@@ -20,6 +20,8 @@ export interface Gateway {
   readonly baseUrl: string;
   readonly usage: readonly UsageRecord[];
   totalsFor(key: string): { inputTokens: number; outputTokens: number };
+  /** 到达网关的补全请求数，重试会让它大于会话轮数。 */
+  requestCount(): number;
   close(): Promise<void>;
 }
 
@@ -67,8 +69,14 @@ export function resolveUpstream(fake: Upstream, env: NodeJS.ProcessEnv = process
   return fake;
 }
 
-export async function startGateway(options: { upstream: Upstream; models: readonly GatewayModel[] }): Promise<Gateway> {
+export async function startGateway(options: {
+  upstream: Upstream;
+  models: readonly GatewayModel[];
+  /** 头 N 个补全请求返 503，用来触发 Pi 的自动重试。 */
+  failFirst?: number;
+}): Promise<Gateway> {
   const usage: UsageRecord[] = [];
+  let requests = 0;
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = req.url ?? "";
@@ -89,6 +97,13 @@ export async function startGateway(options: { upstream: Upstream; models: readon
 
     const key = bearer(req);
     const body = JSON.parse(await readBody(req)) as ChatCompletionRequest;
+    requests += 1;
+    if (requests <= (options.failFirst ?? 0)) {
+      // 503 会进 isRetryableAssistantError 的可重试白名单。
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "503 Service Unavailable", type: "server_error" } }));
+      return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
 
     for await (const payload of options.upstream(body, key)) {
@@ -124,6 +139,7 @@ export async function startGateway(options: { upstream: Upstream; models: readon
     totalsFor: (key) =>
       usage
         .filter((u) => u.key === key)
+<<<<<<< HEAD
         .reduce(
           (acc, u) => ({
             inputTokens: acc.inputTokens + u.inputTokens,
@@ -134,6 +150,13 @@ export async function startGateway(options: { upstream: Upstream; models: readon
             outputTokens: 0,
           },
         ),
+=======
+        .reduce((acc, u) => ({ inputTokens: acc.inputTokens + u.inputTokens, outputTokens: acc.outputTokens + u.outputTokens }), {
+          inputTokens: 0,
+          outputTokens: 0,
+        }),
+    requestCount: () => requests,
+>>>>>>> wt/pi-spike
     close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
 }

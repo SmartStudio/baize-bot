@@ -56,7 +56,7 @@ block 的语义从 pi-agent-core 的源码确认（`@earendil-works/pi-agent-cor
 | `tool_execution_start`（`:46`） | `bot_tool_call`，`status: "running"`、`durationMs: null` |
 | `tool_execution_end`（`:59`） | `bot_tool_call`，`status` 取 blocked / failed / ok |
 | `turn_end` | 累加 `run_done.steps` |
-| `agent_end`（`:76`） | `run_done`，token 取 `getSessionStats().tokens` |
+| `agent_settled`（`:79`） | `run_done`，token 取 `getSessionStats().tokens` |
 
 每条出边界前过 `AgentToControl.parse`（`src/reporter.ts:34`），schema 不过就抛。验证在 `test/pi-embed.test.ts:183`，断的是完整序列而不是包含关系。A 的实际序列：
 
@@ -75,6 +75,10 @@ run_done(steps:2, inputTokens:2700, outputTokens:76)
 
 **`registerProvider` 有两个重载，别看错文档。** `ExtensionAPI.registerProvider` 既能收一个完整的 `Provider` 对象（`core/extensions/types.d.ts:1066`），也能收 `(name, config)`（`:1067`）。deepwiki 给的答案是第一种（`createProvider` + `openAICompletionsApi` + `auth.apiKey.login/resolve` 的交互式登录流），对我们是绕远路。包里自带的例子 `examples/extensions/custom-provider-anthropic/index.ts` 用的是第二种，`ProviderConfigInput` 里直接给 `baseUrl` 和 `apiKey`，没有任何登录流程。源码和 deepwiki 不一致时以源码为准这条在这里生效了。
 
+**`run_done` 不能挂 `agent_end`。** `agent_end` 一次 run 会发好几遍。自动重试默认开着（`core/settings-manager.js:582` 的 `enabled ?? true`，`maxRetries` 3），上游一次 503 就会让 Pi 重跑这一轮，`core/agent-session.js:386` 每次都带 `willRetry` 发一遍 `agent_end`；`core/agent-session.js:776` 的 `while (await this._handlePostAgentRun()) await this.agent.continue()` 还会因为 steering/后续队列再发几遍。一次 prompt 恰好一次的是 `agent_settled`，它在 `_runAgentPrompt` 的 `finally` 里发（`core/agent-session.js:347`、`:784`），错误和中断路径也覆盖得到。
+
+这条有回归测试：`test/pi-embed.test.ts` 的「上游重试」用例让网关头一个请求返 503（`src/gateway.ts` 的 `failFirst`），断言 `agent_end` 发 2 次、`agent_settled` 发 1 次、`run_done` 只有 1 条。把 reporter 改回 `agent_end` 这条会红，其余四条依旧全绿——原来的四条测试盖不到这个路径。要让 503 冒到 Pi 的重试层，得把 `retry.provider.maxRetries` 设成 0（`core/settings-manager.js:610` 默认 undefined，会落到供应商 SDK 自己那层重试，把错误悄悄吞掉）。
+
 **blocked 和 failed 在事件层是一回事。** 见上面第二节末尾。审批状态必须由拦截器自己记，指望从 `tool_execution_end` 读出来会把工具自身的报错也标成「被拒绝」。
 
 **假上游的第二轮要空着。** 工具结果回去之后 Pi 会再请求一次模型。那一轮如果还吐文本，报文序列就变成 `bot_text… bot_tool_call… bot_text… run_done`，跟验收要的顺序对不上。脚本里第二轮 `textChunks: []` 且 `finish_reason: "stop"`，Pi 接受空 assistant 消息，序列才是干净的。另外第一个分片不要带 `content: ""`，否则会多出一对 `text_start`/`text_end`，凭空多一条 `done: true`。
@@ -86,6 +90,7 @@ run_done(steps:2, inputTokens:2700, outputTokens:76)
 ## 没验证的
 
 - 真上游那两条分支（`src/gateway.ts:64` 的 `realUpstream`）一行没跑过。Anthropic 的 OpenAI 兼容端点路径是按文档写的，没有实测。
+- 只验了传输层错误（503）触发的重试。compaction 触发的 `willRetry`（`core/agent-session.js:1695` 的 overflow 路径）没跑到，不过 `run_done` 挂在 `agent_settled` 上对这两种都成立。
 - 会话的续跑、分支、compaction 都没碰。
 - 多于两个会话、以及长时间跑之后的资源占用没测。
 - 接管暂停（`pause` / `resume`）对应到 Pi 的哪个 API 没找。

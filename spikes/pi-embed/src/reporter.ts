@@ -73,7 +73,10 @@ export function recordRun(
       steps += 1;
       return;
     }
-    if (event.type === "agent_end") {
+    // 不能挂 agent_end：自动重试和队列续跑时它一次 run 会发好几遍（agent-session.js:386 的
+    // willRetry，agent-session.js:776 的 continue 循环）。agent_settled 在 _runAgentPrompt 的
+    // finally 里发，一次 prompt 恰好一次（agent-session.js:347、:784）。
+    if (event.type === "agent_settled") {
       const tokens = session.getSessionStats().tokens;
       push({ type: "run_done", ...ids, steps, inputTokens: tokens.input, outputTokens: tokens.output });
     }

@@ -39,6 +39,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
+    // 一次 prompt 恰好一份，对应 Pi 的 agent_settled 而不是 agent_end（后者重试时会发多遍）。控制面按 runId 幂等。
     // steps 是这次运行里模型回合数（Pi 的 turn_end 次数），不是工具调用次数。
     steps: z.number().int(),
     inputTokens: z.number().int(),
