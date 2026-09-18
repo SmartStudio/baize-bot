@@ -155,6 +155,7 @@ export const Handoff = z.object({
 export type Handoff = z.infer<typeof Handoff>;
 
 export const ToolCallStatus = z.enum(["running", "ok", "failed", "blocked"]);
+export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
 
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
