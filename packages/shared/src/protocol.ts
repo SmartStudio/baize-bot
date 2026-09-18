@@ -7,6 +7,11 @@ import { BotId, ComputerId, GroupId, MessageId, RunId, SiteLogin, ToolConnection
 export const AgentToControl = z.discriminatedUnion("type", [
   z.object({ type: z.literal("hello"), computerId: ComputerId, token: z.string(), version: z.string() }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
+  z.object({
+    type: z.literal("agent_error"),
+    code: z.enum(["bad_message", "prompt_before_config", "unsupported", "runner_failed"]),
+    detail: z.string(),
+  }),
   z.object({ type: z.literal("sites"), sites: z.array(SiteLogin) }),
   z.object({
     type: z.literal("bot_text"),
@@ -52,6 +57,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
 
+// 控制面收下 hello 后必须回 welcome。电脑代理只在收到 welcome 时把重连退避清零。
 export const ControlToAgent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), ownerId: UserId, serverTime: z.string().datetime() }),
   z.object({

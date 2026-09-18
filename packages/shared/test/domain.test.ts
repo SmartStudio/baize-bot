@@ -13,8 +13,14 @@ describe("domain schemas reject illegal states", () => {
 
   it("task numbers are T plus four digits", () => {
     const task = {
-      id: "t1", groupId: "g1", title: "x", checklist: [], handled: [],
-      currentBotId: null, dueAt: null, status: "active",
+      id: "t1",
+      groupId: "g1",
+      title: "x",
+      checklist: [],
+      handled: [],
+      currentBotId: null,
+      dueAt: null,
+      status: "active",
     };
     expect(TopicTask.safeParse({ ...task, number: "T-2481" }).success).toBe(true);
     expect(TopicTask.safeParse({ ...task, number: "2481" }).success).toBe(false);

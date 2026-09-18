@@ -17,7 +17,11 @@ const SCRIPT: Record<string, { first: ScriptedTurn; follow: ScriptedTurn }> = {
   [KEY_A]: {
     first: {
       textChunks: ["小陈，", "这就给客户发邮件。"],
-      toolCall: { id: "call-a-1", name: "send_email", args: { to: "kehu@example.com", subject: "报价", body: "见附件" } },
+      toolCall: {
+        id: "call-a-1",
+        name: "send_email",
+        args: { to: "kehu@example.com", subject: "报价", body: "见附件" },
+      },
       usage: { input: 1200, output: 64 },
     },
     follow: { textChunks: [], usage: { input: 1500, output: 12 } },
@@ -43,7 +47,10 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 /** 外部审批人：等 send_email 挂起，然后通过 HTTP 拒绝它。 */
 async function rejectSendEmail(gate: ApprovalGate): Promise<string> {
   for (let i = 0; i < 400; i++) {
-    const pending = (await (await fetch(`${gate.baseUrl}/approvals`)).json()) as Array<{ callId: string; tool: string }>;
+    const pending = (await (await fetch(`${gate.baseUrl}/approvals`)).json()) as Array<{
+      callId: string;
+      tool: string;
+    }>;
     const target = pending.find((p) => p.tool === "send_email");
     if (target) {
       await fetch(`${gate.baseUrl}/approvals/${encodeURIComponent(target.callId)}`, {
@@ -57,6 +64,15 @@ async function rejectSendEmail(gate: ApprovalGate): Promise<string> {
   }
   throw new Error("没有等到 send_email 的审批请求");
 }
+
+const headerOf = (file: string): { type: string; cwd?: string } =>
+  JSON.parse((readFileSync(file, "utf8").split("\n")[0] ?? "").trim()) as { type: string; cwd?: string };
+
+const doneOf = (report: AgentToControl[]): { inputTokens: number; outputTokens: number } => {
+  const done = report.at(-1);
+  if (done?.type !== "run_done") throw new Error("最后一条不是 run_done");
+  return { inputTokens: done.inputTokens, outputTokens: done.outputTokens };
+};
 
 describe("Pi SDK 嵌入验证", () => {
   let root: string;
@@ -76,7 +92,10 @@ describe("Pi SDK 嵌入验证", () => {
     mkdirSync(agentDir, { recursive: true });
     process.env.PI_CODING_AGENT_DIR = agentDir;
 
-    gateway = await startGateway({ upstream: resolveUpstream(scriptedUpstream(script)), models: [{ id: GATEWAY_MODEL_ID }] });
+    gateway = await startGateway({
+      upstream: resolveUpstream(scriptedUpstream(script)),
+      models: [{ id: GATEWAY_MODEL_ID }],
+    });
     approvals = await startApprovalGate();
 
     sideEffectsA = [];
@@ -101,8 +120,16 @@ describe("Pi SDK 嵌入验证", () => {
     botA = await make("bot-a", KEY_A, sideEffectsA);
     botB = await make("bot-b", KEY_B, sideEffectsB);
 
-    const runA = recordRun(botA.session, { runId: "run-a", botId: "bot-a", groupId: "group-a", messageId: "msg-a" }, approvals.blockedCallIds);
-    const runB = recordRun(botB.session, { runId: "run-b", botId: "bot-b", groupId: "group-b", messageId: "msg-b" }, approvals.blockedCallIds);
+    const runA = recordRun(
+      botA.session,
+      { runId: "run-a", botId: "bot-a", groupId: "group-a", messageId: "msg-a" },
+      approvals.blockedCallIds,
+    );
+    const runB = recordRun(
+      botB.session,
+      { runId: "run-b", botId: "bot-b", groupId: "group-b", messageId: "msg-b" },
+      approvals.blockedCallIds,
+    );
 
     const [, , callId] = await Promise.all([
       botA.session.prompt("给客户发报价邮件"),
@@ -139,8 +166,6 @@ describe("Pi SDK 嵌入验证", () => {
     expect(existsSync(fileA as string)).toBe(true);
     expect(existsSync(fileB as string)).toBe(true);
 
-    const headerOf = (file: string): { type: string; cwd?: string } =>
-      JSON.parse((readFileSync(file, "utf8").split("\n")[0] ?? "").trim()) as { type: string; cwd?: string };
     expect(headerOf(fileA as string).cwd).toBe(join(root, "bot-a", "work"));
     expect(headerOf(fileB as string).cwd).toBe(join(root, "bot-b", "work"));
     expect(readFileSync(fileA as string, "utf8").includes("send_email")).toBe(true);
@@ -171,11 +196,6 @@ describe("Pi SDK 嵌入验证", () => {
     expect(gateway.usage.filter((u) => u.key === KEY_B)).toHaveLength(2);
     expect(gateway.usage.every((u) => u.model === GATEWAY_MODEL_ID)).toBe(true);
 
-    const doneOf = (report: AgentToControl[]): { inputTokens: number; outputTokens: number } => {
-      const done = report.at(-1);
-      if (done?.type !== "run_done") throw new Error("最后一条不是 run_done");
-      return { inputTokens: done.inputTokens, outputTokens: done.outputTokens };
-    };
     expect(doneOf(reportA)).toEqual(gateway.totalsFor(KEY_A));
     expect(doneOf(reportB)).toEqual(gateway.totalsFor(KEY_B));
   });
@@ -185,22 +205,27 @@ describe("Pi SDK 嵌入验证", () => {
       expect(() => AgentToControl.parse(message)).not.toThrow();
     }
 
-    expect(reportA.map((m) => m.type)).toEqual(["bot_text", "bot_text", "bot_text", "bot_tool_call", "bot_tool_call", "run_done"]);
+    expect(reportA.map((m) => m.type)).toEqual([
+      "bot_text",
+      "bot_text",
+      "bot_text",
+      "bot_tool_call",
+      "bot_tool_call",
+      "run_done",
+    ]);
     expect(reportA.slice(0, 3).map((m) => (m.type === "bot_text" ? { delta: m.delta, done: m.done } : null))).toEqual([
       { delta: "小陈，", done: false },
       { delta: "这就给客户发邮件。", done: false },
       { delta: "", done: true },
     ]);
-    expect(reportA.filter((m) => m.type === "bot_tool_call").map((m) => (m.type === "bot_tool_call" ? m.status : null))).toEqual([
-      "running",
-      "blocked",
-    ]);
+    expect(
+      reportA.filter((m) => m.type === "bot_tool_call").map((m) => (m.type === "bot_tool_call" ? m.status : null)),
+    ).toEqual(["running", "blocked"]);
 
     expect(reportB.map((m) => m.type)).toEqual(["bot_text", "bot_text", "bot_tool_call", "bot_tool_call", "run_done"]);
-    expect(reportB.filter((m) => m.type === "bot_tool_call").map((m) => (m.type === "bot_tool_call" ? m.status : null))).toEqual([
-      "running",
-      "ok",
-    ]);
+    expect(
+      reportB.filter((m) => m.type === "bot_tool_call").map((m) => (m.type === "bot_tool_call" ? m.status : null)),
+    ).toEqual(["running", "ok"]);
 
     const doneA = reportA.at(-1);
     expect(doneA?.type).toBe("run_done");

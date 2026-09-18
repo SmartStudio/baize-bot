@@ -74,7 +74,12 @@ export async function startGateway(options: { upstream: Upstream; models: readon
     const url = req.url ?? "";
     if (req.method === "GET" && url.startsWith("/v1/models")) {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ object: "list", data: options.models.map((m) => ({ id: m.id, object: "model", owned_by: "baize" })) }));
+      res.end(
+        JSON.stringify({
+          object: "list",
+          data: options.models.map((m) => ({ id: m.id, object: "model", owned_by: "baize" })),
+        }),
+      );
       return;
     }
     if (req.method !== "POST" || !url.startsWith("/v1/chat/completions")) {
@@ -119,10 +124,16 @@ export async function startGateway(options: { upstream: Upstream; models: readon
     totalsFor: (key) =>
       usage
         .filter((u) => u.key === key)
-        .reduce((acc, u) => ({ inputTokens: acc.inputTokens + u.inputTokens, outputTokens: acc.outputTokens + u.outputTokens }), {
-          inputTokens: 0,
-          outputTokens: 0,
-        }),
+        .reduce(
+          (acc, u) => ({
+            inputTokens: acc.inputTokens + u.inputTokens,
+            outputTokens: acc.outputTokens + u.outputTokens,
+          }),
+          {
+            inputTokens: 0,
+            outputTokens: 0,
+          },
+        ),
     close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
 }

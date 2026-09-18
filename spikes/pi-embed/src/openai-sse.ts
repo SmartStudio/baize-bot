@@ -2,7 +2,11 @@
 
 export interface ChatCompletionRequest {
   readonly model: string;
-  readonly messages: ReadonlyArray<{ readonly role: string; readonly content?: unknown; readonly tool_call_id?: string }>;
+  readonly messages: ReadonlyArray<{
+    readonly role: string;
+    readonly content?: unknown;
+    readonly tool_call_id?: string;
+  }>;
   readonly stream?: boolean;
 }
 
@@ -41,7 +45,11 @@ export function scriptedUpstream(script: (req: ChatCompletionRequest, key: strin
       const serialized = JSON.stringify(turn.toolCall.args);
       yield chunk(
         req.model,
-        { tool_calls: [{ index: 0, id: turn.toolCall.id, type: "function", function: { name: turn.toolCall.name, arguments: "" } }] },
+        {
+          tool_calls: [
+            { index: 0, id: turn.toolCall.id, type: "function", function: { name: turn.toolCall.name, arguments: "" } },
+          ],
+        },
         null,
       );
       yield chunk(req.model, { tool_calls: [{ index: 0, function: { arguments: serialized } }] }, null);
@@ -55,7 +63,11 @@ export function scriptedUpstream(script: (req: ChatCompletionRequest, key: strin
       created: 1758153600,
       model: req.model,
       choices: [],
-      usage: { prompt_tokens: turn.usage.input, completion_tokens: turn.usage.output, total_tokens: turn.usage.input + turn.usage.output },
+      usage: {
+        prompt_tokens: turn.usage.input,
+        completion_tokens: turn.usage.output,
+        total_tokens: turn.usage.input + turn.usage.output,
+      },
     });
     yield "[DONE]";
   };

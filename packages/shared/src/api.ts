@@ -49,8 +49,14 @@ export const SendMessageResponse = z.object({ message: Message });
 export const Settings = z.object({
   theme: z.enum(["light", "dark", "system"]),
   notify: z.boolean(),
-  dndFrom: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
-  dndTo: z.string().regex(/^\d{2}:\d{2}$/).nullable(),
+  dndFrom: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .nullable(),
+  dndTo: z
+    .string()
+    .regex(/^\d{2}:\d{2}$/)
+    .nullable(),
 });
 export type Settings = z.infer<typeof Settings>;
 export const UpdateSettingsRequest = Settings.partial();
@@ -58,7 +64,13 @@ export const UpdateSettingsRequest = Settings.partial();
 // WebSocket /api/ws  登录后客户端连上，服务端推送。客户端不发报文。
 export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: Message }),
-  z.object({ type: z.literal("message_delta"), messageId: MessageId, groupId: GroupId, delta: z.string(), done: z.boolean() }),
+  z.object({
+    type: z.literal("message_delta"),
+    messageId: MessageId,
+    groupId: GroupId,
+    delta: z.string(),
+    done: z.boolean(),
+  }),
   z.object({ type: z.literal("bot_updated"), bot: Bot }),
   z.object({ type: z.literal("bot_deleted"), botId: BotId }),
 ]);
