@@ -236,7 +236,9 @@ export const Trigger = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("webhook"), token: z.string() }),
 ]);
 export const OnFailure = z.enum(["stop_and_tell", "retry_next_time"]);
-export const RoutineRunStatus = z.enum(["ok", "failed", "stopped"]);
+// 触发那一刻就落一条 running 的记录，收尾时改成另外三种之一。运行途中控制面重启，记录就停在 running，
+// 用户看得到「这次没跑完」，比收尾时才落记录、跑挂了就没痕迹要强。
+export const RoutineRunStatus = z.enum(["running", "ok", "failed", "stopped"]);
 
 export const RoutineRun = z.object({
   startedAt: Timestamp,

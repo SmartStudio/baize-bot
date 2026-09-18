@@ -10,6 +10,9 @@ import {
   Handoff,
   Message,
   MessageId,
+  OnFailure,
+  Routine,
+  RoutineId,
   TaskStatus,
   Timestamp,
   TopicTask,
@@ -110,6 +113,37 @@ export const DecideApprovalRequest = z.object({ decision: z.enum(["approved", "r
 export type DecideApprovalRequest = z.infer<typeof DecideApprovalRequest>;
 export const DecideApprovalResponse = z.object({ approval: Approval });
 
+// GET /api/bots/:id/routines  该 Bot 的例行任务，每条带最近 20 条运行记录，新的在前。别人的 Bot 404。
+export const RoutineListResponse = z.object({ items: z.array(Routine) });
+
+// 建和改例行任务时触发器写这个。webhook 的 token 由控制面发：带着这条例行任务已有的 token 就是保留那个地址，
+// 不带或对不上就换一个新的。客户端选不了 token，`/api/hooks/:token` 不要登录，token 撞上就是别人能打你的例行任务。
+export const TriggerInput = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("cron"), expr: z.string().min(1).max(100) }),
+  z.object({ kind: z.literal("webhook"), token: z.string().optional() }),
+]);
+export type TriggerInput = z.infer<typeof TriggerInput>;
+
+// POST /api/bots/:id/routines
+export const CreateRoutineRequest = z.object({
+  name: z.string().min(1).max(40),
+  instruction: z.string().min(1).max(4000),
+  triggers: z.array(TriggerInput).max(10),
+  onFailure: OnFailure,
+  enabled: z.boolean().default(true),
+});
+export type CreateRoutineRequest = z.infer<typeof CreateRoutineRequest>;
+export const RoutineResponse = z.object({ routine: Routine });
+
+// PATCH /api/routines/:id  给到的字段整份替换，triggers 给了就是整份替换。别人的 404。
+export const UpdateRoutineRequest = CreateRoutineRequest.partial();
+export type UpdateRoutineRequest = z.infer<typeof UpdateRoutineRequest>;
+
+// DELETE /api/routines/:id  回 204，运行记录跟着删。
+// POST /api/routines/:id/run  试跑一次。和到点触发走同一条路，回 202 与 RoutineResponse，runs 最前面已多一条 running。
+// 停用的也能试跑，停用只挡自动触发。
+// POST /api/hooks/:token  不要登录，请求体忽略。回 202 空体；token 对不上 404；例行任务停用 409。
+
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({
   theme: z.enum(["light", "dark", "system"]),
@@ -146,5 +180,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approval_updated"), approval: Approval }),
   // 交接同理：新建和确认都推这一条，先推它再推那条 handoff 消息。
   z.object({ type: z.literal("handoff_updated"), handoff: Handoff }),
+  // 建、改、每条运行记录的状态变化都推整条例行任务，客户端整条替换。
+  z.object({ type: z.literal("routine_updated"), routine: Routine }),
+  z.object({ type: z.literal("routine_deleted"), routineId: RoutineId, botId: BotId }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

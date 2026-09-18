@@ -4,9 +4,12 @@ import {
   Bot,
   ControlToAgent,
   CreateGroupRequest,
+  CreateRoutineRequest,
   Group,
   Handoff,
   Message,
+  RoutineRun,
+  ServerPush,
   TopicTask,
 } from "../src/index.js";
 
@@ -100,5 +103,38 @@ describe("M7 群与主题任务的共享形状", () => {
     };
     expect(Handoff.safeParse({ ...handoff, acceptedAt: null }).success).toBe(true);
     expect(Handoff.safeParse(handoff).success).toBe(false);
+  });
+});
+
+describe("M9 例行任务的共享形状", () => {
+  const routine = {
+    name: "每日工单早报",
+    instruction: "汇总昨天的新工单",
+    triggers: [{ kind: "cron", expr: "0 9 * * 1-5" }],
+    onFailure: "stop_and_tell",
+  };
+
+  it("webhook 触发器建的时候不带 token，token 由控制面发", () => {
+    const withHook = { ...routine, triggers: [{ kind: "webhook" }] };
+    expect(CreateRoutineRequest.safeParse(withHook).success).toBe(true);
+    expect(CreateRoutineRequest.parse(routine).enabled).toBe(true);
+  });
+
+  it("cron 表达式不能是空串，触发器最多 10 个", () => {
+    expect(CreateRoutineRequest.safeParse({ ...routine, triggers: [{ kind: "cron", expr: "" }] }).success).toBe(false);
+    const eleven = Array.from({ length: 11 }, () => ({ kind: "cron", expr: "* * * * *" }));
+    expect(CreateRoutineRequest.safeParse({ ...routine, triggers: eleven }).success).toBe(false);
+  });
+
+  it("运行记录触发时是 running，收尾后才是另外三种", () => {
+    for (const status of ["running", "ok", "failed", "stopped"]) {
+      expect(RoutineRun.safeParse({ startedAt: now, status, note: "" }).success).toBe(true);
+    }
+    expect(RoutineRun.safeParse({ startedAt: now, status: "pending", note: "" }).success).toBe(false);
+  });
+
+  it("删例行任务的推送带 botId，客户端按 Bot 分列表", () => {
+    expect(ServerPush.safeParse({ type: "routine_deleted", routineId: "r1", botId: "b1" }).success).toBe(true);
+    expect(ServerPush.safeParse({ type: "routine_deleted", routineId: "r1" }).success).toBe(false);
   });
 });
