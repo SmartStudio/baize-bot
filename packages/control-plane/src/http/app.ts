@@ -1,9 +1,12 @@
 import {
+  ApprovalId,
   BotId,
   BotListResponse,
   Computer,
   CreateBotRequest,
   CreateBotResponse,
+  DecideApprovalRequest,
+  DecideApprovalResponse,
   GroupId,
   LoginRequest,
   LoginResponse,
@@ -21,9 +24,10 @@ import {
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
-import { dispatchUserMessage } from "../agent/dispatch.js";
+import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
+import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
 import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
 import { appendMessage, findGroupId, listMessages } from "../repo/messages.js";
@@ -148,7 +152,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
       limit: query.data.limit,
     });
     if (result.kind === "unknown_cursor") return c.json(NOT_FOUND, 404);
-    return c.json(MessageListResponse.parse(result.page));
+
+    const approvalIds = result.page.messages.flatMap((m) => (m.body.kind === "approval" ? [m.body.approvalId] : []));
+    const approvals = await listApprovals(db, approvalIds);
+    return c.json(MessageListResponse.parse({ ...result.page, approvals }));
   });
 
   app.post("/api/groups/:id/messages", async (c) => {
@@ -161,8 +168,23 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
     const message = await appendMessage(db, owned, { kind: "user", text: body.value.text });
     hub.push(c.get("user").id, { type: "message", message });
-    await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
+    const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
+    if (!settled) await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
     return c.json(SendMessageResponse.parse({ message }), 201);
+  });
+
+  app.post("/api/approvals/:id", async (c) => {
+    const approvalId = ApprovalId.safeParse(c.req.param("id"));
+    if (!approvalId.success) return c.json(NOT_FOUND, 404);
+    // 别人的审批查不到，和不存在一样是 404，不泄露有没有这条。
+    const owned = await findApprovalId(db, c.get("user").id, approvalId.data);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, DecideApprovalRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+
+    const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value.decision);
+    if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
+    return c.json(DecideApprovalResponse.parse({ approval: settled.approval }));
   });
 
   app.get("/api/settings", async (c) => {

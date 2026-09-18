@@ -51,7 +51,9 @@ export const MainWindow = () => {
             groupId={groupId}
             messages={ready.messages[groupId] ?? NO_MESSAGES}
             lookup={lookup}
+            approvals={ready.approvals}
             onSend={actions.sendMessage}
+            onDecide={actions.decideApproval}
           />
           <BotSettingsPanel bot={selected.bot} onChange={actions.updateBot} />
         </>

@@ -1,8 +1,11 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import {
   ServerPush,
+  type Approval,
+  type ApprovalId,
   type Bot,
   type BotId,
+  type DecideApprovalRequest,
   type GroupId,
   type Message,
   type MessageId,
@@ -11,6 +14,7 @@ import {
 } from "@baize/shared";
 import type { BotListItem } from "@baize/shared";
 import { RequestFailed, api, type BotDraft } from "../api/client.js";
+import { notifyApproval } from "./notify.js";
 import { applyTheme } from "./theme.js";
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
@@ -24,6 +28,8 @@ export type AppState =
       bots: BotListItem[];
       selectedBotId: BotId | null;
       messages: Record<GroupId, Message[]>;
+      // 审批卡的状态只在这张表上。approval 类消息的正文只有 approvalId，重推那条消息一个字都不会变。
+      approvals: Record<ApprovalId, Approval>;
       settings: Settings;
     };
 
@@ -37,6 +43,8 @@ type Action =
   | { type: "messages_set"; groupId: GroupId; messages: Message[] }
   | { type: "message_upserted"; message: Message }
   | ({ type: "message_delta" } & Delta)
+  | { type: "approvals_loaded"; approvals: Approval[] }
+  | { type: "approval_pushed"; approval: Approval }
   | { type: "settings_set"; settings: Settings };
 
 // 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
@@ -62,6 +70,43 @@ const streamedInto = (previous: Message | undefined, groupBotId: BotId, delta: D
   };
 };
 
+type ReadyState = Extract<AppState, { status: "ready" }>;
+
+// 同一条 approval 会从拉历史、决定的响应、服务端推送三条路各来一次，先后不受控。只认「之前知道的状态」，
+// 重到的那次自然是 0。null 表示这条该丢掉。
+const mergeApproval = (
+  previous: Approval | undefined,
+  next: Approval,
+  from: "history" | "push",
+): { approval: Approval; delta: number } | null => {
+  // 拉历史带回来的那批，GET /api/bots 的 pendingApprovals 已经算进去了，这里再加一次就翻倍。
+  if (previous === undefined) return { approval: next, delta: from === "push" && next.status === "pending" ? 1 : 0 };
+  if (previous.status === "pending") return { approval: next, delta: next.status === "pending" ? 0 : -1 };
+  // 本地已经有结论了。结论不会退回 pending，所以说 pending 的那份是拉取在飞时拍下的旧快照。收下它，卡片会
+  // 重新长出两颗按钮，而角标早就减过了，再点只会拿到一个 409。
+  return next.status === "pending" ? null : { approval: next, delta: 0 };
+};
+
+const withApprovals = (state: ReadyState, incoming: Approval[], from: "history" | "push"): ReadyState => {
+  const approvals = { ...state.approvals };
+  const deltaByGroup = new Map<GroupId, number>();
+  for (const next of incoming) {
+    const merged = mergeApproval(approvals[next.id], next, from);
+    if (merged === null) continue;
+    approvals[merged.approval.id] = merged.approval;
+    if (merged.delta !== 0) deltaByGroup.set(next.groupId, (deltaByGroup.get(next.groupId) ?? 0) + merged.delta);
+  }
+  if (deltaByGroup.size === 0) return { ...state, approvals };
+  return {
+    ...state,
+    approvals,
+    bots: state.bots.map((item) => {
+      const delta = deltaByGroup.get(item.groupId) ?? 0;
+      return delta === 0 ? item : { ...item, pendingApprovals: Math.max(0, item.pendingApprovals + delta) };
+    }),
+  };
+};
+
 const reduce = (state: AppState, action: Action): AppState => {
   switch (action.type) {
     case "anonymous":
@@ -73,6 +118,7 @@ const reduce = (state: AppState, action: Action): AppState => {
         bots: action.bots,
         selectedBotId: action.bots[0]?.bot.id ?? null,
         messages: {},
+        approvals: {},
         settings: action.settings,
       };
     default:
@@ -133,6 +179,10 @@ const reduce = (state: AppState, action: Action): AppState => {
         bots: state.bots.map((item) => (item.groupId === action.groupId ? { ...item, lastMessage: grown } : item)),
       };
     }
+    case "approvals_loaded":
+      return withApprovals(state, action.approvals, "history");
+    case "approval_pushed":
+      return withApprovals(state, [action.approval], "push");
     case "settings_set":
       return { ...state, settings: action.settings };
     default:
@@ -148,6 +198,7 @@ export type AppActions = {
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
+  decideApproval: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
 };
 
@@ -206,12 +257,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
       }),
       loadMessages: signedIn(async (groupId: GroupId) => {
-        const { messages } = await api.messages(groupId);
+        const { messages, approvals } = await api.messages(groupId);
         dispatch({ type: "messages_set", groupId, messages });
+        dispatch({ type: "approvals_loaded", approvals });
       }),
       sendMessage: signedIn(async (groupId: GroupId, text: string) => {
         const { message } = await api.sendMessage(groupId, text);
         dispatch({ type: "message_upserted", message });
+      }),
+      decideApproval: signedIn(async (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => {
+        dispatch({ type: "approval_pushed", approval: await api.decideApproval(approvalId, decision) });
       }),
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
@@ -242,6 +297,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
   }, []);
 
+  // 通知要读当下的设置，而 WebSocket 只在 connected 上重建。把 settings 塞进它的依赖，改一次设置就断一次连。
+  const settings = state.status === "ready" ? state.settings : null;
+  const settingsRef = useRef<Settings | null>(null);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  // 同一条 pending 审批会被重推（控制面重连回放就会），计数那边按「之前知道的状态」自然幂等，通知这边没有
+  // 这个信息，会照弹第二遍。记下弹过谁，一条审批只打断你一次。
+  const notified = useRef(new Set<ApprovalId>());
+
   const connected = state.status === "ready";
   useEffect(() => {
     if (!connected) return;
@@ -262,6 +328,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         if (push.type === "bot_updated") dispatch({ type: "bot_updated", bot: push.bot });
         if (push.type === "bot_deleted") dispatch({ type: "bot_removed", botId: push.botId });
+        if (push.type === "approval_updated") {
+          dispatch({ type: "approval_pushed", approval: push.approval });
+          const current = settingsRef.current;
+          if (current !== null && push.approval.status === "pending" && !notified.current.has(push.approval.id)) {
+            notified.current.add(push.approval.id);
+            notifyApproval(push.approval, current, new Date());
+          }
+        }
       });
       // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。
       socket.addEventListener("close", () => {

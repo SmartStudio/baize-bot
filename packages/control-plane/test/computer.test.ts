@@ -1,10 +1,11 @@
-import { ApiError, Computer } from "@baize/shared";
+import { ApiError, Computer, type ComputerId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEV_EMAIL, DEV_PASSWORD, seed } from "../src/seed.js";
-import { authenticateComputer, findComputerByOwner } from "../src/repo/computers.js";
+import { authenticateComputer, findComputerByOwner, markComputerOnline } from "../src/repo/computers.js";
+import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
 
 let database: TestDb;
 let server: TestServer;
@@ -110,5 +111,41 @@ describe("seed", () => {
 
     expect(again.computerId).toBe(before.computerId);
     expect(again.computerToken, "电脑已经在了就拿不到明文，要重置才有").toBeNull();
+  });
+});
+
+async function statusOf(computerId: ComputerId): Promise<string | undefined> {
+  const rows = await database.sql<{ status: string }[]>`SELECT status FROM computers WHERE id = ${computerId}`;
+  return rows[0]?.status;
+}
+
+describe("在线状态不跨进程留存", () => {
+  it("关服务时先把连着的电脑标成休眠再断连接", async () => {
+    const user = await makeUser(database.db);
+    const computer = await makeComputer(database.db, user.id);
+    const own = await startTestServer(database.db);
+    const { agent } = await helloAgent(own.server.port, computer.computerId, computer.token);
+
+    try {
+      await waitFor(async () => (await statusOf(computer.computerId)) === "online", "电脑握手后变在线");
+      await own.close();
+      expect(await statusOf(computer.computerId), "关服务返回时就该是休眠，不能等 socket 回调").toBe("sleeping");
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("起服务时把上次没关干净留下的在线改成休眠", async () => {
+    const stale = await makeComputer(database.db, (await makeUser(database.db)).id);
+    await markComputerOnline(database.db, stale.computerId);
+    const untouched = await makeComputer(database.db, (await makeUser(database.db)).id);
+
+    const own = await startTestServer(database.db);
+    try {
+      expect(await statusOf(stale.computerId), "进程刚起不可能有连接，库里的在线只能是残留").toBe("sleeping");
+      expect(await statusOf(untouched.computerId), "只翻在线那些，别的状态不动").toBe("creating");
+    } finally {
+      await own.close();
+    }
   });
 });

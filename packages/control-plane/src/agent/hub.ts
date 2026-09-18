@@ -2,7 +2,13 @@ import { AgentToControl, ControlToAgent, type ComputerId, type MessageId, type U
 import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
 import { listBots } from "../repo/bots.js";
-import { authenticateComputer, markComputerOnline, markComputerSleeping, rotateGatewayKey } from "../repo/computers.js";
+import {
+  authenticateComputer,
+  markComputerOnline,
+  markComputerSleeping,
+  markComputersSleeping,
+  rotateGatewayKey,
+} from "../repo/computers.js";
 import type { PushHub } from "../ws/hub.js";
 import { handleAgentEvent } from "./events.js";
 
@@ -97,8 +103,14 @@ export class AgentHub {
     await this.#sendConfig(conn);
   }
 
-  closeAll(): void {
-    for (const conn of this.#connections.values()) conn.socket.close();
+  /** 先落库再断线：反过来的话 socket 的 close 回调要和进程退出抢，那台电脑就永远挂在在线。 */
+  async closeAll(): Promise<void> {
+    const open = [...this.#connections.values()];
+    await markComputersSleeping(
+      this.#deps.db,
+      open.map((conn) => conn.computerId),
+    );
+    for (const conn of open) conn.socket.close();
     this.#connections.clear();
   }
 

@@ -10,6 +10,9 @@ export const MAX_MESSAGE_LIMIT = 200;
 
 export type MessagePage = { readonly messages: Message[]; readonly hasMore: boolean };
 
+/** `db.transaction` 回调里那个句柄。写一条消息在事务内外是同一件事，收哪个由调用方定。 */
+export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 /** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。 */
 export async function findGroupId(db: Db, ownerId: UserId, groupId: GroupId): Promise<string | null> {
   const [row] = await db
@@ -58,17 +61,21 @@ export async function listMessages(
   return { kind: "ok", page: { messages: page, hasMore } };
 }
 
-export async function appendMessage(db: Db, groupId: string, body: MessageBody): Promise<Message> {
+export async function appendMessage(db: Db | Tx, groupId: string, body: MessageBody): Promise<Message> {
   const [row] = await db.insert(messages).values({ id: newId(), groupId, body, createdAt: new Date() }).returning();
   if (row === undefined) throw new Error("写消息没有返回行");
   return toMessage(row);
 }
 
-export type AppendResult = { readonly message: Message; readonly created: boolean };
+export type AppendResult =
+  | { readonly kind: "created"; readonly message: Message }
+  | { readonly kind: "existing"; readonly message: Message }
+  | { readonly kind: "taken" };
 
 /**
  * 用报文里给的编号写一条。同一个编号重复到达时不再插入，回库里已有的那条。
  * bot_text 的第一条 delta 和它的重发走的就是这里，靠主键冲突做幂等。
+ * 编号由电脑那头给，撞上的可能是别的群里那条，所以回查按群过滤，不是这个群的回 taken。
  */
 export async function appendMessageWithId(
   db: Db,
@@ -81,20 +88,26 @@ export async function appendMessageWithId(
     .values({ id: messageId, groupId, body, createdAt: new Date() })
     .onConflictDoNothing({ target: messages.id })
     .returning();
-  if (inserted !== undefined) return { message: toMessage(inserted), created: true };
+  if (inserted !== undefined) return { kind: "created", message: toMessage(inserted) };
 
-  const [existing] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
-  if (existing === undefined) throw new Error(`消息 ${messageId} 既没插进去也查不到`);
-  return { message: toMessage(existing), created: false };
+  const [existing] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId)))
+    .limit(1);
+  if (existing === undefined) return { kind: "taken" };
+  return { kind: "existing", message: toMessage(existing) };
 }
 
 /**
  * 把一段 delta 接到 Bot 消息正文后面。累加在一条 UPDATE 里做完，
  * 所以不用在内存里攒正文，进程重启也不会把已落库的正文冲掉。
+ * 限定 kind = 'bot'：正文没有 text 的（比如 tool_call）做 jsonb_set 会写出 NULL 正文，整行就废了。
  */
 export async function appendBotDelta(
   db: Db,
   messageId: MessageId,
+  groupId: string,
   delta: string,
   done: boolean,
 ): Promise<Message | null> {
@@ -107,13 +120,22 @@ export async function appendBotDelta(
         ${done ? sql`'false'::jsonb` : sql`'true'::jsonb`}
       )`,
     })
-    .where(eq(messages.id, messageId))
+    .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId), sql`${messages.body} ->> 'kind' = 'bot'`))
     .returning();
   return row === undefined ? null : toMessage(row);
 }
 
-export async function replaceMessageBody(db: Db, messageId: MessageId, body: MessageBody): Promise<Message | null> {
-  const [row] = await db.update(messages).set({ body }).where(eq(messages.id, messageId)).returning();
+export async function replaceMessageBody(
+  db: Db,
+  messageId: MessageId,
+  groupId: string,
+  body: MessageBody,
+): Promise<Message | null> {
+  const [row] = await db
+    .update(messages)
+    .set({ body })
+    .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId)))
+    .returning();
   return row === undefined ? null : toMessage(row);
 }
 

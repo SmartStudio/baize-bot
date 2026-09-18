@@ -248,8 +248,8 @@ export type Routine = z.infer<typeof Routine>;
 
 export const UsageRecord = z.object({
   runId: RunId,
-  botId: BotId,
-  groupId: GroupId,
+  botId: BotId.nullable(),
+  groupId: GroupId.nullable(),
   startedAt: Timestamp,
   endedAt: Timestamp,
   steps: z.number().int(),

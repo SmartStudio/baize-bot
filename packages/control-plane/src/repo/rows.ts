@@ -1,4 +1,4 @@
-import { Bot, Computer, Group, Message, Settings, UsageRecord, User } from "@baize/shared";
+import { Approval, Bot, Computer, Group, Message, Settings, UsageRecord, User } from "@baize/shared";
 import type * as schema from "../db/schema.js";
 
 // 数据库行是外部输入。品牌化 ID 和字面量联合只在这里产生，往上全是可信的领域类型。
@@ -44,6 +44,20 @@ export function toMessage(row: typeof schema.messages.$inferSelect): Message {
     groupId: row.groupId,
     body: row.body,
     createdAt: row.createdAt.toISOString(),
+  });
+}
+
+// tool、callId、messageId 不出边界：domain.ts 的 Approval 只有客户端画卡要用的那几个字段。
+export function toApproval(row: typeof schema.approvals.$inferSelect): Approval {
+  return Approval.parse({
+    id: row.id,
+    groupId: row.groupId,
+    botId: row.botId,
+    runId: row.runId,
+    kind: row.kind,
+    summary: row.summary,
+    status: row.status,
+    decidedAt: row.decidedAt?.toISOString() ?? null,
   });
 }
 
