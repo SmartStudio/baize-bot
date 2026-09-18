@@ -11,7 +11,8 @@ import {
 import { type ApprovalGate, approvalRule, createApprovalGate } from "./approvals.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
 import { type BotDirs, botDirs, ensureBotDirs } from "./paths.js";
-import { reportRun, type RunIdentity } from "./reporter.js";
+import { reportRun } from "./reporter.js";
+import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
 
 export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
 export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -20,6 +21,7 @@ export type BotConfig = ConfigMessage["bots"][number];
 export { approvalKind, approvalRule } from "./approvals.js";
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
 export { botDirs, type BotDirs } from "./paths.js";
+export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
   readonly bots: readonly BotConfig[];
@@ -28,7 +30,7 @@ export interface RunnerConfig {
   readonly send: (message: AgentToControl) => void;
   /** 每个 Bot 的 Pi 目录建在这下面。Pi 的四个落盘点全部显式钉死，不碰 ~/.pi。 */
   readonly dataDir: string;
-  /** 扩展工具的注册点。这一版空着。 */
+  /** 扩展工具的注册点。主题任务的三个工具由运行器自己挂，排在这些之后。 */
   readonly extensionTools?: readonly RunnerTool[];
   /** 覆盖 Pi 的会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
   readonly settings?: PiSettings;
@@ -47,7 +49,7 @@ export interface Runner {
 // resume 时把排队的整条重发一遍。详见 README。
 type BotLifecycle =
   | { readonly phase: "idle" }
-  | { readonly phase: "running"; readonly run: RunIdentity }
+  | { readonly phase: "running"; readonly active: ActiveRun }
   | { readonly phase: "paused"; readonly queued: PromptMessage[] };
 
 interface BotRuntime {
@@ -61,10 +63,13 @@ interface BotRuntime {
 
 type RunnerState = "ready" | "stopped";
 
+// 任务卡放第一段：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
+// 群里的闲聊会把它挤远，模型更容易照着最后几句走。
 function composePrompt(message: PromptMessage): string {
-  if (message.context.length === 0) return message.text;
+  const card = message.task === null ? "" : `任务卡：\n${renderTaskCard(message.task, message.members)}\n\n`;
+  if (message.context.length === 0) return `${card}${message.text}`;
   const history = message.context.map((line) => `${line.from}：${line.text}`).join("\n");
-  return `群里刚才说的：\n${history}\n\n当前这条：\n${message.text}`;
+  return `${card}群里刚才说的：\n${history}\n\n当前这条：\n${message.text}`;
 }
 
 export function createRunner(config: RunnerConfig): Runner {
@@ -96,14 +101,15 @@ export function createRunner(config: RunnerConfig): Runner {
 
   const sessionFor = async (bot: BotRuntime): Promise<BotSession> => {
     if (bot.session !== null) return bot.session;
+    const activeRun = (): ActiveRun | null => (bot.lifecycle.phase === "running" ? bot.lifecycle.active : null);
     const created = await createBotSession({
       botId: bot.botId,
       dirs: ensureBotDirs(bot.dirs),
       gateway: config.modelGateway,
-      tools: extensionTools,
+      tools: [...extensionTools, ...createTopicTools({ activeRun, send: config.send })],
       needsApproval,
       approvals,
-      activeRun: () => (bot.lifecycle.phase === "running" ? bot.lifecycle.run : null),
+      activeRun,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });
     bot.session = created;
@@ -118,17 +124,21 @@ export function createRunner(config: RunnerConfig): Runner {
       return;
     }
 
-    const run: RunIdentity = {
-      runId: message.runId,
-      botId: message.botId,
-      groupId: message.groupId,
-      messageId: MessageId.parse(randomUUID()),
+    const active: ActiveRun = {
+      run: {
+        runId: message.runId,
+        botId: message.botId,
+        groupId: message.groupId,
+        messageId: MessageId.parse(randomUUID()),
+      },
+      task: message.task,
+      members: message.members,
     };
     let unsubscribe: (() => void) | null = null;
     try {
       const { session } = await sessionFor(bot);
-      bot.lifecycle = { phase: "running", run };
-      unsubscribe = reportRun(session, run, approvals.blockedCallIds, config.send);
+      bot.lifecycle = { phase: "running", active };
+      unsubscribe = reportRun(session, active.run, approvals.blockedCallIds, config.send);
       await session.prompt(composePrompt(message));
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);

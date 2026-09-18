@@ -13,13 +13,13 @@ import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
 import type { BotDirs } from "./paths.js";
-import type { RunIdentity } from "./reporter.js";
+import type { ActiveRun } from "./topic.js";
 
 // 一个 Bot 一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
 
-/** 扩展工具的注册点。桌面操作、MCP 桥接、主题任务、存 skill 以后都从这里进来。 */
+/** 工具的注册点。主题任务的三个工具由 createRunner 拼进来，桌面操作、MCP 桥接、存 skill 还没做。 */
 export type RunnerTool = ToolDefinition<TSchema>;
 
 export type PiSettings = Parameters<typeof SettingsManager.inMemory>[0];
@@ -31,8 +31,8 @@ export interface BotSessionOptions {
   readonly tools: readonly RunnerTool[];
   readonly needsApproval: (toolName: string) => boolean;
   readonly approvals: ApprovalGate;
-  /** 工具调用发生时读，用来把审批挂到当前这一次运行上。 */
-  readonly activeRun: () => RunIdentity | null;
+  /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
+  readonly activeRun: () => ActiveRun | null;
   readonly settings?: PiSettings;
 }
 
@@ -48,13 +48,13 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
 
     pi.on("tool_call", async (event) => {
       if (!options.needsApproval(event.toolName)) return undefined;
-      const run = options.activeRun();
+      const active = options.activeRun();
       // 没有运行在身就没人能批。放行等于绕开审批，一律拦下。
-      if (run === null) return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
+      if (active === null) return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
       const approved = await options.approvals.ask({
-        runId: run.runId,
-        botId: run.botId,
-        groupId: run.groupId,
+        runId: active.run.runId,
+        botId: active.run.botId,
+        groupId: active.run.groupId,
         callId: event.toolCallId,
         tool: event.toolName,
         summary: JSON.stringify(event.input),

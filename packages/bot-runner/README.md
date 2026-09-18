@@ -71,7 +71,70 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。桌面操作、MCP 桥接、主题任务、存 skill 这四组这一版都没做，注册点先空着。测试用它塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。主题任务的三个工具由运行器自己挂，见下一节，排在 `extensionTools` 之后。桌面操作、MCP 桥接、存 skill 这三组还没做。测试用这个注册点塞两个假工具。
+
+## 主题任务工具
+
+`src/topic.ts` 的 `createTopicTools` 挂三个工具，由 `createRunner` 按 Bot 建，不用调用方注册。
+
+| 工具 | 参数 | 返回 | 上行报文 |
+| --- | --- | --- | --- |
+| `read_task` | 无 | 整张任务卡的文本；群里没有任务卡时是 `这个群没有任务卡` | 无 |
+| `update_checklist` | `items: { text, done, ownerBotId? }[]`，最多 50 条 | `清单已更新，n/m 完成` | `task_checklist`，整份替换 |
+| `mention_bot` | `name`、`text` | `已经在群里 @ 了 <名字>。` | `mention`，带 `targetBotId` |
+
+`update_checklist` 在边界上把缺省的 `ownerBotId` 补成 `null`（协议里它是可空不是可省），再过 `z.array(ChecklistItem).max(50)`。`mention_bot` 按 `members` 里的 `name` 精确匹配，匹配不上或者匹配到自己都是错误。
+
+**错误一律靠抛异常表达。** pi-agent-core 的 `agent-loop.js` 在 `execute` 的 catch 里把 `error.message` 做成一条 `isError` 的工具结果，`src/reporter.ts` 据此把 `bot_tool_call` 的终态记成 `failed`。返回一条带错误字样的正常结果只会被记成 `ok`，控制面看到的是这次调用成功了。
+
+自己抛的三条是「不属于任何一次运行」「名字找不到」「@ 自己」，都是中文文本；名字找不到时还会列出群里可以 @ 的名字（排除自己），模型下一轮才不用瞎猜。另外还有一条错误路径是 zod 抛的：清单项的 `text` 为空串、`mention` 的 `text` 为空或超过 2000 字，会在 `z.array(ChecklistItem)` 或 `AgentToControl.parse` 上抛，模型拿到的是 zod 那串英文 issues。这四条都在 `send` 之前抛，所以一条上行报文也发不出去。
+
+### 任务卡的文本
+
+`renderTaskCard(task, members)` 是全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。行数固定，模型就分不混「这行没出现」和「这个字段是空的」。
+
+```
+T-2482 给老客户回一封询价邮件
+说明：先翻历史邮件再动笔
+截止：2026-09-20T10:00:00.000Z
+当前经手：小白
+群成员：小白、小黑
+清单：
+1. [x] 翻历史邮件（经手：小白）
+2. [ ] 起草回信（经手：未指派）
+```
+
+| 字段 | 空值渲染成 |
+| --- | --- |
+| `summary` 为空串 | `无` |
+| `dueAt` 为 null | `不限` |
+| `currentBotId` 为 null | `未指派` |
+| 清单项的 `ownerBotId` 为 null | `未指派` |
+| 清单为空 | 单独一行 `（空）` |
+| 成员名单为空 | `（空）` |
+
+经手的 id 按 `members` 解析成名字。**名单里没有的 id 原样渲染那个 id**，不丢信息：成员名单是可能滞后于任务卡的，换成 `未指派` 就查不出到底是谁。
+
+`task` 不为 null 时任务卡还会作为 **prompt 的第一段**送给模型，形如 `任务卡：\n<卡片>\n\n`，后面才接「群里刚才说的」和「当前这条」。放第一段是因为它是这一轮的目标，群里的闲聊放在后面不会把它挤远。`task` 为 null 时 `composePrompt` 的行为和没有任务卡这套东西时完全一样。
+
+prompt 的这一段和 `read_task` 的返回共用同一个 `renderTaskCard`，两边看到的卡片不会飘。
+
+### 清单里的经手怎么解析
+
+`ownerBotId` 收的是**卡片上写着的那个字**，`src/topic.ts` 的 `ownerResolver` 在边界上把它解析成 `BotId`：
+
+| 模型写的 | 解析成 |
+| --- | --- |
+| 群成员的名字 | 那个成员的 id |
+| 卡片上出现过的 id（成员的 id，或清单里已有的经手） | 原样当 id |
+| 缺省 | `null`，未指派 |
+| 其余 | 抛错，错误文本列出群成员的名字 |
+
+名字是主路，因为卡片上经手渲染的就是名字，模型没有别的地方能拿到 id。名单外的 id 也认，是因为经手的 Bot 可能已经退群，这时卡片渲染的是原始 id，模型读一遍改一条再整份写回来会原样抄回来，拦住它等于把正常的读改写打挂。
+
+剩下的一律抛。`BotId` 只是 `z.string().min(1).brand()`，模型猜的名字照样过得了 `ChecklistItem` 和 `AgentToControl.parse`，不在这里拦住就是一条形状合法的脏数据发到控制面，终态还记成 `ok`。
+
+`test/runner.test.ts` 的「运行器的主题任务工具」一节钉住这些：两条直接断言整张卡片的文本（一条满字段、一条全占位词加名单外的 id），其余九条都真跑一遍假上游，其中三条专钉经手的解析（名字解析成 id、猜的名字被拦下、退群的 id 原样放行）。
 
 ## 跑测试
 
