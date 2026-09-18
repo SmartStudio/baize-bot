@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BotHue, BotId } from "@baize/shared";
+import type { BotHue, BotId, Message } from "@baize/shared";
 import { Sidebar } from "../components/Sidebar.js";
 import { ChatPanel } from "../components/ChatPanel.js";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
@@ -10,6 +10,9 @@ import { useApp } from "../state/app.js";
 type Overlay = "none" | "account" | "settings";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
+
+// 历史还没拉回来时也得给 ChatPanel 一个数组。写成字面量的话每次渲染都是新身份，滚到底的 effect 会空转。
+const NO_MESSAGES: Message[] = [];
 
 export const MainWindow = () => {
   const { state, actions } = useApp();
@@ -46,7 +49,7 @@ export const MainWindow = () => {
           <ChatPanel
             bot={selected.bot}
             groupId={groupId}
-            messages={ready.messages[groupId] ?? []}
+            messages={ready.messages[groupId] ?? NO_MESSAGES}
             lookup={lookup}
             onSend={actions.sendMessage}
           />

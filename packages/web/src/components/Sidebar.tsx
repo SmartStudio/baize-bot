@@ -3,7 +3,7 @@ import { Plus, Search, Settings as SettingsIcon } from "lucide-react";
 import type { BotId, User } from "@baize/shared";
 import type { BotListItem } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
-import { previewOf, timeOf } from "./messages/preview.js";
+import { activityOf, previewOf, timeOf } from "./messages/preview.js";
 
 type Props = {
   bots: BotListItem[];
@@ -57,6 +57,11 @@ export const Sidebar = ({ bots, selectedBotId, user, onSelect, onCreate, onOpenA
                 <span className="bot-item-top">
                   <b>{item.bot.name}</b>
                   {item.bot.tag ? <em className="tag">{item.bot.tag}</em> : null}
+                  {activityOf(item.lastMessage) === "working" ? (
+                    <span className="badge badge-working" data-testid="bot-working">
+                      干活中
+                    </span>
+                  ) : null}
                   <span className="time">{item.lastMessage ? timeOf(item.lastMessage) : "刚刚"}</span>
                 </span>
                 <span className="bot-item-preview">

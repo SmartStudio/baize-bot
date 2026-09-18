@@ -15,9 +15,7 @@ import {
   MOCK_EMAIL,
   MOCK_PASSWORD,
   appendMessage,
-  botReplyFor,
   bots,
-  botReplyDelayMs,
   createBot,
   groupIdByBotId,
   groups,
@@ -25,6 +23,7 @@ import {
   reseed,
   messagesByGroupId,
   settings,
+  streamBotReply,
   user,
 } from "./state.js";
 
@@ -182,14 +181,10 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       const parsed = SendMessageRequest.safeParse(await readBody(req));
       if (!parsed.success) return send(res, 400, { error: "消息不能为空" });
       const message = appendMessage(groupId, { kind: "user", text: parsed.data.text });
-      const botId = groups.get(groupId)?.botIds[0];
-      if (botId) {
-        setTimeout(() => {
-          for (const body of botReplyFor(botId, parsed.data.text)) {
-            push({ type: "message", message: appendMessage(groupId, body) });
-          }
-        }, botReplyDelayMs);
-      }
+      // 一次运行要跑上秒级，POST 只回用户那条，Bot 那边的工具卡、流式正文和花费卡全走推送。
+      streamBotReply(groupId, parsed.data.text, push).catch((cause: unknown) => {
+        process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
+      });
       return send(res, 200, { message });
     }
   }

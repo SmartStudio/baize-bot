@@ -1,5 +1,14 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from "react";
-import { ServerPush, type Bot, type BotId, type GroupId, type Message, type Settings, type User } from "@baize/shared";
+import {
+  ServerPush,
+  type Bot,
+  type BotId,
+  type GroupId,
+  type Message,
+  type MessageId,
+  type Settings,
+  type User,
+} from "@baize/shared";
 import type { BotListItem } from "@baize/shared";
 import { RequestFailed, api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
@@ -26,11 +35,32 @@ type Action =
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
   | { type: "messages_set"; groupId: GroupId; messages: Message[] }
-  | { type: "message_added"; message: Message }
+  | { type: "message_upserted"; message: Message }
+  | ({ type: "message_delta" } & Delta)
   | { type: "settings_set"; settings: Settings };
 
-const withMessage = (list: Message[], message: Message): Message[] =>
-  list.some((m) => m.id === message.id) ? list : [...list, message];
+// 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
+type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean };
+
+// 同一条消息服务端会重推（tool_call 从 running 变 ok 就是重推），按 id 覆盖，不能追加成两条。
+const upsert = (list: Message[], message: Message): Message[] =>
+  list.some((m) => m.id === message.id) ? list.map((m) => (m.id === message.id ? message : m)) : [...list, message];
+
+const streamedInto = (previous: Message | undefined, groupBotId: BotId, delta: Delta): Message => {
+  const grown = previous?.body.kind === "bot" ? previous.body : null;
+  return {
+    id: delta.messageId,
+    groupId: delta.groupId,
+    // delta 报文不带 botId，第一段到的时候只能按「这个群里的 Bot」署名。
+    body: {
+      kind: "bot",
+      botId: grown?.botId ?? groupBotId,
+      text: (grown?.text ?? "") + delta.delta,
+      streaming: !delta.done,
+    },
+    createdAt: previous?.createdAt ?? new Date().toISOString(),
+  };
+};
 
 const reduce = (state: AppState, action: Action): AppState => {
   switch (action.type) {
@@ -68,23 +98,39 @@ const reduce = (state: AppState, action: Action): AppState => {
       };
     }
     case "messages_set":
-      // 拉取在飞的时候推回来的消息已经在本地了，用它们兜住返回的历史，别让整份替换把它们吞掉。
+      // 拉取在飞的时候推回来的消息已经在本地了，本地那份可能还带着历史里没有的流式正文，所以让它压住返回的历史。
       return {
         ...state,
         messages: {
           ...state.messages,
-          [action.groupId]: (state.messages[action.groupId] ?? []).reduce(withMessage, action.messages),
+          [action.groupId]: (state.messages[action.groupId] ?? []).reduce(upsert, action.messages),
         },
       };
-    case "message_added": {
+    case "message_upserted": {
       const groupId = action.message.groupId;
       const known = state.messages[groupId];
       return {
         ...state,
         // messages 里有没有这个键就是「这组历史拉过没有」，所以没拉过的组只更侧栏摘要，不能凭一条推送造出一份假历史。
         messages:
-          known === undefined ? state.messages : { ...state.messages, [groupId]: withMessage(known, action.message) },
+          known === undefined ? state.messages : { ...state.messages, [groupId]: upsert(known, action.message) },
         bots: state.bots.map((item) => (item.groupId === groupId ? { ...item, lastMessage: action.message } : item)),
+      };
+    }
+    case "message_delta": {
+      const owner = state.bots.find((item) => item.groupId === action.groupId);
+      // 群里一个 Bot 都没有，这段字就没人能署名。与其造一条不知道谁说的消息，不如丢掉。
+      if (owner === undefined) return state;
+      const known = state.messages[action.groupId];
+      const grown = streamedInto(
+        known?.find((m) => m.id === action.messageId),
+        owner.bot.id,
+        action,
+      );
+      return {
+        ...state,
+        messages: known === undefined ? state.messages : { ...state.messages, [action.groupId]: upsert(known, grown) },
+        bots: state.bots.map((item) => (item.groupId === action.groupId ? { ...item, lastMessage: grown } : item)),
       };
     }
     case "settings_set":
@@ -165,7 +211,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }),
       sendMessage: signedIn(async (groupId: GroupId, text: string) => {
         const { message } = await api.sendMessage(groupId, text);
-        dispatch({ type: "message_added", message });
+        dispatch({ type: "message_upserted", message });
       }),
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
@@ -209,7 +255,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const parsed = ServerPush.safeParse(JSON.parse(String(event.data)));
         if (!parsed.success) return;
         const push = parsed.data;
-        if (push.type === "message") dispatch({ type: "message_added", message: push.message });
+        if (push.type === "message") dispatch({ type: "message_upserted", message: push.message });
+        if (push.type === "message_delta") {
+          const { messageId, groupId, delta, done } = push;
+          dispatch({ type: "message_delta", messageId, groupId, delta, done });
+        }
         if (push.type === "bot_updated") dispatch({ type: "bot_updated", bot: push.bot });
         if (push.type === "bot_deleted") dispatch({ type: "bot_removed", botId: push.botId });
       });

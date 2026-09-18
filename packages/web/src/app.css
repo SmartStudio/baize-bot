@@ -277,6 +277,63 @@ select {
   font-style: normal;
 }
 
+/* ---------- 在跑的活 ---------- */
+
+/* 呼吸灯要慢，tokens 里最慢的 --dur-slow 才 320ms，表达不了这个节奏。 */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.badge {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  font: var(--type-caption);
+}
+
+.badge-working {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.badge-working::before {
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
+  content: "";
+}
+
+.caret {
+  display: inline-block;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-left: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
+  vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .badge-working::before,
+  .caret,
+  .status-running {
+    animation: none;
+  }
+}
+
 /* ---------- 02 三栏主窗口 ---------- */
 
 .window {
@@ -589,10 +646,17 @@ select {
 }
 
 .status-dot {
+  flex: none;
   width: var(--space-3);
   height: var(--space-3);
   border-radius: var(--radius-full);
   background: var(--fg-4);
+}
+
+.tool-status {
+  flex: none;
+  color: var(--fg-3);
+  font: var(--type-caption);
 }
 
 .status-ok {
@@ -601,6 +665,7 @@ select {
 
 .status-running {
   background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
 }
 
 .status-failed {

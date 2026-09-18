@@ -11,20 +11,34 @@ const BotBubble = ({ body, lookup }: { body: Extract<MessageBody, { kind: "bot" 
   return (
     <div className="bot-line">
       <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
-      <p className="bubble bubble-bot">{body.text}</p>
+      <p className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>
+        {body.text}
+        {body.streaming ? <span className="caret" data-testid="streaming-caret" aria-label="正在输入" /> : null}
+      </p>
     </div>
   );
 };
 
 const SystemNote = ({ text }: { text: string }) => <p className="system-note">{text}</p>;
 
-const ToolCallCard = ({ body }: { body: Extract<MessageBody, { kind: "tool_call" }> }) => (
-  <div className="card card-tool" data-testid="tool-call-card">
+type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
+
+const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
+  running: "运行中",
+  ok: "完成",
+  failed: "失败",
+  blocked: "拦下",
+};
+
+const ToolCallCard = ({ body }: { body: ToolCall }) => (
+  <div className="card card-tool" data-testid="tool-call-card" data-status={body.status}>
     <Globe size={16} aria-hidden="true" />
     <span className="tool-name">{body.tool}</span>
     <code className="tool-args">{body.argsSummary}</code>
     <span className="tool-meta">{body.durationMs === null ? "" : `${Math.round(body.durationMs / 1000)}s`}</span>
     <span className={`status-dot status-${body.status}`} aria-hidden="true" />
+    {/* 四种状态的颜色是给扫一眼的人看的，色盲和读屏的人得有字。 */}
+    <span className="tool-status">{TOOL_STATUS_TEXT[body.status]}</span>
   </div>
 );
 

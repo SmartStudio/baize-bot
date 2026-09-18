@@ -11,13 +11,11 @@ import {
   User,
   type BotHue,
   type MessageBody,
+  type ServerPush,
 } from "@baize/shared";
 
 export const MOCK_EMAIL = "chen@baize.dev";
 export const MOCK_PASSWORD = "baize-dev";
-
-// 真控制面要等运行时回话，mock 用一个固定的小延迟把「回复走 WebSocket 推」这条路径保留下来。
-export const botReplyDelayMs = 120;
 
 const T0 = Date.parse("2026-09-18T01:00:00.000Z");
 const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
@@ -107,7 +105,11 @@ export const messagesByGroupId = new Map<string, Message[]>();
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
   Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes) });
 
+// 端到端每条用例开头 reseed。上一条用例还在跑的回复得认出世界已经换了一茬，别往新状态里写。
+let generation = 0;
+
 export const reseed = (): void => {
+  generation += 1;
   bots.clear();
   groups.clear();
   groupIdByBotId.clear();
@@ -204,9 +206,89 @@ export const appendMessage = (groupId: string, body: MessageBody): Message => {
   return message;
 };
 
-export const botReplyFor = (botId: string, text: string): MessageBody[] => [
-  { kind: "bot", botId: BotId.parse(botId), text: `收到。${text.slice(0, 12)}… 我这就去办。`, streaming: false },
-  { kind: "cost", runId: RunId.parse(`run_${nextSuffix()}`), steps: 4, amount: 0.8 },
-];
+const rewriteMessage = (groupId: string, id: MessageId, body: MessageBody): Message => {
+  const list = messagesByGroupId.get(groupId) ?? [];
+  const at = list.findIndex((m) => m.id === id);
+  const previous = list[at];
+  if (previous === undefined) throw new Error(`消息 ${id} 不在 ${groupId} 里，mock 状态坏了`);
+  const next = Message.parse({ ...previous, body });
+  list[at] = next;
+  return next;
+};
+
+const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
+
+const chunked = (text: string, count: number): string[] => {
+  const letters = [...text];
+  const size = Math.ceil(letters.length / count);
+  const parts: string[] = [];
+  for (let i = 0; i < letters.length; i += size) parts.push(letters.slice(i, i + size).join(""));
+  return parts;
+};
+
+// 真控制面要等运行时回话。这些延迟把一次运行的真实节奏摆出来：工具先跑起来，正文一段段吐，最后结账。
+const REPLY_DELAY_MS = 120;
+const TOOL_CALL_MS = 1000;
+const DELTA_MS = 80;
+const DELTA_COUNT = 4;
+
+export const streamBotReply = async (
+  groupId: string,
+  prompt: string,
+  push: (event: ServerPush) => void,
+): Promise<void> => {
+  const botId = groups.get(groupId)?.botIds[0];
+  if (botId === undefined) return;
+  const run = generation;
+  const abandoned = () => generation !== run;
+  const argsSummary = `ERP · ${prompt.slice(0, 12)}`;
+
+  await sleep(REPLY_DELAY_MS);
+  if (abandoned()) return;
+  const call = appendMessage(groupId, {
+    kind: "tool_call",
+    botId,
+    tool: "erp.query",
+    argsSummary,
+    status: "running",
+    durationMs: null,
+  });
+  push({ type: "message", message: call });
+
+  await sleep(TOOL_CALL_MS);
+  if (abandoned()) return;
+  const settled = rewriteMessage(groupId, call.id, {
+    kind: "tool_call",
+    botId,
+    tool: "erp.query",
+    argsSummary,
+    status: "ok",
+    durationMs: TOOL_CALL_MS,
+  });
+  push({ type: "message", message: settled });
+
+  // 这条回复只靠 delta 长出来，整条的 message 一次都不推，逼着前端走「没见过就先占个位」那条路。
+  const draft = appendMessage(groupId, { kind: "bot", botId, text: "", streaming: true });
+  const parts = chunked(`收到。${prompt.slice(0, 12)}… 我这就去办。`, DELTA_COUNT);
+  let text = "";
+  for (const [index, delta] of parts.entries()) {
+    await sleep(DELTA_MS);
+    if (abandoned()) return;
+    text += delta;
+    const done = index === parts.length - 1;
+    rewriteMessage(groupId, draft.id, { kind: "bot", botId, text, streaming: !done });
+    push({ type: "message_delta", messageId: draft.id, groupId: draft.groupId, delta, done });
+  }
+
+  await sleep(DELTA_MS);
+  if (abandoned()) return;
+  const cost = appendMessage(groupId, {
+    kind: "cost",
+    runId: RunId.parse(`run_${nextSuffix()}`),
+    steps: 4,
+    amount: 0.8,
+  });
+  push({ type: "message", message: cost });
+};
 
 export const lastMessageOf = (groupId: string): Message | null => (messagesByGroupId.get(groupId) ?? []).at(-1) ?? null;

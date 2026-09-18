@@ -16,16 +16,18 @@ export const ChatPanel = ({ bot, groupId, messages, lookup, onSend }: Props) => 
   const [draft, setDraft] = useState("");
   const bottom = useRef<HTMLDivElement>(null);
 
+  // 盯的是数组本身而不是条数：流式回复只让最后一条变长，条数一直不变，盯条数就跟不住。
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, groupId]);
+  }, [messages, groupId]);
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
     if (text.length === 0) return;
-    // 发失败了得把字还给用户，所以等 onSend 落地再清。
-    void onSend(groupId, text).then(() => setDraft(""));
+    setDraft("");
+    // 发失败了把字还回去，别让用户重打一遍。
+    void onSend(groupId, text).catch(() => setDraft(text));
   };
 
   return (
