@@ -1,0 +1,20 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "env": {
+    "es2024": true,
+    "node": true
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+  "rules": {
+    "no-console": "off",
+    "eqeqeq": "error",
+    "no-var": "error",
+    "typescript/no-explicit-any": "error",
+    "no-await-in-loop": "off"
+  },
+  "ignorePatterns": ["node_modules", "dist", "bot-application-prototype", "research", "spikes/*/dist"]
+}
