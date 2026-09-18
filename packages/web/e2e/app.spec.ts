@@ -157,6 +157,7 @@ test("点加号建的新 Bot 进侧栏并直接进入它的对话", async ({ pag
   const items = page.locator("[data-testid=bot-item]");
   const before = await items.count();
 
+  await page.getByTestId("new-menu").click();
   await page.getByTestId("new-bot").click();
 
   await expect(items).toHaveCount(before + 1);
@@ -486,4 +487,98 @@ test("免打扰只设了一头等于没设；权限没给就安静跳过，不�
   await expect(item.getByTestId("bot-pending"), "通知发不出去也不影响这件事攒在角标上").toHaveText("等你点头 2");
   expect((await page.evaluate(() => window.__notifications?.sent))?.length, "权限不是 granted 就不发通知").toBe(1);
   expect((await page.evaluate(() => window.__notifications?.asked)) ?? 0, "更不该反过来弹权限请求").toBe(0);
+});
+
+// 预置的多 Bot 群只有一条系统消息，谁开口都是被 @ 出来的，数「只有它回了」才数得清。
+const openTeamGroup = async (page: Page, title: string) => {
+  await page.locator(`[data-testid=group-item][data-group-title="${title}"]`).click();
+  await expect(page.getByTestId("task-card")).toBeVisible();
+};
+
+test("从加号建群后侧栏多一个群，群顶部钉着带编号的任务卡", async ({ page }) => {
+  await login(page);
+  const groups = page.locator("[data-testid=group-item]");
+  await expect(groups, "预置里本来就有一个多 Bot 群").toHaveCount(1);
+
+  await page.getByTestId("new-menu").click();
+  await page.getByTestId("new-group").click();
+  await expect(page.getByTestId("new-group-dialog")).toBeVisible();
+  await page.getByTestId("group-title").fill("Globex X3 × 200 补货");
+  await expect(page.getByTestId("group-submit"), "还没拉人进来就不该能提交").toBeDisabled();
+  await page.locator('[data-testid=group-member][data-bot-name="小服"]').click();
+  await page.locator('[data-testid=group-member][data-bot-name="小采"]').click();
+  await page.getByTestId("group-summary").fill("X3 现货不够 200 台，先补货再答复客户。");
+  await page.getByTestId("group-submit").click();
+
+  await expect(page.getByTestId("new-group-dialog"), "建完弹层自己收起来").toHaveCount(0);
+  await expect(groups).toHaveCount(2);
+  await expect(
+    page.locator('[data-testid=group-item][data-group-title="Globex X3 × 200 补货"]'),
+    "建群的人直接进了这个群",
+  ).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("chat-title")).toHaveText("Globex X3 × 200 补货");
+  await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 2 个 Bot");
+  // 编号由服务端发，预置那个是 T-2481，接着往下发。
+  await expect(page.getByTestId("task-number"), "任务卡上是系统发的 T- 编号").toHaveText("T-2482");
+  await expect(page.getByTestId("task-progress"), "清单等 Bot 接手后自己列").toHaveText("清单 0 / 0");
+  await expect(page.getByTestId("task-current")).toHaveText("当前 还没人接手");
+  await page.screenshot({ path: `${SHOT}/08.png` });
+});
+
+test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", async ({ page }) => {
+  await login(page);
+  await openTeamGroup(page, "Globex X3 × 200 订单");
+  await expect(page.getByTestId("task-progress")).toHaveText("清单 0 / 5");
+  await expect(page.getByTestId("task-current"), "建好还没人接手").toHaveText("当前 还没人接手");
+
+  const input = page.getByTestId("composer-input");
+  await input.fill("@小");
+  await expect(page.getByTestId("mention-menu"), "打 @ 就弹成员名单").toBeVisible();
+  await page.locator('[data-testid=mention-option][data-bot-name="小销"]').click();
+  await expect(input, "选中谁就往输入框里插「@小销 」").toHaveValue("@小销 ");
+  await input.fill("@小销 查一下 X3 的现货还有多少");
+  await page.getByTestId("composer-send").click();
+
+  const list = page.getByTestId("message-list");
+  await expect(list.getByTestId("cost-card"), "花费卡到了就说明这次运行跑完了").toHaveCount(1);
+  await expect(list.locator("[data-kind=bot]"), "群里只有被 @ 的那个开口").toHaveCount(1);
+  const source = list.getByTestId("bot-source");
+  await expect(source, "多 Bot 群里每条 Bot 消息上方写清是谁说的").toHaveCount(1);
+  await expect(source).toHaveAttribute("data-bot-name", "小销");
+  await expect(source).toContainText("小销 · 销售");
+  await expect(page.locator('[data-testid=bot-source][data-bot-name="小服"]'), "没被 @ 的那个一句话都没说").toHaveCount(
+    0,
+  );
+
+  await expect(page.getByTestId("task-current"), "被 @ 就是接手").toHaveText("当前 小销");
+  await expect(page.getByTestId("checklist-item").first(), "接手的 Bot 干完一步就勾掉一项").toBeChecked();
+  await expect(page.getByTestId("task-progress")).toHaveText("清单 1 / 5");
+  await page.screenshot({ path: `${SHOT}/05.png` });
+});
+
+test("在任务卡上勾掉第二项，卡片和任务详情一起跟着变，刷新还在", async ({ page }) => {
+  await login(page);
+  await openTeamGroup(page, "Globex X3 × 200 订单");
+  const items = page.getByTestId("checklist-item");
+  await expect(items).toHaveCount(5);
+
+  const saved = page.waitForResponse((res) => res.url().includes("/api/tasks/") && res.request().method() === "PATCH");
+  // 清单是受控的，勾上要等服务端把整份清单回过来，check() 会因为点完那一下状态还没变而失败。
+  await items.nth(1).click();
+  await saved;
+
+  await expect(items.nth(1), "勾的是第二项").toBeChecked();
+  await expect(items.first(), "别的项不受影响").not.toBeChecked();
+  await expect(page.getByTestId("task-progress"), "卡片上的进度跟着走").toHaveText("清单 1 / 5");
+
+  await page.getByTestId("task-open").click();
+  const panel = page.getByTestId("task-panel");
+  await expect(panel.getByTestId("task-panel-checklist").locator("li").nth(1)).toHaveAttribute("data-done", "true");
+  await expect(panel.getByTestId("task-handled"), "还没人接手，经手里两个成员都在等").toContainText("等待接手");
+  await page.screenshot({ path: `${SHOT}/5b.png` });
+
+  // 刷新走的是拉历史那条路。整份清单真存到服务端了才留得住。
+  await page.reload();
+  await openTeamGroup(page, "Globex X3 × 200 订单");
+  await expect(page.getByTestId("checklist-item").nth(1), "刷新后第二项还是勾着的").toBeChecked();
 });

@@ -5,19 +5,38 @@ import {
   type ApprovalId,
   type Bot,
   type BotId,
+  type ChecklistItem,
   type DecideApprovalRequest,
+  type Group,
   type GroupId,
   type Message,
   type MessageId,
   type Settings,
+  type TopicTask,
   type User,
 } from "@baize/shared";
-import type { BotListItem } from "@baize/shared";
-import { RequestFailed, api, type BotDraft } from "../api/client.js";
+import type { BotListItem, GroupListItem } from "@baize/shared";
+import { RequestFailed, api, type BotDraft, type GroupDraft } from "../api/client.js";
 import { notifyApproval } from "./notify.js";
 import { applyTheme } from "./theme.js";
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
+
+// 侧栏一条记录就是一个群，两段共用这一个形状。单 Bot 群只有一个成员且不带任务卡，多 Bot 群有 2 到 6 个成员和一张
+// 任务卡，写成联合而不是「botIds + task 可空」，是为了让「多 Bot 群没有任务卡」这种状态根本拼不出来。
+export type Conversation =
+  | { kind: "solo"; groupId: GroupId; botId: BotId; lastMessage: Message | null; pendingApprovals: number }
+  | {
+      kind: "team";
+      groupId: GroupId;
+      botIds: BotId[];
+      task: TopicTask;
+      lastMessage: Message | null;
+      pendingApprovals: number;
+    };
+
+export const memberIdsOf = (conversation: Conversation): BotId[] =>
+  conversation.kind === "solo" ? [conversation.botId] : conversation.botIds;
 
 export type AppState =
   | { status: "loading" }
@@ -25,8 +44,10 @@ export type AppState =
   | {
       status: "ready";
       user: User;
-      bots: BotListItem[];
-      selectedBotId: BotId | null;
+      // Bot 的名字、标签、色相只存这一份。侧栏、气泡署名、任务卡头像、@ 弹层都从这里查，改名只落一个地方。
+      bots: Record<BotId, Bot>;
+      conversations: Conversation[];
+      selectedGroupId: GroupId | null;
       messages: Record<GroupId, Message[]>;
       // 审批卡的状态只在这张表上。approval 类消息的正文只有 approvalId，重推那条消息一个字都不会变。
       approvals: Record<ApprovalId, Approval>;
@@ -35,11 +56,13 @@ export type AppState =
 
 type Action =
   | { type: "anonymous"; login: LoginPhase }
-  | { type: "ready"; user: User; bots: BotListItem[]; settings: Settings }
-  | { type: "bot_selected"; botId: BotId }
-  | { type: "bot_created"; item: BotListItem }
+  | { type: "ready"; user: User; bots: BotListItem[]; groups: GroupListItem[]; settings: Settings }
+  | { type: "group_selected"; groupId: GroupId }
+  | { type: "bot_created"; bot: Bot; groupId: GroupId }
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
+  | { type: "group_created"; group: Group; task: TopicTask; select: boolean }
+  | { type: "task_updated"; task: TopicTask }
   | { type: "messages_set"; groupId: GroupId; messages: Message[] }
   | { type: "message_upserted"; message: Message }
   | ({ type: "message_delta" } & Delta)
@@ -54,23 +77,32 @@ type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: bool
 const upsert = (list: Message[], message: Message): Message[] =>
   list.some((m) => m.id === message.id) ? list.map((m) => (m.id === message.id ? message : m)) : [...list, message];
 
-const streamedInto = (previous: Message | undefined, groupBotId: BotId, delta: Delta): Message => {
+// delta 报文不带 botId。本地见过这条消息就照它署名；没见过就看这个群里现在谁在开口：单 Bot 群只有那一个，
+// 多 Bot 群是当前经手的那个——派活的那一刻服务端就把它定下来了，不是这里猜的。
+const signerOf = (conversation: Conversation | undefined, known: Message | undefined): BotId | null => {
+  if (known?.body.kind === "bot") return known.body.botId;
+  if (conversation === undefined) return null;
+  return conversation.kind === "solo" ? conversation.botId : conversation.task.currentBotId;
+};
+
+const streamedInto = (previous: Message | undefined, botId: BotId, delta: Delta): Message => {
   const grown = previous?.body.kind === "bot" ? previous.body : null;
   return {
     id: delta.messageId,
     groupId: delta.groupId,
-    // delta 报文不带 botId，第一段到的时候只能按「这个群里的 Bot」署名。
-    body: {
-      kind: "bot",
-      botId: grown?.botId ?? groupBotId,
-      text: (grown?.text ?? "") + delta.delta,
-      streaming: !delta.done,
-    },
+    body: { kind: "bot", botId, text: (grown?.text ?? "") + delta.delta, streaming: !delta.done },
     createdAt: previous?.createdAt ?? new Date().toISOString(),
   };
 };
 
 type ReadyState = Extract<AppState, { status: "ready" }>;
+
+// 摘要和角标是按群算的，跟这个群是单 Bot 还是多 Bot 无关。两段侧栏共用这一条写路径，加一类群不用再写一遍记账。
+const touchGroup = (
+  conversations: Conversation[],
+  groupId: GroupId,
+  patch: { lastMessage?: Message; pendingApprovals?: number },
+): Conversation[] => conversations.map((c) => (c.groupId === groupId ? { ...c, ...patch } : c));
 
 // 同一条 approval 会从拉历史、决定的响应、服务端推送三条路各来一次，先后不受控。只认「之前知道的状态」，
 // 重到的那次自然是 0。null 表示这条该丢掉。
@@ -79,7 +111,7 @@ const mergeApproval = (
   next: Approval,
   from: "history" | "push",
 ): { approval: Approval; delta: number } | null => {
-  // 拉历史带回来的那批，GET /api/bots 的 pendingApprovals 已经算进去了，这里再加一次就翻倍。
+  // 拉历史带回来的那批，GET /api/bots 和 /api/groups 的 pendingApprovals 已经算进去了，这里再加一次就翻倍。
   if (previous === undefined) return { approval: next, delta: from === "push" && next.status === "pending" ? 1 : 0 };
   if (previous.status === "pending") return { approval: next, delta: next.status === "pending" ? 0 : -1 };
   // 本地已经有结论了。结论不会退回 pending，所以说 pending 的那份是拉取在飞时拍下的旧快照。收下它，卡片会
@@ -100,10 +132,42 @@ const withApprovals = (state: ReadyState, incoming: Approval[], from: "history" 
   return {
     ...state,
     approvals,
-    bots: state.bots.map((item) => {
-      const delta = deltaByGroup.get(item.groupId) ?? 0;
-      return delta === 0 ? item : { ...item, pendingApprovals: Math.max(0, item.pendingApprovals + delta) };
+    conversations: state.conversations.map((c) => {
+      const delta = deltaByGroup.get(c.groupId) ?? 0;
+      return delta === 0 ? c : { ...c, pendingApprovals: Math.max(0, c.pendingApprovals + delta) };
     }),
+  };
+};
+
+const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], settings: Settings): ReadyState => {
+  const registry: Record<BotId, Bot> = {};
+  for (const item of bots) registry[item.bot.id] = item.bot;
+  const conversations: Conversation[] = [
+    ...bots.map((item): Conversation => ({
+      kind: "solo",
+      groupId: item.groupId,
+      botId: item.bot.id,
+      lastMessage: item.lastMessage,
+      pendingApprovals: item.pendingApprovals,
+    })),
+    ...groups.map((item): Conversation => ({
+      kind: "team",
+      groupId: item.group.id,
+      botIds: item.group.botIds,
+      task: item.task,
+      lastMessage: item.lastMessage,
+      pendingApprovals: item.pendingApprovals,
+    })),
+  ];
+  return {
+    status: "ready",
+    user,
+    bots: registry,
+    conversations,
+    selectedGroupId: conversations[0]?.groupId ?? null,
+    messages: {},
+    approvals: {},
+    settings,
   };
 };
 
@@ -112,37 +176,64 @@ const reduce = (state: AppState, action: Action): AppState => {
     case "anonymous":
       return { status: "anonymous", login: action.login };
     case "ready":
-      return {
-        status: "ready",
-        user: action.user,
-        bots: action.bots,
-        selectedBotId: action.bots[0]?.bot.id ?? null,
-        messages: {},
-        approvals: {},
-        settings: action.settings,
-      };
+      return enteredState(action.user, action.bots, action.groups, action.settings);
     default:
       break;
   }
   if (state.status !== "ready") return state;
   switch (action.type) {
-    case "bot_selected":
-      return { ...state, selectedBotId: action.botId };
+    case "group_selected":
+      return { ...state, selectedGroupId: action.groupId };
     case "bot_created":
-      return { ...state, bots: [...state.bots, action.item], selectedBotId: action.item.bot.id };
-    case "bot_updated":
       return {
         ...state,
-        bots: state.bots.map((item) => (item.bot.id === action.bot.id ? { ...item, bot: action.bot } : item)),
+        bots: { ...state.bots, [action.bot.id]: action.bot },
+        conversations: [
+          ...state.conversations,
+          { kind: "solo", groupId: action.groupId, botId: action.bot.id, lastMessage: null, pendingApprovals: 0 },
+        ],
+        selectedGroupId: action.groupId,
       };
+    case "bot_updated":
+      return { ...state, bots: { ...state.bots, [action.bot.id]: action.bot } };
     case "bot_removed": {
-      const bots = state.bots.filter((item) => item.bot.id !== action.botId);
+      const bots = { ...state.bots };
+      delete bots[action.botId];
+      const conversations = state.conversations.filter((c) => !(c.kind === "solo" && c.botId === action.botId));
+      const stillThere = conversations.some((c) => c.groupId === state.selectedGroupId);
       return {
         ...state,
         bots,
-        selectedBotId: state.selectedBotId === action.botId ? (bots[0]?.bot.id ?? null) : state.selectedBotId,
+        conversations,
+        selectedGroupId: stillThere ? state.selectedGroupId : (conversations[0]?.groupId ?? null),
       };
     }
+    case "group_created": {
+      // 建群的人从 POST 的响应知道一次，WebSocket 的 group_created 还会再说一次。按 id 认，重到的那次什么都不做。
+      if (state.conversations.some((c) => c.groupId === action.group.id)) {
+        return action.select ? { ...state, selectedGroupId: action.group.id } : state;
+      }
+      const joined: Conversation = {
+        kind: "team",
+        groupId: action.group.id,
+        botIds: action.group.botIds,
+        task: action.task,
+        lastMessage: null,
+        pendingApprovals: 0,
+      };
+      return {
+        ...state,
+        conversations: [...state.conversations, joined],
+        selectedGroupId: action.select ? action.group.id : state.selectedGroupId,
+      };
+    }
+    case "task_updated":
+      return {
+        ...state,
+        conversations: state.conversations.map((c) =>
+          c.kind === "team" && c.task.id === action.task.id ? { ...c, task: action.task } : c,
+        ),
+      };
     case "messages_set":
       // 拉取在飞的时候推回来的消息已经在本地了，本地那份可能还带着历史里没有的流式正文，所以让它压住返回的历史。
       return {
@@ -160,23 +251,26 @@ const reduce = (state: AppState, action: Action): AppState => {
         // messages 里有没有这个键就是「这组历史拉过没有」，所以没拉过的组只更侧栏摘要，不能凭一条推送造出一份假历史。
         messages:
           known === undefined ? state.messages : { ...state.messages, [groupId]: upsert(known, action.message) },
-        bots: state.bots.map((item) => (item.groupId === groupId ? { ...item, lastMessage: action.message } : item)),
+        conversations: touchGroup(state.conversations, groupId, { lastMessage: action.message }),
       };
     }
     case "message_delta": {
-      const owner = state.bots.find((item) => item.groupId === action.groupId);
-      // 群里一个 Bot 都没有，这段字就没人能署名。与其造一条不知道谁说的消息，不如丢掉。
-      if (owner === undefined) return state;
+      const conversation = state.conversations.find((c) => c.groupId === action.groupId);
       const known = state.messages[action.groupId];
+      const botId = signerOf(
+        conversation,
+        known?.find((m) => m.id === action.messageId),
+      );
+      if (botId === null) return state;
       const grown = streamedInto(
         known?.find((m) => m.id === action.messageId),
-        owner.bot.id,
+        botId,
         action,
       );
       return {
         ...state,
         messages: known === undefined ? state.messages : { ...state.messages, [action.groupId]: upsert(known, grown) },
-        bots: state.bots.map((item) => (item.groupId === action.groupId ? { ...item, lastMessage: grown } : item)),
+        conversations: touchGroup(state.conversations, action.groupId, { lastMessage: grown }),
       };
     }
     case "approvals_loaded":
@@ -193,9 +287,11 @@ const reduce = (state: AppState, action: Action): AppState => {
 export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  selectBot: (botId: BotId) => void;
+  selectGroup: (groupId: GroupId) => void;
   createBot: () => Promise<void>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
+  createGroup: (draft: GroupDraft) => Promise<void>;
+  setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
   decideApproval: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
@@ -230,8 +326,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       };
     };
     const enter = async (user: User) => {
-      const [bots, settings] = await Promise.all([api.bots(), api.settings()]);
-      dispatch({ type: "ready", user, bots: bots.items, settings });
+      const [bots, groups, settings] = await Promise.all([api.bots(), api.groups(), api.settings()]);
+      dispatch({ type: "ready", user, bots: bots.items, groups: groups.items, settings });
     };
     return {
       login: async (email, password) => {
@@ -248,13 +344,20 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         await api.logout();
         dispatch({ type: "anonymous", login: { kind: "idle" } });
       },
-      selectBot: (botId) => dispatch({ type: "bot_selected", botId }),
+      selectGroup: (groupId) => dispatch({ type: "group_selected", groupId }),
       createBot: signedIn(async () => {
         const { bot, group } = await api.createBot({});
-        dispatch({ type: "bot_created", item: { bot, groupId: group.id, lastMessage: null, pendingApprovals: 0 } });
+        dispatch({ type: "bot_created", bot, groupId: group.id });
       }),
       updateBot: signedIn(async (botId: BotId, draft: BotDraft) => {
         dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
+      }),
+      createGroup: signedIn(async (draft: GroupDraft) => {
+        const { group, task } = await api.createGroup(draft);
+        dispatch({ type: "group_created", group, task, select: true });
+      }),
+      setChecklist: signedIn(async (task: TopicTask, checklist: ChecklistItem[]) => {
+        dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
       }),
       loadMessages: signedIn(async (groupId: GroupId) => {
         const { messages, approvals } = await api.messages(groupId);
@@ -279,10 +382,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     api
       .me()
       .then(({ user }) =>
-        Promise.all([api.bots(), api.settings()]).then(([bots, settings]) => ({ user, bots, settings })),
+        Promise.all([api.bots(), api.groups(), api.settings()]).then(([bots, groups, settings]) => ({
+          user,
+          bots,
+          groups,
+          settings,
+        })),
       )
-      .then(({ user, bots, settings }) => {
-        if (live) dispatch({ type: "ready", user, bots: bots.items, settings });
+      .then(({ user, bots, groups, settings }) => {
+        if (live) dispatch({ type: "ready", user, bots: bots.items, groups: groups.items, settings });
       })
       .catch((cause: unknown) => {
         if (!live) return;
@@ -328,6 +436,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         if (push.type === "bot_updated") dispatch({ type: "bot_updated", bot: push.bot });
         if (push.type === "bot_deleted") dispatch({ type: "bot_removed", botId: push.botId });
+        // 建群的人已经从 POST 的响应知道了这个群。这条推送是给同一个账号别的窗口看的，不抢它们当下的选中。
+        if (push.type === "group_created") {
+          dispatch({ type: "group_created", group: push.group, task: push.task, select: false });
+        }
+        if (push.type === "task_updated") dispatch({ type: "task_updated", task: push.task });
         if (push.type === "approval_updated") {
           dispatch({ type: "approval_pushed", approval: push.approval });
           const current = settingsRef.current;

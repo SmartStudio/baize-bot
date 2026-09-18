@@ -6,7 +6,7 @@
 
 - `packages/shared` 对象模型、控制面与电脑代理的报文、HTTP API 契约。全部是 zod schema，其他包只从这里引用类型。
 - `packages/control-plane` 控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js，迁移用 drizzle-kit。端口 3001。见下面「控制面」。
-- `packages/web` Web 客户端。Vite 加 React 18 加 react-router。样式只用 `bot-application-prototype/_ds/.../tokens` 里的变量。端口 5173，`/api` 代理到 3001。单跑前端用 `pnpm --filter @baize/web mock` 起假控制面；要连真控制面就先 `docker compose up -d`、`pnpm --filter @baize/control-plane migrate`、`pnpm --filter @baize/control-plane seed`，再 `pnpm dev`。
+- `packages/web` Web 客户端。Vite 加 React 18 加 react-router。样式只用 `bot-application-prototype/_ds/.../tokens` 里的变量。端口 5173，`/api` 代理到 3001。单跑前端用 `pnpm --filter @baize/web mock` 起假控制面；要连真控制面就先 `docker compose up -d`、`pnpm --filter @baize/control-plane migrate`、`pnpm --filter @baize/control-plane seed`，再 `pnpm dev`。侧栏分两段：Bot 是一对一的群，群是多 Bot 的群。加号菜单里「新建 Bot」开前者，「建群」选 2 到 6 个自己的 Bot、写清主题和截止，开后者。群顶部钉着任务卡，编号由系统发（`T-2482` 这种），上面是清单、截止和当前经手，清单勾一下就是一次 `PATCH /api/tasks/:id`。群里打 `@` 弹成员名单，只有被 @ 的那个 Bot 接活并维护清单，没 @ 谁就落到当前经手身上。
 - `packages/computer-agent` 云电脑里的常驻进程。出站 WebSocket 连控制面的 `/agent`。
 - `packages/bot-runner` Bot 运行器。用 @earendil-works/pi-coding-agent 的 SDK，每个 Bot 一个 AgentSession。
 - `packages/e2e` 端到端联调。真控制面、真电脑代理、真运行器一起跑，只有模型上游是假的。见下面「端到端」。

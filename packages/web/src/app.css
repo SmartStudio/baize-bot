@@ -1032,3 +1032,342 @@ select {
   color: var(--fg-4);
   font: var(--type-body);
 }
+
+/* ---------- 08 建群 · 05 主题任务 ---------- */
+
+/* 任务详情没开的多 Bot 群没有第三栏，对话区把它吃掉，而不是留一条空栏。 */
+.window.is-wide {
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+}
+
+.conversation-lists {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.conversation-lists .bot-list {
+  flex: none;
+  overflow: visible;
+}
+
+.bot-item-sub {
+  overflow: hidden;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.avatar-xs {
+  width: var(--space-6);
+  height: var(--space-6);
+  font-size: var(--text-2xs);
+}
+
+.avatar-stack {
+  display: flex;
+  flex: none;
+  align-items: center;
+}
+
+.avatar-stack > .avatar + .avatar {
+  margin-left: calc(-1 * var(--space-3));
+  box-shadow: 0 0 0 2px var(--bg-sidebar);
+}
+
+.menu-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+}
+
+.new-menu {
+  position: absolute;
+  top: var(--titlebar-h);
+  left: var(--space-5);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: calc(var(--sidebar-w) - var(--space-9));
+  padding: var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: min(var(--composer-max-w), 92vw);
+  max-height: 88vh;
+  padding: var(--space-8);
+  overflow-y: auto;
+  border-radius: var(--radius-xl);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-window);
+}
+
+.dialog-head {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  color: var(--fg-3);
+}
+
+.dialog-head span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.dialog-head b {
+  color: var(--fg-1);
+  font: var(--type-title);
+}
+
+.dialog-head small {
+  color: var(--fg-3);
+  font: var(--type-body);
+}
+
+.dialog-note {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.dialog-actions {
+  display: flex;
+  gap: var(--space-5);
+  justify-content: flex-end;
+}
+
+.dialog-actions .primary-button {
+  height: var(--control-h-md);
+  padding: 0 var(--space-6);
+}
+
+.bot-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+}
+
+.bot-pill {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  height: var(--control-h-md);
+  padding: 0 var(--space-5);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.bot-pill.is-picked {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--fg-1);
+}
+
+.task-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: var(--space-5) var(--space-7) 0;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.task-card-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+.task-number {
+  color: var(--fg-3);
+  font: var(--type-mono);
+}
+
+.task-title {
+  color: var(--fg-1);
+}
+
+.task-meta {
+  color: var(--fg-4);
+  font: var(--type-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 头像和「任务详情」是一组，窄一点的时候一起换行，不会按钮掉下去、头像留在上面。 */
+.task-card-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+}
+
+.task-members {
+  display: flex;
+}
+
+.task-members > .avatar + .avatar {
+  margin-left: calc(-1 * var(--space-2));
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+.task-card .ghost-button {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+  font: var(--type-caption);
+}
+
+.task-checklist,
+.task-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-check {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+.task-check .is-done {
+  color: var(--fg-4);
+  text-decoration: line-through;
+}
+
+.task-empty {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.task-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-7);
+  border-left: 1px solid var(--border-1);
+  background: var(--bg-sidebar);
+  overflow-y: auto;
+}
+
+.task-panel-head {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.task-panel-line {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.task-panel-summary {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.task-panel-list > li {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.task-panel-list > li > span {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+}
+
+.task-panel-list > li > small {
+  flex: none;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.task-panel-list > li[data-done="true"] > span {
+  color: var(--fg-4);
+  text-decoration: line-through;
+}
+
+.chat-sub {
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.bot-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.bot-source {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding-left: var(--space-9);
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.composer-area {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.mention-menu {
+  position: absolute;
+  bottom: 100%;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: min(var(--sidebar-w), 92vw);
+  margin-bottom: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}

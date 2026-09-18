@@ -1,27 +1,60 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, SendHorizontal } from "lucide-react";
-import type { Bot, GroupId, Message } from "@baize/shared";
+import { Plus, SendHorizontal, Users } from "lucide-react";
+import type { Bot, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
 import { MessageView, type ApprovalTable, type BotLookup, type DecideApproval } from "./messages/MessageView.js";
 import { BotAvatar } from "./BotAvatar.js";
+import { TaskCard } from "./TaskCard.js";
+import { memberIdsOf, type Conversation } from "../state/app.js";
 
 type Props = {
-  bot: Bot;
-  groupId: GroupId;
+  conversation: Conversation;
+  bots: Record<BotId, Bot>;
   messages: Message[];
   lookup: BotLookup;
   approvals: ApprovalTable;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
+  onToggleChecklist: (checklist: ChecklistItem[]) => void;
+  onOpenTask: () => void;
 };
 
-export const ChatPanel = ({ bot, groupId, messages, lookup, approvals, onSend, onDecide }: Props) => {
+// 正在打的那个 @。光标永远在末尾，所以只认结尾这一段：@ 之后还没打空格的字。
+const MENTION = /@([^\s@]*)$/;
+
+export const ChatPanel = ({
+  conversation,
+  bots,
+  messages,
+  lookup,
+  approvals,
+  onSend,
+  onDecide,
+  onToggleChecklist,
+  onOpenTask,
+}: Props) => {
   const [draft, setDraft] = useState("");
+  const [pickerOff, setPickerOff] = useState(false);
   const bottom = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
+  const groupId = conversation.groupId;
+  const team = conversation.kind === "team";
+  const members = memberIdsOf(conversation)
+    .map((botId) => bots[botId])
+    .filter((bot): bot is Bot => bot !== undefined);
+  const lead = members[0];
 
   // 盯的是数组本身而不是条数：流式回复只让最后一条变长，条数一直不变，盯条数就跟不住。
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, groupId]);
+
+  const typing = pickerOff ? null : (MENTION.exec(draft)?.[1] ?? null);
+  const candidates = typing === null || !team ? [] : members.filter((bot) => bot.name.includes(typing));
+
+  const mention = (name: string) => {
+    setDraft(draft.replace(MENTION, `@${name} `));
+    input.current?.focus();
+  };
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -35,31 +68,90 @@ export const ChatPanel = ({ bot, groupId, messages, lookup, approvals, onSend, o
   return (
     <section className="chat" data-testid="chat">
       <header className="chat-header">
-        <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
-        <b data-testid="chat-title">{bot.name}</b>
-        {bot.tag ? <em className="tag">{bot.tag}</em> : null}
+        {team ? (
+          <>
+            <Users size={16} aria-hidden="true" />
+            <b data-testid="chat-title">{conversation.task.title}</b>
+            <span className="chat-sub" data-testid="chat-subtitle">
+              主题任务 {conversation.task.number} · 你 + {members.length} 个 Bot
+            </span>
+          </>
+        ) : (
+          <>
+            <BotAvatar name={lead?.name ?? "Bot"} hue={lead?.hue ?? "sky"} size="sm" />
+            <b data-testid="chat-title">{lead?.name ?? "Bot"}</b>
+            {lead?.tag ? <em className="tag">{lead.tag}</em> : null}
+          </>
+        )}
       </header>
+      {conversation.kind === "team" ? (
+        <TaskCard
+          task={conversation.task}
+          memberIds={conversation.botIds}
+          bots={bots}
+          onToggle={onToggleChecklist}
+          onOpenDetail={onOpenTask}
+        />
+      ) : null}
       <div className="thread" data-testid="message-list">
-        {messages.length === 0 ? <p className="empty">建好了，桌面也开好了。今天把什么活交出去？</p> : null}
+        {messages.length === 0 ? (
+          <p className="empty">
+            {team ? "群建好了。@ 一个 Bot 把这件事交出去。" : "建好了，桌面也开好了。今天把什么活交出去？"}
+          </p>
+        ) : null}
         {messages.map((message) => (
-          <MessageView key={message.id} message={message} lookup={lookup} approvals={approvals} onDecide={onDecide} />
+          <MessageView
+            key={message.id}
+            message={message}
+            lookup={lookup}
+            approvals={approvals}
+            onDecide={onDecide}
+            showSource={team}
+          />
         ))}
         <div ref={bottom} />
       </div>
-      <form className="composer" onSubmit={submit}>
-        <span className="icon-button" aria-hidden="true">
-          <Plus size={16} />
-        </span>
-        <input
-          data-testid="composer-input"
-          value={draft}
-          placeholder={`给${bot.name}发消息`}
-          aria-label="发消息"
-          onChange={(e) => setDraft(e.target.value)}
-        />
-        <button type="submit" className="send-button" data-testid="composer-send" aria-label="发送">
-          <SendHorizontal size={16} />
-        </button>
+      <form className="composer-area" onSubmit={submit}>
+        {candidates.length > 0 ? (
+          <div className="mention-menu" data-testid="mention-menu">
+            {candidates.map((bot) => (
+              <button
+                key={bot.id}
+                type="button"
+                className="menu-row"
+                data-testid="mention-option"
+                data-bot-name={bot.name}
+                onClick={() => mention(bot.name)}
+              >
+                <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                {bot.name}
+                {bot.tag ? <span className="menu-trail">{bot.tag}</span> : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <div className="composer">
+          <span className="icon-button" aria-hidden="true">
+            <Plus size={16} />
+          </span>
+          <input
+            ref={input}
+            data-testid="composer-input"
+            value={draft}
+            placeholder={team ? "在群里说话，@ 一个 Bot 派活" : `给${lead?.name ?? "Bot"}发消息`}
+            aria-label="发消息"
+            onChange={(e) => {
+              setPickerOff(false);
+              setDraft(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setPickerOff(true);
+            }}
+          />
+          <button type="submit" className="send-button" data-testid="composer-send" aria-label="发送">
+            <SendHorizontal size={16} />
+          </button>
+        </div>
       </form>
     </section>
   );

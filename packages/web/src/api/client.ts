@@ -3,20 +3,26 @@ import {
   ApiError,
   BotListResponse,
   CreateBotResponse,
+  CreateGroupResponse,
   DecideApprovalResponse,
+  GroupListResponse,
   LoginResponse,
   MeResponse,
   MessageListResponse,
   SendMessageResponse,
   Settings,
   UpdateBotResponse,
+  UpdateTaskResponse,
   type Approval,
   type ApprovalId,
   type Bot,
   type BotHue,
   type BotId,
+  type ChecklistItem,
   type DecideApprovalRequest,
   type GroupId,
+  type TaskId,
+  type TopicTask,
 } from "@baize/shared";
 
 export class RequestFailed extends Error {
@@ -61,6 +67,9 @@ export type BotDraft = {
   notify?: boolean;
 };
 
+// 建群表单交出来的那一份。截止可空，而「没填」和「填了空」在这里是同一件事，所以只有 null 没有 undefined。
+export type GroupDraft = { title: string; botIds: BotId[]; summary: string; dueAt: string | null };
+
 export const api = {
   login: async (email: string, password: string) =>
     json(LoginResponse, await send("POST", "/auth/login", { email, password })),
@@ -72,6 +81,10 @@ export const api = {
   createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
     (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
+  groups: async () => json(GroupListResponse, await send("GET", "/groups")),
+  createGroup: async (draft: GroupDraft) => json(CreateGroupResponse, await send("POST", "/groups", draft)),
+  updateTask: async (id: TaskId, patch: { checklist: ChecklistItem[] }): Promise<TopicTask> =>
+    (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
   messages: async (groupId: GroupId) =>
     json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
   sendMessage: async (groupId: GroupId, text: string) =>

@@ -4,12 +4,14 @@ import { WebSocketServer, type WebSocket } from "ws";
 import {
   Bot,
   CreateBotRequest,
+  CreateGroupRequest,
   DecideApprovalRequest,
   LoginRequest,
   SendMessageRequest,
   Settings,
   UpdateBotRequest,
   UpdateSettingsRequest,
+  UpdateTaskRequest,
   type ServerPush,
 } from "@baize/shared";
 import {
@@ -18,19 +20,26 @@ import {
   appendMessage,
   approvals,
   approvalsIn,
+  assignTask,
   bots,
   createBot,
+  createGroup,
   groupIdByBotId,
   groups,
+  isTeamGroup,
   lastMessageOf,
+  mentionsIn,
   pendingApprovalsOf,
   reseed,
+  responderOf,
   messagesByGroupId,
   settleApproval,
   settleLatestPending,
   settings,
   streamBotReply,
+  tasks,
   user,
+  writeTask,
   type ApprovalDecision,
 } from "./state.js";
 
@@ -110,6 +119,18 @@ const botListItems = () =>
     };
   });
 
+const groupListItems = () =>
+  [...groups.values()].filter(isTeamGroup).map((group) => {
+    const task = tasks.get(group.taskId);
+    if (task === undefined) throw new Error(`群 ${group.id} 没有主题任务，mock 状态坏了`);
+    return {
+      group,
+      task,
+      lastMessage: lastMessageOf(group.id),
+      pendingApprovals: pendingApprovalsOf(group.id),
+    };
+  });
+
 const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
   const url = new URL(req.url ?? "/", "http://localhost");
   const path = url.pathname;
@@ -183,6 +204,30 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
     }
   }
 
+  if (path === "/api/groups") {
+    if (method === "GET") return send(res, 200, { items: groupListItems() });
+    if (method === "POST") {
+      const parsed = CreateGroupRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "建群字段不对" });
+      const created = createGroup(parsed.data);
+      push({ type: "group_created", group: created.group, task: created.task });
+      return send(res, 200, created);
+    }
+  }
+
+  const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(path);
+  if (taskMatch && method === "PATCH") {
+    const [, rawTaskId] = taskMatch;
+    const taskId = rawTaskId === undefined ? "" : decodeURIComponent(rawTaskId);
+    const parsed = UpdateTaskRequest.safeParse(await readBody(req));
+    if (!tasks.has(taskId)) return send(res, 404, { error: "没有这个任务" });
+    if (!parsed.success) return send(res, 400, { error: "任务字段不对" });
+    const next = writeTask(taskId, defined(parsed.data));
+    if (next === null) return send(res, 404, { error: "没有这个任务" });
+    push({ type: "task_updated", task: next });
+    return send(res, 200, { task: next });
+  }
+
   const messagesMatch = /^\/api\/groups\/([^/]+)\/messages$/.exec(path);
   if (messagesMatch) {
     const [, rawGroupId] = messagesMatch;
@@ -202,7 +247,12 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       const parsed = SendMessageRequest.safeParse(await readBody(req));
       if (!parsed.success) return send(res, 400, { error: "消息不能为空" });
       const text = parsed.data.text;
-      const message = appendMessage(groupId, { kind: "user", text });
+      // 「@小销」这几个字是用户打的，谁被 @ 到由服务端认，前端不用也不该自己数一遍。
+      const mentions = mentionsIn(groupId, text);
+      const message = appendMessage(
+        groupId,
+        mentions.length > 0 ? { kind: "user", text, mentions } : { kind: "user", text },
+      );
       const decision = DECISION_WORDS.get(text.trim());
       const settled = decision === undefined ? null : settleLatestPending(groupId, decision);
       // 这句话就是结论，不再另起一次运行：正等着这条审批的那次运行收到结论会自己接着往下走。
@@ -211,8 +261,17 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
         push({ type: "approval_updated", approval: settled });
         return send(res, 200, { message });
       }
+      const responder = responderOf(groupId, mentions);
+      if (responder === null) {
+        // 多 Bot 群里谁都没被 @ 到，也还没人接手。群里补一句，而不是让这句话没人应。
+        const note = appendMessage(groupId, { kind: "system", text: "没人接这句话。@ 一个 Bot 派活。" });
+        push({ type: "message", message: note });
+        return send(res, 200, { message });
+      }
+      const assigned = assignTask(groupId, responder);
+      if (assigned !== null) push({ type: "task_updated", task: assigned });
       // 一次运行要跑上秒级，POST 只回用户那条，Bot 那边的工具卡、流式正文和花费卡全走推送。
-      streamBotReply(groupId, text, push).catch((cause: unknown) => {
+      streamBotReply(groupId, responder, text, push).catch((cause: unknown) => {
         process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
       });
       return send(res, 200, { message });

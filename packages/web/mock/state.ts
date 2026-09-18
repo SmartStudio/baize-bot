@@ -10,8 +10,10 @@ import {
   RunId,
   Settings,
   TaskId,
+  TopicTask,
   User,
   type BotHue,
+  type ChecklistItem,
   type MessageBody,
   type ServerPush,
   type ToolCallStatus,
@@ -104,9 +106,21 @@ const seeds: Seed[] = [
 
 export const bots = new Map<string, Bot>();
 export const groups = new Map<string, Group>();
+export const tasks = new Map<string, TopicTask>();
 export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();
+
+// 单 Bot 群建 Bot 时自动建，多 Bot 群从建群页来。成员数就是这两类的分界，`/api/groups` 只列后者。
+export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
+
+// 编号由系统分配，T 加四位。预置的那个群是 T-2481，原型 08 里建好的下一个是 T-2482，接着往下发。
+const FIRST_TASK_NUMBER = 2481;
+let lastTaskNumber = FIRST_TASK_NUMBER;
+const nextTaskNumber = (): string => {
+  lastTaskNumber += 1;
+  return `T-${lastTaskNumber}`;
+};
 
 // 等结论的那次运行停在这里的 resolve 上。按钮和群里回的一句话唤醒的是同一个。
 const waiters = new Map<string, (decision: ApprovalDecision) => void>();
@@ -117,6 +131,18 @@ const buildMessage = (groupId: string, body: MessageBody, minutes: number): Mess
 // 端到端每条用例开头 reseed。上一条用例还在跑的回复得认出世界已经换了一茬，别往新状态里写。
 let generation = 0;
 
+// 预置的多 Bot 群，对着原型 05：小服和小销在一个主题任务下协作，任务卡钉在群顶部。
+const TEAM_GROUP_ID = "grp_order";
+const TEAM_TASK_ID = "tsk_order";
+const TEAM_BOT_IDS = ["bot_service", "bot_sales"];
+const TEAM_CHECKLIST = [
+  "查 X3 库存与排产，确认 200 台的交付节奏",
+  "出 200 台 X3 的报价单",
+  "跟 Lisa 确认交期和付款方式",
+  "报价发出去之前找陈默点头",
+  "订单录进 ERP，交期同步给客户",
+];
+
 export const reseed = (): void => {
   generation += 1;
   // 上一条用例可能还有一次运行停在等结论上。不给它一个结论那个 Promise 永远不落地，进程里就攒下一堆停住的运行。
@@ -125,9 +151,11 @@ export const reseed = (): void => {
   approvals.clear();
   bots.clear();
   groups.clear();
+  tasks.clear();
   groupIdByBotId.clear();
   messagesByGroupId.clear();
   counter = 0;
+  lastTaskNumber = FIRST_TASK_NUMBER;
   settings.current = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" });
   seeds.forEach((seed, seedIndex) => {
     const botId = `bot_${seed.key}`;
@@ -162,6 +190,36 @@ export const reseed = (): void => {
       seed.bodies.map((body, i) => buildMessage(groupId, body, 10 + seedIndex * 10 + i)),
     );
   });
+
+  groups.set(
+    TEAM_GROUP_ID,
+    Group.parse({
+      id: TEAM_GROUP_ID,
+      ownerId: user.id,
+      botIds: TEAM_BOT_IDS,
+      taskId: TEAM_TASK_ID,
+      createdAt: at(40),
+    }),
+  );
+  tasks.set(
+    TEAM_TASK_ID,
+    TopicTask.parse({
+      id: TEAM_TASK_ID,
+      groupId: TEAM_GROUP_ID,
+      number: `T-${FIRST_TASK_NUMBER}`,
+      title: "Globex X3 × 200 订单",
+      summary: "Lisa 确认要 200 台 X3，交期 10 月 30 日前。报价归小销，供货和沟通归小服。对外发邮件先找我点头。",
+      dueAt: at(60 * 24 * 12),
+      checklist: TEAM_CHECKLIST.map((text) => ({ text, done: false, ownerBotId: null })),
+      currentBotId: null,
+      handled: [],
+      status: "active",
+    }),
+  );
+  // 群里先只有一条系统消息。谁开口都是被 @ 出来的，用例才数得清「只有被 @ 的那个回了」。
+  messagesByGroupId.set(TEAM_GROUP_ID, [
+    buildMessage(TEAM_GROUP_ID, { kind: "system", text: "群建好了。@ 一个 Bot 派活。" }, 40),
+  ]);
 };
 
 export const settings: { current: Settings } = {
@@ -204,6 +262,91 @@ export const createBot = (input: {
   groupIdByBotId.set(bot.id, group.id);
   messagesByGroupId.set(group.id, []);
   return { bot, group };
+};
+
+export const createGroup = (input: {
+  title: string;
+  botIds: BotId[];
+  summary?: string | undefined;
+  dueAt?: string | null | undefined;
+}) => {
+  const suffix = nextSuffix();
+  const groupId = GroupId.parse(`grp_new_${suffix}`);
+  const taskId = TaskId.parse(`tsk_new_${suffix}`);
+  const group = Group.parse({
+    id: groupId,
+    ownerId: user.id,
+    botIds: input.botIds,
+    taskId,
+    createdAt: new Date().toISOString(),
+  });
+  const task = TopicTask.parse({
+    id: taskId,
+    groupId,
+    number: nextTaskNumber(),
+    title: input.title,
+    summary: input.summary ?? "",
+    dueAt: input.dueAt ?? null,
+    // 清单由 Bot 接手后自己列，建群这一刻是空的。原型 08 的预览卡写的就是「0 / 0 · Bot 接手后自己列」。
+    checklist: [],
+    currentBotId: null,
+    handled: [],
+    status: "active",
+  });
+  groups.set(group.id, group);
+  tasks.set(task.id, task);
+  messagesByGroupId.set(group.id, []);
+  return { group, task };
+};
+
+// patch 从 PATCH 的请求体来，键在不在、值对不对都由 TopicTask.parse 说了算，这里不替它先信一遍。
+export const writeTask = (id: string, patch: Partial<Record<keyof TopicTask, unknown>>): TopicTask | null => {
+  const task = tasks.get(id);
+  if (task === undefined) return null;
+  const next = TopicTask.parse({ ...task, ...patch });
+  tasks.set(next.id, next);
+  return next;
+};
+
+// 群消息只送给被 @ 的 Bot 和当前经手 Bot。名单从群成员来，@ 的是别人的 Bot 或群外的 Bot 都不算。
+export const mentionsIn = (groupId: string, text: string): BotId[] => {
+  const group = groups.get(groupId);
+  if (group === undefined) return [];
+  return group.botIds.filter((botId) => {
+    const name = bots.get(botId)?.name;
+    return name !== undefined && text.includes(`@${name}`);
+  });
+};
+
+// 单 Bot 群里那一个永远是收件人。多 Bot 群里开口的是被 @ 的那个，没 @ 谁就落到当前经手身上，谁都没有就没人接活。
+export const responderOf = (groupId: string, mentions: BotId[]): BotId | null => {
+  const group = groups.get(groupId);
+  if (group === undefined) return null;
+  if (group.botIds.length === 1) return group.botIds[0] ?? null;
+  return mentions[0] ?? tasks.get(group.taskId)?.currentBotId ?? null;
+};
+
+// 被 @ 就是接手。上一任的经手记录在这一刻收尾，新的一条从现在开始。
+export const assignTask = (groupId: string, botId: BotId): TopicTask | null => {
+  const taskId = groups.get(groupId)?.taskId;
+  const task = taskId === undefined ? undefined : tasks.get(taskId);
+  if (task === undefined || task.currentBotId === botId) return null;
+  const now = new Date().toISOString();
+  const handed = task.handled.map((record) => (record.to === null ? { ...record, to: now } : record));
+  return writeTask(task.id, { currentBotId: botId, handled: [...handed, { botId, from: now, to: null }] });
+};
+
+// 接手的 Bot 干的第一件事就是把清单勾掉一项。全勾完了就没得勾，返回 null，别推一条什么都没变的 task_updated。
+export const tickFirstUndone = (groupId: string, botId: BotId): TopicTask | null => {
+  const taskId = groups.get(groupId)?.taskId;
+  const task = taskId === undefined ? undefined : tasks.get(taskId);
+  if (task === undefined) return null;
+  const at = task.checklist.findIndex((item) => !item.done);
+  if (at < 0) return null;
+  const checklist: ChecklistItem[] = task.checklist.map((item, i) =>
+    i === at ? { ...item, done: true, ownerBotId: botId } : item,
+  );
+  return writeTask(task.id, { checklist });
 };
 
 export const appendMessage = (groupId: string, body: MessageBody): Message => {
@@ -310,11 +453,10 @@ const waitForDecision = (id: string): Promise<ApprovalDecision> => new Promise((
 
 export const streamBotReply = async (
   groupId: string,
+  botId: BotId,
   prompt: string,
   push: (event: ServerPush) => void,
 ): Promise<void> => {
-  const botId = groups.get(groupId)?.botIds[0];
-  if (botId === undefined) return;
   const run = generation;
   const abandoned = () => generation !== run;
   const needed = approvalFor(prompt);
@@ -360,6 +502,10 @@ export const streamBotReply = async (
     durationMs: TOOL_CALL_MS,
   });
   push({ type: "message", message: settled });
+
+  // 接手的 Bot 干完这一步就把清单勾掉一项，这是它维护任务卡的方式，用户在卡上看到的就是这次运行的结果。
+  const ticked = status === "ok" ? tickFirstUndone(groupId, botId) : null;
+  if (ticked !== null) push({ type: "task_updated", task: ticked });
 
   // 这条回复只靠 delta 长出来，整条的 message 一次都不推，逼着前端走「没见过就先占个位」那条路。
   const draft = appendMessage(groupId, { kind: "bot", botId, text: "", streaming: true });
