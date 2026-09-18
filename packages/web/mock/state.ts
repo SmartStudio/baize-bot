@@ -51,8 +51,20 @@ const seeds: Seed[] = [
     hue: "sky",
     bodies: [
       { kind: "user", text: "Globex 的 Lisa 想把交期从 10 月 30 日提前到 10 月 20 日，能不能做到？先别回她。" },
-      { kind: "bot", botId: BotId.parse("bot_service"), text: "收到。我去查库存和排产，查完给你结论，不回客户。", streaming: false },
-      { kind: "tool_call", botId: BotId.parse("bot_service"), tool: "erp.query", argsSummary: "ERP · X3 库存与排产计划", status: "ok", durationMs: 41_000 },
+      {
+        kind: "bot",
+        botId: BotId.parse("bot_service"),
+        text: "收到。我去查库存和排产，查完给你结论，不回客户。",
+        streaming: false,
+      },
+      {
+        kind: "tool_call",
+        botId: BotId.parse("bot_service"),
+        tool: "erp.query",
+        argsSummary: "ERP · X3 库存与排产计划",
+        status: "ok",
+        durationMs: 41_000,
+      },
       {
         kind: "bot",
         botId: BotId.parse("bot_service"),
@@ -197,5 +209,4 @@ export const botReplyFor = (botId: string, text: string): MessageBody[] => [
   { kind: "cost", runId: RunId.parse(`run_${nextSuffix()}`), steps: 4, amount: 0.8 },
 ];
 
-export const lastMessageOf = (groupId: string): Message | null =>
-  (messagesByGroupId.get(groupId) ?? []).at(-1) ?? null;
+export const lastMessageOf = (groupId: string): Message | null => (messagesByGroupId.get(groupId) ?? []).at(-1) ?? null;

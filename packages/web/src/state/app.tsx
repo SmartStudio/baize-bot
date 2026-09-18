@@ -1,14 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, type ReactNode } from "react";
-import {
-  ServerPush,
-  type Bot,
-  type BotId,
-  type GroupId,
-  type Message,
-  type Settings,
-  type User,
-} from "@baize/shared";
-import type { BotListItem } from "../api/types.js";
+import { ServerPush, type Bot, type BotId, type GroupId, type Message, type Settings, type User } from "@baize/shared";
+import type { BotListItem } from "@baize/shared";
 import { RequestFailed, api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 
@@ -90,7 +82,8 @@ const reduce = (state: AppState, action: Action): AppState => {
       return {
         ...state,
         // messages 里有没有这个键就是「这组历史拉过没有」，所以没拉过的组只更侧栏摘要，不能凭一条推送造出一份假历史。
-        messages: known === undefined ? state.messages : { ...state.messages, [groupId]: withMessage(known, action.message) },
+        messages:
+          known === undefined ? state.messages : { ...state.messages, [groupId]: withMessage(known, action.message) },
         bots: state.bots.map((item) => (item.groupId === groupId ? { ...item, lastMessage: action.message } : item)),
       };
     }
@@ -184,7 +177,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     let live = true;
     api
       .me()
-      .then(({ user }) => Promise.all([api.bots(), api.settings()]).then(([bots, settings]) => ({ user, bots, settings })))
+      .then(({ user }) =>
+        Promise.all([api.bots(), api.settings()]).then(([bots, settings]) => ({ user, bots, settings })),
+      )
       .then(({ user, bots, settings }) => {
         if (live) dispatch({ type: "ready", user, bots: bots.items, settings });
       })

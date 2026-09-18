@@ -121,7 +121,13 @@ export const SettingsWindow = ({ user, settings, onChange, onLogout, onClose }: 
         <section className="settings-page">
           <header className="settings-page-head">
             <h2>{current.title}</h2>
-            <button type="button" className="icon-button" data-testid="settings-close" aria-label="关闭设置" onClick={onClose}>
+            <button
+              type="button"
+              className="icon-button"
+              data-testid="settings-close"
+              aria-label="关闭设置"
+              onClick={onClose}
+            >
               <X size={16} />
             </button>
           </header>

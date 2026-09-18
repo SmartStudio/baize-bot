@@ -7,3 +7,5 @@ dist/
 .DS_Store
 packages/*/node_modules/
 spikes/*/node_modules/
+test-results/
+playwright-report/

@@ -281,7 +281,11 @@ describe("Pi SDK 嵌入验证 · 上游重试", () => {
       if (event.type === "agent_end") agentEndCount += 1;
       if (event.type === "agent_settled") settledCount += 1;
     });
-    const run = recordRun(bot.session, { runId: "run-r", botId: "bot-retry", groupId: "group-r", messageId: "msg-r" }, approvals.blockedCallIds);
+    const run = recordRun(
+      bot.session,
+      { runId: "run-r", botId: "bot-retry", groupId: "group-r", messageId: "msg-r" },
+      approvals.blockedCallIds,
+    );
     await bot.session.prompt("说句话");
     run.unsubscribe();
     unsubscribeProbe();

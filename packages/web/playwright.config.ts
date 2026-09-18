@@ -26,7 +26,12 @@ export default defineConfig({
   },
   // 优先用 playwright install 下下来的 chromium。没下成就退到机器上装着的 Chrome，引擎一样，
   // 免得一条端到端都跑不了。
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], ...(bundledChromium ? {} : { channel: "chrome" as const }) } }],
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"], ...(bundledChromium ? {} : { channel: "chrome" as const }) },
+    },
+  ],
   webServer: [
     {
       command: "pnpm mock",

@@ -4,3 +4,4 @@ pnpm-lock.yaml
 bot-application-prototype
 research
 *.md
+packages/web/src/ds/tokens/

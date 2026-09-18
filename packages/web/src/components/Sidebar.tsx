@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Plus, Search, Settings as SettingsIcon } from "lucide-react";
 import type { BotId, User } from "@baize/shared";
-import type { BotListItem } from "../api/types.js";
+import type { BotListItem } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { previewOf, timeOf } from "./messages/preview.js";
 

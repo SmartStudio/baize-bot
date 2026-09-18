@@ -21,6 +21,7 @@ export const BotListItem = z.object({
   lastMessage: Message.nullable(),
   pendingApprovals: z.number().int().nonnegative(),
 });
+export type BotListItem = z.infer<typeof BotListItem>;
 export const BotListResponse = z.object({ items: z.array(BotListItem) });
 
 // POST /api/bots  建 Bot 时同步建它的单 Bot 群。全部字段可省，省了系统起名。
@@ -62,6 +63,7 @@ export type Settings = z.infer<typeof Settings>;
 export const UpdateSettingsRequest = Settings.partial();
 
 // WebSocket /api/ws  登录后客户端连上，服务端推送。客户端不发报文。
+// message_delta 是流式回复的契约，M2 的 Web 和控制面都还没实现，先整条 message 推。
 export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: Message }),
   z.object({
