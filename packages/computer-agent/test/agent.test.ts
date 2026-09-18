@@ -1,9 +1,42 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, ComputerId } from "@baize/shared";
-import { startAgent, type AgentHandle } from "../src/agent.js";
+import { AgentToControl, type BotId, ComputerId, MessageId, type RunId } from "@baize/shared";
+import { startAgent, type AgentHandle, type RunnerFactory } from "../src/agent.js";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
+
+// 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
+interface RunnerCalls {
+  readonly approvals: Array<{ runId: RunId; callId: string; approved: boolean }>;
+  readonly paused: BotId[];
+  readonly resumed: BotId[];
+}
+
+function fakeRunner(calls: RunnerCalls): RunnerFactory {
+  return (config) => ({
+    async prompt(message) {
+      config.send({
+        type: "bot_text",
+        runId: message.runId,
+        botId: message.botId,
+        groupId: message.groupId,
+        messageId: MessageId.parse(`msg-${message.runId}`),
+        delta: "假运行器的回复。",
+        done: true,
+      });
+    },
+    approve: (runId, callId, approved) => {
+      calls.approvals.push({ runId, callId, approved });
+    },
+    pause: async (botId) => {
+      calls.paused.push(botId);
+    },
+    resume: async (botId) => {
+      calls.resumed.push(botId);
+    },
+    stop: async () => {},
+  });
+}
 
 const configMessage = {
   type: "config",
@@ -90,14 +123,25 @@ type ControlPlane = ReturnType<typeof startControlPlane>;
 
 const agents: AgentHandle[] = [];
 const servers: ControlPlane[] = [];
+const runnerCallsLog: RunnerCalls[] = [];
+
+/** 最近一个 spawnAgent 建出来的代理记下的运行器调用。 */
+const runnerCalls = (): RunnerCalls => {
+  const last = runnerCallsLog.at(-1);
+  if (last === undefined) throw new Error("还没有 spawnAgent 过");
+  return last;
+};
 
 function spawnAgent(url: string, tuning: { heartbeatMs?: number; backoff?: BackoffOptions } = {}): AgentHandle {
+  const calls: RunnerCalls = { approvals: [], paused: [], resumed: [] };
+  runnerCallsLog.push(calls);
   const handle = startAgent({
     url,
     computerId: ComputerId.parse("computer-1"),
     token: "dev-token",
     version: "0.1.0",
     log: () => {},
+    makeRunner: fakeRunner(calls),
     ...tuning,
   });
   agents.push(handle);
@@ -114,6 +158,7 @@ async function startPair(tuning: { heartbeatMs?: number; backoff?: BackoffOption
 afterEach(async () => {
   await Promise.all(agents.splice(0).map((agent) => agent.stop()));
   await Promise.all(servers.splice(0).map((server) => server.close()));
+  runnerCallsLog.splice(0);
 });
 
 describe("电脑代理连控制面", () => {
@@ -174,6 +219,45 @@ describe("电脑代理连控制面", () => {
 
     const reply = await server.waitForMessage("bot_text", 1, 3000);
     expect(reply.done).toBe(true);
+  });
+
+  it("approval_result 报文到达后调用运行器的 approve", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", approved: false }));
+    socket.send(JSON.stringify(promptMessage));
+
+    // 报文有序，等到 prompt 的回复就说明前面那条也处理完了。
+    await server.waitForMessage("bot_text", 1, 3000);
+    expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: false }]);
+  });
+
+  it("config 之前到的 approval_result 被丢弃，不会在建好运行器后补发", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify({ type: "approval_result", runId: "run-早了", callId: "call-1", approved: true }));
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify(promptMessage));
+
+    await server.waitForMessage("bot_text", 1, 3000);
+    expect(runnerCalls().approvals).toEqual([]);
+  });
+
+  it("pause 和 resume 报文到达后按顺序调用运行器的 pause 和 resume", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify({ type: "pause", botId: "bot-1" }));
+    socket.send(JSON.stringify({ type: "resume", botId: "bot-1" }));
+    socket.send(JSON.stringify(promptMessage));
+
+    await server.waitForMessage("bot_text", 1, 3000);
+    expect(runnerCalls().paused).toEqual(["bot-1"]);
+    expect(runnerCalls().resumed).toEqual(["bot-1"]);
   });
 
   it("连接断开后按默认退避重连，5 秒内重新 hello", async () => {
