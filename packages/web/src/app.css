@@ -1,0 +1,912 @@
+/* 只用 src/ds/tokens 里的变量。任何裸色值、裸圆角、裸间距都算违规。 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+.splash {
+  height: 100%;
+  background: var(--bg-app);
+}
+
+/* ---------- 01 登录 ---------- */
+
+.login {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-8);
+  height: 100%;
+  padding: var(--space-8);
+  background: var(--bg-app);
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  justify-content: center;
+  width: 100%;
+  max-width: var(--panel-w);
+  margin: 0 auto;
+}
+
+.login-form form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.wordmark {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  font: var(--type-heading);
+}
+
+.wordmark-badge {
+  display: grid;
+  width: var(--space-8);
+  height: var(--space-8);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: var(--type-ui);
+  place-items: center;
+}
+
+.login h1 {
+  margin: 0;
+  font: var(--type-title);
+}
+
+.lede,
+.fine,
+.workspace-line {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.or {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.login-aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  justify-content: center;
+  padding: var(--space-10);
+  border-radius: var(--radius-xl);
+  background: var(--accent-soft);
+}
+
+.login-aside h2 {
+  margin: 0;
+  font: var(--type-title);
+  color: var(--fg-1);
+}
+
+.login-aside p {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.error {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font: var(--type-ui);
+}
+
+/* ---------- 控件 ---------- */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field > span {
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.field > small {
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.field input,
+.field textarea,
+.search input,
+select {
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-body);
+}
+
+.field textarea {
+  resize: vertical;
+}
+
+select {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-full);
+  font: var(--type-ui);
+}
+
+.primary-button {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: center;
+  height: var(--control-h-lg);
+  border-radius: var(--radius-full);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  font: var(--type-ui);
+}
+
+.primary-button:hover {
+  background: var(--btn-primary-hover);
+}
+
+.primary-button:disabled {
+  opacity: 0.4;
+}
+
+.ghost-button {
+  display: inline-flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: center;
+  height: var(--control-h-md);
+  padding: 0 var(--space-6);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.ghost-button.wide {
+  height: var(--control-h-lg);
+  width: 100%;
+}
+
+.ghost-button:disabled {
+  opacity: 0.4;
+}
+
+.link-button {
+  color: var(--link);
+  font: var(--type-caption);
+}
+
+.icon-button {
+  display: grid;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  place-items: center;
+}
+
+.icon-button:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.switch {
+  position: relative;
+  flex: none;
+  width: var(--space-10);
+  height: var(--space-8);
+  border-radius: var(--radius-full);
+  background: var(--border-3);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.switch::after {
+  position: absolute;
+  top: var(--space-1);
+  left: var(--space-1);
+  width: var(--space-7);
+  height: var(--space-7);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  content: "";
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.switch.is-on {
+  background: var(--fg-1);
+}
+
+.switch.is-on::after {
+  transform: translateX(var(--space-6));
+}
+
+.tag {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--bg-selected);
+  color: var(--fg-3);
+  font: var(--type-caption);
+  font-style: normal;
+}
+
+/* ---------- 02 三栏主窗口 ---------- */
+
+.window {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--panel-w);
+  height: 100%;
+  background: var(--bg-app);
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--border-1);
+  background: var(--bg-sidebar);
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--titlebar-h);
+  padding: 0 var(--space-5);
+}
+
+.lights {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.lights i {
+  width: var(--space-5);
+  height: var(--space-5);
+  border-radius: var(--radius-full);
+  background: var(--border-3);
+}
+
+.search {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0 var(--space-5) var(--space-5);
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  box-shadow: var(--inset-hairline);
+  color: var(--fg-4);
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-4) 0;
+  border: 0;
+  background: none;
+  font: var(--type-ui);
+}
+
+.list-label {
+  margin: 0 var(--space-6) var(--space-3);
+  color: var(--fg-4);
+  font: var(--type-label);
+}
+
+.bot-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 var(--space-4);
+  overflow-y: auto;
+  list-style: none;
+}
+
+.bot-item {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  width: 100%;
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.bot-item:hover {
+  background: var(--bg-hover);
+}
+
+.bot-item.is-selected {
+  background: var(--bg-selected);
+}
+
+.bot-item-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.bot-item-top {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.bot-item-top .time {
+  margin-left: auto;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.bot-item-preview {
+  overflow: hidden;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-footer {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border-1);
+}
+
+.account-button {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-4);
+  border-radius: var(--radius-md);
+  color: var(--fg-3);
+}
+
+.account-button:hover {
+  background: var(--bg-hover);
+}
+
+.account-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  text-align: left;
+}
+
+.account-body b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.account-body small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+/* ---------- 头像 ---------- */
+
+.avatar {
+  display: grid;
+  flex: none;
+  /* 头像有 sm/md/lg 三档，圆角得跟着尺寸走，tokens 里的 --radius-* 都是固定 px，表达不了这个比例。 */
+  border-radius: 32%;
+  color: var(--fg-inverse);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  place-items: center;
+}
+
+.avatar-sm {
+  width: var(--space-8);
+  height: var(--space-8);
+  font-size: var(--text-xs);
+}
+
+.avatar-md {
+  width: var(--space-9);
+  height: var(--space-9);
+  font-size: var(--text-sm);
+}
+
+.avatar-lg {
+  width: var(--space-12);
+  height: var(--space-12);
+  font-size: var(--text-3xl);
+}
+
+.avatar-user {
+  background: var(--bg-selected);
+  color: var(--fg-2);
+}
+
+/* ---------- 2a 对话区 ---------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+.chat-header {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  height: var(--titlebar-h);
+  padding: 0 var(--space-7);
+  border-bottom: 1px solid var(--border-1);
+  font: var(--type-ui);
+}
+
+.thread {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 0;
+  padding: var(--space-7);
+  overflow-y: auto;
+}
+
+/* 让消息像 messenger 一样贴底，条数少时不吊在顶上。 */
+.thread::before {
+  margin-top: auto;
+  content: "";
+}
+
+.empty {
+  margin: auto;
+  color: var(--fg-3);
+  font: var(--type-body);
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+}
+
+.bubble {
+  max-width: 72%;
+  margin: 0;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  font: var(--type-body);
+  white-space: pre-wrap;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+}
+
+.bot-line {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-end;
+}
+
+.bubble-bot {
+  background: var(--bg-bubble);
+  color: var(--fg-1);
+}
+
+.system-note {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.card {
+  max-width: 72%;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.card-tool {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+.tool-name {
+  color: var(--fg-1);
+}
+
+.tool-args {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--code-inline-bg);
+  color: var(--code-inline-fg);
+  font: var(--type-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-meta {
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.status-dot {
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--fg-4);
+}
+
+.status-ok {
+  background: var(--success);
+}
+
+.status-running {
+  background: var(--accent);
+}
+
+.status-failed {
+  background: var(--danger);
+}
+
+.status-blocked {
+  background: var(--pending);
+}
+
+.card-cost {
+  padding: var(--space-5) var(--space-6);
+}
+
+.card-title {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.metrics {
+  display: flex;
+  gap: var(--space-9);
+  margin-top: var(--space-4);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+}
+
+.metric b {
+  font: var(--type-metric);
+}
+
+.metric small {
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.card-later {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-5) var(--space-6);
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+.composer {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  width: 100%;
+  max-width: var(--composer-max-w);
+  margin: 0 auto var(--space-7);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  font: var(--type-body);
+}
+
+.composer input:focus {
+  outline: none;
+}
+
+.send-button {
+  display: grid;
+  width: var(--control-h-md);
+  height: var(--control-h-md);
+  border-radius: var(--radius-full);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  place-items: center;
+}
+
+/* ---------- 2a/2b 右侧 Bot 设置栏 ---------- */
+
+.bot-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-height: 0;
+  padding: var(--space-7);
+  border-left: 1px solid var(--border-1);
+  background: var(--bg-sidebar);
+  overflow-y: auto;
+}
+
+.bot-panel-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  align-items: center;
+}
+
+.hue-row {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.hue-swatch {
+  width: var(--space-7);
+  height: var(--space-7);
+  border-radius: var(--radius-full);
+}
+
+.hue-swatch.is-selected {
+  box-shadow: var(--ring-focus);
+}
+
+.row-card {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.row-card > span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.row-card b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.row-card small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.row-card.is-later {
+  color: var(--fg-4);
+}
+
+.dnd {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--fg-3);
+}
+
+.dnd input {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  font: var(--type-ui);
+}
+
+/* ---------- 07 账户菜单与设置窗 ---------- */
+
+.account-menu {
+  position: absolute;
+  bottom: var(--space-12);
+  left: var(--space-5);
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: var(--sidebar-w);
+  padding: var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.account-menu-head {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  padding: var(--space-5);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.account-menu-head span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.account-menu-head b {
+  font: var(--type-ui);
+}
+
+.account-menu-head small {
+  overflow: hidden;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  text-overflow: ellipsis;
+}
+
+.account-menu hr {
+  width: 100%;
+  margin: var(--space-2) 0;
+  border: 0;
+  border-top: 1px solid var(--border-1);
+}
+
+.menu-row {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-sm);
+  color: var(--fg-1);
+  font: var(--type-ui);
+  text-align: left;
+}
+
+.menu-row:hover {
+  background: var(--bg-hover);
+}
+
+.menu-row.is-selected {
+  background: var(--bg-selected);
+}
+
+.menu-trail {
+  margin-left: auto;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  background: var(--overlay);
+  place-items: center;
+}
+
+.settings {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  width: min(var(--content-max-w), 92vw);
+  height: 88vh;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-window);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-7) var(--space-5);
+  border-right: 1px solid var(--border-1);
+  background: var(--bg-inset);
+}
+
+.settings-nav > b {
+  padding: 0 var(--space-5) var(--space-5);
+  font: var(--type-heading);
+}
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-8);
+  overflow-y: auto;
+}
+
+.settings-page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.settings-page-head h2 {
+  margin: 0;
+  font: var(--type-title);
+}
+
+.group-label {
+  margin: var(--space-6) 0 var(--space-2);
+  color: var(--fg-4);
+  font: var(--type-label);
+}
+
+.later {
+  margin: auto;
+  color: var(--fg-4);
+  font: var(--type-body);
+}
