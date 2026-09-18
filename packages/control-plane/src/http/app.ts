@@ -192,7 +192,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
     const approvalIds = result.page.messages.flatMap((m) => (m.body.kind === "approval" ? [m.body.approvalId] : []));
     const approvals = await listApprovals(db, approvalIds);
-    return c.json(MessageListResponse.parse({ ...result.page, approvals }));
+    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs: [] }));
   });
 
   app.post("/api/groups/:id/messages", async (c) => {

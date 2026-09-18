@@ -22,6 +22,7 @@ export type BotListEntry = {
   readonly groupId: string;
   readonly lastMessage: Message | null;
   readonly pendingApprovals: number;
+  readonly pendingHandoffs: number;
 };
 
 export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput): Promise<{ bot: Bot; group: Group }> {
@@ -92,6 +93,7 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
     groupId: row.groupId,
     lastMessage: lastMessages.get(row.groupId) ?? null,
     pendingApprovals: pending.get(row.groupId) ?? 0,
+    pendingHandoffs: 0,
   }));
 }
 

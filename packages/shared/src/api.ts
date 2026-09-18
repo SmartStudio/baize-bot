@@ -7,6 +7,7 @@ import {
   ChecklistItem,
   Group,
   GroupId,
+  Handoff,
   Message,
   MessageId,
   TaskStatus,
@@ -35,6 +36,7 @@ export const BotListItem = z.object({
   groupId: GroupId,
   lastMessage: Message.nullable(),
   pendingApprovals: z.number().int().nonnegative(),
+  pendingHandoffs: z.number().int().nonnegative(),
 });
 export type BotListItem = z.infer<typeof BotListItem>;
 export const BotListResponse = z.object({ items: z.array(BotListItem) });
@@ -69,6 +71,7 @@ export const GroupListItem = z.object({
   task: TopicTask,
   lastMessage: Message.nullable(),
   pendingApprovals: z.number().int().nonnegative(),
+  pendingHandoffs: z.number().int().nonnegative(),
 });
 export type GroupListItem = z.infer<typeof GroupListItem>;
 export const GroupListResponse = z.object({ items: z.array(GroupListItem) });
@@ -89,12 +92,13 @@ export const UpdateTaskRequest = z
 export const UpdateTaskResponse = z.object({ task: TopicTask });
 
 // GET /api/groups/:id/messages?before=<messageId>&limit=50  按时间正序返回。
-// approval 类消息的正文只有 approvalId，状态在 Approval 上，所以这一页引用到的审批跟着一起回，
+// approval 和 handoff 类消息的正文只有一个 id，状态在 Approval 或 Handoff 上，所以这一页引用到的都跟着一起回，
 // 客户端不用为了画一张卡再发一次请求。
 export const MessageListResponse = z.object({
   messages: z.array(Message),
   hasMore: z.boolean(),
   approvals: z.array(Approval),
+  handoffs: z.array(Handoff),
 });
 
 // POST /api/groups/:id/messages  正文里的「@Bot 名」由服务端解析成 mentions，多 Bot 群按它路由。
@@ -140,5 +144,7 @@ export const ServerPush = z.discriminatedUnion("type", [
   // 审批新建和有了结论都推这一条。approval 消息的正文只有 approvalId，重推那条 message 一个字都不会变，
   // 结论只能随 Approval 走。新建时先推 approval_updated 再推那条 message。
   z.object({ type: z.literal("approval_updated"), approval: Approval }),
+  // 交接同理：新建和确认都推这一条，先推它再推那条 handoff 消息。
+  z.object({ type: z.literal("handoff_updated"), handoff: Handoff }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

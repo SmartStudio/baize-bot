@@ -131,7 +131,7 @@ describe("读消息", () => {
   it("新群是空的", async () => {
     const { client, groupId } = await clientWithGroup();
     const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
-    expect(page).toEqual({ messages: [], hasMore: false, approvals: [] });
+    expect(page).toEqual({ messages: [], hasMore: false, approvals: [], handoffs: [] });
   });
 });
 

@@ -4,6 +4,7 @@ import {
   ChecklistItem,
   ComputerId,
   GroupId,
+  HandoffId,
   MessageId,
   RunId,
   SiteLogin,
@@ -85,6 +86,26 @@ export const AgentToControl = z.discriminatedUnion("type", [
     targetBotId: BotId,
     text: z.string().min(1).max(2000),
   }),
+  // 当前经手把活交给同群另一个 Bot。控制面落一条交接报文，给目标派一条带 handoffId 的 prompt。
+  z.object({
+    type: z.literal("handoff"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    toBotId: BotId,
+    done: z.string().max(2000),
+    notDone: z.string().max(2000),
+    next: z.string().max(2000),
+    checklistIndex: z.number().int().nonnegative().nullable(),
+  }),
+  // 目标 Bot 确认接手。确认之后它才是当前经手，Bot 之间的确认不等于用户的审批。
+  z.object({
+    type: z.literal("handoff_accept"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    handoffId: HandoffId,
+  }),
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
 
@@ -107,6 +128,8 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁。单 Bot 群 task 为 null，members 只有它自己。
     task: TopicTask.nullable(),
     members: z.array(z.object({ id: BotId, name: z.string() })),
+    // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
+    handoffId: HandoffId.optional(),
   }),
   z.object({
     type: z.literal("approval_result"),

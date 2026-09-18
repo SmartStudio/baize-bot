@@ -151,6 +151,9 @@ export const Handoff = z.object({
   next: z.string(),
   checklistIndex: z.number().int().nonnegative().nullable(),
   status: HandoffStatus,
+  createdAt: Timestamp,
+  // 超时提醒按 createdAt 算，接手时刻单独记：经手记录里那一条的 from 就是它。
+  acceptedAt: Timestamp.nullable(),
 });
 export type Handoff = z.infer<typeof Handoff>;
 

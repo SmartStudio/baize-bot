@@ -116,6 +116,7 @@ const botListItems = () =>
       groupId,
       lastMessage: lastMessageOf(groupId),
       pendingApprovals: pendingApprovalsOf(groupId),
+      pendingHandoffs: 0,
     };
   });
 
@@ -128,6 +129,7 @@ const groupListItems = () =>
       task,
       lastMessage: lastMessageOf(group.id),
       pendingApprovals: pendingApprovalsOf(group.id),
+      pendingHandoffs: 0,
     };
   });
 
@@ -241,7 +243,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       const limit = Number(url.searchParams.get("limit") ?? 50);
       const start = Math.max(0, (end < 0 ? all.length : end) - limit);
       const page = all.slice(start, end < 0 ? all.length : end);
-      return send(res, 200, { messages: page, hasMore: start > 0, approvals: approvalsIn(page) });
+      return send(res, 200, { messages: page, hasMore: start > 0, approvals: approvalsIn(page), handoffs: [] });
     }
     if (method === "POST") {
       const parsed = SendMessageRequest.safeParse(await readBody(req));

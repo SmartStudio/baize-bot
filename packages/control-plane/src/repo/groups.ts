@@ -71,6 +71,7 @@ export type GroupListEntry = {
   readonly task: TopicTask;
   readonly lastMessage: Message | null;
   readonly pendingApprovals: number;
+  readonly pendingHandoffs: number;
 };
 
 export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntry[]> {
@@ -111,6 +112,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
     task: toTask(row.task),
     lastMessage: lastMessages.get(row.group.id) ?? null,
     pendingApprovals: pending.get(row.group.id) ?? 0,
+    pendingHandoffs: 0,
   }));
 }
 
