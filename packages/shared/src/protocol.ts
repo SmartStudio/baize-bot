@@ -25,6 +25,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     callId: z.string(),
     tool: z.string(),
     argsSummary: z.string(),
+    // blocked 由运行器的审批拦截器按 callId 判定。Pi 的工具结果里被拦下和自身报错都是 isError，推断不出来。
     status: z.enum(["running", "ok", "failed", "blocked"]),
     durationMs: z.number().nullable(),
   }),
@@ -33,6 +34,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
+    // steps 是这次运行里模型回合数（Pi 的 turn_end 次数），不是工具调用次数。
     steps: z.number().int(),
     inputTokens: z.number().int(),
     outputTokens: z.number().int(),
@@ -43,6 +45,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     botId: BotId,
     groupId: GroupId,
     callId: z.string(),
+    tool: z.string(),
     kind: z.enum(["send_external", "change_production_data", "pay"]),
     summary: z.string(),
   }),
