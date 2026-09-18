@@ -1,10 +1,11 @@
 import type { Db } from "../../src/db/client.js";
-import { startServer, type RunningServer } from "../../src/server.js";
+import type { RuntimeConfig } from "../../src/env.js";
+import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../../src/server.js";
 
 export type TestServer = { readonly server: RunningServer; client(): ApiClient; close(): Promise<void> };
 
-export async function startTestServer(db: Db): Promise<TestServer> {
-  const server = await startServer({ db, port: 0 });
+export async function startTestServer(db: Db, config: Partial<RuntimeConfig> = {}): Promise<TestServer> {
+  const server = await startServer({ db, port: 0, config: { ...DEFAULT_RUNTIME_CONFIG, ...config } });
   return {
     server,
     client: () => new ApiClient(server.port),

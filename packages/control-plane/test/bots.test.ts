@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { groupMembers, tasks } from "../src/db/schema.js";
 import { HUE_ROTATION } from "../src/naming.js";
+import { appendMessage } from "../src/repo/messages.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeUser } from "./helpers/fixtures.js";
@@ -106,8 +107,9 @@ describe("Bot 列表", () => {
   it("只列自己的 Bot，带上它的单 Bot 群和最近一条消息", async () => {
     const mine = await loggedInClient();
     const created = CreateBotResponse.parse(await (await mine.post("/api/bots", { name: "小采" })).json());
-    await mine.post(`/api/groups/${created.group.id}/messages`, { text: "先比个价" });
-    await mine.post(`/api/groups/${created.group.id}/messages`, { text: "再看交期" });
+    // 直接写库排状态。走 POST 的话电脑不在线那条系统消息会变成最近一条。
+    await appendMessage(database.db, created.group.id, { kind: "user", text: "先比个价" });
+    await appendMessage(database.db, created.group.id, { kind: "user", text: "再看交期" });
 
     const other = await loggedInClient();
     await other.post("/api/bots", { name: "别人的" });

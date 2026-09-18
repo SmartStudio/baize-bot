@@ -11,6 +11,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     type: z.literal("agent_error"),
     code: z.enum(["bad_message", "prompt_before_config", "unsupported", "runner_failed"]),
     detail: z.string(),
+    // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
+    groupId: GroupId.optional(),
   }),
   z.object({ type: z.literal("sites"), sites: z.array(SiteLogin) }),
   z.object({
