@@ -1,4 +1,6 @@
 import {
+  Approval,
+  ApprovalId,
   Bot,
   BotId,
   Group,
@@ -12,7 +14,10 @@ import {
   type BotHue,
   type MessageBody,
   type ServerPush,
+  type ToolCallStatus,
 } from "@baize/shared";
+
+export type ApprovalDecision = "approved" | "rejected";
 
 export const MOCK_EMAIL = "chen@baize.dev";
 export const MOCK_PASSWORD = "baize-dev";
@@ -101,6 +106,10 @@ export const bots = new Map<string, Bot>();
 export const groups = new Map<string, Group>();
 export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
+export const approvals = new Map<string, Approval>();
+
+// 等结论的那次运行停在这里的 resolve 上。按钮和群里回的一句话唤醒的是同一个。
+const waiters = new Map<string, (decision: ApprovalDecision) => void>();
 
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
   Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes) });
@@ -110,6 +119,10 @@ let generation = 0;
 
 export const reseed = (): void => {
   generation += 1;
+  // 上一条用例可能还有一次运行停在等结论上。不给它一个结论那个 Promise 永远不落地，进程里就攒下一堆停住的运行。
+  for (const wake of waiters.values()) wake("rejected");
+  waiters.clear();
+  approvals.clear();
   bots.clear();
   groups.clear();
   groupIdByBotId.clear();
@@ -216,6 +229,60 @@ const rewriteMessage = (groupId: string, id: MessageId, body: MessageBody): Mess
   return next;
 };
 
+export const createApproval = (input: {
+  groupId: string;
+  botId: BotId;
+  kind: Approval["kind"];
+  summary: string;
+}): Approval => {
+  const approval = Approval.parse({
+    id: ApprovalId.parse(`apr_${nextSuffix()}`),
+    groupId: GroupId.parse(input.groupId),
+    botId: input.botId,
+    runId: RunId.parse(`run_${nextSuffix()}`),
+    kind: input.kind,
+    summary: input.summary,
+    status: "pending",
+    decidedAt: null,
+  });
+  approvals.set(approval.id, approval);
+  return approval;
+};
+
+// 查状态和写结论是同一步，中间没有让别人插进来的缝。按钮和群里回的那句话会同时到，两边都先看到 pending
+// 再各写一次的话，后写的那个会把结论翻过来，而等结论的运行早就按先到的那个跑完了。
+// null 表示这条没得决定：查不到，或者已经有结论了。
+export const settleApproval = (id: string, decision: ApprovalDecision): Approval | null => {
+  const approval = approvals.get(id);
+  if (approval === undefined || approval.status !== "pending") return null;
+  const next = Approval.parse({ ...approval, status: decision, decidedAt: new Date().toISOString() });
+  approvals.set(next.id, next);
+  waiters.get(next.id)?.(decision);
+  waiters.delete(next.id);
+  return next;
+};
+
+const pendingIn = (groupId: string): Approval[] =>
+  [...approvals.values()].filter((a) => a.groupId === groupId && a.status === "pending");
+
+export const pendingApprovalsOf = (groupId: string): number => pendingIn(groupId).length;
+
+export const settleLatestPending = (groupId: string, decision: ApprovalDecision): Approval | null => {
+  const waiting = pendingIn(groupId).at(-1);
+  return waiting === undefined ? null : settleApproval(waiting.id, decision);
+};
+
+// approval 消息的正文只有 approvalId，状态在 Approval 上。这一页引用到的跟着这一页回，客户端不用再问一次。
+export const approvalsIn = (messages: Message[]): Approval[] => {
+  const found: Approval[] = [];
+  for (const message of messages) {
+    if (message.body.kind !== "approval") continue;
+    const approval = approvals.get(message.body.approvalId);
+    if (approval) found.push(approval);
+  }
+  return found;
+};
+
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 const chunked = (text: string, count: number): string[] => {
@@ -232,6 +299,15 @@ const TOOL_CALL_MS = 1000;
 const DELTA_MS = 80;
 const DELTA_COUNT = 4;
 
+// 这次运行用的工具要不要点头，写死在 prompt 上：出现「发」「付」或「退款」就要。镜像 bot-runner/README.md 的
+// 工具名前缀规则（send_ 映射 send_external、pay_ 映射 pay），含「发」当对外发送，其余当付钱。
+const approvalFor = (prompt: string): { tool: string; kind: Approval["kind"] } | null => {
+  if (!/[发付]|退款/.test(prompt)) return null;
+  return prompt.includes("发") ? { tool: "send_email", kind: "send_external" } : { tool: "pay_refund", kind: "pay" };
+};
+
+const waitForDecision = (id: string): Promise<ApprovalDecision> => new Promise((resolve) => waiters.set(id, resolve));
+
 export const streamBotReply = async (
   groupId: string,
   prompt: string,
@@ -241,6 +317,8 @@ export const streamBotReply = async (
   if (botId === undefined) return;
   const run = generation;
   const abandoned = () => generation !== run;
+  const needed = approvalFor(prompt);
+  const tool = needed?.tool ?? "erp.query";
   const argsSummary = `ERP · ${prompt.slice(0, 12)}`;
 
   await sleep(REPLY_DELAY_MS);
@@ -248,28 +326,44 @@ export const streamBotReply = async (
   const call = appendMessage(groupId, {
     kind: "tool_call",
     botId,
-    tool: "erp.query",
+    tool,
     argsSummary,
     status: "running",
     durationMs: null,
   });
   push({ type: "message", message: call });
 
-  await sleep(TOOL_CALL_MS);
-  if (abandoned()) return;
+  let status: ToolCallStatus = "ok";
+  let reply = `收到。${prompt.slice(0, 12)}… 我这就去办。`;
+  if (needed === null) {
+    await sleep(TOOL_CALL_MS);
+    if (abandoned()) return;
+  } else {
+    const approval = createApproval({ groupId, botId, kind: needed.kind, summary: `${tool} · ${prompt}` });
+    const card = appendMessage(groupId, { kind: "approval", approvalId: approval.id });
+    // 先推 approval_updated 再推那条消息：卡的状态只在 Approval 上，消息先到的话前端只能先画一张查不到状态的占位。
+    push({ type: "approval_updated", approval });
+    push({ type: "message", message: card });
+    const decision = await waitForDecision(approval.id);
+    if (abandoned()) return;
+    status = decision === "approved" ? "ok" : "blocked";
+    reply =
+      decision === "approved" ? `好，${prompt.slice(0, 12)}… 已经办了。` : `明白，这一步我放弃了，别的照原样办完。`;
+  }
+
   const settled = rewriteMessage(groupId, call.id, {
     kind: "tool_call",
     botId,
-    tool: "erp.query",
+    tool,
     argsSummary,
-    status: "ok",
+    status,
     durationMs: TOOL_CALL_MS,
   });
   push({ type: "message", message: settled });
 
   // 这条回复只靠 delta 长出来，整条的 message 一次都不推，逼着前端走「没见过就先占个位」那条路。
   const draft = appendMessage(groupId, { kind: "bot", botId, text: "", streaming: true });
-  const parts = chunked(`收到。${prompt.slice(0, 12)}… 我这就去办。`, DELTA_COUNT);
+  const parts = chunked(reply, DELTA_COUNT);
   let text = "";
   for (const [index, delta] of parts.entries()) {
     await sleep(DELTA_MS);

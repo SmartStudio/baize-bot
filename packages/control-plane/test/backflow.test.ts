@@ -8,7 +8,7 @@ import {
   type Message,
   type RunId,
 } from "@baize/shared";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
@@ -221,6 +221,70 @@ describe("bot_tool_call", () => {
   });
 });
 
+describe("撞上同群里非 bot 的那条", () => {
+  it("拿工具调用卡的 id 发 bot_text，那张卡不变，后面的正文照样落地", async () => {
+    const job = await runningJob();
+    // 正文里没有 text 的那种卡，做 jsonb_set 会写出 NULL 正文，非空约束当场把整条报文掀了。
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      job.agent.send({
+        type: "bot_tool_call",
+        runId: job.runId,
+        botId: job.botId,
+        groupId: job.groupId,
+        callId: "call-1",
+        tool: "browser.open",
+        argsSummary: "打开订单页",
+        status: "running",
+        durationMs: null,
+      });
+      const card = await job.push.next();
+      const cardId = card.type === "message" ? card.message.id : null;
+      const cardBody = card.type === "message" ? card.message.body : null;
+      expect(cardId, "工具调用该先推出一张卡").not.toBeNull();
+
+      job.agent.send({
+        type: "bot_text",
+        runId: job.runId,
+        botId: job.botId,
+        groupId: job.groupId,
+        messageId: MessageId.parse(cardId ?? ""),
+        delta: "冲掉这张卡",
+        done: true,
+      });
+      const ownMessageId = MessageId.parse(randomUUID());
+      job.agent.send({
+        type: "bot_text",
+        runId: job.runId,
+        botId: job.botId,
+        groupId: job.groupId,
+        messageId: ownMessageId,
+        delta: "正经正文",
+        done: true,
+      });
+
+      for (;;) {
+        const received = await job.push.next();
+        if (received.type === "message_delta" && received.messageId === ownMessageId && received.done) break;
+      }
+
+      const stored = await groupMessages(job);
+      expect(stored.find((m) => m.id === cardId)?.body, "那张卡一个字都不该变").toEqual(cardBody);
+      expect(stored.find((m) => m.id === ownMessageId)?.body, "后面那条正文照样落地").toEqual({
+        kind: "bot",
+        botId: job.botId,
+        text: "正经正文",
+        streaming: false,
+      });
+      expect(logged.mock.calls, "电脑随便报一个 id 不该把服务端报出错").toEqual([]);
+    } finally {
+      logged.mockRestore();
+      job.close();
+    }
+  });
+});
+
 describe("run_done", () => {
   it("结束 run、按价目折算金额、群里多一张花费卡", async () => {
     const job = await runningJob();
@@ -319,31 +383,32 @@ describe("agent_error", () => {
   });
 });
 
-describe("approval_request", () => {
-  it("先回一个不批，再在群里说清楚", async () => {
+describe("删 Bot", () => {
+  it("用量行留着，Bot、群、触发消息三处归属置空", async () => {
     const job = await runningJob();
 
     try {
       job.agent.send({
-        type: "approval_request",
+        type: "run_done",
         runId: job.runId,
         botId: job.botId,
         groupId: job.groupId,
-        callId: "call-9",
-        tool: "shop.refund",
-        kind: "pay",
-        summary: "给这单退 120 块",
+        steps: 3,
+        inputTokens: 2000,
+        outputTokens: 500,
       });
+      await job.push.next();
 
-      const result = await job.agent.expect("approval_result");
-      expect(result.runId).toBe(job.runId);
-      expect(result.callId).toBe("call-9");
-      expect(result.approved, "审批要到 M5，这一版一律不批").toBe(false);
+      expect((await job.client.delete(`/api/bots/${job.botId}`)).status).toBe(204);
 
-      const push = await job.push.next();
-      const text = push.type === "message" && push.message.body.kind === "system" ? push.message.body.text : "";
-      expect(text).toContain("shop.refund");
-      expect(text).toContain("M5");
+      const rows = await database.sql<
+        { bot_id: string | null; group_id: string | null; trigger_message_id: string | null; steps: number }[]
+      >`SELECT bot_id, group_id, trigger_message_id, steps FROM runs WHERE id = ${job.runId}`;
+      expect(rows, "用量是账，Bot 删了账要留着").toHaveLength(1);
+      expect(rows[0]?.bot_id, "Bot 没了，归属置空").toBeNull();
+      expect(rows[0]?.group_id, "群跟着 Bot 一起删了，归属置空").toBeNull();
+      expect(rows[0]?.trigger_message_id, "触发那条消息跟着群一起删了，归属置空").toBeNull();
+      expect(rows[0]?.steps, "账上的数字一个不少").toBe(3);
     } finally {
       job.close();
     }

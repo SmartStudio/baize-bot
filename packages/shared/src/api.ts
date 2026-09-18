@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  Approval,
   Bot,
   BotHue,
   BotId,
@@ -88,11 +89,22 @@ export const UpdateTaskRequest = z
 export const UpdateTaskResponse = z.object({ task: TopicTask });
 
 // GET /api/groups/:id/messages?before=<messageId>&limit=50  按时间正序返回。
-export const MessageListResponse = z.object({ messages: z.array(Message), hasMore: z.boolean() });
+// approval 类消息的正文只有 approvalId，状态在 Approval 上，所以这一页引用到的审批跟着一起回，
+// 客户端不用为了画一张卡再发一次请求。
+export const MessageListResponse = z.object({
+  messages: z.array(Message),
+  hasMore: z.boolean(),
+  approvals: z.array(Approval),
+});
 
 // POST /api/groups/:id/messages  正文里的「@Bot 名」由服务端解析成 mentions，多 Bot 群按它路由。
 export const SendMessageRequest = z.object({ text: z.string().min(1) });
 export const SendMessageResponse = z.object({ message: Message });
+
+// POST /api/approvals/:id  归属人点批准或拒绝。别人的审批 404，已经有结论的 409。
+export const DecideApprovalRequest = z.object({ decision: z.enum(["approved", "rejected"]) });
+export type DecideApprovalRequest = z.infer<typeof DecideApprovalRequest>;
+export const DecideApprovalResponse = z.object({ approval: Approval });
 
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({
@@ -125,5 +137,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bot_deleted"), botId: BotId }),
   z.object({ type: z.literal("group_created"), group: Group, task: TopicTask }),
   z.object({ type: z.literal("task_updated"), task: TopicTask }),
+  // 审批新建和有了结论都推这一条。approval 消息的正文只有 approvalId，重推那条 message 一个字都不会变，
+  // 结论只能随 Approval 走。新建时先推 approval_updated 再推那条 message。
+  z.object({ type: z.literal("approval_updated"), approval: Approval }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

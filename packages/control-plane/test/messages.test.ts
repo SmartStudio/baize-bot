@@ -1,9 +1,19 @@
-import { ApiError, CreateBotResponse, MessageListResponse, SendMessageResponse, type Message } from "@baize/shared";
+import {
+  ApiError,
+  CreateBotResponse,
+  MessageId,
+  MessageListResponse,
+  RunId,
+  SendMessageResponse,
+  type Message,
+} from "@baize/shared";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appendMessage } from "../src/repo/messages.js";
+import { appendMessage, appendMessageWithId } from "../src/repo/messages.js";
+import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
 import { connectPush } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -121,7 +131,7 @@ describe("读消息", () => {
   it("新群是空的", async () => {
     const { client, groupId } = await clientWithGroup();
     const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
-    expect(page).toEqual({ messages: [], hasMore: false });
+    expect(page).toEqual({ messages: [], hasMore: false, approvals: [] });
   });
 });
 
@@ -148,6 +158,88 @@ describe("别人的群", () => {
     const response = await client.get("/api/groups/00000000-0000-0000-0000-000000000000/messages");
     expect(response.status).toBe(404);
     ApiError.parse(await response.json());
+  });
+});
+
+describe("跨群改消息", () => {
+  it("拿别的群里那条消息的 id 发 bot_text，既改不动那条也不落进自己的群", async () => {
+    const victimOwner = await makeUser(database.db);
+    const victimClient = server.client();
+    expect((await victimClient.login(victimOwner.email, PASSWORD)).status).toBe(200);
+    const victimBot = CreateBotResponse.parse(await (await victimClient.post("/api/bots", {})).json());
+    const victimMessageId = MessageId.parse(randomUUID());
+    const victimBody = { kind: "bot", botId: victimBot.bot.id, text: "别人群里的正文", streaming: false } as const;
+    await appendMessageWithId(database.db, victimMessageId, victimBot.group.id, victimBody);
+
+    const attackerOwner = await makeUser(database.db);
+    const computer = await makeComputer(database.db, attackerOwner.id);
+    const attackerClient = server.client();
+    expect((await attackerClient.login(attackerOwner.email, PASSWORD)).status).toBe(200);
+    const attackerBot = CreateBotResponse.parse(await (await attackerClient.post("/api/bots", {})).json());
+    const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+    const push = await connectPush(server.server.port, attackerClient.cookie ?? "");
+    const ownMessageId = MessageId.parse(randomUUID());
+
+    try {
+      agent.send({
+        type: "bot_text",
+        runId: RunId.parse(randomUUID()),
+        botId: attackerBot.bot.id,
+        groupId: attackerBot.group.id,
+        messageId: victimMessageId,
+        delta: "偷改",
+        done: true,
+      });
+      // 后发的这条能落地，它先推出来就说明上一条什么也没做，不靠超时。
+      agent.send({
+        type: "bot_text",
+        runId: RunId.parse(randomUUID()),
+        botId: attackerBot.bot.id,
+        groupId: attackerBot.group.id,
+        messageId: ownMessageId,
+        delta: "自己的正文",
+        done: true,
+      });
+
+      const pushes: Awaited<ReturnType<typeof push.next>>[] = [];
+      for (;;) {
+        const received = await push.next();
+        pushes.push(received);
+        // 等到收尾那一片再读库，不然读到的是刚插进去、正文还空着的空壳。
+        if (received.type === "message_delta" && received.messageId === ownMessageId && received.done) break;
+      }
+      const victimPage = MessageListResponse.parse(
+        await (await victimClient.get(`/api/groups/${victimBot.group.id}/messages`)).json(),
+      );
+      expect(victimPage.messages.find((m) => m.id === victimMessageId)?.body, "别人群里那条一个字都不该变").toEqual(
+        victimBody,
+      );
+
+      expect(
+        pushes.filter(
+          (p) =>
+            (p.type === "message" ? p.message.id : p.type === "message_delta" ? p.messageId : null) === victimMessageId,
+        ),
+        "撞号那条不该推出任何东西",
+      ).toEqual([]);
+
+      const attackerPage = MessageListResponse.parse(
+        await (await attackerClient.get(`/api/groups/${attackerBot.group.id}/messages`)).json(),
+      );
+      expect(
+        attackerPage.messages.map((m) => m.id),
+        "自己群里只该有后发那条，撞号那条整条丢掉",
+      ).toEqual([ownMessageId]);
+      expect(attackerPage.messages[0]?.body).toEqual({
+        kind: "bot",
+        botId: attackerBot.bot.id,
+        text: "自己的正文",
+        streaming: false,
+      });
+    } finally {
+      agent.close();
+      push.close();
+    }
   });
 });
 

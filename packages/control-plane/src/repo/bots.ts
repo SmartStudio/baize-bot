@@ -3,6 +3,7 @@ import { and, eq, inArray, max, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
+import { pendingApprovalCounts } from "./approvals.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
 import { toBot, toGroup, toMessage } from "./rows.js";
 
@@ -82,16 +83,14 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
     .orderBy(bots.createdAt, bots.id);
   if (rows.length === 0) return [];
 
-  const lastMessages = await latestMessagePerGroup(
-    db,
-    rows.map((r) => r.groupId),
-  );
+  const groupIds = rows.map((r) => r.groupId);
+  const lastMessages = await latestMessagePerGroup(db, groupIds);
+  const pending = await pendingApprovalCounts(db, groupIds);
   return rows.map((row) => ({
     bot: toBot(row.bot),
     groupId: row.groupId,
     lastMessage: lastMessages.get(row.groupId) ?? null,
-    // 审批是 M5 的对象，这一版没有表，未处理审批恒为 0。
-    pendingApprovals: 0,
+    pendingApprovals: pending.get(row.groupId) ?? 0,
   }));
 }
 

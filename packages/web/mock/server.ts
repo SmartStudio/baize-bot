@@ -4,6 +4,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import {
   Bot,
   CreateBotRequest,
+  DecideApprovalRequest,
   LoginRequest,
   SendMessageRequest,
   Settings,
@@ -15,17 +16,31 @@ import {
   MOCK_EMAIL,
   MOCK_PASSWORD,
   appendMessage,
+  approvals,
+  approvalsIn,
   bots,
   createBot,
   groupIdByBotId,
   groups,
   lastMessageOf,
+  pendingApprovalsOf,
   reseed,
   messagesByGroupId,
+  settleApproval,
+  settleLatestPending,
   settings,
   streamBotReply,
   user,
+  type ApprovalDecision,
 } from "./state.js";
+
+// 群里回一句话和点按钮是同一件事。词表用表装着，加一个说法不用多一条分支。
+const DECISION_WORDS = new Map<string, ApprovalDecision>([
+  ["批准", "approved"],
+  ["同意", "approved"],
+  ["拒绝", "rejected"],
+  ["不行", "rejected"],
+]);
 
 const PORT = Number(process.env["API_PORT"] ?? 3001);
 const SESSION_COOKIE = "baize_session";
@@ -87,7 +102,12 @@ const botListItems = () =>
   [...bots.values()].map((bot) => {
     const groupId = groupIdByBotId.get(bot.id);
     if (groupId === undefined) throw new Error(`Bot ${bot.id} 没有群，mock 状态坏了`);
-    return { bot, groupId, lastMessage: lastMessageOf(groupId), pendingApprovals: 0 };
+    return {
+      bot,
+      groupId,
+      lastMessage: lastMessageOf(groupId),
+      pendingApprovals: pendingApprovalsOf(groupId),
+    };
   });
 
 const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -175,18 +195,42 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       const end = before === null ? all.length : all.findIndex((m) => m.id === before);
       const limit = Number(url.searchParams.get("limit") ?? 50);
       const start = Math.max(0, (end < 0 ? all.length : end) - limit);
-      return send(res, 200, { messages: all.slice(start, end < 0 ? all.length : end), hasMore: start > 0 });
+      const page = all.slice(start, end < 0 ? all.length : end);
+      return send(res, 200, { messages: page, hasMore: start > 0, approvals: approvalsIn(page) });
     }
     if (method === "POST") {
       const parsed = SendMessageRequest.safeParse(await readBody(req));
       if (!parsed.success) return send(res, 400, { error: "消息不能为空" });
-      const message = appendMessage(groupId, { kind: "user", text: parsed.data.text });
+      const text = parsed.data.text;
+      const message = appendMessage(groupId, { kind: "user", text });
+      const decision = DECISION_WORDS.get(text.trim());
+      const settled = decision === undefined ? null : settleLatestPending(groupId, decision);
+      // 这句话就是结论，不再另起一次运行：正等着这条审批的那次运行收到结论会自己接着往下走。
+      // 没有在等结论的审批时 settled 是 null，「批准」就只是一句普通的话，照常跑一次运行。
+      if (settled !== null) {
+        push({ type: "approval_updated", approval: settled });
+        return send(res, 200, { message });
+      }
       // 一次运行要跑上秒级，POST 只回用户那条，Bot 那边的工具卡、流式正文和花费卡全走推送。
-      streamBotReply(groupId, parsed.data.text, push).catch((cause: unknown) => {
+      streamBotReply(groupId, text, push).catch((cause: unknown) => {
         process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
       });
       return send(res, 200, { message });
     }
+  }
+
+  const approvalMatch = /^\/api\/approvals\/([^/]+)$/.exec(path);
+  if (approvalMatch && method === "POST") {
+    const [, rawApprovalId] = approvalMatch;
+    const id = rawApprovalId === undefined ? "" : decodeURIComponent(rawApprovalId);
+    // body 先读完。查到和写结论之间只要还有一个 await，群里回的那句话就能从这个缝里插进来先写一遍。
+    const parsed = DecideApprovalRequest.safeParse(await readBody(req));
+    if (!approvals.has(id)) return send(res, 404, { error: "没有这条审批" });
+    if (!parsed.success) return send(res, 400, { error: "结论只能是批准或拒绝" });
+    const next = settleApproval(id, parsed.data.decision);
+    if (next === null) return send(res, 409, { error: "这条审批已经有结论了" });
+    push({ type: "approval_updated", approval: next });
+    return send(res, 200, { approval: next });
   }
 
   if (path === "/api/settings") {

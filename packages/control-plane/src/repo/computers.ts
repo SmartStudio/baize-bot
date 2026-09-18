@@ -1,5 +1,5 @@
 import { ComputerId, type Computer, type UserId } from "@baize/shared";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { computers } from "../db/schema.js";
 import { hashSecret, newId, newSecret, secretMatches } from "../ids.js";
@@ -75,6 +75,20 @@ export async function markComputerOnline(db: Db, computerId: ComputerId): Promis
 /** 调用方负责确认这条连接还是当前那条，被顶掉的旧连接关闭时不该把在线的那台写成休眠。 */
 export async function markComputerSleeping(db: Db, computerId: ComputerId): Promise<void> {
   await db.update(computers).set({ status: "sleeping", idleSince: new Date() }).where(eq(computers.id, computerId));
+}
+
+/** 关服务时一次写完。socket 的 close 回调排在事件循环后面，进程退出之前跑不完。 */
+export async function markComputersSleeping(db: Db, computerIds: readonly ComputerId[]): Promise<void> {
+  if (computerIds.length === 0) return;
+  await db
+    .update(computers)
+    .set({ status: "sleeping", idleSince: new Date() })
+    .where(inArray(computers.id, [...computerIds]));
+}
+
+/** 进程刚起不可能有活着的连接，库里剩下的在线必然是上次没关干净留下的。 */
+export async function markOnlineComputersSleeping(db: Db): Promise<void> {
+  await db.update(computers).set({ status: "sleeping", idleSince: new Date() }).where(eq(computers.status, "online"));
 }
 
 export type TokenReset = { readonly computerId: ComputerId; readonly token: string };

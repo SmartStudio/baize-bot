@@ -315,6 +315,11 @@ select {
   content: "";
 }
 
+.badge-pending {
+  background: var(--pending-soft);
+  color: var(--pending);
+}
+
 .caret {
   display: inline-block;
   width: var(--space-4);
@@ -706,6 +711,58 @@ select {
 .metric small {
   color: var(--fg-4);
   font: var(--type-caption);
+}
+
+.card-approval {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-color: var(--info-soft);
+  background: var(--info-soft);
+}
+
+.card-approval .card-title {
+  color: var(--info);
+}
+
+.approval-summary {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-body);
+}
+
+.approval-actions {
+  display: flex;
+  gap: var(--space-4);
+  justify-content: flex-end;
+}
+
+/* .primary-button 是给整宽表单按钮做的，没有左右内边距。放进一行得自己撑开，高度也跟旁边的 ghost 对齐。 */
+.approval-actions .primary-button {
+  height: var(--control-h-md);
+  padding: 0 var(--space-6);
+}
+
+.approval-decided {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: right;
+}
+
+/* 有了结论这张卡就只是一条记录，压掉底色和字的对比度，别再跟等着点头的那张抢注意力。 */
+.card-approval[data-status="approved"],
+.card-approval[data-status="rejected"] {
+  border-color: var(--border-1);
+  background: var(--bg-surface);
+}
+
+.card-approval[data-status="approved"] .card-title,
+.card-approval[data-status="rejected"] .card-title,
+.card-approval[data-status="approved"] .approval-summary,
+.card-approval[data-status="rejected"] .approval-summary {
+  color: var(--fg-4);
 }
 
 .card-later {

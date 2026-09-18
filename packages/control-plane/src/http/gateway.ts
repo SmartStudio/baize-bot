@@ -12,8 +12,14 @@ export type GatewayDeps = {
   readonly upstreamApiKey: string;
 };
 
-// 上游按 content-encoding 压过一次，fetch 已经解开了；长度和分块也由我们这边重新定。
-const DROPPED_HEADERS = new Set(["content-encoding", "content-length", "transfer-encoding", "connection"]);
+// 白名单而不是黑名单：上游的组织标识、Set-Cookie 这类头不该漏给云电脑，
+// 而黑名单挡不住上游以后新加的头。压缩、长度、分块也顺带落在名单外，那几项由我们这边重新定。
+const FORWARDED_HEADERS = new Set(["content-type", "cache-control"]);
+const FORWARDED_HEADER_PREFIXES = ["x-ratelimit-"];
+
+function isForwarded(name: string): boolean {
+  return FORWARDED_HEADERS.has(name) || FORWARDED_HEADER_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
 
 const CompletionRequest = z.object({}).passthrough();
 
@@ -44,14 +50,18 @@ export function createGateway(deps: GatewayDeps): Hono {
         headers: { "content-type": "application/json", authorization: `Bearer ${deps.upstreamApiKey}` },
         // 选哪个模型由网关说了算，电脑代理报上来的 model 一律换掉。
         body: JSON.stringify({ ...parsed.data, model: deps.model }),
+        // 电脑那头断了就把上游一起断掉，别让上游替一个已经没人要的请求接着烧 token。
+        signal: c.req.raw.signal,
       });
     } catch (error) {
+      // 客户端自己走的，这不是上游连不上；再回一个 502 是对着空气说话，还会把断线记成上游故障。
+      if (c.req.raw.signal.aborted) throw error;
       return c.json({ error: `连不上模型上游，${String(error)}。稍后再试或者找管理员看看上游地址。` }, 502);
     }
 
     const headers = new Headers();
     for (const [name, value] of upstream.headers) {
-      if (!DROPPED_HEADERS.has(name.toLowerCase())) headers.set(name, value);
+      if (isForwarded(name.toLowerCase())) headers.set(name, value);
     }
     // 流式和非流式都原样转回去，SSE 分片不在这里攒。
     return new Response(upstream.body, { status: upstream.status, headers });

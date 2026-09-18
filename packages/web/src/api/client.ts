@@ -3,15 +3,19 @@ import {
   ApiError,
   BotListResponse,
   CreateBotResponse,
+  DecideApprovalResponse,
   LoginResponse,
   MeResponse,
   MessageListResponse,
   SendMessageResponse,
   Settings,
   UpdateBotResponse,
+  type Approval,
+  type ApprovalId,
   type Bot,
   type BotHue,
   type BotId,
+  type DecideApprovalRequest,
   type GroupId,
 } from "@baize/shared";
 
@@ -72,6 +76,9 @@ export const api = {
     json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
   sendMessage: async (groupId: GroupId, text: string) =>
     json(SendMessageResponse, await send("POST", `/groups/${encodeURIComponent(groupId)}/messages`, { text })),
+  decideApproval: async (id: ApprovalId, decision: DecideApprovalRequest["decision"]): Promise<Approval> =>
+    (await json(DecideApprovalResponse, await send("POST", `/approvals/${encodeURIComponent(id)}`, { decision })))
+      .approval,
   settings: async () => json(Settings, await send("GET", "/settings")),
   updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
 };

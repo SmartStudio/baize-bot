@@ -1,5 +1,6 @@
-import type { GroupId, Message, MessageBody, UserId } from "@baize/shared";
+import type { Approval, ApprovalId, GroupId, Message, MessageBody, UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
 import { appendMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { startRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
@@ -89,4 +90,56 @@ function clip(text: string): string {
 async function appendAndPush(deps: DispatchDeps, ownerId: UserId, groupId: string, body: MessageBody): Promise<void> {
   const message = await appendMessage(deps.db, groupId, body);
   deps.push.push(ownerId, { type: "message", message });
+}
+
+/** 群里回这四个词等于按了审批卡上的按钮。 */
+const REPLY_DECISIONS = new Map<string, "approved" | "rejected">([
+  ["批准", "approved"],
+  ["同意", "approved"],
+  ["拒绝", "rejected"],
+  ["不行", "rejected"],
+]);
+
+export type SettleResult = { readonly kind: "ok"; readonly approval: Approval } | { readonly kind: "already_decided" };
+
+/**
+ * 给一条审批定结论、告诉电脑、推给客户端。按钮和群里回话共用这一份。
+ * 电脑不在线时 send 返回 false，决定照样落库：运行器那一头本来就已经断了，等它回来是另一件事。
+ */
+export async function settleApproval(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  approvalId: ApprovalId,
+  decision: "approved" | "rejected",
+): Promise<SettleResult> {
+  const decided = await decideApproval(deps.db, approvalId, decision);
+  if (decided === null) return { kind: "already_decided" };
+
+  deps.agents.send(ownerId, {
+    type: "approval_result",
+    runId: decided.runId,
+    callId: decided.callId,
+    approved: decision === "approved",
+  });
+  deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
+  return { kind: "ok", approval: decided.approval };
+}
+
+/**
+ * 用户消息落到该群最近一条待批审批上。返回真表示这条消息已经当作审批回复用掉了，
+ * 不再派活：运行器正挂着等结论，再派一次会并发起第二个 run。
+ * 群里没有待批审批时「批准」就是一句普通话。
+ */
+export async function settleByReply(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: string,
+  text: string,
+): Promise<boolean> {
+  const decision = REPLY_DECISIONS.get(text.trim());
+  if (decision === undefined) return false;
+  const pending = await latestPendingApproval(deps.db, groupId);
+  if (pending === null) return false;
+  await settleApproval(deps, ownerId, pending, decision);
+  return true;
 }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Plus, Search, Settings as SettingsIcon } from "lucide-react";
+import { Hand, Plus, Search, Settings as SettingsIcon } from "lucide-react";
 import type { BotId, User } from "@baize/shared";
 import type { BotListItem } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
@@ -57,6 +57,12 @@ export const Sidebar = ({ bots, selectedBotId, user, onSelect, onCreate, onOpenA
                 <span className="bot-item-top">
                   <b>{item.bot.name}</b>
                   {item.bot.tag ? <em className="tag">{item.bot.tag}</em> : null}
+                  {item.pendingApprovals > 0 ? (
+                    <span className="badge badge-pending" data-testid="bot-pending">
+                      <Hand size={13} aria-hidden="true" />
+                      等你点头 {item.pendingApprovals}
+                    </span>
+                  ) : null}
                   {activityOf(item.lastMessage) === "working" ? (
                     <span className="badge badge-working" data-testid="bot-working">
                       干活中

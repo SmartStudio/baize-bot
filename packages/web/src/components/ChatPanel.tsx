@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, SendHorizontal } from "lucide-react";
 import type { Bot, GroupId, Message } from "@baize/shared";
-import { MessageView, type BotLookup } from "./messages/MessageView.js";
+import { MessageView, type ApprovalTable, type BotLookup, type DecideApproval } from "./messages/MessageView.js";
 import { BotAvatar } from "./BotAvatar.js";
 
 type Props = {
@@ -9,10 +9,12 @@ type Props = {
   groupId: GroupId;
   messages: Message[];
   lookup: BotLookup;
+  approvals: ApprovalTable;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
+  onDecide: DecideApproval;
 };
 
-export const ChatPanel = ({ bot, groupId, messages, lookup, onSend }: Props) => {
+export const ChatPanel = ({ bot, groupId, messages, lookup, approvals, onSend, onDecide }: Props) => {
   const [draft, setDraft] = useState("");
   const bottom = useRef<HTMLDivElement>(null);
 
@@ -40,7 +42,7 @@ export const ChatPanel = ({ bot, groupId, messages, lookup, onSend }: Props) => 
       <div className="thread" data-testid="message-list">
         {messages.length === 0 ? <p className="empty">建好了，桌面也开好了。今天把什么活交出去？</p> : null}
         {messages.map((message) => (
-          <MessageView key={message.id} message={message} lookup={lookup} />
+          <MessageView key={message.id} message={message} lookup={lookup} approvals={approvals} onDecide={onDecide} />
         ))}
         <div ref={bottom} />
       </div>

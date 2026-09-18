@@ -1,4 +1,12 @@
-import type { BotHue, ChecklistItem, ComputerStatus, MessageBody, TaskStatus as TaskStatusSchema } from "@baize/shared";
+import type {
+  ApprovalKind as ApprovalKindSchema,
+  ApprovalStatus as ApprovalStatusSchema,
+  BotHue,
+  ChecklistItem,
+  ComputerStatus,
+  MessageBody,
+  TaskStatus as TaskStatusSchema,
+} from "@baize/shared";
 import type { z } from "zod";
 import {
   bigserial,
@@ -11,10 +19,13 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 
-// shared 只导出了 TaskStatus 的 schema，没有导出类型，这里从 schema 推回来。
+// shared 只导出了这几个的 schema，没有导出类型，这里从 schema 推回来。
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
+type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
+type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -158,19 +169,14 @@ export const computers = pgTable("computers", {
 });
 
 // 规格里的用量记录。一次派活一行，ended_at 为空表示还在跑，run_done 靠「只更新 ended_at 为空的那行」做幂等。
+// 用量是账：Bot、群、触发消息删了账还要留着，所以这三处归属可空，删的时候置空而不是跟着走。
 export const runs = pgTable(
   "runs",
   {
     id: text("id").primaryKey(),
-    botId: text("bot_id")
-      .notNull()
-      .references(() => bots.id, { onDelete: "cascade" }),
-    groupId: text("group_id")
-      .notNull()
-      .references(() => groups.id, { onDelete: "cascade" }),
-    triggerMessageId: text("trigger_message_id")
-      .notNull()
-      .references(() => messages.id, { onDelete: "cascade" }),
+    botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
+    groupId: text("group_id").references(() => groups.id, { onDelete: "set null" }),
+    triggerMessageId: text("trigger_message_id").references(() => messages.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     steps: integer("steps").notNull().default(0),
@@ -179,4 +185,38 @@ export const runs = pgTable(
     amount: numeric("amount", { precision: 14, scale: 6 }).notNull().default("0"),
   },
   (t) => [index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt), index("runs_bot_id_idx").on(t.botId)],
+);
+
+// 一条等归属人点头的审批。message_id 指向群里那张卡，非空：卡和审批一起生，群里不会出现没有审批的卡。
+// (run_id, call_id) 唯一，电脑重发同一条 approval_request 时不多出第二张卡。
+// reminded_at 记下 24 小时提醒发过了，没有它每扫一次就重发一遍，跨进程重启也挡不住。
+export const approvals = pgTable(
+  "approvals",
+  {
+    id: text("id").primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    callId: text("call_id").notNull(),
+    tool: text("tool").notNull(),
+    kind: text("kind").$type<ApprovalKind>().notNull(),
+    summary: text("summary").notNull(),
+    status: text("status").$type<ApprovalStatus>().notNull().default("pending"),
+    messageId: text("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    remindedAt: timestamp("reminded_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("approvals_group_id_status_idx").on(t.groupId, t.status),
+    uniqueIndex("approvals_run_id_call_id_idx").on(t.runId, t.callId),
+  ],
 );

@@ -1,11 +1,13 @@
 import type { ComputerId } from "@baize/shared";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { GATEWAY_PATH } from "../src/http/gateway.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { makeComputer, makeUser } from "./helpers/fixtures.js";
 import { helloAgent } from "./helpers/agent.js";
-import { scriptedUpstream, type Upstream } from "./helpers/openai-sse.js";
+import { scriptedUpstream, type ChatCompletionRequest, type Upstream } from "./helpers/openai-sse.js";
 import { deadUpstreamUrl, startUpstream, type FakeUpstream } from "./helpers/upstream.js";
 
 const GATEWAY_MODEL = "baize-test-model";
@@ -65,6 +67,77 @@ function chatBody(extra: Record<string, unknown> = {}): RequestInit {
 
 function authed(key: string, init: RequestInit): RequestInit {
   return { ...init, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${key}` } };
+}
+
+/** 一台只管回指定响应头的假上游。SCOPE 不含 test/helpers，所以就地起一台。 */
+async function startHeaderUpstream(headers: Record<string, string>): Promise<{
+  readonly baseUrl: string;
+  close(): Promise<void>;
+}> {
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json", ...headers });
+    res.end(JSON.stringify({ id: "chatcmpl-1", choices: [] }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
+  };
+}
+
+/** 一台收下请求就再不回话的假上游。等上游回话那一段是 signal 唯一管得着的地方。 */
+async function startSilentUpstream(): Promise<{
+  readonly baseUrl: string;
+  /** 上游收到的那份请求体。 */
+  readonly received: Promise<ChatCompletionRequest>;
+  readonly disconnected: Promise<void>;
+  connected(): boolean;
+  close(): Promise<void>;
+}> {
+  let sawRequest!: (body: ChatCompletionRequest) => void;
+  const received = new Promise<ChatCompletionRequest>((resolve) => {
+    sawRequest = resolve;
+  });
+  let sawDisconnect!: () => void;
+  const disconnected = new Promise<void>((resolve) => {
+    sawDisconnect = resolve;
+  });
+  let live = false;
+
+  const server = createServer((req, res) => {
+    live = true;
+    res.on("close", () => {
+      live = false;
+      sawDisconnect();
+    });
+    let raw = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk: string) => {
+      raw += chunk;
+    });
+    // 只收不回：响应永远不 writeHead，网关那头一直挂在 fetch 上。
+    req.on("end", () => sawRequest(JSON.parse(raw) as ChatCompletionRequest));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    received,
+    disconnected,
+    connected: () => live,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections();
+        server.close((e) => (e ? reject(e) : resolve()));
+      }),
+  };
+}
+
+function rejectAfter(ms: number, what: string): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    setTimeout(() => reject(new Error(what)), ms).unref();
+  });
 }
 
 describe("网关认证", () => {
@@ -204,6 +277,43 @@ describe("转发", () => {
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain("连不上模型上游");
     expect(body.error).toContain("找管理员");
+  });
+
+  it("客户端中途断开，还挂在上游那条连接跟着断", async () => {
+    const upstream = await startSilentUpstream();
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl });
+
+    const controller = new AbortController();
+    const pending = r
+      .call("/chat/completions", { ...authed(r.key, chatBody({ stream: true })), signal: controller.signal })
+      .catch(() => null);
+
+    const forwarded = await upstream.received;
+    expect(forwarded.model, "断开之前请求照样按网关的模型转出去了").toBe(GATEWAY_MODEL);
+    expect(upstream.connected(), "上游还没回话，这会儿该连着").toBe(true);
+
+    controller.abort();
+    await Promise.race([upstream.disconnected, rejectAfter(2000, "客户端都走了，上游那条连接还挂着烧 token")]);
+    await pending;
+  });
+
+  it("上游的响应头只放白名单里那些过去", async () => {
+    const upstream = await startHeaderUpstream({
+      "openai-organization": "org-someone-else",
+      "set-cookie": "sid=someone-elses-session; Path=/",
+      "x-ratelimit-remaining-requests": "99",
+    });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl });
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+
+    expect(response.headers.get("openai-organization"), "上游的组织标识不该漏给云电脑").toBeNull();
+    expect(response.headers.getSetCookie(), "上游的 Set-Cookie 不该漏给云电脑").toEqual([]);
+    expect(response.headers.get("content-type"), "白名单里的照转").toContain("application/json");
+    expect(response.headers.get("x-ratelimit-remaining-requests"), "限流头按前缀放行").toBe("99");
+    expect(await response.json(), "正文照旧原样带回来").toEqual({ id: "chatcmpl-1", choices: [] });
   });
 
   it("请求体不是 JSON 对象返回 400，不打上游", async () => {

@@ -1,8 +1,12 @@
-import { CircleDollarSign, Globe, Handshake, ShieldQuestion } from "lucide-react";
-import type { BotHue, BotId, Message, MessageBody } from "@baize/shared";
+import { useState } from "react";
+import { CircleDollarSign, Globe, Handshake, ShieldAlert } from "lucide-react";
+import type { Approval, ApprovalId, BotHue, BotId, DecideApprovalRequest, Message, MessageBody } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
+import { timeOf } from "./preview.js";
 
 export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
+export type ApprovalTable = Record<ApprovalId, Approval>;
+export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
@@ -68,7 +72,94 @@ const LaterCard = ({ icon, text }: { icon: React.ReactNode; text: string }) => (
   </div>
 );
 
-export const MessageView = ({ message, lookup }: { message: Message; lookup: BotLookup }) => {
+const APPROVAL_KIND_TEXT: Record<Approval["kind"], string> = {
+  send_external: "对外发送",
+  change_production_data: "改生产数据",
+  pay: "付钱",
+};
+
+const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
+  approved: "已批准",
+  rejected: "已拒绝",
+};
+
+// timeOf 只认 Message，而结论时间挂在 Approval 上。借这条审批消息套一层，免得为同一个格式再写一份。
+const decidedTimeOf = (message: Message, decidedAt: string): string => timeOf({ ...message, createdAt: decidedAt });
+
+const ApprovalCard = ({
+  approval,
+  message,
+  onDecide,
+}: {
+  approval: Approval;
+  message: Message;
+  onDecide: DecideApproval;
+}) => {
+  const [sent, setSent] = useState(false);
+  // 结论以服务端推回来的那条为准，这里只锁住按钮，免得一次点两下发两个决定。
+  const decide = (decision: DecideApprovalRequest["decision"]) => {
+    setSent(true);
+    void onDecide(approval.id, decision).catch(() => setSent(false));
+  };
+  return (
+    <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
+      <div className="card-title">
+        <ShieldAlert size={16} aria-hidden="true" />
+        需要你点头 · {APPROVAL_KIND_TEXT[approval.kind]}
+      </div>
+      <p className="approval-summary">{approval.summary}</p>
+      {approval.status === "pending" ? (
+        <div className="approval-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="approval-reject"
+            disabled={sent}
+            onClick={() => decide("rejected")}
+          >
+            拒绝
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="approval-approve"
+            disabled={sent}
+            onClick={() => decide("approved")}
+          >
+            批准
+          </button>
+        </div>
+      ) : (
+        <p className="approval-decided" data-testid="approval-decided">
+          {DECIDED_TEXT[approval.status]}
+          {approval.decidedAt === null ? "" : ` · ${decidedTimeOf(message, approval.decidedAt)}`}
+        </p>
+      )}
+    </div>
+  );
+};
+
+// 新建审批先推 approval_updated 再推那条消息，但历史和推送会赛跑。查不到就先占个位，别让整条消息消失。
+const ApprovalPlaceholder = () => (
+  <div className="card card-approval" data-testid="approval-card" data-status="unknown">
+    <div className="card-title">
+      <ShieldAlert size={16} aria-hidden="true" />
+      等你点头
+    </div>
+  </div>
+);
+
+export const MessageView = ({
+  message,
+  lookup,
+  approvals,
+  onDecide,
+}: {
+  message: Message;
+  lookup: BotLookup;
+  approvals: ApprovalTable;
+  onDecide: DecideApproval;
+}) => {
   const body = message.body;
   return (
     <div className="message" data-testid="message" data-kind={body.kind}>
@@ -84,8 +175,14 @@ export const MessageView = ({ message, lookup }: { message: Message; lookup: Bot
             return <ToolCallCard body={body} />;
           case "cost":
             return <CostCard body={body} />;
-          case "approval":
-            return <LaterCard icon={<ShieldQuestion size={16} aria-hidden="true" />} text="审批卡 · 后续" />;
+          case "approval": {
+            const approval = approvals[body.approvalId];
+            return approval === undefined ? (
+              <ApprovalPlaceholder />
+            ) : (
+              <ApprovalCard approval={approval} message={message} onDecide={onDecide} />
+            );
+          }
           case "handoff":
             return <LaterCard icon={<Handshake size={16} aria-hidden="true" />} text="交接报文 · 后续" />;
           default: {

@@ -1,5 +1,6 @@
 import type { AgentToControl, ControlToAgent, Message, MessageBody, UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import { createApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import {
   appendBotDelta,
@@ -65,16 +66,20 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (groupId === null) return;
 
-  const { message, created } = await appendMessageWithId(deps.db, event.messageId, groupId, {
+  const appended = await appendMessageWithId(deps.db, event.messageId, groupId, {
     kind: "bot",
     botId: event.botId,
     text: "",
     streaming: true,
   });
+  if (appended.kind === "taken") {
+    console.warn(`电脑 ${conn.computerId} 报的消息编号 ${event.messageId} 已经被别的群占了，整条丢掉`);
+    return;
+  }
   // 先推空壳再推 delta，客户端才有一条可以往上追加正文的消息。
-  if (created) deps.push.push(conn.ownerId, { type: "message", message });
+  if (appended.kind === "created") deps.push.push(conn.ownerId, { type: "message", message: appended.message });
 
-  await appendBotDelta(deps.db, event.messageId, event.delta, event.done);
+  await appendBotDelta(deps.db, event.messageId, groupId, event.delta, event.done);
   deps.push.push(conn.ownerId, {
     type: "message_delta",
     messageId: event.messageId,
@@ -100,7 +105,9 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
   const key = `${event.runId}:${event.callId}`;
   const known = conn.toolCallMessages.get(key);
   const message =
-    known === undefined ? await appendMessage(deps.db, groupId, body) : await replaceMessageBody(deps.db, known, body);
+    known === undefined
+      ? await appendMessage(deps.db, groupId, body)
+      : await replaceMessageBody(deps.db, known, groupId, body);
   if (message === null) return;
 
   // 同一个 id 推第二次，客户端按 id 覆盖那张卡。
@@ -153,16 +160,29 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   });
 }
 
+/**
+ * 不回 approval_result，电脑上的运行器就一直挂着等，直到归属人点了按钮或在群里回了话。
+ * 这是审批的本意：没人点头就不往下走。
+ */
 async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, event: ApprovalRequest): Promise<void> {
-  // 审批是 M5 的事。先回一个拒绝，别让电脑上的运行器一直挂着等结论。
-  deps.reply(conn, { type: "approval_result", runId: event.runId, callId: event.callId, approved: false });
-
   const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (groupId === null) return;
-  await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "system",
-    text: `「${event.tool}」这一步要你点头（${event.summary}），审批要到 M5 才做，这次先当作没批。`,
+
+  const created = await createApproval(deps.db, {
+    runId: event.runId,
+    botId: event.botId,
+    groupId,
+    callId: event.callId,
+    tool: event.tool,
+    kind: event.kind,
+    summary: event.summary,
   });
+  // 同一条 approval_request 重发时这里是 null：不多一张卡，也不多推一次。
+  if (created === null) return;
+
+  // 先推审批再推卡，客户端画那张卡的时候状态已经在手上了。
+  deps.push.push(conn.ownerId, { type: "approval_updated", approval: created.approval });
+  deps.push.push(conn.ownerId, { type: "message", message: created.message });
 }
 
 async function appendAndPush(

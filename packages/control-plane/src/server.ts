@@ -8,10 +8,15 @@ import { AGENT_PATH, AgentHub } from "./agent/hub.js";
 import type { Db } from "./db/client.js";
 import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
+import { remindStaleApprovals } from "./repo/approvals.js";
+import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
 import { PushHub } from "./ws/hub.js";
 
 export const WS_PATH = "/api/ws";
+
+/** 扫一遍放了一天还没有结论的审批。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
+const REMIND_INTERVAL_MS = 60 * 60 * 1000;
 
 export type RunningServer = {
   readonly port: number;
@@ -62,6 +67,9 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       upstreamApiKey: config.upstreamApiKey,
     },
   });
+  // 还没开始监听就不可能有电脑连上来，库里剩下的在线必然是上一个进程没关干净留下的。
+  await markOnlineComputersSleeping(options.db);
+
   const server = serve({ fetch: app.fetch, port: options.port });
   const clients = new WebSocketServer({ noServer: true });
   const agentSockets = new WebSocketServer({ noServer: true });
@@ -86,12 +94,20 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const port = await listeningPort(server);
   publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
+  const reminders = setInterval(() => {
+    void remindStaleApprovals(options.db, hub, new Date()).catch((error: unknown) =>
+      console.error("扫超时审批出错", error),
+    );
+  }, REMIND_INTERVAL_MS);
+  reminders.unref();
+
   return {
     port,
     hub,
     close: async () => {
+      clearInterval(reminders);
       hub.closeAll();
-      agents.closeAll();
+      await agents.closeAll();
       clients.close();
       agentSockets.close();
       await new Promise<void>((resolve, reject) =>
