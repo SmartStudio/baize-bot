@@ -30,6 +30,8 @@ export interface BotSessionOptions {
   readonly needsApproval: (toolName: string) => boolean;
   /** 工具函数体真正执行时往这里追加，用来证明被 block 的调用没有执行。 */
   readonly sideEffects: string[];
+  /** 覆盖会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
+  readonly settings?: Parameters<typeof SettingsManager.inMemory>[0];
 }
 
 export interface BotSession {
@@ -107,7 +109,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
   const model = modelRuntime.getModel(GATEWAY_PROVIDER_ID, GATEWAY_MODEL_ID);
   if (!model) throw new Error(`网关供应商没注册上：${GATEWAY_PROVIDER_ID}/${GATEWAY_MODEL_ID}`);
 
-  const settingsManager = SettingsManager.inMemory();
+  const settingsManager = SettingsManager.inMemory(options.settings);
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: options.agentDir,

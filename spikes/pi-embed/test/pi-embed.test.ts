@@ -210,3 +210,73 @@ describe("Pi SDK 嵌入验证", () => {
     }
   });
 });
+
+// 自动重试默认开着（settings-manager.js:582 的 enabled ?? true）。上游一次 503 会让 Pi 重跑
+// 这一轮，agent_end 因此发两遍，只有 agent_settled 是一次 prompt 一次。
+describe("Pi SDK 嵌入验证 · 上游重试", () => {
+  let root: string;
+  let gateway: Gateway;
+  let approvals: ApprovalGate;
+  let bot: BotSession;
+  let report: AgentToControl[];
+  let agentEndCount = 0;
+  let settledCount = 0;
+
+  beforeAll(async () => {
+    root = mkdtempSync(join(tmpdir(), "baize-pi-retry-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "work");
+    const sessionDir = join(root, "sessions");
+    for (const d of [agentDir, cwd, sessionDir]) mkdirSync(d, { recursive: true });
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+
+    const turn: ScriptedTurn = { textChunks: ["重试之后才说的话。"], usage: { input: 300, output: 9 } };
+    gateway = await startGateway({
+      upstream: scriptedUpstream(() => turn),
+      models: [{ id: GATEWAY_MODEL_ID }],
+      failFirst: 1,
+    });
+    approvals = await startApprovalGate();
+
+    bot = await createBotSession({
+      botId: "bot-retry",
+      cwd,
+      sessionDir,
+      agentDir,
+      gatewayBaseUrl: gateway.baseUrl,
+      gatewayApiKey: "key-bot-retry",
+      approvals,
+      needsApproval: () => false,
+      sideEffects: [],
+      // provider.maxRetries 不设成 0 的话，503 会被供应商 SDK 自己那层重试吞掉，冒不到 Pi 这里。
+      settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 10, provider: { maxRetries: 0 } } },
+    });
+
+    const unsubscribeProbe = bot.session.subscribe((event) => {
+      if (event.type === "agent_end") agentEndCount += 1;
+      if (event.type === "agent_settled") settledCount += 1;
+    });
+    const run = recordRun(bot.session, { runId: "run-r", botId: "bot-retry", groupId: "group-r", messageId: "msg-r" }, approvals.blockedCallIds);
+    await bot.session.prompt("说句话");
+    run.unsubscribe();
+    unsubscribeProbe();
+    report = run.messages;
+  });
+
+  afterAll(async () => {
+    bot?.dispose();
+    await gateway?.close();
+    await approvals?.close();
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  it("e. 上游 503 触发一次重试，agent_end 发两遍而 run_done 只发一遍", () => {
+    expect(gateway.requestCount()).toBe(2);
+    expect(agentEndCount).toBe(2);
+    expect(settledCount).toBe(1);
+
+    expect(report.filter((m) => m.type === "run_done")).toHaveLength(1);
+    expect(report.at(-1)?.type).toBe("run_done");
+    expect(report.some((m) => m.type === "bot_text" && m.delta === "重试之后才说的话。")).toBe(true);
+  });
+});
