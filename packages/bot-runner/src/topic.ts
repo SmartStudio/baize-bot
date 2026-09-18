@@ -1,10 +1,17 @@
-import { AgentToControl, BotId, ChecklistItem, type ControlToAgent, type TopicTask } from "@baize/shared";
+import {
+  AgentToControl,
+  BotId,
+  ChecklistItem,
+  type ControlToAgent,
+  type HandoffId,
+  type TopicTask,
+} from "@baize/shared";
 import { type Static, Type } from "typebox";
 import { z } from "zod";
 import type { RunnerTool } from "./bot-session.js";
 import type { RunIdentity } from "./reporter.js";
 
-// 主题任务工具。Bot 靠它读任务卡、改清单、@ 群里别的 Bot。
+// 主题任务工具。Bot 靠它读任务卡、改清单、@ 群里别的 Bot、把活交接出去和接下别人的交接。
 // 错误一律 throw：pi-agent-core 的 agent-loop 在 catch 里把 error.message 做成 isError 的工具结果，
 // 运行器的 reporter 据此把 bot_tool_call 记成 failed。返回一条带错误字样的正常结果只会被记成 ok。
 
@@ -12,11 +19,13 @@ type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 
 export type GroupMember = PromptMessage["members"][number];
 
-/** 工具执行时手头要有的东西：这次运行的身份，加这次 prompt 的任务卡与成员名单。 */
+/** 工具执行时手头要有的东西：这次运行的身份，加这次 prompt 的任务卡、成员名单和待接手的交接。 */
 export interface ActiveRun {
   readonly run: RunIdentity;
   readonly task: PromptMessage["task"];
   readonly members: readonly GroupMember[];
+  /** 这次 prompt 是为了处理某份交接派来的才有值。 */
+  readonly handoffId: HandoffId | undefined;
 }
 
 const NO_SUMMARY = "无";
@@ -24,21 +33,23 @@ const NO_DUE = "不限";
 const NO_OWNER = "未指派";
 const EMPTY = "（空）";
 
+// 名单里没有的 id 原样渲染：丢了它就查不出是谁，而成员名单是可能滞后于任务卡的。
+const nameOf = (members: readonly GroupMember[], id: BotId): string =>
+  members.find((member) => member.id === id)?.name ?? id;
+
 /**
  * 任务卡的文本形式。全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。
  * 模型看到的行数因此是固定的，「这行没出现」和「这个字段是空的」不会混起来。
  * prompt 的第一段和 read_task 的返回共用这一份，两边看到的卡片不会飘。
  */
 export function renderTaskCard(task: TopicTask, members: readonly GroupMember[]): string {
-  // 名单里没有的 id 原样渲染：丢了它就查不出是谁，而成员名单是可能滞后于任务卡的。
-  const nameOf = (id: BotId): string => members.find((member) => member.id === id)?.name ?? id;
   const checklist =
     task.checklist.length === 0
       ? [EMPTY]
       : task.checklist.map(
           (item, index) =>
             `${index + 1}. [${item.done ? "x" : " "}] ${item.text}（经手：${
-              item.ownerBotId === null ? NO_OWNER : nameOf(item.ownerBotId)
+              item.ownerBotId === null ? NO_OWNER : nameOf(members, item.ownerBotId)
             }）`,
         );
 
@@ -46,7 +57,7 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     `${task.number} ${task.title}`,
     `说明：${task.summary === "" ? NO_SUMMARY : task.summary}`,
     `截止：${task.dueAt ?? NO_DUE}`,
-    `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(task.currentBotId)}`,
+    `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
     `群成员：${members.length === 0 ? EMPTY : members.map((member) => member.name).join("、")}`,
     "清单：",
     ...checklist,
@@ -61,6 +72,16 @@ const UPDATE_CHECKLIST_PARAMS = Type.Object({
 });
 
 const MENTION_PARAMS = Type.Object({ name: Type.String(), text: Type.String() });
+
+const HANDOFF_PARAMS = Type.Object({
+  to: Type.String(),
+  done: Type.String(),
+  notDone: Type.String(),
+  next: Type.String(),
+  // 范围不写进 schema：Pi 拿 schema 挡下的参数，模型收到的是一条 Validation 报错，看不出该写几。
+  // 交给下面的范围检查统一报，0 和越界给的是同一句能照着改的话。
+  checklistIndex: Type.Optional(Type.Integer()),
+});
 
 const Checklist = z.array(ChecklistItem).max(50);
 
@@ -83,6 +104,21 @@ function ownerResolver(active: ActiveRun): (written: string | undefined) => BotI
     if (idsOnCard.has(written)) return BotId.parse(written);
     throw new Error(`清单里的经手「${written}」不在这个群里。经手写群成员的名字：${[...idByName.keys()].join("、")}`);
   };
+}
+
+/**
+ * 把模型写的名字解析成群里的另一个 Bot。错误文本把还能选的名字列出来，不然模型只能接着猜。
+ * @ 和交接两处用同一条路，两边认的名字因此不会不一样。
+ */
+function otherMemberByName(active: ActiveRun, name: string, verb: string): GroupMember {
+  const target = active.members.find((member) => member.name === name);
+  if (target === undefined) {
+    const others = active.members.filter((member) => member.id !== active.run.botId).map((member) => member.name);
+    const hint = others.length === 0 ? "群里只有你自己。" : `可以${verb}的是：${others.join("、")}`;
+    throw new Error(`群里没有叫「${name}」的 Bot。${hint}`);
+  }
+  if (target.id === active.run.botId) throw new Error(`不能${verb}自己。`);
+  return target;
 }
 
 const resultText = (body: string): Awaited<ReturnType<RunnerTool["execute"]>> => ({
@@ -147,13 +183,7 @@ export function createTopicTools(options: {
       execute: async (_callId, params) => {
         const active = activeOrThrow("@ 队友");
         const { name, text: body } = params as Static<typeof MENTION_PARAMS>;
-        const target = active.members.find((member) => member.name === name);
-        if (target === undefined) {
-          const others = active.members.filter((member) => member.id !== active.run.botId).map((m) => m.name);
-          const hint = others.length === 0 ? "群里只有你自己。" : `可以 @ 的是：${others.join("、")}`;
-          throw new Error(`群里没有叫「${name}」的 Bot。${hint}`);
-        }
-        if (target.id === active.run.botId) throw new Error("不能 @ 自己。");
+        const target = otherMemberByName(active, name, " @ ");
         push({
           type: "mention",
           runId: active.run.runId,
@@ -163,6 +193,61 @@ export function createTopicTools(options: {
           text: body,
         });
         return resultText(`已经在群里 @ 了 ${target.name}。`);
+      },
+    },
+    {
+      name: "handoff_task",
+      label: "交接",
+      description:
+        "把这个任务交给群里另一个 Bot。要写清做了什么、没做什么、下一步从哪接，还可以指到清单的某一条，写任务卡上那条前面的序号。只有当前经手能交接，对方确认之后它才是当前经手。",
+      parameters: HANDOFF_PARAMS,
+      execute: async (_callId, params) => {
+        const active = activeOrThrow("交接");
+        const { to, done, notDone, next, checklistIndex } = params as Static<typeof HANDOFF_PARAMS>;
+        const task = active.task;
+        if (task === null) throw new Error("这个群没有任务卡，没有任务卡就没有可交接的活。");
+        if (task.currentBotId !== active.run.botId) {
+          const holder = task.currentBotId === null ? NO_OWNER : nameOf(active.members, task.currentBotId);
+          throw new Error(`当前经手是${holder}，不是你。只有当前经手能把活交出去。`);
+        }
+        const target = otherMemberByName(active, to, "交接给");
+        // 卡片上清单从 1 编号，模型照卡片写；协议里的 checklistIndex 是下标，从 0 起。在这个边界
+        // 上换算并卡住范围：越界的指针进了报文，接手的 Bot 拿到的就是一条指向不存在清单项的交接。
+        if (checklistIndex !== undefined && (checklistIndex < 1 || checklistIndex > task.checklist.length)) {
+          throw new Error(`清单一共 ${task.checklist.length} 条，没有第 ${checklistIndex} 条。`);
+        }
+        push({
+          type: "handoff",
+          runId: active.run.runId,
+          botId: active.run.botId,
+          groupId: active.run.groupId,
+          toBotId: target.id,
+          done,
+          notDone,
+          next,
+          checklistIndex: checklistIndex === undefined ? null : checklistIndex - 1,
+        });
+        return resultText(`已发交接报文给${target.name}，等它确认。`);
+      },
+    },
+    {
+      name: "accept_handoff",
+      label: "接手",
+      description:
+        "确认接下别人交给你的这份活。只有这次是为了让你处理一份交接派来的时候才用得上，接手之后你就是当前经手。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        const active = activeOrThrow("接手");
+        const handoffId = active.handoffId;
+        if (handoffId === undefined) throw new Error("这次没有要你接手的交接，用不上 accept_handoff。");
+        push({
+          type: "handoff_accept",
+          runId: active.run.runId,
+          botId: active.run.botId,
+          groupId: active.run.groupId,
+          handoffId,
+        });
+        return resultText("已确认接手，你现在是当前经手。");
       },
     },
   ];

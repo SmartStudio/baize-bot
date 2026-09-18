@@ -30,7 +30,7 @@ export interface RunnerConfig {
   readonly send: (message: AgentToControl) => void;
   /** 每个 Bot 的 Pi 目录建在这下面。Pi 的四个落盘点全部显式钉死，不碰 ~/.pi。 */
   readonly dataDir: string;
-  /** 扩展工具的注册点。主题任务的三个工具由运行器自己挂，排在这些之后。 */
+  /** 扩展工具的注册点。`src/topic.ts` 那组主题任务工具由运行器自己挂，排在这些之后。 */
   readonly extensionTools?: readonly RunnerTool[];
   /** 覆盖 Pi 的会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
   readonly settings?: PiSettings;
@@ -66,10 +66,20 @@ type RunnerState = "ready" | "stopped";
 // 任务卡放第一段：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
 // 群里的闲聊会把它挤远，模型更容易照着最后几句走。
 function composePrompt(message: PromptMessage): string {
-  const card = message.task === null ? "" : `任务卡：\n${renderTaskCard(message.task, message.members)}\n\n`;
-  if (message.context.length === 0) return `${card}${message.text}`;
-  const history = message.context.map((line) => `${line.from}：${line.text}`).join("\n");
-  return `${card}群里刚才说的：\n${history}\n\n当前这条：\n${message.text}`;
+  const sections: string[] = [];
+  if (message.task !== null) sections.push(`任务卡：\n${renderTaskCard(message.task, message.members)}`);
+  // 带 handoffId 的这条 prompt，正文就是控制面渲染好的交接报文：紧跟在任务卡后面单成一段，
+  // 并点名先确认接手。混在群聊后面当「当前这条」，模型会当成又一句闲话直接开干。
+  if (message.handoffId !== undefined) {
+    sections.push(`交接报文：\n${message.text}\n\n先调用 accept_handoff 确认接手，再照着上面的下一步往下做。`);
+  }
+  if (message.context.length > 0) {
+    sections.push(`群里刚才说的：\n${message.context.map((line) => `${line.from}：${line.text}`).join("\n")}`);
+  }
+  if (message.handoffId === undefined) {
+    sections.push(message.context.length === 0 ? message.text : `当前这条：\n${message.text}`);
+  }
+  return sections.join("\n\n");
 }
 
 export function createRunner(config: RunnerConfig): Runner {
@@ -133,6 +143,7 @@ export function createRunner(config: RunnerConfig): Runner {
       },
       task: message.task,
       members: message.members,
+      handoffId: message.handoffId,
     };
     let unsubscribe: (() => void) | null = null;
     try {

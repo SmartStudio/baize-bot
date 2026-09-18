@@ -19,7 +19,7 @@ import type { ActiveRun } from "./topic.js";
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
 
-/** 工具的注册点。主题任务的三个工具由 createRunner 拼进来，桌面操作、MCP 桥接、存 skill 还没做。 */
+/** 工具的注册点。`src/topic.ts` 那组工具由 createRunner 拼进来，桌面操作、MCP 桥接、存 skill 还没做。 */
 export type RunnerTool = ToolDefinition<TSchema>;
 
 export type PiSettings = Parameters<typeof SettingsManager.inMemory>[0];
