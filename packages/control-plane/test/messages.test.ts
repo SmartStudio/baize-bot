@@ -1,10 +1,4 @@
-import {
-  ApiError,
-  CreateBotResponse,
-  MessageListResponse,
-  SendMessageResponse,
-  type Message,
-} from "@baize/shared";
+import { ApiError, CreateBotResponse, MessageListResponse, SendMessageResponse, type Message } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -105,24 +99,18 @@ describe("读消息", () => {
       await client.post(`/api/groups/${groupId}/messages`, { text });
     }
 
-    const page = MessageListResponse.parse(
-      await (await client.get(`/api/groups/${groupId}/messages?limit=2`)).json(),
-    );
+    const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages?limit=2`)).json());
     expect(page.messages.map(textOf)).toEqual(["四", "五"]);
     expect(page.hasMore).toBe(true);
 
     const older = MessageListResponse.parse(
-      await (
-        await client.get(`/api/groups/${groupId}/messages?limit=2&before=${page.messages[0]?.id}`)
-      ).json(),
+      await (await client.get(`/api/groups/${groupId}/messages?limit=2&before=${page.messages[0]?.id}`)).json(),
     );
     expect(older.messages.map(textOf)).toEqual(["二", "三"]);
     expect(older.hasMore).toBe(true);
 
     const oldest = MessageListResponse.parse(
-      await (
-        await client.get(`/api/groups/${groupId}/messages?limit=2&before=${older.messages[0]?.id}`)
-      ).json(),
+      await (await client.get(`/api/groups/${groupId}/messages?limit=2&before=${older.messages[0]?.id}`)).json(),
     );
     expect(oldest.messages.map(textOf)).toEqual(["一"]);
     expect(oldest.hasMore, "翻到头了就没有更多").toBe(false);
@@ -130,9 +118,7 @@ describe("读消息", () => {
 
   it("新群是空的", async () => {
     const { client, groupId } = await clientWithGroup();
-    const page = MessageListResponse.parse(
-      await (await client.get(`/api/groups/${groupId}/messages`)).json(),
-    );
+    const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
     expect(page).toEqual({ messages: [], hasMore: false });
   });
 });
@@ -151,9 +137,7 @@ describe("别人的群", () => {
     expect(write.status).toBe(404);
     ApiError.parse(await write.json());
 
-    const mine = MessageListResponse.parse(
-      await (await client.get(`/api/groups/${groupId}/messages`)).json(),
-    );
+    const mine = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
     expect(mine.messages.map(textOf), "别人的写入不应当落进来").toEqual(["私密"]);
   });
 

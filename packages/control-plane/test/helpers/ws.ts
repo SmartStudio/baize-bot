@@ -51,10 +51,7 @@ export async function connectPush(port: number, cookie: string): Promise<PushCli
 
 export function expectUpgradeRejected(port: number, cookie: string | null): Promise<number> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(
-      `ws://localhost:${port}${WS_PATH}`,
-      cookie === null ? {} : { headers: { cookie } },
-    );
+    const socket = new WebSocket(`ws://localhost:${port}${WS_PATH}`, cookie === null ? {} : { headers: { cookie } });
     socket.once("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
     socket.once("open", () => reject(new Error("握手本应被拒绝")));
     socket.once("error", (err) => reject(err));

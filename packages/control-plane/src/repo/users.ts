@@ -1,4 +1,4 @@
-import type { User, UserId } from "@baize/shared";
+import type { User } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { settings, userCounters, users } from "../db/schema.js";
@@ -47,4 +47,3 @@ export async function authenticate(db: Db, email: string, password: string): Pro
   if (!ok || row === undefined) return null;
   return toUser(row);
 }
-

@@ -64,7 +64,10 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   };
 }
 
-function listeningPort(server: { address(): AddressInfo | string | null; once(event: string, fn: () => void): unknown }): Promise<number> {
+function listeningPort(server: {
+  address(): AddressInfo | string | null;
+  once(event: string, fn: () => void): unknown;
+}): Promise<number> {
   return new Promise((resolve, reject) => {
     const settle = () => {
       const address = server.address();
@@ -76,4 +79,3 @@ function listeningPort(server: { address(): AddressInfo | string | null; once(ev
     else settle();
   });
 }
-

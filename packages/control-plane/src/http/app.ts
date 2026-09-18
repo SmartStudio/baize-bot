@@ -22,12 +22,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
-import {
-  DEFAULT_MESSAGE_LIMIT,
-  appendUserMessage,
-  findGroupId,
-  listMessages,
-} from "../repo/messages.js";
+import { appendUserMessage, findGroupId, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { authenticate } from "../repo/users.js";

@@ -21,4 +21,3 @@ export function taskNumber(n: number): string {
   if (n < 0 || n > 9999) throw new Error(`主题任务编号 ${n} 放不进 T- 四位`);
   return `T-${String(n).padStart(4, "0")}`;
 }
-

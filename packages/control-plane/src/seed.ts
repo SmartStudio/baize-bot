@@ -26,8 +26,7 @@ export type SeedResult = {
 export async function seed(db: Db): Promise<SeedResult> {
   const existing = await findUserByEmail(db, DEV_EMAIL);
   const user =
-    existing ??
-    (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD, teamName: "白泽" }));
+    existing ?? (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD, teamName: "白泽" }));
 
   const present = new Set((await listBots(db, user.id)).map((item) => item.bot.name));
   const createdBots: string[] = [];

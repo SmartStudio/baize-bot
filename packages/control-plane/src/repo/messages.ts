@@ -20,10 +20,8 @@ export async function findGroupId(db: Db, ownerId: UserId, groupId: GroupId): Pr
   return row?.id ?? null;
 }
 
-
 export type ListMessagesResult =
-  | { readonly kind: "ok"; readonly page: MessagePage }
-  | { readonly kind: "unknown_cursor" };
+  { readonly kind: "ok"; readonly page: MessagePage } | { readonly kind: "unknown_cursor" };
 
 export async function listMessages(
   db: Db,
@@ -56,7 +54,7 @@ export async function listMessages(
     .limit(limit + 1);
 
   const hasMore = rows.length > limit;
-  const page = rows.slice(0, limit).reverse().map(toMessage);
+  const page = rows.slice(0, limit).toReversed().map(toMessage);
   return { kind: "ok", page: { messages: page, hasMore } };
 }
 

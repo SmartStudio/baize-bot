@@ -28,11 +28,7 @@ export function toBot(row: typeof schema.bots.$inferSelect): Bot {
   });
 }
 
-export function toGroup(
-  row: typeof schema.groups.$inferSelect,
-  botIds: readonly string[],
-  taskId: string,
-): Group {
+export function toGroup(row: typeof schema.groups.$inferSelect, botIds: readonly string[], taskId: string): Group {
   return Group.parse({
     id: row.id,
     ownerId: row.ownerId,
@@ -41,7 +37,6 @@ export function toGroup(
     createdAt: row.createdAt.toISOString(),
   });
 }
-
 
 export function toMessage(row: typeof schema.messages.$inferSelect): Message {
   return Message.parse({

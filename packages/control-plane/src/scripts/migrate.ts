@@ -5,7 +5,9 @@ import { databaseUrl } from "../env.js";
 const { sql } = connect(databaseUrl(), { max: 1 });
 try {
   const applied = await runMigrations(sql);
-  console.log(applied.length === 0 ? "迁移已是最新，没有要跑的" : `应用了 ${applied.length} 个迁移: ${applied.join(", ")}`);
+  console.log(
+    applied.length === 0 ? "迁移已是最新，没有要跑的" : `应用了 ${applied.length} 个迁移: ${applied.join(", ")}`,
+  );
 } finally {
   await sql.end();
 }

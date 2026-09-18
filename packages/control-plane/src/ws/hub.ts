@@ -28,7 +28,6 @@ export class PushHub {
     }
   }
 
-
   closeAll(): void {
     for (const sockets of this.#connections.values()) {
       for (const socket of sockets) socket.close();

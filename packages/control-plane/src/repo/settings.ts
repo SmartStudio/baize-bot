@@ -12,11 +12,7 @@ export async function getSettings(db: Db, userId: UserId): Promise<Settings> {
 
 export type SettingsPatch = { readonly [K in keyof Settings]?: Settings[K] | undefined };
 
-export async function updateSettings(
-  db: Db,
-  userId: UserId,
-  patch: SettingsPatch,
-): Promise<Settings> {
+export async function updateSettings(db: Db, userId: UserId, patch: SettingsPatch): Promise<Settings> {
   const columns: Partial<typeof settings.$inferInsert> = {};
   if (patch.theme !== undefined) columns.theme = patch.theme;
   if (patch.notify !== undefined) columns.notify = patch.notify;

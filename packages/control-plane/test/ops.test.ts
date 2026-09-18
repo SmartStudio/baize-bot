@@ -30,7 +30,7 @@ describe("迁移", () => {
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     `;
     // 库的排序规则不确定，下划线开头的表位置会变，所以在 JS 里排。
-    expect(rows.map((r) => r.table_name).sort()).toEqual([
+    expect(rows.map((r) => r.table_name).toSorted()).toEqual([
       "_migrations",
       "bots",
       "group_members",
@@ -75,11 +75,10 @@ describe("seed", () => {
     const client = server.client();
     await client.login(DEV_EMAIL, DEV_PASSWORD);
     const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
-    expect(list.items.map((i) => i.bot.name), "重复 seed 不应当多出 Bot").toEqual([
-      "小服",
-      "小销",
-      "小采",
-    ]);
+    expect(
+      list.items.map((i) => i.bot.name),
+      "重复 seed 不应当多出 Bot",
+    ).toEqual(["小服", "小销", "小采"]);
   });
 
   it("上一次只建了一半时补齐缺的那个", async () => {

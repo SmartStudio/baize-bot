@@ -22,11 +22,7 @@ export type BotListEntry = {
   readonly pendingApprovals: number;
 };
 
-export async function createBot(
-  db: Db,
-  ownerId: UserId,
-  input: CreateBotInput,
-): Promise<{ bot: Bot; group: Group }> {
+export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput): Promise<{ bot: Bot; group: Group }> {
   return db.transaction(async (tx) => {
     // 一次 UPDATE ... RETURNING 同时占住编号和色相，并发建 Bot 不会拿到同一个号。
     // 用户自己挑了色就不推进轮转，免得下一个自动分配的跳色。
@@ -57,10 +53,7 @@ export async function createBot(
       .returning();
     if (botRow === undefined) throw new Error("建 Bot 没有返回行");
 
-    const [groupRow] = await tx
-      .insert(groups)
-      .values({ id: newId(), ownerId, soloBotId: botRow.id })
-      .returning();
+    const [groupRow] = await tx.insert(groups).values({ id: newId(), ownerId, soloBotId: botRow.id }).returning();
     if (groupRow === undefined) throw new Error("建群没有返回行");
 
     await tx.insert(groupMembers).values({ groupId: groupRow.id, botId: botRow.id, position: 0 });
@@ -111,12 +104,7 @@ export async function findBot(db: Db, ownerId: UserId, botId: BotId): Promise<Bo
   return row === undefined ? null : toBot(row);
 }
 
-export async function updateBot(
-  db: Db,
-  ownerId: UserId,
-  botId: BotId,
-  input: UpdateBotInput,
-): Promise<Bot | null> {
+export async function updateBot(db: Db, ownerId: UserId, botId: BotId, input: UpdateBotInput): Promise<Bot | null> {
   const patch: Partial<typeof bots.$inferInsert> = {};
   if (input.name !== undefined) patch.name = input.name;
   if (input.tag !== undefined) patch.tag = input.tag;

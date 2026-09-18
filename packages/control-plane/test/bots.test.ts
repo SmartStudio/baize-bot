@@ -1,10 +1,4 @@
-import {
-  ApiError,
-  BotListResponse,
-  CreateBotResponse,
-  UpdateBotResponse,
-  type BotHue,
-} from "@baize/shared";
+import { ApiError, BotListResponse, CreateBotResponse, UpdateBotResponse, type BotHue } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { groupMembers, tasks } from "../src/db/schema.js";
@@ -46,10 +40,7 @@ describe("建 Bot", () => {
       const { bot, group } = CreateBotResponse.parse(await response.json());
 
       expect(group.botIds, "单 Bot 群的成员只有它自己").toEqual([bot.id]);
-      const members = await database.db
-        .select()
-        .from(groupMembers)
-        .where(eq(groupMembers.groupId, group.id));
+      const members = await database.db.select().from(groupMembers).where(eq(groupMembers.groupId, group.id));
       expect(members.map((m) => m.botId)).toEqual([bot.id]);
 
       const [task] = await database.db.select().from(tasks).where(eq(tasks.id, group.taskId));
@@ -270,7 +261,7 @@ describe("并发建 Bot", () => {
         return task?.number ?? "";
       }),
     );
-    expect(numbers.sort()).toEqual(["T-1001", "T-1002", "T-1003", "T-1004", "T-1005"]);
+    expect(numbers.toSorted()).toEqual(["T-1001", "T-1002", "T-1003", "T-1004", "T-1005"]);
     expect(new Set(created.map((c) => c.bot.hue)).size, "五个自动分配的色相互不相同").toBe(5);
   });
 });

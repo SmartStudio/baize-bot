@@ -5,3 +5,4 @@ bot-application-prototype
 research
 *.md
 packages/web/src/ds/tokens/
+packages/control-plane/drizzle/

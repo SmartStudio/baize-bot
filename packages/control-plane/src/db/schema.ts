@@ -1,16 +1,6 @@
 import type { BotHue, ChecklistItem, MessageBody, TaskStatus as TaskStatusSchema } from "@baize/shared";
 import type { z } from "zod";
-import {
-  bigserial,
-  boolean,
-  index,
-  integer,
-  jsonb,
-  pgTable,
-  primaryKey,
-  text,
-  timestamp,
-} from "drizzle-orm/pg-core";
+import { bigserial, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，这里从 schema 推回来。
 type TaskStatus = z.infer<typeof TaskStatusSchema>;

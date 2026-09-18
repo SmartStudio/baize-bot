@@ -50,9 +50,7 @@ describe("登录", () => {
     const wrongPassword = await server.client().login(email, "错的密码");
 
     expect(wrongEmail.status).toBe(401);
-    expect(ApiError.parse(await wrongEmail.json()).error).toBe(
-      ApiError.parse(await wrongPassword.json()).error,
-    );
+    expect(ApiError.parse(await wrongEmail.json()).error).toBe(ApiError.parse(await wrongPassword.json()).error);
   });
 
   it("请求体不合法时返回 400", async () => {
@@ -74,9 +72,7 @@ describe("登录态", () => {
 
   it("没有 cookie、伪造 cookie、退出后的 cookie 都握不上 WebSocket", async () => {
     await expect(expectUpgradeRejected(server.server.port, null)).resolves.toBe(401);
-    await expect(
-      expectUpgradeRejected(server.server.port, `${SESSION_COOKIE}=forged-token`),
-    ).resolves.toBe(401);
+    await expect(expectUpgradeRejected(server.server.port, `${SESSION_COOKIE}=forged-token`)).resolves.toBe(401);
 
     const client = server.client();
     await client.login(email, PASSWORD);

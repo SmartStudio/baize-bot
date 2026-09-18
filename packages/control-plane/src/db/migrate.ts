@@ -15,7 +15,7 @@ const MIGRATION_LOCK = 0x6261697a;
  * 整批在一个事务里，并发的第二个进程被咨询锁挡在外面，进来时已经能看到前一个的记账。
  */
 export async function runMigrations(sql: Sql): Promise<string[]> {
-  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).sort();
+  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).toSorted();
 
   return sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK})`;

@@ -60,9 +60,7 @@ describe("设置", () => {
   it("免打扰时段可以清成 null", async () => {
     const client = await loggedInClient();
     await client.patch("/api/settings", { dndFrom: "22:00", dndTo: "08:00" });
-    const cleared = Settings.parse(
-      await (await client.patch("/api/settings", { dndFrom: null, dndTo: null })).json(),
-    );
+    const cleared = Settings.parse(await (await client.patch("/api/settings", { dndFrom: null, dndTo: null })).json());
     expect(cleared.dndFrom).toBeNull();
     expect(cleared.dndTo).toBeNull();
   });
