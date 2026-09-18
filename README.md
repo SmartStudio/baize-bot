@@ -9,6 +9,7 @@
 - `packages/web` Web 客户端。Vite 加 React 18 加 react-router。样式只用 `bot-application-prototype/_ds/.../tokens` 里的变量。端口 5173，`/api` 代理到 3001。单跑前端用 `pnpm --filter @baize/web mock` 起假控制面；要连真控制面就先 `docker compose up -d`、`pnpm --filter @baize/control-plane migrate`、`pnpm --filter @baize/control-plane seed`，再 `pnpm dev`。
 - `packages/computer-agent` 云电脑里的常驻进程。出站 WebSocket 连控制面的 `/agent`。
 - `packages/bot-runner` Bot 运行器。用 @earendil-works/pi-coding-agent 的 SDK，每个 Bot 一个 AgentSession。
+- `packages/e2e` 端到端联调。真控制面、真电脑代理、真运行器一起跑，只有模型上游是假的。见下面「端到端」。
 - `spikes/` 技术验证，不是产品代码。
 
 ## 约定
@@ -61,4 +62,17 @@ pnpm --filter @baize/control-plane seed
 pnpm dev
 ```
 
+`pnpm dev` 起控制面和 Web。要连云电脑就把 seed 打印的 `COMPUTER_ID=` 和 `AGENT_TOKEN=` 抄进根目录的 `.env`，再跑 `pnpm dev --agent`，电脑代理会跟着一起起来。
+
 `pnpm check` 跑类型检查、lint 和测试。
+
+## 端到端
+
+`packages/e2e` 里一条用例走完整条链路：Web 发的那个 HTTP 请求进控制面，控制面派活给电脑代理，代理里的运行器用 Pi 跑一次 `ls`，结果经模型网关回到群里，最后落一张花费卡和一行 `runs`。只有模型上游是假的，其余都是产品代码。
+
+```
+docker compose up -d
+pnpm --filter @baize/e2e test
+```
+
+它自己建一个临时库、临时 Bot 数据目录、系统分配的端口，跑完都拆掉，所以重复跑和与 `pnpm dev` 并行跑都不打架。用例最后会打印从 POST 到第一条 `message_delta` 的毫秒数，这是「一句话到 Bot 第一个字」的基线。

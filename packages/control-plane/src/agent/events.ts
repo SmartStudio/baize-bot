@@ -140,13 +140,14 @@ const ERROR_REASONS: Record<AgentError["code"], string> = {
 };
 
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
-  // agent_error 报文里没有群号，只能落到这台电脑最近一次还没结束的活所在的群。
-  const open = await latestOpenRun(deps.db, conn.ownerId);
-  if (open === null) {
+  // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
+  const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
+  const groupId = named ?? (await latestOpenRun(deps.db, conn.ownerId))?.groupId ?? null;
+  if (groupId === null) {
     console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);
     return;
   }
-  await appendAndPush(deps, conn.ownerId, open.groupId, {
+  await appendAndPush(deps, conn.ownerId, groupId, {
     kind: "system",
     text: `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
   });

@@ -1,0 +1,24 @@
+{
+  "name": "@baize/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@baize/bot-runner": "workspace:*",
+    "@baize/computer-agent": "workspace:*",
+    "@baize/control-plane": "workspace:*",
+    "@baize/shared": "workspace:*",
+    "postgres": "^3.4.5",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

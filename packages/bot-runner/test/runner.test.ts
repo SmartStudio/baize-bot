@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { AgentToControl, BotId, GroupId, RunId, type ToolConnection } from "@baize/shared";
@@ -224,13 +224,49 @@ describe("运行器跑一次 prompt", () => {
     expect(h.sideEffects).toEqual(["list_files:/work"]);
   });
 
-  it("config 里没有的 botId 回 agent_error，不跑任何东西", async () => {
+  it("config 里没有的 botId 回 agent_error，带上这条 prompt 的群号", async () => {
     const h = await startHarness({ bots: ["bot-1"], script: scriptBy([]) });
 
     await h.runner.prompt(promptMessage("bot-别的", "run-x", "列目录"));
 
     expect(shape(h.sent)).toEqual(["agent_error"]);
+    const error = h.sent[0];
+    expect(error?.type === "agent_error" && error.groupId).toBe("group-1");
     expect(h.gateway.requestCount()).toBe(0);
+  });
+
+  // 关掉内置工具的话「看看电脑里有哪些文件」一件也做不了：bash 没注册，模型点它只会拿到一条错误工具结果。
+  it("Pi 的内置 bash 工具是开着的，命令真的在 Bot 的 work 目录里跑了", async () => {
+    const toolResults: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        if (!isFollowUpTurn(req)) {
+          return {
+            textChunks: [],
+            toolCall: { id: "call-1", name: "bash", args: { command: "ls" } },
+            usage: { input: 800, output: 20 },
+          };
+        }
+        toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+        return { textChunks: ["有 ", "report.md。"], usage: { input: 900, output: 12 } };
+      },
+    });
+    const { workDir } = botDirs(h.dataDir, BotId.parse("bot-1"));
+    mkdirSync(workDir, { recursive: true });
+    writeFileSync(join(workDir, "report.md"), "报告\n");
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看电脑里有哪些文件"));
+
+    expect(shape(h.sent)).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_text:false",
+      "bot_text:false",
+      "bot_text:true",
+      "run_done",
+    ]);
+    expect(toolResults.join(""), "ls 的真实输出要回到模型那一轮").toContain("report.md");
   });
 });
 
