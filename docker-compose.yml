@@ -1,3 +1,6 @@
+# 项目名写死。不写的话跟着目录走，每个 git 工作树都成一个新项目，容器名却写死是 baize-postgres，第二个工作树里 up 就撞名。
+name: baize
+
 services:
   postgres:
     image: postgres:16
