@@ -14,6 +14,7 @@ export const LoginResponse = z.object({ user: User });
 // GET /api/me
 export const MeResponse = z.object({ user: User });
 
+// GET /api/computer  响应是 domain 里的 Computer。首次登录时建出来，状态先是 creating。
 // GET /api/bots  侧栏需要每个 Bot 的单 Bot 群和最近一条消息。
 export const BotListItem = z.object({
   bot: Bot,
@@ -63,7 +64,7 @@ export type Settings = z.infer<typeof Settings>;
 export const UpdateSettingsRequest = Settings.partial();
 
 // WebSocket /api/ws  登录后客户端连上，服务端推送。客户端不发报文。
-// message_delta 是流式回复的契约，M2 的 Web 和控制面都还没实现，先整条 message 推。
+// Bot 流式回复先推一条空正文的 message，随后每段 delta 推一条 message_delta，客户端按 messageId 往上追加。
 export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: Message }),
   z.object({

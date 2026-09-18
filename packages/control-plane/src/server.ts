@@ -1,8 +1,12 @@
 import { serve } from "@hono/node-server";
 import { parse as parseCookie } from "hono/utils/cookie";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
+import { AGENT_PATH, AgentHub } from "./agent/hub.js";
 import type { Db } from "./db/client.js";
+import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
 import { PushHub } from "./ws/hub.js";
@@ -19,49 +23,104 @@ export type StartOptions = {
   readonly db: Db;
   readonly port: number;
   readonly secureCookie?: boolean;
+  readonly config?: RuntimeConfig;
+};
+
+/** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
+export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
+  publicBaseUrl: null,
+  gatewayModel: DEFAULT_GATEWAY_MODEL,
+  upstreamBaseUrl: DEFAULT_UPSTREAM_BASE_URL,
+  upstreamApiKey: "",
+  priceInputPerM: 0,
+  priceOutputPerM: 0,
 };
 
 export async function startServer(options: StartOptions): Promise<RunningServer> {
+  const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
   const hub = new PushHub();
-  const app = createApp({ db: options.db, hub, secureCookie: options.secureCookie ?? false });
-  const server = serve({ fetch: app.fetch, port: options.port });
-  const wss = new WebSocketServer({ noServer: true });
 
-  // WebSocket 和 HTTP 用同一份 cookie 认身份，握手时认不出人就直接拒绝升级。
+  // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
+  let publicBaseUrl = config.publicBaseUrl;
+  const agents = new AgentHub({
+    db: options.db,
+    push: hub,
+    gatewayModel: config.gatewayModel,
+    priceInputPerM: config.priceInputPerM,
+    priceOutputPerM: config.priceOutputPerM,
+    gatewayBaseUrl: () => publicBaseUrl ?? "",
+  });
+
+  const app = createApp({
+    db: options.db,
+    hub,
+    agents,
+    secureCookie: options.secureCookie ?? false,
+    gateway: {
+      model: config.gatewayModel,
+      upstreamBaseUrl: config.upstreamBaseUrl,
+      upstreamApiKey: config.upstreamApiKey,
+    },
+  });
+  const server = serve({ fetch: app.fetch, port: options.port });
+  const clients = new WebSocketServer({ noServer: true });
+  const agentSockets = new WebSocketServer({ noServer: true });
+
   server.on("upgrade", (request, socket, head) => {
-    if (new URL(request.url ?? "/", "http://localhost").pathname !== WS_PATH) {
-      socket.destroy();
-      return;
-    }
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
     // http 模块在 emit upgrade 时已摘掉自己的 error 监听，认身份这段时间断连会变成未捕获异常。
     socket.on("error", () => socket.destroy());
 
-    const token = parseCookie(request.headers.cookie ?? "")[SESSION_COOKIE] ?? null;
-    const authenticated = token === null ? Promise.resolve(null) : userForSession(options.db, token);
-    void authenticated
-      .then((user) => {
-        if (user === null) {
-          socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-          return;
-        }
-        wss.handleUpgrade(request, socket, head, (ws) => hub.add(user.id, ws));
-      })
-      .catch(() => socket.destroy());
+    // 电脑代理不带 cookie，身份由它自己报的 hello 定，所以升级这一步不认人。
+    if (path === AGENT_PATH) {
+      agentSockets.handleUpgrade(request, socket, head, (ws) => agents.accept(ws));
+      return;
+    }
+    if (path !== WS_PATH) {
+      socket.destroy();
+      return;
+    }
+    acceptClient(options.db, clients, hub, request, socket, head);
   });
 
   const port = await listeningPort(server);
+  publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
   return {
     port,
     hub,
     close: async () => {
       hub.closeAll();
-      wss.close();
+      agents.closeAll();
+      clients.close();
+      agentSockets.close();
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
       );
     },
   };
+}
+
+// WebSocket 和 HTTP 用同一份 cookie 认身份，握手时认不出人就直接拒绝升级。
+function acceptClient(
+  db: Db,
+  clients: WebSocketServer,
+  hub: PushHub,
+  request: IncomingMessage,
+  socket: Duplex,
+  head: Buffer,
+): void {
+  const token = parseCookie(request.headers.cookie ?? "")[SESSION_COOKIE] ?? null;
+  const authenticated = token === null ? Promise.resolve(null) : userForSession(db, token);
+  void authenticated
+    .then((user) => {
+      if (user === null) {
+        socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        return;
+      }
+      clients.handleUpgrade(request, socket, head, (ws) => hub.add(user.id, ws));
+    })
+    .catch(() => socket.destroy());
 }
 
 function listeningPort(server: {

@@ -1,7 +1,8 @@
-import type { BotHue, User } from "@baize/shared";
+import type { BotHue, ComputerId, User } from "@baize/shared";
 import type { Db } from "./db/client.js";
 import { createBot, listBots } from "./repo/bots.js";
-import { appendUserMessage } from "./repo/messages.js";
+import { ensureComputer } from "./repo/computers.js";
+import { appendMessage } from "./repo/messages.js";
 import { createUser, findUserByEmail } from "./repo/users.js";
 
 export const DEV_EMAIL = "chen@baize.dev";
@@ -17,6 +18,9 @@ export type SeedResult = {
   readonly user: User;
   readonly createdUser: boolean;
   readonly createdBots: string[];
+  readonly computerId: ComputerId;
+  /** 只有这一次建出电脑时才拿得到 token 明文，已经有电脑时是 null。 */
+  readonly computerToken: string | null;
 };
 
 /**
@@ -28,6 +32,8 @@ export async function seed(db: Db): Promise<SeedResult> {
   const user =
     existing ?? (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD, teamName: "白泽" }));
 
+  const computer = await ensureComputer(db, user.id);
+
   const present = new Set((await listBots(db, user.id)).map((item) => item.bot.name));
   const createdBots: string[] = [];
   for (const spec of DEV_BOTS) {
@@ -38,9 +44,15 @@ export async function seed(db: Db): Promise<SeedResult> {
       hue: spec.hue,
       description: `${spec.tag}方向的活先找我。`,
     });
-    await appendUserMessage(db, group.id, spec.firstMessage);
+    await appendMessage(db, group.id, { kind: "user", text: spec.firstMessage });
     createdBots.push(bot.name);
   }
 
-  return { user, createdUser: existing === null, createdBots };
+  return {
+    user,
+    createdUser: existing === null,
+    createdBots,
+    computerId: computer.computer.id,
+    computerToken: computer.token,
+  };
 }

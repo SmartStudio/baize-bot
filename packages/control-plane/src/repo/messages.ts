@@ -1,7 +1,7 @@
-import type { GroupId, Message, MessageId, UserId } from "@baize/shared";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { BotId, type GroupId, type Message, type MessageBody, type MessageId, type UserId } from "@baize/shared";
+import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { groups, messages } from "../db/schema.js";
+import { bots, groupMembers, groups, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toMessage } from "./rows.js";
 
@@ -58,16 +58,74 @@ export async function listMessages(
   return { kind: "ok", page: { messages: page, hasMore } };
 }
 
-export async function appendUserMessage(db: Db, groupId: string, text: string): Promise<Message> {
-  const [row] = await db
-    .insert(messages)
-    .values({
-      id: newId(),
-      groupId,
-      body: { kind: "user", text },
-      createdAt: new Date(),
-    })
-    .returning();
+export async function appendMessage(db: Db, groupId: string, body: MessageBody): Promise<Message> {
+  const [row] = await db.insert(messages).values({ id: newId(), groupId, body, createdAt: new Date() }).returning();
   if (row === undefined) throw new Error("写消息没有返回行");
   return toMessage(row);
+}
+
+export type AppendResult = { readonly message: Message; readonly created: boolean };
+
+/**
+ * 用报文里给的编号写一条。同一个编号重复到达时不再插入，回库里已有的那条。
+ * bot_text 的第一条 delta 和它的重发走的就是这里，靠主键冲突做幂等。
+ */
+export async function appendMessageWithId(
+  db: Db,
+  messageId: MessageId,
+  groupId: string,
+  body: MessageBody,
+): Promise<AppendResult> {
+  const [inserted] = await db
+    .insert(messages)
+    .values({ id: messageId, groupId, body, createdAt: new Date() })
+    .onConflictDoNothing({ target: messages.id })
+    .returning();
+  if (inserted !== undefined) return { message: toMessage(inserted), created: true };
+
+  const [existing] = await db.select().from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (existing === undefined) throw new Error(`消息 ${messageId} 既没插进去也查不到`);
+  return { message: toMessage(existing), created: false };
+}
+
+/**
+ * 把一段 delta 接到 Bot 消息正文后面。累加在一条 UPDATE 里做完，
+ * 所以不用在内存里攒正文，进程重启也不会把已落库的正文冲掉。
+ */
+export async function appendBotDelta(
+  db: Db,
+  messageId: MessageId,
+  delta: string,
+  done: boolean,
+): Promise<Message | null> {
+  const [row] = await db
+    .update(messages)
+    .set({
+      body: sql`jsonb_set(
+        jsonb_set(${messages.body}, '{text}', to_jsonb((${messages.body} ->> 'text') || ${delta}::text)),
+        '{streaming}',
+        ${done ? sql`'false'::jsonb` : sql`'true'::jsonb`}
+      )`,
+    })
+    .where(eq(messages.id, messageId))
+    .returning();
+  return row === undefined ? null : toMessage(row);
+}
+
+export async function replaceMessageBody(db: Db, messageId: MessageId, body: MessageBody): Promise<Message | null> {
+  const [row] = await db.update(messages).set({ body }).where(eq(messages.id, messageId)).returning();
+  return row === undefined ? null : toMessage(row);
+}
+
+export type GroupBot = { readonly id: BotId; readonly name: string };
+
+/** 群成员按展示顺序。M3 只有单 Bot 群，派活取第一个。 */
+export async function listGroupBots(db: Db, groupId: string): Promise<GroupBot[]> {
+  const rows = await db
+    .select({ id: bots.id, name: bots.name })
+    .from(groupMembers)
+    .innerJoin(bots, eq(bots.id, groupMembers.botId))
+    .where(eq(groupMembers.groupId, groupId))
+    .orderBy(asc(groupMembers.position));
+  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name }));
 }

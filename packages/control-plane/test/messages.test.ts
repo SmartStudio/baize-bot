@@ -1,5 +1,6 @@
 import { ApiError, CreateBotResponse, MessageListResponse, SendMessageResponse, type Message } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { appendMessage } from "../src/repo/messages.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeUser } from "./helpers/fixtures.js";
@@ -95,8 +96,9 @@ describe("发消息", () => {
 describe("读消息", () => {
   it("按时间正序返回，翻页用 before 往前取", async () => {
     const { client, groupId } = await clientWithGroup();
+    // 直接写库排状态。走 POST 的话派活那一步还会在中间插系统消息，这里只想验翻页。
     for (const text of ["一", "二", "三", "四", "五"]) {
-      await client.post(`/api/groups/${groupId}/messages`, { text });
+      await appendMessage(database.db, groupId, { kind: "user", text });
     }
 
     const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages?limit=2`)).json());
@@ -126,7 +128,7 @@ describe("读消息", () => {
 describe("别人的群", () => {
   it("读和写都返回 404", async () => {
     const { client, groupId } = await clientWithGroup();
-    await client.post(`/api/groups/${groupId}/messages`, { text: "私密" });
+    await appendMessage(database.db, groupId, { kind: "user", text: "私密" });
 
     const stranger = await loggedInClient();
     const read = await stranger.get(`/api/groups/${groupId}/messages`);

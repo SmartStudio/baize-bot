@@ -1,6 +1,7 @@
 import {
   BotId,
   BotListResponse,
+  Computer,
   CreateBotRequest,
   CreateBotResponse,
   GroupId,
@@ -20,15 +21,25 @@ import {
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
+import { dispatchUserMessage } from "../agent/dispatch.js";
+import type { AgentHub } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
 import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
-import { appendUserMessage, findGroupId, listMessages } from "../repo/messages.js";
+import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
+import { appendMessage, findGroupId, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { authenticate } from "../repo/users.js";
 import type { PushHub } from "../ws/hub.js";
+import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 
-export type AppDeps = { readonly db: Db; readonly hub: PushHub; readonly secureCookie: boolean };
+export type AppDeps = {
+  readonly db: Db;
+  readonly hub: PushHub;
+  readonly agents: AgentHub;
+  readonly secureCookie: boolean;
+  readonly gateway: Omit<GatewayDeps, "db">;
+};
 
 type Env = { Variables: { user: User } };
 
@@ -38,8 +49,10 @@ const NOT_FOUND = { error: "没有这个对象" } as const;
 const UNAUTHORIZED = { error: "请先登录" } as const;
 
 export function createApp(deps: AppDeps): Hono<Env> {
-  const { db, hub } = deps;
+  const { agents, db, hub } = deps;
   const app = new Hono<Env>();
+
+  app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
 
   app.use("/api/*", async (c, next) => {
     if (PUBLIC_PATHS.has(c.req.path)) return next();
@@ -56,6 +69,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const user = await authenticate(db, body.value.email, body.value.password);
     if (user === null) return c.json({ error: "邮箱或密码不对" }, 401);
     const token = await createSession(db, user.id);
+    // 首次登录时给他建云电脑。规格里的「首次登录时后台创建云电脑」，状态先是创建中。
+    await ensureComputer(db, user.id);
     setCookie(c, SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: "Lax",
@@ -75,6 +90,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
   app.get("/api/me", (c) => c.json(MeResponse.parse({ user: c.get("user") })));
 
+  app.get("/api/computer", async (c) => {
+    const computer = await findComputerByOwner(db, c.get("user").id);
+    if (computer === null) return c.json(NOT_FOUND, 404);
+    return c.json(Computer.parse(computer));
+  });
+
   app.get("/api/bots", async (c) => {
     const items = await listBots(db, c.get("user").id);
     return c.json(BotListResponse.parse({ items }));
@@ -84,6 +105,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, CreateBotRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     const created = await createBot(db, c.get("user").id, body.value);
+    await agents.sendConfig(c.get("user").id);
     return c.json(CreateBotResponse.parse(created), 201);
   });
 
@@ -94,6 +116,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
     const bot = await updateBot(db, c.get("user").id, botId.data, body.value);
     if (bot === null) return c.json(NOT_FOUND, 404);
+    await agents.sendConfig(c.get("user").id);
     hub.push(c.get("user").id, { type: "bot_updated", bot });
     return c.json(UpdateBotResponse.parse({ bot }));
   });
@@ -103,6 +126,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!botId.success) return c.json(NOT_FOUND, 404);
     const deleted = await deleteBot(db, c.get("user").id, botId.data);
     if (!deleted) return c.json(NOT_FOUND, 404);
+    await agents.sendConfig(c.get("user").id);
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
     return c.body(null, 204);
   });
@@ -135,8 +159,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, SendMessageRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 
-    const message = await appendUserMessage(db, owned, body.value.text);
+    const message = await appendMessage(db, owned, { kind: "user", text: body.value.text });
     hub.push(c.get("user").id, { type: "message", message });
+    await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
     return c.json(SendMessageResponse.parse({ message }), 201);
   });
 

@@ -1,6 +1,17 @@
-import type { BotHue, ChecklistItem, MessageBody, TaskStatus as TaskStatusSchema } from "@baize/shared";
+import type { BotHue, ChecklistItem, ComputerStatus, MessageBody, TaskStatus as TaskStatusSchema } from "@baize/shared";
 import type { z } from "zod";
-import { bigserial, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  bigserial,
+  boolean,
+  index,
+  integer,
+  jsonb,
+  numeric,
+  pgTable,
+  primaryKey,
+  text,
+  timestamp,
+} from "drizzle-orm/pg-core";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，这里从 schema 推回来。
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
@@ -127,4 +138,45 @@ export const messages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (t) => [index("messages_group_id_seq_idx").on(t.groupId, t.seq)],
+);
+
+// 每个用户一台。token 给电脑代理登录 /agent，gateway key 给模型网关认账，两把都是 32 字节随机数，
+// 库里只存 sha256：明文只在生成的那一刻存在，比对时按哈希查，所以不能加盐。
+export const computers = pgTable("computers", {
+  id: text("id").primaryKey(),
+  ownerId: text("owner_id")
+    .notNull()
+    .unique()
+    .references(() => users.id, { onDelete: "cascade" }),
+  status: text("status").$type<ComputerStatus>().notNull().default("creating"),
+  tokenHash: text("token_hash").notNull(),
+  gatewayKeyHash: text("gateway_key_hash").notNull(),
+  host: text("host"),
+  idleSince: timestamp("idle_since", { withTimezone: true }),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+  createdAt: createdAt(),
+});
+
+// 规格里的用量记录。一次派活一行，ended_at 为空表示还在跑，run_done 靠「只更新 ended_at 为空的那行」做幂等。
+export const runs = pgTable(
+  "runs",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    triggerMessageId: text("trigger_message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    steps: integer("steps").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    amount: numeric("amount", { precision: 14, scale: 6 }).notNull().default("0"),
+  },
+  (t) => [index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt), index("runs_bot_id_idx").on(t.botId)],
 );
