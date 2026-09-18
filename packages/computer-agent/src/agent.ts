@@ -1,7 +1,11 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { WebSocket } from "ws";
 import { type AgentToControl, type ComputerId, ControlToAgent } from "@baize/shared";
-import { createRunner, type Runner } from "@baize/bot-runner";
+import { createRunner, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
+
+export type RunnerFactory = (config: RunnerConfig) => Runner;
 
 export interface AgentOptions {
   readonly url: string;
@@ -11,6 +15,10 @@ export interface AgentOptions {
   readonly heartbeatMs?: number;
   readonly backoff?: BackoffOptions;
   readonly log?: (line: string) => void;
+  /** 每个 Bot 的 Pi 目录建在这下面。 */
+  readonly dataDir?: string;
+  /** 换掉真运行器。测试用它免去起真模型网关。 */
+  readonly makeRunner?: RunnerFactory;
 }
 
 export interface AgentHandle {
@@ -27,6 +35,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const backoff = options.backoff ?? defaultBackoff;
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
+  const dataDir = options.dataDir ?? process.env["BAIZE_DATA_DIR"] ?? join(homedir(), ".baize", "bots");
+  const makeRunner = options.makeRunner ?? createRunner;
 
   let link: Link = { phase: "stopped" };
   let heartbeat: NodeJS.Timeout | null = null;
@@ -74,10 +84,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "config": {
         const previous = runner;
         // 先同步换上新 runner，再去停旧的。中间不能有 await，否则紧跟其后的 prompt 会看到还没建好的 runner。
-        runner = createRunner({
+        runner = makeRunner({
           bots: message.bots,
           tools: message.tools,
           modelGateway: message.modelGateway,
+          dataDir,
           send,
         });
         await previous?.stop();
@@ -92,10 +103,19 @@ export function startAgent(options: AgentOptions): AgentHandle {
         await runner.prompt(message);
         return;
       }
-      case "approval_result":
+      case "approval_result": {
+        if (runner === null) {
+          log(`还没收到 config，丢弃 run ${message.runId} 的审批结论`);
+          return;
+        }
+        runner.approve(message.runId, message.callId, message.approved);
+        return;
+      }
       case "pause":
+        await runner?.pause(message.botId);
+        return;
       case "resume":
-        log(`${message.type} 在骨架里还没实现`);
+        await runner?.resume(message.botId);
         return;
     }
   };
