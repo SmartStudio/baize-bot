@@ -1,4 +1,4 @@
-import type { AgentToControl, ControlToAgent, Message, MessageBody, UserId } from "@baize/shared";
+import type { AgentToControl, BotId, GroupId, Message, MessageBody, RunId, UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { createApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
@@ -7,18 +7,23 @@ import {
   appendMessage,
   appendMessageWithId,
   findGroupId,
+  listGroupBots,
   replaceMessageBody,
 } from "../repo/messages.js";
-import { finishRun, latestOpenRun } from "../repo/runs.js";
+import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
+import { replaceChecklist } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
-import type { AgentConnection } from "./hub.js";
+import { MENTION_LOOP_NOTICE, dispatchBotMention } from "./dispatch.js";
+import type { AgentHub, AgentConnection } from "./hub.js";
+import type { MentionLoopGuard } from "./mention-loop.js";
 
 export type AgentEventDeps = {
   readonly db: Db;
   readonly push: PushHub;
+  readonly agents: AgentHub;
+  readonly mentionLoop: MentionLoopGuard;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
-  readonly reply: (conn: AgentConnection, message: ControlToAgent) => void;
 };
 
 /** 电脑代理报上来的事件。每一条都写进 messages 表再推给 Web 客户端，群消息是事实来源。 */
@@ -52,7 +57,28 @@ export async function handleAgentEvent(
     case "approval_request":
       await onApprovalRequest(deps, conn, message);
       return;
+    case "task_checklist":
+      await onTaskChecklist(deps, conn, message);
+      return;
+    case "mention":
+      await onMention(deps, conn, message);
+      return;
   }
+}
+
+/** 群要是这台电脑主人的，run 要是这个 Bot 在这个群里的。任一不成立整条丢掉。 */
+async function resolveRun(
+  deps: AgentEventDeps,
+  conn: AgentConnection,
+  event: { readonly runId: RunId; readonly botId: BotId; readonly groupId: GroupId },
+): Promise<string | null> {
+  // 报文里的群号是外部输入，findGroupId 按归属人过滤，不是这台电脑主人的群整条丢掉。
+  const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
+  if (groupId === null) return null;
+  // 外键只保证 runId 存在，管不了它指到哪个群：不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。
+  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId)) return groupId;
+  console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
+  return null;
 }
 
 type BotText = Extract<AgentToControl, { type: "bot_text" }>;
@@ -60,10 +86,11 @@ type ToolCall = Extract<AgentToControl, { type: "bot_tool_call" }>;
 type RunDone = Extract<AgentToControl, { type: "run_done" }>;
 type AgentError = Extract<AgentToControl, { type: "agent_error" }>;
 type ApprovalRequest = Extract<AgentToControl, { type: "approval_request" }>;
+type TaskChecklist = Extract<AgentToControl, { type: "task_checklist" }>;
+type Mention = Extract<AgentToControl, { type: "mention" }>;
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
-  // 报文里的群号是外部输入，findGroupId 按归属人过滤，不是这台电脑主人的群整条丢掉。
-  const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
+  const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
 
   const appended = await appendMessageWithId(deps.db, event.messageId, groupId, {
@@ -90,7 +117,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
 }
 
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
-  const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
+  const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
 
   const body = {
@@ -117,7 +144,7 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
 }
 
 async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: RunDone): Promise<void> {
-  const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
+  const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
 
   const amount =
@@ -165,7 +192,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
  * 这是审批的本意：没人点头就不往下走。
  */
 async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, event: ApprovalRequest): Promise<void> {
-  const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
+  const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
 
   const created = await createApproval(deps.db, {
@@ -183,6 +210,75 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
   // 先推审批再推卡，客户端画那张卡的时候状态已经在手上了。
   deps.push.push(conn.ownerId, { type: "approval_updated", approval: created.approval });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
+}
+
+/**
+ * 运行器整份替换清单。ownerBotId 当不可信输入再校一次：
+ * 运行器只能对着这次 prompt 带去的 members 把名字解析成 id，比不出群的真实成员表。
+ */
+async function onTaskChecklist(deps: AgentEventDeps, conn: AgentConnection, event: TaskChecklist): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+
+  const members = await listGroupBots(deps.db, groupId);
+  const memberIds = new Set<string>(members.map((member) => member.id));
+  const stranger = event.checklist.find((item) => item.ownerBotId !== null && !memberIds.has(item.ownerBotId));
+  if (stranger !== undefined) {
+    console.warn(`电脑 ${conn.computerId} 报的清单里 ${stranger.ownerBotId} 不是群 ${event.groupId} 的成员，整条丢掉`);
+    return;
+  }
+
+  const task = await replaceChecklist(deps.db, groupId, event.checklist);
+  if (task === null) return;
+  deps.push.push(conn.ownerId, { type: "task_updated", task });
+
+  const botName = members.find((member) => member.id === event.botId)?.name ?? "Bot";
+  const done = event.checklist.filter((item) => item.done).length;
+  await appendAndPush(deps, conn.ownerId, groupId, {
+    kind: "system",
+    text: `${botName}更新了清单，${done}/${event.checklist.length} 完成`,
+  });
+}
+
+/**
+ * Bot @ 群里另一个 Bot。消息先落再判限额：那句话 Bot 确实说了，用户该看见，停下的只是派活。
+ * 目标是外部输入，必须是这个群的成员且不是它自己，否则整条丢掉。
+ */
+async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Mention): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+
+  const members = await listGroupBots(deps.db, groupId);
+  const known = members.some((member) => member.id === event.targetBotId);
+  if (!known || event.targetBotId === event.botId) {
+    console.warn(`电脑 ${conn.computerId} 报的 @ 目标 ${event.targetBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
+    return;
+  }
+
+  const said = await appendAndPush(deps, conn.ownerId, groupId, {
+    kind: "bot",
+    botId: event.botId,
+    text: event.text,
+    streaming: false,
+    mentions: [event.targetBotId],
+  });
+
+  switch (deps.mentionLoop.record(groupId)) {
+    case "allow":
+      await dispatchBotMention(
+        { db: deps.db, push: deps.push, agents: deps.agents },
+        conn.ownerId,
+        said.groupId,
+        said,
+        event.targetBotId,
+      );
+      return;
+    case "stop":
+      await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", text: MENTION_LOOP_NOTICE });
+      return;
+    case "silent":
+      return;
+  }
 }
 
 async function appendAndPush(

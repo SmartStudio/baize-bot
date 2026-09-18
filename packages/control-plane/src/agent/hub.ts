@@ -11,6 +11,7 @@ import {
 } from "../repo/computers.js";
 import type { PushHub } from "../ws/hub.js";
 import { handleAgentEvent } from "./events.js";
+import type { MentionLoopGuard } from "./mention-loop.js";
 
 export const AGENT_PATH = "/agent";
 
@@ -36,6 +37,8 @@ export type AgentHubDeps = {
   readonly gatewayModel: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
+  /** 和 createApp 收的是同一个实例：Bot 之间 @ 的计数要被上行 mention 和用户消息两边碰到。 */
+  readonly mentionLoop: MentionLoopGuard;
   /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
   readonly gatewayBaseUrl: () => string;
 };
@@ -128,9 +131,10 @@ export class AgentHub {
         {
           db: this.#deps.db,
           push: this.#deps.push,
+          agents: this,
+          mentionLoop: this.#deps.mentionLoop,
           priceInputPerM: this.#deps.priceInputPerM,
           priceOutputPerM: this.#deps.priceOutputPerM,
-          reply: (target, reply) => void this.#send(target, reply),
         },
         conn,
         message,

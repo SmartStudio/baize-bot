@@ -1,11 +1,12 @@
 import type { Bot, BotHue, BotId, Group, Message, UserId } from "@baize/shared";
-import { and, eq, inArray, max, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, messages, tasks, userCounters } from "../db/schema.js";
+import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
+import { latestMessagePerGroup } from "./messages.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
-import { toBot, toGroup, toMessage } from "./rows.js";
+import { toBot, toGroup } from "./rows.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -127,18 +128,4 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
     .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
     .returning({ id: bots.id });
   return deleted.length > 0;
-}
-
-async function latestMessagePerGroup(db: Db, groupIds: string[]): Promise<Map<string, Message>> {
-  const latest = db
-    .select({ groupId: messages.groupId, maxSeq: max(messages.seq).as("max_seq") })
-    .from(messages)
-    .where(inArray(messages.groupId, groupIds))
-    .groupBy(messages.groupId)
-    .as("latest");
-  const rows = await db
-    .select({ message: messages })
-    .from(messages)
-    .innerJoin(latest, and(eq(messages.groupId, latest.groupId), eq(messages.seq, latest.maxSeq)));
-  return new Map(rows.map((r) => [r.message.groupId, toMessage(r.message)]));
 }
