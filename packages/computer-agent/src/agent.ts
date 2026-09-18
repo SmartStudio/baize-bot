@@ -15,7 +15,7 @@ export interface AgentOptions {
   readonly heartbeatMs?: number;
   readonly backoff?: BackoffOptions;
   readonly log?: (line: string) => void;
-  /** 每个 Bot 的 Pi 目录建在这下面。 */
+  /** 每个 Bot 的 Pi 目录建在这下面。main.ts 从 BAIZE_DATA_DIR 读，不给就落到 ~/.baize/bots。 */
   readonly dataDir?: string;
   /** 换掉真运行器。测试用它免去起真模型网关。 */
   readonly makeRunner?: RunnerFactory;
@@ -35,7 +35,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const backoff = options.backoff ?? defaultBackoff;
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
-  const dataDir = options.dataDir ?? process.env["BAIZE_DATA_DIR"] ?? join(homedir(), ".baize", "bots");
+  const dataDir = options.dataDir ?? join(homedir(), ".baize", "bots");
   const makeRunner = options.makeRunner ?? createRunner;
 
   let link: Link = { phase: "stopped" };
@@ -98,6 +98,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "prompt": {
         if (runner === null) {
           log(`还没收到 config，丢弃 run ${message.runId} 的 prompt`);
+          send({
+            type: "agent_error",
+            code: "prompt_before_config",
+            detail: `run ${message.runId} 的 prompt 比 config 先到`,
+            groupId: message.groupId,
+          });
           return;
         }
         await runner.prompt(message);

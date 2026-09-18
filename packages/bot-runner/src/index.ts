@@ -3,6 +3,7 @@ import {
   type AgentToControl,
   type BotId,
   type ControlToAgent,
+  type GroupId,
   MessageId,
   type RunId,
   type ToolConnection,
@@ -85,8 +86,12 @@ export function createRunner(config: RunnerConfig): Runner {
     ]),
   );
 
-  const fail = (code: Extract<AgentToControl, { type: "agent_error" }>["code"], detail: string): void => {
-    config.send({ type: "agent_error", code, detail });
+  const fail = (
+    code: Extract<AgentToControl, { type: "agent_error" }>["code"],
+    detail: string,
+    groupId: GroupId,
+  ): void => {
+    config.send({ type: "agent_error", code, detail, groupId });
   };
 
   const sessionFor = async (bot: BotRuntime): Promise<BotSession> => {
@@ -126,7 +131,7 @@ export function createRunner(config: RunnerConfig): Runner {
       unsubscribe = reportRun(session, run, approvals.blockedCallIds, config.send);
       await session.prompt(composePrompt(message));
     } catch (error) {
-      fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`);
+      fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {
       unsubscribe?.();
       // pause 在跑的过程中把状态改成 paused 了的话，这里不能踩回 idle。
@@ -139,7 +144,7 @@ export function createRunner(config: RunnerConfig): Runner {
       if (state === "stopped") return;
       const bot = bots.get(message.botId);
       if (bot === undefined) {
-        fail("unsupported", `config 里没有 Bot ${message.botId}，丢弃 run ${message.runId}`);
+        fail("unsupported", `config 里没有 Bot ${message.botId}，丢弃 run ${message.runId}`, message.groupId);
         return;
       }
       if (bot.lifecycle.phase === "paused") {

@@ -5,11 +5,44 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
+const AGENT_KEYS = ["COMPUTER_ID", "AGENT_TOKEN", "CONTROL_PLANE_AGENT_URL", "BAIZE_DATA_DIR"];
+
 const services = [
   { pkg: "@baize/control-plane", dir: "packages/control-plane", port: 3001 },
   { pkg: "@baize/web", dir: "packages/web", port: 5173 },
-  { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null },
 ];
+
+/** .env 里的 KEY=value。只认这一种写法，不展开变量也不处理续行。 */
+function readEnvFile(path) {
+  if (!existsSync(path)) return {};
+  const env = {};
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (match === null) continue;
+    env[match[1]] = match[2].trim().replace(/^["']|["']$/gu, "");
+  }
+  return env;
+}
+
+// 电脑代理要一份电脑 token 才连得上控制面，默认不起，免得每次 pnpm dev 都看它报错重连。
+function agentService() {
+  const env = readEnvFile(join(root, ".env"));
+  const missing = ["COMPUTER_ID", "AGENT_TOKEN"].filter((name) => (env[name] ?? "") === "");
+  if (missing.length > 0) {
+    console.log(
+      `.env 里缺 ${missing.join("、")}，不起 computer-agent。跑 pnpm --filter @baize/control-plane seed 拿一份`,
+    );
+    return null;
+  }
+  const picked = {};
+  for (const key of AGENT_KEYS) if ((env[key] ?? "") !== "") picked[key] = env[key];
+  return { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null, env: picked };
+}
+
+if (process.argv.slice(2).includes("--agent")) {
+  const service = agentService();
+  if (service !== null) services.push(service);
+}
 
 function devScriptOf(dir) {
   const manifest = join(root, dir, "package.json");
@@ -51,7 +84,11 @@ for (const service of services) {
     console.log(`跳过 ${name}：${service.dir} 还没有带 dev 脚本的 package.json`);
     continue;
   }
-  const child = spawn("pnpm", ["--filter", service.pkg, "dev"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn("pnpm", ["--filter", service.pkg, "dev"], {
+    cwd: root,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ...service.env },
+  });
   prefixed(name, child.stdout, (line) => process.stdout.write(line));
   prefixed(name, child.stderr, (line) => process.stderr.write(line));
   child.on("exit", (code, signal) => {
@@ -64,7 +101,7 @@ for (const service of services) {
 }
 
 if (children.length === 0) {
-  console.log("三个服务一个都没起来，等别的包就位再跑 pnpm dev");
+  console.log("一个服务都没起来，等别的包就位再跑 pnpm dev");
   process.exit(0);
 }
 

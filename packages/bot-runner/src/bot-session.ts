@@ -109,6 +109,8 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
   });
   await resourceLoader.reload();
 
+  // 不传 noTools，Pi 的四个内置工具（read、bash、edit、write）就是开的。Bot 在云电脑上干活靠它们，
+  // 关掉的话「看看电脑里有哪些文件」这类活一件也做不了。作用范围是这个 Bot 自己的 work 目录。
   const { session } = await createAgentSession({
     cwd: workDir,
     agentDir,
@@ -117,7 +119,6 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     resourceLoader,
     settingsManager,
     sessionManager: SessionManager.create(workDir, sessionDir),
-    noTools: "builtin",
   });
 
   return {
