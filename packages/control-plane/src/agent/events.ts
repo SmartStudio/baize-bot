@@ -2,6 +2,7 @@ import type { AgentToControl, BotId, GroupId, Message, MessageBody, RunId, UserI
 import type { Db } from "../db/client.js";
 import { createApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
+import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import {
   appendBotDelta,
   appendMessage,
@@ -11,9 +12,10 @@ import {
   replaceMessageBody,
 } from "../repo/messages.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
-import { replaceChecklist } from "../repo/tasks.js";
+import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
-import { MENTION_LOOP_NOTICE, dispatchBotMention } from "./dispatch.js";
+import { MENTION_LOOP_NOTICE, dispatchBotMention, dispatchHandoff } from "./dispatch.js";
+import { renderHandoffReport } from "./handoff.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
 import type { MentionLoopGuard } from "./mention-loop.js";
 
@@ -63,6 +65,12 @@ export async function handleAgentEvent(
     case "mention":
       await onMention(deps, conn, message);
       return;
+    case "handoff":
+      await onHandoff(deps, conn, message);
+      return;
+    case "handoff_accept":
+      await onHandoffAccept(deps, conn, message);
+      return;
   }
 }
 
@@ -88,6 +96,8 @@ type AgentError = Extract<AgentToControl, { type: "agent_error" }>;
 type ApprovalRequest = Extract<AgentToControl, { type: "approval_request" }>;
 type TaskChecklist = Extract<AgentToControl, { type: "task_checklist" }>;
 type Mention = Extract<AgentToControl, { type: "mention" }>;
+type HandoffEvent = Extract<AgentToControl, { type: "handoff" }>;
+type HandoffAcceptEvent = Extract<AgentToControl, { type: "handoff_accept" }>;
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
@@ -279,6 +289,80 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
     case "silent":
       return;
   }
+}
+
+/**
+ * 当前经手把活交给同群另一个 Bot。发起者必须是当前经手，目标必须是群里的别人，两道都是外部输入，任一不成立整条丢掉。
+ * 报文和群里那张卡一起落，随后把活派给目标。当前经手这时一个字都不改：
+ * 交出去只是发了份报文，要等目标确认了才换人，没人确认这件事就还挂在原来那个身上。
+ */
+async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: HandoffEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+
+  const task = await findTaskByGroup(deps.db, groupId);
+  if (task === null || task.currentBotId !== event.botId) {
+    console.warn(`电脑 ${conn.computerId} 报的交接来自 ${event.botId}，它不是群 ${event.groupId} 的当前经手，整条丢掉`);
+    return;
+  }
+
+  const members = await listGroupBots(deps.db, groupId);
+  const known = members.some((member) => member.id === event.toBotId);
+  if (!known || event.toBotId === event.botId) {
+    console.warn(`电脑 ${conn.computerId} 报的交接目标 ${event.toBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
+    return;
+  }
+
+  const created = await createHandoff(deps.db, {
+    groupId,
+    fromBotId: event.botId,
+    toBotId: event.toBotId,
+    done: event.done,
+    notDone: event.notDone,
+    next: event.next,
+    checklistIndex: event.checklistIndex,
+  });
+
+  // 先推交接再推卡，客户端画那张卡的时候状态已经在手上了。
+  deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: created.handoff });
+  deps.push.push(conn.ownerId, { type: "message", message: created.message });
+
+  await dispatchHandoff({ db: deps.db, push: deps.push, agents: deps.agents }, conn.ownerId, created.message.groupId, {
+    trigger: created.message,
+    targetBotId: event.toBotId,
+    handoffId: created.handoff.id,
+    text: renderHandoffReport({
+      fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
+      done: event.done,
+      notDone: event.notDone,
+      next: event.next,
+      checklistIndex: event.checklistIndex,
+    }),
+  });
+}
+
+/**
+ * 目标确认接手。确认之后它才是当前经手：`setCurrentBot` 给上一位补上交出去的时刻，新一位追加一条。
+ * 不是它的交接、对不上群的编号、重复的确认，全在 `acceptHandoff` 那条 UPDATE 的 WHERE 里挡掉，
+ * 所以这里只剩一条成功路径，重复确认既不会再改经手也不会再推一次。
+ */
+async function onHandoffAccept(deps: AgentEventDeps, conn: AgentConnection, event: HandoffAcceptEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+
+  // 同一个时刻既是 accepted_at 也是经手记录里新那一条的 from，卡上和任务页因此对得起来。
+  const at = new Date();
+  const accepted = await acceptHandoff(deps.db, { handoffId: event.handoffId, groupId, toBotId: event.botId, at });
+  if (accepted === null) {
+    console.warn(
+      `电脑 ${conn.computerId} 报的确认 ${event.handoffId} 不是群 ${event.groupId} 里等 ${event.botId} 接手的交接，整条丢掉`,
+    );
+    return;
+  }
+
+  const task = await setCurrentBot(deps.db, groupId, event.botId, at);
+  deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: accepted });
+  if (task !== null) deps.push.push(conn.ownerId, { type: "task_updated", task });
 }
 
 async function appendAndPush(

@@ -22,6 +22,13 @@
       "when": 1789753259364,
       "tag": "0002_unique_butterfly",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1789773816174,
+      "tag": "0003_nostalgic_joystick",
+      "breakpoints": true
     }
   ]
 }

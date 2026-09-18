@@ -1,4 +1,14 @@
-import type { Approval, ApprovalId, BotId, GroupId, Message, MessageBody, TopicTask, UserId } from "@baize/shared";
+import type {
+  Approval,
+  ApprovalId,
+  BotId,
+  GroupId,
+  HandoffId,
+  Message,
+  MessageBody,
+  TopicTask,
+  UserId,
+} from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
 import { appendMessage, listGroupBots, listMessages, type GroupBot } from "../repo/messages.js";
@@ -51,7 +61,7 @@ export async function dispatchUserMessage(
     return;
   }
 
-  await sendToTargets(deps, ownerId, groupId, trigger, members, targets, task);
+  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task });
 }
 
 /** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
@@ -69,39 +79,75 @@ export async function dispatchBotMention(
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [targetBotId] });
   if (targets.length === 0) return;
 
-  await sendToTargets(deps, ownerId, groupId, trigger, members, targets, task);
+  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task });
 }
 
-/** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
-async function sendToTargets(
+export type HandoffDispatch = {
+  /** 群里那张交接卡。上下文取它之前那些，run 也挂在它上面。 */
+  readonly trigger: Message;
+  readonly targetBotId: BotId;
+  readonly handoffId: HandoffId;
+  /** 交接报文渲染出来的正文，当作这条 prompt 的正文发下去。 */
+  readonly text: string;
+};
+
+/**
+ * 把活派给交接的目标。目标由报文点名，不走当前经手：确认之前当前经手还是交出去的那一个。
+ * prompt 带上 handoffId，运行器据此才开出 accept_handoff。
+ */
+export async function dispatchHandoff(
   deps: DispatchDeps,
   ownerId: UserId,
   groupId: GroupId,
-  trigger: Message,
-  members: readonly GroupBot[],
-  targets: readonly BotId[],
-  task: TopicTask | null,
+  input: HandoffDispatch,
 ): Promise<void> {
+  const members = await listGroupBots(deps.db, groupId);
+  const task = await findTaskByGroup(deps.db, groupId);
+  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [input.targetBotId] });
+  if (targets.length === 0) return;
+
+  await sendToTargets(deps, ownerId, groupId, {
+    trigger: input.trigger,
+    members,
+    targets,
+    task,
+    handoff: { id: input.handoffId, text: input.text },
+  });
+}
+
+type SendInput = {
+  readonly trigger: Message;
+  readonly members: readonly GroupBot[];
+  readonly targets: readonly BotId[];
+  readonly task: TopicTask | null;
+  /** 只有交接派活带它：正文换成交接报文，报文编号跟着下去。 */
+  readonly handoff?: { readonly id: HandoffId; readonly text: string } | undefined;
+};
+
+/** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
+async function sendToTargets(deps: DispatchDeps, ownerId: UserId, groupId: GroupId, input: SendInput): Promise<void> {
   if (!deps.agents.isOnline(ownerId)) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
     return;
   }
 
-  const history = await recentBodies(deps.db, groupId, trigger);
-  const roster = members.map((member) => ({ id: member.id, name: member.name }));
+  const history = await recentBodies(deps.db, groupId, input.trigger);
+  const roster = input.members.map((member) => ({ id: member.id, name: member.name }));
   let dropped = false;
-  for (const target of targets) {
-    const runId = await startRun(deps.db, { botId: target, groupId, triggerMessageId: trigger.id });
+  for (const target of input.targets) {
+    const runId = await startRun(deps.db, { botId: target, groupId, triggerMessageId: input.trigger.id });
     const sent = deps.agents.send(ownerId, {
       type: "prompt",
       runId,
       botId: target,
       groupId,
-      text: triggerText(trigger.body),
-      context: history.map((body) => summarize(body, target, members)),
+      text: input.handoff?.text ?? triggerText(input.trigger.body),
+      context: history.map((body) => summarize(body, target, input.members)),
       // 单 Bot 群没有任务卡可给，protocol.ts 就是这么定的。
-      task: members.length > 1 ? task : null,
+      task: input.members.length > 1 ? input.task : null,
       members: roster,
+      // handoffId 可省，恒带一个 undefined 在 exactOptionalPropertyTypes 下不是同一件事。
+      ...(input.handoff === undefined ? {} : { handoffId: input.handoff.id }),
     });
     if (!sent) dropped = true;
   }

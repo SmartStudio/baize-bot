@@ -4,6 +4,7 @@ import type {
   BotHue,
   ChecklistItem,
   ComputerStatus,
+  HandoffStatus as HandoffStatusSchema,
   MessageBody,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
@@ -26,6 +27,7 @@ import {
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
 type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
 type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
+type HandoffStatus = z.infer<typeof HandoffStatusSchema>;
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -219,4 +221,35 @@ export const approvals = pgTable(
     index("approvals_group_id_status_idx").on(t.groupId, t.status),
     uniqueIndex("approvals_run_id_call_id_idx").on(t.runId, t.callId),
   ],
+);
+
+// 一份等目标 Bot 确认的交接报文。和审批同一种形状：message_id 指向群里那张卡，非空，卡和报文一起生；
+// reminded_at 记下 24 小时提醒发过了。accepted_at 是接手时刻，经手记录里新那一条的 from 就是它。
+// 没有 (run_id, call_id) 那样的唯一键：交接由 Bot 主动发起，同一个 Bot 交两次就是两份报文。
+export const handoffs = pgTable(
+  "handoffs",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    fromBotId: text("from_bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    toBotId: text("to_bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    done: text("done").notNull(),
+    notDone: text("not_done").notNull(),
+    next: text("next").notNull(),
+    checklistIndex: integer("checklist_index"),
+    status: text("status").$type<HandoffStatus>().notNull().default("pending"),
+    messageId: text("message_id")
+      .notNull()
+      .references(() => messages.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    remindedAt: timestamp("reminded_at", { withTimezone: true }),
+  },
+  (t) => [index("handoffs_group_id_status_idx").on(t.groupId, t.status)],
 );

@@ -62,6 +62,16 @@ describe("派活目标", () => {
     expect(targets).toEqual([sales.id, buyer.id, clerk.id]);
   });
 
+  it("交接还没确认时，不 @ 人的消息仍然派给交出去的那一个", () => {
+    const targets = routeTargets({ members: [sales, buyer], currentBotId: sales.id, mentions: [] });
+    expect(targets, "确认之前当前经手没换人，小采只是收到了一份报文").toEqual([sales.id]);
+  });
+
+  it("交接确认之后，不 @ 人的消息只派给接手的那一个", () => {
+    const targets = routeTargets({ members: [sales, buyer], currentBotId: buyer.id, mentions: [] });
+    expect(targets, "换完经手，群里的话不再落到小销身上").toEqual([buyer.id]);
+  });
+
   it("同一个 Bot @ 多次只派一次", () => {
     const targets = routeTargets({
       members: [sales, buyer],

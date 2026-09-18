@@ -3,7 +3,8 @@ import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte } 
 import type { Db } from "../db/client.js";
 import { approvals, groups, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { appendMessage, type Tx } from "./messages.js";
+import { appendMessage } from "./messages.js";
+import { appendReminders } from "./reminders.js";
 import { toApproval } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
 
@@ -138,8 +139,7 @@ export async function pendingApprovalCounts(db: Db, groupIds: readonly string[])
  * 时钟是参数，测试直接传一个 25 小时后的 now。
  */
 export async function remindStaleApprovals(db: Db, push: PushHub, now: Date): Promise<number> {
-  // 占住 reminded_at 和补提醒必须一起提交：UPDATE 单独落地而消息没写成的话，那几行以后再也扫不中，提醒永久丢掉。
-  const { scanned, reminders } = await db.transaction(async (tx) => {
+  return appendReminders(db, push, async (tx) => {
     const stale = await tx
       .update(approvals)
       .set({ remindedAt: now })
@@ -151,36 +151,9 @@ export async function remindStaleApprovals(db: Db, push: PushHub, now: Date): Pr
         ),
       )
       .returning();
-    if (stale.length === 0) return { scanned: 0, reminders: [] as Reminder[] };
-
-    const owners = await ownersOf(
-      tx,
-      stale.map((row) => row.groupId),
-    );
-    const written: Reminder[] = [];
-    for (const row of stale) {
-      const ownerId = owners.get(row.groupId);
-      if (ownerId === undefined) continue;
-      const message = await appendMessage(tx, row.groupId, {
-        kind: "system",
-        text: `「${row.summary}」这件事等你点头已经一天了，它还挂着。`,
-      });
-      written.push({ ownerId, message });
-    }
-    return { scanned: stale.length, reminders: written };
+    return stale.map((row) => ({
+      groupId: row.groupId,
+      text: `「${row.summary}」这件事等你点头已经一天了，它还挂着。`,
+    }));
   });
-
-  // 推留在事务外：连接那头出事不该把已经落库的提醒回滚掉。
-  for (const reminder of reminders) push.push(reminder.ownerId, { type: "message", message: reminder.message });
-  return scanned;
-}
-
-type Reminder = { readonly ownerId: UserId; readonly message: Message };
-
-async function ownersOf(db: Db | Tx, groupIds: readonly string[]): Promise<Map<string, UserId>> {
-  const rows = await db
-    .select({ id: groups.id, ownerId: groups.ownerId })
-    .from(groups)
-    .where(inArray(groups.id, [...groupIds]));
-  return new Map(rows.map((row) => [row.id, UserId.parse(row.ownerId)]));
 }

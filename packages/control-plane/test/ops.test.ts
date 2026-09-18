@@ -24,7 +24,7 @@ describe("迁移", () => {
     expect(again, "第二次跑迁移应当一个文件都不应用").toEqual([]);
   });
 
-  it("建出十二张业务表加一张迁移记账表", async () => {
+  it("建出十三张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -37,6 +37,7 @@ describe("迁移", () => {
       "computers",
       "group_members",
       "groups",
+      "handoffs",
       "messages",
       "runs",
       "sessions",

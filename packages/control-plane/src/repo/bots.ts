@@ -4,6 +4,7 @@ import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
+import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup } from "./messages.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
 import { toBot, toGroup } from "./rows.js";
@@ -88,12 +89,13 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
   const groupIds = rows.map((r) => r.groupId);
   const lastMessages = await latestMessagePerGroup(db, groupIds);
   const pending = await pendingApprovalCounts(db, groupIds);
+  const handedOff = await pendingHandoffCounts(db, groupIds);
   return rows.map((row) => ({
     bot: toBot(row.bot),
     groupId: row.groupId,
     lastMessage: lastMessages.get(row.groupId) ?? null,
     pendingApprovals: pending.get(row.groupId) ?? 0,
-    pendingHandoffs: 0,
+    pendingHandoffs: handedOff.get(row.groupId) ?? 0,
   }));
 }
 

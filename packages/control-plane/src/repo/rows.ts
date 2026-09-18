@@ -1,4 +1,15 @@
-import { Approval, Bot, Computer, Group, Message, Settings, TopicTask, UsageRecord, User } from "@baize/shared";
+import {
+  Approval,
+  Bot,
+  Computer,
+  Group,
+  Handoff,
+  Message,
+  Settings,
+  TopicTask,
+  UsageRecord,
+  User,
+} from "@baize/shared";
 import type * as schema from "../db/schema.js";
 
 // 数据库行是外部输入。品牌化 ID 和字面量联合只在这里产生，往上全是可信的领域类型。
@@ -73,6 +84,23 @@ export function toApproval(row: typeof schema.approvals.$inferSelect): Approval 
     summary: row.summary,
     status: row.status,
     decidedAt: row.decidedAt?.toISOString() ?? null,
+  });
+}
+
+// messageId 不出边界，和 Approval 一样：domain.ts 的 Handoff 只有客户端画那张卡要用的字段。
+export function toHandoff(row: typeof schema.handoffs.$inferSelect): Handoff {
+  return Handoff.parse({
+    id: row.id,
+    groupId: row.groupId,
+    fromBotId: row.fromBotId,
+    toBotId: row.toBotId,
+    done: row.done,
+    notDone: row.notDone,
+    next: row.next,
+    checklistIndex: row.checklistIndex,
+    status: row.status,
+    createdAt: row.createdAt.toISOString(),
+    acceptedAt: row.acceptedAt?.toISOString() ?? null,
   });
 }
 

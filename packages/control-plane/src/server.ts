@@ -10,13 +10,14 @@ import type { Db } from "./db/client.js";
 import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
+import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
 import { PushHub } from "./ws/hub.js";
 
 export const WS_PATH = "/api/ws";
 
-/** 扫一遍放了一天还没有结论的审批。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
+/** 扫一遍放了一天还没有结论的审批和还没人确认的交接。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
 const REMIND_INTERVAL_MS = 60 * 60 * 1000;
 
 export type RunningServer = {
@@ -100,9 +101,9 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
   const reminders = setInterval(() => {
-    void remindStaleApprovals(options.db, hub, new Date()).catch((error: unknown) =>
-      console.error("扫超时审批出错", error),
-    );
+    const now = new Date();
+    void remindStaleApprovals(options.db, hub, now).catch((error: unknown) => console.error("扫超时审批出错", error));
+    void remindStaleHandoffs(options.db, hub, now).catch((error: unknown) => console.error("扫超时交接出错", error));
   }, REMIND_INTERVAL_MS);
   reminders.unref();
 

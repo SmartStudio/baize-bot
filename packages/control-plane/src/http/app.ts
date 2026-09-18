@@ -37,6 +37,7 @@ import type { MentionLoopGuard } from "../agent/mention-loop.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
+import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
 import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
@@ -192,7 +193,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
     const approvalIds = result.page.messages.flatMap((m) => (m.body.kind === "approval" ? [m.body.approvalId] : []));
     const approvals = await listApprovals(db, approvalIds);
-    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs: [] }));
+    const handoffIds = result.page.messages.flatMap((m) => (m.body.kind === "handoff" ? [m.body.handoffId] : []));
+    const handoffs = await listHandoffs(db, handoffIds);
+    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs }));
   });
 
   app.post("/api/groups/:id/messages", async (c) => {

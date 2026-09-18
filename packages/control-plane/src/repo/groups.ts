@@ -5,6 +5,7 @@ import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js
 import { newId } from "../ids.js";
 import { taskNumber } from "../naming.js";
 import { pendingApprovalCounts } from "./approvals.js";
+import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup } from "./messages.js";
 import { toBot, toGroup, toTask } from "./rows.js";
 
@@ -107,12 +108,13 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
 
   const lastMessages = await latestMessagePerGroup(db, groupIds);
   const pending = await pendingApprovalCounts(db, groupIds);
+  const handedOff = await pendingHandoffCounts(db, groupIds);
   return rows.map((row) => ({
     group: toGroup(row.group, membersOf.get(row.group.id) ?? [], row.task.id),
     task: toTask(row.task),
     lastMessage: lastMessages.get(row.group.id) ?? null,
     pendingApprovals: pending.get(row.group.id) ?? 0,
-    pendingHandoffs: 0,
+    pendingHandoffs: handedOff.get(row.group.id) ?? 0,
   }));
 }
 
