@@ -1,4 +1,4 @@
-import { Approval, Bot, Computer, Group, Message, Settings, UsageRecord, User } from "@baize/shared";
+import { Approval, Bot, Computer, Group, Message, Settings, TopicTask, UsageRecord, User } from "@baize/shared";
 import type * as schema from "../db/schema.js";
 
 // 数据库行是外部输入。品牌化 ID 和字面量联合只在这里产生，往上全是可信的领域类型。
@@ -35,6 +35,21 @@ export function toGroup(row: typeof schema.groups.$inferSelect, botIds: readonly
     botIds,
     taskId,
     createdAt: row.createdAt.toISOString(),
+  });
+}
+
+export function toTask(row: typeof schema.tasks.$inferSelect): TopicTask {
+  return TopicTask.parse({
+    id: row.id,
+    groupId: row.groupId,
+    number: row.number,
+    title: row.title,
+    summary: row.summary,
+    dueAt: row.dueAt?.toISOString() ?? null,
+    checklist: row.checklist,
+    currentBotId: row.currentBotId,
+    handled: row.handled,
+    status: row.status,
   });
 }
 

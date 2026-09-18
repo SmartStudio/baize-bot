@@ -1,10 +1,12 @@
-import type { Approval, ApprovalId, GroupId, Message, MessageBody, UserId } from "@baize/shared";
+import type { Approval, ApprovalId, BotId, GroupId, Message, MessageBody, TopicTask, UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
-import { appendMessage, listGroupBots, listMessages } from "../repo/messages.js";
+import { appendMessage, listGroupBots, listMessages, type GroupBot } from "../repo/messages.js";
 import { startRun } from "../repo/runs.js";
+import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
+import { routeTargets } from "./routing.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
 export const CONTEXT_MESSAGES = 20;
@@ -13,6 +15,8 @@ export const CONTEXT_MESSAGES = 20;
 const CONTEXT_TEXT_LIMIT = 200;
 
 export const OFFLINE_NOTICE = "电脑不在线，消息已留着";
+export const NO_TARGET_NOTICE = "@ 一个 Bot 派活";
+export const MENTION_LOOP_NOTICE = "Bot 之间 @ 太多次，停下等你";
 
 export type DispatchDeps = {
   readonly db: Db;
@@ -21,7 +25,7 @@ export type DispatchDeps = {
 };
 
 /**
- * 用户发完消息就派活。M3 只有单 Bot 群，取群里第一个成员。
+ * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
  * 电脑不在线时只在群里留一句话，不建 run，免得表里堆永远不会结束的行。
  */
 export async function dispatchUserMessage(
@@ -30,50 +34,106 @@ export async function dispatchUserMessage(
   groupId: GroupId,
   trigger: Message,
 ): Promise<void> {
-  const [bot] = await listGroupBots(deps.db, groupId);
-  if (bot === undefined) return;
+  const members = await listGroupBots(deps.db, groupId);
+  if (members.length === 0) return;
 
+  const mentions = trigger.body.kind === "user" ? (trigger.body.mentions ?? []) : [];
+  const [first] = mentions;
+  // @ 了好几个也只认第一个当经手。单 Bot 群没有经手可言，它的任务卡也不出边界。
+  if (members.length > 1 && first !== undefined) await setCurrentBot(deps.db, groupId, first, new Date());
+
+  // 排在改经手之后：送出去的任务卡要是改完经手的那份。
+  const task = await findTaskByGroup(deps.db, groupId);
+  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions });
+  // 排在在线检查之前：没人可派的时候「@ 一个 Bot 派活」比「电脑不在线」有用。
+  if (targets.length === 0) {
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", text: NO_TARGET_NOTICE });
+    return;
+  }
+
+  await sendToTargets(deps, ownerId, groupId, trigger, members, targets, task);
+}
+
+/** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
+export async function dispatchBotMention(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  trigger: Message,
+  targetBotId: BotId,
+): Promise<void> {
+  const members = await listGroupBots(deps.db, groupId);
+  if (members.length === 0) return;
+
+  const task = await findTaskByGroup(deps.db, groupId);
+  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [targetBotId] });
+  if (targets.length === 0) return;
+
+  await sendToTargets(deps, ownerId, groupId, trigger, members, targets, task);
+}
+
+/** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
+async function sendToTargets(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  trigger: Message,
+  members: readonly GroupBot[],
+  targets: readonly BotId[],
+  task: TopicTask | null,
+): Promise<void> {
   if (!deps.agents.isOnline(ownerId)) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
     return;
   }
 
-  const context = await recentContext(deps.db, groupId, trigger, bot.name);
-  const runId = await startRun(deps.db, { botId: bot.id, groupId, triggerMessageId: trigger.id });
-  const sent = deps.agents.send(ownerId, {
-    type: "prompt",
-    runId,
-    botId: bot.id,
-    groupId,
-    text: trigger.body.kind === "user" ? trigger.body.text : "",
-    context,
-    // M3 只有单 Bot 群，任务卡不给。M7 的多 Bot 群在这里带上任务卡和成员。
-    task: null,
-    members: [{ id: bot.id, name: bot.name }],
-  });
+  const history = await recentBodies(deps.db, groupId, trigger);
+  const roster = members.map((member) => ({ id: member.id, name: member.name }));
+  let dropped = false;
+  for (const target of targets) {
+    const runId = await startRun(deps.db, { botId: target, groupId, triggerMessageId: trigger.id });
+    const sent = deps.agents.send(ownerId, {
+      type: "prompt",
+      runId,
+      botId: target,
+      groupId,
+      text: triggerText(trigger.body),
+      context: history.map((body) => summarize(body, target, members)),
+      // 单 Bot 群没有任务卡可给，protocol.ts 就是这么定的。
+      task: members.length > 1 ? task : null,
+      members: roster,
+    });
+    if (!sent) dropped = true;
+  }
   // 查在线和发报文之间连接掉了。run 行留着不结束，跟一次跑到一半断连是同一种痕迹。
-  if (!sent) await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+  // 几个目标一起没发出去也只留一句话：断的是同一条连接，说一遍就够。
+  if (dropped) await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+}
+
+function triggerText(body: MessageBody): string {
+  if (body.kind === "user") return body.text;
+  return body.kind === "bot" ? body.text : "";
 }
 
 type ContextLine = { readonly from: string; readonly text: string };
 
-async function recentContext(db: Db, groupId: GroupId, trigger: Message, botName: string): Promise<ContextLine[]> {
+async function recentBodies(db: Db, groupId: GroupId, trigger: Message): Promise<MessageBody[]> {
   const result = await listMessages(db, groupId, { before: trigger.id, limit: CONTEXT_MESSAGES });
   if (result.kind !== "ok") return [];
-  return result.page.messages.map((message) => summarize(message.body, botName));
+  return result.page.messages.map((message) => message.body);
 }
 
-/** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。 */
-function summarize(body: MessageBody, botName: string): ContextLine {
+/** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。 */
+function summarize(body: MessageBody, recipient: BotId, members: readonly GroupBot[]): ContextLine {
   switch (body.kind) {
     case "user":
       return { from: "你", text: clip(body.text) };
     case "bot":
-      return { from: botName, text: clip(body.text) };
+      return { from: sender(body.botId, recipient, members), text: clip(body.text) };
     case "system":
       return { from: "系统", text: clip(body.text) };
     case "tool_call":
-      return { from: botName, text: clip(`用了 ${body.tool}：${body.argsSummary}`) };
+      return { from: sender(body.botId, recipient, members), text: clip(`用了 ${body.tool}：${body.argsSummary}`) };
     case "cost":
       return { from: "系统", text: `上一次跑了 ${body.steps} 步，花了 ${body.amount}` };
     case "approval":
@@ -81,6 +141,14 @@ function summarize(body: MessageBody, botName: string): ContextLine {
     case "handoff":
       return { from: "系统", text: "一条交接报文" };
   }
+}
+
+/** 收件人看自己只看到自己的名字，看别人带上 tag 才分得清同名的两位。 */
+function sender(botId: BotId, recipient: BotId, members: readonly GroupBot[]): string {
+  const member = members.find((one) => one.id === botId);
+  if (member === undefined) return "别的 Bot";
+  if (member.id === recipient) return member.name;
+  return member.tag === "" ? member.name : `${member.name} · ${member.tag}`;
 }
 
 function clip(text: string): string {

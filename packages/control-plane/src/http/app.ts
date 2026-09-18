@@ -5,9 +5,13 @@ import {
   Computer,
   CreateBotRequest,
   CreateBotResponse,
+  CreateGroupRequest,
+  CreateGroupResponse,
   DecideApprovalRequest,
   DecideApprovalResponse,
   GroupId,
+  GroupListResponse,
+  GroupResponse,
   LoginRequest,
   LoginResponse,
   MeResponse,
@@ -15,9 +19,12 @@ import {
   MessageListResponse,
   SendMessageRequest,
   SendMessageResponse,
+  TaskId,
   UpdateBotRequest,
   UpdateBotResponse,
   UpdateSettingsRequest,
+  UpdateTaskRequest,
+  UpdateTaskResponse,
   type Settings,
   type User,
 } from "@baize/shared";
@@ -26,13 +33,17 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
+import type { MentionLoopGuard } from "../agent/mention-loop.js";
+import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
 import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
-import { appendMessage, findGroupId, listMessages } from "../repo/messages.js";
+import { createGroup, findGroup, listGroups } from "../repo/groups.js";
+import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
+import { updateTask } from "../repo/tasks.js";
 import { authenticate } from "../repo/users.js";
 import type { PushHub } from "../ws/hub.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
@@ -41,6 +52,7 @@ export type AppDeps = {
   readonly db: Db;
   readonly hub: PushHub;
   readonly agents: AgentHub;
+  readonly mentionLoop: MentionLoopGuard;
   readonly secureCookie: boolean;
   readonly gateway: Omit<GatewayDeps, "db">;
 };
@@ -135,6 +147,31 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.body(null, 204);
   });
 
+  app.post("/api/groups", async (c) => {
+    const body = await readJson(c.req.raw, CreateGroupRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const created = await createGroup(db, c.get("user").id, body.value);
+    // 别人的 Bot 和不存在的 Bot 一样是 404，不泄露有没有这个 Bot。
+    if (created.kind === "unknown_bot") return c.json(NOT_FOUND, 404);
+    if (created.kind === "duplicate_bot") return c.json({ error: "同一个 Bot 不能重复拉进群" }, 400);
+    // 不发 config：config 里只有 Bot 列表，建群没有改它。
+    hub.push(c.get("user").id, { type: "group_created", group: created.group, task: created.task });
+    return c.json(CreateGroupResponse.parse({ group: created.group, task: created.task }), 201);
+  });
+
+  app.get("/api/groups", async (c) => {
+    const items = await listGroups(db, c.get("user").id);
+    return c.json(GroupListResponse.parse({ items }));
+  });
+
+  app.get("/api/groups/:id", async (c) => {
+    const groupId = GroupId.safeParse(c.req.param("id"));
+    if (!groupId.success) return c.json(NOT_FOUND, 404);
+    const detail = await findGroup(db, c.get("user").id, groupId.data);
+    if (detail === null) return c.json(NOT_FOUND, 404);
+    return c.json(GroupResponse.parse(detail));
+  });
+
   app.get("/api/groups/:id/messages", async (c) => {
     const groupId = GroupId.safeParse(c.req.param("id"));
     if (!groupId.success) return c.json(NOT_FOUND, 404);
@@ -166,7 +203,17 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, SendMessageRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 
-    const message = await appendMessage(db, owned, { kind: "user", text: body.value.text });
+    // @名 在写入前解析一次就存进正文，派活只看 mentions，不重新解析正文。单 Bot 群 parseMentions 自己返回空。
+    const mentions = parseMentions(body.value.text, await listGroupBots(db, owned));
+    // 没 @ 人就不带这个字段：MessageBody 里它可省，恒带一个空数组等于说「@ 了一批空的人」。
+    const sent =
+      mentions.length === 0
+        ? ({ kind: "user", text: body.value.text } as const)
+        : ({ kind: "user", text: body.value.text, mentions } as const);
+    // 防循环的限额是「两条用户消息之间」，所以用户一说话就归零。
+    deps.mentionLoop.reset(owned);
+
+    const message = await appendMessage(db, owned, sent);
     hub.push(c.get("user").id, { type: "message", message });
     const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
     if (!settled) await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
@@ -185,6 +232,17 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value.decision);
     if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
     return c.json(DecideApprovalResponse.parse({ approval: settled.approval }));
+  });
+
+  app.patch("/api/tasks/:id", async (c) => {
+    const taskId = TaskId.safeParse(c.req.param("id"));
+    if (!taskId.success) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, UpdateTaskRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const task = await updateTask(db, c.get("user").id, taskId.data, body.value);
+    if (task === null) return c.json(NOT_FOUND, 404);
+    hub.push(c.get("user").id, { type: "task_updated", task });
+    return c.json(UpdateTaskResponse.parse({ task }));
   });
 
   app.get("/api/settings", async (c) => {
@@ -215,7 +273,8 @@ const MessageQuery = z.object({
 
 type ReadResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
-async function readJson<T>(request: Request, schema: z.ZodType<T>): Promise<ReadResult<T>> {
+// 泛型收在 schema 上而不是 z.ZodType<T>：后者的输入类型会把 BotId 这类品牌化 ID 磨回 string。
+async function readJson<S extends z.ZodTypeAny>(request: Request, schema: S): Promise<ReadResult<z.infer<S>>> {
   let raw: unknown;
   try {
     raw = await request.json();

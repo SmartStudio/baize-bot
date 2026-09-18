@@ -5,6 +5,7 @@ import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { AGENT_PATH, AgentHub } from "./agent/hub.js";
+import { MentionLoopGuard } from "./agent/mention-loop.js";
 import type { Db } from "./db/client.js";
 import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
@@ -44,6 +45,8 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
 export async function startServer(options: StartOptions): Promise<RunningServer> {
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
   const hub = new PushHub();
+  // 一个实例，两处用：用户消息在 createApp 那边归零，上行 mention 在 AgentHub 那边计数。
+  const mentionLoop = new MentionLoopGuard();
 
   // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
@@ -53,6 +56,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     gatewayModel: config.gatewayModel,
     priceInputPerM: config.priceInputPerM,
     priceOutputPerM: config.priceOutputPerM,
+    mentionLoop,
     gatewayBaseUrl: () => publicBaseUrl ?? "",
   });
 
@@ -60,6 +64,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     db: options.db,
     hub,
     agents,
+    mentionLoop,
     secureCookie: options.secureCookie ?? false,
     gateway: {
       model: config.gatewayModel,

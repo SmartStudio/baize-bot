@@ -57,6 +57,16 @@ export async function finishRun(
   return row === undefined ? null : toUsageRecord(row);
 }
 
+/** 这个 run 确实是这个 Bot 在这个群里的活。上行报文的 runId 是外部输入，外键管不了它指到哪个群。 */
+export async function runBelongsTo(db: Db, runId: RunId, botId: BotId, groupId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.id, runId), eq(runs.botId, botId), eq(runs.groupId, groupId)))
+    .limit(1);
+  return row !== undefined;
+}
+
 export type OpenRun = { readonly runId: RunId; readonly groupId: GroupId; readonly botId: BotId };
 
 /** 该用户最近一条还没结束的 run。agent_error 报文里没有群号，只能落到它上面。 */

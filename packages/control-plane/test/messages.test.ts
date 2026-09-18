@@ -179,11 +179,18 @@ describe("跨群改消息", () => {
     const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
     const push = await connectPush(server.server.port, attackerClient.cookie ?? "");
     const ownMessageId = MessageId.parse(randomUUID());
+    // 上行报文的 runId 要真属于这个 Bot 在这个群里，否则整条在归属校验那里就被丢掉，撞号这一关根本走不到。
+    // 直接插一行而不是发条消息派活：派活会在攻击者群里留下一条用户消息，最后那句「只该有后发那条」就不成立了。
+    const runId = RunId.parse(randomUUID());
+    await database.sql`
+      INSERT INTO runs (id, bot_id, group_id, started_at)
+      VALUES (${runId}, ${attackerBot.bot.id}, ${attackerBot.group.id}, now())
+    `;
 
     try {
       agent.send({
         type: "bot_text",
-        runId: RunId.parse(randomUUID()),
+        runId,
         botId: attackerBot.bot.id,
         groupId: attackerBot.group.id,
         messageId: victimMessageId,
@@ -193,7 +200,7 @@ describe("跨群改消息", () => {
       // 后发的这条能落地，它先推出来就说明上一条什么也没做，不靠超时。
       agent.send({
         type: "bot_text",
-        runId: RunId.parse(randomUUID()),
+        runId,
         botId: attackerBot.bot.id,
         groupId: attackerBot.group.id,
         messageId: ownMessageId,

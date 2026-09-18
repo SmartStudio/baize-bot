@@ -1,5 +1,5 @@
 import { BotId, type GroupId, type Message, type MessageBody, type MessageId, type UserId } from "@baize/shared";
-import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, lt, max, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -139,15 +139,30 @@ export async function replaceMessageBody(
   return row === undefined ? null : toMessage(row);
 }
 
-export type GroupBot = { readonly id: BotId; readonly name: string };
+/** 每个群的最近一条消息。侧栏和群列表都要它，一次查询查完所有群。 */
+export async function latestMessagePerGroup(db: Db, groupIds: readonly string[]): Promise<Map<string, Message>> {
+  const latest = db
+    .select({ groupId: messages.groupId, maxSeq: max(messages.seq).as("max_seq") })
+    .from(messages)
+    .where(inArray(messages.groupId, [...groupIds]))
+    .groupBy(messages.groupId)
+    .as("latest");
+  const rows = await db
+    .select({ message: messages })
+    .from(messages)
+    .innerJoin(latest, and(eq(messages.groupId, latest.groupId), eq(messages.seq, latest.maxSeq)));
+  return new Map(rows.map((r) => [r.message.groupId, toMessage(r.message)]));
+}
 
-/** 群成员按展示顺序。M3 只有单 Bot 群，派活取第一个。 */
+export type GroupBot = { readonly id: BotId; readonly name: string; readonly tag: string };
+
+/** 群成员按展示顺序。派活、路由、上下文署名都用这一份。 */
 export async function listGroupBots(db: Db, groupId: string): Promise<GroupBot[]> {
   const rows = await db
-    .select({ id: bots.id, name: bots.name })
+    .select({ id: bots.id, name: bots.name, tag: bots.tag })
     .from(groupMembers)
     .innerJoin(bots, eq(bots.id, groupMembers.botId))
     .where(eq(groupMembers.groupId, groupId))
     .orderBy(asc(groupMembers.position));
-  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name }));
+  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name, tag: row.tag }));
 }
