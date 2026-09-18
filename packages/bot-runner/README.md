@@ -71,23 +71,25 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。主题任务的三个工具由运行器自己挂，见下一节，排在 `extensionTools` 之后。桌面操作、MCP 桥接、存 skill 这三组还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具由运行器自己挂，见下一节，排在 `extensionTools` 之后。桌面操作、MCP 桥接、存 skill 这三组还没做。测试用这个注册点塞两个假工具。
 
 ## 主题任务工具
 
-`src/topic.ts` 的 `createTopicTools` 挂三个工具，由 `createRunner` 按 Bot 建，不用调用方注册。
+`src/topic.ts` 的 `createTopicTools` 挂五个工具，由 `createRunner` 按 Bot 建，不用调用方注册。
 
 | 工具 | 参数 | 返回 | 上行报文 |
 | --- | --- | --- | --- |
 | `read_task` | 无 | 整张任务卡的文本；群里没有任务卡时是 `这个群没有任务卡` | 无 |
 | `update_checklist` | `items: { text, done, ownerBotId? }[]`，最多 50 条 | `清单已更新，n/m 完成` | `task_checklist`，整份替换 |
 | `mention_bot` | `name`、`text` | `已经在群里 @ 了 <名字>。` | `mention`，带 `targetBotId` |
+| `handoff_task` | `to`、`done`、`notDone`、`next`、`checklistIndex?` | `已发交接报文给 <名字>，等它确认。` | `handoff`，带 `toBotId` |
+| `accept_handoff` | 无 | `已确认接手，你现在是当前经手。` | `handoff_accept`，带 `handoffId` |
 
-`update_checklist` 在边界上把缺省的 `ownerBotId` 补成 `null`（协议里它是可空不是可省），再过 `z.array(ChecklistItem).max(50)`。`mention_bot` 按 `members` 里的 `name` 精确匹配，匹配不上或者匹配到自己都是错误。
+`update_checklist` 在边界上把缺省的 `ownerBotId` 补成 `null`（协议里它是可空不是可省），再过 `z.array(ChecklistItem).max(50)`。`mention_bot` 和 `handoff_task` 的目标都走同一个 `otherMemberByName`，按 `members` 里的 `name` 精确匹配，匹配不上或者匹配到自己都是错误。
 
 **错误一律靠抛异常表达。** pi-agent-core 的 `agent-loop.js` 在 `execute` 的 catch 里把 `error.message` 做成一条 `isError` 的工具结果，`src/reporter.ts` 据此把 `bot_tool_call` 的终态记成 `failed`。返回一条带错误字样的正常结果只会被记成 `ok`，控制面看到的是这次调用成功了。
 
-自己抛的三条是「不属于任何一次运行」「名字找不到」「@ 自己」，都是中文文本；名字找不到时还会列出群里可以 @ 的名字（排除自己），模型下一轮才不用瞎猜。另外还有一条错误路径是 zod 抛的：清单项的 `text` 为空串、`mention` 的 `text` 为空或超过 2000 字，会在 `z.array(ChecklistItem)` 或 `AgentToControl.parse` 上抛，模型拿到的是 zod 那串英文 issues。这四条都在 `send` 之前抛，所以一条上行报文也发不出去。
+自己抛的是「不属于任何一次运行」「名字找不到」「交给自己」「不是当前经手」「这个群没有任务卡」「清单指针越界」「这次没有要你接手的交接」，都是中文文本；名字找不到时还会列出群里还能选的名字（排除自己），模型下一轮才不用瞎猜。另外还有一条错误路径是 zod 抛的：清单项的 `text` 为空串、`mention` 的 `text` 为空或超过 2000 字，会在 `z.array(ChecklistItem)` 或 `AgentToControl.parse` 上抛，模型拿到的是 zod 那串英文 issues。这些都在 `send` 之前抛，所以一条上行报文也发不出去。
 
 ### 任务卡的文本
 
@@ -115,9 +117,27 @@ T-2482 给老客户回一封询价邮件
 
 经手的 id 按 `members` 解析成名字。**名单里没有的 id 原样渲染那个 id**，不丢信息：成员名单是可能滞后于任务卡的，换成 `未指派` 就查不出到底是谁。
 
-`task` 不为 null 时任务卡还会作为 **prompt 的第一段**送给模型，形如 `任务卡：\n<卡片>\n\n`，后面才接「群里刚才说的」和「当前这条」。放第一段是因为它是这一轮的目标，群里的闲聊放在后面不会把它挤远。`task` 为 null 时 `composePrompt` 的行为和没有任务卡这套东西时完全一样。
+`task` 不为 null 时任务卡还会作为 **prompt 的第一段**送给模型，形如 `任务卡：\n<卡片>\n\n`，后面才接「交接报文」（只在这条 prompt 带了 `handoffId` 时有，见下）、「群里刚才说的」和「当前这条」。放第一段是因为它是这一轮的目标，群里的闲聊放在后面不会把它挤远。`task` 为 null 时 `composePrompt` 的行为和没有任务卡这套东西时完全一样。
 
 prompt 的这一段和 `read_task` 的返回共用同一个 `renderTaskCard`，两边看到的卡片不会飘。
+
+### 交接
+
+交接分两步，中间隔着目标 Bot 的确认：当前经手点 `handoff_task` 发出报文，控制面落库并给目标派一条带 `handoffId` 的 prompt，目标点 `accept_handoff` 才真正接手。Bot 之间的这个确认不是归属人的审批，走的也不是审批那条路。
+
+`handoff_task` 在三件事上拦：群里没有任务卡、发起的人不是 `task.currentBotId`、目标是自己或者名单外的名字。**经手校验排在名字解析前面**，所以一个手里没活的 Bot 写了个不存在的名字，拿到的错误是「你不是当前经手」而不是「没这个人」，先纠正那个更要紧的错。
+
+`checklistIndex` 收的是**任务卡上那个序号**，从 1 起；协议里的 `checklistIndex` 是下标，从 0 起。换算和范围检查都在 `handoff_task` 里做：
+
+| 模型写的 | 结果 |
+| --- | --- |
+| 1 到清单长度 | 减一，上行成下标 |
+| 缺省 | `null` |
+| 0、负数、超过清单长度 | 抛错，错误文本给出清单一共几条 |
+
+范围**故意不写进 typebox 的 schema**。Pi 在 `execute` 之前按 schema 校验参数，被它挡下来的模型只能看到一条 `Validation` 报错，看不出该写几；交给这个 if 统一报，0 和越界给的是同一句能照着改的话。
+
+`accept_handoff` 无参，只在这次 prompt 带了 `handoffId` 时能用，`handoffId` 从 `ActiveRun` 上取，不收模型给的。带 `handoffId` 的 prompt，正文就是控制面渲染好的交接报文，`composePrompt` 把它贴上「交接报文：」的标签紧跟在任务卡后面单成一段，再补一句「先调用 `accept_handoff` 确认接手」。这一段不会再重复成「当前这条」。混在群聊后面的话，模型会把它当成又一句闲话直接开干。
 
 ### 清单里的经手怎么解析
 
@@ -134,7 +154,7 @@ prompt 的这一段和 `read_task` 的返回共用同一个 `renderTaskCard`，�
 
 剩下的一律抛。`BotId` 只是 `z.string().min(1).brand()`，模型猜的名字照样过得了 `ChecklistItem` 和 `AgentToControl.parse`，不在这里拦住就是一条形状合法的脏数据发到控制面，终态还记成 `ok`。
 
-`test/runner.test.ts` 的「运行器的主题任务工具」一节钉住这些：两条直接断言整张卡片的文本（一条满字段、一条全占位词加名单外的 id），其余九条都真跑一遍假上游，其中三条专钉经手的解析（名字解析成 id、猜的名字被拦下、退群的 id 原样放行）。
+`test/runner.test.ts` 的「运行器的主题任务工具」一节钉住这些：两条直接断言整张卡片的文本（一条满字段、一条全占位词加名单外的 id），其余九条都真跑一遍假上游，其中三条专钉经手的解析（名字解析成 id、猜的名字被拦下、退群的 id 原样放行）。「运行器的交接工具」一节另有十二条，覆盖整条报文的字段、指针换算、四道拦截，以及带 `handoffId` 的 prompt 里各段的先后。
 
 ## 跑测试
 

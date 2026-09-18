@@ -1,7 +1,16 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { AgentToControl, BotId, GroupId, RunId, TaskId, type ToolConnection, type TopicTask } from "@baize/shared";
+import {
+  AgentToControl,
+  BotId,
+  GroupId,
+  HandoffId,
+  RunId,
+  TaskId,
+  type ToolConnection,
+  type TopicTask,
+} from "@baize/shared";
 import { Type } from "typebox";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 import {
@@ -43,7 +52,11 @@ const promptMessage = (
   botId: string,
   runId: string,
   text: string,
-  group?: { readonly task?: TopicTask; readonly members?: readonly GroupMember[] },
+  group?: {
+    readonly task?: TopicTask;
+    readonly members?: readonly GroupMember[];
+    readonly handoffId?: string;
+  },
 ): PromptMessage => ({
   type: "prompt",
   runId: RunId.parse(runId),
@@ -53,6 +66,7 @@ const promptMessage = (
   context: [],
   task: group?.task ?? null,
   members: [...(group?.members ?? [{ id: BotId.parse(botId), name: botId }])],
+  ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
 });
 
 const member = (botId: string, name: string): GroupMember => ({ id: BotId.parse(botId), name });
@@ -735,6 +749,254 @@ describe("运行器的主题任务工具", () => {
     expect(firstTurn.indexOf("群里刚才说的："), "群聊上下文在当前这条之前").toBeLessThan(
       firstTurn.indexOf("当前这条："),
     );
+  });
+});
+
+describe("运行器的交接工具", () => {
+  const handoffArgs = {
+    to: "小黑",
+    done: "翻完历史邮件，价格口径跟财务对过了",
+    notDone: "回信还没起草",
+    next: "照 2023 年那版模板起草，周五前发出去",
+    checklistIndex: 2,
+  };
+
+  it("handoff_task 上报整条交接报文，清单指针从卡片上的序号换成下标", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["交给小黑", callTool("handoff_task", handoffArgs)]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff"),
+      "卡片上第 2 条在协议里是下标 1，不换算就指到隔壁那条了",
+    ).toEqual([
+      {
+        type: "handoff",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        toBotId: "bot-2",
+        done: handoffArgs.done,
+        notDone: handoffArgs.notDone,
+        next: handoffArgs.next,
+        checklistIndex: 1,
+      },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(seen.toolResults.join(""), "返回值要点名在等谁确认").toContain("已发交接报文给小黑，等它确认。");
+  });
+
+  it("handoff_task 不给清单指针时上行补成 null", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([["交给小黑", callTool("handoff_task", { ...handoffArgs, checklistIndex: undefined })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff").map((m) => m.type === "handoff" && m.checklistIndex),
+      "协议里 checklistIndex 是可空不是可省，缺省在这个边界补成 null",
+    ).toEqual([null]);
+  });
+
+  it("handoff_task 由非当前经手发起：不上报，终态 failed，错误文本说出当前经手是谁", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["交给小黑", callTool("handoff_task", handoffArgs)]]),
+    });
+
+    await h.runner.prompt(
+      promptMessage("bot-1", "run-1", "交给小黑", {
+        task: topicTask({ currentBotId: BotId.parse("bot-2") }),
+        members: TWO_MEMBERS,
+      }),
+    );
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff"),
+      "手里没活的 Bot 交接出去，控制面收到的就是一条改别人经手的报文",
+    ).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join(""), "错误文本要告诉模型当前经手是谁").toContain("当前经手是小黑");
+  });
+
+  it("handoff_task 交给自己：不上报，终态 failed", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([["交给小黑", callTool("handoff_task", { ...handoffArgs, to: "小白" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff"),
+      "交给自己不该产生一条交接",
+    ).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+  });
+
+  // 清单有两条，0 是模型误当成下标写的，5 是它凭空编的。
+  for (const bad of [0, 5]) {
+    it(`handoff_task 的清单指针 ${bad} 落在清单之外：不上报，终态 failed，错误文本给出清单长度`, async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        script: scriptRecording(seen, [
+          ["交给小黑", callTool("handoff_task", { ...handoffArgs, checklistIndex: bad })],
+        ]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { task: topicTask(), members: TWO_MEMBERS }));
+
+      expect(
+        h.sent.filter((m) => m.type === "handoff"),
+        "指到不存在的清单项，接手的 Bot 拿到的就是一条查无此条的交接",
+      ).toEqual([]);
+      expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+        "bot_tool_call:running",
+        "bot_tool_call:failed",
+      ]);
+      expect(seen.toolResults.join(""), "错误文本要给出清单长度，模型才知道该写几").toContain("清单一共 2 条");
+    });
+  }
+
+  it("handoff_task 在没有任务卡的群里：不上报，终态 failed", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["交给小黑", callTool("handoff_task", handoffArgs)]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff"),
+      "没有任务卡就没有当前经手，交接无从谈起",
+    ).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join(""), "错误文本要说明这个群没有任务卡").toContain("这个群没有任务卡");
+  });
+
+  it("handoff_task 交给群里没有的名字：不上报，终态 failed，错误文本列出可以交接给谁", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["交给小黑", callTool("handoff_task", { ...handoffArgs, to: "小灰" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "交给小黑", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff"),
+      "名字对不上就不该有 handoff 上行",
+    ).toEqual([]);
+    const results = seen.toolResults.join("");
+    expect(results, "错误文本要把能交接给谁告诉模型，否则它只能瞎猜").toContain("可以交接给的是：小黑");
+    expect(results, "自己不在可以交接的名单里").not.toContain("小白");
+  });
+
+  it("accept_handoff 在带 handoffId 的 prompt 里：上报 handoff_accept，带这条 prompt 的 handoffId", async () => {
+    const h = await startHarness({
+      bots: ["bot-2"],
+      script: scriptBy([["接一下", callTool("accept_handoff", {})]]),
+    });
+
+    await h.runner.prompt(
+      promptMessage("bot-2", "run-1", "接一下", {
+        task: topicTask(),
+        members: TWO_MEMBERS,
+        handoffId: "handoff-1",
+      }),
+    );
+
+    expect(h.sent.filter((m) => m.type === "handoff_accept")).toEqual([
+      { type: "handoff_accept", runId: "run-1", botId: "bot-2", groupId: "group-1", handoffId: "handoff-1" },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+  });
+
+  it("accept_handoff 在不带 handoffId 的 prompt 里：不上报，终态 failed", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["接一下", callTool("accept_handoff", {})]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "接一下", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(
+      h.sent.filter((m) => m.type === "handoff_accept"),
+      "没有交接可接时的确认，控制面拿不到 handoffId，只能是一条脏报文",
+    ).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join(""), "错误文本要说明这次没有可接的交接").toContain("这次没有要你接手的交接");
+  });
+
+  it("带 handoffId 的 prompt：交接报文单成一段排在任务卡之后，并让它先确认接手", async () => {
+    const body = "小白交给你。做了什么：翻完历史邮件。没做什么：回信没起草。下一步：照模板起草。";
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-2"],
+      script: scriptRecording(seen, [[body, { textChunks: ["好。"], usage: { input: 800, output: 5 } }]]),
+    });
+
+    await h.runner.prompt(
+      promptMessage("bot-2", "run-1", body, { task: topicTask(), members: TWO_MEMBERS, handoffId: "handoff-1" }),
+    );
+
+    const firstTurn = seen.firstTurn.join("");
+    expect(firstTurn, "交接报文正文要原样送进去").toContain(body);
+    expect(firstTurn, "贴上标签，模型才不会把它当成群里又一句闲话").toContain("交接报文：");
+    expect(firstTurn, "要点名先确认接手再动手").toContain("先调用 accept_handoff 确认接手");
+    expect(firstTurn.indexOf("任务卡："), "任务卡仍排在最前").toBeLessThan(firstTurn.indexOf("交接报文："));
+    expect(firstTurn, "正文已经是交接报文那一段，不再重复成「当前这条」").not.toContain("当前这条：");
+  });
+
+  // composePrompt 有没有 context 是两条分支，上一条只走空 context 那条，这条走另一条。
+  it("带 handoffId 又有群聊上下文时，交接报文夹在任务卡和群聊之间", async () => {
+    const body = "小白交给你。做了什么：翻完历史邮件。没做什么：回信没起草。下一步：照模板起草。";
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-2"],
+      script: scriptRecording(seen, [[body, { textChunks: ["好。"], usage: { input: 800, output: 5 } }]]),
+    });
+
+    await h.runner.prompt({
+      ...promptMessage("bot-2", "run-1", body, { task: topicTask(), members: TWO_MEMBERS, handoffId: "handoff-1" }),
+      context: [{ from: "小白", text: "客户刚又催了一遍" }],
+    });
+
+    const firstTurn = seen.firstTurn.join("");
+    expect(firstTurn, "群聊上下文照常送").toContain("客户刚又催了一遍");
+    expect(firstTurn.indexOf("任务卡："), "任务卡仍排在最前").toBeLessThan(firstTurn.indexOf("交接报文："));
+    expect(firstTurn.indexOf("交接报文："), "交接报文排在群聊之前，不被闲聊挤远").toBeLessThan(
+      firstTurn.indexOf("群里刚才说的："),
+    );
+    expect(firstTurn, "正文已经是交接报文那一段，不再重复成「当前这条」").not.toContain("当前这条：");
   });
 });
 
