@@ -159,8 +159,15 @@ export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
 
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("user"), text: z.string() }),
-  z.object({ kind: z.literal("bot"), botId: BotId, text: z.string(), streaming: z.boolean() }),
+  // mentions 在写入时从正文里解析出来存下，派活路由只看它，不重新解析正文。可省，省了等于没 @ 人。
+  z.object({ kind: z.literal("user"), text: z.string(), mentions: z.array(BotId).optional() }),
+  z.object({
+    kind: z.literal("bot"),
+    botId: BotId,
+    text: z.string(),
+    streaming: z.boolean(),
+    mentions: z.array(BotId).optional(),
+  }),
   z.object({ kind: z.literal("system"), text: z.string() }),
   z.object({
     kind: z.literal("tool_call"),

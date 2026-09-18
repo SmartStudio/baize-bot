@@ -1,5 +1,16 @@
 import { z } from "zod";
-import { BotId, ComputerId, GroupId, MessageId, RunId, SiteLogin, ToolConnection, UserId } from "./domain.js";
+import {
+  BotId,
+  ChecklistItem,
+  ComputerId,
+  GroupId,
+  MessageId,
+  RunId,
+  SiteLogin,
+  ToolConnection,
+  TopicTask,
+  UserId,
+} from "./domain.js";
 
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
@@ -57,6 +68,23 @@ export const AgentToControl = z.discriminatedUnion("type", [
     kind: z.enum(["send_external", "change_production_data", "pay"]),
     summary: z.string(),
   }),
+  // 运行器的主题任务工具走下面两条。清单整份替换，同一份重发两遍结果不变。
+  z.object({
+    type: z.literal("task_checklist"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    checklist: z.array(ChecklistItem).max(50),
+  }),
+  // Bot @ 群里另一个 Bot。控制面存成这个 Bot 的一条消息，只派给被 @ 的那个，不改当前经手。
+  z.object({
+    type: z.literal("mention"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    targetBotId: BotId,
+    text: z.string().min(1).max(2000),
+  }),
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
 
@@ -76,6 +104,9 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     groupId: GroupId,
     text: z.string(),
     context: z.array(z.object({ from: z.string(), text: z.string() })),
+    // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁。单 Bot 群 task 为 null，members 只有它自己。
+    task: TopicTask.nullable(),
+    members: z.array(z.object({ id: BotId, name: z.string() })),
   }),
   z.object({
     type: z.literal("approval_result"),

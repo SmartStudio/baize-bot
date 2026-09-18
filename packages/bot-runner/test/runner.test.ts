@@ -44,6 +44,8 @@ const promptMessage = (botId: string, runId: string, text: string): PromptMessag
   groupId: GroupId.parse("group-1"),
   text,
   context: [],
+  task: null,
+  members: [{ id: BotId.parse(botId), name: botId }],
 });
 
 /** 假上游按请求里出现过的字眼分派脚本，一次 prompt 的第二轮一律空着收尾。 */

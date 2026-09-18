@@ -46,6 +46,9 @@ export async function dispatchUserMessage(
     groupId,
     text: trigger.body.kind === "user" ? trigger.body.text : "",
     context,
+    // M3 只有单 Bot 群，任务卡不给。M7 的多 Bot 群在这里带上任务卡和成员。
+    task: null,
+    members: [{ id: bot.id, name: bot.name }],
   });
   // 查在线和发报文之间连接掉了。run 行留着不结束，跟一次跑到一半断连是同一种痕迹。
   if (!sent) await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
