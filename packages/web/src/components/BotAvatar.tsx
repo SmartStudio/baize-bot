@@ -1,6 +1,6 @@
 import type { BotHue } from "@baize/shared";
 
-type Size = "sm" | "md" | "lg";
+type Size = "xs" | "sm" | "md" | "lg";
 
 // 原型里 小服 的头像是「服」：中文名取首段汉字的最后一个字，去掉「小」这类前缀。
 export const initialOf = (name: string): string => {

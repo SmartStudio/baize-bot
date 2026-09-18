@@ -10,15 +10,33 @@ export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRe
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
-const BotBubble = ({ body, lookup }: { body: Extract<MessageBody, { kind: "bot" }>; lookup: BotLookup }) => {
+// 多 Bot 群里得先说清这句话是谁说的，单 Bot 群里只有一个人会开口，这一行就是噪音。
+const BotBubble = ({
+  body,
+  lookup,
+  showSource,
+}: {
+  body: Extract<MessageBody, { kind: "bot" }>;
+  lookup: BotLookup;
+  showSource: boolean;
+}) => {
   const bot = lookup(body.botId);
   return (
-    <div className="bot-line">
-      <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
-      <p className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>
-        {body.text}
-        {body.streaming ? <span className="caret" data-testid="streaming-caret" aria-label="正在输入" /> : null}
-      </p>
+    <div className="bot-block">
+      {showSource ? (
+        <span className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
+          消息来自
+          <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+          {bot.tag ? `${bot.name} · ${bot.tag}` : bot.name}
+        </span>
+      ) : null}
+      <div className="bot-line">
+        <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
+        <p className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>
+          {body.text}
+          {body.streaming ? <span className="caret" data-testid="streaming-caret" aria-label="正在输入" /> : null}
+        </p>
+      </div>
     </div>
   );
 };
@@ -154,11 +172,13 @@ export const MessageView = ({
   lookup,
   approvals,
   onDecide,
+  showSource = false,
 }: {
   message: Message;
   lookup: BotLookup;
   approvals: ApprovalTable;
   onDecide: DecideApproval;
+  showSource?: boolean;
 }) => {
   const body = message.body;
   return (
@@ -168,7 +188,7 @@ export const MessageView = ({
           case "user":
             return <UserBubble text={body.text} />;
           case "bot":
-            return <BotBubble body={body} lookup={lookup} />;
+            return <BotBubble body={body} lookup={lookup} showSource={showSource} />;
           case "system":
             return <SystemNote text={body.text} />;
           case "tool_call":

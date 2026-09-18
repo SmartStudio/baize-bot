@@ -1,25 +1,124 @@
 import { useState } from "react";
-import { Hand, Plus, Search, Settings as SettingsIcon } from "lucide-react";
-import type { BotId, User } from "@baize/shared";
-import type { BotListItem } from "@baize/shared";
+import { Hand, Plus, Search, Settings as SettingsIcon, Users } from "lucide-react";
+import type { Bot, BotId, GroupId, User } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { activityOf, previewOf, timeOf } from "./messages/preview.js";
+import { memberIdsOf, type Conversation } from "../state/app.js";
 
 type Props = {
-  bots: BotListItem[];
-  selectedBotId: BotId | null;
+  conversations: Conversation[];
+  bots: Record<BotId, Bot>;
+  selectedGroupId: GroupId | null;
   user: User;
-  onSelect: (botId: BotId) => void;
-  onCreate: () => void;
+  onSelect: (groupId: GroupId) => void;
+  onCreateBot: () => void;
+  onCreateGroup: () => void;
   onOpenAccount: () => void;
 };
 
-export const Sidebar = ({ bots, selectedBotId, user, onSelect, onCreate, onOpenAccount }: Props) => {
+const membersOf = (conversation: Conversation, bots: Record<BotId, Bot>): Bot[] =>
+  memberIdsOf(conversation)
+    .map((botId) => bots[botId])
+    .filter((bot): bot is Bot => bot !== undefined);
+
+const ConversationItem = ({
+  conversation,
+  bots,
+  selected,
+  onSelect,
+}: {
+  conversation: Conversation;
+  bots: Record<BotId, Bot>;
+  selected: boolean;
+  onSelect: (groupId: GroupId) => void;
+}) => {
+  const members = membersOf(conversation, bots);
+  const lead = members[0];
+  const team = conversation.kind === "team";
+  const title = team ? conversation.task.title : (lead?.name ?? "Bot");
+  return (
+    <li>
+      <button
+        type="button"
+        className={`bot-item${selected ? " is-selected" : ""}`}
+        data-testid={team ? "group-item" : "bot-item"}
+        data-bot-name={team ? undefined : lead?.name}
+        data-group-title={team ? title : undefined}
+        onClick={() => onSelect(conversation.groupId)}
+      >
+        {team ? (
+          <span className="avatar-stack" aria-hidden="true">
+            {members.slice(0, 2).map((bot) => (
+              <BotAvatar key={bot.id} name={bot.name} hue={bot.hue} size="sm" />
+            ))}
+          </span>
+        ) : (
+          <BotAvatar name={lead?.name ?? "Bot"} hue={lead?.hue ?? "sky"} />
+        )}
+        <span className="bot-item-body">
+          <span className="bot-item-top">
+            <b>{title}</b>
+            {!team && lead?.tag ? <em className="tag">{lead.tag}</em> : null}
+            {conversation.pendingApprovals > 0 ? (
+              <span className="badge badge-pending" data-testid="bot-pending">
+                <Hand size={13} aria-hidden="true" />
+                等你点头 {conversation.pendingApprovals}
+              </span>
+            ) : null}
+            {activityOf(conversation.lastMessage) === "working" ? (
+              <span className="badge badge-working" data-testid="bot-working">
+                干活中
+              </span>
+            ) : null}
+            <span className="time">{conversation.lastMessage ? timeOf(conversation.lastMessage) : "刚刚"}</span>
+          </span>
+          {team ? <span className="bot-item-sub">{members.map((bot) => bot.name).join(" · ")}</span> : null}
+          <span className="bot-item-preview">
+            {conversation.lastMessage
+              ? previewOf(conversation.lastMessage.body)
+              : team
+                ? "群建好了，还没派活。"
+                : "刚建好，还没派活。"}
+          </span>
+        </span>
+      </button>
+    </li>
+  );
+};
+
+export const Sidebar = ({
+  conversations,
+  bots,
+  selectedGroupId,
+  user,
+  onSelect,
+  onCreateBot,
+  onCreateGroup,
+  onOpenAccount,
+}: Props) => {
   const [query, setQuery] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const needle = query.trim().toLowerCase();
-  const shown = needle
-    ? bots.filter((item) => `${item.bot.name} ${item.bot.tag} ${item.bot.description}`.toLowerCase().includes(needle))
-    : bots;
+  // 搜的是一条对话的全部可见文字：单 Bot 群是那个 Bot，多 Bot 群是任务编号、标题和所有成员。
+  const haystackOf = (conversation: Conversation): string => {
+    const members = membersOf(conversation, bots)
+      .map((bot) => `${bot.name} ${bot.tag} ${bot.description}`)
+      .join(" ");
+    return conversation.kind === "team" ? `${conversation.task.number} ${conversation.task.title} ${members}` : members;
+  };
+  const shown = needle ? conversations.filter((c) => haystackOf(c).toLowerCase().includes(needle)) : conversations;
+  const solo = shown.filter((c) => c.kind === "solo");
+  const team = shown.filter((c) => c.kind === "team");
+
+  const item = (conversation: Conversation) => (
+    <ConversationItem
+      key={conversation.groupId}
+      conversation={conversation}
+      bots={bots}
+      selected={conversation.groupId === selectedGroupId}
+      onSelect={onSelect}
+    />
+  );
 
   return (
     <aside className="sidebar" data-testid="sidebar">
@@ -27,10 +126,48 @@ export const Sidebar = ({ bots, selectedBotId, user, onSelect, onCreate, onOpenA
         <span className="lights" aria-hidden="true">
           <i /> <i /> <i />
         </span>
-        <button type="button" className="icon-button" data-testid="new-bot" onClick={onCreate} aria-label="新建 Bot">
+        <button
+          type="button"
+          className="icon-button"
+          data-testid="new-menu"
+          aria-label="新建"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen(!menuOpen)}
+        >
           <Plus size={16} />
         </button>
       </header>
+      {menuOpen ? (
+        <>
+          <button type="button" className="menu-scrim" aria-label="关掉菜单" onClick={() => setMenuOpen(false)} />
+          <div className="new-menu" data-testid="new-menu-popup">
+            <button
+              type="button"
+              className="menu-row"
+              data-testid="new-bot"
+              onClick={() => {
+                setMenuOpen(false);
+                onCreateBot();
+              }}
+            >
+              <Plus size={16} aria-hidden="true" />
+              新建 Bot
+            </button>
+            <button
+              type="button"
+              className="menu-row"
+              data-testid="new-group"
+              onClick={() => {
+                setMenuOpen(false);
+                onCreateGroup();
+              }}
+            >
+              <Users size={16} aria-hidden="true" />
+              建群
+            </button>
+          </div>
+        </>
+      ) : null}
       <div className="search">
         <Search size={16} aria-hidden="true" />
         <input
@@ -41,43 +178,20 @@ export const Sidebar = ({ bots, selectedBotId, user, onSelect, onCreate, onOpenA
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
-      <p className="list-label">Bot</p>
-      <ul className="bot-list" data-testid="bot-list">
-        {shown.map((item) => (
-          <li key={item.bot.id}>
-            <button
-              type="button"
-              className={`bot-item${item.bot.id === selectedBotId ? " is-selected" : ""}`}
-              data-testid="bot-item"
-              data-bot-name={item.bot.name}
-              onClick={() => onSelect(item.bot.id)}
-            >
-              <BotAvatar name={item.bot.name} hue={item.bot.hue} />
-              <span className="bot-item-body">
-                <span className="bot-item-top">
-                  <b>{item.bot.name}</b>
-                  {item.bot.tag ? <em className="tag">{item.bot.tag}</em> : null}
-                  {item.pendingApprovals > 0 ? (
-                    <span className="badge badge-pending" data-testid="bot-pending">
-                      <Hand size={13} aria-hidden="true" />
-                      等你点头 {item.pendingApprovals}
-                    </span>
-                  ) : null}
-                  {activityOf(item.lastMessage) === "working" ? (
-                    <span className="badge badge-working" data-testid="bot-working">
-                      干活中
-                    </span>
-                  ) : null}
-                  <span className="time">{item.lastMessage ? timeOf(item.lastMessage) : "刚刚"}</span>
-                </span>
-                <span className="bot-item-preview">
-                  {item.lastMessage ? previewOf(item.lastMessage.body) : "刚建好，还没派活。"}
-                </span>
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
+      <div className="conversation-lists">
+        <p className="list-label">Bot</p>
+        <ul className="bot-list" data-testid="bot-list">
+          {solo.map(item)}
+        </ul>
+        {team.length > 0 ? (
+          <>
+            <p className="list-label">群</p>
+            <ul className="bot-list" data-testid="group-list">
+              {team.map(item)}
+            </ul>
+          </>
+        ) : null}
+      </div>
       <footer className="sidebar-footer">
         <button type="button" className="account-button" data-testid="account-button" onClick={onOpenAccount}>
           <span className="avatar avatar-md avatar-user" aria-hidden="true">
