@@ -1,0 +1,34 @@
+{
+  "name": "@baize/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "mock": "tsx mock/server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src mock e2e",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "@baize/shared": "workspace:*",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/ws": "^8.5.13",
+    "@vitejs/plugin-react": "^4.3.4",
+    "oxlint": "^0.15.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "ws": "^8.18.0"
+  }
+}
