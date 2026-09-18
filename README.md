@@ -38,6 +38,8 @@ pnpm --filter @baize/control-plane computer-token # 之后重置并重新打印
 
 模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`，`model` 一律换成 `GATEWAY_MODEL`，流式和非流式都原样透传。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。
 
+Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里回「批准」「拒绝」都算数，详见 `packages/control-plane/README.md`。
+
 环境变量：
 
 | 名字 | 默认值 | 作用 |
@@ -48,7 +50,7 @@ pnpm --filter @baize/control-plane computer-token # 之后重置并重新打印
 | `PUBLIC_BASE_URL` | 空，用实际监听的地址拼 | 下发给电脑代理的模型网关地址前缀 |
 | `GATEWAY_MODEL` | `baize-default` | 网关对外和对上游都用这个模型名 |
 | `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | 模型上游 |
-| `UPSTREAM_API_KEY` | 空 | 转发给上游的 key |
+| `UPSTREAM_API_KEY` | 空 | 转发给上游的 key，只能是 ASCII，否则每次上游请求都变成 502 |
 | `PRICE_INPUT_PER_M` | `0` | 每百万输入 token 的价，用来折算 run 的花费 |
 | `PRICE_OUTPUT_PER_M` | `0` | 每百万输出 token 的价 |
 
