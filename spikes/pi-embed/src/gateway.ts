@@ -139,7 +139,6 @@ export async function startGateway(options: {
     totalsFor: (key) =>
       usage
         .filter((u) => u.key === key)
-<<<<<<< HEAD
         .reduce(
           (acc, u) => ({
             inputTokens: acc.inputTokens + u.inputTokens,
@@ -150,13 +149,7 @@ export async function startGateway(options: {
             outputTokens: 0,
           },
         ),
-=======
-        .reduce((acc, u) => ({ inputTokens: acc.inputTokens + u.inputTokens, outputTokens: acc.outputTokens + u.outputTokens }), {
-          inputTokens: 0,
-          outputTokens: 0,
-        }),
     requestCount: () => requests,
->>>>>>> wt/pi-spike
     close: () => new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
 }
