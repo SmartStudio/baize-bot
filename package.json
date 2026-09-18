@@ -1,0 +1,11 @@
+{
+  "name": "baize-bot",
+  "private": true,
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "check": "pnpm typecheck && pnpm test"
+  },
+  "devDependencies": { "@types/node": "^22.10.2", "typescript": "^5.6.3" }
+}
