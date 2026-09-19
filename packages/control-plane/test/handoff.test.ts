@@ -223,6 +223,10 @@ describe("上行 handoff", () => {
         ),
         "第一次越线只留一条提示，后续静默",
       ).toHaveLength(1);
+      expect(
+        stored.messages.find((message) => message.body.kind === "system" && message.body.text === HANDOFF_LOOP_NOTICE)
+          ?.body,
+      ).toMatchObject({ tone: "error" });
 
       const response = await team.client.post(`/api/groups/${team.group.id}/messages`, { text: "继续" });
       expect(response.status).toBe(201);
@@ -476,6 +480,7 @@ describe("24 小时提醒", () => {
       expect(reminders, "提醒只该有一条").toHaveLength(1);
       expect(reminders[0], "提醒要说清楚在等谁、下一步是什么").toContain("小服");
       expect(reminders[0]).toContain(NEXT);
+      expect(stored.messages.find((message) => message.body.kind === "system")?.body).toMatchObject({ tone: "info" });
 
       expect(stored.handoffs[0]?.status, "只提醒，不退回给小销也不升级").toBe("pending");
       expect(await storedTask(team.group.id).then((task) => task.currentBotId)).toBe(team.sales.id);

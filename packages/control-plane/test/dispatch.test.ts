@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import {
   CreateBotResponse,
   CreateGroupResponse,
   MessageListResponse,
+  RunId,
   SendMessageResponse,
   type BotId,
   type GroupId,
@@ -215,6 +217,21 @@ describe("派活", () => {
       streaming: false,
     });
     await appendMessage(database.db, owner.groupId, { kind: "system", text: "电脑睡了" });
+    await appendMessage(database.db, owner.groupId, {
+      kind: "tool_call",
+      botId: owner.botId,
+      tool: "erp.query",
+      argsSummary: "库存",
+      status: "ok",
+      durationMs: 12,
+    });
+    await appendMessage(database.db, owner.groupId, {
+      kind: "cost",
+      runId: RunId.parse(randomUUID()),
+      botId: owner.botId,
+      steps: 7,
+      amount: 2.5,
+    });
     const agent = await online(owner);
 
     try {
@@ -225,6 +242,7 @@ describe("派活", () => {
         { from: "你", text: "你好" },
         { from: "小服", text: "在的" },
         { from: "系统", text: "电脑睡了" },
+        { from: "小服", text: "用了 erp.query：库存" },
       ]);
     } finally {
       agent.close();
@@ -244,7 +262,7 @@ describe("电脑不在线", () => {
     );
     expect(page.messages.map((m) => m.body)).toEqual([
       { kind: "user", text: "先存着" },
-      { kind: "system", text: OFFLINE_NOTICE },
+      { kind: "system", text: OFFLINE_NOTICE, tone: "error" },
     ]);
     expect(await runCount(owner.groupId), "没派出去的活不该在用量表里留行").toBe(0);
   });

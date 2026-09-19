@@ -178,6 +178,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   await appendAndPush(deps, conn.ownerId, groupId, {
     kind: "cost",
     runId: event.runId,
+    botId: event.botId,
     steps: usage.steps,
     amount: usage.amount,
   });
@@ -203,6 +204,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   }
   await appendAndPush(deps, conn.ownerId, groupId, {
     kind: "system",
+    tone: "error",
     text:
       event.code === "model_failed"
         ? `模型没回话，${Array.from(event.detail).slice(0, 200).join("")}。检查控制面的上游地址和 key（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODEL）。`
@@ -302,7 +304,11 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
       );
       return;
     case "stop":
-      await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", text: MENTION_LOOP_NOTICE });
+      await appendAndPush(deps, conn.ownerId, groupId, {
+        kind: "system",
+        tone: "error",
+        text: MENTION_LOOP_NOTICE,
+      });
       return;
     case "silent":
       return;

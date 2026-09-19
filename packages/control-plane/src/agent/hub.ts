@@ -242,7 +242,7 @@ export class AgentHub {
         const message =
           run.groupId === null
             ? null
-            : await appendMessage(tx, run.groupId, { kind: "system", text: DISCONNECT_NOTICE });
+            : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: DISCONNECT_NOTICE });
         return { message };
       });
       if (result === null) continue;

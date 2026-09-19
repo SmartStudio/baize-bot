@@ -31,7 +31,10 @@ export async function appendReminders(
     for (const one of stale) {
       const ownerId = owners.get(one.groupId);
       if (ownerId === undefined) continue;
-      messages.push({ ownerId, message: await appendMessage(tx, one.groupId, { kind: "system", text: one.text }) });
+      messages.push({
+        ownerId,
+        message: await appendMessage(tx, one.groupId, { kind: "system", tone: "info", text: one.text }),
+      });
     }
     return messages;
   });

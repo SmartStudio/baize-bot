@@ -304,6 +304,7 @@ describe("run_done", () => {
       expect(push.type === "message" ? push.message.body : null).toEqual({
         kind: "cost",
         runId: job.runId,
+        botId: job.botId,
         steps: 7,
         amount: 6,
       });
@@ -377,6 +378,7 @@ describe("agent_error", () => {
 
       expect(text).toContain("跑活的进程出错了");
       expect(text, "原始报错留着，出问题时要能查").toContain("exit code 137");
+      expect(push.type === "message" ? push.message.body : null).toMatchObject({ tone: "error" });
     } finally {
       job.close();
     }
@@ -395,6 +397,7 @@ describe("agent_error", () => {
 
       expect(message?.groupId, "推送的是报错指定的群").toBe(job.groupId);
       expect(message?.body.kind, "推送一条系统消息").toBe("system");
+      expect(message?.body).toMatchObject({ tone: "error" });
       expect(text).toContain(detail.slice(0, 200));
       expect(text).not.toContain("TAIL_NOT_FOR_USER");
       expect(text).toContain("UPSTREAM_BASE_URL");

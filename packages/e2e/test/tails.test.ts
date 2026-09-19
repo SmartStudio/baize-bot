@@ -79,7 +79,7 @@ it("离线留言只落 system、不建 run，重连不补派", async () => {
         .toBe(before.messages.length + 2);
       expect((await messages(stack, groupId)).messages.slice(-2).map((message) => message.body)).toEqual([
         offline.message.body,
-        { kind: "system", text: "电脑不在线，消息已留着" },
+        { kind: "system", text: "电脑不在线，消息已留着", tone: "error" },
       ]);
       expect(await runs(stack, groupId), "离线留言不能创建 run").toHaveLength(0);
 

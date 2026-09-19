@@ -73,7 +73,7 @@ export async function dispatchUserMessage(
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions });
   // 排在在线检查之前：没人可派的时候「@ 一个 Bot 派活」比「电脑不在线」有用。
   if (targets.length === 0) {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", text: NO_TARGET_NOTICE });
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: NO_TARGET_NOTICE });
     return { kind: "no_target" };
   }
 
@@ -121,7 +121,7 @@ export async function dispatchHandoff(
     case "allow":
       break;
     case "stop":
-      await appendAndPush(deps, ownerId, groupId, { kind: "system", text: HANDOFF_LOOP_NOTICE });
+      await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: HANDOFF_LOOP_NOTICE });
       return;
     case "silent":
       return;
@@ -159,7 +159,7 @@ async function sendToTargets(
   input: SendInput,
 ): Promise<Exclude<DispatchOutcome, { kind: "no_target" }>> {
   if (!deps.agents.isOnline(ownerId)) {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
     return { kind: "offline" };
   }
 
@@ -181,7 +181,10 @@ async function sendToTargets(
       botId: target,
       groupId,
       text: input.handoff?.text ?? triggerText(input.trigger.body),
-      context: history.map((body) => summarize(body, target, input.members)),
+      context: history.flatMap((body) => {
+        const line = summarize(body, target, input.members);
+        return line === null ? [] : [line];
+      }),
       // 单 Bot 群没有任务卡可给，protocol.ts 就是这么定的。
       task: input.members.length > 1 ? input.task : null,
       members: roster,
@@ -194,7 +197,7 @@ async function sendToTargets(
   // 查在线和发报文之间连接掉了。run 行留着不结束，跟一次跑到一半断连是同一种痕迹。
   // 几个目标一起没发出去也只留一句话：断的是同一条连接，说一遍就够。
   if (dropped) {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
     return sentCount > 0 ? { kind: "partial" } : { kind: "offline" };
   }
   return { kind: "sent" };
@@ -214,7 +217,7 @@ async function recentBodies(db: Db, groupId: GroupId, trigger: Message): Promise
 }
 
 /** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。 */
-function summarize(body: MessageBody, recipient: BotId, members: readonly GroupBot[]): ContextLine {
+function summarize(body: MessageBody, recipient: BotId, members: readonly GroupBot[]): ContextLine | null {
   switch (body.kind) {
     case "user":
       return { from: "你", text: clip(body.text) };
@@ -225,7 +228,7 @@ function summarize(body: MessageBody, recipient: BotId, members: readonly GroupB
     case "tool_call":
       return { from: sender(body.botId, recipient, members), text: clip(`用了 ${body.tool}：${body.argsSummary}`) };
     case "cost":
-      return { from: "系统", text: `上一次跑了 ${body.steps} 步，花了 ${body.amount}` };
+      return null;
     case "approval":
       return { from: "系统", text: "一条等你点头的审批" };
     case "handoff":

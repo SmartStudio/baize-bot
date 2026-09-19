@@ -69,7 +69,10 @@ it("hello 只收尾 activeRuns 之外的 run，并推送失败消息", async () 
       const received: string[] = [];
       while (received.length < 1) {
         const event = await push.next();
-        if (event.type === "message" && event.message.body.kind === "system") received.push(event.message.body.text);
+        if (event.type === "message" && event.message.body.kind === "system") {
+          expect(event.message.body.tone).toBe("error");
+          received.push(event.message.body.text);
+        }
       }
       expect(received).toEqual([notice]);
     } finally {

@@ -178,7 +178,7 @@ describe("多 Bot 群派活", () => {
       const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
       expect(bodies, "谁都没 @，群里只该多一句提示").toEqual([
         { kind: "user", text: "先看看这件事" },
-        { kind: "system", text: NO_TARGET_NOTICE },
+        { kind: "system", text: NO_TARGET_NOTICE, tone: "error" },
       ]);
       expect(await runCount(team.group.id), "没派出去的活不该在用量表里留行").toBe(0);
 
@@ -464,6 +464,9 @@ describe("上行 mention", () => {
         message.body.kind === "system" ? [message.body.text] : [],
       );
       expect(texts, "越线的第一条留一句话，越线之后的不再重复").toEqual([MENTION_LOOP_NOTICE]);
+      expect(
+        (await messagesIn(team, team.group.id)).find((message) => message.body.kind === "system")?.body,
+      ).toMatchObject({ tone: "error" });
 
       // 越线那条要是也派了，它会排在这条用户消息的派活前面。
       await say(team, team.group.id, "@小销 我来说一句");

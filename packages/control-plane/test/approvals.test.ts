@@ -339,6 +339,7 @@ describe("24 小时提醒", () => {
       const text =
         reminder.type === "message" && reminder.message.body.kind === "system" ? reminder.message.body.text : "";
       expect(text, "提醒要说清楚等的是哪件事").toContain(SUMMARY);
+      expect(reminder.type === "message" ? reminder.message.body : null).toMatchObject({ tone: "info" });
 
       const again = await remindStaleApprovals(database.db, server.server.hub, later);
       expect(again, "reminded_at 已经占住了，第二遍一行都不该命中").toBe(0);
