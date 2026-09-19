@@ -197,7 +197,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
     const bad = badCron(body.value.triggers ?? []);
     if (bad !== null) return c.json({ error: bad }, 400);
-    const routine = await updateRoutine(db, owned.row, body.value);
+    const routine = await updateRoutine(db, RoutineId.parse(owned.row.id), body.value);
     if (routine === null) return c.json(NOT_FOUND, 404);
     hub.push(c.get("user").id, { type: "routine_updated", routine });
     return c.json(RoutineResponse.parse({ routine }));

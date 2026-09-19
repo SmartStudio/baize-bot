@@ -137,7 +137,11 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
     if (locked === undefined) return false;
     if (input.triggers !== undefined) patch.triggers = mergeTriggers(locked.triggers, input.triggers);
     if (Object.keys(patch).length === 0) return true;
-    const updated = await tx.update(routines).set(patch).where(eq(routines.id, routineId)).returning({ id: routines.id });
+    const updated = await tx
+      .update(routines)
+      .set(patch)
+      .where(eq(routines.id, routineId))
+      .returning({ id: routines.id });
     return updated.length > 0;
   });
   if (!ok) return null;
