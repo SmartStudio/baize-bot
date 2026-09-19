@@ -9,6 +9,7 @@ import {
   markComputersSleeping,
   rotateGatewayKey,
 } from "../repo/computers.js";
+import { listSkillsByOwner } from "../repo/skills.js";
 import type { PushHub } from "../ws/hub.js";
 import { handleAgentEvent } from "./events.js";
 import type { MentionLoopGuard } from "./mention-loop.js";
@@ -178,6 +179,9 @@ export class AgentHub {
       bots: items.map((item) => ({ id: item.bot.id, name: item.bot.name, description: item.bot.description })),
       // 工具连接是 M6 的对象，这一版恒为空。
       tools: [],
+      // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
+      // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
+      skills: await listSkillsByOwner(this.#deps.db, conn.ownerId),
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,

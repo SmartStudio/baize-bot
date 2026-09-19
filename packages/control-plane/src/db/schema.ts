@@ -8,6 +8,7 @@ import type {
   MessageBody,
   OnFailure as OnFailureSchema,
   RoutineRunStatus as RoutineRunStatusSchema,
+  SkillSource,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
 import type { z } from "zod";
@@ -160,6 +161,10 @@ export const messages = pgTable(
       .notNull()
       .references(() => groups.id, { onDelete: "cascade" }),
     body: jsonb("body").$type<MessageBody>().notNull(),
+    // 只对 kind = 'skill_offer' 的行有意义。正文里没有 source 字段，而来源是上行那一刻按
+    // 「这个 run 属不属于例行任务运行」判出来的，要等用户点存才写进 skill 行，中间没有别处能存它。
+    // 不出边界，`toMessage` 不读它。
+    skillOfferSource: text("skill_offer_source").$type<SkillSource>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
   },
   (t) => [index("messages_group_id_seq_idx").on(t.groupId, t.seq)],
@@ -310,4 +315,28 @@ export const handoffs = pgTable(
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
   },
   (t) => [index("handoffs_group_id_status_idx").on(t.groupId, t.status)],
+);
+
+// Bot 会做的一件活，属于一个 Bot，删 Bot 跟着走。步骤整份存 jsonb：它就是一份有序的文本，
+// 列化或单开一张步骤表都只是把同一份东西拆开再拼回来。
+//
+// 唯一索引 `(bot_id, name)` 是「同一 Bot 下名字不重复」的唯一真相源。建、改名、复制、点存四条路
+// 都靠插入撞它来判 409，不先查后写：先查后写挡不住并发的两个同名请求，两边都查到没有，两边都插进去。
+// 重名必须在库这一级挡死，因为 Pi 按 name 去重，同名的第二条根本不会进系统提示，
+// 库里留着它只会让用户看见一条永远跑不起来的活。
+// 没有单开 `skills_bot_id_idx`：这个唯一索引的前缀已经覆盖按 bot_id 的查询。
+export const skills = pgTable(
+  "skills",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    source: text("source").$type<SkillSource>().notNull(),
+    steps: jsonb("steps").$type<string[]>().notNull().default([]),
+    useCount: integer("use_count").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("skills_bot_id_name_idx").on(t.botId, t.name)],
 );

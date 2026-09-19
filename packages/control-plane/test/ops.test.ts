@@ -44,6 +44,7 @@ describe("迁移", () => {
       "runs",
       "sessions",
       "settings",
+      "skills",
       "tasks",
       "user_counters",
       "users",

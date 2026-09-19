@@ -67,6 +67,29 @@ export async function appendMessage(db: Db | Tx, groupId: string, body: MessageB
   return toMessage(row);
 }
 
+/** 正文里那支 `skill_offer`。落卡和点存两处都只认这一支，别的 kind 编译期就进不来。 */
+export type SkillOfferBody = Extract<MessageBody, { kind: "skill_offer" }>;
+
+type SkillSource = NonNullable<(typeof messages.$inferSelect)["skillOfferSource"]>;
+
+/**
+ * 落一条 skill_offer 卡。来源不走正文走单独一列，所以这一条不能借 `appendMessage`：
+ * 那个函数只收 `MessageBody`，多一个恒为 undefined 的参数会让别的十几个调用点一起背上这个字段。
+ */
+export async function appendSkillOffer(
+  db: Db,
+  groupId: string,
+  body: SkillOfferBody,
+  source: SkillSource,
+): Promise<Message> {
+  const [row] = await db
+    .insert(messages)
+    .values({ id: newId(), groupId, body, skillOfferSource: source, createdAt: new Date() })
+    .returning();
+  if (row === undefined) throw new Error("写 skill_offer 卡没有返回行");
+  return toMessage(row);
+}
+
 export type AppendResult =
   | { readonly kind: "created"; readonly message: Message }
   | { readonly kind: "existing"; readonly message: Message }

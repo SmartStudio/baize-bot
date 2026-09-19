@@ -7,10 +7,12 @@ import {
   appendBotDelta,
   appendMessage,
   appendMessageWithId,
+  appendSkillOffer,
   findGroupId,
   listGroupBots,
   replaceMessageBody,
 } from "../repo/messages.js";
+import { routineRunOfRun } from "../repo/routines.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
 import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
@@ -66,6 +68,9 @@ export async function handleAgentEvent(
     case "mention":
       await onMention(deps, conn, message);
       return;
+    case "skill_offer":
+      await onSkillOffer(deps, conn, message);
+      return;
     case "handoff":
       await onHandoff(deps, conn, message);
       return;
@@ -97,6 +102,7 @@ type AgentError = Extract<AgentToControl, { type: "agent_error" }>;
 type ApprovalRequest = Extract<AgentToControl, { type: "approval_request" }>;
 type TaskChecklist = Extract<AgentToControl, { type: "task_checklist" }>;
 type Mention = Extract<AgentToControl, { type: "mention" }>;
+type SkillOffer = Extract<AgentToControl, { type: "skill_offer" }>;
 type HandoffEvent = Extract<AgentToControl, { type: "handoff" }>;
 type HandoffAcceptEvent = Extract<AgentToControl, { type: "handoff_accept" }>;
 
@@ -297,6 +303,28 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
     case "silent":
       return;
   }
+}
+
+/**
+ * Bot 干完一件多步的活，问用户存不存。这一步只落一张卡，不建 skill 行：
+ * 存不存由用户在群里点，`config.skills` 因此一个字都没变，不用重发 config。
+ *
+ * 来源按「这个 run 属不属于一次例行任务运行」判，只有此刻查得到：用户点存时手上只有那张卡，
+ * 卡的正文里没有 runId，而例行任务的运行记录只留最近 20 条，早的那次到时候连行都不在了。
+ * 所以现在就判出来记在这一行的 `skill_offer_source` 列上。
+ */
+async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: SkillOffer): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+
+  const source = (await routineRunOfRun(deps.db, event.runId)) !== null ? "routine" : "chat";
+  const message = await appendSkillOffer(
+    deps.db,
+    groupId,
+    { kind: "skill_offer", botId: event.botId, name: event.name, steps: event.steps, status: "offered", skillId: null },
+    source,
+  );
+  deps.push.push(conn.ownerId, { type: "message", message });
 }
 
 /**

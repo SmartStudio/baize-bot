@@ -3,13 +3,17 @@ import {
   BotId,
   BotListResponse,
   Computer,
+  CopySkillRequest,
   CreateBotRequest,
   CreateBotResponse,
   CreateGroupRequest,
   CreateGroupResponse,
   CreateRoutineRequest,
+  CreateSkillRequest,
   DecideApprovalRequest,
   DecideApprovalResponse,
+  DecideSkillOfferRequest,
+  DecideSkillOfferResponse,
   GroupId,
   GroupListResponse,
   GroupResponse,
@@ -23,11 +27,15 @@ import {
   RoutineResponse,
   SendMessageRequest,
   SendMessageResponse,
+  SkillId,
+  SkillListResponse,
+  SkillResponse,
   TaskId,
   UpdateBotRequest,
   UpdateBotResponse,
   UpdateRoutineRequest,
   UpdateSettingsRequest,
+  UpdateSkillRequest,
   UpdateTaskRequest,
   UpdateTaskResponse,
   type Settings,
@@ -61,6 +69,18 @@ import {
 import { isValidCron } from "../routines/cron.js";
 import { runRoutine } from "../routines/run.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
+import {
+  bumpSkillUses,
+  copySkill,
+  createSkill,
+  decideSkillOffer,
+  deleteSkill,
+  findOwnedSkill,
+  findOwnedSkillOfferMessage,
+  listSkills,
+  updateSkill,
+  type SkillRow,
+} from "../repo/skills.js";
 import { updateTask } from "../repo/tasks.js";
 import { authenticate } from "../repo/users.js";
 import type { PushHub } from "../ws/hub.js";
@@ -83,6 +103,8 @@ const PUBLIC_HOOK = /^\/api\/hooks\/[^/]+$/;
 
 const NOT_FOUND = { error: "没有这个对象" } as const;
 const UNAUTHORIZED = { error: "请先登录" } as const;
+/** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
+const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const { agents, db, hub } = deps;
@@ -232,6 +254,93 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.body(null, 202);
   });
 
+  app.get("/api/bots/:id/skills", async (c) => {
+    const botId = BotId.safeParse(c.req.param("id"));
+    if (!botId.success) return c.json(NOT_FOUND, 404);
+    if ((await findBot(db, c.get("user").id, botId.data)) === null) return c.json(NOT_FOUND, 404);
+    const items = await listSkills(db, botId.data);
+    return c.json(SkillListResponse.parse({ items }));
+  });
+
+  app.post("/api/bots/:id/skills", async (c) => {
+    const botId = BotId.safeParse(c.req.param("id"));
+    if (!botId.success) return c.json(NOT_FOUND, 404);
+    if ((await findBot(db, c.get("user").id, botId.data)) === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, CreateSkillRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    // 用户在 Web 上「教它一个」，来源恒为 taught。
+    const skill = await createSkill(db, botId.data, { ...body.value, source: "taught" });
+    if (skill === null) return c.json(NAME_TAKEN, 409);
+    await agents.sendConfig(c.get("user").id);
+    hub.push(c.get("user").id, { type: "skill_updated", skill });
+    return c.json(SkillResponse.parse({ skill }), 201);
+  });
+
+  app.patch("/api/skills/:id", async (c) => {
+    const owned = await ownedSkill(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, UpdateSkillRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const updated = await updateSkill(db, SkillId.parse(owned.id), body.value);
+    if (updated.kind === "gone") return c.json(NOT_FOUND, 404);
+    if (updated.kind === "name_taken") return c.json(NAME_TAKEN, 409);
+    await agents.sendConfig(c.get("user").id);
+    hub.push(c.get("user").id, { type: "skill_updated", skill: updated.skill });
+    return c.json(SkillResponse.parse({ skill: updated.skill }));
+  });
+
+  app.delete("/api/skills/:id", async (c) => {
+    const owned = await ownedSkill(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    if (!(await deleteSkill(db, SkillId.parse(owned.id)))) return c.json(NOT_FOUND, 404);
+    await agents.sendConfig(c.get("user").id);
+    hub.push(c.get("user").id, {
+      type: "skill_deleted",
+      skillId: SkillId.parse(owned.id),
+      botId: BotId.parse(owned.botId),
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/api/skills/:id/copy", async (c) => {
+    const owned = await ownedSkill(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, CopySkillRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    // 目标 Bot 也要是自己的，别人的和不存在的一样 404：复制是往目标里写东西，源的归属管不了目标。
+    if ((await findBot(db, c.get("user").id, body.value.botId)) === null) return c.json(NOT_FOUND, 404);
+    const skill = await copySkill(db, owned, body.value.botId);
+    if (skill === null) return c.json(NAME_TAKEN, 409);
+    await agents.sendConfig(c.get("user").id);
+    hub.push(c.get("user").id, { type: "skill_updated", skill });
+    return c.json(SkillResponse.parse({ skill }), 201);
+  });
+
+  app.post("/api/messages/:id/skill-offer", async (c) => {
+    const messageId = MessageId.safeParse(c.req.param("id"));
+    if (!messageId.success) return c.json(NOT_FOUND, 404);
+    // 别人的消息、不存在的消息、正文不是这张卡的消息，在这里都是 null，一律 404。
+    const offer = await findOwnedSkillOfferMessage(db, c.get("user").id, messageId.data);
+    if (offer === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, DecideSkillOfferRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+
+    const decided = await decideSkillOffer(db, c.get("user").id, offer, body.value.decision);
+    // 卡上那个 Bot 已经删了，那条 skill 无处可落，和卡本身不在一样 404。
+    if (decided.kind === "bot_gone") return c.json(NOT_FOUND, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这条卡已经有结论了" }, 409);
+    if (decided.kind === "name_taken") return c.json(NAME_TAKEN, 409);
+
+    // 卡的状态住在正文里，所以点完要重推那条 message，客户端按 id 覆盖它。
+    hub.push(c.get("user").id, { type: "message", message: decided.message });
+    if (decided.skill !== null) {
+      hub.push(c.get("user").id, { type: "skill_updated", skill: decided.skill });
+      // 不存什么都没变，`config.skills` 也就不用重发。
+      await agents.sendConfig(c.get("user").id);
+    }
+    return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill: decided.skill }));
+  });
+
   app.post("/api/groups", async (c) => {
     const body = await readJson(c.req.raw, CreateGroupRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
@@ -302,6 +411,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
     const message = await appendMessage(db, owned, sent);
     hub.push(c.get("user").id, { type: "message", message });
+
+    // `/名` 只加一次用量，正文一个字都不改：运行器收到的和用户手打的一模一样，Pi 自己按名字找那份 SKILL.md。
+    // 不重发 config：变的只有 use_count，它不进 SKILL.md。
+    for (const skill of await bumpSkillUses(db, owned, body.value.text)) {
+      hub.push(c.get("user").id, { type: "skill_updated", skill });
+    }
+
     const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
     if (!settled) await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
     return c.json(SendMessageResponse.parse({ message }), 201);
@@ -351,6 +467,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   return app;
+}
+
+/** skill 按归属人查，别人的和不存在的一样是 404。 */
+function ownedSkill(db: Db, c: Context<Env>): Promise<SkillRow | null> {
+  const skillId = SkillId.safeParse(c.req.param("id"));
+  if (!skillId.success) return Promise.resolve(null);
+  return findOwnedSkill(db, c.get("user").id, skillId.data);
 }
 
 /** 例行任务按归属人查，别人的和不存在的一样是 404。 */

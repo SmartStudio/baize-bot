@@ -1,8 +1,10 @@
-import type { BotId } from "@baize/shared";
+import type { BotId, SkillId } from "@baize/shared";
 
-// 派活路由的两个纯函数。不碰数据库，群成员由调用方查好传进来。
+// 派活路由的几个纯函数。不碰数据库，群成员和 skill 由调用方查好传进来。
 
 export type RoutingMember = { readonly id: BotId; readonly name: string };
+
+export type RoutingSkill = { readonly id: SkillId; readonly name: string };
 
 /**
  * 这条消息该派给谁。
@@ -32,20 +34,47 @@ export function routeTargets(input: {
 /** 正文里 @ 到的群成员。单 Bot 群不解析，@ 谁都派给那一个。 */
 export function parseMentions(text: string, members: readonly RoutingMember[]): BotId[] {
   if (members.length < 2) return [];
+  const hit = scanNames(text, "@", members);
+  return members.filter((member) => hit.has(member.id)).map((member) => member.id);
+}
 
-  // 名字长的先试，「@小销售」因此不会先命中成员「小销」。排序键只有长度，规范保证稳定排序，等长时保持成员顺序。
-  const byNameLength = members.toSorted((a, b) => b.name.length - a.name.length);
+/**
+ * 正文里 `/名` 引到的 skill。
+ *
+ * 和 `parseMentions` 不同，这里没有「单 Bot 群不解析」那道短路：单 Bot 群里 `/名` 照样算，
+ * 它引的是这个 Bot 会做的活，不是在群里点人。
+ *
+ * 同名的 skill 跨 Bot 可以重名，而每个 `/` 位置只认一条（`scanNames` 里的 break）：
+ * Pi 按 name 去重，同名的第二条根本不会进系统提示，所以只给排在前面的那一条计数，
+ * 和真正跑起来的那一条对得上。排在前面由调用方的查询顺序定。
+ */
+export function parseSkillRefs(text: string, skills: readonly RoutingSkill[]): SkillId[] {
+  const hit = scanNames(text, "/", skills);
+  return skills.filter((skill) => hit.has(skill.id)).map((skill) => skill.id);
+}
+
+type Named = { readonly id: string; readonly name: string };
+
+/**
+ * 正文里 `prefix` 后面跟着的那些名字，命中的 id 一份。
+ * 名字长的先试，「@小销售」因此不会先命中成员「小销」。排序键只有长度，规范保证稳定排序，等长时保持传入顺序。
+ * 一个 `prefix` 位置最多认一条，认上就不再往下试。
+ */
+function scanNames(text: string, prefix: string, named: readonly Named[]): Set<string> {
+  const byNameLength = named.toSorted((a, b) => b.name.length - a.name.length);
   const hit = new Set<string>();
-  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
-    for (const member of byNameLength) {
-      // 按索引扫而不是拼正则：名字里带正则元字符（Bot 叫「小(销)」）时，转义这个问题在这里根本不存在。
-      if (!text.startsWith(member.name, at + 1)) continue;
+  for (let at = text.indexOf(prefix); at !== -1; at = text.indexOf(prefix, at + 1)) {
+    const from = at + prefix.length;
+    for (const one of byNameLength) {
+      // 按索引扫而不是拼正则：名字里带正则元字符（Bot 叫「小(销)」、skill 叫「报价+」）时，
+      // 转义这个问题在这里根本不存在。
+      if (!text.startsWith(one.name, from)) continue;
       // 名后必须断开，否则「@小销售」里的「小销」也算命中。空串 trim 还是空串，所以「到结尾」不用单独判。
-      const after = text.slice(at + 1 + member.name.length, at + 2 + member.name.length);
+      const after = text.slice(from + one.name.length, from + one.name.length + 1);
       if (after.trim() !== "") continue;
-      hit.add(member.id);
+      hit.add(one.id);
       break;
     }
   }
-  return members.filter((member) => hit.has(member.id)).map((member) => member.id);
+  return hit;
 }

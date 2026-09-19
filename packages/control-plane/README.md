@@ -140,6 +140,47 @@ WHERE id = $1 AND triggers -> 0 ->> 'lastFiredAt' = $旧值
 
 webhook 的 token 存在 triggers jsonb 里，`/api/hooks/:token` 用 `@>` 配 GIN 索引直接查，**没有单独的 `webhook_tokens` 表**：token 只由控制面的 `randomBytes(16)` 发，客户端在 `TriggerInput` 里只能带回这条例行任务已有的那个，别的都换新，所以撞号得赢 128 位随机数，一张表换来的唯一约束挡不住任何现实中的路，反倒多一条要同步的边。
 
+## skill
+
+Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有一条：随 `config` 下发，运行器落成 `<botDir>/skills/<skillId>/SKILL.md`，不往回同步。** 两个方向都能写的文件没有真相源：运行器改了一笔、Web 上同时改了一笔，谁覆盖谁只取决于哪条消息先到。`config.skills` 是该用户**全部** Bot 的 skill，运行器按 botId 分开落盘；这个字段恒带，一条都没有也带一个空数组，运行器靠整份名单和 skills 目录对账，省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
+
+### 同一 Bot 下名字不重复
+
+唯一索引 `(bot_id, name)` 是这件事的唯一真相源。建一条、改名、复制给别的 Bot、点存，四条路都靠**插入撞它**来判 409，不先查后写：先查后写挡不住并发的两个同名请求，两边都查到没有，两边都插进去。重名必须在库这一级挡死，因为 Pi 按 name 去重，同名的第二条根本不会进系统提示，库里留着它只会让用户看见一条永远跑不起来的活。
+
+点存撞名时**卡留在 offered**，让用户先改名再点。所以那个事务只能整条回滚，不能只插一半：卡和 skill 行要么一起成，要么一个都不动。撞名和「已经点过了」都走 `tx.rollback()`，而它抛的是同一种错，所以是谁回滚的记在事务外的一个变量上，路由层照它翻 409 的文案。
+
+### 那张卡的状态住在正文里
+
+和审批、交接**相反**。审批和交接的卡正文里只有一个 id，状态在 `approvals` / `handoffs` 自己那一行上，所以重推那条 message 一个字都不会变。skill_offer 不是这样：`name` 和 `steps` 在用户点存之前**不在任何表里**，只在正文里，状态没有别的地方可住。点完存或不存要**重推那条 message**，客户端按 id 覆盖那张卡。
+
+幂等同样不靠先查后写，靠那条 UPDATE 自己：`WHERE id = ? AND group_id = ? AND body->>'status' = 'offered'`。两个并发的点存只有一个改得动，另一个看到 0 行就是 409。
+
+### `skill_offer_source` 为什么在 `messages` 上
+
+来源有三种。`taught` 是 Web 上「教它一个」那条路写死的，另外两种只有**上行那一刻**判得出来：这个 `runId` 能不能找到一条 `routine_runs`，找得到就是 `routine`，找不到就是 `chat`。用户点存时手上只有那张卡，卡的正文里没有 runId，例行任务的运行记录又只留最近 20 条，早的那次连行都不在了。shared 的 `skill_offer` 正文里没有 source 字段，形状是冻的，塞不进去。所以单开 `messages.skill_offer_source` 一列存着它，点存时写进 skill 行。这一列只对 `kind = 'skill_offer'` 的行有意义，不出边界，`toMessage` 不读它。M10 之前落的卡读不到这一列，按对话算。
+
+### `/名` 引用
+
+`POST /api/groups/:id/messages` 落库推完那条消息之后解析一遍正文，命中的 skill `use_count` 加一。**控制面不改写正文**，运行器收到的和用户手打的一模一样，Pi 自己按名字找那份 SKILL.md。
+
+解析规则和 `@` 完全一样，公共的那段就是 `agent/routing.ts` 的 `scanNames`：名字长的先试（「/小销售」不会先命中「小销」），名后必须跟空白或行尾，按索引扫不拼正则（skill 名里可能带正则元字符）。两处的差别只有两点：`@` 在单 Bot 群不解析，`/名` 在单 Bot 群照样算；`@` 认的是群成员，`/` 认的是群里全体成员 Bot 的 skill，按 `group_members.position, skills.created_at, skills.id` 排。
+
+**每个 `/` 位置最多认一条。** 同名的 skill 跨 Bot 可以重名，但 Pi 按 name 去重，同名的第二条根本不会进系统提示，所以只给排在前面的那一条计数，和真正跑起来的那一条对得上。
+
+### 哪个动作推什么
+
+| 动作 | 推送 | 重发 config |
+| --- | --- | --- |
+| `POST /api/bots/:id/skills` | `skill_updated` | 是 |
+| `PATCH /api/skills/:id` | `skill_updated` | 是 |
+| `DELETE /api/skills/:id` | `skill_deleted` | 是 |
+| `POST /api/skills/:id/copy` | `skill_updated`（新那条） | 是 |
+| 上行 `skill_offer` | `message` | 否，还没建 skill 行 |
+| 点「存」 | `message`、`skill_updated` | 是 |
+| 点「不存」 | `message` | 否，什么都没变 |
+| 正文里 `/名` | 每条命中一条 `skill_updated` | 否，只有 `use_count` 变了，它不进 SKILL.md |
+
 ## 迁移
 
 ```

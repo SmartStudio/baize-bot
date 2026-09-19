@@ -7,6 +7,7 @@ import {
   Message,
   Routine,
   Settings,
+  Skill,
   TopicTask,
   UsageRecord,
   User,
@@ -126,6 +127,18 @@ export function toRoutine(
       status: run.status,
       note: run.note,
     })),
+  });
+}
+
+export function toSkill(row: typeof schema.skills.$inferSelect): Skill {
+  return Skill.parse({
+    id: row.id,
+    botId: row.botId,
+    name: row.name,
+    source: row.source,
+    steps: row.steps,
+    useCount: row.useCount,
+    createdAt: row.createdAt.toISOString(),
   });
 }
 
