@@ -159,6 +159,8 @@ const nextTaskNumber = (): string => {
 
 // 等结论的那次运行停在这里的 resolve 上。按钮和群里回的一句话唤醒的是同一个。
 const waiters = new Map<string, (decision: ApprovalDecision) => void>();
+const handoffWaiters = new Map<string, () => void>();
+let autoAcceptHandoff = true;
 
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
   Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes) });
@@ -184,6 +186,9 @@ export const reseed = (): void => {
   // 上一条用例可能还有一次运行停在等结论上。不给它一个结论那个 Promise 永远不落地，进程里就攒下一堆停住的运行。
   for (const wake of waiters.values()) wake("rejected");
   waiters.clear();
+  for (const wake of handoffWaiters.values()) wake();
+  handoffWaiters.clear();
+  autoAcceptHandoff = true;
   approvals.clear();
   handoffs.clear();
   routines.clear();
@@ -794,19 +799,34 @@ const HANDOFF_SCRIPT = {
 
 const HANDOFF_ACCEPT_MS = 2000;
 
-const playHandoff = async (groupId: string, botId: BotId, push: (event: ServerPush) => void): Promise<void> => {
-  const run = generation;
-  const group = groups.get(groupId);
-  if (group === undefined || group.botIds.length === 1 || botId !== HANDOFF_SCRIPT.fromBotId) return;
-  const toBotId = group.botIds.find((id) => id === HANDOFF_SCRIPT.toBotId);
-  if (toBotId === undefined) return;
-  // 演一次就够。再 @ 一次小服不该又长出一张卡，不然角标是几全看用例发过几条消息。
-  if ([...handoffs.values()].some((h) => h.groupId === groupId)) return;
+export const holdHandoffAccept = (): void => {
+  autoAcceptHandoff = false;
+};
 
-  const handoff = Handoff.parse({
+export const confirmNextHandoff = (): boolean => {
+  const wake = handoffWaiters.values().next().value;
+  if (wake === undefined) return false;
+  wake();
+  return true;
+};
+
+const waitForHandoffAccept = (id: string): Promise<void> =>
+  new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const wake = () => {
+      if (timer !== null) clearTimeout(timer);
+      handoffWaiters.delete(id);
+      resolve();
+    };
+    handoffWaiters.set(id, wake);
+    if (autoAcceptHandoff) timer = setTimeout(wake, HANDOFF_ACCEPT_MS);
+  });
+
+const pendingHandoff = (groupId: string, fromBotId: BotId, toBotId: BotId): Handoff =>
+  Handoff.parse({
     id: HandoffId.parse(`hof_${nextSuffix()}`),
     groupId: GroupId.parse(groupId),
-    fromBotId: botId,
+    fromBotId,
     toBotId,
     done: HANDOFF_SCRIPT.done,
     notDone: HANDOFF_SCRIPT.notDone,
@@ -816,12 +836,41 @@ const playHandoff = async (groupId: string, botId: BotId, push: (event: ServerPu
     createdAt: new Date().toISOString(),
     acceptedAt: null,
   });
+
+export const seedUnseenHandoff = (): Handoff => {
+  const handoff = pendingHandoff(
+    TEAM_GROUP_ID,
+    BotId.parse(HANDOFF_SCRIPT.fromBotId),
+    BotId.parse(HANDOFF_SCRIPT.toBotId),
+  );
+  handoffs.set(handoff.id, handoff);
+  return handoff;
+};
+
+export const settleUnseenHandoff = (): Handoff | null => {
+  const handoff = [...handoffs.values()].find((item) => item.status === "pending");
+  if (handoff === undefined) return null;
+  const accepted = Handoff.parse({ ...handoff, status: "accepted", acceptedAt: new Date().toISOString() });
+  handoffs.set(accepted.id, accepted);
+  return accepted;
+};
+
+const playHandoff = async (groupId: string, botId: BotId, push: (event: ServerPush) => void): Promise<void> => {
+  const run = generation;
+  const group = groups.get(groupId);
+  if (group === undefined || group.botIds.length === 1 || botId !== HANDOFF_SCRIPT.fromBotId) return;
+  const toBotId = group.botIds.find((id) => id === HANDOFF_SCRIPT.toBotId);
+  if (toBotId === undefined) return;
+  // 演一次就够。再 @ 一次小服不该又长出一张卡，不然角标是几全看用例发过几条消息。
+  if ([...handoffs.values()].some((h) => h.groupId === groupId)) return;
+
+  const handoff = pendingHandoff(groupId, botId, toBotId);
   handoffs.set(handoff.id, handoff);
   // 先推 handoff_updated 再推那条消息：卡的状态只在 Handoff 上，消息先到的话前端只能先画一张查不到状态的占位。
   push({ type: "handoff_updated", handoff });
   push({ type: "message", message: appendMessage(groupId, { kind: "handoff", handoffId: handoff.id }) });
 
-  await sleep(HANDOFF_ACCEPT_MS);
+  await waitForHandoffAccept(handoff.id);
   if (generation !== run) return;
   const accepted = Handoff.parse({ ...handoff, status: "accepted", acceptedAt: new Date().toISOString() });
   handoffs.set(accepted.id, accepted);

@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { OvernightResponse, SkillResponse, UsageResponse } from "@baize/shared";
 
 const EMAIL = "chen@baize.dev";
@@ -586,8 +586,9 @@ test("在任务卡上勾掉第二项，卡片和任务详情一起跟着变，�
   await expect(page.getByTestId("checklist-item").nth(1), "刷新后第二项还是勾着的").toBeChecked();
 });
 
-// 小服在群里干完这一段就把供货交给小采，两秒后小采确认。@ 的这句话不含「发」「付」，不会岔进审批那条序列。
-const handoffFromService = async (page: Page) => {
+// 小服在群里干完这一段就把供货交给小采。@ 的这句话不含「发」「付」，不会岔进审批那条序列。
+const handoffFromService = async (page: Page, request: APIRequestContext) => {
+  expect((await request.post("/api/test/handoff/hold")).status(), "交接确认由用例主动触发").toBe(204);
   await openTeamGroup(page, TEAM_TITLE);
   await sendText(page, "@小服 查一下 Globex 的 X3 库存和排产");
   const card = page.getByTestId("handoff-card");
@@ -597,9 +598,19 @@ const handoffFromService = async (page: Page) => {
 
 const teamItem = (page: Page) => page.locator(`[data-testid=group-item][data-group-title="${TEAM_TITLE}"]`);
 
+test("登录前已有的交接在未打开群时收到确认推送，侧栏角标归零", async ({ page, request }) => {
+  expect((await request.post("/api/test/handoff/pending")).status()).toBe(201);
+  await login(page);
+  const badge = teamItem(page).getByTestId("bot-handoff");
+  await expect(badge, "登录列表带回待确认计数").toHaveText("等 Bot 确认 1");
+
+  expect((await request.post("/api/test/handoff/accept")).status()).toBe(204);
+  await expect(badge, "未拉群历史也能按终态推送清掉角标").toHaveCount(0);
+});
+
 test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认 1」", async ({ page, request }) => {
   await login(page);
-  const card = await handoffFromService(page);
+  const card = await handoffFromService(page, request);
 
   await expect(card, "小采还没确认").toHaveAttribute("data-status", "pending");
   const pair = card.getByTestId("handoff-pair");
@@ -644,11 +655,13 @@ test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认
   await page.screenshot({ path: `${SHOT}/5c.png` });
 });
 
-test("小采确认之后卡片变已接手、角标归零、任务卡当前经手换成小采", async ({ page }) => {
+test("小采确认之后卡片变已接手、角标归零、任务卡当前经手换成小采", async ({ page, request }) => {
   await login(page);
-  const card = await handoffFromService(page);
+  const card = await handoffFromService(page, request);
 
-  await expect(card, "两秒后小采确认，状态从服务端推回来").toHaveAttribute("data-status", "accepted");
+  await expect(card, "确认前交接仍在等待").toHaveAttribute("data-status", "pending");
+  expect((await request.post("/api/test/handoff/accept")).status(), "小采现在确认").toBe(204);
+  await expect(card, "小采确认后状态从服务端推回来").toHaveAttribute("data-status", "accepted");
   await expect(card.getByTestId("handoff-status"), "接手了就写上时刻").toContainText("已接手 · ");
   await expect(teamItem(page).getByTestId("bot-handoff"), "没有在等确认的交接了，角标整个不渲染").toHaveCount(0);
   await expect(page.getByTestId("task-current"), "接手就是换经手人").toHaveText("当前 小采");
@@ -667,10 +680,10 @@ test("小采确认之后卡片变已接手、角标归零、任务卡当前经�
   await expect(page.getByTestId("task-current"), "换过的经手人也存住了").toHaveText("当前 小采");
 });
 
-test("交接是 Bot 等 Bot：不占「等你点头」那个角标，也不弹通知", async ({ page }) => {
+test("交接是 Bot 等 Bot：不占「等你点头」那个角标，也不弹通知", async ({ page, request }) => {
   await stubNotifications(page);
   await login(page);
-  await handoffFromService(page);
+  await handoffFromService(page, request);
 
   const item = teamItem(page);
   await expect(item.getByTestId("bot-handoff"), "交接记在自己那本账上").toHaveText("等 Bot 确认 1");

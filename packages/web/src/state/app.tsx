@@ -109,6 +109,7 @@ type Action =
   | { type: "approval_pushed"; approval: Approval }
   | { type: "handoffs_loaded"; handoffs: Handoff[] }
   | { type: "handoff_pushed"; handoff: Handoff }
+  | { type: "pending_counts_loaded"; bots: BotListItem[]; groups: GroupListItem[] }
   | { type: "routines_loaded"; botId: BotId; routines: Routine[] }
   | { type: "routine_upserted"; routine: Routine }
   | { type: "routine_removed"; botId: BotId; routineId: RoutineId }
@@ -374,6 +375,21 @@ const reduce = (state: AppState, action: Action): AppState => {
       return withHandoffs(state, action.handoffs, "history");
     case "handoff_pushed":
       return withHandoffs(state, [action.handoff], "push");
+    case "pending_counts_loaded": {
+      const counts = new Map(
+        [...action.bots, ...action.groups].map((item) => [
+          "bot" in item ? item.groupId : item.group.id,
+          { pendingApprovals: item.pendingApprovals, pendingHandoffs: item.pendingHandoffs },
+        ]),
+      );
+      return {
+        ...state,
+        conversations: state.conversations.map((conversation) => {
+          const current = counts.get(conversation.groupId);
+          return current === undefined ? conversation : { ...conversation, ...current };
+        }),
+      };
+    }
     case "routines_loaded":
       return { ...state, routines: { ...state.routines, [action.botId]: action.routines } };
     case "routine_upserted": {
@@ -609,6 +625,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // 同一条 pending 审批会被重推（控制面重连回放就会），计数那边按「之前知道的状态」自然幂等，通知这边没有
   // 这个信息，会照弹第二遍。记下弹过谁，一条审批只打断你一次。
   const notified = useRef(new Set<ApprovalId>());
+  const stateRef = useRef(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const connected = state.status === "ready";
   useEffect(() => {
@@ -616,6 +636,24 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let countsQueued = false;
+    const refreshPendingCounts = () => {
+      if (countsQueued) return;
+      countsQueued = true;
+      queueMicrotask(() => {
+        countsQueued = false;
+        if (cancelled) return;
+        void Promise.all([api.bots(), api.groups()])
+          .then(([bots, groups]) => {
+            if (!cancelled) dispatch({ type: "pending_counts_loaded", bots: bots.items, groups: groups.items });
+          })
+          .catch((cause: unknown) => {
+            if (!cancelled && isUnauthorized(cause)) {
+              dispatch({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
+            }
+          });
+      });
+    };
     const open = () => {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
@@ -636,7 +674,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         if (push.type === "task_updated") dispatch({ type: "task_updated", task: push.task });
         if (push.type === "approval_updated") {
+          const unseenTerminal =
+            push.approval.status !== "pending" &&
+            stateRef.current.status === "ready" &&
+            stateRef.current.approvals[push.approval.id] === undefined;
           dispatch({ type: "approval_pushed", approval: push.approval });
+          if (unseenTerminal) refreshPendingCounts();
           const current = settingsRef.current;
           if (current !== null && push.approval.status === "pending" && !notified.current.has(push.approval.id)) {
             notified.current.add(push.approval.id);
@@ -644,7 +687,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           }
         }
         // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
-        if (push.type === "handoff_updated") dispatch({ type: "handoff_pushed", handoff: push.handoff });
+        if (push.type === "handoff_updated") {
+          const unseenTerminal =
+            push.handoff.status !== "pending" &&
+            stateRef.current.status === "ready" &&
+            stateRef.current.handoffs[push.handoff.id] === undefined;
+          dispatch({ type: "handoff_pushed", handoff: push.handoff });
+          if (unseenTerminal) refreshPendingCounts();
+        }
         if (push.type === "routine_updated") dispatch({ type: "routine_upserted", routine: push.routine });
         if (push.type === "routine_deleted") {
           dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId });
