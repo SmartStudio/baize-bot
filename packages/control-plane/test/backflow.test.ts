@@ -381,6 +381,34 @@ describe("agent_error", () => {
       job.close();
     }
   });
+
+  it("模型上游报错落进指定群并推给 Web，指出控制面配置", async () => {
+    const job = await runningJob();
+    const detail = `401: invalid upstream key ${"x".repeat(210)}TAIL_NOT_FOR_USER`;
+
+    try {
+      const before = (await groupMessages(job)).length;
+      job.agent.send({ type: "agent_error", code: "model_failed", detail, groupId: job.groupId });
+      const pushed = await job.push.next();
+      const message = pushed.type === "message" ? pushed.message : null;
+      const text = message?.body.kind === "system" ? message.body.text : "";
+
+      expect(message?.groupId, "推送的是报错指定的群").toBe(job.groupId);
+      expect(message?.body.kind, "推送一条系统消息").toBe("system");
+      expect(text).toContain(detail.slice(0, 200));
+      expect(text).not.toContain("TAIL_NOT_FOR_USER");
+      expect(text).toContain("UPSTREAM_BASE_URL");
+      expect(text).toContain("UPSTREAM_API_KEY");
+      expect(text).toContain("GATEWAY_MODEL");
+      expect(text).not.toContain("电脑那边没干成这件事");
+
+      const stored = await groupMessages(job);
+      expect(stored, "群里只多一条报错消息").toHaveLength(before + 1);
+      expect(stored.at(-1), "入库内容与推送内容相同").toEqual(message);
+    } finally {
+      job.close();
+    }
+  });
 });
 
 describe("删 Bot", () => {

@@ -203,7 +203,10 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   }
   await appendAndPush(deps, conn.ownerId, groupId, {
     kind: "system",
-    text: `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
+    text:
+      event.code === "model_failed"
+        ? `模型没回话，${Array.from(event.detail).slice(0, 200).join("")}。检查控制面的上游地址和 key（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODEL）。`
+        : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
   });
   // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
   if (open !== null && open.groupId === groupId) {
