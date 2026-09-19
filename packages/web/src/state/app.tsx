@@ -14,10 +14,15 @@ import {
   type Message,
   type MessageId,
   type CreateRoutineRequest,
+  type CreateSkillRequest,
+  type DecideSkillOfferRequest,
   type Routine,
   type RoutineId,
   type Settings,
+  type Skill,
+  type SkillId,
   type UpdateRoutineRequest,
+  type UpdateSkillRequest,
   type TopicTask,
   type User,
 } from "@baize/shared";
@@ -70,6 +75,9 @@ export type AppState =
       // 例行任务按 Bot 分桶，开了那个 Bot 的「例行」页才拉。键在不在就是「这个 Bot 的例行任务拉过没有」，
       // 跟 messages 一个路子：没拉过的 Bot 不能凭一条推送造出一份只有一条的假列表。
       routines: Record<BotId, Routine[]>;
+      // 会做的活也按 Bot 分桶，开了那个 Bot 的「会做的活」页、或者聊天框里要列 `/` 名单才拉。键在不在就是
+      // 「这个 Bot 的 skill 拉过没有」，跟 routines 一个路子。
+      skills: Record<BotId, Skill[]>;
       settings: Settings;
     };
 
@@ -92,6 +100,9 @@ type Action =
   | { type: "routines_loaded"; botId: BotId; routines: Routine[] }
   | { type: "routine_upserted"; routine: Routine }
   | { type: "routine_removed"; botId: BotId; routineId: RoutineId }
+  | { type: "skills_loaded"; botId: BotId; skills: Skill[] }
+  | { type: "skill_upserted"; skill: Skill }
+  | { type: "skill_removed"; botId: BotId; skillId: SkillId }
   | { type: "settings_set"; settings: Settings };
 
 // 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
@@ -223,6 +234,7 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
     approvals: {},
     handoffs: {},
     routines: {},
+    skills: {},
     settings,
   };
 };
@@ -365,6 +377,21 @@ const reduce = (state: AppState, action: Action): AppState => {
         routines: { ...state.routines, [action.botId]: known.filter((r) => r.id !== action.routineId) },
       };
     }
+    case "skills_loaded":
+      return { ...state, skills: { ...state.skills, [action.botId]: action.skills } };
+    case "skill_upserted": {
+      const known = state.skills[action.skill.botId];
+      if (known === undefined) return state;
+      const seen = known.some((s) => s.id === action.skill.id);
+      // 用过几次一变就会重推整条。按 id 覆盖且不挪位置，列表不会在你正看着的时候跳一下。
+      const next = seen ? known.map((s) => (s.id === action.skill.id ? action.skill : s)) : [...known, action.skill];
+      return { ...state, skills: { ...state.skills, [action.skill.botId]: next } };
+    }
+    case "skill_removed": {
+      const known = state.skills[action.botId];
+      if (known === undefined) return state;
+      return { ...state, skills: { ...state.skills, [action.botId]: known.filter((s) => s.id !== action.skillId) } };
+    }
     case "settings_set":
       return { ...state, settings: action.settings };
     default:
@@ -388,6 +415,12 @@ export type AppActions = {
   updateRoutine: (routineId: RoutineId, patch: UpdateRoutineRequest) => Promise<void>;
   deleteRoutine: (routine: Routine) => Promise<void>;
   runRoutine: (routineId: RoutineId) => Promise<void>;
+  loadSkills: (botId: BotId) => Promise<void>;
+  createSkill: (botId: BotId, draft: CreateSkillRequest) => Promise<void>;
+  updateSkill: (skillId: SkillId, patch: UpdateSkillRequest) => Promise<void>;
+  deleteSkill: (skill: Skill) => Promise<void>;
+  copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
+  decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
 };
 
@@ -482,6 +515,29 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       runRoutine: signedIn(async (routineId: RoutineId) => {
         dispatch({ type: "routine_upserted", routine: await api.runRoutine(routineId) });
       }),
+      loadSkills: signedIn(async (botId: BotId) => {
+        dispatch({ type: "skills_loaded", botId, skills: (await api.skills(botId)).items });
+      }),
+      createSkill: signedIn(async (botId: BotId, draft: CreateSkillRequest) => {
+        dispatch({ type: "skill_upserted", skill: await api.createSkill(botId, draft) });
+      }),
+      updateSkill: signedIn(async (skillId: SkillId, patch: UpdateSkillRequest) => {
+        dispatch({ type: "skill_upserted", skill: await api.updateSkill(skillId, patch) });
+      }),
+      // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
+      deleteSkill: signedIn(async (skill: Skill) => {
+        await api.deleteSkill(skill.id);
+        dispatch({ type: "skill_removed", botId: skill.botId, skillId: skill.id });
+      }),
+      copySkill: signedIn(async (skillId: SkillId, botId: BotId) => {
+        dispatch({ type: "skill_upserted", skill: await api.copySkill(skillId, botId) });
+      }),
+      // 结论随这条消息的正文走，所以先落那条消息。存下来的那条 skill 是顺带回来的，dismiss 时没有。
+      decideSkillOffer: signedIn(async (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => {
+        const res = await api.decideSkillOffer(messageId, decision);
+        dispatch({ type: "message_upserted", message: res.message });
+        if (res.skill !== null) dispatch({ type: "skill_upserted", skill: res.skill });
+      }),
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
       }),
@@ -565,6 +621,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         if (push.type === "routine_updated") dispatch({ type: "routine_upserted", routine: push.routine });
         if (push.type === "routine_deleted") {
           dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId });
+        }
+        if (push.type === "skill_updated") dispatch({ type: "skill_upserted", skill: push.skill });
+        if (push.type === "skill_deleted") {
+          dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId });
         }
       });
       // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。

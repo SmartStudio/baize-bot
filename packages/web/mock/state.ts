@@ -14,6 +14,8 @@ import {
   RoutineId,
   RunId,
   Settings,
+  Skill,
+  SkillId,
   TaskId,
   TopicTask,
   User,
@@ -21,10 +23,13 @@ import {
   type ChecklistItem,
   type MessageBody,
   type CreateRoutineRequest,
+  type CreateSkillRequest,
   type ServerPush,
+  type SkillSource,
   type ToolCallStatus,
   type TriggerInput,
   type UpdateRoutineRequest,
+  type UpdateSkillRequest,
 } from "@baize/shared";
 
 export type ApprovalDecision = "approved" | "rejected";
@@ -106,6 +111,14 @@ const seeds: Seed[] = [
     bodies: [
       { kind: "user", text: "给 Globex 出一份 200 台 X3 的报价，发之前先给我看。" },
       { kind: "bot", botId: BotId.parse("bot_sales"), text: "发出去了。有回复我第一时间告诉你。", streaming: false },
+      {
+        kind: "skill_offer",
+        botId: BotId.parse("bot_sales"),
+        name: "Initech 报价",
+        steps: ["在 ERP 按 Initech 建报价单", "折扣沿用 Globex 那套口径", "生成 PDF 发我过目"],
+        status: "offered",
+        skillId: null,
+      },
     ],
   },
   {
@@ -129,6 +142,7 @@ export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();
 export const handoffs = new Map<string, Handoff>();
 export const routines = new Map<string, Routine>();
+export const skills = new Map<string, Skill>();
 
 // 单 Bot 群建 Bot 时自动建，多 Bot 群从建群页来。成员数就是这两类的分界，`/api/groups` 只列后者。
 export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
@@ -171,6 +185,7 @@ export const reseed = (): void => {
   approvals.clear();
   handoffs.clear();
   routines.clear();
+  skills.clear();
   bots.clear();
   groups.clear();
   tasks.clear();
@@ -261,9 +276,47 @@ export const reseed = (): void => {
       ],
     }),
   );
+
+  for (const skill of SEEDED_SKILLS) skills.set(skill.id, skill);
 };
 
 const SEEDED_ROUTINE_ID = "rtn_daily_report";
+
+// 对着原型 10 屏：小销会做的三件活，三种来源各一条。
+const SEEDED_SKILLS: Skill[] = [
+  Skill.parse({
+    id: "skl_quote",
+    botId: "bot_sales",
+    name: "Globex 报价",
+    source: "chat",
+    steps: [
+      "在 ERP 按客户建报价单",
+      "折扣沿用上季度口径，不确定时问你",
+      "生成 PDF，附上保修条款",
+      "发邮件前停下等你点头",
+    ],
+    useCount: 3,
+    createdAt: at(-60 * 24 * 5),
+  }),
+  Skill.parse({
+    id: "skl_lead_digest",
+    botId: "bot_sales",
+    name: "线索跟进早报",
+    source: "routine",
+    steps: ["拉昨天进来的线索，按金额排序", "给三天没动的线索写一句跟进话术", "汇总成一份早报发我"],
+    useCount: 21,
+    createdAt: at(-60 * 24 * 3),
+  }),
+  Skill.parse({
+    id: "skl_contract_diff",
+    botId: "bot_sales",
+    name: "合同条款比对",
+    source: "taught",
+    steps: ["把对方回传的合同和我们的模板逐条比对", "标出改过的条款和风险点", "拿不准的停下来问我"],
+    useCount: 1,
+    createdAt: at(-60 * 24),
+  }),
+];
 
 export const routinesOf = (botId: string): Routine[] => [...routines.values()].filter((r) => r.botId === botId);
 
@@ -480,6 +533,64 @@ const rewriteMessage = (groupId: string, id: MessageId, body: MessageBody): Mess
   const next = Message.parse({ ...previous, body });
   list[at] = next;
   return next;
+};
+
+export const skillsOf = (botId: string): Skill[] => [...skills.values()].filter((s) => s.botId === botId);
+
+// 同一个 Bot 下名字不重复。改名时把自己排除掉，不然原样存一次就会撞上自己。
+export const skillNameTaken = (botId: string, name: string, exceptId?: string): boolean =>
+  [...skills.values()].some((s) => s.botId === botId && s.name === name && s.id !== exceptId);
+
+export const createSkill = (botId: string, input: CreateSkillRequest, source: SkillSource): Skill => {
+  const skill = Skill.parse({
+    id: SkillId.parse(`skl_new_${nextSuffix()}`),
+    botId,
+    name: input.name,
+    source,
+    steps: input.steps,
+    useCount: 0,
+    createdAt: new Date().toISOString(),
+  });
+  skills.set(skill.id, skill);
+  return skill;
+};
+
+// patch 从 PATCH 的请求体来，键在不在、值对不对都由 Skill.parse 说了算。steps 给了就是整份替换。
+export const writeSkill = (id: string, patch: UpdateSkillRequest): Skill | null => {
+  const skill = skills.get(id);
+  if (skill === undefined) return null;
+  const next = Skill.parse({ ...skill, ...patch });
+  skills.set(next.id, next);
+  return next;
+};
+
+// 来源跟着原样走：一条从对话里存下来的活复制给谁，它还是从对话里来的。用过几次是新 Bot 自己的账，从零算。
+export const copySkillTo = (id: string, botId: string): Skill | null => {
+  const skill = skills.get(id);
+  if (skill === undefined) return null;
+  const copy = Skill.parse({
+    ...skill,
+    id: SkillId.parse(`skl_new_${nextSuffix()}`),
+    botId,
+    useCount: 0,
+    createdAt: new Date().toISOString(),
+  });
+  skills.set(copy.id, copy);
+  return copy;
+};
+
+// 存 skill 的那张卡按消息 id 点，而消息按群分桶存着，只有一条 id 的话得挨个群找。
+export const findMessage = (id: string): Message | null => {
+  for (const list of messagesByGroupId.values()) {
+    const found = list.find((m) => m.id === id);
+    if (found !== undefined) return found;
+  }
+  return null;
+};
+
+export const writeMessageBody = (id: string, body: MessageBody): Message | null => {
+  const message = findMessage(id);
+  return message === null ? null : rewriteMessage(message.groupId, message.id, body);
 };
 
 export const createApproval = (input: {

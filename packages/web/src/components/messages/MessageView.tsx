@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRightLeft, CircleDollarSign, Globe, ShieldAlert } from "lucide-react";
+import { ArrowRightLeft, CircleDollarSign, Globe, ShieldAlert, Sparkles } from "lucide-react";
 import type {
   Approval,
   ApprovalId,
@@ -7,10 +7,13 @@ import type {
   BotId,
   ChecklistItem,
   DecideApprovalRequest,
+  DecideSkillOfferRequest,
   Handoff,
   HandoffId,
   Message,
   MessageBody,
+  MessageId,
+  SkillOfferStatus,
 } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
 import { timeOf } from "./preview.js";
@@ -19,6 +22,7 @@ export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotH
 export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
@@ -55,17 +59,68 @@ const BotBubble = ({
 
 const SystemNote = ({ text }: { text: string }) => <p className="system-note">{text}</p>;
 
-// M10 Web 线把它换成带「存」「不存」两个按钮的卡。在那之前只把问题和结论摆出来，别让这种消息空着。
-const SKILL_OFFER_TEXT: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], string> = {
-  offered: "",
-  saved: " 已存",
-  dismissed: " 没存",
+const OFFER_DECIDED_TEXT: Record<Exclude<SkillOfferStatus, "offered">, string> = {
+  saved: "已存",
+  dismissed: "没存",
 };
-const SkillOfferNote = ({ body }: { body: Extract<MessageBody, { kind: "skill_offer" }> }) => (
-  <p className="system-note" data-testid="skill-offer">
-    存成 skill「{body.name}」？{SKILL_OFFER_TEXT[body.status]}
-  </p>
-);
+
+// 这张卡的状态就在消息正文里，不像审批和交接另有一张表。点完什么都不改，等服务端把改过的那条消息推回来。
+const SkillOfferCard = ({
+  body,
+  messageId,
+  onDecide,
+}: {
+  body: Extract<MessageBody, { kind: "skill_offer" }>;
+  messageId: MessageId;
+  onDecide: DecideSkillOffer;
+}) => {
+  const [sent, setSent] = useState(false);
+  const decide = (decision: DecideSkillOfferRequest["decision"]) => {
+    setSent(true);
+    void onDecide(messageId, decision).catch(() => setSent(false));
+  };
+  return (
+    <div className="card card-skill-offer" data-testid="skill-offer" data-status={body.status}>
+      <div className="card-title">
+        <Sparkles size={16} aria-hidden="true" />
+        存成 skill「{body.name}」？
+      </div>
+      <ol className="skill-steps">
+        {body.steps.map((step, at) => (
+          <li key={`${at}-${step}`} data-testid="skill-offer-step">
+            {step}
+          </li>
+        ))}
+      </ol>
+      {body.status === "offered" ? (
+        <div className="approval-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="skill-offer-dismiss"
+            disabled={sent}
+            onClick={() => decide("dismiss")}
+          >
+            不存
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="skill-offer-save"
+            disabled={sent}
+            onClick={() => decide("save")}
+          >
+            存
+          </button>
+        </div>
+      ) : (
+        <p className="approval-decided" data-testid="skill-offer-decided">
+          {OFFER_DECIDED_TEXT[body.status]}
+        </p>
+      )}
+    </div>
+  );
+};
 
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 
@@ -266,6 +321,7 @@ export const MessageView = ({
   handoffs,
   checklist,
   onDecide,
+  onDecideSkillOffer,
   showSource = false,
 }: {
   message: Message;
@@ -274,6 +330,7 @@ export const MessageView = ({
   handoffs: HandoffTable;
   checklist: ChecklistItem[];
   onDecide: DecideApproval;
+  onDecideSkillOffer: DecideSkillOffer;
   showSource?: boolean;
 }) => {
   const body = message.body;
@@ -300,7 +357,7 @@ export const MessageView = ({
             );
           }
           case "skill_offer":
-            return <SkillOfferNote body={body} />;
+            return <SkillOfferCard body={body} messageId={message.id} onDecide={onDecideSkillOffer} />;
           case "handoff": {
             const handoff = handoffs[body.handoffId];
             return handoff === undefined ? (

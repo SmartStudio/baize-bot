@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, SendHorizontal, Users } from "lucide-react";
-import type { Bot, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
+import { Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
+import type { Bot, BotId, ChecklistItem, GroupId, Message, Skill } from "@baize/shared";
 import {
   MessageView,
   type ApprovalTable,
   type BotLookup,
   type DecideApproval,
+  type DecideSkillOffer,
   type HandoffTable,
 } from "./messages/MessageView.js";
 import { BotAvatar } from "./BotAvatar.js";
@@ -19,8 +20,11 @@ type Props = {
   lookup: BotLookup;
   approvals: ApprovalTable;
   handoffs: HandoffTable;
+  skills: Record<BotId, Skill[]>;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
+  onDecideSkillOffer: DecideSkillOffer;
+  onLoadSkills: (botId: BotId) => Promise<void>;
   onToggleChecklist: (checklist: ChecklistItem[]) => void;
   onOpenTask: () => void;
 };
@@ -31,6 +35,20 @@ const NO_CHECKLIST: ChecklistItem[] = [];
 // 正在打的那个 @。光标永远在末尾，所以只认结尾这一段：@ 之后还没打空格的字。
 const MENTION = /@([^\s@]*)$/;
 
+// 斜杠得贴着行首或一个空白，不然 `@/x` 会同时算成两个菜单。
+const SLASH = /(^|\s)\/([^\s/]*)$/;
+
+// 输入框底下同一时刻只有一个菜单。写成联合而不是两个各自为政的变量，「@ 和 / 的菜单一起弹出来」
+// 就拼不出来。
+type Picker = { kind: "mention"; typing: string } | { kind: "slash"; typing: string } | null;
+
+const pickerOf = (draft: string): Picker => {
+  const slash = SLASH.exec(draft);
+  if (slash !== null) return { kind: "slash", typing: slash[2] ?? "" };
+  const mention = MENTION.exec(draft);
+  return mention === null ? null : { kind: "mention", typing: mention[1] ?? "" };
+};
+
 export const ChatPanel = ({
   conversation,
   bots,
@@ -38,8 +56,11 @@ export const ChatPanel = ({
   lookup,
   approvals,
   handoffs,
+  skills,
   onSend,
   onDecide,
+  onDecideSkillOffer,
+  onLoadSkills,
   onToggleChecklist,
   onOpenTask,
 }: Props) => {
@@ -61,11 +82,35 @@ export const ChatPanel = ({
     bottom.current?.scrollIntoView({ block: "end" });
   }, [messages, groupId]);
 
-  const typing = pickerOff ? null : (MENTION.exec(draft)?.[1] ?? null);
-  const candidates = typing === null || !team ? [] : members.filter((bot) => bot.name.includes(typing));
+  // 群里每来一条消息 conversation 就换一次身份，这个 effect 也就跟着再跑一遍。不记一笔的话，拉取还在
+  // 飞的那会儿同一个 Bot 会被问上好几遍。
+  const asked = useRef(new Set<BotId>());
+  useEffect(() => {
+    for (const botId of memberIdsOf(conversation)) {
+      if (skills[botId] !== undefined || asked.current.has(botId)) continue;
+      asked.current.add(botId);
+      void onLoadSkills(botId);
+    }
+  }, [conversation, skills, onLoadSkills]);
+
+  const picker = pickerOff ? null : pickerOf(draft);
+  // @ 是在多 Bot 群里点名派活，单 Bot 群里只有一个人会接，这个菜单就是噪音。
+  const mentioned = picker?.kind === "mention" && team ? members.filter((bot) => bot.name.includes(picker.typing)) : [];
+  // `/` 列的是这个群里全部成员会做的活，单 Bot 群也要出。
+  const offered =
+    picker?.kind === "slash"
+      ? members
+          .flatMap((bot) => (skills[bot.id] ?? []).map((skill) => ({ bot, skill })))
+          .filter(({ skill }) => skill.name.includes(picker.typing))
+      : [];
 
   const mention = (name: string) => {
     setDraft(draft.replace(MENTION, `@${name} `));
+    input.current?.focus();
+  };
+
+  const insertSkill = (name: string) => {
+    setDraft(draft.replace(SLASH, (_full, head: string) => `${head}/${name} `));
     input.current?.focus();
   };
 
@@ -121,15 +166,16 @@ export const ChatPanel = ({
             handoffs={handoffs}
             checklist={checklist}
             onDecide={onDecide}
+            onDecideSkillOffer={onDecideSkillOffer}
             showSource={team}
           />
         ))}
         <div ref={bottom} />
       </div>
       <form className="composer-area" onSubmit={submit}>
-        {candidates.length > 0 ? (
+        {mentioned.length > 0 ? (
           <div className="mention-menu" data-testid="mention-menu">
-            {candidates.map((bot) => (
+            {mentioned.map((bot) => (
               <button
                 key={bot.id}
                 type="button"
@@ -141,6 +187,24 @@ export const ChatPanel = ({
                 <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
                 {bot.name}
                 {bot.tag ? <span className="menu-trail">{bot.tag}</span> : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {offered.length > 0 ? (
+          <div className="mention-menu" data-testid="skill-menu">
+            {offered.map(({ bot, skill }) => (
+              <button
+                key={skill.id}
+                type="button"
+                className="menu-row"
+                data-testid="skill-option"
+                data-skill-name={skill.name}
+                onClick={() => insertSkill(skill.name)}
+              >
+                <Sparkles size={14} aria-hidden="true" />
+                {skill.name}
+                {team ? <span className="menu-trail">{bot.name}</span> : null}
               </button>
             ))}
           </div>

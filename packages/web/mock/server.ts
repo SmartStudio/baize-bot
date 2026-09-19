@@ -5,14 +5,18 @@ import {
   Bot,
   CreateBotRequest,
   CreateGroupRequest,
+  CopySkillRequest,
   CreateRoutineRequest,
+  CreateSkillRequest,
   DecideApprovalRequest,
+  DecideSkillOfferRequest,
   LoginRequest,
   SendMessageRequest,
   Settings,
   UpdateBotRequest,
   UpdateRoutineRequest,
   UpdateSettingsRequest,
+  UpdateSkillRequest,
   UpdateTaskRequest,
   type Routine,
   type ServerPush,
@@ -26,8 +30,11 @@ import {
   assignTask,
   bots,
   createBot,
+  copySkillTo,
   createGroup,
   createRoutine,
+  createSkill,
+  findMessage,
   groupIdByBotId,
   groups,
   handoffsIn,
@@ -46,10 +53,15 @@ import {
   settleApproval,
   settleLatestPending,
   settings,
+  skillNameTaken,
+  skills,
+  skillsOf,
   streamBotReply,
   tasks,
   user,
+  writeMessageBody,
   writeRoutine,
+  writeSkill,
   writeTask,
   type ApprovalDecision,
 } from "./state.js";
@@ -247,7 +259,7 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       if (!parsed.success) return send(res, 400, { error: "例行任务字段不对" });
       const routine = createRoutine(botId, parsed.data);
       push({ type: "routine_updated", routine });
-      return send(res, 200, { routine });
+      return send(res, 201, { routine });
     }
   }
 
@@ -278,6 +290,97 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
       push({ type: "routine_deleted", routineId: routine.id, botId: routine.botId });
       return send(res, 204);
     }
+  }
+
+  const botSkillsMatch = /^\/api\/bots\/([^/]+)\/skills$/.exec(path);
+  if (botSkillsMatch) {
+    const [, rawBotId] = botSkillsMatch;
+    const botId = rawBotId === undefined ? "" : decodeURIComponent(rawBotId);
+    if (!bots.has(botId)) return send(res, 404, { error: "没有这个 Bot" });
+    if (method === "GET") return send(res, 200, { items: skillsOf(botId) });
+    if (method === "POST") {
+      const parsed = CreateSkillRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "skill 字段不对" });
+      if (skillNameTaken(botId, parsed.data.name)) {
+        return send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
+      }
+      const skill = createSkill(botId, parsed.data, "taught");
+      push({ type: "skill_updated", skill });
+      return send(res, 201, { skill });
+    }
+  }
+
+  const skillCopyMatch = /^\/api\/skills\/([^/]+)\/copy$/.exec(path);
+  if (skillCopyMatch && method === "POST") {
+    const [, rawSkillId] = skillCopyMatch;
+    const skillId = rawSkillId === undefined ? "" : decodeURIComponent(rawSkillId);
+    // body 先读完，查到和写之间不留一个能让别的请求插进来的 await。
+    const parsed = CopySkillRequest.safeParse(await readBody(req));
+    const skill = skills.get(skillId);
+    if (skill === undefined) return send(res, 404, { error: "没有这条 skill" });
+    if (!parsed.success) return send(res, 400, { error: "skill 字段不对" });
+    if (!bots.has(parsed.data.botId)) return send(res, 404, { error: "没有这个 Bot" });
+    if (skillNameTaken(parsed.data.botId, skill.name)) {
+      return send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
+    }
+    const copy = copySkillTo(skillId, parsed.data.botId);
+    if (copy === null) return send(res, 404, { error: "没有这条 skill" });
+    push({ type: "skill_updated", skill: copy });
+    return send(res, 201, { skill: copy });
+  }
+
+  const skillMatch = /^\/api\/skills\/([^/]+)$/.exec(path);
+  if (skillMatch) {
+    const [, rawSkillId] = skillMatch;
+    const skillId = rawSkillId === undefined ? "" : decodeURIComponent(rawSkillId);
+    const skill = skills.get(skillId);
+    if (skill === undefined) return send(res, 404, { error: "没有这条 skill" });
+    if (method === "PATCH") {
+      const parsed = UpdateSkillRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "skill 字段不对" });
+      const patch = defined(parsed.data);
+      if (patch.name !== undefined && skillNameTaken(skill.botId, patch.name, skill.id)) {
+        return send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
+      }
+      const next = writeSkill(skillId, patch);
+      if (next === null) return send(res, 404, { error: "没有这条 skill" });
+      push({ type: "skill_updated", skill: next });
+      return send(res, 200, { skill: next });
+    }
+    if (method === "DELETE") {
+      skills.delete(skillId);
+      push({ type: "skill_deleted", skillId: skill.id, botId: skill.botId });
+      return send(res, 204);
+    }
+  }
+
+  const skillOfferMatch = /^\/api\/messages\/([^/]+)\/skill-offer$/.exec(path);
+  if (skillOfferMatch && method === "POST") {
+    const [, rawMessageId] = skillOfferMatch;
+    const messageId = rawMessageId === undefined ? "" : decodeURIComponent(rawMessageId);
+    // body 先读完，查到和写之间不留一个能让别的请求插进来的 await。
+    const parsed = DecideSkillOfferRequest.safeParse(await readBody(req));
+    const card = findMessage(messageId);
+    const body = card?.body;
+    if (body === undefined || body.kind !== "skill_offer") {
+      return send(res, 404, { error: "这条消息不是一张存 skill 的卡" });
+    }
+    if (!parsed.success) return send(res, 400, { error: "结论只能是存或不存" });
+    if (body.status !== "offered") return send(res, 409, { error: "这张卡已经有结论了" });
+    const saving = parsed.data.decision === "save";
+    // 名字撞了就把卡留在 offered，用户改个名还能再点一次；改成 saved 的话这张卡就废了。
+    if (saving && skillNameTaken(body.botId, body.name)) {
+      return send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
+    }
+    const skill = saving ? createSkill(body.botId, { name: body.name, steps: body.steps }, "chat") : null;
+    const message = writeMessageBody(
+      messageId,
+      skill === null ? { ...body, status: "dismissed" } : { ...body, status: "saved", skillId: skill.id },
+    );
+    if (message === null) return send(res, 404, { error: "这条消息不是一张存 skill 的卡" });
+    push({ type: "message", message });
+    if (skill !== null) push({ type: "skill_updated", skill });
+    return send(res, 200, { message, skill });
   }
 
   if (path === "/api/groups") {

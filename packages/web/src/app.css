@@ -766,7 +766,8 @@ select {
 }
 
 /* .primary-button 是给整宽表单按钮做的，没有左右内边距。放进一行得自己撑开，高度也跟旁边的 ghost 对齐。 */
-.approval-actions .primary-button {
+.approval-actions .primary-button,
+.skill-actions .primary-button {
   height: var(--control-h-md);
   padding: 0 var(--space-6);
 }
@@ -789,6 +790,33 @@ select {
 .card-approval[data-status="rejected"] .card-title,
 .card-approval[data-status="approved"] .approval-summary,
 .card-approval[data-status="rejected"] .approval-summary {
+  color: var(--fg-4);
+}
+
+.card-skill-offer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+  border-color: var(--workflow-soft);
+  background: var(--workflow-soft);
+}
+
+.card-skill-offer .card-title {
+  color: var(--workflow);
+}
+
+/* 有了结论这张卡就只是一条记录，压掉底色和字的对比度，别再跟还等着你点的那张抢注意力。 */
+.card-skill-offer[data-status="saved"],
+.card-skill-offer[data-status="dismissed"] {
+  border-color: var(--border-1);
+  background: var(--bg-surface);
+}
+
+.card-skill-offer[data-status="saved"] .card-title,
+.card-skill-offer[data-status="dismissed"] .card-title,
+.card-skill-offer[data-status="saved"] .skill-steps li,
+.card-skill-offer[data-status="dismissed"] .skill-steps li {
   color: var(--fg-4);
 }
 
@@ -1001,29 +1029,34 @@ select {
   color: var(--fg-1);
 }
 
-.routines {
+.routines,
+.skills {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
 }
 
-.routines-head {
+.routines-head,
+.skills-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.routines-head .group-label {
+.routines-head .group-label,
+.skills-head .group-label {
   margin: 0;
 }
 
-.routines-empty {
+.routines-empty,
+.skills-empty {
   margin: 0;
   color: var(--fg-4);
   font: var(--type-caption);
 }
 
-.routine-open {
+.routine-open,
+.skill-open {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -1033,17 +1066,20 @@ select {
   text-align: left;
 }
 
-.routine-open b {
+.routine-open b,
+.skill-open b {
   color: var(--fg-1);
   font: var(--type-ui);
 }
 
-.routine-open small {
+.routine-open small,
+.skill-open small {
   color: var(--fg-3);
   font: var(--type-caption);
 }
 
-.routine-crumb {
+.routine-crumb,
+.skill-crumb {
   display: flex;
   gap: var(--space-2);
   align-items: center;
@@ -1052,15 +1088,21 @@ select {
   font: var(--type-ui);
 }
 
-.routine-crumb b {
+.routine-crumb b,
+.skill-crumb b {
   color: var(--fg-1);
   font: var(--type-ui);
 }
 
-.routine-actions {
+.routine-actions,
+.skill-actions {
   display: flex;
   gap: var(--space-4);
   align-items: center;
+}
+
+.skill-actions {
+  justify-content: flex-end;
 }
 
 .routine-actions b {
@@ -1073,7 +1115,10 @@ select {
 }
 
 .routine-actions .ghost-button,
-.routines-head .ghost-button {
+.routines-head .ghost-button,
+.skills-head .ghost-button,
+.skill-actions .ghost-button,
+.skill-detail-head .ghost-button {
   height: var(--control-h-sm);
   padding: 0 var(--space-5);
 }
@@ -1085,6 +1130,83 @@ select {
 
 .routine-actions .routine-delete-confirm:hover {
   background: var(--danger-soft);
+}
+
+.skill-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+  list-style: none;
+}
+
+.skill-steps li {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+  color: var(--fg-1);
+  font: var(--type-body);
+  counter-increment: step;
+}
+
+/* 序号跟着列表自己数，不用在正文里再存一份，删一步也不会剩下一个断号。 */
+.skill-steps li::before {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  content: counter(step);
+  font: var(--weight-semibold) var(--text-2xs) / 20px var(--font-mono);
+  text-align: center;
+}
+
+.skill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--inset-hairline);
+}
+
+.skill-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.skill-detail-head b {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-1);
+  font: var(--type-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-note {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+/* 挑复制给谁是详情里的一小段名单，不像 @ 菜单那样浮在输入框上面。 */
+.skill-copy-menu {
+  display: flex;
+  position: static;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
 }
 
 .trigger-box {

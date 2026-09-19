@@ -65,8 +65,11 @@ export const MainWindow = () => {
           lookup={lookup}
           approvals={ready.approvals}
           handoffs={ready.handoffs}
+          skills={ready.skills}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
+          onDecideSkillOffer={actions.decideSkillOffer}
+          onLoadSkills={actions.loadSkills}
           onToggleChecklist={(checklist: ChecklistItem[]) => {
             if (team !== null) void actions.setChecklist(team.task, checklist);
           }}

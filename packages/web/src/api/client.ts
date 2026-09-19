@@ -5,6 +5,7 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   DecideApprovalResponse,
+  DecideSkillOfferResponse,
   GroupListResponse,
   LoginResponse,
   MeResponse,
@@ -13,6 +14,8 @@ import {
   RoutineResponse,
   SendMessageResponse,
   Settings,
+  SkillListResponse,
+  SkillResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
   type Approval,
@@ -22,13 +25,19 @@ import {
   type BotId,
   type ChecklistItem,
   type CreateRoutineRequest,
+  type CreateSkillRequest,
   type DecideApprovalRequest,
+  type DecideSkillOfferRequest,
   type GroupId,
+  type MessageId,
   type Routine,
   type RoutineId,
+  type Skill,
+  type SkillId,
   type TaskId,
   type TopicTask,
   type UpdateRoutineRequest,
+  type UpdateSkillRequest,
 } from "@baize/shared";
 
 export class RequestFailed extends Error {
@@ -109,6 +118,22 @@ export const api = {
   },
   runRoutine: async (id: RoutineId): Promise<Routine> =>
     (await json(RoutineResponse, await send("POST", `/routines/${encodeURIComponent(id)}/run`))).routine,
+  skills: async (botId: BotId) =>
+    json(SkillListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/skills`)),
+  createSkill: async (botId: BotId, body: CreateSkillRequest): Promise<Skill> =>
+    (await json(SkillResponse, await send("POST", `/bots/${encodeURIComponent(botId)}/skills`, body))).skill,
+  updateSkill: async (id: SkillId, patch: UpdateSkillRequest): Promise<Skill> =>
+    (await json(SkillResponse, await send("PATCH", `/skills/${encodeURIComponent(id)}`, patch))).skill,
+  deleteSkill: async (id: SkillId) => {
+    await send("DELETE", `/skills/${encodeURIComponent(id)}`);
+  },
+  copySkill: async (id: SkillId, botId: BotId): Promise<Skill> =>
+    (await json(SkillResponse, await send("POST", `/skills/${encodeURIComponent(id)}/copy`, { botId }))).skill,
+  decideSkillOffer: async (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) =>
+    json(
+      DecideSkillOfferResponse,
+      await send("POST", `/messages/${encodeURIComponent(messageId)}/skill-offer`, { decision }),
+    ),
   settings: async () => json(Settings, await send("GET", "/settings")),
   updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
 };

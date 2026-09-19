@@ -1,23 +1,24 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Clock, SlidersHorizontal } from "lucide-react";
+import { ChevronRight, Clock, SlidersHorizontal, Sparkles } from "lucide-react";
 import { BotHue, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { RoutinesTab } from "./routines/RoutinesTab.js";
+import { SkillsTab } from "./skills/SkillsTab.js";
 
 type Props = { bot: Bot; onChange: (botId: BotId, draft: BotDraft) => Promise<void> };
 
-type Tab = "settings" | "routines";
+type Tab = "settings" | "routines" | "skills";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "settings", label: "设置", icon: <SlidersHorizontal size={14} aria-hidden="true" /> },
   { id: "routines", label: "例行", icon: <Clock size={14} aria-hidden="true" /> },
+  { id: "skills", label: "会做的活", icon: <Sparkles size={14} aria-hidden="true" /> },
 ];
 
 const LATER_ROWS = [
   { title: "可用工具", note: "去「设置 · 工具」连 MCP 再勾给它 · 后续" },
   { title: "已登录站点", note: "在电脑里登录一次，所有 Bot 共用 · 后续" },
-  { title: "会做的活", note: "干过的活它会存成 skill · 后续" },
 ];
 
 export const BotSettingsPanel = ({ bot, onChange }: Props) => {
@@ -67,9 +68,9 @@ export const BotSettingsPanel = ({ bot, onChange }: Props) => {
           </button>
         ))}
       </nav>
-      {tab === "routines" ? (
-        <RoutinesTab botId={bot.id} key={bot.id} />
-      ) : (
+      {tab === "routines" ? <RoutinesTab botId={bot.id} key={bot.id} /> : null}
+      {tab === "skills" ? <SkillsTab botId={bot.id} key={bot.id} /> : null}
+      {tab === "settings" ? (
         <>
           <label className="field">
             <span>名称</span>
@@ -132,7 +133,7 @@ export const BotSettingsPanel = ({ bot, onChange }: Props) => {
             </div>
           ))}
         </>
-      )}
+      ) : null}
     </aside>
   );
 };
