@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import { chromium, defineConfig, devices } from "@playwright/test";
 
 // 端到端自带一套端口，免得撞上开发机上别的进程或真控制面。
-const API_PORT = "3101";
-const WEB_PORT = "5273";
+const API_PORT = "3317";
+const WEB_PORT = "5377";
 
 const bundledChromium = ((): boolean => {
   try {

@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
+import { ArrowDown, Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, Skill } from "@baize/shared";
 import {
-  MessageView,
+  TurnView,
   type ApprovalTable,
   type BotLookup,
   type DecideApproval,
   type DecideSkillOffer,
   type HandoffTable,
 } from "./messages/MessageView.js";
+import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation } from "../state/app.js";
@@ -29,7 +30,7 @@ type Props = {
   onOpenTask: () => void;
 };
 
-// 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让 MessageView 重画一遍。
+// 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让回合组件重画一遍。
 const NO_CHECKLIST: ChecklistItem[] = [];
 
 // 正在打的那个 @。光标永远在末尾，所以只认结尾这一段：@ 之后还没打空格的字。
@@ -49,6 +50,32 @@ const pickerOf = (draft: string): Picker => {
   return mention === null ? null : { kind: "mention", typing: mention[1] ?? "" };
 };
 
+const firstAt = (turn: Turn): string =>
+  turn.kind === "bot" ? (turn.items[0]?.createdAt ?? "") : turn.message.createdAt;
+const lastAt = (turn: Turn): string => {
+  if (turn.kind !== "bot")
+    return turn.kind === "system" ? (turn.cost?.createdAt ?? turn.message.createdAt) : turn.message.createdAt;
+  return turn.cost?.createdAt ?? turn.items.at(-1)?.createdAt ?? "";
+};
+
+const timeLabel = (at: string): string => {
+  const date = new Date(at);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (date.toDateString() === today.toDateString()) return `今天 ${clock}`;
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${clock}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
+};
+
+const needsTimeDivider = (turn: Turn, before: Turn | undefined): boolean => {
+  if (before === undefined) return true;
+  const start = new Date(firstAt(turn));
+  const previous = new Date(lastAt(before));
+  return start.toDateString() !== previous.toDateString() || start.getTime() - previous.getTime() > 5 * 60_000;
+};
+
 export const ChatPanel = ({
   conversation,
   bots,
@@ -66,7 +93,9 @@ export const ChatPanel = ({
 }: Props) => {
   const [draft, setDraft] = useState("");
   const [pickerOff, setPickerOff] = useState(false);
-  const bottom = useRef<HTMLDivElement>(null);
+  const thread = useRef<HTMLDivElement>(null);
+  const atBottom = useRef(true);
+  const [showScroll, setShowScroll] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const groupId = conversation.groupId;
   const team = conversation.kind === "team";
@@ -76,10 +105,17 @@ export const ChatPanel = ({
     .map((botId) => bots[botId])
     .filter((bot): bot is Bot => bot !== undefined);
   const lead = members[0];
+  const turns = turnsOf(messages);
 
-  // 盯的是数组本身而不是条数：流式回复只让最后一条变长，条数一直不变，盯条数就跟不住。
   useEffect(() => {
-    bottom.current?.scrollIntoView({ block: "end" });
+    atBottom.current = true;
+    setShowScroll(false);
+    if (thread.current) thread.current.scrollTop = thread.current.scrollHeight;
+  }, [groupId]);
+
+  // 流式回复只让最后一条变长，条数不变；用户向上读历史时不能抢走滚动位置。
+  useEffect(() => {
+    if (thread.current && atBottom.current) thread.current.scrollTop = thread.current.scrollHeight;
   }, [messages, groupId]);
 
   // 群里每来一条消息 conversation 就换一次身份，这个 effect 也就跟着再跑一遍。不记一笔的话，拉取还在
@@ -151,26 +187,61 @@ export const ChatPanel = ({
           onOpenDetail={onOpenTask}
         />
       ) : null}
-      <div className="thread" data-testid="message-list">
-        {messages.length === 0 ? (
-          <p className="empty">
-            {team ? "群建好了。@ 一个 Bot 把这件事交出去。" : "建好了，桌面也开好了。今天把什么活交出去？"}
-          </p>
+      <div className="thread-shell">
+        <div
+          className="thread"
+          data-testid="message-list"
+          ref={thread}
+          onScroll={() => {
+            const list = thread.current;
+            if (list === null) return;
+            const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+            atBottom.current = distance < 24;
+            setShowScroll(distance > list.clientHeight);
+          }}
+        >
+          {messages.length === 0 ? (
+            <p className="empty">
+              {team ? "群建好了。@ 一个 Bot 把这件事交出去。" : "建好了，桌面也开好了。今天把什么活交出去？"}
+            </p>
+          ) : null}
+          {turns.map((turn, at) => (
+            <div className="turn-group" key={turn.kind === "bot" ? (turn.items[0]?.id ?? turn.botId) : turn.message.id}>
+              {needsTimeDivider(turn, turns[at - 1]) ? (
+                <div className="time-divider" data-testid="time-divider">
+                  {timeLabel(firstAt(turn))}
+                </div>
+              ) : null}
+              <TurnView
+                turn={turn}
+                lookup={lookup}
+                approvals={approvals}
+                handoffs={handoffs}
+                checklist={checklist}
+                onDecide={onDecide}
+                onDecideSkillOffer={onDecideSkillOffer}
+                showSource={team}
+              />
+            </div>
+          ))}
+        </div>
+        {showScroll ? (
+          <button
+            type="button"
+            className="scroll-to-bottom"
+            data-testid="scroll-to-bottom"
+            aria-label="回到底部"
+            onClick={() => {
+              const list = thread.current;
+              if (list === null) return;
+              list.scrollTop = list.scrollHeight;
+              atBottom.current = true;
+              setShowScroll(false);
+            }}
+          >
+            <ArrowDown size={18} aria-hidden="true" />
+          </button>
         ) : null}
-        {messages.map((message) => (
-          <MessageView
-            key={message.id}
-            message={message}
-            lookup={lookup}
-            approvals={approvals}
-            handoffs={handoffs}
-            checklist={checklist}
-            onDecide={onDecide}
-            onDecideSkillOffer={onDecideSkillOffer}
-            showSource={team}
-          />
-        ))}
-        <div ref={bottom} />
       </div>
       <form className="composer-area" onSubmit={submit}>
         {mentioned.length > 0 ? (
@@ -217,7 +288,7 @@ export const ChatPanel = ({
             ref={input}
             data-testid="composer-input"
             value={draft}
-            placeholder={team ? "在群里说话，@ 一个 Bot 派活" : `给${lead?.name ?? "Bot"}发消息`}
+            placeholder={team ? `给 ${conversation.task.title} 发消息` : `给 ${lead?.name ?? "Bot"} 发消息`}
             aria-label="发消息"
             onChange={(e) => {
               setPickerOff(false);

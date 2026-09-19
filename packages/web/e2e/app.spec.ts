@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { OvernightResponse, SkillResponse, UsageResponse } from "@baize/shared";
+import { Message, MessageListResponse, OvernightResponse, SkillResponse, UsageResponse } from "@baize/shared";
 
 const EMAIL = "chen@baize.dev";
 const PASSWORD = "baize-dev";
@@ -39,7 +39,7 @@ const sendText = async (page: Page, text: string) => {
   await page.getByTestId("composer-send").click();
 };
 
-type RunTrace = { tool: string[]; streaming: boolean[]; working: boolean[] };
+type RunTrace = { tool: string[]; activity: boolean[]; streaming: boolean[]; working: boolean[] };
 
 declare global {
   interface Window {
@@ -52,7 +52,7 @@ declare global {
 // 装个观察器把每次变化按先后记下来，跑完再断言这串序列。
 const traceRun = (page: Page) =>
   page.evaluate(() => {
-    const trace: RunTrace = { tool: [], streaming: [], working: [] };
+    const trace: RunTrace = { tool: [], activity: [], streaming: [], working: [] };
     window.__runTrace = trace;
     const push = <T>(log: T[], value: T) => {
       if (log.at(-1) !== value) log.push(value);
@@ -60,6 +60,10 @@ const traceRun = (page: Page) =>
     const sample = () => {
       const status = document.querySelector("[data-testid=tool-call-card]")?.getAttribute("data-status");
       if (typeof status === "string") push(trace.tool, status);
+      push(
+        trace.activity,
+        document.querySelector("[data-testid=activity-toggle]")?.getAttribute("aria-expanded") === "true",
+      );
       push(trace.streaming, document.querySelector("[data-testid=bot-bubble][data-streaming=true]") !== null);
       push(trace.working, document.querySelector("[data-testid=bot-working]") !== null);
     };
@@ -135,7 +139,7 @@ test("登录成功进主窗口，侧栏列出预置的三个 Bot", async ({ page
   await page.screenshot({ path: `${SHOT}/02.png` });
 });
 
-test("小服的对话里 bot、tool_call、cost 三种消息各渲染成一张卡", async ({ page }) => {
+test("小服的对话按回合排，工具和花费是轻量摘要", async ({ page }) => {
   await login(page);
   await openBot(page, "小服");
   const list = page.getByTestId("message-list");
@@ -146,9 +150,128 @@ test("小服的对话里 bot、tool_call、cost 三种消息各渲染成一张�
   await expect(list.locator("[data-kind=tool_call]").getByTestId("tool-call-card")).toHaveCount(1);
   await expect(list.locator("[data-kind=cost]").getByTestId("cost-card")).toHaveCount(1);
   await expect(list.getByTestId("cost-card")).toContainText("约 ¥4.6");
+  await expect(list.getByTestId("cost-card")).not.toContainText("步");
+  await expect(list.getByTestId("activity-toggle")).toHaveAttribute("aria-expanded", "false");
+  await expect(list.getByTestId("tool-call-card")).toBeHidden();
+  await expect(list.getByTestId("time-divider").first()).toContainText(/\d{2}:\d{2}/);
+  await expect(list.getByTestId("bot-turn")).toHaveCount(1);
+  await expect(list.locator(".bot-block .avatar"), "单 Bot 气泡旁不再重复头像").toHaveCount(0);
+  await expect(page.getByTestId("composer-input")).toHaveAttribute("placeholder", "给 小服 发消息");
   await expect(list.getByTestId("message").first()).toHaveAttribute("data-kind", "user");
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await page.getByTestId("chat").screenshot({ path: "test-results/chat-normal.png" });
   // 登录后本来就选中第一个 Bot，整窗截图会和 02 一模一样，所以 2a 只截对话这一栏。
   await page.getByTestId("chat").screenshot({ path: `${SHOT}/2a.png` });
+});
+
+test("错误 system 显示左对齐提示卡，小额花费收在卡底部", async ({ page }) => {
+  await page.route("**/api/groups/grp_service/messages*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch();
+    const payload = MessageListResponse.parse(await response.json());
+    const groupId = payload.messages[0]?.groupId;
+    if (groupId === undefined) throw new Error("预置对话没有消息");
+    const now = Date.now();
+    const extra = [
+      Message.parse({
+        id: "message_error_user",
+        groupId,
+        body: { kind: "user", text: "刚才的请求有结果吗？" },
+        createdAt: new Date(now - 2000).toISOString(),
+      }),
+      Message.parse({
+        id: "message_error_notice",
+        groupId,
+        body: { kind: "system", tone: "error", text: "模型上游没回话，请稍后再试。" },
+        createdAt: new Date(now - 1000).toISOString(),
+      }),
+      Message.parse({
+        id: "message_error_cost",
+        groupId,
+        body: { kind: "cost", runId: "run_error", steps: 1, amount: 0.000372 },
+        createdAt: new Date(now).toISOString(),
+      }),
+    ];
+    await route.fulfill({ response, json: { ...payload, messages: [...payload.messages, ...extra] } });
+  });
+
+  await login(page);
+  const notice = page.getByTestId("notice");
+  await expect(notice).toHaveAttribute("data-tone", "error");
+  await expect(notice).toContainText("模型上游没回话，请稍后再试。");
+  await expect(notice.locator("svg")).toHaveCount(1);
+  await expect(notice.getByTestId("cost-card")).toHaveText("约 ¥0.0004");
+  await expect(page.getByTestId("time-divider").last()).toContainText(/今天 \d{2}:\d{2}/);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await page.getByTestId("chat").screenshot({ path: "test-results/chat-error.png" });
+});
+
+test("两个已完成工具默认只露摘要，展开后各有状态和一位小数耗时", async ({ page }) => {
+  await page.route("**/api/groups/grp_service/messages*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch();
+    const payload = MessageListResponse.parse(await response.json());
+    const index = payload.messages.findIndex((message) => message.body.kind === "tool_call");
+    const first = payload.messages[index];
+    if (first?.body.kind !== "tool_call") throw new Error("预置对话没有工具调用");
+    const second = Message.parse({
+      ...first,
+      id: "message_second_tool",
+      body: { ...first.body, tool: "read_task", durationMs: 1500 },
+    });
+    const messages = payload.messages.slice();
+    messages.splice(index + 1, 0, second);
+    await route.fulfill({ response, json: { ...payload, messages } });
+  });
+
+  await login(page);
+  const list = page.getByTestId("message-list");
+  await expect(list.getByTestId("activity-toggle")).toContainText("用了 2 个工具");
+  await expect(list.getByTestId("tool-call-card")).toHaveCount(2);
+  await expect(list.getByTestId("tool-call-card").first()).toBeHidden();
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await list.getByTestId("activity-toggle").click();
+  await expect(list.getByTestId("tool-call-card").first()).toBeVisible();
+  await expect(list.getByTestId("tool-call-card").last()).toContainText("read_task");
+  await expect(list.getByTestId("tool-call-card").last()).toContainText("1.5s");
+});
+
+test("离底部超过一屏显示回到底部，新消息不抢阅读位置", async ({ page }) => {
+  await page.route("**/api/groups/grp_service/messages*", async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    const response = await route.fetch();
+    const payload = MessageListResponse.parse(await response.json());
+    const groupId = payload.messages[0]?.groupId;
+    if (groupId === undefined) throw new Error("预置对话没有消息");
+    const extra = Array.from({ length: 35 }, (_, index) =>
+      Message.parse({
+        id: `message_scroll_${index}`,
+        groupId,
+        body: { kind: "user", text: `历史问题 ${index + 1}：请核对这一轮的记录。` },
+        createdAt: new Date(Date.now() - (35 - index) * 60_000).toISOString(),
+      }),
+    );
+    await route.fulfill({ response, json: { ...payload, messages: [...payload.messages, ...extra] } });
+  });
+
+  await login(page);
+  const list = page.getByTestId("message-list");
+  await expect(list.locator('[data-kind="user"]')).toHaveCount(36);
+  await list.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  const back = page.getByTestId("scroll-to-bottom");
+  await expect(back).toBeVisible();
+
+  await sendText(page, "请再看最新记录");
+  await expect(list.locator('[data-kind="user"]', { hasText: "请再看最新记录" })).toHaveCount(1);
+  expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
+
+  await back.click();
+  await expect(back).toHaveCount(0);
+  await expect
+    .poll(() => list.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight))
+    .toBeLessThan(24);
 });
 
 test("发一条消息后它出现在列表里，Bot 的回复从 WebSocket 推回来", async ({ page }) => {
@@ -163,7 +286,7 @@ test("发一条消息后它出现在列表里，Bot 的回复从 WebSocket 推�
 
   await expect(list.locator("[data-kind=user]", { hasText: text })).toHaveCount(1);
   await expect(list.locator("[data-kind=bot]")).toHaveCount(botsBefore + 1);
-  // Bot 回完会紧跟一张花费卡，侧栏摘要停在最后那条上。
+  // Bot 回完会收到花费摘要，侧栏摘要停在最后那条上。
   await expect(page.locator('[data-testid=bot-item][data-bot-name="小销"]')).toContainText("本次花费");
 });
 
@@ -339,7 +462,7 @@ test("Bot 的回复分多段 delta 推回来，在同一个气泡里拼成一条
 
   await sendText(page, "把 Globex 的报价单再核一遍");
   await expect(page.getByTestId("composer-input"), "点了发送输入框就空，不等服务端回话").toHaveValue("");
-  await expect(list.getByTestId("cost-card"), "花费卡到了就说明这次运行跑完了").toHaveCount(1);
+  await expect(list.getByTestId("cost-card"), "花费摘要到了就说明这次运行跑完了").toHaveCount(1);
 
   expect(deltas.length, "回复至少分三段推回来").toBeGreaterThanOrEqual(3);
   expect(new Set(deltas.map((d) => d.messageId)).size, "这些段属于同一条消息").toBe(1);
@@ -367,13 +490,17 @@ test("工具调用卡在同一张卡上从运行中变完成", async ({ page }) 
   await expect(card, "同一个 id 重推是改这张卡，不是再添一张").toHaveCount(1);
   const trace = await page.evaluate(() => window.__runTrace);
   expect(trace?.tool, "这张卡先运行中后完成").toEqual(["running", "ok"]);
-  await expect(card, "工具名、参数摘要、耗时、状态都在卡上").toContainText("erp.query");
+  expect(trace?.activity, "运行中的工具活动保持展开").toContain(true);
+  await expect(list.getByTestId("activity-toggle"), "工具默认收起").toHaveAttribute("aria-expanded", "false");
+  await list.getByTestId("activity-toggle").click();
+  await expect(card, "展开后显示工具名、参数摘要、耗时和状态").toBeVisible();
+  await expect(card).toContainText("erp.query");
   await expect(card).toContainText("ERP · 查一下 X3 还有多少");
-  await expect(card).toContainText("1s");
-  await expect(card).toContainText("完成");
+  await expect(card).toContainText("1.0s");
+  await expect(card.getByRole("img", { name: "完成" })).toBeVisible();
 });
 
-test("运行结束出现花费卡，侧栏摘要跟着换，跑的过程中标「干活中」", async ({ page }) => {
+test("运行结束出现花费摘要，侧栏摘要跟着换，跑的过程中标「干活中」", async ({ page }) => {
   await login(page);
   await openBot(page, "小采");
   await traceRun(page);
@@ -382,8 +509,8 @@ test("运行结束出现花费卡，侧栏摘要跟着换，跑的过程中标�
 
   await sendText(page, "再找三家供应商询个价");
   await expect(cost).toHaveCount(1);
-  await expect(cost, "花费卡上是金额和步数").toContainText("约 ¥0.8");
-  await expect(cost).toContainText("4 步");
+  await expect(cost, "花费摘要只显示金额").toContainText("约 ¥0.8");
+  await expect(cost).not.toContainText("步");
 
   const trace = await page.evaluate(() => window.__runTrace);
   expect(trace?.working, "跑的过程中侧栏这个 Bot 标着干活中").toContain(true);
@@ -438,7 +565,7 @@ test("点拒绝后卡片留下结论、角标归零、这一步被拦下", async
   await card.getByTestId("approval-reject").click();
 
   await expect(card, "结论落在卡上，状态从服务端推回来").toHaveAttribute("data-status", "rejected");
-  await expect(card.getByTestId("approval-decided"), "有结论的卡只剩一行记录").toContainText("已拒绝");
+  await expect(card.getByTestId("approval-decided"), "有结论的卡只剩一行记录").toHaveText("不同意");
   await expect(card.getByTestId("approval-reject"), "有结论就不该还留着按钮").toHaveCount(0);
 
   const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
@@ -460,7 +587,7 @@ test("在群里回一句「批准」和点批准按钮是同一件事", async ({
   await sendText(page, "批准");
 
   await expect(card, "群里回的一句话也作用到那条 pending 审批上").toHaveAttribute("data-status", "approved");
-  await expect(card.getByTestId("approval-decided")).toContainText("已批准");
+  await expect(card.getByTestId("approval-decided")).toHaveText("同意");
 
   const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
   await expect(item.getByTestId("bot-pending"), "点头之后角标归零").toHaveCount(0);
@@ -652,12 +779,16 @@ test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", asyn
   await page.getByTestId("composer-send").click();
 
   const list = page.getByTestId("message-list");
-  await expect(list.getByTestId("cost-card"), "花费卡到了就说明这次运行跑完了").toHaveCount(1);
+  await expect(list.getByTestId("cost-card"), "花费摘要到了就说明这次运行跑完了").toHaveCount(1);
   await expect(list.locator("[data-kind=bot]"), "群里只有被 @ 的那个开口").toHaveCount(1);
   const source = list.getByTestId("bot-source");
   await expect(source, "多 Bot 群里每条 Bot 消息上方写清是谁说的").toHaveCount(1);
   await expect(source).toHaveAttribute("data-bot-name", "小销");
   await expect(source).toContainText("小销 · 销售");
+  expect(await source.evaluate((element) => element.nextElementSibling?.getAttribute("data-testid"))).toBe(
+    "bot-bubble",
+  );
+  await expect(page.getByTestId("composer-input")).toHaveAttribute("placeholder", `给 ${TEAM_TITLE} 发消息`);
   await expect(page.locator('[data-testid=bot-source][data-bot-name="小服"]'), "没被 @ 的那个一句话都没说").toHaveCount(
     0,
   );

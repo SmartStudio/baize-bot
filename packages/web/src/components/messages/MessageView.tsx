@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRightLeft, CircleDollarSign, Globe, ShieldAlert, Sparkles } from "lucide-react";
+import { ArrowRightLeft, ChevronDown, ChevronRight, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
 import type {
   Approval,
   ApprovalId,
@@ -16,7 +16,9 @@ import type {
   SkillOfferStatus,
 } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
-import { timeOf } from "./preview.js";
+import { Markdown } from "./markdown.js";
+import { formatAmount, timeOf } from "./preview.js";
+import type { Turn } from "./turns.js";
 
 export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
 export type ApprovalTable = Record<ApprovalId, Approval>;
@@ -26,7 +28,6 @@ export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOffer
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
-// 多 Bot 群里得先说清这句话是谁说的，单 Bot 群里只有一个人会开口，这一行就是噪音。
 const BotBubble = ({
   body,
   lookup,
@@ -40,24 +41,29 @@ const BotBubble = ({
   return (
     <div className="bot-block">
       {showSource ? (
-        <span className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
+        <div className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
           消息来自
           <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
           {bot.tag ? `${bot.name} · ${bot.tag}` : bot.name}
-        </span>
+        </div>
       ) : null}
-      <div className="bot-line">
-        <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
-        <p className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>
-          {body.text}
-          {body.streaming ? <span className="caret" data-testid="streaming-caret" aria-label="正在输入" /> : null}
-        </p>
+      <div className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>
+        <Markdown text={body.text} />
+        {body.streaming ? <span className="caret" data-testid="streaming-caret" aria-label="正在输入" /> : null}
       </div>
     </div>
   );
 };
 
-const SystemNote = ({ text }: { text: string }) => <p className="system-note">{text}</p>;
+const SystemNote = ({ body }: { body: Extract<MessageBody, { kind: "system" }> }) =>
+  body.tone === "error" ? (
+    <div className="notice notice-error" data-testid="notice" data-tone="error">
+      <TriangleAlert size={16} aria-hidden="true" />
+      <p>{body.text}</p>
+    </div>
+  ) : (
+    <p className="system-note">{body.text}</p>
+  );
 
 const OFFER_DECIDED_TEXT: Record<Exclude<SkillOfferStatus, "offered">, string> = {
   saved: "已存",
@@ -132,33 +138,19 @@ const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
 };
 
 const ToolCallCard = ({ body }: { body: ToolCall }) => (
-  <div className="card card-tool" data-testid="tool-call-card" data-status={body.status}>
-    <Globe size={16} aria-hidden="true" />
+  <div className="tool-line" data-testid="tool-call-card" data-status={body.status}>
     <span className="tool-name">{body.tool}</span>
-    <code className="tool-args">{body.argsSummary}</code>
-    <span className="tool-meta">{body.durationMs === null ? "" : `${Math.round(body.durationMs / 1000)}s`}</span>
-    <span className={`status-dot status-${body.status}`} aria-hidden="true" />
-    {/* 四种状态的颜色是给扫一眼的人看的，色盲和读屏的人得有字。 */}
-    <span className="tool-status">{TOOL_STATUS_TEXT[body.status]}</span>
+    <span aria-hidden="true">·</span>
+    <span className="tool-args">{body.argsSummary}</span>
+    <span aria-hidden="true">·</span>
+    <span className={`status-dot status-${body.status}`} role="img" aria-label={TOOL_STATUS_TEXT[body.status]} />
+    <span className="tool-meta">{body.durationMs === null ? "—" : `${(body.durationMs / 1000).toFixed(1)}s`}</span>
   </div>
 );
 
 const CostCard = ({ body }: { body: Extract<MessageBody, { kind: "cost" }> }) => (
-  <div className="card card-cost" data-testid="cost-card">
-    <div className="card-title">
-      <CircleDollarSign size={16} aria-hidden="true" />
-      本次花费
-    </div>
-    <div className="metrics">
-      <span className="metric">
-        <b>约 ¥{body.amount.toFixed(1)}</b>
-        <small>费用</small>
-      </span>
-      <span className="metric">
-        <b>{body.steps} 步</b>
-        <small>步数</small>
-      </span>
-    </div>
+  <div className="cost-caption" data-testid="cost-card" data-kind="cost">
+    约 ¥{formatAmount(body.amount)}
   </div>
 );
 
@@ -169,8 +161,8 @@ const APPROVAL_KIND_TEXT: Record<Approval["kind"], string> = {
 };
 
 const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
-  approved: "已批准",
-  rejected: "已拒绝",
+  approved: "同意",
+  rejected: "不同意",
 };
 
 // timeOf 只认 Message，而结论时间和接手时间挂在 Approval、Handoff 上。借这条消息套一层，免得为同一个格式
@@ -192,6 +184,20 @@ const ApprovalCard = ({
     setSent(true);
     void onDecide(approval.id, decision).catch(() => setSent(false));
   };
+  if (approval.status !== "pending") {
+    return (
+      <div className="card card-approval approval-compact" data-testid="approval-card" data-status={approval.status}>
+        <span className="approval-compact-text">{approval.summary}</span>
+        <span
+          className="approval-pill"
+          data-testid="approval-decided"
+          title={approval.decidedAt === null ? undefined : stampOf(message, approval.decidedAt)}
+        >
+          {DECIDED_TEXT[approval.status]}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
       <div className="card-title">
@@ -199,33 +205,26 @@ const ApprovalCard = ({
         需要你点头 · {APPROVAL_KIND_TEXT[approval.kind]}
       </div>
       <p className="approval-summary">{approval.summary}</p>
-      {approval.status === "pending" ? (
-        <div className="approval-actions">
-          <button
-            type="button"
-            className="ghost-button"
-            data-testid="approval-reject"
-            disabled={sent}
-            onClick={() => decide("rejected")}
-          >
-            拒绝
-          </button>
-          <button
-            type="button"
-            className="primary-button"
-            data-testid="approval-approve"
-            disabled={sent}
-            onClick={() => decide("approved")}
-          >
-            批准
-          </button>
-        </div>
-      ) : (
-        <p className="approval-decided" data-testid="approval-decided">
-          {DECIDED_TEXT[approval.status]}
-          {approval.decidedAt === null ? "" : ` · ${stampOf(message, approval.decidedAt)}`}
-        </p>
-      )}
+      <div className="approval-actions">
+        <button
+          type="button"
+          className="ghost-button"
+          data-testid="approval-reject"
+          disabled={sent}
+          onClick={() => decide("rejected")}
+        >
+          拒绝
+        </button>
+        <button
+          type="button"
+          className="primary-button"
+          data-testid="approval-approve"
+          disabled={sent}
+          onClick={() => decide("approved")}
+        >
+          批准
+        </button>
+      </div>
     </div>
   );
 };
@@ -261,46 +260,53 @@ const HandoffCard = ({
   const to = lookup(handoff.toBotId);
   const accepted = handoff.status === "accepted";
   return (
-    <div className="card card-handoff" data-testid="handoff-card" data-status={handoff.status}>
-      <div className="handoff-head">
-        <ArrowRightLeft size={16} aria-hidden="true" />
-        <span className="handoff-label">交接</span>
-        <span className="handoff-pair" data-testid="handoff-pair">
-          <BotAvatar name={from.name} hue={from.hue} size="xs" />
-          {from.name}
-          <span className="handoff-arrow" aria-hidden="true">
-            →
-          </span>
-          <BotAvatar name={to.name} hue={to.hue} size="xs" />
-          {to.name}
-        </span>
-        <span className={`badge ${accepted ? "badge-accepted" : "badge-await-bot"}`} data-testid="handoff-status">
-          {accepted
-            ? `已接手${handoff.acceptedAt === null ? "" : ` · ${stampOf(message, handoff.acceptedAt)}`}`
-            : `等${to.name}确认`}
-        </span>
+    <>
+      <div className="bot-source handoff-source">
+        已发消息给
+        <BotAvatar name={to.name} hue={to.hue} size="xs" />
+        {to.name}
       </div>
-      <dl className="handoff-body">
-        <div className="handoff-row">
-          <dt>做了什么</dt>
-          <dd data-testid="handoff-done">{handoff.done}</dd>
+      <div className="card card-handoff" data-testid="handoff-card" data-status={handoff.status}>
+        <div className="handoff-head">
+          <ArrowRightLeft size={16} aria-hidden="true" />
+          <span className="handoff-label">交接</span>
+          <span className="handoff-pair" data-testid="handoff-pair">
+            <BotAvatar name={from.name} hue={from.hue} size="xs" />
+            {from.name}
+            <span className="handoff-arrow" aria-hidden="true">
+              →
+            </span>
+            <BotAvatar name={to.name} hue={to.hue} size="xs" />
+            {to.name}
+          </span>
+          <span className={`badge ${accepted ? "badge-accepted" : "badge-await-bot"}`} data-testid="handoff-status">
+            {accepted
+              ? `已接手${handoff.acceptedAt === null ? "" : ` · ${stampOf(message, handoff.acceptedAt)}`}`
+              : `等${to.name}确认`}
+          </span>
         </div>
-        <div className="handoff-row">
-          <dt>没做什么</dt>
-          <dd data-testid="handoff-not-done">{handoff.notDone}</dd>
-        </div>
-        <div className="handoff-row">
-          <dt>下一步</dt>
-          <dd data-testid="handoff-next">{handoff.next}</dd>
-        </div>
-        {handoff.checklistIndex === null ? null : (
+        <dl className="handoff-body">
           <div className="handoff-row">
-            <dt>清单</dt>
-            <dd data-testid="handoff-checklist">{pointerTextOf(checklist, handoff.checklistIndex)}</dd>
+            <dt>做了什么</dt>
+            <dd data-testid="handoff-done">{handoff.done}</dd>
           </div>
-        )}
-      </dl>
-    </div>
+          <div className="handoff-row">
+            <dt>没做什么</dt>
+            <dd data-testid="handoff-not-done">{handoff.notDone}</dd>
+          </div>
+          <div className="handoff-row">
+            <dt>下一步</dt>
+            <dd data-testid="handoff-next">{handoff.next}</dd>
+          </div>
+          {handoff.checklistIndex === null ? null : (
+            <div className="handoff-row">
+              <dt>清单</dt>
+              <dd data-testid="handoff-checklist">{pointerTextOf(checklist, handoff.checklistIndex)}</dd>
+            </div>
+          )}
+        </dl>
+      </div>
+    </>
   );
 };
 
@@ -314,16 +320,7 @@ const HandoffPlaceholder = () => (
   </div>
 );
 
-export const MessageView = ({
-  message,
-  lookup,
-  approvals,
-  handoffs,
-  checklist,
-  onDecide,
-  onDecideSkillOffer,
-  showSource = false,
-}: {
+type MessageProps = {
   message: Message;
   lookup: BotLookup;
   approvals: ApprovalTable;
@@ -331,8 +328,19 @@ export const MessageView = ({
   checklist: ChecklistItem[];
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
-  showSource?: boolean;
-}) => {
+  showSource: boolean;
+};
+
+const MessageView = ({
+  message,
+  lookup,
+  approvals,
+  handoffs,
+  checklist,
+  onDecide,
+  onDecideSkillOffer,
+  showSource,
+}: MessageProps) => {
   const body = message.body;
   return (
     <div className="message" data-testid="message" data-kind={body.kind}>
@@ -343,7 +351,7 @@ export const MessageView = ({
           case "bot":
             return <BotBubble body={body} lookup={lookup} showSource={showSource} />;
           case "system":
-            return <SystemNote text={body.text} />;
+            return <SystemNote body={body} />;
           case "tool_call":
             return <ToolCallCard body={body} />;
           case "cost":
@@ -373,6 +381,101 @@ export const MessageView = ({
           }
         }
       })()}
+    </div>
+  );
+};
+
+const CostMessage = ({ message }: { message: Message }) =>
+  message.body.kind === "cost" ? (
+    <div className="message message-cost" data-testid="message" data-kind="cost">
+      <CostCard body={message.body} />
+    </div>
+  ) : null;
+
+const Activity = ({ tools, cost }: { tools: Message[]; cost: Message | null }) => {
+  const [expanded, setExpanded] = useState(false);
+  const running = tools.find((message) => message.body.kind === "tool_call" && message.body.status === "running");
+  const open = running !== undefined || expanded;
+  const runningName = running?.body.kind === "tool_call" ? running.body.tool : "";
+
+  return (
+    <div className="activity" data-testid="activity">
+      <div className="turn-meta">
+        <button
+          className="activity-toggle"
+          type="button"
+          data-testid="activity-toggle"
+          aria-expanded={open}
+          disabled={running !== undefined}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {running === undefined ? `用了 ${tools.length} 个工具` : `正在用 ${runningName}…`}
+          {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+        </button>
+        {cost === null ? null : (
+          <>
+            <span aria-hidden="true">·</span>
+            <CostMessage message={cost} />
+          </>
+        )}
+      </div>
+      <div className="activity-lines">
+        {tools.map((message) => (
+          <div className="message" data-testid="message" data-kind="tool_call" key={message.id} hidden={!open}>
+            {message.body.kind === "tool_call" ? <ToolCallCard body={message.body} /> : null}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+type TurnProps = Omit<MessageProps, "message"> & { turn: Turn };
+
+export const TurnView = ({ turn, ...props }: TurnProps) => {
+  if (turn.kind === "system" && turn.message.body.kind === "system" && turn.message.body.tone === "error") {
+    return (
+      <div className="turn turn-system">
+        <div className="message" data-testid="message" data-kind="system">
+          <div className="notice notice-error" data-testid="notice" data-tone="error">
+            <TriangleAlert size={16} aria-hidden="true" />
+            <div className="notice-body">
+              <p>{turn.message.body.text}</p>
+              {turn.cost === null ? null : <CostMessage message={turn.cost} />}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (turn.kind === "user" || turn.kind === "system") {
+    return (
+      <div className={`turn turn-${turn.kind}`}>
+        <MessageView message={turn.message} {...props} />
+        {turn.kind === "system" && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
+      </div>
+    );
+  }
+  if (turn.kind === "cost") {
+    return (
+      <div className="turn turn-cost">
+        <MessageView message={turn.message} {...props} />
+      </div>
+    );
+  }
+
+  const tools = turn.items.filter((message) => message.body.kind === "tool_call");
+  return (
+    <div className="turn turn-bot" data-testid="bot-turn" data-bot-id={turn.botId}>
+      <div className="turn-content">
+        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} /> : null}
+        {tools.length === 0 && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
+        {turn.items
+          .filter((message) => message.body.kind !== "tool_call")
+          .map((message) => (
+            <MessageView key={message.id} message={message} {...props} />
+          ))}
+      </div>
     </div>
   );
 };

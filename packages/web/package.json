@@ -9,6 +9,7 @@
     "mock": "tsx mock/server.ts",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint src mock e2e",
+    "test": "vitest run && pnpm test:e2e",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -29,6 +30,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
+    "vitest": "^2.1.8",
     "ws": "^8.18.0"
   }
 }

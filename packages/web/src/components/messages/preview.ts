@@ -1,5 +1,7 @@
 import type { Message, MessageBody } from "@baize/shared";
 
+export const formatAmount = (amount: number): string => amount.toFixed(4).replace(/0+$/, "").replace(/\.$/, ".0");
+
 export const previewOf = (body: MessageBody): string => {
   switch (body.kind) {
     case "user":
@@ -15,7 +17,7 @@ export const previewOf = (body: MessageBody): string => {
     case "skill_offer":
       return `存成 skill「${body.name}」？`;
     case "cost":
-      return `本次花费 ¥${body.amount.toFixed(1)}`;
+      return `本次花费 ¥${formatAmount(body.amount)}`;
   }
 };
 
