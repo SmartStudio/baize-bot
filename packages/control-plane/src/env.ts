@@ -44,10 +44,18 @@ export function runtimeConfig(): RuntimeConfig {
     publicBaseUrl: process.env["PUBLIC_BASE_URL"] ?? null,
     gatewayModel: process.env["GATEWAY_MODEL"] ?? DEFAULT_GATEWAY_MODEL,
     upstreamBaseUrl: process.env["UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM_BASE_URL,
-    upstreamApiKey: process.env["UPSTREAM_API_KEY"] ?? "",
+    upstreamApiKey: upstreamApiKey(),
     priceInputPerM: price("PRICE_INPUT_PER_M"),
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
   };
+}
+
+function upstreamApiKey(): string {
+  const value = process.env["UPSTREAM_API_KEY"] ?? "";
+  if (/[^\x20-\x7e]/u.test(value)) {
+    throw new Error("UPSTREAM_API_KEY 只能包含可打印 ASCII 字符，因为它会写入 HTTP Authorization 请求头");
+  }
+  return value;
 }
 
 function price(name: string): number {

@@ -7,11 +7,19 @@ import { WebSocket } from "ws";
 import { AgentToControl, Computer, ControlToAgent, ServerPush } from "@baize/shared";
 import { createRunner, type PromptMessage } from "@baize/bot-runner";
 import { startAgent } from "@baize/computer-agent";
-import { connect, type Db, type Sql } from "@baize/control-plane/src/db/client.js";
-import { runMigrations } from "@baize/control-plane/src/db/migrate.js";
-import { databaseUrl, runtimeConfig } from "@baize/control-plane/src/env.js";
-import { DEV_EMAIL, DEV_PASSWORD, seed } from "@baize/control-plane/src/seed.js";
-import { startServer, WS_PATH } from "@baize/control-plane/src/server.js";
+import {
+  connect,
+  databaseUrl,
+  DEV_EMAIL,
+  DEV_PASSWORD,
+  runMigrations,
+  runtimeConfig,
+  seed,
+  startServer,
+  type Db,
+  type Sql,
+  WS_PATH,
+} from "@baize/control-plane";
 
 const AGENT_VERSION = "0.1.0-e2e";
 
