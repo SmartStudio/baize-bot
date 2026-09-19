@@ -17,6 +17,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/test": "^1.49.1",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.18.1",
