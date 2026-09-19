@@ -1,7 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, type BotId, ComputerId, MessageId, type RunId } from "@baize/shared";
+import { AgentToControl, type BotId, ComputerId, MessageId, type RunId, Skill } from "@baize/shared";
 import { startAgent, type AgentHandle, type RunnerFactory } from "../src/agent.js";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
 
@@ -10,10 +10,19 @@ interface RunnerCalls {
   readonly approvals: Array<{ runId: RunId; callId: string; approved: boolean }>;
   readonly paused: BotId[];
   readonly resumed: BotId[];
+  /** 每次建运行器时拿到的 config.skills，原样记下，undefined 也记。 */
+  readonly configSkills: Array<readonly Skill[] | undefined>;
 }
 
 function fakeRunner(calls: RunnerCalls): RunnerFactory {
-  return (config) => ({
+  return (config) => {
+    calls.configSkills.push(config.skills);
+    return runnerOf(config, calls);
+  };
+}
+
+function runnerOf(config: Parameters<RunnerFactory>[0], calls: RunnerCalls): ReturnType<RunnerFactory> {
+  return {
     async prompt(message) {
       config.send({
         type: "bot_text",
@@ -35,7 +44,7 @@ function fakeRunner(calls: RunnerCalls): RunnerFactory {
       calls.resumed.push(botId);
     },
     stop: async () => {},
-  });
+  };
 }
 
 const configMessage = {
@@ -135,7 +144,7 @@ const runnerCalls = (): RunnerCalls => {
 };
 
 function spawnAgent(url: string, tuning: { heartbeatMs?: number; backoff?: BackoffOptions } = {}): AgentHandle {
-  const calls: RunnerCalls = { approvals: [], paused: [], resumed: [] };
+  const calls: RunnerCalls = { approvals: [], paused: [], resumed: [], configSkills: [] };
   runnerCallsLog.push(calls);
   const handle = startAgent({
     url,
@@ -193,6 +202,27 @@ describe("电脑代理连控制面", () => {
     expect(reply.runId).toBe("run-1");
     expect(reply.botId).toBe("bot-1");
     expect(reply.groupId).toBe("group-1");
+  });
+
+  it("config 里的 skills 原样交给运行器，没带就是 undefined", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const skill = Skill.parse({
+      id: "skill-globex",
+      botId: "bot-1",
+      name: "Globex 报价",
+      steps: ["建报价单", "生成 PDF"],
+      source: "chat",
+      useCount: 0,
+      createdAt: "2026-09-19T00:00:00.000Z",
+    });
+
+    socket.send(JSON.stringify({ ...configMessage, skills: [skill] }));
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify(promptMessage));
+
+    await server.waitForMessage("bot_text", 1, 3000);
+    expect(runnerCalls().configSkills).toEqual([[skill], undefined]);
   });
 
   it("还没收到 config 的 prompt 被丢弃，只有 config 之后的那条回 bot_text", async () => {
