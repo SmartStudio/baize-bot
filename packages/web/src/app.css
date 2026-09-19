@@ -1063,6 +1063,15 @@ select {
   padding: 0 var(--space-5);
 }
 
+.routine-actions .routine-delete-confirm {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.routine-actions .routine-delete-confirm:hover {
+  background: var(--danger-soft);
+}
+
 .trigger-box {
   display: flex;
   position: relative;

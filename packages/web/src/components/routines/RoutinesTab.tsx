@@ -43,8 +43,11 @@ const RUN_STATUS_TEXT: Record<RoutineRun["status"], string> = {
   stopped: "停下等你",
 };
 
-const runText = (run: RoutineRun): string =>
-  run.note.length === 0 ? RUN_STATUS_TEXT[run.status] : `${RUN_STATUS_TEXT[run.status]} · ${run.note}`;
+const runText = (run: RoutineRun): string => {
+  const status = RUN_STATUS_TEXT[run.status];
+  if ((run.status === "stopped" || run.status === "failed") && run.note.length > 0) return run.note;
+  return run.note.length === 0 ? status : `${status} · ${run.note}`;
+};
 
 const hookUrlOf = (token: string) => `${window.location.origin}/api/hooks/${token}`;
 
@@ -253,6 +256,7 @@ export const RoutinesTab = ({ botId }: { botId: BotId }) => {
   const { state, actions } = useApp();
   const [view, setView] = useState<View>({ kind: "list" });
   const [draft, setDraft] = useState<Form>(EMPTY_FORM);
+  const [deleteRoutineId, setDeleteRoutineId] = useState<RoutineId | null>(null);
 
   const routines = state.status === "ready" ? state.routines[botId] : undefined;
 
@@ -260,9 +264,18 @@ export const RoutinesTab = ({ botId }: { botId: BotId }) => {
     if (routines === undefined) void actions.loadRoutines(botId);
   }, [botId, routines, actions]);
 
+  useEffect(() => {
+    if (deleteRoutineId === null) return;
+    const timeout = window.setTimeout(() => setDeleteRoutineId(null), 3_000);
+    return () => window.clearTimeout(timeout);
+  }, [deleteRoutineId]);
+
   if (routines === undefined) return <p className="routines-empty">在拉例行任务…</p>;
 
-  const toList = () => setView({ kind: "list" });
+  const toList = () => {
+    setDeleteRoutineId(null);
+    setView({ kind: "list" });
+  };
 
   if (view.kind === "draft") {
     const saveable = draft.name.trim().length > 0 && draft.instruction.trim().length > 0;
@@ -324,17 +337,41 @@ export const RoutinesTab = ({ botId }: { botId: BotId }) => {
           />
           <b>{editing.enabled ? "已启用" : "已停用"}</b>
           <span className="routine-actions-gap" />
-          <button
-            type="button"
-            className="ghost-button"
-            data-testid="routine-delete"
-            onClick={() => {
-              void actions.deleteRoutine(editing);
-              toList();
-            }}
-          >
-            删除
-          </button>
+          {deleteRoutineId === editing.id ? (
+            <>
+              <button
+                type="button"
+                className="ghost-button routine-delete-confirm"
+                data-testid="routine-delete-confirm"
+                onClick={() => {
+                  setDeleteRoutineId(null);
+                  void actions
+                    .deleteRoutine(editing)
+                    .then(toList)
+                    .catch(() => undefined);
+                }}
+              >
+                确认删除
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                data-testid="routine-delete-cancel"
+                onClick={() => setDeleteRoutineId(null)}
+              >
+                取消
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="routine-delete"
+              onClick={() => setDeleteRoutineId(editing.id)}
+            >
+              删除
+            </button>
+          )}
           <button
             type="button"
             className="ghost-button"

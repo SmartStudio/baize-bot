@@ -713,11 +713,12 @@ test("试跑一次后群里出现「自动运行」那条 system，运行记录�
   await page.getByTestId("routine-open").click();
   const runs = page.getByTestId("run-row");
   await expect(runs, "预置了三条运行记录").toHaveCount(3);
-  await expect(runs.nth(0).locator("small"), "状态文案加 note，中间用点隔开").toHaveText(
-    "停下等你 · 1 条等你点头 · ¥0.8",
+  await expect(runs.nth(0).locator("small"), "停下时 note 已经说清原因，不重复状态词").toHaveText(
+    "1 条等你点头 · ¥0.8",
   );
-  await expect(runs.nth(1).locator("small"), "跑完了就是「完成」，后面跟这次的花费").toHaveText("完成 · ¥0.7");
-  await expect(runs.nth(2).locator("small"), "失败那条把原因带出来").toHaveText("失败 · 工单系统登录过期 · ¥0.2");
+  await expect(runs.nth(0).locator("small")).not.toContainText("停下等你");
+  await expect(runs.nth(1).locator("small"), "正常完成仍保留状态词和花费").toHaveText("完成 · ¥0.7");
+  await expect(runs.nth(2).locator("small"), "失败时直接显示控制面给的原因").toHaveText("工单系统登录过期 · ¥0.2");
 
   await page.getByTestId("routine-run-now").click();
 
@@ -731,6 +732,40 @@ test("试跑一次后群里出现「自动运行」那条 system，运行记录�
 
   await page.getByTestId("run-row").last().scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOT}/2c-runs.png` });
+});
+
+test("删除例行任务要二次确认，取消和超时都不删除", async ({ page }) => {
+  await login(page);
+  await openRoutines(page, "小服");
+  const rows = page.getByTestId("routine-row");
+  await expect(rows).toHaveCount(1);
+  await page.getByTestId("routine-open").click();
+
+  await page.getByTestId("routine-delete").click();
+  await expect(page.getByTestId("routine-delete-confirm")).toBeVisible();
+  await expect(page.getByTestId("routine-delete-cancel")).toBeVisible();
+  await page.screenshot({ path: `${SHOT}/2d.png` });
+  await page.getByTestId("routine-delete-cancel").click();
+  await expect(page.getByTestId("routine-delete")).toBeVisible();
+
+  await page.getByTestId("routine-delete").click();
+  await expect(page.getByTestId("routine-delete-confirm")).toBeVisible();
+  await expect(page.getByTestId("routine-delete"), "三秒不确认就恢复成普通删除按钮").toBeVisible({
+    timeout: 4_000,
+  });
+  await page.getByTestId("routine-back").click();
+  await expect(rows, "取消或超时都没有删除列表项").toHaveCount(1);
+
+  await page.getByTestId("routine-open").click();
+  await page.getByTestId("routine-delete").click();
+  const deleted = page.waitForResponse(
+    (response) =>
+      response.request().method() === "DELETE" && /\/api\/routines\/[^/]+$/.test(new URL(response.url()).pathname),
+  );
+  await page.getByTestId("routine-delete-confirm").click();
+  await deleted;
+  await expect(page.getByTestId("routine-list")).toBeVisible();
+  await expect(rows, "确认删除后列表少一条").toHaveCount(0);
 });
 
 test("在列表里停用一条例行任务，那一行的状态变「已停用」", async ({ page }) => {
