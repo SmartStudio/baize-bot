@@ -8,6 +8,7 @@ export interface ChatCompletionRequest {
     readonly tool_call_id?: string;
   }>;
   readonly stream?: boolean;
+  readonly tools?: ReadonlyArray<{ readonly function: { readonly name: string } }>;
 }
 
 export interface ScriptedToolCall {

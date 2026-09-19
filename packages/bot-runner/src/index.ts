@@ -6,10 +6,11 @@ import {
   type GroupId,
   MessageId,
   type RunId,
-  type ToolConnection,
+  type ToolConnectionConfig,
 } from "@baize/shared";
 import { type ApprovalGate, approvalRule, createApprovalGate } from "./approvals.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
+import { connectionsFor, createMcpTools } from "./mcp-tools.js";
 import { type BotDirs, botDirs, ensureBotDirs } from "./paths.js";
 import { reportRun } from "./reporter.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
@@ -26,7 +27,8 @@ export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } fr
 
 export interface RunnerConfig {
   readonly bots: readonly BotConfig[];
-  readonly tools: readonly ToolConnection[];
+  /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
+  readonly tools: readonly ToolConnectionConfig[];
   readonly modelGateway: ConfigMessage["modelGateway"];
   /** 该用户全部 Bot 的 skill，按 botId 分开落盘。省略按空数组对账，也就是把留在盘上的旧 skill 清掉。 */
   readonly skills?: ConfigMessage["skills"];
@@ -91,7 +93,6 @@ function composePrompt(message: PromptMessage): string {
 export function createRunner(config: RunnerConfig): Runner {
   let state: RunnerState = "ready";
   const approvals: ApprovalGate = createApprovalGate(config.send);
-  const needsApproval = approvalRule(config.tools);
   const extensionTools = config.extensionTools ?? [];
   const liveRuns = new Set<RunId>();
 
@@ -130,23 +131,37 @@ export function createRunner(config: RunnerConfig): Runner {
   const sessionFor = async (bot: BotRuntime): Promise<BotSession> => {
     if (bot.session !== null) return bot.session;
     const activeRun = (): ActiveRun | null => (bot.lifecycle.phase === "running" ? bot.lifecycle.active : null);
+    const connections = connectionsFor(bot.botId, config.tools);
+    const builtIn: readonly RunnerTool[] = [
+      ...extensionTools,
+      ...createTopicTools({ activeRun, send: config.send }),
+      ...createSkillTools({ activeRun, send: config.send }),
+    ];
+    const mcp = createMcpTools({
+      botId: bot.botId,
+      connections,
+      reserved: new Set(builtIn.map((tool) => tool.name)),
+    });
+    // MCP 是惰性连接，createBotSession 抛出时还没有任何 client 要关。
     const created = await createBotSession({
       botId: bot.botId,
       description: bot.description,
       dirs: ensureBotDirs(bot.dirs),
       gateway: config.modelGateway,
-      tools: [
-        ...extensionTools,
-        ...createTopicTools({ activeRun, send: config.send }),
-        ...createSkillTools({ activeRun, send: config.send }),
-      ],
-      needsApproval,
+      tools: [...builtIn, ...mcp.tools],
+      needsApproval: approvalRule(connections),
       approvals,
       activeRun,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });
-    bot.session = created;
-    return created;
+    bot.session = {
+      ...created,
+      dispose: async () => {
+        await created.dispose();
+        await mcp.close();
+      },
+    };
+    return bot.session;
   };
 
   const runOne = async (bot: BotRuntime, message: PromptMessage): Promise<void> => {
@@ -242,7 +257,7 @@ export function createRunner(config: RunnerConfig): Runner {
         [...bots.values()].map(async (bot) => {
           await bot.chain.catch(() => undefined);
           await bot.session?.session.abort();
-          bot.session?.dispose();
+          await bot.session?.dispose();
           bot.session = null;
         }),
       );

@@ -36,7 +36,7 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 ## 审批
 
-哪些工具要审批：工具连接（`ToolConnection`）的 `operations` 里 `needsApproval` 为 `true` 的工具名。没在任何工具连接里出现过的自定义工具默认不审批。规则在 `src/approvals.ts` 的 `approvalRule`。
+哪些工具要审批：分配给这个 Bot 的工具连接（`config.tools` 里 `assignedBotIds` 含它的那些）的 `operations` 里 `needsApproval` 为 `true` 的工具名。没在这些连接里出现过的工具默认不审批，别的 Bot 的连接管不到它。规则在 `src/approvals.ts` 的 `approvalRule`，按 Bot 建会话时各算一份。
 
 审批的 `kind` 第一版按工具名前缀映射，表在 `src/approvals.ts`：
 
@@ -72,7 +72,17 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具和 `src/skills.ts` 的 `propose_skill` 由运行器自己挂，见下面两节，排在 `extensionTools` 之后。桌面操作和 MCP 桥接还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具和 `src/skills.ts` 的 `propose_skill` 由运行器自己挂，见下面两节，排在 `extensionTools` 之后；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+
+## 工具连接
+
+`config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。建 Bot 会话时取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。
+
+每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
+
+撞名先到先得：运行器自己的工具（`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+
+会话销毁、`stop()` 时关掉这个 Bot 的所有 client。电脑代理每来一条 config 就整个换 runner，所以没有热更新：新 runner 按新 config 建会话。
 
 ## 主题任务工具
 
@@ -235,4 +245,4 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 pnpm --filter @baize/bot-runner test
 ```
 
-本机没有模型 key。测试起一个假上游加 OpenAI 兼容网关（`test/fixtures/`，搬自 `spikes/pi-embed/`，去掉了转发真上游的分支），按脚本产出 SSE 分片，不打任何付费接口。
+本机没有模型 key。测试起一个假上游加 OpenAI 兼容网关（`test/fixtures/`，搬自 `spikes/pi-embed/`，去掉了转发真上游的分支），按脚本产出 SSE 分片，不打任何付费接口。工具连接的用例起一个本地假 MCP（`test/helpers/mcp.ts`，SDK 的 `McpServer` 加 `StreamableHTTPServerTransport`），记下收到的参数和 `Authorization` 头。

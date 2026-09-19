@@ -19,6 +19,7 @@ export function approvalKind(toolName: string): ApprovalKind {
 
 /**
  * 工具连接里 needsApproval 为 true 的操作要审批。没在任何工具连接里出现过的自定义工具默认不审批。
+ * 传进来的应当只是分配给这个 Bot 的连接：别的 Bot 的连接管不到它，也不该替它定审批。
  */
 export function approvalRule(tools: readonly ToolConnection[]): (toolName: string) => boolean {
   const needing = new Set(

@@ -20,7 +20,7 @@ import type { ActiveRun } from "./topic.js";
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
 
-/** 工具的注册点。`src/topic.ts` 和 `src/skills.ts` 那两组由 createRunner 拼进来，桌面操作和 MCP 桥接还没做。 */
+/** 工具的注册点。`src/topic.ts`、`src/skills.ts` 那两组和 `src/mcp-tools.ts` 的工具连接由 createRunner 拼进来，桌面操作还没做。 */
 export type RunnerTool = ToolDefinition<TSchema>;
 
 export type PiSettings = Parameters<typeof SettingsManager.inMemory>[0];
@@ -42,7 +42,7 @@ export interface BotSessionOptions {
 export interface BotSession {
   readonly session: AgentSession;
   readonly sessionFile: string | undefined;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
@@ -134,6 +134,6 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
   return {
     session,
     sessionFile: session.sessionManager.getSessionFile(),
-    dispose: () => session.dispose(),
+    dispose: async () => session.dispose(),
   };
 }
