@@ -5,13 +5,16 @@ import {
   Bot,
   CreateBotRequest,
   CreateGroupRequest,
+  CreateRoutineRequest,
   DecideApprovalRequest,
   LoginRequest,
   SendMessageRequest,
   Settings,
   UpdateBotRequest,
+  UpdateRoutineRequest,
   UpdateSettingsRequest,
   UpdateTaskRequest,
+  type Routine,
   type ServerPush,
 } from "@baize/shared";
 import {
@@ -24,6 +27,7 @@ import {
   bots,
   createBot,
   createGroup,
+  createRoutine,
   groupIdByBotId,
   groups,
   handoffsIn,
@@ -34,13 +38,18 @@ import {
   pendingHandoffsOf,
   reseed,
   responderOf,
+  routineByToken,
   messagesByGroupId,
+  routines,
+  routinesOf,
+  runRoutine,
   settleApproval,
   settleLatestPending,
   settings,
   streamBotReply,
   tasks,
   user,
+  writeRoutine,
   writeTask,
   type ApprovalDecision,
 } from "./state.js";
@@ -109,6 +118,15 @@ const push = (event: ServerPush) => {
   }
 };
 
+// 一次运行不看是谁按的：群里落 system 加 user 两条，运行记录多一条 running，整条例行任务推回去。
+const fireRoutine = (routineId: string): Routine | null => {
+  const ran = runRoutine(routineId);
+  if (ran === null) return null;
+  push({ type: "routine_updated", routine: ran.routine });
+  for (const message of ran.messages) push({ type: "message", message });
+  return ran.routine;
+};
+
 const botListItems = () =>
   [...bots.values()].map((bot) => {
     const groupId = groupIdByBotId.get(bot.id);
@@ -167,6 +185,16 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
     return send(res, 204);
   }
 
+  // webhook 是外面的系统打进来的，它没有会话，所以这条排在登录检查前面。
+  const hookMatch = /^\/api\/hooks\/([^/]+)$/.exec(path);
+  if (hookMatch && method === "POST") {
+    const [, rawToken] = hookMatch;
+    const routine = routineByToken(rawToken === undefined ? "" : decodeURIComponent(rawToken));
+    if (routine === null) return send(res, 404, { error: "没有这个 webhook" });
+    if (!routine.enabled) return send(res, 409, { error: "这条例行任务停用了" });
+    return send(res, fireRoutine(routine.id) === null ? 404 : 202);
+  }
+
   if (!authed(req)) return send(res, 401, { error: "没登录" });
 
   if (method === "GET" && path === "/api/me") return send(res, 200, { user });
@@ -204,6 +232,50 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
         groupIdByBotId.delete(botId);
       }
       push({ type: "bot_deleted", botId: bot.id });
+      return send(res, 204);
+    }
+  }
+
+  const botRoutinesMatch = /^\/api\/bots\/([^/]+)\/routines$/.exec(path);
+  if (botRoutinesMatch) {
+    const [, rawBotId] = botRoutinesMatch;
+    const botId = rawBotId === undefined ? "" : decodeURIComponent(rawBotId);
+    if (!bots.has(botId)) return send(res, 404, { error: "没有这个 Bot" });
+    if (method === "GET") return send(res, 200, { items: routinesOf(botId) });
+    if (method === "POST") {
+      const parsed = CreateRoutineRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "例行任务字段不对" });
+      const routine = createRoutine(botId, parsed.data);
+      push({ type: "routine_updated", routine });
+      return send(res, 200, { routine });
+    }
+  }
+
+  const routineRunMatch = /^\/api\/routines\/([^/]+)\/run$/.exec(path);
+  if (routineRunMatch && method === "POST") {
+    const [, rawRoutineId] = routineRunMatch;
+    const ran = fireRoutine(rawRoutineId === undefined ? "" : decodeURIComponent(rawRoutineId));
+    if (ran === null) return send(res, 404, { error: "没有这条例行任务" });
+    return send(res, 202, { routine: ran });
+  }
+
+  const routineMatch = /^\/api\/routines\/([^/]+)$/.exec(path);
+  if (routineMatch) {
+    const [, rawRoutineId] = routineMatch;
+    const routineId = rawRoutineId === undefined ? "" : decodeURIComponent(rawRoutineId);
+    const routine = routines.get(routineId);
+    if (routine === undefined) return send(res, 404, { error: "没有这条例行任务" });
+    if (method === "PATCH") {
+      const parsed = UpdateRoutineRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "例行任务字段不对" });
+      const next = writeRoutine(routineId, defined(parsed.data));
+      if (next === null) return send(res, 404, { error: "没有这条例行任务" });
+      push({ type: "routine_updated", routine: next });
+      return send(res, 200, { routine: next });
+    }
+    if (method === "DELETE") {
+      routines.delete(routineId);
+      push({ type: "routine_deleted", routineId: routine.id, botId: routine.botId });
       return send(res, 204);
     }
   }

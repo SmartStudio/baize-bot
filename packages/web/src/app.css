@@ -957,6 +957,264 @@ select {
   font: var(--type-ui);
 }
 
+/* ---------- 2c Bot 设置栏的分页与例行任务 ---------- */
+
+.panel-tabs {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  box-shadow: var(--inset-hairline);
+}
+
+.panel-tab {
+  display: flex;
+  flex: 1;
+  gap: var(--space-3);
+  align-items: center;
+  justify-content: center;
+  height: var(--control-h-sm);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+.panel-tab.is-selected {
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+  color: var(--fg-1);
+}
+
+.routines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.routines-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.routines-head .group-label {
+  margin: 0;
+}
+
+.routines-empty {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.routine-open {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+  min-width: 0;
+  text-align: left;
+}
+
+.routine-open b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.routine-open small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.routine-crumb {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-left: calc(-1 * var(--space-3));
+  color: var(--fg-4);
+  font: var(--type-ui);
+}
+
+.routine-crumb b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.routine-actions {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.routine-actions b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.routine-actions-gap {
+  flex: 1;
+}
+
+.routine-actions .ghost-button,
+.routines-head .ghost-button {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+}
+
+.trigger-box {
+  display: flex;
+  position: relative;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-4);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.trigger-chip {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3) 0 var(--space-5);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  box-shadow: var(--inset-hairline);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.trigger-chip code {
+  overflow: hidden;
+  max-width: 220px;
+  color: var(--fg-3);
+  font: var(--type-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trigger-chip .icon-button {
+  width: var(--space-7);
+  height: var(--space-7);
+}
+
+.trigger-time {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.trigger-add {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+  border: 1px dashed var(--border-3);
+  border-radius: var(--radius-full);
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.trigger-add:hover {
+  background: var(--bg-hover);
+  color: var(--fg-1);
+}
+
+.trigger-menu {
+  display: flex;
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  flex-direction: column;
+  width: 240px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.trigger-menu button {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  height: var(--control-h-md);
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-sm);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.trigger-menu button:hover {
+  background: var(--bg-hover);
+}
+
+.run-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  list-style: none;
+  overflow: hidden;
+}
+
+.run-row {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-5) var(--space-6);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.run-row + .run-row {
+  border-top: 1px solid var(--border-1);
+}
+
+.run-row > span {
+  flex: 1;
+}
+
+.run-row > small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.run-row[data-status="failed"] > small {
+  color: var(--danger);
+}
+
+.run-dot {
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--success);
+}
+
+.run-row[data-status="running"] .run-dot {
+  background: var(--accent);
+}
+
+.run-row[data-status="stopped"] .run-dot {
+  background: var(--pending);
+}
+
+.run-row[data-status="failed"] .run-dot {
+  background: var(--danger);
+}
+
 /* ---------- 07 账户菜单与设置窗 ---------- */
 
 .account-menu {

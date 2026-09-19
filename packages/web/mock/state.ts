@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
   Approval,
   ApprovalId,
@@ -9,6 +10,8 @@ import {
   HandoffId,
   Message,
   MessageId,
+  Routine,
+  RoutineId,
   RunId,
   Settings,
   TaskId,
@@ -17,8 +20,11 @@ import {
   type BotHue,
   type ChecklistItem,
   type MessageBody,
+  type CreateRoutineRequest,
   type ServerPush,
   type ToolCallStatus,
+  type TriggerInput,
+  type UpdateRoutineRequest,
 } from "@baize/shared";
 
 export type ApprovalDecision = "approved" | "rejected";
@@ -28,6 +34,15 @@ export const MOCK_PASSWORD = "baize-dev";
 
 const T0 = Date.parse("2026-09-18T01:00:00.000Z");
 const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
+
+// 预置的运行记录按真实日期算：固定的 T0 过一天就不是「今天」了，而原型 2c 最上面那行是「今天 09:00」。
+// 顺手别落在将来：早上九点前开的话，试跑落的那条会排在一个还没发生的时刻上面。
+const ranAt = (daysAgo: number): string => {
+  const day = new Date();
+  day.setDate(day.getDate() - daysAgo);
+  day.setHours(9, 0, 0, 0);
+  return new Date(Math.min(day.getTime(), Date.now() - 60_000)).toISOString();
+};
 
 let counter = 0;
 const nextSuffix = () => `${(counter += 1)}`;
@@ -113,6 +128,7 @@ export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();
 export const handoffs = new Map<string, Handoff>();
+export const routines = new Map<string, Routine>();
 
 // 单 Bot 群建 Bot 时自动建，多 Bot 群从建群页来。成员数就是这两类的分界，`/api/groups` 只列后者。
 export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
@@ -154,6 +170,7 @@ export const reseed = (): void => {
   waiters.clear();
   approvals.clear();
   handoffs.clear();
+  routines.clear();
   bots.clear();
   groups.clear();
   tasks.clear();
@@ -225,6 +242,94 @@ export const reseed = (): void => {
   messagesByGroupId.set(TEAM_GROUP_ID, [
     buildMessage(TEAM_GROUP_ID, { kind: "system", text: "群建好了。@ 一个 Bot 派活。" }, 40),
   ]);
+
+  routines.set(
+    SEEDED_ROUTINE_ID,
+    Routine.parse({
+      id: SEEDED_ROUTINE_ID,
+      botId: "bot_service",
+      name: "每日工单早报",
+      instruction: "汇总昨天的新工单，按紧急度排序，发我一份摘要。标准问题直接按话术回复；退款、改交期停下来等我。",
+      triggers: [{ kind: "cron", expr: "0 9 * * 1-5" }],
+      onFailure: "stop_and_tell",
+      enabled: true,
+      // 对着原型 2c 那三行。
+      runs: [
+        { startedAt: ranAt(0), status: "stopped", note: "1 条等你点头 · ¥0.8" },
+        { startedAt: ranAt(5), status: "ok", note: "¥0.7" },
+        { startedAt: ranAt(6), status: "failed", note: "工单系统登录过期 · ¥0.2" },
+      ],
+    }),
+  );
+};
+
+const SEEDED_ROUTINE_ID = "rtn_daily_report";
+
+export const routinesOf = (botId: string): Routine[] => [...routines.values()].filter((r) => r.botId === botId);
+
+export const routineByToken = (token: string): Routine | null =>
+  [...routines.values()].find((r) => r.triggers.some((t) => t.kind === "webhook" && t.token === token)) ?? null;
+
+const RUN_CAP = 20;
+
+// webhook 的 token 由服务端发。带着这条例行任务已有的 token 就保留那个地址，不带或对不上就换一个新的：
+// 客户端选不了 token，不然谁都能挑一个别人的地址。
+const tokensFrom = (previous: Routine["triggers"], inputs: TriggerInput[]): Routine["triggers"] => {
+  const mine = new Set(previous.filter((t) => t.kind === "webhook").map((t) => t.token));
+  return inputs.map((input) =>
+    input.kind === "cron"
+      ? { kind: "cron", expr: input.expr }
+      : {
+          kind: "webhook",
+          token: input.token !== undefined && mine.has(input.token) ? input.token : randomBytes(16).toString("hex"),
+        },
+  );
+};
+
+export const createRoutine = (botId: string, input: CreateRoutineRequest): Routine => {
+  const routine = Routine.parse({
+    id: RoutineId.parse(`rtn_new_${nextSuffix()}`),
+    botId,
+    name: input.name,
+    instruction: input.instruction,
+    triggers: tokensFrom([], input.triggers),
+    onFailure: input.onFailure,
+    enabled: input.enabled,
+    runs: [],
+  });
+  routines.set(routine.id, routine);
+  return routine;
+};
+
+// patch 从 PATCH 的请求体来，键在不在、值对不对都由 Routine.parse 说了算。triggers 给了就是整份替换，
+// 替换前先把已有的 webhook token 认回来。
+export const writeRoutine = (id: string, patch: UpdateRoutineRequest): Routine | null => {
+  const routine = routines.get(id);
+  if (routine === undefined) return null;
+  const triggers = patch.triggers === undefined ? routine.triggers : tokensFrom(routine.triggers, patch.triggers);
+  const next = Routine.parse({ ...routine, ...patch, triggers });
+  routines.set(next.id, next);
+  return next;
+};
+
+// 试跑一次就是用户在这个 Bot 的单 Bot 群里发了一条消息：先一条 system 说是例行任务在跑，再一条 user 是正文。
+// 运行记录在触发那一刻就落一条 running，mock 不演收尾，跟控制面中途重启停在 running 是同一个样子。
+export const runRoutine = (id: string): { routine: Routine; messages: Message[] } | null => {
+  const routine = routines.get(id);
+  if (routine === undefined) return null;
+  const groupId = groupIdByBotId.get(routine.botId);
+  if (groupId === undefined) return null;
+  const messages = [
+    appendMessage(groupId, { kind: "system", text: `例行任务「${routine.name}」自动运行` }),
+    appendMessage(groupId, { kind: "user", text: routine.instruction }),
+  ];
+  const runs = [{ startedAt: new Date().toISOString(), status: "running", note: "" }, ...routine.runs].slice(
+    0,
+    RUN_CAP,
+  );
+  const next = Routine.parse({ ...routine, runs });
+  routines.set(next.id, next);
+  return { routine: next, messages };
 };
 
 export const settings: { current: Settings } = {

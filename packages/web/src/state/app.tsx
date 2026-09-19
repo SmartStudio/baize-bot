@@ -13,7 +13,11 @@ import {
   type HandoffId,
   type Message,
   type MessageId,
+  type CreateRoutineRequest,
+  type Routine,
+  type RoutineId,
   type Settings,
+  type UpdateRoutineRequest,
   type TopicTask,
   type User,
 } from "@baize/shared";
@@ -63,6 +67,9 @@ export type AppState =
       // 都不会变。
       approvals: Record<ApprovalId, Approval>;
       handoffs: Record<HandoffId, Handoff>;
+      // 例行任务按 Bot 分桶，开了那个 Bot 的「例行」页才拉。键在不在就是「这个 Bot 的例行任务拉过没有」，
+      // 跟 messages 一个路子：没拉过的 Bot 不能凭一条推送造出一份只有一条的假列表。
+      routines: Record<BotId, Routine[]>;
       settings: Settings;
     };
 
@@ -82,6 +89,9 @@ type Action =
   | { type: "approval_pushed"; approval: Approval }
   | { type: "handoffs_loaded"; handoffs: Handoff[] }
   | { type: "handoff_pushed"; handoff: Handoff }
+  | { type: "routines_loaded"; botId: BotId; routines: Routine[] }
+  | { type: "routine_upserted"; routine: Routine }
+  | { type: "routine_removed"; botId: BotId; routineId: RoutineId }
   | { type: "settings_set"; settings: Settings };
 
 // 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
@@ -212,6 +222,7 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
     messages: {},
     approvals: {},
     handoffs: {},
+    routines: {},
     settings,
   };
 };
@@ -334,6 +345,26 @@ const reduce = (state: AppState, action: Action): AppState => {
       return withHandoffs(state, action.handoffs, "history");
     case "handoff_pushed":
       return withHandoffs(state, [action.handoff], "push");
+    case "routines_loaded":
+      return { ...state, routines: { ...state.routines, [action.botId]: action.routines } };
+    case "routine_upserted": {
+      const known = state.routines[action.routine.botId];
+      if (known === undefined) return state;
+      const seen = known.some((r) => r.id === action.routine.id);
+      // 每次运行记录变化都会重推整条。按 id 覆盖且不挪位置，列表不会在你正看着的时候跳一下。
+      const next = seen
+        ? known.map((r) => (r.id === action.routine.id ? action.routine : r))
+        : [...known, action.routine];
+      return { ...state, routines: { ...state.routines, [action.routine.botId]: next } };
+    }
+    case "routine_removed": {
+      const known = state.routines[action.botId];
+      if (known === undefined) return state;
+      return {
+        ...state,
+        routines: { ...state.routines, [action.botId]: known.filter((r) => r.id !== action.routineId) },
+      };
+    }
     case "settings_set":
       return { ...state, settings: action.settings };
     default:
@@ -352,6 +383,11 @@ export type AppActions = {
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
   decideApproval: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+  loadRoutines: (botId: BotId) => Promise<void>;
+  createRoutine: (botId: BotId, draft: CreateRoutineRequest) => Promise<void>;
+  updateRoutine: (routineId: RoutineId, patch: UpdateRoutineRequest) => Promise<void>;
+  deleteRoutine: (routine: Routine) => Promise<void>;
+  runRoutine: (routineId: RoutineId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
 };
 
@@ -428,6 +464,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }),
       decideApproval: signedIn(async (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => {
         dispatch({ type: "approval_pushed", approval: await api.decideApproval(approvalId, decision) });
+      }),
+      loadRoutines: signedIn(async (botId: BotId) => {
+        dispatch({ type: "routines_loaded", botId, routines: (await api.routines(botId)).items });
+      }),
+      createRoutine: signedIn(async (botId: BotId, draft: CreateRoutineRequest) => {
+        dispatch({ type: "routine_upserted", routine: await api.createRoutine(botId, draft) });
+      }),
+      updateRoutine: signedIn(async (routineId: RoutineId, patch: UpdateRoutineRequest) => {
+        dispatch({ type: "routine_upserted", routine: await api.updateRoutine(routineId, patch) });
+      }),
+      // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
+      deleteRoutine: signedIn(async (routine: Routine) => {
+        await api.deleteRoutine(routine.id);
+        dispatch({ type: "routine_removed", botId: routine.botId, routineId: routine.id });
+      }),
+      runRoutine: signedIn(async (routineId: RoutineId) => {
+        dispatch({ type: "routine_upserted", routine: await api.runRoutine(routineId) });
       }),
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
@@ -509,6 +562,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
         if (push.type === "handoff_updated") dispatch({ type: "handoff_pushed", handoff: push.handoff });
+        if (push.type === "routine_updated") dispatch({ type: "routine_upserted", routine: push.routine });
+        if (push.type === "routine_deleted") {
+          dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId });
+        }
       });
       // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。
       socket.addEventListener("close", () => {

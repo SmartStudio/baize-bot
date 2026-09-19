@@ -9,6 +9,8 @@ import {
   LoginResponse,
   MeResponse,
   MessageListResponse,
+  RoutineListResponse,
+  RoutineResponse,
   SendMessageResponse,
   Settings,
   UpdateBotResponse,
@@ -19,10 +21,14 @@ import {
   type BotHue,
   type BotId,
   type ChecklistItem,
+  type CreateRoutineRequest,
   type DecideApprovalRequest,
   type GroupId,
+  type Routine,
+  type RoutineId,
   type TaskId,
   type TopicTask,
+  type UpdateRoutineRequest,
 } from "@baize/shared";
 
 export class RequestFailed extends Error {
@@ -92,6 +98,17 @@ export const api = {
   decideApproval: async (id: ApprovalId, decision: DecideApprovalRequest["decision"]): Promise<Approval> =>
     (await json(DecideApprovalResponse, await send("POST", `/approvals/${encodeURIComponent(id)}`, { decision })))
       .approval,
+  routines: async (botId: BotId) =>
+    json(RoutineListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/routines`)),
+  createRoutine: async (botId: BotId, body: CreateRoutineRequest): Promise<Routine> =>
+    (await json(RoutineResponse, await send("POST", `/bots/${encodeURIComponent(botId)}/routines`, body))).routine,
+  updateRoutine: async (id: RoutineId, patch: UpdateRoutineRequest): Promise<Routine> =>
+    (await json(RoutineResponse, await send("PATCH", `/routines/${encodeURIComponent(id)}`, patch))).routine,
+  deleteRoutine: async (id: RoutineId) => {
+    await send("DELETE", `/routines/${encodeURIComponent(id)}`);
+  },
+  runRoutine: async (id: RoutineId): Promise<Routine> =>
+    (await json(RoutineResponse, await send("POST", `/routines/${encodeURIComponent(id)}/run`))).routine,
   settings: async () => json(Settings, await send("GET", "/settings")),
   updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
 };
