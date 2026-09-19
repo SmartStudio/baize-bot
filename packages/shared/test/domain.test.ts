@@ -14,6 +14,9 @@ import {
   Skill,
   SkillId,
   TopicTask,
+  OvernightResponse,
+  UsageResponse,
+  UsageRunItem,
 } from "../src/index.js";
 
 const now = "2026-09-18T00:00:00.000Z";
@@ -178,5 +181,35 @@ describe("M10 skill 的共享形状", () => {
     expect(Skill.safeParse({ ...skill, name: "周报", steps: [] }).success).toBe(false);
     expect(Skill.safeParse({ ...skill, name: "周报", steps: ["a", ""] }).success).toBe(false);
     expect(ServerPush.safeParse({ type: "skill_deleted", skillId: "s1", botId: "b1" }).success).toBe(true);
+  });
+});
+
+describe("M11 用量与昨夜进展的共享形状", () => {
+  it("用量页每个 Bot 一行，最近任务最多 20 条", () => {
+    const run = {
+      runId: "r1",
+      botId: "b1",
+      groupId: "g1",
+      title: "查库存",
+      startedAt: now,
+      endedAt: now,
+      steps: 3,
+      amount: 0.4,
+    };
+    const usage = { weekStartsAt: now, total: 0.4, bots: [{ botId: "b1", amount: 0.4, runs: 1 }], recent: [run] };
+    expect(UsageResponse.safeParse(usage).success).toBe(true);
+    expect(UsageResponse.safeParse({ ...usage, recent: Array.from({ length: 21 }, () => run) }).success).toBe(false);
+    expect(UsageResponse.safeParse({ ...usage, bots: [{ botId: "b1", amount: -1, runs: 0 }] }).success).toBe(false);
+    expect(UsageRunItem.safeParse({ ...run, botId: null, groupId: null }).success).toBe(true);
+  });
+
+  it("昨夜进展只有三种状态，since 从没连过是 null", () => {
+    const item = { botId: "b1", groupId: "g1", text: "3 家供应商报价齐了", status: "done", at: now };
+    expect(OvernightResponse.safeParse({ since: null, items: [] }).success).toBe(true);
+    expect(OvernightResponse.safeParse({ since: now, items: [item] }).success).toBe(true);
+    expect(OvernightResponse.safeParse({ since: now, items: [{ ...item, status: "pending" }] }).success).toBe(false);
+    expect(OvernightResponse.safeParse({ since: now, items: Array.from({ length: 11 }, () => item) }).success).toBe(
+      false,
+    );
   });
 });

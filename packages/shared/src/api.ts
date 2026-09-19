@@ -12,6 +12,7 @@ import {
   MessageId,
   OnFailure,
   Routine,
+  RunId,
   RoutineId,
   Skill,
   SkillId,
@@ -172,6 +173,50 @@ export type CopySkillRequest = z.infer<typeof CopySkillRequest>;
 export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
 export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
 export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
+
+// GET /api/usage  设置的用量页。本周从周一 00:00（Asia/Shanghai）起算，weekStartsAt 告诉客户端这一刻。
+// 每个自己的 Bot 一行，本周没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。预算是后续，响应里没有 budget。
+export const UsageBotLine = z.object({
+  botId: BotId,
+  amount: z.number().nonnegative(),
+  runs: z.number().int().nonnegative(),
+});
+export type UsageBotLine = z.infer<typeof UsageBotLine>;
+// title 由控制面定：用户派的活取那句话的前 40 字，例行任务派的取「例行 · 名字」，其余取群的主题任务标题。
+export const UsageRunItem = z.object({
+  runId: RunId,
+  botId: BotId.nullable(),
+  groupId: GroupId.nullable(),
+  title: z.string().max(80),
+  startedAt: Timestamp,
+  endedAt: Timestamp.nullable(),
+  steps: z.number().int().nonnegative(),
+  amount: z.number().nonnegative(),
+});
+export type UsageRunItem = z.infer<typeof UsageRunItem>;
+export const UsageResponse = z.object({
+  weekStartsAt: Timestamp,
+  total: z.number().nonnegative(),
+  bots: z.array(UsageBotLine),
+  recent: z.array(UsageRunItem).max(20),
+});
+export type UsageResponse = z.infer<typeof UsageResponse>;
+
+// GET /api/overnight  「你下线的时候，活没停」。since 是这个用户上一条推送连接断开的时刻，从没连过是 null。
+// 每个 Bot 最多一条：since 之后它最新一句话。等你 = 那个群有它发起的待审批或待接手；在干活 = 它有没结束的 run；其余算完成。
+// 断开不到 30 分钟又回来，items 给空数组，客户端不弹卡。
+export const OvernightStatus = z.enum(["done", "waiting", "working"]);
+export type OvernightStatus = z.infer<typeof OvernightStatus>;
+export const OvernightItem = z.object({
+  botId: BotId,
+  groupId: GroupId,
+  text: z.string().max(200),
+  status: OvernightStatus,
+  at: Timestamp,
+});
+export type OvernightItem = z.infer<typeof OvernightItem>;
+export const OvernightResponse = z.object({ since: Timestamp.nullable(), items: z.array(OvernightItem).max(10) });
+export type OvernightResponse = z.infer<typeof OvernightResponse>;
 
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({
