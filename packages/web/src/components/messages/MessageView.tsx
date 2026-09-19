@@ -468,13 +468,14 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
   return (
     <div className="turn turn-bot" data-testid="bot-turn" data-bot-id={turn.botId}>
       <div className="turn-content">
-        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} /> : null}
-        {tools.length === 0 && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
         {turn.items
           .filter((message) => message.body.kind !== "tool_call")
           .map((message) => (
             <MessageView key={message.id} message={message} {...props} />
           ))}
+        {/* 工具活动和花费收在回合底部：正在用工具时它像「正在输入」，跑完了它是这轮的收尾小字。 */}
+        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} /> : null}
+        {tools.length === 0 && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
       </div>
     </div>
   );
