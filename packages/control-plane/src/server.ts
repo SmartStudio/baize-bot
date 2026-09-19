@@ -13,6 +13,7 @@ import { remindStaleApprovals } from "./repo/approvals.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
+import { RoutineScheduler, type SchedulerOptions } from "./routines/scheduler.js";
 import { PushHub } from "./ws/hub.js";
 
 export const WS_PATH = "/api/ws";
@@ -23,6 +24,8 @@ const REMIND_INTERVAL_MS = 60 * 60 * 1000;
 export type RunningServer = {
   readonly port: number;
   readonly hub: PushHub;
+  /** 露出来是为了在测试里自己说什么时候到点，正常跑的时候没人碰它。 */
+  readonly routines: RoutineScheduler;
   close(): Promise<void>;
 };
 
@@ -31,6 +34,7 @@ export type StartOptions = {
   readonly port: number;
   readonly secureCookie?: boolean;
   readonly config?: RuntimeConfig;
+  readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -100,6 +104,9 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const port = await listeningPort(server);
   publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
+  const routines = new RoutineScheduler({ db: options.db, push: hub, agents, ...options.scheduler });
+  await routines.start();
+
   const reminders = setInterval(() => {
     const now = new Date();
     void remindStaleApprovals(options.db, hub, now).catch((error: unknown) => console.error("扫超时审批出错", error));
@@ -110,7 +117,9 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   return {
     port,
     hub,
+    routines,
     close: async () => {
+      routines.stop();
       clearInterval(reminders);
       hub.closeAll();
       await agents.closeAll();

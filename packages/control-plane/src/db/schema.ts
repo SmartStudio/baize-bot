@@ -6,6 +6,8 @@ import type {
   ComputerStatus,
   HandoffStatus as HandoffStatusSchema,
   MessageBody,
+  OnFailure as OnFailureSchema,
+  RoutineRunStatus as RoutineRunStatusSchema,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
 import type { z } from "zod";
@@ -28,6 +30,16 @@ type TaskStatus = z.infer<typeof TaskStatusSchema>;
 type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
 type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 type HandoffStatus = z.infer<typeof HandoffStatusSchema>;
+type OnFailure = z.infer<typeof OnFailureSchema>;
+type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
+
+/**
+ * 触发器在库里的样子：shared 的 `Trigger` 加上 cron 的 `lastFiredAt`。
+ * 后者是调度器的游标，不出边界，`Routine.parse` 在 rows.ts 里把它剥掉。
+ */
+export type StoredTrigger =
+  | { readonly kind: "cron"; readonly expr: string; readonly lastFiredAt: string | null }
+  | { readonly kind: "webhook"; readonly token: string };
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -170,6 +182,44 @@ export const computers = pgTable("computers", {
   createdAt: createdAt(),
 });
 
+// 例行任务属于一个 Bot，删 Bot 跟着走。触发器整份存 jsonb：列化的话每加一种触发器就要改一次表，
+// 放 jsonb 里触发器的种类只由 shared 的 `Trigger` 定。
+// GIN 索引是给 `POST /api/hooks/:token` 用的，那条路不登录，进来只有一个 token，不能全表扫 jsonb。
+// token 的全局唯一没有交给数据库约束：它只由控制面的 `randomBytes(16)` 产生，客户端选不了，
+// 撞车是 CSPRNG 的 2^-128，单开一张 webhook_tokens 表就要把同一条边存两遍，还得自己保证两边不走散。
+export const routines = pgTable(
+  "routines",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    instruction: text("instruction").notNull(),
+    triggers: jsonb("triggers").$type<StoredTrigger[]>().notNull().default([]),
+    onFailure: text("on_failure").$type<OnFailure>().notNull().default("stop_and_tell"),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => [index("routines_bot_id_idx").on(t.botId), index("routines_triggers_idx").using("gin", t.triggers)],
+);
+
+// 一条运行记录。触发那一刻就落 running，收尾时改状态补 note，每个例行任务只留最近 20 条。
+// 指向 runs 的那条边存在 runs 那一头（`runs.routine_run_id`），不在这里：见下面那张表的注释。
+export const routineRuns = pgTable(
+  "routine_runs",
+  {
+    id: text("id").primaryKey(),
+    routineId: text("routine_id")
+      .notNull()
+      .references(() => routines.id, { onDelete: "cascade" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    status: text("status").$type<RoutineRunStatus>().notNull().default("running"),
+    note: text("note").notNull().default(""),
+  },
+  (t) => [index("routine_runs_routine_id_started_at_idx").on(t.routineId, t.startedAt)],
+);
+
 // 规格里的用量记录。一次派活一行，ended_at 为空表示还在跑，run_done 靠「只更新 ended_at 为空的那行」做幂等。
 // 用量是账：Bot、群、触发消息删了账还要留着，所以这三处归属可空，删的时候置空而不是跟着走。
 export const runs = pgTable(
@@ -179,6 +229,10 @@ export const runs = pgTable(
     botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
     groupId: text("group_id").references(() => groups.id, { onDelete: "set null" }),
     triggerMessageId: text("trigger_message_id").references(() => messages.id, { onDelete: "set null" }),
+    // 例行任务发起的活在这里认领。边存在这一头，run 行一生出来就带着它，
+    // 上行的 run_done 拿到的就是它，中间没有「派完活再回填」的窗口能让收尾报文扑空。
+    // 记录只留 20 条、删例行任务时跟着走，所以这一列置空而不是级联，账要留着。
+    routineRunId: text("routine_run_id").references(() => routineRuns.id, { onDelete: "set null" }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     steps: integer("steps").notNull().default(0),
@@ -186,7 +240,11 @@ export const runs = pgTable(
     outputTokens: integer("output_tokens").notNull().default(0),
     amount: numeric("amount", { precision: 14, scale: 6 }).notNull().default("0"),
   },
-  (t) => [index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt), index("runs_bot_id_idx").on(t.botId)],
+  (t) => [
+    index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt),
+    index("runs_bot_id_idx").on(t.botId),
+    index("runs_routine_run_id_idx").on(t.routineRunId),
+  ],
 );
 
 // 一条等归属人点头的审批。message_id 指向群里那张卡，非空：卡和审批一起生，群里不会出现没有审批的卡。

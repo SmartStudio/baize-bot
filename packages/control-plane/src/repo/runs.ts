@@ -9,6 +9,8 @@ export type StartRunInput = {
   readonly botId: BotId;
   readonly groupId: GroupId;
   readonly triggerMessageId: MessageId;
+  /** 例行任务派出来的活带着它。run 行一生出来就认领了那条运行记录，收尾报文因此不会扑空。 */
+  readonly routineRunId?: string | undefined;
 };
 
 export async function startRun(db: Db, input: StartRunInput): Promise<RunId> {
@@ -19,6 +21,7 @@ export async function startRun(db: Db, input: StartRunInput): Promise<RunId> {
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId: input.triggerMessageId,
+      routineRunId: input.routineRunId ?? null,
       startedAt: new Date(),
     })
     .returning({ id: runs.id });

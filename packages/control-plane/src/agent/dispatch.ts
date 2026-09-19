@@ -34,6 +34,11 @@ export type DispatchDeps = {
   readonly agents: AgentHub;
 };
 
+export type DispatchOptions = {
+  /** 例行任务到点或试跑派的活带着它，往下一路传到 `startRun`。普通的用户消息不带。 */
+  readonly routineRunId?: string | undefined;
+};
+
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
  * 电脑不在线时只在群里留一句话，不建 run，免得表里堆永远不会结束的行。
@@ -43,6 +48,7 @@ export async function dispatchUserMessage(
   ownerId: UserId,
   groupId: GroupId,
   trigger: Message,
+  options: DispatchOptions = {},
 ): Promise<void> {
   const members = await listGroupBots(deps.db, groupId);
   if (members.length === 0) return;
@@ -61,7 +67,7 @@ export async function dispatchUserMessage(
     return;
   }
 
-  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task });
+  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, ...options });
 }
 
 /** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
@@ -122,6 +128,7 @@ type SendInput = {
   readonly task: TopicTask | null;
   /** 只有交接派活带它：正文换成交接报文，报文编号跟着下去。 */
   readonly handoff?: { readonly id: HandoffId; readonly text: string } | undefined;
+  readonly routineRunId?: string | undefined;
 };
 
 /** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
@@ -135,7 +142,12 @@ async function sendToTargets(deps: DispatchDeps, ownerId: UserId, groupId: Group
   const roster = input.members.map((member) => ({ id: member.id, name: member.name }));
   let dropped = false;
   for (const target of input.targets) {
-    const runId = await startRun(deps.db, { botId: target, groupId, triggerMessageId: input.trigger.id });
+    const runId = await startRun(deps.db, {
+      botId: target,
+      groupId,
+      triggerMessageId: input.trigger.id,
+      routineRunId: input.routineRunId,
+    });
     const sent = deps.agents.send(ownerId, {
       type: "prompt",
       runId,
