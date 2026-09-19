@@ -15,7 +15,11 @@ export const MessageId = id("MessageId");
 export const ApprovalId = id("ApprovalId");
 export const HandoffId = id("HandoffId");
 export const ToolConnectionId = id("ToolConnectionId");
-export const SkillId = id("SkillId");
+// skill id 在运行器里直接当目录名（<botDir>/skills/<skillId>/SKILL.md），所以只收一段安全的名字。
+export const SkillId = z
+  .string()
+  .regex(/^[A-Za-z0-9_-]{1,64}$/)
+  .brand("SkillId");
 export const RoutineId = id("RoutineId");
 export const RunId = id("RunId");
 
@@ -160,6 +164,29 @@ export type Handoff = z.infer<typeof Handoff>;
 export const ToolCallStatus = z.enum(["running", "ok", "failed", "blocked"]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
 
+// 来源：对话里 Bot 提议存下的记 chat，例行任务运行里提议的记 routine，用户在 Web 教的记 taught。复制给别的 Bot 保留原来源。
+export const SkillSource = z.enum(["chat", "routine", "taught"]);
+export type SkillSource = z.infer<typeof SkillSource>;
+
+export const SkillName = z.string().min(1).max(40);
+export const SkillSteps = z.array(z.string().min(1).max(500)).min(1).max(20);
+
+// 真相源是控制面的 skills 表。运行器只按 config 落文件，不往回同步。同一 Bot 下名字不重复，Pi 按名字找文件。
+export const Skill = z.object({
+  id: SkillId,
+  botId: BotId,
+  name: SkillName,
+  source: SkillSource,
+  steps: SkillSteps,
+  useCount: z.number().int().nonnegative(),
+  createdAt: Timestamp,
+});
+export type Skill = z.infer<typeof Skill>;
+
+// Bot 问「存不存」的那张卡。offered 是还没点，saved 之后 skillId 指向存下的那条，dismissed 是用户说不存。
+export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
+export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
+
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
   // mentions 在写入时从正文里解析出来存下，派活路由只看它，不重新解析正文。可省，省了等于没 @ 人。
@@ -183,6 +210,16 @@ export const MessageBody = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("approval"), approvalId: ApprovalId }),
   z.object({ kind: z.literal("handoff"), handoffId: HandoffId }),
   z.object({ kind: z.literal("cost"), runId: RunId, steps: z.number().int(), amount: z.number() }),
+  // 审批和交接的正文只放 id，状态在别的对象上；这张卡不同，name 和 steps 就在正文里，用户没点存之前它们
+  // 不在任何表里。所以状态也随正文走，点了存或不存就改这条消息再重推。存了之后 skillId 指向那条 skill。
+  z.object({
+    kind: z.literal("skill_offer"),
+    botId: BotId,
+    name: SkillName,
+    steps: SkillSteps.min(2),
+    status: SkillOfferStatus,
+    skillId: SkillId.nullable(),
+  }),
 ]);
 export type MessageBody = z.infer<typeof MessageBody>;
 
@@ -219,33 +256,24 @@ export const SiteLogin = z.object({
 });
 export type SiteLogin = z.infer<typeof SiteLogin>;
 
-export const SkillSource = z.enum(["chat", "routine", "taught"]);
-
-export const Skill = z.object({
-  id: SkillId,
-  botId: BotId,
-  name: z.string().min(1),
-  source: SkillSource,
-  steps: z.array(z.string()),
-  useCount: z.number().int().nonnegative(),
-  createdAt: Timestamp,
-});
-export type Skill = z.infer<typeof Skill>;
-
 export const Trigger = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cron"), expr: z.string() }),
   z.object({ kind: z.literal("webhook"), token: z.string() }),
 ]);
 export const OnFailure = z.enum(["stop_and_tell", "retry_next_time"]);
+export type OnFailure = z.infer<typeof OnFailure>;
+export type Trigger = z.infer<typeof Trigger>;
 // 触发那一刻就落一条 running 的记录，收尾时改成另外三种之一。运行途中控制面重启，记录就停在 running，
 // 用户看得到「这次没跑完」，比收尾时才落记录、跑挂了就没痕迹要强。
 export const RoutineRunStatus = z.enum(["running", "ok", "failed", "stopped"]);
+export type RoutineRunStatus = z.infer<typeof RoutineRunStatus>;
 
 export const RoutineRun = z.object({
   startedAt: Timestamp,
   status: RoutineRunStatus,
   note: z.string(),
 });
+export type RoutineRun = z.infer<typeof RoutineRun>;
 
 export const Routine = z.object({
   id: RoutineId,

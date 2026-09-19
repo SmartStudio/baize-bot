@@ -5,11 +5,14 @@ import {
   ControlToAgent,
   CreateGroupRequest,
   CreateRoutineRequest,
+  DecideSkillOfferRequest,
   Group,
   Handoff,
   Message,
   RoutineRun,
   ServerPush,
+  Skill,
+  SkillId,
   TopicTask,
 } from "../src/index.js";
 
@@ -145,5 +148,35 @@ describe("M10 skill 的共享形状", () => {
     expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单", "生成 PDF"] }).success).toBe(true);
     expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单"] }).success).toBe(false);
     expect(AgentToControl.safeParse({ ...offer, name: "", steps: ["a", "b"] }).success).toBe(false);
+  });
+
+  it("SkillId 只收能当目录名的一段，带分隔符或点点的不收", () => {
+    expect(SkillId.safeParse("skill-globex_1").success).toBe(true);
+    expect(SkillId.safeParse("3f2c9a1e-7b4d-4c5e-9a1b-2c3d4e5f6a7b").success).toBe(true);
+    for (const bad of ["../pwned", "a/b", "a\\b", "..", "", "x".repeat(65), "报价"]) {
+      expect(SkillId.safeParse(bad).success, bad).toBe(false);
+    }
+  });
+
+  it("skill_offer 消息正文自带步骤和结论，存了之后 skillId 才有值", () => {
+    const msg = { id: "m1", groupId: "g1", createdAt: now };
+    const offer = { kind: "skill_offer", botId: "b1", name: "Globex 报价", steps: ["建报价单", "生成 PDF"] };
+    expect(Message.safeParse({ ...msg, body: { ...offer, status: "offered", skillId: null } }).success).toBe(true);
+    expect(Message.safeParse({ ...msg, body: { ...offer, status: "saved", skillId: "s1" } }).success).toBe(true);
+    expect(Message.safeParse({ ...msg, body: { ...offer, status: "offered" } }).success).toBe(false);
+    expect(
+      Message.safeParse({ ...msg, body: { ...offer, steps: ["只有一步"], status: "offered", skillId: null } }).success,
+    ).toBe(false);
+    expect(DecideSkillOfferRequest.safeParse({ decision: "save" }).success).toBe(true);
+    expect(DecideSkillOfferRequest.safeParse({ decision: "approved" }).success).toBe(false);
+  });
+
+  it("skill 名最多 40 字，步骤 1 到 20 条且每条非空", () => {
+    const skill = { id: "s1", botId: "b1", source: "taught", useCount: 0, createdAt: now };
+    expect(Skill.safeParse({ ...skill, name: "周报", steps: ["翻一遍群消息"] }).success).toBe(true);
+    expect(Skill.safeParse({ ...skill, name: "x".repeat(41), steps: ["a"] }).success).toBe(false);
+    expect(Skill.safeParse({ ...skill, name: "周报", steps: [] }).success).toBe(false);
+    expect(Skill.safeParse({ ...skill, name: "周报", steps: ["a", ""] }).success).toBe(false);
+    expect(ServerPush.safeParse({ type: "skill_deleted", skillId: "s1", botId: "b1" }).success).toBe(true);
   });
 });

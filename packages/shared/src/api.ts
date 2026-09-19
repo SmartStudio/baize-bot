@@ -13,6 +13,10 @@ import {
   OnFailure,
   Routine,
   RoutineId,
+  Skill,
+  SkillId,
+  SkillName,
+  SkillSteps,
   TaskStatus,
   Timestamp,
   TopicTask,
@@ -144,6 +148,31 @@ export type UpdateRoutineRequest = z.infer<typeof UpdateRoutineRequest>;
 // 停用的也能试跑，停用只挡自动触发。
 // POST /api/hooks/:token  不要登录，请求体忽略。回 202 空体；token 对不上 404；例行任务停用 409。
 
+// GET /api/bots/:id/skills  该 Bot 会做的活。别人的 Bot 404。
+export const SkillListResponse = z.object({ items: z.array(Skill) });
+
+// POST /api/bots/:id/skills  用户在 Web「教它一个」，source 记 taught，回 201。同一 Bot 下名字撞了 409。
+export const CreateSkillRequest = z.object({ name: SkillName, steps: SkillSteps });
+export type CreateSkillRequest = z.infer<typeof CreateSkillRequest>;
+export const SkillResponse = z.object({ skill: Skill });
+
+// PATCH /api/skills/:id  给到的字段整份替换，steps 给了就是整份替换。改名撞了 409，别人的 404。
+export const UpdateSkillRequest = CreateSkillRequest.partial();
+export type UpdateSkillRequest = z.infer<typeof UpdateSkillRequest>;
+
+// DELETE /api/skills/:id  回 204。
+// POST /api/skills/:id/copy  复制给自己的另一个 Bot，来源保留，useCount 归零，回 201 与 SkillResponse。
+// 目标 Bot 不是自己的 404，目标 Bot 已有同名 409。
+export const CopySkillRequest = z.object({ botId: BotId });
+export type CopySkillRequest = z.infer<typeof CopySkillRequest>;
+
+// POST /api/messages/:id/skill-offer  群里那张卡点「存」或「不存」。消息不是 skill_offer 404，已有结论 409。
+// save 建 skill 行、把消息 status 改成 saved 并重推那条 message，再推 skill_updated 和新的 config；
+// 名字和该 Bot 已有的撞了也是 409，卡留在 offered 让用户先改名。dismiss 只改 status，skill 回 null。
+export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
+export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
+export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
+
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({
   theme: z.enum(["light", "dark", "system"]),
@@ -183,5 +212,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   // 建、改、每条运行记录的状态变化都推整条例行任务，客户端整条替换。
   z.object({ type: z.literal("routine_updated"), routine: Routine }),
   z.object({ type: z.literal("routine_deleted"), routineId: RoutineId, botId: BotId }),
+  // 建、改、复制、`/名` 引用计数加一都推整条 skill，客户端整条替换。删推 skill_deleted。
+  z.object({ type: z.literal("skill_updated"), skill: Skill }),
+  z.object({ type: z.literal("skill_deleted"), skillId: SkillId, botId: BotId }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

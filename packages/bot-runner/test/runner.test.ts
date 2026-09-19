@@ -1147,7 +1147,8 @@ describe("运行器的 skill", () => {
   it("skillId 带路径分隔符时不落盘，写不到 dataDir 外面去", async () => {
     const h = await startHarness({
       bots: ["bot-1"],
-      skills: [GLOBEX_SKILL, skillOf("../../pwned", "bot-1", "越界", ["一", "二"])],
+      // shared 的 SkillId 已经不收带分隔符的 id，这里绕过 parse 造一条，证明运行器自己的守卫还在。
+      skills: [GLOBEX_SKILL, { ...GLOBEX_SKILL, id: "../../pwned" as Skill["id"], name: "越界", steps: ["一", "二"] }],
       script: scriptBy([]),
     });
 

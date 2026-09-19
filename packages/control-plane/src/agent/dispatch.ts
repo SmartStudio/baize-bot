@@ -198,6 +198,8 @@ function summarize(body: MessageBody, recipient: BotId, members: readonly GroupB
       return { from: "系统", text: "一条等你点头的审批" };
     case "handoff":
       return { from: "系统", text: "一条交接报文" };
+    case "skill_offer":
+      return { from: "系统", text: `问过要不要存成 skill「${body.name}」` };
   }
 }
 

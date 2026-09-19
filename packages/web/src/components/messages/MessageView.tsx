@@ -55,6 +55,18 @@ const BotBubble = ({
 
 const SystemNote = ({ text }: { text: string }) => <p className="system-note">{text}</p>;
 
+// M10 Web 线把它换成带「存」「不存」两个按钮的卡。在那之前只把问题和结论摆出来，别让这种消息空着。
+const SKILL_OFFER_TEXT: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], string> = {
+  offered: "",
+  saved: " 已存",
+  dismissed: " 没存",
+};
+const SkillOfferNote = ({ body }: { body: Extract<MessageBody, { kind: "skill_offer" }> }) => (
+  <p className="system-note" data-testid="skill-offer">
+    存成 skill「{body.name}」？{SKILL_OFFER_TEXT[body.status]}
+  </p>
+);
+
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 
 const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
@@ -287,6 +299,8 @@ export const MessageView = ({
               <ApprovalCard approval={approval} message={message} onDecide={onDecide} />
             );
           }
+          case "skill_offer":
+            return <SkillOfferNote body={body} />;
           case "handoff": {
             const handoff = handoffs[body.handoffId];
             return handoff === undefined ? (
