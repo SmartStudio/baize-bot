@@ -30,6 +30,7 @@ import {
   assignTask,
   bots,
   createBot,
+  confirmNextHandoff,
   copySkillTo,
   createGroup,
   createRoutine,
@@ -38,6 +39,7 @@ import {
   groupIdByBotId,
   groups,
   handoffsIn,
+  holdHandoffAccept,
   isTeamGroup,
   lastMessageOf,
   mentionsIn,
@@ -45,6 +47,7 @@ import {
   pendingApprovalsOf,
   pendingHandoffsOf,
   reseed,
+  seedUnseenHandoff,
   responderOf,
   routineByToken,
   messagesByGroupId,
@@ -53,6 +56,7 @@ import {
   runRoutine,
   settleApproval,
   settleLatestPending,
+  settleUnseenHandoff,
   settings,
   skillNameTaken,
   skills,
@@ -177,6 +181,23 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   // 端到端每条用例开头把内存状态倒回预置的三个 Bot，用例之间就不会互相依赖跑的顺序。
   if (method === "POST" && path === "/api/test/reset") {
     reseed();
+    return send(res, 204);
+  }
+
+  if (method === "POST" && path === "/api/test/handoff/pending") {
+    return send(res, 201, { handoff: seedUnseenHandoff() });
+  }
+
+  if (method === "POST" && path === "/api/test/handoff/hold") {
+    holdHandoffAccept();
+    return send(res, 204);
+  }
+
+  if (method === "POST" && path === "/api/test/handoff/accept") {
+    if (confirmNextHandoff()) return send(res, 204);
+    const accepted = settleUnseenHandoff();
+    if (accepted === null) return send(res, 404, { error: "没有待确认的交接" });
+    push({ type: "handoff_updated", handoff: accepted });
     return send(res, 204);
   }
 
