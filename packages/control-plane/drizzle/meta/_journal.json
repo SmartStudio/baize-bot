@@ -43,6 +43,13 @@
       "when": 1789780531480,
       "tag": "0005_acoustic_madripoor",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789808014358,
+      "tag": "0006_tiny_thor",
+      "breakpoints": true
     }
   ]
 }

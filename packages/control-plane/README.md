@@ -181,6 +181,12 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 | 点「不存」 | `message` | 否，什么都没变 |
 | 正文里 `/名` | 每条命中一条 `skill_updated` | 否，只有 `use_count` 变了，它不进 SKILL.md |
 
+## 用量与昨夜进展
+
+`GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
+
+`GET /api/overnight` 的 `since` 是用户上一条推送 WebSocket 断开的时间，任一连接断开都会更新。没断开过，或离上次断开不到 30 分钟，`items` 为空。其余情况从断开之后每个 Bot 最新一条非空、已结束流式输出的 bot 消息取正文，按时间倒序至多 10 条。消息所在群里有该 Bot 发起的 pending 审批或 pending 交接时是 `waiting`；否则该 Bot 有未结束的 run 时是 `working`；其余是 `done`。审批/交接优先于运行状态。
+
 ## 迁移
 
 ```

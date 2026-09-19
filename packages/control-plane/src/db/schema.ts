@@ -50,6 +50,7 @@ export const users = pgTable("users", {
   email: text("email").notNull().unique(),
   teamName: text("team_name").notNull().default(""),
   passwordHash: text("password_hash").notNull(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
   createdAt: createdAt(),
 });
 
@@ -231,6 +232,7 @@ export const runs = pgTable(
   "runs",
   {
     id: text("id").primaryKey(),
+    ownerId: text("owner_id").references(() => users.id, { onDelete: "set null" }),
     botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
     groupId: text("group_id").references(() => groups.id, { onDelete: "set null" }),
     triggerMessageId: text("trigger_message_id").references(() => messages.id, { onDelete: "set null" }),
@@ -238,6 +240,7 @@ export const runs = pgTable(
     // 上行的 run_done 拿到的就是它，中间没有「派完活再回填」的窗口能让收尾报文扑空。
     // 记录只留 20 条、删例行任务时跟着走，所以这一列置空而不是级联，账要留着。
     routineRunId: text("routine_run_id").references(() => routineRuns.id, { onDelete: "set null" }),
+    isRoutine: boolean("is_routine").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     steps: integer("steps").notNull().default(0),
@@ -248,6 +251,7 @@ export const runs = pgTable(
   (t) => [
     index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt),
     index("runs_bot_id_idx").on(t.botId),
+    index("runs_owner_id_started_at_idx").on(t.ownerId, t.startedAt),
     index("runs_routine_run_id_idx").on(t.routineRunId),
   ],
 );

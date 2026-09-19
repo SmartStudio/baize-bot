@@ -6,6 +6,7 @@ import { newId } from "../ids.js";
 import { toUsageRecord } from "./rows.js";
 
 export type StartRunInput = {
+  readonly ownerId: UserId;
   readonly botId: BotId;
   readonly groupId: GroupId;
   readonly triggerMessageId: MessageId;
@@ -18,10 +19,12 @@ export async function startRun(db: Db, input: StartRunInput): Promise<RunId> {
     .insert(runs)
     .values({
       id: newId(),
+      ownerId: input.ownerId,
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId: input.triggerMessageId,
       routineRunId: input.routineRunId ?? null,
+      isRoutine: input.routineRunId !== undefined,
       startedAt: new Date(),
     })
     .returning({ id: runs.id });

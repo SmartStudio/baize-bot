@@ -143,6 +143,7 @@ async function sendToTargets(deps: DispatchDeps, ownerId: UserId, groupId: Group
   let dropped = false;
   for (const target of input.targets) {
     const runId = await startRun(deps.db, {
+      ownerId,
       botId: target,
       groupId,
       triggerMessageId: input.trigger.id,

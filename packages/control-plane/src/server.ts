@@ -49,7 +49,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
 
 export async function startServer(options: StartOptions): Promise<RunningServer> {
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
-  const hub = new PushHub();
+  const hub = new PushHub(options.db);
   // 一个实例，两处用：用户消息在 createApp 那边归零，上行 mention 在 AgentHub 那边计数。
   const mentionLoop = new MentionLoopGuard();
 
@@ -121,7 +121,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     close: async () => {
       routines.stop();
       clearInterval(reminders);
-      hub.closeAll();
+      await hub.closeAll();
       await agents.closeAll();
       clients.close();
       agentSockets.close();

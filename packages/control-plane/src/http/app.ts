@@ -22,6 +22,7 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
+  OvernightResponse,
   RoutineId,
   RoutineListResponse,
   RoutineResponse,
@@ -38,6 +39,7 @@ import {
   UpdateSkillRequest,
   UpdateTaskRequest,
   UpdateTaskResponse,
+  UsageResponse,
   type Settings,
   type TriggerInput,
   type User,
@@ -83,6 +85,7 @@ import {
 } from "../repo/skills.js";
 import { updateTask } from "../repo/tasks.js";
 import { authenticate } from "../repo/users.js";
+import { getOvernight, getUsage } from "../repo/usage.js";
 import type { PushHub } from "../ws/hub.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 
@@ -148,6 +151,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   app.get("/api/me", (c) => c.json(MeResponse.parse({ user: c.get("user") })));
+
+  app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
+
+  app.get("/api/overnight", async (c) => c.json(OvernightResponse.parse(await getOvernight(db, c.get("user").id))));
 
   app.get("/api/computer", async (c) => {
     const computer = await findComputerByOwner(db, c.get("user").id);
