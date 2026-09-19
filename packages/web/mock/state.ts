@@ -5,6 +5,8 @@ import {
   BotId,
   Group,
   GroupId,
+  Handoff,
+  HandoffId,
   Message,
   MessageId,
   RunId,
@@ -110,6 +112,7 @@ export const tasks = new Map<string, TopicTask>();
 export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();
+export const handoffs = new Map<string, Handoff>();
 
 // 单 Bot 群建 Bot 时自动建，多 Bot 群从建群页来。成员数就是这两类的分界，`/api/groups` 只列后者。
 export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
@@ -134,7 +137,8 @@ let generation = 0;
 // 预置的多 Bot 群，对着原型 05：小服和小销在一个主题任务下协作，任务卡钉在群顶部。
 const TEAM_GROUP_ID = "grp_order";
 const TEAM_TASK_ID = "tsk_order";
-const TEAM_BOT_IDS = ["bot_service", "bot_sales"];
+// 小采在群里，交接才演得起来：原型 05 的这个群就是小服、小销、小采三个。
+const TEAM_BOT_IDS = ["bot_service", "bot_sales", "bot_buy"];
 const TEAM_CHECKLIST = [
   "查 X3 库存与排产，确认 200 台的交付节奏",
   "出 200 台 X3 的报价单",
@@ -149,6 +153,7 @@ export const reseed = (): void => {
   for (const wake of waiters.values()) wake("rejected");
   waiters.clear();
   approvals.clear();
+  handoffs.clear();
   bots.clear();
   groups.clear();
   tasks.clear();
@@ -426,6 +431,27 @@ export const approvalsIn = (messages: Message[]): Approval[] => {
   return found;
 };
 
+// 交接卡的正文只有 handoffId，状态在 Handoff 上。跟审批一样，这一页引用到的跟着这一页回。
+export const handoffsIn = (messages: Message[]): Handoff[] => {
+  const found: Handoff[] = [];
+  for (const message of messages) {
+    if (message.body.kind !== "handoff") continue;
+    const handoff = handoffs.get(message.body.handoffId);
+    if (handoff) found.push(handoff);
+  }
+  return found;
+};
+
+export const pendingHandoffsOf = (groupId: string): number =>
+  [...handoffs.values()].filter((h) => h.groupId === groupId && h.status === "pending").length;
+
+// 交接报文指向的是「下一个人该从哪一项接着做」，所以指针取交接这一刻第一项还没勾掉的。全勾完了就没什么可指的。
+const nextUndoneIndexOf = (groupId: string): number | null => {
+  const taskId = groups.get(groupId)?.taskId;
+  const at = (taskId === undefined ? undefined : tasks.get(taskId))?.checklist.findIndex((item) => !item.done) ?? -1;
+  return at < 0 ? null : at;
+};
+
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 const chunked = (text: string, count: number): string[] => {
@@ -450,6 +476,55 @@ const approvalFor = (prompt: string): { tool: string; kind: Approval["kind"] } |
 };
 
 const waitForDecision = (id: string): Promise<ApprovalDecision> => new Promise((resolve) => waiters.set(id, resolve));
+
+// mock 只演一次交接，对着原型 05：小服在群里把手上这一段干完，把剩下的供货确认交给小采，两秒后小采接手。
+// 真控制面里交给谁由 Bot 自己的 handoff_task 决定，这里写死一条，用例才数得清角标和当前经手。
+const HANDOFF_SCRIPT = {
+  fromBotId: "bot_service",
+  toBotId: "bot_buy",
+  done: "查完 Globex 的 X3 库存与排产：10 月 20 日能先交 120 台，联系人和交期口径都记在任务卡上了。",
+  notDone: "剩下 80 台的货期还没定，三家供应商的现货和到货期一家都没问。",
+  next: "找 3 家供应商问 X3 现货和最早到货日，回来补进任务卡。",
+};
+
+const HANDOFF_ACCEPT_MS = 2000;
+
+const playHandoff = async (groupId: string, botId: BotId, push: (event: ServerPush) => void): Promise<void> => {
+  const run = generation;
+  const group = groups.get(groupId);
+  if (group === undefined || group.botIds.length === 1 || botId !== HANDOFF_SCRIPT.fromBotId) return;
+  const toBotId = group.botIds.find((id) => id === HANDOFF_SCRIPT.toBotId);
+  if (toBotId === undefined) return;
+  // 演一次就够。再 @ 一次小服不该又长出一张卡，不然角标是几全看用例发过几条消息。
+  if ([...handoffs.values()].some((h) => h.groupId === groupId)) return;
+
+  const handoff = Handoff.parse({
+    id: HandoffId.parse(`hof_${nextSuffix()}`),
+    groupId: GroupId.parse(groupId),
+    fromBotId: botId,
+    toBotId,
+    done: HANDOFF_SCRIPT.done,
+    notDone: HANDOFF_SCRIPT.notDone,
+    next: HANDOFF_SCRIPT.next,
+    checklistIndex: nextUndoneIndexOf(groupId),
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    acceptedAt: null,
+  });
+  handoffs.set(handoff.id, handoff);
+  // 先推 handoff_updated 再推那条消息：卡的状态只在 Handoff 上，消息先到的话前端只能先画一张查不到状态的占位。
+  push({ type: "handoff_updated", handoff });
+  push({ type: "message", message: appendMessage(groupId, { kind: "handoff", handoffId: handoff.id }) });
+
+  await sleep(HANDOFF_ACCEPT_MS);
+  if (generation !== run) return;
+  const accepted = Handoff.parse({ ...handoff, status: "accepted", acceptedAt: new Date().toISOString() });
+  handoffs.set(accepted.id, accepted);
+  push({ type: "handoff_updated", handoff: accepted });
+  // 接手就是换经手人，控制面那边复用 setCurrentBot，mock 这边是同一件事。
+  const assigned = assignTask(groupId, toBotId);
+  if (assigned !== null) push({ type: "task_updated", task: assigned });
+};
 
 export const streamBotReply = async (
   groupId: string,
@@ -529,6 +604,9 @@ export const streamBotReply = async (
     amount: 0.8,
   });
   push({ type: "message", message: cost });
+
+  // 被拦下的那次运行没干成事，没什么可交接的。
+  if (status === "ok") await playHandoff(groupId, botId, push);
 };
 
 export const lastMessageOf = (groupId: string): Message | null => (messagesByGroupId.get(groupId) ?? []).at(-1) ?? null;

@@ -64,6 +64,7 @@ export const MainWindow = () => {
           messages={ready.messages[conversation.groupId] ?? NO_MESSAGES}
           lookup={lookup}
           approvals={ready.approvals}
+          handoffs={ready.handoffs}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onToggleChecklist={(checklist: ChecklistItem[]) => {
