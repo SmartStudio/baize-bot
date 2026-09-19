@@ -244,7 +244,7 @@ describe("上行 task_checklist", () => {
 
     try {
       const runId = await runFor(team, team.group.id, "@小销 记一下");
-      expect((await team.push.next()).type, "先收掉用户那条消息的推送").toBe("message");
+      await mentioned(team, team.sales.id);
 
       const checklist = [item("定价", true, team.sales.id), item("备货", false, null)];
       team.agent.send({ type: "task_checklist", runId, botId: team.sales.id, groupId: team.group.id, checklist });
@@ -270,6 +270,7 @@ describe("上行 task_checklist", () => {
 
     try {
       const runId = await runFor(team, team.group.id, "@小销 记一下");
+      await mentioned(team, team.sales.id);
       const outsider = (await makeBot(team.client, "小采", "采购")).bot;
 
       team.agent.send({
@@ -302,6 +303,7 @@ describe("上行 task_checklist", () => {
 
     try {
       const soloRunId = await runFor(team, team.soloGroupId, "自己群里先干着");
+      expect((await team.push.next()).type, "单 Bot 群只推用户那条消息，没有经手可言").toBe("message");
 
       team.agent.send({
         type: "task_checklist",
@@ -311,6 +313,7 @@ describe("上行 task_checklist", () => {
         checklist: [item("借道插一条", false, null)],
       });
       const groupRunId = await runFor(team, team.group.id, "@小销 记一下");
+      await mentioned(team, team.sales.id);
       team.agent.send({
         type: "task_checklist",
         runId: groupRunId,
@@ -338,6 +341,14 @@ async function waitForSystemPush(team: Team, text: string): Promise<void> {
 }
 
 /** 等到 task_updated 那一条推出来。它之前的推送都是这一步之前就该有的。 */
+/** @ 了人之后控制面先推用户那条消息，再推经手换人的任务卡。两条都收掉，断言经手是被 @ 的那个。 */
+async function mentioned(team: Team, botId: BotId): Promise<void> {
+  expect((await team.push.next()).type, "先收掉用户那条消息的推送").toBe("message");
+  const updated = await team.push.next();
+  expect(updated.type, "@ 谁谁就成为经手，任务卡紧跟着推").toBe("task_updated");
+  expect(updated.type === "task_updated" ? updated.task.currentBotId : null).toBe(botId);
+}
+
 async function waitForTaskUpdated(team: Team): Promise<void> {
   for (;;) {
     const push = await team.push.next();

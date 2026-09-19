@@ -243,6 +243,9 @@ describe("上行 handoff", () => {
     try {
       const runId = await runFor(team, "@小销 开个头");
       expect((await team.push.next()).type, "先收掉用户那条消息的推送").toBe("message");
+      const claimed = await team.push.next();
+      expect(claimed.type, "@ 谁谁就成为经手，任务卡紧跟着推").toBe("task_updated");
+      expect(claimed.type === "task_updated" ? claimed.task.currentBotId : null).toBe(team.sales.id);
 
       sendHandoff(team, { runId, botId: team.sales.id, toBotId: team.service.id, checklistIndex: 2 });
 

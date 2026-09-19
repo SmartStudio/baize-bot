@@ -17,6 +17,7 @@ import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
 let server: TestServer;
@@ -82,6 +83,26 @@ async function runCount(groupId: GroupId): Promise<number> {
   return Number(rows[0]?.n ?? "0");
 }
 
+async function nextOfType(push: PushClient, type: string) {
+  for (let seen = 0; seen < 10; seen += 1) {
+    const item = await push.next();
+    if (item.type === type) return item;
+  }
+  throw new Error(`等了 10 条推送都没有 ${type}`);
+}
+
+/** 把眼下已经到的推送都收下来，收到等不到为止。 */
+async function drain(push: PushClient) {
+  const items = [];
+  for (;;) {
+    try {
+      items.push(await push.next(300));
+    } catch {
+      return items;
+    }
+  }
+}
+
 describe("派活", () => {
   it("电脑离线返回 offline，多 Bot 群无人经手返回 no_target", async () => {
     const owner = await ownerWithBot();
@@ -123,6 +144,40 @@ describe("派活", () => {
       expect(rows[0]?.trigger_message_id, "run 要指回触发它的那条消息").toBe(sent.message.id);
       expect(rows[0]?.ended_at, "刚派出去的活还没结束").toBeNull();
     } finally {
+      agent.close();
+    }
+  });
+
+  it("多 Bot 群里 @ 谁谁就成为当前经手，并立刻推一条 task_updated", async () => {
+    const owner = await ownerWithBot();
+    const second = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小销" })).json());
+    const group = CreateGroupResponse.parse(
+      await (await owner.client.post("/api/groups", { title: "两人群", botIds: [owner.botId, second.bot.id] })).json(),
+    );
+    expect(group.task.currentBotId, "刚建的群还没人经手").toBeNull();
+    const agent = await online(owner);
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+
+    try {
+      expect(
+        (await owner.client.post(`/api/groups/${group.group.id}/messages`, { text: "@小服 先查库存" })).status,
+      ).toBe(201);
+      const updated = await nextOfType(push, "task_updated");
+      expect(updated.type === "task_updated" ? updated.task.currentBotId : null).toBe(owner.botId);
+
+      // 再 @ 同一个人经手没变，不该再推任务卡；能等到的下一条是这条消息本身。
+      await agent.expect("prompt");
+      expect(
+        (await owner.client.post(`/api/groups/${group.group.id}/messages`, { text: "@小服 再看看排产" })).status,
+      ).toBe(201);
+      await agent.expect("prompt");
+      const pushes = await drain(push);
+      expect(
+        pushes.filter((item) => item.type === "task_updated"),
+        "经手没变不重推",
+      ).toEqual([]);
+    } finally {
+      push.close();
       agent.close();
     }
   });

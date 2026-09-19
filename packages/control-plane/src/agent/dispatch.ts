@@ -64,10 +64,12 @@ export async function dispatchUserMessage(
   const mentions = trigger.body.kind === "user" ? (trigger.body.mentions ?? []) : [];
   const [first] = mentions;
   // @ 了好几个也只认第一个当经手。单 Bot 群没有经手可言，它的任务卡也不出边界。
-  if (members.length > 1 && first !== undefined) await setCurrentBot(deps.db, groupId, first, new Date());
-
-  // 排在改经手之后：送出去的任务卡要是改完经手的那份。
-  const task = await findTaskByGroup(deps.db, groupId);
+  // 经手换了人就推一条任务卡，不然页面要等到刷新或交接才看到新经手。送出去的任务卡也要是改完经手的那份。
+  let task = await findTaskByGroup(deps.db, groupId);
+  if (members.length > 1 && first !== undefined && task !== null && task.currentBotId !== first) {
+    task = await setCurrentBot(deps.db, groupId, first, new Date());
+    if (task !== null) deps.push.push(ownerId, { type: "task_updated", task });
+  }
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions });
   // 排在在线检查之前：没人可派的时候「@ 一个 Bot 派活」比「电脑不在线」有用。
   if (targets.length === 0) {
