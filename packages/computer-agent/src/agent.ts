@@ -116,7 +116,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           });
           return;
         }
-        await runner.prompt(message);
+        void runner.prompt(message);
         return;
       }
       case "approval_result": {

@@ -335,6 +335,63 @@ describe("电脑代理连控制面", () => {
     expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: false }]);
   });
 
+  it("prompt 等审批时仍派发后续 approval_result，让这次 run 收尾", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    let started = false;
+    let release: (() => void) | undefined;
+    const decision = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const approvals: Array<{ runId: RunId; callId: string; approved: boolean }> = [];
+    agents.push(
+      startAgent({
+        url: await server.url(),
+        computerId: ComputerId.parse("computer-1"),
+        token: "dev-token",
+        version: "0.1.0",
+        log: () => {},
+        makeRunner: (config) => ({
+          prompt: async (message) => {
+            started = true;
+            await decision;
+            config.send({
+              type: "run_done",
+              runId: message.runId,
+              botId: message.botId,
+              groupId: message.groupId,
+              steps: 1,
+              inputTokens: 1,
+              outputTokens: 1,
+            });
+          },
+          approve: (runId, callId, approved) => {
+            approvals.push({ runId, callId, approved });
+            if (runId === "run-1" && callId === "call-1" && approved) release?.();
+          },
+          pause: async () => {},
+          resume: async () => {},
+          activeRuns: () => [],
+          stop: async () => {},
+        }),
+      }),
+    );
+
+    try {
+      const socket = await server.waitForSocket(1);
+      socket.send(JSON.stringify(configMessage));
+      socket.send(JSON.stringify(promptMessage));
+      await poll(() => (started ? true : undefined), 3000, "运行器开始等待审批");
+      socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", approved: true }));
+
+      const done = await server.waitForMessage("run_done", 1, 3000);
+      expect(done.runId).toBe("run-1");
+      expect(approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: true }]);
+    } finally {
+      release?.();
+    }
+  });
+
   it("config 之前到的 approval_result 被丢弃，不会在建好运行器后补发", async () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
