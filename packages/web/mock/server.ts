@@ -41,6 +41,7 @@ import {
   isTeamGroup,
   lastMessageOf,
   mentionsIn,
+  overnightOf,
   pendingApprovalsOf,
   pendingHandoffsOf,
   reseed,
@@ -59,6 +60,7 @@ import {
   streamBotReply,
   tasks,
   user,
+  usageOf,
   writeMessageBody,
   writeRoutine,
   writeSkill,
@@ -210,6 +212,8 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (!authed(req)) return send(res, 401, { error: "没登录" });
 
   if (method === "GET" && path === "/api/me") return send(res, 200, { user });
+  if (method === "GET" && path === "/api/usage") return send(res, 200, usageOf());
+  if (method === "GET" && path === "/api/overnight") return send(res, 200, overnightOf());
 
   if (method === "GET" && path === "/api/bots") return send(res, 200, { items: botListItems() });
 

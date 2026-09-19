@@ -13,6 +13,7 @@ import {
   type HandoffId,
   type Message,
   type MessageId,
+  type OvernightItem,
   type CreateRoutineRequest,
   type CreateSkillRequest,
   type DecideSkillOfferRequest,
@@ -25,6 +26,7 @@ import {
   type UpdateSkillRequest,
   type TopicTask,
   type User,
+  type UsageResponse,
 } from "@baize/shared";
 import type { BotListItem, GroupListItem } from "@baize/shared";
 import { RequestFailed, api, type BotDraft, type GroupDraft } from "../api/client.js";
@@ -79,11 +81,21 @@ export type AppState =
       // 「这个 Bot 的 skill 拉过没有」，跟 routines 一个路子。
       skills: Record<BotId, Skill[]>;
       settings: Settings;
+      usage: UsageResponse;
+      overnight: OvernightItem[];
     };
 
 type Action =
   | { type: "anonymous"; login: LoginPhase }
-  | { type: "ready"; user: User; bots: BotListItem[]; groups: GroupListItem[]; settings: Settings }
+  | {
+      type: "ready";
+      user: User;
+      bots: BotListItem[];
+      groups: GroupListItem[];
+      settings: Settings;
+      usage: UsageResponse;
+      overnight: OvernightItem[];
+    }
   | { type: "group_selected"; groupId: GroupId }
   | { type: "bot_created"; bot: Bot; groupId: GroupId }
   | { type: "bot_updated"; bot: Bot }
@@ -103,7 +115,9 @@ type Action =
   | { type: "skills_loaded"; botId: BotId; skills: Skill[] }
   | { type: "skill_upserted"; skill: Skill }
   | { type: "skill_removed"; botId: BotId; skillId: SkillId }
-  | { type: "settings_set"; settings: Settings };
+  | { type: "settings_set"; settings: Settings }
+  | { type: "usage_loaded"; usage: UsageResponse }
+  | { type: "overnight_dismissed" };
 
 // 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
 type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean };
@@ -202,7 +216,8 @@ const withHandoffs = (state: ReadyState, incoming: Handoff[], from: "history" | 
   return { ...state, handoffs: table, conversations };
 };
 
-const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], settings: Settings): ReadyState => {
+const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState => {
+  const { user, bots, groups, settings, usage, overnight } = action;
   const registry: Record<BotId, Bot> = {};
   for (const item of bots) registry[item.bot.id] = item.bot;
   const conversations: Conversation[] = [
@@ -236,6 +251,8 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
     routines: {},
     skills: {},
     settings,
+    usage,
+    overnight,
   };
 };
 
@@ -244,7 +261,7 @@ const reduce = (state: AppState, action: Action): AppState => {
     case "anonymous":
       return { status: "anonymous", login: action.login };
     case "ready":
-      return enteredState(action.user, action.bots, action.groups, action.settings);
+      return enteredState(action);
     default:
       break;
   }
@@ -394,6 +411,10 @@ const reduce = (state: AppState, action: Action): AppState => {
     }
     case "settings_set":
       return { ...state, settings: action.settings };
+    case "usage_loaded":
+      return { ...state, usage: action.usage };
+    case "overnight_dismissed":
+      return { ...state, overnight: [] };
     default:
       return state;
   }
@@ -422,6 +443,8 @@ export type AppActions = {
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
+  loadUsage: () => Promise<void>;
+  dismissOvernight: () => void;
 };
 
 const AppContext = createContext<{ state: AppState; actions: AppActions } | null>(null);
@@ -433,6 +456,17 @@ export const useApp = () => {
 };
 
 const isUnauthorized = (cause: unknown): boolean => cause instanceof RequestFailed && cause.status === 401;
+
+const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>> => {
+  const [bots, groups, settings, usage, overnight] = await Promise.all([
+    api.bots(),
+    api.groups(),
+    api.settings(),
+    api.usage(),
+    api.overnight(),
+  ]);
+  return { type: "ready", user, bots: bots.items, groups: groups.items, settings, usage, overnight: overnight.items };
+};
 
 const RECONNECT_DELAY_MS = 1000;
 
@@ -451,16 +485,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
       };
     };
-    const enter = async (user: User) => {
-      const [bots, groups, settings] = await Promise.all([api.bots(), api.groups(), api.settings()]);
-      dispatch({ type: "ready", user, bots: bots.items, groups: groups.items, settings });
-    };
     return {
       login: async (email, password) => {
         dispatch({ type: "anonymous", login: { kind: "submitting" } });
         try {
           const { user } = await api.login(email, password);
-          await enter(user);
+          dispatch(await loadEntry(user));
         } catch (cause) {
           const message = cause instanceof RequestFailed ? cause.message : "登录失败，再试一次";
           dispatch({ type: "anonymous", login: { kind: "failed", message } });
@@ -541,6 +571,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
       }),
+      loadUsage: signedIn(async () => {
+        dispatch({ type: "usage_loaded", usage: await api.usage() });
+      }),
+      dismissOvernight: () => dispatch({ type: "overnight_dismissed" }),
     };
   }, []);
 
@@ -548,16 +582,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     let live = true;
     api
       .me()
-      .then(({ user }) =>
-        Promise.all([api.bots(), api.groups(), api.settings()]).then(([bots, groups, settings]) => ({
-          user,
-          bots,
-          groups,
-          settings,
-        })),
-      )
-      .then(({ user, bots, groups, settings }) => {
-        if (live) dispatch({ type: "ready", user, bots: bots.items, groups: groups.items, settings });
+      .then(({ user }) => loadEntry(user))
+      .then((action) => {
+        if (live) dispatch(action);
       })
       .catch((cause: unknown) => {
         if (!live) return;

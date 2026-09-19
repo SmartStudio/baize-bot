@@ -10,6 +10,7 @@ import {
   LoginResponse,
   MeResponse,
   MessageListResponse,
+  OvernightResponse,
   RoutineListResponse,
   RoutineResponse,
   SendMessageResponse,
@@ -18,6 +19,7 @@ import {
   SkillResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
+  UsageResponse,
   type Approval,
   type ApprovalId,
   type Bot,
@@ -92,6 +94,8 @@ export const api = {
     await send("POST", "/auth/logout");
   },
   me: async () => json(MeResponse, await send("GET", "/me")),
+  usage: async () => json(UsageResponse, await send("GET", "/usage")),
+  overnight: async () => json(OvernightResponse, await send("GET", "/overnight")),
   bots: async () => json(BotListResponse, await send("GET", "/bots")),
   createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>

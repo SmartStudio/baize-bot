@@ -1502,6 +1502,260 @@ select {
   font: var(--type-body);
 }
 
+.usage-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  min-width: 0;
+  padding-bottom: var(--space-5);
+}
+
+.usage-section h3 {
+  margin: 0 0 var(--space-4);
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+.usage-panel {
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--inset-hairline);
+}
+
+.usage-summary {
+  display: flex;
+  gap: var(--space-5);
+  align-items: baseline;
+  padding: var(--space-6);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.usage-summary strong {
+  font: var(--type-metric);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-summary span,
+.usage-bot small,
+.usage-future,
+.usage-run-head,
+.usage-run time,
+.usage-foot {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.usage-bot {
+  display: flex;
+  gap: var(--space-6);
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-1);
+  font: var(--type-ui);
+}
+
+.usage-bot-name {
+  display: inline-flex;
+  gap: var(--space-4);
+  align-items: center;
+  min-width: 0;
+}
+
+.usage-hue {
+  flex: none;
+  width: var(--space-4);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
+}
+
+.usage-bot strong,
+.usage-run strong {
+  font: var(--type-ui);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.usage-future {
+  display: flex;
+  gap: var(--space-4) var(--space-7);
+  flex-wrap: wrap;
+  padding: var(--space-5) var(--space-6);
+}
+
+.usage-run-head,
+.usage-run {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) calc(var(--space-12) + var(--space-8)) var(--space-12);
+  gap: var(--space-6);
+  align-items: center;
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.usage-run-head span:last-child {
+  text-align: right;
+}
+
+.usage-run-title {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  min-width: 0;
+  font: var(--type-ui);
+}
+
+.usage-run-title > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-run time {
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-foot {
+  display: flex;
+  gap: var(--space-6);
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: var(--space-5) var(--space-6);
+}
+
+.overnight-card {
+  position: fixed;
+  top: var(--space-8);
+  left: 50%;
+  z-index: 2;
+  width: min(calc(var(--panel-w) + var(--space-12)), calc(100vw - var(--space-8)));
+  max-height: calc(100vh - var(--space-9));
+  overflow-y: auto;
+  transform: translateX(-50%);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-window);
+}
+
+.overnight-head {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-6);
+  background: var(--accent-soft);
+}
+
+.overnight-head h2 {
+  margin: 0;
+  font: var(--type-heading);
+}
+
+.overnight-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.overnight-row {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  width: 100%;
+  min-height: var(--space-11);
+  padding: var(--space-6);
+  border-bottom: 1px solid var(--border-1);
+  text-align: left;
+}
+
+.overnight-row:last-child {
+  border-bottom: 0;
+}
+
+.overnight-row:hover {
+  background: var(--bg-hover);
+}
+
+.overnight-row:active {
+  transform: scale(0.98);
+}
+
+.overnight-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  font: var(--type-ui);
+}
+
+.overnight-copy small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.overnight-text {
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+@media (max-width: 700px) {
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    width: calc(100vw - var(--space-6) * 2);
+    height: calc(100vh - var(--space-6) * 2);
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    overflow-x: auto;
+    padding: var(--space-4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border-1);
+  }
+
+  .settings-nav > b {
+    display: none;
+  }
+
+  .settings-nav .menu-row {
+    flex: none;
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .settings-page {
+    padding: var(--space-6);
+  }
+
+  .usage-run-head {
+    display: none;
+  }
+
+  .usage-run {
+    grid-template-columns: minmax(0, 1fr) var(--space-12);
+    gap: var(--space-2) var(--space-5);
+  }
+
+  .usage-run-title {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .usage-run time {
+    grid-column: 1;
+    grid-row: 2;
+    padding-left: calc(var(--space-8) + var(--space-4));
+  }
+
+  .usage-run strong {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+}
+
 /* ---------- 08 建群 · 05 主题任务 ---------- */
 
 /* 任务详情没开的多 Bot 群没有第三栏，对话区把它吃掉，而不是留一条空栏。 */
