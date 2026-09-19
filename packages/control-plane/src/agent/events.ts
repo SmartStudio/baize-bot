@@ -189,6 +189,7 @@ const ERROR_REASONS: Record<AgentError["code"], string> = {
   prompt_before_config: "配置还没到就先接到了活",
   unsupported: "这件事它还做不了",
   runner_failed: "跑活的进程出错了",
+  model_failed: "模型上游没回话",
 };
 
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
