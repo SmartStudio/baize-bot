@@ -198,7 +198,8 @@ export const MessageBody = z.discriminatedUnion("kind", [
     streaming: z.boolean(),
     mentions: z.array(BotId).optional(),
   }),
-  z.object({ kind: z.literal("system"), text: z.string() }),
+  // tone 是给界面分层用的：error 的那条用户没得到想要的结果，界面把它渲染成醒目的提示卡；不带就是普通说明。
+  z.object({ kind: z.literal("system"), text: z.string(), tone: z.enum(["info", "error"]).optional() }),
   z.object({
     kind: z.literal("tool_call"),
     botId: BotId,
@@ -209,7 +210,14 @@ export const MessageBody = z.discriminatedUnion("kind", [
   }),
   z.object({ kind: z.literal("approval"), approvalId: ApprovalId }),
   z.object({ kind: z.literal("handoff"), handoffId: HandoffId }),
-  z.object({ kind: z.literal("cost"), runId: RunId, steps: z.number().int(), amount: z.number() }),
+  // botId 告诉界面这笔账挂在哪个 Bot 的那轮回复底下。早期的行没有它，界面退回到「挂最近一轮」。
+  z.object({
+    kind: z.literal("cost"),
+    runId: RunId,
+    botId: BotId.optional(),
+    steps: z.number().int(),
+    amount: z.number(),
+  }),
   // 审批和交接的正文只放 id，状态在别的对象上；这张卡不同，name 和 steps 就在正文里，用户没点存之前它们
   // 不在任何表里。所以状态也随正文走，点了存或不存就改这条消息再重推。存了之后 skillId 指向那条 skill。
   z.object({
