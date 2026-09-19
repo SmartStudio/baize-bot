@@ -62,6 +62,7 @@ export class AgentHub {
   readonly #deps: AgentHubDeps;
   readonly #connections = new Map<string, AgentConnection>();
   readonly #graceTimers = new Map<string, NodeJS.Timeout>();
+  readonly #finishChains = new Map<string, Promise<void>>();
   readonly #pendingFinishes = new Set<Promise<void>>();
   readonly #sleepingWrites = new Map<string, Promise<void>>();
 
@@ -101,10 +102,10 @@ export class AgentHub {
           this.#connections.delete(closed.ownerId);
           const timer = setTimeout(() => {
             this.#graceTimers.delete(closed.ownerId);
-            if (this.isOnline(closed.ownerId)) return;
-            const job = this.#finishMissingRuns(closed.ownerId, []).catch((error: unknown) =>
-              console.error("断连后收尾 run 出错", error),
-            );
+            const job = this.#enqueueFinish(closed.ownerId, async () => {
+              if (this.isOnline(closed.ownerId)) return;
+              await this.#finishMissingRuns(closed.ownerId, [], () => this.isOnline(closed.ownerId));
+            }).catch((error: unknown) => console.error("断连后收尾 run 出错", error));
             this.#pendingFinishes.add(job);
             void job.then(() => this.#pendingFinishes.delete(job));
           }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
@@ -207,18 +208,26 @@ export class AgentHub {
     }
     previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
 
-    await this.#sleepingWrites.get(computer.ownerId);
-    await this.#finishMissingRuns(computer.ownerId, message.activeRuns);
+    await this.#enqueueFinish(computer.ownerId, async () => {
+      await this.#sleepingWrites.get(computer.ownerId);
+      await this.#finishMissingRuns(computer.ownerId, message.activeRuns);
+    });
     await markComputerOnline(this.#deps.db, computer.id);
     this.#send(accepted, { type: "welcome", ownerId: computer.ownerId, serverTime: new Date().toISOString() });
     await this.#sendConfig(accepted);
     return accepted;
   }
 
-  async #finishMissingRuns(ownerId: UserId, activeRuns: readonly RunId[]): Promise<void> {
+  async #finishMissingRuns(
+    ownerId: UserId,
+    activeRuns: readonly RunId[],
+    shouldStop: (() => boolean) | undefined = undefined,
+  ): Promise<void> {
     const active = new Set(activeRuns);
     for (const run of await openRunsForOwner(this.#deps.db, ownerId)) {
+      if (shouldStop?.()) return;
       if (active.has(run.runId)) continue;
+      if (shouldStop?.()) return;
       const result = await this.#deps.db.transaction(async (tx) => {
         const usage = await finishRun(tx, run.runId, run.groupId, {
           steps: 0,
@@ -237,6 +246,21 @@ export class AgentHub {
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
       await failRoutineRunOf({ db: this.#deps.db, push: this.#deps.push, agents: this }, run.runId, DISCONNECT_NOTICE);
     }
+  }
+
+  #enqueueFinish(ownerId: UserId, task: () => Promise<void>): Promise<void> {
+    const previous = this.#finishChains.get(ownerId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(task);
+    this.#finishChains.set(ownerId, current);
+    void current.then(
+      () => {
+        if (this.#finishChains.get(ownerId) === current) this.#finishChains.delete(ownerId);
+      },
+      () => {
+        if (this.#finishChains.get(ownerId) === current) this.#finishChains.delete(ownerId);
+      },
+    );
+    return current;
   }
 
   async #sendConfig(conn: AgentConnection): Promise<void> {

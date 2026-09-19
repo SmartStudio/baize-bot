@@ -1,6 +1,16 @@
-import { CreateBotResponse, MessageListResponse, SendMessageResponse, type BotId, type GroupId } from "@baize/shared";
+import {
+  CreateBotResponse,
+  CreateGroupResponse,
+  MessageListResponse,
+  SendMessageResponse,
+  type BotId,
+  type GroupId,
+  type UserId,
+} from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CONTEXT_MESSAGES, OFFLINE_NOTICE } from "../src/agent/dispatch.js";
+import { CONTEXT_MESSAGES, OFFLINE_NOTICE, dispatchUserMessage } from "../src/agent/dispatch.js";
+import { AgentHub } from "../src/agent/hub.js";
+import { MentionLoopGuard } from "../src/agent/mention-loop.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -21,6 +31,7 @@ afterAll(async () => {
 });
 
 type Owner = {
+  readonly ownerId: UserId;
   readonly client: ApiClient;
   readonly computer: TestComputer;
   readonly groupId: GroupId;
@@ -33,7 +44,23 @@ async function ownerWithBot(): Promise<Owner> {
   const client = server.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
-  return { client, computer, groupId: created.group.id, botId: created.bot.id };
+  return { ownerId: user.id, client, computer, groupId: created.group.id, botId: created.bot.id };
+}
+
+function dispatchDeps() {
+  return {
+    db: database.db,
+    push: server.server.hub,
+    agents: new AgentHub({
+      db: database.db,
+      push: server.server.hub,
+      gatewayModel: "test",
+      priceInputPerM: 0,
+      priceOutputPerM: 0,
+      mentionLoop: new MentionLoopGuard(),
+      gatewayBaseUrl: () => "",
+    }),
+  };
 }
 
 async function online(owner: Owner): Promise<AgentClient> {
@@ -54,6 +81,23 @@ async function runCount(groupId: GroupId): Promise<number> {
 }
 
 describe("派活", () => {
+  it("电脑离线返回 offline，多 Bot 群无人经手返回 no_target", async () => {
+    const owner = await ownerWithBot();
+    const offline = await appendMessage(database.db, owner.groupId, { kind: "user", text: "先存着" });
+    expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, owner.groupId, offline)).toEqual({
+      kind: "offline",
+    });
+
+    const second = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小销" })).json());
+    const group = CreateGroupResponse.parse(
+      await (await owner.client.post("/api/groups", { title: "两人群", botIds: [owner.botId, second.bot.id] })).json(),
+    );
+    const unaddressed = await appendMessage(database.db, group.group.id, { kind: "user", text: "谁来处理" });
+    expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, group.group.id, unaddressed)).toEqual({
+      kind: "no_target",
+    });
+  });
+
   it("电脑在线时收到 prompt，runs 多一行", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);

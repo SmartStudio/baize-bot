@@ -16,6 +16,7 @@ import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
+import type { MentionLoopGuard } from "./mention-loop.js";
 import { routeTargets } from "./routing.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
@@ -27,6 +28,7 @@ const CONTEXT_TEXT_LIMIT = 200;
 export const OFFLINE_NOTICE = "电脑不在线，消息已留着";
 export const NO_TARGET_NOTICE = "@ 一个 Bot 派活";
 export const MENTION_LOOP_NOTICE = "Bot 之间 @ 太多次，停下等你";
+export const HANDOFF_LOOP_NOTICE = "Bot 之间交接太多次，停下等你";
 
 export type DispatchDeps = {
   readonly db: Db;
@@ -39,6 +41,12 @@ export type DispatchOptions = {
   readonly routineRunId?: string | undefined;
 };
 
+export type DispatchOutcome =
+  | { readonly kind: "sent" }
+  | { readonly kind: "offline" }
+  | { readonly kind: "no_target" }
+  | { readonly kind: "partial" };
+
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
  * 电脑不在线时只在群里留一句话，不建 run，免得表里堆永远不会结束的行。
@@ -49,9 +57,9 @@ export async function dispatchUserMessage(
   groupId: GroupId,
   trigger: Message,
   options: DispatchOptions = {},
-): Promise<void> {
+): Promise<DispatchOutcome> {
   const members = await listGroupBots(deps.db, groupId);
-  if (members.length === 0) return;
+  if (members.length === 0) return { kind: "no_target" };
 
   const mentions = trigger.body.kind === "user" ? (trigger.body.mentions ?? []) : [];
   const [first] = mentions;
@@ -64,10 +72,10 @@ export async function dispatchUserMessage(
   // 排在在线检查之前：没人可派的时候「@ 一个 Bot 派活」比「电脑不在线」有用。
   if (targets.length === 0) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", text: NO_TARGET_NOTICE });
-    return;
+    return { kind: "no_target" };
   }
 
-  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, ...options });
+  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, ...options });
 }
 
 /** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
@@ -102,11 +110,21 @@ export type HandoffDispatch = {
  * prompt 带上 handoffId，运行器据此才开出 accept_handoff。
  */
 export async function dispatchHandoff(
-  deps: DispatchDeps,
+  deps: DispatchDeps & { readonly mentionLoop: MentionLoopGuard },
   ownerId: UserId,
   groupId: GroupId,
   input: HandoffDispatch,
 ): Promise<void> {
+  switch (deps.mentionLoop.record(groupId)) {
+    case "allow":
+      break;
+    case "stop":
+      await appendAndPush(deps, ownerId, groupId, { kind: "system", text: HANDOFF_LOOP_NOTICE });
+      return;
+    case "silent":
+      return;
+  }
+
   const members = await listGroupBots(deps.db, groupId);
   const task = await findTaskByGroup(deps.db, groupId);
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [input.targetBotId] });
@@ -132,15 +150,21 @@ type SendInput = {
 };
 
 /** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
-async function sendToTargets(deps: DispatchDeps, ownerId: UserId, groupId: GroupId, input: SendInput): Promise<void> {
+async function sendToTargets(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  input: SendInput,
+): Promise<Exclude<DispatchOutcome, { kind: "no_target" }>> {
   if (!deps.agents.isOnline(ownerId)) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
-    return;
+    return { kind: "offline" };
   }
 
   const history = await recentBodies(deps.db, groupId, input.trigger);
   const roster = input.members.map((member) => ({ id: member.id, name: member.name }));
   let dropped = false;
+  let sentCount = 0;
   for (const target of input.targets) {
     const runId = await startRun(deps.db, {
       ownerId,
@@ -162,11 +186,16 @@ async function sendToTargets(deps: DispatchDeps, ownerId: UserId, groupId: Group
       // handoffId 可省，恒带一个 undefined 在 exactOptionalPropertyTypes 下不是同一件事。
       ...(input.handoff === undefined ? {} : { handoffId: input.handoff.id }),
     });
-    if (!sent) dropped = true;
+    if (sent) sentCount += 1;
+    else dropped = true;
   }
   // 查在线和发报文之间连接掉了。run 行留着不结束，跟一次跑到一半断连是同一种痕迹。
   // 几个目标一起没发出去也只留一句话：断的是同一条连接，说一遍就够。
-  if (dropped) await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+  if (dropped) {
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", text: OFFLINE_NOTICE });
+    return sentCount > 0 ? { kind: "partial" } : { kind: "offline" };
+  }
+  return { kind: "sent" };
 }
 
 function triggerText(body: MessageBody): string {

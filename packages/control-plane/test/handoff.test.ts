@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import {
   CreateBotResponse,
   CreateGroupResponse,
   GroupListResponse,
   MessageListResponse,
+  MessageId,
   type Bot,
   type BotId,
   type Group,
@@ -13,6 +15,7 @@ import {
   type TopicTask,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { MENTION_LOOP_LIMIT } from "../src/agent/mention-loop.js";
 import { STALE_HANDOFF_MS, remindStaleHandoffs } from "../src/repo/handoffs.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -36,6 +39,7 @@ afterAll(async () => {
 const DONE = "退款政策那一版写完了";
 const NOT_DONE = "还没跟仓库对过库存";
 const NEXT = "找仓库确认双十一的备货量";
+const HANDOFF_LOOP_NOTICE = "Bot 之间交接太多次，停下等你";
 
 type Team = {
   readonly client: ApiClient;
@@ -137,6 +141,11 @@ async function pendingBadge(team: Team): Promise<number> {
   return list.items.find((entry) => entry.group.id === team.group.id)?.pendingHandoffs ?? -1;
 }
 
+async function runCount(groupId: GroupId): Promise<number> {
+  const rows = await database.sql<{ n: string }[]>`SELECT count(*) AS n FROM runs WHERE group_id = ${groupId}`;
+  return Number(rows[0]?.n ?? "0");
+}
+
 /** 等到下一条 handoff_updated。它之前的推送都是这一步之前就该有的。 */
 async function waitForHandoffUpdated(team: Team): Promise<Handoff> {
   for (;;) {
@@ -160,6 +169,74 @@ function acceptWith(team: Team, runId: RunId, botId: BotId, handoffId: HandoffId
 }
 
 describe("上行 handoff", () => {
+  it("交接与 @ 共用次数上限，用户发消息后可再次交接", async () => {
+    const team = await makeTeam();
+
+    try {
+      let runId = await runFor(team, "@小销 开个头");
+      let fromBotId = team.sales.id;
+      let toBotId = team.service.id;
+
+      for (let i = 0; i < MENTION_LOOP_LIMIT; i += 1) {
+        sendHandoff(team, { runId, botId: fromBotId, toBotId });
+        const pending = await waitForHandoffUpdated(team);
+        expect(pending.status).toBe("pending");
+        const prompt = await team.agent.expect("prompt");
+        expect(prompt.botId).toBe(toBotId);
+        acceptWith(team, prompt.runId, toBotId, pending.id);
+        expect((await waitForHandoffUpdated(team)).status).toBe("accepted");
+        expect((await team.push.next()).type).toBe("task_updated");
+        runId = prompt.runId;
+        [fromBotId, toBotId] = [toBotId, fromBotId];
+      }
+
+      const dispatched = await runCount(team.group.id);
+      sendHandoff(team, { runId, botId: fromBotId, toBotId });
+      const stopped = await waitForHandoffUpdated(team);
+      sendHandoff(team, { runId, botId: fromBotId, toBotId });
+      const silent = await waitForHandoffUpdated(team);
+
+      const barrierId = MessageId.parse(randomUUID());
+      team.agent.send({
+        type: "bot_text",
+        runId,
+        botId: fromBotId,
+        groupId: team.group.id,
+        messageId: barrierId,
+        delta: "处理完两次越线交接",
+        done: true,
+      });
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.id === barrierId) break;
+      }
+
+      expect(await runCount(team.group.id), "越线的两份交接都没有派 prompt").toBe(dispatched);
+      const stored = await page(team);
+      expect(stored.handoffs.filter((handoff) => handoff.id === stopped.id || handoff.id === silent.id)).toEqual([
+        expect.objectContaining({ id: stopped.id, status: "pending" }),
+        expect.objectContaining({ id: silent.id, status: "pending" }),
+      ]);
+      expect(
+        stored.messages.filter(
+          (message) => message.body.kind === "system" && message.body.text === HANDOFF_LOOP_NOTICE,
+        ),
+        "第一次越线只留一条提示，后续静默",
+      ).toHaveLength(1);
+
+      const response = await team.client.post(`/api/groups/${team.group.id}/messages`, { text: "继续" });
+      expect(response.status).toBe(201);
+      const resumed = await team.agent.expect("prompt");
+      expect(resumed.botId).toBe(fromBotId);
+      sendHandoff(team, { runId: resumed.runId, botId: fromBotId, toBotId });
+      const next = await waitForHandoffUpdated(team);
+      expect(next.status).toBe("pending");
+      expect((await team.agent.expect("prompt")).handoffId).toBe(next.id);
+    } finally {
+      team.close();
+    }
+  });
+
   it("落一份报文和一张卡，先推报文再推卡，目标收到带 handoffId 的活", async () => {
     const team = await makeTeam();
 
