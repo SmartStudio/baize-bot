@@ -42,14 +42,26 @@ describe("握手", () => {
   it("token 不对就关连接，不发 welcome", async () => {
     const { computer } = await ownerWithComputer();
     const agent = await openAgent(server.server.port);
-    agent.send({ type: "hello", computerId: computer.computerId, token: "b".repeat(64), version: "test" });
+    agent.send({
+      type: "hello",
+      computerId: computer.computerId,
+      token: "b".repeat(64),
+      version: "test",
+      activeRuns: [],
+    });
 
     expect(await agent.closed()).toBe(4001);
   });
 
   it("电脑号不存在也关连接", async () => {
     const agent = await openAgent(server.server.port);
-    agent.send({ type: "hello", computerId: ComputerId.parse("没有这台电脑"), token: "b".repeat(64), version: "test" });
+    agent.send({
+      type: "hello",
+      computerId: ComputerId.parse("没有这台电脑"),
+      token: "b".repeat(64),
+      version: "test",
+      activeRuns: [],
+    });
 
     expect(await agent.closed()).toBe(4001);
   });
@@ -88,7 +100,13 @@ describe("握手", () => {
   it("hello 还在查库时就断开，电脑不会挂在在线上", async () => {
     const { computer, userId } = await ownerWithComputer();
     const agent = await openAgent(server.server.port);
-    agent.send({ type: "hello", computerId: computer.computerId, token: computer.token, version: "test" });
+    agent.send({
+      type: "hello",
+      computerId: computer.computerId,
+      token: computer.token,
+      version: "test",
+      activeRuns: [],
+    });
     // 不等 welcome 就关。认身份那一段是异步的，关闭要排在它后面才看得见这条连接。
     agent.close();
 

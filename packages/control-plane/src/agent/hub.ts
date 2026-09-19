@@ -1,4 +1,11 @@
-import { AgentToControl, ControlToAgent, type ComputerId, type MessageId, type UserId } from "@baize/shared";
+import {
+  AgentToControl,
+  ControlToAgent,
+  type ComputerId,
+  type MessageId,
+  type RunId,
+  type UserId,
+} from "@baize/shared";
 import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
 import { listBots } from "../repo/bots.js";
@@ -10,6 +17,9 @@ import {
   rotateGatewayKey,
 } from "../repo/computers.js";
 import { listSkillsByOwner } from "../repo/skills.js";
+import { appendMessage } from "../repo/messages.js";
+import { finishRun, openRunsForOwner } from "../repo/runs.js";
+import { failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { handleAgentEvent } from "./events.js";
 import type { MentionLoopGuard } from "./mention-loop.js";
@@ -21,6 +31,8 @@ const HELLO_TIMEOUT_MS = 10_000;
 
 const CLOSE_SUPERSEDED = 4000;
 const CLOSE_BAD_HELLO = 4001;
+const DISCONNECT_NOTICE = "电脑断过线，这次活没做完";
+const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
 
 export type AgentConnection = {
   readonly computerId: ComputerId;
@@ -42,12 +54,16 @@ export type AgentHubDeps = {
   readonly mentionLoop: MentionLoopGuard;
   /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
   readonly gatewayBaseUrl: () => string;
+  readonly disconnectGraceMs?: number | undefined;
 };
 
 /** 电脑代理的连接表。一人一台电脑（computers.owner_id 唯一），按 owner 索引就等于按电脑索引。 */
 export class AgentHub {
   readonly #deps: AgentHubDeps;
   readonly #connections = new Map<string, AgentConnection>();
+  readonly #graceTimers = new Map<string, NodeJS.Timeout>();
+  readonly #pendingFinishes = new Set<Promise<void>>();
+  readonly #sleepingWrites = new Map<string, Promise<void>>();
 
   constructor(deps: AgentHubDeps) {
     this.#deps = deps;
@@ -83,7 +99,24 @@ export class AgentHub {
           // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
           if (this.#connections.get(closed.ownerId) !== closed) return;
           this.#connections.delete(closed.ownerId);
-          await markComputerSleeping(this.#deps.db, closed.computerId);
+          const timer = setTimeout(() => {
+            this.#graceTimers.delete(closed.ownerId);
+            if (this.isOnline(closed.ownerId)) return;
+            const job = this.#finishMissingRuns(closed.ownerId, []).catch((error: unknown) =>
+              console.error("断连后收尾 run 出错", error),
+            );
+            this.#pendingFinishes.add(job);
+            void job.then(() => this.#pendingFinishes.delete(job));
+          }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
+          timer.unref();
+          this.#graceTimers.set(closed.ownerId, timer);
+          const sleeping = markComputerSleeping(this.#deps.db, closed.computerId);
+          this.#sleepingWrites.set(closed.ownerId, sleeping);
+          try {
+            await sleeping;
+          } finally {
+            if (this.#sleepingWrites.get(closed.ownerId) === sleeping) this.#sleepingWrites.delete(closed.ownerId);
+          }
         })
         .catch((error: unknown) => console.error("把电脑标记为休眠出错", error));
     });
@@ -109,6 +142,9 @@ export class AgentHub {
 
   /** 先落库再断线：反过来的话 socket 的 close 回调要和进程退出抢，那台电脑就永远挂在在线。 */
   async closeAll(): Promise<void> {
+    for (const timer of this.#graceTimers.values()) clearTimeout(timer);
+    this.#graceTimers.clear();
+    await Promise.all(this.#pendingFinishes);
     const open = [...this.#connections.values()];
     await markComputersSleeping(
       this.#deps.db,
@@ -164,12 +200,43 @@ export class AgentHub {
 
     const previous = this.#connections.get(computer.ownerId);
     this.#connections.set(computer.ownerId, accepted);
+    const timer = this.#graceTimers.get(computer.ownerId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      this.#graceTimers.delete(computer.ownerId);
+    }
     previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
 
+    await this.#sleepingWrites.get(computer.ownerId);
+    await this.#finishMissingRuns(computer.ownerId, message.activeRuns);
     await markComputerOnline(this.#deps.db, computer.id);
     this.#send(accepted, { type: "welcome", ownerId: computer.ownerId, serverTime: new Date().toISOString() });
     await this.#sendConfig(accepted);
     return accepted;
+  }
+
+  async #finishMissingRuns(ownerId: UserId, activeRuns: readonly RunId[]): Promise<void> {
+    const active = new Set(activeRuns);
+    for (const run of await openRunsForOwner(this.#deps.db, ownerId)) {
+      if (active.has(run.runId)) continue;
+      const result = await this.#deps.db.transaction(async (tx) => {
+        const usage = await finishRun(tx, run.runId, run.groupId, {
+          steps: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          amount: 0,
+        });
+        if (usage === null) return null;
+        const message =
+          run.groupId === null
+            ? null
+            : await appendMessage(tx, run.groupId, { kind: "system", text: DISCONNECT_NOTICE });
+        return { message };
+      });
+      if (result === null) continue;
+      if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
+      await failRoutineRunOf({ db: this.#deps.db, push: this.#deps.push, agents: this }, run.runId, DISCONNECT_NOTICE);
+    }
   }
 
   async #sendConfig(conn: AgentConnection): Promise<void> {

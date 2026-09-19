@@ -3,6 +3,7 @@ import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
+import type { Tx } from "./messages.js";
 import { toUsageRecord } from "./rows.js";
 
 export type StartRunInput = {
@@ -44,9 +45,9 @@ export type RunTotals = {
  * 幂等靠这条 UPDATE 的 WHERE 本身，不靠先查后写。
  */
 export async function finishRun(
-  db: Db,
+  db: Db | Tx,
   runId: RunId,
-  groupId: GroupId,
+  groupId: GroupId | null,
   totals: RunTotals,
 ): Promise<UsageRecord | null> {
   const [row] = await db
@@ -58,7 +59,13 @@ export async function finishRun(
       outputTokens: totals.outputTokens,
       amount: totals.amount.toFixed(6),
     })
-    .where(and(eq(runs.id, runId), eq(runs.groupId, groupId), isNull(runs.endedAt)))
+    .where(
+      and(
+        eq(runs.id, runId),
+        groupId === null ? isNull(runs.groupId) : eq(runs.groupId, groupId),
+        isNull(runs.endedAt),
+      ),
+    )
     .returning();
   return row === undefined ? null : toUsageRecord(row);
 }
@@ -74,6 +81,20 @@ export async function runBelongsTo(db: Db, runId: RunId, botId: BotId, groupId: 
 }
 
 export type OpenRun = { readonly runId: RunId; readonly groupId: GroupId; readonly botId: BotId };
+
+export async function openRunsForOwner(
+  db: Db,
+  ownerId: UserId,
+): Promise<readonly { readonly runId: RunId; readonly groupId: GroupId | null }[]> {
+  const rows = await db
+    .select({ runId: runs.id, groupId: runs.groupId })
+    .from(runs)
+    .where(and(eq(runs.ownerId, ownerId), isNull(runs.endedAt)));
+  return rows.map((row) => ({
+    runId: RunId.parse(row.runId),
+    groupId: row.groupId === null ? null : GroupId.parse(row.groupId),
+  }));
+}
 
 /** 该用户最近一条还没结束的 run。agent_error 报文里没有群号，只能落到它上面。 */
 export async function latestOpenRun(db: Db, ownerId: UserId): Promise<OpenRun | null> {

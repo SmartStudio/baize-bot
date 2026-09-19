@@ -29,6 +29,7 @@ export type StackOptions = {
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly startComputer?: boolean;
+  readonly disconnectGraceMs?: number;
 };
 
 export type Stack = {
@@ -80,7 +81,12 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     delete process.env["PUBLIC_BASE_URL"];
 
     // 端口交给系统分配，同一台机器上别的进程占着 3001 也不影响。
-    const server = await startServer({ db, port: 0, config: runtimeConfig() });
+    const server = await startServer({
+      db,
+      port: 0,
+      config: runtimeConfig(),
+      ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
+    });
     closers.push(() => server.close());
     const baseUrl = `http://127.0.0.1:${server.port}`;
 
@@ -186,7 +192,7 @@ async function connectComputer(options: {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  socket.send(JSON.stringify(AgentToControl.parse({ type: "hello", ...options })));
+  socket.send(JSON.stringify(AgentToControl.parse({ type: "hello", ...options, activeRuns: [] })));
   return {
     frames: () => frames,
     closed: () => closed,

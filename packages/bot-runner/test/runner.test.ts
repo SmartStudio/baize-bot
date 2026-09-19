@@ -400,6 +400,7 @@ describe("运行器的审批", () => {
 
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
     await until(() => h.sent.some((m) => m.type === "approval_request"), "approval_request");
+    expect(h.runner.activeRuns()).toEqual([RunId.parse("run-1")]);
     await h.runner.pause(BotId.parse("bot-1"));
     await running;
 
@@ -408,6 +409,7 @@ describe("运行器的审批", () => {
       "bot_tool_call:running",
       "bot_tool_call:blocked",
     ]);
+    expect(h.runner.activeRuns()).toEqual([]);
   }, 10_000);
 
   it("approve(false) 之后 bot_tool_call 终态是 blocked，工具体没执行", async () => {
@@ -503,12 +505,14 @@ describe("运行器的暂停和继续", () => {
     await h.runner.pause(BotId.parse("bot-1"));
     await h.runner.prompt(promptMessage("bot-1", "run-2", "干活"));
 
+    expect(h.runner.activeRuns()).toEqual([RunId.parse("run-2")]);
     expect(h.sent, "暂停期间不该有任何上行报文").toEqual([]);
     expect(h.gateway.requestCount()).toBe(requestsBeforePause);
 
     await h.runner.resume(BotId.parse("bot-1"));
 
     expect(h.sent.filter((m) => m.type === "run_done").map((m) => m.runId)).toEqual(["run-2"]);
+    expect(h.runner.activeRuns()).toEqual([]);
     expect(h.gateway.requestCount()).toBeGreaterThan(requestsBeforePause);
   });
 

@@ -35,6 +35,7 @@ export type StartOptions = {
   readonly secureCookie?: boolean;
   readonly config?: RuntimeConfig;
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
+  readonly disconnectGraceMs?: number;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -63,6 +64,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     priceOutputPerM: config.priceOutputPerM,
     mentionLoop,
     gatewayBaseUrl: () => publicBaseUrl ?? "",
+    disconnectGraceMs: options.disconnectGraceMs,
   });
 
   const app = createApp({
