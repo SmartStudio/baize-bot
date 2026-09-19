@@ -614,9 +614,19 @@ test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认
   );
 
   await expect(page.getByTestId("task-current"), "还没确认，任务卡上仍是小服").toHaveText("当前 小服");
-  await expect(teamItem(page).getByTestId("bot-handoff"), "一条没确认的交接在侧栏就是「等 Bot 确认 1」").toHaveText(
-    "等 Bot 确认 1",
-  );
+  const sidebarItem = teamItem(page);
+  const handoffBadge = sidebarItem.getByTestId("bot-handoff");
+  await expect(handoffBadge, "一条没确认的交接在侧栏就是「等 Bot 确认 1」").toHaveText("等 Bot 确认 1");
+  const title = sidebarItem.locator(".bot-item-top b");
+  const titleMetrics = await title.evaluate((element) => ({
+    height: element.getBoundingClientRect().height,
+    lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  expect(titleMetrics.height, "有角标时群标题仍只有一行").toBeLessThan(titleMetrics.lineHeight * 2);
+  const titleBox = await title.boundingBox();
+  const badgeBox = await handoffBadge.boundingBox();
+  if (titleBox === null || badgeBox === null) throw new Error("群标题或交接角标没有可测量的布局框");
+  expect(badgeBox.y, "角标单独排在标题下一行").toBeGreaterThan(titleBox.y + titleBox.height / 2);
 
   // 角标这一路是推送加出来的。刷新后它只能从列表接口的计数里来，两个接口没数上的话一刷新角标就没了。
   await request.post("/api/auth/login", { data: { email: EMAIL, password: PASSWORD } });

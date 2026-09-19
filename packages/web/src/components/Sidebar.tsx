@@ -36,6 +36,8 @@ const ConversationItem = ({
   const lead = members[0];
   const team = conversation.kind === "team";
   const title = team ? conversation.task.title : (lead?.name ?? "Bot");
+  const working = activityOf(conversation.lastMessage) === "working";
+  const hasBadges = conversation.pendingApprovals > 0 || conversation.pendingHandoffs > 0 || working;
   return (
     <li>
       <button
@@ -59,25 +61,29 @@ const ConversationItem = ({
           <span className="bot-item-top">
             <b>{title}</b>
             {!team && lead?.tag ? <em className="tag">{lead.tag}</em> : null}
-            {conversation.pendingApprovals > 0 ? (
-              <span className="badge badge-pending" data-testid="bot-pending">
-                <Hand size={13} aria-hidden="true" />
-                等你点头 {conversation.pendingApprovals}
-              </span>
-            ) : null}
-            {/* 等 Bot 确认的不用你动手，压在「等你点头」下面一档，两个角标并排时你先看到该你做的那个。 */}
-            {conversation.pendingHandoffs > 0 ? (
-              <span className="badge badge-await-bot" data-testid="bot-handoff">
-                <ArrowRightLeft size={13} aria-hidden="true" />等 Bot 确认 {conversation.pendingHandoffs}
-              </span>
-            ) : null}
-            {activityOf(conversation.lastMessage) === "working" ? (
-              <span className="badge badge-working" data-testid="bot-working">
-                干活中
-              </span>
-            ) : null}
             <span className="time">{conversation.lastMessage ? timeOf(conversation.lastMessage) : "刚刚"}</span>
           </span>
+          {hasBadges ? (
+            <span className="bot-item-badges">
+              {conversation.pendingApprovals > 0 ? (
+                <span className="badge badge-pending" data-testid="bot-pending">
+                  <Hand size={13} aria-hidden="true" />
+                  等你点头 {conversation.pendingApprovals}
+                </span>
+              ) : null}
+              {/* 等 Bot 确认的不用你动手，压在「等你点头」下面一档，两个角标并排时你先看到该你做的那个。 */}
+              {conversation.pendingHandoffs > 0 ? (
+                <span className="badge badge-await-bot" data-testid="bot-handoff">
+                  <ArrowRightLeft size={13} aria-hidden="true" />等 Bot 确认 {conversation.pendingHandoffs}
+                </span>
+              ) : null}
+              {working ? (
+                <span className="badge badge-working" data-testid="bot-working">
+                  干活中
+                </span>
+              ) : null}
+            </span>
+          ) : null}
           {team ? <span className="bot-item-sub">{members.map((bot) => bot.name).join(" · ")}</span> : null}
           <span className="bot-item-preview">
             {conversation.lastMessage

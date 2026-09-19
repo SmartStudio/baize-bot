@@ -458,10 +458,25 @@ select {
   font: var(--type-ui);
 }
 
+.bot-item-top > b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .bot-item-top .time {
+  flex: none;
   margin-left: auto;
   color: var(--fg-4);
   font: var(--type-caption);
+}
+
+.bot-item-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
 }
 
 .bot-item-preview {
