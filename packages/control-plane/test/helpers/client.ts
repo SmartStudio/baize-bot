@@ -1,11 +1,20 @@
 import type { Db } from "../../src/db/client.js";
 import type { RuntimeConfig } from "../../src/env.js";
-import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../../src/server.js";
+import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer, type StartOptions } from "../../src/server.js";
 
 export type TestServer = { readonly server: RunningServer; client(): ApiClient; close(): Promise<void> };
 
-export async function startTestServer(db: Db, config: Partial<RuntimeConfig> = {}): Promise<TestServer> {
-  const server = await startServer({ db, port: 0, config: { ...DEFAULT_RUNTIME_CONFIG, ...config } });
+export async function startTestServer(
+  db: Db,
+  config: Partial<RuntimeConfig> = {},
+  scheduler?: StartOptions["scheduler"],
+): Promise<TestServer> {
+  const server = await startServer({
+    db,
+    port: 0,
+    config: { ...DEFAULT_RUNTIME_CONFIG, ...config },
+    ...(scheduler === undefined ? {} : { scheduler }),
+  });
   return {
     server,
     client: () => new ApiClient(server.port),

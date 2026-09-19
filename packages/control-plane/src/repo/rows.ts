@@ -5,6 +5,7 @@ import {
   Group,
   Handoff,
   Message,
+  Routine,
   Settings,
   TopicTask,
   UsageRecord,
@@ -101,6 +102,30 @@ export function toHandoff(row: typeof schema.handoffs.$inferSelect): Handoff {
     status: row.status,
     createdAt: row.createdAt.toISOString(),
     acceptedAt: row.acceptedAt?.toISOString() ?? null,
+  });
+}
+
+/**
+ * 例行任务带最近 20 条运行记录，新的在前。
+ * 触发器里 cron 的 `lastFiredAt` 是调度器的游标，`Trigger` 里没有这个字段，`Routine.parse` 顺手把它剥掉。
+ */
+export function toRoutine(
+  row: typeof schema.routines.$inferSelect,
+  runs: readonly (typeof schema.routineRuns.$inferSelect)[],
+): Routine {
+  return Routine.parse({
+    id: row.id,
+    botId: row.botId,
+    name: row.name,
+    instruction: row.instruction,
+    triggers: row.triggers,
+    onFailure: row.onFailure,
+    enabled: row.enabled,
+    runs: runs.map((run) => ({
+      startedAt: run.startedAt.toISOString(),
+      status: run.status,
+      note: run.note,
+    })),
   });
 }
 

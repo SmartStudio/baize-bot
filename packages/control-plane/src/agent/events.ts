@@ -13,6 +13,7 @@ import {
 } from "../repo/messages.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
+import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { MENTION_LOOP_NOTICE, dispatchBotMention, dispatchHandoff } from "./dispatch.js";
 import { renderHandoffReport } from "./handoff.js";
@@ -174,6 +175,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     steps: usage.steps,
     amount: usage.amount,
   });
+  await chargeRoutineRunOf(deps, event.runId, usage.amount);
 }
 
 const ERROR_REASONS: Record<AgentError["code"], string> = {
@@ -186,7 +188,8 @@ const ERROR_REASONS: Record<AgentError["code"], string> = {
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
-  const groupId = named ?? (await latestOpenRun(deps.db, conn.ownerId))?.groupId ?? null;
+  const open = await latestOpenRun(deps.db, conn.ownerId);
+  const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
     console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);
     return;
@@ -195,6 +198,10 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     kind: "system",
     text: `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
   });
+  // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
+  if (open !== null && open.groupId === groupId) {
+    await failRoutineRunOf(deps, open.runId, ERROR_REASONS[event.code]);
+  }
 }
 
 /**
@@ -220,6 +227,7 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
   // 先推审批再推卡，客户端画那张卡的时候状态已经在手上了。
   deps.push.push(conn.ownerId, { type: "approval_updated", approval: created.approval });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
+  await holdRoutineRunOf(deps, event.runId);
 }
 
 /**

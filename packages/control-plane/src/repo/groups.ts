@@ -1,4 +1,4 @@
-import type { Bot, BotId, Group, GroupId, Message, TopicTask, UserId } from "@baize/shared";
+import { GroupId, type Bot, type BotId, type Group, type Message, type TopicTask, type UserId } from "@baize/shared";
 import { and, asc, count, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
@@ -20,6 +20,12 @@ export type CreateGroupResult =
   | { readonly kind: "ok"; readonly group: Group; readonly task: TopicTask }
   | { readonly kind: "unknown_bot" }
   | { readonly kind: "duplicate_bot" };
+
+/** Bot 的单 Bot 群。例行任务的一次运行等同于归属人在这个群里发了一条消息。 */
+export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | null> {
+  const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId)).limit(1);
+  return row === undefined ? null : GroupId.parse(row.id);
+}
 
 /** 建多 Bot 群，同时建它的主题任务。单 Bot 群不走这里，建 Bot 时自动建。 */
 export async function createGroup(db: Db, ownerId: UserId, input: CreateGroupInput): Promise<CreateGroupResult> {

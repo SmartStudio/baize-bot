@@ -7,6 +7,7 @@ import {
   CreateBotResponse,
   CreateGroupRequest,
   CreateGroupResponse,
+  CreateRoutineRequest,
   DecideApprovalRequest,
   DecideApprovalResponse,
   GroupId,
@@ -17,18 +18,23 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
+  RoutineId,
+  RoutineListResponse,
+  RoutineResponse,
   SendMessageRequest,
   SendMessageResponse,
   TaskId,
   UpdateBotRequest,
   UpdateBotResponse,
+  UpdateRoutineRequest,
   UpdateSettingsRequest,
   UpdateTaskRequest,
   UpdateTaskResponse,
   type Settings,
+  type TriggerInput,
   type User,
 } from "@baize/shared";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
@@ -38,11 +44,22 @@ import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
-import { createBot, deleteBot, listBots, updateBot } from "../repo/bots.js";
+import { createBot, deleteBot, findBot, listBots, updateBot } from "../repo/bots.js";
 import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
+import {
+  createRoutine,
+  deleteRoutine,
+  findOwnedRoutine,
+  findRoutineByWebhookToken,
+  listRoutines,
+  updateRoutine,
+  type OwnedRoutine,
+} from "../repo/routines.js";
+import { isValidCron } from "../routines/cron.js";
+import { runRoutine } from "../routines/run.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { updateTask } from "../repo/tasks.js";
 import { authenticate } from "../repo/users.js";
@@ -61,18 +78,21 @@ export type AppDeps = {
 type Env = { Variables: { user: User } };
 
 const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
+/** webhook 的 token 本身就是凭据，打这条的人手上没有会话。只豁免这一条路由，多一段路径都不算。 */
+const PUBLIC_HOOK = /^\/api\/hooks\/[^/]+$/;
 
 const NOT_FOUND = { error: "没有这个对象" } as const;
 const UNAUTHORIZED = { error: "请先登录" } as const;
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const { agents, db, hub } = deps;
+  const routineDeps = { db, push: hub, agents };
   const app = new Hono<Env>();
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
 
   app.use("/api/*", async (c, next) => {
-    if (PUBLIC_PATHS.has(c.req.path)) return next();
+    if (PUBLIC_PATHS.has(c.req.path) || PUBLIC_HOOK.test(c.req.path)) return next();
     const token = getCookie(c, SESSION_COOKIE);
     const user = token === undefined ? null : await userForSession(db, token);
     if (user === null) return c.json(UNAUTHORIZED, 401);
@@ -146,6 +166,70 @@ export function createApp(deps: AppDeps): Hono<Env> {
     await agents.sendConfig(c.get("user").id);
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
     return c.body(null, 204);
+  });
+
+  app.get("/api/bots/:id/routines", async (c) => {
+    const botId = BotId.safeParse(c.req.param("id"));
+    if (!botId.success) return c.json(NOT_FOUND, 404);
+    // 别人的 Bot 在这里就挡住了，下面按 bot_id 查就不用再管归属。
+    if ((await findBot(db, c.get("user").id, botId.data)) === null) return c.json(NOT_FOUND, 404);
+    const items = await listRoutines(db, botId.data);
+    return c.json(RoutineListResponse.parse({ items }));
+  });
+
+  app.post("/api/bots/:id/routines", async (c) => {
+    const botId = BotId.safeParse(c.req.param("id"));
+    if (!botId.success) return c.json(NOT_FOUND, 404);
+    if ((await findBot(db, c.get("user").id, botId.data)) === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, CreateRoutineRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const bad = badCron(body.value.triggers);
+    if (bad !== null) return c.json({ error: bad }, 400);
+    const routine = await createRoutine(db, botId.data, body.value);
+    hub.push(c.get("user").id, { type: "routine_updated", routine });
+    return c.json(RoutineResponse.parse({ routine }), 201);
+  });
+
+  app.patch("/api/routines/:id", async (c) => {
+    const owned = await ownedRoutine(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, UpdateRoutineRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const bad = badCron(body.value.triggers ?? []);
+    if (bad !== null) return c.json({ error: bad }, 400);
+    const routine = await updateRoutine(db, owned.row, body.value);
+    if (routine === null) return c.json(NOT_FOUND, 404);
+    hub.push(c.get("user").id, { type: "routine_updated", routine });
+    return c.json(RoutineResponse.parse({ routine }));
+  });
+
+  app.delete("/api/routines/:id", async (c) => {
+    const owned = await ownedRoutine(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    if (!(await deleteRoutine(db, RoutineId.parse(owned.row.id)))) return c.json(NOT_FOUND, 404);
+    hub.push(c.get("user").id, {
+      type: "routine_deleted",
+      routineId: RoutineId.parse(owned.row.id),
+      botId: BotId.parse(owned.row.botId),
+    });
+    return c.body(null, 204);
+  });
+
+  app.post("/api/routines/:id/run", async (c) => {
+    const owned = await ownedRoutine(db, c);
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    // 停用只挡自动触发，试跑照跑。
+    const routine = await runRoutine(routineDeps, owned.ownerId, owned.row, new Date());
+    if (routine === null) return c.json(NOT_FOUND, 404);
+    return c.json(RoutineResponse.parse({ routine }), 202);
+  });
+
+  app.post("/api/hooks/:token", async (c) => {
+    const owned = await findRoutineByWebhookToken(db, c.req.param("token"));
+    if (owned === null) return c.json(NOT_FOUND, 404);
+    if (!owned.row.enabled) return c.json({ error: "这条例行任务已停用" }, 409);
+    if ((await runRoutine(routineDeps, owned.ownerId, owned.row, new Date())) === null) return c.json(NOT_FOUND, 404);
+    return c.body(null, 202);
   });
 
   app.post("/api/groups", async (c) => {
@@ -267,6 +351,21 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   return app;
+}
+
+/** 例行任务按归属人查，别人的和不存在的一样是 404。 */
+function ownedRoutine(db: Db, c: Context<Env>): Promise<OwnedRoutine | null> {
+  const routineId = RoutineId.safeParse(c.req.param("id"));
+  if (!routineId.success) return Promise.resolve(null);
+  return findOwnedRoutine(db, c.get("user").id, routineId.data);
+}
+
+/** cron 在收下的时候就解一遍，不合法的表达式不该进库等调度器每 30 秒失败一次。 */
+function badCron(triggers: readonly TriggerInput[]): string | null {
+  for (const trigger of triggers) {
+    if (trigger.kind === "cron" && !isValidCron(trigger.expr)) return `cron 表达式不合法：${trigger.expr}`;
+  }
+  return null;
 }
 
 const MessageQuery = z.object({
