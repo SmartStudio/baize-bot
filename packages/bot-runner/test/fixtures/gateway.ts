@@ -40,8 +40,10 @@ const readBody = (req: IncomingMessage): Promise<string> =>
 export async function startGateway(options: {
   upstream: Upstream;
   models: readonly GatewayModel[];
-  /** 头 N 个补全请求返 503，用来触发 Pi 的自动重试。 */
+  /** 头 N 个补全请求返回错误；默认 503，可用 401 测无效密钥。 */
   failFirst?: number;
+  failStatus?: 401 | 503;
+  failMessage?: string;
 }): Promise<Gateway> {
   const usage: UsageRecord[] = [];
   let requests = 0;
@@ -67,9 +69,16 @@ export async function startGateway(options: {
     const body = JSON.parse(await readBody(req)) as ChatCompletionRequest;
     requests += 1;
     if (requests <= (options.failFirst ?? 0)) {
-      // 503 会进 isRetryableAssistantError 的可重试白名单。
-      res.writeHead(503, { "content-type": "application/json" });
-      res.end(JSON.stringify({ error: { message: "503 Service Unavailable", type: "server_error" } }));
+      const status = options.failStatus ?? 503;
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: options.failMessage ?? (status === 401 ? "401 Unauthorized" : "503 Service Unavailable"),
+            type: status === 401 ? "authentication_error" : "server_error",
+          },
+        }),
+      );
       return;
     }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });

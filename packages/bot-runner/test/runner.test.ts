@@ -218,6 +218,8 @@ async function startHarness(options: {
   readonly extensionTools?: readonly RunnerTool[];
   readonly script: (req: ChatCompletionRequest) => ScriptedTurn;
   readonly failFirst?: number;
+  readonly failStatus?: 401 | 503;
+  readonly failMessage?: string;
   /** 收到 approval_request 就按这个结论回，undefined 表示不给结论。 */
   readonly approve?: boolean;
   readonly settings?: RunnerConfig["settings"];
@@ -233,6 +235,8 @@ async function startHarness(options: {
     upstream: scriptedUpstream(options.script),
     models: [{ id: MODEL_ID }],
     ...(options.failFirst === undefined ? {} : { failFirst: options.failFirst }),
+    ...(options.failStatus === undefined ? {} : { failStatus: options.failStatus }),
+    ...(options.failMessage === undefined ? {} : { failMessage: options.failMessage }),
   });
 
   const sent: AgentToControl[] = [];
@@ -538,20 +542,48 @@ describe("运行器的暂停和继续", () => {
 });
 
 describe("上游重试", () => {
-  it("首个补全请求返 503 时 Pi 重跑一轮，run_done 仍然只发一条", async () => {
+  it("前两次补全返 503 后成功，不上报模型错误，run_done 只发一条", async () => {
     const h = await startHarness({
       bots: ["bot-1"],
       script: scriptBy([["干活", { textChunks: ["重试之后才说的话。"], usage: { input: 300, output: 9 } }]]),
-      failFirst: 1,
+      failFirst: 2,
       settings: RETRY_TO_PI,
     });
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "干活"));
 
-    expect(h.gateway.requestCount()).toBe(2);
+    expect(h.gateway.requestCount()).toBe(3);
+    expect(h.sent.filter((message) => message.type === "agent_error")).toHaveLength(0);
     expect(h.sent.filter((m) => m.type === "run_done")).toHaveLength(1);
     expect(h.sent.at(-1)?.type).toBe("run_done");
     expect(h.sent.some((m) => m.type === "bot_text" && m.delta === "重试之后才说的话。")).toBe(true);
+  });
+});
+
+describe("模型上游报错", () => {
+  it("401 回合上报一次 model_failed，仍发送 run_done 收尾", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([]),
+      failFirst: 10,
+      failStatus: 401,
+      failMessage: `401 Unauthorized ${"x".repeat(600)}`,
+      settings: RETRY_TO_PI,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查一条订单"));
+
+    expect(h.sent.filter((message) => message.type === "run_done")).toHaveLength(1);
+    const errors = h.sent.filter((message) => message.type === "agent_error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ type: "agent_error", code: "model_failed", groupId: "group-1" });
+    expect(errors[0]?.type === "agent_error" && errors[0].detail).toContain("401");
+    expect(errors[0]?.type === "agent_error" && errors[0].detail).toHaveLength(500);
+    expect(
+      h.sent
+        .filter((message) => message.type === "agent_error" || message.type === "run_done")
+        .map((message) => message.type),
+    ).toEqual(["agent_error", "run_done"]);
   });
 });
 

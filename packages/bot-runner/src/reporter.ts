@@ -19,12 +19,18 @@ export function reportRun(
   const ids = { runId: identity.runId, botId: identity.botId, groupId: identity.groupId };
   const startedAt = new Map<string, number>();
   let steps = 0;
+  let lastModelError: string | null = null;
 
   const push = (message: AgentToControl): void => {
     send(AgentToControl.parse(message));
   };
 
   return session.subscribe((event) => {
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      lastModelError =
+        event.message.stopReason === "error" ? (event.message.errorMessage || "模型上游没回话").slice(0, 500) : null;
+      return;
+    }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       push({
         type: "bot_text",
@@ -72,6 +78,9 @@ export function reportRun(
     // 不能挂 agent_end：自动重试和队列续跑时它一次 run 会发好几遍。agent_settled 在
     // _runAgentPrompt 的 finally 里发，一次 prompt 恰好一次，出错和中止也覆盖。
     if (event.type === "agent_settled") {
+      if (lastModelError !== null) {
+        push({ type: "agent_error", code: "model_failed", detail: lastModelError, groupId: ids.groupId });
+      }
       const tokens = session.getSessionStats().tokens;
       push({ type: "run_done", ...ids, steps, inputTokens: tokens.input, outputTokens: tokens.output });
     }
