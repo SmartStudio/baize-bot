@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "acceptance": "pnpm --filter @baize/web exec tsx ../e2e/acceptance/run.ts"
   },
   "dependencies": {
     "@baize/bot-runner": "workspace:*",
@@ -16,6 +17,7 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.1",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.18.1",
     "typescript": "^5.6.3",

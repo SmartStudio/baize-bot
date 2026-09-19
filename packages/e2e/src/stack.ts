@@ -33,6 +33,7 @@ export type StackOptions = {
 };
 
 export type Stack = {
+  readonly port: number;
   readonly db: Db;
   readonly sql: Sql;
   /** 电脑代理的 Bot 数据目录，临时目录，跑完删掉。 */
@@ -143,6 +144,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     if (options.startComputer !== false) await startComputer();
 
     return {
+      port: server.port,
       db,
       sql,
       dataDir,
