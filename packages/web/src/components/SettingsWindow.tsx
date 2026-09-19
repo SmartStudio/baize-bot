@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Cpu, Download, Gauge, Plug, Settings as SettingsIcon, X } from "lucide-react";
-import { Settings, type User } from "@baize/shared";
+import { Settings, type Bot, type BotId, type UsageResponse, type User } from "@baize/shared";
+import { BotAvatar } from "./BotAvatar.js";
 
 type PageId = "general" | "computer" | "tools" | "usage" | "update";
 
@@ -17,12 +18,21 @@ const PAGE_IDS = Object.keys(PAGES) as PageId[];
 type Props = {
   user: User;
   settings: Settings;
+  usage: UsageResponse;
+  bots: Record<BotId, Bot>;
+  initialPage?: PageId;
+  onLoadUsage: () => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
   onClose: () => void;
 };
 
-const GeneralPage = ({ user, settings, onChange, onLogout }: Omit<Props, "onClose">) => (
+const GeneralPage = ({
+  user,
+  settings,
+  onChange,
+  onLogout,
+}: Pick<Props, "user" | "settings" | "onChange" | "onLogout">) => (
   <>
     <p className="group-label">账户</p>
     <div className="row-card">
@@ -96,9 +106,101 @@ const GeneralPage = ({ user, settings, onChange, onLogout }: Omit<Props, "onClos
   </>
 );
 
-export const SettingsWindow = ({ user, settings, onChange, onLogout, onClose }: Props) => {
-  const [page, setPage] = useState<PageId>("general");
+const money = (amount: number): string => `¥${amount.toFixed(1)}`;
+
+const when = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  month: "numeric",
+  day: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const UsagePage = ({ usage, bots }: Pick<Props, "usage" | "bots">) => (
+  <div className="usage-page" data-testid="usage-page">
+    <section className="usage-section">
+      <h3>本周</h3>
+      <div className="usage-panel">
+        <div className="usage-summary">
+          <strong data-testid="usage-total">{money(usage.total)}</strong>
+          <span>周预算 · 后续</span>
+        </div>
+        <div className="usage-bots" data-testid="usage-bots">
+          {usage.bots.map((line) => {
+            const bot = bots[line.botId];
+            return (
+              <div className="usage-bot" key={line.botId}>
+                <span className="usage-bot-name">
+                  <i
+                    className="usage-hue"
+                    style={{ background: `var(--bot-${bot?.hue ?? "sky"})` }}
+                    aria-hidden="true"
+                  />
+                  {bot?.name ?? "已删除的 Bot"}
+                  <small>{line.runs} 次运行</small>
+                </span>
+                <strong>{money(line.amount)}</strong>
+              </div>
+            );
+          })}
+        </div>
+        <div className="usage-future" aria-label="后续功能">
+          <span>快用完时提醒 · 后续</span>
+          <span>负责人加额 · 后续</span>
+          <span>默认档位 · 后续</span>
+        </div>
+      </div>
+    </section>
+    <section className="usage-section">
+      <h3>最近任务</h3>
+      <div className="usage-panel">
+        <div className="usage-run-head" aria-hidden="true">
+          <span>任务</span>
+          <span>时间</span>
+          <span>花费</span>
+        </div>
+        <div data-testid="usage-recent">
+          {usage.recent.map((run) => {
+            const bot = run.botId === null ? undefined : bots[run.botId];
+            return (
+              <div className="usage-run" key={run.runId}>
+                <span className="usage-run-title">
+                  {bot ? <BotAvatar name={bot.name} hue={bot.hue} size="xs" /> : null}
+                  <span title={run.title}>{run.title}</span>
+                </span>
+                <time dateTime={run.startedAt}>{when.format(new Date(run.startedAt))}</time>
+                <strong>{money(run.amount)}</strong>
+              </div>
+            );
+          })}
+        </div>
+        <div className="usage-foot">
+          <span>对内第一版只看用量，团队统一结算是后续。</span>
+          <span>导出本月明细 · 后续</span>
+        </div>
+      </div>
+    </section>
+  </div>
+);
+
+export const SettingsWindow = ({
+  user,
+  settings,
+  usage,
+  bots,
+  initialPage = "general",
+  onLoadUsage,
+  onChange,
+  onLogout,
+  onClose,
+}: Props) => {
+  const [page, setPage] = useState<PageId>(initialPage);
   const current = PAGES[page];
+
+  useEffect(() => {
+    if (page === "usage") void onLoadUsage();
+  }, [page, onLoadUsage]);
 
   return (
     <div className="scrim" data-testid="settings-window">
@@ -133,6 +235,8 @@ export const SettingsWindow = ({ user, settings, onChange, onLogout, onClose }: 
           </header>
           {page === "general" ? (
             <GeneralPage user={user} settings={settings} onChange={onChange} onLogout={onLogout} />
+          ) : page === "usage" ? (
+            <UsagePage usage={usage} bots={bots} />
           ) : (
             <p className="later" data-testid="settings-later">
               {current.title} · 后续

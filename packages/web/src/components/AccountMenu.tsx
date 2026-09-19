@@ -2,9 +2,16 @@ import { useEffect, useRef } from "react";
 import { Gauge, LifeBuoy, LogOut, Settings as SettingsIcon } from "lucide-react";
 import type { User } from "@baize/shared";
 
-type Props = { user: User; onOpenSettings: () => void; onLogout: () => void; onClose: () => void };
+type Props = {
+  user: User;
+  usageTotal: number;
+  onOpenUsage: () => void;
+  onOpenSettings: () => void;
+  onLogout: () => void;
+  onClose: () => void;
+};
 
-export const AccountMenu = ({ user, onOpenSettings, onLogout, onClose }: Props) => {
+export const AccountMenu = ({ user, usageTotal, onOpenUsage, onOpenSettings, onLogout, onClose }: Props) => {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const away = (event: MouseEvent) => {
@@ -28,10 +35,12 @@ export const AccountMenu = ({ user, onOpenSettings, onLogout, onClose }: Props) 
           <small>{user.email}</small>
         </span>
       </div>
-      <button type="button" className="menu-row" role="menuitem">
+      <button type="button" className="menu-row" role="menuitem" data-testid="open-usage" onClick={onOpenUsage}>
         <Gauge size={16} aria-hidden="true" />
         本周花费
-        <span className="menu-trail">¥38.2 / ¥200</span>
+        <span className="menu-trail" data-testid="account-usage-total">
+          ¥{usageTotal.toFixed(1)}
+        </span>
       </button>
       <button type="button" className="menu-row" role="menuitem">
         <LifeBuoy size={16} aria-hidden="true" />

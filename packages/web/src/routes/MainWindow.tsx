@@ -6,10 +6,11 @@ import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
 import { AccountMenu } from "../components/AccountMenu.js";
 import { SettingsWindow } from "../components/SettingsWindow.js";
 import { NewGroupDialog } from "../components/NewGroupDialog.js";
+import { OvernightCard } from "../components/OvernightCard.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { useApp } from "../state/app.js";
 
-type Overlay = "none" | "account" | "settings" | "new-group";
+type Overlay = "none" | "account" | "settings" | "usage" | "new-group";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -84,9 +85,22 @@ export const MainWindow = () => {
       {team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />
       ) : null}
+      {ready.overnight.length > 0 ? (
+        <OvernightCard
+          items={ready.overnight}
+          bots={bots}
+          onSelect={(selected) => {
+            actions.selectGroup(selected);
+            actions.dismissOvernight();
+          }}
+          onDismiss={actions.dismissOvernight}
+        />
+      ) : null}
       {overlay === "account" ? (
         <AccountMenu
           user={ready.user}
+          usageTotal={ready.usage.total}
+          onOpenUsage={() => setOverlay("usage")}
           onOpenSettings={() => setOverlay("settings")}
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}
@@ -95,10 +109,14 @@ export const MainWindow = () => {
       {overlay === "new-group" ? (
         <NewGroupDialog bots={Object.values(bots)} onCreate={actions.createGroup} onClose={() => setOverlay("none")} />
       ) : null}
-      {overlay === "settings" ? (
+      {overlay === "settings" || overlay === "usage" ? (
         <SettingsWindow
           user={ready.user}
           settings={ready.settings}
+          usage={ready.usage}
+          bots={bots}
+          initialPage={overlay === "usage" ? "usage" : "general"}
+          onLoadUsage={actions.loadUsage}
           onChange={actions.updateSettings}
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}
