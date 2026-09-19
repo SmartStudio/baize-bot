@@ -41,6 +41,8 @@ export interface RunnerConfig {
 
 export interface Runner {
   prompt(message: PromptMessage): Promise<void>;
+  /** 当前仍在运行的 run。只读快照，供电脑代理在重连 hello 时上报。 */
+  activeRuns(): readonly RunId[];
   /** 控制面的审批结论。runId 对不上的结论不作数。 */
   approve(runId: RunId, callId: string, approved: boolean): void;
   pause(botId: BotId): Promise<void>;
@@ -91,6 +93,7 @@ export function createRunner(config: RunnerConfig): Runner {
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const needsApproval = approvalRule(config.tools);
   const extensionTools = config.extensionTools ?? [];
+  const liveRuns = new Set<RunId>();
 
   const bots = new Map<BotId, BotRuntime>(
     config.bots.map((bot) => [
@@ -190,10 +193,22 @@ export function createRunner(config: RunnerConfig): Runner {
       }
       if (bot.lifecycle.phase === "paused") {
         bot.lifecycle.queued.push(message);
+        liveRuns.add(message.runId);
         return;
       }
-      bot.chain = bot.chain.then(() => runOne(bot, message));
+      liveRuns.add(message.runId);
+      bot.chain = bot.chain.then(async () => {
+        try {
+          await runOne(bot, message);
+        } finally {
+          liveRuns.delete(message.runId);
+        }
+      });
       await bot.chain;
+    },
+
+    activeRuns() {
+      return [...liveRuns];
     },
 
     approve(runId, callId, approved) {
@@ -231,6 +246,7 @@ export function createRunner(config: RunnerConfig): Runner {
           bot.session = null;
         }),
       );
+      liveRuns.clear();
     },
   };
 

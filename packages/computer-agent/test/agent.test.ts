@@ -1,13 +1,14 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, type BotId, ComputerId, MessageId, type RunId, Skill } from "@baize/shared";
+import { AgentToControl, type BotId, ComputerId, MessageId, RunId, Skill } from "@baize/shared";
 import { startAgent, type AgentHandle, type RunnerFactory } from "../src/agent.js";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
 
 // 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
 interface RunnerCalls {
   readonly approvals: Array<{ runId: RunId; callId: string; approved: boolean }>;
+  readonly activeRuns: RunId[];
   readonly paused: BotId[];
   readonly resumed: BotId[];
   /** 每次建运行器时拿到的 config.skills，原样记下，undefined 也记。 */
@@ -43,6 +44,7 @@ function runnerOf(config: Parameters<RunnerFactory>[0], calls: RunnerCalls): Ret
     resume: async (botId) => {
       calls.resumed.push(botId);
     },
+    activeRuns: () => calls.activeRuns,
     stop: async () => {},
   };
 }
@@ -144,7 +146,7 @@ const runnerCalls = (): RunnerCalls => {
 };
 
 function spawnAgent(url: string, tuning: { heartbeatMs?: number; backoff?: BackoffOptions } = {}): AgentHandle {
-  const calls: RunnerCalls = { approvals: [], paused: [], resumed: [], configSkills: [] };
+  const calls: RunnerCalls = { approvals: [], activeRuns: [], paused: [], resumed: [], configSkills: [] };
   runnerCallsLog.push(calls);
   const handle = startAgent({
     url,
@@ -178,7 +180,74 @@ describe("电脑代理连控制面", () => {
 
     const hello = await server.waitForMessage("hello", 1, 3000);
 
-    expect(hello).toEqual({ type: "hello", computerId: "computer-1", token: "dev-token", version: "0.1.0" });
+    expect(hello).toEqual({
+      type: "hello",
+      computerId: "computer-1",
+      token: "dev-token",
+      version: "0.1.0",
+      activeRuns: [],
+    });
+  });
+
+  it("重连 hello 报告运行器仍活着的 run", async () => {
+    const server = await startPair();
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1, 3000);
+
+    first.send(JSON.stringify(configMessage));
+    await poll(() => (runnerCalls().configSkills.length === 1 ? true : undefined), 3000, "运行器建好");
+    runnerCalls().activeRuns.push(RunId.parse("run-1"));
+
+    first.terminate();
+    await server.waitForSocket(2, 5000);
+    const hello = await server.waitForMessage("hello", 2, 5000);
+
+    expect(hello.activeRuns).toEqual(["run-1"]);
+  });
+
+  it("旧运行器等待收尾时再次重连，hello 仍报告它的 run", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const calls: RunnerCalls = { approvals: [], activeRuns: [], paused: [], resumed: [], configSkills: [] };
+    const runId = RunId.parse("run-1");
+    let resolveStop: (() => void) | undefined;
+    const stopGate = new Promise<void>((resolve) => {
+      resolveStop = resolve;
+    });
+    let created = 0;
+    agents.push(
+      startAgent({
+        url: await server.url(),
+        computerId: ComputerId.parse("computer-1"),
+        token: "dev-token",
+        version: "0.1.0",
+        log: () => {},
+        makeRunner: (config) => {
+          created += 1;
+          const fake = runnerOf(config, calls);
+          return created === 1 ? { ...fake, activeRuns: () => [runId], stop: () => stopGate } : fake;
+        },
+      }),
+    );
+
+    try {
+      const first = await server.waitForSocket(1);
+      await server.waitForMessage("hello", 1);
+      first.send(JSON.stringify(configMessage));
+      await poll(() => (created === 1 ? true : undefined), 3000, "首个运行器建好");
+      first.terminate();
+
+      const second = await server.waitForSocket(2);
+      expect((await server.waitForMessage("hello", 2)).activeRuns).toEqual([runId]);
+      second.send(JSON.stringify(configMessage));
+      await poll(() => (created === 2 ? true : undefined), 3000, "新运行器建好");
+      second.terminate();
+
+      await server.waitForSocket(3);
+      expect((await server.waitForMessage("hello", 3)).activeRuns).toEqual([runId]);
+    } finally {
+      resolveStop?.();
+    }
   });
 
   it("连上后按间隔发心跳", async () => {

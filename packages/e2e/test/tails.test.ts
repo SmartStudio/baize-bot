@@ -27,6 +27,7 @@ async function withStack(
   script: Parameters<typeof startUpstream>[0],
   startComputer: boolean,
   run: (stack: Stack) => Promise<void>,
+  options: { readonly disconnectGraceMs?: number } = {},
 ) {
   const upstream = await startUpstream(script);
   let stack: Stack | undefined;
@@ -36,6 +37,7 @@ async function withStack(
       priceInputPerM: 3,
       priceOutputPerM: 15,
       startComputer,
+      ...options,
     });
     await run(stack);
   } finally {
@@ -100,9 +102,7 @@ it("离线留言只落 system、不建 run，重连不补派", async () => {
   );
 });
 
-// 控制面还没做断连收尾：hub.ts 的 close 回调只标电脑休眠，run 挂着不结束，群里也没话。
-// 钉成 fails：哪天控制面补上了，这条会翻红，把 fails 摘掉就是正式用例。
-it.fails("工具调用后断连必须收尾 run 并在群里提示失败", async () => {
+it("工具调用后断连必须收尾 run 并在群里提示失败", async () => {
   const followUp = gate();
   let waitingForModel = false;
   await withStack(
@@ -148,8 +148,10 @@ it.fails("工具调用后断连必须收尾 run 并在群里提示失败", async
               const storedRuns = await runs(stack, groupId);
               const stored = await messages(stack, groupId);
               return {
-                ended: storedRuns.length === 1 && storedRuns[0]?.ended_at instanceof Date,
-                failureNotice: stored.messages.some((message) => message.body.kind === "system"),
+                ended: storedRuns.length === 1 && storedRuns[0]?.ended_at !== null,
+                failureNotice: stored.messages.some(
+                  (message) => message.body.kind === "system" && message.body.text === "电脑断过线，这次活没做完",
+                ),
               };
             },
             { timeout: 2_000, interval: 50, message: "断连后不能留下未结束的 run，群里必须有失败提示" },
@@ -157,9 +159,13 @@ it.fails("工具调用后断连必须收尾 run 并在群里提示失败", async
           .toEqual({ ended: true, failureNotice: true });
       } finally {
         followUp.release();
-        await stopping;
+        if (stopping !== undefined) {
+          await expect.poll(async () => Computer.parse(await stack.get("/api/computer")).status, poll).toBe("sleeping");
+          await stopping;
+        }
       }
     },
+    { disconnectGraceMs: 100 },
   );
 });
 

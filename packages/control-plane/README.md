@@ -75,6 +75,8 @@
 
 ### 电脑断线
 
+有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次。
+
 pending 的审批留着。重连后照发 `welcome` 加 `config`，**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。
 
 电脑不在线时点结论，`agents.send` 返回 false，这一版**决定照样落库**，群里不额外补一句话。运行器那一头本来就已经断了，等它回来是另一件事。
@@ -134,7 +136,7 @@ WHERE id = $1 AND triggers -> 0 ->> 'lastFiredAt' = $旧值
 
 ### 运行记录
 
-触发那一刻就落一条 `running`，`run_done` / `agent_error` / `approval_request` 到了再改状态补 note，每次改都推一条 `routine_updated`（整条例行任务带 runs，客户端整条替换）。控制面中途重启的运行就停在 `running`，不补收尾。每条例行任务只留最近 20 条，插入后按 `started_at DESC, id DESC` 裁。
+触发那一刻就落一条 `running`，`run_done` / `agent_error` / `approval_request` 到了再改状态补 note，每次改都推一条 `routine_updated`（整条例行任务带 runs，客户端整条替换）。控制面中途重启的运行会在电脑重新 hello 时对账收尾；电脑一直不再连接时仍停在 `running`。每条例行任务只留最近 20 条，插入后按 `started_at DESC, id DESC` 裁。
 
 收尾要从 `run_id` 找回运行记录，两条路里选了**在 `runs` 上加 `routine_run_id` 可空列**，没用 `routine_runs.run_id`：run 行是 `startRun` 建的，派活时把 `routineRunId` 一路带进去，行一生下来就带着这条边。反过来先建 `routine_runs` 再回填 `run_id` 的话，派活到回填之间有个窗口，活跑得快的时候 `run_done` 进来会查不到边。
 

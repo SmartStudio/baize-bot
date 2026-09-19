@@ -1,4 +1,4 @@
-import { ControlToAgent, type AgentToControl, type ComputerId } from "@baize/shared";
+import { ControlToAgent, type AgentToControl, type ComputerId, type RunId } from "@baize/shared";
 import { WebSocket } from "ws";
 import { AGENT_PATH } from "../../src/agent/hub.js";
 
@@ -87,9 +87,14 @@ export type HelloResult = {
   readonly config: Extract<ControlToAgent, { type: "config" }>;
 };
 
-export async function helloAgent(port: number, computerId: ComputerId, token: string): Promise<HelloResult> {
+export async function helloAgent(
+  port: number,
+  computerId: ComputerId,
+  token: string,
+  activeRuns: readonly RunId[] = [],
+): Promise<HelloResult> {
   const agent = await openAgent(port);
-  agent.send({ type: "hello", computerId, token, version: "test" });
+  agent.send({ type: "hello", computerId, token, version: "test", activeRuns: [...activeRuns] });
   const welcome = await agent.expect("welcome");
   const config = await agent.expect("config");
   return { agent, welcome, config };

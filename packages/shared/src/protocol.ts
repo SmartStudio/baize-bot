@@ -18,7 +18,13 @@ import {
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
 export const AgentToControl = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("hello"), computerId: ComputerId, token: z.string(), version: z.string() }),
+  z.object({
+    type: z.literal("hello"),
+    computerId: ComputerId,
+    token: z.string(),
+    version: z.string(),
+    activeRuns: z.array(RunId),
+  }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
   z.object({
     type: z.literal("agent_error"),

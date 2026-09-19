@@ -42,6 +42,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let heartbeat: NodeJS.Timeout | null = null;
   let attempt = 0;
   let runner: Runner | null = null;
+  const retiringRunners = new Set<Runner>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
 
@@ -93,7 +94,14 @@ export function startAgent(options: AgentOptions): AgentHandle {
           dataDir,
           send,
         });
-        await previous?.stop();
+        if (previous !== null) {
+          retiringRunners.add(previous);
+          try {
+            await previous.stop();
+          } finally {
+            retiringRunners.delete(previous);
+          }
+        }
         log(`收到 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`);
         return;
       }
@@ -144,11 +152,13 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
     socket.on("open", () => {
       link = { phase: "open", socket };
+      const activeRuns = [...(runner?.activeRuns() ?? []), ...[...retiringRunners].flatMap((old) => old.activeRuns())];
       send({
         type: "hello",
         computerId: options.computerId,
         token: options.token,
         version: options.version,
+        activeRuns: [...activeRuns],
       });
       stopHeartbeat();
       heartbeat = setInterval(() => send({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
