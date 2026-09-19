@@ -138,3 +138,12 @@ describe("M9 例行任务的共享形状", () => {
     expect(ServerPush.safeParse({ type: "routine_deleted", routineId: "r1" }).success).toBe(false);
   });
 });
+
+describe("M10 skill 的共享形状", () => {
+  it("skill_offer 至少两步，name 非空", () => {
+    const offer = { type: "skill_offer", runId: "r1", botId: "b1", groupId: "g1", name: "Globex 报价" };
+    expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单", "生成 PDF"] }).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单"] }).success).toBe(false);
+    expect(AgentToControl.safeParse({ ...offer, name: "", steps: ["a", "b"] }).success).toBe(false);
+  });
+});

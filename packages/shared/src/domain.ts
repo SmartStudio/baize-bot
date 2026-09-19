@@ -228,6 +228,7 @@ export const Skill = z.object({
   source: SkillSource,
   steps: z.array(z.string()),
   useCount: z.number().int().nonnegative(),
+  createdAt: Timestamp,
 });
 export type Skill = z.infer<typeof Skill>;
 
