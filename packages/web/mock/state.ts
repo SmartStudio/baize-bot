@@ -18,6 +18,8 @@ import {
   Skill,
   SkillId,
   TaskId,
+  ToolConnection,
+  ToolConnectionId,
   TopicTask,
   User,
   UsageResponse,
@@ -30,6 +32,7 @@ import {
   type SkillSource,
   type ToolCallStatus,
   type TriggerInput,
+  type ToolOperation,
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
 } from "@baize/shared";
@@ -145,6 +148,7 @@ export const approvals = new Map<string, Approval>();
 export const handoffs = new Map<string, Handoff>();
 export const routines = new Map<string, Routine>();
 export const skills = new Map<string, Skill>();
+export const tools = new Map<string, ToolConnection>();
 
 // 单 Bot 群建 Bot 时自动建，多 Bot 群从建群页来。成员数就是这两类的分界，`/api/groups` 只列后者。
 export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
@@ -193,6 +197,7 @@ export const reseed = (): void => {
   handoffs.clear();
   routines.clear();
   skills.clear();
+  tools.clear();
   bots.clear();
   groups.clear();
   tasks.clear();
@@ -285,6 +290,67 @@ export const reseed = (): void => {
   );
 
   for (const skill of SEEDED_SKILLS) skills.set(skill.id, skill);
+
+  tools.set(
+    "tool_tickets",
+    ToolConnection.parse({
+      id: ToolConnectionId.parse("tool_tickets"),
+      ownerId: user.id,
+      name: "工单系统",
+      url: "https://tickets.acme.internal/mcp",
+      operations: [
+        {
+          name: "create_ticket",
+          description: "创建工单",
+          inputSchema: {
+            type: "object",
+            properties: { title: { type: "string" }, description: { type: "string" } },
+            required: ["title"],
+          },
+          needsApproval: true,
+        },
+        {
+          name: "lookup_ticket",
+          description: "查询工单",
+          inputSchema: {
+            type: "object",
+            properties: { ticketId: { type: "string" } },
+            required: ["ticketId"],
+          },
+          needsApproval: false,
+        },
+      ] satisfies ToolOperation[],
+      assignedBotIds: ["bot_service"],
+    }),
+  );
+  tools.set(
+    "tool_mail",
+    ToolConnection.parse({
+      id: ToolConnectionId.parse("tool_mail"),
+      ownerId: user.id,
+      name: "邮箱",
+      url: "https://mail.acme.com/mcp",
+      operations: [
+        {
+          name: "send_email",
+          description: "发送邮件",
+          inputSchema: {
+            type: "object",
+            properties: { to: { type: "string" }, subject: { type: "string" }, body: { type: "string" } },
+            required: ["to", "subject", "body"],
+          },
+          needsApproval: true,
+        },
+        {
+          name: "list_inbox",
+          description: "列出收件箱",
+          inputSchema: { type: "object", properties: {} },
+          needsApproval: false,
+        },
+      ] satisfies ToolOperation[],
+      assignedBotIds: ["bot_service", "bot_sales", "bot_buy"],
+    }),
+  );
 };
 
 const SEEDED_ROUTINE_ID = "rtn_daily_report";

@@ -4,6 +4,8 @@ import {
   BotListResponse,
   CreateBotResponse,
   CreateGroupResponse,
+  ToolListResponse,
+  ToolResponse,
   DecideApprovalResponse,
   DecideSkillOfferResponse,
   GroupListResponse,
@@ -27,6 +29,7 @@ import {
   type BotId,
   type ChecklistItem,
   type CreateRoutineRequest,
+  type CreateToolRequest,
   type CreateSkillRequest,
   type DecideApprovalRequest,
   type DecideSkillOfferRequest,
@@ -37,7 +40,10 @@ import {
   type Skill,
   type SkillId,
   type TaskId,
+  type ToolConnection,
+  type ToolConnectionId,
   type TopicTask,
+  type UpdateToolRequest,
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
 } from "@baize/shared";
@@ -101,6 +107,14 @@ export const api = {
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
     (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
   groups: async () => json(GroupListResponse, await send("GET", "/groups")),
+  tools: async () => json(ToolListResponse, await send("GET", "/tools")),
+  createTool: async (draft: CreateToolRequest): Promise<ToolConnection> =>
+    (await json(ToolResponse, await send("POST", "/tools", draft))).tool,
+  updateTool: async (id: ToolConnectionId, patch: UpdateToolRequest): Promise<ToolConnection> =>
+    (await json(ToolResponse, await send("PATCH", `/tools/${encodeURIComponent(id)}`, patch))).tool,
+  deleteTool: async (id: ToolConnectionId): Promise<void> => {
+    await send("DELETE", `/tools/${encodeURIComponent(id)}`);
+  },
   createGroup: async (draft: GroupDraft) => json(CreateGroupResponse, await send("POST", "/groups", draft)),
   updateTask: async (id: TaskId, patch: { checklist: ChecklistItem[] }): Promise<TopicTask> =>
     (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
