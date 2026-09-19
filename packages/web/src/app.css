@@ -320,6 +320,18 @@ select {
   color: var(--pending);
 }
 
+/* 等 Bot 确认这件事不用你动手。中性底加一圈描边，跟橙色的「等你点头」放一起时它自己往后退一档。 */
+.badge-await-bot {
+  background: var(--bg-elevated);
+  box-shadow: var(--inset-hairline);
+  color: var(--fg-2);
+}
+
+.badge-accepted {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
 .caret {
   display: inline-block;
   width: var(--space-4);
@@ -765,13 +777,66 @@ select {
   color: var(--fg-4);
 }
 
-.card-later {
+.card-handoff {
+  overflow: hidden;
+}
+
+/* 还等着确认的那张交接没落地，描一圈 pending 的边，从已经归档的那些里挑出来。 */
+.card-handoff[data-status="pending"] {
+  border-color: var(--pending);
+}
+
+.handoff-head {
   display: flex;
   gap: var(--space-4);
   align-items: center;
   padding: var(--space-5) var(--space-6);
+  border-bottom: 1px solid var(--border-1);
   color: var(--fg-3);
   font: var(--type-ui);
+}
+
+.handoff-label {
+  color: var(--fg-1);
+}
+
+.handoff-pair {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--fg-2);
+}
+
+.handoff-arrow {
+  color: var(--fg-4);
+}
+
+.handoff-head .badge {
+  margin-left: auto;
+}
+
+.handoff-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: var(--space-5) var(--space-6);
+}
+
+.handoff-row {
+  display: grid;
+  grid-template-columns: var(--space-11) 1fr;
+  gap: var(--space-5);
+  font: var(--type-caption);
+}
+
+.handoff-row dt {
+  color: var(--fg-4);
+}
+
+.handoff-row dd {
+  margin: 0;
+  color: var(--fg-2);
 }
 
 .composer {

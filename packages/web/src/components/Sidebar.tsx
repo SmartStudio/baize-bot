@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Hand, Plus, Search, Settings as SettingsIcon, Users } from "lucide-react";
+import { ArrowRightLeft, Hand, Plus, Search, Settings as SettingsIcon, Users } from "lucide-react";
 import type { Bot, BotId, GroupId, User } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { activityOf, previewOf, timeOf } from "./messages/preview.js";
@@ -63,6 +63,12 @@ const ConversationItem = ({
               <span className="badge badge-pending" data-testid="bot-pending">
                 <Hand size={13} aria-hidden="true" />
                 等你点头 {conversation.pendingApprovals}
+              </span>
+            ) : null}
+            {/* 等 Bot 确认的不用你动手，压在「等你点头」下面一档，两个角标并排时你先看到该你做的那个。 */}
+            {conversation.pendingHandoffs > 0 ? (
+              <span className="badge badge-await-bot" data-testid="bot-handoff">
+                <ArrowRightLeft size={13} aria-hidden="true" />等 Bot 确认 {conversation.pendingHandoffs}
               </span>
             ) : null}
             {activityOf(conversation.lastMessage) === "working" ? (

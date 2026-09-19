@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, SendHorizontal, Users } from "lucide-react";
 import type { Bot, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
-import { MessageView, type ApprovalTable, type BotLookup, type DecideApproval } from "./messages/MessageView.js";
+import {
+  MessageView,
+  type ApprovalTable,
+  type BotLookup,
+  type DecideApproval,
+  type HandoffTable,
+} from "./messages/MessageView.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation } from "../state/app.js";
@@ -12,11 +18,15 @@ type Props = {
   messages: Message[];
   lookup: BotLookup;
   approvals: ApprovalTable;
+  handoffs: HandoffTable;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
   onToggleChecklist: (checklist: ChecklistItem[]) => void;
   onOpenTask: () => void;
 };
+
+// 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让 MessageView 重画一遍。
+const NO_CHECKLIST: ChecklistItem[] = [];
 
 // 正在打的那个 @。光标永远在末尾，所以只认结尾这一段：@ 之后还没打空格的字。
 const MENTION = /@([^\s@]*)$/;
@@ -27,6 +37,7 @@ export const ChatPanel = ({
   messages,
   lookup,
   approvals,
+  handoffs,
   onSend,
   onDecide,
   onToggleChecklist,
@@ -38,6 +49,8 @@ export const ChatPanel = ({
   const input = useRef<HTMLInputElement>(null);
   const groupId = conversation.groupId;
   const team = conversation.kind === "team";
+  // 交接卡上的清单指针要指出那一项的正文。单 Bot 群没有任务卡，也就没有清单可指。
+  const checklist = conversation.kind === "team" ? conversation.task.checklist : NO_CHECKLIST;
   const members = memberIdsOf(conversation)
     .map((botId) => bots[botId])
     .filter((bot): bot is Bot => bot !== undefined);
@@ -105,6 +118,8 @@ export const ChatPanel = ({
             message={message}
             lookup={lookup}
             approvals={approvals}
+            handoffs={handoffs}
+            checklist={checklist}
             onDecide={onDecide}
             showSource={team}
           />

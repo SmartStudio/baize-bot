@@ -490,6 +490,8 @@ test("免打扰只设了一头等于没设；权限没给就安静跳过，不�
 });
 
 // 预置的多 Bot 群只有一条系统消息，谁开口都是被 @ 出来的，数「只有它回了」才数得清。
+const TEAM_TITLE = "Globex X3 × 200 订单";
+
 const openTeamGroup = async (page: Page, title: string) => {
   await page.locator(`[data-testid=group-item][data-group-title="${title}"]`).click();
   await expect(page.getByTestId("task-card")).toBeVisible();
@@ -527,7 +529,7 @@ test("从加号建群后侧栏多一个群，群顶部钉着带编号的任务�
 
 test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", async ({ page }) => {
   await login(page);
-  await openTeamGroup(page, "Globex X3 × 200 订单");
+  await openTeamGroup(page, TEAM_TITLE);
   await expect(page.getByTestId("task-progress")).toHaveText("清单 0 / 5");
   await expect(page.getByTestId("task-current"), "建好还没人接手").toHaveText("当前 还没人接手");
 
@@ -558,7 +560,7 @@ test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", asyn
 
 test("在任务卡上勾掉第二项，卡片和任务详情一起跟着变，刷新还在", async ({ page }) => {
   await login(page);
-  await openTeamGroup(page, "Globex X3 × 200 订单");
+  await openTeamGroup(page, TEAM_TITLE);
   const items = page.getByTestId("checklist-item");
   await expect(items).toHaveCount(5);
 
@@ -579,6 +581,91 @@ test("在任务卡上勾掉第二项，卡片和任务详情一起跟着变，�
 
   // 刷新走的是拉历史那条路。整份清单真存到服务端了才留得住。
   await page.reload();
-  await openTeamGroup(page, "Globex X3 × 200 订单");
+  await openTeamGroup(page, TEAM_TITLE);
   await expect(page.getByTestId("checklist-item").nth(1), "刷新后第二项还是勾着的").toBeChecked();
+});
+
+// 小服在群里干完这一段就把供货交给小采，两秒后小采确认。@ 的这句话不含「发」「付」，不会岔进审批那条序列。
+const handoffFromService = async (page: Page) => {
+  await openTeamGroup(page, TEAM_TITLE);
+  await sendText(page, "@小服 查一下 Globex 的 X3 库存和排产");
+  const card = page.getByTestId("handoff-card");
+  await expect(card, "小服干完活就在群里发一张交接报文卡").toBeVisible();
+  return card;
+};
+
+const teamItem = (page: Page) => page.locator(`[data-testid=group-item][data-group-title="${TEAM_TITLE}"]`);
+
+test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认 1」", async ({ page, request }) => {
+  await login(page);
+  const card = await handoffFromService(page);
+
+  await expect(card, "小采还没确认").toHaveAttribute("data-status", "pending");
+  const pair = card.getByTestId("handoff-pair");
+  await expect(pair, "卡头写清这一份从谁手上交出去").toContainText("小服");
+  await expect(pair, "也写清交到谁手上").toContainText("小采");
+  await expect(card.getByTestId("handoff-status"), "没确认之前卡上写的是在等谁").toHaveText("等小采确认");
+  await expect(card.getByTestId("handoff-done"), "做了什么").toContainText("10 月 20 日能先交 120 台");
+  await expect(card.getByTestId("handoff-not-done"), "没做什么").toContainText("三家供应商的现货和到货期");
+  await expect(card.getByTestId("handoff-next"), "下一步").toContainText("最早到货日");
+  // 小服接手时勾掉了第一项，指针指的是下一个人该接着做的那一项，卡上写的是那一项的正文而不只是个序号。
+  await expect(card.getByTestId("handoff-checklist"), "清单指针指到具体哪一项").toHaveText(
+    "第 2 项 · 出 200 台 X3 的报价单",
+  );
+
+  await expect(page.getByTestId("task-current"), "还没确认，任务卡上仍是小服").toHaveText("当前 小服");
+  await expect(teamItem(page).getByTestId("bot-handoff"), "一条没确认的交接在侧栏就是「等 Bot 确认 1」").toHaveText(
+    "等 Bot 确认 1",
+  );
+
+  // 角标这一路是推送加出来的。刷新后它只能从列表接口的计数里来，两个接口没数上的话一刷新角标就没了。
+  await request.post("/api/auth/login", { data: { email: EMAIL, password: PASSWORD } });
+  const listed = (await (await request.get("/api/groups")).json()) as { items: { pendingHandoffs: number }[] };
+  expect(
+    listed.items.map((entry) => entry.pendingHandoffs),
+    "没确认的交接进 GET /api/groups 的计数",
+  ).toEqual([1]);
+  const listedBots = (await (await request.get("/api/bots")).json()) as { items: { pendingHandoffs: number }[] };
+  expect(
+    listedBots.items.map((entry) => entry.pendingHandoffs),
+    "交接记在群那本账上，不串到三个单 Bot 群里",
+  ).toEqual([0, 0, 0]);
+  await page.screenshot({ path: `${SHOT}/5c.png` });
+});
+
+test("小采确认之后卡片变已接手、角标归零、任务卡当前经手换成小采", async ({ page }) => {
+  await login(page);
+  const card = await handoffFromService(page);
+
+  await expect(card, "两秒后小采确认，状态从服务端推回来").toHaveAttribute("data-status", "accepted");
+  await expect(card.getByTestId("handoff-status"), "接手了就写上时刻").toContainText("已接手 · ");
+  await expect(teamItem(page).getByTestId("bot-handoff"), "没有在等确认的交接了，角标整个不渲染").toHaveCount(0);
+  await expect(page.getByTestId("task-current"), "接手就是换经手人").toHaveText("当前 小采");
+
+  await page.getByTestId("task-open").click();
+  const handled = page.getByTestId("task-panel").getByTestId("task-handled").locator("li");
+  await expect(handled.nth(0), "小服那一条在接手的时刻收了尾").not.toContainText("当前");
+  await expect(handled.nth(1), "经手记录随 task_updated 长出新的一条").toContainText("小采");
+  await expect(handled.nth(1), "小采是当前那一位").toContainText("当前");
+  await page.screenshot({ path: `${SHOT}/5d.png` });
+
+  // 刷新走的是拉历史那条路。卡的状态得跟着 GET /messages 的 handoffs 回来，不能只活在推送攒出来的内存里。
+  await page.reload();
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(page.getByTestId("handoff-card"), "刷新后交接卡还带着已接手").toHaveAttribute("data-status", "accepted");
+  await expect(page.getByTestId("task-current"), "换过的经手人也存住了").toHaveText("当前 小采");
+});
+
+test("交接是 Bot 等 Bot：不占「等你点头」那个角标，也不弹通知", async ({ page }) => {
+  await stubNotifications(page);
+  await login(page);
+  await handoffFromService(page);
+
+  const item = teamItem(page);
+  await expect(item.getByTestId("bot-handoff"), "交接记在自己那本账上").toHaveText("等 Bot 确认 1");
+  await expect(item.getByTestId("bot-pending"), "Bot 之间的确认不是你的审批，不该混进「等你点头」").toHaveCount(0);
+  expect(
+    (await page.evaluate(() => window.__notifications?.sent)) ?? [],
+    "这件事不用你动手，不该拿系统通知把你从别的事上拽回来",
+  ).toHaveLength(0);
 });

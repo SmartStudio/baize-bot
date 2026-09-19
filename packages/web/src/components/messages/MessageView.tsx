@@ -1,11 +1,23 @@
 import { useState } from "react";
-import { CircleDollarSign, Globe, Handshake, ShieldAlert } from "lucide-react";
-import type { Approval, ApprovalId, BotHue, BotId, DecideApprovalRequest, Message, MessageBody } from "@baize/shared";
+import { ArrowRightLeft, CircleDollarSign, Globe, ShieldAlert } from "lucide-react";
+import type {
+  Approval,
+  ApprovalId,
+  BotHue,
+  BotId,
+  ChecklistItem,
+  DecideApprovalRequest,
+  Handoff,
+  HandoffId,
+  Message,
+  MessageBody,
+} from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
 import { timeOf } from "./preview.js";
 
 export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
 export type ApprovalTable = Record<ApprovalId, Approval>;
+export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
@@ -83,13 +95,6 @@ const CostCard = ({ body }: { body: Extract<MessageBody, { kind: "cost" }> }) =>
   </div>
 );
 
-const LaterCard = ({ icon, text }: { icon: React.ReactNode; text: string }) => (
-  <div className="card card-later">
-    {icon}
-    <span>{text}</span>
-  </div>
-);
-
 const APPROVAL_KIND_TEXT: Record<Approval["kind"], string> = {
   send_external: "对外发送",
   change_production_data: "改生产数据",
@@ -101,8 +106,9 @@ const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
   rejected: "已拒绝",
 };
 
-// timeOf 只认 Message，而结论时间挂在 Approval 上。借这条审批消息套一层，免得为同一个格式再写一份。
-const decidedTimeOf = (message: Message, decidedAt: string): string => timeOf({ ...message, createdAt: decidedAt });
+// timeOf 只认 Message，而结论时间和接手时间挂在 Approval、Handoff 上。借这条消息套一层，免得为同一个格式
+// 再写一份。
+const stampOf = (message: Message, at: string): string => timeOf({ ...message, createdAt: at });
 
 const ApprovalCard = ({
   approval,
@@ -150,7 +156,7 @@ const ApprovalCard = ({
       ) : (
         <p className="approval-decided" data-testid="approval-decided">
           {DECIDED_TEXT[approval.status]}
-          {approval.decidedAt === null ? "" : ` · ${decidedTimeOf(message, approval.decidedAt)}`}
+          {approval.decidedAt === null ? "" : ` · ${stampOf(message, approval.decidedAt)}`}
         </p>
       )}
     </div>
@@ -167,16 +173,94 @@ const ApprovalPlaceholder = () => (
   </div>
 );
 
+// 指针指到清单外面（Bot 交接完用户又删了一项）时还是把这一项指出来，光秃秃一个序号也比整行消失强。
+const pointerTextOf = (checklist: ChecklistItem[], at: number): string => {
+  const item = checklist[at];
+  return item === undefined ? `第 ${at + 1} 项` : `第 ${at + 1} 项 · ${item.text}`;
+};
+
+const HandoffCard = ({
+  handoff,
+  message,
+  lookup,
+  checklist,
+}: {
+  handoff: Handoff;
+  message: Message;
+  lookup: BotLookup;
+  checklist: ChecklistItem[];
+}) => {
+  const from = lookup(handoff.fromBotId);
+  const to = lookup(handoff.toBotId);
+  const accepted = handoff.status === "accepted";
+  return (
+    <div className="card card-handoff" data-testid="handoff-card" data-status={handoff.status}>
+      <div className="handoff-head">
+        <ArrowRightLeft size={16} aria-hidden="true" />
+        <span className="handoff-label">交接</span>
+        <span className="handoff-pair" data-testid="handoff-pair">
+          <BotAvatar name={from.name} hue={from.hue} size="xs" />
+          {from.name}
+          <span className="handoff-arrow" aria-hidden="true">
+            →
+          </span>
+          <BotAvatar name={to.name} hue={to.hue} size="xs" />
+          {to.name}
+        </span>
+        <span className={`badge ${accepted ? "badge-accepted" : "badge-await-bot"}`} data-testid="handoff-status">
+          {accepted
+            ? `已接手${handoff.acceptedAt === null ? "" : ` · ${stampOf(message, handoff.acceptedAt)}`}`
+            : `等${to.name}确认`}
+        </span>
+      </div>
+      <dl className="handoff-body">
+        <div className="handoff-row">
+          <dt>做了什么</dt>
+          <dd data-testid="handoff-done">{handoff.done}</dd>
+        </div>
+        <div className="handoff-row">
+          <dt>没做什么</dt>
+          <dd data-testid="handoff-not-done">{handoff.notDone}</dd>
+        </div>
+        <div className="handoff-row">
+          <dt>下一步</dt>
+          <dd data-testid="handoff-next">{handoff.next}</dd>
+        </div>
+        {handoff.checklistIndex === null ? null : (
+          <div className="handoff-row">
+            <dt>清单</dt>
+            <dd data-testid="handoff-checklist">{pointerTextOf(checklist, handoff.checklistIndex)}</dd>
+          </div>
+        )}
+      </dl>
+    </div>
+  );
+};
+
+// 新建交接先推 handoff_updated 再推那条消息，跟审批一样会跟历史赛跑。查不到就先占个位。
+const HandoffPlaceholder = () => (
+  <div className="card card-handoff" data-testid="handoff-card" data-status="unknown">
+    <div className="handoff-head">
+      <ArrowRightLeft size={16} aria-hidden="true" />
+      <span className="handoff-label">交接</span>
+    </div>
+  </div>
+);
+
 export const MessageView = ({
   message,
   lookup,
   approvals,
+  handoffs,
+  checklist,
   onDecide,
   showSource = false,
 }: {
   message: Message;
   lookup: BotLookup;
   approvals: ApprovalTable;
+  handoffs: HandoffTable;
+  checklist: ChecklistItem[];
   onDecide: DecideApproval;
   showSource?: boolean;
 }) => {
@@ -203,8 +287,14 @@ export const MessageView = ({
               <ApprovalCard approval={approval} message={message} onDecide={onDecide} />
             );
           }
-          case "handoff":
-            return <LaterCard icon={<Handshake size={16} aria-hidden="true" />} text="交接报文 · 后续" />;
+          case "handoff": {
+            const handoff = handoffs[body.handoffId];
+            return handoff === undefined ? (
+              <HandoffPlaceholder />
+            ) : (
+              <HandoffCard handoff={handoff} message={message} lookup={lookup} checklist={checklist} />
+            );
+          }
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。
             const unreached: never = body;

@@ -9,6 +9,8 @@ import {
   type DecideApprovalRequest,
   type Group,
   type GroupId,
+  type Handoff,
+  type HandoffId,
   type Message,
   type MessageId,
   type Settings,
@@ -25,7 +27,14 @@ export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "fa
 // 侧栏一条记录就是一个群，两段共用这一个形状。单 Bot 群只有一个成员且不带任务卡，多 Bot 群有 2 到 6 个成员和一张
 // 任务卡，写成联合而不是「botIds + task 可空」，是为了让「多 Bot 群没有任务卡」这种状态根本拼不出来。
 export type Conversation =
-  | { kind: "solo"; groupId: GroupId; botId: BotId; lastMessage: Message | null; pendingApprovals: number }
+  | {
+      kind: "solo";
+      groupId: GroupId;
+      botId: BotId;
+      lastMessage: Message | null;
+      pendingApprovals: number;
+      pendingHandoffs: number;
+    }
   | {
       kind: "team";
       groupId: GroupId;
@@ -33,6 +42,7 @@ export type Conversation =
       task: TopicTask;
       lastMessage: Message | null;
       pendingApprovals: number;
+      pendingHandoffs: number;
     };
 
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
@@ -49,8 +59,10 @@ export type AppState =
       conversations: Conversation[];
       selectedGroupId: GroupId | null;
       messages: Record<GroupId, Message[]>;
-      // 审批卡的状态只在这张表上。approval 类消息的正文只有 approvalId，重推那条消息一个字都不会变。
+      // 审批卡和交接卡的状态只在这两张表上。approval 和 handoff 类消息的正文只有一个 id，重推那条消息一个字
+      // 都不会变。
       approvals: Record<ApprovalId, Approval>;
+      handoffs: Record<HandoffId, Handoff>;
       settings: Settings;
     };
 
@@ -68,6 +80,8 @@ type Action =
   | ({ type: "message_delta" } & Delta)
   | { type: "approvals_loaded"; approvals: Approval[] }
   | { type: "approval_pushed"; approval: Approval }
+  | { type: "handoffs_loaded"; handoffs: Handoff[] }
+  | { type: "handoff_pushed"; handoff: Handoff }
   | { type: "settings_set"; settings: Settings };
 
 // 流式回复的每一段。正文只有 delta 这几个字，落地成一条完整消息要靠本地已有的那条补齐。
@@ -98,45 +112,73 @@ const streamedInto = (previous: Message | undefined, botId: BotId, delta: Delta)
 type ReadyState = Extract<AppState, { status: "ready" }>;
 
 // 摘要和角标是按群算的，跟这个群是单 Bot 还是多 Bot 无关。两段侧栏共用这一条写路径，加一类群不用再写一遍记账。
-const touchGroup = (
-  conversations: Conversation[],
-  groupId: GroupId,
-  patch: { lastMessage?: Message; pendingApprovals?: number },
-): Conversation[] => conversations.map((c) => (c.groupId === groupId ? { ...c, ...patch } : c));
+const touchGroup = (conversations: Conversation[], groupId: GroupId, patch: { lastMessage: Message }): Conversation[] =>
+  conversations.map((c) => (c.groupId === groupId ? { ...c, ...patch } : c));
 
-// 同一条 approval 会从拉历史、决定的响应、服务端推送三条路各来一次，先后不受控。只认「之前知道的状态」，
-// 重到的那次自然是 0。null 表示这条该丢掉。
-const mergeApproval = (
-  previous: Approval | undefined,
-  next: Approval,
+// 等你点头的审批和等 Bot 确认的交接是同一种记账：一条记录从 pending 走到一个结论就不再退回；同一条会从拉历史、
+// 请求的响应、服务端推送三条路各来一次，先后不受控；侧栏的角标是这个群里还在 pending 的条数。两种卡共用下面
+// 这一份对账，第三种要记账的东西来了也不用把这套先后关系再推一遍。
+// 状态写死成两边的联合而不是 string：第三种要记账的东西得先把自己的状态接进这一行，才会在这里看见 pending
+// 是那个唯一还没落地的值。写 string 的话它接上就能编译，然后一条都不计。
+type SettlingStatus = Approval["status"] | Handoff["status"];
+
+type Settling = { id: string; groupId: GroupId; status: SettlingStatus };
+
+type PendingCount = "pendingApprovals" | "pendingHandoffs";
+
+// 只认「之前知道的状态」，重到的那次自然是 0。null 表示这条该丢掉。
+const reconcile = <T extends Settling>(
+  previous: T | undefined,
+  next: T,
   from: "history" | "push",
-): { approval: Approval; delta: number } | null => {
-  // 拉历史带回来的那批，GET /api/bots 和 /api/groups 的 pendingApprovals 已经算进去了，这里再加一次就翻倍。
-  if (previous === undefined) return { approval: next, delta: from === "push" && next.status === "pending" ? 1 : 0 };
-  if (previous.status === "pending") return { approval: next, delta: next.status === "pending" ? 0 : -1 };
-  // 本地已经有结论了。结论不会退回 pending，所以说 pending 的那份是拉取在飞时拍下的旧快照。收下它，卡片会
+): { record: T; delta: number } | null => {
+  // 拉历史带回来的那批，GET /api/bots 和 /api/groups 的计数已经算进去了，这里再加一次就翻倍。
+  if (previous === undefined) return { record: next, delta: from === "push" && next.status === "pending" ? 1 : 0 };
+  if (previous.status === "pending") return { record: next, delta: next.status === "pending" ? 0 : -1 };
+  // 本地已经有结论了。结论不会退回 pending，所以说 pending 的那份是拉取在飞时拍下的旧快照。收下它，审批卡会
   // 重新长出两颗按钮，而角标早就减过了，再点只会拿到一个 409。
-  return next.status === "pending" ? null : { approval: next, delta: 0 };
+  return next.status === "pending" ? null : { record: next, delta: 0 };
+};
+
+// 计数字段名是个联合，用计算键去展开会把 Conversation 这个可辨识联合摊平，只能两边各写一次。
+const bumped = (conversation: Conversation, count: PendingCount, delta: number): Conversation =>
+  count === "pendingApprovals"
+    ? { ...conversation, pendingApprovals: Math.max(0, conversation.pendingApprovals + delta) }
+    : { ...conversation, pendingHandoffs: Math.max(0, conversation.pendingHandoffs + delta) };
+
+const settled = <T extends Settling>(
+  state: ReadyState,
+  table: Record<string, T>,
+  incoming: T[],
+  from: "history" | "push",
+  count: PendingCount,
+): { table: Record<string, T>; conversations: Conversation[] } => {
+  const next = { ...table };
+  const deltaByGroup = new Map<GroupId, number>();
+  for (const record of incoming) {
+    const merged = reconcile(next[record.id], record, from);
+    if (merged === null) continue;
+    next[merged.record.id] = merged.record;
+    if (merged.delta !== 0) deltaByGroup.set(record.groupId, (deltaByGroup.get(record.groupId) ?? 0) + merged.delta);
+  }
+  if (deltaByGroup.size === 0) return { table: next, conversations: state.conversations };
+  return {
+    table: next,
+    conversations: state.conversations.map((c) => {
+      const delta = deltaByGroup.get(c.groupId) ?? 0;
+      return delta === 0 ? c : bumped(c, count, delta);
+    }),
+  };
 };
 
 const withApprovals = (state: ReadyState, incoming: Approval[], from: "history" | "push"): ReadyState => {
-  const approvals = { ...state.approvals };
-  const deltaByGroup = new Map<GroupId, number>();
-  for (const next of incoming) {
-    const merged = mergeApproval(approvals[next.id], next, from);
-    if (merged === null) continue;
-    approvals[merged.approval.id] = merged.approval;
-    if (merged.delta !== 0) deltaByGroup.set(next.groupId, (deltaByGroup.get(next.groupId) ?? 0) + merged.delta);
-  }
-  if (deltaByGroup.size === 0) return { ...state, approvals };
-  return {
-    ...state,
-    approvals,
-    conversations: state.conversations.map((c) => {
-      const delta = deltaByGroup.get(c.groupId) ?? 0;
-      return delta === 0 ? c : { ...c, pendingApprovals: Math.max(0, c.pendingApprovals + delta) };
-    }),
-  };
+  const { table, conversations } = settled(state, state.approvals, incoming, from, "pendingApprovals");
+  return { ...state, approvals: table, conversations };
+};
+
+const withHandoffs = (state: ReadyState, incoming: Handoff[], from: "history" | "push"): ReadyState => {
+  const { table, conversations } = settled(state, state.handoffs, incoming, from, "pendingHandoffs");
+  return { ...state, handoffs: table, conversations };
 };
 
 const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], settings: Settings): ReadyState => {
@@ -149,6 +191,7 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
       botId: item.bot.id,
       lastMessage: item.lastMessage,
       pendingApprovals: item.pendingApprovals,
+      pendingHandoffs: item.pendingHandoffs,
     })),
     ...groups.map((item): Conversation => ({
       kind: "team",
@@ -157,6 +200,7 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
       task: item.task,
       lastMessage: item.lastMessage,
       pendingApprovals: item.pendingApprovals,
+      pendingHandoffs: item.pendingHandoffs,
     })),
   ];
   return {
@@ -167,6 +211,7 @@ const enteredState = (user: User, bots: BotListItem[], groups: GroupListItem[], 
     selectedGroupId: conversations[0]?.groupId ?? null,
     messages: {},
     approvals: {},
+    handoffs: {},
     settings,
   };
 };
@@ -190,7 +235,14 @@ const reduce = (state: AppState, action: Action): AppState => {
         bots: { ...state.bots, [action.bot.id]: action.bot },
         conversations: [
           ...state.conversations,
-          { kind: "solo", groupId: action.groupId, botId: action.bot.id, lastMessage: null, pendingApprovals: 0 },
+          {
+            kind: "solo",
+            groupId: action.groupId,
+            botId: action.bot.id,
+            lastMessage: null,
+            pendingApprovals: 0,
+            pendingHandoffs: 0,
+          },
         ],
         selectedGroupId: action.groupId,
       };
@@ -220,6 +272,7 @@ const reduce = (state: AppState, action: Action): AppState => {
         task: action.task,
         lastMessage: null,
         pendingApprovals: 0,
+        pendingHandoffs: 0,
       };
       return {
         ...state,
@@ -277,6 +330,10 @@ const reduce = (state: AppState, action: Action): AppState => {
       return withApprovals(state, action.approvals, "history");
     case "approval_pushed":
       return withApprovals(state, [action.approval], "push");
+    case "handoffs_loaded":
+      return withHandoffs(state, action.handoffs, "history");
+    case "handoff_pushed":
+      return withHandoffs(state, [action.handoff], "push");
     case "settings_set":
       return { ...state, settings: action.settings };
     default:
@@ -360,9 +417,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
       }),
       loadMessages: signedIn(async (groupId: GroupId) => {
-        const { messages, approvals } = await api.messages(groupId);
+        const { messages, approvals, handoffs } = await api.messages(groupId);
         dispatch({ type: "messages_set", groupId, messages });
         dispatch({ type: "approvals_loaded", approvals });
+        dispatch({ type: "handoffs_loaded", handoffs });
       }),
       sendMessage: signedIn(async (groupId: GroupId, text: string) => {
         const { message } = await api.sendMessage(groupId, text);
@@ -449,6 +507,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
             notifyApproval(push.approval, current, new Date());
           }
         }
+        // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
+        if (push.type === "handoff_updated") dispatch({ type: "handoff_pushed", handoff: push.handoff });
       });
       // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。
       socket.addEventListener("close", () => {
