@@ -258,12 +258,6 @@ export async function routineRunOfRun(db: Db, runId: string): Promise<RoutineRun
   return row ?? null;
 }
 
-/** 这条运行记录派出去的活。一条都没有说明派活那一步没成，电脑不在线就是这种。 */
-export async function routineRunDispatched(db: Db, routineRunId: string): Promise<boolean> {
-  const [row] = await db.select({ id: runs.id }).from(runs).where(eq(runs.routineRunId, routineRunId)).limit(1);
-  return row !== undefined;
-}
-
 /** 收尾。只改还在 running 的那一条，重复的报文和已经停下的记录都不再动。 */
 export async function settleRoutineRun(
   db: Db,

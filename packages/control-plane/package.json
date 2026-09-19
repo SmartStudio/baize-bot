@@ -6,8 +6,7 @@
   "main": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./src/agent/hub.js": "./src/agent/hub.ts",
-    "./src/repo/computers.js": "./src/repo/computers.ts"
+    "./testing": "./src/testing.ts"
   },
   "scripts": {
     "dev": "tsx watch src/main.ts",

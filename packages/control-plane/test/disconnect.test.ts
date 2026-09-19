@@ -1,10 +1,11 @@
 import { Computer, CreateBotResponse, MessageListResponse, type GroupId, type RunId } from "@baize/shared";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
+import * as runsRepo from "../src/repo/runs.js";
 import { ApiClient } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
-import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
 import { connectPush } from "./helpers/ws.js";
 
 const notice = "电脑断过线，这次活没做完";
@@ -88,6 +89,82 @@ it("宽限到期且电脑未重连时收尾", async () => {
   await agent.closed();
   await waitFor(() => ended(runId), "宽限到期后 run 收尾");
   expect(await notices(owner.client, owner.groupId)).toBe(1);
+});
+
+it("计时器收尾进行时 hello 对账仍保留 activeRuns", async () => {
+  const owner = await ownerWithBot();
+  const first = await connect(owner.computer);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  const originalOpenRunsForOwner = runsRepo.openRunsForOwner;
+  let releaseTimerRead!: () => void;
+  const timerReadBlocked = new Promise<void>((resolve) => {
+    releaseTimerRead = resolve;
+  });
+  let timerReadStarted!: () => void;
+  const timerReadEntered = new Promise<void>((resolve) => {
+    timerReadStarted = resolve;
+  });
+  let openRunsCalls = 0;
+  const openRunsSpy = vi.spyOn(runsRepo, "openRunsForOwner").mockImplementation(async (db, ownerId) => {
+    openRunsCalls += 1;
+    if (openRunsCalls === 1) {
+      timerReadStarted();
+      await timerReadBlocked;
+    }
+    return originalOpenRunsForOwner(db, ownerId);
+  });
+
+  try {
+    const active = await startRun(owner.client, owner.groupId, first);
+    const missing = await startRun(owner.client, owner.groupId, first);
+    first.close();
+    await first.closed();
+    await timerReadEntered;
+    const beforeGatewayKey = (
+      await database.sql<{ gateway_key_hash: string }[]>`
+        SELECT gateway_key_hash FROM computers WHERE id = ${owner.computer.computerId}
+      `
+    )[0]?.gateway_key_hash;
+
+    const second = await openAgent(server.port);
+    second.send({
+      type: "hello",
+      computerId: owner.computer.computerId,
+      token: owner.computer.token,
+      version: "test",
+      activeRuns: [active],
+    });
+    await waitFor(async () => {
+      const row = (
+        await database.sql<{ gateway_key_hash: string }[]>`
+            SELECT gateway_key_hash FROM computers WHERE id = ${owner.computer.computerId}
+          `
+      )[0];
+      return row !== undefined && row.gateway_key_hash !== beforeGatewayKey;
+    }, "hello 轮换网关 key");
+    await new Promise((resolve) => setImmediate(resolve));
+    releaseTimerRead();
+    await second.expect("welcome");
+    await second.expect("config");
+
+    try {
+      await waitFor(() => ended(missing), "hello 对账收尾不在列表里的 run");
+      expect(await ended(active), "hello 报活着的 run 不能被计时器收尾").toBe(false);
+      expect(await notices(owner.client, owner.groupId)).toBe(1);
+      const received: string[] = [];
+      while (received.length < 1) {
+        const event = await push.next();
+        if (event.type === "message" && event.message.body.kind === "system") received.push(event.message.body.text);
+      }
+      expect(received).toEqual([notice]);
+    } finally {
+      second.close();
+    }
+  } finally {
+    openRunsSpy.mockRestore();
+    first.close();
+    push.close();
+  }
 });
 
 it("宽限到期前重连并报告活着的 run，不收尾", async () => {

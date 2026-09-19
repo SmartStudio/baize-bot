@@ -363,18 +363,23 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: created.handoff });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
 
-  await dispatchHandoff({ db: deps.db, push: deps.push, agents: deps.agents }, conn.ownerId, created.message.groupId, {
-    trigger: created.message,
-    targetBotId: event.toBotId,
-    handoffId: created.handoff.id,
-    text: renderHandoffReport({
-      fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
-      done: event.done,
-      notDone: event.notDone,
-      next: event.next,
-      checklistIndex: event.checklistIndex,
-    }),
-  });
+  await dispatchHandoff(
+    { db: deps.db, push: deps.push, agents: deps.agents, mentionLoop: deps.mentionLoop },
+    conn.ownerId,
+    created.message.groupId,
+    {
+      trigger: created.message,
+      targetBotId: event.toBotId,
+      handoffId: created.handoff.id,
+      text: renderHandoffReport({
+        fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
+        done: event.done,
+        notDone: event.notDone,
+        next: event.next,
+        checklistIndex: event.checklistIndex,
+      }),
+    },
+  );
 }
 
 /**
