@@ -82,7 +82,9 @@ const readBody = (req: IncomingMessage): Promise<string> =>
     req.on("error", reject);
   });
 
-export async function startUpstream(script: (req: ChatRequest) => ScriptedTurn): Promise<FakeUpstream> {
+export async function startUpstream(
+  script: (req: ChatRequest) => ScriptedTurn | Promise<ScriptedTurn>,
+): Promise<FakeUpstream> {
   const requests: ChatRequest[] = [];
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -93,7 +95,7 @@ export async function startUpstream(script: (req: ChatRequest) => ScriptedTurn):
     const body = JSON.parse(await readBody(req)) as ChatRequest;
     requests.push(body);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    for (const payload of frames(body, script(body))) res.write(`data: ${payload}\n\n`);
+    for (const payload of frames(body, await script(body))) res.write(`data: ${payload}\n\n`);
     res.end();
   };
 

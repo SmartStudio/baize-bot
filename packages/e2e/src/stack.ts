@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import postgres from "postgres";
 import { WebSocket } from "ws";
-import { Computer, ServerPush } from "@baize/shared";
+import { AgentToControl, Computer, ControlToAgent, ServerPush } from "@baize/shared";
+import { createRunner, type PromptMessage } from "@baize/bot-runner";
 import { startAgent } from "@baize/computer-agent";
 import { connect, type Db, type Sql } from "@baize/control-plane/src/db/client.js";
 import { runMigrations } from "@baize/control-plane/src/db/migrate.js";
@@ -19,6 +20,7 @@ export type StackOptions = {
   readonly upstreamBaseUrl: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
+  readonly startComputer?: boolean;
 };
 
 export type Stack = {
@@ -33,6 +35,10 @@ export type Stack = {
   post(path: string, body: unknown): Promise<unknown>;
   /** 按到达顺序取下一条推送，等不到就抛。 */
   nextPush(timeoutMs?: number): Promise<ServerPush>;
+  startComputer(): Promise<void>;
+  stopComputer(): Promise<void>;
+  prompts(): readonly PromptMessage[];
+  connectComputer(): Promise<ComputerProbe>;
   close(): Promise<void>;
 };
 
@@ -83,20 +89,44 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     closers.push(async () => rmSync(dataDir, { recursive: true, force: true }));
 
     let log = "";
-    const agent = startAgent({
+    const agentOptions = {
       url: `ws://127.0.0.1:${server.port}/agent`,
       computerId: seeded.computerId,
       token: seeded.computerToken,
       version: AGENT_VERSION,
       dataDir,
-      log: (line) => {
+      log: (line: string) => {
         log += `${line}\n`;
       },
-    });
-    closers.push(() => agent.stop());
+    };
+    const prompts: PromptMessage[] = [];
+    let agent: ReturnType<typeof startAgent> | undefined;
+    const stopComputer = async (): Promise<void> => {
+      const current = agent;
+      agent = undefined;
+      await current?.stop();
+    };
+    closers.push(stopComputer);
+    const startComputer = async (): Promise<void> => {
+      if (agent !== undefined) throw new Error("电脑代理已经启动");
+      agent = startAgent({
+        ...agentOptions,
+        makeRunner: (config) => {
+          const runner = createRunner(config);
+          return {
+            ...runner,
+            prompt: (message) => {
+              prompts.push(message);
+              return runner.prompt(message);
+            },
+          };
+        },
+      });
+      await waitFor(async () => Computer.parse(await api.get("/api/computer")).status === "online", "电脑上线");
+    };
 
     // 电脑上线之后控制面才会派活，不等的话 dispatch 会走「电脑不在线」那一支。
-    await waitFor(async () => Computer.parse(await api.get("/api/computer")).status === "online", "电脑上线");
+    if (options.startComputer !== false) await startComputer();
 
     return {
       db,
@@ -106,12 +136,57 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       get: api.get,
       post: api.post,
       nextPush: push.next,
+      startComputer,
+      stopComputer,
+      prompts: () => prompts,
+      connectComputer: async () => {
+        const probe = await connectComputer(agentOptions);
+        closers.push(probe.close);
+        return probe;
+      },
       close: closeAll,
     };
   } catch (error) {
     await closeAll();
     throw error;
   }
+}
+
+export type ComputerProbe = {
+  frames(): readonly ControlToAgent[];
+  closed(): { readonly code: number; readonly reason: string } | null;
+  close(): Promise<void>;
+};
+
+async function connectComputer(options: {
+  readonly url: string;
+  readonly computerId: string;
+  readonly token: string;
+  readonly version: string;
+}): Promise<ComputerProbe> {
+  const socket = new WebSocket(options.url);
+  const frames: ControlToAgent[] = [];
+  let closed: ReturnType<ComputerProbe["closed"]> = null;
+  const closing = new Promise<void>((resolve) => {
+    socket.once("close", (code, reason) => {
+      closed = { code, reason: reason.toString() };
+      resolve();
+    });
+  });
+  socket.on("message", (data) => frames.push(ControlToAgent.parse(JSON.parse(data.toString()))));
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve);
+    socket.once("error", reject);
+  });
+  socket.send(JSON.stringify(AgentToControl.parse({ type: "hello", ...options })));
+  return {
+    frames: () => frames,
+    closed: () => closed,
+    close: async () => {
+      socket.close();
+      await closing;
+    },
+  };
 }
 
 async function withAdmin(run: (admin: Sql) => Promise<unknown>): Promise<void> {
