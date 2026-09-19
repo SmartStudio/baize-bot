@@ -10,6 +10,7 @@ import {
   CreateGroupResponse,
   CreateRoutineRequest,
   CreateSkillRequest,
+  CreateToolRequest,
   DecideApprovalRequest,
   DecideApprovalResponse,
   DecideSkillOfferRequest,
@@ -32,6 +33,10 @@ import {
   SkillListResponse,
   SkillResponse,
   TaskId,
+  ToolConnectionId,
+  ToolListResponse,
+  type ToolOperation,
+  ToolResponse,
   UpdateBotRequest,
   UpdateBotResponse,
   UpdateRoutineRequest,
@@ -39,6 +44,7 @@ import {
   UpdateSkillRequest,
   UpdateTaskRequest,
   UpdateTaskResponse,
+  UpdateToolRequest,
   UsageResponse,
   type Settings,
   type TriggerInput,
@@ -52,6 +58,8 @@ import type { AgentHub } from "../agent/hub.js";
 import type { MentionLoopGuard } from "../agent/mention-loop.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
+import type { ToolCrypto } from "../crypto.js";
+import { discoverTools } from "../mcp/discover.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, findBot, listBots, updateBot } from "../repo/bots.js";
@@ -84,6 +92,7 @@ import {
   type SkillRow,
 } from "../repo/skills.js";
 import { updateTask } from "../repo/tasks.js";
+import { createTool, deleteTool, findOwnedTool, listToolsByOwner, updateTool } from "../repo/tools.js";
 import { authenticate } from "../repo/users.js";
 import { getOvernight, getUsage } from "../repo/usage.js";
 import type { PushHub } from "../ws/hub.js";
@@ -93,6 +102,7 @@ export type AppDeps = {
   readonly db: Db;
   readonly hub: PushHub;
   readonly agents: AgentHub;
+  readonly toolCrypto: ToolCrypto;
   readonly mentionLoop: MentionLoopGuard;
   readonly secureCookie: boolean;
   readonly gateway: Omit<GatewayDeps, "db">;
@@ -151,6 +161,48 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   app.get("/api/me", (c) => c.json(MeResponse.parse({ user: c.get("user") })));
+
+  app.get("/api/tools", async (c) =>
+    c.json(ToolListResponse.parse({ items: await listToolsByOwner(db, c.get("user").id) })),
+  );
+
+  app.post("/api/tools", async (c) => {
+    const body = await readJson(c.req.raw, CreateToolRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    let operations: ToolOperation[];
+    try {
+      operations = await discoverTools(body.value);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : "连不上 MCP" }, 400);
+    }
+    const tool = await createTool(db, c.get("user").id, body.value, operations, deps.toolCrypto);
+    if (tool === null) return c.json({ error: "已有同名工具连接" }, 409);
+    await agents.sendConfig(c.get("user").id);
+    return c.json(ToolResponse.parse({ tool }), 201);
+  });
+
+  app.patch("/api/tools/:id", async (c) => {
+    const id = ToolConnectionId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NOT_FOUND, 404);
+    const current = await findOwnedTool(db, c.get("user").id, id.data);
+    if (current === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, UpdateToolRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const result = await updateTool(db, c.get("user").id, current, body.value);
+    if (result.kind === "gone") return c.json(NOT_FOUND, 404);
+    if (result.kind === "name_taken") return c.json({ error: "已有同名工具连接" }, 409);
+    if (result.kind === "invalid_operation") return c.json({ error: "操作名不在这条工具连接上" }, 400);
+    if (result.kind === "invalid_bot") return c.json({ error: "只能分配给自己的 Bot" }, 400);
+    await agents.sendConfig(c.get("user").id);
+    return c.json(ToolResponse.parse({ tool: result.tool }));
+  });
+
+  app.delete("/api/tools/:id", async (c) => {
+    const id = ToolConnectionId.safeParse(c.req.param("id"));
+    if (!id.success || !(await deleteTool(db, c.get("user").id, id.data))) return c.json(NOT_FOUND, 404);
+    await agents.sendConfig(c.get("user").id);
+    return c.body(null, 204);
+  });
 
   app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
 

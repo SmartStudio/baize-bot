@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CONTEXT_MESSAGES, OFFLINE_NOTICE, dispatchUserMessage } from "../src/agent/dispatch.js";
 import { AgentHub } from "../src/agent/hub.js";
 import { MentionLoopGuard } from "../src/agent/mention-loop.js";
+import { ToolCrypto } from "../src/crypto.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -59,6 +60,7 @@ function dispatchDeps() {
       priceOutputPerM: 0,
       mentionLoop: new MentionLoopGuard(),
       gatewayBaseUrl: () => "",
+      toolCrypto: new ToolCrypto("a".repeat(64)),
     }),
   };
 }
