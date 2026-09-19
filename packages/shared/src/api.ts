@@ -20,6 +20,8 @@ import {
   SkillSteps,
   TaskStatus,
   Timestamp,
+  ToolConnection,
+  ToolOperation,
   TopicTask,
   User,
 } from "./domain.js";
@@ -173,6 +175,30 @@ export type CopySkillRequest = z.infer<typeof CopySkillRequest>;
 export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
 export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
 export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
+
+// GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
+export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
+
+// POST /api/tools  连一个 MCP（Streamable HTTP）。控制面当场 initialize 加 tools/list，连不上或不是 MCP 回 400 并说原因；
+// operations 按注解定 needsApproval；assignedBotIds 起始为空。回 201。同名 409。
+export const CreateToolRequest = z.object({
+  name: z.string().min(1).max(40),
+  url: z.string().url(),
+  authorization: z.string().min(1).optional(),
+});
+export type CreateToolRequest = z.infer<typeof CreateToolRequest>;
+export const ToolResponse = z.object({ tool: ToolConnection });
+
+// PATCH /api/tools/:id  给到的字段整份替换。operations 只收 name 与 needsApproval，name 不在这条连接上 400；
+// assignedBotIds 里不是自己的 Bot 400。改完重发 config。别人的 404。
+export const UpdateToolRequest = z.object({
+  name: z.string().min(1).max(40).optional(),
+  assignedBotIds: z.array(BotId).optional(),
+  operations: z.array(ToolOperation.pick({ name: true, needsApproval: true })).optional(),
+});
+export type UpdateToolRequest = z.infer<typeof UpdateToolRequest>;
+
+// DELETE /api/tools/:id  回 204，重发 config。
 
 // GET /api/usage  设置的用量页。本周从周一 00:00（Asia/Shanghai）起算，weekStartsAt 告诉客户端这一刻。
 // 每个自己的 Bot 一行，本周没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。预算是后续，响应里没有 budget。

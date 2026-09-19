@@ -17,6 +17,10 @@ import {
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
+// 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
+export const ToolConnectionConfig = ToolConnection.extend({ authorization: z.string().nullable() });
+export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
+
 export const AgentToControl = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -131,7 +135,8 @@ export const ControlToAgent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("config"),
     bots: z.array(z.object({ id: BotId, name: z.string(), description: z.string() })),
-    tools: z.array(ToolConnection),
+    // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
+    tools: z.array(ToolConnectionConfig),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
     skills: z.array(Skill).optional(),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string(), model: z.string() }),

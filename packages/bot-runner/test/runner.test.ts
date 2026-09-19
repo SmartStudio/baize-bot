@@ -20,6 +20,7 @@ import {
   SkillId,
   TaskId,
   type ToolConnection,
+  type ToolOperation,
   type TopicTask,
 } from "@baize/shared";
 import { Type } from "typebox";
@@ -50,12 +51,12 @@ const RETRY_TO_PI: RunnerConfig["settings"] = {
 
 const SUITE_STARTED_AT = Date.now();
 
-const toolConnection = (operations: ToolConnection["operations"]): ToolConnection => ({
+const toolConnection = (operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>): ToolConnection => ({
   id: "tc-1" as ToolConnection["id"],
   ownerId: "user-1" as ToolConnection["ownerId"],
   name: "客服工具",
   url: "https://tools.example.com",
-  operations,
+  operations: operations.map((op) => ({ ...op, description: "", inputSchema: {} })),
   assignedBotIds: [],
 });
 

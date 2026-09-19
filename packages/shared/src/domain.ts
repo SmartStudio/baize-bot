@@ -231,10 +231,15 @@ export const Message = z.object({
 });
 export type Message = z.infer<typeof Message>;
 
+// MCP 服务上的一个操作。description 和 inputSchema 是 tools/list 原样带回的，运行器照它注册工具；
+// needsApproval 默认按注解定（readOnlyHint 为 true 的不问，其余都问），用户在工具页可改。
 export const ToolOperation = z.object({
-  name: z.string(),
+  name: z.string().min(1),
+  description: z.string(),
+  inputSchema: z.record(z.unknown()),
   needsApproval: z.boolean(),
 });
+export type ToolOperation = z.infer<typeof ToolOperation>;
 
 export const ToolConnection = z.object({
   id: ToolConnectionId,
