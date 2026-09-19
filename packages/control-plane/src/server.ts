@@ -5,9 +5,10 @@ import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { AGENT_PATH, AgentHub } from "./agent/hub.js";
+import { ToolCrypto } from "./crypto.js";
 import { MentionLoopGuard } from "./agent/mention-loop.js";
 import type { Db } from "./db/client.js";
-import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, type RuntimeConfig } from "./env.js";
+import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, toolSecretKey, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
@@ -36,6 +37,7 @@ export type StartOptions = {
   readonly config?: RuntimeConfig;
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
   readonly disconnectGraceMs?: number;
+  readonly toolSecretKey?: string;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -50,6 +52,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
 
 export async function startServer(options: StartOptions): Promise<RunningServer> {
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
+  const toolCrypto = new ToolCrypto(options.toolSecretKey ?? toolSecretKey());
   const hub = new PushHub(options.db);
   // 一个实例，两处用：用户消息在 createApp 那边归零，上行 mention 在 AgentHub 那边计数。
   const mentionLoop = new MentionLoopGuard();
@@ -65,12 +68,14 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     mentionLoop,
     gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
+    toolCrypto,
   });
 
   const app = createApp({
     db: options.db,
     hub,
     agents,
+    toolCrypto,
     mentionLoop,
     secureCookie: options.secureCookie ?? false,
     gateway: {

@@ -12,6 +12,7 @@ export async function startTestServer(
   const server = await startServer({
     db,
     port: 0,
+    toolSecretKey: "a".repeat(64),
     config: { ...DEFAULT_RUNTIME_CONFIG, ...config },
     ...(scheduler === undefined ? {} : { scheduler }),
   });

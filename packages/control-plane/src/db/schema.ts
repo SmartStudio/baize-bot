@@ -9,6 +9,7 @@ import type {
   OnFailure as OnFailureSchema,
   RoutineRunStatus as RoutineRunStatusSchema,
   SkillSource,
+  ToolOperation,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
 import type { z } from "zod";
@@ -101,6 +102,35 @@ export const bots = pgTable(
     createdAt: createdAt(),
   },
   (t) => [index("bots_owner_id_idx").on(t.ownerId)],
+);
+
+export const toolConnections = pgTable(
+  "tool_connections",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    url: text("url").notNull(),
+    authorizationEnc: text("authorization_enc"),
+    operations: jsonb("operations").$type<ToolOperation[]>().notNull().default([]),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],
+);
+
+export const toolConnectionBots = pgTable(
+  "tool_connection_bots",
+  {
+    toolConnectionId: text("tool_connection_id")
+      .notNull()
+      .references(() => toolConnections.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.toolConnectionId, t.botId] }), index("tool_connection_bots_bot_id_idx").on(t.botId)],
 );
 
 // solo_bot_id 是「建 Bot 时系统自动建的那个单 Bot 群」，非空即该群属于这个 Bot。

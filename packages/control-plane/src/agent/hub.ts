@@ -8,6 +8,7 @@ import {
 } from "@baize/shared";
 import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
+import type { ToolCrypto } from "../crypto.js";
 import { listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
@@ -19,6 +20,7 @@ import {
 import { listSkillsByOwner } from "../repo/skills.js";
 import { appendMessage } from "../repo/messages.js";
 import { finishRun, openRunsForOwner } from "../repo/runs.js";
+import { listToolConfigs } from "../repo/tools.js";
 import { failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { handleAgentEvent } from "./events.js";
@@ -55,6 +57,7 @@ export type AgentHubDeps = {
   /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
   readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
+  readonly toolCrypto: ToolCrypto;
 };
 
 /** 电脑代理的连接表。一人一台电脑（computers.owner_id 唯一），按 owner 索引就等于按电脑索引。 */
@@ -268,8 +271,7 @@ export class AgentHub {
     this.#send(conn, {
       type: "config",
       bots: items.map((item) => ({ id: item.bot.id, name: item.bot.name, description: item.bot.description })),
-      // 工具连接是 M6 的对象，这一版恒为空。
-      tools: [],
+      tools: await listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills: await listSkillsByOwner(this.#deps.db, conn.ownerId),
