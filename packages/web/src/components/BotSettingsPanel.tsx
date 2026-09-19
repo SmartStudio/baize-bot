@@ -1,12 +1,17 @@
 import { useEffect, useState } from "react";
 import { ChevronRight, Clock, SlidersHorizontal, Sparkles } from "lucide-react";
-import { BotHue, type Bot, type BotId } from "@baize/shared";
+import { BotHue, type Bot, type BotId, type ToolConnection } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { RoutinesTab } from "./routines/RoutinesTab.js";
 import { SkillsTab } from "./skills/SkillsTab.js";
 
-type Props = { bot: Bot; onChange: (botId: BotId, draft: BotDraft) => Promise<void> };
+type Props = {
+  bot: Bot;
+  tools: ToolConnection[];
+  onChange: (botId: BotId, draft: BotDraft) => Promise<void>;
+  onOpenTools: () => void;
+};
 
 type Tab = "settings" | "routines" | "skills";
 
@@ -16,12 +21,9 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "skills", label: "会做的活", icon: <Sparkles size={14} aria-hidden="true" /> },
 ];
 
-const LATER_ROWS = [
-  { title: "可用工具", note: "去「设置 · 工具」连 MCP 再勾给它 · 后续" },
-  { title: "已登录站点", note: "在电脑里登录一次，所有 Bot 共用 · 后续" },
-];
+const LATER_ROWS = [{ title: "已登录站点", note: "在电脑里登录一次，所有 Bot 共用 · 后续" }];
 
-export const BotSettingsPanel = ({ bot, onChange }: Props) => {
+export const BotSettingsPanel = ({ bot, tools, onChange, onOpenTools }: Props) => {
   const [name, setName] = useState(bot.name);
   const [tag, setTag] = useState(bot.tag);
   const [description, setDescription] = useState(bot.description);
@@ -123,6 +125,23 @@ export const BotSettingsPanel = ({ bot, onChange }: Props) => {
               onClick={() => commit({ notify: !bot.notify })}
             />
           </div>
+          <button
+            type="button"
+            className="row-card bot-tools-link"
+            data-testid="bot-available-tools"
+            onClick={onOpenTools}
+          >
+            <span>
+              <b>可用工具</b>
+              <small data-testid="bot-available-tools-summary">
+                {tools
+                  .filter((tool) => tool.assignedBotIds.includes(bot.id))
+                  .map((tool) => tool.name)
+                  .join(" · ") || "还没勾。去「设置 · 工具」连 MCP 再勾给它"}
+              </small>
+            </span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </button>
           {LATER_ROWS.map((row) => (
             <div className="row-card is-later" key={row.title}>
               <span>

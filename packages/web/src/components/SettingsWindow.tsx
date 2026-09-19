@@ -1,7 +1,18 @@
 import { useEffect, useState } from "react";
 import { Cpu, Download, Gauge, Plug, Settings as SettingsIcon, X } from "lucide-react";
-import { Settings, type Bot, type BotId, type UsageResponse, type User } from "@baize/shared";
+import {
+  Settings,
+  type Bot,
+  type BotId,
+  type CreateToolRequest,
+  type ToolConnection,
+  type ToolConnectionId,
+  type UpdateToolRequest,
+  type UsageResponse,
+  type User,
+} from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
+import { ToolsPage } from "./ToolsPage.js";
 
 type PageId = "general" | "computer" | "tools" | "usage" | "update";
 
@@ -20,7 +31,11 @@ type Props = {
   settings: Settings;
   usage: UsageResponse;
   bots: Record<BotId, Bot>;
+  tools: ToolConnection[];
   initialPage?: PageId;
+  onCreateTool: (draft: CreateToolRequest) => Promise<void>;
+  onUpdateTool: (id: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
+  onDeleteTool: (id: ToolConnectionId) => Promise<void>;
   onLoadUsage: () => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
@@ -189,7 +204,11 @@ export const SettingsWindow = ({
   settings,
   usage,
   bots,
+  tools,
   initialPage = "general",
+  onCreateTool,
+  onUpdateTool,
+  onDeleteTool,
   onLoadUsage,
   onChange,
   onLogout,
@@ -235,6 +254,14 @@ export const SettingsWindow = ({
           </header>
           {page === "general" ? (
             <GeneralPage user={user} settings={settings} onChange={onChange} onLogout={onLogout} />
+          ) : page === "tools" ? (
+            <ToolsPage
+              tools={tools}
+              bots={bots}
+              onCreate={onCreateTool}
+              onUpdate={onUpdateTool}
+              onDelete={onDeleteTool}
+            />
           ) : page === "usage" ? (
             <UsagePage usage={usage} bots={bots} />
           ) : (

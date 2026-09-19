@@ -10,7 +10,7 @@ import { OvernightCard } from "../components/OvernightCard.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { useApp } from "../state/app.js";
 
-type Overlay = "none" | "account" | "settings" | "usage" | "new-group";
+type Overlay = "none" | "account" | "settings" | "tools" | "usage" | "new-group";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -81,7 +81,14 @@ export const MainWindow = () => {
           <p className="empty">今天把什么活交出去？先建一个 Bot。</p>
         </section>
       )}
-      {soloBot !== null ? <BotSettingsPanel bot={soloBot} onChange={actions.updateBot} /> : null}
+      {soloBot !== null ? (
+        <BotSettingsPanel
+          bot={soloBot}
+          tools={ready.tools}
+          onChange={actions.updateBot}
+          onOpenTools={() => setOverlay("tools")}
+        />
+      ) : null}
       {team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />
       ) : null}
@@ -109,13 +116,17 @@ export const MainWindow = () => {
       {overlay === "new-group" ? (
         <NewGroupDialog bots={Object.values(bots)} onCreate={actions.createGroup} onClose={() => setOverlay("none")} />
       ) : null}
-      {overlay === "settings" || overlay === "usage" ? (
+      {overlay === "settings" || overlay === "tools" || overlay === "usage" ? (
         <SettingsWindow
           user={ready.user}
           settings={ready.settings}
           usage={ready.usage}
           bots={bots}
-          initialPage={overlay === "usage" ? "usage" : "general"}
+          tools={ready.tools}
+          initialPage={overlay === "usage" ? "usage" : overlay === "tools" ? "tools" : "general"}
+          onCreateTool={actions.createTool}
+          onUpdateTool={actions.updateTool}
+          onDeleteTool={actions.deleteTool}
           onLoadUsage={actions.loadUsage}
           onChange={actions.updateSettings}
           onLogout={() => void actions.logout()}

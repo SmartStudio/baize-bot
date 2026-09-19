@@ -16,14 +16,18 @@ import {
   type OvernightItem,
   type CreateRoutineRequest,
   type CreateSkillRequest,
+  type CreateToolRequest,
   type DecideSkillOfferRequest,
   type Routine,
   type RoutineId,
   type Settings,
   type Skill,
   type SkillId,
+  type ToolConnection,
+  type ToolConnectionId,
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
+  type UpdateToolRequest,
   type TopicTask,
   type User,
   type UsageResponse,
@@ -80,6 +84,7 @@ export type AppState =
       // 会做的活也按 Bot 分桶，开了那个 Bot 的「会做的活」页、或者聊天框里要列 `/` 名单才拉。键在不在就是
       // 「这个 Bot 的 skill 拉过没有」，跟 routines 一个路子。
       skills: Record<BotId, Skill[]>;
+      tools: ToolConnection[];
       settings: Settings;
       usage: UsageResponse;
       overnight: OvernightItem[];
@@ -92,6 +97,7 @@ type Action =
       user: User;
       bots: BotListItem[];
       groups: GroupListItem[];
+      tools: ToolConnection[];
       settings: Settings;
       usage: UsageResponse;
       overnight: OvernightItem[];
@@ -116,6 +122,8 @@ type Action =
   | { type: "skills_loaded"; botId: BotId; skills: Skill[] }
   | { type: "skill_upserted"; skill: Skill }
   | { type: "skill_removed"; botId: BotId; skillId: SkillId }
+  | { type: "tool_upserted"; tool: ToolConnection }
+  | { type: "tool_removed"; toolId: ToolConnectionId }
   | { type: "settings_set"; settings: Settings }
   | { type: "usage_loaded"; usage: UsageResponse }
   | { type: "overnight_dismissed" };
@@ -218,7 +226,7 @@ const withHandoffs = (state: ReadyState, incoming: Handoff[], from: "history" | 
 };
 
 const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState => {
-  const { user, bots, groups, settings, usage, overnight } = action;
+  const { user, bots, groups, tools, settings, usage, overnight } = action;
   const registry: Record<BotId, Bot> = {};
   for (const item of bots) registry[item.bot.id] = item.bot;
   const conversations: Conversation[] = [
@@ -251,6 +259,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     handoffs: {},
     routines: {},
     skills: {},
+    tools,
     settings,
     usage,
     overnight,
@@ -425,6 +434,17 @@ const reduce = (state: AppState, action: Action): AppState => {
       if (known === undefined) return state;
       return { ...state, skills: { ...state.skills, [action.botId]: known.filter((s) => s.id !== action.skillId) } };
     }
+    case "tool_upserted": {
+      const known = state.tools.some((tool) => tool.id === action.tool.id);
+      return {
+        ...state,
+        tools: known
+          ? state.tools.map((tool) => (tool.id === action.tool.id ? action.tool : tool))
+          : [...state.tools, action.tool],
+      };
+    }
+    case "tool_removed":
+      return { ...state, tools: state.tools.filter((tool) => tool.id !== action.toolId) };
     case "settings_set":
       return { ...state, settings: action.settings };
     case "usage_loaded":
@@ -458,6 +478,9 @@ export type AppActions = {
   deleteSkill: (skill: Skill) => Promise<void>;
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+  createTool: (draft: CreateToolRequest) => Promise<void>;
+  updateTool: (toolId: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
+  deleteTool: (toolId: ToolConnectionId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   loadUsage: () => Promise<void>;
   dismissOvernight: () => void;
@@ -474,14 +497,24 @@ export const useApp = () => {
 const isUnauthorized = (cause: unknown): boolean => cause instanceof RequestFailed && cause.status === 401;
 
 const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>> => {
-  const [bots, groups, settings, usage, overnight] = await Promise.all([
+  const [bots, groups, tools, settings, usage, overnight] = await Promise.all([
     api.bots(),
     api.groups(),
+    api.tools(),
     api.settings(),
     api.usage(),
     api.overnight(),
   ]);
-  return { type: "ready", user, bots: bots.items, groups: groups.items, settings, usage, overnight: overnight.items };
+  return {
+    type: "ready",
+    user,
+    bots: bots.items,
+    groups: groups.items,
+    tools: tools.items,
+    settings,
+    usage,
+    overnight: overnight.items,
+  };
 };
 
 const RECONNECT_DELAY_MS = 1000;
@@ -583,6 +616,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const res = await api.decideSkillOffer(messageId, decision);
         dispatch({ type: "message_upserted", message: res.message });
         if (res.skill !== null) dispatch({ type: "skill_upserted", skill: res.skill });
+      }),
+      createTool: signedIn(async (draft: CreateToolRequest) => {
+        dispatch({ type: "tool_upserted", tool: await api.createTool(draft) });
+      }),
+      updateTool: signedIn(async (toolId: ToolConnectionId, patch: UpdateToolRequest) => {
+        dispatch({ type: "tool_upserted", tool: await api.updateTool(toolId, patch) });
+      }),
+      deleteTool: signedIn(async (toolId: ToolConnectionId) => {
+        await api.deleteTool(toolId);
+        dispatch({ type: "tool_removed", toolId });
       }),
       updateSettings: signedIn(async (patch: Partial<Settings>) => {
         dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });

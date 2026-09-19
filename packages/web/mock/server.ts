@@ -13,11 +13,14 @@ import {
   LoginRequest,
   SendMessageRequest,
   Settings,
+  ToolConnection,
+  CreateToolRequest,
   UpdateBotRequest,
   UpdateRoutineRequest,
   UpdateSettingsRequest,
   UpdateSkillRequest,
   UpdateTaskRequest,
+  UpdateToolRequest,
   type Routine,
   type ServerPush,
 } from "@baize/shared";
@@ -63,6 +66,7 @@ import {
   skillsOf,
   streamBotReply,
   tasks,
+  tools,
   user,
   usageOf,
   writeMessageBody,
@@ -237,6 +241,84 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (method === "GET" && path === "/api/overnight") return send(res, 200, overnightOf());
 
   if (method === "GET" && path === "/api/bots") return send(res, 200, { items: botListItems() });
+
+  if (method === "GET" && path === "/api/tools") return send(res, 200, { items: [...tools.values()] });
+
+  if (method === "POST" && path === "/api/tools") {
+    const parsed = CreateToolRequest.safeParse(await readBody(req));
+    if (!parsed.success) return send(res, 400, { error: "工具字段不对" });
+    if ([...tools.values()].some((tool) => tool.name === parsed.data.name)) {
+      return send(res, 409, { error: "已有同名工具连接" });
+    }
+    const host = new URL(parsed.data.url).host;
+    if (host.includes("bad")) {
+      return send(res, 400, { error: "连不上 MCP：ECONNREFUSED" });
+    }
+    const tool = ToolConnection.parse({
+      id: `tool_${randomUUID()}`,
+      ownerId: user.id,
+      name: parsed.data.name,
+      url: parsed.data.url,
+      operations: [
+        {
+          name: "do_thing",
+          description: "执行操作",
+          inputSchema: { type: "object", properties: {} },
+          needsApproval: true,
+        },
+        {
+          name: "list_things",
+          description: "列出事项",
+          inputSchema: { type: "object", properties: {} },
+          needsApproval: false,
+        },
+      ],
+      assignedBotIds: [],
+    });
+    tools.set(tool.id, tool);
+    return send(res, 201, { tool });
+  }
+
+  const toolMatch = /^\/api\/tools\/([^/]+)$/.exec(path);
+  if (toolMatch) {
+    const [, rawToolId] = toolMatch;
+    const toolId = rawToolId === undefined ? "" : decodeURIComponent(rawToolId);
+    const tool = tools.get(toolId);
+    if (tool === undefined) return send(res, 404, { error: "没有这个工具" });
+    if (method === "PATCH") {
+      const parsed = UpdateToolRequest.safeParse(await readBody(req));
+      if (!parsed.success) return send(res, 400, { error: "工具字段不对" });
+      if (
+        parsed.data.assignedBotIds?.some((botId) => {
+          const bot = bots.get(botId);
+          return bot === undefined || bot.ownerId !== user.id;
+        })
+      ) {
+        return send(res, 400, { error: "只能分配给自己的 Bot" });
+      }
+      const operations =
+        parsed.data.operations === undefined
+          ? tool.operations
+          : parsed.data.operations.map((operation) => {
+              const existing = tool.operations.find((candidate) => candidate.name === operation.name);
+              return existing === undefined ? null : { ...existing, needsApproval: operation.needsApproval };
+            });
+      if (operations.some((operation) => operation === null)) {
+        return send(res, 400, { error: "工具操作不存在" });
+      }
+      const next = ToolConnection.parse({
+        ...tool,
+        ...defined(parsed.data),
+        operations,
+      });
+      tools.set(next.id, next);
+      return send(res, 200, { tool: next });
+    }
+    if (method === "DELETE") {
+      tools.delete(tool.id);
+      return send(res, 204);
+    }
+  }
 
   if (method === "POST" && path === "/api/bots") {
     const parsed = CreateBotRequest.safeParse(await readBody(req));
