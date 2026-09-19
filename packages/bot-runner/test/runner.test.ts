@@ -19,12 +19,12 @@ import {
   type Skill,
   SkillId,
   TaskId,
-  type ToolConnection,
+  type ToolConnectionConfig,
   type ToolOperation,
   type TopicTask,
 } from "@baize/shared";
 import { Type } from "typebox";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   botDirs,
   createRunner,
@@ -36,6 +36,7 @@ import {
   type RunnerTool,
 } from "../src/index.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
+import { startFakeMcp } from "./helpers/mcp.js";
 import {
   type ChatCompletionRequest,
   isFollowUpTurn,
@@ -51,13 +52,19 @@ const RETRY_TO_PI: RunnerConfig["settings"] = {
 
 const SUITE_STARTED_AT = Date.now();
 
-const toolConnection = (operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>): ToolConnection => ({
-  id: "tc-1" as ToolConnection["id"],
-  ownerId: "user-1" as ToolConnection["ownerId"],
+/** 一条分配给 bot-1 的工具连接。不给 url 就指向一个没人听的地址，工具真被调用时会连不上。 */
+const toolConnection = (
+  operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>,
+  overrides: Partial<Pick<ToolConnectionConfig, "id" | "name" | "url" | "authorization" | "assignedBotIds">> = {},
+): ToolConnectionConfig => ({
+  id: "tc-1" as ToolConnectionConfig["id"],
+  ownerId: "user-1" as ToolConnectionConfig["ownerId"],
   name: "客服工具",
-  url: "https://tools.example.com",
+  url: "http://127.0.0.1:9/mcp",
   operations: operations.map((op) => ({ ...op, description: "", inputSchema: {} })),
-  assignedBotIds: [],
+  assignedBotIds: [BotId.parse("bot-1")],
+  authorization: null,
+  ...overrides,
 });
 
 const promptMessage = (
@@ -206,7 +213,9 @@ function listFilesTool(sideEffects: string[]): RunnerTool {
 
 async function startHarness(options: {
   readonly bots: readonly string[];
-  readonly tools?: readonly ToolConnection[];
+  readonly tools?: readonly ToolConnectionConfig[];
+  /** 不给就挂 send_email、list_files 两个假扩展工具。 */
+  readonly extensionTools?: readonly RunnerTool[];
   readonly script: (req: ChatCompletionRequest) => ScriptedTurn;
   readonly failFirst?: number;
   /** 收到 approval_request 就按这个结论回，undefined 表示不给结论。 */
@@ -236,7 +245,7 @@ async function startHarness(options: {
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
     dataDir,
     ...(options.skills === undefined ? {} : { skills: [...options.skills] }),
-    extensionTools: [sendEmailTool(sideEffects), listFilesTool(sideEffects)],
+    extensionTools: options.extensionTools ?? [sendEmailTool(sideEffects), listFilesTool(sideEffects)],
     send: (message) => {
       sent.push(AgentToControl.parse(message));
       if (message.type === "approval_request" && options.approve !== undefined) {
@@ -1296,6 +1305,207 @@ describe("运行器的 skill", () => {
     const systemPrompt = seen.firstTurn.join("");
     expect(systemPrompt, "描述是空的就整段不占位，不给模型一句「你的描述是：」的空话").not.toContain("你的描述");
     expect(systemPrompt, "规则和描述不绑在一起，没描述照样要有").toContain("用 propose_skill 把刚才的步骤写成清单");
+  });
+});
+
+describe("运行器按 Bot 加载 MCP 工具", () => {
+  const OPS: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">> = [
+    { name: "send_email", needsApproval: true },
+    { name: "lookup_stock", needsApproval: false },
+  ];
+
+  /** 和 scriptRecording 一样分派，另外把每轮请求里报给模型的工具名单收下来。 */
+  const scriptSeeingTools = (
+    seen: { firstTurn: string[]; toolResults: string[]; toolNames: string[][] },
+    turns: ReadonlyArray<readonly [marker: string, turn: ScriptedTurn]>,
+  ) => {
+    const dispatch = scriptRecording(seen, turns);
+    return (req: ChatCompletionRequest): ScriptedTurn => {
+      seen.toolNames.push((req.tools ?? []).map((tool) => tool.function.name));
+      return dispatch(req);
+    };
+  };
+  const toolRecorder = () => ({ ...recorder(), toolNames: [] as string[][] });
+
+  const openMcps: { close(): Promise<void> }[] = [];
+  const fakeMcp = async () => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    return mcp;
+  };
+  afterEach(async () => {
+    await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+  });
+
+  it("分配了的 Bot：名单里有两个操作，调用 lookup_stock 时假 MCP 收到参数和 Authorization 头，结果文字回到模型", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url, authorization: "Bearer secret-token" })],
+      script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+    expect(seen.toolNames[0]).toEqual(expect.arrayContaining(["send_email", "lookup_stock"]));
+    expect(mcp.calls).toEqual([{ name: "lookup_stock", args: { sku: "SKU-1" }, authorization: "Bearer secret-token" }]);
+    expect(seen.toolResults[0]).toContain("SKU-1 库存 42");
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(
+      h.sent.some((m) => m.type === "approval_request"),
+      "lookup_stock 不需要审批",
+    ).toBe(false);
+  });
+
+  it("没分配的 Bot：名单里没有这条连接的操作", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-2"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url })],
+      script: scriptSeeingTools(seen, [["随便聊", { textChunks: ["好的。"], usage: { input: 100, output: 5 } }]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-2", "run-1", "随便聊"));
+
+    expect(seen.toolNames[0]).not.toContain("send_email");
+    expect(seen.toolNames[0]).not.toContain("lookup_stock");
+    expect(seen.toolNames[0], "运行器自己的工具照常在").toContain("read_task");
+  });
+
+  it("审批按 Bot 算：连接只分配给 bot-1 时，bot-2 自己的 send_email 不进审批", async () => {
+    const h = await startHarness({
+      bots: ["bot-2"],
+      tools: [toolConnection(OPS)],
+      script: scriptBy([["发邮件", callTool("send_email", { to: "kehu@example.com" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-2", "run-1", "发邮件"));
+
+    expect(h.sent.some((m) => m.type === "approval_request")).toBe(false);
+    expect(h.sideEffects).toEqual(["send_email:kehu@example.com"]);
+  });
+
+  it("needsApproval 的 send_email 先走 approval_request，批了才到假 MCP，带参数和 Authorization 头", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url, authorization: "Bearer secret-token" })],
+      script: scriptSeeingTools(seen, [
+        ["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })],
+      ]),
+      approve: true,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+    const request = h.sent.find((m) => m.type === "approval_request");
+    expect(request?.type === "approval_request" && request.tool).toBe("send_email");
+    expect(request?.type === "approval_request" && request.kind).toBe("send_external");
+    expect(mcp.calls).toEqual([
+      {
+        name: "send_email",
+        args: { to: "kehu@example.com", subject: "报价" },
+        authorization: "Bearer secret-token",
+      },
+    ]);
+    expect(seen.toolResults[0]).toContain("已发给 kehu@example.com");
+  });
+
+  it("拒绝之后假 MCP 一个调用都没收到", async () => {
+    const mcp = await fakeMcp();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url })],
+      script: scriptBy([["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })]]),
+      approve: false,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+    expect(mcp.calls).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+  });
+
+  it("假 MCP 没起：工具结果是「连不上」那句，run 正常收尾，没有 agent_error", async () => {
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS)],
+      script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+    expect(seen.toolResults[0]).toContain("工具连接「客服工具」连不上：");
+    expect(shape(h.sent).at(-1)).toBe("run_done");
+    expect(h.sent.some((m) => m.type === "agent_error")).toBe(false);
+  });
+
+  it("MCP 回 isError：终态 failed，错误文本是工具给的那句", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url })],
+      script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-BAD" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults[0]).toContain("没有这个 SKU");
+  });
+
+  it("两条连接撞了 lookup_stock：config 里靠前的赢，后面的跳过并 warn 一次", async () => {
+    const first = await fakeMcp();
+    const second = await fakeMcp();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [
+        toolConnection([{ name: "lookup_stock", needsApproval: false }], {
+          id: "tc-a" as ToolConnectionConfig["id"],
+          name: "仓库 A",
+          url: first.url,
+        }),
+        toolConnection([{ name: "lookup_stock", needsApproval: false }], {
+          id: "tc-b" as ToolConnectionConfig["id"],
+          name: "仓库 B",
+          url: second.url,
+        }),
+      ],
+      script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+    expect(seen.toolNames[0]?.filter((name) => name === "lookup_stock")).toHaveLength(1);
+    expect(first.calls.map((c) => c.name)).toEqual(["lookup_stock"]);
+    expect(second.calls).toEqual([]);
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      "Bot bot-1：连接「仓库 B」的操作「lookup_stock」和已注册的工具重名，跳过",
+    ]);
+    warn.mockRestore();
   });
 });
 
