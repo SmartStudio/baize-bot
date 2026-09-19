@@ -14,14 +14,21 @@ export interface BotDirs {
   readonly sessionDir: string;
   /** 会话的 cwd，Bot 干活的地方。 */
   readonly workDir: string;
+  /** `config.skills` 落成的 `<skillId>/SKILL.md`，Pi 的 `additionalSkillPaths` 指到这里。 */
+  readonly skillsDir: string;
 }
 
 export function botDirs(dataDir: string, botId: BotId): BotDirs {
   const root = join(dataDir, botId);
-  return { agentDir: join(root, "agent"), sessionDir: join(root, "sessions"), workDir: join(root, "work") };
+  return {
+    agentDir: join(root, "agent"),
+    sessionDir: join(root, "sessions"),
+    workDir: join(root, "work"),
+    skillsDir: join(root, "skills"),
+  };
 }
 
 export function ensureBotDirs(dirs: BotDirs): BotDirs {
-  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir]) mkdirSync(dir, { recursive: true });
+  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir]) mkdirSync(dir, { recursive: true });
   return dirs;
 }

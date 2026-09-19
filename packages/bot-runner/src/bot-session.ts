@@ -13,19 +13,22 @@ import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
 import type { BotDirs } from "./paths.js";
+import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 
 // 一个 Bot 一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
 
-/** 工具的注册点。`src/topic.ts` 那组工具由 createRunner 拼进来，桌面操作、MCP 桥接、存 skill 还没做。 */
+/** 工具的注册点。`src/topic.ts` 和 `src/skills.ts` 那两组由 createRunner 拼进来，桌面操作和 MCP 桥接还没做。 */
 export type RunnerTool = ToolDefinition<TSchema>;
 
 export type PiSettings = Parameters<typeof SettingsManager.inMemory>[0];
 
 export interface BotSessionOptions {
   readonly botId: BotId;
+  /** Bot 的描述，也是它的边界。进系统提示，排在存 skill 的规则前面。空串就不占一段。 */
+  readonly description: string;
   readonly dirs: BotDirs;
   readonly gateway: Extract<ControlToAgent, { type: "config" }>["modelGateway"];
   readonly tools: readonly RunnerTool[];
@@ -65,7 +68,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
 }
 
 export async function createBotSession(options: BotSessionOptions): Promise<BotSession> {
-  const { agentDir, sessionDir, workDir } = options.dirs;
+  const { agentDir, sessionDir, workDir, skillsDir } = options.dirs;
 
   const modelRuntime = await ModelRuntime.create({
     authPath: join(agentDir, "auth.json"),
@@ -101,7 +104,14 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     cwd: workDir,
     agentDir,
     settingsManager,
+    // noSkills 只关掉 Pi 默认的那两处（agentDir/skills、cwd/.pi/skills），additionalSkillPaths 照收不误
+    // （`core/resource-loader.js` 的 mergePaths）。不选 skillsOverride 的理由见 README 的 skill 一节。
     noSkills: true,
+    additionalSkillPaths: [skillsDir],
+    appendSystemPrompt: [
+      ...(options.description === "" ? [] : [`你的描述，也是你的边界：${options.description}`]),
+      PROPOSE_SKILL_RULE,
+    ],
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,

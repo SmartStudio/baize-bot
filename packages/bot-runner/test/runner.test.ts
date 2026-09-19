@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +16,8 @@ import {
   GroupId,
   HandoffId,
   RunId,
+  type Skill,
+  SkillId,
   TaskId,
   type ToolConnection,
   type TopicTask,
@@ -90,6 +101,35 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   ...overrides,
 });
 
+const skillOf = (id: string, botId: string, name: string, steps: readonly string[]): Skill => ({
+  id: SkillId.parse(id),
+  botId: BotId.parse(botId),
+  name,
+  source: "chat",
+  steps: [...steps],
+  useCount: 0,
+  createdAt: "2026-09-13T08:00:00.000Z",
+});
+
+const GLOBEX_SKILL = skillOf("skill-globex", "bot-1", "Globex 报价", [
+  "打开 CRM 找到 Globex 的联系人",
+  "按上季度的价目表算一版报价",
+  "把报价贴进邮件草稿",
+]);
+const WEEKLY_SKILL = skillOf("skill-weekly", "bot-1", "周报", ["翻一遍本周的群消息", "按项目分段写成周报"]);
+
+const skillsDirOf = (dataDir: string, botId: string): string => botDirs(dataDir, BotId.parse(botId)).skillsDir;
+
+const skillIdsOn = (dataDir: string, botId: string): string[] => readdirSync(skillsDirOf(dataDir, botId)).toSorted();
+
+const skillFileOn = (dataDir: string, botId: string, skillId: string): string =>
+  readFileSync(join(skillsDirOf(dataDir, botId), skillId, "SKILL.md"), "utf8");
+
+const PROPOSE_ARGS = {
+  name: "Globex 报价",
+  steps: ["打开 CRM 找到 Globex 的联系人", "按上季度的价目表算一版报价", "把报价贴进邮件草稿"],
+};
+
 /** 假上游按请求里出现过的字眼分派脚本，一次 prompt 的第二轮一律空着收尾。 */
 const scriptBy = (turns: ReadonlyArray<readonly [marker: string, turn: ScriptedTurn]>) => {
   const follow: ScriptedTurn = { textChunks: [], usage: { input: 900, output: 8 } };
@@ -171,8 +211,13 @@ async function startHarness(options: {
   /** 收到 approval_request 就按这个结论回，undefined 表示不给结论。 */
   readonly approve?: boolean;
   readonly settings?: RunnerConfig["settings"];
+  readonly skills?: readonly Skill[];
+  /** 每个 Bot 的描述，进系统提示。 */
+  readonly description?: string;
+  /** 复用上一台的数据目录，用来模拟同一台云电脑上又来一条 config。 */
+  readonly dataDir?: string;
 }): Promise<Harness> {
-  const dataDir = mkdtempSync(join(tmpdir(), "baize-runner-"));
+  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
   const gateway = await startGateway({
     upstream: scriptedUpstream(options.script),
@@ -185,10 +230,11 @@ async function startHarness(options: {
   let runner: Runner | null = null;
 
   runner = createRunner({
-    bots: options.bots.map((id) => ({ id: BotId.parse(id), name: id, description: "" })),
+    bots: options.bots.map((id) => ({ id: BotId.parse(id), name: id, description: options.description ?? "" })),
     tools: options.tools ?? [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
     dataDir,
+    ...(options.skills === undefined ? {} : { skills: [...options.skills] }),
     extensionTools: [sendEmailTool(sideEffects), listFilesTool(sideEffects)],
     send: (message) => {
       sent.push(AgentToControl.parse(message));
@@ -997,6 +1043,253 @@ describe("运行器的交接工具", () => {
       firstTurn.indexOf("群里刚才说的："),
     );
     expect(firstTurn, "正文已经是交接报文那一段，不再重复成「当前这条」").not.toContain("当前这条：");
+  });
+});
+
+describe("运行器的 skill", () => {
+  const GLOBEX_FILE = [
+    "---",
+    'name: "Globex 报价"',
+    'description: "打开 CRM 找到 Globex 的联系人"',
+    "---",
+    "",
+    "# Globex 报价",
+    "",
+    "1. 打开 CRM 找到 Globex 的联系人",
+    "2. 按上季度的价目表算一版报价",
+    "3. 把报价贴进邮件草稿",
+    "",
+  ].join("\n");
+
+  it("config 带两个 skill：落成两个 SKILL.md，两条都进了系统提示的 available_skills", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL, WEEKLY_SKILL],
+      script: scriptRecording(seen, [["随便说句话", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
+    });
+
+    expect(skillIdsOn(h.dataDir, "bot-1"), "目录名就是 skillId，一条一个目录").toEqual([
+      "skill-globex",
+      "skill-weekly",
+    ]);
+    expect(
+      skillFileOn(h.dataDir, "bot-1", "skill-globex"),
+      "frontmatter 的 description 用第一步，正文是编号的步骤",
+    ).toBe(GLOBEX_FILE);
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "随便说句话"));
+
+    const systemPrompt = seen.firstTurn.join("");
+    expect(systemPrompt, "Pi 把 getSkills 的结果 formatSkillsForPrompt 进系统提示").toContain("<available_skills>");
+    expect(systemPrompt, "两条都被 getSkills 列出来了才会都出现在提示里").toContain("Globex 报价");
+    expect(systemPrompt).toContain("周报");
+    expect(systemPrompt, "提示里给的是文件位置，模型照着名字去读步骤").toContain("skill-globex");
+  });
+
+  it("再来一条少一个 skill 的 config：盘上多出来的那个被删掉", async () => {
+    const first = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL, WEEKLY_SKILL],
+      script: scriptBy([]),
+    });
+    await startHarness({
+      bots: ["bot-1"],
+      dataDir: first.dataDir,
+      skills: [GLOBEX_SKILL],
+      script: scriptBy([]),
+    });
+
+    expect(skillIdsOn(first.dataDir, "bot-1"), "控制面的表是真相源，config 里没有的盘上也不能留着").toEqual([
+      "skill-globex",
+    ]);
+  });
+
+  it("再来一条改了步骤的 config：文件重写成新的；同一份 config 再来一次，文件不动", async () => {
+    const first = await startHarness({ bots: ["bot-1"], skills: [GLOBEX_SKILL], script: scriptBy([]) });
+    const changed = { ...GLOBEX_SKILL, steps: ["打开 CRM 找到 Globex 的联系人", "按新价目表算一版报价"] };
+
+    await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, skills: [changed], script: scriptBy([]) });
+
+    const file = join(skillsDirOf(first.dataDir, "bot-1"), "skill-globex", "SKILL.md");
+    expect(skillFileOn(first.dataDir, "bot-1", "skill-globex"), "同一条 skill 改了步骤，盘上那份要跟着变").toContain(
+      "2. 按新价目表算一版报价",
+    );
+    expect(skillFileOn(first.dataDir, "bot-1", "skill-globex"), "旧步骤不留").not.toContain("按上季度的价目表");
+
+    const before = statSync(file).mtimeMs;
+    await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, skills: [changed], script: scriptBy([]) });
+    expect(statSync(file).mtimeMs, "内容一样就不重写，重连一次不该把所有 skill 文件翻新一遍").toBe(before);
+  });
+
+  it("要写的位置上是个普通文件时，对账把它清掉再落，不炸掉整个 runner", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "baize-runner-"));
+    const dirty = skillsDirOf(dataDir, "bot-1");
+    mkdirSync(dirty, { recursive: true });
+    writeFileSync(join(dirty, "skill-globex"), "上一版留下的脏东西", "utf8");
+
+    const h = await startHarness({ bots: ["bot-1"], dataDir, skills: [GLOBEX_SKILL], script: scriptBy([]) });
+
+    expect(skillFileOn(h.dataDir, "bot-1", "skill-globex"), "对账要能从盘上任何一种状态收敛过来").toBe(GLOBEX_FILE);
+  });
+
+  it("别的 Bot 的 skill 不落到自己目录里", async () => {
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      skills: [GLOBEX_SKILL, skillOf("skill-duiqi", "bot-2", "对账", ["拉流水", "和账单核一遍"])],
+      script: scriptBy([]),
+    });
+
+    expect(skillIdsOn(h.dataDir, "bot-1")).toEqual(["skill-globex"]);
+    expect(skillIdsOn(h.dataDir, "bot-2"), "config.skills 是全部 Bot 的，运行器按 botId 分").toEqual(["skill-duiqi"]);
+  });
+
+  it("skillId 带路径分隔符时不落盘，写不到 dataDir 外面去", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL, skillOf("../../pwned", "bot-1", "越界", ["一", "二"])],
+      script: scriptBy([]),
+    });
+
+    expect(skillIdsOn(h.dataDir, "bot-1"), "目录名只收一段安全的名字，越界的那条整条不落").toEqual(["skill-globex"]);
+    expect(existsSync(join(h.dataDir, "pwned")), "上跳两级本该落在这里，一个文件都不该有").toBe(false);
+  });
+
+  it("propose_skill 上报整条 skill_offer", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["这件活干完了", callTool("propose_skill", PROPOSE_ARGS)]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "这件活干完了"));
+
+    expect(
+      h.sent.filter((m) => m.type === "skill_offer"),
+      "存不存由 Bot 发起，控制面据此落一条卡",
+    ).toEqual([
+      {
+        type: "skill_offer",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        name: PROPOSE_ARGS.name,
+        steps: PROPOSE_ARGS.steps,
+      },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(seen.toolResults.join(""), "返回值要说清还在等用户点").toContain("已经在群里问用户存不存「Globex 报价」了");
+  });
+
+  it("同一次运行里第二次 propose_skill：不上报，终态 failed，错误文本说已经问过了", async () => {
+    const seen = recorder();
+    const twice = (req: ChatCompletionRequest): ScriptedTurn => {
+      const answered = req.messages.filter((m) => m.role === "tool").length;
+      if (answered === 0) return callTool("propose_skill", PROPOSE_ARGS);
+      if (answered === 1) {
+        return {
+          textChunks: [],
+          toolCall: { id: "call-2", name: "propose_skill", args: PROPOSE_ARGS },
+          usage: { input: 900, output: 30 },
+        };
+      }
+      return { textChunks: [], usage: { input: 1000, output: 8 } };
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        if (req.messages.some((m) => m.role === "tool"))
+          seen.toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+        return twice(req);
+      },
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "这件活干完了"));
+
+    expect(h.sent.filter((m) => m.type === "skill_offer").length, "一次运行最多问一次，第二次拦在发报文之前").toBe(1);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join("")).toContain("这次已经问过了");
+  });
+
+  it("propose_skill 只给一条步骤：不上报，终态 failed，错误文本给出该写几条", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["这件活干完了", callTool("propose_skill", { name: "Globex 报价", steps: ["打开 CRM"] })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "这件活干完了"));
+
+    expect(
+      h.sent.filter((m) => m.type === "skill_offer"),
+      "一步的活不成其为 skill，拦在发报文之前",
+    ).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join(""), "错误文本要把该写几条告诉模型").toContain("步骤要 2 到 20 条，这次给了 1 条。");
+  });
+
+  it("propose_skill 某一步超过 500 字：本地就拦住，错误文本是中文", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["这件活干完了", callTool("propose_skill", { name: "Globex 报价", steps: ["打开 CRM", "把".repeat(501)] })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "这件活干完了"));
+
+    expect(
+      h.sent.filter((m) => m.type === "skill_offer"),
+      "上行 schema 也不收，拦在发之前",
+    ).toEqual([]);
+    expect(seen.toolResults.join(""), "拦在 AgentToControl.parse 之前，模型才不会收到一坨英文 ZodError").toContain(
+      "第 2 步有 501 个字，每步最多 500 个",
+    );
+  });
+
+  it("系统提示里有提议存 skill 的规则，排在 Bot 描述之后", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      description: "只管报价的事，发出去之前先问我",
+      script: scriptRecording(seen, [["随便说句话", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "随便说句话"));
+
+    const systemPrompt = seen.firstTurn.join("");
+    const describedAt = systemPrompt.indexOf("只管报价的事，发出去之前先问我");
+    const ruleAt = systemPrompt.indexOf("用 propose_skill 把刚才的步骤写成清单");
+    expect(describedAt, "描述是 Bot 的边界，得进系统提示").toBeGreaterThan(-1);
+    expect(ruleAt, "规则排在描述之后：先知道自己是干什么的，再谈把这件活存下来").toBeGreaterThan(describedAt);
+  });
+
+  it("Bot 没写描述时，系统提示里不留一句空的边界", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["随便说句话", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "随便说句话"));
+
+    const systemPrompt = seen.firstTurn.join("");
+    expect(systemPrompt, "描述是空的就整段不占位，不给模型一句「你的描述是：」的空话").not.toContain("你的描述");
+    expect(systemPrompt, "规则和描述不绑在一起，没描述照样要有").toContain("用 propose_skill 把刚才的步骤写成清单");
   });
 });
 

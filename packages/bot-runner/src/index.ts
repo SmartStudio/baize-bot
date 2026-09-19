@@ -12,6 +12,7 @@ import { type ApprovalGate, approvalRule, createApprovalGate } from "./approvals
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
 import { type BotDirs, botDirs, ensureBotDirs } from "./paths.js";
 import { reportRun } from "./reporter.js";
+import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
 
 export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
@@ -27,6 +28,8 @@ export interface RunnerConfig {
   readonly bots: readonly BotConfig[];
   readonly tools: readonly ToolConnection[];
   readonly modelGateway: ConfigMessage["modelGateway"];
+  /** 该用户全部 Bot 的 skill，按 botId 分开落盘。省略按空数组对账，也就是把留在盘上的旧 skill 清掉。 */
+  readonly skills?: ConfigMessage["skills"];
   readonly send: (message: AgentToControl) => void;
   /** 每个 Bot 的 Pi 目录建在这下面。Pi 的四个落盘点全部显式钉死，不碰 ~/.pi。 */
   readonly dataDir: string;
@@ -54,6 +57,7 @@ type BotLifecycle =
 
 interface BotRuntime {
   readonly botId: BotId;
+  readonly description: string;
   readonly dirs: BotDirs;
   session: BotSession | null;
   lifecycle: BotLifecycle;
@@ -93,6 +97,7 @@ export function createRunner(config: RunnerConfig): Runner {
       bot.id,
       {
         botId: bot.id,
+        description: bot.description,
         dirs: botDirs(config.dataDir, bot.id),
         session: null,
         lifecycle: { phase: "idle" },
@@ -100,6 +105,16 @@ export function createRunner(config: RunnerConfig): Runner {
       },
     ]),
   );
+
+  // config 一到就整目录对账，不等这个 Bot 被 prompt：不然一条把 skill 删光的 config 下来，
+  // 没人找它说话的 Bot 盘上那份就一直留着。会话是之后才懒建的，建的时候读到的已经是新的一份。
+  const skills = config.skills ?? [];
+  for (const bot of bots.values()) {
+    reconcileSkillDir(
+      bot.dirs.skillsDir,
+      skills.filter((skill) => skill.botId === bot.botId),
+    );
+  }
 
   const fail = (
     code: Extract<AgentToControl, { type: "agent_error" }>["code"],
@@ -114,9 +129,14 @@ export function createRunner(config: RunnerConfig): Runner {
     const activeRun = (): ActiveRun | null => (bot.lifecycle.phase === "running" ? bot.lifecycle.active : null);
     const created = await createBotSession({
       botId: bot.botId,
+      description: bot.description,
       dirs: ensureBotDirs(bot.dirs),
       gateway: config.modelGateway,
-      tools: [...extensionTools, ...createTopicTools({ activeRun, send: config.send })],
+      tools: [
+        ...extensionTools,
+        ...createTopicTools({ activeRun, send: config.send }),
+        ...createSkillTools({ activeRun, send: config.send }),
+      ],
       needsApproval,
       approvals,
       activeRun,

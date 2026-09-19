@@ -22,6 +22,7 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.85.1 的 SDK，一个 Bo
 <dataDir>/<botId>/agent      Pi 的 agentDir。auth.json、models-store.json 落在这里
 <dataDir>/<botId>/sessions   会话 JSONL
 <dataDir>/<botId>/work       会话的 cwd，Bot 干活的地方
+<dataDir>/<botId>/skills     config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 ```
 
 Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/agent`，一台云电脑上多个 Bot 共用一个进程时会互相串。四个都在 `src/bot-session.ts` 里钉死：
@@ -71,7 +72,7 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具由运行器自己挂，见下一节，排在 `extensionTools` 之后。桌面操作、MCP 桥接、存 skill 这三组还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具和 `src/skills.ts` 的 `propose_skill` 由运行器自己挂，见下面两节，排在 `extensionTools` 之后。桌面操作和 MCP 桥接还没做。测试用这个注册点塞两个假工具。
 
 ## 主题任务工具
 
@@ -155,6 +156,78 @@ prompt 的这一段和 `read_task` 的返回共用同一个 `renderTaskCard`，�
 剩下的一律抛。`BotId` 只是 `z.string().min(1).brand()`，模型猜的名字照样过得了 `ChecklistItem` 和 `AgentToControl.parse`，不在这里拦住就是一条形状合法的脏数据发到控制面，终态还记成 `ok`。
 
 `test/runner.test.ts` 的「运行器的主题任务工具」一节钉住这些：两条直接断言整张卡片的文本（一条满字段、一条全占位词加名单外的 id），其余九条都真跑一遍假上游，其中三条专钉经手的解析（名字解析成 id、猜的名字被拦下、退群的 id 原样放行）。「运行器的交接工具」一节另有十二条，覆盖整条报文的字段、指针换算、四道拦截，以及带 `handoffId` 的 prompt 里各段的先后。
+
+## skill
+
+**方向只有一个：控制面下发，运行器落盘。** skill 的真相源是控制面的 `skills` 表，运行器不往回同步文件。两个方向都能写的文件没有真相源，用户在 Web 上改的步骤和 Bot 刚存的文件谁覆盖谁说不清。改步骤、删除、复制给别的 Bot，都是改表再重发一条 `config`。
+
+### 落盘和对账
+
+`config.skills` 是该用户**全部 Bot** 的 skill，运行器按 `botId` 分，每个 Bot 落到自己的 `<botId>/skills` 下：
+
+```
+<dataDir>/<botId>/skills/<skillId>/SKILL.md
+```
+
+目录名就是 `skillId`，一条一个目录。文件长这样，frontmatter 的 `description` 用**第一步**，正文是编号的步骤：
+
+```markdown
+---
+name: "Globex 报价"
+description: "打开 CRM 找到 Globex 的联系人"
+---
+
+# Globex 报价
+
+1. 打开 CRM 找到 Globex 的联系人
+2. 按上季度的价目表算一版报价
+3. 把报价贴进邮件草稿
+```
+
+`description` 不能为空：Pi 的 `loadSkillFromFile` 把没有 description 的文件整条丢掉，所以步骤为空的 skill 回落到用名字当 description。两个字段都过 `JSON.stringify` 写成 YAML 的双引号标量，名字里的冒号和引号才不会把 frontmatter 撑破（Pi 用的是真 `yaml` 解析器）。
+
+对账在 `createRunner` 里做，**整目录**一次过：`config` 里没有的目录删掉、少的补上、内容变了的重写，内容一样的连 mtime 都不动。重跑同一份 `config` 不改任何文件。不等这个 Bot 被 prompt 就对账，不然一条把 skill 删光的 `config` 下来，没人找它说话的那个 Bot 盘上的旧文件会一直留着。
+
+两条边界上的防护：
+
+- `skillId` 直接当目录名，而 shared 的 `SkillId` 只保证是非空字符串。带 `/`、`\` 或等于 `..` 的 id **整条不落盘**，否则 `../../x` 这种 id 会把 `SKILL.md` 写到 `dataDir` 外面去，而对账只扫一层目录，写出去的永远清不掉。
+- 要写的位置上如果是个普通文件（或者 `SKILL.md` 那一格是个目录），先 `rm` 再建。对账在 `createRunner` 里同步做，直接写会 `EEXIST`/`EISDIR`，一个 Bot 的一条脏目录就能让这台机器上所有 Bot 的 runner 都建不起来。
+
+### 怎么让 Pi 看见
+
+`DefaultResourceLoader` 的 `noSkills` 保持 `true`，另外把 `additionalSkillPaths` 指到那个目录。`noSkills` 只关掉 Pi 默认的两处（`agentDir/skills` 和 `cwd/.pi/skills`），`additionalSkillPaths` 照收（`core/resource-loader.js` 的 `mergePaths`），所以这两个选项不打架，而 `~/.pi` 下的 skill 一条也进不来。
+
+**走这条不走 `skillsOverride`**：发现规则（目录里找 `SKILL.md`）、frontmatter 校验、重名去重、`reload()` 时的重扫，这几样都归 Pi 管。用 `skillsOverride` 就得自己调 `loadSkillsFromDir` 再把结果塞回去，等于把这几样重写一遍，而且 `reload()` 之后还得记得重新调。
+
+Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，模型看到的是一段 `<available_skills>`，每条带名字、description 和 `SKILL.md` 的绝对路径，按名字对上了就用 `read` 打开读步骤。控制面不改写用户正文里的 `/名`，模型就是靠这段自己找过去的。
+
+两处已知的毛刺，都不影响 skill 被加载：
+
+- Pi 的 `validateName` 按 Agent Skills 规范要求名字是小写字母、数字和连字符，中文名字会在 `getSkills().diagnostics` 里留一条 warning。加载不受影响（只有 description 为空才会整条丢掉），提示里的名字也是原样中文。
+- 同一个 Bot 底下两条 skill 重名时，Pi 只留先扫到的那条，另一条进 `diagnostics` 的 collision。名字的唯一性得控制面保证。
+
+### propose_skill
+
+存不存由 Bot 发起。`src/skills.ts` 的 `createSkillTools` 挂一个工具：
+
+| 工具 | 参数 | 返回 | 上行报文 |
+| --- | --- | --- | --- |
+| `propose_skill` | `name`（1 到 40 字）、`steps`（2 到 20 条，每条非空、每条不超过 500 字） | `已经在群里问用户存不存「<名字>」了，等他点。` | `skill_offer` |
+
+控制面收到 `skill_offer` 落一条消息，Web 画成一张带「存」「不存」的卡，用户点存才有 skill 行，再随新的 `config` 发回来。
+
+**一次运行最多问一次。** 第二次调用抛「这次已经问过了。」。一个 Bot 的运行是串行的，手里最多一次运行，所以记住刚问过的那个 `runId` 就够，不用攒一张表。
+
+这几个范围和 `protocol.ts` 里 `skill_offer` 的 schema 一一对齐：本地挡不住的会在 `AgentToControl.parse` 那里变成一坨英文 ZodError 扔给模型。范围和主题任务工具一个路子，**故意不写进 typebox 的 schema**：被 schema 挡下的模型只看得到一条英文 Validation 报错，看不出该写几条；交给工具里的检查统一报，给的是能照着改的中文。错误一律抛，理由见上面「主题任务工具」那节。
+
+### 系统提示
+
+`DefaultResourceLoader` 的 `appendSystemPrompt` 挂两段，按这个先后：
+
+1. Bot 的描述，也是它的边界（`config.bots[].description`，空串就不占这一段）。
+2. 提议存 skill 的规则：一件活用了三次以上工具才做完的，收尾时用 `propose_skill` 把步骤写成清单问用户存不存，一次运行最多一次。
+
+规则排在描述之后：先让模型知道自己是干什么的，再谈把这件活存下来。`<available_skills>` 由 Pi 拼在这两段之后。
 
 ## 跑测试
 
