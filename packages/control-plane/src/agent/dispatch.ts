@@ -4,20 +4,20 @@ import type {
   BotId,
   ControlToAgent,
   GroupId,
-  HandoffId,
   Message,
   MessageBody,
-  TopicTask,
+  RunId,
   UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
-import { appendMessage, listGroupBots, listMessages, type GroupBot } from "../repo/messages.js";
+import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
 import { findChiefBotId } from "../repo/groups.js";
 import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
+import { GroupTurns, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
@@ -27,14 +27,12 @@ export const CONTEXT_MESSAGES = 20;
 const CONTEXT_TEXT_LIMIT = 200;
 
 export const OFFLINE_NOTICE = "电脑不在线，消息已留着";
-export const NO_TARGET_NOTICE = "@ 一个 Bot 派活";
-export const MENTION_LOOP_NOTICE = "Bot 之间 @ 太多次，停下等你";
-export const HANDOFF_LOOP_NOTICE = "Bot 之间交接太多次，停下等你";
 
 export type DispatchDeps = {
   readonly db: Db;
   readonly push: PushHub;
   readonly agents: AgentHub;
+  readonly groupTurns?: GroupTurns;
 };
 
 export type DispatchOptions = {
@@ -42,18 +40,14 @@ export type DispatchOptions = {
   readonly routineRunId?: string | undefined;
 };
 
-export type DispatchOutcome =
-  | { readonly kind: "sent" }
-  | { readonly kind: "offline" }
-  | { readonly kind: "no_target" }
-  | { readonly kind: "partial" };
+export type DispatchOutcome = { readonly kind: "sent" } | { readonly kind: "offline" } | { readonly kind: "no_target" };
 
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
  * 电脑不在线时只在群里留一句话，不建 run，免得表里堆永远不会结束的行。
  */
 export async function dispatchUserMessage(
-  deps: DispatchDeps,
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
   ownerId: UserId,
   groupId: GroupId,
   trigger: Message,
@@ -71,81 +65,36 @@ export async function dispatchUserMessage(
     task = await setCurrentBot(deps.db, groupId, first, new Date());
     if (task !== null) deps.push.push(ownerId, { type: "task_updated", task });
   }
-  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions });
-  // 排在在线检查之前：没人可派的时候「@ 一个 Bot 派活」比「电脑不在线」有用。
-  if (targets.length === 0) {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: NO_TARGET_NOTICE });
-    return { kind: "no_target" };
+  const chiefBotId = await findChiefBotId(deps.db, groupId);
+  const targets = routeTargets({ members, chiefBotId, currentBotId: task?.currentBotId ?? null, mentions });
+  if (targets.length === 0) return { kind: "no_target" };
+
+  const reason =
+    members.length === 1
+      ? "solo"
+      : mentions.length > 0
+        ? "mentioned"
+        : chiefBotId !== null
+          ? "chief"
+          : task?.currentBotId !== null && task?.currentBotId !== undefined
+            ? "current"
+            : "everyone";
+  if (!deps.agents.isOnline(ownerId)) {
+    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
+    return { kind: "offline" };
   }
-
-  const origin = { kind: options.routineRunId === undefined ? "user" : "routine" } as const;
-  const reason = members.length === 1 ? "solo" : first === undefined ? "current" : "mentioned";
-  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, origin, reason, ...options });
-}
-
-/** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
-export async function dispatchBotMention(
-  deps: DispatchDeps,
-  ownerId: UserId,
-  groupId: GroupId,
-  trigger: Message,
-  targetBotId: BotId,
-): Promise<void> {
-  const members = await listGroupBots(deps.db, groupId);
-  if (members.length === 0) return;
-
-  const task = await findTaskByGroup(deps.db, groupId);
-  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [targetBotId] });
-  if (targets.length === 0) return;
-
-  await sendToTargets(deps, ownerId, groupId, {
-    trigger,
+  await deps.groupTurns.start({
+    groupId,
+    ownerId,
+    epoch: await messageSeq(deps.db, trigger.id),
     members,
-    targets,
-    task,
-    origin: botOrigin(members, trigger.body.kind === "bot" ? trigger.body.botId : targetBotId),
-    reason: "mentioned",
+    speakers: targets.map((botId) => ({ botId, trigger, reason })),
+    send: (speaker, includeRecent) => sendSpeaker(deps, ownerId, groupId, members, speaker, includeRecent, options),
   });
+  return { kind: "sent" };
 }
 
-export type HandoffDispatch = {
-  /** 群里那张交接卡。上下文取它之前那些，run 也挂在它上面。 */
-  readonly trigger: Message;
-  readonly targetBotId: BotId;
-  readonly fromBotId: BotId;
-  readonly handoffId: HandoffId;
-  /** 交接报文渲染出来的正文，当作这条 prompt 的正文发下去。 */
-  readonly text: string;
-};
-
-/**
- * 把活派给交接的目标。目标由报文点名，不走当前经手：确认之前当前经手还是交出去的那一个。
- * prompt 带上 handoffId，运行器据此才开出 accept_handoff。
- */
-export async function dispatchHandoff(
-  deps: DispatchDeps,
-  ownerId: UserId,
-  groupId: GroupId,
-  input: HandoffDispatch,
-): Promise<void> {
-  const members = await listGroupBots(deps.db, groupId);
-  const task = await findTaskByGroup(deps.db, groupId);
-  const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [input.targetBotId] });
-  if (targets.length === 0) return;
-
-  await sendToTargets(deps, ownerId, groupId, {
-    trigger: input.trigger,
-    members,
-    targets,
-    task,
-    origin: botOrigin(members, input.fromBotId),
-    reason: "handoff",
-    handoff: { id: input.handoffId, text: input.text },
-  });
-}
-
-type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
-type PromptOrigin = PromptMessage["origin"];
+type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
 
 /** 发信 Bot 已经不在群里时退回 user：报文是它留下的，但没有名字可署。 */
 function botOrigin(members: readonly GroupBot[], botId: BotId): PromptOrigin {
@@ -153,33 +102,24 @@ function botOrigin(members: readonly GroupBot[], botId: BotId): PromptOrigin {
   return bot === undefined ? { kind: "user" } : { kind: "bot", id: bot.id, name: bot.name, tag: bot.tag };
 }
 
-type SendInput = {
-  readonly trigger: Message;
-  readonly members: readonly GroupBot[];
-  readonly targets: readonly BotId[];
-  readonly task: TopicTask | null;
-  readonly origin: PromptOrigin;
-  readonly reason: PromptMessage["reason"];
-  /** 只有交接派活带它：正文换成交接报文，报文编号跟着下去。 */
-  readonly handoff?: { readonly id: HandoffId; readonly text: string } | undefined;
-  readonly routineRunId?: string | undefined;
-};
-
-/** 每个目标各起一个 run、各发一条 prompt。上下文按收件人分别生成，所以署名在每个人眼里都对。 */
-async function sendToTargets(
+async function sendSpeaker(
   deps: DispatchDeps,
   ownerId: UserId,
   groupId: GroupId,
-  input: SendInput,
-): Promise<Exclude<DispatchOutcome, { kind: "no_target" }>> {
+  members: readonly GroupBot[],
+  speaker: Speaker,
+  includeRecent: boolean,
+  options: DispatchOptions,
+): Promise<RunId | null> {
   if (!deps.agents.isOnline(ownerId)) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
-    return { kind: "offline" };
+    return null;
   }
 
-  const history = await recentBodies(deps.db, groupId, input.trigger);
+  const history = await recentBodies(deps.db, groupId, speaker.trigger, includeRecent);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
-  const roster = input.members.map(({ id, name, tag, description }) => ({
+  const task = await findTaskByGroup(deps.db, groupId);
+  const roster = members.map(({ id, name, tag, description }) => ({
     id,
     name,
     tag,
@@ -188,49 +128,45 @@ async function sendToTargets(
   }));
   const group = {
     id: groupId,
-    number: input.task?.number ?? "",
-    title: input.task?.title ?? "",
-    kind: input.members.length > 1 ? ("team" as const) : ("solo" as const),
+    number: task?.number ?? "",
+    title: task?.title ?? "",
+    kind: members.length > 1 ? ("team" as const) : ("solo" as const),
   };
-  let dropped = false;
-  let sentCount = 0;
-  for (const target of input.targets) {
-    const runId = await startRun(deps.db, {
-      ownerId,
-      botId: target,
-      groupId,
-      triggerMessageId: input.trigger.id,
-      routineRunId: input.routineRunId,
-    });
-    const sent = deps.agents.send(ownerId, {
-      type: "prompt",
-      runId,
-      botId: target,
-      groupId,
-      text: input.handoff?.text ?? triggerText(input.trigger.body),
-      origin: input.origin,
-      reason: input.reason,
-      group,
-      context: history.flatMap((body) => {
-        const line = summarize(body, target, input.members);
-        return line === null ? [] : [line];
-      }),
-      // 单 Bot 群没有任务卡可给，protocol.ts 就是这么定的。
-      task: input.members.length > 1 ? input.task : null,
-      members: roster,
-      // handoffId 可省，恒带一个 undefined 在 exactOptionalPropertyTypes 下不是同一件事。
-      ...(input.handoff === undefined ? {} : { handoffId: input.handoff.id }),
-    });
-    if (sent) sentCount += 1;
-    else dropped = true;
-  }
-  // 查在线和发报文之间连接掉了。run 行留着不结束，跟一次跑到一半断连是同一种痕迹。
-  // 几个目标一起没发出去也只留一句话：断的是同一条连接，说一遍就够。
-  if (dropped) {
+  const runId = await startRun(deps.db, {
+    ownerId,
+    botId: speaker.botId,
+    groupId,
+    triggerMessageId: speaker.trigger.id,
+    routineRunId: options.routineRunId,
+  });
+  const origin: PromptOrigin =
+    speaker.handoff !== undefined
+      ? botOrigin(members, speaker.handoff.fromBotId)
+      : speaker.trigger.body.kind === "bot"
+        ? botOrigin(members, speaker.trigger.body.botId)
+        : { kind: options.routineRunId === undefined ? "user" : "routine" };
+  const sent = deps.agents.send(ownerId, {
+    type: "prompt",
+    runId,
+    botId: speaker.botId,
+    groupId,
+    text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
+    origin,
+    reason: speaker.reason,
+    group,
+    context: history.flatMap((body) => {
+      const line = summarize(body, speaker.botId, members);
+      return line === null ? [] : [line];
+    }),
+    task: members.length > 1 ? task : null,
+    members: roster,
+    ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+  });
+  if (!sent) {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
-    return sentCount > 0 ? { kind: "partial" } : { kind: "offline" };
+    return null;
   }
-  return { kind: "sent" };
+  return runId;
 }
 
 function triggerText(body: MessageBody): string {
@@ -240,10 +176,18 @@ function triggerText(body: MessageBody): string {
 
 type ContextLine = { readonly from: string; readonly text: string };
 
-async function recentBodies(db: Db, groupId: GroupId, trigger: Message): Promise<MessageBody[]> {
-  const result = await listMessages(db, groupId, { before: trigger.id, limit: CONTEXT_MESSAGES });
+async function recentBodies(
+  db: Db,
+  groupId: GroupId,
+  trigger: Message,
+  includeRecent: boolean,
+): Promise<MessageBody[]> {
+  const result = await listMessages(db, groupId, {
+    ...(includeRecent ? {} : { before: trigger.id }),
+    limit: CONTEXT_MESSAGES,
+  });
   if (result.kind !== "ok") return [];
-  return result.page.messages.map((message) => message.body);
+  return result.page.messages.filter((message) => message.id !== trigger.id).map((message) => message.body);
 }
 
 /** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。 */

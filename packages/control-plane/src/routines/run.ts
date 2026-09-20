@@ -2,6 +2,7 @@ import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/
 import type { Db } from "../db/client.js";
 import type { AgentHub } from "../agent/hub.js";
 import { dispatchUserMessage } from "../agent/dispatch.js";
+import type { GroupTurns } from "../agent/group-turn.js";
 import { findSoloGroup } from "../repo/groups.js";
 import { appendMessage } from "../repo/messages.js";
 import {
@@ -19,6 +20,7 @@ export type RoutineDeps = {
   readonly db: Db;
   readonly push: PushHub;
   readonly agents: AgentHub;
+  readonly groupTurns: GroupTurns;
 };
 
 /** 派活那一步就没成，群里已经有一句「电脑不在线」，运行记录不该停在「运行中」。 */

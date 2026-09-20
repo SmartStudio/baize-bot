@@ -5,8 +5,8 @@ import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import { AGENT_PATH, AgentHub } from "./agent/hub.js";
+import { GroupTurns } from "./agent/group-turn.js";
 import { ToolCrypto } from "./crypto.js";
-import { MentionLoopGuard } from "./agent/mention-loop.js";
 import type { Db } from "./db/client.js";
 import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, toolSecretKey, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
@@ -54,8 +54,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
   const toolCrypto = new ToolCrypto(options.toolSecretKey ?? toolSecretKey());
   const hub = new PushHub(options.db);
-  // 一个实例，两处用：用户消息在 createApp 那边归零，上行 mention 在 AgentHub 那边计数。
-  const mentionLoop = new MentionLoopGuard();
+  const groupTurns = new GroupTurns(options.db, hub);
 
   // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
@@ -65,7 +64,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     gatewayModel: config.gatewayModel,
     priceInputPerM: config.priceInputPerM,
     priceOutputPerM: config.priceOutputPerM,
-    mentionLoop,
+    groupTurns,
     gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
     toolCrypto,
@@ -76,7 +75,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     hub,
     agents,
     toolCrypto,
-    mentionLoop,
+    groupTurns,
     secureCookie: options.secureCookie ?? false,
     gateway: {
       model: config.gatewayModel,
@@ -105,13 +104,13 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       socket.destroy();
       return;
     }
-    acceptClient(options.db, clients, hub, request, socket, head);
+    acceptClient(options.db, clients, hub, groupTurns, request, socket, head);
   });
 
   const port = await listeningPort(server);
   publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
-  const routines = new RoutineScheduler({ db: options.db, push: hub, agents, ...options.scheduler });
+  const routines = new RoutineScheduler({ db: options.db, push: hub, agents, groupTurns, ...options.scheduler });
   await routines.start();
 
   const reminders = setInterval(() => {
@@ -144,6 +143,7 @@ function acceptClient(
   db: Db,
   clients: WebSocketServer,
   hub: PushHub,
+  groupTurns: GroupTurns,
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer,
@@ -156,7 +156,10 @@ function acceptClient(
         socket.end("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
         return;
       }
-      clients.handleUpgrade(request, socket, head, (ws) => hub.add(user.id, ws));
+      clients.handleUpgrade(request, socket, head, (ws) => {
+        hub.add(user.id, ws);
+        for (const snapshot of groupTurns.snapshots(user.id)) ws.send(JSON.stringify(snapshot));
+      });
     })
     .catch(() => socket.destroy());
 }

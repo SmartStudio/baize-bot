@@ -1,5 +1,6 @@
 import type { Db } from "../db/client.js";
 import type { AgentHub } from "../agent/hub.js";
+import type { GroupTurns } from "../agent/group-turn.js";
 import { advanceCronTrigger, listCronRoutines, type OwnedRoutine, type RoutineRow } from "../repo/routines.js";
 import type { PushHub } from "../ws/hub.js";
 import { dueMoment } from "./cron.js";
@@ -12,6 +13,7 @@ export type SchedulerOptions = {
   readonly db: Db;
   readonly push: PushHub;
   readonly agents: AgentHub;
+  readonly groupTurns: GroupTurns;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;

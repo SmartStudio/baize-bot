@@ -67,6 +67,12 @@ export async function appendMessage(db: Db | Tx, groupId: string, body: MessageB
   return toMessage(row);
 }
 
+export async function messageSeq(db: Db, messageId: MessageId): Promise<number> {
+  const [row] = await db.select({ seq: messages.seq }).from(messages).where(eq(messages.id, messageId)).limit(1);
+  if (row === undefined) throw new Error(`消息 ${messageId} 不存在`);
+  return row.seq;
+}
+
 /** 正文里那支 `skill_offer`。落卡和点存两处都只认这一支，别的 kind 编译期就进不来。 */
 export type SkillOfferBody = Extract<MessageBody, { kind: "skill_offer" }>;
 

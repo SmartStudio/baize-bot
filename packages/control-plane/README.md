@@ -18,10 +18,13 @@
 | --- | --- |
 | 单 Bot 群 | 恒为它，@ 了谁、上一句谁经手都改变不了 |
 | 多 Bot 群，正文 @ 了人 | 被 @ 的那些，按正文首次出现顺序去重 |
-| 多 Bot 群，没 @ 人 | 当前经手 |
-| 多 Bot 群，没 @ 人也没有当前经手 | 没人，群里留一句「@ 一个 Bot 派活」 |
+| 多 Bot 群，没 @ 人、有首席 | 只派首席 |
+| 多 Bot 群，没 @ 人、没首席、有当前经手 | 只派当前经手 |
+| 多 Bot 群，没 @ 人、没首席也没当前经手 | 全员按成员表顺序轮流说 |
 
-规则本身是 `agent/routing.ts` 的两个纯函数，不碰数据库，成员由调用方查好传进去。「没人可派」这一句排在「电脑不在线」之前：谁都没 @ 的时候，让用户点个名比告诉他电脑睡了有用。
+`@所有人` 派给全员，顺序按成员表。首席是群属性，可以由 Bot 调用 `set_chief` 设置或卸任；首席优先于当前经手。Bot 没有话要说时以 `(pass)` 或 `（pass）` 开头回复，控制面不落这条消息，也不推给 Web。
+
+同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。Bot 消息累计到 10 条时停止，并在群里留一句提示。
 
 ### `@名` 在写入前解析
 
@@ -96,12 +99,12 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`，**不重发**
 | 这一步 | 谁做 | 结果 |
 | --- | --- | --- |
 | 决定交出去 | 运行器 | 发一条 `handoff` 上来，带目标 Bot 和 done / notDone / next / checklistIndex |
-| `handoff` 到达 | `agent/events.ts` | 一个事务里建群消息和 handoffs 行，先推 `handoff_updated` 再推那条 `message`，然后给目标派一条 prompt，带 `handoffId`，正文是 `agent/handoff.ts` 渲染出来的报文 |
+| `handoff` 到达 | `agent/events.ts` | 一个事务里建群消息和 handoffs 行，先推 `handoff_updated` 再推那条 `message`，目标 prompt 排到当前 run 的 `run_done` 之后，带 `handoffId`，正文是 `agent/handoff.ts` 渲染出来的报文 |
 | 目标确认接手 | 运行器发 `handoff_accept` | 状态改 accepted、`tasks.current_bot_id` 换人、经手记录补上一位的 `to` 再加新一位，推 `handoff_updated` 和 `task_updated` |
 
 **确认之前当前经手不换人。** 交出去的那一个照旧收群里不 @ 人的消息，目标只是多收到一份报文。换人发生在 accept，不在发起，所以目标一直不确认时活不会悬在半空。
 
-交接与 Bot @ 共用次数上限；越限时不落卡，也不写 handoffs 行。第一次越限留一条提示，后续静默。
+群回合里的 Bot 消息达到 10 条后停止派发交接；群里留一条提示，之后静默。
 
 ### 两道校验
 

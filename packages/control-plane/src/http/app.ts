@@ -55,7 +55,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
-import type { MentionLoopGuard } from "../agent/mention-loop.js";
+import type { GroupTurns } from "../agent/group-turn.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
@@ -103,7 +103,7 @@ export type AppDeps = {
   readonly hub: PushHub;
   readonly agents: AgentHub;
   readonly toolCrypto: ToolCrypto;
-  readonly mentionLoop: MentionLoopGuard;
+  readonly groupTurns: GroupTurns;
   readonly secureCookie: boolean;
   readonly gateway: Omit<GatewayDeps, "db">;
 };
@@ -121,7 +121,7 @@ const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const { agents, db, hub } = deps;
-  const routineDeps = { db, push: hub, agents };
+  const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns };
   const app = new Hono<Env>();
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
@@ -465,8 +465,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       mentions.length === 0
         ? ({ kind: "user", text: body.value.text } as const)
         : ({ kind: "user", text: body.value.text, mentions } as const);
-    // 防循环的限额是「两条用户消息之间」，所以用户一说话就归零。
-    deps.mentionLoop.reset(owned);
+    deps.groupTurns.cancel(groupId.data);
 
     const message = await appendMessage(db, owned, sent);
     hub.push(c.get("user").id, { type: "message", message });
@@ -478,7 +477,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     }
 
     const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
-    if (!settled) await dispatchUserMessage({ db, push: hub, agents }, c.get("user").id, groupId.data, message);
+    if (!settled)
+      await dispatchUserMessage(
+        { db, push: hub, agents, groupTurns: deps.groupTurns },
+        c.get("user").id,
+        groupId.data,
+        message,
+      );
     return c.json(SendMessageResponse.parse({ message }), 201);
   });
 

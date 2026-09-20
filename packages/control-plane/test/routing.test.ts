@@ -15,6 +15,7 @@ describe("派活目标", () => {
   it("多 Bot 群里只派给被 @ 的，没被 @ 又不是当前经手的不在目标里", () => {
     const targets = routeTargets({
       members: [sales, buyer, clerk],
+      chiefBotId: null,
       currentBotId: null,
       mentions: [buyer.id],
     });
@@ -22,31 +23,52 @@ describe("派活目标", () => {
   });
 
   it("多 Bot 群没有 @ 时派给当前经手的", () => {
-    const targets = routeTargets({ members: [sales, buyer], currentBotId: sales.id, mentions: [] });
+    const targets = routeTargets({ members: [sales, buyer], chiefBotId: null, currentBotId: sales.id, mentions: [] });
     expect(targets).toEqual([sales.id]);
   });
 
-  it("多 Bot 群没有 @ 也没有当前经手时不派给任何人", () => {
-    expect(routeTargets({ members: [sales, buyer], currentBotId: null, mentions: [] })).toEqual([]);
+  it("多 Bot 群没有 @ 时首席优先于经手", () => {
+    const targets = routeTargets({
+      members: [sales, buyer],
+      chiefBotId: buyer.id,
+      currentBotId: sales.id,
+      mentions: [],
+    });
+    expect(targets).toEqual([buyer.id]);
   });
 
-  it("当前经手的已经不是群成员时不派给它", () => {
-    const targets = routeTargets({ members: [sales, buyer], currentBotId: outsider.id, mentions: [] });
-    expect(targets).toEqual([]);
+  it("多 Bot 群没有 @、首席和当前经手时按成员顺序派全员", () => {
+    expect(routeTargets({ members: [sales, buyer], chiefBotId: null, currentBotId: null, mentions: [] })).toEqual([
+      sales.id,
+      buyer.id,
+    ]);
+  });
+
+  it("当前经手已不是群成员时退回全员", () => {
+    const targets = routeTargets({
+      members: [sales, buyer],
+      chiefBotId: null,
+      currentBotId: outsider.id,
+      mentions: [],
+    });
+    expect(targets).toEqual([sales.id, buyer.id]);
   });
 
   it("单 Bot 群恒派给那一个，@ 了别人也一样", () => {
-    expect(routeTargets({ members: [sales], currentBotId: null, mentions: [] })).toEqual([sales.id]);
-    expect(routeTargets({ members: [sales], currentBotId: outsider.id, mentions: [outsider.id] })).toEqual([sales.id]);
+    expect(routeTargets({ members: [sales], chiefBotId: null, currentBotId: null, mentions: [] })).toEqual([sales.id]);
+    expect(
+      routeTargets({ members: [sales], chiefBotId: null, currentBotId: outsider.id, mentions: [outsider.id] }),
+    ).toEqual([sales.id]);
   });
 
   it("成员为空时不派给任何人", () => {
-    expect(routeTargets({ members: [], currentBotId: sales.id, mentions: [sales.id] })).toEqual([]);
+    expect(routeTargets({ members: [], chiefBotId: null, currentBotId: sales.id, mentions: [sales.id] })).toEqual([]);
   });
 
   it("mentions 里混进非群成员时它被滤掉", () => {
     const targets = routeTargets({
       members: [sales, buyer],
+      chiefBotId: null,
       currentBotId: null,
       mentions: [outsider.id, buyer.id],
     });
@@ -56,6 +78,7 @@ describe("派活目标", () => {
   it("多个目标按 @ 首次出现的顺序排，并过滤群外目标", () => {
     const targets = routeTargets({
       members: [sales, buyer, clerk],
+      chiefBotId: null,
       currentBotId: null,
       mentions: [clerk.id, outsider.id, buyer.id, clerk.id, sales.id],
     });
@@ -63,18 +86,19 @@ describe("派活目标", () => {
   });
 
   it("交接还没确认时，不 @ 人的消息仍然派给交出去的那一个", () => {
-    const targets = routeTargets({ members: [sales, buyer], currentBotId: sales.id, mentions: [] });
+    const targets = routeTargets({ members: [sales, buyer], chiefBotId: null, currentBotId: sales.id, mentions: [] });
     expect(targets, "确认之前当前经手没换人，小采只是收到了一份报文").toEqual([sales.id]);
   });
 
   it("交接确认之后，不 @ 人的消息只派给接手的那一个", () => {
-    const targets = routeTargets({ members: [sales, buyer], currentBotId: buyer.id, mentions: [] });
+    const targets = routeTargets({ members: [sales, buyer], chiefBotId: null, currentBotId: buyer.id, mentions: [] });
     expect(targets, "换完经手，群里的话不再落到小销身上").toEqual([buyer.id]);
   });
 
   it("同一个 Bot @ 多次只派一次", () => {
     const targets = routeTargets({
       members: [sales, buyer],
+      chiefBotId: null,
       currentBotId: null,
       mentions: [buyer.id, buyer.id],
     });
@@ -124,5 +148,9 @@ describe("解析正文里的 @", () => {
 
   it("正文里没有 @ 时返回空", () => {
     expect(parseMentions("小销 查一下", [sales, buyer])).toEqual([]);
+  });
+
+  it("@所有人 按成员表顺序派全员", () => {
+    expect(parseMentions("@小服 @所有人 一起看", [sales, buyer, clerk])).toEqual([sales.id, buyer.id, clerk.id]);
   });
 });

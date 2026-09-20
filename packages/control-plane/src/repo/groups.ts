@@ -28,6 +28,15 @@ export async function findChiefBotId(db: Db, groupId: GroupId): Promise<BotId | 
   return row?.chiefBotId === undefined || row.chiefBotId === null ? null : BotId.parse(row.chiefBotId);
 }
 
+export async function setChiefBotId(db: Db, groupId: GroupId, targetBotId: BotId | null): Promise<boolean> {
+  const [changed] = await db
+    .update(groups)
+    .set({ chiefBotId: targetBotId })
+    .where(and(eq(groups.id, groupId), sql`${groups.chiefBotId} is distinct from ${targetBotId}`))
+    .returning({ id: groups.id });
+  return changed !== undefined;
+}
+
 export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | null> {
   const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId)).limit(1);
   return row === undefined ? null : GroupId.parse(row.id);

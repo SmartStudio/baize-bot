@@ -23,8 +23,8 @@ import { finishRun, openRunsForOwner } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
 import { failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { handleAgentEvent } from "./events.js";
-import type { MentionLoopGuard } from "./mention-loop.js";
+import { clearTextPrefixes, handleAgentEvent } from "./events.js";
+import type { GroupTurns } from "./group-turn.js";
 
 export const AGENT_PATH = "/agent";
 
@@ -52,8 +52,7 @@ export type AgentHubDeps = {
   readonly gatewayModel: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
-  /** 和 createApp 收的是同一个实例：Bot 之间 @ 的计数要被上行 mention 和用户消息两边碰到。 */
-  readonly mentionLoop: MentionLoopGuard;
+  readonly groupTurns: GroupTurns;
   /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
   readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
@@ -173,7 +172,7 @@ export class AgentHub {
           db: this.#deps.db,
           push: this.#deps.push,
           agents: this,
-          mentionLoop: this.#deps.mentionLoop,
+          groupTurns: this.#deps.groupTurns,
           priceInputPerM: this.#deps.priceInputPerM,
           priceOutputPerM: this.#deps.priceOutputPerM,
         },
@@ -246,8 +245,14 @@ export class AgentHub {
         return { message };
       });
       if (result === null) continue;
+      clearTextPrefixes(run.runId);
+      if (run.groupId !== null) this.#deps.groupTurns.abandon(run.groupId, run.runId);
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
-      await failRoutineRunOf({ db: this.#deps.db, push: this.#deps.push, agents: this }, run.runId, DISCONNECT_NOTICE);
+      await failRoutineRunOf(
+        { db: this.#deps.db, push: this.#deps.push, agents: this, groupTurns: this.#deps.groupTurns },
+        run.runId,
+        DISCONNECT_NOTICE,
+      );
     }
   }
 

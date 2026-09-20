@@ -81,7 +81,7 @@ async function groupMessages(job: Running): Promise<Message[]> {
 }
 
 describe("bot_text", () => {
-  it("三段 delta 推出一条 message 和三条 message_delta，库里正文完整", async () => {
+  it("前三段流式正文先判前缀，再推出一条 message 和两条 delta", async () => {
     const job = await runningJob();
     const messageId = MessageId.parse(randomUUID());
 
@@ -108,10 +108,9 @@ describe("bot_text", () => {
         streaming: true,
       });
 
-      const deltas = [await job.push.next(), await job.push.next(), await job.push.next()];
+      const deltas = [await job.push.next(), await job.push.next()];
       expect(deltas.map((p) => (p.type === "message_delta" ? [p.delta, p.done] : p.type))).toEqual([
-        ["先看一眼", false],
-        ["再点进去", false],
+        ["先看一眼再点进去", false],
         ["好了", true],
       ]);
       for (const p of deltas) expect(p.type === "message_delta" ? p.messageId : null).toBe(messageId);

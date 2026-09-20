@@ -12,7 +12,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CONTEXT_MESSAGES, OFFLINE_NOTICE, dispatchUserMessage } from "../src/agent/dispatch.js";
 import { AgentHub } from "../src/agent/hub.js";
-import { MentionLoopGuard } from "../src/agent/mention-loop.js";
+import { GroupTurns } from "../src/agent/group-turn.js";
 import { ToolCrypto } from "../src/crypto.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -55,13 +55,14 @@ function dispatchDeps() {
   return {
     db: database.db,
     push: server.server.hub,
+    groupTurns: new GroupTurns(database.db, server.server.hub),
     agents: new AgentHub({
       db: database.db,
       push: server.server.hub,
       gatewayModel: "test",
       priceInputPerM: 0,
       priceOutputPerM: 0,
-      mentionLoop: new MentionLoopGuard(),
+      groupTurns: new GroupTurns(database.db, server.server.hub),
       gatewayBaseUrl: () => "",
       toolCrypto: new ToolCrypto("a".repeat(64)),
     }),
@@ -106,7 +107,7 @@ async function drain(push: PushClient) {
 }
 
 describe("派活", () => {
-  it("电脑离线返回 offline，多 Bot 群无人经手返回 no_target", async () => {
+  it("电脑离线时单 Bot 群和无人经手的多 Bot 群都返回 offline", async () => {
     const owner = await ownerWithBot();
     const offline = await appendMessage(database.db, owner.groupId, { kind: "user", text: "先存着" });
     expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, owner.groupId, offline)).toEqual({
@@ -119,7 +120,7 @@ describe("派活", () => {
     );
     const unaddressed = await appendMessage(database.db, group.group.id, { kind: "user", text: "谁来处理" });
     expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, group.group.id, unaddressed)).toEqual({
-      kind: "no_target",
+      kind: "offline",
     });
   });
 

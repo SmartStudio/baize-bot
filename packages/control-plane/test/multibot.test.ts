@@ -15,8 +15,7 @@ import {
   type TopicTask,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { MENTION_LOOP_LIMIT } from "../src/agent/mention-loop.js";
-import { MENTION_LOOP_NOTICE, NO_TARGET_NOTICE } from "../src/agent/dispatch.js";
+import { BOT_MESSAGE_LIMIT, MENTION_LOOP_NOTICE } from "../src/agent/group-turn.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -128,21 +127,54 @@ async function runFor(team: Team, groupId: GroupId, text: string): Promise<RunId
   return prompt.runId;
 }
 
+function finish(team: Team, runId: RunId, botId: BotId, groupId: GroupId = team.group.id): void {
+  team.agent.send({ type: "run_done", runId, botId, groupId, steps: 1, inputTokens: 0, outputTokens: 0 });
+}
+
+function reply(team: Team, runId: RunId, botId: BotId, text: string, groupId: GroupId = team.group.id): void {
+  team.agent.send({
+    type: "bot_text",
+    runId,
+    botId,
+    groupId,
+    messageId: MessageId.parse(randomUUID()),
+    delta: text,
+    done: true,
+  });
+}
+
 function item(text: string, done: boolean, ownerBotId: BotId | null): ChecklistItem {
   return { text, done, ownerBotId };
 }
 
 describe("多 Bot 群派活", () => {
-  it("@小服 @小销 时小服先收到 prompt 且成为经手", async () => {
+  it("@小服 @小销 串行，小销的 context 含小服刚才的回复", async () => {
     const team = await makeTeam();
 
     try {
       await say(team, team.group.id, "@小服 @小销 一起看");
       const first = await team.agent.expect("prompt");
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.current === team.service.id) {
+          expect(push.next).toEqual([team.sales.id]);
+          break;
+        }
+      }
+      reply(team, first.runId, team.service.id, "小服先答了");
+      finish(team, first.runId, team.service.id);
       const second = await team.agent.expect("prompt");
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.current === team.sales.id) {
+          expect(push.next).toEqual([]);
+          break;
+        }
+      }
 
       expect(first.botId, "正文先 @ 小服，所以第一条 prompt 先到小服").toBe(team.service.id);
       expect(second.botId, "第二条 prompt 再到小销").toBe(team.sales.id);
+      expect(second.context).toContainEqual({ from: "小服 · 客服", text: "小服先答了" });
       expect(
         first.members.map((member) => member.name),
         "成员表仍按群成员位置，小销在前",
@@ -200,17 +232,20 @@ describe("多 Bot 群派活", () => {
     }
   });
 
-  it("不 @ 人时派给当前经手，没有当前经手就留一句话不建 run", async () => {
+  it("不 @、无首席和经手时按成员顺序全员说；有经手时只派经手", async () => {
     const team = await makeTeam();
 
     try {
       await say(team, team.group.id, "先看看这件事");
-      const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
-      expect(bodies, "谁都没 @，群里只该多一句提示").toEqual([
-        { kind: "user", text: "先看看这件事" },
-        { kind: "system", text: NO_TARGET_NOTICE, tone: "error" },
-      ]);
-      expect(await runCount(team.group.id), "没派出去的活不该在用量表里留行").toBe(0);
+      const first = await team.agent.expect("prompt");
+      expect(first.botId).toBe(team.sales.id);
+      expect(first.reason).toBe("everyone");
+      finish(team, first.runId, team.sales.id);
+      const second = await team.agent.expect("prompt");
+      expect(second.botId).toBe(team.service.id);
+      expect(second.reason).toBe("everyone");
+      finish(team, second.runId, team.service.id);
+      expect(await runCount(team.group.id)).toBe(2);
 
       await say(team, team.group.id, "@小服 你来");
       expect((await team.agent.expect("prompt")).botId).toBe(team.service.id);
@@ -218,6 +253,7 @@ describe("多 Bot 群派活", () => {
       await say(team, team.group.id, "接着弄");
       const followUp = await team.agent.expect("prompt");
       expect(followUp.botId, "没 @ 人就归当前经手").toBe(team.service.id);
+      expect(followUp.reason).toBe("current");
       expect(followUp.text).toBe("接着弄");
     } finally {
       team.close();
@@ -271,6 +307,254 @@ describe("多 Bot 群派活", () => {
         { from: "小销", text: "价格我定好了" },
         { from: "小服 · 客服", text: "退货政策也写了" },
       ]);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("@所有人 按成员表顺序串行派全员", async () => {
+    const team = await makeTeam();
+    try {
+      await say(team, team.group.id, "@所有人 一起看");
+      const first = await team.agent.expect("prompt");
+      expect(first.botId).toBe(team.sales.id);
+      expect(first.reason).toBe("mentioned");
+      finish(team, first.runId, team.sales.id);
+      const second = await team.agent.expect("prompt");
+      expect(second.botId).toBe(team.service.id);
+      expect(second.reason).toBe("mentioned");
+    } finally {
+      team.close();
+    }
+  });
+
+  it("设首席后没 @ 只派首席，首席 @ 队友要等本次 run_done", async () => {
+    const team = await makeTeam();
+    try {
+      const setupRun = await runFor(team, team.group.id, "@小服 你当首席");
+      team.agent.send({
+        type: "set_chief",
+        runId: setupRun,
+        botId: team.service.id,
+        groupId: team.group.id,
+        targetBotId: team.sales.id,
+      });
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "group_updated") {
+          expect(push.group.chiefBotId).toBe(team.sales.id);
+          break;
+        }
+      }
+      finish(team, setupRun, team.service.id);
+      await say(team, team.group.id, "接着处理");
+      const chief = await team.agent.expect("prompt");
+      expect(chief.botId).toBe(team.sales.id);
+      expect(chief.reason).toBe("chief");
+      expect(chief.members.find((member) => member.id === team.sales.id)?.role).toBe("chief");
+      team.agent.send({
+        type: "mention",
+        runId: chief.runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        targetBotId: team.service.id,
+        text: "@小服 请补充售后",
+      });
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "bot") break;
+      }
+      expect(await runCount(team.group.id), "Bot @ 先落消息，当前 run 没结束就不建下一条 run").toBe(2);
+      finish(team, chief.runId, team.sales.id);
+      const teammate = await team.agent.expect("prompt");
+      expect(teammate.botId).toBe(team.service.id);
+      expect(teammate.reason).toBe("mentioned");
+      expect(teammate.text).toBe("@小服 请补充售后");
+    } finally {
+      team.close();
+    }
+  });
+
+  it("一轮没人 @ 时结束并推 group_turn current null", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.group.id, "@小销 回答");
+      finish(team, runId, team.sales.id);
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.current === null) {
+          expect(push.groupId).toBe(team.group.id);
+          expect(push.next).toEqual([]);
+          break;
+        }
+      }
+    } finally {
+      team.close();
+    }
+  });
+
+  it("(pass) 和全角括号版本不落 Bot 消息，也不推 message 或 delta", async () => {
+    const team = await makeTeam();
+    try {
+      for (const [index, prefix] of ["(pass)", "（pass）"].entries()) {
+        const runId = await runFor(team, team.group.id, "@小销 看看");
+        const messageId = MessageId.parse(randomUUID());
+        team.agent.send({
+          type: "bot_text",
+          runId,
+          botId: team.sales.id,
+          groupId: team.group.id,
+          messageId,
+          delta: prefix.slice(0, 3),
+          done: false,
+        });
+        team.agent.send({
+          type: "bot_text",
+          runId,
+          botId: team.sales.id,
+          groupId: team.group.id,
+          messageId,
+          delta: `${prefix.slice(3)} 第 ${index + 1} 次`,
+          done: true,
+        });
+        finish(team, runId, team.sales.id);
+        for (;;) {
+          const push = await team.push.next();
+          expect(push.type === "message_delta" ? push.messageId : null).not.toBe(messageId);
+          expect(push.type === "message" ? push.message.id : null).not.toBe(messageId);
+          if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === runId) break;
+        }
+      }
+      expect((await messagesIn(team, team.group.id)).filter((message) => message.body.kind === "bot")).toHaveLength(0);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("用户中途说话换 epoch，旧 run 落消息但不再推进", async () => {
+    const team = await makeTeam();
+    try {
+      await say(team, team.group.id, "@小服 @小销 先讨论");
+      const oldRun = await team.agent.expect("prompt");
+      await say(team, team.group.id, "@小销 换个问题");
+      const newRun = await team.agent.expect("prompt");
+      expect(newRun.botId).toBe(team.sales.id);
+      reply(team, oldRun.runId, team.service.id, "旧问题的回复");
+      finish(team, oldRun.runId, team.service.id);
+      finish(team, newRun.runId, team.sales.id);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === newRun.runId)
+          break;
+      }
+      expect(await runCount(team.group.id), "旧回合的第二位不该再建 run").toBe(2);
+      expect(
+        (await messagesIn(team, team.group.id)).some(
+          (message) => message.body.kind === "bot" && message.body.text === "旧问题的回复",
+        ),
+      ).toBe(true);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("重连 /api/ws 会收到正在进行的 group_turn 快照", async () => {
+    const team = await makeTeam();
+    const second = await (async () => {
+      await say(team, team.group.id, "@小服 @小销 一起看");
+      await team.agent.expect("prompt");
+      return connectPush(server.server.port, team.client.cookie ?? "");
+    })();
+    try {
+      const snapshot = await second.nextRaw();
+      expect(snapshot.type).toBe("group_turn");
+      if (snapshot.type === "group_turn") {
+        expect(snapshot.groupId).toBe(team.group.id);
+        expect(snapshot.epoch).toBeGreaterThan(0);
+        expect(snapshot.current).toBe(team.service.id);
+        expect(snapshot.next).toEqual([team.sales.id]);
+      }
+    } finally {
+      second.close();
+      team.close();
+    }
+  });
+});
+
+describe("上行 set_chief", () => {
+  it("群外目标整条丢弃；卸任推 group_updated 且只落一条系统消息", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.group.id, "@小销 设置首席");
+      const outsider = (await makeBot(team.client, "小采", "采购")).bot;
+      await team.agent.expect("config");
+      const sendChief = (targetBotId: BotId | null) =>
+        team.agent.send({
+          type: "set_chief",
+          runId,
+          botId: team.sales.id,
+          groupId: team.group.id,
+          targetBotId,
+        });
+      sendChief(outsider.id);
+      sendChief(team.sales.id);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "group_updated") {
+          expect(push.group.chiefBotId).toBe(team.sales.id);
+          break;
+        }
+      }
+      sendChief(team.sales.id);
+      sendChief(null);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "group_updated") {
+          expect(push.group.chiefBotId).toBeNull();
+          break;
+        }
+      }
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "system" && push.message.body.text === "小销卸任首席")
+          break;
+      }
+      const systems = (await messagesIn(team, team.group.id)).flatMap((message) =>
+        message.body.kind === "system" ? [message.body] : [],
+      );
+      expect(systems).toEqual([
+        { kind: "system", text: "小销成为首席" },
+        { kind: "system", text: "小销卸任首席" },
+      ]);
+      const detail = GroupResponse.parse(await (await team.client.get(`/api/groups/${team.group.id}`)).json());
+      expect(detail.group.chiefBotId).toBeNull();
+    } finally {
+      team.close();
+    }
+  });
+
+  it("单 Bot 群的 set_chief 整条丢弃", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.soloGroupId, "我来");
+      team.agent.send({
+        type: "set_chief",
+        runId,
+        botId: team.service.id,
+        groupId: team.soloGroupId,
+        targetBotId: team.service.id,
+      });
+      finish(team, runId, team.service.id, team.soloGroupId);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === runId) break;
+        expect(push.type).not.toBe("group_updated");
+      }
+      const detail = GroupResponse.parse(await (await team.client.get(`/api/groups/${team.soloGroupId}`)).json());
+      expect(detail.group.chiefBotId).toBeNull();
+      expect(
+        (await messagesIn(team, team.soloGroupId)).filter((message) => message.body.kind === "system"),
+      ).toHaveLength(0);
     } finally {
       team.close();
     }
@@ -410,6 +694,7 @@ describe("上行 mention", () => {
         targetBotId: team.service.id,
         text: "@小服 这单退款你看下",
       });
+      finish(team, runId, team.sales.id);
 
       // 小销要是也收到了，按成员顺序它那条会排在前面，所以这里读到小服就说明只派了一个。
       const prompt = await team.agent.expect("prompt");
@@ -423,7 +708,7 @@ describe("上行 mention", () => {
       });
 
       const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
-      expect(bodies.at(-1)).toEqual({
+      expect(bodies.find((body) => body.kind === "bot")).toEqual({
         kind: "bot",
         botId: team.sales.id,
         text: "@小服 这单退款你看下",
@@ -446,7 +731,6 @@ describe("上行 mention", () => {
       const outsider = (await makeBot(team.client, "小采", "采购")).bot;
       // 建 Bot 会重发一遍 config，先收掉它，后面读到的才是派活。
       await team.agent.expect("config");
-      const before = (await messagesIn(team, team.group.id)).length;
 
       team.agent.send({
         type: "mention",
@@ -473,55 +757,28 @@ describe("上行 mention", () => {
         targetBotId: team.service.id,
         text: "@小服 还是你来",
       });
+      finish(team, runId, team.sales.id);
 
       const prompt = await team.agent.expect("prompt");
       expect(prompt.botId).toBe(team.service.id);
-      expect((await messagesIn(team, team.group.id)).length, "丢掉的两条一条消息都不该留").toBe(before + 1);
+      expect((await messagesIn(team, team.group.id)).filter((message) => message.body.kind === "bot")).toHaveLength(1);
     } finally {
       team.close();
     }
   });
 
-  it("两条用户消息之间 Bot 发起的 @ 到了上限就停下", async () => {
+  it("Bot 消息累计到 10 条就留一句提示并停止派发", async () => {
     const team = await makeTeam();
-
     try {
       const runId = await runFor(team, team.group.id, "@小销 开个头");
-      const mention = (text: string) =>
-        team.agent.send({
-          type: "mention",
-          runId,
-          botId: team.sales.id,
-          groupId: team.group.id,
-          targetBotId: team.service.id,
-          text,
-        });
-
-      for (let round = 1; round <= MENTION_LOOP_LIMIT + 1; round += 1) mention(`@小服 第 ${round} 遍`);
-      for (let round = 1; round <= MENTION_LOOP_LIMIT; round += 1) {
-        const prompt = await team.agent.expect("prompt");
-        expect(prompt.text, "前十条各派一次").toBe(`@小服 第 ${round} 遍`);
-      }
-
-      // 越线那条在群里留的话推出来，就说明它已经处理完了，下面那条用户消息不会赶在它前面把计数清掉。
+      for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) reply(team, runId, team.sales.id, `第 ${i + 1} 条`);
       await waitForSystemPush(team, MENTION_LOOP_NOTICE);
-      const texts = (await messagesIn(team, team.group.id)).flatMap((message) =>
-        message.body.kind === "system" ? [message.body.text] : [],
-      );
-      expect(texts, "越线的第一条留一句话，越线之后的不再重复").toEqual([MENTION_LOOP_NOTICE]);
-      expect(
-        (await messagesIn(team, team.group.id)).find((message) => message.body.kind === "system")?.body,
-      ).toMatchObject({ tone: "error" });
-
-      // 越线那条要是也派了，它会排在这条用户消息的派活前面。
-      await say(team, team.group.id, "@小销 我来说一句");
-      const afterUser = await team.agent.expect("prompt");
-      expect(afterUser.botId, "第十一条没派出去").toBe(team.sales.id);
-
-      mention("@小服 用户说完了再来");
-      const revived = await team.agent.expect("prompt");
-      expect(revived.botId, "用户一说话计数就归零，Bot 又能 @ 了").toBe(team.service.id);
-      expect(revived.text).toBe("@小服 用户说完了再来");
+      finish(team, runId, team.sales.id);
+      const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
+      expect(bodies.filter((body) => body.kind === "bot")).toHaveLength(BOT_MESSAGE_LIMIT);
+      expect(bodies.filter((body) => body.kind === "system" && body.text === MENTION_LOOP_NOTICE)).toHaveLength(1);
+      await say(team, team.group.id, "@小服 新一轮");
+      expect((await team.agent.expect("prompt")).botId).toBe(team.service.id);
     } finally {
       team.close();
     }

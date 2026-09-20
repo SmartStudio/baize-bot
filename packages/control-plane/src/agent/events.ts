@@ -1,8 +1,17 @@
-import type { AgentToControl, BotId, GroupId, Message, MessageBody, RunId, UserId } from "@baize/shared";
+import {
+  GroupId,
+  type AgentToControl,
+  type BotId,
+  type Message,
+  type MessageBody,
+  type RunId,
+  type UserId,
+} from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { createApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
+import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
 import {
   appendBotDelta,
   appendMessage,
@@ -17,16 +26,15 @@ import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
 import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { HANDOFF_LOOP_NOTICE, MENTION_LOOP_NOTICE, dispatchBotMention, dispatchHandoff } from "./dispatch.js";
+import type { GroupTurns } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
-import type { MentionLoopGuard } from "./mention-loop.js";
 
 export type AgentEventDeps = {
   readonly db: Db;
   readonly push: PushHub;
   readonly agents: AgentHub;
-  readonly mentionLoop: MentionLoopGuard;
+  readonly groupTurns: GroupTurns;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
 };
@@ -77,6 +85,9 @@ export async function handleAgentEvent(
     case "handoff_accept":
       await onHandoffAccept(deps, conn, message);
       return;
+    case "set_chief":
+      await onSetChief(deps, conn, message);
+      return;
   }
 }
 
@@ -85,12 +96,12 @@ async function resolveRun(
   deps: AgentEventDeps,
   conn: AgentConnection,
   event: { readonly runId: RunId; readonly botId: BotId; readonly groupId: GroupId },
-): Promise<string | null> {
+): Promise<GroupId | null> {
   // 报文里的群号是外部输入，findGroupId 按归属人过滤，不是这台电脑主人的群整条丢掉。
   const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (groupId === null) return null;
   // 外键只保证 runId 存在，管不了它指到哪个群：不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。
-  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId)) return groupId;
+  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId)) return GroupId.parse(groupId);
   console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
   return null;
 }
@@ -105,10 +116,38 @@ type Mention = Extract<AgentToControl, { type: "mention" }>;
 type SkillOffer = Extract<AgentToControl, { type: "skill_offer" }>;
 type HandoffEvent = Extract<AgentToControl, { type: "handoff" }>;
 type HandoffAcceptEvent = Extract<AgentToControl, { type: "handoff_accept" }>;
+type SetChiefEvent = Extract<AgentToControl, { type: "set_chief" }>;
+
+type TextPrefix =
+  | { readonly kind: "buffering"; readonly text: string; readonly runId: RunId }
+  | { readonly kind: "pass"; readonly runId: RunId }
+  | { readonly kind: "visible"; readonly runId: RunId };
+const textPrefixes = new Map<string, TextPrefix>();
+
+export function clearTextPrefixes(runId: RunId): void {
+  for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
+}
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
+  if (deps.groupTurns.isBlocked(event.runId)) return;
+
+  const previous = textPrefixes.get(event.messageId);
+  if (previous?.kind === "pass") return;
+  let delta = event.delta;
+  if (previous === undefined || previous.kind === "buffering") {
+    delta = (previous?.text ?? "") + event.delta;
+    if (delta.length < 6 && !event.done) {
+      textPrefixes.set(event.messageId, { kind: "buffering", text: delta, runId: event.runId });
+      return;
+    }
+    if (delta.startsWith("(pass)") || delta.startsWith("（pass）")) {
+      textPrefixes.set(event.messageId, { kind: "pass", runId: event.runId });
+      return;
+    }
+    textPrefixes.set(event.messageId, { kind: "visible", runId: event.runId });
+  }
 
   const appended = await appendMessageWithId(deps.db, event.messageId, groupId, {
     kind: "bot",
@@ -123,14 +162,15 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   // 先推空壳再推 delta，客户端才有一条可以往上追加正文的消息。
   if (appended.kind === "created") deps.push.push(conn.ownerId, { type: "message", message: appended.message });
 
-  await appendBotDelta(deps.db, event.messageId, groupId, event.delta, event.done);
+  const updated = await appendBotDelta(deps.db, event.messageId, groupId, delta, event.done);
   deps.push.push(conn.ownerId, {
     type: "message_delta",
     messageId: event.messageId,
     groupId: event.groupId,
-    delta: event.delta,
+    delta,
     done: event.done,
   });
+  if (event.done && updated !== null) await deps.groupTurns.recordBotMessage(groupId, event.runId, updated);
 }
 
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
@@ -183,6 +223,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     amount: usage.amount,
   });
   await chargeRoutineRunOf(deps, event.runId, usage.amount);
+  clearTextPrefixes(event.runId);
+  await deps.groupTurns.runDone(event.groupId, event.runId);
 }
 
 const ERROR_REASONS: Record<AgentError["code"], string> = {
@@ -276,7 +318,7 @@ async function onTaskChecklist(deps: AgentEventDeps, conn: AgentConnection, even
  */
 async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Mention): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
-  if (groupId === null) return;
+  if (groupId === null || deps.groupTurns.isBlocked(event.runId)) return;
 
   const members = await listGroupBots(deps.db, groupId);
   const known = members.some((member) => member.id === event.targetBotId);
@@ -292,27 +334,7 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
     streaming: false,
     mentions: [event.targetBotId],
   });
-
-  switch (deps.mentionLoop.record(groupId)) {
-    case "allow":
-      await dispatchBotMention(
-        { db: deps.db, push: deps.push, agents: deps.agents },
-        conn.ownerId,
-        said.groupId,
-        said,
-        event.targetBotId,
-      );
-      return;
-    case "stop":
-      await appendAndPush(deps, conn.ownerId, groupId, {
-        kind: "system",
-        tone: "error",
-        text: MENTION_LOOP_NOTICE,
-      });
-      return;
-    case "silent":
-      return;
-  }
+  await deps.groupTurns.recordBotMessage(groupId, event.runId, said);
 }
 
 /**
@@ -344,7 +366,7 @@ async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: 
  */
 async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: HandoffEvent): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
-  if (groupId === null) return;
+  if (groupId === null || deps.groupTurns.isBlocked(event.runId)) return;
 
   const task = await findTaskByGroup(deps.db, groupId);
   if (task === null || task.currentBotId !== event.botId) {
@@ -357,20 +379,6 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   if (!known || event.toBotId === event.botId) {
     console.warn(`电脑 ${conn.computerId} 报的交接目标 ${event.toBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
     return;
-  }
-
-  switch (deps.mentionLoop.record(groupId)) {
-    case "allow":
-      break;
-    case "stop":
-      await appendAndPush(deps, conn.ownerId, groupId, {
-        kind: "system",
-        tone: "error",
-        text: HANDOFF_LOOP_NOTICE,
-      });
-      return;
-    case "silent":
-      return;
   }
 
   const created = await createHandoff(deps.db, {
@@ -387,18 +395,39 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: created.handoff });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
 
-  await dispatchHandoff({ db: deps.db, push: deps.push, agents: deps.agents }, conn.ownerId, created.message.groupId, {
+  deps.groupTurns.queueHandoff(groupId, event.runId, {
+    botId: event.toBotId,
     trigger: created.message,
-    targetBotId: event.toBotId,
-    fromBotId: event.botId,
-    handoffId: created.handoff.id,
-    text: renderHandoffReport({
-      fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
-      done: event.done,
-      notDone: event.notDone,
-      next: event.next,
-      checklistIndex: event.checklistIndex,
-    }),
+    reason: "handoff",
+    handoff: {
+      id: created.handoff.id,
+      fromBotId: event.botId,
+      text: renderHandoffReport({
+        fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
+        done: event.done,
+        notDone: event.notDone,
+        next: event.next,
+        checklistIndex: event.checklistIndex,
+      }),
+    },
+  });
+  await deps.groupTurns.recordHandoff(groupId, event.runId);
+}
+
+async function onSetChief(deps: AgentEventDeps, conn: AgentConnection, event: SetChiefEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const members = await listGroupBots(deps.db, groupId);
+  if (members.length < 2) return;
+  if (event.targetBotId !== null && !members.some((member) => member.id === event.targetBotId)) return;
+  const previousChief = await findChiefBotId(deps.db, groupId);
+  if (!(await setChiefBotId(deps.db, groupId, event.targetBotId))) return;
+  const detail = await findGroup(deps.db, conn.ownerId, groupId);
+  if (detail !== null) deps.push.push(conn.ownerId, { type: "group_updated", group: detail.group });
+  const name = members.find((member) => member.id === (event.targetBotId ?? previousChief))?.name ?? "Bot";
+  await appendAndPush(deps, conn.ownerId, groupId, {
+    kind: "system",
+    text: `${name}${event.targetBotId === null ? "卸任首席" : "成为首席"}`,
   });
 }
 

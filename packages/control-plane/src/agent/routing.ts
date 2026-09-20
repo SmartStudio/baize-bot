@@ -13,6 +13,7 @@ export type RoutingSkill = { readonly id: SkillId; readonly name: string };
  */
 export function routeTargets(input: {
   readonly members: readonly RoutingMember[];
+  readonly chiefBotId: BotId | null;
   readonly currentBotId: BotId | null;
   readonly mentions: readonly BotId[];
 }): BotId[] {
@@ -25,16 +26,31 @@ export function routeTargets(input: {
   const targets = [...new Set(input.mentions)].filter((id) => memberIds.has(id));
   if (targets.length > 0) return targets;
 
+  if (input.chiefBotId !== null && memberIds.has(input.chiefBotId)) return [input.chiefBotId];
   const current = input.currentBotId;
-  if (current === null) return [];
-  return input.members.some((member) => member.id === current) ? [current] : [];
+  if (current !== null && memberIds.has(current)) return [current];
+  return input.members.map((member) => member.id);
 }
 
 /** 正文里 @ 到的群成员。单 Bot 群不解析，@ 谁都派给那一个。 */
 export function parseMentions(text: string, members: readonly RoutingMember[]): BotId[] {
   if (members.length < 2) return [];
-  const hit = scanNames(text, "@", members);
-  return [...hit];
+  const named = [{ id: null, name: "所有人" }, ...members];
+  const byNameLength = named.toSorted((a, b) => b.name.length - a.name.length);
+  const hit = new Set<BotId>();
+  let everyone = false;
+  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
+    const from = at + 1;
+    for (const one of byNameLength) {
+      if (!text.startsWith(one.name, from)) continue;
+      const after = text.slice(from + one.name.length, from + one.name.length + 1);
+      if (after.trim() !== "") continue;
+      if (one.id === null) everyone = true;
+      else hit.add(one.id);
+      break;
+    }
+  }
+  return everyone ? members.map((member) => member.id) : [...hit];
 }
 
 /**

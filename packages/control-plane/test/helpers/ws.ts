@@ -5,6 +5,7 @@ import { WS_PATH } from "../../src/server.js";
 export type PushClient = {
   readonly socket: WebSocket;
   next(timeoutMs?: number): Promise<ServerPush>;
+  nextRaw(timeoutMs?: number): Promise<ServerPush>;
   close(): void;
 };
 
@@ -25,26 +26,31 @@ export async function connectPush(port: number, cookie: string): Promise<PushCli
     socket.once("error", reject);
   });
 
+  const nextRaw = (timeoutMs = 5000): Promise<ServerPush> =>
+    new Promise((resolve, reject) => {
+      const buffered = inbox.shift();
+      if (buffered !== undefined) return resolve(buffered);
+      const waiter = (push: ServerPush) => {
+        clearTimeout(timer);
+        resolve(push);
+      };
+      const timer = setTimeout(() => {
+        const at = waiters.indexOf(waiter);
+        if (at !== -1) waiters.splice(at, 1);
+        reject(new Error("等推送超时"));
+      }, timeoutMs);
+      waiters.push(waiter);
+    });
+
   return {
     socket,
-    next: (timeoutMs = 5000) =>
-      new Promise<ServerPush>((resolve, reject) => {
-        const buffered = inbox.shift();
-        if (buffered !== undefined) {
-          resolve(buffered);
-          return;
-        }
-        const waiter = (push: ServerPush) => {
-          clearTimeout(timer);
-          resolve(push);
-        };
-        const timer = setTimeout(() => {
-          const at = waiters.indexOf(waiter);
-          if (at !== -1) waiters.splice(at, 1);
-          reject(new Error("等推送超时"));
-        }, timeoutMs);
-        waiters.push(waiter);
-      }),
+    nextRaw,
+    next: async (timeoutMs = 5000) => {
+      for (;;) {
+        const push = await nextRaw(timeoutMs);
+        if (push.type !== "group_turn") return push;
+      }
+    },
     close: () => socket.close(),
   };
 }
