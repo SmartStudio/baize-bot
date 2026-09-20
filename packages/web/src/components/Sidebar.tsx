@@ -3,11 +3,12 @@ import { ArrowRightLeft, Hand, Plus, Search, Settings as SettingsIcon, Users } f
 import type { Bot, BotId, GroupId, User } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { activityOf, previewOf, timeOf } from "./messages/preview.js";
-import { memberIdsOf, type Conversation } from "../state/app.js";
+import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 
 type Props = {
   conversations: Conversation[];
   bots: Record<BotId, Bot>;
+  groupTurns: Record<GroupId, GroupTurn>;
   selectedGroupId: GroupId | null;
   user: User;
   onSelect: (groupId: GroupId) => void;
@@ -24,11 +25,13 @@ const membersOf = (conversation: Conversation, bots: Record<BotId, Bot>): Bot[] 
 const ConversationItem = ({
   conversation,
   bots,
+  turn,
   selected,
   onSelect,
 }: {
   conversation: Conversation;
   bots: Record<BotId, Bot>;
+  turn: GroupTurn | undefined;
   selected: boolean;
   onSelect: (groupId: GroupId) => void;
 }) => {
@@ -87,7 +90,11 @@ const ConversationItem = ({
           ) : null}
           {team ? (
             <span className="bot-item-sub" data-testid="group-handler">
-              {current ? `${current.name} 经手` : "待派活"}
+              {turn?.current
+                ? `${bots[turn.current]?.name ?? turn.current}正在说`
+                : current
+                  ? `${current.name} 经手`
+                  : "待派活"}
             </span>
           ) : null}
           <span className="bot-item-preview">
@@ -106,6 +113,7 @@ const ConversationItem = ({
 export const Sidebar = ({
   conversations,
   bots,
+  groupTurns,
   selectedGroupId,
   user,
   onSelect,
@@ -132,6 +140,7 @@ export const Sidebar = ({
       key={conversation.groupId}
       conversation={conversation}
       bots={bots}
+      turn={groupTurns[conversation.groupId]}
       selected={conversation.groupId === selectedGroupId}
       onSelect={onSelect}
     />

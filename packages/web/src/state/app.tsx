@@ -54,6 +54,7 @@ export type Conversation =
       kind: "team";
       groupId: GroupId;
       botIds: BotId[];
+      chiefBotId: BotId | null;
       task: TopicTask;
       lastMessage: Message | null;
       pendingApprovals: number;
@@ -62,6 +63,8 @@ export type Conversation =
 
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
   conversation.kind === "solo" ? [conversation.botId] : conversation.botIds;
+
+export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
 export type AppState =
   | { status: "loading" }
@@ -72,6 +75,8 @@ export type AppState =
       // Bot 的名字、标签、色相只存这一份。侧栏、气泡署名、任务卡头像、@ 弹层都从这里查，改名只落一个地方。
       bots: Record<BotId, Bot>;
       conversations: Conversation[];
+      groupTurns: Record<GroupId, GroupTurn>;
+      turnEpochs: Record<GroupId, number>;
       selectedGroupId: GroupId | null;
       messages: Record<GroupId, Message[]>;
       // 审批卡和交接卡的状态只在这两张表上。approval 和 handoff 类消息的正文只有一个 id，重推那条消息一个字
@@ -107,6 +112,9 @@ type Action =
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
   | { type: "group_created"; group: Group; task: TopicTask; select: boolean }
+  | { type: "group_updated"; group: Group }
+  | { type: "group_turn"; turn: GroupTurn }
+  | { type: "turns_cleared" }
   | { type: "task_updated"; task: TopicTask }
   | { type: "messages_set"; groupId: GroupId; messages: Message[] }
   | { type: "message_upserted"; message: Message }
@@ -242,6 +250,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
       kind: "team",
       groupId: item.group.id,
       botIds: item.group.botIds,
+      chiefBotId: item.group.chiefBotId,
       task: item.task,
       lastMessage: item.lastMessage,
       pendingApprovals: item.pendingApprovals,
@@ -253,6 +262,8 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     user,
     bots: registry,
     conversations,
+    groupTurns: {},
+    turnEpochs: {},
     selectedGroupId: conversations[0]?.groupId ?? null,
     messages: {},
     approvals: {},
@@ -319,6 +330,7 @@ const reduce = (state: AppState, action: Action): AppState => {
         kind: "team",
         groupId: action.group.id,
         botIds: action.group.botIds,
+        chiefBotId: action.group.chiefBotId,
         task: action.task,
         lastMessage: null,
         pendingApprovals: 0,
@@ -330,6 +342,29 @@ const reduce = (state: AppState, action: Action): AppState => {
         selectedGroupId: action.select ? action.group.id : state.selectedGroupId,
       };
     }
+    case "group_updated":
+      return {
+        ...state,
+        conversations: state.conversations.map((c) =>
+          c.kind === "team" && c.groupId === action.group.id
+            ? { ...c, botIds: action.group.botIds, chiefBotId: action.group.chiefBotId }
+            : c,
+        ),
+      };
+    case "group_turn": {
+      const { turn } = action;
+      if (turn.epoch < (state.turnEpochs[turn.groupId] ?? -1)) return state;
+      const groupTurns = { ...state.groupTurns };
+      if (turn.current === null && turn.next.length === 0) delete groupTurns[turn.groupId];
+      else groupTurns[turn.groupId] = turn;
+      return {
+        ...state,
+        groupTurns,
+        turnEpochs: { ...state.turnEpochs, [turn.groupId]: turn.epoch },
+      };
+    }
+    case "turns_cleared":
+      return { ...state, groupTurns: {}, turnEpochs: {} };
     case "task_updated":
       return {
         ...state,
@@ -698,6 +733,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       });
     };
     const open = () => {
+      dispatch({ type: "turns_cleared" });
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
       socket.addEventListener("message", (event) => {
@@ -715,6 +751,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         if (push.type === "group_created") {
           dispatch({ type: "group_created", group: push.group, task: push.task, select: false });
         }
+        if (push.type === "group_updated") dispatch({ type: "group_updated", group: push.group });
+        if (push.type === "group_turn") dispatch({ type: "group_turn", turn: push });
         if (push.type === "task_updated") dispatch({ type: "task_updated", task: push.task });
         if (push.type === "approval_updated") {
           const unseenTerminal =

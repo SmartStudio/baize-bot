@@ -1,8 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
+import { z } from "zod";
 import {
   Bot,
+  BotId,
+  Group,
+  GroupId,
   CreateBotRequest,
   CreateGroupRequest,
   CopySkillRequest,
@@ -13,6 +17,7 @@ import {
   LoginRequest,
   SendMessageRequest,
   Settings,
+  ServerPush,
   ToolConnection,
   CreateToolRequest,
   UpdateBotRequest,
@@ -22,7 +27,6 @@ import {
   UpdateTaskRequest,
   UpdateToolRequest,
   type Routine,
-  type ServerPush,
 } from "@baize/shared";
 import {
   MOCK_EMAIL,
@@ -88,6 +92,10 @@ const PORT = Number(process.env["API_PORT"] ?? 3001);
 const SESSION_COOKIE = "baize_session";
 const sessions = new Set<string>();
 const sockets = new Set<WebSocket>();
+const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
+const turnEpochs = new Map<GroupId, number>();
+
+const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
 
 // zod 的 .optional() 推出 `k?: T | undefined`，和 exactOptionalPropertyTypes 下的目标类型不兼容，展开前先去掉 undefined 的键。
 const defined = <T extends object>(value: T): Partial<T> =>
@@ -185,6 +193,39 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   // 端到端每条用例开头把内存状态倒回预置的三个 Bot，用例之间就不会互相依赖跑的顺序。
   if (method === "POST" && path === "/api/test/reset") {
     reseed();
+    activeTurns.clear();
+    turnEpochs.clear();
+    return send(res, 204);
+  }
+
+  if (method === "POST" && path === "/api/test/group/updated") {
+    const parsed = GroupUpdateTrigger.safeParse(await readBody(req));
+    if (!parsed.success) return send(res, 400, { error: "群更新参数不对" });
+    const group = groups.get(parsed.data.groupId);
+    if (group === undefined) return send(res, 404, { error: "没有这个群" });
+    if (parsed.data.chiefBotId !== null && !group.botIds.includes(parsed.data.chiefBotId)) {
+      return send(res, 400, { error: "首席不在群里" });
+    }
+    const updated = Group.parse({ ...group, chiefBotId: parsed.data.chiefBotId });
+    groups.set(updated.id, updated);
+    push({ type: "group_updated", group: updated });
+    return send(res, 204);
+  }
+
+  if (method === "POST" && path === "/api/test/group/turn") {
+    const body = await readBody(req);
+    const parsed = ServerPush.safeParse(
+      typeof body === "object" && body !== null ? { ...body, type: "group_turn" } : body,
+    );
+    if (!parsed.success || parsed.data.type !== "group_turn") return send(res, 400, { error: "群回合参数不对" });
+    const turn = parsed.data;
+    if (!groups.has(turn.groupId)) return send(res, 404, { error: "没有这个群" });
+    if (turn.epoch >= (turnEpochs.get(turn.groupId) ?? -1)) {
+      turnEpochs.set(turn.groupId, turn.epoch);
+      if (turn.current === null && turn.next.length === 0) activeTurns.delete(turn.groupId);
+      else activeTurns.set(turn.groupId, turn);
+    }
+    push(turn);
     return send(res, 204);
   }
 
@@ -612,6 +653,7 @@ server.on("upgrade", (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     sockets.add(ws);
+    for (const turn of activeTurns.values()) ws.send(JSON.stringify(turn));
     ws.on("close", () => sockets.delete(ws));
   });
 });

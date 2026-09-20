@@ -1,5 +1,12 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
-import { Message, MessageListResponse, OvernightResponse, SkillResponse, UsageResponse } from "@baize/shared";
+import {
+  Message,
+  MessageListResponse,
+  OvernightResponse,
+  ServerPush,
+  SkillResponse,
+  UsageResponse,
+} from "@baize/shared";
 
 const EMAIL = "chen@baize.dev";
 const PASSWORD = "baize-dev";
@@ -1383,5 +1390,94 @@ test("群头成员和侧栏经手人随 task_updated 同步变化，单 Bot 不�
   await page.reload();
   await openTeamGroup(page, TEAM_TITLE);
   await expect(members.filter({ hasText: "经手" })).toContainText("小采经手");
+  await expect(handler).toHaveText("小采 经手");
+});
+
+test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧栏", async ({ page, request }) => {
+  const turnFrames: number[] = [];
+  page.on("websocket", (socket) =>
+    socket.on("framereceived", (frame) => {
+      const parsed = ServerPush.safeParse(JSON.parse(String(frame.payload)));
+      if (parsed.success && parsed.data.type === "group_turn") turnFrames.push(parsed.data.epoch);
+    }),
+  );
+  await login(page);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await openBot(page, "小服");
+  await expect(page.getByTestId("chat-members"), "单 Bot 群没有成员行").toHaveCount(0);
+  await expect(page.getByTestId("group-turn"), "单 Bot 群没有轮流说提示").toHaveCount(0);
+  await openTeamGroup(page, TEAM_TITLE);
+
+  const members = page.getByTestId("chat-members");
+  const handler = teamItem(page).getByTestId("group-handler");
+  await expect(members.getByText("首席"), "预置群没有首席").toHaveCount(0);
+  expect(
+    (
+      await request.post("/api/test/group/updated", { data: { groupId: "grp_order", chiefBotId: "bot_sales" } })
+    ).status(),
+    "mock 把整条 group_updated 推到 WebSocket",
+  ).toBe(204);
+  await expect(members.getByTestId("chat-member").filter({ hasText: "首席" })).toContainText("小销首席");
+  await page.screenshot({ path: `${SHOT}/comm-chief.png` });
+
+  const turn = { groupId: "grp_order", epoch: 12, current: "bot_sales", next: ["bot_buy"] };
+  expect((await request.post("/api/test/group/turn", { data: turn })).status(), "mock 推送 group_turn").toBe(204);
+  await expect(page.getByTestId("group-turn")).toHaveText("轮到 小销，接着 小采");
+  await expect(handler).toHaveText("小销正在说");
+  await page.screenshot({ path: `${SHOT}/comm-turn.png` });
+
+  await page.reload();
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(members.getByTestId("chat-member").filter({ hasText: "首席" }), "首席从群列表重新读回").toContainText(
+    "小销首席",
+  );
+  await expect(page.getByTestId("group-turn"), "重连后收到正在进行的回合快照").toHaveText("轮到 小销，接着 小采");
+  await expect(handler).toHaveText("小销正在说");
+
+  await handoffFromService(page, request);
+  await expect(page.getByTestId("task-current"), "回合进行中任务卡仍更新经手人").toHaveText("当前 小服");
+  await expect(handler, "轮流说提示优先于经手人").toHaveText("小销正在说");
+  expect((await request.post("/api/test/handoff/accept")).status(), "小采确认交接").toBe(204);
+  await expect(page.getByTestId("task-current")).toHaveText("当前 小采");
+  await expect(handler, "经手人变更后仍优先显示当前发言人").toHaveText("小销正在说");
+
+  const beforeStale = turnFrames.length;
+  expect(
+    (
+      await request.post("/api/test/group/turn", { data: { ...turn, epoch: 11, current: "bot_service", next: [] } })
+    ).status(),
+    "旧 epoch 仍通过真实 WebSocket 发出",
+  ).toBe(204);
+  await expect.poll(() => turnFrames.length).toBe(beforeStale + 1);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.getByTestId("group-turn"), "旧回合不能盖掉新回合").toHaveText("轮到 小销，接着 小采");
+  await expect(handler).toHaveText("小销正在说");
+
+  await openBot(page, "小服");
+  await expect(page.getByTestId("chat-members"), "回合进行中单 Bot 群仍没有成员行").toHaveCount(0);
+  await expect(page.getByTestId("group-turn"), "回合进行中单 Bot 群仍没有轮流说提示").toHaveCount(0);
+  await expect(page.getByTestId("bot-item").getByTestId("group-handler")).toHaveCount(0);
+  await openTeamGroup(page, TEAM_TITLE);
+
+  const beforeEnd = turnFrames.length;
+  expect(
+    (
+      await request.post("/api/test/group/turn", { data: { groupId: "grp_order", epoch: 12, current: null, next: [] } })
+    ).status(),
+    "结束报文清掉回合",
+  ).toBe(204);
+  await expect.poll(() => turnFrames.length).toBe(beforeEnd + 1);
+  await expect(page.getByTestId("group-turn")).toHaveCount(0);
+  await expect(handler).toHaveText("小采 经手");
+  await expect(members.getByTestId("chat-member").filter({ hasText: "首席" })).toContainText("小销首席");
+
+  const beforeLate = turnFrames.length;
+  expect(
+    (await request.post("/api/test/group/turn", { data: { ...turn, epoch: 11 } })).status(),
+    "结束后旧 epoch 仍通过 WebSocket 发出",
+  ).toBe(204);
+  await expect.poll(() => turnFrames.length).toBe(beforeLate + 1);
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
+  await expect(page.getByTestId("group-turn"), "结束后旧回合不能复活").toHaveCount(0);
   await expect(handler).toHaveText("小采 经手");
 });

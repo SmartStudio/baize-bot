@@ -605,6 +605,11 @@ select {
   gap: var(--space-2);
 }
 
+.chat-turn {
+  margin-left: auto;
+  color: var(--fg-3);
+}
+
 .thread-shell {
   position: relative;
   display: flex;

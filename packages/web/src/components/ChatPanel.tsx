@@ -12,10 +12,11 @@ import {
 import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { TaskCard } from "./TaskCard.js";
-import { memberIdsOf, type Conversation } from "../state/app.js";
+import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 
 type Props = {
   conversation: Conversation;
+  turn: GroupTurn | undefined;
   bots: Record<BotId, Bot>;
   messages: Message[];
   lookup: BotLookup;
@@ -78,6 +79,7 @@ const needsTimeDivider = (turn: Turn, before: Turn | undefined): boolean => {
 
 export const ChatPanel = ({
   conversation,
+  turn,
   bots,
   messages,
   lookup,
@@ -176,9 +178,16 @@ export const ChatPanel = ({
                 <span className="chat-member" data-testid="chat-member" key={bot.id}>
                   <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
                   {bot.name}
+                  {conversation.chiefBotId === bot.id ? <em className="tag">首席</em> : null}
                   {conversation.task.currentBotId === bot.id ? <em className="tag">经手</em> : null}
                 </span>
               ))}
+              {turn?.current ? (
+                <span className="chat-turn" data-testid="group-turn">
+                  轮到 {bots[turn.current]?.name ?? turn.current}
+                  {turn.next.length > 0 ? `，接着 ${turn.next.map((id) => bots[id]?.name ?? id).join("、")}` : null}
+                </span>
+              ) : null}
             </div>
           </>
         ) : (

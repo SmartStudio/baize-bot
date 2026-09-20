@@ -51,6 +51,7 @@ export const MainWindow = () => {
       <Sidebar
         conversations={ready.conversations}
         bots={bots}
+        groupTurns={ready.groupTurns}
         selectedGroupId={ready.selectedGroupId}
         user={ready.user}
         onSelect={actions.selectGroup}
@@ -62,6 +63,7 @@ export const MainWindow = () => {
         <ChatPanel
           conversation={conversation}
           bots={bots}
+          turn={ready.groupTurns[conversation.groupId]}
           messages={ready.messages[conversation.groupId] ?? NO_MESSAGES}
           lookup={lookup}
           approvals={ready.approvals}
