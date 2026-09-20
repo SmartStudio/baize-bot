@@ -79,8 +79,29 @@ function composePrompt(message: PromptMessage): string {
   const sections: string[] = [
     message.group.kind === "solo"
       ? "[这是你和用户的单聊]"
-      : `[群 ${message.group.number} ${message.group.title} · 成员 ${message.members.map((member) => member.name).join("、")}]`,
+      : `[群 ${message.group.number} ${message.group.title} · 成员 ${message.members.map((member) => `${member.name}${member.role === "chief" ? "（首席）" : ""}`).join("、")}]`,
   ];
+  switch (message.reason) {
+    case "solo":
+    case "mentioned":
+    case "handoff":
+      break;
+    case "chief":
+      sections.push(
+        "没人点名，你是这个群的首席，先到你。自己能答就直接答；需要谁补充就 @ 谁；要大家都表态就 @所有人。别为了显得周到把每个人都点一遍。",
+      );
+      break;
+    case "current":
+      sections.push("没人点名，你是当前经手，这条是冲着手上的活来的。");
+      break;
+    case "everyone":
+      sections.push("没人点名，群里每位会依次看到这条。跟你无关或无话可说，只回 (pass)，一个字都别多。");
+      break;
+    default: {
+      const exhaustive: never = message.reason;
+      throw new Error(`未知的派发原因：${exhaustive}`);
+    }
+  }
   if (message.task !== null) sections.push(`任务卡：\n${renderTaskCard(message.task, message.members)}`);
   // 带 handoffId 的这条 prompt，正文就是控制面渲染好的交接报文：紧跟在任务卡后面单成一段，
   // 并点名先确认接手。混在群聊后面当「当前这条」，模型会当成又一句闲话直接开干。

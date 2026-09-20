@@ -57,10 +57,10 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
   const roster =
     members.length === 0
       ? [EMPTY]
-      : members.map(
-          (member) =>
-            `- ${member.name}${member.tag === "" ? "" : `（${member.tag}）`}${member.description === "" ? "" : `：${member.description}`}`,
-        );
+      : members.map((member) => {
+          const tags = [member.tag, ...(member.role === "chief" ? ["首席"] : [])].filter(Boolean);
+          return `- ${member.name}${tags.length === 0 ? "" : `（${tags.join("，")}）`}${member.description === "" ? "" : `：${member.description}`}`;
+        });
 
   return [
     `${task.number} ${task.title}`,
@@ -82,6 +82,8 @@ const UPDATE_CHECKLIST_PARAMS = Type.Object({
 });
 
 const MENTION_PARAMS = Type.Object({ name: Type.String(), text: Type.String() });
+
+const SET_CHIEF_PARAMS = Type.Object({ name: Type.Optional(Type.String()) });
 
 const HANDOFF_PARAMS = Type.Object({
   to: Type.String(),
@@ -203,6 +205,32 @@ export function createTopicTools(options: {
           text: body,
         });
         return resultText(`已经在群里 @ 了 ${target.name}。`);
+      },
+    },
+    {
+      name: "set_chief",
+      label: "设首席",
+      description:
+        "用户让你或让某个队友当首席时调，名字写群成员名单里的名字；用户让首席卸任时不传名字。只在多 Bot 群可用。",
+      parameters: SET_CHIEF_PARAMS,
+      execute: async (_callId, params) => {
+        const active = activeOrThrow("设首席");
+        if (active.members.length < 2) throw new Error("这是单聊，没有首席可设");
+        const { name } = params as Static<typeof SET_CHIEF_PARAMS>;
+        const target = name === undefined ? null : active.members.find((member) => member.name === name);
+        if (target === undefined) {
+          throw new Error(
+            `群里没有叫「${name}」的 Bot。可以设为首席的是：${active.members.map((member) => member.name).join("、")}`,
+          );
+        }
+        push({
+          type: "set_chief",
+          runId: active.run.runId,
+          botId: active.run.botId,
+          groupId: active.run.groupId,
+          targetBotId: target?.id ?? null,
+        });
+        return resultText(target === null ? "已请求卸任首席。" : `已请求将${target.name}设为首席。`);
       },
     },
     {
