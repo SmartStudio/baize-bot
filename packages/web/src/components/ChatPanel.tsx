@@ -222,7 +222,7 @@ export const ChatPanel = ({
         >
           {messages.length === 0 ? (
             <p className="empty">
-              {team ? "群建好了。@ 一个 Bot 把这件事交出去。" : "建好了，桌面也开好了。今天把什么活交出去？"}
+              {team ? "群建好了。直接说话大家轮流答，@ 谁就只派给谁。" : "建好了，桌面也开好了。今天把什么活交出去？"}
             </p>
           ) : null}
           {turns.map((turn, at) => (

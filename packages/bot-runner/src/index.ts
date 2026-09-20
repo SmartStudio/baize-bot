@@ -95,7 +95,9 @@ function composePrompt(message: PromptMessage): string {
       sections.push("没人点名，你是当前经手，这条是冲着手上的活来的。");
       break;
     case "everyone":
-      sections.push("没人点名，群里每位会依次看到这条。跟你无关或无话可说，只回 (pass)，一个字都别多。");
+      sections.push(
+        "没人点名，群里每位会依次看到这条。对大家说的话（问候、通知、提问）得有人接：前面没队友答过就由你答；队友已经答到位而你没有要补充的，或者这条跟你无关，只回 (pass)，一个字都别多。",
+      );
       break;
     default: {
       const exhaustive: never = message.reason;

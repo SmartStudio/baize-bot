@@ -269,7 +269,7 @@ export const reseed = (): void => {
   );
   // 群里先只有一条系统消息。谁开口都是被 @ 出来的，用例才数得清「只有被 @ 的那个回了」。
   messagesByGroupId.set(TEAM_GROUP_ID, [
-    buildMessage(TEAM_GROUP_ID, { kind: "system", text: "群建好了。@ 一个 Bot 派活。" }, 40),
+    buildMessage(TEAM_GROUP_ID, { kind: "system", text: "群建好了。直接说话大家轮流答，@ 谁就只派给谁。" }, 40),
   ]);
 
   routines.set(
