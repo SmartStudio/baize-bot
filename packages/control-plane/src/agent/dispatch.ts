@@ -2,6 +2,7 @@ import type {
   Approval,
   ApprovalId,
   BotId,
+  ControlToAgent,
   GroupId,
   HandoffId,
   Message,
@@ -77,7 +78,8 @@ export async function dispatchUserMessage(
     return { kind: "no_target" };
   }
 
-  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, ...options });
+  const origin = { kind: options.routineRunId === undefined ? "user" : "routine" } as const;
+  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, origin, ...options });
 }
 
 /** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
@@ -95,13 +97,20 @@ export async function dispatchBotMention(
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [targetBotId] });
   if (targets.length === 0) return;
 
-  await sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task });
+  await sendToTargets(deps, ownerId, groupId, {
+    trigger,
+    members,
+    targets,
+    task,
+    origin: botOrigin(members, trigger.body.kind === "bot" ? trigger.body.botId : targetBotId),
+  });
 }
 
 export type HandoffDispatch = {
   /** 群里那张交接卡。上下文取它之前那些，run 也挂在它上面。 */
   readonly trigger: Message;
   readonly targetBotId: BotId;
+  readonly fromBotId: BotId;
   readonly handoffId: HandoffId;
   /** 交接报文渲染出来的正文，当作这条 prompt 的正文发下去。 */
   readonly text: string;
@@ -137,8 +146,17 @@ export async function dispatchHandoff(
     members,
     targets,
     task,
+    origin: botOrigin(members, input.fromBotId),
     handoff: { id: input.handoffId, text: input.text },
   });
+}
+
+type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
+
+/** 发信 Bot 已经不在群里时退回 user：报文是它留下的，但没有名字可署。 */
+function botOrigin(members: readonly GroupBot[], botId: BotId): PromptOrigin {
+  const bot = members.find((member) => member.id === botId);
+  return bot === undefined ? { kind: "user" } : { kind: "bot", id: bot.id, name: bot.name, tag: bot.tag };
 }
 
 type SendInput = {
@@ -146,6 +164,7 @@ type SendInput = {
   readonly members: readonly GroupBot[];
   readonly targets: readonly BotId[];
   readonly task: TopicTask | null;
+  readonly origin: PromptOrigin;
   /** 只有交接派活带它：正文换成交接报文，报文编号跟着下去。 */
   readonly handoff?: { readonly id: HandoffId; readonly text: string } | undefined;
   readonly routineRunId?: string | undefined;
@@ -164,7 +183,13 @@ async function sendToTargets(
   }
 
   const history = await recentBodies(deps.db, groupId, input.trigger);
-  const roster = input.members.map((member) => ({ id: member.id, name: member.name }));
+  const roster = input.members.map(({ id, name, tag, description }) => ({ id, name, tag, description }));
+  const group = {
+    id: groupId,
+    number: input.task?.number ?? "",
+    title: input.task?.title ?? "",
+    kind: input.members.length > 1 ? ("team" as const) : ("solo" as const),
+  };
   let dropped = false;
   let sentCount = 0;
   for (const target of input.targets) {
@@ -181,6 +206,8 @@ async function sendToTargets(
       botId: target,
       groupId,
       text: input.handoff?.text ?? triggerText(input.trigger.body),
+      origin: input.origin,
+      group,
       context: history.flatMap((body) => {
         const line = summarize(body, target, input.members);
         return line === null ? [] : [line];

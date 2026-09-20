@@ -270,7 +270,12 @@ export class AgentHub {
     const items = await listBots(this.#deps.db, conn.ownerId);
     this.#send(conn, {
       type: "config",
-      bots: items.map((item) => ({ id: item.bot.id, name: item.bot.name, description: item.bot.description })),
+      bots: items.map((item) => ({
+        id: item.bot.id,
+        name: item.bot.name,
+        tag: item.bot.tag,
+        description: item.bot.description,
+      })),
       tools: await listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。

@@ -171,13 +171,15 @@ describe("Bot 变动重发 config", () => {
     try {
       const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
       const afterCreate = await agent.expect("config");
-      expect(afterCreate.bots).toEqual([{ id: created.bot.id, name: "小服", description: created.bot.description }]);
+      expect(afterCreate.bots).toEqual([
+        { id: created.bot.id, name: "小服", tag: "", description: created.bot.description },
+      ]);
 
       expect((await client.patch(`/api/bots/${created.bot.id}`, { name: "小采", description: "买东西" })).status).toBe(
         200,
       );
       const afterRename = await agent.expect("config");
-      expect(afterRename.bots).toEqual([{ id: created.bot.id, name: "小采", description: "买东西" }]);
+      expect(afterRename.bots).toEqual([{ id: created.bot.id, name: "小采", tag: "", description: "买东西" }]);
 
       expect((await client.delete(`/api/bots/${created.bot.id}`)).status).toBe(204);
       const afterDelete = await agent.expect("config");

@@ -280,6 +280,12 @@ describe("上行 handoff", () => {
       expect(prompt.text, "清单指针从 1 数起说给它听").toContain("第 3 条");
       expect(prompt.text, "报文要说清楚是谁交过来的").toContain("小销");
       expect(prompt.task?.currentBotId, "确认之前当前经手还是小销").toBe(team.sales.id);
+      expect(prompt.origin, "交接报文是小销发的").toEqual({
+        kind: "bot",
+        id: team.sales.id,
+        name: "小销",
+        tag: "销售",
+      });
 
       const stored = await page(team);
       expect(

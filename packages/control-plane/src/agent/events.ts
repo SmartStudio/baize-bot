@@ -380,6 +380,7 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
     {
       trigger: created.message,
       targetBotId: event.toBotId,
+      fromBotId: event.botId,
       handoffId: created.handoff.id,
       text: renderHandoffReport({
         fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",

@@ -80,7 +80,17 @@ describe("M7 群与主题任务的共享形状", () => {
   });
 
   it("prompt 必须带任务卡字段，单 Bot 群传 null", () => {
-    const prompt = { type: "prompt", runId: "r1", botId: "b1", groupId: "g1", text: "hi", context: [], members: [] };
+    const prompt = {
+      type: "prompt",
+      runId: "r1",
+      botId: "b1",
+      groupId: "g1",
+      text: "hi",
+      origin: { kind: "user" },
+      group: { id: "g1", number: "", title: "", kind: "solo" },
+      context: [],
+      members: [],
+    };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, task: null }).success).toBe(true);
   });
@@ -89,7 +99,16 @@ describe("M7 群与主题任务的共享形状", () => {
     const run = { runId: "r1", botId: "b1", groupId: "g1" };
     expect(AgentToControl.safeParse({ type: "handoff_accept", ...run, handoffId: "h1" }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "handoff_accept", ...run }).success).toBe(false);
-    const prompt = { type: "prompt", ...run, text: "x", context: [], task: null, members: [] };
+    const prompt = {
+      type: "prompt",
+      ...run,
+      text: "x",
+      origin: { kind: "user" },
+      group: { id: "g1", number: "", title: "", kind: "solo" },
+      context: [],
+      task: null,
+      members: [],
+    };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
   });

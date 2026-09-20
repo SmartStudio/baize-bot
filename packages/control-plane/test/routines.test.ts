@@ -121,6 +121,7 @@ describe("例行任务到点触发", () => {
       expect(prompt.text, "派下去的正文就是 instruction 本身").toBe("把今天的工单汇总一下");
       expect(prompt.botId).toBe(owner.botId);
       expect(prompt.groupId).toBe(owner.groupId);
+      expect(prompt.origin, "例行任务那条没有人在等回复，运行器得知道").toEqual({ kind: "routine" });
 
       const page = MessageListResponse.parse(
         await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),

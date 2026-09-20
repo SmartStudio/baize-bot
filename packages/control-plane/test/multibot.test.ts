@@ -143,10 +143,17 @@ describe("多 Bot 群派活", () => {
       expect(first.text).toBe("@小销 查一下");
       expect(first.task?.number, "多 Bot 群的 prompt 带的是这个群的任务卡").toBe(team.task.number);
       expect(first.task?.currentBotId, "任务卡是改完经手之后的那份").toBe(team.sales.id);
-      expect(first.members, "成员名单是全体成员，按位置顺序").toEqual([
-        { id: team.sales.id, name: "小销" },
-        { id: team.service.id, name: "小服" },
+      expect(first.members, "成员名单是全体成员，按位置顺序，带 tag 和描述").toEqual([
+        { id: team.sales.id, name: "小销", tag: "销售", description: "" },
+        { id: team.service.id, name: "小服", tag: "客服", description: "" },
       ]);
+      expect(first.origin, "用户手打的消息").toEqual({ kind: "user" });
+      expect(first.group, "群标签取自任务卡，多 Bot 群是 team").toEqual({
+        id: team.group.id,
+        number: team.task.number,
+        title: "双十一大促",
+        kind: "team",
+      });
 
       const afterFirst = await storedTask(team.group.id);
       expect(afterFirst.currentBotId).toBe(team.sales.id);
@@ -202,7 +209,13 @@ describe("多 Bot 群派活", () => {
       const prompt = await team.agent.expect("prompt");
       expect(prompt.botId, "单 Bot 群 @ 谁都派给它").toBe(team.service.id);
       expect(prompt.task, "单 Bot 群不带任务卡").toBeNull();
-      expect(prompt.members).toEqual([{ id: team.service.id, name: "小服" }]);
+      expect(prompt.members).toEqual([{ id: team.service.id, name: "小服", tag: "客服", description: "" }]);
+      expect(prompt.group, "单 Bot 群的任务卡不下发，但群标签仍取它的编号，标题就是 Bot 名").toEqual({
+        id: team.soloGroupId,
+        number: expect.stringMatching(/^T-\d{4}$/),
+        title: "小服",
+        kind: "solo",
+      });
     } finally {
       team.close();
     }
@@ -376,6 +389,12 @@ describe("上行 mention", () => {
       const prompt = await team.agent.expect("prompt");
       expect(prompt.botId).toBe(team.service.id);
       expect(prompt.text).toBe("@小服 这单退款你看下");
+      expect(prompt.origin, "队友 @ 来的活要带发信人，运行器据此提醒模型这不是用户说的").toEqual({
+        kind: "bot",
+        id: team.sales.id,
+        name: "小销",
+        tag: "销售",
+      });
 
       const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
       expect(bodies.at(-1)).toEqual({

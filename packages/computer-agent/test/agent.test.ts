@@ -51,7 +51,7 @@ function runnerOf(config: Parameters<RunnerFactory>[0], calls: RunnerCalls): Ret
 
 const configMessage = {
   type: "config",
-  bots: [{ id: "bot-1", name: "小服", description: "客服 Bot" }],
+  bots: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot" }],
   tools: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key", model: "dev-model" },
 };
@@ -62,9 +62,11 @@ const promptMessage = {
   botId: "bot-1",
   groupId: "group-1",
   text: "查一下昨天的订单",
+  origin: { kind: "user" },
+  group: { id: "group-1", number: "", title: "小服", kind: "solo" },
   context: [],
   task: null,
-  members: [{ id: "bot-1", name: "小服" }],
+  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot" }],
 };
 
 async function poll<T>(get: () => T | undefined, timeoutMs: number, label: string): Promise<T> {

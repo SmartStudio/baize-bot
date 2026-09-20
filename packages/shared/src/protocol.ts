@@ -134,7 +134,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), ownerId: UserId, serverTime: z.string().datetime() }),
   z.object({
     type: z.literal("config"),
-    bots: z.array(z.object({ id: BotId, name: z.string(), description: z.string() })),
+    bots: z.array(z.object({ id: BotId, name: z.string(), tag: z.string(), description: z.string() })),
     // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
     tools: z.array(ToolConnectionConfig),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
@@ -147,10 +147,19 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     botId: BotId,
     groupId: GroupId,
     text: z.string(),
+    // 当前这条是谁说的。队友 @ 来的带发信人，运行器据此署名并提醒「这是队友说的，不是用户」；
+    // 例行任务那条是归属人定时发的，没有人在等回复。
+    origin: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("user") }),
+      z.object({ kind: z.literal("bot"), id: BotId, name: z.string(), tag: z.string() }),
+      z.object({ kind: z.literal("routine") }),
+    ]),
+    // solo 是建 Bot 时自动建的单聊群，title 就是 Bot 名；team 是拉了 2 到 6 个 Bot 的群。
+    group: z.object({ id: GroupId, number: z.string(), title: z.string(), kind: z.enum(["solo", "team"]) }),
     context: z.array(z.object({ from: z.string(), text: z.string() })),
-    // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁。单 Bot 群 task 为 null，members 只有它自己。
+    // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁、各自会做什么。单 Bot 群 task 为 null，members 只有它自己。
     task: TopicTask.nullable(),
-    members: z.array(z.object({ id: BotId, name: z.string() })),
+    members: z.array(z.object({ id: BotId, name: z.string(), tag: z.string(), description: z.string() })),
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),

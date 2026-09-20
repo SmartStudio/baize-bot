@@ -82,13 +82,25 @@ const promptMessage = (
   botId: BotId.parse(botId),
   groupId: GroupId.parse("group-1"),
   text,
+  origin: { kind: "user" },
+  group: {
+    id: GroupId.parse("group-1"),
+    number: "",
+    title: botId,
+    kind: (group?.members?.length ?? 1) > 1 ? "team" : "solo",
+  },
   context: [],
   task: group?.task ?? null,
-  members: [...(group?.members ?? [{ id: BotId.parse(botId), name: botId }])],
+  members: [...(group?.members ?? [member(botId, botId)])],
   ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
 });
 
-const member = (botId: string, name: string): GroupMember => ({ id: BotId.parse(botId), name });
+const member = (botId: string, name: string): GroupMember => ({
+  id: BotId.parse(botId),
+  name,
+  tag: "",
+  description: "",
+});
 /** 两个 Bot 的群。bot-1 是跑这次 prompt 的那个，bot-2 是它能 @ 的队友。 */
 const TWO_MEMBERS: readonly GroupMember[] = [member("bot-1", "小白"), member("bot-2", "小黑")];
 
@@ -244,7 +256,12 @@ async function startHarness(options: {
   let runner: Runner | null = null;
 
   runner = createRunner({
-    bots: options.bots.map((id) => ({ id: BotId.parse(id), name: id, description: options.description ?? "" })),
+    bots: options.bots.map((id) => ({
+      id: BotId.parse(id),
+      name: id,
+      tag: "",
+      description: options.description ?? "",
+    })),
     tools: options.tools ?? [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
     dataDir,

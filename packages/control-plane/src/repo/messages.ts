@@ -177,15 +177,20 @@ export async function latestMessagePerGroup(db: Db, groupIds: readonly string[])
   return new Map(rows.map((r) => [r.message.groupId, toMessage(r.message)]));
 }
 
-export type GroupBot = { readonly id: BotId; readonly name: string; readonly tag: string };
+export type GroupBot = {
+  readonly id: BotId;
+  readonly name: string;
+  readonly tag: string;
+  readonly description: string;
+};
 
 /** 群成员按展示顺序。派活、路由、上下文署名都用这一份。 */
 export async function listGroupBots(db: Db, groupId: string): Promise<GroupBot[]> {
   const rows = await db
-    .select({ id: bots.id, name: bots.name, tag: bots.tag })
+    .select({ id: bots.id, name: bots.name, tag: bots.tag, description: bots.description })
     .from(groupMembers)
     .innerJoin(bots, eq(bots.id, groupMembers.botId))
     .where(eq(groupMembers.groupId, groupId))
     .orderBy(asc(groupMembers.position));
-  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name, tag: row.tag }));
+  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name, tag: row.tag, description: row.description }));
 }
