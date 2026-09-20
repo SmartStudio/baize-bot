@@ -1,4 +1,4 @@
-import { GroupId, type Bot, type BotId, type Group, type Message, type TopicTask, type UserId } from "@baize/shared";
+import { BotId, GroupId, type Bot, type Group, type Message, type TopicTask, type UserId } from "@baize/shared";
 import { and, asc, count, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
@@ -22,6 +22,12 @@ export type CreateGroupResult =
   | { readonly kind: "duplicate_bot" };
 
 /** Bot 的单 Bot 群。例行任务的一次运行等同于归属人在这个群里发了一条消息。 */
+/** 群的首席，没设或群不存在都是 null。派活按它算 prompt 里的成员角色。 */
+export async function findChiefBotId(db: Db, groupId: GroupId): Promise<BotId | null> {
+  const [row] = await db.select({ chiefBotId: groups.chiefBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  return row?.chiefBotId === undefined || row.chiefBotId === null ? null : BotId.parse(row.chiefBotId);
+}
+
 export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | null> {
   const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId)).limit(1);
   return row === undefined ? null : GroupId.parse(row.id);

@@ -63,10 +63,11 @@ const promptMessage = {
   groupId: "group-1",
   text: "查一下昨天的订单",
   origin: { kind: "user" },
+  reason: "solo",
   group: { id: "group-1", number: "", title: "小服", kind: "solo" },
   context: [],
   task: null,
-  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot" }],
+  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot", role: "member" }],
 };
 
 async function poll<T>(get: () => T | undefined, timeoutMs: number, label: string): Promise<T> {

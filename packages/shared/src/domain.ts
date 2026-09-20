@@ -124,6 +124,8 @@ export const Group = z.object({
   ownerId: UserId,
   botIds: z.array(BotId).min(1).max(6),
   taskId: TaskId,
+  // 没人点名时先到谁。和任务卡的 currentBotId 是两件事：经手人随交接换，首席随用户一句话换。单 Bot 群恒为 null。
+  chiefBotId: BotId.nullable(),
   createdAt: Timestamp,
 });
 export type Group = z.infer<typeof Group>;

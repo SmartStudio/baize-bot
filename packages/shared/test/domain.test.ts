@@ -23,7 +23,8 @@ const now = "2026-09-18T00:00:00.000Z";
 
 describe("domain schemas reject illegal states", () => {
   it("a group needs 1 to 6 bots", () => {
-    const base = { id: "g1", ownerId: "u1", taskId: "t1", createdAt: now };
+    const base = { id: "g1", ownerId: "u1", taskId: "t1", chiefBotId: null, createdAt: now };
+    expect(Group.safeParse({ ...base, botIds: ["b1"], chiefBotId: undefined }).success, "首席字段不可省").toBe(false);
     expect(Group.safeParse({ ...base, botIds: [] }).success).toBe(false);
     expect(Group.safeParse({ ...base, botIds: ["b1", "b2", "b3", "b4", "b5", "b6", "b7"] }).success).toBe(false);
     expect(Group.safeParse({ ...base, botIds: ["b1"] }).success).toBe(true);
@@ -87,6 +88,7 @@ describe("M7 群与主题任务的共享形状", () => {
       groupId: "g1",
       text: "hi",
       origin: { kind: "user" },
+      reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
       context: [],
       members: [],
@@ -104,6 +106,7 @@ describe("M7 群与主题任务的共享形状", () => {
       ...run,
       text: "x",
       origin: { kind: "user" },
+      reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
       context: [],
       task: null,
@@ -111,6 +114,29 @@ describe("M7 群与主题任务的共享形状", () => {
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
+  });
+
+  it("prompt 必须说明派到你的原因，成员必须带角色；set_chief 的目标可为 null 表示卸任", () => {
+    const run = { runId: "r1", botId: "b1", groupId: "g1" };
+    const member = { id: "b1", name: "小服", tag: "", description: "" };
+    const prompt = {
+      type: "prompt",
+      ...run,
+      text: "x",
+      origin: { kind: "user" },
+      reason: "everyone",
+      group: { id: "g1", number: "T-0001", title: "群", kind: "team" },
+      context: [],
+      task: null,
+      members: [{ ...member, role: "chief" }],
+    };
+    expect(ControlToAgent.safeParse(prompt).success).toBe(true);
+    const { reason: _reason, ...withoutReason } = prompt;
+    expect(ControlToAgent.safeParse(withoutReason).success, "reason 不可省").toBe(false);
+    expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员角色不可省").toBe(false);
+    expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: "b2" }).success).toBe(true);
+    expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: null }).success).toBe(true);
+    expect(AgentToControl.safeParse({ type: "set_chief", ...run }).success, "目标字段不可省").toBe(false);
   });
 
   it("交接记录带创建时刻，接手时刻在确认前是 null", () => {

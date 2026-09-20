@@ -58,6 +58,7 @@ describe("端到端：模型实际收到的 prompt 头部", () => {
       expect(systemText(solo)).toContain("你是白泽 Bot");
       expect(systemText(solo)).toContain("你叫 小服，标签 客服");
       expect(systemText(solo)).toContain("协作规则：");
+      expect(stack.prompts().at(-1)?.reason, "单聊的派活原因").toBe("solo");
 
       const { group, task } = CreateGroupResponse.parse(
         await stack.post("/api/groups", { title: "采购交接", botIds: [service.bot.id, buyer.bot.id] }),
@@ -73,13 +74,19 @@ describe("端到端：模型实际收到的 prompt 头部", () => {
       );
       expect(prompt).toContain("用户：@小服 整理需求");
       expect(prompt, "用户发的不该被当成队友说的").not.toContain("这是队友说的");
+      const teamPrompts = stack.prompts().filter((item) => item.groupId === group.id);
       expect(
-        stack
-          .prompts()
-          .filter((item) => item.groupId === group.id)
-          .map((item) => item.origin),
+        teamPrompts.map((item) => item.origin),
         "控制面标的来源是用户",
       ).toEqual([{ kind: "user" }]);
+      expect(
+        teamPrompts.map((item) => item.reason),
+        "被 @ 的派活原因",
+      ).toEqual(["mentioned"]);
+      expect(
+        teamPrompts[0]?.members.map((member) => member.role),
+        "没设首席时人人都是普通成员",
+      ).toEqual(["member", "member"]);
     } finally {
       await stack.close();
       await upstream.close();

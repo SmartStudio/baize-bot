@@ -126,6 +126,14 @@ export const AgentToControl = z.discriminatedUnion("type", [
     groupId: GroupId,
     handoffId: HandoffId,
   }),
+  // Bot 按用户的话设或卸这个群的首席。目标要是群成员，null 是卸任。控制面写 groups.chief_bot_id，推 group_updated。
+  z.object({
+    type: z.literal("set_chief"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    targetBotId: BotId.nullable(),
+  }),
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
 
@@ -157,9 +165,20 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // solo 是建 Bot 时自动建的单聊群，title 就是 Bot 名；team 是拉了 2 到 6 个 Bot 的群。
     group: z.object({ id: GroupId, number: z.string(), title: z.string(), kind: z.enum(["solo", "team"]) }),
     context: z.array(z.object({ from: z.string(), text: z.string() })),
+    // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流。
+    // 运行器据此在群标签下写一句，全员轮流那种要告诉它无话可说回 (pass)。
+    reason: z.enum(["solo", "mentioned", "handoff", "chief", "current", "everyone"]),
     // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁、各自会做什么。单 Bot 群 task 为 null，members 只有它自己。
     task: TopicTask.nullable(),
-    members: z.array(z.object({ id: BotId, name: z.string(), tag: z.string(), description: z.string() })),
+    members: z.array(
+      z.object({
+        id: BotId,
+        name: z.string(),
+        tag: z.string(),
+        description: z.string(),
+        role: z.enum(["chief", "member"]),
+      }),
+    ),
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),

@@ -83,6 +83,7 @@ const promptMessage = (
   groupId: GroupId.parse("group-1"),
   text,
   origin: { kind: "user" },
+  reason: (group?.members?.length ?? 1) > 1 ? "mentioned" : "solo",
   group: {
     id: GroupId.parse("group-1"),
     number: "",
@@ -100,6 +101,7 @@ const member = (botId: string, name: string): GroupMember => ({
   name,
   tag: "",
   description: "",
+  role: "member",
 });
 /** 两个 Bot 的群。bot-1 是跑这次 prompt 的那个，bot-2 是它能 @ 的队友。 */
 const TWO_MEMBERS: readonly GroupMember[] = [member("bot-1", "小白"), member("bot-2", "小黑")];

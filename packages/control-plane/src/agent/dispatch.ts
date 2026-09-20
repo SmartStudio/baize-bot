@@ -13,6 +13,7 @@ import type {
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
 import { appendMessage, listGroupBots, listMessages, type GroupBot } from "../repo/messages.js";
+import { findChiefBotId } from "../repo/groups.js";
 import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
@@ -78,7 +79,8 @@ export async function dispatchUserMessage(
   }
 
   const origin = { kind: options.routineRunId === undefined ? "user" : "routine" } as const;
-  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, origin, ...options });
+  const reason = members.length === 1 ? "solo" : first === undefined ? "current" : "mentioned";
+  return sendToTargets(deps, ownerId, groupId, { trigger, members, targets, task, origin, reason, ...options });
 }
 
 /** Bot @ 群里另一个 Bot。目标是报文点名的那一个，当前经手一个字不改：接力是 Bot 之间的事，不是用户交出去的。 */
@@ -102,6 +104,7 @@ export async function dispatchBotMention(
     targets,
     task,
     origin: botOrigin(members, trigger.body.kind === "bot" ? trigger.body.botId : targetBotId),
+    reason: "mentioned",
   });
 }
 
@@ -136,11 +139,13 @@ export async function dispatchHandoff(
     targets,
     task,
     origin: botOrigin(members, input.fromBotId),
+    reason: "handoff",
     handoff: { id: input.handoffId, text: input.text },
   });
 }
 
-type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
+type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
+type PromptOrigin = PromptMessage["origin"];
 
 /** 发信 Bot 已经不在群里时退回 user：报文是它留下的，但没有名字可署。 */
 function botOrigin(members: readonly GroupBot[], botId: BotId): PromptOrigin {
@@ -154,6 +159,7 @@ type SendInput = {
   readonly targets: readonly BotId[];
   readonly task: TopicTask | null;
   readonly origin: PromptOrigin;
+  readonly reason: PromptMessage["reason"];
   /** 只有交接派活带它：正文换成交接报文，报文编号跟着下去。 */
   readonly handoff?: { readonly id: HandoffId; readonly text: string } | undefined;
   readonly routineRunId?: string | undefined;
@@ -172,7 +178,14 @@ async function sendToTargets(
   }
 
   const history = await recentBodies(deps.db, groupId, input.trigger);
-  const roster = input.members.map(({ id, name, tag, description }) => ({ id, name, tag, description }));
+  const chiefBotId = await findChiefBotId(deps.db, groupId);
+  const roster = input.members.map(({ id, name, tag, description }) => ({
+    id,
+    name,
+    tag,
+    description,
+    role: id === chiefBotId ? ("chief" as const) : ("member" as const),
+  }));
   const group = {
     id: groupId,
     number: input.task?.number ?? "",
@@ -196,6 +209,7 @@ async function sendToTargets(
       groupId,
       text: input.handoff?.text ?? triggerText(input.trigger.body),
       origin: input.origin,
+      reason: input.reason,
       group,
       context: history.flatMap((body) => {
         const line = summarize(body, target, input.members);

@@ -1,0 +1,2 @@
+ALTER TABLE "groups" ADD COLUMN "chief_bot_id" text;--> statement-breakpoint
+ALTER TABLE "groups" ADD CONSTRAINT "groups_chief_bot_id_bots_id_fk" FOREIGN KEY ("chief_bot_id") REFERENCES "public"."bots"("id") ON DELETE set null ON UPDATE no action;

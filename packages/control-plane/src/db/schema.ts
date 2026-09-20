@@ -145,6 +145,7 @@ export const groups = pgTable(
     soloBotId: text("solo_bot_id")
       .unique()
       .references(() => bots.id, { onDelete: "cascade" }),
+    chiefBotId: text("chief_bot_id").references(() => bots.id, { onDelete: "set null" }),
     createdAt: createdAt(),
   },
   (t) => [index("groups_owner_id_idx").on(t.ownerId)],

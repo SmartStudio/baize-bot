@@ -274,6 +274,17 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bot_updated"), bot: Bot }),
   z.object({ type: z.literal("bot_deleted"), botId: BotId }),
   z.object({ type: z.literal("group_created"), group: Group, task: TopicTask }),
+  // 群本身变了（目前只有首席）推整条，客户端整条替换。
+  z.object({ type: z.literal("group_updated"), group: Group }),
+  // 群回合推进：current 是正在说的，next 是排在后面的。回合结束推 current null、next 空。
+  // 没有快照接口：连上 /api/ws 时正在进行的回合各推一条。
+  z.object({
+    type: z.literal("group_turn"),
+    groupId: GroupId,
+    epoch: z.number().int().nonnegative(),
+    current: BotId.nullable(),
+    next: z.array(BotId),
+  }),
   z.object({ type: z.literal("task_updated"), task: TopicTask }),
   // 审批新建和有了结论都推这一条。approval 消息的正文只有 approvalId，重推那条 message 一个字都不会变，
   // 结论只能随 Approval 走。新建时先推 approval_updated 再推那条 message。

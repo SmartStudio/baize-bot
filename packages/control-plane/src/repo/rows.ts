@@ -47,6 +47,7 @@ export function toGroup(row: typeof schema.groups.$inferSelect, botIds: readonly
     ownerId: row.ownerId,
     botIds,
     taskId,
+    chiefBotId: row.chiefBotId,
     createdAt: row.createdAt.toISOString(),
   });
 }

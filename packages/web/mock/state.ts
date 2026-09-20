@@ -230,6 +230,7 @@ export const reseed = (): void => {
         ownerId: user.id,
         botIds: [botId],
         taskId: `tsk_${seed.key}`,
+        chiefBotId: null,
         createdAt: at(seedIndex),
       }),
     );
@@ -247,6 +248,7 @@ export const reseed = (): void => {
       ownerId: user.id,
       botIds: TEAM_BOT_IDS,
       taskId: TEAM_TASK_ID,
+      chiefBotId: null,
       createdAt: at(40),
     }),
   );
@@ -578,6 +580,7 @@ export const createBot = (input: {
     ownerId: user.id,
     botIds: [botId],
     taskId: TaskId.parse(`tsk_new_${suffix}`),
+    chiefBotId: null,
     createdAt: bot.createdAt,
   });
   bots.set(bot.id, bot);
@@ -601,6 +604,7 @@ export const createGroup = (input: {
     ownerId: user.id,
     botIds: input.botIds,
     taskId,
+    chiefBotId: null,
     createdAt: new Date().toISOString(),
   });
   const task = TopicTask.parse({
