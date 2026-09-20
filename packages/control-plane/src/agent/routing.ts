@@ -21,9 +21,8 @@ export function routeTargets(input: {
   // 单 Bot 群只有一个去处，@ 了谁、上一句谁经手都改变不了它。
   if (input.members.length === 1) return [first.id];
 
-  // 遍历成员留下被 @ 的：去重和「按成员顺序排」都是这一遍遍历的副产品，结果因此稳定可断言。
-  const mentioned = new Set<string>(input.mentions);
-  const targets = input.members.filter((member) => mentioned.has(member.id)).map((member) => member.id);
+  const memberIds = new Set(input.members.map((member) => member.id));
+  const targets = [...new Set(input.mentions)].filter((id) => memberIds.has(id));
   if (targets.length > 0) return targets;
 
   const current = input.currentBotId;
@@ -35,7 +34,7 @@ export function routeTargets(input: {
 export function parseMentions(text: string, members: readonly RoutingMember[]): BotId[] {
   if (members.length < 2) return [];
   const hit = scanNames(text, "@", members);
-  return members.filter((member) => hit.has(member.id)).map((member) => member.id);
+  return [...hit];
 }
 
 /**
@@ -53,16 +52,16 @@ export function parseSkillRefs(text: string, skills: readonly RoutingSkill[]): S
   return skills.filter((skill) => hit.has(skill.id)).map((skill) => skill.id);
 }
 
-type Named = { readonly id: string; readonly name: string };
+type Named<Id extends string> = { readonly id: Id; readonly name: string };
 
 /**
  * 正文里 `prefix` 后面跟着的那些名字，命中的 id 一份。
  * 名字长的先试，「@小销售」因此不会先命中成员「小销」。排序键只有长度，规范保证稳定排序，等长时保持传入顺序。
  * 一个 `prefix` 位置最多认一条，认上就不再往下试。
  */
-function scanNames(text: string, prefix: string, named: readonly Named[]): Set<string> {
+function scanNames<Id extends string>(text: string, prefix: string, named: readonly Named<Id>[]): Set<Id> {
   const byNameLength = named.toSorted((a, b) => b.name.length - a.name.length);
-  const hit = new Set<string>();
+  const hit = new Set<Id>();
   for (let at = text.indexOf(prefix); at !== -1; at = text.indexOf(prefix, at + 1)) {
     const from = at + prefix.length;
     for (const one of byNameLength) {

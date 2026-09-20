@@ -133,6 +133,28 @@ function item(text: string, done: boolean, ownerBotId: BotId | null): ChecklistI
 }
 
 describe("多 Bot 群派活", () => {
+  it("@小服 @小销 时小服先收到 prompt 且成为经手", async () => {
+    const team = await makeTeam();
+
+    try {
+      await say(team, team.group.id, "@小服 @小销 一起看");
+      const first = await team.agent.expect("prompt");
+      const second = await team.agent.expect("prompt");
+
+      expect(first.botId, "正文先 @ 小服，所以第一条 prompt 先到小服").toBe(team.service.id);
+      expect(second.botId, "第二条 prompt 再到小销").toBe(team.sales.id);
+      expect(
+        first.members.map((member) => member.name),
+        "成员表仍按群成员位置，小销在前",
+      ).toEqual(["小销", "小服"]);
+      expect(first.task?.currentBotId, "第一条 prompt 带更新后的经手").toBe(team.service.id);
+      expect(second.task?.currentBotId, "第二条 prompt 也带同一个经手").toBe(team.service.id);
+      expect((await storedTask(team.group.id)).currentBotId, "正文第一个 @ 的小服成为经手").toBe(team.service.id);
+    } finally {
+      team.close();
+    }
+  });
+
   it("@ 谁就派给谁，当前经手跟着换", async () => {
     const team = await makeTeam();
 

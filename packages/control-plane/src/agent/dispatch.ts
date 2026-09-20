@@ -17,7 +17,6 @@ import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
-import type { MentionLoopGuard } from "./mention-loop.js";
 import { routeTargets } from "./routing.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
@@ -121,21 +120,11 @@ export type HandoffDispatch = {
  * prompt 带上 handoffId，运行器据此才开出 accept_handoff。
  */
 export async function dispatchHandoff(
-  deps: DispatchDeps & { readonly mentionLoop: MentionLoopGuard },
+  deps: DispatchDeps,
   ownerId: UserId,
   groupId: GroupId,
   input: HandoffDispatch,
 ): Promise<void> {
-  switch (deps.mentionLoop.record(groupId)) {
-    case "allow":
-      break;
-    case "stop":
-      await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: HANDOFF_LOOP_NOTICE });
-      return;
-    case "silent":
-      return;
-  }
-
   const members = await listGroupBots(deps.db, groupId);
   const task = await findTaskByGroup(deps.db, groupId);
   const targets = routeTargets({ members, currentBotId: task?.currentBotId ?? null, mentions: [input.targetBotId] });

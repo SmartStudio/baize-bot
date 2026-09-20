@@ -17,7 +17,7 @@ import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
 import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { MENTION_LOOP_NOTICE, dispatchBotMention, dispatchHandoff } from "./dispatch.js";
+import { HANDOFF_LOOP_NOTICE, MENTION_LOOP_NOTICE, dispatchBotMention, dispatchHandoff } from "./dispatch.js";
 import { renderHandoffReport } from "./handoff.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
 import type { MentionLoopGuard } from "./mention-loop.js";
@@ -359,6 +359,20 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
     return;
   }
 
+  switch (deps.mentionLoop.record(groupId)) {
+    case "allow":
+      break;
+    case "stop":
+      await appendAndPush(deps, conn.ownerId, groupId, {
+        kind: "system",
+        tone: "error",
+        text: HANDOFF_LOOP_NOTICE,
+      });
+      return;
+    case "silent":
+      return;
+  }
+
   const created = await createHandoff(deps.db, {
     groupId,
     fromBotId: event.botId,
@@ -373,24 +387,19 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: created.handoff });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
 
-  await dispatchHandoff(
-    { db: deps.db, push: deps.push, agents: deps.agents, mentionLoop: deps.mentionLoop },
-    conn.ownerId,
-    created.message.groupId,
-    {
-      trigger: created.message,
-      targetBotId: event.toBotId,
-      fromBotId: event.botId,
-      handoffId: created.handoff.id,
-      text: renderHandoffReport({
-        fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
-        done: event.done,
-        notDone: event.notDone,
-        next: event.next,
-        checklistIndex: event.checklistIndex,
-      }),
-    },
-  );
+  await dispatchHandoff({ db: deps.db, push: deps.push, agents: deps.agents }, conn.ownerId, created.message.groupId, {
+    trigger: created.message,
+    targetBotId: event.toBotId,
+    fromBotId: event.botId,
+    handoffId: created.handoff.id,
+    text: renderHandoffReport({
+      fromName: members.find((member) => member.id === event.botId)?.name ?? "上一位",
+      done: event.done,
+      notDone: event.notDone,
+      next: event.next,
+      checklistIndex: event.checklistIndex,
+    }),
+  });
 }
 
 /**

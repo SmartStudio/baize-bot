@@ -53,13 +53,13 @@ describe("派活目标", () => {
     expect(targets).toEqual([buyer.id]);
   });
 
-  it("多个目标按群成员顺序排，不按 @ 出现的顺序", () => {
+  it("多个目标按 @ 首次出现的顺序排，并过滤群外目标", () => {
     const targets = routeTargets({
       members: [sales, buyer, clerk],
       currentBotId: null,
-      mentions: [clerk.id, buyer.id, sales.id],
+      mentions: [clerk.id, outsider.id, buyer.id, clerk.id, sales.id],
     });
-    expect(targets).toEqual([sales.id, buyer.id, clerk.id]);
+    expect(targets).toEqual([clerk.id, buyer.id, sales.id]);
   });
 
   it("交接还没确认时，不 @ 人的消息仍然派给交出去的那一个", () => {
@@ -104,8 +104,12 @@ describe("解析正文里的 @", () => {
     expect(parseMentions("@小销 和 @小销 一起看", [sales, buyer])).toEqual([sales.id]);
   });
 
-  it("多个 @ 按群成员顺序出，不按出现顺序", () => {
-    expect(parseMentions("@小服 @小采 @小销 都来", [sales, buyer, clerk])).toEqual([sales.id, buyer.id, clerk.id]);
+  it("多个 @ 按正文首次出现的顺序去重", () => {
+    expect(parseMentions("@小服 @小采 @小服 @小销 都来", [sales, buyer, clerk])).toEqual([
+      clerk.id,
+      buyer.id,
+      sales.id,
+    ]);
   });
 
   it("名字里带正则元字符照样解析得出来", () => {

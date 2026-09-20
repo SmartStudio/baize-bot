@@ -169,7 +169,7 @@ function acceptWith(team: Team, runId: RunId, botId: BotId, handoffId: HandoffId
 }
 
 describe("上行 handoff", () => {
-  it("交接与 @ 共用次数上限，用户发消息后可再次交接", async () => {
+  it("交接与 @ 共用次数上限，越限不落交接行和卡，用户发消息后可再次交接", async () => {
     const team = await makeTeam();
 
     try {
@@ -191,10 +191,24 @@ describe("上行 handoff", () => {
       }
 
       const dispatched = await runCount(team.group.id);
+      const before = await page(team);
+      const rowsBefore = await database.sql`SELECT id FROM handoffs WHERE group_id = ${team.group.id} ORDER BY id`;
       sendHandoff(team, { runId, botId: fromBotId, toBotId });
-      const stopped = await waitForHandoffUpdated(team);
+      const notice = await team.push.next();
+      expect(notice.type === "message" ? notice.message.body : null).toEqual({
+        kind: "system",
+        tone: "error",
+        text: HANDOFF_LOOP_NOTICE,
+      });
+      const stopped = await page(team);
+      expect(stopped.handoffs, "首次越限不新增交接报文").toEqual(before.handoffs);
+      expect(stopped.messages.filter((message) => message.body.kind === "handoff")).toEqual(
+        before.messages.filter((message) => message.body.kind === "handoff"),
+      );
+      expect(await database.sql`SELECT id FROM handoffs WHERE group_id = ${team.group.id} ORDER BY id`).toEqual(
+        rowsBefore,
+      );
       sendHandoff(team, { runId, botId: fromBotId, toBotId });
-      const silent = await waitForHandoffUpdated(team);
 
       const barrierId = MessageId.parse(randomUUID());
       team.agent.send({
@@ -208,15 +222,23 @@ describe("上行 handoff", () => {
       });
       for (;;) {
         const push = await team.push.next();
+        expect(push.type, "后续越限不推交接更新").not.toBe("handoff_updated");
+        expect(push.type === "message" ? push.message.body.kind : null, "后续越限不推卡或提示").not.toMatch(
+          /handoff|system/,
+        );
         if (push.type === "message" && push.message.id === barrierId) break;
       }
 
       expect(await runCount(team.group.id), "越线的两份交接都没有派 prompt").toBe(dispatched);
       const stored = await page(team);
-      expect(stored.handoffs.filter((handoff) => handoff.id === stopped.id || handoff.id === silent.id)).toEqual([
-        expect.objectContaining({ id: stopped.id, status: "pending" }),
-        expect.objectContaining({ id: silent.id, status: "pending" }),
-      ]);
+      expect(stored.handoffs, "两次越限后交接报文数不增加").toEqual(before.handoffs);
+      expect(
+        stored.messages.filter((message) => message.body.kind === "handoff"),
+        "两次越限后交接卡数不增加",
+      ).toEqual(before.messages.filter((message) => message.body.kind === "handoff"));
+      expect(await database.sql`SELECT id FROM handoffs WHERE group_id = ${team.group.id} ORDER BY id`).toEqual(
+        rowsBefore,
+      );
       expect(
         stored.messages.filter(
           (message) => message.body.kind === "system" && message.body.text === HANDOFF_LOOP_NOTICE,
