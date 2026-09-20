@@ -40,11 +40,16 @@ const BotBubble = ({
   const bot = lookup(body.botId);
   return (
     <div className="bot-block">
-      {showSource ? (
+      {showSource || (body.mentions?.length ?? 0) > 0 ? (
         <div className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
           消息来自
           <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
           {bot.tag ? `${bot.name} · ${bot.tag}` : bot.name}
+          {body.mentions?.length ? (
+            <span className="tag" data-testid="bot-recipient">
+              发给 {body.mentions.map((id) => lookup(id).name).join("、")}
+            </span>
+          ) : null}
         </div>
       ) : null}
       <div className="bubble bubble-bot" data-testid="bot-bubble" data-streaming={body.streaming}>

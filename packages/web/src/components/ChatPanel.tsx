@@ -161,14 +161,25 @@ export const ChatPanel = ({
 
   return (
     <section className="chat" data-testid="chat">
-      <header className="chat-header">
+      <header className={`chat-header${team ? " chat-header-team" : ""}`}>
         {team ? (
           <>
-            <Users size={16} aria-hidden="true" />
-            <b data-testid="chat-title">{conversation.task.title}</b>
-            <span className="chat-sub" data-testid="chat-subtitle">
-              主题任务 {conversation.task.number} · 你 + {members.length} 个 Bot
-            </span>
+            <div className="chat-heading">
+              <Users size={16} aria-hidden="true" />
+              <b data-testid="chat-title">{conversation.task.title}</b>
+              <span className="chat-sub" data-testid="chat-subtitle">
+                主题任务 {conversation.task.number} · 你 + {members.length} 个 Bot
+              </span>
+            </div>
+            <div className="chat-members" data-testid="chat-members">
+              {members.map((bot) => (
+                <span className="chat-member" data-testid="chat-member" key={bot.id}>
+                  <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                  {bot.name}
+                  {conversation.task.currentBotId === bot.id ? <em className="tag">经手</em> : null}
+                </span>
+              ))}
+            </div>
           </>
         ) : (
           <>

@@ -36,6 +36,7 @@ const ConversationItem = ({
   const lead = members[0];
   const team = conversation.kind === "team";
   const title = team ? conversation.task.title : (lead?.name ?? "Bot");
+  const current = team && conversation.task.currentBotId !== null ? bots[conversation.task.currentBotId] : undefined;
   const working = activityOf(conversation.lastMessage) === "working";
   const hasBadges = conversation.pendingApprovals > 0 || conversation.pendingHandoffs > 0 || working;
   return (
@@ -84,7 +85,11 @@ const ConversationItem = ({
               ) : null}
             </span>
           ) : null}
-          {team ? <span className="bot-item-sub">{members.map((bot) => bot.name).join(" · ")}</span> : null}
+          {team ? (
+            <span className="bot-item-sub" data-testid="group-handler">
+              {current ? `${current.name} 经手` : "待派活"}
+            </span>
+          ) : null}
           <span className="bot-item-preview">
             {conversation.lastMessage
               ? previewOf(conversation.lastMessage.body)

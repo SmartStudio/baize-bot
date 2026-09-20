@@ -579,6 +579,32 @@ select {
   font: var(--type-ui);
 }
 
+.chat-header-team {
+  height: auto;
+  min-height: var(--titlebar-h);
+  flex-direction: column;
+  align-items: stretch;
+  padding-block: var(--space-4);
+}
+
+.chat-heading,
+.chat-members,
+.chat-member {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.chat-members {
+  flex-wrap: wrap;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.chat-member {
+  gap: var(--space-2);
+}
+
 .thread-shell {
   position: relative;
   display: flex;
@@ -2409,6 +2435,7 @@ select {
 
 .bot-source {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-3);
   align-items: center;
   color: var(--fg-4);

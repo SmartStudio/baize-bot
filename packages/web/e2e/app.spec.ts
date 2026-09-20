@@ -1307,3 +1307,81 @@ test("窄屏用量页仍能看到合计和任务，不横向溢出", async ({ pa
   expect(await usage.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: `${SHOT}/11d.png` });
 });
+
+test("Bot 定向气泡在署名旁标收件人，用户和普通 Bot 消息不标", async ({ page }) => {
+  await page.route("**/api/groups/grp_order/messages*", async (route) => {
+    const response = await route.fetch();
+    const payload = MessageListResponse.parse(await response.json());
+    payload.messages = [
+      Message.parse({
+        id: "msg_direct_one",
+        groupId: "grp_order",
+        createdAt: "2026-09-18T01:00:00.000Z",
+        body: { kind: "bot", botId: "bot_service", text: "请查供应商库存。", streaming: false, mentions: ["bot_buy"] },
+      }),
+      Message.parse({
+        id: "msg_direct_many",
+        groupId: "grp_order",
+        createdAt: "2026-09-18T01:01:00.000Z",
+        body: {
+          kind: "bot",
+          botId: "bot_service",
+          text: "请一起核对报价。",
+          streaming: false,
+          mentions: ["bot_buy", "bot_sales"],
+        },
+      }),
+      Message.parse({
+        id: "msg_direct_user",
+        groupId: "grp_order",
+        createdAt: "2026-09-18T01:02:00.000Z",
+        body: { kind: "user", text: "@小采 查一下。", mentions: ["bot_buy"] },
+      }),
+      Message.parse({
+        id: "msg_direct_empty",
+        groupId: "grp_order",
+        createdAt: "2026-09-18T01:03:00.000Z",
+        body: { kind: "bot", botId: "bot_buy", text: "收到。", streaming: false, mentions: [] },
+      }),
+      Message.parse({
+        id: "msg_direct_absent",
+        groupId: "grp_order",
+        createdAt: "2026-09-18T01:04:00.000Z",
+        body: { kind: "bot", botId: "bot_buy", text: "正在查询。", streaming: false },
+      }),
+    ];
+    await route.fulfill({ json: payload });
+  });
+  await login(page);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(page.getByTestId("bot-recipient")).toHaveText(["发给 小采", "发给 小采、小销"]);
+  await expect(page.getByTestId("bot-source").filter({ has: page.getByTestId("bot-recipient") })).toHaveCount(2);
+  await expect(page.locator('[data-kind="user"]').getByTestId("bot-recipient")).toHaveCount(0);
+  await page.screenshot({ path: `${SHOT}/comm-mentions.png` });
+});
+
+test("群头成员和侧栏经手人随 task_updated 同步变化，单 Bot 不显示成员行", async ({ page, request }) => {
+  await login(page);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await openBot(page, "小服");
+  await expect(page.getByTestId("chat-members")).toHaveCount(0);
+  await expect(page.getByTestId("bot-item").getByTestId("group-handler")).toHaveCount(0);
+  await openTeamGroup(page, TEAM_TITLE);
+  const members = page.getByTestId("chat-member");
+  await expect(members).toContainText(["小服", "小销", "小采"]);
+  await expect(members.locator(".avatar")).toHaveCount(3);
+  const handler = teamItem(page).getByTestId("group-handler");
+  await expect(handler).toHaveText("待派活");
+  await handoffFromService(page, request);
+  await expect(members.filter({ hasText: "经手" })).toContainText("小服经手");
+  await expect(handler).toHaveText("小服 经手");
+  expect((await request.post("/api/test/handoff/accept")).status()).toBe(204);
+  await expect(members.filter({ hasText: "经手" })).toContainText("小采经手");
+  await expect(handler).toHaveText("小采 经手");
+  await page.screenshot({ path: `${SHOT}/comm-handler.png` });
+  await page.reload();
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(members.filter({ hasText: "经手" })).toContainText("小采经手");
+  await expect(handler).toHaveText("小采 经手");
+});
