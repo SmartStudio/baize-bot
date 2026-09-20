@@ -5,13 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const AGENT_KEYS = ["COMPUTER_ID", "AGENT_TOKEN", "CONTROL_PLANE_AGENT_URL", "BAIZE_DATA_DIR"];
-
-const services = [
-  { pkg: "@baize/control-plane", dir: "packages/control-plane", port: 3001 },
-  { pkg: "@baize/web", dir: "packages/web", port: 5173 },
-];
-
 /** .env 里的 KEY=value。只认这一种写法，不展开变量也不处理续行。 */
 function readEnvFile(path) {
   if (!existsSync(path)) return {};
@@ -24,19 +17,24 @@ function readEnvFile(path) {
   return env;
 }
 
+// 整份 .env 给每个服务，shell 里已经有的变量优先，和 dotenv 的习惯一致。
+const fileEnv = readEnvFile(join(root, ".env"));
+
+const services = [
+  { pkg: "@baize/control-plane", dir: "packages/control-plane", port: Number(fileEnv.PORT ?? 3001) },
+  { pkg: "@baize/web", dir: "packages/web", port: 5173 },
+];
+
 // 电脑代理要一份电脑 token 才连得上控制面，默认不起，免得每次 pnpm dev 都看它报错重连。
 function agentService() {
-  const env = readEnvFile(join(root, ".env"));
-  const missing = ["COMPUTER_ID", "AGENT_TOKEN"].filter((name) => (env[name] ?? "") === "");
+  const missing = ["COMPUTER_ID", "AGENT_TOKEN"].filter((name) => (fileEnv[name] ?? "") === "");
   if (missing.length > 0) {
     console.log(
       `.env 里缺 ${missing.join("、")}，不起 computer-agent。跑 pnpm --filter @baize/control-plane seed 拿一份`,
     );
     return null;
   }
-  const picked = {};
-  for (const key of AGENT_KEYS) if ((env[key] ?? "") !== "") picked[key] = env[key];
-  return { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null, env: picked };
+  return { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null };
 }
 
 if (process.argv.slice(2).includes("--agent")) {
@@ -87,7 +85,7 @@ for (const service of services) {
   const child = spawn("pnpm", ["--filter", service.pkg, "dev"], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, ...service.env },
+    env: { ...fileEnv, ...process.env },
   });
   prefixed(name, child.stdout, (line) => process.stdout.write(line));
   prefixed(name, child.stderr, (line) => process.stderr.write(line));
