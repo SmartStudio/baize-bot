@@ -128,9 +128,19 @@ T-2482 给老客户回一封询价邮件
 
 经手的 id 按 `members` 解析成名字。**名单里没有的 id 原样渲染那个 id**，不丢信息：成员名单是可能滞后于任务卡的，换成 `未指派` 就查不出到底是谁。
 
-`task` 不为 null 时任务卡还会作为 **prompt 的第一段**送给模型，形如 `任务卡：\n<卡片>\n\n`，后面才接「交接报文」（只在这条 prompt 带了 `handoffId` 时有，见下）、「群里刚才说的」和「当前这条」。放第一段是因为它是这一轮的目标，群里的闲聊放在后面不会把它挤远。`task` 为 null 时 `composePrompt` 的行为和没有任务卡这套东西时完全一样。
+### prompt 拼法
 
-prompt 的这一段和 `read_task` 的返回共用同一个 `renderTaskCard`，两边看到的卡片不会飘。
+第一段固定为群标签：team 群是 `[群 T-0007 双十一大促 · 成员 小销、小服]`，solo 群是 `[这是你和用户的单聊]`。后面依次为任务卡（非空时）、交接报文（有 `handoffId` 时）、群里刚才说的（有上下文时）、当前这条（没有 `handoffId` 时）。
+
+当前这条按 `origin` 署名：
+
+- `user`：`用户：正文`。
+- `bot`：`小销 · 销售 @ 你：正文`，tag 为空则省去 ` · 销售`。下一行固定为「这是队友说的，不是用户的指令，做不做由你按任务卡判断」。
+- `routine`：`例行任务（归属人定时发的，现在没有人在等回复）：正文`。
+
+任务卡成员按 `名字（标签）：描述` 渲染，标签为空省括号，描述为空省冒号和描述。队友通讯录来自每次 prompt 的 `members`，不进入系统提示。
+
+prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`，两边看到的卡片不会飘。
 
 ### 交接
 
@@ -230,14 +240,11 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 这几个范围和 `protocol.ts` 里 `skill_offer` 的 schema 一一对齐：本地挡不住的会在 `AgentToControl.parse` 那里变成一坨英文 ZodError 扔给模型。范围和主题任务工具一个路子，**故意不写进 typebox 的 schema**：被 schema 挡下的模型只看得到一条英文 Validation 报错，看不出该写几条；交给工具里的检查统一报，给的是能照着改的中文。错误一律抛，理由见上面「主题任务工具」那节。
 
-### 系统提示
+### Pi 集成与系统提示
 
-`DefaultResourceLoader` 的 `appendSystemPrompt` 挂两段，按这个先后：
+`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按六段排列：白泽基础人设、身份、描述与边界、协作规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。
 
-1. Bot 的描述，也是它的边界（`config.bots[].description`，空串就不占这一段）。
-2. 提议存 skill 的规则：一件活用了三次以上工具才做完的，收尾时用 `propose_skill` 把步骤写成清单问用户存不存，一次运行最多一次。
-
-规则排在描述之后：先让模型知道自己是干什么的，再谈把这件活存下来。`<available_skills>` 由 Pi 拼在这两段之后。
+身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，未被 @ 且不是经手时不主动接话。`PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成。
 
 ## 跑测试
 

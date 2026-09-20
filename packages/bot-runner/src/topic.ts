@@ -40,7 +40,7 @@ const nameOf = (members: readonly GroupMember[], id: BotId): string =>
 /**
  * 任务卡的文本形式。全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。
  * 模型看到的行数因此是固定的，「这行没出现」和「这个字段是空的」不会混起来。
- * prompt 的第一段和 read_task 的返回共用这一份，两边看到的卡片不会飘。
+ * prompt 的任务卡段和 read_task 的返回共用这一份，两边看到的卡片不会飘。
  */
 export function renderTaskCard(task: TopicTask, members: readonly GroupMember[]): string {
   const checklist =
@@ -58,7 +58,7 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     `说明：${task.summary === "" ? NO_SUMMARY : task.summary}`,
     `截止：${task.dueAt ?? NO_DUE}`,
     `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
-    `群成员：${members.length === 0 ? EMPTY : members.map((member) => member.name).join("、")}`,
+    `群成员：${members.length === 0 ? EMPTY : members.map((member) => `${member.name}${member.tag === "" ? "" : `（${member.tag}）`}${member.description === "" ? "" : `：${member.description}`}`).join("、")}`,
     "清单：",
     ...checklist,
   ].join("\n");
