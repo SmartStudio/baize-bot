@@ -53,12 +53,22 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
             }）`,
         );
 
+  // 描述常以句号收尾，再用顿号串起来就读成「先找我。、小采」，所以每人一行。
+  const roster =
+    members.length === 0
+      ? [EMPTY]
+      : members.map(
+          (member) =>
+            `- ${member.name}${member.tag === "" ? "" : `（${member.tag}）`}${member.description === "" ? "" : `：${member.description}`}`,
+        );
+
   return [
     `${task.number} ${task.title}`,
     `说明：${task.summary === "" ? NO_SUMMARY : task.summary}`,
     `截止：${task.dueAt ?? NO_DUE}`,
     `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
-    `群成员：${members.length === 0 ? EMPTY : members.map((member) => `${member.name}${member.tag === "" ? "" : `（${member.tag}）`}${member.description === "" ? "" : `：${member.description}`}`).join("、")}`,
+    "群成员：",
+    ...roster,
     "清单：",
     ...checklist,
   ].join("\n");
