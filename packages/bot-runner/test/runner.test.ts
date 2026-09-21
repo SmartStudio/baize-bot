@@ -717,15 +717,18 @@ describe("运行器的通信提示", () => {
     );
     expect(system).not.toContain("You are an expert coding assistant");
     const identity = `你叫 小销${tag === "" ? "" : "，标签 销售"}`;
-    expect(system.split("\n\n")[1]).toBe(identity);
+    // Pi 0.86 起系统提示按段名拼，preamble 之外每段都包一层 <段名>，appendSystemPrompt 整体落进 <addendum>。
+    expect(system.split("\n\n")[1]).toBe(`<addendum>\n${identity}`);
     const sections = [
+      "<addendum>",
       identity,
       "你的描述，也是你的边界：只管报价的事，发出去之前先问我",
       "协作规则：",
       "用 propose_skill 把刚才的步骤写成清单",
+      "</addendum>",
       "<available_skills>",
       "</available_skills>",
-      "Current working directory:",
+      "<cwd>",
     ];
     let previous = -1;
     for (const section of sections) {
@@ -744,9 +747,7 @@ describe("运行器的通信提示", () => {
       expect(system, `系统提示要包含「${rule}」`).toContain(rule);
     }
     expect(system).toContain("<name>Globex 报价</name>");
-    expect(
-      system.trimEnd().endsWith(`Current working directory: ${botDirs(h.dataDir, BotId.parse("bot-1")).workDir}`),
-    ).toBe(true);
+    expect(system.trimEnd().endsWith(`<cwd>\n${botDirs(h.dataDir, BotId.parse("bot-1")).workDir}\n</cwd>`)).toBe(true);
   });
 
   it("任务卡成员带标签和描述，空字段不留括号或冒号", () => {

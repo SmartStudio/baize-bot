@@ -256,9 +256,9 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 ### Pi 集成与系统提示
 
-`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按六段排列：白泽基础人设、身份、描述与边界、协作规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。
+`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按六段排列：白泽基础人设、身份、描述与边界、协作规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间四段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
 
-身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` `PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成。
+身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` `PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
 
 ## 跑测试
 
