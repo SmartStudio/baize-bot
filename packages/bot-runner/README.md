@@ -25,7 +25,7 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.85.1 的 SDK，一个 Bo
 <dataDir>/<botId>/skills     config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 ```
 
-Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/agent`，一台云电脑上多个 Bot 共用一个进程时会互相串。四个都在 `src/bot-session.ts` 里钉死：
+Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/agent`，一台电脑上多个 Bot 共用一个进程时会互相串。四个都在 `src/bot-session.ts` 里钉死：
 
 - `ModelRuntime.create` 的 `authPath` 和 `modelsStorePath` 指到 `<botId>/agent`，`modelsPath` 设 `null`（关掉读 `models.json`）。
 - `DefaultResourceLoader` 的 `agentDir`。

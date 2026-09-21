@@ -16,7 +16,7 @@ SDK 的行号指 `spikes/pi-embed/node_modules/@earendil-works/pi-coding-agent/d
 
 验证在 `test/pi-embed.test.ts:127`。两个会话的 `sessionManager.getCwd()` 不同，JSONL 落在各自的 `sessions/` 下，文件第一行的 header 里 `cwd` 分别是各自的工作目录，文件内容里分别只出现自己那个工具名。两个 `prompt()` 用 `Promise.all` 同时发（`:107`），网关日志里两个会话的请求是交错的，不是串行。
 
-进程级共享状态只有一处要当心：不给 `ModelRuntime.create` 传 `modelsStorePath`，它默认写 `~/.pi/agent/models-store.json`（`core/models-store.js:30`），云电脑上会串到别的 Bot。`src/bot-session.ts:83` 显式钉死。
+进程级共享状态只有一处要当心：不给 `ModelRuntime.create` 传 `modelsStorePath`，它默认写 `~/.pi/agent/models-store.json`（`core/models-store.js:30`），一台电脑上会串到别的 Bot。`src/bot-session.ts:83` 显式钉死。
 
 ## 二、扩展注册自定义工具、拦截 tool_call、等外部 HTTP 批准、拒绝时 block
 

@@ -1,0 +1,110 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+白泽 Bot：企业内部的多 Bot 协作产品。pnpm monorepo，TypeScript strict，ESM，Node 22+。仓库内文档全是中文，回复和注释也用中文。
+
+## 常用命令
+
+```
+pnpm install
+docker compose up -d                                   # PostgreSQL 16，端口 5434，库/用户/密码都是 baize
+pnpm --filter @baize/control-plane migrate             # 应用迁移
+pnpm --filter @baize/control-plane seed                # 建开发账号 chen@baize.dev / baize-dev，打印 COMPUTER_ID 和 AGENT_TOKEN
+pnpm dev                                               # 起控制面 3001 和 Web 5173，会先 docker compose up -d
+pnpm dev --agent                                       # 再起电脑代理，要求 .env 里有 COMPUTER_ID 和 AGENT_TOKEN
+pnpm check                                             # typecheck + oxlint + 全部测试
+pnpm typecheck / pnpm lint / pnpm format
+```
+
+测试按包跑，每个包都是 `vitest run`：
+
+```
+pnpm --filter @baize/control-plane test                # 需要 docker 里的 Postgres，每个测试文件建一个随机库跑全部迁移
+pnpm --filter @baize/bot-runner test                   # 起假上游，不打付费接口
+pnpm --filter @baize/e2e test                          # 真控制面 + 真代理 + 真运行器，只有模型上游是假的，端口和库都临时
+pnpm --filter @baize/web test                          # vitest 之后接着跑 Playwright
+pnpm --filter @baize/web test:e2e                      # 只跑 Playwright，自动起 mock 控制面 3317 和 Web 5377
+pnpm --filter @baize/e2e acceptance                    # 真栈截图验收，截图落 packages/e2e/acceptance/screenshots
+```
+
+跑单个测试：
+
+```
+pnpm --filter @baize/control-plane exec vitest run test/handoff.test.ts -t "用例名"
+pnpm --filter @baize/web exec playwright test e2e/app.spec.ts -g "用例名"
+```
+
+`bot-runner/test/runner.test.ts` 最后的「落盘位置」用例检查的是前面用例写下的文件，单独用 `-t` 挑它会失败，要整个文件跑。
+
+其他：
+
+```
+pnpm --filter @baize/web mock                          # 单跑前端用的假控制面
+pnpm --filter @baize/control-plane generate            # 改完 src/db/schema.ts 生成迁移，已生成的迁移文件不改只往后加
+pnpm --filter @baize/control-plane computer-token      # 重置并打印电脑 token
+```
+
+环境变量在 `.env.example`，dev 脚本只认 `KEY=value` 一种写法。`UPSTREAM_API_KEY` 必须是 ASCII，否则每次上游请求都变 502。
+
+## 架构
+
+五个包，一条链路。`packages/shared` 是唯一的类型来源，对象模型、控制面与电脑代理之间的报文、HTTP API 契约全是 zod schema，其他包只从这里引类型，外部输入在边界 parse，内部函数信任类型。
+
+```
+Web (Vite/React, /api 代理到 3001)
+  │ HTTP /api，WebSocket /api/ws 推送
+  ▼
+control-plane (Hono + drizzle/postgres.js，3001)
+  │ WebSocket /agent：hello → welcome → config（该用户全部 Bot、skill、工具连接、网关 key）
+  ▼
+computer-agent（电脑上的常驻进程，出站连接，每收一条 config 整个换 runner）
+  └─ bot-runner：每个 Bot 一个 Pi AgentSession（@earendil-works/pi-coding-agent）
+       │ 模型请求走控制面的 /gateway/v1，Bearer 换成 UPSTREAM_API_KEY，model 换成 GATEWAY_MODEL
+       ▼
+     UPSTREAM_BASE_URL
+```
+
+控制面四个面在同一个 3001 端口上按路径分流：`/api`、`/api/ws`、`/agent`、`/gateway/v1`。
+
+### 几个要先建立的模型
+
+- 群是唯一的会话容器。单 Bot 群建 Bot 时自动建出来，多 Bot 群拉 2 到 6 个 Bot。每个群恰好一张主题任务卡（`T-xxxx`），卡上有清单、截止、当前经手。
+- 路由规则在 `control-plane/src/agent/routing.ts`，纯函数：单 Bot 群恒为它；多 Bot 群被 @ 的说，没 @ 就是当前经手，都没有就留一句「@ 一个 Bot 派活」。`@名` 在写入前解析进 `body.mentions`，派活只看它。
+- 派活在 `agent/dispatch.ts`：每个目标各起一条 `runs` 行、各发一条 `prompt`，带触发消息之前 20 条历史（每条截 200 字）、任务卡（单 Bot 群为 null）和成员名单。运行器 `composePrompt` 按「任务卡 → 交接报文 → 群里刚才说的 → 当前这条」拼。
+- 上行报文（`bot_text`、`bot_tool_call`、`run_done`、`approval_request`、`handoff`、`mention`、`skill_offer` 等）都进 `agent/events.ts`，带 runId 的先校验 run 属于这台电脑、这个 Bot、这个群，不成立整条静默丢弃。`run_done` 挂在 Pi 的 `agent_settled` 上，一次 prompt 恰好一次。
+- 群消息是事实来源，但三种卡的状态住的地方不同：审批和交接的卡正文只有一个 id，状态在 `approvals` / `handoffs` 行上，只随 `approval_updated` / `handoff_updated` 推；`skill_offer` 的 name 和 steps 在点存之前只在正文里，点完要重推那条 message。
+- 交接分两步：`handoff_task` 发报文，目标 `accept_handoff` 之后 `tasks.current_bot_id` 才换人。确认之前活不悬空。
+- Bot 之间 @ 有回路守卫（`agent/mention-loop.ts`），两条用户消息之间最多派 10 次，计数在内存。
+- skill 单向：真相源是控制面 `skills` 表，随 `config` 下发，运行器落成 `<dataDir>/<botId>/skills/<skillId>/SKILL.md`，不回传。`config.skills` 恒带，空也带空数组，运行器靠它整目录对账。
+- 例行任务就是归属人在单 Bot 群里发了一条消息，运行器和电脑代理不认识它。调度游标用 `UPDATE ... WHERE lastFiredAt = 旧值` 抢，停机不补跑。
+- 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
+- Pi 的四个落盘点（authPath、modelsStorePath、两个 agentDir、sessionDir）都在 `bot-runner/src/bot-session.ts` 钉到 `<dataDir>/<botId>/` 下，`~/.pi` 不能出现任何新文件，`bot-runner/test/runner.test.ts` 最后一条用例钉着这件事。
+- Pi 没有 pause。暂停实现成先把挂起的审批打成拒绝再 `abort()`，期间的 prompt 进内存队列。
+
+### 文档在哪
+
+- `README.md` 跑起来、环境变量、控制面握手。
+- `packages/control-plane/README.md` 路由、审批、交接、例行、skill、用量的设计理由，改这些前先读对应一节。
+- `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法。
+- `spec/规格.md` 产品规格，`plan/开发计划.md` 里程碑，`research/` Grok Bot 对照研究。
+- `bot-application-prototype/` 静态原型，Web 的样式只用它 `_ds/.../tokens` 里的变量。oxlint 和 prettier 都忽略它。
+
+## 与 codex 协作
+
+控制面、运行器、Web 三条线的实现可以派给 Herdr 里的 codex 面板，流程在 `.claude/agents/codex-panel.md`：任务书写 `.audit/briefs/<slug>.md`，报告回 `.audit/reports/<slug>.md`，提交由协调者做。codex 一律用 **GPT-5.6 Solo，推理强度 xhigh**，起面板时显式带参数，不靠本机 `~/.codex/config.toml` 的默认值：
+
+```
+herdr agent start <名> --kind codex --pane <pane_id> -- --yolo -m gpt-5.6-sol -c model_reasoning_effort=xhigh
+```
+
+面板启动横幅里 `model: gpt-5.6-sol xhigh`、`permissions: YOLO mode` 两行都在才算对。`--yolo` 让 codex 不再为沙箱外命令逐条弹审批。
+
+## 约定
+
+- 根 `tsconfig.base.json` 是唯一编译选项来源，`noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes` 都开着，可省属性和 `undefined` 不是一回事。
+- 状态用字面量联合，不用布尔组合。错误在工具里靠抛异常表达，中文文案，Pi 会把它做成 `isError` 工具结果。
+- 注释只留代码说不出来的原因。测试断言信息就是文档。
+- 控制面测试只通过 HTTP 和两条 WebSocket 碰服务，不直接调路由函数。等异步效果不靠超时，发一条确定会落地的报文，断言它先到。
+- Prettier `printWidth` 120，双引号，尾逗号。oxlint 的 `typescript/no-explicit-any` 是 error。
+- `spikes/` 是技术验证，不是产品代码。
