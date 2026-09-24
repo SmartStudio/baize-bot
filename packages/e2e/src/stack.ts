@@ -1,7 +1,9 @@
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { WebSocket } from "ws";
 import { AgentToControl, Computer, ControlToAgent, ServerPush } from "@baize/shared";
@@ -30,6 +32,8 @@ export type StackOptions = {
   readonly priceOutputPerM: number;
   readonly startComputer?: boolean;
   readonly disconnectGraceMs?: number;
+  /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
+  readonly agentProcess?: boolean;
 };
 
 export type Stack = {
@@ -94,6 +98,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
 
     const seeded = await seed(db);
     if (seeded.computerToken === null) throw new Error("seed 没给出电脑 token");
+    const computerToken = seeded.computerToken;
 
     const cookie = await login(baseUrl);
     const api = makeApi(baseUrl, cookie);
@@ -117,28 +122,85 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     };
     const prompts: PromptMessage[] = [];
     let agent: ReturnType<typeof startAgent> | undefined;
+    let agentChild: ChildProcess | undefined;
     const stopComputer = async (): Promise<void> => {
+      if (agentChild !== undefined) {
+        const child = agentChild;
+        agentChild = undefined;
+        const exited = new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          child.once("exit", () => resolve());
+        });
+        child.kill("SIGTERM");
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, 5_000);
+        await exited;
+        clearTimeout(timer);
+        return;
+      }
       const current = agent;
       agent = undefined;
       await current?.stop();
     };
     closers.push(stopComputer);
     const startComputer = async (): Promise<void> => {
-      if (agent !== undefined) throw new Error("电脑代理已经启动");
-      agent = startAgent({
-        ...agentOptions,
-        makeRunner: (config) => {
-          const runner = createRunner(config);
-          return {
-            ...runner,
-            prompt: (message) => {
-              prompts.push(message);
-              return runner.prompt(message);
-            },
-          };
-        },
-      });
-      await waitFor(async () => Computer.parse(await api.get("/api/computer")).status === "online", "电脑上线");
+      if (agent !== undefined || agentChild !== undefined) throw new Error("电脑代理已经启动");
+      let earlyExitError: Error | undefined;
+      if (options.agentProcess) {
+        const agentDir = fileURLToPath(new URL("../../computer-agent", import.meta.url));
+        const tsxBin = join(agentDir, "node_modules", ".bin", "tsx");
+        const mainPath = join(agentDir, "src", "main.ts");
+        const agentEnv: NodeJS.ProcessEnv = {
+          ...process.env,
+          COMPUTER_ID: seeded.computerId,
+          AGENT_TOKEN: computerToken,
+          CONTROL_PLANE_AGENT_URL: `ws://127.0.0.1:${server.port}/agent`,
+          BAIZE_DATA_DIR: dataDir,
+        };
+        delete agentEnv["UPSTREAM_API_KEY"];
+        delete agentEnv["DATABASE_URL"];
+
+        const child = spawn(tsxBin, [mainPath], {
+          cwd: agentDir,
+          env: agentEnv,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        child.stdout?.on("data", (chunk: Buffer) => {
+          log += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+          log += chunk.toString();
+        });
+        child.on("exit", (code, signal) => {
+          if (agentChild === child) {
+            agentChild = undefined;
+            earlyExitError = new Error(`电脑代理子进程异常退出 (code: ${code}, signal: ${signal})\n${log}`);
+          }
+        });
+        agentChild = child;
+      } else {
+        agent = startAgent({
+          ...agentOptions,
+          makeRunner: (config) => {
+            const runner = createRunner(config);
+            return {
+              ...runner,
+              prompt: (message) => {
+                prompts.push(message);
+                return runner.prompt(message);
+              },
+            };
+          },
+        });
+      }
+      await waitFor(async () => {
+        if (earlyExitError !== undefined) throw earlyExitError;
+        return Computer.parse(await api.get("/api/computer")).status === "online";
+      }, "电脑上线");
     };
 
     // 电脑上线之后控制面才会派活，不等的话 dispatch 会走「电脑不在线」那一支。

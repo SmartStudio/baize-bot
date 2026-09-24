@@ -30,6 +30,8 @@ function readEnv(env: NodeJS.ProcessEnv): AgentEnv | { readonly missing: readonl
 }
 
 const config = readEnv(process.env);
+// Bot 的 bash 每次执行都继承 process.env，token 读完就删，Bot 在 bash 里跑 env 看不到它。
+delete process.env["AGENT_TOKEN"];
 if ("missing" in config) {
   console.error(
     `缺少环境变量 ${config.missing.join("、")}。跑 pnpm --filter @baize/control-plane seed 或 computer-token 拿一份。`,

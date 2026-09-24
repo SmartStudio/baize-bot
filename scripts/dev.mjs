@@ -17,7 +17,7 @@ function readEnvFile(path) {
   return env;
 }
 
-// 整份 .env 给每个服务，shell 里已经有的变量优先，和 dotenv 的习惯一致。
+// 整份 .env 给控制面和 Web，shell 里已经有的变量优先，和 dotenv 的习惯一致。电脑代理例外，见 agentEnvOf。
 const fileEnv = readEnvFile(join(root, ".env"));
 
 const services = [
@@ -27,7 +27,7 @@ const services = [
 
 // 电脑代理要一份电脑 token 才连得上控制面，默认不起，免得每次 pnpm dev 都看它报错重连。
 function agentService() {
-  const missing = ["COMPUTER_ID", "AGENT_TOKEN"].filter((name) => (fileEnv[name] ?? "") === "");
+  const missing = ["COMPUTER_ID", "AGENT_TOKEN"].filter((name) => (process.env[name] ?? fileEnv[name] ?? "") === "");
   if (missing.length > 0) {
     console.log(
       `.env 里缺 ${missing.join("、")}，不起 computer-agent。跑 pnpm --filter @baize/control-plane seed 拿一份`,
@@ -35,6 +35,20 @@ function agentService() {
     return null;
   }
   return { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null };
+}
+
+// Bot 的 bash 会继承代理的环境。代理照拿 shell 的环境，.env 里只拿连控制面要的四个，上游密钥和库连接留给控制面。
+function agentEnvOf(envFromFile) {
+  const env = { ...process.env };
+  for (const key of Object.keys(envFromFile)) {
+    delete env[key];
+  }
+  const allowed = ["COMPUTER_ID", "AGENT_TOKEN", "CONTROL_PLANE_AGENT_URL", "BAIZE_DATA_DIR"];
+  for (const key of allowed) {
+    const value = process.env[key] ?? envFromFile[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return env;
 }
 
 if (process.argv.slice(2).includes("--agent")) {
@@ -82,10 +96,11 @@ for (const service of services) {
     console.log(`跳过 ${name}：${service.dir} 还没有带 dev 脚本的 package.json`);
     continue;
   }
+  const env = service.pkg === "@baize/computer-agent" ? agentEnvOf(fileEnv) : { ...fileEnv, ...process.env };
   const child = spawn("pnpm", ["--filter", service.pkg, "dev"], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...fileEnv, ...process.env },
+    env,
   });
   prefixed(name, child.stdout, (line) => process.stdout.write(line));
   prefixed(name, child.stderr, (line) => process.stderr.write(line));
