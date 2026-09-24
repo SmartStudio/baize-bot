@@ -28,7 +28,7 @@ let server: TestServer;
 
 beforeAll(async () => {
   database = await createTestDb();
-  server = await startTestServer(database.db);
+  server = await startTestServer(database.db, { priceInputPerM: 3, priceOutputPerM: 15 });
 });
 
 afterAll(async () => {
@@ -388,6 +388,52 @@ describe("多 Bot 群派活", () => {
           break;
         }
       }
+    } finally {
+      team.close();
+    }
+  });
+
+  it("一个回合里有人回话、有人 (pass) 时只留一条花费，金额是两次之和", async () => {
+    const team = await makeTeam();
+    try {
+      await say(team, team.group.id, "先看看这件事");
+      const first = await team.agent.expect("prompt");
+      expect(first.botId, "没人点名时先派成员表里的第一位").toBe(team.sales.id);
+      reply(team, first.runId, team.sales.id, "我来答");
+      team.agent.send({
+        type: "run_done",
+        runId: first.runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        steps: 2,
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+      });
+      const second = await team.agent.expect("prompt");
+      expect(second.botId).toBe(team.service.id);
+      reply(team, second.runId, team.service.id, "(pass)");
+      team.agent.send({
+        type: "run_done",
+        runId: second.runId,
+        botId: team.service.id,
+        groupId: team.group.id,
+        steps: 4,
+        inputTokens: 0,
+        outputTokens: 1_000_000,
+      });
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.current === null) break;
+      }
+      const messages = await messagesIn(team, team.group.id);
+      const costs = messages.flatMap((message) => (message.body.kind === "cost" ? [message.body] : []));
+      expect(
+        messages.filter((message) => message.body.kind === "bot"),
+        "(pass) 不落 Bot 消息",
+      ).toHaveLength(1);
+      expect(costs, "两次调用并成一条花费").toEqual([
+        { kind: "cost", runId: first.runId, botId: team.sales.id, steps: 6, amount: 18 },
+      ]);
     } finally {
       team.close();
     }

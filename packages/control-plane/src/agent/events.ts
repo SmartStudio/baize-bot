@@ -26,7 +26,7 @@ import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
 import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import type { GroupTurns } from "./group-turn.js";
+import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
 
@@ -215,16 +215,55 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   // 重复的 runId 和不认识的 runId 在这里都是 null，不再多记一行也不再多一张花费卡。
   if (usage === null) return;
 
-  await appendAndPush(deps, conn.ownerId, groupId, {
+  const passed = runPassed(event.runId);
+  clearTextPrefixes(event.runId);
+  if (passed) {
+    const absorbed = deps.groupTurns.absorbPassCost(groupId, event.runId, {
+      steps: usage.steps,
+      amount: usage.amount,
+      botId: event.botId,
+    });
+    if (absorbed.kind === "merged") {
+      const updated = await replaceMessageBody(deps.db, absorbed.cost.messageId, groupId, {
+        kind: "cost",
+        runId: absorbed.cost.runId,
+        botId: absorbed.cost.botId,
+        steps: absorbed.cost.steps,
+        amount: absorbed.cost.amount,
+      });
+      if (updated !== null) deps.push.push(conn.ownerId, { type: "message", message: updated });
+    }
+    if (absorbed.kind !== "miss") {
+      await chargeRoutineRunOf(deps, event.runId, usage.amount);
+      await deps.groupTurns.runDone(event.groupId, event.runId);
+      return;
+    }
+  }
+
+  const held = deps.groupTurns.takeHeldPass(groupId, event.runId);
+  const message = await appendAndPush(deps, conn.ownerId, groupId, {
     kind: "cost",
     runId: event.runId,
     botId: event.botId,
-    steps: usage.steps,
-    amount: usage.amount,
+    steps: usage.steps + held.steps,
+    amount: usage.amount + held.amount,
+  });
+  deps.groupTurns.rememberCost(groupId, event.runId, {
+    messageId: message.id,
+    runId: event.runId,
+    botId: event.botId,
+    steps: usage.steps + held.steps,
+    amount: usage.amount + held.amount,
   });
   await chargeRoutineRunOf(deps, event.runId, usage.amount);
-  clearTextPrefixes(event.runId);
   await deps.groupTurns.runDone(event.groupId, event.runId);
+}
+
+function runPassed(runId: RunId): boolean {
+  for (const prefix of textPrefixes.values()) {
+    if (prefix.runId === runId && prefix.kind === "pass") return true;
+  }
+  return false;
 }
 
 const ERROR_REASONS: Record<AgentError["code"], string> = {
@@ -366,7 +405,7 @@ async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: 
  */
 async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: HandoffEvent): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
-  if (groupId === null || deps.groupTurns.isBlocked(event.runId)) return;
+  if (groupId === null) return;
 
   const task = await findTaskByGroup(deps.db, groupId);
   if (task === null || task.currentBotId !== event.botId) {
@@ -378,6 +417,17 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   const known = members.some((member) => member.id === event.toBotId);
   if (!known || event.toBotId === event.botId) {
     console.warn(`电脑 ${conn.computerId} 报的交接目标 ${event.toBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
+    return;
+  }
+
+  if (deps.groupTurns.isBlocked(event.runId)) {
+    if (deps.groupTurns.claimHandoffLimitNotice(event.runId)) {
+      await appendAndPush(deps, conn.ownerId, groupId, {
+        kind: "system",
+        tone: "error",
+        text: HANDOFF_LIMIT_NOTICE,
+      });
+    }
     return;
   }
 

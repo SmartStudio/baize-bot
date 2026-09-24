@@ -32,25 +32,14 @@ export function routeTargets(input: {
   return input.members.map((member) => member.id);
 }
 
+const EVERYONE = "所有人";
+
 /** 正文里 @ 到的群成员。单 Bot 群不解析，@ 谁都派给那一个。 */
 export function parseMentions(text: string, members: readonly RoutingMember[]): BotId[] {
   if (members.length < 2) return [];
-  const named = [{ id: null, name: "所有人" }, ...members];
-  const byNameLength = named.toSorted((a, b) => b.name.length - a.name.length);
-  const hit = new Set<BotId>();
-  let everyone = false;
-  for (let at = text.indexOf("@"); at !== -1; at = text.indexOf("@", at + 1)) {
-    const from = at + 1;
-    for (const one of byNameLength) {
-      if (!text.startsWith(one.name, from)) continue;
-      const after = text.slice(from + one.name.length, from + one.name.length + 1);
-      if (after.trim() !== "") continue;
-      if (one.id === null) everyone = true;
-      else hit.add(one.id);
-      break;
-    }
-  }
-  return everyone ? members.map((member) => member.id) : [...hit];
+  const hit = scanNames<BotId | typeof EVERYONE>(text, "@", [{ id: EVERYONE, name: EVERYONE }, ...members]);
+  if (hit.has(EVERYONE)) return members.map((member) => member.id);
+  return [...hit].filter((id): id is BotId => id !== EVERYONE);
 }
 
 /**

@@ -15,7 +15,7 @@ import {
   type TopicTask,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { BOT_MESSAGE_LIMIT, MENTION_LOOP_NOTICE } from "../src/agent/group-turn.js";
+import { BOT_MESSAGE_LIMIT, HANDOFF_LIMIT_NOTICE, MENTION_LOOP_NOTICE } from "../src/agent/group-turn.js";
 import { STALE_HANDOFF_MS, remindStaleHandoffs } from "../src/repo/handoffs.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -181,6 +181,94 @@ function acceptWith(team: Team, runId: RunId, botId: BotId, handoffId: HandoffId
 }
 
 describe("上行 handoff", () => {
+  it("回合被用户插话取消后，旧 run 发的交接仍派给目标", async () => {
+    const team = await makeTeam();
+    try {
+      const oldRun = await runFor(team, "@小销 @小服 一起看");
+      const fresh = await runFor(team, "@小销 换个问题");
+      sendHandoff(team, { runId: oldRun, botId: team.sales.id, toBotId: team.service.id });
+      const handoff = await waitForHandoffUpdated(team);
+      finish(team, fresh, team.sales.id);
+      let sawCost = false;
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === fresh) {
+          sawCost = true;
+        }
+        if (sawCost && push.type === "group_turn") break;
+      }
+      expect((await team.client.post(`/api/groups/${team.group.id}/messages`, { text: "@小销 哨兵" })).status).toBe(
+        201,
+      );
+      const prompt = await team.agent.expect("prompt");
+      expect(prompt.reason, "被插话取消的回合里后到的交接仍要派给目标").toBe("handoff");
+      expect(prompt.botId).toBe(team.service.id);
+      expect(prompt.handoffId).toBe(handoff.id);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("交接目标排进下一回合后，那一回合又被插话取消，目标仍不丢", async () => {
+    const team = await makeTeam();
+    try {
+      const oldRun = await runFor(team, "@小销 @小服 一起看");
+      await runFor(team, "@小销 换个问题");
+      sendHandoff(team, { runId: oldRun, botId: team.sales.id, toBotId: team.service.id });
+      const handoff = await waitForHandoffUpdated(team);
+      const third = await runFor(team, "@小销 再换一个");
+      finish(team, third, team.sales.id);
+      const prompt = await team.agent.expect("prompt");
+      expect(prompt.reason, "卡已经建了，回合再被取消几次，目标也要等到这份交接").toBe("handoff");
+      expect(prompt.botId).toBe(team.service.id);
+      expect(prompt.handoffId).toBe(handoff.id);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("Bot 发言数到上限时不建交接卡，群里有一条说明", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, "@小销 开个头");
+      for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) {
+        team.agent.send({
+          type: "bot_text",
+          runId,
+          botId: team.sales.id,
+          groupId: team.group.id,
+          messageId: MessageId.parse(randomUUID()),
+          delta: `第 ${i + 1} 条`,
+          done: true,
+        });
+      }
+      for (;;) {
+        const push = await team.push.next();
+        if (
+          push.type === "message" &&
+          push.message.body.kind === "system" &&
+          push.message.body.text === MENTION_LOOP_NOTICE
+        ) {
+          break;
+        }
+      }
+      sendHandoff(team, { runId, botId: team.sales.id, toBotId: team.service.id });
+      finish(team, runId, team.sales.id);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === runId) break;
+      }
+      const stored = await page(team);
+      expect(stored.handoffs, "到上限后不再建交接卡").toHaveLength(0);
+      expect(
+        stored.messages.flatMap((message) => (message.body.kind === "system" ? [message.body.text] : [])),
+        "到上限后要说明为什么没把交接交出去",
+      ).toContain(HANDOFF_LIMIT_NOTICE);
+    } finally {
+      team.close();
+    }
+  });
+
   it("Bot 消息达到上限后交接不落卡", async () => {
     const team = await makeTeam();
     try {

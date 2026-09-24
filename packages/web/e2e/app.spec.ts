@@ -1424,7 +1424,6 @@ test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧
   expect((await request.post("/api/test/group/turn", { data: turn })).status(), "mock 推送 group_turn").toBe(204);
   await expect(page.getByTestId("group-turn")).toHaveText("轮到 小销，接着 小采");
   await expect(handler).toHaveText("小销正在说");
-  await page.screenshot({ path: `${SHOT}/comm-turn.png` });
 
   await page.reload();
   await openTeamGroup(page, TEAM_TITLE);
@@ -1440,6 +1439,16 @@ test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧
   expect((await request.post("/api/test/handoff/accept")).status(), "小采确认交接").toBe(204);
   await expect(page.getByTestId("task-current")).toHaveText("当前 小采");
   await expect(handler, "经手人变更后仍优先显示当前发言人").toHaveText("小销正在说");
+  await expect(page.getByTestId("handoff-card")).toHaveAttribute("data-status", "accepted");
+  await expect(page.getByTestId("message-list").getByTestId("cost-card")).toHaveCount(1);
+  await expect(page.getByTestId("group-turn")).toHaveText("轮到 小销，接着 小采");
+  const overnight = page.getByTestId("overnight-card");
+  if (await overnight.isVisible()) {
+    await overnight.getByRole("button", { name: "知道了" }).click();
+    await expect(overnight).toHaveCount(0);
+  }
+  await page.getByTestId("handoff-card").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOT}/comm-turn.png` });
 
   const beforeStale = turnFrames.length;
   expect(

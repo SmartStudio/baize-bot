@@ -465,7 +465,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
       mentions.length === 0
         ? ({ kind: "user", text: body.value.text } as const)
         : ({ kind: "user", text: body.value.text, mentions } as const);
-    deps.groupTurns.cancel(groupId.data);
+    await deps.groupTurns.cancel(groupId.data);
 
     const message = await appendMessage(db, owned, sent);
     hub.push(c.get("user").id, { type: "message", message });
