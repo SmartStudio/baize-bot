@@ -10,8 +10,8 @@ import {
 } from "@baize/shared";
 import { type ApprovalGate, approvalRule, createApprovalGate } from "./approvals.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
-import { connectionsFor, createMcpTools } from "./mcp-tools.js";
-import { type BotDirs, botDirs, ensureBotDirs } from "./paths.js";
+import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
+import { type BotDirs, botDirs, ensureBotDirs, groupSessionDir } from "./paths.js";
 import { reportRun } from "./reporter.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
@@ -22,7 +22,7 @@ export type BotConfig = ConfigMessage["bots"][number];
 
 export { approvalKind, approvalRule } from "./approvals.js";
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
-export { botDirs, type BotDirs } from "./paths.js";
+export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
@@ -65,7 +65,9 @@ interface BotRuntime {
   readonly tag: string;
   readonly description: string;
   readonly dirs: BotDirs;
-  session: BotSession | null;
+  sessions: Map<GroupId, BotSession>;
+  /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
+  mcp: McpToolSet | null;
   lifecycle: BotLifecycle;
   /** 同一个 Bot 的 prompt 串行跑，不同 Bot 之间并行。 */
   chain: Promise<void>;
@@ -151,7 +153,8 @@ export function createRunner(config: RunnerConfig): Runner {
         tag: bot.tag,
         description: bot.description,
         dirs: botDirs(config.dataDir, bot.id),
-        session: null,
+        sessions: new Map(),
+        mcp: null,
         lifecycle: { phase: "idle" },
         chain: Promise.resolve(),
       },
@@ -176,8 +179,9 @@ export function createRunner(config: RunnerConfig): Runner {
     config.send({ type: "agent_error", code, detail, groupId });
   };
 
-  const sessionFor = async (bot: BotRuntime): Promise<BotSession> => {
-    if (bot.session !== null) return bot.session;
+  const sessionFor = async (bot: BotRuntime, groupId: GroupId): Promise<BotSession> => {
+    const existing = bot.sessions.get(groupId);
+    if (existing !== undefined) return existing;
     const activeRun = (): ActiveRun | null => (bot.lifecycle.phase === "running" ? bot.lifecycle.active : null);
     const connections = connectionsFor(bot.botId, config.tools);
     const builtIn: readonly RunnerTool[] = [
@@ -185,18 +189,21 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
     ];
-    const mcp = createMcpTools({
-      botId: bot.botId,
-      connections,
-      reserved: new Set(builtIn.map((tool) => tool.name)),
-    });
-    // MCP 是惰性连接，createBotSession 抛出时还没有任何 client 要关。
+    const mcp =
+      bot.mcp ??
+      createMcpTools({
+        botId: bot.botId,
+        connections,
+        reserved: new Set(builtIn.map((tool) => tool.name)),
+      });
+    bot.mcp = mcp;
+    const dirs = ensureBotDirs(bot.dirs);
     const created = await createBotSession({
       botId: bot.botId,
       name: bot.name,
       tag: bot.tag,
       description: bot.description,
-      dirs: ensureBotDirs(bot.dirs),
+      dirs: { ...dirs, sessionDir: groupSessionDir(dirs, groupId) },
       gateway: config.modelGateway,
       tools: [...builtIn, ...mcp.tools],
       needsApproval: approvalRule(connections),
@@ -204,14 +211,8 @@ export function createRunner(config: RunnerConfig): Runner {
       activeRun,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });
-    bot.session = {
-      ...created,
-      dispose: async () => {
-        await created.dispose();
-        await mcp.close();
-      },
-    };
-    return bot.session;
+    bot.sessions.set(groupId, created);
+    return created;
   };
 
   const runOne = async (bot: BotRuntime, message: PromptMessage): Promise<void> => {
@@ -235,7 +236,7 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     let unsubscribe: (() => void) | null = null;
     try {
-      const { session } = await sessionFor(bot);
+      const { session } = await sessionFor(bot, message.groupId);
       bot.lifecycle = { phase: "running", active };
       unsubscribe = reportRun(session, active.run, approvals.blockedCallIds, config.send);
       await session.prompt(composePrompt(message));
@@ -283,13 +284,14 @@ export function createRunner(config: RunnerConfig): Runner {
     async pause(botId) {
       const bot = bots.get(botId);
       if (bot === undefined || bot.lifecycle.phase === "paused") return;
-      const wasRunning = bot.lifecycle.phase === "running";
+      const runningGroupId = bot.lifecycle.phase === "running" ? bot.lifecycle.active.run.groupId : undefined;
       // 先立状态再中止。abort 会让正在跑的那次走完 finally，晚立的话会被踩回 idle。
       bot.lifecycle = { phase: "paused", queued: [] };
-      if (!wasRunning) return;
+      if (runningGroupId === undefined) return;
       // 挂起的审批不解开，Pi 的工具循环还在 await 它，abort 等不到 idle 会一直挂着。
+      // 只中止正在跑的那个群。别的群的会话留着，resume 之后接着用。
       approvals.abandon(botId);
-      await bot.session?.session.abort();
+      await bot.sessions.get(runningGroupId)?.session.abort();
     },
 
     async resume(botId) {
@@ -306,9 +308,15 @@ export function createRunner(config: RunnerConfig): Runner {
       await Promise.all(
         [...bots.values()].map(async (bot) => {
           await bot.chain.catch(() => undefined);
-          await bot.session?.session.abort();
-          await bot.session?.dispose();
-          bot.session = null;
+          await Promise.all(
+            [...bot.sessions.values()].map(async (botSession) => {
+              await botSession.session.abort();
+              await botSession.dispose();
+            }),
+          );
+          bot.sessions.clear();
+          await bot.mcp?.close();
+          bot.mcp = null;
         }),
       );
       liveRuns.clear();

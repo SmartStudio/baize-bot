@@ -18,6 +18,8 @@ export interface McpCall {
 export interface FakeMcp {
   readonly url: string;
   readonly calls: readonly McpCall[];
+  /** 客户端发过几次 `notifications/initialized`，一次完整 connect 记一次。 */
+  readonly connections: number;
   close(): Promise<void>;
 }
 
@@ -29,8 +31,9 @@ const header = (
   return Array.isArray(value) ? value.join(", ") : value;
 };
 
-function makeServer(calls: McpCall[]): McpServer {
+function makeServer(calls: McpCall[], onInitialized: () => void): McpServer {
   const server = new McpServer({ name: "fake-tools", version: "0.0.0" });
+  server.server.oninitialized = onInitialized;
   server.registerTool(
     "send_email",
     { description: "给客户发一封邮件。", inputSchema: { to: z.string(), subject: z.string() } },
@@ -53,10 +56,13 @@ function makeServer(calls: McpCall[]): McpServer {
 
 export async function startFakeMcp(): Promise<FakeMcp> {
   const calls: McpCall[] = [];
+  let connections = 0;
 
   const http: Server = createServer((req, res) => {
     const serve = async (): Promise<void> => {
-      const server = makeServer(calls);
+      const server = makeServer(calls, () => {
+        connections += 1;
+      });
       const transport = new StreamableHTTPServerTransport({});
       res.on("close", () => void transport.close());
       // SDK 1.30 的 transport 把 sessionId 声明成 `string | undefined`，Transport 要的是可省属性，exactOptionalPropertyTypes 下要转一次。
@@ -74,6 +80,9 @@ export async function startFakeMcp(): Promise<FakeMcp> {
   return {
     url: `http://127.0.0.1:${port}/mcp`,
     calls,
+    get connections() {
+      return connections;
+    },
     close: () =>
       new Promise<void>((resolve, reject) => {
         // 运行器那头的 client 可能还没关，keep-alive 连接会让 close 等到天荒地老。

@@ -16,7 +16,7 @@ import type { BotDirs } from "./paths.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 
-// 一个 Bot 一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
+// 一个群一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
 
@@ -134,7 +134,8 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     modelRuntime,
     resourceLoader,
     settingsManager,
-    sessionManager: SessionManager.create(workDir, sessionDir),
+    // 旧布局把 JSONL 直接放在 sessions/ 下。那个目录不传给 continueRecent，所以升级后不会被续上，文件留在原地。
+    sessionManager: SessionManager.continueRecent(workDir, sessionDir),
   });
 
   return {

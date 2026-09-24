@@ -1,6 +1,6 @@
 # @baize/bot-runner
 
-Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bot 一个 `AgentSession`，跑在电脑代理进程里。
+Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
 
 `createRunner(config)` 返回五个方法：
 
@@ -19,18 +19,20 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 `config.dataDir` 是根，每个 Bot 一棵子树，三个目录都在 `src/paths.ts` 的 `botDirs` 里定死：
 
 ```
-<dataDir>/<botId>/agent      Pi 的 agentDir。auth.json、models-store.json 落在这里
-<dataDir>/<botId>/sessions   会话 JSONL
-<dataDir>/<botId>/work       会话的 cwd，Bot 干活的地方
-<dataDir>/<botId>/skills     config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
+<dataDir>/<botId>/agent                 Pi 的 agentDir。auth.json、models-store.json 落在这里
+<dataDir>/<botId>/sessions/<groupId>    这个群的会话 JSONL
+<dataDir>/<botId>/work                  会话的 cwd，Bot 干活的地方
+<dataDir>/<botId>/skills                config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 ```
+
+直接放在 `sessions/` 里的旧 JSONL 不迁移、不删除。升级后那个 Bot 会丢一次旧记忆，之后按群续用。
 
 Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/agent`，一台电脑上多个 Bot 共用一个进程时会互相串。四个都在 `src/bot-session.ts` 里钉死：
 
 - `ModelRuntime.create` 的 `authPath` 和 `modelsStorePath` 指到 `<botId>/agent`，`modelsPath` 设 `null`（关掉读 `models.json`）。
 - `DefaultResourceLoader` 的 `agentDir`。
 - `createAgentSession` 的 `agentDir`。
-- `SessionManager.create(workDir, sessionDir)` 的第二参。
+- `SessionManager.continueRecent(workDir, <sessions>/<groupId>)` 的第二参。目录里有 JSONL 就续最近一份，没有才新建。
 
 `SettingsManager` 用 `inMemory()`，不落盘。测试里 `test/runner.test.ts` 的最后一条用例先确认探针在临时目录下确实看得见新写的 `auth.json` 和会话 JSONL，再断言 `~/.pi` 下一个新文件都没有。
 
@@ -54,7 +56,7 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 **Pi 没有 pause。** `AgentSession` 上只有 `abort(): Promise<void>`（`core/agent-session.d.ts:444`）和几个针对具体子任务的 `abortCompaction` / `abortRetry` / `abortBash`。`agent-core` 那层是 `AbortSignal`，语义同样是中止，不是挂起。
 
-所以暂停实现成：立 `paused` 状态，把这个 Bot 挂起的审批一律当拒绝收尾，再 `session.abort()` 中止当前运行。暂停期间来的 prompt 进队列，`resume` 时按顺序整条重发。
+所以暂停实现成：立 `paused` 状态，把这个 Bot 挂起的审批一律当拒绝收尾，再 abort 正在跑的那个群的会话。别的群的会话不动。暂停期间来的 prompt 进队列，`resume` 时按顺序整条重发。
 
 先收尾审批这一步是必须的，不是顺手。挂起的审批是 Pi 的工具循环正在 `await` 的一个 Promise，`abort()` 等的是会话变 idle，解不开那个 Promise 就永远等不到，`pause()` 会一直挂着。`test/runner.test.ts` 里「审批还挂着的时候 pause」这条用例就是钉这个的：去掉 `approvals.abandon(botId)` 它会超时。
 
@@ -76,13 +78,13 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 工具连接
 
-`config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。建 Bot 会话时取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。
+`config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具和 client 这个 Bot 的所有群共用，不按群各连一次。
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
 撞名先到先得：运行器自己的工具（`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
-会话销毁、`stop()` 时关掉这个 Bot 的所有 client。电脑代理每来一条 config 就整个换 runner，所以没有热更新：新 runner 按新 config 建会话。
+`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。电脑代理每来一条 config 就整个换 runner，所以没有热更新：新 runner 按新 config 建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
 ## 主题任务工具
 

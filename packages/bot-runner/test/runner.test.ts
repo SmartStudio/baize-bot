@@ -75,26 +75,30 @@ const promptMessage = (
     readonly task?: TopicTask;
     readonly members?: readonly GroupMember[];
     readonly handoffId?: string;
+    readonly groupId?: string;
   },
-): PromptMessage => ({
-  type: "prompt",
-  runId: RunId.parse(runId),
-  botId: BotId.parse(botId),
-  groupId: GroupId.parse("group-1"),
-  text,
-  origin: { kind: "user" },
-  reason: (group?.members?.length ?? 1) > 1 ? "mentioned" : "solo",
-  group: {
-    id: GroupId.parse("group-1"),
-    number: "",
-    title: botId,
-    kind: (group?.members?.length ?? 1) > 1 ? "team" : "solo",
-  },
-  context: [],
-  task: group?.task ?? null,
-  members: [...(group?.members ?? [member(botId, botId)])],
-  ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
-});
+): PromptMessage => {
+  const groupId = GroupId.parse(group?.groupId ?? "group-1");
+  return {
+    type: "prompt",
+    runId: RunId.parse(runId),
+    botId: BotId.parse(botId),
+    groupId,
+    text,
+    origin: { kind: "user" },
+    reason: (group?.members?.length ?? 1) > 1 ? "mentioned" : "solo",
+    group: {
+      id: groupId,
+      number: "",
+      title: botId,
+      kind: (group?.members?.length ?? 1) > 1 ? "team" : "solo",
+    },
+    context: [],
+    task: group?.task ?? null,
+    members: [...(group?.members ?? [member(botId, botId)])],
+    ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
+  };
+};
 
 const member = (botId: string, name: string): GroupMember => ({
   id: BotId.parse(botId),
@@ -322,8 +326,26 @@ const shape = (sent: readonly AgentToControl[]): string[] =>
 
 const sessionFilesOf = (dataDir: string, botId: string): string[] => {
   const dir = botDirs(dataDir, BotId.parse(botId)).sessionDir;
-  return readdirSync(dir).map((name) => join(dir, name));
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      return readdirSync(path)
+        .filter((name) => name.endsWith(".jsonl"))
+        .map((name) => join(path, name));
+    }
+    return entry.name.endsWith(".jsonl") ? [path] : [];
+  });
 };
+
+const jsonlIn = (dir: string): string[] => {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".jsonl"))
+    .map((name) => join(dir, name));
+};
+
+const groupDir = (dataDir: string, botId: string, groupId: string): string =>
+  join(botDirs(dataDir, BotId.parse(botId)).sessionDir, groupId);
 
 const headerCwdOf = (file: string): string =>
   (JSON.parse((readFileSync(file, "utf8").split("\n")[0] ?? "").trim()) as { cwd: string }).cwd;
@@ -1811,6 +1833,80 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
       "Bot bot-1：连接「仓库 B」的操作「lookup_stock」和已注册的工具重名，跳过",
     ]);
     warn.mockRestore();
+  });
+});
+
+describe("每群一份会话", () => {
+  it("同一 Bot 两个群的 prompt 落到两个会话文件", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([
+        ["甲群的话", { textChunks: ["甲群回了。"], usage: { input: 100, output: 5 } }],
+        ["乙群的话", { textChunks: ["乙群回了。"], usage: { input: 110, output: 6 } }],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "甲群的话", { groupId: "group-a" }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "乙群的话", { groupId: "group-b" }));
+
+    const filesA = jsonlIn(groupDir(h.dataDir, "bot-1", "group-a"));
+    const filesB = jsonlIn(groupDir(h.dataDir, "bot-1", "group-b"));
+    expect(filesA, "甲群目录下应有一份 JSONL").toHaveLength(1);
+    expect(filesB, "乙群目录下应有一份 JSONL").toHaveLength(1);
+    expect(filesA[0]).not.toBe(filesB[0]);
+  });
+
+  it("换一份 config 重建运行器后，同一个群的会话文件被续用而不是新建", async () => {
+    const firstSeen = recorder();
+    const first = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(firstSeen, [
+        ["口令青鸟", { textChunks: ["记下了青鸟。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+
+    await first.runner.prompt(promptMessage("bot-1", "run-1", "口令青鸟", { groupId: "group-a" }));
+    await first.runner.stop();
+
+    const secondSeen = recorder();
+    const second = await startHarness({
+      bots: ["bot-1"],
+      dataDir: first.dataDir,
+      script: scriptRecording(secondSeen, [["还记得吗", { textChunks: ["记得。"], usage: { input: 200, output: 4 } }]]),
+    });
+
+    await second.runner.prompt(promptMessage("bot-1", "run-2", "还记得吗", { groupId: "group-a" }));
+
+    expect(jsonlIn(groupDir(first.dataDir, "bot-1", "group-a")), "续用后目录里仍只有一个 JSONL").toHaveLength(1);
+    const messages = secondSeen.firstTurn.join("\n");
+    expect(messages, "第二次 prompt 时模型要看到第一次的用户话").toContain("口令青鸟");
+    expect(messages, "第二次 prompt 时模型要看到第一次的回答").toContain("记下了青鸟。");
+  });
+
+  it("同一 Bot 两个群只连一次 MCP", async () => {
+    const mcp = await startFakeMcp();
+    try {
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        tools: [toolConnection([{ name: "lookup_stock", needsApproval: false }], { url: mcp.url })],
+        script: (req) => {
+          if (isFollowUpTurn(req)) return { textChunks: [], usage: { input: 900, output: 8 } };
+          const body = JSON.stringify(req.messages);
+          if (body.includes("乙群查库存")) return callTool("lookup_stock", { sku: "SKU-B" });
+          if (body.includes("甲群查库存")) return callTool("lookup_stock", { sku: "SKU-A" });
+          throw new Error(`假上游没有匹配的脚本：${body.slice(0, 200)}`);
+        },
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "甲群查库存", { groupId: "group-a" }));
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "乙群查库存", { groupId: "group-b" }));
+
+      expect(mcp.calls.map((call) => call.args)).toEqual([{ sku: "SKU-A" }, { sku: "SKU-B" }]);
+      expect(mcp.connections, "两个群共用这一份 MCP 连接").toBe(1);
+    } finally {
+      await mcp.close();
+    }
   });
 });
 
