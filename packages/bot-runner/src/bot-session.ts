@@ -111,7 +111,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     noSkills: true,
     additionalSkillPaths: [skillsDir],
     systemPrompt:
-      "你是白泽 Bot，在这家公司的云电脑上替同事干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
+      "你是白泽 Bot，在同事自己的电脑上替他干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
     appendSystemPrompt: [
       `你叫 ${options.name}${options.tag === "" ? "" : `，标签 ${options.tag}`}`,
       ...(options.description === "" ? [] : [`你的描述，也是你的边界：${options.description}`]),
@@ -125,7 +125,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
   });
   await resourceLoader.reload();
 
-  // 不传 noTools，Pi 的四个内置工具（read、bash、edit、write）就是开的。Bot 在云电脑上干活靠它们，
+  // 不传 noTools，Pi 的四个内置工具（read、bash、edit、write）就是开的。Bot 在电脑上干活靠它们，
   // 关掉的话「看看电脑里有哪些文件」这类活一件也做不了。作用范围是这个 Bot 自己的 work 目录。
   const { session } = await createAgentSession({
     cwd: workDir,

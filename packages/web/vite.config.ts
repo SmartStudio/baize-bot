@@ -7,7 +7,7 @@ const sharedSrc = fileURLToPath(new URL("../shared/src/index.ts", import.meta.ur
 // 真控制面在 3001。端到端跑的是 mock/server.ts，用 API_PORT 把两边挪到一个不跟别的进程抢的端口。
 const apiPort = process.env["API_PORT"] ?? "3001";
 
-// /gateway 是云电脑代理连控制面用的，不是前端路由。不挡住它，Vite 的 SPA 回退会拿 index.html 当 200 回，
+// /gateway 是电脑代理连控制面用的，不是前端路由。不挡住它，Vite 的 SPA 回退会拿 index.html 当 200 回，
 // 代理会以为自己握上手了。
 const rejectGateway = (): Plugin => ({
   name: "baize-reject-gateway",

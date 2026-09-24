@@ -249,7 +249,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
         <p>后续</p>
       </section>
       <p className="tools-foot">
-        Bot 设置里的「可用工具」「已登录站点」点进来也是这一页。登录态在云电脑里，过期了 Bot
+        Bot 设置里的「可用工具」「已登录站点」点进来也是这一页。登录态在你的电脑上，过期了 Bot
         不会猜密码，会停下请你接管登录。没有别的权限设置。
       </p>
     </div>

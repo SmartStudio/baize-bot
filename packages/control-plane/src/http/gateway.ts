@@ -12,7 +12,7 @@ export type GatewayDeps = {
   readonly upstreamApiKey: string;
 };
 
-// 白名单而不是黑名单：上游的组织标识、Set-Cookie 这类头不该漏给云电脑，
+// 白名单而不是黑名单：上游的组织标识、Set-Cookie 这类头不该漏给电脑，
 // 而黑名单挡不住上游以后新加的头。压缩、长度、分块也顺带落在名单外，那几项由我们这边重新定。
 const FORWARDED_HEADERS = new Set(["content-type", "cache-control"]);
 const FORWARDED_HEADER_PREFIXES = ["x-ratelimit-"];
@@ -24,7 +24,7 @@ function isForwarded(name: string): boolean {
 const CompletionRequest = z.object({}).passthrough();
 
 /**
- * 模型网关。云电脑只能出站到控制面，模型调用都从这里转出去。
+ * 模型网关。上游密钥不下发到电脑，模型调用都从这里转出去。
  * 用量以电脑报上来的 run_done 为准，网关自己不记账。
  */
 export function createGateway(deps: GatewayDeps): Hono {

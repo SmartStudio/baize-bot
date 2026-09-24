@@ -16,7 +16,7 @@ try {
   } else {
     const reset = await resetComputerToken(db, user.id);
     if (reset === null) {
-      console.error(`${email} 还没有云电脑，登录一次或者跑 seed`);
+      console.error(`${email} 还没有电脑，登录一次或者跑 seed`);
       process.exitCode = 1;
     } else {
       console.log(`COMPUTER_ID=${reset.computerId}`);

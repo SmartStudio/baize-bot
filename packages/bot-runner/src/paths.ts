@@ -5,7 +5,7 @@ import type { BotId } from "@baize/shared";
 // Pi 有四个独立的落盘回落点，不给就各自回落到 ~/.pi/agent：
 // createAgentSession 的 agentDir、DefaultResourceLoader 的 agentDir、
 // ModelRuntime 的 authPath / modelsPath / modelsStorePath、SessionManager.create 的第二参。
-// 一台云电脑上多个 Bot 共用一个进程，串到 ~/.pi 就等于串到别的 Bot 头上。
+// 一台电脑上多个 Bot 共用一个进程，串到 ~/.pi 就等于串到别的 Bot 头上。
 
 export interface BotDirs {
   /** Pi 的 agentDir。auth.json 和 models-store.json 落在这里。 */

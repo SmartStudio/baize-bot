@@ -2,7 +2,7 @@ import { ControlToAgent, type AgentToControl, type ComputerId, type RunId } from
 import { WebSocket } from "ws";
 import { AGENT_PATH } from "../../src/agent/hub.js";
 
-/** 扮演云电脑里的电脑代理。测试只通过这条 WebSocket 碰 /agent。 */
+/** 扮演电脑代理。测试只通过这条 WebSocket 碰 /agent。 */
 export type AgentClient = {
   readonly socket: WebSocket;
   send(message: AgentToControl): void;

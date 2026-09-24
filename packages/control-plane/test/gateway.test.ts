@@ -309,8 +309,8 @@ describe("转发", () => {
 
     const response = await r.call("/chat/completions", authed(r.key, chatBody()));
 
-    expect(response.headers.get("openai-organization"), "上游的组织标识不该漏给云电脑").toBeNull();
-    expect(response.headers.getSetCookie(), "上游的 Set-Cookie 不该漏给云电脑").toEqual([]);
+    expect(response.headers.get("openai-organization"), "上游的组织标识不该漏给电脑").toBeNull();
+    expect(response.headers.getSetCookie(), "上游的 Set-Cookie 不该漏给电脑").toEqual([]);
     expect(response.headers.get("content-type"), "白名单里的照转").toContain("application/json");
     expect(response.headers.get("x-ratelimit-remaining-requests"), "限流头按前缀放行").toBe("99");
     expect(await response.json(), "正文照旧原样带回来").toEqual({ id: "chatcmpl-1", choices: [] });

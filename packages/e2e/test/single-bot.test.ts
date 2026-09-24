@@ -42,7 +42,7 @@ function script(req: ChatRequest): ScriptedTurn {
   return { textChunks: ["电脑里有 ", `${listing}。`], usage: { input: 1500, output: 24 } };
 }
 
-describe("端到端：一句话走完控制面、云电脑、模型网关", () => {
+describe("端到端：一句话走完控制面、电脑代理、模型网关", () => {
   it("群里依次出现 tool_call、bot、cost，runs 表多一行", async () => {
     const upstream = await startUpstream(script);
     const stack = await startStack({

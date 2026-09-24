@@ -50,7 +50,7 @@ export const LoginPage = () => {
             <button type="button" className="ghost-button wide" disabled>
               <KeyRound size={16} aria-hidden="true" /> 使用 SSO 登录 · 后续
             </button>
-            <p className="fine">登录即同意企业使用条款 · 云电脑可部署在企业内网，数据不用于训练</p>
+            <p className="fine">登录即同意企业使用条款 · Bot 在你自己的电脑上干活，数据不用于训练</p>
           </form>
         ) : (
           <form
@@ -94,7 +94,7 @@ export const LoginPage = () => {
       </div>
       <aside className="login-aside">
         <h2>能把真活交出去的数字同事</h2>
-        <p>每个 Bot 有自己的桌面，在你的云电脑里把活干完。要你点头的时候才来找你。</p>
+        <p>每个 Bot 在你的电脑上把活干完。要你点头的时候才来找你。</p>
       </aside>
     </main>
   );

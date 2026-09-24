@@ -141,7 +141,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const user = await authenticate(db, body.value.email, body.value.password);
     if (user === null) return c.json({ error: "邮箱或密码不对" }, 401);
     const token = await createSession(db, user.id);
-    // 首次登录时给他建云电脑。规格里的「首次登录时后台创建云电脑」，状态先是创建中。
+    // 首次登录时给他登记一台电脑，状态先是创建中，代理第一次握手才转在线。
     await ensureComputer(db, user.id);
     setCookie(c, SESSION_COOKIE, token, {
       httpOnly: true,

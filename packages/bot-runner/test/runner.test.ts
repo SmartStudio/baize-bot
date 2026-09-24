@@ -246,7 +246,7 @@ async function startHarness(options: {
   readonly description?: string;
   readonly name?: string;
   readonly tag?: string;
-  /** 复用上一台的数据目录，用来模拟同一台云电脑上又来一条 config。 */
+  /** 复用上一台的数据目录，用来模拟同一台电脑上又来一条 config。 */
   readonly dataDir?: string;
 }): Promise<Harness> {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
@@ -713,7 +713,7 @@ describe("运行器的通信提示", () => {
     expect(typeof system).toBe("string");
     if (typeof system !== "string") throw new Error("假上游未收到 system 文本");
     expect(system.split("\n\n")[0]).toBe(
-      "你是白泽 Bot，在这家公司的云电脑上替同事干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
+      "你是白泽 Bot，在同事自己的电脑上替他干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
     );
     expect(system).not.toContain("You are an expert coding assistant");
     const identity = `你叫 小销${tag === "" ? "" : "，标签 销售"}`;
