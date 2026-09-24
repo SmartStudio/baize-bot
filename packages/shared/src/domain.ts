@@ -4,22 +4,24 @@ import { z } from "zod";
 // 状态一律用字面量联合，不用布尔组合。
 
 const id = (brand: string) => z.string().min(1).brand(brand);
+// 运行器直接拿来当目录名的 id（<botDir>/skills/<skillId>/、<botDir>/sessions/<groupId>/），只收一段安全的名字。
+const dirId = <B extends string>(brand: B) =>
+  z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,64}$/)
+    .brand(brand);
 
 export const UserId = id("UserId");
 export const ComputerId = id("ComputerId");
 export const DesktopId = id("DesktopId");
 export const BotId = id("BotId");
-export const GroupId = id("GroupId");
+export const GroupId = dirId("GroupId");
 export const TaskId = id("TaskId");
 export const MessageId = id("MessageId");
 export const ApprovalId = id("ApprovalId");
 export const HandoffId = id("HandoffId");
 export const ToolConnectionId = id("ToolConnectionId");
-// skill id 在运行器里直接当目录名（<botDir>/skills/<skillId>/SKILL.md），所以只收一段安全的名字。
-export const SkillId = z
-  .string()
-  .regex(/^[A-Za-z0-9_-]{1,64}$/)
-  .brand("SkillId");
+export const SkillId = dirId("SkillId");
 export const RoutineId = id("RoutineId");
 export const RunId = id("RunId");
 

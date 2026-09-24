@@ -7,6 +7,7 @@ import {
   CreateRoutineRequest,
   DecideSkillOfferRequest,
   Group,
+  GroupId,
   Handoff,
   Message,
   RoutineRun,
@@ -203,6 +204,14 @@ describe("M10 skill 的共享形状", () => {
     expect(SkillId.safeParse("3f2c9a1e-7b4d-4c5e-9a1b-2c3d4e5f6a7b").success).toBe(true);
     for (const bad of ["../pwned", "a/b", "a\\b", "..", "", "x".repeat(65), "报价"]) {
       expect(SkillId.safeParse(bad).success, bad).toBe(false);
+    }
+  });
+
+  it("GroupId 也只收能当目录名的一段，运行器拿它拼会话目录", () => {
+    expect(GroupId.safeParse("grp_sales").success).toBe(true);
+    expect(GroupId.safeParse("3f2c9a1e-7b4d-4c5e-9a1b-2c3d4e5f6a7b").success).toBe(true);
+    for (const bad of ["../pwned", "a/b", "a\\b", "..", "", "x".repeat(65), "报价"]) {
+      expect(GroupId.safeParse(bad).success, bad).toBe(false);
     }
   });
 
