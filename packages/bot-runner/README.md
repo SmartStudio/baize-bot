@@ -1,6 +1,6 @@
 # @baize/bot-runner
 
-Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.85.1 的 SDK，一个 Bot 一个 `AgentSession`，跑在电脑代理进程里。
+Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bot 一个 `AgentSession`，跑在电脑代理进程里。
 
 `createRunner(config)` 返回五个方法：
 
