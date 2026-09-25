@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// 对象模型。依据 spec/规格.md 第一部分。每个对象一个 zod schema，类型从 schema 推导。
+// 对象模型。依据 spec/规格.md 第二节，这里是各对象「现在」的形状。每个对象一个 zod schema，类型从 schema 推导。
 // 状态一律用字面量联合，不用布尔组合。
 
 const id = (brand: string) => z.string().min(1).brand(brand);

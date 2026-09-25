@@ -75,7 +75,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - 上行报文（`bot_text`、`bot_tool_call`、`run_done`、`approval_request`、`handoff`、`mention`、`skill_offer` 等）都进 `agent/events.ts`，带 runId 的先校验 run 属于这台电脑、这个 Bot、这个群，不成立整条静默丢弃。`run_done` 挂在 Pi 的 `agent_settled` 上，一次 prompt 恰好一次。
 - 群消息是事实来源，但三种卡的状态住的地方不同：审批和交接的卡正文只有一个 id，状态在 `approvals` / `handoffs` 行上，只随 `approval_updated` / `handoff_updated` 推；`skill_offer` 的 name 和 steps 在点存之前只在正文里，点完要重推那条 message。
 - 交接分两步：`handoff_task` 发报文，目标 `accept_handoff` 之后 `tasks.current_bot_id` 才换人。确认之前活不悬空。
-- Bot 之间 @ 有回路守卫（`agent/mention-loop.ts`），两条用户消息之间最多派 10 次，计数在内存。
+- 多 Bot 群一次回合的调度在 `agent/group-turn.ts`，Bot 之间 @ 的回路守卫也在这里，一个回合里 Bot 最多说 10 条（`BOT_MESSAGE_LIMIT`），计数在内存。
 - skill 单向：真相源是控制面 `skills` 表，随 `config` 下发，运行器落成 `<dataDir>/<botId>/skills/<skillId>/SKILL.md`，不回传。`config.skills` 恒带，空也带空数组，运行器靠它整目录对账。
 - 例行任务就是归属人在单 Bot 群里发了一条消息，运行器和电脑代理不认识它。调度游标用 `UPDATE ... WHERE lastFiredAt = 旧值` 抢，停机不补跑。
 - 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
@@ -87,8 +87,10 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - `README.md` 跑起来、环境变量、控制面握手。
 - `packages/control-plane/README.md` 路由、审批、交接、例行、skill、用量的设计理由，改这些前先读对应一节。
 - `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法。
-- `spec/规格.md` 产品规格，`plan/开发计划.md` 里程碑，`research/` Grok Bot 对照研究。
-- `bot-application-prototype/` 静态原型，Web 的样式只用它 `_ds/.../tokens` 里的变量。oxlint 和 prettier 都忽略它。
+- `spec/规格.md` 产品规格 v0.2，方向已转成个人助理，每个对象写了目标和「现在」的差距。`spec/用户故事.md` 按天讲用户怎么用，每期的验收就是走通对应的故事。`spec/原型/个人助理-v4.html` 是可点的交互原型，一次性的，不照着抄代码，prettier 忽略它。
+- `plan/开发计划.md` 分期和单元，第四节列了 v0.1 的 M 和 N 单元去哪了。
+- `research/` 竞品对照，Grok Bot 和个人助理几家。
+- `bot-application-prototype/` v0.1 的静态原型，Web 的样式只用它 `_ds/.../tokens` 里的变量。oxlint 和 prettier 都忽略它。
 
 ## 与 codex 协作
 

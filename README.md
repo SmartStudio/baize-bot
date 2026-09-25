@@ -1,6 +1,6 @@
 # 白泽 Bot
 
-规格在 spec/规格.md，开发计划在 plan/开发计划.md，原型在 bot-application-prototype/。
+产品方向是个人助理。规格在 spec/规格.md，用户故事在 spec/用户故事.md，交互原型在 spec/原型/个人助理-v4.html，开发计划在 plan/开发计划.md，竞品对照在 research/。下面描述的是主干现在的样子，按 v0.1 的企业版做的，要改成什么样看规格。bot-application-prototype/ 是 v0.1 的静态原型，Web 的样式变量还从它取。
 
 ## 目录
 
