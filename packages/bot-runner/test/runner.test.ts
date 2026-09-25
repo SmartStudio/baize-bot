@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import {
   AgentToControl,
   BotId,
@@ -27,6 +28,7 @@ import { Type } from "typebox";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import {
   botDirs,
+  type BotConfig,
   createRunner,
   type GroupMember,
   type PromptMessage,
@@ -43,6 +45,52 @@ import {
   type ScriptedTurn,
   scriptedUpstream,
 } from "./fixtures/openai-sse.js";
+
+const botSessionProbe = vi.hoisted(() => ({
+  creations: [] as Array<{ botId: string; sessionDir: string }>,
+  disposals: [] as Array<{ botId: string; sessionDir: string }>,
+  disposeGate: null as Promise<void> | null,
+  disposeError: null as Error | null,
+  disposeErrorFor: null as string | null,
+  createGate: null as Promise<void> | null,
+  promptError: null as Error | null,
+  promptHook: null as (() => void) | null,
+}));
+
+vi.mock("../src/bot-session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/bot-session.js")>();
+  return {
+    ...actual,
+    async createBotSession(options: Parameters<typeof actual.createBotSession>[0]) {
+      const key = { botId: String(options.botId), sessionDir: options.dirs.sessionDir };
+      botSessionProbe.creations.push(key);
+      if (botSessionProbe.createGate !== null) await botSessionProbe.createGate;
+      const created = await actual.createBotSession(options);
+      const prompt = created.session.prompt.bind(created.session);
+      Object.defineProperty(created.session, "prompt", {
+        configurable: true,
+        value: (input: string) => {
+          if (botSessionProbe.promptError !== null) throw botSessionProbe.promptError;
+          botSessionProbe.promptHook?.();
+          return prompt(input);
+        },
+      });
+      return {
+        ...created,
+        async dispose() {
+          botSessionProbe.disposals.push(key);
+          const gate = botSessionProbe.disposeGate;
+          if (gate !== null) await gate;
+          if (botSessionProbe.disposeError !== null) throw botSessionProbe.disposeError;
+          if (botSessionProbe.disposeErrorFor !== null && key.sessionDir.includes(botSessionProbe.disposeErrorFor)) {
+            throw new Error(`模拟 ${botSessionProbe.disposeErrorFor} 关闭失败`);
+          }
+          await created.dispose();
+        },
+      };
+    },
+  };
+});
 
 const MODEL_ID = "baize-test-model";
 // 供应商 SDK 自己那层重试会把上游的 503 吞掉，设成 0 才冒得到 Pi 的重试层。
@@ -200,6 +248,12 @@ interface Harness {
   readonly sideEffects: string[];
   readonly gateway: Gateway;
   readonly dataDir: string;
+  config(overrides?: {
+    readonly bots?: readonly BotConfig[];
+    readonly tools?: readonly ToolConnectionConfig[];
+    readonly skills?: readonly Skill[];
+    readonly modelGateway?: RunnerConfig["modelGateway"];
+  }): RunnerConfig;
   close(): Promise<void>;
 }
 
@@ -266,27 +320,43 @@ async function startHarness(options: {
   const sent: AgentToControl[] = [];
   const sideEffects: string[] = [];
   let runner: Runner | null = null;
-
-  runner = createRunner({
-    bots: options.bots.map((id) => ({
-      id: BotId.parse(id),
-      name: options.name ?? id,
-      tag: options.tag ?? "",
-      description: options.description ?? "",
-    })),
-    tools: options.tools ?? [],
-    modelGateway: { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
+  const bots = options.bots.map((id) => ({
+    id: BotId.parse(id),
+    name: options.name ?? id,
+    tag: options.tag ?? "",
+    description: options.description ?? "",
+  }));
+  const tools = options.tools ?? [];
+  const extensionTools = options.extensionTools ?? [sendEmailTool(sideEffects), listFilesTool(sideEffects)];
+  const send = (message: AgentToControl): void => {
+    sent.push(AgentToControl.parse(message));
+    if (message.type === "approval_request" && options.approve !== undefined) {
+      runner?.approve(message.runId, message.callId, options.approve);
+    }
+  };
+  const config = (
+    overrides: {
+      readonly bots?: readonly BotConfig[];
+      readonly tools?: readonly ToolConnectionConfig[];
+      readonly skills?: readonly Skill[];
+      readonly modelGateway?: RunnerConfig["modelGateway"];
+    } = {},
+  ): RunnerConfig => ({
+    bots: overrides.bots ?? bots,
+    tools: overrides.tools ?? tools,
+    modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
     dataDir,
-    ...(options.skills === undefined ? {} : { skills: [...options.skills] }),
-    extensionTools: options.extensionTools ?? [sendEmailTool(sideEffects), listFilesTool(sideEffects)],
-    send: (message) => {
-      sent.push(AgentToControl.parse(message));
-      if (message.type === "approval_request" && options.approve !== undefined) {
-        runner?.approve(message.runId, message.callId, options.approve);
-      }
-    },
+    ...(overrides.skills !== undefined
+      ? { skills: [...overrides.skills] }
+      : options.skills === undefined
+        ? {}
+        : { skills: [...options.skills] }),
+    extensionTools,
+    send,
     ...(options.settings === undefined ? {} : { settings: options.settings }),
   });
+
+  runner = createRunner(config());
 
   const harness: Harness = {
     runner,
@@ -294,6 +364,7 @@ async function startHarness(options: {
     sideEffects,
     gateway,
     dataDir,
+    config,
     async close() {
       await runner?.stop();
       await gateway.close();
@@ -305,6 +376,14 @@ async function startHarness(options: {
 
 afterEach(async () => {
   await Promise.all(open.splice(0).map((harness) => harness.close()));
+  botSessionProbe.creations.splice(0);
+  botSessionProbe.disposals.splice(0);
+  botSessionProbe.disposeGate = null;
+  botSessionProbe.disposeError = null;
+  botSessionProbe.disposeErrorFor = null;
+  botSessionProbe.createGate = null;
+  botSessionProbe.promptError = null;
+  botSessionProbe.promptHook = null;
 });
 
 afterAll(() => {
@@ -319,10 +398,44 @@ async function until(ready: () => boolean, label: string, timeoutMs = 5000): Pro
   }
 }
 
+const median = (values: readonly number[]): number => {
+  const sorted = values.toSorted((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)] ?? Number.POSITIVE_INFINITY;
+};
+
+const sessionCreationsFor = (botId: string): number =>
+  botSessionProbe.creations.filter((creation) => creation.botId === botId).length;
+
 const shape = (sent: readonly AgentToControl[]): string[] =>
   sent.map((m) =>
     m.type === "bot_tool_call" ? `bot_tool_call:${m.status}` : m.type === "bot_text" ? `bot_text:${m.done}` : m.type,
   );
+
+const holdTool = (): { readonly hold: RunnerTool; readonly started: () => boolean; readonly release: () => void } => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let started = false;
+  return {
+    hold: {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    },
+    started: () => started,
+    release,
+  };
+};
+
+const runDoneIds = (harness: Harness): string[] =>
+  harness.sent.filter((message) => message.type === "run_done").map((message) => message.runId);
 
 const sessionFilesOf = (dataDir: string, botId: string): string[] => {
   const dir = botDirs(dataDir, BotId.parse(botId)).sessionDir;
@@ -397,14 +510,21 @@ describe("运行器跑一次 prompt", () => {
     expect(h.sideEffects).toEqual(["list_files:/work"]);
   });
 
-  it("config 里没有的 botId 回 agent_error，带上这条 prompt 的群号", async () => {
+  it("config 里没有的 botId 回 agent_error 和一次 run_done，带上这条 prompt 的群号", async () => {
     const h = await startHarness({ bots: ["bot-1"], script: scriptBy([]) });
 
     await h.runner.prompt(promptMessage("bot-别的", "run-x", "列目录"));
 
-    expect(shape(h.sent)).toEqual(["agent_error"]);
+    expect(shape(h.sent)).toEqual(["agent_error", "run_done"]);
     const error = h.sent[0];
     expect(error?.type === "agent_error" && error.groupId).toBe("group-1");
+    expect(h.sent[1]).toMatchObject({
+      type: "run_done",
+      runId: "run-x",
+      steps: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
     expect(h.gateway.requestCount()).toBe(0);
   });
 
@@ -571,6 +691,10 @@ describe("运行器的暂停和继续", () => {
     expect(h.gateway.requestCount()).toBe(requestsBeforePause);
 
     await h.runner.resume(BotId.parse("bot-1"));
+    await until(
+      () => h.sent.some((message) => message.type === "run_done" && message.runId === "run-2"),
+      "resume 重新排队的 run-2 收尾",
+    );
 
     expect(h.sent.filter((m) => m.type === "run_done").map((m) => m.runId)).toEqual(["run-2"]);
     expect(h.runner.activeRuns()).toEqual([]);
@@ -1927,6 +2051,1264 @@ describe("每次运行的用量", () => {
     expect(done).toHaveLength(2);
     expect(done[0]).toMatchObject({ runId: "run-1", inputTokens: 100, outputTokens: 5 });
     expect(done[1]).toMatchObject({ runId: "run-2", inputTokens: 110, outputTokens: 6 });
+  });
+});
+
+describe("config 按 Bot 增量对账", () => {
+  const fiveBots = ["bot-1", "bot-2", "bot-3", "bot-4", "bot-5"] as const;
+
+  const gateDisposal = (): (() => void) => {
+    let release!: () => void;
+    botSessionProbe.disposeGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return release;
+  };
+
+  const changedBots = (description: string): readonly BotConfig[] =>
+    fiveBots.map((id) => ({
+      id: BotId.parse(id),
+      name: id,
+      tag: "",
+      description: id === "bot-5" ? description : "",
+    }));
+
+  it("Bot A 在跑时改 Bot B，A 的 run 正常 run_done", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      extensionTools: [hold],
+      script: scriptBy([
+        ["A 改配置后", { textChunks: ["A 还在。"], usage: { input: 120, output: 7 } }],
+        ["B 改配置后", { textChunks: ["B 已更新。"], usage: { input: 115, output: 6 } }],
+        ["B 预热", { textChunks: ["B 就绪。"], usage: { input: 90, output: 4 } }],
+        ["慢活", callTool("hold", {})],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-2", "warm-b", "B 预热"));
+    const running = h.runner.prompt(promptMessage("bot-1", "run-a", "慢活"));
+    await until(() => started, "Bot A 进入工具");
+    const aCreationsBefore = sessionCreationsFor("bot-1");
+    const bCreationsBefore = sessionCreationsFor("bot-2");
+    try {
+      await h.runner.applyConfig(
+        h.config({
+          bots: [
+            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "" },
+            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新描述" },
+          ],
+        }),
+      );
+    } finally {
+      release();
+    }
+    await running;
+    await h.runner.prompt(promptMessage("bot-1", "run-a-after", "A 改配置后"));
+    await h.runner.prompt(promptMessage("bot-2", "run-b-after", "B 改配置后"));
+
+    expect(sessionCreationsFor("bot-1"), "没变化的 Bot A 必须保留原会话对象").toBe(aCreationsBefore);
+    expect(sessionCreationsFor("bot-2"), "变化的 Bot B 只在下一条 prompt 时建一个新会话").toBe(bCreationsBefore + 1);
+    expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+      "warm-b",
+      "run-a",
+      "run-a-after",
+      "run-b-after",
+    ]);
+  });
+
+  it("存 skill 后续用同一份历史，下一次系统提示有新 skill 且没有已删 skill", async () => {
+    const systems: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      skills: [WEEKLY_SKILL],
+      script: (request) => {
+        const body = JSON.stringify(request.messages);
+        if (body.includes("skill 变更后")) {
+          systems.push(String(request.messages.find((message) => message.role === "system")?.content ?? ""));
+        }
+        return { textChunks: ["完成。"], usage: { input: 100, output: 5 } };
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "skill 变更前"));
+    await h.runner.prompt(promptMessage("bot-2", "warm-b", "B 预热"));
+    const beforeFiles = sessionFilesOf(h.dataDir, "bot-1");
+    const beforeContents = beforeFiles.map((file) => readFileSync(file, "utf8"));
+    const bot1CreationsBefore = sessionCreationsFor("bot-1");
+    const bot2CreationsBefore = sessionCreationsFor("bot-2");
+
+    await h.runner.applyConfig(h.config({ skills: [GLOBEX_SKILL] }));
+    await until(() => skillIdsOn(h.dataDir, "bot-1").includes("skill-globex"), "新 skill 落盘");
+
+    expect(sessionFilesOf(h.dataDir, "bot-1")).toEqual(beforeFiles);
+    expect(beforeFiles.map((file) => readFileSync(file, "utf8"))).toEqual(beforeContents);
+    expect(skillFileOn(h.dataDir, "bot-1", "skill-globex")).toContain("# Globex 报价");
+    expect(sessionCreationsFor("bot-1"), "skill 变化后应先关旧会话，不在 applyConfig 里急建").toBe(bot1CreationsBefore);
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "skill 变更后"));
+    await h.runner.prompt(promptMessage("bot-2", "run-b-after", "B 配置没变"));
+
+    expect(sessionCreationsFor("bot-1"), "只为 skill 变化的 Bot 重建一次会话").toBe(bot1CreationsBefore + 1);
+    expect(sessionCreationsFor("bot-2"), "别的 Bot 必须保留原会话对象").toBe(bot2CreationsBefore);
+    expect(systems).toHaveLength(1);
+    expect(systems[0]).toContain("Globex 报价");
+    expect(systems[0]).not.toContain("周报");
+  });
+
+  it("换 config 后旧会话用新的网关 key 请求", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([
+        ["第二次", { textChunks: ["第二次完成。"], usage: { input: 110, output: 6 } }],
+        ["第一次", { textChunks: ["第一次完成。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一次"));
+    const [sessionFile] = sessionFilesOf(h.dataDir, "bot-1");
+    const creationsBefore = sessionCreationsFor("bot-1");
+
+    await h.runner.applyConfig(
+      h.config({
+        modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-key", model: MODEL_ID },
+      }),
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
+
+    expect(sessionFilesOf(h.dataDir, "bot-1")).toEqual([sessionFile]);
+    expect(sessionCreationsFor("bot-1"), "只换网关 key 不得重建会话对象").toBe(creationsBefore);
+    expect(h.gateway.usage.map((record) => record.key)).toEqual(["test-key", "rotated-key"]);
+  });
+
+  it("换网关 baseUrl 和 model 时在原会话上 setModel", async () => {
+    const nextModel = "baize-next-model";
+    const nextGateway = await startGateway({
+      upstream: scriptedUpstream(() => ({ textChunks: ["新网关完成。"], usage: { input: 130, output: 8 } })),
+      models: [{ id: nextModel }],
+    });
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([["旧网关", { textChunks: ["旧网关完成。"], usage: { input: 100, output: 5 } }]]),
+    });
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "旧网关"));
+      const creationsBefore = sessionCreationsFor("bot-1");
+
+      await h.runner.applyConfig(
+        h.config({ modelGateway: { baseUrl: nextGateway.baseUrl, apiKey: "next-key", model: nextModel } }),
+      );
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "新网关"));
+
+      expect(sessionCreationsFor("bot-1"), "换端点和模型也不重建会话对象").toBe(creationsBefore);
+      expect(nextGateway.usage).toEqual([
+        expect.objectContaining({ key: "next-key", model: nextModel, inputTokens: 130, outputTokens: 8 }),
+      ]);
+    } finally {
+      await nextGateway.close();
+    }
+  });
+
+  it("换 config 时排队的 prompt 仍然各有一次 run_done", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      extensionTools: [hold],
+      script: scriptBy([
+        ["排队活", { textChunks: ["排队活完成。"], usage: { input: 110, output: 6 } }],
+        ["慢活", callTool("hold", {})],
+      ]),
+    });
+
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "慢活"));
+    await until(() => started, "第一条进入工具");
+    const queued = h.runner.prompt(promptMessage("bot-1", "run-2", "排队活"));
+    try {
+      await h.runner.applyConfig(
+        h.config({
+          bots: [
+            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "" },
+            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新描述" },
+          ],
+        }),
+      );
+    } finally {
+      release();
+    }
+    await Promise.all([first, queued]);
+
+    const done = h.sent.filter((message) => message.type === "run_done").map((message) => message.runId);
+    expect(done).toEqual(["run-1", "run-2"]);
+    expect(new Set(done).size).toBe(2);
+  });
+
+  it("运行中的 Bot 改了定义，当前 run 收尾后先重建再跑队列", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    let secondSystem = "";
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [hold],
+      script: (request) => {
+        const body = JSON.stringify(request.messages);
+        if (body.includes("第二条")) {
+          secondSystem = String(request.messages.find((message) => message.role === "system")?.content ?? "");
+          return { textChunks: ["第二条完成。"], usage: { input: 110, output: 6 } };
+        }
+        if (isFollowUpTurn(request)) return { textChunks: [], usage: { input: 90, output: 2 } };
+        return callTool("hold", {});
+      },
+    });
+
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => started, "第一条进入工具");
+    const queued = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    try {
+      await h.runner.applyConfig(
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "只处理新版任务" }],
+        }),
+      );
+    } finally {
+      release();
+    }
+    await Promise.all([first, queued]);
+
+    expect(secondSystem).toContain("只处理新版任务");
+    expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+  });
+
+  it("删除运行中的 Bot 会让当前 run 收尾，并给已排队 prompt 一次零用量 run_done", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [hold],
+      script: scriptBy([["第一条", callTool("hold", {})]]),
+    });
+
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => started, "第一条进入工具");
+    const queued = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    try {
+      await h.runner.applyConfig(h.config({ bots: [] }));
+    } finally {
+      release();
+    }
+    await Promise.all([first, queued]);
+
+    const done = h.sent.filter((message) => message.type === "run_done");
+    expect(done.map((message) => message.runId)).toEqual(["run-1", "run-2"]);
+    expect(done[1]).toMatchObject({ steps: 0, inputTokens: 0, outputTokens: 0 });
+  });
+
+  it("延迟重建失败只报一次 runner_failed，队列不被毒死且排障后恢复", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [hold],
+      script: scriptBy([
+        ["第三条", { textChunks: ["第三条完成。"], usage: { input: 120, output: 7 } }],
+        ["第二条", { textChunks: ["第二条完成。"], usage: { input: 110, output: 6 } }],
+        ["第一条", callTool("hold", {})],
+      ]),
+    });
+    const dirs = botDirs(h.dataDir, BotId.parse("bot-1"));
+    let poisoned = false;
+
+    try {
+      const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+      await until(() => started, "第一条进入工具");
+      await h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+      );
+      rmSync(dirs.workDir, { recursive: true, force: true });
+      writeFileSync(dirs.workDir, "阻止重建");
+      poisoned = true;
+      release();
+
+      await expect(first, "重建错误不能从 prompt 泄漏或毒死 bot.chain").resolves.toBeUndefined();
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+
+      expect(
+        h.sent.filter((message) => message.type === "agent_error" && message.code === "runner_failed"),
+      ).toHaveLength(1);
+
+      rmSync(dirs.workDir, { force: true });
+      poisoned = false;
+      await h.runner.prompt(promptMessage("bot-1", "run-3", "第三条"));
+
+      expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+        "run-1",
+        "run-2",
+        "run-3",
+      ]);
+    } finally {
+      release();
+      if (poisoned) rmSync(dirs.workDir, { force: true });
+    }
+  });
+
+  it("空闲 Bot 对账失败不让 applyConfig reject，下一条 prompt 继续尝试", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([
+        ["恢复后", { textChunks: ["恢复了。"], usage: { input: 110, output: 6 } }],
+        ["先建会话", { textChunks: ["建好了。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    botSessionProbe.disposeError = new Error("模拟关闭旧会话失败");
+
+    try {
+      await expect(
+        h.runner.applyConfig(
+          h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+        ),
+        "对账失败只上报 runner_failed，不向电脑代理抛异常",
+      ).resolves.toBeUndefined();
+      await until(
+        () => h.sent.some((message) => message.type === "agent_error" && message.code === "runner_failed"),
+        "空闲 Bot 对账失败",
+      );
+      expect(
+        h.sent.filter((message) => message.type === "agent_error" && message.code === "runner_failed"),
+      ).toHaveLength(1);
+    } finally {
+      botSessionProbe.disposeError = null;
+    }
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "恢复后"));
+    expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+  });
+
+  it("停机给暂停队列里的每条 prompt 各发一次零用量 run_done", async () => {
+    const h = await startHarness({ bots: ["bot-1"], script: scriptBy([]) });
+    await h.runner.pause(BotId.parse("bot-1"));
+    await Promise.all([
+      h.runner.prompt(promptMessage("bot-1", "paused-1", "暂停队列一")),
+      h.runner.prompt(promptMessage("bot-1", "paused-2", "暂停队列二")),
+    ]);
+
+    await h.runner.stop();
+
+    const done = h.sent.filter((message) => message.type === "run_done");
+    expect(done.map((message) => message.runId)).toEqual(["paused-1", "paused-2"]);
+    expect(done).toEqual([
+      expect.objectContaining({ steps: 0, inputTokens: 0, outputTokens: 0 }),
+      expect.objectContaining({ steps: 0, inputTokens: 0, outputTokens: 0 }),
+    ]);
+  });
+
+  it("停机给 chain 上排队但未开始的 prompt 一次零用量 run_done", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const hold: RunnerTool = {
+      name: "hold",
+      label: "等一下",
+      description: "等测试放行。",
+      parameters: Type.Object({}),
+      execute: async () => {
+        started = true;
+        await blocked;
+        return { content: [{ type: "text", text: "已放行" }], details: {} };
+      },
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [hold],
+      script: scriptBy([
+        ["不该执行", { textChunks: ["不该看到。"], usage: { input: 999, output: 999 } }],
+        ["第一条", callTool("hold", {})],
+      ]),
+    });
+
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => started, "第一条进入工具");
+    const queued = h.runner.prompt(promptMessage("bot-1", "run-2", "不该执行"));
+    const stopping = h.runner.stop();
+    release();
+    await Promise.all([first, queued, stopping]);
+
+    const done = h.sent.filter((message) => message.type === "run_done");
+    expect(done.map((message) => message.runId)).toEqual(["run-1", "run-2"]);
+    expect(done[1]).toMatchObject({ steps: 0, inputTokens: 0, outputTokens: 0 });
+    expect(h.gateway.usage.some((record) => record.inputTokens === 999)).toBe(false);
+  });
+
+  it("删除 Bot 关资源期间又加回来，之后的 prompt 正常跑", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([
+        ["加回后", { textChunks: ["还在。"], usage: { input: 110, output: 6 } }],
+        ["先建会话", { textChunks: ["建好了。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+
+    let releaseDispose!: () => void;
+    botSessionProbe.disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve;
+    });
+    const removing = h.runner.applyConfig(h.config({ bots: [] }));
+    await until(() => botSessionProbe.disposals.some((entry) => entry.botId === "bot-1"), "Bot 开始关闭资源");
+    const readding = h.runner.applyConfig(h.config());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseDispose();
+    try {
+      await Promise.all([removing, readding]);
+    } finally {
+      botSessionProbe.disposeGate = null;
+      releaseDispose();
+    }
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "加回后"));
+
+    expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
+    expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+      "run-1",
+      "run-2",
+    ]);
+  });
+
+  it("对账进行中暂停：等对账的 prompt 回到暂停队列，恢复后每条各有一次 run_done", async () => {
+    const asked: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        const body = JSON.stringify(request.messages);
+        if (body.includes("暂停前排队")) asked.push("run-2");
+        else if (body.includes("暂停后进来")) asked.push("run-3");
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    const releaseDispose = gateDisposal();
+
+    try {
+      const applying = h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+      );
+      await until(() => botSessionProbe.disposals.length > 0, "开始关旧会话");
+      const queuedBeforePause = h.runner.prompt(promptMessage("bot-1", "run-2", "暂停前排队"));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await h.runner.pause(BotId.parse("bot-1"));
+      const queuedAfterPause = h.runner.prompt(promptMessage("bot-1", "run-3", "暂停后进来"));
+
+      releaseDispose();
+      await Promise.all([applying, queuedBeforePause, queuedAfterPause]);
+      expect(asked, "暂停期间不该请求模型").toEqual([]);
+
+      await h.runner.resume(BotId.parse("bot-1"));
+      await until(() => runDoneIds(h).length === 3, "恢复后的三条 run 收尾");
+      expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+      expect(h.runner.activeRuns()).toEqual([]);
+    } finally {
+      releaseDispose();
+      botSessionProbe.disposeGate = null;
+    }
+  });
+
+  it("删除并暂停：关资源期间收到的 prompt 也有一次 run_done", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([["第一条", callTool("hold", {})]]),
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(tool.started, "第一条进入工具");
+    await h.runner.applyConfig(h.config({ bots: [] }));
+    const releaseDispose = gateDisposal();
+
+    try {
+      const pausing = h.runner.pause(BotId.parse("bot-1"));
+      tool.release();
+      await pausing;
+      await until(() => botSessionProbe.disposals.length > 0, "开始关资源");
+      const duringClose = h.runner.prompt(promptMessage("bot-1", "run-2", "关资源期间"));
+      releaseDispose();
+      await Promise.all([first, duringClose]);
+
+      expect(runDoneIds(h)).toEqual(["run-1", "run-2"]);
+      expect(h.runner.activeRuns()).toEqual([]);
+    } finally {
+      tool.release();
+      releaseDispose();
+      botSessionProbe.disposeGate = null;
+    }
+  });
+
+  it("暂停中重建又删除：暂停队列里的 prompt 也有一次 run_done", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-1", "暂停队列"));
+    const releaseDispose = gateDisposal();
+
+    try {
+      const rebuilding = h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+      );
+      await until(() => botSessionProbe.disposals.length > 0, "开始关旧会话");
+      const deleting = h.runner.applyConfig(h.config({ bots: [] }));
+      releaseDispose();
+      await Promise.all([rebuilding, deleting]);
+      await until(() => runDoneIds(h).length === 2, "删除时暂停队列收尾");
+
+      expect(runDoneIds(h)).toEqual(["run-1", "paused-1"]);
+      expect(h.runner.activeRuns()).toEqual([]);
+    } finally {
+      releaseDispose();
+      botSessionProbe.disposeGate = null;
+    }
+  });
+
+  it("skill 目录对账失败只报一次，原 Bot 的新定义和新增 Bot 仍然生效", async () => {
+    const systems = new Map<string, string>();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        const body = JSON.stringify(request.messages);
+        if (body.includes("检查原 Bot")) systems.set("bot-1", body);
+        if (body.includes("检查新增 Bot")) systems.set("bot-2", body);
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+
+    const bot1SkillsDir = skillsDirOf(h.dataDir, "bot-1");
+    const bot2Dirs = botDirs(h.dataDir, BotId.parse("bot-2"));
+    rmSync(bot1SkillsDir, { recursive: true, force: true });
+    writeFileSync(bot1SkillsDir, "阻止 skill 目录对账");
+    mkdirSync(bot2Dirs.agentDir, { recursive: true });
+    writeFileSync(bot2Dirs.skillsDir, "阻止 skill 目录对账");
+
+    try {
+      await h.runner.applyConfig(
+        h.config({
+          bots: [
+            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "原 Bot 新定义" },
+            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新增 Bot 定义" },
+          ],
+        }),
+      );
+      await until(
+        () => h.sent.some((message) => message.type === "agent_error" && message.code === "runner_failed"),
+        "skill 目录对账失败",
+      );
+    } finally {
+      rmSync(bot1SkillsDir, { force: true });
+      rmSync(bot2Dirs.skillsDir, { force: true });
+      mkdirSync(bot1SkillsDir, { recursive: true });
+      mkdirSync(bot2Dirs.skillsDir, { recursive: true });
+    }
+
+    expect(h.sent.filter((message) => message.type === "agent_error" && message.code === "runner_failed")).toHaveLength(
+      1,
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "检查原 Bot"));
+    await h.runner.prompt(promptMessage("bot-2", "run-3", "检查新增 Bot"));
+
+    expect(systems.get("bot-1")).toContain("原 Bot 新定义");
+    expect(systems.get("bot-2")).toContain("新增 Bot 定义");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("换网关 key 后 dataDir 和 ~/.pi 都没有 key 明文", async () => {
+    const secret = "sk-PROBE-ROTATED-7f3a9c";
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "一"));
+    await h.runner.applyConfig(
+      h.config({ modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: secret, model: MODEL_ID } }),
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "二"));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "三", { groupId: "group-2" }));
+    await h.runner.stop();
+
+    const { spawnSync } = await import("node:child_process");
+    const scan = spawnSync("grep", ["-rl", "-e", secret, "-e", "test-key", h.dataDir, join(homedir(), ".pi")], {
+      encoding: "utf8",
+    });
+    expect(h.gateway.usage.map((record) => record.key)).toEqual(["test-key", secret, secret]);
+    expect(scan.status).toBe(1);
+    expect(scan.stdout).toBe("");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("resume 补跑期间删除 Bot：每条 prompt 恰好一次 run_done 且不报 unsupported", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([
+        ["队列一", callTool("hold", {})],
+        ["队列二", { textChunks: ["好"], usage: { input: 10, output: 1 } }],
+      ]),
+    });
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-1", "队列一"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-2", "队列二"));
+    const resuming = h.runner.resume(BotId.parse("bot-1"));
+    await until(tool.started, "队列一进工具");
+    await h.runner.applyConfig(h.config({ bots: [] }));
+    tool.release();
+    await resuming;
+    await until(() => runDoneIds(h).length === 2, "删除后两条补跑收尾");
+
+    expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["paused-1", "paused-2"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("resume 补跑期间停机：每条 prompt 恰好一次 run_done 且 activeRuns 清空", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([
+        ["队列一", callTool("hold", {})],
+        ["队列二", { textChunks: ["好"], usage: { input: 10, output: 1 } }],
+      ]),
+    });
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-1", "队列一"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-2", "队列二"));
+    const resuming = h.runner.resume(BotId.parse("bot-1"));
+    await until(tool.started, "队列一进工具");
+    const stopping = h.runner.stop();
+    tool.release();
+    await Promise.all([resuming, stopping]);
+
+    expect(runDoneIds(h)).toEqual(["paused-1", "paused-2"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("resume 补跑期间再次 pause：剩下的 prompt 留在暂停队列，恢复后各有一次 run_done", async () => {
+    const tool = holdTool();
+    const asked: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: (request) => {
+        const body = JSON.stringify(request.messages);
+        if (isFollowUpTurn(request)) return { textChunks: [], usage: { input: 1, output: 1 } };
+        if (body.includes("队列一")) {
+          asked.push("paused-1");
+          return callTool("hold", {});
+        }
+        asked.push(body.includes("队列二") ? "paused-2" : "paused-3");
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-1", "队列一"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-2", "队列二"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-3", "队列三"));
+    const resuming = h.runner.resume(BotId.parse("bot-1"));
+    await until(tool.started, "队列一进工具");
+    const pausing = h.runner.pause(BotId.parse("bot-1"));
+    tool.release();
+    await Promise.all([pausing, resuming]);
+    const liveWhilePaused = [...h.runner.activeRuns()].toSorted();
+    await h.runner.resume(BotId.parse("bot-1"));
+
+    expect(asked).toEqual(["paused-1"]);
+    expect(liveWhilePaused).toEqual(["paused-2", "paused-3"]);
+    await until(() => runDoneIds(h).length === 3, "再次恢复后的三条 run 收尾");
+    expect(runDoneIds(h)).toEqual(["paused-1", "paused-2", "paused-3"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("建会话期间 pause 再改定义：暂停期间不请求模型，恢复后的下一条使用新定义", async () => {
+    const asked: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        asked.push(JSON.stringify(request.messages));
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    let openCreate!: () => void;
+    botSessionProbe.createGate = new Promise<void>((resolve) => {
+      openCreate = resolve;
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.applyConfig(
+      h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "暂停期间换上的新定义" }] }),
+    );
+    botSessionProbe.createGate = null;
+    openCreate();
+    await first;
+    const askedWhilePaused = asked.length;
+    await h.runner.resume(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+
+    expect(askedWhilePaused).toBe(0);
+    expect(asked.at(-1)).toContain("暂停期间换上的新定义");
+    expect(runDoneIds(h).toSorted()).toEqual(["run-1", "run-2"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("建会话期间 pause 再把工具改成要审批：恢复后调用先经过审批", async () => {
+    const mcp = await startFakeMcp();
+    try {
+      const noApproval = toolConnection([{ name: "send_email", needsApproval: false }], { url: mcp.url });
+      const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
+      const h = await startHarness({
+        bots: ["bot-1"],
+        tools: [noApproval],
+        extensionTools: [],
+        approve: false,
+        script: scriptBy([
+          ["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })],
+          ["第一条", { textChunks: ["好"], usage: { input: 10, output: 1 } }],
+        ]),
+      });
+      let openCreate!: () => void;
+      botSessionProbe.createGate = new Promise<void>((resolve) => {
+        openCreate = resolve;
+      });
+      const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+      await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+      await h.runner.pause(BotId.parse("bot-1"));
+      await h.runner.applyConfig(h.config({ tools: [needApproval] }));
+      botSessionProbe.createGate = null;
+      openCreate();
+      await first;
+      await h.runner.resume(BotId.parse("bot-1"));
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "发邮件"));
+
+      expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(1);
+      expect(mcp.calls).toEqual([]);
+      expect(runDoneIds(h)).toEqual(["run-1", "run-2"]);
+      expect(h.runner.activeRuns()).toEqual([]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("建会话期间 pause 再删除 Bot：删除后不请求模型且关掉已建会话", async () => {
+    const asked: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        asked.push(JSON.stringify(request.messages));
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    let openCreate!: () => void;
+    botSessionProbe.createGate = new Promise<void>((resolve) => {
+      openCreate = resolve;
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.applyConfig(h.config({ bots: [] }));
+    botSessionProbe.createGate = null;
+    openCreate();
+    await first;
+
+    expect(asked).toEqual([]);
+    expect(botSessionProbe.disposals).toHaveLength(1);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("停机时关会话失败：stop 不抛且暂停队列的 prompt 仍有一次 run_done", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    await h.runner.pause(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "paused-1", "暂停队列"));
+    botSessionProbe.disposeError = new Error("模拟关闭会话失败");
+    let result: PromiseSettledResult<void>[];
+    try {
+      result = await Promise.allSettled([h.runner.stop()]);
+    } finally {
+      botSessionProbe.disposeError = null;
+    }
+
+    expect(result[0]?.status).toBe("fulfilled");
+    expect(runDoneIds(h)).toEqual(["run-1", "paused-1"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("部分关会话失败后恢复原定义：不复用已释放会话，回复仍有正文", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "群一建会话"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "群二建会话", { groupId: "group-2" }));
+    botSessionProbe.disposeErrorFor = "group-2";
+    try {
+      await h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改一下" }] }),
+      );
+      await until(
+        () =>
+          h.sent.some(
+            (message) =>
+              message.type === "agent_error" &&
+              message.code === "runner_failed" &&
+              message.detail.includes("关闭会话失败"),
+          ),
+        "部分会话关闭失败",
+      );
+    } finally {
+      botSessionProbe.disposeErrorFor = null;
+    }
+    await h.runner.applyConfig(h.config());
+    const before = h.sent.length;
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "群一再说一句"));
+    const after = h.sent.slice(before);
+
+    expect(shape(after)).toContain("bot_text:true");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("run 进行中 pause：chain 上排队的 prompt 回到暂停队列后仍在 activeRuns", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([
+        ["第一条", callTool("hold", {})],
+        ["第二条", { textChunks: ["好"], usage: { input: 10, output: 1 } }],
+      ]),
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(tool.started, "第一条进入工具");
+    const second = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    const pausing = h.runner.pause(BotId.parse("bot-1"));
+    tool.release();
+    await Promise.all([first, second, pausing]);
+
+    expect(h.runner.activeRuns()).toEqual(["run-2"]);
+    await h.runner.resume(BotId.parse("bot-1"));
+    await until(() => runDoneIds(h).length === 2, "恢复后第二条 run 收尾");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("skill 落盘失败后排障：同一份 config 落好 skill 后重建会话并更新系统提示", async () => {
+    const systems: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        systems.push(JSON.stringify(request.messages));
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    const skillsDir = skillsDirOf(h.dataDir, "bot-1");
+    rmSync(skillsDir, { recursive: true, force: true });
+    writeFileSync(skillsDir, "阻止 skill 落盘");
+    try {
+      await h.runner.applyConfig(h.config({ skills: [GLOBEX_SKILL] }));
+    } finally {
+      rmSync(skillsDir, { force: true });
+      mkdirSync(skillsDir, { recursive: true });
+    }
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "排障后第一条"));
+    await h.runner.applyConfig(h.config({ skills: [GLOBEX_SKILL] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "skill 落好之后"));
+
+    expect(skillIdsOn(h.dataDir, "bot-1")).toEqual(["skill-globex"]);
+    expect(systems.at(-1)).toContain("Globex 报价");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("session.prompt 在订阅后同步预检抛错：仍恰好一次 run_done", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    botSessionProbe.promptError = new Error("模拟 prompt 预检失败");
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "预检抛错"));
+    } finally {
+      botSessionProbe.promptError = null;
+    }
+
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("run 收尾对账关资源期间来第二条 config：applyConfig 不等后面的审批 run", async () => {
+    const mcp = await startFakeMcp();
+    const tool = holdTool();
+    try {
+      const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
+      const h = await startHarness({
+        bots: ["bot-1"],
+        tools: [needApproval],
+        extensionTools: [tool.hold],
+        script: (request) => {
+          if (request.messages.at(-1)?.role === "tool") return { textChunks: [], usage: { input: 1, output: 1 } };
+          const body = JSON.stringify(request.messages);
+          if (body.includes("第二条")) return callTool("send_email", { to: "kehu@example.com", subject: "报价" });
+          return callTool("hold", {});
+        },
+      });
+      const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+      await until(tool.started, "run-1 进工具");
+      await h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改一" }] }),
+      );
+      const second = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+      const releaseDispose = gateDisposal();
+      tool.release();
+      await until(() => botSessionProbe.disposals.length > 0, "run-1 收尾后对账开始关会话");
+      let applied = false;
+      const applying = h.runner
+        .applyConfig(h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改二" }] }))
+        .then(() => {
+          applied = true;
+        });
+      releaseDispose();
+      botSessionProbe.disposeGate = null;
+      await until(() => h.sent.some((message) => message.type === "approval_request"), "run-2 请求审批");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const appliedBeforeApproval = applied;
+      const request = h.sent.find((message) => message.type === "approval_request");
+      if (request?.type === "approval_request") h.runner.approve(request.runId, request.callId, false);
+      await Promise.all([first, second, applying]);
+
+      expect(runDoneIds(h)).toEqual(["run-1", "run-2"]);
+      expect(appliedBeforeApproval, "applyConfig 不得等到 run-2 的审批").toBe(true);
+    } finally {
+      tool.release();
+      botSessionProbe.disposeGate = null;
+      await mcp.close();
+    }
+  });
+
+  it("run 跑着时 pause：chain 上排队的 run-2 和暂停后来的 run-3 恢复后按到达顺序跑", async () => {
+    const tool = holdTool();
+    const order: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: (request) => {
+        if (request.messages.at(-1)?.role === "tool") return { textChunks: [], usage: { input: 1, output: 1 } };
+        const body = JSON.stringify(request.messages.findLast((message) => message.role === "user") ?? "");
+        if (body.includes("第三条")) order.push("run-3");
+        else if (body.includes("第二条")) order.push("run-2");
+        else return callTool("hold", {});
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(tool.started, "run-1 进工具");
+    const second = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    const pausing = h.runner.pause(BotId.parse("bot-1"));
+    tool.release();
+    await pausing;
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三条"));
+    await Promise.all([first, second]);
+    await h.runner.resume(BotId.parse("bot-1"));
+    await until(() => runDoneIds(h).length === 3, "三条收尾");
+
+    expect(order, "run-2 先到，恢复后应先跑 run-2").toEqual(["run-2", "run-3"]);
+  });
+
+  it("建会话期间 pause、把工具改成要审批再 resume：首次调用按最新 desired 规则拦截", async () => {
+    const mcp = await startFakeMcp();
+    try {
+      const noApproval = toolConnection([{ name: "send_email", needsApproval: false }], { url: mcp.url });
+      const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
+      const h = await startHarness({
+        bots: ["bot-1"],
+        tools: [noApproval],
+        extensionTools: [],
+        approve: false,
+        script: scriptBy([["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })]]),
+      });
+      let openCreate!: () => void;
+      botSessionProbe.createGate = new Promise<void>((resolve) => {
+        openCreate = resolve;
+      });
+      const first = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+      await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+      await h.runner.pause(BotId.parse("bot-1"));
+      await h.runner.applyConfig(h.config({ tools: [needApproval] }));
+      await h.runner.resume(BotId.parse("bot-1"));
+      botSessionProbe.createGate = null;
+      openCreate();
+      await first;
+
+      expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(1);
+      expect(mcp.calls, "建会话期间收紧规则后，首次调用也不得绕过审批").toEqual([]);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("建会话期间不 pause 也把工具改成要审批：首次调用按最新 desired 规则拦截", async () => {
+    const mcp = await startFakeMcp();
+    try {
+      const noApproval = toolConnection([{ name: "send_email", needsApproval: false }], { url: mcp.url });
+      const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
+      const h = await startHarness({
+        bots: ["bot-1"],
+        tools: [noApproval],
+        extensionTools: [],
+        approve: false,
+        script: scriptBy([["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })]]),
+      });
+      let openCreate!: () => void;
+      botSessionProbe.createGate = new Promise<void>((resolve) => {
+        openCreate = resolve;
+      });
+      const first = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+      await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+      await h.runner.applyConfig(h.config({ tools: [needApproval] }));
+      botSessionProbe.createGate = null;
+      openCreate();
+      await first;
+
+      expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(1);
+      expect(mcp.calls, "不 pause 也必须按建会话期间收到的最新规则审批").toEqual([]);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("run 中途删掉 Bot：这次 run 里的调用仍按原规则审批", async () => {
+    const mcp = await startFakeMcp();
+    try {
+      const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
+      let harness: Harness | null = null;
+      const h = await startHarness({
+        bots: ["bot-1"],
+        tools: [needApproval],
+        extensionTools: [],
+        approve: false,
+        script: (request) => {
+          if (!isFollowUpTurn(request) && harness !== null)
+            void harness.runner.applyConfig(harness.config({ bots: [] }));
+          return scriptBy([["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })]])(request);
+        },
+      });
+      harness = h;
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+      expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(1);
+      expect(mcp.calls, "删 Bot 不等于放宽审批，被拒的调用不该发出去").toEqual([]);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+      expect(h.runner.activeRuns()).toEqual([]);
+    } finally {
+      await mcp.close();
+    }
+  });
+
+  it("建会话期间 stop：建好后不请求模型，一次 run_done", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    let openCreate!: () => void;
+    botSessionProbe.createGate = new Promise<void>((resolve) => {
+      openCreate = resolve;
+    });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await until(() => botSessionProbe.creations.length > 0, "开始建会话");
+    const stopping = h.runner.stop();
+    botSessionProbe.createGate = null;
+    openCreate();
+    await Promise.all([first, stopping]);
+
+    expect(h.gateway.usage, "stop 之后不该再请求模型").toHaveLength(0);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("关会话部分失败后，失败群的下一条用新定义建新会话", async () => {
+    const systems: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (request) => {
+        systems.push(JSON.stringify(request.messages));
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "群一建会话"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "群二建会话", { groupId: "group-2" }));
+    botSessionProbe.disposeErrorFor = "group-2";
+    try {
+      await h.runner.applyConfig(
+        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "描述改成了紫罗兰" }] }),
+      );
+      await until(
+        () =>
+          h.sent.some(
+            (message) =>
+              message.type === "agent_error" &&
+              message.code === "runner_failed" &&
+              message.detail.includes("关闭会话失败"),
+          ),
+        "失败群会话关闭失败",
+      );
+    } finally {
+      botSessionProbe.disposeErrorFor = null;
+    }
+    const group2Before = botSessionProbe.creations.filter((creation) => creation.sessionDir.includes("group-2")).length;
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "群二再说一句", { groupId: "group-2" }));
+    const group2After = botSessionProbe.creations.filter((creation) => creation.sessionDir.includes("group-2")).length;
+
+    expect(group2After).toBe(group2Before + 1);
+    expect(systems.at(-1)).toContain("紫罗兰");
+    expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
+  });
+
+  it("五个 Bot 只改一个时，测量增量对账和整个换运行器的中位耗时", async () => {
+    const h = await startHarness({
+      bots: fiveBots,
+      script: scriptBy(
+        fiveBots.map((id) => [`${id} 干活`, { textChunks: ["好了。"], usage: { input: 10, output: 1 } }]),
+      ),
+    });
+    await Promise.all(
+      fiveBots.map((id, index) => h.runner.prompt(promptMessage(id, `warm-apply-${index}`, `${id} 干活`))),
+    );
+
+    const applyTimes: number[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      const startedAt = performance.now();
+      await h.runner.applyConfig(h.config({ bots: changedBots(index % 2 === 0 ? "甲" : "乙") }));
+      applyTimes.push(performance.now() - startedAt);
+    }
+
+    const legacyDataDir = mkdtempSync(join(tmpdir(), "baize-runner-legacy-"));
+    usedDataDirs.push(legacyDataDir);
+    let legacy = createRunner({ ...h.config({ bots: changedBots("初始") }), dataDir: legacyDataDir });
+    const replaceTimes: number[] = [];
+    try {
+      await Promise.all(
+        fiveBots.map((id, botIndex) => legacy.prompt(promptMessage(id, `warm-replace-${botIndex}`, `${id} 干活`))),
+      );
+      for (let index = 0; index < 20; index += 1) {
+        const startedAt = performance.now();
+        const replacement = createRunner({
+          ...h.config({ bots: changedBots(index % 2 === 0 ? "甲" : "乙") }),
+          dataDir: legacyDataDir,
+        });
+        await legacy.stop();
+        await Promise.all(
+          fiveBots.map((id, botIndex) =>
+            replacement.prompt(promptMessage(id, `ready-replace-${index}-${botIndex}`, `${id} 干活`)),
+          ),
+        );
+        replaceTimes.push(performance.now() - startedAt);
+        legacy = replacement;
+      }
+    } finally {
+      await legacy.stop();
+    }
+
+    const applyMedian = median(applyTimes);
+    const replaceMedian = median(replaceTimes);
+    console.info(`P0-3 性能：applyConfig ${applyMedian.toFixed(3)}ms；整个换运行器 ${replaceMedian.toFixed(3)}ms`);
+    expect(applyTimes).toHaveLength(20);
+    expect(replaceTimes).toHaveLength(20);
   });
 });
 

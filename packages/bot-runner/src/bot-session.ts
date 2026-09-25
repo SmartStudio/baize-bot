@@ -45,8 +45,27 @@ export interface BotSessionOptions {
 export interface BotSession {
   readonly session: AgentSession;
   readonly sessionFile: string | undefined;
+  applyGateway(gateway: BotSessionOptions["gateway"]): Promise<void>;
   dispose(): Promise<void>;
 }
+
+const gatewayProvider = (gateway: BotSessionOptions["gateway"]) => ({
+  name: "白泽模型网关",
+  baseUrl: gateway.baseUrl,
+  apiKey: gateway.apiKey,
+  api: "openai-completions" as const,
+  models: [
+    {
+      id: gateway.model,
+      name: gateway.model,
+      reasoning: false,
+      input: ["text" as const],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 8192,
+    },
+  ],
+});
 
 function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
   return (pi) => {
@@ -82,23 +101,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     allowModelNetwork: false,
   });
 
-  modelRuntime.registerProvider(GATEWAY_PROVIDER_ID, {
-    name: "白泽模型网关",
-    baseUrl: options.gateway.baseUrl,
-    apiKey: options.gateway.apiKey,
-    api: "openai-completions",
-    models: [
-      {
-        id: options.gateway.model,
-        name: options.gateway.model,
-        reasoning: false,
-        input: ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128_000,
-        maxTokens: 8192,
-      },
-    ],
-  });
+  modelRuntime.registerProvider(GATEWAY_PROVIDER_ID, gatewayProvider(options.gateway));
 
   const model = modelRuntime.getModel(GATEWAY_PROVIDER_ID, options.gateway.model);
   if (!model) throw new Error(`网关供应商没注册上：${GATEWAY_PROVIDER_ID}/${options.gateway.model}`);
@@ -139,10 +142,21 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     // 旧布局把 JSONL 直接放在 sessions/ 下。那个目录不传给 continueRecent，所以升级后不会被续上，文件留在原地。
     sessionManager: SessionManager.continueRecent(workDir, sessionDir),
   });
+  let gateway = options.gateway;
 
   return {
     session,
     sessionFile: session.sessionManager.getSessionFile(),
+    applyGateway: async (next) => {
+      const endpointChanged = gateway.baseUrl !== next.baseUrl || gateway.model !== next.model;
+      modelRuntime.registerProvider(GATEWAY_PROVIDER_ID, gatewayProvider(next));
+      if (endpointChanged) {
+        const nextModel = modelRuntime.getModel(GATEWAY_PROVIDER_ID, next.model);
+        if (!nextModel) throw new Error(`网关供应商没注册上：${GATEWAY_PROVIDER_ID}/${next.model}`);
+        await session.setModel(nextModel);
+      }
+      gateway = next;
+    },
     dispose: async () => session.dispose(),
   };
 }

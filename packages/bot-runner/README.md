@@ -2,10 +2,11 @@
 
 Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
 
-`createRunner(config)` 返回五个方法：
+`createRunner(config)` 返回六个方法：
 
 | 方法 | 对应的下行报文 | 干什么 |
 | --- | --- | --- |
+| `applyConfig(config)` | `config` | 按 Bot 增量对账定义、工具、skill 和网关凭据 |
 | `prompt(message)` | `prompt` | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done` |
 | `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论 |
 | `pause(botId)` | `pause` | 中止这个 Bot 当前的运行，之后的 prompt 排队 |
@@ -13,6 +14,20 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 | `stop()` | 连接关闭 | 停掉所有会话 |
 
 上行报文不从这里直接出网，交给 `config.send` 回调，由电脑代理写进 WebSocket。每条出边界前过 `AgentToControl.parse`。
+
+## config 增量对账
+
+电脑代理只在第一条 `config` 创建运行器，后续配置都交给同一个运行器的 `applyConfig`。每个 Bot 有一条串行队列 `chain`：运行、建会话、关会话和 MCP、skill 落盘、网关热更新都排在上面，同一个 Bot 任何时刻只做一件。`applyConfig` 只记下每个 Bot 的期望配置 `desired`，给每个 Bot 排一个对账步骤就返回，不等任何队列。它不能等：电脑代理的 inbox 在 await 它，而队列前面可能有一条在等审批的 run，审批结论也排在那个 inbox 里。config 之后到的 prompt 排在对账步骤后面，所以看得到新定义。
+
+对账比较每个 Bot 的定义指纹：名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。
+
+指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时暂停队列里的 prompt 各发一条零用量 `run_done`。只换网关 key 时重新注册同一个 provider，把 `apiKey` 热更新给已有会话。base URL 或 model 变化时在同一个会话上 `setModel`。
+
+审批规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 连接算要不要审批，归属人收紧规则对在飞的 run 立刻生效。待删除的 Bot 没有 `desired`，按建会话时的连接算，删 Bot 不等于放宽审批。
+
+暂停和「有 run 在跑」是两个字段。`paused` 只决定 prompt 轮到时进暂停队列，`active` 是当前 run。pause 拒绝挂起的审批并 abort 当前 run，不碰配置和资源。暂停期间的 prompt 也先排进 `chain`，轮到时再进暂停队列，恢复后按到达顺序跑。resume 把暂停队列重新排进 `chain` 就返回，不等补跑。
+
+`run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停队列里的也算，重连时的 hello 带得上它们。
 
 ## 目录布局
 
@@ -84,7 +99,7 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 撞名先到先得：运行器自己的工具（`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
-`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。电脑代理每来一条 config 就整个换 runner，所以没有热更新：新 runner 按新 config 建会话，同一个群的 JSONL 用 `continueRecent` 续上。
+`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
 ## 主题任务工具
 
@@ -222,7 +237,7 @@ description: "打开 CRM 找到 Globex 的联系人"
 
 `description` 不能为空：Pi 的 `loadSkillFromFile` 把没有 description 的文件整条丢掉，所以步骤为空的 skill 回落到用名字当 description。两个字段都过 `JSON.stringify` 写成 YAML 的双引号标量，名字里的冒号和引号才不会把 frontmatter 撑破（Pi 用的是真 `yaml` 解析器）。
 
-对账在 `createRunner` 里做，**整目录**一次过：`config` 里没有的目录删掉、少的补上、内容变了的重写，内容一样的连 mtime 都不动。重跑同一份 `config` 不改任何文件。不等这个 Bot 被 prompt 就对账，不然一条把 skill 删光的 `config` 下来，没人找它说话的那个 Bot 盘上的旧文件会一直留着。
+对账在各 Bot 的 `chain` 上做，**整目录**一次过：`config` 里没有的目录删掉、少的补上、内容变了的重写，内容一样的连 mtime 都不动。重跑同一份 `config` 不改任何文件。不等这个 Bot 被 prompt 就对账，不然一条把 skill 删光的 `config` 下来，没人找它说话的那个 Bot 盘上的旧文件会一直留着。skill 变化会改这个 Bot 的指纹，旧会话关掉后，下一条 prompt 才重新建会话、刷新系统提示。
 
 两条边界上的防护：
 

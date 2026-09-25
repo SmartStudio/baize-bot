@@ -42,6 +42,8 @@ export interface RunnerConfig {
 }
 
 export interface Runner {
+  /** 增量应用控制面最新配置；正在运行的 Bot 在本次 run 收尾后再重建。 */
+  applyConfig(config: RunnerConfig): Promise<void>;
   prompt(message: PromptMessage): Promise<void>;
   /** 当前仍在运行的 run。只读快照，供电脑代理在重连 hello 时上报。 */
   activeRuns(): readonly RunId[];
@@ -52,28 +54,95 @@ export interface Runner {
   stop(): Promise<void>;
 }
 
-// 暂停不是断点续跑：Pi 只有 abort，没有 pause。中止当前运行，之后的 prompt 排队，
-// resume 时把排队的整条重发一遍。详见 README。
-type BotLifecycle =
-  | { readonly phase: "idle" }
-  | { readonly phase: "running"; readonly active: ActiveRun }
-  | { readonly phase: "paused"; readonly queued: PromptMessage[] };
+type BotSkill = NonNullable<ConfigMessage["skills"]>[number];
+
+interface BotDesired {
+  readonly version: number;
+  readonly config: BotConfig;
+  readonly tools: readonly ToolConnectionConfig[];
+  readonly skills: readonly BotSkill[];
+  readonly gateway: RunnerConfig["modelGateway"];
+}
+
+interface BotDefinition {
+  readonly config: BotConfig;
+  readonly connections: readonly ToolConnectionConfig[];
+  readonly skills: readonly BotSkill[];
+  readonly fingerprint: string;
+}
+
+type BotConfigState =
+  | { readonly phase: "active"; readonly current: BotDefinition; readonly desired: BotDesired }
+  | {
+      readonly phase: "pending";
+      readonly current: BotDefinition | null;
+      readonly desired: BotDesired | null;
+    }
+  | { readonly phase: "deleted"; readonly current: null; readonly desired: null };
 
 interface BotRuntime {
   readonly botId: BotId;
-  readonly name: string;
-  readonly tag: string;
-  readonly description: string;
   readonly dirs: BotDirs;
+  configState: BotConfigState;
+  appliedGateway: RunnerConfig["modelGateway"];
+  lastGroupId: GroupId | null;
   sessions: Map<GroupId, BotSession>;
   /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
   mcp: McpToolSet | null;
-  lifecycle: BotLifecycle;
-  /** 同一个 Bot 的 prompt 串行跑，不同 Bot 之间并行。 */
+  /** pause 只表示是否拦下后续 prompt，不再兼任“当前有运行”。 */
+  paused: boolean;
+  pausedQueue: PromptMessage[];
+  active: ActiveRun | null;
+  /** prompt、建会话、配置对账和资源关闭都只从这一条队列进入。 */
   chain: Promise<void>;
 }
 
 type RunnerState = "ready" | "stopped";
+
+function definitionFor(
+  bot: BotConfig,
+  tools: readonly ToolConnectionConfig[],
+  skills: readonly BotSkill[],
+  skillsReady = true,
+): BotDefinition {
+  const connections = connectionsFor(bot.id, tools);
+  const botSkills = skills
+    .filter((skill) => skill.botId === bot.id)
+    .toSorted((left, right) => left.id.localeCompare(right.id));
+  return {
+    config: bot,
+    connections,
+    skills: botSkills,
+    // assignedBotIds 里别的 Bot 变化不影响当前 Bot。当前 Bot 是否被分配已经由 connectionsFor 体现。
+    fingerprint: JSON.stringify({
+      bot,
+      connections: connections.map((connection) => Object.assign({}, connection, { assignedBotIds: [bot.id] })),
+      skills: botSkills.map((skill) => ({ id: skill.id, name: skill.name, steps: skill.steps })),
+      skillsReady,
+    }),
+  };
+}
+
+const currentDefinition = (bot: BotRuntime): BotDefinition | null => bot.configState.current;
+
+const desiredConfig = (bot: BotRuntime): BotDesired | null => bot.configState.desired;
+
+const sameGateway = (left: RunnerConfig["modelGateway"], right: RunnerConfig["modelGateway"]): boolean =>
+  left.baseUrl === right.baseUrl && left.apiKey === right.apiKey && left.model === right.model;
+
+const desiredFor = (
+  version: number,
+  bot: BotConfig,
+  tools: readonly ToolConnectionConfig[],
+  skills: readonly BotSkill[],
+  gateway: RunnerConfig["modelGateway"],
+): BotDesired => ({ version, config: bot, tools, skills, gateway });
+
+const append = (bot: BotRuntime, operation: () => Promise<void>): Promise<void> => {
+  const queued = bot.chain.then(operation);
+  bot.chain = queued.catch(() => undefined);
+  return queued;
+};
 
 // 群标签之后先放任务卡：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
 // 群里的闲聊会把它挤远，模型更容易照着最后几句走。
@@ -140,36 +209,11 @@ function composePrompt(message: PromptMessage): string {
 
 export function createRunner(config: RunnerConfig): Runner {
   let state: RunnerState = "ready";
+  const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const extensionTools = config.extensionTools ?? [];
   const liveRuns = new Set<RunId>();
-
-  const bots = new Map<BotId, BotRuntime>(
-    config.bots.map((bot) => [
-      bot.id,
-      {
-        botId: bot.id,
-        name: bot.name,
-        tag: bot.tag,
-        description: bot.description,
-        dirs: botDirs(config.dataDir, bot.id),
-        sessions: new Map(),
-        mcp: null,
-        lifecycle: { phase: "idle" },
-        chain: Promise.resolve(),
-      },
-    ]),
-  );
-
-  // config 一到就整目录对账，不等这个 Bot 被 prompt：不然一条把 skill 删光的 config 下来，
-  // 没人找它说话的 Bot 盘上那份就一直留着。会话是之后才懒建的，建的时候读到的已经是新的一份。
-  const skills = config.skills ?? [];
-  for (const bot of bots.values()) {
-    reconcileSkillDir(
-      bot.dirs.skillsDir,
-      skills.filter((skill) => skill.botId === bot.botId),
-    );
-  }
+  let nextConfigVersion = 1;
 
   const fail = (
     code: Extract<AgentToControl, { type: "agent_error" }>["code"],
@@ -179,11 +223,183 @@ export function createRunner(config: RunnerConfig): Runner {
     config.send({ type: "agent_error", code, detail, groupId });
   };
 
+  const initialSkills = config.skills ?? [];
+  const bots = new Map<BotId, BotRuntime>(
+    config.bots.map((botConfig) => {
+      const desired = desiredFor(nextConfigVersion, botConfig, config.tools, initialSkills, config.modelGateway);
+      const dirs = botDirs(config.dataDir, botConfig.id);
+      reconcileSkillDir(
+        dirs.skillsDir,
+        initialSkills.filter((skill) => skill.botId === botConfig.id),
+      );
+      const current = definitionFor(botConfig, config.tools, initialSkills, true);
+      return [
+        botConfig.id,
+        {
+          botId: botConfig.id,
+          dirs,
+          configState: { phase: "active", current, desired },
+          appliedGateway: config.modelGateway,
+          lastGroupId: null,
+          sessions: new Map(),
+          mcp: null,
+          paused: false,
+          pausedQueue: [],
+          active: null,
+          chain: Promise.resolve(),
+        },
+      ];
+    }),
+  );
+
+  const finishRun = (done: Extract<AgentToControl, { type: "run_done" }>): void => {
+    if (!liveRuns.delete(done.runId)) return;
+    config.send(done);
+  };
+
+  const finishWithoutRun = (message: PromptMessage): void => {
+    finishRun({
+      type: "run_done",
+      runId: message.runId,
+      botId: message.botId,
+      groupId: message.groupId,
+      steps: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+  };
+
+  const finishPausedQueue = (bot: BotRuntime): void => {
+    for (const message of bot.pausedQueue.splice(0)) finishWithoutRun(message);
+  };
+
+  const closeBotResources = async (bot: BotRuntime): Promise<void> => {
+    const sessions = [...bot.sessions.entries()];
+    const results = await Promise.allSettled(
+      sessions.map(async ([groupId, botSession]) => {
+        const errors: unknown[] = [];
+        try {
+          await botSession.session.abort();
+        } catch (error) {
+          errors.push(error);
+        }
+        try {
+          await botSession.dispose();
+        } catch (error) {
+          errors.push(error);
+        }
+        bot.sessions.delete(groupId);
+        if (errors.length > 0) throw errors[0];
+      }),
+    );
+    results.forEach((result, index) => {
+      if (result.status !== "rejected") return;
+      const groupId = sessions[index]?.[0] ?? bot.lastGroupId;
+      if (groupId !== null) {
+        fail("runner_failed", `Bot ${bot.botId} 关闭会话失败：${String(result.reason)}`, groupId);
+      }
+    });
+
+    const mcp = bot.mcp;
+    bot.mcp = null;
+    if (mcp === null) return;
+    try {
+      await mcp.close();
+    } catch (error) {
+      if (bot.lastGroupId !== null) {
+        fail("runner_failed", `Bot ${bot.botId} 关闭 MCP 失败：${String(error)}`, bot.lastGroupId);
+      }
+    }
+  };
+
+  const deleteBot = (bot: BotRuntime, removeFromBots: boolean): void => {
+    finishPausedQueue(bot);
+    bot.configState = { phase: "deleted", current: null, desired: null };
+    if (removeFromBots && bots.get(bot.botId) === bot) bots.delete(bot.botId);
+  };
+
+  const reconcileBot = async (bot: BotRuntime): Promise<void> => {
+    for (;;) {
+      if (state !== "ready") return;
+      const desired = desiredConfig(bot);
+      const current = currentDefinition(bot);
+
+      if (desired === null) {
+        await closeBotResources(bot);
+        const latest = desiredConfig(bot);
+        if (latest !== null) {
+          bot.configState = { phase: "pending", current: null, desired: latest };
+          continue;
+        }
+        deleteBot(bot, true);
+        return;
+      }
+
+      let skillsReady = true;
+      try {
+        reconcileSkillDir(
+          bot.dirs.skillsDir,
+          desired.skills.filter((skill) => skill.botId === bot.botId),
+        );
+      } catch (error) {
+        skillsReady = false;
+        if (bot.lastGroupId !== null) {
+          fail("runner_failed", `Bot ${bot.botId} 对账 skill 失败：${String(error)}`, bot.lastGroupId);
+        }
+      }
+      const prepared = definitionFor(desired.config, desired.tools, desired.skills, skillsReady);
+
+      if (current === null || current.fingerprint !== prepared.fingerprint) {
+        await closeBotResources(bot);
+        const latest = desiredConfig(bot);
+        if (latest?.version !== desired.version) {
+          bot.configState = { phase: "pending", current: null, desired: latest };
+          continue;
+        }
+        bot.appliedGateway = desired.gateway;
+        bot.configState = { phase: "active", current: prepared, desired };
+        return;
+      }
+
+      if (!sameGateway(bot.appliedGateway, desired.gateway)) {
+        const sessions = [...bot.sessions.entries()];
+        const results = await Promise.allSettled(
+          sessions.map(([, botSession]) => botSession.applyGateway(desired.gateway)),
+        );
+        let allApplied = true;
+        results.forEach((result, index) => {
+          if (result.status !== "rejected") return;
+          allApplied = false;
+          const groupId = sessions[index]?.[0] ?? bot.lastGroupId;
+          if (groupId !== null) {
+            fail("runner_failed", `Bot ${bot.botId} 更新网关失败：${String(result.reason)}`, groupId);
+          }
+        });
+        const latest = desiredConfig(bot);
+        if (latest?.version !== desired.version) continue;
+        if (allApplied) bot.appliedGateway = desired.gateway;
+      }
+
+      const latest = desiredConfig(bot);
+      if (latest?.version !== desired.version) continue;
+      bot.configState = { phase: "active", current: prepared, desired };
+      return;
+    }
+  };
+
   const sessionFor = async (bot: BotRuntime, groupId: GroupId): Promise<BotSession> => {
+    bot.lastGroupId = groupId;
     const existing = bot.sessions.get(groupId);
     if (existing !== undefined) return existing;
-    const activeRun = (): ActiveRun | null => (bot.lifecycle.phase === "running" ? bot.lifecycle.active : null);
-    const connections = connectionsFor(bot.botId, config.tools);
+    const definition = currentDefinition(bot);
+    if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
+    const needsApproval = (toolName: string): boolean => {
+      // 待删除的 Bot 没有 desired，在飞的 run 还拿着旧工具，按建会话时的规则审批，不能放空。
+      const desired = desiredConfig(bot);
+      const connections = desired === null ? definition.connections : connectionsFor(bot.botId, desired.tools);
+      return approvalRule(connections)(toolName);
+    };
+    const activeRun = (): ActiveRun | null => bot.active;
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
@@ -193,20 +409,20 @@ export function createRunner(config: RunnerConfig): Runner {
       bot.mcp ??
       createMcpTools({
         botId: bot.botId,
-        connections,
+        connections: definition.connections,
         reserved: new Set(builtIn.map((tool) => tool.name)),
       });
     bot.mcp = mcp;
     const dirs = ensureBotDirs(bot.dirs);
     const created = await createBotSession({
       botId: bot.botId,
-      name: bot.name,
-      tag: bot.tag,
-      description: bot.description,
+      name: definition.config.name,
+      tag: definition.config.tag,
+      description: definition.config.description,
       dirs: { ...dirs, sessionDir: groupSessionDir(dirs, groupId) },
-      gateway: config.modelGateway,
+      gateway: bot.appliedGateway,
       tools: [...builtIn, ...mcp.tools],
-      needsApproval: approvalRule(connections),
+      needsApproval,
       approvals,
       activeRun,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
@@ -216,10 +432,13 @@ export function createRunner(config: RunnerConfig): Runner {
   };
 
   const runOne = async (bot: BotRuntime, message: PromptMessage): Promise<void> => {
-    if (state === "stopped") return;
-    // 排在前面那次运行跑的时候可能来过 pause，轮到自己时得回到队列里，不能丢。
-    if (bot.lifecycle.phase === "paused") {
-      bot.lifecycle.queued.push(message);
+    if (bot.configState.phase === "pending") await reconcileBot(bot);
+    if (state === "stopped" || bot.configState.phase === "deleted" || currentDefinition(bot) === null) {
+      finishWithoutRun(message);
+      return;
+    }
+    if (bot.paused) {
+      bot.pausedQueue.push(message);
       return;
     }
 
@@ -235,43 +454,92 @@ export function createRunner(config: RunnerConfig): Runner {
       handoffId: message.handoffId,
     };
     let unsubscribe: (() => void) | null = null;
+    let deferredByPause = false;
     try {
+      bot.active = active;
       const { session } = await sessionFor(bot, message.groupId);
-      bot.lifecycle = { phase: "running", active };
+      if (bot.paused) {
+        bot.pausedQueue.push(message);
+        deferredByPause = true;
+        return;
+      }
+      if (hasStopped() || currentDefinition(bot) === null) return;
       const statsBeforeRun = session.getSessionStats();
-      unsubscribe = reportRun(session, statsBeforeRun, active.run, approvals.blockedCallIds, config.send);
+      unsubscribe = reportRun(session, statsBeforeRun, active.run, approvals.blockedCallIds, (outgoing) => {
+        if (outgoing.type === "run_done") finishRun(outgoing);
+        else config.send(outgoing);
+      });
       await session.prompt(composePrompt(message));
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {
       unsubscribe?.();
-      // pause 在跑的过程中把状态改成 paused 了的话，这里不能踩回 idle。
-      if (bot.lifecycle.phase === "running") bot.lifecycle = { phase: "idle" };
+      bot.active = null;
+      if (state === "ready" && bot.configState.phase === "pending") await reconcileBot(bot);
+      if (!deferredByPause) finishWithoutRun(message);
     }
   };
 
+  const schedulePrompt = (bot: BotRuntime, message: PromptMessage): Promise<void> =>
+    append(bot, async () => {
+      try {
+        await runOne(bot, message);
+      } catch (error) {
+        fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
+        finishWithoutRun(message);
+      }
+    });
+
   const runner: Runner = {
-    async prompt(message) {
+    async applyConfig(next) {
       if (state === "stopped") return;
+      nextConfigVersion += 1;
+      const version = nextConfigVersion;
+      const nextSkills = next.skills ?? [];
+      const incoming = new Map(
+        next.bots.map((botConfig) => [
+          botConfig.id,
+          desiredFor(version, botConfig, next.tools, nextSkills, next.modelGateway),
+        ]),
+      );
+      for (const bot of bots.values()) {
+        const desired = incoming.get(bot.botId) ?? null;
+        incoming.delete(bot.botId);
+        bot.configState = { phase: "pending", current: currentDefinition(bot), desired };
+        append(bot, () => reconcileBot(bot));
+      }
+      for (const desired of incoming.values()) {
+        const bot: BotRuntime = {
+          botId: desired.config.id,
+          dirs: botDirs(config.dataDir, desired.config.id),
+          configState: { phase: "pending", current: null, desired },
+          appliedGateway: desired.gateway,
+          lastGroupId: null,
+          sessions: new Map(),
+          mcp: null,
+          paused: false,
+          pausedQueue: [],
+          active: null,
+          chain: Promise.resolve(),
+        };
+        bots.set(bot.botId, bot);
+        append(bot, () => reconcileBot(bot));
+      }
+    },
+
+    async prompt(message) {
+      liveRuns.add(message.runId);
+      if (state === "stopped") {
+        finishWithoutRun(message);
+        return;
+      }
       const bot = bots.get(message.botId);
       if (bot === undefined) {
         fail("unsupported", `config 里没有 Bot ${message.botId}，丢弃 run ${message.runId}`, message.groupId);
+        finishWithoutRun(message);
         return;
       }
-      if (bot.lifecycle.phase === "paused") {
-        bot.lifecycle.queued.push(message);
-        liveRuns.add(message.runId);
-        return;
-      }
-      liveRuns.add(message.runId);
-      bot.chain = bot.chain.then(async () => {
-        try {
-          await runOne(bot, message);
-        } finally {
-          liveRuns.delete(message.runId);
-        }
-      });
-      await bot.chain;
+      await schedulePrompt(bot, message);
     },
 
     activeRuns() {
@@ -284,10 +552,9 @@ export function createRunner(config: RunnerConfig): Runner {
 
     async pause(botId) {
       const bot = bots.get(botId);
-      if (bot === undefined || bot.lifecycle.phase === "paused") return;
-      const runningGroupId = bot.lifecycle.phase === "running" ? bot.lifecycle.active.run.groupId : undefined;
-      // 先立状态再中止。abort 会让正在跑的那次走完 finally，晚立的话会被踩回 idle。
-      bot.lifecycle = { phase: "paused", queued: [] };
+      if (bot === undefined || bot.paused) return;
+      bot.paused = true;
+      const runningGroupId = bot.active?.run.groupId;
       if (runningGroupId === undefined) return;
       // 挂起的审批不解开，Pi 的工具循环还在 await 它，abort 等不到 idle 会一直挂着。
       // 只中止正在跑的那个群。别的群的会话留着，resume 之后接着用。
@@ -297,30 +564,25 @@ export function createRunner(config: RunnerConfig): Runner {
 
     async resume(botId) {
       const bot = bots.get(botId);
-      if (bot === undefined || bot.lifecycle.phase !== "paused") return;
-      const queued = bot.lifecycle.queued;
-      bot.lifecycle = { phase: "idle" };
-      for (const message of queued) await runner.prompt(message);
+      if (bot === undefined || !bot.paused) return;
+      bot.paused = false;
+      const queued = bot.pausedQueue.splice(0);
+      for (const message of queued) void schedulePrompt(bot, message);
     },
 
     async stop() {
       state = "stopped";
       approvals.abandon();
-      await Promise.all(
-        [...bots.values()].map(async (bot) => {
-          await bot.chain.catch(() => undefined);
-          await Promise.all(
-            [...bot.sessions.values()].map(async (botSession) => {
-              await botSession.session.abort();
-              await botSession.dispose();
-            }),
-          );
-          bot.sessions.clear();
-          await bot.mcp?.close();
-          bot.mcp = null;
+      const stopping = [...bots.values()].map((bot) =>
+        append(bot, async () => {
+          try {
+            await closeBotResources(bot);
+          } finally {
+            deleteBot(bot, false);
+          }
         }),
       );
-      liveRuns.clear();
+      await Promise.allSettled(stopping);
     },
   };
 

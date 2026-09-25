@@ -42,7 +42,6 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let heartbeat: NodeJS.Timeout | null = null;
   let attempt = 0;
   let runner: Runner | null = null;
-  const retiringRunners = new Set<Runner>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
 
@@ -83,9 +82,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         log(`控制面已接纳，owner ${message.ownerId}`);
         return;
       case "config": {
-        const previous = runner;
-        // 先同步换上新 runner，再去停旧的。中间不能有 await，否则紧跟其后的 prompt 会看到还没建好的 runner。
-        runner = makeRunner({
+        const config: RunnerConfig = {
           bots: message.bots,
           tools: message.tools,
           modelGateway: message.modelGateway,
@@ -93,14 +90,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
           skills: message.skills,
           dataDir,
           send,
-        });
-        if (previous !== null) {
-          retiringRunners.add(previous);
-          try {
-            await previous.stop();
-          } finally {
-            retiringRunners.delete(previous);
-          }
+        };
+        if (runner === null) {
+          runner = makeRunner(config);
+        } else {
+          await runner.applyConfig(config);
         }
         log(`收到 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`);
         return;
@@ -131,7 +125,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         await runner?.pause(message.botId);
         return;
       case "resume":
-        await runner?.resume(message.botId);
+        void runner?.resume(message.botId).catch((error: unknown) => log(`恢复 Bot 失败：${String(error)}`));
         return;
     }
   };
@@ -152,7 +146,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
     socket.on("open", () => {
       link = { phase: "open", socket };
-      const activeRuns = [...(runner?.activeRuns() ?? []), ...[...retiringRunners].flatMap((old) => old.activeRuns())];
+      const activeRuns = runner?.activeRuns() ?? [];
       send({
         type: "hello",
         computerId: options.computerId,
