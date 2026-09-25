@@ -9,6 +9,7 @@ import {
 import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
+import type { NoticePublisher } from "../notifications.js";
 import { listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
@@ -57,6 +58,7 @@ export type AgentHubDeps = {
   readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
   readonly toolCrypto: ToolCrypto;
+  readonly notifications: NoticePublisher;
 };
 
 /** 电脑代理的连接表。同一个用户可以同时有本机和远程两条连接，连接只按电脑号互相替换。 */
@@ -182,6 +184,7 @@ export class AgentHub {
           groupTurns: this.#deps.groupTurns,
           priceInputPerM: this.#deps.priceInputPerM,
           priceOutputPerM: this.#deps.priceOutputPerM,
+          notifications: this.#deps.notifications,
         },
         conn,
         message,
@@ -223,6 +226,7 @@ export class AgentHub {
     });
     const online = await markComputerOnline(this.#deps.db, computer.id);
     if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
+    await this.#deps.notifications.computerOnline(computer.ownerId);
     this.#send(accepted, {
       type: "welcome",
       ownerId: computer.ownerId,
@@ -268,11 +272,24 @@ export class AgentHub {
       }
       for (const message of result.failedTools) this.#deps.push.push(ownerId, { type: "message", message });
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
-      await failRoutineRunOf(
-        { db: this.#deps.db, push: this.#deps.push, agents: this, groupTurns: this.#deps.groupTurns },
+      const routine = await failRoutineRunOf(
+        {
+          db: this.#deps.db,
+          push: this.#deps.push,
+          agents: this,
+          groupTurns: this.#deps.groupTurns,
+          notifications: this.#deps.notifications,
+        },
         run.runId,
         result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : DISCONNECT_NOTICE,
       );
+      if (routine !== null) {
+        await this.#deps.notifications.publish(ownerId, {
+          kind: "stuck",
+          text: `例行任务「${routine.name}」没跑完：电脑中途断线`,
+          groupId: run.groupId,
+        });
+      }
     }
   }
 

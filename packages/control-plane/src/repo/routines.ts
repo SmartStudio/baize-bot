@@ -247,13 +247,19 @@ export async function startRoutineRun(db: Db, routineId: string, startedAt: Date
 export type RoutineRunRef = {
   readonly routineRunId: string;
   readonly routineId: string;
+  readonly name: string;
   readonly onFailure: OnFailure;
 };
 
 /** 这个 run 是哪条运行记录派出去的。回 null 就是普通的一次对话，不是例行任务。 */
 export async function routineRunOfRun(db: Db, runId: string): Promise<RoutineRunRef | null> {
   const [row] = await db
-    .select({ routineRunId: routineRuns.id, routineId: routines.id, onFailure: routines.onFailure })
+    .select({
+      routineRunId: routineRuns.id,
+      routineId: routines.id,
+      name: routines.name,
+      onFailure: routines.onFailure,
+    })
     .from(runs)
     .innerJoin(routineRuns, eq(routineRuns.id, runs.routineRunId))
     .innerJoin(routines, eq(routines.id, routineRuns.routineId))

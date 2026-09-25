@@ -12,6 +12,14 @@ export function isValidCron(expr: string): boolean {
   }
 }
 
+export function nextMoment(expr: string, after: Date): Date | null {
+  try {
+    return new Cron(expr, CRON_MODE).nextRun(after);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `after` 之后、`now` 之前（含）最晚的那个 cron 时刻，没有就是 null。
  *

@@ -100,13 +100,16 @@ function sendApprovalAbandoned(job: Running, callId: string): void {
   });
 }
 
-/** 发一条 approval_request 并收下它推出来的两条。推送顺序本身由第一条用例把关。 */
+/** 发一条 approval_request 并收下状态、卡片和通知。推送顺序本身由第一条用例把关。 */
 async function raiseApproval(job: Running, callId = "call-1"): Promise<Approval> {
   sendApprovalRequest(job, callId);
   const updated = await job.push.next();
   if (updated.type !== "approval_updated") throw new Error(`本应先推 approval_updated，实际是 ${updated.type}`);
   const card = await job.push.next();
   if (card.type !== "message") throw new Error(`审批之后本应推那条卡，实际是 ${card.type}`);
+  const notice = await job.push.next();
+  if (notice.type !== "notify" || notice.notice.kind !== "confirm")
+    throw new Error(`审批卡之后本应推 confirm 通知，实际是 ${notice.type}`);
   return updated.approval;
 }
 
@@ -147,6 +150,8 @@ describe("approval_request 到达", () => {
         kind: "approval",
         approvalId: approval?.id,
       });
+      const third = await job.push.next();
+      expect(third.type === "notify" ? third.notice.kind : null).toBe("confirm");
 
       const stored = await page(job);
       expect(

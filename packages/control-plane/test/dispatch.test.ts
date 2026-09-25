@@ -64,6 +64,7 @@ function dispatchDeps() {
       groupTurns: new GroupTurns(database.db, server.server.hub),
       gatewayBaseUrl: () => "",
       toolCrypto: new ToolCrypto("a".repeat(64)),
+      notifications: server.server.notifications,
     }),
   };
 }

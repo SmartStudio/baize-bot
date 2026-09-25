@@ -1,5 +1,6 @@
 import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
 import { dispatchUserMessage } from "../agent/dispatch.js";
 import type { GroupTurns } from "../agent/group-turn.js";
@@ -14,6 +15,7 @@ import {
   settleRoutineRun,
   startRoutineRun,
   type RoutineRow,
+  type RoutineRunRef,
 } from "../repo/routines.js";
 import type { PushHub } from "../ws/hub.js";
 
@@ -22,6 +24,7 @@ export type RoutineDeps = {
   readonly push: PushHub;
   readonly agents: AgentHub;
   readonly groupTurns: GroupTurns;
+  readonly notifications: NoticePublisher;
 };
 
 /** 派活那一步就没成，群里已经有一句「电脑不在线」，运行记录不该停在「运行中」。 */
@@ -64,6 +67,14 @@ export async function runRoutine(
   if (outcome.kind !== "sent") {
     await settleRoutineRun(deps.db, started.id, "failed", NOT_DISPATCHED_NOTE);
   }
+  // 用户自己发的消息派不出去，群里那句 system 他当场看得到；例行任务没人在看，才要找他。
+  if (outcome.kind === "offline") {
+    await deps.notifications.publish(ownerId, {
+      kind: "stuck",
+      text: `例行任务「${row.name}」没跑：电脑不在线`,
+      groupId,
+    });
+  }
 
   const loaded = await loadRoutine(deps.db, RoutineId.parse(row.id));
   if (loaded === null) return null;
@@ -71,17 +82,26 @@ export async function runRoutine(
   return loaded.routine;
 }
 
-/** 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费。 */
-export async function chargeRoutineRunOf(deps: RoutineDeps, runId: RunId, amount: number): Promise<void> {
+/**
+ * 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费。
+ * 回 null 说明这个 run 不是例行任务派的。
+ */
+export async function chargeRoutineRunOf(
+  deps: RoutineDeps,
+  runId: RunId,
+  amount: number,
+): Promise<RoutineRunRef | null> {
   const ref = await routineRunOfRun(deps.db, runId);
-  if (ref === null) return;
+  if (ref === null) return null;
   await pushIfChanged(deps, await chargeRoutineRun(deps.db, ref.routineRunId, `¥${amount.toFixed(2)}`));
+  return ref;
 }
 
-export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<void> {
+export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<RoutineRunRef | null> {
   const ref = await routineRunOfRun(deps.db, runId);
-  if (ref === null) return;
+  if (ref === null) return null;
   await pushIfChanged(deps, await failRoutineRun(deps.db, ref.routineRunId, reason));
+  return ref;
 }
 
 /**

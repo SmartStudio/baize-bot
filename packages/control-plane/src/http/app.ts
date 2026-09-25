@@ -24,7 +24,6 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
-  OvernightResponse,
   RegisterRequest,
   RegisterResponse,
   RoutineId,
@@ -36,6 +35,7 @@ import {
   SkillListResponse,
   SkillResponse,
   TaskId,
+  TodayResponse,
   ToolConnectionId,
   ToolListResponse,
   type ToolOperation,
@@ -82,6 +82,7 @@ import {
 import { isValidCron } from "../routines/cron.js";
 import { runRoutine } from "../routines/run.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
+import { getToday } from "../repo/today.js";
 import {
   bumpSkillUses,
   copySkill,
@@ -97,7 +98,8 @@ import {
 import { updateTask } from "../repo/tasks.js";
 import { createTool, deleteTool, findOwnedTool, listToolsByOwner, updateTool } from "../repo/tools.js";
 import { authenticate, createUser, isEmailTaken } from "../repo/users.js";
-import { getOvernight, getUsage } from "../repo/usage.js";
+import { getUsage } from "../repo/usage.js";
+import type { NoticePublisher } from "../notifications.js";
 import type { PushHub } from "../ws/hub.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 
@@ -107,6 +109,7 @@ export type AppDeps = {
   readonly agents: AgentHub;
   readonly toolCrypto: ToolCrypto;
   readonly groupTurns: GroupTurns;
+  readonly notifications: NoticePublisher;
   readonly secureCookie: boolean;
   readonly gateway: Omit<GatewayDeps, "db">;
 };
@@ -124,7 +127,7 @@ const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
 export function createApp(deps: AppDeps): Hono<Env> {
   const { agents, db, hub } = deps;
-  const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns };
+  const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns, notifications: deps.notifications };
   const app = new Hono<Env>();
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
@@ -231,7 +234,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
   app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
 
-  app.get("/api/overnight", async (c) => c.json(OvernightResponse.parse(await getOvernight(db, c.get("user").id))));
+  app.get("/api/today", async (c) => c.json(TodayResponse.parse(await getToday(db, c.get("user").id))));
 
   app.get("/api/computers", async (c) =>
     c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),

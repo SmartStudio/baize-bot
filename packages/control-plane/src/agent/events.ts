@@ -8,6 +8,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import type { NoticePublisher } from "../notifications.js";
 import { approvalRun, createApproval, expireApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
@@ -38,6 +39,7 @@ export type AgentEventDeps = {
   readonly groupTurns: GroupTurns;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
+  readonly notifications: NoticePublisher;
 };
 
 /** 电脑代理报上来的事件。每一条都写进 messages 表再推给 Web 客户端，群消息是事实来源。 */
@@ -125,9 +127,11 @@ type TextPrefix =
   | { readonly kind: "pass"; readonly runId: RunId }
   | { readonly kind: "visible"; readonly runId: RunId };
 const textPrefixes = new Map<string, TextPrefix>();
+const resultRuns = new Set<RunId>();
 
 export function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
+  resultRuns.delete(runId);
 }
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
@@ -165,6 +169,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   if (appended.kind === "created") deps.push.push(conn.ownerId, { type: "message", message: appended.message });
 
   const updated = await appendBotDelta(deps.db, event.messageId, groupId, delta, event.done);
+  if (updated !== null && delta.trim() !== "") resultRuns.add(event.runId);
   deps.push.push(conn.ownerId, {
     type: "message_delta",
     messageId: event.messageId,
@@ -225,6 +230,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
 
   const passed = runPassed(event.runId);
+  const hasResult = !passed && resultRuns.has(event.runId);
   clearTextPrefixes(event.runId);
   if (passed) {
     const absorbed = deps.groupTurns.absorbPassCost(groupId, event.runId, {
@@ -264,8 +270,16 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     steps: usage.steps + held.steps,
     amount: usage.amount + held.amount,
   });
-  await chargeRoutineRunOf(deps, event.runId, usage.amount);
+  const routine = await chargeRoutineRunOf(deps, event.runId, usage.amount);
   await deps.groupTurns.runDone(event.groupId, event.runId);
+  // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
+  if (hasResult && routine !== null) {
+    await deps.notifications.publish(conn.ownerId, {
+      kind: "result",
+      text: `例行任务「${routine.name}」做完了，打开群聊看结果`,
+      groupId,
+    });
+  }
 }
 
 function runPassed(runId: RunId): boolean {
@@ -342,6 +356,11 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
   deps.push.push(conn.ownerId, { type: "approval_updated", approval: created.approval });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
   await holdRoutineRunOf(deps, event.runId);
+  await deps.notifications.publish(conn.ownerId, {
+    kind: "confirm",
+    text: "有一件事等你确认，打开「今天」看",
+    groupId,
+  });
 }
 
 async function onApprovalAbandoned(

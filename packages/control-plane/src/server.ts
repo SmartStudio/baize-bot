@@ -10,6 +10,7 @@ import { ToolCrypto } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { DEFAULT_GATEWAY_MODEL, DEFAULT_UPSTREAM_BASE_URL, toolSecretKey, type RuntimeConfig } from "./env.js";
 import { createApp } from "./http/app.js";
+import { Notifications, type NotificationOptions } from "./notifications.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
@@ -27,6 +28,7 @@ export type RunningServer = {
   readonly hub: PushHub;
   /** 露出来是为了在测试里自己说什么时候到点，正常跑的时候没人碰它。 */
   readonly routines: RoutineScheduler;
+  readonly notifications: Notifications;
   close(): Promise<void>;
 };
 
@@ -36,6 +38,7 @@ export type StartOptions = {
   readonly secureCookie?: boolean;
   readonly config?: RuntimeConfig;
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
+  readonly notificationScheduler?: NotificationOptions;
   readonly disconnectGraceMs?: number;
   readonly toolSecretKey?: string;
 };
@@ -53,7 +56,8 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
 export async function startServer(options: StartOptions): Promise<RunningServer> {
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
   const toolCrypto = new ToolCrypto(options.toolSecretKey ?? toolSecretKey());
-  const hub = new PushHub(options.db);
+  const hub = new PushHub();
+  const notifications = new Notifications(options.db, hub, options.notificationScheduler);
   const groupTurns = new GroupTurns(options.db, hub);
 
   // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
@@ -67,6 +71,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
     toolCrypto,
+    notifications,
   });
 
   const app = createApp({
@@ -75,6 +80,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     agents,
     toolCrypto,
     groupTurns,
+    notifications,
     secureCookie: options.secureCookie ?? false,
     gateway: {
       models: config.gatewayModels,
@@ -103,14 +109,22 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       socket.destroy();
       return;
     }
-    acceptClient(options.db, clients, hub, groupTurns, request, socket, head);
+    acceptClient(options.db, clients, hub, groupTurns, notifications, request, socket, head);
   });
 
   const port = await listeningPort(server);
   publicBaseUrl = publicBaseUrl ?? `http://localhost:${port}`;
 
-  const routines = new RoutineScheduler({ db: options.db, push: hub, agents, groupTurns, ...options.scheduler });
+  const routines = new RoutineScheduler({
+    db: options.db,
+    push: hub,
+    agents,
+    groupTurns,
+    notifications,
+    ...options.scheduler,
+  });
   await routines.start();
+  notifications.start();
 
   const reminders = setInterval(() => {
     const now = new Date();
@@ -123,9 +137,11 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     port,
     hub,
     routines,
+    notifications,
     close: async () => {
       routines.stop();
       clearInterval(reminders);
+      await notifications.close();
       await hub.closeAll();
       await agents.closeAll();
       clients.close();
@@ -143,6 +159,7 @@ function acceptClient(
   clients: WebSocketServer,
   hub: PushHub,
   groupTurns: GroupTurns,
+  notifications: Notifications,
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer,
@@ -158,6 +175,7 @@ function acceptClient(
       clients.handleUpgrade(request, socket, head, (ws) => {
         hub.add(user.id, ws);
         for (const snapshot of groupTurns.snapshots(user.id)) ws.send(JSON.stringify(snapshot));
+        void notifications.connected(user.id).catch((error: unknown) => console.error("补发免打扰汇总出错", error));
       });
     })
     .catch(() => socket.destroy());

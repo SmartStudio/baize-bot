@@ -1,27 +1,15 @@
 import { ServerPush, type UserId } from "@baize/shared";
 import type { WebSocket } from "ws";
-import type { Db } from "../db/client.js";
-import { recordLastSeen } from "../repo/users.js";
 
 /** 按用户分组的连接表。一个用户可以开多个标签页，推送发给他的全部连接。 */
 export class PushHub {
   readonly #connections = new Map<string, Set<WebSocket>>();
-  readonly #pending = new Set<Promise<void>>();
-
-  constructor(readonly db: Db) {}
 
   add(userId: UserId, socket: WebSocket): void {
     const existing = this.#connections.get(userId);
     if (existing === undefined) this.#connections.set(userId, new Set([socket]));
     else existing.add(socket);
-    socket.on("close", () => {
-      this.remove(userId, socket);
-      const write = recordLastSeen(this.db, userId).catch((error: unknown) =>
-        console.error("记录推送断开时间出错", error),
-      );
-      this.#pending.add(write);
-      void write.then(() => this.#pending.delete(write));
-    });
+    socket.on("close", () => this.remove(userId, socket));
   }
 
   remove(userId: string, socket: WebSocket): void {
@@ -29,6 +17,10 @@ export class PushHub {
     if (existing === undefined) return;
     existing.delete(socket);
     if (existing.size === 0) this.#connections.delete(userId);
+  }
+
+  isConnected(userId: string): boolean {
+    return this.#connections.has(userId);
   }
 
   push(userId: string, push: ServerPush): void {
@@ -50,7 +42,6 @@ export class PushHub {
       }
     }
     await Promise.all(closing);
-    await Promise.all(this.#pending);
     this.#connections.clear();
   }
 }

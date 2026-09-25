@@ -1,5 +1,6 @@
 import type { Db } from "../../src/db/client.js";
 import type { RuntimeConfig } from "../../src/env.js";
+import type { NotificationOptions } from "../../src/notifications.js";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer, type StartOptions } from "../../src/server.js";
 
 export type TestServer = { readonly server: RunningServer; client(): ApiClient; close(): Promise<void> };
@@ -8,6 +9,7 @@ export async function startTestServer(
   db: Db,
   config: Partial<RuntimeConfig> = {},
   scheduler?: StartOptions["scheduler"],
+  notificationScheduler?: NotificationOptions,
 ): Promise<TestServer> {
   const server = await startServer({
     db,
@@ -15,6 +17,7 @@ export async function startTestServer(
     toolSecretKey: "a".repeat(64),
     config: { ...DEFAULT_RUNTIME_CONFIG, ...config },
     ...(scheduler === undefined ? {} : { scheduler }),
+    ...(notificationScheduler === undefined ? {} : { notificationScheduler }),
   });
   return {
     server,

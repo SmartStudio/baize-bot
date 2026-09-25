@@ -1,5 +1,5 @@
-import type { User, UserId } from "@baize/shared";
-import { eq, sql } from "drizzle-orm";
+import type { User } from "@baize/shared";
+import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { settings, userCounters, users } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -45,13 +45,6 @@ export async function createUser(db: Db, input: NewUser): Promise<User> {
 export async function findUserByEmail(db: Db, email: string): Promise<User | null> {
   const [row] = await db.select().from(users).where(eq(users.email, email)).limit(1);
   return row === undefined ? null : toUser(row);
-}
-
-export async function recordLastSeen(db: Db, userId: UserId): Promise<void> {
-  await db
-    .update(users)
-    .set({ lastSeenAt: sql`greatest(coalesce(${users.lastSeenAt}, '-infinity'::timestamptz), now())` })
-    .where(eq(users.id, userId));
 }
 
 // 邮箱不存在时拿它顶上，这样两条路径都只跑一次 scrypt，响应时间不泄露账号是否存在。
