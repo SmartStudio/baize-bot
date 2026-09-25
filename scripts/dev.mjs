@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,17 +38,27 @@ function agentService() {
   return { pkg: "@baize/computer-agent", dir: "packages/computer-agent", port: null };
 }
 
-// Bot 的 bash 会继承代理的环境。代理照拿 shell 的环境，.env 里只拿连控制面要的四个，上游密钥和库连接留给控制面。
+const agentEnvKeys = ["COMPUTER_ID", "AGENT_TOKEN", "CONTROL_PLANE_AGENT_URL", "BAIZE_DATA_DIR"];
+
+function agentLaunchOf(envFromFile) {
+  const port = process.env.PORT ?? envFromFile.PORT ?? "3001";
+  const configuredUrl = process.env.CONTROL_PLANE_AGENT_URL ?? envFromFile.CONTROL_PLANE_AGENT_URL;
+  const configuredDataDir = process.env.BAIZE_DATA_DIR ?? envFromFile.BAIZE_DATA_DIR;
+  return {
+    url: configuredUrl || `ws://127.0.0.1:${port}/agent`,
+    computerId: process.env.COMPUTER_ID ?? envFromFile.COMPUTER_ID,
+    token: process.env.AGENT_TOKEN ?? envFromFile.AGENT_TOKEN,
+    dataDir: configuredDataDir || join(homedir(), ".baize", "bots"),
+  };
+}
+
+// Bot 的 bash 会继承代理的环境。代理照拿 shell 的环境，.env 里只拿连控制面要的普通配置，上游密钥和库连接留给控制面。
 function agentEnvOf(envFromFile) {
   const env = { ...process.env };
   for (const key of Object.keys(envFromFile)) {
     delete env[key];
   }
-  const allowed = ["COMPUTER_ID", "AGENT_TOKEN", "CONTROL_PLANE_AGENT_URL", "BAIZE_DATA_DIR"];
-  for (const key of allowed) {
-    const value = process.env[key] ?? envFromFile[key];
-    if (value !== undefined) env[key] = value;
-  }
+  for (const key of agentEnvKeys) delete env[key];
   return env;
 }
 
@@ -96,12 +107,16 @@ for (const service of services) {
     console.log(`跳过 ${name}：${service.dir} 还没有带 dev 脚本的 package.json`);
     continue;
   }
-  const env = service.pkg === "@baize/computer-agent" ? agentEnvOf(fileEnv) : { ...fileEnv, ...process.env };
-  const child = spawn("pnpm", ["--filter", service.pkg, "dev"], {
+  const isAgent = service.pkg === "@baize/computer-agent";
+  const env = isAgent ? agentEnvOf(fileEnv) : { ...fileEnv, ...process.env };
+  // tsx watch 会把 stdin 当成交互控制，启动报文必须直接交给代理入口。
+  const args = isAgent ? ["--filter", service.pkg, "exec", "tsx", "src/main.ts"] : ["--filter", service.pkg, "dev"];
+  const child = spawn("pnpm", args, {
     cwd: root,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [isAgent ? "pipe" : "ignore", "pipe", "pipe"],
     env,
   });
+  if (isAgent) child.stdin.write(`${JSON.stringify(agentLaunchOf(fileEnv))}\n`);
   prefixed(name, child.stdout, (line) => process.stdout.write(line));
   prefixed(name, child.stderr, (line) => process.stderr.write(line));
   child.on("exit", (code, signal) => {

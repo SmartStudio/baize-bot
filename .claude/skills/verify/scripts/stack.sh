@@ -33,6 +33,16 @@ env_keys() {
   sed -nE 's/^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=.*/\1/p' "$ENV_FILE"
 }
 
+json_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '"%s"' "$value"
+}
+
 # 控制面拿整份 .env，shell 里已有的变量优先，和 dev.mjs 一致。
 export_env_file() {
   local key
@@ -195,8 +205,31 @@ report_migrations() {
 }
 
 start_agent() {
-  local cp="$1" tries=0
-  start entry2 computer-agent "$SELF" _exec-computer-agent "$cp"
+  local cp="$1" tries=0 id token url data launch input log
+  local fallback_url="ws://127.0.0.1:$cp/agent"
+  id="${COMPUTER_ID:-$(env_get COMPUTER_ID)}"
+  token="${AGENT_TOKEN:-$(env_get AGENT_TOKEN)}"
+  url="${CONTROL_PLANE_AGENT_URL:-$(env_get CONTROL_PLANE_AGENT_URL "$fallback_url")}"
+  data="${BAIZE_DATA_DIR:-$(env_get BAIZE_DATA_DIR)}"
+  [[ -n "$data" ]] || data="$HOME/.baize/bots"
+  launch="$(printf '{"url":%s,"computerId":%s,"token":%s,"dataDir":%s}' \
+    "$(json_quote "$url")" "$(json_quote "$id")" "$(json_quote "$token")" "$(json_quote "$data")")"
+  input="$RUN/entry2/computer-agent.stdin"
+  log="$RUN/entry2/computer-agent.log"
+  mkdir -p "$RUN/entry2"
+  rm -f "$input"
+  mkfifo "$input"
+  set -m
+  (
+    (cd "$ROOT" && exec "$SELF" _exec-computer-agent) <"$input" >"$log" 2>&1 &
+    local agent_pid=$!
+    exec 3>"$input"
+    printf '%s\n' "$launch" >&3
+    wait "$agent_pid"
+  ) &
+  echo $! >"$RUN/entry2/computer-agent.pgid"
+  set +m
+  echo "起 computer-agent，进程组 $(cat "$RUN/entry2/computer-agent.pgid")，日志 $log"
   until grep -q "收到 config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
     tries=$((tries + 1))
     [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没收到 config："; tail -20 "$RUN/entry2/computer-agent.log"; exit 1; }
@@ -259,22 +292,17 @@ exec_control_plane() {
   exec pnpm --filter @baize/control-plane start
 }
 
-# 电脑代理只拿连控制面要的四个，上游密钥和库连接不进 Bot 的 bash，和 dev.mjs 的 agentEnvOf 一致。
+# 电脑代理只通过 stdin 收启动报文。上游密钥和库连接不进 Bot 的 bash，和 dev.mjs 的 agentEnvOf 一致。
 exec_computer_agent() {
-  local cp="$1" key id token url data
-  id="${COMPUTER_ID:-$(env_get COMPUTER_ID)}"
-  token="${AGENT_TOKEN:-$(env_get AGENT_TOKEN)}"
-  url="${CONTROL_PLANE_AGENT_URL:-$(env_get CONTROL_PLANE_AGENT_URL "ws://127.0.0.1:$cp/agent")}"
-  data="${BAIZE_DATA_DIR:-$(env_get BAIZE_DATA_DIR)}"
+  local key
   for key in $(env_keys); do unset "$key"; done
-  export COMPUTER_ID="$id" AGENT_TOKEN="$token" CONTROL_PLANE_AGENT_URL="$url"
-  if [[ -n "$data" ]]; then export BAIZE_DATA_DIR="$data"; fi
+  unset COMPUTER_ID AGENT_TOKEN CONTROL_PLANE_AGENT_URL BAIZE_DATA_DIR
   exec pnpm --filter @baize/computer-agent exec tsx src/main.ts
 }
 
 case "${1-}" in
   _exec-control-plane) exec_control_plane ;;
-  _exec-computer-agent) shift; exec_computer_agent "$@" ;;
+  _exec-computer-agent) exec_computer_agent ;;
   entry1) shift; entry1 "$@" ;;
   entry2) shift; entry2 "$@" ;;
   *) usage ;;

@@ -192,13 +192,11 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       if (options.agentProcess) {
         const agentDir = fileURLToPath(new URL("../../computer-agent", import.meta.url));
         const mainPath = join(agentDir, "src", "main.ts");
-        const agentEnv: NodeJS.ProcessEnv = {
-          ...process.env,
-          COMPUTER_ID: computerId,
-          AGENT_TOKEN: computerToken,
-          CONTROL_PLANE_AGENT_URL: `ws://127.0.0.1:${server.port}/agent`,
-          BAIZE_DATA_DIR: dataDir,
-        };
+        const agentEnv: NodeJS.ProcessEnv = { ...process.env };
+        delete agentEnv["COMPUTER_ID"];
+        delete agentEnv["AGENT_TOKEN"];
+        delete agentEnv["CONTROL_PLANE_AGENT_URL"];
+        delete agentEnv["BAIZE_DATA_DIR"];
         delete agentEnv["UPSTREAM_API_KEY"];
         delete agentEnv["DATABASE_URL"];
 
@@ -206,8 +204,16 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         const child = spawn(process.execPath, ["--import", "tsx", mainPath], {
           cwd: agentDir,
           env: agentEnv,
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
         });
+        child.stdin.write(
+          `${JSON.stringify({
+            url: `ws://127.0.0.1:${server.port}/agent`,
+            computerId,
+            token: computerToken,
+            dataDir,
+          })}\n`,
+        );
         child.stdout?.on("data", (chunk: Buffer) => {
           log += chunk.toString();
         });

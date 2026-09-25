@@ -12,7 +12,7 @@ docker compose up -d                                   # PostgreSQL 16，端口 
 pnpm --filter @baize/control-plane migrate             # 应用迁移
 pnpm --filter @baize/control-plane seed                # 建开发账号 chen@baize.dev / baize-dev，打印 COMPUTER_ID 和 AGENT_TOKEN
 pnpm dev                                               # 起控制面 3001 和 Web 5173，会先 docker compose up -d
-pnpm dev --agent                                       # 再起电脑代理，要求 .env 里有 COMPUTER_ID 和 AGENT_TOKEN
+pnpm dev --agent                                       # 再起电脑代理，要求 .env 或 shell 里有 COMPUTER_ID 和 AGENT_TOKEN；启动 JSON 走 stdin，不进代理环境
 pnpm check                                             # typecheck + oxlint + 全部测试
 pnpm typecheck / pnpm lint / pnpm format
 ```
@@ -77,6 +77,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - 交接分两步：`handoff_task` 发报文，目标 `accept_handoff` 之后 `tasks.current_bot_id` 才换人。确认之前活不悬空。
 - 多 Bot 群一次回合的调度在 `agent/group-turn.ts`，Bot 之间 @ 的回路守卫也在这里，一个回合里 Bot 最多说 10 条（`BOT_MESSAGE_LIMIT`），计数在内存。
 - skill 单向：真相源是控制面 `skills` 表，随 `config` 下发，运行器落成 `<dataDir>/<botId>/skills/<skillId>/SKILL.md`，不回传。`config.skills` 恒带，空也带空数组，运行器靠它整目录对账。
+- 电脑代理的启动配置是一行 JSON `{ url, computerId, token, dataDir }`，由调用方写入 stdin；`COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR` 不得出现在代理环境中。
 - 例行任务就是归属人在单 Bot 群里发了一条消息，运行器和电脑代理不认识它。调度游标用 `UPDATE ... WHERE lastFiredAt = 旧值` 抢，停机不补跑。
 - 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
 - Pi 的四个落盘点（authPath、modelsStorePath、两个 agentDir、sessionDir）都在 `bot-runner/src/bot-session.ts` 钉到 `<dataDir>/<botId>/` 下，`~/.pi` 不能出现任何新文件，`bot-runner/test/runner.test.ts` 最后一条用例钉着这件事。

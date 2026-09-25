@@ -85,6 +85,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "welcome":
         attempt = 0;
         log(`控制面已接纳，owner ${message.ownerId}`);
+        process.stdout.write('{"type":"online"}\n');
         return;
       case "config": {
         const config: RunnerConfig = {

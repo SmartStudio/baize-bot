@@ -1,54 +1,75 @@
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { ComputerId } from "@baize/shared";
+import { createInterface } from "node:readline";
+import { AgentLaunch } from "@baize/shared";
 import { startAgent } from "./agent.js";
 
 const AGENT_VERSION = "0.1.0";
+let stdinEnded = false;
 
-const DEFAULT_AGENT_URL = "ws://localhost:3001/agent";
-
-/** 进程里只有这里读 process.env，agent.ts 收到的是已经拿全的值。 */
-type AgentEnv = {
-  readonly url: string;
-  readonly computerId: ComputerId;
-  readonly token: string;
-  readonly dataDir: string;
-};
-
-function readEnv(env: NodeJS.ProcessEnv): AgentEnv | { readonly missing: readonly string[] } {
-  const computerId = env["COMPUTER_ID"] ?? "";
-  const token = env["AGENT_TOKEN"] ?? "";
-  const missing = [...(computerId === "" ? ["COMPUTER_ID"] : []), ...(token === "" ? ["AGENT_TOKEN"] : [])];
-  if (missing.length > 0) return { missing };
-  return {
-    url: env["CONTROL_PLANE_AGENT_URL"] ?? DEFAULT_AGENT_URL,
-    computerId: ComputerId.parse(computerId),
-    token,
-    // Bot 的会话文件落在这下面。默认值离 ~/.pi 远远的，Pi 的落盘点由运行器另外钉死。
-    dataDir: env["BAIZE_DATA_DIR"] ?? join(homedir(), ".baize", "bots"),
-  };
-}
-
-const config = readEnv(process.env);
-// Bot 的 bash 每次执行都继承 process.env，token 读完就删，Bot 在 bash 里跑 env 看不到它。
-delete process.env["AGENT_TOKEN"];
-if ("missing" in config) {
-  console.error(
-    `缺少环境变量 ${config.missing.join("、")}。跑 pnpm --filter @baize/control-plane seed 或 computer-token 拿一份。`,
-  );
-  process.exit(1);
-}
-
-const handle = startAgent({
-  url: config.url,
-  computerId: config.computerId,
-  token: config.token,
-  version: AGENT_VERSION,
-  dataDir: config.dataDir,
+process.stdin.once("end", () => {
+  stdinEnded = true;
 });
 
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    void handle.stop().finally(() => process.exit(0));
+function readLaunch(): Promise<AgentLaunch> {
+  if (Object.prototype.hasOwnProperty.call(process.env, "AGENT_TOKEN")) {
+    return Promise.reject(new Error("环境变量 AGENT_TOKEN 不允许存在，token 必须通过 stdin 传入"));
+  }
+
+  const input = createInterface({ input: process.stdin });
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      input.close();
+      reject(error);
+    };
+    input.once("line", (line) => {
+      let json: unknown;
+      try {
+        json = JSON.parse(line);
+      } catch {
+        fail(new Error("启动配置不是 JSON"));
+        return;
+      }
+      const parsed = AgentLaunch.safeParse(json);
+      if (!parsed.success) {
+        fail(new Error("启动配置不合 schema"));
+        return;
+      }
+      settled = true;
+      input.close();
+      resolve(parsed.data);
+    });
+    input.once("close", () => fail(new Error("stdin 未提供启动配置")));
+    input.once("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
   });
 }
+
+void readLaunch()
+  .then((config: AgentLaunch) => {
+    delete process.env["ELECTRON_RUN_AS_NODE"];
+    const handle = startAgent({
+      url: config.url,
+      computerId: config.computerId,
+      token: config.token,
+      version: AGENT_VERSION,
+      dataDir: config.dataDir,
+    });
+
+    const stop = (): void => {
+      void handle.stop().finally(() => process.exit(0));
+    };
+    if (stdinEnded) stop();
+    else process.stdin.once("end", stop);
+
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      process.on(signal, () => {
+        void handle.stop().finally(() => process.exit(0));
+      });
+    }
+  })
+  .catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`电脑代理启动失败：${message}`);
+    process.exit(1);
+  });

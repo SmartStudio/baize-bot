@@ -56,7 +56,7 @@ $S entry2 agent         # 控制面已起，只补电脑代理，shell 里的电
 1. `docker start baize-postgres`，等 `pg_isready`。
 2. 控制面：把 `.env` 按 dev.mjs 的规则导出（只认 `KEY=value`，shell 里已有的优先），跑 `pnpm --filter @baize/control-plane start`。端口取 `.env` 的 `PORT`，没写就是 3001。
 3. Web：`API_PORT=<.env 的 API_PORT，没写取 PORT> WEB_PORT=5173 pnpm --filter @baize/web dev`。
-4. 加 `--agent` 或跑 `entry2 agent` 时起电脑代理：`pnpm --filter @baize/computer-agent exec tsx src/main.ts`，环境里去掉 `.env` 的所有键，只放回 `COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR`，每个先取 shell 里的值，没有再取 `.env`，和 dev.mjs 的 `agentEnvOf` 一样，上游密钥不进 Bot 的 bash。等到日志出现「收到 config」才算连上。
+4. 加 `--agent` 或跑 `entry2 agent` 时起电脑代理：`pnpm --filter @baize/computer-agent exec tsx src/main.ts`。`COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR` 每个先取 shell 里的值，没有再取 `.env`，拼成一行 JSON `{ url, computerId, token, dataDir }`，经 `.audit/verify-run/entry2/computer-agent.stdin` 这个 fifo 写进代理的 stdin。代理环境里去掉 `.env` 的所有键和这四个键，和 dev.mjs 一样，token 和上游密钥都不进 Bot 的 bash。环境里只要有 `AGENT_TOKEN`（空串也算），代理就拒绝启动。stdin 关闭时代理自己停机。日志里先出现 `{"type":"online"}`，再出现「收到 config」，才算连上。
 
 就绪标志：控制面 `/api/bots` 回 401，经 Web 代理的 `5173/api/bots` 也回 401，body 是 `{"error":"请先登录"}`。
 

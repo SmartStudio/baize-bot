@@ -1,0 +1,31 @@
+{
+  "name": "@baize/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node scripts/build.mjs",
+    "package": "pnpm --filter @baize/web build && node scripts/build.mjs && node scripts/package.mjs",
+    "prove": "tsx scripts/prove.ts"
+  },
+  "dependencies": {
+    "@baize/computer-agent": "workspace:*",
+    "@fontsource-variable/geist-mono": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/noto-sans-sc": "^5.3.0",
+    "@baize/shared": "workspace:*",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.3.0",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.18.1",
+    "electron": "^44.4.5",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "vitest": "^2.1.8",
+    "typescript": "^5.6.3"
+  }
+}
