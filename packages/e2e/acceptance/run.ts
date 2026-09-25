@@ -237,7 +237,7 @@ const run = async (): Promise<void> => {
     activeStep = "3";
     await send(page, "@小服 Lisa 要 200 台 X3，10 月 30 日前交，先查库存和排产");
     await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-status", "ok");
-    await check(page.getByTestId("tool-call-card")).toContainText("bash");
+    await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-view-kind", "bash");
     await check(page.getByTestId("bot-bubble").filter({ hasText: "方案一" })).toContainText("方案二");
     await check(page.getByTestId("cost-card")).toBeVisible();
     const history = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
