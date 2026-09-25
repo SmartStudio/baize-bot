@@ -25,7 +25,7 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 
 审批规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 连接算要不要审批，归属人收紧规则对在飞的 run 立刻生效。待删除的 Bot 没有 `desired`，按建会话时的连接算，删 Bot 不等于放宽审批。
 
-暂停和「有 run 在跑」是两个字段。`paused` 只决定 prompt 轮到时进暂停队列，`active` 是当前 run。pause 拒绝挂起的审批并 abort 当前 run，不碰配置和资源。暂停期间的 prompt 也先排进 `chain`，轮到时再进暂停队列，恢复后按到达顺序跑。resume 把暂停队列重新排进 `chain` 就返回，不等补跑。
+暂停和「有 run 在跑」是两个字段。`paused` 只决定 prompt 轮到时进暂停队列，`active` 是当前 run。pause 先上报挂起的审批已放弃，再把工具调用当拒绝收尾并 abort 当前 run，不碰配置和资源。暂停期间的 prompt 也先排进 `chain`，轮到时再进暂停队列，恢复后按到达顺序跑。resume 把暂停队列重新排进 `chain` 就返回，不等补跑。
 
 `run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停队列里的也算，重连时的 hello 带得上它们。
 
@@ -67,17 +67,19 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `tool_execution_end.isError` 都是真，所以被拒的 `callId` 由拦截器自己记在 `ApprovalGate.blockedCallIds` 里，`bot_tool_call` 的终态从这张表读。
 
+停机或暂停时，每条仍挂起的审批先各发一条 `approval_abandoned`，原因分别是 `stopped` 或 `paused`，再在运行器内按拒绝收尾，让 Pi 能结束 run。已经批准或拒绝的审批不会再发放弃。断线原因 `disconnected` 由控制面处理，运行器不发。
+
 ## 暂停和继续
 
 **Pi 没有 pause。** `AgentSession` 上只有 `abort(): Promise<void>`（`core/agent-session.d.ts:444`）和几个针对具体子任务的 `abortCompaction` / `abortRetry` / `abortBash`。`agent-core` 那层是 `AbortSignal`，语义同样是中止，不是挂起。
 
-所以暂停实现成：立 `paused` 状态，把这个 Bot 挂起的审批一律当拒绝收尾，再 abort 正在跑的那个群的会话。别的群的会话不动。暂停期间来的 prompt 进队列，`resume` 时按顺序整条重发。
+所以暂停实现成：立 `paused` 状态，上报这个 Bot 挂起的审批已放弃并把工具调用当拒绝收尾，再 abort 正在跑的那个群的会话。别的群的会话不动。暂停期间来的 prompt 进队列，`resume` 时按顺序整条重发。
 
-先收尾审批这一步是必须的，不是顺手。挂起的审批是 Pi 的工具循环正在 `await` 的一个 Promise，`abort()` 等的是会话变 idle，解不开那个 Promise 就永远等不到，`pause()` 会一直挂着。`test/runner.test.ts` 里「审批还挂着的时候 pause」这条用例就是钉这个的：去掉 `approvals.abandon(botId)` 它会超时。
+先收尾审批这一步是必须的，不是顺手。挂起的审批是 Pi 的工具循环正在 `await` 的一个 Promise，`abort()` 等的是会话变 idle，解不开那个 Promise 就永远等不到，`pause()` 会一直挂着。`test/runner.test.ts` 里「审批还挂着的时候 pause」这条用例就是钉这个的：去掉 `approvals.abandon("paused", botId)` 它会超时。
 
 限制，都是这个做法的直接后果：
 
-- **暂停会把挂起的审批打成拒绝。** 归属人点暂停的时候正好有个工具在等批，那个工具调用的终态就是 `blocked`。恢复以后它不会再问一次。
+- **暂停会让挂起的审批失效，并把工具调用打成拒绝。** 归属人点暂停的时候正好有个工具在等批，控制面会收到 `approval_abandoned`，工具调用的终态就是 `blocked`。恢复以后它不会再问一次。
 - **这不是断点续跑。** 被中止的那一次运行不会从中断点接着跑。它的 `run_done` 已经在 `agent_settled` 上发过了（`abort` 路径也走 `_runAgentPrompt` 的 finally），控制面看到的是一次跑完的运行，只是内容被截断。想续上得由人再发一条 prompt。
 - **排队的 prompt 是原样重发。** 会话历史还在（同一个 `AgentSession`），所以模型看得到中断前说过的话，但这条 prompt 本身是从头跑的一次新运行，`runId` 不变。
 - **队列不落盘。** 进程重启，排队的 prompt 就没了。

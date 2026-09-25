@@ -5,6 +5,7 @@ import type { AgentToControl, BotId, GroupId, RunId, ToolConnection, ToolView } 
 // 都只是 isError，分不出来。
 
 export type ApprovalKind = Extract<AgentToControl, { type: "approval_request" }>["kind"];
+type ApprovalAbandonReason = Exclude<Extract<AgentToControl, { type: "approval_abandoned" }>["reason"], "disconnected">;
 
 // 第一版按工具名前缀定审批类型。命中不了的一律当改生产数据，宁可多问一次。
 const KIND_BY_PREFIX: ReadonlyArray<readonly [prefix: string, kind: ApprovalKind]> = [
@@ -44,10 +45,10 @@ export interface ApprovalGate {
   /** 控制面的结论。runId 对不上的结论不作数。 */
   settle(runId: RunId, callId: string, approved: boolean): void;
   /**
-   * 把还挂着的审批一律当拒绝收尾。不给 botId 就是全部。
+   * 先上报还挂着的审批已放弃，再一律当拒绝收尾。不给 botId 就是全部。
    * 挂起的 handler 是 Pi 工具循环在 await 的东西，不解开它，abort 永远等不到 idle。
    */
-  abandon(botId?: BotId): void;
+  abandon(reason: ApprovalAbandonReason, botId?: BotId): void;
   readonly blockedCallIds: ReadonlySet<string>;
 }
 
@@ -87,12 +88,15 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
       if (waiting.get(callId)?.runId !== runId) return;
       decide(callId, approved);
     },
-    abandon: (botId) => {
-      const targets: string[] = [];
+    abandon: (reason, botId) => {
+      const targets: Array<readonly [callId: string, runId: RunId]> = [];
       for (const [callId, entry] of waiting) {
-        if (botId === undefined || entry.botId === botId) targets.push(callId);
+        if (botId === undefined || entry.botId === botId) targets.push([callId, entry.runId]);
       }
-      for (const callId of targets) decide(callId, false);
+      for (const [callId, runId] of targets) {
+        send({ type: "approval_abandoned", runId, callId, reason });
+        decide(callId, false);
+      }
     },
   };
 }

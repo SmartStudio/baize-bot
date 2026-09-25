@@ -558,7 +558,7 @@ export function createRunner(config: RunnerConfig): Runner {
       if (runningGroupId === undefined) return;
       // 挂起的审批不解开，Pi 的工具循环还在 await 它，abort 等不到 idle 会一直挂着。
       // 只中止正在跑的那个群。别的群的会话留着，resume 之后接着用。
-      approvals.abandon(botId);
+      approvals.abandon("paused", botId);
       await bot.sessions.get(runningGroupId)?.session.abort();
     },
 
@@ -572,7 +572,7 @@ export function createRunner(config: RunnerConfig): Runner {
 
     async stop() {
       state = "stopped";
-      approvals.abandon();
+      approvals.abandon("stopped");
       const stopping = [...bots.values()].map((bot) =>
         append(bot, async () => {
           try {

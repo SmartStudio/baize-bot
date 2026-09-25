@@ -859,7 +859,7 @@ describe("运行器的通信提示", () => {
     expect(typeof system).toBe("string");
     if (typeof system !== "string") throw new Error("假上游未收到 system 文本");
     expect(system.split("\n\n")[0]).toBe(
-      "你是白泽 Bot，在同事自己的电脑上替他干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
+      "你是白泽 Bot，在主人的电脑上替主人干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
     );
     expect(system).not.toContain("You are an expert coding assistant");
     const identity = `你叫 小销${tag === "" ? "" : "，标签 销售"}`;
@@ -3310,6 +3310,80 @@ describe("config 按 Bot 增量对账", () => {
     expect(applyTimes).toHaveLength(20);
     expect(replaceTimes).toHaveLength(20);
   });
+});
+
+describe("放弃挂起的审批", () => {
+  const tools = [
+    toolConnection([{ name: "send_email", needsApproval: true }], {
+      assignedBotIds: [BotId.parse("bot-1"), BotId.parse("bot-2")],
+    }),
+  ];
+  const script = scriptBy([
+    [
+      "甲发邮件",
+      {
+        textChunks: [],
+        toolCall: { id: "call-1", name: "send_email", args: { to: "jia@example.com" } },
+        usage: { input: 100, output: 10 },
+      },
+    ],
+    [
+      "乙发邮件",
+      {
+        textChunks: [],
+        toolCall: { id: "call-2", name: "send_email", args: { to: "yi@example.com" } },
+        usage: { input: 100, output: 10 },
+      },
+    ],
+  ]);
+
+  it("停机时每条挂起审批各发一条放弃", async () => {
+    const h = await startHarness({ bots: ["bot-1", "bot-2"], tools, script });
+    const first = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
+    const second = h.runner.prompt(promptMessage("bot-2", "run-2", "乙发邮件"));
+    await until(() => h.sent.filter((message) => message.type === "approval_request").length === 2, "两条审批");
+
+    await Promise.all([first, second, h.runner.stop()]);
+
+    const abandoned = h.sent.filter((message) => message.type === "approval_abandoned");
+    expect(abandoned).toHaveLength(2);
+    expect(abandoned).toEqual(
+      expect.arrayContaining([
+        { type: "approval_abandoned", runId: "run-1", callId: "call-1", reason: "stopped" },
+        { type: "approval_abandoned", runId: "run-2", callId: "call-2", reason: "stopped" },
+      ]),
+    );
+    expect(runDoneIds(h).toSorted()).toEqual(["run-1", "run-2"]);
+  }, 10_000);
+
+  it("暂停时挂起的审批发一条放弃，reason 是暂停", async () => {
+    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
+    await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
+
+    await h.runner.pause(BotId.parse("bot-1"));
+    await running;
+    await h.runner.stop();
+
+    expect(h.sent.filter((message) => message.type === "approval_abandoned")).toEqual([
+      { type: "approval_abandoned", runId: "run-1", callId: "call-1", reason: "paused" },
+    ]);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  }, 10_000);
+
+  it("批准之后停机不发放弃", async () => {
+    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
+    await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
+    const request = h.sent.find((message) => message.type === "approval_request");
+    if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
+    h.runner.approve(request.runId, request.callId, true);
+
+    await Promise.all([running, h.runner.stop()]);
+
+    expect(h.sent.filter((message) => message.type === "approval_abandoned")).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  }, 10_000);
 });
 
 describe("落盘位置", () => {

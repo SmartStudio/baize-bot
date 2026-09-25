@@ -116,7 +116,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     noSkills: true,
     additionalSkillPaths: [skillsDir],
     systemPrompt:
-      "你是白泽 Bot，在同事自己的电脑上替他干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
+      "你是白泽 Bot，在主人的电脑上替主人干活。说中文，回答先给结论再给依据。能用工具查到的就查，不猜。不确定要不要做的事先问，牵涉花钱、发出去、删东西的操作要走审批。",
     appendSystemPrompt: [
       `你叫 ${options.name}${options.tag === "" ? "" : `，标签 ${options.tag}`}`,
       ...(options.description === "" ? [] : [`你的描述，也是你的边界：${options.description}`]),
