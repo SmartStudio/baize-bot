@@ -10,7 +10,6 @@ import {
   type HandoffId,
   type Message,
   type MessageId,
-  type OvernightItem,
   type Routine,
   type RoutineId,
   type Settings,
@@ -70,7 +69,7 @@ export type AppState =
       tools: ToolConnection[];
       settings: Settings;
       usage: UsageResponse;
-      overnight: OvernightItem[];
+      todayVersion: number;
     };
 
 export type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean };
@@ -86,13 +85,12 @@ export type Action =
       tools: ToolConnection[];
       settings: Settings;
       usage: UsageResponse;
-      overnight: OvernightItem[];
     }
-  | { type: "group_selected"; groupId: GroupId }
+  | { type: "group_selected"; groupId: GroupId | null }
   | { type: "bot_created"; bot: Bot; groupId: GroupId }
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
-  | { type: "group_created"; group: Group; task: TopicTask; select: boolean }
+  | { type: "group_created"; group: Group; task: TopicTask }
   | { type: "group_updated"; group: Group }
   | { type: "group_turn"; turn: GroupTurn }
   | { type: "turns_cleared" }
@@ -115,6 +113,6 @@ export type Action =
   | { type: "tool_removed"; toolId: ToolConnectionId }
   | { type: "settings_set"; settings: Settings }
   | { type: "usage_loaded"; usage: UsageResponse }
-  | { type: "overnight_dismissed" };
+  | { type: "today_version_bumped" };
 
 export type ReadyState = Extract<AppState, { status: "ready" }>;

@@ -5,18 +5,11 @@ import { turnsOf, type Turn } from "./turns.js";
 let nextMessageId = 0;
 
 const message = (body: unknown, createdAt = "2026-09-19T12:00:00.000Z") =>
-  Message.parse({
-    id: `message-${nextMessageId++}`,
-    groupId: "group-1",
-    body,
-    createdAt,
-  });
+  Message.parse({ id: `message-${nextMessageId++}`, groupId: "group-1", body, createdAt });
 
 const user = (text = "hello") => message({ kind: "user", text });
-
 const bot = (botId: string, text = "reply", createdAt?: string) =>
   message({ kind: "bot", botId, text, streaming: false }, createdAt);
-
 const toolCall = (botId: string, tool = "read_task") =>
   message({
     kind: "tool_call",
@@ -27,7 +20,6 @@ const toolCall = (botId: string, tool = "read_task") =>
     status: "ok",
     durationMs: 100,
   });
-
 const skillOffer = (botId: string) =>
   message({
     kind: "skill_offer",
@@ -37,19 +29,9 @@ const skillOffer = (botId: string) =>
     status: "offered",
     skillId: null,
   });
-
 const approval = () => message({ kind: "approval", approvalId: "approval-1" });
 const handoff = () => message({ kind: "handoff", handoffId: "handoff-1" });
-
-const system = (text = "提示", tone?: "info" | "error") =>
-  message(tone === undefined ? { kind: "system", text } : { kind: "system", text, tone });
-
-const cost = (amount = 0.8, botId?: string) =>
-  message(
-    botId === undefined
-      ? { kind: "cost", runId: "run-1", steps: 1, amount }
-      : { kind: "cost", runId: "run-1", botId, steps: 1, amount },
-  );
+const cost = () => message({ kind: "cost", runId: "run-1", steps: 1, amount: 0.8 });
 
 const botTurnAt = (turns: Turn[], index: number) => {
   const turn = turns[index];
@@ -57,34 +39,26 @@ const botTurnAt = (turns: Turn[], index: number) => {
   return turn;
 };
 
-const systemTurnAt = (turns: Turn[], index: number) => {
-  const turn = turns[index];
-  if (turn?.kind !== "system") throw new Error(`expected system turn at index ${index}`);
-  return turn;
-};
-
 describe("turnsOf", () => {
-  it("returns no turns for an empty message list", () => {
+  it("空消息返回空回合", () => {
     expect(turnsOf([])).toEqual([]);
   });
 
-  it("opens user turns and preserves the supplied message order", () => {
+  it("保留输入顺序", () => {
     const late = bot("bot-a", "late", "2026-09-19T12:10:00.000Z");
     const early = user("early");
-    const turns = turnsOf([late, early]);
-
-    expect(turns).toHaveLength(2);
-    expect(turns[0]).toEqual({ kind: "bot", botId: "bot-a", items: [late], cost: null });
-    expect(turns[1]).toEqual({ kind: "user", message: early });
+    expect(turnsOf([late, early])).toEqual([
+      { kind: "bot", botId: "bot-a", items: [late] },
+      { kind: "user", message: early },
+    ]);
   });
 
-  it("folds bot, tool, and skill messages only while the previous bot turn has the same botId", () => {
+  it("只把相邻且同 Bot 的正文、工具和技能合成一轮", () => {
     const firstBot = bot("bot-a");
     const firstTool = toolCall("bot-a");
     const firstOffer = skillOffer("bot-a");
     const secondBot = bot("bot-b");
     const laterBot = bot("bot-a", "new turn");
-
     const turns = turnsOf([firstBot, firstTool, firstOffer, secondBot, laterBot]);
 
     expect(turns).toHaveLength(3);
@@ -93,12 +67,9 @@ describe("turnsOf", () => {
     expect(botTurnAt(turns, 2)).toMatchObject({ botId: "bot-a", items: [laterBot] });
   });
 
-  it("folds approval and handoff into the active bot turn", () => {
+  it("把审批和交接收进正在进行的 Bot 回合", () => {
     const messages = [bot("bot-a"), approval(), handoff(), toolCall("bot-a")];
-    const turns = turnsOf(messages);
-
-    expect(turns).toHaveLength(1);
-    expect(botTurnAt(turns, 0).items.map((item) => item.body.kind)).toEqual([
+    expect(botTurnAt(turnsOf(messages), 0).items.map((item) => item.body.kind)).toEqual([
       "bot",
       "approval",
       "handoff",
@@ -106,109 +77,18 @@ describe("turnsOf", () => {
     ]);
   });
 
-  it("degrades approval and handoff to separate system turns without an active bot turn", () => {
+  it("没有 Bot 回合时审批和交接各自成为系统回合", () => {
     const approvalMessage = approval();
     const handoffMessage = handoff();
-    const turns = turnsOf([approvalMessage, handoffMessage]);
-
-    expect(turns).toEqual([
-      { kind: "system", message: approvalMessage, cost: null },
-      { kind: "system", message: handoffMessage, cost: null },
+    expect(turnsOf([approvalMessage, handoffMessage])).toEqual([
+      { kind: "system", message: approvalMessage },
+      { kind: "system", message: handoffMessage },
     ]);
   });
 
-  it("opens a new system turn for every system message", () => {
-    const info = system("info", "info");
-    const error = system("error", "error");
-    const turns = turnsOf([info, error]);
-
-    expect(turns).toEqual([
-      { kind: "system", message: info, cost: null },
-      { kind: "system", message: error, cost: null },
-    ]);
-  });
-
-  it("attaches an unqualified cost to the nearest bot turn", () => {
+  it("花费消息不产出回合", () => {
     const botMessage = bot("bot-a");
-    const costMessage = cost();
-    const turns = turnsOf([botMessage, costMessage]);
-
-    expect(turns).toHaveLength(1);
-    expect(botTurnAt(turns, 0).cost).toBe(costMessage);
-  });
-
-  it("uses a matching botId and can pass a newer turn for another bot", () => {
-    const firstBot = bot("bot-a");
-    const secondBot = bot("bot-b");
-    const costMessage = cost(0.4, "bot-a");
-    const turns = turnsOf([firstBot, secondBot, costMessage]);
-
-    expect(botTurnAt(turns, 0).cost).toBe(costMessage);
-    expect(botTurnAt(turns, 1).cost).toBeNull();
-  });
-
-  it("leaves a cost orphaned when no botId-matching turn exists", () => {
-    const botMessage = bot("bot-a");
-    const costMessage = cost(0.4, "bot-b");
-    const turns = turnsOf([botMessage, costMessage]);
-
-    expect(turns).toEqual([
-      { kind: "bot", botId: "bot-a", items: [botMessage], cost: null },
-      { kind: "cost", message: costMessage },
-    ]);
-  });
-
-  it("stops cost lookup at a user turn", () => {
-    const oldBot = bot("bot-a");
-    const userMessage = user("new request");
-    const costMessage = cost(0.4, "bot-a");
-    const turns = turnsOf([oldBot, userMessage, costMessage]);
-
-    expect(turns).toEqual([
-      { kind: "bot", botId: "bot-a", items: [oldBot], cost: null },
-      { kind: "user", message: userMessage },
-      { kind: "cost", message: costMessage },
-    ]);
-  });
-
-  it("leaves a second cost orphaned instead of attaching it to the same bot turn", () => {
-    const botMessage = bot("bot-a");
-    const firstCost = cost(0.4, "bot-a");
-    const secondCost = cost(0.5, "bot-a");
-    const turns = turnsOf([botMessage, firstCost, secondCost]);
-
-    expect(turns).toEqual([
-      { kind: "bot", botId: "bot-a", items: [botMessage], cost: firstCost },
-      { kind: "cost", message: secondCost },
-    ]);
-  });
-
-  it("attaches a cost to an immediately preceding error system turn when no bot turn is eligible", () => {
-    const error = system("失败了", "error");
-    const costMessage = cost();
-    const turns = turnsOf([error, costMessage]);
-
-    expect(turns).toHaveLength(1);
-    expect(systemTurnAt(turns, 0)).toEqual({ kind: "system", message: error, cost: costMessage });
-  });
-
-  it("does not attach a cost to an ordinary system turn", () => {
-    const info = system("说明", "info");
-    const costMessage = cost();
-    const turns = turnsOf([info, costMessage]);
-
-    expect(turns).toEqual([
-      { kind: "system", message: info, cost: null },
-      { kind: "cost", message: costMessage },
-    ]);
-  });
-
-  it("keeps the input messages unchanged", () => {
-    const messages = [bot("bot-a"), cost(0.4, "bot-a")];
-    const before = messages.slice();
-
-    turnsOf(messages);
-
-    expect(messages).toEqual(before);
+    expect(turnsOf([botMessage, cost()])).toEqual([{ kind: "bot", botId: "bot-a", items: [botMessage] }]);
+    expect(turnsOf([cost()])).toEqual([]);
   });
 });

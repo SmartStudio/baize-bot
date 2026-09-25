@@ -5,14 +5,13 @@ import { ChatPanel } from "../components/ChatPanel.js";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
 import { AccountMenu } from "../components/AccountMenu.js";
 import { SettingsWindow } from "../components/SettingsWindow.js";
-import { NewGroupDialog } from "../components/NewGroupDialog.js";
-import { OvernightCard } from "../components/OvernightCard.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
+import { TodayPage } from "./TodayPage.js";
 import { useApp } from "../state/app.js";
-import type { ToolView } from "@baize/shared";
+import type { InspectedTool } from "../components/messages/MessageView.js";
 
-type Overlay = "none" | "account" | "settings" | "tools" | "usage" | "new-group";
+type Overlay = "none" | "account" | "settings" | "tools" | "usage";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -24,7 +23,7 @@ export const MainWindow = () => {
   const [overlay, setOverlay] = useState<Overlay>("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
-  const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; view: ToolView } | null>(null);
+  const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; tool: InspectedTool } | null>(null);
 
   const ready = state.status === "ready" ? state : null;
   const conversation = ready?.conversations.find((c) => c.groupId === ready.selectedGroupId) ?? null;
@@ -46,9 +45,9 @@ export const MainWindow = () => {
   };
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
-  const inspectedView = inspectedTool?.groupId === groupId ? inspectedTool.view : null;
+  const inspected = inspectedTool?.groupId === groupId ? inspectedTool.tool : null;
   // 检查器临时占用右栏；关掉后回到 Bot 设置或任务详情。没有右栏内容时，对话区把这一栏吃掉。
-  const hasPanel = inspectedView !== null || soloBot !== null || (team !== null && taskOpen);
+  const hasPanel = inspected !== null || soloBot !== null || (team !== null && taskOpen);
 
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
@@ -58,9 +57,9 @@ export const MainWindow = () => {
         groupTurns={ready.groupTurns}
         selectedGroupId={ready.selectedGroupId}
         user={ready.user}
+        onSelectToday={() => actions.selectGroup(null)}
         onSelect={actions.selectGroup}
         onCreateBot={() => void actions.createBot()}
-        onCreateGroup={() => setOverlay("new-group")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
       />
       {conversation !== null ? (
@@ -77,8 +76,9 @@ export const MainWindow = () => {
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
           onInspectTool={(view) => {
-            if (groupId !== null) setInspectedTool({ groupId, view });
+            if (groupId !== null) setInspectedTool({ groupId, tool: view });
           }}
+          inspectedToolId={inspected?.messageId ?? null}
           onLoadSkills={actions.loadSkills}
           onToggleChecklist={(checklist: ChecklistItem[]) => {
             if (team !== null) void actions.setChecklist(team.task, checklist);
@@ -86,12 +86,16 @@ export const MainWindow = () => {
           onOpenTask={() => setTaskOpenFor(groupId)}
         />
       ) : (
-        <section className="chat">
-          <p className="empty">今天把什么活交出去？先建一个 Bot。</p>
-        </section>
+        <TodayPage
+          userName={ready.user.name}
+          onSend={actions.sendMessage}
+          onDecide={actions.decideApproval}
+          onOpenGroup={actions.selectGroup}
+          onOpenSettings={() => setOverlay("settings")}
+        />
       )}
-      {inspectedView !== null ? (
-        <ToolInspector view={inspectedView} onClose={() => setInspectedTool(null)} />
+      {inspected !== null ? (
+        <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
       ) : soloBot !== null ? (
         <BotSettingsPanel
           bot={soloBot}
@@ -100,19 +104,8 @@ export const MainWindow = () => {
           onOpenTools={() => setOverlay("tools")}
         />
       ) : null}
-      {inspectedView === null && team !== null && taskOpen ? (
+      {inspected === null && team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />
-      ) : null}
-      {ready.overnight.length > 0 ? (
-        <OvernightCard
-          items={ready.overnight}
-          bots={bots}
-          onSelect={(selected) => {
-            actions.selectGroup(selected);
-            actions.dismissOvernight();
-          }}
-          onDismiss={actions.dismissOvernight}
-        />
       ) : null}
       {overlay === "account" ? (
         <AccountMenu
@@ -123,9 +116,6 @@ export const MainWindow = () => {
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}
         />
-      ) : null}
-      {overlay === "new-group" ? (
-        <NewGroupDialog bots={Object.values(bots)} onCreate={actions.createGroup} onClose={() => setOverlay("none")} />
       ) : null}
       {overlay === "settings" || overlay === "tools" || overlay === "usage" ? (
         <SettingsWindow

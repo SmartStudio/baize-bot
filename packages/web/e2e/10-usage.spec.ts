@@ -1,8 +1,7 @@
-import { expect, test, OvernightResponse, SHOT, UsageResponse, login, openSettings } from "./fixtures";
+import { expect, test, SHOT, UsageResponse, login, openSettings } from "./fixtures";
 
 test("用量与账单按 Bot 分列本周花费，并列出五条最近任务", async ({ page }) => {
   await login(page);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await openSettings(page);
   const loaded = page.waitForResponse((response) => response.url().endsWith("/api/usage") && response.ok());
   await page.getByTestId("settings-nav-usage").click();
@@ -25,18 +24,11 @@ test("用量与账单按 Bot 分列本周花费，并列出五条最近任务", 
   await page.screenshot({ path: `${SHOT}/11a.png` });
 });
 
-test("昨夜进展卡点小采，选中对应群并关卡", async ({ page }) => {
+test("打开应用默认进入今天", async ({ page }) => {
   await login(page);
-  const card = page.getByTestId("overnight-card");
-  await expect(card).toContainText("你下线的时候，活没停");
-  await expect(card.getByTestId("overnight-row")).toHaveCount(3);
-  await expect(card.getByTestId("overnight-row").filter({ hasText: "小采" })).toContainText("完成");
-  await expect(card.getByTestId("overnight-row").filter({ hasText: "小服" })).toContainText("等你");
-  await expect(card.getByTestId("overnight-row").filter({ hasText: "小销" })).toContainText("在干活");
+  await expect(page.getByTestId("today-page")).toBeVisible();
+  await expect(page.getByTestId("today-nav")).toHaveAttribute("aria-current", "page");
   await page.screenshot({ path: `${SHOT}/11b.png` });
-  await card.getByTestId("overnight-row").filter({ hasText: "小采" }).click();
-  await expect(page.getByTestId("chat-title")).toHaveText("小采");
-  await expect(card).toHaveCount(0);
 });
 
 test("账户菜单显示接口合计而非写死的金额，点开用量页", async ({ page }) => {
@@ -58,38 +50,9 @@ test("账户菜单显示接口合计而非写死的金额，点开用量页", as
   await page.screenshot({ path: `${SHOT}/11c.png` });
 });
 
-test("昨夜进展只在进入应用时拉取，关卡后本会话不再弹", async ({ page }) => {
-  let calls = 0;
-  await page.route("**/api/overnight", async (route) => {
-    calls += 1;
-    await route.continue();
-  });
-  await login(page);
-  expect(calls).toBe(1);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
-  await openSettings(page);
-  await page.getByTestId("settings-close").click();
-  await expect(page.getByTestId("overnight-card")).toHaveCount(0);
-  expect(calls, "关卡和开关设置不重新拉取").toBe(1);
-  await page.reload();
-  await expect(page.getByTestId("main-window")).toBeVisible();
-  await expect.poll(() => calls, "保持登录的冷启动重新进入应用").toBe(2);
-});
-
-test("昨夜没有进展时不弹卡", async ({ page }) => {
-  await page.route("**/api/overnight", async (route) => {
-    const response = await route.fetch();
-    const overnight = OvernightResponse.parse(await response.json());
-    await route.fulfill({ response, json: { ...overnight, items: [] } });
-  });
-  await login(page);
-  await expect(page.getByTestId("overnight-card")).toHaveCount(0);
-});
-
 test("窄屏用量页仍能看到合计和任务，不横向溢出", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await login(page);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await openSettings(page);
   await page.getByTestId("settings-nav-usage").click();
   const usage = page.getByTestId("usage-page");

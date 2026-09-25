@@ -24,12 +24,9 @@ export const TaskCard = ({ task, memberIds, bots, onToggle, onOpenDetail }: Prop
     onToggle(task.checklist.map((item, i) => (i === at ? { ...item, done: !item.done } : item)));
 
   return (
-    <section className="task-card" data-testid="task-card" data-task-number={task.number}>
+    <section className="task-card" data-testid="task-card">
       <header className="task-card-top">
         <Pin size={14} aria-hidden="true" />
-        <span className="task-number" data-testid="task-number">
-          {task.number}
-        </span>
         <b className="task-title">{task.title}</b>
         <span className="task-meta" data-testid="task-progress">
           清单 {done} / {task.checklist.length}

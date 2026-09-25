@@ -20,8 +20,12 @@
   font: var(--type-body);
 }
 
-.composer input:focus {
-  outline: none;
+.composer input:focus-visible {
+  box-shadow: none;
+}
+
+.composer:focus-within {
+  box-shadow: var(--ring-focus);
 }
 
 .send-button {

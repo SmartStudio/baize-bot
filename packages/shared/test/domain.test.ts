@@ -21,6 +21,7 @@ import {
   TopicTask,
   toolViewText,
   OvernightResponse,
+  TodayResponse,
   UsageResponse,
   UsageRunItem,
   type UserId,
@@ -326,6 +327,94 @@ describe("M11 用量与昨夜进展的共享形状", () => {
     expect(OvernightResponse.safeParse({ since: now, items: Array.from({ length: 11 }, () => item) }).success).toBe(
       false,
     );
+  });
+});
+
+describe("今日页的共享形状", () => {
+  it("四栏只复用 C1 对象，顶层和各栏都拒绝缺字段与多余字段", () => {
+    const approval = {
+      id: "a1",
+      groupId: "g1",
+      botId: "b1",
+      runId: "r1",
+      action: "publish",
+      target: null,
+      view: { kind: "bash", command: "echo hi" },
+      status: "pending",
+      decidedAt: null,
+      grantId: null,
+    };
+    const draft = {
+      id: "d1",
+      groupId: "g1",
+      botId: "b1",
+      planId: "p1",
+      accountId: "a1",
+      platform: "x",
+      content: { kind: "post", title: "今日动态", text: "正文", images: [], github: null },
+      scheduledAt: null,
+      status: "pending",
+      edits: [],
+      createdAt: now,
+      decidedAt: null,
+    };
+    const plan = {
+      id: "p1",
+      groupId: "g1",
+      botId: "b1",
+      title: "本周计划",
+      status: "pending",
+      draftIds: ["d1"],
+      createdAt: now,
+      decidedAt: null,
+    };
+    const account = {
+      id: "a1",
+      ownerId: "u1",
+      computerId: "c1",
+      platform: "x",
+      handle: "@baize",
+      tier: "confirm_publish",
+      login: "valid",
+      createdAt: now,
+    };
+    const response = {
+      assistantGroupId: "g1",
+      pending: [
+        { kind: "approval", since: now, approval },
+        { kind: "plan", since: now, plan, drafts: [draft] },
+        { kind: "draft", since: now, draft },
+        { kind: "account", since: now, account },
+      ],
+      done: [
+        {
+          kind: "publication",
+          at: now,
+          groupId: "g1",
+          title: "今日动态",
+          platform: "x",
+          url: "https://example.com/posts/1",
+        },
+        { kind: "plan_approved", at: now, groupId: "g1", title: "本周计划", draftCount: 1 },
+        { kind: "routine", at: now, groupId: null, title: "每日早报", note: "新增 3 条线索" },
+      ],
+      running: [{ groupId: "g1", title: "本周计划", published: 1, planned: 3 }],
+      next: [
+        { kind: "draft", at: now, draft },
+        { kind: "routine", at: now, routineId: "routine-1", groupId: null, botId: "b1", title: "每日早报" },
+      ],
+    };
+
+    expect(TodayResponse.safeParse(response).success).toBe(true);
+    expect(TodayResponse.safeParse({ ...response, assistantGroupId: null }).success).toBe(true);
+    expect(TodayResponse.safeParse({ ...response, pending: undefined }).success).toBe(false);
+    expect(TodayResponse.safeParse({ ...response, extra: [] }).success).toBe(false);
+    expect(
+      TodayResponse.safeParse({
+        ...response,
+        pending: [{ ...response.pending[0], extra: [] }, ...response.pending.slice(1)],
+      }).success,
+    ).toBe(false);
   });
 });
 

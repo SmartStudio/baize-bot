@@ -95,6 +95,7 @@ test("断开工具后卡片消失，刷新也不回来", async ({ page }) => {
 
 test("Bot 设置显示可用工具，点击直达设置的工具页", async ({ page }) => {
   await login(page);
+  await openBot(page, "小服");
   await expect(page.getByTestId("bot-available-tools-summary")).toHaveText("工单系统 · 邮箱");
   await openBot(page, "小销");
   await expect(page.getByTestId("bot-available-tools-summary")).toHaveText("邮箱");

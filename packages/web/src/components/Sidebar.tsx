@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowRightLeft, Hand, Plus, Search, Settings as SettingsIcon, Users } from "lucide-react";
+import { ArrowRightLeft, Hand, Plus, Search, Settings as SettingsIcon, Sun } from "lucide-react";
 import type { Bot, BotId, GroupId, User } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { activityOf, previewOf, timeOf } from "./messages/preview.js";
@@ -11,9 +11,9 @@ type Props = {
   groupTurns: Record<GroupId, GroupTurn>;
   selectedGroupId: GroupId | null;
   user: User;
+  onSelectToday: () => void;
   onSelect: (groupId: GroupId) => void;
   onCreateBot: () => void;
-  onCreateGroup: () => void;
   onOpenAccount: () => void;
 };
 
@@ -116,20 +116,20 @@ export const Sidebar = ({
   groupTurns,
   selectedGroupId,
   user,
+  onSelectToday,
   onSelect,
   onCreateBot,
-  onCreateGroup,
   onOpenAccount,
 }: Props) => {
   const [query, setQuery] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const needle = query.trim().toLowerCase();
-  // 搜的是一条对话的全部可见文字：单 Bot 群是那个 Bot，多 Bot 群是任务编号、标题和所有成员。
+  // 搜的是一条对话的全部可见文字：单 Bot 群是那个 Bot，多 Bot 群是标题和所有成员。
   const haystackOf = (conversation: Conversation): string => {
     const members = membersOf(conversation, bots)
       .map((bot) => `${bot.name} ${bot.tag} ${bot.description}`)
       .join(" ");
-    return conversation.kind === "team" ? `${conversation.task.number} ${conversation.task.title} ${members}` : members;
+    return conversation.kind === "team" ? `${conversation.task.title} ${members}` : members;
   };
   const shown = needle ? conversations.filter((c) => haystackOf(c).toLowerCase().includes(needle)) : conversations;
   const solo = shown.filter((c) => c.kind === "solo");
@@ -179,18 +179,6 @@ export const Sidebar = ({
               <Plus size={16} aria-hidden="true" />
               新建 Bot
             </button>
-            <button
-              type="button"
-              className="menu-row"
-              data-testid="new-group"
-              onClick={() => {
-                setMenuOpen(false);
-                onCreateGroup();
-              }}
-            >
-              <Users size={16} aria-hidden="true" />
-              建群
-            </button>
           </div>
         </>
       ) : null}
@@ -204,6 +192,16 @@ export const Sidebar = ({
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
+      <button
+        type="button"
+        className={`today-nav${selectedGroupId === null ? " is-selected" : ""}`}
+        data-testid="today-nav"
+        aria-current={selectedGroupId === null ? "page" : undefined}
+        onClick={onSelectToday}
+      >
+        <Sun size={17} aria-hidden="true" />
+        今天
+      </button>
       <div className="conversation-lists">
         <p className="list-label">Bot</p>
         <ul className="bot-list" data-testid="bot-list">

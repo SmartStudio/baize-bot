@@ -23,7 +23,7 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import { RequestFailed, api, type BotDraft, type GroupDraft } from "../api/client.js";
+import { RequestFailed, api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
@@ -37,10 +37,9 @@ export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
-  selectGroup: (groupId: GroupId) => void;
+  selectGroup: (groupId: GroupId | null) => void;
   createBot: () => Promise<void>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
-  createGroup: (draft: GroupDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
@@ -61,7 +60,6 @@ export type AppActions = {
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   loadUsage: () => Promise<void>;
-  dismissOvernight: () => void;
 };
 
 const AppContext = createContext<{ state: AppState; actions: AppActions } | null>(null);
@@ -75,13 +73,12 @@ export const useApp = () => {
 const isUnauthorized = (cause: unknown): boolean => cause instanceof RequestFailed && cause.status === 401;
 
 const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>> => {
-  const [bots, groups, tools, settings, usage, overnight] = await Promise.all([
+  const [bots, groups, tools, settings, usage] = await Promise.all([
     api.bots(),
     api.groups(),
     api.tools(),
     api.settings(),
     api.usage(),
-    api.overnight(),
   ]);
   return {
     type: "ready",
@@ -91,7 +88,6 @@ const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>
     tools: tools.items,
     settings,
     usage,
-    overnight: overnight.items,
   };
 };
 
@@ -144,10 +140,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }),
       updateBot: signedIn(async (botId: BotId, draft: BotDraft) => {
         dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
-      }),
-      createGroup: signedIn(async (draft: GroupDraft) => {
-        const { group, task } = await api.createGroup(draft);
-        dispatch({ type: "group_created", group, task, select: true });
       }),
       setChecklist: signedIn(async (task: TopicTask, checklist: ChecklistItem[]) => {
         dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
@@ -221,7 +213,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       loadUsage: signedIn(async () => {
         dispatch({ type: "usage_loaded", usage: await api.usage() });
       }),
-      dismissOvernight: () => dispatch({ type: "overnight_dismissed" }),
     };
   }, []);
 
@@ -246,16 +237,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
   }, []);
 
-  // 通知要读当下的设置，而 WebSocket 只在 connected 上重建。把 settings 塞进它的依赖，改一次设置就断一次连。
   const settings = state.status === "ready" ? state.settings : null;
   const settingsRef = useRef<Settings | null>(null);
   useEffect(() => {
     settingsRef.current = settings;
   }, [settings]);
 
-  // 同一条 pending 审批会被重推（控制面重连回放就会），计数那边按「之前知道的状态」自然幂等，通知这边没有
-  // 这个信息，会照弹第二遍。记下弹过谁，一条审批只打断你一次。
-  const notified = useRef(new Set<ApprovalId>());
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
@@ -267,6 +254,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     let cancelled = false;
     let socket: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let hasConnected = false;
     let countsQueued = false;
     const refreshPendingCounts = () => {
       if (countsQueued) return;
@@ -289,13 +277,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       dispatch,
       stateRef,
       settingsRef,
-      notified,
       refreshPendingCounts,
     });
     const open = () => {
       dispatch({ type: "turns_cleared" });
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
+      socket.addEventListener("open", () => {
+        if (hasConnected) dispatch({ type: "today_version_bumped" });
+        hasConnected = true;
+      });
       socket.addEventListener("message", (event) => {
         const parsed = ServerPush.safeParse(JSON.parse(String(event.data)));
         if (!parsed.success) return;

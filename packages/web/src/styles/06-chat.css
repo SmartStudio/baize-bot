@@ -111,7 +111,6 @@
   width: 100%;
 }
 
-.turn-cost,
 .turn-system {
   align-items: center;
 }
@@ -254,8 +253,4 @@
   flex-direction: column;
   gap: var(--space-4);
   min-width: 0;
-}
-
-.notice-body .cost-caption {
-  color: var(--danger);
 }

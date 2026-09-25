@@ -1,16 +1,29 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { LoginPage } from "./routes/LoginPage.js";
 import { MainWindow } from "./routes/MainWindow.js";
+import { MenubarPage } from "./routes/MenubarPage.js";
 import { RegisterPage } from "./routes/RegisterPage.js";
 import { useApp } from "./state/app.js";
 
 export const App = () => {
-  const { state } = useApp();
+  const { state, actions } = useApp();
+  const location = useLocation();
+  const next = new URLSearchParams(location.search).get("next") === "/menubar" ? "/menubar" : "/";
   if (state.status === "loading") return <div className="splash" data-testid="splash" />;
   return (
     <Routes>
-      <Route path="/login" element={state.status === "anonymous" ? <LoginPage /> : <Navigate to="/" replace />} />
+      <Route path="/login" element={state.status === "anonymous" ? <LoginPage /> : <Navigate to={next} replace />} />
       <Route path="/register" element={state.status === "anonymous" ? <RegisterPage /> : <Navigate to="/" replace />} />
+      <Route
+        path="/menubar"
+        element={
+          state.status === "ready" ? (
+            <MenubarPage onSend={actions.sendMessage} onDecide={actions.decideApproval} />
+          ) : (
+            <Navigate to="/login?next=/menubar" replace />
+          )
+        }
+      />
       <Route path="/" element={state.status === "ready" ? <MainWindow /> : <Navigate to="/login" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

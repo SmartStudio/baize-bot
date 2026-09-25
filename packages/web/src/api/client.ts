@@ -3,7 +3,6 @@ import {
   ApiError,
   BotListResponse,
   CreateBotResponse,
-  CreateGroupResponse,
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
@@ -12,7 +11,6 @@ import {
   LoginResponse,
   MeResponse,
   MessageListResponse,
-  OvernightResponse,
   RegisterResponse,
   RoutineListResponse,
   RoutineResponse,
@@ -20,6 +18,7 @@ import {
   Settings,
   SkillListResponse,
   SkillResponse,
+  TodayResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
   UsageResponse,
@@ -91,9 +90,6 @@ export type BotDraft = {
   notify?: boolean;
 };
 
-// 建群表单交出来的那一份。截止可空，而「没填」和「填了空」在这里是同一件事，所以只有 null 没有 undefined。
-export type GroupDraft = { title: string; botIds: BotId[]; summary: string; dueAt: string | null };
-
 export const api = {
   login: async (email: string, password: string) =>
     json(LoginResponse, await send("POST", "/auth/login", { email, password })),
@@ -103,8 +99,8 @@ export const api = {
     await send("POST", "/auth/logout");
   },
   me: async () => json(MeResponse, await send("GET", "/me")),
+  today: async () => json(TodayResponse, await send("GET", "/today")),
   usage: async () => json(UsageResponse, await send("GET", "/usage")),
-  overnight: async () => json(OvernightResponse, await send("GET", "/overnight")),
   bots: async () => json(BotListResponse, await send("GET", "/bots")),
   createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
@@ -118,7 +114,6 @@ export const api = {
   deleteTool: async (id: ToolConnectionId): Promise<void> => {
     await send("DELETE", `/tools/${encodeURIComponent(id)}`);
   },
-  createGroup: async (draft: GroupDraft) => json(CreateGroupResponse, await send("POST", "/groups", draft)),
   updateTask: async (id: TaskId, patch: { checklist: ChecklistItem[] }): Promise<TopicTask> =>
     (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
   messages: async (groupId: GroupId) =>

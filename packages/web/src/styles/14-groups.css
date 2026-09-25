@@ -63,84 +63,6 @@
   box-shadow: var(--shadow-lg);
 }
 
-.dialog {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-6);
-  width: min(var(--composer-max-w), 92vw);
-  max-height: 88vh;
-  padding: var(--space-8);
-  overflow-y: auto;
-  border-radius: var(--radius-xl);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-window);
-}
-
-.dialog-head {
-  display: flex;
-  gap: var(--space-5);
-  align-items: flex-start;
-  color: var(--fg-3);
-}
-
-.dialog-head span {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.dialog-head b {
-  color: var(--fg-1);
-  font: var(--type-title);
-}
-
-.dialog-head small {
-  color: var(--fg-3);
-  font: var(--type-body);
-}
-
-.dialog-note {
-  margin: 0;
-  color: var(--fg-4);
-  font: var(--type-caption);
-}
-
-.dialog-actions {
-  display: flex;
-  gap: var(--space-5);
-  justify-content: flex-end;
-}
-
-.dialog-actions .primary-button {
-  height: var(--control-h-md);
-  padding: 0 var(--space-6);
-}
-
-.bot-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-}
-
-.bot-pill {
-  display: inline-flex;
-  gap: var(--space-3);
-  align-items: center;
-  height: var(--control-h-md);
-  padding: 0 var(--space-5);
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-full);
-  background: var(--bg-surface);
-  color: var(--fg-1);
-  font: var(--type-ui);
-}
-
-.bot-pill.is-picked {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--fg-1);
-}
-
 .task-card {
   display: flex;
   flex-direction: column;
@@ -159,11 +81,6 @@
   align-items: center;
   color: var(--fg-3);
   font: var(--type-ui);
-}
-
-.task-number {
-  color: var(--fg-3);
-  font: var(--type-mono);
 }
 
 .task-title {

@@ -19,6 +19,7 @@ import {
   TEAM_CHECKLIST,
   TEAM_GROUP_ID,
   TEAM_TASK_ID,
+  accounts,
   advanceGeneration,
   approvals,
   at,
@@ -28,12 +29,15 @@ import {
   handoffAcceptance,
   handoffWaiters,
   handoffs,
+  drafts,
   messagesByGroupId,
   nextSuffix,
   ranAt,
   resetSuffix,
   resetTaskNumber,
   routines,
+  plans,
+  publications,
   settings,
   skills,
   taskNumber,
@@ -173,6 +177,10 @@ export const reseed = (): void => {
   handoffWaiters.clear();
   handoffAcceptance.automatic = true;
   approvals.clear();
+  drafts.clear();
+  plans.clear();
+  accounts.clear();
+  publications.clear();
   handoffs.clear();
   routines.clear();
   skills.clear();

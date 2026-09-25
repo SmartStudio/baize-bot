@@ -1,18 +1,23 @@
-import { BotId, Group, GroupId, ServerPush } from "@baize/shared";
+import { BotId, Group, GroupId, Notice, ServerPush } from "@baize/shared";
 import { z } from "zod";
 import {
   confirmNextHandoff,
+  addTodayApproval,
   expireLatestPending,
   groups,
   holdHandoffAccept,
   reseed,
+  resetToday,
   seedUnseenHandoff,
+  setTodayMode,
   settleUnseenHandoff,
 } from "../state.js";
 import { resetRegisteredEmails } from "./auth.js";
 import { readBody, send, type Route } from "./http.js";
 
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
+const TodayModeRequest = z.object({ mode: z.enum(["full", "empty", "performance"]) }).strict();
+const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
 
@@ -26,10 +31,42 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
 
   if (method === "POST" && path === "/api/test/reset") {
     reseed();
+    resetToday();
     resetRegisteredEmails();
     activeTurns.clear();
     turnEpochs.clear();
     send(res, 204);
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/today") {
+    const parsed = TodayModeRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "Today 模式不对" });
+    else {
+      setTodayMode(parsed.data.mode);
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/today/pending") {
+    const parsed = TodayPendingRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "Today 待办参数不对" });
+    else {
+      const approval = addTodayApproval(parsed.data.title);
+      push({ type: "approval_updated", approval });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/notify") {
+    const parsed = Notice.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "通知参数不对" });
+    else {
+      push({ type: "notify", notice: parsed.data });
+      send(res, 204);
+    }
     return true;
   }
 

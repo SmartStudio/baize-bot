@@ -65,6 +65,12 @@
   transform: scale(0.96);
 }
 
+.tool-line.is-selected {
+  background: var(--bg-selected);
+  color: var(--fg-1);
+  box-shadow: var(--inset-hairline);
+}
+
 .tool-args {
   flex: 1;
   min-width: 0;
@@ -122,12 +128,6 @@
 
 .status-blocked {
   background: var(--pending);
-}
-
-.cost-caption {
-  color: var(--fg-3);
-  font: var(--type-caption);
-  font-variant-numeric: tabular-nums;
 }
 
 .card-title {

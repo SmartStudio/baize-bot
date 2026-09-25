@@ -14,11 +14,10 @@ import type {
   MessageBody,
   MessageId,
   SkillOfferStatus,
-  ToolView,
 } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
 import { Markdown } from "./markdown.js";
-import { formatAmount, timeOf } from "./preview.js";
+import { timeOf } from "./preview.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
@@ -27,7 +26,9 @@ export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
 export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
-export type InspectTool = (view: ToolView) => void;
+type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
+export type InspectedTool = { messageId: MessageId; body: ToolCall };
+export type InspectTool = (tool: InspectedTool) => void;
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
@@ -45,7 +46,6 @@ const BotBubble = ({
     <div className="bot-block">
       {showSource || (body.mentions?.length ?? 0) > 0 ? (
         <div className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
-          消息来自
           <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
           {bot.tag ? `${bot.name} · ${bot.tag}` : bot.name}
           {body.mentions?.length ? (
@@ -136,8 +136,6 @@ const SkillOfferCard = ({
   );
 };
 
-type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
-
 const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
   running: "运行中",
   ok: "完成",
@@ -145,14 +143,25 @@ const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
   blocked: "拦下",
 };
 
-const ToolCallCard = ({ body, onInspect }: { body: ToolCall; onInspect: InspectTool }) => (
+const ToolCallCard = ({
+  messageId,
+  body,
+  selected,
+  onInspect,
+}: {
+  messageId: MessageId;
+  body: ToolCall;
+  selected: boolean;
+  onInspect: InspectTool;
+}) => (
   <button
     type="button"
-    className="tool-line"
+    className={`tool-line${selected ? " is-selected" : ""}`}
     data-testid="tool-call-card"
     data-status={body.status}
     data-view-kind={body.view.kind}
-    onClick={() => onInspect(body.view)}
+    aria-pressed={selected}
+    onClick={() => onInspect({ messageId, body })}
   >
     <span className="tool-args">
       <ToolViewContent view={body.view} />
@@ -161,12 +170,6 @@ const ToolCallCard = ({ body, onInspect }: { body: ToolCall; onInspect: InspectT
     <span className={`status-dot status-${body.status}`} role="img" aria-label={TOOL_STATUS_TEXT[body.status]} />
     <span className="tool-meta">{body.durationMs === null ? "—" : `${(body.durationMs / 1000).toFixed(1)}s`}</span>
   </button>
-);
-
-const CostCard = ({ body }: { body: Extract<MessageBody, { kind: "cost" }> }) => (
-  <div className="cost-caption" data-testid="cost-card" data-kind="cost">
-    约 ¥{formatAmount(body.amount)}
-  </div>
 );
 
 const APPROVAL_ACTION_TEXT: Record<Approval["action"], string> = {
@@ -374,6 +377,7 @@ type MessageProps = {
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
   onInspectTool: InspectTool;
+  selectedToolId: MessageId | null;
   showSource: boolean;
 };
 
@@ -386,6 +390,7 @@ const MessageView = ({
   onDecide,
   onDecideSkillOffer,
   onInspectTool,
+  selectedToolId,
   showSource,
 }: MessageProps) => {
   const body = message.body;
@@ -400,9 +405,16 @@ const MessageView = ({
           case "system":
             return <SystemNote body={body} />;
           case "tool_call":
-            return <ToolCallCard body={body} onInspect={onInspectTool} />;
+            return (
+              <ToolCallCard
+                messageId={message.id}
+                body={body}
+                selected={selectedToolId === message.id}
+                onInspect={onInspectTool}
+              />
+            );
           case "cost":
-            return <CostCard body={body} />;
+            return null;
           case "approval": {
             const approval = approvals[body.approvalId];
             return approval === undefined ? (
@@ -436,14 +448,15 @@ const MessageView = ({
   );
 };
 
-const CostMessage = ({ message }: { message: Message }) =>
-  message.body.kind === "cost" ? (
-    <div className="message message-cost" data-testid="message" data-kind="cost">
-      <CostCard body={message.body} />
-    </div>
-  ) : null;
-
-const Activity = ({ tools, cost, onInspect }: { tools: Message[]; cost: Message | null; onInspect: InspectTool }) => {
+const Activity = ({
+  tools,
+  selectedToolId,
+  onInspect,
+}: {
+  tools: Message[];
+  selectedToolId: MessageId | null;
+  onInspect: InspectTool;
+}) => {
   const [expanded, setExpanded] = useState(false);
   const running = tools.find((message) => message.body.kind === "tool_call" && message.body.status === "running");
   const open = running !== undefined || expanded;
@@ -460,20 +473,21 @@ const Activity = ({ tools, cost, onInspect }: { tools: Message[]; cost: Message 
           disabled={running !== undefined}
           onClick={() => setExpanded((value) => !value)}
         >
-          {running === undefined ? `用了 ${tools.length} 个工具` : `正在用 ${runningName}…`}
+          {running === undefined ? `做了 ${tools.length} 步` : `正在用 ${runningName}…`}
           {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
         </button>
-        {cost === null ? null : (
-          <>
-            <span aria-hidden="true">·</span>
-            <CostMessage message={cost} />
-          </>
-        )}
       </div>
       <div className="activity-lines">
         {tools.map((message) => (
           <div className="message" data-testid="message" data-kind="tool_call" key={message.id} hidden={!open}>
-            {message.body.kind === "tool_call" ? <ToolCallCard body={message.body} onInspect={onInspect} /> : null}
+            {message.body.kind === "tool_call" ? (
+              <ToolCallCard
+                messageId={message.id}
+                body={message.body}
+                selected={selectedToolId === message.id}
+                onInspect={onInspect}
+              />
+            ) : null}
           </div>
         ))}
       </div>
@@ -492,7 +506,6 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
             <TriangleAlert size={16} aria-hidden="true" />
             <div className="notice-body">
               <p>{turn.message.body.text}</p>
-              {turn.cost === null ? null : <CostMessage message={turn.cost} />}
             </div>
           </div>
         </div>
@@ -503,18 +516,9 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
     return (
       <div className={`turn turn-${turn.kind}`}>
         <MessageView message={turn.message} {...props} />
-        {turn.kind === "system" && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
       </div>
     );
   }
-  if (turn.kind === "cost") {
-    return (
-      <div className="turn turn-cost">
-        <MessageView message={turn.message} {...props} />
-      </div>
-    );
-  }
-
   const tools = turn.items.filter((message) => message.body.kind === "tool_call");
   return (
     <div className="turn turn-bot" data-testid="bot-turn" data-bot-id={turn.botId}>
@@ -524,9 +528,9 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
           .map((message) => (
             <MessageView key={message.id} message={message} {...props} />
           ))}
-        {/* 工具活动和花费收在回合底部：正在用工具时它像「正在输入」，跑完了它是这轮的收尾小字。 */}
-        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} onInspect={props.onInspectTool} /> : null}
-        {tools.length === 0 && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
+        {tools.length > 0 ? (
+          <Activity tools={tools} selectedToolId={props.selectedToolId} onInspect={props.onInspectTool} />
+        ) : null}
       </div>
     </div>
   );

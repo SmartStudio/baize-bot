@@ -50,7 +50,8 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
       const bots = { ...state.bots };
       delete bots[action.botId];
       const conversations = state.conversations.filter((c) => !(c.kind === "solo" && c.botId === action.botId));
-      const stillThere = conversations.some((c) => c.groupId === state.selectedGroupId);
+      const stillThere =
+        state.selectedGroupId === null || conversations.some((c) => c.groupId === state.selectedGroupId);
       return {
         ...state,
         bots,
@@ -59,10 +60,7 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
       };
     }
     case "group_created": {
-      // 建群的人从 POST 的响应知道一次，WebSocket 的 group_created 还会再说一次。按 id 认，重到的那次什么都不做。
-      if (state.conversations.some((c) => c.groupId === action.group.id)) {
-        return action.select ? { ...state, selectedGroupId: action.group.id } : state;
-      }
+      if (state.conversations.some((c) => c.groupId === action.group.id)) return state;
       const joined: Conversation = {
         kind: "team",
         groupId: action.group.id,
@@ -76,7 +74,6 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
       return {
         ...state,
         conversations: [...state.conversations, joined],
-        selectedGroupId: action.select ? action.group.id : state.selectedGroupId,
       };
     }
     case "group_updated":

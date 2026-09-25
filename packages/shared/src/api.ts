@@ -23,6 +23,7 @@ import {
   Message,
   MessageId,
   OnFailure,
+  Platform,
   Publication,
   BrowserPlatform,
   Notice,
@@ -314,6 +315,88 @@ export const OvernightItem = z.object({
 export type OvernightItem = z.infer<typeof OvernightItem>;
 export const OvernightResponse = z.object({ since: Timestamp.nullable(), items: z.array(OvernightItem).max(10) });
 export type OvernightResponse = z.infer<typeof OvernightResponse>;
+
+// GET /api/today  首页四栏。服务端把每一行要显示的都拼好、排好，Web 照数组顺序渲染，不再二次关联。
+// 等你确认按 since 升序：新来的排在后面，不把已有的行往下挤。
+// 挂在待批计划下的稿子只随计划那一项出现，不再单独成一项，所以待办数就是数组长度。
+export const TodayPendingItem = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("approval"), since: Timestamp, approval: Approval }).strict(),
+  z.object({ kind: z.literal("plan"), since: Timestamp, plan: ContentPlan, drafts: z.array(Draft).max(20) }).strict(),
+  z.object({ kind: z.literal("draft"), since: Timestamp, draft: Draft }).strict(),
+  z.object({ kind: z.literal("account"), since: Timestamp, account: Account }).strict(),
+]);
+export type TodayPendingItem = z.infer<typeof TodayPendingItem>;
+
+// 刚做完按 at 降序。title 由服务端取好：发布取稿子标题或正文开头，计划取计划标题，例行取例行名。
+export const TodayDoneItem = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("publication"),
+      at: Timestamp,
+      groupId: GroupId.nullable(),
+      title: z.string().min(1).max(80),
+      platform: Platform,
+      url: z.string().url(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("plan_approved"),
+      at: Timestamp,
+      groupId: GroupId,
+      title: z.string().min(1).max(80),
+      draftCount: z.number().int().min(1),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("routine"),
+      at: Timestamp,
+      groupId: GroupId.nullable(),
+      title: z.string().min(1).max(80),
+      note: z.string().max(200),
+    })
+    .strict(),
+]);
+export type TodayDoneItem = z.infer<typeof TodayDoneItem>;
+
+// 进行中一个项目一行，进度是这个项目当前计划里已发出的稿子数对总数，没有计划时两个都是 0。
+export const TodayRunningItem = z
+  .object({
+    groupId: GroupId,
+    title: z.string().min(1),
+    published: z.number().int().nonnegative(),
+    planned: z.number().int().nonnegative(),
+  })
+  .strict();
+export type TodayRunningItem = z.infer<typeof TodayRunningItem>;
+
+// 接下来按 at 升序：排了时间的稿子和下一次要跑的例行。
+export const TodayNextItem = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("draft"), at: Timestamp, draft: Draft }).strict(),
+  z
+    .object({
+      kind: z.literal("routine"),
+      at: Timestamp,
+      routineId: RoutineId,
+      groupId: GroupId.nullable(),
+      botId: BotId,
+      title: z.string().min(1),
+    })
+    .strict(),
+]);
+export type TodayNextItem = z.infer<typeof TodayNextItem>;
+
+export const TodayResponse = z
+  .object({
+    assistantGroupId: GroupId.nullable(),
+    pending: z.array(TodayPendingItem).max(50),
+    done: z.array(TodayDoneItem).max(20),
+    running: z.array(TodayRunningItem).max(20),
+    next: z.array(TodayNextItem).max(20),
+  })
+  .strict();
+export type TodayResponse = z.infer<typeof TodayResponse>;
 
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({

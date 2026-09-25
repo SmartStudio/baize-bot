@@ -1,4 +1,4 @@
-import { BotId, GroupId, OvernightResponse, RunId, UsageResponse } from "@baize/shared";
+import { BotId, GroupId, RunId, UsageResponse } from "@baize/shared";
 import { bots, groups } from "./store.js";
 
 const WEEKLY_SPEND = [
@@ -59,31 +59,3 @@ export const usageOf = (): UsageResponse => {
     })),
   });
 };
-
-export const overnightOf = (): OvernightResponse =>
-  OvernightResponse.parse({
-    since: hoursAgo(12),
-    items: [
-      {
-        botId: "bot_buy",
-        groupId: "grp_buy",
-        text: "3 家供应商报价齐了，X3 现货 160 台，其余 10-20 到。",
-        status: "done",
-        at: hoursAgo(1),
-      },
-      {
-        botId: "bot_service",
-        groupId: "grp_service",
-        text: "清了 14 张工单。Globex 要改交期，等你点头。",
-        status: "waiting",
-        at: hoursAgo(2),
-      },
-      {
-        botId: "bot_sales",
-        groupId: "grp_sales",
-        text: "08:00 例行：跟进了 6 条线索，2 条有回复。",
-        status: "working",
-        at: hoursAgo(3),
-      },
-    ].filter((item) => bots.has(item.botId)),
-  });

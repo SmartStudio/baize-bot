@@ -58,7 +58,6 @@ test("Bot 定向气泡在署名旁标收件人，用户和普通 Bot 消息不�
     await route.fulfill({ json: payload });
   });
   await login(page);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await openTeamGroup(page, TEAM_TITLE);
   await expect(page.getByTestId("bot-recipient")).toHaveText(["发给 小采", "发给 小采、小销"]);
   await expect(page.getByTestId("bot-source").filter({ has: page.getByTestId("bot-recipient") })).toHaveCount(2);
@@ -68,7 +67,6 @@ test("Bot 定向气泡在署名旁标收件人，用户和普通 Bot 消息不�
 
 test("群头成员和侧栏经手人随 task_updated 同步变化，单 Bot 不显示成员行", async ({ page, request }) => {
   await login(page);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await openBot(page, "小服");
   await expect(page.getByTestId("chat-members")).toHaveCount(0);
   await expect(page.getByTestId("bot-item").getByTestId("group-handler")).toHaveCount(0);
@@ -100,7 +98,6 @@ test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧
     }),
   );
   await login(page);
-  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await openBot(page, "小服");
   await expect(page.getByTestId("chat-members"), "单 Bot 群没有成员行").toHaveCount(0);
   await expect(page.getByTestId("group-turn"), "单 Bot 群没有轮流说提示").toHaveCount(0);
@@ -138,13 +135,8 @@ test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧
   await expect(page.getByTestId("task-current")).toHaveText("当前 小采");
   await expect(handler, "经手人变更后仍优先显示当前发言人").toHaveText("小销正在说");
   await expect(page.getByTestId("handoff-card")).toHaveAttribute("data-status", "accepted");
-  await expect(page.getByTestId("message-list").getByTestId("cost-card")).toHaveCount(1);
+  await expect(page.getByTestId("message-list").getByTestId("cost-card"), "群回合也不露单轮花费").toHaveCount(0);
   await expect(page.getByTestId("group-turn")).toHaveText("轮到 小销，接着 小采");
-  const overnight = page.getByTestId("overnight-card");
-  if (await overnight.isVisible()) {
-    await overnight.getByRole("button", { name: "知道了" }).click();
-    await expect(overnight).toHaveCount(0);
-  }
   await page.getByTestId("handoff-card").scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOT}/comm-turn.png` });
 

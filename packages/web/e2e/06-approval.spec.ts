@@ -6,7 +6,6 @@ import {
   dndAround,
   login,
   openBot,
-  openSettings,
   sendForApproval,
   sendText,
   setDnd,
@@ -54,7 +53,7 @@ test("点拒绝后卡片留下结论、角标归零、这一步被拦下", async
   const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
   await expect(item.getByTestId("bot-pending"), "没有 pending 审批了角标整个不渲染").toHaveCount(0);
 
-  await expect(page.getByTestId("cost-card"), "拒绝之后这次运行照样收尾结账").toHaveCount(1);
+  await expect(page.getByTestId("cost-card"), "拒绝之后也不露单轮花费").toHaveCount(0);
   await expect(page.getByTestId("tool-call-card"), "拒绝把这一步拦下，工具卡终态是 blocked").toHaveAttribute(
     "data-status",
     "blocked",
@@ -76,7 +75,7 @@ test("在群里回一句「批准」和点批准按钮是同一件事", async ({
   await expect(item.getByTestId("bot-pending"), "点头之后角标归零").toHaveCount(0);
 
   await expect(page.getByTestId("tool-call-card"), "批准让这一步真的跑完").toHaveAttribute("data-status", "ok");
-  await expect(page.getByTestId("cost-card")).toHaveCount(1);
+  await expect(page.getByTestId("cost-card"), "批准之后也不露单轮花费").toHaveCount(0);
   // 「批准」这四个字本身是结论不是新任务，不该再引出一次运行。
   await expect(page.getByTestId("message-list").locator("[data-kind=tool_call]"), "没有多起一次运行").toHaveCount(1);
 });
@@ -119,17 +118,24 @@ test("点过按钮就锁住，一次点击只发得出一个结论", async ({ pa
   await expect(card, "结论回来了卡片才落到已拒绝").toHaveAttribute("data-status", "rejected");
 });
 
-test("免打扰时段外弹通知，时段内只记角标", async ({ page }) => {
+test("控制面推来的 notify 立即显示，Web 不再按免打扰攒通知", async ({ page, request }) => {
   await stubNotifications(page);
+  const connected = page.waitForEvent("websocket");
   await login(page);
+  await connected;
 
-  // 整段都排在一小时以后，当下在它前面。按跨午夜读这段会一路盖到午夜，把当下也圈进去。
-  await setDnd(page, await dndAround(page, 1, 2));
-  await sendForApproval(page, "小销");
+  await setDnd(page, await dndAround(page, -1, 1));
+  expect(
+    (
+      await request.post("/api/test/notify", {
+        data: { kind: "confirm", text: "把报价单发给 Lisa", groupId: "grp_sales", at: new Date().toISOString() },
+      })
+    ).status(),
+  ).toBe(204);
 
   await expect
     .poll(async () => (await page.evaluate(() => window.__notifications?.sent)) ?? [], {
-      message: "不在免打扰里，要你点头的事该弹到系统通知上",
+      message: "控制面已经决定推送，浏览器收到后立即显示",
     })
     .toHaveLength(1);
   expect(
@@ -137,45 +143,65 @@ test("免打扰时段外弹通知，时段内只记角标", async ({ page }) => 
     "通知正文就是这条审批要你点头的那件事",
   ).toContain("把报价单发给 Lisa");
 
-  // from 比 to 晚，就是「22:00–08:00」那种跨午夜的写法：它盖的是 from 到午夜、午夜到 to 这两段，当下落在
-  // 前一段里。按同一天的区间读，from > to 是个空区间，当下就漏在外面了。
-  await setDnd(page, await dndAround(page, -1, -2));
-  await sendText(page, NEEDS_APPROVAL);
-
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(item.getByTestId("bot-pending"), "免打扰期间事情照样攒在角标上").toHaveText("等你点头 2");
   expect(
-    (await page.evaluate(() => window.__notifications?.sent))?.length,
-    "免打扰期间不打断你，通知还是刚才那一条",
-  ).toBe(1);
+    (
+      await request.post("/api/test/notify", {
+        data: { kind: "stuck", text: "小红书登录过期", groupId: "grp_sales", at: new Date().toISOString() },
+      })
+    ).status(),
+  ).toBe(204);
+  await expect
+    .poll(async () => (await page.evaluate(() => window.__notifications?.sent)) ?? [], {
+      message: "Web 不再按免打扰区间压住控制面已经推来的通知",
+    })
+    .toHaveLength(2);
   expect((await page.evaluate(() => window.__notifications?.asked)) ?? 0, "任何时候都不该弹权限请求").toBe(0);
 });
 
-test("免打扰只设了一头等于没设；权限没给就安静跳过，不弹权限请求", async ({ page }) => {
+test("权限没给就跳过，后续通知仍能到达", async ({ page, request }) => {
   await stubNotifications(page);
+  const connected = page.waitForEvent("websocket");
   await login(page);
+  await connected;
 
-  // 只留一头划不出区间。把它当成免打扰开着，等于把另外那半天也算进去，该响的时候不响。
-  await openSettings(page);
-  await page.getByTestId("dnd-from").fill("");
-  await expect(page.getByTestId("dnd-from")).toHaveValue("");
-  await page.getByTestId("settings-close").click();
-
-  await sendForApproval(page, "小销");
+  expect(
+    (
+      await request.post("/api/test/notify", {
+        data: { kind: "result", text: "周报已经完成", groupId: null, at: new Date().toISOString() },
+      })
+    ).status(),
+  ).toBe(204);
   await expect
     .poll(async () => (await page.evaluate(() => window.__notifications?.sent)) ?? [], {
-      message: "免打扰只设了一头就是没开，通知照发",
+      message: "先确认 WebSocket 上的 notify 已经能送达",
     })
     .toHaveLength(1);
 
-  // 用户还没给过通知权限。这时候弹权限请求等于拿一个系统弹窗拦住人，角标已经把事情说清楚了。
   await page.evaluate(() => {
     Object.defineProperty(window.Notification, "permission", { value: "default", configurable: true });
   });
-  await sendText(page, NEEDS_APPROVAL);
-
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(item.getByTestId("bot-pending"), "通知发不出去也不影响这件事攒在角标上").toHaveText("等你点头 2");
-  expect((await page.evaluate(() => window.__notifications?.sent))?.length, "权限不是 granted 就不发通知").toBe(1);
+  expect(
+    (
+      await request.post("/api/test/notify", {
+        data: { kind: "stuck", text: "账号登录过期", groupId: null, at: new Date().toISOString() },
+      })
+    ).status(),
+  ).toBe(204);
+  await page.evaluate(() => {
+    Object.defineProperty(window.Notification, "permission", { value: "granted", configurable: true });
+  });
+  expect(
+    (
+      await request.post("/api/test/notify", {
+        data: { kind: "result", text: "后续通知仍然送达", groupId: null, at: new Date().toISOString() },
+      })
+    ).status(),
+  ).toBe(204);
+  await expect
+    .poll(async () => (await page.evaluate(() => window.__notifications?.sent)) ?? [], {
+      message: "后一条已显示，说明前一条权限不足的 notify 已经按顺序处理完",
+    })
+    .toHaveLength(2);
+  expect((await page.evaluate(() => window.__notifications?.sent))?.join("\n")).not.toContain("账号登录过期");
   expect((await page.evaluate(() => window.__notifications?.asked)) ?? 0, "更不该反过来弹权限请求").toBe(0);
 });

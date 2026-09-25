@@ -7,7 +7,7 @@ import { reduceSkills } from "./skills.js";
 import type { Action, AppState, Conversation, ReadyState } from "./types.js";
 
 const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState => {
-  const { user, bots, groups, tools, settings, usage, overnight } = action;
+  const { user, bots, groups, tools, settings, usage } = action;
   const registry: Record<BotId, Bot> = {};
   for (const item of bots) registry[item.bot.id] = item.bot;
   const conversations: Conversation[] = [
@@ -37,7 +37,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     conversations,
     groupTurns: {},
     turnEpochs: {},
-    selectedGroupId: conversations[0]?.groupId ?? null,
+    selectedGroupId: null,
     messages: {},
     approvals: {},
     handoffs: {},
@@ -46,7 +46,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     tools,
     settings,
     usage,
-    overnight,
+    todayVersion: 0,
   };
 };
 
@@ -62,6 +62,7 @@ export const reduce = (state: AppState, action: Action): AppState => {
       break;
   }
   if (state.status !== "ready") return state;
+  if (action.type === "today_version_bumped") return { ...state, todayVersion: state.todayVersion + 1 };
   const groups = reduceGroups(state, action);
   const approvals = reduceApprovals(groups, action);
   const routines = reduceRoutines(approvals, action);

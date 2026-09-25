@@ -12,32 +12,21 @@ import {
   teamItem,
 } from "./fixtures";
 
-test("从加号建群后侧栏多一个群，群顶部钉着带编号的任务卡", async ({ page }) => {
+test("新建群入口已删除，现有群的任务卡不再显示 T 编号", async ({ page }) => {
   await login(page);
   const groups = page.locator("[data-testid=group-item]");
   await expect(groups, "预置里本来就有一个多 Bot 群").toHaveCount(1);
 
   await page.getByTestId("new-menu").click();
-  await page.getByTestId("new-group").click();
-  await expect(page.getByTestId("new-group-dialog")).toBeVisible();
-  await page.getByTestId("group-title").fill("Globex X3 × 200 补货");
-  await expect(page.getByTestId("group-submit"), "还没拉人进来就不该能提交").toBeDisabled();
-  await page.locator('[data-testid=group-member][data-bot-name="小服"]').click();
-  await page.locator('[data-testid=group-member][data-bot-name="小采"]').click();
-  await page.getByTestId("group-summary").fill("X3 现货不够 200 台，先补货再答复客户。");
-  await page.getByTestId("group-submit").click();
-
-  await expect(page.getByTestId("new-group-dialog"), "建完弹层自己收起来").toHaveCount(0);
-  await expect(groups).toHaveCount(2);
-  await expect(
-    page.locator('[data-testid=group-item][data-group-title="Globex X3 × 200 补货"]'),
-    "建群的人直接进了这个群",
-  ).toHaveClass(/is-selected/);
-  await expect(page.getByTestId("chat-title")).toHaveText("Globex X3 × 200 补货");
-  await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 2 个 Bot");
-  // 编号由服务端发，预置那个是 T-2481，接着往下发。
-  await expect(page.getByTestId("task-number"), "任务卡上是系统发的 T- 编号").toHaveText("T-2482");
-  await expect(page.getByTestId("task-progress"), "清单等 Bot 接手后自己列").toHaveText("清单 0 / 0");
+  await expect(page.getByTestId("new-bot"), "加号只保留新建 Bot").toBeVisible();
+  await expect(page.getByTestId("new-group"), "不再从对话侧栏建群").toHaveCount(0);
+  await expect(page.getByTestId("new-group-dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "关掉菜单" }).click();
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 3 个 Bot");
+  await expect(page.getByTestId("task-number"), "任务卡不再露出系统编号").toHaveCount(0);
+  await expect(page.getByTestId("task-card")).not.toContainText(/T-\d{4}/);
+  await expect(page.getByTestId("task-progress"), "预置清单保留").toHaveText("清单 0 / 5");
   await expect(page.getByTestId("task-current")).toHaveText("当前 还没人接手");
   await page.screenshot({ path: `${SHOT}/08.png` });
 });
@@ -57,7 +46,7 @@ test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", asyn
   await page.getByTestId("composer-send").click();
 
   const list = page.getByTestId("message-list");
-  await expect(list.getByTestId("cost-card"), "花费摘要到了就说明这次运行跑完了").toHaveCount(1);
+  await expect(page.getByTestId("task-progress"), "清单进度更新说明这次运行跑完了").toHaveText("清单 1 / 5");
   await expect(list.locator("[data-kind=bot]"), "群里只有被 @ 的那个开口").toHaveCount(1);
   const source = list.getByTestId("bot-source");
   await expect(source, "多 Bot 群里每条 Bot 消息上方写清是谁说的").toHaveCount(1);

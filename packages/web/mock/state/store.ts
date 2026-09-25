@@ -1,9 +1,13 @@
 import {
+  Account,
   Approval,
   Bot,
+  ContentPlan,
+  Draft,
   Group,
   Handoff,
   Message,
+  Publication,
   Routine,
   Settings,
   Skill,
@@ -47,6 +51,10 @@ export const tasks = new Map<string, TopicTask>();
 export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();
+export const drafts = new Map<string, Draft>();
+export const plans = new Map<string, ContentPlan>();
+export const accounts = new Map<string, Account>();
+export const publications = new Map<string, Publication>();
 export const handoffs = new Map<string, Handoff>();
 export const routines = new Map<string, Routine>();
 export const skills = new Map<string, Skill>();

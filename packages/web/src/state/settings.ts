@@ -17,8 +17,6 @@ export const reduceSettings = (state: ReadyState, action: Action): ReadyState =>
       return { ...state, settings: action.settings };
     case "usage_loaded":
       return { ...state, usage: action.usage };
-    case "overnight_dismissed":
-      return { ...state, overnight: [] };
     default:
       return state;
   }

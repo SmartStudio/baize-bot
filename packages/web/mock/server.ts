@@ -9,6 +9,7 @@ import { send, type Push, type Route, type RouteContext } from "./routes/http.js
 import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
 import { currentTurns, testRoutes } from "./routes/test.js";
+import { todayRoutes } from "./routes/today.js";
 import { toolRoutes } from "./routes/tools.js";
 
 const PORT = Number(process.env["API_PORT"] ?? 3001);
@@ -22,7 +23,15 @@ const push: Push = (event: ServerPush) => {
 };
 
 const publicRoutes: Route[] = [testRoutes, authRoutes, hookRoutes];
-const protectedRoutes: Route[] = [accountRoutes, botRoutes, toolRoutes, routineRoutes, skillRoutes, groupRoutes];
+const protectedRoutes: Route[] = [
+  accountRoutes,
+  botRoutes,
+  toolRoutes,
+  routineRoutes,
+  skillRoutes,
+  todayRoutes,
+  groupRoutes,
+];
 
 const handle = async (context: RouteContext): Promise<void> => {
   for (const route of publicRoutes) {

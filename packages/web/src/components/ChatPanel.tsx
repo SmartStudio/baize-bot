@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
-import type { Bot, BotId, ChecklistItem, GroupId, Message, Skill } from "@baize/shared";
+import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
 import {
   TurnView,
   type ApprovalTable,
@@ -28,6 +28,7 @@ type Props = {
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
   onInspectTool: InspectTool;
+  inspectedToolId: MessageId | null;
   onLoadSkills: (botId: BotId) => Promise<void>;
   onToggleChecklist: (checklist: ChecklistItem[]) => void;
   onOpenTask: () => void;
@@ -55,11 +56,8 @@ const pickerOf = (draft: string): Picker => {
 
 const firstAt = (turn: Turn): string =>
   turn.kind === "bot" ? (turn.items[0]?.createdAt ?? "") : turn.message.createdAt;
-const lastAt = (turn: Turn): string => {
-  if (turn.kind !== "bot")
-    return turn.kind === "system" ? (turn.cost?.createdAt ?? turn.message.createdAt) : turn.message.createdAt;
-  return turn.cost?.createdAt ?? turn.items.at(-1)?.createdAt ?? "";
-};
+const lastAt = (turn: Turn): string =>
+  turn.kind === "bot" ? (turn.items.at(-1)?.createdAt ?? "") : turn.message.createdAt;
 
 const timeLabel = (at: string): string => {
   const date = new Date(at);
@@ -92,6 +90,7 @@ export const ChatPanel = ({
   onDecide,
   onDecideSkillOffer,
   onInspectTool,
+  inspectedToolId,
   onLoadSkills,
   onToggleChecklist,
   onOpenTask,
@@ -173,7 +172,7 @@ export const ChatPanel = ({
               <Users size={16} aria-hidden="true" />
               <b data-testid="chat-title">{conversation.task.title}</b>
               <span className="chat-sub" data-testid="chat-subtitle">
-                主题任务 {conversation.task.number} · 你 + {members.length} 个 Bot
+                你 + {members.length} 个 Bot
               </span>
             </div>
             <div className="chat-members" data-testid="chat-members">
@@ -244,6 +243,7 @@ export const ChatPanel = ({
                 onDecide={onDecide}
                 onDecideSkillOffer={onDecideSkillOffer}
                 onInspectTool={onInspectTool}
+                selectedToolId={inspectedToolId}
                 showSource={team}
               />
             </div>

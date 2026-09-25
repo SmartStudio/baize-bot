@@ -38,10 +38,7 @@ export const TaskPanel = ({ task, memberIds, bots, onClose }: Props) => {
           <X size={16} />
         </button>
       </header>
-      <p className="task-panel-line">
-        <span className="task-number">{task.number}</span>
-        {task.dueAt === null ? "没定截止" : `截止 ${dueTextOf(task.dueAt)}`}
-      </p>
+      <p className="task-panel-line">{task.dueAt === null ? "没定截止" : `截止 ${dueTextOf(task.dueAt)}`}</p>
       {task.summary.length === 0 ? null : <p className="task-panel-summary">{task.summary}</p>}
 
       <p className="group-label">
