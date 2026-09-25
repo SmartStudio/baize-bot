@@ -115,7 +115,14 @@ class DevtoolsPage {
     socket.on("message", (raw) => {
       let message: {
         readonly id?: number;
-        readonly result?: { readonly result?: { readonly value?: unknown }; readonly data?: string };
+        readonly result?: {
+          readonly result?: { readonly value?: unknown };
+          readonly exceptionDetails?: {
+            readonly exception?: { readonly description?: string };
+            readonly text?: string;
+          };
+          readonly data?: string;
+        };
         readonly error?: { readonly message?: string };
       };
       try {
@@ -127,7 +134,10 @@ class DevtoolsPage {
       const pending = this.#pending.get(message.id);
       if (pending === undefined) return;
       this.#pending.delete(message.id);
+      const exception = message.result?.exceptionDetails;
       if (message.error !== undefined) pending.reject(new Error(message.error.message ?? "DevTools 调用失败"));
+      else if (exception !== undefined)
+        pending.reject(new Error(`页面脚本抛错：${exception.exception?.description ?? exception.text ?? "未知"}`));
       else if (message.result?.result !== undefined) pending.resolve(message.result.result.value);
       else pending.resolve(message.result?.data);
     });
@@ -144,7 +154,8 @@ class DevtoolsPage {
             item.type === "page" &&
             item.webSocketDebuggerUrl !== undefined &&
             item.url !== undefined &&
-            !new URL(item.url).pathname.endsWith("/menubar"),
+            !new URL(item.url).pathname.endsWith("/menubar") &&
+            new URL(item.url).searchParams.get("next") !== "/menubar",
         );
         if (target?.webSocketDebuggerUrl !== undefined) {
           const socket = new WebSocket(target.webSocketDebuggerUrl);
@@ -262,15 +273,29 @@ async function driveProof(
   await waitFor(page, "document.querySelector('[data-testid=composer-input]') !== null", 20_000);
   await page.evaluate(`(() => {
     const input = document.querySelector('[data-testid=composer-input]');
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
     setter.call(input, "运行一个长命令");
     input.dispatchEvent(new Event("input", { bubbles: true }));
   })()`);
   await waitFor(page, "document.querySelector('[data-testid=composer-send]') !== null", 20_000);
+  const approvalsBefore = Number(
+    await page.evaluate("document.querySelectorAll('[data-testid=approval-card]').length"),
+  );
   await page.evaluate("document.querySelector('[data-testid=composer-send]').click()");
+  // 闸门对 sleep 要审批；baize_verify 里留着往次的卡，只认这次发送之后新出的那张。
+  const newApproval = `[...document.querySelectorAll('[data-testid=approval-card]')].slice(${approvalsBefore})`;
   await waitFor(
     page,
-    "document.querySelector('[data-testid=tool-call-card][data-status=running][data-view-kind=bash]') !== null",
+    `${newApproval}.some((card) => card.querySelector('[data-testid=approval-approve]') !== null)`,
+    45_000,
+  );
+  await page.evaluate(
+    `${newApproval}.find((card) => card.querySelector('[data-testid=approval-approve]') !== null).querySelector('[data-testid=approval-approve]').click()`,
+  );
+  await waitFor(page, `${newApproval}.some((card) => card.dataset.status === 'approved')`, 20_000);
+  await waitFor(
+    page,
+    "[...document.querySelectorAll('[data-testid=tool-call-card]')].at(-1)?.matches('[data-status=running][data-view-kind=bash]') === true",
     45_000,
   );
 }
@@ -350,6 +375,15 @@ function descendantsOf(rootPid: number): number[] {
     }
   }
   return [...found].filter((pid) => pid !== rootPid);
+}
+
+async function waitDescendants(rootPid: number, timeoutMs: number): Promise<number[]> {
+  const started = Date.now();
+  for (;;) {
+    const found = descendantsOf(rootPid);
+    if (found.length > 0 || Date.now() - started > timeoutMs) return found;
+    await sleep(100);
+  }
 }
 
 async function launch(
@@ -439,7 +473,7 @@ async function main(): Promise<void> {
     const environment = spawnSync("ps", ["eww", "-p", String(first.run.agentPid)], { encoding: "utf8" }).stdout;
     writeFileSync(join(desktop, "dist/prove-ps.txt"), environment);
     result.envHasAgentToken = environment.includes("AGENT_TOKEN=");
-    result.bashDescendants = descendantsOf(first.run.agentPid);
+    result.bashDescendants = await waitDescendants(first.run.agentPid, 15_000);
     result.appSelfExitedAfterSigterm = await stop(first.child);
     await sleep(500);
     result.aliveAfterQuit = [first.run.agentPid, ...result.bashDescendants].filter(alive);

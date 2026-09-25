@@ -411,6 +411,18 @@ function showMenubar(): void {
 }
 
 async function createWindows(session: Session): Promise<void> {
+  // 登录页一加载完就能提交，钩子晚于 loadURL 装上会漏掉这次登录，代理就永远不启动。
+  if (!authHookInstalled) {
+    authHookInstalled = true;
+    session.webRequest.onCompleted({ urls: [`${uiOrigin}/api/auth/login`, `${uiOrigin}/api/register`] }, (details) => {
+      if (details.statusCode >= 200 && details.statusCode < 300) {
+        void provision(session).catch((error: unknown) => {
+          if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
+        });
+      }
+    });
+  }
+
   if (mainWindow === null) {
     const window = new BrowserWindow({
       width: 1400,
@@ -458,17 +470,6 @@ async function createWindows(session: Session): Promise<void> {
       }
     });
     await window.loadURL(`${uiOrigin}/menubar`);
-  }
-
-  if (!authHookInstalled) {
-    authHookInstalled = true;
-    session.webRequest.onCompleted({ urls: [`${uiOrigin}/api/auth/login`, `${uiOrigin}/api/register`] }, (details) => {
-      if (details.statusCode >= 200 && details.statusCode < 300) {
-        void provision(session).catch((error: unknown) => {
-          if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
-        });
-      }
-    });
   }
 }
 
