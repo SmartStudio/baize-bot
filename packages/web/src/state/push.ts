@@ -49,7 +49,7 @@ export const createPushHandlers = ({
       if (unseenTerminal) refreshPendingCounts();
       bumpToday();
     },
-    grant_deleted: () => undefined,
+    grant_deleted: (push) => dispatch({ type: "grant_deleted", grantId: push.grantId }),
     handoff_updated: (push) => {
       // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
       const unseenTerminal =

@@ -1,8 +1,12 @@
 import {
   Approval,
   ApprovalId,
+  ApprovalScope,
+  GRANTABLE_SCOPES,
   BotId,
   GroupId,
+  Grant,
+  GrantId,
   Handoff,
   HandoffId,
   RunId,
@@ -23,6 +27,7 @@ import {
   nextSuffix,
   tasks,
   waiters,
+  grants,
   type ApprovalDecision,
 } from "./store.js";
 
@@ -31,6 +36,7 @@ export const createApproval = (input: {
   botId: BotId;
   runId: RunId;
   action: Approval["action"];
+  target?: Approval["target"];
   view: Approval["view"];
 }): Approval => {
   const approval = Approval.parse({
@@ -39,7 +45,7 @@ export const createApproval = (input: {
     botId: input.botId,
     runId: input.runId,
     action: input.action,
-    target: null,
+    target: input.target ?? null,
     view: input.view,
     status: "pending",
     decidedAt: null,
@@ -52,10 +58,35 @@ export const createApproval = (input: {
 // 查状态和写结论是同一步，中间没有让别人插进来的缝。按钮和群里回的那句话会同时到，两边都先看到 pending
 // 再各写一次的话，后写的那个会把结论翻过来，而等结论的运行早就按先到的那个跑完了。
 // null 表示这条没得决定：查不到，或者已经有结论了。
-export const settleApproval = (id: string, decision: ApprovalDecision): Approval | null => {
+// 控制面的同一条规则：长期授权按目标匹配，目标为空存不下；动作不许的范围也不收。
+export const canGrant = (approval: Approval, scope: ApprovalScope): boolean =>
+  scope === "once" || (approval.target !== null && GRANTABLE_SCOPES[approval.action].includes(scope));
+
+export const settleApproval = (
+  id: string,
+  decision: ApprovalDecision,
+  scope: ApprovalScope = "once",
+): Approval | null => {
   const approval = approvals.get(id);
   if (approval === undefined || approval.status !== "pending") return null;
-  const next = Approval.parse({ ...approval, status: decision, decidedAt: new Date().toISOString() });
+  const grant =
+    decision === "approved" && scope !== "once" && approval.target !== null
+      ? Grant.parse({
+          id: GrantId.parse(`grant_${nextSuffix()}`),
+          scope,
+          ...(scope === "project" ? { groupId: approval.groupId } : {}),
+          action: approval.action,
+          target: approval.target,
+          createdAt: new Date().toISOString(),
+        })
+      : null;
+  if (grant !== null) grants.set(grant.id, grant);
+  const next = Approval.parse({
+    ...approval,
+    status: decision,
+    decidedAt: new Date().toISOString(),
+    grantId: grant?.id ?? null,
+  });
   approvals.set(next.id, next);
   waiters.get(next.id)?.(decision);
   waiters.delete(next.id);

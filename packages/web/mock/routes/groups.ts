@@ -6,6 +6,7 @@ import {
   assignTask,
   createGroup,
   groups,
+  grants,
   handoffsIn,
   isTeamGroup,
   lastMessageOf,
@@ -14,6 +15,7 @@ import {
   pendingApprovalsOf,
   pendingHandoffsOf,
   responderOf,
+  canGrant,
   settleApproval,
   settleLatestPending,
   streamBotReply,
@@ -139,14 +141,21 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
   const rawApprovalId = approvalMatch[1];
   const id = rawApprovalId === undefined ? "" : decodeURIComponent(rawApprovalId);
   const parsed = DecideApprovalRequest.safeParse(await readBody(req));
-  if (!approvals.has(id)) send(res, 404, { error: "没有这条审批" });
+  const approval = approvals.get(id);
+  if (approval === undefined) send(res, 404, { error: "没有这条审批" });
   else if (!parsed.success) send(res, 400, { error: "结论只能是批准或拒绝" });
-  else {
-    const next = settleApproval(id, parsed.data.decision);
+  else if (parsed.data.decision === "approved" && !canGrant(approval, parsed.data.scope)) {
+    send(res, 400, { error: "这条审批只能批这一次" });
+  } else {
+    const next = settleApproval(
+      id,
+      parsed.data.decision,
+      parsed.data.decision === "approved" ? parsed.data.scope : "once",
+    );
     if (next === null) send(res, 409, { error: "这条审批已经有结论了" });
     else {
       push({ type: "approval_updated", approval: next });
-      send(res, 200, { approval: next, grant: null });
+      send(res, 200, { approval: next, grant: next.grantId === null ? null : (grants.get(next.grantId) ?? null) });
     }
   }
   return true;

@@ -6,7 +6,7 @@ import { pendingCountOf, useToday } from "../state/today.js";
 
 type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
-  onDecide: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+  onDecide: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
 };
 
 export const MenubarPage = ({ onSend, onDecide }: Props) => {
@@ -52,8 +52,8 @@ export const MenubarPage = ({ onSend, onDecide }: Props) => {
       <TodayPending
         data={data.pending}
         compact
-        onDecide={async (id, decision) => {
-          await onDecide(id, decision);
+        onDecide={async (id, request) => {
+          await onDecide(id, request);
           await refresh();
         }}
       />

@@ -1,8 +1,10 @@
-import { BotId, Group, GroupId, Notice, ServerPush } from "@baize/shared";
+import { ActionKind, BotId, Group, GroupId, GrantTarget, Notice, ServerPush, RunId } from "@baize/shared";
 import { z } from "zod";
 import {
   confirmNextHandoff,
   addTodayApproval,
+  appendMessage,
+  createApproval,
   expireLatestPending,
   groups,
   holdHandoffAccept,
@@ -18,6 +20,9 @@ import { readBody, send, type Route } from "./http.js";
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
 const TodayModeRequest = z.object({ mode: z.enum(["full", "empty", "performance"]) }).strict();
 const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
+const TestApprovalRequest = z
+  .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
+  .strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
 
@@ -56,6 +61,26 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       const approval = addTodayApproval(parsed.data.title);
       push({ type: "approval_updated", approval });
       send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/approval") {
+    const parsed = TestApprovalRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "审批参数不对" });
+    else {
+      const approval = createApproval({
+        groupId: parsed.data.groupId,
+        botId: BotId.parse("bot_sales"),
+        runId: RunId.parse(`run_test_${Date.now()}`),
+        action: parsed.data.action,
+        target: parsed.data.target ?? null,
+        view: { kind: "bash", command: "示例调用", raw: { command: "示例调用" } },
+      });
+      const message = appendMessage(approval.groupId, { kind: "approval", approvalId: approval.id });
+      push({ type: "approval_updated", approval });
+      push({ type: "message", message });
+      send(res, 201, { approval });
     }
     return true;
   }

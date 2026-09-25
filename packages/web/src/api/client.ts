@@ -1,6 +1,7 @@
 import type { z } from "zod";
 import {
   ApiError,
+  BotResponse,
   BotListResponse,
   CreateBotResponse,
   ToolListResponse,
@@ -8,6 +9,7 @@ import {
   DecideApprovalResponse,
   DecideSkillOfferResponse,
   GroupListResponse,
+  GrantListResponse,
   LoginResponse,
   MeResponse,
   MessageListResponse,
@@ -22,7 +24,6 @@ import {
   UpdateBotResponse,
   UpdateTaskResponse,
   UsageResponse,
-  type Approval,
   type ApprovalId,
   type Bot,
   type BotHue,
@@ -34,6 +35,7 @@ import {
   type DecideApprovalRequest,
   type DecideSkillOfferRequest,
   type GroupId,
+  type GrantId,
   type MessageId,
   type Routine,
   type RoutineId,
@@ -120,17 +122,16 @@ export const api = {
     json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
   sendMessage: async (groupId: GroupId, text: string) =>
     json(SendMessageResponse, await send("POST", `/groups/${encodeURIComponent(groupId)}/messages`, { text })),
-  decideApproval: async (id: ApprovalId, decision: DecideApprovalRequest["decision"]): Promise<Approval> =>
-    (
-      await json(
-        DecideApprovalResponse,
-        await send(
-          "POST",
-          `/approvals/${encodeURIComponent(id)}`,
-          decision === "approved" ? { decision, scope: "once" } : { decision },
-        ),
-      )
-    ).approval,
+  decideApproval: async (id: ApprovalId, request: DecideApprovalRequest) =>
+    json(DecideApprovalResponse, await send("POST", `/approvals/${encodeURIComponent(id)}`, request)),
+  grants: async () => json(GrantListResponse, await send("GET", "/grants")),
+  deleteGrant: async (id: GrantId): Promise<void> => {
+    await send("DELETE", `/grants/${encodeURIComponent(id)}`);
+  },
+  pauseBot: async (id: BotId): Promise<Bot> =>
+    (await json(BotResponse, await send("POST", `/bots/${encodeURIComponent(id)}/pause`))).bot,
+  resumeBot: async (id: BotId): Promise<Bot> =>
+    (await json(BotResponse, await send("POST", `/bots/${encodeURIComponent(id)}/resume`))).bot,
   routines: async (botId: BotId) =>
     json(RoutineListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/routines`)),
   createRoutine: async (botId: BotId, body: CreateRoutineRequest): Promise<Routine> =>

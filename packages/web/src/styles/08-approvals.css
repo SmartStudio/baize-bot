@@ -28,6 +28,12 @@
   font: var(--type-body);
 }
 
+.approval-target {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
 .approval-summary .tool-view-content {
   flex-wrap: wrap;
   white-space: normal;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Cpu, Download, Gauge, Plug, Settings as SettingsIcon, X } from "lucide-react";
+import { Cpu, Download, Gauge, KeyRound, Plug, Settings as SettingsIcon, X } from "lucide-react";
 import {
   ComputerListResponse,
   Settings,
@@ -7,6 +7,9 @@ import {
   type BotId,
   type Computer,
   type CreateToolRequest,
+  type Grant,
+  type GrantId,
+  type GroupId,
   type ToolConnection,
   type ToolConnectionId,
   type UpdateToolRequest,
@@ -15,13 +18,15 @@ import {
 } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
+import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 
-type PageId = "general" | "computer" | "tools" | "usage" | "update";
+type PageId = "general" | "computer" | "tools" | "grants" | "usage" | "update";
 
 const PAGES: Record<PageId, { title: string; icon: React.ReactNode }> = {
   general: { title: "通用", icon: <SettingsIcon size={16} aria-hidden="true" /> },
   computer: { title: "电脑", icon: <Cpu size={16} aria-hidden="true" /> },
   tools: { title: "工具", icon: <Plug size={16} aria-hidden="true" /> },
+  grants: { title: "授权", icon: <KeyRound size={16} aria-hidden="true" /> },
   usage: { title: "用量与账单", icon: <Gauge size={16} aria-hidden="true" /> },
   update: { title: "更新", icon: <Download size={16} aria-hidden="true" /> },
 };
@@ -34,11 +39,17 @@ type Props = {
   usage: UsageResponse;
   bots: Record<BotId, Bot>;
   tools: ToolConnection[];
+  grants: Grant[];
+  projectNames: Record<GroupId, string>;
+  // 首页版本号，重连和审批变化都会让它加一。授权页开着就照它重拉，补上断线期间别处撤掉的和别处新批的授权。
+  grantsVersion: number;
   initialPage?: PageId;
   onCreateTool: (draft: CreateToolRequest) => Promise<void>;
   onUpdateTool: (id: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
   onDeleteTool: (id: ToolConnectionId) => Promise<void>;
   onLoadUsage: () => Promise<void>;
+  onLoadGrants: () => Promise<void>;
+  onRevokeGrant: (id: GrantId) => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
   onClose: () => void;
@@ -120,6 +131,93 @@ const GeneralPage = ({
     </div>
   </>
 );
+
+const GrantRow = ({
+  grant,
+  projectName,
+  onRevoke,
+}: {
+  grant: Grant;
+  projectName: string | undefined;
+  onRevoke: (id: GrantId) => Promise<void>;
+}) => {
+  const [revoke, setRevoke] = useState<"idle" | "busy" | "failed">("idle");
+  const run = async () => {
+    setRevoke("busy");
+    try {
+      await onRevoke(grant.id);
+    } catch {
+      setRevoke("failed");
+    }
+  };
+  return (
+    <div className="row-card grant-row" data-testid="grant-row" data-grant-id={grant.id}>
+      <span>
+        <b>{SCOPE_TEXT[grant.scope]}</b>
+        <small>
+          {ACTION_TEXT[grant.action]} · {targetText(grant.target)}
+        </small>
+        {grant.scope === "project" ? <small>项目：{projectName ?? "已删除的对话"}</small> : null}
+        {revoke === "failed" ? (
+          <small className="grant-error" data-testid="grant-revoke-error" role="alert">
+            没撤掉，再试一次
+          </small>
+        ) : null}
+      </span>
+      <button
+        type="button"
+        className="ghost-button"
+        data-testid="grant-revoke"
+        disabled={revoke === "busy"}
+        onClick={() => void run()}
+      >
+        撤销
+      </button>
+    </div>
+  );
+};
+
+const GrantsPage = ({
+  grants,
+  projectNames,
+  loading,
+  error,
+  onRevoke,
+}: {
+  grants: Grant[];
+  projectNames: Record<GroupId, string>;
+  loading: boolean;
+  error: string | null;
+  onRevoke: (id: GrantId) => Promise<void>;
+}) => {
+  if (loading) return <p className="later">正在加载授权…</p>;
+  if (error !== null) {
+    return (
+      <p className="later" data-testid="grants-error" role="alert">
+        授权列表加载失败：{error}
+      </p>
+    );
+  }
+  if (grants.length === 0) {
+    return (
+      <p className="later" data-testid="grants-empty">
+        还没有长期授权
+      </p>
+    );
+  }
+  return (
+    <div className="grants-page" data-testid="grants-page">
+      {grants.map((grant) => (
+        <GrantRow
+          key={grant.id}
+          grant={grant}
+          projectName={grant.scope === "project" ? projectNames[grant.groupId] : undefined}
+          onRevoke={onRevoke}
+        />
+      ))}
+    </div>
+  );
+};
 
 const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
   local: "本机",
@@ -288,21 +386,45 @@ export const SettingsWindow = ({
   usage,
   bots,
   tools,
+  grants,
+  projectNames,
+  grantsVersion,
   initialPage = "general",
   onCreateTool,
   onUpdateTool,
   onDeleteTool,
   onLoadUsage,
+  onLoadGrants,
+  onRevokeGrant,
   onChange,
   onLogout,
   onClose,
 }: Props) => {
   const [page, setPage] = useState<PageId>(initialPage);
+  const [grantsLoading, setGrantsLoading] = useState(initialPage === "grants");
+  const [grantsError, setGrantsError] = useState<string | null>(null);
   const current = PAGES[page];
 
   useEffect(() => {
     if (page === "usage") void onLoadUsage();
   }, [page, onLoadUsage]);
+
+  useEffect(() => {
+    if (page !== "grants") return;
+    void onLoadGrants()
+      .then(() => setGrantsError(null))
+      .catch((cause: unknown) => setGrantsError(cause instanceof Error ? cause.message : "请重试"))
+      .finally(() => setGrantsLoading(false));
+  }, [page, grantsVersion, onLoadGrants]);
+
+  const selectPage = (next: PageId) => {
+    if (next === page) return;
+    if (next === "grants") {
+      setGrantsLoading(true);
+      setGrantsError(null);
+    }
+    setPage(next);
+  };
 
   return (
     <div className="scrim" data-testid="settings-window">
@@ -315,7 +437,7 @@ export const SettingsWindow = ({
               type="button"
               className={`menu-row${id === page ? " is-selected" : ""}`}
               data-testid={`settings-nav-${id}`}
-              onClick={() => setPage(id)}
+              onClick={() => selectPage(id)}
             >
               {PAGES[id].icon}
               {PAGES[id].title}
@@ -347,6 +469,14 @@ export const SettingsWindow = ({
             />
           ) : page === "computer" ? (
             <ComputerPage />
+          ) : page === "grants" ? (
+            <GrantsPage
+              grants={grants}
+              projectNames={projectNames}
+              loading={grantsLoading}
+              error={grantsError}
+              onRevoke={onRevokeGrant}
+            />
           ) : page === "usage" ? (
             <UsagePage usage={usage} bots={bots} />
           ) : (

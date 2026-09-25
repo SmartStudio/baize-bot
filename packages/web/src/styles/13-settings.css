@@ -139,10 +139,15 @@
   font: var(--type-body);
 }
 
-.computers-page {
+.computers-page,
+.grants-page {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+.row-card small.grant-error {
+  color: var(--danger);
 }
 
 .row-card > .computer-status {

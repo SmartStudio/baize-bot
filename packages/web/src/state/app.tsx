@@ -5,6 +5,7 @@ import {
   type BotId,
   type ChecklistItem,
   type DecideApprovalRequest,
+  type GrantId,
   type GroupId,
   type MessageId,
   type CreateRoutineRequest,
@@ -43,7 +44,11 @@ export type AppActions = {
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
-  decideApproval: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+  decideApproval: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
+  loadGrants: () => Promise<void>;
+  deleteGrant: (grantId: GrantId) => Promise<void>;
+  pauseBot: (botId: BotId) => Promise<void>;
+  resumeBot: (botId: BotId) => Promise<void>;
   loadRoutines: (botId: BotId) => Promise<void>;
   createRoutine: (botId: BotId, draft: CreateRoutineRequest) => Promise<void>;
   updateRoutine: (routineId: RoutineId, patch: UpdateRoutineRequest) => Promise<void>;
@@ -154,8 +159,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const { message } = await api.sendMessage(groupId, text);
         dispatch({ type: "message_upserted", message });
       }),
-      decideApproval: signedIn(async (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => {
-        dispatch({ type: "approval_pushed", approval: await api.decideApproval(approvalId, decision) });
+      decideApproval: signedIn(async (approvalId: ApprovalId, request: DecideApprovalRequest) => {
+        const result = await api.decideApproval(approvalId, request);
+        dispatch({ type: "approval_pushed", approval: result.approval });
+        if (result.grant !== null) dispatch({ type: "grant_upserted", grant: result.grant });
+      }),
+      loadGrants: signedIn(async () => {
+        dispatch({ type: "grants_loaded", grants: (await api.grants()).grants });
+      }),
+      deleteGrant: signedIn(async (grantId: GrantId) => {
+        await api.deleteGrant(grantId);
+        dispatch({ type: "grant_deleted", grantId });
+      }),
+      pauseBot: signedIn(async (botId: BotId) => {
+        dispatch({ type: "bot_updated", bot: await api.pauseBot(botId) });
+      }),
+      resumeBot: signedIn(async (botId: BotId) => {
+        dispatch({ type: "bot_updated", bot: await api.resumeBot(botId) });
       }),
       loadRoutines: signedIn(async (botId: BotId) => {
         dispatch({ type: "routines_loaded", botId, routines: (await api.routines(botId)).items });

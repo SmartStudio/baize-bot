@@ -6,6 +6,8 @@ import {
   type BotId,
   type Group,
   type GroupId,
+  type Grant,
+  type GrantId,
   type Handoff,
   type HandoffId,
   type Message,
@@ -68,6 +70,8 @@ export type AppState =
       skills: Record<BotId, Skill[]>;
       tools: ToolConnection[];
       settings: Settings;
+      grants: Grant[];
+      revokedGrantIds: GrantId[];
       usage: UsageResponse;
       todayVersion: number;
     };
@@ -100,6 +104,9 @@ export type Action =
   | ({ type: "message_delta" } & Delta)
   | { type: "approvals_loaded"; approvals: Approval[] }
   | { type: "approval_pushed"; approval: Approval }
+  | { type: "grants_loaded"; grants: Grant[] }
+  | { type: "grant_upserted"; grant: Grant }
+  | { type: "grant_deleted"; grantId: GrantId }
   | { type: "handoffs_loaded"; handoffs: Handoff[] }
   | { type: "handoff_pushed"; handoff: Handoff }
   | { type: "pending_counts_loaded"; bots: BotListItem[]; groups: GroupListItem[] }

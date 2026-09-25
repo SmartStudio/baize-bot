@@ -61,6 +61,10 @@
   font: var(--type-caption);
 }
 
+.row-card small.bot-run-state-error {
+  color: var(--danger);
+}
+
 .row-card.is-later {
   color: var(--fg-4);
 }

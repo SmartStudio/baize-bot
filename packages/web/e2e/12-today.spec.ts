@@ -153,7 +153,7 @@ test("群里批过的审批会从首页消失", async ({ page, request }) => {
   await expect(page.getByTestId("today-pending")).toContainText("群里联动的发送确认");
   await openBot(page, "小销");
   const card = page.getByTestId("approval-card").filter({ hasText: "群里联动的发送确认" });
-  await card.getByRole("button", { name: "批准" }).click();
+  await card.getByTestId("approval-scope-once").click();
   await expect(card).toHaveAttribute("data-status", "approved");
   await page.getByTestId("today-nav").click();
   await expect(page.getByTestId("today-pending")).not.toContainText("群里联动的发送确认");

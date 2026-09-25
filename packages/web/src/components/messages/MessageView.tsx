@@ -16,6 +16,7 @@ import type {
   SkillOfferStatus,
 } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
+import { ACTION_TEXT, SCOPE_TEXT, offeredScopes, targetText } from "../grantText.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
 import { ToolViewContent } from "./ToolViewContent.js";
@@ -24,7 +25,7 @@ import type { Turn } from "./turns.js";
 export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
 export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
-export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+export type DecideApproval = (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
 export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 export type InspectedTool = { messageId: MessageId; body: ToolCall };
@@ -172,21 +173,6 @@ const ToolCallCard = ({
   </button>
 );
 
-const APPROVAL_ACTION_TEXT: Record<Approval["action"], string> = {
-  read: "读取",
-  write_workspace: "写工作目录",
-  write_outside: "写外部文件",
-  delete: "删除",
-  shell: "运行命令",
-  publish: "公开发布",
-  message_person: "对外发送",
-  engage: "互动",
-  spend: "付钱",
-  account_security: "账号安全",
-  install: "安装",
-  external_write: "改生产数据",
-};
-
 const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
   approved: "同意",
   rejected: "不同意",
@@ -208,16 +194,16 @@ const ApprovalCard = ({
 }) => {
   const [sent, setSent] = useState(false);
   // 结论以服务端推回来的那条为准，这里只锁住按钮，免得一次点两下发两个决定。
-  const decide = (decision: DecideApprovalRequest["decision"]) => {
+  const decide = (request: DecideApprovalRequest) => {
     setSent(true);
-    void onDecide(approval.id, decision).catch(() => setSent(false));
+    void onDecide(approval.id, request).catch(() => setSent(false));
   };
   if (approval.status === "expired") {
     return (
       <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
         <div className="card-title">
           <ShieldAlert size={16} aria-hidden="true" />
-          已失效 · {APPROVAL_ACTION_TEXT[approval.action]}
+          已失效 · {ACTION_TEXT[approval.action]}
         </div>
         <p className="approval-summary">
           <ToolViewContent view={approval.view} approval />
@@ -248,30 +234,36 @@ const ApprovalCard = ({
     <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
       <div className="card-title">
         <ShieldAlert size={16} aria-hidden="true" />
-        需要你点头 · {APPROVAL_ACTION_TEXT[approval.action]}
+        需要你点头 · {ACTION_TEXT[approval.action]}
       </div>
       <p className="approval-summary">
         <ToolViewContent view={approval.view} approval />
       </p>
+      {approval.target === null ? null : <p className="approval-target">目标：{targetText(approval.target)}</p>}
       <div className="approval-actions">
         <button
           type="button"
           className="ghost-button"
           data-testid="approval-reject"
           disabled={sent}
-          onClick={() => decide("rejected")}
+          onClick={() => decide({ decision: "rejected" })}
         >
           拒绝
         </button>
-        <button
-          type="button"
-          className="primary-button"
-          data-testid="approval-approve"
-          disabled={sent}
-          onClick={() => decide("approved")}
-        >
-          批准
-        </button>
+        {offeredScopes(approval).map((scope) => (
+          // approval-approve 是桌面 prove 和真栈验收脚本点的钩子，范围的 testid 只好挂在外层。
+          <span data-testid={`approval-scope-${scope}`} key={scope}>
+            <button
+              type="button"
+              className="primary-button"
+              data-testid={scope === "once" ? "approval-approve" : undefined}
+              disabled={sent}
+              onClick={() => decide({ decision: "approved", scope })}
+            >
+              {SCOPE_TEXT[scope]}
+            </button>
+          </span>
+        ))}
       </div>
     </div>
   );

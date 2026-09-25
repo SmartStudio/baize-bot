@@ -19,12 +19,24 @@ const greeting = (name: string): string => {
 const draftText = (draft: Draft): string =>
   draft.content.kind === "post" ? (draft.content.title ?? draft.content.text) : `回复 ${draft.content.replyTo.author}`;
 
-const timeText = (at: string): string => new Date(at).toLocaleString("zh-CN");
+export const timeText = (at: string, now = new Date()): string => {
+  const date = new Date(at);
+  const day = (value: Date): string => `${value.getFullYear()}-${value.getMonth()}-${value.getDate()}`;
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (day(date) === day(now)) return `今天 ${clock}`;
+  if (day(date) === day(tomorrow)) return `明天 ${clock}`;
+  if (day(date) === day(yesterday)) return `昨天 ${clock}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
+};
 
 type PendingProps = {
   data: TodayResponse["pending"];
   compact?: boolean;
-  onDecide: (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
+  onDecide: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
   onOpenGroup?: (groupId: GroupId) => void;
   onOpenSettings?: () => void;
 };
@@ -38,12 +50,12 @@ const ApprovalRow = ({
 }) => {
   const [deciding, setDeciding] = useState<DecideApprovalRequest["decision"] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const decide = async (decision: DecideApprovalRequest["decision"]) => {
+  const decide = async (request: DecideApprovalRequest) => {
     if (deciding !== null) return;
-    setDeciding(decision);
+    setDeciding(request.decision);
     setError(null);
     try {
-      await onDecide(item.approval.id, decision);
+      await onDecide(item.approval.id, request);
     } catch {
       setError("没能提交结论，请重试");
     } finally {
@@ -69,15 +81,16 @@ const ApprovalRow = ({
           type="button"
           className="ghost-button today-row-action"
           disabled={deciding !== null}
-          onClick={() => void decide("rejected")}
+          onClick={() => void decide({ decision: "rejected" })}
         >
           {deciding === "rejected" ? "拒绝中" : "拒绝"}
         </button>
         <button
           type="button"
           className="primary-button today-row-action"
+          data-testid="approval-scope-once"
           disabled={deciding !== null}
-          onClick={() => void decide("approved")}
+          onClick={() => void decide({ decision: "approved", scope: "once" })}
         >
           {deciding === "approved" ? "批准中" : "批准"}
         </button>

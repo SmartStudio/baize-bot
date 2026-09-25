@@ -41,6 +41,8 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     messages: {},
     approvals: {},
     handoffs: {},
+    grants: [],
+    revokedGrantIds: [],
     routines: {},
     skills: {},
     tools,

@@ -5,6 +5,7 @@ import { accountRoutes } from "./routes/account.js";
 import { authRoutes, authed } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
 import { groupRoutes } from "./routes/groups.js";
+import { grantRoutes } from "./routes/grants.js";
 import { send, type Push, type Route, type RouteContext } from "./routes/http.js";
 import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
@@ -31,6 +32,7 @@ const protectedRoutes: Route[] = [
   skillRoutes,
   todayRoutes,
   groupRoutes,
+  grantRoutes,
 ];
 
 const handle = async (context: RouteContext): Promise<void> => {

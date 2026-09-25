@@ -39,6 +39,13 @@ export const MainWindow = () => {
   if (!ready) return null;
 
   const bots = ready.bots;
+  const projectNames: Record<GroupId, string> = Object.fromEntries(
+    ready.conversations.flatMap((item) => {
+      if (item.kind === "team") return [[item.groupId, item.task.title]];
+      const bot = bots[item.botId];
+      return bot === undefined ? [] : [[item.groupId, bot.name]];
+    }),
+  );
   const lookup = (botId: BotId) => {
     const found = bots[botId];
     return found ? { name: found.name, tag: found.tag, hue: found.hue } : FALLBACK;
@@ -101,6 +108,8 @@ export const MainWindow = () => {
           bot={soloBot}
           tools={ready.tools}
           onChange={actions.updateBot}
+          onPause={actions.pauseBot}
+          onResume={actions.resumeBot}
           onOpenTools={() => setOverlay("tools")}
         />
       ) : null}
@@ -124,11 +133,16 @@ export const MainWindow = () => {
           usage={ready.usage}
           bots={bots}
           tools={ready.tools}
+          grants={ready.grants}
+          projectNames={projectNames}
+          grantsVersion={ready.todayVersion}
           initialPage={overlay === "usage" ? "usage" : overlay === "tools" ? "tools" : "general"}
           onCreateTool={actions.createTool}
           onUpdateTool={actions.updateTool}
           onDeleteTool={actions.deleteTool}
           onLoadUsage={actions.loadUsage}
+          onLoadGrants={actions.loadGrants}
+          onRevokeGrant={actions.deleteGrant}
           onChange={actions.updateSettings}
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}

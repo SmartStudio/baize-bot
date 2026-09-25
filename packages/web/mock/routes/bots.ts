@@ -37,6 +37,26 @@ export const botRoutes: Route = async ({ req, res, path, method, push }) => {
     return true;
   }
 
+  const runStateMatch = /^\/api\/bots\/([^/]+)\/(pause|resume)$/.exec(path);
+  if (runStateMatch !== null && method === "POST") {
+    const rawBotId = runStateMatch[1];
+    const operation = runStateMatch[2];
+    if (rawBotId === undefined || operation === undefined) {
+      send(res, 404, { error: "没有这个 Bot" });
+      return true;
+    }
+    const botId = decodeURIComponent(rawBotId);
+    const bot = bots.get(botId);
+    if (bot === undefined) send(res, 404, { error: "没有这个 Bot" });
+    else {
+      const next = Bot.parse({ ...bot, runState: operation === "pause" ? "paused" : "running" });
+      bots.set(botId, next);
+      push({ type: "bot_updated", bot: next });
+      send(res, 200, { bot: next });
+    }
+    return true;
+  }
+
   const match = /^\/api\/bots\/([^/]+)$/.exec(path);
   if (match === null) return false;
   const rawBotId = match[1];

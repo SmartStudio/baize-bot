@@ -26,6 +26,7 @@ import {
   bots,
   groupIdByBotId,
   groups,
+  grants,
   handoffAcceptance,
   handoffWaiters,
   handoffs,
@@ -177,6 +178,7 @@ export const reseed = (): void => {
   handoffWaiters.clear();
   handoffAcceptance.automatic = true;
   approvals.clear();
+  grants.clear();
   drafts.clear();
   plans.clear();
   accounts.clear();
