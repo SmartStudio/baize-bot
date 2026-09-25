@@ -27,6 +27,7 @@ it("老格式的 tool_call 消息和审批行迁移后能从 HTTP 读出来", as
     if (applied0010[0] !== undefined) {
       await database.sql.unsafe('ALTER TABLE "approvals" ADD COLUMN "summary" text DEFAULT \'\' NOT NULL');
       await database.sql.unsafe('ALTER TABLE "approvals" DROP COLUMN "view"');
+      await database.sql.unsafe('ALTER TABLE "approvals" ADD COLUMN "kind" text');
       await database.sql`DELETE FROM _migrations WHERE name = ${applied0010[0].name}`;
     }
 
@@ -60,10 +61,10 @@ it("老格式的 tool_call 消息和审批行迁移后能从 HTTP 读出来", as
     `;
     await database.sql`
       INSERT INTO approvals (
-        id, run_id, bot_id, group_id, call_id, tool, kind, summary, status, message_id, created_at
+        id, run_id, bot_id, group_id, call_id, tool, kind, action, summary, status, message_id, created_at
       )
       VALUES (
-        ${approvalId}, ${prompt.runId}, ${created.bot.id}, ${created.group.id}, 'legacy-call', 'legacy_pay', 'pay',
+        ${approvalId}, ${prompt.runId}, ${created.bot.id}, ${created.group.id}, 'legacy-call', 'legacy_pay', 'pay', 'spend',
         '旧审批字符串', 'pending', ${approvalMessageId}, now()
       )
     `;

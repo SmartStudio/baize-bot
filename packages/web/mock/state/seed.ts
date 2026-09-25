@@ -193,6 +193,8 @@ export const reseed = (): void => {
       Bot.parse({
         id: botId,
         ownerId: user.id,
+        role: "member",
+        runState: "running",
         name: seed.name,
         tag: seed.tag,
         description: seed.description,
@@ -244,6 +246,7 @@ export const reseed = (): void => {
       currentBotId: null,
       handled: [],
       status: "active",
+      cadence: "",
     }),
   );
   // 群里先只有一条系统消息。谁开口都是被 @ 出来的，用例才数得清「只有被 @ 的那个回了」。
@@ -260,6 +263,8 @@ export const reseed = (): void => {
       instruction: "汇总昨天的新工单，按紧急度排序，发我一份摘要。标准问题直接按话术回复；退款、改交期停下来等我。",
       triggers: [{ kind: "cron", expr: "0 9 * * 1-5" }],
       onFailure: "stop_and_tell",
+      groupId: null,
+      purpose: "plan",
       enabled: true,
       // 对着原型 2c 那三行。
       runs: [

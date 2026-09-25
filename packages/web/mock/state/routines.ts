@@ -40,6 +40,8 @@ export const createRoutine = (botId: string, input: CreateRoutineRequest): Routi
     instruction: input.instruction,
     triggers: tokensFrom([], input.triggers),
     onFailure: input.onFailure,
+    groupId: input.groupId ?? null,
+    purpose: input.purpose ?? "plan",
     enabled: input.enabled,
     runs: [],
   });

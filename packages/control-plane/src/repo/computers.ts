@@ -1,5 +1,5 @@
 import { ComputerId, type Computer, type UserId } from "@baize/shared";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { computers } from "../db/schema.js";
 import { hashSecret, newId, newSecret, secretMatches } from "../ids.js";
@@ -8,7 +8,7 @@ import { toComputer } from "./rows.js";
 /** 建电脑时才拿得到 token 明文，已经有电脑时是 null。 */
 export type EnsureResult = { readonly computer: Computer; readonly token: string | null };
 
-/** 一人一台，owner_id 上的唯一约束兜住并发登录，重复调用不会多建一台。 */
+/** 每人一台本机，(owner_id, kind) 上的唯一约束兜住并发登录，重复调用不会多建一台。 */
 export async function ensureComputer(db: Db, ownerId: UserId): Promise<EnsureResult> {
   const token = newSecret();
   const [created] = await db
@@ -16,12 +16,13 @@ export async function ensureComputer(db: Db, ownerId: UserId): Promise<EnsureRes
     .values({
       id: newId(),
       ownerId,
+      kind: "local",
       status: "creating",
       tokenHash: hashSecret(token),
       // 下发前一定会在 hello 时轮换，这一把只是占住非空列，永远不会交出去。
       gatewayKeyHash: hashSecret(newSecret()),
     })
-    .onConflictDoNothing({ target: computers.ownerId })
+    .onConflictDoNothing({ target: [computers.ownerId, computers.kind] })
     .returning();
   if (created !== undefined) return { computer: toComputer(created), token };
 
@@ -31,7 +32,11 @@ export async function ensureComputer(db: Db, ownerId: UserId): Promise<EnsureRes
 }
 
 export async function findComputerByOwner(db: Db, ownerId: UserId): Promise<Computer | null> {
-  const [row] = await db.select().from(computers).where(eq(computers.ownerId, ownerId)).limit(1);
+  const [row] = await db
+    .select()
+    .from(computers)
+    .where(and(eq(computers.ownerId, ownerId), eq(computers.kind, "local")))
+    .limit(1);
   return row === undefined ? null : toComputer(row);
 }
 
@@ -98,7 +103,7 @@ export async function resetComputerToken(db: Db, ownerId: UserId): Promise<Token
   const [row] = await db
     .update(computers)
     .set({ tokenHash: hashSecret(token) })
-    .where(eq(computers.ownerId, ownerId))
+    .where(and(eq(computers.ownerId, ownerId), eq(computers.kind, "local")))
     .returning({ id: computers.id });
   if (row === undefined) return null;
   return { computerId: ComputerId.parse(row.id), token };

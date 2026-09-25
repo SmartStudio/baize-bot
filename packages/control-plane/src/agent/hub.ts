@@ -216,7 +216,12 @@ export class AgentHub {
       await this.#finishMissingRuns(computer.ownerId, message.activeRuns);
     });
     await markComputerOnline(this.#deps.db, computer.id);
-    this.#send(accepted, { type: "welcome", ownerId: computer.ownerId, serverTime: new Date().toISOString() });
+    this.#send(accepted, {
+      type: "welcome",
+      ownerId: computer.ownerId,
+      kind: computer.kind,
+      serverTime: new Date().toISOString(),
+    });
     await this.#sendConfig(accepted);
     return accepted;
   }
@@ -284,6 +289,7 @@ export class AgentHub {
       type: "config",
       bots: items.map((item) => ({
         id: item.bot.id,
+        role: item.bot.role,
         name: item.bot.name,
         tag: item.bot.tag,
         description: item.bot.description,
@@ -292,6 +298,8 @@ export class AgentHub {
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills: await listSkillsByOwner(this.#deps.db, conn.ownerId),
+      accounts: [],
+      grants: [],
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,

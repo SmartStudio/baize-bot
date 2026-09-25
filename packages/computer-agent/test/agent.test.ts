@@ -64,8 +64,10 @@ function runnerOf(
 
 const configMessage = {
   type: "config",
-  bots: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot" }],
+  bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "客服 Bot" }],
   tools: [],
+  accounts: [],
+  grants: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key", model: "dev-model" },
 };
 
@@ -79,8 +81,9 @@ const promptMessage = {
   reason: "solo",
   group: { id: "group-1", number: "", title: "小服", kind: "solo" },
   context: [],
+  purpose: "plan",
   task: null,
-  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot", role: "member" }],
+  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot", seat: "member" }],
 };
 
 async function poll<T>(get: () => T | undefined, timeoutMs: number, label: string): Promise<T> {
@@ -248,7 +251,7 @@ describe("电脑代理连控制面", () => {
     const socket = await server.waitForSocket(1);
     const secondConfig = {
       ...configMessage,
-      bots: [{ id: "bot-1", name: "新版小服", tag: "", description: "新版客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", name: "新版小服", tag: "", description: "新版客服 Bot" }],
     };
 
     try {
@@ -521,7 +524,8 @@ describe("电脑代理连控制面", () => {
                 groupId: message.groupId,
                 callId: "call-2",
                 tool: "send_email",
-                kind: "send_external",
+                action: "message_person",
+                target: null,
                 view: { kind: "mcp", server: "客服工具", tool: "send_email", params: [], raw: "发一封报价邮件" },
               });
               await secondApproval;
@@ -557,7 +561,7 @@ describe("电脑代理连控制面", () => {
     socket.send(
       JSON.stringify({
         ...configMessage,
-        bots: [{ id: "bot-1", name: "小服", tag: "", description: "新版客服 Bot" }],
+        bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "新版客服 Bot" }],
       }),
     );
     socket.send(JSON.stringify({ ...promptMessage, runId: "run-2", text: "发报价邮件" }));
@@ -630,7 +634,8 @@ describe("电脑代理连控制面", () => {
             groupId: message.groupId,
             callId: "call-1",
             tool: "send_email",
-            kind: "send_external",
+            action: "message_person",
+            target: null,
             view: { kind: "mcp", server: "客服工具", tool: "send_email", params: [], raw: {} },
           });
         },

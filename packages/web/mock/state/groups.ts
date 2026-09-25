@@ -23,6 +23,8 @@ export const createBot = (input: {
   const bot = Bot.parse({
     id: botId,
     ownerId: user.id,
+    role: "member",
+    runState: "running",
     name: input.name ?? `新 Bot ${bots.size + 1}`,
     tag: input.tag ?? "",
     description: input.description ?? "",
@@ -74,6 +76,7 @@ export const createGroup = (input: {
     currentBotId: null,
     handled: [],
     status: "active",
+    cadence: "",
   });
   groups.set(group.id, group);
   tasks.set(task.id, task);

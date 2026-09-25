@@ -457,7 +457,8 @@ describe("运行记录收尾", () => {
         groupId: owner.groupId,
         callId: "call-1",
         tool: "send_email",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
 
@@ -497,7 +498,8 @@ describe("运行记录收尾", () => {
         groupId: owner.groupId,
         callId: "call-expired",
         tool: "send_email",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
       await settled(routine.id);
@@ -533,7 +535,8 @@ describe("运行记录收尾", () => {
         groupId: owner.groupId,
         callId: "call-1",
         tool: "send_email",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
 

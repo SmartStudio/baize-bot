@@ -1,17 +1,32 @@
 import { z } from "zod";
 import {
+  Account,
+  AccountId,
+  AccountTier,
   Approval,
+  ApprovalScope,
   Bot,
   BotHue,
   BotId,
   ChecklistItem,
+  Computer,
   ComputerId,
+  ContentPlan,
+  Draft,
+  DraftContent,
+  DraftId,
+  Grant,
+  GrantId,
   Group,
   GroupId,
   Handoff,
   Message,
   MessageId,
   OnFailure,
+  Publication,
+  BrowserPlatform,
+  Notice,
+  ModelPurpose,
   Routine,
   RunId,
   RoutineId,
@@ -46,6 +61,7 @@ export const RegisterResponse = z.object({ user: User });
 
 // POST /api/computers/local。token 明文只在这次响应里出现。
 export const LocalComputerResponse = z.object({ computerId: ComputerId, token: z.string() });
+export const ComputerListResponse = z.object({ computers: z.array(Computer) });
 
 // POST /api/auth/logout 无请求体，响应 204。
 // GET /api/me
@@ -75,6 +91,9 @@ export const CreateBotResponse = z.object({ bot: Bot, group: Group });
 // PATCH /api/bots/:id
 export const UpdateBotRequest = CreateBotRequest.extend({ notify: z.boolean().optional() });
 export const UpdateBotResponse = z.object({ bot: Bot });
+export const BotResponse = z.object({ bot: Bot });
+
+// POST /api/bots/:id/pause、POST /api/bots/:id/resume 无请求体，回 BotResponse。
 
 // DELETE /api/bots/:id 响应 204。
 
@@ -109,6 +128,7 @@ export const UpdateTaskRequest = z
     dueAt: Timestamp.nullable(),
     checklist: z.array(ChecklistItem).max(50),
     status: TaskStatus,
+    cadence: z.string().max(200),
   })
   .partial();
 export const UpdateTaskResponse = z.object({ task: TopicTask });
@@ -121,6 +141,8 @@ export const MessageListResponse = z.object({
   hasMore: z.boolean(),
   approvals: z.array(Approval),
   handoffs: z.array(Handoff),
+  drafts: z.array(Draft),
+  plans: z.array(ContentPlan),
 });
 
 // POST /api/groups/:id/messages  正文里的「@Bot 名」由服务端解析成 mentions，多 Bot 群按它路由。
@@ -128,9 +150,37 @@ export const SendMessageRequest = z.object({ text: z.string().min(1) });
 export const SendMessageResponse = z.object({ message: Message });
 
 // POST /api/approvals/:id  归属人点批准或拒绝。别人的审批 404，已经有结论的 409。
-export const DecideApprovalRequest = z.object({ decision: z.enum(["approved", "rejected"]) });
+export const DecideApprovalRequest = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("approved"), scope: ApprovalScope.default("once") }).strict(),
+  z.object({ decision: z.literal("rejected") }).strict(),
+]);
 export type DecideApprovalRequest = z.infer<typeof DecideApprovalRequest>;
-export const DecideApprovalResponse = z.object({ approval: Approval });
+export const DecideApprovalResponse = z.object({ approval: Approval, grant: Grant.nullable() });
+// GET /api/grants
+export const GrantListResponse = z.object({ grants: z.array(Grant) });
+// DELETE /api/grants/:id 回 204。
+
+// POST /api/drafts/:id 单条批准或退回。
+export const DecideDraftRequest = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("approve"), content: DraftContent.optional() }).strict(),
+  z.object({ decision: z.literal("return") }).strict(),
+]);
+export const DecideDraftResponse = z.object({ draft: Draft });
+
+// POST /api/plans/:id/approve 一次批准整份计划。
+export const ApprovePlanRequest = z
+  .object({ edits: z.array(z.object({ draftId: DraftId, content: DraftContent }).strict()).max(20) })
+  .strict();
+export const ApprovePlanResponse = z.object({ plan: ContentPlan, drafts: z.array(Draft) });
+export const ReturnPlanResponse = z.object({ plan: ContentPlan });
+
+// GET /api/accounts
+export const AccountListResponse = z.object({ accounts: z.array(Account) });
+// POST /api/accounts
+export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
+export const AccountResponse = z.object({ account: Account });
+// PATCH /api/accounts/:id
+export const UpdateAccountRequest = z.object({ tier: AccountTier }).strict();
 
 // GET /api/bots/:id/routines  该 Bot 的例行任务，每条带最近 20 条运行记录，新的在前。别人的 Bot 404。
 export const RoutineListResponse = z.object({ items: z.array(Routine) });
@@ -149,6 +199,8 @@ export const CreateRoutineRequest = z.object({
   instruction: z.string().min(1).max(4000),
   triggers: z.array(TriggerInput).max(10),
   onFailure: OnFailure,
+  groupId: GroupId.nullable().optional(),
+  purpose: ModelPurpose.optional(),
   enabled: z.boolean().default(true),
 });
 export type CreateRoutineRequest = z.infer<typeof CreateRoutineRequest>;
@@ -187,6 +239,13 @@ export type CopySkillRequest = z.infer<typeof CopySkillRequest>;
 export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
 export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
 export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
+
+// POST /api/messages/:id/project-offer
+export const DecideProjectOfferRequest = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("start"), name: z.string().min(1).max(40).optional() }).strict(),
+  z.object({ decision: z.literal("dismiss") }).strict(),
+]);
+export const DecideProjectOfferResponse = z.object({ message: Message, group: Group.nullable() });
 
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
 export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
@@ -301,6 +360,7 @@ export const ServerPush = z.discriminatedUnion("type", [
   // 审批新建和有了结论都推这一条。approval 消息的正文只有 approvalId，重推那条 message 一个字都不会变，
   // 结论只能随 Approval 走。新建时先推 approval_updated 再推那条 message。
   z.object({ type: z.literal("approval_updated"), approval: Approval }),
+  z.object({ type: z.literal("grant_deleted"), grantId: GrantId }),
   // 交接同理：新建和确认都推这一条，先推它再推那条 handoff 消息。
   z.object({ type: z.literal("handoff_updated"), handoff: Handoff }),
   // 建、改、每条运行记录的状态变化都推整条例行任务，客户端整条替换。
@@ -309,5 +369,12 @@ export const ServerPush = z.discriminatedUnion("type", [
   // 建、改、复制、`/名` 引用计数加一都推整条 skill，客户端整条替换。删推 skill_deleted。
   z.object({ type: z.literal("skill_updated"), skill: Skill }),
   z.object({ type: z.literal("skill_deleted"), skillId: SkillId, botId: BotId }),
+  z.object({ type: z.literal("draft_updated"), draft: Draft }),
+  z.object({ type: z.literal("plan_updated"), plan: ContentPlan }),
+  z.object({ type: z.literal("account_updated"), account: Account }),
+  z.object({ type: z.literal("account_deleted"), accountId: AccountId }),
+  z.object({ type: z.literal("publication_created"), publication: Publication }),
+  z.object({ type: z.literal("computer_updated"), computer: Computer }),
+  z.object({ type: z.literal("notify"), notice: Notice }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

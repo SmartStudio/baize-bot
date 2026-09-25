@@ -3,6 +3,7 @@ import {
   AgentToControl,
   Bot,
   BotId,
+  GRANTABLE_SCOPES,
   ControlToAgent,
   CreateGroupRequest,
   CreateRoutineRequest,
@@ -11,6 +12,8 @@ import {
   GroupId,
   Handoff,
   Message,
+  MessageBody,
+  ProjectOfferPlatform,
   RoutineRun,
   ServerPush,
   Skill,
@@ -52,6 +55,7 @@ describe("domain schemas reject illegal states", () => {
       handled: [],
       currentBotId: null,
       dueAt: null,
+      cadence: "",
       status: "active",
     };
     expect(TopicTask.safeParse({ ...task, number: "T-2481" }).success).toBe(true);
@@ -59,7 +63,7 @@ describe("domain schemas reject illegal states", () => {
   });
 
   it("a bot hue must be one of the seven design-system hues", () => {
-    const bot = { id: "b1", ownerId: "u1", name: "小服", createdAt: now };
+    const bot = { id: "b1", ownerId: "u1", name: "小服", role: "member", runState: "running", createdAt: now };
     expect(Bot.safeParse({ ...bot, hue: "mint" }).success).toBe(true);
     expect(Bot.safeParse({ ...bot, hue: "red" }).success).toBe(false);
   });
@@ -68,6 +72,48 @@ describe("domain schemas reject illegal states", () => {
     const msg = { id: "m1", groupId: "g1", createdAt: now };
     expect(Message.safeParse({ ...msg, body: { kind: "user", text: "hi" } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { kind: "bot", text: "hi" } }).success).toBe(false);
+  });
+
+  it("硬清单只允许这一次，write_outside 允许项目授权", () => {
+    expect(GRANTABLE_SCOPES.spend).toEqual(["once"]);
+    expect(GRANTABLE_SCOPES.account_security).toEqual(["once"]);
+    expect(GRANTABLE_SCOPES.delete).toEqual(["once"]);
+    expect(GRANTABLE_SCOPES.write_outside).toEqual(["once", "project"]);
+    expect(GRANTABLE_SCOPES.spend).not.toContain("project");
+    expect(GRANTABLE_SCOPES.spend).not.toContain("forever");
+  });
+
+  it("Bot 带运行状态，方案卡能表达暂不支持的平台", () => {
+    const bot = {
+      id: "b1",
+      ownerId: "u1",
+      role: "member",
+      name: "小服",
+      hue: "mint",
+      runState: "paused",
+      createdAt: now,
+    };
+    expect(Bot.parse(bot).runState).toBe("paused");
+    expect(ProjectOfferPlatform.safeParse({ kind: "unsupported", name: "抖音" }).success).toBe(true);
+    expect(ProjectOfferPlatform.safeParse({ kind: "supported", platform: "抖音" }).success).toBe(false);
+  });
+
+  it("MessageBody 能解析方案卡、草稿卡和计划卡", () => {
+    const offer = {
+      kind: "project_offer",
+      botId: "b1",
+      name: "内容项目",
+      goal: "每周发帖",
+      team: [{ name: "小编", tag: "edit", description: "负责写作" }],
+      platforms: [{ kind: "unsupported", name: "抖音" }],
+      cadence: "每周 3 篇",
+      firstStep: "先写第一篇",
+      status: "offered",
+      groupId: null,
+    };
+    expect(MessageBody.safeParse(offer).success).toBe(true);
+    expect(MessageBody.safeParse({ kind: "draft", draftId: "d1" }).success).toBe(true);
+    expect(MessageBody.safeParse({ kind: "plan", planId: "p1" }).success).toBe(true);
   });
 });
 
@@ -103,7 +149,8 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
-      context: [],
+      context: [{ messageId: "m1", from: "用户", text: "hi" }],
+      purpose: "plan",
       members: [],
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
@@ -121,7 +168,8 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
-      context: [],
+      context: [{ messageId: "m1", from: "用户", text: "x" }],
+      purpose: "plan",
       task: null,
       members: [],
     };
@@ -129,7 +177,7 @@ describe("M7 群与主题任务的共享形状", () => {
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
   });
 
-  it("prompt 必须说明派到你的原因，成员必须带角色；set_chief 的目标可为 null 表示卸任", () => {
+  it("prompt 必须说明派到你的原因，成员必须带座次；set_chief 的目标可为 null 表示卸任", () => {
     const run = { runId: "r1", botId: "b1", groupId: "g1" };
     const member = { id: "b1", name: "小服", tag: "", description: "" };
     const prompt = {
@@ -139,14 +187,15 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "everyone",
       group: { id: "g1", number: "T-0001", title: "群", kind: "team" },
-      context: [],
+      context: [{ messageId: "m1", from: "用户", text: "x" }],
+      purpose: "plan",
       task: null,
-      members: [{ ...member, role: "chief" }],
+      members: [{ ...member, seat: "chief" }],
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     const { reason: _reason, ...withoutReason } = prompt;
     expect(ControlToAgent.safeParse(withoutReason).success, "reason 不可省").toBe(false);
-    expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员角色不可省").toBe(false);
+    expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员座次不可省").toBe(false);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: "b2" }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: null }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run }).success, "目标字段不可省").toBe(false);
@@ -336,7 +385,8 @@ describe("C0 工具视图与审批报文", () => {
         groupId: "g1",
         callId: "c1",
         tool: "write_file",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: base,
       }).success,
       "五行预览应能解析",
@@ -349,7 +399,8 @@ describe("C0 工具视图与审批报文", () => {
         groupId: "g1",
         callId: "c1",
         tool: "write_file",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: { ...base, preview: [...base.preview, "6"] },
       }).success,
       "预览最多五行",
@@ -362,7 +413,8 @@ describe("C0 工具视图与审批报文", () => {
         groupId: "g1",
         callId: "c1",
         tool: "write_file",
-        kind: "send_external",
+        action: "message_person",
+        target: null,
         view: { ...base, raw: { invalid: BigInt(1) } },
       }).success,
       "原始参数只能是 JSON 值",

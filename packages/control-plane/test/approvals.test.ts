@@ -85,7 +85,8 @@ function sendApprovalRequest(job: Running, callId: string): void {
     groupId: job.groupId,
     callId,
     tool: TOOL,
-    kind: "pay",
+    action: "spend",
+    target: null,
     view: VIEW,
   });
 }
@@ -135,7 +136,7 @@ describe("approval_request 到达", () => {
       expect(first.type, "客户端画卡的时候状态得已经在手上，所以审批先推").toBe("approval_updated");
       const approval = first.type === "approval_updated" ? first.approval : null;
       expect(approval?.status).toBe("pending");
-      expect(approval?.kind).toBe("pay");
+      expect(approval?.action).toBe("spend");
       expect(approval?.view).toEqual(VIEW);
       expect(approval?.runId).toBe(job.runId);
       expect(approval?.botId).toBe(job.botId);

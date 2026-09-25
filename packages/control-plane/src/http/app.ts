@@ -480,7 +480,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const approvals = await listApprovals(db, approvalIds);
     const handoffIds = result.page.messages.flatMap((m) => (m.body.kind === "handoff" ? [m.body.handoffId] : []));
     const handoffs = await listHandoffs(db, handoffIds);
-    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs }));
+    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs, drafts: [], plans: [] }));
   });
 
   app.post("/api/groups/:id/messages", async (c) => {
@@ -531,7 +531,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
     const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value.decision);
     if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
-    return c.json(DecideApprovalResponse.parse({ approval: settled.approval }));
+    return c.json(DecideApprovalResponse.parse({ approval: settled.approval, grant: null }));
   });
 
   app.patch("/api/tasks/:id", async (c) => {

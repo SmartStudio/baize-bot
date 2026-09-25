@@ -6,6 +6,8 @@ import {
   toolViewText,
   UserId,
   type Approval,
+  type ActionKind,
+  type GrantTarget,
   type Message,
   type ToolView,
 } from "@baize/shared";
@@ -18,9 +20,7 @@ import { appendReminders } from "./reminders.js";
 import { toApproval } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
 
-// shared 只导出了 ApprovalKind 和 ApprovalStatus 的 schema，没有导出类型，从列上取回来。
 type ApprovalRow = typeof approvals.$inferSelect;
-type ApprovalKind = ApprovalRow["kind"];
 type Decision = Exclude<ApprovalRow["status"], "pending">;
 
 /** 过了这么久还没有结论就提醒一次。规格里的「24 小时后追加一条 system 提醒」。 */
@@ -32,7 +32,8 @@ export type CreateApprovalInput = {
   readonly groupId: string;
   readonly callId: string;
   readonly tool: string;
-  readonly kind: ApprovalKind;
+  readonly action: ActionKind;
+  readonly target: GrantTarget | null;
   readonly view: ToolView;
 };
 
@@ -60,7 +61,8 @@ export async function createApproval(db: Db, input: CreateApprovalInput): Promis
           groupId: input.groupId,
           callId: input.callId,
           tool: input.tool,
-          kind: input.kind,
+          action: input.action,
+          target: input.target,
           view: input.view,
           messageId: message.id,
         })

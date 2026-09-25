@@ -1,22 +1,36 @@
 import type {
-  ApprovalKind as ApprovalKindSchema,
+  AccountLogin as AccountLoginSchema,
+  AccountTier as AccountTierSchema,
+  ActionKind as ActionKindSchema,
   ApprovalStatus as ApprovalStatusSchema,
   BotHue,
+  BotRole as BotRoleSchema,
+  BotRunState as BotRunStateSchema,
   ChecklistItem,
+  ComputerKind as ComputerKindSchema,
   ComputerStatus,
+  ContentPlanStatus as ContentPlanStatusSchema,
+  DraftContent,
+  DraftEdit,
+  DraftStatus as DraftStatusSchema,
+  GrantTarget,
   HandoffStatus as HandoffStatusSchema,
   MessageBody,
+  ModelPurpose as ModelPurposeSchema,
   OnFailure as OnFailureSchema,
+  Platform as PlatformSchema,
   RoutineRunStatus as RoutineRunStatusSchema,
   SkillSource,
-  ToolView,
   ToolOperation,
+  ToolView,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
+import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
   bigserial,
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -25,15 +39,25 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 // shared 只导出了这几个的 schema，没有导出类型，这里从 schema 推回来。
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
-type ApprovalKind = z.infer<typeof ApprovalKindSchema>;
+type AccountLogin = z.infer<typeof AccountLoginSchema>;
+type AccountTier = z.infer<typeof AccountTierSchema>;
+type ActionKind = z.infer<typeof ActionKindSchema>;
 type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
+type BotRole = z.infer<typeof BotRoleSchema>;
+type BotRunState = z.infer<typeof BotRunStateSchema>;
+type ComputerKind = z.infer<typeof ComputerKindSchema>;
+type ContentPlanStatus = z.infer<typeof ContentPlanStatusSchema>;
+type DraftStatus = z.infer<typeof DraftStatusSchema>;
 type HandoffStatus = z.infer<typeof HandoffStatusSchema>;
+type ModelPurpose = z.infer<typeof ModelPurposeSchema>;
 type OnFailure = z.infer<typeof OnFailureSchema>;
+type Platform = z.infer<typeof PlatformSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
 
 /**
@@ -94,6 +118,8 @@ export const bots = pgTable(
     ownerId: text("owner_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
+    role: text("role").$type<BotRole>().notNull().default("member"),
+    runState: text("run_state").$type<BotRunState>().notNull().default("running"),
     name: text("name").notNull(),
     tag: text("tag").notNull().default(""),
     description: text("description").notNull().default(""),
@@ -101,7 +127,12 @@ export const bots = pgTable(
     notify: boolean("notify").notNull().default(true),
     createdAt: createdAt(),
   },
-  (t) => [index("bots_owner_id_idx").on(t.ownerId)],
+  (t) => [
+    index("bots_owner_id_idx").on(t.ownerId),
+    uniqueIndex("bots_owner_id_assistant_idx")
+      .on(t.ownerId)
+      .where(sql`${t.role} = 'assistant'`),
+  ],
 );
 
 export const toolConnections = pgTable(
@@ -181,6 +212,7 @@ export const tasks = pgTable("tasks", {
   currentBotId: text("current_bot_id").references(() => bots.id, { onDelete: "set null" }),
   handled: jsonb("handled").$type<{ botId: string; from: string; to: string | null }[]>().notNull().default([]),
   status: text("status").$type<TaskStatus>().notNull().default("active"),
+  cadence: text("cadence").notNull().default(""),
 });
 
 // seq 是群内消息的唯一排序依据。created_at 在同一事务里会撞在一起，翻页不能靠它。
@@ -202,21 +234,64 @@ export const messages = pgTable(
   (t) => [index("messages_group_id_seq_idx").on(t.groupId, t.seq)],
 );
 
-// 每个用户一台。token 给电脑代理登录 /agent，gateway key 给模型网关认账，两把都是 32 字节随机数，
+// 每个用户每种电脑至多一台。token 给电脑代理登录 /agent，gateway key 给模型网关认账，两把都是 32 字节随机数，
 // 库里只存 sha256：明文只在生成的那一刻存在，比对时按哈希查，所以不能加盐。
-export const computers = pgTable("computers", {
-  id: text("id").primaryKey(),
-  ownerId: text("owner_id")
-    .notNull()
-    .unique()
-    .references(() => users.id, { onDelete: "cascade" }),
-  status: text("status").$type<ComputerStatus>().notNull().default("creating"),
-  tokenHash: text("token_hash").notNull(),
-  gatewayKeyHash: text("gateway_key_hash").notNull(),
-  host: text("host"),
-  idleSince: timestamp("idle_since", { withTimezone: true }),
-  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
-  createdAt: createdAt(),
+export const computers = pgTable(
+  "computers",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind").$type<ComputerKind>().notNull(),
+    status: text("status").$type<ComputerStatus>().notNull().default("creating"),
+    tokenHash: text("token_hash").notNull(),
+    gatewayKeyHash: text("gateway_key_hash").notNull(),
+    host: text("host"),
+    idleSince: timestamp("idle_since", { withTimezone: true }),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("computers_owner_id_kind_idx").on(t.ownerId, t.kind)],
+);
+
+export const accounts = pgTable(
+  "accounts",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    computerId: text("computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "restrict" }),
+    platform: text("platform").$type<Platform>().notNull(),
+    handle: text("handle"),
+    tier: text("tier").$type<AccountTier>().notNull().default("confirm_publish"),
+    login: text("login").$type<AccountLogin>().notNull().default("none"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index("accounts_owner_id_idx").on(t.ownerId),
+    uniqueIndex("accounts_computer_platform_handle_idx").on(t.computerId, t.platform, t.handle),
+    uniqueIndex("accounts_owner_platform_none_idx")
+      .on(t.ownerId, t.platform)
+      .where(sql`${t.login} = 'none'`),
+    check("accounts_xhs_tier_ck", sql`${t.platform} <> 'xiaohongshu' OR ${t.tier} <> 'direct_publish'`),
+    check("accounts_handle_ck", sql`(${t.login} = 'none') = (${t.handle} IS NULL)`),
+  ],
+);
+
+export const accountCredentials = pgTable("account_credentials", {
+  accountId: text("account_id")
+    .primaryKey()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  accessEnc: text("access_enc").notNull(),
+  refreshEnc: text("refresh_enc"),
+  accessExpiresAt: timestamp("access_expires_at", { withTimezone: true }),
+  refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
+  scope: text("scope").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 });
 
 // 例行任务属于一个 Bot，删 Bot 跟着走。触发器整份存 jsonb：列化的话每加一种触发器就要改一次表，
@@ -235,10 +310,16 @@ export const routines = pgTable(
     instruction: text("instruction").notNull(),
     triggers: jsonb("triggers").$type<StoredTrigger[]>().notNull().default([]),
     onFailure: text("on_failure").$type<OnFailure>().notNull().default("stop_and_tell"),
+    groupId: text("group_id").references(() => groups.id, { onDelete: "cascade" }),
+    purpose: text("purpose").$type<ModelPurpose>().notNull().default("plan"),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: createdAt(),
   },
-  (t) => [index("routines_bot_id_idx").on(t.botId), index("routines_triggers_idx").using("gin", t.triggers)],
+  (t) => [
+    index("routines_bot_id_idx").on(t.botId),
+    index("routines_triggers_idx").using("gin", t.triggers),
+    index("routines_group_id_idx").on(t.groupId),
+  ],
 );
 
 // 一条运行记录。触发那一刻就落 running，收尾时改状态补 note，每个例行任务只留最近 20 条。
@@ -266,6 +347,7 @@ export const runs = pgTable(
     ownerId: text("owner_id").references(() => users.id, { onDelete: "set null" }),
     botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
     groupId: text("group_id").references(() => groups.id, { onDelete: "set null" }),
+    computerId: text("computer_id").references(() => computers.id, { onDelete: "set null" }),
     triggerMessageId: text("trigger_message_id").references(() => messages.id, { onDelete: "set null" }),
     // 例行任务发起的活在这里认领。边存在这一头，run 行一生出来就带着它，
     // 上行的 run_done 拿到的就是它，中间没有「派完活再回填」的窗口能让收尾报文扑空。
@@ -284,6 +366,32 @@ export const runs = pgTable(
     index("runs_bot_id_idx").on(t.botId),
     index("runs_owner_id_started_at_idx").on(t.ownerId, t.startedAt),
     index("runs_routine_run_id_idx").on(t.routineRunId),
+    index("runs_computer_id_idx").on(t.computerId),
+  ],
+);
+
+export const grants = pgTable(
+  "grants",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    action: text("action").$type<ActionKind>().notNull(),
+    target: jsonb("target").$type<GrantTarget>().notNull(),
+    scope: text("scope").$type<"project" | "forever">().notNull(),
+    groupId: text("group_id").references(() => groups.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    unique("grants_owner_action_target_group_uq").on(t.ownerId, t.action, t.target, t.groupId).nullsNotDistinct(),
+    check(
+      "grants_scope_group_ck",
+      sql`(${t.scope} = 'project' AND ${t.groupId} IS NOT NULL) OR (${t.scope} = 'forever' AND ${t.groupId} IS NULL)`,
+    ),
+    check("grants_action_ck", sql`${t.action} NOT IN ('spend', 'account_security', 'delete')`),
+    check("grants_forever_ck", sql`${t.scope} <> 'forever' OR ${t.action} <> 'write_outside'`),
+    index("grants_owner_id_idx").on(t.ownerId),
   ],
 );
 
@@ -305,9 +413,11 @@ export const approvals = pgTable(
       .references(() => groups.id, { onDelete: "cascade" }),
     callId: text("call_id").notNull(),
     tool: text("tool").notNull(),
-    kind: text("kind").$type<ApprovalKind>().notNull(),
+    action: text("action").$type<ActionKind>().notNull(),
+    target: jsonb("target").$type<GrantTarget>(),
     view: jsonb("view").$type<ToolView>().notNull(),
     status: text("status").$type<ApprovalStatus>().notNull().default("pending"),
+    grantId: text("grant_id").references(() => grants.id, { onDelete: "set null" }),
     messageId: text("message_id")
       .notNull()
       .references(() => messages.id, { onDelete: "cascade" }),
@@ -319,6 +429,81 @@ export const approvals = pgTable(
     index("approvals_group_id_status_idx").on(t.groupId, t.status),
     uniqueIndex("approvals_run_id_call_id_idx").on(t.runId, t.callId),
   ],
+);
+
+export const contentPlans = pgTable(
+  "content_plans",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
+    title: text("title").notNull(),
+    status: text("status").$type<ContentPlanStatus>().notNull().default("pending"),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [index("content_plans_owner_id_status_idx").on(t.ownerId, t.status)],
+);
+
+export const drafts = pgTable(
+  "drafts",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
+    planId: text("plan_id").references(() => contentPlans.id, { onDelete: "cascade" }),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    platform: text("platform").$type<Platform>().notNull(),
+    content: jsonb("content").$type<DraftContent>().notNull(),
+    contentHash: text("content_hash").notNull(),
+    approvedHash: text("approved_hash"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
+    status: text("status").$type<DraftStatus>().notNull().default("pending"),
+    edits: jsonb("edits").$type<DraftEdit[]>().notNull().default([]),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    failure: text("failure"),
+    createdAt: createdAt(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("drafts_status_scheduled_at_idx").on(t.status, t.scheduledAt),
+    index("drafts_owner_id_status_idx").on(t.ownerId, t.status),
+    index("drafts_plan_id_idx").on(t.planId),
+  ],
+);
+
+export const publications = pgTable(
+  "publications",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    draftId: text("draft_id")
+      .unique()
+      .references(() => drafts.id, { onDelete: "set null" }),
+    groupId: text("group_id").references(() => groups.id, { onDelete: "set null" }),
+    accountId: text("account_id").references(() => accounts.id, { onDelete: "set null" }),
+    platform: text("platform").$type<Platform>().notNull(),
+    url: text("url").notNull(),
+    externalId: text("external_id").notNull(),
+    publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("publications_group_id_published_at_idx").on(t.groupId, t.publishedAt)],
 );
 
 // 一份等目标 Bot 确认的交接报文。和审批同一种形状：message_id 指向群里那张卡，非空，卡和报文一起生；

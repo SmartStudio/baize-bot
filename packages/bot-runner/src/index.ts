@@ -150,7 +150,7 @@ function composePrompt(message: PromptMessage): string {
   const sections: string[] = [
     message.group.kind === "solo"
       ? "[这是你和用户的单聊]"
-      : `[群 ${message.group.number} ${message.group.title} · 成员 ${message.members.map((member) => `${member.name}${member.role === "chief" ? "（首席）" : ""}`).join("、")}]`,
+      : `[群 ${message.group.number} ${message.group.title} · 成员 ${message.members.map((member) => `${member.name}${member.seat === "chief" ? "（首席）" : ""}`).join("、")}]`,
   ];
   switch (message.reason) {
     case "solo":

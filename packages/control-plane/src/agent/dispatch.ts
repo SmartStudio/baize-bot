@@ -125,7 +125,7 @@ async function sendSpeaker(
     name,
     tag,
     description,
-    role: id === chiefBotId ? ("chief" as const) : ("member" as const),
+    seat: id === chiefBotId ? ("chief" as const) : ("member" as const),
   }));
   const group = {
     id: groupId,
@@ -155,10 +155,11 @@ async function sendSpeaker(
     origin,
     reason: speaker.reason,
     group,
-    context: history.flatMap((body) => {
-      const line = summarize(body, speaker.botId, members);
+    context: history.flatMap((message) => {
+      const line = summarize(message, speaker.botId, members);
       return line === null ? [] : [line];
     }),
+    purpose: "plan",
     task: members.length > 1 ? task : null,
     members: roster,
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
@@ -175,41 +176,42 @@ function triggerText(body: MessageBody): string {
   return body.kind === "bot" ? body.text : "";
 }
 
-type ContextLine = { readonly from: string; readonly text: string };
+type ContextLine = { readonly messageId: Message["id"]; readonly from: string; readonly text: string };
 
-async function recentBodies(
-  db: Db,
-  groupId: GroupId,
-  trigger: Message,
-  includeRecent: boolean,
-): Promise<MessageBody[]> {
+async function recentBodies(db: Db, groupId: GroupId, trigger: Message, includeRecent: boolean): Promise<Message[]> {
   const result = await listMessages(db, groupId, {
     ...(includeRecent ? {} : { before: trigger.id }),
     limit: CONTEXT_MESSAGES,
   });
   if (result.kind !== "ok") return [];
-  return result.page.messages.filter((message) => message.id !== trigger.id).map((message) => message.body);
+  return result.page.messages.filter((message) => message.id !== trigger.id);
 }
 
 /** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。 */
-function summarize(body: MessageBody, recipient: BotId, members: readonly GroupBot[]): ContextLine | null {
+function summarize(message: Message, recipient: BotId, members: readonly GroupBot[]): ContextLine | null {
+  const body = message.body;
+  const line = (from: string, text: string): ContextLine => ({ messageId: message.id, from, text });
   switch (body.kind) {
     case "user":
-      return { from: "你", text: clip(body.text) };
+      return line("你", clip(body.text));
     case "bot":
-      return { from: sender(body.botId, recipient, members), text: clip(body.text) };
+      return line(sender(body.botId, recipient, members), clip(body.text));
     case "system":
-      return { from: "系统", text: clip(body.text) };
+      return line("系统", clip(body.text));
     case "tool_call":
-      return { from: sender(body.botId, recipient, members), text: clip(toolViewText(body.view)) };
+      return line(sender(body.botId, recipient, members), clip(toolViewText(body.view)));
     case "cost":
       return null;
     case "approval":
-      return { from: "系统", text: "一条等你点头的审批" };
+      return line("系统", "一条等你点头的审批");
     case "handoff":
-      return { from: "系统", text: "一条交接报文" };
+      return line("系统", "一条交接报文");
     case "skill_offer":
-      return { from: "系统", text: `问过要不要存成 skill「${body.name}」` };
+      return line("系统", `问过要不要存成 skill「${body.name}」`);
+    case "project_offer":
+    case "draft":
+    case "plan":
+      return null;
   }
 }
 

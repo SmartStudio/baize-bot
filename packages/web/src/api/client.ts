@@ -126,8 +126,16 @@ export const api = {
   sendMessage: async (groupId: GroupId, text: string) =>
     json(SendMessageResponse, await send("POST", `/groups/${encodeURIComponent(groupId)}/messages`, { text })),
   decideApproval: async (id: ApprovalId, decision: DecideApprovalRequest["decision"]): Promise<Approval> =>
-    (await json(DecideApprovalResponse, await send("POST", `/approvals/${encodeURIComponent(id)}`, { decision })))
-      .approval,
+    (
+      await json(
+        DecideApprovalResponse,
+        await send(
+          "POST",
+          `/approvals/${encodeURIComponent(id)}`,
+          decision === "approved" ? { decision, scope: "once" } : { decision },
+        ),
+      )
+    ).approval,
   routines: async (botId: BotId) =>
     json(RoutineListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/routines`)),
   createRoutine: async (botId: BotId, body: CreateRoutineRequest): Promise<Routine> =>

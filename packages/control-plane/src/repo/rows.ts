@@ -29,6 +29,8 @@ export function toBot(row: typeof schema.bots.$inferSelect): Bot {
   return Bot.parse({
     id: row.id,
     ownerId: row.ownerId,
+    role: row.role,
+    runState: row.runState,
     name: row.name,
     tag: row.tag,
     description: row.description,
@@ -63,6 +65,7 @@ export function toTask(row: typeof schema.tasks.$inferSelect): TopicTask {
     currentBotId: row.currentBotId,
     handled: row.handled,
     status: row.status,
+    cadence: row.cadence,
   });
 }
 
@@ -82,10 +85,12 @@ export function toApproval(row: typeof schema.approvals.$inferSelect): Approval 
     groupId: row.groupId,
     botId: row.botId,
     runId: row.runId,
-    kind: row.kind,
+    action: row.action,
+    target: row.target,
     view: row.view,
     status: row.status,
     decidedAt: row.decidedAt?.toISOString() ?? null,
+    grantId: row.grantId,
   });
 }
 
@@ -121,6 +126,8 @@ export function toRoutine(
     instruction: row.instruction,
     triggers: row.triggers,
     onFailure: row.onFailure,
+    groupId: row.groupId,
+    purpose: row.purpose,
     enabled: row.enabled,
     runs: runs.map((run) => ({
       startedAt: run.startedAt.toISOString(),
@@ -155,6 +162,7 @@ export function toComputer(row: typeof schema.computers.$inferSelect): Computer 
   return Computer.parse({
     id: row.id,
     ownerId: row.ownerId,
+    kind: row.kind,
     status: row.status,
     host: row.host,
     idleSince: row.idleSince?.toISOString() ?? null,

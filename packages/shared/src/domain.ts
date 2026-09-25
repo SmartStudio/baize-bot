@@ -24,6 +24,11 @@ export const ToolConnectionId = id("ToolConnectionId");
 export const SkillId = dirId("SkillId");
 export const RoutineId = id("RoutineId");
 export const RunId = id("RunId");
+export const GrantId = id("GrantId");
+export const DraftId = id("DraftId");
+export const ContentPlanId = id("ContentPlanId");
+export const PublicationId = id("PublicationId");
+export const AccountId = id("AccountId");
 
 export type UserId = z.infer<typeof UserId>;
 export type ComputerId = z.infer<typeof ComputerId>;
@@ -37,6 +42,11 @@ export type ToolConnectionId = z.infer<typeof ToolConnectionId>;
 export type SkillId = z.infer<typeof SkillId>;
 export type RoutineId = z.infer<typeof RoutineId>;
 export type RunId = z.infer<typeof RunId>;
+export type GrantId = z.infer<typeof GrantId>;
+export type DraftId = z.infer<typeof DraftId>;
+export type ContentPlanId = z.infer<typeof ContentPlanId>;
+export type PublicationId = z.infer<typeof PublicationId>;
+export type AccountId = z.infer<typeof AccountId>;
 
 export const Timestamp = z.string().datetime();
 
@@ -50,10 +60,13 @@ export type User = z.infer<typeof User>;
 
 export const ComputerStatus = z.enum(["creating", "online", "sleeping", "failed"]);
 export type ComputerStatus = z.infer<typeof ComputerStatus>;
+export const ComputerKind = z.enum(["local", "remote"]);
+export type ComputerKind = z.infer<typeof ComputerKind>;
 
 export const Computer = z.object({
   id: ComputerId,
   ownerId: UserId,
+  kind: ComputerKind,
   status: ComputerStatus,
   host: z.string().nullable(),
   idleSince: Timestamp.nullable(),
@@ -64,16 +77,22 @@ export type Computer = z.infer<typeof Computer>;
 // 七个队友色相，来自设计系统 tokens/colors.css 的 --bot-*。
 export const BotHue = z.enum(["coral", "tangerine", "lime", "mint", "sky", "violet", "pink"]);
 export type BotHue = z.infer<typeof BotHue>;
+export const BotRole = z.enum(["assistant", "member"]);
+export type BotRole = z.infer<typeof BotRole>;
+export const BotRunState = z.enum(["running", "paused"]);
+export type BotRunState = z.infer<typeof BotRunState>;
 
 export const Bot = z.object({
   id: BotId,
   ownerId: UserId,
+  role: BotRole,
   name: z.string().min(1).max(20),
   tag: z.string().max(20).default(""),
   description: z.string().default(""),
   hue: BotHue,
   notify: z.boolean().default(true),
   toolConnectionIds: z.array(ToolConnectionId).default([]),
+  runState: BotRunState,
   createdAt: Timestamp,
 });
 export type Bot = z.infer<typeof Bot>;
@@ -99,6 +118,7 @@ export const TopicTask = z.object({
   number: z.string().regex(/^T-\d{4}$/),
   title: z.string().min(1),
   summary: z.string().default(""),
+  cadence: z.string().max(200),
   dueAt: Timestamp.nullable(),
   checklist: z.array(ChecklistItem),
   currentBotId: BotId.nullable(),
@@ -118,18 +138,87 @@ export const Group = z.object({
 });
 export type Group = z.infer<typeof Group>;
 
-export const ApprovalKind = z.enum(["send_external", "change_production_data", "pay"]);
 export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired"]);
+export type ApprovalStatus = z.infer<typeof ApprovalStatus>;
+
+export const ActionKind = z.enum([
+  "read",
+  "write_workspace",
+  "write_outside",
+  "delete",
+  "shell",
+  "publish",
+  "message_person",
+  "engage",
+  "spend",
+  "account_security",
+  "install",
+  "external_write",
+]);
+export type ActionKind = z.infer<typeof ActionKind>;
+
+export const Verdict = z.enum(["allow", "ask", "deny"]);
+export type Verdict = z.infer<typeof Verdict>;
+
+export const ApprovalScope = z.enum(["once", "project", "forever"]);
+export type ApprovalScope = z.infer<typeof ApprovalScope>;
+
+export const GRANTABLE_SCOPES: Readonly<Record<ActionKind, readonly ApprovalScope[]>> = {
+  read: ["once", "project", "forever"],
+  write_workspace: ["once", "project", "forever"],
+  write_outside: ["once", "project"],
+  delete: ["once"],
+  shell: ["once", "project", "forever"],
+  publish: ["once", "project", "forever"],
+  message_person: ["once", "project", "forever"],
+  engage: ["once", "project", "forever"],
+  spend: ["once"],
+  account_security: ["once"],
+  install: ["once", "project", "forever"],
+  external_write: ["once", "project", "forever"],
+};
+
+export const GrantTarget = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("account"), accountId: AccountId }).strict(),
+  z.object({ kind: z.literal("domain"), domain: z.string().min(1).max(253) }).strict(),
+  z.object({ kind: z.literal("path"), computerId: ComputerId, prefix: z.string().startsWith("/").max(1024) }).strict(),
+]);
+export type GrantTarget = z.infer<typeof GrantTarget>;
+
+export const Grant = z.discriminatedUnion("scope", [
+  z
+    .object({
+      id: GrantId,
+      scope: z.literal("project"),
+      groupId: GroupId,
+      action: ActionKind,
+      target: GrantTarget,
+      createdAt: Timestamp,
+    })
+    .strict(),
+  z
+    .object({
+      id: GrantId,
+      scope: z.literal("forever"),
+      action: ActionKind,
+      target: GrantTarget,
+      createdAt: Timestamp,
+    })
+    .strict(),
+]);
+export type Grant = z.infer<typeof Grant>;
 
 export const Approval = z.object({
   id: ApprovalId,
   groupId: GroupId,
   botId: BotId,
   runId: RunId,
-  kind: ApprovalKind,
+  action: ActionKind,
+  target: GrantTarget.nullable(),
   view: ToolView,
   status: ApprovalStatus,
   decidedAt: Timestamp.nullable(),
+  grantId: GrantId.nullable(),
 });
 export type Approval = z.infer<typeof Approval>;
 
@@ -177,6 +266,25 @@ export type Skill = z.infer<typeof Skill>;
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
 
+export const Platform = z.enum(["github", "x", "xiaohongshu"]);
+export type Platform = z.infer<typeof Platform>;
+export const BrowserPlatform = Platform.extract(["xiaohongshu"]);
+export type BrowserPlatform = z.infer<typeof BrowserPlatform>;
+export const OAuthPlatform = Platform.extract(["github", "x"]);
+export type OAuthPlatform = z.infer<typeof OAuthPlatform>;
+
+export const ProjectOfferStatus = z.enum(["offered", "started", "dismissed"]);
+export type ProjectOfferStatus = z.infer<typeof ProjectOfferStatus>;
+export const ProjectOfferMember = z
+  .object({ name: z.string().min(1).max(20), tag: z.string().max(20), description: z.string().max(200) })
+  .strict();
+export type ProjectOfferMember = z.infer<typeof ProjectOfferMember>;
+export const ProjectOfferPlatform = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("supported"), platform: Platform }).strict(),
+  z.object({ kind: z.literal("unsupported"), name: z.string().min(1).max(20) }).strict(),
+]);
+export type ProjectOfferPlatform = z.infer<typeof ProjectOfferPlatform>;
+
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
   // mentions 在写入时从正文里解析出来存下，派活路由只看它，不重新解析正文。可省，省了等于没 @ 人。
@@ -219,6 +327,20 @@ export const MessageBody = z.discriminatedUnion("kind", [
     status: SkillOfferStatus,
     skillId: SkillId.nullable(),
   }),
+  z.object({
+    kind: z.literal("project_offer"),
+    botId: BotId,
+    name: z.string().min(1).max(40),
+    goal: z.string().min(1).max(200),
+    team: z.array(ProjectOfferMember).min(1).max(5),
+    platforms: z.array(ProjectOfferPlatform).max(6),
+    cadence: z.string().max(200),
+    firstStep: z.string().min(1).max(200),
+    status: ProjectOfferStatus,
+    groupId: GroupId.nullable(),
+  }),
+  z.object({ kind: z.literal("draft"), draftId: DraftId }),
+  z.object({ kind: z.literal("plan"), planId: ContentPlanId }),
 ]);
 export type MessageBody = z.infer<typeof MessageBody>;
 
@@ -250,15 +372,121 @@ export const ToolConnection = z.object({
 });
 export type ToolConnection = z.infer<typeof ToolConnection>;
 
-export const SiteLoginStatus = z.enum(["valid", "expired"]);
+export const AccountTier = z.enum(["read_only", "draft", "confirm_publish", "direct_publish"]);
+export type AccountTier = z.infer<typeof AccountTier>;
+export const AccountLogin = z.enum(["none", "valid", "expired"]);
+export type AccountLogin = z.infer<typeof AccountLogin>;
 
-export const SiteLogin = z.object({
-  domain: z.string(),
-  loggedInAt: Timestamp,
-  by: z.enum(["user", "bot"]),
-  status: SiteLoginStatus,
+export const Account = z.object({
+  id: AccountId,
+  ownerId: UserId,
+  computerId: ComputerId,
+  platform: Platform,
+  handle: z.string().min(1).max(100).nullable(),
+  tier: AccountTier,
+  login: AccountLogin,
+  createdAt: Timestamp,
 });
-export type SiteLogin = z.infer<typeof SiteLogin>;
+export type Account = z.infer<typeof Account>;
+
+export const DraftStatus = z.enum(["pending", "approved", "publishing", "published", "returned", "failed"]);
+export type DraftStatus = z.infer<typeof DraftStatus>;
+export const DraftKind = z.enum(["post", "reply"]);
+export type DraftKind = z.infer<typeof DraftKind>;
+
+export const DraftImage = z
+  .object({
+    path: z.string().min(1),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  })
+  .strict();
+export type DraftImage = z.infer<typeof DraftImage>;
+
+export const GithubTarget = z
+  .object({ repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/), as: z.enum(["issue", "discussion"]) })
+  .strict();
+export type GithubTarget = z.infer<typeof GithubTarget>;
+
+export const ReplyTarget = z
+  .object({ url: z.string().url(), author: z.string().min(1).max(100), quote: z.string().max(2000) })
+  .strict();
+export type ReplyTarget = z.infer<typeof ReplyTarget>;
+
+export const DraftContent = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("post"),
+      title: z.string().min(1).max(100).nullable(),
+      text: z.string().min(1).max(10_000),
+      images: z.array(DraftImage).max(9),
+      github: GithubTarget.nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("reply"),
+      text: z.string().min(1).max(10_000),
+      images: z.array(DraftImage).max(9),
+      replyTo: ReplyTarget,
+    })
+    .strict(),
+]);
+export type DraftContent = z.infer<typeof DraftContent>;
+
+export const DraftEdit = z.object({ before: z.string(), after: z.string(), at: Timestamp }).strict();
+export type DraftEdit = z.infer<typeof DraftEdit>;
+
+export const Draft = z.object({
+  id: DraftId,
+  groupId: GroupId,
+  botId: BotId.nullable(),
+  planId: ContentPlanId.nullable(),
+  accountId: AccountId,
+  platform: Platform,
+  content: DraftContent,
+  scheduledAt: Timestamp.nullable(),
+  status: DraftStatus,
+  edits: z.array(DraftEdit).max(50),
+  createdAt: Timestamp,
+  decidedAt: Timestamp.nullable(),
+});
+export type Draft = z.infer<typeof Draft>;
+
+export const ContentPlanStatus = z.enum(["pending", "approved", "returned"]);
+export type ContentPlanStatus = z.infer<typeof ContentPlanStatus>;
+
+export const ContentPlan = z.object({
+  id: ContentPlanId,
+  groupId: GroupId,
+  botId: BotId.nullable(),
+  title: z.string().min(1).max(60),
+  status: ContentPlanStatus,
+  draftIds: z.array(DraftId).min(1).max(20),
+  createdAt: Timestamp,
+  decidedAt: Timestamp.nullable(),
+});
+export type ContentPlan = z.infer<typeof ContentPlan>;
+
+export const Publication = z.object({
+  id: PublicationId,
+  draftId: DraftId.nullable(),
+  groupId: GroupId.nullable(),
+  accountId: AccountId.nullable(),
+  platform: Platform,
+  url: z.string().url(),
+  publishedAt: Timestamp,
+});
+export type Publication = z.infer<typeof Publication>;
+
+export const NotifyKind = z.enum(["confirm", "result", "stuck"]);
+export type NotifyKind = z.infer<typeof NotifyKind>;
+export const Notice = z
+  .object({ kind: NotifyKind, text: z.string().min(1).max(200), groupId: GroupId.nullable(), at: Timestamp })
+  .strict();
+export type Notice = z.infer<typeof Notice>;
+
+export const ModelPurpose = z.enum(["plan", "fast"]);
+export type ModelPurpose = z.infer<typeof ModelPurpose>;
 
 export const Trigger = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cron"), expr: z.string() }),
@@ -282,6 +510,8 @@ export type RoutineRun = z.infer<typeof RoutineRun>;
 export const Routine = z.object({
   id: RoutineId,
   botId: BotId,
+  groupId: GroupId.nullable(),
+  purpose: ModelPurpose,
   name: z.string().min(1),
   instruction: z.string(),
   triggers: z.array(Trigger),

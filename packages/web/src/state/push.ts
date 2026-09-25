@@ -53,6 +53,7 @@ export const createPushHandlers = ({
       notifyApproval(push.approval, current, new Date());
     }
   },
+  grant_deleted: () => undefined,
   handoff_updated: (push) => {
     // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
     const unseenTerminal =
@@ -66,6 +67,13 @@ export const createPushHandlers = ({
   routine_deleted: (push) => dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId }),
   skill_updated: (push) => dispatch({ type: "skill_upserted", skill: push.skill }),
   skill_deleted: (push) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId }),
+  draft_updated: () => undefined,
+  plan_updated: () => undefined,
+  account_updated: () => undefined,
+  account_deleted: () => undefined,
+  publication_created: () => undefined,
+  computer_updated: () => undefined,
+  notify: () => undefined,
 });
 
 export const dispatchServerPush = (handlers: PushHandlers, push: ServerPush): void => {

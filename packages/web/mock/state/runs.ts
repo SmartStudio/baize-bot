@@ -30,7 +30,7 @@ export const createApproval = (input: {
   groupId: string;
   botId: BotId;
   runId: RunId;
-  kind: Approval["kind"];
+  action: Approval["action"];
   view: Approval["view"];
 }): Approval => {
   const approval = Approval.parse({
@@ -38,10 +38,12 @@ export const createApproval = (input: {
     groupId: GroupId.parse(input.groupId),
     botId: input.botId,
     runId: input.runId,
-    kind: input.kind,
+    action: input.action,
+    target: null,
     view: input.view,
     status: "pending",
     decidedAt: null,
+    grantId: null,
   });
   approvals.set(approval.id, approval);
   return approval;
@@ -130,9 +132,11 @@ const DELTA_COUNT = 4;
 
 // 这次运行用的工具要不要点头，写死在 prompt 上：出现「发」「付」或「退款」就要。镜像 bot-runner/README.md 的
 // 工具名前缀规则（send_ 映射 send_external、pay_ 映射 pay），含「发」当对外发送，其余当付钱。
-const approvalFor = (prompt: string): { tool: string; kind: Approval["kind"] } | null => {
+const approvalFor = (prompt: string): { tool: string; action: Approval["action"] } | null => {
   if (!/[发付]|退款/.test(prompt)) return null;
-  return prompt.includes("发") ? { tool: "send_email", kind: "send_external" } : { tool: "pay_refund", kind: "pay" };
+  return prompt.includes("发")
+    ? { tool: "send_email", action: "message_person" }
+    : { tool: "pay_refund", action: "spend" };
 };
 
 const waitForDecision = (id: string): Promise<ApprovalDecision> => new Promise((resolve) => waiters.set(id, resolve));
@@ -268,7 +272,7 @@ export const streamBotReply = async (
     await sleep(TOOL_CALL_MS);
     if (abandoned()) return;
   } else {
-    const approval = createApproval({ groupId, botId, runId, kind: needed.kind, view });
+    const approval = createApproval({ groupId, botId, runId, action: needed.action, view });
     const card = appendMessage(groupId, { kind: "approval", approvalId: approval.id });
     // 先推 approval_updated 再推那条消息：卡的状态只在 Approval 上，消息先到的话前端只能先画一张查不到状态的占位。
     push({ type: "approval_updated", approval });

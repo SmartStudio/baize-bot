@@ -188,7 +188,7 @@ describe("多 Bot 群派活", () => {
 
       expect(first.botId, "正文先 @ 小服，所以第一条 prompt 先到小服").toBe(team.service.id);
       expect(second.botId, "第二条 prompt 再到小销").toBe(team.sales.id);
-      expect(second.context).toContainEqual({ from: "小服 · 客服", text: "小服先答了" });
+      expect(second.context).toContainEqual(expect.objectContaining({ from: "小服 · 客服", text: "小服先答了" }));
       expect(
         first.members.map((member) => member.name),
         "成员表仍按群成员位置，小销在前",
@@ -212,8 +212,8 @@ describe("多 Bot 群派活", () => {
       expect(first.task?.number, "多 Bot 群的 prompt 带的是这个群的任务卡").toBe(team.task.number);
       expect(first.task?.currentBotId, "任务卡是改完经手之后的那份").toBe(team.sales.id);
       expect(first.members, "成员名单是全体成员，按位置顺序，带 tag 和描述，没设首席时都是普通成员").toEqual([
-        { id: team.sales.id, name: "小销", tag: "销售", description: "", role: "member" },
-        { id: team.service.id, name: "小服", tag: "客服", description: "", role: "member" },
+        { id: team.sales.id, name: "小销", tag: "销售", description: "", seat: "member" },
+        { id: team.service.id, name: "小服", tag: "客服", description: "", seat: "member" },
       ]);
       expect(first.origin, "用户手打的消息").toEqual({ kind: "user" });
       expect(first.reason, "派活原因是被 @").toBe("mentioned");
@@ -283,7 +283,7 @@ describe("多 Bot 群派活", () => {
       expect(prompt.botId, "单 Bot 群 @ 谁都派给它").toBe(team.service.id);
       expect(prompt.task, "单 Bot 群不带任务卡").toBeNull();
       expect(prompt.members).toEqual([
-        { id: team.service.id, name: "小服", tag: "客服", description: "", role: "member" },
+        { id: team.service.id, name: "小服", tag: "客服", description: "", seat: "member" },
       ]);
       expect(prompt.reason, "单 Bot 群的派活原因").toBe("solo");
       expect(prompt.group, "单 Bot 群的任务卡不下发，但群标签仍取它的编号，标题就是 Bot 名").toEqual({
@@ -317,7 +317,7 @@ describe("多 Bot 群派活", () => {
       await say(team, team.group.id, "@小销 继续");
       const prompt = await team.agent.expect("prompt");
       expect(prompt.botId).toBe(team.sales.id);
-      expect(prompt.context, "收件人是小销，所以小销署自己的名字，小服带上 tag").toEqual([
+      expect(prompt.context, "收件人是小销，所以小销署自己的名字，小服带上 tag").toMatchObject([
         { from: "小销", text: "价格我定好了" },
         { from: "小服 · 客服", text: "退货政策也写了" },
       ]);
@@ -365,7 +365,7 @@ describe("多 Bot 群派活", () => {
       const chief = await team.agent.expect("prompt");
       expect(chief.botId).toBe(team.sales.id);
       expect(chief.reason).toBe("chief");
-      expect(chief.members.find((member) => member.id === team.sales.id)?.role).toBe("chief");
+      expect(chief.members.find((member) => member.id === team.sales.id)?.seat).toBe("chief");
       team.agent.send({
         type: "mention",
         runId: chief.runId,

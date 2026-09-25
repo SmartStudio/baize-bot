@@ -24,7 +24,7 @@ describe("迁移", () => {
     expect(again, "第二次跑迁移应当一个文件都不应用").toEqual([]);
   });
 
-  it("建出十七张业务表加一张迁移记账表", async () => {
+  it("建出二十四张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -32,13 +32,19 @@ describe("迁移", () => {
     // 库的排序规则不确定，下划线开头的表位置会变，所以在 JS 里排。
     expect(rows.map((r) => r.table_name).toSorted()).toEqual([
       "_migrations",
+      "account_credentials",
+      "accounts",
       "approvals",
       "bots",
       "computers",
+      "content_plans",
+      "drafts",
+      "grants",
       "group_members",
       "groups",
       "handoffs",
       "messages",
+      "publications",
       "routine_runs",
       "routines",
       "runs",

@@ -139,7 +139,8 @@ it("电脑断线收尾后，挂着的审批变成已失效", async () => {
       groupId: owner.groupId,
       callId: "disconnect-approval",
       tool: "send_email",
-      kind: "send_external",
+      action: "message_person",
+      target: null,
       view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
     });
     const created = await push.next();

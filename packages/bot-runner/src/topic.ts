@@ -58,7 +58,7 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     members.length === 0
       ? [EMPTY]
       : members.map((member) => {
-          const tags = [member.tag, ...(member.role === "chief" ? ["首席"] : [])].filter(Boolean);
+          const tags = [member.tag, ...(member.seat === "chief" ? ["首席"] : [])].filter(Boolean);
           return `- ${member.name}${tags.length === 0 ? "" : `（${tags.join("，")}）`}${member.description === "" ? "" : `：${member.description}`}`;
         });
 

@@ -194,7 +194,8 @@ describe("GET /api/overnight", () => {
       groupId: waiting.group.id,
       callId: "approval-1",
       tool: "pay",
-      kind: "pay",
+      action: "spend",
+      target: null,
       view: { kind: "mcp", server: "采购系统", tool: "pay", params: [] },
       messageId: approvalMessageId,
     });

@@ -53,9 +53,6 @@ export async function handleAgentEvent(
     case "heartbeat":
       await markComputerOnline(deps.db, conn.computerId);
       return;
-    // 已登录站点是 M6 的对象，这一版收下不存。
-    case "sites":
-      return;
     case "bot_text":
       await onBotText(deps, conn, message);
       return;
@@ -328,7 +325,8 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
     groupId,
     callId: event.callId,
     tool: event.tool,
-    kind: event.kind,
+    action: event.action,
+    target: event.target,
     view: event.view,
   });
   // 同一条 approval_request 重发时这里是 null：不多一张卡，也不多推一次。

@@ -4,18 +4,18 @@ import type { AgentToControl, BotId, GroupId, RunId, ToolConnection, ToolView } 
 // 经 runner.approve 落回来。被拒的 callId 记在这里：Pi 的事件层里「被拦下」和「工具自己报错」
 // 都只是 isError，分不出来。
 
-export type ApprovalKind = Extract<AgentToControl, { type: "approval_request" }>["kind"];
+export type ApprovalAction = Extract<AgentToControl, { type: "approval_request" }>["action"];
 type ApprovalAbandonReason = Exclude<Extract<AgentToControl, { type: "approval_abandoned" }>["reason"], "disconnected">;
 
 // 第一版按工具名前缀定审批类型。命中不了的一律当改生产数据，宁可多问一次。
-const KIND_BY_PREFIX: ReadonlyArray<readonly [prefix: string, kind: ApprovalKind]> = [
-  ["send_", "send_external"],
-  ["pay_", "pay"],
+const ACTION_BY_PREFIX: ReadonlyArray<readonly [prefix: string, action: ApprovalAction]> = [
+  ["send_", "message_person"],
+  ["pay_", "spend"],
 ];
-const FALLBACK_KIND: ApprovalKind = "change_production_data";
+const FALLBACK_ACTION: ApprovalAction = "external_write";
 
-export function approvalKind(toolName: string): ApprovalKind {
-  return KIND_BY_PREFIX.find(([prefix]) => toolName.startsWith(prefix))?.[1] ?? FALLBACK_KIND;
+export function approvalKind(toolName: string): ApprovalAction {
+  return ACTION_BY_PREFIX.find(([prefix]) => toolName.startsWith(prefix))?.[1] ?? FALLBACK_ACTION;
 }
 
 /**
@@ -78,7 +78,8 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
           groupId: request.groupId,
           callId: request.callId,
           tool: request.tool,
-          kind: approvalKind(request.tool),
+          action: approvalKind(request.tool),
+          target: null,
           view: request.view,
         });
       }),

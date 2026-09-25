@@ -95,6 +95,8 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
           hasMore: start > 0,
           approvals: approvalsIn(page),
           handoffs: handoffsIn(page),
+          drafts: [],
+          plans: [],
         });
       } else if (method === "POST") {
         const parsed = SendMessageRequest.safeParse(await readBody(req));
@@ -144,7 +146,7 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
     if (next === null) send(res, 409, { error: "这条审批已经有结论了" });
     else {
       push({ type: "approval_updated", approval: next });
-      send(res, 200, { approval: next });
+      send(res, 200, { approval: next, grant: null });
     }
   }
   return true;

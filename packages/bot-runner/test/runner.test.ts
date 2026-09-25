@@ -16,6 +16,7 @@ import {
   BotId,
   GroupId,
   HandoffId,
+  MessageId,
   RunId,
   type Skill,
   SkillId,
@@ -156,6 +157,7 @@ const promptMessage = (
       kind: (group?.members?.length ?? 1) > 1 ? "team" : "solo",
     },
     context: [],
+    purpose: "plan",
     task: group?.task ?? null,
     members: [...(group?.members ?? [member(botId, botId)])],
     ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
@@ -167,12 +169,12 @@ const member = (botId: string, name: string): GroupMember => ({
   name,
   tag: "",
   description: "",
-  role: "member",
+  seat: "member",
 });
 /** 两个 Bot 的群。bot-1 是跑这次 prompt 的那个，bot-2 是它能 @ 的队友。 */
 const TWO_MEMBERS: readonly GroupMember[] = [member("bot-1", "小白"), member("bot-2", "小黑")];
 const CHIEF_MEMBERS: readonly GroupMember[] = [
-  { ...member("bot-1", "小服"), tag: "客服", description: "负责售后", role: "chief" },
+  { ...member("bot-1", "小服"), tag: "客服", description: "负责售后", seat: "chief" },
   { ...member("bot-2", "小销"), tag: "销售", description: "负责报价" },
 ];
 
@@ -190,6 +192,7 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   currentBotId: BotId.parse("bot-1"),
   handled: [],
   status: "active",
+  cadence: "",
   ...overrides,
 });
 
@@ -378,6 +381,7 @@ async function startHarness(options: {
   let runner: Runner | null = null;
   const bots = options.bots.map((id) => ({
     id: BotId.parse(id),
+    role: "member" as const,
     name: options.name ?? id,
     tag: options.tag ?? "",
     description: options.description ?? "",
@@ -734,7 +738,8 @@ describe("运行器的审批", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
 
     const request = h.sent.find((m) => m.type === "approval_request");
-    expect(request?.type === "approval_request" && request.kind).toBe("send_external");
+    expect(request?.type === "approval_request" && request.action).toBe("message_person");
+    expect(request?.type === "approval_request" && request.target).toBeNull();
     expect(request?.type === "approval_request" && request.tool).toBe("send_email");
     expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
@@ -995,7 +1000,7 @@ describe("运行器的通信提示", () => {
       ...promptMessage("bot-1", "run-1", "请核对售后口径", { task, members }),
       group: { id: GroupId.parse("group-1"), number: "T-0007", title: "双十一大促", kind: "team" },
       origin: { kind: "bot", id: BotId.parse("bot-2"), name: "小销", tag },
-      context: [{ from: "用户", text: "今天确定活动安排" }],
+      context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排" }],
     });
     const prompt = requests[0]?.messages.find((message) => message.role === "user")?.content;
     expect(prompt).toEqual([
@@ -1144,7 +1149,7 @@ describe("运行器的通信提示", () => {
     expect(firstTurn).toContain("[群 T-0314 报价协同 · 成员 小服（首席）、小销]");
     expect(firstTurn).toContain("- 小服（客服，首席）：负责售后");
     expect(firstTurn).toContain("- 小销（销售）：负责报价");
-    expect(renderTaskCard(task, [{ ...member("bot-1", "小服"), role: "chief", description: "负责售后" }])).toContain(
+    expect(renderTaskCard(task, [{ ...member("bot-1", "小服"), seat: "chief", description: "负责售后" }])).toContain(
       "- 小服（首席）：负责售后",
     );
   });
@@ -1469,7 +1474,7 @@ describe("运行器的主题任务工具", () => {
 
     await h.runner.prompt({
       ...promptMessage("bot-1", "run-1", "按卡片往下做", { task: topicTask(), members: TWO_MEMBERS }),
-      context: [{ from: "小黑", text: "客户刚又催了一遍" }],
+      context: [{ messageId: MessageId.parse("msg-context-2"), from: "小黑", text: "客户刚又催了一遍" }],
     });
 
     const firstTurn = seen.firstTurn.join("");
@@ -1716,7 +1721,7 @@ describe("运行器的交接工具", () => {
 
     await h.runner.prompt({
       ...promptMessage("bot-2", "run-1", body, { task: topicTask(), members: TWO_MEMBERS, handoffId: "handoff-1" }),
-      context: [{ from: "小白", text: "客户刚又催了一遍" }],
+      context: [{ messageId: MessageId.parse("msg-context-3"), from: "小白", text: "客户刚又催了一遍" }],
     });
 
     const firstTurn = seen.firstTurn.join("");
@@ -2085,7 +2090,8 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
 
     const request = h.sent.find((m) => m.type === "approval_request");
     expect(request?.type === "approval_request" && request.tool).toBe("send_email");
-    expect(request?.type === "approval_request" && request.kind).toBe("send_external");
+    expect(request?.type === "approval_request" && request.action).toBe("message_person");
+    expect(request?.type === "approval_request" && request.target).toBeNull();
     expect(request?.type === "approval_request" && request.view).toMatchObject({
       kind: "mcp",
       server: "客服工具",
@@ -2298,6 +2304,7 @@ describe("config 按 Bot 增量对账", () => {
   const changedBots = (description: string): readonly BotConfig[] =>
     fiveBots.map((id) => ({
       id: BotId.parse(id),
+      role: "member",
       name: id,
       tag: "",
       description: id === "bot-5" ? description : "",
@@ -2340,8 +2347,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "" },
-            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新描述" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新描述" },
           ],
         }),
       );
@@ -2485,8 +2492,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "" },
-            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新描述" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新描述" },
           ],
         }),
       );
@@ -2538,7 +2545,7 @@ describe("config 按 Bot 增量对账", () => {
     try {
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "只处理新版任务" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "只处理新版任务" }],
         }),
       );
     } finally {
@@ -2624,7 +2631,9 @@ describe("config 按 Bot 增量对账", () => {
       const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
       await until(() => started, "第一条进入工具");
       await h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+        }),
       );
       rmSync(dirs.workDir, { recursive: true, force: true });
       writeFileSync(dirs.workDir, "阻止重建");
@@ -2667,7 +2676,9 @@ describe("config 按 Bot 增量对账", () => {
     try {
       await expect(
         h.runner.applyConfig(
-          h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+          h.config({
+            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+          }),
         ),
         "对账失败只上报 runner_failed，不向电脑代理抛异常",
       ).resolves.toBeUndefined();
@@ -2797,7 +2808,9 @@ describe("config 按 Bot 增量对账", () => {
 
     try {
       const applying = h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+        }),
       );
       await until(() => botSessionProbe.disposals.length > 0, "开始关旧会话");
       const queuedBeforePause = h.runner.prompt(promptMessage("bot-1", "run-2", "暂停前排队"));
@@ -2861,7 +2874,9 @@ describe("config 按 Bot 增量对账", () => {
 
     try {
       const rebuilding = h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "新描述" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+        }),
       );
       await until(() => botSessionProbe.disposals.length > 0, "开始关旧会话");
       const deleting = h.runner.applyConfig(h.config({ bots: [] }));
@@ -2901,8 +2916,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "原 Bot 新定义" },
-            { id: BotId.parse("bot-2"), name: "bot-2", tag: "", description: "新增 Bot 定义" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "原 Bot 新定义" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新增 Bot 定义" },
           ],
         }),
       );
@@ -3055,7 +3070,17 @@ describe("config 按 Bot 增量对账", () => {
     await until(() => botSessionProbe.creations.length > 0, "开始建会话");
     await h.runner.pause(BotId.parse("bot-1"));
     await h.runner.applyConfig(
-      h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "暂停期间换上的新定义" }] }),
+      h.config({
+        bots: [
+          {
+            id: BotId.parse("bot-1"),
+            role: "member",
+            name: "bot-1",
+            tag: "",
+            description: "暂停期间换上的新定义",
+          },
+        ],
+      }),
     );
     botSessionProbe.createGate = null;
     openCreate();
@@ -3166,7 +3191,9 @@ describe("config 按 Bot 增量对账", () => {
     botSessionProbe.disposeErrorFor = "group-2";
     try {
       await h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改一下" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改一下" }],
+        }),
       );
       await until(
         () =>
@@ -3279,7 +3306,9 @@ describe("config 按 Bot 增量对账", () => {
       const first = h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
       await until(tool.started, "run-1 进工具");
       await h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改一" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改一" }],
+        }),
       );
       const second = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
       const releaseDispose = gateDisposal();
@@ -3287,7 +3316,11 @@ describe("config 按 Bot 增量对账", () => {
       await until(() => botSessionProbe.disposals.length > 0, "run-1 收尾后对账开始关会话");
       let applied = false;
       const applying = h.runner
-        .applyConfig(h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "改二" }] }))
+        .applyConfig(
+          h.config({
+            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改二" }],
+          }),
+        )
         .then(() => {
           applied = true;
         });
@@ -3465,7 +3498,9 @@ describe("config 按 Bot 增量对账", () => {
     botSessionProbe.disposeErrorFor = "group-2";
     try {
       await h.runner.applyConfig(
-        h.config({ bots: [{ id: BotId.parse("bot-1"), name: "bot-1", tag: "", description: "描述改成了紫罗兰" }] }),
+        h.config({
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "描述改成了紫罗兰" }],
+        }),
       );
       await until(
         () =>

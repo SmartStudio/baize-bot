@@ -84,7 +84,7 @@ describe("端到端：模型实际收到的 prompt 头部", () => {
         "被 @ 的派活原因",
       ).toEqual(["mentioned"]);
       expect(
-        teamPrompts[0]?.members.map((member) => member.role),
+        teamPrompts[0]?.members.map((member) => member.seat),
         "没设首席时人人都是普通成员",
       ).toEqual(["member", "member"]);
     } finally {

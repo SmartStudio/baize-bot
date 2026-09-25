@@ -169,10 +169,19 @@ const CostCard = ({ body }: { body: Extract<MessageBody, { kind: "cost" }> }) =>
   </div>
 );
 
-const APPROVAL_KIND_TEXT: Record<Approval["kind"], string> = {
-  send_external: "对外发送",
-  change_production_data: "改生产数据",
-  pay: "付钱",
+const APPROVAL_ACTION_TEXT: Record<Approval["action"], string> = {
+  read: "读取",
+  write_workspace: "写工作目录",
+  write_outside: "写外部文件",
+  delete: "删除",
+  shell: "运行命令",
+  publish: "公开发布",
+  message_person: "对外发送",
+  engage: "互动",
+  spend: "付钱",
+  account_security: "账号安全",
+  install: "安装",
+  external_write: "改生产数据",
 };
 
 const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
@@ -205,7 +214,7 @@ const ApprovalCard = ({
       <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
         <div className="card-title">
           <ShieldAlert size={16} aria-hidden="true" />
-          已失效 · {APPROVAL_KIND_TEXT[approval.kind]}
+          已失效 · {APPROVAL_ACTION_TEXT[approval.action]}
         </div>
         <p className="approval-summary">
           <ToolViewContent view={approval.view} approval />
@@ -236,7 +245,7 @@ const ApprovalCard = ({
     <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
       <div className="card-title">
         <ShieldAlert size={16} aria-hidden="true" />
-        需要你点头 · {APPROVAL_KIND_TEXT[approval.kind]}
+        需要你点头 · {APPROVAL_ACTION_TEXT[approval.action]}
       </div>
       <p className="approval-summary">
         <ToolViewContent view={approval.view} approval />
@@ -412,6 +421,10 @@ const MessageView = ({
               <HandoffCard handoff={handoff} message={message} lookup={lookup} checklist={checklist} />
             );
           }
+          case "project_offer":
+          case "draft":
+          case "plan":
+            return null;
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。
             const unreached: never = body;

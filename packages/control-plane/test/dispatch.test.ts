@@ -197,8 +197,8 @@ describe("派活", () => {
       const prompt = await agent.expect("prompt");
 
       expect(prompt.context).toHaveLength(CONTEXT_MESSAGES);
-      expect(prompt.context[0], "第 1 到第 4 条应当被挤出去").toEqual({ from: "你", text: "第 5 条" });
-      expect(prompt.context.at(-1)).toEqual({ from: "你", text: "第 24 条" });
+      expect(prompt.context[0], "第 1 到第 4 条应当被挤出去").toMatchObject({ from: "你", text: "第 5 条" });
+      expect(prompt.context.at(-1)).toMatchObject({ from: "你", text: "第 24 条" });
       expect(
         prompt.context.map((line) => line.text),
         "触发消息本身不进上下文",
@@ -240,7 +240,7 @@ describe("派活", () => {
       await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "继续" });
       const prompt = await agent.expect("prompt");
 
-      expect(prompt.context).toEqual([
+      expect(prompt.context).toMatchObject([
         { from: "你", text: "你好" },
         { from: "小服", text: "在的" },
         { from: "系统", text: "电脑睡了" },
