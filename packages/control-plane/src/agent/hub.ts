@@ -17,11 +17,12 @@ import {
   markComputersSleeping,
   rotateGatewayKey,
 } from "../repo/computers.js";
+import { expireApprovalsOfRun } from "../repo/approvals.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { appendMessage } from "../repo/messages.js";
 import { finishRun, openRunsForOwner } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
-import { failRoutineRunOf } from "../routines/run.js";
+import { EXPIRED_APPROVAL_NOTE, failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { clearTextPrefixes, handleAgentEvent } from "./events.js";
 import type { GroupTurns } from "./group-turn.js";
@@ -238,20 +239,24 @@ export class AgentHub {
           amount: 0,
         });
         if (usage === null) return null;
+        const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
         const message =
           run.groupId === null
             ? null
             : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: DISCONNECT_NOTICE });
-        return { message };
+        return { expiredApprovals, message };
       });
       if (result === null) continue;
       clearTextPrefixes(run.runId);
       if (run.groupId !== null) this.#deps.groupTurns.abandon(run.groupId, run.runId);
+      for (const approval of result.expiredApprovals) {
+        this.#deps.push.push(ownerId, { type: "approval_updated", approval });
+      }
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
       await failRoutineRunOf(
         { db: this.#deps.db, push: this.#deps.push, agents: this, groupTurns: this.#deps.groupTurns },
         run.runId,
-        DISCONNECT_NOTICE,
+        result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : DISCONNECT_NOTICE,
       );
     }
   }

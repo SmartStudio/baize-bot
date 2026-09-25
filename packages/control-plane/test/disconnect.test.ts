@@ -37,7 +37,7 @@ async function ownerWithBot() {
   const client = new ApiClient(server.port);
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
-  return { computer, client, groupId: created.group.id };
+  return { computer, client, groupId: created.group.id, botId: created.bot.id };
 }
 
 async function ownerWithTeam(): Promise<{
@@ -123,6 +123,51 @@ it("宽限到期且电脑未重连时收尾", async () => {
   await agent.closed();
   await waitFor(() => ended(runId), "宽限到期后 run 收尾");
   expect(await notices(owner.client, owner.groupId)).toBe(1);
+});
+
+it("电脑断线收尾后，挂着的审批变成已失效", async () => {
+  const owner = await ownerWithBot();
+  const agent = await connect(owner.computer);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  try {
+    const runId = await startRun(owner.client, owner.groupId, agent);
+    expect((await push.next()).type).toBe("message");
+    agent.send({
+      type: "approval_request",
+      runId,
+      botId: owner.botId,
+      groupId: owner.groupId,
+      callId: "disconnect-approval",
+      tool: "send_email",
+      kind: "send_external",
+      summary: "给客户发一封邮件",
+      view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+    });
+    const created = await push.next();
+    expect(created.type).toBe("approval_updated");
+    const approvalId = created.type === "approval_updated" ? created.approval.id : "";
+    expect(created.type === "approval_updated" ? created.approval.status : null).toBe("pending");
+    expect((await push.next()).type).toBe("message");
+
+    agent.close();
+    await agent.closed();
+
+    let expired = false;
+    while (!expired) {
+      const event = await push.next();
+      expired =
+        event.type === "approval_updated" && event.approval.id === approvalId && event.approval.status === "expired";
+    }
+    await waitFor(() => ended(runId), "宽限到期后 run 收尾");
+
+    const page = MessageListResponse.parse(
+      await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
+    );
+    expect(page.approvals).toMatchObject([{ id: approvalId, status: "expired" }]);
+  } finally {
+    agent.close();
+    push.close();
+  }
 });
 
 it("计时器收尾进行时 hello 对账仍保留 activeRuns", async () => {

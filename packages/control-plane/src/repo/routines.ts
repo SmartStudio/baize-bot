@@ -273,6 +273,16 @@ export async function settleRoutineRun(
   return row?.routineId ?? null;
 }
 
+/** 审批挂起后运行记可能已是 stopped；失效要把 running 和 stopped 都收成 failed。 */
+export async function failRoutineRun(db: Db, routineRunId: string, note: string): Promise<string | null> {
+  const [row] = await db
+    .update(routineRuns)
+    .set({ status: "failed", note })
+    .where(and(eq(routineRuns.id, routineRunId), inArray(routineRuns.status, ["running", "stopped"])))
+    .returning({ routineId: routineRuns.routineId });
+  return row?.routineId ?? null;
+}
+
 /** 只补 note，状态一个字不改。`retry_next_time` 遇到审批走这里：记一笔，活照样算在跑。 */
 export async function noteRoutineRun(db: Db, routineRunId: string, note: string): Promise<string | null> {
   const [row] = await db

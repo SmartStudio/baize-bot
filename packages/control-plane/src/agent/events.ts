@@ -8,7 +8,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { createApproval } from "../repo/approvals.js";
+import { approvalRun, createApproval, expireApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
@@ -24,7 +24,7 @@ import {
 import { routineRunOfRun } from "../repo/routines.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
-import { chargeRoutineRunOf, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
+import { chargeRoutineRunOf, EXPIRED_APPROVAL_NOTE, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
@@ -70,6 +70,9 @@ export async function handleAgentEvent(
     case "approval_request":
       await onApprovalRequest(deps, conn, message);
       return;
+    case "approval_abandoned":
+      await onApprovalAbandoned(deps, conn, message);
+      return;
     case "task_checklist":
       await onTaskChecklist(deps, conn, message);
       return;
@@ -111,6 +114,7 @@ type ToolCall = Extract<AgentToControl, { type: "bot_tool_call" }>;
 type RunDone = Extract<AgentToControl, { type: "run_done" }>;
 type AgentError = Extract<AgentToControl, { type: "agent_error" }>;
 type ApprovalRequest = Extract<AgentToControl, { type: "approval_request" }>;
+type ApprovalAbandoned = Extract<AgentToControl, { type: "approval_abandoned" }>;
 type TaskChecklist = Extract<AgentToControl, { type: "task_checklist" }>;
 type Mention = Extract<AgentToControl, { type: "mention" }>;
 type SkillOffer = Extract<AgentToControl, { type: "skill_offer" }>;
@@ -326,6 +330,22 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
   deps.push.push(conn.ownerId, { type: "approval_updated", approval: created.approval });
   deps.push.push(conn.ownerId, { type: "message", message: created.message });
   await holdRoutineRunOf(deps, event.runId);
+}
+
+async function onApprovalAbandoned(
+  deps: AgentEventDeps,
+  conn: AgentConnection,
+  event: ApprovalAbandoned,
+): Promise<void> {
+  const scope = await approvalRun(deps.db, event.runId, event.callId);
+  if (scope === null) return;
+  const groupId = await resolveRun(deps, conn, { runId: event.runId, botId: scope.botId, groupId: scope.groupId });
+  if (groupId === null) return;
+
+  const approval = await expireApproval(deps.db, event.runId, event.callId);
+  if (approval === null) return;
+  deps.push.push(conn.ownerId, { type: "approval_updated", approval });
+  await failRoutineRunOf(deps, event.runId, EXPIRED_APPROVAL_NOTE);
 }
 
 /**

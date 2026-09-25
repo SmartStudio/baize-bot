@@ -1,9 +1,9 @@
-import { ApprovalId, RunId, UserId, type Approval, type BotId, type Message } from "@baize/shared";
+import { ApprovalId, BotId, GroupId, RunId, UserId, type Approval, type Message } from "@baize/shared";
 import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, groups, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { appendMessage } from "./messages.js";
+import { appendMessage, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
 import { toApproval } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
@@ -27,6 +27,8 @@ export type CreateApprovalInput = {
 };
 
 export type CreatedApproval = { readonly approval: Approval; readonly message: Message };
+
+export type ApprovalRun = { readonly botId: BotId; readonly groupId: GroupId };
 
 /**
  * 建一条待批审批和群里那张卡。两者在一个事务里生，所以群里不会出现没有审批的孤儿卡。
@@ -61,6 +63,37 @@ export async function createApproval(db: Db, input: CreateApprovalInput): Promis
     if (error instanceof TransactionRollbackError) return null;
     throw error;
   }
+}
+
+/** approval_abandoned 没带 Bot 和群，先从它指名的审批还原，随后交给上行报文的统一 run 归属校验。 */
+export async function approvalRun(db: Db, runId: RunId, callId: string): Promise<ApprovalRun | null> {
+  const [row] = await db
+    .select({ botId: approvals.botId, groupId: approvals.groupId })
+    .from(approvals)
+    .where(and(eq(approvals.runId, runId), eq(approvals.callId, callId)))
+    .limit(1);
+  if (row === undefined) return null;
+  return { botId: BotId.parse(row.botId), groupId: GroupId.parse(row.groupId) };
+}
+
+/** 只让还在等点头的那一行失效，重复报文或已有结论都返回 null。 */
+export async function expireApproval(db: Db, runId: RunId, callId: string): Promise<Approval | null> {
+  const [row] = await db
+    .update(approvals)
+    .set({ status: "expired" })
+    .where(and(eq(approvals.runId, runId), eq(approvals.callId, callId), eq(approvals.status, "pending")))
+    .returning();
+  return row === undefined ? null : toApproval(row);
+}
+
+/** hub 收尾 run 时把它上面所有还在等的审批一起失效。 */
+export async function expireApprovalsOfRun(db: Db | Tx, runId: RunId): Promise<Approval[]> {
+  const rows = await db
+    .update(approvals)
+    .set({ status: "expired" })
+    .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")))
+    .returning();
+  return rows.map(toApproval);
 }
 
 /** 审批按归属人过滤。别人的审批在这里查不到，路由层因此返回 404 而不是 403。 */

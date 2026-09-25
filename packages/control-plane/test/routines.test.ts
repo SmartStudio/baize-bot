@@ -482,6 +482,43 @@ describe("运行记录收尾", () => {
     }
   });
 
+  it("例行 run 的审批失效后，这次例行记失败，原因是审批已失效", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+
+    try {
+      const routine = await makeRoutine(owner, { triggers: [], onFailure: "stop_and_tell" });
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+      const prompt = await agent.expect("prompt");
+
+      agent.send({
+        type: "approval_request",
+        runId: prompt.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        callId: "call-expired",
+        tool: "send_email",
+        kind: "send_external",
+        summary: "给客户发一封邮件",
+        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+      });
+      await settled(routine.id);
+      expect((await runsOf(routine.id))[0]?.status).toBe("stopped");
+
+      agent.send({
+        type: "approval_abandoned",
+        runId: prompt.runId,
+        callId: "call-expired",
+        reason: "stopped",
+      });
+
+      await waitForNote(routine.id, "审批已失效");
+      expect((await runsOf(routine.id))[0]).toMatchObject({ status: "failed", note: "审批已失效" });
+    } finally {
+      agent.close();
+    }
+  });
+
   it("retry_next_time 遇到审批只补一句话，活还算在跑", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);

@@ -7,6 +7,7 @@ import { findSoloGroup } from "../repo/groups.js";
 import { appendMessage } from "../repo/messages.js";
 import {
   chargeRoutineRun,
+  failRoutineRun,
   loadRoutine,
   noteRoutineRun,
   routineRunOfRun,
@@ -27,6 +28,7 @@ export type RoutineDeps = {
 export const NOT_DISPATCHED_NOTE = "电脑不在线，没跑起来";
 export const WAITING_APPROVAL_NOTE = "1 条等你点头";
 export const RETRY_NEXT_TIME_NOTE = "等你点头，下次照常跑";
+export const EXPIRED_APPROVAL_NOTE = "审批已失效";
 
 /**
  * 跑一次例行任务。到点触发、webhook、试跑走的都是这一条路。
@@ -76,7 +78,7 @@ export async function chargeRoutineRunOf(deps: RoutineDeps, runId: RunId, amount
 export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<void> {
   const ref = await routineRunOfRun(deps.db, runId);
   if (ref === null) return;
-  await pushIfChanged(deps, await settleRoutineRun(deps.db, ref.routineRunId, "failed", reason));
+  await pushIfChanged(deps, await failRoutineRun(deps.db, ref.routineRunId, reason));
 }
 
 /**

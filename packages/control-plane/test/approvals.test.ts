@@ -88,6 +88,15 @@ function sendApprovalRequest(job: Running, callId: string): void {
   });
 }
 
+function sendApprovalAbandoned(job: Running, callId: string): void {
+  job.agent.send({
+    type: "approval_abandoned",
+    runId: job.runId,
+    callId,
+    reason: "stopped",
+  });
+}
+
 /** 发一条 approval_request 并收下它推出来的两条。推送顺序本身由第一条用例把关。 */
 async function raiseApproval(job: Running, callId = "call-1"): Promise<Approval> {
   sendApprovalRequest(job, callId);
@@ -180,6 +189,70 @@ describe("approval_request 到达", () => {
       expect(stored.approvals.map((a) => a.id)).toEqual([approval.id]);
     } finally {
       job.close();
+    }
+  });
+});
+
+describe("放弃审批", () => {
+  it("运行器上报放弃后，点批准返回冲突，卡片状态是已失效", async () => {
+    const job = await runningJob();
+
+    try {
+      const approval = await raiseApproval(job, "call-expired");
+      sendApprovalAbandoned(job, "call-expired");
+
+      const pushed = await job.push.next();
+      expect(pushed.type).toBe("approval_updated");
+      expect(pushed.type === "approval_updated" ? pushed.approval : null).toMatchObject({
+        id: approval.id,
+        status: "expired",
+      });
+
+      const stored = await page(job);
+      expect(stored.approvals).toMatchObject([{ id: approval.id, status: "expired" }]);
+
+      const response = await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "这条审批已经有结论了" });
+    } finally {
+      job.close();
+    }
+  });
+
+  it("别的电脑上报的放弃被丢弃", async () => {
+    const mine = await runningJob();
+    const other = await runningJob();
+
+    try {
+      const approval = await raiseApproval(mine, "call-owned");
+      other.agent.send({
+        type: "approval_abandoned",
+        runId: mine.runId,
+        callId: "call-owned",
+        reason: "stopped",
+      });
+      other.agent.send({
+        type: "bot_tool_call",
+        runId: other.runId,
+        botId: other.botId,
+        groupId: other.groupId,
+        callId: "abandoned-sentinel",
+        tool: "test.sentinel",
+        argsSummary: "哨兵已落库",
+        view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
+        status: "ok",
+        durationMs: 0,
+      });
+
+      const next = await other.push.next();
+      expect(next.type === "message" ? next.message.body : null).toMatchObject({
+        kind: "tool_call",
+        argsSummary: "哨兵已落库",
+      });
+      expect((await page(mine)).approvals).toMatchObject([{ id: approval.id, status: "pending" }]);
+    } finally {
+      mine.close();
+      other.close();
     }
   });
 });
@@ -401,7 +474,7 @@ describe("提醒的写入不会半程丢掉", () => {
 });
 
 describe("电脑断线", () => {
-  it("重连只收到 welcome 和 config，pending 的审批不重发，决定到达时照样发下去", async () => {
+  it("重连报告 run 还活着时只收到 welcome 和 config，pending 的审批不重发，决定照样发下去", async () => {
     const job = await runningJob();
 
     try {
@@ -415,7 +488,7 @@ describe("电脑断线", () => {
       }, "电脑变成休眠");
 
       // helloAgent 逐条 expect 握手的两条，中间多出任何一条报文它就会失败。
-      const { agent } = await helloAgent(server.server.port, job.computer.computerId, job.computer.token);
+      const { agent } = await helloAgent(server.server.port, job.computer.computerId, job.computer.token, [job.runId]);
       try {
         expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(200);
         const result = await agent.expect("approval_result");
