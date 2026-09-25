@@ -1,4 +1,4 @@
-import type { AgentToControl, BotId, GroupId, RunId, ToolConnection } from "@baize/shared";
+import type { AgentToControl, BotId, GroupId, RunId, ToolConnection, ToolView } from "@baize/shared";
 
 // 审批拦截器。扩展在 Pi 的 tool_call 事件里挂起一个 pending，控制面的 approval_result
 // 经 runner.approve 落回来。被拒的 callId 记在这里：Pi 的事件层里「被拦下」和「工具自己报错」
@@ -35,6 +35,7 @@ export interface ApprovalRequest {
   readonly callId: string;
   readonly tool: string;
   readonly summary: string;
+  readonly view: ToolView;
 }
 
 export interface ApprovalGate {
@@ -79,6 +80,7 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
           tool: request.tool,
           kind: approvalKind(request.tool),
           summary: request.summary,
+          view: request.view,
         });
       }),
     settle: (runId, callId, approved) => {

@@ -10,7 +10,6 @@ export type NewUser = {
   readonly name: string;
   readonly email: string;
   readonly password: string;
-  readonly teamName: string;
 };
 
 export async function createUser(db: Db, input: NewUser): Promise<User> {
@@ -22,7 +21,6 @@ export async function createUser(db: Db, input: NewUser): Promise<User> {
         id: newId(),
         name: input.name,
         email: input.email,
-        teamName: input.teamName,
         passwordHash,
       })
       .returning();

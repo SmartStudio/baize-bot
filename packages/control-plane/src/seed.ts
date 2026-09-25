@@ -29,8 +29,7 @@ export type SeedResult = {
  */
 export async function seed(db: Db): Promise<SeedResult> {
   const existing = await findUserByEmail(db, DEV_EMAIL);
-  const user =
-    existing ?? (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD, teamName: "白泽" }));
+  const user = existing ?? (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD }));
 
   const computer = await ensureComputer(db, user.id);
 

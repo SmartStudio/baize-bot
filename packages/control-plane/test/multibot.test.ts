@@ -487,6 +487,7 @@ describe("多 Bot 群派活", () => {
         callId: "all-pass-settled",
         tool: "test.sentinel",
         argsSummary: "全员 pass 已处理",
+        view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
         status: "ok",
         durationMs: 0,
       });
@@ -559,6 +560,7 @@ describe("多 Bot 群派活", () => {
           callId: `pass-settled-${index}`,
           tool: "test.sentinel",
           argsSummary: `第 ${index + 1} 次 pass 已处理`,
+          view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
           status: "ok",
           durationMs: 0,
         });

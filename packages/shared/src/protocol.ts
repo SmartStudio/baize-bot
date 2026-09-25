@@ -21,6 +21,41 @@ import {
 export const ToolConnectionConfig = ToolConnection.extend({ authorization: z.string().nullable() });
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+export const JsonValue: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([z.string(), z.number().finite(), z.boolean(), z.null(), z.array(JsonValue), z.record(JsonValue)]),
+);
+
+export const ToolView = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("bash"), command: z.string(), raw: JsonValue.optional() }).strict(),
+  z
+    .object({
+      kind: z.literal("write"),
+      path: z.string(),
+      preview: z.array(z.string()).max(5),
+      raw: JsonValue.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("edit"),
+      path: z.string(),
+      changedLines: z.number().int().nonnegative(),
+      raw: JsonValue.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("mcp"),
+      server: z.string(),
+      tool: z.string(),
+      params: z.array(z.object({ key: z.string(), value: JsonValue }).strict()).max(3),
+      raw: JsonValue.optional(),
+    })
+    .strict(),
+]);
+export type ToolView = z.infer<typeof ToolView>;
+
 export const AgentToControl = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("hello"),
@@ -55,6 +90,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     callId: z.string(),
     tool: z.string(),
     argsSummary: z.string(),
+    view: ToolView,
     // blocked 由运行器的审批拦截器按 callId 判定。Pi 的工具结果里被拦下和自身报错都是 isError，推断不出来。
     status: z.enum(["running", "ok", "failed", "blocked"]),
     durationMs: z.number().nullable(),
@@ -79,6 +115,13 @@ export const AgentToControl = z.discriminatedUnion("type", [
     tool: z.string(),
     kind: z.enum(["send_external", "change_production_data", "pay"]),
     summary: z.string(),
+    view: ToolView,
+  }),
+  z.object({
+    type: z.literal("approval_abandoned"),
+    runId: RunId,
+    callId: z.string(),
+    reason: z.enum(["stopped", "paused", "disconnected"]),
   }),
   // 运行器的主题任务工具走下面两条。清单整份替换，同一份重发两遍结果不变。
   z.object({

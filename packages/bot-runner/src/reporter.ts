@@ -1,4 +1,4 @@
-import { AgentToControl, type BotId, type GroupId, type MessageId, type RunId } from "@baize/shared";
+import { AgentToControl, type BotId, type GroupId, type MessageId, type RunId, type ToolView } from "@baize/shared";
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 
 // 一次 prompt 的会话事件翻成上行报文。出边界前一律过 AgentToControl.parse，schema 不过就抛。
@@ -10,6 +10,17 @@ export interface RunIdentity {
   readonly messageId: MessageId;
 }
 
+export function simpleToolView(toolName: string, args: unknown): ToolView {
+  if (toolName === "bash") {
+    const command =
+      typeof args === "object" && args !== null && "command" in args && typeof args.command === "string"
+        ? args.command
+        : "";
+    return { kind: "bash", command };
+  }
+  return { kind: "mcp", server: "", tool: toolName, params: [] };
+}
+
 export function reportRun(
   session: AgentSession,
   statsBeforeRun: SessionStats,
@@ -19,6 +30,7 @@ export function reportRun(
 ): () => void {
   const ids = { runId: identity.runId, botId: identity.botId, groupId: identity.groupId };
   const startedAt = new Map<string, number>();
+  const views = new Map<string, ToolView>();
   let steps = 0;
   let lastModelError: string | null = null;
 
@@ -48,12 +60,15 @@ export function reportRun(
     }
     if (event.type === "tool_execution_start") {
       startedAt.set(event.toolCallId, Date.now());
+      const view = simpleToolView(event.toolName, event.args);
+      views.set(event.toolCallId, view);
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
         argsSummary: JSON.stringify(event.args),
+        view,
         status: "running",
         durationMs: null,
       });
@@ -61,12 +76,16 @@ export function reportRun(
     }
     if (event.type === "tool_execution_end") {
       const began = startedAt.get(event.toolCallId);
+      const view = views.get(event.toolCallId) ?? simpleToolView(event.toolName, undefined);
+      startedAt.delete(event.toolCallId);
+      views.delete(event.toolCallId);
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
         argsSummary: "",
+        view,
         status: blockedCallIds.has(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
         durationMs: began === undefined ? null : Date.now() - began,
       });

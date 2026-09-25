@@ -173,6 +173,7 @@ describe("bot_tool_call", () => {
         callId: "call-1",
         tool: "browser.click",
         argsSummary: "点开订单列表",
+        view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "running",
         durationMs: null,
       });
@@ -195,6 +196,7 @@ describe("bot_tool_call", () => {
         callId: "call-1",
         tool: "browser.click",
         argsSummary: "点开订单列表",
+        view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "ok",
         durationMs: 820,
       });
@@ -235,6 +237,7 @@ describe("撞上同群里非 bot 的那条", () => {
         callId: "call-1",
         tool: "browser.open",
         argsSummary: "打开订单页",
+        view: { kind: "mcp", server: "", tool: "browser.open", params: [] },
         status: "running",
         durationMs: null,
       });

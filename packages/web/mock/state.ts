@@ -61,7 +61,7 @@ export const user: User = User.parse({
   id: "usr_chen",
   name: "陈默",
   email: MOCK_EMAIL,
-  teamName: "Acme",
+  teamName: "",
   createdAt: at(0),
 });
 

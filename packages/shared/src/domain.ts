@@ -119,7 +119,7 @@ export const Group = z.object({
 export type Group = z.infer<typeof Group>;
 
 export const ApprovalKind = z.enum(["send_external", "change_production_data", "pay"]);
-export const ApprovalStatus = z.enum(["pending", "approved", "rejected"]);
+export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired"]);
 
 export const Approval = z.object({
   id: ApprovalId,

@@ -300,6 +300,7 @@ it("断线时排队的交接不留到下一回合", async () => {
         callId: "disconnect-handoff-settled",
         tool: "test.sentinel",
         argsSummary: "断线后新一轮已处理",
+        view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
         status: "ok",
         durationMs: 0,
       });

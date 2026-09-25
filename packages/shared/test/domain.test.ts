@@ -278,3 +278,80 @@ describe("M11 用量与昨夜进展的共享形状", () => {
     );
   });
 });
+
+describe("C0 工具视图与审批报文", () => {
+  it("工具调用和审批放弃报文带结构化视图", () => {
+    const view = {
+      kind: "mcp",
+      server: "库存服务",
+      tool: "lookup_stock",
+      params: [{ key: "sku", value: "A-001" }],
+      raw: { sku: "A-001" },
+    };
+    expect(
+      AgentToControl.safeParse({
+        type: "bot_tool_call",
+        runId: "r1",
+        botId: "b1",
+        groupId: "g1",
+        callId: "c1",
+        tool: "lookup_stock",
+        argsSummary: "查询库存",
+        view,
+        status: "running",
+        durationMs: null,
+      }).success,
+      "带视图的工具调用报文应能解析",
+    ).toBe(true);
+    expect(
+      AgentToControl.safeParse({ type: "approval_abandoned", runId: "r1", callId: "c1", reason: "paused" }).success,
+      "审批放弃报文应能解析",
+    ).toBe(true);
+  });
+
+  it("工具视图限制预览行数并拒绝非 JSON 值", () => {
+    const base = { kind: "write", path: "报价.md", preview: ["1", "2", "3", "4", "5"] };
+    expect(
+      AgentToControl.safeParse({
+        type: "approval_request",
+        runId: "r1",
+        botId: "b1",
+        groupId: "g1",
+        callId: "c1",
+        tool: "write_file",
+        kind: "send_external",
+        summary: "写入报价",
+        view: base,
+      }).success,
+      "五行预览应能解析",
+    ).toBe(true);
+    expect(
+      AgentToControl.safeParse({
+        type: "approval_request",
+        runId: "r1",
+        botId: "b1",
+        groupId: "g1",
+        callId: "c1",
+        tool: "write_file",
+        kind: "send_external",
+        summary: "写入报价",
+        view: { ...base, preview: [...base.preview, "6"] },
+      }).success,
+      "预览最多五行",
+    ).toBe(false);
+    expect(
+      AgentToControl.safeParse({
+        type: "approval_request",
+        runId: "r1",
+        botId: "b1",
+        groupId: "g1",
+        callId: "c1",
+        tool: "write_file",
+        kind: "send_external",
+        summary: "写入报价",
+        view: { ...base, raw: { invalid: BigInt(1) } },
+      }).success,
+      "原始参数只能是 JSON 值",
+    ).toBe(false);
+  });
+});

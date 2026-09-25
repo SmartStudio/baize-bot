@@ -84,6 +84,7 @@ function sendApprovalRequest(job: Running, callId: string): void {
     tool: TOOL,
     kind: "pay",
     summary: SUMMARY,
+    view: { kind: "mcp", server: "", tool: TOOL, params: [] },
   });
 }
 

@@ -64,6 +64,13 @@
       "when": 1789905770339,
       "tag": "0008_wet_leper_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790348084233,
+      "tag": "0009_chemical_corsair",
+      "breakpoints": true
     }
   ]
 }

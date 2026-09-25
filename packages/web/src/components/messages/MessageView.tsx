@@ -168,6 +168,7 @@ const APPROVAL_KIND_TEXT: Record<Approval["kind"], string> = {
 const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
   approved: "同意",
   rejected: "不同意",
+  expired: "已失效",
 };
 
 // timeOf 只认 Message，而结论时间和接手时间挂在 Approval、Handoff 上。借这条消息套一层，免得为同一个格式

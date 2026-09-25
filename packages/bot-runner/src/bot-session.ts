@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
 import type { BotDirs } from "./paths.js";
+import { simpleToolView } from "./reporter.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 
@@ -63,6 +64,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
         callId: event.toolCallId,
         tool: event.toolName,
         summary: JSON.stringify(event.input),
+        view: simpleToolView(event.toolName, event.input),
       });
       return approved ? undefined : { block: true, reason: "归属人拒绝了这个动作。" };
     });

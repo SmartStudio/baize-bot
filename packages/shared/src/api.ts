@@ -5,6 +5,7 @@ import {
   BotHue,
   BotId,
   ChecklistItem,
+  ComputerId,
   Group,
   GroupId,
   Handoff,
@@ -34,6 +35,17 @@ export const ApiError = z.object({ error: z.string() });
 // POST /api/auth/login
 export const LoginRequest = z.object({ email: z.string().email(), password: z.string().min(1) });
 export const LoginResponse = z.object({ user: User });
+
+// POST /api/register
+export const RegisterRequest = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+  name: z.string().min(1),
+});
+export const RegisterResponse = z.object({ user: User });
+
+// POST /api/computers/local。token 明文只在这次响应里出现。
+export const LocalComputerResponse = z.object({ computerId: ComputerId, token: z.string() });
 
 // POST /api/auth/logout 无请求体，响应 204。
 // GET /api/me

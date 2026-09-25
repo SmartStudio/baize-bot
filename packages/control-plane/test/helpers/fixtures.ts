@@ -13,7 +13,6 @@ export async function makeUser(db: Db, name = "陈默"): Promise<User> {
     name,
     email: `user${counter}-${Date.now()}@baize.dev`,
     password: PASSWORD,
-    teamName: "白泽",
   });
 }
 

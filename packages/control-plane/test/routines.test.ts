@@ -459,6 +459,7 @@ describe("运行记录收尾", () => {
         tool: "send_email",
         kind: "send_external",
         summary: "给客户发一封邮件",
+        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
       });
 
       await settled(routine.id);
@@ -499,6 +500,7 @@ describe("运行记录收尾", () => {
         tool: "send_email",
         kind: "send_external",
         summary: "给客户发一封邮件",
+        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
       });
 
       await waitForNote(routine.id, "等你点头，下次照常跑");

@@ -51,6 +51,7 @@ export function recordRun(
         callId: event.toolCallId,
         tool: event.toolName,
         argsSummary: JSON.stringify(event.args),
+        view: { kind: "mcp", server: "", tool: event.toolName, params: [] },
         status: "running",
         durationMs: null,
       });
@@ -64,6 +65,7 @@ export function recordRun(
         callId: event.toolCallId,
         tool: event.toolName,
         argsSummary: "",
+        view: { kind: "mcp", server: "", tool: event.toolName, params: [] },
         status: blockedCallIds.has(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
         durationMs: began === undefined ? null : Date.now() - began,
       });
