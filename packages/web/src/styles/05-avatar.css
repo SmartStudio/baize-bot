@@ -1,0 +1,35 @@
+/* ---------- 头像 ---------- */
+
+.avatar {
+  display: grid;
+  flex: none;
+  /* 头像有 sm/md/lg 三档，圆角得跟着尺寸走，tokens 里的 --radius-* 都是固定 px，表达不了这个比例。 */
+  border-radius: 32%;
+  color: var(--fg-inverse);
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+  place-items: center;
+}
+
+.avatar-sm {
+  width: var(--space-8);
+  height: var(--space-8);
+  font-size: var(--text-xs);
+}
+
+.avatar-md {
+  width: var(--space-9);
+  height: var(--space-9);
+  font-size: var(--text-sm);
+}
+
+.avatar-lg {
+  width: var(--space-12);
+  height: var(--space-12);
+  font-size: var(--text-3xl);
+}
+
+.avatar-user {
+  background: var(--bg-selected);
+  color: var(--fg-2);
+}

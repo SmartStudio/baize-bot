@@ -1,0 +1,35 @@
+.composer {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  width: 100%;
+  max-width: var(--composer-max-w);
+  margin: 0 auto var(--space-7);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-2xl);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  font: var(--type-body);
+}
+
+.composer input:focus {
+  outline: none;
+}
+
+.send-button {
+  display: grid;
+  width: var(--control-h-md);
+  height: var(--control-h-md);
+  border-radius: var(--radius-full);
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  place-items: center;
+}

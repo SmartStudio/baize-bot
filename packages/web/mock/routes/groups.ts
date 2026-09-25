@@ -1,0 +1,151 @@
+import { CreateGroupRequest, DecideApprovalRequest, SendMessageRequest, UpdateTaskRequest } from "@baize/shared";
+import {
+  appendMessage,
+  approvals,
+  approvalsIn,
+  assignTask,
+  createGroup,
+  groups,
+  handoffsIn,
+  isTeamGroup,
+  lastMessageOf,
+  mentionsIn,
+  messagesByGroupId,
+  pendingApprovalsOf,
+  pendingHandoffsOf,
+  responderOf,
+  settleApproval,
+  settleLatestPending,
+  streamBotReply,
+  tasks,
+  writeTask,
+  type ApprovalDecision,
+} from "../state.js";
+import { defined, readBody, send, type Route } from "./http.js";
+
+const DECISION_WORDS = new Map<string, ApprovalDecision>([
+  ["批准", "approved"],
+  ["同意", "approved"],
+  ["拒绝", "rejected"],
+  ["不行", "rejected"],
+]);
+
+const groupListItems = () =>
+  [...groups.values()].filter(isTeamGroup).map((group) => {
+    const task = tasks.get(group.taskId);
+    if (task === undefined) throw new Error(`群 ${group.id} 没有主题任务，mock 状态坏了`);
+    return {
+      group,
+      task,
+      lastMessage: lastMessageOf(group.id),
+      pendingApprovals: pendingApprovalsOf(group.id),
+      pendingHandoffs: pendingHandoffsOf(group.id),
+    };
+  });
+
+export const groupRoutes: Route = async ({ req, res, url, path, method, push }) => {
+  if (path === "/api/groups") {
+    if (method === "GET") send(res, 200, { items: groupListItems() });
+    else if (method === "POST") {
+      const parsed = CreateGroupRequest.safeParse(await readBody(req));
+      if (!parsed.success) send(res, 400, { error: "建群字段不对" });
+      else {
+        const created = createGroup(parsed.data);
+        push({ type: "group_created", group: created.group, task: created.task });
+        send(res, 200, created);
+      }
+    } else return false;
+    return true;
+  }
+
+  const taskMatch = /^\/api\/tasks\/([^/]+)$/.exec(path);
+  if (taskMatch !== null && method === "PATCH") {
+    const rawTaskId = taskMatch[1];
+    const taskId = rawTaskId === undefined ? "" : decodeURIComponent(rawTaskId);
+    const parsed = UpdateTaskRequest.safeParse(await readBody(req));
+    if (!tasks.has(taskId)) send(res, 404, { error: "没有这个任务" });
+    else if (!parsed.success) send(res, 400, { error: "任务字段不对" });
+    else {
+      const next = writeTask(taskId, defined(parsed.data));
+      if (next === null) send(res, 404, { error: "没有这个任务" });
+      else {
+        push({ type: "task_updated", task: next });
+        send(res, 200, { task: next });
+      }
+    }
+    return true;
+  }
+
+  const messagesMatch = /^\/api\/groups\/([^/]+)\/messages$/.exec(path);
+  if (messagesMatch !== null) {
+    const rawGroupId = messagesMatch[1];
+    if (rawGroupId === undefined) send(res, 404, { error: "没有这个群" });
+    else {
+      const groupId = decodeURIComponent(rawGroupId);
+      if (!groups.has(groupId)) send(res, 404, { error: "没有这个群" });
+      else if (method === "GET") {
+        const all = messagesByGroupId.get(groupId) ?? [];
+        const before = url.searchParams.get("before");
+        const end = before === null ? all.length : all.findIndex((message) => message.id === before);
+        const limit = Number(url.searchParams.get("limit") ?? 50);
+        const start = Math.max(0, (end < 0 ? all.length : end) - limit);
+        const page = all.slice(start, end < 0 ? all.length : end);
+        send(res, 200, {
+          messages: page,
+          hasMore: start > 0,
+          approvals: approvalsIn(page),
+          handoffs: handoffsIn(page),
+        });
+      } else if (method === "POST") {
+        const parsed = SendMessageRequest.safeParse(await readBody(req));
+        if (!parsed.success) send(res, 400, { error: "消息不能为空" });
+        else {
+          const text = parsed.data.text;
+          const mentions = mentionsIn(groupId, text);
+          const message = appendMessage(
+            groupId,
+            mentions.length > 0 ? { kind: "user", text, mentions } : { kind: "user", text },
+          );
+          const decision = DECISION_WORDS.get(text.trim());
+          const settled = decision === undefined ? null : settleLatestPending(groupId, decision);
+          if (settled !== null) {
+            push({ type: "approval_updated", approval: settled });
+            send(res, 200, { message });
+          } else {
+            const responder = responderOf(groupId, mentions);
+            if (responder === null) {
+              const note = appendMessage(groupId, { kind: "system", text: "没人接这句话。@ 一个 Bot 派活。" });
+              push({ type: "message", message: note });
+              send(res, 200, { message });
+            } else {
+              const assigned = assignTask(groupId, responder);
+              if (assigned !== null) push({ type: "task_updated", task: assigned });
+              streamBotReply(groupId, responder, text, push).catch((cause: unknown) => {
+                process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
+              });
+              send(res, 200, { message });
+            }
+          }
+        }
+      } else return false;
+    }
+    return true;
+  }
+
+  const approvalMatch = /^\/api\/approvals\/([^/]+)$/.exec(path);
+  if (approvalMatch === null || method !== "POST") return false;
+  const rawApprovalId = approvalMatch[1];
+  const id = rawApprovalId === undefined ? "" : decodeURIComponent(rawApprovalId);
+  const parsed = DecideApprovalRequest.safeParse(await readBody(req));
+  if (!approvals.has(id)) send(res, 404, { error: "没有这条审批" });
+  else if (!parsed.success) send(res, 400, { error: "结论只能是批准或拒绝" });
+  else {
+    const next = settleApproval(id, parsed.data.decision);
+    if (next === null) send(res, 409, { error: "这条审批已经有结论了" });
+    else {
+      push({ type: "approval_updated", approval: next });
+      send(res, 200, { approval: next });
+    }
+  }
+  return true;
+};

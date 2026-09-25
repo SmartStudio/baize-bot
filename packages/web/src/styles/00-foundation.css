@@ -1,0 +1,40 @@
+/* 只用 src/ds/tokens 里的变量。任何裸色值、裸圆角、裸间距都算违规。 */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+.splash {
+  height: 100%;
+  background: var(--bg-app);
+}

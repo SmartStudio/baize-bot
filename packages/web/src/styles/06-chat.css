@@ -1,0 +1,261 @@
+/* ---------- 2a 对话区 ---------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-app);
+}
+
+.chat-header {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  height: var(--titlebar-h);
+  padding: 0 var(--space-7);
+  border-bottom: 1px solid var(--border-1);
+  font: var(--type-ui);
+}
+
+.chat-header-team {
+  height: auto;
+  min-height: var(--titlebar-h);
+  flex-direction: column;
+  align-items: stretch;
+  padding-block: var(--space-4);
+}
+
+.chat-heading,
+.chat-members,
+.chat-member {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.chat-members {
+  flex-wrap: wrap;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.chat-member {
+  gap: var(--space-2);
+}
+
+.chat-turn {
+  margin-left: auto;
+  color: var(--fg-3);
+}
+
+.thread-shell {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.thread {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-height: 0;
+  padding: var(--space-7);
+  overflow-y: auto;
+}
+
+/* 让消息像 messenger 一样贴底，条数少时不吊在顶上。 */
+.thread::before {
+  margin-top: auto;
+  content: "";
+}
+
+.empty {
+  margin: auto;
+  color: var(--fg-3);
+  font: var(--type-body);
+}
+
+.turn-group,
+.turn,
+.turn-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.turn-group {
+  gap: var(--space-4);
+}
+
+.turn {
+  gap: var(--space-3);
+}
+
+.turn-bot {
+  width: 100%;
+  max-width: var(--composer-max-w);
+}
+
+.turn-content {
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.turn-user {
+  align-items: flex-end;
+}
+
+.turn-user .message {
+  align-items: flex-end;
+  width: 100%;
+}
+
+.turn-cost,
+.turn-system {
+  align-items: center;
+}
+
+.time-divider {
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.message[hidden] {
+  display: none;
+}
+
+.bubble {
+  max-width: 100%;
+  margin: 0;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  font: var(--type-body);
+  overflow-wrap: anywhere;
+}
+
+.bubble-user {
+  align-self: flex-end;
+  max-width: 72%;
+  background: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  white-space: pre-wrap;
+}
+
+.bubble-bot {
+  width: fit-content;
+  border: 1px solid var(--border-2);
+  background: var(--bg-bubble);
+  color: var(--fg-1);
+}
+
+.markdown p,
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 0;
+}
+
+.markdown > * + * {
+  margin-top: var(--space-4);
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  font-weight: var(--weight-semibold);
+}
+
+.markdown h1 {
+  font-size: var(--text-lg);
+}
+
+.markdown h3 {
+  font-size: var(--text-sm);
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: var(--space-7);
+}
+
+.markdown li + li {
+  margin-top: var(--space-2);
+}
+
+.markdown code {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--code-inline-bg);
+  color: var(--code-inline-fg);
+  font: var(--type-mono);
+}
+
+.markdown pre {
+  margin-bottom: 0;
+  padding: var(--space-5);
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  background: var(--code-bg);
+  color: var(--code-fg);
+}
+
+.markdown pre code {
+  padding: 0;
+  background: none;
+  color: inherit;
+  white-space: pre;
+}
+
+.markdown a {
+  color: var(--link);
+  text-decoration: underline;
+}
+
+.system-note {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.notice {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  max-width: var(--composer-max-w);
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font: var(--type-body);
+}
+
+.notice svg {
+  flex: none;
+  margin-top: var(--space-2);
+}
+
+.notice p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.notice-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.notice-body .cost-caption {
+  color: var(--danger);
+}

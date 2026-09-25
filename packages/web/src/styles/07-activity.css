@@ -1,0 +1,139 @@
+.card {
+  max-width: var(--composer-max-w);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.turn-meta {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.activity-toggle {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  min-height: var(--control-h-sm);
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+
+.activity-toggle:disabled {
+  cursor: default;
+}
+
+.activity-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.tool-line {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  width: 100%;
+  min-height: var(--space-10);
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: var(--fg-3);
+  font: var(--type-caption);
+  text-align: left;
+  transition: transform var(--dur-fast) var(--ease-out);
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .tool-line:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.tool-line:active {
+  transform: scale(0.96);
+}
+
+.tool-args {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-view-content {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  max-width: 100%;
+}
+
+.tool-view-code {
+  overflow: hidden;
+  color: inherit;
+  font: var(--type-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-view-detail {
+  overflow: hidden;
+  color: var(--fg-4);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-meta {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-dot {
+  flex: none;
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--fg-4);
+}
+
+.status-ok {
+  background: var(--success);
+}
+
+.status-running {
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
+}
+
+.status-failed {
+  background: var(--danger);
+}
+
+.status-blocked {
+  background: var(--pending);
+}
+
+.cost-caption {
+  color: var(--fg-3);
+  font: var(--type-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.card-title {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+  font: var(--type-ui);
+}

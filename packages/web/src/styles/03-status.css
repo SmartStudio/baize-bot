@@ -1,0 +1,73 @@
+/* ---------- 在跑的活 ---------- */
+
+/* 呼吸灯要慢，tokens 里最慢的 --dur-slow 才 320ms，表达不了这个节奏。 */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.badge {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-1) var(--space-4);
+  border-radius: var(--radius-full);
+  font: var(--type-caption);
+}
+
+.badge-working {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.badge-working::before {
+  width: var(--space-3);
+  height: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
+  content: "";
+}
+
+.badge-pending {
+  background: var(--pending-soft);
+  color: var(--pending);
+}
+
+/* 等 Bot 确认这件事不用你动手。中性底加一圈描边，跟橙色的「等你点头」放一起时它自己往后退一档。 */
+.badge-await-bot {
+  background: var(--bg-elevated);
+  box-shadow: var(--inset-hairline);
+  color: var(--fg-2);
+}
+
+.badge-accepted {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.caret {
+  display: inline-block;
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-left: var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  animation: pulse 1.2s var(--ease-in-out) infinite;
+  vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .badge-working::before,
+  .caret,
+  .status-running {
+    animation: none;
+  }
+}

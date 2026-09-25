@@ -1,0 +1,96 @@
+/* ---------- 01 登录 ---------- */
+
+.login {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-8);
+  height: 100%;
+  padding: var(--space-8);
+  background: var(--bg-app);
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-7);
+  justify-content: center;
+  width: 100%;
+  max-width: var(--panel-w);
+  margin: 0 auto;
+}
+
+.login-form form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.wordmark {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  font: var(--type-heading);
+}
+
+.wordmark-badge {
+  display: grid;
+  width: var(--space-8);
+  height: var(--space-8);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font: var(--type-ui);
+  place-items: center;
+}
+
+.login h1 {
+  margin: 0;
+  font: var(--type-title);
+}
+
+.lede,
+.fine,
+.workspace-line {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.or {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.login-aside {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  justify-content: center;
+  padding: var(--space-10);
+  border-radius: var(--radius-xl);
+  background: var(--accent-soft);
+}
+
+.login-aside h2 {
+  margin: 0;
+  font: var(--type-title);
+  color: var(--fg-1);
+}
+
+.login-aside p {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.error {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font: var(--type-ui);
+}
