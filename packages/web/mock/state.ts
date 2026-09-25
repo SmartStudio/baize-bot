@@ -92,8 +92,51 @@ const seeds: Seed[] = [
         kind: "tool_call",
         runId: RunId.parse("run_service_1"),
         botId: BotId.parse("bot_service"),
+        tool: "bash",
+        view: { kind: "bash", command: "pnpm check", raw: { command: "pnpm check" } },
+        status: "ok",
+        durationMs: 12_000,
+      },
+      {
+        kind: "tool_call",
+        runId: RunId.parse("run_service_1"),
+        botId: BotId.parse("bot_service"),
+        tool: "write",
+        view: {
+          kind: "write",
+          path: "周报.md",
+          preview: ["# 本周完成", "- 核对 X3 库存", "- 更新交付计划"],
+          raw: { path: "周报.md", content: "# 本周完成\n- 核对 X3 库存\n- 更新交付计划" },
+        },
+        status: "ok",
+        durationMs: 800,
+      },
+      {
+        kind: "tool_call",
+        runId: RunId.parse("run_service_1"),
+        botId: BotId.parse("bot_service"),
+        tool: "edit",
+        view: {
+          kind: "edit",
+          path: "周报.md",
+          changedLines: 3,
+          raw: { path: "周报.md", edits: [{ oldText: "交付待定", newText: "10 月 20 日先交 120 台" }] },
+        },
+        status: "ok",
+        durationMs: 1_200,
+      },
+      {
+        kind: "tool_call",
+        runId: RunId.parse("run_service_1"),
+        botId: BotId.parse("bot_service"),
         tool: "erp.query",
-        view: { kind: "mcp", server: "ERP", tool: "query", params: [{ key: "查询", value: "库存与排产计划" }] },
+        view: {
+          kind: "mcp",
+          server: "ERP",
+          tool: "query",
+          params: [{ key: "查询", value: "库存与排产计划" }],
+          raw: { query: "库存与排产计划", limit: 20 },
+        },
         status: "ok",
         durationMs: 41_000,
       },
@@ -971,11 +1014,12 @@ export const streamBotReply = async (
   const abandoned = () => generation !== run;
   const needed = approvalFor(prompt);
   const tool = needed?.tool ?? "erp.query";
+  const operation = tool.includes(".") ? tool.slice(tool.lastIndexOf(".") + 1) : tool;
   const runId = RunId.parse(`run_${nextSuffix()}`);
   const view = {
     kind: "mcp" as const,
     server: "ERP",
-    tool,
+    tool: operation,
     params: [{ key: "请求", value: prompt.slice(0, 12) }],
   };
 

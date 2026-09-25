@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { ArrowRightLeft, ChevronDown, ChevronRight, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
-import { toolViewText } from "@baize/shared";
 import type {
   Approval,
   ApprovalId,
@@ -15,10 +14,12 @@ import type {
   MessageBody,
   MessageId,
   SkillOfferStatus,
+  ToolView,
 } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
 import { Markdown } from "./markdown.js";
 import { formatAmount, timeOf } from "./preview.js";
+import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
 export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
@@ -26,6 +27,7 @@ export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, decision: DecideApprovalRequest["decision"]) => Promise<void>;
 export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+export type InspectTool = (view: ToolView) => void;
 
 const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
 
@@ -143,15 +145,22 @@ const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
   blocked: "拦下",
 };
 
-const ToolCallCard = ({ body }: { body: ToolCall }) => (
-  <div className="tool-line" data-testid="tool-call-card" data-status={body.status}>
-    <span className="tool-name">{body.tool}</span>
-    <span aria-hidden="true">·</span>
-    <span className="tool-args">{toolViewText(body.view)}</span>
+const ToolCallCard = ({ body, onInspect }: { body: ToolCall; onInspect: InspectTool }) => (
+  <button
+    type="button"
+    className="tool-line"
+    data-testid="tool-call-card"
+    data-status={body.status}
+    data-view-kind={body.view.kind}
+    onClick={() => onInspect(body.view)}
+  >
+    <span className="tool-args">
+      <ToolViewContent view={body.view} />
+    </span>
     <span aria-hidden="true">·</span>
     <span className={`status-dot status-${body.status}`} role="img" aria-label={TOOL_STATUS_TEXT[body.status]} />
     <span className="tool-meta">{body.durationMs === null ? "—" : `${(body.durationMs / 1000).toFixed(1)}s`}</span>
-  </div>
+  </button>
 );
 
 const CostCard = ({ body }: { body: Extract<MessageBody, { kind: "cost" }> }) => (
@@ -198,7 +207,9 @@ const ApprovalCard = ({
           <ShieldAlert size={16} aria-hidden="true" />
           已失效 · {APPROVAL_KIND_TEXT[approval.kind]}
         </div>
-        <p className="approval-summary">{toolViewText(approval.view)}</p>
+        <p className="approval-summary">
+          <ToolViewContent view={approval.view} approval />
+        </p>
         <div className="approval-actions">
           <p className="approval-expired-text">这一步已经不用了</p>
         </div>
@@ -208,7 +219,9 @@ const ApprovalCard = ({
   if (approval.status !== "pending") {
     return (
       <div className="card card-approval approval-compact" data-testid="approval-card" data-status={approval.status}>
-        <span className="approval-compact-text">{toolViewText(approval.view)}</span>
+        <span className="approval-compact-text">
+          <ToolViewContent view={approval.view} approval />
+        </span>
         <span
           className="approval-pill"
           data-testid="approval-decided"
@@ -225,7 +238,9 @@ const ApprovalCard = ({
         <ShieldAlert size={16} aria-hidden="true" />
         需要你点头 · {APPROVAL_KIND_TEXT[approval.kind]}
       </div>
-      <p className="approval-summary">{toolViewText(approval.view)}</p>
+      <p className="approval-summary">
+        <ToolViewContent view={approval.view} approval />
+      </p>
       <div className="approval-actions">
         <button
           type="button"
@@ -349,6 +364,7 @@ type MessageProps = {
   checklist: ChecklistItem[];
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onInspectTool: InspectTool;
   showSource: boolean;
 };
 
@@ -360,6 +376,7 @@ const MessageView = ({
   checklist,
   onDecide,
   onDecideSkillOffer,
+  onInspectTool,
   showSource,
 }: MessageProps) => {
   const body = message.body;
@@ -374,7 +391,7 @@ const MessageView = ({
           case "system":
             return <SystemNote body={body} />;
           case "tool_call":
-            return <ToolCallCard body={body} />;
+            return <ToolCallCard body={body} onInspect={onInspectTool} />;
           case "cost":
             return <CostCard body={body} />;
           case "approval": {
@@ -413,7 +430,7 @@ const CostMessage = ({ message }: { message: Message }) =>
     </div>
   ) : null;
 
-const Activity = ({ tools, cost }: { tools: Message[]; cost: Message | null }) => {
+const Activity = ({ tools, cost, onInspect }: { tools: Message[]; cost: Message | null; onInspect: InspectTool }) => {
   const [expanded, setExpanded] = useState(false);
   const running = tools.find((message) => message.body.kind === "tool_call" && message.body.status === "running");
   const open = running !== undefined || expanded;
@@ -443,7 +460,7 @@ const Activity = ({ tools, cost }: { tools: Message[]; cost: Message | null }) =
       <div className="activity-lines">
         {tools.map((message) => (
           <div className="message" data-testid="message" data-kind="tool_call" key={message.id} hidden={!open}>
-            {message.body.kind === "tool_call" ? <ToolCallCard body={message.body} /> : null}
+            {message.body.kind === "tool_call" ? <ToolCallCard body={message.body} onInspect={onInspect} /> : null}
           </div>
         ))}
       </div>
@@ -495,7 +512,7 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
             <MessageView key={message.id} message={message} {...props} />
           ))}
         {/* 工具活动和花费收在回合底部：正在用工具时它像「正在输入」，跑完了它是这轮的收尾小字。 */}
-        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} /> : null}
+        {tools.length > 0 ? <Activity tools={tools} cost={turn.cost} onInspect={props.onInspectTool} /> : null}
         {tools.length === 0 && turn.cost !== null ? <MessageView message={turn.cost} {...props} /> : null}
       </div>
     </div>

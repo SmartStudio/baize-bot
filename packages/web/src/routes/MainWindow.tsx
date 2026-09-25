@@ -8,7 +8,9 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { NewGroupDialog } from "../components/NewGroupDialog.js";
 import { OvernightCard } from "../components/OvernightCard.js";
 import { TaskPanel } from "../components/TaskPanel.js";
+import { ToolInspector } from "../components/ToolInspector.js";
 import { useApp } from "../state/app.js";
+import type { ToolView } from "@baize/shared";
 
 type Overlay = "none" | "account" | "settings" | "tools" | "usage" | "new-group";
 
@@ -22,6 +24,7 @@ export const MainWindow = () => {
   const [overlay, setOverlay] = useState<Overlay>("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
+  const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; view: ToolView } | null>(null);
 
   const ready = state.status === "ready" ? state : null;
   const conversation = ready?.conversations.find((c) => c.groupId === ready.selectedGroupId) ?? null;
@@ -43,8 +46,9 @@ export const MainWindow = () => {
   };
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
-  // 单 Bot 群右边是 Bot 设置栏，多 Bot 群右边只有点开任务详情时才有东西。没有的话对话区把这一栏吃掉。
-  const hasPanel = soloBot !== null || (team !== null && taskOpen);
+  const inspectedView = inspectedTool?.groupId === groupId ? inspectedTool.view : null;
+  // 检查器临时占用右栏；关掉后回到 Bot 设置或任务详情。没有右栏内容时，对话区把这一栏吃掉。
+  const hasPanel = inspectedView !== null || soloBot !== null || (team !== null && taskOpen);
 
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
@@ -72,6 +76,9 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
+          onInspectTool={(view) => {
+            if (groupId !== null) setInspectedTool({ groupId, view });
+          }}
           onLoadSkills={actions.loadSkills}
           onToggleChecklist={(checklist: ChecklistItem[]) => {
             if (team !== null) void actions.setChecklist(team.task, checklist);
@@ -83,7 +90,9 @@ export const MainWindow = () => {
           <p className="empty">今天把什么活交出去？先建一个 Bot。</p>
         </section>
       )}
-      {soloBot !== null ? (
+      {inspectedView !== null ? (
+        <ToolInspector view={inspectedView} onClose={() => setInspectedTool(null)} />
+      ) : soloBot !== null ? (
         <BotSettingsPanel
           bot={soloBot}
           tools={ready.tools}
@@ -91,7 +100,7 @@ export const MainWindow = () => {
           onOpenTools={() => setOverlay("tools")}
         />
       ) : null}
-      {team !== null && taskOpen ? (
+      {inspectedView === null && team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />
       ) : null}
       {ready.overnight.length > 0 ? (

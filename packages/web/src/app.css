@@ -867,14 +867,26 @@ select {
   display: flex;
   gap: var(--space-3);
   align-items: center;
+  width: 100%;
+  min-height: var(--space-10);
   max-width: 100%;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
   color: var(--fg-3);
   font: var(--type-caption);
+  text-align: left;
+  transition: transform var(--dur-fast) var(--ease-out);
   white-space: nowrap;
 }
 
-.tool-name {
-  flex: none;
+@media (hover: hover) {
+  .tool-line:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.tool-line:active {
+  transform: scale(0.96);
 }
 
 .tool-args {
@@ -882,6 +894,28 @@ select {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.tool-view-content {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  max-width: 100%;
+}
+
+.tool-view-code {
+  overflow: hidden;
+  color: inherit;
+  font: var(--type-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-view-detail {
+  overflow: hidden;
+  color: var(--fg-4);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-meta {
@@ -956,6 +990,15 @@ select {
   margin: 0;
   color: var(--fg-1);
   font: var(--type-body);
+}
+
+.approval-summary .tool-view-content {
+  flex-wrap: wrap;
+  white-space: normal;
+}
+
+.approval-summary .tool-view-detail {
+  white-space: normal;
 }
 
 .approval-actions {
@@ -2397,6 +2440,61 @@ select {
   border-left: 1px solid var(--border-1);
   background: var(--bg-sidebar);
   overflow-y: auto;
+}
+
+.tool-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  min-height: 0;
+  padding: var(--space-7);
+  border-left: 1px solid var(--border-1);
+  background: var(--bg-sidebar);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.tool-inspector-head {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: space-between;
+}
+
+.tool-inspector-head h2 {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.tool-inspector-head .icon-button {
+  width: var(--space-10);
+  height: var(--space-10);
+}
+
+.tool-inspector-advanced {
+  border-top: 1px solid var(--border-1);
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.tool-inspector-advanced summary {
+  min-height: var(--control-h-lg);
+  padding: var(--space-5) 0;
+  cursor: pointer;
+}
+
+.tool-inspector-advanced pre {
+  max-height: calc(100vh - var(--space-12) * 2);
+  margin: 0;
+  padding: var(--space-5);
+  overflow: auto;
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+  color: var(--fg-2);
+  font: var(--type-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .task-panel-head {

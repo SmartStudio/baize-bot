@@ -11,6 +11,7 @@ import {
 const EMAIL = "chen@baize.dev";
 const PASSWORD = "baize-dev";
 const SHOT = "e2e/screenshots";
+const AUDIT_SHOT = "/Users/zouyanjian/other-try/prepare/baize/baize-bot/.audit/v1/p0-5";
 
 test.beforeEach(async ({ request }) => {
   expect((await request.post("/api/test/reset")).status(), "mock 状态倒回预置的三个 Bot").toBe(204);
@@ -180,16 +181,16 @@ test("小服的对话按回合排，工具和花费是轻量摘要", async ({ pa
   await login(page);
   await openBot(page, "小服");
   const list = page.getByTestId("message-list");
-  await expect(list.getByTestId("message")).toHaveCount(6);
+  await expect(list.getByTestId("message")).toHaveCount(9);
   await expect(list.locator("[data-kind=user]")).toHaveCount(1);
   await expect(list.locator("[data-kind=bot]")).toHaveCount(2);
   await expect(list.locator("[data-kind=system]")).toHaveCount(1);
-  await expect(list.locator("[data-kind=tool_call]").getByTestId("tool-call-card")).toHaveCount(1);
+  await expect(list.locator("[data-kind=tool_call]").getByTestId("tool-call-card")).toHaveCount(4);
   await expect(list.locator("[data-kind=cost]").getByTestId("cost-card")).toHaveCount(1);
   await expect(list.getByTestId("cost-card")).toContainText("约 ¥4.6");
   await expect(list.getByTestId("cost-card")).not.toContainText("步");
   await expect(list.getByTestId("activity-toggle")).toHaveAttribute("aria-expanded", "false");
-  await expect(list.getByTestId("tool-call-card")).toBeHidden();
+  for (const tool of await list.getByTestId("tool-call-card").all()) await expect(tool).toBeHidden();
   await expect(list.getByTestId("time-divider").first()).toContainText(/\d{2}:\d{2}/);
   await expect(list.getByTestId("bot-turn")).toHaveCount(1);
   await expect(list.locator(".bot-block .avatar"), "单 Bot 气泡旁不再重复头像").toHaveCount(0);
@@ -243,7 +244,7 @@ test("错误 system 显示左对齐提示卡，小额花费收在卡底部", asy
   await page.getByTestId("chat").screenshot({ path: "test-results/chat-error.png" });
 });
 
-test("两个已完成工具默认只露摘要，展开后各有状态和一位小数耗时", async ({ page }) => {
+test("多个已完成工具默认只露摘要，展开后各有状态和一位小数耗时", async ({ page }) => {
   await page.route("**/api/groups/grp_service/messages*", async (route) => {
     if (route.request().method() !== "GET") return route.continue();
     const response = await route.fetch();
@@ -254,7 +255,12 @@ test("两个已完成工具默认只露摘要，展开后各有状态和一位�
     const second = Message.parse({
       ...first,
       id: "message_second_tool",
-      body: { ...first.body, tool: "read_task", durationMs: 1500 },
+      body: {
+        ...first.body,
+        tool: "read_task",
+        view: { kind: "bash", command: "cat TASK.md", raw: { command: "cat TASK.md" } },
+        durationMs: 1500,
+      },
     });
     const messages = payload.messages.slice();
     messages.splice(index + 1, 0, second);
@@ -263,14 +269,15 @@ test("两个已完成工具默认只露摘要，展开后各有状态和一位�
 
   await login(page);
   const list = page.getByTestId("message-list");
-  await expect(list.getByTestId("activity-toggle")).toContainText("用了 2 个工具");
-  await expect(list.getByTestId("tool-call-card")).toHaveCount(2);
+  await expect(list.getByTestId("activity-toggle")).toContainText("用了 5 个工具");
+  await expect(list.getByTestId("tool-call-card")).toHaveCount(5);
   await expect(list.getByTestId("tool-call-card").first()).toBeHidden();
   await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
   await list.getByTestId("activity-toggle").click();
   await expect(list.getByTestId("tool-call-card").first()).toBeVisible();
-  await expect(list.getByTestId("tool-call-card").last()).toContainText("read_task");
-  await expect(list.getByTestId("tool-call-card").last()).toContainText("1.5s");
+  const extra = list.locator('[data-testid="tool-call-card"][data-view-kind="bash"]').last();
+  await expect(extra).toContainText("cat TASK.md");
+  await expect(extra).toContainText("1.5s");
 });
 
 test("离底部超过一屏显示回到底部，新消息不抢阅读位置", async ({ page }) => {
@@ -531,10 +538,54 @@ test("工具调用卡在同一张卡上从运行中变完成", async ({ page }) 
   await expect(list.getByTestId("activity-toggle"), "工具默认收起").toHaveAttribute("aria-expanded", "false");
   await list.getByTestId("activity-toggle").click();
   await expect(card, "展开后显示工具名、参数摘要、耗时和状态").toBeVisible();
-  await expect(card).toContainText("erp.query");
-  await expect(card).toContainText("ERP · 查一下 X3 还有多少");
+  await expect(card).toContainText("调用 ERP · query");
+  await expect(card).toContainText("请求=查一下 X3 还有多少");
   await expect(card).toContainText("1.0s");
   await expect(card.getByRole("img", { name: "完成" })).toBeVisible();
+});
+
+test("审批卡和工具行里没有 `{`", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await openSeededBot(page, "小服");
+  const list = page.getByTestId("message-list");
+  await list.getByTestId("activity-toggle").click();
+  const tools = list.getByTestId("tool-call-card");
+  await expect(tools, "mock 覆盖 bash、write、edit、mcp 四种工具视图").toHaveCount(4);
+  await expect(tools.nth(0)).toContainText("pnpm check");
+  await expect(tools.nth(1)).toContainText("周报.md");
+  await expect(tools.nth(1)).toContainText("本周完成");
+  await expect(tools.nth(2)).toContainText("改 3 行");
+  await expect(tools.nth(3)).toContainText("库存与排产计划");
+  for (const tool of await tools.all()) await expect(tool).not.toContainText("{");
+
+  const approval = await sendForApproval(page, "小销");
+  await expect(approval).not.toContainText("{");
+  await page.screenshot({ path: `${SHOT}/p0-5-approval-mock.png` });
+  await page.screenshot({ path: `${AUDIT_SHOT}/approval-mock.png` });
+});
+
+test("点工具行，检查器高级里有原始参数", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("overnight-card").getByRole("button", { name: "知道了" }).click();
+  await openSeededBot(page, "小服");
+  await page.getByTestId("activity-toggle").click();
+  const bash = page.locator('[data-testid="tool-call-card"][data-view-kind="bash"]');
+
+  await bash.click();
+  await expect(page.getByTestId("tool-inspector")).toBeVisible();
+  await page.getByTestId("tool-inspector-close").click();
+  await expect(page.getByTestId("tool-inspector")).toHaveCount(0);
+
+  await bash.click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("tool-inspector")).toHaveCount(0);
+
+  await bash.click();
+  await page.getByTestId("tool-inspector-advanced").click();
+  await expect(page.getByTestId("tool-inspector-raw")).toContainText('"command": "pnpm check"');
+  await page.screenshot({ path: `${SHOT}/p0-5-inspector-mock.png` });
+  await page.screenshot({ path: `${AUDIT_SHOT}/inspector-mock.png` });
 });
 
 test("运行结束出现花费摘要，侧栏摘要跟着换，跑的过程中标「干活中」", async ({ page }) => {

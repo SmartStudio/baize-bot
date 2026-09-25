@@ -8,6 +8,7 @@ import {
   type DecideApproval,
   type DecideSkillOffer,
   type HandoffTable,
+  type InspectTool,
 } from "./messages/MessageView.js";
 import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
@@ -26,6 +27,7 @@ type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onInspectTool: InspectTool;
   onLoadSkills: (botId: BotId) => Promise<void>;
   onToggleChecklist: (checklist: ChecklistItem[]) => void;
   onOpenTask: () => void;
@@ -89,6 +91,7 @@ export const ChatPanel = ({
   onSend,
   onDecide,
   onDecideSkillOffer,
+  onInspectTool,
   onLoadSkills,
   onToggleChecklist,
   onOpenTask,
@@ -240,6 +243,7 @@ export const ChatPanel = ({
                 checklist={checklist}
                 onDecide={onDecide}
                 onDecideSkillOffer={onDecideSkillOffer}
+                onInspectTool={onInspectTool}
                 showSource={team}
               />
             </div>
