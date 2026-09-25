@@ -21,7 +21,6 @@ export function toUser(row: typeof schema.users.$inferSelect): User {
     id: row.id,
     name: row.name,
     email: row.email,
-    teamName: "",
     createdAt: row.createdAt.toISOString(),
   });
 }

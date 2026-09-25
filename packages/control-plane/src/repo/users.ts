@@ -12,6 +12,17 @@ export type NewUser = {
   readonly password: string;
 };
 
+/** 注册撞邮箱时只认数据库唯一约束，不先查后写。 */
+export function isEmailTaken(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    error.code === "23505" &&
+    "constraint_name" in error &&
+    error.constraint_name === "users_email_unique"
+  );
+}
+
 export async function createUser(db: Db, input: NewUser): Promise<User> {
   const passwordHash = await hashPassword(input.password);
   return db.transaction(async (tx) => {

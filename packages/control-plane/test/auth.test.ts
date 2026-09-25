@@ -1,4 +1,4 @@
-import { ApiError, LoginResponse, MeResponse } from "@baize/shared";
+import { ApiError, LoginResponse, MeResponse, RegisterResponse } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SESSION_COOKIE } from "../src/repo/sessions.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
@@ -55,6 +55,50 @@ describe("登录", () => {
 
   it("请求体不合法时返回 400", async () => {
     const response = await server.client().post("/api/auth/login", { email: "不是邮箱", password: "" });
+    expect(response.status).toBe(400);
+    ApiError.parse(await response.json());
+  });
+});
+
+describe("注册", () => {
+  it("注册后能登录", async () => {
+    const client = server.client();
+    const registeredEmail = `register-${Date.now()}@baize.dev`;
+    const response = await client.post("/api/register", {
+      email: registeredEmail,
+      password: PASSWORD,
+      name: "林静",
+    });
+
+    expect(response.status).toBe(201);
+    const registered = RegisterResponse.parse(await response.json());
+    expect(registered.user).toMatchObject({ email: registeredEmail, name: "林静" });
+    expect(client.cookie, "注册成功应当直接下发会话 cookie").not.toBeNull();
+
+    const me = MeResponse.parse(await (await client.get("/api/me")).json());
+    expect(me.user).toEqual(registered.user);
+  });
+
+  it("重复邮箱返回 409", async () => {
+    const registeredEmail = `duplicate-${Date.now()}@baize.dev`;
+    const first = await server.client().post("/api/register", {
+      email: registeredEmail,
+      password: PASSWORD,
+      name: "林静",
+    });
+    expect(first.status).toBe(201);
+
+    const duplicate = await server.client().post("/api/register", {
+      email: registeredEmail,
+      password: PASSWORD,
+      name: "另一人",
+    });
+    expect(duplicate.status).toBe(409);
+    expect(ApiError.parse(await duplicate.json()).error).toBe("这个邮箱已经注册过了");
+  });
+
+  it("请求体不合法时返回 400", async () => {
+    const response = await server.client().post("/api/register", { email: "不是邮箱", password: "", name: "" });
     expect(response.status).toBe(400);
     ApiError.parse(await response.json());
   });

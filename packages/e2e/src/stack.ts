@@ -6,7 +6,15 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { WebSocket } from "ws";
-import { AgentToControl, Computer, ControlToAgent, ServerPush } from "@baize/shared";
+import {
+  AgentToControl,
+  Computer,
+  ControlToAgent,
+  LocalComputerResponse,
+  RegisterResponse,
+  ServerPush,
+  type ComputerId,
+} from "@baize/shared";
 import { createRunner, type PromptMessage } from "@baize/bot-runner";
 import { startAgent } from "@baize/computer-agent";
 import {
@@ -30,6 +38,8 @@ export type StackOptions = {
   readonly upstreamBaseUrl: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
+  /** 默认沿用 seed；注册路径通过 HTTP 创建账号、本机 token 和一个可对话 Bot。 */
+  readonly bootstrap?: "seed" | "register";
   readonly startComputer?: boolean;
   readonly disconnectGraceMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
@@ -96,12 +106,26 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     closers.push(() => server.close());
     const baseUrl = `http://127.0.0.1:${server.port}`;
 
-    const seeded = await seed(db);
-    if (seeded.computerToken === null) throw new Error("seed 没给出电脑 token");
-    const computerToken = seeded.computerToken;
-
-    const cookie = await login(baseUrl);
+    const bootstrap = options.bootstrap ?? "seed";
+    let computerId: ComputerId;
+    let computerToken: string;
+    let cookie: string;
+    if (bootstrap === "register") {
+      const registered = await register(baseUrl);
+      cookie = registered.cookie;
+      computerId = registered.computerId;
+      computerToken = registered.computerToken;
+    } else {
+      const seeded = await seed(db);
+      if (seeded.computerToken === null) throw new Error("seed 没给出电脑 token");
+      cookie = await login(baseUrl);
+      computerId = seeded.computerId;
+      computerToken = seeded.computerToken;
+    }
     const api = makeApi(baseUrl, cookie);
+    if (bootstrap === "register") {
+      await api.post("/api/bots", { name: "注册助手", tag: "助手", description: "注册路径的 E2E 助手" });
+    }
 
     const push = await connectPush(server.port, cookie);
     closers.push(push.close);
@@ -112,8 +136,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     let log = "";
     const agentOptions = {
       url: `ws://127.0.0.1:${server.port}/agent`,
-      computerId: seeded.computerId,
-      token: seeded.computerToken,
+      computerId,
+      token: computerToken,
       version: AGENT_VERSION,
       dataDir,
       log: (line: string) => {
@@ -156,7 +180,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         const mainPath = join(agentDir, "src", "main.ts");
         const agentEnv: NodeJS.ProcessEnv = {
           ...process.env,
-          COMPUTER_ID: seeded.computerId,
+          COMPUTER_ID: computerId,
           AGENT_TOKEN: computerToken,
           CONTROL_PLANE_AGENT_URL: `ws://127.0.0.1:${server.port}/agent`,
           BAIZE_DATA_DIR: dataDir,
@@ -276,6 +300,35 @@ async function withAdmin(run: (admin: Sql) => Promise<unknown>): Promise<void> {
   } finally {
     await admin.end();
   }
+}
+
+async function register(baseUrl: string): Promise<{
+  readonly cookie: string;
+  readonly computerId: ComputerId;
+  readonly computerToken: string;
+}> {
+  const response = await fetch(`${baseUrl}/api/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email: `e2e-${randomBytes(8).toString("hex")}@example.com`,
+      password: "e2e-password",
+      name: "E2E 用户",
+    }),
+  });
+  if (!response.ok) throw new Error(`注册失败 ${response.status}：${await response.text()}`);
+  RegisterResponse.parse(await response.json());
+  const setCookie = response.headers.getSetCookie()[0];
+  if (setCookie === undefined) throw new Error("注册成功但没发 cookie");
+  const cookie = setCookie.split(";")[0] ?? "";
+
+  const localResponse = await fetch(`${baseUrl}/api/computers/local`, {
+    method: "POST",
+    headers: { cookie },
+  });
+  if (!localResponse.ok) throw new Error(`注册本机失败 ${localResponse.status}：${await localResponse.text()}`);
+  const local = LocalComputerResponse.parse(await localResponse.json());
+  return { cookie, computerId: local.computerId, computerToken: local.token };
 }
 
 async function login(baseUrl: string): Promise<string> {

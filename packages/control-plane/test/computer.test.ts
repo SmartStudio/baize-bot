@@ -1,4 +1,4 @@
-import { ApiError, Computer, type ComputerId } from "@baize/shared";
+import { ApiError, Computer, LocalComputerResponse, type ComputerId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEV_EMAIL, DEV_PASSWORD, seed } from "../src/seed.js";
 import { authenticateComputer, findComputerByOwner, markComputerOnline } from "../src/repo/computers.js";
@@ -70,6 +70,35 @@ describe("电脑归属", () => {
 });
 
 describe("token", () => {
+  it("未登录不能取得本机 token", async () => {
+    const response = await server.client().post("/api/computers/local");
+    expect(response.status).toBe(401);
+    ApiError.parse(await response.json());
+  });
+
+  it("本机 token 只在响应里出现一次，再查不到明文", async () => {
+    const user = await makeUser(database.db);
+    const client = server.client();
+    await client.login(user.email, PASSWORD);
+
+    const response = await client.post("/api/computers/local");
+    expect(response.status).toBe(200);
+    const raw = await response.text();
+    const local = LocalComputerResponse.parse(JSON.parse(raw));
+    expect(raw.split(local.token)).toHaveLength(2);
+
+    const stored = await database.sql<Record<string, unknown>[]>`
+      SELECT * FROM computers WHERE owner_id = ${user.id}
+    `;
+    expect(JSON.stringify(stored), "数据库行里不能出现 token 明文").not.toContain(local.token);
+
+    const visible = await client.get("/api/computer");
+    expect(await visible.text(), "后续查询不能再拿到 token 明文").not.toContain(local.token);
+
+    const connected = await helloAgent(server.server.port, local.computerId, local.token);
+    connected.agent.close();
+  });
+
   it("库里只存哈希，明文不落库", async () => {
     const user = await makeUser(database.db);
     await server.client().login(user.email, PASSWORD);

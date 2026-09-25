@@ -23,7 +23,10 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
+  LocalComputerResponse,
   OvernightResponse,
+  RegisterRequest,
+  RegisterResponse,
   RoutineId,
   RoutineListResponse,
   RoutineResponse,
@@ -63,7 +66,7 @@ import { discoverTools } from "../mcp/discover.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, findBot, listBots, updateBot } from "../repo/bots.js";
-import { ensureComputer, findComputerByOwner } from "../repo/computers.js";
+import { ensureComputer, findComputerByOwner, resetComputerToken } from "../repo/computers.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
@@ -93,7 +96,7 @@ import {
 } from "../repo/skills.js";
 import { updateTask } from "../repo/tasks.js";
 import { createTool, deleteTool, findOwnedTool, listToolsByOwner, updateTool } from "../repo/tools.js";
-import { authenticate } from "../repo/users.js";
+import { authenticate, createUser, isEmailTaken } from "../repo/users.js";
 import { getOvernight, getUsage } from "../repo/usage.js";
 import type { PushHub } from "../ws/hub.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
@@ -110,7 +113,7 @@ export type AppDeps = {
 
 type Env = { Variables: { user: User } };
 
-const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout"]);
+const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout", "/api/register"]);
 /** webhook 的 token 本身就是凭据，打这条的人手上没有会话。只豁免这一条路由，多一段路径都不算。 */
 const PUBLIC_HOOK = /^\/api\/hooks\/[^/]+$/;
 
@@ -133,6 +136,28 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (user === null) return c.json(UNAUTHORIZED, 401);
     c.set("user", user);
     await next();
+  });
+
+  app.post("/api/register", async (c) => {
+    const body = await readJson(c.req.raw, RegisterRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    let user: User;
+    try {
+      user = await createUser(db, body.value);
+    } catch (error) {
+      if (isEmailTaken(error)) return c.json({ error: "这个邮箱已经注册过了" }, 409);
+      throw error;
+    }
+    const token = await createSession(db, user.id);
+    await ensureComputer(db, user.id);
+    setCookie(c, SESSION_COOKIE, token, {
+      httpOnly: true,
+      sameSite: "Lax",
+      path: "/",
+      maxAge: Math.floor(SESSION_TTL_MS / 1000),
+      secure: deps.secureCookie,
+    });
+    return c.json(RegisterResponse.parse({ user }), 201);
   });
 
   app.post("/api/auth/login", async (c) => {
@@ -212,6 +237,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const computer = await findComputerByOwner(db, c.get("user").id);
     if (computer === null) return c.json(NOT_FOUND, 404);
     return c.json(Computer.parse(computer));
+  });
+
+  app.post("/api/computers/local", async (c) => {
+    const ownerId = c.get("user").id;
+    await ensureComputer(db, ownerId);
+    const local = await resetComputerToken(db, ownerId);
+    if (local === null) throw new Error(`用户 ${ownerId} 的本机电脑既没建成也无法重置 token`);
+    return c.json(LocalComputerResponse.parse(local));
   });
 
   app.get("/api/bots", async (c) => {
