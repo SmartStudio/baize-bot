@@ -46,6 +46,7 @@ const result: {
 };
 
 const save = (): void => writeFileSync(resultPath, `${JSON.stringify(result, null, 2)}\n`);
+const BASH_TOOL_COMMAND = "sleep 90";
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 const alive = (pid: number): boolean => {
   try {
@@ -373,9 +374,9 @@ function descendantsOf(rootPid: number): number[] {
       }
     }
   }
+  // bash -c 和 sandbox-exec 都会 exec 下去，工具命令落地后进程表里只剩命令本身。
   return rows
-    .filter((row) => found.has(row.pid) && row.pid !== rootPid)
-    .filter((row) => row.command.trim().split(/\s+/u)[0]?.split("/").pop() === "bash")
+    .filter((row) => found.has(row.pid) && row.pid !== rootPid && row.command.trim() === BASH_TOOL_COMMAND)
     .map((row) => row.pid);
 }
 
@@ -444,7 +445,7 @@ async function main(): Promise<void> {
       ? { textChunks: ["长命令结束。"], usage: { input: 100, output: 10 } }
       : {
           textChunks: [],
-          toolCall: { id: "desktop-sleep", name: "bash", args: { command: "sleep 90" } },
+          toolCall: { id: "desktop-sleep", name: "bash", args: { command: BASH_TOOL_COMMAND } },
           usage: { input: 100, output: 10 },
         },
   );
