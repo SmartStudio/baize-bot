@@ -45,6 +45,7 @@ import {
   isFollowUpTurn,
   type ScriptedTurn,
   scriptedUpstream,
+  type Upstream,
 } from "./fixtures/openai-sse.js";
 
 const botSessionProbe = vi.hoisted(() => ({
@@ -56,6 +57,7 @@ const botSessionProbe = vi.hoisted(() => ({
   createGate: null as Promise<void> | null,
   promptError: null as Error | null,
   promptHook: null as (() => void) | null,
+  assistantEnds: [] as Array<{ stopReason: string; errorMessage: string | undefined }>,
 }));
 
 vi.mock("../src/bot-session.js", async (importOriginal) => {
@@ -76,6 +78,13 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
           return prompt(input);
         },
       });
+      const unsubscribe = created.session.subscribe((event) => {
+        if (event.type !== "message_end" || event.message.role !== "assistant") return;
+        botSessionProbe.assistantEnds.push({
+          stopReason: event.message.stopReason,
+          errorMessage: event.message.errorMessage,
+        });
+      });
       return {
         ...created,
         async dispose() {
@@ -86,6 +95,7 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
           if (botSessionProbe.disposeErrorFor !== null && key.sessionDir.includes(botSessionProbe.disposeErrorFor)) {
             throw new Error(`模拟 ${botSessionProbe.disposeErrorFor} 关闭失败`);
           }
+          unsubscribe();
           await created.dispose();
         },
       };
@@ -97,6 +107,9 @@ const MODEL_ID = "baize-test-model";
 // 供应商 SDK 自己那层重试会把上游的 503 吞掉，设成 0 才冒得到 Pi 的重试层。
 const RETRY_TO_PI: RunnerConfig["settings"] = {
   retry: { enabled: true, maxRetries: 3, baseDelayMs: 10, provider: { maxRetries: 0 } },
+};
+const SLOW_RETRY_TO_PI: RunnerConfig["settings"] = {
+  retry: { enabled: true, maxRetries: 3, baseDelayMs: 60_000, provider: { maxRetries: 0 } },
 };
 
 const SUITE_STARTED_AT = Date.now();
@@ -234,6 +247,47 @@ const scriptRecording = (
   };
 };
 
+const streamChunk = (id: string, model: string, delta: unknown, finishReason: string | null): string =>
+  JSON.stringify({
+    id,
+    object: "chat.completion.chunk",
+    created: 1758153600,
+    model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
+  });
+
+const midStreamUpstream = (): { readonly upstream: Upstream; readonly release: () => void } => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    upstream: async function* (req) {
+      yield streamChunk("chatcmpl-mid-stream", req.model, { role: "assistant" }, null);
+      yield streamChunk("chatcmpl-mid-stream", req.model, { content: "只流到一半" }, null);
+      await blocked;
+      yield streamChunk("chatcmpl-mid-stream", req.model, {}, "stop");
+      yield "[DONE]";
+    },
+    release,
+  };
+};
+
+const interruptedMidStreamUpstream = (): { readonly upstream: Upstream; readonly interrupt: () => void } => {
+  let interrupt!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    interrupt = resolve;
+  });
+  return {
+    upstream: async function* (req) {
+      yield streamChunk("chatcmpl-interrupted", req.model, { role: "assistant" }, null);
+      yield streamChunk("chatcmpl-interrupted", req.model, { content: "只流到一半" }, null);
+      await blocked;
+    },
+    interrupt,
+  };
+};
+
 const recorder = (): { firstTurn: string[]; toolResults: string[] } => ({ firstTurn: [], toolResults: [] });
 
 /** 头一轮只点一个工具，不说话。 */
@@ -294,8 +348,9 @@ async function startHarness(options: {
   /** 不给就挂 send_email、list_files 两个假扩展工具。 */
   readonly extensionTools?: readonly RunnerTool[];
   readonly script: (req: ChatCompletionRequest) => ScriptedTurn;
+  readonly upstream?: Upstream;
   readonly failFirst?: number;
-  readonly failStatus?: 401 | 503;
+  readonly failStatus?: 401 | 500 | 503;
   readonly failMessage?: string;
   /** 收到 approval_request 就按这个结论回，undefined 表示不给结论。 */
   readonly approve?: boolean;
@@ -311,7 +366,7 @@ async function startHarness(options: {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
   const gateway = await startGateway({
-    upstream: scriptedUpstream(options.script),
+    upstream: options.upstream ?? scriptedUpstream(options.script),
     models: [{ id: MODEL_ID }],
     ...(options.failFirst === undefined ? {} : { failFirst: options.failFirst }),
     ...(options.failStatus === undefined ? {} : { failStatus: options.failStatus }),
@@ -385,6 +440,7 @@ afterEach(async () => {
   botSessionProbe.createGate = null;
   botSessionProbe.promptError = null;
   botSessionProbe.promptHook = null;
+  botSessionProbe.assistantEnds.splice(0);
 });
 
 afterAll(() => {
@@ -804,6 +860,89 @@ describe("上游重试", () => {
 });
 
 describe("模型上游报错", () => {
+  it("Pi 0.87.1 正在 fetch 时 abort 会产出 aborted，而不是 error", async () => {
+    const stream = midStreamUpstream();
+    const h = await startHarness({ bots: ["bot-1"], script: scriptBy([]), upstream: stream.upstream });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查一条订单"));
+    await until(() => h.sent.some((message) => message.type === "bot_text"), "假上游流出半句话");
+
+    try {
+      await h.runner.pause(BotId.parse("bot-1"));
+      await running;
+    } finally {
+      stream.release();
+    }
+
+    expect(botSessionProbe.assistantEnds.at(-1)).toEqual({
+      stopReason: "aborted",
+      errorMessage: "Request was aborted",
+    });
+  });
+
+  it("暂停时挂着的 run 不报模型错误，run_done 恰好一次", async () => {
+    const stream = interruptedMidStreamUpstream();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([]),
+      upstream: stream.upstream,
+      settings: SLOW_RETRY_TO_PI,
+    });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查一条订单"));
+    await until(() => h.sent.some((message) => message.type === "bot_text"), "假上游流出半句话");
+    stream.interrupt();
+    await until(
+      () => botSessionProbe.assistantEnds.some((message) => message.stopReason === "error"),
+      "Pi 记录断流错误",
+    );
+
+    await h.runner.pause(BotId.parse("bot-1"));
+    await running;
+
+    expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
+  it("停机时挂着的 run 不报模型错误，run_done 恰好一次", async () => {
+    const stream = interruptedMidStreamUpstream();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([]),
+      upstream: stream.upstream,
+      settings: SLOW_RETRY_TO_PI,
+    });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查一条订单"));
+    await until(() => h.sent.some((message) => message.type === "bot_text"), "假上游流出半句话");
+    stream.interrupt();
+    await until(
+      () => botSessionProbe.assistantEnds.some((message) => message.stopReason === "error"),
+      "Pi 记录断流错误",
+    );
+
+    await Promise.all([running, h.runner.stop()]);
+
+    expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
+  it("上游回 500 仍恰好上报一次 model_failed", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([]),
+      failFirst: 10,
+      failStatus: 500,
+      failMessage: "500 Internal Server Error",
+      settings: RETRY_TO_PI,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查一条订单"));
+
+    const errors = h.sent.filter((message) => message.type === "agent_error");
+    expect(errors).toEqual([
+      expect.objectContaining({ type: "agent_error", code: "model_failed", groupId: "group-1" }),
+    ]);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
   it("401 回合上报一次 model_failed，仍发送 run_done 收尾", async () => {
     const h = await startHarness({
       bots: ["bot-1"],

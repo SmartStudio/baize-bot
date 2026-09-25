@@ -42,7 +42,7 @@ export async function startGateway(options: {
   models: readonly GatewayModel[];
   /** 头 N 个补全请求返回错误；默认 503，可用 401 测无效密钥。 */
   failFirst?: number;
-  failStatus?: 401 | 503;
+  failStatus?: 401 | 500 | 503;
   failMessage?: string;
 }): Promise<Gateway> {
   const usage: UsageRecord[] = [];

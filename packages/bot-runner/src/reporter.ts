@@ -63,6 +63,7 @@ export function reportRun(
   session: AgentSession,
   statsBeforeRun: SessionStats,
   identity: RunIdentity,
+  runnerAborted: () => boolean,
   blockedCallIds: ReadonlySet<string>,
   serverForTool: (toolName: string) => string,
   send: (message: AgentToControl) => void,
@@ -136,7 +137,7 @@ export function reportRun(
     // 不能挂 agent_end：自动重试和队列续跑时它一次 run 会发好几遍。agent_settled 在
     // _runAgentPrompt 的 finally 里发，一次 prompt 恰好一次，出错和中止也覆盖。
     if (event.type === "agent_settled") {
-      if (lastModelError !== null) {
+      if (!runnerAborted() && lastModelError !== null) {
         push({ type: "agent_error", code: "model_failed", detail: lastModelError, groupId: ids.groupId });
       }
       const statsAfterRun = session.getSessionStats();

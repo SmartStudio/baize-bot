@@ -213,6 +213,7 @@ export function createRunner(config: RunnerConfig): Runner {
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const extensionTools = config.extensionTools ?? [];
   const liveRuns = new Set<RunId>();
+  const runnerAbortedRuns = new Set<RunId>();
   let nextConfigVersion = 1;
 
   const fail = (
@@ -273,13 +274,19 @@ export function createRunner(config: RunnerConfig): Runner {
     for (const message of bot.pausedQueue.splice(0)) finishWithoutRun(message);
   };
 
+  const abortSession = async (bot: BotRuntime, groupId: GroupId): Promise<void> => {
+    const active = bot.active;
+    if (active?.run.groupId === groupId) runnerAbortedRuns.add(active.run.runId);
+    await bot.sessions.get(groupId)?.session.abort();
+  };
+
   const closeBotResources = async (bot: BotRuntime): Promise<void> => {
     const sessions = [...bot.sessions.entries()];
     const results = await Promise.allSettled(
       sessions.map(async ([groupId, botSession]) => {
         const errors: unknown[] = [];
         try {
-          await botSession.session.abort();
+          await abortSession(bot, groupId);
         } catch (error) {
           errors.push(error);
         }
@@ -470,6 +477,7 @@ export function createRunner(config: RunnerConfig): Runner {
         session,
         statsBeforeRun,
         active.run,
+        () => runnerAbortedRuns.has(active.run.runId),
         approvals.blockedCallIds,
         bot.mcp?.serverFor ?? (() => ""),
         (outgoing) => {
@@ -483,6 +491,7 @@ export function createRunner(config: RunnerConfig): Runner {
     } finally {
       unsubscribe?.();
       bot.active = null;
+      runnerAbortedRuns.delete(message.runId);
       if (state === "ready" && bot.configState.phase === "pending") await reconcileBot(bot);
       if (!deferredByPause) finishWithoutRun(message);
     }
@@ -567,7 +576,7 @@ export function createRunner(config: RunnerConfig): Runner {
       // 挂起的审批不解开，Pi 的工具循环还在 await 它，abort 等不到 idle 会一直挂着。
       // 只中止正在跑的那个群。别的群的会话留着，resume 之后接着用。
       approvals.abandon("paused", botId);
-      await bot.sessions.get(runningGroupId)?.session.abort();
+      await abortSession(bot, runningGroupId);
     },
 
     async resume(botId) {
@@ -585,12 +594,7 @@ export function createRunner(config: RunnerConfig): Runner {
       const aborting = stoppingBots.map((bot) => {
         const runningGroupId = bot.active?.run.groupId;
         if (runningGroupId === undefined) return Promise.resolve();
-        return (
-          bot.sessions
-            .get(runningGroupId)
-            ?.session.abort()
-            .catch(() => undefined) ?? Promise.resolve()
-        );
+        return abortSession(bot, runningGroupId).catch(() => undefined);
       });
       const stopping = stoppingBots.map((bot, index) =>
         append(bot, async () => {
