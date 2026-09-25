@@ -41,25 +41,75 @@ function parsePort(raw: string | undefined): number {
 export type RuntimeConfig = {
   /** 下发给电脑代理的模型网关地址前缀。null 表示用实际监听的端口拼。 */
   readonly publicBaseUrl: string | null;
-  readonly gatewayModel: string;
+  /** 网关两个用途对应的真实上游模型名。 */
+  readonly gatewayModels: GatewayModels;
   readonly upstreamBaseUrl: string;
   readonly upstreamApiKey: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
 };
 
+export type GatewayModels = {
+  readonly plan: string;
+  readonly fast: string;
+};
+
 export const DEFAULT_GATEWAY_MODEL = "baize-default";
 export const DEFAULT_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
 
 export function runtimeConfig(): RuntimeConfig {
+  const gatewayModels = configuredGatewayModels();
   return {
     publicBaseUrl: process.env["PUBLIC_BASE_URL"] ?? null,
-    gatewayModel: process.env["GATEWAY_MODEL"] ?? DEFAULT_GATEWAY_MODEL,
+    gatewayModels,
     upstreamBaseUrl: process.env["UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM_BASE_URL,
     upstreamApiKey: upstreamApiKey(),
     priceInputPerM: price("PRICE_INPUT_PER_M"),
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
   };
+}
+
+function configuredGatewayModels(): GatewayModels {
+  const configured = process.env["GATEWAY_MODELS"];
+  const configuredLegacy = process.env["GATEWAY_MODEL"];
+  if (
+    configured !== undefined &&
+    configured.trim() !== "" &&
+    configuredLegacy !== undefined &&
+    configuredLegacy.trim() !== ""
+  ) {
+    console.warn("GATEWAY_MODELS 和 GATEWAY_MODEL 同时设置，优先使用 GATEWAY_MODELS");
+  }
+  if (configured === undefined || configured.trim() === "") {
+    const legacy =
+      configuredLegacy === undefined || configuredLegacy.trim() === ""
+        ? DEFAULT_GATEWAY_MODEL
+        : configuredLegacy.trim();
+    return { plan: legacy, fast: legacy };
+  }
+
+  let plan: string | undefined;
+  let fast: string | undefined;
+  for (const rawEntry of configured.split(",")) {
+    const entry = rawEntry.trim();
+    if (entry === "") continue;
+    const separator = entry.indexOf("=");
+    if (separator <= 0) throw new Error("GATEWAY_MODELS 格式不正确，应为 plan=模型,fast=模型");
+    const purpose = entry.slice(0, separator).trim();
+    const model = entry.slice(separator + 1).trim();
+    if (purpose !== "plan" && purpose !== "fast") throw new Error(`GATEWAY_MODELS 包含未知用途：${purpose}`);
+    if (model === "") throw new Error(`GATEWAY_MODELS 的 ${purpose} 模型不能为空`);
+    if (purpose === "plan") {
+      if (plan !== undefined) throw new Error("GATEWAY_MODELS 重复配置 plan 用途");
+      plan = model;
+    } else {
+      if (fast !== undefined) throw new Error("GATEWAY_MODELS 重复配置 fast 用途");
+      fast = model;
+    }
+  }
+  if (plan === undefined) throw new Error("GATEWAY_MODELS 缺少 plan 用途配置");
+  if (fast === undefined) throw new Error("GATEWAY_MODELS 缺少 fast 用途配置");
+  return { plan, fast };
 }
 
 function upstreamApiKey(): string {

@@ -1,7 +1,7 @@
 import type { ComputerId } from "@baize/shared";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_PATH } from "../src/http/gateway.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -10,7 +10,8 @@ import { helloAgent } from "./helpers/agent.js";
 import { scriptedUpstream, type ChatCompletionRequest, type Upstream } from "./helpers/openai-sse.js";
 import { deadUpstreamUrl, startUpstream, type FakeUpstream } from "./helpers/upstream.js";
 
-const GATEWAY_MODEL = "baize-test-model";
+const GATEWAY_MODEL = "gpt-plan-real";
+const FAST_GATEWAY_MODEL = "gpt-fast-real";
 const UPSTREAM_API_KEY = "sk-fake-upstream";
 
 type Rig = {
@@ -30,12 +31,14 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
 });
 
-async function rig(options: { upstream?: FakeUpstream; upstreamBaseUrl?: string } = {}): Promise<Rig> {
+async function rig(
+  options: { upstream?: FakeUpstream; upstreamBaseUrl?: string; gatewayModels?: { plan: string; fast: string } } = {},
+): Promise<Rig> {
   const database = await createTestDb();
   cleanups.push(() => database.close());
 
   const server = await startTestServer(database.db, {
-    gatewayModel: GATEWAY_MODEL,
+    gatewayModels: options.gatewayModels ?? { plan: GATEWAY_MODEL, fast: FAST_GATEWAY_MODEL },
     upstreamApiKey: UPSTREAM_API_KEY,
     upstreamBaseUrl: options.upstream?.baseUrl ?? options.upstreamBaseUrl ?? "http://127.0.0.1:1/v1",
   });
@@ -61,12 +64,47 @@ function chatBody(extra: Record<string, unknown> = {}): RequestInit {
   return {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: "电脑自己挑的模型", messages: [{ role: "user", content: "在吗" }], ...extra }),
+    body: JSON.stringify({ model: "baize:plan", messages: [{ role: "user", content: "在吗" }], ...extra }),
   };
 }
 
 function authed(key: string, init: RequestInit): RequestInit {
   return { ...init, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${key}` } };
+}
+
+async function startSplitSseUpstream(): Promise<FakeUpstream> {
+  const server = createServer((req, res) => {
+    if (req.method !== "POST" || !(req.url ?? "").startsWith("/v1/chat/completions")) {
+      res.writeHead(404).end();
+      return;
+    }
+    req.resume();
+    req.on("end", () => {
+      const payload = JSON.stringify({
+        id: "chatcmpl-split",
+        object: "chat.completion.chunk",
+        model: GATEWAY_MODEL,
+        choices: [{ index: 0, delta: { content: "分片" }, finish_reason: null }],
+      });
+      const splitAt = payload.indexOf('"model"') + 4;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+      res.write("event: note\n");
+      res.write(`data: ${payload.slice(0, splitAt)}`);
+      // 跨一次事件循环再写后半段，让网关必须处理未收完的 data 行。
+      setImmediate(() => {
+        res.write(`${payload.slice(splitAt)}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+      });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    calls: [],
+    close: () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  };
 }
 
 /** 一台只管回指定响应头的假上游。SCOPE 不含 test/helpers，所以就地起一台。 */
@@ -166,14 +204,17 @@ describe("网关认证", () => {
     expect((await r.call("/models", authed(again.config.modelGateway.apiKey, {}))).status).toBe(200);
   });
 
-  it("GET /models 返回网关自己那一个模型", async () => {
+  it("GET /models 只返回两个用途别名", async () => {
     const r = await rig();
     const response = await r.call("/models", authed(r.key, {}));
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       object: "list",
-      data: [{ id: GATEWAY_MODEL, object: "model", owned_by: "baize" }],
+      data: [
+        { id: "baize:plan", object: "model", owned_by: "baize" },
+        { id: "baize:fast", object: "model", owned_by: "baize" },
+      ],
     });
   });
 });
@@ -192,6 +233,80 @@ describe("转发", () => {
     expect(upstream.calls[0]?.authorization, "电脑那把 key 不许漏给上游").toBe(`Bearer ${UPSTREAM_API_KEY}`);
     expect(upstream.calls[0]?.body.model, "选哪个模型由网关说了算").toBe(GATEWAY_MODEL);
     expect(upstream.calls[0]?.body.messages).toEqual([{ role: "user", content: "在吗" }]);
+  });
+
+  it("非流式响应不把上游真模型名带回来", async () => {
+    const upstream = await startUpstream({
+      json: { id: "chatcmpl-1", model: GATEWAY_MODEL, choices: [] },
+    });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { model: string };
+    expect(body.model).toBe("baize:plan");
+    expect(body.model).not.toBe(GATEWAY_MODEL);
+  });
+
+  it("只接受 baize:plan 和 baize:fast，并映射到对应上游模型", async () => {
+    const upstream = await startUpstream({ json: { id: "chatcmpl-1", choices: [] } });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream, gatewayModels: { plan: GATEWAY_MODEL, fast: FAST_GATEWAY_MODEL } });
+
+    const fast = await r.call("/chat/completions", authed(r.key, chatBody({ model: "baize:fast" })));
+    expect(fast.status).toBe(200);
+    expect(upstream.calls[0]?.body.model).toBe(FAST_GATEWAY_MODEL);
+
+    const ordinary = await r.call("/chat/completions", authed(r.key, chatBody({ model: GATEWAY_MODEL })));
+    expect(ordinary.status).toBe(400);
+    expect((await ordinary.json()) as { error: string }).toEqual({ error: "model 只能是 baize:plan 或 baize:fast" });
+
+    const unknown = await r.call("/chat/completions", authed(r.key, chatBody({ model: "baize:unknown" })));
+    expect(unknown.status).toBe(400);
+    expect((await unknown.json()) as { error: string }).toEqual({ error: "model 只能是 baize:plan 或 baize:fast" });
+    expect(upstream.calls).toHaveLength(1);
+  });
+
+  it("image_url 内容结构原样转给上游", async () => {
+    const upstream = await startUpstream({ json: { id: "chatcmpl-1", choices: [] } });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+    const messages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "看这张图" },
+          { type: "image_url", image_url: { url: "https://example.com/a.png", detail: "high" } },
+        ],
+      },
+    ];
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody({ messages })));
+
+    expect(response.status).toBe(200);
+    expect(upstream.calls[0]?.body.messages).toEqual(messages);
+  });
+
+  it("超过 20 MiB 的请求体返回中文 413 且不打上游", async () => {
+    const upstream = await startUpstream({ json: {} });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+    const oversized = new Uint8Array(20 * 1024 * 1024 + 1);
+
+    const response = await r.call(
+      "/chat/completions",
+      authed(r.key, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: oversized,
+      }),
+    );
+
+    expect(response.status).toBe(413);
+    expect((await response.json()) as { error: string }).toEqual({ error: "请求体超过 20 MiB 上限" });
+    expect(upstream.calls).toHaveLength(0);
   });
 
   it("SSE 原样透传", async () => {
@@ -228,6 +343,23 @@ describe("转发", () => {
         .map((p) => (JSON.parse(p) as { choices: { delta: { content?: string } }[] }).choices[0]?.delta.content ?? "")
         .join(""),
     ).toBe("你好啊");
+  });
+
+  it("流式响应不把上游真模型名带回来，且支持跨 chunk 的半行", async () => {
+    const upstream = await startSplitSseUpstream();
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody({ stream: true })));
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain("event: note\n");
+    expect(body).toContain("data: [DONE]\n\n");
+    const dataLine = body.split("\n").find((line) => line.startsWith("data: {"));
+    expect(dataLine).toBeDefined();
+    expect((JSON.parse(dataLine?.slice("data: ".length) ?? "null") as { model: string }).model).toBe("baize:plan");
+    expect(body).not.toContain(GATEWAY_MODEL);
   });
 
   it("分片边到边转，不攒完再给", async () => {
@@ -268,6 +400,29 @@ describe("转发", () => {
     const body = (await response.json()) as { error: string };
     expect(body.error).toContain("模型上游返回 429");
     expect(body.error).not.toContain("rate limited");
+  });
+
+  it("上游非 2xx 的正文只截前 200 字写控制面日志，不回给电脑", async () => {
+    const errorBody = `${"a".repeat(200)}THIS_MUST_NOT_BE_LOGGED`;
+    const upstream = await startUpstream({
+      status: 429,
+      raw: { body: errorBody, contentType: "text/plain" },
+    });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    try {
+      const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+      expect(response.status).toBe(429);
+      const body = await response.text();
+      expect(body).not.toContain(errorBody);
+      const logged = log.mock.calls.flat().map(String).join(" ");
+      expect(logged).toContain(errorBody.slice(0, 200));
+      expect(logged).not.toContain("THIS_MUST_NOT_BE_LOGGED");
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it("上游返回 HTML 的 502，不把正文带回来", async () => {

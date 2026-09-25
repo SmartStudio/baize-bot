@@ -57,7 +57,10 @@ export async function runRoutine(
   const instruction = await appendMessage(deps.db, groupId, { kind: "user", text: row.instruction });
   deps.push.push(ownerId, { type: "message", message: instruction });
 
-  const outcome = await dispatchUserMessage(deps, ownerId, groupId, instruction, { routineRunId: started.id });
+  const outcome = await dispatchUserMessage(deps, ownerId, groupId, instruction, {
+    routineRunId: started.id,
+    purpose: row.purpose,
+  });
   if (outcome.kind !== "sent") {
     await settleRoutineRun(deps.db, started.id, "failed", NOT_DISPATCHED_NOTE);
   }

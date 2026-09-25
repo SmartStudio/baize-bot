@@ -60,7 +60,7 @@ control-plane (Hono + drizzle/postgres.js，3001)
   ▼
 computer-agent（电脑上的常驻进程，出站连接，每收一条 config 整个换 runner）
   └─ bot-runner：每个 Bot 一个 Pi AgentSession（@earendil-works/pi-coding-agent）
-       │ 模型请求走控制面的 /gateway/v1，Bearer 换成 UPSTREAM_API_KEY，model 换成 GATEWAY_MODEL
+       │ 模型请求走控制面的 /gateway/v1，Bearer 换成 UPSTREAM_API_KEY，baize:plan/baize:fast 按用途映射到 GATEWAY_MODELS
        ▼
      UPSTREAM_BASE_URL
 ```

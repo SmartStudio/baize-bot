@@ -43,7 +43,7 @@ export type StartOptions = {
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
 export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   publicBaseUrl: null,
-  gatewayModel: DEFAULT_GATEWAY_MODEL,
+  gatewayModels: { plan: DEFAULT_GATEWAY_MODEL, fast: DEFAULT_GATEWAY_MODEL },
   upstreamBaseUrl: DEFAULT_UPSTREAM_BASE_URL,
   upstreamApiKey: "",
   priceInputPerM: 0,
@@ -61,7 +61,6 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const agents = new AgentHub({
     db: options.db,
     push: hub,
-    gatewayModel: config.gatewayModel,
     priceInputPerM: config.priceInputPerM,
     priceOutputPerM: config.priceOutputPerM,
     groupTurns,
@@ -78,7 +77,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     groupTurns,
     secureCookie: options.secureCookie ?? false,
     gateway: {
-      model: config.gatewayModel,
+      models: config.gatewayModels,
       upstreamBaseUrl: config.upstreamBaseUrl,
       upstreamApiKey: config.upstreamApiKey,
     },

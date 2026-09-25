@@ -59,7 +59,6 @@ function dispatchDeps() {
     agents: new AgentHub({
       db: database.db,
       push: server.server.hub,
-      gatewayModel: "test",
       priceInputPerM: 0,
       priceOutputPerM: 0,
       groupTurns: new GroupTurns(database.db, server.server.hub),

@@ -3,6 +3,7 @@ import {
   UserId,
   type BotId,
   type OnFailure as OnFailureSchema,
+  type ModelPurpose,
   type Routine,
   type RoutineRunStatus as RoutineRunStatusSchema,
   type TriggerInput,
@@ -96,6 +97,7 @@ export type RoutineInput = {
   readonly instruction: string;
   readonly triggers: readonly TriggerInput[];
   readonly onFailure: OnFailure;
+  readonly purpose?: ModelPurpose | undefined;
   readonly enabled: boolean;
 };
 
@@ -109,6 +111,7 @@ export async function createRoutine(db: Db, botId: BotId, input: RoutineInput): 
       instruction: input.instruction,
       triggers: mergeTriggers([], input.triggers),
       onFailure: input.onFailure,
+      purpose: input.purpose ?? "plan",
       enabled: input.enabled,
     })
     .returning();
@@ -130,6 +133,7 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
   if (input.name !== undefined) patch.name = input.name;
   if (input.instruction !== undefined) patch.instruction = input.instruction;
   if (input.onFailure !== undefined) patch.onFailure = input.onFailure;
+  if (input.purpose !== undefined) patch.purpose = input.purpose;
   if (input.enabled !== undefined) patch.enabled = input.enabled;
 
   const ok = await db.transaction(async (tx) => {

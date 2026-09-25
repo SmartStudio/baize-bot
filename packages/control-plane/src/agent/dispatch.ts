@@ -8,6 +8,7 @@ import {
   type GroupId,
   type Message,
   type MessageBody,
+  type ModelPurpose,
   type RunId,
   type UserId,
 } from "@baize/shared";
@@ -42,6 +43,8 @@ export type DispatchDeps = {
 export type DispatchOptions = {
   /** 例行任务到点或试跑派的活带着它，往下一路传到 `startRun`。普通的用户消息不带。 */
   readonly routineRunId?: string | undefined;
+  /** 例行任务按保存的用途选模型；普通消息不带，固定走 plan。 */
+  readonly purpose?: ModelPurpose | undefined;
 };
 
 export type DispatchOutcome = { readonly kind: "sent" } | { readonly kind: "offline" } | { readonly kind: "no_target" };
@@ -185,7 +188,7 @@ async function sendSpeaker(
       const line = summarize(message, speaker.botId, members);
       return line === null ? [] : [line];
     }),
-    purpose: "plan",
+    purpose: options.purpose ?? "plan",
     task: members.length > 1 ? task : null,
     members: roster,
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),

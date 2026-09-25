@@ -37,7 +37,7 @@ pnpm --filter @baize/control-plane computer-token # 重置并打印本机 token
 pnpm --filter @baize/control-plane computer-token -- remote [邮箱] # 创建或重置远程电脑 token
 ```
 
-模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`，`model` 一律换成 `GATEWAY_MODEL`，流式和非流式都原样透传。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。
+模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`。电脑代理只可请求 `baize:plan` 和 `baize:fast`，网关分别映射到 `GATEWAY_MODELS` 的真实上游模型名；`GATEWAY_MODELS` 非空时优先使用它，同时设置两个变量会告警；未设置或仅含空白时两个用途都回退到 `GATEWAY_MODEL`，两者都未设置则使用开发默认值。请求除 `model` 外原样转发；响应（非流式 JSON 与 SSE data JSON）只把顶层 `model` 改回 baize 别名，其他内容透传。`image_url` 内容也不改写，请求体上限为 20 MiB。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。
 
 Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里回「批准」「拒绝」都算数，详见 `packages/control-plane/README.md`。
 
@@ -49,9 +49,10 @@ Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里�
 | `PORT` | `3001` | 监听端口 |
 | `COOKIE_SECURE` | 空 | 设成 `1` 时会话 cookie 带 Secure |
 | `PUBLIC_BASE_URL` | 空，用实际监听的地址拼 | 下发给电脑代理的模型网关地址前缀 |
-| `GATEWAY_MODEL` | `baize-default` | 网关对外和对上游都用这个模型名 |
+| `GATEWAY_MODEL` | `baize-default` | 兼容旧配置；未设置 `GATEWAY_MODELS` 时同时作为 plan 和 fast 的上游模型名 |
+| `GATEWAY_MODELS` | 空，回退 `GATEWAY_MODEL` | 按 `plan=模型,fast=模型` 配置两个用途；设置后必须同时包含 plan 和 fast |
 | `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | 模型上游 |
-| `UPSTREAM_API_KEY` | 空 | 转发给上游的 key，只能是 ASCII，否则每次上游请求都变成 502 |
+| `UPSTREAM_API_KEY` | 空 | 转发给上游的 key，只能是可打印 ASCII，否则启动时失败 |
 | `PRICE_INPUT_PER_M` | `0` | 每百万输入 token 的价，用来折算 run 的花费 |
 | `PRICE_OUTPUT_PER_M` | `0` | 每百万输出 token 的价 |
 

@@ -50,7 +50,6 @@ export type AgentConnection = {
 export type AgentHubDeps = {
   readonly db: Db;
   readonly push: PushHub;
-  readonly gatewayModel: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly groupTurns: GroupTurns;
@@ -312,7 +311,7 @@ export class AgentHub {
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,
-        model: this.#deps.gatewayModel,
+        model: "baize:plan",
       },
     });
   }

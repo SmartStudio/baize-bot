@@ -1,6 +1,12 @@
-import { ComputerId, ComputerListResponse, ComputerTokenResponse, CreateBotResponse, type UserId } from "@baize/shared";
+import {
+  ComputerId,
+  ComputerListResponse,
+  ComputerTokenResponse,
+  CreateBotResponse,
+  MessageListResponse,
+  type UserId,
+} from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { DEFAULT_GATEWAY_MODEL } from "../src/env.js";
 import { findComputerByOwner } from "../src/repo/computers.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -77,7 +83,7 @@ describe("握手", () => {
       expect(config.tools, "工具连接是 M6 的事").toEqual([]);
       expect(config.modelGateway.baseUrl).toBe(`http://localhost:${server.server.port}/gateway/v1`);
       expect(config.modelGateway.apiKey, "网关 key 是 32 字节随机数的十六进制").toMatch(/^[0-9a-f]{64}$/);
-      expect(config.modelGateway.model).toBe(DEFAULT_GATEWAY_MODEL);
+      expect(config.modelGateway.model).toBe("baize:plan");
     } finally {
       agent.close();
     }
@@ -183,6 +189,40 @@ describe("心跳", () => {
         async () => ((await findComputerByOwner(database.db, userId))?.lastSeenAt ?? "") > before,
         "心跳刷新见面时间",
       );
+    } finally {
+      agent.close();
+    }
+  });
+});
+
+describe("agent_error", () => {
+  it("网关返回 413 时在群里说明内容超过 20 MiB", async () => {
+    const { client, computer } = await ownerWithComputer();
+    const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
+    const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+
+    try {
+      expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "发起一次超大请求" })).status).toBe(
+        201,
+      );
+      await agent.expect("prompt");
+      agent.send({
+        type: "agent_error",
+        code: "model_failed",
+        detail: "413: 请求体超过 20 MiB 上限",
+        groupId: created.group.id,
+      });
+
+      let text = "";
+      await waitFor(async () => {
+        const page = MessageListResponse.parse(
+          await (await client.get(`/api/groups/${created.group.id}/messages`)).json(),
+        );
+        const message = page.messages.at(-1);
+        text = message?.body.kind === "system" ? message.body.text : "";
+        return text === "这次带的内容太大（超过 20 MiB）";
+      }, "413 群消息");
+      expect(text).toBe("这次带的内容太大（超过 20 MiB）");
     } finally {
       agent.close();
     }

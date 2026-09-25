@@ -30,6 +30,7 @@ describe("端到端：注册账号并启动本机代理", () => {
       const messages = MessageListResponse.parse(await stack.get(`/api/groups/${first.groupId}/messages`)).messages;
       const bot = messages.toReversed().find((message) => message.body.kind === "bot");
       expect(bot?.body.kind === "bot" && bot.body.text).toBe("注册路径已连通");
+      expect(upstream.requests()[0]?.model, "运行器不改也应通过 baize:plan 走到 plan 的真模型").toBe("e2e-plan-model");
     } finally {
       await stack.close();
       await upstream.close();

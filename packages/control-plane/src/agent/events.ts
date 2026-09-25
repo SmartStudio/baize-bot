@@ -288,6 +288,12 @@ function modelFailureStatus(detail: string): string {
   return status === undefined ? "" : `，上游状态码 ${status}`;
 }
 
+function modelFailureMessage(detail: string): string {
+  const status = /(?:^|\D)([45]\d{2})(?:\D|$)/.exec(detail)?.[1];
+  if (status === "413") return "这次带的内容太大（超过 20 MiB）";
+  return `模型没回话${modelFailureStatus(detail)}。检查控制面的上游地址、key 和模型映射（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODELS）。`;
+}
+
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
@@ -302,7 +308,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     tone: "error",
     text:
       event.code === "model_failed"
-        ? `模型没回话${modelFailureStatus(event.detail)}。检查控制面的上游地址和 key（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODEL）。`
+        ? modelFailureMessage(event.detail)
         : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
   });
   // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。

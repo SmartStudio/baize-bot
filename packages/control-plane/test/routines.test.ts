@@ -103,13 +103,30 @@ function advanceOneMinute(): void {
   clock = new Date(clock.getTime() + 61_000);
 }
 
+describe("消息用途", () => {
+  it("单 Bot 群里的普通消息走 plan", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+
+    try {
+      const response = await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "请安排今天的工作" });
+      expect(response.status).toBe(201);
+
+      const prompt = await agent.expect("prompt");
+      expect(prompt.purpose).toBe("plan");
+    } finally {
+      agent.close();
+    }
+  });
+});
+
 describe("例行任务到点触发", () => {
   it("到点跑一次：群里多两条消息，活派了下去", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);
 
     try {
-      const routine = await makeRoutine(owner);
+      const routine = await makeRoutine(owner, { purpose: "fast" });
       // 第一遍只把从没触发过的游标对齐到现在。新建的例行任务不该立刻跑一次。
       await server.server.routines.tick();
       expect(await runsOf(routine.id), "刚建好还没到过点").toHaveLength(0);
@@ -122,6 +139,7 @@ describe("例行任务到点触发", () => {
       expect(prompt.botId).toBe(owner.botId);
       expect(prompt.groupId).toBe(owner.groupId);
       expect(prompt.origin, "例行任务那条没有人在等回复，运行器得知道").toEqual({ kind: "routine" });
+      expect(prompt.purpose, "例行任务按自己保存的用途选模型").toBe("fast");
 
       const page = MessageListResponse.parse(
         await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
@@ -342,6 +360,29 @@ describe("webhook 触发", () => {
 });
 
 describe("试跑", () => {
+  it("PATCH 改成 fast 后试跑沿用，省略 purpose 时保留原值", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+
+    try {
+      const routine = await makeRoutine(owner, { purpose: "plan", triggers: [], enabled: false });
+      const changed = await owner.client.patch(`/api/routines/${routine.id}`, { purpose: "fast" });
+      expect(changed.status).toBe(200);
+      expect(RoutineResponse.parse(await changed.json()).routine.purpose).toBe("fast");
+
+      const unchanged = await owner.client.patch(`/api/routines/${routine.id}`, { name: "换个名字" });
+      expect(unchanged.status).toBe(200);
+      expect(RoutineResponse.parse(await unchanged.json()).routine.purpose).toBe("fast");
+
+      const run = await owner.client.post(`/api/routines/${routine.id}/run`);
+      expect(run.status).toBe(202);
+      const prompt = await agent.expect("prompt");
+      expect(prompt.purpose).toBe("fast");
+    } finally {
+      agent.close();
+    }
+  });
+
   it("和到点触发走同一条路，回 202 且最前面多一条 running", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);

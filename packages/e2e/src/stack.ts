@@ -94,6 +94,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     process.env["UPSTREAM_BASE_URL"] = options.upstreamBaseUrl;
     // 假上游不验这把钥匙，但它要进 HTTP 头，非 ASCII 会被 fetch 直接拒掉。
     process.env["UPSTREAM_API_KEY"] = "e2e-upstream-key";
+    process.env["GATEWAY_MODELS"] = "plan=e2e-plan-model,fast=e2e-fast-model";
+    delete process.env["GATEWAY_MODEL"];
     process.env["PRICE_INPUT_PER_M"] = String(options.priceInputPerM);
     process.env["PRICE_OUTPUT_PER_M"] = String(options.priceOutputPerM);
     delete process.env["PUBLIC_BASE_URL"];
