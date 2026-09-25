@@ -1,7 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, type BotId, ComputerId, MessageId, RunId, Skill } from "@baize/shared";
+import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
 import type { RunnerConfig } from "@baize/bot-runner";
 import { startAgent, type AgentHandle, type RunnerFactory } from "../src/agent.js";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
@@ -601,6 +601,136 @@ describe("电脑代理连控制面", () => {
     await server.waitForMessage("bot_text", 1, 3000);
     expect(runnerCalls().paused).toEqual(["bot-1"]);
     expect(runnerCalls().resumed).toEqual(["bot-1"]);
+  });
+
+  it("停机时运行器的放弃审批和 run_done 先送到控制面再断开", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const order: string[] = [];
+    server.onConnection((socket) => {
+      socket.on("message", (data) => {
+        const parsed = AgentToControl.parse(JSON.parse(data.toString()));
+        if (parsed.type !== "hello") order.push(parsed.type);
+      });
+      socket.on("close", () => order.push("closed"));
+    });
+    const handle = startAgent({
+      url: await server.url(),
+      computerId: ComputerId.parse("computer-1"),
+      token: "dev-token",
+      version: "0.1.0",
+      log: () => {},
+      makeRunner: (config) => ({
+        applyConfig: async () => {},
+        async prompt(message) {
+          config.send({
+            type: "approval_request",
+            runId: message.runId,
+            botId: message.botId,
+            groupId: message.groupId,
+            callId: "call-1",
+            tool: "send_email",
+            kind: "send_external",
+            view: { kind: "mcp", server: "客服工具", tool: "send_email", params: [], raw: {} },
+          });
+        },
+        approve: () => {},
+        pause: async () => {},
+        resume: async () => {},
+        activeRuns: () => [RunId.parse("run-1")],
+        async stop() {
+          config.send({
+            type: "approval_abandoned",
+            runId: RunId.parse("run-1"),
+            callId: "call-1",
+            reason: "stopped",
+          });
+          config.send({
+            type: "run_done",
+            runId: RunId.parse("run-1"),
+            botId: BotId.parse("bot-1"),
+            groupId: GroupId.parse("group-1"),
+            steps: 1,
+            inputTokens: 10,
+            outputTokens: 2,
+          });
+        },
+      }),
+    });
+    agents.push(handle);
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify(promptMessage));
+    await server.waitForMessage("approval_request", 1, 3000);
+
+    await handle.stop();
+    await poll(() => (order.includes("closed") ? true : undefined), 3000, "连接关闭");
+
+    expect(server.messages.find((message) => message.type === "approval_abandoned")).toEqual({
+      type: "approval_abandoned",
+      runId: "run-1",
+      callId: "call-1",
+      reason: "stopped",
+    });
+    expect(server.messages.filter((message) => message.type === "run_done")).toEqual([
+      {
+        type: "run_done",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        steps: 1,
+        inputTokens: 10,
+        outputTokens: 2,
+      },
+    ]);
+    expect(order).toEqual(["approval_request", "approval_abandoned", "run_done", "closed"]);
+  });
+
+  it("运行器停不下来时，停机在上限内返回", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    let runnerCreated = false;
+    let closed = false;
+    server.onConnection((socket) => socket.on("close", () => (closed = true)));
+    const handle = startAgent({
+      url: await server.url(),
+      computerId: ComputerId.parse("computer-1"),
+      token: "dev-token",
+      version: "0.1.0",
+      log: () => {},
+      makeRunner: (config) => {
+        runnerCreated = true;
+        return {
+          ...runnerOf(config, {
+            approvals: [],
+            activeRuns: [],
+            paused: [],
+            resumed: [],
+            prompts: [],
+            configSkills: [],
+            appliedConfigs: [],
+          }),
+          stop: () => new Promise<void>(() => {}),
+        };
+      },
+      runnerStopTimeoutMs: 40,
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await poll(() => (runnerCreated ? true : undefined), 3000, "运行器建好");
+
+    const startedAt = Date.now();
+    const result = await Promise.race([
+      handle.stop().then(() => "stopped" as const),
+      new Promise<"timed-out">((resolve) => setTimeout(() => resolve("timed-out"), 500)),
+    ]);
+    const elapsedMs = Date.now() - startedAt;
+    await poll(() => (closed ? true : undefined), 3000, "连接关闭");
+
+    expect(result).toBe("stopped");
+    expect(elapsedMs).toBeGreaterThanOrEqual(30);
+    expect(elapsedMs).toBeLessThan(300);
+    expect(closed).toBe(true);
   });
 
   it("连接断开后按默认退避重连，5 秒内重新 hello", async () => {

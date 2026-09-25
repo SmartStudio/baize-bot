@@ -581,9 +581,21 @@ export function createRunner(config: RunnerConfig): Runner {
     async stop() {
       state = "stopped";
       approvals.abandon("stopped");
-      const stopping = [...bots.values()].map((bot) =>
+      const stoppingBots = [...bots.values()];
+      const aborting = stoppingBots.map((bot) => {
+        const runningGroupId = bot.active?.run.groupId;
+        if (runningGroupId === undefined) return Promise.resolve();
+        return (
+          bot.sessions
+            .get(runningGroupId)
+            ?.session.abort()
+            .catch(() => undefined) ?? Promise.resolve()
+        );
+      });
+      const stopping = stoppingBots.map((bot, index) =>
         append(bot, async () => {
           try {
+            await aborting[index];
             await closeBotResources(bot);
           } finally {
             deleteBot(bot, false);

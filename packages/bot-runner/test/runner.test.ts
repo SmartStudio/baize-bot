@@ -3440,6 +3440,18 @@ describe("放弃挂起的审批", () => {
     expect(runDoneIds(h).toSorted()).toEqual(["run-1", "run-2"]);
   }, 10_000);
 
+  it("停机时挂着审批的 run 不再请求模型，run_done 恰好一次", async () => {
+    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
+    await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
+    const requestsBeforeStop = h.gateway.requestCount();
+
+    await Promise.all([running, h.runner.stop()]);
+
+    expect(h.gateway.requestCount()).toBe(requestsBeforeStop);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  }, 10_000);
+
   it("暂停时挂起的审批发一条放弃，reason 是暂停", async () => {
     const h = await startHarness({ bots: ["bot-1"], tools, script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));

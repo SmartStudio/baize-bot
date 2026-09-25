@@ -19,6 +19,8 @@ export interface AgentOptions {
   readonly dataDir?: string;
   /** 换掉真运行器。测试用它免去起真模型网关。 */
   readonly makeRunner?: RunnerFactory;
+  /** 停机时等运行器收尾的上限。超时后仍会关连接退出。 */
+  readonly runnerStopTimeoutMs?: number;
 }
 
 export interface AgentHandle {
@@ -37,8 +39,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
   const dataDir = options.dataDir ?? join(homedir(), ".baize", "bots");
   const makeRunner = options.makeRunner ?? createRunner;
+  const runnerStopTimeoutMs = options.runnerStopTimeoutMs ?? 3_000;
 
   let link: Link = { phase: "stopped" };
+  let stopping = false;
+  let stopPromise: Promise<void> | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
   let attempt = 0;
   let runner: Runner | null = null;
@@ -46,7 +51,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let inbox: Promise<void> = Promise.resolve();
 
   const send = (message: AgentToControl): void => {
-    if (link.phase !== "open") {
+    if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
       log(`连接不在，丢弃 ${message.type}`);
       return;
     }
@@ -61,7 +66,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
   const handle = async (raw: string): Promise<void> => {
     // socket.close() 之后 ws 仍会把已经到手的帧派发上来。停了还建 runner 的话就没人再停它。
-    if (link.phase === "stopped") return;
+    if (stopping || link.phase === "stopped") return;
     let json: unknown;
     try {
       json = JSON.parse(raw);
@@ -131,7 +136,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   };
 
   const scheduleReconnect = (): void => {
-    if (link.phase === "stopped") return;
+    if (stopping || link.phase === "stopped") return;
     const delay = backoffDelay(attempt, backoff);
     attempt += 1;
     // 这个定时器必须 ref 住事件循环。unref 的话，断开期间进程没有别的 handle，会直接退出而不是重连。
@@ -141,10 +146,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
   };
 
   function connect(): void {
+    if (stopping) return;
     const socket = new WebSocket(options.url);
     link = { phase: "connecting", socket };
 
     socket.on("open", () => {
+      if (stopping) return;
       link = { phase: "open", socket };
       const activeRuns = runner?.activeRuns() ?? [];
       send({
@@ -160,6 +167,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
 
     socket.on("message", (data) => {
+      if (stopping) return;
       const raw = data.toString();
       inbox = inbox.then(() => handle(raw)).catch((error: unknown) => log(`处理报文出错：${String(error)}`));
     });
@@ -178,15 +186,43 @@ export function startAgent(options: AgentOptions): AgentHandle {
   connect();
 
   return {
-    async stop() {
-      const current = link;
-      link = { phase: "stopped" };
+    stop() {
+      if (stopPromise !== null) return stopPromise;
+      stopping = true;
       stopHeartbeat();
-      if (current.phase === "waiting") clearTimeout(current.timer);
-      if (current.phase === "connecting" || current.phase === "open") current.socket.close();
-      await inbox;
-      await runner?.stop();
-      runner = null;
+      if (link.phase === "waiting") clearTimeout(link.timer);
+
+      stopPromise = (async () => {
+        const currentRunner = runner;
+        if (currentRunner !== null) {
+          let timeout: NodeJS.Timeout | null = null;
+          const result = await Promise.race([
+            Promise.resolve()
+              .then(() => currentRunner.stop())
+              .then(
+                () => "stopped" as const,
+                (error: unknown) => {
+                  log(`运行器停机失败：${String(error)}`);
+                  return "stopped" as const;
+                },
+              ),
+            new Promise<"timed-out">((resolve) => {
+              timeout = setTimeout(() => resolve("timed-out"), runnerStopTimeoutMs);
+              timeout.unref();
+            }),
+          ]);
+          if (timeout !== null) clearTimeout(timeout);
+          if (result === "timed-out") log(`运行器停机超过 ${runnerStopTimeoutMs}ms，继续关闭连接`);
+        }
+        runner = null;
+
+        const current = link;
+        link = { phase: "stopped" };
+        stopHeartbeat();
+        if (current.phase === "waiting") clearTimeout(current.timer);
+        if (current.phase === "connecting" || current.phase === "open") current.socket.close();
+      })();
+      return stopPromise;
     },
   };
 }

@@ -27,7 +27,7 @@ async function withStack(
   script: Parameters<typeof startUpstream>[0],
   startComputer: boolean,
   run: (stack: Stack) => Promise<void>,
-  options: { readonly disconnectGraceMs?: number } = {},
+  options: { readonly disconnectGraceMs?: number; readonly agentProcess?: boolean } = {},
 ) {
   const upstream = await startUpstream(script);
   let stack: Stack | undefined;
@@ -139,8 +139,8 @@ it("工具调用后断连必须收尾 run 并在群里提示失败", async () =>
         expect(before).toHaveLength(1);
         expect(before[0]?.ended_at, "工具已执行，模型下一轮尚未返回，run 仍在进行").toBeNull();
 
-        // stop 先关闭真实 WebSocket，再等运行器；模型闸门保持关闭，排除 run_done 正常收尾。
-        stopping = stack.stopComputer();
+        // 进程被杀，运行器来不及发 run_done；模型闸门保持关闭，排除正常收尾。
+        stopping = stack.killComputer();
         await expect.poll(async () => Computer.parse(await stack.get("/api/computer")).status, poll).toBe("sleeping");
         await expect
           .poll(
@@ -165,7 +165,7 @@ it("工具调用后断连必须收尾 run 并在群里提示失败", async () =>
         }
       }
     },
-    { disconnectGraceMs: 100 },
+    { disconnectGraceMs: 100, agentProcess: true },
   );
 });
 

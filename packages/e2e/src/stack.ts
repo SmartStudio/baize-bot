@@ -62,6 +62,8 @@ export type Stack = {
   nextPush(timeoutMs?: number): Promise<ServerPush>;
   startComputer(): Promise<void>;
   stopComputer(): Promise<void>;
+  /** 模拟电脑突然没了：SIGKILL 电脑代理进程，运行器来不及发任何收尾报文。只在 agentProcess 下可用。 */
+  killComputer(): Promise<void>;
   prompts(): readonly PromptMessage[];
   connectComputer(): Promise<ComputerProbe>;
   close(): Promise<void>;
@@ -171,12 +173,22 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       await current?.stop();
     };
     closers.push(stopComputer);
+    const killComputer = async (): Promise<void> => {
+      const child = agentChild;
+      if (child === undefined) throw new Error("killComputer 要求 agentProcess");
+      agentChild = undefined;
+      const exited = new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) resolve();
+        else child.once("exit", () => resolve());
+      });
+      child.kill("SIGKILL");
+      await exited;
+    };
     const startComputer = async (): Promise<void> => {
       if (agent !== undefined || agentChild !== undefined) throw new Error("电脑代理已经启动");
       let earlyExitError: Error | undefined;
       if (options.agentProcess) {
         const agentDir = fileURLToPath(new URL("../../computer-agent", import.meta.url));
-        const tsxBin = join(agentDir, "node_modules", ".bin", "tsx");
         const mainPath = join(agentDir, "src", "main.ts");
         const agentEnv: NodeJS.ProcessEnv = {
           ...process.env,
@@ -188,7 +200,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         delete agentEnv["UPSTREAM_API_KEY"];
         delete agentEnv["DATABASE_URL"];
 
-        const child = spawn(tsxBin, [mainPath], {
+        // 不经 tsx 包装进程：SIGKILL 转发不到它的子进程，killComputer 会杀不掉真正的代理。
+        const child = spawn(process.execPath, ["--import", "tsx", mainPath], {
           cwd: agentDir,
           env: agentEnv,
           stdio: ["ignore", "pipe", "pipe"],
@@ -242,6 +255,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       nextPush: push.next,
       startComputer,
       stopComputer,
+      killComputer,
       prompts: () => prompts,
       connectComputer: async () => {
         const probe = await connectComputer(agentOptions);
