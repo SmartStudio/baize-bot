@@ -8,6 +8,7 @@ import {
 } from "@baize/shared";
 import { type Static, Type } from "typebox";
 import { z } from "zod";
+import type { Project } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
 import type { RunIdentity } from "./reporter.js";
 
@@ -26,6 +27,8 @@ export interface ActiveRun {
   readonly members: readonly GroupMember[];
   /** 这次 prompt 是为了处理某份交接派来的才有值。 */
   readonly handoffId: HandoffId | undefined;
+  /** 主助理手上的项目，set_cadence 只认这里面的。队员的 prompt 不带，是空的。 */
+  readonly projects: readonly Project[];
 }
 
 const NO_SUMMARY = "无";

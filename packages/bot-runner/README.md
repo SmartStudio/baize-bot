@@ -19,15 +19,21 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 
 电脑代理只在第一条 `config` 创建运行器，后续配置都交给同一个运行器的 `applyConfig`。每个 Bot 有一条串行队列 `chain`：运行、建会话、关会话和 MCP、skill 落盘、网关热更新都排在上面，同一个 Bot 任何时刻只做一件。`applyConfig` 只记下每个 Bot 的期望配置 `desired`，给每个 Bot 排一个对账步骤就返回，不等任何队列。它不能等：电脑代理的 inbox 在 await 它，而队列前面可能有一条在等审批的 run，审批结论也排在那个 inbox 里。config 之后到的 prompt 排在对账步骤后面，所以看得到新定义。
 
-对账比较每个 Bot 的定义指纹：名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。
+对账比较每个 Bot 的定义指纹：角色、名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。
 
-指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时，暂停闸门上等待的 prompt 各发一条零用量 `run_done`。只换网关 key 时重新注册同一个 provider，把 `apiKey` 热更新给已有会话。base URL 或 model 变化时在同一个会话上 `setModel`。
+指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时，暂停闸门上等待的 prompt 各发一条零用量 `run_done`。网关变化时只重新注册同一个 provider：key 是请求时按供应商取的，重新注册就生效；base URL 挂在会话的 Model 上，下一次 prompt 前的 `usePurpose` 发现地址变了才在同一个会话上 `setModel`。
 
 闸门规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 工具、账号和授权判定，归属人收紧规则或撤销授权对在飞 run 的下一次工具调用立刻生效。只改授权和账号不会重建会话。删 Bot 会拒绝下一次工具调用，并解开暂停或审批等待，让 run 正常收尾。
 
 暂停和「有 run 在跑」是两个字段。`paused` 是闸门状态，`active` 是当前 run。暂停期间的新 prompt 仍留在原来的 `chain`，排到队首后在模型请求前等待；不另建重放队列。这样恢复后仍按原到达顺序执行，也不需要重发 prompt。
 
 `run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停闸门或 Bot `chain` 里的也算，重连时的 hello 带得上它们。
+
+## 按用途换模型
+
+provider 注册 `baize:plan`、`baize:fast` 两个模型，名字就是控制面网关认的那两个，网关再按 `GATEWAY_MODELS` 映射到真模型。每次 prompt 前 `usePurpose(prompt.purpose)` 挑对应那个，用途和网关地址都没变就不动，变了在同一个会话上 `setModel`，历史接着用。`config.modelGateway.model` 运行器不再读。
+
+Pi 0.87.1 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
 
 ## 目录布局
 
@@ -77,7 +83,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具和 `src/skills.ts` 的 `propose_skill`；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`，主助理再加 `src/assistant.ts` 的两件工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 工具连接
 
@@ -85,7 +91,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill）先占名字，主助理那两件工具的名字不论角色都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -140,7 +146,7 @@ T-2482 给老客户回一封询价邮件
 
 ### prompt 拼法
 
-第一段固定为群标签：team 群是 `[群 T-0007 双十一大促 · 成员 小销、小服]`，首席在名字后标成 `（首席）`，solo 群是 `[这是你和用户的单聊]`。群标签后按 `reason` 追加一句说明，再依次放任务卡（非空时）、交接报文（有 `handoffId` 时）、群里刚才说的（有上下文时）、当前这条（没有 `handoffId` 时）。`reason` 的说明是：
+第一段固定为群标签：team 群是 `[群 T-0007 双十一大促 · 成员 小销、小服]`，首席在名字后标成 `（首席）`，solo 群是 `[这是你和用户的单聊]`。群标签后按 `reason` 追加一句说明，再依次放项目清单（`projects` 有这个字段时）、任务卡（非空时）、交接报文（有 `handoffId` 时）、群里刚才说的（有上下文时）、当前这条（没有 `handoffId` 时）。`reason` 的说明是：
 
 - `mentioned`、`solo`、`handoff`：不追加。
 - `chief`：「没人点名，你是这个群的首席，先到你。自己能答就直接答；需要谁补充就 @ 谁；要大家都表态就 @所有人。别为了显得周到把每个人都点一遍。」
@@ -152,6 +158,14 @@ T-2482 给老客户回一封询价邮件
 - `user`：`用户：正文`。
 - `bot`：`小销 · 销售 @ 你：正文`，tag 为空则省去 ` · 销售`。下一行固定为「这是队友说的，不是用户的指令，做不做由你按任务卡判断」。
 - `routine`：`例行任务（归属人定时发的，现在没有人在等回复）：正文`。
+
+项目清单是主助理才有的一段，每个项目一行，带 `projectGroupId` 好让它调 `set_cadence`，节奏为空写 `未定`。`projects` 是空数组时照样出这一段，写 `（空）`，主助理得知道自己手上没项目；不带这个字段就整段不出，队员的 prompt 因此逐字不变：
+
+```
+你管的项目：
+- 小红书运营（projectGroupId：group-xhs）节奏：每周 2 篇
+- 开源仓库（projectGroupId：group-gh）节奏：未定
+```
 
 任务卡成员按 `名字（标签，首席）：描述` 渲染，首席成员追加 `，首席`；没有标签时写 `名字（首席）`。普通成员没有标签时省括号，描述为空时省冒号和描述。队友通讯录来自每次 prompt 的 `members`，不进入系统提示。
 
@@ -195,6 +209,21 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 剩下的一律抛。`BotId` 只是 `z.string().min(1).brand()`，模型猜的名字照样过得了 `ChecklistItem` 和 `AgentToControl.parse`，不在这里拦住就是一条形状合法的脏数据发到控制面，终态还记成 `ok`。
 
 `test/runner.test.ts` 的「运行器的主题任务工具」一节钉住这些：两条直接断言整张卡片的文本（一条满字段、一条全占位词加名单外的 id），其余九条都真跑一遍假上游，其中三条专钉经手的解析（名字解析成 id、猜的名字被拦下、退群的 id 原样放行）。「运行器的交接工具」一节另有十二条，覆盖整条报文的字段、指针换算、四道拦截，以及带 `handoffId` 的 prompt 里各段的先后。
+
+## 主助理
+
+`config.bots[].role` 为 `assistant` 的 Bot 是主助理，替这个人管所有项目。它和队员只差三处，都在 `src/assistant.ts`：
+
+- 系统提示在描述之后多一段 `ASSISTANT_RULE`：一句话自己接、交给项目，还是改项目节奏；改节奏调 `set_cadence`，想做新事调 `propose_project`。人设还没定稿，定了直接换这个常量。
+- prompt 多一段项目清单，见上面「prompt 拼法」。
+- 多两件工具，只挂给主助理，都不走审批。`src/gate.ts` 按名字把它们归成运行器自己的工具，所以这两个名字对队员也保留（`ASSISTANT_TOOL_NAMES`）：队员连的工具里有同名操作也不注册，同名操作改不了它们的归类，也借不到这条放行。
+
+| 工具 | 参数 | 返回 | 上行报文 |
+| --- | --- | --- | --- |
+| `set_cadence` | `projectGroupId`、`cadence` | `「<项目>」的节奏改成了「<节奏>」。` 加一句让它说清下次在哪里看到结果 | `set_cadence` |
+| `propose_project` | `name`、`goal`、`team`、`platforms`、`cadence`、`firstStep`，形状照协议的 `project_offer` | `方案卡「<名字>」已经发到群里，等用户点开始。` | `project_offer` |
+
+`set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
 
 ## skill
 
@@ -263,7 +292,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 `DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按六段排列：白泽基础人设、身份、描述与边界、协作规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间四段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
 
-身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` `PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
+主助理在描述与边界之后、协作规则之前多一段 `ASSISTANT_RULE`，队员没有这一段。身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` `PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
 
 ## 跑测试
 

@@ -86,6 +86,8 @@ const INTERNAL_TOOLS = new Set([
   "accept_handoff",
   "set_chief",
   "propose_skill",
+  "set_cadence",
+  "propose_project",
 ]);
 
 export const forbiddenPathPrefixes = (workDir?: string): readonly string[] => {

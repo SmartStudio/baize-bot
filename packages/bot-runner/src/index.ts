@@ -10,6 +10,7 @@ import {
   type ToolConnectionConfig,
 } from "@baize/shared";
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
+import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
 import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
@@ -143,7 +144,7 @@ const currentDefinition = (bot: BotRuntime): BotDefinition | null => bot.configS
 const desiredConfig = (bot: BotRuntime): BotDesired | null => bot.configState.desired;
 
 const sameGateway = (left: RunnerConfig["modelGateway"], right: RunnerConfig["modelGateway"]): boolean =>
-  left.baseUrl === right.baseUrl && left.apiKey === right.apiKey && left.model === right.model;
+  left.baseUrl === right.baseUrl && left.apiKey === right.apiKey;
 
 const desiredFor = (
   version: number,
@@ -201,6 +202,7 @@ function composePrompt(message: PromptMessage): string {
       throw new Error(`未知的派发原因：${exhaustive}`);
     }
   }
+  if (message.projects !== undefined) sections.push(renderProjects(message.projects));
   if (message.task !== null) sections.push(`任务卡：\n${renderTaskCard(message.task, message.members)}`);
   // 带 handoffId 的这条 prompt，正文就是控制面渲染好的交接报文：紧跟在任务卡后面单成一段，
   // 并点名先确认接手。混在群聊后面当「当前这条」，模型会当成又一句闲话直接开干。
@@ -458,13 +460,14 @@ export function createRunner(config: RunnerConfig): Runner {
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
+      ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
     ];
     const mcp =
       bot.mcp ??
       createMcpTools({
         botId: bot.botId,
         connections: definition.connections,
-        reserved: new Set([bash.tool.name, ...builtIn.map((tool) => tool.name)]),
+        reserved: new Set([bash.tool.name, ...builtIn.map((tool) => tool.name), ...ASSISTANT_TOOL_NAMES]),
       });
     bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
@@ -489,6 +492,7 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     const created = await createBotSession({
       botId: bot.botId,
+      role: definition.config.role,
       name: definition.config.name,
       tag: definition.config.tag,
       description: definition.config.description,
@@ -526,6 +530,7 @@ export function createRunner(config: RunnerConfig): Runner {
       task: message.task,
       members: message.members,
       handoffId: message.handoffId,
+      projects: message.projects ?? [],
     };
     let unsubscribe: (() => void) | null = null;
     let botSession: BotSession | null = null;
@@ -535,6 +540,7 @@ export function createRunner(config: RunnerConfig): Runner {
       botSession = await sessionFor(bot, message.groupId);
       if (!(await waitUntilRunning(bot, undefined))) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
+      await botSession.usePurpose(message.purpose);
       const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
       unsubscribe = reportRun(
