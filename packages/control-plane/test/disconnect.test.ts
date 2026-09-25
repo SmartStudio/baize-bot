@@ -1,4 +1,12 @@
-import { Computer, CreateBotResponse, MessageListResponse, type GroupId, type RunId } from "@baize/shared";
+import {
+  Computer,
+  CreateBotResponse,
+  CreateGroupResponse,
+  MessageListResponse,
+  type Bot,
+  type GroupId,
+  type RunId,
+} from "@baize/shared";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
 import * as runsRepo from "../src/repo/runs.js";
@@ -30,6 +38,29 @@ async function ownerWithBot() {
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
   return { computer, client, groupId: created.group.id };
+}
+
+async function ownerWithTeam(): Promise<{
+  computer: TestComputer;
+  client: ApiClient;
+  groupId: GroupId;
+  sales: Bot;
+  service: Bot;
+}> {
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const client = new ApiClient(server.port);
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const sales = CreateBotResponse.parse(
+    await (await client.post("/api/bots", { name: "小销", tag: "销售" })).json(),
+  ).bot;
+  const service = CreateBotResponse.parse(
+    await (await client.post("/api/bots", { name: "小服", tag: "客服" })).json(),
+  ).bot;
+  const group = CreateGroupResponse.parse(
+    await (await client.post("/api/groups", { title: "双十一大促", botIds: [sales.id, service.id] })).json(),
+  ).group;
+  return { computer, client, groupId: group.id, sales, service };
 }
 
 async function connect(computer: TestComputer, activeRuns: readonly RunId[] = []): Promise<AgentClient> {
@@ -214,5 +245,92 @@ it("宽限收尾后重复 hello 只留一条失败消息", async () => {
     expect(await notices(owner.client, owner.groupId)).toBe(1);
   } finally {
     second.close();
+  }
+});
+
+it("断线时排队的交接不留到下一回合", async () => {
+  const owner = await ownerWithTeam();
+  const first = await connect(owner.computer);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  try {
+    expect((await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "@小销 开个头" })).status).toBe(
+      201,
+    );
+    const source = await first.expect("prompt");
+    first.send({
+      type: "handoff",
+      runId: source.runId,
+      botId: owner.sales.id,
+      groupId: owner.groupId,
+      toBotId: owner.service.id,
+      done: "退款政策已经写完",
+      notDone: "库存还没核对",
+      next: "找仓库确认备货量",
+      checklistIndex: null,
+    });
+    for (;;) {
+      const event = await push.next();
+      if (event.type === "handoff_updated") break;
+    }
+
+    first.close();
+    await first.closed();
+    await waitFor(() => ended(source.runId), "断线的交接来源 run 收尾");
+    const second = await connect(owner.computer);
+    try {
+      expect(
+        (await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "@小销 断线后的新一轮" })).status,
+      ).toBe(201);
+      const fresh = await second.expect("prompt");
+      expect(fresh.botId).toBe(owner.sales.id);
+      second.send({
+        type: "run_done",
+        runId: fresh.runId,
+        botId: owner.sales.id,
+        groupId: owner.groupId,
+        steps: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      second.send({
+        type: "bot_tool_call",
+        runId: fresh.runId,
+        botId: owner.sales.id,
+        groupId: owner.groupId,
+        callId: "disconnect-handoff-settled",
+        tool: "test.sentinel",
+        argsSummary: "断线后新一轮已处理",
+        status: "ok",
+        durationMs: 0,
+      });
+      for (;;) {
+        const event = await push.next();
+        if (
+          event.type === "message" &&
+          event.message.body.kind === "tool_call" &&
+          event.message.body.argsSummary === "断线后新一轮已处理"
+        )
+          break;
+      }
+
+      expect((await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "@小销 哨兵" })).status).toBe(
+        201,
+      );
+      const sentinel = await second.expect("prompt");
+      expect(sentinel.botId, "断线前未派出的交接不能抢在新消息前冒出来").toBe(owner.sales.id);
+      expect(sentinel.reason).toBe("mentioned");
+
+      const page = MessageListResponse.parse(
+        await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
+      );
+      expect(page.handoffs, "没确认的交接卡仍保持 pending，当前经手不因断线改变").toMatchObject([
+        { fromBotId: owner.sales.id, toBotId: owner.service.id, status: "pending" },
+      ]);
+    } finally {
+      second.close();
+    }
+  } finally {
+    first.close();
+    push.close();
   }
 });

@@ -120,6 +120,20 @@ async function runCount(groupId: GroupId): Promise<number> {
   return Number(rows[0]?.n ?? "0");
 }
 
+async function usageOf(runId: RunId): Promise<{
+  steps: number;
+  inputTokens: number;
+  outputTokens: number;
+  amount: string;
+}> {
+  const rows = await database.sql<
+    { steps: number; input_tokens: number; output_tokens: number; amount: string }[]
+  >`SELECT steps, input_tokens, output_tokens, amount FROM runs WHERE id = ${runId}`;
+  const row = rows[0];
+  if (row === undefined) throw new Error(`没有找到 run ${runId}`);
+  return { steps: row.steps, inputTokens: row.input_tokens, outputTokens: row.output_tokens, amount: row.amount };
+}
+
 /** 派一次活，拿回这个目标这一次的 runId。上行报文的归属校验要求 runId 真是它的活。 */
 async function runFor(team: Team, groupId: GroupId, text: string): Promise<RunId> {
   await say(team, groupId, text);
@@ -439,6 +453,79 @@ describe("多 Bot 群派活", () => {
     }
   });
 
+  it("整轮全 pass 不写花费行", async () => {
+    const team = await makeTeam();
+    try {
+      await say(team, team.group.id, "先看看这件事");
+      const first = await team.agent.expect("prompt");
+      reply(team, first.runId, team.sales.id, "(pass)");
+      team.agent.send({
+        type: "run_done",
+        runId: first.runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        steps: 2,
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+      });
+      const second = await team.agent.expect("prompt");
+      reply(team, second.runId, team.service.id, "（pass）");
+      team.agent.send({
+        type: "run_done",
+        runId: second.runId,
+        botId: team.service.id,
+        groupId: team.group.id,
+        steps: 4,
+        inputTokens: 0,
+        outputTokens: 1_000_000,
+      });
+      team.agent.send({
+        type: "bot_tool_call",
+        runId: second.runId,
+        botId: team.service.id,
+        groupId: team.group.id,
+        callId: "all-pass-settled",
+        tool: "test.sentinel",
+        argsSummary: "全员 pass 已处理",
+        status: "ok",
+        durationMs: 0,
+      });
+      for (;;) {
+        const push = await team.push.next();
+        if (
+          push.type === "message" &&
+          push.message.body.kind === "tool_call" &&
+          push.message.body.argsSummary === "全员 pass 已处理"
+        )
+          break;
+      }
+
+      const messages = await messagesIn(team, team.group.id);
+      expect(
+        messages.filter((message) => message.body.kind === "bot"),
+        "全轮的 pass 都不落 Bot 消息",
+      ).toHaveLength(0);
+      expect(
+        messages.filter((message) => message.body.kind === "cost"),
+        "全轮没有可挂的 Bot 回复时也不写纯金额行",
+      ).toHaveLength(0);
+      expect(await usageOf(first.runId), "第一位的用量仍记在 runs").toEqual({
+        steps: 2,
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+        amount: "3.000000",
+      });
+      expect(await usageOf(second.runId), "第二位的用量仍记在 runs").toEqual({
+        steps: 4,
+        inputTokens: 0,
+        outputTokens: 1_000_000,
+        amount: "15.000000",
+      });
+    } finally {
+      team.close();
+    }
+  });
+
   it("(pass) 和全角括号版本不落 Bot 消息，也不推 message 或 delta", async () => {
     const team = await makeTeam();
     try {
@@ -464,11 +551,27 @@ describe("多 Bot 群派活", () => {
           done: true,
         });
         finish(team, runId, team.sales.id);
+        team.agent.send({
+          type: "bot_tool_call",
+          runId,
+          botId: team.sales.id,
+          groupId: team.group.id,
+          callId: `pass-settled-${index}`,
+          tool: "test.sentinel",
+          argsSummary: `第 ${index + 1} 次 pass 已处理`,
+          status: "ok",
+          durationMs: 0,
+        });
         for (;;) {
           const push = await team.push.next();
           expect(push.type === "message_delta" ? push.messageId : null).not.toBe(messageId);
           expect(push.type === "message" ? push.message.id : null).not.toBe(messageId);
-          if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === runId) break;
+          if (
+            push.type === "message" &&
+            push.message.body.kind === "tool_call" &&
+            push.message.body.argsSummary === `第 ${index + 1} 次 pass 已处理`
+          )
+            break;
         }
       }
       expect((await messagesIn(team, team.group.id)).filter((message) => message.body.kind === "bot")).toHaveLength(0);

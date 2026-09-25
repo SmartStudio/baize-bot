@@ -246,7 +246,7 @@ export class AgentHub {
       });
       if (result === null) continue;
       clearTextPrefixes(run.runId);
-      if (run.groupId !== null) await this.#deps.groupTurns.abandon(run.groupId, run.runId);
+      if (run.groupId !== null) this.#deps.groupTurns.abandon(run.groupId, run.runId);
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
       await failRoutineRunOf(
         { db: this.#deps.db, push: this.#deps.push, agents: this, groupTurns: this.#deps.groupTurns },

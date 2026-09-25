@@ -99,10 +99,10 @@ export class GroupTurns {
     await this.#advance(turn);
   }
 
-  async cancel(groupId: GroupId): Promise<void> {
+  cancel(groupId: GroupId): void {
     const turn = this.#turns.get(groupId);
     if (turn === undefined) return;
-    await this.#close(turn);
+    this.#close(turn);
   }
 
   snapshots(ownerId: UserId): Extract<ServerPush, { type: "group_turn" }>[] {
@@ -196,11 +196,12 @@ export class GroupTurns {
     await this.#advance(turn);
   }
 
-  async abandon(groupId: GroupId, runId: RunId): Promise<void> {
+  abandon(groupId: GroupId, runId: RunId): void {
     this.#blockedRuns.delete(runId);
     this.#handoffLimitNoted.delete(runId);
+    this.#deferred.delete(groupId);
     const turn = this.#turns.get(groupId);
-    if (turn?.current?.runId === runId) await this.#close(turn);
+    if (turn?.current?.runId === runId) this.#close(turn, false);
   }
 
   async #count(turn: Turn, runId: RunId): Promise<void> {
@@ -213,7 +214,7 @@ export class GroupTurns {
       text: MENTION_LOOP_NOTICE,
     });
     this.push.push(turn.ownerId, { type: "message", message: notice });
-    await this.#close(turn);
+    this.#close(turn);
   }
 
   async #advance(turn: Turn): Promise<void> {
@@ -225,13 +226,13 @@ export class GroupTurns {
       speaker = turn.speakers.shift();
     }
     if (speaker === undefined) {
-      await this.#close(turn);
+      this.#close(turn);
       return;
     }
     const runId = await turn.send(speaker, turn.dispatched > 0);
     if (this.#turns.get(turn.groupId) !== turn) return;
     if (runId === null) {
-      await this.#close(turn);
+      this.#close(turn);
       return;
     }
     turn.current = { speaker, runId };
@@ -265,31 +266,18 @@ export class GroupTurns {
     this.#deferred.set(groupId, queued);
   }
 
-  async #flushHeldPass(turn: Turn): Promise<void> {
-    const held = turn.heldPass;
-    turn.heldPass = null;
-    if (held === null || turn.summary !== null) return;
-    const message = await appendMessage(this.db, turn.groupId, {
-      kind: "cost",
-      runId: held.runId,
-      botId: held.botId,
-      steps: held.steps,
-      amount: held.amount,
-    });
-    this.push.push(turn.ownerId, { type: "message", message });
-  }
-
-  async #close(turn: Turn): Promise<void> {
+  #close(turn: Turn, carryHandoffs = true): void {
     if (this.#turns.get(turn.groupId) !== turn) return;
-    // 收尾的状态变更一口气做完再 await，否则两次 close 交错时，后一次会把刚 start 的新回合删掉。
-    // 没派出去的交接目标不管排在 handoffs 还是 speakers 里都带到下一回合，卡已经建了。
-    const pending = [...turn.handoffs, ...turn.speakers.filter((speaker) => speaker.handoff !== undefined)];
+    // 用户插话时，没派出的交接目标不管排在 handoffs 还是 speakers 里都带到下一回合，卡已经建了。
+    const pending = carryHandoffs
+      ? [...turn.handoffs, ...turn.speakers.filter((speaker) => speaker.handoff !== undefined)]
+      : [];
     this.#turns.delete(turn.groupId);
     turn.current = null;
     turn.handoffs.length = 0;
     turn.speakers = [];
     this.#publish(turn);
     if (pending.length > 0) this.#deferred.set(turn.groupId, [...(this.#deferred.get(turn.groupId) ?? []), ...pending]);
-    await this.#flushHeldPass(turn);
+    turn.heldPass = null;
   }
 }
