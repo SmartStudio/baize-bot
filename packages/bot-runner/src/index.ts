@@ -238,7 +238,8 @@ export function createRunner(config: RunnerConfig): Runner {
     try {
       const { session } = await sessionFor(bot, message.groupId);
       bot.lifecycle = { phase: "running", active };
-      unsubscribe = reportRun(session, active.run, approvals.blockedCallIds, config.send);
+      const statsBeforeRun = session.getSessionStats();
+      unsubscribe = reportRun(session, statsBeforeRun, active.run, approvals.blockedCallIds, config.send);
       await session.prompt(composePrompt(message));
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);

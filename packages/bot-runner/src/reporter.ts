@@ -1,5 +1,5 @@
 import { AgentToControl, type BotId, type GroupId, type MessageId, type RunId } from "@baize/shared";
-import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 
 // 一次 prompt 的会话事件翻成上行报文。出边界前一律过 AgentToControl.parse，schema 不过就抛。
 
@@ -12,6 +12,7 @@ export interface RunIdentity {
 
 export function reportRun(
   session: AgentSession,
+  statsBeforeRun: SessionStats,
   identity: RunIdentity,
   blockedCallIds: ReadonlySet<string>,
   send: (message: AgentToControl) => void,
@@ -81,8 +82,11 @@ export function reportRun(
       if (lastModelError !== null) {
         push({ type: "agent_error", code: "model_failed", detail: lastModelError, groupId: ids.groupId });
       }
-      const tokens = session.getSessionStats().tokens;
-      push({ type: "run_done", ...ids, steps, inputTokens: tokens.input, outputTokens: tokens.output });
+      const statsAfterRun = session.getSessionStats();
+      // config 切换或会话重建会让累计值回零，差值最低按零报，不能把负数送出边界。
+      const inputTokens = Math.max(0, statsAfterRun.tokens.input - statsBeforeRun.tokens.input);
+      const outputTokens = Math.max(0, statsAfterRun.tokens.output - statsBeforeRun.tokens.output);
+      push({ type: "run_done", ...ids, steps, inputTokens, outputTokens });
     }
   });
 }

@@ -1910,6 +1910,26 @@ describe("每群一份会话", () => {
   });
 });
 
+describe("每次运行的用量", () => {
+  it("同一个群连发两条，第二次的 token 不含第一次", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([
+        ["第二句话", { textChunks: ["第二句回答。"], usage: { input: 110, output: 6 } }],
+        ["第一句话", { textChunks: ["第一句回答。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一句话"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二句话"));
+
+    const done = h.sent.filter((message) => message.type === "run_done");
+    expect(done).toHaveLength(2);
+    expect(done[0]).toMatchObject({ runId: "run-1", inputTokens: 100, outputTokens: 5 });
+    expect(done[1]).toMatchObject({ runId: "run-2", inputTokens: 110, outputTokens: 6 });
+  });
+});
+
 describe("落盘位置", () => {
   it("Pi 的落盘全在钉死的临时目录里，~/.pi 下一个新文件都没有", () => {
     // 先证明这个探针能看见新文件，否则下面那条空断言是空的。
