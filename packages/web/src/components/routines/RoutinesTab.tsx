@@ -151,7 +151,7 @@ const RoutineFields = ({ value, onPatch }: { value: Form; onPatch: (patch: Parti
           data-testid="routine-instruction-input"
           rows={5}
           value={instruction}
-          placeholder="像交代同事一样写清楚：做什么、做到什么程度、什么要停下来等你"
+          placeholder="写清楚做什么、做到什么程度、什么情况要停下来等你"
           onChange={(e) => setInstruction(e.target.value)}
           onBlur={() => instruction !== value.instruction && onPatch({ instruction })}
         />

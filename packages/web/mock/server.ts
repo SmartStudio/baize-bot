@@ -14,11 +14,15 @@ import {
   CreateSkillRequest,
   DecideApprovalRequest,
   DecideSkillOfferRequest,
+  LocalComputerResponse,
   LoginRequest,
+  RegisterRequest,
+  RegisterResponse,
   SendMessageRequest,
   Settings,
   ServerPush,
   ToolConnection,
+  User,
   CreateToolRequest,
   UpdateBotRequest,
   UpdateRoutineRequest,
@@ -91,6 +95,7 @@ const DECISION_WORDS = new Map<string, ApprovalDecision>([
 const PORT = Number(process.env["API_PORT"] ?? 3001);
 const SESSION_COOKIE = "baize_session";
 const sessions = new Set<string>();
+const registeredEmails = new Set<string>([MOCK_EMAIL]);
 const sockets = new Set<WebSocket>();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
@@ -193,6 +198,8 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   // 端到端每条用例开头把内存状态倒回预置的三个 Bot，用例之间就不会互相依赖跑的顺序。
   if (method === "POST" && path === "/api/test/reset") {
     reseed();
+    registeredEmails.clear();
+    registeredEmails.add(MOCK_EMAIL);
     activeTurns.clear();
     turnEpochs.clear();
     return send(res, 204);
@@ -258,6 +265,25 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
     return send(res, 200, { user });
   }
 
+  if (method === "POST" && path === "/api/register") {
+    const parsed = RegisterRequest.safeParse(await readBody(req));
+    if (!parsed.success) return send(res, 400, { error: "注册信息格式不对" });
+    if (registeredEmails.has(parsed.data.email)) {
+      return send(res, 409, { error: "这个邮箱已经注册过了" });
+    }
+    registeredEmails.add(parsed.data.email);
+    const registeredUser = User.parse({
+      id: `usr_${randomUUID()}`,
+      name: parsed.data.name,
+      email: parsed.data.email,
+      createdAt: new Date().toISOString(),
+    });
+    const token = randomUUID();
+    sessions.add(token);
+    res.setHeader("set-cookie", `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax`);
+    return send(res, 201, RegisterResponse.parse({ user: registeredUser }));
+  }
+
   if (method === "POST" && path === "/api/auth/logout") {
     const token = readCookie(req, SESSION_COOKIE);
     if (token) sessions.delete(token);
@@ -278,6 +304,9 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (!authed(req)) return send(res, 401, { error: "没登录" });
 
   if (method === "GET" && path === "/api/me") return send(res, 200, { user });
+  if (method === "POST" && path === "/api/computers/local") {
+    return send(res, 200, LocalComputerResponse.parse({ computerId: "cmp_local", token: randomUUID() }));
+  }
   if (method === "GET" && path === "/api/usage") return send(res, 200, usageOf());
   if (method === "GET" && path === "/api/overnight") return send(res, 200, overnightOf());
 

@@ -53,9 +53,7 @@ const GeneralPage = ({
     <div className="row-card">
       <span className="account-body">
         <b>{user.name}</b>
-        <small>
-          {user.email} · {user.teamName}
-        </small>
+        <small>{user.email}</small>
       </span>
       <button type="button" className="ghost-button" data-testid="settings-logout" onClick={onLogout}>
         退出登录

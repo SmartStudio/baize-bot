@@ -159,8 +159,6 @@ const shot = (step: number | string): string => `${screenshots}/step-${step}.png
 
 const login = async (page: Page, url: string): Promise<void> => {
   await page.goto(url);
-  await page.getByTestId("workspace-input").fill("acme");
-  await page.getByTestId("workspace-continue").click();
   await page.getByTestId("email-input").fill("chen@baize.dev");
   await page.getByTestId("password-input").fill("baize-dev");
   await page.getByTestId("login-submit").click();

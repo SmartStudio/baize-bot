@@ -225,7 +225,7 @@ export const Sidebar = ({
           </span>
           <span className="account-body">
             <b>{user.name}</b>
-            <small>{user.teamName}</small>
+            <small>{user.email}</small>
           </span>
           <SettingsIcon size={16} aria-hidden="true" />
         </button>

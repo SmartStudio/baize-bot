@@ -68,7 +68,7 @@ export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
 export type AppState =
   | { status: "loading" }
-  | { status: "anonymous"; login: LoginPhase }
+  | { status: "anonymous"; login: LoginPhase; register: LoginPhase }
   | {
       status: "ready";
       user: User;
@@ -97,6 +97,7 @@ export type AppState =
 
 type Action =
   | { type: "anonymous"; login: LoginPhase }
+  | { type: "register_phase"; register: LoginPhase }
   | {
       type: "ready";
       user: User;
@@ -280,7 +281,9 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
 const reduce = (state: AppState, action: Action): AppState => {
   switch (action.type) {
     case "anonymous":
-      return { status: "anonymous", login: action.login };
+      return { status: "anonymous", login: action.login, register: { kind: "idle" } };
+    case "register_phase":
+      return state.status === "anonymous" ? { ...state, register: action.register } : state;
     case "ready":
       return enteredState(action);
     default:
@@ -493,6 +496,7 @@ const reduce = (state: AppState, action: Action): AppState => {
 
 export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
   selectGroup: (groupId: GroupId) => void;
   createBot: () => Promise<void>;
@@ -578,6 +582,16 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         } catch (cause) {
           const message = cause instanceof RequestFailed ? cause.message : "登录失败，再试一次";
           dispatch({ type: "anonymous", login: { kind: "failed", message } });
+        }
+      },
+      register: async (email, password, name) => {
+        dispatch({ type: "register_phase", register: { kind: "submitting" } });
+        try {
+          const { user } = await api.register(email, password, name);
+          dispatch(await loadEntry(user));
+        } catch (cause) {
+          const message = cause instanceof RequestFailed ? cause.message : "注册失败，再试一次";
+          dispatch({ type: "register_phase", register: { kind: "failed", message } });
         }
       },
       logout: async () => {

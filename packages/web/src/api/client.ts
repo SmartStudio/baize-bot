@@ -13,6 +13,7 @@ import {
   MeResponse,
   MessageListResponse,
   OvernightResponse,
+  RegisterResponse,
   RoutineListResponse,
   RoutineResponse,
   SendMessageResponse,
@@ -96,6 +97,8 @@ export type GroupDraft = { title: string; botIds: BotId[]; summary: string; dueA
 export const api = {
   login: async (email: string, password: string) =>
     json(LoginResponse, await send("POST", "/auth/login", { email, password })),
+  register: async (email: string, password: string, name: string) =>
+    json(RegisterResponse, await send("POST", "/register", { email, password, name })),
   logout: async () => {
     await send("POST", "/auth/logout");
   },

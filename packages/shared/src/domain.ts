@@ -43,7 +43,6 @@ export const User = z.object({
   id: UserId,
   name: z.string().min(1),
   email: z.string().email(),
-  teamName: z.string().default(""),
   createdAt: Timestamp,
 });
 export type User = z.infer<typeof User>;
