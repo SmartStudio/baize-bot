@@ -141,9 +141,10 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     close: async () => {
       routines.stop();
       clearInterval(reminders);
-      await notifications.close();
       await hub.closeAll();
       await agents.closeAll();
+      // 断线收尾可能还在推 stuck，等它们排完再关。
+      await notifications.close();
       clients.close();
       agentSockets.close();
       await new Promise<void>((resolve, reject) =>

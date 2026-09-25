@@ -90,6 +90,16 @@ async function noticesBeforeBotMarker(owner: Owner, push: PushClient): Promise<N
   return noticesBefore(push, (item) => item.type === "bot_updated" && item.bot.description === description);
 }
 
+/** 连上推送后先收齐预期的几条 notify，再用标记确认后面没有多出来的。 */
+async function noticesOnConnect(owner: Owner, push: PushClient, expected: number): Promise<Notice[]> {
+  const notices: Notice[] = [];
+  while (notices.length < expected) {
+    const item = await push.next();
+    if (item.type === "notify") notices.push(item.notice);
+  }
+  return [...notices, ...(await noticesBeforeBotMarker(owner, push))];
+}
+
 type Job = { readonly agent: AgentClient; readonly push: PushClient; readonly runId: RunId; close(): void };
 
 /** 推送连接在 prompt 之后才连，派活那一串推送都不进收件箱。 */
@@ -298,6 +308,77 @@ describe("stuck", () => {
       job.close();
     }
   });
+
+  it("用户消息触发的 run 中途断线，不推 stuck", async () => {
+    const owner = await ownerWithBot();
+    const job = await userJob(owner);
+    try {
+      job.agent.close();
+      await waitFor(async () => (await computerStatus(owner)) === "sleeping", "电脑变休眠");
+      const { agent } = await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token);
+      agent.close();
+      const notices = await noticesBefore(
+        job.push,
+        (item) => item.type === "computer_updated" && item.computer.status === "online",
+      );
+      expect(notices, "用户自己的消息断线时群里已经看得到，不该弹 stuck").toEqual([]);
+    } finally {
+      job.close();
+    }
+  });
+
+  it("用户没有推送连接时，例行派不出去，连上后收到一条 stuck", async () => {
+    const owner = await ownerWithBot();
+    const routine = await makeRoutine(owner);
+    const failedAt = clock;
+    await runRoutineNow(owner, routine);
+
+    clock = new Date("2030-01-01T03:00:00.000Z");
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      expect(await noticesOnConnect(owner, push, 1), "Mac 睡着时没跑成的例行，醒来要知道").toEqual([
+        { kind: "stuck", text: OFFLINE_STUCK, groupId: owner.groupId, at: failedAt.toISOString() },
+      ]);
+    } finally {
+      push.close();
+    }
+  });
+
+  it("同一段离线期派不出去三次，连上后只收到一条", async () => {
+    const owner = await ownerWithBot();
+    const routine = await makeRoutine(owner);
+    for (let i = 0; i < 3; i += 1) await runRoutineNow(owner, routine);
+
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      expect((await noticesOnConnect(owner, push, 1)).map((notice) => notice.text)).toEqual([OFFLINE_STUCK]);
+    } finally {
+      push.close();
+    }
+  });
+
+  it("连上时先推留下的 stuck，再推免打扰汇总", async () => {
+    const owner = await ownerWithBot();
+    await owner.client.patch("/api/settings", { dndFrom: "09:00", dndTo: "11:00" });
+    const routine = await makeRoutine(owner);
+    await runRoutineNow(owner, routine);
+
+    clock = new Date("2030-01-01T03:00:00.000Z");
+    const { agent } = await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token);
+    agent.close();
+    await waitFor(async () => (await computerStatus(owner)) === "sleeping", "电脑变休眠");
+    await runRoutineNow(owner, routine);
+
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      expect((await noticesOnConnect(owner, push, 2)).map((notice) => [notice.kind, notice.text])).toEqual([
+        ["stuck", OFFLINE_STUCK],
+        ["result", SUMMARY_ONE],
+      ]);
+    } finally {
+      push.close();
+    }
+  });
 });
 
 describe("免打扰", () => {
@@ -350,6 +431,27 @@ describe("免打扰", () => {
     try {
       await runRoutineNow(owner, routine);
       expect(await noticesBeforeBotMarker(owner, push)).toEqual([]);
+    } finally {
+      push.close();
+    }
+  });
+
+  it("缩短免打扰后，在新的结束时刻汇总", async () => {
+    const owner = await ownerWithBot();
+    await owner.client.patch("/api/settings", { dndFrom: "09:00", dndTo: "11:00" });
+    const routine = await makeRoutine(owner);
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      await runRoutineNow(owner, routine);
+      expect(await noticesBeforeBotMarker(owner, push)).toEqual([]);
+      expect((await owner.client.patch("/api/settings", { dndFrom: "09:00", dndTo: "10:30" })).status).toBe(200);
+
+      clock = new Date("2030-01-01T02:30:00.000Z");
+      await server.server.notifications.tick();
+      expect(
+        (await noticesBeforeBotMarker(owner, push)).map((notice) => notice.text),
+        "不能等到原来的 11:00",
+      ).toEqual([SUMMARY_ONE]);
     } finally {
       push.close();
     }
