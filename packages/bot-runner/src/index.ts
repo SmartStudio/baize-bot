@@ -2,17 +2,20 @@ import { randomUUID } from "node:crypto";
 import {
   type AgentToControl,
   type BotId,
+  type ComputerId,
   type ControlToAgent,
   type GroupId,
   MessageId,
   type RunId,
   type ToolConnectionConfig,
 } from "@baize/shared";
-import { type ApprovalGate, approvalRule, createApprovalGate } from "./approvals.js";
+import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
+import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
 import { type BotDirs, botDirs, ensureBotDirs, groupSessionDir } from "./paths.js";
 import { reportRun } from "./reporter.js";
+import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
 
@@ -20,16 +23,19 @@ export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
 export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type BotConfig = ConfigMessage["bots"][number];
 
-export { approvalKind, approvalRule } from "./approvals.js";
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
+export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
+  readonly computerId: ComputerId;
   readonly bots: readonly BotConfig[];
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
   readonly modelGateway: ConfigMessage["modelGateway"];
+  readonly accounts: ConfigMessage["accounts"];
+  readonly grants: ConfigMessage["grants"];
   /** 该用户全部 Bot 的 skill，按 botId 分开落盘。省略按空数组对账，也就是把留在盘上的旧 skill 清掉。 */
   readonly skills?: ConfigMessage["skills"];
   readonly send: (message: AgentToControl) => void;
@@ -62,6 +68,9 @@ interface BotDesired {
   readonly tools: readonly ToolConnectionConfig[];
   readonly skills: readonly BotSkill[];
   readonly gateway: RunnerConfig["modelGateway"];
+  readonly computerId: ComputerId;
+  readonly accounts: ConfigMessage["accounts"];
+  readonly grants: ConfigMessage["grants"];
 }
 
 interface BotDefinition {
@@ -89,12 +98,18 @@ interface BotRuntime {
   sessions: Map<GroupId, BotSession>;
   /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
   mcp: McpToolSet | null;
-  /** pause 只表示是否拦下后续 prompt，不再兼任“当前有运行”。 */
+  /** pause 只让下一次 prompt 入场或工具过闸挂起；已经执行中的工具不被中止。 */
   paused: boolean;
-  pausedQueue: PromptMessage[];
+  pauseWaiters: Set<PauseWaiter>;
   active: ActiveRun | null;
   /** prompt、建会话、配置对账和资源关闭都只从这一条队列进入。 */
   chain: Promise<void>;
+}
+
+interface PauseWaiter {
+  readonly settle: (running: boolean) => void;
+  readonly signal: AbortSignal | undefined;
+  readonly onAbort: () => void;
 }
 
 type RunnerState = "ready" | "stopped";
@@ -136,12 +151,23 @@ const desiredFor = (
   tools: readonly ToolConnectionConfig[],
   skills: readonly BotSkill[],
   gateway: RunnerConfig["modelGateway"],
-): BotDesired => ({ version, config: bot, tools, skills, gateway });
+  computerId: ComputerId,
+  accounts: ConfigMessage["accounts"],
+  grants: ConfigMessage["grants"],
+): BotDesired => ({ version, config: bot, tools, skills, gateway, computerId, accounts, grants });
 
 const append = (bot: BotRuntime, operation: () => Promise<void>): Promise<void> => {
   const queued = bot.chain.then(operation);
   bot.chain = queued.catch(() => undefined);
   return queued;
+};
+
+const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
+  for (const waiter of bot.pauseWaiters) {
+    bot.pauseWaiters.delete(waiter);
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    waiter.settle(running);
+  }
 };
 
 // 群标签之后先放任务卡：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
@@ -225,9 +251,20 @@ export function createRunner(config: RunnerConfig): Runner {
   };
 
   const initialSkills = config.skills ?? [];
+  const initialAccounts = config.accounts;
+  const initialGrants = config.grants;
   const bots = new Map<BotId, BotRuntime>(
     config.bots.map((botConfig) => {
-      const desired = desiredFor(nextConfigVersion, botConfig, config.tools, initialSkills, config.modelGateway);
+      const desired = desiredFor(
+        nextConfigVersion,
+        botConfig,
+        config.tools,
+        initialSkills,
+        config.modelGateway,
+        config.computerId,
+        initialAccounts,
+        initialGrants,
+      );
       const dirs = botDirs(config.dataDir, botConfig.id);
       reconcileSkillDir(
         dirs.skillsDir,
@@ -245,7 +282,7 @@ export function createRunner(config: RunnerConfig): Runner {
           sessions: new Map(),
           mcp: null,
           paused: false,
-          pausedQueue: [],
+          pauseWaiters: new Set(),
           active: null,
           chain: Promise.resolve(),
         },
@@ -270,8 +307,22 @@ export function createRunner(config: RunnerConfig): Runner {
     });
   };
 
-  const finishPausedQueue = (bot: BotRuntime): void => {
-    for (const message of bot.pausedQueue.splice(0)) finishWithoutRun(message);
+  const waitUntilRunning = (bot: BotRuntime, signal: AbortSignal | undefined): Promise<boolean> => {
+    if (state !== "ready" || desiredConfig(bot) === null || bot.configState.phase === "deleted") {
+      return Promise.resolve(false);
+    }
+    if (!bot.paused) return Promise.resolve(true);
+    if (signal?.aborted === true) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let waiter: PauseWaiter;
+      const onAbort = (): void => {
+        bot.pauseWaiters.delete(waiter);
+        resolve(false);
+      };
+      waiter = { settle: resolve, signal, onAbort };
+      bot.pauseWaiters.add(waiter);
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
   };
 
   const abortSession = async (bot: BotRuntime, groupId: GroupId): Promise<void> => {
@@ -320,7 +371,7 @@ export function createRunner(config: RunnerConfig): Runner {
   };
 
   const deleteBot = (bot: BotRuntime, removeFromBots: boolean): void => {
-    finishPausedQueue(bot);
+    settlePauseWaiters(bot, false);
     bot.configState = { phase: "deleted", current: null, desired: null };
     if (removeFromBots && bots.get(bot.botId) === bot) bots.delete(bot.botId);
   };
@@ -400,13 +451,9 @@ export function createRunner(config: RunnerConfig): Runner {
     if (existing !== undefined) return existing;
     const definition = currentDefinition(bot);
     if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
-    const needsApproval = (toolName: string): boolean => {
-      // 待删除的 Bot 没有 desired，在飞的 run 还拿着旧工具，按建会话时的规则审批，不能放空。
-      const desired = desiredConfig(bot);
-      const connections = desired === null ? definition.connections : connectionsFor(bot.botId, desired.tools);
-      return approvalRule(connections)(toolName);
-    };
     const activeRun = (): ActiveRun | null => bot.active;
+    const dirs = ensureBotDirs(bot.dirs);
+    const bash = createSandboxedBash(dirs.workDir, () => bot.active?.run.runId ?? null);
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
@@ -417,10 +464,29 @@ export function createRunner(config: RunnerConfig): Runner {
       createMcpTools({
         botId: bot.botId,
         connections: definition.connections,
-        reserved: new Set(builtIn.map((tool) => tool.name)),
+        reserved: new Set([bash.tool.name, ...builtIn.map((tool) => tool.name)]),
       });
     bot.mcp = mcp;
-    const dirs = ensureBotDirs(bot.dirs);
+    const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
+      const desired = desiredConfig(bot)!;
+      const connections = connectionsFor(bot.botId, desired.tools);
+      const operation =
+        connections.flatMap((connection) => connection.operations).find((candidate) => candidate.name === toolName) ??
+        null;
+      return decide(
+        {
+          toolName,
+          input,
+          workDir: dirs.workDir,
+          groupId,
+          platform: process.platform,
+          mcpOperation: operation,
+          computerId: desired.computerId,
+        },
+        desired.grants,
+        desired.accounts,
+      );
+    };
     const created = await createBotSession({
       botId: bot.botId,
       name: definition.config.name,
@@ -428,9 +494,13 @@ export function createRunner(config: RunnerConfig): Runner {
       description: definition.config.description,
       dirs: { ...dirs, sessionDir: groupSessionDir(dirs, groupId) },
       gateway: bot.appliedGateway,
+      bashTool: bash.tool,
       tools: [...builtIn, ...mcp.tools],
       serverForTool: mcp.serverFor,
-      needsApproval,
+      decideTool,
+      waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+      allowBash: bash.allow,
+      clearBashRun: bash.clearRun,
       approvals,
       activeRun,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
@@ -443,10 +513,6 @@ export function createRunner(config: RunnerConfig): Runner {
     if (bot.configState.phase === "pending") await reconcileBot(bot);
     if (state === "stopped" || bot.configState.phase === "deleted" || currentDefinition(bot) === null) {
       finishWithoutRun(message);
-      return;
-    }
-    if (bot.paused) {
-      bot.pausedQueue.push(message);
       return;
     }
 
@@ -462,23 +528,21 @@ export function createRunner(config: RunnerConfig): Runner {
       handoffId: message.handoffId,
     };
     let unsubscribe: (() => void) | null = null;
-    let deferredByPause = false;
+    let botSession: BotSession | null = null;
     try {
       bot.active = active;
-      const { session } = await sessionFor(bot, message.groupId);
-      if (bot.paused) {
-        bot.pausedQueue.push(message);
-        deferredByPause = true;
-        return;
-      }
+      if (!(await waitUntilRunning(bot, undefined))) return;
+      botSession = await sessionFor(bot, message.groupId);
+      if (!(await waitUntilRunning(bot, undefined))) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
+      const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
       unsubscribe = reportRun(
         session,
         statsBeforeRun,
         active.run,
         () => runnerAbortedRuns.has(active.run.runId),
-        approvals.blockedCallIds,
+        approvals.consumeBlocked,
         bot.mcp?.serverFor ?? (() => ""),
         (outgoing) => {
           if (outgoing.type === "run_done") finishRun(outgoing);
@@ -490,10 +554,11 @@ export function createRunner(config: RunnerConfig): Runner {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {
       unsubscribe?.();
+      botSession?.clearBashRun(message.runId);
       bot.active = null;
       runnerAbortedRuns.delete(message.runId);
       if (state === "ready" && bot.configState.phase === "pending") await reconcileBot(bot);
-      if (!deferredByPause) finishWithoutRun(message);
+      finishWithoutRun(message);
     }
   };
 
@@ -513,16 +578,31 @@ export function createRunner(config: RunnerConfig): Runner {
       nextConfigVersion += 1;
       const version = nextConfigVersion;
       const nextSkills = next.skills ?? [];
+      const nextAccounts = next.accounts;
+      const nextGrants = next.grants;
       const incoming = new Map(
         next.bots.map((botConfig) => [
           botConfig.id,
-          desiredFor(version, botConfig, next.tools, nextSkills, next.modelGateway),
+          desiredFor(
+            version,
+            botConfig,
+            next.tools,
+            nextSkills,
+            next.modelGateway,
+            next.computerId,
+            nextAccounts,
+            nextGrants,
+          ),
         ]),
       );
       for (const bot of bots.values()) {
         const desired = incoming.get(bot.botId) ?? null;
         incoming.delete(bot.botId);
         bot.configState = { phase: "pending", current: currentDefinition(bot), desired };
+        if (desired === null) {
+          approvals.cancel(bot.botId);
+          settlePauseWaiters(bot, false);
+        }
         append(bot, () => reconcileBot(bot));
       }
       for (const desired of incoming.values()) {
@@ -535,7 +615,7 @@ export function createRunner(config: RunnerConfig): Runner {
           sessions: new Map(),
           mcp: null,
           paused: false,
-          pausedQueue: [],
+          pauseWaiters: new Set(),
           active: null,
           chain: Promise.resolve(),
         };
@@ -571,26 +651,20 @@ export function createRunner(config: RunnerConfig): Runner {
       const bot = bots.get(botId);
       if (bot === undefined || bot.paused) return;
       bot.paused = true;
-      const runningGroupId = bot.active?.run.groupId;
-      if (runningGroupId === undefined) return;
-      // 挂起的审批不解开，Pi 的工具循环还在 await 它，abort 等不到 idle 会一直挂着。
-      // 只中止正在跑的那个群。别的群的会话留着，resume 之后接着用。
-      approvals.abandon("paused", botId);
-      await abortSession(bot, runningGroupId);
     },
 
     async resume(botId) {
       const bot = bots.get(botId);
       if (bot === undefined || !bot.paused) return;
       bot.paused = false;
-      const queued = bot.pausedQueue.splice(0);
-      for (const message of queued) void schedulePrompt(bot, message);
+      settlePauseWaiters(bot, true);
     },
 
     async stop() {
       state = "stopped";
       approvals.abandon("stopped");
       const stoppingBots = [...bots.values()];
+      for (const bot of stoppingBots) settlePauseWaiters(bot, false);
       const aborting = stoppingBots.map((bot) => {
         const runningGroupId = bot.active?.run.groupId;
         if (runningGroupId === undefined) return Promise.resolve();

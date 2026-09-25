@@ -9,8 +9,8 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 | `applyConfig(config)` | `config` | 按 Bot 增量对账定义、工具、skill 和网关凭据 |
 | `prompt(message)` | `prompt` | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done` |
 | `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论 |
-| `pause(botId)` | `pause` | 中止这个 Bot 当前的运行，之后的 prompt 排队 |
-| `resume(botId)` | `resume` | 把排队的 prompt 重发一遍 |
+| `pause(botId)` | `pause` | 立起这个 Bot 的暂停闸门；正在执行的工具跑完，下一次工具调用或新 prompt 挂起 |
+| `resume(botId)` | `resume` | 放开暂停闸门，原 run 从等待点继续 |
 | `stop()` | 连接关闭 | 停掉所有会话 |
 
 上行报文不从这里直接出网，交给 `config.send` 回调，由电脑代理写进 WebSocket。每条出边界前过 `AgentToControl.parse`。
@@ -21,13 +21,13 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 
 对账比较每个 Bot 的定义指纹：名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。
 
-指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时暂停队列里的 prompt 各发一条零用量 `run_done`。只换网关 key 时重新注册同一个 provider，把 `apiKey` 热更新给已有会话。base URL 或 model 变化时在同一个会话上 `setModel`。
+指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时，暂停闸门上等待的 prompt 各发一条零用量 `run_done`。只换网关 key 时重新注册同一个 provider，把 `apiKey` 热更新给已有会话。base URL 或 model 变化时在同一个会话上 `setModel`。
 
-审批规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 连接算要不要审批，归属人收紧规则对在飞的 run 立刻生效。待删除的 Bot 没有 `desired`，按建会话时的连接算，删 Bot 不等于放宽审批。
+闸门规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 工具、账号和授权判定，归属人收紧规则或撤销授权对在飞 run 的下一次工具调用立刻生效。只改授权和账号不会重建会话。删 Bot 会拒绝下一次工具调用，并解开暂停或审批等待，让 run 正常收尾。
 
-暂停和「有 run 在跑」是两个字段。`paused` 只决定 prompt 轮到时进暂停队列，`active` 是当前 run。pause 先上报挂起的审批已放弃，再把工具调用当拒绝收尾并 abort 当前 run，不碰配置和资源。暂停期间的 prompt 也先排进 `chain`，轮到时再进暂停队列，恢复后按到达顺序跑。resume 把暂停队列重新排进 `chain` 就返回，不等补跑。
+暂停和「有 run 在跑」是两个字段。`paused` 是闸门状态，`active` 是当前 run。暂停期间的新 prompt 仍留在原来的 `chain`，排到队首后在模型请求前等待；不另建重放队列。这样恢复后仍按原到达顺序执行，也不需要重发 prompt。
 
-`run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停队列里的也算，重连时的 hello 带得上它们。
+`run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停闸门或 Bot `chain` 里的也算，重连时的 hello 带得上它们。
 
 ## 目录布局
 
@@ -51,39 +51,25 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 `SettingsManager` 用 `inMemory()`，不落盘。测试里 `test/runner.test.ts` 的最后一条用例先确认探针在临时目录下确实看得见新写的 `auth.json` 和会话 JSONL，再断言 `~/.pi` 下一个新文件都没有。
 
-## 审批
+## 统一闸门和沙箱
 
-哪些工具要审批：分配给这个 Bot 的工具连接（`config.tools` 里 `assignedBotIds` 含它的那些）的 `operations` 里 `needsApproval` 为 `true` 的工具名。没在这些连接里出现过的工具默认不审批，别的 Bot 的连接管不到它。规则在 `src/approvals.ts` 的 `approvalRule`，按 Bot 建会话时各算一份。
+每次 Pi `tool_call` 都先走 `src/gate.ts` 的纯函数。判定顺序固定为禁区、硬清单、`config.grants` 与账号权限档、默认表。禁区授权也不能越过；`spend`、`account_security` 和 `delete` 每次都问。项目授权只在同一 `groupId` 生效，永久授权还会再过 `GRANTABLE_SCOPES`，畸形的硬清单或 `write_outside` 永久授权不会被采用。
 
-审批的 `kind` 第一版按工具名前缀映射，表在 `src/approvals.ts`：
+`read`、`write`、`edit` 先展开 `~` 和开头的 `@`，再对已存在的路径段做 realpath。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。`~/.ssh`、钥匙串和浏览器登录资料是固定前缀禁区。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
 
-| 工具名前缀 | kind |
-| --- | --- |
-| `send_` | `send_external` |
-| `pay_` | `pay` |
-| 其余需要审批的 | `change_production_data` |
+bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。macOS 上实际执行统一经过 `src/sandbox.ts` 的 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外还会把环境裁成基础变量和 `PI_` 前缀。Seatbelt 做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。Linux 在 bubblewrap 接入前，bash 一律问。
 
-流程：Pi 的 `tool_call` 事件被扩展拦下，发一条 `approval_request` 上去，handler 挂起等 `approve`。拒绝时返回 `{ block: true, reason }`，pi-agent-core 走 `kind: "immediate"` 分支直接造一条错误工具结果，`tool.execute` 根本不进。
+Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里先全部判完再并行执行，路径判定与实际使用之间不留给同批工具改符号链接的窗口。
 
-Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `tool_execution_end.isError` 都是真，所以被拒的 `callId` 由拦截器自己记在 `ApprovalGate.blockedCallIds` 里，`bot_tool_call` 的终态从这张表读。
-
-停机或暂停时，每条仍挂起的审批先各发一条 `approval_abandoned`，原因分别是 `stopped` 或 `paused`，再在运行器内按拒绝收尾，让 Pi 能结束 run。已经批准或拒绝的审批不会再发放弃。断线原因 `disconnected` 由控制面处理，运行器不发。
+`ask` 发出的 `approval_request` 带 `action` 和能确定时的 `target`。handler 同时监听审批 Promise 和 Pi 的 `ctx.signal`。拒绝或中止返回 `{ block: true, reason }`，工具函数不执行。停机时运行器发送 `approval_abandoned`；删 Bot 时只解开本地等待，不发送该报文，由控制面删除 Bot 的流程收尾审批。暂停不会让审批失效。`bot_tool_call` 的 `blocked` 标记由 `ApprovalGate` 记下，并在 reporter 消费后删除。
 
 ## 暂停和继续
 
-**Pi 没有 pause。** `AgentSession` 上只有 `abort(): Promise<void>`（`core/agent-session.d.ts:444`）和几个针对具体子任务的 `abortCompaction` / `abortRetry` / `abortBash`。`agent-core` 那层是 `AbortSignal`，语义同样是中止，不是挂起。
+Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 prompt 入场和每次 `tool_call` 前等待同一个 Bot 的暂停闸门。正在执行的工具和正在返回的模型请求不会被截断；工具完成后，下一次工具调用停在闸门。审批在暂停前已经发出时仍可决定，批准后也要等 resume 才执行。
 
-所以暂停实现成：立 `paused` 状态，上报这个 Bot 挂起的审批已放弃并把工具调用当拒绝收尾，再 abort 正在跑的那个群的会话。别的群的会话不动。暂停期间来的 prompt 进队列，`resume` 时按顺序整条重发。
+暂停不拦已经进入模型请求的纯文字回复。Bot 已经开始生成且这一轮没有工具调用时，文字和 `run_done` 会照常发完；暂停只卡新 prompt 入场和下一次工具闸门。
 
-先收尾审批这一步是必须的，不是顺手。挂起的审批是 Pi 的工具循环正在 `await` 的一个 Promise，`abort()` 等的是会话变 idle，解不开那个 Promise 就永远等不到，`pause()` 会一直挂着。`test/runner.test.ts` 里「审批还挂着的时候 pause」这条用例就是钉这个的：去掉 `approvals.abandon("paused", botId)` 它会超时。
-
-限制，都是这个做法的直接后果：
-
-- **暂停会让挂起的审批失效，并把工具调用打成拒绝。** 归属人点暂停的时候正好有个工具在等批，控制面会收到 `approval_abandoned`，工具调用的终态就是 `blocked`。恢复以后它不会再问一次。
-- **这不是断点续跑。** 被中止的那一次运行不会从中断点接着跑。它的 `run_done` 已经在 `agent_settled` 上发过了（`abort` 路径也走 `_runAgentPrompt` 的 finally），控制面看到的是一次跑完的运行，只是内容被截断。想续上得由人再发一条 prompt。
-- **排队的 prompt 是原样重发。** 会话历史还在（同一个 `AgentSession`），所以模型看得到中断前说过的话，但这条 prompt 本身是从头跑的一次新运行，`runId` 不变。
-- **队列不落盘。** 进程重启，排队的 prompt 就没了。
-- **暂停期间没有上行报文。** 排队的 prompt 不发 `bot_text` 也不发 `run_done`，控制面在 `resume` 之前看不到任何动静。
+暂停期间的新 prompt 直接留在 Bot 原有的串行 `chain`，第一条排到队首后在模型请求前等待，其余保持原顺序。resume 只放开等待点，不重发 prompt、不换 runId。停机或删 Bot 会把等待结果定为不继续，随后仍从 `finishRun` 发唯一一条零用量 `run_done`。
 
 ## run_done 挂在 agent_settled 上
 
@@ -91,7 +77,7 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。`src/topic.ts` 那组主题任务工具和 `src/skills.ts` 的 `propose_skill` 由运行器自己挂，见下面两节，排在 `extensionTools` 之后；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具和 `src/skills.ts` 的 `propose_skill`；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 工具连接
 
@@ -99,7 +85,7 @@ Pi 的事件层分不出「被拦下」和「工具自己报错」，两者的 `
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill）先占名字，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 

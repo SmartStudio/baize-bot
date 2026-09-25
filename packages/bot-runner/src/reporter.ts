@@ -65,7 +65,7 @@ export function reportRun(
   statsBeforeRun: SessionStats,
   identity: RunIdentity,
   runnerAborted: () => boolean,
-  blockedCallIds: ReadonlySet<string>,
+  consumeBlockedCall: (callId: string) => boolean,
   serverForTool: (toolName: string) => string,
   send: (message: AgentToControl) => void,
 ): () => void {
@@ -126,7 +126,7 @@ export function reportRun(
         callId: event.toolCallId,
         tool: event.toolName,
         view,
-        status: blockedCallIds.has(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
+        status: consumeBlockedCall(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
         durationMs: began === undefined ? null : Date.now() - began,
       });
       return;

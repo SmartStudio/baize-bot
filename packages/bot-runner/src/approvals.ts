@@ -1,33 +1,7 @@
-import type { AgentToControl, BotId, GroupId, RunId, ToolConnection, ToolView } from "@baize/shared";
-
-// 审批拦截器。扩展在 Pi 的 tool_call 事件里挂起一个 pending，控制面的 approval_result
-// 经 runner.approve 落回来。被拒的 callId 记在这里：Pi 的事件层里「被拦下」和「工具自己报错」
-// 都只是 isError，分不出来。
+import type { AgentToControl, BotId, GrantTarget, GroupId, RunId, ToolView } from "@baize/shared";
 
 export type ApprovalAction = Extract<AgentToControl, { type: "approval_request" }>["action"];
 type ApprovalAbandonReason = Exclude<Extract<AgentToControl, { type: "approval_abandoned" }>["reason"], "disconnected">;
-
-// 第一版按工具名前缀定审批类型。命中不了的一律当改生产数据，宁可多问一次。
-const ACTION_BY_PREFIX: ReadonlyArray<readonly [prefix: string, action: ApprovalAction]> = [
-  ["send_", "message_person"],
-  ["pay_", "spend"],
-];
-const FALLBACK_ACTION: ApprovalAction = "external_write";
-
-export function approvalKind(toolName: string): ApprovalAction {
-  return ACTION_BY_PREFIX.find(([prefix]) => toolName.startsWith(prefix))?.[1] ?? FALLBACK_ACTION;
-}
-
-/**
- * 工具连接里 needsApproval 为 true 的操作要审批。没在任何工具连接里出现过的自定义工具默认不审批。
- * 传进来的应当只是分配给这个 Bot 的连接：别的 Bot 的连接管不到它，也不该替它定审批。
- */
-export function approvalRule(tools: readonly ToolConnection[]): (toolName: string) => boolean {
-  const needing = new Set(
-    tools.flatMap((tool) => tool.operations.filter((op) => op.needsApproval).map((op) => op.name)),
-  );
-  return (toolName) => needing.has(toolName);
-}
 
 export interface ApprovalRequest {
   readonly runId: RunId;
@@ -35,42 +9,57 @@ export interface ApprovalRequest {
   readonly groupId: GroupId;
   readonly callId: string;
   readonly tool: string;
+  readonly action: ApprovalAction;
+  readonly target: GrantTarget | null;
   readonly view: ToolView;
 }
 
 export interface ApprovalGate {
-  /** 扩展调用。发出 approval_request，挂起到 approve 给结论为止。 */
-  ask(request: ApprovalRequest): Promise<boolean>;
-  /** 控制面的结论。runId 对不上的结论不作数。 */
+  ask(request: ApprovalRequest, signal: AbortSignal | undefined): Promise<boolean>;
   settle(runId: RunId, callId: string, approved: boolean): void;
-  /**
-   * 先上报还挂着的审批已放弃，再一律当拒绝收尾。不给 botId 就是全部。
-   * 挂起的 handler 是 Pi 工具循环在 await 的东西，不解开它，abort 永远等不到 idle。
-   */
+  block(callId: string): void;
+  consumeBlocked(callId: string): boolean;
   abandon(reason: ApprovalAbandonReason, botId?: BotId): void;
-  readonly blockedCallIds: ReadonlySet<string>;
+  cancel(botId?: BotId): void;
+}
+
+interface WaitingApproval {
+  readonly runId: RunId;
+  readonly botId: BotId;
+  readonly settle: (approved: boolean) => void;
+  readonly signal: AbortSignal | undefined;
+  readonly onAbort: () => void;
 }
 
 export function createApprovalGate(send: (message: AgentToControl) => void): ApprovalGate {
-  const waiting = new Map<
-    string,
-    { readonly runId: RunId; readonly botId: BotId; readonly settle: (approved: boolean) => void }
-  >();
+  const waiting = new Map<string, WaitingApproval>();
   const blockedCallIds = new Set<string>();
 
-  const decide = (callId: string, approved: boolean): void => {
+  const settleCall = (callId: string, approved: boolean): void => {
     const entry = waiting.get(callId);
     if (entry === undefined) return;
     waiting.delete(callId);
+    entry.signal?.removeEventListener("abort", entry.onAbort);
     if (!approved) blockedCallIds.add(callId);
     entry.settle(approved);
   };
 
   return {
-    blockedCallIds,
-    ask: (request) =>
-      new Promise<boolean>((resolve) => {
-        waiting.set(request.callId, { runId: request.runId, botId: request.botId, settle: resolve });
+    ask: (request, signal) => {
+      if (signal?.aborted === true) {
+        blockedCallIds.add(request.callId);
+        return Promise.resolve(false);
+      }
+      return new Promise<boolean>((resolve) => {
+        const onAbort = (): void => settleCall(request.callId, false);
+        waiting.set(request.callId, {
+          runId: request.runId,
+          botId: request.botId,
+          settle: resolve,
+          signal,
+          onAbort,
+        });
+        signal?.addEventListener("abort", onAbort, { once: true });
         send({
           type: "approval_request",
           runId: request.runId,
@@ -78,15 +67,20 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
           groupId: request.groupId,
           callId: request.callId,
           tool: request.tool,
-          action: approvalKind(request.tool),
-          target: null,
+          action: request.action,
+          target: request.target,
           view: request.view,
         });
-      }),
+      });
+    },
     settle: (runId, callId, approved) => {
       if (waiting.get(callId)?.runId !== runId) return;
-      decide(callId, approved);
+      settleCall(callId, approved);
     },
+    block: (callId) => {
+      blockedCallIds.add(callId);
+    },
+    consumeBlocked: (callId) => blockedCallIds.delete(callId),
     abandon: (reason, botId) => {
       const targets: Array<readonly [callId: string, runId: RunId]> = [];
       for (const [callId, entry] of waiting) {
@@ -94,8 +88,13 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
       }
       for (const [callId, runId] of targets) {
         send({ type: "approval_abandoned", runId, callId, reason });
-        decide(callId, false);
+        settleCall(callId, false);
       }
+    },
+    cancel: (botId) => {
+      const targets: string[] = [];
+      for (const [callId, entry] of waiting) if (botId === undefined || entry.botId === botId) targets.push(callId);
+      for (const callId of targets) settleCall(callId, false);
     },
   };
 }

@@ -88,8 +88,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
         return;
       case "config": {
         const config: RunnerConfig = {
+          computerId: options.computerId,
           bots: message.bots,
           tools: message.tools,
+          accounts: message.accounts,
+          grants: message.grants,
           modelGateway: message.modelGateway,
           // 不透传的话运行器按空数组对账，每来一条 config 就把所有 Bot 盘上的 skill 清空。
           skills: message.skills,

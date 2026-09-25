@@ -2,6 +2,7 @@ import type { BotId, ControlToAgent } from "@baize/shared";
 import {
   type AgentSession,
   createAgentSession,
+  type createBashToolDefinition,
   DefaultResourceLoader,
   type ExtensionAPI,
   ModelRuntime,
@@ -12,6 +13,7 @@ import {
 import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
+import type { GateAccess, GateDecision } from "./gate.js";
 import type { BotDirs } from "./paths.js";
 import { simpleToolView } from "./reporter.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
@@ -34,9 +36,13 @@ export interface BotSessionOptions {
   readonly description: string;
   readonly dirs: BotDirs;
   readonly gateway: Extract<ControlToAgent, { type: "config" }>["modelGateway"];
+  readonly bashTool: ReturnType<typeof createBashToolDefinition>;
   readonly tools: readonly RunnerTool[];
   readonly serverForTool: (toolName: string) => string;
-  readonly needsApproval: (toolName: string) => boolean;
+  readonly decideTool: (toolName: string, input: Record<string, unknown>) => GateDecision;
+  readonly waitUntilRunning: (signal: AbortSignal | undefined) => Promise<boolean>;
+  readonly allowBash: (runId: string, callId: string, access: GateAccess) => void;
+  readonly clearBashRun: (runId: string) => void;
   readonly approvals: ApprovalGate;
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
@@ -46,6 +52,7 @@ export interface BotSessionOptions {
 export interface BotSession {
   readonly session: AgentSession;
   readonly sessionFile: string | undefined;
+  clearBashRun(runId: string): void;
   applyGateway(gateway: BotSessionOptions["gateway"]): Promise<void>;
   dispose(): Promise<void>;
 }
@@ -70,22 +77,46 @@ const gatewayProvider = (gateway: BotSessionOptions["gateway"]) => ({
 
 function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
   return (pi) => {
+    pi.registerTool(options.bashTool);
     for (const tool of options.tools) pi.registerTool(tool);
 
-    pi.on("tool_call", async (event) => {
-      if (!options.needsApproval(event.toolName)) return undefined;
+    pi.on("tool_call", async (event, ctx) => {
       const active = options.activeRun();
-      // 没有运行在身就没人能批。放行等于绕开审批，一律拦下。
-      if (active === null) return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
-      const approved = await options.approvals.ask({
-        runId: active.run.runId,
-        botId: active.run.botId,
-        groupId: active.run.groupId,
-        callId: event.toolCallId,
-        tool: event.toolName,
-        view: simpleToolView(event.toolName, event.input, options.serverForTool(event.toolName)),
-      });
-      return approved ? undefined : { block: true, reason: "归属人拒绝了这个动作。" };
+      if (active === null) {
+        options.approvals.block(event.toolCallId);
+        return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
+      }
+      if (!(await options.waitUntilRunning(ctx.signal))) {
+        options.approvals.block(event.toolCallId);
+        return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
+      }
+      const decision = options.decideTool(event.toolName, event.input);
+      if (decision.verdict === "deny") {
+        options.approvals.block(event.toolCallId);
+        return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
+      }
+      if (decision.verdict === "ask") {
+        const approved = await options.approvals.ask(
+          {
+            runId: active.run.runId,
+            botId: active.run.botId,
+            groupId: active.run.groupId,
+            callId: event.toolCallId,
+            tool: event.toolName,
+            action: decision.action,
+            target: decision.target,
+            view: simpleToolView(event.toolName, event.input, options.serverForTool(event.toolName)),
+          },
+          ctx.signal,
+        );
+        if (!approved) return { block: true, reason: "归属人拒绝了这个动作。" };
+      }
+      if (!(await options.waitUntilRunning(ctx.signal))) {
+        options.approvals.block(event.toolCallId);
+        return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
+      }
+      if (event.toolName === "bash") options.allowBash(active.run.runId, event.toolCallId, decision.access);
+      return undefined;
     });
   };
 }
@@ -142,11 +173,13 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     // 旧布局把 JSONL 直接放在 sessions/ 下。那个目录不传给 continueRecent，所以升级后不会被续上，文件留在原地。
     sessionManager: SessionManager.continueRecent(workDir, sessionDir),
   });
+  session.agent.toolExecution = "sequential";
   let gateway = options.gateway;
 
   return {
     session,
     sessionFile: session.sessionManager.getSessionFile(),
+    clearBashRun: options.clearBashRun,
     applyGateway: async (next) => {
       const endpointChanged = gateway.baseUrl !== next.baseUrl || gateway.model !== next.model;
       modelRuntime.registerProvider(GATEWAY_PROVIDER_ID, gatewayProvider(next));
