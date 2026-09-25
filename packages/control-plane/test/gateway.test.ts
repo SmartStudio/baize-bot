@@ -258,14 +258,32 @@ describe("转发", () => {
     await reader.cancel();
   });
 
-  it("上游返回的错误状态照原样带回来", async () => {
+  it("上游返回的错误状态只带状态码和中文说明回来", async () => {
     const upstream = await startUpstream({ status: 429, json: { error: { message: "rate limited" } } });
     cleanups.push(() => upstream.close());
     const r = await rig({ upstream });
 
     const response = await r.call("/chat/completions", authed(r.key, chatBody()));
     expect(response.status).toBe(429);
-    expect(await response.json()).toEqual({ error: { message: "rate limited" } });
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("模型上游返回 429");
+    expect(body.error).not.toContain("rate limited");
+  });
+
+  it("上游返回 HTML 的 502，不把正文带回来", async () => {
+    const upstream = await startUpstream({
+      status: 502,
+      raw: { body: "<html><body>cloudflare bad gateway</body></html>", contentType: "text/html" },
+    });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream });
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+    expect(response.status).toBe(502);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("模型上游返回 502");
+    expect(body.error).not.toContain("<");
   });
 
   it("上游连不上返回 502 并说人话", async () => {

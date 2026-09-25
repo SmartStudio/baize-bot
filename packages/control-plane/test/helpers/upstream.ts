@@ -20,6 +20,8 @@ export type UpstreamOptions = {
   readonly stream?: Upstream;
   /** 给了就走非流式，整块 JSON 返回。 */
   readonly json?: unknown;
+  /** 给了就按指定类型原样返回正文。 */
+  readonly raw?: { readonly body: string; readonly contentType: string };
   readonly status?: number;
 };
 
@@ -34,6 +36,11 @@ export async function startUpstream(options: UpstreamOptions): Promise<FakeUpstr
     const body = JSON.parse(await readBody(req)) as ChatCompletionRequest;
     calls.push({ authorization: req.headers.authorization ?? "", body });
 
+    if (options.raw !== undefined) {
+      res.writeHead(options.status ?? 200, { "content-type": options.raw.contentType });
+      res.end(options.raw.body);
+      return;
+    }
     if (options.json !== undefined) {
       res.writeHead(options.status ?? 200, { "content-type": "application/json" });
       res.end(JSON.stringify(options.json));

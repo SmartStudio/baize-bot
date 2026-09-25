@@ -274,6 +274,11 @@ const ERROR_REASONS: Record<AgentError["code"], string> = {
   model_failed: "模型上游没回话",
 };
 
+function modelFailureStatus(detail: string): string {
+  const status = /(?:^|\D)([45]\d{2})(?:\D|$)/.exec(detail)?.[1];
+  return status === undefined ? "" : `，上游状态码 ${status}`;
+}
+
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
@@ -288,7 +293,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     tone: "error",
     text:
       event.code === "model_failed"
-        ? `模型没回话，${Array.from(event.detail).slice(0, 200).join("")}。检查控制面的上游地址和 key（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODEL）。`
+        ? `模型没回话${modelFailureStatus(event.detail)}。检查控制面的上游地址和 key（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODEL）。`
         : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
   });
   // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。

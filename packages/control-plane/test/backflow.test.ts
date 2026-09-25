@@ -397,7 +397,8 @@ describe("agent_error", () => {
       expect(message?.groupId, "推送的是报错指定的群").toBe(job.groupId);
       expect(message?.body.kind, "推送一条系统消息").toBe("system");
       expect(message?.body).toMatchObject({ tone: "error" });
-      expect(text).toContain(detail.slice(0, 200));
+      expect(text).toContain("401");
+      expect(text).not.toContain("invalid upstream key");
       expect(text).not.toContain("TAIL_NOT_FOR_USER");
       expect(text).toContain("UPSTREAM_BASE_URL");
       expect(text).toContain("UPSTREAM_API_KEY");
@@ -407,6 +408,27 @@ describe("agent_error", () => {
       const stored = await groupMessages(job);
       expect(stored, "群里只多一条报错消息").toHaveLength(before + 1);
       expect(stored.at(-1), "入库内容与推送内容相同").toEqual(message);
+    } finally {
+      job.close();
+    }
+  });
+
+  it("上游返回 HTML 的 502，群消息里没有 <", async () => {
+    const job = await runningJob();
+
+    try {
+      job.agent.send({
+        type: "agent_error",
+        code: "model_failed",
+        detail: "502: <html><body>cloudflare bad gateway</body></html>",
+        groupId: job.groupId,
+      });
+      const pushed = await job.push.next();
+      const text = pushed.type === "message" && pushed.message.body.kind === "system" ? pushed.message.body.text : "";
+
+      expect(text).toContain("502");
+      expect(text).not.toContain("<");
+      expect((await groupMessages(job)).at(-1)?.body).toMatchObject({ kind: "system", text });
     } finally {
       job.close();
     }

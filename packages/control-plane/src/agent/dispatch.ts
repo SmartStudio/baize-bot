@@ -26,7 +26,7 @@ export const CONTEXT_MESSAGES = 20;
 /** 一条上下文的正文上限，长消息在这里截断，prompt 不替 Bot 读全文。 */
 const CONTEXT_TEXT_LIMIT = 200;
 
-export const OFFLINE_NOTICE = "电脑不在线，消息已留着";
+export const OFFLINE_NOTICE = "电脑不在线，这条没派出去，电脑回来后再说一次";
 
 export type DispatchDeps = {
   readonly db: Db;

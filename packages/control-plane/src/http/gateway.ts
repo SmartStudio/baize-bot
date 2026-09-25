@@ -59,6 +59,14 @@ export function createGateway(deps: GatewayDeps): Hono {
       return c.json({ error: `连不上模型上游，${String(error)}。稍后再试或者找管理员看看上游地址。` }, 502);
     }
 
+    if (!upstream.ok) {
+      await upstream.body?.cancel();
+      return new Response(JSON.stringify({ error: `模型上游返回 ${upstream.status}，请稍后再试或检查上游配置。` }), {
+        status: upstream.status,
+        headers: { "content-type": "application/json; charset=UTF-8" },
+      });
+    }
+
     const headers = new Headers();
     for (const [name, value] of upstream.headers) {
       if (isForwarded(name.toLowerCase())) headers.set(name, value);

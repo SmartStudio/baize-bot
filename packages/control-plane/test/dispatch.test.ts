@@ -10,7 +10,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { CONTEXT_MESSAGES, OFFLINE_NOTICE, dispatchUserMessage } from "../src/agent/dispatch.js";
+import { CONTEXT_MESSAGES, dispatchUserMessage } from "../src/agent/dispatch.js";
 import { AgentHub } from "../src/agent/hub.js";
 import { GroupTurns } from "../src/agent/group-turn.js";
 import { ToolCrypto } from "../src/crypto.js";
@@ -263,7 +263,7 @@ describe("电脑不在线", () => {
     );
     expect(page.messages.map((m) => m.body)).toEqual([
       { kind: "user", text: "先存着" },
-      { kind: "system", text: OFFLINE_NOTICE, tone: "error" },
+      { kind: "system", text: "电脑不在线，这条没派出去，电脑回来后再说一次", tone: "error" },
     ]);
     expect(await runCount(owner.groupId), "没派出去的活不该在用量表里留行").toBe(0);
   });
@@ -285,7 +285,7 @@ describe("电脑不在线", () => {
     expect(page.messages.map((m) => (m.body.kind === "system" ? m.body.text : m.body.kind))).toEqual([
       "user",
       "user",
-      OFFLINE_NOTICE,
+      "电脑不在线，这条没派出去，电脑回来后再说一次",
     ]);
     expect(await runCount(owner.groupId), "只有在线那次派出去了").toBe(1);
   });
