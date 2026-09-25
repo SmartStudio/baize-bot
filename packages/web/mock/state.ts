@@ -799,6 +799,16 @@ export const settleLatestPending = (groupId: string, decision: ApprovalDecision)
   return waiting === undefined ? null : settleApproval(waiting.id, decision);
 };
 
+export const expireLatestPending = (): Approval | null => {
+  const waiting = [...approvals.values()].findLast((approval) => approval.status === "pending");
+  if (waiting === undefined) return null;
+  const next = Approval.parse({ ...waiting, status: "expired", decidedAt: null });
+  approvals.set(next.id, next);
+  waiters.get(next.id)?.("rejected");
+  waiters.delete(next.id);
+  return next;
+};
+
 // approval 消息的正文只有 approvalId，状态在 Approval 上。这一页引用到的跟着这一页回，客户端不用再问一次。
 export const approvalsIn = (messages: Message[]): Approval[] => {
   const found: Approval[] = [];

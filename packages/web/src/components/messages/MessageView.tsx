@@ -190,6 +190,20 @@ const ApprovalCard = ({
     setSent(true);
     void onDecide(approval.id, decision).catch(() => setSent(false));
   };
+  if (approval.status === "expired") {
+    return (
+      <div className="card card-approval" data-testid="approval-card" data-status={approval.status}>
+        <div className="card-title">
+          <ShieldAlert size={16} aria-hidden="true" />
+          已失效 · {APPROVAL_KIND_TEXT[approval.kind]}
+        </div>
+        <p className="approval-summary">{approval.summary}</p>
+        <div className="approval-actions">
+          <p className="approval-expired-text">这一步已经不用了</p>
+        </div>
+      </div>
+    );
+  }
   if (approval.status !== "pending") {
     return (
       <div className="card card-approval approval-compact" data-testid="approval-card" data-status={approval.status}>

@@ -635,6 +635,18 @@ test("在群里回一句「批准」和点批准按钮是同一件事", async ({
   await expect(page.getByTestId("message-list").locator("[data-kind=tool_call]"), "没有多起一次运行").toHaveCount(1);
 });
 
+test("已失效的审批卡没有批准按钮", async ({ page, request }) => {
+  await login(page);
+  const card = await sendForApproval(page, "小销");
+
+  expect((await request.post("/api/test/approval/expire")).status(), "mock 让 pending 审批失效").toBe(204);
+  await expect(card).toHaveAttribute("data-status", "expired");
+  await expect(card).toContainText("这一步已经不用了");
+  await expect(card.getByTestId("approval-approve")).toHaveCount(0);
+  await expect(card.getByTestId("approval-reject")).toHaveCount(0);
+  await page.screenshot({ path: `${SHOT}/expired-mock.png` });
+});
+
 // 测试浏览器里 Notification.permission 是 default，真代码会安静跳过，什么都断言不到。换成一个记账的桩，
 // 既数得出弹了几条，也数得出权限弹窗被请求过几次——一次都不该有。
 const stubNotifications = (page: Page) =>

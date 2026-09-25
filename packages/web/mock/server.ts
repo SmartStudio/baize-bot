@@ -46,6 +46,7 @@ import {
   createGroup,
   createRoutine,
   createSkill,
+  expireLatestPending,
   findMessage,
   groupIdByBotId,
   groups,
@@ -250,6 +251,13 @@ const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> 
     const accepted = settleUnseenHandoff();
     if (accepted === null) return send(res, 404, { error: "没有待确认的交接" });
     push({ type: "handoff_updated", handoff: accepted });
+    return send(res, 204);
+  }
+
+  if (method === "POST" && path === "/api/test/approval/expire") {
+    const expired = expireLatestPending();
+    if (expired === null) return send(res, 409, { error: "没有待失效的审批" });
+    push({ type: "approval_updated", approval: expired });
     return send(res, 204);
   }
 

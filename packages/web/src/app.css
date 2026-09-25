@@ -941,6 +941,17 @@ select {
   color: var(--info);
 }
 
+.card-approval[data-status="expired"] {
+  border-color: var(--border-1);
+  background: var(--bg-surface);
+}
+
+.card-approval[data-status="expired"] .card-title,
+.card-approval[data-status="expired"] .approval-summary,
+.approval-expired-text {
+  color: var(--fg-3);
+}
+
 .approval-summary {
   margin: 0;
   color: var(--fg-1);
@@ -951,6 +962,12 @@ select {
   display: flex;
   gap: var(--space-4);
   justify-content: flex-end;
+}
+
+.approval-expired-text {
+  margin: 0;
+  font: var(--type-caption);
+  white-space: nowrap;
 }
 
 /* .primary-button 是给整宽表单按钮做的，没有左右内边距。放进一行得自己撑开，高度也跟旁边的 ghost 对齐。 */
