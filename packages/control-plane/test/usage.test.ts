@@ -195,7 +195,7 @@ describe("GET /api/overnight", () => {
       callId: "approval-1",
       tool: "pay",
       kind: "pay",
-      summary: "采购",
+      view: { kind: "mcp", server: "采购系统", tool: "pay", params: [] },
       messageId: approvalMessageId,
     });
 

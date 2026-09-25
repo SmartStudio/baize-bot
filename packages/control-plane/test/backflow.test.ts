@@ -172,7 +172,6 @@ describe("bot_tool_call", () => {
         groupId: job.groupId,
         callId: "call-1",
         tool: "browser.click",
-        argsSummary: "点开订单列表",
         view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "running",
         durationMs: null,
@@ -181,9 +180,10 @@ describe("bot_tool_call", () => {
       const messageId = started.type === "message" ? started.message.id : null;
       expect(started.type === "message" ? started.message.body : null).toEqual({
         kind: "tool_call",
+        runId: job.runId,
         botId: job.botId,
         tool: "browser.click",
-        argsSummary: "点开订单列表",
+        view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "running",
         durationMs: null,
       });
@@ -195,7 +195,6 @@ describe("bot_tool_call", () => {
         groupId: job.groupId,
         callId: "call-1",
         tool: "browser.click",
-        argsSummary: "点开订单列表",
         view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "ok",
         durationMs: 820,
@@ -206,9 +205,10 @@ describe("bot_tool_call", () => {
       );
       expect(finished.type === "message" ? finished.message.body : null).toEqual({
         kind: "tool_call",
+        runId: job.runId,
         botId: job.botId,
         tool: "browser.click",
-        argsSummary: "点开订单列表",
+        view: { kind: "mcp", server: "", tool: "browser.click", params: [] },
         status: "ok",
         durationMs: 820,
       });
@@ -216,6 +216,47 @@ describe("bot_tool_call", () => {
       const stored = (await groupMessages(job)).filter((m) => m.body.kind === "tool_call");
       expect(stored, "两次报文只该有一条工具调用消息").toHaveLength(1);
       expect(stored[0]?.id).toBe(messageId);
+    } finally {
+      job.close();
+    }
+  });
+
+  it("run_done 把仍在 running 的工具行改成 failed 并推送", async () => {
+    const job = await runningJob();
+
+    try {
+      job.agent.send({
+        type: "bot_tool_call",
+        runId: job.runId,
+        botId: job.botId,
+        groupId: job.groupId,
+        callId: "unfinished-call",
+        tool: "browser.click",
+        view: { kind: "mcp", server: "浏览器", tool: "click", params: [] },
+        status: "running",
+        durationMs: null,
+      });
+      const started = await job.push.next();
+      const messageId = started.type === "message" ? started.message.id : null;
+
+      job.agent.send({
+        type: "run_done",
+        runId: job.runId,
+        botId: job.botId,
+        groupId: job.groupId,
+        steps: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      const failed = await job.push.next();
+      expect(failed.type === "message" ? failed.message : null).toMatchObject({
+        id: messageId,
+        body: { kind: "tool_call", runId: job.runId, status: "failed" },
+      });
+      expect((await job.push.next()).type).toBe("message");
+
+      const stored = (await groupMessages(job)).find((message) => message.id === messageId);
+      expect(stored?.body).toMatchObject({ kind: "tool_call", runId: job.runId, status: "failed" });
     } finally {
       job.close();
     }
@@ -236,7 +277,6 @@ describe("撞上同群里非 bot 的那条", () => {
         groupId: job.groupId,
         callId: "call-1",
         tool: "browser.open",
-        argsSummary: "打开订单页",
         view: { kind: "mcp", server: "", tool: "browser.open", params: [] },
         status: "running",
         durationMs: null,

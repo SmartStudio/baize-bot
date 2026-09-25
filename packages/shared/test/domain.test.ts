@@ -16,6 +16,7 @@ import {
   Skill,
   SkillId,
   TopicTask,
+  toolViewText,
   OvernightResponse,
   UsageResponse,
   UsageRunItem,
@@ -280,7 +281,7 @@ describe("M11 用量与昨夜进展的共享形状", () => {
 });
 
 describe("C0 工具视图与审批报文", () => {
-  it("工具调用和审批放弃报文带结构化视图", () => {
+  it("工具调用只带结构化视图，消息正文带 runId", () => {
     const view = {
       kind: "mcp",
       server: "库存服务",
@@ -296,12 +297,28 @@ describe("C0 工具视图与审批报文", () => {
         groupId: "g1",
         callId: "c1",
         tool: "lookup_stock",
-        argsSummary: "查询库存",
         view,
         status: "running",
         durationMs: null,
       }).success,
       "带视图的工具调用报文应能解析",
+    ).toBe(true);
+    expect(
+      Message.safeParse({
+        id: "m1",
+        groupId: "g1",
+        createdAt: now,
+        body: {
+          kind: "tool_call",
+          runId: "r1",
+          botId: "b1",
+          tool: "lookup_stock",
+          view,
+          status: "running",
+          durationMs: null,
+        },
+      }).success,
+      "工具消息应保存 runId 和结构化视图",
     ).toBe(true);
     expect(
       AgentToControl.safeParse({ type: "approval_abandoned", runId: "r1", callId: "c1", reason: "paused" }).success,
@@ -320,7 +337,6 @@ describe("C0 工具视图与审批报文", () => {
         callId: "c1",
         tool: "write_file",
         kind: "send_external",
-        summary: "写入报价",
         view: base,
       }).success,
       "五行预览应能解析",
@@ -334,7 +350,6 @@ describe("C0 工具视图与审批报文", () => {
         callId: "c1",
         tool: "write_file",
         kind: "send_external",
-        summary: "写入报价",
         view: { ...base, preview: [...base.preview, "6"] },
       }).success,
       "预览最多五行",
@@ -348,10 +363,31 @@ describe("C0 工具视图与审批报文", () => {
         callId: "c1",
         tool: "write_file",
         kind: "send_external",
-        summary: "写入报价",
         view: { ...base, raw: { invalid: BigInt(1) } },
       }).success,
       "原始参数只能是 JSON 值",
     ).toBe(false);
+  });
+
+  it("toolViewText 四种视图都说人话且没有花括号", () => {
+    const samples = [
+      toolViewText({ kind: "bash", command: "ls ~/Downloads", raw: { command: "ls ~/Downloads" } }),
+      toolViewText({ kind: "write", path: "报价.md", preview: ["第一行"], raw: { path: "报价.md" } }),
+      toolViewText({ kind: "edit", path: "报价.md", changedLines: 3, raw: { oldText: "旧", newText: "新" } }),
+      toolViewText({
+        kind: "mcp",
+        server: "库存服务",
+        tool: "lookup_stock",
+        params: [{ key: "sku", value: "A-001" }],
+        raw: { sku: "A-001" },
+      }),
+    ];
+    expect(samples).toEqual([
+      "要执行 `ls ~/Downloads`",
+      "要写 `报价.md`",
+      "要改 `报价.md` 的 3 行",
+      "要用库存服务的 lookup_stock，参数：sku=A-001",
+    ]);
+    expect(samples.every((sample) => !/[{}]/.test(sample))).toBe(true);
   });
 });

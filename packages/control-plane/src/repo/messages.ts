@@ -1,4 +1,12 @@
-import { BotId, type GroupId, type Message, type MessageBody, type MessageId, type UserId } from "@baize/shared";
+import {
+  BotId,
+  type GroupId,
+  type Message,
+  type MessageBody,
+  type MessageId,
+  type RunId,
+  type UserId,
+} from "@baize/shared";
 import { and, asc, desc, eq, inArray, lt, max, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages } from "../db/schema.js";
@@ -166,6 +174,23 @@ export async function replaceMessageBody(
     .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId)))
     .returning();
   return row === undefined ? null : toMessage(row);
+}
+
+/** run 收尾后不再可能有工具结果，只改仍在 running 的工具行，重复收尾不会再次命中。 */
+export async function failRunningToolCalls(db: Db | Tx, groupId: GroupId, runId: RunId): Promise<Message[]> {
+  const rows = await db
+    .update(messages)
+    .set({ body: sql`jsonb_set(${messages.body}, '{status}', '"failed"'::jsonb)` })
+    .where(
+      and(
+        eq(messages.groupId, groupId),
+        sql`${messages.body} ->> 'kind' = 'tool_call'`,
+        sql`${messages.body} ->> 'runId' = ${runId}`,
+        sql`${messages.body} ->> 'status' = 'running'`,
+      ),
+    )
+    .returning();
+  return rows.map(toMessage);
 }
 
 /** 每个群的最近一条消息。侧栏和群列表都要它，一次查询查完所有群。 */

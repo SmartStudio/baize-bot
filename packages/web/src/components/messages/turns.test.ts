@@ -20,9 +20,10 @@ const bot = (botId: string, text = "reply", createdAt?: string) =>
 const toolCall = (botId: string, tool = "read_task") =>
   message({
     kind: "tool_call",
+    runId: "run-1",
     botId,
     tool,
-    argsSummary: "{}",
+    view: { kind: "mcp", server: "", tool, params: [] },
     status: "ok",
     durationMs: 100,
   });

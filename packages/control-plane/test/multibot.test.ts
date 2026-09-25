@@ -486,7 +486,6 @@ describe("多 Bot 群派活", () => {
         groupId: team.group.id,
         callId: "all-pass-settled",
         tool: "test.sentinel",
-        argsSummary: "全员 pass 已处理",
         view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
         status: "ok",
         durationMs: 0,
@@ -496,7 +495,7 @@ describe("多 Bot 群派活", () => {
         if (
           push.type === "message" &&
           push.message.body.kind === "tool_call" &&
-          push.message.body.argsSummary === "全员 pass 已处理"
+          push.message.body.tool === "test.sentinel"
         )
           break;
       }
@@ -558,9 +557,8 @@ describe("多 Bot 群派活", () => {
           botId: team.sales.id,
           groupId: team.group.id,
           callId: `pass-settled-${index}`,
-          tool: "test.sentinel",
-          argsSummary: `第 ${index + 1} 次 pass 已处理`,
-          view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
+          tool: `test.sentinel.${index}`,
+          view: { kind: "mcp", server: "", tool: `test.sentinel.${index}`, params: [] },
           status: "ok",
           durationMs: 0,
         });
@@ -571,7 +569,7 @@ describe("多 Bot 群派活", () => {
           if (
             push.type === "message" &&
             push.message.body.kind === "tool_call" &&
-            push.message.body.argsSummary === `第 ${index + 1} 次 pass 已处理`
+            push.message.body.tool === `test.sentinel.${index}`
           )
             break;
         }

@@ -7,6 +7,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { ToolView } from "@baize/shared";
 import { join } from "node:path";
 import { Type } from "typebox";
 import type { ApprovalGate } from "./approval.js";
@@ -71,7 +72,13 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
         callId: event.toolCallId,
         botId: options.botId,
         tool: event.toolName,
-        summary: JSON.stringify(event.input),
+        view: {
+          kind: "mcp",
+          server: "",
+          tool: event.toolName,
+          params: [],
+          raw: event.input as ToolView["raw"],
+        },
       });
       return decision.approved ? undefined : { block: true, reason: decision.reason || "归属人拒绝了这个动作" };
     });

@@ -35,6 +35,7 @@ export interface BotSessionOptions {
   readonly dirs: BotDirs;
   readonly gateway: Extract<ControlToAgent, { type: "config" }>["modelGateway"];
   readonly tools: readonly RunnerTool[];
+  readonly serverForTool: (toolName: string) => string;
   readonly needsApproval: (toolName: string) => boolean;
   readonly approvals: ApprovalGate;
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
@@ -82,8 +83,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
         groupId: active.run.groupId,
         callId: event.toolCallId,
         tool: event.toolName,
-        summary: JSON.stringify(event.input),
-        view: simpleToolView(event.toolName, event.input),
+        view: simpleToolView(event.toolName, event.input, options.serverForTool(event.toolName)),
       });
       return approved ? undefined : { block: true, reason: "归属人拒绝了这个动作。" };
     });

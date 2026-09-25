@@ -1,4 +1,4 @@
-import { AgentToControl, BotId, GroupId, MessageId, RunId } from "@baize/shared";
+import { AgentToControl, BotId, GroupId, MessageId, RunId, type ToolView } from "@baize/shared";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 
 // 把一次 prompt 的会话事件翻成电脑代理发给控制面的报文。
@@ -28,6 +28,7 @@ export function recordRun(
   };
   const messageId = MessageId.parse(identity.messageId);
   const startedAt = new Map<string, number>();
+  const views = new Map<string, ToolView>();
   let steps = 0;
 
   const push = (message: AgentToControl): void => {
@@ -45,13 +46,20 @@ export function recordRun(
     }
     if (event.type === "tool_execution_start") {
       startedAt.set(event.toolCallId, Date.now());
+      const view: ToolView = {
+        kind: "mcp",
+        server: "",
+        tool: event.toolName,
+        params: [],
+        raw: event.args as ToolView["raw"],
+      };
+      views.set(event.toolCallId, view);
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
-        argsSummary: JSON.stringify(event.args),
-        view: { kind: "mcp", server: "", tool: event.toolName, params: [] },
+        view,
         status: "running",
         durationMs: null,
       });
@@ -59,13 +67,15 @@ export function recordRun(
     }
     if (event.type === "tool_execution_end") {
       const began = startedAt.get(event.toolCallId);
+      const view = views.get(event.toolCallId) ?? { kind: "mcp", server: "", tool: event.toolName, params: [] };
+      startedAt.delete(event.toolCallId);
+      views.delete(event.toolCallId);
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
-        argsSummary: "",
-        view: { kind: "mcp", server: "", tool: event.toolName, params: [] },
+        view,
         status: blockedCallIds.has(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
         durationMs: began === undefined ? null : Date.now() - began,
       });

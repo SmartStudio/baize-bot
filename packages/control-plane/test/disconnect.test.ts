@@ -140,8 +140,7 @@ it("电脑断线收尾后，挂着的审批变成已失效", async () => {
       callId: "disconnect-approval",
       tool: "send_email",
       kind: "send_external",
-      summary: "给客户发一封邮件",
-      view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+      view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
     });
     const created = await push.next();
     expect(created.type).toBe("approval_updated");
@@ -164,6 +163,60 @@ it("电脑断线收尾后，挂着的审批变成已失效", async () => {
       await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
     );
     expect(page.approvals).toMatchObject([{ id: approvalId, status: "expired" }]);
+  } finally {
+    agent.close();
+    push.close();
+  }
+});
+
+it("电脑断线后，这次运行里还在跑的工具行变成 failed 并推送", async () => {
+  const owner = await ownerWithBot();
+  const agent = await connect(owner.computer);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  try {
+    const runId = await startRun(owner.client, owner.groupId, agent);
+    expect((await push.next()).type).toBe("message");
+    agent.send({
+      type: "bot_tool_call",
+      runId,
+      botId: owner.botId,
+      groupId: owner.groupId,
+      callId: "disconnect-tool",
+      tool: "send_email",
+      view: {
+        kind: "mcp",
+        server: "邮件服务",
+        tool: "send_email",
+        params: [{ key: "to", value: "customer@example.com" }],
+      },
+      status: "running",
+      durationMs: null,
+    });
+    const running = await push.next();
+    expect(running.type === "message" ? running.message.body : null).toMatchObject({
+      kind: "tool_call",
+      status: "running",
+    });
+
+    agent.close();
+    await agent.closed();
+
+    let failedMessageId: string | null = null;
+    for (let at = 0; at < 3 && failedMessageId === null; at += 1) {
+      const event = await push.next(1500);
+      if (event.type === "message" && event.message.body.kind === "tool_call") {
+        expect(event.message.body).toMatchObject({ runId, status: "failed" });
+        failedMessageId = event.message.id;
+      }
+    }
+    expect(failedMessageId, "断线收尾应推送变成 failed 的同一条工具消息").not.toBeNull();
+    await waitFor(() => ended(runId), "宽限到期后 run 收尾");
+
+    const page = MessageListResponse.parse(
+      await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
+    );
+    const tool = page.messages.find((message) => message.id === failedMessageId);
+    expect(tool?.body).toMatchObject({ kind: "tool_call", runId, status: "failed" });
   } finally {
     agent.close();
     push.close();
@@ -344,7 +397,6 @@ it("断线时排队的交接不留到下一回合", async () => {
         groupId: owner.groupId,
         callId: "disconnect-handoff-settled",
         tool: "test.sentinel",
-        argsSummary: "断线后新一轮已处理",
         view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
         status: "ok",
         durationMs: 0,
@@ -354,7 +406,7 @@ it("断线时排队的交接不留到下一回合", async () => {
         if (
           event.type === "message" &&
           event.message.body.kind === "tool_call" &&
-          event.message.body.argsSummary === "断线后新一轮已处理"
+          event.message.body.tool === "test.sentinel"
         )
           break;
       }

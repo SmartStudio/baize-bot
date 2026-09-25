@@ -10,6 +10,7 @@ import type { RunnerTool } from "./bot-session.js";
 
 export interface McpToolSet {
   readonly tools: readonly RunnerTool[];
+  serverFor(toolName: string): string;
   close(): Promise<void>;
 }
 
@@ -73,6 +74,7 @@ export function createMcpTools(options: {
   const taken = new Set(options.reserved);
   const links: Link[] = [];
   const tools: RunnerTool[] = [];
+  const servers = new Map<string, string>();
 
   for (const connection of options.connections) {
     const link: Link = { connection, client: null };
@@ -83,6 +85,7 @@ export function createMcpTools(options: {
         continue;
       }
       taken.add(op.name);
+      servers.set(op.name, connection.name);
       tools.push({
         name: op.name,
         label: op.name,
@@ -110,6 +113,7 @@ export function createMcpTools(options: {
 
   return {
     tools,
+    serverFor: (toolName) => servers.get(toolName) ?? "",
     close: async () => {
       await Promise.all(
         links.map(async (link) => {

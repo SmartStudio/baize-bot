@@ -86,7 +86,7 @@ describe("端到端：一句话走完控制面、电脑代理、模型网关", (
       const toolCalls = messages.flatMap((m) => (m.body.kind === "tool_call" ? [m.body] : []));
       expect(toolCalls.map((b) => b.status)).toEqual(["running", "ok"]);
       expect(toolCalls[0]?.tool, "点的是 Pi 自带的 bash").toBe("bash");
-      expect(toolCalls[0]?.argsSummary).toContain("ls");
+      expect(toolCalls[0]?.view).toMatchObject({ kind: "bash", command: expect.stringContaining("ls") });
       // 同一张卡改状态，不是两张卡。
       expect(messages[1]?.id).toBe(messages[2]?.id);
 

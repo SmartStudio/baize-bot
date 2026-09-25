@@ -37,6 +37,7 @@ import {
   type RunnerConfig,
   type RunnerTool,
 } from "../src/index.js";
+import { simpleToolView } from "../src/reporter.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
 import { startFakeMcp } from "./helpers/mcp.js";
 import {
@@ -450,6 +451,70 @@ const sessionFilesOf = (dataDir: string, botId: string): string[] => {
   });
 };
 
+describe("工具视图", () => {
+  it("bash tool_call 的 view 是结构化命令，参数字符串只在 raw 里保留", () => {
+    const args = { command: 'printf \'{"sku":"SKU-1"}\'', timeout: 3 };
+    const view = simpleToolView("bash", args);
+    const wire = JSON.stringify({ type: "bot_tool_call", tool: "bash", view });
+
+    expect(view).toEqual({ kind: "bash", command: args.command, raw: args });
+    expect(wire).toContain(`"command":${JSON.stringify(args.command)}`);
+    expect(wire).toContain(`"raw":${JSON.stringify(args)}`);
+    expect(wire).not.toContain("argsSummary");
+    expect(wire).not.toContain(JSON.stringify(JSON.stringify(args)));
+  });
+
+  it("write.preview 只有内容前五行，并保留原始参数", () => {
+    const args = { path: "报价.md", content: "一\n二\n三\n四\n五\n六" };
+
+    expect(simpleToolView("write", args)).toEqual({
+      kind: "write",
+      path: args.path,
+      preview: ["一", "二", "三", "四", "五"],
+      raw: args,
+    });
+  });
+
+  it("edit 显示改动行数，MCP 只留三个标量参数", () => {
+    const editArgs = {
+      path: "报价.md",
+      edits: [
+        { oldText: "旧一\n旧二", newText: "新一" },
+        { oldText: "旧三", newText: "新三\n新四\n新五" },
+      ],
+    };
+    expect(simpleToolView("edit", editArgs)).toEqual({
+      kind: "edit",
+      path: editArgs.path,
+      changedLines: 5,
+      raw: editArgs,
+    });
+
+    expect(
+      simpleToolView(
+        "lookup_stock",
+        {
+          sku: "SKU-1",
+          region: "华东",
+          limit: 3,
+          nested: { ignored: true },
+        },
+        "库存服务",
+      ),
+    ).toEqual({
+      kind: "mcp",
+      server: "库存服务",
+      tool: "lookup_stock",
+      params: [
+        { key: "sku", value: "SKU-1" },
+        { key: "region", value: "华东" },
+        { key: "limit", value: 3 },
+      ],
+      raw: { sku: "SKU-1", region: "华东", limit: 3, nested: { ignored: true } },
+    });
+  });
+});
+
 const jsonlIn = (dir: string): string[] => {
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
@@ -551,6 +616,13 @@ describe("运行器跑一次 prompt", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "看看电脑里有哪些文件"));
 
+    const bashCall = h.sent.find((message) => message.type === "bot_tool_call" && message.status === "running");
+    expect(bashCall?.type === "bot_tool_call" && bashCall.view).toEqual({
+      kind: "bash",
+      command: "ls",
+      raw: { command: "ls" },
+    });
+    expect(JSON.stringify(bashCall)).not.toContain("argsSummary");
     expect(shape(h.sent)).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:ok",
@@ -1803,6 +1875,13 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
     expect(seen.toolNames[0]).toEqual(expect.arrayContaining(["send_email", "lookup_stock"]));
     expect(mcp.calls).toEqual([{ name: "lookup_stock", args: { sku: "SKU-1" }, authorization: "Bearer secret-token" }]);
     expect(seen.toolResults[0]).toContain("SKU-1 库存 42");
+    expect(
+      h.sent
+        .filter((message) => message.type === "bot_tool_call")
+        .map((message) => message.view)
+        .every((view) => view.kind === "mcp" && view.server === "客服工具"),
+      "MCP 工具行要带连接名",
+    ).toBe(true);
     expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:ok",
@@ -1861,6 +1940,11 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
     const request = h.sent.find((m) => m.type === "approval_request");
     expect(request?.type === "approval_request" && request.tool).toBe("send_email");
     expect(request?.type === "approval_request" && request.kind).toBe("send_external");
+    expect(request?.type === "approval_request" && request.view).toMatchObject({
+      kind: "mcp",
+      server: "客服工具",
+      tool: "send_email",
+    });
     expect(mcp.calls).toEqual([
       {
         name: "send_email",

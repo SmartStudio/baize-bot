@@ -13,6 +13,7 @@ import {
   TopicTask,
   UserId,
 } from "./domain.js";
+import { ToolView } from "./tool-view.js";
 
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
@@ -20,41 +21,6 @@ import {
 // 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
 export const ToolConnectionConfig = ToolConnection.extend({ authorization: z.string().nullable() });
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
-
-export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-export const JsonValue: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([z.string(), z.number().finite(), z.boolean(), z.null(), z.array(JsonValue), z.record(JsonValue)]),
-);
-
-export const ToolView = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("bash"), command: z.string(), raw: JsonValue.optional() }).strict(),
-  z
-    .object({
-      kind: z.literal("write"),
-      path: z.string(),
-      preview: z.array(z.string()).max(5),
-      raw: JsonValue.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("edit"),
-      path: z.string(),
-      changedLines: z.number().int().nonnegative(),
-      raw: JsonValue.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      kind: z.literal("mcp"),
-      server: z.string(),
-      tool: z.string(),
-      params: z.array(z.object({ key: z.string(), value: JsonValue }).strict()).max(3),
-      raw: JsonValue.optional(),
-    })
-    .strict(),
-]);
-export type ToolView = z.infer<typeof ToolView>;
 
 export const AgentToControl = z.discriminatedUnion("type", [
   z.object({
@@ -89,7 +55,6 @@ export const AgentToControl = z.discriminatedUnion("type", [
     groupId: GroupId,
     callId: z.string(),
     tool: z.string(),
-    argsSummary: z.string(),
     view: ToolView,
     // blocked 由运行器的审批拦截器按 callId 判定。Pi 的工具结果里被拦下和自身报错都是 isError，推断不出来。
     status: z.enum(["running", "ok", "failed", "blocked"]),
@@ -114,7 +79,6 @@ export const AgentToControl = z.discriminatedUnion("type", [
     callId: z.string(),
     tool: z.string(),
     kind: z.enum(["send_external", "change_production_data", "pay"]),
-    summary: z.string(),
     view: ToolView,
   }),
   z.object({

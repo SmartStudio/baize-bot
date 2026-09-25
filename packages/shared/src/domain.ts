@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ToolView } from "./tool-view.js";
 
 // 对象模型。依据 spec/规格.md 第二节，这里是各对象「现在」的形状。每个对象一个 zod schema，类型从 schema 推导。
 // 状态一律用字面量联合，不用布尔组合。
@@ -126,7 +127,7 @@ export const Approval = z.object({
   botId: BotId,
   runId: RunId,
   kind: ApprovalKind,
-  summary: z.string(),
+  view: ToolView,
   status: ApprovalStatus,
   decidedAt: Timestamp.nullable(),
 });
@@ -191,9 +192,10 @@ export const MessageBody = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("system"), text: z.string(), tone: z.enum(["info", "error"]).optional() }),
   z.object({
     kind: z.literal("tool_call"),
+    runId: z.union([RunId, z.literal("")]),
     botId: BotId,
     tool: z.string(),
-    argsSummary: z.string(),
+    view: ToolView,
     status: ToolCallStatus,
     durationMs: z.number().nonnegative().nullable(),
   }),

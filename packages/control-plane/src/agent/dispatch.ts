@@ -1,13 +1,14 @@
-import type {
-  Approval,
-  ApprovalId,
-  BotId,
-  ControlToAgent,
-  GroupId,
-  Message,
-  MessageBody,
-  RunId,
-  UserId,
+import {
+  toolViewText,
+  type Approval,
+  type ApprovalId,
+  type BotId,
+  type ControlToAgent,
+  type GroupId,
+  type Message,
+  type MessageBody,
+  type RunId,
+  type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
@@ -200,7 +201,7 @@ function summarize(body: MessageBody, recipient: BotId, members: readonly GroupB
     case "system":
       return { from: "系统", text: clip(body.text) };
     case "tool_call":
-      return { from: sender(body.botId, recipient, members), text: clip(`用了 ${body.tool}：${body.argsSummary}`) };
+      return { from: sender(body.botId, recipient, members), text: clip(toolViewText(body.view)) };
     case "cost":
       return null;
     case "approval":

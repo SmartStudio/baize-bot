@@ -9,6 +9,7 @@ import type {
   OnFailure as OnFailureSchema,
   RoutineRunStatus as RoutineRunStatusSchema,
   SkillSource,
+  ToolView,
   ToolOperation,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
@@ -305,7 +306,7 @@ export const approvals = pgTable(
     callId: text("call_id").notNull(),
     tool: text("tool").notNull(),
     kind: text("kind").$type<ApprovalKind>().notNull(),
-    summary: text("summary").notNull(),
+    view: jsonb("view").$type<ToolView>().notNull(),
     status: text("status").$type<ApprovalStatus>().notNull().default("pending"),
     messageId: text("message_id")
       .notNull()

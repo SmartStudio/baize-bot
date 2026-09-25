@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ArrowRightLeft, ChevronDown, ChevronRight, ShieldAlert, Sparkles, TriangleAlert } from "lucide-react";
+import { toolViewText } from "@baize/shared";
 import type {
   Approval,
   ApprovalId,
@@ -146,7 +147,7 @@ const ToolCallCard = ({ body }: { body: ToolCall }) => (
   <div className="tool-line" data-testid="tool-call-card" data-status={body.status}>
     <span className="tool-name">{body.tool}</span>
     <span aria-hidden="true">·</span>
-    <span className="tool-args">{body.argsSummary}</span>
+    <span className="tool-args">{toolViewText(body.view)}</span>
     <span aria-hidden="true">·</span>
     <span className={`status-dot status-${body.status}`} role="img" aria-label={TOOL_STATUS_TEXT[body.status]} />
     <span className="tool-meta">{body.durationMs === null ? "—" : `${(body.durationMs / 1000).toFixed(1)}s`}</span>
@@ -197,7 +198,7 @@ const ApprovalCard = ({
           <ShieldAlert size={16} aria-hidden="true" />
           已失效 · {APPROVAL_KIND_TEXT[approval.kind]}
         </div>
-        <p className="approval-summary">{approval.summary}</p>
+        <p className="approval-summary">{toolViewText(approval.view)}</p>
         <div className="approval-actions">
           <p className="approval-expired-text">这一步已经不用了</p>
         </div>
@@ -207,7 +208,7 @@ const ApprovalCard = ({
   if (approval.status !== "pending") {
     return (
       <div className="card card-approval approval-compact" data-testid="approval-card" data-status={approval.status}>
-        <span className="approval-compact-text">{approval.summary}</span>
+        <span className="approval-compact-text">{toolViewText(approval.view)}</span>
         <span
           className="approval-pill"
           data-testid="approval-decided"
@@ -224,7 +225,7 @@ const ApprovalCard = ({
         <ShieldAlert size={16} aria-hidden="true" />
         需要你点头 · {APPROVAL_KIND_TEXT[approval.kind]}
       </div>
-      <p className="approval-summary">{approval.summary}</p>
+      <p className="approval-summary">{toolViewText(approval.view)}</p>
       <div className="approval-actions">
         <button
           type="button"

@@ -90,9 +90,10 @@ const seeds: Seed[] = [
       },
       {
         kind: "tool_call",
+        runId: RunId.parse("run_service_1"),
         botId: BotId.parse("bot_service"),
         tool: "erp.query",
-        argsSummary: "ERP · X3 库存与排产计划",
+        view: { kind: "mcp", server: "ERP", tool: "query", params: [{ key: "查询", value: "库存与排产计划" }] },
         status: "ok",
         durationMs: 41_000,
       },
@@ -759,16 +760,17 @@ export const writeMessageBody = (id: string, body: MessageBody): Message | null 
 export const createApproval = (input: {
   groupId: string;
   botId: BotId;
+  runId: RunId;
   kind: Approval["kind"];
-  summary: string;
+  view: Approval["view"];
 }): Approval => {
   const approval = Approval.parse({
     id: ApprovalId.parse(`apr_${nextSuffix()}`),
     groupId: GroupId.parse(input.groupId),
     botId: input.botId,
-    runId: RunId.parse(`run_${nextSuffix()}`),
+    runId: input.runId,
     kind: input.kind,
-    summary: input.summary,
+    view: input.view,
     status: "pending",
     decidedAt: null,
   });
@@ -969,15 +971,22 @@ export const streamBotReply = async (
   const abandoned = () => generation !== run;
   const needed = approvalFor(prompt);
   const tool = needed?.tool ?? "erp.query";
-  const argsSummary = `ERP · ${prompt.slice(0, 12)}`;
+  const runId = RunId.parse(`run_${nextSuffix()}`);
+  const view = {
+    kind: "mcp" as const,
+    server: "ERP",
+    tool,
+    params: [{ key: "请求", value: prompt.slice(0, 12) }],
+  };
 
   await sleep(REPLY_DELAY_MS);
   if (abandoned()) return;
   const call = appendMessage(groupId, {
     kind: "tool_call",
+    runId,
     botId,
     tool,
-    argsSummary,
+    view,
     status: "running",
     durationMs: null,
   });
@@ -989,7 +998,7 @@ export const streamBotReply = async (
     await sleep(TOOL_CALL_MS);
     if (abandoned()) return;
   } else {
-    const approval = createApproval({ groupId, botId, kind: needed.kind, summary: `${tool} · ${prompt}` });
+    const approval = createApproval({ groupId, botId, runId, kind: needed.kind, view });
     const card = appendMessage(groupId, { kind: "approval", approvalId: approval.id });
     // 先推 approval_updated 再推那条消息：卡的状态只在 Approval 上，消息先到的话前端只能先画一张查不到状态的占位。
     push({ type: "approval_updated", approval });
@@ -1003,9 +1012,10 @@ export const streamBotReply = async (
 
   const settled = rewriteMessage(groupId, call.id, {
     kind: "tool_call",
+    runId,
     botId,
     tool,
-    argsSummary,
+    view,
     status,
     durationMs: TOOL_CALL_MS,
   });

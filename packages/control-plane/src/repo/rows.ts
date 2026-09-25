@@ -83,7 +83,7 @@ export function toApproval(row: typeof schema.approvals.$inferSelect): Approval 
     botId: row.botId,
     runId: row.runId,
     kind: row.kind,
-    summary: row.summary,
+    view: row.view,
     status: row.status,
     decidedAt: row.decidedAt?.toISOString() ?? null,
   });

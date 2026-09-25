@@ -1,3 +1,4 @@
+import { toolViewText } from "@baize/shared";
 import type { Approval, Settings } from "@baize/shared";
 
 // "HH:MM" 转当天分钟数。schema 已经把格式钉成两位数，这里不再防一遍。
@@ -23,5 +24,5 @@ export const notifyApproval = (approval: Approval, settings: Settings, at: Date)
   if (typeof Notification === "undefined") return;
   // 权限没给就安静跳过。一条推送不该把用户按在一个权限弹窗前，角标已经把这件事说清楚了。
   if (Notification.permission !== "granted") return;
-  new Notification("等你点头", { body: approval.summary });
+  new Notification("等你点头", { body: toolViewText(approval.view) });
 };

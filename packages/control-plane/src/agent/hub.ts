@@ -19,7 +19,7 @@ import {
 } from "../repo/computers.js";
 import { expireApprovalsOfRun } from "../repo/approvals.js";
 import { listSkillsByOwner } from "../repo/skills.js";
-import { appendMessage } from "../repo/messages.js";
+import { appendMessage, failRunningToolCalls } from "../repo/messages.js";
 import { finishRun, openRunsForOwner } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
 import { EXPIRED_APPROVAL_NOTE, failRoutineRunOf } from "../routines/run.js";
@@ -240,11 +240,12 @@ export class AgentHub {
         });
         if (usage === null) return null;
         const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
+        const failedTools = run.groupId === null ? [] : await failRunningToolCalls(tx, run.groupId, run.runId);
         const message =
           run.groupId === null
             ? null
             : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: DISCONNECT_NOTICE });
-        return { expiredApprovals, message };
+        return { expiredApprovals, failedTools, message };
       });
       if (result === null) continue;
       clearTextPrefixes(run.runId);
@@ -252,6 +253,7 @@ export class AgentHub {
       for (const approval of result.expiredApprovals) {
         this.#deps.push.push(ownerId, { type: "approval_updated", approval });
       }
+      for (const message of result.failedTools) this.#deps.push.push(ownerId, { type: "message", message });
       if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
       await failRoutineRunOf(
         { db: this.#deps.db, push: this.#deps.push, agents: this, groupTurns: this.#deps.groupTurns },

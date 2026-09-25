@@ -522,8 +522,7 @@ describe("电脑代理连控制面", () => {
                 callId: "call-2",
                 tool: "send_email",
                 kind: "send_external",
-                summary: "发一封报价邮件",
-                view: { kind: "mcp", server: "客服工具", tool: "send_email", params: [] },
+                view: { kind: "mcp", server: "客服工具", tool: "send_email", params: [], raw: "发一封报价邮件" },
               });
               await secondApproval;
               config.send({

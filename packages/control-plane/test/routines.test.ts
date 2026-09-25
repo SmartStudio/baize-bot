@@ -458,8 +458,7 @@ describe("运行记录收尾", () => {
         callId: "call-1",
         tool: "send_email",
         kind: "send_external",
-        summary: "给客户发一封邮件",
-        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+        view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
 
       await settled(routine.id);
@@ -499,8 +498,7 @@ describe("运行记录收尾", () => {
         callId: "call-expired",
         tool: "send_email",
         kind: "send_external",
-        summary: "给客户发一封邮件",
-        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+        view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
       await settled(routine.id);
       expect((await runsOf(routine.id))[0]?.status).toBe("stopped");
@@ -536,8 +534,7 @@ describe("运行记录收尾", () => {
         callId: "call-1",
         tool: "send_email",
         kind: "send_external",
-        summary: "给客户发一封邮件",
-        view: { kind: "mcp", server: "", tool: "send_email", params: [] },
+        view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
       });
 
       await waitForNote(routine.id, "等你点头，下次照常跑");

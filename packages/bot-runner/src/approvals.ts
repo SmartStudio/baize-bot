@@ -35,7 +35,6 @@ export interface ApprovalRequest {
   readonly groupId: GroupId;
   readonly callId: string;
   readonly tool: string;
-  readonly summary: string;
   readonly view: ToolView;
 }
 
@@ -80,7 +79,6 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
           callId: request.callId,
           tool: request.tool,
           kind: approvalKind(request.tool),
-          summary: request.summary,
           view: request.view,
         });
       }),

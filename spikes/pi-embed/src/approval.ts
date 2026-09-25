@@ -1,3 +1,4 @@
+import type { ToolView } from "@baize/shared";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { z } from "zod";
@@ -12,7 +13,7 @@ export interface PendingApproval {
   readonly callId: string;
   readonly botId: string;
   readonly tool: string;
-  readonly summary: string;
+  readonly view: ToolView;
 }
 
 export interface ApprovalGate {

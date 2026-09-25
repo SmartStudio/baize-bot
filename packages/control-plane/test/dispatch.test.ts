@@ -220,9 +220,10 @@ describe("派活", () => {
     await appendMessage(database.db, owner.groupId, { kind: "system", text: "电脑睡了" });
     await appendMessage(database.db, owner.groupId, {
       kind: "tool_call",
+      runId: RunId.parse(randomUUID()),
       botId: owner.botId,
       tool: "erp.query",
-      argsSummary: "库存",
+      view: { kind: "mcp", server: "ERP", tool: "query", params: [{ key: "查询", value: "库存" }] },
       status: "ok",
       durationMs: 12,
     });
@@ -243,7 +244,7 @@ describe("派活", () => {
         { from: "你", text: "你好" },
         { from: "小服", text: "在的" },
         { from: "系统", text: "电脑睡了" },
-        { from: "小服", text: "用了 erp.query：库存" },
+        { from: "小服", text: "要用ERP的 query，参数：查询=库存" },
       ]);
     } finally {
       agent.close();

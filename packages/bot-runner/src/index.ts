@@ -422,6 +422,7 @@ export function createRunner(config: RunnerConfig): Runner {
       dirs: { ...dirs, sessionDir: groupSessionDir(dirs, groupId) },
       gateway: bot.appliedGateway,
       tools: [...builtIn, ...mcp.tools],
+      serverForTool: mcp.serverFor,
       needsApproval,
       approvals,
       activeRun,
@@ -465,10 +466,17 @@ export function createRunner(config: RunnerConfig): Runner {
       }
       if (hasStopped() || currentDefinition(bot) === null) return;
       const statsBeforeRun = session.getSessionStats();
-      unsubscribe = reportRun(session, statsBeforeRun, active.run, approvals.blockedCallIds, (outgoing) => {
-        if (outgoing.type === "run_done") finishRun(outgoing);
-        else config.send(outgoing);
-      });
+      unsubscribe = reportRun(
+        session,
+        statsBeforeRun,
+        active.run,
+        approvals.blockedCallIds,
+        bot.mcp?.serverFor ?? (() => ""),
+        (outgoing) => {
+          if (outgoing.type === "run_done") finishRun(outgoing);
+          else config.send(outgoing);
+        },
+      );
       await session.prompt(composePrompt(message));
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);

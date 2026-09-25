@@ -17,6 +17,7 @@ import {
   appendMessage,
   appendMessageWithId,
   appendSkillOffer,
+  failRunningToolCalls,
   findGroupId,
   listGroupBots,
   replaceMessageBody,
@@ -183,9 +184,10 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
 
   const body = {
     kind: "tool_call",
+    runId: event.runId,
     botId: event.botId,
     tool: event.tool,
-    argsSummary: event.argsSummary,
+    view: event.view,
     status: event.status,
     durationMs: event.durationMs,
   } as const;
@@ -210,14 +212,20 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
 
   const amount =
     (event.inputTokens / 1_000_000) * deps.priceInputPerM + (event.outputTokens / 1_000_000) * deps.priceOutputPerM;
-  const usage = await finishRun(deps.db, event.runId, event.groupId, {
-    steps: event.steps,
-    inputTokens: event.inputTokens,
-    outputTokens: event.outputTokens,
-    amount,
+  const finished = await deps.db.transaction(async (tx) => {
+    const usage = await finishRun(tx, event.runId, event.groupId, {
+      steps: event.steps,
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      amount,
+    });
+    if (usage === null) return null;
+    return { usage, failedTools: await failRunningToolCalls(tx, event.groupId, event.runId) };
   });
   // 重复的 runId 和不认识的 runId 在这里都是 null，不再多记一行也不再多一张花费卡。
-  if (usage === null) return;
+  if (finished === null) return;
+  const { usage } = finished;
+  for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
 
   const passed = runPassed(event.runId);
   clearTextPrefixes(event.runId);
@@ -321,7 +329,7 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
     callId: event.callId,
     tool: event.tool,
     kind: event.kind,
-    summary: event.summary,
+    view: event.view,
   });
   // 同一条 approval_request 重发时这里是 null：不多一张卡，也不多推一次。
   if (created === null) return;

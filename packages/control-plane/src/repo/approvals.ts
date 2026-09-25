@@ -1,4 +1,14 @@
-import { ApprovalId, BotId, GroupId, RunId, UserId, type Approval, type Message } from "@baize/shared";
+import {
+  ApprovalId,
+  BotId,
+  GroupId,
+  RunId,
+  toolViewText,
+  UserId,
+  type Approval,
+  type Message,
+  type ToolView,
+} from "@baize/shared";
 import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, groups, messages } from "../db/schema.js";
@@ -23,7 +33,7 @@ export type CreateApprovalInput = {
   readonly callId: string;
   readonly tool: string;
   readonly kind: ApprovalKind;
-  readonly summary: string;
+  readonly view: ToolView;
 };
 
 export type CreatedApproval = { readonly approval: Approval; readonly message: Message };
@@ -51,7 +61,7 @@ export async function createApproval(db: Db, input: CreateApprovalInput): Promis
           callId: input.callId,
           tool: input.tool,
           kind: input.kind,
-          summary: input.summary,
+          view: input.view,
           messageId: message.id,
         })
         .onConflictDoNothing({ target: [approvals.runId, approvals.callId] })
@@ -186,7 +196,7 @@ export async function remindStaleApprovals(db: Db, push: PushHub, now: Date): Pr
       .returning();
     return stale.map((row) => ({
       groupId: row.groupId,
-      text: `「${row.summary}」这件事等你点头已经一天了，它还挂着。`,
+      text: `「${toolViewText(row.view)}」这件事等你点头已经一天了，它还挂着。`,
     }));
   });
 }

@@ -71,6 +71,13 @@
       "when": 1790348084233,
       "tag": "0009_chemical_corsair",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790361028240,
+      "tag": "0010_giant_lily_hollister",
+      "breakpoints": true
     }
   ]
 }

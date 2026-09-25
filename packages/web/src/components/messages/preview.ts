@@ -1,3 +1,4 @@
+import { toolViewText } from "@baize/shared";
 import type { Message, MessageBody } from "@baize/shared";
 
 export const formatAmount = (amount: number): string => amount.toFixed(4).replace(/0+$/, "").replace(/\.$/, ".0");
@@ -9,7 +10,7 @@ export const previewOf = (body: MessageBody): string => {
     case "system":
       return body.text;
     case "tool_call":
-      return `${body.tool} · ${body.argsSummary}`;
+      return `${body.tool} · ${toolViewText(body.view)}`;
     case "approval":
       return "等你点头";
     case "handoff":

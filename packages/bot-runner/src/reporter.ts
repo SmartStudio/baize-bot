@@ -10,15 +10,53 @@ export interface RunIdentity {
   readonly messageId: MessageId;
 }
 
-export function simpleToolView(toolName: string, args: unknown): ToolView {
+type ToolArgs = Record<string, unknown>;
+
+const objectOf = (args: unknown): ToolArgs | null =>
+  typeof args === "object" && args !== null && !Array.isArray(args) ? (args as ToolArgs) : null;
+
+const rawOf = (args: unknown): { readonly raw?: ToolView["raw"] } =>
+  args === undefined ? {} : { raw: args as ToolView["raw"] };
+
+const lineCount = (text: string): number => (text === "" ? 0 : text.split("\n").length);
+
+const changedLinesOf = (args: ToolArgs): number => {
+  const edits = args.edits;
+  if (!Array.isArray(edits)) return 0;
+  return edits.reduce((total, edit) => {
+    if (typeof edit !== "object" || edit === null || Array.isArray(edit)) return total;
+    const oldText = "oldText" in edit && typeof edit.oldText === "string" ? edit.oldText : "";
+    const newText = "newText" in edit && typeof edit.newText === "string" ? edit.newText : "";
+    return total + Math.max(lineCount(oldText), lineCount(newText));
+  }, 0);
+};
+
+const isScalar = (value: unknown): value is string | number | boolean | null =>
+  value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+
+export function simpleToolView(toolName: string, args: unknown, server = ""): ToolView {
+  const object = objectOf(args);
   if (toolName === "bash") {
-    const command =
-      typeof args === "object" && args !== null && "command" in args && typeof args.command === "string"
-        ? args.command
-        : "";
-    return { kind: "bash", command };
+    const command = object !== null && typeof object.command === "string" ? object.command : "";
+    return { kind: "bash", command, ...rawOf(args) };
   }
-  return { kind: "mcp", server: "", tool: toolName, params: [] };
+  if (toolName === "write") {
+    const path = object !== null && typeof object.path === "string" ? object.path : "";
+    const content = object !== null && typeof object.content === "string" ? object.content : "";
+    return { kind: "write", path, preview: content.split("\n").slice(0, 5), ...rawOf(args) };
+  }
+  if (toolName === "edit") {
+    const path = object !== null && typeof object.path === "string" ? object.path : "";
+    return { kind: "edit", path, changedLines: changedLinesOf(object ?? {}), ...rawOf(args) };
+  }
+  const params =
+    object === null
+      ? []
+      : Object.entries(object)
+          .filter((entry): entry is [string, string | number | boolean | null] => isScalar(entry[1]))
+          .slice(0, 3)
+          .map(([key, value]) => ({ key, value }));
+  return { kind: "mcp", server, tool: toolName, params, ...rawOf(args) };
 }
 
 export function reportRun(
@@ -26,6 +64,7 @@ export function reportRun(
   statsBeforeRun: SessionStats,
   identity: RunIdentity,
   blockedCallIds: ReadonlySet<string>,
+  serverForTool: (toolName: string) => string,
   send: (message: AgentToControl) => void,
 ): () => void {
   const ids = { runId: identity.runId, botId: identity.botId, groupId: identity.groupId };
@@ -60,14 +99,13 @@ export function reportRun(
     }
     if (event.type === "tool_execution_start") {
       startedAt.set(event.toolCallId, Date.now());
-      const view = simpleToolView(event.toolName, event.args);
+      const view = simpleToolView(event.toolName, event.args, serverForTool(event.toolName));
       views.set(event.toolCallId, view);
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
-        argsSummary: JSON.stringify(event.args),
         view,
         status: "running",
         durationMs: null,
@@ -76,7 +114,8 @@ export function reportRun(
     }
     if (event.type === "tool_execution_end") {
       const began = startedAt.get(event.toolCallId);
-      const view = views.get(event.toolCallId) ?? simpleToolView(event.toolName, undefined);
+      const view =
+        views.get(event.toolCallId) ?? simpleToolView(event.toolName, undefined, serverForTool(event.toolName));
       startedAt.delete(event.toolCallId);
       views.delete(event.toolCallId);
       push({
@@ -84,7 +123,6 @@ export function reportRun(
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
-        argsSummary: "",
         view,
         status: blockedCallIds.has(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
         durationMs: began === undefined ? null : Date.now() - began,

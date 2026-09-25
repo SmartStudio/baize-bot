@@ -4,10 +4,12 @@ import {
   CreateBotResponse,
   MessageId,
   MessageListResponse,
+  toolViewText,
   type Approval,
   type BotId,
   type GroupId,
   type RunId,
+  type ToolView,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { STALE_APPROVAL_MS, remindStaleApprovals } from "../src/repo/approvals.js";
@@ -73,6 +75,7 @@ async function runningJob(): Promise<Running> {
 
 const TOOL = "shop.refund";
 const SUMMARY = "给这单退 120 块";
+const VIEW: ToolView = { kind: "mcp", server: "", tool: TOOL, params: [], raw: SUMMARY };
 
 function sendApprovalRequest(job: Running, callId: string): void {
   job.agent.send({
@@ -83,8 +86,7 @@ function sendApprovalRequest(job: Running, callId: string): void {
     callId,
     tool: TOOL,
     kind: "pay",
-    summary: SUMMARY,
-    view: { kind: "mcp", server: "", tool: TOOL, params: [] },
+    view: VIEW,
   });
 }
 
@@ -134,7 +136,7 @@ describe("approval_request 到达", () => {
       const approval = first.type === "approval_updated" ? first.approval : null;
       expect(approval?.status).toBe("pending");
       expect(approval?.kind).toBe("pay");
-      expect(approval?.summary).toBe(SUMMARY);
+      expect(approval?.view).toEqual(VIEW);
       expect(approval?.runId).toBe(job.runId);
       expect(approval?.botId).toBe(job.botId);
       expect(approval?.decidedAt, "还没人点头").toBeNull();
@@ -238,7 +240,6 @@ describe("放弃审批", () => {
         groupId: other.groupId,
         callId: "abandoned-sentinel",
         tool: "test.sentinel",
-        argsSummary: "哨兵已落库",
         view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
         status: "ok",
         durationMs: 0,
@@ -247,7 +248,7 @@ describe("放弃审批", () => {
       const next = await other.push.next();
       expect(next.type === "message" ? next.message.body : null).toMatchObject({
         kind: "tool_call",
-        argsSummary: "哨兵已落库",
+        tool: "test.sentinel",
       });
       expect((await page(mine)).approvals).toMatchObject([{ id: approval.id, status: "pending" }]);
     } finally {
@@ -412,7 +413,7 @@ describe("24 小时提醒", () => {
       const reminder = await job.push.next();
       const text =
         reminder.type === "message" && reminder.message.body.kind === "system" ? reminder.message.body.text : "";
-      expect(text, "提醒要说清楚等的是哪件事").toContain(SUMMARY);
+      expect(text, "提醒要说清楚等的是哪件事").toContain(toolViewText(VIEW));
       expect(reminder.type === "message" ? reminder.message.body : null).toMatchObject({ tone: "info" });
 
       const again = await remindStaleApprovals(database.db, server.server.hub, later);
