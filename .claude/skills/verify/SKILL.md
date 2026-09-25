@@ -10,7 +10,7 @@ description: 在真浏览器里把白泽 Bot 的 Web 跑起来、点一遍、留
 ```
 S=.claude/skills/verify/scripts/stack.sh
 $S entry1 up | doctor | down
-$S entry2 up [--agent] | doctor | down
+$S entry2 up [--agent] | agent | doctor | down
 ```
 
 功能怎么点、点完看什么，在 `features/README.md` 和它列的各个文件里。
@@ -47,7 +47,8 @@ Postgres 容器 `baize-postgres` 挂在另一个 compose 项目（`control-plane
 
 ```
 $S entry2 up            # 控制面 + Web
-$S entry2 up --agent    # 再加电脑代理
+$S entry2 up --agent    # 再加电脑代理，电脑凭据取 .env
+$S entry2 agent         # 控制面已起，只补电脑代理，shell 里的电脑凭据优先于 .env
 ```
 
 它做的事：
@@ -55,15 +56,49 @@ $S entry2 up --agent    # 再加电脑代理
 1. `docker start baize-postgres`，等 `pg_isready`。
 2. 控制面：把 `.env` 按 dev.mjs 的规则导出（只认 `KEY=value`，shell 里已有的优先），跑 `pnpm --filter @baize/control-plane start`。端口取 `.env` 的 `PORT`，没写就是 3001。
 3. Web：`API_PORT=<.env 的 API_PORT，没写取 PORT> WEB_PORT=5173 pnpm --filter @baize/web dev`。
-4. 加 `--agent` 时起电脑代理：`pnpm --filter @baize/computer-agent exec tsx src/main.ts`，环境里去掉 `.env` 的所有键，只放回 `COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR`，和 dev.mjs 的 `agentEnvOf` 一样，上游密钥不进 Bot 的 bash。等到日志出现「收到 config」才算连上。
+4. 加 `--agent` 或跑 `entry2 agent` 时起电脑代理：`pnpm --filter @baize/computer-agent exec tsx src/main.ts`，环境里去掉 `.env` 的所有键，只放回 `COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR`，每个先取 shell 里的值，没有再取 `.env`，和 dev.mjs 的 `agentEnvOf` 一样，上游密钥不进 Bot 的 bash。等到日志出现「收到 config」才算连上。
 
 就绪标志：控制面 `/api/bots` 回 401，经 Web 代理的 `5173/api/bots` 也回 401，body 是 `{"error":"请先登录"}`。
 
 `up` 和 `doctor` 都会拿 `packages/control-plane/drizzle/*.sql` 对一遍库里的 `_migrations`，打出缺的迁移。缺迁移时控制面照样回 401，但新接口会在运行时出错。应用迁移要跑 `pnpm --filter @baize/control-plane migrate`，这是写开发库，先问调用方。
 
+开发库落后于分支上的迁移时（比如 0009 删列还没经用户同意），实机验证改用单独的验证库，不碰开发库。shell 里的 `DATABASE_URL` 优先于 `.env`，`stack.sh` 的迁移检查也跟着它走：
+
+```
+V=postgres://baize:baize@localhost:5434/baize_verify
+docker exec baize-postgres psql -U baize -d postgres -c "create database baize_verify"   # 只第一次
+DATABASE_URL=$V pnpm --filter @baize/control-plane migrate
+DATABASE_URL=$V $S entry2 up
+```
+
+验证库里没有 seed 账号，照下面的办法注册一个。
+
 3001 在这台机器上被 Obsidian 占着（只绑 127.0.0.1），Vite 代理打的正是 `127.0.0.1:3001`。所以 `.env` 把控制面挪到了 3101，`PORT`、`API_PORT`、`CONTROL_PLANE_AGENT_URL` 三处一起改。`stack.sh` 起之前查端口占用，占了就拒绝。
 
-账号：P0-6（注册页）合入前用 seed 的开发账号，企业域名 `acme`，邮箱 `chen@baize.dev`，密码 `baize-dev`。账号已存在时不要再跑 seed。`COMPUTER_ID`、`AGENT_TOKEN` 要重置用 `pnpm --filter @baize/control-plane computer-token`。P0-6 合入后改成在注册页新建一个账号，这一段随之更新。账号、token、密码只留在这个文件里，不写进报告和截图文件名。
+账号：要登录入口二时默认新注册一个，邮箱带时间戳，比如 `verify-<yyyymmddHHMM>@example.com`。注册写的是开发库，账号删不掉，所以邮箱每次换新的。
+
+1. 注册。`entry2 up` 之后在 `http://localhost:5173/register` 填表，或者直接调接口，回 201 并种下会话 cookie：
+
+   ```
+   J=.audit/verify-run/entry2/cookie.txt
+   curl -s -c $J -H 'content-type: application/json' \
+     -d '{"email":"verify-<时间戳>@example.com","password":"<密码>","name":"验证"}' \
+     http://127.0.0.1:3101/api/register
+   ```
+
+   在网页上注册的，用同样的邮箱密码 `POST /api/auth/login` 拿 cookie。
+2. 拿电脑凭据。`curl -s -b $J -X POST http://127.0.0.1:3101/api/computers/local` 回 `{"computerId":…,"token":…}`，token 明文只在这一次响应里。每调一次都换一把新 token，旧 token 再握手就不被接纳，所以一次代理运行只调一次。
+3. 起代理。把这两个值交给 `entry2 agent`，不写进 `.env`：
+
+   ```
+   COMPUTER_ID=<computerId> AGENT_TOKEN=<token> $S entry2 agent
+   ```
+
+新账号没有 Bot，侧栏是空的，要对话先在 Web 里建一个，或者带 cookie `POST /api/bots`。
+
+备选是 seed 的开发账号，邮箱 `chen@baize.dev`，密码 `baize-dev`，库里已有 Bot 和群。它的 `COMPUTER_ID`、`AGENT_TOKEN` 在 `.env` 里，`entry2 up --agent` 直接用。账号已存在时不要再跑 seed。token 要重置用 `pnpm --filter @baize/control-plane computer-token`，重置后把新值写回 `.env`。对 seed 账号调 `/api/computers/local` 也会换 token，`.env` 里那把随之失效。
+
+账号、token、密码只留在 shell 和 `.audit/verify-run/` 里，不写进报告和截图文件名。上面的端口 3101 是本机 `.env` 的 `PORT`，换机器按 `.env` 改。
 
 入口二的写操作：控制面起着时，例行调度器会按库里的例行任务触发，每小时扫一次超时的审批和交接；电脑代理握手会把 `computers` 行改成 online 并换一把网关 key，断开后回 sleeping。只要证明「能起来」就只起控制面和 Web，别带 `--agent`，也别登录。
 

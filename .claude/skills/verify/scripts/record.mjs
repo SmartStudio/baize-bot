@@ -17,8 +17,6 @@ if (baseUrl === undefined || out === undefined) {
 
 const login = async (page) => {
   await page.goto(baseUrl);
-  await page.getByTestId("workspace-input").fill("acme");
-  await page.getByTestId("workspace-continue").click();
   await page.getByTestId("email-input").fill(process.env.BAIZE_EMAIL ?? "chen@baize.dev");
   await page.getByTestId("password-input").fill(process.env.BAIZE_PASSWORD ?? "baize-dev");
   await page.getByTestId("login-submit").click();

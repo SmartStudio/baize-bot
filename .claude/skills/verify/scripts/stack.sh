@@ -12,6 +12,7 @@ usage() {
 用法：
   stack.sh entry1 up|doctor|down          假控制面 3317 + Web 5377
   stack.sh entry2 up [--agent]|doctor|down 真控制面（.env 的 PORT）+ Web 5173 + 可选电脑代理
+  stack.sh entry2 agent                    给已起的真控制面补一个电脑代理，shell 里的 COMPUTER_ID、AGENT_TOKEN 优先于 .env
 EOF
   exit 2
 }
@@ -167,9 +168,16 @@ wait_postgres() {
 }
 
 # 只读对账：drizzle 目录里有、库里 _migrations 没记的迁移。缺了控制面照样起，但新接口会在运行时报错。
+# 和控制面 env.ts 一样，shell 的 DATABASE_URL 优先，其次 .env，都没有就是 baize。
+db_name() {
+  local url
+  url="${DATABASE_URL:-$(env_get DATABASE_URL postgres://baize:baize@localhost:5434/baize)}"
+  echo "${url##*/}"
+}
+
 pending_migrations() {
   local applied file
-  applied="$(docker exec baize-postgres psql -U baize -d baize -Atc "select name from public._migrations" 2>/dev/null || true)"
+  applied="$(docker exec baize-postgres psql -U baize -d "$(db_name)" -Atc "select name from public._migrations" 2>/dev/null || true)"
   for file in "$ROOT"/packages/control-plane/drizzle/*.sql; do
     grep -qx "$(basename "$file")" <<<"$applied" || basename "$file"
   done
@@ -179,10 +187,22 @@ report_migrations() {
   local missing
   missing="$(pending_migrations)"
   if [[ -z "$missing" ]]; then
-    echo "迁移已全部应用"
+    echo "$(db_name) 库迁移已全部应用"
   else
-    echo "开发库缺迁移：$(echo "$missing" | tr '\n' ' ')。要应用跑 pnpm --filter @baize/control-plane migrate，这是写库，先问调用方"
+    echo "$(db_name) 库缺迁移：$(echo "$missing" | tr '
+' ' ')。要应用跑 pnpm --filter @baize/control-plane migrate，这是写库，先问调用方"
   fi
+}
+
+start_agent() {
+  local cp="$1" tries=0
+  start entry2 computer-agent "$SELF" _exec-computer-agent "$cp"
+  until grep -q "收到 config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
+    tries=$((tries + 1))
+    [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没收到 config："; tail -20 "$RUN/entry2/computer-agent.log"; exit 1; }
+    sleep 0.5
+  done
+  grep "收到 config" "$RUN/entry2/computer-agent.log" | tail -1
 }
 
 entry2() {
@@ -202,17 +222,19 @@ entry2() {
       start entry2 web env API_PORT="$api" WEB_PORT="$web" pnpm --filter @baize/web dev
       wait_code "http://127.0.0.1:$cp/api/bots" 401 control-plane "$RUN/entry2/control-plane.log"
       wait_code "http://127.0.0.1:$web/api/bots" 401 "web→控制面 代理" "$RUN/entry2/web.log"
-      if [[ $with_agent -eq 1 ]]; then
-        start entry2 computer-agent "$SELF" _exec-computer-agent "$cp"
-        local tries=0
-        until grep -q "收到 config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
-          tries=$((tries + 1))
-          [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没收到 config："; tail -20 "$RUN/entry2/computer-agent.log"; exit 1; }
-          sleep 0.5
-        done
-        grep "收到 config" "$RUN/entry2/computer-agent.log" | tail -1
-      fi
+      if [[ $with_agent -eq 1 ]]; then start_agent "$cp"; fi
       echo "打开 http://localhost:$web"
+      ;;
+    agent)
+      if ! { [[ -f "$RUN/entry2/control-plane.pgid" ]] && group_alive "$(cat "$RUN/entry2/control-plane.pgid")"; }; then
+        echo "没有 stack.sh 起的真控制面在跑，先 entry2 up"
+        exit 1
+      fi
+      if [[ -f "$RUN/entry2/computer-agent.pgid" ]] && group_alive "$(cat "$RUN/entry2/computer-agent.pgid")"; then
+        echo "电脑代理已经在跑，进程组 $(cat "$RUN/entry2/computer-agent.pgid")"
+        exit 1
+      fi
+      start_agent "$cp"
       ;;
     doctor)
       local ok=0
@@ -239,14 +261,14 @@ exec_control_plane() {
 
 # 电脑代理只拿连控制面要的四个，上游密钥和库连接不进 Bot 的 bash，和 dev.mjs 的 agentEnvOf 一致。
 exec_computer_agent() {
-  local cp="$1" key value
+  local cp="$1" key id token url data
+  id="${COMPUTER_ID:-$(env_get COMPUTER_ID)}"
+  token="${AGENT_TOKEN:-$(env_get AGENT_TOKEN)}"
+  url="${CONTROL_PLANE_AGENT_URL:-$(env_get CONTROL_PLANE_AGENT_URL "ws://127.0.0.1:$cp/agent")}"
+  data="${BAIZE_DATA_DIR:-$(env_get BAIZE_DATA_DIR)}"
   for key in $(env_keys); do unset "$key"; done
-  export COMPUTER_ID AGENT_TOKEN CONTROL_PLANE_AGENT_URL
-  COMPUTER_ID="$(env_get COMPUTER_ID)"
-  AGENT_TOKEN="$(env_get AGENT_TOKEN)"
-  CONTROL_PLANE_AGENT_URL="$(env_get CONTROL_PLANE_AGENT_URL "ws://127.0.0.1:$cp/agent")"
-  value="$(env_get BAIZE_DATA_DIR)"
-  if [[ -n "$value" ]]; then export BAIZE_DATA_DIR="$value"; fi
+  export COMPUTER_ID="$id" AGENT_TOKEN="$token" CONTROL_PLANE_AGENT_URL="$url"
+  if [[ -n "$data" ]]; then export BAIZE_DATA_DIR="$data"; fi
   exec pnpm --filter @baize/computer-agent exec tsx src/main.ts
 }
 
