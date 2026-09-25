@@ -531,6 +531,13 @@ describe("工具视图", () => {
     });
   });
 
+  it("write.preview 不带文件结尾换行切出的空行，空文件没有预览", () => {
+    expect(simpleToolView("write", { path: "a.txt", content: "苹果\n香蕉\n" })).toMatchObject({
+      preview: ["苹果", "香蕉"],
+    });
+    expect(simpleToolView("write", { path: "a.txt", content: "" })).toMatchObject({ preview: [] });
+  });
+
   it("edit 显示改动行数，MCP 只留三个标量参数", () => {
     const editArgs = {
       path: "报价.md",

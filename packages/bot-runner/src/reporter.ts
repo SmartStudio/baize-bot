@@ -42,8 +42,9 @@ export function simpleToolView(toolName: string, args: unknown, server = ""): To
   }
   if (toolName === "write") {
     const path = object !== null && typeof object.path === "string" ? object.path : "";
-    const content = object !== null && typeof object.content === "string" ? object.content : "";
-    return { kind: "write", path, preview: content.split("\n").slice(0, 5), ...rawOf(args) };
+    const content = object !== null && typeof object.content === "string" ? object.content.replace(/\n+$/, "") : "";
+    const preview = content === "" ? [] : content.split("\n").slice(0, 5);
+    return { kind: "write", path, preview, ...rawOf(args) };
   }
   if (toolName === "edit") {
     const path = object !== null && typeof object.path === "string" ? object.path : "";
