@@ -2,7 +2,8 @@ import {
   ApprovalId,
   BotId,
   BotListResponse,
-  Computer,
+  ComputerListResponse,
+  ComputerTokenResponse,
   CopySkillRequest,
   CreateBotRequest,
   CreateBotResponse,
@@ -23,7 +24,6 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
-  LocalComputerResponse,
   OvernightResponse,
   RegisterRequest,
   RegisterResponse,
@@ -66,7 +66,7 @@ import { discoverTools } from "../mcp/discover.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, findBot, listBots, updateBot } from "../repo/bots.js";
-import { ensureComputer, findComputerByOwner, resetComputerToken } from "../repo/computers.js";
+import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
@@ -233,18 +233,26 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
   app.get("/api/overnight", async (c) => c.json(OvernightResponse.parse(await getOvernight(db, c.get("user").id))));
 
-  app.get("/api/computer", async (c) => {
-    const computer = await findComputerByOwner(db, c.get("user").id);
-    if (computer === null) return c.json(NOT_FOUND, 404);
-    return c.json(Computer.parse(computer));
-  });
+  app.get("/api/computers", async (c) =>
+    c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),
+  );
 
   app.post("/api/computers/local", async (c) => {
     const ownerId = c.get("user").id;
-    await ensureComputer(db, ownerId);
+    const { computer } = await ensureComputer(db, ownerId);
     const local = await resetComputerToken(db, ownerId);
     if (local === null) throw new Error(`用户 ${ownerId} 的本机电脑既没建成也无法重置 token`);
-    return c.json(LocalComputerResponse.parse(local));
+    hub.push(ownerId, { type: "computer_updated", computer });
+    return c.json(ComputerTokenResponse.parse(local));
+  });
+
+  app.post("/api/computers/remote", async (c) => {
+    const ownerId = c.get("user").id;
+    const { computer } = await ensureComputer(db, ownerId, "remote");
+    const remote = await resetComputerToken(db, ownerId, "remote");
+    if (remote === null) throw new Error(`用户 ${ownerId} 的远程电脑既没建成也无法重置 token`);
+    hub.push(ownerId, { type: "computer_updated", computer });
+    return c.json(ComputerTokenResponse.parse(remote));
   });
 
   app.get("/api/bots", async (c) => {

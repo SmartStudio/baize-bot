@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BotListResponse, Computer, MeResponse, MessageListResponse } from "@baize/shared";
+import { BotListResponse, ComputerListResponse, MeResponse, MessageListResponse } from "@baize/shared";
 import { startStack } from "../src/stack.js";
 import { startUpstream } from "../src/upstream.js";
 
@@ -16,7 +16,7 @@ describe("端到端：注册账号并启动本机代理", () => {
     try {
       const me = MeResponse.parse(await stack.get("/api/me"));
       expect(me.user.name).toBe("E2E 用户");
-      expect(Computer.parse(await stack.get("/api/computer")).status).toBe("online");
+      expect(ComputerListResponse.parse(await stack.get("/api/computers")).computers[0]?.status).toBe("online");
 
       const first = BotListResponse.parse(await stack.get("/api/bots")).items[0];
       if (first === undefined) throw new Error("注册路径没有建出可对话 Bot");

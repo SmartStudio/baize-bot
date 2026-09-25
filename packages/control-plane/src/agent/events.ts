@@ -102,7 +102,7 @@ async function resolveRun(
   const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (groupId === null) return null;
   // 外键只保证 runId 存在，管不了它指到哪个群：不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。
-  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId)) return GroupId.parse(groupId);
+  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId)) return GroupId.parse(groupId);
   console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
   return null;
 }
@@ -291,7 +291,7 @@ function modelFailureStatus(detail: string): string {
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
-  const open = await latestOpenRun(deps.db, conn.ownerId);
+  const open = await latestOpenRun(deps.db, conn.computerId);
   const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
     console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);

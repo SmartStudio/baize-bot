@@ -1,4 +1,4 @@
-import { Computer, ComputerId, CreateBotResponse, type UserId } from "@baize/shared";
+import { ComputerId, ComputerListResponse, ComputerTokenResponse, CreateBotResponse, type UserId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEFAULT_GATEWAY_MODEL } from "../src/env.js";
 import { findComputerByOwner } from "../src/repo/computers.js";
@@ -127,7 +127,7 @@ describe("握手", () => {
     }
   });
 
-  it("新连接顶掉旧连接，电脑仍然在线", async () => {
+  it("同一台电脑的新连接仍然顶掉旧连接", async () => {
     const { computer, userId } = await ownerWithComputer();
     const first = await helloAgent(server.server.port, computer.computerId, computer.token);
     const second = await helloAgent(server.server.port, computer.computerId, computer.token);
@@ -139,6 +139,32 @@ describe("握手", () => {
       expect(await statusOf(userId)()).toBe("online");
     } finally {
       second.agent.close();
+    }
+  });
+
+  it("本机和远程同时在线互不顶掉", async () => {
+    const { client, computer } = await ownerWithComputer();
+    const remoteResponse = await client.post("/api/computers/remote");
+    expect(remoteResponse.status).toBe(200);
+    const remote = ComputerTokenResponse.parse(await remoteResponse.json());
+    const localConnection = await helloAgent(server.server.port, computer.computerId, computer.token);
+    const remoteConnection = await helloAgent(server.server.port, remote.computerId, remote.token);
+
+    try {
+      expect(localConnection.welcome.kind).toBe("local");
+      expect(remoteConnection.welcome.kind).toBe("remote");
+      expect(remoteConnection.config.modelGateway.apiKey).not.toBe(localConnection.config.modelGateway.apiKey);
+      await client.post("/api/bots", { name: "小服" });
+      expect((await localConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["小服"]);
+      expect((await remoteConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["小服"]);
+      const listed = ComputerListResponse.parse(await (await client.get("/api/computers")).json());
+      expect(listed.computers.map(({ kind, status }) => ({ kind, status }))).toEqual([
+        { kind: "local", status: "online" },
+        { kind: "remote", status: "online" },
+      ]);
+    } finally {
+      localConnection.agent.close();
+      remoteConnection.agent.close();
     }
   });
 });
@@ -210,14 +236,18 @@ describe("Bot 变动重发 config", () => {
 });
 
 describe("状态", () => {
-  it("GET /api/computer 跟着握手一起变", async () => {
+  it("GET /api/computers 跟着握手一起变", async () => {
     const { client, computer } = await ownerWithComputer();
-    expect(Computer.parse(await (await client.get("/api/computer")).json()).status).toBe("creating");
+    expect(ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0]?.status).toBe(
+      "creating",
+    );
 
     const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
     try {
       await waitFor(
-        async () => Computer.parse(await (await client.get("/api/computer")).json()).status === "online",
+        async () =>
+          ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0]?.status ===
+          "online",
         "接口上看到在线",
       );
     } finally {

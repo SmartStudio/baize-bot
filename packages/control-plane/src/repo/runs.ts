@@ -1,4 +1,4 @@
-import { BotId, GroupId, RunId, type MessageId, type UsageRecord, type UserId } from "@baize/shared";
+import { BotId, ComputerId, GroupId, RunId, type MessageId, type UsageRecord, type UserId } from "@baize/shared";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, runs } from "../db/schema.js";
@@ -8,6 +8,7 @@ import { toUsageRecord } from "./rows.js";
 
 export type StartRunInput = {
   readonly ownerId: UserId;
+  readonly computerId: ComputerId;
   readonly botId: BotId;
   readonly groupId: GroupId;
   readonly triggerMessageId: MessageId;
@@ -21,6 +22,7 @@ export async function startRun(db: Db, input: StartRunInput): Promise<RunId> {
     .values({
       id: newId(),
       ownerId: input.ownerId,
+      computerId: input.computerId,
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId: input.triggerMessageId,
@@ -71,38 +73,44 @@ export async function finishRun(
 }
 
 /** 这个 run 确实是这个 Bot 在这个群里的活。上行报文的 runId 是外部输入，外键管不了它指到哪个群。 */
-export async function runBelongsTo(db: Db, runId: RunId, botId: BotId, groupId: string): Promise<boolean> {
+export async function runBelongsTo(
+  db: Db,
+  runId: RunId,
+  botId: BotId,
+  groupId: string,
+  computerId: ComputerId,
+): Promise<boolean> {
   const [row] = await db
     .select({ id: runs.id })
     .from(runs)
-    .where(and(eq(runs.id, runId), eq(runs.botId, botId), eq(runs.groupId, groupId)))
+    .where(and(eq(runs.id, runId), eq(runs.botId, botId), eq(runs.groupId, groupId), eq(runs.computerId, computerId)))
     .limit(1);
   return row !== undefined;
 }
 
 export type OpenRun = { readonly runId: RunId; readonly groupId: GroupId; readonly botId: BotId };
 
-export async function openRunsForOwner(
+export async function openRunsForComputer(
   db: Db,
-  ownerId: UserId,
+  computerId: ComputerId,
 ): Promise<readonly { readonly runId: RunId; readonly groupId: GroupId | null }[]> {
   const rows = await db
     .select({ runId: runs.id, groupId: runs.groupId })
     .from(runs)
-    .where(and(eq(runs.ownerId, ownerId), isNull(runs.endedAt)));
+    .where(and(eq(runs.computerId, computerId), isNull(runs.endedAt)));
   return rows.map((row) => ({
     runId: RunId.parse(row.runId),
     groupId: row.groupId === null ? null : GroupId.parse(row.groupId),
   }));
 }
 
-/** 该用户最近一条还没结束的 run。agent_error 报文里没有群号，只能落到它上面。 */
-export async function latestOpenRun(db: Db, ownerId: UserId): Promise<OpenRun | null> {
+/** 该电脑最近一条还没结束的 run。agent_error 报文里没有群号，只能落到它上面。 */
+export async function latestOpenRun(db: Db, computerId: ComputerId): Promise<OpenRun | null> {
   const [row] = await db
     .select({ runId: runs.id, groupId: runs.groupId, botId: runs.botId })
     .from(runs)
     .innerJoin(bots, eq(bots.id, runs.botId))
-    .where(and(eq(bots.ownerId, ownerId), isNull(runs.endedAt)))
+    .where(and(eq(runs.computerId, computerId), isNull(runs.endedAt)))
     .orderBy(desc(runs.startedAt))
     .limit(1);
   if (row === undefined) return null;

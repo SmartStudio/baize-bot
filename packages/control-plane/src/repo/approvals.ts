@@ -1,6 +1,7 @@
 import {
   ApprovalId,
   BotId,
+  ComputerId,
   GroupId,
   RunId,
   toolViewText,
@@ -13,7 +14,7 @@ import {
 } from "@baize/shared";
 import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { approvals, groups, messages } from "../db/schema.js";
+import { approvals, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
@@ -136,6 +137,7 @@ export async function latestPendingApproval(db: Db, groupId: string): Promise<Ap
 export type DecidedApproval = {
   readonly approval: Approval;
   readonly runId: RunId;
+  readonly computerId: ComputerId | null;
   readonly callId: string;
 };
 
@@ -154,7 +156,13 @@ export async function decideApproval(
     .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
     .returning();
   if (row === undefined) return null;
-  return { approval: toApproval(row), runId: RunId.parse(row.runId), callId: row.callId };
+  const [run] = await db.select({ computerId: runs.computerId }).from(runs).where(eq(runs.id, row.runId)).limit(1);
+  return {
+    approval: toApproval(row),
+    runId: RunId.parse(row.runId),
+    computerId: run?.computerId === null || run?.computerId === undefined ? null : ComputerId.parse(run.computerId),
+    callId: row.callId,
+  };
 }
 
 /** 一页消息引用到的审批。客户端画卡要的状态跟着这一页一起回，不用再发一次请求。 */

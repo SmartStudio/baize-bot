@@ -20,7 +20,7 @@ import {
 import { expireApprovalsOfRun } from "../repo/approvals.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { appendMessage, failRunningToolCalls } from "../repo/messages.js";
-import { finishRun, openRunsForOwner } from "../repo/runs.js";
+import { finishRun, openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
 import { EXPIRED_APPROVAL_NOTE, failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
@@ -60,14 +60,14 @@ export type AgentHubDeps = {
   readonly toolCrypto: ToolCrypto;
 };
 
-/** 电脑代理的连接表。一人一台电脑（computers.owner_id 唯一），按 owner 索引就等于按电脑索引。 */
+/** 电脑代理的连接表。同一个用户可以同时有本机和远程两条连接，连接只按电脑号互相替换。 */
 export class AgentHub {
   readonly #deps: AgentHubDeps;
-  readonly #connections = new Map<string, AgentConnection>();
-  readonly #graceTimers = new Map<string, NodeJS.Timeout>();
-  readonly #finishChains = new Map<string, Promise<void>>();
+  readonly #connections = new Map<ComputerId, AgentConnection>();
+  readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
+  readonly #finishChains = new Map<ComputerId, Promise<void>>();
   readonly #pendingFinishes = new Set<Promise<void>>();
-  readonly #sleepingWrites = new Map<string, Promise<void>>();
+  readonly #sleepingWrites = new Map<ComputerId, Promise<void>>();
 
   constructor(deps: AgentHubDeps) {
     this.#deps = deps;
@@ -101,47 +101,54 @@ export class AgentHub {
           const closed = conn;
           if (closed === null) return;
           // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
-          if (this.#connections.get(closed.ownerId) !== closed) return;
-          this.#connections.delete(closed.ownerId);
+          if (this.#connections.get(closed.computerId) !== closed) return;
+          this.#connections.delete(closed.computerId);
           const timer = setTimeout(() => {
-            this.#graceTimers.delete(closed.ownerId);
-            const job = this.#enqueueFinish(closed.ownerId, async () => {
-              if (this.isOnline(closed.ownerId)) return;
-              await this.#finishMissingRuns(closed.ownerId, [], () => this.isOnline(closed.ownerId));
+            this.#graceTimers.delete(closed.computerId);
+            const job = this.#enqueueFinish(closed.computerId, async () => {
+              if (this.isOnline(closed.computerId)) return;
+              await this.#finishMissingRuns(closed.computerId, closed.ownerId, [], () =>
+                this.isOnline(closed.computerId),
+              );
             }).catch((error: unknown) => console.error("断连后收尾 run 出错", error));
             this.#pendingFinishes.add(job);
             void job.then(() => this.#pendingFinishes.delete(job));
           }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
           timer.unref();
-          this.#graceTimers.set(closed.ownerId, timer);
-          const sleeping = markComputerSleeping(this.#deps.db, closed.computerId);
-          this.#sleepingWrites.set(closed.ownerId, sleeping);
+          this.#graceTimers.set(closed.computerId, timer);
+          const sleeping = markComputerSleeping(this.#deps.db, closed.computerId).then((computer) => {
+            if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });
+          });
+          this.#sleepingWrites.set(closed.computerId, sleeping);
           try {
             await sleeping;
           } finally {
-            if (this.#sleepingWrites.get(closed.ownerId) === sleeping) this.#sleepingWrites.delete(closed.ownerId);
+            if (this.#sleepingWrites.get(closed.computerId) === sleeping)
+              this.#sleepingWrites.delete(closed.computerId);
           }
         })
         .catch((error: unknown) => console.error("把电脑标记为休眠出错", error));
     });
   }
 
-  isOnline(ownerId: UserId): boolean {
-    const conn = this.#connections.get(ownerId);
+  isOnline(computerId: ComputerId): boolean {
+    const conn = this.#connections.get(computerId);
     return conn !== undefined && conn.socket.readyState === conn.socket.OPEN;
   }
 
-  send(ownerId: UserId, message: ControlToAgent): boolean {
-    const conn = this.#connections.get(ownerId);
+  send(computerId: ComputerId, message: ControlToAgent): boolean {
+    const conn = this.#connections.get(computerId);
     if (conn === undefined) return false;
     return this.#send(conn, message);
   }
 
   /** Bot 增删改之后重发，电脑代理会按新的 Bot 列表重建运行器。 */
   async sendConfig(ownerId: UserId): Promise<void> {
-    const conn = this.#connections.get(ownerId);
-    if (conn === undefined) return;
-    await this.#sendConfig(conn);
+    await Promise.all(
+      [...this.#connections.values()]
+        .filter((connection) => connection.ownerId === ownerId)
+        .map((connection) => this.#sendConfig(connection)),
+    );
   }
 
   /** 先落库再断线：反过来的话 socket 的 close 回调要和进程退出抢，那台电脑就永远挂在在线。 */
@@ -202,20 +209,21 @@ export class AgentHub {
       toolCallMessages: new Map(),
     };
 
-    const previous = this.#connections.get(computer.ownerId);
-    this.#connections.set(computer.ownerId, accepted);
-    const timer = this.#graceTimers.get(computer.ownerId);
+    const previous = this.#connections.get(computer.id);
+    this.#connections.set(computer.id, accepted);
+    const timer = this.#graceTimers.get(computer.id);
     if (timer !== undefined) {
       clearTimeout(timer);
-      this.#graceTimers.delete(computer.ownerId);
+      this.#graceTimers.delete(computer.id);
     }
     previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
 
-    await this.#enqueueFinish(computer.ownerId, async () => {
-      await this.#sleepingWrites.get(computer.ownerId);
-      await this.#finishMissingRuns(computer.ownerId, message.activeRuns);
+    await this.#enqueueFinish(computer.id, async () => {
+      await this.#sleepingWrites.get(computer.id);
+      await this.#finishMissingRuns(computer.id, computer.ownerId, message.activeRuns);
     });
-    await markComputerOnline(this.#deps.db, computer.id);
+    const online = await markComputerOnline(this.#deps.db, computer.id);
+    if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
     this.#send(accepted, {
       type: "welcome",
       ownerId: computer.ownerId,
@@ -227,12 +235,13 @@ export class AgentHub {
   }
 
   async #finishMissingRuns(
+    computerId: ComputerId,
     ownerId: UserId,
     activeRuns: readonly RunId[],
     shouldStop: (() => boolean) | undefined = undefined,
   ): Promise<void> {
     const active = new Set(activeRuns);
-    for (const run of await openRunsForOwner(this.#deps.db, ownerId)) {
+    for (const run of await openRunsForComputer(this.#deps.db, computerId)) {
       if (shouldStop?.()) return;
       if (active.has(run.runId)) continue;
       if (shouldStop?.()) return;
@@ -268,16 +277,16 @@ export class AgentHub {
     }
   }
 
-  #enqueueFinish(ownerId: UserId, task: () => Promise<void>): Promise<void> {
-    const previous = this.#finishChains.get(ownerId) ?? Promise.resolve();
+  #enqueueFinish(computerId: ComputerId, task: () => Promise<void>): Promise<void> {
+    const previous = this.#finishChains.get(computerId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(task);
-    this.#finishChains.set(ownerId, current);
+    this.#finishChains.set(computerId, current);
     void current.then(
       () => {
-        if (this.#finishChains.get(ownerId) === current) this.#finishChains.delete(ownerId);
+        if (this.#finishChains.get(computerId) === current) this.#finishChains.delete(computerId);
       },
       () => {
-        if (this.#finishChains.get(ownerId) === current) this.#finishChains.delete(ownerId);
+        if (this.#finishChains.get(computerId) === current) this.#finishChains.delete(computerId);
       },
     );
     return current;

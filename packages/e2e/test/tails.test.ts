@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
 import {
   BotListResponse,
-  Computer,
+  ComputerListResponse,
   CreateGroupResponse,
   GroupListResponse,
   GroupResponse,
@@ -141,7 +141,9 @@ it("工具调用后断连必须收尾 run 并在群里提示失败", async () =>
 
         // 进程被杀，运行器来不及发 run_done；模型闸门保持关闭，排除正常收尾。
         stopping = stack.killComputer();
-        await expect.poll(async () => Computer.parse(await stack.get("/api/computer")).status, poll).toBe("sleeping");
+        await expect
+          .poll(async () => ComputerListResponse.parse(await stack.get("/api/computers")).computers[0]?.status, poll)
+          .toBe("sleeping");
         await expect
           .poll(
             async () => {
@@ -160,7 +162,9 @@ it("工具调用后断连必须收尾 run 并在群里提示失败", async () =>
       } finally {
         followUp.release();
         if (stopping !== undefined) {
-          await expect.poll(async () => Computer.parse(await stack.get("/api/computer")).status, poll).toBe("sleeping");
+          await expect
+            .poll(async () => ComputerListResponse.parse(await stack.get("/api/computers")).computers[0]?.status, poll)
+            .toBe("sleeping");
           await stopping;
         }
       }
@@ -180,7 +184,10 @@ it("同 token 新连接关闭旧连接，welcome/config 后只向新连接派活
       const second = await stack.connectComputer();
       await expect.poll(() => second.frames().map((frame) => frame.type), poll).toEqual(["welcome", "config"]);
       await expect.poll(() => first.closed(), poll).toEqual({ code: 4000, reason: "同一台电脑有了新连接" });
-      expect(Computer.parse(await stack.get("/api/computer")).status, "旧连接关闭不能把新连接标成休眠").toBe("online");
+      expect(
+        ComputerListResponse.parse(await stack.get("/api/computers")).computers[0]?.status,
+        "旧连接关闭不能把新连接标成休眠",
+      ).toBe("online");
 
       await stack.post(`/api/groups/${groupId}/messages`, { text: "交给新的连接" });
       await expect.poll(() => second.frames().filter((frame) => frame.type === "prompt").length, poll).toBe(1);

@@ -2,6 +2,7 @@ import {
   toolViewText,
   type Approval,
   type ApprovalId,
+  type AccountConfig,
   type BotId,
   type ControlToAgent,
   type GroupId,
@@ -14,10 +15,12 @@ import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
 import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
 import { findChiefBotId } from "../repo/groups.js";
+import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
+import { selectComputer, type ComputerSelection } from "./computer-selection.js";
 import { GroupTurns, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 
@@ -42,6 +45,26 @@ export type DispatchOptions = {
 };
 
 export type DispatchOutcome = { readonly kind: "sent" } | { readonly kind: "offline" } | { readonly kind: "no_target" };
+
+async function computerFor(
+  db: Db,
+  agents: AgentHub,
+  ownerId: UserId,
+  requiredAccounts: readonly AccountConfig[],
+): Promise<ComputerSelection> {
+  const computers = await listComputers(db, ownerId);
+  return selectComputer(
+    requiredAccounts,
+    computers.map((computer) => ({
+      computer: agents.isOnline(computer.id)
+        ? { ...computer, status: "online" }
+        : computer.status === "online"
+          ? { ...computer, status: "sleeping" }
+          : computer,
+      accounts: [],
+    })),
+  );
+}
 
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
@@ -80,7 +103,8 @@ export async function dispatchUserMessage(
           : task?.currentBotId !== null && task?.currentBotId !== undefined
             ? "current"
             : "everyone";
-  if (!deps.agents.isOnline(ownerId)) {
+  const selected = await computerFor(deps.db, deps.agents, ownerId, []);
+  if (selected.kind === "failed") {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
     return { kind: "offline" };
   }
@@ -112,7 +136,8 @@ async function sendSpeaker(
   includeRecent: boolean,
   options: DispatchOptions,
 ): Promise<RunId | null> {
-  if (!deps.agents.isOnline(ownerId)) {
+  const selected = await computerFor(deps.db, deps.agents, ownerId, []);
+  if (selected.kind === "failed") {
     await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
     return null;
   }
@@ -135,6 +160,7 @@ async function sendSpeaker(
   };
   const runId = await startRun(deps.db, {
     ownerId,
+    computerId: selected.computer.id,
     botId: speaker.botId,
     groupId,
     triggerMessageId: speaker.trigger.id,
@@ -146,7 +172,7 @@ async function sendSpeaker(
       : speaker.trigger.body.kind === "bot"
         ? botOrigin(members, speaker.trigger.body.botId)
         : { kind: options.routineRunId === undefined ? "user" : "routine" };
-  const sent = deps.agents.send(ownerId, {
+  const sent = deps.agents.send(selected.computer.id, {
     type: "prompt",
     runId,
     botId: speaker.botId,
@@ -255,12 +281,13 @@ export async function settleApproval(
   const decided = await decideApproval(deps.db, approvalId, decision);
   if (decided === null) return { kind: "already_decided" };
 
-  deps.agents.send(ownerId, {
-    type: "approval_result",
-    runId: decided.runId,
-    callId: decided.callId,
-    approved: decision === "approved",
-  });
+  if (decided.computerId !== null)
+    deps.agents.send(decided.computerId, {
+      type: "approval_result",
+      runId: decided.runId,
+      callId: decided.callId,
+      approved: decision === "approved",
+    });
   deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
   return { kind: "ok", approval: decided.approval };
 }

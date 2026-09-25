@@ -139,11 +139,14 @@ describe("派活", () => {
       expect(prompt.groupId).toBe(owner.groupId);
       expect(prompt.context, "群里在这条之前没有别的消息").toEqual([]);
 
-      const rows = await database.sql<{ id: string; trigger_message_id: string; ended_at: Date | null }[]>`
-        SELECT id, trigger_message_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
+      const rows = await database.sql<
+        { id: string; computer_id: string | null; trigger_message_id: string; ended_at: Date | null }[]
+      >`
+        SELECT id, computer_id, trigger_message_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
       `;
       expect(rows).toHaveLength(1);
       expect(rows[0]?.id).toBe(prompt.runId);
+      expect(rows[0]?.computer_id, "run 要记住真正派到的电脑").toBe(owner.computer.computerId);
       expect(rows[0]?.trigger_message_id, "run 要指回触发它的那条消息").toBe(sent.message.id);
       expect(rows[0]?.ended_at, "刚派出去的活还没结束").toBeNull();
     } finally {

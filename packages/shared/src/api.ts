@@ -59,15 +59,15 @@ export const RegisterRequest = z.object({
 });
 export const RegisterResponse = z.object({ user: User });
 
-// POST /api/computers/local。token 明文只在这次响应里出现。
-export const LocalComputerResponse = z.object({ computerId: ComputerId, token: z.string() });
+// POST /api/computers/local、POST /api/computers/remote。token 明文只在这次响应里出现。
+export const ComputerTokenResponse = z.object({ computerId: ComputerId, token: z.string() });
 export const ComputerListResponse = z.object({ computers: z.array(Computer) });
 
 // POST /api/auth/logout 无请求体，响应 204。
 // GET /api/me
 export const MeResponse = z.object({ user: User });
 
-// GET /api/computer  响应是 domain 里的 Computer。首次登录时建出来，状态先是 creating。
+// GET /api/computers  响应是 ComputerListResponse。本机和远程各至多一台。
 // GET /api/bots  侧栏需要每个 Bot 的单 Bot 群和最近一条消息。
 export const BotListItem = z.object({
   bot: Bot,

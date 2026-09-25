@@ -9,7 +9,7 @@ beforeEach(() => {
       vi.spyOn(AgentHub.prototype, "isOnline").mockReturnValue(true);
       break;
     case "disconnect":
-      vi.spyOn(computers, "markComputerSleeping").mockResolvedValue(undefined);
+      vi.spyOn(computers, "markComputerSleeping").mockResolvedValue(null);
       break;
     case "supersede": {
       const close = WebSocket.prototype.close;
@@ -20,12 +20,12 @@ beforeEach(() => {
     }
     case "handoff": {
       const send = AgentHub.prototype.send;
-      vi.spyOn(AgentHub.prototype, "send").mockImplementation(function (this: AgentHub, ownerId, message) {
+      vi.spyOn(AgentHub.prototype, "send").mockImplementation(function (this: AgentHub, computerId, message) {
         if (message.type === "prompt" && message.handoffId !== undefined) {
           const { handoffId: _handoffId, ...withoutHandoff } = message;
-          return send.call(this, ownerId, withoutHandoff);
+          return send.call(this, computerId, withoutHandoff);
         }
-        return send.call(this, ownerId, message);
+        return send.call(this, computerId, message);
       });
       break;
     }

@@ -33,7 +33,8 @@
 
 ```
 pnpm --filter @baize/control-plane seed           # 第一次建账号时打印 AGENT_TOKEN=...
-pnpm --filter @baize/control-plane computer-token # 之后重置并重新打印
+pnpm --filter @baize/control-plane computer-token # 重置并打印本机 token
+pnpm --filter @baize/control-plane computer-token -- remote [邮箱] # 创建或重置远程电脑 token
 ```
 
 模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`，`model` 一律换成 `GATEWAY_MODEL`，流式和非流式都原样透传。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。

@@ -183,8 +183,8 @@ describe("跨群改消息", () => {
     // 直接插一行而不是发条消息派活：派活会在攻击者群里留下一条用户消息，最后那句「只该有后发那条」就不成立了。
     const runId = RunId.parse(randomUUID());
     await database.sql`
-      INSERT INTO runs (id, bot_id, group_id, started_at)
-      VALUES (${runId}, ${attackerBot.bot.id}, ${attackerBot.group.id}, now())
+      INSERT INTO runs (id, bot_id, group_id, computer_id, started_at)
+      VALUES (${runId}, ${attackerBot.bot.id}, ${attackerBot.group.id}, ${computer.computerId}, now())
     `;
 
     try {

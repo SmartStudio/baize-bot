@@ -1,5 +1,6 @@
 import {
-  Computer,
+  ComputerListResponse,
+  ComputerTokenResponse,
   CreateBotResponse,
   CreateGroupResponse,
   MessageListResponse,
@@ -125,6 +126,36 @@ it("宽限到期且电脑未重连时收尾", async () => {
   expect(await notices(owner.client, owner.groupId)).toBe(1);
 });
 
+it("本机断线只收尾本机的 run", async () => {
+  const owner = await ownerWithBot();
+  const second = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小销" })).json());
+  const remoteResponse = await owner.client.post("/api/computers/remote");
+  expect(remoteResponse.status).toBe(200);
+  const remoteToken = ComputerTokenResponse.parse(await remoteResponse.json());
+  const remote = { computerId: remoteToken.computerId, token: remoteToken.token };
+  const localAgent = await connect(owner.computer);
+  const remoteAgent = await connect(remote);
+
+  try {
+    const localRun = await startRun(owner.client, owner.groupId, localAgent);
+    localAgent.close();
+    await localAgent.closed();
+    await waitFor(async () => {
+      const rows = await database.sql<{ status: string }[]>`
+        SELECT status FROM computers WHERE id = ${owner.computer.computerId}
+      `;
+      return rows[0]?.status === "sleeping";
+    }, "本机变休眠");
+
+    const remoteRun = await startRun(owner.client, second.group.id, remoteAgent);
+    await waitFor(() => ended(localRun), "本机 run 收尾");
+    expect(await ended(remoteRun), "远程电脑的 run 不能跟着本机收尾").toBe(false);
+  } finally {
+    localAgent.close();
+    remoteAgent.close();
+  }
+});
+
 it("电脑断线收尾后，挂着的审批变成已失效", async () => {
   const owner = await ownerWithBot();
   const agent = await connect(owner.computer);
@@ -228,7 +259,7 @@ it("计时器收尾进行时 hello 对账仍保留 activeRuns", async () => {
   const owner = await ownerWithBot();
   const first = await connect(owner.computer);
   const push = await connectPush(server.port, owner.client.cookie ?? "");
-  const originalOpenRunsForOwner = runsRepo.openRunsForOwner;
+  const originalOpenRunsForComputer = runsRepo.openRunsForComputer;
   let releaseTimerRead!: () => void;
   const timerReadBlocked = new Promise<void>((resolve) => {
     releaseTimerRead = resolve;
@@ -238,13 +269,13 @@ it("计时器收尾进行时 hello 对账仍保留 activeRuns", async () => {
     timerReadStarted = resolve;
   });
   let openRunsCalls = 0;
-  const openRunsSpy = vi.spyOn(runsRepo, "openRunsForOwner").mockImplementation(async (db, ownerId) => {
+  const openRunsSpy = vi.spyOn(runsRepo, "openRunsForComputer").mockImplementation(async (db, computerId) => {
     openRunsCalls += 1;
     if (openRunsCalls === 1) {
       timerReadStarted();
       await timerReadBlocked;
     }
-    return originalOpenRunsForOwner(db, ownerId);
+    return originalOpenRunsForComputer(db, computerId);
   });
 
   try {
@@ -311,7 +342,9 @@ it("宽限到期前重连并报告活着的 run，不收尾", async () => {
     await new Promise((resolve) => setTimeout(resolve, graceMs + 80));
     expect(await ended(runId)).toBe(false);
     expect(await notices(owner.client, owner.groupId)).toBe(0);
-    expect(Computer.parse(await (await owner.client.get("/api/computer")).json()).status).toBe("online");
+    expect(
+      ComputerListResponse.parse(await (await owner.client.get("/api/computers")).json()).computers[0]?.status,
+    ).toBe("online");
   } finally {
     second.close();
   }

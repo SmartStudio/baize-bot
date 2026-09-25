@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Cpu, Download, Gauge, Plug, Settings as SettingsIcon, X } from "lucide-react";
 import {
+  ComputerListResponse,
   Settings,
   type Bot,
   type BotId,
+  type Computer,
   type CreateToolRequest,
   type ToolConnection,
   type ToolConnectionId,
@@ -118,6 +120,89 @@ const GeneralPage = ({
     </div>
   </>
 );
+
+const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
+  local: "本机",
+  remote: "远程",
+};
+
+const COMPUTER_STATUS_TEXT: Record<Computer["status"], string> = {
+  online: "在线",
+  sleeping: "休眠",
+  creating: "创建中",
+  failed: "失败",
+};
+
+const COMPUTER_STATUS_CLASS: Record<Computer["status"], string> = {
+  online: "status-ok",
+  sleeping: "status-blocked",
+  creating: "status-running",
+  failed: "status-failed",
+};
+
+const ComputerPage = () => {
+  const [computers, setComputers] = useState<Computer[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    void fetch("/api/computers", { credentials: "same-origin" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`请求失败（${response.status}）`);
+        return ComputerListResponse.parse(await response.json());
+      })
+      .then((data) => {
+        if (active) setComputers(data.computers);
+      })
+      .catch((cause: unknown) => {
+        if (active) setError(cause instanceof Error ? cause.message : "加载电脑失败，请重试");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (loading)
+    return (
+      <p className="later" data-testid="computer-loading">
+        加载中…
+      </p>
+    );
+  if (error !== null) {
+    return (
+      <p className="later" data-testid="computer-error" role="alert">
+        电脑列表加载失败：{error}
+      </p>
+    );
+  }
+
+  return (
+    <div className="computers-page" data-testid="computer-list">
+      {computers?.map((computer) => (
+        <div
+          className="row-card computer-row"
+          data-testid="computer-row"
+          data-computer-id={computer.id}
+          key={computer.id}
+        >
+          <span>
+            <b>{COMPUTER_KIND_TEXT[computer.kind]}</b>
+          </span>
+          <span className="computer-status" data-testid="computer-status" data-status={computer.status}>
+            <i className={`status-dot ${COMPUTER_STATUS_CLASS[computer.status]}`} aria-hidden="true" />
+            <b>{COMPUTER_STATUS_TEXT[computer.status]}</b>
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
 
 const money = (amount: number): string => `¥${amount.toFixed(1)}`;
 
@@ -260,6 +345,8 @@ export const SettingsWindow = ({
               onUpdate={onUpdateTool}
               onDelete={onDeleteTool}
             />
+          ) : page === "computer" ? (
+            <ComputerPage />
           ) : page === "usage" ? (
             <UsagePage usage={usage} bots={bots} />
           ) : (

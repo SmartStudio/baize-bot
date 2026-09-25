@@ -1,4 +1,4 @@
-import { ApiError, Computer, LocalComputerResponse, type ComputerId } from "@baize/shared";
+import { ApiError, ComputerListResponse, ComputerTokenResponse, type ComputerId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEV_EMAIL, DEV_PASSWORD, seed } from "../src/seed.js";
 import { authenticateComputer, findComputerByOwner, markComputerOnline } from "../src/repo/computers.js";
@@ -28,7 +28,8 @@ describe("电脑归属", () => {
     const client = server.client();
     expect((await client.login(user.email, PASSWORD)).status).toBe(200);
 
-    const computer = Computer.parse(await (await client.get("/api/computer")).json());
+    const computer = ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0];
+    if (computer === undefined) throw new Error("登录后应有本机电脑");
     expect(computer.ownerId).toBe(user.id);
     expect(computer.status).toBe("creating");
     expect(computer.host).toBeNull();
@@ -40,11 +41,11 @@ describe("电脑归属", () => {
     const client = server.client();
 
     await client.login(user.email, PASSWORD);
-    const first = Computer.parse(await (await client.get("/api/computer")).json());
+    const first = ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0];
     await client.login(user.email, PASSWORD);
-    const second = Computer.parse(await (await client.get("/api/computer")).json());
+    const second = ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0];
 
-    expect(second.id).toBe(first.id);
+    expect(second?.id).toBe(first?.id);
     const rows = await database.sql<{ n: string }[]>`SELECT count(*) AS n FROM computers WHERE owner_id = ${user.id}`;
     expect(rows[0]?.n).toBe("1");
   });
@@ -57,13 +58,13 @@ describe("电脑归属", () => {
     await one.login(userOne.email, PASSWORD);
     await two.login(userTwo.email, PASSWORD);
 
-    const first = Computer.parse(await (await one.get("/api/computer")).json());
-    const second = Computer.parse(await (await two.get("/api/computer")).json());
-    expect(first.id).not.toBe(second.id);
+    const first = ComputerListResponse.parse(await (await one.get("/api/computers")).json()).computers[0];
+    const second = ComputerListResponse.parse(await (await two.get("/api/computers")).json()).computers[0];
+    expect(first?.id).not.toBe(second?.id);
   });
 
   it("没登录时返回 401", async () => {
-    const response = await server.client().get("/api/computer");
+    const response = await server.client().get("/api/computers");
     expect(response.status).toBe(401);
     ApiError.parse(await response.json());
   });
@@ -84,7 +85,7 @@ describe("token", () => {
     const response = await client.post("/api/computers/local");
     expect(response.status).toBe(200);
     const raw = await response.text();
-    const local = LocalComputerResponse.parse(JSON.parse(raw));
+    const local = ComputerTokenResponse.parse(JSON.parse(raw));
     expect(raw.split(local.token)).toHaveLength(2);
 
     const stored = await database.sql<Record<string, unknown>[]>`
@@ -92,7 +93,7 @@ describe("token", () => {
     `;
     expect(JSON.stringify(stored), "数据库行里不能出现 token 明文").not.toContain(local.token);
 
-    const visible = await client.get("/api/computer");
+    const visible = await client.get("/api/computers");
     expect(await visible.text(), "后续查询不能再拿到 token 明文").not.toContain(local.token);
 
     const connected = await helloAgent(server.server.port, local.computerId, local.token);
@@ -131,7 +132,9 @@ describe("seed", () => {
 
     const client = server.client();
     await client.login(DEV_EMAIL, DEV_PASSWORD);
-    expect(Computer.parse(await (await client.get("/api/computer")).json()).id).toBe(result.computerId);
+    expect(ComputerListResponse.parse(await (await client.get("/api/computers")).json()).computers[0]?.id).toBe(
+      result.computerId,
+    );
   });
 
   it("第二次 seed 不重建电脑也不再给 token", async () => {

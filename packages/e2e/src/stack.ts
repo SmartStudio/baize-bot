@@ -8,9 +8,9 @@ import postgres from "postgres";
 import { WebSocket } from "ws";
 import {
   AgentToControl,
-  Computer,
+  ComputerListResponse,
+  ComputerTokenResponse,
   ControlToAgent,
-  LocalComputerResponse,
   RegisterResponse,
   ServerPush,
   type ComputerId,
@@ -236,7 +236,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       }
       await waitFor(async () => {
         if (earlyExitError !== undefined) throw earlyExitError;
-        return Computer.parse(await api.get("/api/computer")).status === "online";
+        return ComputerListResponse.parse(await api.get("/api/computers")).computers[0]?.status === "online";
       }, "电脑上线");
     };
 
@@ -341,7 +341,7 @@ async function register(baseUrl: string): Promise<{
     headers: { cookie },
   });
   if (!localResponse.ok) throw new Error(`注册本机失败 ${localResponse.status}：${await localResponse.text()}`);
-  const local = LocalComputerResponse.parse(await localResponse.json());
+  const local = ComputerTokenResponse.parse(await localResponse.json());
   return { cookie, computerId: local.computerId, computerToken: local.token };
 }
 
