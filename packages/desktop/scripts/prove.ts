@@ -246,7 +246,7 @@ async function waitFor(page: DevtoolsPage, expression: string, timeoutMs: number
 
 async function driveProof(
   page: DevtoolsPage,
-  credentials: { readonly email: string; readonly password: string; readonly mode: "hello" | "bash" },
+  credentials: { readonly email: string; readonly password: string },
   waitAgent: () => Promise<void>,
 ): Promise<void> {
   await waitFor(page, "document.querySelector('[data-testid=login]') !== null", 30_000);
@@ -267,7 +267,6 @@ async function driveProof(
   await page.evaluate("document.querySelector('[data-testid=login-submit]').click()");
   await waitFor(page, "document.querySelector('[data-testid=main-window]') !== null", 30_000);
   await waitAgent();
-  if (credentials.mode === "hello") return;
   await waitFor(page, "document.querySelector('[data-testid=bot-item]') !== null", 20_000);
   await page.evaluate("document.querySelector('[data-testid=bot-item]').click()");
   await waitFor(page, "document.querySelector('[data-testid=composer-input]') !== null", 20_000);
@@ -374,7 +373,10 @@ function descendantsOf(rootPid: number): number[] {
       }
     }
   }
-  return [...found].filter((pid) => pid !== rootPid);
+  return rows
+    .filter((row) => found.has(row.pid) && row.pid !== rootPid)
+    .filter((row) => row.command.trim().split(/\s+/u)[0]?.split("/").pop() === "bash")
+    .map((row) => row.pid);
 }
 
 async function waitDescendants(rootPid: number, timeoutMs: number): Promise<number[]> {
@@ -386,10 +388,7 @@ async function waitDescendants(rootPid: number, timeoutMs: number): Promise<numb
   }
 }
 
-async function launch(
-  mode: "hello" | "bash" | "stored",
-  screenshot?: string,
-): Promise<{ child: ChildProcess; run: Run }> {
+async function launch(mode: "bash" | "stored", screenshot?: string): Promise<{ child: ChildProcess; run: Run }> {
   const env = cleanEnv({});
   const remoteDebuggingPort = await freePort();
   const started = performance.now();
@@ -411,7 +410,7 @@ async function launch(
     try {
       if (mode === "stored") await logs.waitFor("agent-online", 90_000);
       else {
-        await driveProof(page, { email: "chen@baize.dev", password: "baize-dev", mode }, () =>
+        await driveProof(page, { email: "chen@baize.dev", password: "baize-dev" }, () =>
           logs.waitFor("agent-online", 90_000).then(() => undefined),
         );
         if (screenshot !== undefined) await page.screenshot(screenshot);

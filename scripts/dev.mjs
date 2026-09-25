@@ -18,7 +18,7 @@ function readEnvFile(path) {
   return env;
 }
 
-// 整份 .env 给控制面和 Web，shell 里已经有的变量优先，和 dotenv 的习惯一致。电脑代理例外，见 agentEnvOf。
+// 整份 .env 给控制面和 Web，shell 里已经有的变量优先，和 dotenv 的习惯一致。电脑代理不继承 .env，见 agentEnvOf。
 const fileEnv = readEnvFile(join(root, ".env"));
 
 const services = [
@@ -52,7 +52,7 @@ function agentLaunchOf(envFromFile) {
   };
 }
 
-// Bot 的 bash 会继承代理的环境。代理照拿 shell 的环境，.env 里只拿连控制面要的普通配置，上游密钥和库连接留给控制面。
+// Bot 的 bash 会继承代理的环境。代理照拿 shell 的环境，但不把 .env 或代理专用变量带进去。
 function agentEnvOf(envFromFile) {
   const env = { ...process.env };
   for (const key of Object.keys(envFromFile)) {
@@ -109,14 +109,17 @@ for (const service of services) {
   }
   const isAgent = service.pkg === "@baize/computer-agent";
   const env = isAgent ? agentEnvOf(fileEnv) : { ...fileEnv, ...process.env };
-  // tsx watch 会把 stdin 当成交互控制，启动报文必须直接交给代理入口。
+  // 启动报文必须直接交给代理入口；代理的 dev 脚本也不热重载。
   const args = isAgent ? ["--filter", service.pkg, "exec", "tsx", "src/main.ts"] : ["--filter", service.pkg, "dev"];
   const child = spawn("pnpm", args, {
     cwd: root,
     stdio: [isAgent ? "pipe" : "ignore", "pipe", "pipe"],
     env,
   });
-  if (isAgent) child.stdin.write(`${JSON.stringify(agentLaunchOf(fileEnv))}\n`);
+  if (isAgent) {
+    child.stdin.on("error", (error) => console.error(`[${name}] stdin 写入失败：${error.message}`));
+    child.stdin.write(`${JSON.stringify(agentLaunchOf(fileEnv))}\n`);
+  }
   prefixed(name, child.stdout, (line) => process.stdout.write(line));
   prefixed(name, child.stderr, (line) => process.stderr.write(line));
   child.on("exit", (code, signal) => {

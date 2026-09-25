@@ -70,7 +70,7 @@ function proxyHttp(req: IncomingMessage, res: ServerResponse, target: URL): void
   const upstream = request(
     {
       protocol: target.protocol,
-      hostname: target.hostname,
+      hostname: targetHostname(target),
       port: target.port,
       method: req.method,
       path: req.url,
@@ -103,8 +103,8 @@ function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, target
   };
   const upstream =
     target.protocol === "https:"
-      ? tlsConnect({ host: target.hostname, port, servername: target.hostname }, () => forwardUpgrade())
-      : netConnect(port, target.hostname, forwardUpgrade);
+      ? tlsConnect({ host: targetHostname(target), port, servername: targetHostname(target) }, () => forwardUpgrade())
+      : netConnect(port, targetHostname(target), forwardUpgrade);
   const destroy = (): void => {
     socket.destroy();
     upstream.destroy();
@@ -128,6 +128,10 @@ function forwardedHeaders(
   }
   if (rewriteHost) next["host"] = target.host;
   return next;
+}
+
+function targetHostname(target: URL): string {
+  return target.hostname.replace(/^\[(.*)\]$/u, "$1");
 }
 
 function serveStatic(req: IncomingMessage, res: ServerResponse, webRoot: string): void {

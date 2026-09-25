@@ -24,6 +24,7 @@ import {
   type NotifyKind,
 } from "@baize/shared";
 import WebSocket from "ws";
+import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
 import {
   currentAgentChild,
   isCurrentAgent,
@@ -134,15 +135,30 @@ function agentUrl(origin: string): string {
   return url.toString();
 }
 
-class AgentReplacedError extends Error {}
+export class AgentReplacedError extends Error {}
 
-function startAgent(credentials: { readonly computerId: ComputerId; readonly token: string }): Promise<void> {
+const agentDataDir = (): string => join(app.getPath("userData"), "bots");
+
+// 助理 Chrome 是 open 起的，挂在 launchd 下，不在代理的进程组里。强杀代理时它来不及收，这里按 profile 收。
+async function reapAgentChrome(): Promise<void> {
+  try {
+    const reaped = await reapProfileChromes(chromeProfileDir(agentDataDir()));
+    if (reaped.length > 0) logLine(`agent-chrome-reaped ${reaped.join(",")}`);
+  } catch (error) {
+    logLine(`agent-chrome-reap-failed ${String(error)}`);
+  }
+}
+
+export function startAgent(
+  credentials: { readonly computerId: ComputerId; readonly token: string },
+  timeoutMs = 45_000,
+): Promise<void> {
   if (agentState.status === "starting" || agentState.status === "online") return Promise.resolve();
   const launch = AgentLaunch.parse({
     url: agentUrl(controlOrigin),
     computerId: credentials.computerId,
     token: credentials.token,
-    dataDir: join(app.getPath("userData"), "bots"),
+    dataDir: agentDataDir(),
   });
   let child: ChildProcess;
   try {
@@ -167,9 +183,18 @@ function startAgent(credentials: { readonly computerId: ComputerId; readonly tok
     let online = false;
     let settled = false;
     const timer = setTimeout(() => {
+      if (settled) return;
       settled = true;
-      reject(new Error("电脑代理 45 秒内没有被控制面接纳"));
-    }, 45_000);
+      clearTimeout(timer);
+      if (isCurrentAgent(agentState, child)) agentState = { status: "none" };
+      try {
+        process.kill(-child.pid!, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      void reapAgentChrome();
+      reject(new Error(`电脑代理 ${Math.round(timeoutMs / 1_000)} 秒内没有被控制面接纳`));
+    }, timeoutMs);
     const fail = (error: Error): void => {
       if (settled) return;
       settled = true;
@@ -258,7 +283,7 @@ function descendantPids(rootPid: number): number[] {
   return [...found].filter((pid) => pid !== rootPid);
 }
 
-async function stopAgent(): Promise<void> {
+export async function stopAgent(): Promise<void> {
   const child = currentAgentChild(agentState);
   if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
     agentState = { status: "none" };
@@ -295,6 +320,7 @@ async function stopAgent(): Promise<void> {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
   await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 500))]);
+  await reapAgentChrome();
 }
 
 async function postLocalComputer(
@@ -343,16 +369,16 @@ async function refreshPending(session: Session): Promise<void> {
   }
 }
 
-function connectPush(session: Session): void {
+export function connectPush(session: Session, origin = uiOrigin): void {
   const generation = ++pushGeneration;
   if (pushRetry !== null) clearTimeout(pushRetry);
   pushRetry = null;
   const previous = pushSocket;
   pushSocket = null;
   previous?.close();
-  void session.cookies.get({ url: uiOrigin }).then((cookies) => {
+  void session.cookies.get({ url: origin }).then((cookies) => {
     if (quitting || generation !== pushGeneration) return;
-    const url = new URL("/api/ws", uiOrigin);
+    const url = new URL("/api/ws", origin);
     url.protocol = "ws:";
     const socket = new WebSocket(url, {
       headers: { cookie: cookies.map((item) => `${item.name}=${item.value}`).join("; ") },
@@ -367,7 +393,7 @@ function connectPush(session: Session): void {
     socket.on("close", () => {
       if (!shouldRetryPush(quitting, pushSocket, socket)) return;
       pushSocket = null;
-      pushRetry = setTimeout(() => connectPush(session), 1_000);
+      pushRetry = setTimeout(() => connectPush(session, origin), 1_000);
     });
     socket.on("error", () => undefined);
   });

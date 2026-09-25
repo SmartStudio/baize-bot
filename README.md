@@ -66,7 +66,7 @@ pnpm --filter @baize/control-plane seed
 pnpm dev
 ```
 
-`pnpm dev` 起控制面和 Web。要连电脑代理，就把 seed 打印的 `COMPUTER_ID=` 和 `AGENT_TOKEN=` 填进根目录的 `.env` 或 shell，再跑 `pnpm dev --agent`。脚本会把 `{ url, computerId, token, dataDir }` 写入代理 stdin，代理环境不会带 `COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR`。
+`pnpm dev` 起控制面和 Web。要连电脑代理，就把 seed 打印的 `COMPUTER_ID=` 和 `AGENT_TOKEN=` 填进根目录的 `.env` 或 shell，再跑 `pnpm dev --agent`。脚本会把 `{ url, computerId, token, dataDir }` 写入代理 stdin，代理环境不会带 `COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR`。`pnpm dev --agent` 下代理不热重载。
 
 `pnpm check` 跑类型检查、lint 和测试。
 

@@ -1,10 +1,34 @@
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
 import type { RunnerConfig } from "@baize/bot-runner";
-import { startAgent, type AgentHandle, type RunnerFactory } from "../src/agent.js";
+import {
+  startAgent as startProductAgent,
+  type AgentHandle,
+  type AgentOptions,
+  type AgentRunnerConfig,
+  type RunnerFactory,
+} from "../src/agent.js";
+import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } from "../src/chrome.js";
+import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
+
+const fakeChrome = (): AssistantChrome => ({
+  profileDir: "/tmp/baize-test/chrome-profile",
+  cdpUrl: async () => "http://127.0.0.1:9222",
+  login: async () => ({ login: "valid", handle: "白泽工厂日记" }),
+  pid: () => null,
+  stop: async () => {},
+});
+const initialRunnerConfigs: AgentRunnerConfig[] = [];
+
+function startAgent(options: AgentOptions): AgentHandle {
+  return startProductAgent({ ...options, makeChrome: options.makeChrome ?? fakeChrome });
+}
 
 // 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
 interface RunnerCalls {
@@ -21,6 +45,7 @@ interface RunnerCalls {
 
 function fakeRunner(calls: RunnerCalls): RunnerFactory {
   return (config) => {
+    initialRunnerConfigs.push(config);
     calls.configSkills.push(config.skills);
     return runnerOf(config, calls);
   };
@@ -166,7 +191,9 @@ const runnerCalls = (): RunnerCalls => {
 
 function spawnAgent(
   url: string,
-  tuning: { heartbeatMs?: number; backoff?: BackoffOptions; makeRunner?: RunnerFactory } = {},
+  tuning: Partial<
+    Pick<AgentOptions, "heartbeatMs" | "backoff" | "makeRunner" | "makeChrome" | "loginTimeoutMs" | "dataDir">
+  > = {},
 ): AgentHandle {
   const calls: RunnerCalls = {
     approvals: [],
@@ -198,10 +225,21 @@ async function startPair(tuning: { heartbeatMs?: number; backoff?: BackoffOption
   return server;
 }
 
+const dataDirs: string[] = [];
+
+async function tempDataDir(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "baize-agent-test-"));
+  dataDirs.push(directory);
+  return directory;
+}
+
 afterEach(async () => {
   await Promise.all(agents.splice(0).map((agent) => agent.stop()));
+  await Promise.all(dataDirs.map((directory) => reapProfileChromes(chromeProfileDir(directory))));
+  await Promise.all(dataDirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
   await Promise.all(servers.splice(0).map((server) => server.close()));
   runnerCallsLog.splice(0);
+  initialRunnerConfigs.splice(0);
 });
 
 describe("电脑代理连控制面", () => {
@@ -276,6 +314,17 @@ describe("电脑代理连控制面", () => {
     } finally {
       releaseApplyConfig?.();
     }
+  });
+
+  it("把 Chrome profile 和动态 CDP 地址交给运行器", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify(configMessage));
+    await poll(() => initialRunnerConfigs[0], 3000, "运行器配置");
+
+    expect(initialRunnerConfigs[0]?.browser.profileDir).toBe("/tmp/baize-test/chrome-profile");
+    await expect(initialRunnerConfigs[0]?.browser.cdpUrl()).resolves.toBe("http://127.0.0.1:9222");
   });
 
   it("连上后按间隔发心跳", async () => {
@@ -363,6 +412,107 @@ describe("电脑代理连控制面", () => {
     await server.waitForMessage("bot_text", 1, 3000);
     expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: false }]);
   });
+
+  it("收 browser_login 后回一条 login_state", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+
+    await expect(server.waitForMessage("login_state", 1, 500)).resolves.toEqual({
+      type: "login_state",
+      accountId: "account-1",
+      state: { login: "valid", handle: "白泽工厂日记" },
+    });
+  });
+
+  it.each([
+    ["启动就失败", async (): Promise<never> => Promise.reject(new Error("没装 Chrome"))],
+    ["一直起不来", (): Promise<never> => new Promise<never>(() => {})],
+  ])("Chrome %s时 browser_login 回 expired", async (_label, launchChrome) => {
+    const server = startControlPlane();
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      dataDir: await tempDataDir(),
+      loginTimeoutMs: 300,
+      makeChrome: (options) =>
+        startAssistantChrome({
+          ...options,
+          launchChrome,
+          activateProcess: async () => {},
+          backgroundProcess: async () => {},
+        }),
+    });
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+
+    await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
+      type: "login_state",
+      accountId: "account-1",
+      state: { login: "expired" },
+    });
+  });
+
+  it("前一个登录卡住不堵后一个", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const outcomes: Promise<BrowserLoginState>[] = [
+      new Promise<never>(() => {}),
+      Promise.resolve({ login: "valid", handle: "白泽工厂日记" }),
+    ];
+    let logins = 0;
+    spawnAgent(await server.url(), {
+      loginTimeoutMs: 300,
+      makeChrome: () => ({
+        ...fakeChrome(),
+        login: () => {
+          logins += 1;
+          return outcomes.shift() ?? Promise.reject(new Error("多登了一次"));
+        },
+      }),
+    });
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+    // 上限从收到报文算起。第二条等第一条真的卡在登录里再发，它的上限才晚于第一条到点。
+    await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
+    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-2", platform: "xiaohongshu" }));
+    await server.waitForMessage("login_state", 2, 3000);
+
+    expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      { type: "login_state", accountId: "account-1", state: { login: "expired" } },
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
+    ]);
+  });
+
+  it.runIf(process.platform === "darwin")(
+    "代理正常停机后，这个 profile 的 Chrome 不在了",
+    async () => {
+      const server = startControlPlane();
+      servers.push(server);
+      const directory = await tempDataDir();
+      const cdpUrls: Promise<string>[] = [];
+      const agent = spawnAgent(await server.url(), {
+        dataDir: directory,
+        makeChrome: startAssistantChrome,
+        makeRunner: (config) => {
+          cdpUrls.push(config.browser.cdpUrl());
+          return runnerOf(config, runnerCalls());
+        },
+      });
+      const socket = await server.waitForSocket(1);
+      socket.send(JSON.stringify(configMessage));
+      await poll(() => cdpUrls[0], 3000, "运行器要 CDP 地址");
+      const running = await profileChromePids(chromeProfileDir(directory));
+      expect(running, "前提：运行器要过 CDP 之后这个 profile 有一个 Chrome").toHaveLength(1);
+
+      await agent.stop();
+
+      expect(await profileChromePids(chromeProfileDir(directory))).toEqual([]);
+    },
+    30_000,
+  );
 
   it("prompt 等审批时仍派发后续 approval_result，让这次 run 收尾", async () => {
     const server = startControlPlane();

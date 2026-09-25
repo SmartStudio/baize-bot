@@ -17,6 +17,7 @@ import {
 } from "@baize/shared";
 import { createRunner, type PromptMessage } from "@baize/bot-runner";
 import { startAgent } from "@baize/computer-agent";
+import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
 import {
   connect,
   databaseUrl,
@@ -270,7 +271,11 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         closers.push(probe.close);
         return probe;
       },
-      close: closeAll,
+      close: async () => {
+        await closeAll();
+        const leftover = await reapProfileChromes(chromeProfileDir(dataDir));
+        if (leftover.length > 0) throw new Error(`电脑代理收尾后留下了助理 Chrome，PID ${leftover.join(", ")}`);
+      },
     };
   } catch (error) {
     await closeAll();

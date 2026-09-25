@@ -4,8 +4,17 @@ import { WebSocket } from "ws";
 import { type AgentToControl, type ComputerId, ControlToAgent } from "@baize/shared";
 import { createRunner, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
+import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
 
-export type RunnerFactory = (config: RunnerConfig) => Runner;
+export interface AgentRunnerConfig extends RunnerConfig {
+  readonly browser: {
+    readonly profileDir: string;
+    cdpUrl(): Promise<string>;
+  };
+}
+
+export type RunnerFactory = (config: AgentRunnerConfig) => Runner;
+export type AssistantChromeFactory = (options: AssistantChromeOptions) => AssistantChrome;
 
 export interface AgentOptions {
   readonly url: string;
@@ -21,6 +30,10 @@ export interface AgentOptions {
   readonly makeRunner?: RunnerFactory;
   /** 停机时等运行器收尾的上限。超时后仍会关连接退出。 */
   readonly runnerStopTimeoutMs?: number;
+  /** 换掉真 Chrome 守护。测试用它避免启动图形应用。 */
+  readonly makeChrome?: AssistantChromeFactory;
+  /** 一次 browser_login 从收到到回 login_state 的上限，排队和等 Chrome 起来都算在内。 */
+  readonly loginTimeoutMs?: number;
 }
 
 export interface AgentHandle {
@@ -38,8 +51,14 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const backoff = options.backoff ?? defaultBackoff;
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
   const dataDir = options.dataDir ?? join(homedir(), ".baize", "bots");
-  const makeRunner = options.makeRunner ?? createRunner;
+  const makeRunner: RunnerFactory = options.makeRunner ?? ((config) => createRunner(config));
   const runnerStopTimeoutMs = options.runnerStopTimeoutMs ?? 3_000;
+  const loginTimeoutMs = options.loginTimeoutMs ?? 120_000;
+  const chrome = (options.makeChrome ?? startAssistantChrome)({ dataDir, log });
+  const browserConfig: AgentRunnerConfig["browser"] = {
+    profileDir: chrome.profileDir,
+    cdpUrl: () => chrome.cdpUrl(),
+  };
 
   let link: Link = { phase: "stopped" };
   let stopping = false;
@@ -49,6 +68,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let runner: Runner | null = null;
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
+  let loginQueue: Promise<void> = Promise.resolve();
 
   const send = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
@@ -88,7 +108,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         process.stdout.write('{"type":"online"}\n');
         return;
       case "config": {
-        const config: RunnerConfig = {
+        const config: AgentRunnerConfig = {
           computerId: options.computerId,
           bots: message.bots,
           tools: message.tools,
@@ -99,6 +119,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           skills: message.skills,
           dataDir,
           send,
+          browser: browserConfig,
         };
         if (runner === null) {
           runner = makeRunner(config);
@@ -128,6 +149,25 @@ export function startAgent(options: AgentOptions): AgentHandle {
           return;
         }
         runner.approve(message.runId, message.callId, message.approved);
+        return;
+      }
+      case "browser_login": {
+        const deadline = AbortSignal.timeout(loginTimeoutMs);
+        // 到点就不再等这次登录，队列接着走。login 自己也收 deadline，会收起窗口。
+        loginQueue = loginQueue
+          .then(() => {
+            deadline.throwIfAborted();
+            return untilAborted(chrome.login(message.platform, deadline), deadline);
+          })
+          .then((state) => {
+            if (!stopping) send({ type: "login_state", accountId: message.accountId, state });
+          })
+          .catch((error: unknown) => {
+            log(`登录 ${message.platform} 失败：${String(error)}`);
+            if (!stopping) {
+              send({ type: "login_state", accountId: message.accountId, state: { login: "expired" } });
+            }
+          });
         return;
       }
       case "pause":
@@ -197,6 +237,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       if (link.phase === "waiting") clearTimeout(link.timer);
 
       stopPromise = (async () => {
+        const chromeStopping = chrome.stop().catch((error: unknown) => log(`助理 Chrome 停机失败：${String(error)}`));
         const currentRunner = runner;
         if (currentRunner !== null) {
           let timeout: NodeJS.Timeout | null = null;
@@ -219,6 +260,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           if (result === "timed-out") log(`运行器停机超过 ${runnerStopTimeoutMs}ms，继续关闭连接`);
         }
         runner = null;
+        await chromeStopping;
 
         const current = link;
         link = { phase: "stopped" };
