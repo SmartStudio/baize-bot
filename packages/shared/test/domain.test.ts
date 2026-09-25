@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   AgentToControl,
   Bot,
+  BotId,
   ControlToAgent,
   CreateGroupRequest,
   CreateRoutineRequest,
@@ -18,9 +19,19 @@ import {
   OvernightResponse,
   UsageResponse,
   UsageRunItem,
+  type UserId,
 } from "../src/index.js";
 
 const now = "2026-09-18T00:00:00.000Z";
+
+describe("id 品牌", () => {
+  it("BotId 不能赋给 UserId", () => {
+    const botId = BotId.parse("b1");
+    // @ts-expect-error BotId 和 UserId 必须是两个不同的品牌。
+    const userId: UserId = botId;
+    expect(userId).toBe("b1");
+  });
+});
 
 describe("domain schemas reject illegal states", () => {
   it("a group needs 1 to 6 bots", () => {

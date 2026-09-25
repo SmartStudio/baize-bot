@@ -3,7 +3,7 @@ import { z } from "zod";
 // 对象模型。依据 spec/规格.md 第二节，这里是各对象「现在」的形状。每个对象一个 zod schema，类型从 schema 推导。
 // 状态一律用字面量联合，不用布尔组合。
 
-const id = (brand: string) => z.string().min(1).brand(brand);
+const id = <B extends string>(_brand: B) => z.string().min(1).brand<B>();
 // 运行器直接拿来当目录名的 id（<botDir>/skills/<skillId>/、<botDir>/sessions/<groupId>/），只收一段安全的名字。
 const dirId = <B extends string>(brand: B) =>
   z
@@ -13,7 +13,6 @@ const dirId = <B extends string>(brand: B) =>
 
 export const UserId = id("UserId");
 export const ComputerId = id("ComputerId");
-export const DesktopId = id("DesktopId");
 export const BotId = id("BotId");
 export const GroupId = dirId("GroupId");
 export const TaskId = id("TaskId");
@@ -27,7 +26,6 @@ export const RunId = id("RunId");
 
 export type UserId = z.infer<typeof UserId>;
 export type ComputerId = z.infer<typeof ComputerId>;
-export type DesktopId = z.infer<typeof DesktopId>;
 export type BotId = z.infer<typeof BotId>;
 export type GroupId = z.infer<typeof GroupId>;
 export type TaskId = z.infer<typeof TaskId>;
@@ -62,18 +60,6 @@ export const Computer = z.object({
   lastSeenAt: Timestamp.nullable(),
 });
 export type Computer = z.infer<typeof Computer>;
-
-export const DesktopStatus = z.enum(["idle", "working", "taken_over"]);
-export type DesktopStatus = z.infer<typeof DesktopStatus>;
-
-export const Desktop = z.object({
-  id: DesktopId,
-  computerId: ComputerId,
-  botId: BotId,
-  status: DesktopStatus,
-  streamUrl: z.string().nullable(),
-});
-export type Desktop = z.infer<typeof Desktop>;
 
 // 七个队友色相，来自设计系统 tokens/colors.css 的 --bot-*。
 export const BotHue = z.enum(["coral", "tangerine", "lime", "mint", "sky", "violet", "pink"]);
