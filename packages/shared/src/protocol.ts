@@ -64,9 +64,19 @@ export const AgentToControl = z.discriminatedUnion("type", [
     activeRuns: z.array(RunId),
   }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
+  // 代理收下一条 config 并换好了运行器。旧代理不发，控制面只拿它从 config_rejected 里恢复。
+  z.object({ type: z.literal("config_applied") }),
   z.object({
     type: z.literal("agent_error"),
-    code: z.enum(["bad_message", "prompt_before_config", "unsupported", "runner_failed", "model_failed"]),
+    code: z.enum([
+      "bad_message",
+      "prompt_before_config",
+      "unsupported",
+      "runner_failed",
+      "model_failed",
+      // 代理不认这条 config（多半是两边版本对不上），detail 写校验不过的字段路径。
+      "config_rejected",
+    ]),
     detail: z.string(),
     // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
     groupId: GroupId.optional(),
@@ -262,8 +272,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     grants: z.array(Grant),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
     // 读 GitHub、X 走控制面的账号代理：`${baseUrl}/<accountId>/<平台路径>`，Bearer 用 modelGateway.apiKey，令牌不下发。
-    // 运行器的读工具接上之前可省。
-    accountsProxy: z.object({ baseUrl: z.string().url() }).optional(),
+    accountsProxy: z.object({ baseUrl: z.string().url() }),
   }),
   z.object({
     type: z.literal("prompt"),
