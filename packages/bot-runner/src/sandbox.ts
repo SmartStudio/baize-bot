@@ -18,6 +18,7 @@ const MACH_LOOKUP_NAMES = [
   "com.apple.system.notification_center",
   "com.apple.runningboard",
 ] as const;
+const MDNS_RESPONDER_SOCKET = "/private/var/run/mDNSResponder";
 
 const shSingleQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 const seatbeltString = (value: string): string => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -60,11 +61,19 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
     '(allow file-write* (literal "/dev/fd/1"))',
     '(allow file-write* (literal "/dev/fd/2"))',
     '(allow file-write* (literal "/dev/dtracehelper"))',
+    // 连 unix socket 在 seatbelt 里算 network-outbound，裸的 (allow network-outbound) 会把本机所有 unix socket
+    // 一起放开（docker.sock、用户自己 Chrome 的 SingletonSocket）。批了联网只放 IP、DNS 走的 mDNSResponder
+    // 和工作目录里 Bot 自己起的 socket。
     ...(access.network
-      ? ["(allow network-outbound)", "(allow network-inbound)", "(allow network-bind)"]
+      ? [
+          "(allow network-outbound (remote ip))",
+          `(allow network-outbound (remote unix-socket (path-literal ${seatbeltString(MDNS_RESPONDER_SOCKET)})))`,
+          `(allow network-outbound (remote unix-socket (subpath ${seatbeltString(work)})))`,
+          "(allow network-inbound)",
+          "(allow network-bind)",
+        ]
       : ["(deny network*)"]),
-    // 连 unix socket 在 seatbelt 里算 network-outbound，拒读拒写挡不住，批了联网时禁区里的 socket
-    // （助理 Chrome 的 SingletonSocket）要单独拒。
+    // 禁区落在工作目录里面时，上面放开的工作目录 socket 在这里拒回去。
     ...zones.hidden.flatMap((prefix) => {
       const real = seatbeltString(realpathExisting(prefix));
       return [

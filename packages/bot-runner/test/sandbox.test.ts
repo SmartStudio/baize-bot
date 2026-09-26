@@ -83,14 +83,14 @@ const connectUnix = (path: string): Promise<void> =>
 
 // 先列目录，再分别按相对路径（cd 进去）和绝对路径连：macOS 的 sun_path 只有 104 字节，长路径只能相对连。
 // 连上打 CONNECTED，连不上只打错误码，不带路径，列不出时输出里就不会出现 socket 的名字。
-const unixSocketProbe = (socketDir: string): string => {
+const unixSocketProbe = (socketDir: string, name = "SingletonSocket"): string => {
   const connectScript = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{process.stdout.write("CONNECTED\\n");s.end()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
   const node = shellQuote(process.execPath);
   const dir = shellQuote(socketDir);
   return [
     `ls -A ${dir} 2>/dev/null`,
-    `(cd ${dir} 2>/dev/null && ${node} -e ${shellQuote(connectScript)} SingletonSocket)`,
-    `${node} -e ${shellQuote(connectScript)} ${shellQuote(join(socketDir, "SingletonSocket"))}`,
+    `(cd ${dir} 2>/dev/null && ${node} -e ${shellQuote(connectScript)} ${shellQuote(name)})`,
+    `${node} -e ${shellQuote(connectScript)} ${shellQuote(join(socketDir, name))}`,
     "true",
   ].join("; ");
 };
@@ -194,6 +194,110 @@ describe("bash 沙箱性能", () => {
       }
     },
   );
+
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下批了联网，工作目录和禁区外的 unix socket 连不上，不批联网也连不上",
+    async () => {
+      // 代表 docker.sock 和用户自己 Chrome 的 SingletonSocket：在系统临时目录里，不在工作目录，也不在禁区。
+      const outside = mkdtempSync(join(tmpdir(), "baize-host-sock-"));
+      const server = await listenUnix(join(outside, "docker.sock"));
+      let runId = "";
+      try {
+        const sandbox = createSandboxedBash(workDir, zones, () => runId);
+        for (const callId of ["networked", "plain"]) {
+          runId = `run-host-sock-${callId}`;
+          if (callId === "networked") sandbox.allow(runId, callId, { network: true, writePaths: [] });
+          const result = await sandbox.tool.execute(
+            callId,
+            { command: unixSocketProbe(outside, "docker.sock") },
+            undefined,
+            undefined,
+            undefined as never,
+          );
+          const output = JSON.stringify(result.content);
+          expect(output, `${callId}：相对路径和绝对路径都连不上`).not.toContain("CONNECTED");
+          expect(output, callId).toContain("REFUSED EPERM");
+        }
+        expect(server.accepted(), "沙箱里一次都没连上").toBe(0);
+        await connectUnix(join(outside, "docker.sock"));
+        expect(server.accepted(), "沙箱外连得上").toBe(1);
+      } finally {
+        await server.close();
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下批了联网能解析域名、连本机回环、连工作目录里的 socket，不批联网三样都不通",
+    async () => {
+      // 本机的 .local 名字由 mDNSResponder 解析，不靠外网，所以断网的机器上也测得出 DNS 那条 socket 放没放开。
+      const localName = `${spawnSync("/usr/sbin/scutil", ["--get", "LocalHostName"], { encoding: "utf8" }).stdout.trim()}.local`;
+      const socketDir = join(workDir, "svc");
+      mkdirSync(socketDir, { recursive: true });
+      const unixServer = await listenUnix(join(socketDir, "bot.sock"));
+      const httpServer = createHttpServer((_request, response) => response.end("pong-sandbox-net"));
+      await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+      const address = httpServer.address();
+      if (address === null || typeof address === "string") throw new Error("没有拿到本地测试端口");
+      const node = shellQuote(process.execPath);
+      const command = [
+        `${node} -e 'require("node:dns").lookup(process.argv[1],(e,a)=>process.stdout.write((e?"DNS-FAIL "+e.code:"DNS-OK")+"\\n"))' ${shellQuote(localName)}`,
+        `/usr/bin/curl -sS --max-time 2 http://127.0.0.1:${address.port}/ || echo LOOPBACK-FAIL`,
+        unixSocketProbe(socketDir, "bot.sock"),
+      ].join("; ");
+      let runId = "run-net-ok";
+      try {
+        const sandbox = createSandboxedBash(workDir, zones, () => runId);
+        sandbox.allow(runId, "networked", { network: true, writePaths: [] });
+        const networked = JSON.stringify(
+          (await sandbox.tool.execute("networked", { command }, undefined, undefined, undefined as never)).content,
+        );
+        expect(networked, "DNS 照常").toContain("DNS-OK");
+        expect(networked, "本机回环照常").toContain("pong-sandbox-net");
+        expect(networked.match(/CONNECTED/g), "工作目录里的 socket 相对路径和绝对路径都连得上").toHaveLength(2);
+
+        runId = "run-net-off";
+        const plain = JSON.stringify(
+          (await sandbox.tool.execute("plain", { command }, undefined, undefined, undefined as never)).content,
+        );
+        expect(plain, "不批联网 DNS 不通").toContain("DNS-FAIL");
+        expect(plain, "不批联网回环不通").toContain("LOOPBACK-FAIL");
+        expect(plain, "不批联网连不上工作目录里的 socket").not.toContain("CONNECTED");
+        expect(unixServer.accepted(), "只有批了联网那次的两连").toBe(2);
+      } finally {
+        await unixServer.close();
+        await new Promise((resolve) => httpServer.close(resolve));
+        rmSync(socketDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("seatbelt 下禁区落在工作目录里，批了联网也连不上里面的 socket", async () => {
+    const nestedProfile = join(workDir, "nested-profile");
+    mkdirSync(nestedProfile, { recursive: true });
+    const server = await listenUnix(join(nestedProfile, "SingletonSocket"));
+    try {
+      const sandbox = createSandboxedBash(
+        workDir,
+        forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), nestedProfile),
+        () => "run-nested",
+      );
+      sandbox.allow("run-nested", "call-nested", { network: true, writePaths: [] });
+      const result = await sandbox.tool.execute(
+        "call-nested",
+        { command: unixSocketProbe(nestedProfile) },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      expect(JSON.stringify(result.content)).not.toContain("CONNECTED");
+      expect(server.accepted()).toBe(0);
+    } finally {
+      await server.close();
+      rmSync(nestedProfile, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(process.platform !== "darwin")("seatbelt 下配图拷贝目录读得到、写不进，批准写 Bot 目录也一样", async () => {
     const drafts = botDirs(dataDir, BotId.parse("bot-1")).draftsDir;
@@ -591,6 +695,30 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
       expect(server.accepted(), "沙箱外连得上，所以只有这一次").toBe(1);
     } finally {
       await server.close();
+    }
+  });
+
+  // bwrap 挡 unix socket 只靠看不看得见：共用网络命名空间不影响文件 socket，看得见的就连得上。
+  it("bwrap 下批了联网，真 /tmp 里的 unix socket 连不上，工作目录里的 socket 连得上", async () => {
+    const hostDir = mkdtempSync(join("/tmp", "baize-host-sock-"));
+    const hostServer = await listenUnix(join(hostDir, "docker.sock"));
+    const workServer = await listenUnix(join(botWork, "bot.sock"));
+    try {
+      const callId = nextCall();
+      sandbox.allow(runId, callId, { network: true, writePaths: [] });
+      const result = await run(
+        `${unixSocketProbe(hostDir, "docker.sock")}; ${unixSocketProbe(botWork, "bot.sock")}`,
+        callId,
+      );
+      const output = JSON.stringify(result.content);
+      expect(output.match(/CONNECTED/g), "只有工作目录里的 socket 两种写法都连得上").toHaveLength(2);
+      expect(hostServer.accepted(), "沙箱外的 socket 一次都没连上").toBe(0);
+      expect(workServer.accepted()).toBe(2);
+    } finally {
+      await hostServer.close();
+      await workServer.close();
+      rmSync(hostDir, { recursive: true, force: true });
+      rmSync(join(botWork, "bot.sock"), { force: true });
     }
   });
 
