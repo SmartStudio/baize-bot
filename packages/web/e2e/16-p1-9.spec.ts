@@ -1,8 +1,8 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { TestInfo } from "@playwright/test";
-import { DecideProjectOfferResponse, GroupListResponse, MessageListResponse } from "@baize/shared";
-import { expect, login, openBot, teamCard, test, type Page } from "./fixtures";
+import { BotListResponse, DecideProjectOfferResponse, GroupListResponse, MessageListResponse } from "@baize/shared";
+import { ServerPush, expect, login, openBot, openSeededBot, teamCard, test, type Page } from "./fixtures";
 
 const screenshotPath = async (testInfo: TestInfo, name: string): Promise<string> => {
   const auditDir = process.env["BAIZE_P1_9_AUDIT_DIR"];
@@ -205,4 +205,160 @@ test("刷新之后已发出的草稿卡还带原帖链接", async ({ page, reque
     "href",
     /^https:\/\/www\.xiaohongshu\.com\//,
   );
+});
+
+const offerMessage = async (page: Page) => {
+  const offer = MessageListResponse.parse(
+    await (await page.request.get("/api/groups/grp_assistant/messages")).json(),
+  ).messages.find((message) => message.body.kind === "project_offer");
+  if (offer === undefined || offer.body.kind !== "project_offer") throw new Error("主助理单聊里没有方案卡");
+  return { ...offer, body: offer.body };
+};
+
+test("卡已在别处放弃时，按回包收成一行灰字，不跳", async ({ page }) => {
+  await login(page);
+  const card = await proposeFromSidebar(page, STAR_GOAL);
+  const offer = await offerMessage(page);
+  // 控制面抢不到卡时只回 200 加卡现在的样子，不推送；这里整条替掉，卡能换样子只可能靠回包。
+  await page.route("**/project-offer", (route) =>
+    route.fulfill({ json: { message: { ...offer, body: { ...offer.body, status: "dismissed" } }, group: null } }),
+  );
+
+  await card.getByTestId("project-offer-start").click();
+  await expect(card, "卡跟着回包里的状态换").toHaveAttribute("data-status", "dismissed");
+  await expect(card, "收成一行灰字").toHaveText("方案「推广白泽」没有开始");
+  await expect(card.getByRole("button"), "放弃了的卡上没有按钮").toHaveCount(0);
+  const muted = await card.evaluate((element) => getComputedStyle(element).color);
+  const goal = await page
+    .getByTestId("message-list")
+    .locator("[data-kind=user]", { hasText: STAR_GOAL })
+    .evaluate((element) => getComputedStyle(element).color);
+  expect(muted, "灰字和正文的颜色不同").not.toBe(goal);
+  await expect(page, "没开始就不跳").toHaveURL(/\/g\/grp_assistant$/);
+  await expect(page.getByTestId("group-item"), "没建出项目").toHaveCount(1);
+});
+
+test("卡已在别处开始时，按回包跳进那个群", async ({ page }) => {
+  await login(page);
+  const card = await proposeFromSidebar(page, STAR_GOAL);
+  const offer = await offerMessage(page);
+  const existing = GroupListResponse.parse(await (await page.request.get("/api/groups")).json()).items[0];
+  if (existing === undefined) throw new Error("mock 里没有预置的群");
+  await page.route("**/project-offer", (route) =>
+    route.fulfill({
+      json: {
+        message: { ...offer, body: { ...offer.body, status: "started", groupId: existing.group.id } },
+        group: existing.group,
+      },
+    }),
+  );
+
+  await card.getByTestId("project-offer-start").click();
+  await expect(page, "跳进回包里的那个群").toHaveURL(new RegExp(`/g/${existing.group.id}$`));
+  await expect(page.getByTestId("chat-title")).toHaveText(existing.task.title);
+  await expect(page.getByTestId("group-item"), "没有多建一个项目").toHaveCount(1);
+
+  await page.getByTestId("assistant-nav").click();
+  const started = offerCard(page);
+  await expect(started, "卡换成已开始靠的是回包，没有推送").toHaveAttribute("data-status", "started");
+  await started.getByTestId("project-offer-open").click();
+  await expect(page, "去看看指向回包里的群").toHaveURL(new RegExp(`/g/${existing.group.id}$`));
+});
+
+test("新群的推送晚于回包时，开始后照样留在新群", async ({ page }) => {
+  const held: string[] = [];
+  let release = () => {};
+  await page.routeWebSocket(/\/api\/ws$/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => server.send(message));
+    let holding = true;
+    server.onMessage((message) => {
+      const push = typeof message === "string" ? ServerPush.safeParse(JSON.parse(message)) : null;
+      if (holding && push?.success === true && push.data.type === "group_created") held.push(String(message));
+      else ws.send(message);
+    });
+    release = () => {
+      holding = false;
+      for (const message of held.splice(0)) ws.send(message);
+    };
+  });
+  await login(page);
+  const card = await proposeFromSidebar(page, STAR_GOAL);
+
+  await card.getByTestId("project-offer-start").click();
+  await expect(page.getByTestId("chat-title"), "推送没到也进得了新群").toHaveText("推广白泽");
+  await expect(page).toHaveURL(/\/g\/(?!grp_assistant$)[^/]+$/);
+  await expect(page.getByTestId("group-item"), "侧栏从补拉里拿到了新群").toHaveCount(2);
+  expect(held, "group_created 确实被扣在路上").toHaveLength(1);
+  const projectUrl = page.url();
+
+  release();
+  await expect.poll(() => held.length, "扣下的推送放出去了").toBe(0);
+  await page.getByTestId("assistant-nav").click();
+  await expect(offerCard(page)).toHaveAttribute("data-status", "started");
+  await expect(page.getByTestId("group-item"), "推送晚到不会多出一行").toHaveCount(2);
+  await page.getByTestId("group-item").filter({ hasText: "推广白泽" }).click();
+  await expect(page).toHaveURL(projectUrl);
+});
+
+test("在两个群之间来回，已发出的草稿卡还带原帖链接", async ({ page, request }) => {
+  await login(page);
+  const approved = await page.request.post("/api/drafts/draft_today_reply", { data: { decision: "approve" } });
+  expect(approved.status()).toBe(200);
+  expect((await request.post("/api/test/drafts/draft_today_reply/publish")).status()).toBe(204);
+  await page.reload();
+  await page.goto("/g/grp_assistant");
+  const card = page.getByTestId("message-list").getByTestId("draft-card").filter({ hasText: "阿杰的车间" });
+  const link = card.getByTestId("draft-link");
+  await expect(link).toHaveAttribute("href", /^https:\/\/www\.xiaohongshu\.com\//);
+
+  const pages: string[] = [];
+  page.on("request", (sent) => {
+    if (sent.url().includes("/messages")) pages.push(new URL(sent.url()).pathname);
+  });
+  await openSeededBot(page, "小采");
+  await page.getByTestId("assistant-nav").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("主助理");
+  expect(pages, "回到主助理单聊不重新拉历史，链接只能靠本地那份").toEqual(["/api/groups/grp_buy/messages"]);
+  await expect(link, "进过别的群，链接还在").toHaveAttribute("href", /^https:\/\/www\.xiaohongshu\.com\//);
+});
+
+test("开始后团队页不刷新就能和新队员单聊", async ({ page }) => {
+  await login(page);
+  const card = await proposeFromSidebar(page, STAR_GOAL);
+  await card.getByTestId("project-offer-start").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("推广白泽");
+
+  const solo = BotListResponse.parse(await (await page.request.get("/api/bots")).json()).items.find(
+    (item) => item.bot.name === "小内",
+  );
+  if (solo === undefined) throw new Error("控制面没有小内");
+  await page.getByTestId("team-nav").click();
+  const chat = teamCard(page, "小内").getByTestId("team-bot-chat");
+  await expect(chat, "新队员的单聊跟着开始一起到了前端").toBeVisible();
+  await chat.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("小内");
+  await expect(page, "点进的是控制面给小内建的单聊").toHaveURL(new RegExp(`/g/${solo.groupId}$`));
+  await page.getByTestId("team-nav").click();
+  await expect(teamCard(page, "小社").getByTestId("team-bot-chat")).toBeVisible();
+});
+
+test("改名时按 Escape 回到原名，不提交", async ({ page }) => {
+  await login(page);
+  const card = await proposeFromSidebar(page, STAR_GOAL);
+  const bodies: unknown[] = [];
+  page.on("request", (sent) => {
+    if (sent.url().includes("/project-offer")) bodies.push(sent.postDataJSON());
+  });
+
+  await card.getByTestId("project-offer-name").click();
+  const nameInput = card.getByTestId("project-offer-name-input");
+  await nameInput.fill("白泽千星");
+  await nameInput.press("Escape");
+  await expect(nameInput, "Escape 收起输入框").toHaveCount(0);
+  await expect(card.getByTestId("project-offer-name"), "Escape 回到原名").toHaveText("推广白泽");
+
+  await card.getByTestId("project-offer-start").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("推广白泽");
+  expect(bodies, "开始时不带名字，按原名建").toEqual([{ decision: "start" }]);
 });

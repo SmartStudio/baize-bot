@@ -20,6 +20,22 @@ const webDir = fileURLToPath(new URL("../../web/", import.meta.url));
 const viteBin = fileURLToPath(new URL("../../web/node_modules/vite/bin/vite.js", import.meta.url));
 const check = expect.configure({ timeout: 30_000 });
 
+const ORDER = "Globex X3 × 200 订单";
+const ORDER_ASK = "Globex 的 Lisa 要 200 台 X3，10 月 30 日前交，帮我把这单张罗起来";
+// 点开始时控制面按方案一个个新建队员，不认已有的 Bot，所以队员不能和种子里的小服、小销、小采重名。
+const ORDER_PROPOSAL = {
+  name: ORDER,
+  goal: "Lisa 的 200 台 X3 在 10 月 30 日前交齐",
+  team: [
+    { name: "小库", tag: "库存", description: "查库存和排产、给交期方案，不直接回客户" },
+    { name: "小价", tag: "报价", description: "算两批交付的报价，不改交期" },
+    { name: "小供", tag: "供货", description: "确认供货和到货，下单先找你点头" },
+  ],
+  platforms: [],
+  cadence: "每天下午同步一次交付进度",
+  firstStep: "先查 X3 的库存和排产",
+};
+
 const turn = (request: ChatRequest): ScriptedTurn => {
   const lastUser = request.messages.findLastIndex((message) => message.role === "user");
   const content = request.messages[lastUser]?.content;
@@ -28,6 +44,11 @@ const turn = (request: ChatRequest): ScriptedTurn => {
   const afterTool = request.messages.slice(lastUser + 1).some((message) => message.role === "tool");
   const usage = { input: 1_200, output: 30 };
 
+  if (current.includes(ORDER_ASK)) {
+    return afterTool
+      ? { textChunks: ["方案卡发好了，等你点开始。"], usage }
+      : { textChunks: [], toolCall: { id: "propose-order", name: "propose_project", args: ORDER_PROPOSAL }, usage };
+  }
   if (prompt.includes("交接报文：")) {
     return afterTool
       ? { textChunks: ["我已接手，接下来确认供货。"], usage }
@@ -65,16 +86,16 @@ const turn = (request: ChatRequest): ScriptedTurn => {
           usage,
         };
   }
-  if (current.includes("交接给小采")) {
+  if (current.includes("交接给小供")) {
     return afterTool
-      ? { textChunks: ["交接报文已发给小采，等它确认。"], usage }
+      ? { textChunks: ["交接报文已发给小供，等它确认。"], usage }
       : {
           textChunks: [],
           toolCall: {
             id: "handoff-to-procurement",
             name: "handoff_task",
             args: {
-              to: "小采",
+              to: "小供",
               done: "确认了两批交付方案并给 Lisa 发信",
               notDone: "尚未确认供货",
               next: "核对供货与交期",
@@ -229,27 +250,32 @@ const run = async (): Promise<void> => {
     process.stdout.write("step 1: 5 Bot\n");
 
     activeStep = "2";
+    const assistant = seeded.items.find((item) => item.bot.role === "assistant");
+    if (assistant === undefined) throw new Error("种子数据缺少主助理");
     await page.getByTestId("new-project").click();
-    await page.getByTestId("group-title").fill("Globex X3 × 200 订单");
-    await page
-      .getByTestId("group-summary")
-      .fill("小服查库存与交期，小销负责报价，小采确认供货。对外发送先找陈默点头。");
-    for (const name of ["小服", "小销", "小采"]) {
-      await page.locator(`[data-testid=group-member][data-bot-name="${name}"]`).click();
-    }
-    await page.getByTestId("group-submit").click();
+    await page.getByTestId("new-project-input").fill(ORDER_ASK);
+    await page.getByTestId("new-project-submit").click();
+    await check(page, "加号那句话发进主助理单聊").toHaveURL(new RegExp(`/g/${assistant.groupId}$`));
+    const proposal = page.getByTestId("message-list").getByTestId("project-offer");
+    await check(proposal).toHaveAttribute("data-status", "offered");
+    await check(proposal.getByTestId("project-offer-member")).toHaveCount(3);
+    await page.screenshot({ path: shot("2a") });
+    await proposal.getByTestId("project-offer-start").click();
     await check(page.getByTestId("task-card")).toBeVisible();
+    await check(page.getByTestId("chat-title")).toHaveText(ORDER);
     const group = GroupListResponse.parse(await stack.get("/api/groups")).items.find(
-      (item) => item.task.title === "Globex X3 × 200 订单",
+      (item) => item.task.title === ORDER,
     );
-    if (group === undefined) throw new Error("第 2 步建群后，控制面没有这张任务卡");
-    // 任务卡不再露编号，改认地址里的群 id：建完跳进的正是控制面刚建的这个群。
-    await check(page).toHaveURL(new RegExp(`/g/${group.group.id}$`));
+    if (group === undefined) throw new Error("第 2 步点开始后，控制面没有这个项目群");
+    await check(page, "开始后跳进的正是控制面刚建的项目群").toHaveURL(new RegExp(`/g/${group.group.id}$`));
+    const crew = BotListResponse.parse(await stack.get("/api/bots")).items;
+    const nameOf = (botId: string) => crew.find((item) => item.bot.id === botId)?.bot.name;
+    check(group.group.botIds.map(nameOf), "主助理带方案里的三个队员").toEqual(["主助理", "小库", "小价", "小供"]);
     await page.screenshot({ path: shot(2) });
-    process.stdout.write(`step 2: ${group.task.number}\n`);
+    process.stdout.write("step 2: 一句话出方案卡，点开始建出项目群\n");
 
     activeStep = "3";
-    await send(page, "@小服 Lisa 要 200 台 X3，10 月 30 日前交，先查库存和排产");
+    await send(page, "@小库 Lisa 要 200 台 X3，10 月 30 日前交，先查库存和排产");
     await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-status", "ok");
     await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-view-kind", "bash");
     await check(page.getByTestId("bot-bubble").filter({ hasText: "方案一" })).toContainText("方案二");
@@ -276,11 +302,11 @@ const run = async (): Promise<void> => {
     const mail = page.locator('[data-testid=tool-card][data-tool-name="邮箱"]');
     await check(mail).toBeVisible();
     if (!(await mail.getByTestId("tool-details").isVisible())) await mail.getByTestId("tool-edit-assignment").click();
-    const serviceCheckbox = mail.locator('[data-testid=tool-bot-checkbox][data-bot-name="小服"]');
+    const serviceCheckbox = mail.locator('[data-testid=tool-bot-checkbox][data-bot-name="小库"]');
     await serviceCheckbox.click();
     await check(serviceCheckbox).toBeChecked();
-    const service = seeded.items.find((item) => item.bot.name === "小服");
-    if (service === undefined) throw new Error("种子数据缺少小服");
+    const service = crew.find((item) => item.bot.name === "小库");
+    if (service === undefined) throw new Error("项目群里缺少小库");
     await check
       .poll(async () =>
         ToolListResponse.parse(await stack.get("/api/tools")).items[0]?.assignedBotIds.includes(service.bot.id),
@@ -288,10 +314,10 @@ const run = async (): Promise<void> => {
       .toBe(true);
     await page.screenshot({ path: shot("4a") });
     await page.getByTestId("settings-close").click();
-    process.stdout.write("step 4a: 邮箱 MCP 已连接并分配给小服\n");
+    process.stdout.write("step 4a: 邮箱 MCP 已连接并分配给小库\n");
 
     activeStep = "4";
-    await send(page, "分两批，回复先给我看");
+    await send(page, "@小库 分两批，回复先给我看");
     const approval = page.getByTestId("approval-card");
     await check(approval).toHaveAttribute("data-status", "pending");
     const pendingHistory = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
@@ -314,13 +340,13 @@ const run = async (): Promise<void> => {
     process.stdout.write("step 4: 邮件先审批后发送，工具卡 ok\n");
 
     activeStep = "5";
-    await send(page, "@小服 现在把这单交接给小采");
+    await send(page, "@小库 现在把这单交接给小供");
     await check(page.getByTestId("handoff-card")).toHaveAttribute("data-status", "accepted");
-    await check(page.getByTestId("task-current")).toHaveText("当前 小采");
+    await check(page.getByTestId("task-current")).toHaveText("当前 小供");
     const handed = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
     check(handed.handoffs.some((item) => item.status === "accepted")).toBe(true);
     await page.screenshot({ path: shot(5) });
-    process.stdout.write("step 5: 小采确认交接并成为当前经手\n");
+    process.stdout.write("step 5: 小供确认交接并成为当前经手\n");
 
     activeStep = "6";
     process.stdout.write("step 6: skip，已登录站点 gated\n");
@@ -346,18 +372,18 @@ const run = async (): Promise<void> => {
     process.stdout.write("step 7: 小销例行任务试跑出结果\n");
 
     activeStep = "8";
-    await page.locator('[data-testid=group-item][data-group-title="Globex X3 × 200 订单"]').click();
+    await page.locator(`[data-testid=group-item][data-group-title="${ORDER}"]`).click();
     await check(page.getByTestId("task-card")).toBeVisible();
-    await send(page, "@小服 请整理 Globex 报价步骤，问我要不要存");
+    await send(page, "@小库 请整理 Globex 报价步骤，问我要不要存");
     const offer = page.getByTestId("skill-offer").filter({ hasText: "Globex 报价" });
     await check(offer).toHaveAttribute("data-status", "offered");
     await offer.getByTestId("skill-offer-save").click();
     await check(offer).toHaveAttribute("data-status", "saved");
-    await openBot(page, "小服");
+    await openBot(page, "小库");
     await page.getByTestId("bot-tab-skills").click();
     await check(page.locator('[data-testid=skill-row][data-skill-name="Globex 报价"]')).toBeVisible();
     await page.screenshot({ path: shot(8) });
-    process.stdout.write("step 8: Globex 报价已存为小服的会做的活\n");
+    process.stdout.write("step 8: Globex 报价已存为小库的会做的活\n");
 
     activeStep = "9";
     await page.getByTestId("account-button").click();
@@ -367,16 +393,19 @@ const run = async (): Promise<void> => {
     await check(page.getByTestId("usage-page")).toBeVisible();
     const usage = UsageResponse.parse(await stack.get("/api/usage"));
     const serviceUsage = usage.bots.find((item) => item.botId === service.bot.id);
-    if (serviceUsage === undefined) throw new Error("用量接口没有小服这一行");
+    if (serviceUsage === undefined) throw new Error("用量接口没有小库这一行");
     check(serviceUsage.amount).toBeGreaterThan(0);
-    const serviceLine = page.getByTestId("usage-bots").locator(".usage-bot").filter({ hasText: "小服" });
+    const serviceLine = page.getByTestId("usage-bots").locator(".usage-bot").filter({ hasText: "小库" });
     await check(serviceLine).toBeVisible();
     await check
       .poll(async () => Number((await serviceLine.locator("strong").textContent())?.replace(/[¥,]/g, "")))
       .toBeGreaterThan(0);
-    await check(page.getByTestId("usage-bots").locator(".usage-bot"), "零花费的主助理也列一行").toHaveCount(6);
+    await check(
+      page.getByTestId("usage-bots").locator(".usage-bot"),
+      "原来 6 行加方案新建的小库、小价、小供",
+    ).toHaveCount(9);
     await page.screenshot({ path: shot(9) });
-    process.stdout.write(`step 9: 小服本周用量 ¥${serviceUsage.amount.toFixed(2)}\n`);
+    process.stdout.write(`step 9: 小库本周用量 ¥${serviceUsage.amount.toFixed(2)}\n`);
     process.stdout.write("acceptance: 9 步（第 6 步 skip）\n");
   } catch (error) {
     throw new Error(

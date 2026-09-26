@@ -279,7 +279,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "message_upserted", message });
         if (group === null) return undefined;
         // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页。回包没带任务卡，从列表补一份。
-        const joined = (await api.groups()).items.find((item) => item.group.id === group.id);
+        // 控制面给每个新队员都建了单聊却不推，一并从 Bot 列表补进来，团队页才有「单聊」。
+        const [groups, bots] = await Promise.all([api.groups(), api.bots()]);
+        const joined = groups.items.find((item) => item.group.id === group.id);
+        for (const item of bots.items) {
+          if (group.botIds.includes(item.bot.id))
+            dispatch({ type: "bot_created", bot: item.bot, groupId: item.groupId });
+        }
         if (joined !== undefined) dispatch({ type: "group_created", group: joined.group, task: joined.task });
         return group.id;
       }),

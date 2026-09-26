@@ -25,10 +25,12 @@ const touchGroup = (conversations: Conversation[], groupId: GroupId, patch: { la
 
 export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
   switch (action.type) {
-    case "bot_created":
+    case "bot_created": {
+      const bots = { ...state.bots, [action.bot.id]: action.bot };
+      if (state.conversations.some((c) => c.groupId === action.groupId)) return { ...state, bots };
       return {
         ...state,
-        bots: { ...state.bots, [action.bot.id]: action.bot },
+        bots,
         conversations: [
           ...state.conversations,
           {
@@ -41,6 +43,7 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
           },
         ],
       };
+    }
     case "bot_updated":
       return { ...state, bots: { ...state.bots, [action.bot.id]: action.bot } };
     case "bot_removed": {

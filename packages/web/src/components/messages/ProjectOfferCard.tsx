@@ -52,6 +52,7 @@ const OfferName = ({ name, onName, locked }: { name: string; onName: (name: stri
         setEditing(false);
       }}
       onKeyDown={(event) => {
+        if (event.key === "Escape") event.currentTarget.value = name;
         if (event.key === "Enter" || event.key === "Escape") event.currentTarget.blur();
       }}
     />
