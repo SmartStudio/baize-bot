@@ -1,4 +1,13 @@
-import { BotId, GroupId, type Bot, type Group, type Message, type TopicTask, type UserId } from "@baize/shared";
+import {
+  BotId,
+  GroupId,
+  type Bot,
+  type ChecklistItem,
+  type Group,
+  type Message,
+  type TopicTask,
+  type UserId,
+} from "@baize/shared";
 import { and, asc, count, eq, gt, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
@@ -6,7 +15,7 @@ import { newId } from "../ids.js";
 import { taskNumber } from "../naming.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
-import { latestMessagePerGroup } from "./messages.js";
+import { latestMessagePerGroup, type Tx } from "./messages.js";
 import { toBot, toGroup, toTask } from "./rows.js";
 
 export type CreateGroupInput = {
@@ -53,39 +62,71 @@ export async function createGroup(db: Db, ownerId: UserId, input: CreateGroupInp
     .where(and(eq(bots.ownerId, ownerId), inArray(bots.id, [...input.botIds])));
   if (owned.length !== input.botIds.length) return { kind: "unknown_bot" };
 
-  const dueAt = input.dueAt ?? null;
-  return db.transaction(async (tx): Promise<CreateGroupResult> => {
-    // 一次 UPDATE ... RETURNING 占住编号，并发建群不会拿到同一个号。
-    // 不推进 nextHueIndex：建群不分配色相，推进了下一个自动分配的 Bot 会跳色。
-    const [counter] = await tx
-      .update(userCounters)
-      .set({ nextTaskNumber: sql`${userCounters.nextTaskNumber} + 1` })
-      .where(eq(userCounters.userId, ownerId))
-      .returning({ nextTaskNumber: userCounters.nextTaskNumber });
-    if (counter === undefined) throw new Error(`用户 ${ownerId} 没有发号器行`);
+  return db.transaction(async (tx) => ({
+    kind: "ok" as const,
+    ...(await openGroup(tx, ownerId, {
+      id: GroupId.parse(newId()),
+      title: input.title,
+      botIds: input.botIds,
+      summary: input.summary ?? "",
+      dueAt: input.dueAt ?? null,
+      chiefBotId: null,
+      cadence: "",
+      checklist: [],
+    })),
+  }));
+}
 
-    const [groupRow] = await tx.insert(groups).values({ id: newId(), ownerId }).returning();
-    if (groupRow === undefined) throw new Error("建群没有返回行");
+export type OpenGroupSpec = {
+  /** 调用方先定好群号：建项目时方案卡要在建群之前就写上它，抢卡那条 UPDATE 才能一次写完。 */
+  readonly id: GroupId;
+  readonly title: string;
+  readonly botIds: readonly BotId[];
+  readonly summary: string;
+  readonly dueAt: string | null;
+  readonly chiefBotId: BotId | null;
+  readonly cadence: string;
+  readonly checklist: readonly ChecklistItem[];
+};
 
-    await tx
-      .insert(groupMembers)
-      .values(input.botIds.map((botId, position) => ({ groupId: groupRow.id, botId, position })));
+/** 在调用方的事务里建多 Bot 群和它的主题任务。成员归属由调用方保证。 */
+export async function openGroup(
+  tx: Tx,
+  ownerId: UserId,
+  spec: OpenGroupSpec,
+): Promise<{ readonly group: Group; readonly task: TopicTask }> {
+  // 一次 UPDATE ... RETURNING 占住编号，并发建群不会拿到同一个号。
+  // 不推进 nextHueIndex：建群不分配色相，推进了下一个自动分配的 Bot 会跳色。
+  const [counter] = await tx
+    .update(userCounters)
+    .set({ nextTaskNumber: sql`${userCounters.nextTaskNumber} + 1` })
+    .where(eq(userCounters.userId, ownerId))
+    .returning({ nextTaskNumber: userCounters.nextTaskNumber });
+  if (counter === undefined) throw new Error(`用户 ${ownerId} 没有发号器行`);
 
-    const [taskRow] = await tx
-      .insert(tasks)
-      .values({
-        id: newId(),
-        groupId: groupRow.id,
-        number: taskNumber(counter.nextTaskNumber - 1),
-        title: input.title,
-        summary: input.summary ?? "",
-        dueAt: dueAt === null ? null : new Date(dueAt),
-      })
-      .returning();
-    if (taskRow === undefined) throw new Error("建主题任务没有返回行");
+  const [groupRow] = await tx.insert(groups).values({ id: spec.id, ownerId, chiefBotId: spec.chiefBotId }).returning();
+  if (groupRow === undefined) throw new Error("建群没有返回行");
 
-    return { kind: "ok", group: toGroup(groupRow, [...input.botIds], taskRow.id), task: toTask(taskRow) };
-  });
+  await tx
+    .insert(groupMembers)
+    .values(spec.botIds.map((botId, position) => ({ groupId: groupRow.id, botId, position })));
+
+  const [taskRow] = await tx
+    .insert(tasks)
+    .values({
+      id: newId(),
+      groupId: groupRow.id,
+      number: taskNumber(counter.nextTaskNumber - 1),
+      title: spec.title,
+      summary: spec.summary,
+      dueAt: spec.dueAt === null ? null : new Date(spec.dueAt),
+      cadence: spec.cadence,
+      checklist: [...spec.checklist],
+    })
+    .returning();
+  if (taskRow === undefined) throw new Error("建主题任务没有返回行");
+
+  return { group: toGroup(groupRow, [...spec.botIds], taskRow.id), task: toTask(taskRow) };
 }
 
 export type GroupListEntry = {

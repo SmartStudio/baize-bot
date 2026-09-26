@@ -15,6 +15,8 @@ import {
   CreateToolRequest,
   DecideApprovalRequest,
   DecideApprovalResponse,
+  DecideProjectOfferRequest,
+  DecideProjectOfferResponse,
   DecideSkillOfferRequest,
   DecideSkillOfferResponse,
   GrantId,
@@ -85,6 +87,7 @@ import {
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
 import { runRoutine } from "../routines/run.js";
+import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { getToday } from "../repo/today.js";
 import {
@@ -466,6 +469,31 @@ export function createApp(deps: AppDeps): Hono<Env> {
       await agents.sendConfig(c.get("user").id);
     }
     return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill: decided.skill }));
+  });
+
+  app.post("/api/messages/:id/project-offer", async (c) => {
+    const messageId = MessageId.safeParse(c.req.param("id"));
+    if (!messageId.success) return c.json(NOT_FOUND, 404);
+    const ownerId = c.get("user").id;
+    const offer = await findOwnedProjectOffer(db, ownerId, messageId.data);
+    if (offer === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, DecideProjectOfferRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+
+    const decided = await decideProjectOffer(db, ownerId, offer, body.value);
+    // 已经有结论的卡回它现在的样子，不算错：点两次开始的人要的就是那个项目。
+    if (decided.kind === "settled") {
+      return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: decided.group }));
+    }
+    hub.push(ownerId, { type: "message", message: decided.message });
+    if (decided.kind === "dismissed") {
+      return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: null }));
+    }
+    hub.push(ownerId, { type: "group_created", group: decided.group, task: decided.task });
+    for (const routine of decided.routines) hub.push(ownerId, { type: "routine_updated", routine });
+    // 新队员要进 config 才跑得起来。
+    await agents.sendConfig(ownerId);
+    return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: decided.group }));
   });
 
   app.post("/api/groups", async (c) => {

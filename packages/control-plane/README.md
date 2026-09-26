@@ -48,11 +48,30 @@
 
 ## 主助理
 
-每个用户恰好一个主助理，`bots.role = 'assistant'`，由部分唯一索引 `bots_owner_id_assistant_idx` 钉住。`ensureAssistant(tx, ownerId)` 不先查：直接插 bot 行撞这个索引，`onConflictDoNothing` 没返回行就停，不占编号、不建群。真插进去的那次才建单聊群、主题任务卡和 `group_members`，并在单聊里写主助理的第一句 `ASSISTANT_GREETING`。注册在同一个事务里调它；登录成功后再调一次，给 P1-13 之前注册的老用户补建，补建成功且电脑在线就重发一次 `config`；`seed` 建完用户也调一次。主助理的色相固定 `sky`，不推进 `user_counters.next_hue`，所以用户自己建的 Bot 仍从色相轮转的第一格起。
+每个用户恰好一个主助理，`bots.role = 'assistant'`，由部分唯一索引 `bots_owner_id_assistant_idx` 钉住。`ensureAssistant(tx, ownerId)` 不先查：直接插 bot 行撞这个索引，`onConflictDoNothing` 没返回行就停，不占编号、不建群。真插进去的那次才建单聊群、主题任务卡和 `group_members`，并在单聊里写主助理的第一句 `ASSISTANT_GREETING`。注册在同一个事务里调它；登录成功后再调一次，给 P1-13 之前注册的老用户补建，补建成功且电脑在线就重发一次 `config`；电脑 `hello` 校验通过后、查 Bot 发 `config` 之前也调一次，会话还有效、一直没重新登录的老用户靠这一处补上，补建成功时这个用户的其他连接也重发一次 `config`；`seed` 建完用户也调一次。主助理的色相固定 `sky`，不推进 `user_counters.next_hue`，所以用户自己建的 Bot 仍从色相轮转的第一格起。
 
 `DELETE /api/bots/:id` 删不了主助理，回 409 和一句中文原因。删除和收审批用同一个 `role = 'member'` 条件，删不到时再分辨是主助理还是不存在。群没有删除和退群的接口，所以主助理的单聊群没有别的入口可以拆。
 
 派给主助理的 `prompt` 恒带 `projects`，是这个用户所有项目群（`solo_bot_id IS NULL` 的群）的 `groupId`、`title`、`cadence`，没有项目也带空数组；派给队员不带。上行 `set_cadence` 先照常校验 run 归属，再在同一条 `UPDATE tasks` 里要求 `projectGroupId` 是这个用户的项目群、发报文的 Bot 是这个用户的主助理，改不到就静默丢弃。改成了只推 `task_updated`，不建审批、不写卡片消息。`findAssistant(db, ownerId)` 是取主助理和它单聊群的唯一入口，`GET /api/today` 用它，P1-9 建项目群时也用它。
+
+## 项目
+
+项目是主助理提议、用户点「开始」才建出来的多 Bot 群。
+
+### 方案卡
+
+上行 `project_offer` 先照常校验 run 归属，再要求发报文的 Bot 是这个用户的主助理、run 所在的群是主助理的单聊，不成立整条静默丢弃。成立就在单聊里落一条 `project_offer` 消息，`status: "offered"`、`groupId: null`，此外什么都不建。`platforms` 里的 `unsupported` 只随正文留着给 Web 显示，不建任何东西。
+
+### 点开始
+
+`POST /api/messages/:id/project-offer` 按归属人查这条消息，正文不是方案卡或不是自己的回 404。`start` 在一个事务里做完下面几件事，第一步就是抢卡：
+
+1. `UPDATE messages ... WHERE body ->> 'status' = 'offered'`，同时写进 `status: "started"` 和预先生成的项目群 id。并发的第二个请求在行锁上等，醒来 `WHERE` 已不成立，一行都改不到，事务回滚，什么都不建。
+2. 按 `team` 建队员 Bot，每个都带自己的单聊群（`listBots` 按单聊 join，没有单聊的 Bot 进不了 `config`）。`tag` 对 `tag`，`description` 对 `description`。
+3. 建项目群和主题任务卡。群名取请求里的 `name`，没给用正文的；`summary` 取 `goal`，`cadence` 取正文，`firstStep` 是清单第一项。成员是主助理在前、队员在后，首席是主助理。
+4. 建 `PROJECT_ROUTINES` 两条例行：「周一 09:00 排本周计划」让主助理调 `propose_plan`，「周五复盘」只复盘。例行的 Bot 是主助理，`groupId` 是项目群，`purpose` 是 `plan`。
+
+提交之后重推这条消息，推 `group_created` 和每条 `routine_updated`，再重发 `config`，新队员这时才跑得起来。`dismiss` 用同一个条件 `UPDATE` 改成 `dismissed` 并重推。抢不到卡时回 200 带当前消息，已开始的顺带项目群，不再推送。
 
 ## 审批
 
@@ -183,7 +202,7 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 
 
 ## 例行任务
 
-例行任务属于一个 Bot。**一次运行就是归属人在这个 Bot 的单 Bot 群里发了一条消息**：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`。运行器和电脑代理因此不认识例行任务，没有新报文。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
+例行任务属于一个 Bot。**一次运行就是归属人在群里发了一条消息**，`groupId` 为空时是这个 Bot 的单 Bot 群，不为空时是那个群（建项目时的两条例行发进项目群）：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`。运行器和电脑代理因此不认识例行任务，没有新报文。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
 
 ### 调度判定
 

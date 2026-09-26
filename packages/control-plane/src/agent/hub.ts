@@ -10,7 +10,7 @@ import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import type { NoticePublisher } from "../notifications.js";
-import { listBots } from "../repo/bots.js";
+import { ensureAssistant, listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
   markComputerOnline,
@@ -239,7 +239,14 @@ export class AgentHub {
       kind: computer.kind,
       serverTime: new Date().toISOString(),
     });
+    // 登录时补建管不到会话还有效的老用户，他们下次登录前一直没有主助理。hello 这里再补一次，
+    // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
+    const assistant = await this.#deps.db.transaction((tx) => ensureAssistant(tx, computer.ownerId));
     await this.#sendConfig(accepted, "hello");
+    if (assistant !== null) {
+      const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
+      await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
+    }
     return accepted;
   }
 

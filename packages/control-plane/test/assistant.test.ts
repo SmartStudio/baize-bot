@@ -1,6 +1,8 @@
 import {
+  ApprovalId,
   BotListResponse,
   CreateBotResponse,
+  DecideApprovalResponse,
   CreateGroupResponse,
   GroupResponse,
   MessageListResponse,
@@ -8,6 +10,7 @@ import {
   type BotId,
   type ControlToAgent,
   type GroupId,
+  type RunId,
   type ServerPush,
   type User,
 } from "@baize/shared";
@@ -329,6 +332,138 @@ describe("主助理", () => {
       });
       await finishRun(agent, push, prompt);
       expect((await taskOf(me.client, project.groupId)).cadence).toBe("每周小红书 2 篇");
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+  it("对单聊群 set_cadence 被丢弃", async () => {
+    const me = await owner();
+    const member = await createBot(me.client, "小内");
+    const { agent } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    const push = await connectPush(server.server.port, me.client.cookie ?? "");
+    try {
+      const prompt = await sendAndPrompt(me.client, agent, me.assistant.groupId, "小内那边改成每天发");
+      for (const soloGroupId of [member.group.id, me.assistant.groupId]) {
+        agent.send({
+          type: "set_cadence",
+          runId: prompt.runId,
+          botId: prompt.botId,
+          groupId: prompt.groupId,
+          projectGroupId: soloGroupId,
+          cadence: "每天 5 篇",
+        });
+      }
+      await finishRun(agent, push, prompt);
+      expect((await taskOf(me.client, member.group.id)).cadence, "队员的单聊不是项目").toBe("");
+      expect((await taskOf(me.client, me.assistant.groupId)).cadence, "主助理的单聊不是项目").toBe("");
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("run 归属不成立的 set_cadence 被丢弃", async () => {
+    const me = await owner();
+    const project = await projectOf(me.client, "推广白泽", "每周小红书 2 篇");
+    const { agent } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    const push = await connectPush(server.server.port, me.client.cookie ?? "");
+    try {
+      const prompt = await sendAndPrompt(me.client, agent, me.assistant.groupId, "下周多发点");
+      agent.send({
+        type: "set_cadence",
+        runId: newId() as RunId,
+        botId: prompt.botId,
+        groupId: prompt.groupId,
+        projectGroupId: project.groupId,
+        cadence: "每天 5 篇",
+      });
+      await finishRun(agent, push, prompt);
+      expect((await taskOf(me.client, project.groupId)).cadence, "编出来的 runId 不算主助理在干活").toBe(
+        "每周小红书 2 篇",
+      );
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("老用户登录补建主助理后，在线的电脑收到带主助理的新 config", async () => {
+    const me = await owner();
+    const { agent } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    try {
+      // 删掉主助理行，这个账号就回到了 P1-13 之前的样子，电脑还连着。
+      await database.sql`DELETE FROM bots WHERE owner_id = ${me.user.id} AND role = 'assistant'`;
+      expect((await server.client().login(me.user.email, PASSWORD)).status).toBe(200);
+      const config = await agent.expect("config");
+      const assistants = config.bots.filter((bot) => bot.role === "assistant");
+      expect(
+        assistants.map((bot) => bot.name),
+        "补建出来的主助理要进 config 才跑得起来",
+      ).toEqual(["主助理"]);
+      expect(assistants[0]?.id).toBe((await onlyAssistant(me.client)).botId);
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("会话还有效的老用户，电脑重连后 config 里有主助理", async () => {
+    const me = await owner();
+    // 删掉主助理行造出老用户。cookie 还有效，他不会再走一次登录。
+    await database.sql`DELETE FROM bots WHERE owner_id = ${me.user.id} AND role = 'assistant'`;
+    expect(await assistantsOf(me.client)).toEqual([]);
+
+    const { agent, config } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    try {
+      expect(
+        config.bots.filter((bot) => bot.role === "assistant").map((bot) => bot.name),
+        "hello 时补建，config 里就有主助理",
+      ).toEqual(["主助理"]);
+      const assistant = await onlyAssistant(me.client);
+      const today = TodayResponse.parse(await (await me.client.get("/api/today")).json());
+      expect(today.assistantGroupId, "首页输入框不再禁用").toBe(assistant.groupId);
+      expect(
+        (await messagesOf(me.client, assistant.groupId)).map((message) => message.body),
+        "补建的主助理照样说第一句",
+      ).toEqual([{ kind: "bot", botId: assistant.botId, text: GREETING, streaming: false }]);
+    } finally {
+      agent.close();
+    }
+
+    const again = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    again.agent.close();
+    expect(
+      again.config.bots.filter((bot) => bot.role === "assistant"),
+      "再连一次不多建",
+    ).toHaveLength(1);
+  });
+
+  it("删主助理被拒时，它挂着的审批不作废", async () => {
+    const me = await owner();
+    const { agent } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    const push = await connectPush(server.server.port, me.client.cookie ?? "");
+    try {
+      const prompt = await sendAndPrompt(me.client, agent, me.assistant.groupId, "给这单退款");
+      agent.send({
+        type: "approval_request",
+        runId: prompt.runId,
+        botId: prompt.botId,
+        groupId: prompt.groupId,
+        callId: "call-1",
+        tool: "shop.refund",
+        action: "spend",
+        target: null,
+        view: { kind: "mcp", server: "", tool: "shop.refund", params: [], raw: "给这单退 120 块" },
+      });
+      const raised = await nextOfType(push, "approval_updated");
+      expect(raised.approval.status).toBe("pending");
+
+      expect((await me.client.delete(`/api/bots/${me.assistant.botId}`)).status).toBe(409);
+      const decided = await me.client.post(`/api/approvals/${ApprovalId.parse(raised.approval.id)}`, {
+        decision: "approved",
+      });
+      expect(decided.status, "删不掉的主助理，它的审批还等着点头").toBe(200);
+      expect(DecideApprovalResponse.parse(await decided.json()).approval.status).toBe("approved");
     } finally {
       agent.close();
       push.close();

@@ -80,23 +80,30 @@ async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Pr
 }
 
 export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput): Promise<{ bot: Bot; group: Group }> {
-  return db.transaction(async (tx) => {
-    // 用户自己挑了色就不推进轮转，免得下一个自动分配的跳色。
-    const counter = await claimCounter(tx, ownerId, input.hue === undefined);
-    const [botRow] = await tx
-      .insert(bots)
-      .values({
-        id: newId(),
-        ownerId,
-        name: input.name ?? generateBotName(),
-        tag: input.tag ?? "",
-        description: input.description ?? "",
-        hue: input.hue ?? hueAt(counter.nextHueIndex - 1),
-      })
-      .returning();
-    if (botRow === undefined) throw new Error("建 Bot 没有返回行");
-    return openSoloGroup(tx, botRow, counter.nextTaskNumber);
-  });
+  return db.transaction((tx) => insertMemberBot(tx, ownerId, input));
+}
+
+/** 建一个队员连同它的单聊。单聊不能省：`listBots` 按单聊 join，没有单聊的 Bot 进不了 config。 */
+export async function insertMemberBot(
+  tx: Tx,
+  ownerId: UserId,
+  input: CreateBotInput,
+): Promise<{ bot: Bot; group: Group }> {
+  // 用户自己挑了色就不推进轮转，免得下一个自动分配的跳色。
+  const counter = await claimCounter(tx, ownerId, input.hue === undefined);
+  const [botRow] = await tx
+    .insert(bots)
+    .values({
+      id: newId(),
+      ownerId,
+      name: input.name ?? generateBotName(),
+      tag: input.tag ?? "",
+      description: input.description ?? "",
+      hue: input.hue ?? hueAt(counter.nextHueIndex - 1),
+    })
+    .returning();
+  if (botRow === undefined) throw new Error("建 Bot 没有返回行");
+  return openSoloGroup(tx, botRow, counter.nextTaskNumber);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
+import { BotId, GroupId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
@@ -36,7 +36,8 @@ export const EXPIRED_APPROVAL_NOTE = "审批已失效";
 /**
  * 跑一次例行任务。到点触发、webhook、试跑走的都是这一条路。
  *
- * 一次运行等同于归属人在这个 Bot 的单 Bot 群里发了一条消息：先落一条 system 说是例行任务自动跑的，
+ * 一次运行等同于归属人发了一条消息：带群号的发进那个群（项目的例行，首席是它的 Bot），
+ * 不带的发进这个 Bot 的单 Bot 群。先落一条 system 说是例行任务自动跑的，
  * 再落一条正文是 `instruction` 的 user 消息，然后走现有的 `dispatchUserMessage`。
  * 运行器和电脑代理因此不用认识例行任务，没有新报文。
  */
@@ -46,7 +47,8 @@ export async function runRoutine(
   row: RoutineRow,
   at: Date,
 ): Promise<Routine | null> {
-  const groupId = await findSoloGroup(deps.db, BotId.parse(row.botId));
+  const groupId =
+    row.groupId === null ? await findSoloGroup(deps.db, BotId.parse(row.botId)) : GroupId.parse(row.groupId);
   if (groupId === null) return null;
 
   const started = await startRoutineRun(deps.db, row.id, at);

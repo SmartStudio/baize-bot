@@ -11,6 +11,7 @@ import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { approvalRun, createApproval, expireApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
+import { findAssistant } from "../repo/bots.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
 import {
@@ -94,6 +95,9 @@ export async function handleAgentEvent(
     case "set_cadence":
       await onSetCadence(deps, conn, message);
       return;
+    case "project_offer":
+      await onProjectOffer(deps, conn, message);
+      return;
   }
 }
 
@@ -125,6 +129,7 @@ type HandoffEvent = Extract<AgentToControl, { type: "handoff" }>;
 type HandoffAcceptEvent = Extract<AgentToControl, { type: "handoff_accept" }>;
 type SetChiefEvent = Extract<AgentToControl, { type: "set_chief" }>;
 type SetCadenceEvent = Extract<AgentToControl, { type: "set_cadence" }>;
+type ProjectOfferEvent = Extract<AgentToControl, { type: "project_offer" }>;
 
 type TextPrefix =
   | { readonly kind: "buffering"; readonly text: string; readonly runId: RunId }
@@ -556,6 +561,33 @@ async function onSetCadence(deps: AgentEventDeps, conn: AgentConnection, event: 
     return;
   }
   deps.push.push(conn.ownerId, { type: "task_updated", task });
+}
+
+/**
+ * 主助理出的方案卡，只落一条消息，什么都不建，要等用户点开始。
+ * 只认主助理在自己单聊里发的：点卡的路由只处理单聊里的卡，队员或别的群发来的整条丢掉。
+ */
+async function onProjectOffer(deps: AgentEventDeps, conn: AgentConnection, event: ProjectOfferEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const assistant = await findAssistant(deps.db, conn.ownerId);
+  if (assistant === null || assistant.bot.id !== event.botId || assistant.groupId !== groupId) {
+    console.warn(`电脑 ${conn.computerId} 报的方案卡来自 ${event.botId}，不是主助理在它单聊里发的，整条丢掉`);
+    return;
+  }
+  const { name, goal, team, platforms, cadence, firstStep } = event;
+  await appendAndPush(deps, conn.ownerId, groupId, {
+    kind: "project_offer",
+    botId: event.botId,
+    name,
+    goal,
+    team,
+    platforms,
+    cadence,
+    firstStep,
+    status: "offered",
+    groupId: null,
+  });
 }
 
 /**
