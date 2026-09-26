@@ -19,6 +19,7 @@ import {
   rotateGatewayKey,
 } from "../repo/computers.js";
 import { expireApprovalsOfRun } from "../repo/approvals.js";
+import { listGrants } from "../repo/grants.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { appendMessage, failRunningToolCalls } from "../repo/messages.js";
 import { finishRun, openRunsForComputer } from "../repo/runs.js";
@@ -143,13 +144,18 @@ export class AgentHub {
     return this.#send(conn, message);
   }
 
-  /** Bot 增删改之后重发，电脑代理会按新的 Bot 列表重建运行器。 */
+  /** 这个用户在线的每台电脑各发一条。暂停和继续不知道 Bot 的活在哪台电脑上，所以都发。 */
+  sendToOwner(ownerId: UserId, message: ControlToAgent): void {
+    for (const connection of this.#ownerConnections(ownerId)) this.#send(connection, message);
+  }
+
+  /** Bot 或授权变了之后重发，电脑代理会按新的 Bot 列表和授权对账运行器。 */
   async sendConfig(ownerId: UserId): Promise<void> {
-    await Promise.all(
-      [...this.#connections.values()]
-        .filter((connection) => connection.ownerId === ownerId)
-        .map((connection) => this.#sendConfig(connection)),
-    );
+    await Promise.all(this.#ownerConnections(ownerId).map((connection) => this.#sendConfig(connection, "changed")));
+  }
+
+  #ownerConnections(ownerId: UserId): AgentConnection[] {
+    return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
 
   /** 先落库再断线：反过来的话 socket 的 close 回调要和进程退出抢，那台电脑就永远挂在在线。 */
@@ -233,7 +239,7 @@ export class AgentHub {
       kind: computer.kind,
       serverTime: new Date().toISOString(),
     });
-    await this.#sendConfig(accepted);
+    await this.#sendConfig(accepted, "hello");
     return accepted;
   }
 
@@ -308,29 +314,45 @@ export class AgentHub {
     return current;
   }
 
-  async #sendConfig(conn: AgentConnection): Promise<void> {
-    const items = await listBots(this.#deps.db, conn.ownerId);
+  /**
+   * hello 时 config 后面紧跟每个 Bot 的运行状态，停着的补 pause，其余的补 resume。
+   * 暂停状态住在控制面：新起的代理不记得谁停着；同一个代理进程重连则还记得断线前的状态，
+   * 断线期间点的继续没送到，只补 pause 的话它会一直停着。代理收到 config 之前的 pause、resume 会被丢掉，
+   * 所以只能排在 config 后面。
+   */
+  async #sendConfig(conn: AgentConnection, reason: "hello" | "changed"): Promise<void> {
+    const [tools, skills, grants] = await Promise.all([
+      listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
+      listSkillsByOwner(this.#deps.db, conn.ownerId),
+      listGrants(this.#deps.db, conn.ownerId),
+    ]);
+    // listBots 是判暂停状态的快照，放在最后一个 await，查完同步发出 config 和补发，
+    // 和暂停路由交错的窗口只剩这次查询在途的那一段。
+    const bots = (await listBots(this.#deps.db, conn.ownerId)).map((item) => item.bot);
     this.#send(conn, {
       type: "config",
-      bots: items.map((item) => ({
-        id: item.bot.id,
-        role: item.bot.role,
-        name: item.bot.name,
-        tag: item.bot.tag,
-        description: item.bot.description,
+      bots: bots.map((bot) => ({
+        id: bot.id,
+        role: bot.role,
+        name: bot.name,
+        tag: bot.tag,
+        description: bot.description,
       })),
-      tools: await listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
+      tools,
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
-      skills: await listSkillsByOwner(this.#deps.db, conn.ownerId),
+      skills,
       accounts: [],
-      grants: [],
+      grants,
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,
         model: "baize:plan",
       },
     });
+    if (reason === "hello") {
+      for (const bot of bots) this.#send(conn, { type: bot.runState === "paused" ? "pause" : "resume", botId: bot.id });
+    }
   }
 
   #send(conn: AgentConnection, message: ControlToAgent): boolean {

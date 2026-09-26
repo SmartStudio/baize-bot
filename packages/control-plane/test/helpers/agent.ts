@@ -85,6 +85,8 @@ export type HelloResult = {
   readonly agent: AgentClient;
   readonly welcome: Extract<ControlToAgent, { type: "welcome" }>;
   readonly config: Extract<ControlToAgent, { type: "config" }>;
+  /** config 后面紧跟的补发，config 里每个 Bot 恰好一条 pause 或 resume。 */
+  readonly runStates: readonly Extract<ControlToAgent, { type: "pause" | "resume" }>[];
 };
 
 export async function helloAgent(
@@ -97,5 +99,13 @@ export async function helloAgent(
   agent.send({ type: "hello", computerId, token, version: "test", activeRuns: [...activeRuns] });
   const welcome = await agent.expect("welcome");
   const config = await agent.expect("config");
-  return { agent, welcome, config };
+  const runStates: Extract<ControlToAgent, { type: "pause" | "resume" }>[] = [];
+  for (const bot of config.bots) {
+    const synced = await agent.next();
+    if ((synced.type !== "pause" && synced.type !== "resume") || synced.botId !== bot.id) {
+      throw new Error(`config 之后本应按顺序补发 ${bot.id} 的运行状态，实际是 ${JSON.stringify(synced)}`);
+    }
+    runStates.push(synced);
+  }
+  return { agent, welcome, config, runStates };
 }

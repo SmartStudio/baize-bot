@@ -1,13 +1,13 @@
-import type { Bot, BotHue, BotId, Group, Message, UserId } from "@baize/shared";
-import { and, eq, sql } from "drizzle-orm";
+import type { Approval, Bot, BotHue, BotId, Group, Message, UserId } from "@baize/shared";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
+import { approvals, bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup } from "./messages.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
-import { toBot, toGroup } from "./rows.js";
+import { toApproval, toBot, toGroup } from "./rows.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -125,11 +125,42 @@ export async function updateBot(db: Db, ownerId: UserId, botId: BotId, input: Up
   return row === undefined ? null : toBot(row);
 }
 
-/** 删 Bot。单 Bot 群、主题任务、消息由外键级联一起走，重复删返回 false。 */
-export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<boolean> {
-  const deleted = await db
-    .delete(bots)
+/** 暂停和继续只改这一列。别人的 Bot 改不到，返回 null。 */
+export async function setRunState(
+  db: Db,
+  ownerId: UserId,
+  botId: BotId,
+  runState: Bot["runState"],
+): Promise<Bot | null> {
+  const [row] = await db
+    .update(bots)
+    .set({ runState })
     .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
-    .returning({ id: bots.id });
-  return deleted.length > 0;
+    .returning();
+  return row === undefined ? null : toBot(row);
+}
+
+/**
+ * 删 Bot。单 Bot 群、主题任务、消息由外键级联一起走，重复删或删别人的返回 null。
+ * 它挂着的审批先在同一个事务里收成 expired 再删，回给调用方推终态：运行器删 Bot 时不再报 approval_abandoned。
+ * 用 UPDATE ... WHERE status = 'pending' 而不是先查，和同时点下的批准抢行锁，谁先落谁算。
+ * UPDATE 自己带归属条件，别人的 Bot 连审批行锁都不碰。
+ */
+export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<Approval[] | null> {
+  return db.transaction(async (tx) => {
+    const owned = tx
+      .select({ id: bots.id })
+      .from(bots)
+      .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)));
+    const expired = await tx
+      .update(approvals)
+      .set({ status: "expired" })
+      .where(and(inArray(approvals.botId, owned), eq(approvals.status, "pending")))
+      .returning();
+    const deleted = await tx
+      .delete(bots)
+      .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
+      .returning({ id: bots.id });
+    return deleted.length === 0 ? null : expired.map(toApproval);
+  });
 }

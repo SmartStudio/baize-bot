@@ -173,16 +173,21 @@ it("工具调用后断连必须收尾 run 并在群里提示失败", async () =>
   );
 });
 
-it("同 token 新连接关闭旧连接，welcome/config 后只向新连接派活", async () => {
+it("同 token 新连接关闭旧连接，welcome/config/运行状态之后只向新连接派活", async () => {
   await withStack(
     () => textTurn,
     false,
     async (stack) => {
       const { groupId, bot } = await serviceBot(stack);
+      const handshake = [
+        "welcome",
+        "config",
+        ...BotListResponse.parse(await stack.get("/api/bots")).items.map(() => "resume"),
+      ];
       const first = await stack.connectComputer();
-      await expect.poll(() => first.frames().map((frame) => frame.type), poll).toEqual(["welcome", "config"]);
+      await expect.poll(() => first.frames().map((frame) => frame.type), poll).toEqual(handshake);
       const second = await stack.connectComputer();
-      await expect.poll(() => second.frames().map((frame) => frame.type), poll).toEqual(["welcome", "config"]);
+      await expect.poll(() => second.frames().map((frame) => frame.type), poll).toEqual(handshake);
       await expect.poll(() => first.closed(), poll).toEqual({ code: 4000, reason: "同一台电脑有了新连接" });
       expect(
         ComputerListResponse.parse(await stack.get("/api/computers")).computers[0]?.status,

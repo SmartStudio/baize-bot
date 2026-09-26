@@ -2,6 +2,7 @@ import {
   ApprovalId,
   BotId,
   BotListResponse,
+  BotResponse,
   ComputerListResponse,
   ComputerTokenResponse,
   CopySkillRequest,
@@ -16,6 +17,8 @@ import {
   DecideApprovalResponse,
   DecideSkillOfferRequest,
   DecideSkillOfferResponse,
+  GrantId,
+  GrantListResponse,
   GroupId,
   GroupListResponse,
   GroupResponse,
@@ -65,8 +68,9 @@ import type { ToolCrypto } from "../crypto.js";
 import { discoverTools } from "../mcp/discover.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
-import { createBot, deleteBot, findBot, listBots, updateBot } from "../repo/bots.js";
+import { createBot, deleteBot, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
+import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
@@ -286,12 +290,29 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.delete("/api/bots/:id", async (c) => {
     const botId = BotId.safeParse(c.req.param("id"));
     if (!botId.success) return c.json(NOT_FOUND, 404);
-    const deleted = await deleteBot(db, c.get("user").id, botId.data);
-    if (!deleted) return c.json(NOT_FOUND, 404);
+    const expired = await deleteBot(db, c.get("user").id, botId.data);
+    if (expired === null) return c.json(NOT_FOUND, 404);
     await agents.sendConfig(c.get("user").id);
+    // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
+    for (const approval of expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
     return c.body(null, 204);
   });
+
+  for (const [path, runState] of [
+    ["pause", "paused"],
+    ["resume", "running"],
+  ] as const) {
+    app.post(`/api/bots/:id/${path}`, async (c) => {
+      const botId = BotId.safeParse(c.req.param("id"));
+      if (!botId.success) return c.json(NOT_FOUND, 404);
+      const bot = await setRunState(db, c.get("user").id, botId.data, runState);
+      if (bot === null) return c.json(NOT_FOUND, 404);
+      agents.sendToOwner(c.get("user").id, { type: path, botId: bot.id });
+      hub.push(c.get("user").id, { type: "bot_updated", bot });
+      return c.json(BotResponse.parse({ bot }));
+    });
+  }
 
   app.get("/api/bots/:id/routines", async (c) => {
     const botId = BotId.safeParse(c.req.param("id"));
@@ -540,9 +561,23 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, DecideApprovalRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 
-    const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value.decision);
+    const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value);
     if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
-    return c.json(DecideApprovalResponse.parse({ approval: settled.approval, grant: null }));
+    if (settled.kind === "scope_not_allowed") return c.json({ error: settled.error }, 400);
+    return c.json(DecideApprovalResponse.parse({ approval: settled.approval, grant: settled.grant }));
+  });
+
+  app.get("/api/grants", async (c) => {
+    return c.json(GrantListResponse.parse({ grants: await listGrants(db, c.get("user").id) }));
+  });
+
+  app.delete("/api/grants/:id", async (c) => {
+    const grantId = GrantId.safeParse(c.req.param("id"));
+    if (!grantId.success) return c.json(NOT_FOUND, 404);
+    if (!(await deleteGrant(db, c.get("user").id, grantId.data))) return c.json(NOT_FOUND, 404);
+    hub.push(c.get("user").id, { type: "grant_deleted", grantId: grantId.data });
+    await agents.sendConfig(c.get("user").id);
+    return c.body(null, 204);
   });
 
   app.patch("/api/tasks/:id", async (c) => {

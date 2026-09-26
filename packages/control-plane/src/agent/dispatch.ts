@@ -5,6 +5,8 @@ import {
   type AccountConfig,
   type BotId,
   type ControlToAgent,
+  type DecideApprovalRequest,
+  type Grant,
   type GroupId,
   type Message,
   type MessageBody,
@@ -261,38 +263,44 @@ async function appendAndPush(deps: DispatchDeps, ownerId: UserId, groupId: strin
   deps.push.push(ownerId, { type: "message", message });
 }
 
-/** 群里回这四个词等于按了审批卡上的按钮。 */
-const REPLY_DECISIONS = new Map<string, "approved" | "rejected">([
-  ["批准", "approved"],
-  ["同意", "approved"],
-  ["拒绝", "rejected"],
-  ["不行", "rejected"],
+/** 群里回这四个词等于按了审批卡上的按钮。回话没法选范围，批准一律只批这一次。 */
+const REPLY_DECISIONS = new Map<string, DecideApprovalRequest>([
+  ["批准", { decision: "approved", scope: "once" }],
+  ["同意", { decision: "approved", scope: "once" }],
+  ["拒绝", { decision: "rejected" }],
+  ["不行", { decision: "rejected" }],
 ]);
 
-export type SettleResult = { readonly kind: "ok"; readonly approval: Approval } | { readonly kind: "already_decided" };
+export type SettleResult =
+  | { readonly kind: "ok"; readonly approval: Approval; readonly grant: Grant | null }
+  | { readonly kind: "already_decided" }
+  | { readonly kind: "scope_not_allowed"; readonly error: string };
 
 /**
  * 给一条审批定结论、告诉电脑、推给客户端。按钮和群里回话共用这一份。
+ * 落了授权就先重发 config 再放行：运行器放行之后紧接着的同类调用要看到这条授权，否则还会再问一次。
  * 电脑不在线时 send 返回 false，决定照样落库：运行器那一头本来就已经断了，等它回来是另一件事。
  */
 export async function settleApproval(
   deps: DispatchDeps,
   ownerId: UserId,
   approvalId: ApprovalId,
-  decision: "approved" | "rejected",
+  request: DecideApprovalRequest,
 ): Promise<SettleResult> {
-  const decided = await decideApproval(deps.db, approvalId, decision);
-  if (decided === null) return { kind: "already_decided" };
+  const outcome = await decideApproval(deps.db, ownerId, approvalId, request);
+  if (outcome.kind !== "decided") return outcome;
+  const { decided } = outcome;
 
+  if (decided.grant !== null) await deps.agents.sendConfig(ownerId);
   if (decided.computerId !== null)
     deps.agents.send(decided.computerId, {
       type: "approval_result",
       runId: decided.runId,
       callId: decided.callId,
-      approved: decision === "approved",
+      approved: request.decision === "approved",
     });
   deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
-  return { kind: "ok", approval: decided.approval };
+  return { kind: "ok", approval: decided.approval, grant: decided.grant };
 }
 
 /**

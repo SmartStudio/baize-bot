@@ -2,27 +2,31 @@ import {
   ApprovalId,
   BotId,
   ComputerId,
+  GRANTABLE_SCOPES,
+  GrantId,
   GroupId,
   RunId,
   toolViewText,
   UserId,
   type Approval,
+  type ApprovalScope,
   type ActionKind,
+  type DecideApprovalRequest,
+  type Grant,
   type GrantTarget,
   type Message,
   type ToolView,
 } from "@baize/shared";
-import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte } from "drizzle-orm";
+import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { approvals, groups, messages, runs } from "../db/schema.js";
+import { approvals, grants, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
-import { toApproval } from "./rows.js";
+import { toApproval, toGrant } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
 
 type ApprovalRow = typeof approvals.$inferSelect;
-type Decision = Exclude<ApprovalRow["status"], "pending">;
 
 /** 过了这么久还没有结论就提醒一次。规格里的「24 小时后追加一条 system 提醒」。 */
 export const STALE_APPROVAL_MS = 24 * 60 * 60 * 1000;
@@ -139,30 +143,98 @@ export type DecidedApproval = {
   readonly runId: RunId;
   readonly computerId: ComputerId | null;
   readonly callId: string;
+  /** 批准时选了长期范围才有。同一个目标之前批过，拿到的是原来那一条。 */
+  readonly grant: Grant | null;
 };
 
+export type DecideOutcome =
+  | { readonly kind: "decided"; readonly decided: DecidedApproval }
+  | { readonly kind: "already_decided" }
+  | { readonly kind: "scope_not_allowed"; readonly error: string };
+
+/** 这条审批能不能批到这个范围。不能就给一句人话，能就是 null。 */
+function scopeRefusal(row: ApprovalRow, scope: ApprovalScope): string | null {
+  if (scope === "once") return null;
+  const allowed = GRANTABLE_SCOPES[row.action];
+  if (!allowed.includes(scope))
+    return allowed.includes("project") ? "这类动作最多批到这个项目里" : "这类动作只能批这一次";
+  // 授权要记住「同类动作、同一个目标」，没有目标就没有东西可记。
+  if (row.target === null) return "这条审批没有具体目标，只能批这一次";
+  return null;
+}
+
 /**
- * 只给还没有结论的那一行定结论。重复的决定返回 null，
- * 幂等靠这条 UPDATE 的 WHERE 本身，不靠先查后写。
+ * 只给还没有结论的那一行定结论，批准时顺手落授权，都在一个事务里。
+ * 幂等靠 UPDATE 的 WHERE status = 'pending' 和授权表的唯一约束，不靠先查后写。
+ * 越级的范围整条回滚，审批还在等。
  */
 export async function decideApproval(
   db: Db,
+  ownerId: UserId,
   approvalId: ApprovalId,
-  decision: Decision,
-): Promise<DecidedApproval | null> {
-  const [row] = await db
-    .update(approvals)
-    .set({ status: decision, decidedAt: new Date() })
-    .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
-    .returning();
-  if (row === undefined) return null;
-  const [run] = await db.select({ computerId: runs.computerId }).from(runs).where(eq(runs.id, row.runId)).limit(1);
-  return {
-    approval: toApproval(row),
-    runId: RunId.parse(row.runId),
-    computerId: run?.computerId === null || run?.computerId === undefined ? null : ComputerId.parse(run.computerId),
-    callId: row.callId,
-  };
+  request: DecideApprovalRequest,
+): Promise<DecideOutcome> {
+  // 回滚只能靠抛异常，拒绝的原因从这里带出事务。
+  const refused: { error: string | null } = { error: null };
+  try {
+    const decided = await db.transaction(async (tx): Promise<DecidedApproval | null> => {
+      const [row] = await tx
+        .update(approvals)
+        .set({ status: request.decision, decidedAt: new Date() })
+        .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+        .returning();
+      if (row === undefined) return null;
+
+      const scope = request.decision === "approved" ? request.scope : "once";
+      refused.error = scopeRefusal(row, scope);
+      if (refused.error !== null) return tx.rollback();
+
+      let settled = row;
+      let grant: Grant | null = null;
+      if (scope !== "once" && row.target !== null) {
+        const [grantRow] = await tx
+          .insert(grants)
+          .values({
+            id: GrantId.parse(newId()),
+            ownerId,
+            action: row.action,
+            target: row.target,
+            scope,
+            groupId: scope === "project" ? row.groupId : null,
+          })
+          .onConflictDoUpdate({
+            target: [grants.ownerId, grants.action, grants.target, grants.groupId],
+            // 空更新只为让 RETURNING 带回已有那一行。
+            set: { scope: sql`excluded.scope` },
+          })
+          .returning();
+        if (grantRow === undefined) throw new Error("授权写入没有返回行");
+        grant = toGrant(grantRow);
+        const [linked] = await tx
+          .update(approvals)
+          .set({ grantId: grant.id })
+          .where(eq(approvals.id, approvalId))
+          .returning();
+        if (linked === undefined) throw new Error("审批行在同一事务里消失了");
+        settled = linked;
+      }
+
+      const [run] = await tx.select({ computerId: runs.computerId }).from(runs).where(eq(runs.id, row.runId)).limit(1);
+      return {
+        approval: toApproval(settled),
+        runId: RunId.parse(row.runId),
+        computerId: run?.computerId === null || run?.computerId === undefined ? null : ComputerId.parse(run.computerId),
+        callId: row.callId,
+        grant,
+      };
+    });
+    return decided === null ? { kind: "already_decided" } : { kind: "decided", decided };
+  } catch (error) {
+    if (error instanceof TransactionRollbackError && refused.error !== null) {
+      return { kind: "scope_not_allowed", error: refused.error };
+    }
+    throw error;
+  }
 }
 
 /** 一页消息引用到的审批。客户端画卡要的状态跟着这一页一起回，不用再发一次请求。 */

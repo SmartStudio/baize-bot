@@ -52,7 +52,7 @@
 
 ### 哪些工具要点头
 
-工具连接（`ToolConnection`）的 `operations` 里 `needsApproval` 为真的操作。判定在电脑那一侧做，控制面不重算一遍。工具名前缀到 `kind` 的映射表（`send_` 到 `send_external`、`pay_` 到 `pay`、其余到 `change_production_data`）在 `packages/bot-runner/README.md`。
+判定全在电脑那一侧的统一闸门里做，顺序是禁区、硬清单、授权、默认表，控制面不重算一遍，细节在 `packages/bot-runner/README.md`。闸门判成「问」时发上来的 `approval_request` 带着 `action` 和 `target`，控制面原样存在 approvals 行上，批准时的授权就从这两列来。
 
 ### 一条链
 
@@ -60,7 +60,7 @@
 | --- | --- | --- |
 | 拦下要点头的工具 | 运行器 | 发一条 `approval_request` 上来，handler 挂起等结论 |
 | `approval_request` 到达 | `agent/events.ts` | 一个事务里建群消息和 approvals 行，先推 `approval_updated` 再推那条 `message` |
-| 归属人点批准或拒绝 | `POST /api/approvals/:id` | 定结论、向电脑发 `approval_result`、推 `approval_updated` |
+| 归属人点批准或拒绝 | `POST /api/approvals/:id` | 定结论，选了长期范围就落授权并先重发 `config`，再向电脑发 `approval_result`、推 `approval_updated` |
 | 结论到达 | 运行器 | 批了就往下跑，拒了就 `block`，这个工具调用的终态是 `blocked` |
 
 控制面收到 `approval_request` 时**不回任何东西**，运行器就一直挂着等。这是审批的本意：没人点头就不往下走。
@@ -69,6 +69,57 @@
 
 - 电脑重发同一条 `approval_request` 时，唯一索引 `(run_id, call_id)` 拦下，整条事务回滚。群里不多一张卡，也不多推一次。消息必须先落地（`approvals.message_id` 是非空外键），所以输掉竞争时只能整条回滚，不能只删一半。
 - 重复的决定靠 `WHERE status = 'pending'` 拦下，返回 0 行就是 409。电脑不会第二次收到 `approval_result`。
+- 同一个用户对同一类动作、同一个目标、同一个群（`forever` 的群是空）只有一条授权，唯一约束 `grants_owner_action_target_group_uq` 带 `NULLS NOT DISTINCT`，空群也算重复。批第二次走 `ON CONFLICT` 拿回原来那一条，两条审批的 `grantId` 指向同一行。
+
+### 批准的范围落成授权
+
+`DecideApprovalRequest.scope` 是 `once`、`project`、`forever` 之一，省了是 `once`。
+
+| 范围 | 落什么 |
+| --- | --- |
+| `once` | 不落授权，只放行这一次 |
+| `project` | 一条绑在这个群上的授权，别的群同类动作照样问 |
+| `forever` | 一条对这个用户全局生效的授权。表里没有 Bot 列，同一个用户的所有 Bot 都认 |
+
+越级的范围在边界回 400，不落授权，审批还在等：
+
+- 超出 `GRANTABLE_SCOPES[action]` 的。`spend`、`account_security`、`delete` 只能 `once`，`write_outside` 最多 `project`。表里的 check 约束再兜一道。
+- 审批行的 `target` 为空的。授权记的是「同类动作、同一个目标」，没有目标就没东西可记。Web 那边这种卡只给「这一次」，两边照同一条规则。
+
+定结论、落授权、把 `grantId` 写回审批行在一个事务里。越级时 `UPDATE ... WHERE status = 'pending'` 已经跑过，只能整条回滚，所以不先查后写也不会把审批误定下来。
+
+落了授权就**先重发 `config` 再发 `approval_result`**。运行器放行之后紧接着的同类调用要读到这条授权，顺序反过来它还会再问一次。群里回「批准」这类词没法选范围，一律按 `once`。
+
+`GET /api/grants` 列这个用户的全部授权。`DELETE /api/grants/:id` 按归属人删，别人的和不存在一样是 404。删掉之后推 `grant_deleted`，再重发 `config`，下一次同类调用又会问。
+
+### 暂停和继续
+
+`POST /api/bots/:id/pause` 和 `resume` 只改 `bots.run_state`，给这个用户在线的每台电脑发 `pause` 或 `resume`，推 `bot_updated`，回 `BotResponse`。运行器那头怎么停在闸门上见 `packages/bot-runner/README.md`。
+
+暂停状态住在控制面，电脑那头只是照着执行。
+
+**hello 按状态补发。** 电脑 hello 成功后照发 `welcome` 加 `config`，紧跟着给 `config` 里的每个 Bot 各补一条：`run_state` 是 `paused` 的补 `pause`，其余的补 `resume`。代理在收到 `config` 之前收到的 `pause`、`resume` 会被丢掉（那时还没有运行器），所以只能排在 `config` 后面。补发和 `config` 用的是同一次 `listBots` 的结果。
+
+**断线期间点的「继续」不会丢。** 断线时点继续，库里照样写成 `running`，但这时没有连接，那条 `resume` 发不出去。代理重连有两种情况：
+
+- 进程是新起的。运行器是按 `config` 新建的，本来就没停，补不补都一样。
+- 同一个代理进程重连。运行器不重建，还记得断线前那个 Bot 停着。只补 `pause` 的话它会一直停着，之后的活全挂在闸门上，库和 Web 却显示在跑。
+
+所以没停的也要补 `resume`。运行器对没停的 Bot 收到 `resume` 什么也不做，给新进程多发一条没有害处。
+
+**还剩一个极窄的竞态。** `#sendConfig` 先查工具、skill 和授权，最后一个 await 才是 `listBots`，查完同步发出 `config` 和补发，中间不再让出事件循环。剩下的窗口是 `listBots` 这一次查询在途的那一段：
+
+1. hello 的 `listBots` 读到快照，比如这个 Bot 停着。
+2. 这次查询的结果还没回来，一个 `resume` 的 UPDATE 提交了，路由把 `resume` 发了出去。
+3. hello 拿到结果，按旧快照补发 `pause`。
+
+结果是运行器里停着，库里却是 `running`。反过来点暂停也一样，停不住。窗口是一次查询的往返，用户再点一次就能恢复，这一版不修。要彻底关掉，得把同一个用户的 hello 补发和 pause、resume 路由串到一条链上（做法同 `agent/hub.ts` 里按电脑串行的 `#enqueueFinish`），让「读状态加下发」和「写状态加下发」不再交错。
+
+### 删 Bot 时的审批
+
+`DELETE /api/bots/:id` 在同一个事务里先把这个 Bot 挂着的审批 `UPDATE ... WHERE status = 'pending'` 成 `expired`，再删 Bot，然后逐条推 `approval_updated`，最后推 `bot_deleted`。运行器删 Bot 时不再报 `approval_abandoned`，收尾由控制面做。和同时点下的批准靠行锁排先后，谁先落谁算，输的一方拿到 409 或不在名单里。这条 UPDATE 自己带归属条件（`bot_id` 只取这个用户名下的 Bot），删别人的 Bot 回 404，连他的审批行锁都不碰。
+
+approvals 行的 `bot_id` 外键是级联删除，事务提交后那一行随 Bot 一起没了。单 Bot 群连群带卡一起走，不留痕迹；多 Bot 群里那张卡还在，客户端手上已经有终态，重新加载后这张卡查不到审批。
 
 ### 群里回话等于按按钮
 
@@ -86,7 +137,7 @@
 
 有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次。
 
-pending 的审批留着。重连后照发 `welcome` 加 `config`，**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。
+pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 Bot 的 `pause` 或 `resume`），**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。
 
 电脑不在线时点结论，`agents.send` 返回 false，这一版**决定照样落库**，群里不额外补一句话。运行器那一头本来就已经断了，等它回来是另一件事。
 

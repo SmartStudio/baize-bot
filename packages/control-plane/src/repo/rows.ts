@@ -2,6 +2,7 @@ import {
   Approval,
   Bot,
   Computer,
+  Grant,
   Group,
   Handoff,
   Message,
@@ -92,6 +93,19 @@ export function toApproval(row: typeof schema.approvals.$inferSelect): Approval 
     decidedAt: row.decidedAt?.toISOString() ?? null,
     grantId: row.grantId,
   });
+}
+
+// 表里 project 行带 group_id、forever 行不带，由 check 约束保证；Grant 的两支各自 strict，多一个 groupId 就过不了 parse。
+export function toGrant(row: typeof schema.grants.$inferSelect): Grant {
+  const base = {
+    id: row.id,
+    action: row.action,
+    target: row.target,
+    createdAt: row.createdAt.toISOString(),
+  };
+  return Grant.parse(
+    row.scope === "project" ? { ...base, scope: "project", groupId: row.groupId } : { ...base, scope: "forever" },
+  );
 }
 
 // messageId 不出边界，和 Approval 一样：domain.ts 的 Handoff 只有客户端画那张卡要用的字段。
