@@ -428,7 +428,7 @@ export async function listPlansForPage(
 // ---- 发布 ----
 
 /** 能自动发的档位。可起草档批了也只是留着，只读档连草稿都建不了。 */
-const PUBLISHING_TIERS = ["confirm_publish", "direct_publish"] as const;
+export const PUBLISHING_TIERS = ["confirm_publish", "direct_publish"] as const;
 
 export type ClaimedDraft = {
   readonly draft: Draft;

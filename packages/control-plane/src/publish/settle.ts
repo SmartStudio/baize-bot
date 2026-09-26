@@ -7,7 +7,7 @@ import type { Published } from "./platforms.js";
 
 export type SettleDeps = { readonly db: Db; readonly push: PushHub; readonly notifications: NoticePublisher };
 
-const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
+export const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 const FAILURE_TEXT: Record<PublishFailureReason, string> = {
   login_expired: "账号登录过期了，重新登录后让 Bot 再起一稿",
   page_changed: "平台页面变了，没找到发布的地方",
@@ -42,7 +42,7 @@ export async function announceFailure(
   });
 }
 
-function titleOf(draft: Draft): string {
+export function titleOf(draft: Draft): string {
   const title = draft.content.kind === "post" ? (draft.content.title ?? draft.content.text) : draft.content.text;
   const chars = [...title.replaceAll("\n", " ")];
   return chars.length > 30 ? `${chars.slice(0, 30).join("")}…` : title;

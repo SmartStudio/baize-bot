@@ -3,11 +3,18 @@ import {
   type Approval,
   type ApprovalId,
   type AccountConfig,
+  type AccountId,
   type BotId,
+  type ContentPlan,
+  type ContentPlanId,
   type ControlToAgent,
   type DecideApprovalRequest,
+  type Draft,
+  type DraftId,
   type Grant,
   type GroupId,
+  type Handoff,
+  type HandoffId,
   type Message,
   type MessageBody,
   type ModelPurpose,
@@ -15,12 +22,16 @@ import {
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { decideApproval, latestPendingApproval } from "../repo/approvals.js";
+import { decideApproval, latestPendingApproval, listApprovals } from "../repo/approvals.js";
+import { listAccounts } from "../repo/accounts.js";
+import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
+import { listHandoffs } from "../repo/handoffs.js";
 import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
 import { findChiefBotId } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
+import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
 import { selectComputer, type ComputerSelection } from "./computer-selection.js";
@@ -148,6 +159,7 @@ async function sendSpeaker(
   }
 
   const history = await recentBodies(deps.db, groupId, speaker.trigger, includeRecent);
+  const context = await summarizeAll(deps.db, ownerId, history, speaker.botId, members);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const task = await findTaskByGroup(deps.db, groupId);
   const roster = members.map(({ id, name, tag, description }) => ({
@@ -190,10 +202,7 @@ async function sendSpeaker(
     origin,
     reason: speaker.reason,
     group,
-    context: history.flatMap((message) => {
-      const line = summarize(message, speaker.botId, members);
-      return line === null ? [] : [line];
-    }),
+    context,
     purpose: options.purpose ?? "plan",
     task: members.length > 1 ? task : null,
     members: roster,
@@ -223,37 +232,169 @@ async function recentBodies(db: Db, groupId: GroupId, trigger: Message, includeR
   return result.page.messages.filter((message) => message.id !== trigger.id);
 }
 
-/** 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。 */
-function summarize(message: Message, recipient: BotId, members: readonly GroupBot[]): ContextLine | null {
+/** 上下文里的卡指向的那些行。卡正文只有 id，状态住在行上。 */
+type CardRows = {
+  readonly approvals: ReadonlyMap<ApprovalId, Approval>;
+  readonly handoffs: ReadonlyMap<HandoffId, Handoff>;
+  readonly drafts: ReadonlyMap<DraftId, Draft>;
+  readonly plans: ReadonlyMap<ContentPlanId, ContentPlan>;
+  /** 档位能自动发的账号。草稿批了之后等不等着发看它。 */
+  readonly publishingAccounts: ReadonlySet<AccountId>;
+};
+
+function byId<K, T extends { readonly id: K }>(rows: readonly T[]): ReadonlyMap<K, T> {
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+/** 这一批上下文涉及的卡每种一次查完，再逐条写成一句。 */
+async function summarizeAll(
+  db: Db,
+  ownerId: UserId,
+  messages: readonly Message[],
+  recipient: BotId,
+  members: readonly GroupBot[],
+): Promise<ContextLine[]> {
+  const bodies = messages.map((message) => message.body);
+  const draftIds = bodies.flatMap((body) => (body.kind === "draft" ? [body.draftId] : []));
+  const [approvals, handoffs, drafts, plans, accounts] = await Promise.all([
+    listApprovals(
+      db,
+      bodies.flatMap((body) => (body.kind === "approval" ? [body.approvalId] : [])),
+    ),
+    listHandoffs(
+      db,
+      bodies.flatMap((body) => (body.kind === "handoff" ? [body.handoffId] : [])),
+    ),
+    listDraftsForPage(db, ownerId, draftIds, []),
+    listPlansForPage(
+      db,
+      ownerId,
+      bodies.flatMap((body) => (body.kind === "plan" ? [body.planId] : [])),
+    ),
+    draftIds.length === 0 ? [] : listAccounts(db, ownerId),
+  ]);
+  const cards: CardRows = {
+    approvals: byId(approvals),
+    handoffs: byId(handoffs),
+    drafts: byId(drafts),
+    plans: byId(plans),
+    publishingAccounts: new Set(
+      accounts.filter(({ tier }) => PUBLISHING_TIERS.some((one) => one === tier)).map(({ id }) => id),
+    ),
+  };
+  return messages.flatMap((message) => {
+    const line = summarize(message, cards, recipient, members);
+    return line === null ? [] : [line];
+  });
+}
+
+const APPROVAL_OUTCOME: Record<Approval["status"], string> = {
+  pending: "还在等你点头",
+  approved: "你批准了",
+  rejected: "你拒绝了",
+  expired: "没批下来，过期了",
+};
+
+const HANDOFF_OUTCOME: Record<Handoff["status"], (to: string) => string> = {
+  pending: (to) => `交接还在等${to}接`,
+  accepted: (to) => `${to}接了`,
+};
+
+const DRAFT_OUTCOME: Record<Draft["status"], (publishes: boolean) => string> = {
+  pending: () => "还在等你看",
+  approved: (publishes) => (publishes ? "你批准了，等着发" : "你批准了，留着没发"),
+  publishing: () => "正在发",
+  published: () => "已经发出去了",
+  returned: () => "你退回了",
+  failed: () => "没发出去",
+};
+
+const PLAN_OUTCOME: Record<ContentPlan["status"], string> = {
+  pending: "还在等你看",
+  approved: "你批准了",
+  returned: "你退回了",
+};
+
+const SKILL_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], string> = {
+  offered: "还在等你定",
+  saved: "你存了",
+  dismissed: "你没存",
+};
+
+const PROJECT_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "project_offer" }>["status"], string> = {
+  offered: "还在等你点开始",
+  started: "你点了开始，项目群建好了",
+  dismissed: "你没要",
+};
+
+/**
+ * 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。
+ * 卡写成「谁做了什么，现在怎样」一句结论；卡指的行查不到就不写，免得说错状态。
+ */
+function summarize(
+  message: Message,
+  cards: CardRows,
+  recipient: BotId,
+  members: readonly GroupBot[],
+): ContextLine | null {
   const body = message.body;
   const line = (from: string, text: string): ContextLine => ({ messageId: message.id, from, text });
+  const who = (botId: BotId | null) => sender(botId, recipient, members);
   switch (body.kind) {
     case "user":
       return line("你", clip(body.text));
     case "bot":
-      return line(sender(body.botId, recipient, members), clip(body.text));
+      return line(who(body.botId), clip(body.text));
     case "system":
       return line("系统", clip(body.text));
     case "tool_call":
-      return line(sender(body.botId, recipient, members), clip(toolViewText(body.view)));
+      return line(who(body.botId), clip(toolViewText(body.view)));
     case "cost":
       return null;
-    case "approval":
-      return line("系统", "一条等你点头的审批");
-    case "handoff":
-      return line("系统", "一条交接报文");
+    case "approval": {
+      const approval = cards.approvals.get(body.approvalId);
+      if (approval === undefined) return null;
+      return line(
+        "系统",
+        `${who(approval.botId)}${clip(toolViewText(approval.view))}，${APPROVAL_OUTCOME[approval.status]}`,
+      );
+    }
+    case "handoff": {
+      const handoff = cards.handoffs.get(body.handoffId);
+      if (handoff === undefined) return null;
+      const to = who(handoff.toBotId);
+      return line(
+        "系统",
+        `${who(handoff.fromBotId)}把活交给${to}，下一步是「${clip(handoff.next)}」，${HANDOFF_OUTCOME[handoff.status](to)}`,
+      );
+    }
+    case "draft": {
+      const draft = cards.drafts.get(body.draftId);
+      if (draft === undefined) return null;
+      const noun = draft.content.kind === "reply" ? "回复" : "草稿";
+      return line(
+        "系统",
+        `${who(draft.botId)}起草的${noun}「${titleOf(draft)}」（${PLATFORM_LABEL[draft.platform]}），${DRAFT_OUTCOME[draft.status](cards.publishingAccounts.has(draft.accountId))}`,
+      );
+    }
+    case "plan": {
+      const plan = cards.plans.get(body.planId);
+      if (plan === undefined) return null;
+      return line(
+        "系统",
+        `${who(plan.botId)}排的内容计划「${plan.title}」共 ${plan.draftIds.length} 篇，${PLAN_OUTCOME[plan.status]}`,
+      );
+    }
     case "skill_offer":
-      return line("系统", `问过要不要存成 skill「${body.name}」`);
+      return line("系统", `问过要不要存成 skill「${body.name}」，${SKILL_OFFER_OUTCOME[body.status]}`);
     case "project_offer":
-    case "draft":
-    case "plan":
-      return null;
+      return line("系统", `${who(body.botId)}出的方案卡「${body.name}」，${PROJECT_OFFER_OUTCOME[body.status]}`);
   }
 }
 
 /** 收件人看自己只看到自己的名字，看别人带上 tag 才分得清同名的两位。 */
-function sender(botId: BotId, recipient: BotId, members: readonly GroupBot[]): string {
-  const member = members.find((one) => one.id === botId);
+function sender(botId: BotId | null, recipient: BotId, members: readonly GroupBot[]): string {
+  const member = botId === null ? undefined : members.find((one) => one.id === botId);
   if (member === undefined) return "别的 Bot";
   if (member.id === recipient) return member.name;
   return member.tag === "" ? member.name : `${member.name} · ${member.tag}`;
