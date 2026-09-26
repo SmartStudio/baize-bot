@@ -256,6 +256,8 @@ describe("方案卡", () => {
         { text: OFFER.firstStep, done: false, ownerBotId: null },
       ]);
       expect(detail.bots.map((bot) => bot.name)).toEqual(["主助理", ...OFFER.team.map((member) => member.name)]);
+      expect(started.task, "回包带任务卡，Web 跳项目页不用再拉一次").toEqual(detail.task);
+      expect(created.task).toEqual(detail.task);
 
       // 两条在同一个事务里建，created_at 相同，列表里谁先谁后不定，按名字的码点排再比。
       const routines = (await routinesOf(s.me.client, s.me.assistant.botId)).toSorted((x, y) =>
@@ -355,14 +357,30 @@ describe("方案卡", () => {
     }
   });
 
-  it("开始时带新名字，群名是新名字", async () => {
+  it("开始时带新名字，群名是新名字，卡正文里的名字也换成它并重推", async () => {
     const s = await session();
     try {
       const card = await offerCard(s);
-      const { group } = await decide(s.me.client, card.id, { decision: "start", name: "白泽千星" });
-      if (group === null) throw new Error("开始了却没回项目群");
-      const detail = GroupResponse.parse(await (await s.me.client.get(`/api/groups/${group.id}`)).json());
+      const started = await decide(s.me.client, card.id, { decision: "start", name: "白泽千星" });
+      if (started.group === null) throw new Error("开始了却没回项目群");
+      const detail = GroupResponse.parse(await (await s.me.client.get(`/api/groups/${started.group.id}`)).json());
       expect(detail.task.title).toBe("白泽千星");
+      expect(started.task?.title).toBe("白泽千星");
+
+      expect(offerBody(started.message), "卡的状态住在正文里，新名字也写回正文").toEqual({
+        ...offerBody(card),
+        name: "白泽千星",
+        status: "started",
+        groupId: started.group.id,
+      });
+      const repushed = await nextOfType(s.push, "message");
+      expect(repushed.message, "重推的是带新名字的那条卡").toEqual(started.message);
+      const stored = (await messagesOf(s.me.client, s.me.assistant.groupId)).find((message) => message.id === card.id);
+      expect(stored, "刷新后卡上还是新名字").toEqual(started.message);
+
+      const again = await decide(s.me.client, card.id, { decision: "start", name: "又一个名字" });
+      expect(again.message, "已经开始的卡再点，名字不再改").toEqual(started.message);
+      expect(again.task, "已经开始的卡回同一张任务卡").toEqual(started.task);
     } finally {
       s.close();
     }
@@ -397,12 +415,14 @@ describe("方案卡", () => {
       const card = await offerCard(s);
       const dismissed = await decide(s.me.client, card.id, { decision: "dismiss" });
       expect(dismissed.group).toBeNull();
+      expect(dismissed.task).toBeNull();
       expect(offerBody(dismissed.message)).toMatchObject({ status: "dismissed", groupId: null });
       const repushed = await nextOfType(s.push, "message");
       expect(repushed.message).toEqual(dismissed.message);
 
       const again = await decide(s.me.client, card.id, { decision: "start" });
       expect(again.group).toBeNull();
+      expect(again.task).toBeNull();
       expect(offerBody(again.message).status, "回当前那条，不改").toBe("dismissed");
       expect(await counts(s.me)).toEqual(before);
     } finally {

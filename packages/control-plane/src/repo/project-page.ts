@@ -13,17 +13,26 @@ import {
   runs,
   tasks,
 } from "../db/schema.js";
+import type { Tx } from "./messages.js";
 import { toDraft, toMessage, toPlan } from "./rows.js";
 import { draftTitle, draftsByPlanOf, nextItems, nextRoutineAt, pendingItems } from "./today.js";
 import { runTitle, weekStart } from "./usage.js";
 
 /** 项目就是本人的多 Bot 群。别人的群、单 Bot 群、不存在的群都是 null，路由据此回 404。 */
-export async function getProject(
+export function getProject(
   db: Db,
   ownerId: UserId,
   groupId: GroupId,
   now = new Date(),
 ): Promise<ProjectResponse | null> {
+  // 起点、轮数、回应分几条查。不在同一个快照里的话，查起点之后才落库的新一句不算起点，却会被当成回应带出来。
+  return db.transaction((tx) => readProject(tx, ownerId, groupId, now), {
+    isolationLevel: "repeatable read",
+    accessMode: "read only",
+  });
+}
+
+async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date): Promise<ProjectResponse | null> {
   const [group] = await db
     .select({ id: groups.id })
     .from(groups)

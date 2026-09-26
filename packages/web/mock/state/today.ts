@@ -15,6 +15,7 @@ import {
   PublicationId,
   RunId,
   TodayResponse,
+  type TodayAssistantLine,
   type TodayPendingItem,
 } from "@baize/shared";
 import { appendMessage } from "./messages.js";
@@ -46,6 +47,21 @@ const botIdOf = (id: string): BotId => bots.get(id)?.id ?? BotId.parse(id);
 const assistantGroupIdOf = (): GroupId | null => {
   const groupId = groupIdByBotId.get("bot_assistant");
   return groupId === undefined ? null : groupIdOf(groupId);
+};
+
+const assistantLatestOf = (): TodayAssistantLine | null => {
+  const groupId = groupIdByBotId.get("bot_assistant");
+  const said = (groupId === undefined ? [] : (messagesByGroupId.get(groupId) ?? [])).findLast(
+    (message) => message.body.kind === "bot" && message.body.text !== "",
+  );
+  if (said === undefined || said.body.kind !== "bot") return null;
+  // 跟控制面同一个口径：按 UTF-16 码元数到 200，一个码点一个码点地收，不劈开 emoji。
+  let text = "";
+  for (const point of said.body.text) {
+    if (text.length + point.length > 200) break;
+    text += point;
+  }
+  return { text, at: said.createdAt };
 };
 
 const accountOf = (
@@ -555,7 +571,14 @@ export const pendingOf = (): TodayPendingItem[] => {
 
 export const todayOf = (): TodayResponse => {
   if (mode === "empty") {
-    return TodayResponse.parse({ assistantGroupId: null, pending: [], done: [], running: [], next: [] });
+    return TodayResponse.parse({
+      assistantGroupId: null,
+      assistantLatest: null,
+      pending: [],
+      done: [],
+      running: [],
+      next: [],
+    });
   }
 
   const done: TodayResponse["done"] = [...publications.values()].map((publication) => {
@@ -626,6 +649,7 @@ export const todayOf = (): TodayResponse => {
 
   return TodayResponse.parse({
     assistantGroupId: assistantGroupIdOf(),
+    assistantLatest: assistantLatestOf(),
     pending: pendingOf(),
     done,
     running,

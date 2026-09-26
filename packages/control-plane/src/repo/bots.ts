@@ -6,6 +6,7 @@ import {
   type BotId,
   type Group,
   type Message,
+  type TopicTask,
   type UserId,
 } from "@baize/shared";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -16,7 +17,7 @@ import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
-import { toApproval, toBot, toGroup } from "./rows.js";
+import { toApproval, toBot, toGroup, toTask } from "./rows.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -61,7 +62,9 @@ async function claimCounter(tx: Tx, ownerId: UserId, advanceHue: boolean) {
 }
 
 /** 给刚插进去的 Bot 建单聊群、入群、主题任务卡。 */
-async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Promise<{ bot: Bot; group: Group }> {
+type SoloOpened = { readonly bot: Bot; readonly group: Group; readonly task: TopicTask };
+
+async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Promise<SoloOpened> {
   const [groupRow] = await tx
     .insert(groups)
     .values({ id: newId(), ownerId: botRow.ownerId, soloBotId: botRow.id })
@@ -76,7 +79,7 @@ async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Pr
     .returning();
   if (taskRow === undefined) throw new Error("建主题任务没有返回行");
 
-  return { bot: toBot(botRow), group: toGroup(groupRow, [botRow.id], taskRow.id) };
+  return { bot: toBot(botRow), group: toGroup(groupRow, [botRow.id], taskRow.id), task: toTask(taskRow) };
 }
 
 export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput): Promise<{ bot: Bot; group: Group }> {
@@ -111,7 +114,10 @@ export async function insertMemberBot(
  * 不先查：bot 行直接撞部分唯一索引 `bots_owner_id_assistant_idx`，并发的两次里输的那次没有返回行，
  * 到这里就停，不占编号、不建群、不再说第一句。
  */
-export async function ensureAssistant(tx: Tx, ownerId: UserId): Promise<{ bot: Bot; group: Group } | null> {
+export async function ensureAssistant(
+  tx: Tx,
+  ownerId: UserId,
+): Promise<(SoloOpened & { readonly greeting: Message }) | null> {
   const [botRow] = await tx
     .insert(bots)
     .values({ id: newId(), ownerId, role: "assistant", name: ASSISTANT_NAME, hue: ASSISTANT_HUE })
@@ -121,13 +127,13 @@ export async function ensureAssistant(tx: Tx, ownerId: UserId): Promise<{ bot: B
 
   const counter = await claimCounter(tx, ownerId, false);
   const created = await openSoloGroup(tx, botRow, counter.nextTaskNumber);
-  await appendMessage(tx, created.group.id, {
+  const greeting = await appendMessage(tx, created.group.id, {
     kind: "bot",
     botId: created.bot.id,
     text: ASSISTANT_GREETING,
     streaming: false,
   });
-  return created;
+  return { ...created, greeting };
 }
 
 /** 这个用户的主助理和它的单聊群。P1-13 之前注册、还没登录过的老用户没有，返回 null。 */

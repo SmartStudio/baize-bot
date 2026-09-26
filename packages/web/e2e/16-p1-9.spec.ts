@@ -226,7 +226,9 @@ test("卡已在别处放弃时，按回包收成一行灰字，不跳", async ({
   const offer = await offerMessage(page);
   // 控制面抢不到卡时只回 200 加卡现在的样子，不推送；这里整条替掉，卡能换样子只可能靠回包。
   await page.route("**/project-offer", (route) =>
-    route.fulfill({ json: { message: { ...offer, body: { ...offer.body, status: "dismissed" } }, group: null } }),
+    route.fulfill({
+      json: { message: { ...offer, body: { ...offer.body, status: "dismissed" } }, group: null, task: null },
+    }),
   );
 
   await card.getByTestId("project-offer-start").click();
@@ -254,6 +256,7 @@ test("卡已在别处开始时，按回包跳进那个项目的项目页", async
       json: {
         message: { ...offer, body: { ...offer.body, status: "started", groupId: existing.group.id } },
         group: existing.group,
+        task: existing.task,
       },
     }),
   );

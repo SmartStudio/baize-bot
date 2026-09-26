@@ -5,6 +5,7 @@ import {
   DecideApprovalResponse,
   CreateGroupResponse,
   GroupResponse,
+  MessageId,
   MessageListResponse,
   TodayResponse,
   type BotId,
@@ -219,6 +220,130 @@ describe("主助理", () => {
     const { client, assistant } = await owner();
     const today = TodayResponse.parse(await (await client.get("/api/today")).json());
     expect(today.assistantGroupId).toBe(assistant.groupId);
+  });
+
+  it("today 带主助理单聊里最近一条 Bot 消息，正文截到 200 字，别的群和用户的话不算", async () => {
+    const me = await owner();
+    const [greeting] = await messagesOf(me.client, me.assistant.groupId);
+    if (greeting === undefined) throw new Error("主助理单聊里没有第一句");
+    const fresh = TodayResponse.parse(await (await me.client.get("/api/today")).json());
+    expect(fresh.assistantLatest, "注册完首页就有主助理那一句").toEqual({ text: GREETING, at: greeting.createdAt });
+
+    const { agent } = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    const push = await connectPush(server.server.port, me.client.cookie ?? "");
+    try {
+      const botSays = async (prompt: Extract<ControlToAgent, { type: "prompt" }>, delta: string) => {
+        const messageId = MessageId.parse(newId());
+        agent.send({
+          type: "bot_text",
+          runId: prompt.runId,
+          botId: prompt.botId,
+          groupId: prompt.groupId,
+          messageId,
+          delta,
+          done: true,
+        });
+        for (;;) {
+          const item = await nextOfType(push, "message");
+          if (item.message.id === messageId) return item.message;
+        }
+      };
+
+      // 199 个字加一个 emoji：按码元截到 200 会劈开代理对，这里要整个丢掉 emoji。
+      const long = `${"长".repeat(199)}😀之后的字`;
+      const replied = await botSays(
+        await sendAndPrompt(me.client, agent, me.assistant.groupId, "介绍一下你自己"),
+        long,
+      );
+
+      const member = await createBot(me.client, "小服");
+      await agent.expect("config");
+      await botSays(await sendAndPrompt(me.client, agent, member.group.id, "你好"), "队员单聊里的话");
+      const pending = await sendAndPrompt(me.client, agent, me.assistant.groupId, "今天做什么");
+
+      const today = TodayResponse.parse(await (await me.client.get("/api/today")).json());
+      expect(today.assistantLatest).toEqual({ text: "长".repeat(199), at: replied.createdAt });
+
+      const streamingId = MessageId.parse(newId());
+      const streamed = (delta: string, done: boolean) => {
+        agent.send({
+          type: "bot_text",
+          runId: pending.runId,
+          botId: pending.botId,
+          groupId: pending.groupId,
+          messageId: streamingId,
+          delta,
+          done,
+        });
+      };
+      const landed = async (done: boolean) => {
+        for (;;) {
+          const item = await nextOfType(push, "message_delta");
+          if (item.messageId === streamingId && item.done === done) return;
+        }
+      };
+      streamed("还没说完的半句", false);
+      await landed(false);
+      const midway = TodayResponse.parse(await (await me.client.get("/api/today")).json());
+      expect(midway.assistantLatest, "流式中的半句不顶掉上一句说完的").toEqual(today.assistantLatest);
+
+      streamed("，现在说完了", true);
+      await landed(true);
+      const finished = (await messagesOf(me.client, me.assistant.groupId)).find((m) => m.id === streamingId);
+      const after = TodayResponse.parse(await (await me.client.get("/api/today")).json());
+      expect(after.assistantLatest, "说完之后才算最近一句").toEqual({
+        text: "还没说完的半句，现在说完了",
+        at: finished?.createdAt,
+      });
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("hello 补建主助理后给 Web 推 Bot、单聊群和第一句，再 hello 不推", async () => {
+    const me = await owner();
+    const marker = await createBot(me.client, "小服");
+    // 删掉主助理行造出老用户：首页已经开着，推送连着，cookie 还有效，他不会再走一次登录。
+    await database.sql`DELETE FROM bots WHERE owner_id = ${me.user.id} AND role = 'assistant'`;
+    const push = await connectPush(server.server.port, me.client.cookie ?? "");
+
+    /** 改一下 marker 的名字，它的 bot_updated 一定落地；排在它前面的就是 hello 期间推的全部。 */
+    const pushesUntilMarker = async (name: string): Promise<ServerPush[]> => {
+      expect((await me.client.patch(`/api/bots/${marker.bot.id}`, { name })).status).toBe(200);
+      const seen: ServerPush[] = [];
+      for (;;) {
+        const item = await push.next();
+        if (item.type === "bot_updated" && item.bot.id === marker.bot.id && item.bot.name === name) return seen;
+        seen.push(item);
+      }
+    };
+
+    const first = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    try {
+      const pushed = (await pushesUntilMarker("小服一")).filter((item) => item.type !== "computer_updated");
+      const assistant = await onlyAssistant(me.client);
+      const detail = GroupResponse.parse(await (await me.client.get(`/api/groups/${assistant.groupId}`)).json());
+      const [greeting] = await messagesOf(me.client, assistant.groupId);
+      if (greeting === undefined) throw new Error("补建的主助理没说第一句");
+      expect(pushed, "先认识 Bot，再拿到它的单聊群，最后是第一句").toEqual([
+        { type: "bot_updated", bot: detail.bots[0] },
+        { type: "group_created", group: detail.group, task: detail.task },
+        { type: "message", message: greeting },
+      ]);
+      expect(detail.bots.map((bot) => bot.role)).toEqual(["assistant"]);
+    } finally {
+      first.agent.close();
+    }
+
+    const again = await helloAgent(server.server.port, me.computer.computerId, me.computer.token);
+    try {
+      const pushed = (await pushesUntilMarker("小服二")).filter((item) => item.type !== "computer_updated");
+      expect(pushed, "主助理本来就有，hello 不再推它").toEqual([]);
+    } finally {
+      again.agent.close();
+      push.close();
+    }
   });
 
   it("主助理的 prompt 带 projects，队员的不带", async () => {

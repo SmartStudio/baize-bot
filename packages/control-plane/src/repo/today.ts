@@ -4,13 +4,14 @@ import {
   GroupId,
   RoutineId,
   TodayResponse,
+  type TodayAssistantLine,
   type TodayDoneItem,
   type TodayNextItem,
   type TodayPendingItem,
   type TodayRunningItem,
   type UserId,
 } from "@baize/shared";
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   accounts,
@@ -19,6 +20,7 @@ import {
   contentPlans,
   drafts,
   groups,
+  messages,
   publications,
   routineRuns,
   routines,
@@ -191,8 +193,10 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
     now,
   );
 
+  const assistant = await findAssistant(db, ownerId);
   return TodayResponse.parse({
-    assistantGroupId: (await findAssistant(db, ownerId))?.groupId ?? null,
+    assistantGroupId: assistant?.groupId ?? null,
+    assistantLatest: assistant === null ? null : await latestBotLine(db, assistant.groupId),
     pending: orderedPending.slice(-50),
     done: orderedDone.slice(0, 20).map(({ item }) => item),
     running,
@@ -340,6 +344,24 @@ export function draftTitle(row: DraftRow): string {
     row.content.kind === "post" ? (row.content.title ?? row.content.text) : `回复 ${row.content.replyTo.author}`,
     80,
   );
+}
+
+// 流式中的消息还会变，断在半路就永远是半句，只认说完的；空壳不算说过话。
+async function latestBotLine(db: Db, groupId: GroupId): Promise<TodayAssistantLine | null> {
+  const [row] = await db
+    .select({ text: sql<string>`${messages.body}->>'text'`, createdAt: messages.createdAt })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.groupId, groupId),
+        sql`${messages.body}->>'kind' = 'bot'`,
+        sql`${messages.body}->>'streaming' = 'false'`,
+        sql`${messages.body}->>'text' <> ''`,
+      ),
+    )
+    .orderBy(desc(messages.seq))
+    .limit(1);
+  return row === undefined ? null : { text: clip(row.text, 200), at: row.createdAt.toISOString() };
 }
 
 // zod 的 max 数的是 UTF-16 码元，这里按同一个口径截；一个码点一个码点地收，emoji 这类代理对不会被劈成两半。

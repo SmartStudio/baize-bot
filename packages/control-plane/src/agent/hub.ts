@@ -268,6 +268,12 @@ export class AgentHub {
     // 登录时补建管不到会话还有效的老用户，他们下次登录前一直没有主助理。hello 这里再补一次，
     // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
     const assistant = await this.#deps.db.transaction((tx) => ensureAssistant(tx, computer.ownerId));
+    if (assistant !== null) {
+      // 已经打开的首页靠这三条认识主助理，不用刷新输入框就能用。
+      this.#deps.push.push(computer.ownerId, { type: "bot_updated", bot: assistant.bot });
+      this.#deps.push.push(computer.ownerId, { type: "group_created", group: assistant.group, task: assistant.task });
+      this.#deps.push.push(computer.ownerId, { type: "message", message: assistant.greeting });
+    }
     await this.#sendConfig(accepted, "hello");
     this.#configured.add(accepted);
     if (assistant !== null) {

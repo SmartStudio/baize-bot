@@ -1,6 +1,8 @@
 import {
   CreateBotResponse,
+  CreateGroupResponse,
   MessageListResponse,
+  RoutineListResponse,
   RoutineResponse,
   type BotId,
   type CreateRoutineRequest,
@@ -634,3 +636,94 @@ async function waitUntil(check: () => Promise<boolean>, what: string): Promise<v
   }
   throw new Error(`等${what}超时`);
 }
+
+async function allRoutines(client: ApiClient): Promise<Routine[]> {
+  const response = await client.get("/api/routines");
+  expect(response.status).toBe(200);
+  return RoutineListResponse.parse(await response.json()).items;
+}
+
+async function secondBot(owner: Owner): Promise<BotId> {
+  return CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小内" })).json()).bot.id;
+}
+
+async function projectGroup(owner: Owner, botIds: readonly BotId[]): Promise<GroupId> {
+  const response = await owner.client.post("/api/groups", { title: "推广白泽", botIds });
+  expect(response.status).toBe(201);
+  return CreateGroupResponse.parse(await response.json()).group.id;
+}
+
+describe("例行聚合与项目群里的例行", () => {
+  it("GET /api/routines 列出自己全部 Bot 的例行，每条带 botId、groupId 和运行记录，别人的不在", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const stranger = await ownerWithBot();
+    await makeRoutine(stranger, { name: "别人的" });
+
+    const first = await makeRoutine(owner, { name: "早报" });
+    const ran = await owner.client.post(`/api/routines/${first.id}/run`, {});
+    expect(ran.status).toBe(202);
+    const afterRun = RoutineResponse.parse(await ran.json()).routine;
+    const second = RoutineResponse.parse(
+      await (
+        await owner.client.post(`/api/bots/${other}/routines`, {
+          name: "晚报",
+          instruction: "汇总今天的工单",
+          triggers: [],
+          onFailure: "stop_and_tell",
+        })
+      ).json(),
+    ).routine;
+
+    const items = await allRoutines(owner.client);
+    expect(items, "按建的先后排，和单个 Bot 的接口同一个形状").toEqual([afterRun, second]);
+    expect(items.map((routine) => routine.botId)).toEqual([owner.botId, other]);
+    expect(
+      items[0]?.runs.map((run) => run.status),
+      "带着运行记录",
+    ).toEqual(["failed"]);
+    expect((await server.client().get("/api/routines")).status, "没登录拿不到").toBe(401);
+  });
+
+  it("建例行时带的 groupId 落库，列表里带着，试跑发进那个群", async () => {
+    const owner = await ownerWithBot();
+    const groupId = await projectGroup(owner, [owner.botId, await secondBot(owner)]);
+    const routine = await makeRoutine(owner, { name: "项目周报", groupId });
+    expect(routine.groupId).toBe(groupId);
+
+    const [listed] = await allRoutines(owner.client);
+    expect(listed?.groupId, "落了库，重新读出来还是那个群").toBe(groupId);
+    const stored = await database.sql<{ group_id: string | null }[]>`
+      SELECT group_id FROM routines WHERE id = ${routine.id}
+    `;
+    expect(stored[0]?.group_id).toBe(groupId);
+
+    expect((await owner.client.post(`/api/routines/${routine.id}/run`, {})).status).toBe(202);
+    const inProject = MessageListResponse.parse(
+      await (await owner.client.get(`/api/groups/${groupId}/messages`)).json(),
+    ).messages.map((message) => message.body);
+    expect(inProject, "例行发进项目群，不是 Bot 的单聊").toContainEqual({
+      kind: "system",
+      text: "例行任务「项目周报」自动运行",
+    });
+    const inSolo = MessageListResponse.parse(
+      await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
+    ).messages;
+    expect(inSolo).toEqual([]);
+  });
+
+  it("groupId 是别人的群 404，Bot 不在那个群里 400，都不建", async () => {
+    const owner = await ownerWithBot();
+    const stranger = await ownerWithBot();
+    const strangerGroup = await projectGroup(stranger, [stranger.botId, await secondBot(stranger)]);
+    const withoutMe = await projectGroup(owner, [await secondBot(owner), await secondBot(owner)]);
+    const body = { name: "项目周报", instruction: "写周报", triggers: [], onFailure: "stop_and_tell" };
+
+    const foreign = await owner.client.post(`/api/bots/${owner.botId}/routines`, { ...body, groupId: strangerGroup });
+    expect(foreign.status, "别人的群和不存在一样").toBe(404);
+    const notMember = await owner.client.post(`/api/bots/${owner.botId}/routines`, { ...body, groupId: withoutMe });
+    expect(notMember.status).toBe(400);
+    expect(((await notMember.json()) as { error: string }).error).toContain("不在");
+    expect(await allRoutines(owner.client)).toEqual([]);
+  });
+});

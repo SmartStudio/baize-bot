@@ -75,7 +75,7 @@
 
 ## 主助理
 
-每个用户恰好一个主助理，`bots.role = 'assistant'`，由部分唯一索引 `bots_owner_id_assistant_idx` 钉住。`ensureAssistant(tx, ownerId)` 不先查：直接插 bot 行撞这个索引，`onConflictDoNothing` 没返回行就停，不占编号、不建群。真插进去的那次才建单聊群、主题任务卡和 `group_members`，并在单聊里写主助理的第一句 `ASSISTANT_GREETING`。注册在同一个事务里调它；登录成功后再调一次，给 P1-13 之前注册的老用户补建，补建成功且电脑在线就重发一次 `config`；电脑 `hello` 校验通过后、查 Bot 发 `config` 之前也调一次，会话还有效、一直没重新登录的老用户靠这一处补上，补建成功时这个用户的其他连接也重发一次 `config`；`seed` 建完用户也调一次。主助理的色相固定 `sky`，不推进 `user_counters.next_hue`，所以用户自己建的 Bot 仍从色相轮转的第一格起。
+每个用户恰好一个主助理，`bots.role = 'assistant'`，由部分唯一索引 `bots_owner_id_assistant_idx` 钉住。`ensureAssistant(tx, ownerId)` 不先查：直接插 bot 行撞这个索引，`onConflictDoNothing` 没返回行就停，不占编号、不建群。真插进去的那次才建单聊群、主题任务卡和 `group_members`，并在单聊里写主助理的第一句 `ASSISTANT_GREETING`。注册在同一个事务里调它；登录成功后再调一次，给 P1-13 之前注册的老用户补建，补建成功且电脑在线就重发一次 `config`；电脑 `hello` 校验通过后、查 Bot 发 `config` 之前也调一次，会话还有效、一直没重新登录的老用户靠这一处补上，补建成功时先给 Web 推 `bot_updated`（主助理）、`group_created`（单聊群和它的主题任务卡）和第一句的 `message`，已经开着的首页不用刷新就能用输入框，这个用户的其他连接也重发一次 `config`；`seed` 建完用户也调一次。主助理的色相固定 `sky`，不推进 `user_counters.next_hue`，所以用户自己建的 Bot 仍从色相轮转的第一格起。
 
 `DELETE /api/bots/:id` 删不了主助理，回 409 和一句中文原因。删除和收审批用同一个 `role = 'member'` 条件，删不到时再分辨是主助理还是不存在。群没有删除和退群的接口，所以主助理的单聊群没有别的入口可以拆。
 
@@ -93,12 +93,12 @@
 
 `POST /api/messages/:id/project-offer` 按归属人查这条消息，正文不是方案卡或不是自己的回 404。`start` 在一个事务里做完下面几件事，第一步就是抢卡：
 
-1. `UPDATE messages ... WHERE body ->> 'status' = 'offered'`，同时写进 `status: "started"` 和预先生成的项目群 id。并发的第二个请求在行锁上等，醒来 `WHERE` 已不成立，一行都改不到，事务回滚，什么都不建。
+1. `UPDATE messages ... WHERE body ->> 'status' = 'offered'`，同时写进 `status: "started"`、预先生成的项目群 id 和最终的项目名（请求给了 `name` 就是它）。卡的状态只住在这条正文里，改名不另存一份。并发的第二个请求在行锁上等，醒来 `WHERE` 已不成立，一行都改不到，事务回滚，什么都不建。
 2. 按 `team` 建队员 Bot，每个都带自己的单聊群（`listBots` 按单聊 join，没有单聊的 Bot 进不了 `config`）。`tag` 对 `tag`，`description` 对 `description`。
 3. 建项目群和主题任务卡。群名取请求里的 `name`，没给用正文的；`summary` 取 `goal`，`cadence` 取正文，`firstStep` 是清单第一项。成员是主助理在前、队员在后，首席是主助理。
 4. 建 `PROJECT_ROUTINES` 两条例行：「周一 09:00 排本周计划」让主助理调 `propose_plan`，「周五复盘」只复盘。例行的 Bot 是主助理，`groupId` 是项目群，`purpose` 是 `plan`。
 
-提交之后重推这条消息，推 `group_created` 和每条 `routine_updated`，再重发 `config`，新队员这时才跑得起来。`dismiss` 用同一个条件 `UPDATE` 改成 `dismissed` 并重推。抢不到卡时回 200 带当前消息，已开始的顺带项目群，不再推送。
+提交之后重推这条消息，给每个新队员推 `bot_updated`，再推 `group_created` 和每条 `routine_updated`，最后重发 `config`，新队员这时才跑得起来。回包带这条消息、项目群和它的主题任务卡。`dismiss` 用同一个条件 `UPDATE` 改成 `dismissed` 并重推，回包的群和卡都是 null。抢不到卡时回 200 带当前消息，已开始的顺带项目群和卡，不再推送。
 
 ## 审批
 
@@ -232,6 +232,8 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 
 ## 例行任务
 
 例行任务属于一个 Bot。**一次运行就是归属人在群里发了一条消息**，`groupId` 为空时是这个 Bot 的单 Bot 群，不为空时是那个群（建项目时的两条例行发进项目群）：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`，派到哪台电脑也是同一条规则（见「派到哪台电脑」），本机合盖、远程在线时例行照常在远程跑。运行器和电脑代理因此不认识例行任务，没有新报文。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
+
+`POST /api/bots/:id/routines` 带的 `groupId` 照存进 `routines.group_id`。群按归属人查，别人的群和不存在一样回 404；Bot 不在那个群里回 400。`GET /api/routines` 是这个用户全部 Bot 的例行，每条就是 `Routine`（带 `botId`、`groupId` 和最近 20 条运行记录），按建的先后排。
 
 ### 调度判定
 
@@ -383,9 +385,9 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
 
-`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。
+`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
 
-`GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 只读本人的 `publications`，按发布时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
+`GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 只读本人的 `publications`，按发布时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数。整页在一个 `REPEATABLE READ` 只读事务里查，起点、轮数和回应出自同一个快照：分开查的话，查完起点才落库的下一句不算起点，却会被当成回应带出来；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
 
 系统通知在这几种时候产生：
 

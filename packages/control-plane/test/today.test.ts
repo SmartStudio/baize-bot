@@ -2,6 +2,7 @@ import {
   ApprovalId,
   BotListResponse,
   CreateBotResponse,
+  MessageListResponse,
   TodayResponse,
   type BotId,
   type GroupId,
@@ -51,6 +52,17 @@ async function assistantGroupOf(client: ApiClient): Promise<GroupId> {
   const assistant = list.items.find((item) => item.bot.role === "assistant");
   if (assistant === undefined) throw new Error("注册后应当已有主助理");
   return assistant.groupId;
+}
+
+/** 刚注册的人首页上主助理那一栏：单聊群，加上它在单聊里说的第一句。 */
+async function freshAssistantOf(
+  client: ApiClient,
+): Promise<Pick<TodayResponse, "assistantGroupId" | "assistantLatest">> {
+  const groupId = await assistantGroupOf(client);
+  const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
+  const [greeting] = page.messages;
+  if (greeting?.body.kind !== "bot") throw new Error("主助理单聊里第一条应当是它的第一句");
+  return { assistantGroupId: groupId, assistantLatest: { text: greeting.body.text, at: greeting.createdAt } };
 }
 
 async function ownerWithBot(name = "小服"): Promise<Owner> {
@@ -284,7 +296,7 @@ describe("GET /api/today", () => {
     expect((await client.login(user.email, PASSWORD)).status).toBe(200);
 
     expect(TodayResponse.parse(await (await client.get("/api/today")).json())).toEqual({
-      assistantGroupId: await assistantGroupOf(client),
+      ...(await freshAssistantOf(client)),
       pending: [],
       done: [],
       running: [],
@@ -298,7 +310,7 @@ describe("GET /api/today", () => {
     await seedFourColumns(other);
 
     expect(TodayResponse.parse(await (await mine.client.get("/api/today")).json())).toEqual({
-      assistantGroupId: await assistantGroupOf(mine.client),
+      ...(await freshAssistantOf(mine.client)),
       pending: [],
       done: [],
       running: [],

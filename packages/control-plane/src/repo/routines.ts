@@ -2,6 +2,7 @@ import {
   RoutineId,
   UserId,
   type BotId,
+  type GroupId,
   type OnFailure as OnFailureSchema,
   type ModelPurpose,
   type Routine,
@@ -65,7 +66,27 @@ export async function loadRoutine(db: Db, routineId: RoutineId): Promise<Routine
 }
 
 export async function listRoutines(db: Db, botId: BotId): Promise<Routine[]> {
-  const rows = await db.select().from(routines).where(eq(routines.botId, botId)).orderBy(asc(routines.createdAt));
+  return withRuns(
+    db,
+    await db.select().from(routines).where(eq(routines.botId, botId)).orderBy(asc(routines.createdAt)),
+  );
+}
+
+/** 这个人全部 Bot 的例行任务，按建的先后排。 */
+export async function listOwnerRoutines(db: Db, ownerId: UserId): Promise<Routine[]> {
+  const rows = await db
+    .select({ row: routines })
+    .from(routines)
+    .innerJoin(bots, eq(bots.id, routines.botId))
+    .where(eq(bots.ownerId, ownerId))
+    .orderBy(asc(routines.createdAt), asc(routines.id));
+  return withRuns(
+    db,
+    rows.map(({ row }) => row),
+  );
+}
+
+async function withRuns(db: Db, rows: readonly RoutineRow[]): Promise<Routine[]> {
   if (rows.length === 0) return [];
   const byRoutine = await listRunsByRoutine(
     db,
@@ -97,6 +118,8 @@ export type RoutineInput = {
   readonly instruction: string;
   readonly triggers: readonly TriggerInput[];
   readonly onFailure: OnFailure;
+  /** null 或不给是发进 Bot 的单聊。 */
+  readonly groupId?: GroupId | null | undefined;
   readonly purpose?: ModelPurpose | undefined;
   readonly enabled: boolean;
 };
@@ -111,6 +134,7 @@ export async function createRoutine(db: Db, botId: BotId, input: RoutineInput): 
       instruction: input.instruction,
       triggers: mergeTriggers([], input.triggers),
       onFailure: input.onFailure,
+      groupId: input.groupId ?? null,
       purpose: input.purpose ?? "plan",
       enabled: input.enabled,
     })

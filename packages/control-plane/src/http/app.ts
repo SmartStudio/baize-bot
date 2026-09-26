@@ -97,6 +97,7 @@ import {
   deleteRoutine,
   findOwnedRoutine,
   findRoutineByWebhookToken,
+  listOwnerRoutines,
   listRoutines,
   updateRoutine,
   type OwnedRoutine,
@@ -472,6 +473,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
     });
   }
 
+  app.get("/api/routines", async (c) =>
+    c.json(RoutineListResponse.parse({ items: await listOwnerRoutines(db, c.get("user").id) })),
+  );
+
   app.get("/api/bots/:id/routines", async (c) => {
     const botId = BotId.safeParse(c.req.param("id"));
     if (!botId.success) return c.json(NOT_FOUND, 404);
@@ -489,6 +494,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
     const bad = badCron(body.value.triggers);
     if (bad !== null) return c.json({ error: bad }, 400);
+    const groupId = body.value.groupId ?? null;
+    if (groupId !== null) {
+      const target = await findGroup(db, c.get("user").id, groupId);
+      if (target === null) return c.json(NOT_FOUND, 404);
+      if (!target.group.botIds.includes(botId.data)) return c.json({ error: "这个 Bot 不在那个群里" }, 400);
+    }
     const routine = await createRoutine(db, botId.data, body.value);
     hub.push(c.get("user").id, { type: "routine_updated", routine });
     return c.json(RoutineResponse.parse({ routine }), 201);
@@ -635,11 +646,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const decided = await decideProjectOffer(db, ownerId, offer, body.value);
     // 已经有结论的卡回它现在的样子，不算错：点两次开始的人要的就是那个项目。
     if (decided.kind === "settled") {
-      return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: decided.group }));
+      const { project } = decided;
+      return c.json(
+        DecideProjectOfferResponse.parse({
+          message: decided.message,
+          group: project?.group ?? null,
+          task: project?.task ?? null,
+        }),
+      );
     }
     hub.push(ownerId, { type: "message", message: decided.message });
     if (decided.kind === "dismissed") {
-      return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: null }));
+      return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: null, task: null }));
     }
     // 队员先到，Web 画新群时才认得每个人，不会显示成「Bot」。同一事务建出的队员 createdAt 相同，按群里的顺序推。
     const owned = new Map((await listBots(db, ownerId)).map(({ bot }) => [bot.id, bot]));
@@ -651,7 +669,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
     for (const routine of decided.routines) hub.push(ownerId, { type: "routine_updated", routine });
     // 新队员要进 config 才跑得起来。
     await agents.sendConfig(ownerId);
-    return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: decided.group }));
+    return c.json(
+      DecideProjectOfferResponse.parse({ message: decided.message, group: decided.group, task: decided.task }),
+    );
   });
 
   app.post("/api/groups", async (c) => {

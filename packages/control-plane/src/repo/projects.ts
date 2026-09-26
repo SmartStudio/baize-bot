@@ -76,8 +76,12 @@ export type DecideProjectOfferResult =
       readonly routines: readonly Routine[];
     }
   | { readonly kind: "dismissed"; readonly message: Message }
-  /** 这张卡别人已经点过了。回它现在的样子，开始过的带上那个项目群。 */
-  | { readonly kind: "settled"; readonly message: Message; readonly group: Group | null };
+  /** 这张卡别人已经点过了。回它现在的样子，开始过的带上那个项目群和它的主题任务卡。 */
+  | {
+      readonly kind: "settled";
+      readonly message: Message;
+      readonly project: { readonly group: Group; readonly task: TopicTask } | null;
+    };
 
 /**
  * 开始或不要。两种都靠 `UPDATE ... WHERE status = 'offered'` 抢这张卡：并发的第二次在行锁上等第一次提交，
@@ -98,7 +102,9 @@ export async function decideProjectOffer(
   try {
     return await db.transaction(async (tx): Promise<DecideProjectOfferResult> => {
       const projectGroupId = GroupId.parse(newId());
-      const message = await claimOffer(tx, offer, { ...offer.body, status: "started", groupId: projectGroupId });
+      const name = decision.name ?? offer.body.name;
+      // 卡正文就是这张卡的状态，项目改了名，卡上也得是新名字，别处没有第二份。
+      const message = await claimOffer(tx, offer, { ...offer.body, name, status: "started", groupId: projectGroupId });
       if (message === null) {
         lost = true;
         return tx.rollback();
@@ -120,7 +126,7 @@ export async function decideProjectOffer(
 
       const opened = await openGroup(tx, ownerId, {
         id: projectGroupId,
-        title: decision.name ?? offer.body.name,
+        title: name,
         botIds: [assistant.bot.id, ...memberIds],
         summary: offer.body.goal,
         dueAt: null,
@@ -183,5 +189,5 @@ async function settled(db: Db, ownerId: UserId, offer: ProjectOfferMessage): Pro
   const message = toMessage(row);
   const projectGroupId = message.body.kind === "project_offer" ? message.body.groupId : null;
   const detail = projectGroupId === null ? null : await findGroup(db, ownerId, projectGroupId);
-  return { kind: "settled", message, group: detail?.group ?? null };
+  return { kind: "settled", message, project: detail === null ? null : { group: detail.group, task: detail.task } };
 }

@@ -1,7 +1,7 @@
-import { BotId, type Bot, type Group, type Message, type MessageBody } from "@baize/shared";
+import { BotId, type Bot, type Group, type Message, type MessageBody, type TopicTask } from "@baize/shared";
 import { createBot, createGroup } from "./groups.js";
 import { findMessage, writeMessageBody } from "./messages.js";
-import { groups } from "./store.js";
+import { groups, tasks } from "./store.js";
 
 type OfferBody = Extract<MessageBody, { kind: "project_offer" }>;
 type Offer = Omit<OfferBody, "kind" | "botId" | "status" | "groupId">;
@@ -47,8 +47,8 @@ export const projectOfferFor = (prompt: string): OfferBody | null => {
 
 export type StartResult =
   | { kind: "missing" }
-  | { kind: "settled"; message: Message; group: Group | null }
-  | { kind: "started"; message: Message; group: Group; members: Bot[]; task: ReturnType<typeof createGroup>["task"] };
+  | { kind: "settled"; message: Message; group: Group | null; task: TopicTask | null }
+  | { kind: "started"; message: Message; group: Group; members: Bot[]; task: TopicTask };
 
 // 跟控制面一样只有 offered 的卡能开始，第二次点回卡现在的样子和它建出的群，什么都不再建。
 export const startProject = (messageId: string, name: string | undefined): StartResult => {
@@ -56,15 +56,13 @@ export const startProject = (messageId: string, name: string | undefined): Start
   if (offer === null || offer.body.kind !== "project_offer") return { kind: "missing" };
   const body = offer.body;
   if (body.status !== "offered") {
-    return {
-      kind: "settled",
-      message: offer,
-      group: body.groupId === null ? null : (groups.get(body.groupId) ?? null),
-    };
+    const group = body.groupId === null ? null : (groups.get(body.groupId) ?? null);
+    return { kind: "settled", message: offer, group, task: group === null ? null : (tasks.get(group.taskId) ?? null) };
   }
   const members = body.team.map((member) => createBot(member).bot);
+  const title = name ?? body.name;
   const { group, task } = createGroup({
-    title: name ?? body.name,
+    title,
     botIds: [ASSISTANT, ...members.map((bot) => bot.id)],
     summary: body.goal,
     dueAt: null,
@@ -72,7 +70,7 @@ export const startProject = (messageId: string, name: string | undefined): Start
     cadence: body.cadence,
     checklist: [{ text: body.firstStep, done: false, ownerBotId: null }],
   });
-  const message = writeMessageBody(offer.id, { ...body, status: "started", groupId: group.id });
+  const message = writeMessageBody(offer.id, { ...body, name: title, status: "started", groupId: group.id });
   if (message === null) throw new Error(`方案卡 ${offer.id} 点完就不见了，mock 状态坏了`);
   return { kind: "started", message, group, members, task };
 };
