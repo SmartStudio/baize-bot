@@ -70,6 +70,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     detail: z.string(),
     // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
     groupId: GroupId.optional(),
+    // 带了就是说这个 run 在代理这头不会再跑、也不会有 run_done，控制面替它收尾。
+    runId: RunId.optional(),
   }),
   z.object({
     type: z.literal("bot_text"),
