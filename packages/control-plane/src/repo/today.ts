@@ -27,6 +27,7 @@ import {
   routines,
 } from "../db/schema.js";
 import { nextMoment } from "../routines/cron.js";
+import { findAssistant } from "./bots.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 type PlanRow = typeof contentPlans.$inferSelect;
@@ -272,7 +273,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
   );
 
   return TodayResponse.parse({
-    assistantGroupId: null,
+    assistantGroupId: (await findAssistant(db, ownerId))?.groupId ?? null,
     pending: orderedPending.slice(-50).map(({ item }) => item),
     done: orderedDone.slice(0, 20).map(({ item }) => item),
     running,

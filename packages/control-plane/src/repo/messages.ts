@@ -1,5 +1,6 @@
 import {
   BotId,
+  type BotRole,
   type GroupId,
   type Message,
   type MessageBody,
@@ -210,6 +211,7 @@ export async function latestMessagePerGroup(db: Db, groupIds: readonly string[])
 
 export type GroupBot = {
   readonly id: BotId;
+  readonly role: BotRole;
   readonly name: string;
   readonly tag: string;
   readonly description: string;
@@ -218,10 +220,10 @@ export type GroupBot = {
 /** 群成员按展示顺序。派活、路由、上下文署名都用这一份。 */
 export async function listGroupBots(db: Db, groupId: string): Promise<GroupBot[]> {
   const rows = await db
-    .select({ id: bots.id, name: bots.name, tag: bots.tag, description: bots.description })
+    .select({ id: bots.id, role: bots.role, name: bots.name, tag: bots.tag, description: bots.description })
     .from(groupMembers)
     .innerJoin(bots, eq(bots.id, groupMembers.botId))
     .where(eq(groupMembers.groupId, groupId))
     .orderBy(asc(groupMembers.position));
-  return rows.map((row) => ({ id: BotId.parse(row.id), name: row.name, tag: row.tag, description: row.description }));
+  return rows.map((row) => ({ ...row, id: BotId.parse(row.id) }));
 }

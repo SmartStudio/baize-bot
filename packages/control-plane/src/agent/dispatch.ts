@@ -20,7 +20,7 @@ import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot }
 import { findChiefBotId } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
-import { findTaskByGroup, setCurrentBot } from "../repo/tasks.js";
+import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
 import { selectComputer, type ComputerSelection } from "./computer-selection.js";
@@ -177,6 +177,9 @@ async function sendSpeaker(
       : speaker.trigger.body.kind === "bot"
         ? botOrigin(members, speaker.trigger.body.botId)
         : { kind: options.routineRunId === undefined ? "user" : "routine" };
+  // 只有主助理拿项目清单，它才能把一句「下周多发点小红书」落到某个项目的节奏上。
+  const speakerRole = members.find((member) => member.id === speaker.botId)?.role;
+  const projects = speakerRole === "assistant" ? await listProjects(deps.db, ownerId) : undefined;
   const sent = deps.agents.send(selected.computer.id, {
     type: "prompt",
     runId,
@@ -193,6 +196,7 @@ async function sendSpeaker(
     purpose: options.purpose ?? "plan",
     task: members.length > 1 ? task : null,
     members: roster,
+    ...(projects === undefined ? {} : { projects }),
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
   });
   if (!sent) {

@@ -31,7 +31,7 @@ async function loggedInClient() {
 }
 
 describe("建 Bot", () => {
-  it("同步建单 Bot 群和一条主题任务，编号从 T-1001 起按用户递增", async () => {
+  it("同步建单 Bot 群和一条主题任务，主助理注册时占了 T-1001，之后按用户递增", async () => {
     const client = await loggedInClient();
 
     const numbers: string[] = [];
@@ -52,14 +52,14 @@ describe("建 Bot", () => {
       numbers.push(task?.number ?? "");
     }
 
-    expect(numbers).toEqual(["T-1001", "T-1002", "T-1003"]);
+    expect(numbers).toEqual(["T-1002", "T-1003", "T-1004"]);
   });
 
-  it("另一个用户的编号也从 T-1001 起", async () => {
+  it("另一个用户的编号也从头算，主助理之后第一个是 T-1002", async () => {
     const client = await loggedInClient();
     const { group } = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
     const [task] = await database.db.select().from(tasks).where(eq(tasks.id, group.taskId));
-    expect(task?.number).toBe("T-1001");
+    expect(task?.number).toBe("T-1002");
   });
 
   it("不给名字时系统起「小」加一个字，色相按七个轮流分配", async () => {
@@ -115,9 +115,12 @@ describe("Bot 列表", () => {
     await other.post("/api/bots", { name: "别人的" });
 
     const list = BotListResponse.parse(await (await mine.get("/api/bots")).json());
-    expect(list.items.map((i) => i.bot.name)).toEqual(["小采"]);
+    expect(
+      list.items.map((i) => i.bot.name),
+      "主助理排在最前，它注册时就建了",
+    ).toEqual(["主助理", "小采"]);
 
-    const item = list.items[0];
+    const item = list.items.find((i) => i.bot.id === created.bot.id);
     expect(item?.groupId).toBe(created.group.id);
     expect(item?.lastMessage?.body, "最近一条应当是后发的那条").toEqual({
       kind: "user",
@@ -128,9 +131,9 @@ describe("Bot 列表", () => {
 
   it("没发过消息的 Bot 的 lastMessage 是 null", async () => {
     const client = await loggedInClient();
-    await client.post("/api/bots", { name: "小销" });
+    const { bot } = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小销" })).json());
     const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
-    expect(list.items[0]?.lastMessage).toBeNull();
+    expect(list.items.find((i) => i.bot.id === bot.id)?.lastMessage).toBeNull();
   });
 });
 
@@ -162,7 +165,7 @@ describe("改 Bot", () => {
     ApiError.parse(await response.json());
 
     const still = BotListResponse.parse(await (await owner.get("/api/bots")).json());
-    expect(still.items[0]?.bot.name, "别人的 PATCH 不应当改到数据").toBe(bot.name);
+    expect(still.items.find((i) => i.bot.id === bot.id)?.bot.name, "别人的 PATCH 不应当改到数据").toBe(bot.name);
   });
 });
 
@@ -176,7 +179,7 @@ describe("删 Bot", () => {
     expect(response.status).toBe(204);
 
     const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
-    expect(list.items.map((i) => i.bot.id)).toEqual([keep.bot.id]);
+    expect(list.items.filter((i) => i.bot.role === "member").map((i) => i.bot.id)).toEqual([keep.bot.id]);
 
     const messages = await client.get(`/api/groups/${drop.group.id}/messages`);
     expect(messages.status, "群随 Bot 一起删掉").toBe(404);
@@ -263,7 +266,7 @@ describe("并发建 Bot", () => {
         return task?.number ?? "";
       }),
     );
-    expect(numbers.toSorted()).toEqual(["T-1001", "T-1002", "T-1003", "T-1004", "T-1005"]);
+    expect(numbers.toSorted(), "T-1001 是注册时的主助理").toEqual(["T-1002", "T-1003", "T-1004", "T-1005", "T-1006"]);
     expect(new Set(created.map((c) => c.bot.hue)).size, "五个自动分配的色相互不相同").toBe(5);
   });
 });

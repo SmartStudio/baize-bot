@@ -1,6 +1,6 @@
 import type { BotHue, ComputerId, User } from "@baize/shared";
 import type { Db } from "./db/client.js";
-import { createBot, listBots } from "./repo/bots.js";
+import { createBot, ensureAssistant, listBots } from "./repo/bots.js";
 import { ensureComputer } from "./repo/computers.js";
 import { appendMessage } from "./repo/messages.js";
 import { createUser, findUserByEmail } from "./repo/users.js";
@@ -30,6 +30,8 @@ export type SeedResult = {
 export async function seed(db: Db): Promise<SeedResult> {
   const existing = await findUserByEmail(db, DEV_EMAIL);
   const user = existing ?? (await createUser(db, { name: "陈默", email: DEV_EMAIL, password: DEV_PASSWORD }));
+  // 新建的账号在 createUser 里已经有了，这一次补的是主助理之前就 seed 过的开发库。
+  await db.transaction((tx) => ensureAssistant(tx, user.id));
 
   const computer = await ensureComputer(db, user.id);
 

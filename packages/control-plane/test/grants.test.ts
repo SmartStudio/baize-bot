@@ -1,4 +1,5 @@
 import {
+  BotListResponse,
   BotResponse,
   CreateBotResponse,
   DecideApprovalResponse,
@@ -40,6 +41,8 @@ type Owner = {
   readonly agent: AgentClient;
   readonly push: PushClient;
   readonly computer: TestComputer;
+  /** 注册时自带的主助理，重连补发时它也有一条。 */
+  readonly assistantId: BotId;
   /** 每个 Bot 一个单 Bot 群，各自派出去一个正在跑的活。 */
   readonly jobs: readonly Job[];
   close(): void;
@@ -55,6 +58,10 @@ async function owner(botCount = 1): Promise<Owner> {
   for (let index = 0; index < botCount; index += 1) {
     created.push(CreateBotResponse.parse(await (await client.post("/api/bots", { name: `小服${index}` })).json()));
   }
+
+  const listed = BotListResponse.parse(await (await client.get("/api/bots")).json());
+  const assistant = listed.items.find((item) => item.bot.role === "assistant");
+  if (assistant === undefined) throw new Error("注册后应当已有主助理");
 
   const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
   const push = await connectPush(server.server.port, client.cookie ?? "");
@@ -72,6 +79,7 @@ async function owner(botCount = 1): Promise<Owner> {
     agent,
     push,
     computer,
+    assistantId: assistant.bot.id,
     jobs,
     close: () => {
       agent.close();
@@ -427,6 +435,13 @@ async function downlinksBeforePrompt(
   return before;
 }
 
+const botIdOf = (downlink: ControlToAgent): string => ("botId" in downlink ? downlink.botId : "");
+
+/** 补发按 Bot 各一条，彼此之间没有约定顺序。 */
+function byBotId(downlinks: readonly ControlToAgent[]): ControlToAgent[] {
+  return downlinks.toSorted((left, right) => botIdOf(left).localeCompare(botIdOf(right)));
+}
+
 describe("暂停和继续", () => {
   it("暂停写进 Bot、下发 pause 并推 bot_updated，继续则反过来", async () => {
     const who = await owner();
@@ -463,12 +478,15 @@ describe("暂停和继续", () => {
       try {
         const synced = await downlinksBeforePrompt(who, agent, pausedJob, "还在吗");
         expect(
-          synced.toSorted((left, right) => left.type.localeCompare(right.type)),
-          "config 之后、派活之前，每个 Bot 按库里的状态各补一条",
-        ).toEqual([
-          { type: "pause", botId: pausedJob.botId },
-          { type: "resume", botId: runningJob.botId },
-        ]);
+          byBotId(synced),
+          "config 之后、派活之前，每个 Bot 按库里的状态各补一条，主助理没停过，补 resume",
+        ).toEqual(
+          byBotId([
+            { type: "pause", botId: pausedJob.botId },
+            { type: "resume", botId: runningJob.botId },
+            { type: "resume", botId: who.assistantId },
+          ]),
+        );
       } finally {
         agent.close();
       }
@@ -493,9 +511,14 @@ describe("暂停和继续", () => {
       const agent = await reconnect(who, [job.runId]);
       try {
         expect(
-          await downlinksBeforePrompt(who, agent, job, "接着干"),
+          byBotId(await downlinksBeforePrompt(who, agent, job, "接着干")),
           "那条 resume 发的时候没有连接，重连时要补上，否则同一个代理进程里的 Bot 一直停着",
-        ).toEqual([{ type: "resume", botId: job.botId }]);
+        ).toEqual(
+          byBotId([
+            { type: "resume", botId: job.botId },
+            { type: "resume", botId: who.assistantId },
+          ]),
+        );
       } finally {
         agent.close();
       }
@@ -518,7 +541,12 @@ describe("暂停和继续", () => {
 
       const agent = await reconnect(who, [job.runId]);
       try {
-        expect(await downlinksBeforePrompt(who, agent, job, "接着干")).toEqual([{ type: "resume", botId: job.botId }]);
+        expect(byBotId(await downlinksBeforePrompt(who, agent, job, "接着干"))).toEqual(
+          byBotId([
+            { type: "resume", botId: job.botId },
+            { type: "resume", botId: who.assistantId },
+          ]),
+        );
       } finally {
         agent.close();
       }

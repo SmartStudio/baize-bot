@@ -1,4 +1,4 @@
-import { CreateBotResponse, UsageResponse, type UserId } from "@baize/shared";
+import { BotListResponse, CreateBotResponse, UsageResponse, type BotId, type UserId } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { messages, routineRuns, routines, runs } from "../src/db/schema.js";
@@ -33,6 +33,16 @@ async function bot(client: ApiClient, name: string) {
   expect(response.status).toBe(201);
   return CreateBotResponse.parse(await response.json());
 }
+
+async function assistantOf(client: ApiClient): Promise<BotId> {
+  const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
+  const assistant = list.items.find((item) => item.bot.role === "assistant");
+  if (assistant === undefined) throw new Error("注册后应当已有主助理");
+  return assistant.bot.id;
+}
+
+type BotUsage = { readonly botId: string };
+const byBotId = (left: BotUsage, right: BotUsage): number => left.botId.localeCompare(right.botId);
 
 function run(ownerId: UserId, botId: string, groupId: string, startedAt: Date, amount: string) {
   return { id: newId(), ownerId, botId, groupId, startedAt, endedAt: startedAt, amount };
@@ -82,11 +92,16 @@ describe("GET /api/usage", () => {
     expect(response.status).toBe(200);
     const usage = UsageResponse.parse(await response.json());
     expect(usage.weekStartsAt).toBe(start.toISOString());
-    expect(usage.bots).toEqual([
+    expect(usage.bots.slice(0, 2), "花了钱的按金额从高到低").toEqual([
       { botId: a.bot.id, amount: 2.5, runs: 1 },
       { botId: b.bot.id, amount: 1.25, runs: 1 },
-      { botId: zero.bot.id, amount: 0, runs: 0 },
     ]);
+    expect(usage.bots.slice(2).toSorted(byBotId), "零花费的也列出，主助理没跑过也在").toEqual(
+      [
+        { botId: zero.bot.id, amount: 0, runs: 0 },
+        { botId: await assistantOf(client), amount: 0, runs: 0 },
+      ].toSorted(byBotId),
+    );
     expect(usage.total).toBe(usage.bots.reduce((sum, row) => sum + row.amount, 0));
     expect(usage.recent).toHaveLength(3);
     expect(usage.recent.find((item) => item.title === "查一下供应商的交期，然后整理采购对照表")?.amount).toBe(2.5);
@@ -102,7 +117,9 @@ describe("GET /api/usage", () => {
 
     const usage = UsageResponse.parse(await (await client.get("/api/usage")).json());
     expect(usage.total).toBe(3);
-    expect(usage.bots).toEqual([]);
+    expect(usage.bots, "分列里只剩主助理，没有已删的那个").toEqual([
+      { botId: await assistantOf(client), amount: 0, runs: 0 },
+    ]);
     expect(usage.recent).toMatchObject([{ botId: null, groupId: null, amount: 3 }]);
   });
 

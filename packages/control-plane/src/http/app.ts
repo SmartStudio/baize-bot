@@ -68,7 +68,7 @@ import type { ToolCrypto } from "../crypto.js";
 import { discoverTools } from "../mcp/discover.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { listHandoffs } from "../repo/handoffs.js";
-import { createBot, deleteBot, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
+import { createBot, deleteBot, ensureAssistant, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
@@ -175,6 +175,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const token = await createSession(db, user.id);
     // 首次登录时给他登记一台电脑，状态先是创建中，代理第一次握手才转在线。
     await ensureComputer(db, user.id);
+    // 主助理之前注册的老用户在这里补上。他的电脑可能正在线，新 Bot 要进 config 才跑得起来。
+    if ((await db.transaction((tx) => ensureAssistant(tx, user.id))) !== null) await agents.sendConfig(user.id);
     setCookie(c, SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: "Lax",
@@ -290,11 +292,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.delete("/api/bots/:id", async (c) => {
     const botId = BotId.safeParse(c.req.param("id"));
     if (!botId.success) return c.json(NOT_FOUND, 404);
-    const expired = await deleteBot(db, c.get("user").id, botId.data);
-    if (expired === null) return c.json(NOT_FOUND, 404);
+    const deleted = await deleteBot(db, c.get("user").id, botId.data);
+    if (deleted.kind === "not_found") return c.json(NOT_FOUND, 404);
+    if (deleted.kind === "assistant") return c.json({ error: "主助理不能删，你在首页说的话都由它来接" }, 409);
     await agents.sendConfig(c.get("user").id);
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
-    for (const approval of expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
+    for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
     return c.body(null, 204);
   });

@@ -46,6 +46,14 @@
 
 带 runId 的上行报文（`bot_text`、`bot_tool_call`、`run_done`、`approval_request`、`task_checklist`、`mention`）都过同一道校验：群要是这台电脑主人的，run 要是报文里那个 Bot 在那个群里的活。外键只保证 runId 存在，管不了它指到哪个群，不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。任一不成立整条丢掉，丢得安静：不抛异常，不给电脑回报文，只记一条日志。
 
+## 主助理
+
+每个用户恰好一个主助理，`bots.role = 'assistant'`，由部分唯一索引 `bots_owner_id_assistant_idx` 钉住。`ensureAssistant(tx, ownerId)` 不先查：直接插 bot 行撞这个索引，`onConflictDoNothing` 没返回行就停，不占编号、不建群。真插进去的那次才建单聊群、主题任务卡和 `group_members`，并在单聊里写主助理的第一句 `ASSISTANT_GREETING`。注册在同一个事务里调它；登录成功后再调一次，给 P1-13 之前注册的老用户补建，补建成功且电脑在线就重发一次 `config`；`seed` 建完用户也调一次。主助理的色相固定 `sky`，不推进 `user_counters.next_hue`，所以用户自己建的 Bot 仍从色相轮转的第一格起。
+
+`DELETE /api/bots/:id` 删不了主助理，回 409 和一句中文原因。删除和收审批用同一个 `role = 'member'` 条件，删不到时再分辨是主助理还是不存在。群没有删除和退群的接口，所以主助理的单聊群没有别的入口可以拆。
+
+派给主助理的 `prompt` 恒带 `projects`，是这个用户所有项目群（`solo_bot_id IS NULL` 的群）的 `groupId`、`title`、`cadence`，没有项目也带空数组；派给队员不带。上行 `set_cadence` 先照常校验 run 归属，再在同一条 `UPDATE tasks` 里要求 `projectGroupId` 是这个用户的项目群、发报文的 Bot 是这个用户的主助理，改不到就静默丢弃。改成了只推 `task_updated`，不建审批、不写卡片消息。`findAssistant(db, ownerId)` 是取主助理和它单聊群的唯一入口，`GET /api/today` 用它，P1-9 建项目群时也用它。
+
 ## 审批
 
 群消息是事实来源，审批是唯一一件「群消息本身说不全」的事：那张卡的正文只有一个 approvalId，批没批写在 approvals 行上。所以结论只随 `approval_updated` 推，重推那条 message 一个字都不会变。
@@ -249,7 +257,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 `GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
 
-`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。主助理创建前 `assistantGroupId` 恒为 `null`。
+`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。
 
 系统通知只在用户不在场、又需要他知道的三种时候产生：
 

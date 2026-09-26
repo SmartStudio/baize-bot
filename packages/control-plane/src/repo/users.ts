@@ -4,6 +4,7 @@ import type { Db } from "../db/client.js";
 import { settings, userCounters, users } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { hashPassword, verifyPassword } from "../password.js";
+import { ensureAssistant } from "./bots.js";
 import { toUser } from "./rows.js";
 
 export type NewUser = {
@@ -38,7 +39,9 @@ export async function createUser(db: Db, input: NewUser): Promise<User> {
     if (row === undefined) throw new Error("建用户没有返回行");
     await tx.insert(userCounters).values({ userId: row.id });
     await tx.insert(settings).values({ userId: row.id });
-    return toUser(row);
+    const user = toUser(row);
+    await ensureAssistant(tx, user.id);
+    return user;
   });
 }
 

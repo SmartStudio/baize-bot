@@ -215,11 +215,16 @@ const run = async (): Promise<void> => {
     activeStep = "1";
     await login(page, web.url);
     const seeded = BotListResponse.parse(await stack.get("/api/bots"));
-    check(seeded.items.map((item) => item.bot.name)).toEqual(["小服", "小销", "小采"]);
+    check(seeded.items.filter((item) => item.bot.role === "member").map((item) => item.bot.name)).toEqual([
+      "小服",
+      "小销",
+      "小采",
+    ]);
+    check(seeded.items.filter((item) => item.bot.role === "assistant")).toHaveLength(1);
     await addBot(page, "小品", "产品");
     await addBot(page, "小设", "设计");
     await check(page.getByTestId("team-bot")).toHaveCount(5);
-    check(BotListResponse.parse(await stack.get("/api/bots")).items).toHaveLength(5);
+    check(BotListResponse.parse(await stack.get("/api/bots")).items, "5 个队员加主助理").toHaveLength(6);
     await page.screenshot({ path: shot(1) });
     process.stdout.write("step 1: 5 Bot\n");
 
@@ -369,7 +374,7 @@ const run = async (): Promise<void> => {
     await check
       .poll(async () => Number((await serviceLine.locator("strong").textContent())?.replace(/[¥,]/g, "")))
       .toBeGreaterThan(0);
-    await check(page.getByTestId("usage-bots").locator(".usage-bot")).toHaveCount(5);
+    await check(page.getByTestId("usage-bots").locator(".usage-bot"), "零花费的主助理也列一行").toHaveCount(6);
     await page.screenshot({ path: shot(9) });
     process.stdout.write(`step 9: 小服本周用量 ¥${serviceUsage.amount.toFixed(2)}\n`);
     process.stdout.write("acceptance: 9 步（第 6 步 skip）\n");

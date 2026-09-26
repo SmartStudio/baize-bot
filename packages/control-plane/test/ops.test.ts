@@ -72,11 +72,15 @@ describe("seed", () => {
     expect(LoginResponse.parse(await login.json()).user.email).toBe(DEV_EMAIL);
 
     const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
-    expect(list.items.map((i) => i.bot.name)).toEqual(["小服", "小销", "小采"]);
-    expect(list.items.map((i) => i.bot.tag)).toEqual(["客服", "销售", "采购"]);
-    for (const item of list.items) {
-      expect(item.lastMessage?.body.kind, `${item.bot.name} 应当有一条示例消息`).toBe("user");
-    }
+    expect(
+      list.items.map((i) => i.bot.name),
+      "开发账号和注册的用户一样先有主助理",
+    ).toEqual(["主助理", "小服", "小销", "小采"]);
+    expect(list.items.map((i) => i.bot.tag)).toEqual(["", "客服", "销售", "采购"]);
+    expect(
+      list.items.map((i) => i.lastMessage?.body.kind),
+      "主助理先开口，三个队员各有一条示例消息",
+    ).toEqual(["bot", "user", "user", "user"]);
   });
 
   it("第二次跑不重复建", async () => {
@@ -92,8 +96,8 @@ describe("seed", () => {
     const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
     expect(
       list.items.map((i) => i.bot.name),
-      "重复 seed 不应当多出 Bot",
-    ).toEqual(["小服", "小销", "小采"]);
+      "重复 seed 不应当多出 Bot，主助理也只有一个",
+    ).toEqual(["主助理", "小服", "小销", "小采"]);
   });
 
   it("上一次只建了一半时补齐缺的那个", async () => {
@@ -111,6 +115,6 @@ describe("seed", () => {
     expect(again.createdBots, "缺的那个要补回来").toEqual(["小销"]);
 
     const after = BotListResponse.parse(await (await client.get("/api/bots")).json());
-    expect(new Set(after.items.map((i) => i.bot.name))).toEqual(new Set(["小服", "小销", "小采"]));
+    expect(new Set(after.items.map((i) => i.bot.name))).toEqual(new Set(["主助理", "小服", "小销", "小采"]));
   });
 });

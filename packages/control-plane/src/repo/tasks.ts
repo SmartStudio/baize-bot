@@ -1,7 +1,7 @@
-import type { BotId, ChecklistItem, TaskId, TopicTask, UserId } from "@baize/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { GroupId, type BotId, type ChecklistItem, type TaskId, type TopicTask, type UserId } from "@baize/shared";
+import { and, asc, eq, exists, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { groups, tasks } from "../db/schema.js";
+import { bots, groups, tasks } from "../db/schema.js";
 import { toTask } from "./rows.js";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，从列上取回来。
@@ -100,5 +100,50 @@ async function findTask(db: Db, ownerId: UserId, taskId: TaskId): Promise<TopicT
     .from(tasks)
     .where(and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedGroups)))
     .limit(1);
+  return row === undefined ? null : toTask(row);
+}
+
+export type Project = { readonly groupId: GroupId; readonly title: string; readonly cadence: string };
+
+/** 项目就是多 Bot 群，单聊不算。派给主助理的 prompt 带这一份，set_cadence 也只认这里面的群。 */
+function projectGroupsOf(db: Db, ownerId: UserId) {
+  return db
+    .select({ id: groups.id })
+    .from(groups)
+    .where(and(eq(groups.ownerId, ownerId), isNull(groups.soloBotId)));
+}
+
+export async function listProjects(db: Db, ownerId: UserId): Promise<Project[]> {
+  const rows = await db
+    .select({ groupId: tasks.groupId, title: tasks.title, cadence: tasks.cadence })
+    .from(tasks)
+    .innerJoin(groups, eq(groups.id, tasks.groupId))
+    .where(inArray(tasks.groupId, projectGroupsOf(db, ownerId)))
+    .orderBy(asc(groups.createdAt), asc(groups.id));
+  return rows.map((row) => ({ ...row, groupId: GroupId.parse(row.groupId) }));
+}
+
+/**
+ * 主助理改项目节奏。一条 UPDATE 带齐两道条件：群是这个用户的项目群，发起的是他的主助理。
+ * 任一不成立更新不到行，返回 null。
+ */
+export async function setProjectCadence(
+  db: Db,
+  ownerId: UserId,
+  assistantId: BotId,
+  projectGroupId: GroupId,
+  cadence: string,
+): Promise<TopicTask | null> {
+  const isAssistant = db
+    .select({ id: bots.id })
+    .from(bots)
+    .where(and(eq(bots.id, assistantId), eq(bots.ownerId, ownerId), eq(bots.role, "assistant")));
+  const [row] = await db
+    .update(tasks)
+    .set({ cadence })
+    .where(
+      and(eq(tasks.groupId, projectGroupId), inArray(tasks.groupId, projectGroupsOf(db, ownerId)), exists(isAssistant)),
+    )
+    .returning();
   return row === undefined ? null : toTask(row);
 }

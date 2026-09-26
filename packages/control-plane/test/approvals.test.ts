@@ -389,7 +389,7 @@ describe("侧栏角标", () => {
     const job = await runningJob();
     const pendingCount = async (): Promise<number> => {
       const list = BotListResponse.parse(await (await job.client.get("/api/bots")).json());
-      return list.items[0]?.pendingApprovals ?? -1;
+      return list.items.find((item) => item.bot.id === job.botId)?.pendingApprovals ?? -1;
     };
 
     try {

@@ -79,7 +79,10 @@ describe("握手", () => {
     try {
       expect(welcome.ownerId).toBe(userId);
       expect(Date.parse(welcome.serverTime)).not.toBeNaN();
-      expect(config.bots, "这个账号还没有 Bot").toEqual([]);
+      expect(
+        config.bots.map(({ role, name }) => ({ role, name })),
+        "新账号只有注册时建好的主助理",
+      ).toEqual([{ role: "assistant", name: "主助理" }]);
       expect(config.tools, "工具连接是 M6 的事").toEqual([]);
       expect(config.modelGateway.baseUrl).toBe(`http://localhost:${server.server.port}/gateway/v1`);
       expect(config.modelGateway.apiKey, "网关 key 是 32 字节随机数的十六进制").toMatch(/^[0-9a-f]{64}$/);
@@ -161,8 +164,8 @@ describe("握手", () => {
       expect(remoteConnection.welcome.kind).toBe("remote");
       expect(remoteConnection.config.modelGateway.apiKey).not.toBe(localConnection.config.modelGateway.apiKey);
       await client.post("/api/bots", { name: "小服" });
-      expect((await localConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["小服"]);
-      expect((await remoteConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["小服"]);
+      expect((await localConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["主助理", "小服"]);
+      expect((await remoteConnection.agent.expect("config")).bots.map((bot) => bot.name)).toEqual(["主助理", "小服"]);
       const listed = ComputerListResponse.parse(await (await client.get("/api/computers")).json());
       expect(listed.computers.map(({ kind, status }) => ({ kind, status }))).toEqual([
         { kind: "local", status: "online" },
@@ -237,7 +240,7 @@ describe("Bot 变动重发 config", () => {
     try {
       const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
       const afterCreate = await agent.expect("config");
-      expect(afterCreate.bots).toEqual([
+      expect(afterCreate.bots.filter((bot) => bot.role === "member")).toEqual([
         { id: created.bot.id, role: "member", name: "小服", tag: "", description: created.bot.description },
       ]);
 
@@ -245,13 +248,16 @@ describe("Bot 变动重发 config", () => {
         200,
       );
       const afterRename = await agent.expect("config");
-      expect(afterRename.bots).toEqual([
+      expect(afterRename.bots.filter((bot) => bot.role === "member")).toEqual([
         { id: created.bot.id, role: "member", name: "小采", tag: "", description: "买东西" },
       ]);
 
       expect((await client.delete(`/api/bots/${created.bot.id}`)).status).toBe(204);
       const afterDelete = await agent.expect("config");
-      expect(afterDelete.bots).toEqual([]);
+      expect(
+        afterDelete.bots.map((bot) => bot.role),
+        "删完只剩主助理",
+      ).toEqual(["assistant"]);
     } finally {
       agent.close();
     }
@@ -268,7 +274,7 @@ describe("Bot 变动重发 config", () => {
 
       // 后建的「他的」先到，说明「我的」那次根本没进这条连接，不靠超时。
       const config = await listener.agent.expect("config");
-      expect(config.bots.map((b) => b.name)).toEqual(["他的"]);
+      expect(config.bots.map((b) => b.name)).toEqual(["主助理", "他的"]);
     } finally {
       listener.agent.close();
     }

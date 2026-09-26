@@ -1,4 +1,12 @@
-import { ApprovalId, CreateBotResponse, TodayResponse, type BotId, type GroupId, type UserId } from "@baize/shared";
+import {
+  ApprovalId,
+  BotListResponse,
+  CreateBotResponse,
+  TodayResponse,
+  type BotId,
+  type GroupId,
+  type UserId,
+} from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   accounts,
@@ -36,6 +44,14 @@ type Owner = {
   readonly groupId: GroupId;
   readonly botId: BotId;
 };
+
+/** 注册时自带的主助理的单聊群，首页的输入框发到这里。 */
+async function assistantGroupOf(client: ApiClient): Promise<GroupId> {
+  const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
+  const assistant = list.items.find((item) => item.bot.role === "assistant");
+  if (assistant === undefined) throw new Error("注册后应当已有主助理");
+  return assistant.groupId;
+}
 
 async function ownerWithBot(name = "小服"): Promise<Owner> {
   const user = await makeUser(database.db);
@@ -244,7 +260,7 @@ describe("GET /api/today", () => {
     expect(response.status).toBe(200);
     const today = TodayResponse.parse(await response.json());
 
-    expect(today.assistantGroupId).toBeNull();
+    expect(today.assistantGroupId).toBe(await assistantGroupOf(owner.client));
     expect(today.pending.map((item) => item.kind)).toEqual(["account", "plan", "draft", "approval"]);
     const plan = today.pending.find((item) => item.kind === "plan");
     expect(plan?.kind === "plan" ? plan.drafts.map((draft) => draft.id) : []).toEqual([seeded.nestedDraftId]);
@@ -267,7 +283,7 @@ describe("GET /api/today", () => {
     expect((await client.login(user.email, PASSWORD)).status).toBe(200);
 
     expect(TodayResponse.parse(await (await client.get("/api/today")).json())).toEqual({
-      assistantGroupId: null,
+      assistantGroupId: await assistantGroupOf(client),
       pending: [],
       done: [],
       running: [],
@@ -281,7 +297,7 @@ describe("GET /api/today", () => {
     await seedFourColumns(other);
 
     expect(TodayResponse.parse(await (await mine.client.get("/api/today")).json())).toEqual({
-      assistantGroupId: null,
+      assistantGroupId: await assistantGroupOf(mine.client),
       pending: [],
       done: [],
       running: [],

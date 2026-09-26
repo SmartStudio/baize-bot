@@ -25,7 +25,7 @@ import {
 } from "../repo/messages.js";
 import { routineRunOfRun } from "../repo/routines.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
-import { findTaskByGroup, replaceChecklist, setCurrentBot } from "../repo/tasks.js";
+import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
 import { chargeRoutineRunOf, EXPIRED_APPROVAL_NOTE, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
@@ -91,6 +91,9 @@ export async function handleAgentEvent(
     case "set_chief":
       await onSetChief(deps, conn, message);
       return;
+    case "set_cadence":
+      await onSetCadence(deps, conn, message);
+      return;
   }
 }
 
@@ -121,6 +124,7 @@ type SkillOffer = Extract<AgentToControl, { type: "skill_offer" }>;
 type HandoffEvent = Extract<AgentToControl, { type: "handoff" }>;
 type HandoffAcceptEvent = Extract<AgentToControl, { type: "handoff_accept" }>;
 type SetChiefEvent = Extract<AgentToControl, { type: "set_chief" }>;
+type SetCadenceEvent = Extract<AgentToControl, { type: "set_cadence" }>;
 
 type TextPrefix =
   | { readonly kind: "buffering"; readonly text: string; readonly runId: RunId }
@@ -535,6 +539,23 @@ async function onSetChief(deps: AgentEventDeps, conn: AgentConnection, event: Se
     kind: "system",
     text: `${name}${event.targetBotId === null ? "卸任首席" : "成为首席"}`,
   });
+}
+
+/**
+ * 主助理改一个项目的节奏。用户那句话本身就是决定，所以不出审批、不落卡，只推任务卡让首页和项目页刷新。
+ * 项目群和发起者都是外部输入，`setProjectCadence` 那条 UPDATE 校验它们，不成立整条丢掉。
+ */
+async function onSetCadence(deps: AgentEventDeps, conn: AgentConnection, event: SetCadenceEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const task = await setProjectCadence(deps.db, conn.ownerId, event.botId, event.projectGroupId, event.cadence);
+  if (task === null) {
+    console.warn(
+      `电脑 ${conn.computerId} 报的节奏改动指向 ${event.projectGroupId}，它不是这个用户的项目群或 ${event.botId} 不是主助理，整条丢掉`,
+    );
+    return;
+  }
+  deps.push.push(conn.ownerId, { type: "task_updated", task });
 }
 
 /**

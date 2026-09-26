@@ -107,14 +107,14 @@ describe("建群", () => {
     expect(taskNumberValue(second.task.number)).toBe(taskNumberValue(first.task.number) + 1);
   });
 
-  it("全新用户的第一个 Bot 拿 T-1001，它的单 Bot 群也查得到", async () => {
+  it("全新用户自己建的第一个 Bot 拿 T-1002，它的单 Bot 群也查得到", async () => {
     const client = await loggedInClient();
     const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
 
     const response = await client.get(`/api/groups/${created.group.id}`);
     expect(response.status, "单 Bot 群不显示任务卡，但查得到").toBe(200);
     const detail = GroupResponse.parse(await response.json());
-    expect(detail.task.number, "编号计数器从 T-1001 起").toBe("T-1001");
+    expect(detail.task.number, "编号计数器从 T-1001 起，T-1001 是注册时主助理的单聊").toBe("T-1002");
     expect(detail.bots.map((bot) => bot.id)).toEqual([created.bot.id]);
   });
 
