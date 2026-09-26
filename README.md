@@ -27,7 +27,7 @@
 
 四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。
 
-一人一台电脑。用户第一次登录时建出 computers 行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`。握手就算在线，断开变休眠，同一台电脑新连接顶掉旧连接。
+一人一台电脑。用户第一次登录时建出 computers 行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接顶掉旧连接。
 
 拿电脑 token：
 

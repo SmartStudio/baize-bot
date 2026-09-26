@@ -52,6 +52,8 @@ export type StartOptions = {
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
   readonly notificationScheduler?: NotificationOptions;
   readonly disconnectGraceMs?: number;
+  /** 电脑多久不发任何帧就判掉线，测试调短用。 */
+  readonly silenceTimeoutMs?: number;
   readonly toolSecretKey?: string;
   /** 不给就读 CREDENTIALS_KEY，缺了或不对启动失败。 */
   readonly credentialsKey?: string;
@@ -88,6 +90,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     groupTurns,
     gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
+    silenceTimeoutMs: options.silenceTimeoutMs,
     toolCrypto,
     notifications,
   });

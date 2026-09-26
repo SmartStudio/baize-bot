@@ -187,6 +187,8 @@ approvals 行的 `bot_id` 外键是级联删除，事务提交后那一行随 Bo
 
 ### 电脑断线
 
+断线有两种：socket 真的关了，或者 45 秒收不到这条连接的任何报文。后一种是合盖的 Mac，进程冻住发不出 FIN，服务端手里的 socket 一直是 OPEN，只看 `readyState` 的话例行照样派给它。电脑代理每 15 秒发一次 `heartbeat`，45 秒是连丢两次还不判、第三次也没到才判。计时挂在每条 socket 上，收到任何一帧就重置，到点只 `terminate()`，之后标记休眠、推 `computer_updated`、宽限、收尾、推 `stuck` 全走下面这条普通断线的路，不另写一遍。用 `terminate()` 不用 `close()`：后者要等对端回关闭帧，冻住的对端不会回。没有用协议层 ping：心跳已经每 15 秒一帧，pong 能证明的它都能证明。被新连接顶掉的旧连接到点只关它自己，碰不到新连接。阈值是 `startServer` 的 `silenceTimeoutMs`，测试调短用。
+
 有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次。
 
 pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 Bot 的 `pause` 或 `resume`），**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。

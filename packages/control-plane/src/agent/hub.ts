@@ -39,6 +39,11 @@ const CLOSE_SUPERSEDED = 4000;
 const CLOSE_BAD_HELLO = 4001;
 const DISCONNECT_NOTICE = "电脑断过线，这次活没做完";
 const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
+/**
+ * 多久收不到任何上行帧就当连接已死。合盖的 Mac 发不出 FIN，服务端手里的 socket 会一直是 OPEN。
+ * 电脑代理每 15 秒一次心跳，三倍是连丢两次还不判，第三次也没到才判。
+ */
+const DEFAULT_SILENCE_TIMEOUT_MS = 45_000;
 
 export type AgentConnection = {
   readonly computerId: ComputerId;
@@ -59,6 +64,7 @@ export type AgentHubDeps = {
   /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
   readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
+  readonly silenceTimeoutMs?: number | undefined;
   readonly toolCrypto: ToolCrypto;
   readonly notifications: NoticePublisher;
 };
@@ -81,11 +87,16 @@ export class AgentHub {
     let conn: AgentConnection | null = null;
     const deadline = setTimeout(() => socket.close(CLOSE_BAD_HELLO, "没有报 hello"), HELLO_TIMEOUT_MS);
     deadline.unref();
+    // 到点只 terminate，离线处理全交给下面的 close。close() 要等对端回关闭帧，冻住的对端永远不回。
+    // 计时器挂在这条 socket 上，被新连接顶掉的旧连接到点也只关它自己。
+    const silence = setTimeout(() => socket.terminate(), this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS);
+    silence.unref();
 
     // 报文按到达顺序串行处理。并发跑的话三段 delta 会乱序落库，config 后面紧跟的 prompt 也可能先到。
     let inbox: Promise<void> = Promise.resolve();
 
     socket.on("message", (raw) => {
+      silence.refresh();
       const text = raw.toString();
       inbox = inbox
         .then(async () => {
@@ -99,6 +110,7 @@ export class AgentHub {
     // 关闭也排在同一条链上。hello 还在查库时断开的话，直接读 conn 会读到 null，那台电脑就永远挂在在线。
     socket.on("close", () => {
       clearTimeout(deadline);
+      clearTimeout(silence);
       inbox = inbox
         .then(async () => {
           const closed = conn;
