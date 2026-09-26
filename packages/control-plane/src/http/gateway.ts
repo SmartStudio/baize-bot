@@ -113,7 +113,7 @@ export function createGateway(deps: GatewayDeps): Hono {
   return app;
 }
 
-function bearerToken(header: string | undefined): string | null {
+export function bearerToken(header: string | undefined): string | null {
   if (header === undefined) return null;
   const match = /^Bearer\s+(.+)$/i.exec(header.trim());
   return match?.[1] ?? null;

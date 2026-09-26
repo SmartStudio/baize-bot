@@ -1,4 +1,5 @@
 import {
+  BrowserPlatform,
   GroupId,
   type AgentToControl,
   type BotId,
@@ -9,9 +10,10 @@ import {
   type RunId,
   type UserId,
 } from "@baize/shared";
+import { expireLogin } from "../account-expiry.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
-import { findAccountOnComputer, markLoginExpired, markLoginValid } from "../repo/accounts.js";
+import { findAccountOnComputer, markLoginValid } from "../repo/accounts.js";
 import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
@@ -153,12 +155,19 @@ const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> =
 
 /**
  * 三种结论都先认电脑：账号必须是这台电脑主人的、登在这台电脑上的，否则整条丢掉。
+ * 还得是在电脑浏览器里登录的平台：GitHub、X 的登录状态只跟着控制面的凭据代际走，电脑说什么都不算。
  * 账号不属于哪个群，没有群消息可落，要用户处理的都走通知。登录状态随 config.accounts 下发，变了就重发。
  */
 async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: LoginState): Promise<void> {
   const found = await findAccountOnComputer(deps.db, conn.ownerId, conn.computerId, event.accountId);
   if (found === null) {
     console.warn(`电脑 ${conn.computerId} 报的账号 ${event.accountId} 不在它上面，整条丢掉`);
+    return;
+  }
+  if (!BrowserPlatform.safeParse(found.platform).success) {
+    console.warn(
+      `电脑 ${conn.computerId} 报了 ${found.platform} 账号 ${event.accountId} 的登录状态，这个平台不在电脑上登录，整条丢掉`,
+    );
     return;
   }
   const { state } = event;
@@ -172,16 +181,7 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
       return;
     }
     case "expired": {
-      const account = await markLoginExpired(deps.db, { ownerId: conn.ownerId, accountId: event.accountId });
-      // 已经是过期的再报一次，什么都不推。
-      if (account === null) return;
-      deps.push.push(conn.ownerId, { type: "account_updated", account });
-      await deps.notifications.publish(conn.ownerId, {
-        kind: "failed",
-        text: `${PLATFORM_LABEL[account.platform]}账号「${account.handle ?? ""}」登录过期了，这个账号的稿子先不发，到账号页重新登录`,
-        groupId: null,
-      });
-      await deps.agents.sendConfig(conn.ownerId);
+      await expireLogin(deps, conn.ownerId, event.accountId);
       return;
     }
     case "failed":

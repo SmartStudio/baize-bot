@@ -13,6 +13,13 @@ export class PublishError extends Error {
   }
 }
 
+/** 平台回 401：不认这次带的令牌，请求没被接受。发布循环拿它换一次令牌重试，重试还是它才记过期。 */
+export class TokenRejected extends PublishError {
+  constructor(detail: string) {
+    super("login_expired", detail);
+  }
+}
+
 export type ApiPublishInput = {
   readonly content: DraftContent;
   readonly handle: string | null;
@@ -58,11 +65,11 @@ async function call(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (error) {
-    throw new PublishError("error", `请求没发出去：${error instanceof Error ? error.message : String(error)}`);
+    // 超时只说明没等到回应，平台可能已经收下、已经发出去了。
+    throw new PublishError("error", `没等到平台的回应：${error instanceof Error ? error.message : String(error)}`);
   }
-  if (response.status === 401 || response.status === 403) {
-    throw new PublishError("login_expired", `平台回 ${response.status}，令牌不认了`);
-  }
+  if (response.status === 401) throw new TokenRejected("平台回 401，令牌不认了");
+  if (response.status === 403) throw new PublishError("login_expired", "平台回 403，令牌不认了");
   if (!response.ok) throw new PublishError("error", `平台回 ${response.status}`);
   const json: unknown = await response.json().catch(() => null);
   if (typeof json !== "object" || json === null) throw new PublishError("error", "平台的回应不是 JSON 对象");

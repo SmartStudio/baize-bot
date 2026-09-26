@@ -110,3 +110,47 @@ it("GitHub 和 X 的接口根地址取环境变量，没设用官方地址", () 
     xApiBaseUrl: "http://127.0.0.1:9/x",
   });
 });
+
+it("OAuth 变量：GitHub 两个要一起设，X 可以只设 client id，WEB_BASE_URL 单独读", () => {
+  vi.stubEnv("GITHUB_APP_CLIENT_ID", "gh-id");
+  vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "");
+  expect(runtimeConfig).toThrowError("GITHUB_APP_CLIENT_ID 和 GITHUB_APP_CLIENT_SECRET 要一起设");
+
+  vi.stubEnv("GITHUB_APP_CLIENT_ID", "");
+  vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "gh-secret");
+  expect(runtimeConfig).toThrowError("GITHUB_APP_CLIENT_ID 和 GITHUB_APP_CLIENT_SECRET 要一起设");
+
+  vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "");
+  vi.stubEnv("X_CLIENT_SECRET", "x-secret");
+  expect(runtimeConfig).toThrowError("设了 X_CLIENT_SECRET 就要设 X_CLIENT_ID");
+
+  vi.stubEnv("GITHUB_APP_CLIENT_ID", "gh-id");
+  vi.stubEnv("GITHUB_APP_CLIENT_SECRET", "gh-secret");
+  vi.stubEnv("X_CLIENT_ID", "x-id");
+  vi.stubEnv("X_CLIENT_SECRET", "  ");
+  vi.stubEnv("WEB_BASE_URL", "https://bot.example.com");
+  vi.stubEnv("GITHUB_OAUTH_BASE_URL", "http://127.0.0.1:9/github-oauth");
+  const config = runtimeConfig();
+  expect(config.webBaseUrl).toBe("https://bot.example.com");
+  expect(config.oauth).toEqual({
+    github: { clientId: "gh-id", clientSecret: "gh-secret" },
+    x: { clientId: "x-id", clientSecret: null },
+    githubOauthBaseUrl: "http://127.0.0.1:9/github-oauth",
+    xOauthBaseUrl: "https://x.com",
+  });
+});
+
+it("没配 OAuth 变量时两个平台都是 null，WEB_BASE_URL 留空就是 null", () => {
+  for (const name of [
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
+    "X_CLIENT_ID",
+    "X_CLIENT_SECRET",
+    "WEB_BASE_URL",
+  ]) {
+    vi.stubEnv(name, "");
+  }
+  const config = runtimeConfig();
+  expect(config.webBaseUrl).toBeNull();
+  expect([config.oauth.github, config.oauth.x]).toEqual([null, null]);
+});

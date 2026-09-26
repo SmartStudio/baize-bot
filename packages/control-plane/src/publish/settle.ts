@@ -2,6 +2,7 @@ import type { Draft, Platform, PublishFailureReason, UserId } from "@baize/share
 import type { AgentHub } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
+import type { RejectedCredentials } from "../repo/accounts.js";
 import { settleFailed, settlePublished, type LoginEffect, type SettleScope } from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
 import type { Published } from "./platforms.js";
@@ -32,8 +33,14 @@ export async function publishSucceeded(
   deps.push.push(settled.ownerId, { type: "draft_updated", draft: settled.draft });
 }
 
-export async function publishFailed(deps: SettleDeps, scope: SettleScope, reason: PublishFailureReason): Promise<void> {
-  const settled = await settleFailed(deps.db, scope, reason);
+/** 控制面拿凭据被拒的 login_expired 带上被拒的那一代，电脑报上来的不带。 */
+export async function publishFailed(
+  deps: SettleDeps,
+  scope: SettleScope,
+  reason: PublishFailureReason,
+  rejected?: RejectedCredentials,
+): Promise<void> {
+  const settled = await settleFailed(deps.db, scope, reason, rejected);
   if (settled !== null) await announceFailure(deps, settled, settled.login);
 }
 

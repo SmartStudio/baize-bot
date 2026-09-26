@@ -14,8 +14,9 @@ import {
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
-import { publications } from "../src/db/schema.js";
+import { drafts, publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
+import { withAccountLock } from "../src/repo/account-lock.js";
 import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import {
@@ -531,7 +532,7 @@ describe("发布循环", () => {
     const github = accountOf(job, "github");
     const token = "ghp_rotated_key_secret";
     const staleKey = new CredentialCrypto(randomBytes(32).toString("base64"));
-    await saveAccessToken(s.database.db, staleKey, github.id, token);
+    await withAccountLock(s.database.db, github.id, (lock) => saveAccessToken(lock, staleKey, token));
     const seen: string[] = [];
     job.push.socket.on("message", (raw: Buffer) => seen.push(raw.toString()));
     job.agent.socket.on("message", (raw: Buffer) => seen.push(raw.toString()));
@@ -731,9 +732,7 @@ describe("小红书走电脑", () => {
 
   it("电脑报上来的结果只认走电脑的平台，走接口在发的草稿它结算不了", async () => {
     const s = await stack();
-    // 钉住时钟，伪造的结果能带上这一次认领的标识，挡它的只剩平台这一条。
-    const claimedAt = new Date();
-    const server = await s.serve(() => claimedAt);
+    const server = await s.serve();
     const job = await jobOn(s, server, [GITHUB]);
     const github = accountOf(job, "github");
     const spec = specOf(github, issuePost("走接口的"));
@@ -741,11 +740,17 @@ describe("小红书走电脑", () => {
     const release = s.fake.hold();
     const inflight = server.server.publisher.tick();
     await waitFor(async () => s.fake.requests().length === 1, "请求在途");
+    // 伪造的结果带上库里这一次认领的标识，挡它的只剩平台这一条。
+    const [claimed] = await s.database.db
+      .select({ claimedAt: drafts.claimedAt })
+      .from(drafts)
+      .where(eq(drafts.id, spec.draftId));
+    if (claimed === undefined || claimed.claimedAt === null) throw new Error("草稿没被认领");
 
     job.agent.send({
       type: "publish_result",
       draftId: spec.draftId,
-      attempt: claimedAt.toISOString(),
+      attempt: claimed.claimedAt.toISOString(),
       result: { status: "ok", url: "https://evil.example/forged", externalId: "forged" },
     });
     await agentCaughtUp(job, github, issuePost("哨兵"));

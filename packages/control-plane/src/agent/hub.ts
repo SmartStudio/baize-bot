@@ -1,3 +1,4 @@
+import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
 import {
   AgentToControl,
   ControlToAgent,
@@ -360,6 +361,7 @@ export class AgentHub {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,
       },
+      accountsProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${ACCOUNTS_PROXY_PATH}` },
     });
     if (reason === "hello") {
       for (const bot of bots) this.#send(conn, { type: bot.runState === "paused" ? "pause" : "resume", botId: bot.id });

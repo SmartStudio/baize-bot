@@ -57,9 +57,14 @@ Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里�
 | `PRICE_OUTPUT_PER_M` | `0` | 每百万输出 token 的价 |
 | `CREDENTIALS_KEY` | 无，必填 | 加密账号令牌的钥匙，32 字节 base64，用 `openssl rand -base64 32` 生成。缺了或长度不对启动失败；换了钥匙之前存的令牌就解不开 |
 | `GITHUB_API_BASE_URL` | `https://api.github.com` | 发 GitHub 草稿打的接口根地址，验证时指到假 GitHub |
-| `X_API_BASE_URL` | `https://api.x.com` | 发 X 草稿打的接口根地址 |
+| `X_API_BASE_URL` | `https://api.x.com` | 发 X 草稿打的接口根地址，X 的令牌端点也在它下面 |
+| `WEB_BASE_URL` | 空，用 `PUBLIC_BASE_URL` | 浏览器打开 Web 的地址，OAuth 回调 `<它>/api/oauth/github/callback`、`.../x/callback` 拼在它上面 |
+| `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET` | 空 | GitHub App 的 client id 和 secret，要一起设；不设则账号页连 GitHub 回 503 |
+| `X_CLIENT_ID`、`X_CLIENT_SECRET` | 空 | X OAuth 2.0 应用；公共客户端只设 id，机密客户端再设 secret；不设 id 则连 X 回 503 |
+| `GITHUB_OAUTH_BASE_URL` | `https://github.com` | GitHub 授权页和令牌端点的根地址，验证时指到假 GitHub |
+| `X_OAUTH_BASE_URL` | `https://x.com` | X 授权页的根地址 |
 
-GitHub、X 账号先用脚本挂上，令牌加密存进库里：`pnpm --silent --filter @baize/control-plane account-add -- --owner <邮箱> --platform github --handle <名> --token <PAT>`，可选 `--tier`。不带 `--silent` 时 pnpm 会把整条命令连令牌一起回显到终端。
+GitHub、X 账号在账号页走 OAuth 连。开发时手里有令牌想跳过授权页，也可以用脚本挂上，令牌加密存进库里（没有刷新令牌，过期了只能再跑一次）：`pnpm --silent --filter @baize/control-plane account-add -- --owner <邮箱> --platform github --handle <名> --token <PAT>`，可选 `--tier`。不带 `--silent` 时 pnpm 会把整条命令连令牌一起回显到终端。
 
 ## 跑起来
 

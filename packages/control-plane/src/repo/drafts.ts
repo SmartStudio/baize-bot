@@ -25,7 +25,7 @@ import type { Db } from "../db/client.js";
 import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
-import { findAccountForDraft, markLoginExpired } from "./accounts.js";
+import { findAccountForDraft, markLoginExpired, type RejectedCredentials } from "./accounts.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
 
@@ -458,7 +458,9 @@ export async function claimDueDrafts(
         : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
   const claimed = await db
     .update(drafts)
-    .set({ status: "publishing", claimedAt: now })
+    // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
+    // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
+    .set({ status: "publishing", claimedAt: sql`date_trunc('milliseconds', now())` })
     .from(accounts)
     .where(
       and(
@@ -485,13 +487,16 @@ export async function claimDueDrafts(
       ),
     )
     .orderBy(asc(drafts.createdAt), asc(drafts.id));
-  return rows.map((row) => ({
-    draft: toDraft(row.draft),
-    ownerId: UserId.parse(row.draft.ownerId),
-    handle: row.handle,
-    computerId: ComputerId.parse(row.computerId),
-    claimedAt: now,
-  }));
+  return rows.map((row) => {
+    if (row.draft.claimedAt === null) throw new Error(`刚认领的草稿 ${row.draft.id} 没有认领时刻`);
+    return {
+      draft: toDraft(row.draft),
+      ownerId: UserId.parse(row.draft.ownerId),
+      handle: row.handle,
+      computerId: ComputerId.parse(row.computerId),
+      claimedAt: row.draft.claimedAt,
+    };
+  });
 }
 
 /**
@@ -580,11 +585,15 @@ export type LoginEffect =
   | { readonly kind: "expired_now"; readonly account: Account }
   | { readonly kind: "already_known" };
 
-/** 因登录过期没发出去的，同一个事务里把账号也记成过期，只记认领时那一代登录。 */
+/**
+ * 因登录过期没发出去的，同一个事务里把账号也记成过期。控制面拿凭据被拒的（rejected）只按代际：
+ * 被拒的那一代还是当前这一代才算；电脑发的草稿没有凭据，只记认领时那一次登录，认领之后重登过的不算。
+ */
 export async function settleFailed(
   db: Db,
   scope: SettleScope,
   reason: PublishFailureReason,
+  rejected?: RejectedCredentials,
 ): Promise<{ draft: Draft; ownerId: UserId; login: LoginEffect } | null> {
   return db.transaction(async (tx) => {
     const [row] = await tx
@@ -600,7 +609,8 @@ export async function settleFailed(
     const expired = await markLoginExpired(tx, {
       ownerId,
       accountId: draft.accountId,
-      sessionAt: row.claimedAt,
+      evidence:
+        rejected === undefined ? { kind: "reported", sessionAt: row.claimedAt } : { kind: "rejected", ...rejected },
     });
     return {
       draft,

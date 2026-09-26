@@ -21,9 +21,22 @@ Web 前端不在这份 compose 里，控制面也不托管静态文件。上线�
 
 **工具凭据的加密密钥。** `TOOL_SECRET_KEY` 是 64 位十六进制，用 `openssl rand -hex 32` 生成一次，之后不要换。换了，库里已存的工具凭据全部解不开。
 
-**GitHub App 和 X 应用的回调地址。** 这两处 OAuth 回调由 P1-5 的控制面 `src/http/oauth.ts` 实现，路径以那边为准。在 GitHub App 和 X 开发者后台登记的回调要落在上面那个域名的 HTTPS 下，形如 `https://baize.example.com/api/oauth/github/callback` 和 `https://baize.example.com/api/oauth/x/callback`。当前控制面还没有这两条路由。
+**GitHub App 和 X 应用。** 账号页的「连 GitHub」「连 X」走 OAuth，路由在控制面 `src/http/oauth.ts`。两家后台登记的回调地址是：
 
-远程电脑上不能登录 GitHub 或 X 账号。要求登录的活派到远程电脑，会回登录失败，日志写「远程电脑上不能登录，请在本机登录这个账号」。账号请在本机的桌面壳里登录。
+```
+<WEB_BASE_URL>/api/oauth/github/callback
+<WEB_BASE_URL>/api/oauth/x/callback
+```
+
+`WEB_BASE_URL` 是浏览器打开 Web 的地址，比如 `https://baize.example.com`，回调和授权完跳回的首页都拼在它上面（末尾的 `/` 会去掉），登记的地址要和拼出来的一字不差。这份 compose 里 `PUBLIC_BASE_URL` 是远程电脑在 compose 网络里连控制面的 `http://control-plane:3001`，浏览器到不了，所以回调单独用 `WEB_BASE_URL`，不设才退回 `PUBLIC_BASE_URL`。
+
+GitHub 要建 GitHub App，勾上「过期的用户令牌」，把 client id、client secret 填进 `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`，两个要一起设。X 建 OAuth 2.0 应用，权限要带 `offline.access` 才拿得到 refresh 令牌；公共客户端只填 `X_CLIENT_ID`，机密客户端再填 `X_CLIENT_SECRET`。哪家没配，账号页点那家会回 503「管理员还没配…应用」。
+
+令牌加密进控制面的 `account_credentials`，密钥是 `CREDENTIALS_KEY`（32 字节 base64，`openssl rand -base64 32`），缺了控制面起不来，换了已存的令牌全部解不开。令牌不下发到任何电脑，远程电脑上的 Bot 读 GitHub、X 走控制面的 `/accounts-proxy`。
+
+GitHub、X 账号不用在哪台电脑上登录，也就没有「远程电脑上不能登录」这回事。要在电脑上扫码登录的只有小红书，它只能挂在本机。
+
+`CREDENTIALS_KEY` 和 `WEB_BASE_URL` 是必填，compose 缺了直接报错不起。四个 OAuth 变量可以不填，不填的那家连不了。
 
 以上配置写进 `deploy/remote/.env`（compose 默认读它），不要提交：
 
@@ -32,6 +45,13 @@ UPSTREAM_BASE_URL=https://上游/v1
 UPSTREAM_API_KEY=...
 GATEWAY_MODELS=plan=...,fast=...
 TOOL_SECRET_KEY=...
+CREDENTIALS_KEY=...
+WEB_BASE_URL=https://baize.example.com
+GITHUB_APP_CLIENT_ID=...
+GITHUB_APP_CLIENT_SECRET=...
+X_CLIENT_ID=...
+# 公共客户端留空
+X_CLIENT_SECRET=
 POSTGRES_PASSWORD=...
 COOKIE_SECURE=1
 CONTROL_PLANE_PORT=3201

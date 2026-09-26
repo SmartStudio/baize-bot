@@ -16,7 +16,7 @@ import {
   type User,
 } from "@baize/shared";
 import { expect } from "vitest";
-import { CredentialCrypto, saveAccessToken } from "../../src/credentials.js";
+import { addAccountWithToken, CredentialCrypto } from "../../src/credentials.js";
 import type { Db } from "../../src/db/client.js";
 import { addAccount } from "../../src/repo/accounts.js";
 import { helloAgent, type AgentClient } from "./agent.js";
@@ -49,13 +49,9 @@ export async function contentJob(server: TestServer, db: Db, specs: readonly Acc
   const crypto = new CredentialCrypto(TEST_CREDENTIALS_KEY);
   const accounts: Account[] = [];
   for (const spec of specs) {
-    const account = await addAccount(db, {
-      ownerId: user.id,
-      computerId: computer.computerId,
-      platform: spec.platform,
-      handle: spec.handle,
-    });
-    if (spec.token !== undefined) await saveAccessToken(db, crypto, account.id, spec.token);
+    const input = { ownerId: user.id, computerId: computer.computerId, platform: spec.platform, handle: spec.handle };
+    const account =
+      spec.token === undefined ? await addAccount(db, input) : await addAccountWithToken(db, crypto, input, spec.token);
     accounts.push(account);
   }
 

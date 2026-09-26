@@ -315,7 +315,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### `login_state` 三个分支
 
-三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。
+三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。账号还必须是在电脑浏览器里登录的平台（`BrowserPlatform`，现在只有小红书）：GitHub、X 的 `login` 只跟着控制面的凭据代际走，电脑报上来的 `valid`、`expired`、`failed` 一律丢掉，账号状态和代际都不动。不然一台认证过的电脑就能把一个凭据已死的号报回 `valid`，或者在重新授权之后把新一代报成过期，绕过下面的不变式。
 
 - `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
 - `expired`：`UPDATE ... WHERE login = 'valid'` 记成 `expired`，推 `account_updated` 和一条 `failed` 通知，重发 `config`。已经过期或还没登录的行不命中这条 UPDATE，重复报不再通知。
@@ -325,9 +325,59 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 发布循环 `claimDueDrafts` 只抢 `login='valid'` 账号的到点已批稿。账号一过期，它的稿子留在已批，不再下发，别的账号照发。重新登录成 `valid` 后（不管是更新原来那行还是新占位并进原来那行），这些稿子下一轮照常被抢，过了排期很久的也会补发。例外是控制面重启：`reopenMissedDrafts` 会把停机期间错过的定时稿打回待批，但跳过 `login` 不是 `valid` 的账号，过期账号的稿子不算停机错过，照样留在已批等重新登录。
 
-发布路径自己发现过期也记账号：草稿因 `login_expired` 失败（电脑回的 `publish_result`、平台回 401/403、令牌缺失三处），`settleFailed` 在同一个事务里把草稿记失败、把账号按上面同一个 `markLoginExpired` 记成 `expired`。用户只收到一条通知，就是草稿那条「某平台上的「标题」没发出去：账号登录过期了，重新登录后让 Bot 再起一稿」，账号这边只推 `account_updated`、重发 `config`，不再加第二条。电脑自己报 `expired` 时没有草稿可挂，才用账号那条「小红书账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」。两条哪条先到就是那一条：`markLoginExpired` 只认 `login='valid'`，后到的那条发现账号已经是 `expired`，账号不改、不推 `account_updated`、不重发 `config`，也不再发通知；后到的是草稿失败时草稿照样结算成失败，只推 `draft_updated`。发布结果记过期还绑着认领时那一代登录：同一条 UPDATE 另要求 `login_changed_at <= 草稿的 claimed_at`。认领之后账号已经重登成 `valid` 的，旧那次回来的 `login_expired` 只把草稿记失败、推 `draft_updated`，账号保持 `valid`，不推过期通知、不重发 `config`。
+发布路径自己发现过期也记账号：草稿因 `login_expired` 失败（电脑回的 `publish_result`、平台回 401/403、令牌缺失三处），`settleFailed` 在同一个事务里把草稿记失败、把账号按上面同一个 `markLoginExpired` 记成 `expired`。用户只收到一条通知，就是草稿那条「某平台上的「标题」没发出去：账号登录过期了，重新登录后让 Bot 再起一稿」，账号这边只推 `account_updated`、重发 `config`，不再加第二条。电脑自己报 `expired` 时没有草稿可挂，才用账号那条「小红书账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」。两条哪条先到就是那一条：`markLoginExpired` 只认 `login='valid'`，后到的那条发现账号已经是 `expired`，账号不改、不推 `account_updated`、不重发 `config`，也不再发通知；后到的是草稿失败时草稿照样结算成失败，只推 `draft_updated`。发布结果记过期还绑着认领时那一代登录。电脑发的草稿（小红书）没有控制面凭据，同一条 UPDATE 另要求 `login_changed_at <= 草稿的 claimed_at`，`claimed_at` 由认领那条 SQL 自己用 `now()` 产生并返回，不是发布循环开始那一趟时取的时间，不然认领之前的重登会被算到认领之后。走控制面凭据的草稿（GitHub、X）不看认领时刻，只按下一节的代际条件。认领之后账号已经重登成 `valid` 的，旧那次回来的 `login_expired` 只把草稿记失败、推 `draft_updated`，账号保持 `valid`，不推过期通知、不重发 `config`。
 
 过期推的是 `failed`，不是 `stuck`：`stuck` 每人一段离线期只推一次，是给电脑掉线的，混进来会和掉线那条互相吞。
+
+### 授权：连 GitHub、连 X
+
+`GET /api/oauth/:platform/start` 要登录。平台不是 github 或 x 回 404，这家没配应用回 503（「管理员还没配 GitHub 应用」）。放行时生成 state 和 PKCE verifier（S256，GitHub 也带），在 `oauth_states` 记一行 `(state, owner_id, platform, code_verifier, expires_at)`，十分钟有效，302 到平台授权页。这张表有上限：插入那个事务先按 `expires_at` 的索引删掉已过期的行，再把同一个人同一个平台超出最新 5 条的删掉（过滤和排序走 `(owner_id, platform, expires_at desc, state desc)` 复合索引，不随全站 state 行数扫全表）（`createOAuthState`，在 `pg_advisory_xact_lock('oauth-state:<ownerId>:<platform>')` 里做，并发点几次也越不过 5 条）。开五个标签页同时授权都能回来，第六个把最旧的挤掉。回调地址是 `<WEB_BASE_URL>/api/oauth/:platform/callback`，`WEB_BASE_URL` 不设就用 `PUBLIC_BASE_URL`。分开配是因为部署时 `PUBLIC_BASE_URL` 常是电脑在内网连控制面的地址，浏览器到不了。
+
+回调也挂在 `/api` 下、要登录。session cookie 是 `SameSite=Lax`，平台跳回来是顶层 GET，cookie 照带。第一步是一条 `DELETE FROM oauth_states WHERE state=? AND owner_id=? AND platform=? AND expires_at>now() RETURNING code_verifier`：state 只认发起它的那个人，别人发起的授权链接落到这个人的会话上拿不到 verifier，平台号不会挂错人；同一个回调被打两次，只有第一次删得到。用户在授权页点了拒绝，这个 state 也跟着作废。之后拿 code 和 verifier 换令牌、调「我是谁」取 handle，在一个事务里挂账号、存令牌，推 `account_updated`、重发 `config`，302 回 Web 首页，带 `?oauth=<平台>&result=<connected|denied|invalid_state|failed>`。`failed` 只说换令牌、取 handle 或挂账号的事务没成；事务提交之后账号就是连上了，推送和重发 `config` 只是通知，出错只记日志，页面照样 `connected`。
+
+令牌端点（换授权码和刷新共用）单独 10 秒超时，别的平台请求是 30 秒；刷新时有请求在等它，令牌端点只回一小段 JSON，10 秒还没回就当这次连不上。换授权码有自己的失败口径：令牌端点回 400、401，或者 200 带 `error`，都算这个授权码不认，回 `result=failed`，用户回账号页再点一次就是新的授权码，所以不细分错误码；5xx、超时也落 `failed`。它和刷新不共用判断，刷新的判断见下一节。
+
+账号挂哪台电脑：有远程电脑挂远程电脑，没有就挂本机。读和发都走控制面，电脑只决定账号在账号页上归哪台，Bot 常驻在远程电脑那边。重连同一个 handle 不多出一行：同一人、同平台、同 handle 已有的行（优先挂在目标电脑上的那行，其次最早的那行）挪到目标电脑，旧令牌整行覆盖，`login` 由写凭据的 `saveGrant` 改回 `valid`（原本就是 `valid` 的不动，`login_changed_at` 也不动）。唯一索引按电脑建，拦不住同一个号在本机和远程各建一行，第一次授权时也没有现成的行可锁，所以挂账号的事务先拿 `pg_advisory_xact_lock(hashtextextended('oauth-account:<ownerId>:<platform>', 0))`（`lockOwnerPlatform`），同一人同一平台的回调排成一队，选电脑也在锁里。开发用的 `addAccountWithToken` 也先拿同一把锁再挂账号，所以同一个外部账号收敛到一行对这两条会新建 GitHub、X 账号行的路径都成立：account-add 在本机挂号还没提交时授权回调进来，回调排在锁后面，醒来看到那行，把它挪到远程电脑。反过来授权回调先在远程挂了号还没提交时 account-add 进来，account-add 排在锁后面，醒来先按人、平台、handle 找已有的行（`findOwnerAccount`），找到就在那一行上写凭据，电脑不动，找不到才在本机建行。电脑不挪回本机：account-add 选本机只是因为脚本没有别的可选，授权回调挂远程是有意的（Bot 常驻在那边），挪回去会让这一行随谁后到在两台电脑之间来回换。锁是事务级的，提交或回滚就放；会话级的锁会留在连接池的空闲连接上，下一条回调换一条连接就卡住。过期稿子因此跟着回来，走上面「重登收敛」同一条路。
+
+令牌 AES-256-GCM 加密进 `account_credentials`，密钥是 `CREDENTIALS_KEY`。访问令牌、刷新令牌和两个过期时间各一列，另有一列 `generation`（代际），用法见下一节末尾。`account-add` 脚本还在，只给开发用：它只存访问令牌，没有刷新令牌，过期了控制面刷不了。挂账号和存令牌走 `addAccountWithToken`，一个事务，先拿 `oauth-account:<ownerId>:<platform>` 的 advisory lock、在锁里选行、再进 `withAccountLock`，顺序和授权回调一样；e2e 的测试栈也用它。
+
+### 刷新：进程内合并、锁行、锁到后再查一次、成功先落库
+
+发布循环和账号代理共用一个 `AccountTokens`，都从 `accessToken(accountId, rejected)` 拿令牌。`rejected` 是平台刚回 401 的那个令牌，平时为 null。访问令牌离过期还有一分钟以上、也不是 `rejected`，直接解密返回，不开事务。否则要刷新：
+
+- 同一进程里同一个账号的刷新只跑一趟（single-flight）。进程里按账号记着正在跑的那一趟，后来的请求直接等它的结果，不开事务、不占数据库连接。那一趟不论成功、被拒还是抛异常，结束时都从表里删掉，下一次要刷新的请求会重新起一趟，一次 5xx 不会把后面的请求永远钉在同一个失败上。
+- 不同账号的刷新各要一个事务，同时进事务的不超过连接池 `max` 的三分之一（至少 1 条，默认池 10 条时是 3 条），多出来的在进程内存里排队，排队时不开事务、不占连接。事务里要等令牌端点，最长 10 秒，不设上限的话发布循环一轮十几个账号一起刷新就能把连接池占满，登录、账号页这些普通请求全卡住。
+- 跑的那一趟走 `withAccountLock` 锁账号行（见下面「唯一锁序」），锁到之后再判一次：还能用（排在前面的已经刷过，或者库里的已经不是 `rejected`），就用它；没有刷新令牌或刷新令牌也过期了，回 `login_expired`；否则拿刷新令牌去换。
+- 换到了，新的访问令牌、刷新令牌、两个过期时间在同一个事务里写回，账号是 `expired` 的话同一条事务改回 `valid`，提交之后才把令牌交出去；改回了 `valid` 的，提交后推 `account_updated`、重发 `config`；这两步只是通知，重发 `config` 出错只记日志，这趟请求照常用新令牌走下去（`server.ts` 里交给 `AccountTokens` 的回调）。
+
+刷新失败怎样分类。清掉刷新令牌是不可逆的，所以只有能证明刷新令牌本身失效的回应才算被拒，判断在 `oauth-providers.ts` 的 `DEAD_REFRESH_TOKEN`：
+
+- 5xx 一律不算，不管错误体里写什么，GitHub 的 `bad_refresh_token` 也一样。5xx 是平台自己出了事。
+- GitHub：`error` 是 `bad_refresh_token`。GitHub 不认时回 200，错误写在 `error` 里。
+- X：HTTP 400，且 `error` 是 `invalid_grant`（RFC 6749 §5.2 定义它覆盖刷新令牌无效、过期、被撤销）。
+- X：HTTP 400，`error` 是 `invalid_request`，且 `error_description` 等于或包含 `Value passed for the token was invalid`。X 对撤销或用过的刷新令牌实际就这么回，X 官方 TypeScript SDK 的 issue #54 存着完整回包。RFC 6749 §5.2 里 `invalid_request` 是通用的请求格式错误，所以光凭错误码不算，401、503 或别的描述都不算。
+
+被拒时把 `refresh_enc` 清成 null，代际不变，回 `login_expired` 并带上被拒的那一代，调用方记过期。其余一律是运维错误：`invalid_client`、`unauthorized_client`、GitHub 的 `incorrect_client_credentials` 这类应用配置错误，描述对不上的 `invalid_request`，别的 400、401，错误体不是 JSON，5xx，超时，连不上。运维错误打一条 `console.error`，只写平台、状态码和错误码，不写令牌，然后抛异常，密文和账号状态都不动；管理员修好 client secret 或平台恢复之后，原来的刷新令牌照常能用。代理把异常回成 502，发布循环记这条草稿 `error`。
+
+为什么要合并和锁行。两家的刷新令牌都是一次性的，换一次就轮换，旧的立刻作废。发布循环和代理、或者两个代理请求同时发现令牌过期，各自拿同一把刷新令牌去换，只有一个换得到，另一个被平台拒绝，然后把一个其实好好的账号记成过期。进程内合并挡住同一进程里的并发，也让十几个请求等一次刷新时只占一条数据库连接，不会把连接池占满；账号行锁和锁后再查一次留作跨进程的兜底，另一个进程排在锁后面，锁到时直接用前面换到的新令牌，不再打平台。锁里打 HTTP 会把这个账号锁到令牌端点回话为止，最长 10 秒，只挡同一个账号；这期间记过期、重新授权的事务排在它后面，醒来看到的是刷新提交之后的世界。连接池的占用由上面的并发上限管。没有把打令牌端点挪到事务外（先短事务读代际、事务外换令牌、再按「代际没变」提交），是因为刷新令牌一次性：两个进程在事务外拿同一把去换，后到的被平台拒掉，要么把刚被别人换好的账号清掉刷新令牌、记成过期，要么还得再加一层「被拒但代际可能马上会变」的等待；锁里换，后到的进程在行锁上等，醒来直接用前面换到的。代价是某家令牌端点挂住时，这个进程里别的账号的刷新排在后面，最多等上限那几条各自超时。成功先落库，是因为平台那边旧刷新令牌已经作废，新的没存下来就再也刷不了。
+
+`login_expired` 到了发布循环就是草稿因 `login_expired` 失败，走上面同一条 `settleFailed`，只发草稿那条通知。到了代理就调 `expireLogin`：`markLoginExpired`、推 `account_updated`、发账号那条「…账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」、重发 `config`，和电脑报 `expired` 同一段代码。
+
+代际。`account_credentials.generation` 每写一份新凭据加一：授权回调写凭据、刷新成功写回，都走 `saveGrant` 的 `generation = generation + 1`；刷新被拒只清 `refresh_enc`，代际不动，死的还是那一代。`accessToken` 交出的令牌和 `login_expired` 都带着代际，没有凭据行时是 null。控制面自己因为凭据被拒把账号记过期（代理取到 `login_expired`、代理重试后还是 401、发布同样两种情况、发布碰到 403），都把那一代交给 `markLoginExpired`，改账号的那条 UPDATE 里带 `EXISTS (SELECT 1 FROM account_credentials WHERE account_id = accounts.id AND generation = <被拒的那一代>)`，没有凭据行的那种换成 `NOT EXISTS`。代理和发布走同一个函数，电脑报上来的过期不经过控制面的凭据，不带这个条件（`ExpiryEvidence` 的 `reported` 和 `rejected` 两种）。
+
+不变式。对有控制面凭据的账号，`login = 'expired'` 成立，当且仅当当前这一代凭据被判定为死了。过期是针对某一代凭据下的结论：记过期的 UPDATE 带着那一代，库里已经是下一代就什么都不改。凭据代际一推进（刷新成功、重新授权，都经 `saveGrant`），账号必须回到 `valid`，所以 `saveGrant` 写下新一代之后在同一个事务里把 `login <> 'valid'` 的账号改回 `valid`；代际不推进，账号就没有从 `expired` 回到 `valid` 的路（唯一例外是 `markLoginValid`，只给电脑报小红书登录用，这种账号没有控制面凭据）。刷新被拒只清 `refresh_enc`、不推进代际，因为死的还是这一代。选「刷新成功时在锁里写回 `valid`」而不是「发现已 `expired` 就不刷新」，是因为过期先提交、刷新随后成功这条交错里刷新已经拿到了平台发的新令牌，扔掉它就要用户再授权一次；写回 `valid` 让不变式直接成立，`account_updated` 和 `config` 在提交后补推。
+
+唯一锁序。所有同时碰 `accounts` 和 `account_credentials` 的路径都先锁账号行，再碰凭据行，入口只有一个：`withAccountLock(db, accountId, run)`，它开事务、`SELECT ... FOR UPDATE` 锁账号行、把一个只有它造得出来的 `AccountLock` 交给 `run`。写凭据的 `saveGrant`、`saveAccessToken`，刷新的整趟（锁到后再查、打平台、被拒清 `refresh_enc`、成功写回），`markLoginExpired`，授权回调写凭据，`addAccountWithToken`，`markLoginValid` 都收这个 `AccountLock` 或从这里进，不收 `Db`，绕过锁的写法编译不过。凭据行不再单独加 `FOR UPDATE OF account_credentials` 或 `FOR SHARE`：账号行锁已经把这些路径排成一队，后到的在账号行上等，醒来跑的 UPDATE 看到的是前一个提交之后的世界，两边不会互等成死锁（`test/oauth.test.ts` 的「锁序」用例把回调停在「锁了账号、还没写凭据」的窗口，这时记过期，两边都能完成）。授权回调和 `addAccountWithToken` 的 advisory lock（`oauth-account:<ownerId>:<platform>`）在它外面，管的是「挂哪一行」，两条路径都先拿它、选定行之后才进 `withAccountLock`，顺序一致，不会互等。发布路径的认领时刻条件（`login_changed_at <= claimed_at`）只留给电脑发的草稿：那些账号没有控制面凭据，只能靠它挡「认领之后过期又重登」；走接口的草稿只看代际。
+
+交错里那一次旧请求本身的结论不变：代理回 409，发布把那条草稿记 `login_expired`；账号不动，因为账号这边已经有了更新的结论，草稿失败时也不再发通知（同 `settleFailed` 的 `already_known`）。
+
+### 代理：`/accounts-proxy/:accountId/*`
+
+Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面的 `/accounts-proxy`，地址随 `config.accountsProxy.baseUrl` 下发，和网关一样拼在 `PUBLIC_BASE_URL` 上。认身份用电脑的网关 key（`Authorization: Bearer`），浏览器 cookie 不算数。依次判：key 不对 401；不是 GET 405「代理只读，发东西走草稿」；账号不是这台电脑主人的、不存在、或不是 github/x 回 404；`login` 不是 `valid` 回 409；取令牌出错 502，取到 `login_expired` 记过期后回 409。放行时把 `*` 那段原样（不解码）拼到平台接口根地址后面，拼完核对 origin 和根路径前缀，跳出去回 400；解码后再拼的话 `..%2F` 会变回 `../`，GitHub 的账号能打到 X 上。请求头换成平台要的头和 `Bearer <平台令牌>`，客户端的 `accept` 保留，其他一律不带。回包只透 `content-type`、`etag`、`last-modified`、`link`、`cache-control` 和 `x-ratelimit-*`，平台的 `set-cookie` 不透。平台回 401 走下面那条共用规则，回 403 原样透给 Bot，不刷新、不记过期：403 多半是这个号没权限读那个资源，令牌本身没问题。
+
+代理和发布共用一条「401 刷新后重试一次」的规则。平台回 401，就把这次用的令牌作为 `rejected` 交给 `accessToken`：库里的令牌已经不是它（别的路径刚刷过），直接拿库里的重试；还是它，就强制刷新一次再重试。重试还是 401，代理记过期回 409，发布循环把草稿记 `login_expired`、账号跟着记过期。对发布的 POST 重试一次是安全的：401 表示平台没有接受这次请求，什么都没发出去，重发不会发出两条。这条规则也挡住了一个交错：发布先拿到旧令牌 A、请求还在路上，代理这时 401、刷出新令牌 B；A 晚到的 401 交回去时库里已经是 B，发布直接用 B 重试，账号不会被记成过期。发布路径把平台的 403 也记成 `login_expired`，和代理的口径不同，这一版还没统一。
+
+为什么令牌不出控制面。电脑上跑的是 Bot 写的命令，Bot 的上下文又会进模型。令牌一旦下发，就等于交给了模型和电脑上任何能读文件的进程，撤销只能去平台后台点。留在控制面，电脑只拿得到一把网关 key，它只能以这个用户的名义读、不能写，写一律走草稿和审批；要收回，删账号或换网关 key 就行。刷新也只有一处在做，锁行才管得住。
 
 ## 用量、今天与通知
 

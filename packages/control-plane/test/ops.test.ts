@@ -1,9 +1,11 @@
 import { BotListResponse, LoginResponse } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runMigrations } from "../src/db/migrate.js";
+import { addAccount } from "../src/repo/accounts.js";
 import { DEV_EMAIL, DEV_PASSWORD, seed } from "../src/seed.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
+import { makeComputer, makeUser } from "./helpers/fixtures.js";
 
 let database: TestDb;
 let server: TestServer;
@@ -24,7 +26,38 @@ describe("迁移", () => {
     expect(again, "第二次跑迁移应当一个文件都不应用").toEqual([]);
   });
 
-  it("建出二十四张业务表加一张迁移记账表", async () => {
+  it("停在 0014 且已有凭据的库，只跑 0015 之后旧凭据算第一代", async () => {
+    const older = await createTestDb();
+    try {
+      await older.sql.unsafe('DROP TABLE "oauth_states"');
+      await older.sql.unsafe('ALTER TABLE "account_credentials" DROP COLUMN "generation"');
+      await older.sql`DELETE FROM _migrations WHERE name = '0015_p1_5_oauth_states.sql'`;
+
+      const user = await makeUser(older.db);
+      const computer = await makeComputer(older.db, user.id);
+      const account = await addAccount(older.db, {
+        ownerId: user.id,
+        computerId: computer.computerId,
+        platform: "github",
+        handle: "老凭据",
+      });
+      await older.sql`
+        INSERT INTO account_credentials (account_id, access_enc, scope, updated_at)
+        VALUES (${account.id}, 'enc:old', 'repo', now())
+      `;
+
+      const applied = await runMigrations(older.sql);
+      expect(applied, "只该补上 0015 这一个文件").toEqual(["0015_p1_5_oauth_states.sql"]);
+      const [row] = await older.sql<{ generation: number }[]>`
+        SELECT generation FROM account_credentials WHERE account_id = ${account.id}
+      `;
+      expect(row?.generation, "升级前就有的凭据算第一代").toBe(1);
+    } finally {
+      await older.close();
+    }
+  });
+
+  it("建出二十五张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -44,6 +77,7 @@ describe("迁移", () => {
       "groups",
       "handoffs",
       "messages",
+      "oauth_states",
       "publications",
       "routine_runs",
       "routines",

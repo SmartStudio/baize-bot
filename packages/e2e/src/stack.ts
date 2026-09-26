@@ -34,7 +34,7 @@ import {
   type Sql,
   WS_PATH,
 } from "@baize/control-plane";
-import { addAccount, CredentialCrypto, saveAccessToken } from "@baize/control-plane/testing";
+import { addAccountWithToken, CredentialCrypto } from "@baize/control-plane/testing";
 
 const AGENT_VERSION = "0.1.0-e2e";
 
@@ -294,9 +294,12 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       publishTick: () => server.publisher.tick(),
       addAccount: async ({ platform, handle, token }) => {
         const { user } = MeResponse.parse(await api.get("/api/me"));
-        const account = await addAccount(db, { ownerId: user.id, computerId, platform, handle });
-        await saveAccessToken(db, new CredentialCrypto(credentialsKey), account.id, token);
-        return account;
+        return addAccountWithToken(
+          db,
+          new CredentialCrypto(credentialsKey),
+          { ownerId: user.id, computerId, platform, handle },
+          token,
+        );
       },
       close: async () => {
         await closeAll();

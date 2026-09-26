@@ -53,6 +53,7 @@ import {
   type GroupId,
   type GrantId,
   type MessageId,
+  type OAuthPlatform,
   type Routine,
   type RoutineId,
   type Skill,
@@ -167,6 +168,8 @@ export const createApi = (signal?: AbortSignal) => {
       json(AccountResponse, await send("POST", "/accounts", request)),
     loginAccount: async (id: AccountId) =>
       json(AccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`)),
+    // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它设 location。
+    oauthStartUrl: (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`,
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
     grants: async () => json(GrantListResponse, await send("GET", "/grants")),
     deleteGrant: async (id: GrantId): Promise<void> => {

@@ -17,6 +17,7 @@ import type {
   HandoffStatus as HandoffStatusSchema,
   MessageBody,
   ModelPurpose as ModelPurposeSchema,
+  OAuthPlatform,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
   PublishFailureReason as PublishFailureReasonSchema,
@@ -295,7 +296,36 @@ export const accountCredentials = pgTable("account_credentials", {
   refreshExpiresAt: timestamp("refresh_expires_at", { withTimezone: true }),
   scope: text("scope").notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  // 每写一份新凭据（授权、刷新成功）加一。平台不认的结论只算在那一代头上，见 markLoginExpired。
+  generation: integer("generation").notNull().default(1),
 });
+
+// 发起授权到平台跳回来之间的那一小段。state 防伪造，code_verifier 是 PKCE 的另一半，都只在控制面，
+// 回调时按 state、人、平台一条 DELETE ... RETURNING 取走，同一个 state 只能用一次。
+// 每次发起授权一行，回调时删掉。没回来的靠两条路收：过期的按 expires_at 清（索引给这条用），
+// 同一个人同一个平台只留最新 5 条（见 createOAuthState），表的大小有上限。
+export const oauthStates = pgTable(
+  "oauth_states",
+  {
+    state: text("state").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    platform: text("platform").$type<OAuthPlatform>().notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    index("oauth_states_expires_at_idx").on(table.expiresAt),
+    // 发起授权时挤掉这个人这个平台最旧的 state：按 owner、platform 过滤，按过期时刻和 state 倒序取最新几条。
+    index("oauth_states_owner_platform_idx").on(
+      table.ownerId,
+      table.platform,
+      table.expiresAt.desc().nullsFirst(),
+      table.state.desc().nullsFirst(),
+    ),
+  ],
+);
 
 // 例行任务属于一个 Bot，删 Bot 跟着走。触发器整份存 jsonb：列化的话每加一种触发器就要改一次表，
 // 放 jsonb 里触发器的种类只由 shared 的 `Trigger` 定。

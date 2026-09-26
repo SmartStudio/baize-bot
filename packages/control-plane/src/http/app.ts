@@ -126,7 +126,11 @@ import { authenticate, createUser, isEmailTaken } from "../repo/users.js";
 import { getUsage } from "../repo/usage.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { PushHub } from "../ws/hub.js";
+import type { AccountTokens, CredentialCrypto } from "../credentials.js";
+import type { OAuthEndpoints } from "../oauth-providers.js";
+import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
+import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 
 export type AppDeps = {
   readonly db: Db;
@@ -137,6 +141,12 @@ export type AppDeps = {
   readonly notifications: NoticePublisher;
   readonly secureCookie: boolean;
   readonly gateway: Omit<GatewayDeps, "db">;
+  readonly platformAccounts: {
+    readonly crypto: CredentialCrypto;
+    readonly tokens: AccountTokens;
+    readonly endpoints: OAuthEndpoints;
+    readonly webBaseUrl: () => string;
+  };
 };
 
 type Env = { Variables: { user: User } };
@@ -160,6 +170,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
   const app = new Hono<Env>();
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
+  const { platformAccounts } = deps;
+  app.route(
+    ACCOUNTS_PROXY_PATH,
+    createAccountsProxy({
+      db,
+      push: hub,
+      notifications: deps.notifications,
+      agents,
+      tokens: platformAccounts.tokens,
+      endpoints: platformAccounts.endpoints,
+    }),
+  );
 
   app.use("/api/*", async (c, next) => {
     if (PUBLIC_PATHS.has(c.req.path) || PUBLIC_HOOK.test(c.req.path)) return next();
@@ -169,6 +191,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
     c.set("user", user);
     await next();
   });
+
+  app.route(
+    OAUTH_PATH,
+    createOAuthRoutes({
+      db,
+      push: hub,
+      agents,
+      crypto: platformAccounts.crypto,
+      endpoints: platformAccounts.endpoints,
+      webBaseUrl: platformAccounts.webBaseUrl,
+    }),
+  );
 
   app.post("/api/register", async (c) => {
     const body = await readJson(c.req.raw, RegisterRequest);

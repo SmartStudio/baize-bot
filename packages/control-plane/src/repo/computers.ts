@@ -1,6 +1,7 @@
 import { ComputerId, type Computer, type ComputerKind, type UserId } from "@baize/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import type { Tx } from "./messages.js";
 import { computers } from "../db/schema.js";
 import { hashSecret, newId, newSecret, secretMatches } from "../ids.js";
 import { toComputer } from "./rows.js";
@@ -9,7 +10,11 @@ import { toComputer } from "./rows.js";
 export type EnsureResult = { readonly computer: Computer; readonly token: string | null };
 
 /** 每人每种电脑至多一台，(owner_id, kind) 上的唯一约束兜住并发创建。 */
-export async function ensureComputer(db: Db, ownerId: UserId, kind: ComputerKind = "local"): Promise<EnsureResult> {
+export async function ensureComputer(
+  db: Db | Tx,
+  ownerId: UserId,
+  kind: ComputerKind = "local",
+): Promise<EnsureResult> {
   const token = newSecret();
   const [created] = await db
     .insert(computers)
@@ -32,7 +37,7 @@ export async function ensureComputer(db: Db, ownerId: UserId, kind: ComputerKind
 }
 
 export async function findComputerByOwner(
-  db: Db,
+  db: Db | Tx,
   ownerId: UserId,
   kind: ComputerKind = "local",
 ): Promise<Computer | null> {

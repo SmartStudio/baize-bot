@@ -1,11 +1,10 @@
 import type { AgentHub } from "../agent/hub.js";
-import type { CredentialCrypto } from "../credentials.js";
-import { accessTokenOf } from "../credentials.js";
+import type { AccountTokens } from "../credentials.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { claimDueDrafts, failStaleDrafts, reopenMissedDrafts, type ClaimedDraft } from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
-import { COMPUTER_PLATFORMS, PUBLISHERS, PublishError, type ApiBases } from "./platforms.js";
+import { COMPUTER_PLATFORMS, PUBLISHERS, PublishError, TokenRejected, type ApiBases } from "./platforms.js";
 import { announceFailure, publishFailed, publishSucceeded, type SettleDeps } from "./settle.js";
 
 export const PUBLISH_INTERVAL_MS = 60_000;
@@ -16,7 +15,7 @@ export type PublishLoopOptions = {
   readonly db: Db;
   readonly push: PushHub;
   readonly notifications: NoticePublisher;
-  readonly crypto: CredentialCrypto;
+  readonly tokens: AccountTokens;
   readonly bases: ApiBases;
   readonly computers: Pick<AgentHub, "onlineComputerIds" | "send" | "sendConfig">;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
@@ -109,19 +108,36 @@ export class PublishLoop {
       return;
     }
     try {
-      // 解密也在 try 里：钥匙换过、密文坏了，这一轮就记失败，不等十分钟超时。
-      const token = await accessTokenOf(this.#options.db, this.#options.crypto, draft.accountId);
-      if (token === null) {
-        await publishFailed(this.#deps, scope, "login_expired");
-        return;
+      // 和账号代理同一条规则：401 把这次用的令牌交回去，库里还是它就强制刷新，已被别处换过就直接用新的，只重试一次。
+      // 401 是平台没接受这次请求，重发这条 POST 不会发出两条；别处刷新之后旧令牌晚到的 401 也就不会把账号记过期。
+      let rejected: string | null = null;
+      for (;;) {
+        // 解密也在 try 里：钥匙换过、密文坏了，这一轮就记失败，不等十分钟超时。
+        const token = await this.#options.tokens.accessToken(draft.accountId, rejected);
+        if (token.kind === "login_expired") {
+          await publishFailed(this.#deps, scope, "login_expired", { generation: token.generation });
+          return;
+        }
+        try {
+          const published = await publisher.publish({
+            content: draft.content,
+            handle: claimed.handle,
+            token: token.token,
+            baseUrl: publisher.baseUrl(this.#options.bases),
+          });
+          await publishSucceeded(this.#deps, scope, () => published);
+          return;
+        } catch (error) {
+          if (error instanceof TokenRejected && rejected === null) {
+            rejected = token.token;
+            continue;
+          }
+          if (!(error instanceof PublishError) || error.reason !== "login_expired") throw error;
+          console.warn(`草稿 ${draft.id} 没发出去`, error.message);
+          await publishFailed(this.#deps, scope, "login_expired", { generation: token.generation });
+          return;
+        }
       }
-      const published = await publisher.publish({
-        content: draft.content,
-        handle: claimed.handle,
-        token,
-        baseUrl: publisher.baseUrl(this.#options.bases),
-      });
-      await publishSucceeded(this.#deps, scope, () => published);
     } catch (error) {
       console.warn(`草稿 ${draft.id} 没发出去`, error instanceof PublishError ? error.message : error);
       await publishFailed(this.#deps, scope, error instanceof PublishError ? error.reason : "error");

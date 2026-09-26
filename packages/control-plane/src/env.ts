@@ -58,15 +58,33 @@ export type RuntimeConfig = {
   readonly upstreamApiKey: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
-  /** 发布器打的平台接口根地址。测试和实机验证指到假平台。 */
+  /**
+   * 浏览器打开 Web 的那个地址，`/api` 在它下面转给控制面。OAuth 回调和授权完跳回的页面都拼在它上面。
+   * null 就用 publicBaseUrl：部署时那个常是电脑代理在内网连控制面的地址，浏览器未必到得了，所以分开配。
+   */
+  readonly webBaseUrl: string | null;
+  /** 发布器、账号代理和「我是谁」打的平台接口根地址。测试和实机验证指到假平台。X 的令牌端点也在 xApiBaseUrl 下。 */
   readonly githubApiBaseUrl: string;
   readonly xApiBaseUrl: string;
+  readonly oauth: OAuthConfig;
+};
+
+/** GitHub App 换令牌必须带 secret。X 的公共客户端只靠 PKCE，没有 secret 也能跑。 */
+export type OAuthConfig = {
+  readonly github: { readonly clientId: string; readonly clientSecret: string } | null;
+  readonly x: { readonly clientId: string; readonly clientSecret: string | null } | null;
+  /** GitHub 的授权页和令牌端点都在这下面。 */
+  readonly githubOauthBaseUrl: string;
+  /** X 的授权页在这下面，令牌端点在 xApiBaseUrl 下。 */
+  readonly xOauthBaseUrl: string;
 };
 
 export const DEFAULT_GATEWAY_MODEL = "baize-default";
 export const DEFAULT_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 export const DEFAULT_X_API_BASE_URL = "https://api.x.com";
+export const DEFAULT_GITHUB_OAUTH_BASE_URL = "https://github.com";
+export const DEFAULT_X_OAUTH_BASE_URL = "https://x.com";
 
 export function runtimeConfig(): RuntimeConfig {
   const gatewayModels = configuredGatewayModels();
@@ -79,6 +97,30 @@ export function runtimeConfig(): RuntimeConfig {
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
     githubApiBaseUrl: process.env["GITHUB_API_BASE_URL"] ?? DEFAULT_GITHUB_API_BASE_URL,
     xApiBaseUrl: process.env["X_API_BASE_URL"] ?? DEFAULT_X_API_BASE_URL,
+    webBaseUrl: nonEmpty("WEB_BASE_URL"),
+    oauth: oauthConfig(),
+  };
+}
+
+function nonEmpty(name: string): string | null {
+  const value = process.env[name]?.trim() ?? "";
+  return value === "" ? null : value;
+}
+
+function oauthConfig(): OAuthConfig {
+  const githubId = nonEmpty("GITHUB_APP_CLIENT_ID");
+  const githubSecret = nonEmpty("GITHUB_APP_CLIENT_SECRET");
+  if ((githubId === null) !== (githubSecret === null)) {
+    throw new Error("GITHUB_APP_CLIENT_ID 和 GITHUB_APP_CLIENT_SECRET 要一起设");
+  }
+  const xId = nonEmpty("X_CLIENT_ID");
+  const xSecret = nonEmpty("X_CLIENT_SECRET");
+  if (xId === null && xSecret !== null) throw new Error("设了 X_CLIENT_SECRET 就要设 X_CLIENT_ID");
+  return {
+    github: githubId === null || githubSecret === null ? null : { clientId: githubId, clientSecret: githubSecret },
+    x: xId === null ? null : { clientId: xId, clientSecret: xSecret },
+    githubOauthBaseUrl: process.env["GITHUB_OAUTH_BASE_URL"] ?? DEFAULT_GITHUB_OAUTH_BASE_URL,
+    xOauthBaseUrl: process.env["X_OAUTH_BASE_URL"] ?? DEFAULT_X_OAUTH_BASE_URL,
   };
 }
 

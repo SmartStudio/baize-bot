@@ -8,12 +8,14 @@ import { AGENT_PATH, AgentHub } from "./agent/hub.js";
 import { GroupTurns } from "./agent/group-turn.js";
 import { ToolCrypto } from "./crypto.js";
 import type { Db } from "./db/client.js";
-import { CredentialCrypto } from "./credentials.js";
+import { AccountTokens, CredentialCrypto } from "./credentials.js";
 import {
   DEFAULT_GATEWAY_MODEL,
   DEFAULT_GITHUB_API_BASE_URL,
+  DEFAULT_GITHUB_OAUTH_BASE_URL,
   DEFAULT_UPSTREAM_BASE_URL,
   DEFAULT_X_API_BASE_URL,
+  DEFAULT_X_OAUTH_BASE_URL,
   credentialsKey,
   toolSecretKey,
   type RuntimeConfig,
@@ -70,6 +72,13 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   priceOutputPerM: 0,
   githubApiBaseUrl: DEFAULT_GITHUB_API_BASE_URL,
   xApiBaseUrl: DEFAULT_X_API_BASE_URL,
+  webBaseUrl: null,
+  oauth: {
+    github: null,
+    x: null,
+    githubOauthBaseUrl: DEFAULT_GITHUB_OAUTH_BASE_URL,
+    xOauthBaseUrl: DEFAULT_X_OAUTH_BASE_URL,
+  },
 };
 
 export async function startServer(options: StartOptions): Promise<RunningServer> {
@@ -82,6 +91,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
 
   // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
+  const endpoints = { ...config.oauth, githubApiBaseUrl: config.githubApiBaseUrl, xApiBaseUrl: config.xApiBaseUrl };
   const agents = new AgentHub({
     db: options.db,
     push: hub,
@@ -93,6 +103,14 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     silenceTimeoutMs: options.silenceTimeoutMs,
     toolCrypto,
     notifications,
+  });
+  // 刷新成功把过期账号带回 valid 和授权回调走同一套推送：账号页和 config.accounts 都要知道它又能用了。
+  const tokens = new AccountTokens(options.db, credentialCrypto, endpoints, async (account) => {
+    hub.push(account.ownerId, { type: "account_updated", account });
+    // 新令牌已经落库，这一趟请求用它照常走；重发 config 出错只影响电脑那边晚点知道，不能把请求变成 502。
+    await agents.sendConfig(account.ownerId).catch((error: unknown) => {
+      console.error(`账号 ${account.id} 刷新后重发 config 出错`, error);
+    });
   });
 
   const app = createApp({
@@ -107,6 +125,12 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       models: config.gatewayModels,
       upstreamBaseUrl: config.upstreamBaseUrl,
       upstreamApiKey: config.upstreamApiKey,
+    },
+    platformAccounts: {
+      crypto: credentialCrypto,
+      tokens,
+      endpoints,
+      webBaseUrl: () => config.webBaseUrl ?? publicBaseUrl ?? "",
     },
   });
   // 还没开始监听就不可能有电脑连上来，库里剩下的在线必然是上一个进程没关干净留下的。
@@ -151,7 +175,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     db: options.db,
     push: hub,
     notifications,
-    crypto: credentialCrypto,
+    tokens,
     bases: { githubApiBaseUrl: config.githubApiBaseUrl, xApiBaseUrl: config.xApiBaseUrl },
     computers: agents,
     ...options.publisher,

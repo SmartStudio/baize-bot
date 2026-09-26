@@ -3,6 +3,7 @@ import {
   ApprovePlanRequest,
   CreateAccountRequest,
   DecideDraftRequest,
+  OAuthPlatform,
   UpdateAccountRequest,
 } from "@baize/shared";
 import { accounts, createAccount, decideDraft, loginAccount, setAccountTier, settlePlan } from "../state.js";
@@ -61,6 +62,18 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
         push({ type: "account_updated", account: outcome.value.account });
         send(res, outcome.value.created ? 201 : 200, { account: outcome.value.account });
       }
+    }
+    return true;
+  }
+
+  // 占位：不去平台，直接当授权成功跳回首页。账号行等界面接上时再按真控制面补。
+  const oauthMatch = /^\/api\/oauth\/([^/]+)\/start$/.exec(path);
+  if (oauthMatch !== null && method === "GET") {
+    const platform = OAuthPlatform.safeParse(idOf(oauthMatch));
+    if (!platform.success) send(res, 404, { error: "这个平台不走授权登录" });
+    else {
+      res.writeHead(302, { location: `/?${new URLSearchParams({ oauth: platform.data, result: "connected" })}` });
+      res.end();
     }
     return true;
   }
