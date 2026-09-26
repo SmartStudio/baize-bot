@@ -244,7 +244,12 @@ function triggerText(body: MessageBody): string {
   return body.kind === "bot" ? body.text : "";
 }
 
-type ContextLine = { readonly messageId: Message["id"]; readonly from: string; readonly text: string };
+type ContextLine = {
+  readonly messageId: Message["id"];
+  readonly from: string;
+  readonly text: string;
+  readonly settled: boolean;
+};
 
 async function recentBodies(db: Db, groupId: GroupId, trigger: Message, includeRecent: boolean): Promise<Message[]> {
   const result = await listMessages(db, groupId, {
@@ -361,7 +366,9 @@ function summarize(
   members: readonly GroupBot[],
 ): ContextLine | null {
   const body = message.body;
-  const line = (from: string, text: string): ContextLine => ({ messageId: message.id, from, text });
+  // 只有 Bot 正在流的那条还会长，运行器的水位靠它决定下一轮要不要再拼一次。
+  const settled = !(body.kind === "bot" && body.streaming);
+  const line = (from: string, text: string): ContextLine => ({ messageId: message.id, from, text, settled });
   const who = (botId: BotId | null) => sender(botId, recipient, members);
   switch (body.kind) {
     case "user":

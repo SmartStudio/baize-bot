@@ -44,6 +44,8 @@ type Turn = {
   readonly members: readonly RoutingMember[];
   readonly send: (speaker: Speaker, includeRecent: boolean) => Promise<RunId | null>;
   readonly seen: Set<string>;
+  /** 说过正文的 run。运行器每个文字块一条消息，一个 run 的正文只算一句，不然一段带工具的长回复就撞上限。 */
+  readonly talked: Set<RunId>;
   readonly handoffs: Speaker[];
   readonly mentions: Speaker[];
   speakers: Speaker[];
@@ -86,6 +88,7 @@ export class GroupTurns {
       ...input,
       speakers: [...input.speakers, ...carried],
       seen: new Set(),
+      talked: new Set(),
       handoffs: [],
       mentions: [],
       round: 0,
@@ -169,7 +172,8 @@ export class GroupTurns {
     turn.summary = cost;
   }
 
-  async recordBotMessage(groupId: GroupId, runId: RunId, message: Message): Promise<void> {
+  /** 正文块同一个 run 只计一次；`mention` 工具每 @ 一次计一次，回路守卫靠它。 */
+  async recordBotMessage(groupId: GroupId, runId: RunId, message: Message, via: "text" | "mention"): Promise<void> {
     const turn = this.#turns.get(groupId);
     if (turn?.current?.runId !== runId || message.body.kind !== "bot" || turn.seen.has(message.id)) return;
     turn.seen.add(message.id);
@@ -178,6 +182,8 @@ export class GroupTurns {
       if (turn.mentions.some((speaker) => speaker.botId === botId)) continue;
       turn.mentions.push({ botId, trigger: message, reason: "mentioned" });
     }
+    if (via === "text" && turn.talked.has(runId)) return;
+    if (via === "text") turn.talked.add(runId);
     await this.#count(turn, runId);
   }
 

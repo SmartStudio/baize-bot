@@ -15,8 +15,11 @@ export type ChatRequest = {
   readonly messages: readonly ChatMessage[];
 };
 
+/** 流到这里先停住，等它 resolve 再往下流。用来在一句话说到一半时插话。 */
+export type Hold = () => Promise<void>;
+
 export type ScriptedTurn = {
-  readonly textChunks: readonly string[];
+  readonly textChunks: readonly (string | Hold)[];
   readonly toolCall?: { readonly id: string; readonly name: string; readonly args: Record<string, unknown> };
   readonly usage: { readonly input: number; readonly output: number };
 };
@@ -41,9 +44,9 @@ const chunk = (model: string, delta: unknown, finishReason: string | null): stri
     choices: [{ index: 0, delta, finish_reason: finishReason }],
   });
 
-function* frames(req: ChatRequest, turn: ScriptedTurn): Generator<string> {
+function* frames(req: ChatRequest, turn: ScriptedTurn): Generator<string | Hold> {
   yield chunk(req.model, { role: "assistant" }, null);
-  for (const text of turn.textChunks) yield chunk(req.model, { content: text }, null);
+  for (const text of turn.textChunks) yield typeof text === "string" ? chunk(req.model, { content: text }, null) : text;
   if (turn.toolCall === undefined) {
     yield chunk(req.model, {}, "stop");
   } else {
@@ -95,7 +98,10 @@ export async function startUpstream(
     const body = JSON.parse(await readBody(req)) as ChatRequest;
     requests.push(body);
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
-    for (const payload of frames(body, await script(body))) res.write(`data: ${payload}\n\n`);
+    for (const payload of frames(body, await script(body))) {
+      if (typeof payload === "string") res.write(`data: ${payload}\n\n`);
+      else await payload();
+    }
     res.end();
   };
 

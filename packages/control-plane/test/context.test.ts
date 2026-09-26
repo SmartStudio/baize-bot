@@ -4,6 +4,7 @@ import {
   ContentPlanId,
   CreateBotResponse,
   CreateGroupResponse,
+  MessageId,
   type BotId,
   type ControlToAgent,
   type GroupId,
@@ -275,6 +276,61 @@ describe("上下文里的卡写结论", () => {
       ).toEqual([2, 1]);
     } finally {
       job.close();
+    }
+  });
+});
+
+const settledFlags = (prompt: Prompt) => prompt.context.map((line) => ({ text: line.text, settled: line.settled }));
+
+describe("上下文行带是否定稿", () => {
+  it("还在流的 Bot 消息标没定稿，流完标定稿，别的行一律定稿", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { groupId, wenId } = await withTeammate(owner);
+      await say(owner.client, groupId, "@阿文 查下库存");
+      const wen = await nextPrompt(owner.agent);
+      const said = MessageId.parse(randomUUID());
+      const half = MessageId.parse(randomUUID());
+      const stream = (messageId: MessageId, delta: string, done: boolean) =>
+        owner.agent.send({ type: "bot_text", runId: wen.runId, botId: wenId, groupId, messageId, delta, done });
+      stream(said, "我先查一下库存。", true);
+      stream(half, "库存还剩三十", false);
+      for (;;) {
+        const pushed = await owner.push.next();
+        if (pushed.type === "message_delta" && pushed.messageId === half) break;
+      }
+
+      await say(owner.client, groupId, "@小服 看下排产");
+      const during = await nextPrompt(owner.agent);
+      stream(half, "件。", true);
+      owner.agent.send({
+        type: "run_done",
+        runId: wen.runId,
+        botId: wenId,
+        groupId,
+        steps: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      await waitFor(
+        async () =>
+          (await database.sql`SELECT 1 FROM runs WHERE id = ${wen.runId} AND ended_at IS NOT NULL`).length === 1,
+        "阿文的 run 收尾",
+      );
+      await say(owner.client, groupId, "@小服 再对一下");
+      const after = await nextPrompt(owner.agent);
+
+      expect(settledFlags(during), "阿文那句还在流，标没定稿").toEqual([
+        { text: "@阿文 查下库存", settled: true },
+        { text: "我先查一下库存。", settled: true },
+        { text: "库存还剩三十", settled: false },
+      ]);
+      expect(
+        settledFlags(after).find((line) => line.text.startsWith("库存还剩")),
+        "流完就标定稿",
+      ).toEqual({ text: "库存还剩三十件。", settled: true });
+    } finally {
+      owner.close();
     }
   });
 });

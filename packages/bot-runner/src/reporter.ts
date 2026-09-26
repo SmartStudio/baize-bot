@@ -1,4 +1,5 @@
-import { AgentToControl, type BotId, type GroupId, type MessageId, type RunId, type ToolView } from "@baize/shared";
+import { randomUUID } from "node:crypto";
+import { AgentToControl, type BotId, type GroupId, MessageId, type RunId, type ToolView } from "@baize/shared";
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 
 // 一次 prompt 的会话事件翻成上行报文。出边界前一律过 AgentToControl.parse，schema 不过就抛。
@@ -7,7 +8,6 @@ export interface RunIdentity {
   readonly runId: RunId;
   readonly botId: BotId;
   readonly groupId: GroupId;
-  readonly messageId: MessageId;
 }
 
 type ToolArgs = Record<string, unknown>;
@@ -74,6 +74,9 @@ export function reportRun(
   const views = new Map<string, ToolView>();
   let steps = 0;
   let lastModelError: string | null = null;
+  // 每个文字块一条群消息。text_end 之后这条不再长，工具之后的正文另起一条，
+  // 控制面的 streaming 因此就等于「这条还会长」，别的 Bot 的水位靠它。
+  let block: MessageId | null = null;
 
   const push = (message: AgentToControl): void => {
     send(AgentToControl.parse(message));
@@ -86,17 +89,14 @@ export function reportRun(
       return;
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      push({
-        type: "bot_text",
-        ...ids,
-        messageId: identity.messageId,
-        delta: event.assistantMessageEvent.delta,
-        done: false,
-      });
+      block ??= MessageId.parse(randomUUID());
+      push({ type: "bot_text", ...ids, messageId: block, delta: event.assistantMessageEvent.delta, done: false });
       return;
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
-      push({ type: "bot_text", ...ids, messageId: identity.messageId, delta: "", done: true });
+      if (block === null) return;
+      push({ type: "bot_text", ...ids, messageId: block, delta: "", done: true });
+      block = null;
       return;
     }
     if (event.type === "tool_execution_start") {

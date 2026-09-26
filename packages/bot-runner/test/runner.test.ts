@@ -698,6 +698,48 @@ describe("运行器跑一次 prompt", () => {
     expect(h.sideEffects).toEqual(["list_files:/work"]);
   });
 
+  it("说话、调工具、再说话是两条消息，头一条 done 之后不再长", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (req) =>
+        isFollowUpTurn(req)
+          ? { textChunks: ["有三个", "文件。"], usage: { input: 900, output: 12 } }
+          : {
+              textChunks: ["先看看", "目录。"],
+              toolCall: { id: "call-1", name: "list_files", args: { dir: "/work" } },
+              usage: { input: 800, output: 40 },
+            },
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "列目录"));
+
+    const texts = h.sent.flatMap((m) => (m.type === "bot_text" ? [m] : []));
+    const ids = [...new Set(texts.map((m) => m.messageId))];
+    expect(
+      ids.map((id) => texts.filter((m) => m.messageId === id).map((m) => (m.done ? "done" : m.delta))),
+      "工具前后各一条，各自以 done 收尾",
+    ).toEqual([
+      ["先看看", "目录。", "done"],
+      ["有三个", "文件。", "done"],
+    ]);
+    const firstDone = h.sent.findIndex((m) => m.type === "bot_text" && m.done);
+    expect(
+      h.sent.slice(firstDone + 1).filter((m) => m.type === "bot_text" && m.messageId === ids[0]),
+      "头一条 done 之后再没有它的报文",
+    ).toEqual([]);
+    expect(shape(h.sent)).toEqual([
+      "bot_text:false",
+      "bot_text:false",
+      "bot_text:true",
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_text:false",
+      "bot_text:false",
+      "bot_text:true",
+      "run_done",
+    ]);
+  });
+
   it("config 里没有的 botId 回 agent_error 和一次 run_done，带上这条 prompt 的群号", async () => {
     const h = await startHarness({ bots: ["bot-1"], script: scriptBy([]) });
 
@@ -1037,7 +1079,7 @@ describe("运行器的通信提示", () => {
       ...promptMessage("bot-1", "run-1", "请核对售后口径", { task, members }),
       group: { id: GroupId.parse("group-1"), number: "T-0007", title: "双十一大促", kind: "team" },
       origin: { kind: "bot", id: BotId.parse("bot-2"), name: "小销", tag },
-      context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排" }],
+      context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排", settled: true }],
     });
     const prompt = requests[0]?.messages.find((message) => message.role === "user")?.content;
     expect(prompt).toEqual([
@@ -1511,7 +1553,7 @@ describe("运行器的主题任务工具", () => {
 
     await h.runner.prompt({
       ...promptMessage("bot-1", "run-1", "按卡片往下做", { task: topicTask(), members: TWO_MEMBERS }),
-      context: [{ messageId: MessageId.parse("msg-context-2"), from: "小黑", text: "客户刚又催了一遍" }],
+      context: [{ messageId: MessageId.parse("msg-context-2"), from: "小黑", text: "客户刚又催了一遍", settled: true }],
     });
 
     const firstTurn = seen.firstTurn.join("");
@@ -1758,7 +1800,7 @@ describe("运行器的交接工具", () => {
 
     await h.runner.prompt({
       ...promptMessage("bot-2", "run-1", body, { task: topicTask(), members: TWO_MEMBERS, handoffId: "handoff-1" }),
-      context: [{ messageId: MessageId.parse("msg-context-3"), from: "小白", text: "客户刚又催了一遍" }],
+      context: [{ messageId: MessageId.parse("msg-context-3"), from: "小白", text: "客户刚又催了一遍", settled: true }],
     });
 
     const firstTurn = seen.firstTurn.join("");
@@ -3961,7 +4003,7 @@ describe("运行器的主助理", () => {
       ...promptMessage("bot-1", "run-1", "请核对售后口径", { task: topicTask(), members: CHIEF_MEMBERS }),
       reason: "chief",
       group: { id: GroupId.parse("group-1"), number: "T-2482", title: "报价协同", kind: "team" },
-      context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排" }],
+      context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排", settled: true }],
     });
 
     // 下面两段是加主助理之前的运行器实际发出的首轮请求，原样抄下来；P1-4 只在系统提示里加了起草规则一段。
@@ -5562,6 +5604,7 @@ const chatLine = (group: string, n: number, from = n % 2 === 0 ? "小黑" : "用
   messageId: MessageId.parse(`${group}-msg-${n}`),
   from,
   text: `第 ${n} 句：客户那边又问了一遍交期和报价口径`,
+  settled: true,
 });
 const chatLines = (group: string, first: number, last: number): ContextLine[] =>
   Array.from({ length: last - first + 1 }, (_, i) => chatLine(group, first + i));
@@ -5749,14 +5792,17 @@ describe("群聊上下文按水位增量", () => {
     expect(contextOf(prompts[1]), "触发和队友那句上一轮都看过了").toBe(rendered([mine]));
   });
 
-  it("旧会话里只记了上下文末条的水位照样认，认不出的当没有水位", async () => {
+  it("旧格式的水位和认不出的水位都当没有，整批照拼", async () => {
     const { prompts, script } = promptsSeen();
     const first = await startHarness({ bots: ["bot-1"], script });
     await first.runner.prompt(
       withContext("run-1", "第一次", chatLines("g1", 1, 20), "group-1", MessageId.parse("g1-msg-21")),
     );
     await first.runner.stop();
-    expect(rewriteWatermarks(first.dataDir, { messageId: "g1-msg-20" }), "改的是真有的水位").toBeGreaterThan(0);
+    expect(
+      rewriteWatermarks(first.dataDir, { messageId: "g1-msg-21", contextEnd: "g1-msg-20" }),
+      "改的是真有的水位",
+    ).toBeGreaterThan(0);
 
     const second = await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, script });
     await second.runner.prompt(
@@ -5770,8 +5816,70 @@ describe("群聊上下文按水位增量", () => {
       withContext("run-3", "坏水位之后", chatLines("g1", 5, 24), "group-1", MessageId.parse("g1-msg-25")),
     );
 
-    expect(contextOf(prompts[1]), "旧格式 { messageId } 照旧从它之后拼").toBe(rendered(chatLines("g1", 21, 22)));
+    expect(contextOf(prompts[1]), "旧格式 { messageId, contextEnd } 当没有水位，20 条全拼").toBe(
+      rendered(chatLines("g1", 3, 22)),
+    );
     expect(contextOf(prompts[2]), "认不出的水位当没有，20 条全拼").toBe(rendered(chatLines("g1", 5, 24)));
+  });
+
+  it("水位不越过没定稿的行：下一轮给那条的整句，它后面上一轮看过的行和触发消息不再拼", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+    const half = { ...chatLine("g1", 4, "小采 · 采购"), text: "库存我先查一下，", settled: false };
+    const after = { ...chatLine("g1", 5, "你"), text: "@小采 顺便看下报价" };
+    const trigger = { ...chatLine("g1", 6, "你"), text: "@bot-1 你看下排产" };
+    const answer = { ...chatLine("g1", 7, "bot-1"), text: "收到。" };
+
+    await h.runner.prompt(
+      withContext("run-1", trigger.text, [...chatLines("g1", 1, 3), half, after], "group-1", trigger.messageId),
+    );
+    await h.runner.prompt(
+      withContext(
+        "run-2",
+        "@bot-1 再对一下",
+        [
+          ...chatLines("g1", 1, 3),
+          { ...half, text: "库存我先查一下，还剩 30 件。", settled: true },
+          after,
+          trigger,
+          answer,
+        ],
+        "group-1",
+        MessageId.parse("g1-msg-8"),
+      ),
+    );
+
+    expect(contextOf(prompts[0]), "这一轮照样看得到半截").toBe(rendered([...chatLines("g1", 1, 3), half, after]));
+    expect(contextOf(prompts[1]), "整句补上，看过的「顺便看下报价」和触发都不重来").toBe(
+      "小采 · 采购：库存我先查一下，还剩 30 件。\nbot-1：收到。",
+    );
+  });
+
+  it("没定稿又一个字没长的行不重复拼，长了再拼一次", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+    const stale = { ...chatLine("g1", 2, "小采 · 采购"), text: "断在半截", settled: false };
+    const turn = (n: number) => ({ ...chatLine("g1", n, "你"), text: `@bot-1 第 ${n} 句` });
+    const answer = (n: number) => ({ ...chatLine("g1", n, "bot-1"), text: "收到。" });
+
+    await h.runner.prompt(withContext("run-1", turn(3).text, [chatLine("g1", 1), stale], "group-1", turn(3).messageId));
+    await h.runner.prompt(
+      withContext("run-2", turn(5).text, [chatLine("g1", 1), stale, turn(3), answer(4)], "group-1", turn(5).messageId),
+    );
+    await h.runner.prompt(
+      withContext(
+        "run-3",
+        turn(7).text,
+        [chatLine("g1", 1), { ...stale, text: "断在半截，接着说完了" }, turn(3), answer(4), turn(5), answer(6)],
+        "group-1",
+        turn(7).messageId,
+      ),
+    );
+
+    expect(contextOf(prompts[1]), "老半截没变，只拼上一轮的回复").toBe(rendered([answer(4)]));
+    expect(contextOf(prompts[2]), "老半截长了，连同上一轮的回复一起拼").toBe(
+      rendered([{ ...stale, text: "断在半截，接着说完了" }, answer(6)]),
+    );
   });
 
   it("20 条历史的群连发五轮，第五轮的上下文只含一轮的新消息", async () => {

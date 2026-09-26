@@ -1,10 +1,8 @@
-import { randomUUID } from "node:crypto";
 import {
   CreateBotResponse,
   CreateGroupResponse,
   GroupListResponse,
   MessageListResponse,
-  MessageId,
   type Bot,
   type BotId,
   type Group,
@@ -233,13 +231,12 @@ describe("上行 handoff", () => {
       const runId = await runFor(team, "@小销 开个头");
       for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) {
         team.agent.send({
-          type: "bot_text",
+          type: "mention",
           runId,
           botId: team.sales.id,
           groupId: team.group.id,
-          messageId: MessageId.parse(randomUUID()),
-          delta: `第 ${i + 1} 条`,
-          done: true,
+          targetBotId: team.service.id,
+          text: `@小服 第 ${i + 1} 条`,
         });
       }
       for (;;) {
@@ -275,13 +272,12 @@ describe("上行 handoff", () => {
       const runId = await runFor(team, "@小销 开个头");
       for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) {
         team.agent.send({
-          type: "bot_text",
+          type: "mention",
           runId,
           botId: team.sales.id,
           groupId: team.group.id,
-          messageId: MessageId.parse(randomUUID()),
-          delta: `第 ${i + 1} 条`,
-          done: true,
+          targetBotId: team.service.id,
+          text: `@小服 第 ${i + 1} 条`,
         });
       }
       for (;;) {

@@ -233,7 +233,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     delta,
     done: event.done,
   });
-  if (event.done && updated !== null) await deps.groupTurns.recordBotMessage(groupId, event.runId, updated);
+  if (event.done && updated !== null) await deps.groupTurns.recordBotMessage(groupId, event.runId, updated, "text");
 }
 
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
@@ -338,11 +338,15 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   }
 }
 
+// 一个 run 按文字块分成好几条，先说了可见的话再回 (pass) 的 run 仍是回了话，花费卡要留。
 function runPassed(runId: RunId): boolean {
+  let passed = false;
   for (const prefix of textPrefixes.values()) {
-    if (prefix.runId === runId && prefix.kind === "pass") return true;
+    if (prefix.runId !== runId) continue;
+    if (prefix.kind === "visible") return false;
+    if (prefix.kind === "pass") passed = true;
   }
-  return false;
+  return passed;
 }
 
 const ERROR_REASONS: Record<AgentError["code"], string> = {
@@ -485,7 +489,7 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
     streaming: false,
     mentions: [event.targetBotId],
   });
-  await deps.groupTurns.recordBotMessage(groupId, event.runId, said);
+  await deps.groupTurns.recordBotMessage(groupId, event.runId, said, "mention");
 }
 
 /**

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import {
   type AgentToControl,
@@ -6,7 +5,6 @@ import {
   type ComputerId,
   type ControlToAgent,
   type GroupId,
-  MessageId,
   type RunId,
   type ToolConnectionConfig,
 } from "@baize/shared";
@@ -565,7 +563,6 @@ export function createRunner(config: RunnerConfig): Runner {
         runId: message.runId,
         botId: message.botId,
         groupId: message.groupId,
-        messageId: MessageId.parse(randomUUID()),
       },
       task: message.task,
       members: message.members,

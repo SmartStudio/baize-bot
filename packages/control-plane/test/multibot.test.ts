@@ -157,6 +157,18 @@ function reply(team: Team, runId: RunId, botId: BotId, text: string, groupId: Gr
   });
 }
 
+/** 小销在这个 run 里 @ 小服说一句。@ 报文每条单算一句。 */
+function mentionService(team: Team, runId: RunId, text: string): void {
+  team.agent.send({
+    type: "mention",
+    runId,
+    botId: team.sales.id,
+    groupId: team.group.id,
+    targetBotId: team.service.id,
+    text,
+  });
+}
+
 function item(text: string, done: boolean, ownerBotId: BotId | null): ChecklistItem {
   return { text, done, ownerBotId };
 }
@@ -580,6 +592,51 @@ describe("多 Bot 群派活", () => {
     }
   });
 
+  it("一个 run 先说了可见的话、调了工具、再回 (pass)，花费卡照留，(pass) 那块不显示", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.group.id, "@小销 看看库存");
+      reply(team, runId, team.sales.id, "我查一下库存，");
+      team.agent.send({
+        type: "bot_tool_call",
+        runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        callId: "stock-pwd",
+        tool: "bash",
+        view: { kind: "mcp", server: "", tool: "bash", params: [] },
+        status: "ok",
+        durationMs: 0,
+      });
+      reply(team, runId, team.sales.id, "(pass) 没什么要补的");
+      team.agent.send({
+        type: "run_done",
+        runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        steps: 2,
+        inputTokens: 1_000_000,
+        outputTokens: 0,
+      });
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.current === null) break;
+      }
+
+      const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
+      expect(
+        bodies.filter((body) => body.kind === "bot").map((body) => (body.kind === "bot" ? body.text : "")),
+        "只有可见那块落成 Bot 消息",
+      ).toEqual(["我查一下库存，"]);
+      expect(
+        bodies.filter((body) => body.kind === "cost"),
+        "有可见正文的 run 不算 pass，花费卡照留",
+      ).toEqual([{ kind: "cost", runId, botId: team.sales.id, steps: 2, amount: 3 }]);
+    } finally {
+      team.close();
+    }
+  });
+
   it("用户中途说话换 epoch，旧 run 落消息但不再推进", async () => {
     const team = await makeTeam();
     try {
@@ -924,7 +981,7 @@ describe("上行 mention", () => {
     const team = await makeTeam();
     try {
       const runId = await runFor(team, team.group.id, "@小销 开个头");
-      for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) reply(team, runId, team.sales.id, `第 ${i + 1} 条`);
+      for (let i = 0; i < BOT_MESSAGE_LIMIT; i += 1) mentionService(team, runId, `@小服 第 ${i + 1} 条`);
       await waitForSystemPush(team, MENTION_LOOP_NOTICE);
       finish(team, runId, team.sales.id);
       const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
@@ -932,6 +989,51 @@ describe("上行 mention", () => {
       expect(bodies.filter((body) => body.kind === "system" && body.text === MENTION_LOOP_NOTICE)).toHaveLength(1);
       await say(team, team.group.id, "@小服 新一轮");
       expect((await team.agent.expect("prompt")).botId).toBe(team.service.id);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("一个 run 的正文按文字块分成十几条，合起来只算一句，最后一块里 @ 的队友照样派到", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.group.id, "@小销 开个头");
+      for (let i = 0; i < BOT_MESSAGE_LIMIT + 2; i += 1) reply(team, runId, team.sales.id, `第 ${i + 1} 段`);
+      reply(team, runId, team.sales.id, "@小服 你接着看");
+      finish(team, runId, team.sales.id);
+
+      expect((await team.agent.expect("prompt")).botId, "没被当成说满十句停下").toBe(team.service.id);
+      const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
+      expect(
+        bodies.filter((body) => body.kind === "bot"),
+        "每一块都落了",
+      ).toHaveLength(BOT_MESSAGE_LIMIT + 3);
+      expect(bodies.filter((body) => body.kind === "system" && body.text === MENTION_LOOP_NOTICE)).toEqual([]);
+    } finally {
+      team.close();
+    }
+  });
+  it("工具之后那块正文里 @ 了队友，照样派到队友", async () => {
+    const team = await makeTeam();
+    try {
+      const runId = await runFor(team, team.group.id, "@小销 开个头");
+      reply(team, runId, team.sales.id, "我先看一下，");
+      team.agent.send({
+        type: "bot_tool_call",
+        runId,
+        botId: team.sales.id,
+        groupId: team.group.id,
+        callId: "look-pwd",
+        tool: "bash",
+        view: { kind: "mcp", server: "", tool: "bash", params: [] },
+        status: "ok",
+        durationMs: 0,
+      });
+      reply(team, runId, team.sales.id, "@小服 你接着看");
+      finish(team, runId, team.sales.id);
+
+      const next = await team.agent.expect("prompt");
+      expect(next.botId, "工具之后那块是新消息，里面的 @ 照样解析派活").toBe(team.service.id);
     } finally {
       team.close();
     }

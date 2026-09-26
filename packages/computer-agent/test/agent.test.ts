@@ -47,6 +47,8 @@ interface RunnerCalls {
   readonly paused: BotId[];
   readonly resumed: BotId[];
   readonly prompts: RunId[];
+  /** 运行器拿到的每条 prompt 的 context，parse 之后的样子。 */
+  readonly promptContexts: Array<Parameters<ReturnType<RunnerFactory>["prompt"]>[0]["context"]>;
   /** 每次建运行器时拿到的 config.skills，原样记下，undefined 也记。 */
   readonly configSkills: Array<readonly Skill[] | undefined>;
   /** 已有运行器收到的配置更新，原样记下。 */
@@ -73,6 +75,7 @@ function runnerOf(
     },
     async prompt(message) {
       calls.prompts.push(message.runId);
+      calls.promptContexts.push(message.context);
       config.send({
         type: "bot_text",
         runId: message.runId,
@@ -247,6 +250,7 @@ function spawnAgent(
     paused: [],
     resumed: [],
     prompts: [],
+    promptContexts: [],
     configSkills: [],
     appliedConfigs: [],
   };
@@ -394,6 +398,22 @@ describe("电脑代理连控制面", () => {
     expect(reply.runId).toBe("run-1");
     expect(reply.botId).toBe("bot-1");
     expect(reply.groupId).toBe("group-1");
+  });
+
+  it("旧控制面发来的 context 行不带 settled，prompt 照样接住跑完，这些行按定稿交给运行器", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify(configMessage));
+    socket.send(
+      JSON.stringify({ ...promptMessage, context: [{ messageId: "message-0", from: "用户", text: "昨天那单呢" }] }),
+    );
+
+    const reply = await server.waitForMessage("bot_text", 1, 3000);
+    expect(reply.runId, "没被当坏报文丢掉").toBe("run-1");
+    expect(runnerCalls().promptContexts, "缺省的 settled 当定稿").toEqual([
+      [{ messageId: "message-0", from: "用户", text: "昨天那单呢", settled: true }],
+    ]);
   });
 
   it("config 里的 skills 原样交给运行器，没带就是 undefined", async () => {
@@ -1056,6 +1076,7 @@ describe("电脑代理连控制面", () => {
             paused: [],
             resumed: [],
             prompts: [],
+            promptContexts: [],
             configSkills: [],
             appliedConfigs: [],
           }),
