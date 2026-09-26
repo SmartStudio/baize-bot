@@ -4845,6 +4845,157 @@ describe("运行器的草稿", () => {
   });
 });
 
+type ContextLine = PromptMessage["context"][number];
+const chatLine = (group: string, n: number, from = n % 2 === 0 ? "小黑" : "用户"): ContextLine => ({
+  messageId: MessageId.parse(`${group}-msg-${n}`),
+  from,
+  text: `第 ${n} 句：客户那边又问了一遍交期和报价口径`,
+});
+const chatLines = (group: string, first: number, last: number): ContextLine[] =>
+  Array.from({ length: last - first + 1 }, (_, i) => chatLine(group, first + i));
+const rendered = (context: readonly ContextLine[]): string =>
+  context.map((entry) => `${entry.from}：${entry.text}`).join("\n");
+const withContext = (runId: string, text: string, context: readonly ContextLine[], groupId = "group-1") => ({
+  ...promptMessage("bot-1", runId, text, { groupId }),
+  context: [...context],
+});
+
+const userText = (content: unknown): string =>
+  typeof content === "string"
+    ? content
+    : (content as ReadonlyArray<{ type: string; text?: string }>)
+        .filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("");
+/** 每次 prompt 头一轮请求里的最后一条用户消息，就是这次 composePrompt 的输出。 */
+const promptsSeen = () => {
+  const prompts: string[] = [];
+  const script = (req: ChatCompletionRequest): ScriptedTurn => {
+    const last = req.messages.findLast((message) => message.role === "user");
+    prompts.push(userText(last?.content));
+    return { textChunks: ["收到。"], usage: { input: 100, output: 3 } };
+  };
+  return { prompts, script };
+};
+const contextOf = (prompt: string | undefined): string | null =>
+  /群里刚才说的：\n([\s\S]*?)\n\n当前这条：/.exec(prompt ?? "")?.[1] ?? null;
+
+describe("群聊上下文按水位增量", () => {
+  it("第二次 prompt 只拼上次之后的消息", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-1", "第一次", chatLines("g1", 1, 20)));
+    await h.runner.prompt(withContext("run-2", "第二次", chatLines("g1", 4, 23)));
+
+    expect(contextOf(prompts[0]), "头一次没有水位，20 条全拼").toBe(rendered(chatLines("g1", 1, 20)));
+    expect(contextOf(prompts[1]), "第二次只拼水位 g1-msg-20 之后的三条").toBe(rendered(chatLines("g1", 21, 23)));
+  });
+
+  it("会话目录清空后第一次 prompt 用上全部 20 条", async () => {
+    const { prompts, script } = promptsSeen();
+    const first = await startHarness({ bots: ["bot-1"], script });
+    await first.runner.prompt(withContext("run-1", "第一次", chatLines("g1", 1, 20)));
+    await first.runner.stop();
+
+    const second = await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, script });
+    await second.runner.prompt(withContext("run-2", "换了运行器", chatLines("g1", 3, 22)));
+    await second.runner.stop();
+
+    rmSync(groupDir(first.dataDir, "bot-1", "group-1"), { recursive: true, force: true });
+    const third = await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, script });
+    await third.runner.prompt(withContext("run-3", "目录清空以后", chatLines("g1", 5, 24)));
+
+    expect(contextOf(prompts[1]), "换运行器续用同一份会话，水位跟着 JSONL 回来").toBe(
+      rendered(chatLines("g1", 21, 22)),
+    );
+    expect(contextOf(prompts[2]), "会话目录清空，水位跟着没了，这次的 20 条全拼").toBe(
+      rendered(chatLines("g1", 5, 24)),
+    );
+  });
+
+  it("两个群各自一份水位，互不影响", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-1", "甲群第一次", chatLines("ga", 1, 20), "group-a"));
+    await h.runner.prompt(withContext("run-2", "乙群第一次", chatLines("gb", 1, 20), "group-b"));
+    await h.runner.prompt(withContext("run-3", "甲群第二次", chatLines("ga", 3, 22), "group-a"));
+
+    expect(contextOf(prompts[1]), "乙群头一次，甲群的水位不算数").toBe(rendered(chatLines("gb", 1, 20)));
+    expect(contextOf(prompts[2]), "甲群接着自己的水位 ga-msg-20，乙群那条水位不串过来").toBe(
+      rendered(chatLines("ga", 21, 22)),
+    );
+  });
+
+  it("水位之后没有新消息时不出群里刚才说的这一段", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-1", "第一次", chatLines("g1", 1, 5)));
+    await h.runner.prompt(withContext("run-2", "第二次", chatLines("g1", 1, 5)));
+
+    expect(prompts[1], "拼出来是空的，整段连标题都不出").not.toContain("群里刚才说的");
+    expect(prompts[1], "当前这条照常拼").toContain("当前这条：\n用户：第二次");
+  });
+
+  it("水位不在这次 20 条里时拼全部", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-1", "第一次", chatLines("g1", 1, 20)));
+    await h.runner.prompt(withContext("run-2", "隔了二十多条", chatLines("g1", 22, 41)));
+
+    expect(contextOf(prompts[1]), "水位 g1-msg-20 已滑出窗口，中间断了，20 条全拼").toBe(
+      rendered(chatLines("g1", 22, 41)),
+    );
+  });
+
+  it("prompt 抛错不记水位，这批下次照拼", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-0", "先建会话", chatLines("g1", 1, 5)));
+    botSessionProbe.promptError = new Error("模拟 prompt 预检失败");
+    try {
+      await h.runner.prompt(withContext("run-1", "抛错这一次", chatLines("g1", 1, 20)));
+    } finally {
+      botSessionProbe.promptError = null;
+    }
+    await h.runner.prompt(withContext("run-2", "之后", chatLines("g1", 3, 22)));
+
+    expect(contextOf(prompts.at(-1)), "抛错那次没进会话，第 6 到 20 条不能被水位跳过").toBe(
+      rendered(chatLines("g1", 6, 22)),
+    );
+  });
+
+  it("20 条历史的群连发五轮，第五轮的上下文只含一轮的新消息", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    const log = chatLines("g1", 1, 20);
+    let lastWindow: ContextLine[] = [];
+    for (let round = 1; round <= 5; round += 1) {
+      const next = log.length + 1;
+      const trigger = { ...chatLine("g1", next, "用户"), text: `第 ${round} 轮：这一轮的活怎么排` };
+      lastWindow = log.slice(-20);
+      await h.runner.prompt(withContext(`run-${round}`, trigger.text, lastWindow));
+      log.push(trigger, { ...chatLine("g1", next + 1, "bot-1"), text: "收到。" });
+    }
+
+    const contexts = prompts.map(contextOf);
+    const lengths = contexts.map((context) => context?.length ?? 0);
+    expect(
+      contexts.map((context) => context?.split("\n").length ?? 0),
+      "头一轮 20 条全拼，之后每轮只拼上一轮的触发消息和回复",
+    ).toEqual([20, 2, 2, 2, 2]);
+    const fullWindow = rendered(lastWindow).length;
+    expect(lengths[4], `五轮上下文字数 ${lengths.join(" / ")}，第五轮要不到整窗 ${fullWindow} 的三分之一`).toBeLessThan(
+      fullWindow / 3,
+    );
+  });
+});
+
 describe("落盘位置", () => {
   it("Pi 的落盘全在钉死的临时目录里，~/.pi 下一个新文件都没有", () => {
     // 先证明这个探针能看见新文件，否则下面那条空断言是空的。

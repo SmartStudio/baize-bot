@@ -20,6 +20,7 @@ import { reportRun } from "./reporter.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
+import { contextSince, readWatermark, recordWatermark } from "./watermark.js";
 
 export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
 export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -175,7 +176,11 @@ const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
 
 // 群标签之后先放任务卡：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
 // 群里的闲聊会把它挤远，模型更容易照着最后几句走。
-function composePrompt(message: PromptMessage, accounts: ConfigMessage["accounts"]): string {
+function composePrompt(
+  message: PromptMessage,
+  context: readonly PromptMessage["context"][number][],
+  accounts: ConfigMessage["accounts"],
+): string {
   const sections: string[] = [
     message.group.kind === "solo"
       ? "[这是你和用户的单聊]"
@@ -212,8 +217,8 @@ function composePrompt(message: PromptMessage, accounts: ConfigMessage["accounts
   if (message.handoffId !== undefined) {
     sections.push(`交接报文：\n${message.text}\n\n先调用 accept_handoff 确认接手，再照着上面的下一步往下做。`);
   }
-  if (message.context.length > 0) {
-    sections.push(`群里刚才说的：\n${message.context.map((line) => `${line.from}：${line.text}`).join("\n")}`);
+  if (context.length > 0) {
+    sections.push(`群里刚才说的：\n${context.map((line) => `${line.from}：${line.text}`).join("\n")}`);
   }
   if (message.handoffId === undefined) {
     const origin = message.origin;
@@ -564,7 +569,12 @@ export function createRunner(config: RunnerConfig): Runner {
           else config.send(outgoing);
         },
       );
-      await session.prompt(composePrompt(message, desiredConfig(bot)!.accounts));
+      const watermark = readWatermark(session.sessionManager);
+      await session.prompt(
+        composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts),
+      );
+      // prompt 抛错就不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
+      recordWatermark(session.sessionManager, message.context, watermark);
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {
