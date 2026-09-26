@@ -1,5 +1,6 @@
 import type { Bot, BotId } from "@baize/shared";
 import { reduceApprovals } from "./approvals.js";
+import { EMPTY_CONTENT, reduceContent } from "./content.js";
 import { reduceGroups } from "./groups.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
@@ -47,6 +48,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     tools,
     settings,
     usage,
+    content: EMPTY_CONTENT,
     todayVersion: 0,
   };
 };
@@ -68,5 +70,5 @@ export const reduce = (state: AppState, action: Action): AppState => {
   const approvals = reduceApprovals(groups, action);
   const routines = reduceRoutines(approvals, action);
   const skills = reduceSkills(routines, action);
-  return reduceSettings(skills, action);
+  return reduceContent(reduceSettings(skills, action), action);
 };

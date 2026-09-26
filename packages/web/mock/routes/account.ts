@@ -1,37 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { ComputerListResponse, ComputerTokenResponse, Settings, UpdateSettingsRequest } from "@baize/shared";
-import { at, settings, usageOf, user } from "../state.js";
+import { ComputerTokenResponse, Settings, UpdateSettingsRequest } from "@baize/shared";
+import { computersOf, settings, usageOf, user } from "../state.js";
 import { defined, readBody, send, type Route } from "./http.js";
 
 export const accountRoutes: Route = async ({ req, res, path, method }) => {
   if (method === "GET" && path === "/api/me") send(res, 200, { user });
   else if (method === "GET" && path === "/api/computers") {
-    send(
-      res,
-      200,
-      ComputerListResponse.parse({
-        computers: [
-          {
-            id: "cmp_local",
-            ownerId: user.id,
-            kind: "local",
-            status: "online",
-            host: null,
-            idleSince: null,
-            lastSeenAt: at(1),
-          },
-          {
-            id: "cmp_remote",
-            ownerId: user.id,
-            kind: "remote",
-            status: "online",
-            host: "remote.baize.dev",
-            idleSince: null,
-            lastSeenAt: at(1),
-          },
-        ],
-      }),
-    );
+    send(res, 200, computersOf());
   } else if (method === "POST" && path === "/api/computers/local") {
     send(res, 200, ComputerTokenResponse.parse({ computerId: "cmp_local", token: randomUUID() }));
   } else if (method === "GET" && path === "/api/usage") send(res, 200, usageOf());

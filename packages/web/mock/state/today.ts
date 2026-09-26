@@ -9,6 +9,7 @@ import {
   ContentPlanId,
   Draft,
   DraftId,
+  type DraftContent,
   GroupId,
   Publication,
   PublicationId,
@@ -25,6 +26,7 @@ import {
   drafts,
   groupIdByBotId,
   groups,
+  messagesByGroupId,
   nextSuffix,
   plans,
   publications,
@@ -46,17 +48,29 @@ const assistantGroupIdOf = (): GroupId | null => {
   return groupId === undefined ? null : groupIdOf(groupId);
 };
 
-const accountOf = (id: string, platform: Account["platform"], handle: string, tier: Account["tier"]): Account =>
+const accountOf = (
+  id: string,
+  platform: Account["platform"],
+  handle: string,
+  tier: Account["tier"],
+  where: { computerId: string; login: Account["login"] } = { computerId: "cmp_local", login: "expired" },
+): Account =>
   Account.parse({
     id: AccountId.parse(id),
     ownerId: user.id,
-    computerId: ComputerId.parse("cmp_local"),
+    computerId: ComputerId.parse(where.computerId),
     platform,
     handle,
     tier,
-    login: "expired",
+    login: where.login,
     createdAt: at(-120),
   });
+
+const hoursFromNow = (hours: number): string => {
+  const date = new Date(Date.now() + hours * 3_600_000);
+  date.setMinutes(0, 0, 0);
+  return date.toISOString();
+};
 
 const draftOf = (input: {
   id: string;
@@ -69,6 +83,7 @@ const draftOf = (input: {
   text: string;
   status: Draft["status"];
   scheduledAt?: string | null;
+  content?: DraftContent;
 }): Draft =>
   Draft.parse({
     id: DraftId.parse(input.id),
@@ -77,7 +92,7 @@ const draftOf = (input: {
     planId: input.planId === undefined || input.planId === null ? null : ContentPlanId.parse(input.planId),
     accountId: AccountId.parse(input.accountId),
     platform: input.platform,
-    content: { kind: "post", title: input.title, text: input.text, images: [], github: null },
+    content: input.content ?? { kind: "post", title: input.title, text: input.text, images: [], github: null },
     scheduledAt: input.scheduledAt === undefined ? null : input.scheduledAt,
     status: input.status,
     edits: [],
@@ -118,11 +133,18 @@ const approvalOf = (input: { id: string; groupId: string; botId: string; runId: 
     grantId: null,
   });
 
-const publicationOf = (input: {
+const POST_URL: Record<Publication["platform"], (key: string) => string> = {
+  x: (key) => `https://x.com/baize/status/${key}`,
+  xiaohongshu: (key) => `https://www.xiaohongshu.com/explore/${key}`,
+  github: (key) => `https://github.com/baize-tech/x3/issues/${key.replace(/\D/g, "") || "1"}`,
+};
+
+export const publicationOf = (input: {
   id: string;
   draftId: string;
   groupId: string;
   accountId: string;
+  platform?: Publication["platform"];
   publishedAt?: string;
 }): Publication =>
   Publication.parse({
@@ -130,8 +152,8 @@ const publicationOf = (input: {
     draftId: DraftId.parse(input.draftId),
     groupId: groupIdOf(input.groupId),
     accountId: AccountId.parse(input.accountId),
-    platform: "x",
-    url: `https://x.com/baize/status/${input.id.replace("pub_", "")}`,
+    platform: input.platform ?? "x",
+    url: POST_URL[input.platform ?? "x"](input.id.replace("pub_", "")),
     publishedAt: input.publishedAt ?? at(-30),
   });
 
@@ -149,43 +171,124 @@ const seedFull = (): void => {
   putPending(accountX, at(-70));
   putPending(accountXhs, at(-60));
 
-  const planDraft = draftOf({
-    id: "draft_today_content",
-    groupId: "grp_sales",
-    botId: "bot_sales",
-    planId: "plan_today_content",
-    accountId: accountX.id,
-    platform: "x",
-    title: "X3 交付进度：从排产到现场",
-    text: "记录一台 X3 从确认订单到交付现场的真实协作过程。",
+  const accountGithub = accountOf("acc_today_github", "github", "baize-tech", "confirm_publish", {
+    computerId: "cmp_remote",
+    login: "valid",
+  });
+  const accountDiary = accountOf("acc_today_diary", "xiaohongshu", "白泽工厂日记", "confirm_publish", {
+    computerId: "cmp_remote",
+    login: "valid",
+  });
+  accounts.set(accountGithub.id, accountGithub);
+  accounts.set(accountDiary.id, accountDiary);
+
+  // 故意不按排期顺序登记，卡片自己按 scheduledAt 排。
+  const weekly = [
+    {
+      id: "draft_today_plan_3",
+      account: accountGithub,
+      hours: 50,
+      title: "X3 v1.2 更新说明",
+      text: "X3 v1.2 发布：排产看板支持按产线筛选，交期预估误差降到半天以内。",
+      github: { repo: "baize-tech/x3", as: "discussion" as const },
+    },
+    {
+      id: "draft_today_plan_1",
+      account: accountX,
+      hours: 20,
+      title: "X3 上线苏州工厂",
+      text: "X3 这周在苏州工厂上线，第一天就把排产会从两小时缩到二十分钟。",
+      github: null,
+    },
+    {
+      id: "draft_today_plan_5",
+      account: accountDiary,
+      hours: 98,
+      title: "车间主任的一周",
+      text: "跟着车间主任过了一周：早会、巡线、对交期，哪些事交给 X3 了。",
+      github: null,
+    },
+    {
+      id: "draft_today_plan_2",
+      account: accountDiary,
+      hours: 30,
+      title: "X3 排产看板上手笔记",
+      text: "三张图看懂 X3 排产看板：订单、产线、交期一屏对齐。",
+      github: null,
+    },
+    {
+      id: "draft_today_plan_4",
+      account: accountX,
+      hours: 74,
+      title: "客户问答合集",
+      text: "这周客户问得最多的三个问题：能不能接飞书、数据放哪、多久能上线。",
+      github: null,
+    },
+  ];
+  for (const item of weekly) {
+    const draft = draftOf({
+      id: item.id,
+      groupId: "grp_assistant",
+      botId: "bot_assistant",
+      planId: "plan_today_content",
+      accountId: item.account.id,
+      platform: item.account.platform,
+      title: item.title,
+      text: item.text,
+      status: "pending",
+      scheduledAt: hoursFromNow(item.hours),
+      content: { kind: "post", title: item.title, text: item.text, images: [], github: item.github },
+    });
+    drafts.set(draft.id, draft);
+  }
+  const weeklyPlan = planOf({
+    id: "plan_today_content",
+    groupId: "grp_assistant",
+    botId: "bot_assistant",
+    title: "本周推广计划",
+    status: "pending",
+    draftIds: weekly.map((item) => item.id),
+  });
+  putPending(weeklyPlan, at(-95));
+  appendMessage(weeklyPlan.groupId, { kind: "plan", planId: weeklyPlan.id });
+
+  // 这一张留在小采的群里，首页的「去群里看」得进它自己的群，不能都进主助理。
+  const review = draftOf({
+    id: "draft_today_review",
+    groupId: "grp_buy",
+    botId: "bot_buy",
+    accountId: accountXhs.id,
+    platform: "xiaohongshu",
+    title: "X3 现货比价清单",
+    text: "三家供应商的现货、到货和报价差异已经整理好。",
     status: "pending",
   });
-  drafts.set(planDraft.id, planDraft);
-  putPending(
-    planOf({
-      id: "plan_today_content",
-      groupId: "grp_sales",
-      botId: "bot_sales",
-      title: "本周 X3 客户案例连载",
-      status: "pending",
-      draftIds: [planDraft.id],
-    }),
-    at(-95),
-  );
+  putPending(review, at(-90));
+  appendMessage(review.groupId, { kind: "draft", draftId: review.id });
 
-  putPending(
-    draftOf({
-      id: "draft_today_review",
-      groupId: "grp_buy",
-      botId: "bot_buy",
-      accountId: accountXhs.id,
-      platform: "xiaohongshu",
-      title: "X3 现货比价清单",
-      text: "三家供应商的现货、到货和报价差异已经整理好。",
-      status: "pending",
-    }),
-    at(-90),
-  );
+  const replyText = "能接。飞书的审批和群消息都能进白泽，私信我发你接入文档。";
+  const reply = draftOf({
+    id: "draft_today_reply",
+    groupId: "grp_assistant",
+    botId: "bot_assistant",
+    accountId: accountDiary.id,
+    platform: "xiaohongshu",
+    title: replyText,
+    text: replyText,
+    status: "pending",
+    content: {
+      kind: "reply",
+      text: replyText,
+      images: [],
+      replyTo: {
+        url: "https://www.xiaohongshu.com/explore/x3-launch",
+        author: "阿杰的车间",
+        quote: "这个能接飞书吗？我们厂里审批都在飞书上。",
+      },
+    },
+  });
+  putPending(reply, at(-85));
+  appendMessage(reply.groupId, { kind: "draft", draftId: reply.id });
 
   putPending(
     approvalOf({
@@ -367,11 +470,22 @@ const seedPerformance = (): void => {
   }
 };
 
+const seeded = (id: string): boolean => id.includes("_today_") || id.includes("_perf_");
+
 const removeTodayData = (): void => {
   for (const store of [approvals, drafts, plans, accounts, publications]) {
     for (const id of store.keys()) {
-      if (id.includes("_today_") || id.includes("_perf_")) store.delete(id);
+      if (seeded(id)) store.delete(id);
     }
+  }
+  for (const [groupId, list] of messagesByGroupId) {
+    messagesByGroupId.set(
+      groupId,
+      list.filter(
+        ({ body }) =>
+          !(body.kind === "draft" && seeded(body.draftId)) && !(body.kind === "plan" && seeded(body.planId)),
+      ),
+    );
   }
   pendingSince.clear();
 };

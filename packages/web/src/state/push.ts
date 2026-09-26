@@ -63,12 +63,27 @@ export const createPushHandlers = ({
     routine_deleted: (push) => dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId }),
     skill_updated: (push) => dispatch({ type: "skill_upserted", skill: push.skill }),
     skill_deleted: (push) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId }),
-    draft_updated: () => bumpToday(),
-    plan_updated: () => bumpToday(),
-    account_updated: () => bumpToday(),
-    account_deleted: () => bumpToday(),
-    publication_created: () => bumpToday(),
-    computer_updated: () => undefined,
+    draft_updated: (push) => {
+      dispatch({ type: "content_loaded", drafts: [push.draft], plans: [] });
+      bumpToday();
+    },
+    plan_updated: (push) => {
+      dispatch({ type: "content_loaded", drafts: [], plans: [push.plan] });
+      bumpToday();
+    },
+    account_updated: (push) => {
+      dispatch({ type: "account_upserted", account: push.account });
+      bumpToday();
+    },
+    account_deleted: (push) => {
+      dispatch({ type: "account_removed", accountId: push.accountId });
+      bumpToday();
+    },
+    publication_created: (push) => {
+      dispatch({ type: "publication_added", publication: push.publication });
+      bumpToday();
+    },
+    computer_updated: (push) => dispatch({ type: "computer_upserted", computer: push.computer }),
     notify: (push) => {
       bumpToday();
       const current = settingsRef.current;

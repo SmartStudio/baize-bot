@@ -1,6 +1,14 @@
 import type { z } from "zod";
 import {
+  AccountListResponse,
+  AccountResponse,
   ApiError,
+  ApprovePlanRequest as ApprovePlanRequestSchema,
+  ApprovePlanResponse,
+  ComputerListResponse,
+  DecideDraftRequest as DecideDraftRequestSchema,
+  DecideDraftResponse,
+  ReturnPlanResponse,
   BotResponse,
   BotListResponse,
   CreateBotResponse,
@@ -24,8 +32,12 @@ import {
   TodayResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
+  UpdateAccountRequest as UpdateAccountRequestSchema,
   UsageResponse,
+  type AccountId,
   type ApprovalId,
+  type ContentPlanId,
+  type DraftId,
   type Bot,
   type BotHue,
   type BotId,
@@ -50,6 +62,11 @@ import {
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
 } from "@baize/shared";
+
+// shared 只导出了这三份请求的 schema，没有同名类型。
+export type DecideDraftRequest = z.infer<typeof DecideDraftRequestSchema>;
+export type ApprovePlanRequest = z.infer<typeof ApprovePlanRequestSchema>;
+export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequestSchema>;
 
 export class RequestFailed extends Error {
   constructor(
@@ -129,6 +146,16 @@ export const api = {
     json(SendMessageResponse, await send("POST", `/groups/${encodeURIComponent(groupId)}/messages`, { text })),
   decideApproval: async (id: ApprovalId, request: DecideApprovalRequest) =>
     json(DecideApprovalResponse, await send("POST", `/approvals/${encodeURIComponent(id)}`, request)),
+  decideDraft: async (id: DraftId, request: DecideDraftRequest) =>
+    json(DecideDraftResponse, await send("POST", `/drafts/${encodeURIComponent(id)}`, request)),
+  approvePlan: async (id: ContentPlanId, request: ApprovePlanRequest) =>
+    json(ApprovePlanResponse, await send("POST", `/plans/${encodeURIComponent(id)}/approve`, request)),
+  returnPlan: async (id: ContentPlanId) =>
+    json(ReturnPlanResponse, await send("POST", `/plans/${encodeURIComponent(id)}/return`)),
+  accounts: async () => json(AccountListResponse, await send("GET", "/accounts")),
+  updateAccount: async (id: AccountId, request: UpdateAccountRequest) =>
+    json(AccountResponse, await send("PATCH", `/accounts/${encodeURIComponent(id)}`, request)),
+  computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
   grants: async () => json(GrantListResponse, await send("GET", "/grants")),
   deleteGrant: async (id: GrantId): Promise<void> => {
     await send("DELETE", `/grants/${encodeURIComponent(id)}`);

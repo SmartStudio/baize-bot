@@ -4,6 +4,7 @@ import { type ServerPush } from "@baize/shared";
 import { accountRoutes } from "./routes/account.js";
 import { authRoutes, authed } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
+import { contentRoutes } from "./routes/content.js";
 import { groupRoutes } from "./routes/groups.js";
 import { grantRoutes } from "./routes/grants.js";
 import { send, type Push, type Route, type RouteContext } from "./routes/http.js";
@@ -31,6 +32,7 @@ const protectedRoutes: Route[] = [
   routineRoutes,
   skillRoutes,
   todayRoutes,
+  contentRoutes,
   groupRoutes,
   grantRoutes,
 ];

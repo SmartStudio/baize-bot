@@ -1,7 +1,12 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
 import {
   ServerPush,
+  type AccountId,
+  type AccountTier,
   type ApprovalId,
+  type ContentPlanId,
+  type DraftId,
+  type TodayResponse,
   type BotId,
   type ChecklistItem,
   type DecideApprovalRequest,
@@ -24,11 +29,18 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import { RequestFailed, api, type BotDraft, type GroupDraft } from "../api/client.js";
+import {
+  RequestFailed,
+  api,
+  type ApprovePlanRequest,
+  type BotDraft,
+  type DecideDraftRequest,
+  type GroupDraft,
+} from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
-import type { Action, AppState } from "./types.js";
+import type { Action, AppState, SnapshotMerge } from "./types.js";
 
 export { memberIdsOf } from "./types.js";
 export type { AppState, Conversation, GroupTurn, LoginPhase } from "./types.js";
@@ -46,6 +58,13 @@ export type AppActions = {
   loadMessages: (groupId: GroupId) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
   decideApproval: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
+  decideDraft: (draftId: DraftId, request: DecideDraftRequest) => Promise<void>;
+  approvePlan: (planId: ContentPlanId, request: ApprovePlanRequest) => Promise<void>;
+  returnPlan: (planId: ContentPlanId) => Promise<void>;
+  // 首页快照里带着草稿和计划，顺手补进同一张表，首页展开的卡和群里的卡读的是同一份。
+  loadToday: () => Promise<TodayResponse>;
+  loadAccounts: () => Promise<void>;
+  updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loadGrants: () => Promise<void>;
   deleteGrant: (grantId: GrantId) => Promise<void>;
   pauseBot: (botId: BotId) => Promise<void>;
@@ -101,6 +120,8 @@ const RECONNECT_DELAY_MS = 1000;
 
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(reduce, { status: "loading" } satisfies AppState);
+  // 推送重连时置上，下一次发出的首页快照拿去 resync，发出去就收回。
+  const resyncPending = useRef(false);
 
   const actions = useMemo<AppActions>(() => {
     // 会话过期后每个请求都会 401。不接住的话界面停在 ready 上，发消息、存设置全都静悄悄地不生效。
@@ -157,7 +178,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
       }),
       loadMessages: signedIn(async (groupId: GroupId) => {
-        const { messages, approvals, handoffs } = await api.messages(groupId);
+        const { messages, approvals, handoffs, drafts, plans } = await api.messages(groupId);
+        dispatch({ type: "content_loaded", drafts, plans });
         dispatch({ type: "messages_set", groupId, messages });
         dispatch({ type: "approvals_loaded", approvals });
         dispatch({ type: "handoffs_loaded", handoffs });
@@ -170,6 +192,42 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const result = await api.decideApproval(approvalId, request);
         dispatch({ type: "approval_pushed", approval: result.approval });
         if (result.grant !== null) dispatch({ type: "grant_upserted", grant: result.grant });
+      }),
+      decideDraft: signedIn(async (draftId: DraftId, request: DecideDraftRequest) => {
+        const { draft } = await api.decideDraft(draftId, request);
+        dispatch({ type: "content_loaded", drafts: [draft], plans: [] });
+      }),
+      approvePlan: signedIn(async (planId: ContentPlanId, request: ApprovePlanRequest) => {
+        const { plan, drafts } = await api.approvePlan(planId, request);
+        dispatch({ type: "content_loaded", drafts, plans: [plan] });
+      }),
+      returnPlan: signedIn(async (planId: ContentPlanId) => {
+        const { plan } = await api.returnPlan(planId);
+        dispatch({ type: "content_loaded", drafts: [], plans: [plan] });
+      }),
+      loadToday: async () => {
+        const merge: SnapshotMerge = resyncPending.current ? "resync" : "fill";
+        resyncPending.current = false;
+        const today = await api.today().catch((cause: unknown) => {
+          if (merge === "resync") resyncPending.current = true;
+          throw cause;
+        });
+        const plans = today.pending.flatMap((item) => (item.kind === "plan" ? [item.plan] : []));
+        const drafts = [
+          ...today.pending.flatMap((item) =>
+            item.kind === "plan" ? item.drafts : item.kind === "draft" ? [item.draft] : [],
+          ),
+          ...today.next.flatMap((item) => (item.kind === "draft" ? [item.draft] : [])),
+        ];
+        dispatch({ type: "today_snapshot_loaded", drafts, plans, merge });
+        return today;
+      },
+      loadAccounts: signedIn(async () => {
+        const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);
+        dispatch({ type: "accounts_loaded", accounts, computers });
+      }),
+      updateAccountTier: signedIn(async (accountId: AccountId, tier: AccountTier) => {
+        dispatch({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account });
       }),
       loadGrants: signedIn(async () => {
         dispatch({ type: "grants_loaded", grants: (await api.grants()).grants });
@@ -276,6 +334,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   }, [state]);
 
   const connected = state.status === "ready";
+  // 卡片上的「从哪台电脑发」和账号页都读这两张表。拉不到只是少写一句电脑名，不该拖住整个入口。
+  useEffect(() => {
+    if (connected) actions.loadAccounts().catch(() => undefined);
+  }, [connected, actions]);
+
   useEffect(() => {
     if (!connected) return;
     let cancelled = false;
@@ -311,7 +374,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
       socket.addEventListener("open", () => {
-        if (hasConnected) dispatch({ type: "today_version_bumped" });
+        if (hasConnected) {
+          resyncPending.current = true;
+          dispatch({ type: "today_version_bumped" });
+        }
         hasConnected = true;
       });
       socket.addEventListener("message", (event) => {

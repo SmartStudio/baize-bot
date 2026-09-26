@@ -15,8 +15,10 @@ import type {
   MessageId,
   SkillOfferStatus,
 } from "@baize/shared";
+import type { ContentBook } from "../../state/types.js";
 import { BotAvatar } from "../BotAvatar.js";
 import { ACTION_TEXT, SCOPE_TEXT, offeredScopes, targetText } from "../grantText.js";
+import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
 import { ToolViewContent } from "./ToolViewContent.js";
@@ -371,6 +373,8 @@ type MessageProps = {
   onInspectTool: InspectTool;
   selectedToolId: MessageId | null;
   showSource: boolean;
+  content: ContentBook;
+  contentActions: ContentActions;
 };
 
 const MessageView = ({
@@ -384,6 +388,8 @@ const MessageView = ({
   onInspectTool,
   selectedToolId,
   showSource,
+  content,
+  contentActions,
 }: MessageProps) => {
   const body = message.body;
   return (
@@ -425,9 +431,29 @@ const MessageView = ({
               <HandoffCard handoff={handoff} message={message} lookup={lookup} checklist={checklist} />
             );
           }
+          case "draft": {
+            const botId = content.drafts[body.draftId]?.botId ?? null;
+            return (
+              <DraftCard
+                draftId={body.draftId}
+                botName={botId === null ? null : lookup(botId).name}
+                content={content}
+                actions={contentActions}
+              />
+            );
+          }
+          case "plan": {
+            const botId = content.plans[body.planId]?.botId ?? null;
+            return (
+              <PlanCard
+                planId={body.planId}
+                botName={botId === null ? null : lookup(botId).name}
+                content={content}
+                actions={contentActions}
+              />
+            );
+          }
           case "project_offer":
-          case "draft":
-          case "plan":
             return null;
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。

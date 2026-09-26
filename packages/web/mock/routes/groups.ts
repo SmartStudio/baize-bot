@@ -16,6 +16,7 @@ import {
   pendingHandoffsOf,
   responderOf,
   canGrant,
+  contentIn,
   settleApproval,
   settleLatestPending,
   streamBotReply,
@@ -97,8 +98,7 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
           hasMore: start > 0,
           approvals: approvalsIn(page),
           handoffs: handoffsIn(page),
-          drafts: [],
-          plans: [],
+          ...contentIn(page),
         });
       } else if (method === "POST") {
         const parsed = SendMessageRequest.safeParse(await readBody(req));

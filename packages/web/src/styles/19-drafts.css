@@ -1,0 +1,314 @@
+/* ---------- 草稿卡、计划卡、回复卡 ---------- */
+
+.badge-running {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.badge-failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.badge-muted {
+  background: var(--bg-inset);
+  color: var(--fg-3);
+}
+
+.draft-card,
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+}
+
+.draft-card-head {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+}
+
+.draft-card-title {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.draft-card-title b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+  font-weight: var(--weight-semibold);
+}
+
+.draft-card-title small,
+.draft-meta,
+.plan-note {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.draft-quote {
+  margin: 0;
+  padding: var(--space-4) var(--space-5);
+  border-left: 2px solid var(--border-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.draft-quote b {
+  color: var(--fg-1);
+}
+
+.draft-text {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-body);
+  white-space: pre-wrap;
+}
+
+.draft-editor {
+  width: 100%;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-body);
+  resize: vertical;
+}
+
+.draft-editor:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+.draft-editor.is-edited {
+  border-color: var(--success);
+}
+
+.brand-hint {
+  margin: 0;
+  color: var(--success);
+  font: var(--type-caption);
+}
+
+.draft-outcome {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+.draft-outcome.is-failed,
+.draft-error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}
+
+.draft-outcome a {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--link);
+}
+
+.draft-copy {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-3);
+  align-items: center;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+}
+
+.plan-drafts {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  list-style: none;
+}
+
+.plan-draft + .plan-draft {
+  border-top: 1px solid var(--border-1);
+}
+
+.plan-draft-toggle {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  width: 100%;
+  min-height: var(--control-h-lg);
+  padding: var(--space-3) var(--space-5);
+  color: var(--fg-3);
+  text-align: left;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .plan-draft-toggle:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.plan-draft-time {
+  flex: none;
+  color: var(--fg-3);
+  font: var(--type-mono);
+}
+
+.plan-draft-line {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-1);
+  font: var(--type-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-draft-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: 0 var(--space-5) var(--space-5);
+}
+
+.plan-card.is-folded {
+  flex-direction: row;
+  align-items: center;
+  padding: var(--space-4) var(--space-6);
+  color: var(--fg-2);
+}
+
+.plan-folded-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-1);
+  font: var(--type-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- 首页里就地展开的行 ---------- */
+
+.today-expandable {
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+}
+
+.today-expand {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  width: 100%;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.today-expanded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.today-expanded .card {
+  width: 100%;
+}
+
+.today-open-group {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  cursor: pointer;
+}
+
+/* ---------- 设置里的账号页 ---------- */
+
+.accounts-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.account-row-head {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+.account-tier {
+  flex: none;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+.account-tiers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.account-tier-option {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.account-tier-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.account-tier-option b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.account-tier-option small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.account-tier-option.is-blocked {
+  cursor: not-allowed;
+}
+
+.account-tier-option.is-blocked b,
+.account-tier-option.is-blocked small {
+  color: var(--fg-4);
+}
+
+.account-tier-option.is-blocked .account-tier-reason {
+  color: var(--warning);
+}
+
+.account-tier-error {
+  color: var(--danger);
+  font: var(--type-caption);
+}

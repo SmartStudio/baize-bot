@@ -122,14 +122,18 @@ test("首页审批能拒绝且计划、稿子、账号行都去正确页面", as
   await approval.getByRole("button", { name: "拒绝" }).click();
   await expect(approval).toHaveCount(0);
 
-  await page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "本周 X3" }).click();
-  await expect(page.getByTestId("chat-title")).toHaveText("小销");
+  const plan = page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "本周推广计划" });
+  await plan.getByTestId("today-expand").click();
+  await plan.getByTestId("today-open-group").click();
+  await expect(page.getByTestId("chat-title"), "计划行展开后去群里，进的是出计划的主助理群").toHaveText("主助理");
   await page.getByTestId("today-nav").click();
-  await page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "X3 现货比价清单" }).click();
-  await expect(page.getByTestId("chat-title")).toHaveText("小采");
+  const draft = page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "X3 现货比价清单" });
+  await draft.getByTestId("today-expand").click();
+  await draft.getByTestId("today-open-group").click();
+  await expect(page.getByTestId("chat-title"), "稿子行进的是起草它的小采群，不是一律进主助理").toHaveText("小采");
   await page.getByTestId("today-nav").click();
   await page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "@baize_x3" }).click();
-  await expect(page.getByTestId("settings-window")).toBeVisible();
+  await expect(page.getByTestId("accounts-page"), "账号行直接进设置里的账号页").toBeVisible();
 });
 
 test("推送的新待办追加在最后，旧行相对顺序不变", async ({ page, request }) => {

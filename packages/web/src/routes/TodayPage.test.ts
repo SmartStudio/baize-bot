@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { timeText } from "./TodayPage.js";
+import { timeText } from "../components/messages/content.js";
 
 describe("timeText", () => {
   const localAt = (day: number, hour: number, minute = 0): string => new Date(2026, 8, day, hour, minute).toISOString();

@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { Cpu, Download, Gauge, KeyRound, Plug, Settings as SettingsIcon, X } from "lucide-react";
+import { AtSign, Cpu, Download, Gauge, KeyRound, Plug, Settings as SettingsIcon, X } from "lucide-react";
 import {
   ComputerListResponse,
   Settings,
+  type Account,
+  type AccountId,
+  type AccountTier,
   type Bot,
   type BotId,
   type Computer,
@@ -18,13 +21,15 @@ import {
 } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
+import { AccountsPage } from "./AccountsPage.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 
-type PageId = "general" | "computer" | "tools" | "grants" | "usage" | "update";
+export type PageId = "general" | "computer" | "accounts" | "tools" | "grants" | "usage" | "update";
 
 const PAGES: Record<PageId, { title: string; icon: React.ReactNode }> = {
   general: { title: "通用", icon: <SettingsIcon size={16} aria-hidden="true" /> },
   computer: { title: "电脑", icon: <Cpu size={16} aria-hidden="true" /> },
+  accounts: { title: "账号", icon: <AtSign size={16} aria-hidden="true" /> },
   tools: { title: "工具", icon: <Plug size={16} aria-hidden="true" /> },
   grants: { title: "授权", icon: <KeyRound size={16} aria-hidden="true" /> },
   usage: { title: "用量与账单", icon: <Gauge size={16} aria-hidden="true" /> },
@@ -41,6 +46,8 @@ type Props = {
   tools: ToolConnection[];
   grants: Grant[];
   projectNames: Record<GroupId, string>;
+  accounts: Account[];
+  computers: Record<string, Computer>;
   // 首页版本号，重连和审批变化都会让它加一。授权页开着就照它重拉，补上断线期间别处撤掉的和别处新批的授权。
   grantsVersion: number;
   initialPage?: PageId;
@@ -50,6 +57,8 @@ type Props = {
   onLoadUsage: () => Promise<void>;
   onLoadGrants: () => Promise<void>;
   onRevokeGrant: (id: GrantId) => Promise<void>;
+  onLoadAccounts: () => Promise<void>;
+  onChangeTier: (id: AccountId, tier: AccountTier) => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
   onClose: () => void;
@@ -388,6 +397,8 @@ export const SettingsWindow = ({
   tools,
   grants,
   projectNames,
+  accounts,
+  computers,
   grantsVersion,
   initialPage = "general",
   onCreateTool,
@@ -396,6 +407,8 @@ export const SettingsWindow = ({
   onLoadUsage,
   onLoadGrants,
   onRevokeGrant,
+  onLoadAccounts,
+  onChangeTier,
   onChange,
   onLogout,
   onClose,
@@ -469,6 +482,13 @@ export const SettingsWindow = ({
             />
           ) : page === "computer" ? (
             <ComputerPage />
+          ) : page === "accounts" ? (
+            <AccountsPage
+              accounts={accounts}
+              computers={computers}
+              onLoad={onLoadAccounts}
+              onChangeTier={onChangeTier}
+            />
           ) : page === "grants" ? (
             <GrantsPage
               grants={grants}

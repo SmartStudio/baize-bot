@@ -1,0 +1,64 @@
+import { AccountListResponse, ApprovePlanRequest, DecideDraftRequest, UpdateAccountRequest } from "@baize/shared";
+import { accounts, decideDraft, setAccountTier, settlePlan } from "../state.js";
+import { readBody, send, type Route } from "./http.js";
+
+const idOf = (match: RegExpExecArray): string => decodeURIComponent(match[1] ?? "");
+
+export const contentRoutes: Route = async ({ req, res, path, method, push }) => {
+  const draftMatch = /^\/api\/drafts\/([^/]+)$/.exec(path);
+  if (draftMatch !== null && method === "POST") {
+    const parsed = DecideDraftRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "结论只能是批准或退回" });
+    else {
+      const outcome = decideDraft(idOf(draftMatch), parsed.data);
+      if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+      else {
+        push({ type: "draft_updated", draft: outcome.value });
+        send(res, 200, { draft: outcome.value });
+      }
+    }
+    return true;
+  }
+
+  const planMatch = /^\/api\/plans\/([^/]+)\/(approve|return)$/.exec(path);
+  if (planMatch !== null && method === "POST") {
+    const body = await readBody(req);
+    const parsed = planMatch[2] === "approve" ? ApprovePlanRequest.safeParse(body) : null;
+    if (parsed !== null && !parsed.success) send(res, 400, { error: "改动的格式不对" });
+    else {
+      const outcome = settlePlan(
+        idOf(planMatch),
+        parsed === null ? { decision: "return" } : { decision: "approve", edits: parsed.data.edits },
+      );
+      if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+      else {
+        push({ type: "plan_updated", plan: outcome.value.plan });
+        for (const draft of outcome.value.drafts) push({ type: "draft_updated", draft });
+        send(res, 200, parsed === null ? { plan: outcome.value.plan } : outcome.value);
+      }
+    }
+    return true;
+  }
+
+  if (method === "GET" && path === "/api/accounts") {
+    send(res, 200, AccountListResponse.parse({ accounts: [...accounts.values()] }));
+    return true;
+  }
+
+  const accountMatch = /^\/api\/accounts\/([^/]+)$/.exec(path);
+  if (accountMatch !== null && method === "PATCH") {
+    const parsed = UpdateAccountRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "档位不对" });
+    else {
+      const outcome = setAccountTier(idOf(accountMatch), parsed.data.tier);
+      if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+      else {
+        push({ type: "account_updated", account: outcome.value });
+        send(res, 200, { account: outcome.value });
+      }
+    }
+    return true;
+  }
+
+  return false;
+};

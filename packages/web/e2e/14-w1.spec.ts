@@ -158,9 +158,18 @@ test("今天页点一条待办进对应群，URL 跟着变", async ({ page, requ
   await expect(pending.first()).toBeVisible();
   await expect(page.getByTestId("today-count"), "今天旁边带待办数").toHaveText(String(await pending.count()));
 
-  await page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "本周 X3" }).click();
-  await expect(page).toHaveURL(/\/g\/grp_sales$/);
-  await expect(page.getByTestId("chat-title")).toHaveText("小销");
+  const plan = page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "本周推广计划" });
+  await plan.getByTestId("today-expand").click();
+  await plan.getByTestId("today-open-group").click();
+  await expect(page).toHaveURL(/\/g\/grp_assistant$/);
+  await expect(page.getByTestId("chat-title")).toHaveText("主助理");
+
+  await page.goBack();
+  const draft = page.getByTestId("today-pending").getByTestId("today-row").filter({ hasText: "X3 现货比价清单" });
+  await draft.getByTestId("today-expand").click();
+  await draft.getByTestId("today-open-group").click();
+  await expect(page, "别的 Bot 起草的稿子进它自己的群").toHaveURL(/\/g\/grp_buy$/);
+  await expect(page.getByTestId("chat-title")).toHaveText("小采");
 
   await page.goBack();
   await expect(page).toHaveURL(/\/$/);

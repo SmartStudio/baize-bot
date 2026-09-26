@@ -17,7 +17,7 @@ import { useApp } from "../state/app.js";
 import { pendingCountOf, useToday } from "../state/today.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 
-type Overlay = "none" | "account" | "settings" | "tools" | "usage" | "new-group";
+type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-group";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -74,6 +74,11 @@ export const MainWindow = () => {
     const found = bots[botId];
     return found ? { name: found.name, tag: found.tag, hue: found.hue } : FALLBACK;
   };
+  const contentActions = {
+    decideDraft: actions.decideDraft,
+    approvePlan: actions.approvePlan,
+    returnPlan: actions.returnPlan,
+  };
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
   const inspected = inspectedTool?.groupId === groupId ? inspectedTool.tool : null;
@@ -103,6 +108,8 @@ export const MainWindow = () => {
           approvals={ready.approvals}
           handoffs={ready.handoffs}
           skills={ready.skills}
+          content={ready.content}
+          contentActions={contentActions}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
@@ -128,10 +135,11 @@ export const MainWindow = () => {
         <TodayPage
           today={today}
           userName={ready.user.name}
+          cards={{ content: ready.content, actions: contentActions, lookup }}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onOpenGroup={openGroupPage}
-          onOpenSettings={() => setOverlay("settings")}
+          onOpenAccounts={() => setOverlay("accounts")}
         />
       )}
       {inspected !== null ? (
@@ -166,7 +174,7 @@ export const MainWindow = () => {
           onClose={() => setOverlay("none")}
         />
       ) : null}
-      {overlay === "settings" || overlay === "tools" || overlay === "usage" ? (
+      {overlay === "settings" || overlay === "accounts" || overlay === "tools" || overlay === "usage" ? (
         <SettingsWindow
           user={ready.user}
           settings={ready.settings}
@@ -175,14 +183,18 @@ export const MainWindow = () => {
           tools={ready.tools}
           grants={ready.grants}
           projectNames={projectNames}
+          accounts={Object.values(ready.content.accounts)}
+          computers={ready.content.computers}
           grantsVersion={ready.todayVersion}
-          initialPage={overlay === "usage" ? "usage" : overlay === "tools" ? "tools" : "general"}
+          initialPage={overlay === "settings" ? "general" : overlay}
           onCreateTool={actions.createTool}
           onUpdateTool={actions.updateTool}
           onDeleteTool={actions.deleteTool}
           onLoadUsage={actions.loadUsage}
           onLoadGrants={actions.loadGrants}
           onRevokeGrant={actions.deleteGrant}
+          onLoadAccounts={actions.loadAccounts}
+          onChangeTier={actions.updateAccountTier}
           onChange={actions.updateSettings}
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}

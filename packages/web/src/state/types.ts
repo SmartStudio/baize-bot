@@ -1,9 +1,17 @@
 import {
   ServerPush,
+  type Account,
+  type AccountId,
   type Approval,
   type ApprovalId,
   type Bot,
   type BotId,
+  type Computer,
+  type ComputerId,
+  type ContentPlan,
+  type ContentPlanId,
+  type Draft,
+  type DraftId,
   type Group,
   type GroupId,
   type Grant,
@@ -12,6 +20,7 @@ import {
   type HandoffId,
   type Message,
   type MessageId,
+  type Publication,
   type Routine,
   type RoutineId,
   type Settings,
@@ -50,6 +59,20 @@ export type Conversation =
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
   conversation.kind === "solo" ? [conversation.botId] : conversation.botIds;
 
+// 草稿卡、计划卡和账号页共用的几张表。群历史、首页快照、接口响应和推送都往这里写，卡片只从这里读，
+// 首页展开的卡和群里的同一张卡因此不会各说各的。发布只从推送来，所以原帖链接只有卡片开着时发出的那条才有。
+export type ContentBook = {
+  drafts: Record<DraftId, Draft>;
+  plans: Record<ContentPlanId, ContentPlan>;
+  accounts: Record<AccountId, Account>;
+  computers: Record<ComputerId, Computer>;
+  publications: Record<DraftId, Publication>;
+};
+
+// 首页快照可能在推送之前生成、之后才到，平时只补表里还没有的条目。断线期间漏掉的推送没人补，
+// 所以重连后发出的第一次快照可以盖掉已有的。
+export type SnapshotMerge = "fill" | "resync";
+
 export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
 export type AppState =
@@ -72,6 +95,7 @@ export type AppState =
       grants: Grant[];
       revokedGrantIds: GrantId[];
       usage: UsageResponse;
+      content: ContentBook;
       todayVersion: number;
     };
 
@@ -118,6 +142,13 @@ export type Action =
   | { type: "tool_removed"; toolId: ToolConnectionId }
   | { type: "settings_set"; settings: Settings }
   | { type: "usage_loaded"; usage: UsageResponse }
+  | { type: "content_loaded"; drafts: Draft[]; plans: ContentPlan[] }
+  | { type: "today_snapshot_loaded"; drafts: Draft[]; plans: ContentPlan[]; merge: SnapshotMerge }
+  | { type: "accounts_loaded"; accounts: Account[]; computers: Computer[] }
+  | { type: "account_upserted"; account: Account }
+  | { type: "account_removed"; accountId: AccountId }
+  | { type: "computer_upserted"; computer: Computer }
+  | { type: "publication_added"; publication: Publication }
   | { type: "today_version_bumped" };
 
 export type ReadyState = Extract<AppState, { status: "ready" }>;

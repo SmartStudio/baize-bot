@@ -8,8 +8,10 @@ import {
   expireLatestPending,
   groups,
   holdHandoffAccept,
+  publishDraft,
   reseed,
   resetToday,
+  reviseDraft,
   seedUnseenHandoff,
   setTodayMode,
   settleUnseenHandoff,
@@ -20,6 +22,7 @@ import { readBody, send, type Route } from "./http.js";
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
 const TodayModeRequest = z.object({ mode: z.enum(["full", "empty", "performance"]) }).strict();
 const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
+const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
   .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
   .strict();
@@ -61,6 +64,33 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       const approval = addTodayApproval(parsed.data.title);
       push({ type: "approval_updated", approval });
       send(res, 204);
+    }
+    return true;
+  }
+
+  const publishMatch = /^\/api\/test\/drafts\/([^/]+)\/publish$/.exec(path);
+  if (publishMatch !== null && method === "POST") {
+    const outcome = publishDraft(decodeURIComponent(publishMatch[1] ?? ""));
+    if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+    else {
+      push({ type: "publication_created", publication: outcome.value.publication });
+      push({ type: "draft_updated", draft: outcome.value.draft });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  const reviseMatch = /^\/api\/test\/drafts\/([^/]+)\/revise$/.exec(path);
+  if (reviseMatch !== null && method === "POST") {
+    const parsed = TestReviseRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "改稿参数不对" });
+    else {
+      const outcome = reviseDraft(decodeURIComponent(reviseMatch[1] ?? ""), parsed.data.text);
+      if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+      else {
+        push({ type: "draft_updated", draft: outcome.value });
+        send(res, 204);
+      }
     }
     return true;
   }

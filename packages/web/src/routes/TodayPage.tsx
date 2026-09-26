@@ -1,14 +1,22 @@
 import { useState } from "react";
-import { ArrowRight, CalendarClock, Check, ExternalLink, SendHorizontal, Sparkles, TriangleAlert } from "lucide-react";
-import type { ApprovalId, DecideApprovalRequest, Draft, GroupId, TodayResponse } from "@baize/shared";
+import {
+  ArrowRight,
+  CalendarClock,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  SendHorizontal,
+  Sparkles,
+  TriangleAlert,
+} from "lucide-react";
+import type { ApprovalId, DecideApprovalRequest, GroupId, TodayResponse } from "@baize/shared";
+import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
+import { DraftCard, PlanCard, type ContentActions } from "../components/messages/DraftCards.js";
+import type { BotLookup } from "../components/messages/MessageView.js";
 import { ToolViewContent } from "../components/messages/ToolViewContent.js";
+import type { ContentBook } from "../state/types.js";
 import { pendingCountOf, type Today } from "../state/today.js";
-
-const PLATFORM: Record<Draft["platform"], string> = {
-  github: "GitHub",
-  x: "X",
-  xiaohongshu: "小红书",
-};
 
 const greeting = (name: string): string => {
   const hour = new Date().getHours();
@@ -16,29 +24,16 @@ const greeting = (name: string): string => {
   return `${name}，${time}`;
 };
 
-const draftText = (draft: Draft): string =>
-  draft.content.kind === "post" ? (draft.content.title ?? draft.content.text) : `回复 ${draft.content.replyTo.author}`;
-
-export const timeText = (at: string, now = new Date()): string => {
-  const date = new Date(at);
-  const day = (value: Date): string => `${value.getFullYear()}-${value.getMonth()}-${value.getDate()}`;
-  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-  const tomorrow = new Date(now);
-  tomorrow.setDate(now.getDate() + 1);
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (day(date) === day(now)) return `今天 ${clock}`;
-  if (day(date) === day(tomorrow)) return `明天 ${clock}`;
-  if (day(date) === day(yesterday)) return `昨天 ${clock}`;
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
-};
+// 首页主窗口的计划行和草稿行就地展开成群里那同一张卡。菜单栏太窄，不给这一份，行就只是一行字。
+type Cards = { content: ContentBook; actions: ContentActions; lookup: BotLookup };
 
 type PendingProps = {
   data: TodayResponse["pending"];
   compact?: boolean;
+  cards?: Cards;
   onDecide: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
   onOpenGroup?: (groupId: GroupId) => void;
-  onOpenSettings?: () => void;
+  onOpenAccounts?: () => void;
 };
 
 const ApprovalRow = ({
@@ -99,7 +94,77 @@ const ApprovalRow = ({
   );
 };
 
-export const TodayPending = ({ data, compact = false, onDecide, onOpenGroup, onOpenSettings }: PendingProps) => {
+// 有卡片就就地展开；没有卡片时，主窗口里点了进群，菜单栏里只是一行字。
+const PendingRow = ({
+  kind,
+  summary,
+  groupId,
+  cards,
+  onOpenGroup,
+  children,
+}: {
+  kind: "plan" | "draft";
+  summary: React.ReactNode;
+  groupId: GroupId;
+  cards: Cards | undefined;
+  onOpenGroup: ((groupId: GroupId) => void) | undefined;
+  children: React.ReactNode;
+}) => {
+  const [open, setOpen] = useState(false);
+  if (cards !== undefined) {
+    return (
+      <article
+        className={`today-row today-confirm today-expandable${open ? " is-open" : ""}`}
+        data-testid="today-row"
+        data-kind={kind}
+      >
+        <button
+          type="button"
+          className="today-expand"
+          data-testid="today-expand"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          {summary}
+          {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
+        </button>
+        {open ? (
+          <div className="today-expanded">
+            {children}
+            {onOpenGroup === undefined ? null : (
+              <button
+                type="button"
+                className="today-open-group"
+                data-testid="today-open-group"
+                onClick={() => onOpenGroup(groupId)}
+              >
+                去群里看 <ArrowRight size={14} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        ) : null}
+      </article>
+    );
+  }
+  return onOpenGroup === undefined ? (
+    <article className="today-row today-confirm" data-testid="today-row" data-kind={kind}>
+      {summary}
+    </article>
+  ) : (
+    <button
+      type="button"
+      className="today-row today-confirm"
+      data-testid="today-row"
+      data-kind={kind}
+      onClick={() => onOpenGroup(groupId)}
+    >
+      {summary}
+      <ArrowRight size={16} aria-hidden="true" />
+    </button>
+  );
+};
+
+export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGroup, onOpenAccounts }: PendingProps) => {
   if (data.length === 0) {
     return (
       <p className="today-empty" data-testid="today-empty">
@@ -114,71 +179,63 @@ export const TodayPending = ({ data, compact = false, onDecide, onOpenGroup, onO
           case "approval":
             return <ApprovalRow item={item} onDecide={onDecide} key={item.approval.id} />;
           case "plan": {
-            const content = (
-              <>
-                <span className="today-row-main">
-                  <span className="today-kicker">内容计划</span>
-                  <strong>{item.plan.title}</strong>
-                  <small>{item.drafts.length} 条草稿等你确认</small>
-                </span>
-                {onOpenGroup === undefined ? null : <ArrowRight size={16} aria-hidden="true" />}
-              </>
+            const summary = (
+              <span className="today-row-main">
+                <span className="today-kicker">内容计划</span>
+                <strong>{item.plan.title}</strong>
+                <small>{item.drafts.length} 条草稿等你确认</small>
+              </span>
             );
-            return onOpenGroup === undefined ? (
-              <article
-                className="today-row today-confirm"
-                data-testid="today-row"
-                data-kind={item.kind}
+            return (
+              <PendingRow
+                kind={item.kind}
+                summary={summary}
+                groupId={item.plan.groupId}
+                cards={cards}
+                onOpenGroup={onOpenGroup}
                 key={item.plan.id}
               >
-                {content}
-              </article>
-            ) : (
-              <button
-                type="button"
-                className="today-row today-confirm"
-                data-testid="today-row"
-                data-kind={item.kind}
-                key={item.plan.id}
-                onClick={() => onOpenGroup(item.plan.groupId)}
-              >
-                {content}
-              </button>
+                {cards === undefined ? null : (
+                  <PlanCard
+                    planId={item.plan.id}
+                    botName={item.plan.botId === null ? null : cards.lookup(item.plan.botId).name}
+                    content={cards.content}
+                    actions={cards.actions}
+                  />
+                )}
+              </PendingRow>
             );
           }
           case "draft": {
-            const content = (
-              <>
-                <span className="today-row-main">
-                  <span className="today-kicker">{PLATFORM[item.draft.platform]} 草稿</span>
-                  <strong>{draftText(item.draft)}</strong>
-                  <small>
-                    {item.draft.content.kind === "reply" ? item.draft.content.replyTo.quote : item.draft.content.text}
-                  </small>
+            const summary = (
+              <span className="today-row-main">
+                <span className="today-kicker">
+                  {PLATFORM[item.draft.platform]} {item.draft.content.kind === "reply" ? "回复" : "草稿"}
                 </span>
-                {onOpenGroup === undefined ? null : <ArrowRight size={16} aria-hidden="true" />}
-              </>
+                <strong>{draftText(item.draft)}</strong>
+                <small>
+                  {item.draft.content.kind === "reply" ? item.draft.content.replyTo.quote : item.draft.content.text}
+                </small>
+              </span>
             );
-            return onOpenGroup === undefined ? (
-              <article
-                className="today-row today-confirm"
-                data-testid="today-row"
-                data-kind={item.kind}
+            return (
+              <PendingRow
+                kind={item.kind}
+                summary={summary}
+                groupId={item.draft.groupId}
+                cards={cards}
+                onOpenGroup={onOpenGroup}
                 key={item.draft.id}
               >
-                {content}
-              </article>
-            ) : (
-              <button
-                type="button"
-                className="today-row today-confirm"
-                data-testid="today-row"
-                data-kind={item.kind}
-                key={item.draft.id}
-                onClick={() => onOpenGroup(item.draft.groupId)}
-              >
-                {content}
-              </button>
+                {cards === undefined ? null : (
+                  <DraftCard
+                    draftId={item.draft.id}
+                    botName={item.draft.botId === null ? null : cards.lookup(item.draft.botId).name}
+                    content={cards.content}
+                    actions={cards.actions}
+                  />
+                )}
+              </PendingRow>
             );
           }
           case "account": {
@@ -192,10 +249,10 @@ export const TodayPending = ({ data, compact = false, onDecide, onOpenGroup, onO
                   </strong>
                   <small>在账号所在电脑重新登录</small>
                 </span>
-                {onOpenSettings === undefined ? null : <ArrowRight size={16} aria-hidden="true" />}
+                {onOpenAccounts === undefined ? null : <ArrowRight size={16} aria-hidden="true" />}
               </>
             );
-            return onOpenSettings === undefined ? (
+            return onOpenAccounts === undefined ? (
               <article
                 className="today-row today-alert"
                 data-testid="today-row"
@@ -211,7 +268,7 @@ export const TodayPending = ({ data, compact = false, onDecide, onOpenGroup, onO
                 data-testid="today-row"
                 data-kind={item.kind}
                 key={item.account.id}
-                onClick={onOpenSettings}
+                onClick={onOpenAccounts}
               >
                 {content}
               </button>
@@ -241,7 +298,11 @@ const TodaySection = ({
   <section className="today-section" data-testid={`today-${id}`}>
     <header className="today-section-head">
       <h2>{title}</h2>
-      {count > 0 ? <span className={id === "pending" ? "is-pending" : undefined}>{count}</span> : null}
+      {count > 0 ? (
+        <span className={id === "pending" ? "is-pending" : undefined} data-testid="today-section-count">
+          {count}
+        </span>
+      ) : null}
     </header>
     {children}
   </section>
@@ -250,13 +311,14 @@ const TodaySection = ({
 type Props = {
   today: Today;
   userName: string;
+  cards: Cards;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: PendingProps["onDecide"];
   onOpenGroup: (groupId: GroupId) => void;
-  onOpenSettings: () => void;
+  onOpenAccounts: () => void;
 };
 
-export const TodayPage = ({ today, userName, onSend, onDecide, onOpenGroup, onOpenSettings }: Props) => {
+export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGroup, onOpenAccounts }: Props) => {
   const { status, data, error, refresh } = today;
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -354,8 +416,9 @@ export const TodayPage = ({ today, userName, onSend, onDecide, onOpenGroup, onOp
             <TodaySection title="等你确认" id="pending" count={pendingCount}>
               <TodayPending
                 data={data.pending}
+                cards={cards}
                 onOpenGroup={onOpenGroup}
-                onOpenSettings={onOpenSettings}
+                onOpenAccounts={onOpenAccounts}
                 onDecide={async (id, decision) => {
                   await onDecide(id, decision);
                   await refresh();

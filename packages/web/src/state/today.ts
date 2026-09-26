@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TodayResponse } from "@baize/shared";
-import { api } from "../api/client.js";
 import { useApp } from "./app.js";
 
 type TodayLoad =
@@ -15,7 +14,8 @@ const REFRESH_ERROR = "今天的清单刷新失败。";
 export const pendingCountOf = (data: TodayResponse): number => data.pending.length;
 
 export const useToday = () => {
-  const { state } = useApp();
+  const { state, actions } = useApp();
+  const loadToday = actions.loadToday;
   const todayVersion = state.status === "ready" ? state.todayVersion : 0;
   const [load, setLoad] = useState<TodayLoad>({ status: "loading", data: null, error: null });
   const requestVersion = useRef(0);
@@ -36,7 +36,7 @@ export const useToday = () => {
       current.data === null ? { status: "loading", data: null, error: null } : { ...current, error: null },
     );
     try {
-      const data = await api.today();
+      const data = await loadToday();
       if (mounted.current && requestVersion.current === currentRequest) setLoad({ status: "ready", data, error: null });
     } catch {
       if (!mounted.current || requestVersion.current !== currentRequest) return;
@@ -46,7 +46,7 @@ export const useToday = () => {
           : { status: "ready", data: current.data, error: REFRESH_ERROR },
       );
     }
-  }, []);
+  }, [loadToday]);
 
   useEffect(() => {
     const delay = firstLoad.current ? 0 : REFRESH_DEBOUNCE_MS;

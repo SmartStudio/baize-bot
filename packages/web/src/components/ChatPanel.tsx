@@ -14,6 +14,8 @@ import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
+import type { ContentBook } from "../state/types.js";
+import type { ContentActions } from "./messages/DraftCards.js";
 
 type Props = {
   conversation: Conversation;
@@ -23,6 +25,8 @@ type Props = {
   lookup: BotLookup;
   approvals: ApprovalTable;
   handoffs: HandoffTable;
+  content: ContentBook;
+  contentActions: ContentActions;
   skills: Record<BotId, Skill[]>;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
@@ -85,6 +89,8 @@ export const ChatPanel = ({
   lookup,
   approvals,
   handoffs,
+  content,
+  contentActions,
   skills,
   onSend,
   onDecide,
@@ -239,6 +245,8 @@ export const ChatPanel = ({
                 lookup={lookup}
                 approvals={approvals}
                 handoffs={handoffs}
+                content={content}
+                contentActions={contentActions}
                 checklist={checklist}
                 onDecide={onDecide}
                 onDecideSkillOffer={onDecideSkillOffer}
