@@ -1,32 +1,12 @@
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { createServer as createNetServer, connect as netConnect, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type BotBrowser, createBotBrowser } from "../src/browser.js";
-import { browserSocketUrl, connectCdp } from "../src/cdp.js";
-import {
-  chromeBinary,
-  evaluateIn,
-  launchTestChrome,
-  openUserTab,
-  type PageTarget,
-  pageTargets,
-  type TestChrome,
-} from "./helpers/chrome.js";
-
-const listen = async (server: Server | ReturnType<typeof createHttpServer>): Promise<number> => {
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("测试服务没有端口");
-  return address.port;
-};
-
-const closeServer = (server: Server | ReturnType<typeof createHttpServer>): Promise<void> =>
-  new Promise((resolve) => server.close(() => resolve()));
+import { type CdpConnection, type CdpEvent, connectPipe } from "../src/cdp.js";
+import { chromeBinary, launchTestChrome, pageTargets, settledPageCount, type TestChrome } from "./helpers/chrome.js";
 
 const resultText = (result: { content: ReadonlyArray<{ type: string; text?: string }> }): string =>
   result.content.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("\n");
@@ -43,98 +23,48 @@ const errorOf = (work: Promise<unknown>): Promise<string> =>
     (error: unknown) => String(error),
   );
 
-/** 攻击页：302、链接、脚本跳转和图片地址都指向 `to`。每条路径的访问次数记在 hits 里。 */
-async function startTrapSite(): Promise<{
-  readonly url: string;
-  readonly hits: Map<string, number>;
-  close(): Promise<void>;
-}> {
-  const hits = new Map<string, number>();
+async function startSite(): Promise<{ readonly url: string; close(): Promise<void> }> {
   const server = createHttpServer((request, response) => {
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    hits.set(url.pathname, (hits.get(url.pathname) ?? 0) + 1);
-    const to = url.searchParams.get("to") ?? "";
-    if (url.pathname === "/redirect") {
-      response.writeHead(302, { location: to });
-      response.end();
-      return;
-    }
-    const body: Record<string, string> = {
-      "/link": `<a id="go" href="${to}">去看看</a>`,
-      "/script-go": `<p>马上跳走</p><script>location.href = ${JSON.stringify(to)};</script>`,
-      "/image": `<p>一张图</p><img src="${to}">`,
-    };
+    const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(
-      `<!doctype html><meta charset="utf-8"><title>陷阱 ${url.pathname}</title>${body[url.pathname] ?? `<p>PAGE-TEXT${url.pathname}</p>`}`,
-    );
+    response.end(`<!doctype html><meta charset="utf-8"><title>页 ${path}</title><p>PAGE-TEXT${path}</p>`);
   });
-  const port = await listen(server);
-  return { url: `http://127.0.0.1:${port}`, hits, close: () => closeServer(server) };
-}
-
-/**
- * 夹在 Bot 和 Chrome 之间的 TCP 转发。Chrome 按 Host 头拼 webSocketDebuggerUrl，所以 WebSocket 也走这里。
- * cut() 掐断现有连接；cutAtReply(n) 让下一条 WebSocket 连接在 Chrome 回第 n 段数据时断掉，这段不转给 Bot。
- */
-async function startCdpProxy(cdpUrl: string) {
-  const target = Number(new URL(cdpUrl).port);
-  const sockets = new Set<Socket>();
-  let cutAt: number | null = null;
-  const server = createNetServer((client) => {
-    const upstream = netConnect(target, "127.0.0.1");
-    let replies: number | null = null;
-    const drop = (): void => {
-      client.destroy();
-      upstream.destroy();
-      sockets.delete(client);
-      sockets.delete(upstream);
-    };
-    sockets.add(client);
-    sockets.add(upstream);
-    client.pipe(upstream);
-    upstream.on("data", (chunk: Buffer) => {
-      if (replies === null && cutAt !== null && chunk.subarray(0, 12).toString() === "HTTP/1.1 101") replies = 0;
-      else if (replies !== null && (replies += 1) === cutAt) {
-        cutAt = null;
-        drop();
-        return;
-      }
-      client.write(chunk);
-    });
-    client.on("close", drop);
-    upstream.on("close", drop);
-    client.on("error", drop);
-    upstream.on("error", drop);
-  });
-  const port = await listen(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("测试服务没有端口");
   return {
-    url: `http://127.0.0.1:${port}`,
-    cut: () => {
-      for (const socket of sockets) socket.destroy();
-    },
-    cutAtReply: (n: number) => {
-      cutAt = n;
-    },
-    close: async () => {
-      for (const socket of sockets) socket.destroy();
-      await closeServer(server);
-    },
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
 
-describe.skipIf(chromeBinary === null)("助理浏览器挡 CDP 端口（真 Chrome）", () => {
+/** 同一条管道外面再包一层，冒充另一条连接，或者让某条命令失败一次。 */
+function wrap(
+  inner: CdpConnection,
+  intercept: (method: string) => Error | null = () => null,
+): CdpConnection & { alive: boolean } {
+  const wrapped = {
+    alive: true,
+    send: (method: string, params?: Record<string, unknown>, sessionId?: string) => {
+      const failure = intercept(method);
+      return failure === null ? inner.send(method, params, sessionId) : Promise.reject(failure);
+    },
+    onEvent: (listener: (event: CdpEvent) => void) => inner.onEvent(listener),
+    isOpen: () => wrapped.alive && inner.isOpen(),
+  };
+  return wrapped;
+}
+
+describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）", () => {
   let chrome: TestChrome;
-  let site: Awaited<ReturnType<typeof startTrapSite>>;
+  let site: Awaited<ReturnType<typeof startSite>>;
   let profileDir = "";
-  let victim: PageTarget;
   const opened: BotBrowser[] = [];
 
   beforeAll(async () => {
-    profileDir = mkdtempSync(join(tmpdir(), "baize-browser-cdp-"));
+    profileDir = mkdtempSync(join(tmpdir(), "baize-browser-pipe-"));
     chrome = await launchTestChrome(profileDir);
-    site = await startTrapSite();
-    victim = await openUserTab(chrome.cdpUrl, `${site.url}/victim`);
+    site = await startSite();
   }, 30_000);
 
   afterAll(async () => {
@@ -144,69 +74,16 @@ describe.skipIf(chromeBinary === null)("助理浏览器挡 CDP 端口（真 Chro
     rmSync(profileDir, { recursive: true, force: true });
   });
 
-  const botBrowser = (): BotBrowser => {
-    const browser = createBotBrowser({ profileDir, cdpUrl: async () => chrome.cdpUrl });
+  const botBrowser = (connection: () => Promise<CdpConnection> = async () => chrome.connection): BotBrowser => {
+    const browser = createBotBrowser({ profileDir, connection });
     opened.push(browser);
     return browser;
   };
-  const cdpPort = (): string => new URL(chrome.cdpUrl).port;
-  const victimAlive = async (): Promise<boolean> =>
-    (await pageTargets(chrome.cdpUrl)).some((target) => target.id === victim.id);
-
-  it("browser_open 只看端口：四种主机名写法都打不开 CDP 端口，页面里没有标签页清单", async () => {
-    const browser = botBrowser();
-    const port = cdpPort();
-    for (const host of ["127.0.0.1", "0.0.0.0", "localhost.", "[::ffff:127.0.0.1]"]) {
-      const error = await errorOf(call(browser, "browser_open", { url: `http://${host}:${port}/json/list` }));
-      expect(error, host).toContain("不能打开助理 Chrome 自己的调试端口");
-      const page = await call(browser, "browser_snapshot");
-      expect(page, `${host} 之后页面里不能有别的标签页的 id`).not.toContain(victim.id);
-      expect(page, host).not.toContain("webSocketDebuggerUrl");
-    }
-  });
-
-  it("302、点链接、页面脚本跳转到 CDP 端口都被挡，读不到 /json/list", async () => {
-    const browser = botBrowser();
-    const list = encodeURIComponent(`http://127.0.0.1:${cdpPort()}/json/list`);
-    const pages: string[] = [];
-
-    const redirected = await errorOf(call(browser, "browser_open", { url: `${site.url}/redirect?to=${list}` }));
-    pages.push(redirected, await call(browser, "browser_snapshot"));
-
-    await call(browser, "browser_open", { url: `${site.url}/link?to=${list}` });
-    await call(browser, "browser_click", { ref: 1 }).catch((error: unknown) => pages.push(String(error)));
-    pages.push(await call(browser, "browser_snapshot"));
-
-    await call(browser, "browser_open", { url: `${site.url}/script-go?to=${list}` }).catch((error: unknown) =>
-      pages.push(String(error)),
-    );
-    await delay(500);
-    pages.push(await call(browser, "browser_snapshot"));
-
-    expect(site.hits.get("/redirect"), "302 那一页真被请求过").toBe(1);
-    expect(site.hits.get("/link")).toBe(1);
-    expect(site.hits.get("/script-go")).toBe(1);
-    for (const page of pages) {
-      expect(page, "页面和报错里都不能有别的标签页的 id").not.toContain(victim.id);
-      expect(page).not.toContain("webSocketDebuggerUrl");
-    }
-    expect(redirected, "302 跳到调试端口时告诉模型被挡了").toContain("调试端口");
-  });
-
-  it("页面里的图片地址指向 /json/close 也关不掉别人的标签页", async () => {
-    const browser = botBrowser();
-    const close = encodeURIComponent(`http://127.0.0.1:${cdpPort()}/json/close/${victim.id}`);
-    expect(await victimAlive()).toBe(true);
-
-    await call(browser, "browser_open", { url: `${site.url}/image?to=${close}` });
-    await delay(500);
-
-    expect(await victimAlive(), "用户的标签页还在").toBe(true);
-    expect(await evaluateIn(victim, "location.pathname")).toBe("/victim");
-  });
+  const pageCount = async (): Promise<number> => (await pageTargets(chrome.connection)).length;
+  const settled = (expected: number): Promise<number> => settledPageCount(chrome.connection, expected);
 
   it("一个 Bot 同时来三个调用只建一个标签页", async () => {
-    const before = (await pageTargets(chrome.cdpUrl)).length;
+    const before = await pageCount();
     const browser = botBrowser();
 
     await Promise.all([
@@ -215,165 +92,131 @@ describe.skipIf(chromeBinary === null)("助理浏览器挡 CDP 端口（真 Chro
       call(browser, "browser_snapshot"),
     ]);
 
-    expect((await pageTargets(chrome.cdpUrl)).length, "调用串行，第二个调用复用第一个建的页").toBe(before + 1);
+    expect(await pageCount(), "调用串行，第二个调用复用第一个建的页").toBe(before + 1);
     await browser.close();
-    expect((await pageTargets(chrome.cdpUrl)).length).toBe(before);
-  });
-});
-
-describe.skipIf(chromeBinary === null)("助理浏览器不留孤儿标签页（真 Chrome）", () => {
-  let chrome: TestChrome;
-  let site: Awaited<ReturnType<typeof startTrapSite>>;
-  let profileDir = "";
-  const cleanups: Array<() => Promise<void>> = [];
-
-  beforeAll(async () => {
-    profileDir = mkdtempSync(join(tmpdir(), "baize-browser-orphan-"));
-    chrome = await launchTestChrome(profileDir);
-    site = await startTrapSite();
-  }, 30_000);
-
-  afterAll(async () => {
-    for (const cleanup of cleanups.splice(0)) await cleanup();
-    await chrome?.stop();
-    await site?.close();
-    rmSync(profileDir, { recursive: true, force: true });
+    expect(await settled(before)).toBe(before);
   });
 
-  const pageCount = async (): Promise<number> => (await pageTargets(chrome.cdpUrl)).length;
-  const proxied = async () => {
-    const proxy = await startCdpProxy(chrome.cdpUrl);
-    cleanups.push(proxy.close);
-    return proxy;
-  };
+  it("两个 Bot 共用一条管道，各读各的页", async () => {
+    const [first, second] = [botBrowser(), botBrowser()];
+    await Promise.all([
+      call(first, "browser_open", { url: `${site.url}/first` }),
+      call(second, "browser_open", { url: `${site.url}/second` }),
+    ]);
 
-  it("连接断了重开标签页时关掉旧的那页", async () => {
-    const proxy = await proxied();
-    const browser = createBotBrowser({ profileDir, cdpUrl: async () => proxy.url });
-    cleanups.push(() => browser.close());
+    expect(await call(first, "browser_snapshot")).toContain("PAGE-TEXT/first");
+    expect(await call(second, "browser_snapshot")).toContain("PAGE-TEXT/second");
+  });
+
+  it("标签页被关掉后重开一页，告诉模型上次在哪", async () => {
+    const browser = botBrowser();
+    await call(browser, "browser_open", { url: `${site.url}/closed-under-me` });
+    const mine = (await pageTargets(chrome.connection)).find((target) => target.url.endsWith("/closed-under-me"));
+    if (mine === undefined) throw new Error("找不到 Bot 的标签页");
     const before = await pageCount();
-    await call(browser, "browser_open", { url: `${site.url}/first` });
 
-    proxy.cut();
-    // 连接刚断时 WebSocket 可能还没收到 close，第一次调用撞上旧连接会报断了，第二次重开。
-    await call(browser, "browser_snapshot").catch(() => call(browser, "browser_snapshot"));
+    await chrome.connection.send("Target.closeTarget", { targetId: mine.id });
+    const page = await call(browser, "browser_snapshot").catch(() => call(browser, "browser_snapshot"));
 
-    expect(await pageCount(), "旧页关掉，只剩新开的一页").toBe(before + 1);
+    expect(page).toContain(`标签页断开后重开过，上次在 ${site.url}/closed-under-me`);
+    expect(await settled(before), "关掉的那页换成新开的一页").toBe(before);
   });
 
-  it("Chrome 换了地址而旧连接还通时，先关旧页再开新页", async () => {
-    const proxy = await proxied();
-    let endpoint = proxy.url;
-    const browser = createBotBrowser({ profileDir, cdpUrl: async () => endpoint });
-    cleanups.push(() => browser.close());
+  it("换了一条连接时，先在旧连接上关旧页再开新页，提示 Chrome 重启过", async () => {
+    const old = wrap(chrome.connection);
+    let current: CdpConnection = old;
+    const browser = botBrowser(async () => current);
     const before = await pageCount();
     await call(browser, "browser_open", { url: `${site.url}/moved` });
 
-    endpoint = chrome.cdpUrl;
-    await call(browser, "browser_snapshot");
+    current = wrap(chrome.connection);
+    const page = await call(browser, "browser_snapshot");
 
-    expect(await pageCount()).toBe(before + 1);
+    expect(page).toContain(`Chrome 重启过，上次在 ${site.url}/moved`);
+    expect(await settled(before + 1), "旧页关掉，只剩新开的一页").toBe(before + 1);
   });
 
-  it("开标签页半路断了，建好的那页不留下", async () => {
-    const proxy = await proxied();
-    const browser = createBotBrowser({ profileDir, cdpUrl: async () => proxy.url });
-    cleanups.push(() => browser.close());
+  it("开标签页半路失败，建好的那页不留下", async () => {
+    let failAttach = true;
+    const flaky = wrap(chrome.connection, (method) => {
+      if (method !== "Target.attachToTarget" || !failAttach) return null;
+      failAttach = false;
+      return new Error("attach 失败一次");
+    });
+    const browser = botBrowser(async () => flaky);
     const before = await pageCount();
 
-    proxy.cutAtReply(2);
-    expect(await errorOf(call(browser, "browser_snapshot")), "createTarget 回来了，attachToTarget 时断了").toContain(
-      "断了",
+    expect(await errorOf(call(browser, "browser_snapshot")), "createTarget 回来了，attachToTarget 失败").toContain(
+      "attach 失败一次",
     );
     await call(browser, "browser_snapshot");
 
-    expect(await pageCount(), "半路建好的页被收掉，只剩这次开的一页").toBe(before + 1);
+    expect(await settled(before + 1), "半路建好的页被收掉，只剩这次开的一页").toBe(before + 1);
     await browser.close();
-    expect(await pageCount(), "关 Bot 的浏览器后一页不剩").toBe(before);
+    expect(await settled(before), "关 Bot 的浏览器后一页不剩").toBe(before);
   });
 });
 
-/** 服务端发给客户端的短文本帧，不带掩码。 */
-function frame(text: string): Buffer {
-  const payload = Buffer.from(text);
-  if (payload.length > 125) throw new Error("假服务只发短帧");
-  return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
-}
-
-/** 只会握手的 WebSocket 服务：握手后先发 frames 里的每一帧，再对收到的每条命令回 `{ id: 1, result: { ok: true } }`，收到关闭帧就断开。 */
-async function startFakeSocket(frames: readonly string[]) {
-  const server = createHttpServer();
-  server.on("upgrade", (request, socket: Socket) => {
-    const accept = createHash("sha1")
-      .update(`${String(request.headers["sec-websocket-key"])}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
-      .digest("base64");
-    socket.write(
-      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
-    );
-    for (const text of frames) socket.write(frame(text));
-    sockets.add(socket);
-    socket.on("data", (chunk: Buffer) => {
-      if (((chunk[0] ?? 0) & 0x0f) === 0x8) socket.destroy();
-      else socket.write(frame('{"id":1,"result":{"ok":true}}'));
-    });
-    socket.on("error", () => undefined);
-  });
-  const sockets = new Set<Socket>();
-  const port = await listen(server);
+function fakePipe() {
+  const toChrome = new PassThrough();
+  const fromChrome = new PassThrough();
+  const written: string[] = [];
+  toChrome.on("data", (chunk: Buffer) => written.push(...chunk.toString("utf8").split("\0").filter(Boolean)));
   return {
-    url: `ws://127.0.0.1:${port}/devtools/browser/fake`,
-    close: () => {
-      for (const socket of sockets) socket.destroy();
-      return closeServer(server);
-    },
+    pipe: { toChrome, fromChrome },
+    fromChrome,
+    written,
+    reply: (text: string) => fromChrome.write(`${text}\0`),
   };
 }
 
-describe("CDP 客户端", () => {
-  it("/json/version 回的 WebSocket 地址不是 127.0.0.1 就不连", async () => {
-    for (const socketUrl of ["ws://localhost:1/devtools/browser/x", "ws://10.0.0.8:9222/devtools/browser/x"]) {
-      const server = createHttpServer((_request, response) => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify({ webSocketDebuggerUrl: socketUrl }));
-      });
-      const port = await listen(server);
-      try {
-        expect(await errorOf(browserSocketUrl(`http://127.0.0.1:${port}`)), socketUrl).toContain(
-          "助理 Chrome 的 CDP 地址不在本机",
-        );
-      } finally {
-        await closeServer(server);
-      }
-    }
+describe("管道上的 CDP 客户端", () => {
+  it("收到不是 JSON 的消息就丢掉，连接照常能用", async () => {
+    const fake = fakePipe();
+    const connection = connectPipe(fake.pipe);
+    fake.reply("not json {");
+    const version = connection.send("Browser.getVersion");
+    await new Promise((resolve) => setImmediate(resolve));
+    const { id } = JSON.parse(fake.written[0] ?? "{}") as { id: number };
+    // 一条应答拆成两段到，按 NUL 才算完整。
+    fake.fromChrome.write(`{"id":${id},"result":`);
+    fake.fromChrome.write(`{"ok":true}}\0`);
+
+    expect(await version).toEqual({ ok: true });
+    expect(connection.isOpen()).toBe(true);
   });
 
-  it("端口接了 TCP 却一直不握手，5 秒左右报连不上", async () => {
-    const sockets = new Set<Socket>();
-    const server = createNetServer((socket) => sockets.add(socket));
-    const port = await listen(server);
-    try {
-      const startedAt = Date.now();
-      const outcome = await Promise.race([
-        errorOf(connectCdp(`ws://127.0.0.1:${port}/devtools/browser/x`)),
-        delay(10_000).then(() => "等了 10 秒还没结果"),
-      ]);
-      expect(outcome).toContain("连不上助理 Chrome");
-      expect(Date.now() - startedAt).toBeLessThan(8_000);
-    } finally {
-      for (const socket of sockets) socket.destroy();
-      await closeServer(server);
-    }
+  it("事件带着 sessionId 分给监听者，退订后不再收到", async () => {
+    const fake = fakePipe();
+    const connection = connectPipe(fake.pipe);
+    const seen: CdpEvent[] = [];
+    const unsubscribe = connection.onEvent((event) => seen.push(event));
+    fake.reply('{"method":"Page.loadEventFired","params":{},"sessionId":"S1"}');
+    await new Promise((resolve) => setImmediate(resolve));
+    unsubscribe();
+    fake.reply('{"method":"Page.loadEventFired","params":{},"sessionId":"S2"}');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(seen).toEqual([{ method: "Page.loadEventFired", params: {}, sessionId: "S1" }]);
   });
 
-  it("收到不是 JSON 的消息就丢掉，连接照常能用", { timeout: 10_000 }, async () => {
-    const fake = await startFakeSocket(["not json {", '{"method":"Fake.event","params":{}}']);
-    try {
-      const connection = await connectCdp(fake.url);
-      expect(await connection.send("Browser.getVersion")).toEqual({ ok: true });
-      expect(connection.isOpen()).toBe(true);
-      connection.close();
-    } finally {
-      await fake.close();
-    }
+  it("管道断了，在途命令当场报错，之后的命令直接报错", async () => {
+    const fake = fakePipe();
+    const connection = connectPipe(fake.pipe);
+    const inFlight = errorOf(connection.send("Runtime.evaluate", { expression: "1" }, "S1"));
+    fake.fromChrome.end();
+
+    expect(await inFlight).toContain("助理 Chrome 退出了");
+    expect(connection.isOpen()).toBe(false);
+    expect(await errorOf(connection.send("Browser.getVersion"))).toContain("下次用时会重新起");
+  });
+
+  it("写端报 EPIPE 不会把进程带崩，在途命令报错", async () => {
+    const fake = fakePipe();
+    const connection = connectPipe(fake.pipe);
+    const inFlight = errorOf(connection.send("Browser.getVersion"));
+    fake.pipe.toChrome.destroy(Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+
+    expect(await inFlight).toContain("助理 Chrome 退出了");
   });
 });

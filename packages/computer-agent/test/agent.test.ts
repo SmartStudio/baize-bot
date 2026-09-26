@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
+import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
-import type { RunnerConfig } from "@baize/bot-runner";
+import type { CdpConnection, RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
   type AgentHandle,
@@ -17,12 +17,19 @@ import {
 } from "../src/agent.js";
 import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } from "../src/chrome.js";
 import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
+import type { CdpPipe } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
+
+const fakeConnection: CdpConnection = {
+  send: () => Promise.reject(new Error("假 Chrome 不接命令")),
+  onEvent: () => () => undefined,
+  isOpen: () => true,
+};
 
 const fakeChrome = (): AssistantChrome => ({
   kind: "local",
   profileDir: "/tmp/baize-test/chrome-profile",
-  cdpUrl: async () => "http://127.0.0.1:9222",
+  connection: async () => fakeConnection,
   login: async () => ({ login: "valid", handle: "白泽工厂日记" }),
   pid: () => null,
   stop: async () => {},
@@ -126,29 +133,24 @@ async function poll<T>(get: () => T | undefined, timeoutMs: number, label: strin
 }
 
 /**
- * 假的助理 Chrome 调试口：只回发布器前几步用到的 CDP 命令，页面永远停在小红书登录页。
+ * 假的助理 Chrome 管道：只回发布器前几步用到的 CDP 命令，页面永远停在小红书登录页。
  * 发布器真用上这台电脑的浏览器，就会撞到登录页回 login_expired。
  */
-async function startLoginWallCdp() {
-  let port = 0;
-  let connections = 0;
-  const http = createServer((request, response) => {
-    if (request.url !== "/json/version") {
-      response.writeHead(404).end();
-      return;
-    }
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/fake` }));
-  });
-  const sockets = new WebSocketServer({ server: http });
-  sockets.on("connection", (socket) => {
-    connections += 1;
-    socket.on("message", (data) => {
-      const { id, method, params } = JSON.parse(data.toString()) as {
+function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } {
+  const toChrome = new PassThrough();
+  const fromChrome = new PassThrough();
+  const commands: string[] = [];
+  let buffered = "";
+  toChrome.on("data", (chunk: Buffer) => {
+    buffered += chunk.toString("utf8");
+    for (let end = buffered.indexOf("\0"); end !== -1; end = buffered.indexOf("\0")) {
+      const { id, method, params } = JSON.parse(buffered.slice(0, end)) as {
         id: number;
         method: string;
         params: { expression?: string };
       };
+      buffered = buffered.slice(end + 1);
+      commands.push(method);
       const result =
         method === "Target.createTarget"
           ? { targetId: "tab-1" }
@@ -159,20 +161,10 @@ async function startLoginWallCdp() {
               : method === "Runtime.evaluate"
                 ? { result: { type: "object", subtype: "null", value: null } }
                 : {};
-      socket.send(JSON.stringify({ id, result }));
-    });
+      fromChrome.write(`${JSON.stringify({ id, result })}\0`);
+    }
   });
-  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
-  port = (http.address() as AddressInfo).port;
-  return {
-    port,
-    connections: () => connections,
-    close: async () => {
-      for (const client of sockets.clients) client.terminate();
-      await new Promise<void>((resolve) => sockets.close(() => resolve()));
-      await new Promise<void>((resolve) => http.close(() => resolve()));
-    },
-  };
+  return { pipe: { toChrome, fromChrome }, commands: () => [...commands] };
 }
 
 function startControlPlane() {
@@ -370,7 +362,7 @@ describe("电脑代理连控制面", () => {
     }
   });
 
-  it("把 Chrome profile 和动态 CDP 地址交给运行器", async () => {
+  it("把 Chrome profile 和管道连接交给运行器", async () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
 
@@ -378,7 +370,7 @@ describe("电脑代理连控制面", () => {
     await poll(() => initialRunnerConfigs[0], 3000, "运行器配置");
 
     expect(initialRunnerConfigs[0]?.browser.profileDir).toBe("/tmp/baize-test/chrome-profile");
-    await expect(initialRunnerConfigs[0]?.browser.cdpUrl()).resolves.toBe("http://127.0.0.1:9222");
+    await expect(initialRunnerConfigs[0]?.browser.connection()).resolves.toBe(fakeConnection);
   });
 
   it("连上后按间隔发心跳", async () => {
@@ -489,14 +481,14 @@ describe("电脑代理连控制面", () => {
     const drafts = join(dataDir, "bot-x", "drafts");
     await mkdir(drafts, { recursive: true });
     await writeFile(join(drafts, `${sha256}.png`), bytes);
-    let cdpCalls = 0;
+    let connectionCalls = 0;
     spawnAgent(await server.url(), {
       dataDir,
       makeChrome: () => ({
         ...fakeChrome(),
-        cdpUrl: async () => {
-          cdpCalls += 1;
-          return "http://127.0.0.1:9";
+        connection: async () => {
+          connectionCalls += 1;
+          return fakeConnection;
         },
       }),
     });
@@ -520,79 +512,80 @@ describe("电脑代理连控制面", () => {
       }),
     );
 
-    // 配图校验认的是代理的数据目录，过了才去取助理 Chrome 的地址；这台假 Chrome 没在听，所以回 error。
+    // 配图校验认的是代理的数据目录，过了才去要助理 Chrome 的连接；这台假 Chrome 不接命令，所以回 error。
     await expect(server.waitForMessage("publish_result", 1, 10_000)).resolves.toMatchObject({
       type: "publish_result",
       draftId: "draft-1",
       attempt: "2026-09-26T08:00:00.000Z",
       result: { status: "failed", reason: "error" },
     });
-    expect(cdpCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
+    expect(connectionCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
   });
 
   it("远程电脑收到 publish_draft 回 error 并写明没有助理浏览器，Bot 的助理浏览器照旧", async () => {
     const server = startControlPlane();
     servers.push(server);
-    const cdp = await startLoginWallCdp();
-    try {
-      const dataDir = await tempDataDir();
-      const bytes = Buffer.from("远程电脑上起草时拷下来的图");
-      const sha256 = createHash("sha256").update(bytes).digest("hex");
-      const drafts = join(dataDir, "bot-1", "drafts");
-      await mkdir(drafts, { recursive: true });
-      await writeFile(join(drafts, `${sha256}.png`), bytes);
-      spawnAgent(await server.url(), {
-        dataDir,
-        makeChrome: (options) =>
-          startAssistantChrome({
-            ...options,
-            platform: "linux",
-            launchChrome: async (profileDir) => {
-              await writeFile(join(profileDir, "DevToolsActivePort"), `${cdp.port}\n/devtools/browser/fake\n`);
-              const stopped = new AbortController();
-              const exited = new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve()));
-              return { pid: process.pid, exited, stop: async () => stopped.abort() };
-            },
-          }),
-      });
-      const socket = await server.waitForSocket(1);
-      socket.send(JSON.stringify(configMessage));
-      socket.send(
-        JSON.stringify({
-          type: "publish_draft",
-          draftId: "draft-1",
-          botId: "bot-1",
-          accountId: "account-1",
-          platform: "xiaohongshu",
-          content: {
-            kind: "post",
-            title: "周一早安",
-            text: "新的一周从一杯咖啡开始",
-            images: [{ path: join(drafts, `${sha256}.png`), sha256 }],
-            github: null,
+    const wall = startLoginWallPipe();
+    let launches = 0;
+    const dataDir = await tempDataDir();
+    const bytes = Buffer.from("远程电脑上起草时拷下来的图");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const drafts = join(dataDir, "bot-1", "drafts");
+    await mkdir(drafts, { recursive: true });
+    await writeFile(join(drafts, `${sha256}.png`), bytes);
+    spawnAgent(await server.url(), {
+      dataDir,
+      makeChrome: (options) =>
+        startAssistantChrome({
+          ...options,
+          platform: "linux",
+          launchChrome: async () => {
+            launches += 1;
+            const stopped = new AbortController();
+            const exited = new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve()));
+            return { pid: process.pid, exited, pipe: wall.pipe, stop: async () => stopped.abort() };
           },
-          attempt: "2026-09-26T08:00:00.000Z",
         }),
-      );
-
-      await expect(
-        server.waitForMessage("publish_result", 1, 10_000),
-        "远程上扫码登录会被拒，不能回 login_expired 引用户去扫码",
-      ).resolves.toEqual({
-        type: "publish_result",
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    socket.send(
+      JSON.stringify({
+        type: "publish_draft",
         draftId: "draft-1",
+        botId: "bot-1",
+        accountId: "account-1",
+        platform: "xiaohongshu",
+        content: {
+          kind: "post",
+          title: "周一早安",
+          text: "新的一周从一杯咖啡开始",
+          images: [{ path: join(drafts, `${sha256}.png`), sha256 }],
+          github: null,
+        },
         attempt: "2026-09-26T08:00:00.000Z",
-        result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
-      });
-      expect(cdp.connections(), "发布器没去连这台电脑上的 Chrome").toBe(0);
-      const botBrowser = (await poll(() => initialRunnerConfigs.at(-1), 3000, "运行器收到 config")).browser;
-      expect(botBrowser.profileDir).toBe(chromeProfileDir(dataDir));
-      expect(await botBrowser.cdpUrl(), "Bot 的助理浏览器工具在远程照样拿得到浏览器").toBe(
-        `http://127.0.0.1:${cdp.port}`,
-      );
-    } finally {
-      await cdp.close();
-    }
+      }),
+    );
+
+    await expect(
+      server.waitForMessage("publish_result", 1, 10_000),
+      "远程上扫码登录会被拒，不能回 login_expired 引用户去扫码",
+    ).resolves.toEqual({
+      type: "publish_result",
+      draftId: "draft-1",
+      attempt: "2026-09-26T08:00:00.000Z",
+      result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
+    });
+    expect(launches, "发布器没去起这台电脑上的 Chrome").toBe(0);
+    expect(wall.commands(), "管道上一条命令都没有").toEqual([]);
+    const botBrowser = (await poll(() => initialRunnerConfigs.at(-1), 3000, "运行器收到 config")).browser;
+    expect(botBrowser.profileDir).toBe(chromeProfileDir(dataDir));
+    const connection = await botBrowser.connection();
+    await connection.send("Target.createTarget", { url: "about:blank", background: true });
+    expect(wall.commands(), "Bot 的助理浏览器工具在远程照样拿得到浏览器").toEqual([
+      "Browser.getVersion",
+      "Target.createTarget",
+    ]);
   });
 
   it.each([
@@ -692,20 +685,21 @@ describe("电脑代理连控制面", () => {
       const server = startControlPlane();
       servers.push(server);
       const directory = await tempDataDir();
-      const cdpUrls: Promise<string>[] = [];
+      const connections: Promise<CdpConnection>[] = [];
       const agent = spawnAgent(await server.url(), {
         dataDir: directory,
         makeChrome: startAssistantChrome,
         makeRunner: (config) => {
-          cdpUrls.push(config.browser.cdpUrl());
+          connections.push(config.browser.connection());
           return runnerOf(config, runnerCalls());
         },
       });
       const socket = await server.waitForSocket(1);
       socket.send(JSON.stringify(configMessage));
-      await poll(() => cdpUrls[0], 3000, "运行器要 CDP 地址");
+      await poll(() => connections[0], 3000, "运行器要管道连接");
+      await connections[0];
       const running = await profileChromePids(chromeProfileDir(directory));
-      expect(running, "前提：运行器要过 CDP 之后这个 profile 有一个 Chrome").toHaveLength(1);
+      expect(running, "前提：运行器要过连接之后这个 profile 有一个 Chrome").toHaveLength(1);
 
       await agent.stop();
 

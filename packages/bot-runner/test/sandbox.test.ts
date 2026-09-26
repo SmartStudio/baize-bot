@@ -201,67 +201,6 @@ describe("bash 沙箱性能", () => {
     }
   });
 
-  it.skipIf(process.platform !== "darwin")(
-    "批准联网的 bash 连不上助理 Chrome 的调试端口，别的本地回环端口照通，端口每次现取",
-    async () => {
-      const cdp = await serveText('{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/fake"}');
-      const other = await serveText("other-loopback-ok");
-      let current: number | null = cdp.port;
-      const curlIn = async (sandbox: ReturnType<typeof createSandboxedBash>, url: string): Promise<string> => {
-        sandbox.allow("run-cdp", "call-cdp", { network: true, writePaths: [] });
-        return sandbox.tool
-          .execute(
-            "call-cdp",
-            { command: `/usr/bin/curl -sS --max-time 2 ${shellQuote(url)}` },
-            undefined,
-            undefined,
-            undefined as never,
-          )
-          .then(
-            (result) => JSON.stringify(result.content),
-            (error: unknown) => String(error),
-          );
-      };
-      try {
-        const guarded = createSandboxedBash(
-          workDir,
-          zones,
-          () => "run-cdp",
-          async () => current,
-        );
-        for (const host of ["127.0.0.1", "localhost", "[::ffff:127.0.0.1]"]) {
-          expect(await curlIn(guarded, `http://${host}:${cdp.port}/json/version`), host).not.toContain(
-            "webSocketDebuggerUrl",
-          );
-        }
-        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "别的回环端口照通").toContain(
-          "other-loopback-ok",
-        );
-
-        current = other.port;
-        expect(
-          await curlIn(guarded, `http://127.0.0.1:${cdp.port}/json/version`),
-          "Chrome 换了端口，旧端口放开",
-        ).toContain("webSocketDebuggerUrl");
-        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "新端口挡住").not.toContain(
-          "other-loopback-ok",
-        );
-
-        current = null;
-        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "Chrome 没起就不加这条").toContain(
-          "other-loopback-ok",
-        );
-        const plain = createSandboxedBash(workDir, zones, () => "run-cdp");
-        expect(await curlIn(plain, `http://127.0.0.1:${cdp.port}/json/version`), "没有助理 Chrome 不挡").toContain(
-          "webSocketDebuggerUrl",
-        );
-      } finally {
-        await cdp.close();
-        await other.close();
-      }
-    },
-  );
-
   it.skipIf(process.platform !== "darwin")("echo ok 100 次，闸门加沙箱的 p95 增量不超过 50ms", async () => {
     const baseline = createBashToolDefinition(workDir, { exposeSessionEnvironment: false });
     const sandbox = createSandboxedBash(workDir, zones).tool;
@@ -578,12 +517,3 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     }
   });
 });
-
-/** 本地回环上回固定正文的 HTTP 服务。 */
-async function serveText(body: string) {
-  const server = createHttpServer((_request, response) => response.end(body));
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("假服务没有端口");
-  return { port: address.port, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
-}

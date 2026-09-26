@@ -34,16 +34,7 @@ export function whitelistEnv(env: NodeJS.ProcessEnv, cwd: string, tmpDir: string
   return next;
 }
 
-/**
- * blockedPorts 只在放行联网时起作用：助理 Chrome 的 CDP 端口。批准联网的 bash 连上它就能列出、关掉别的标签页，
- * 或拿到带登录态的页面读 cookie。主机写成 *：规则写 localhost 时 [::ffff:127.0.0.1] 能绕过去，实测过。
- */
-export function sandboxProfile(
-  workDir: string,
-  access: GateAccess,
-  zones: ForbiddenZones,
-  blockedPorts: readonly number[] = [],
-): string {
+export function sandboxProfile(workDir: string, access: GateAccess, zones: ForbiddenZones): string {
   const work = realpathExisting(workDir);
   const lines = [
     "(version 1)",
@@ -70,12 +61,7 @@ export function sandboxProfile(
     '(allow file-write* (literal "/dev/fd/2"))',
     '(allow file-write* (literal "/dev/dtracehelper"))',
     ...(access.network
-      ? [
-          "(allow network-outbound)",
-          "(allow network-inbound)",
-          "(allow network-bind)",
-          ...blockedPorts.map((port) => `(deny network-outbound (remote tcp "*:${port}"))`),
-        ]
+      ? ["(allow network-outbound)", "(allow network-inbound)", "(allow network-bind)"]
       : ["(deny network*)"]),
     ...zones.hidden.flatMap((prefix) => {
       const real = seatbeltString(realpathExisting(prefix));
@@ -190,12 +176,11 @@ const sandboxedCommand = (
   workDir: string,
   zones: ForbiddenZones,
   access: GateAccess,
-  blockedPorts: readonly number[],
   command: string,
 ): string => {
   switch (kind) {
     case "seatbelt":
-      return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones, blockedPorts))} /bin/bash -c ${shSingleQuote(command)}`;
+      return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones))} /bin/bash -c ${shSingleQuote(command)}`;
     case "bwrap":
       return bwrapCommand(workDir, zones, access, command);
     case "none":
@@ -208,16 +193,9 @@ const sandboxedCommand = (
 };
 
 const spawnHook =
-  (
-    kind: SandboxKind,
-    workDir: string,
-    zones: ForbiddenZones,
-    tmpDir: string,
-    access: GateAccess,
-    blockedPorts: readonly number[],
-  ): BashSpawnHook =>
+  (kind: SandboxKind, workDir: string, zones: ForbiddenZones, tmpDir: string, access: GateAccess): BashSpawnHook =>
   (ctx: BashSpawnContext) => ({
-    command: sandboxedCommand(kind, workDir, zones, access, blockedPorts, ctx.command),
+    command: sandboxedCommand(kind, workDir, zones, access, ctx.command),
     cwd: workDir,
     env: whitelistEnv(ctx.env, workDir, tmpDir),
   });
@@ -229,15 +207,10 @@ export interface BashSandbox {
   clearRun(runId: string): void;
 }
 
-/**
- * cdpPort 是助理 Chrome 当前的调试端口，没有助理 Chrome 或它起不来时给 null。Chrome 重启后端口会变，
- * 所以每条批准联网的命令拼 profile 前现取一次。bwrap 这次不挡，见 README。
- */
 export function createSandboxedBash(
   workDir: string,
   zones: ForbiddenZones,
   activeRunId: () => string | null = () => null,
-  cdpPort: () => Promise<number | null> = async () => null,
 ): BashSandbox {
   const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
@@ -254,10 +227,8 @@ export function createSandboxedBash(
       const access = runAccess?.get(callId) ?? { network: false, writePaths: [] };
       runAccess?.delete(callId);
       if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
-      const port = kind === "seatbelt" && access.network ? await cdpPort() : null;
-      const blockedPorts = port === null ? [] : [port];
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, blockedPorts),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access),
       });
       return scoped.execute(...args);
     },

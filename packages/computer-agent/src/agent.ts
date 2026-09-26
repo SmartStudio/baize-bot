@@ -54,7 +54,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const chrome = (options.makeChrome ?? startAssistantChrome)({ dataDir, log });
   const browserConfig: AgentRunnerConfig["browser"] = {
     profileDir: chrome.profileDir,
-    cdpUrl: () => chrome.cdpUrl(),
+    connection: () => chrome.connection(),
   };
 
   let link: Link = { phase: "stopped" };

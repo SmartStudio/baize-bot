@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -13,10 +14,14 @@ import { chromeProfileDir, isAlive, profileChromePids, reapProfileChromes } from
 const chromes: AssistantChrome[] = [];
 const dataDirs: string[] = [];
 
-async function poll<T>(get: () => T | undefined, timeoutMs: number, label: string): Promise<T> {
+async function poll<T>(
+  get: () => T | undefined | Promise<T | undefined>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    const value = get();
+    const value = await get();
     if (value !== undefined) return value;
     if (Date.now() > deadline) throw new Error(`等了 ${timeoutMs}ms 还没等到${label}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -31,7 +36,7 @@ async function dataDir(): Promise<string> {
 
 type Host = {
   readonly child: ChildProcessByStdio<null, Readable, Readable>;
-  readonly ready: { readonly pid: number; readonly cdpUrl: string };
+  readonly ready: { readonly pid: number; readonly product: string };
   log(): string;
 };
 
@@ -71,7 +76,7 @@ afterEach(async () => {
 });
 
 describe("助理 Chrome 按需起", () => {
-  it("构造时不起 Chrome，要 CDP 时才起，起不来就 reject，下次再要再起", async () => {
+  it("构造时不起 Chrome，要连接时才起，起不来就 reject，下次再要再起", async () => {
     let launches = 0;
     const chrome = startAssistantChrome({
       dataDir: await dataDir(),
@@ -83,10 +88,10 @@ describe("助理 Chrome 按需起", () => {
     });
     chromes.push(chrome);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(launches, "没人要 CDP 就不起").toBe(0);
+    expect(launches, "没人要连接就不起").toBe(0);
 
-    await expect(chrome.cdpUrl()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
-    await expect(chrome.cdpUrl()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
+    await expect(chrome.connection()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
+    await expect(chrome.connection()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
     expect(launches).toBe(2);
   });
 });
@@ -125,11 +130,20 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
         login: "valid",
         handle: "白泽工厂日记",
       });
-      const targets = (await (await fetch(`${await chrome.cdpUrl()}/json/list`)).json()) as { url: string }[];
-      expect(
-        targets.map((target) => target.url).filter((url) => url.startsWith(`http://127.0.0.1:${address.port}`)),
-        "登录完关掉登录页，不越攒越多",
-      ).toEqual([]);
+      const connection = await chrome.connection();
+      const loginPages = async (): Promise<string[]> => {
+        const { targetInfos } = (await connection.send("Target.getTargets")) as { targetInfos: { url: string }[] };
+        return targetInfos
+          .map((target) => target.url)
+          .filter((url) => url.startsWith(`http://127.0.0.1:${address.port}`));
+      };
+      // closeTarget 先回 success，标签页等 detachedFromTarget 之后才从清单里消失。
+      const settled = await poll(
+        async () => ((await loginPages()).length === 0 ? [] : undefined),
+        3_000,
+        "登录页关掉",
+      ).catch(() => loginPages());
+      expect(settled, "登录完关掉登录页，不越攒越多").toEqual([]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
@@ -175,36 +189,63 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
 // 真起浏览器的用例。macOS 起 Google Chrome，Linux 起 Debian 的 chromium，远程电脑镜像里就是这一种。
 const realChrome = process.platform === "darwin" || (process.platform === "linux" && existsSync("/usr/bin/chromium"));
 
-describe.runIf(realChrome)("助理 Chrome 进程", () => {
-  it("Chrome 进程被杀后自动重起", async () => {
-    const chrome = startAssistantChrome({
-      dataDir: await dataDir(),
-      log: () => {},
-      backoff: { initialMs: 20, maxMs: 20, factor: 1 },
+/** 这个进程在听的 TCP 端口，lsof 查不到就是空数组。 */
+function listeningPorts(pid: number): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    execFile("lsof", ["-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"], (error, stdout) => {
+      if (error !== null && error.code !== 1) reject(error);
+      else resolve(stdout.split("\n").filter((line) => line.startsWith("n")));
     });
+  });
+}
+
+describe.runIf(realChrome)("助理 Chrome 只有一条管道", () => {
+  it("起来以后本机没有它监听的 TCP 端口，profile 里也没有 DevToolsActivePort", async () => {
+    const directory = await dataDir();
+    const chrome = startAssistantChrome({ dataDir: directory, log: () => {} });
     chromes.push(chrome);
-    await chrome.cdpUrl();
-    const firstPid = chrome.pid();
-    if (firstPid === null) throw new Error("Chrome 没有 PID");
+    await chrome.connection();
+    const pid = chrome.pid();
+    if (pid === null) throw new Error("Chrome 没有 PID");
 
-    process.kill(firstPid, "SIGKILL");
-    const restartedPid = await poll(
-      () => {
-        const pid = chrome.pid();
-        return pid !== null && pid !== firstPid ? pid : undefined;
-      },
-      10_000,
-      "Chrome 重起",
-    );
-
-    expect(restartedPid).not.toBe(firstPid);
-    await expect(chrome.cdpUrl()).resolves.toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
+    expect(await listeningPorts(pid), "助理 Chrome 不听任何 TCP 端口").toEqual([]);
+    expect(existsSync(join(chromeProfileDir(directory), "DevToolsActivePort"))).toBe(false);
   }, 20_000);
 
+  it("Chrome 被杀后在途命令以中文错误结束，不自己重起，下次要连接时再起", async () => {
+    const directory = await dataDir();
+    const chrome = startAssistantChrome({ dataDir: directory, log: () => {} });
+    chromes.push(chrome);
+    const connection = await chrome.connection();
+    const firstPid = chrome.pid();
+    if (firstPid === null) throw new Error("Chrome 没有 PID");
+    const { targetId } = await connection.send("Target.createTarget", { url: "about:blank", background: true });
+    const { sessionId } = await connection.send("Target.attachToTarget", { targetId, flatten: true });
+    const inFlight = connection
+      .send("Runtime.evaluate", { expression: "new Promise(() => {})", awaitPromise: true }, String(sessionId))
+      .then(
+        () => "居然回了结果",
+        (error: unknown) => String(error),
+      );
+
+    process.kill(firstPid, "SIGKILL");
+
+    const outcome = await Promise.race([inFlight, delay(5_000).then(() => "等了 5 秒还挂着")]);
+    expect(outcome, "在途命令当场以错误结束").toContain("助理 Chrome 退出了");
+    await delay(500);
+    expect(await profileChromePids(chromeProfileDir(directory)), "没人要就不重起").toEqual([]);
+
+    const again = await chrome.connection();
+    expect(chrome.pid(), "下次要连接时起的是新 Chrome").not.toBe(firstPid);
+    expect(String((await again.send("Browser.getVersion")).product)).toContain("Chrome");
+  }, 30_000);
+});
+
+describe.runIf(realChrome)("助理 Chrome 进程", () => {
   it("收尾时 Chrome 进程一起退出", async () => {
     const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {} });
     chromes.push(chrome);
-    await chrome.cdpUrl();
+    await chrome.connection();
     const pid = chrome.pid();
     if (pid === null) throw new Error("Chrome 没有 PID");
 
@@ -213,26 +254,21 @@ describe.runIf(realChrome)("助理 Chrome 进程", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 20_000);
 
-  it("代理进程被 SIGKILL 后再起，这个 profile 只剩新守护的一个 Chrome，CDP 连得上", async () => {
+  it("代理进程被 SIGKILL 后它的 Chrome 跟着退，再起时这个 profile 只剩新守护的一个 Chrome，管道连得上", async () => {
     const directory = await dataDir();
     const profileDir = chromeProfileDir(directory);
     const first = await startHost(directory);
 
     first.child.kill("SIGKILL");
     await exited(first.child);
-    expect(isAlive(first.ready.pid), "前提：宿主被强杀后它的 Chrome 成了孤儿").toBe(true);
+    await poll(() => (isAlive(first.ready.pid) ? undefined : true), 10_000, "管道断开后旧 Chrome 自己退出");
 
-    const restartedAt = Date.now();
     const second = await startHost(directory);
 
-    // 旧孤儿还占着 profile 时，Chrome 自己的单例会把新起的实例并进孤儿。守护若先认领孤儿，
-    // 就要干等 15 秒 CDP 超时才失败重起，这段时间 Bot 用不了浏览器。
-    expect(Date.now() - restartedAt, `再起的守护认领了孤儿：${second.log()}`).toBeLessThan(10_000);
     expect(await profileChromePids(profileDir), "进程表里这个 profile 只剩一个 Chrome，就是新守护报的那个").toEqual([
       second.ready.pid,
     ]);
-    const version = await fetch(`${second.ready.cdpUrl}/json/version`, { signal: AbortSignal.timeout(2_000) });
-    expect(version.status).toBe(200);
+    expect(second.ready.product, `新守护经管道拿到了版本：${second.log()}`).toContain("Chrome");
 
     second.child.kill("SIGTERM");
     await exited(second.child);

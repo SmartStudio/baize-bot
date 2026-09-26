@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { setTimeout as delay } from "node:timers/promises";
+import { existsSync } from "node:fs";
+import type { Readable, Writable } from "node:stream";
+import { type CdpConnection, connectPipe } from "../../src/cdp.js";
 
 const CHROME_BINARIES: Readonly<Partial<Record<NodeJS.Platform, string>>> = {
   darwin: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -13,12 +14,12 @@ export const chromeBinary = ((): string | null => {
 })();
 
 export interface TestChrome {
-  readonly cdpUrl: string;
+  readonly connection: CdpConnection;
   readonly pid: number;
   stop(): Promise<void>;
 }
 
-// 用例起的 Chrome 走无头模式，不在桌面上弹窗；实机不抢焦点的证据另外采。
+// 用例起的 Chrome 走无头模式，不在桌面上弹窗；实机不抢焦点的证据另外采。和产品一样走管道，不开调试端口。
 export async function launchTestChrome(profileDir: string): Promise<TestChrome> {
   if (chromeBinary === null) throw new Error("这台电脑上没有 Chrome");
   const child = spawn(
@@ -26,80 +27,59 @@ export async function launchTestChrome(profileDir: string): Promise<TestChrome> 
     [
       `--user-data-dir=${profileDir}`,
       "--headless=new",
-      "--remote-debugging-port=0",
-      "--remote-debugging-address=127.0.0.1",
+      "--remote-debugging-pipe",
       "--no-first-run",
       "--no-default-browser-check",
       "--password-store=basic",
       "--use-mock-keychain",
       "about:blank",
     ],
-    { stdio: "ignore" },
+    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] },
   );
   const pid = child.pid;
   if (pid === undefined) throw new Error("Chrome 没有 PID");
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
-  const deadline = Date.now() + 15_000;
-  for (;;) {
-    try {
-      const port = Number(readFileSync(`${profileDir}/DevToolsActivePort`, "utf8").split("\n", 1)[0]);
-      const url = `http://127.0.0.1:${port}`;
-      const response = await fetch(`${url}/json/version`);
-      if (response.ok) {
-        return {
-          cdpUrl: url,
-          pid,
-          stop: async () => {
-            child.kill("SIGKILL");
-            await exited;
-          },
-        };
-      }
-    } catch {
-      // Chrome 还没写 DevToolsActivePort 或还没开始听。
-    }
-    if (Date.now() > deadline) {
-      child.kill("SIGKILL");
-      throw new Error("等了 15s 还没等到 Chrome 的 CDP");
-    }
-    await delay(50);
+  const toChrome = child.stdio[3] as Writable;
+  const fromChrome = child.stdio[4] as Readable;
+  void exited.then(() => {
+    toChrome.destroy();
+    fromChrome.destroy();
+  });
+  const connection = connectPipe({ toChrome, fromChrome });
+  const stop = async (): Promise<void> => {
+    child.kill("SIGKILL");
+    await exited;
+  };
+  try {
+    await connection.send("Browser.getVersion");
+  } catch (error) {
+    await stop();
+    throw error;
   }
+  return { connection, pid, stop };
 }
 
 export interface PageTarget {
   readonly id: string;
   readonly url: string;
-  readonly webSocketDebuggerUrl: string;
+  readonly connection: CdpConnection;
 }
 
-export async function pageTargets(cdpUrl: string): Promise<PageTarget[]> {
-  const response = await fetch(`${cdpUrl}/json/list`);
-  const list = (await response.json()) as Array<PageTarget & { readonly type: string }>;
-  return list.filter((target) => target.type === "page");
+export async function pageTargets(connection: CdpConnection): Promise<PageTarget[]> {
+  const { targetInfos } = (await connection.send("Target.getTargets")) as {
+    targetInfos: Array<{ targetId: string; type: string; url: string }>;
+  };
+  return targetInfos
+    .filter((target) => target.type === "page")
+    .map((target) => ({ id: target.targetId, url: target.url, connection }));
 }
 
 async function sendIn(target: PageTarget, method: string, params: Record<string, unknown>): Promise<unknown> {
-  const socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise<void>((resolve, reject) => {
-    socket.addEventListener("open", () => resolve(), { once: true });
-    socket.addEventListener("error", () => reject(new Error("连不上标签页的 CDP")), { once: true });
-  });
+  const { sessionId } = await target.connection.send("Target.attachToTarget", { targetId: target.id, flatten: true });
   try {
-    socket.send(JSON.stringify({ id: 1, method, params }));
-    return await new Promise((resolve, reject) => {
-      socket.addEventListener("message", (event) => {
-        const message = JSON.parse(String(event.data)) as {
-          id?: number;
-          result?: unknown;
-          error?: { message: string };
-        };
-        if (message.id !== 1) return;
-        if (message.error !== undefined) reject(new Error(message.error.message));
-        else resolve(message.result);
-      });
-    });
+    return await target.connection.send(method, params, String(sessionId));
   } finally {
-    socket.close();
+    await target.connection.send("Target.detachFromTarget", { sessionId }).catch(() => undefined);
   }
 }
 
@@ -118,7 +98,27 @@ export async function captureIn(target: PageTarget): Promise<string> {
 }
 
 /** 用前台方式开一个标签页，冒充用户自己正在看的那一页。 */
-export async function openUserTab(cdpUrl: string, url: string): Promise<PageTarget> {
-  const response = await fetch(`${cdpUrl}/json/new?${encodeURIComponent(url)}`, { method: "PUT" });
-  return (await response.json()) as PageTarget;
+export async function openUserTab(connection: CdpConnection, url: string): Promise<PageTarget> {
+  const { targetId } = await connection.send("Target.createTarget", { url });
+  return { id: String(targetId), url, connection };
+}
+
+/**
+ * Target.closeTarget 先回 success，标签页等 detachedFromTarget 之后才从清单里消失，所以看关没关要等它落定。
+ * 等到 settled 成立或 3 秒到头，回最后一次看到的清单，由用例自己断言。
+ */
+export async function settledPages(
+  connection: CdpConnection,
+  settled: (pages: readonly PageTarget[]) => boolean,
+): Promise<PageTarget[]> {
+  const deadline = Date.now() + 3_000;
+  for (;;) {
+    const pages = await pageTargets(connection);
+    if (settled(pages) || Date.now() > deadline) return pages;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+export async function settledPageCount(connection: CdpConnection, expected: number): Promise<number> {
+  return (await settledPages(connection, (pages) => pages.length === expected)).length;
 }

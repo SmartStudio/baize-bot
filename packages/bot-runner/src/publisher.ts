@@ -11,7 +11,6 @@ import { readFile, realpath } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserConfig } from "./browser.js";
-import { browserSocketUrl, type CdpConnection, connectCdp } from "./cdp.js";
 import { draftCopyName } from "./drafts.js";
 import { botDirs } from "./paths.js";
 
@@ -106,11 +105,9 @@ export interface PublisherDeps {
   /** 配图只认 `<dataDir>/<publish_draft.botId>/drafts/` 里起草时的拷贝。 */
   readonly dataDir: string;
   /** 本机电脑代理给的助理浏览器。远程电脑没有。 */
-  readonly browser: Pick<BrowserConfig, "cdpUrl"> | null;
+  readonly browser: Pick<BrowserConfig, "connection"> | null;
   readonly xiaohongshu?: XiaohongshuPages;
   readonly limits?: PublishLimits;
-  /** 只给测试换，用来看超时之后还有没有命令发给标签页。 */
-  readonly connect?: (socketUrl: string) => Promise<CdpConnection>;
 }
 
 const DETAIL_MAX = 200;
@@ -168,7 +165,7 @@ function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-type DepsWithBrowser = PublisherDeps & { readonly browser: Pick<BrowserConfig, "cdpUrl"> };
+type DepsWithBrowser = PublisherDeps & { readonly browser: Pick<BrowserConfig, "connection"> };
 
 interface PublishTab {
   send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -183,16 +180,13 @@ async function inBackgroundTab<T>(
   work: (tab: PublishTab) => Promise<T>,
 ): Promise<T> {
   let closed = false;
-  const opening = deps.browser
-    .cdpUrl()
-    .then(browserSocketUrl)
-    .then(deps.connect ?? connectCdp);
+  const opening = deps.browser.connection();
   const creating = opening.then((connection) =>
     connection.send("Target.createTarget", { url: "about:blank", background: true }),
   );
   creating.catch(() => undefined);
   const flow = (async () => {
-    const connection: CdpConnection = await opening;
+    const connection = await opening;
     const { targetId } = await creating;
     const attached = await connection.send("Target.attachToTarget", { targetId, flatten: true });
     const sessionId = String(attached.sessionId);
@@ -214,12 +208,11 @@ async function inBackgroundTab<T>(
   } finally {
     closed = true;
     clearTimeout(timer);
+    // 管道是这台电脑共用的，只关自己这一页，不断连接。
     const connection = await opening.catch(() => null);
     const target = await creating.catch(() => null);
-    if (connection !== null) {
-      if (target !== null) await connection.send("Target.closeTarget", { targetId: target.targetId }).catch(() => null);
-      connection.close();
-    }
+    if (connection !== null && target !== null)
+      await connection.send("Target.closeTarget", { targetId: target.targetId }).catch(() => null);
   }
 }
 

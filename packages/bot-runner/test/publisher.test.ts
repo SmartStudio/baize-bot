@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { AccountId, ControlToAgent, DraftId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { type CdpConnection, connectCdp } from "../src/cdp.js";
+import { createBotBrowser } from "../src/browser.js";
+import type { CdpConnection } from "../src/cdp.js";
 import { type PublishDraftMessage, publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "../src/publisher.js";
 import {
   chromeBinary,
@@ -209,6 +210,9 @@ async function startCreatorSite(mode: SiteMode, publishDelayMs = 0) {
 
 type CreatorSite = Awaited<ReturnType<typeof startCreatorSite>>;
 
+const textOf = (content: readonly ({ type: "text"; text: string } | { type: "image" })[]): string =>
+  content.map((block) => (block.type === "text" ? block.text : "")).join("");
+
 const sha256Of = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
 /** 照起草工具的规矩放一张拷贝：`<dataDir>/<botId>/drafts/<sha256>.<扩展名>`。 */
@@ -248,7 +252,7 @@ const noBrowserCalls = (): { deps: (dataDir: string) => PublisherDeps; calls: ()
     deps: (dataDir) => ({
       dataDir,
       browser: {
-        cdpUrl: async () => {
+        connection: async () => {
           calls += 1;
           throw new Error("不该碰浏览器");
         },
@@ -386,7 +390,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
   };
   const depsFor = (creator: CreatorSite, limits = { totalMs: 30_000, stepMs: 3_000 }): PublisherDeps => ({
     dataDir,
-    browser: { cdpUrl: async () => chrome.cdpUrl },
+    browser: { connection: async () => chrome.connection },
     xiaohongshu: {
       ...XIAOHONGSHU_PAGES,
       publishUrl: `${creator.url}/publish/publish`,
@@ -395,7 +399,16 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     limits,
   });
   const tabIds = async (): Promise<string[]> =>
-    (await pageTargets(chrome.cdpUrl)).map((target) => target.id).toSorted();
+    (await pageTargets(chrome.connection)).map((target) => target.id).toSorted();
+  // closeTarget 先回 success，标签页要等 detachedFromTarget 之后才从清单里消失。
+  const tabsSettleTo = async (expected: readonly string[]): Promise<string[]> => {
+    const deadline = Date.now() + 3_000;
+    for (;;) {
+      const ids = await tabIds();
+      if (ids.join() === expected.join() || Date.now() > deadline) return ids;
+      await delay(50);
+    }
+  };
 
   it("发出一条笔记，回 ok 带笔记链接", async () => {
     const creator = await site("normal");
@@ -438,7 +451,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
 
   it("发完标签页关掉，建标签页用的是 background", async () => {
     const creator = await site("normal");
-    const user: PageTarget = await openUserTab(chrome.cdpUrl, `${creator.url}/user`);
+    const user: PageTarget = await openUserTab(chrome.connection, `${creator.url}/user`);
     const before = await tabIds();
 
     const { result } = await publishDraft(
@@ -447,7 +460,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     );
 
     expect(result.status).toBe("ok");
-    expect(await tabIds(), "发布器的标签页发完就关，别的标签页一个不少").toEqual(before);
+    expect(await tabsSettleTo(before), "发布器的标签页发完就关，别的标签页一个不少").toEqual(before);
     expect(await evaluateIn(user, "window.hidden"), "用户那页从头到尾没被挤到后面").toEqual([]);
     expect(await evaluateIn(user, "document.visibilityState")).toBe("visible");
     expect(creator.publications[0]?.hasFocus, "后台页开了焦点模拟，页面照有焦点的样子跑").toBe(true);
@@ -463,7 +476,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     );
 
     expect(result).toMatchObject({ status: "failed", reason: "login_expired" });
-    expect(await tabIds(), "失败也关标签页").toEqual(before);
+    expect(await tabsSettleTo(before), "失败也关标签页").toEqual(before);
   });
 
   it("发布按钮不见了回 page_changed，detail 说是哪一步", async () => {
@@ -520,7 +533,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     expect(result).toMatchObject({ status: "failed", reason: "error" });
     expect(result.status === "failed" ? result.detail : "").toContain("超时");
     expect(Date.now() - started, "到总时限就停，不等单条 CDP 命令的 30 秒").toBeLessThan(10_000);
-    expect(await tabIds(), "超时也关标签页").toEqual(before);
+    expect(await tabsSettleTo(before), "超时也关标签页").toEqual(before);
     expect(creator.requests(), "发布页确实被请求过，卡在它不回").toBeGreaterThan(0);
   });
 
@@ -529,30 +542,71 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     let closing = false;
     const afterClose: string[] = [];
     // 关标签页故意慢一秒：在这一秒里还往标签页发的命令，真页面上就可能接着点了发布。
-    const connect = async (socketUrl: string): Promise<CdpConnection> => {
-      const connection = await connectCdp(socketUrl);
-      return {
-        ...connection,
-        send: async (method, params, sessionId) => {
-          if (closing && sessionId !== undefined) afterClose.push(method);
-          if (method === "Target.closeTarget") {
-            closing = true;
-            await delay(1_000);
-          }
-          return connection.send(method, params, sessionId);
-        },
-      };
+    const shared = chrome.connection;
+    const slowClose: CdpConnection = {
+      onEvent: (listener) => shared.onEvent(listener),
+      isOpen: () => shared.isOpen(),
+      send: async (method, params, sessionId) => {
+        if (closing && sessionId !== undefined) afterClose.push(method);
+        if (method === "Target.closeTarget") {
+          closing = true;
+          await delay(1_000);
+        }
+        return shared.send(method, params, sessionId);
+      },
     };
 
     const { result } = await publishDraft(
       draftMessage("draft-late-write", { title: "t", text: "正文", images: [draftCopy(dataDir, "迟写")] }),
-      { ...depsFor(creator, { totalMs: 2_500, stepMs: 60_000 }), connect },
+      { ...depsFor(creator, { totalMs: 2_500, stepMs: 60_000 }), browser: { connection: async () => slowClose } },
     );
 
     expect(result).toMatchObject({ status: "failed", reason: "error" });
     expect(result.status === "failed" ? result.detail : "", "超时时正卡在等发布按钮").toContain("点发布");
     expect(closing, "超时确实去关了标签页").toBe(true);
     expect(afterClose, "超时之后一条命令都不再发给发布标签页").toEqual([]);
+  });
+
+  it("Bot 浏览器和发布器同时用一条管道，各走各的 session 互不串", async () => {
+    const creator = await site("normal", 400);
+    const slow = createServer((_request, response) => {
+      setTimeout(() => {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end('<!doctype html><meta charset="utf-8"><title>BOT-慢页</title><p>BOT-TEXT</p>');
+      }, 2_000);
+    });
+    await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve));
+    const address = slow.address();
+    if (address === null || typeof address === "string") throw new Error("慢页没有端口");
+    const bot = createBotBrowser({ profileDir, connection: async () => chrome.connection });
+    const open = bot.tools.find((tool) => tool.name === "browser_open");
+    const snapshot = bot.tools.find((tool) => tool.name === "browser_snapshot");
+    if (open === undefined || snapshot === undefined) throw new Error("没有浏览器工具");
+    try {
+      const publishing = publishDraft(
+        draftMessage("draft-shared", { title: "同时发", text: "正文", images: [draftCopy(dataDir, "同时")] }),
+        depsFor(creator),
+      );
+      await delay(200);
+      const opened = await open.execute(
+        "call-open",
+        { url: `http://127.0.0.1:${address.port}/slow` } as never,
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      const { result } = await publishing;
+      const after = await snapshot.execute("call-snapshot", {} as never, undefined, undefined, undefined as never);
+
+      expect(textOf(opened.content), "Bot 的导航等到了自己那页加载完").toContain("已打开「BOT-慢页」");
+      expect(result.status, "Bot 在旁边开页，发布照常完成").toBe("ok");
+      expect(creator.publications.map((one) => one.title)).toEqual(["同时发"]);
+      expect(textOf(after.content), "发布器关掉自己的页，Bot 的页还在原地，不当成自己断开").toContain("BOT-TEXT");
+      expect(textOf(after.content)).not.toContain("重开过");
+    } finally {
+      await bot.close();
+      await new Promise<void>((resolve) => slow.close(() => resolve()));
+    }
   });
 
   it("发出去了但读不到笔记链接，回 ok 带笔记管理页地址，不让用户重发", async () => {

@@ -63,6 +63,7 @@ import {
   openUserTab,
   type PageTarget,
   pageTargets,
+  settledPages,
   type TestChrome,
 } from "./helpers/chrome.js";
 import { MCP_CHART_BYTES, startFakeMcp } from "./helpers/mcp.js";
@@ -4574,7 +4575,7 @@ describe("运行器的草稿", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       dataDir,
-      browser: { profileDir, cdpUrl: () => Promise.reject(new Error("这条用例不开浏览器")) },
+      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")) },
       accounts: ACCOUNTS,
       extensionTools: [],
       script: scriptRecording(seen, [
@@ -5051,7 +5052,7 @@ describe("助理浏览器的禁区和看图", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, cdpUrl: () => Promise.reject(new Error("这条用例不开浏览器")) },
+      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")) },
       script: scriptRecording(seen, [["看看 cookie", callTool("bash", { command: `cat ${cookies}` })]]),
     });
 
@@ -5080,7 +5081,7 @@ describe("助理浏览器的禁区和看图", () => {
     };
     const browser = {
       profileDir: join(tmpdir(), "baize-no-such-profile"),
-      cdpUrl: () => Promise.reject(new Error("不开")),
+      connection: () => Promise.reject(new Error("不开")),
     };
 
     expect((await toolsOf(browser)).toSorted()).toEqual([
@@ -5091,6 +5092,38 @@ describe("助理浏览器的禁区和看图", () => {
       "browser_type",
     ]);
     expect(await toolsOf(undefined), "远程电脑没有助理 Chrome").toEqual([]);
+  });
+
+  it("建 Bot 的 bash、跑不联网和批了联网的命令，都不去拉起助理 Chrome", async () => {
+    let asked = 0;
+    const refuse = (): Promise<never> => {
+      asked += 1;
+      return Promise.reject(new Error("这条用例不该起助理 Chrome"));
+    };
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      script: scriptPlans(requests, {
+        跑命令: [
+          ["bash", { command: "echo 本地命令跑了" }],
+          ["bash", { command: "curl -s --max-time 2 http://127.0.0.1:9/; echo 联网命令跑了" }],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "跑命令"));
+
+    const results = toolResultsOf(requests);
+    expect(results).toContain("本地命令跑了");
+    expect(results).toContain("联网命令跑了");
+    expect(
+      shape(h.sent).filter((line) => line === "approval_request"),
+      "联网那条问过、批了",
+    ).toHaveLength(1);
+    expect(asked, "bash 建出来、跑命令都不碰助理 Chrome").toBe(0);
   });
 
   it("工具连接里同名的 browser_open 不注册，没给 browser 时也占着", async () => {
@@ -5276,9 +5309,12 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     await site?.close();
   });
 
-  const browser = (): NonNullable<RunnerConfig["browser"]> => ({ profileDir, cdpUrl: async () => chrome.cdpUrl });
+  const browser = (): NonNullable<RunnerConfig["browser"]> => ({
+    profileDir,
+    connection: async () => chrome.connection,
+  });
   const botTarget = async (path: string, exclude: readonly string[] = []): Promise<PageTarget> => {
-    const found = (await pageTargets(chrome.cdpUrl)).find(
+    const found = (await pageTargets(chrome.connection)).find(
       (target) => target.url === `${site.url}${path}` && !exclude.includes(target.id),
     );
     if (found === undefined) throw new Error(`找不到开着 ${path} 的标签页`);
@@ -5390,7 +5426,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
   });
 
   it("browser_open 在后台开标签页，用户正看的那页还在前面，Bot 的页以为自己有焦点", async () => {
-    const user = await openUserTab(chrome.cdpUrl, `${site.url}/user`);
+    const user = await openUserTab(chrome.connection, `${site.url}/user`);
     const requests: ChatCompletionRequest[] = [];
     const h = await startHarness({
       bots: ["bot-1"],
@@ -5430,7 +5466,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     await botTarget("/b");
   });
 
-  it("Chrome 重起后地址变了，browser_snapshot 跟着新地址，停在空白页不重开上次的网址，告诉模型上次在哪", async () => {
+  it("Chrome 重起后换了连接，browser_snapshot 跟着新连接，停在空白页不重开上次的网址，告诉模型上次在哪", async () => {
     const firstProfile = mkdtempSync(join(tmpdir(), "baize-runner-chrome-a-"));
     const secondProfile = mkdtempSync(join(tmpdir(), "baize-runner-chrome-b-"));
     usedDataDirs.push(firstProfile, secondProfile);
@@ -5440,7 +5476,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       const h = await startHarness({
         bots: ["bot-1"],
         extensionTools: [],
-        browser: { profileDir: firstProfile, cdpUrl: async () => current.cdpUrl },
+        browser: { profileDir: firstProfile, connection: async () => current.connection },
         script: scriptPlans(requests, {
           "开 a": [["browser_open", { url: `${site.url}/restart-a` }]],
           再看: [["browser_snapshot", {}]],
@@ -5449,12 +5485,12 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       await h.runner.prompt(promptMessage("bot-1", "run-1", "开 a"));
       await current.stop();
       current = await launchTestChrome(secondProfile);
-      const before = (await pageTargets(current.cdpUrl)).length;
+      const before = (await pageTargets(current.connection)).length;
 
       await h.runner.prompt(promptMessage("bot-1", "run-2", "再看一眼"));
 
       expect(site.hits.get("/restart-a"), "重起后不替 Bot 再 GET 一次上次的网址").toBe(1);
-      const pages = await pageTargets(current.cdpUrl);
+      const pages = await pageTargets(current.connection);
       expect(pages.length, "新 Chrome 里建了 Bot 的标签页").toBe(before + 1);
       expect(
         pages.map((target) => target.url),
@@ -5482,8 +5518,10 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
 
     await h.runner.applyConfig(h.config({ bots: [] }));
 
+    const gone = (pages: readonly PageTarget[]): boolean =>
+      !pages.some((target) => target.url === `${site.url}/removed-bot`);
     expect(
-      (await pageTargets(chrome.cdpUrl)).map((target) => target.url),
+      (await settledPages(chrome.connection, gone)).map((target) => target.url),
       "移走的 Bot 不留标签页",
     ).not.toContain(`${site.url}/removed-bot`);
   });
@@ -5516,36 +5554,6 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       expect(shape(h.sent), "闸门认不出路径，送审批").toContain("approval_request");
       expect(seen.toolResults.join(""), "命令真跑了，被沙箱拒").toContain("Operation not permitted");
       expect(seen.toolResults.join("")).not.toContain("cookie-secret-sandbox");
-    },
-  );
-
-  it.skipIf(process.platform !== "darwin")(
-    "用户批了联网的 bash 连不上助理 Chrome 的调试端口，本地别的网站照通",
-    async () => {
-      const port = new URL(chrome.cdpUrl).port;
-      const requests: ChatCompletionRequest[] = [];
-      const h = await startHarness({
-        bots: ["bot-1"],
-        extensionTools: [],
-        approve: true,
-        browser: browser(),
-        script: scriptPlans(requests, {
-          连端口: [
-            ["bash", { command: `curl -s --max-time 3 http://[::ffff:127.0.0.1]:${port}/json/version` }],
-            ["bash", { command: `curl -s --max-time 3 ${site.url}/loopback-ok` }],
-          ],
-        }),
-      });
-
-      await h.runner.prompt(promptMessage("bot-1", "run-1", "连端口"));
-
-      const results = toolResultsOf(requests);
-      expect(
-        shape(h.sent).filter((line) => line === "approval_request"),
-        "两次联网都问了",
-      ).toHaveLength(2);
-      expect(results, "本地别的网站照通").toContain("测试页 loopback-ok");
-      expect(results, "调试端口连不上").not.toContain("webSocketDebuggerUrl");
     },
   );
 });

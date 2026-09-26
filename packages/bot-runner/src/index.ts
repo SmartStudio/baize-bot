@@ -29,6 +29,7 @@ export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type BotConfig = ConfigMessage["bots"][number];
 
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
+export { type CdpConnection, type CdpPipe, connectPipe } from "./cdp.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";
@@ -478,17 +479,7 @@ export function createRunner(config: RunnerConfig): Runner {
     const activeRun = (): ActiveRun | null => bot.active;
     const dirs = ensureBotDirs(bot.dirs);
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
-    const browserConfig = config.browser;
-    // 取地址会顺带把没起的助理 Chrome 起起来，这样端口是定下来的；起不来就没有端口可连，不加这条规则。
-    const cdpPort =
-      browserConfig === undefined
-        ? undefined
-        : () =>
-            browserConfig.cdpUrl().then(
-              (url) => Number(new URL(url).port || 80),
-              () => null,
-            );
-    const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null, cdpPort);
+    const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null);
     if (config.browser !== undefined) bot.browser ??= createBotBrowser(config.browser);
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,

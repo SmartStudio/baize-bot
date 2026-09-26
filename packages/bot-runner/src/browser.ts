@@ -2,17 +2,17 @@ import type { ActionKind, ToolView } from "@baize/shared";
 import { setTimeout as delay } from "node:timers/promises";
 import { type Static, Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
-import { browserSocketUrl, type CdpConnection, connectCdp } from "./cdp.js";
+import type { CdpConnection } from "./cdp.js";
 
 // 助理浏览器：每个 Bot 在助理 Chrome 里有一个自己的后台标签页。只有本机电脑代理给 browser，远程电脑和测试不给就没有这组工具。
 // 标签页各用各的，但 Chrome 和 profile 是所有 Bot 共用的：cookie 和登录态互通，谁都能打开别人登录过的网站。
-// 能列出、关掉、接管别的标签页的只有 CDP 端口，所以这个端口在 browser_open 和每个标签页的网络层各挡一次。
+// 助理 Chrome 不开调试端口，只有电脑代理手里的那条管道能列出、关掉、接管标签页，页面和 bash 都够不着。
 
 export interface BrowserConfig {
   /** 整个目录是禁区，闸门和两种沙箱都按它挡。 */
   readonly profileDir: string;
-  /** 每次用都重新取。Chrome 崩溃重起后端口会变，缓存的地址会连到空处。 */
-  cdpUrl(): Promise<string>;
+  /** 每次用都重新取。Chrome 退了会按需重起，缓存的连接已经断了。 */
+  connection(): Promise<CdpConnection>;
 }
 
 // 读页面归 read。点和填会替归属人在网站上留下动作，归 engage，默认问。没有发布工具，发帖只走草稿加发布器。
@@ -36,10 +36,10 @@ type Tab =
   | { readonly kind: "closed" }
   | {
       readonly kind: "open";
-      readonly endpoint: string;
       readonly connection: CdpConnection;
       readonly sessionId: string;
       readonly targetId: string;
+      readonly unsubscribe: () => void;
     };
 type OpenTab = Extract<Tab, { kind: "open" }>;
 
@@ -51,12 +51,6 @@ interface Seen {
   readonly elements: readonly string[];
 }
 const NOTHING_SEEN: Seen = { url: null, elements: [] };
-
-/** 建好了、还没关掉的标签页。关的时候连接已断，就等下次连上同一个 Chrome 再关。 */
-interface Leftover {
-  readonly endpoint: string;
-  readonly targetId: string;
-}
 
 // type=password 之外，autocomplete 标成密码的普通输入框也是密码框。
 const PASSWORD_SELECTOR =
@@ -124,13 +118,7 @@ const TYPE_PARAMS = Type.Object({
   submit: Type.Optional(Type.Boolean({ description: "填完按回车" })),
 });
 
-const portOf = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
-
-/**
- * 只开 http 和 https，也不开助理 Chrome 自己的 CDP 端口：那里能列出所有标签页、关掉或接管别的 Bot 和用户的页。
- * 只看端口不看主机：0.0.0.0、localhost.、[::ffff:127.0.0.1] 都通到本机，列不全。本机以外同端口的网站也一起挡了。
- */
-function checkedUrl(raw: string, endpoint: string): string {
+function checkedUrl(raw: string): string {
   let url: URL;
   try {
     url = new URL(raw);
@@ -139,7 +127,6 @@ function checkedUrl(raw: string, endpoint: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new Error(`只能打开 http 和 https 网址，「${raw}」不行`);
-  if (portOf(url) === portOf(new URL(endpoint))) throw new Error("不能打开助理 Chrome 自己的调试端口");
   return url.href;
 }
 
@@ -174,8 +161,7 @@ const withNotice = (notice: string | null, text: string): string => (notice === 
 export function createBotBrowser(config: BrowserConfig): BotBrowser {
   let tab: Tab = { kind: "closed" };
   let seen: Seen = NOTHING_SEEN;
-  let lastEndpoint: string | null = null;
-  let leftovers: Leftover[] = [];
+  let lastConnection: CdpConnection | null = null;
   const loadWaiters = new Set<() => void>();
   // 一个 Bot 的浏览器调用排成一队，重建标签页和导航不交叠。
   let queue: Promise<unknown> = Promise.resolve();
@@ -191,27 +177,11 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     seen = { url: next, elements: elements ?? (next === seen.url ? seen.elements : []) };
   };
 
-  const closeTarget = async (connection: CdpConnection, endpoint: string, targetId: string): Promise<void> => {
-    const closed = connection.isOpen()
-      ? await connection.send("Target.closeTarget", { targetId }).then(
-          () => true,
-          () => false,
-        )
-      : false;
-    if (!closed) leftovers.push({ endpoint, targetId });
-  };
-
+  // 管道已断时这一页跟着 Chrome 一起没了，关不关得掉都不用记。
   const retire = async (open: OpenTab): Promise<void> => {
     if (tab === open) tab = { kind: "closed" };
-    await closeTarget(open.connection, open.endpoint, open.targetId);
-    open.connection.close();
-  };
-
-  // 别的端点上的遗留页随那个 Chrome 一起没了，只收当前这个。
-  const reap = async (connection: CdpConnection, endpoint: string): Promise<void> => {
-    const mine = leftovers.filter((leftover) => leftover.endpoint === endpoint);
-    leftovers = [];
-    for (const { targetId } of mine) await connection.send("Target.closeTarget", { targetId }).catch(() => undefined);
+    open.unsubscribe();
+    await open.connection.send("Target.closeTarget", { targetId: open.targetId }).catch(() => undefined);
   };
 
   const evaluate = async (open: OpenTab, expression: string): Promise<unknown> => {
@@ -226,8 +196,6 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     loadWaiters.add(loaded);
     try {
       const result = await send(open, "Page.navigate", { url });
-      if (result.errorText === "net::ERR_BLOCKED_BY_CLIENT")
-        throw new Error("没打开：这个网址或它跳转的地方是助理 Chrome 的调试端口，被挡了");
       if (typeof result.errorText === "string") throw new Error(`没打开：${result.errorText}`);
       // 同一文档里的跳转没有 loaderId，也不会再有 load 事件。
       if (result.loaderId === undefined) return;
@@ -237,72 +205,53 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     }
   };
 
-  const openTab = async (endpoint: string): Promise<OpenTab> => {
-    const connection = await connectCdp(await browserSocketUrl(endpoint));
+  const openTab = async (connection: CdpConnection): Promise<OpenTab> => {
     let targetId: string | null = null;
+    let unsubscribe: (() => void) | null = null;
     try {
-      await reap(connection, endpoint);
       const created = await connection.send("Target.createTarget", { url: "about:blank", background: true });
       targetId = String(created.targetId);
       const attached = await connection.send("Target.attachToTarget", { targetId, flatten: true });
-      const opened: OpenTab = { kind: "open", endpoint, connection, sessionId: String(attached.sessionId), targetId };
-      const cdpPort = portOf(new URL(endpoint));
-      connection.onEvent((event) => {
-        if (event.sessionId !== opened.sessionId && event.params.sessionId !== opened.sessionId) return;
-        if (event.method === "Target.detachedFromTarget" && tab === opened) {
+      const sessionId = String(attached.sessionId);
+      // 管道上是所有 Bot、发布器和登录窗口的事件，只认自己这一页的 session。
+      unsubscribe = connection.onEvent((event) => {
+        if (event.sessionId !== sessionId && event.params.sessionId !== sessionId) return;
+        if (event.method === "Target.detachedFromTarget" && tab.kind === "open" && tab.sessionId === sessionId) {
+          tab.unsubscribe();
           tab = { kind: "closed" };
-          connection.close();
         }
         if (event.method === "Page.loadEventFired") {
           for (const waiter of loadWaiters) waiter();
         }
-        if (event.method === "Fetch.requestPaused") {
-          const request = event.params.request as { url?: unknown } | undefined;
-          let blocked = true;
-          try {
-            blocked = portOf(new URL(String(request?.url))) === cdpPort;
-          } catch {
-            // 解析不了的地址不放行。
-          }
-          const requestId = event.params.requestId;
-          void send(
-            opened,
-            blocked ? "Fetch.failRequest" : "Fetch.continueRequest",
-            blocked ? { requestId, errorReason: "BlockedByClient" } : { requestId },
-          ).catch(() => undefined);
-        }
       });
-      // 网络层再挡一次 CDP 端口：页面脚本跳转、302、点链接、图片和 fetch 都不经过 checkedUrl。
-      // 用 Fetch 不用 Network.setBlockedURLs：实测后者挡不住顶层导航、302 和点链接。
-      // 模式只圈出带这个端口的地址，其余请求不停；「:端口/」也可能出现在路径或查询里，所以回调里再按真端口判。
-      await send(opened, "Fetch.enable", { patterns: [{ urlPattern: `*:${cdpPort}/*`, requestStage: "Request" }] });
+      const opened: OpenTab = { kind: "open", connection, sessionId, targetId, unsubscribe };
       // 后台标签页里 document.hasFocus() 是 false，不少页面据此不响应输入。焦点模拟只骗这一页，不碰桌面焦点。
       await send(opened, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await send(opened, "Page.enable");
       return opened;
     } catch (error) {
-      if (targetId !== null) await closeTarget(connection, endpoint, targetId);
-      connection.close();
+      unsubscribe?.();
+      if (targetId !== null) await connection.send("Target.closeTarget", { targetId }).catch(() => undefined);
       throw error;
     }
   };
 
   /**
-   * 拿当前能用的标签页。Chrome 换了地址或连接断了就关掉旧页、开一页新的停在空白页：
+   * 拿当前能用的标签页。Chrome 重起过或标签页断了就关掉旧页、开一页新的停在空白页：
    * 上次的网址可能是一次提交或一次性链接，替 Bot 再 GET 一遍会重复动作，只在结果里告诉模型上次在哪。
    */
   const ensureTab = async (): Promise<{ readonly open: OpenTab; readonly notice: string | null }> => {
-    const endpoint = await config.cdpUrl();
-    if (tab.kind === "open" && tab.endpoint === endpoint && tab.connection.isOpen()) return { open: tab, notice: null };
+    const connection = await config.connection();
+    if (tab.kind === "open" && tab.connection === connection && connection.isOpen()) return { open: tab, notice: null };
     if (tab.kind === "open") await retire(tab);
-    const opened = await openTab(endpoint);
+    const opened = await openTab(connection);
     tab = opened;
     const notice =
       seen.url === null
         ? null
-        : `${lastEndpoint === endpoint ? "标签页断开后重开过" : "Chrome 重启过"}，上次在 ${seen.url}。` +
+        : `${lastConnection === connection ? "标签页断开后重开过" : "Chrome 重启过"}，上次在 ${seen.url}。` +
           "现在是空白页，之前的编号都作废了，要接着看先 browser_open 这个网址。";
-    lastEndpoint = endpoint;
+    lastConnection = connection;
     seen = NOTHING_SEEN;
     return { open: opened, notice };
   };
@@ -350,7 +299,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       execute: (_callId, params) =>
         serial(async () => {
           const { open } = await ensureTab();
-          const url = checkedUrl((params as Static<typeof OPEN_PARAMS>).url, open.endpoint);
+          const url = checkedUrl((params as Static<typeof OPEN_PARAMS>).url);
           await navigate(open, url);
           await rememberUrl(open);
           const title = await evaluate(open, "document.title");
@@ -486,12 +435,9 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
         raw: args as ToolView["raw"],
       };
     },
-    // 连接已断时关不掉的页留在 leftovers 里，Bot 都移走了也不会再有下次连接去收，这一页只能等 Chrome 重启。
     close: () =>
       serial(async () => {
-        if (tab.kind !== "open") return;
-        await reap(tab.connection, tab.endpoint);
-        await retire(tab);
+        if (tab.kind === "open") await retire(tab);
       }),
   };
 }

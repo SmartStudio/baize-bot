@@ -68,7 +68,7 @@ bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行�
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。批准联网时，给了 `config.browser` 就在放宽规则之后追加 `(deny network-outbound (remote tcp "*:<CDP 端口>"))`，端口每次拼 profile 时从 `cdpUrl()` 现取，取不到就不加；写成 `localhost:<端口>` 会被 `[::ffff:127.0.0.1]` 绕过，所以用 `*`。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连，seatbelt 里不再为它加规则。
 - **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
@@ -250,11 +250,15 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 ## 助理浏览器
 
-`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, cdpUrl() }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`，用 Node 自带的全局 `WebSocket`，一个 Bot 一条连接到浏览器级端点，标签页的命令走 flatten 模式的 `sessionId`。
+`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, connection() }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`。
+
+助理 Chrome 用 `--remote-debugging-pipe` 起，不开任何 TCP 端口：Chrome 从 fd 3 读命令、往 fd 4 写回复和事件，一条消息一段 JSON，以 NUL 结尾。一台电脑只有这一条管道，由电脑代理起 Chrome 时建好，`connectPipe` 包成 `CdpConnection`，`connection()` 回的就是它。所有 Bot 的浏览器工具、发布器和登录窗口都挂在这条管道上，各自 `Target.attachToTarget({ flatten: true })` 自己的标签页，命令带 `sessionId`，事件按 `sessionId` 分给各自的标签页，挂上的监听在关页时摘掉。
+
+Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起它，第一次有人调 `connection()` 才起，起完用 `Browser.getVersion` 判就绪。Chrome 退出或管道断了，在途命令当场以「助理 Chrome 退出了，这条命令没做完」结束，之后的命令直接报错；电脑代理清掉这份状态，不自己重起，下次有人调 `connection()` 再起一个新的。管道一断 Chrome 自己退出，电脑代理被 SIGKILL 也不留孤儿 Chrome。
 
 | 工具 | 动作 | 做什么 |
 | --- | --- | --- |
-| `browser_open` | `read`，放行 | 在自己的后台标签页打开 http 或 https 网址，回标题和网址。目标端口等于助理 Chrome 的 CDP 端口就拒，不看主机名 |
+| `browser_open` | `read`，放行 | 在自己的后台标签页打开 http 或 https 网址，回标题和网址 |
 | `browser_snapshot` | `read`，放行 | 回标题、网址、正文（`innerText`，截到 8000 字）和编号的可点元素 |
 | `browser_screenshot` | `read`，放行 | 截当前这一屏，PNG 作为图片进模型 |
 | `browser_click` | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent` |
@@ -279,11 +283,11 @@ snapshot 的形状：
 
 编号按 DOM 顺序，只收看得见的元素，最多 200 个，编号表挂在页面上，下一次 snapshot 重建。`type="password"`，以及 `autocomplete` 含 `current-password` 或 `new-password` 的输入框都算密码框，只报「密码框」不报值，`document.cookie` 和 `Set-Cookie` 都不读。截图前把所有密码框的值清空，截完在 `finally` 里填回去，页面不收到 input 事件。
 
-**标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新取 `cdpUrl()`；地址变了或连接断了（Chrome 崩溃重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页，关不掉的记下来，下次同一个 Chrome 里建页前再关。
+**标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 
-**CDP 端口。** 能列出、关掉、接管别的标签页的只有 CDP 端口，所以挡两层。`browser_open` 只看目标端口（没写端口按协议默认端口算），等于 CDP 端口就拒，`127.0.0.1`、`localhost.`、`0.0.0.0`、`[::ffff:127.0.0.1]` 这类写法都挡。每个标签页的 session 上开 `Fetch.enable`，pattern 是 `*:<端口>/*`，`requestStage` 为 `Request`，暂停的请求再按端口精确比一次，是就 `failRequest`（`BlockedByClient`），不是就放行；302、点链接、页面脚本跳转、图片等子资源都在这里挡。选 `Fetch` 不选 `Network.setBlockedURLs`：原型实测后者挡不住顶层导航和 302。Chrome 启动不带 `--remote-allow-origins`，页面里的 WebSocket 连不上 CDP。跨源 iframe、Worker 和 Service Worker 的请求不走这个 session，没有挡，见报告。
+**没有调试端口。** 原来的 `--remote-debugging-port=0` 会在本机开一个 CDP 端口，能列出、关掉、接管所有标签页，所以当时挡了三层：`browser_open` 按端口拒、每个标签页开 `Fetch.enable` 拦跳到这个端口的请求、seatbelt 拒批了联网的 bash 连它。换成管道之后本机没有这个端口，这三层一起删了。管道的两个 fd 只在电脑代理进程和 Chrome 之间，Bot 的 bash 是另起的沙箱进程，拿不到。Chrome 的 SingletonSocket 还在，能连上它的进程可以让助理 Chrome 打开任意网址，但拿不到调试端口，这条另外收。
 
-**禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。批准联网的 bash 在 seatbelt 里另外拒连 CDP 端口，见「统一闸门和沙箱」；bwrap 这边还没挡。
+**禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。
 
 **看图。** 网关 provider 的 `input` 是 `["text", "image"]`，截图和工具连接回的图片都以 `ImageContent` 进模型。工具连接回的图只收 `MODEL_IMAGE_TYPES`（png、jpeg、gif、webp），单张超过 `MODEL_IMAGE_MAX_BYTES`（5 MiB）的和别的格式各换成一行中文说明，不进模型。`src/bot-session.ts` 在 Pi 的 `context` 事件里从新往旧数图片块，只留最近 `KEPT_IMAGES = 3` 张原图，更早的换成一行「（之前的截图已省略）」，免得每轮请求超过上游 20 MiB。只改发给上游的这一份，会话 JSONL 里的原消息不动。
 
@@ -291,7 +295,7 @@ snapshot 的形状：
 
 控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
 
-- **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `cdpUrl()`，不缓存。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
+- **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
 - **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。每张图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。
 - **一台电脑一次只发一条。** 小红书同一个号只能登一处，同时发会互相挤。进程内一条 promise 队列，第二条等第一条连同读链接整个做完。验配图也在队里做，入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。每条的总时限是 `PUBLISH_LIMITS.totalMs`（3 分钟），出队验完配图、开始连 Chrome 时起算，到了回 `error`、关标签页。等某一个元素的时限是 `stepMs`（1 分钟）。
@@ -317,8 +321,6 @@ snapshot 的形状：
 | `noteUrl` | `https://www.xiaohongshu.com/explore/<id>`，只在读不到带 token 的原链接时兜底 | 推断 | 没有 |
 
 xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwener/OpenCLI。真页面要登录才看得到，表里每一条都要在实机关卡里核一遍。
-
-发布器的标签页没有开 `Fetch.enable` 挡 CDP 端口：它只打开表里的两个固定网址，不打开模型给的地址。
 
 `test/publisher.test.ts` 钉住这些：前四条不需要 Chrome，其余用真 Chrome 加一个照这张表搭的假创作者中心，找不到 Chrome 时跳过。
 
