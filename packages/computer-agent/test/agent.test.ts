@@ -102,6 +102,7 @@ function runnerOf(
 
 const configMessage = {
   type: "config",
+  generation: 1,
   bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "客服 Bot" }],
   tools: [],
   accounts: [],
@@ -340,6 +341,7 @@ describe("电脑代理连控制面", () => {
     const socket = await server.waitForSocket(1);
     const secondConfig = {
       ...configMessage,
+      generation: 2,
       bots: [{ id: "bot-1", role: "member", name: "新版小服", tag: "", description: "新版客服 Bot" }],
     };
 
@@ -431,7 +433,7 @@ describe("电脑代理连控制面", () => {
     });
 
     socket.send(JSON.stringify({ ...configMessage, skills: [skill] }));
-    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify({ ...configMessage, generation: 2 }));
     socket.send(JSON.stringify(promptMessage));
 
     await server.waitForMessage("bot_text", 1, 3000);
@@ -473,9 +475,10 @@ describe("电脑代理连控制面", () => {
     socket.send(JSON.stringify(oldConfig));
     socket.send(JSON.stringify(promptMessage));
     const rejected = await server.waitForMessage("agent_error", 1, 3000);
-    expect(rejected, "被拒的 config 要报给控制面，detail 写校验不过的字段路径").toEqual({
+    expect(rejected, "被拒的 config 要报给控制面，detail 写校验不过的字段路径，generation 说明拒的是哪一代").toEqual({
       type: "agent_error",
       code: "config_rejected",
+      generation: 1,
       detail: "config 不合这个电脑代理的版本，校验不过的字段：accountsProxy",
     });
     expect(
@@ -486,8 +489,109 @@ describe("电脑代理连控制面", () => {
     expect(server.messages.filter((message) => message.type === "config_applied")).toEqual([]);
 
     socket.send(JSON.stringify(configMessage));
-    expect(await server.waitForMessage("config_applied", 1, 3000)).toEqual({ type: "config_applied" });
+    expect(await server.waitForMessage("config_applied", 1, 3000)).toEqual({ type: "config_applied", generation: 1 });
     expect(runnerCalls().configSkills, "合格的 config 建出运行器").toHaveLength(1);
+  });
+
+  it("代际比已应用的旧的 config 丢掉不回执；回执带上这条 config 的代际；重连后代际从头算", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const named = (generation: number, name: string) => ({
+      ...configMessage,
+      generation,
+      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+    });
+
+    socket.send(JSON.stringify(named(2, "第二代")));
+    expect(await server.waitForMessage("config_applied", 1, 3000), "回执说的是收下了哪一代").toEqual({
+      type: "config_applied",
+      generation: 2,
+    });
+    // 控制面并发重发时，先开始读快照的那条可能后到：它的代际更小，里面的账号状态是旧的。
+    socket.send(JSON.stringify(named(1, "第一代")));
+    socket.send(JSON.stringify(named(3, "第三代")));
+    expect(await server.waitForMessage("config_applied", 2, 3000)).toEqual({ type: "config_applied", generation: 3 });
+    expect(
+      runnerCalls().appliedConfigs.map((config) => config.bots[0]?.name),
+      "第一代比已应用的第二代旧，不交给运行器",
+    ).toEqual(["第三代"]);
+    expect(server.messages.filter((message) => message.type === "config_applied")).toHaveLength(2);
+
+    const { accountsProxy: _dropped, ...oldShape } = named(4, "第四代");
+    socket.send(JSON.stringify(oldShape));
+    expect((await server.waitForMessage("agent_error", 1, 3000)).generation, "拒收也说清拒的是哪一代").toBe(4);
+
+    socket.terminate();
+    const second = await server.waitForSocket(2, 5000);
+    await server.waitForMessage("hello", 2, 5000);
+    second.send(JSON.stringify(named(1, "重连后的第一代")));
+    expect(await server.waitForMessage("config_applied", 3, 3000), "代际按连接算，新连接的第一代不算旧").toEqual({
+      type: "config_applied",
+      generation: 1,
+    });
+    expect(runnerCalls().appliedConfigs.map((config) => config.bots[0]?.name)).toEqual(["第三代", "重连后的第一代"]);
+  });
+
+  it("旧连接的 config 还在 applyConfig 里时重连：它做完不更新代际、不经新连接回执，新连接的第一代照常生效", async () => {
+    let releaseApplyConfig!: () => void;
+    const applyConfigDone = new Promise<void>((resolve) => {
+      releaseApplyConfig = resolve;
+    });
+    const server = startControlPlane();
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      backoff: { initialMs: 50, maxMs: 50, factor: 1 },
+      makeRunner: (config) => runnerOf(config, runnerCalls(), applyConfigDone),
+    });
+    const named = (generation: number, name: string) => ({
+      ...configMessage,
+      generation,
+      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+    });
+    const first = await server.waitForSocket(1);
+    first.send(JSON.stringify(named(1, "第一条连接的第一代")));
+    await server.waitForMessage("config_applied", 1, 3000);
+
+    first.send(JSON.stringify(named(7, "第一条连接的第七代")));
+    await poll(() => (runnerCalls().appliedConfigs.length === 1 ? true : undefined), 3000, "旧连接进入 applyConfig");
+    first.terminate();
+    const second = await server.waitForSocket(2, 5000);
+    await server.waitForMessage("hello", 2, 5000);
+    second.send(JSON.stringify(named(1, "第二条连接的第一代")));
+    releaseApplyConfig();
+
+    expect(await server.waitForMessage("config_applied", 2, 3000), "新连接只确认自己的第一代").toEqual({
+      type: "config_applied",
+      generation: 1,
+    });
+    expect(
+      server.messages.filter((message) => message.type === "config_applied"),
+      "旧连接那一代做完了也不回执",
+    ).toEqual([
+      { type: "config_applied", generation: 1 },
+      { type: "config_applied", generation: 1 },
+    ]);
+    expect(
+      runnerCalls().appliedConfigs.map((config) => config.bots[0]?.name),
+      "运行器最后停在新连接那份配置上",
+    ).toEqual(["第一条连接的第七代", "第二条连接的第一代"]);
+  });
+
+  it("已应用新代际后，晚到的旧代际 config 就算不合版本也按代际丢掉，不回 config_rejected", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify({ ...configMessage, generation: 3 }));
+    await server.waitForMessage("config_applied", 1, 3000);
+
+    const { accountsProxy: _dropped, ...staleOldShape } = { ...configMessage, generation: 2 };
+    socket.send(JSON.stringify(staleOldShape));
+    socket.send(JSON.stringify({ ...configMessage, generation: 4 }));
+    await server.waitForMessage("config_applied", 2, 3000);
+
+    expect(
+      server.messages.filter((message) => message.type === "agent_error"),
+      "旧代际先按代际丢，轮不到校验形状，控制面不会被旧拒收卡住",
+    ).toEqual([]);
   });
 
   it("坏报文只被丢弃，不拖垮连接", async () => {
@@ -977,6 +1081,7 @@ describe("电脑代理连控制面", () => {
     socket.send(
       JSON.stringify({
         ...configMessage,
+        generation: 2,
         bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "新版客服 Bot" }],
       }),
     );

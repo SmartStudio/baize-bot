@@ -215,38 +215,52 @@ export async function markLoginValid(
   accountId: AccountId,
   handle: string,
 ): Promise<LoginValid | null> {
-  return withAccountLock(db, accountId, async ({ tx }) => {
-    const [reported] = await tx
-      .select()
-      .from(accounts)
-      .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId), eq(accounts.computerId, computerId)));
-    if (reported === undefined) return null;
-    const now = new Date();
-    const [known] = await tx
-      .update(accounts)
-      .set({ login: "valid", loginChangedAt: loginChangedAt("valid", now) })
-      .where(
-        and(
-          eq(accounts.computerId, computerId),
-          eq(accounts.platform, reported.platform),
-          eq(accounts.handle, handle),
-          ne(accounts.id, accountId),
-        ),
-      )
-      .returning();
-    if (known !== undefined) {
-      if (reported.login !== "none") return { account: toAccount(known), deleted: null };
-      await tx.update(drafts).set({ accountId: known.id }).where(eq(drafts.accountId, accountId));
-      await tx.delete(accounts).where(eq(accounts.id, accountId));
-      return { account: toAccount(known), deleted: accountId };
-    }
-    const [row] = await tx
-      .update(accounts)
-      .set({ login: "valid", handle, loginChangedAt: loginChangedAt("valid", now) })
-      .where(eq(accounts.id, accountId))
-      .returning();
-    if (row === undefined) throw new Error("锁住的账号行更新时不见了");
-    return { account: toAccount(row), deleted: null };
+  return db.transaction(async (outer) => {
+    // 合并要锁两行：报上来的和同名的 known。两次合并互为对方的 known 时各自先锁自己的行就互等成 deadlock，
+    // 所以先在电脑上排队，同一台电脑的登录结果一次只进一个，两把行锁的顺序才有意义。
+    await outer.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`login-valid:${computerId}`}, 0))`);
+    return withAccountLock(outer, accountId, async ({ tx }) => {
+      const [reported] = await tx
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId), eq(accounts.computerId, computerId)));
+      if (reported === undefined) return null;
+      const now = new Date();
+      const loggedIn = {
+        login: "valid" as const,
+        loginChangedAt: loginChangedAt("valid", now),
+        loginGeneration: sql`${accounts.loginGeneration} + 1`,
+      };
+      const [found] = await tx
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(
+          and(
+            eq(accounts.computerId, computerId),
+            eq(accounts.platform, reported.platform),
+            eq(accounts.handle, handle),
+            ne(accounts.id, accountId),
+          ),
+        );
+      if (found !== undefined) {
+        // known 那一行也在改登录状态，和结算它的发布结果一样走它自己的账号锁。
+        return withAccountLock(tx, AccountId.parse(found.id), async ({ tx: locked }) => {
+          const [known] = await locked.update(accounts).set(loggedIn).where(eq(accounts.id, found.id)).returning();
+          if (known === undefined) throw new Error("锁住的账号行更新时不见了");
+          if (reported.login !== "none") return { account: toAccount(known), deleted: null };
+          await locked.update(drafts).set({ accountId: known.id }).where(eq(drafts.accountId, accountId));
+          await locked.delete(accounts).where(eq(accounts.id, accountId));
+          return { account: toAccount(known), deleted: accountId };
+        });
+      }
+      const [row] = await tx
+        .update(accounts)
+        .set({ ...loggedIn, handle })
+        .where(eq(accounts.id, accountId))
+        .returning();
+      if (row === undefined) throw new Error("锁住的账号行更新时不见了");
+      return { account: toAccount(row), deleted: null };
+    });
   });
 }
 
@@ -254,11 +268,21 @@ export async function markLoginValid(
 export type RejectedCredentials = { readonly generation: number | null };
 
 /**
+ * 发布认领时看到的登录会话。generation 是认领那一刻抄下的 login_generation，之后重登过的不算。
+ * migrated 是 claimed_login_generation 这列加上之前认领的：代次按迁移基线第 1 代算，
+ * 再加基底的认领时刻条件，挡住滚动升级期间旧控制面记登录成功却不推进代次的重登。
+ */
+export type ClaimedSession =
+  | { readonly kind: "generation"; readonly generation: number }
+  | { readonly kind: "migrated"; readonly claimedAt: Date };
+
+/**
  * 过期的依据。rejected 是控制面拿着某一代凭据被平台拒了，结论只算在那一代头上；
- * reported 是电脑代理看着浏览器说的，sessionAt 是那次发布认领时的登录，之后重登过的不算。
+ * reported 是电脑代理看着浏览器说的，带 session 的是某次发布认领的结论，不带的是此刻看到的。
  */
 export type ExpiryEvidence =
-  ({ readonly kind: "rejected" } & RejectedCredentials) | { readonly kind: "reported"; readonly sessionAt?: Date };
+  | ({ readonly kind: "rejected" } & RejectedCredentials)
+  | { readonly kind: "reported"; readonly session?: ClaimedSession };
 
 export type ExpiryTarget = {
   readonly ownerId: UserId;
@@ -292,7 +316,10 @@ export async function markLoginExpired(db: Db | Tx, target: ExpiryTarget): Promi
 
 function stillHolds(evidence: ExpiryEvidence): SQL | undefined {
   if (evidence.kind === "reported") {
-    return evidence.sessionAt === undefined ? undefined : lte(accounts.loginChangedAt, evidence.sessionAt);
+    const session = evidence.session;
+    if (session === undefined) return undefined;
+    if (session.kind === "generation") return eq(accounts.loginGeneration, session.generation);
+    return and(eq(accounts.loginGeneration, 1), lte(accounts.loginChangedAt, session.claimedAt));
   }
   if (evidence.generation === null) {
     return sql`NOT EXISTS (SELECT 1 FROM ${accountCredentials} WHERE ${accountCredentials.accountId} = ${accounts.id})`;

@@ -46,6 +46,12 @@ export async function setChiefBotId(db: Db, groupId: GroupId, targetBotId: BotId
   return changed !== undefined;
 }
 
+/** 单聊群里的那个 Bot；多 Bot 群是 null。群是不是单聊只看这一列，不看此刻剩几个成员。 */
+export async function findSoloBotId(db: Db, groupId: GroupId): Promise<BotId | null> {
+  const [row] = await db.select({ soloBotId: groups.soloBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  return row?.soloBotId === undefined || row.soloBotId === null ? null : BotId.parse(row.soloBotId);
+}
+
 export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | null> {
   const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId)).limit(1);
   return row === undefined ? null : GroupId.parse(row.id);

@@ -71,7 +71,7 @@ export async function handleAgentEvent(
       await markComputerOnline(deps.db, conn.computerId);
       return;
     case "config_applied":
-      deps.agents.markConfigApplied(conn);
+      deps.agents.markConfigApplied(conn, message.generation);
       return;
     case "bot_text":
       await onBotText(deps, conn, message);
@@ -450,8 +450,8 @@ function modelFailureMessage(detail: string): string {
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
-    deps.agents.markConfigRejected(conn);
-    console.warn(`电脑 ${conn.computerId} 拒了 config：${event.detail}`);
+    if (!deps.agents.markConfigRejected(conn, event.generation)) return;
+    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${event.detail}`);
     await deps.notifications.publish(conn.ownerId, {
       kind: "stuck",
       text: `电脑上的活派不出去：${CONFIG_MISMATCH}。把电脑代理和控制面升到同一个版本再连。`,
@@ -461,7 +461,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   }
   // 被拒期间代理手里没有能用的运行器，它回的 prompt_before_config 其实是版本不对，照实说。
   const reason =
-    event.code === "prompt_before_config" && deps.agents.configRejected(conn)
+    event.code === "prompt_before_config" && deps.agents.configRejected(conn.computerId)
       ? CONFIG_MISMATCH
       : ERROR_REASONS[event.code];
   const text =

@@ -7,6 +7,7 @@ export type ComputerCandidate = {
 
 export type SelectionFailure =
   | "no_computer_online"
+  | "config_rejected"
   | "all_computers_offline"
   | "required_account_not_found"
   | "accounts_on_multiple_computers"
@@ -19,6 +20,7 @@ export type ComputerSelection =
 /** `why` 同时进群里那句、例行的运行记录和 stuck 通知，`next` 只在群里说，告诉用户接下来怎么办。 */
 export const SELECTION_FAILURE: Readonly<Record<SelectionFailure, { readonly why: string; readonly next: string }>> = {
   no_computer_online: { why: "电脑不在线", next: "电脑回来后再说一次" },
+  config_rejected: { why: "电脑拒收了配置", next: "按通知里说的把两边版本对上再说一次" },
   all_computers_offline: { why: "你的电脑都不在线", next: "有一台回来后再说一次" },
   required_account_not_found: { why: "要用的账号已经不在账号页里", next: "把账号挂上后再说一次" },
   accounts_on_multiple_computers: {

@@ -27,7 +27,7 @@ import { listAccounts } from "../repo/accounts.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
-import { findChiefBotId } from "../repo/groups.js";
+import { findChiefBotId, findSoloBotId } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
@@ -68,10 +68,13 @@ export type DispatchOutcome =
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
   | { readonly kind: "no_target" };
 
-/** 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。 */
+/**
+ * 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。
+ * 拒了 config 的电脑连着却派不了活，按「不在线」选不中时把真实原因说出来，用户才知道去看通知。
+ */
 async function computerFor(db: Db, agents: AgentHub, ownerId: UserId): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
-  return selectComputer(
+  const selected = selectComputer(
     [],
     computers.map((computer) => ({
       computer: agents.isOnline(computer.id)
@@ -82,6 +85,10 @@ async function computerFor(db: Db, agents: AgentHub, ownerId: UserId): Promise<C
       accounts: [],
     })),
   );
+  if (selected.kind === "failed" && computers.some((computer) => agents.configRejected(computer.id))) {
+    return { kind: "failed", reason: "config_rejected" };
+  }
+  return selected;
 }
 
 /**
@@ -103,7 +110,9 @@ export async function dispatchUserMessage(
   // @ 了好几个也只认第一个当经手。单 Bot 群没有经手可言，它的任务卡也不出边界。
   // 经手换了人就推一条任务卡，不然页面要等到刷新或交接才看到新经手。送出去的任务卡也要是改完经手的那份。
   let task = await findTaskByGroup(deps.db, groupId);
-  if (members.length > 1 && first !== undefined && task !== null && task.currentBotId !== first) {
+  // 单聊看 groups.solo_bot_id，和运行器收方案卡的口径一致；多 Bot 群删到只剩一个成员仍是多 Bot 群。
+  const solo = (await findSoloBotId(deps.db, groupId)) !== null;
+  if (!solo && first !== undefined && task !== null && task.currentBotId !== first) {
     task = await setCurrentBot(deps.db, groupId, first, new Date());
     if (task !== null) deps.push.push(ownerId, { type: "task_updated", task });
   }
@@ -111,16 +120,15 @@ export async function dispatchUserMessage(
   const targets = routeTargets({ members, chiefBotId, currentBotId: task?.currentBotId ?? null, mentions });
   if (targets.length === 0) return { kind: "no_target" };
 
-  const reason =
-    members.length === 1
-      ? "solo"
-      : mentions.length > 0
-        ? "mentioned"
-        : chiefBotId !== null
-          ? "chief"
-          : task?.currentBotId !== null && task?.currentBotId !== undefined
-            ? "current"
-            : "everyone";
+  const reason = solo
+    ? "solo"
+    : mentions.length > 0
+      ? "mentioned"
+      : chiefBotId !== null
+        ? "chief"
+        : task?.currentBotId !== null && task?.currentBotId !== undefined
+          ? "current"
+          : "everyone";
   const selected = await computerFor(deps.db, deps.agents, ownerId);
   if (selected.kind === "failed") {
     await appendAndPush(deps, ownerId, groupId, {
@@ -180,6 +188,7 @@ async function sendSpeaker(
   const history = await recentBodies(deps.db, groupId, speaker.trigger, includeRecent);
   const context = await summarizeAll(deps.db, ownerId, history, speaker.botId, members);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
+  const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
   const roster = members.map(({ id, name, tag, description }) => ({
     id,
@@ -192,7 +201,7 @@ async function sendSpeaker(
     id: groupId,
     number: task?.number ?? "",
     title: task?.title ?? "",
-    kind: members.length > 1 ? ("team" as const) : ("solo" as const),
+    kind: solo ? ("solo" as const) : ("team" as const),
   };
   const runId = await startRun(deps.db, {
     ownerId,
@@ -223,7 +232,7 @@ async function sendSpeaker(
     group,
     context,
     purpose: options.purpose ?? "plan",
-    task: members.length > 1 ? task : null,
+    task: solo ? null : task,
     members: roster,
     ...(projects === undefined ? {} : { projects }),
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),

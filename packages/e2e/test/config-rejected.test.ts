@@ -155,6 +155,7 @@ describe("端到端：新电脑代理连旧控制面", () => {
         {
           type: "agent_error",
           code: "config_rejected",
+          generation: 1,
           detail: "config 不合这个电脑代理的版本，校验不过的字段：accountsProxy",
         },
       ]);

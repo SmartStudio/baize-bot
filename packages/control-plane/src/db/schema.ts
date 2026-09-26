@@ -273,6 +273,9 @@ export const accounts = pgTable(
     tier: text("tier").$type<AccountTier>().notNull().default("confirm_publish"),
     login: text("login").$type<AccountLogin>().notNull().default("none"),
     loginChangedAt: timestamp("login_changed_at", { withTimezone: true }).notNull().defaultNow(),
+    // 浏览器登录的会话是第几代：每次报上来登录成功都加一，valid 重登到 valid 也加。
+    // 发布认领时抄一份到 drafts.claimed_login_generation，晚到的 login_expired 只在代次还一样时算数。
+    loginGeneration: integer("login_generation").notNull().default(1),
     createdAt: createdAt(),
   },
   (t) => [
@@ -508,6 +511,9 @@ export const drafts = pgTable(
     status: text("status").$type<DraftStatus>().notNull().default("pending"),
     edits: jsonb("edits").$type<DraftEdit[]>().notNull().default([]),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    // 认领那一刻账号的登录会话代次。这列加上之前认领的旧行是 null，结算时退回「账号仍是第 1 代，
+    // 且 login_changed_at 不晚于 claimed_at」才记过期。
+    claimedLoginGeneration: integer("claimed_login_generation"),
     failure: text("failure").$type<PublishFailureReason>(),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),

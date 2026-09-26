@@ -39,7 +39,8 @@ export interface AgentHandle {
 
 type Link =
   | { readonly phase: "connecting"; readonly socket: WebSocket }
-  | { readonly phase: "open"; readonly socket: WebSocket }
+  // applied 是这条连接上已应用到第几代 config。代际按连接算，连接换了号就跟着换，旧连接的号不带过来。
+  | { readonly phase: "open"; readonly socket: WebSocket; applied: number }
   | { readonly phase: "waiting"; readonly timer: NodeJS.Timeout }
   | { readonly phase: "stopped" };
 
@@ -81,7 +82,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
     heartbeat = null;
   };
 
-  const handle = async (raw: string): Promise<void> => {
+  const handle = async (raw: string, from: WebSocket): Promise<void> => {
     // socket.close() 之后 ws 仍会把已经到手的帧派发上来。停了还建 runner 的话就没人再停它。
     if (stopping || link.phase === "stopped") return;
     let json: unknown;
@@ -91,15 +92,34 @@ export function startAgent(options: AgentOptions): AgentHandle {
       log("收到非 JSON 报文，丢弃");
       return;
     }
+    const frame = json as { type?: unknown; generation?: unknown } | null;
+    const generation =
+      frame?.type === "config" && Number.isInteger(frame.generation) && (frame.generation as number) > 0
+        ? (frame.generation as number)
+        : undefined;
+    if (frame?.type === "config") {
+      // 先按代际丢，再校验形状：旧代际的快照就算不合版本也不能回拒收，不然控制面会被一条晚到的旧报文卡在拒收上。
+      // 旧连接上晚派发的 config 也不认：它的代际是上一条连接的号，收下会把这条连接的号顶乱。
+      if (link.phase !== "open" || link.socket !== from) {
+        log(`第 ${generation ?? "?"} 代 config 来自已经换掉的连接，丢弃`);
+        return;
+      }
+      // 控制面并发重发时先开始读快照的那条可能后到，它的代际小、里面的账号状态旧，收下会盖掉新的。
+      if (generation !== undefined && generation <= link.applied) {
+        log(`第 ${generation} 代 config 比已应用的第 ${link.applied} 代旧，丢弃`);
+        return;
+      }
+    }
     const parsed = ControlToAgent.safeParse(json);
     if (!parsed.success) {
       // config 被拒只在本地记一笔的话，控制面会一直往这台电脑派活，用户只看到活没人接。报回去让它停派。
-      if ((json as { type?: unknown } | null)?.type === "config") {
+      if (frame?.type === "config") {
         const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
         log(`config 不合这个电脑代理的版本，丢弃。校验不过的字段：${paths}`);
         send({
           type: "agent_error",
           code: "config_rejected",
+          ...(generation === undefined ? {} : { generation }),
           detail: `config 不合这个电脑代理的版本，校验不过的字段：${paths}`,
         });
         return;
@@ -135,8 +155,17 @@ export function startAgent(options: AgentOptions): AgentHandle {
         } else {
           await runner.applyConfig(config);
         }
-        log(`收到 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`);
-        send({ type: "config_applied" });
+        // applyConfig 期间连接可能换了。这份配置已经进了运行器，但它的号属于旧连接，不能记到新连接头上，
+        // 回执也不能经新连接发：新连接自己的第一代紧跟在后面（报文串行），运行器最后停在那一份上。
+        if (link.phase !== "open" || link.socket !== from) {
+          log(`第 ${message.generation} 代 config 应用完时连接已经换掉，不回执`);
+          return;
+        }
+        link.applied = message.generation;
+        log(
+          `收到第 ${message.generation} 代 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`,
+        );
+        send({ type: "config_applied", generation: message.generation });
         return;
       }
       case "prompt": {
@@ -222,7 +251,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
     socket.on("open", () => {
       if (stopping) return;
-      link = { phase: "open", socket };
+      link = { phase: "open", socket, applied: 0 };
       const activeRuns = runner?.activeRuns() ?? [];
       send({
         type: "hello",
@@ -240,7 +269,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
     socket.on("message", (data) => {
       if (stopping) return;
       const raw = data.toString();
-      inbox = inbox.then(() => handle(raw)).catch((error: unknown) => log(`处理报文出错：${String(error)}`));
+      inbox = inbox.then(() => handle(raw, socket)).catch((error: unknown) => log(`处理报文出错：${String(error)}`));
     });
 
     socket.on("error", (error) => {

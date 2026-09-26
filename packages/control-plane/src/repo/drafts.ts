@@ -25,7 +25,7 @@ import type { Db } from "../db/client.js";
 import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
-import { findAccountForDraft, markLoginExpired, type RejectedCredentials } from "./accounts.js";
+import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
 
@@ -460,7 +460,12 @@ export async function claimDueDrafts(
     .update(drafts)
     // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
     // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
-    .set({ status: "publishing", claimedAt: sql`date_trunc('milliseconds', now())` })
+    // 登录会话代次也在这条语句里抄：它和 login = 'valid' 是同一行同一刻看到的。
+    .set({
+      status: "publishing",
+      claimedAt: sql`date_trunc('milliseconds', now())`,
+      claimedLoginGeneration: sql`${accounts.loginGeneration}`,
+    })
     .from(accounts)
     .where(
       and(
@@ -605,12 +610,11 @@ export async function settleFailed(
     const ownerId = UserId.parse(row.ownerId);
     const draft = toDraft(row);
     if (reason !== "login_expired") return { draft, ownerId, login: { kind: "unchanged" } };
-    if (row.claimedAt === null) throw new Error(`在发的草稿 ${row.id} 没有认领时刻`);
     const expired = await markLoginExpired(tx, {
       ownerId,
       accountId: draft.accountId,
       evidence:
-        rejected === undefined ? { kind: "reported", sessionAt: row.claimedAt } : { kind: "rejected", ...rejected },
+        rejected === undefined ? { kind: "reported", session: claimedSession(row) } : { kind: "rejected", ...rejected },
     });
     return {
       draft,
@@ -618,6 +622,16 @@ export async function settleFailed(
       login: expired === null ? { kind: "already_known" } : { kind: "expired_now", account: expired },
     };
   });
+}
+
+function claimedSession(row: {
+  id: string;
+  claimedAt: Date | null;
+  claimedLoginGeneration: number | null;
+}): ClaimedSession {
+  if (row.claimedLoginGeneration !== null) return { kind: "generation", generation: row.claimedLoginGeneration };
+  if (row.claimedAt === null) throw new Error(`在发的草稿 ${row.id} 没有认领时刻`);
+  return { kind: "migrated", claimedAt: row.claimedAt };
 }
 
 /** 抢到之后太久没有结论的，多半是发的那个进程没了。记成出错，不重发：平台那边可能已经发出去了。 */

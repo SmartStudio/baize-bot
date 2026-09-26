@@ -309,6 +309,28 @@ describe("多 Bot 群派活", () => {
     }
   });
 
+  it("多 Bot 群删到只剩一个成员仍是 team：带任务卡，派活原因不是 solo", async () => {
+    const team = await makeTeam();
+
+    try {
+      expect((await team.client.delete(`/api/bots/${team.service.id}`)).status).toBe(204);
+      await say(team, team.group.id, "只剩你了");
+      let prompt = await team.agent.next();
+      while (prompt.type !== "prompt") prompt = await team.agent.next();
+      expect(prompt.botId).toBe(team.sales.id);
+      expect(prompt.group, "群是不是单聊看 solo_bot_id，不看此刻剩几个成员，和运行器收方案卡的口径一致").toEqual({
+        id: team.group.id,
+        number: team.task.number,
+        title: "双十一大促",
+        kind: "team",
+      });
+      expect(prompt.task?.id, "多 Bot 群的任务卡照带").toBe(team.task.id);
+      expect(prompt.reason, "不是单聊，派活原因按多 Bot 群的规则算").not.toBe("solo");
+    } finally {
+      team.close();
+    }
+  });
+
   it("上下文里别人的话带 tag，自己的话只有名字", async () => {
     const team = await makeTeam();
 

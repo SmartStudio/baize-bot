@@ -15,7 +15,7 @@ import {
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
-import { drafts, publications } from "../src/db/schema.js";
+import { accounts as accountsTable, drafts, publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { withAccountLock } from "../src/repo/account-lock.js";
 import { helloAgent } from "./helpers/agent.js";
@@ -155,6 +155,11 @@ async function reconnect(job: ContentJob, server: TestServer): Promise<ContentJo
 }
 
 /** 截下 console 的全部输出，收尾时还原。 */
+/** 0016 上线前就在发的存量草稿：claimed_login_generation 是 null。 */
+async function claimedBeforeMigration(s: Stack, spec: DraftSpec) {
+  await s.database.db.update(drafts).set({ claimedLoginGeneration: null }).where(eq(drafts.id, spec.draftId));
+}
+
 function captureConsole(): string[] {
   const logged: string[] = [];
   for (const method of ["log", "info", "warn", "error", "debug"] as const) {
@@ -1206,5 +1211,136 @@ describe("小红书登录过期", () => {
       accounts.find((one) => one.id === xhs.id),
       "认领之后已经重登，账号保持重登后的样子",
     ).toEqual(relogged);
+  });
+
+  it("认领后账号从 valid 直接重登成 valid，旧 attempt 晚到的 login_expired 只记草稿失败，账号仍是 valid", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("重登之前发的"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+
+    // 账号一直是 valid，用户在电脑上又扫了一次码：login 没变，只有会话换了一代。
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+    const relogged = (await nextOf(job.push, "account_updated")).account;
+    expect(relogged.login).toBe("valid");
+    expect((await job.agent.expect("config")).accounts.find((one) => one.id === xhs.id)?.login).toBe("valid");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
+    });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-2") },
+    });
+
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(
+      seen.map((pushed) => pushed.type),
+      "旧 attempt 只结算旧草稿，新会话不算过期，不推 account_updated 也不推过期通知",
+    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(accounts.find((one) => one.id === xhs.id)?.login, "valid 重登到 valid 之后账号还是 valid").toBe("valid");
+  });
+
+  it("0016 之前认领的草稿（认领代次为 null）：账号 valid 重登成 valid 后旧 attempt 的 login_expired 不改账号", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("迁移之前认领的"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    await claimedBeforeMigration(s, spec);
+
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+    expect((await nextOf(job.push, "account_updated")).account.login).toBe("valid");
+    await job.agent.expect("config");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
+    });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-3") },
+    });
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(
+      seen.map((pushed) => pushed.type),
+      "认领代次为 null 的按迁移基线第 1 代算，重登后已是第 2 代，旧结论不改账号、不推过期通知",
+    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(accounts.find((one) => one.id === xhs.id)?.login).toBe("valid");
+  });
+
+  it("0016 之前认领的草稿：滚动升级期间旧控制面把过期账号重登成 valid 不推进代次，认领时刻仍挡住旧 login_expired", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("迁移之前认领的"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    await claimedBeforeMigration(s, spec);
+
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    expect((await nextOf(job.push, "account_updated")).account.login).toBe("expired");
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+    await job.agent.expect("config");
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+    expect((await nextOf(job.push, "account_updated")).account.login).toBe("valid");
+    await job.agent.expect("config");
+    // 旧控制面记登录成功时不认识 login_generation，那一列停在迁移基线上。
+    await s.database.db.update(accountsTable).set({ loginGeneration: 1 }).where(eq(accountsTable.id, xhs.id));
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
+    });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-4") },
+    });
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(
+      seen.map((pushed) => pushed.type),
+      "代次对不上时看认领时刻：登录时刻晚于认领，旧结论不改账号",
+    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(listed.find((one) => one.id === xhs.id)?.login).toBe("valid");
   });
 });

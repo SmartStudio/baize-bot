@@ -113,6 +113,13 @@
       "when": 1790445509377,
       "tag": "0015_p1_5_oauth_states",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790460242645,
+      "tag": "0016_p1_cp_login_generation",
+      "breakpoints": true
     }
   ]
 }

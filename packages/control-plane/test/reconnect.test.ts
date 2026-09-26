@@ -242,8 +242,12 @@ it("代理拒了 config：这台电脑不再接活，派出去的 run 按版本�
 
     await post(owner.client, owner.groupId, "config 被拒之后的活");
     expect(await openRuns(owner.groupId), "被拒之后不再往这台电脑派活，也不留 running 的 run").toBe(0);
+    expect(
+      (await systemTexts(owner.client, owner.groupId)).at(-1),
+      "被拒期间发的话，群里说的是配置被拒这个真实原因，不是电脑不在线",
+    ).toContain("电脑拒收了配置");
 
-    agent.send({ type: "config_applied" });
+    agent.send({ type: "config_applied", generation: 1 });
     await post(owner.client, owner.groupId, "收下新 config 之后的活");
     const resumed = await agent.expect("prompt");
     expect(resumed.text, "被拒期间那条没派出来，收下 config 之后照常接活").toBe("收下新 config 之后的活");

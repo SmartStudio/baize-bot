@@ -76,8 +76,16 @@ export class AgentHub {
    * 但在 config 发出之前派 prompt，新起的代理还没有运行器，会把它丢掉，那个 run 就永远不收尾。
    * hello 那条发出去就记 ready：旧代理不回 config_applied，等它的话旧代理永远派不上活。
    * 代理回 config_rejected 记 rejected，直到它回 config_applied 才回到 ready。
+   *
+   * sent 是这条连接上发到第几代，acked 是代理最近回执的哪一代（0 是还没回过带代际的回执）。
+   * 并发的 sendConfig 在开始读快照时就领号，先领的号小；后领号的那条可能先发出去，代理按代际丢掉晚到的旧快照。
+   * 回执和拒收都只认 sent 这一代：被拒之后又发了一代，早先那一代晚到的 config_applied 不能把 rejected 提前恢复成 ready；
+   * 新一代收下之后，早先那一代晚到的 config_rejected 也不能把电脑重新卡成拒收。
    */
-  readonly #configState = new WeakMap<AgentConnection, "ready" | "rejected">();
+  readonly #configs = new WeakMap<
+    AgentConnection,
+    { sent: number; acked: number; state: "handshaking" | "ready" | "rejected" }
+  >();
   readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
   readonly #finishChains = new Map<ComputerId, Promise<void>>();
   readonly #pendingFinishes = new Set<Promise<void>>();
@@ -154,19 +162,35 @@ export class AgentHub {
   /** 能派活：连着，hello 的 config 已经发出，而且代理没拒掉 config。 */
   isOnline(computerId: ComputerId): boolean {
     const conn = this.#connections.get(computerId);
-    return conn !== undefined && this.#configState.get(conn) === "ready" && conn.socket.readyState === conn.socket.OPEN;
+    return (
+      conn !== undefined && this.#configs.get(conn)?.state === "ready" && conn.socket.readyState === conn.socket.OPEN
+    );
   }
 
-  configRejected(conn: AgentConnection): boolean {
-    return this.#configState.get(conn) === "rejected";
+  /** 这台电脑当前这条连接拒了 config，还没收下新的。 */
+  configRejected(computerId: ComputerId): boolean {
+    const conn = this.#connections.get(computerId);
+    return conn !== undefined && this.#configs.get(conn)?.state === "rejected";
   }
 
-  markConfigRejected(conn: AgentConnection): void {
-    this.#configState.set(conn, "rejected");
+  /**
+   * 带代际的拒收只认当前这一代。不带代际的是旧代理的报文：它从不回带代际的回执，
+   * 这条连接上一旦有过带代际的回执，无代际的拒收就不可能说的是当前这一代，不能盖掉已有的事实。
+   * 返回是否采纳：没采纳的拒收不是事实，调用方不能据它告警或通知。
+   */
+  markConfigRejected(conn: AgentConnection, generation: number | undefined): boolean {
+    const config = this.#configs.get(conn);
+    if (config === undefined) return false;
+    if (generation === undefined ? config.acked !== 0 : generation !== config.sent) return false;
+    config.state = "rejected";
+    return true;
   }
 
-  markConfigApplied(conn: AgentConnection): void {
-    this.#configState.set(conn, "ready");
+  markConfigApplied(conn: AgentConnection, generation: number): void {
+    const config = this.#configs.get(conn);
+    if (config === undefined || config.sent !== generation) return;
+    config.acked = generation;
+    config.state = "ready";
   }
 
   #connected(computerId: ComputerId): boolean {
@@ -289,7 +313,8 @@ export class AgentHub {
       this.#deps.push.push(computer.ownerId, { type: "message", message: assistant.greeting });
     }
     await this.#sendConfig(accepted, "hello");
-    this.#configState.set(accepted, "ready");
+    const handshake = this.#configs.get(accepted);
+    if (handshake !== undefined) handshake.state = "ready";
     if (assistant !== null) {
       const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
       await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
@@ -353,6 +378,10 @@ export class AgentHub {
    * 所以只能排在 config 后面。
    */
   async #sendConfig(conn: AgentConnection, reason: "hello" | "changed"): Promise<void> {
+    const config = this.#configs.get(conn) ?? { sent: 0, acked: 0, state: "handshaking" as const };
+    this.#configs.set(conn, config);
+    config.sent += 1;
+    const generation = config.sent;
     const [tools, skills, grants, accounts] = await Promise.all([
       listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
       listSkillsByOwner(this.#deps.db, conn.ownerId),
@@ -364,6 +393,7 @@ export class AgentHub {
     const bots = (await listBots(this.#deps.db, conn.ownerId)).map((item) => item.bot);
     this.#send(conn, {
       type: "config",
+      generation,
       bots: bots.map((bot) => ({
         id: bot.id,
         role: bot.role,

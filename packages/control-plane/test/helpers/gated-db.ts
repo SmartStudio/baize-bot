@@ -39,12 +39,14 @@ export function gatedDb(sql: Sql): { readonly db: Db; arm(pattern: RegExp): Quer
             });
           };
         }
-        if (prop === "begin") {
+        // drizzle 的嵌套事务走 tx.savepoint，回调里拿到的客户端也要包，否则嵌套层的查询绕过屏障。
+        if (prop === "begin" || prop === "savepoint") {
           return (...args: unknown[]) => {
             const last = args.at(-1);
-            if (typeof last !== "function") throw new Error("begin 没有回调");
+            if (typeof last !== "function") throw new Error(`${prop} 没有回调`);
             const body = last as (tx: Sql) => unknown;
-            return (target.begin as (...a: unknown[]) => unknown)(...args.slice(0, -1), (tx: Sql) => body(wrap(tx)));
+            const open = Reflect.get(target, prop) as (...a: unknown[]) => unknown;
+            return open.call(target, ...args.slice(0, -1), (tx: Sql) => body(wrap(tx)));
           };
         }
         const value: unknown = Reflect.get(target, prop);
