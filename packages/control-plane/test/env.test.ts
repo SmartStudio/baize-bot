@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { DEFAULT_GATEWAY_MODEL, runtimeConfig } from "../src/env.js";
+import { CredentialCrypto } from "../src/credentials.js";
+import { DEFAULT_GATEWAY_MODEL, credentialsKey, runtimeConfig } from "../src/env.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -75,4 +76,37 @@ it("两个网关变量都为空时保留开发默认值", () => {
   vi.stubEnv("GATEWAY_MODEL", "");
 
   expect(runtimeConfig().gatewayModels).toEqual({ plan: DEFAULT_GATEWAY_MODEL, fast: DEFAULT_GATEWAY_MODEL });
+});
+
+it("CREDENTIALS_KEY 没设或不是 32 字节的 base64 时启动失败", () => {
+  vi.stubEnv("CREDENTIALS_KEY", undefined);
+  expect(credentialsKey).toThrowError("CREDENTIALS_KEY 没设，用 openssl rand -base64 32 生成一个");
+
+  const wrong = "CREDENTIALS_KEY 必须是 32 字节的 base64，用 openssl rand -base64 32 生成";
+  expect(() => new CredentialCrypto(Buffer.alloc(16, 1).toString("base64"))).toThrowError(wrong);
+  expect(() => new CredentialCrypto(`${Buffer.alloc(32, 1).toString("base64")}!`)).toThrowError(wrong);
+
+  const key = Buffer.alloc(32, 1).toString("base64");
+  vi.stubEnv("CREDENTIALS_KEY", key);
+  const crypto = new CredentialCrypto(credentialsKey());
+  const sealed = crypto.encrypt("ghp_secret");
+  expect(sealed).not.toContain("ghp_secret");
+  expect(crypto.decrypt(sealed)).toBe("ghp_secret");
+  expect(() => new CredentialCrypto(Buffer.alloc(32, 2).toString("base64")).decrypt(sealed)).toThrowError();
+});
+
+it("GitHub 和 X 的接口根地址取环境变量，没设用官方地址", () => {
+  vi.stubEnv("GITHUB_API_BASE_URL", undefined);
+  vi.stubEnv("X_API_BASE_URL", undefined);
+  expect(runtimeConfig()).toMatchObject({
+    githubApiBaseUrl: "https://api.github.com",
+    xApiBaseUrl: "https://api.x.com",
+  });
+
+  vi.stubEnv("GITHUB_API_BASE_URL", "http://127.0.0.1:9/github");
+  vi.stubEnv("X_API_BASE_URL", "http://127.0.0.1:9/x");
+  expect(runtimeConfig()).toMatchObject({
+    githubApiBaseUrl: "http://127.0.0.1:9/github",
+    xApiBaseUrl: "http://127.0.0.1:9/x",
+  });
 });

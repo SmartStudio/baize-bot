@@ -11,7 +11,7 @@ import {
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
 import * as runsRepo from "../src/repo/runs.js";
-import { ApiClient } from "./helpers/client.js";
+import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
@@ -24,7 +24,13 @@ let server: RunningServer;
 
 beforeAll(async () => {
   database = await createTestDb();
-  server = await startServer({ db: database.db, port: 0, config: DEFAULT_RUNTIME_CONFIG, disconnectGraceMs: graceMs });
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    config: DEFAULT_RUNTIME_CONFIG,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    disconnectGraceMs: graceMs,
+  });
 });
 
 afterAll(async () => {

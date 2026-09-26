@@ -13,6 +13,8 @@ usage() {
   stack.sh entry1 up|doctor|down          假控制面 3317 + Web 5377
   stack.sh entry2 up [--agent]|doctor|down 真控制面（.env 的 PORT）+ Web 5173 + 可选电脑代理
   stack.sh entry2 agent                    给已起的真控制面补一个电脑代理，shell 里的 COMPUTER_ID、AGENT_TOKEN 优先于 .env
+  stack.sh entry2 account-add --owner <邮箱> --platform github|x --handle <名> --token <令牌>
+                                           用控制面同一把 CREDENTIALS_KEY 挂一个走接口发布的账号
 EOF
   exit 2
 }
@@ -49,6 +51,19 @@ export_env_file() {
   for key in $(env_keys); do
     if [[ -z "${!key+x}" ]]; then export "$key=$(env_get "$key")"; fi
   done
+}
+
+# 账号凭据的钥匙没有开发默认值。shell 和 .env 都没给时用验证专用的一把，存在 verify-run 下，
+# 控制面重启、account-add 脚本都读同一把，之前加密的令牌还解得开。
+ensure_credentials_key() {
+  [[ -n "${CREDENTIALS_KEY-}" ]] && return
+  local file="$RUN/credentials.key"
+  if [[ ! -s "$file" ]]; then
+    mkdir -p "$RUN"
+    (umask 077 && openssl rand -base64 32 >"$file")
+  fi
+  CREDENTIALS_KEY="$(cat "$file")"
+  export CREDENTIALS_KEY
 }
 
 listener_pid() {
@@ -282,6 +297,14 @@ entry2() {
       echo "控制面 /api/bots → $(http_code "http://127.0.0.1:$cp/api/bots")，经 Web 代理 → $(http_code "http://127.0.0.1:$web/api/bots")（都要 401）"
       return $ok
       ;;
+    account-add)
+      shift
+      (
+        export_env_file
+        ensure_credentials_key
+        cd "$ROOT" && exec pnpm --silent --filter @baize/control-plane account-add -- "$@"
+      )
+      ;;
     down) stop_all entry2 ;;
     *) usage ;;
   esac
@@ -289,6 +312,7 @@ entry2() {
 
 exec_control_plane() {
   export_env_file
+  ensure_credentials_key
   exec pnpm --filter @baize/control-plane start
 }
 

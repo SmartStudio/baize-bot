@@ -1,10 +1,16 @@
 import {
+  AccountId,
+  AccountListResponse,
+  AccountResponse,
   ApprovalId,
+  ApprovePlanRequest,
+  ApprovePlanResponse,
   BotId,
   BotListResponse,
   BotResponse,
   ComputerListResponse,
   ComputerTokenResponse,
+  ContentPlanId,
   CopySkillRequest,
   CreateBotRequest,
   CreateBotResponse,
@@ -15,10 +21,13 @@ import {
   CreateToolRequest,
   DecideApprovalRequest,
   DecideApprovalResponse,
+  DecideDraftRequest,
+  DecideDraftResponse,
   DecideProjectOfferRequest,
   DecideProjectOfferResponse,
   DecideSkillOfferRequest,
   DecideSkillOfferResponse,
+  DraftId,
   GrantId,
   GrantListResponse,
   GroupId,
@@ -31,6 +40,7 @@ import {
   MessageListResponse,
   RegisterRequest,
   RegisterResponse,
+  ReturnPlanResponse,
   RoutineId,
   RoutineListResponse,
   RoutineResponse,
@@ -45,6 +55,7 @@ import {
   ToolListResponse,
   type ToolOperation,
   ToolResponse,
+  UpdateAccountRequest,
   UpdateBotRequest,
   UpdateBotResponse,
   UpdateRoutineRequest,
@@ -68,7 +79,9 @@ import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import { discoverTools } from "../mcp/discover.js";
+import { listAccounts, setAccountTier } from "../repo/accounts.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
+import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPlan } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, ensureAssistant, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
@@ -130,6 +143,10 @@ const PUBLIC_HOOK = /^\/api\/hooks\/[^/]+$/;
 
 const NOT_FOUND = { error: "没有这个对象" } as const;
 const UNAUTHORIZED = { error: "请先登录" } as const;
+// 和 Web mock 的 404 文案一致，卡片上直接显示它。
+const NO_ACCOUNT = { error: "没有这个账号" } as const;
+const NO_DRAFT = { error: "没有这条草稿" } as const;
+const NO_PLAN = { error: "没有这份计划" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
 const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
@@ -245,6 +262,67 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
 
   app.get("/api/today", async (c) => c.json(TodayResponse.parse(await getToday(db, c.get("user").id))));
+
+  app.get("/api/accounts", async (c) =>
+    c.json(AccountListResponse.parse({ accounts: await listAccounts(db, c.get("user").id) })),
+  );
+
+  app.patch("/api/accounts/:id", async (c) => {
+    const id = AccountId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_ACCOUNT, 404);
+    const body = await readJson(c.req.raw, UpdateAccountRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const ownerId = c.get("user").id;
+    const result = await setAccountTier(db, ownerId, id.data, body.value.tier);
+    if (result.kind === "not_found") return c.json(NO_ACCOUNT, 404);
+    if (result.kind === "not_allowed") return c.json({ error: "小红书账号不能设成可直接发布" }, 400);
+    hub.push(ownerId, { type: "account_updated", account: result.account });
+    // 档位随 config.accounts 下发，运行器按它决定 Bot 能不能起草、能不能直接发。
+    await agents.sendConfig(ownerId);
+    return c.json(AccountResponse.parse({ account: result.account }));
+  });
+
+  app.post("/api/drafts/:id", async (c) => {
+    const id = DraftId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_DRAFT, 404);
+    const body = await readJson(c.req.raw, DecideDraftRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const ownerId = c.get("user").id;
+    const decided = await decideDraft(db, ownerId, id.data, body.value);
+    if (decided.kind === "not_found") return c.json(NO_DRAFT, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这条草稿已经有结论了" }, 409);
+    if (decided.kind === "invalid") return c.json({ error: decided.error }, 400);
+    hub.push(ownerId, { type: "draft_updated", draft: decided.value });
+    return c.json(DecideDraftResponse.parse({ draft: decided.value }));
+  });
+
+  app.post("/api/plans/:id/approve", async (c) => {
+    const id = ContentPlanId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_PLAN, 404);
+    const body = await readJson(c.req.raw, ApprovePlanRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const ownerId = c.get("user").id;
+    const decided = await approvePlan(db, ownerId, id.data, body.value.edits);
+    if (decided.kind === "not_found") return c.json(NO_PLAN, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这份计划已经有结论了" }, 409);
+    if (decided.kind === "invalid") return c.json({ error: decided.error }, 400);
+    hub.push(ownerId, { type: "plan_updated", plan: decided.value.plan });
+    for (const draft of decided.value.drafts) hub.push(ownerId, { type: "draft_updated", draft });
+    return c.json(ApprovePlanResponse.parse(decided.value));
+  });
+
+  app.post("/api/plans/:id/return", async (c) => {
+    const id = ContentPlanId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_PLAN, 404);
+    const ownerId = c.get("user").id;
+    const decided = await returnPlan(db, ownerId, id.data);
+    if (decided.kind === "not_found") return c.json(NO_PLAN, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这份计划已经有结论了" }, 409);
+    if (decided.kind === "invalid") return c.json({ error: decided.error }, 400);
+    hub.push(ownerId, { type: "plan_updated", plan: decided.value.plan });
+    for (const draft of decided.value.drafts) hub.push(ownerId, { type: "draft_updated", draft });
+    return c.json(ReturnPlanResponse.parse({ plan: decided.value.plan }));
+  });
 
   app.get("/api/computers", async (c) =>
     c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),
@@ -550,15 +628,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const approvals = await listApprovals(db, approvalIds);
     const handoffIds = result.page.messages.flatMap((m) => (m.body.kind === "handoff" ? [m.body.handoffId] : []));
     const handoffs = await listHandoffs(db, handoffIds);
-    const publications = await listPublicationsForPage(
-      db,
-      c.get("user").id,
-      result.page.messages.flatMap((m) => (m.body.kind === "draft" ? [m.body.draftId] : [])),
-      result.page.messages.flatMap((m) => (m.body.kind === "plan" ? [m.body.planId] : [])),
-    );
-    return c.json(
-      MessageListResponse.parse({ ...result.page, approvals, handoffs, drafts: [], plans: [], publications }),
-    );
+    const ownerId = c.get("user").id;
+    const draftIds = result.page.messages.flatMap((m) => (m.body.kind === "draft" ? [m.body.draftId] : []));
+    const planIds = result.page.messages.flatMap((m) => (m.body.kind === "plan" ? [m.body.planId] : []));
+    const [drafts, plans, publications] = await Promise.all([
+      listDraftsForPage(db, ownerId, draftIds, planIds),
+      listPlansForPage(db, ownerId, planIds),
+      listPublicationsForPage(db, ownerId, draftIds, planIds),
+    ]);
+    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs, drafts, plans, publications }));
   });
 
   app.post("/api/groups/:id/messages", async (c) => {

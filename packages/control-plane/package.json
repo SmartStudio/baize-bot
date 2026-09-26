@@ -14,6 +14,7 @@
     "migrate": "tsx src/scripts/migrate.ts",
     "seed": "tsx src/scripts/seed.ts",
     "computer-token": "tsx src/scripts/computer-token.ts",
+    "account-add": "tsx src/scripts/account-add.ts",
     "generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

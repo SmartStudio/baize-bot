@@ -349,6 +349,7 @@ describe("方案卡", () => {
       expect(routinePrompt.groupId, "项目的例行跑在项目群里，不是主助理的单聊").toBe(group.id);
       expect(routinePrompt.botId).toBe(s.me.assistant.botId);
       expect(routinePrompt.purpose).toBe("plan");
+      expect(routinePrompt.task?.cadence, "排本周计划的 prompt 里任务卡带着节奏").toBe(OFFER.cadence);
     } finally {
       s.close();
     }

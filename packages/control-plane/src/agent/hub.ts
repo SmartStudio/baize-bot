@@ -10,6 +10,7 @@ import type { WebSocket } from "ws";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import type { NoticePublisher } from "../notifications.js";
+import { listAccountConfigs } from "../repo/accounts.js";
 import { ensureAssistant, listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
@@ -136,6 +137,10 @@ export class AgentHub {
   isOnline(computerId: ComputerId): boolean {
     const conn = this.#connections.get(computerId);
     return conn !== undefined && conn.socket.readyState === conn.socket.OPEN;
+  }
+
+  onlineComputerIds(): ComputerId[] {
+    return [...this.#connections.keys()].filter((computerId) => this.isOnline(computerId));
   }
 
   send(computerId: ComputerId, message: ControlToAgent): boolean {
@@ -328,10 +333,11 @@ export class AgentHub {
    * 所以只能排在 config 后面。
    */
   async #sendConfig(conn: AgentConnection, reason: "hello" | "changed"): Promise<void> {
-    const [tools, skills, grants] = await Promise.all([
+    const [tools, skills, grants, accounts] = await Promise.all([
       listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
       listSkillsByOwner(this.#deps.db, conn.ownerId),
       listGrants(this.#deps.db, conn.ownerId),
+      listAccountConfigs(this.#deps.db, conn.ownerId),
     ]);
     // listBots 是判暂停状态的快照，放在最后一个 await，查完同步发出 config 和补发，
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
@@ -349,7 +355,7 @@ export class AgentHub {
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,
-      accounts: [],
+      accounts,
       grants,
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,

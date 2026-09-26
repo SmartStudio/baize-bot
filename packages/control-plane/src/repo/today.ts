@@ -1,8 +1,5 @@
 import {
-  Account,
   Approval,
-  ContentPlan,
-  Draft,
   BotId,
   GroupId,
   RoutineId,
@@ -28,6 +25,7 @@ import {
 } from "../db/schema.js";
 import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
+import { toAccount, toDraft, toPlan } from "./rows.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 type PlanRow = typeof contentPlans.$inferSelect;
@@ -293,50 +291,6 @@ function toApproval(row: typeof approvals.$inferSelect): Approval {
     status: row.status,
     decidedAt: row.decidedAt?.toISOString() ?? null,
     grantId: row.grantId,
-  });
-}
-
-function toAccount(row: typeof accounts.$inferSelect): Account {
-  return Account.parse({
-    id: row.id,
-    ownerId: row.ownerId,
-    computerId: row.computerId,
-    platform: row.platform,
-    handle: row.handle,
-    tier: row.tier,
-    login: row.login,
-    createdAt: row.createdAt.toISOString(),
-  });
-}
-
-function toDraft(row: DraftRow): Draft {
-  return Draft.parse({
-    id: row.id,
-    groupId: row.groupId,
-    botId: row.botId,
-    planId: row.planId,
-    accountId: row.accountId,
-    platform: row.platform,
-    content: row.content,
-    scheduledAt: row.scheduledAt?.toISOString() ?? null,
-    status: row.status,
-    edits: row.edits,
-    failure: row.failure,
-    createdAt: row.createdAt.toISOString(),
-    decidedAt: row.decidedAt?.toISOString() ?? null,
-  });
-}
-
-function toPlan(row: PlanRow, planDrafts: readonly DraftRow[]): ContentPlan {
-  return ContentPlan.parse({
-    id: row.id,
-    groupId: row.groupId,
-    botId: row.botId,
-    title: row.title,
-    status: row.status,
-    draftIds: planDrafts.slice(0, 20).map((draft) => draft.id),
-    createdAt: row.createdAt.toISOString(),
-    decidedAt: row.decidedAt?.toISOString() ?? null,
   });
 }
 

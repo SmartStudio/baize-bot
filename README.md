@@ -55,6 +55,11 @@ Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里�
 | `UPSTREAM_API_KEY` | 空 | 转发给上游的 key，只能是可打印 ASCII，否则启动时失败 |
 | `PRICE_INPUT_PER_M` | `0` | 每百万输入 token 的价，用来折算 run 的花费 |
 | `PRICE_OUTPUT_PER_M` | `0` | 每百万输出 token 的价 |
+| `CREDENTIALS_KEY` | 无，必填 | 加密账号令牌的钥匙，32 字节 base64，用 `openssl rand -base64 32` 生成。缺了或长度不对启动失败；换了钥匙之前存的令牌就解不开 |
+| `GITHUB_API_BASE_URL` | `https://api.github.com` | 发 GitHub 草稿打的接口根地址，验证时指到假 GitHub |
+| `X_API_BASE_URL` | `https://api.x.com` | 发 X 草稿打的接口根地址 |
+
+GitHub、X 账号先用脚本挂上，令牌加密存进库里：`pnpm --silent --filter @baize/control-plane account-add -- --owner <邮箱> --platform github --handle <名> --token <PAT>`，可选 `--tier`。不带 `--silent` 时 pnpm 会把整条命令连令牌一起回显到终端。
 
 ## 跑起来
 

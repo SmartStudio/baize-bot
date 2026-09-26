@@ -3,6 +3,13 @@ import type { RuntimeConfig } from "../../src/env.js";
 import type { NotificationOptions } from "../../src/notifications.js";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer, type StartOptions } from "../../src/server.js";
 
+/** 测试专用的凭据钥匙。account-add 脚本和测试都用 CredentialCrypto 拿它加密令牌。 */
+export const TEST_CREDENTIALS_KEY = Buffer.alloc(32, 7).toString("base64");
+
+// 没指到假平台的用例万一发了，也只会连不上，不会打到真 GitHub 和 X。
+const UNREACHABLE_PLATFORMS = { githubApiBaseUrl: "http://127.0.0.1:9/github", xApiBaseUrl: "http://127.0.0.1:9/x" };
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 export type TestServer = { readonly server: RunningServer; client(): ApiClient; close(): Promise<void> };
 
 export async function startTestServer(
@@ -10,14 +17,18 @@ export async function startTestServer(
   config: Partial<RuntimeConfig> = {},
   scheduler?: StartOptions["scheduler"],
   notificationScheduler?: NotificationOptions,
+  publisher?: StartOptions["publisher"],
 ): Promise<TestServer> {
   const server = await startServer({
     db,
     port: 0,
     toolSecretKey: "a".repeat(64),
-    config: { ...DEFAULT_RUNTIME_CONFIG, ...config },
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    config: { ...DEFAULT_RUNTIME_CONFIG, ...UNREACHABLE_PLATFORMS, ...config },
     ...(scheduler === undefined ? {} : { scheduler }),
     ...(notificationScheduler === undefined ? {} : { notificationScheduler }),
+    // 发布循环只在测试手动 tick 时跑，不让它自己到点抢走别的用例留下的已批草稿。
+    publisher: { intervalMs: DAY_MS, ...publisher },
   });
   return {
     server,

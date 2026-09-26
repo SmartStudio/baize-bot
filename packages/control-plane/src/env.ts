@@ -23,6 +23,15 @@ export function toolSecretKey(): string {
   return DEV_TOOL_SECRET_KEY;
 }
 
+/** 账号凭据的钥匙没有开发默认值：令牌是真平台的，用一把人人知道的钥匙加密等于没加密。 */
+export function credentialsKey(): string {
+  const key = process.env["CREDENTIALS_KEY"];
+  if (key === undefined || key.trim() === "") {
+    throw new Error("CREDENTIALS_KEY 没设，用 openssl rand -base64 32 生成一个");
+  }
+  return key;
+}
+
 export function port(): number {
   return parsePort(process.env["PORT"]);
 }
@@ -49,10 +58,15 @@ export type RuntimeConfig = {
   readonly upstreamApiKey: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
+  /** 发布器打的平台接口根地址。测试和实机验证指到假平台。 */
+  readonly githubApiBaseUrl: string;
+  readonly xApiBaseUrl: string;
 };
 
 export const DEFAULT_GATEWAY_MODEL = "baize-default";
 export const DEFAULT_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
+export const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
+export const DEFAULT_X_API_BASE_URL = "https://api.x.com";
 
 export function runtimeConfig(): RuntimeConfig {
   const gatewayModels = configuredGatewayModels();
@@ -63,6 +77,8 @@ export function runtimeConfig(): RuntimeConfig {
     upstreamApiKey: upstreamApiKey(),
     priceInputPerM: price("PRICE_INPUT_PER_M"),
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
+    githubApiBaseUrl: process.env["GITHUB_API_BASE_URL"] ?? DEFAULT_GITHUB_API_BASE_URL,
+    xApiBaseUrl: process.env["X_API_BASE_URL"] ?? DEFAULT_X_API_BASE_URL,
   };
 }
 

@@ -11,9 +11,12 @@ import {
   ComputerListResponse,
   ComputerTokenResponse,
   ControlToAgent,
+  MeResponse,
   RegisterResponse,
   ServerPush,
+  type Account,
   type ComputerId,
+  type Platform,
 } from "@baize/shared";
 import { createRunner, type PromptMessage } from "@baize/bot-runner";
 import { startAgent } from "@baize/computer-agent";
@@ -31,6 +34,7 @@ import {
   type Sql,
   WS_PATH,
 } from "@baize/control-plane";
+import { addAccount, CredentialCrypto, saveAccessToken } from "@baize/control-plane/testing";
 
 const AGENT_VERSION = "0.1.0-e2e";
 
@@ -45,6 +49,9 @@ export type StackOptions = {
   readonly disconnectGraceMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
   readonly agentProcess?: boolean;
+  /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
+  readonly githubApiBaseUrl?: string;
+  readonly xApiBaseUrl?: string;
 };
 
 export type Stack = {
@@ -67,8 +74,15 @@ export type Stack = {
   killComputer(): Promise<void>;
   prompts(): readonly PromptMessage[];
   connectComputer(): Promise<ComputerProbe>;
+  /** 手动跑一轮发布循环，跑完时这一轮抢到的草稿都有了结论（走电脑的除外）。 */
+  publishTick(): Promise<void>;
+  /** 照 account-add 脚本的做法，给当前用户挂一个走接口发布的账号，令牌加密入库。 */
+  addAccount(input: { platform: Platform; handle: string; token: string }): Promise<Account>;
   close(): Promise<void>;
 };
+
+const UNREACHABLE = "http://127.0.0.1:9";
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * 起真控制面、真电脑代理、真运行器，模型那一端换成假上游。
@@ -100,12 +114,18 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     process.env["PRICE_INPUT_PER_M"] = String(options.priceInputPerM);
     process.env["PRICE_OUTPUT_PER_M"] = String(options.priceOutputPerM);
     delete process.env["PUBLIC_BASE_URL"];
+    process.env["GITHUB_API_BASE_URL"] = options.githubApiBaseUrl ?? `${UNREACHABLE}/github`;
+    process.env["X_API_BASE_URL"] = options.xApiBaseUrl ?? `${UNREACHABLE}/x`;
+    const credentialsKey = randomBytes(32).toString("base64");
+    process.env["CREDENTIALS_KEY"] = credentialsKey;
 
     // 端口交给系统分配，同一台机器上别的进程占着 3001 也不影响。
     const server = await startServer({
       db,
       port: 0,
       config: runtimeConfig(),
+      // 发布只在用例调 publishTick 时跑，到点的草稿什么时候发由用例说了算。
+      publisher: { intervalMs: DAY_MS },
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
     });
     closers.push(() => server.close());
@@ -270,6 +290,13 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         const probe = await connectComputer(agentOptions);
         closers.push(probe.close);
         return probe;
+      },
+      publishTick: () => server.publisher.tick(),
+      addAccount: async ({ platform, handle, token }) => {
+        const { user } = MeResponse.parse(await api.get("/api/me"));
+        const account = await addAccount(db, { ownerId: user.id, computerId, platform, handle });
+        await saveAccessToken(db, new CredentialCrypto(credentialsKey), account.id, token);
+        return account;
       },
       close: async () => {
         await closeAll();

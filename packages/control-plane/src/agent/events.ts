@@ -27,7 +27,9 @@ import {
   listGroupBots,
   replaceMessageBody,
 } from "../repo/messages.js";
+import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { routineRunOfRun } from "../repo/routines.js";
+import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
 import { chargeRoutineRunOf, EXPIRED_APPROVAL_NOTE, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
@@ -103,6 +105,18 @@ export async function handleAgentEvent(
       return;
     case "login_state":
       await onLoginState(deps, conn, message);
+      return;
+    case "draft_create":
+      await onDraftCreate(deps, conn, message);
+      return;
+    case "plan_propose":
+      await onPlanPropose(deps, conn, message);
+      return;
+    case "draft_edit":
+      await onDraftEdit(deps, conn, message);
+      return;
+    case "publish_result":
+      await onPublishResult(deps, conn, message);
       return;
   }
 }
@@ -644,6 +658,59 @@ async function onHandoffAccept(deps: AgentEventDeps, conn: AgentConnection, even
   const task = await setCurrentBot(deps.db, groupId, event.botId, at);
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: accepted });
   if (task !== null) deps.push.push(conn.ownerId, { type: "task_updated", task });
+}
+
+type DraftCreate = Extract<AgentToControl, { type: "draft_create" }>;
+type PlanPropose = Extract<AgentToControl, { type: "plan_propose" }>;
+type DraftEditEvent = Extract<AgentToControl, { type: "draft_edit" }>;
+type PublishResult = Extract<AgentToControl, { type: "publish_result" }>;
+
+/** 账号不是这个用户的、是只读档、GitHub 和 X 带了图，整条丢掉。运行器那边已经先挡过一道，走到这里的是外部输入。 */
+async function onDraftCreate(deps: AgentEventDeps, conn: AgentConnection, event: DraftCreate): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const created = await createDraft(
+    deps.db,
+    { ownerId: conn.ownerId, groupId, botId: event.botId, runId: event.runId },
+    event.draft,
+  );
+  if (created === null) return;
+  deps.push.push(conn.ownerId, { type: "draft_updated", draft: created.draft });
+  deps.push.push(conn.ownerId, { type: "message", message: created.message });
+}
+
+async function onPlanPropose(deps: AgentEventDeps, conn: AgentConnection, event: PlanPropose): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const proposed = await proposePlan(
+    deps.db,
+    { ownerId: conn.ownerId, groupId, botId: event.botId, runId: event.runId },
+    event.planId,
+    event.title,
+    event.drafts,
+  );
+  if (proposed === null) return;
+  for (const draft of proposed.drafts) deps.push.push(conn.ownerId, { type: "draft_updated", draft });
+  deps.push.push(conn.ownerId, { type: "plan_updated", plan: proposed.plan });
+  deps.push.push(conn.ownerId, { type: "message", message: proposed.message });
+}
+
+/** 内容没变也推一次：Bot 以为自己改了，卡上至少刷新一遍。 */
+async function onDraftEdit(deps: AgentEventDeps, conn: AgentConnection, event: DraftEditEvent): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null) return;
+  const draft = await editDraft(deps.db, { ownerId: conn.ownerId, groupId }, event.draftId, event.content);
+  if (draft !== null) deps.push.push(conn.ownerId, { type: "draft_updated", draft });
+}
+
+/** 只认发给这台电脑、还在 publishing 的草稿。重复报的、超时已经记失败的，都不再改。 */
+async function onPublishResult(deps: AgentEventDeps, conn: AgentConnection, event: PublishResult): Promise<void> {
+  const scope = { draftId: event.draftId, computer: { ownerId: conn.ownerId, computerId: conn.computerId } };
+  if (event.result.status === "ok") {
+    await publishSucceeded(deps, scope, { url: event.result.url, externalId: event.result.externalId });
+    return;
+  }
+  await publishFailed(deps, scope, event.result.reason);
 }
 
 async function appendAndPush(

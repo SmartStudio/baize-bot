@@ -1,7 +1,10 @@
 import {
+  Account,
   Approval,
   Bot,
   Computer,
+  ContentPlan,
+  Draft,
   Grant,
   Group,
   Handoff,
@@ -197,5 +200,53 @@ export function toUsageRecord(row: typeof schema.runs.$inferSelect): UsageRecord
     outputTokens: row.outputTokens,
     // numeric 在 postgres.js 里是字符串，精度留在库里，出边界时才变成 number。
     amount: Number(row.amount),
+  });
+}
+
+export function toAccount(row: typeof schema.accounts.$inferSelect): Account {
+  return Account.parse({
+    id: row.id,
+    ownerId: row.ownerId,
+    computerId: row.computerId,
+    platform: row.platform,
+    handle: row.handle,
+    tier: row.tier,
+    login: row.login,
+    createdAt: row.createdAt.toISOString(),
+  });
+}
+
+export function toDraft(row: typeof schema.drafts.$inferSelect): Draft {
+  return Draft.parse({
+    id: row.id,
+    groupId: row.groupId,
+    botId: row.botId,
+    planId: row.planId,
+    accountId: row.accountId,
+    platform: row.platform,
+    content: row.content,
+    scheduledAt: row.scheduledAt?.toISOString() ?? null,
+    status: row.status,
+    edits: row.edits,
+    failure: row.failure,
+    createdAt: row.createdAt.toISOString(),
+    decidedAt: row.decidedAt?.toISOString() ?? null,
+  });
+}
+
+/** 计划的草稿名单不存在计划行上，由调用方按 created_at 排好传进来：那就是 Bot 排的顺序。 */
+export function toPlan(
+  row: typeof schema.contentPlans.$inferSelect,
+  planDrafts: readonly { readonly id: string }[],
+): ContentPlan {
+  return ContentPlan.parse({
+    id: row.id,
+    groupId: row.groupId,
+    botId: row.botId,
+    title: row.title,
+    status: row.status,
+    draftIds: planDrafts.slice(0, 20).map((draft) => draft.id),
+    createdAt: row.createdAt.toISOString(),
+    decidedAt: row.decidedAt?.toISOString() ?? null,
   });
 }
