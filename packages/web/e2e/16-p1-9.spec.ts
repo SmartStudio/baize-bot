@@ -298,7 +298,11 @@ test("新群的推送晚于回包时，开始后照样留在新群", async ({ pa
   await expect(offerCard(page)).toHaveAttribute("data-status", "started");
   await expect(page.getByTestId("group-item"), "推送晚到不会多出一行").toHaveCount(2);
   await page.getByTestId("group-item").filter({ hasText: "推广白泽" }).click();
-  await expect(page).toHaveURL(projectUrl);
+  await expect(page, "侧栏的项目进这个项目的项目页").toHaveURL(projectUrl.replace("/g/", "/p/"));
+  await expect(
+    page.getByTestId("project-page").getByRole("heading", { name: "推广白泽" }),
+    "项目页真的渲染出了这个项目",
+  ).toBeVisible();
 });
 
 test("在两个群之间来回，已发出的草稿卡还带原帖链接", async ({ page, request }) => {

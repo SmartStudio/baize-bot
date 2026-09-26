@@ -8,6 +8,7 @@ import {
   type ContentPlanId,
   type DecideDraftRequest,
   type DraftId,
+  type ProjectResponse,
   type TodayResponse,
   type BotId,
   type ChecklistItem,
@@ -57,6 +58,7 @@ export type AppActions = {
   returnPlan: (planId: ContentPlanId) => Promise<void>;
   // 首页快照里带着草稿和计划，顺手补进同一张表，首页展开的卡和群里的卡读的是同一份。
   loadToday: () => Promise<TodayResponse>;
+  loadProject: (groupId: GroupId) => Promise<ProjectResponse>;
   loadAccounts: () => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loadGrants: () => Promise<void>;
@@ -213,6 +215,22 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         ];
         dispatch({ type: "today_snapshot_loaded", drafts, plans, merge });
         return today;
+      },
+      loadProject: async (groupId: GroupId) => {
+        const project = await api.project(groupId);
+        const plans = [
+          ...project.pending.flatMap((item) => (item.kind === "plan" ? [item.plan] : [])),
+          ...(project.plan === null ? [] : [project.plan.plan]),
+        ];
+        const drafts = [
+          ...project.pending.flatMap((item) =>
+            item.kind === "plan" ? item.drafts : item.kind === "draft" ? [item.draft] : [],
+          ),
+          ...(project.plan?.drafts ?? []),
+          ...(project.next?.kind === "draft" ? [project.next.draft] : []),
+        ];
+        dispatch({ type: "today_snapshot_loaded", drafts, plans, merge: "fill" });
+        return project;
       },
       loadAccounts: signedIn(async () => {
         const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);

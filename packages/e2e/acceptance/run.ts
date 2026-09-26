@@ -373,6 +373,8 @@ const run = async (): Promise<void> => {
 
     activeStep = "8";
     await page.locator(`[data-testid=group-item][data-group-title="${ORDER}"]`).click();
+    await check(page.getByTestId("project-page")).toBeVisible();
+    await page.getByTestId("project-open-group").click();
     await check(page.getByTestId("task-card")).toBeVisible();
     await send(page, "@小库 请整理 Globex 报价步骤，问我要不要存");
     const offer = page.getByTestId("skill-offer").filter({ hasText: "Globex 报价" });

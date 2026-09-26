@@ -1,0 +1,182 @@
+.project-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-6);
+  align-items: flex-start;
+  margin-bottom: var(--space-7);
+}
+
+.project-head-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.project-head h1 {
+  margin: 0 0 var(--space-3);
+  color: var(--fg-1);
+  font: var(--type-title);
+}
+
+.project-goal,
+.project-cadence {
+  margin: 0 0 var(--space-2);
+  color: var(--fg-2);
+}
+
+.project-cadence {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  align-items: center;
+  margin-top: var(--space-5);
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-progress b {
+  color: var(--fg-1);
+  font: var(--type-metric);
+  font-variant-numeric: tabular-nums;
+}
+
+.project-progress progress {
+  flex: 1;
+  min-width: var(--space-12);
+  max-width: calc(var(--space-12) * 3);
+}
+
+.project-up {
+  color: var(--success);
+}
+
+.project-open-group {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-3);
+  align-items: center;
+  height: var(--control-h-md);
+  padding: 0 var(--space-6);
+}
+
+/* 对话区钉死一轮的高度，说多少话都在里面滚，下面的等你和成果不跟着挪。 */
+.project-thread {
+  display: flex;
+  flex-direction: column;
+  height: calc(var(--space-12) * 3);
+  margin: var(--space-4) 0 var(--space-8);
+}
+
+.project-latest {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-3) var(--space-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.project-turn-me {
+  align-self: flex-end;
+  max-width: 80%;
+  margin: 0;
+}
+
+.project-turn-bot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  color: var(--fg-1);
+}
+
+.project-turn-who {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-turn-note {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-older {
+  display: inline-flex;
+  flex: none;
+  gap: var(--space-3);
+  align-items: center;
+  align-self: flex-start;
+  padding: var(--space-3) 0 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  cursor: pointer;
+}
+
+.project-older:hover {
+  color: var(--fg-1);
+}
+
+.project-block {
+  margin-bottom: var(--space-8);
+  padding: var(--space-7);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.project-block-head {
+  display: flex;
+  gap: var(--space-4);
+  align-items: baseline;
+  min-width: 0;
+  padding-bottom: var(--space-5);
+}
+
+.project-block-head h3 {
+  flex: none;
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.project-working,
+.project-block-count {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-fold {
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-1);
+}
+
+.project-fold > summary {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-fold[open] > summary {
+  margin-bottom: var(--space-5);
+}

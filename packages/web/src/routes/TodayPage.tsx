@@ -25,9 +25,9 @@ const greeting = (name: string): string => {
 };
 
 // 首页主窗口的计划行和草稿行就地展开成群里那同一张卡。菜单栏太窄，不给这一份，行就只是一行字。
-type Cards = { content: ContentBook; actions: ContentActions; lookup: BotLookup };
+export type Cards = { content: ContentBook; actions: ContentActions; lookup: BotLookup };
 
-type PendingProps = {
+export type PendingProps = {
   data: TodayResponse["pending"];
   compact?: boolean;
   cards?: Cards;

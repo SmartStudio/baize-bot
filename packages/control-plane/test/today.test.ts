@@ -515,6 +515,41 @@ describe("GET /api/today", () => {
     expect(next?.kind === "draft" ? next.draft.failure : undefined, "上次失败的原因原样读回").toBe("login_expired");
   });
 
+  it("无标题的推文正文开头带 emoji，做成的一栏照样出来，标题按码元截到 80 且不劈开 emoji", async () => {
+    const owner = await ownerWithBot();
+    const accountId = await createAccount(owner);
+    const text = "🎉" + "白泽今天开源了".repeat(12);
+    const draftId = newId();
+    await database.db.insert(drafts).values({
+      id: draftId,
+      ownerId: owner.userId,
+      groupId: owner.groupId,
+      botId: owner.botId,
+      accountId,
+      platform: "x",
+      content: { kind: "post", title: null, text, images: [], github: null },
+      contentHash: draftId,
+      status: "published",
+    });
+    await database.db.insert(publications).values({
+      id: newId(),
+      ownerId: owner.userId,
+      draftId,
+      groupId: owner.groupId,
+      accountId,
+      platform: "x",
+      url: "https://x.com/baize/status/85",
+      publishedAt: new Date(),
+    });
+
+    const response = await owner.client.get("/api/today");
+    expect(response.status, "85 个码点、86 个码元的正文不能让首页 500").toBe(200);
+    const today = TodayResponse.parse(await response.json());
+    const done = today.done.find((item) => item.kind === "publication");
+    expect(done?.title, "emoji 占两个码元，截到 80 个码元").toBe(text.slice(0, 80));
+    expect(done?.title.length).toBe(80);
+  });
+
   it("旧的 overnight 接口已经删除", async () => {
     const owner = await ownerWithBot();
     expect((await owner.client.get("/api/overnight")).status).toBe(404);

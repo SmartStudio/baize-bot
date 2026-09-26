@@ -59,10 +59,14 @@ test("点主助理进它的单 Bot 群", async ({ page }) => {
   await expect(page.getByTestId("assistant-nav")).toHaveAttribute("aria-current", "page");
 });
 
-test("点项目进群聊，刷新后还在这个群", async ({ page }) => {
+test("点项目进项目页，一步进项目群，刷新后还在这个群", async ({ page }) => {
   await login(page);
   const project = page.getByTestId("group-item").filter({ hasText: TEAM_TITLE });
   await project.click();
+  await expect(page).toHaveURL(/\/p\/grp_order$/);
+  await expect(page.getByTestId("project-page")).toBeVisible();
+  await expect(project, "在项目页时侧栏那一项亮着").toHaveAttribute("aria-current", "page");
+  await page.getByTestId("project-open-group").click();
   await expect(page).toHaveURL(/\/g\/grp_order$/);
   await expect(page.getByTestId("chat-title")).toHaveText(TEAM_TITLE);
   await expect(page.getByTestId("task-card")).toBeVisible();

@@ -520,7 +520,7 @@ const titleOf = (draft: Draft): string =>
     ? (draft.content.title ?? draft.content.text.slice(0, 80))
     : `回复 ${draft.content.replyTo.author}`;
 
-const pendingOf = (): TodayPendingItem[] => {
+export const pendingOf = (): TodayPendingItem[] => {
   const items: TodayPendingItem[] = [];
   for (const approval of approvals.values()) {
     if (approval.status === "pending") {
@@ -644,4 +644,75 @@ export const addTodayApproval = (title: string): Approval => {
   putPending(approval, new Date().toISOString());
   appendMessage(approval.groupId, { kind: "approval", approvalId: approval.id });
   return approval;
+};
+
+// 项目页用例的数据：Globex 订单群里三条发布记录（小红书那条读不到笔记 id，只有管理页链接）和一张待批稿子。
+// id 都带 _today_，重置时跟首页数据一起清掉；默认 seed 不放，首页的计数不受影响。
+export const seedProjectPage = (): Draft => {
+  const accountX = accountOf("acc_today_proj_x", "x", "@globex_x3", "confirm_publish", {
+    computerId: "cmp_remote",
+    login: "valid",
+  });
+  const accountXhs = accountOf("acc_today_proj_xhs", "xiaohongshu", "X3 工厂日记", "confirm_publish", {
+    computerId: "cmp_local",
+    login: "valid",
+  });
+  const accountGithub = accountOf("acc_today_proj_github", "github", "globex", "confirm_publish", {
+    computerId: "cmp_remote",
+    login: "valid",
+  });
+  for (const account of [accountX, accountXhs, accountGithub]) accounts.set(account.id, account);
+  const shipped = [
+    { key: "x", account: accountX, title: "X3 × 200 台签约", url: "https://x.com/globex/status/1", minutes: -300 },
+    {
+      key: "github",
+      account: accountGithub,
+      title: "X3 交付节奏公开",
+      url: "https://github.com/globex/x3/issues/200",
+      minutes: -200,
+    },
+    {
+      key: "xhs",
+      account: accountXhs,
+      title: "三张图看懂 X3 交期",
+      url: "https://creator.xiaohongshu.com/new/note-manager",
+      minutes: -100,
+    },
+  ];
+  for (const item of shipped) {
+    const draft = draftOf({
+      id: `draft_today_proj_${item.key}`,
+      groupId: "grp_order",
+      botId: "bot_sales",
+      accountId: item.account.id,
+      platform: item.account.platform,
+      title: item.title,
+      text: `${item.title}的正文`,
+      status: "published",
+    });
+    drafts.set(draft.id, draft);
+    const publication = Publication.parse({
+      id: PublicationId.parse(`pub_today_proj_${item.key}`),
+      draftId: draft.id,
+      groupId: draft.groupId,
+      accountId: item.account.id,
+      platform: item.account.platform,
+      url: item.url,
+      publishedAt: new Date(Date.now() + item.minutes * 60_000).toISOString(),
+    });
+    publications.set(publication.id, publication);
+  }
+  const pending = draftOf({
+    id: "draft_today_proj_pending",
+    groupId: "grp_order",
+    botId: "bot_sales",
+    accountId: accountX.id,
+    platform: "x",
+    title: "Globex 交期答疑",
+    text: "200 台 X3 分三批交付，第一批下周发出。",
+    status: "pending",
+  });
+  putPending(pending, new Date().toISOString());
+  appendMessage(pending.groupId, { kind: "draft", draftId: pending.id });
+  return pending;
 };

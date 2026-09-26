@@ -1,4 +1,4 @@
-import { BotId, GroupId, RunId, type UsageResponse, type UserId } from "@baize/shared";
+import { BotId, GroupId, RunId, type MessageBody, type UsageResponse, type UserId } from "@baize/shared";
 import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, messages, routineRuns, routines, runs, tasks } from "../db/schema.js";
@@ -16,6 +16,25 @@ export function weekStart(now: Date): Date {
   const localDay = Date.UTC(part("year"), part("month") - 1, part("day"));
   const daysSinceMonday = (new Date(localDay).getUTCDay() + 6) % 7;
   return new Date(localDay - daysSinceMonday * 86_400_000 - 8 * 3_600_000);
+}
+
+/** 用户派的活取那句话的前 40 字，例行任务派的取「例行 · 名字」，其余取群的主题任务标题。用量页和项目页共用。 */
+export function runTitle(input: {
+  readonly isRoutine: boolean;
+  readonly routineName: string | null;
+  readonly trigger: MessageBody | null;
+  readonly taskTitle: string | null;
+}): string {
+  const { isRoutine, routineName, trigger, taskTitle } = input;
+  return (
+    isRoutine
+      ? routineName === null
+        ? "例行任务"
+        : `例行 · ${routineName}`
+      : trigger?.kind === "user"
+        ? [...trigger.text].slice(0, 40).join("")
+        : (taskTitle ?? "主题任务")
+  ).slice(0, 80);
 }
 
 export async function getUsage(db: Db, ownerId: UserId, now = new Date()): Promise<UsageResponse> {
@@ -56,14 +75,7 @@ export async function getUsage(db: Db, ownerId: UserId, now = new Date()): Promi
       runId: RunId.parse(run.id),
       botId: run.botId === null ? null : BotId.parse(run.botId),
       groupId: run.groupId === null ? null : GroupId.parse(run.groupId),
-      title: (run.isRoutine
-        ? routineName === null
-          ? "例行任务"
-          : `例行 · ${routineName}`
-        : trigger?.kind === "user"
-          ? [...trigger.text].slice(0, 40).join("")
-          : (taskTitle ?? "主题任务")
-      ).slice(0, 80),
+      title: runTitle({ isRoutine: run.isRoutine, routineName, trigger, taskTitle }),
       startedAt: run.startedAt.toISOString(),
       endedAt: run.endedAt?.toISOString() ?? null,
       steps: run.steps,

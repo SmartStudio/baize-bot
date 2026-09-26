@@ -189,8 +189,11 @@ export const setDnd = async (page: Page, window: { from: string; to: string }) =
 // 预置的多 Bot 群只有一条系统消息，谁开口都是被 @ 出来的，数「只有它回了」才数得清。
 export const TEAM_TITLE = "Globex X3 × 200 订单";
 
+// 侧栏的项目先到项目页，项目页一步进项目群。
 export const openTeamGroup = async (page: Page, title: string) => {
   await page.locator(`[data-testid=group-item][data-group-title="${title}"]`).click();
+  await expect(page.getByTestId("project-page")).toBeVisible();
+  await page.getByTestId("project-open-group").click();
   await expect(page.getByTestId("task-card")).toBeVisible();
 };
 

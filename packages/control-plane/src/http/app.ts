@@ -38,6 +38,7 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
+  ProjectResponse,
   RegisterRequest,
   RegisterResponse,
   ReturnPlanResponse,
@@ -104,6 +105,7 @@ import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { getToday } from "../repo/today.js";
+import { getProject } from "../repo/project-page.js";
 import {
   bumpSkillUses,
   copySkill,
@@ -262,6 +264,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
 
   app.get("/api/today", async (c) => c.json(TodayResponse.parse(await getToday(db, c.get("user").id))));
+
+  app.get("/api/projects/:groupId", async (c) => {
+    const groupId = GroupId.safeParse(c.req.param("groupId"));
+    const project = groupId.success ? await getProject(db, c.get("user").id, groupId.data) : null;
+    return project === null ? c.json(NOT_FOUND, 404) : c.json(ProjectResponse.parse(project));
+  });
 
   app.get("/api/accounts", async (c) =>
     c.json(AccountListResponse.parse({ accounts: await listAccounts(db, c.get("user").id) })),

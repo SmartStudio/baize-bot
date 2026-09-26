@@ -38,7 +38,7 @@ const ProjectItem = ({
   const hasBadges = project.pendingApprovals > 0 || project.pendingHandoffs > 0 || working;
   return (
     <Link
-      to={pathOf({ kind: "group", groupId: project.groupId })}
+      to={pathOf({ kind: "project", groupId: project.groupId })}
       className="nav project"
       data-testid="group-item"
       data-group-title={project.task.title}
@@ -91,7 +91,8 @@ export const Sidebar = ({
   onOpenAccount,
   onOpenSettings,
 }: Props) => {
-  const openGroup = screen.kind === "group" ? screen.groupId : null;
+  // 项目页和项目群是同一个项目，两处都点亮侧栏那一项。
+  const openGroup = screen.kind === "group" || screen.kind === "project" ? screen.groupId : null;
   const assistant = conversations.find((c) => c.kind === "solo" && bots[c.botId]?.role === "assistant");
   const projects = conversations.filter((c): c is Team => c.kind === "team");
   const openSolo = conversations.find((c) => c.kind === "solo" && c.groupId === openGroup);

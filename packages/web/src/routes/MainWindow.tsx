@@ -10,11 +10,13 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
 import { TodayPage } from "./TodayPage.js";
+import { ProjectPage } from "./ProjectPage.js";
 import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
 import { pendingCountOf, useToday } from "../state/today.js";
+import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 
 type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-project";
@@ -23,6 +25,12 @@ const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag:
 
 // 历史还没拉回来时也得给 ChatPanel 一个数组。写成字面量的话每次渲染都是新身份，滚到底的 effect 会空转。
 const NO_MESSAGES: Message[] = [];
+
+// 拉项目数据的 hook 只在项目页挂着时跑。
+const ProjectView = (props: Omit<React.ComponentProps<typeof ProjectPage>, "project">) => {
+  const project = useProject(props.conversation.groupId);
+  return <ProjectPage project={project} {...props} />;
+};
 
 export const MainWindow = () => {
   const { state, actions } = useApp();
@@ -35,14 +43,18 @@ export const MainWindow = () => {
   const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; tool: InspectedTool } | null>(null);
 
   const ready = state.status === "ready" ? state : null;
-  const openGroup = screen?.kind === "group" ? screen.groupId : null;
-  const conversation = ready?.conversations.find((c) => c.groupId === openGroup) ?? null;
+  // 项目页和项目群看的是同一个群：项目页要拿最近一轮，也得把这个群的历史拉回来。
+  const focusGroup = screen?.kind === "group" || screen?.kind === "project" ? screen.groupId : null;
+  const focused = ready?.conversations.find((c) => c.groupId === focusGroup) ?? null;
+  const conversation = screen?.kind === "group" ? focused : null;
+  const projectOpen = screen?.kind === "project" && focused?.kind === "team" ? focused : null;
   const groupId = conversation?.groupId ?? null;
-  const loaded = groupId !== null && ready !== null && ready.messages[groupId] !== undefined;
+  const focusedId = focused?.groupId ?? null;
+  const loaded = focusedId !== null && ready !== null && ready.messages[focusedId] !== undefined;
 
   useEffect(() => {
-    if (groupId !== null && !loaded) void actions.loadMessages(groupId);
-  }, [groupId, loaded, actions]);
+    if (focusedId !== null && !loaded) void actions.loadMessages(focusedId);
+  }, [focusedId, loaded, actions]);
 
   // 今天页原来每次切回来都重新挂载、重新拉一遍。清单提到主窗口给侧栏数待办之后不再重挂，切回来时补拉这一下。
   const onToday = screen?.kind === "today";
@@ -56,7 +68,12 @@ export const MainWindow = () => {
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
   if (!ready) return null;
-  if (screen === null || (screen.kind === "group" && conversation === null)) return <Navigate to="/" replace />;
+  if (
+    screen === null ||
+    (screen.kind === "group" && conversation === null) ||
+    (screen.kind === "project" && projectOpen === null)
+  )
+    return <Navigate to="/" replace />;
 
   const openGroupPage = (target: GroupId | undefined) => {
     if (target !== undefined) navigate(pathOf({ kind: "group", groupId: target }));
@@ -127,6 +144,17 @@ export const MainWindow = () => {
             if (team !== null) void actions.setChecklist(team.task, checklist);
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
+        />
+      ) : projectOpen !== null ? (
+        <ProjectView
+          conversation={projectOpen}
+          bots={bots}
+          messages={ready.messages[projectOpen.groupId] ?? NO_MESSAGES}
+          lookup={lookup}
+          cards={{ content: ready.content, actions: contentActions, lookup }}
+          onSend={actions.sendMessage}
+          onDecide={actions.decideApproval}
+          onOpenGroup={openGroupPage}
         />
       ) : screen.kind === "routines" ? (
         <RoutinesPage />

@@ -93,64 +93,13 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       .where(and(eq(bots.ownerId, ownerId), eq(routines.enabled, true))),
   ]);
 
-  const draftsByPlan = new Map<string, DraftRow[]>();
-  for (const row of draftRows) {
-    if (row.planId === null) continue;
-    const bucket = draftsByPlan.get(row.planId);
-    if (bucket === undefined) draftsByPlan.set(row.planId, [row]);
-    else bucket.push(row);
-  }
-  for (const [planId, rows] of draftsByPlan) {
-    draftsByPlan.set(
-      planId,
-      rows.toSorted(
-        (left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
-      ),
-    );
-  }
-
-  const pendingPlans = planRows.filter((row) => row.status === "pending");
-  const pendingPlanIds = new Set(pendingPlans.map((row) => row.id));
-  const pending: { at: Date; id: string; item: TodayPendingItem }[] = [];
-  for (const { row } of approvalRows) {
-    pending.push({
-      at: row.createdAt,
-      id: row.id,
-      item: { kind: "approval", since: row.createdAt.toISOString(), approval: toApproval(row) },
-    });
-  }
-  for (const row of pendingPlans) {
-    const planDrafts = (draftsByPlan.get(row.id) ?? []).slice(0, 20);
-    if (planDrafts.length === 0) continue;
-    pending.push({
-      at: row.createdAt,
-      id: row.id,
-      item: {
-        kind: "plan",
-        since: row.createdAt.toISOString(),
-        plan: toPlan(row, planDrafts),
-        drafts: planDrafts.map(toDraft),
-      },
-    });
-  }
-  for (const row of draftRows) {
-    if (row.status !== "pending" || (row.planId !== null && pendingPlanIds.has(row.planId))) continue;
-    pending.push({
-      at: row.createdAt,
-      id: row.id,
-      item: { kind: "draft", since: row.createdAt.toISOString(), draft: toDraft(row) },
-    });
-  }
-  for (const row of accountRows) {
-    pending.push({
-      at: row.createdAt,
-      id: row.id,
-      item: { kind: "account", since: row.createdAt.toISOString(), account: toAccount(row) },
-    });
-  }
-  const orderedPending = pending.toSorted(
-    (left, right) => left.at.getTime() - right.at.getTime() || left.id.localeCompare(right.id),
-  );
+  const draftsByPlan = draftsByPlanOf(draftRows);
+  const orderedPending = pendingItems({
+    approvals: approvalRows.map(({ row }) => row),
+    plans: planRows,
+    drafts: draftRows,
+    accounts: accountRows,
+  });
 
   const done: { at: Date; id: string; item: TodayDoneItem }[] = [];
   for (const { publication, draft } of publicationRows) {
@@ -236,6 +185,102 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
     .slice(0, 20)
     .map(({ item }) => item);
 
+  const orderedNext = nextItems(
+    draftRows,
+    routineRows.map(({ routine }) => routine),
+    now,
+  );
+
+  return TodayResponse.parse({
+    assistantGroupId: (await findAssistant(db, ownerId))?.groupId ?? null,
+    pending: orderedPending.slice(-50),
+    done: orderedDone.slice(0, 20).map(({ item }) => item),
+    running,
+    next: orderedNext.slice(0, 20),
+  });
+}
+
+/** 稿子按所属计划分桶，桶里按建稿先后排。 */
+export function draftsByPlanOf(draftRows: readonly DraftRow[]): Map<string, DraftRow[]> {
+  const draftsByPlan = new Map<string, DraftRow[]>();
+  for (const row of draftRows) {
+    if (row.planId === null) continue;
+    const bucket = draftsByPlan.get(row.planId);
+    if (bucket === undefined) draftsByPlan.set(row.planId, [row]);
+    else bucket.push(row);
+  }
+  for (const [planId, rows] of draftsByPlan) {
+    draftsByPlan.set(
+      planId,
+      rows.toSorted(
+        (left, right) => left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      ),
+    );
+  }
+  return draftsByPlan;
+}
+
+/**
+ * 等你确认的卡，按来的先后排。approvals 只给待批的；plans 里只有待批的计划成卡；
+ * drafts 要带上待批计划下的稿子，它们只随计划出现，不单独成卡。首页和项目页共用。
+ */
+export function pendingItems(input: {
+  readonly approvals: readonly (typeof approvals.$inferSelect)[];
+  readonly plans: readonly PlanRow[];
+  readonly drafts: readonly DraftRow[];
+  readonly accounts: readonly (typeof accounts.$inferSelect)[];
+}): TodayPendingItem[] {
+  const draftsByPlan = draftsByPlanOf(input.drafts);
+  const pendingPlans = input.plans.filter((row) => row.status === "pending");
+  const pendingPlanIds = new Set(pendingPlans.map((row) => row.id));
+  const pending: { at: Date; id: string; item: TodayPendingItem }[] = [];
+  for (const row of input.approvals) {
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: { kind: "approval", since: row.createdAt.toISOString(), approval: toApproval(row) },
+    });
+  }
+  for (const row of pendingPlans) {
+    const planDrafts = (draftsByPlan.get(row.id) ?? []).slice(0, 20);
+    if (planDrafts.length === 0) continue;
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: {
+        kind: "plan",
+        since: row.createdAt.toISOString(),
+        plan: toPlan(row, planDrafts),
+        drafts: planDrafts.map(toDraft),
+      },
+    });
+  }
+  for (const row of input.drafts) {
+    if (row.status !== "pending" || (row.planId !== null && pendingPlanIds.has(row.planId))) continue;
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: { kind: "draft", since: row.createdAt.toISOString(), draft: toDraft(row) },
+    });
+  }
+  for (const row of input.accounts) {
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: { kind: "account", since: row.createdAt.toISOString(), account: toAccount(row) },
+    });
+  }
+  return pending
+    .toSorted((left, right) => left.at.getTime() - right.at.getTime() || left.id.localeCompare(right.id))
+    .map(({ item }) => item);
+}
+
+/** 排了时间的已批稿子和启用中的例行下一次触发，按时间升序。首页和项目页共用。 */
+export function nextItems(
+  draftRows: readonly DraftRow[],
+  routineRows: readonly (typeof routines.$inferSelect)[],
+  now: Date,
+): TodayNextItem[] {
   const next: { at: Date; id: string; item: TodayNextItem }[] = [];
   for (const row of draftRows) {
     if (row.status !== "approved" || row.scheduledAt === null) continue;
@@ -245,14 +290,9 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       item: { kind: "draft", at: row.scheduledAt.toISOString(), draft: toDraft(row) },
     });
   }
-  for (const { routine } of routineRows) {
-    const times = routine.triggers.flatMap((trigger) => {
-      if (trigger.kind !== "cron") return [];
-      const at = nextMoment(trigger.expr, now);
-      return at === null ? [] : [at];
-    });
-    const at = times.toSorted((left, right) => left.getTime() - right.getTime())[0];
-    if (at === undefined) continue;
+  for (const routine of routineRows) {
+    const at = nextRoutineAt(routine, now);
+    if (at === null) continue;
     next.push({
       at,
       id: routine.id,
@@ -266,17 +306,18 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       },
     });
   }
-  const orderedNext = next.toSorted(
-    (left, right) => left.at.getTime() - right.at.getTime() || left.id.localeCompare(right.id),
-  );
+  return next
+    .toSorted((left, right) => left.at.getTime() - right.at.getTime() || left.id.localeCompare(right.id))
+    .map(({ item }) => item);
+}
 
-  return TodayResponse.parse({
-    assistantGroupId: (await findAssistant(db, ownerId))?.groupId ?? null,
-    pending: orderedPending.slice(-50).map(({ item }) => item),
-    done: orderedDone.slice(0, 20).map(({ item }) => item),
-    running,
-    next: orderedNext.slice(0, 20).map(({ item }) => item),
+export function nextRoutineAt(routine: typeof routines.$inferSelect, now: Date): Date | null {
+  const times = routine.triggers.flatMap((trigger) => {
+    if (trigger.kind !== "cron") return [];
+    const at = nextMoment(trigger.expr, now);
+    return at === null ? [] : [at];
   });
+  return times.toSorted((left, right) => left.getTime() - right.getTime())[0] ?? null;
 }
 
 function toApproval(row: typeof approvals.$inferSelect): Approval {
@@ -294,13 +335,19 @@ function toApproval(row: typeof approvals.$inferSelect): Approval {
   });
 }
 
-function draftTitle(row: DraftRow): string {
+export function draftTitle(row: DraftRow): string {
   return clip(
     row.content.kind === "post" ? (row.content.title ?? row.content.text) : `回复 ${row.content.replyTo.author}`,
     80,
   );
 }
 
-function clip(value: string, max: number): string {
-  return [...value].slice(0, max).join("");
+// zod 的 max 数的是 UTF-16 码元，这里按同一个口径截；一个码点一个码点地收，emoji 这类代理对不会被劈成两半。
+export function clip(value: string, max: number): string {
+  let clipped = "";
+  for (const point of value) {
+    if (clipped.length + point.length > max) break;
+    clipped += point;
+  }
+  return clipped;
 }

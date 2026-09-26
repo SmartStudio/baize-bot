@@ -28,6 +28,7 @@ import {
   Settings,
   SkillListResponse,
   SkillResponse,
+  ProjectResponse,
   TodayResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
@@ -119,6 +120,8 @@ export const api = {
   },
   me: async () => json(MeResponse, await send("GET", "/me")),
   today: async () => json(TodayResponse, await send("GET", "/today")),
+  project: async (groupId: GroupId) =>
+    json(ProjectResponse, await send("GET", `/projects/${encodeURIComponent(groupId)}`)),
   usage: async () => json(UsageResponse, await send("GET", "/usage")),
   bots: async () => json(BotListResponse, await send("GET", "/bots")),
   createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),

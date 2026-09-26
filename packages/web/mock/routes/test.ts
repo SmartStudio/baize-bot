@@ -11,6 +11,7 @@ import {
   publishDraft,
   reseed,
   resetToday,
+  seedProjectPage,
   reviseDraft,
   seedUnseenHandoff,
   setTodayMode,
@@ -65,6 +66,13 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       push({ type: "approval_updated", approval });
       send(res, 204);
     }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/project") {
+    const draft = seedProjectPage();
+    push({ type: "draft_updated", draft });
+    send(res, 204);
     return true;
   }
 
