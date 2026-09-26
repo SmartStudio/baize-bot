@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { constants } from "node:fs";
+import { open, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { extname, join } from "node:path";
 import {
   type AccountConfig,
   type AgentToControl,
@@ -13,7 +15,7 @@ import {
 import { type Static, Type } from "typebox";
 import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
-import { forbiddenPathPrefixes, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
+import { isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 import type { ActiveRun } from "./topic.js";
 
 // Bot 往外发东西只有起草这一条路：三件工具都只发上行，群里出草稿卡或计划卡，用户在卡上批了才发。
@@ -84,25 +86,73 @@ const CONTENT_GUIDE =
   "小红书要写 title，可以带图（images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
-// 发布器照这份路径读图、照 sha256 再核一次，所以路径记 realpath、哈希由运行器读文件自己算：用户批的就是发出去的那份字节。
-// 禁区先于工作目录判：禁区里的文件不能叫模型挪进工作目录再来。
-function imageOf(path: string, workDir: string, where: string): DraftImage {
-  const real = realpathExisting(logicalResolve(path, workDir));
-  if (forbiddenPathPrefixes(workDir).some((prefix) => isInsideRoot(real, prefix))) {
-    throw new Error(`${where}配图「${path}」在固定禁区里，不能当配图，换一张图。`);
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/** 配图从哪儿收、拷到哪儿、哪些目录碰都不能碰。 */
+export interface ImageDirs {
+  readonly workDir: string;
+  readonly draftsDir: string;
+  readonly hidden: readonly string[];
+}
+
+const errorCode = (error: unknown): unknown =>
+  error && typeof error === "object" && "code" in error ? error.code : undefined;
+
+// 用户批的必须就是发出去的那份字节：从 fd 读、算哈希、拷进 Bot 写不到的 drafts 目录，DraftSpec 记拷贝。
+// 之后工作目录里的原图怎么改都不影响草稿。禁区先于工作目录判：禁区里的文件不能叫模型挪进工作目录再来。
+async function imageOf(path: string, dirs: ImageDirs, where: string): Promise<DraftImage> {
+  const label = `${where}配图「${path}」`;
+  const loop = `${label}是符号链接绕成了环，换成真正的图片文件。`;
+  const logical = logicalResolve(path, dirs.workDir);
+  // realpathExisting 遇到成环会退回逻辑路径，再被当成「不在工作目录」，报错就偏了，所以先单独认出成环。
+  const real = await realpath(logical).catch((error: unknown) => {
+    if (errorCode(error) === "ELOOP") throw new Error(loop);
+    return realpathExisting(logical);
+  });
+  if (dirs.hidden.some((prefix) => isInsideRoot(real, prefix))) {
+    throw new Error(`${label}在固定禁区里，不能当配图，换一张图。`);
   }
-  if (!isInsideRoot(real, workDir)) {
-    throw new Error(`${where}配图「${path}」不在工作目录里，先把图放进工作目录再起草。`);
+  if (!isInsideRoot(real, dirs.workDir)) {
+    throw new Error(`${label}不在工作目录里，先把图放进工作目录再起草。`);
   }
-  const stats = statSync(real, { throwIfNoEntry: false });
-  if (stats === undefined) throw new Error(`${where}配图「${path}」不存在，路径按工作目录算，核对一下再调。`);
-  if (!stats.isFile()) throw new Error(`${where}配图「${path}」不是普通文件，给一张图片文件的路径。`);
-  return { path: real, sha256: createHash("sha256").update(readFileSync(real)).digest("hex") };
+  let file;
+  try {
+    // O_NONBLOCK：路径若是命名管道，open 不会一直等写端。
+    file = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ENOENT") throw new Error(`${label}不存在，路径按工作目录算，核对一下再调。`, { cause: error });
+    if (code === "EACCES" || code === "EPERM")
+      throw new Error(`${label}没有权限读，换一张图或者先改好权限。`, { cause: error });
+    if (code === "ELOOP") throw new Error(loop, { cause: error });
+    throw new Error(`${label}打不开：${String(error)}`, { cause: error });
+  }
+  try {
+    const opened = await file.stat();
+    if (!opened.isFile()) throw new Error(`${label}不是普通文件，给一张图片文件的路径。`);
+    if (opened.size > MAX_IMAGE_BYTES) throw new Error(`${label}超过 20 MiB，压小一点再起草。`);
+    // realpath 和 open 之间上级目录可能被换成链接，打开后再核一次路径和 inode 还是同一个文件。
+    const now = await stat(real).catch(() => null);
+    if ((await realpath(real).catch(() => null)) !== real || now?.ino !== opened.ino || now.dev !== opened.dev) {
+      throw new Error(`${label}在读的时候被换掉了，重新调一次。`);
+    }
+    const bytes = await file.readFile();
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`${label}超过 20 MiB，压小一点再起草。`);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const copy = join(dirs.draftsDir, `${sha256}${extname(real).toLowerCase()}`);
+    const temporary = `${copy}.${randomUUID()}.tmp`;
+    await writeFile(temporary, bytes, { flag: "wx", mode: 0o444 });
+    await rename(temporary, copy);
+    return { path: copy, sha256 };
+  } finally {
+    await file.close();
+  }
 }
 
 // 协议里的对象都是 strict，模型多写一个键就整条被拒，所以只挑协议要的字段。
-const contentOf = (content: Static<typeof CONTENT>, workDir: string, where: string): DraftContent => {
-  const images = (content.images ?? []).map((image) => imageOf(image.path, workDir, where));
+const contentOf = async (content: Static<typeof CONTENT>, dirs: ImageDirs, where: string): Promise<DraftContent> => {
+  const images: DraftImage[] = [];
+  for (const image of content.images ?? []) images.push(await imageOf(image.path, dirs, where));
   return content.kind === "post"
     ? {
         kind: "post",
@@ -134,12 +184,12 @@ const accountsHint = (accounts: readonly AccountConfig[]): string =>
     ? "用户还没连任何账号，告诉用户先去账号页连一个。"
     : `能用的账号：${accounts.map((account) => `${accountLabel(account)}（accountId：${account.id}）`).join("、")}`;
 
-function specOf(
+async function specOf(
   input: Static<typeof DRAFT_INPUT>,
   accounts: readonly AccountConfig[],
-  workDir: string,
+  dirs: ImageDirs,
   where: string,
-): DraftSpec {
+): Promise<DraftSpec> {
   const account = accounts.find((candidate) => candidate.id === input.accountId);
   if (account === undefined) {
     throw new Error(`${where}没有 accountId 是「${input.accountId}」的账号。${accountsHint(accounts)}`);
@@ -150,7 +200,7 @@ function specOf(
   return {
     draftId: DraftId.parse(randomUUID()),
     accountId: account.id,
-    content: contentOf(input.content, workDir, where),
+    content: await contentOf(input.content, dirs, where),
     scheduledAt: scheduledAtOf(input.scheduledAt, where),
   };
 }
@@ -159,8 +209,8 @@ export function createDraftTools(options: {
   readonly activeRun: () => ActiveRun | null;
   /** 工具调用时读最新的 config.accounts：换账号不重建会话，建工具时抓一份会过期。 */
   readonly accounts: () => readonly AccountConfig[];
-  /** 配图只收这个目录里的文件。 */
-  readonly workDir: string;
+  /** 配图只收工作目录里的文件，拷进 drafts 目录。 */
+  readonly images: ImageDirs;
   readonly send: (message: AgentToControl) => void;
 }): readonly RunnerTool[] {
   const activeOrThrow = (action: string): ActiveRun => {
@@ -179,10 +229,10 @@ export function createDraftTools(options: {
       parameters: DRAFT_INPUT,
       execute: async (_callId, params) => {
         const active = activeOrThrow("起草");
-        const draft = specOf(
+        const draft = await specOf(
           params as Static<typeof DRAFT_INPUT>,
           options.accounts(),
-          options.workDir,
+          options.images,
           "草稿没建，改好再调：",
         );
         options.send(
@@ -220,7 +270,7 @@ export function createDraftTools(options: {
               botId: active.run.botId,
               groupId: active.run.groupId,
               draftId: parsedId.data,
-              content: contentOf(content, options.workDir, "草稿没改，改好再调："),
+              content: await contentOf(content, options.images, "草稿没改，改好再调："),
             },
             "改动",
           ),
@@ -239,9 +289,10 @@ export function createDraftTools(options: {
         const active = activeOrThrow("出内容计划");
         const { title, drafts } = params as Static<typeof PLAN_PARAMS>;
         const accounts = options.accounts();
-        const specs = drafts.map((draft, index) =>
-          specOf(draft, accounts, options.workDir, `计划没发出去，改好再调：第 ${index + 1} 条草稿`),
-        );
+        const specs: DraftSpec[] = [];
+        for (const [index, draft] of drafts.entries()) {
+          specs.push(await specOf(draft, accounts, options.images, `计划没发出去，改好再调：第 ${index + 1} 条草稿`));
+        }
         options.send(
           parseOrThrow(
             {

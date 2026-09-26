@@ -11,8 +11,9 @@ import {
   type Verdict,
 } from "@baize/shared";
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
+import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
-import { forbiddenPathPrefixes, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
+import { type ForbiddenZones, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 
 export interface GateAccess {
   readonly network: boolean;
@@ -24,6 +25,7 @@ export interface GateContext {
   readonly groupId: GroupId;
   readonly computerId: ComputerId;
   readonly platform: NodeJS.Platform;
+  readonly zones: ForbiddenZones;
 }
 
 /** bash 实际跑在哪种系统沙箱里。`none` 时禁区和写范围只剩命令解析，挡不住，所以 bash 一律问。 */
@@ -93,9 +95,26 @@ const INTERNAL_TOOLS = new Set([
   "propose_project",
 ]);
 
-const isForbiddenPath = (path: string, call: GateContext): boolean => {
+type ZoneHit = "hidden" | "read_only" | null;
+
+const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
+
+// 改动落在禁区的祖先上（放宽写整个数据目录、删掉上一级）也算碰禁区。
+const zoneHit = (action: ActionKind, path: string, call: GateContext): ZoneHit => {
   const real = realpathExisting(path);
-  return forbiddenPathPrefixes(call.workDir).some((prefix) => isInsideRoot(real, prefix, call.platform));
+  const inside = (zone: readonly string[]): boolean => zone.some((prefix) => isInsideRoot(real, prefix, call.platform));
+  const covers = (zone: readonly string[]): boolean =>
+    MUTATIONS.has(action) &&
+    action !== "write_workspace" &&
+    zone.some((prefix) => isInsideRoot(prefix, path, call.platform));
+  if (inside(call.zones.hidden) || covers(call.zones.hidden)) return "hidden";
+  if (MUTATIONS.has(action) && (inside(call.zones.readOnly) || covers(call.zones.readOnly))) return "read_only";
+  return null;
+};
+
+const ZONE_REASONS: Readonly<Record<Exclude<ZoneHit, null>, string>> = {
+  hidden: "这个路径属于固定禁区，不能读取或修改。",
+  read_only: "这个路径是配图拷贝目录，属于固定禁区，只能读不能改。",
 };
 
 const targetForPath = (path: string, computerId: ComputerId): GrantTarget => ({
@@ -481,6 +500,8 @@ const classifyTool = (call: GateCall): readonly ClassifiedAction[] => {
   if (INTERNAL_TOOLS.has(call.toolName)) {
     return [plainAction(call.toolName === "read_task" ? "read" : "write_workspace")];
   }
+  const browserAction = BROWSER_TOOL_ACTIONS.get(call.toolName);
+  if (browserAction !== undefined) return [plainAction(browserAction, targetFromInput(call.input, call))];
   if (call.mcpOperation === null) return [plainAction("write_workspace")];
   return [plainAction(mcpAction(call.toolName, call.mcpOperation.needsApproval), targetFromInput(call.input, call))];
 };
@@ -517,15 +538,7 @@ const verdictForItem = (
   grants: readonly Grant[],
   accounts: readonly AccountConfig[],
 ): Verdict => {
-  const itemPath = item.path;
-  if (
-    itemPath !== null &&
-    (isForbiddenPath(itemPath, call) ||
-      (item.action === "write_outside" &&
-        forbiddenPathPrefixes(call.workDir).some((prefix) => isInsideRoot(prefix, itemPath, call.platform))))
-  ) {
-    return "deny";
-  }
+  if (item.path !== null && zoneHit(item.action, item.path, call) !== null) return "deny";
   if (HARD_ACTIONS.has(item.action)) return "ask";
   if (granted(item, call, grants)) return "allow";
   if (item.action === "publish" && item.target?.kind === "account") {
@@ -613,7 +626,10 @@ export function decide(call: GateCall, grants: readonly Grant[], accounts: reado
     verdict: selected.verdict,
     action: selected.item.action,
     target: selected.item.target,
-    reason: selected.verdict === "deny" ? "这个路径属于固定禁区，不能读取或修改。" : null,
+    reason:
+      selected.verdict === "deny" && selected.item.path !== null
+        ? ZONE_REASONS[zoneHit(selected.item.action, selected.item.path, call) ?? "hidden"]
+        : null,
     access: mergeAccess(items),
   };
 }

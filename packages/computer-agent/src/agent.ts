@@ -7,10 +7,7 @@ import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js"
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
 
 export interface AgentRunnerConfig extends RunnerConfig {
-  readonly browser: {
-    readonly profileDir: string;
-    cdpUrl(): Promise<string>;
-  };
+  readonly browser: NonNullable<RunnerConfig["browser"]>;
 }
 
 export type RunnerFactory = (config: AgentRunnerConfig) => Runner;

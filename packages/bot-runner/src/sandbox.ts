@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
 import type { GateAccess, SandboxKind } from "./gate.js";
-import { forbiddenPathPrefixes, realpathExisting } from "./paths.js";
+import { type ForbiddenZones, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
 const MACH_LOOKUP_NAMES = [
@@ -34,7 +34,16 @@ export function whitelistEnv(env: NodeJS.ProcessEnv, cwd: string, tmpDir: string
   return next;
 }
 
-export function sandboxProfile(workDir: string, access: GateAccess): string {
+/**
+ * blockedPorts 只在放行联网时起作用：助理 Chrome 的 CDP 端口。批准联网的 bash 连上它就能列出、关掉别的标签页，
+ * 或拿到带登录态的页面读 cookie。主机写成 *：规则写 localhost 时 [::ffff:127.0.0.1] 能绕过去，实测过。
+ */
+export function sandboxProfile(
+  workDir: string,
+  access: GateAccess,
+  zones: ForbiddenZones,
+  blockedPorts: readonly number[] = [],
+): string {
   const work = realpathExisting(workDir);
   const lines = [
     "(version 1)",
@@ -61,12 +70,18 @@ export function sandboxProfile(workDir: string, access: GateAccess): string {
     '(allow file-write* (literal "/dev/fd/2"))',
     '(allow file-write* (literal "/dev/dtracehelper"))',
     ...(access.network
-      ? ["(allow network-outbound)", "(allow network-inbound)", "(allow network-bind)"]
+      ? [
+          "(allow network-outbound)",
+          "(allow network-inbound)",
+          "(allow network-bind)",
+          ...blockedPorts.map((port) => `(deny network-outbound (remote tcp "*:${port}"))`),
+        ]
       : ["(deny network*)"]),
-    ...forbiddenPathPrefixes(workDir).flatMap((prefix) => {
+    ...zones.hidden.flatMap((prefix) => {
       const real = seatbeltString(realpathExisting(prefix));
       return [`(deny file-read* (subpath ${real}))`, `(deny file-write* (subpath ${real}))`];
     }),
+    ...zones.readOnly.map((prefix) => `(deny file-write* (subpath ${seatbeltString(realpathExisting(prefix))}))`),
   ];
   return lines.join("\n");
 }
@@ -99,11 +114,17 @@ export function sandboxKind(): SandboxKind {
  * 「Can't mkdir parents ... Read-only file system」，整条命令起不来。
  * 禁区放在所有 bind 之后：bwrap 按参数顺序叠挂载，后挂的盖住先挂的。禁区落在工作目录或批准的写路径里面时照样被盖住；
  * 工作目录本身落在禁区里时 --chdir 失败，命令起不来。
+ * 只读区用 --ro-bind 叠在写路径之后，批准写它的祖先也改不动它。
  * 空 tmpfs 默认可写，写进去的东西随沙箱消失，命令却报成功，所以再逐个 --remount-ro。先挂完全部 tmpfs 再改只读，
  * 禁区互相嵌套时里层的挂载点还建得出来。
  * 不挂 --proc：docker 遮住了部分 /proc，新挂 proc 会失败，沙箱和容器共用 /proc。
  */
-export function bwrapArgs(workDir: string, access: GateAccess, forbidden: readonly string[]): readonly string[] {
+export function bwrapArgs(
+  workDir: string,
+  access: GateAccess,
+  forbidden: readonly string[],
+  readOnly: readonly string[],
+): readonly string[] {
   return [
     "--ro-bind",
     "/",
@@ -116,6 +137,7 @@ export function bwrapArgs(workDir: string, access: GateAccess, forbidden: readon
     workDir,
     workDir,
     ...access.writePaths.flatMap((path) => ["--bind", path, path]),
+    ...readOnly.flatMap((path) => ["--ro-bind", path, path]),
     ...forbidden.flatMap((path) => ["--tmpfs", path]),
     ...forbidden.flatMap((path) => ["--remount-ro", path]),
     "--unshare-pid",
@@ -151,21 +173,31 @@ const writeMountPoint = (path: string): string | null => {
 // 沙箱的 /tmp 本来就是空的；批准写 /tmp 下的新文件会把真 /tmp 挂进来，所以这个目录单独盖住。
 const X11_SOCKET_DIR = "/tmp/.X11-unix";
 
-const bwrapCommand = (workDir: string, access: GateAccess, command: string): string => {
+const existingReal = (paths: readonly string[]): readonly string[] => [
+  ...new Set(paths.map(realpathExisting).filter(existsSync)),
+];
+
+const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
   const work = realpathExisting(workDir);
-  const candidates = [...forbiddenPathPrefixes(workDir), ...otherBotDirs(work), X11_SOCKET_DIR];
-  const forbidden = [...new Set(candidates.map(realpathExisting).filter(existsSync))];
+  const forbidden = existingReal([...zones.hidden, ...otherBotDirs(work), X11_SOCKET_DIR]);
   const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
-  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden);
+  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden, existingReal(zones.readOnly));
   return ["bwrap", ...args, "/bin/bash", "-c", command].map(shSingleQuote).join(" ");
 };
 
-const sandboxedCommand = (kind: SandboxKind, workDir: string, access: GateAccess, command: string): string => {
+const sandboxedCommand = (
+  kind: SandboxKind,
+  workDir: string,
+  zones: ForbiddenZones,
+  access: GateAccess,
+  blockedPorts: readonly number[],
+  command: string,
+): string => {
   switch (kind) {
     case "seatbelt":
-      return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access))} /bin/bash -c ${shSingleQuote(command)}`;
+      return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones, blockedPorts))} /bin/bash -c ${shSingleQuote(command)}`;
     case "bwrap":
-      return bwrapCommand(workDir, access, command);
+      return bwrapCommand(workDir, zones, access, command);
     case "none":
       return command;
     default: {
@@ -176,9 +208,16 @@ const sandboxedCommand = (kind: SandboxKind, workDir: string, access: GateAccess
 };
 
 const spawnHook =
-  (kind: SandboxKind, workDir: string, tmpDir: string, access: GateAccess): BashSpawnHook =>
+  (
+    kind: SandboxKind,
+    workDir: string,
+    zones: ForbiddenZones,
+    tmpDir: string,
+    access: GateAccess,
+    blockedPorts: readonly number[],
+  ): BashSpawnHook =>
   (ctx: BashSpawnContext) => ({
-    command: sandboxedCommand(kind, workDir, access, ctx.command),
+    command: sandboxedCommand(kind, workDir, zones, access, blockedPorts, ctx.command),
     cwd: workDir,
     env: whitelistEnv(ctx.env, workDir, tmpDir),
   });
@@ -190,7 +229,16 @@ export interface BashSandbox {
   clearRun(runId: string): void;
 }
 
-export function createSandboxedBash(workDir: string, activeRunId: () => string | null = () => null): BashSandbox {
+/**
+ * cdpPort 是助理 Chrome 当前的调试端口，没有助理 Chrome 或它起不来时给 null。Chrome 重启后端口会变，
+ * 所以每条批准联网的命令拼 profile 前现取一次。bwrap 这次不挡，见 README。
+ */
+export function createSandboxedBash(
+  workDir: string,
+  zones: ForbiddenZones,
+  activeRunId: () => string | null = () => null,
+  cdpPort: () => Promise<number | null> = async () => null,
+): BashSandbox {
   const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
   mkdirSync(tmpDir, { recursive: true });
@@ -206,7 +254,11 @@ export function createSandboxedBash(workDir: string, activeRunId: () => string |
       const access = runAccess?.get(callId) ?? { network: false, writePaths: [] };
       runAccess?.delete(callId);
       if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
-      const scoped = createBashToolDefinition(workDir, { spawnHook: spawnHook(kind, workDir, tmpDir, access) });
+      const port = kind === "seatbelt" && access.network ? await cdpPort() : null;
+      const blockedPorts = port === null ? [] : [port];
+      const scoped = createBashToolDefinition(workDir, {
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, blockedPorts),
+      });
       return scoped.execute(...args);
     },
   } satisfies typeof base;

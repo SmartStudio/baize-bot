@@ -37,13 +37,14 @@ Pi 0.87.1 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一
 
 ## 目录布局
 
-`config.dataDir` 是根，每个 Bot 一棵子树，三个目录都在 `src/paths.ts` 的 `botDirs` 里定死：
+`config.dataDir` 是根，每个 Bot 一棵子树，这几个目录都在 `src/paths.ts` 的 `botDirs` 里定死：
 
 ```
 <dataDir>/<botId>/agent                 Pi 的 agentDir。auth.json、models-store.json 落在这里
 <dataDir>/<botId>/sessions/<groupId>    这个群的会话 JSONL
 <dataDir>/<botId>/work                  会话的 cwd，Bot 干活的地方
 <dataDir>/<botId>/skills                config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
+<dataDir>/<botId>/drafts                起草时拷来的配图，<sha256>.<扩展名>，Bot 能读不能写
 ```
 
 直接放在 `sessions/` 里的旧 JSONL 不迁移、不删除。升级后那个 Bot 会丢一次旧记忆，之后按群续用。
@@ -61,14 +62,14 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 每次 Pi `tool_call` 都先走 `src/gate.ts` 的纯函数。判定顺序固定为禁区、硬清单、`config.grants` 与账号权限档、默认表。禁区授权也不能越过；`spend`、`account_security` 和 `delete` 每次都问。项目授权只在同一 `groupId` 生效，永久授权还会再过 `GRANTABLE_SCOPES`，畸形的硬清单或 `write_outside` 永久授权不会被采用。
 
-`read`、`write`、`edit` 先展开 `~` 和开头的 `@`，再对已存在的路径段做 realpath。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。`~/.ssh`、钥匙串和浏览器登录资料是固定前缀禁区。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
+`read`、`write`、`edit` 先展开 `~` 和开头的 `@`，再对已存在的路径段做 realpath。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。禁区由 `src/paths.ts` 的 `forbiddenZones` 给出，闸门和两种沙箱共用一份。`hidden` 读写都拒：`~/.ssh`、钥匙串、用户自己浏览器的登录资料，给了 `config.browser` 时再加上助理 Chrome 的整个 `profileDir`；没给就不加，也不按数据目录去猜。`readOnly` 只拒改：这个 Bot 的 `drafts/`。写和删的目标若是禁区的祖先（比如删整个 Bot 目录）也直接拒。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
 
 bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝。
-- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。批准联网时，给了 `config.browser` 就在放宽规则之后追加 `(deny network-outbound (remote tcp "*:<CDP 端口>"))`，端口每次拼 profile 时从 `cdpUrl()` 现取，取不到就不加；写成 `localhost:<端口>` 会被 `[::ffff:127.0.0.1]` 绕过，所以用 `*`。
+- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
 `seatbelt` 和 `bwrap` 走同一套命令分类。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外都把环境裁成基础变量和 `PI_` 前缀，`DISPLAY` 不在里面。两种沙箱都做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。远程电脑上批准网络的那次调用和容器共用网络命名空间，所以 Xvfb 带 `-nolisten local` 关掉抽象 socket，只留 `/tmp/.X11-unix` 下的文件 socket。沙箱私有的 `/tmp` 里没有这个目录，获批写 `/tmp` 把真 `/tmp` 挂进来时它也按禁区盖住。
@@ -93,15 +94,15 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 工具连接
 
 `config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具和 client 这个 Bot 的所有群共用，不按群各连一次。
 
-每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
+每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具的名字不论角色都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具和五个浏览器工具的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -247,6 +248,45 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 `set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
 
+## 助理浏览器
+
+`RunnerConfig.browser` 是本机电脑代理给的 `{ profileDir, cdpUrl() }`，远程电脑和大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`，用 Node 自带的全局 `WebSocket`，一个 Bot 一条连接到浏览器级端点，标签页的命令走 flatten 模式的 `sessionId`。
+
+| 工具 | 动作 | 做什么 |
+| --- | --- | --- |
+| `browser_open` | `read`，放行 | 在自己的后台标签页打开 http 或 https 网址，回标题和网址。目标端口等于助理 Chrome 的 CDP 端口就拒，不看主机名 |
+| `browser_snapshot` | `read`，放行 | 回标题、网址、正文（`innerText`，截到 8000 字）和编号的可点元素 |
+| `browser_screenshot` | `read`，放行 | 截当前这一屏，PNG 作为图片进模型 |
+| `browser_click` | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent` |
+| `browser_type` | `engage`，默认问 | 按编号填字，替换原内容，可选按回车 |
+
+没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标现在是空的，每次都问；按域名授权见报告里的提议。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（最近一次打开或 snapshot 看到的网址的主机名）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
+
+snapshot 的形状：
+
+```
+标题：…
+地址：…
+
+页面文字：…
+
+可点的元素：
+[1] 输入框「账号」
+[2] 密码框「密码」
+[3] 按钮「登录」
+[4] 链接「帮助」→ https://…
+```
+
+编号按 DOM 顺序，只收看得见的元素，最多 200 个，编号表挂在页面上，下一次 snapshot 重建。`type="password"`，以及 `autocomplete` 含 `current-password` 或 `new-password` 的输入框都算密码框，只报「密码框」不报值，`document.cookie` 和 `Set-Cookie` 都不读。截图前把所有密码框的值清空，截完在 `finally` 里填回去，页面不收到 input 事件。
+
+**标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新取 `cdpUrl()`；地址变了或连接断了（Chrome 崩溃重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页，关不掉的记下来，下次同一个 Chrome 里建页前再关。
+
+**CDP 端口。** 能列出、关掉、接管别的标签页的只有 CDP 端口，所以挡两层。`browser_open` 只看目标端口（没写端口按协议默认端口算），等于 CDP 端口就拒，`127.0.0.1`、`localhost.`、`0.0.0.0`、`[::ffff:127.0.0.1]` 这类写法都挡。每个标签页的 session 上开 `Fetch.enable`，pattern 是 `*:<端口>/*`，`requestStage` 为 `Request`，暂停的请求再按端口精确比一次，是就 `failRequest`（`BlockedByClient`），不是就放行；302、点链接、页面脚本跳转、图片等子资源都在这里挡。选 `Fetch` 不选 `Network.setBlockedURLs`：原型实测后者挡不住顶层导航和 302。Chrome 启动不带 `--remote-allow-origins`，页面里的 WebSocket 连不上 CDP。跨源 iframe、Worker 和 Service Worker 的请求不走这个 session，没有挡，见报告。
+
+**禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。批准联网的 bash 在 seatbelt 里另外拒连 CDP 端口，见「统一闸门和沙箱」；bwrap 这边还没挡。
+
+**看图。** 网关 provider 的 `input` 是 `["text", "image"]`，截图和工具连接回的图片都以 `ImageContent` 进模型。工具连接回的图只收 `MODEL_IMAGE_TYPES`（png、jpeg、gif、webp），单张超过 `MODEL_IMAGE_MAX_BYTES`（5 MiB）的和别的格式各换成一行中文说明，不进模型。`src/bot-session.ts` 在 Pi 的 `context` 事件里从新往旧数图片块，只留最近 `KEPT_IMAGES = 3` 张原图，更早的换成一行「（之前的截图已省略）」，免得每轮请求超过上游 20 MiB。只改发给上游的这一份，会话 JSONL 里的原消息不动。
+
 ## 草稿和内容计划
 
 Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具挂给所有 Bot，主助理和队员都能起草，三个名字（`DRAFT_TOOL_NAMES`）对工具连接一律保留。三件都不走审批，闸门只看账号档，见「统一闸门和沙箱」。
@@ -261,7 +301,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
 - **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，在读图之前判。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
-- **配图由运行器认。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器取 realpath，先看是否落在固定禁区里（`src/paths.ts` 的 `forbiddenPathPrefixes`），在就拒，哪怕是工作目录里的符号链接指过去的，错误里也不叫模型把它挪进工作目录；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录再起草；文件不存在或不是普通文件也抛错。三件工具的配图都这样判，错了只回工具错误，不发上行。通过的图，`DraftSpec` 里记 realpath 和运行器读文件算出的 sha256，所以用户批的那张图和发布器读到的是同一份字节；发布器照 sha256 再核一次，是 P1-5 的事。
+- **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。`DraftSpec` 记的是这份拷贝的路径和 sha256，之后工作目录里的原图怎么改都不影响草稿，发布器读到的就是起草时的字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 
 `src/publisher.ts` 的 `publishDraft` 收控制面下行的 `publish_draft`，回一条 `publish_result`。本机发布器按平台登记成一张表，现在是空的，所以一律回 `failed`、`reason: "error"`、`detail: "本机发布器还没接上"`；P1-5 接小红书时往表里加一行。它不挂在 `Runner` 上，电脑代理收到报文直接调，不经过 Bot 的串行队列。

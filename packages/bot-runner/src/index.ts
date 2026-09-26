@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import {
   type AgentToControl,
   type BotId,
@@ -12,11 +13,12 @@ import {
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
+import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
-import { type BotDirs, botDirs, ensureBotDirs, groupSessionDir } from "./paths.js";
-import { reportRun } from "./reporter.js";
+import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
+import { reportRun, simpleToolView } from "./reporter.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
@@ -49,6 +51,11 @@ export interface RunnerConfig {
   readonly extensionTools?: readonly RunnerTool[];
   /** 覆盖 Pi 的会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
   readonly settings?: PiSettings;
+  /**
+   * 本机的助理 Chrome。给了才注册五件浏览器工具，profile 目录进禁区。远程电脑不给。
+   * 只认 createRunner 时的这一份，applyConfig 里带的不换。
+   */
+  readonly browser?: BrowserConfig;
 }
 
 export interface Runner {
@@ -102,6 +109,8 @@ interface BotRuntime {
   sessions: Map<GroupId, BotSession>;
   /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
   mcp: McpToolSet | null;
+  /** 同样所有群共用：一个 Bot 一个后台标签页，不按群分。 */
+  browser: BotBrowser | null;
   /** pause 只让下一次 prompt 入场或工具过闸挂起；已经执行中的工具不被中止。 */
   paused: boolean;
   pauseWaiters: Set<PauseWaiter>;
@@ -291,6 +300,7 @@ export function createRunner(config: RunnerConfig): Runner {
           lastGroupId: null,
           sessions: new Map(),
           mcp: null,
+          browser: null,
           paused: false,
           pauseWaiters: new Set(),
           active: null,
@@ -367,6 +377,10 @@ export function createRunner(config: RunnerConfig): Runner {
         fail("runner_failed", `Bot ${bot.botId} 关闭会话失败：${String(result.reason)}`, groupId);
       }
     });
+
+    const browser = bot.browser;
+    bot.browser = null;
+    await browser?.close();
 
     const mcp = bot.mcp;
     bot.mcp = null;
@@ -463,7 +477,19 @@ export function createRunner(config: RunnerConfig): Runner {
     if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
     const activeRun = (): ActiveRun | null => bot.active;
     const dirs = ensureBotDirs(bot.dirs);
-    const bash = createSandboxedBash(dirs.workDir, () => bot.active?.run.runId ?? null);
+    const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
+    const browserConfig = config.browser;
+    // 取地址会顺带把没起的助理 Chrome 起起来，这样端口是定下来的；起不来就没有端口可连，不加这条规则。
+    const cdpPort =
+      browserConfig === undefined
+        ? undefined
+        : () =>
+            browserConfig.cdpUrl().then(
+              (url) => Number(new URL(url).port || 80),
+              () => null,
+            );
+    const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null, cdpPort);
+    if (config.browser !== undefined) bot.browser ??= createBotBrowser(config.browser);
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
@@ -472,16 +498,22 @@ export function createRunner(config: RunnerConfig): Runner {
         activeRun,
         send: config.send,
         accounts: () => desiredConfig(bot)!.accounts,
-        workDir: dirs.workDir,
+        images: { workDir: dirs.workDir, draftsDir: realpathSync(dirs.draftsDir), hidden: zones.hidden },
       }),
       ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
+      ...(bot.browser?.tools ?? []),
     ];
     const mcp =
       bot.mcp ??
       createMcpTools({
         botId: bot.botId,
         connections: definition.connections,
-        reserved: new Set([bash.tool.name, ...builtIn.map((tool) => tool.name), ...ASSISTANT_TOOL_NAMES]),
+        reserved: new Set([
+          bash.tool.name,
+          ...builtIn.map((tool) => tool.name),
+          ...ASSISTANT_TOOL_NAMES,
+          ...BROWSER_TOOL_NAMES,
+        ]),
       });
     bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
@@ -495,6 +527,7 @@ export function createRunner(config: RunnerConfig): Runner {
           toolName,
           input,
           workDir: dirs.workDir,
+          zones,
           groupId,
           platform: process.platform,
           sandbox: bash.sandbox,
@@ -515,7 +548,8 @@ export function createRunner(config: RunnerConfig): Runner {
       gateway: bot.appliedGateway,
       bashTool: bash.tool,
       tools: [...builtIn, ...mcp.tools],
-      serverForTool: mcp.serverFor,
+      approvalView: (toolName, input) =>
+        bot.browser?.approvalView(toolName, input) ?? simpleToolView(toolName, input, mcp.serverFor(toolName)),
       decideTool,
       waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
       allowBash: bash.allow,
@@ -640,6 +674,7 @@ export function createRunner(config: RunnerConfig): Runner {
           lastGroupId: null,
           sessions: new Map(),
           mcp: null,
+          browser: null,
           paused: false,
           pauseWaiters: new Set(),
           active: null,

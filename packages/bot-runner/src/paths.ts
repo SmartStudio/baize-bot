@@ -17,6 +17,8 @@ export interface BotDirs {
   readonly workDir: string;
   /** `config.skills` 落成的 `<skillId>/SKILL.md`，Pi 的 `additionalSkillPaths` 指到这里。 */
   readonly skillsDir: string;
+  /** 配图起草时拷到这里，按 sha256 命名。Bot 能读不能写，发布时拿到的就是起草时的字节。 */
+  readonly draftsDir: string;
 }
 
 // GroupId 在边界上已经是这段正则。这里再挡一次：拼路径时不改写，对不上就拒绝。
@@ -35,30 +37,43 @@ export function botDirs(dataDir: string, botId: BotId): BotDirs {
     sessionDir: join(root, "sessions"),
     workDir: join(root, "work"),
     skillsDir: join(root, "skills"),
+    draftsDir: join(root, "drafts"),
   };
 }
 
 export function ensureBotDirs(dirs: BotDirs): BotDirs {
-  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir]) mkdirSync(dir, { recursive: true });
+  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir]) {
+    mkdirSync(dir, { recursive: true });
+  }
   return dirs;
 }
 
-export const forbiddenPathPrefixes = (workDir?: string): readonly string[] => {
+/** 闸门和两种沙箱共用的禁区。hidden 读写都不行，readOnly 能读不能写。 */
+export interface ForbiddenZones {
+  readonly hidden: readonly string[];
+  readonly readOnly: readonly string[];
+}
+
+// 助理 Chrome 的 profile 只认 config 给的路径，不按数据目录的布局去猜：猜错了等于没禁。
+export function forbiddenZones(dirs: Pick<BotDirs, "draftsDir">, browserProfileDir: string | null): ForbiddenZones {
   const home = homedir();
-  return [
-    join(home, ".ssh"),
-    join(home, "Library", "Keychains"),
-    "/Library/Keychains",
-    join(home, "Library", "Application Support", "Google", "Chrome"),
-    join(home, "Library", "Application Support", "Chromium"),
-    join(home, "Library", "Application Support", "Microsoft Edge"),
-    join(home, "Library", "Application Support", "Firefox", "Profiles"),
-    join(home, ".config", "google-chrome"),
-    join(home, ".config", "chromium"),
-    join(home, ".mozilla", "firefox"),
-    ...(workDir === undefined ? [] : [join(dirname(dirname(workDir)), "chrome-profile")]),
-  ];
-};
+  return {
+    hidden: [
+      join(home, ".ssh"),
+      join(home, "Library", "Keychains"),
+      "/Library/Keychains",
+      join(home, "Library", "Application Support", "Google", "Chrome"),
+      join(home, "Library", "Application Support", "Chromium"),
+      join(home, "Library", "Application Support", "Microsoft Edge"),
+      join(home, "Library", "Application Support", "Firefox", "Profiles"),
+      join(home, ".config", "google-chrome"),
+      join(home, ".config", "chromium"),
+      join(home, ".mozilla", "firefox"),
+      ...(browserProfileDir === null ? [] : [browserProfileDir]),
+    ],
+    readOnly: [dirs.draftsDir],
+  };
+}
 
 export function logicalResolve(input: string, cwd: string): string {
   let normalized = input;

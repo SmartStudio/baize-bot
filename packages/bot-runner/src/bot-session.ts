@@ -1,4 +1,4 @@
-import type { BotId, BotRole, ControlToAgent, ModelPurpose } from "@baize/shared";
+import type { BotId, BotRole, ControlToAgent, ModelPurpose, ToolView } from "@baize/shared";
 import {
   type AgentSession,
   createAgentSession,
@@ -17,7 +17,6 @@ import { ASSISTANT_RULE } from "./assistant.js";
 import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
 import type { BotDirs } from "./paths.js";
-import { simpleToolView } from "./reporter.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 
@@ -45,7 +44,8 @@ export interface BotSessionOptions {
   readonly gateway: Extract<ControlToAgent, { type: "config" }>["modelGateway"];
   readonly bashTool: ReturnType<typeof createBashToolDefinition>;
   readonly tools: readonly RunnerTool[];
-  readonly serverForTool: (toolName: string) => string;
+  /** 审批卡上的样子。浏览器的点和填要写清域名和元素，其余照工具参数摆。 */
+  readonly approvalView: (toolName: string, input: Record<string, unknown>) => ToolView;
   readonly decideTool: (toolName: string, input: Record<string, unknown>) => GateDecision;
   readonly waitUntilRunning: (signal: AbortSignal | undefined) => Promise<boolean>;
   readonly allowBash: (runId: string, callId: string, access: GateAccess) => void;
@@ -75,17 +75,45 @@ const gatewayProvider = (gateway: BotSessionOptions["gateway"]) => ({
     id,
     name: id,
     reasoning: false,
-    input: ["text" as const],
+    input: ["text" as const, "image" as const],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
     maxTokens: 8192,
   })),
 });
 
+// 上游一次请求限 20 MiB，截图原样留着几轮就超。只留最近几张原图，更早的换成一行字。
+export const KEPT_IMAGES = 3;
+export const PRUNED_IMAGE_TEXT = "（之前的截图已省略）";
+
+/** 从新往旧数图片块，第 KEPT_IMAGES 张以外的换成文字。会话 JSONL 里的原消息不动，只改这一轮发给上游的副本。 */
+export function pruneImages<M extends { readonly role: string; readonly content?: unknown }>(
+  messages: readonly M[],
+): M[] {
+  let kept = 0;
+  const pruned = [...messages];
+  for (let index = pruned.length - 1; index >= 0; index -= 1) {
+    const message = pruned[index];
+    if (message === undefined || !Array.isArray(message.content)) continue;
+    const content = message.content as ReadonlyArray<{ readonly type: string }>;
+    if (!content.some((block) => block.type === "image")) continue;
+    const next = [...content];
+    for (let blockIndex = next.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      if (next[blockIndex]?.type !== "image") continue;
+      if (kept < KEPT_IMAGES) kept += 1;
+      else next[blockIndex] = { type: "text", text: PRUNED_IMAGE_TEXT } as never;
+    }
+    pruned[index] = { ...message, content: next };
+  }
+  return pruned;
+}
+
 function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
   return (pi) => {
     pi.registerTool(options.bashTool);
     for (const tool of options.tools) pi.registerTool(tool);
+
+    pi.on("context", (event) => ({ messages: pruneImages(event.messages) }));
 
     pi.on("tool_call", async (event, ctx) => {
       const active = options.activeRun();
@@ -112,7 +140,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
             tool: event.toolName,
             action: decision.action,
             target: decision.target,
-            view: simpleToolView(event.toolName, event.input, options.serverForTool(event.toolName)),
+            view: options.approvalView(event.toolName, event.input),
           },
           ctx.signal,
         );

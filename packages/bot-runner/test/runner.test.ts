@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -9,10 +11,12 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   type AccountConfig,
@@ -36,7 +40,7 @@ import {
   type TopicTask,
 } from "@baize/shared";
 import { Type } from "typebox";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   botDirs,
   type BotConfig,
@@ -51,7 +55,17 @@ import {
 } from "../src/index.js";
 import { simpleToolView } from "../src/reporter.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
-import { startFakeMcp } from "./helpers/mcp.js";
+import {
+  captureIn,
+  chromeBinary,
+  evaluateIn,
+  launchTestChrome,
+  openUserTab,
+  type PageTarget,
+  pageTargets,
+  type TestChrome,
+} from "./helpers/chrome.js";
+import { MCP_CHART_BYTES, startFakeMcp } from "./helpers/mcp.js";
 import {
   type ChatCompletionRequest,
   isFollowUpTurn,
@@ -384,6 +398,8 @@ async function startHarness(options: {
   readonly role?: BotRole;
   /** 复用上一台的数据目录，用来模拟同一台电脑上又来一条 config。 */
   readonly dataDir?: string;
+  /** 助理 Chrome。不给就和远程电脑一样没有浏览器工具。 */
+  readonly browser?: RunnerConfig["browser"];
 }): Promise<Harness> {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
@@ -438,6 +454,7 @@ async function startHarness(options: {
     extensionTools,
     send,
     ...(options.settings === undefined ? {} : { settings: options.settings }),
+    ...(options.browser === undefined ? {} : { browser: options.browser }),
   });
 
   runner = createRunner(config());
@@ -641,7 +658,8 @@ function filesNewerThan(dir: string, since: number): string[] {
   }
   return entries.flatMap((name) => {
     const path = join(dir, name);
-    const stat = statSync(path, { throwIfNoEntry: false });
+    // 不跟符号链接：草稿用例在工作目录里留了一对成环的链接。
+    const stat = lstatSync(path, { throwIfNoEntry: false });
     if (stat === undefined) return [];
     if (stat.isDirectory()) return filesNewerThan(path, since);
     return stat.mtimeMs > since ? [path] : [];
@@ -4336,6 +4354,9 @@ const botWorkDir = (): { readonly dataDir: string; readonly workDir: string } =>
   mkdirSync(workDir, { recursive: true });
   return { dataDir, workDir };
 };
+/** 运行器把配图拷进 `<dataDir>/<botId>/drafts/<sha256>.<扩展名>`，草稿记的是这份拷贝。 */
+const draftCopyOf = (dataDir: string, bytes: Buffer, ext = ".png"): string =>
+  join(realpathSync(dataDir), "bot-1", "drafts", `${createHash("sha256").update(bytes).digest("hex")}${ext}`);
 const drafted = (h: Harness) => h.sent.flatMap((message) => (message.type === "draft_create" ? [message.draft] : []));
 const toolStatuses = (h: Harness) => shape(h.sent).filter((s) => s.startsWith("bot_tool_call"));
 
@@ -4490,7 +4511,7 @@ describe("运行器的草稿", () => {
     expect(drafted(h)).toMatchObject([
       {
         accountId: "acc-xhs",
-        content: { images: [{ path: realpathSync(join(workDir, "cover.png")) }] },
+        content: { images: [{ path: draftCopyOf(dataDir, COVER_BYTES) }] },
         scheduledAt: null,
       },
       { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
@@ -4527,8 +4548,10 @@ describe("运行器的草稿", () => {
 
   it("工作目录里指向禁区的符号链接当配图被拒", async () => {
     const { dataDir, workDir } = botWorkDir();
-    // 助理 Chrome 的 profile 是固定禁区，路径由工作目录往上两级推出来。
-    const cookies = join(dataDir, "chrome-profile", "Default", "Cookies");
+    // profile 故意不放在数据目录旁边：禁区照 config.browser.profileDir 认，不从工作目录往上猜。
+    const profileDir = mkdtempSync(join(tmpdir(), "baize-assistant-profile-"));
+    usedDataDirs.push(profileDir);
+    const cookies = join(profileDir, "Default", "Cookies");
     mkdirSync(dirname(cookies), { recursive: true });
     writeFileSync(cookies, "登录态");
     symlinkSync(cookies, join(workDir, "cover.png"));
@@ -4536,6 +4559,7 @@ describe("运行器的草稿", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       dataDir,
+      browser: { profileDir, cdpUrl: () => Promise.reject(new Error("这条用例不开浏览器")) },
       accounts: ACCOUNTS,
       extensionTools: [],
       script: scriptRecording(seen, [
@@ -4580,11 +4604,146 @@ describe("运行器的草稿", () => {
     ).toEqual([
       [
         {
-          path: realpathSync(join(workDir, "cover.png")),
+          path: draftCopyOf(dataDir, COVER_BYTES),
           sha256: createHash("sha256").update(COVER_BYTES).digest("hex"),
         },
       ],
     ]);
+  });
+
+  it("起草后改掉原图，草稿指向的拷贝还是起草时的字节", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    const original = join(workDir, "cover.png");
+    writeFileSync(original, COVER_BYTES);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptBy([
+        ["发小红书", callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [IMAGE] } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+    writeFileSync(original, "起草之后被换掉的图");
+
+    const [image] = drafted(h)[0]?.content.images ?? [];
+    expect(image?.path, "草稿不能指向工作目录里还能被改的原图").not.toBe(realpathSync(original));
+    expect(
+      createHash("sha256")
+        .update(readFileSync(image?.path ?? ""))
+        .digest("hex"),
+      "发布器读到的还是用户批的那份字节",
+    ).toBe(image?.sha256);
+    expect(image?.sha256).toBe(createHash("sha256").update(COVER_BYTES).digest("hex"));
+  });
+
+  it.each([
+    [
+      "成环的符号链接",
+      (workDir: string) => {
+        symlinkSync(join(workDir, "b.png"), join(workDir, "cover.png"));
+        symlinkSync(join(workDir, "cover.png"), join(workDir, "b.png"));
+      },
+      "符号链接绕成了环",
+    ],
+    [
+      "超过 20 MiB",
+      (workDir: string) => {
+        writeFileSync(join(workDir, "cover.png"), "");
+        truncateSync(join(workDir, "cover.png"), 20 * 1024 * 1024 + 1);
+      },
+      "超过 20 MiB",
+    ],
+    [
+      "没有读权限",
+      (workDir: string) => {
+        writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+        chmodSync(join(workDir, "cover.png"), 0o000);
+      },
+      "没有权限读",
+    ],
+    [
+      "目录",
+      (workDir: string) => {
+        mkdirSync(join(workDir, "cover.png"));
+      },
+      "不是普通文件",
+    ],
+  ])("配图是%s时报中文，不发上行", async (_label, arrange, phrase) => {
+    const { dataDir, workDir } = botWorkDir();
+    arrange(workDir);
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["发小红书", callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [IMAGE] } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    expect(drafted(h)).toEqual([]);
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+    const error = seen.toolResults.join("");
+    expect(error, "点名是哪张图").toContain("配图「cover.png」");
+    expect(error).toContain(phrase);
+  });
+
+  it("工作目录往上一级的 agent/auth.json 不能当配图", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    const auth = join(dirname(workDir), "agent", "auth.json");
+    mkdirSync(dirname(auth), { recursive: true });
+    writeFileSync(auth, "{}");
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "发小红书",
+          callTool("create_draft", {
+            accountId: "acc-xhs",
+            content: { ...POST, images: [{ path: "../agent/auth.json" }] },
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    expect(drafted(h), "Bot 目录下工作目录以外的文件都不算工作目录").toEqual([]);
+    expect(seen.toolResults.join("")).toContain("不在工作目录里");
+  });
+
+  it("只有一个账号时 prompt 照样列出它，create_draft 仍要写 accountId", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const seen = recorder();
+    const dispatch = scriptRecording(seen, [["发小红书", callTool("create_draft", { content: POST })]]);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: [XHS],
+      extensionTools: [],
+      script: (req) => {
+        requests.push(req);
+        return dispatch(req);
+      },
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    const content = requests[0]?.messages.find((message) => message.role === "user")?.content;
+    expect((content as ReadonlyArray<{ text: string }>)[0]?.text, "一个账号也要列").toContain(
+      "能用的账号：\n- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
+    );
+    expect(drafted(h), "现在的 accountId 是必填，不因为只有一个账号就替模型补上").toEqual([]);
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
   });
 
   it("配图不存在或不是普通文件时报错", async () => {
@@ -4843,6 +5002,558 @@ describe("运行器的草稿", () => {
 });
 
 type ContextLine = PromptMessage["context"][number];
+/** 一个假扩展工具：每调一次回一张字节是「image-<次数>」的图，不是真 PNG，假上游不解码。 */
+const snapTool = (): RunnerTool => {
+  let shots = 0;
+  return {
+    name: "snap",
+    label: "截图",
+    description: "截一张图。",
+    parameters: Type.Object({}),
+    execute: async () => {
+      shots += 1;
+      return {
+        content: [{ type: "image", data: Buffer.from(`image-${shots}`).toString("base64"), mimeType: "image/png" }],
+        details: {},
+      };
+    },
+  };
+};
+
+/** 同一个工具连着点 times 次，每轮都把请求收下来。 */
+const scriptRepeating =
+  (requests: ChatCompletionRequest[], name: string, times: number, args: Record<string, unknown> = {}) =>
+  (req: ChatCompletionRequest): ScriptedTurn => {
+    requests.push(req);
+    const done = req.messages.filter((message) => message.role === "tool").length;
+    if (done >= times) return { textChunks: ["好了"], usage: { input: 800, output: 2 } };
+    return {
+      textChunks: [],
+      toolCall: { id: `call-${done + 1}`, name, args },
+      usage: { input: 800, output: 30 },
+    };
+  };
+
+const imagesIn = (req: ChatCompletionRequest | undefined): string[] =>
+  [...JSON.stringify(req?.messages ?? []).matchAll(/data:image\/png;base64,([A-Za-z0-9+/=]+)/g)].map((match) =>
+    Buffer.from(match[1] ?? "", "base64").toString(),
+  );
+
+describe("助理浏览器的禁区和看图", () => {
+  const openMcps: { close(): Promise<void> }[] = [];
+  afterEach(async () => {
+    await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+  });
+
+  it("bash 读助理 Chrome profile 下的 Cookies 被闸门拒绝，profile 按 config.browser.profileDir 认", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "baize-assistant-profile-"));
+    usedDataDirs.push(profileDir);
+    const cookies = join(profileDir, "Default", "Cookies");
+    mkdirSync(dirname(cookies), { recursive: true });
+    writeFileSync(cookies, "cookie-secret-p1-5");
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, cdpUrl: () => Promise.reject(new Error("这条用例不开浏览器")) },
+      script: scriptRecording(seen, [["看看 cookie", callTool("bash", { command: `cat ${cookies}` })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看 cookie"));
+
+    expect(shape(h.sent), "禁区直接拒，不送审批").not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    expect(seen.toolResults.join("")).toContain("固定禁区");
+    expect(seen.toolResults.join("")).not.toContain("cookie-secret-p1-5");
+  });
+
+  it("给了 browser 才有五件浏览器工具，没给就一件都没有", async () => {
+    const toolsOf = async (browser: RunnerConfig["browser"] | undefined): Promise<string[]> => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        ...(browser === undefined ? {} : { browser }),
+        script: (req) => {
+          requests.push(req);
+          return { textChunks: ["好"], usage: { input: 800, output: 2 } };
+        },
+      });
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "随便聊"));
+      return (requests[0]?.tools ?? []).map((tool) => tool.function.name).filter((name) => name.startsWith("browser_"));
+    };
+    const browser = {
+      profileDir: join(tmpdir(), "baize-no-such-profile"),
+      cdpUrl: () => Promise.reject(new Error("不开")),
+    };
+
+    expect((await toolsOf(browser)).toSorted()).toEqual([
+      "browser_click",
+      "browser_open",
+      "browser_screenshot",
+      "browser_snapshot",
+      "browser_type",
+    ]);
+    expect(await toolsOf(undefined), "远程电脑没有助理 Chrome").toEqual([]);
+  });
+
+  it("工具连接里同名的 browser_open 不注册，没给 browser 时也占着", async () => {
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection([{ name: "browser_open", needsApproval: false }])],
+      script: scriptSeeingTools(seen, [["随便聊", { textChunks: ["好"], usage: { input: 100, output: 5 } }]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "随便聊"));
+
+    expect(seen.toolNames[0], "闸门按运行器自己的分档认 browser_ 开头的名字").not.toContain("browser_open");
+  });
+
+  it("工具回的图作为图片进模型，第 4 张起最早的一张换成一行字", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [snapTool()],
+      script: scriptRepeating(requests, "snap", 4),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "连截四张"));
+
+    expect(imagesIn(requests[1]), "第一张原图进了模型").toEqual(["image-1"]);
+    expect(imagesIn(requests[3])).toEqual(["image-1", "image-2", "image-3"]);
+    const last = requests[4];
+    expect(imagesIn(last), "只留最近 3 张原图").toEqual(["image-2", "image-3", "image-4"]);
+    expect(JSON.stringify(last?.messages), "省掉的那张留一行字").toContain("（之前的截图已省略）");
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
+  it("工具连接返回的图片块进模型", async () => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection([{ name: "render_chart", needsApproval: false }], { url: mcp.url })],
+      script: scriptRepeating(requests, "render_chart", 1, { sku: "SKU-1" }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "画个图"));
+
+    expect(imagesIn(requests[1])).toEqual([MCP_CHART_BYTES.toString()]);
+    expect(JSON.stringify(requests[1]?.messages), "文字块照旧").toContain("的库存图");
+  });
+
+  it("工具连接回的图只收 png、jpeg、gif、webp，单张超过 5 MiB 换成一行字", async () => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection([{ name: "render_image", needsApproval: false }], { url: mcp.url })],
+      script: scriptPlans(requests, {
+        出图: [
+          ["render_image", { mimeType: "image/tiff", bytes: 16 }],
+          ["render_image", { mimeType: "image/png", bytes: 5 * 1024 * 1024 + 1 }],
+          ["render_image", { mimeType: "image/webp", bytes: 5 * 1024 * 1024 }],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "出图"));
+
+    const messages = JSON.stringify(requests.at(-1)?.messages);
+    expect(
+      [...messages.matchAll(/data:(image\/[a-z]+);base64,/g)].map((match) => match[1]),
+      "只有正好 5 MiB 的 webp 进了模型",
+    ).toEqual(["image/webp"]);
+    expect(messages, "tiff 换成一行字").toContain("image/tiff 的图模型看不了");
+    expect(messages, "超大的 png 换成一行字").toContain("超过 5 MiB");
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+});
+
+const PAGE_SECRETS = [
+  "COOKIE-HEADER-SECRET",
+  "COOKIE-JS-SECRET",
+  "PASSWORD-SECRET",
+  "CURRENT-PW-SECRET",
+  "NEW-PW-SECRET",
+] as const;
+
+/** 三个密码框：type=password 一个，autocomplete 标成密码的两个。 */
+const PASSWORD_FIELDS = ["pw", "cur", "new"] as const;
+const PASSWORD_VALUES = ["PASSWORD-SECRET", "CURRENT-PW-SECRET", "NEW-PW-SECRET"] as const;
+const LONG_LABEL = "很长的按钮".repeat(30);
+
+const staticPage = (
+  name: string,
+): string => `<!doctype html><html><head><meta charset="utf-8"><title>测试页 ${name}</title>
+<style>body{font:16px sans-serif;margin:20px}input{display:block;margin:8px 0;width:240px}</style></head><body>
+<h1>白泽测试页 ${name}</h1><p>这里是页面正文 PAGE-TEXT-${name}</p>
+<input id="user" placeholder="账号"><input id="pw" type="password" placeholder="密码">
+<button type="button" onclick="document.getElementById('out').textContent='点过了：'+document.getElementById('user').value">登录</button>
+<input id="cur" autocomplete="current-password" placeholder="当前密码"><input id="new" autocomplete="username new-password" placeholder="新密码">
+<button type="button">${LONG_LABEL}</button>
+<div id="out"></div>
+<script>document.cookie="js_token=COOKIE-JS-SECRET; path=/";document.getElementById("pw").value="PASSWORD-SECRET";
+document.getElementById("cur").value="CURRENT-PW-SECRET";document.getElementById("new").value="NEW-PW-SECRET";</script>
+</body></html>`;
+
+/** 本地静态页。每页带一个 Set-Cookie、一个脚本写的 cookie 和三个脚本填好的密码框，正文里有页名。hits 记每个路径被 GET 了几次。 */
+async function startStaticSite(): Promise<{
+  readonly url: string;
+  readonly hits: ReadonlyMap<string, number>;
+  close(): Promise<void>;
+}> {
+  const hits = new Map<string, number>();
+  const server = createHttpServer((request, response) => {
+    const name = (request.url ?? "/").slice(1) || "index";
+    hits.set(`/${name}`, (hits.get(`/${name}`) ?? 0) + 1);
+    response.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "set-cookie": "sid=COOKIE-HEADER-SECRET; Path=/",
+    });
+    response.end(staticPage(name));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("静态页没有端口");
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    hits,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+type PlannedCall = readonly [name: string, args: Record<string, unknown>];
+
+/**
+ * 按「当前这条」里的字眼挑一串工具调用，本次 prompt 已经回来几个工具结果就点第几个。
+ * pi-ai 把工具结果里的图另起一条 user 消息，找「当前这条」时要跳过它。
+ */
+const scriptPlans =
+  (requests: ChatCompletionRequest[], plans: Readonly<Record<string, readonly PlannedCall[]>>) =>
+  (req: ChatCompletionRequest): ScriptedTurn => {
+    requests.push(req);
+    const promptAt = req.messages.findLastIndex(
+      (message) => message.role === "user" && !JSON.stringify(message.content).includes("Attached image"),
+    );
+    const promptText = JSON.stringify(req.messages[promptAt]?.content);
+    const marker = Object.keys(plans).find((key) => promptText.includes(key));
+    if (marker === undefined) throw new Error(`假上游没有匹配的计划：${promptText.slice(0, 200)}`);
+    const done = req.messages.slice(promptAt).filter((message) => message.role === "tool").length;
+    const next = plans[marker]?.[done];
+    if (next === undefined) return { textChunks: ["好了"], usage: { input: 800, output: 2 } };
+    return {
+      textChunks: [],
+      toolCall: { id: `call-${done + 1}`, name: next[0], args: next[1] },
+      usage: { input: 800, output: 30 },
+    };
+  };
+
+const toolResultsOf = (requests: readonly ChatCompletionRequest[]): string =>
+  JSON.stringify(requests.at(-1)?.messages.filter((message) => message.role === "tool") ?? []);
+
+const pngsIn = (req: ChatCompletionRequest | undefined): string[] =>
+  [...JSON.stringify(req?.messages ?? []).matchAll(/data:image\/png;base64,([A-Za-z0-9+/=]+)/g)].map(
+    (match) => match[1] ?? "",
+  );
+
+describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => {
+  let site: Awaited<ReturnType<typeof startStaticSite>>;
+  let chrome: TestChrome;
+  let profileDir = "";
+
+  beforeAll(async () => {
+    site = await startStaticSite();
+    profileDir = mkdtempSync(join(tmpdir(), "baize-runner-chrome-"));
+    usedDataDirs.push(profileDir);
+    chrome = await launchTestChrome(profileDir);
+  }, 30_000);
+
+  afterAll(async () => {
+    await chrome?.stop();
+    await site?.close();
+  });
+
+  const browser = (): NonNullable<RunnerConfig["browser"]> => ({ profileDir, cdpUrl: async () => chrome.cdpUrl });
+  const botTarget = async (path: string, exclude: readonly string[] = []): Promise<PageTarget> => {
+    const found = (await pageTargets(chrome.cdpUrl)).find(
+      (target) => target.url === `${site.url}${path}` && !exclude.includes(target.id),
+    );
+    if (found === undefined) throw new Error(`找不到开着 ${path} 的标签页`);
+    return found;
+  };
+
+  it("浏览器工具的结果里没有 cookie 和密码框内容，点和填照常", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      browser: browser(),
+      script: scriptPlans(requests, {
+        登录页: [
+          ["browser_open", { url: `${site.url}/login` }],
+          ["browser_snapshot", {}],
+          ["browser_type", { ref: 1, text: "小满" }],
+          ["browser_click", { ref: 3 }],
+          ["browser_click", { ref: 6 }],
+          ["browser_snapshot", {}],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看登录页"));
+
+    const page = await botTarget("/login");
+    expect(String(await evaluateIn(page, "document.cookie")), "页面上真有两个 cookie").toContain(
+      "COOKIE-HEADER-SECRET",
+    );
+    expect(String(await evaluateIn(page, "document.cookie"))).toContain("COOKIE-JS-SECRET");
+    const results = toolResultsOf(requests);
+    for (const secret of PAGE_SECRETS) expect(results, secret).not.toContain(secret);
+    expect(results, "snapshot 有正文").toContain("PAGE-TEXT-login");
+    expect(results, "snapshot 标出密码框但不给值").toContain("[2] 密码框");
+    expect(results, "autocomplete 是 current-password 的框也当密码框").toContain("[4] 密码框「当前密码」");
+    expect(results, "autocomplete 里带 new-password 的框也当密码框").toContain("[5] 密码框「新密码」");
+    expect(results, "填和点真落到页面上").toContain("点过了：小满");
+    const asks = h.sent.flatMap((message) => (message.type === "approval_request" ? [message] : []));
+    expect(
+      asks.map((message) => message.tool),
+      "只有点和填要问",
+    ).toEqual(["browser_type", "browser_click", "browser_click"]);
+    const [typing, clicking, longClick] = asks.map((message) => message.view);
+    expect(typing, "填字的审批卡给出域名、snapshot 里那个框和要填的字").toMatchObject({
+      kind: "mcp",
+      server: "助理浏览器",
+      tool: "browser_type",
+      params: [
+        { key: "域名", value: "127.0.0.1" },
+        { key: "元素", value: "输入框「账号」" },
+        { key: "文字", value: "小满" },
+      ],
+    });
+    expect(clicking, "点击的审批卡给出域名和 snapshot 里那个按钮").toMatchObject({
+      kind: "mcp",
+      server: "助理浏览器",
+      tool: "browser_click",
+      params: [
+        { key: "域名", value: "127.0.0.1" },
+        { key: "元素", value: "按钮「登录」" },
+      ],
+    });
+    const longElement = longClick?.kind === "mcp" ? longClick.params[1]?.value : null;
+    expect(typeof longElement === "string" ? [...longElement].length : null, "元素描述截到 80 字").toBe(80);
+    expect(String(longElement), "截的是 snapshot 里那一行").toMatch(/^按钮「很长的按钮很长的按钮/);
+  });
+
+  it("截图进模型是图片，截的时候密码框是空的，截完填回去", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: browser(),
+      script: scriptPlans(requests, {
+        截图: [
+          ["browser_open", { url: `${site.url}/shot` }],
+          ["browser_screenshot", {}],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "截图看看"));
+
+    const [shot] = pngsIn(requests.at(-1));
+    expect(
+      Buffer.from(shot ?? "", "base64")
+        .subarray(1, 4)
+        .toString(),
+      "是一张真 PNG",
+    ).toBe("PNG");
+    const page = await botTarget("/shot");
+    const passwords = `${JSON.stringify(PASSWORD_FIELDS)}.map((id) => document.getElementById(id).value)`;
+    expect(await evaluateIn(page, passwords), "截完填回去").toEqual([...PASSWORD_VALUES]);
+    const filled = await captureIn(page);
+    await evaluateIn(
+      page,
+      `${JSON.stringify(PASSWORD_FIELDS)}.forEach((id) => (document.getElementById(id).value = ""))`,
+    );
+    const cleared = await captureIn(page);
+    await evaluateIn(
+      page,
+      `${JSON.stringify(PASSWORD_FIELDS)}.forEach((id, i) => (document.getElementById(id).value = ${JSON.stringify(PASSWORD_VALUES)}[i]))`,
+    );
+    expect(filled, "密码框有值和没值截出来不一样").not.toBe(cleared);
+    expect(shot, "Bot 截到的是三个密码框都清空的样子").toBe(cleared);
+    for (const secret of PASSWORD_VALUES) expect(toolResultsOf(requests)).not.toContain(secret);
+  });
+
+  it("browser_open 在后台开标签页，用户正看的那页还在前面，Bot 的页以为自己有焦点", async () => {
+    const user = await openUserTab(chrome.cdpUrl, `${site.url}/user`);
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: browser(),
+      script: scriptPlans(requests, { 后台: [["browser_open", { url: `${site.url}/background` }]] }),
+    });
+    expect(await evaluateIn(user, "document.visibilityState")).toBe("visible");
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "后台开一下"));
+
+    expect(await evaluateIn(user, "document.visibilityState"), "Bot 开页没把用户那页挤到后面").toBe("visible");
+    const page = await botTarget("/background");
+    expect(await evaluateIn(page, "document.hasFocus()"), "开了焦点模拟，页面照有焦点的样子跑").toBe(true);
+  });
+
+  it("两个 Bot 各有自己的标签页，一个开新页不会把另一个的页换掉", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      extensionTools: [],
+      browser: browser(),
+      script: scriptPlans(requests, {
+        "开 a": [["browser_open", { url: `${site.url}/a` }]],
+        "开 b": [["browser_open", { url: `${site.url}/b` }]],
+        再看: [["browser_snapshot", {}]],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "开 a"));
+    await h.runner.prompt(promptMessage("bot-2", "run-2", "开 b"));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "再看一眼"));
+
+    expect(toolResultsOf(requests), "bot-1 的页还是 a").toContain("PAGE-TEXT-a");
+    expect(toolResultsOf(requests)).not.toContain("PAGE-TEXT-b");
+    await botTarget("/a");
+    await botTarget("/b");
+  });
+
+  it("Chrome 重起后地址变了，browser_snapshot 跟着新地址，停在空白页不重开上次的网址，告诉模型上次在哪", async () => {
+    const firstProfile = mkdtempSync(join(tmpdir(), "baize-runner-chrome-a-"));
+    const secondProfile = mkdtempSync(join(tmpdir(), "baize-runner-chrome-b-"));
+    usedDataDirs.push(firstProfile, secondProfile);
+    let current = await launchTestChrome(firstProfile);
+    const requests: ChatCompletionRequest[] = [];
+    try {
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        browser: { profileDir: firstProfile, cdpUrl: async () => current.cdpUrl },
+        script: scriptPlans(requests, {
+          "开 a": [["browser_open", { url: `${site.url}/restart-a` }]],
+          再看: [["browser_snapshot", {}]],
+        }),
+      });
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "开 a"));
+      await current.stop();
+      current = await launchTestChrome(secondProfile);
+      const before = (await pageTargets(current.cdpUrl)).length;
+
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "再看一眼"));
+
+      expect(site.hits.get("/restart-a"), "重起后不替 Bot 再 GET 一次上次的网址").toBe(1);
+      const pages = await pageTargets(current.cdpUrl);
+      expect(pages.length, "新 Chrome 里建了 Bot 的标签页").toBe(before + 1);
+      expect(
+        pages.map((target) => target.url),
+        "新标签页停在空白页",
+      ).not.toContain(`${site.url}/restart-a`);
+      expect(toolResultsOf(requests), "工具结果告诉模型重启过、上次在哪").toContain(
+        `Chrome 重启过，上次在 ${site.url}/restart-a`,
+      );
+      expect(shape(h.sent).findLast((line) => line.startsWith("bot_tool_call"))).toBe("bot_tool_call:ok");
+    } finally {
+      await current.stop();
+    }
+  }, 30_000);
+
+  it("Bot 从 config 里移走时关掉它的标签页", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: browser(),
+      script: scriptPlans(requests, { 开页: [["browser_open", { url: `${site.url}/removed-bot` }]] }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "开页"));
+    await botTarget("/removed-bot");
+
+    await h.runner.applyConfig(h.config({ bots: [] }));
+
+    expect(
+      (await pageTargets(chrome.cdpUrl)).map((target) => target.url),
+      "移走的 Bot 不留标签页",
+    ).not.toContain(`${site.url}/removed-bot`);
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "闸门问过、用户批了的 bash 绕着写 profile 路径，seatbelt 照样按 config.browser.profileDir 挡住",
+    async () => {
+      // 这个 profile 正被测试 Chrome 用着，不碰它真的 Cookies 文件，另放一个。
+      const secretFile = join(profileDir, "Default", "baize-secret.txt");
+      mkdirSync(dirname(secretFile), { recursive: true });
+      writeFileSync(secretFile, "cookie-secret-sandbox");
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        approve: true,
+        browser: browser(),
+        script: scriptRecording(seen, [
+          [
+            "绕着读",
+            callTool("bash", {
+              command: `d=${JSON.stringify(dirname(profileDir))}; p=${JSON.stringify(basename(profileDir))}; f=secret; cat "$d/$p/Default/baize-\${f}.txt"`,
+            }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "绕着读 cookie"));
+
+      expect(shape(h.sent), "闸门认不出路径，送审批").toContain("approval_request");
+      expect(seen.toolResults.join(""), "命令真跑了，被沙箱拒").toContain("Operation not permitted");
+      expect(seen.toolResults.join("")).not.toContain("cookie-secret-sandbox");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "用户批了联网的 bash 连不上助理 Chrome 的调试端口，本地别的网站照通",
+    async () => {
+      const port = new URL(chrome.cdpUrl).port;
+      const requests: ChatCompletionRequest[] = [];
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        approve: true,
+        browser: browser(),
+        script: scriptPlans(requests, {
+          连端口: [
+            ["bash", { command: `curl -s --max-time 3 http://[::ffff:127.0.0.1]:${port}/json/version` }],
+            ["bash", { command: `curl -s --max-time 3 ${site.url}/loopback-ok` }],
+          ],
+        }),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "连端口"));
+
+      const results = toolResultsOf(requests);
+      expect(
+        shape(h.sent).filter((line) => line === "approval_request"),
+        "两次联网都问了",
+      ).toHaveLength(2);
+      expect(results, "本地别的网站照通").toContain("测试页 loopback-ok");
+      expect(results, "调试端口连不上").not.toContain("webSocketDebuggerUrl");
+    },
+  );
+});
+
 const chatLine = (group: string, n: number, from = n % 2 === 0 ? "小黑" : "用户"): ContextLine => ({
   messageId: MessageId.parse(`${group}-msg-${n}`),
   from,

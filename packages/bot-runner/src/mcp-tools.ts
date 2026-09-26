@@ -25,14 +25,41 @@ export function connectionsFor(botId: BotId, tools: readonly ToolConnectionConfi
   return tools.filter((tool) => tool.assignedBotIds.includes(botId));
 }
 
-/** MCP 结果里 text 块的正文拼起来。图片、资源这类块不进模型，SDK 已按协议校验过形状，这里只挑类型。 */
-const textOf = (content: unknown): string =>
-  (Array.isArray(content) ? content : [])
-    .filter(
-      (block): block is { type: "text"; text: string } => block?.type === "text" && typeof block.text === "string",
-    )
-    .map((block) => block.text)
-    .join("\n");
+type ResultBlock = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+
+/** 上游模型认的图片格式，别的格式送过去整次请求会被拒。 */
+const MODEL_IMAGE_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** 单张图的上限，按解码后的字节算。 */
+const MODEL_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+
+const imageBlock = (data: string, mimeType: string): ResultBlock => {
+  if (!MODEL_IMAGE_TYPES.has(mimeType)) {
+    return {
+      type: "text",
+      text: `工具连接回了一张 ${mimeType} 的图模型看不了（只收 png、jpeg、gif、webp），没放进来。`,
+    };
+  }
+  if (Buffer.byteLength(data, "base64") > MODEL_IMAGE_MAX_BYTES) {
+    return {
+      type: "text",
+      text: `工具连接回了一张超过 ${MODEL_IMAGE_MAX_BYTES / 1024 / 1024} MiB 的图，太大没放进来。`,
+    };
+  }
+  return { type: "image", data, mimeType };
+};
+
+/** MCP 结果里的 text 块原样进模型，image 块过一道格式和大小，资源这类块不进。SDK 已按协议校验过形状，这里只挑类型。 */
+const blocksOf = (content: unknown): ResultBlock[] =>
+  (Array.isArray(content) ? content : []).flatMap((block): ResultBlock[] => {
+    if (block?.type === "text" && typeof block.text === "string") return [{ type: "text", text: block.text }];
+    if (block?.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string") {
+      return [imageBlock(block.data, block.mimeType)];
+    }
+    return [];
+  });
+
+const textOf = (blocks: readonly ResultBlock[]): string =>
+  blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 
 const reasonOf = (error: unknown): string => {
   if (!(error instanceof Error)) return String(error);
@@ -103,9 +130,13 @@ export function createMcpTools(options: {
             };
           }
           const result = await client.callTool({ name: op.name, arguments: params as Record<string, unknown> });
-          const text = textOf(result.content);
+          const blocks = blocksOf(result.content);
+          const text = textOf(blocks);
           if (result.isError === true) throw new Error(text === "" ? `工具「${op.name}」报错，没有说明` : text);
-          return { content: [{ type: "text", text: text === "" ? "（工具没有返回文字）" : text }], details: {} };
+          return {
+            content: blocks.length === 0 ? [{ type: "text", text: "（工具没有返回文字）" }] : blocks,
+            details: {},
+          };
         },
       });
     }

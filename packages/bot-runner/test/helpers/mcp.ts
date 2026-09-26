@@ -5,9 +5,12 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 
-// 测试夹具。本地假 MCP，两个工具：send_email 记下收到的参数和 Authorization 头，lookup_stock 回一段固定文字，
-// SKU-BAD 时回 isError。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
+// 测试夹具。本地假 MCP，四个工具：send_email 记下收到的参数和 Authorization 头，lookup_stock 回一段固定文字，
+// SKU-BAD 时回 isError，render_chart 回一段文字加一张图（字节是 MCP_CHART_BYTES，不是真 PNG），
+// render_image 按参数回任意格式和大小的图。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
 // 每个请求新建一对 server 和 transport，记录放在外面共享。
+
+export const MCP_CHART_BYTES = Buffer.from("mcp-chart-p1-5");
 
 export interface McpCall {
   readonly name: string;
@@ -50,6 +53,26 @@ function makeServer(calls: McpCall[], onInitialized: () => void): McpServer {
       if (args.sku === "SKU-BAD") return { content: [{ type: "text", text: "没有这个 SKU" }], isError: true };
       return { content: [{ type: "text", text: `${args.sku} 库存 42` }] };
     },
+  );
+  server.registerTool(
+    "render_chart",
+    { description: "把库存画成图。", inputSchema: { sku: z.string() } },
+    async (args) => ({
+      content: [
+        { type: "text", text: `${args.sku} 的库存图` },
+        { type: "image", data: MCP_CHART_BYTES.toString("base64"), mimeType: "image/png" },
+      ],
+    }),
+  );
+  server.registerTool(
+    "render_image",
+    { description: "按给定的格式和字节数回一张图。", inputSchema: { mimeType: z.string(), bytes: z.number() } },
+    async (args) => ({
+      content: [
+        { type: "text", text: `${args.mimeType} 的图` },
+        { type: "image", data: Buffer.alloc(args.bytes, "a").toString("base64"), mimeType: args.mimeType },
+      ],
+    }),
   );
   return server;
 }

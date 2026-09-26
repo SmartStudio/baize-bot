@@ -12,6 +12,7 @@ import {
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decide, verdictFor, type GateCall, type GateContext } from "../src/gate.js";
+import { forbiddenZones } from "../src/paths.js";
 
 const computerId = ComputerId.parse("computer-1");
 const groupId = GroupId.parse("group-1");
@@ -31,11 +32,17 @@ afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
+// 助理 Chrome 的 profile 和这个 Bot 的配图拷贝目录，照运行器的布局放。
+const profileDir = (): string => join(root, "chrome-profile");
+const draftsDir = (): string => join(root, "bot-1", "drafts");
+const zones = () => forbiddenZones({ draftsDir: draftsDir() }, profileDir());
+
 const pathTarget = (prefix: string): GrantTarget => ({ kind: "path", computerId, prefix });
 const domainTarget = (domain: string): GrantTarget => ({ kind: "domain", domain });
 
 const gateContext = (overrides: Partial<GateContext> = {}): GateContext => ({
   workDir,
+  zones: zones(),
   groupId,
   computerId,
   platform: "darwin",
@@ -107,6 +114,20 @@ describe("统一闸门四层判定", () => {
     expect(actionVerdict("read", target, [grant("read", target, "forever")])).toBe("deny");
   });
 
+  it("没给助理 Chrome 时不猜 profile 在哪", () => {
+    const target = pathTarget(join(root, "chrome-profile", "Default", "Cookies"));
+    const remote = gateContext({ zones: forbiddenZones({ draftsDir: draftsDir() }, null) });
+    expect(actionVerdict("read", target, [], [], remote)).toBe("ask");
+  });
+
+  it("配图拷贝目录能读不能写，写它的祖先也拒绝", () => {
+    const copy = pathTarget(join(draftsDir(), "a".repeat(64) + ".png"));
+    expect(actionVerdict("write_outside", copy, [grant("write_outside", copy, "forever")])).toBe("deny");
+    expect(actionVerdict("delete", copy)).toBe("deny");
+    expect(actionVerdict("write_outside", pathTarget(join(root, "bot-1")))).toBe("deny");
+    expect(actionVerdict("read", copy), "读只是工作目录外的读").toBe("ask");
+  });
+
   it("darwin 禁区比较忽略大小写", () => {
     const target = pathTarget(join(root, "CHROME-PROFILE", "Default", "Cookies"));
     expect(actionVerdict("read", target, [grant("read", target, "forever")])).toBe("deny");
@@ -115,6 +136,19 @@ describe("统一闸门四层判定", () => {
   it("工作目录外写的目标覆盖禁区祖先时直接拒绝", () => {
     const target = pathTarget(root);
     expect(actionVerdict("write_outside", target, [grant("write_outside", target)])).toBe("deny");
+  });
+
+  it("工作目录外写和删除只覆盖隐藏禁区（不碰配图目录）的祖先时也拒绝", () => {
+    const profileParent = join(root, "assistant");
+    const context = gateContext({
+      zones: forbiddenZones({ draftsDir: draftsDir() }, join(profileParent, "chrome-profile")),
+    });
+    const target = pathTarget(profileParent);
+    expect(
+      actionVerdict("write_outside", target, [grant("write_outside", target)], [], context),
+      "放宽写 profile 的上一级",
+    ).toBe("deny");
+    expect(actionVerdict("delete", target, [], [], context), "删掉 profile 的上一级").toBe("deny");
   });
 
   it("spend 和 delete 即使收到畸形 forever 授权仍然问", () => {
@@ -175,6 +209,7 @@ describe("起草工具", () => {
     toolName,
     input,
     workDir,
+    zones: zones(),
     groupId,
     computerId,
     platform: "darwin",
@@ -244,6 +279,7 @@ describe("bash 分类", () => {
     toolName: "bash",
     input: { command },
     workDir,
+    zones: zones(),
     groupId,
     computerId,
     platform: "darwin",
@@ -349,5 +385,45 @@ describe("bash 分类", () => {
       expect(decide({ ...bashCall(command), platform: "linux", sandbox: "bwrap" }, [], []), command).toEqual(seatbelt);
     }
     expect(decide({ ...bashCall("ls"), platform: "linux", sandbox: "bwrap" }, [], []).verdict).toBe("allow");
+  });
+});
+
+describe("浏览器工具", () => {
+  const call = (toolName: string, input: Record<string, unknown>): GateCall => ({
+    ...gateContext(),
+    toolName,
+    input,
+    sandbox: "seatbelt",
+    mcpOperation: null,
+  });
+
+  it.each([
+    ["browser_open", { url: "https://example.com/a" }],
+    ["browser_snapshot", {}],
+    ["browser_screenshot", {}],
+  ] as const)("%s 归 read，直接放行", (toolName, input) => {
+    expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "allow", action: "read" });
+  });
+
+  it.each([
+    ["browser_click", { ref: 3 }],
+    ["browser_type", { ref: 3, text: "你好" }],
+  ] as const)("%s 归 engage，默认问", (toolName, input) => {
+    expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "ask", action: "engage" });
+  });
+
+  it("bash 读 profile 下的 Cookies 被拒", () => {
+    const decision = decide(call("bash", { command: `cat ${join(profileDir(), "Default", "Cookies")}` }), [], []);
+    expect(decision.verdict).toBe("deny");
+    expect(decision.reason).toContain("固定禁区");
+  });
+
+  it("bash 往配图拷贝目录里写被拒", () => {
+    const decision = decide(
+      call("bash", { command: `echo x > ${join(draftsDir(), "b".repeat(64) + ".png")}` }),
+      [],
+      [],
+    );
+    expect(decision.verdict).toBe("deny");
   });
 });

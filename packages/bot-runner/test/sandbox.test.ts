@@ -6,15 +6,17 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
-import { ComputerId, GroupId } from "@baize/shared";
+import { BotId, ComputerId, GroupId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decide } from "../src/gate.js";
+import { botDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
 import { bwrapArgs, createSandboxedBash, sandboxKind, sandboxProfile, whitelistEnv } from "../src/sandbox.js";
 
 // 照运行器的布局 <dataDir>/<botId>/work：bwrap 把数据目录下别的目录都当别的 Bot 盖住。
 const dataDir = mkdtempSync(join(tmpdir(), "baize-sandbox-perf-"));
 const workDir = join(dataDir, "bot-1", "work");
 mkdirSync(workDir, { recursive: true });
+const zones: ForbiddenZones = forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), join(dataDir, "chrome-profile"));
 
 afterAll(() => {
   rmSync(dataDir, { recursive: true, force: true });
@@ -57,7 +59,7 @@ const availablePort = (): Promise<number> =>
 const runInSandbox = (command: string, network = false) =>
   spawnSync(
     "/usr/bin/sandbox-exec",
-    ["-p", sandboxProfile(workDir, { network, writePaths: [] }), "/bin/bash", "-c", command],
+    ["-p", sandboxProfile(workDir, { network, writePaths: [] }, zones), "/bin/bash", "-c", command],
     {
       cwd: workDir,
       encoding: "utf8",
@@ -74,7 +76,8 @@ describe("bash 沙箱性能", () => {
       const leaked = join(forbiddenDir, "leaked.txt");
       mkdirSync(nestedWorkDir, { recursive: true });
       mkdirSync(forbiddenDir);
-      const profile = sandboxProfile(nestedWorkDir, { network: false, writePaths: [sandboxRoot] });
+      const nestedZones = forbiddenZones(botDirs(sandboxRoot, BotId.parse("bot-1")), forbiddenDir);
+      const profile = sandboxProfile(nestedWorkDir, { network: false, writePaths: [sandboxRoot] }, nestedZones);
       const result = spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/usr/bin/touch", leaked], {
         encoding: "utf8",
       });
@@ -83,6 +86,66 @@ describe("bash 沙箱性能", () => {
     } finally {
       rmSync(sandboxRoot, { recursive: true, force: true });
     }
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下读不到助理 Chrome profile 里的 Cookies，命令解析认不出的读法也不行",
+    async () => {
+      const profileDir = mkdtempSync(join(tmpdir(), "baize-assistant-profile-"));
+      try {
+        mkdirSync(join(profileDir, "Default"));
+        writeFileSync(join(profileDir, "Default", "Cookies"), "cookie-secret-p1-5");
+        const sandbox = createSandboxedBash(
+          workDir,
+          forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), profileDir),
+        );
+        const commands = [
+          `d=${shellQuote(profileDir)}; f=Cook; cat "$d/Default/\${f}ies"`,
+          `${shellQuote(process.execPath)} -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))' ${shellQuote(join(profileDir, "Default", "Cookies"))}`,
+        ];
+        for (const [index, command] of commands.entries()) {
+          const result = sandbox.tool.execute(
+            `cookies-${index}`,
+            { command },
+            undefined,
+            undefined,
+            undefined as never,
+          );
+          await expect(result, command).rejects.toThrow();
+          await result.catch((error: unknown) => expect(String(error)).not.toContain("cookie-secret-p1-5"));
+        }
+      } finally {
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("seatbelt 下配图拷贝目录读得到、写不进，批准写 Bot 目录也一样", async () => {
+    const drafts = botDirs(dataDir, BotId.parse("bot-1")).draftsDir;
+    mkdirSync(drafts, { recursive: true });
+    writeFileSync(join(drafts, "copy.png"), "approved-bytes");
+    let runId = "run-drafts";
+    const sandbox = createSandboxedBash(workDir, zones, () => runId);
+    sandbox.allow(runId, "widened", { network: false, writePaths: [join(dataDir, "bot-1")] });
+    await expect(
+      sandbox.tool.execute(
+        "widened",
+        { command: `echo swapped > ${shellQuote(join(drafts, "copy.png"))}` },
+        undefined,
+        undefined,
+        undefined as never,
+      ),
+    ).rejects.toThrow();
+    expect(readFileSync(join(drafts, "copy.png"), "utf8")).toBe("approved-bytes");
+    runId = "run-read";
+    const read = await sandbox.tool.execute(
+      "read",
+      { command: `cat ${shellQuote(join(drafts, "copy.png"))}` },
+      undefined,
+      undefined,
+      undefined as never,
+    );
+    expect(JSON.stringify(read.content)).toContain("approved-bytes");
   });
 
   it.skipIf(process.platform !== "darwin")("mach-lookup 白名单支持常用 CLI，curl 走受控报错路径", () => {
@@ -138,9 +201,70 @@ describe("bash 沙箱性能", () => {
     }
   });
 
+  it.skipIf(process.platform !== "darwin")(
+    "批准联网的 bash 连不上助理 Chrome 的调试端口，别的本地回环端口照通，端口每次现取",
+    async () => {
+      const cdp = await serveText('{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/fake"}');
+      const other = await serveText("other-loopback-ok");
+      let current: number | null = cdp.port;
+      const curlIn = async (sandbox: ReturnType<typeof createSandboxedBash>, url: string): Promise<string> => {
+        sandbox.allow("run-cdp", "call-cdp", { network: true, writePaths: [] });
+        return sandbox.tool
+          .execute(
+            "call-cdp",
+            { command: `/usr/bin/curl -sS --max-time 2 ${shellQuote(url)}` },
+            undefined,
+            undefined,
+            undefined as never,
+          )
+          .then(
+            (result) => JSON.stringify(result.content),
+            (error: unknown) => String(error),
+          );
+      };
+      try {
+        const guarded = createSandboxedBash(
+          workDir,
+          zones,
+          () => "run-cdp",
+          async () => current,
+        );
+        for (const host of ["127.0.0.1", "localhost", "[::ffff:127.0.0.1]"]) {
+          expect(await curlIn(guarded, `http://${host}:${cdp.port}/json/version`), host).not.toContain(
+            "webSocketDebuggerUrl",
+          );
+        }
+        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "别的回环端口照通").toContain(
+          "other-loopback-ok",
+        );
+
+        current = other.port;
+        expect(
+          await curlIn(guarded, `http://127.0.0.1:${cdp.port}/json/version`),
+          "Chrome 换了端口，旧端口放开",
+        ).toContain("webSocketDebuggerUrl");
+        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "新端口挡住").not.toContain(
+          "other-loopback-ok",
+        );
+
+        current = null;
+        expect(await curlIn(guarded, `http://127.0.0.1:${other.port}/`), "Chrome 没起就不加这条").toContain(
+          "other-loopback-ok",
+        );
+        const plain = createSandboxedBash(workDir, zones, () => "run-cdp");
+        expect(await curlIn(plain, `http://127.0.0.1:${cdp.port}/json/version`), "没有助理 Chrome 不挡").toContain(
+          "webSocketDebuggerUrl",
+        );
+      } finally {
+        await cdp.close();
+        await other.close();
+      }
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")("echo ok 100 次，闸门加沙箱的 p95 增量不超过 50ms", async () => {
     const baseline = createBashToolDefinition(workDir, { exposeSessionEnvironment: false });
-    const sandbox = createSandboxedBash(workDir).tool;
+    const sandbox = createSandboxedBash(workDir, zones).tool;
     const baselineTimes: number[] = [];
     const sandboxTimes: number[] = [];
 
@@ -156,6 +280,7 @@ describe("bash 沙箱性能", () => {
           toolName: "bash",
           input: { command: "echo ok" },
           workDir,
+          zones,
           groupId: GroupId.parse("group-1"),
           computerId: ComputerId.parse("computer-1"),
           platform: process.platform,
@@ -199,7 +324,7 @@ describe("bash 沙箱性能", () => {
     async () => {
       const outside = mkdtempSync(join(tmpdir(), "baize-sandbox-access-"));
       let runId = "run-1";
-      const sandbox = createSandboxedBash(workDir, () => runId);
+      const sandbox = createSandboxedBash(workDir, zones, () => runId);
       try {
         sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] });
         sandbox.clearRun(runId);
@@ -245,7 +370,7 @@ describe("bash 沙箱性能", () => {
     ].join(";");
     const command = `${shellQuote(process.execPath)} -e ${shellQuote(parent)}`;
     const controller = new AbortController();
-    const tool = createSandboxedBash(workDir).tool;
+    const tool = createSandboxedBash(workDir, zones).tool;
     const running = tool.execute("process-group", { command }, controller.signal, undefined, undefined as never);
     try {
       await until(() => processesWith(marker).length >= 2, "父子进程都启动");
@@ -274,7 +399,8 @@ describe("bwrap 参数", () => {
   it("bwrap 参数：禁区盖在最上面，批准的写路径可写，批准 network 时不断网", () => {
     const work = "/data/bot-1/work";
     const forbidden = ["/home/node/.ssh", "/data/bot-1/work/.ssh", "/data/bot-2", "/outside/chrome-profile"];
-    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden)).toEqual([
+    const readOnly = ["/data/bot-1/drafts"];
+    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden, readOnly)).toEqual([
       "--ro-bind",
       "/",
       "/",
@@ -288,6 +414,9 @@ describe("bwrap 参数", () => {
       "--bind",
       "/outside",
       "/outside",
+      "--ro-bind",
+      "/data/bot-1/drafts",
+      "/data/bot-1/drafts",
       "--tmpfs",
       "/home/node/.ssh",
       "--tmpfs",
@@ -313,7 +442,7 @@ describe("bwrap 参数", () => {
       "--chdir",
       work,
     ]);
-    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden);
+    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly);
     expect(networked, "批准 network 的那一次和容器共用网络").not.toContain("--unshare-net");
     expect(networked, "docker 遮住了部分 /proc，新挂 proc 会失败").not.toContain("--proc");
   });
@@ -331,6 +460,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
   let otherBot = "";
   let fakeHome = "";
   let outside = "";
+  let profileDir = "";
   let callSeq = 0;
   let sandbox!: ReturnType<typeof createSandboxedBash>;
   const nextCall = (): string => `bwrap-${(callSeq += 1)}`;
@@ -350,7 +480,14 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     symlinkSync(otherBot, join(botWork, "bot-2-link"));
     // homedir() 在 Linux 上读 HOME，禁区的 ~/.ssh 就落在临时家目录里，不碰真家目录。
     process.env["HOME"] = fakeHome;
-    sandbox = createSandboxedBash(botWork, () => runId);
+    profileDir = join(root, "chrome-profile");
+    mkdirSync(join(profileDir, "Default"), { recursive: true });
+    writeFileSync(join(profileDir, "Default", "Cookies"), "cookie-secret-p1-6");
+    sandbox = createSandboxedBash(
+      botWork,
+      forbiddenZones(botDirs(join(root, "data"), BotId.parse("bot-1")), profileDir),
+      () => runId,
+    );
   });
 
   afterAll(() => {
@@ -373,6 +510,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     ],
     ["cat 别的 Bot 目录", () => `cat ${shellQuote(join(otherBot, "secret.txt"))}`],
     ["工作目录里指向别的 Bot 的符号链接", () => "cat bot-2-link/secret.txt"],
+    ["数据目录外的助理 Chrome profile 里的 Cookies", () => `f=Cook; cat ${shellQuote(profileDir)}/Default/\${f}ies`],
   ])("bwrap 下禁区读不到：%s", async (_label, command) => {
     const result = run(command());
     await expect(result).rejects.toThrow();
@@ -440,3 +578,12 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     }
   });
 });
+
+/** 本地回环上回固定正文的 HTTP 服务。 */
+async function serveText(body: string) {
+  const server = createHttpServer((_request, response) => response.end(body));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("假服务没有端口");
+  return { port: address.port, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+}
