@@ -152,7 +152,7 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
-      context: [{ messageId: "m1", from: "用户", text: "hi" }],
+      context: [{ messageId: "m1", from: "用户", text: "hi", settled: true }],
       purpose: "plan",
       members: [],
     };
@@ -172,7 +172,7 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "solo",
       group: { id: "g1", number: "", title: "", kind: "solo" },
-      context: [{ messageId: "m1", from: "用户", text: "x" }],
+      context: [{ messageId: "m1", from: "用户", text: "x", settled: true }],
       purpose: "plan",
       task: null,
       members: [],
@@ -192,7 +192,7 @@ describe("M7 群与主题任务的共享形状", () => {
       origin: { kind: "user" },
       reason: "everyone",
       group: { id: "g1", number: "T-0001", title: "群", kind: "team" },
-      context: [{ messageId: "m1", from: "用户", text: "x" }],
+      context: [{ messageId: "m1", from: "用户", text: "x", settled: true }],
       purpose: "plan",
       task: null,
       members: [{ ...member, seat: "chief" }],
@@ -203,6 +203,10 @@ describe("M7 群与主题任务的共享形状", () => {
     const { messageId: _messageId, ...withoutMessageId } = prompt;
     expect(ControlToAgent.safeParse(withoutMessageId).success, "messageId 不可省").toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员座次不可省").toBe(false);
+    const legacy = ControlToAgent.parse({ ...prompt, context: [{ messageId: "m1", from: "用户", text: "x" }] });
+    expect(legacy.type === "prompt" ? legacy.context : null, "旧控制面不带 settled 的上下文行照样收下，当定稿").toEqual(
+      [{ messageId: "m1", from: "用户", text: "x", settled: true }],
+    );
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: "b2" }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: null }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run }).success, "目标字段不可省").toBe(false);

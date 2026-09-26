@@ -277,7 +277,11 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     ]),
     // solo 是建 Bot 时自动建的单聊群，title 就是 Bot 名；team 是拉了 2 到 6 个 Bot 的群。
     group: z.object({ id: GroupId, number: z.string(), title: z.string(), kind: z.enum(["solo", "team"]) }),
-    context: z.array(z.object({ messageId: MessageId, from: z.string(), text: z.string() })),
+    // settled 为 false 的是 Bot 还在往下说的那条，下一轮它会长。运行器的水位不能把它当看完了。
+    // 旧控制面不发 settled，缺省当定稿，新代理配旧控制面时退回原来的行为，而不是整条 prompt parse 不过被丢掉。
+    context: z.array(
+      z.object({ messageId: MessageId, from: z.string(), text: z.string(), settled: z.boolean().default(true) }),
+    ),
     purpose: ModelPurpose,
     projects: z.array(z.object({ groupId: GroupId, title: z.string(), cadence: z.string() }).strict()).optional(),
     // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流。
