@@ -187,6 +187,11 @@ export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
 // POST /api/accounts/:id/login  打开登录窗口，没有请求体。给账号所在电脑发 browser_login 就回 202 和 AccountResponse，
 // 登录结果随 account_updated 推回来。电脑不在线 409，别人的账号 404，不走浏览器登录的平台 400。
+// GET /api/oauth/:platform/start  浏览器跳过来，302 到 GitHub 或 X 的授权页。平台没配 503。
+// GET /api/oauth/:platform/callback  平台跳回来，换令牌、挂账号，302 回 Web 首页，带 ?oauth=<平台>&result=<OAuthResult>。
+// 结果只放在跳转地址里，账号本身随 account_updated 推给页面。
+export const OAuthResult = z.enum(["connected", "denied", "invalid_state", "failed"]);
+export type OAuthResult = z.infer<typeof OAuthResult>;
 // PATCH /api/accounts/:id
 export const UpdateAccountRequest = z.object({ tier: AccountTier }).strict();
 export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequest>;

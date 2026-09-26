@@ -261,6 +261,9 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     accounts: z.array(AccountConfig),
     grants: z.array(Grant),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
+    // 读 GitHub、X 走控制面的账号代理：`${baseUrl}/<accountId>/<平台路径>`，Bearer 用 modelGateway.apiKey，令牌不下发。
+    // 运行器的读工具接上之前可省。
+    accountsProxy: z.object({ baseUrl: z.string().url() }).optional(),
   }),
   z.object({
     type: z.literal("prompt"),
