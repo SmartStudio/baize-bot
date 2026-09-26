@@ -8,6 +8,7 @@ import { contentRoutes } from "./routes/content.js";
 import { groupRoutes } from "./routes/groups.js";
 import { grantRoutes } from "./routes/grants.js";
 import { send, type Push, type Route, type RouteContext } from "./routes/http.js";
+import { projectRoutes } from "./routes/projects.js";
 import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
 import { currentTurns, testRoutes } from "./routes/test.js";
@@ -31,6 +32,7 @@ const protectedRoutes: Route[] = [
   toolRoutes,
   routineRoutes,
   skillRoutes,
+  projectRoutes,
   todayRoutes,
   contentRoutes,
   groupRoutes,

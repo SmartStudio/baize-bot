@@ -16,6 +16,7 @@ import {
 } from "@baize/shared";
 import { assignTask, tickFirstUndone } from "./groups.js";
 import { appendMessage, rewriteMessage } from "./messages.js";
+import { projectOfferFor } from "./projects.js";
 import {
   TEAM_GROUP_ID,
   approvals,
@@ -345,6 +346,8 @@ export const streamBotReply = async (
 
   await sleep(DELTA_MS);
   if (abandoned()) return;
+  const offer = projectOfferFor(prompt);
+  if (offer !== null && botId === offer.botId) push({ type: "message", message: appendMessage(groupId, offer) });
   const cost = appendMessage(groupId, {
     kind: "cost",
     runId: RunId.parse(`run_${nextSuffix()}`),

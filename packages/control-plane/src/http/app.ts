@@ -490,6 +490,12 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (decided.kind === "dismissed") {
       return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: null }));
     }
+    // 队员先到，Web 画新群时才认得每个人，不会显示成「Bot」。同一事务建出的队员 createdAt 相同，按群里的顺序推。
+    const owned = new Map((await listBots(db, ownerId)).map(({ bot }) => [bot.id, bot]));
+    for (const botId of decided.group.botIds) {
+      const bot = owned.get(botId);
+      if (bot !== undefined && botId !== decided.group.chiefBotId) hub.push(ownerId, { type: "bot_updated", bot });
+    }
     hub.push(ownerId, { type: "group_created", group: decided.group, task: decided.task });
     for (const routine of decided.routines) hub.push(ownerId, { type: "routine_updated", routine });
     // 新队员要进 config 才跑得起来。

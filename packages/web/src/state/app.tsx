@@ -4,7 +4,9 @@ import {
   type AccountId,
   type AccountTier,
   type ApprovalId,
+  type ApprovePlanRequest,
   type ContentPlanId,
+  type DecideDraftRequest,
   type DraftId,
   type TodayResponse,
   type BotId,
@@ -29,14 +31,7 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import {
-  RequestFailed,
-  api,
-  type ApprovePlanRequest,
-  type BotDraft,
-  type DecideDraftRequest,
-  type GroupDraft,
-} from "../api/client.js";
+import { RequestFailed, api, type BotDraft, type DecideProjectOfferRequest } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
@@ -52,7 +47,6 @@ export type AppActions = {
   logout: () => Promise<void>;
   // 建完返回新群，由调用方跳过去。登录过期时是 undefined。
   createBot: () => Promise<GroupId | undefined>;
-  createGroup: (draft: GroupDraft) => Promise<GroupId | undefined>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
@@ -80,6 +74,8 @@ export type AppActions = {
   deleteSkill: (skill: Skill) => Promise<void>;
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+  // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
+  decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
   createTool: (draft: CreateToolRequest) => Promise<void>;
   updateTool: (toolId: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
@@ -166,11 +162,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "bot_created", bot, groupId: group.id });
         return group.id;
       }),
-      createGroup: signedIn(async (draft: GroupDraft) => {
-        const { group, task } = await api.createGroup(draft);
-        dispatch({ type: "group_created", group, task });
-        return group.id;
-      }),
       updateBot: signedIn(async (botId: BotId, draft: BotDraft) => {
         dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
       }),
@@ -178,8 +169,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
       }),
       loadMessages: signedIn(async (groupId: GroupId) => {
-        const { messages, approvals, handoffs, drafts, plans } = await api.messages(groupId);
+        const { messages, approvals, handoffs, drafts, plans, publications } = await api.messages(groupId);
         dispatch({ type: "content_loaded", drafts, plans });
+        dispatch({ type: "publications_loaded", publications });
         dispatch({ type: "messages_set", groupId, messages });
         dispatch({ type: "approvals_loaded", approvals });
         dispatch({ type: "handoffs_loaded", handoffs });
@@ -281,6 +273,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const res = await api.decideSkillOffer(messageId, decision);
         dispatch({ type: "message_upserted", message: res.message });
         if (res.skill !== null) dispatch({ type: "skill_upserted", skill: res.skill });
+      }),
+      decideProjectOffer: signedIn(async (messageId: MessageId, request: DecideProjectOfferRequest) => {
+        const { message, group } = await api.decideProjectOffer(messageId, request);
+        dispatch({ type: "message_upserted", message });
+        if (group === null) return undefined;
+        // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页。回包没带任务卡，从列表补一份。
+        const joined = (await api.groups()).items.find((item) => item.group.id === group.id);
+        if (joined !== undefined) dispatch({ type: "group_created", group: joined.group, task: joined.task });
+        return group.id;
       }),
       createTool: signedIn(async (draft: CreateToolRequest) => {
         dispatch({ type: "tool_upserted", tool: await api.createTool(draft) });

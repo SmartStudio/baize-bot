@@ -148,7 +148,7 @@ export type Action =
   | { type: "account_upserted"; account: Account }
   | { type: "account_removed"; accountId: AccountId }
   | { type: "computer_upserted"; computer: Computer }
-  | { type: "publication_added"; publication: Publication }
+  | { type: "publications_loaded"; publications: Publication[] }
   | { type: "today_version_bumped" };
 
 export type ReadyState = Extract<AppState, { status: "ready" }>;

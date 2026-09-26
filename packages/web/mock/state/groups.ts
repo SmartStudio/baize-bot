@@ -53,6 +53,9 @@ export const createGroup = (input: {
   botIds: BotId[];
   summary?: string | undefined;
   dueAt?: string | null | undefined;
+  chiefBotId?: BotId | null;
+  cadence?: string;
+  checklist?: ChecklistItem[];
 }) => {
   const suffix = nextSuffix();
   const groupId = GroupId.parse(`grp_new_${suffix}`);
@@ -62,7 +65,7 @@ export const createGroup = (input: {
     ownerId: user.id,
     botIds: input.botIds,
     taskId,
-    chiefBotId: null,
+    chiefBotId: input.chiefBotId ?? null,
     createdAt: new Date().toISOString(),
   });
   const task = TopicTask.parse({
@@ -72,11 +75,11 @@ export const createGroup = (input: {
     title: input.title,
     summary: input.summary ?? "",
     dueAt: input.dueAt ?? null,
-    checklist: [],
+    checklist: input.checklist ?? [],
     currentBotId: null,
     handled: [],
     status: "active",
-    cadence: "",
+    cadence: input.cadence ?? "",
   });
   groups.set(group.id, group);
   tasks.set(task.id, task);

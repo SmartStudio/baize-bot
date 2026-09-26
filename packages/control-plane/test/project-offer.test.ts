@@ -300,6 +300,30 @@ describe("方案卡", () => {
     }
   });
 
+  it("开始后每个新队员都先推一条 bot_updated，再推新群", async () => {
+    const s = await session();
+    try {
+      const card = await offerCard(s);
+      const { group } = await decide(s.me.client, card.id, { decision: "start" });
+      if (group === null) throw new Error("开始了却没回项目群");
+
+      const updated: { name: string; tag: string; description: string; role: string }[] = [];
+      for (;;) {
+        const item = await s.push.next();
+        if (item.type === "group_created") break;
+        if (item.type === "bot_updated") {
+          const { name, tag, description, role } = item.bot;
+          updated.push({ name, tag, description, role });
+        }
+      }
+      expect(updated, "Web 拿到新群时已经认识每个队员，不会显示成「Bot」").toEqual(
+        OFFER.team.map((member) => ({ ...member, role: "member" })),
+      );
+    } finally {
+      s.close();
+    }
+  });
+
   it("项目群的首席是主助理，没点名的话先到它，例行也跑在项目群里", async () => {
     const s = await session();
     try {

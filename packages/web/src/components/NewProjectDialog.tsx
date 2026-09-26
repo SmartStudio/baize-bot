@@ -1,0 +1,58 @@
+import { useState } from "react";
+import { Sparkles } from "lucide-react";
+
+type Props = {
+  // 主助理单聊还没拉回来时是 null，这时不能发。
+  canSend: boolean;
+  onSend: (text: string) => Promise<void>;
+  onClose: () => void;
+};
+
+// 只收一句话。这句话就是主助理单聊里的一条普通消息，方案卡由主助理回在那里。
+export const NewProjectDialog = ({ canSend, onSend, onClose }: Props) => {
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const ready = canSend && text.trim().length > 0 && !sending;
+
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!ready) return;
+    setSending(true);
+    void onSend(text.trim()).catch(() => setSending(false));
+  };
+
+  return (
+    <div className="scrim" data-testid="new-project-dialog">
+      <form className="dialog" onSubmit={submit}>
+        <header className="dialog-head">
+          <Sparkles size={20} aria-hidden="true" />
+          <span>
+            <b>新项目</b>
+            <small>想做成什么事？一句话就行</small>
+          </span>
+        </header>
+        <label className="field">
+          <input
+            data-testid="new-project-input"
+            aria-label="想做成什么事"
+            autoFocus
+            value={text}
+            placeholder="比如「把抖音号做起来，年底 1000 粉」"
+            onChange={(event) => setText(event.target.value)}
+          />
+        </label>
+        <p className="dialog-note">
+          名字、队伍、要用的账号、多久跑一次，主助理排成一张方案卡给你看。你点开始就开工，不用先填表。
+        </p>
+        <div className="dialog-actions">
+          <button type="button" className="ghost-button" data-testid="new-project-cancel" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary-button" data-testid="new-project-submit" disabled={!ready}>
+            交给主助理
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};

@@ -64,31 +64,6 @@
   padding: 0 var(--space-6);
 }
 
-.bot-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-}
-
-.bot-pill {
-  display: inline-flex;
-  gap: var(--space-3);
-  align-items: center;
-  height: var(--control-h-md);
-  padding: 0 var(--space-5);
-  border: 1px solid var(--border-2);
-  border-radius: var(--radius-full);
-  background: var(--bg-surface);
-  color: var(--fg-1);
-  font: var(--type-ui);
-}
-
-.bot-pill.is-picked {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--fg-1);
-}
-
 .task-card {
   display: flex;
   flex-direction: column;

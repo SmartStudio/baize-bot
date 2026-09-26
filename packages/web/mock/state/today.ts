@@ -84,6 +84,7 @@ const draftOf = (input: {
   status: Draft["status"];
   scheduledAt?: string | null;
   content?: DraftContent;
+  failure?: Draft["failure"];
 }): Draft =>
   Draft.parse({
     id: DraftId.parse(input.id),
@@ -96,7 +97,7 @@ const draftOf = (input: {
     scheduledAt: input.scheduledAt === undefined ? null : input.scheduledAt,
     status: input.status,
     edits: [],
-    failure: null,
+    failure: input.failure ?? null,
     createdAt: at(-90),
     decidedAt: input.status === "pending" ? null : at(-50),
   });
@@ -266,6 +267,20 @@ const seedFull = (): void => {
   });
   putPending(review, at(-90));
   appendMessage(review.groupId, { kind: "draft", draftId: review.id });
+
+  const failed = draftOf({
+    id: "draft_today_failed",
+    groupId: "grp_buy",
+    botId: "bot_buy",
+    accountId: accountX.id,
+    platform: "x",
+    title: "X3 交期答疑",
+    text: "X3 交期答疑：现货两天发出，定制款三周。",
+    status: "failed",
+    failure: "login_expired",
+  });
+  drafts.set(failed.id, failed);
+  appendMessage(failed.groupId, { kind: "draft", draftId: failed.id });
 
   const replyText = "能接。飞书的审批和群消息都能进白泽，私信我发你接入文档。";
   const reply = draftOf({

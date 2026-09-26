@@ -3,19 +3,18 @@ import {
   AccountListResponse,
   AccountResponse,
   ApiError,
-  ApprovePlanRequest as ApprovePlanRequestSchema,
   ApprovePlanResponse,
   ComputerListResponse,
-  DecideDraftRequest as DecideDraftRequestSchema,
   DecideDraftResponse,
   ReturnPlanResponse,
   BotResponse,
   BotListResponse,
   CreateBotResponse,
-  CreateGroupResponse,
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
+  DecideProjectOfferRequest as DecideProjectOfferRequestSchema,
+  DecideProjectOfferResponse,
   DecideSkillOfferResponse,
   GroupListResponse,
   GrantListResponse,
@@ -32,9 +31,11 @@ import {
   TodayResponse,
   UpdateBotResponse,
   UpdateTaskResponse,
-  UpdateAccountRequest as UpdateAccountRequestSchema,
   UsageResponse,
   type AccountId,
+  type ApprovePlanRequest,
+  type DecideDraftRequest,
+  type UpdateAccountRequest,
   type ApprovalId,
   type ContentPlanId,
   type DraftId,
@@ -63,10 +64,8 @@ import {
   type UpdateSkillRequest,
 } from "@baize/shared";
 
-// shared 只导出了这三份请求的 schema，没有同名类型。
-export type DecideDraftRequest = z.infer<typeof DecideDraftRequestSchema>;
-export type ApprovePlanRequest = z.infer<typeof ApprovePlanRequestSchema>;
-export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequestSchema>;
+// shared 只导出了这份请求的 schema，没有同名类型。
+export type DecideProjectOfferRequest = z.infer<typeof DecideProjectOfferRequestSchema>;
 
 export class RequestFailed extends Error {
   constructor(
@@ -110,9 +109,6 @@ export type BotDraft = {
   notify?: boolean;
 };
 
-// 建群表单交出来的那一份。截止可空，而「没填」和「填了空」在这里是同一件事，所以只有 null 没有 undefined。
-export type GroupDraft = { title: string; botIds: BotId[]; summary: string; dueAt: string | null };
-
 export const api = {
   login: async (email: string, password: string) =>
     json(LoginResponse, await send("POST", "/auth/login", { email, password })),
@@ -129,7 +125,6 @@ export const api = {
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
     (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
   groups: async () => json(GroupListResponse, await send("GET", "/groups")),
-  createGroup: async (draft: GroupDraft) => json(CreateGroupResponse, await send("POST", "/groups", draft)),
   tools: async () => json(ToolListResponse, await send("GET", "/tools")),
   createTool: async (draft: CreateToolRequest): Promise<ToolConnection> =>
     (await json(ToolResponse, await send("POST", "/tools", draft))).tool,
@@ -190,6 +185,11 @@ export const api = {
     json(
       DecideSkillOfferResponse,
       await send("POST", `/messages/${encodeURIComponent(messageId)}/skill-offer`, { decision }),
+    ),
+  decideProjectOffer: async (messageId: MessageId, request: DecideProjectOfferRequest) =>
+    json(
+      DecideProjectOfferResponse,
+      await send("POST", `/messages/${encodeURIComponent(messageId)}/project-offer`, request),
     ),
   settings: async () => json(Settings, await send("GET", "/settings")),
   updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),

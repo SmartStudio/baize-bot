@@ -1,7 +1,16 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Copy, ExternalLink, Megaphone, MessageSquareReply } from "lucide-react";
-import type { ContentPlan, ContentPlanId, Draft, DraftContent, DraftId, DraftStatus } from "@baize/shared";
-import type { ApprovePlanRequest, DecideDraftRequest } from "../../api/client.js";
+import type {
+  ApprovePlanRequest,
+  ContentPlan,
+  ContentPlanId,
+  DecideDraftRequest,
+  Draft,
+  DraftContent,
+  PublishFailureReason,
+  DraftId,
+  DraftStatus,
+} from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
 import { PLATFORM, accountText, computerText, draftText, timeText } from "./content.js";
 
@@ -22,6 +31,12 @@ const STATUS: Record<DraftStatus, { label: string; tone: string }> = {
   published: { label: "已发", tone: "badge-accepted" },
   failed: { label: "没发出去", tone: "badge-failed" },
   returned: { label: "已退回", tone: "badge-muted" },
+};
+
+const FAILURE: Record<PublishFailureReason, string> = {
+  login_expired: "账号登录过期了，重新登录后再发",
+  page_changed: "平台页面变了，没发出去",
+  error: "没发出去",
 };
 
 const withText = (content: DraftContent, text: string): DraftContent => ({ ...content, text });
@@ -142,7 +157,11 @@ const DraftOutcome = ({ draft, content }: { draft: Draft; content: ContentBook }
         </div>
       );
     case "failed":
-      return <div className="draft-outcome is-failed">没发出去，原因见通知。改好后让它重新起草。</div>;
+      return (
+        <div className="draft-outcome is-failed" data-testid="draft-failure">
+          {draft.failure === null ? FAILURE.error : FAILURE[draft.failure]}
+        </div>
+      );
     case "returned":
       return <div className="draft-outcome">已退回，不会发。</div>;
     default: {

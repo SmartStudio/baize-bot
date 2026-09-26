@@ -19,6 +19,7 @@ import type { ContentBook } from "../../state/types.js";
 import { BotAvatar } from "../BotAvatar.js";
 import { ACTION_TEXT, SCOPE_TEXT, offeredScopes, targetText } from "../grantText.js";
 import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
+import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
 import { ToolViewContent } from "./ToolViewContent.js";
@@ -375,6 +376,7 @@ type MessageProps = {
   showSource: boolean;
   content: ContentBook;
   contentActions: ContentActions;
+  projectOfferActions: ProjectOfferActions;
 };
 
 const MessageView = ({
@@ -390,6 +392,7 @@ const MessageView = ({
   showSource,
   content,
   contentActions,
+  projectOfferActions,
 }: MessageProps) => {
   const body = message.body;
   return (
@@ -454,7 +457,14 @@ const MessageView = ({
             );
           }
           case "project_offer":
-            return null;
+            return (
+              <ProjectOfferCard
+                body={body}
+                messageId={message.id}
+                accounts={content.accounts}
+                actions={projectOfferActions}
+              />
+            );
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。
             const unreached: never = body;

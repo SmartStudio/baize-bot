@@ -80,7 +80,7 @@ export const createPushHandlers = ({
       bumpToday();
     },
     publication_created: (push) => {
-      dispatch({ type: "publication_added", publication: push.publication });
+      dispatch({ type: "publications_loaded", publications: [push.publication] });
       bumpToday();
     },
     computer_updated: (push) => dispatch({ type: "computer_upserted", computer: push.computer }),

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
 import { Sidebar } from "../components/Sidebar.js";
-import { NewGroupDialog } from "../components/NewGroupDialog.js";
+import { NewProjectDialog } from "../components/NewProjectDialog.js";
 import { ChatPanel } from "../components/ChatPanel.js";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
 import { AccountMenu } from "../components/AccountMenu.js";
@@ -17,7 +17,7 @@ import { useApp } from "../state/app.js";
 import { pendingCountOf, useToday } from "../state/today.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 
-type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-group";
+type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-project";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -63,6 +63,7 @@ export const MainWindow = () => {
   };
 
   const bots = ready.bots;
+  const assistantGroupId = today.data?.assistantGroupId ?? null;
   const projectNames: Record<GroupId, string> = Object.fromEntries(
     ready.conversations.flatMap((item) => {
       if (item.kind === "team") return [[item.groupId, item.task.title]];
@@ -94,7 +95,7 @@ export const MainWindow = () => {
         groupTurns={ready.groupTurns}
         user={ready.user}
         pendingCount={today.data === null ? 0 : pendingCountOf(today.data)}
-        onNewProject={() => setOverlay("new-group")}
+        onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
         onOpenSettings={() => setOverlay("settings")}
       />
@@ -113,6 +114,10 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
+          onDecideProjectOffer={(messageId, request) =>
+            actions.decideProjectOffer(messageId, request).then(openGroupPage)
+          }
+          onOpenGroup={openGroupPage}
           onInspectTool={(view) => {
             if (groupId !== null) setInspectedTool({ groupId, tool: view });
           }}
@@ -167,10 +172,15 @@ export const MainWindow = () => {
           onClose={() => setOverlay("none")}
         />
       ) : null}
-      {overlay === "new-group" ? (
-        <NewGroupDialog
-          bots={Object.values(bots).filter((bot) => bot.role === "member")}
-          onCreate={(draft) => actions.createGroup(draft).then(openGroupPage)}
+      {overlay === "new-project" ? (
+        <NewProjectDialog
+          canSend={assistantGroupId !== null}
+          onSend={async (text) => {
+            if (assistantGroupId === null) return;
+            await actions.sendMessage(assistantGroupId, text);
+            setOverlay("none");
+            openGroupPage(assistantGroupId);
+          }}
           onClose={() => setOverlay("none")}
         />
       ) : null}

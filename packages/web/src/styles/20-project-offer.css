@@ -1,0 +1,114 @@
+/* ---------- 主助理的方案卡 ---------- */
+
+.project-offer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+}
+
+.project-offer .card-title {
+  color: var(--fg-1);
+}
+
+.offer-name {
+  padding: 0 var(--space-2);
+  border: 1px dashed var(--border-2);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-1);
+  font: var(--type-ui);
+  font-weight: 600;
+  cursor: text;
+}
+
+.offer-name:disabled {
+  border-color: transparent;
+  cursor: default;
+}
+
+.offer-name-input {
+  min-width: 0;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-ui);
+  font-weight: 600;
+}
+
+.offer-hint {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.offer-kv {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-3) var(--space-6);
+  margin: 0;
+  font: var(--type-body);
+}
+
+.offer-kv dt {
+  color: var(--fg-3);
+}
+
+.offer-kv dd {
+  margin: 0;
+  color: var(--fg-1);
+}
+
+.offer-team,
+.offer-platforms {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.offer-team li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.offer-team span {
+  color: var(--fg-2);
+}
+
+/* 暂不支持的平台照写出来，让人知道主助理听见了，但压成灰字，不跟能用的平台并列。 */
+.offer-platforms .is-unsupported {
+  color: var(--fg-4);
+}
+
+.project-offer .approval-actions {
+  align-items: center;
+}
+
+.offer-note {
+  display: inline-flex;
+  flex: 1;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-offer.is-folded {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-6);
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.project-offer.is-muted {
+  border-color: var(--border-1);
+  color: var(--fg-4);
+}

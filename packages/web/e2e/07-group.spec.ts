@@ -12,30 +12,9 @@ import {
   teamItem,
 } from "./fixtures";
 
-test("项目旁的加号建出一个多 Bot 群并直接进去，现有群的任务卡不再显示 T 编号", async ({ page }) => {
+test("现有群的任务卡不再显示 T 编号", async ({ page }) => {
   await login(page);
-  const groups = page.locator("[data-testid=group-item]");
-  await expect(groups, "预置里本来就有一个多 Bot 群").toHaveCount(1);
-
-  await page.getByTestId("new-project").click();
-  const dialog = page.getByTestId("new-group-dialog");
-  await expect(dialog).toBeVisible();
-  await expect(dialog.locator("[data-testid=group-member][data-bot-name=主助理]"), "项目只拉队员").toHaveCount(0);
-  await page.getByTestId("group-title").fill("Initech 年框续约");
-  await dialog.locator("[data-testid=group-member][data-bot-name=小销]").click();
-  await expect(page.getByTestId("group-submit"), "少于两个 Bot 建不了群").toBeDisabled();
-  await dialog.locator("[data-testid=group-member][data-bot-name=小服]").click();
-  await page.getByTestId("group-submit").click();
-
-  await expect(dialog, "建完对话框关掉").toHaveCount(0);
-  await expect(page).toHaveURL(/\/g\/[^/]+$/);
-  await expect(page.getByTestId("chat-title")).toHaveText("Initech 年框续约");
-  await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 2 个 Bot");
-  await expect(groups, "新项目进了侧栏").toHaveCount(2);
-  await expect(page.locator('[data-testid=group-item][data-group-title="Initech 年框续约"]')).toHaveAttribute(
-    "aria-current",
-    "page",
-  );
+  await expect(page.locator("[data-testid=group-item]"), "预置里本来就有一个多 Bot 群").toHaveCount(1);
 
   await openTeamGroup(page, TEAM_TITLE);
   await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 3 个 Bot");

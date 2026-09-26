@@ -49,13 +49,12 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
     }
     case "computer_upserted":
       return withContent(state, { ...content, computers: keyed(content.computers, [action.computer]) });
-    case "publication_added": {
-      const draftId = action.publication.draftId;
-      if (draftId === null) return state;
-      return withContent(state, {
-        ...content,
-        publications: { ...content.publications, [draftId]: action.publication },
-      });
+    case "publications_loaded": {
+      const publications = { ...content.publications };
+      for (const publication of action.publications) {
+        if (publication.draftId !== null) publications[publication.draftId] = publication;
+      }
+      return withContent(state, { ...content, publications });
     }
     default:
       return state;

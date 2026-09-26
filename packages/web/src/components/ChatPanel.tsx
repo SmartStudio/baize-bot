@@ -16,6 +16,7 @@ import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 import type { ContentBook } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
+import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
 
 type Props = {
   conversation: Conversation;
@@ -31,6 +32,8 @@ type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onDecideProjectOffer: ProjectOfferActions["decide"];
+  onOpenGroup: (groupId: GroupId) => void;
   onInspectTool: InspectTool;
   inspectedToolId: MessageId | null;
   onLoadSkills: (botId: BotId) => Promise<void>;
@@ -95,6 +98,8 @@ export const ChatPanel = ({
   onSend,
   onDecide,
   onDecideSkillOffer,
+  onDecideProjectOffer,
+  onOpenGroup,
   onInspectTool,
   inspectedToolId,
   onLoadSkills,
@@ -158,6 +163,15 @@ export const ChatPanel = ({
   const insertSkill = (name: string) => {
     setDraft(draft.replace(SLASH, (_full, head: string) => `${head}/${name} `));
     input.current?.focus();
+  };
+
+  const projectOfferActions: ProjectOfferActions = {
+    decide: onDecideProjectOffer,
+    revise: () => {
+      setDraft("改一下：");
+      input.current?.focus();
+    },
+    open: onOpenGroup,
   };
 
   const submit = (event: React.FormEvent) => {
@@ -250,6 +264,7 @@ export const ChatPanel = ({
                 checklist={checklist}
                 onDecide={onDecide}
                 onDecideSkillOffer={onDecideSkillOffer}
+                projectOfferActions={projectOfferActions}
                 onInspectTool={onInspectTool}
                 selectedToolId={inspectedToolId}
                 showSource={team}
