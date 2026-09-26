@@ -229,6 +229,82 @@ describe("bash 沙箱性能", () => {
   );
 
   it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下批了联网，/private/var/run 里只有 mDNSResponder 放行",
+    async () => {
+      // docker.sock 就在 /var/run 下，不能拿它测。syslog 是 datagram socket，只 connect 不发字节：
+      // 过了沙箱会被内核按类型拒成 EPROTOTYPE，只有沙箱拒才是 EPERM。seatbelt 只对真 socket 做判断，
+      // 不存在的路径和普通文件在两种 profile 下报错一样，所以只能借一个系统 socket。
+      const node = shellQuote(process.execPath);
+      const connectScript = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{process.stdout.write("CONNECTED\\n");s.destroy()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
+      const sandbox = createSandboxedBash(workDir, zones, () => "run-var-run");
+      sandbox.allow("run-var-run", "call-var-run", { network: true, writePaths: [] });
+      const result = await sandbox.tool.execute(
+        "call-var-run",
+        { command: `${node} -e ${shellQuote(connectScript)} /private/var/run/syslog` },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      expect(JSON.stringify(result.content), "syslog 被沙箱拒掉，不是过了沙箱被内核拒").toContain("REFUSED EPERM");
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下批了联网，别的 Bot 目录和本 Bot 工作目录外的 socket 连不上",
+    async () => {
+      const otherBotWork = join(dataDir, "bot-2", "work");
+      const ownAgentDir = join(dataDir, "bot-1", "agent");
+      mkdirSync(otherBotWork, { recursive: true });
+      mkdirSync(ownAgentDir, { recursive: true });
+      const otherServer = await listenUnix(join(otherBotWork, "x.sock"));
+      const agentServer = await listenUnix(join(ownAgentDir, "x.sock"));
+      try {
+        const sandbox = createSandboxedBash(workDir, zones, () => "run-sibling-sock");
+        sandbox.allow("run-sibling-sock", "call-sibling-sock", { network: true, writePaths: [] });
+        const result = await sandbox.tool.execute(
+          "call-sibling-sock",
+          { command: `${unixSocketProbe(otherBotWork, "x.sock")}; ${unixSocketProbe(ownAgentDir, "x.sock")}` },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        const output = JSON.stringify(result.content);
+        expect(output, "相对路径和绝对路径都连不上").not.toContain("CONNECTED");
+        expect(output.match(/REFUSED EPERM/g), "两个 socket 各两种写法都被沙箱拒").toHaveLength(4);
+        expect(otherServer.accepted(), "别的 Bot 工作目录里的 socket 一次都没连上").toBe(0);
+        expect(agentServer.accepted(), "本 Bot 工作目录外的 socket 一次都没连上").toBe(0);
+      } finally {
+        await otherServer.close();
+        await agentServer.close();
+        rmSync(join(dataDir, "bot-2"), { recursive: true, force: true });
+        rmSync(ownAgentDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("seatbelt 下批了联网，本机地址以外的 IP 也放行，不批联网被拒", async () => {
+    // seatbelt 的 localhost 包括本机所有网卡地址，连本机网卡地址分不出「全部 IP」和「只放 localhost」。
+    // 127.0.0.2 不是本机地址但路由在 lo0 上，包不出本机，断网也测得出：沙箱放行时 connect 挂起或被内核拒，
+    // 沙箱不放行时 connect 当场 EPERM。
+    const port = await availablePort();
+    const node = shellQuote(process.execPath);
+    const connectScript = `const s=require("node:net").connect(${port},"127.0.0.2");const pass=()=>{process.stdout.write("SANDBOX-PASSED\\n");s.destroy()};s.setTimeout(300,pass);s.on("connect",pass);s.on("error",(e)=>e.code==="EPERM"?process.stdout.write("REFUSED EPERM\\n"):pass())`;
+    const command = `${node} -e ${shellQuote(connectScript)}`;
+    let runId = "run-remote-ip";
+    const sandbox = createSandboxedBash(workDir, zones, () => runId);
+    sandbox.allow(runId, "networked", { network: true, writePaths: [] });
+    const networked = JSON.stringify(
+      (await sandbox.tool.execute("networked", { command }, undefined, undefined, undefined as never)).content,
+    );
+    expect(networked, "批了联网，非本机地址的连接出得了沙箱").toContain("SANDBOX-PASSED");
+    runId = "run-remote-ip-off";
+    const plain = JSON.stringify(
+      (await sandbox.tool.execute("plain", { command }, undefined, undefined, undefined as never)).content,
+    );
+    expect(plain, "不批联网被沙箱拒").toContain("REFUSED EPERM");
+  });
+
+  it.skipIf(process.platform !== "darwin")(
     "seatbelt 下批了联网能解析域名、连本机回环、连工作目录里的 socket，不批联网三样都不通",
     async () => {
       // 本机的 .local 名字由 mDNSResponder 解析，不靠外网，所以断网的机器上也测得出 DNS 那条 socket 放没放开。
