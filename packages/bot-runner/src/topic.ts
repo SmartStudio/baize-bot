@@ -69,6 +69,8 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     `${task.number} ${task.title}`,
     `说明：${task.summary === "" ? NO_SUMMARY : task.summary}`,
     `截止：${task.dueAt ?? NO_DUE}`,
+    // 节奏只有例行派来的主题才有，空着不出这一行，队员的 prompt 字节不变。
+    ...(task.cadence === "" ? [] : [`节奏：${task.cadence}`]),
     `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
     "群成员：",
     ...roster,

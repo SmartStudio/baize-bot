@@ -61,13 +61,13 @@ const issueText = (issue: z.ZodIssue): string => {
 };
 
 /** 过协议 schema，不合格就抛一句中文，模型照着改完再调。 */
-function parseOrThrow(message: AgentToControl, what: string): AgentToControl {
+export function parseOrThrow(message: AgentToControl, what: string): AgentToControl {
   const parsed = AgentToControl.safeParse(message);
   if (!parsed.success) throw new Error(`${what}没发出去，改好再调：${parsed.error.issues.map(issueText).join("；")}`);
   return parsed.data;
 }
 
-const resultText = (body: string): Awaited<ReturnType<RunnerTool["execute"]>> => ({
+export const resultText = (body: string): Awaited<ReturnType<RunnerTool["execute"]>> => ({
   content: [{ type: "text", text: body }],
   details: {},
 });

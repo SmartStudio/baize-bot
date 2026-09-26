@@ -14,6 +14,7 @@ import {
   type Verdict,
 } from "@baize/shared";
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
+import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 
 export interface GateAccess {
   readonly network: boolean;
@@ -619,7 +620,36 @@ export function verdictFor(
   return verdictForItem(plainAction(action, target), call, grants, accounts);
 }
 
+const DRAFT_TOOLS: ReadonlySet<string> = new Set(DRAFT_TOOL_NAMES);
+
+const draftAccountIds = (input: Record<string, unknown>): readonly unknown[] =>
+  Array.isArray(input["drafts"])
+    ? input["drafts"].map((draft: unknown) =>
+        typeof draft === "object" && draft !== null ? (draft as Record<string, unknown>)["accountId"] : undefined,
+      )
+    : [input["accountId"]];
+
+// 起草不是真发：草稿卡本身就是确认，所以不看授权、不出审批卡，只看账号档。
+// 清单里没有的账号放行，工具自己报错并列出能用的账号；edit_draft 不带账号，档在建草稿时已经看过。
+function decideDraft(input: Record<string, unknown>, accounts: readonly AccountConfig[]): GateDecision {
+  const used = draftAccountIds(input).flatMap((id) => accounts.filter((account) => account.id === id));
+  const readOnly = used.find((account) => account.tier === "read_only");
+  const target = readOnly ?? used[0];
+  return {
+    verdict: readOnly === undefined ? "allow" : "deny",
+    action: "publish",
+    target: target === undefined ? null : { kind: "account", accountId: target.id },
+    reason:
+      readOnly === undefined
+        ? null
+        : `${accountLabel(readOnly)} 是只读档，不能起草。换一个账号，或者告诉用户去账号页把它调成起草档。`,
+    access: NO_ACCESS,
+  };
+}
+
 export function decide(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
+  // 同名的 MCP 操作注册时就被跳过，所以这个名字一定是运行器自己的起草工具，不看 mcpOperation。
+  if (DRAFT_TOOLS.has(call.toolName)) return decideDraft(call.input, accounts);
   const items = classifyTool(call);
   const evaluated = items.map((item) => ({ item, verdict: verdictForItem(item, call, grants, accounts) }));
   const denied = evaluated.find((entry) => entry.verdict === "deny");

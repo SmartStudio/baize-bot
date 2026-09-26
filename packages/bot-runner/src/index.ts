@@ -12,6 +12,7 @@ import {
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
+import { createDraftTools } from "./drafts.js";
 import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
 import { type BotDirs, botDirs, ensureBotDirs, groupSessionDir } from "./paths.js";
@@ -27,6 +28,7 @@ export type BotConfig = ConfigMessage["bots"][number];
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
+export { publishDraft } from "./publisher.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
@@ -460,6 +462,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
+      ...createDraftTools({ activeRun, send: config.send, accounts: () => desiredConfig(bot)!.accounts }),
       ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
     ];
     const mcp =

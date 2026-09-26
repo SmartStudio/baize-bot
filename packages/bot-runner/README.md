@@ -67,6 +67,8 @@ bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行�
 
 Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里先全部判完再并行执行，路径判定与实际使用之间不留给同批工具改符号链接的窗口。
 
+起草工具（`create_draft`、`edit_draft`、`propose_plan`）在闸门里单走一个分支，排在按工具名分类之前：动作归 `publish`，结论只看账号档，不看授权。`read_only` 档拒绝，理由是一句中文，点名那个账号并叫模型换账号或告诉用户；其余三档一律放行，不出审批卡，草稿卡本身就是确认。`propose_plan` 里任一条草稿用了只读档账号就整份拒，`target` 指向那个账号。清单里没有的账号放行，交给工具报错并列出能用的账号；`edit_draft` 不带账号，放行。MCP 里 `publish_*` 这类名字的操作不走这个分支，照旧按档问：只有 `direct_publish` 且登录有效才放行。
+
 `ask` 发出的 `approval_request` 带 `action` 和能确定时的 `target`。handler 同时监听审批 Promise 和 Pi 的 `ctx.signal`。拒绝或中止返回 `{ block: true, reason }`，工具函数不执行。停机时运行器发送 `approval_abandoned`；删 Bot 时只解开本地等待，不发送该报文，由控制面删除 Bot 的流程收尾审批。暂停不会让审批失效。`bot_tool_call` 的 `blocked` 标记由 `ApprovalGate` 记下，并在 reporter 消费后删除。
 
 ## 暂停和继续
@@ -83,7 +85,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`，主助理再加 `src/assistant.ts` 的两件工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 工具连接
 
@@ -91,7 +93,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里 `text` 块拼起来作为工具结果，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill）先占名字，主助理那两件工具的名字不论角色都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具的名字不论角色都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -119,6 +121,8 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 ### 任务卡的文本
 
 `renderTaskCard(task, members)` 是全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。行数固定，模型就分不混「这行没出现」和「这个字段是空的」。
+
+例外是节奏：`cadence` 非空时在「截止」后面加一行 `节奏：<cadence>`，空串不出这一行。节奏只有例行派来的主题才有（比如「排本周计划」），队员平常的任务卡没有它，加占位行会让所有队员的 prompt 多一行字节。
 
 ```
 T-2482 给老客户回一封询价邮件
@@ -225,6 +229,26 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 `set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
 
+## 草稿和内容计划
+
+Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具挂给所有 Bot，主助理和队员都能起草，三个名字（`DRAFT_TOOL_NAMES`）对工具连接一律保留。三件都不走审批，闸门只看账号档，见「统一闸门和沙箱」。
+
+| 工具 | 参数 | 返回 | 上行报文 |
+| --- | --- | --- | --- |
+| `create_draft` | `accountId`、`content`、`scheduledAt?` | `草稿已建（draftId：…），等用户在卡上批。` 加一句别说已经发了 | `draft_create` |
+| `edit_draft` | `draftId`、`content` | `草稿 … 已改，改过的稿子会重新等用户批` | `draft_edit` |
+| `propose_plan` | `title`、`drafts[]`（每条同 `create_draft`，1 到 20 条） | `计划「…」已发出，N 条草稿等用户在计划卡上批` 加每条的 draftId | `plan_propose` |
+
+- **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
+- **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
+- **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。`accountId` 不在清单里就抛错，错误里列出每个账号的平台、账号名和 accountId，模型下一轮照着改；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
+- **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，小红书的图随 P1-5。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
+- **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
+
+`src/publisher.ts` 的 `publishDraft` 收控制面下行的 `publish_draft`，回一条 `publish_result`。本机发布器按平台登记成一张表，现在是空的，所以一律回 `failed`、`reason: "error"`、`detail: "本机发布器还没接上"`；P1-5 接小红书时往表里加一行。它不挂在 `Runner` 上，电脑代理收到报文直接调，不经过 Bot 的串行队列。
+
+`test/runner.test.ts` 的「运行器的草稿」一节钉住这些，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。
+
 ## skill
 
 **方向只有一个：控制面下发，运行器落盘。** skill 的真相源是控制面的 `skills` 表，运行器不往回同步文件。两个方向都能写的文件没有真相源，用户在 Web 上改的步骤和 Bot 刚存的文件谁覆盖谁说不清。改步骤、删除、复制给别的 Bot，都是改表再重发一条 `config`。
@@ -290,9 +314,9 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 ### Pi 集成与系统提示
 
-`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按六段排列：白泽基础人设、身份、描述与边界、协作规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间四段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
+`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按七段排列：白泽基础人设、身份、描述与边界、协作规则、起草规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间五段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
 
-主助理在描述与边界之后、协作规则之前多一段 `ASSISTANT_RULE`，队员没有这一段。身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` `PROPOSE_SKILL_RULE` 保持原文。后五段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
+主助理在描述与边界之后、协作规则之前多一段 `ASSISTANT_RULE`，队员没有这一段。身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` 协作规则之后是 `src/drafts.ts` 的 `DRAFT_RULE`，所有角色都有：往外发东西只能起草，不要用 bash、浏览器或工具连接里的操作自己去发。`PROPOSE_SKILL_RULE` 保持原文。后六段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
 
 ## 跑测试
 

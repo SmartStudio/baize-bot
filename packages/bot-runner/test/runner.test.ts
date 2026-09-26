@@ -13,10 +13,12 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   type AccountConfig,
+  AccountId,
   AgentToControl,
   BotId,
   type BotRole,
   ComputerId,
+  ControlToAgent,
   type Grant,
   GrantId,
   GroupId,
@@ -38,6 +40,7 @@ import {
   createRunner,
   type GroupMember,
   type PromptMessage,
+  publishDraft,
   renderTaskCard,
   type Runner,
   type RunnerConfig,
@@ -3907,7 +3910,7 @@ describe("运行器的主助理", () => {
     expect(sessionFilesOf(h.dataDir, "bot-1")).toHaveLength(1);
   });
 
-  it("队员的 prompt 和改之前逐字相同", async () => {
+  it("队员的 prompt 除了起草，和改之前逐字相同", async () => {
     const requests: ChatCompletionRequest[] = [];
     const h = await startHarness({
       bots: ["bot-1"],
@@ -3927,7 +3930,7 @@ describe("运行器的主助理", () => {
       context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排" }],
     });
 
-    // 下面两段是加主助理之前的运行器实际发出的首轮请求，原样抄下来。
+    // 下面两段是加主助理之前的运行器实际发出的首轮请求，原样抄下来；P1-4 只在系统提示里加了起草规则一段。
     expect(requests[0]?.messages).toEqual([
       {
         role: "system",
@@ -3946,6 +3949,8 @@ describe("运行器的主助理", () => {
 没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；
 用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。
 
+往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。
+
 存下会做的活：一件活要是用了三次以上工具才做完，收尾时用 propose_skill 把刚才的步骤写成清单，问用户存不存。一次运行最多提一次，用户不答也别再提。
 </addendum>
 
@@ -3963,7 +3968,7 @@ ${join(h.dataDir, "bot-1", "work")}
         ],
       },
     ]);
-    expect(toolNamesSent(requests), "队员的工具一件没多").toEqual([
+    expect(toolNamesSent(requests), "队员的工具只多了三件起草工具").toEqual([
       "read",
       "bash",
       "edit",
@@ -3977,6 +3982,9 @@ ${join(h.dataDir, "bot-1", "work")}
       "handoff_task",
       "accept_handoff",
       "propose_skill",
+      "create_draft",
+      "edit_draft",
+      "propose_plan",
     ]);
   });
 
@@ -4311,6 +4319,348 @@ ${join(h.dataDir, "bot-1", "work")}
       "bot_tool_call:failed",
     ]);
     expect(seen.toolResults.join("")).toContain("节奏没发出去，改好再调：cadence 是空的");
+  });
+});
+
+const accountOf = (
+  id: string,
+  platform: AccountConfig["platform"],
+  handle: string | null,
+  tier: AccountConfig["tier"],
+): AccountConfig => ({ id: AccountId.parse(id), platform, handle, tier, login: "valid" });
+
+describe("运行器的草稿", () => {
+  const XHS = accountOf("acc-xhs", "xiaohongshu", "小满的日常", "confirm_publish");
+  const GITHUB = accountOf("acc-gh", "github", "baize-tech", "draft");
+  const X_READ_ONLY = accountOf("acc-x", "x", "baize_bot", "read_only");
+  const ACCOUNTS = [XHS, GITHUB, X_READ_ONLY];
+  const POST = { kind: "post", title: "周一早安", text: "新的一周从一杯咖啡开始" };
+  const ISSUE = {
+    kind: "post",
+    title: "文档里的安装命令过期了",
+    text: "README 第三节还写着 npm i",
+    github: { repo: "baize/bot", as: "issue" },
+  };
+  const IMAGE = { path: "/tmp/cover.png", sha256: "a".repeat(64) };
+
+  it("create_draft 不弹允许吗，返回草稿已建", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "写一条小红书",
+          callTool("create_draft", { accountId: "acc-xhs", content: POST, scheduledAt: "2026-09-28T09:00:00+08:00" }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "写一条小红书"));
+
+    expect(shape(h.sent), "发布要确认档也不弹，草稿卡本身就是确认").not.toContain("approval_request");
+    const created = h.sent.filter((message) => message.type === "draft_create");
+    expect(created).toEqual([
+      {
+        type: "draft_create",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        draft: {
+          draftId: expect.any(String),
+          accountId: "acc-xhs",
+          content: { kind: "post", title: "周一早安", text: "新的一周从一杯咖啡开始", images: [], github: null },
+          scheduledAt: "2026-09-28T01:00:00.000Z",
+        },
+      },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    const result = seen.toolResults.join("");
+    expect(result).toContain("草稿已建");
+    expect(result, "别让模型以为已经发出去了").toContain("等用户在卡上批");
+    expect(result, "带上 draftId，模型之后才能 edit_draft").toContain(
+      created[0]?.type === "draft_create" ? created[0].draft.draftId : "没有 draft_create",
+    );
+    expect(seen.firstTurn.join(""), "系统提示说清往外发只能起草").toContain(
+      "往外发东西只能起草：调 create_draft 或 propose_plan",
+    );
+  });
+
+  it("只读档账号的 create_draft 报错，不发上行", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["发条推", callTool("create_draft", { accountId: "acc-x", content: { kind: "post", text: "早安" } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发条推"));
+
+    expect(h.sent.some((message) => message.type === "draft_create")).toBe(false);
+    expect(shape(h.sent), "只读档直接拒，不是问").not.toContain("approval_request");
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+    const error = seen.toolResults.join("");
+    expect(error).toContain("X @baize_bot 是只读档");
+    expect(error, "告诉模型下一步怎么办").toContain("换一个账号");
+  });
+
+  it("accountId 不在清单里时报错，错误里列出可用账号", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["写一条小红书", callTool("create_draft", { accountId: "xiaohongshu", content: POST })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "写一条小红书"));
+
+    expect(h.sent.some((message) => message.type === "draft_create")).toBe(false);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    const error = seen.toolResults.join("");
+    expect(error).toContain("没有 accountId 是「xiaohongshu」的账号");
+    expect(error, "列出平台、名字和 id，模型下一轮照抄").toContain("小红书 @小满的日常（accountId：acc-xhs）");
+    expect(error).toContain("GitHub @baize-tech（accountId：acc-gh）");
+  });
+
+  it("GitHub 草稿带图报错", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["提个 issue", callTool("create_draft", { accountId: "acc-gh", content: { ...ISSUE, images: [IMAGE] } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "提个 issue"));
+
+    expect(h.sent.some((message) => message.type === "draft_create")).toBe(false);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join("")).toContain("GitHub 的草稿先不带图");
+  });
+
+  it("小红书草稿可以带图，GitHub 草稿不带图照常建", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptBy([
+        ["发小红书", callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [IMAGE] } })],
+        ["提个 issue", callTool("create_draft", { accountId: "acc-gh", content: ISSUE })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "提个 issue", { groupId: "group-b" }));
+
+    expect(h.sent.flatMap((message) => (message.type === "draft_create" ? [message.draft] : []))).toMatchObject([
+      { accountId: "acc-xhs", content: { images: [IMAGE] }, scheduledAt: null },
+      { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
+    ]);
+  });
+
+  it("edit_draft 发一条 draft_edit，结果告诉模型改过的稿子要重新等批", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["改一下那条", callTool("edit_draft", { draftId: "draft-1", content: { kind: "post", text: "改过的正文" } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "改一下那条"));
+
+    expect(shape(h.sent)).not.toContain("approval_request");
+    expect(h.sent.filter((message) => message.type === "draft_edit")).toEqual([
+      {
+        type: "draft_edit",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        draftId: "draft-1",
+        content: { kind: "post", title: null, text: "改过的正文", images: [], github: null },
+      },
+    ]);
+    expect(seen.toolResults.join("")).toContain("重新等用户批");
+  });
+
+  it("propose_plan 一次发一条 plan_propose，每条草稿各有 id", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "排本周计划",
+          callTool("propose_plan", {
+            title: "本周推广计划",
+            drafts: [
+              { accountId: "acc-xhs", content: POST, scheduledAt: "2026-09-28T01:00:00Z" },
+              { accountId: "acc-xhs", content: { ...POST, title: "周三分享" }, scheduledAt: "2026-09-30T01:00:00Z" },
+              { accountId: "acc-gh", content: ISSUE },
+            ],
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "排本周计划"));
+
+    expect(shape(h.sent)).not.toContain("approval_request");
+    const plans = h.sent.filter((message) => message.type === "plan_propose");
+    expect(plans).toHaveLength(1);
+    const plan = plans[0]!;
+    if (plan.type !== "plan_propose") throw new Error("不是 plan_propose");
+    expect(plan).toMatchObject({ runId: "run-1", botId: "bot-1", groupId: "group-1", title: "本周推广计划" });
+    expect(plan.planId).not.toBe("");
+    expect(plan.drafts.map((draft) => [draft.accountId, draft.scheduledAt])).toEqual([
+      ["acc-xhs", "2026-09-28T01:00:00.000Z"],
+      ["acc-xhs", "2026-09-30T01:00:00.000Z"],
+      ["acc-gh", null],
+    ]);
+    const ids = plan.drafts.map((draft) => draft.draftId);
+    expect(new Set(ids).size, "每条草稿各一个 id").toBe(3);
+    expect(ids, "草稿 id 和计划 id 不混用").not.toContain(plan.planId);
+    expect(
+      h.sent.some((message) => message.type === "draft_create"),
+      "计划里的草稿不再单发",
+    ).toBe(false);
+    expect(seen.toolResults.join("")).toContain("计划「本周推广计划」已发出，3 条草稿等用户在计划卡上批");
+  });
+
+  it("propose_plan 里有一条用只读档账号：整份计划被拒，不发上行", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptBy([
+        [
+          "排本周计划",
+          callTool("propose_plan", {
+            title: "本周推广计划",
+            drafts: [
+              { accountId: "acc-xhs", content: POST },
+              { accountId: "acc-x", content: { kind: "post", text: "早安" } },
+            ],
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "排本周计划"));
+
+    expect(h.sent.some((message) => message.type === "plan_propose")).toBe(false);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+  });
+
+  it("MCP 里名叫 publish_x 的工具照旧按档问", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      tools: [toolConnection([{ name: "publish_x", needsApproval: true }])],
+      approve: false,
+      script: scriptBy([["发到 GitHub", callTool("publish_x", { accountId: "acc-gh", text: "早安" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发到 GitHub"));
+
+    expect(h.sent.find((message) => message.type === "approval_request")).toMatchObject({
+      tool: "publish_x",
+      action: "publish",
+      target: { kind: "account", accountId: "acc-gh" },
+    });
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+  });
+
+  it("队员连的工具有同名 create_draft 操作：不注册，起草工具不被工具连接占走", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      tools: [toolConnection([{ name: "create_draft", needsApproval: false }])],
+      script: scriptBy([["写一条小红书", callTool("create_draft", { accountId: "acc-xhs", content: POST })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "写一条小红书"));
+
+    expect(h.sent.filter((message) => message.type === "draft_create")).toHaveLength(1);
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      "Bot bot-1：连接「客服工具」的操作「create_draft」和已注册的工具重名，跳过",
+    ]);
+    warn.mockRestore();
+  });
+
+  it("任务卡带节奏时写进任务卡那一段", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      script: (req) => {
+        requests.push(req);
+        return { textChunks: ["好"], usage: { input: 800, output: 2 } };
+      },
+    });
+
+    await h.runner.prompt({
+      ...promptMessage("bot-1", "run-1", "排本周计划", {
+        task: topicTask({ cadence: "每周一排本周计划，一次 5 条" }),
+        members: TWO_MEMBERS,
+      }),
+      origin: { kind: "routine" },
+    });
+
+    const text = JSON.stringify(requests[0]?.messages.find((message) => message.role === "user")?.content);
+    expect(text).toContain("截止：2026-09-20T10:00:00.000Z\\n节奏：每周一排本周计划，一次 5 条\\n当前经手：小白");
+  });
+
+  it("收到 publish_draft 回一条 failed 的 publish_result", async () => {
+    const message = ControlToAgent.parse({
+      type: "publish_draft",
+      draftId: "draft-1",
+      accountId: "acc-xhs",
+      platform: "xiaohongshu",
+      content: { kind: "post", title: null, text: "早安", images: [], github: null },
+    });
+    if (message.type !== "publish_draft") throw new Error("不是 publish_draft");
+
+    const result = await publishDraft(message);
+
+    expect(AgentToControl.parse(result)).toEqual({
+      type: "publish_result",
+      draftId: "draft-1",
+      result: { status: "failed", reason: "error", detail: "本机发布器还没接上" },
+    });
   });
 });
 

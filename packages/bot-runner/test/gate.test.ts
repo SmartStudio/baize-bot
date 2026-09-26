@@ -162,6 +162,82 @@ describe("统一闸门四层判定", () => {
   });
 });
 
+const accountOf = (id: string, tier: AccountConfig["tier"]): AccountConfig => ({
+  id: id as AccountConfig["id"],
+  platform: "x",
+  handle: "baize",
+  tier,
+  login: "expired",
+});
+
+describe("起草工具", () => {
+  const call = (toolName: string, input: Record<string, unknown>): GateCall => ({
+    toolName,
+    input,
+    workDir,
+    groupId,
+    computerId,
+    platform: "darwin",
+    mcpOperation: null,
+  });
+  const draftOn = (accountId: string) => call("create_draft", { accountId, content: { kind: "post", text: "早安" } });
+
+  it.each(["draft", "confirm_publish", "direct_publish"] as const)(
+    "%s 档的 create_draft 不问，没有授权、没登录也放行",
+    (tier) => {
+      expect(decide(draftOn("account-1"), [], [accountOf("account-1", tier)])).toMatchObject({
+        verdict: "allow",
+        action: "publish",
+        target: { kind: "account", accountId: "account-1" },
+      });
+    },
+  );
+
+  it("read_only 档的 create_draft 拒绝，理由是中文且叫模型换账号", () => {
+    const decision = decide(draftOn("account-1"), [], [accountOf("account-1", "read_only")]);
+    expect(decision.verdict).toBe("deny");
+    expect(decision.reason).toContain("只读档");
+    expect(decision.reason).toContain("换一个账号");
+  });
+
+  it("read_only 档的 publish 授权也救不了起草", () => {
+    const forever = grant("publish", { kind: "account", accountId: "account-1" as AccountConfig["id"] }, "forever");
+    expect(decide(draftOn("account-1"), [forever], [accountOf("account-1", "read_only")]).verdict).toBe("deny");
+  });
+
+  it("propose_plan 里任一条草稿用只读档账号就整份拒绝", () => {
+    const accounts = [accountOf("account-1", "draft"), accountOf("account-2", "read_only")];
+    const plan = call("propose_plan", {
+      title: "本周",
+      drafts: [{ accountId: "account-1" }, { accountId: "account-2" }],
+    });
+    expect(decide(plan, [], accounts)).toMatchObject({
+      verdict: "deny",
+      target: { kind: "account", accountId: "account-2" },
+    });
+  });
+
+  it("edit_draft 不带账号，放行", () => {
+    expect(decide(call("edit_draft", { draftId: "draft-1", content: {} }), [], []).verdict).toBe("allow");
+  });
+
+  it("清单里没有的账号闸门放行，交给工具报错列出可用账号", () => {
+    expect(decide(draftOn("account-9"), [], [accountOf("account-1", "read_only")]).verdict).toBe("allow");
+  });
+
+  it("MCP 里 publish_ 开头的操作照旧按档问", () => {
+    const publish = {
+      ...call("publish_x", { accountId: "account-1" }),
+      mcpOperation: { name: "publish_x", needsApproval: true },
+    };
+    expect(decide(publish, [], [accountOf("account-1", "draft")])).toMatchObject({
+      verdict: "ask",
+      action: "publish",
+    });
+    expect(decide(publish, [], [accountOf("account-1", "read_only")]).verdict).toBe("ask");
+  });
+});
+
 describe("bash 分类", () => {
   const bashCall = (command: string): GateCall => ({
     toolName: "bash",

@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import { type AgentToControl, type ComputerId, ControlToAgent } from "@baize/shared";
-import { createRunner, type Runner, type RunnerConfig } from "@baize/bot-runner";
+import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
 
@@ -175,6 +175,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
         return;
       case "resume":
         void runner?.resume(message.botId).catch((error: unknown) => log(`恢复 Bot 失败：${String(error)}`));
+        return;
+      case "publish_draft":
+        void publishDraft(message).then(send, (error: unknown) =>
+          log(`发布草稿 ${message.draftId} 出错：${String(error)}`),
+        );
         return;
     }
   };
