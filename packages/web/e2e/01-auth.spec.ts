@@ -1,4 +1,4 @@
-import { expect, test, EMAIL, SHOT, fillCredentials, login } from "./fixtures";
+import { expect, test, EMAIL, SHOT, fillCredentials, login, teamCard } from "./fixtures";
 
 test("注册页注册后进首页", async ({ page }) => {
   await page.goto("/");
@@ -40,12 +40,13 @@ test("密码不对时登录页留在原地并说明原因", async ({ page }) => 
   await page.screenshot({ path: `${SHOT}/01.png` });
 });
 
-test("登录成功进主窗口，侧栏列出预置的三个 Bot", async ({ page }) => {
+test("登录成功进主窗口，团队页列出预置的三个 Bot", async ({ page }) => {
   await login(page);
-  const names = page.locator("[data-testid=bot-item]");
+  await page.getByTestId("team-nav").click();
+  const names = page.getByTestId("team-bot");
   await expect(names).toHaveCount(3);
   for (const name of ["小服", "小销", "小采"]) {
-    await expect(page.locator(`[data-testid=bot-item][data-bot-name="${name}"]`)).toHaveCount(1);
+    await expect(teamCard(page, name)).toHaveCount(1);
   }
   await page.screenshot({ path: `${SHOT}/02.png` });
 });

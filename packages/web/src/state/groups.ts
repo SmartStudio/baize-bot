@@ -25,8 +25,6 @@ const touchGroup = (conversations: Conversation[], groupId: GroupId, patch: { la
 
 export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
   switch (action.type) {
-    case "group_selected":
-      return { ...state, selectedGroupId: action.groupId };
     case "bot_created":
       return {
         ...state,
@@ -42,7 +40,6 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
             pendingHandoffs: 0,
           },
         ],
-        selectedGroupId: action.groupId,
       };
     case "bot_updated":
       return { ...state, bots: { ...state.bots, [action.bot.id]: action.bot } };
@@ -50,14 +47,7 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
       const bots = { ...state.bots };
       delete bots[action.botId];
       const conversations = state.conversations.filter((c) => !(c.kind === "solo" && c.botId === action.botId));
-      const stillThere =
-        state.selectedGroupId === null || conversations.some((c) => c.groupId === state.selectedGroupId);
-      return {
-        ...state,
-        bots,
-        conversations,
-        selectedGroupId: stillThere ? state.selectedGroupId : (conversations[0]?.groupId ?? null),
-      };
+      return { ...state, bots, conversations };
     }
     case "group_created": {
       if (state.conversations.some((c) => c.groupId === action.group.id)) return state;

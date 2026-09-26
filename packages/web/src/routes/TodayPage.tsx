@@ -2,7 +2,7 @@ import { useState } from "react";
 import { ArrowRight, CalendarClock, Check, ExternalLink, SendHorizontal, Sparkles, TriangleAlert } from "lucide-react";
 import type { ApprovalId, DecideApprovalRequest, Draft, GroupId, TodayResponse } from "@baize/shared";
 import { ToolViewContent } from "../components/messages/ToolViewContent.js";
-import { pendingCountOf, useToday } from "../state/today.js";
+import { pendingCountOf, type Today } from "../state/today.js";
 
 const PLATFORM: Record<Draft["platform"], string> = {
   github: "GitHub",
@@ -248,6 +248,7 @@ const TodaySection = ({
 );
 
 type Props = {
+  today: Today;
   userName: string;
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: PendingProps["onDecide"];
@@ -255,8 +256,8 @@ type Props = {
   onOpenSettings: () => void;
 };
 
-export const TodayPage = ({ userName, onSend, onDecide, onOpenGroup, onOpenSettings }: Props) => {
-  const { status, data, error, refresh } = useToday();
+export const TodayPage = ({ today, userName, onSend, onDecide, onOpenGroup, onOpenSettings }: Props) => {
+  const { status, data, error, refresh } = today;
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);

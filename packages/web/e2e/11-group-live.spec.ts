@@ -69,7 +69,11 @@ test("群头成员和侧栏经手人随 task_updated 同步变化，单 Bot 不�
   await login(page);
   await openBot(page, "小服");
   await expect(page.getByTestId("chat-members")).toHaveCount(0);
-  await expect(page.getByTestId("bot-item").getByTestId("group-handler")).toHaveCount(0);
+  await expect(
+    page.getByTestId("sidebar").getByTestId("group-handler"),
+    "经手这一行只挂在项目上，单 Bot 群没有",
+  ).toHaveCount(1);
+  await expect(teamItem(page).getByTestId("group-handler")).toHaveCount(1);
   await openTeamGroup(page, TEAM_TITLE);
   const members = page.getByTestId("chat-member");
   await expect(members).toContainText(["小服", "小销", "小采"]);
@@ -155,7 +159,11 @@ test("首席和群回合由 WebSocket 推送更新，结束后恢复群头和侧
   await openBot(page, "小服");
   await expect(page.getByTestId("chat-members"), "回合进行中单 Bot 群仍没有成员行").toHaveCount(0);
   await expect(page.getByTestId("group-turn"), "回合进行中单 Bot 群仍没有轮流说提示").toHaveCount(0);
-  await expect(page.getByTestId("bot-item").getByTestId("group-handler")).toHaveCount(0);
+  await expect(
+    page.getByTestId("sidebar").getByTestId("group-handler"),
+    "经手这一行只挂在项目上，单 Bot 群没有",
+  ).toHaveCount(1);
+  await expect(teamItem(page).getByTestId("group-handler")).toHaveCount(1);
   await openTeamGroup(page, TEAM_TITLE);
 
   const beforeEnd = turnFrames.length;

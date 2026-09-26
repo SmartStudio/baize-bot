@@ -165,21 +165,30 @@ const login = async (page: Page, url: string): Promise<void> => {
   await check(page.getByTestId("main-window")).toBeVisible();
 };
 
+const teamCard = (page: Page, name: string) => page.locator(`[data-testid=team-bot][data-bot-name="${name}"]`);
+
+const openBot = async (page: Page, name: string): Promise<void> => {
+  await page.getByTestId("team-nav").click();
+  await teamCard(page, name).getByTestId("team-bot-chat").click();
+  await check(page.getByTestId("chat-title")).toHaveText(name);
+};
+
 const addBot = async (page: Page, name: string, tag: string): Promise<void> => {
-  const before = await page.getByTestId("bot-item").count();
-  await page.getByTestId("new-menu").click();
+  await page.getByTestId("team-nav").click();
+  const before = await page.getByTestId("team-bot").count();
   await page.getByTestId("new-bot").click();
-  await check(page.getByTestId("bot-item")).toHaveCount(before + 1);
   const input = page.getByTestId("bot-name-input");
   await check(input).toBeVisible();
   await check(page.getByTestId("bot-tag-input")).toHaveValue("");
   await input.fill(name);
   await input.press("Tab");
-  await check(page.locator(`[data-testid=bot-item][data-bot-name="${name}"]`)).toBeVisible();
+  await check(page.getByTestId("chat-title")).toHaveText(name);
   const label = page.getByTestId("bot-tag-input");
   await label.fill(tag);
   await label.press("Tab");
-  await check(page.locator(`[data-testid=bot-item][data-bot-name="${name}"]`)).toContainText(tag);
+  await page.getByTestId("team-nav").click();
+  await check(page.getByTestId("team-bot")).toHaveCount(before + 1);
+  await check(teamCard(page, name)).toContainText(tag);
 };
 
 const send = async (page: Page, text: string): Promise<void> => {
@@ -209,14 +218,13 @@ const run = async (): Promise<void> => {
     check(seeded.items.map((item) => item.bot.name)).toEqual(["小服", "小销", "小采"]);
     await addBot(page, "小品", "产品");
     await addBot(page, "小设", "设计");
-    await check(page.getByTestId("bot-item")).toHaveCount(5);
+    await check(page.getByTestId("team-bot")).toHaveCount(5);
     check(BotListResponse.parse(await stack.get("/api/bots")).items).toHaveLength(5);
     await page.screenshot({ path: shot(1) });
     process.stdout.write("step 1: 5 Bot\n");
 
     activeStep = "2";
-    await page.getByTestId("new-menu").click();
-    await page.getByTestId("new-group").click();
+    await page.getByTestId("new-project").click();
     await page.getByTestId("group-title").fill("Globex X3 × 200 订单");
     await page
       .getByTestId("group-summary")
@@ -230,7 +238,8 @@ const run = async (): Promise<void> => {
       (item) => item.task.title === "Globex X3 × 200 订单",
     );
     if (group === undefined) throw new Error("第 2 步建群后，控制面没有这张任务卡");
-    await check(page.getByTestId("task-number")).toHaveText(group.task.number);
+    // 任务卡不再露编号，改认地址里的群 id：建完跳进的正是控制面刚建的这个群。
+    await check(page).toHaveURL(new RegExp(`/g/${group.group.id}$`));
     await page.screenshot({ path: shot(2) });
     process.stdout.write(`step 2: ${group.task.number}\n`);
 
@@ -239,7 +248,6 @@ const run = async (): Promise<void> => {
     await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-status", "ok");
     await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-view-kind", "bash");
     await check(page.getByTestId("bot-bubble").filter({ hasText: "方案一" })).toContainText("方案二");
-    await check(page.getByTestId("cost-card")).toBeVisible();
     const history = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
     check(history.messages.some((message) => message.body.kind === "tool_call" && message.body.tool === "bash")).toBe(
       true,
@@ -313,10 +321,10 @@ const run = async (): Promise<void> => {
     process.stdout.write("step 6: skip，已登录站点 gated\n");
 
     activeStep = "7";
-    await page.locator('[data-testid=bot-item][data-bot-name="小销"]').click();
-    await page.getByTestId("bot-tab-routines").click();
+    await page.getByTestId("routines-nav").click();
     await check(page.getByTestId("routine-list")).toBeVisible();
     await page.getByTestId("routine-new").click();
+    await page.getByTestId("routine-bot-select").selectOption({ label: "小销" });
     await page.getByTestId("routine-name-input").fill("每日线索早报");
     await page.getByTestId("routine-instruction-input").fill("请生成今日线索早报");
     await page.getByTestId("trigger-add").click();
@@ -326,6 +334,7 @@ const run = async (): Promise<void> => {
     await check(routine).toBeVisible();
     await routine.getByTestId("routine-open").click();
     await page.getByTestId("routine-run-now").click();
+    await openBot(page, "小销");
     await check(page.getByTestId("message-list").getByText("例行任务「每日线索早报」自动运行")).toBeVisible();
     await check(page.getByTestId("bot-bubble").filter({ hasText: "今日线索早报已生成" })).toBeVisible();
     await page.screenshot({ path: shot(7) });
@@ -339,7 +348,7 @@ const run = async (): Promise<void> => {
     await check(offer).toHaveAttribute("data-status", "offered");
     await offer.getByTestId("skill-offer-save").click();
     await check(offer).toHaveAttribute("data-status", "saved");
-    await page.locator('[data-testid=bot-item][data-bot-name="小服"]').click();
+    await openBot(page, "小服");
     await page.getByTestId("bot-tab-skills").click();
     await check(page.locator('[data-testid=skill-row][data-skill-name="Globex 报价"]')).toBeVisible();
     await page.screenshot({ path: shot(8) });

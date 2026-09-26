@@ -12,7 +12,7 @@ export const AUDIT_SHOT = "/Users/zouyanjian/other-try/prepare/baize/baize-bot/.
 export const test = base.extend<{ resetMock: void }>({
   resetMock: [
     async ({ request }, use) => {
-      expect((await request.post("/api/test/reset")).status(), "mock 状态倒回预置的三个 Bot").toBe(204);
+      expect((await request.post("/api/test/reset")).status(), "mock 状态倒回预置的四个 Bot").toBe(204);
       await use();
     },
     { auto: true },
@@ -31,8 +31,12 @@ export const login = async (page: Page) => {
   await expect(page.getByTestId("main-window")).toBeVisible();
 };
 
+export const teamCard = (page: Page, name: string) => page.locator(`[data-testid=team-bot][data-bot-name="${name}"]`);
+
+// 侧栏不再单列 Bot，和队员单聊从团队页的卡片点进去。
 export const openBot = async (page: Page, name: string) => {
-  await page.locator(`[data-testid=bot-item][data-bot-name="${name}"]`).click();
+  await page.getByTestId("team-nav").click();
+  await teamCard(page, name).getByTestId("team-bot-chat").click();
   await expect(page.getByTestId("chat-title")).toHaveText(name);
 };
 
@@ -202,11 +206,13 @@ export const handoffFromService = async (page: Page, request: APIRequestContext)
 
 export const teamItem = (page: Page) => page.locator(`[data-testid=group-item][data-group-title="${TEAM_TITLE}"]`);
 
-export const openRoutines = async (page: Page, name: string) => {
-  await openBot(page, name);
-  await page.getByTestId("bot-tab-routines").click();
+export const routineRows = (page: Page, botName: string) =>
+  page.locator(`[data-testid=routine-row][data-bot-name="${botName}"]`);
+
+export const openRoutines = async (page: Page, botName: string) => {
+  await page.getByTestId("routines-nav").click();
   // 切过去才开始拉。不等预置那条到齐就数行数，数到的是一份还没填上的空列表。
-  await expect(page.getByTestId("routine-row")).not.toHaveCount(0);
+  await expect(routineRows(page, botName)).not.toHaveCount(0);
 };
 
 export const openSkills = async (page: Page, botName: string) => {

@@ -37,7 +37,6 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     conversations,
     groupTurns: {},
     turnEpochs: {},
-    selectedGroupId: null,
     messages: {},
     approvals: {},
     handoffs: {},

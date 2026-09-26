@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, Clock, SlidersHorizontal, Sparkles } from "lucide-react";
+import { ChevronRight, SlidersHorizontal, Sparkles } from "lucide-react";
 import { BotHue, type Bot, type BotId, type ToolConnection } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
-import { RoutinesTab } from "./routines/RoutinesTab.js";
 import { SkillsTab } from "./skills/SkillsTab.js";
 
 type Props = {
@@ -15,11 +14,10 @@ type Props = {
   onOpenTools: () => void;
 };
 
-type Tab = "settings" | "routines" | "skills";
+type Tab = "settings" | "skills";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "settings", label: "设置", icon: <SlidersHorizontal size={14} aria-hidden="true" /> },
-  { id: "routines", label: "例行", icon: <Clock size={14} aria-hidden="true" /> },
   { id: "skills", label: "会做的活", icon: <Sparkles size={14} aria-hidden="true" /> },
 ];
 
@@ -116,7 +114,6 @@ export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOp
           </button>
         ))}
       </nav>
-      {tab === "routines" ? <RoutinesTab botId={bot.id} key={bot.id} /> : null}
       {tab === "skills" ? <SkillsTab botId={bot.id} key={bot.id} /> : null}
       {tab === "settings" ? (
         <>

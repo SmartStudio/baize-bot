@@ -1,233 +1,182 @@
-import { useState } from "react";
-import { ArrowRightLeft, Hand, Plus, Search, Settings as SettingsIcon, Sun } from "lucide-react";
+import { ArrowRightLeft, Hand, MessageSquare, Plus, Repeat, Settings as SettingsIcon, Sun, Users } from "lucide-react";
+import { Link } from "react-router-dom";
 import type { Bot, BotId, GroupId, User } from "@baize/shared";
-import { BotAvatar } from "./BotAvatar.js";
-import { activityOf, previewOf, timeOf } from "./messages/preview.js";
-import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
+import { activityOf } from "./messages/preview.js";
+import type { Conversation, GroupTurn } from "../state/app.js";
+import { pathOf, type Screen } from "../routes/screen.js";
+
+type Team = Extract<Conversation, { kind: "team" }>;
 
 type Props = {
+  screen: Screen;
   conversations: Conversation[];
   bots: Record<BotId, Bot>;
   groupTurns: Record<GroupId, GroupTurn>;
-  selectedGroupId: GroupId | null;
   user: User;
-  onSelectToday: () => void;
-  onSelect: (groupId: GroupId) => void;
-  onCreateBot: () => void;
+  pendingCount: number;
+  onNewProject: () => void;
   onOpenAccount: () => void;
+  onOpenSettings: () => void;
 };
 
-const membersOf = (conversation: Conversation, bots: Record<BotId, Bot>): Bot[] =>
-  memberIdsOf(conversation)
-    .map((botId) => bots[botId])
-    .filter((bot): bot is Bot => bot !== undefined);
+const currentIf = (on: boolean) => (on ? ("page" as const) : undefined);
 
-const ConversationItem = ({
-  conversation,
+const ProjectItem = ({
+  project,
   bots,
   turn,
-  selected,
-  onSelect,
+  current,
 }: {
-  conversation: Conversation;
+  project: Team;
   bots: Record<BotId, Bot>;
   turn: GroupTurn | undefined;
-  selected: boolean;
-  onSelect: (groupId: GroupId) => void;
+  current: boolean;
 }) => {
-  const members = membersOf(conversation, bots);
-  const lead = members[0];
-  const team = conversation.kind === "team";
-  const title = team ? conversation.task.title : (lead?.name ?? "Bot");
-  const current = team && conversation.task.currentBotId !== null ? bots[conversation.task.currentBotId] : undefined;
-  const working = activityOf(conversation.lastMessage) === "working";
-  const hasBadges = conversation.pendingApprovals > 0 || conversation.pendingHandoffs > 0 || working;
+  const lead = project.botIds.map((botId) => bots[botId]).find((bot) => bot !== undefined);
+  const handler = project.task.currentBotId === null ? undefined : bots[project.task.currentBotId];
+  const working = activityOf(project.lastMessage) === "working";
+  const hasBadges = project.pendingApprovals > 0 || project.pendingHandoffs > 0 || working;
   return (
-    <li>
-      <button
-        type="button"
-        className={`bot-item${selected ? " is-selected" : ""}`}
-        data-testid={team ? "group-item" : "bot-item"}
-        data-bot-name={team ? undefined : lead?.name}
-        data-group-title={team ? title : undefined}
-        onClick={() => onSelect(conversation.groupId)}
-      >
-        {team ? (
-          <span className="avatar-stack" aria-hidden="true">
-            {members.slice(0, 2).map((bot) => (
-              <BotAvatar key={bot.id} name={bot.name} hue={bot.hue} size="sm" />
-            ))}
+    <Link
+      to={pathOf({ kind: "group", groupId: project.groupId })}
+      className="nav project"
+      data-testid="group-item"
+      data-group-title={project.task.title}
+      aria-current={currentIf(current)}
+    >
+      <span className="dot" style={{ background: `var(--bot-${lead?.hue ?? "sky"})` }} aria-hidden="true" />
+      <span className="project-body">
+        <b data-testid="project-title">{project.task.title}</b>
+        {hasBadges ? (
+          <span className="project-badges">
+            {project.pendingApprovals > 0 ? (
+              <span className="badge badge-pending" data-testid="bot-pending">
+                <Hand size={13} aria-hidden="true" />
+                等你点头 {project.pendingApprovals}
+              </span>
+            ) : null}
+            {/* 等 Bot 确认的不用你动手，压在「等你点头」下面一档，两个角标并排时你先看到该你做的那个。 */}
+            {project.pendingHandoffs > 0 ? (
+              <span className="badge badge-await-bot" data-testid="bot-handoff">
+                <ArrowRightLeft size={13} aria-hidden="true" />等 Bot 确认 {project.pendingHandoffs}
+              </span>
+            ) : null}
+            {working ? (
+              <span className="badge badge-working" data-testid="bot-working">
+                干活中
+              </span>
+            ) : null}
           </span>
-        ) : (
-          <BotAvatar name={lead?.name ?? "Bot"} hue={lead?.hue ?? "sky"} />
-        )}
-        <span className="bot-item-body">
-          <span className="bot-item-top">
-            <b>{title}</b>
-            {!team && lead?.tag ? <em className="tag">{lead.tag}</em> : null}
-            <span className="time">{conversation.lastMessage ? timeOf(conversation.lastMessage) : "刚刚"}</span>
-          </span>
-          {hasBadges ? (
-            <span className="bot-item-badges">
-              {conversation.pendingApprovals > 0 ? (
-                <span className="badge badge-pending" data-testid="bot-pending">
-                  <Hand size={13} aria-hidden="true" />
-                  等你点头 {conversation.pendingApprovals}
-                </span>
-              ) : null}
-              {/* 等 Bot 确认的不用你动手，压在「等你点头」下面一档，两个角标并排时你先看到该你做的那个。 */}
-              {conversation.pendingHandoffs > 0 ? (
-                <span className="badge badge-await-bot" data-testid="bot-handoff">
-                  <ArrowRightLeft size={13} aria-hidden="true" />等 Bot 确认 {conversation.pendingHandoffs}
-                </span>
-              ) : null}
-              {working ? (
-                <span className="badge badge-working" data-testid="bot-working">
-                  干活中
-                </span>
-              ) : null}
-            </span>
-          ) : null}
-          {team ? (
-            <span className="bot-item-sub" data-testid="group-handler">
-              {turn?.current
-                ? `${bots[turn.current]?.name ?? turn.current}正在说`
-                : current
-                  ? `${current.name} 经手`
-                  : "待派活"}
-            </span>
-          ) : null}
-          <span className="bot-item-preview">
-            {conversation.lastMessage
-              ? previewOf(conversation.lastMessage.body)
-              : team
-                ? "群建好了，还没派活。"
-                : "刚建好，还没派活。"}
-          </span>
-        </span>
-      </button>
-    </li>
+        ) : null}
+        <small data-testid="group-handler">
+          {turn?.current
+            ? `${bots[turn.current]?.name ?? turn.current}正在说`
+            : handler
+              ? `${handler.name} 经手`
+              : "待派活"}
+        </small>
+      </span>
+    </Link>
   );
 };
 
 export const Sidebar = ({
+  screen,
   conversations,
   bots,
   groupTurns,
-  selectedGroupId,
   user,
-  onSelectToday,
-  onSelect,
-  onCreateBot,
+  pendingCount,
+  onNewProject,
   onOpenAccount,
+  onOpenSettings,
 }: Props) => {
-  const [query, setQuery] = useState("");
-  const [menuOpen, setMenuOpen] = useState(false);
-  const needle = query.trim().toLowerCase();
-  // 搜的是一条对话的全部可见文字：单 Bot 群是那个 Bot，多 Bot 群是标题和所有成员。
-  const haystackOf = (conversation: Conversation): string => {
-    const members = membersOf(conversation, bots)
-      .map((bot) => `${bot.name} ${bot.tag} ${bot.description}`)
-      .join(" ");
-    return conversation.kind === "team" ? `${conversation.task.title} ${members}` : members;
-  };
-  const shown = needle ? conversations.filter((c) => haystackOf(c).toLowerCase().includes(needle)) : conversations;
-  const solo = shown.filter((c) => c.kind === "solo");
-  const team = shown.filter((c) => c.kind === "team");
-
-  const item = (conversation: Conversation) => (
-    <ConversationItem
-      key={conversation.groupId}
-      conversation={conversation}
-      bots={bots}
-      turn={groupTurns[conversation.groupId]}
-      selected={conversation.groupId === selectedGroupId}
-      onSelect={onSelect}
-    />
-  );
+  const openGroup = screen.kind === "group" ? screen.groupId : null;
+  const assistant = conversations.find((c) => c.kind === "solo" && bots[c.botId]?.role === "assistant");
+  const projects = conversations.filter((c): c is Team => c.kind === "team");
+  const openSolo = conversations.find((c) => c.kind === "solo" && c.groupId === openGroup);
+  // 和队员单聊是从团队页点进去的，侧栏把它算在「团队」底下，不然这时候侧栏一个亮的都没有。
+  const onTeam = screen.kind === "team" || (openSolo !== undefined && openSolo !== assistant);
 
   return (
-    <aside className="sidebar" data-testid="sidebar">
-      <header className="titlebar">
-        <span className="lights" aria-hidden="true">
-          <i /> <i /> <i />
-        </span>
-        <button
-          type="button"
-          className="icon-button"
-          data-testid="new-menu"
-          aria-label="新建"
-          aria-expanded={menuOpen}
-          onClick={() => setMenuOpen(!menuOpen)}
-        >
-          <Plus size={16} />
-        </button>
-      </header>
-      {menuOpen ? (
-        <>
-          <button type="button" className="menu-scrim" aria-label="关掉菜单" onClick={() => setMenuOpen(false)} />
-          <div className="new-menu" data-testid="new-menu-popup">
-            <button
-              type="button"
-              className="menu-row"
-              data-testid="new-bot"
-              onClick={() => {
-                setMenuOpen(false);
-                onCreateBot();
-              }}
-            >
-              <Plus size={16} aria-hidden="true" />
-              新建 Bot
-            </button>
-          </div>
-        </>
-      ) : null}
-      <div className="search">
-        <Search size={16} aria-hidden="true" />
-        <input
-          data-testid="sidebar-search"
-          value={query}
-          placeholder="搜索"
-          aria-label="搜索 Bot"
-          onChange={(e) => setQuery(e.target.value)}
-        />
-      </div>
-      <button
-        type="button"
-        className={`today-nav${selectedGroupId === null ? " is-selected" : ""}`}
+    <nav className="sidebar" data-testid="sidebar">
+      <Link
+        to={pathOf({ kind: "today" })}
+        className="nav"
         data-testid="today-nav"
-        aria-current={selectedGroupId === null ? "page" : undefined}
-        onClick={onSelectToday}
+        aria-current={currentIf(screen.kind === "today")}
       >
         <Sun size={17} aria-hidden="true" />
         今天
-      </button>
-      <div className="conversation-lists">
-        <p className="list-label">Bot</p>
-        <ul className="bot-list" data-testid="bot-list">
-          {solo.map(item)}
-        </ul>
-        {team.length > 0 ? (
-          <>
-            <p className="list-label">群</p>
-            <ul className="bot-list" data-testid="group-list">
-              {team.map(item)}
-            </ul>
-          </>
+        {pendingCount > 0 ? (
+          <span className="count" data-testid="today-count">
+            {pendingCount}
+          </span>
         ) : null}
-      </div>
-      <footer className="sidebar-footer">
-        <button type="button" className="account-button" data-testid="account-button" onClick={onOpenAccount}>
-          <span className="avatar avatar-md avatar-user" aria-hidden="true">
-            {[...user.name][0]}
-          </span>
-          <span className="account-body">
-            <b>{user.name}</b>
-            <small>{user.email}</small>
-          </span>
-          <SettingsIcon size={16} aria-hidden="true" />
+      </Link>
+      {assistant === undefined ? null : (
+        <Link
+          to={pathOf({ kind: "group", groupId: assistant.groupId })}
+          className="nav"
+          data-testid="assistant-nav"
+          aria-current={currentIf(openGroup === assistant.groupId)}
+        >
+          <MessageSquare size={17} aria-hidden="true" />
+          主助理
+        </Link>
+      )}
+      <div className="sect" data-testid="projects-label">
+        <span>项目</span>
+        <button type="button" className="sect-add" data-testid="new-project" aria-label="新项目" onClick={onNewProject}>
+          <Plus size={15} aria-hidden="true" />
         </button>
-      </footer>
-    </aside>
+      </div>
+      {projects.map((project) => (
+        <ProjectItem
+          key={project.groupId}
+          project={project}
+          bots={bots}
+          turn={groupTurns[project.groupId]}
+          current={openGroup === project.groupId}
+        />
+      ))}
+      <div className="side-low">
+        <Link
+          to={pathOf({ kind: "routines" })}
+          className="nav lite"
+          data-testid="routines-nav"
+          aria-current={currentIf(screen.kind === "routines")}
+        >
+          <Repeat size={16} aria-hidden="true" />
+          例行
+        </Link>
+        <Link
+          to={pathOf({ kind: "team" })}
+          className="nav lite"
+          data-testid="team-nav"
+          aria-current={currentIf(onTeam)}
+        >
+          <Users size={16} aria-hidden="true" />
+          团队
+        </Link>
+        <div className="foot">
+          <button type="button" className="account-button" data-testid="account-button" onClick={onOpenAccount}>
+            <span className="avatar avatar-sm avatar-user" aria-hidden="true">
+              {[...user.name][0]}
+            </span>
+            你
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            data-testid="sidebar-settings"
+            aria-label="设置"
+            onClick={onOpenSettings}
+          >
+            <SettingsIcon size={16} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </nav>
   );
 };

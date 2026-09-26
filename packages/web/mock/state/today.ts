@@ -23,6 +23,7 @@ import {
   at,
   bots,
   drafts,
+  groupIdByBotId,
   groups,
   nextSuffix,
   plans,
@@ -38,6 +39,12 @@ const pendingSince = new Map<string, string>();
 
 const groupIdOf = (id: string): GroupId => groups.get(id)?.id ?? GroupId.parse(id);
 const botIdOf = (id: string): BotId => bots.get(id)?.id ?? BotId.parse(id);
+
+// 今天页的输入框发给主助理的单 Bot 群。控制面这一期还回 null，mock 先指到 role = assistant 那个 Bot 上，删掉它就回 null。
+const assistantGroupIdOf = (): GroupId | null => {
+  const groupId = groupIdByBotId.get("bot_assistant");
+  return groupId === undefined ? null : groupIdOf(groupId);
+};
 
 const accountOf = (id: string, platform: Account["platform"], handle: string, tier: Account["tier"]): Account =>
   Account.parse({
@@ -487,7 +494,7 @@ export const todayOf = (): TodayResponse => {
   next.sort((left, right) => left.at.localeCompare(right.at));
 
   return TodayResponse.parse({
-    assistantGroupId: groupIdOf("grp_service"),
+    assistantGroupId: assistantGroupIdOf(),
     pending: pendingOf(),
     done,
     running,

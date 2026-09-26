@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
-import { ChevronLeft, Clock, Copy, Globe, Play, Plus, X } from "lucide-react";
-import { OnFailure, type BotId, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
-import { useApp } from "../../state/app.js";
-import { CRON_PRESETS, DEFAULT_TIME, cronExprOf, cronPresetOf, describeTriggers } from "./cron.js";
+import { useEffect, useRef, useState } from "react";
+import { ChevronLeft, Clock, Copy, Globe, Play, Plus, ShieldCheck, X } from "lucide-react";
+import { OnFailure, type Bot, type BotId, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
+import { BotAvatar } from "../components/BotAvatar.js";
+import { useApp } from "../state/app.js";
+import { CRON_PRESETS, DEFAULT_TIME, cronExprOf, cronPresetOf, describeTriggers } from "../components/routines/cron.js";
 
 type RoutineRun = Routine["runs"][number];
 
@@ -252,17 +253,87 @@ const RunList = ({ runs }: { runs: RoutineRun[] }) => {
   );
 };
 
-export const RoutinesTab = ({ botId }: { botId: BotId }) => {
+const Lockbox = () => (
+  <div className="lockbox">
+    <ShieldCheck size={16} aria-hidden="true" />
+    <p>
+      <b>例行不另开权限。</b>它跑的时候和平时一样过闸，发东西照样先问你。电脑关着的那次不补跑，等下一次。
+    </p>
+  </div>
+);
+
+const RoutineRow = ({ routine, bot, onOpen }: { routine: Routine; bot: Bot; onOpen: () => void }) => {
+  const { actions } = useApp();
+  const last = routine.runs[0];
+  return (
+    <div className="routine-row" data-testid="routine-row" data-routine-name={routine.name} data-bot-name={bot.name}>
+      <span className="when-col" data-testid="routine-row-note">
+        {routine.enabled ? describeTriggers(routine.triggers) : "已停用"}
+      </span>
+      <div className="routine-row-body">
+        <button type="button" className="routine-open" data-testid="routine-open" onClick={onOpen}>
+          <b>{routine.name}</b>
+        </button>
+        <span className="routine-row-meta">
+          <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+          <span data-testid="routine-bot">{bot.name}</span>
+        </span>
+        <span className="routine-row-meta">
+          {last === undefined ? null : (
+            <span data-testid="routine-last">
+              {stampOf(last.startedAt, new Date())} {runText(last)}
+            </span>
+          )}
+          <span data-testid="routine-run-count">
+            {routine.runs.length === 0 ? "还没跑过" : `跑过 ${routine.runs.length} 次`}
+          </span>
+        </span>
+      </div>
+      <div className="routine-row-actions">
+        <button
+          type="button"
+          className="ghost-button"
+          data-testid="routine-run"
+          onClick={() => void actions.runRoutine(routine.id)}
+        >
+          <Play size={14} aria-hidden="true" />
+          试跑
+        </button>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={routine.enabled}
+          aria-label={`启用 ${routine.name}`}
+          className={`switch${routine.enabled ? " is-on" : ""}`}
+          data-testid="routine-switch"
+          onClick={() => void actions.updateRoutine(routine.id, { enabled: !routine.enabled })}
+        />
+      </div>
+    </div>
+  );
+};
+
+// 例行现在都挂在单 Bot 群上，控制面只有按 Bot 取的接口，这一页把每个 Bot 的那一份拼起来。
+export const RoutinesPage = () => {
   const { state, actions } = useApp();
   const [view, setView] = useState<View>({ kind: "list" });
   const [draft, setDraft] = useState<Form>(EMPTY_FORM);
+  const [draftBotId, setDraftBotId] = useState<BotId | null>(null);
   const [deleteRoutineId, setDeleteRoutineId] = useState<RoutineId | null>(null);
 
-  const routines = state.status === "ready" ? state.routines[botId] : undefined;
+  const ready = state.status === "ready" ? state : null;
+  const bots = ready === null ? [] : Object.values(ready.bots);
+  const missing = bots.filter((bot) => ready?.routines[bot.id] === undefined).map((bot) => bot.id);
+  // 几个 Bot 的请求各回各的，先回来的会让这一页重渲一遍。记下发过的，免得还在路上的那几个被再要一次。
+  const requested = useRef(new Set<BotId>());
 
   useEffect(() => {
-    if (routines === undefined) void actions.loadRoutines(botId);
-  }, [botId, routines, actions]);
+    for (const botId of missing) {
+      if (requested.current.has(botId)) continue;
+      requested.current.add(botId);
+      void actions.loadRoutines(botId);
+    }
+  });
 
   useEffect(() => {
     if (deleteRoutineId === null) return;
@@ -270,128 +341,157 @@ export const RoutinesTab = ({ botId }: { botId: BotId }) => {
     return () => window.clearTimeout(timeout);
   }, [deleteRoutineId]);
 
-  if (routines === undefined) return <p className="routines-empty">在拉例行任务…</p>;
+  if (ready === null) return null;
 
+  const rows = bots.flatMap((bot) => (ready.routines[bot.id] ?? []).map((routine) => ({ routine, bot })));
   const toList = () => {
     setDeleteRoutineId(null);
     setView({ kind: "list" });
   };
 
   if (view.kind === "draft") {
-    const saveable = draft.name.trim().length > 0 && draft.instruction.trim().length > 0;
+    const botId = draftBotId ?? bots[0]?.id ?? null;
+    const saveable = botId !== null && draft.name.trim().length > 0 && draft.instruction.trim().length > 0;
     return (
-      <div className="routines" data-testid="routine-editor">
-        <Crumb count={routines.length} current="新的例行任务" onBack={toList} />
-        <RoutineFields value={draft} onPatch={(patch) => setDraft((current) => ({ ...current, ...patch }))} />
-        <div className="routine-actions">
-          <button
-            type="button"
-            className="ghost-button"
-            data-testid="routine-cancel"
-            onClick={() => {
-              setDraft(EMPTY_FORM);
-              toList();
-            }}
-          >
-            取消
-          </button>
-          <button
-            type="button"
-            className="primary-button"
-            data-testid="routine-save"
-            disabled={!saveable}
-            // 没存成就留在编辑器里。先清草稿再退回列表的话，刚写完的一整条就没了，界面上还看着像建成了。
-            onClick={() => {
-              void actions
-                .createRoutine(botId, { ...draft, enabled: true })
-                .then(() => {
-                  setDraft(EMPTY_FORM);
-                  toList();
-                })
-                .catch(() => undefined);
-            }}
-          >
-            建好了
-          </button>
+      <main className="page routines-page" data-testid="routines-page">
+        <div className="routines" data-testid="routine-editor">
+          <Crumb count={rows.length} current="新的例行" onBack={toList} />
+          <label className="field">
+            <span>交给谁</span>
+            <select
+              data-testid="routine-bot-select"
+              value={botId ?? ""}
+              onChange={(e) => setDraftBotId(bots.find((bot) => bot.id === e.target.value)?.id ?? null)}
+            >
+              {bots.map((bot) => (
+                <option key={bot.id} value={bot.id}>
+                  {bot.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <RoutineFields value={draft} onPatch={(patch) => setDraft((current) => ({ ...current, ...patch }))} />
+          <div className="routine-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="routine-cancel"
+              onClick={() => {
+                setDraft(EMPTY_FORM);
+                toList();
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              data-testid="routine-save"
+              disabled={!saveable}
+              // 没存成就留在编辑器里。先清草稿再退回列表的话，刚写完的一整条就没了，界面上还看着像建成了。
+              onClick={() => {
+                if (botId === null) return;
+                void actions
+                  .createRoutine(botId, { ...draft, enabled: true })
+                  .then(() => {
+                    setDraft(EMPTY_FORM);
+                    toList();
+                  })
+                  .catch(() => undefined);
+              }}
+            >
+              建好了
+            </button>
+          </div>
         </div>
-      </div>
+      </main>
     );
   }
 
   // 正编着的这条被别的窗口删了，推送一到就查不着。退回列表，比留一个空壳编辑器强。
-  const editing = view.kind === "editing" ? (routines.find((r) => r.id === view.routineId) ?? null) : null;
+  const editing = view.kind === "editing" ? (rows.find((row) => row.routine.id === view.routineId) ?? null) : null;
 
   if (editing !== null) {
+    const { routine } = editing;
     return (
-      <div className="routines" data-testid="routine-editor">
-        <Crumb count={routines.length} current={editing.name} onBack={toList} />
-        <div className="routine-actions">
-          <button
-            type="button"
-            role="switch"
-            aria-checked={editing.enabled}
-            aria-label="启用"
-            className={`switch${editing.enabled ? " is-on" : ""}`}
-            data-testid="routine-enabled-switch"
-            onClick={() => void actions.updateRoutine(editing.id, { enabled: !editing.enabled })}
-          />
-          <b>{editing.enabled ? "已启用" : "已停用"}</b>
-          <span className="routine-actions-gap" />
-          {deleteRoutineId === editing.id ? (
-            <>
-              <button
-                type="button"
-                className="ghost-button routine-delete-confirm"
-                data-testid="routine-delete-confirm"
-                onClick={() => {
-                  setDeleteRoutineId(null);
-                  void actions
-                    .deleteRoutine(editing)
-                    .then(toList)
-                    .catch(() => undefined);
-                }}
-              >
-                确认删除
-              </button>
+      <main className="page routines-page" data-testid="routines-page">
+        <div className="routines" data-testid="routine-editor">
+          <Crumb count={rows.length} current={routine.name} onBack={toList} />
+          <div className="routine-actions">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={routine.enabled}
+              aria-label="启用"
+              className={`switch${routine.enabled ? " is-on" : ""}`}
+              data-testid="routine-enabled-switch"
+              onClick={() => void actions.updateRoutine(routine.id, { enabled: !routine.enabled })}
+            />
+            <b>{routine.enabled ? "已启用" : "已停用"}</b>
+            <span className="routine-row-meta">
+              <BotAvatar name={editing.bot.name} hue={editing.bot.hue} size="xs" />
+              {editing.bot.name}
+            </span>
+            <span className="routine-actions-gap" />
+            {deleteRoutineId === routine.id ? (
+              <>
+                <button
+                  type="button"
+                  className="ghost-button routine-delete-confirm"
+                  data-testid="routine-delete-confirm"
+                  onClick={() => {
+                    setDeleteRoutineId(null);
+                    void actions
+                      .deleteRoutine(routine)
+                      .then(toList)
+                      .catch(() => undefined);
+                  }}
+                >
+                  确认删除
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  data-testid="routine-delete-cancel"
+                  onClick={() => setDeleteRoutineId(null)}
+                >
+                  取消
+                </button>
+              </>
+            ) : (
               <button
                 type="button"
                 className="ghost-button"
-                data-testid="routine-delete-cancel"
-                onClick={() => setDeleteRoutineId(null)}
+                data-testid="routine-delete"
+                onClick={() => setDeleteRoutineId(routine.id)}
               >
-                取消
+                删除
               </button>
-            </>
-          ) : (
+            )}
             <button
               type="button"
               className="ghost-button"
-              data-testid="routine-delete"
-              onClick={() => setDeleteRoutineId(editing.id)}
+              data-testid="routine-run-now"
+              onClick={() => void actions.runRoutine(routine.id)}
             >
-              删除
+              <Play size={14} aria-hidden="true" />
+              试跑一次
             </button>
-          )}
-          <button
-            type="button"
-            className="ghost-button"
-            data-testid="routine-run-now"
-            onClick={() => void actions.runRoutine(editing.id)}
-          >
-            <Play size={14} aria-hidden="true" />
-            试跑一次
-          </button>
+          </div>
+          <RoutineFields value={formOf(routine)} onPatch={(patch) => void actions.updateRoutine(routine.id, patch)} />
+          <RunList runs={routine.runs} />
         </div>
-        <RoutineFields value={formOf(editing)} onPatch={(patch) => void actions.updateRoutine(editing.id, patch)} />
-        <RunList runs={editing.runs} />
-      </div>
+      </main>
     );
   }
 
   return (
-    <div className="routines" data-testid="routine-list">
-      <div className="routines-head">
-        <span className="group-label">例行任务 · {routines.length}</span>
+    <main className="page routines-page" data-testid="routines-page">
+      <header className="page-head">
+        <div>
+          <h2>例行</h2>
+          <p>到点自己跑的活。走通一次的活存下来，让它定时自己跑。</p>
+        </div>
         <button
           type="button"
           className="ghost-button"
@@ -399,36 +499,28 @@ export const RoutinesTab = ({ botId }: { botId: BotId }) => {
           onClick={() => setView({ kind: "draft" })}
         >
           <Plus size={14} aria-hidden="true" />
-          新建
+          新建例行
         </button>
-      </div>
-      {routines.length === 0 ? (
-        <p className="routines-empty">还没有例行任务。走通一次的活可以存下来，让它定时自己跑。</p>
-      ) : null}
-      {routines.map((routine) => (
-        <div className="row-card" data-testid="routine-row" data-routine-name={routine.name} key={routine.id}>
-          <button
-            type="button"
-            className="routine-open"
-            data-testid="routine-open"
-            onClick={() => setView({ kind: "editing", routineId: routine.id })}
-          >
-            <b>{routine.name}</b>
-            <small data-testid="routine-row-note">
-              {routine.enabled ? describeTriggers(routine.triggers) : "已停用"}
-            </small>
-          </button>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={routine.enabled}
-            aria-label={`启用 ${routine.name}`}
-            className={`switch${routine.enabled ? " is-on" : ""}`}
-            data-testid="routine-switch"
-            onClick={() => void actions.updateRoutine(routine.id, { enabled: !routine.enabled })}
-          />
+      </header>
+      <section className="blk" data-testid="routine-list">
+        <div className="blk-h">
+          <h3>日常</h3>
+          <span>只属于你，不挂项目</span>
         </div>
-      ))}
-    </div>
+        {missing.length > 0 && rows.length === 0 ? <p className="routines-empty">在拉例行任务…</p> : null}
+        {missing.length === 0 && rows.length === 0 ? (
+          <p className="routines-empty">还没有例行任务。走通一次的活可以存下来，让它定时自己跑。</p>
+        ) : null}
+        {rows.map(({ routine, bot }) => (
+          <RoutineRow
+            key={routine.id}
+            routine={routine}
+            bot={bot}
+            onOpen={() => setView({ kind: "editing", routineId: routine.id })}
+          />
+        ))}
+      </section>
+      <Lockbox />
+    </main>
   );
 };

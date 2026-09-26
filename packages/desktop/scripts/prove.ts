@@ -268,8 +268,10 @@ async function driveProof(
   await page.evaluate("document.querySelector('[data-testid=login-submit]').click()");
   await waitFor(page, "document.querySelector('[data-testid=main-window]') !== null", 30_000);
   await waitAgent();
-  await waitFor(page, "document.querySelector('[data-testid=bot-item]') !== null", 20_000);
-  await page.evaluate("document.querySelector('[data-testid=bot-item]').click()");
+  await waitFor(page, "document.querySelector('[data-testid=team-nav]') !== null", 20_000);
+  await page.evaluate("document.querySelector('[data-testid=team-nav]').click()");
+  await waitFor(page, "document.querySelector('[data-testid=team-bot-chat]') !== null", 20_000);
+  await page.evaluate("document.querySelector('[data-testid=team-bot-chat]').click()");
   await waitFor(page, "document.querySelector('[data-testid=composer-input]') !== null", 20_000);
   await page.evaluate(`(() => {
     const input = document.querySelector('[data-testid=composer-input]');

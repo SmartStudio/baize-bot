@@ -62,7 +62,6 @@ export type AppState =
       conversations: Conversation[];
       groupTurns: Record<GroupId, GroupTurn>;
       turnEpochs: Record<GroupId, number>;
-      selectedGroupId: GroupId | null;
       messages: Record<GroupId, Message[]>;
       approvals: Record<ApprovalId, Approval>;
       handoffs: Record<HandoffId, Handoff>;
@@ -90,7 +89,6 @@ export type Action =
       settings: Settings;
       usage: UsageResponse;
     }
-  | { type: "group_selected"; groupId: GroupId | null }
   | { type: "bot_created"; bot: Bot; groupId: GroupId }
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }

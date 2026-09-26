@@ -1,20 +1,25 @@
-import { expect, test, login, openBot, SHOT } from "./fixtures";
+import { expect, test, login, openBot, teamCard, SHOT } from "./fixtures";
 
-test("点加号建的新 Bot 进侧栏并直接进入它的对话", async ({ page }) => {
+test("团队页点新 Bot 建的 Bot 进团队并直接进入它的对话", async ({ page }) => {
   await login(page);
-  const items = page.locator("[data-testid=bot-item]");
+  await page.getByTestId("team-nav").click();
+  const items = page.getByTestId("team-bot");
+  await expect(items).toHaveCount(3);
   const before = await items.count();
 
-  await page.getByTestId("new-menu").click();
   await page.getByTestId("new-bot").click();
 
-  await expect(items).toHaveCount(before + 1);
+  await expect(page).toHaveURL(/\/g\/[^/]+$/);
+  await expect(page.getByTestId("chat-title")).toHaveText(/^新 Bot/);
   const created = await page.getByTestId("chat-title").textContent();
-  expect(created).toMatch(/^新 Bot/);
-  await expect(page.locator(`[data-testid=bot-item][data-bot-name="${created}"]`)).toHaveClass(/is-selected/);
+  await expect(page.getByTestId("team-nav"), "新 Bot 的单聊算在团队底下").toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("message-list").getByTestId("message")).toHaveCount(0);
   await expect(page.getByTestId("bot-name-input")).toHaveValue(String(created));
   await page.screenshot({ path: `${SHOT}/2b.png` });
+
+  await page.getByTestId("team-nav").click();
+  await expect(items).toHaveCount(before + 1);
+  await expect(teamCard(page, String(created))).toHaveCount(1);
 });
 
 test("改完描述刷新页面还在", async ({ page }) => {

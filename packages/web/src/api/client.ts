@@ -4,6 +4,7 @@ import {
   BotResponse,
   BotListResponse,
   CreateBotResponse,
+  CreateGroupResponse,
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
@@ -92,6 +93,9 @@ export type BotDraft = {
   notify?: boolean;
 };
 
+// 建群表单交出来的那一份。截止可空，而「没填」和「填了空」在这里是同一件事，所以只有 null 没有 undefined。
+export type GroupDraft = { title: string; botIds: BotId[]; summary: string; dueAt: string | null };
+
 export const api = {
   login: async (email: string, password: string) =>
     json(LoginResponse, await send("POST", "/auth/login", { email, password })),
@@ -108,6 +112,7 @@ export const api = {
   updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
     (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
   groups: async () => json(GroupListResponse, await send("GET", "/groups")),
+  createGroup: async (draft: GroupDraft) => json(CreateGroupResponse, await send("POST", "/groups", draft)),
   tools: async () => json(ToolListResponse, await send("GET", "/tools")),
   createTool: async (draft: CreateToolRequest): Promise<ToolConnection> =>
     (await json(ToolResponse, await send("POST", "/tools", draft))).tool,

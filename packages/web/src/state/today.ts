@@ -57,3 +57,5 @@ export const useToday = () => {
 
   return { ...load, refresh: fetchToday };
 };
+
+export type Today = ReturnType<typeof useToday>;

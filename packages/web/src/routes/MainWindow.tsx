@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
 import { Sidebar } from "../components/Sidebar.js";
+import { NewGroupDialog } from "../components/NewGroupDialog.js";
 import { ChatPanel } from "../components/ChatPanel.js";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
 import { AccountMenu } from "../components/AccountMenu.js";
@@ -8,10 +10,14 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
 import { TodayPage } from "./TodayPage.js";
+import { RoutinesPage } from "./RoutinesPage.js";
+import { TeamPage } from "./TeamPage.js";
+import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
+import { pendingCountOf, useToday } from "../state/today.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 
-type Overlay = "none" | "account" | "settings" | "tools" | "usage";
+type Overlay = "none" | "account" | "settings" | "tools" | "usage" | "new-group";
 
 const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
 
@@ -20,13 +26,17 @@ const NO_MESSAGES: Message[] = [];
 
 export const MainWindow = () => {
   const { state, actions } = useApp();
+  const navigate = useNavigate();
+  const screen = screenOf(useLocation().pathname);
+  const today = useToday();
   const [overlay, setOverlay] = useState<Overlay>("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
   const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; tool: InspectedTool } | null>(null);
 
   const ready = state.status === "ready" ? state : null;
-  const conversation = ready?.conversations.find((c) => c.groupId === ready.selectedGroupId) ?? null;
+  const openGroup = screen?.kind === "group" ? screen.groupId : null;
+  const conversation = ready?.conversations.find((c) => c.groupId === openGroup) ?? null;
   const groupId = conversation?.groupId ?? null;
   const loaded = groupId !== null && ready !== null && ready.messages[groupId] !== undefined;
 
@@ -34,9 +44,23 @@ export const MainWindow = () => {
     if (groupId !== null && !loaded) void actions.loadMessages(groupId);
   }, [groupId, loaded, actions]);
 
+  // 今天页原来每次切回来都重新挂载、重新拉一遍。清单提到主窗口给侧栏数待办之后不再重挂，切回来时补拉这一下。
+  const onToday = screen?.kind === "today";
+  const wasOnToday = useRef(onToday);
+  const refreshToday = today.refresh;
+  useEffect(() => {
+    if (onToday && !wasOnToday.current) void refreshToday();
+    wasOnToday.current = onToday;
+  }, [onToday, refreshToday]);
+
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
   if (!ready) return null;
+  if (screen === null || (screen.kind === "group" && conversation === null)) return <Navigate to="/" replace />;
+
+  const openGroupPage = (target: GroupId | undefined) => {
+    if (target !== undefined) navigate(pathOf({ kind: "group", groupId: target }));
+  };
 
   const bots = ready.bots;
   const projectNames: Record<GroupId, string> = Object.fromEntries(
@@ -59,15 +83,15 @@ export const MainWindow = () => {
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
       <Sidebar
+        screen={screen}
         conversations={ready.conversations}
         bots={bots}
         groupTurns={ready.groupTurns}
-        selectedGroupId={ready.selectedGroupId}
         user={ready.user}
-        onSelectToday={() => actions.selectGroup(null)}
-        onSelect={actions.selectGroup}
-        onCreateBot={() => void actions.createBot()}
+        pendingCount={today.data === null ? 0 : pendingCountOf(today.data)}
+        onNewProject={() => setOverlay("new-group")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
+        onOpenSettings={() => setOverlay("settings")}
       />
       {conversation !== null ? (
         <ChatPanel
@@ -92,12 +116,21 @@ export const MainWindow = () => {
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
         />
+      ) : screen.kind === "routines" ? (
+        <RoutinesPage />
+      ) : screen.kind === "team" ? (
+        <TeamPage
+          bots={bots}
+          conversations={ready.conversations}
+          onCreateBot={() => void actions.createBot().then(openGroupPage)}
+        />
       ) : (
         <TodayPage
+          today={today}
           userName={ready.user.name}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
-          onOpenGroup={actions.selectGroup}
+          onOpenGroup={openGroupPage}
           onOpenSettings={() => setOverlay("settings")}
         />
       )}
@@ -123,6 +156,13 @@ export const MainWindow = () => {
           onOpenUsage={() => setOverlay("usage")}
           onOpenSettings={() => setOverlay("settings")}
           onLogout={() => void actions.logout()}
+          onClose={() => setOverlay("none")}
+        />
+      ) : null}
+      {overlay === "new-group" ? (
+        <NewGroupDialog
+          bots={Object.values(bots).filter((bot) => bot.role === "member")}
+          onCreate={(draft) => actions.createGroup(draft).then(openGroupPage)}
           onClose={() => setOverlay("none")}
         />
       ) : null}

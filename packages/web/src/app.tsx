@@ -24,8 +24,8 @@ export const App = () => {
           )
         }
       />
-      <Route path="/" element={state.status === "ready" ? <MainWindow /> : <Navigate to="/login" replace />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      {/* 主窗口的几个入口共用这一条路由，换入口时 MainWindow 不重挂，开着的浮层和今天的清单都留着。 */}
+      <Route path="/*" element={state.status === "ready" ? <MainWindow /> : <Navigate to="/login" replace />} />
     </Routes>
   );
 };

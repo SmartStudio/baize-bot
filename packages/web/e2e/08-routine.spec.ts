@@ -6,6 +6,7 @@ test("在例行页新建一条每分钟的例行任务，存下来就出现在�
   await expect(page.getByTestId("routine-row"), "预置的只有「每日工单早报」一条").toHaveCount(1);
 
   await page.getByTestId("routine-new").click();
+  await page.getByTestId("routine-bot-select").selectOption({ label: "小服" });
   await page.getByTestId("routine-name-input").fill("每分钟看一眼工单");
   await page.getByTestId("routine-instruction-input").fill("看一眼有没有新工单，有紧急的就告诉我。");
   await page.getByTestId("trigger-add").click();
@@ -20,6 +21,7 @@ test("在例行页新建一条每分钟的例行任务，存下来就出现在�
 
   const created = page.locator('[data-testid=routine-row][data-routine-name="每分钟看一眼工单"]');
   await expect(page.getByTestId("routine-row")).toHaveCount(2);
+  await expect(created, "存到选中的那个 Bot 名下").toHaveAttribute("data-bot-name", "小服");
   await expect(created.getByTestId("routine-row-note"), "列表上的下次触发是从表达式反推的文案").toHaveText("每分钟");
 
   // 刷新才分得清「存住了」和「界面自己记了一笔」。
@@ -31,8 +33,7 @@ test("在例行页新建一条每分钟的例行任务，存下来就出现在�
 
 test("试跑一次后群里出现「自动运行」那条 system，运行记录多一条", async ({ page }) => {
   await login(page);
-  await openSeededBot(page, "小服");
-  await page.getByTestId("bot-tab-routines").click();
+  await openRoutines(page, "小服");
   await page.getByTestId("routine-open").click();
   const runs = page.getByTestId("run-row");
   await expect(runs, "预置了三条运行记录").toHaveCount(3);
@@ -48,13 +49,15 @@ test("试跑一次后群里出现「自动运行」那条 system，运行记录�
   await expect(runs, "触发那一刻就落一条").toHaveCount(4);
   // 刚触发的还没有 note，状态文案后面不该拖一个孤零零的点。
   await expect(runs.first().locator("small"), "刚触发的那条停在运行中").toHaveText("运行中");
+  await page.getByTestId("run-row").last().scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOT}/2c-runs.png` });
+
+  // 例行页不带对话，这次运行在群里说的话要回小服的单 Bot 群看。
+  await openSeededBot(page, "小服");
   const thread = page.getByTestId("message-list");
   await expect(thread.getByText("例行任务「每日工单早报」自动运行"), "一次运行先在群里说一声").toBeVisible();
   await expect(thread.getByText("按紧急度排序"), "再落一条 user 消息，正文就是每次运行做什么").toBeVisible();
   await page.screenshot({ path: `${SHOT}/2c.png` });
-
-  await page.getByTestId("run-row").last().scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOT}/2c-runs.png` });
 });
 
 test("删除例行任务要二次确认，取消和超时都不删除", async ({ page }) => {
@@ -127,6 +130,7 @@ test("给 webhook 地址打一下，群里照样跑起来，运行记录靠推�
   // 这一路没经过界面上的任何一个按钮，列表能动只能是 routine_updated 推回来的。
   await expect(page.getByTestId("run-row"), "webhook 触发的运行记法一样").toHaveCount(4);
   await expect(page.getByTestId("run-row").first().locator("small")).toHaveText("运行中");
+  await openSeededBot(page, "小服");
   await expect(
     page.getByTestId("message-list").getByText("例行任务「每日工单早报」自动运行"),
     "从哪儿触发的，群里都是同样两条消息",

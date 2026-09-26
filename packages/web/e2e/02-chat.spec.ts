@@ -1,4 +1,15 @@
-import { expect, test, Message, MessageListResponse, login, openBot, openSeededBot, sendText, SHOT } from "./fixtures";
+import {
+  expect,
+  test,
+  Message,
+  MessageListResponse,
+  login,
+  openBot,
+  openSeededBot,
+  sendText,
+  teamCard,
+  SHOT,
+} from "./fixtures";
 
 test("小服的对话按回合排，工具过程收成一行且不露单轮花费", async ({ page }) => {
   await login(page);
@@ -152,8 +163,9 @@ test("发一条消息后它出现在列表里，Bot 的回复从 WebSocket 推�
 
   await expect(list.locator("[data-kind=user]", { hasText: text })).toHaveCount(1);
   await expect(list.locator("[data-kind=bot]")).toHaveCount(botsBefore + 1);
-  // Bot 回完会收到花费摘要，侧栏摘要停在最后那条上。
-  const sidebar = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(sidebar).toContainText("已完成");
-  await expect(sidebar).not.toContainText("本次花费");
+  // Bot 回完会收到花费摘要，团队页卡片上的摘要停在最后那条上。
+  await page.getByTestId("team-nav").click();
+  const card = teamCard(page, "小销");
+  await expect(card).toContainText("已完成");
+  await expect(card).not.toContainText("本次花费");
 });

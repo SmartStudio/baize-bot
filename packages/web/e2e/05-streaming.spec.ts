@@ -9,6 +9,7 @@ import {
   recordDeltas,
   sendForApproval,
   sendText,
+  teamCard,
   traceRun,
 } from "./fixtures";
 
@@ -102,20 +103,24 @@ test("点工具行，检查器高级里有原始参数", async ({ page }) => {
   await page.screenshot({ path: `${AUDIT_SHOT}/inspector-mock.png` });
 });
 
-test("运行结束不露单轮花费，侧栏只说已完成，跑的过程中标「干活中」", async ({ page }) => {
+test("运行结束不露单轮花费，团队页卡片只说已完成，跑的过程中标「干活中」", async ({ page, context }) => {
   await login(page);
   await openBot(page, "小采");
-  await traceRun(page);
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小采"]');
+  // 「干活中」只挂在团队页的卡片上，对话页看不到。同一个登录再开一页停在团队页，两页收的是同一路推送。
+  const team = await context.newPage();
+  await team.goto("/team");
+  const item = teamCard(team, "小采");
+  await expect(item.getByTestId("bot-working"), "发之前没在干活").toHaveCount(0);
+  await traceRun(team);
   const list = page.getByTestId("message-list");
 
   await sendText(page, "再找三家供应商询个价");
   await expect(list.getByTestId("tool-call-card")).toHaveAttribute("data-status", "ok");
   await expect(list.getByTestId("cost-card"), "单轮花费不在对话里露出").toHaveCount(0);
 
-  const trace = await page.evaluate(() => window.__runTrace);
-  expect(trace?.working, "跑的过程中侧栏这个 Bot 标着干活中").toContain(true);
+  await expect(item, "团队页卡片摘要只说运行完成").toContainText("已完成");
+  const trace = await team.evaluate(() => window.__runTrace);
+  expect(trace?.working, "跑的过程中团队页这个 Bot 标着干活中").toContain(true);
   await expect(item.getByTestId("bot-working"), "跑完就不标了").toHaveCount(0);
-  await expect(item, "侧栏摘要只说运行完成").toContainText("已完成");
   await expect(item).not.toContainText("本次花费");
 });

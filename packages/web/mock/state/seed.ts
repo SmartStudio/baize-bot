@@ -11,6 +11,7 @@ import {
   ToolConnectionId,
   TopicTask,
   type BotHue,
+  type BotRole,
   type MessageBody,
   type ToolOperation,
 } from "@baize/shared";
@@ -50,6 +51,7 @@ import {
 
 type Seed = {
   key: string;
+  role: BotRole;
   name: string;
   tag: string;
   description: string;
@@ -60,6 +62,7 @@ type Seed = {
 const seeds: Seed[] = [
   {
     key: "service",
+    role: "member",
     name: "小服",
     tag: "客服",
     description: "接工单、查订单、回答标准问题。改交期、退款、对外发邮件先找我点头。",
@@ -136,6 +139,7 @@ const seeds: Seed[] = [
   },
   {
     key: "sales",
+    role: "member",
     name: "小销",
     tag: "销售",
     description: "跟线索、出报价、写跟进邮件。对外发送前先找我点头。",
@@ -155,6 +159,7 @@ const seeds: Seed[] = [
   },
   {
     key: "buy",
+    role: "member",
     name: "小采",
     tag: "采购",
     description: "比价、询价、盯到货。下单和付钱先找我点头。",
@@ -163,6 +168,15 @@ const seeds: Seed[] = [
       { kind: "user", text: "X3 终端再找三家供应商询个价，中午前给我。" },
       { kind: "bot", botId: BotId.parse("bot_buy"), text: "在跟 3 家供应商询价，中午前给你对比表。", streaming: false },
     ],
+  },
+  {
+    key: "assistant",
+    role: "assistant",
+    name: "主助理",
+    tag: "主助理",
+    description: "拆活、排期、找你拍板。",
+    hue: "violet",
+    bodies: [],
   },
 ];
 
@@ -203,7 +217,7 @@ export const reseed = (): void => {
       Bot.parse({
         id: botId,
         ownerId: user.id,
-        role: "member",
+        role: seed.role,
         runState: "running",
         name: seed.name,
         tag: seed.tag,
@@ -344,7 +358,7 @@ export const reseed = (): void => {
           needsApproval: false,
         },
       ] satisfies ToolOperation[],
-      assignedBotIds: ["bot_service", "bot_sales", "bot_buy"],
+      assignedBotIds: ["bot_service", "bot_sales", "bot_buy", "bot_assistant"],
     }),
   );
 };

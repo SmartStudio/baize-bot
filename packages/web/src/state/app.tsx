@@ -24,7 +24,7 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import { RequestFailed, api, type BotDraft } from "../api/client.js";
+import { RequestFailed, api, type BotDraft, type GroupDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
@@ -38,8 +38,9 @@ export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
-  selectGroup: (groupId: GroupId | null) => void;
-  createBot: () => Promise<void>;
+  // 建完返回新群，由调用方跳过去。登录过期时是 undefined。
+  createBot: () => Promise<GroupId | undefined>;
+  createGroup: (draft: GroupDraft) => Promise<GroupId | undefined>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   loadMessages: (groupId: GroupId) => Promise<void>;
@@ -103,13 +104,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   const actions = useMemo<AppActions>(() => {
     // 会话过期后每个请求都会 401。不接住的话界面停在 ready 上，发消息、存设置全都静悄悄地不生效。
-    const signedIn = <A extends unknown[]>(run: (...args: A) => Promise<void>) => {
-      return async (...args: A): Promise<void> => {
+    const signedIn = <A extends unknown[], R>(run: (...args: A) => Promise<R>) => {
+      return async (...args: A): Promise<R | undefined> => {
         try {
-          await run(...args);
+          return await run(...args);
         } catch (cause) {
           if (!isUnauthorized(cause)) throw cause;
           dispatch({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
+          return undefined;
         }
       };
     };
@@ -138,10 +140,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         await api.logout();
         dispatch({ type: "anonymous", login: { kind: "idle" } });
       },
-      selectGroup: (groupId) => dispatch({ type: "group_selected", groupId }),
       createBot: signedIn(async () => {
         const { bot, group } = await api.createBot({});
         dispatch({ type: "bot_created", bot, groupId: group.id });
+        return group.id;
+      }),
+      createGroup: signedIn(async (draft: GroupDraft) => {
+        const { group, task } = await api.createGroup(draft);
+        dispatch({ type: "group_created", group, task });
+        return group.id;
       }),
       updateBot: signedIn(async (botId: BotId, draft: BotDraft) => {
         dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });

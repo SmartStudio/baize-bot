@@ -9,8 +9,8 @@ test("用量与账单按 Bot 分列本周花费，并列出五条最近任务", 
 
   const usage = page.getByTestId("usage-page");
   await expect(usage.getByTestId("usage-total")).toHaveText("¥38.2");
-  await expect(usage.getByTestId("usage-bots").locator(".usage-bot")).toHaveCount(3);
-  for (const name of ["小销", "小采", "小服"]) {
+  await expect(usage.getByTestId("usage-bots").locator(".usage-bot")).toHaveCount(4);
+  for (const name of ["小销", "小采", "小服", "主助理"]) {
     await expect(usage.getByTestId("usage-bots")).toContainText(name);
   }
   await expect(usage.getByTestId("usage-recent").locator(".usage-run")).toHaveCount(5);

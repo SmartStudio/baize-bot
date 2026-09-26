@@ -9,6 +9,7 @@ import {
   sendForApproval,
   sendText,
   setDnd,
+  teamCard,
   stubNotifications,
 } from "./fixtures";
 
@@ -21,9 +22,6 @@ test("要点头的工具让群里出一张审批卡，侧栏记一笔「等你�
   await expect(card, "卡上写清楚要点头的是哪一类").toContainText("对外发送");
   await expect(card, "卡上写清楚这次要做什么").toContainText(NEEDS_APPROVAL);
 
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(item.getByTestId("bot-pending"), "一条 pending 审批在侧栏就是「等你点头 1」").toHaveText("等你点头 1");
-
   // 没点头之前这一步不许往下走，工具卡得停在运行中，不能自己变完成。
   await expect(page.getByTestId("tool-call-card"), "等结论的工具卡停在运行中").toHaveAttribute(
     "data-status",
@@ -31,12 +29,19 @@ test("要点头的工具让群里出一张审批卡，侧栏记一笔「等你�
   );
   await expect(page.getByTestId("cost-card"), "还没点头就不该结账").toHaveCount(0);
 
+  const item = teamCard(page, "小销");
+  await page.getByTestId("team-nav").click();
+  await expect(item.getByTestId("bot-pending"), "一条 pending 审批在团队页卡片上就是「等你点头 1」").toHaveText(
+    "等你点头 1",
+  );
+
   // 刷新走的是拉历史那条路。历史里的审批只填表不动计数，不然 GET /api/bots 已经数过的这一条会被加第二遍。
   await page.reload();
   await openBot(page, "小销");
   // 先等审批卡从历史里回来。它出现才说明 approvals_loaded 已经派发过，这时候数角标才数得到多加的那一下。
   await expect(page.getByTestId("approval-card"), "历史里的审批卡也带着状态").toHaveAttribute("data-status", "pending");
   await expect(page.getByTestId("approval-approve"), "还没点头，按钮还在").toBeVisible();
+  await page.getByTestId("team-nav").click();
   await expect(item.getByTestId("bot-pending"), "刷新后还是 1，历史没有把它再加一遍").toHaveText("等你点头 1");
 });
 
@@ -50,9 +55,6 @@ test("点拒绝后卡片留下结论、角标归零、这一步被拦下", async
   await expect(card.getByTestId("approval-decided"), "有结论的卡只剩一行记录").toHaveText("不同意");
   await expect(card.getByTestId("approval-reject"), "有结论就不该还留着按钮").toHaveCount(0);
 
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(item.getByTestId("bot-pending"), "没有 pending 审批了角标整个不渲染").toHaveCount(0);
-
   await expect(page.getByTestId("cost-card"), "拒绝之后也不露单轮花费").toHaveCount(0);
   await expect(page.getByTestId("tool-call-card"), "拒绝把这一步拦下，工具卡终态是 blocked").toHaveAttribute(
     "data-status",
@@ -60,6 +62,11 @@ test("点拒绝后卡片留下结论、角标归零、这一步被拦下", async
   );
   const trace = await page.evaluate(() => window.__runTrace);
   expect(trace?.tool, "同一张工具卡先运行中再被拦下，中间没有自己变完成").toEqual(["running", "blocked"]);
+
+  await page.getByTestId("team-nav").click();
+  const item = teamCard(page, "小销");
+  await expect(item, "团队页卡片到了才谈得上看角标").toBeVisible();
+  await expect(item.getByTestId("bot-pending"), "没有 pending 审批了角标整个不渲染").toHaveCount(0);
 });
 
 test("在群里回一句「批准」和点批准按钮是同一件事", async ({ page }) => {
@@ -71,13 +78,15 @@ test("在群里回一句「批准」和点批准按钮是同一件事", async ({
   await expect(card, "群里回的一句话也作用到那条 pending 审批上").toHaveAttribute("data-status", "approved");
   await expect(card.getByTestId("approval-decided")).toHaveText("同意");
 
-  const item = page.locator('[data-testid=bot-item][data-bot-name="小销"]');
-  await expect(item.getByTestId("bot-pending"), "点头之后角标归零").toHaveCount(0);
-
   await expect(page.getByTestId("tool-call-card"), "批准让这一步真的跑完").toHaveAttribute("data-status", "ok");
   await expect(page.getByTestId("cost-card"), "批准之后也不露单轮花费").toHaveCount(0);
   // 「批准」这四个字本身是结论不是新任务，不该再引出一次运行。
   await expect(page.getByTestId("message-list").locator("[data-kind=tool_call]"), "没有多起一次运行").toHaveCount(1);
+
+  await page.getByTestId("team-nav").click();
+  const item = teamCard(page, "小销");
+  await expect(item, "团队页卡片到了才谈得上看角标").toBeVisible();
+  await expect(item.getByTestId("bot-pending"), "点头之后角标归零").toHaveCount(0);
 });
 
 test("已失效的审批卡没有批准按钮", async ({ page, request }) => {

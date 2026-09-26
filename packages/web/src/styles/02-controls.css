@@ -18,7 +18,6 @@
 
 .field input,
 .field textarea,
-.search input,
 select {
   padding: var(--space-4) var(--space-5);
   border: 1px solid var(--border-2);

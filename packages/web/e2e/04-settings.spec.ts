@@ -30,7 +30,7 @@ test("工具页列出两个预置 MCP 连接和分配摘要", async ({ page }) =
   await expect(toolCard(page, "工单系统")).toContainText("tickets.acme.internal · MCP");
   await expect(toolCard(page, "工单系统").getByTestId("tool-assignment")).toHaveText("小服");
   await expect(toolCard(page, "邮箱")).toContainText("mail.acme.com · MCP");
-  await expect(toolCard(page, "邮箱").getByTestId("tool-assignment")).toHaveText("全部 3 个 Bot");
+  await expect(toolCard(page, "邮箱").getByTestId("tool-assignment")).toHaveText("全部 4 个 Bot");
   await page.screenshot({ path: `${SHOT}/09a.png` });
 });
 

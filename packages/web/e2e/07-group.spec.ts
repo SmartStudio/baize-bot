@@ -12,16 +12,31 @@ import {
   teamItem,
 } from "./fixtures";
 
-test("新建群入口已删除，现有群的任务卡不再显示 T 编号", async ({ page }) => {
+test("项目旁的加号建出一个多 Bot 群并直接进去，现有群的任务卡不再显示 T 编号", async ({ page }) => {
   await login(page);
   const groups = page.locator("[data-testid=group-item]");
   await expect(groups, "预置里本来就有一个多 Bot 群").toHaveCount(1);
 
-  await page.getByTestId("new-menu").click();
-  await expect(page.getByTestId("new-bot"), "加号只保留新建 Bot").toBeVisible();
-  await expect(page.getByTestId("new-group"), "不再从对话侧栏建群").toHaveCount(0);
-  await expect(page.getByTestId("new-group-dialog")).toHaveCount(0);
-  await page.getByRole("button", { name: "关掉菜单" }).click();
+  await page.getByTestId("new-project").click();
+  const dialog = page.getByTestId("new-group-dialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("[data-testid=group-member][data-bot-name=主助理]"), "项目只拉队员").toHaveCount(0);
+  await page.getByTestId("group-title").fill("Initech 年框续约");
+  await dialog.locator("[data-testid=group-member][data-bot-name=小销]").click();
+  await expect(page.getByTestId("group-submit"), "少于两个 Bot 建不了群").toBeDisabled();
+  await dialog.locator("[data-testid=group-member][data-bot-name=小服]").click();
+  await page.getByTestId("group-submit").click();
+
+  await expect(dialog, "建完对话框关掉").toHaveCount(0);
+  await expect(page).toHaveURL(/\/g\/[^/]+$/);
+  await expect(page.getByTestId("chat-title")).toHaveText("Initech 年框续约");
+  await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 2 个 Bot");
+  await expect(groups, "新项目进了侧栏").toHaveCount(2);
+  await expect(page.locator('[data-testid=group-item][data-group-title="Initech 年框续约"]')).toHaveAttribute(
+    "aria-current",
+    "page",
+  );
+
   await openTeamGroup(page, TEAM_TITLE);
   await expect(page.getByTestId("chat-subtitle")).toContainText("你 + 3 个 Bot");
   await expect(page.getByTestId("task-number"), "任务卡不再露出系统编号").toHaveCount(0);
@@ -124,7 +139,7 @@ test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认
   const sidebarItem = teamItem(page);
   const handoffBadge = sidebarItem.getByTestId("bot-handoff");
   await expect(handoffBadge, "一条没确认的交接在侧栏就是「等 Bot 确认 1」").toHaveText("等 Bot 确认 1");
-  const title = sidebarItem.locator(".bot-item-top b");
+  const title = sidebarItem.getByTestId("project-title");
   const titleMetrics = await title.evaluate((element) => ({
     height: element.getBoundingClientRect().height,
     lineHeight: Number.parseFloat(getComputedStyle(element).lineHeight),
@@ -145,8 +160,8 @@ test("小服干完活发一张交接报文卡，侧栏记一笔「等 Bot 确认
   const listedBots = (await (await request.get("/api/bots")).json()) as { items: { pendingHandoffs: number }[] };
   expect(
     listedBots.items.map((entry) => entry.pendingHandoffs),
-    "交接记在群那本账上，不串到三个单 Bot 群里",
-  ).toEqual([0, 0, 0]);
+    "交接记在群那本账上，不串到四个单 Bot 群里",
+  ).toEqual([0, 0, 0, 0]);
   await page.screenshot({ path: `${SHOT}/5c.png` });
 });
 
