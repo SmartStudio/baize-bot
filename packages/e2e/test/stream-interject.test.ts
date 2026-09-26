@@ -69,6 +69,11 @@ type Team = {
   runsDone(botId: string, count: number): Promise<void>;
   /** 小采说的、正文含 fragment 的那条，在库里现在的样子。 */
   caiSaid(fragment: string): Promise<{ text: string; streaming: boolean } | undefined>;
+  /**
+   * 等小采这次工具调用的卡在库里收尾。工具之后那一轮到了上游不代表卡已落库：工具卡走代理报文，
+   * 后一轮走网关，两条路在控制面上不排队，插话抢在卡前面落库的话卡就排到插话后面。
+   */
+  caiToolSettled(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -104,6 +109,13 @@ async function team(script: (req: ChatRequest) => ScriptedTurn | Promise<Scripte
           AND body->>'text' LIKE ${`%${fragment}%`}`;
       return rows[0]?.body;
     },
+    caiToolSettled: () =>
+      until(async () => {
+        const rows = await stack.sql<{ status: string }[]>`
+          SELECT body->>'status' AS status FROM messages
+          WHERE group_id = ${group.id} AND body->>'kind' = 'tool_call' AND body->>'botId' = ${cai.bot.id}`;
+        return rows.length === 1 && rows[0]?.status === "ok";
+      }, "小采的工具卡在库里收尾"),
     close: async () => {
       await stack.close();
       await upstream.close();
@@ -153,6 +165,7 @@ describe("端到端：Bot 话说到一半时插话", () => {
         async () => t.upstream.requests().some((req) => isBot(req, "小采") && isFollowUpTurn(req)),
         "小采工具之后那一轮到了上游",
       );
+      await t.caiToolSettled();
       await t.post("@小服 你看下排产");
       await t.runsDone(t.fuId, 1);
       hold.open();
@@ -187,6 +200,7 @@ describe("端到端：Bot 话说到一半时插话", () => {
         async () => t.upstream.requests().some((req) => isBot(req, "小采") && isFollowUpTurn(req)),
         "小采工具之后那一轮到了上游",
       );
+      await t.caiToolSettled();
       await t.post("@小服 你看下排产");
       await t.runsDone(t.fuId, 1);
       afterTool.open();
