@@ -417,6 +417,47 @@ describe("连平台账号", () => {
   });
 });
 
+describe("令牌端点发来不安全的访问令牌", () => {
+  const isExchange: RequestMatch = (request) => field(request.body, "grant_type") === "authorization_code";
+
+  it.each([
+    { name: "十二个连续反斜杠", token: `ghu_${"\\".repeat(12)}X` },
+    { name: "十二个连续百分号", token: `ghu_${"%".repeat(12)}X` },
+    { name: "控制字符", token: "ghu_a\u0001b" },
+    { name: "Latin-1 字符", token: "ghu_toké" },
+  ])("含$name：授权回调不建账号，刷新回 502，这把令牌都进不了库", async ({ token }) => {
+    const s = await stack();
+    const o = await owner(s, true);
+    const logged = captureErrors();
+    const grant = {
+      access_token: token,
+      expires_in: 3600,
+      refresh_token: "github_refresh_unsafe",
+      token_type: "bearer",
+    };
+
+    s.fake.failNext(200, isExchange, grant);
+    const walk = await connectPlatform(o.client, "github");
+    expect(Object.fromEntries(walk.landed.searchParams)).toEqual({ oauth: "github", result: "failed" });
+    expect(await accountsOf(o), "账号没建").toEqual([]);
+    expect(await s.database.db.select().from(accountCredentials), "凭据没落库").toEqual([]);
+    expect(s.fake.requests().filter(isRead), "没拿这把令牌去问我是谁").toEqual([]);
+
+    s.fake.setTokenLifetime(SHORT_LIFETIME_S);
+    await connectPlatform(o.client, "github");
+    const account = await connected(o);
+    const stored = await credentialsOf(s, account.id);
+    s.fake.failNext(200, isRefresh, grant);
+    const failed = await proxyFetch(o, `/${account.id}${WHOAMI.github}`);
+    expect(failed.status, "当平台出错，让 Bot 稍后再试").toBe(502);
+    expect(await credentialsOf(s, account.id), "刷出来的这把没写进库，还是原来那一代").toEqual(stored);
+    expect(
+      logged.filter((line) => line.includes("访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收")),
+    ).toHaveLength(2);
+    expect(logged.join("\n"), "日志里没有这把令牌").not.toContain(token);
+  });
+});
+
 describe("令牌刷新", () => {
   it("同一个账号十几个请求一起等刷新：只刷一次，等着的不占数据库连接，别的账号和别的接口照常走", async () => {
     const s = await stack();

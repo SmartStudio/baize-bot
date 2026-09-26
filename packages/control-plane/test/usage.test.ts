@@ -146,4 +146,29 @@ describe("GET /api/usage", () => {
     await database.db.delete(routines).where(eq(routines.id, routineId));
     expect(UsageResponse.parse(await (await client.get("/api/usage")).json()).recent[0]?.title).toBe("例行任务");
   });
+
+  it("标题截到 80 个 UTF-16 码元，emoji 落在第 80 位时整个去掉，不留半个代理对", async () => {
+    const { client, ownerId } = await signedIn();
+    const created = await bot(client, "小服");
+    const routineId = newId();
+    const routineRunId = newId();
+    const startedAt = new Date();
+    const prefix = `例行 · ${"a".repeat(74)}`;
+    expect(prefix.length, "emoji 的前半个码元正好是第 80 位").toBe(79);
+    await database.db.insert(routines).values({
+      id: routineId,
+      botId: created.bot.id,
+      name: `${"a".repeat(74)}😀尾巴`,
+      instruction: "汇总",
+      triggers: [],
+    });
+    await database.db.insert(routineRuns).values({ id: routineRunId, routineId, startedAt });
+    await database.db.insert(runs).values({
+      ...run(ownerId, created.bot.id, created.group.id, startedAt, "0.250000"),
+      routineRunId,
+      isRoutine: true,
+    });
+    const title = UsageResponse.parse(await (await client.get("/api/usage")).json()).recent[0]?.title ?? "";
+    expect(title, "emoji 整个去掉，不留落单的前半个代理对").toBe(prefix);
+  });
 });

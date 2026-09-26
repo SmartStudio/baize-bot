@@ -2,6 +2,7 @@ import { BotId, GroupId, RunId, type MessageBody, type UsageResponse, type UserI
 import { and, asc, desc, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, messages, routineRuns, routines, runs, tasks } from "../db/schema.js";
+import { clip } from "./today.js";
 
 const shanghai = new Intl.DateTimeFormat("en-GB", {
   timeZone: "Asia/Shanghai",
@@ -26,15 +27,16 @@ export function runTitle(input: {
   readonly taskTitle: string | null;
 }): string {
   const { isRoutine, routineName, trigger, taskTitle } = input;
-  return (
+  return clip(
     isRoutine
       ? routineName === null
         ? "例行任务"
         : `例行 · ${routineName}`
       : trigger?.kind === "user"
         ? [...trigger.text].slice(0, 40).join("")
-        : (taskTitle ?? "主题任务")
-  ).slice(0, 80);
+        : (taskTitle ?? "主题任务"),
+    80,
+  );
 }
 
 export async function getUsage(db: Db, ownerId: UserId, now = new Date()): Promise<UsageResponse> {

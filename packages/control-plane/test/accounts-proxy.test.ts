@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addAccountWithToken, CredentialCrypto } from "../src/credentials.js";
 import { accounts } from "../src/db/schema.js";
 import { startFakePlatforms } from "../src/fake-platforms.js";
-import { ACCOUNTS_PROXY_MAX_BYTES, TRUNCATED_HEADER } from "../src/http/accounts-proxy.js";
+import { ACCOUNTS_PROXY_MAX_BYTES, readCapped, TRUNCATED_HEADER } from "../src/http/accounts-proxy.js";
 import { newId } from "../src/ids.js";
 import { startTestServer, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { nextOf } from "./helpers/content.js";
@@ -27,6 +27,8 @@ afterAll(async () => {
 
 const isUser = (request: { platform: string; path: string }) =>
   request.platform === "github" && request.path === "/user";
+const isRefresh = (request: { body: unknown }) =>
+  (request.body as Record<string, unknown> | null)?.["grant_type"] === "refresh_token";
 
 type Linked = { readonly owner: Owner; readonly linked: readonly Account[]; readonly config: Owner["config"] };
 
@@ -314,6 +316,89 @@ describe("账号代理", () => {
       expect(form.slice(0, kept), "上限处落在一个转义中间").toMatch(/%2$|\\u00$/);
       expect(await cut.text(), `切在「${form.slice(0, kept)}」后面，这一截都去掉`).toBe(head);
     }
+  });
+
+  it("截断处接不成令牌的不删：上限落在 %2 后、普通字符后、多字节字符中间，只有真接着令牌写下去的那一截才去掉", async () => {
+    const token = "/ghu_lows";
+    const { owner, account } = await ownerWithToken(s, token);
+    for (const { name, form, kept, cut } of [
+      { name: "%2 后面接的是空格", form: "%20plain", kept: 2, cut: false },
+      { name: "%2 后面接的是这把令牌", form: "%2Fghu_lows", kept: 2, cut: true },
+      { name: "/ 后面接的是别的字", form: "/xyz", kept: 1, cut: false },
+      { name: "/ 后面接的是这把令牌", form: token, kept: 1, cut: true },
+      { name: "上限落在「中」的第一个字节后", form: "中文", kept: 1, cut: false },
+    ]) {
+      const head = Buffer.from("a".repeat(ACCOUNTS_PROXY_MAX_BYTES - kept));
+      const tail = Buffer.from(form).subarray(0, kept);
+      s.fake.failNext(200, isUser, `${head.toString()}${form}${"b".repeat(4096)}`);
+      const response = await proxyFetch(owner, `/${account.id}/user`);
+      expect(response.headers.get(TRUNCATED_HEADER)).toBe("true");
+      const body = Buffer.from(await response.arrayBuffer());
+      expect(body.equals(cut ? head : Buffer.concat([head, tail])), `${name}：${cut ? "这一截去掉" : "原样留着"}`).toBe(
+        true,
+      );
+    }
+  });
+
+  it("401 刷新后的新令牌以旧令牌开头，两把都回显在正文里：长的先匹配，替换后不留残片", async () => {
+    const before = s.fake.requests().length;
+    const { owner, linked } = await ownerWith(["github"]);
+    const [github] = linked;
+    if (github === undefined) throw new Error("没连上 GitHub");
+    const oldToken =
+      s.fake
+        .requests()
+        .slice(before)
+        .find((request) => request.method === "GET")
+        ?.authorization?.replace(/^Bearer /, "") ?? "";
+    expect(oldToken, "连 GitHub 时发出过访问令牌").not.toBe("");
+    const newToken = `${oldToken}_next`;
+    const sentWith = (token: string) => (request: { platform: string; path: string; authorization: string | null }) =>
+      isUser(request) && request.authorization === `Bearer ${token}`;
+
+    s.fake.failNext(401, sentWith(oldToken));
+    s.fake.failNext(200, isRefresh, {
+      access_token: newToken,
+      expires_in: 8 * 3600,
+      refresh_token: "github_refresh_next",
+      token_type: "bearer",
+    });
+    s.fake.failNext(200, sentWith(newToken), `<${oldToken}> <${newToken}>`);
+    const response = await proxyFetch(owner, `/${github.id}/user`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text(), "短的先匹配会把长的那把剩下 _next").toBe("<[已隐藏]> <[已隐藏]>");
+    expect(s.fake.requests().findLast(isUser)?.authorization, "重试用的是刷出来的新令牌").toBe(`Bearer ${newToken}`);
+  });
+
+  it("读到上限 cancel 之后放掉 reader lock，平台中途断连时也放掉", async () => {
+    let canceled = false;
+    const endless = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64).fill(0x61));
+        },
+        cancel() {
+          canceled = true;
+        },
+      }),
+    );
+    const read = await readCapped(endless, 100);
+    expect(read.truncated).toBe(true);
+    expect(read.bytes.length).toBe(100);
+    expect(canceled, "到上限就 cancel").toBe(true);
+    expect(endless.body?.locked, "cancel 之后 reader lock 放掉了").toBe(false);
+
+    const broken = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.error(new Error("平台断连"));
+        },
+      }),
+    );
+    await expect(readCapped(broken, 100)).rejects.toThrow("平台断连");
+    expect(broken.body?.locked, "读出错时 reader lock 也放掉了").toBe(false);
   });
 
   it("白名单响应头回显令牌：这个头整个丢掉，别的头和正文照常，请求成功", async () => {

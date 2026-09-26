@@ -113,11 +113,11 @@ async function forward(upstream: Response, tokens: readonly string[]): Promise<R
       forwarded.set(name, value);
     }
   }
-  const { bytes, truncated } = await readCapped(upstream, ACCOUNTS_PROXY_MAX_BYTES);
-  let body = secrets.redact(bytes);
-  if (truncated) {
+  const read = await readCapped(upstream, ACCOUNTS_PROXY_MAX_BYTES);
+  let body = secrets.redact(read.bytes);
+  if (read.truncated) {
     // 上限可能正好落在一把令牌（或它的某种写法）中间，截下来的前半截没法整把匹配，只能连它一起去掉。
-    body = body.subarray(0, body.length - secrets.partialTail(body));
+    body = body.subarray(0, body.length - secrets.partialTail(body, read.beyond));
     forwarded.set(TRUNCATED_HEADER, "true");
   }
   return new Response(upstream.body === null ? null : new Uint8Array(body), {
@@ -126,23 +126,33 @@ async function forward(upstream: Response, tokens: readonly string[]): Promise<R
   });
 }
 
-/** 读到上限多一个字节就停，多出来的那一个字节只用来判断是不是真超了。 */
-async function readCapped(response: Response, max: number): Promise<{ bytes: Buffer; truncated: boolean }> {
-  if (response.body === null) return { bytes: Buffer.alloc(0), truncated: false };
+/** truncated 时 beyond 是上限之后已经读到的那一截，只用来看截断处是不是真有令牌接着往下写。 */
+export type CappedBody =
+  | { readonly truncated: false; readonly bytes: Buffer }
+  | { readonly truncated: true; readonly bytes: Buffer; readonly beyond: Buffer };
+
+/** 读到超过上限就停。 */
+export async function readCapped(response: Response, max: number): Promise<CappedBody> {
+  if (response.body === null) return { truncated: false, bytes: Buffer.alloc(0) };
   const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    total += value.length;
-    if (total > max) {
-      await reader.cancel();
-      return { bytes: Buffer.concat(chunks).subarray(0, max), truncated: true };
+  try {
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+      if (total > max) {
+        await reader.cancel();
+        const all = Buffer.concat(chunks);
+        return { truncated: true, bytes: all.subarray(0, max), beyond: all.subarray(max) };
+      }
     }
+    return { truncated: false, bytes: Buffer.concat(chunks) };
+  } finally {
+    reader.releaseLock();
   }
-  return { bytes: Buffer.concat(chunks), truncated: false };
 }
 
 /** 一个位置上允许出现的字节。 */
@@ -191,11 +201,11 @@ const atomSource = (atom: Atom): string => {
 const spellingSource = (spelling: Spelling): string =>
   spelling.map((forms) => `(?:${forms.map((form) => form.map(atomSource).join("")).join("|")})`).join("");
 
-/** text 能不能是这把令牌某种写法的开头（整把写完之前就到头了）。 */
-function isPrefixOf(text: string, spelling: Spelling, at = 0, char = 0): boolean {
+/** text 从头起能不能是这把令牌的某种写法：整把写完了，或者写到一半 text 就到头了。 */
+function startsSpelling(text: string, spelling: Spelling, at = 0, char = 0): boolean {
   if (at === text.length) return true;
   const forms = spelling[char];
-  if (forms === undefined) return false;
+  if (forms === undefined) return true;
   return forms.some((form) => {
     let pos = at;
     for (const atom of form) {
@@ -203,7 +213,7 @@ function isPrefixOf(text: string, spelling: Spelling, at = 0, char = 0): boolean
       if (!atom.includes(text.charCodeAt(pos))) return false;
       pos += 1;
     }
-    return isPrefixOf(text, spelling, pos, char + 1);
+    return startsSpelling(text, spelling, pos, char + 1);
   });
 }
 
@@ -235,12 +245,16 @@ function secretMatcher(tokens: readonly string[]) {
     occursIn(value: string): boolean {
       return pattern !== null && value.search(pattern) !== -1;
     },
-    /** 结尾有多长可能是某把令牌某种写法的开头。 */
-    partialTail(body: Buffer): number {
+    /**
+     * 结尾有多长是某把令牌某种写法被截断的前半截。接上上限之后读到的 beyond 一起看，接不成令牌的就不算；
+     * beyond 不够长、看不出接不接得成的，按接得成算。
+     */
+    partialTail(body: Buffer, beyond: Buffer): number {
       const text = body.toString("latin1");
+      const next = beyond.subarray(0, longest).toString("latin1");
       for (let length = Math.min(longest - 1, text.length); length > 0; length--) {
-        const tail = text.slice(text.length - length);
-        if (spellings.some((spelling) => isPrefixOf(tail, spelling))) return length;
+        const tail = text.slice(text.length - length) + next;
+        if (spellings.some((spelling) => startsSpelling(tail, spelling))) return length;
       }
       return 0;
     },

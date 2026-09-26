@@ -91,6 +91,11 @@ const TIMEOUT_MS = 30_000;
  * 等久了同账号的请求全在后面排着。令牌端点只回一小段 JSON，10 秒还没回就当这次连不上。
  */
 const TOKEN_TIMEOUT_MS = 10_000;
+/**
+ * 两家发的访问令牌只有字母数字和少量标点。反斜杠、百分号、控制字符和非 ASCII 都不收：账号代理替换回显令牌时，
+ * 一串连续的反斜杠或百分号会让匹配正则灾难性回溯，Latin-1 字符在线路上是单字节、匹配器只认 UTF-8 写法。
+ */
+const UNSAFE_TOKEN_CHAR = /[\\%]|[^\x20-\x7e]/;
 
 export function notConfigured(platform: OAuthPlatform, endpoints: OAuthEndpoints): string | null {
   const provider = PROVIDERS[platform];
@@ -189,6 +194,9 @@ export async function requestToken(
   }
   const accessToken = at(json, "access_token");
   if (typeof accessToken !== "string" || accessToken === "") throw new Error("令牌端点的回应里没有 access_token");
+  if (UNSAFE_TOKEN_CHAR.test(accessToken)) {
+    throw new Error("令牌端点发来的访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收");
+  }
   const refreshToken = at(json, "refresh_token");
   const scope = at(json, "scope");
   return {
