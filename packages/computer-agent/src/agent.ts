@@ -178,7 +178,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         void runner?.resume(message.botId).catch((error: unknown) => log(`恢复 Bot 失败：${String(error)}`));
         return;
       case "publish_draft":
-        void publishDraft(message).then(send, (error: unknown) =>
+        void publishDraft(message, { dataDir, browser: browserConfig }).then(send, (error: unknown) =>
           log(`发布草稿 ${message.draftId} 出错：${String(error)}`),
         );
         return;

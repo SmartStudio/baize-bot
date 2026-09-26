@@ -1,4 +1,11 @@
-import type { BotId, BotRole, ControlToAgent, ModelPurpose, ToolView } from "@baize/shared";
+import {
+  type BotId,
+  type BotRole,
+  type ControlToAgent,
+  gatewayAlias,
+  ModelPurpose,
+  type ToolView,
+} from "@baize/shared";
 import {
   type AgentSession,
   createAgentSession,
@@ -23,9 +30,6 @@ import type { ActiveRun } from "./topic.js";
 // 一个群一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
 
 export const GATEWAY_PROVIDER_ID = "baize-gateway";
-
-// 控制面的网关只认这两个名字，按用途映射到真模型。
-const MODEL_BY_PURPOSE: Record<ModelPurpose, string> = { plan: "baize:plan", fast: "baize:fast" };
 
 /** 工具的注册点。`src/topic.ts`、`src/skills.ts` 那两组和 `src/mcp-tools.ts` 的工具连接由 createRunner 拼进来，桌面操作还没做。 */
 export type RunnerTool = ToolDefinition<TSchema>;
@@ -71,7 +75,7 @@ const gatewayProvider = (gateway: BotSessionOptions["gateway"]) => ({
   baseUrl: gateway.baseUrl,
   apiKey: gateway.apiKey,
   api: "openai-completions" as const,
-  models: Object.values(MODEL_BY_PURPOSE).map((id) => ({
+  models: ModelPurpose.options.map(gatewayAlias).map((id) => ({
     id,
     name: id,
     reasoning: false,
@@ -170,8 +174,8 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
   modelRuntime.registerProvider(GATEWAY_PROVIDER_ID, gatewayProvider(options.gateway));
 
   const modelFor = (purpose: ModelPurpose) => {
-    const found = modelRuntime.getModel(GATEWAY_PROVIDER_ID, MODEL_BY_PURPOSE[purpose]);
-    if (!found) throw new Error(`网关供应商没注册上：${GATEWAY_PROVIDER_ID}/${MODEL_BY_PURPOSE[purpose]}`);
+    const found = modelRuntime.getModel(GATEWAY_PROVIDER_ID, gatewayAlias(purpose));
+    if (!found) throw new Error(`网关供应商没注册上：${GATEWAY_PROVIDER_ID}/${gatewayAlias(purpose)}`);
     return found;
   };
 

@@ -95,6 +95,9 @@ export interface ImageDirs {
   readonly hidden: readonly string[];
 }
 
+/** drafts 目录里拷贝的文件名。发布器按它核对配图还是起草时那份。 */
+export const draftCopyName = (sha256: string, source: string): string => `${sha256}${extname(source).toLowerCase()}`;
+
 const errorCode = (error: unknown): unknown =>
   error && typeof error === "object" && "code" in error ? error.code : undefined;
 
@@ -139,7 +142,7 @@ async function imageOf(path: string, dirs: ImageDirs, where: string): Promise<Dr
     const bytes = await file.readFile();
     if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`${label}超过 20 MiB，压小一点再起草。`);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const copy = join(dirs.draftsDir, `${sha256}${extname(real).toLowerCase()}`);
+    const copy = join(dirs.draftsDir, draftCopyName(sha256, real));
     const temporary = `${copy}.${randomUUID()}.tmp`;
     await writeFile(temporary, bytes, { flag: "wx", mode: 0o444 });
     await rename(temporary, copy);

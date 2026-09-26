@@ -25,12 +25,13 @@ import {
   BotId,
   type BotRole,
   ComputerId,
-  ControlToAgent,
   type Grant,
   GrantId,
+  gatewayAlias,
   GroupId,
   HandoffId,
   MessageId,
+  ModelPurpose,
   RunId,
   type Skill,
   SkillId,
@@ -47,7 +48,6 @@ import {
   createRunner,
   type GroupMember,
   type PromptMessage,
-  publishDraft,
   renderTaskCard,
   type Runner,
   type RunnerConfig,
@@ -3928,6 +3928,21 @@ describe("运行器的主助理", () => {
     expect(sessionFilesOf(h.dataDir, "bot-1")).toHaveLength(1);
   });
 
+  it.each(ModelPurpose.options)("用途 %s 发给网关的 model 就是 shared 的 gatewayAlias", async (purpose) => {
+    const models: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        models.push(req.model);
+        return reply;
+      },
+    });
+
+    await h.runner.prompt({ ...promptMessage("bot-1", "run-1", "回一句"), purpose });
+
+    expect(models, "网关认的名字只有 shared 一处定义，运行器不自己拼").toEqual([gatewayAlias(purpose)]);
+  });
+
   it("队员的 prompt 除了起草，和改之前逐字相同", async () => {
     const requests: ChatCompletionRequest[] = [];
     const h = await startHarness({
@@ -4980,25 +4995,6 @@ describe("运行器的草稿", () => {
     const text = JSON.stringify(requests[0]?.messages.find((message) => message.role === "user")?.content);
     expect(text).toContain("截止：2026-09-20T10:00:00.000Z\\n节奏：每周一排本周计划，一次 5 条\\n当前经手：小白");
   });
-
-  it("收到 publish_draft 回一条 failed 的 publish_result", async () => {
-    const message = ControlToAgent.parse({
-      type: "publish_draft",
-      draftId: "draft-1",
-      accountId: "acc-xhs",
-      platform: "xiaohongshu",
-      content: { kind: "post", title: null, text: "早安", images: [], github: null },
-    });
-    if (message.type !== "publish_draft") throw new Error("不是 publish_draft");
-
-    const result = await publishDraft(message);
-
-    expect(AgentToControl.parse(result)).toEqual({
-      type: "publish_result",
-      draftId: "draft-1",
-      result: { status: "failed", reason: "error", detail: "本机发布器还没接上" },
-    });
-  });
 });
 
 type ContextLine = PromptMessage["context"][number];
@@ -5563,10 +5559,32 @@ const chatLines = (group: string, first: number, last: number): ContextLine[] =>
   Array.from({ length: last - first + 1 }, (_, i) => chatLine(group, first + i));
 const rendered = (context: readonly ContextLine[]): string =>
   context.map((entry) => `${entry.from}：${entry.text}`).join("\n");
-const withContext = (runId: string, text: string, context: readonly ContextLine[], groupId = "group-1") => ({
+const withContext = (
+  runId: string,
+  text: string,
+  context: readonly ContextLine[],
+  groupId = "group-1",
+  messageId = MessageId.parse(`message-${runId}`),
+) => ({
   ...promptMessage("bot-1", runId, text, { groupId }),
+  messageId,
   context: [...context],
 });
+/** 把这个群会话 JSONL 里每一条水位的 data 换掉，冒充旧版本或坏掉的会话。 */
+const rewriteWatermarks = (dataDir: string, data: unknown): number => {
+  let rewritten = 0;
+  for (const file of sessionFilesOf(dataDir, "bot-1")) {
+    const lines = readFileSync(file, "utf8")
+      .split("\n")
+      .map((line) => {
+        if (!line.includes('"baize.context-watermark"')) return line;
+        rewritten += 1;
+        return JSON.stringify({ ...(JSON.parse(line) as object), data });
+      });
+    writeFileSync(file, lines.join("\n"));
+  }
+  return rewritten;
+};
 
 const userText = (content: unknown): string =>
   typeof content === "string"
@@ -5677,6 +5695,77 @@ describe("群聊上下文按水位增量", () => {
     );
   });
 
+  it("连发两条，第二轮的群里刚才说的不再出现第一条", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+    const first = { ...chatLine("g1", 21, "你"), text: "第一条：帮我把报价单理一下" };
+    const answer = { ...chatLine("g1", 22, "bot-1"), text: "收到。" };
+
+    await h.runner.prompt(withContext("run-1", first.text, chatLines("g1", 1, 20), "group-1", first.messageId));
+    await h.runner.prompt(
+      withContext(
+        "run-2",
+        "第二条：交期也顺手看看",
+        [...chatLines("g1", 3, 20), first, answer],
+        "group-1",
+        MessageId.parse("g1-msg-23"),
+      ),
+    );
+
+    expect(prompts[0], "第一条是作为当前这条拼进去的").toContain(`当前这条：\n用户：${first.text}`);
+    expect(contextOf(prompts[1]), "水位推进到第一条，之后只剩 Bot 自己那句回复").toBe(rendered([answer]));
+    expect(prompts[1]).not.toContain(first.text);
+  });
+
+  it("同一回合后开口的 Bot 看过触发之后的队友发言，下一轮不再拼", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+    const trigger = { ...chatLine("g1", 21, "你"), text: "大家都说说这周怎么排" };
+    const teammate = { ...chatLine("g1", 22, "小销 · 销售"), text: "我先排客户回访" };
+    const mine = { ...chatLine("g1", 23, "bot-1"), text: "我排内容" };
+
+    // 回合里后开口的 Bot 拿到的上下文带着触发之后的队友发言，触发消息本身不在里面。
+    await h.runner.prompt(
+      withContext("run-1", trigger.text, [...chatLines("g1", 2, 20), teammate], "group-1", trigger.messageId),
+    );
+    await h.runner.prompt(
+      withContext(
+        "run-2",
+        "下一轮",
+        [...chatLines("g1", 4, 20), trigger, teammate, mine],
+        "group-1",
+        MessageId.parse("g1-msg-24"),
+      ),
+    );
+
+    expect(contextOf(prompts[1]), "触发和队友那句上一轮都看过了").toBe(rendered([mine]));
+  });
+
+  it("旧会话里只记了上下文末条的水位照样认，认不出的当没有水位", async () => {
+    const { prompts, script } = promptsSeen();
+    const first = await startHarness({ bots: ["bot-1"], script });
+    await first.runner.prompt(
+      withContext("run-1", "第一次", chatLines("g1", 1, 20), "group-1", MessageId.parse("g1-msg-21")),
+    );
+    await first.runner.stop();
+    expect(rewriteWatermarks(first.dataDir, { messageId: "g1-msg-20" }), "改的是真有的水位").toBeGreaterThan(0);
+
+    const second = await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, script });
+    await second.runner.prompt(
+      withContext("run-2", "旧水位之后", chatLines("g1", 3, 22), "group-1", MessageId.parse("g1-msg-23")),
+    );
+    await second.runner.stop();
+    rewriteWatermarks(first.dataDir, { cursor: 7 });
+
+    const third = await startHarness({ bots: ["bot-1"], dataDir: first.dataDir, script });
+    await third.runner.prompt(
+      withContext("run-3", "坏水位之后", chatLines("g1", 5, 24), "group-1", MessageId.parse("g1-msg-25")),
+    );
+
+    expect(contextOf(prompts[1]), "旧格式 { messageId } 照旧从它之后拼").toBe(rendered(chatLines("g1", 21, 22)));
+    expect(contextOf(prompts[2]), "认不出的水位当没有，20 条全拼").toBe(rendered(chatLines("g1", 5, 24)));
+  });
+
   it("20 条历史的群连发五轮，第五轮的上下文只含一轮的新消息", async () => {
     const { prompts, script } = promptsSeen();
     const h = await startHarness({ bots: ["bot-1"], script });
@@ -5687,7 +5776,7 @@ describe("群聊上下文按水位增量", () => {
       const next = log.length + 1;
       const trigger = { ...chatLine("g1", next, "用户"), text: `第 ${round} 轮：这一轮的活怎么排` };
       lastWindow = log.slice(-20);
-      await h.runner.prompt(withContext(`run-${round}`, trigger.text, lastWindow));
+      await h.runner.prompt(withContext(`run-${round}`, trigger.text, lastWindow, "group-1", trigger.messageId));
       log.push(trigger, { ...chatLine("g1", next + 1, "bot-1"), text: "收到。" });
     }
 
@@ -5695,8 +5784,8 @@ describe("群聊上下文按水位增量", () => {
     const lengths = contexts.map((context) => context?.length ?? 0);
     expect(
       contexts.map((context) => context?.split("\n").length ?? 0),
-      "头一轮 20 条全拼，之后每轮只拼上一轮的触发消息和回复",
-    ).toEqual([20, 2, 2, 2, 2]);
+      "头一轮 20 条全拼，之后每轮只拼上一轮 Bot 的回复，触发消息已经作为当前这条看过",
+    ).toEqual([20, 1, 1, 1, 1]);
     const fullWindow = rendered(lastWindow).length;
     expect(lengths[4], `五轮上下文字数 ${lengths.join(" / ")}，第五轮要不到整窗 ${fullWindow} 的三分之一`).toBeLessThan(
       fullWindow / 3,

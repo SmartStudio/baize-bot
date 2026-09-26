@@ -31,7 +31,7 @@ export type BotConfig = ConfigMessage["bots"][number];
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
-export { publishDraft } from "./publisher.js";
+export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
@@ -609,7 +609,7 @@ export function createRunner(config: RunnerConfig): Runner {
         composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts),
       );
       // prompt 抛错就不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
-      recordWatermark(session.sessionManager, message.context, watermark);
+      recordWatermark(session.sessionManager, message, watermark);
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {

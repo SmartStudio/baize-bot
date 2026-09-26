@@ -1,11 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, BotId, ComputerId, ControlToAgent, GroupId, MessageId, RunId, Skill } from "@baize/shared";
-import { publishDraft, type RunnerConfig } from "@baize/bot-runner";
+import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
+import type { RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
   type AgentHandle,
@@ -427,23 +428,51 @@ describe("电脑代理连控制面", () => {
     });
   });
 
-  it("publish_draft 的结果原样回给控制面", async () => {
-    const server = await startPair();
+  it("publish_draft 交给发布器时带上助理浏览器和数据目录", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const dataDir = await tempDataDir();
+    const bytes = Buffer.from("起草时拷下来的图");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const drafts = join(dataDir, "bot-x", "drafts");
+    await mkdir(drafts, { recursive: true });
+    await writeFile(join(drafts, `${sha256}.png`), bytes);
+    let cdpCalls = 0;
+    spawnAgent(await server.url(), {
+      dataDir,
+      makeChrome: () => ({
+        ...fakeChrome(),
+        cdpUrl: async () => {
+          cdpCalls += 1;
+          return "http://127.0.0.1:9";
+        },
+      }),
+    });
     const socket = await server.waitForSocket(1);
-    const publish = {
-      type: "publish_draft",
+
+    socket.send(
+      JSON.stringify({
+        type: "publish_draft",
+        draftId: "draft-1",
+        accountId: "account-1",
+        platform: "xiaohongshu",
+        content: {
+          kind: "post",
+          title: "周一早安",
+          text: "新的一周从一杯咖啡开始",
+          images: [{ path: join(drafts, `${sha256}.png`), sha256 }],
+          github: null,
+        },
+      }),
+    );
+
+    // 配图校验认的是代理的数据目录，过了才去取助理 Chrome 的地址；这台假 Chrome 没在听，所以回 error。
+    await expect(server.waitForMessage("publish_result", 1, 10_000)).resolves.toMatchObject({
+      type: "publish_result",
       draftId: "draft-1",
-      accountId: "account-1",
-      platform: "xiaohongshu",
-      content: { kind: "post", title: "周一早安", text: "新的一周从一杯咖啡开始", images: [], github: null },
-    };
-    const parsed = ControlToAgent.parse(publish);
-    if (parsed.type !== "publish_draft") throw new Error("不是 publish_draft");
-
-    socket.send(JSON.stringify(publish));
-
-    // 不走假运行器：发布器是 bot-runner 导出的函数，代理直接调，这里拿它自己的结果当期望。
-    await expect(server.waitForMessage("publish_result", 1, 3000)).resolves.toEqual(await publishDraft(parsed));
+      result: { status: "failed", reason: "error" },
+    });
+    expect(cdpCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
   });
 
   it.each([
