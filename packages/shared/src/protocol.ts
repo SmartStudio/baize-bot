@@ -65,8 +65,10 @@ export const AgentToControl = z.discriminatedUnion("type", [
     activeRuns: z.array(RunId),
   }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
-  // 代理收下一条 config 并换好了运行器。旧代理不发，控制面只拿它从 config_rejected 里恢复。
-  z.object({ type: z.literal("config_applied") }),
+  // 代理收下一条 config 并换好了运行器，generation 是收下的那条 config 的代际。
+  // 控制面只拿它从 config_rejected 里恢复，且只认当前待确认的那一代。
+  // 不兼容旧代理：它回的 config_applied 不带 generation，parse 不过整条丢掉。控制面和代理同版一起升。
+  z.object({ type: z.literal("config_applied"), generation: z.number().int().positive() }),
   z.object({
     type: z.literal("agent_error"),
     code: z.enum([
@@ -79,6 +81,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
       "config_rejected",
     ]),
     detail: z.string(),
+    // config_rejected 时带被拒那条 config 的代际；读不出代际时不带，这时这条连接还没回过带代际的 config_applied 就按当前那一代算，回过之后忽略。
+    generation: z.number().int().positive().optional(),
     // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
     groupId: GroupId.optional(),
     // 带了就是说这个 run 在代理这头不会再跑、也不会有 run_done，控制面替它收尾。
@@ -265,6 +269,9 @@ export const ControlToAgent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("welcome"), ownerId: UserId, kind: ComputerKind, serverTime: z.string().datetime() }),
   z.object({
     type: z.literal("config"),
+    // 这条连接上第几份 config，从 1 起按开始读快照的先后编号。并发重发时后开始的可能先到，
+    // 代理丢掉比已应用代际小的，回执带同一个数。
+    generation: z.number().int().positive(),
     bots: z.array(z.object({ id: BotId, role: BotRole, name: z.string(), tag: z.string(), description: z.string() })),
     // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
     tools: z.array(ToolConnectionConfig),
