@@ -1,6 +1,7 @@
 import type { BrowserPlatform, DraftContent, Platform, PublishFailureReason } from "@baize/shared";
 
-export type Published = { readonly url: string; readonly externalId: string };
+/** externalId 为 null：电脑那边发出去了，但没读到平台上的 id。走接口的一定有。 */
+export type Published = { readonly url: string; readonly externalId: string | null };
 
 /** 平台接口没走通。原因按状态码分：401、403 是令牌不认了，别的都记出错。detail 只给人看，不带令牌。 */
 export class PublishError extends Error {
@@ -29,7 +30,14 @@ export type PlatformPublisher =
       readonly baseUrl: (bases: ApiBases) => string;
       publish(input: ApiPublishInput): Promise<Published>;
     }
-  | { readonly via: "computer"; readonly platform: BrowserPlatform };
+  | {
+      readonly via: "computer";
+      readonly platform: BrowserPlatform;
+      /** 电脑报上来的链接只认这个域名和它的子域。 */
+      readonly host: string;
+      /** 报上来的链接不可信时落账用这个页面，用户去那里找刚发的那条。 */
+      readonly manageUrl: string;
+    };
 
 export type ApiBases = { readonly githubApiBaseUrl: string; readonly xApiBaseUrl: string };
 
@@ -179,8 +187,30 @@ async function publishX({ content, handle, token, baseUrl }: ApiPublishInput): P
 export const PUBLISHERS: Record<Platform, PlatformPublisher> = {
   github: { via: "api", baseUrl: (bases) => bases.githubApiBaseUrl, publish: publishGithub },
   x: { via: "api", baseUrl: (bases) => bases.xApiBaseUrl, publish: publishX },
-  xiaohongshu: { via: "computer", platform: "xiaohongshu" },
+  xiaohongshu: {
+    via: "computer",
+    platform: "xiaohongshu",
+    host: "xiaohongshu.com",
+    manageUrl: "https://creator.xiaohongshu.com/new/note-manager",
+  },
 };
+
+/**
+ * 电脑报上来的链接是发布器从页面上读的，页面说什么它就报什么。只认 https、默认端口、平台自己的域名或子域，
+ * 别的照样算发出去了，链接换成平台的管理页：结果本身可信（认领标识对得上），只是这个链接不能直接给用户点。
+ * 放行的落 WHATWG 规范化后的串：判定用的是这套解析，原串换一个解析器（比如 `\@` 这种写法）可能解析出别的主机。
+ */
+export function trustedPageUrl(platform: Platform, reported: string): string {
+  const publisher = PUBLISHERS[platform];
+  if (publisher.via !== "computer") return reported;
+  const url = URL.parse(reported);
+  const trusted =
+    url !== null &&
+    url.protocol === "https:" &&
+    url.port === "" &&
+    (url.hostname === publisher.host || url.hostname.endsWith(`.${publisher.host}`));
+  return trusted ? url.href : publisher.manageUrl;
+}
 
 export const COMPUTER_PLATFORMS: readonly Platform[] = (Object.keys(PUBLISHERS) as Platform[]).filter(
   (platform) => PUBLISHERS[platform].via === "computer",

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -19,6 +20,7 @@ import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
 
 const fakeChrome = (): AssistantChrome => ({
+  kind: "local",
   profileDir: "/tmp/baize-test/chrome-profile",
   cdpUrl: async () => "http://127.0.0.1:9222",
   login: async () => ({ login: "valid", handle: "白泽工厂日记" }),
@@ -121,6 +123,56 @@ async function poll<T>(get: () => T | undefined, timeoutMs: number, label: strin
     if (Date.now() > deadline) throw new Error(`等了 ${timeoutMs}ms 还没等到${label}`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+/**
+ * 假的助理 Chrome 调试口：只回发布器前几步用到的 CDP 命令，页面永远停在小红书登录页。
+ * 发布器真用上这台电脑的浏览器，就会撞到登录页回 login_expired。
+ */
+async function startLoginWallCdp() {
+  let port = 0;
+  let connections = 0;
+  const http = createServer((request, response) => {
+    if (request.url !== "/json/version") {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/fake` }));
+  });
+  const sockets = new WebSocketServer({ server: http });
+  sockets.on("connection", (socket) => {
+    connections += 1;
+    socket.on("message", (data) => {
+      const { id, method, params } = JSON.parse(data.toString()) as {
+        id: number;
+        method: string;
+        params: { expression?: string };
+      };
+      const result =
+        method === "Target.createTarget"
+          ? { targetId: "tab-1" }
+          : method === "Target.attachToTarget"
+            ? { sessionId: "session-1" }
+            : method === "Runtime.evaluate" && params.expression === "location.href"
+              ? { result: { type: "string", value: "https://creator.xiaohongshu.com/login?redirectReason=401" } }
+              : method === "Runtime.evaluate"
+                ? { result: { type: "object", subtype: "null", value: null } }
+                : {};
+      socket.send(JSON.stringify({ id, result }));
+    });
+  });
+  await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
+  port = (http.address() as AddressInfo).port;
+  return {
+    port,
+    connections: () => connections,
+    close: async () => {
+      for (const client of sockets.clients) client.terminate();
+      await new Promise<void>((resolve) => sockets.close(() => resolve()));
+      await new Promise<void>((resolve) => http.close(() => resolve()));
+    },
+  };
 }
 
 function startControlPlane() {
@@ -454,6 +506,7 @@ describe("电脑代理连控制面", () => {
       JSON.stringify({
         type: "publish_draft",
         draftId: "draft-1",
+        botId: "bot-x",
         accountId: "account-1",
         platform: "xiaohongshu",
         content: {
@@ -463,6 +516,7 @@ describe("电脑代理连控制面", () => {
           images: [{ path: join(drafts, `${sha256}.png`), sha256 }],
           github: null,
         },
+        attempt: "2026-09-26T08:00:00.000Z",
       }),
     );
 
@@ -470,9 +524,75 @@ describe("电脑代理连控制面", () => {
     await expect(server.waitForMessage("publish_result", 1, 10_000)).resolves.toMatchObject({
       type: "publish_result",
       draftId: "draft-1",
+      attempt: "2026-09-26T08:00:00.000Z",
       result: { status: "failed", reason: "error" },
     });
     expect(cdpCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
+  });
+
+  it("远程电脑收到 publish_draft 回 error 并写明没有助理浏览器，Bot 的助理浏览器照旧", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const cdp = await startLoginWallCdp();
+    try {
+      const dataDir = await tempDataDir();
+      const bytes = Buffer.from("远程电脑上起草时拷下来的图");
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const drafts = join(dataDir, "bot-1", "drafts");
+      await mkdir(drafts, { recursive: true });
+      await writeFile(join(drafts, `${sha256}.png`), bytes);
+      spawnAgent(await server.url(), {
+        dataDir,
+        makeChrome: (options) =>
+          startAssistantChrome({
+            ...options,
+            platform: "linux",
+            launchChrome: async (profileDir) => {
+              await writeFile(join(profileDir, "DevToolsActivePort"), `${cdp.port}\n/devtools/browser/fake\n`);
+              const stopped = new AbortController();
+              const exited = new Promise<void>((resolve) => stopped.signal.addEventListener("abort", () => resolve()));
+              return { pid: process.pid, exited, stop: async () => stopped.abort() };
+            },
+          }),
+      });
+      const socket = await server.waitForSocket(1);
+      socket.send(JSON.stringify(configMessage));
+      socket.send(
+        JSON.stringify({
+          type: "publish_draft",
+          draftId: "draft-1",
+          botId: "bot-1",
+          accountId: "account-1",
+          platform: "xiaohongshu",
+          content: {
+            kind: "post",
+            title: "周一早安",
+            text: "新的一周从一杯咖啡开始",
+            images: [{ path: join(drafts, `${sha256}.png`), sha256 }],
+            github: null,
+          },
+          attempt: "2026-09-26T08:00:00.000Z",
+        }),
+      );
+
+      await expect(
+        server.waitForMessage("publish_result", 1, 10_000),
+        "远程上扫码登录会被拒，不能回 login_expired 引用户去扫码",
+      ).resolves.toEqual({
+        type: "publish_result",
+        draftId: "draft-1",
+        attempt: "2026-09-26T08:00:00.000Z",
+        result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
+      });
+      expect(cdp.connections(), "发布器没去连这台电脑上的 Chrome").toBe(0);
+      const botBrowser = (await poll(() => initialRunnerConfigs.at(-1), 3000, "运行器收到 config")).browser;
+      expect(botBrowser.profileDir).toBe(chromeProfileDir(dataDir));
+      expect(await botBrowser.cdpUrl(), "Bot 的助理浏览器工具在远程照样拿得到浏览器").toBe(
+        `http://127.0.0.1:${cdp.port}`,
+      );
+    } finally {
+      await cdp.close();
+    }
   });
 
   it.each([

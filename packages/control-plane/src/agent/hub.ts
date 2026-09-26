@@ -183,7 +183,7 @@ export class AgentHub {
     deadline: NodeJS.Timeout,
     raw: string,
   ): Promise<AgentConnection | null> {
-    const message = parseFrame(raw);
+    const message = parseFrame(raw, conn === null ? "未握手的连接" : `电脑 ${conn.computerId}`);
     if (message === null) return conn;
 
     if (conn !== null) {
@@ -374,13 +374,23 @@ export class AgentHub {
   }
 }
 
-function parseFrame(raw: string): AgentToControl | null {
+/**
+ * 丢弃时打一行警告，只带 type 和出错的字段路径：正文里有 token、草稿和链接，不进日志。
+ * 新旧版本混跑时形状对不上就走到这里，不留痕的话已经发出去的帖子会在十分钟后被记成没发出去，查不到原因。
+ */
+function parseFrame(raw: string, from: string): AgentToControl | null {
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch {
+    console.warn(`${from} 报的不是 JSON，丢弃`);
     return null;
   }
   const parsed = AgentToControl.safeParse(json);
-  return parsed.success ? parsed.data : null;
+  if (parsed.success) return parsed.data;
+  const type = (json as { type?: unknown } | null)?.type;
+  const label = typeof type === "string" ? JSON.stringify(type.slice(0, 64)) : "没有 type 的报文";
+  const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
+  console.warn(`${from} 报的 ${label} 不合 AgentToControl，丢弃。出错的字段：${paths}`);
+  return null;
 }

@@ -435,7 +435,7 @@ async function downlinksBeforePrompt(
   return before;
 }
 
-const botIdOf = (downlink: ControlToAgent): string => ("botId" in downlink ? downlink.botId : "");
+const botIdOf = (downlink: ControlToAgent): string => ("botId" in downlink ? (downlink.botId ?? "") : "");
 
 /** 补发按 Bot 各一条，彼此之间没有约定顺序。 */
 function byBotId(downlinks: readonly ControlToAgent[]): ControlToAgent[] {

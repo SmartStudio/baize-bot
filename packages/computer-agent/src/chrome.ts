@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserPlatform, LoginFailure } from "@baize/shared";
+import type { BrowserPlatform, ComputerKind, LoginFailure } from "@baize/shared";
 import { WebSocket } from "ws";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import {
@@ -27,6 +27,8 @@ export type BrowserLoginState =
 const WINDOW_FAILED: BrowserLoginState = { login: "failed", reason: "window_failed" };
 
 export interface AssistantChrome {
+  /** 远程电脑上的这个 Chrome 只给 Bot 的浏览器工具用：没人扫码登录，也就不拿它发布。 */
+  readonly kind: ComputerKind;
   readonly profileDir: string;
   /** 第一次要地址时才起 Chrome。这一轮启动失败就 reject，不会一直挂着。 */
   cdpUrl(): Promise<string>;
@@ -44,7 +46,7 @@ export interface AssistantChromeOptions {
   readonly activateProcess?: (pid: number) => Promise<void>;
   readonly backgroundProcess?: (pid: number) => Promise<void>;
   readonly launchChrome?: (profileDir: string) => Promise<ChromeProcess>;
-  /** 决定用哪种壳起 Chrome、能不能在这台电脑上登录。默认是 process.platform。 */
+  /** 决定用哪种壳起 Chrome，也就定了这台电脑算本机还是远程。默认是 process.platform。 */
   readonly platform?: NodeJS.Platform;
 }
 
@@ -292,25 +294,19 @@ async function backgroundProcess(pid: number): Promise<void> {
   ]);
 }
 
-type LoginMode = { readonly kind: "interactive" } | { readonly kind: "refused"; readonly reason: string };
-
 interface ChromeShell {
+  readonly kind: ComputerKind;
   readonly launch: (profileDir: string) => Promise<ChromeProcess>;
-  readonly login: LoginMode;
 }
 
 const chromeShells: Partial<Record<NodeJS.Platform, ChromeShell>> = {
-  darwin: { launch: launchMacChrome, login: { kind: "interactive" } },
-  // 远程电脑上没有人看屏幕，扫码或输验证码都没人接。
-  linux: {
-    launch: launchLinuxChrome,
-    login: { kind: "refused", reason: "远程电脑上不能登录，请在本机登录这个账号" },
-  },
+  darwin: { kind: "local", launch: launchMacChrome },
+  linux: { kind: "remote", launch: launchLinuxChrome },
 };
 
 const unsupportedShell: ChromeShell = {
+  kind: "local",
   launch: () => Promise.reject(new Error("助理 Chrome 壳当前只支持 macOS 和 Linux")),
-  login: { kind: "interactive" },
 };
 
 export function startAssistantChrome(options: AssistantChromeOptions): AssistantChrome {
@@ -422,12 +418,14 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
   };
 
   return {
+    kind: shell.kind,
     profileDir,
     cdpUrl,
     pid: () => browser?.pid ?? null,
     async login(platform, signal) {
-      if (shell.login.kind === "refused") {
-        log(shell.login.reason);
+      // 远程电脑上没有人看屏幕，扫码或输验证码都没人接。
+      if (shell.kind === "remote") {
+        log("远程电脑上不能登录，请在本机登录这个账号");
         return { login: "failed", reason: "remote_refused" };
       }
       const pageConfig = platformPages[platform];

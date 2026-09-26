@@ -250,6 +250,7 @@ export const DecideProjectOfferRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("start"), name: z.string().min(1).max(40).optional() }).strict(),
   z.object({ decision: z.literal("dismiss") }).strict(),
 ]);
+export type DecideProjectOfferRequest = z.infer<typeof DecideProjectOfferRequest>;
 export const DecideProjectOfferResponse = z.object({ message: Message, group: Group.nullable() });
 
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。

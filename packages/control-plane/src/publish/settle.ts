@@ -15,8 +15,12 @@ const FAILURE_TEXT: Record<PublishFailureReason, string> = {
 };
 
 /** 发出去了：先推发布记录再推草稿，客户端拿到 published 的草稿时链接已经在手上。 */
-export async function publishSucceeded(deps: SettleDeps, scope: SettleScope, result: Published): Promise<void> {
-  const settled = await settlePublished(deps.db, scope, result, new Date());
+export async function publishSucceeded(
+  deps: SettleDeps,
+  scope: SettleScope,
+  publishedOn: (platform: Platform) => Published,
+): Promise<void> {
+  const settled = await settlePublished(deps.db, scope, publishedOn, new Date());
   if (settled === null) return;
   deps.push.push(settled.ownerId, { type: "publication_created", publication: settled.publication });
   deps.push.push(settled.ownerId, { type: "draft_updated", draft: settled.draft });

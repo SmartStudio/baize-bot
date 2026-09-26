@@ -250,7 +250,7 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 ## 助理浏览器
 
-`RunnerConfig.browser` 是本机电脑代理给的 `{ profileDir, cdpUrl() }`，远程电脑和大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`，用 Node 自带的全局 `WebSocket`，一个 Bot 一条连接到浏览器级端点，标签页的命令走 flatten 模式的 `sessionId`。
+`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, cdpUrl() }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`，用 Node 自带的全局 `WebSocket`，一个 Bot 一条连接到浏览器级端点，标签页的命令走 flatten 模式的 `sessionId`。
 
 | 工具 | 动作 | 做什么 |
 | --- | --- | --- |
@@ -289,14 +289,14 @@ snapshot 的形状：
 
 ## 小红书发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
 
-- **浏览器和数据目录从依赖参数来。** `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `cdpUrl()`，不缓存。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
-- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。每张图先取 realpath，必须正好落在某个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。`publish_draft` 不带 botId，所以哪个 Bot 的 drafts 目录都认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
+- **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `cdpUrl()`，不缓存。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
+- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。每张图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。
 - **一台电脑一次只发一条。** 小红书同一个号只能登一处，同时发会互相挤。进程内一条 promise 队列，第二条等第一条连同读链接整个做完。验配图也在队里做，入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。每条的总时限是 `PUBLISH_LIMITS.totalMs`（3 分钟），出队验完配图、开始连 Chrome 时起算，到了回 `error`、关标签页。等某一个元素的时限是 `stepMs`（1 分钟）。
 - **不重试，失败分三种。** 每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
-- **成功带笔记链接。** 离开发布页算发出去了。之后打开笔记管理页，在卡片里找文字含标题的那张（草稿没标题就取最新一张），从 `data-impression` 里抠出 24 位的笔记 id，`externalId` 就是这个 id。链接优先用卡片里带 `xsec_token`、网址又含这个 id 的原链接，OpenCLI 的 `note-helpers` 说笔记详情页要带签名链接才能稳定打开，光有 id 不一定打得开；卡片上读不到才拼 `https://www.xiaohongshu.com/explore/<id>` 兜底。读不到链接时回 `ok`，`url` 是笔记管理页，`externalId` 是 `unread:<draftId>`。回 `failed` 会让用户以为没发出去再发一遍，重复发帖比链接不准的代价大。
+- **成功带笔记链接。** 离开发布页算发出去了。之后打开笔记管理页，在卡片里找文字含标题的那张（草稿没标题就取最新一张），从 `data-impression` 里抠出 24 位的笔记 id，`externalId` 就是这个 id。链接优先用卡片里带 `xsec_token`、网址又含这个 id 的原链接，OpenCLI 的 `note-helpers` 说笔记详情页要带签名链接才能稳定打开，光有 id 不一定打得开；卡片上读不到才拼 `https://www.xiaohongshu.com/explore/<id>` 兜底。读不到链接时回 `ok`，`url` 是笔记管理页，`externalId` 是 null。链接是从页面上读的，控制面不原样信：不是 https、主机不是 `xiaohongshu.com` 或它的子域，就按 `ok` 落账，链接换成笔记管理页。回 `failed` 会让用户以为没发出去再发一遍，重复发帖比链接不准的代价大。
 
 页面结构全在 `XIAOHONGSHU_PAGES` 一张常量表里，改版只改这一处。测试通过 `deps.xiaohongshu` 把两个网址换成本地假页，选择器照用，不走环境变量。`deps.connect` 也只给测试换，用来把关标签页拖慢，看超时之后还有没有命令发给标签页。
 

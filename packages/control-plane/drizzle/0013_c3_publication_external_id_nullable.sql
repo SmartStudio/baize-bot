@@ -1,0 +1,1 @@
+ALTER TABLE "publications" ALTER COLUMN "external_id" DROP NOT NULL;

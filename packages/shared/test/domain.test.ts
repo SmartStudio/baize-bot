@@ -541,7 +541,12 @@ describe("登录失败、发布失败和网关别名", () => {
   });
 
   it("publish_result 的失败原因和草稿上的 failure 是同一组值", () => {
-    const failed = { type: "publish_result", draftId: "d1", result: { status: "failed", detail: "" } };
+    const failed = {
+      type: "publish_result",
+      draftId: "d1",
+      attempt: now,
+      result: { status: "failed", detail: "" },
+    };
     const draft = {
       id: "d1",
       groupId: "g1",
@@ -565,6 +570,28 @@ describe("登录失败、发布失败和网关别名", () => {
     );
     expect(Draft.safeParse({ ...draft, failure: "timeout" }).success, "草稿不收发布报文之外的原因").toBe(false);
     expect(Draft.safeParse({ ...draft, failure: null }).success).toBe(true);
+  });
+
+  it("发布报文带认领标识，结果原样带回；读不到笔记 id 可以是 null", () => {
+    const draft = {
+      type: "publish_draft",
+      draftId: "d1",
+      botId: "b1",
+      accountId: "a1",
+      platform: "xiaohongshu",
+      content: { kind: "post", title: null, text: "正文", images: [], github: null },
+      attempt: now,
+    };
+    expect(ControlToAgent.safeParse(draft).success).toBe(true);
+    expect(ControlToAgent.safeParse({ ...draft, botId: null }).success, "起草的 Bot 删了").toBe(true);
+    expect(ControlToAgent.safeParse({ ...draft, attempt: undefined }).success, "认领标识不可省").toBe(false);
+    const ok = { type: "publish_result", draftId: "d1", attempt: now, result: { status: "ok", url: "https://a.b/c" } };
+    expect(AgentToControl.safeParse({ ...ok, result: { ...ok.result, externalId: null } }).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...ok, result: { ...ok.result, externalId: "" } }).success).toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...ok, attempt: undefined, result: { ...ok.result, externalId: "n1" } }).success,
+      "结果不带认领标识不认",
+    ).toBe(false);
   });
 
   it("网关别名是 baize: 加用途", () => {

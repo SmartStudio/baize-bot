@@ -8,8 +8,10 @@ import {
   type DraftId,
   type DraftSpec,
 } from "@baize/shared";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
+import { publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import {
@@ -35,6 +37,8 @@ const GITHUB = { platform: "github", handle: "baize-dev", token: "ghp_publish_se
 const X = { platform: "x", handle: "baize_x", token: "x_publish_secret_2" } as const;
 const XHS = { platform: "xiaohongshu", handle: "白泽" } as const;
 const MINUTE = 60_000;
+/** 电脑报的链接不可信时落账用的笔记管理页，和运行器发布器里读不到链接时回的是同一个页面。 */
+const XHS_MANAGE_URL = "https://creator.xiaohongshu.com/new/note-manager";
 
 type Clock = () => Date;
 
@@ -658,16 +662,20 @@ describe("小红书走电脑", () => {
 
     await server.server.publisher.tick();
     expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
-    expect(await job.agent.expect("publish_draft")).toEqual({
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim).toEqual({
       type: "publish_draft",
       draftId: ok.draftId,
+      botId: job.botId,
       accountId: xhs.id,
       platform: "xiaohongshu",
       content,
+      attempt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T.*Z$/),
     });
     job.agent.send({
       type: "publish_result",
       draftId: ok.draftId,
+      attempt: claim.attempt,
       result: { status: "ok", url: "https://www.xiaohongshu.com/explore/abc", externalId: "abc" },
     });
     expect((await nextOf(job.push, "publication_created")).publication.url).toBe(
@@ -679,10 +687,12 @@ describe("小红书走电脑", () => {
     await createApproved(job, changed);
     await server.server.publisher.tick();
     expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
-    expect((await job.agent.expect("publish_draft")).draftId).toBe(changed.draftId);
+    const changedClaim = await job.agent.expect("publish_draft");
+    expect(changedClaim.draftId).toBe(changed.draftId);
     job.agent.send({
       type: "publish_result",
       draftId: changed.draftId,
+      attempt: changedClaim.attempt,
       result: { status: "failed", reason: "page_changed", detail: "找不到发布按钮" },
     });
     expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({
@@ -694,6 +704,7 @@ describe("小红书走电脑", () => {
     job.agent.send({
       type: "publish_result",
       draftId: ok.draftId,
+      attempt: claim.attempt,
       result: { status: "failed", reason: "error", detail: "重复的结果" },
     });
     const sentinel = specOf(xhs, { ...content, text: "哨兵" });
@@ -703,7 +714,9 @@ describe("小红书走电脑", () => {
 
   it("电脑报上来的结果只认走电脑的平台，走接口在发的草稿它结算不了", async () => {
     const s = await stack();
-    const server = await s.serve();
+    // 钉住时钟，伪造的结果能带上这一次认领的标识，挡它的只剩平台这一条。
+    const claimedAt = new Date();
+    const server = await s.serve(() => claimedAt);
     const job = await jobOn(s, server, [GITHUB]);
     const github = accountOf(job, "github");
     const spec = specOf(github, issuePost("走接口的"));
@@ -715,6 +728,7 @@ describe("小红书走电脑", () => {
     job.agent.send({
       type: "publish_result",
       draftId: spec.draftId,
+      attempt: claimedAt.toISOString(),
       result: { status: "ok", url: "https://evil.example/forged", externalId: "forged" },
     });
     await agentCaughtUp(job, github, issuePost("哨兵"));
@@ -727,6 +741,189 @@ describe("小红书走电脑", () => {
     expect(page.publications.map((publication) => publication.url)).toEqual([
       "https://github.com/baize/demo/issues/101",
     ]);
+  });
+
+  it("超时记失败、改稿重批再被抢，旧那次的 failed 和 ok 晚到都不改新那次", async () => {
+    const s = await stack();
+    let offset = 0;
+    const server = await s.serve(() => new Date(Date.now() + offset));
+    const job = await jobOn(s, server, [XHS]);
+    const content: DraftContent = { kind: "post", title: "上新", text: "第一次", images: [IMAGE], github: null };
+    const spec = specOf(accountOf(job, "xiaohongshu"), content);
+    await createApproved(job, spec);
+
+    await server.server.publisher.tick();
+    const first = await job.agent.expect("publish_draft");
+    expect(first.content).toMatchObject({ text: "第一次" });
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    offset = 11 * MINUTE;
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft, "在途超过十分钟记失败").toMatchObject({
+      status: "failed",
+      failure: "error",
+    });
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+
+    editByBot(job, spec.draftId, { ...content, text: "第二次" });
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({
+      status: "pending",
+      content: { text: "第二次" },
+    });
+    await approve(job, spec.draftId);
+    await server.server.publisher.tick();
+    const second = await job.agent.expect("publish_draft");
+    expect(second.content).toMatchObject({ text: "第二次" });
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: first.attempt,
+      result: { status: "failed", reason: "error", detail: "第一次那次超时了" },
+    });
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: first.attempt,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/first", externalId: "first" },
+    });
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: second.attempt,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/second", externalId: "second" },
+    });
+    expect(
+      (await nextOf(job.push, "publication_created")).publication.url,
+      "第一次那次的 failed 和 ok 晚到，都不结算第二次",
+    ).toBe("https://www.xiaohongshu.com/explore/second");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("published");
+    const { draft, page } = await draftOnPage(job, spec.draftId);
+    expect({ status: draft.status, urls: page.publications.map((one) => one.url) }).toEqual({
+      status: "published",
+      urls: ["https://www.xiaohongshu.com/explore/second"],
+    });
+    expect(second.attempt, "两次认领的标识不同").not.toBe(first.attempt);
+  });
+
+  it("读不到笔记 id 时 externalId 为 null，publications 记下 null", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const spec = specOf(accountOf(job, "xiaohongshu"), {
+      kind: "post",
+      title: "读不到",
+      text: "发出去了但管理页上没找到",
+      images: [IMAGE],
+      github: null,
+    });
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "ok", url: XHS_MANAGE_URL, externalId: null },
+    });
+    expect((await nextOf(job.push, "publication_created")).publication.url).toBe(XHS_MANAGE_URL);
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("published");
+    const rows = await s.database.db
+      .select({ externalId: publications.externalId })
+      .from(publications)
+      .where(eq(publications.draftId, spec.draftId));
+    expect(rows).toEqual([{ externalId: null }]);
+  });
+
+  it("电脑报上来的链接只认 https、默认端口、小红书域名，放行的落规范化后的串，别的换成笔记管理页", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    // 反斜杠这条浏览器解析成小红书，Python 的 urlsplit 解析成 evil.example：落原串的话换个消费方就指到别的站。
+    const backslash = "https://www.xiaohongshu.com\\@evil.example/";
+    const reported = [
+      ["https://evil.example/forged", XHS_MANAGE_URL],
+      ["http://www.xiaohongshu.com/explore/plain", XHS_MANAGE_URL],
+      ["https://www.xiaohongshu.com:8443/explore/port", XHS_MANAGE_URL],
+      [backslash, "https://www.xiaohongshu.com/@evil.example/"],
+      ["https://xiaohongshu.com.evil.example/explore/suffix", XHS_MANAGE_URL],
+      ["https://evilxiaohongshu.com/explore/prefix", XHS_MANAGE_URL],
+      ["javascript:alert(1)//xiaohongshu.com", XHS_MANAGE_URL],
+      [
+        "https://www.xiaohongshu.com/explore/signed?xsec_token=t",
+        "https://www.xiaohongshu.com/explore/signed?xsec_token=t",
+      ],
+      ["https://xiaohongshu.com/explore/bare", "https://xiaohongshu.com/explore/bare"],
+    ] as const;
+    const cases = reported.map(([url, expected], index) => ({
+      url,
+      expected,
+      spec: specOf(xhs, { kind: "post", title: `第 ${index} 条`, text: "正文", images: [IMAGE], github: null }),
+    }));
+    for (const { spec } of cases) await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const attempts = new Map<string, string>();
+    for (let received = 0; received < cases.length; received += 1) {
+      const claim = await job.agent.expect("publish_draft");
+      attempts.set(claim.draftId, claim.attempt);
+    }
+
+    for (const [index, { url, spec }] of cases.entries()) {
+      job.agent.send({
+        type: "publish_result",
+        draftId: spec.draftId,
+        attempt: attempts.get(spec.draftId) ?? "",
+        result: { status: "ok", url, externalId: `note-${index}` },
+      });
+    }
+    await waitFor(
+      async () => (await messagesOf(job)).drafts.every((draft) => draft.status === "published"),
+      "每条都按 ok 结算",
+    );
+    const { publications: landed } = await messagesOf(job);
+    const urlOf = new Map(landed.map((one) => [one.draftId, one.url]));
+    expect(cases.map(({ spec }) => urlOf.get(spec.draftId))).toEqual(cases.map(({ expected }) => expected));
+    for (const url of urlOf.values()) {
+      expect(new URL(url).hostname, `落账的 ${url} 主机是小红书`).toMatch(/(^|\.)xiaohongshu\.com$/);
+    }
+  });
+
+  it("旧运行器回的 publish_result 不带 attempt，整条丢弃，控制面打一行警告，带 type 和字段路径、不带正文", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, { kind: "post", title: "旧版", text: "新旧混跑", images: [IMAGE], github: null });
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+
+    const logged = captureConsole();
+    const body = "https://www.xiaohongshu.com/explore/old-runner-secret";
+    job.agent.socket.send(
+      JSON.stringify({
+        type: "publish_result",
+        draftId: spec.draftId,
+        result: { status: "ok", url: body, externalId: "old-runner-note" },
+      }),
+    );
+    const broken = '{"type":"publish_result","draftId":"broken-frame';
+    job.agent.socket.send(broken);
+    await agentCaughtUp(job, xhs, { kind: "post", title: "哨兵", text: "哨兵", images: [], github: null });
+
+    expect((await draftOnPage(job, spec.draftId)).draft.status, "不合形状的结果不结算").toBe("publishing");
+    const warnings = logged.filter((line) => line.includes("丢弃"));
+    expect(warnings).toEqual([
+      expect.stringMatching(/"publish_result".*attempt/),
+      expect.stringContaining("不是 JSON"),
+    ]);
+    for (const secret of [body, "old-runner-note", spec.draftId, "broken-frame"]) {
+      expect(logged.join("\n"), "日志不带报文正文").not.toContain(secret);
+    }
   });
 
   it("电脑不在线不抢，草稿留在已批", async () => {

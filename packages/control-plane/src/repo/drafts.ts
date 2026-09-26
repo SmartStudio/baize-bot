@@ -497,6 +497,7 @@ export async function claimDueDrafts(
  */
 export type SettleScope = {
   readonly draftId: DraftId;
+  /** 只结算这一次认领。发布循环用自己抢到时记的时刻，电脑报上来的用 publish_result 带回的 attempt。 */
   readonly claimedAt?: Date;
   /** 电脑报上来的结果只认走电脑的平台、这台电脑上的账号、这台电脑主人的草稿。走接口的草稿只有发布循环自己能结算。 */
   readonly computer?: { readonly ownerId: UserId; readonly computerId: ComputerId };
@@ -520,10 +521,11 @@ function settleWhere(scope: SettleScope): SQL | undefined {
   );
 }
 
+/** 落账的链接和 id 按这条草稿的平台定：电脑报上来的链接要先过这个平台的域名。 */
 export async function settlePublished(
   db: Db,
   scope: SettleScope,
-  result: { readonly url: string; readonly externalId: string },
+  publishedOn: (platform: Platform) => { readonly url: string; readonly externalId: string | null },
   now: Date,
 ): Promise<{ draft: Draft; publication: Publication; ownerId: UserId } | null> {
   return db.transaction(async (tx) => {
@@ -533,6 +535,7 @@ export async function settlePublished(
       .where(settleWhere(scope))
       .returning();
     if (row === undefined) return null;
+    const result = publishedOn(row.platform);
     const [publication] = await tx
       .insert(publications)
       .values({

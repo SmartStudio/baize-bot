@@ -95,9 +95,11 @@ export class PublishLoop {
       this.#options.computers.send(claimed.computerId, {
         type: "publish_draft",
         draftId: draft.id,
+        botId: draft.botId,
         accountId: draft.accountId,
         platform: publisher.platform,
         content: draft.content,
+        attempt: claimed.claimedAt.toISOString(),
       });
       return;
     }
@@ -114,7 +116,7 @@ export class PublishLoop {
         token,
         baseUrl: publisher.baseUrl(this.#options.bases),
       });
-      await publishSucceeded(this.#deps, scope, published);
+      await publishSucceeded(this.#deps, scope, () => published);
     } catch (error) {
       console.warn(`草稿 ${draft.id} 没发出去`, error instanceof PublishError ? error.message : error);
       await publishFailed(this.#deps, scope, error instanceof PublishError ? error.reason : "error");

@@ -29,6 +29,7 @@ import {
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { routineRunOfRun } from "../repo/routines.js";
+import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
@@ -703,11 +704,19 @@ async function onDraftEdit(deps: AgentEventDeps, conn: AgentConnection, event: D
   if (draft !== null) deps.push.push(conn.ownerId, { type: "draft_updated", draft });
 }
 
-/** 只认发给这台电脑、还在 publishing 的草稿。重复报的、超时已经记失败的，都不再改。 */
+/**
+ * 只认发给这台电脑、还在 publishing、还是 attempt 那一次认领的草稿。重复报的、超时已经记失败的、
+ * 重批以后旧那次晚到的，都不再改。
+ */
 async function onPublishResult(deps: AgentEventDeps, conn: AgentConnection, event: PublishResult): Promise<void> {
-  const scope = { draftId: event.draftId, computer: { ownerId: conn.ownerId, computerId: conn.computerId } };
+  const scope = {
+    draftId: event.draftId,
+    claimedAt: new Date(event.attempt),
+    computer: { ownerId: conn.ownerId, computerId: conn.computerId },
+  };
   if (event.result.status === "ok") {
-    await publishSucceeded(deps, scope, { url: event.result.url, externalId: event.result.externalId });
+    const { url, externalId } = event.result;
+    await publishSucceeded(deps, scope, (platform) => ({ url: trustedPageUrl(platform, url), externalId }));
     return;
   }
   await publishFailed(deps, scope, event.result.reason);

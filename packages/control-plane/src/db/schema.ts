@@ -502,7 +502,7 @@ export const publications = pgTable(
     accountId: text("account_id").references(() => accounts.id, { onDelete: "set null" }),
     platform: text("platform").$type<Platform>().notNull(),
     url: text("url").notNull(),
-    externalId: text("external_id").notNull(),
+    externalId: text("external_id"),
     publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
   },
   (t) => [index("publications_group_id_published_at_idx").on(t.groupId, t.publishedAt)],

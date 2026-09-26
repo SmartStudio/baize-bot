@@ -212,26 +212,31 @@ type CreatorSite = Awaited<ReturnType<typeof startCreatorSite>>;
 const sha256Of = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
 /** 照起草工具的规矩放一张拷贝：`<dataDir>/<botId>/drafts/<sha256>.<扩展名>`。 */
-function draftCopy(dataDir: string, label: string): { path: string; sha256: string } {
+function draftCopy(dataDir: string, label: string, botId = "bot-1"): { path: string; sha256: string } {
   const bytes = Buffer.from(`假 PNG：${label}`);
   const sha256 = sha256Of(bytes);
-  const dir = join(dataDir, "bot-1", "drafts");
+  const dir = join(dataDir, botId, "drafts");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${sha256}.png`);
   writeFileSync(path, bytes);
   return { path, sha256 };
 }
 
+const ATTEMPT = "2026-09-26T08:00:00.000Z";
+
 function draftMessage(
   draftId: string,
   post: { title: string | null; text: string; images: ReadonlyArray<{ path: string; sha256: string }> },
+  botId: string | null = "bot-1",
 ): PublishDraftMessage {
   const parsed = ControlToAgent.parse({
     type: "publish_draft",
     draftId: DraftId.parse(draftId),
+    botId,
     accountId: AccountId.parse("acc-xhs"),
     platform: "xiaohongshu",
     content: { kind: "post", title: post.title, text: post.text, images: post.images, github: null },
+    attempt: ATTEMPT,
   });
   if (parsed.type !== "publish_draft") throw new Error("不是 publish_draft");
   return parsed;
@@ -267,11 +272,34 @@ describe("发布器先验草稿，不碰浏览器", () => {
       browser: null,
     });
 
-    expect(result).toEqual({
+    expect(result, "认领标识原样带回").toEqual({
       type: "publish_result",
       draftId: "draft-remote",
+      attempt: ATTEMPT,
       result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
     });
+  });
+
+  it("别的 Bot 目录下的配图不上传，回 error", async () => {
+    const others = draftCopy(dataDir, "别的 Bot 起的", "bot-2");
+    const probe = noBrowserCalls();
+
+    const results = [
+      await publishDraft(
+        draftMessage("draft-other-bot", { title: "t", text: "正文", images: [others] }, "bot-1"),
+        probe.deps(dataDir),
+      ),
+      await publishDraft(
+        draftMessage("draft-bot-gone", { title: "t", text: "正文", images: [others] }, null),
+        probe.deps(dataDir),
+      ),
+    ];
+
+    for (const { result } of results) {
+      expect(result).toMatchObject({ status: "failed", reason: "error" });
+      expect(result.status === "failed" ? result.detail : "", "说清楚是配图不对").toContain("配图");
+    }
+    expect(probe.calls(), "别的 Bot 的拷贝一张都不传，浏览器也不连").toBe(0);
   });
 
   it("图片路径不在拷贝目录里，不上传，回 error", async () => {
@@ -380,6 +408,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     expect(reply, "笔记链接用管理页卡片上带 xsec_token 的那条，不是作者主页那条").toEqual({
       type: "publish_result",
       draftId: "draft-ok",
+      attempt: ATTEMPT,
       result: { status: "ok", url: signedNoteUrl(NOTE_IDS[0] ?? ""), externalId: NOTE_IDS[0] },
     });
     expect(creator.publications, "假页面收到了标题、分好段的正文，图片就是拷贝目录里那两张，按顺序").toEqual([
@@ -535,6 +564,10 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     );
 
     expect(creator.publications, "笔记确实发出去了").toHaveLength(1);
-    expect(result).toMatchObject({ status: "ok", url: `${creator.url}/new/note-manager` });
+    expect(result, "读不到笔记 id 就不编一个").toEqual({
+      status: "ok",
+      url: `${creator.url}/new/note-manager`,
+      externalId: null,
+    });
   });
 });

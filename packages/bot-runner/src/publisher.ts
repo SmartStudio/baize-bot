@@ -1,6 +1,6 @@
 import {
   type AgentToControl,
-  BotId,
+  type BotId,
   type BrowserPlatform,
   type ControlToAgent,
   type DraftImage,
@@ -103,7 +103,7 @@ export interface PublishLimits {
 export const PUBLISH_LIMITS: PublishLimits = { totalMs: 180_000, stepMs: 60_000 };
 
 export interface PublisherDeps {
-  /** 配图只认 `<dataDir>/<botId>/drafts/` 里起草时的拷贝。 */
+  /** 配图只认 `<dataDir>/<publish_draft.botId>/drafts/` 里起草时的拷贝。 */
   readonly dataDir: string;
   /** 本机电脑代理给的助理浏览器。远程电脑没有。 */
   readonly browser: Pick<BrowserConfig, "cdpUrl"> | null;
@@ -136,24 +136,22 @@ const failed = (reason: PublishFailureReason, detail: string): PublishResult => 
 const sha256Of = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
 /**
- * 草稿里的配图换成可以上传的真实路径。publish_draft 不带 botId，所以任何一个 Bot 的 drafts 目录都认，
- * 但必须是起草时按 sha256 命名的那份拷贝，字节也还对得上；符号链接先取 realpath 再判。
+ * 草稿里的配图换成可以上传的真实路径。只认起草这个草稿的 Bot 自己 drafts 目录里按 sha256 命名的那份拷贝，
+ * 字节也还对得上；符号链接先取 realpath 再判。Bot 删了就没有哪个目录算它的，一张都不认。
  */
-async function draftFiles(dataDir: string, images: readonly DraftImage[]): Promise<string[]> {
+async function draftFiles(dataDir: string, botId: BotId | null, images: readonly DraftImage[]): Promise<string[]> {
+  if (botId === null) throw new PublishFailure("error", "起草这条的 Bot 已经删了，配图认不出是谁拷的，没有上传");
   const root = await realpath(dataDir).catch(() => {
     throw new PublishFailure("error", "这台电脑的数据目录不在了");
   });
+  const { draftsDir } = botDirs(root, botId);
   const files: string[] = [];
   for (const image of images) {
     const name = basename(image.path);
     const real = await realpath(image.path).catch(() => null);
-    const botId = real === null ? null : BotId.safeParse(basename(dirname(dirname(real))));
     const inCopies =
-      real !== null &&
-      botId?.success === true &&
-      dirname(real) === botDirs(root, botId.data).draftsDir &&
-      basename(real) === draftCopyName(image.sha256, real);
-    if (!inCopies) throw new PublishFailure("error", `配图「${name}」不是起草时拷下来的那份，没有上传`);
+      real !== null && dirname(real) === draftsDir && basename(real) === draftCopyName(image.sha256, real);
+    if (!inCopies) throw new PublishFailure("error", `配图「${name}」不是这个 Bot 起草时拷下来的那份，没有上传`);
     if (sha256Of(await readFile(real)) !== image.sha256) {
       throw new PublishFailure("error", `配图「${name}」和起草时的字节对不上，没有上传`);
     }
@@ -376,7 +374,7 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWith
   try {
     // 验配图也排在队里：入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。
     return await oneAtATime(async () => {
-      const files = await draftFiles(deps.dataDir, content.images);
+      const files = await draftFiles(deps.dataDir, message.botId, content.images);
       return inBackgroundTab(
         deps,
         limits.totalMs,
@@ -386,9 +384,7 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWith
     });
   } catch (error) {
     // 已经离开发布页就是发出去了，只是没读到笔记链接。回 failed 会让用户以为没发、再发一遍，所以回 ok 指向笔记管理页。
-    if (progress.phase === "published") {
-      return { status: "ok", url: pages.manageUrl, externalId: `unread:${message.draftId}` };
-    }
+    if (progress.phase === "published") return { status: "ok", url: pages.manageUrl, externalId: null };
     const failure =
       error instanceof PublishFailure
         ? error
@@ -409,5 +405,5 @@ export async function publishDraft(message: PublishDraftMessage, deps: Publisher
     browser === null
       ? failed("error", "这台电脑没有助理浏览器")
       : await PUBLISHERS[message.platform](message, { ...deps, browser });
-  return { type: "publish_result", draftId: message.draftId, result };
+  return { type: "publish_result", draftId: message.draftId, attempt: message.attempt, result };
 }
