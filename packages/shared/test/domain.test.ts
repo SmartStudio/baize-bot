@@ -377,6 +377,7 @@ describe("今日页的共享形状", () => {
       handle: "@baize",
       tier: "confirm_publish",
       login: "valid",
+      loginChangedAt: now,
       createdAt: now,
     };
     const response = {

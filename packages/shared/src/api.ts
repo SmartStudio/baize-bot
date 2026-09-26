@@ -181,9 +181,12 @@ export const ReturnPlanResponse = z.object({ plan: ContentPlan });
 
 // GET /api/accounts
 export const AccountListResponse = z.object({ accounts: z.array(Account) });
-// POST /api/accounts
+// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行，200。浏览器平台只能挂本机电脑。
 export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
+export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
+// POST /api/accounts/:id/login  打开登录窗口，没有请求体。给账号所在电脑发 browser_login 就回 202 和 AccountResponse，
+// 登录结果随 account_updated 推回来。电脑不在线 409，别人的账号 404，不走浏览器登录的平台 400。
 // PATCH /api/accounts/:id
 export const UpdateAccountRequest = z.object({ tier: AccountTier }).strict();
 export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequest>;

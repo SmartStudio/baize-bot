@@ -388,6 +388,8 @@ export const Account = z.object({
   handle: z.string().min(1).max(100).nullable(),
   tier: AccountTier,
   login: AccountLogin,
+  // login 最近一次变的时刻。建占位时等于 createdAt，今天页的过期卡按它写「什么时候过期的」。
+  loginChangedAt: Timestamp,
   createdAt: Timestamp,
 });
 export type Account = z.infer<typeof Account>;
