@@ -63,6 +63,7 @@ const accountOf = (
     handle,
     tier,
     login: where.login,
+    loginChangedAt: at(-120),
     createdAt: at(-120),
   });
 

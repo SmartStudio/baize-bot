@@ -271,6 +271,7 @@ export const accounts = pgTable(
     handle: text("handle"),
     tier: text("tier").$type<AccountTier>().notNull().default("confirm_publish"),
     login: text("login").$type<AccountLogin>().notNull().default("none"),
+    loginChangedAt: timestamp("login_changed_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: createdAt(),
   },
   (t) => [

@@ -3,11 +3,13 @@ import {
   AccountListResponse,
   AccountResponse,
   ApprovalId,
+  BrowserPlatform,
   ApprovePlanRequest,
   ApprovePlanResponse,
   BotId,
   BotListResponse,
   BotResponse,
+  CreateAccountRequest,
   ComputerListResponse,
   ComputerTokenResponse,
   ContentPlanId,
@@ -80,7 +82,7 @@ import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import { discoverTools } from "../mcp/discover.js";
-import { listAccounts, setAccountTier } from "../repo/accounts.js";
+import { createPlaceholder, findAccount, listAccounts, setAccountTier } from "../repo/accounts.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPlan } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
@@ -274,6 +276,35 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/accounts", async (c) =>
     c.json(AccountListResponse.parse({ accounts: await listAccounts(db, c.get("user").id) })),
   );
+
+  app.post("/api/accounts", async (c) => {
+    const body = await readJson(c.req.raw, CreateAccountRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const ownerId = c.get("user").id;
+    const result = await createPlaceholder(db, ownerId, body.value);
+    if (result.kind === "no_computer") return c.json({ error: "没有这台电脑" }, 404);
+    if (result.kind === "remote_computer") {
+      return c.json({ error: "小红书要扫码登录，只能挂在你自己的电脑上，远程电脑没有助理浏览器" }, 400);
+    }
+    hub.push(ownerId, { type: "account_updated", account: result.account });
+    await agents.sendConfig(ownerId);
+    return c.json(AccountResponse.parse({ account: result.account }), result.kind === "created" ? 201 : 200);
+  });
+
+  app.post("/api/accounts/:id/login", async (c) => {
+    const id = AccountId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_ACCOUNT, 404);
+    const account = await findAccount(db, c.get("user").id, id.data);
+    if (account === null) return c.json(NO_ACCOUNT, 404);
+    const platform = BrowserPlatform.safeParse(account.platform);
+    if (!platform.success) return c.json({ error: "这个平台不用登录窗口，走授权页登录" }, 400);
+    // 电脑刚好在判完在线之后断了，send 返回 false，同样按不在线回。
+    const sent =
+      agents.isOnline(account.computerId) &&
+      agents.send(account.computerId, { type: "browser_login", accountId: account.id, platform: platform.data });
+    if (!sent) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+    return c.json(AccountResponse.parse({ account }), 202);
+  });
 
   app.patch("/api/accounts/:id", async (c) => {
     const id = AccountId.safeParse(c.req.param("id"));

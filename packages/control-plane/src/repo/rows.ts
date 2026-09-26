@@ -212,6 +212,7 @@ export function toAccount(row: typeof schema.accounts.$inferSelect): Account {
     handle: row.handle,
     tier: row.tier,
     login: row.login,
+    loginChangedAt: row.loginChangedAt.toISOString(),
     createdAt: row.createdAt.toISOString(),
   });
 }

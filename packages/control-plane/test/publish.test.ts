@@ -1,18 +1,22 @@
 import { randomBytes } from "node:crypto";
 import { format } from "node:util";
 import {
+  AccountListResponse,
+  ComputerTokenResponse,
   DecideDraftResponse,
   TodayResponse,
   type Account,
   type DraftContent,
   type DraftId,
   type DraftSpec,
+  type ServerPush,
 } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
 import { publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
+import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import {
   IMAGE,
@@ -162,14 +166,22 @@ function captureConsole(): string[] {
   return logged;
 }
 
+/** 登录过期的那一次，草稿和通知之间还夹一条账号变成过期的推送。 */
 async function failedPushes(job: ContentJob) {
   expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
   const failed = (await nextOf(job.push, "draft_updated")).draft;
   expect(failed.status).toBe("failed");
-  const notice = (await nextOf(job.push, "notify")).notice;
+  let next = await job.push.next();
+  let account: Account | null = null;
+  if (next.type === "account_updated") {
+    account = next.account;
+    next = await job.push.next();
+  }
+  if (next.type !== "notify") throw new Error(`本应推 notify，实际是 ${JSON.stringify(next)}`);
+  const notice = next.notice;
   expect(notice.kind).toBe("failed");
   expect(notice.groupId).toBe(job.groupId);
-  return { draft: failed, notice };
+  return { draft: failed, notice, account };
 }
 
 describe("发布循环", () => {
@@ -617,32 +629,37 @@ describe("各平台的发法", () => {
     expect(comment.publication.url).toBe("https://github.com/baize/demo/issues/7#issuecomment-102000");
   });
 
-  it("平台回 401 记登录过期，别的错记出错，都推一条没办成", async () => {
+  it("平台回 401 记登录过期，账号跟着记过期，别的错记出错，都推一条没办成", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [GITHUB, { platform: "x", handle: "no_token" }]);
+    const broken = specOf(accountOf(job, "github"), issuePost("会 500"));
+    await createApproved(job, broken);
+    s.fake.failNext(500);
+    await server.server.publisher.tick();
+    const plain = await failedPushes(job);
+    expect(plain.draft.failure).toBe("error");
+    expect(plain.account, "出错不动账号").toBeNull();
+
     const expired = specOf(accountOf(job, "github"), issuePost("会 401"));
     await createApproved(job, expired);
     s.fake.failNext(401);
     await server.server.publisher.tick();
     const first = await failedPushes(job);
     expect(first.draft.failure).toBe("login_expired");
-
-    const broken = specOf(accountOf(job, "github"), issuePost("会 500"));
-    await createApproved(job, broken);
-    s.fake.failNext(500);
-    await server.server.publisher.tick();
-    expect((await failedPushes(job)).draft.failure).toBe("error");
+    expect(first.account).toMatchObject({ id: accountOf(job, "github").id, login: "expired" });
 
     const tokenless = specOf(accountOf(job, "x"), tweet("没有令牌"));
     await createApproved(job, tokenless);
     await server.server.publisher.tick();
-    expect((await failedPushes(job)).draft.failure, "读不到令牌当作登录过期").toBe("login_expired");
+    const missing = await failedPushes(job);
+    expect(missing.draft.failure, "读不到令牌当作登录过期").toBe("login_expired");
+    expect(missing.account).toMatchObject({ id: accountOf(job, "x").id, login: "expired" });
 
     const page = await messagesOf(job);
     expect(page.drafts.map((draft) => [draft.status, draft.failure])).toEqual([
-      ["failed", "login_expired"],
       ["failed", "error"],
+      ["failed", "login_expired"],
       ["failed", "login_expired"],
     ]);
     expect(page.publications).toEqual([]);
@@ -943,5 +960,231 @@ describe("小红书走电脑", () => {
 
     await server.server.publisher.tick();
     expect((await draftOnPage(job, spec.draftId)).draft.status).toBe("approved");
+  });
+});
+
+const post = (text: string): DraftContent => ({ kind: "post", title: text, text, images: [], github: null });
+
+describe("小红书登录过期", () => {
+  it("小红书草稿只下发到账号所在的电脑", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const spec = specOf(accountOf(job, "xiaohongshu"), post("只在本机发"));
+    await createApproved(job, spec);
+    const remote = ComputerTokenResponse.parse(await (await job.client.post("/api/computers/remote")).json());
+    const { agent: other } = await helloAgent(server.server.port, remote.computerId, remote.token);
+    cleanups.push(async () => other.close());
+
+    await server.server.publisher.tick();
+    expect((await job.agent.expect("publish_draft")).draftId).toBe(spec.draftId);
+    // 改档给两台电脑都重发 config：远程电脑下一条收到的是它，说明发布那条没给它。
+    expect((await job.client.patch(`/api/accounts/${spec.accountId}`, { tier: "draft" })).status).toBe(200);
+    expect((await other.next()).type, "远程电脑没收到 publish_draft").toBe("config");
+  });
+
+  it("账号过期后，这个账号的已批草稿不再下发，别的账号的草稿照发", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS, { platform: "xiaohongshu", handle: "小号" }]);
+    const [main, spare] = job.accounts;
+    if (main === undefined || spare === undefined) throw new Error("两个小红书账号没挂上");
+
+    job.agent.send({ type: "login_state", accountId: main.id, state: { login: "expired" } });
+    expect((await nextOf(job.push, "account_updated")).account).toMatchObject({ id: main.id, login: "expired" });
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+    expect((await job.agent.expect("config")).accounts.find((one) => one.id === main.id)?.login).toBe("expired");
+
+    const stuck = specOf(main, post("过期账号的稿"));
+    const other = specOf(spare, post("另一个账号的稿"));
+    await createApproved(job, stuck);
+    await createApproved(job, other);
+
+    await server.server.publisher.tick();
+    const claimed = await nextOf(job.push, "draft_updated");
+    expect(claimed.draft, "只抢了没过期那个账号的稿").toMatchObject({ id: other.draftId, status: "publishing" });
+    expect((await job.agent.expect("publish_draft")).draftId).toBe(other.draftId);
+    expect((await draftOnPage(job, stuck.draftId)).draft.status, "过期账号的稿留在已批，等重新登录").toBe("approved");
+
+    job.agent.send({ type: "login_state", accountId: main.id, state: { login: "valid", handle: XHS.handle } });
+    expect((await nextOf(job.push, "account_updated")).account).toMatchObject({ id: main.id, login: "valid" });
+    await job.agent.expect("config");
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({ id: stuck.draftId, status: "publishing" });
+    expect((await job.agent.expect("publish_draft")).draftId, "重新登录后下一轮照常抢").toBe(stuck.draftId);
+  });
+
+  it("发布回 login_expired 在前、账号报 expired 在后，账号记 expired，用户只收到一条通知", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("被挤下线"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "跳到了登录页" },
+    });
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(seen.map((pushed) => pushed.type)).toEqual([
+      "draft_updated",
+      "draft_updated",
+      "account_updated",
+      "notify",
+      "notify",
+    ]);
+    const notices = seen.flatMap((pushed) => (pushed.type === "notify" ? [pushed.notice] : []));
+    expect(notices[0], "草稿那条就是这次唯一的通知，账号过期不再另推一条").toMatchObject({
+      kind: "failed",
+      groupId: job.groupId,
+      text: "小红书上的「被挤下线」没发出去：账号登录过期了，重新登录后让 Bot 再起一稿",
+    });
+    expect(seen[2]?.type === "account_updated" && seen[2].account).toMatchObject({ id: xhs.id, login: "expired" });
+    expect((await job.agent.expect("config")).accounts.find((one) => one.id === xhs.id)?.login).toBe("expired");
+    const today = TodayResponse.parse(await (await job.client.get("/api/today")).json());
+    expect(today.pending.some((item) => item.kind === "account" && item.account.id === xhs.id)).toBe(true);
+  });
+
+  it("账号报 expired 在前、发布回 login_expired 在后，草稿照样记失败，用户只收到账号那一条通知", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("先报过期"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "跳到了登录页" },
+    });
+    // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(seen.map((pushed) => pushed.type)).toEqual([
+      "draft_updated",
+      "account_updated",
+      "notify",
+      "draft_updated",
+      "notify",
+    ]);
+    const notices = seen.flatMap((pushed) => (pushed.type === "notify" ? [pushed.notice] : []));
+    expect(notices.slice(0, -1), "账号那条先到就是这次唯一的通知，草稿失败不再另推一条").toEqual([
+      expect.objectContaining({ kind: "failed", groupId: null, text: expect.stringContaining("登录过期了") }),
+    ]);
+    expect(seen[1]?.type === "account_updated" && seen[1].account).toMatchObject({ id: xhs.id, login: "expired" });
+    expect(seen[3]?.type === "draft_updated" && seen[3].draft, "草稿照样结算成失败").toMatchObject({
+      id: spec.draftId,
+      status: "failed",
+      failure: "login_expired",
+    });
+  });
+
+  it("账号过期期间重启仍保留已批稿，重登后照常下发", async () => {
+    const s = await stack();
+    const old = await s.serve(() => new Date(Date.now() - 20 * MINUTE));
+    const job = await jobOn(s, old, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    expect((await nextOf(job.push, "account_updated")).account).toMatchObject({ id: xhs.id, login: "expired" });
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+    await job.agent.expect("config");
+    const waiting = specOf(xhs, post("等重新登录"), new Date(Date.now() + 60 * MINUTE).toISOString());
+    await createApproved(job, waiting);
+    job.close();
+    await old.close();
+
+    // 到点时刻和批准时刻都早于新进程的启动时刻减一轮，账号若是 valid 就算停机期间错过了。
+    const restarted = await s.serve(() => new Date(Date.now() + 120 * MINUTE));
+    const { agent } = await helloAgent(restarted.server.port, job.computer.computerId, job.computer.token);
+    cleanups.push(async () => agent.close());
+    const after = await reconnect(job, restarted);
+    expect(
+      (await draftOnPage(after, waiting.draftId)).draft,
+      "过期账号的稿在重启时不打回待批，留着等重新登录",
+    ).toMatchObject({ status: "approved" });
+
+    agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+    expect((await nextOf(after.push, "account_updated")).account).toMatchObject({ id: xhs.id, login: "valid" });
+    await agent.expect("config");
+    await restarted.server.publisher.tick();
+    expect((await nextOf(after.push, "draft_updated")).draft).toMatchObject({
+      id: waiting.draftId,
+      status: "publishing",
+    });
+    expect((await agent.expect("publish_draft")).draftId, "重新登录后下一轮照常下发").toBe(waiting.draftId);
+  });
+
+  it("旧 attempt 在重登 valid 后才回 login_expired，账号保持 valid，不推过期通知", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("重登之前发的"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    expect((await nextOf(job.push, "account_updated")).account.login).toBe("expired");
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+    const relogged = (await nextOf(job.push, "account_updated")).account;
+    expect(relogged.login).toBe("valid");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
+    });
+    // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(
+      seen.map((pushed) => pushed.type),
+      "旧 attempt 只结算旧草稿，不动账号、不推过期通知",
+    ).toEqual(["draft_updated", "notify"]);
+    expect(seen[0]?.type === "draft_updated" && seen[0].draft).toMatchObject({
+      id: spec.draftId,
+      status: "failed",
+      failure: "login_expired",
+    });
+    const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(
+      accounts.find((one) => one.id === xhs.id),
+      "认领之后已经重登，账号保持重登后的样子",
+    ).toEqual(relogged);
   });
 });

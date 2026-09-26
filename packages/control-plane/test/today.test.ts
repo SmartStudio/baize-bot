@@ -89,7 +89,8 @@ async function seedFourColumns(owner: Owner): Promise<{ readonly nestedDraftId: 
     handle: "@today",
     login: "expired",
     tier: "confirm_publish",
-    createdAt: new Date(now - 8_000),
+    createdAt: new Date(now - 60_000),
+    loginChangedAt: new Date(now - 8_000),
   });
 
   const pendingPlanId = newId();

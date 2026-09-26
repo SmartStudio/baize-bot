@@ -4,6 +4,7 @@ import {
   ComputerId,
   Publication,
   UserId,
+  type Account,
   type BotId,
   type ContentPlan,
   type ContentPlanId,
@@ -24,7 +25,7 @@ import type { Db } from "../db/client.js";
 import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
-import { findAccountForDraft } from "./accounts.js";
+import { findAccountForDraft, markLoginExpired } from "./accounts.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
 
@@ -465,6 +466,8 @@ export async function claimDueDrafts(
         eq(drafts.status, "approved"),
         eq(drafts.approvedHash, drafts.contentHash),
         inArray(accounts.tier, [...PUBLISHING_TIERS]),
+        // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
+        eq(accounts.login, "valid"),
         or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
         reachable,
       ),
@@ -568,17 +571,43 @@ export async function settlePublished(
   });
 }
 
+/**
+ * 这次失败对账号登录的影响。expired_now 是这一下由已登录记成过期的。already_known 是账号这边已经有了
+ * 不晚于这次认领的结论：先到的过期报文已经记过期、通知过用户，或者认领之后已经重新登录，旧那次的过期不算数。
+ */
+export type LoginEffect =
+  | { readonly kind: "unchanged" }
+  | { readonly kind: "expired_now"; readonly account: Account }
+  | { readonly kind: "already_known" };
+
+/** 因登录过期没发出去的，同一个事务里把账号也记成过期，只记认领时那一代登录。 */
 export async function settleFailed(
   db: Db,
   scope: SettleScope,
   reason: PublishFailureReason,
-): Promise<{ draft: Draft; ownerId: UserId } | null> {
-  const [row] = await db
-    .update(drafts)
-    .set({ status: "failed", failure: reason })
-    .where(settleWhere(scope))
-    .returning();
-  return row === undefined ? null : { draft: toDraft(row), ownerId: UserId.parse(row.ownerId) };
+): Promise<{ draft: Draft; ownerId: UserId; login: LoginEffect } | null> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(drafts)
+      .set({ status: "failed", failure: reason })
+      .where(settleWhere(scope))
+      .returning();
+    if (row === undefined) return null;
+    const ownerId = UserId.parse(row.ownerId);
+    const draft = toDraft(row);
+    if (reason !== "login_expired") return { draft, ownerId, login: { kind: "unchanged" } };
+    if (row.claimedAt === null) throw new Error(`在发的草稿 ${row.id} 没有认领时刻`);
+    const expired = await markLoginExpired(tx, {
+      ownerId,
+      accountId: draft.accountId,
+      sessionAt: row.claimedAt,
+    });
+    return {
+      draft,
+      ownerId,
+      login: expired === null ? { kind: "already_known" } : { kind: "expired_now", account: expired },
+    };
+  });
 }
 
 /** 抢到之后太久没有结论的，多半是发的那个进程没了。记成出错，不重发：平台那边可能已经发出去了。 */
@@ -605,6 +634,8 @@ export async function reopenMissedDrafts(db: Db, missedBefore: Date): Promise<{ 
         eq(accounts.id, drafts.accountId),
         eq(drafts.status, "approved"),
         inArray(accounts.tier, [...PUBLISHING_TIERS]),
+        // 过期账号的稿本来就停着等重新登录，不算停机错过；重登后由正常轮询抢。
+        eq(accounts.login, "valid"),
         isNotNull(drafts.scheduledAt),
         // greatest 跳过 NULL：没记批准时刻的只看到点时刻。
         sql`greatest(${drafts.scheduledAt}, ${drafts.decidedAt}) < ${missedBefore.toISOString()}::timestamptz`,

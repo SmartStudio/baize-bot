@@ -37,6 +37,7 @@ import {
   type ApprovePlanRequest,
   type DecideDraftRequest,
   type UpdateAccountRequest,
+  type CreateAccountRequest,
   type ApprovalId,
   type ContentPlanId,
   type DraftId,
@@ -153,6 +154,10 @@ export const api = {
   accounts: async () => json(AccountListResponse, await send("GET", "/accounts")),
   updateAccount: async (id: AccountId, request: UpdateAccountRequest) =>
     json(AccountResponse, await send("PATCH", `/accounts/${encodeURIComponent(id)}`, request)),
+  createAccount: async (request: CreateAccountRequest) =>
+    json(AccountResponse, await send("POST", "/accounts", request)),
+  loginAccount: async (id: AccountId) =>
+    json(AccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`)),
   computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
   grants: async () => json(GrantListResponse, await send("GET", "/grants")),
   deleteGrant: async (id: GrantId): Promise<void> => {

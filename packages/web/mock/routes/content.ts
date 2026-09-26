@@ -1,5 +1,11 @@
-import { AccountListResponse, ApprovePlanRequest, DecideDraftRequest, UpdateAccountRequest } from "@baize/shared";
-import { accounts, decideDraft, setAccountTier, settlePlan } from "../state.js";
+import {
+  AccountListResponse,
+  ApprovePlanRequest,
+  CreateAccountRequest,
+  DecideDraftRequest,
+  UpdateAccountRequest,
+} from "@baize/shared";
+import { accounts, createAccount, decideDraft, loginAccount, setAccountTier, settlePlan } from "../state.js";
 import { readBody, send, type Route } from "./http.js";
 
 const idOf = (match: RegExpExecArray): string => decodeURIComponent(match[1] ?? "");
@@ -42,6 +48,31 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
 
   if (method === "GET" && path === "/api/accounts") {
     send(res, 200, AccountListResponse.parse({ accounts: [...accounts.values()] }));
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/accounts") {
+    const parsed = CreateAccountRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "只能加小红书账号，并选一台电脑" });
+    else {
+      const outcome = createAccount(parsed.data);
+      if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+      else {
+        push({ type: "account_updated", account: outcome.value.account });
+        send(res, outcome.value.created ? 201 : 200, { account: outcome.value.account });
+      }
+    }
+    return true;
+  }
+
+  const loginMatch = /^\/api\/accounts\/([^/]+)\/login$/.exec(path);
+  if (loginMatch !== null && method === "POST") {
+    const outcome = loginAccount(idOf(loginMatch));
+    if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+    else {
+      push({ type: "account_updated", account: outcome.value });
+      send(res, 202, { account: outcome.value });
+    }
     return true;
   }
 

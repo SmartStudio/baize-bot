@@ -11,7 +11,7 @@ import {
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
-import { findAccountOnComputer } from "../repo/accounts.js";
+import { findAccountOnComputer, markLoginExpired, markLoginValid } from "../repo/accounts.js";
 import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
@@ -152,21 +152,47 @@ const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> =
 };
 
 /**
- * 登录没成不等于账号过期，accounts.login 不动，只推一条通知告诉用户原因。
- * 账号不属于哪个群，没有群消息可落，所以走通知。
+ * 三种结论都先认电脑：账号必须是这台电脑主人的、登在这台电脑上的，否则整条丢掉。
+ * 账号不属于哪个群，没有群消息可落，要用户处理的都走通知。登录状态随 config.accounts 下发，变了就重发。
  */
 async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: LoginState): Promise<void> {
-  if (event.state.login !== "failed") return;
-  const account = await findAccountOnComputer(deps.db, conn.ownerId, conn.computerId, event.accountId);
-  if (account === null) {
+  const found = await findAccountOnComputer(deps.db, conn.ownerId, conn.computerId, event.accountId);
+  if (found === null) {
     console.warn(`电脑 ${conn.computerId} 报的账号 ${event.accountId} 不在它上面，整条丢掉`);
     return;
   }
-  await deps.notifications.publish(conn.ownerId, {
-    kind: "failed",
-    text: LOGIN_FAILURE_NOTICE[event.state.reason](PLATFORM_LABEL[account.platform]),
-    groupId: null,
-  });
+  const { state } = event;
+  switch (state.login) {
+    case "valid": {
+      const change = await markLoginValid(deps.db, conn.ownerId, conn.computerId, event.accountId, state.handle);
+      if (change === null) return;
+      if (change.deleted !== null) deps.push.push(conn.ownerId, { type: "account_deleted", accountId: change.deleted });
+      deps.push.push(conn.ownerId, { type: "account_updated", account: change.account });
+      await deps.agents.sendConfig(conn.ownerId);
+      return;
+    }
+    case "expired": {
+      const account = await markLoginExpired(deps.db, { ownerId: conn.ownerId, accountId: event.accountId });
+      // 已经是过期的再报一次，什么都不推。
+      if (account === null) return;
+      deps.push.push(conn.ownerId, { type: "account_updated", account });
+      await deps.notifications.publish(conn.ownerId, {
+        kind: "failed",
+        text: `${PLATFORM_LABEL[account.platform]}账号「${account.handle ?? ""}」登录过期了，这个账号的稿子先不发，到账号页重新登录`,
+        groupId: null,
+      });
+      await deps.agents.sendConfig(conn.ownerId);
+      return;
+    }
+    case "failed":
+      // 登录没成不等于账号过期，accounts.login 不动，只告诉用户原因。
+      await deps.notifications.publish(conn.ownerId, {
+        kind: "failed",
+        text: LOGIN_FAILURE_NOTICE[state.reason](PLATFORM_LABEL[found.platform]),
+        groupId: null,
+      });
+      return;
+  }
 }
 
 type BotText = Extract<AgentToControl, { type: "bot_text" }>;

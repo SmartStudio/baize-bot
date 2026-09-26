@@ -1,16 +1,17 @@
 import {
+  AccountId,
   ComputerId,
   type Account,
   type AccountConfig,
-  type AccountId,
   type AccountTier,
+  type CreateAccountRequest,
   type Platform,
   type UserId,
 } from "@baize/shared";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
-import { accounts } from "../db/schema.js";
+import { accounts, computers, drafts } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toAccount } from "./rows.js";
 
@@ -55,11 +56,139 @@ export async function addAccount(db: Db, input: NewAccount): Promise<Account> {
     })
     .onConflictDoUpdate({
       target: [accounts.computerId, accounts.platform, accounts.handle],
-      set: { login: "valid", ...(input.tier === undefined ? {} : { tier: input.tier }) },
+      set: {
+        login: "valid",
+        loginChangedAt: loginChangedAt("valid", new Date()),
+        ...(input.tier === undefined ? {} : { tier: input.tier }),
+      },
     })
     .returning();
   if (row === undefined) throw new Error("挂账号没有返回行");
   return toAccount(row);
+}
+
+/** login 真变了才换时刻：重复报一次 valid 不该让今天页以为刚登上。 */
+function loginChangedAt(login: Account["login"], now: Date): SQL {
+  return sql`case when ${accounts.login} = ${login} then ${accounts.loginChangedAt} else ${now.toISOString()}::timestamptz end`;
+}
+
+export type CreatePlaceholderResult =
+  | { readonly kind: "created" | "existing"; readonly account: Account }
+  | { readonly kind: "no_computer" }
+  | { readonly kind: "remote_computer" };
+
+/**
+ * 账号页点「加小红书」：建一个没登录、没名字的占位，扫码回来才有名字。一个人每个平台最多一个占位，
+ * 靠部分唯一索引收敛：已经有了就回那一行。
+ */
+export async function createPlaceholder(
+  db: Db,
+  ownerId: UserId,
+  request: CreateAccountRequest,
+): Promise<CreatePlaceholderResult> {
+  const [computer] = await db
+    .select({ kind: computers.kind })
+    .from(computers)
+    .where(and(eq(computers.id, request.computerId), eq(computers.ownerId, ownerId)))
+    .limit(1);
+  if (computer === undefined) return { kind: "no_computer" };
+  // 请求只收浏览器平台。远程电脑没有助理浏览器，挂上去登不了也发不了。
+  if (computer.kind === "remote") return { kind: "remote_computer" };
+  const id = newId();
+  const [row] = await db
+    .insert(accounts)
+    .values({ id, ownerId, computerId: request.computerId, platform: request.platform })
+    .onConflictDoUpdate({
+      target: [accounts.ownerId, accounts.platform],
+      targetWhere: sql`${accounts.login} = 'none'`,
+      // 什么都不改，只为让 RETURNING 带回已有那行。每人只有一台本机，占位不会在别的电脑上。
+      set: { computerId: sql`${accounts.computerId}` },
+    })
+    .returning();
+  if (row === undefined) throw new Error("建账号占位没有返回行");
+  return { kind: row.id === id ? "created" : "existing", account: toAccount(row) };
+}
+
+export async function findAccount(db: Db, ownerId: UserId, accountId: AccountId): Promise<Account | null> {
+  const [row] = await db
+    .select()
+    .from(accounts)
+    .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId)))
+    .limit(1);
+  return row === undefined ? null : toAccount(row);
+}
+
+export type LoginValid = { readonly account: Account; readonly deleted: AccountId | null };
+
+/**
+ * 扫码登上了。这台电脑上同平台已经有这个名字的行（多半是以前过期的那行），就把它记回已登录，
+ * 报上来的要是占位就删掉，占位上的草稿挪过去；没有就给报上来的这行写上名字。
+ * 报上来的行锁住，同一个账号连报两次也只收敛成一行。
+ */
+export async function markLoginValid(
+  db: Db,
+  ownerId: UserId,
+  computerId: ComputerId,
+  accountId: AccountId,
+  handle: string,
+): Promise<LoginValid | null> {
+  return db.transaction(async (tx) => {
+    const [reported] = await tx
+      .select()
+      .from(accounts)
+      .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId), eq(accounts.computerId, computerId)))
+      .for("update");
+    if (reported === undefined) return null;
+    const now = new Date();
+    const [known] = await tx
+      .update(accounts)
+      .set({ login: "valid", loginChangedAt: loginChangedAt("valid", now) })
+      .where(
+        and(
+          eq(accounts.computerId, computerId),
+          eq(accounts.platform, reported.platform),
+          eq(accounts.handle, handle),
+          ne(accounts.id, accountId),
+        ),
+      )
+      .returning();
+    if (known !== undefined) {
+      if (reported.login !== "none") return { account: toAccount(known), deleted: null };
+      await tx.update(drafts).set({ accountId: known.id }).where(eq(drafts.accountId, accountId));
+      await tx.delete(accounts).where(eq(accounts.id, accountId));
+      return { account: toAccount(known), deleted: accountId };
+    }
+    const [row] = await tx
+      .update(accounts)
+      .set({ login: "valid", handle, loginChangedAt: loginChangedAt("valid", now) })
+      .where(eq(accounts.id, accountId))
+      .returning();
+    if (row === undefined) throw new Error("锁住的账号行更新时不见了");
+    return { account: toAccount(row), deleted: null };
+  });
+}
+
+/**
+ * 登录过期只从已登录变过来：占位没有名字，本来就没登上；已经过期的再报一次什么都不改，调用方据此不重复通知。
+ * 给了 sessionAt 就只认那一刻还在的那次登录：之后又重登过的，loginChangedAt 晚于它，不再命中。
+ */
+export async function markLoginExpired(
+  db: Db | Tx,
+  target: { readonly ownerId: UserId; readonly accountId: AccountId; readonly sessionAt?: Date },
+): Promise<Account | null> {
+  const [row] = await db
+    .update(accounts)
+    .set({ login: "expired", loginChangedAt: new Date() })
+    .where(
+      and(
+        eq(accounts.id, target.accountId),
+        eq(accounts.ownerId, target.ownerId),
+        eq(accounts.login, "valid"),
+        target.sessionAt === undefined ? undefined : lte(accounts.loginChangedAt, target.sessionAt),
+      ),
+    )
+    .returning();
+  return row === undefined ? null : toAccount(row);
 }
 
 export async function listAccounts(db: Db, ownerId: UserId): Promise<Account[]> {

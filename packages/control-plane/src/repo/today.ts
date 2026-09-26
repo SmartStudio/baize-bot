@@ -69,7 +69,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       .select()
       .from(accounts)
       .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "expired")))
-      .orderBy(desc(accounts.createdAt), desc(accounts.id))
+      .orderBy(desc(accounts.loginChangedAt), desc(accounts.id))
       .limit(50),
     db
       .select({ publication: publications, draft: drafts })
@@ -265,9 +265,9 @@ export function pendingItems(input: {
   }
   for (const row of input.accounts) {
     pending.push({
-      at: row.createdAt,
+      at: row.loginChangedAt,
       id: row.id,
-      item: { kind: "account", since: row.createdAt.toISOString(), account: toAccount(row) },
+      item: { kind: "account", since: row.loginChangedAt.toISOString(), account: toAccount(row) },
     });
   }
   return pending

@@ -7,6 +7,7 @@ import {
   DecideDraftRequest,
   Draft,
   type AccountTier,
+  type CreateAccountRequest,
   type DraftContent,
   type Message,
   type Publication,
@@ -108,6 +109,46 @@ export const setAccountTier = (id: string, tier: AccountTier): Outcome<Account> 
     return { ok: false, status: 400, error: "小红书账号不能设成可直接发布" };
   }
   const next = Account.parse({ ...account, tier });
+  accounts.set(next.id, next);
+  return { ok: true, value: next };
+};
+
+// 照控制面：一个人每个平台最多一个未登录占位，重复加原样回已有那行。
+export const createAccount = (request: CreateAccountRequest): Outcome<{ account: Account; created: boolean }> => {
+  const computer = computersOf().computers.find((c) => c.id === request.computerId);
+  if (computer === undefined) return { ok: false, status: 404, error: "没有这台电脑" };
+  if (computer.kind === "remote") {
+    return { ok: false, status: 400, error: "小红书要扫码登录，只能挂在你自己的电脑上，远程电脑没有助理浏览器" };
+  }
+  const existing = [...accounts.values()].find((a) => a.platform === request.platform && a.login === "none");
+  if (existing !== undefined) return { ok: true, value: { account: existing, created: false } };
+  const stamp = now();
+  const next = Account.parse({
+    id: `acc_${nextSuffix()}`,
+    ownerId: user.id,
+    computerId: request.computerId,
+    platform: request.platform,
+    handle: null,
+    tier: "confirm_publish",
+    login: "none",
+    loginChangedAt: stamp,
+    createdAt: stamp,
+  });
+  accounts.set(next.id, next);
+  return { ok: true, value: { account: next, created: true } };
+};
+
+// mock 没有电脑和助理浏览器，点登录就当扫码成功，直接记已登录。
+export const loginAccount = (id: string): Outcome<Account> => {
+  const account = accounts.get(id);
+  if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
+  if (account.platform !== "xiaohongshu") return { ok: false, status: 400, error: "这个平台不走浏览器登录" };
+  const next = Account.parse({
+    ...account,
+    handle: account.handle ?? `小红书号${nextSuffix()}`,
+    login: "valid",
+    loginChangedAt: now(),
+  });
   accounts.set(next.id, next);
   return { ok: true, value: next };
 };

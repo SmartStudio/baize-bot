@@ -18,7 +18,7 @@ export type PublishLoopOptions = {
   readonly notifications: NoticePublisher;
   readonly crypto: CredentialCrypto;
   readonly bases: ApiBases;
-  readonly computers: Pick<AgentHub, "onlineComputerIds" | "send">;
+  readonly computers: Pick<AgentHub, "onlineComputerIds" | "send" | "sendConfig">;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;
@@ -37,7 +37,12 @@ export class PublishLoop {
   constructor(options: PublishLoopOptions) {
     this.#options = options;
     this.#now = options.now ?? (() => new Date());
-    this.#deps = { db: options.db, push: options.push, notifications: options.notifications };
+    this.#deps = {
+      db: options.db,
+      push: options.push,
+      notifications: options.notifications,
+      agents: options.computers,
+    };
   }
 
   async start(): Promise<void> {
