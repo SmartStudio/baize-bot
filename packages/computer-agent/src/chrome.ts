@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BrowserPlatform, ComputerKind, LoginFailure } from "@baize/shared";
 import { type CdpConnection, type CdpPipe, connectPipe } from "@baize/bot-runner";
@@ -92,10 +93,20 @@ const chromeArgs = (profileDir: string): string[] => [
   "--no-default-browser-check",
 ];
 
+// Chrome 的 SingletonSocket 建在临时目录里，谁连上它都能让带登录态的助理 Chrome 打开任意网址。
+// 放在系统临时目录时，批了联网的 bash 就连得上；放进 profile，就跟 profile 一起落在 Bot bash 的禁区里。
+// macOS 的 Chrome 不看 TMPDIR，只认 MAC_CHROMIUM_TMPDIR；Linux 的 chromium 看 TMPDIR。
+const chromeTempDir = (profileDir: string): string => join(profileDir, "tmp");
+
 // 单独成进程组，代理收到终端的 Ctrl-C 时不跟着挨信号，由代理自己收尾。管道的两头只有代理拿着：
 // libuv 建的 fd 都带 CLOEXEC，Bot 的 bash 继承不到。代理被强杀时管道断开，Chrome 自己退出。
-async function spawnChrome(binary: string, args: readonly string[]): Promise<ChromeProcess> {
-  const child = spawn(binary, args, { detached: true, stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+async function spawnChrome(binary: string, profileDir: string, args: readonly string[]): Promise<ChromeProcess> {
+  const tmp = chromeTempDir(profileDir);
+  const child = spawn(binary, args, {
+    detached: true,
+    env: { ...process.env, TMPDIR: tmp, MAC_CHROMIUM_TMPDIR: tmp },
+    stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+  });
   await new Promise<void>((resolve, reject) => {
     child.once("spawn", resolve);
     child.once("error", reject);
@@ -112,12 +123,12 @@ async function spawnChrome(binary: string, args: readonly string[]): Promise<Chr
 }
 
 const launchMacChrome = (profileDir: string): Promise<ChromeProcess> =>
-  spawnChrome("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", chromeArgs(profileDir));
+  spawnChrome("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", profileDir, chromeArgs(profileDir));
 
 // 远程电脑上没有桌面，Chrome 画在容器里的 Xvfb 上。
 async function launchLinuxChrome(profileDir: string): Promise<ChromeProcess> {
   if (!process.env["DISPLAY"]) throw new Error("没有 DISPLAY，远程电脑的 Xvfb 没起来");
-  return spawnChrome("/usr/bin/chromium", [...chromeArgs(profileDir), "--password-store=basic"]);
+  return spawnChrome("/usr/bin/chromium", profileDir, [...chromeArgs(profileDir), "--password-store=basic"]);
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -189,6 +200,10 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     // 上次的 Chrome 还没退完就占着 profile 锁，新起的实例会被 Chrome 自己的单例并进它，管道随即断开。
     const reaped = await reapProfileChromes(profileDir);
     if (reaped.length > 0) log(`收掉上次留下的助理 Chrome，PID ${reaped.join(", ")}`);
+    // 临时目录不在 Chrome 就起不来。被强杀的 Chrome 留下的 socket 目录没人收，用这个 profile 的 Chrome
+    // 上面都收掉了，整个清空再建。
+    await rm(chromeTempDir(profileDir), { recursive: true, force: true });
+    await mkdir(chromeTempDir(profileDir), { mode: 0o700 });
     const pending = launcher(profileDir);
     const launched = await untilAborted(pending, stopped.signal).catch((error: unknown) => {
       void pending.then((late) => late.stop()).catch(() => {});

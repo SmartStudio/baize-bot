@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -55,6 +55,45 @@ const availablePort = (): Promise<number> =>
       server.close((error) => (error === undefined ? resolve(address.port) : reject(error)));
     });
   });
+
+const listenUnix = async (path: string): Promise<{ accepted(): number; close(): Promise<void> }> => {
+  let accepted = 0;
+  const server = createServer((socket) => {
+    accepted += 1;
+    socket.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path, resolve);
+  });
+  return {
+    accepted: () => accepted,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+};
+
+const connectUnix = (path: string): Promise<void> =>
+  new Promise((resolve, reject) => {
+    const socket = connect(path, () => {
+      socket.end();
+      resolve();
+    });
+    socket.once("error", reject);
+  });
+
+// 先列目录，再分别按相对路径（cd 进去）和绝对路径连：macOS 的 sun_path 只有 104 字节，长路径只能相对连。
+// 连上打 CONNECTED，连不上只打错误码，不带路径，列不出时输出里就不会出现 socket 的名字。
+const unixSocketProbe = (socketDir: string): string => {
+  const connectScript = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{process.stdout.write("CONNECTED\\n");s.end()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
+  const node = shellQuote(process.execPath);
+  const dir = shellQuote(socketDir);
+  return [
+    `ls -A ${dir} 2>/dev/null`,
+    `(cd ${dir} 2>/dev/null && ${node} -e ${shellQuote(connectScript)} SingletonSocket)`,
+    `${node} -e ${shellQuote(connectScript)} ${shellQuote(join(socketDir, "SingletonSocket"))}`,
+    "true",
+  ].join("; ");
+};
 
 const runInSandbox = (command: string, network = false) =>
   spawnSync(
@@ -116,6 +155,42 @@ describe("bash 沙箱性能", () => {
         }
       } finally {
         rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下批了联网和写路径，禁区里的 unix socket 照样列不出、连不上",
+    async () => {
+      const profileDir = mkdtempSync(join(tmpdir(), "baize-sock-"));
+      const outside = mkdtempSync(join(tmpdir(), "baize-sock-out-"));
+      const socketDir = join(profileDir, "tmp", "sock");
+      mkdirSync(socketDir, { recursive: true });
+      const server = await listenUnix(join(socketDir, "SingletonSocket"));
+      try {
+        const sandbox = createSandboxedBash(
+          workDir,
+          forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), profileDir),
+          () => "run-sock",
+        );
+        sandbox.allow("run-sock", "call-sock", { network: true, writePaths: [join(outside, "new", "x")] });
+        const result = await sandbox.tool.execute(
+          "call-sock",
+          { command: unixSocketProbe(socketDir) },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        const output = JSON.stringify(result.content);
+        expect(output, "列不出禁区里的 socket").not.toContain("SingletonSocket");
+        expect(output, "相对路径和绝对路径都连不上").not.toContain("CONNECTED");
+        expect(output).toContain("REFUSED");
+        await connectUnix(join(socketDir, "SingletonSocket"));
+        expect(server.accepted(), "沙箱外连得上，所以只有这一次").toBe(1);
+      } finally {
+        await server.close();
+        rmSync(profileDir, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
       }
     },
   );
@@ -497,6 +572,25 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     } finally {
       rmSync(marker, { force: true });
       rmSync(approved, { force: true });
+    }
+  });
+
+  it("bwrap 下批了联网和写 /tmp，profile 里的 unix socket 照样列不出、连不上", async () => {
+    const socketDir = join(profileDir, "tmp", "sock");
+    mkdirSync(socketDir, { recursive: true });
+    const server = await listenUnix(join(socketDir, "SingletonSocket"));
+    try {
+      const callId = nextCall();
+      sandbox.allow(runId, callId, { network: true, writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")] });
+      const result = await run(unixSocketProbe(socketDir), callId);
+      const output = JSON.stringify(result.content);
+      expect(output, "列不出禁区里的 socket").not.toContain("SingletonSocket");
+      expect(output, "相对路径和绝对路径都连不上").not.toContain("CONNECTED");
+      expect(output).toContain("REFUSED");
+      await connectUnix(join(socketDir, "SingletonSocket"));
+      expect(server.accepted(), "沙箱外连得上，所以只有这一次").toBe(1);
+    } finally {
+      await server.close();
     }
   });
 

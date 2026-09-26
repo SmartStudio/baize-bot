@@ -1,13 +1,16 @@
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
+import { BotId } from "@baize/shared";
+import { botDirs, forbiddenZones } from "../../bot-runner/src/paths.js";
+import { createSandboxedBash } from "../../bot-runner/src/sandbox.js";
 import { startAssistantChrome, type AssistantChrome } from "../src/chrome.js";
 import { chromeProfileDir, isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 
@@ -238,6 +241,83 @@ describe.runIf(realChrome)("助理 Chrome 只有一条管道", () => {
     const again = await chrome.connection();
     expect(chrome.pid(), "下次要连接时起的是新 Chrome").not.toBe(firstPid);
     expect(String((await again.send("Browser.getVersion")).product)).toContain("Chrome");
+  }, 30_000);
+});
+
+const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
+
+// Chrome 单例 socket 的报文：让已在跑的实例打开 url。能连上它就能让带登录态的助理 Chrome 替自己开网址。
+const openThroughSingleton = (url: string): string => {
+  const message = JSON.stringify(`START\0/tmp\0/x/chrome\0${url}\0`);
+  return `const s=require("node:net").connect("SingletonSocket");s.on("connect",()=>s.end(${message}));s.on("data",(d)=>{process.stdout.write("REPLY "+d+"\\n");s.destroy()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
+};
+
+describe.runIf(realChrome)("助理 Chrome 的单例 socket", () => {
+  it("落在 profile 里，批了联网和写 /tmp 的 Bot bash 列不出、连不上，Chrome 不替它开网址", async () => {
+    const directory = await dataDir();
+    const chrome = startAssistantChrome({ dataDir: directory, log: () => {} });
+    chromes.push(chrome);
+    await chrome.connection();
+    const profileDir = await realpath(chrome.profileDir);
+    const socket = await realpath(join(profileDir, "SingletonSocket"));
+    expect(socket.startsWith(`${profileDir}/`), `SingletonSocket 指到 ${socket}`).toBe(true);
+
+    const hits: string[] = [];
+    const server = createServer((request, response) => {
+      hits.push(request.url ?? "");
+      response.end("ok");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("没有拿到本地测试端口");
+    const origin = `http://127.0.0.1:${address.port}`;
+    try {
+      const workDir = join(directory, "bot-1", "work");
+      await mkdir(workDir, { recursive: true });
+      const bash = createSandboxedBash(
+        workDir,
+        forbiddenZones(botDirs(directory, BotId.parse("bot-1")), chrome.profileDir),
+        () => "run-singleton",
+      );
+      bash.allow("run-singleton", "call-singleton", {
+        network: true,
+        writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")],
+      });
+      const socketDir = dirname(socket);
+      const probe = [
+        `ls -d /var/folders/*/*/T/com.google.Chrome.* /tmp/org.chromium.Chromium.* 2>/dev/null`,
+        `ls -A ${shellQuote(profileDir)} 2>/dev/null`,
+        `(cd ${shellQuote(socketDir)} 2>/dev/null && ${shellQuote(process.execPath)} -e ${shellQuote(openThroughSingleton(`${origin}/from-bash`))})`,
+        "true",
+      ].join("; ");
+      const result = await bash.tool.execute(
+        "call-singleton",
+        { command: probe },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      const output = JSON.stringify(result.content);
+      expect(output, "列不出单例 socket 所在的目录").not.toContain(basename(socketDir));
+      expect(output, "列不出 profile").not.toContain("SingletonSocket");
+      expect(output, "连不上单例 socket").not.toContain("REPLY");
+
+      // 沙箱外按同样的报文再开一次，这一次落地了，说明 socket 本身是通的，前一次没开是被挡住了。
+      const control = await new Promise<string>((resolve, reject) => {
+        execFile(
+          process.execPath,
+          ["-e", openThroughSingleton(`${origin}/control`)],
+          { cwd: socketDir },
+          (error, stdout) => (error === null ? resolve(stdout) : reject(error)),
+        );
+      });
+      expect(control).toContain("REPLY ACK");
+      await poll(() => (hits.includes("/control") ? true : undefined), 10_000, "沙箱外的报文让 Chrome 打开 /control");
+      expect(hits, "Bot bash 那一次没让 Chrome 开网址").not.toContain("/from-bash");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   }, 30_000);
 });
 

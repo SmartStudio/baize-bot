@@ -68,7 +68,7 @@ bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行�
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连，seatbelt 里不再为它加规则。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住，所以禁区里的 unix socket 也在最后单独拒连，批准联网也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
 - **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
@@ -287,7 +287,7 @@ snapshot 的形状：
 
 **标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 
-**没有调试端口。** 原来的 `--remote-debugging-port=0` 会在本机开一个 CDP 端口，能列出、关掉、接管所有标签页，所以当时挡了三层：`browser_open` 按端口拒、每个标签页开 `Fetch.enable` 拦跳到这个端口的请求、seatbelt 拒批了联网的 bash 连它。换成管道之后本机没有这个端口，这三层一起删了。管道的两个 fd 只在电脑代理进程和 Chrome 之间，Bot 的 bash 是另起的沙箱进程，拿不到。Chrome 的 SingletonSocket 还在，能连上它的进程可以让助理 Chrome 打开任意网址，但拿不到调试端口，这条另外收。
+**没有调试端口。** 原来的 `--remote-debugging-port=0` 会在本机开一个 CDP 端口，能列出、关掉、接管所有标签页，所以当时挡了三层：`browser_open` 按端口拒、每个标签页开 `Fetch.enable` 拦跳到这个端口的请求、seatbelt 拒批了联网的 bash 连它。换成管道之后本机没有这个端口，这三层一起删了。管道的两个 fd 只在电脑代理进程和 Chrome 之间，Bot 的 bash 是另起的沙箱进程，拿不到。Chrome 的 SingletonSocket 还在，连上它能让助理 Chrome 带着登录态打开任意网址，但拿不到调试端口。它原本建在系统临时目录里，批了联网的 bash 能列出、连上。电脑代理起 Chrome 时把临时目录指到 `<profileDir>/tmp`（Linux 的 chromium 认 `TMPDIR`，macOS 的 Chrome 只认 `MAC_CHROMIUM_TMPDIR`），socket 就跟 profile 一起落在禁区里：seatbelt 拒读和拒连，bwrap 整个盖住，批准联网、批准写 `/tmp` 都不放开它。
 
 **禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。
 

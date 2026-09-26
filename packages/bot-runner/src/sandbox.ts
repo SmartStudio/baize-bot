@@ -63,9 +63,15 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
     ...(access.network
       ? ["(allow network-outbound)", "(allow network-inbound)", "(allow network-bind)"]
       : ["(deny network*)"]),
+    // 连 unix socket 在 seatbelt 里算 network-outbound，拒读拒写挡不住，批了联网时禁区里的 socket
+    // （助理 Chrome 的 SingletonSocket）要单独拒。
     ...zones.hidden.flatMap((prefix) => {
       const real = seatbeltString(realpathExisting(prefix));
-      return [`(deny file-read* (subpath ${real}))`, `(deny file-write* (subpath ${real}))`];
+      return [
+        `(deny file-read* (subpath ${real}))`,
+        `(deny file-write* (subpath ${real}))`,
+        `(deny network-outbound (remote unix-socket (subpath ${real})))`,
+      ];
     }),
     ...zones.readOnly.map((prefix) => `(deny file-write* (subpath ${seatbeltString(realpathExisting(prefix))}))`),
   ];
