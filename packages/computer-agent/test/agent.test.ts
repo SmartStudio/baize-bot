@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
-import type { RunnerConfig } from "@baize/bot-runner";
+import { AgentToControl, BotId, ComputerId, ControlToAgent, GroupId, MessageId, RunId, Skill } from "@baize/shared";
+import { publishDraft, type RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
   type AgentHandle,
@@ -424,6 +424,25 @@ describe("电脑代理连控制面", () => {
       accountId: "account-1",
       state: { login: "valid", handle: "白泽工厂日记" },
     });
+  });
+
+  it("publish_draft 的结果原样回给控制面", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const publish = {
+      type: "publish_draft",
+      draftId: "draft-1",
+      accountId: "account-1",
+      platform: "xiaohongshu",
+      content: { kind: "post", title: "周一早安", text: "新的一周从一杯咖啡开始", images: [], github: null },
+    };
+    const parsed = ControlToAgent.parse(publish);
+    if (parsed.type !== "publish_draft") throw new Error("不是 publish_draft");
+
+    socket.send(JSON.stringify(publish));
+
+    // 不走假运行器：发布器是 bot-runner 导出的函数，代理直接调，这里拿它自己的结果当期望。
+    await expect(server.waitForMessage("publish_result", 1, 3000)).resolves.toEqual(await publishDraft(parsed));
   });
 
   it.each([

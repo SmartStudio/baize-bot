@@ -1,16 +1,19 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
 import {
   type AccountConfig,
   type AgentToControl,
   ContentPlanId,
   type DraftContent,
   DraftId,
+  type DraftImage,
   type DraftSpec,
   type Platform,
 } from "@baize/shared";
 import { type Static, Type } from "typebox";
 import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
+import { forbiddenPathPrefixes, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 import type { ActiveRun } from "./topic.js";
 
 // Bot 往外发东西只有起草这一条路：三件工具都只发上行，群里出草稿卡或计划卡，用户在卡上批了才发。
@@ -31,7 +34,21 @@ const TEXT_ONLY_PLATFORMS: ReadonlySet<Platform> = new Set(["github", "x"]);
 export const accountLabel = (account: AccountConfig): string =>
   `${PLATFORM_LABEL[account.platform]} ${account.handle === null ? "（没有账号名）" : `@${account.handle}`}`;
 
-const IMAGE = Type.Object({ path: Type.String(), sha256: Type.String() });
+const TIER_LABEL: Record<AccountConfig["tier"], string> = {
+  read_only: "只读档，不能起草",
+  draft: "可起草档",
+  confirm_publish: "发布要确认档",
+  direct_publish: "可直接发布档",
+};
+
+/** prompt 里「能用的账号」一段，模型照这里抄 accountId。没账号时不调，整段不出。 */
+export const renderAccounts = (accounts: readonly AccountConfig[]): string =>
+  [
+    "能用的账号：",
+    ...accounts.map((account) => `- ${accountLabel(account)}，${TIER_LABEL[account.tier]}，accountId：${account.id}`),
+  ].join("\n");
+
+const IMAGE = Type.Object({ path: Type.String() });
 
 // 可省的字段在边界上补成协议要的 null 或空数组；长度范围不写进 schema，交给 AgentToControl 校验再翻成中文。
 const CONTENT = Type.Union([
@@ -64,12 +81,28 @@ const PLAN_PARAMS = Type.Object({ title: Type.String(), drafts: Type.Array(DRAFT
 
 const CONTENT_GUIDE =
   "各平台的要求：X 正文不超过 280 字符，不带图；GitHub 要写 title，github 里写 repo（owner/name）和 as（issue 或 discussion），不带图；" +
-  "小红书要写 title，可以带图（images 每张给本机路径和 sha256）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
+  "小红书要写 title，可以带图（images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
+// 发布器照这份路径读图、照 sha256 再核一次，所以路径记 realpath、哈希由运行器读文件自己算：用户批的就是发出去的那份字节。
+// 禁区先于工作目录判：禁区里的文件不能叫模型挪进工作目录再来。
+function imageOf(path: string, workDir: string, where: string): DraftImage {
+  const real = realpathExisting(logicalResolve(path, workDir));
+  if (forbiddenPathPrefixes(workDir).some((prefix) => isInsideRoot(real, prefix))) {
+    throw new Error(`${where}配图「${path}」在固定禁区里，不能当配图，换一张图。`);
+  }
+  if (!isInsideRoot(real, workDir)) {
+    throw new Error(`${where}配图「${path}」不在工作目录里，先把图放进工作目录再起草。`);
+  }
+  const stats = statSync(real, { throwIfNoEntry: false });
+  if (stats === undefined) throw new Error(`${where}配图「${path}」不存在，路径按工作目录算，核对一下再调。`);
+  if (!stats.isFile()) throw new Error(`${where}配图「${path}」不是普通文件，给一张图片文件的路径。`);
+  return { path: real, sha256: createHash("sha256").update(readFileSync(real)).digest("hex") };
+}
+
 // 协议里的对象都是 strict，模型多写一个键就整条被拒，所以只挑协议要的字段。
-const contentOf = (content: Static<typeof CONTENT>): DraftContent => {
-  const images = (content.images ?? []).map((image) => ({ path: image.path, sha256: image.sha256 }));
+const contentOf = (content: Static<typeof CONTENT>, workDir: string, where: string): DraftContent => {
+  const images = (content.images ?? []).map((image) => imageOf(image.path, workDir, where));
   return content.kind === "post"
     ? {
         kind: "post",
@@ -101,19 +134,23 @@ const accountsHint = (accounts: readonly AccountConfig[]): string =>
     ? "用户还没连任何账号，告诉用户先去账号页连一个。"
     : `能用的账号：${accounts.map((account) => `${accountLabel(account)}（accountId：${account.id}）`).join("、")}`;
 
-function specOf(input: Static<typeof DRAFT_INPUT>, accounts: readonly AccountConfig[], where: string): DraftSpec {
+function specOf(
+  input: Static<typeof DRAFT_INPUT>,
+  accounts: readonly AccountConfig[],
+  workDir: string,
+  where: string,
+): DraftSpec {
   const account = accounts.find((candidate) => candidate.id === input.accountId);
   if (account === undefined) {
     throw new Error(`${where}没有 accountId 是「${input.accountId}」的账号。${accountsHint(accounts)}`);
   }
-  const content = contentOf(input.content);
-  if (content.images.length > 0 && TEXT_ONLY_PLATFORMS.has(account.platform)) {
+  if ((input.content.images ?? []).length > 0 && TEXT_ONLY_PLATFORMS.has(account.platform)) {
     throw new Error(`${where}${PLATFORM_LABEL[account.platform]} 的草稿先不带图，去掉 images 再调。`);
   }
   return {
     draftId: DraftId.parse(randomUUID()),
     accountId: account.id,
-    content,
+    content: contentOf(input.content, workDir, where),
     scheduledAt: scheduledAtOf(input.scheduledAt, where),
   };
 }
@@ -122,6 +159,8 @@ export function createDraftTools(options: {
   readonly activeRun: () => ActiveRun | null;
   /** 工具调用时读最新的 config.accounts：换账号不重建会话，建工具时抓一份会过期。 */
   readonly accounts: () => readonly AccountConfig[];
+  /** 配图只收这个目录里的文件。 */
+  readonly workDir: string;
   readonly send: (message: AgentToControl) => void;
 }): readonly RunnerTool[] {
   const activeOrThrow = (action: string): ActiveRun => {
@@ -135,12 +174,17 @@ export function createDraftTools(options: {
       name: "create_draft",
       label: "起草",
       description:
-        "起草一条要往外发的内容，群里出一张草稿卡等用户批，批了才发。accountId 用用户连过的账号，不知道就先随便写，报错里会列出能用的账号。" +
+        "起草一条要往外发的内容，群里出一张草稿卡等用户批，批了才发。accountId 从 prompt 里的能用的账号取。" +
         CONTENT_GUIDE,
       parameters: DRAFT_INPUT,
       execute: async (_callId, params) => {
         const active = activeOrThrow("起草");
-        const draft = specOf(params as Static<typeof DRAFT_INPUT>, options.accounts(), "草稿没建，改好再调：");
+        const draft = specOf(
+          params as Static<typeof DRAFT_INPUT>,
+          options.accounts(),
+          options.workDir,
+          "草稿没建，改好再调：",
+        );
         options.send(
           parseOrThrow(
             {
@@ -176,7 +220,7 @@ export function createDraftTools(options: {
               botId: active.run.botId,
               groupId: active.run.groupId,
               draftId: parsedId.data,
-              content: contentOf(content),
+              content: contentOf(content, options.workDir, "草稿没改，改好再调："),
             },
             "改动",
           ),
@@ -196,7 +240,7 @@ export function createDraftTools(options: {
         const { title, drafts } = params as Static<typeof PLAN_PARAMS>;
         const accounts = options.accounts();
         const specs = drafts.map((draft, index) =>
-          specOf(draft, accounts, `计划没发出去，改好再调：第 ${index + 1} 条草稿`),
+          specOf(draft, accounts, options.workDir, `计划没发出去，改好再调：第 ${index + 1} 条草稿`),
         );
         options.send(
           parseOrThrow(

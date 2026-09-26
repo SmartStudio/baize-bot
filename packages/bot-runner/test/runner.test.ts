@@ -1,15 +1,18 @@
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
   type AccountConfig,
@@ -4329,6 +4332,16 @@ const accountOf = (
   tier: AccountConfig["tier"],
 ): AccountConfig => ({ id: AccountId.parse(id), platform, handle, tier, login: "valid" });
 
+/** 配图的路径要在建 harness 之前写进脚本，所以先把数据目录和 bot-1 的工作目录建好。 */
+const botWorkDir = (): { readonly dataDir: string; readonly workDir: string } => {
+  const dataDir = mkdtempSync(join(tmpdir(), "baize-runner-"));
+  const { workDir } = botDirs(dataDir, BotId.parse("bot-1"));
+  mkdirSync(workDir, { recursive: true });
+  return { dataDir, workDir };
+};
+const drafted = (h: Harness) => h.sent.flatMap((message) => (message.type === "draft_create" ? [message.draft] : []));
+const toolStatuses = (h: Harness) => shape(h.sent).filter((s) => s.startsWith("bot_tool_call"));
+
 describe("运行器的草稿", () => {
   const XHS = accountOf("acc-xhs", "xiaohongshu", "小满的日常", "confirm_publish");
   const GITHUB = accountOf("acc-gh", "github", "baize-tech", "draft");
@@ -4341,7 +4354,8 @@ describe("运行器的草稿", () => {
     text: "README 第三节还写着 npm i",
     github: { repo: "baize/bot", as: "issue" },
   };
-  const IMAGE = { path: "/tmp/cover.png", sha256: "a".repeat(64) };
+  const IMAGE = { path: "cover.png" };
+  const COVER_BYTES = Buffer.from("不是真的 PNG，只要字节确定就行");
 
   it("create_draft 不弹允许吗，返回草稿已建", async () => {
     const seen = recorder();
@@ -4460,8 +4474,11 @@ describe("运行器的草稿", () => {
   });
 
   it("小红书草稿可以带图，GitHub 草稿不带图照常建", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
     const h = await startHarness({
       bots: ["bot-1"],
+      dataDir,
       accounts: ACCOUNTS,
       extensionTools: [],
       script: scriptBy([
@@ -4473,10 +4490,174 @@ describe("运行器的草稿", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
     await h.runner.prompt(promptMessage("bot-1", "run-2", "提个 issue", { groupId: "group-b" }));
 
-    expect(h.sent.flatMap((message) => (message.type === "draft_create" ? [message.draft] : []))).toMatchObject([
-      { accountId: "acc-xhs", content: { images: [IMAGE] }, scheduledAt: null },
+    expect(drafted(h)).toMatchObject([
+      {
+        accountId: "acc-xhs",
+        content: { images: [{ path: realpathSync(join(workDir, "cover.png")) }] },
+        scheduledAt: null,
+      },
       { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
     ]);
+  });
+
+  it("配图在工作目录外时报错且不发上行", async () => {
+    const { dataDir } = botWorkDir();
+    const outside = join(dataDir, "桌面上的图.png");
+    writeFileSync(outside, COVER_BYTES);
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "发小红书",
+          callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [{ path: outside }] } }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    expect(drafted(h), "工作目录外的图不能进草稿").toEqual([]);
+    expect(shape(h.sent), "配图不对是参数错误，不是问").not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+    const error = seen.toolResults.join("");
+    expect(error, "点名是哪张图").toContain("桌面上的图.png");
+    expect(error, "告诉模型下一步怎么办").toContain("先把图放进工作目录再起草");
+  });
+
+  it("工作目录里指向禁区的符号链接当配图被拒", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    // 助理 Chrome 的 profile 是固定禁区，路径由工作目录往上两级推出来。
+    const cookies = join(dataDir, "chrome-profile", "Default", "Cookies");
+    mkdirSync(dirname(cookies), { recursive: true });
+    writeFileSync(cookies, "登录态");
+    symlinkSync(cookies, join(workDir, "cover.png"));
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["发小红书", callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [IMAGE] } })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    expect(drafted(h)).toEqual([]);
+    expect(shape(h.sent)).not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+    const error = seen.toolResults.join("");
+    expect(error, "按链接指向的真实位置认，认出是禁区").toContain("固定禁区");
+    expect(error, "禁区里的文件不能叫模型挪进工作目录").not.toContain("放进工作目录");
+  });
+
+  it("配图的 sha256 由运行器算，和文件内容一致", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptBy([
+        [
+          "发小红书",
+          callTool("create_draft", {
+            accountId: "acc-xhs",
+            content: { ...POST, images: [{ path: join(workDir, "cover.png"), sha256: "a".repeat(64) }] },
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发小红书"));
+
+    expect(
+      drafted(h).map((draft) => draft.content.images),
+      "模型多写的 sha256 不算数",
+    ).toEqual([
+      [
+        {
+          path: realpathSync(join(workDir, "cover.png")),
+          sha256: createHash("sha256").update(COVER_BYTES).digest("hex"),
+        },
+      ],
+    ]);
+  });
+
+  it("配图不存在或不是普通文件时报错", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    mkdirSync(join(workDir, "图集"));
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "发两条",
+          callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [{ path: "没有这张.png" }] } }),
+        ],
+        [
+          "发目录",
+          callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [{ path: "图集" }] } }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发两条"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "发目录", { groupId: "group-b" }));
+
+    expect(drafted(h)).toEqual([]);
+    const [missing, directory] = seen.toolResults;
+    expect(missing).toContain("配图「没有这张.png」不存在");
+    expect(directory).toContain("配图「图集」不是普通文件");
+  });
+
+  it("有账号时 prompt 列出能用的账号，没账号时 prompt 不变", async () => {
+    const userText = async (accounts: readonly AccountConfig[]) => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await startHarness({
+        bots: ["bot-1"],
+        accounts,
+        extensionTools: [],
+        script: (req) => {
+          requests.push(req);
+          return { textChunks: ["好"], usage: { input: 800, output: 2 } };
+        },
+      });
+      await h.runner.prompt(
+        promptMessage("bot-1", "run-1", "写一条小红书", { task: topicTask(), members: TWO_MEMBERS }),
+      );
+      const content = requests[0]?.messages.find((message) => message.role === "user")?.content;
+      const description = requests[0]?.tools?.find((tool) => tool.function.name === "create_draft")?.function
+        .description;
+      return { text: (content as ReadonlyArray<{ text: string }>)[0]?.text ?? "", description };
+    };
+    const section = [
+      "能用的账号：",
+      "- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
+      "- GitHub @baize-tech，可起草档，accountId：acc-gh",
+      "- X @baize_bot，只读档，不能起草，accountId：acc-x",
+    ].join("\n");
+
+    const withAccounts = await userText(ACCOUNTS);
+    const withoutAccounts = await userText([]);
+
+    expect(withAccounts.text, "每个账号一行，平台、账号名、档位和 accountId 都在").toContain(section);
+    expect(withAccounts.text.indexOf(section), "账号和项目清单一样是背景，排在任务卡前面").toBeLessThan(
+      withAccounts.text.indexOf("任务卡："),
+    );
+    expect(withoutAccounts.text, "没账号的 Bot 整段不出").not.toContain("能用的账号");
+    expect(withAccounts.text.replace(`${section}\n\n`, ""), "除了这一段，其余字节不变").toBe(withoutAccounts.text);
+    expect(withAccounts.description, "不再叫模型先随便写一个 accountId").not.toContain("随便写");
+    expect(withAccounts.description).toContain("accountId 从 prompt 里的能用的账号取");
   });
 
   it("edit_draft 发一条 draft_edit，结果告诉模型改过的稿子要重新等批", async () => {

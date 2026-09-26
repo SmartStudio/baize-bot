@@ -1,6 +1,3 @@
-import { realpathSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   GRANTABLE_SCOPES,
   AccountId,
@@ -15,6 +12,7 @@ import {
 } from "@baize/shared";
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
+import { forbiddenPathPrefixes, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 
 export interface GateAccess {
   readonly network: boolean;
@@ -90,57 +88,6 @@ const INTERNAL_TOOLS = new Set([
   "set_cadence",
   "propose_project",
 ]);
-
-export const forbiddenPathPrefixes = (workDir?: string): readonly string[] => {
-  const home = homedir();
-  return [
-    join(home, ".ssh"),
-    join(home, "Library", "Keychains"),
-    "/Library/Keychains",
-    join(home, "Library", "Application Support", "Google", "Chrome"),
-    join(home, "Library", "Application Support", "Chromium"),
-    join(home, "Library", "Application Support", "Microsoft Edge"),
-    join(home, "Library", "Application Support", "Firefox", "Profiles"),
-    join(home, ".config", "google-chrome"),
-    join(home, ".config", "chromium"),
-    join(home, ".mozilla", "firefox"),
-    ...(workDir === undefined ? [] : [join(dirname(dirname(workDir)), "chrome-profile")]),
-  ];
-};
-
-export function logicalResolve(input: string, cwd: string): string {
-  let normalized = input;
-  if (normalized.startsWith("@")) normalized = normalized.slice(1);
-  let expanded = normalized;
-  if (expanded === "~") expanded = homedir();
-  else if (expanded.startsWith("~/")) expanded = join(homedir(), expanded.slice(2));
-  return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
-}
-
-export function realpathExisting(logical: string): string {
-  const suffix: string[] = [];
-  let current = logical;
-  for (;;) {
-    try {
-      const real = realpathSync.native(current);
-      return suffix.length === 0 ? real : join(real, ...suffix);
-    } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM" && code !== "ENOTDIR") return logical;
-      const parent = dirname(current);
-      if (parent === current) return logical;
-      suffix.unshift(current.slice(parent.length + 1));
-      current = parent;
-    }
-  }
-}
-
-export function isInsideRoot(realChild: string, root: string, platform: NodeJS.Platform = process.platform): boolean {
-  const fold = (value: string): string => (platform === "darwin" ? value.toLocaleLowerCase("en-US") : value);
-  const child = fold(realpathExisting(realChild));
-  const realRoot = fold(realpathExisting(root));
-  return child === realRoot || child.startsWith(`${realRoot}${sep}`);
-}
 
 const isForbiddenPath = (path: string, call: GateContext): boolean => {
   const real = realpathExisting(path);

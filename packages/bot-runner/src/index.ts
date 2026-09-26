@@ -12,7 +12,7 @@ import {
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
-import { createDraftTools } from "./drafts.js";
+import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
 import { type BotDirs, botDirs, ensureBotDirs, groupSessionDir } from "./paths.js";
@@ -175,7 +175,7 @@ const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
 
 // 群标签之后先放任务卡：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
 // 群里的闲聊会把它挤远，模型更容易照着最后几句走。
-function composePrompt(message: PromptMessage): string {
+function composePrompt(message: PromptMessage, accounts: ConfigMessage["accounts"]): string {
   const sections: string[] = [
     message.group.kind === "solo"
       ? "[这是你和用户的单聊]"
@@ -205,6 +205,7 @@ function composePrompt(message: PromptMessage): string {
     }
   }
   if (message.projects !== undefined) sections.push(renderProjects(message.projects));
+  if (accounts.length > 0) sections.push(renderAccounts(accounts));
   if (message.task !== null) sections.push(`任务卡：\n${renderTaskCard(message.task, message.members)}`);
   // 带 handoffId 的这条 prompt，正文就是控制面渲染好的交接报文：紧跟在任务卡后面单成一段，
   // 并点名先确认接手。混在群聊后面当「当前这条」，模型会当成又一句闲话直接开干。
@@ -462,7 +463,12 @@ export function createRunner(config: RunnerConfig): Runner {
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
-      ...createDraftTools({ activeRun, send: config.send, accounts: () => desiredConfig(bot)!.accounts }),
+      ...createDraftTools({
+        activeRun,
+        send: config.send,
+        accounts: () => desiredConfig(bot)!.accounts,
+        workDir: dirs.workDir,
+      }),
       ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
     ];
     const mcp =
@@ -558,7 +564,7 @@ export function createRunner(config: RunnerConfig): Runner {
           else config.send(outgoing);
         },
       );
-      await session.prompt(composePrompt(message));
+      await session.prompt(composePrompt(message, desiredConfig(bot)!.accounts));
     } catch (error) {
       fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
     } finally {

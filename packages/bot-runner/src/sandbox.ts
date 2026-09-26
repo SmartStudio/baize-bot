@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
-import { forbiddenPathPrefixes, realpathExisting, type GateAccess } from "./gate.js";
+import type { GateAccess } from "./gate.js";
+import { forbiddenPathPrefixes, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
 const MACH_LOOKUP_NAMES = [
