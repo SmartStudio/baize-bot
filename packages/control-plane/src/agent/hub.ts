@@ -72,10 +72,12 @@ export class AgentHub {
   readonly #deps: AgentHubDeps;
   readonly #connections = new Map<ComputerId, AgentConnection>();
   /**
-   * hello 那条 config 已经发出去的连接。连接一握手就进 #connections，好让断线收尾停手、并发的 sendConfig 送得到；
+   * 连接的 config 走到哪一步。连接一握手就进 #connections，好让断线收尾停手、并发的 sendConfig 送得到；
    * 但在 config 发出之前派 prompt，新起的代理还没有运行器，会把它丢掉，那个 run 就永远不收尾。
+   * hello 那条发出去就记 ready：旧代理不回 config_applied，等它的话旧代理永远派不上活。
+   * 代理回 config_rejected 记 rejected，直到它回 config_applied 才回到 ready。
    */
-  readonly #configured = new WeakSet<AgentConnection>();
+  readonly #configState = new WeakMap<AgentConnection, "ready" | "rejected">();
   readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
   readonly #finishChains = new Map<ComputerId, Promise<void>>();
   readonly #pendingFinishes = new Set<Promise<void>>();
@@ -149,10 +151,22 @@ export class AgentHub {
     });
   }
 
-  /** 能派活：连着，而且 hello 的 config 已经发出。 */
+  /** 能派活：连着，hello 的 config 已经发出，而且代理没拒掉 config。 */
   isOnline(computerId: ComputerId): boolean {
     const conn = this.#connections.get(computerId);
-    return conn !== undefined && this.#configured.has(conn) && conn.socket.readyState === conn.socket.OPEN;
+    return conn !== undefined && this.#configState.get(conn) === "ready" && conn.socket.readyState === conn.socket.OPEN;
+  }
+
+  configRejected(conn: AgentConnection): boolean {
+    return this.#configState.get(conn) === "rejected";
+  }
+
+  markConfigRejected(conn: AgentConnection): void {
+    this.#configState.set(conn, "rejected");
+  }
+
+  markConfigApplied(conn: AgentConnection): void {
+    this.#configState.set(conn, "ready");
   }
 
   #connected(computerId: ComputerId): boolean {
@@ -275,7 +289,7 @@ export class AgentHub {
       this.#deps.push.push(computer.ownerId, { type: "message", message: assistant.greeting });
     }
     await this.#sendConfig(accepted, "hello");
-    this.#configured.add(accepted);
+    this.#configState.set(accepted, "ready");
     if (assistant !== null) {
       const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
       await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));

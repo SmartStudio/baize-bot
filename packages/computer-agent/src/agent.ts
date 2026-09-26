@@ -93,6 +93,17 @@ export function startAgent(options: AgentOptions): AgentHandle {
     }
     const parsed = ControlToAgent.safeParse(json);
     if (!parsed.success) {
+      // config 被拒只在本地记一笔的话，控制面会一直往这台电脑派活，用户只看到活没人接。报回去让它停派。
+      if ((json as { type?: unknown } | null)?.type === "config") {
+        const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
+        log(`config 不合这个电脑代理的版本，丢弃。校验不过的字段：${paths}`);
+        send({
+          type: "agent_error",
+          code: "config_rejected",
+          detail: `config 不合这个电脑代理的版本，校验不过的字段：${paths}`,
+        });
+        return;
+      }
       log(`报文不合 ControlToAgent，丢弃：${parsed.error.message}`);
       return;
     }
@@ -112,6 +123,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           accounts: message.accounts,
           grants: message.grants,
           modelGateway: message.modelGateway,
+          accountsProxy: message.accountsProxy,
           // 不透传的话运行器按空数组对账，每来一条 config 就把所有 Bot 盘上的 skill 清空。
           skills: message.skills,
           dataDir,
@@ -124,6 +136,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           await runner.applyConfig(config);
         }
         log(`收到 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`);
+        send({ type: "config_applied" });
         return;
       }
       case "prompt": {

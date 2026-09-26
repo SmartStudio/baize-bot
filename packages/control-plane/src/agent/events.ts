@@ -70,6 +70,9 @@ export async function handleAgentEvent(
     case "heartbeat":
       await markComputerOnline(deps.db, conn.computerId);
       return;
+    case "config_applied":
+      deps.agents.markConfigApplied(conn);
+      return;
     case "bot_text":
       await onBotText(deps, conn, message);
       return;
@@ -416,12 +419,15 @@ function runPassed(runId: RunId): boolean {
   return passed;
 }
 
+const CONFIG_MISMATCH = "电脑代理和控制面版本对不上，配置被拒";
+
 const ERROR_REASONS: Record<AgentError["code"], string> = {
   bad_message: "它看不懂控制面发过去的报文",
   prompt_before_config: "配置还没到就先接到了活",
   unsupported: "这件事它还做不了",
   runner_failed: "跑活的进程出错了",
   model_failed: "模型上游没回话",
+  config_rejected: CONFIG_MISMATCH,
 };
 
 function modelFailureStatus(detail: string): string {
@@ -436,14 +442,30 @@ function modelFailureMessage(detail: string): string {
 }
 
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
+  if (event.code === "config_rejected") {
+    // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
+    deps.agents.markConfigRejected(conn);
+    console.warn(`电脑 ${conn.computerId} 拒了 config：${event.detail}`);
+    await deps.notifications.publish(conn.ownerId, {
+      kind: "stuck",
+      text: `电脑上的活派不出去：${CONFIG_MISMATCH}。把电脑代理和控制面升到同一个版本再连。`,
+      groupId: null,
+    });
+    return;
+  }
+  // 被拒期间代理手里没有能用的运行器，它回的 prompt_before_config 其实是版本不对，照实说。
+  const reason =
+    event.code === "prompt_before_config" && deps.agents.configRejected(conn)
+      ? CONFIG_MISMATCH
+      : ERROR_REASONS[event.code];
   const text =
     event.code === "model_failed"
       ? modelFailureMessage(event.detail)
-      : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`;
+      : `电脑那边没干成这件事，${reason}。原话是：${event.detail}`;
   if (event.runId !== undefined) {
     // runId 是外部输入，只认这台电脑上还没结束的活。已经收过尾的重报落在这里，什么都不做。
     const run = (await openRunsForComputer(deps.db, conn.computerId)).find((open) => open.runId === event.runId);
-    if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason: ERROR_REASONS[event.code] });
+    if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason });
     return;
   }
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
@@ -457,7 +479,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });
   // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
   if (open !== null && open.groupId === groupId) {
-    await failRoutineRunOf(deps, open.runId, ERROR_REASONS[event.code]);
+    await failRoutineRunOf(deps, open.runId, reason);
   }
 }
 

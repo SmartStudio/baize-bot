@@ -107,6 +107,7 @@ const configMessage = {
   accounts: [],
   grants: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },
+  accountsProxy: { baseUrl: "http://localhost:3001/accounts-proxy" },
 };
 
 const promptMessage = {
@@ -462,6 +463,31 @@ describe("电脑代理连控制面", () => {
         runId: "run-早了",
       },
     ]);
+  });
+
+  it("旧控制面发来缺 accountsProxy 的 config：回 config_rejected 带字段路径、不建运行器，下一条合格的 config 建好后回 config_applied", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const { accountsProxy: _dropped, ...oldConfig } = configMessage;
+
+    socket.send(JSON.stringify(oldConfig));
+    socket.send(JSON.stringify(promptMessage));
+    const rejected = await server.waitForMessage("agent_error", 1, 3000);
+    expect(rejected, "被拒的 config 要报给控制面，detail 写校验不过的字段路径").toEqual({
+      type: "agent_error",
+      code: "config_rejected",
+      detail: "config 不合这个电脑代理的版本，校验不过的字段：accountsProxy",
+    });
+    expect(
+      (await server.waitForMessage("agent_error", 2, 3000)).code,
+      "没建运行器，后面的 prompt 照旧丢掉并报给控制面",
+    ).toBe("prompt_before_config");
+    expect(runnerCalls().configSkills, "旧 config 不建运行器").toEqual([]);
+    expect(server.messages.filter((message) => message.type === "config_applied")).toEqual([]);
+
+    socket.send(JSON.stringify(configMessage));
+    expect(await server.waitForMessage("config_applied", 1, 3000)).toEqual({ type: "config_applied" });
+    expect(runnerCalls().configSkills, "合格的 config 建出运行器").toHaveLength(1);
   });
 
   it("坏报文只被丢弃，不拖垮连接", async () => {
@@ -1064,7 +1090,7 @@ describe("电脑代理连控制面", () => {
         outputTokens: 2,
       },
     ]);
-    expect(order).toEqual(["approval_request", "approval_abandoned", "run_done", "closed"]);
+    expect(order).toEqual(["config_applied", "approval_request", "approval_abandoned", "run_done", "closed"]);
   });
 
   it("运行器停不下来时，停机在上限内返回", async () => {

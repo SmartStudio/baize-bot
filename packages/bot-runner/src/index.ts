@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import {
+  type AccountConfig,
   type AgentToControl,
   type BotId,
   type ComputerId,
@@ -8,6 +9,7 @@ import {
   type RunId,
   type ToolConnectionConfig,
 } from "@baize/shared";
+import { ACCOUNT_READ_TOOL, createAccountReadTool, readableAccounts } from "./account-read.js";
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
 import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
@@ -39,6 +41,8 @@ export interface RunnerConfig {
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
   readonly modelGateway: ConfigMessage["modelGateway"];
+  /** 读 GitHub、X 的 account_read 打这里，见 `src/account-read.ts`。 */
+  readonly accountsProxy: ConfigMessage["accountsProxy"];
   readonly accounts: ConfigMessage["accounts"];
   readonly grants: ConfigMessage["grants"];
   /** 该用户全部 Bot 的 skill，按 botId 分开落盘。省略按空数组对账，也就是把留在盘上的旧 skill 清掉。 */
@@ -78,6 +82,7 @@ interface BotDesired {
   readonly tools: readonly ToolConnectionConfig[];
   readonly skills: readonly BotSkill[];
   readonly gateway: RunnerConfig["modelGateway"];
+  readonly accountsProxy: RunnerConfig["accountsProxy"];
   readonly computerId: ComputerId;
   readonly accounts: ConfigMessage["accounts"];
   readonly grants: ConfigMessage["grants"];
@@ -87,6 +92,8 @@ interface BotDefinition {
   readonly config: BotConfig;
   readonly connections: readonly ToolConnectionConfig[];
   readonly skills: readonly BotSkill[];
+  /** 写进 account_read 描述的号。 */
+  readonly readable: readonly AccountConfig[];
   readonly fingerprint: string;
 }
 
@@ -130,9 +137,11 @@ function definitionFor(
   bot: BotConfig,
   tools: readonly ToolConnectionConfig[],
   skills: readonly BotSkill[],
+  accounts: ConfigMessage["accounts"],
   skillsReady = true,
 ): BotDefinition {
   const connections = connectionsFor(bot.id, tools);
+  const readable = readableAccounts(accounts);
   const botSkills = skills
     .filter((skill) => skill.botId === bot.id)
     .toSorted((left, right) => left.id.localeCompare(right.id));
@@ -140,12 +149,15 @@ function definitionFor(
     config: bot,
     connections,
     skills: botSkills,
+    readable,
     // assignedBotIds 里别的 Bot 变化不影响当前 Bot。当前 Bot 是否被分配已经由 connectionsFor 体现。
     fingerprint: JSON.stringify({
       bot,
       connections: connections.map((connection) => Object.assign({}, connection, { assignedBotIds: [bot.id] })),
       skills: botSkills.map((skill) => ({ id: skill.id, name: skill.name, steps: skill.steps })),
       skillsReady,
+      // 登录态和档位不进：它们只影响调用时的判断，那时现取。
+      readable: readable.map(({ id, platform, handle }) => ({ id, platform, handle })),
     }),
   };
 }
@@ -163,10 +175,11 @@ const desiredFor = (
   tools: readonly ToolConnectionConfig[],
   skills: readonly BotSkill[],
   gateway: RunnerConfig["modelGateway"],
+  accountsProxy: RunnerConfig["accountsProxy"],
   computerId: ComputerId,
   accounts: ConfigMessage["accounts"],
   grants: ConfigMessage["grants"],
-): BotDesired => ({ version, config: bot, tools, skills, gateway, computerId, accounts, grants });
+): BotDesired => ({ version, config: bot, tools, skills, gateway, accountsProxy, computerId, accounts, grants });
 
 const append = (bot: BotRuntime, operation: () => Promise<void>): Promise<void> => {
   const queued = bot.chain.then(operation);
@@ -279,6 +292,7 @@ export function createRunner(config: RunnerConfig): Runner {
         config.tools,
         initialSkills,
         config.modelGateway,
+        config.accountsProxy,
         config.computerId,
         initialAccounts,
         initialGrants,
@@ -288,7 +302,7 @@ export function createRunner(config: RunnerConfig): Runner {
         dirs.skillsDir,
         initialSkills.filter((skill) => skill.botId === botConfig.id),
       );
-      const current = definitionFor(botConfig, config.tools, initialSkills, true);
+      const current = definitionFor(botConfig, config.tools, initialSkills, initialAccounts, true);
       return [
         botConfig.id,
         {
@@ -428,7 +442,7 @@ export function createRunner(config: RunnerConfig): Runner {
           fail("runner_failed", `Bot ${bot.botId} 对账 skill 失败：${String(error)}`, bot.lastGroupId);
         }
       }
-      const prepared = definitionFor(desired.config, desired.tools, desired.skills, skillsReady);
+      const prepared = definitionFor(desired.config, desired.tools, desired.skills, desired.accounts, skillsReady);
 
       if (current === null || current.fingerprint !== prepared.fingerprint) {
         await closeBotResources(bot);
@@ -491,6 +505,13 @@ export function createRunner(config: RunnerConfig): Runner {
       }),
       ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
       ...(bot.browser?.tools ?? []),
+      createAccountReadTool({
+        described: definition.readable,
+        live: () => {
+          const desired = desiredConfig(bot)!;
+          return { accounts: desired.accounts, proxy: desired.accountsProxy, gateway: desired.gateway };
+        },
+      }),
     ];
     const mcp =
       bot.mcp ??
@@ -502,6 +523,7 @@ export function createRunner(config: RunnerConfig): Runner {
           ...builtIn.map((tool) => tool.name),
           ...ASSISTANT_TOOL_NAMES,
           ...BROWSER_TOOL_NAMES,
+          ACCOUNT_READ_TOOL,
         ]),
       });
     bot.mcp = mcp;
@@ -637,6 +659,7 @@ export function createRunner(config: RunnerConfig): Runner {
             next.tools,
             nextSkills,
             next.modelGateway,
+            next.accountsProxy,
             next.computerId,
             nextAccounts,
             nextGrants,

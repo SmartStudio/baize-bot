@@ -1,8 +1,16 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { AccountId, type Account } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { addAccountWithToken, CredentialCrypto } from "../src/credentials.js";
 import { accounts } from "../src/db/schema.js";
+import { startFakePlatforms } from "../src/fake-platforms.js";
+import { ACCOUNTS_PROXY_MAX_BYTES, TRUNCATED_HEADER } from "../src/http/accounts-proxy.js";
 import { newId } from "../src/ids.js";
+import { startTestServer, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { nextOf } from "./helpers/content.js";
+import { createTestDb } from "./helpers/db.js";
+import { waitFor } from "./helpers/fixtures.js";
 import { connectPlatform, makeOwner, oauthStack, proxyFetch, type OAuthStack, type Owner } from "./helpers/oauth.js";
 
 let s: OAuthStack;
@@ -16,6 +24,9 @@ afterAll(async () => {
   for (const owner of owners) owner.close();
   await s.close();
 });
+
+const isUser = (request: { platform: string; path: string }) =>
+  request.platform === "github" && request.path === "/user";
 
 type Linked = { readonly owner: Owner; readonly linked: readonly Account[]; readonly config: Owner["config"] };
 
@@ -32,6 +43,46 @@ async function ownerWith(platforms: readonly ("github" | "x")[]): Promise<Linked
   }
   return { owner, linked, config };
 }
+
+/** 手里已有令牌的账号，像 account-add 脚本那样挂上去，令牌里带什么字符由测试定。 */
+async function ownerWithToken(stack: OAuthStack, token: string): Promise<{ owner: Owner; account: Account }> {
+  const owner = await makeOwner(stack, { remote: true });
+  owners.push(owner);
+  const account = await addAccountWithToken(
+    stack.database.db,
+    new CredentialCrypto(TEST_CREDENTIALS_KEY),
+    {
+      ownerId: owner.user.id,
+      computerId: owner.remote?.computerId ?? owner.local.computerId,
+      platform: "github",
+      handle: "baize-dev",
+    },
+    token,
+  );
+  return { owner, account };
+}
+
+/** 斜杠、加号、等号、引号、反斜杠都有，URL 编码和 JSON 转义都会改它的样子。 */
+const ODD_TOKEN = String.raw`ghu_p1/5+fix="two\three`;
+const hex2 = (byte: number): string => byte.toString(16).padStart(2, "0");
+const upperPct = encodeURIComponent(ODD_TOKEN);
+const lowerPct = upperPct.replace(/%[0-9A-F]{2}/g, (escape) => escape.toLowerCase());
+/** 第 1、3、5… 个转义小写，其余大写。 */
+const mixedPct = upperPct
+  .split("%")
+  .map((part, i) => (i % 2 === 1 ? part.slice(0, 2).toLowerCase() + part.slice(2) : part))
+  .join("%");
+const allBytesPct = [...Buffer.from(ODD_TOKEN)].map((byte) => `%${hex2(byte)}`).join("");
+const jsonEscaped = JSON.stringify(ODD_TOKEN).slice(1, -1);
+const jsonSlash = jsonEscaped.replaceAll("/", "\\/");
+const jsonUnicode = [...ODD_TOKEN]
+  .map((char, i) => {
+    const code = char.charCodeAt(0).toString(16).padStart(4, "0");
+    return `\\u${i % 2 === 0 ? code : code.toUpperCase()}`;
+  })
+  .join("");
+/** 一把令牌里每个字符各用一种写法。 */
+const perChar = String.raw`ghu_p1%2f5\u002Bfix%3D\"two%5cthree`;
 
 const errorOf = async (response: Response): Promise<string> => ((await response.json()) as { error: string }).error;
 
@@ -151,5 +202,167 @@ describe("账号代理", () => {
     }
     expect(exposed).not.toMatch(/(github|x)_(access|refresh)_\d/);
     expect(gatewayKey).not.toBe(githubToken);
+  });
+
+  it("平台在正文里回显收到的令牌：成功、出错、401 刷新后重试的回包里，这次用过的新旧令牌都换成 [已隐藏]", async () => {
+    const before = s.fake.requests().length;
+    const { owner, linked } = await ownerWith(["github"]);
+    const [github] = linked;
+    if (github === undefined) throw new Error("没连上 GitHub");
+    const token = s.fake
+      .requests()
+      .slice(before)
+      .find((request) => request.method === "GET")?.authorization;
+    const oldToken = token?.replace(/^Bearer /, "") ?? "";
+    expect(oldToken, "连 GitHub 时发出过访问令牌").not.toBe("");
+
+    s.fake.failNext(200, isUser, { authorization: `Bearer ${oldToken}`, again: oldToken });
+    const ok = await proxyFetch(owner, `/${github.id}/user`);
+    const okText = await ok.text();
+    expect(ok.status).toBe(200);
+    expect(JSON.parse(okText), "成功回包里两处令牌都换掉").toEqual({
+      authorization: "Bearer [已隐藏]",
+      again: "[已隐藏]",
+    });
+
+    s.fake.failNext(502, isUser, { error: `Authorization: Bearer ${oldToken}` });
+    const failed = await proxyFetch(owner, `/${github.id}/user`);
+    expect(failed.status, "出错的状态码照旧透给电脑").toBe(502);
+    expect(await failed.json(), "出错回包里的令牌也换掉").toEqual({ error: "Authorization: Bearer [已隐藏]" });
+
+    // 旧令牌先挨一次 401，控制面强制刷新后拿新令牌重试。新令牌只有挂住第二条请求才看得到，看到再排回包。
+    s.fake.failNext(401, (request) => isUser(request) && request.authorization === `Bearer ${oldToken}`);
+    const retried = (request: { platform: string; path: string; authorization: string | null }) =>
+      isUser(request) && request.authorization !== `Bearer ${oldToken}`;
+    const release = s.fake.hold(retried);
+    const retryFrom = s.fake.requests().length;
+    const pending = proxyFetch(owner, `/${github.id}/user`);
+    let newToken = "";
+    await waitFor(async () => {
+      newToken =
+        s.fake
+          .requests()
+          .slice(retryFrom)
+          .findLast(retried)
+          ?.authorization?.replace(/^Bearer /, "") ?? "";
+      return newToken !== "";
+    }, "刷新后的重试挂在假平台上");
+    s.fake.failNext(200, retried, { old: oldToken, fresh: `Bearer ${newToken}` });
+    release();
+    const refreshed = await pending;
+    expect(refreshed.status).toBe(200);
+    expect(newToken, "确实换了令牌").not.toBe(oldToken);
+    expect(await refreshed.json(), "新旧两份令牌都换掉").toEqual({ old: "[已隐藏]", fresh: "Bearer [已隐藏]" });
+  });
+
+  it("正文超过上限就截在上限处并在响应头里标记，切在令牌中间也不留半截令牌", async () => {
+    const before = s.fake.requests().length;
+    const { owner, linked } = await ownerWith(["github"]);
+    const [github] = linked;
+    if (github === undefined) throw new Error("没连上 GitHub");
+    const token =
+      s.fake
+        .requests()
+        .slice(before)
+        .find((request) => request.method === "GET")
+        ?.authorization?.replace(/^Bearer /, "") ?? "";
+    expect(token.length, "令牌够长才切得到它中间").toBeGreaterThan(10);
+
+    const cut = ACCOUNTS_PROXY_MAX_BYTES - 10;
+    s.fake.failNext(200, isUser, `${"a".repeat(cut)}${token}${"b".repeat(4096)}`);
+    const straddled = await proxyFetch(owner, `/${github.id}/user`);
+    expect(straddled.headers.get(TRUNCATED_HEADER), "超上限的回包在头里标记截断").toBe("true");
+    expect(await straddled.text(), "上限处落在令牌中间，那半截令牌也去掉").toBe("a".repeat(cut));
+
+    s.fake.failNext(200, isUser, "c".repeat(ACCOUNTS_PROXY_MAX_BYTES + 1));
+    const over = await proxyFetch(owner, `/${github.id}/user`);
+    expect(over.headers.get(TRUNCATED_HEADER)).toBe("true");
+    expect((await over.text()).length, "截在上限处").toBe(ACCOUNTS_PROXY_MAX_BYTES);
+
+    s.fake.failNext(200, isUser, "d".repeat(ACCOUNTS_PROXY_MAX_BYTES));
+    const exact = await proxyFetch(owner, `/${github.id}/user`);
+    expect(exact.headers.get(TRUNCATED_HEADER), "正好到上限不算截断").toBeNull();
+    expect((await exact.text()).length).toBe(ACCOUNTS_PROXY_MAX_BYTES);
+  });
+
+  it("平台回显令牌的等价写法：大小写百分号编码、JSON 转义、逐字符混着写，同一把令牌出现多次，全都换成 [已隐藏]", async () => {
+    const { owner, account } = await ownerWithToken(s, ODD_TOKEN);
+    const forms = { upperPct, lowerPct, mixedPct, allBytesPct, jsonEscaped, jsonSlash, jsonUnicode, perChar };
+    expect(lowerPct, "小写百分号编码").toBe("ghu_p1%2f5%2bfix%3d%22two%5cthree");
+    expect(mixedPct, "大小写混写").toBe("ghu_p1%2f5%2Bfix%3d%22two%5cthree");
+    expect(jsonEscaped, "标准 JSON 转义引号和反斜杠").toBe(String.raw`ghu_p1/5+fix=\"two\\three`);
+    const body = [ODD_TOKEN, ...Object.values(forms)].map((form) => `<${form}>`).join(" ");
+    const sent = (request: { authorization: string | null }) => request.authorization === `Bearer ${ODD_TOKEN}`;
+    s.fake.failNext(200, (request) => isUser(request) && sent(request), body);
+
+    const echoed = await proxyFetch(owner, `/${account.id}/user`);
+    expect(echoed.status).toBe(200);
+    expect(await echoed.text(), "每一处都整把换掉").toBe(Array.from({ length: 9 }, () => "<[已隐藏]>").join(" "));
+    expect(s.fake.requests().findLast(isUser)?.authorization, "平台收到的是这把令牌").toBe(`Bearer ${ODD_TOKEN}`);
+  });
+
+  it("截断落在令牌的编码写法中间，连半个百分号转义或 \\u 转义也一起去掉", async () => {
+    const { owner, account } = await ownerWithToken(s, ODD_TOKEN);
+    for (const [form, kept] of [
+      [lowerPct, 12],
+      [jsonUnicode, 22],
+    ] as const) {
+      const head = "a".repeat(ACCOUNTS_PROXY_MAX_BYTES - kept);
+      s.fake.failNext(200, isUser, `${head}${form}${"b".repeat(4096)}`);
+      const cut = await proxyFetch(owner, `/${account.id}/user`);
+      expect(cut.headers.get(TRUNCATED_HEADER)).toBe("true");
+      expect(form.slice(0, kept), "上限处落在一个转义中间").toMatch(/%2$|\\u00$/);
+      expect(await cut.text(), `切在「${form.slice(0, kept)}」后面，这一截都去掉`).toBe(head);
+    }
+  });
+
+  it("白名单响应头回显令牌：这个头整个丢掉，别的头和正文照常，请求成功", async () => {
+    const database = await createTestDb();
+    const fake = await startFakePlatforms();
+    const platform = createServer((_request, response) => {
+      response.writeHead(200, {
+        "content-type": "application/json",
+        "x-ratelimit-remaining": "4999",
+        "x-ratelimit-echo": ODD_TOKEN,
+        link: `<https://api.github.com/user?access_token=${lowerPct}&page=2>; rel="next"`,
+        etag: `W/"${jsonUnicode}"`,
+      });
+      response.end(JSON.stringify({ login: "baize-dev" }));
+    });
+    await new Promise<void>((resolve) => platform.listen(0, "127.0.0.1", resolve));
+    const server = await startTestServer(database.db, {
+      githubApiBaseUrl: `http://127.0.0.1:${(platform.address() as AddressInfo).port}`,
+    });
+    const stack: OAuthStack = {
+      database,
+      fake,
+      server,
+      close: async () => {
+        await server.close();
+        await new Promise<void>((resolve) => platform.close(() => resolve()));
+        await fake.close();
+        await database.close();
+      },
+    };
+    let owner: Owner | undefined;
+    try {
+      const linked = await ownerWithToken(stack, ODD_TOKEN);
+      owner = linked.owner;
+      const account = linked.account;
+      const response = await proxyFetch(owner, `/${account.id}/user`);
+      expect(response.status, "头里有令牌不影响这次读").toBe(200);
+      expect(await response.json()).toEqual({ login: "baize-dev" });
+      const headers = Object.fromEntries(response.headers);
+      expect(headers["x-ratelimit-remaining"], "没命中的白名单头照常透").toBe("4999");
+      expect(headers["content-type"]).toBe("application/json");
+      for (const name of ["x-ratelimit-echo", "link", "etag"]) {
+        expect(headers[name], `${name} 回显了令牌，整个丢掉`).toBeUndefined();
+      }
+      const serialized = JSON.stringify(headers);
+      for (const form of [ODD_TOKEN, lowerPct, "ghu_p1"]) expect(serialized).not.toContain(form);
+    } finally {
+      owner?.close();
+      await stack.close();
+    }
   });
 });

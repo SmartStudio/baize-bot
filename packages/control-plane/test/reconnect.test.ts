@@ -204,3 +204,61 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
     push.close();
   }
 });
+
+it("代理拒了 config：这台电脑不再接活，派出去的 run 按版本对不上收尾，推一条 stuck；代理收下下一条 config 后恢复", async () => {
+  const owner = await ownerWithBot();
+  const { agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  const MISMATCH = "电脑代理和控制面版本对不上，配置被拒";
+  try {
+    await post(owner.client, owner.groupId, "config 被拒之前派出去的活");
+    const { runId } = await agent.expect("prompt");
+
+    agent.send({
+      type: "agent_error",
+      code: "config_rejected",
+      detail: "config 不合这个电脑代理的版本，校验不过的字段：accountsProxy",
+    });
+    const stuck = await nextMatching(push, (event) => event.type === "notify", " stuck 通知");
+    expect(stuck.type === "notify" ? stuck.notice : null, "用户看到的是版本对不上，不是时序问题").toMatchObject({
+      kind: "stuck",
+      text: expect.stringContaining(MISMATCH),
+    });
+
+    agent.send({
+      type: "agent_error",
+      code: "prompt_before_config",
+      detail: `run ${runId} 的 prompt 比 config 先到`,
+      groupId: owner.groupId,
+      runId,
+    });
+    await nextMatching(
+      push,
+      (event) =>
+        event.type === "message" && event.message.body.kind === "system" && event.message.body.text.includes(MISMATCH),
+      "按版本对不上收尾的那句",
+    );
+    expect(await openRuns(owner.groupId), "派出去的 run 收了尾").toBe(0);
+
+    await post(owner.client, owner.groupId, "config 被拒之后的活");
+    expect(await openRuns(owner.groupId), "被拒之后不再往这台电脑派活，也不留 running 的 run").toBe(0);
+
+    agent.send({ type: "config_applied" });
+    await post(owner.client, owner.groupId, "收下新 config 之后的活");
+    const resumed = await agent.expect("prompt");
+    expect(resumed.text, "被拒期间那条没派出来，收下 config 之后照常接活").toBe("收下新 config 之后的活");
+
+    const texts = await systemTexts(owner.client, owner.groupId);
+    expect(
+      texts.filter((text) => text.includes(MISMATCH)),
+      "收尾那句说的是版本对不上",
+    ).toHaveLength(1);
+    expect(
+      texts.some((text) => text.includes("配置还没到就先接到了活")),
+      "不再误报成时序问题",
+    ).toBe(false);
+  } finally {
+    agent.close();
+    push.close();
+  }
+});

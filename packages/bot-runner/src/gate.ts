@@ -11,6 +11,7 @@ import {
   type Verdict,
 } from "@baize/shared";
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
+import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { type ForbiddenZones, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
@@ -500,6 +501,8 @@ const classifyTool = (call: GateCall): readonly ClassifiedAction[] => {
   if (INTERNAL_TOOLS.has(call.toolName)) {
     return [plainAction(call.toolName === "read_task" ? "read" : "write_workspace")];
   }
+  // 只发 GET，账号越权在工具里、令牌在控制面，这里归 read 不问。
+  if (call.toolName === ACCOUNT_READ_TOOL) return [plainAction("read", targetFromInput(call.input, call))];
   const browserAction = BROWSER_TOOL_ACTIONS.get(call.toolName);
   if (browserAction !== undefined) return [plainAction(browserAction, targetFromInput(call.input, call))];
   if (call.mcpOperation === null) return [plainAction("write_workspace")];

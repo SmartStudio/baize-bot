@@ -412,6 +412,13 @@ describe("浏览器工具", () => {
     expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "ask", action: "engage" });
   });
 
+  it("account_read 归 read，没有授权也直接放行", () => {
+    expect(decide(call("account_read", { accountId: "acc-gh", path: "repos/o/r/issues" }), [], [])).toMatchObject({
+      verdict: "allow",
+      action: "read",
+    });
+  });
+
   it("bash 读 profile 下的 Cookies 被拒", () => {
     const decision = decide(call("bash", { command: `cat ${join(profileDir(), "Default", "Cookies")}` }), [], []);
     expect(decision.verdict).toBe("deny");

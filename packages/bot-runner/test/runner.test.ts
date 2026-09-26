@@ -340,6 +340,7 @@ interface Harness {
     readonly tools?: readonly ToolConnectionConfig[];
     readonly skills?: readonly Skill[];
     readonly modelGateway?: RunnerConfig["modelGateway"];
+    readonly accountsProxy?: RunnerConfig["accountsProxy"];
   }): RunnerConfig;
   close(): Promise<void>;
 }
@@ -401,6 +402,8 @@ async function startHarness(options: {
   readonly dataDir?: string;
   /** 助理 Chrome。不给就和远程电脑一样没有浏览器工具。 */
   readonly browser?: RunnerConfig["browser"];
+  /** 不给就指到一个连不上的地址。 */
+  readonly accountsProxy?: RunnerConfig["accountsProxy"];
 }): Promise<Harness> {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
@@ -438,6 +441,7 @@ async function startHarness(options: {
       readonly tools?: readonly ToolConnectionConfig[];
       readonly skills?: readonly Skill[];
       readonly modelGateway?: RunnerConfig["modelGateway"];
+      readonly accountsProxy?: RunnerConfig["accountsProxy"];
     } = {},
   ): RunnerConfig => ({
     accounts: [...(overrides.accounts ?? options.accounts ?? [])],
@@ -446,6 +450,7 @@ async function startHarness(options: {
     grants: [...(overrides.grants ?? options.grants ?? [])],
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
+    accountsProxy: overrides.accountsProxy ?? options.accountsProxy ?? { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
     dataDir,
     ...(overrides.skills !== undefined
       ? { skills: [...overrides.skills] }
@@ -4044,7 +4049,7 @@ ${join(h.dataDir, "bot-1", "work")}
         ],
       },
     ]);
-    expect(toolNamesSent(requests), "队员的工具只多了三件起草工具").toEqual([
+    expect(toolNamesSent(requests), "队员的工具只多了三件起草工具和读 GitHub、X 的 account_read").toEqual([
       "read",
       "bash",
       "edit",
@@ -4061,6 +4066,7 @@ ${join(h.dataDir, "bot-1", "work")}
       "create_draft",
       "edit_draft",
       "propose_plan",
+      "account_read",
     ]);
   });
 
@@ -5077,6 +5083,81 @@ const imagesIn = (req: ChatCompletionRequest | undefined): string[] =>
   [...JSON.stringify(req?.messages ?? []).matchAll(/data:image\/png;base64,([A-Za-z0-9+/=]+)/g)].map((match) =>
     Buffer.from(match[1] ?? "", "base64").toString(),
   );
+
+const accountReadDescription = (request: ChatCompletionRequest | undefined): string =>
+  request?.tools?.find((tool) => tool.function.name === "account_read")?.function.description ??
+  "（没有 account_read）";
+
+describe("运行器的 account_read", () => {
+  const GITHUB = accountOf("acc-gh", "github", "baize-tech", "draft");
+  const X = accountOf("acc-x", "x", "baize_bot", "read_only");
+  const XHS = accountOf("acc-xhs", "xiaohongshu", "小满的日常", "confirm_publish");
+  const seen: { readonly url: string; readonly authorization: string | undefined }[] = [];
+  let proxyBaseUrl = "";
+  let proxy: ReturnType<typeof createHttpServer> | undefined;
+
+  beforeAll(async () => {
+    const server = createHttpServer((request, response) => {
+      seen.push({ url: request.url ?? "", authorization: request.headers.authorization });
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('[{"number":7,"title":"假 issue"}]');
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("假账号代理没有端口");
+    proxyBaseUrl = `http://127.0.0.1:${address.port}/accounts-proxy`;
+    proxy = server;
+  });
+
+  afterAll(() => new Promise<void>((resolve) => (proxy === undefined ? resolve() : proxy.close(() => resolve()))));
+
+  it("不弹审批，按网关 key 打账号代理，平台回包回到模型那一轮", async () => {
+    seen.length = 0;
+    const results = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: [GITHUB, X, XHS],
+      extensionTools: [],
+      accountsProxy: { baseUrl: proxyBaseUrl },
+      script: scriptRecording(results, [
+        ["看看 issue", callTool("account_read", { accountId: "acc-gh", path: "repos/baize/bot/issues?state=open" })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看 issue"));
+
+    expect(shape(h.sent), "读归 read，不问").not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    expect(seen).toEqual([
+      { url: "/accounts-proxy/acc-gh/repos/baize/bot/issues?state=open", authorization: "Bearer test-key" },
+    ]);
+    expect(results.toolResults.join("")).toContain("假 issue");
+  });
+
+  it("工具描述列出能读的号，config 加了号之后下一条 prompt 的描述跟着变", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: [GITHUB, XHS],
+      extensionTools: [],
+      accountsProxy: { baseUrl: proxyBaseUrl },
+      script: (req) => {
+        requests.push(req);
+        return { textChunks: ["好"], usage: { input: 10, output: 1 } };
+      },
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "有哪些号"));
+    const before = accountReadDescription(requests.at(-1));
+    expect(before).toContain("GitHub @baize-tech，accountId：acc-gh");
+    expect(before, "还没连 X").not.toContain("acc-x");
+    expect(before, "小红书不归这个工具").not.toContain("acc-xhs");
+
+    await h.runner.applyConfig(h.config({ accounts: [GITHUB, X, XHS] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "现在呢"));
+    expect(accountReadDescription(requests.at(-1))).toContain("X @baize_bot，accountId：acc-x");
+  });
+});
 
 describe("助理浏览器的禁区和看图", () => {
   const openMcps: { close(): Promise<void> }[] = [];

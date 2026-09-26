@@ -42,7 +42,7 @@
 
 ### 派到哪台电脑
 
-一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接，而且这条连接 hello 的那份 `config` 已经发出。握手到 `config` 之间还要对账、查库，这段时间里派的 prompt 会比 `config` 先到，新起的代理还没有运行器，只能回 `prompt_before_config` 丢掉它，所以这段时间按不在线算。代理的 `agent_error` 带了 `runId` 就是说那个 run 不会再有 `run_done`，控制面按断线收尾同一套替它收尾：run 结束、挂着的审批过期、群里一句、例行记失败，重报只收一次。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
+一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接，而且这条连接 hello 的那份 `config` 已经发出。握手到 `config` 之间还要对账、查库，这段时间里派的 prompt 会比 `config` 先到，新起的代理还没有运行器，只能回 `prompt_before_config` 丢掉它，所以这段时间按不在线算。代理解析不了 config（多半是两边版本对不上）会回 `agent_error` `config_rejected`，detail 写校验不过的字段路径；控制面把这条连接记成被拒，按不在线算，推一条 stuck「电脑代理和控制面版本对不上，配置被拒」，被拒期间代理回的 `prompt_before_config` 也按这个原因收尾。代理每收下一条 config 回 `config_applied`，控制面收到才恢复派活。hello 那条 config 发出去就算在线不变，旧代理不回 `config_applied` 也照常能派。代理的 `agent_error` 带了 `runId` 就是说那个 run 不会再有 `run_done`，控制面按断线收尾同一套替它收尾：run 结束、挂着的审批过期、群里一句、例行记失败，重报只收一次。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
 
 | 这次要碰的账号 | 派到 |
 | --- | --- |
@@ -375,7 +375,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### 代理：`/accounts-proxy/:accountId/*`
 
-Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面的 `/accounts-proxy`，地址随 `config.accountsProxy.baseUrl` 下发，和网关一样拼在 `PUBLIC_BASE_URL` 上。认身份用电脑的网关 key（`Authorization: Bearer`），浏览器 cookie 不算数。依次判：key 不对 401；不是 GET 405「代理只读，发东西走草稿」；账号不是这台电脑主人的、不存在、或不是 github/x 回 404；`login` 不是 `valid` 回 409；取令牌出错 502，取到 `login_expired` 记过期后回 409。放行时把 `*` 那段原样（不解码）拼到平台接口根地址后面，拼完核对 origin 和根路径前缀，跳出去回 400；解码后再拼的话 `..%2F` 会变回 `../`，GitHub 的账号能打到 X 上。请求头换成平台要的头和 `Bearer <平台令牌>`，客户端的 `accept` 保留，其他一律不带。回包只透 `content-type`、`etag`、`last-modified`、`link`、`cache-control` 和 `x-ratelimit-*`，平台的 `set-cookie` 不透。平台回 401 走下面那条共用规则，回 403 原样透给 Bot，不刷新、不记过期：403 多半是这个号没权限读那个资源，令牌本身没问题。
+Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面的 `/accounts-proxy`，地址随 `config.accountsProxy.baseUrl` 下发，和网关一样拼在 `PUBLIC_BASE_URL` 上。认身份用电脑的网关 key（`Authorization: Bearer`），浏览器 cookie 不算数。依次判：key 不对 401；不是 GET 405「代理只读，发东西走草稿」；账号不是这台电脑主人的、不存在、或不是 github/x 回 404；`login` 不是 `valid` 回 409；取令牌出错 502，取到 `login_expired` 记过期后回 409。放行时把 `*` 那段原样（不解码）拼到平台接口根地址后面，拼完核对 origin 和根路径前缀，跳出去回 400；解码后再拼的话 `..%2F` 会变回 `../`，GitHub 的账号能打到 X 上。请求头换成平台要的头和 `Bearer <平台令牌>`，客户端的 `accept` 保留，其他一律不带。回包只透 `content-type`、`etag`、`last-modified`、`link`、`cache-control` 和 `x-ratelimit-*`，平台的 `set-cookie` 不透。平台回 401 走下面那条共用规则，回 403 原样透给 Bot，不刷新、不记过期：403 多半是这个号没权限读那个资源，令牌本身没问题。平台可能把收到的 `Authorization` 回显在正文里，所以回包不是流式透传：正文读进内存，上限 1MB（`ACCOUNTS_PROXY_MAX_BYTES`），超过就截在上限处并带 `x-baize-truncated: true`；这次请求用过的每一把令牌（401 刷新重试时新旧两把）都换成 `[已隐藏]`，成功和出错的回包都换。匹配不按写法枚举，而是逐字符允许等价形态：原字符、`%XX`（十六进制不分大小写，非 ASCII 按 UTF-8 逐字节）、`\/` `\"` `\\`、`\uXXXX`，所以大小写混写、逐字符混用都认得出；双重编码和 HTML 实体不认。透出去的头命中令牌就整个丢掉，不替换，因为头值只能是单字节字符。截断落在令牌中间，或停在半个 `%2`、`\u00` 上时，结尾那一截一并去掉。
 
 代理和发布共用一条「401 刷新后重试一次」的规则。平台回 401，就把这次用的令牌作为 `rejected` 交给 `accessToken`：库里的令牌已经不是它（别的路径刚刷过），直接拿库里的重试；还是它，就强制刷新一次再重试。重试还是 401，代理记过期回 409，发布循环把草稿记 `login_expired`、账号跟着记过期。对发布的 POST 重试一次是安全的：401 表示平台没有接受这次请求，什么都没发出去，重发不会发出两条。这条规则也挡住了一个交错：发布先拿到旧令牌 A、请求还在路上，代理这时 401、刷出新令牌 B；A 晚到的 401 交回去时库里已经是 B，发布直接用 B 重试，账号不会被记成过期。发布路径把平台的 403 也记成 `login_expired`，和代理的口径不同，这一版还没统一。
 

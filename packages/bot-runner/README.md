@@ -19,11 +19,11 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 
 电脑代理只在第一条 `config` 创建运行器，后续配置都交给同一个运行器的 `applyConfig`。每个 Bot 有一条串行队列 `chain`：运行、建会话、关会话和 MCP、skill 落盘、网关热更新都排在上面，同一个 Bot 任何时刻只做一件。`applyConfig` 只记下每个 Bot 的期望配置 `desired`，给每个 Bot 排一个对账步骤就返回，不等任何队列。它不能等：电脑代理的 inbox 在 await 它，而队列前面可能有一条在等审批的 run，审批结论也排在那个 inbox 里。config 之后到的 prompt 排在对账步骤后面，所以看得到新定义。
 
-对账比较每个 Bot 的定义指纹：角色、名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。
+对账比较每个 Bot 的定义指纹：角色、名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序），以及 `account_read` 能读的 GitHub、X 账号（id、平台、handle）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。能读的账号进指纹是同一个原因：Pi 只在建会话时抄一次工具描述，账号清单写在 `account_read` 的描述里；登录状态和权限档不进，它们在调用时现判。
 
 指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时，暂停闸门上等待的 prompt 各发一条零用量 `run_done`。网关变化时只重新注册同一个 provider：key 是请求时按供应商取的，重新注册就生效；base URL 挂在会话的 Model 上，下一次 prompt 前的 `usePurpose` 发现地址变了才在同一个会话上 `setModel`。
 
-闸门规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 工具、账号和授权判定，归属人收紧规则或撤销授权对在飞 run 的下一次工具调用立刻生效。只改授权和账号不会重建会话。删 Bot 会拒绝下一次工具调用，并解开暂停或审批等待，让 run 正常收尾。
+闸门规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 工具、账号和授权判定，归属人收紧规则或撤销授权对在飞 run 的下一次工具调用立刻生效。只改授权、账号的登录状态和权限档不会重建会话；GitHub、X 账号增删或换了 handle 会，见上一段。删 Bot 会拒绝下一次工具调用，并解开暂停或审批等待，让 run 正常收尾。
 
 暂停和「有 run 在跑」是两个字段。`paused` 是闸门状态，`active` 是当前 run。暂停期间的新 prompt 仍留在原来的 `chain`，排到队首后在模型请求前等待；不另建重放队列。这样恢复后仍按原到达顺序执行，也不需要重发 prompt。
 
@@ -94,7 +94,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 工具连接
 
@@ -102,7 +102,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具和五个浏览器工具的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -292,6 +292,18 @@ snapshot 的形状：
 **禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。
 
 **看图。** 网关 provider 的 `input` 是 `["text", "image"]`，截图和工具连接回的图片都以 `ImageContent` 进模型。工具连接回的图只收 `MODEL_IMAGE_TYPES`（png、jpeg、gif、webp），单张超过 `MODEL_IMAGE_MAX_BYTES`（5 MiB）的和别的格式各换成一行中文说明，不进模型。`src/bot-session.ts` 在 Pi 的 `context` 事件里从新往旧数图片块，只留最近 `KEPT_IMAGES = 3` 张原图，更早的换成一行「（之前的截图已省略）」，免得每轮请求超过上游 20 MiB。只改发给上游的这一份，会话 JSONL 里的原消息不动。
+
+## 读 GitHub 和 X
+
+`account_read`（`src/account-read.ts`）让 Bot 以用户连上的 GitHub、X 账号的身份读平台接口。参数是 `accountId` 和平台相对路径（可带查询串），只发 GET，打到 `${config.accountsProxy.baseUrl}/<accountId>/<路径>`，唯一的凭据头是 `Authorization: Bearer <modelGateway.apiKey>`。平台令牌只在控制面的账号代理里换出来用，运行器、会话 JSONL 和模型都见不到，`packages/e2e/test/account-read.test.ts` 扫整个数据目录钉着这件事。
+
+闸门把它归 `read`，目标是账号，不弹审批。写平台一律走起草，这个工具只读。
+
+- 账号清单、代理地址和网关 key 都在调用时从最新的 `desired` 现取。不在 `config.accounts` 里的 id、小红书之类不是 GitHub 或 X 的号、折完 `..` 和 `%2e%2e` 跳出 `<accountId>/` 这一段的路径，都在发请求前拒掉，错误里列出能读的号。
+- 工具描述列出能读的号（handle 和 accountId），这份清单进了定义指纹，见「config 增量对账」。
+- 代理回 409 抛「<号> 这个号登录过期了，去账号页重新授权。」；其他非 2xx 抛「用 <号> 读 <路径> 没成，账号代理回 <状态码>：<原因>」，原因依次取回包 JSON 的 `error`（代理自己的）、`message`（GitHub）、`detail`、`title`（X），都没有就截回包前 300 字。连不上代理抛「连不上白泽的账号代理，没读成」。
+- 成功回平台原文。正文从 `response.body` 按流读，读到 Pi 自带 read、bash 的上限（`DEFAULT_MAX_BYTES`，50KB）再多 4 个字节就 cancel，不把整个回包读进内存。超过上限时按 UTF-8 起始字节和续字节退到最后一个完整码点截断，不拿 `�` 当边界，结尾注明「已截断：回包超过 50.0KB」，叫模型分页或缩小查询。出错回包只读前 16KB 拼原因。
+- 不跟重定向，60 秒超时，run 被中止时请求跟着断。
 
 ## 小红书发布器
 

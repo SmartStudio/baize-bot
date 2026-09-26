@@ -15,6 +15,14 @@ export type AccountsProxyDeps = SettleDeps & { readonly tokens: AccountTokens; r
 // 和网关一样用白名单：平台的 set-cookie、会话标识这类头不该漏给电脑。
 const FORWARDED_HEADERS = new Set(["content-type", "etag", "last-modified", "link", "cache-control"]);
 const TIMEOUT_MS = 30_000;
+/**
+ * 代理替换令牌要把正文整个读进内存，所以设个上限。运行器只给模型看前 50KB，1MB 留足了分页接口的余量，
+ * 又不会让一个超大回包把控制面的内存吃满。
+ */
+export const ACCOUNTS_PROXY_MAX_BYTES = 1024 * 1024;
+/** 正文超过上限被截断时带这个头，值是 true。 */
+export const TRUNCATED_HEADER = "x-baize-truncated";
+const REDACTED = "[已隐藏]";
 const NO_ACCOUNT = { error: "没有这个账号" } as const;
 const LOGIN_EXPIRED = { error: "这个账号登录过期了，到账号页重新连一下" } as const;
 
@@ -48,6 +56,8 @@ export function createAccountsProxy(deps: AccountsProxyDeps): Hono {
     }
     const accept = c.req.header("accept");
 
+    // 这次请求用过的每一把令牌。平台可能把收到的 Authorization 回显在正文里，交给电脑之前都要换掉。
+    const used: string[] = [];
     let rejected: string | null = null;
     for (;;) {
       let token: AccessToken;
@@ -62,6 +72,7 @@ export function createAccountsProxy(deps: AccountsProxyDeps): Hono {
         return c.json(LOGIN_EXPIRED, 409);
       }
 
+      used.push(token.token);
       const headers: Record<string, string> = { ...apiHeaders(platform.data), authorization: `Bearer ${token.token}` };
       if (accept !== undefined) headers["accept"] = accept;
       let upstream: Response;
@@ -85,18 +96,153 @@ export function createAccountsProxy(deps: AccountsProxyDeps): Hono {
         rejected = token.token;
         continue;
       }
-      return forward(upstream);
+      return forward(upstream, used);
     }
   });
 
   return app;
 }
 
-function forward(upstream: Response): Response {
+async function forward(upstream: Response, tokens: readonly string[]): Promise<Response> {
+  const secrets = secretMatcher(tokens);
   const forwarded = new Headers();
   for (const [name, value] of upstream.headers) {
     const lower = name.toLowerCase();
-    if (FORWARDED_HEADERS.has(lower) || lower.startsWith("x-ratelimit-")) forwarded.set(name, value);
+    // 头值只能是 ASCII，中文的替换值塞不进去；命中令牌的头整个不给。
+    if ((FORWARDED_HEADERS.has(lower) || lower.startsWith("x-ratelimit-")) && !secrets.occursIn(value)) {
+      forwarded.set(name, value);
+    }
   }
-  return new Response(upstream.body, { status: upstream.status, headers: forwarded });
+  const { bytes, truncated } = await readCapped(upstream, ACCOUNTS_PROXY_MAX_BYTES);
+  let body = secrets.redact(bytes);
+  if (truncated) {
+    // 上限可能正好落在一把令牌（或它的某种写法）中间，截下来的前半截没法整把匹配，只能连它一起去掉。
+    body = body.subarray(0, body.length - secrets.partialTail(body));
+    forwarded.set(TRUNCATED_HEADER, "true");
+  }
+  return new Response(upstream.body === null ? null : new Uint8Array(body), {
+    status: upstream.status,
+    headers: forwarded,
+  });
+}
+
+/** 读到上限多一个字节就停，多出来的那一个字节只用来判断是不是真超了。 */
+async function readCapped(response: Response, max: number): Promise<{ bytes: Buffer; truncated: boolean }> {
+  if (response.body === null) return { bytes: Buffer.alloc(0), truncated: false };
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    total += value.length;
+    if (total > max) {
+      await reader.cancel();
+      return { bytes: Buffer.concat(chunks).subarray(0, max), truncated: true };
+    }
+  }
+  return { bytes: Buffer.concat(chunks), truncated: false };
+}
+
+/** 一个位置上允许出现的字节。 */
+type Atom = readonly number[];
+/** 令牌里一个字符的一种写法。 */
+type Form = readonly Atom[];
+/** 一把令牌：每个字符的全部等价写法。 */
+type Spelling = readonly (readonly Form[])[];
+
+const PERCENT = 0x25;
+const BACKSLASH = 0x5c;
+const JSON_SHORT_ESCAPES = new Set(["/", '"', "\\"]);
+
+/** 十六进制一位，字母大小写都算。 */
+const hexDigit = (value: number): Atom => {
+  const upper = value.toString(16).toUpperCase().charCodeAt(0);
+  const lower = value.toString(16).charCodeAt(0);
+  return upper === lower ? [upper] : [upper, lower];
+};
+
+/**
+ * 一个字符在正文里可能的样子：原样；URL 百分号编码（按 UTF-8 逐字节，十六进制不分大小写）；
+ * JSON 的 \/、\"、\\ 短转义；JSON 的 \uXXXX（码元逐个，十六进制不分大小写）。
+ */
+function formsOf(char: string): Form[] {
+  const utf8 = [...Buffer.from(char, "utf8")];
+  const forms: Form[] = [
+    utf8.map((byte) => [byte]),
+    utf8.flatMap((byte) => [[PERCENT], hexDigit(byte >> 4), hexDigit(byte & 0xf)]),
+  ];
+  if (JSON_SHORT_ESCAPES.has(char)) forms.push([[BACKSLASH], [char.charCodeAt(0)]]);
+  const unicode: Atom[] = [];
+  for (let i = 0; i < char.length; i++) {
+    const unit = char.charCodeAt(i);
+    unicode.push([BACKSLASH], [0x75], ...[12, 8, 4, 0].map((shift) => hexDigit((unit >> shift) & 0xf)));
+  }
+  forms.push(unicode);
+  return forms;
+}
+
+const atomSource = (atom: Atom): string => {
+  const bytes = atom.map((byte) => `\\x${byte.toString(16).padStart(2, "0")}`).join("");
+  return atom.length === 1 ? bytes : `[${bytes}]`;
+};
+
+const spellingSource = (spelling: Spelling): string =>
+  spelling.map((forms) => `(?:${forms.map((form) => form.map(atomSource).join("")).join("|")})`).join("");
+
+/** text 能不能是这把令牌某种写法的开头（整把写完之前就到头了）。 */
+function isPrefixOf(text: string, spelling: Spelling, at = 0, char = 0): boolean {
+  if (at === text.length) return true;
+  const forms = spelling[char];
+  if (forms === undefined) return false;
+  return forms.some((form) => {
+    let pos = at;
+    for (const atom of form) {
+      if (pos === text.length) return true;
+      if (!atom.includes(text.charCodeAt(pos))) return false;
+      pos += 1;
+    }
+    return isPrefixOf(text, spelling, pos, char + 1);
+  });
+}
+
+/**
+ * 这次用过的令牌在正文和头里的所有写法。不枚举整串的写法，而是逐字符允许等价形态，
+ * 所以大小写混写、一半编码一半原样这类组合一次都覆盖。按字节匹配：正文先当 latin1 看，一个字节一个字符。
+ */
+function secretMatcher(tokens: readonly string[]) {
+  const spellings = [...new Set(tokens)]
+    .filter((token) => token !== "")
+    // 一把是另一把开头时先试长的，免得短的先匹配上、把长的剩一截露出去。
+    .toSorted((a, b) => b.length - a.length)
+    .map((token): Spelling => [...token].map(formsOf));
+  const longest = Math.max(
+    0,
+    ...spellings.map((spelling) =>
+      spelling.reduce((sum, forms) => sum + Math.max(...forms.map((form) => form.length)), 0),
+    ),
+  );
+  const source = spellings.map(spellingSource).join("|");
+  const pattern = source === "" ? null : new RegExp(source, "g");
+  const replacement = Buffer.from(REDACTED, "utf8").toString("latin1");
+  return {
+    redact(bytes: Buffer): Buffer {
+      if (pattern === null) return bytes;
+      return Buffer.from(bytes.toString("latin1").replace(pattern, replacement), "latin1");
+    },
+    /** 头值是按字节解出来的 ByteString，和正文同一种看法。 */
+    occursIn(value: string): boolean {
+      return pattern !== null && value.search(pattern) !== -1;
+    },
+    /** 结尾有多长可能是某把令牌某种写法的开头。 */
+    partialTail(body: Buffer): number {
+      const text = body.toString("latin1");
+      for (let length = Math.min(longest - 1, text.length); length > 0; length--) {
+        const tail = text.slice(text.length - length);
+        if (spellings.some((spelling) => isPrefixOf(tail, spelling))) return length;
+      }
+      return 0;
+    },
+  };
 }
