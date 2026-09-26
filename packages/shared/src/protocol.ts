@@ -17,6 +17,7 @@ import {
   GrantTarget,
   GroupId,
   HandoffId,
+  LoginAttemptId,
   LoginFailure,
   MessageId,
   ModelPurpose,
@@ -132,7 +133,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     state: z.discriminatedUnion("login", [
       z.object({ login: z.literal("valid"), handle: z.string().min(1).max(100) }).strict(),
       z.object({ login: z.literal("expired") }).strict(),
-      z.object({ login: z.literal("failed"), reason: LoginFailure }).strict(),
+      // attempt 原样带回 browser_login 里的那个，控制面靠它把这次没成归到那一次点击。
+      z.object({ login: z.literal("failed"), reason: LoginFailure, attempt: LoginAttemptId }).strict(),
     ]),
   }),
   // attempt 原样带回 publish_draft 里的那个；externalId 为 null 是发出去了但没读到平台上的 id。
@@ -323,7 +325,12 @@ export const ControlToAgent = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("pause"), botId: BotId }),
   z.object({ type: z.literal("resume"), botId: BotId }),
-  z.object({ type: z.literal("browser_login"), accountId: AccountId, platform: BrowserPlatform }),
+  z.object({
+    type: z.literal("browser_login"),
+    accountId: AccountId,
+    platform: BrowserPlatform,
+    attempt: LoginAttemptId,
+  }),
   // attempt 是控制面这一次认领的时刻，一条草稿超时后重批再发，新旧两次靠它分开。
   // botId 是起草的 Bot，配图只认它目录里的拷贝；Bot 删了是 null，这时哪张配图都不认。
   z.object({

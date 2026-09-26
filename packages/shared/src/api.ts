@@ -27,6 +27,8 @@ import {
   Publication,
   PublicationId,
   BrowserPlatform,
+  LoginAttemptId,
+  LoginFailure,
   Notice,
   ModelPurpose,
   Routine,
@@ -185,8 +187,13 @@ export const AccountListResponse = z.object({ accounts: z.array(Account) });
 export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
 export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
-// POST /api/accounts/:id/login  打开登录窗口，没有请求体。给账号所在电脑发 browser_login 就回 202 和 AccountResponse，
-// 登录结果随 account_updated 推回来。电脑不在线 409，别人的账号 404，不走浏览器登录的平台 400。
+// POST /api/accounts/:id/login  打开登录窗口。attempt 是页面为这一次点击取的号，卡片一开就带着它；
+// 控制面原样写进 browser_login 并在 202 里带回。登上随 account_updated 推回来，没成推 login_failed 带同一个号。
+// attempt 格式不对 400，电脑不在线 409，别人的账号 404，不走浏览器登录的平台 400。
+export const LoginAccountRequest = z.object({ attempt: LoginAttemptId }).strict();
+export type LoginAccountRequest = z.infer<typeof LoginAccountRequest>;
+export const LoginAccountResponse = z.object({ account: Account, attempt: LoginAttemptId });
+export type LoginAccountResponse = z.infer<typeof LoginAccountResponse>;
 // GET /api/oauth/:platform/start  浏览器跳过来，302 到 GitHub 或 X 的授权页。平台没配 503。
 // GET /api/oauth/:platform/callback  平台跳回来，换令牌、挂账号，302 回 Web 首页，带 ?oauth=<平台>&result=<OAuthResult>。
 // 结果只放在跳转地址里，账号本身随 account_updated 推给页面。
@@ -521,6 +528,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("account_deleted"), accountId: AccountId }),
   z.object({ type: z.literal("publication_created"), publication: Publication }),
   z.object({ type: z.literal("computer_updated"), computer: Computer }),
+  // 一次登录没成。账号的 login 不变，所以没有 account_updated；attempt 是 POST /api/accounts/:id/login 回的那个。
+  z.object({ type: z.literal("login_failed"), accountId: AccountId, attempt: LoginAttemptId, reason: LoginFailure }),
   z.object({ type: z.literal("notify"), notice: Notice }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;

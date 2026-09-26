@@ -379,6 +379,11 @@ export type AccountLogin = z.infer<typeof AccountLogin>;
 // 一次登录没成，账号本身的 login 不变：window_failed 是登录窗口出错或到点没登上，remote_refused 是远程电脑不许登录。
 export const LoginFailure = z.enum(["window_failed", "remote_refused"]);
 export type LoginFailure = z.infer<typeof LoginFailure>;
+// 点一次「打开登录窗口」算一次尝试，号由页面在点击时取好带进请求体，卡片一开就认它；
+// 控制面原样写进 browser_login，电脑经 login_state 原样带回。页面取的号只收一段安全的名字，控制面在边界挡。
+// 登上是账号的事实，不用认尝试；没成只属于某一次尝试，旧尝试的失败不能盖掉新的。
+export const LoginAttemptId = dirId("LoginAttemptId");
+export type LoginAttemptId = z.infer<typeof LoginAttemptId>;
 
 export const Account = z.object({
   id: AccountId,

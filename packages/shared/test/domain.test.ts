@@ -543,13 +543,24 @@ describe("C0 工具视图与审批报文", () => {
 });
 
 describe("登录失败、发布失败和网关别名", () => {
-  it("login_state 的 failed 只收两种原因", () => {
+  it("login_state 的 failed 只收两种原因，并且要带回这一次的尝试号", () => {
     const base = { type: "login_state", accountId: "a1" };
     for (const reason of ["window_failed", "remote_refused"]) {
-      expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason } }).success).toBe(true);
+      expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason, attempt: "try_1" } }).success).toBe(
+        true,
+      );
     }
-    expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "timeout" } }).success).toBe(false);
-    expect(AgentToControl.safeParse({ ...base, state: { login: "failed" } }).success, "原因不可省").toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "timeout", attempt: "try_1" } }).success,
+    ).toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...base, state: { login: "failed", attempt: "try_1" } }).success,
+      "原因不可省",
+    ).toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "window_failed" } }).success,
+      "尝试号不可省，页面靠它认出失败的是哪一次点击",
+    ).toBe(false);
   });
 
   it("publish_result 的失败原因和草稿上的 failure 是同一组值", () => {
