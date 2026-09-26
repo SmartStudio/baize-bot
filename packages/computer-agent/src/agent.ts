@@ -171,7 +171,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
             return untilAborted(chrome.login(message.platform, deadline), deadline);
           })
           .then((state) => {
-            if (!stopping) send({ type: "login_state", accountId: message.accountId, state });
+            if (stopping) return;
+            send({
+              type: "login_state",
+              accountId: message.accountId,
+              state: state.login === "failed" ? { ...state, attempt: message.attempt } : state,
+            });
           })
           .catch((error: unknown) => {
             log(`登录 ${message.platform} 失败：${String(error)}`);
@@ -179,7 +184,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
               send({
                 type: "login_state",
                 accountId: message.accountId,
-                state: { login: "failed", reason: "window_failed" },
+                state: { login: "failed", reason: "window_failed", attempt: message.attempt },
               });
             }
           });

@@ -4,6 +4,7 @@ import {
   Approval,
   ApprovalId,
   BotId,
+  BrowserPlatform,
   ComputerId,
   ContentPlan,
   ContentPlanId,
@@ -537,8 +538,15 @@ const titleOf = (draft: Draft): string =>
     ? (draft.content.title ?? draft.content.text.slice(0, 80))
     : `回复 ${draft.content.replyTo.author}`;
 
+// 跟控制面同一个口径：过期的号恒成一行；没登录的浏览器平台占位只在有待办等着它时成一行，从最早那件待办算起。
 export const pendingOf = (): TodayPendingItem[] => {
   const items: TodayPendingItem[] = [];
+  const waitingSince = new Map<string, string>();
+  const waitOn = (draft: Draft, since: string) => {
+    if (draft.status !== "pending") return;
+    const current = waitingSince.get(draft.accountId);
+    if (current === undefined || since < current) waitingSince.set(draft.accountId, since);
+  };
   for (const approval of approvals.values()) {
     if (approval.status === "pending") {
       items.push({ kind: "approval", since: pendingSince.get(approval.id) ?? at(-1), approval });
@@ -546,27 +554,32 @@ export const pendingOf = (): TodayPendingItem[] => {
   }
   for (const plan of plans.values()) {
     if (plan.status !== "pending") continue;
-    items.push({
-      kind: "plan",
-      since: pendingSince.get(plan.id) ?? plan.createdAt,
-      plan,
-      drafts: plan.draftIds.flatMap((id) => {
-        const draft = drafts.get(id);
-        return draft === undefined ? [] : [draft];
-      }),
+    const since = pendingSince.get(plan.id) ?? plan.createdAt;
+    const planDrafts = plan.draftIds.flatMap((id) => {
+      const draft = drafts.get(id);
+      return draft === undefined ? [] : [draft];
     });
+    for (const draft of planDrafts) waitOn(draft, since);
+    items.push({ kind: "plan", since, plan, drafts: planDrafts });
   }
   for (const draft of drafts.values()) {
     if (draft.status !== "pending") continue;
     if (draft.planId !== null && plans.get(draft.planId)?.status === "pending") continue;
-    items.push({ kind: "draft", since: pendingSince.get(draft.id) ?? draft.createdAt, draft });
+    const since = pendingSince.get(draft.id) ?? draft.createdAt;
+    waitOn(draft, since);
+    items.push({ kind: "draft", since, draft });
   }
   for (const account of accounts.values()) {
     if (account.login === "expired") {
       items.push({ kind: "account", since: pendingSince.get(account.id) ?? account.createdAt, account });
     }
+    const waiting = waitingSince.get(account.id);
+    if (account.login === "none" && BrowserPlatform.safeParse(account.platform).success && waiting !== undefined) {
+      items.push({ kind: "account", since: waiting, account });
+    }
   }
-  return items.sort((left, right) => left.since.localeCompare(right.since));
+  const rank = (item: TodayPendingItem) => (item.kind === "account" ? 0 : 1);
+  return items.sort((left, right) => left.since.localeCompare(right.since) || rank(left) - rank(right));
 };
 
 export const todayOf = (): TodayResponse => {
@@ -740,4 +753,28 @@ export const seedProjectPage = (): Draft => {
   putPending(pending, new Date().toISOString());
   appendMessage(pending.groupId, { kind: "draft", draftId: pending.id });
   return pending;
+};
+
+// 登录卡用例的数据：本机一个还没登录的小红书占位号，主助理给它写好一条待确认的稿子。slot 2 再造一对，两个号同时登录的用例用。
+export const seedLoginCard = (slot: 1 | 2 = 1): { account: Account; draft: Draft } => {
+  const suffix = slot === 1 ? "" : "2";
+  const account = accountOf(`acc_today_login${suffix}`, "xiaohongshu", "占位", "confirm_publish", {
+    computerId: "cmp_local",
+    login: "none",
+  });
+  const placeholder = Account.parse({ ...account, handle: null });
+  accounts.set(placeholder.id, placeholder);
+  const draft = draftOf({
+    id: `draft_today_login${suffix}`,
+    groupId: "grp_assistant",
+    botId: "bot_assistant",
+    accountId: placeholder.id,
+    platform: "xiaohongshu",
+    title: slot === 1 ? "车间主任的一天" : "质检员的一天",
+    text: "早会、巡线、对交期，车间主任的一天交给 X3 分担了哪些。",
+    status: "pending",
+  });
+  putPending(draft, new Date().toISOString());
+  appendMessage(draft.groupId, { kind: "draft", draftId: draft.id });
+  return { account: placeholder, draft };
 };

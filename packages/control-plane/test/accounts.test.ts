@@ -6,6 +6,8 @@ import {
   ComputerTokenResponse,
   CreateBotResponse,
   DraftId,
+  LoginAccountResponse,
+  LoginAttemptId,
   MessageListResponse,
   TodayResponse,
   type Account,
@@ -176,13 +178,17 @@ describe("打开登录窗口", () => {
     await local.expect("config");
     await other.expect("config");
 
-    const response = await owner.client.post(`/api/accounts/${account.id}/login`);
+    const attempt = LoginAttemptId.parse(newId());
+    const response = await owner.client.post(`/api/accounts/${account.id}/login`, { attempt });
     expect(response.status, "立刻回，登录结果随推送回来").toBe(202);
-    expect(AccountResponse.parse(await response.json()).account).toEqual(account);
-    expect(await local.expect("browser_login")).toEqual({
+    const accepted = LoginAccountResponse.parse(await response.json());
+    expect(accepted.account).toEqual(account);
+    expect(accepted.attempt, "202 带回页面自己取的号").toBe(attempt);
+    expect(await local.expect("browser_login"), "电脑拿到的尝试号就是页面取的那个，控制面不另发").toEqual({
       type: "browser_login",
       accountId: account.id,
       platform: "xiaohongshu",
+      attempt,
     });
 
     // 改档会给两台电脑都重发 config：远程电脑下一条收到的是它，说明登录那条没发给它。
@@ -190,16 +196,42 @@ describe("打开登录窗口", () => {
     expect((await other.next()).type, "远程电脑没收到 browser_login").toBe("config");
   });
 
+  it("请求体缺尝试号或格式不对回 400，电脑什么都收不到", async () => {
+    const owner = await makeOwner();
+    const local = await online(owner.local);
+    const account = await placeholder(owner);
+    await local.expect("config");
+
+    expect((await owner.client.post(`/api/accounts/${account.id}/login`, {})).status, "缺 attempt").toBe(400);
+    expect((await owner.client.post(`/api/accounts/${account.id}/login`, { attempt: "" })).status, "空串").toBe(400);
+    expect(
+      (await owner.client.post(`/api/accounts/${account.id}/login`, { attempt: "有 空格/斜杠" })).status,
+      "不是安全的 id 字符",
+    ).toBe(400);
+    expect(
+      (await owner.client.post(`/api/accounts/${account.id}/login`, { attempt: "a".repeat(65) })).status,
+      "超长",
+    ).toBe(400);
+
+    // 改档会重发 config：电脑下一条收到的是它，说明前面几次都没发 browser_login。
+    expect((await owner.client.patch(`/api/accounts/${account.id}`, { tier: "draft" })).status).toBe(200);
+    expect((await local.next()).type).toBe("config");
+  });
+
   it("电脑不在线回 409", async () => {
     const owner = await makeOwner();
     const account = await placeholder(owner);
+    const attempt = LoginAttemptId.parse(newId());
 
-    const offline = await owner.client.post(`/api/accounts/${account.id}/login`);
+    const offline = await owner.client.post(`/api/accounts/${account.id}/login`, { attempt });
     expect(offline.status).toBe(409);
     expect(((await offline.json()) as { error: string }).error).toContain("不在线");
 
     const agent = await online(owner.local);
-    expect((await owner.client.post(`/api/accounts/${account.id}/login`)).status, "电脑上线后同一个账号能登").toBe(202);
+    expect(
+      (await owner.client.post(`/api/accounts/${account.id}/login`, { attempt })).status,
+      "电脑上线后同一个账号能登",
+    ).toBe(202);
     expect((await agent.expect("browser_login")).accountId).toBe(account.id);
   });
 
@@ -209,8 +241,9 @@ describe("打开登录窗口", () => {
     await online(owner.local);
     const account = await placeholder(owner);
 
-    expect((await stranger.client.post(`/api/accounts/${account.id}/login`)).status).toBe(404);
-    expect((await stranger.client.post("/api/accounts/不是账号/login")).status).toBe(404);
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await stranger.client.post(`/api/accounts/${account.id}/login`, { attempt })).status).toBe(404);
+    expect((await stranger.client.post("/api/accounts/不是账号/login", { attempt })).status).toBe(404);
   });
 });
 
@@ -304,13 +337,17 @@ describe("login_state valid 和 expired", () => {
     await agent.expect("config");
 
     agent.send({ type: "login_state", accountId, state: { login: "expired" } });
-    agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "window_failed" } });
+    agent.send({
+      type: "login_state",
+      accountId,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+    });
     const seen = await pushesUntil(owner.push, (pushed) => pushed.type === "notify");
     expect(
       seen.map((pushed) => pushed.type),
-      "第二次 expired 什么都不推，下一条就是登录窗口那条通知",
-    ).toEqual(["notify"]);
-    expect(seen[0]?.type === "notify" && seen[0].notice.text).toContain("登录窗口");
+      "第二次 expired 什么都不推，下一条就是登录窗口那次失败",
+    ).toEqual(["login_failed", "notify"]);
+    expect(seen[1]?.type === "notify" && seen[1].notice.text).toContain("登录窗口");
     const [after] = await listed(owner);
     expect(after, "重复报过期不改过期时刻").toEqual(expired);
   });
@@ -323,14 +360,18 @@ describe("login_state valid 和 expired", () => {
     const agent = await online(remote);
 
     agent.send({ type: "login_state", accountId: onLocal, state: { login: "expired" } });
-    agent.send({ type: "login_state", accountId: onRemote, state: { login: "failed", reason: "window_failed" } });
+    agent.send({
+      type: "login_state",
+      accountId: onRemote,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+    });
 
     const seen = await pushesUntil(owner.push, (pushed) => pushed.type === "notify");
     expect(
       seen.map((pushed) => pushed.type),
       "本机账号那条整条丢掉，没推账号也没推通知",
-    ).toEqual(["notify"]);
-    expect(seen[0]?.type === "notify" && seen[0].notice.text).toContain("登录窗口");
+    ).toEqual(["login_failed", "notify"]);
+    expect(seen[1]?.type === "notify" && seen[1].notice.text).toContain("登录窗口");
     expect((await listed(owner)).find((one) => one.id === onLocal)?.login).toBe("valid");
   });
 

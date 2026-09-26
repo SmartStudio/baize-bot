@@ -4,6 +4,7 @@ import {
   AccountListResponse,
   ComputerTokenResponse,
   DecideDraftResponse,
+  LoginAttemptId,
   TodayResponse,
   type Account,
   type DraftContent,
@@ -1037,7 +1038,11 @@ describe("小红书登录过期", () => {
     });
     job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
     // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
-    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+    });
 
     const seen: ServerPush[] = [];
     for (;;) {
@@ -1050,6 +1055,7 @@ describe("小红书登录过期", () => {
       "draft_updated",
       "account_updated",
       "notify",
+      "login_failed",
       "notify",
     ]);
     const notices = seen.flatMap((pushed) => (pushed.type === "notify" ? [pushed.notice] : []));
@@ -1082,7 +1088,11 @@ describe("小红书登录过期", () => {
       result: { status: "failed", reason: "login_expired", detail: "跳到了登录页" },
     });
     // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
-    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+    });
 
     const seen: ServerPush[] = [];
     for (;;) {
@@ -1095,6 +1105,7 @@ describe("小红书登录过期", () => {
       "account_updated",
       "notify",
       "draft_updated",
+      "login_failed",
       "notify",
     ]);
     const notices = seen.flatMap((pushed) => (pushed.type === "notify" ? [pushed.notice] : []));
@@ -1169,7 +1180,11 @@ describe("小红书登录过期", () => {
       result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
     });
     // 同一条连接上再报一次登录窗口出错，它的通知一定排在前面那些推送之后。
-    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "failed", reason: "window_failed" } });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+    });
 
     const seen: ServerPush[] = [];
     for (;;) {
@@ -1180,7 +1195,7 @@ describe("小红书登录过期", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "旧 attempt 只结算旧草稿，不动账号、不推过期通知",
-    ).toEqual(["draft_updated", "notify"]);
+    ).toEqual(["draft_updated", "login_failed", "notify"]);
     expect(seen[0]?.type === "draft_updated" && seen[0].draft).toMatchObject({
       id: spec.draftId,
       status: "failed",

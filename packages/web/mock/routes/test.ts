@@ -1,9 +1,26 @@
-import { ActionKind, BotId, Group, GroupId, GrantTarget, Notice, ServerPush, RunId } from "@baize/shared";
+import {
+  AccountId,
+  ActionKind,
+  BotId,
+  ComputerStatus,
+  Group,
+  GroupId,
+  GrantTarget,
+  LoginAttemptId,
+  Notice,
+  ServerPush,
+  RunId,
+} from "@baize/shared";
 import { z } from "zod";
 import {
   confirmNextHandoff,
   addTodayApproval,
   appendMessage,
+  computerStatus,
+  computersOf,
+  LoginState,
+  reportLoginState,
+  seedLoginCard,
   createApproval,
   expireLatestPending,
   groups,
@@ -23,12 +40,14 @@ import { readBody, send, type Route } from "./http.js";
 
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
 const TodayModeRequest = z.object({ mode: z.enum(["full", "empty", "performance"]) }).strict();
+const LoginCardRequest = z.object({ slot: z.union([z.literal(1), z.literal(2)]).default(1) }).strict();
 const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
 const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
   .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
   .strict();
 const TestMessageRequest = z.object({ groupId: GroupId, text: z.string().min(1) }).strict();
+const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
 
@@ -137,6 +156,61 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     if (!parsed.success) send(res, 400, { error: "消息参数不对" });
     else {
       push({ type: "message", message: appendMessage(parsed.data.groupId, { kind: "user", text: parsed.data.text }) });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/accounts/login-card") {
+    const parsed = LoginCardRequest.safeParse(await readBody(req));
+    const { account, draft } = seedLoginCard(parsed.success ? parsed.data.slot : 1);
+    push({ type: "account_updated", account });
+    push({ type: "draft_updated", draft });
+    send(res, 200, { accountId: account.id, draftId: draft.id });
+    return true;
+  }
+
+  // 代替电脑代理报 login_state，推送照控制面：账号变了推 account_updated，没成先推 login_failed 再发 failed 通知。
+  const loginStateMatch = /^\/api\/test\/accounts\/([^/]+)\/login-state$/.exec(path);
+  if (loginStateMatch !== null && method === "POST") {
+    const parsed = LoginState.safeParse(await readBody(req));
+    const outcome = parsed.success ? reportLoginState(decodeURIComponent(loginStateMatch[1] ?? ""), parsed.data) : null;
+    if (outcome === null) send(res, 400, { error: "登录结果参数不对" });
+    else if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+    else {
+      if (outcome.value.account !== null) push({ type: "account_updated", account: outcome.value.account });
+      if (outcome.value.failed !== null) {
+        push({
+          type: "login_failed",
+          accountId: AccountId.parse(decodeURIComponent(loginStateMatch[1] ?? "")),
+          attempt: LoginAttemptId.parse(outcome.value.failed.attempt),
+          reason: outcome.value.failed.reason,
+        });
+      }
+      if (outcome.value.notice !== null) {
+        const notice = Notice.parse({
+          kind: "failed",
+          text: outcome.value.notice,
+          groupId: null,
+          at: new Date().toISOString(),
+        });
+        push({ type: "notify", notice });
+      }
+      send(res, 204);
+    }
+    return true;
+  }
+
+  const computerStatusMatch = /^\/api\/test\/computers\/([^/]+)\/status$/.exec(path);
+  if (computerStatusMatch !== null && method === "POST") {
+    const parsed = ComputerStatusRequest.safeParse(await readBody(req));
+    const id = decodeURIComponent(computerStatusMatch[1] ?? "");
+    const computer = computersOf().computers.find((item) => item.id === id);
+    if (!parsed.success) send(res, 400, { error: "电脑状态参数不对" });
+    else if (computer === undefined) send(res, 404, { error: "没有这台电脑" });
+    else {
+      computerStatus.set(id, parsed.data.status);
+      push({ type: "computer_updated", computer: { ...computer, status: parsed.data.status } });
       send(res, 204);
     }
     return true;

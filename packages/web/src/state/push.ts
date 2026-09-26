@@ -1,4 +1,4 @@
-import type { ServerPush } from "@baize/shared";
+import type { ComputerId, ServerPush } from "@baize/shared";
 import type { Action, AppState, ReadyState, SessionId } from "./types.js";
 import { notifyNotice } from "./notify.js";
 import type { Seq } from "./stamped.js";
@@ -16,6 +16,8 @@ type PushContext = {
   dispatch: (action: Action) => void;
   stateRef: { current: AppState };
   refreshPendingCounts: () => void;
+  // 电脑不在线了，它上面等扫码的登录卡等不到结果：重拉账号，还在等的结成离线。
+  recoverLogins: (computerId: ComputerId) => void;
 };
 
 export const createPushHandlers = ({
@@ -24,6 +26,7 @@ export const createPushHandlers = ({
   dispatch,
   stateRef,
   refreshPendingCounts,
+  recoverLogins,
 }: PushContext): PushHandlers => {
   const bumpToday = () => dispatch({ type: "today_version_bumped" });
   const mine = (): ReadyState | null => {
@@ -80,19 +83,24 @@ export const createPushHandlers = ({
       dispatch({ type: "content_loaded", drafts: [], plans: [push.plan], seq });
       bumpToday();
     },
-    account_updated: (push) => {
-      dispatch({ type: "account_upserted", account: push.account });
+    account_updated: (push, seq) => {
+      dispatch({ type: "account_upserted", account: push.account, seq });
       bumpToday();
     },
-    account_deleted: (push) => {
-      dispatch({ type: "account_removed", accountId: push.accountId });
+    account_deleted: (push, seq) => {
+      dispatch({ type: "account_removed", accountId: push.accountId, seq });
       bumpToday();
     },
     publication_created: (push) => {
       dispatch({ type: "publications_loaded", publications: [push.publication] });
       bumpToday();
     },
-    computer_updated: (push) => dispatch({ type: "computer_upserted", computer: push.computer }),
+    computer_updated: (push, seq) => {
+      dispatch({ type: "computer_upserted", computer: push.computer, seq });
+      if (push.computer.status !== "online") recoverLogins(push.computer.id);
+    },
+    login_failed: (push) =>
+      dispatch({ type: "login_failed", accountId: push.accountId, attempt: push.attempt, reason: push.reason }),
     notify: (push) => {
       bumpToday();
       const state = mine();

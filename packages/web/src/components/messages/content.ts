@@ -1,4 +1,4 @@
-import type { Account, AccountTier, Computer, Draft, Platform } from "@baize/shared";
+import type { Account, AccountLogin, AccountTier, Computer, Draft, LoginFailure, Platform } from "@baize/shared";
 
 export const PLATFORM: Record<Platform, string> = {
   github: "GitHub",
@@ -9,6 +9,35 @@ export const PLATFORM: Record<Platform, string> = {
 export const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
   local: "本机",
   remote: "远程电脑",
+};
+
+export const COMPUTER_STATUS_TEXT: Record<Computer["status"], string> = {
+  online: "在线",
+  sleeping: "休眠",
+  creating: "创建中",
+  failed: "失败",
+};
+
+export const COMPUTER_STATUS_CLASS: Record<Computer["status"], string> = {
+  online: "status-ok",
+  sleeping: "status-blocked",
+  creating: "status-running",
+  failed: "status-failed",
+};
+
+// 本机就叫本机；远程电脑有主机名就带上，好和另一台分开。
+export const computerName = (computer: Computer): string =>
+  computer.kind === "local" ? "本机" : computer.host === null ? "远程电脑" : `远程电脑 ${computer.host}`;
+
+export const LOGIN_TEXT: Record<AccountLogin, string> = {
+  none: "未登录",
+  valid: "已登录",
+  expired: "登录已过期",
+};
+
+export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {
+  window_failed: "登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。",
+  remote_refused: "远程电脑上不能登录这个平台，请在本机登录这个账号。",
 };
 
 export const TIER: Record<AccountTier, { title: string; note: string }> = {

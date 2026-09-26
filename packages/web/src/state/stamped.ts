@@ -36,6 +36,31 @@ export const writeTable = <K extends string, T extends { readonly id: K }>(
   return { rows: next, stamps: nextStamps };
 };
 
+export const removeFromTable = <K extends string, T extends { readonly id: K }>(
+  table: Readonly<Record<K, T>>,
+  stamps: Stamps,
+  seq: Seq,
+  id: K,
+): Stamped<Record<K, T>> => {
+  if (!newer(stamps, id, seq)) return { rows: { ...table }, stamps };
+  const next: Record<K, T> = { ...table };
+  delete next[id];
+  return { rows: next, stamps: { ...stamps, [id]: seq } };
+};
+
+// 整张表的快照，规则同 loadList 的 absent = deleted；表没有「还没加载」一说，先到的推送直接写进表里等着。
+export const loadTable = <K extends string, T extends { readonly id: K }>(
+  table: Readonly<Record<K, T>>,
+  stamps: Stamps,
+  seq: Seq,
+  snapshot: readonly T[],
+): Stamped<Record<K, T>> => {
+  const loaded = loadList(Object.values<T>(table), stamps, seq, snapshot, "deleted");
+  const rows = {} as Record<K, T>;
+  for (const row of loaded.rows) rows[row.id] = row;
+  return { rows, stamps: loaded.stamps };
+};
+
 // 有顺序的列表：已有的就地替换，没有的接在后面，列表不会在你看着的时候跳。
 export const writeList = <T extends Row>(
   list: readonly T[],

@@ -521,7 +521,9 @@ describe("电脑代理连控制面", () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
 
     await expect(server.waitForMessage("login_state", 1, 500)).resolves.toEqual({
       type: "login_state",
@@ -665,12 +667,14 @@ describe("电脑代理连控制面", () => {
     });
     const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
 
     await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
       type: "login_state",
       accountId: "account-1",
-      state: { login: "failed", reason: "window_failed" },
+      state: { login: "failed", reason: "window_failed", attempt: "try-1" },
     });
   });
 
@@ -694,12 +698,14 @@ describe("电脑代理连控制面", () => {
     });
     const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
 
     await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
       type: "login_state",
       accountId: "account-1",
-      state: { login: "failed", reason: "remote_refused" },
+      state: { login: "failed", reason: "remote_refused", attempt: "try-1" },
     });
     expect(lines.join("\n")).toContain("远程电脑上不能登录，请在本机登录这个账号");
     expect(launches).toBe(0);
@@ -725,14 +731,22 @@ describe("电脑代理连控制面", () => {
     });
     const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
     // 上限从收到报文算起。第二条等第一条真的卡在登录里再发，它的上限才晚于第一条到点。
     await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
-    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-2", platform: "xiaohongshu" }));
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-2", platform: "xiaohongshu", attempt: "try-2" }),
+    );
     await server.waitForMessage("login_state", 2, 3000);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
-      { type: "login_state", accountId: "account-1", state: { login: "failed", reason: "window_failed" } },
+      {
+        type: "login_state",
+        accountId: "account-1",
+        state: { login: "failed", reason: "window_failed", attempt: "try-1" },
+      },
       { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
     ]);
   });

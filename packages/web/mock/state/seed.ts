@@ -21,6 +21,8 @@ import {
   TEAM_GROUP_ID,
   TEAM_TASK_ID,
   accounts,
+  computerStatus,
+  loginAttempts,
   advanceGeneration,
   approvals,
   at,
@@ -208,6 +210,8 @@ export const reseed = (): void => {
   drafts.clear();
   plans.clear();
   accounts.clear();
+  computerStatus.clear();
+  loginAttempts.clear();
   publications.clear();
   handoffs.clear();
   routines.clear();

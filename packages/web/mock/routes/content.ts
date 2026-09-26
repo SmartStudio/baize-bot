@@ -3,6 +3,7 @@ import {
   ApprovePlanRequest,
   CreateAccountRequest,
   DecideDraftRequest,
+  LoginAccountRequest,
   OAuthPlatform,
   UpdateAccountRequest,
 } from "@baize/shared";
@@ -80,12 +81,14 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
 
   const loginMatch = /^\/api\/accounts\/([^/]+)\/login$/.exec(path);
   if (loginMatch !== null && method === "POST") {
-    const outcome = loginAccount(idOf(loginMatch));
-    if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
-    else {
-      push({ type: "account_updated", account: outcome.value });
-      send(res, 202, { account: outcome.value });
+    const parsed = LoginAccountRequest.safeParse(await readBody(req));
+    if (!parsed.success) {
+      send(res, 400, { error: "尝试号不对" });
+      return true;
     }
+    const outcome = loginAccount(idOf(loginMatch), parsed.data.attempt);
+    if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
+    else send(res, 202, outcome.value);
     return true;
   }
 

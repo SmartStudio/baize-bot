@@ -22,6 +22,7 @@ import {
 import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
 import { AccountsPage } from "./AccountsPage.js";
+import { COMPUTER_STATUS_CLASS, COMPUTER_STATUS_TEXT } from "./messages/content.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 
 export type PageId = "general" | "computer" | "accounts" | "tools" | "grants" | "usage" | "update";
@@ -231,20 +232,6 @@ const GrantsPage = ({
 const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
   local: "本机",
   remote: "远程",
-};
-
-const COMPUTER_STATUS_TEXT: Record<Computer["status"], string> = {
-  online: "在线",
-  sleeping: "休眠",
-  creating: "创建中",
-  failed: "失败",
-};
-
-const COMPUTER_STATUS_CLASS: Record<Computer["status"], string> = {
-  online: "status-ok",
-  sleeping: "status-blocked",
-  creating: "status-running",
-  failed: "status-failed",
 };
 
 const ComputerPage = () => {

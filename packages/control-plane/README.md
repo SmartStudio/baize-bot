@@ -305,7 +305,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ## 账号
 
-`accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，建占位时等于 `created_at`，今天页过期卡的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。
+`accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，建占位时等于 `created_at`，今天页过期那行的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。今天页哪些账号出行见「用量、今天与通知」一节。
 
 ### 加小红书账号
 
@@ -313,7 +313,9 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### 打开登录窗口
 
-`POST /api/accounts/:id/login` 没有请求体。账号不是本人的回 404，平台不走浏览器登录回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login`，接口立刻回 202 和账号当前的样子，扫码结果由电脑代理的 `login_state` 报回来，随 `account_updated` 推给页面。
+`POST /api/accounts/:id/login` 带 `{ attempt }`。`attempt` 是页面为这一次点击取的号（`LoginAttemptId`，1 到 64 位安全字符），卡片一点就带着它，不等 202。依次判：账号不是本人的回 404，平台不走浏览器登录回 400，请求体不合 `{ attempt }` 回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login { accountId, platform, attempt }`，接口立刻回 202 和 `{ account, attempt }`，`account` 是账号当前的样子，`attempt` 原样带回。扫码结果由电脑代理的 `login_state` 报回来：登上随 `account_updated` 推给页面，没成推 `login_failed` 带同一个 `attempt`。
+
+`attempt` 只做页面上的关联，不是权限：控制面不存、不签发、不查重，只在边界校验格式，原样转给电脑、原样推回页面。页面按 `accountId` 和 `attempt` 一起结算那张卡，所以再点一次之后，上一次点击的失败晚到也不会把新的一次记成没成。账号归属在 HTTP 这边按会话用户查，在上行那边按电脑主人和账号所在电脑查，乱填别人的号进不来。
 
 ### `login_state` 三个分支
 
@@ -321,7 +323,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 - `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
 - `expired`：`UPDATE ... WHERE login = 'valid'` 记成 `expired`，推 `account_updated` 和一条 `failed` 通知，重发 `config`。已经过期或还没登录的行不命中这条 UPDATE，重复报不再通知。
-- `failed`：登录窗口没成，只推通知，`accounts.login` 不动，见下面通知一节。
+- `failed{reason, attempt}`：登录窗口没成，`accounts.login` 不动，所以没有 `account_updated`。先推 `login_failed { accountId, attempt, reason }`，`attempt` 原样带回 `browser_login` 里的那个，页面靠它结算对应那次点击的卡；再推 `failed` 通知给人看，见下面通知一节。
 
 ### 过期隔离和重登收敛
 
@@ -385,7 +387,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
 
-`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
+`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`pending` 里的账号行（`kind: "account"`，带整个 `Account`）有两种：`login='expired'` 的账号恒出一行，`since` 是 `login_changed_at`，也就是什么时候过期的；`login='none'` 的浏览器登录类占位（`BrowserPlatform`，现在只有小红书）只在被当前 pending 稿子（不属于计划的，或挂在 approved 计划下的）或 pending 计划里的 pending 稿子引用时出一行，一个号只出一行，`since` 是引用它的待办里最早那件的 `since`：占位可能几天前就建了，要登录是从有稿子等着它那一刻开始的。GitHub、X 的 `none` 不出行，它们走授权页，不在电脑上登录。账号行和同一刻的待办并列时排在前面。这样待办数恒等于 `pending` 的条数：Web 首页的登录卡只替换这一行、挪到第一张要用它的稿子前面，服务端没列的号不凭空放卡；菜单栏不放卡，照原样列这一行，`none` 写「还没登录」，`expired` 写「登录过期」。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
 
 `GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 只读本人的 `publications`，按发布时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数。整页在一个 `REPEATABLE READ` 只读事务里查，起点、轮数和回应出自同一个快照：分开查的话，查完起点才落库的下一句不算起点，却会被当成回应带出来；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
 

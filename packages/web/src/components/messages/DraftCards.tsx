@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Copy, ExternalLink, Megaphone, MessageSquareReply } from "lucide-react";
 import type {
+  AccountId,
   ApprovePlanRequest,
   ContentPlan,
   ContentPlanId,
@@ -18,6 +19,7 @@ export type ContentActions = {
   decideDraft: (draftId: DraftId, request: DecideDraftRequest) => Promise<void>;
   approvePlan: (planId: ContentPlanId, request: ApprovePlanRequest) => Promise<void>;
   returnPlan: (planId: ContentPlanId) => Promise<void>;
+  loginAccount: (accountId: AccountId) => Promise<void>;
 };
 
 type Deciding = "approve" | "return" | null;

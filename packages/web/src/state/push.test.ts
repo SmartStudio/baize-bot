@@ -31,6 +31,7 @@ const sentFor = (handlerSession: SessionId, stateSession: SessionId, live: boole
     dispatch: () => undefined,
     stateRef: { current: state },
     refreshPendingCounts: () => undefined,
+    recoverLogins: () => undefined,
   });
   dispatchServerPush(handlers, { type: "notify", notice }, 1 as Seq);
   return notification.mock.calls.length;

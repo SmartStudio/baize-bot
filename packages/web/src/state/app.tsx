@@ -1,7 +1,9 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import {
+  LoginAttemptId,
   ServerPush,
   type AccountId,
+  type ComputerId,
   type AccountTier,
   type ApprovalId,
   type ApprovePlanRequest,
@@ -39,7 +41,11 @@ import { reduce } from "./reducer.js";
 import { reconnectDelay } from "./reconnect.js";
 import { createSessions, type Attempt, type Flight, type Session } from "./session.js";
 import { createClock, type Seq } from "./stamped.js";
-import type { Action, AppState, LoadKey } from "./types.js";
+
+// 电脑代理给一次登录最多等 120 秒（computer-agent 的 loginTimeoutMs），这里再宽 30 秒给两跳报文和推送。
+// 过了这个点还没结果，就当电脑那边的结果丢了：重拉一遍账号，还在等的卡改成没等到。
+const LOGIN_TIMEOUT_MS = 150_000;
+import type { Action, AppState, LoadKey, LoginFlow } from "./types.js";
 
 export { memberIdsOf } from "./types.js";
 export type { AppState, Conversation, GroupTurn, LoginPhase } from "./types.js";
@@ -65,6 +71,7 @@ export type AppActions = {
   loadProject: (groupId: GroupId) => Promise<ProjectResponse | undefined>;
   loadAccounts: () => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
+  loginAccount: (accountId: AccountId) => Promise<void>;
   loadGrants: () => Promise<void>;
   deleteGrant: (grantId: GrantId) => Promise<void>;
   pauseBot: (botId: BotId) => Promise<void>;
@@ -192,6 +199,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         session.flights.delete(key);
       }
     };
+    const loadAccounts = signedIn(async ({ api, put }) => {
+      const seq = nextSeq();
+      const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);
+      put({ type: "accounts_loaded", accounts, computers, seq });
+    });
     return {
       login: async (email, password) => {
         const attempt = sessions.attempt();
@@ -267,20 +279,24 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "approval_pushed", approval: result.approval });
         if (result.grant !== null) put({ type: "grant_upserted", grant: result.grant });
       }),
+      // 批了退了之后首页的清单自己重拉，不等推送：断线时推送到不了，卡不能停在清单上。
       decideDraft: signedIn(async ({ api, put }, draftId: DraftId, request: DecideDraftRequest) => {
         const seq = nextSeq();
         const { draft } = await api.decideDraft(draftId, request);
         put({ type: "content_loaded", drafts: [draft], plans: [], seq });
+        put({ type: "today_version_bumped" });
       }),
       approvePlan: signedIn(async ({ api, put }, planId: ContentPlanId, request: ApprovePlanRequest) => {
         const seq = nextSeq();
         const { plan, drafts } = await api.approvePlan(planId, request);
         put({ type: "content_loaded", drafts, plans: [plan], seq });
+        put({ type: "today_version_bumped" });
       }),
       returnPlan: signedIn(async ({ api, put }, planId: ContentPlanId) => {
         const seq = nextSeq();
         const { plan } = await api.returnPlan(planId);
         put({ type: "content_loaded", drafts: [], plans: [plan], seq });
+        put({ type: "today_version_bumped" });
       }),
       loadToday: signedIn(async ({ api, put }) => {
         const seq = nextSeq();
@@ -312,12 +328,39 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "content_loaded", drafts, plans, seq });
         return project;
       }),
-      loadAccounts: signedIn(async ({ api, put }) => {
-        const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);
-        put({ type: "accounts_loaded", accounts, computers });
-      }),
+      loadAccounts,
       updateAccountTier: signedIn(async ({ api, put }, accountId: AccountId, tier: AccountTier) => {
-        put({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account });
+        const seq = nextSeq();
+        put({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account, seq });
+      }),
+      // 尝试号在点击时就取好，卡一开就带着它，202 之前到的旧尝试失败也对不上号。
+      // 202 只说窗口在开了，登上没有随 account_updated 推回来；回包里那份账号比推送旧，按号挡掉。
+      // 这次点击之后的每一步都带着 startedAt，卡已经被别的结果结算、或者又点了一次，这些晚到的一步就不落。
+      loginAccount: signedIn(async ({ api, put, session }, accountId: AccountId) => {
+        const startedAt = nextSeq();
+        const attempt = LoginAttemptId.parse(crypto.randomUUID());
+        put({ type: "login_opened", accountId, startedAt, attempt });
+        const settle = (flow: LoginFlow) => put({ type: "login_flow", accountId, startedAt, flow });
+        const seq = nextSeq();
+        try {
+          const { account } = await api.loginAccount(accountId, attempt);
+          put({ type: "account_upserted", account, seq });
+        } catch (cause) {
+          if (session.signal.aborted || isUnauthorized(cause)) throw cause;
+          settle(
+            cause instanceof RequestFailed && cause.status === 409
+              ? { status: "offline" }
+              : { status: "refused", message: cause instanceof RequestFailed ? cause.message : "请重试" },
+          );
+          return;
+        }
+        const timer = setTimeout(() => {
+          if (session.signal.aborted) return;
+          void loadAccounts()
+            .catch(() => undefined)
+            .then(() => settle({ status: "lapsed" }));
+        }, LOGIN_TIMEOUT_MS);
+        session.signal.addEventListener("abort", () => clearTimeout(timer));
       }),
       loadGrants: signedIn(async ({ api, put }) => {
         put({ type: "grants_loaded", grants: (await api.grants()).grants });
@@ -476,12 +519,29 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           });
       });
     };
+    // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
+    // 重拉失败也结，卡不能一直停在「等你扫码」；重拉期间新点的登录 startedAt 更大，不受影响。
+    const recoverLogins = (computerId: ComputerId | null, flow: "offline" | "lapsed") => {
+      const before = nextSeq();
+      const seq = nextSeq();
+      void Promise.all([scoped.api.accounts(), scoped.api.computers()])
+        .then(([{ accounts }, { computers }]) => {
+          if (live()) put({ type: "accounts_loaded", accounts, computers, seq });
+        })
+        .catch((cause: unknown) => {
+          if (live() && isUnauthorized(cause)) expire();
+        })
+        .then(() => {
+          if (live()) put({ type: "logins_settled", before, computerId, flow: { status: flow } });
+        });
+    };
     const pushHandlers = createPushHandlers({
       session,
       live,
       dispatch: put,
       stateRef,
       refreshPendingCounts,
+      recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
     });
     const retryLater = () => {
       retry = setTimeout(open, reconnectDelay(failures));
@@ -493,7 +553,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
       socket.addEventListener("open", () => {
         failures = 0;
-        if (hasConnected) put({ type: "push_reconnected", seq: nextSeq() });
+        if (hasConnected) {
+          put({ type: "push_reconnected", seq: nextSeq() });
+          recoverLogins(null, "lapsed");
+        }
         hasConnected = true;
       });
       socket.addEventListener("message", (event) => {

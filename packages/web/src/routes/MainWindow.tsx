@@ -16,7 +16,7 @@ import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
-import { pendingCountOf, useToday } from "../state/today.js";
+import { useToday } from "../state/today.js";
 import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 
@@ -102,6 +102,7 @@ export const MainWindow = () => {
     decideDraft: actions.decideDraft,
     approvePlan: actions.approvePlan,
     returnPlan: actions.returnPlan,
+    loginAccount: actions.loginAccount,
   };
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
@@ -117,7 +118,7 @@ export const MainWindow = () => {
         bots={bots}
         groupTurns={ready.groupTurns}
         user={ready.user}
-        pendingCount={today.data === null ? 0 : pendingCountOf(today.data)}
+        pendingCount={today.data === null ? 0 : today.data.pending.length}
         onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
         onOpenSettings={() => setOverlay("settings")}

@@ -568,3 +568,99 @@ describe("GET /api/today", () => {
     expect((await owner.client.get("/api/overnight")).status).toBe(404);
   });
 });
+
+const accountRowsOf = (today: TodayResponse, accountId: string) =>
+  today.pending.filter((item) => item.kind === "account" && item.account.id === accountId);
+
+describe("首页的账号行", () => {
+  async function placeholderOf(owner: Owner, platform: "xiaohongshu" | "x", createdAt: Date): Promise<string> {
+    const accountId = newId();
+    await database.db.insert(accounts).values({
+      id: accountId,
+      ownerId: owner.userId,
+      computerId: owner.computer.computerId,
+      platform,
+      handle: null,
+      login: "none",
+      tier: "confirm_publish",
+      createdAt,
+      loginChangedAt: createdAt,
+    });
+    return accountId;
+  }
+
+  async function draftOn(
+    owner: Owner,
+    accountId: string,
+    input: { platform: "xiaohongshu" | "x"; createdAt: Date; status?: "pending" | "approved"; planId?: string },
+  ): Promise<string> {
+    const draftId = newId();
+    await database.db.insert(drafts).values({
+      id: draftId,
+      ownerId: owner.userId,
+      groupId: owner.groupId,
+      botId: owner.botId,
+      planId: input.planId ?? null,
+      accountId,
+      platform: input.platform,
+      content: post(`稿子 ${draftId}`, "等着发"),
+      contentHash: draftId,
+      status: input.status ?? "pending",
+      createdAt: input.createdAt,
+    });
+    return draftId;
+  }
+
+  it("没登录的小红书号被待确认的稿子和计划引用，today 有且只有一条它的账号行，since 是最早那件待办", async () => {
+    const owner = await ownerWithBot();
+    const now = Date.now();
+    const accountId = await placeholderOf(owner, "xiaohongshu", new Date(now - 3 * 24 * 60 * 60_000));
+    const planId = newId();
+    await database.db.insert(contentPlans).values({
+      id: planId,
+      ownerId: owner.userId,
+      groupId: owner.groupId,
+      botId: owner.botId,
+      title: "小红书一周",
+      status: "pending",
+      createdAt: new Date(now - 9_000),
+    });
+    await draftOn(owner, accountId, { platform: "xiaohongshu", createdAt: new Date(now - 8_000), planId });
+    await draftOn(owner, accountId, { platform: "xiaohongshu", createdAt: new Date(now - 5_000) });
+    await draftOn(owner, accountId, { platform: "xiaohongshu", createdAt: new Date(now - 4_000) });
+
+    const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
+    const rows = accountRowsOf(today, accountId);
+    expect(rows, "三件待办引用同一个没登录的号，只出一行").toHaveLength(1);
+    expect(rows[0]?.kind === "account" && rows[0].account.login).toBe("none");
+    expect(rows[0]?.since, "从第一件等着它的待办算起，不是三天前建占位的那一刻").toBe(
+      new Date(now - 9_000).toISOString(),
+    );
+    expect(
+      today.pending.map((item) => item.kind),
+      "账号行和它们一起按 since 排",
+    ).toEqual(["account", "plan", "draft", "draft"]);
+  });
+
+  it("没有待办引用的没登录号不出行", async () => {
+    const owner = await ownerWithBot();
+    const now = Date.now();
+    const accountId = await placeholderOf(owner, "xiaohongshu", new Date(now - 60_000));
+    await draftOn(owner, accountId, { platform: "xiaohongshu", createdAt: new Date(now - 5_000), status: "approved" });
+
+    const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
+    expect(accountRowsOf(today, accountId), "批过的稿子不算等它").toEqual([]);
+    expect(today.pending).toEqual([]);
+  });
+
+  it("OAuth 平台的没登录号即使有待确认的稿子也不出行", async () => {
+    const owner = await ownerWithBot();
+    const now = Date.now();
+    const accountId = await placeholderOf(owner, "x", new Date(now - 60_000));
+    await draftOn(owner, accountId, { platform: "x", createdAt: new Date(now - 5_000) });
+
+    const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
+    expect(accountRowsOf(today, accountId)).toEqual([]);
+    expect(today.pending.map((item) => item.kind)).toEqual(["draft"]);
+  });
+});

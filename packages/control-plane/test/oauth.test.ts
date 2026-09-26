@@ -4,6 +4,7 @@ import {
   AccountListResponse,
   ComputerTokenResponse,
   DecideDraftResponse,
+  LoginAttemptId,
   type Account,
   type AccountId,
   type Notice,
@@ -1272,7 +1273,7 @@ describe("电脑报 OAuth 账号的登录状态", () => {
       });
       expect(created.status).toBe(201);
       const placeholder = (await nextOf(o.push, "account_updated")).account;
-      // 同一台电脑的上行帧按顺序处理：小红书那条的通知先到，说明前一条已经处理完而且什么都没推。
+      // 同一台电脑的上行帧按顺序处理：小红书那条的 login_failed 和通知先到，说明前一条已经处理完而且什么都没推。
       const report = async (
         state: { readonly login: "valid"; readonly handle: string } | { readonly login: "expired" },
       ) => {
@@ -1280,10 +1281,11 @@ describe("电脑报 OAuth 账号的登录状态", () => {
         o.agent.send({
           type: "login_state",
           accountId: placeholder.id,
-          state: { login: "failed", reason: "window_failed" },
+          state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse(newId()) },
         });
         const pushed = await o.push.next();
-        expect(pushed.type, `电脑报 ${state.login} 不该推任何东西`).toBe("notify");
+        expect(pushed.type, `电脑报 ${state.login} 不该推任何东西`).toBe("login_failed");
+        expect((await o.push.next()).type).toBe("notify");
       };
 
       await report({ login: "expired" });

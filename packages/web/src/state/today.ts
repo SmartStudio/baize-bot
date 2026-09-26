@@ -11,8 +11,6 @@ const REFRESH_DEBOUNCE_MS = 100;
 const LOAD_ERROR = "今天的清单没取到。";
 const REFRESH_ERROR = "今天的清单刷新失败。";
 
-export const pendingCountOf = (data: TodayResponse): number => data.pending.length;
-
 export const useToday = () => {
   const { state, actions } = useApp();
   const loadToday = actions.loadToday;

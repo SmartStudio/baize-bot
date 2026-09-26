@@ -1,9 +1,12 @@
 import {
   AccountId,
   ComputerTokenResponse,
+  LoginAccountResponse,
+  LoginAttemptId,
   TodayResponse,
   type ComputerId,
   type Notice,
+  type ServerPush,
   type UserId,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -74,14 +77,55 @@ async function pendingAccounts(owner: Owner): Promise<readonly string[]> {
   return today.pending.flatMap((item) => (item.kind === "account" ? [item.account.id] : []));
 }
 
+async function nextOf<K extends ServerPush["type"]>(
+  push: PushClient,
+  type: K,
+): Promise<Extract<ServerPush, { type: K }>> {
+  for (;;) {
+    const pushed = await push.next();
+    if (pushed.type === type) return pushed as Extract<ServerPush, { type: K }>;
+  }
+}
+
 describe("login_state failed", () => {
+  it("登录没成推 login_failed，accountId、attempt 和 reason 都是这一次点击的", async () => {
+    const owner = await makeOwner();
+    const accountId = await validAccount(owner);
+    const { agent, push } = await online(owner);
+
+    try {
+      const attempt = LoginAttemptId.parse(newId());
+      const response = await owner.client.post(`/api/accounts/${accountId}/login`, { attempt });
+      expect(response.status).toBe(202);
+      expect(LoginAccountResponse.parse(await response.json()).attempt).toBe(attempt);
+      expect((await agent.expect("browser_login")).attempt, "电脑拿到的是页面取的那个号").toBe(attempt);
+
+      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "remote_refused", attempt } });
+      const failed = await nextOf(push, "login_failed");
+      expect(failed, "页面按这三样把卡结算到那一次点击上").toEqual({
+        type: "login_failed",
+        accountId,
+        attempt,
+        reason: "remote_refused",
+      });
+      expect((await nextOf(push, "notify")).notice.kind, "给人看的通知照旧").toBe("failed");
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
   it("登录窗口出错：账号还是有效，用户收到一句中文原因", async () => {
     const owner = await makeOwner();
     const accountId = await validAccount(owner);
     const { agent, push } = await online(owner);
 
     try {
-      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "window_failed" } });
+      agent.send({
+        type: "login_state",
+        accountId,
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+      });
 
       const notice = await nextNotice(push);
       expect(notice.kind, "没办成要用户处理，不能显示成「做完了」").toBe("failed");
@@ -91,7 +135,11 @@ describe("login_state failed", () => {
       expect(notice.text, "登录失败不等于过期，不能让用户以为要重新授权").toContain("账号状态没变");
       expect(await pendingAccounts(owner), "账号没被改成过期，「今天」不会让他去重新登录").toEqual([]);
 
-      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "window_failed" } });
+      agent.send({
+        type: "login_state",
+        accountId,
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+      });
       expect((await nextNotice(push)).kind, "再点一次又没成，照样再推一条，不像电脑掉线那样一段只推一次").toBe(
         "failed",
       );
@@ -107,7 +155,11 @@ describe("login_state failed", () => {
     const { agent, push } = await online(owner);
 
     try {
-      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "remote_refused" } });
+      agent.send({
+        type: "login_state",
+        accountId,
+        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
+      });
 
       const notice = await nextNotice(push);
       expect(notice.kind, "没办成要用户处理，不能显示成「做完了」").toBe("failed");
@@ -132,15 +184,19 @@ describe("login_state failed", () => {
       mine.agent.send({
         type: "login_state",
         accountId: strangersAccount,
-        state: { login: "failed", reason: "remote_refused" },
+        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
       });
-      mine.agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "window_failed" } });
+      mine.agent.send({
+        type: "login_state",
+        accountId,
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+      });
       expect((await nextNotice(mine.push)).text, "别人账号那条没有推给这台电脑的主人").toContain("登录窗口");
 
       theirs.agent.send({
         type: "login_state",
         accountId: strangersAccount,
-        state: { login: "failed", reason: "window_failed" },
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
       });
       expect((await nextNotice(theirs.push)).text, "也没有推给账号的主人，他收到的第一条是自己电脑发的").toContain(
         "登录窗口",
@@ -162,8 +218,16 @@ describe("login_state failed", () => {
     const { agent } = await helloAgent(server.server.port, remote.computerId, remote.token);
 
     try {
-      agent.send({ type: "login_state", accountId: onLocal, state: { login: "failed", reason: "remote_refused" } });
-      agent.send({ type: "login_state", accountId: onRemote, state: { login: "failed", reason: "window_failed" } });
+      agent.send({
+        type: "login_state",
+        accountId: onLocal,
+        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
+      });
+      agent.send({
+        type: "login_state",
+        accountId: onRemote,
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+      });
       expect(
         (await nextNotice(push)).text,
         "本机账号那条没推：远程电脑管不到本机的登录窗口，推了用户会被一条无关的失败吓到",

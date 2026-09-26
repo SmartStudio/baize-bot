@@ -16,7 +16,9 @@ import { DraftCard, PlanCard, type ContentActions } from "../components/messages
 import type { BotLookup } from "../components/messages/MessageView.js";
 import { ToolViewContent } from "../components/messages/ToolViewContent.js";
 import type { ContentBook } from "../state/types.js";
-import { pendingCountOf, type Today } from "../state/today.js";
+import { withLoginCards } from "../state/accounts.js";
+import type { Today } from "../state/today.js";
+import { LoginCard } from "../components/LoginCard.js";
 
 const greeting = (name: string): string => {
   const hour = new Date().getHours();
@@ -174,8 +176,18 @@ export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGro
   }
   return (
     <div className={`today-list${compact ? " is-compact" : ""}`}>
-      {data.map((item) => {
+      {(cards === undefined ? data : withLoginCards(data, cards.content)).map((item) => {
         switch (item.kind) {
+          case "login":
+            return cards === undefined ? null : (
+              <LoginCard
+                key={`login-${item.account.id}`}
+                account={item.account}
+                computer={cards.content.computers[item.account.computerId]}
+                flow={cards.content.logins[item.account.id]}
+                onLogin={cards.actions.loginAccount}
+              />
+            );
           case "approval":
             return <ApprovalRow item={item} onDecide={onDecide} key={item.approval.id} />;
           case "plan": {
@@ -243,11 +255,11 @@ export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGro
               <>
                 <TriangleAlert size={18} aria-hidden="true" />
                 <span className="today-row-main">
-                  <span className="today-kicker">登录过期</span>
+                  <span className="today-kicker">{item.account.login === "none" ? "还没登录" : "登录过期"}</span>
                   <strong>
                     {PLATFORM[item.account.platform]} · {item.account.handle ?? "账号未命名"}
                   </strong>
-                  <small>在账号所在电脑重新登录</small>
+                  <small>{item.account.login === "none" ? "在账号所在电脑登录" : "在账号所在电脑重新登录"}</small>
                 </span>
                 {onOpenAccounts === undefined ? null : <ArrowRight size={16} aria-hidden="true" />}
               </>
@@ -342,7 +354,7 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
     );
   }
 
-  const pendingCount = pendingCountOf(data);
+  const pendingCount = data.pending.length;
   const disabled = data.assistantGroupId === null;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();

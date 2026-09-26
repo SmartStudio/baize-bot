@@ -1,6 +1,7 @@
 import {
   Approval,
   BotId,
+  BrowserPlatform,
   GroupId,
   RoutineId,
   TodayResponse,
@@ -31,6 +32,7 @@ import { toAccount, toDraft, toPlan } from "./rows.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 type PlanRow = typeof contentPlans.$inferSelect;
+type AccountRow = typeof accounts.$inferSelect;
 
 export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promise<TodayResponse> {
   const planRows = await db
@@ -58,49 +60,62 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
               ),
             ),
           );
-  const [approvalRows, draftRows, accountRows, publicationRows, routineDoneRows, routineRows] = await Promise.all([
-    db
-      .select({ row: approvals })
-      .from(approvals)
-      .innerJoin(groups, eq(groups.id, approvals.groupId))
-      .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending")))
-      .orderBy(desc(approvals.createdAt), desc(approvals.id))
-      .limit(50),
-    draftRowsQuery,
-    db
-      .select()
-      .from(accounts)
-      .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "expired")))
-      .orderBy(desc(accounts.loginChangedAt), desc(accounts.id))
-      .limit(50),
-    db
-      .select({ publication: publications, draft: drafts })
-      .from(publications)
-      .leftJoin(drafts, eq(drafts.id, publications.draftId))
-      .where(eq(publications.ownerId, ownerId))
-      .orderBy(desc(publications.publishedAt), desc(publications.id))
-      .limit(20),
-    db
-      .select({ run: routineRuns, routine: routines })
-      .from(routineRuns)
-      .innerJoin(routines, eq(routines.id, routineRuns.routineId))
-      .innerJoin(bots, eq(bots.id, routines.botId))
-      .where(and(eq(bots.ownerId, ownerId), eq(routineRuns.status, "ok")))
-      .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
-      .limit(20),
-    db
-      .select({ routine: routines })
-      .from(routines)
-      .innerJoin(bots, eq(bots.id, routines.botId))
-      .where(and(eq(bots.ownerId, ownerId), eq(routines.enabled, true))),
-  ]);
+  const [approvalRows, draftRows, expiredAccountRows, placeholderRows, publicationRows, routineDoneRows, routineRows] =
+    await Promise.all([
+      db
+        .select({ row: approvals })
+        .from(approvals)
+        .innerJoin(groups, eq(groups.id, approvals.groupId))
+        .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending")))
+        .orderBy(desc(approvals.createdAt), desc(approvals.id))
+        .limit(50),
+      draftRowsQuery,
+      db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "expired")))
+        .orderBy(desc(accounts.loginChangedAt), desc(accounts.id))
+        .limit(50),
+      // 每个平台至多一个占位（accounts_owner_platform_none_idx），不用 limit。
+      db
+        .select()
+        .from(accounts)
+        .where(
+          and(
+            eq(accounts.ownerId, ownerId),
+            eq(accounts.login, "none"),
+            inArray(accounts.platform, BrowserPlatform.options),
+          ),
+        ),
+      db
+        .select({ publication: publications, draft: drafts })
+        .from(publications)
+        .leftJoin(drafts, eq(drafts.id, publications.draftId))
+        .where(eq(publications.ownerId, ownerId))
+        .orderBy(desc(publications.publishedAt), desc(publications.id))
+        .limit(20),
+      db
+        .select({ run: routineRuns, routine: routines })
+        .from(routineRuns)
+        .innerJoin(routines, eq(routines.id, routineRuns.routineId))
+        .innerJoin(bots, eq(bots.id, routines.botId))
+        .where(and(eq(bots.ownerId, ownerId), eq(routineRuns.status, "ok")))
+        .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
+        .limit(20),
+      db
+        .select({ routine: routines })
+        .from(routines)
+        .innerJoin(bots, eq(bots.id, routines.botId))
+        .where(and(eq(bots.ownerId, ownerId), eq(routines.enabled, true))),
+    ]);
 
   const draftsByPlan = draftsByPlanOf(draftRows);
   const orderedPending = pendingItems({
     approvals: approvalRows.map(({ row }) => row),
     plans: planRows,
     drafts: draftRows,
-    accounts: accountRows,
+    expiredAccounts: expiredAccountRows,
+    placeholders: placeholderRows,
   });
 
   const done: { at: Date; id: string; item: TodayDoneItem }[] = [];
@@ -227,17 +242,25 @@ export function draftsByPlanOf(draftRows: readonly DraftRow[]): Map<string, Draf
 /**
  * 等你确认的卡，按来的先后排。approvals 只给待批的；plans 里只有待批的计划成卡；
  * drafts 要带上待批计划下的稿子，它们只随计划出现，不单独成卡。首页和项目页共用。
+ * 过期的号恒成一行；没登录的浏览器平台占位只在有待办等着发给它时成一行，一个号一行，
+ * 从最早那件等它的待办算起：占位可能早就建了，要登录是从有稿子等着它那一刻开始的。
  */
 export function pendingItems(input: {
   readonly approvals: readonly (typeof approvals.$inferSelect)[];
   readonly plans: readonly PlanRow[];
   readonly drafts: readonly DraftRow[];
-  readonly accounts: readonly (typeof accounts.$inferSelect)[];
+  readonly expiredAccounts: readonly AccountRow[];
+  readonly placeholders: readonly AccountRow[];
 }): TodayPendingItem[] {
   const draftsByPlan = draftsByPlanOf(input.drafts);
   const pendingPlans = input.plans.filter((row) => row.status === "pending");
   const pendingPlanIds = new Set(pendingPlans.map((row) => row.id));
   const pending: { at: Date; id: string; item: TodayPendingItem }[] = [];
+  const waitingSince = new Map<string, Date>();
+  const waitOn = (accountId: string, at: Date) => {
+    const current = waitingSince.get(accountId);
+    if (current === undefined || at < current) waitingSince.set(accountId, at);
+  };
   for (const row of input.approvals) {
     pending.push({
       at: row.createdAt,
@@ -248,6 +271,7 @@ export function pendingItems(input: {
   for (const row of pendingPlans) {
     const planDrafts = (draftsByPlan.get(row.id) ?? []).slice(0, 20);
     if (planDrafts.length === 0) continue;
+    for (const draft of planDrafts) if (draft.status === "pending") waitOn(draft.accountId, row.createdAt);
     pending.push({
       at: row.createdAt,
       id: row.id,
@@ -261,23 +285,37 @@ export function pendingItems(input: {
   }
   for (const row of input.drafts) {
     if (row.status !== "pending" || (row.planId !== null && pendingPlanIds.has(row.planId))) continue;
+    waitOn(row.accountId, row.createdAt);
     pending.push({
       at: row.createdAt,
       id: row.id,
       item: { kind: "draft", since: row.createdAt.toISOString(), draft: toDraft(row) },
     });
   }
-  for (const row of input.accounts) {
+  const accountRows = [
+    ...input.expiredAccounts.map((row) => ({ row, at: row.loginChangedAt })),
+    ...input.placeholders.flatMap((row) => {
+      const at = waitingSince.get(row.id);
+      return at === undefined ? [] : [{ row, at }];
+    }),
+  ];
+  for (const { row, at } of accountRows) {
     pending.push({
-      at: row.loginChangedAt,
+      at,
       id: row.id,
-      item: { kind: "account", since: row.loginChangedAt.toISOString(), account: toAccount(row) },
+      item: { kind: "account", since: at.toISOString(), account: toAccount(row) },
     });
   }
   return pending
-    .toSorted((left, right) => left.at.getTime() - right.at.getTime() || left.id.localeCompare(right.id))
+    .toSorted(
+      (left, right) =>
+        left.at.getTime() - right.at.getTime() || rank(left.item) - rank(right.item) || left.id.localeCompare(right.id),
+    )
     .map(({ item }) => item);
 }
+
+// 账号行和等它的第一件待办同一刻时排在前面，菜单栏里先看到要登录。
+const rank = (item: TodayPendingItem): number => (item.kind === "account" ? 0 : 1);
 
 /** 排了时间的已批稿子和启用中的例行下一次触发，按时间升序。首页和项目页共用。 */
 export function nextItems(

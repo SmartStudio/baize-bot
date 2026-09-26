@@ -249,6 +249,33 @@
   gap: var(--space-4);
 }
 
+.account-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.account-group-head {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 var(--space-2);
+}
+
+.account-group-head b {
+  color: var(--fg-1);
+  font: var(--type-label);
+}
+
+.account-group-head .computer-status {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
 .account-row-head {
   width: 100%;
   text-align: left;
@@ -311,4 +338,18 @@
 .account-tier-error {
   color: var(--danger);
   font: var(--type-caption);
+}
+
+/* ---------- 等你确认里的登录卡 ---------- */
+
+.today-login > svg {
+  color: var(--warning);
+}
+
+.today-login.is-signed-in > svg {
+  color: var(--success);
+}
+
+.today-login .today-row-main small {
+  white-space: normal;
 }

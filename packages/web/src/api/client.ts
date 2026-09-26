@@ -2,6 +2,9 @@ import type { z } from "zod";
 import {
   AccountListResponse,
   AccountResponse,
+  LoginAccountResponse,
+  type LoginAccountRequest,
+  type LoginAttemptId,
   ApiError,
   ApprovePlanResponse,
   ComputerListResponse,
@@ -166,8 +169,10 @@ export const createApi = (signal?: AbortSignal) => {
       json(AccountResponse, await send("PATCH", `/accounts/${encodeURIComponent(id)}`, request)),
     createAccount: async (request: CreateAccountRequest) =>
       json(AccountResponse, await send("POST", "/accounts", request)),
-    loginAccount: async (id: AccountId) =>
-      json(AccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`)),
+    loginAccount: async (id: AccountId, attempt: LoginAttemptId) => {
+      const body: LoginAccountRequest = { attempt };
+      return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
+    },
     // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它设 location。
     oauthStartUrl: (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`,
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),

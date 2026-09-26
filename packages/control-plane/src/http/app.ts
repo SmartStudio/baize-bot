@@ -35,6 +35,8 @@ import {
   GroupId,
   GroupListResponse,
   GroupResponse,
+  LoginAccountRequest,
+  LoginAccountResponse,
   LoginRequest,
   LoginResponse,
   MeResponse,
@@ -333,12 +335,20 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (account === null) return c.json(NO_ACCOUNT, 404);
     const platform = BrowserPlatform.safeParse(account.platform);
     if (!platform.success) return c.json({ error: "这个平台不用登录窗口，走授权页登录" }, 400);
+    const body = await readJson(c.req.raw, LoginAccountRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+    const { attempt } = body.value;
     // 电脑刚好在判完在线之后断了，send 返回 false，同样按不在线回。
     const sent =
       agents.isOnline(account.computerId) &&
-      agents.send(account.computerId, { type: "browser_login", accountId: account.id, platform: platform.data });
+      agents.send(account.computerId, {
+        type: "browser_login",
+        accountId: account.id,
+        platform: platform.data,
+        attempt,
+      });
     if (!sent) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
-    return c.json(AccountResponse.parse({ account }), 202);
+    return c.json(LoginAccountResponse.parse({ account, attempt }), 202);
   });
 
   app.patch("/api/accounts/:id", async (c) => {

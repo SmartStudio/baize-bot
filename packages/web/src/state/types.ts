@@ -18,6 +18,8 @@ import {
   type GrantId,
   type Handoff,
   type HandoffId,
+  type LoginAttemptId,
+  type LoginFailure,
   type Message,
   type MessageId,
   type Publication,
@@ -67,14 +69,27 @@ export type Conversation =
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
   conversation.kind === "solo" ? [conversation.botId] : conversation.botIds;
 
+// 点了「打开登录窗口」之后这个号的登录走到哪一步。没有记录就是没点过；点过的号登上了，卡片才说「已登录」而不是消失。
+// opening 记着这次点击取的号和为它取的尝试号：结算只落在同一次点击上，别的点击、别的尝试的结果碰不到它。
+// offline 是控制面回 409 或电脑中途离线，refused 是别的错；failed 是电脑报回来的登录没成，账号本身的 login 不变；
+// lapsed 是等到超时或重连都没等到结果。signed_in 是等到了 login 为 valid 的账号，之后再过期，卡片从头要你登录。
+export type LoginFlow =
+  | { status: "opening"; startedAt: Seq; attempt: LoginAttemptId }
+  | { status: "signed_in" }
+  | { status: "offline" }
+  | { status: "refused"; message: string }
+  | { status: "failed"; reason: LoginFailure }
+  | { status: "lapsed" };
+
 // 草稿卡、计划卡和账号页共用的几张表。群历史、首页快照、接口响应和推送都往这里写，卡片只从这里读，
-// 首页展开的卡和群里的同一张卡因此不会各说各的。草稿和计划的先后按 stamps 排，见 stamped.ts。
+// 首页展开的卡和群里的同一张卡因此不会各说各的。草稿、计划和账号的先后按 stamps 排，见 stamped.ts。
 export type ContentBook = {
   drafts: Record<DraftId, Draft>;
   plans: Record<ContentPlanId, ContentPlan>;
   accounts: Record<AccountId, Account>;
   computers: Record<ComputerId, Computer>;
   publications: Record<DraftId, Publication>;
+  logins: Partial<Record<AccountId, LoginFlow>>;
   stamps: Stamps;
 };
 
@@ -154,10 +169,19 @@ export type Action =
   | { type: "settings_set"; settings: Settings }
   | { type: "usage_loaded"; usage: UsageResponse }
   | { type: "content_loaded"; drafts: Draft[]; plans: ContentPlan[]; seq: Seq }
-  | { type: "accounts_loaded"; accounts: Account[]; computers: Computer[] }
-  | { type: "account_upserted"; account: Account }
-  | { type: "account_removed"; accountId: AccountId }
-  | { type: "computer_upserted"; computer: Computer }
+  | { type: "accounts_loaded"; accounts: Account[]; computers: Computer[]; seq: Seq }
+  | { type: "account_upserted"; account: Account; seq: Seq }
+  | { type: "account_removed"; accountId: AccountId; seq: Seq }
+  | { type: "login_opened"; accountId: AccountId; startedAt: Seq; attempt: LoginAttemptId }
+  | { type: "login_flow"; accountId: AccountId; startedAt: Seq; flow: LoginFlow }
+  | { type: "login_failed"; accountId: AccountId; attempt: LoginAttemptId; reason: LoginFailure }
+  | {
+      type: "logins_settled";
+      before: Seq;
+      computerId: ComputerId | null;
+      flow: Extract<LoginFlow, { status: "offline" | "lapsed" }>;
+    }
+  | { type: "computer_upserted"; computer: Computer; seq: Seq }
   | { type: "publications_loaded"; publications: Publication[] }
   | { type: "today_version_bumped" }
   | { type: "push_reconnected"; seq: Seq }

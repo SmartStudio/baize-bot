@@ -140,7 +140,13 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
       title: runTitle({ isRoutine: run.isRoutine, routineName, trigger, taskTitle }),
       since: run.startedAt.toISOString(),
     })),
-    pending: pendingItems({ approvals: approvalRows, plans: planRows, drafts: draftRows, accounts: [] }).slice(-50),
+    pending: pendingItems({
+      approvals: approvalRows,
+      plans: planRows,
+      drafts: draftRows,
+      expiredAccounts: [],
+      placeholders: [],
+    }).slice(-50),
     plan:
       latestPlan === undefined
         ? null

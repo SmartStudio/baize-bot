@@ -188,7 +188,13 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
       return;
     }
     case "failed":
-      // 登录没成不等于账号过期，accounts.login 不动，只告诉用户原因。
+      // 登录没成不等于账号过期，accounts.login 不动。页面按 accountId 和 attempt 结算那张卡，通知只是给人看的。
+      deps.push.push(conn.ownerId, {
+        type: "login_failed",
+        accountId: event.accountId,
+        attempt: state.attempt,
+        reason: state.reason,
+      });
       await deps.notifications.publish(conn.ownerId, {
         kind: "failed",
         text: LOGIN_FAILURE_NOTICE[state.reason](PLATFORM_LABEL[found.platform]),

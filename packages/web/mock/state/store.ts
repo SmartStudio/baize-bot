@@ -1,5 +1,6 @@
 import {
   Account,
+  type ComputerStatus,
   Approval,
   Bot,
   ContentPlan,
@@ -56,6 +57,10 @@ export const grants = new Map<string, Grant>();
 export const drafts = new Map<string, Draft>();
 export const plans = new Map<string, ContentPlan>();
 export const accounts = new Map<string, Account>();
+// 电脑在不在线。没有记录就是在线；控制面判 409 看的是电脑代理连没连着，mock 拿这张表代替。
+export const computerStatus = new Map<string, ComputerStatus>();
+// 每个账号最近一次点「打开登录窗口」发出的尝试号，测试入口报失败时不带号就默认是它。
+export const loginAttempts = new Map<string, string>();
 export const publications = new Map<string, Publication>();
 export const handoffs = new Map<string, Handoff>();
 export const routines = new Map<string, Routine>();

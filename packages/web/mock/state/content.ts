@@ -7,12 +7,13 @@ import {
   DecideDraftRequest,
   Draft,
   type AccountTier,
+  LoginFailure,
   type CreateAccountRequest,
   type DraftContent,
   type Message,
   type Publication,
 } from "@baize/shared";
-import { accounts, at, drafts, nextSuffix, plans, publications, user } from "./store.js";
+import { accounts, at, computerStatus, drafts, loginAttempts, nextSuffix, plans, publications, user } from "./store.js";
 import { publicationOf } from "./today.js";
 
 type PlanDecision =
@@ -29,7 +30,7 @@ export const computersOf = () =>
         id: "cmp_local",
         ownerId: user.id,
         kind: "local",
-        status: "online",
+        status: computerStatus.get("cmp_local") ?? "online",
         host: null,
         idleSince: null,
         lastSeenAt: at(1),
@@ -38,7 +39,7 @@ export const computersOf = () =>
         id: "cmp_remote",
         ownerId: user.id,
         kind: "remote",
-        status: "online",
+        status: computerStatus.get("cmp_remote") ?? "online",
         host: "remote.baize.dev",
         idleSince: null,
         lastSeenAt: at(1),
@@ -138,19 +139,64 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
   return { ok: true, value: { account: next, created: true } };
 };
 
-// mock 没有电脑和助理浏览器，点登录就当扫码成功，直接记已登录。
-export const loginAccount = (id: string): Outcome<Account> => {
+// 照控制面：只是把登录窗口打开，账号原样回 202，带回页面取的尝试号；登上没有要等电脑报 login_state，
+// 测试里由 /api/test/accounts/:id/login-state 代替。
+export const loginAccount = (id: string, attempt: string): Outcome<{ account: Account; attempt: string }> => {
   const account = accounts.get(id);
   if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
   if (account.platform !== "xiaohongshu") return { ok: false, status: 400, error: "这个平台不走浏览器登录" };
+  if ((computerStatus.get(account.computerId) ?? "online") !== "online") {
+    return { ok: false, status: 409, error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" };
+  }
+  loginAttempts.set(id, attempt);
+  return { ok: true, value: { account, attempt } };
+};
+
+// 照控制面 agent/events.ts 的 onLoginState：登上记 valid 并换 handle，过期记 expired，
+// 没成推一条 login_failed 再发一条通知、账号不动。失败不带尝试号就算最近一次点击的。
+export const LoginState = z.discriminatedUnion("login", [
+  z.object({ login: z.literal("valid"), handle: z.string().min(1).max(100) }).strict(),
+  z.object({ login: z.literal("expired") }).strict(),
+  z.object({ login: z.literal("failed"), reason: LoginFailure, attempt: z.string().min(1).optional() }).strict(),
+]);
+export type LoginState = z.infer<typeof LoginState>;
+
+const LOGIN_FAILURE_NOTICE: Record<LoginFailure, string> = {
+  window_failed: "小红书的登录窗口出错或到时间还没登上，账号状态没变，可以再点一次登录",
+  remote_refused: "远程电脑上不能登录小红书，请在本机登录这个账号",
+};
+
+export const reportLoginState = (
+  id: string,
+  state: LoginState,
+): Outcome<{
+  account: Account | null;
+  notice: string | null;
+  failed: { attempt: string; reason: LoginFailure } | null;
+}> => {
+  const account = accounts.get(id);
+  if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
+  if (state.login === "failed") {
+    const attempt = state.attempt ?? loginAttempts.get(id) ?? "try_none";
+    return {
+      ok: true,
+      value: { account: null, notice: LOGIN_FAILURE_NOTICE[state.reason], failed: { attempt, reason: state.reason } },
+    };
+  }
+  if (state.login === "expired" && account.login === "expired")
+    return { ok: true, value: { account: null, notice: null, failed: null } };
   const next = Account.parse({
     ...account,
-    handle: account.handle ?? `小红书号${nextSuffix()}`,
-    login: "valid",
+    handle: state.login === "valid" ? state.handle : account.handle,
+    login: state.login,
     loginChangedAt: now(),
   });
   accounts.set(next.id, next);
-  return { ok: true, value: next };
+  const notice =
+    state.login === "expired"
+      ? `小红书账号「${next.handle ?? ""}」登录过期了，这个账号的稿子先不发，到账号页重新登录`
+      : null;
+  return { ok: true, value: { account: next, notice, failed: null } };
 };
 
 // 测试入口：代替控制面的发布循环把一条已批草稿发出去。

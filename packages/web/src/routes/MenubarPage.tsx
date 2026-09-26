@@ -2,7 +2,7 @@ import { useState } from "react";
 import { SendHorizontal } from "lucide-react";
 import type { ApprovalId, DecideApprovalRequest, GroupId } from "@baize/shared";
 import { TodayPending } from "./TodayPage.js";
-import { pendingCountOf, useToday } from "../state/today.js";
+import { useToday } from "../state/today.js";
 
 type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
@@ -33,7 +33,7 @@ export const MenubarPage = ({ onSend, onDecide }: Props) => {
     );
   }
 
-  const count = pendingCountOf(data);
+  const count = data.pending.length;
   const disabled = data.assistantGroupId === null;
   return (
     <main className="menubar-page" data-testid="menubar-page">
