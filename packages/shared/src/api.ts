@@ -25,6 +25,7 @@ import {
   OnFailure,
   Platform,
   Publication,
+  PublicationId,
   BrowserPlatform,
   Notice,
   ModelPurpose,
@@ -386,6 +387,60 @@ export const TodayResponse = z
   })
   .strict();
 export type TodayResponse = z.infer<typeof TodayResponse>;
+
+// GET /api/projects/:groupId  项目页。项目就是多 Bot 群加它的任务卡，项目 id 就是群 id；别人的群、单 Bot 群都回 404。
+// 标题、目标和清单进度 Web 从已有的群和任务卡里读，task_updated 会更新那一份，这里只给那边没有的。
+// weekPublished 是本周（周一 00:00 Asia/Shanghai 起）这个群发出了几条。
+// 一轮是你说的一句话，连同它之后、你下一句之前群里的其他消息。latestTurn 是最近一轮：said 是你按 createdAt 最后说的那句，
+// replies 是它之后的消息，按 createdAt 升序，不含 cost，超过 50 条只给最近的 50 条；你一句都没说过是 null。
+// 它直接从库里取，不受群历史分页的窗口限制。olderTurns 是更早的轮数，也就是你说过的句数减一。
+// working 是这个群里还没结束的 run，title 的取法和用量页一样。pending 只有这个群的卡，排法同首页。
+// plan 是最近批准的那份计划和它的稿子，next 是这个群最近一件排了时间的事。
+// achievements 只来自发布记录，不读历史消息，按 at 降序；url 是原帖链接，读不到笔记 id 时是管理页链接。
+export const ProjectWorkingItem = z
+  .object({ botId: BotId.nullable(), title: z.string().min(1).max(80), since: Timestamp })
+  .strict();
+export type ProjectWorkingItem = z.infer<typeof ProjectWorkingItem>;
+export const ProjectAchievement = z
+  .object({
+    id: PublicationId,
+    at: Timestamp,
+    title: z.string().min(1).max(80),
+    platform: Platform,
+    url: z.string().url(),
+  })
+  .strict();
+export type ProjectAchievement = z.infer<typeof ProjectAchievement>;
+export const ProjectRoutineItem = z
+  .object({
+    routineId: RoutineId,
+    botId: BotId,
+    name: z.string().min(1),
+    enabled: z.boolean(),
+    nextAt: Timestamp.nullable(),
+  })
+  .strict();
+export type ProjectRoutineItem = z.infer<typeof ProjectRoutineItem>;
+export const ProjectTurn = z.object({ said: Message, replies: z.array(Message).max(50) }).strict();
+export type ProjectTurn = z.infer<typeof ProjectTurn>;
+export const ProjectResponse = z
+  .object({
+    groupId: GroupId,
+    weekPublished: z.number().int().nonnegative(),
+    latestTurn: ProjectTurn.nullable(),
+    olderTurns: z.number().int().nonnegative(),
+    working: z.array(ProjectWorkingItem).max(20),
+    pending: z.array(TodayPendingItem).max(50),
+    plan: z
+      .object({ plan: ContentPlan, drafts: z.array(Draft).max(20) })
+      .strict()
+      .nullable(),
+    next: TodayNextItem.nullable(),
+    achievements: z.array(ProjectAchievement).max(20),
+    routines: z.array(ProjectRoutineItem).max(50),
+  })
+  .strict();
+export type ProjectResponse = z.infer<typeof ProjectResponse>;
 
 // GET /api/settings 和 PATCH /api/settings
 export const Settings = z.object({
