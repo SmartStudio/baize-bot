@@ -1,0 +1,83 @@
+# 控制面、Postgres 和一台远程电脑。用法和要准备的东西见同目录 README.md。
+# 项目名写死成 baize-remote，和仓库根的 baize 项目（baize-postgres 容器）互不相干。
+name: baize-remote
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: baize
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-baize}
+      POSTGRES_DB: baize
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U baize -d baize"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # 每次 up 先跑一遍迁移，已应用的跳过。控制面起来时表一定在。
+  migrate:
+    image: baize-control-plane:remote
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://baize:${POSTGRES_PASSWORD:-baize}@postgres:5432/baize
+    command: ["node", "--import", "tsx", "src/scripts/migrate.ts"]
+    restart: "no"
+
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: deploy/remote/Dockerfile
+      target: control-plane
+    image: baize-control-plane:remote
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://baize:${POSTGRES_PASSWORD:-baize}@postgres:5432/baize
+      PORT: "3001"
+      # 下发给电脑代理的网关前缀。远程电脑和控制面在同一个 compose 网络里，走服务名。
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://control-plane:3001}
+      UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:?要设上游地址}
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:?要设上游 key}
+      GATEWAY_MODELS: ${GATEWAY_MODELS:-plan=baize-default,fast=baize-default}
+      # 工具认证信息的加密密钥，64 位十六进制。换了它，已存的凭据全部解不开。
+      TOOL_SECRET_KEY: ${TOOL_SECRET_KEY:?要设工具凭据的加密密钥}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    ports:
+      - "${CONTROL_PLANE_PORT:-3201}:3001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  remote-computer:
+    build:
+      context: ../..
+      dockerfile: deploy/remote/Dockerfile
+      target: remote-computer
+    image: baize-remote-computer:remote
+    depends_on:
+      - control-plane
+    # 只放开 bubblewrap 和 Chromium 沙箱建命名空间要的几个系统调用，不给 privileged，不加 CAP_SYS_ADMIN。
+    security_opt:
+      - seccomp=./seccomp-bwrap.json
+      - apparmor=unconfined
+    init: true
+    # 看护进程给代理 15 秒收尾，docker 默认 10 秒就 SIGKILL。
+    stop_grace_period: 20s
+    shm_size: 1gb
+    # 启动文件放这里：内存盘，只有 node 用户能进，容器一停就没了。
+    tmpfs:
+      - /run/baize:uid=1000,gid=1000,mode=0700
+    volumes:
+      - bots:/home/node/.baize/bots
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  bots:

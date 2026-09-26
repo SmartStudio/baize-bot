@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserPlatform } from "@baize/shared";
@@ -39,6 +39,8 @@ export interface AssistantChromeOptions {
   readonly activateProcess?: (pid: number) => Promise<void>;
   readonly backgroundProcess?: (pid: number) => Promise<void>;
   readonly launchChrome?: (profileDir: string) => Promise<ChromeProcess>;
+  /** 决定用哪种壳起 Chrome、能不能在这台电脑上登录。默认是 process.platform。 */
+  readonly platform?: NodeJS.Platform;
 }
 
 export interface ChromeProcess {
@@ -89,25 +91,44 @@ async function findChromePid(profileDir: string, timeoutMs = 10_000): Promise<nu
   throw new Error(`等不到助理 Chrome 进程，profile ${profileDir}`);
 }
 
+const chromeArgs = (profileDir: string): string[] => [
+  `--user-data-dir=${profileDir}`,
+  "--remote-debugging-port=0",
+  "--remote-debugging-address=127.0.0.1",
+  "--no-startup-window",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--no-first-run",
+  "--no-default-browser-check",
+];
+
 async function launchMacChrome(profileDir: string): Promise<ChromeProcess> {
-  await run("open", [
-    "-g",
-    "-n",
-    "-a",
-    "Google Chrome",
-    "--args",
-    `--user-data-dir=${profileDir}`,
-    "--remote-debugging-port=0",
-    "--remote-debugging-address=127.0.0.1",
-    "--no-startup-window",
-    "--disable-background-timer-throttling",
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-    "--no-first-run",
-    "--no-default-browser-check",
-  ]);
+  await run("open", ["-g", "-n", "-a", "Google Chrome", "--args", ...chromeArgs(profileDir)]);
   const pid = await findChromePid(profileDir);
   return { pid, exited: waitForExit(pid), stop: () => terminate(pid) };
+}
+
+// 远程电脑上没有桌面，Chrome 画在容器里的 Xvfb 上。单独成进程组，代理被强杀时它留下来，
+// 下一次起之前按 profile 收掉，和 macOS 那条一样。
+async function launchLinuxChrome(profileDir: string): Promise<ChromeProcess> {
+  if (!process.env["DISPLAY"]) throw new Error("没有 DISPLAY，远程电脑的 Xvfb 没起来");
+  const child = spawn("/usr/bin/chromium", [...chromeArgs(profileDir), "--password-store=basic"], {
+    detached: true,
+    stdio: "ignore",
+  });
+  await new Promise<void>((resolve, reject) => {
+    child.once("spawn", resolve);
+    child.once("error", reject);
+  });
+  child.unref();
+  const pid = child.pid;
+  if (pid === undefined) throw new Error("chromium 没有 PID");
+  const exited = new Promise<void>((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) resolve();
+    else child.once("exit", () => resolve());
+  });
+  return { pid, exited, stop: () => terminate(pid) };
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -266,9 +287,26 @@ async function backgroundProcess(pid: number): Promise<void> {
   ]);
 }
 
-function unsupportedLauncher(): Promise<ChromeProcess> {
-  return Promise.reject(new Error("助理 Chrome 壳当前只支持 macOS"));
+type LoginMode = { readonly kind: "interactive" } | { readonly kind: "refused"; readonly reason: string };
+
+interface ChromeShell {
+  readonly launch: (profileDir: string) => Promise<ChromeProcess>;
+  readonly login: LoginMode;
 }
+
+const chromeShells: Partial<Record<NodeJS.Platform, ChromeShell>> = {
+  darwin: { launch: launchMacChrome, login: { kind: "interactive" } },
+  // 远程电脑上没有人看屏幕，扫码或输验证码都没人接。
+  linux: {
+    launch: launchLinuxChrome,
+    login: { kind: "refused", reason: "远程电脑上不能登录，请在本机登录这个账号" },
+  },
+};
+
+const unsupportedShell: ChromeShell = {
+  launch: () => Promise.reject(new Error("助理 Chrome 壳当前只支持 macOS 和 Linux")),
+  login: { kind: "interactive" },
+};
 
 export function startAssistantChrome(options: AssistantChromeOptions): AssistantChrome {
   const profileDir = chromeProfileDir(options.dataDir);
@@ -278,7 +316,8 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
   const platformPages = options.platformPages ?? defaultPlatformPages;
   const bringForward = options.activateProcess ?? activateProcess;
   const sendBackward = options.backgroundProcess ?? backgroundProcess;
-  const launcher = options.launchChrome ?? (process.platform === "darwin" ? launchMacChrome : unsupportedLauncher);
+  const shell = chromeShells[options.platform ?? process.platform] ?? unsupportedShell;
+  const launcher = options.launchChrome ?? shell.launch;
   const stopped = new AbortController();
   const waiters = new Set<CdpWaiter>();
 
@@ -382,6 +421,7 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     cdpUrl,
     pid: () => browser?.pid ?? null,
     async login(platform, signal) {
+      if (shell.login.kind === "refused") throw new Error(shell.login.reason);
       const pageConfig = platformPages[platform];
       let url: string | null = null;
       let current: ChromeProcess | null = null;

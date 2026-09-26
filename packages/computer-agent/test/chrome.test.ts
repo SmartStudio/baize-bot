@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -166,7 +167,12 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 20_000);
+});
 
+// 真起浏览器的用例。macOS 起 Google Chrome，Linux 起 Debian 的 chromium，远程电脑镜像里就是这一种。
+const realChrome = process.platform === "darwin" || (process.platform === "linux" && existsSync("/usr/bin/chromium"));
+
+describe.runIf(realChrome)("助理 Chrome 进程", () => {
   it("Chrome 进程被杀后自动重起", async () => {
     const chrome = startAssistantChrome({
       dataDir: await dataDir(),

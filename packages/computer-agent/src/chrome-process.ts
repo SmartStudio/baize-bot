@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
-const CHROME_EXECUTABLE = "/Google Chrome.app/Contents/MacOS/Google Chrome ";
+// macOS 的 Google Chrome，和 Debian chromium 包的真身（/usr/bin/chromium 是个 exec 它的脚本）。
+const CHROME_EXECUTABLES = ["/Google Chrome.app/Contents/MacOS/Google Chrome ", "/usr/lib/chromium/chromium "] as const;
 
 export function chromeProfileDir(dataDir: string): string {
   return join(dataDir, "chrome-profile");
@@ -63,7 +64,8 @@ export async function profileChromePids(profileDir: string): Promise<number[]> {
     const match = /^\s*(\d+)\s(.*)$/u.exec(line);
     if (match === null) continue;
     const command = match[2] ?? "";
-    if (!command.includes(CHROME_EXECUTABLE) || command.includes(" --type=")) continue;
+    if (!CHROME_EXECUTABLES.some((executable) => command.includes(executable))) continue;
+    if (command.includes(" --type=")) continue;
     if (!usesProfile(command, profileDir)) continue;
     pids.push(Number(match[1]));
   }

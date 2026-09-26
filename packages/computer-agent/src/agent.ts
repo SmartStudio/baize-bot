@@ -210,6 +210,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         version: options.version,
         activeRuns: [...activeRuns],
       });
+      log(`已发 hello，报告 ${activeRuns.length} 个仍在跑的 run`);
       stopHeartbeat();
       heartbeat = setInterval(() => send({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
       heartbeat.unref();

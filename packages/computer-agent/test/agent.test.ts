@@ -192,7 +192,7 @@ const runnerCalls = (): RunnerCalls => {
 function spawnAgent(
   url: string,
   tuning: Partial<
-    Pick<AgentOptions, "heartbeatMs" | "backoff" | "makeRunner" | "makeChrome" | "loginTimeoutMs" | "dataDir">
+    Pick<AgentOptions, "heartbeatMs" | "backoff" | "makeRunner" | "makeChrome" | "loginTimeoutMs" | "dataDir" | "log">
   > = {},
 ): AgentHandle {
   const calls: RunnerCalls = {
@@ -471,6 +471,37 @@ describe("电脑代理连控制面", () => {
       accountId: "account-1",
       state: { login: "expired" },
     });
+  });
+
+  it("Linux 上登录请求回失败并带说明，不为此起 Chrome", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const lines: string[] = [];
+    let launches = 0;
+    spawnAgent(await server.url(), {
+      dataDir: await tempDataDir(),
+      log: (line) => lines.push(line),
+      makeChrome: (options) =>
+        startAssistantChrome({
+          ...options,
+          platform: "linux",
+          launchChrome: async () => {
+            launches += 1;
+            throw new Error("不该起 Chrome");
+          },
+        }),
+    });
+    const socket = await server.waitForSocket(1);
+
+    socket.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu" }));
+
+    await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
+      type: "login_state",
+      accountId: "account-1",
+      state: { login: "expired" },
+    });
+    expect(lines.join("\n")).toContain("远程电脑上不能登录，请在本机登录这个账号");
+    expect(launches).toBe(0);
   });
 
   it("前一个登录卡住不堵后一个", async () => {

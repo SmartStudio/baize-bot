@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 
@@ -14,12 +14,13 @@ afterEach(async () => {
 });
 
 // 真 Chrome 起一次要几秒，这里用 node 冒名：可执行文件路径和 argv 跟 Chrome 主进程在 ps 里长得一样。
-async function fakeChromeExecutable(): Promise<{ readonly root: string; readonly executable: string }> {
+async function fakeChromeExecutable(
+  layout: readonly string[],
+): Promise<{ readonly root: string; readonly executable: string }> {
   const root = await mkdtemp(join(tmpdir(), "baize-chrome-process-test-"));
   directories.push(root);
-  const macos = join(root, "Google Chrome.app", "Contents", "MacOS");
-  await mkdir(macos, { recursive: true });
-  const executable = join(macos, "Google Chrome");
+  const executable = join(root, ...layout);
+  await mkdir(dirname(executable), { recursive: true });
   await symlink(process.execPath, executable);
   return { root, executable };
 }
@@ -36,8 +37,11 @@ async function startFake(executable: string, args: readonly string[]): Promise<n
 }
 
 describe("按 profile 认助理 Chrome", () => {
-  it("只认 --user-data-dir 整个参数等于 profile 的主进程，回收后只剩别人的", async () => {
-    const { root, executable } = await fakeChromeExecutable();
+  it.each([
+    ["macOS 的 Google Chrome", ["Google Chrome.app", "Contents", "MacOS", "Google Chrome"]],
+    ["Debian 的 chromium", ["usr", "lib", "chromium", "chromium"]],
+  ])("%s：只认 --user-data-dir 整个参数等于 profile 的主进程，回收后只剩别人的", async (_label, layout) => {
+    const { root, executable } = await fakeChromeExecutable(layout);
     const profileDir = join(root, "Application Support", "chrome-profile");
     const mine = await startFake(executable, [`--user-data-dir=${profileDir}`, "--no-first-run"]);
     const mineLast = await startFake(executable, [`--user-data-dir=${profileDir}`]);

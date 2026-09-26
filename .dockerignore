@@ -1,0 +1,13 @@
+**/node_modules
+**/dist
+.git
+.audit
+.env
+.claude
+bot-application-prototype
+research
+spec
+plan
+packages/web/e2e
+test-results
+playwright-report
