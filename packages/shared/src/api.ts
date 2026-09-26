@@ -197,6 +197,7 @@ export const UpdateAccountRequest = z.object({ tier: AccountTier }).strict();
 export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequest>;
 
 // GET /api/bots/:id/routines  该 Bot 的例行任务，每条带最近 20 条运行记录，新的在前。别人的 Bot 404。
+// GET /api/routines  自己全部 Bot 的例行任务，按建的先后排，形状同上。groupId 为 null 的发进那个 Bot 的单聊。
 export const RoutineListResponse = z.object({ items: z.array(Routine) });
 
 // 建和改例行任务时触发器写这个。webhook 的 token 由控制面发：带着这条例行任务已有的 token 就是保留那个地址，
@@ -207,7 +208,7 @@ export const TriggerInput = z.discriminatedUnion("kind", [
 ]);
 export type TriggerInput = z.infer<typeof TriggerInput>;
 
-// POST /api/bots/:id/routines
+// POST /api/bots/:id/routines  groupId 给了就落库，例行发进那个群；群不是自己的 404，这个 Bot 不在群里 400。
 export const CreateRoutineRequest = z.object({
   name: z.string().min(1).max(40),
   instruction: z.string().min(1).max(4000),
@@ -260,7 +261,12 @@ export const DecideProjectOfferRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("dismiss") }).strict(),
 ]);
 export type DecideProjectOfferRequest = z.infer<typeof DecideProjectOfferRequest>;
-export const DecideProjectOfferResponse = z.object({ message: Message, group: Group.nullable() });
+// start 时给了 name，群名和卡正文里的 name 都换成它。开始过的卡回项目群和它的任务卡，其余两个都是 null。
+export const DecideProjectOfferResponse = z.object({
+  message: Message,
+  group: Group.nullable(),
+  task: TopicTask.nullable(),
+});
 
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
 export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
@@ -385,9 +391,14 @@ export const TodayNextItem = z.discriminatedUnion("kind", [
 ]);
 export type TodayNextItem = z.infer<typeof TodayNextItem>;
 
+// assistantLatest 是主助理单聊里最近一条有字的 Bot 消息，正文截到 200 字；没有主助理或它还没说过话是 null。
+export const TodayAssistantLine = z.object({ text: z.string().min(1).max(200), at: Timestamp }).strict();
+export type TodayAssistantLine = z.infer<typeof TodayAssistantLine>;
+
 export const TodayResponse = z
   .object({
     assistantGroupId: GroupId.nullable(),
+    assistantLatest: TodayAssistantLine.nullable(),
     pending: z.array(TodayPendingItem).max(50),
     done: z.array(TodayDoneItem).max(20),
     running: z.array(TodayRunningItem).max(20),

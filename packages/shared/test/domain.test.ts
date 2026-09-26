@@ -382,6 +382,7 @@ describe("今日页的共享形状", () => {
     };
     const response = {
       assistantGroupId: "g1",
+      assistantLatest: { text: "想让我帮你做成什么事？说一句就行", at: "2026-09-27T01:00:00.000Z" },
       pending: [
         { kind: "approval", since: now, approval },
         { kind: "plan", since: now, plan, drafts: [draft] },
@@ -409,6 +410,12 @@ describe("今日页的共享形状", () => {
 
     expect(TodayResponse.safeParse(response).success).toBe(true);
     expect(TodayResponse.safeParse({ ...response, assistantGroupId: null }).success).toBe(true);
+    expect(TodayResponse.safeParse({ ...response, assistantLatest: null }).success).toBe(true);
+    expect(TodayResponse.safeParse({ ...response, assistantLatest: undefined }).success).toBe(false);
+    expect(
+      TodayResponse.safeParse({ ...response, assistantLatest: { text: "", at: "2026-09-27T01:00:00.000Z" } }).success,
+      "空正文不算主助理说过的话",
+    ).toBe(false);
     expect(TodayResponse.safeParse({ ...response, pending: undefined }).success).toBe(false);
     expect(TodayResponse.safeParse({ ...response, extra: [] }).success).toBe(false);
     expect(
