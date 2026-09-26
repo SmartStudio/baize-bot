@@ -384,6 +384,9 @@ describe("上行 handoff", () => {
       expect(prompt.botId, "活派给交接的目标").toBe(team.service.id);
       expect(prompt.reason).toBe("handoff");
       expect(prompt.handoffId, "带上编号，运行器才开得出 accept_handoff").toBe(handoff?.id);
+      expect(prompt.messageId, "触发这次派活的是交接卡那条消息，不是报文编号，也不是用户那句").toBe(
+        second.type === "message" ? second.message.id : null,
+      );
       expect(prompt.text, "prompt 正文就是交接报文").toContain(DONE);
       expect(prompt.text).toContain(NOT_DONE);
       expect(prompt.text).toContain(NEXT);

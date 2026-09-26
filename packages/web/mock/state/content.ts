@@ -151,7 +151,7 @@ export const reviseDraft = (id: string, text: string): Outcome<Draft> => {
   };
 };
 
-export const contentIn = (page: Message[]): { drafts: Draft[]; plans: ContentPlan[] } => {
+export const contentIn = (page: Message[]): { drafts: Draft[]; plans: ContentPlan[]; publications: Publication[] } => {
   const pagePlans = page.flatMap(({ body }) => {
     const plan = body.kind === "plan" ? plans.get(body.planId) : undefined;
     return plan === undefined ? [] : [plan];
@@ -166,5 +166,8 @@ export const contentIn = (page: Message[]): { drafts: Draft[]; plans: ContentPla
       return draft === undefined ? [] : [draft];
     }),
     plans: pagePlans,
+    publications: [...publications.values()]
+      .filter((publication) => publication.draftId !== null && draftIds.includes(publication.draftId))
+      .sort((a, b) => a.publishedAt.localeCompare(b.publishedAt) || a.id.localeCompare(b.id)),
   };
 };

@@ -14,6 +14,7 @@ export type UpdateTaskInput = {
   readonly dueAt?: string | null | undefined;
   readonly checklist?: readonly ChecklistItem[] | undefined;
   readonly status?: TaskStatus | undefined;
+  readonly cadence?: string | undefined;
 };
 
 /** 按归属人过滤。别人的任务在这里更新不到，路由层因此 404。 */
@@ -30,6 +31,7 @@ export async function updateTask(
   // 清单是整份替换，不是逐项合并。
   if (input.checklist !== undefined) patch.checklist = [...input.checklist];
   if (input.status !== undefined) patch.status = input.status;
+  if (input.cadence !== undefined) patch.cadence = input.cadence;
   if (Object.keys(patch).length === 0) return findTask(db, ownerId, taskId);
 
   // drizzle 的 update 不能 join，归属只能靠这个子查询过滤。

@@ -27,6 +27,18 @@ describe("系统通知", () => {
     expect(notification).toHaveBeenCalledWith("等你确认", { body: notice.text });
   });
 
+  it("没办成的事标题说没办成，不能说成做完了", () => {
+    const notification = vi.fn();
+    Object.defineProperty(notification, "permission", { value: "granted" });
+    vi.stubGlobal("Notification", notification);
+    vi.stubGlobal("window", { location: { pathname: "/" } });
+    vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0" });
+
+    notifyNotice({ ...notice, kind: "failed", text: "小红书的登录窗口出错", groupId: null }, settings);
+
+    expect(notification).toHaveBeenCalledWith("没办成", { body: "小红书的登录窗口出错" });
+  });
+
   it("关闭通知设置时不显示", () => {
     const notification = vi.fn();
     Object.defineProperty(notification, "permission", { value: "granted" });

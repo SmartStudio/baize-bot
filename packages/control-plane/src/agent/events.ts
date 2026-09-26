@@ -2,13 +2,16 @@ import {
   GroupId,
   type AgentToControl,
   type BotId,
+  type LoginFailure,
   type Message,
   type MessageBody,
+  type Platform,
   type RunId,
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
+import { findAccountOnComputer } from "../repo/accounts.js";
 import { approvalRun, createApproval, expireApproval } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
@@ -98,6 +101,9 @@ export async function handleAgentEvent(
     case "project_offer":
       await onProjectOffer(deps, conn, message);
       return;
+    case "login_state":
+      await onLoginState(deps, conn, message);
+      return;
   }
 }
 
@@ -114,6 +120,32 @@ async function resolveRun(
   if (await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId)) return GroupId.parse(groupId);
   console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
   return null;
+}
+
+type LoginState = Extract<AgentToControl, { type: "login_state" }>;
+
+const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
+const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> = {
+  window_failed: (platform) => `${platform}的登录窗口出错或到时间还没登上，账号状态没变，可以再点一次登录`,
+  remote_refused: (platform) => `远程电脑上不能登录${platform}，请在本机登录这个账号`,
+};
+
+/**
+ * 登录没成不等于账号过期，accounts.login 不动，只推一条通知告诉用户原因。
+ * 账号不属于哪个群，没有群消息可落，所以走通知。
+ */
+async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: LoginState): Promise<void> {
+  if (event.state.login !== "failed") return;
+  const account = await findAccountOnComputer(deps.db, conn.ownerId, conn.computerId, event.accountId);
+  if (account === null) {
+    console.warn(`电脑 ${conn.computerId} 报的账号 ${event.accountId} 不在它上面，整条丢掉`);
+    return;
+  }
+  await deps.notifications.publish(conn.ownerId, {
+    kind: "failed",
+    text: LOGIN_FAILURE_NOTICE[event.state.reason](PLATFORM_LABEL[account.platform]),
+    groupId: null,
+  });
 }
 
 type BotText = Extract<AgentToControl, { type: "bot_text" }>;

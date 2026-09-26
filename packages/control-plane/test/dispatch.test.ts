@@ -138,6 +138,7 @@ describe("派活", () => {
       expect(prompt.botId).toBe(owner.botId);
       expect(prompt.groupId).toBe(owner.groupId);
       expect(prompt.context, "群里在这条之前没有别的消息").toEqual([]);
+      expect(prompt.messageId, "prompt 指回触发它的那条用户消息").toBe(sent.message.id);
 
       const rows = await database.sql<
         { id: string; computer_id: string | null; trigger_message_id: string; ended_at: Date | null }[]

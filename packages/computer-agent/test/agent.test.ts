@@ -93,7 +93,7 @@ const configMessage = {
   tools: [],
   accounts: [],
   grants: [],
-  modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key", model: "dev-model" },
+  modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },
 };
 
 const promptMessage = {
@@ -101,6 +101,7 @@ const promptMessage = {
   runId: "run-1",
   botId: "bot-1",
   groupId: "group-1",
+  messageId: "message-1",
   text: "查一下昨天的订单",
   origin: { kind: "user" },
   reason: "solo",
@@ -448,7 +449,7 @@ describe("电脑代理连控制面", () => {
   it.each([
     ["启动就失败", async (): Promise<never> => Promise.reject(new Error("没装 Chrome"))],
     ["一直起不来", (): Promise<never> => new Promise<never>(() => {})],
-  ])("Chrome %s时 browser_login 回 expired", async (_label, launchChrome) => {
+  ])("Chrome %s时 browser_login 回 failed window_failed，不说账号过期", async (_label, launchChrome) => {
     const server = startControlPlane();
     servers.push(server);
     spawnAgent(await server.url(), {
@@ -469,7 +470,7 @@ describe("电脑代理连控制面", () => {
     await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
       type: "login_state",
       accountId: "account-1",
-      state: { login: "expired" },
+      state: { login: "failed", reason: "window_failed" },
     });
   });
 
@@ -498,7 +499,7 @@ describe("电脑代理连控制面", () => {
     await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
       type: "login_state",
       accountId: "account-1",
-      state: { login: "expired" },
+      state: { login: "failed", reason: "remote_refused" },
     });
     expect(lines.join("\n")).toContain("远程电脑上不能登录，请在本机登录这个账号");
     expect(launches).toBe(0);
@@ -531,7 +532,7 @@ describe("电脑代理连控制面", () => {
     await server.waitForMessage("login_state", 2, 3000);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
-      { type: "login_state", accountId: "account-1", state: { login: "expired" } },
+      { type: "login_state", accountId: "account-1", state: { login: "failed", reason: "window_failed" } },
       { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
     ]);
   });

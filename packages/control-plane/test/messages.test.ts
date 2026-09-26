@@ -1,6 +1,8 @@
 import {
   ApiError,
+  ContentPlanId,
   CreateBotResponse,
+  DraftId,
   MessageId,
   MessageListResponse,
   RunId,
@@ -9,6 +11,8 @@ import {
 } from "@baize/shared";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { accounts, contentPlans, drafts, publications } from "../src/db/schema.js";
+import { newId } from "../src/ids.js";
 import { appendMessage, appendMessageWithId } from "../src/repo/messages.js";
 import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
@@ -103,6 +107,61 @@ describe("发消息", () => {
   });
 });
 
+/** 一个有电脑、账号、单 Bot 群和一份内容计划的用户，能往库里直接塞草稿和发布记录。 */
+async function publisher() {
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const client = server.client();
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
+  const groupId = created.group.id;
+  const accountId = newId();
+  await database.db.insert(accounts).values({
+    id: accountId,
+    ownerId: user.id,
+    computerId: computer.computerId,
+    platform: "x",
+    handle: "@page",
+    login: "valid",
+    tier: "confirm_publish",
+  });
+  const planId = ContentPlanId.parse(newId());
+  await database.db
+    .insert(contentPlans)
+    .values({ id: planId, ownerId: user.id, groupId, botId: created.bot.id, title: "一周内容" });
+  const draft = async (label: string, inPlan: boolean): Promise<DraftId> => {
+    const id = DraftId.parse(newId());
+    await database.db.insert(drafts).values({
+      id,
+      ownerId: user.id,
+      groupId,
+      botId: created.bot.id,
+      planId: inPlan ? planId : null,
+      accountId,
+      platform: "x",
+      content: { kind: "post", title: label, text: label, images: [], github: null },
+      contentHash: label,
+    });
+    return id;
+  };
+  const publish = async (draftId: string | null, minutesAgo: number): Promise<string> => {
+    const id = newId();
+    await database.db.insert(publications).values({
+      id,
+      ownerId: user.id,
+      draftId,
+      groupId,
+      accountId,
+      platform: "x",
+      url: `https://x.com/i/status/${id}`,
+      externalId: id,
+      publishedAt: new Date(Date.now() - minutesAgo * 60_000),
+    });
+    return id;
+  };
+  return { client, groupId, planId, draft, publish };
+}
+
 describe("读消息", () => {
   it("按时间正序返回，翻页用 before 往前取", async () => {
     const { client, groupId } = await clientWithGroup();
@@ -131,7 +190,66 @@ describe("读消息", () => {
   it("新群是空的", async () => {
     const { client, groupId } = await clientWithGroup();
     const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages`)).json());
-    expect(page).toEqual({ messages: [], hasMore: false, approvals: [], handoffs: [], drafts: [], plans: [] });
+    expect(page).toEqual({
+      messages: [],
+      hasMore: false,
+      approvals: [],
+      handoffs: [],
+      drafts: [],
+      plans: [],
+      publications: [],
+    });
+  });
+
+  it("只带本页草稿的发布记录，计划卡下的草稿也算", async () => {
+    const { client, groupId, planId, draft, publish } = await publisher();
+    const older = await draft("上一页的稿子", false);
+    const onPage = await draft("本页的稿子", false);
+    const nested = await draft("计划里的稿子", true);
+    const unpublished = await draft("还没发的稿子", false);
+
+    await appendMessage(database.db, groupId, { kind: "draft", draftId: older });
+    await appendMessage(database.db, groupId, { kind: "user", text: "接着来" });
+    await appendMessage(database.db, groupId, { kind: "draft", draftId: onPage });
+    await appendMessage(database.db, groupId, { kind: "plan", planId });
+    await appendMessage(database.db, groupId, { kind: "draft", draftId: unpublished });
+
+    const olderPublication = await publish(older, 30);
+    const nestedPublication = await publish(nested, 20);
+    const onPagePublication = await publish(onPage, 10);
+    await publish(null, 5);
+
+    const page = MessageListResponse.parse(await (await client.get(`/api/groups/${groupId}/messages?limit=3`)).json());
+    expect(
+      page.publications.map((publication) => publication.id),
+      "本页的草稿卡和计划卡下的草稿，按发布时间升序；上一页的和没挂草稿的不带",
+    ).toEqual([nestedPublication, onPagePublication]);
+    expect(page.publications[1]?.draftId).toBe(onPage);
+
+    const previous = MessageListResponse.parse(
+      await (await client.get(`/api/groups/${groupId}/messages?limit=3&before=${page.messages[0]?.id}`)).json(),
+    );
+    expect(previous.publications.map((publication) => publication.id)).toEqual([olderPublication]);
+  });
+
+  it("本页的卡指到别人的草稿或计划，那边的发布记录也不带", async () => {
+    const me = await publisher();
+    const other = await publisher();
+    const mine = await me.draft("我的稿子", false);
+    const theirs = await other.draft("别人的稿子", false);
+    const theirsInPlan = await other.draft("别人计划里的稿子", true);
+    await appendMessage(database.db, me.groupId, { kind: "draft", draftId: mine });
+    await appendMessage(database.db, me.groupId, { kind: "draft", draftId: theirs });
+    await appendMessage(database.db, me.groupId, { kind: "plan", planId: other.planId });
+    const minePublication = await me.publish(mine, 10);
+    await other.publish(theirs, 20);
+    await other.publish(theirsInPlan, 15);
+
+    const page = MessageListResponse.parse(await (await me.client.get(`/api/groups/${me.groupId}/messages`)).json());
+    expect(
+      page.publications.map((publication) => publication.id),
+      "草稿卡和计划卡指到别人的也只回自己的发布记录",
+    ).toEqual([minePublication]);
   });
 });
 

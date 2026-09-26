@@ -86,7 +86,6 @@ describe("握手", () => {
       expect(config.tools, "工具连接是 M6 的事").toEqual([]);
       expect(config.modelGateway.baseUrl).toBe(`http://localhost:${server.server.port}/gateway/v1`);
       expect(config.modelGateway.apiKey, "网关 key 是 32 字节随机数的十六进制").toMatch(/^[0-9a-f]{64}$/);
-      expect(config.modelGateway.model).toBe("baize:plan");
     } finally {
       agent.close();
     }

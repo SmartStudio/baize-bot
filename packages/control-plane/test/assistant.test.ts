@@ -115,8 +115,7 @@ async function projectOf(client: ApiClient, title: string, cadence: string) {
   const created = CreateGroupResponse.parse(
     await (await client.post("/api/groups", { title, botIds: [first.bot.id, second.bot.id] })).json(),
   );
-  // PATCH /api/tasks 眼下不收 cadence，节奏直接写库，等同于 P1-9 建项目时写下的那份。
-  await database.sql`UPDATE tasks SET cadence = ${cadence} WHERE id = ${created.task.id}`;
+  expect((await client.patch(`/api/tasks/${created.task.id}`, { cadence })).status).toBe(200);
   return { groupId: created.group.id, taskId: created.task.id, memberGroupId: first.group.id, memberId: first.bot.id };
 }
 

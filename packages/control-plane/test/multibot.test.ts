@@ -856,7 +856,11 @@ describe("上行 mention", () => {
         tag: "销售",
       });
 
-      const bodies = (await messagesIn(team, team.group.id)).map((message) => message.body);
+      const stored = await messagesIn(team, team.group.id);
+      expect(prompt.messageId, "队友 @ 来的活指回 Bot 发的那条消息").toBe(
+        stored.find((message) => message.body.kind === "bot")?.id,
+      );
+      const bodies = stored.map((message) => message.body);
       expect(bodies.find((body) => body.kind === "bot")).toEqual({
         kind: "bot",
         botId: team.sales.id,

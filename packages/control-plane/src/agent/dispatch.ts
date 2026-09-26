@@ -185,6 +185,7 @@ async function sendSpeaker(
     runId,
     botId: speaker.botId,
     groupId,
+    messageId: speaker.trigger.id,
     text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
     origin,
     reason: speaker.reason,

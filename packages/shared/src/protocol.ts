@@ -17,11 +17,13 @@ import {
   GrantTarget,
   GroupId,
   HandoffId,
+  LoginFailure,
   MessageId,
   ModelPurpose,
   Platform,
   ProjectOfferMember,
   ProjectOfferPlatform,
+  PublishFailureReason,
   RunId,
   Skill,
   ToolConnection,
@@ -117,6 +119,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     state: z.discriminatedUnion("login", [
       z.object({ login: z.literal("valid"), handle: z.string().min(1).max(100) }).strict(),
       z.object({ login: z.literal("expired") }).strict(),
+      z.object({ login: z.literal("failed"), reason: LoginFailure }).strict(),
     ]),
   }),
   z.object({
@@ -127,7 +130,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
       z
         .object({
           status: z.literal("failed"),
-          reason: z.enum(["login_expired", "page_changed", "error"]),
+          reason: PublishFailureReason,
           detail: z.string().max(2000),
         })
         .strict(),
@@ -252,13 +255,15 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     skills: z.array(Skill).optional(),
     accounts: z.array(AccountConfig),
     grants: z.array(Grant),
-    modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string(), model: z.string() }),
+    modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
   }),
   z.object({
     type: z.literal("prompt"),
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
+    // 触发这次 prompt 的那条群消息：用户发的、队友 @ 的、交接卡或例行写进群里的那条。
+    messageId: MessageId,
     text: z.string(),
     // 当前这条是谁说的。队友 @ 来的带发信人，运行器据此署名并提醒「这是队友说的，不是用户」；
     // 例行任务那条是归属人定时发的，没有人在等回复。

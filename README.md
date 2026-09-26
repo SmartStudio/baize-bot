@@ -27,7 +27,7 @@
 
 四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。
 
-一人一台电脑。用户第一次登录时建出 computers 行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key）。Bot 增删改会重发 `config`。握手就算在线，断开变休眠，同一台电脑新连接顶掉旧连接。
+一人一台电脑。用户第一次登录时建出 computers 行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`。握手就算在线，断开变休眠，同一台电脑新连接顶掉旧连接。
 
 拿电脑 token：
 
@@ -37,7 +37,7 @@ pnpm --filter @baize/control-plane computer-token # 重置并打印本机 token
 pnpm --filter @baize/control-plane computer-token -- remote [邮箱] # 创建或重置远程电脑 token
 ```
 
-模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`。电脑代理只可请求 `baize:plan` 和 `baize:fast`，网关分别映射到 `GATEWAY_MODELS` 的真实上游模型名；`GATEWAY_MODELS` 非空时优先使用它，同时设置两个变量会告警；未设置或仅含空白时两个用途都回退到 `GATEWAY_MODEL`，两者都未设置则使用开发默认值。请求除 `model` 外原样转发；响应（非流式 JSON 与 SSE data JSON）只把顶层 `model` 改回 baize 别名，其他内容透传。`image_url` 内容也不改写，请求体上限为 20 MiB。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。
+模型网关把电脑代理的请求转到 `UPSTREAM_BASE_URL`，Bearer 换成 `UPSTREAM_API_KEY`。电脑代理只可请求 `baize:plan` 和 `baize:fast`（shared 的 `gatewayAlias(purpose)`），网关分别映射到 `GATEWAY_MODELS` 的真实上游模型名；`GATEWAY_MODELS` 非空时优先使用它，同时设置两个变量会告警；未设置或仅含空白时两个用途都回退到 `GATEWAY_MODEL`，两者都未设置则使用开发默认值。请求除 `model` 外原样转发；响应（非流式 JSON 与 SSE data JSON）只把顶层 `model` 改回 baize 别名，其他内容透传。`image_url` 内容也不改写，请求体上限为 20 MiB。电脑那把网关 key 每次 `hello` 换一把，明文只随 `config` 下发一次，控制面不长期留存。
 
 Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里回「批准」「拒绝」都算数，详见 `packages/control-plane/README.md`。
 

@@ -368,6 +368,28 @@ describe("改任务", () => {
     expect(cleared.task.status, "没传的字段不动").toBe("done");
   });
 
+  it("改节奏以后 GET 读回新值，并推一条 task_updated", async () => {
+    const client = await loggedInClient();
+    const { created } = await taskToEdit(client);
+    const push = await connectPush(server.server.port, client.cookie ?? "");
+
+    try {
+      const cadence = "每周二、四各发一篇";
+      const response = await client.patch(`/api/tasks/${created.task.id}`, { cadence });
+      expect(response.status).toBe(200);
+      expect(UpdateTaskResponse.parse(await response.json()).task.cadence).toBe(cadence);
+
+      const pushed = await push.next();
+      expect(pushed.type === "task_updated" ? pushed.task.cadence : pushed.type, "推出去的任务卡带新节奏").toBe(
+        cadence,
+      );
+      const detail = GroupResponse.parse(await (await client.get(`/api/groups/${created.group.id}`)).json());
+      expect(detail.task, "节奏落了库，别的列一个不动").toEqual({ ...created.task, cadence });
+    } finally {
+      push.close();
+    }
+  });
+
   it("改别人的任务返回 404 且原任务没被改到", async () => {
     const owner = await loggedInClient();
     const { created } = await taskToEdit(owner);

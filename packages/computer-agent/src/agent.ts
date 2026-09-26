@@ -165,7 +165,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
           .catch((error: unknown) => {
             log(`登录 ${message.platform} 失败：${String(error)}`);
             if (!stopping) {
-              send({ type: "login_state", accountId: message.accountId, state: { login: "expired" } });
+              send({
+                type: "login_state",
+                accountId: message.accountId,
+                state: { login: "failed", reason: "window_failed" },
+              });
             }
           });
         return;

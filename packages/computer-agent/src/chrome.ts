@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import type { BrowserPlatform } from "@baize/shared";
+import type { BrowserPlatform, LoginFailure } from "@baize/shared";
 import { WebSocket } from "ws";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import {
@@ -19,13 +19,18 @@ export interface BrowserPage {
   readonly handleSelector: string;
 }
 
-export type BrowserLoginState = { readonly login: "valid"; readonly handle: string } | { readonly login: "expired" };
+// 登录窗口只能看出登上了还是没登上，看不出账号过期，所以没有 expired。
+export type BrowserLoginState =
+  { readonly login: "valid"; readonly handle: string } | { readonly login: "failed"; readonly reason: LoginFailure };
+
+// 等到上限时有时停在轮询里、有时停在等 Chrome 或 CDP 上，两条路给用户的是同一个结果。
+const WINDOW_FAILED: BrowserLoginState = { login: "failed", reason: "window_failed" };
 
 export interface AssistantChrome {
   readonly profileDir: string;
   /** 第一次要地址时才起 Chrome。这一轮启动失败就 reject，不会一直挂着。 */
   cdpUrl(): Promise<string>;
-  /** signal 到点就收起登录窗口、回 expired，等 Chrome 起来的时间也算在内。 */
+  /** signal 到点就收起登录窗口、回 failed window_failed，等 Chrome 起来的时间也算在内。 */
   login(platform: BrowserPlatform, signal: AbortSignal): Promise<BrowserLoginState>;
   pid(): number | null;
   stop(): Promise<void>;
@@ -421,7 +426,10 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     cdpUrl,
     pid: () => browser?.pid ?? null,
     async login(platform, signal) {
-      if (shell.login.kind === "refused") throw new Error(shell.login.reason);
+      if (shell.login.kind === "refused") {
+        log(shell.login.reason);
+        return { login: "failed", reason: "remote_refused" };
+      }
       const pageConfig = platformPages[platform];
       let url: string | null = null;
       let current: ChromeProcess | null = null;
@@ -459,9 +467,9 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
           if (typeof handle === "string" && handle.length > 0) return { login: "valid", handle };
           await delay(250);
         }
-        return { login: "expired" };
+        return WINDOW_FAILED;
       } catch (error) {
-        if (signal.aborted) return { login: "expired" };
+        if (signal.aborted) return WINDOW_FAILED;
         throw error;
       } finally {
         page?.close();

@@ -321,6 +321,7 @@ function toDraft(row: DraftRow): Draft {
     scheduledAt: row.scheduledAt?.toISOString() ?? null,
     status: row.status,
     edits: row.edits,
+    failure: row.failure,
     createdAt: row.createdAt.toISOString(),
     decidedAt: row.decidedAt?.toISOString() ?? null,
   });

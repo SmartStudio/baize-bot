@@ -1,16 +1,17 @@
+import { ModelPurpose, gatewayAlias, type GatewayModels } from "@baize/shared";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import type { GatewayModels } from "../env.js";
 import { findComputerByGatewayKey } from "../repo/computers.js";
 
 export const GATEWAY_PATH = "/gateway/v1";
 const MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024;
-const PLAN_MODEL_ID = "baize:plan";
-const FAST_MODEL_ID = "baize:fast";
-const INVALID_MODEL_ERROR = "model 只能是 baize:plan 或 baize:fast";
-type GatewayModelId = typeof PLAN_MODEL_ID | typeof FAST_MODEL_ID;
+const PURPOSE_BY_ALIAS = new Map<string, ModelPurpose>(
+  ModelPurpose.options.map((purpose) => [gatewayAlias(purpose), purpose]),
+);
+const INVALID_MODEL_ERROR = `model 只能是 ${[...PURPOSE_BY_ALIAS.keys()].join(" 或 ")}`;
+type GatewayModelId = ReturnType<typeof gatewayAlias>;
 
 export type GatewayDeps = {
   readonly db: Db;
@@ -47,10 +48,7 @@ export function createGateway(deps: GatewayDeps): Hono {
   app.get("/models", (c) =>
     c.json({
       object: "list",
-      data: [
-        { id: PLAN_MODEL_ID, object: "model", owned_by: "baize" },
-        { id: FAST_MODEL_ID, object: "model", owned_by: "baize" },
-      ],
+      data: ModelPurpose.options.map((purpose) => ({ id: gatewayAlias(purpose), object: "model", owned_by: "baize" })),
     }),
   );
 
@@ -65,11 +63,10 @@ export function createGateway(deps: GatewayDeps): Hono {
       if (!parsed.success) return c.json({ error: "请求体不是一个 JSON 对象" }, 400);
 
       const requestedModel = parsed.data["model"];
-      if (requestedModel !== PLAN_MODEL_ID && requestedModel !== FAST_MODEL_ID) {
-        return c.json({ error: INVALID_MODEL_ERROR }, 400);
-      }
-      const modelAlias: GatewayModelId = requestedModel;
-      const upstreamModel = modelAlias === PLAN_MODEL_ID ? deps.models.plan : deps.models.fast;
+      const purpose = typeof requestedModel === "string" ? PURPOSE_BY_ALIAS.get(requestedModel) : undefined;
+      if (purpose === undefined) return c.json({ error: INVALID_MODEL_ERROR }, 400);
+      const modelAlias = gatewayAlias(purpose);
+      const upstreamModel = deps.models[purpose];
 
       let upstream: Response;
       try {

@@ -478,6 +478,43 @@ describe("GET /api/today", () => {
     expect(today.next[0]?.kind === "draft" ? today.next[0].draft.planId : null).toBeNull();
   });
 
+  it("没发过的草稿 failure 是 null", async () => {
+    const owner = await ownerWithBot();
+    const accountId = await createAccount(owner);
+    const draftId = newId();
+    await database.db.insert(drafts).values({
+      id: draftId,
+      ownerId: owner.userId,
+      groupId: owner.groupId,
+      botId: owner.botId,
+      accountId,
+      platform: "x",
+      content: post("刚起的稿子", "还没发过"),
+      contentHash: "fresh",
+    });
+
+    const retryId = newId();
+    await database.db.insert(drafts).values({
+      id: retryId,
+      ownerId: owner.userId,
+      groupId: owner.groupId,
+      botId: owner.botId,
+      accountId,
+      platform: "x",
+      content: post("上次没发出去", "排了下一次"),
+      contentHash: "retry",
+      status: "approved",
+      scheduledAt: new Date(Date.now() + 60 * 60_000),
+      failure: "login_expired",
+    });
+
+    const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
+    const pending = today.pending.find((item) => item.kind === "draft" && item.draft.id === draftId);
+    expect(pending?.kind === "draft" ? pending.draft.failure : undefined, "只有发布失败才写原因").toBeNull();
+    const next = today.next.find((item) => item.kind === "draft" && item.draft.id === retryId);
+    expect(next?.kind === "draft" ? next.draft.failure : undefined, "上次失败的原因原样读回").toBe("login_expired");
+  });
+
   it("旧的 overnight 接口已经删除", async () => {
     const owner = await ownerWithBot();
     expect((await owner.client.get("/api/overnight")).status).toBe(404);

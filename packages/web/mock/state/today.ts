@@ -96,6 +96,7 @@ const draftOf = (input: {
     scheduledAt: input.scheduledAt === undefined ? null : input.scheduledAt,
     status: input.status,
     edits: [],
+    failure: null,
     createdAt: at(-90),
     decidedAt: input.status === "pending" ? null : at(-50),
   });

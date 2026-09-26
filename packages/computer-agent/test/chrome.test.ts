@@ -135,7 +135,7 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
     }
   }, 20_000);
 
-  it("登录元素在上限内没出现就返回 expired", async () => {
+  it("登录元素在上限内没出现就返回 failed window_failed", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><button id=login>登录</button>");
@@ -162,7 +162,10 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
     chromes.push(chrome);
 
     try {
-      await expect(chrome.login("xiaohongshu", AbortSignal.timeout(300))).resolves.toEqual({ login: "expired" });
+      await expect(chrome.login("xiaohongshu", AbortSignal.timeout(300))).resolves.toEqual({
+        login: "failed",
+        reason: "window_failed",
+      });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

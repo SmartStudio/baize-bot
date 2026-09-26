@@ -405,6 +405,7 @@ function showNotice(notice: { readonly kind: NotifyKind; readonly text: string }
     confirm: "白泽要你确认",
     result: "白泽做完了",
     stuck: "白泽卡住了",
+    failed: "白泽没办成",
   };
   const notification = new Notification({
     title: titles[notice.kind],

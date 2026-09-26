@@ -19,6 +19,7 @@ import type {
   ModelPurpose as ModelPurposeSchema,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
+  PublishFailureReason as PublishFailureReasonSchema,
   RoutineRunStatus as RoutineRunStatusSchema,
   SkillSource,
   ToolOperation,
@@ -58,6 +59,7 @@ type HandoffStatus = z.infer<typeof HandoffStatusSchema>;
 type ModelPurpose = z.infer<typeof ModelPurposeSchema>;
 type OnFailure = z.infer<typeof OnFailureSchema>;
 type Platform = z.infer<typeof PlatformSchema>;
+type PublishFailureReason = z.infer<typeof PublishFailureReasonSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
 
 /**
@@ -475,7 +477,7 @@ export const drafts = pgTable(
     status: text("status").$type<DraftStatus>().notNull().default("pending"),
     edits: jsonb("edits").$type<DraftEdit[]>().notNull().default([]),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
-    failure: text("failure"),
+    failure: text("failure").$type<PublishFailureReason>(),
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
   },

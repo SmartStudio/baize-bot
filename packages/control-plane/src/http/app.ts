@@ -88,6 +88,7 @@ import {
 import { isValidCron } from "../routines/cron.js";
 import { runRoutine } from "../routines/run.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
+import { listPublicationsForPage } from "../repo/publications.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
 import { getToday } from "../repo/today.js";
 import {
@@ -543,7 +544,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const approvals = await listApprovals(db, approvalIds);
     const handoffIds = result.page.messages.flatMap((m) => (m.body.kind === "handoff" ? [m.body.handoffId] : []));
     const handoffs = await listHandoffs(db, handoffIds);
-    return c.json(MessageListResponse.parse({ ...result.page, approvals, handoffs, drafts: [], plans: [] }));
+    const publications = await listPublicationsForPage(
+      db,
+      c.get("user").id,
+      result.page.messages.flatMap((m) => (m.body.kind === "draft" ? [m.body.draftId] : [])),
+      result.page.messages.flatMap((m) => (m.body.kind === "plan" ? [m.body.planId] : [])),
+    );
+    return c.json(
+      MessageListResponse.parse({ ...result.page, approvals, handoffs, drafts: [], plans: [], publications }),
+    );
   });
 
   app.post("/api/groups/:id/messages", async (c) => {

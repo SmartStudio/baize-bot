@@ -150,6 +150,7 @@ describe("例行任务到点触发", () => {
         kind: "user",
         text: "把今天的工单汇总一下",
       });
+      expect(prompt.messageId, "例行的 prompt 指回它写进群里的那条用户消息，不是系统提示").toBe(page.messages[1]?.id);
 
       const rows = await runsOf(routine.id);
       expect(rows).toHaveLength(1);

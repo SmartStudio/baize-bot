@@ -8,6 +8,7 @@ import {
   CreateGroupRequest,
   CreateRoutineRequest,
   DecideSkillOfferRequest,
+  Draft,
   Group,
   GroupId,
   Handoff,
@@ -20,7 +21,7 @@ import {
   SkillId,
   TopicTask,
   toolViewText,
-  OvernightResponse,
+  gatewayAlias,
   TodayResponse,
   UsageResponse,
   UsageRunItem,
@@ -146,6 +147,7 @@ describe("M7 群与主题任务的共享形状", () => {
       runId: "r1",
       botId: "b1",
       groupId: "g1",
+      messageId: "m1",
       text: "hi",
       origin: { kind: "user" },
       reason: "solo",
@@ -165,6 +167,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      messageId: "m1",
       text: "x",
       origin: { kind: "user" },
       reason: "solo",
@@ -184,6 +187,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      messageId: "m1",
       text: "x",
       origin: { kind: "user" },
       reason: "everyone",
@@ -196,6 +200,8 @@ describe("M7 群与主题任务的共享形状", () => {
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     const { reason: _reason, ...withoutReason } = prompt;
     expect(ControlToAgent.safeParse(withoutReason).success, "reason 不可省").toBe(false);
+    const { messageId: _messageId, ...withoutMessageId } = prompt;
+    expect(ControlToAgent.safeParse(withoutMessageId).success, "messageId 不可省").toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员座次不可省").toBe(false);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: "b2" }).success).toBe(true);
     expect(AgentToControl.safeParse({ type: "set_chief", ...run, targetBotId: null }).success).toBe(true);
@@ -300,7 +306,7 @@ describe("M10 skill 的共享形状", () => {
   });
 });
 
-describe("M11 用量与昨夜进展的共享形状", () => {
+describe("M11 用量的共享形状", () => {
   it("用量页每个 Bot 一行，最近任务最多 20 条", () => {
     const run = {
       runId: "r1",
@@ -317,16 +323,6 @@ describe("M11 用量与昨夜进展的共享形状", () => {
     expect(UsageResponse.safeParse({ ...usage, recent: Array.from({ length: 21 }, () => run) }).success).toBe(false);
     expect(UsageResponse.safeParse({ ...usage, bots: [{ botId: "b1", amount: -1, runs: 0 }] }).success).toBe(false);
     expect(UsageRunItem.safeParse({ ...run, botId: null, groupId: null }).success).toBe(true);
-  });
-
-  it("昨夜进展只有三种状态，since 从没连过是 null", () => {
-    const item = { botId: "b1", groupId: "g1", text: "3 家供应商报价齐了", status: "done", at: now };
-    expect(OvernightResponse.safeParse({ since: null, items: [] }).success).toBe(true);
-    expect(OvernightResponse.safeParse({ since: now, items: [item] }).success).toBe(true);
-    expect(OvernightResponse.safeParse({ since: now, items: [{ ...item, status: "pending" }] }).success).toBe(false);
-    expect(OvernightResponse.safeParse({ since: now, items: Array.from({ length: 11 }, () => item) }).success).toBe(
-      false,
-    );
   });
 });
 
@@ -355,6 +351,7 @@ describe("今日页的共享形状", () => {
       scheduledAt: null,
       status: "pending",
       edits: [],
+      failure: null,
       createdAt: now,
       decidedAt: null,
     };
@@ -530,5 +527,48 @@ describe("C0 工具视图与审批报文", () => {
       "要用库存服务的 lookup_stock，参数：sku=A-001",
     ]);
     expect(samples.every((sample) => !/[{}]/.test(sample))).toBe(true);
+  });
+});
+
+describe("登录失败、发布失败和网关别名", () => {
+  it("login_state 的 failed 只收两种原因", () => {
+    const base = { type: "login_state", accountId: "a1" };
+    for (const reason of ["window_failed", "remote_refused"]) {
+      expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason } }).success).toBe(true);
+    }
+    expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "timeout" } }).success).toBe(false);
+    expect(AgentToControl.safeParse({ ...base, state: { login: "failed" } }).success, "原因不可省").toBe(false);
+  });
+
+  it("publish_result 的失败原因和草稿上的 failure 是同一组值", () => {
+    const failed = { type: "publish_result", draftId: "d1", result: { status: "failed", detail: "" } };
+    const draft = {
+      id: "d1",
+      groupId: "g1",
+      botId: "b1",
+      planId: null,
+      accountId: "a1",
+      platform: "x",
+      content: { kind: "post", title: "今日动态", text: "正文", images: [], github: null },
+      scheduledAt: null,
+      status: "approved",
+      edits: [],
+      createdAt: now,
+      decidedAt: now,
+    };
+    for (const reason of ["login_expired", "page_changed", "error"]) {
+      expect(AgentToControl.safeParse({ ...failed, result: { ...failed.result, reason } }).success).toBe(true);
+      expect(Draft.safeParse({ ...draft, failure: reason }).success, reason).toBe(true);
+    }
+    expect(AgentToControl.safeParse({ ...failed, result: { ...failed.result, reason: "timeout" } }).success).toBe(
+      false,
+    );
+    expect(Draft.safeParse({ ...draft, failure: "timeout" }).success, "草稿不收发布报文之外的原因").toBe(false);
+    expect(Draft.safeParse({ ...draft, failure: null }).success).toBe(true);
+  });
+
+  it("网关别名是 baize: 加用途", () => {
+    expect(gatewayAlias("plan")).toBe("baize:plan");
+    expect(gatewayAlias("fast")).toBe("baize:fast");
   });
 });

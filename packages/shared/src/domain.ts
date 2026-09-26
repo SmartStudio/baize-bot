@@ -376,6 +376,9 @@ export const AccountTier = z.enum(["read_only", "draft", "confirm_publish", "dir
 export type AccountTier = z.infer<typeof AccountTier>;
 export const AccountLogin = z.enum(["none", "valid", "expired"]);
 export type AccountLogin = z.infer<typeof AccountLogin>;
+// 一次登录没成，账号本身的 login 不变：window_failed 是登录窗口出错或到点没登上，remote_refused 是远程电脑不许登录。
+export const LoginFailure = z.enum(["window_failed", "remote_refused"]);
+export type LoginFailure = z.infer<typeof LoginFailure>;
 
 export const Account = z.object({
   id: AccountId,
@@ -388,6 +391,9 @@ export const Account = z.object({
   createdAt: Timestamp,
 });
 export type Account = z.infer<typeof Account>;
+
+export const PublishFailureReason = z.enum(["login_expired", "page_changed", "error"]);
+export type PublishFailureReason = z.infer<typeof PublishFailureReason>;
 
 export const DraftStatus = z.enum(["pending", "approved", "publishing", "published", "returned", "failed"]);
 export type DraftStatus = z.infer<typeof DraftStatus>;
@@ -447,6 +453,7 @@ export const Draft = z.object({
   scheduledAt: Timestamp.nullable(),
   status: DraftStatus,
   edits: z.array(DraftEdit).max(50),
+  failure: PublishFailureReason.nullable(),
   createdAt: Timestamp,
   decidedAt: Timestamp.nullable(),
 });
@@ -478,7 +485,8 @@ export const Publication = z.object({
 });
 export type Publication = z.infer<typeof Publication>;
 
-export const NotifyKind = z.enum(["confirm", "result", "stuck"]);
+/** stuck 专给电脑掉线：每人一条、不在线时暂存。别的「没办成、要你处理」用 failed，照普通通知走。 */
+export const NotifyKind = z.enum(["confirm", "result", "stuck", "failed"]);
 export type NotifyKind = z.infer<typeof NotifyKind>;
 export const Notice = z
   .object({ kind: NotifyKind, text: z.string().min(1).max(200), groupId: GroupId.nullable(), at: Timestamp })
@@ -487,6 +495,11 @@ export type Notice = z.infer<typeof Notice>;
 
 export const ModelPurpose = z.enum(["plan", "fast"]);
 export type ModelPurpose = z.infer<typeof ModelPurpose>;
+/** 模型网关对外的模型名，控制面按它映射到 GATEWAY_MODELS 里的真实模型。 */
+export type GatewayModels = Record<ModelPurpose, string>;
+export function gatewayAlias(purpose: ModelPurpose): `baize:${ModelPurpose}` {
+  return `baize:${purpose}`;
+}
 
 export const Trigger = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cron"), expr: z.string() }),

@@ -158,6 +158,7 @@ const promptMessage = (
     runId: RunId.parse(runId),
     botId: BotId.parse(botId),
     groupId,
+    messageId: MessageId.parse(`message-${runId}`),
     text,
     origin: { kind: "user" },
     reason: (group?.members?.length ?? 1) > 1 ? "mentioned" : "solo",
@@ -427,7 +428,7 @@ async function startHarness(options: {
     computerId: ComputerId.parse(options.computerId ?? "computer-1"),
     grants: [...(overrides.grants ?? options.grants ?? [])],
     tools: overrides.tools ?? tools,
-    modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key", model: MODEL_ID },
+    modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     dataDir,
     ...(overrides.skills !== undefined
       ? { skills: [...overrides.skills] }
@@ -2425,7 +2426,7 @@ describe("config 按 Bot 增量对账", () => {
 
     await h.runner.applyConfig(
       h.config({
-        modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-key", model: MODEL_ID },
+        modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-key" },
       }),
     );
     await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
@@ -2435,7 +2436,7 @@ describe("config 按 Bot 增量对账", () => {
     expect(h.gateway.usage.map((record) => record.key)).toEqual(["test-key", "rotated-key"]);
   });
 
-  it("换网关 baseUrl 时原会话的下一次请求打到新地址，model 仍按用途写 baize:*", async () => {
+  it("换网关 baseUrl 时原会话的下一次请求打到新地址，model 按用途写 baize:*", async () => {
     const nextModel = "baize-next-model";
     const nextGateway = await startGateway({
       upstream: scriptedUpstream(() => ({ textChunks: ["新网关完成。"], usage: { input: 130, output: 8 } })),
@@ -2449,13 +2450,11 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.prompt(promptMessage("bot-1", "run-1", "旧网关"));
       const creationsBefore = sessionCreationsFor("bot-1");
 
-      await h.runner.applyConfig(
-        h.config({ modelGateway: { baseUrl: nextGateway.baseUrl, apiKey: "next-key", model: nextModel } }),
-      );
+      await h.runner.applyConfig(h.config({ modelGateway: { baseUrl: nextGateway.baseUrl, apiKey: "next-key" } }));
       await h.runner.prompt(promptMessage("bot-1", "run-2", "新网关"));
 
       expect(sessionCreationsFor("bot-1"), "换端点也不重建会话对象").toBe(creationsBefore);
-      expect(nextGateway.usage, "config 里的 model 不再决定请求体的 model，用途才决定").toEqual([
+      expect(nextGateway.usage, "请求体的 model 由用途决定").toEqual([
         expect.objectContaining({ key: "next-key", model: "baize:plan", inputTokens: 130, outputTokens: 8 }),
       ]);
     } finally {
@@ -2943,9 +2942,7 @@ describe("config 按 Bot 增量对账", () => {
       script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
     });
     await h.runner.prompt(promptMessage("bot-1", "run-1", "一"));
-    await h.runner.applyConfig(
-      h.config({ modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: secret, model: MODEL_ID } }),
-    );
+    await h.runner.applyConfig(h.config({ modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: secret } }));
     await h.runner.prompt(promptMessage("bot-1", "run-2", "二"));
     await h.runner.prompt(promptMessage("bot-1", "run-3", "三", { groupId: "group-2" }));
     await h.runner.stop();

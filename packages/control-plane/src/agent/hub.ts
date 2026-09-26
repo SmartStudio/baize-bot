@@ -354,7 +354,6 @@ export class AgentHub {
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,
-        model: "baize:plan",
       },
     });
     if (reason === "hello") {

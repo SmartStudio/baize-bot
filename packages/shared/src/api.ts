@@ -136,7 +136,7 @@ export const UpdateTaskResponse = z.object({ task: TopicTask });
 
 // GET /api/groups/:id/messages?before=<messageId>&limit=50  按时间正序返回。
 // approval 和 handoff 类消息的正文只有一个 id，状态在 Approval 或 Handoff 上，所以这一页引用到的都跟着一起回，
-// 客户端不用为了画一张卡再发一次请求。
+// 客户端不用为了画一张卡再发一次请求。publications 是本页草稿卡和计划卡下草稿的发布记录，按发布时间升序。
 export const MessageListResponse = z.object({
   messages: z.array(Message),
   hasMore: z.boolean(),
@@ -144,6 +144,7 @@ export const MessageListResponse = z.object({
   handoffs: z.array(Handoff),
   drafts: z.array(Draft),
   plans: z.array(ContentPlan),
+  publications: z.array(Publication),
 });
 
 // POST /api/groups/:id/messages  正文里的「@Bot 名」由服务端解析成 mentions，多 Bot 群按它路由。
@@ -166,12 +167,14 @@ export const DecideDraftRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("approve"), content: DraftContent.optional() }).strict(),
   z.object({ decision: z.literal("return") }).strict(),
 ]);
+export type DecideDraftRequest = z.infer<typeof DecideDraftRequest>;
 export const DecideDraftResponse = z.object({ draft: Draft });
 
 // POST /api/plans/:id/approve 一次批准整份计划。
 export const ApprovePlanRequest = z
   .object({ edits: z.array(z.object({ draftId: DraftId, content: DraftContent }).strict()).max(20) })
   .strict();
+export type ApprovePlanRequest = z.infer<typeof ApprovePlanRequest>;
 export const ApprovePlanResponse = z.object({ plan: ContentPlan, drafts: z.array(Draft) });
 export const ReturnPlanResponse = z.object({ plan: ContentPlan });
 
@@ -182,6 +185,7 @@ export const CreateAccountRequest = z.object({ platform: BrowserPlatform, comput
 export const AccountResponse = z.object({ account: Account });
 // PATCH /api/accounts/:id
 export const UpdateAccountRequest = z.object({ tier: AccountTier }).strict();
+export type UpdateAccountRequest = z.infer<typeof UpdateAccountRequest>;
 
 // GET /api/bots/:id/routines  该 Bot 的例行任务，每条带最近 20 条运行记录，新的在前。别人的 Bot 404。
 export const RoutineListResponse = z.object({ items: z.array(Routine) });
@@ -299,22 +303,6 @@ export const UsageResponse = z.object({
   recent: z.array(UsageRunItem).max(20),
 });
 export type UsageResponse = z.infer<typeof UsageResponse>;
-
-// GET /api/overnight  「你下线的时候，活没停」。since 是这个用户上一条推送连接断开的时刻，从没连过是 null。
-// 每个 Bot 最多一条：since 之后它最新一句话。等你 = 那个群有它发起的待审批或待接手；在干活 = 它有没结束的 run；其余算完成。
-// 断开不到 30 分钟又回来，items 给空数组，客户端不弹卡。
-export const OvernightStatus = z.enum(["done", "waiting", "working"]);
-export type OvernightStatus = z.infer<typeof OvernightStatus>;
-export const OvernightItem = z.object({
-  botId: BotId,
-  groupId: GroupId,
-  text: z.string().max(200),
-  status: OvernightStatus,
-  at: Timestamp,
-});
-export type OvernightItem = z.infer<typeof OvernightItem>;
-export const OvernightResponse = z.object({ since: Timestamp.nullable(), items: z.array(OvernightItem).max(10) });
-export type OvernightResponse = z.infer<typeof OvernightResponse>;
 
 // GET /api/today  首页四栏。服务端把每一行要显示的都拼好、排好，Web 照数组顺序渲染，不再二次关联。
 // 等你确认按 since 升序：新来的排在后面，不把已有的行往下挤。

@@ -4,6 +4,7 @@ const TITLE: Record<Notice["kind"], string> = {
   confirm: "等你确认",
   result: "做完了",
   stuck: "卡住了",
+  failed: "没办成",
 };
 
 export const showNativeNotification = (title: string, body: string): void => {
