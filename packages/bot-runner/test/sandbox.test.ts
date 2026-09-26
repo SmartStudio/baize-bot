@@ -1,19 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { ComputerId, GroupId } from "@baize/shared";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decide } from "../src/gate.js";
-import { createSandboxedBash, sandboxProfile, whitelistEnv } from "../src/sandbox.js";
+import { bwrapArgs, createSandboxedBash, sandboxKind, sandboxProfile, whitelistEnv } from "../src/sandbox.js";
 
-const workDir = mkdtempSync(join(tmpdir(), "baize-sandbox-perf-"));
+// 照运行器的布局 <dataDir>/<botId>/work：bwrap 把数据目录下别的目录都当别的 Bot 盖住。
+const dataDir = mkdtempSync(join(tmpdir(), "baize-sandbox-perf-"));
+const workDir = join(dataDir, "bot-1", "work");
+mkdirSync(workDir, { recursive: true });
 
 afterAll(() => {
-  rmSync(workDir, { recursive: true, force: true });
+  rmSync(dataDir, { recursive: true, force: true });
 });
 
 const p95 = (values: readonly number[]): number =>
@@ -155,6 +159,7 @@ describe("bash 沙箱性能", () => {
           groupId: GroupId.parse("group-1"),
           computerId: ComputerId.parse("computer-1"),
           platform: process.platform,
+          sandbox: sandboxKind(),
           mcpOperation: null,
         },
         [],
@@ -176,7 +181,13 @@ describe("bash 沙箱性能", () => {
   it("沙箱外的环境变量白名单只保留基础变量和 PI_ 前缀", () => {
     expect(
       whitelistEnv(
-        { PATH: "/bin", HOME: "/Users/test", BAIZE_GATE_SENTINEL: "secret", PI_SESSION_ID: "session-1" },
+        {
+          PATH: "/bin",
+          HOME: "/Users/test",
+          DISPLAY: ":99",
+          BAIZE_GATE_SENTINEL: "secret",
+          PI_SESSION_ID: "session-1",
+        },
         "/work",
         "/work/.tmp",
       ),
@@ -224,7 +235,7 @@ describe("bash 沙箱性能", () => {
     },
   );
 
-  it.skipIf(process.platform !== "darwin")("abort 会杀掉 sandbox-exec 下的整棵进程组", async () => {
+  it.skipIf(sandboxKind() === "none")("abort 会杀掉沙箱里的整棵进程树", async () => {
     const marker = `baize-p1-3-${Date.now()}`;
     const child = `process.title=${JSON.stringify(`${marker}-child`)};setInterval(()=>{},1000)`;
     const parent = [
@@ -243,8 +254,11 @@ describe("bash 沙箱性能", () => {
       await expect(running).rejects.toThrow("Command aborted");
       await until(() => processesWith(marker).length === 0, "父子进程都退出");
 
-      const groups = new Set(before.map((line) => line.trim().split(/\s+/)[1]));
-      expect(groups.size).toBe(1);
+      // bwrap 带 --new-session，沙箱里的进程另起一个会话，靠 --die-with-parent 和 pid 命名空间跟着收掉。
+      if (sandboxKind() === "seatbelt") {
+        const groups = new Set(before.map((line) => line.trim().split(/\s+/)[1]));
+        expect(groups.size).toBe(1);
+      }
     } finally {
       controller.abort();
       await running.catch(() => undefined);
@@ -252,6 +266,177 @@ describe("bash 沙箱性能", () => {
         const pid = Number.parseInt(line.trim().split(/\s+/)[0] ?? "", 10);
         if (Number.isInteger(pid)) process.kill(pid, "SIGKILL");
       }
+    }
+  });
+});
+
+describe("bwrap 参数", () => {
+  it("bwrap 参数：禁区盖在最上面，批准的写路径可写，批准 network 时不断网", () => {
+    const work = "/data/bot-1/work";
+    const forbidden = ["/home/node/.ssh", "/data/bot-1/work/.ssh", "/data/bot-2", "/outside/chrome-profile"];
+    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden)).toEqual([
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--tmpfs",
+      "/tmp",
+      "--bind",
+      work,
+      work,
+      "--bind",
+      "/outside",
+      "/outside",
+      "--tmpfs",
+      "/home/node/.ssh",
+      "--tmpfs",
+      "/data/bot-1/work/.ssh",
+      "--tmpfs",
+      "/data/bot-2",
+      "--tmpfs",
+      "/outside/chrome-profile",
+      "--remount-ro",
+      "/home/node/.ssh",
+      "--remount-ro",
+      "/data/bot-1/work/.ssh",
+      "--remount-ro",
+      "/data/bot-2",
+      "--remount-ro",
+      "/outside/chrome-profile",
+      "--unshare-pid",
+      "--unshare-ipc",
+      "--unshare-uts",
+      "--die-with-parent",
+      "--new-session",
+      "--unshare-net",
+      "--chdir",
+      work,
+    ]);
+    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden);
+    expect(networked, "批准 network 的那一次和容器共用网络").not.toContain("--unshare-net");
+    expect(networked, "docker 遮住了部分 /proc，新挂 proc 会失败").not.toContain("--proc");
+  });
+});
+
+const hasBwrap = sandboxKind() === "bwrap";
+
+describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
+  const realHome = process.env["HOME"];
+  const runId = "run-bwrap";
+  // 不放在 /tmp 下：沙箱里的 /tmp 是一块私有 tmpfs，写进去不算写出沙箱，也看不见外面的文件。
+  // 数据目录下除自己以外的目录都当别的 Bot 盖住，所以家目录和 outside 放在数据目录旁边。
+  let root = "";
+  let botWork = "";
+  let otherBot = "";
+  let fakeHome = "";
+  let outside = "";
+  let callSeq = 0;
+  let sandbox!: ReturnType<typeof createSandboxedBash>;
+  const nextCall = (): string => `bwrap-${(callSeq += 1)}`;
+  const run = (command: string, callId = nextCall()) =>
+    sandbox.tool.execute(callId, { command }, undefined, undefined, undefined as never);
+
+  beforeAll(() => {
+    root = mkdtempSync(join(homedir(), ".baize-bwrap-test-"));
+    botWork = join(root, "data", "bot-1", "work");
+    otherBot = join(root, "data", "bot-2");
+    fakeHome = join(root, "home");
+    outside = join(root, "outside");
+    for (const dir of [botWork, otherBot, join(fakeHome, ".ssh"), outside]) mkdirSync(dir, { recursive: true });
+    writeFileSync(join(fakeHome, ".ssh", "id_test"), "ssh-secret-p1-6");
+    writeFileSync(join(otherBot, "secret.txt"), "bot-2-secret-p1-6");
+    symlinkSync(join(fakeHome, ".ssh"), join(botWork, "ssh-link"));
+    symlinkSync(otherBot, join(botWork, "bot-2-link"));
+    // homedir() 在 Linux 上读 HOME，禁区的 ~/.ssh 就落在临时家目录里，不碰真家目录。
+    process.env["HOME"] = fakeHome;
+    sandbox = createSandboxedBash(botWork, () => runId);
+  });
+
+  afterAll(() => {
+    if (realHome === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = realHome;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("禁区的 ~/.ssh 落在临时家目录里", () => {
+    expect(homedir()).toBe(fakeHome);
+  });
+
+  it.each([
+    ["cat ~/.ssh", () => `cat ${shellQuote(join(fakeHome, ".ssh", "id_test"))}`],
+    ["工作目录里指向 ~/.ssh 的符号链接", () => "cat ssh-link/id_test"],
+    [
+      "node 读 ~/.ssh",
+      () =>
+        `${shellQuote(process.execPath)} -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))' ${shellQuote(join(fakeHome, ".ssh", "id_test"))}`,
+    ],
+    ["cat 别的 Bot 目录", () => `cat ${shellQuote(join(otherBot, "secret.txt"))}`],
+    ["工作目录里指向别的 Bot 的符号链接", () => "cat bot-2-link/secret.txt"],
+  ])("bwrap 下禁区读不到：%s", async (_label, command) => {
+    const result = run(command());
+    await expect(result).rejects.toThrow();
+    await result.catch((error: unknown) => {
+      expect(String(error)).not.toContain("secret-p1-6");
+    });
+  });
+
+  it("bwrap 下工作目录外写不进，工作目录里能写", async () => {
+    const outsideFile = join(outside, "leak.txt");
+    const homeFile = join(fakeHome, "leak.txt");
+    const otherBotFile = join(otherBot, "leak.txt");
+    for (const target of [outsideFile, homeFile, otherBotFile]) {
+      await expect(run(`echo leak > ${shellQuote(target)}`), target).rejects.toThrow();
+      expect(existsSync(target), target).toBe(false);
+    }
+    await run("echo ok > inside.txt && mkdir -p nested && touch nested/b.txt");
+    expect(readFileSync(join(botWork, "inside.txt"), "utf8")).toBe("ok\n");
+    expect(existsSync(join(botWork, "nested", "b.txt"))).toBe(true);
+  });
+
+  it("bwrap 下批准的写路径这一次可写，禁区照样盖住", async () => {
+    const approved = join(outside, "approved.txt");
+    const callId = nextCall();
+    sandbox.allow(runId, callId, { network: false, writePaths: [approved] });
+    await run(`echo ok > ${shellQuote(approved)}`, callId);
+    expect(readFileSync(approved, "utf8")).toBe("ok\n");
+    await expect(run(`echo again > ${shellQuote(approved)}`), "放宽只管批准的那一次").rejects.toThrow();
+
+    const widened = nextCall();
+    sandbox.allow(runId, widened, { network: false, writePaths: [root] });
+    await expect(run(`cat ${shellQuote(join(otherBot, "secret.txt"))}`, widened)).rejects.toThrow();
+  });
+
+  it.skipIf(!existsSync("/tmp/.X11-unix"))("bwrap 下批准写 /tmp 也看不到 X 的 socket 目录", async () => {
+    const marker = join("/tmp/.X11-unix", `p1-6-runner-${process.pid}`);
+    const approved = join("/tmp", `p1-6-runner-approved-${process.pid}.txt`);
+    writeFileSync(marker, "");
+    try {
+      const callId = nextCall();
+      sandbox.allow(runId, callId, { network: false, writePaths: [approved] });
+      const result = await run(`echo ok > ${shellQuote(approved)} && ls -A /tmp/.X11-unix`, callId);
+      expect(readFileSync(approved, "utf8"), "批准的 /tmp 写路径落到了真 /tmp").toBe("ok\n");
+      expect(JSON.stringify(result.content)).not.toContain("p1-6-runner-");
+    } finally {
+      rmSync(marker, { force: true });
+      rmSync(approved, { force: true });
+    }
+  });
+
+  it("bwrap 下默认断网，批准 network 后通", async () => {
+    const server = createHttpServer((_request, response) => response.end("pong-p1-6"));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("没有拿到本地测试端口");
+    const fetchLoopback = `${shellQuote(process.execPath)} -e 'fetch("http://127.0.0.1:${address.port}/").then((r) => r.text()).then((t) => process.stdout.write(t))'`;
+    try {
+      await expect(run(fetchLoopback), "默认连本机回环也不通").rejects.toThrow();
+      const callId = nextCall();
+      sandbox.allow(runId, callId, { network: true, writePaths: [] });
+      const result = await run(fetchLoopback, callId);
+      expect(JSON.stringify(result.content)).toContain("pong-p1-6");
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 });

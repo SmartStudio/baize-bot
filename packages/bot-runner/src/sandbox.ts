@@ -1,7 +1,8 @@
-import { mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
-import type { GateAccess } from "./gate.js";
+import type { GateAccess, SandboxKind } from "./gate.js";
 import { forbiddenPathPrefixes, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
@@ -70,29 +71,127 @@ export function sandboxProfile(workDir: string, access: GateAccess): string {
   return lines.join("\n");
 }
 
-const spawnHook = (workDir: string, tmpDir: string, access: GateAccess): BashSpawnHook => {
-  if (process.platform !== "darwin") {
-    return (ctx: BashSpawnContext) => ({
-      command: ctx.command,
-      cwd: workDir,
-      env: whitelistEnv(ctx.env, workDir, tmpDir),
-    });
+const detectSandbox = (): SandboxKind => {
+  if (process.platform === "darwin") return "seatbelt";
+  if (process.platform !== "linux") {
+    console.warn(`这台电脑是 ${process.platform}，没有 bash 沙箱，Bot 的每条 bash 都要问`);
+    return "none";
   }
-  const profile = sandboxProfile(workDir, access);
-  return (ctx: BashSpawnContext) => ({
-    command: `/usr/bin/sandbox-exec -p ${shSingleQuote(profile)} /bin/bash -c ${shSingleQuote(ctx.command)}`,
+  const probe = spawnSync("bwrap", ["--ro-bind", "/", "/", "--unshare-net", "--unshare-pid", "true"], {
+    encoding: "utf8",
+  });
+  if (probe.status === 0) return "bwrap";
+  const why = probe.error?.message ?? (probe.stderr.trim() || `exit ${probe.status ?? probe.signal}`);
+  console.warn(`bubblewrap 起不来（${why}），这台电脑没有 bash 沙箱，Bot 的每条 bash 都要问`);
+  return "none";
+};
+
+let detected: SandboxKind | undefined;
+
+/** 进程内只探一次。 */
+export function sandboxKind(): SandboxKind {
+  detected ??= detectSandbox();
+  return detected;
+}
+
+/**
+ * 入参都已是 realpath，禁区都已存在：只读根上建不了挂载点，不存在的禁区会让 bwrap 报
+ * 「Can't mkdir parents ... Read-only file system」，整条命令起不来。
+ * 禁区放在所有 bind 之后：bwrap 按参数顺序叠挂载，后挂的盖住先挂的。禁区落在工作目录或批准的写路径里面时照样被盖住；
+ * 工作目录本身落在禁区里时 --chdir 失败，命令起不来。
+ * 空 tmpfs 默认可写，写进去的东西随沙箱消失，命令却报成功，所以再逐个 --remount-ro。先挂完全部 tmpfs 再改只读，
+ * 禁区互相嵌套时里层的挂载点还建得出来。
+ * 不挂 --proc：docker 遮住了部分 /proc，新挂 proc 会失败，沙箱和容器共用 /proc。
+ */
+export function bwrapArgs(workDir: string, access: GateAccess, forbidden: readonly string[]): readonly string[] {
+  return [
+    "--ro-bind",
+    "/",
+    "/",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--bind",
+    workDir,
+    workDir,
+    ...access.writePaths.flatMap((path) => ["--bind", path, path]),
+    ...forbidden.flatMap((path) => ["--tmpfs", path]),
+    ...forbidden.flatMap((path) => ["--remount-ro", path]),
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--die-with-parent",
+    "--new-session",
+    ...(access.network ? [] : ["--unshare-net"]),
+    "--chdir",
+    workDir,
+  ];
+}
+
+// 工作目录是 <dataDir>/<botId>/work，数据目录下除自己以外的目录都是别的 Bot（和 chrome-profile）。
+const otherBotDirs = (workDir: string): readonly string[] => {
+  const botDir = dirname(workDir);
+  const dataDir = dirname(botDir);
+  return readdirSync(dataDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(dataDir, entry.name))
+    .filter((path) => path !== botDir);
+};
+
+// bind 的源必须存在。批准写一个还不存在的路径，就放开它最近的已存在祖先；根目录不放，
+// 整个根可写会盖掉 /dev 和 /tmp 的挂载。
+const writeMountPoint = (path: string): string | null => {
+  let current = realpathExisting(path);
+  while (!existsSync(current)) current = dirname(current);
+  return current === "/" ? null : current;
+};
+
+// 远程电脑上助理 Chrome 画在 Xvfb 上，Xvfb 不设访问控制，连上它的 socket 就能截屏、注入按键。
+// 沙箱的 /tmp 本来就是空的；批准写 /tmp 下的新文件会把真 /tmp 挂进来，所以这个目录单独盖住。
+const X11_SOCKET_DIR = "/tmp/.X11-unix";
+
+const bwrapCommand = (workDir: string, access: GateAccess, command: string): string => {
+  const work = realpathExisting(workDir);
+  const candidates = [...forbiddenPathPrefixes(workDir), ...otherBotDirs(work), X11_SOCKET_DIR];
+  const forbidden = [...new Set(candidates.map(realpathExisting).filter(existsSync))];
+  const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
+  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden);
+  return ["bwrap", ...args, "/bin/bash", "-c", command].map(shSingleQuote).join(" ");
+};
+
+const sandboxedCommand = (kind: SandboxKind, workDir: string, access: GateAccess, command: string): string => {
+  switch (kind) {
+    case "seatbelt":
+      return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access))} /bin/bash -c ${shSingleQuote(command)}`;
+    case "bwrap":
+      return bwrapCommand(workDir, access, command);
+    case "none":
+      return command;
+    default: {
+      const exhaustive: never = kind;
+      return exhaustive;
+    }
+  }
+};
+
+const spawnHook =
+  (kind: SandboxKind, workDir: string, tmpDir: string, access: GateAccess): BashSpawnHook =>
+  (ctx: BashSpawnContext) => ({
+    command: sandboxedCommand(kind, workDir, access, ctx.command),
     cwd: workDir,
     env: whitelistEnv(ctx.env, workDir, tmpDir),
   });
-};
 
 export interface BashSandbox {
+  readonly sandbox: SandboxKind;
   readonly tool: ReturnType<typeof createBashToolDefinition>;
   allow(runId: string, callId: string, access: GateAccess): void;
   clearRun(runId: string): void;
 }
 
 export function createSandboxedBash(workDir: string, activeRunId: () => string | null = () => null): BashSandbox {
+  const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
   mkdirSync(tmpDir, { recursive: true });
   const accessByRun = new Map<string, Map<string, GateAccess>>();
@@ -107,11 +206,12 @@ export function createSandboxedBash(workDir: string, activeRunId: () => string |
       const access = runAccess?.get(callId) ?? { network: false, writePaths: [] };
       runAccess?.delete(callId);
       if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
-      const scoped = createBashToolDefinition(workDir, { spawnHook: spawnHook(workDir, tmpDir, access) });
+      const scoped = createBashToolDefinition(workDir, { spawnHook: spawnHook(kind, workDir, tmpDir, access) });
       return scoped.execute(...args);
     },
   } satisfies typeof base;
   return {
+    sandbox: kind,
     tool,
     allow: (runId, callId, access) => {
       if (!access.network && access.writePaths.length === 0) {

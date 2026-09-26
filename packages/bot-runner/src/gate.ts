@@ -26,7 +26,11 @@ export interface GateContext {
   readonly platform: NodeJS.Platform;
 }
 
+/** bash 实际跑在哪种系统沙箱里。`none` 时禁区和写范围只剩命令解析，挡不住，所以 bash 一律问。 */
+export type SandboxKind = "seatbelt" | "bwrap" | "none";
+
 export interface GateCall extends GateContext {
+  readonly sandbox: SandboxKind;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   readonly mcpOperation: Pick<ToolOperation, "name" | "needsApproval"> | null;
@@ -453,7 +457,7 @@ const classifyCommand = (words: readonly string[], call: GateContext): readonly 
 };
 
 const classifyBash = (call: GateCall): readonly ClassifiedAction[] => {
-  if (call.platform !== "darwin") return [plainAction("shell")];
+  if (call.sandbox === "none") return [plainAction("shell")];
   const command = call.input.command;
   if (typeof command !== "string" || command.trim() === "") return [plainAction("shell")];
   if (hasUnsafeCommandSeparator(command)) return [plainAction("shell")];

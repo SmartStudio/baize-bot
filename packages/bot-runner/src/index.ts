@@ -497,6 +497,7 @@ export function createRunner(config: RunnerConfig): Runner {
           workDir: dirs.workDir,
           groupId,
           platform: process.platform,
+          sandbox: bash.sandbox,
           mcpOperation: operation,
           computerId: desired.computerId,
         },

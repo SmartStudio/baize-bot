@@ -63,7 +63,15 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 `read`、`write`、`edit` 先展开 `~` 和开头的 `@`，再对已存在的路径段做 realpath。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。`~/.ssh`、钥匙串和浏览器登录资料是固定前缀禁区。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
 
-bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。macOS 上实际执行统一经过 `src/sandbox.ts` 的 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外还会把环境裁成基础变量和 `PI_` 前缀。Seatbelt 做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。Linux 在 bubblewrap 接入前，bash 一律问。
+bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。
+
+bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
+
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝。
+- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
+- **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
+
+`seatbelt` 和 `bwrap` 走同一套命令分类。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外都把环境裁成基础变量和 `PI_` 前缀，`DISPLAY` 不在里面。两种沙箱都做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。远程电脑上批准网络的那次调用和容器共用网络命名空间，所以 Xvfb 带 `-nolisten local` 关掉抽象 socket，只留 `/tmp/.X11-unix` 下的文件 socket。沙箱私有的 `/tmp` 里没有这个目录，获批写 `/tmp` 把真 `/tmp` 挂进来时它也按禁区盖住。
 
 Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里先全部判完再并行执行，路径判定与实际使用之间不留给同批工具改符号链接的窗口。
 

@@ -178,6 +178,7 @@ describe("起草工具", () => {
     groupId,
     computerId,
     platform: "darwin",
+    sandbox: "seatbelt",
     mcpOperation: null,
   });
   const draftOn = (accountId: string) => call("create_draft", { accountId, content: { kind: "post", text: "早安" } });
@@ -246,6 +247,7 @@ describe("bash 分类", () => {
     groupId,
     computerId,
     platform: "darwin",
+    sandbox: "seatbelt",
     mcpOperation: null,
   });
 
@@ -324,10 +326,28 @@ describe("bash 分类", () => {
     });
   });
 
-  it("Linux 上 bash 一律问", () => {
-    expect(decide({ ...bashCall("echo ok"), platform: "linux" }, [], [])).toMatchObject({
-      verdict: "ask",
-      action: "shell",
-    });
+  it("没有沙箱时 bash 一律问", () => {
+    for (const platform of ["darwin", "linux"] as const) {
+      expect(
+        decide({ ...bashCall("ls"), platform, sandbox: "none" }, [], []),
+        `${platform} 上没有沙箱，工作目录里的 ls 也要问`,
+      ).toMatchObject({ verdict: "ask", action: "shell" });
+    }
+  });
+
+  it("bwrap 下工作目录里的 bash 直接放行，分类结果和 seatbelt 一致", () => {
+    const commands = [
+      "ls",
+      "cat a.txt | grep needle && echo ok > result.txt",
+      `echo ok > ${join(outsideDir, "result.txt")}`,
+      "cat ~/.ssh/id_ed25519",
+      "curl https://example.com/",
+      "echo $(date)",
+    ];
+    for (const command of commands) {
+      const seatbelt = decide(bashCall(command), [], []);
+      expect(decide({ ...bashCall(command), platform: "linux", sandbox: "bwrap" }, [], []), command).toEqual(seatbelt);
+    }
+    expect(decide({ ...bashCall("ls"), platform: "linux", sandbox: "bwrap" }, [], []).verdict).toBe("allow");
   });
 });
