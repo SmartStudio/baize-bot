@@ -120,13 +120,30 @@ export const SkillsTab = ({ botId }: { botId: BotId }) => {
   const [view, setView] = useState<View>({ kind: "list" });
 
   const ready = state.status === "ready" ? state : null;
-  const skills = ready?.skills[botId];
+  const skills = ready?.skills.rows[botId];
+  const status = ready?.loads[`skills:${botId}`] ?? "idle";
 
+  // 拉失败了等用户点重试，不自己再要。
   useEffect(() => {
-    if (skills === undefined) void actions.loadSkills(botId);
-  }, [botId, skills, actions]);
+    if (skills === undefined && status === "idle") void actions.loadSkills(botId);
+  }, [botId, skills, status, actions]);
 
-  if (ready === null || skills === undefined) return <p className="skills-empty">在拉会做的活…</p>;
+  if (ready === null || skills === undefined)
+    return status === "failed" ? (
+      <p className="skills-empty" role="alert" data-testid="skills-failed">
+        会做的活没拉下来。{" "}
+        <button
+          type="button"
+          className="ghost-button"
+          data-testid="skills-retry"
+          onClick={() => void actions.loadSkills(botId)}
+        >
+          重试
+        </button>
+      </p>
+    ) : (
+      <p className="skills-empty">在拉会做的活…</p>
+    );
 
   const toList = () => setView({ kind: "list" });
 

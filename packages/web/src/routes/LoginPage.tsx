@@ -60,7 +60,15 @@ export const LoginPage = () => {
           </button>
           <p className="fine">
             还没有账号？{" "}
-            <Link to="/register" data-testid="register-link">
+            {/* 登录还在路上时换去注册，两次认证会抢着进会话。真正挡住晚到的那次靠认证尝试号，这里只是别引人去点。 */}
+            <Link
+              to="/register"
+              data-testid="register-link"
+              aria-disabled={busy}
+              onClick={(event) => {
+                if (busy) event.preventDefault();
+              }}
+            >
               注册
             </Link>
           </p>

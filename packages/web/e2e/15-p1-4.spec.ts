@@ -1,6 +1,17 @@
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { MessageListResponse, expect, openBot, openSettings, test, login, type Page } from "./fixtures";
+import {
+  MessageListResponse,
+  expect,
+  openBot,
+  openSeededBot,
+  openSettings,
+  sendText,
+  teamCard,
+  test,
+  login,
+  type Page,
+} from "./fixtures";
 import type { TestInfo, WebSocketRoute } from "@playwright/test";
 
 const screenshotPath = async (testInfo: TestInfo, name: string): Promise<string> => {
@@ -45,6 +56,68 @@ const draftIn = async (page: Page, groupId: string, draftId: string) => {
 
 const replyCard = (page: Page) =>
   page.getByTestId("message-list").getByTestId("draft-card").filter({ hasText: "阿杰的车间" });
+
+const reviewCard = (page: Page) =>
+  page.getByTestId("message-list").getByTestId("draft-card").filter({ hasText: "X3 现货比价清单" });
+
+// 推送走一层代理：offline 时服务端的推送不转给页面。dropPush 关掉页面这一侧就是断线，应用 1 秒后自己重连，
+// 新连接连上才恢复转发。推送帧可能比触发它的 HTTP 响应晚到代理，所以旧连接关掉以前不能恢复转发。
+const proxyPush = async (page: Page) => {
+  const socket = { offline: false, sides: [] as WebSocketRoute[] };
+  await page.routeWebSocket("**/api/ws", (ws) => {
+    const server = ws.connectToServer();
+    const side = socket.sides.length;
+    ws.onMessage((message) => server.send(message));
+    server.onMessage((message) => {
+      if (!socket.offline && side === socket.sides.length - 1) ws.send(message);
+    });
+    socket.sides.push(ws);
+  });
+  return socket;
+};
+
+const dropPush = async (socket: Awaited<ReturnType<typeof proxyPush>>) => {
+  const count = socket.sides.length;
+  await socket.sides.at(-1)?.close();
+  await expect.poll(() => socket.sides.length, "推送重连上了").toBe(count + 1);
+  socket.offline = false;
+};
+
+// 扣住下一次首页请求：先从服务端取到真快照，压着不放，由用例决定什么时候交给页面。
+const holdNextToday = async (page: Page) => {
+  let armed = true;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let snapshotTaken = () => {};
+  const taken = new Promise<void>((resolve) => (snapshotTaken = resolve));
+  let staleServed = () => {};
+  const served = new Promise<void>((resolve) => (staleServed = resolve));
+  await page.route("**/api/today", async (route) => {
+    if (!armed) return route.continue();
+    armed = false;
+    const response = await route.fetch();
+    snapshotTaken();
+    await gate;
+    await route.fulfill({ response });
+    staleServed();
+  });
+  return {
+    taken,
+    serve: async () => {
+      release();
+      await served;
+      await page.evaluate(() => fetch("/api/health").then(() => undefined));
+    },
+  };
+};
+
+const conflictsOn = (page: Page) => {
+  const conflicts: string[] = [];
+  page.on("response", (res) => {
+    if (res.status() === 409) conflicts.push(res.url());
+  });
+  return conflicts;
+};
 
 test("计划卡里改一条的字再批准，等你确认的数字减一", async ({ page }) => {
   await login(page);
@@ -254,78 +327,235 @@ test("计划卡里改着字时 Bot 改了这一条，改字作废换成新正文
   await expect(card.getByTestId("plan-approve"), "改字作废，批准时不再带 edits").toHaveText("批准 5 条");
 });
 
-test("首页快照晚到，也不把刚批的卡打回待批", async ({ page }) => {
+test("重连过一次之后首页快照晚到，也不把刚批的卡打回待批", async ({ page }) => {
+  const socket = await proxyPush(page);
   await login(page);
   await openAssistant(page);
   const reply = replyCard(page);
   const plan = page.getByTestId("message-list").getByTestId("plan-card");
   await expect(reply).toHaveAttribute("data-status", "pending");
   await expect(plan).toHaveAttribute("data-status", "pending");
+  await expect.poll(() => socket.sides.length, "推送连上了").toBe(1);
+  const resynced = page.waitForResponse("**/api/today");
+  await dropPush(socket);
+  await resynced;
 
-  const conflicts: string[] = [];
-  page.on("response", (res) => {
-    if (res.status() === 409) conflicts.push(res.url());
-  });
-  let armed = false;
-  let release = () => {};
-  const gate = new Promise<void>((resolve) => (release = resolve));
-  let snapshotTaken = () => {};
-  const taken = new Promise<void>((resolve) => (snapshotTaken = resolve));
-  let staleServed = () => {};
-  const served = new Promise<void>((resolve) => (staleServed = resolve));
-  await page.route("**/api/today", async (route) => {
-    if (!armed) return route.continue();
-    armed = false;
-    const response = await route.fetch();
-    snapshotTaken();
-    await gate;
-    await route.fulfill({ response });
-    staleServed();
-  });
-
-  armed = true;
+  const conflicts = conflictsOn(page);
+  const snapshot = await holdNextToday(page);
   await reply.getByTestId("draft-approve").click();
   await expect(reply).toHaveAttribute("data-status", "approved");
-  await taken;
+  await snapshot.taken;
   await plan.getByTestId("plan-approve").click();
   await expect(plan, "第二张卡先随接口和推送变成已批").toHaveAttribute("data-status", "approved");
 
-  release();
-  await served;
-  await page.evaluate(() => fetch("/api/health").then(() => undefined));
+  await snapshot.serve();
   await expect(plan, "批第二张之前生成的首页快照晚到，不把它打回待批").toHaveAttribute("data-status", "approved");
   await expect(plan).toContainText("已批 5 条");
   await expect(plan.getByTestId("plan-approve"), "没有闪回，也就没有能再点的批准").toHaveCount(0);
   expect(conflicts, "没有撞上 409").toEqual([]);
 });
 
-test("断线期间漏掉的改稿，重连后的首页快照补上", async ({ page, request }) => {
-  let offline = false;
-  const pageSides: WebSocketRoute[] = [];
-  await page.routeWebSocket("**/api/ws", (ws) => {
-    const server = ws.connectToServer();
-    ws.onMessage((message) => server.send(message));
-    server.onMessage((message) => {
-      if (!offline) ws.send(message);
-    });
-    pageSides.push(ws);
+test("重连后的首页快照在路上时批了卡，快照晚到也不打回待批", async ({ page }) => {
+  const socket = await proxyPush(page);
+  await login(page);
+  await openBot(page, "小采");
+  const review = reviewCard(page);
+  await expect(review).toHaveAttribute("data-status", "pending");
+  await expect.poll(() => socket.sides.length, "推送连上了").toBe(1);
+
+  const conflicts = conflictsOn(page);
+  const snapshot = await holdNextToday(page);
+  await dropPush(socket);
+  await snapshot.taken;
+  await review.getByTestId("draft-approve").click();
+  await expect(review, "卡先随接口和推送变成已批").toHaveAttribute("data-status", "approved");
+
+  await snapshot.serve();
+  await expect(review, "批之前生成的重连快照晚到，不把它打回待批").toHaveAttribute("data-status", "approved");
+  await expect(review.getByTestId("draft-approve"), "没有闪回，也就没有能再点的批准").toHaveCount(0);
+  expect(conflicts, "没有撞上 409").toEqual([]);
+});
+
+test("进群的历史在路上时别处退回了卡，历史晚到也不打回待批", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("team-nav").click();
+  const conflicts = conflictsOn(page);
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let historyTaken = () => {};
+  const taken = new Promise<void>((resolve) => (historyTaken = resolve));
+  await page.route("**/api/groups/grp_buy/messages", async (route) => {
+    const response = await route.fetch();
+    historyTaken();
+    await gate;
+    await route.fulfill({ response });
   });
+  await teamCard(page, "小采").getByTestId("team-bot-chat").click();
+  await taken;
+  const decided = await page.request.post("/api/drafts/draft_today_review", { data: { decision: "return" } });
+  expect(decided.status(), "群历史在路上时别处退回了这张卡").toBe(200);
+  release();
+  const review = reviewCard(page);
+  await expect(review).toHaveAttribute("data-status", "returned");
+  await page.evaluate(() => fetch("/api/health").then(() => undefined));
+  await expect(review, "退回之前生成的群历史晚到，不把卡打回待批").toHaveAttribute("data-status", "returned");
+  expect(conflicts).toEqual([]);
+});
+
+test("断线期间漏掉的改稿，重连后的首页快照补上", async ({ page, request }) => {
+  const socket = await proxyPush(page);
   await login(page);
   await openAssistant(page);
   const reply = replyCard(page);
   await expect(reply.getByTestId("draft-editor")).toHaveValue(REPLY_TEXT);
-  await expect.poll(() => pageSides.length, "推送连上了").toBe(1);
+  await expect.poll(() => socket.sides.length, "推送连上了").toBe(1);
 
-  offline = true;
+  socket.offline = true;
   const revised = await request.post(`/api/test/drafts/${REPLY_ID}/revise`, { data: { text: BOT_REPLY } });
   expect(revised.status()).toBe(204);
-  const reconnected = page.waitForRequest("**/api/today");
-  offline = false;
-  await pageSides[0]?.close();
-  await reconnected;
+  await dropPush(socket);
   await expect(reply.getByTestId("draft-editor"), "断线时漏掉的 draft_updated 由重连后的首页快照补上").toHaveValue(
     BOT_REPLY,
   );
+});
+
+test("重连后第一次首页快照没取到，下一次快照照样补上断线时漏掉的改稿", async ({ page, request }) => {
+  const socket = await proxyPush(page);
+  await login(page);
+  const row = pendingRows(page).filter({ hasText: "阿杰的车间" });
+  await row.getByTestId("today-expand").click();
+  // 留在首页不进群：进过的群重连后会重拉历史，那条路也能补上，这里只看首页快照这一条路
+  const reply = row.getByTestId("draft-card");
+  await expect(reply.getByTestId("draft-editor")).toHaveValue(REPLY_TEXT);
+  await expect.poll(() => socket.sides.length, "推送连上了").toBe(1);
+
+  socket.offline = true;
+  const revised = await request.post(`/api/test/drafts/${REPLY_ID}/revise`, { data: { text: BOT_REPLY } });
+  expect(revised.status()).toBe(204);
+  let failOnce = true;
+  await page.route("**/api/today", (route) => {
+    if (!failOnce) return route.continue();
+    failOnce = false;
+    return route.fulfill({ status: 500, json: { error: "首页挂了一下" } });
+  });
+  const failed = page.waitForResponse((res) => res.url().endsWith("/api/today") && res.status() === 500);
+  await dropPush(socket);
+  await failed;
+  await expect(reply.getByTestId("draft-editor"), "这一次没取到，卡上还是旧正文").toHaveValue(REPLY_TEXT);
+
+  const other = await request.post("/api/test/drafts/draft_today_plan_1/revise", { data: { text: "别的草稿改了" } });
+  expect(other.status(), "别的草稿一条推送触发下一次首页刷新").toBe(204);
+  await expect(reply.getByTestId("draft-editor"), "下一次快照补上漏掉的改稿").toHaveValue(BOT_REPLY);
+});
+
+test("断线期间别处处理了的卡，重连后当前群立刻、别的群进去时都换成新状态", async ({ page }) => {
+  const socket = await proxyPush(page);
+  await login(page);
+  await openBot(page, "小采");
+  await expect(reviewCard(page)).toHaveAttribute("data-status", "pending");
+  await openAssistant(page);
+  const reply = replyCard(page);
+  await expect(reply).toHaveAttribute("data-status", "pending");
+  await expect.poll(() => socket.sides.length, "推送连上了").toBe(1);
+
+  socket.offline = true;
+  const approved = await page.request.post(`/api/drafts/${REPLY_ID}`, { data: { decision: "approve" } });
+  expect(approved.status(), "断线时另一台设备批了回复卡").toBe(200);
+  const returned = await page.request.post("/api/drafts/draft_today_review", { data: { decision: "return" } });
+  expect(returned.status(), "断线时另一台设备退回了小采群里的卡").toBe(200);
+  await dropPush(socket);
+  await expect(reply, "开着的群重连后重拉历史").not.toHaveAttribute("data-status", "pending");
+  await expect(reply.getByTestId("draft-approve")).toHaveCount(0);
+
+  await openBot(page, "小采");
+  await expect(reviewCard(page), "拉过的别的群再进去时重拉").toHaveAttribute("data-status", "returned");
+});
+
+test("批准回包晚于 Bot 改稿的推送落地，卡片留在改稿后的待批", async ({ page, request }) => {
+  await login(page);
+  await openAssistant(page);
+  const reply = replyCard(page);
+  await expect(reply).toHaveAttribute("data-status", "pending");
+  // 改稿推送会顺手重拉首页快照，那份快照也会带回 pending；让它失败，只看推送和批准回包谁说了算。
+  await page.route("**/api/today", (route) => route.fulfill({ status: 500, json: { error: "首页暂时不可用" } }));
+
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let decided = () => {};
+  const approvedOnServer = new Promise<void>((resolve) => (decided = resolve));
+  await page.route(`**/api/drafts/${REPLY_ID}`, async (route) => {
+    const response = await route.fetch();
+    decided();
+    await gate;
+    await route.fulfill({ response });
+  });
+
+  await reply.getByTestId("draft-approve").click();
+  await approvedOnServer;
+  await expect(reply, "批准的推送先到").toHaveAttribute("data-status", "approved");
+  const revised = await request.post(`/api/test/drafts/${REPLY_ID}/revise`, { data: { text: BOT_REPLY } });
+  expect(revised.status()).toBe(204);
+  await expect(reply, "Bot 改稿的推送把卡打回待批").toHaveAttribute("data-status", "pending");
+  await expect(reply.getByTestId("draft-approve"), "批准请求还压着").toHaveText("批准中");
+
+  release();
+  await expect(reply.getByTestId("draft-approve"), "批准回包已经落地").toHaveText("批准");
+  await expect(reply, "发出更早的批准回包不盖掉后到的改稿").toHaveAttribute("data-status", "pending");
+  await expect(reply.getByTestId("draft-editor")).toHaveValue(BOT_REPLY);
+});
+
+test("断线前只收到半句的流式回复，重连重拉历史后换成完整正文", async ({ page }) => {
+  let dropped = false;
+  const sides: WebSocketRoute[] = [];
+  await page.routeWebSocket("**/api/ws", (ws) => {
+    const server = ws.connectToServer();
+    sides.push(ws);
+    ws.onMessage((message) => server.send(message));
+    server.onMessage((message) => {
+      if (dropped && ws === sides[0]) return;
+      ws.send(message);
+      const push = JSON.parse(String(message)) as { type?: string; done?: boolean };
+      if (!dropped && push.type === "message_delta" && push.done === false) {
+        dropped = true;
+        void ws.close();
+      }
+    });
+  });
+
+  await login(page);
+  await openSeededBot(page, "小销");
+  await sendText(page, "把 Globex 的报价单再核一遍");
+  await expect.poll(() => dropped, "第一段 delta 到页面以后断线").toBe(true);
+  await expect.poll(() => sides.length, "推送重连上了").toBe(2);
+  const bubble = page.getByTestId("message-list").getByTestId("bot-bubble").last();
+  await expect(bubble, "重拉的历史替换了断线前的半句").toHaveAttribute("data-streaming", "false");
+  await expect(bubble).toHaveText("收到。把 Globex 的报价… 我这就去办。");
+});
+
+test("Bot 改稿之后接着改字，打的字不被吞", async ({ page, request }) => {
+  await login(page);
+  await openAssistant(page);
+  const reply = replyCard(page);
+  await reply.getByTestId("draft-editor").fill(MY_REPLY);
+  await expect(reply.getByTestId("brand-hint")).toBeVisible();
+
+  const revised = await request.post(`/api/test/drafts/${REPLY_ID}/revise`, { data: { text: BOT_REPLY } });
+  expect(revised.status()).toBe(204);
+  await expect(reply.getByTestId("draft-editor")).toHaveValue(BOT_REPLY);
+  await expect(reply.getByTestId("brand-hint")).toHaveCount(0);
+
+  await reply.getByTestId("draft-editor").fill(`${BOT_REPLY}有问题随时问。`);
+  await expect(reply.getByTestId("draft-editor"), "在新正文上改的字留在框里").toHaveValue(`${BOT_REPLY}有问题随时问。`);
+  await expect(reply.getByTestId("brand-hint"), "照新正文改的字算改过").toBeVisible();
+});
+
+test("首页快照回 401 时切回登录页", async ({ page }) => {
+  await login(page);
+  await openAssistant(page);
+  await page.route("**/api/today", (route) => route.fulfill({ status: 401, json: { error: "没登录" } }));
+  await page.getByTestId("today-nav").click();
+  await expect(page.getByTestId("login-submit"), "会话过期，首页这一路也把界面切回登录").toBeVisible();
+  await expect(page.getByTestId("main-window")).toHaveCount(0);
 });
 
 test("账号没取到时写没取到，点重试再拉", async ({ page }) => {

@@ -1,8 +1,6 @@
 import type { BotId, GroupId, Message } from "@baize/shared";
+import { shelfLoad, shelfRow, shelfWrite, type Seq } from "./stamped.js";
 import type { Action, Conversation, Delta, ReadyState } from "./types.js";
-
-const upsert = (list: Message[], message: Message): Message[] =>
-  list.some((m) => m.id === message.id) ? list.map((m) => (m.id === message.id ? message : m)) : [...list, message];
 
 const signerOf = (conversation: Conversation | undefined, known: Message | undefined): BotId | null => {
   if (known?.body.kind === "bot") return known.body.botId;
@@ -22,6 +20,18 @@ const streamedInto = (previous: Message | undefined, botId: BotId, delta: Delta)
 
 const touchGroup = (conversations: Conversation[], groupId: GroupId, patch: { lastMessage: Message }): Conversation[] =>
   conversations.map((c) => (c.groupId === groupId ? { ...c, ...patch } : c));
+
+// 没拉过历史的群，推送先记进 messages.early，历史到了再合并，见 stamped.ts 的 Shelf。
+// 群有没有拉过历史只看 messagesLoadedAt，推送不算。
+const written = (state: ReadyState, groupId: GroupId, message: Message, seq: Seq): ReadyState => {
+  const messages = shelfWrite(state.messages, groupId, seq, message);
+  if (messages.stamps[message.id] !== seq) return state;
+  return {
+    ...state,
+    messages,
+    conversations: touchGroup(state.conversations, groupId, { lastMessage: message }),
+  };
+};
 
 export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
   switch (action.type) {
@@ -99,44 +109,27 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
           c.kind === "team" && c.task.id === action.task.id ? { ...c, task: action.task } : c,
         ),
       };
-    case "messages_set":
-      // 拉取在飞的时候推回来的消息已经在本地了，本地那份可能还带着历史里没有的流式正文，所以让它压住返回的历史。
+    case "messages_set": {
+      // 历史不是全量，本地有它没有的消息照留。
       return {
         ...state,
-        messages: {
-          ...state.messages,
-          [action.groupId]: (state.messages[action.groupId] ?? []).reduce(upsert, action.messages),
-        },
-      };
-    case "message_upserted": {
-      const groupId = action.message.groupId;
-      const known = state.messages[groupId];
-      return {
-        ...state,
-        // messages 里有没有这个键就是「这组历史拉过没有」，所以没拉过的组只更侧栏摘要，不能凭一条推送造出一份假历史。
-        messages:
-          known === undefined ? state.messages : { ...state.messages, [groupId]: upsert(known, action.message) },
-        conversations: touchGroup(state.conversations, groupId, { lastMessage: action.message }),
+        messages: shelfLoad(state.messages, action.groupId, action.seq, action.messages, "kept"),
+        messagesLoadedAt: { ...state.messagesLoadedAt, [action.groupId]: action.seq },
       };
     }
+    case "message_upserted":
+      return written(state, action.message.groupId, action.message, action.seq);
     case "message_delta": {
       const conversation = state.conversations.find((c) => c.groupId === action.groupId);
-      const known = state.messages[action.groupId];
-      const botId = signerOf(
-        conversation,
-        known?.find((m) => m.id === action.messageId),
-      );
+      const previous = shelfRow(state.messages, action.groupId, action.messageId);
+      const botId = signerOf(conversation, previous);
       if (botId === null) return state;
-      const grown = streamedInto(
-        known?.find((m) => m.id === action.messageId),
-        botId,
-        action,
-      );
-      return {
-        ...state,
-        messages: known === undefined ? state.messages : { ...state.messages, [action.groupId]: upsert(known, grown) },
-        conversations: touchGroup(state.conversations, action.groupId, { lastMessage: grown }),
-      };
+      const grown = streamedInto(previous, botId, action);
+      // 历史没拉回来、手里也没有这条的空壳，说明它在历史请求之前就开始了，这段 delta 前面缺的正文只有历史里有。
+      // 记下来只会拿半截盖掉历史，所以只更侧栏。
+      if (state.messages.rows[action.groupId] === undefined && previous === undefined)
+        return { ...state, conversations: touchGroup(state.conversations, action.groupId, { lastMessage: grown }) };
+      return written(state, action.groupId, grown, action.seq);
     }
     case "pending_counts_loaded": {
       const counts = new Map(

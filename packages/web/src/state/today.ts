@@ -37,6 +37,7 @@ export const useToday = () => {
     );
     try {
       const data = await loadToday();
+      if (data === undefined) return;
       if (mounted.current && requestVersion.current === currentRequest) setLoad({ status: "ready", data, error: null });
     } catch {
       if (!mounted.current || requestVersion.current !== currentRequest) return;

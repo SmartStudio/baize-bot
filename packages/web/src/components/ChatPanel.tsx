@@ -14,7 +14,7 @@ import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
-import type { ContentBook } from "../state/types.js";
+import type { ContentBook, LoadStatus } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
 
@@ -23,6 +23,8 @@ type Props = {
   turn: GroupTurn | undefined;
   bots: Record<BotId, Bot>;
   messages: Message[];
+  history: LoadStatus;
+  onRetryHistory: () => void;
   lookup: BotLookup;
   approvals: ApprovalTable;
   handoffs: HandoffTable;
@@ -33,7 +35,7 @@ type Props = {
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
   onDecideProjectOffer: ProjectOfferActions["decide"];
-  onOpenGroup: (groupId: GroupId) => void;
+  onOpenProject: (groupId: GroupId) => void;
   onInspectTool: InspectTool;
   inspectedToolId: MessageId | null;
   onLoadSkills: (botId: BotId) => Promise<void>;
@@ -89,6 +91,8 @@ export const ChatPanel = ({
   turn,
   bots,
   messages,
+  history,
+  onRetryHistory,
   lookup,
   approvals,
   handoffs,
@@ -99,7 +103,7 @@ export const ChatPanel = ({
   onDecide,
   onDecideSkillOffer,
   onDecideProjectOffer,
-  onOpenGroup,
+  onOpenProject,
   onInspectTool,
   inspectedToolId,
   onLoadSkills,
@@ -171,7 +175,7 @@ export const ChatPanel = ({
       setDraft("改一下：");
       input.current?.focus();
     },
-    open: onOpenGroup,
+    open: onOpenProject,
   };
 
   const submit = (event: React.FormEvent) => {
@@ -242,7 +246,14 @@ export const ChatPanel = ({
             setShowScroll(distance > list.clientHeight);
           }}
         >
-          {messages.length === 0 ? (
+          {history === "failed" ? (
+            <p className="empty" role="alert" data-testid="history-failed">
+              历史消息没拉下来。{" "}
+              <button type="button" className="ghost-button" data-testid="history-retry" onClick={onRetryHistory}>
+                重试
+              </button>
+            </p>
+          ) : messages.length === 0 ? (
             <p className="empty">
               {team ? "群建好了。直接说话大家轮流答，@ 谁就只派给谁。" : "建好了。今天把什么活交出去？"}
             </p>

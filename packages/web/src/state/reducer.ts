@@ -5,10 +5,11 @@ import { reduceGroups } from "./groups.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
 import { reduceSkills } from "./skills.js";
+import { emptyShelf, type Seq } from "./stamped.js";
 import type { Action, AppState, Conversation, ReadyState } from "./types.js";
 
 const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState => {
-  const { user, bots, groups, tools, settings, usage } = action;
+  const { session, user, bots, groups, tools, settings, usage } = action;
   const registry: Record<BotId, Bot> = {};
   for (const item of bots) registry[item.bot.id] = item.bot;
   const conversations: Conversation[] = [
@@ -33,23 +34,27 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
   ];
   return {
     status: "ready",
+    session,
     user,
     bots: registry,
     conversations,
     groupTurns: {},
     turnEpochs: {},
-    messages: {},
+    messages: emptyShelf(),
     approvals: {},
     handoffs: {},
     grants: [],
     revokedGrantIds: [],
-    routines: {},
-    skills: {},
+    routines: emptyShelf(),
+    skills: emptyShelf(),
     tools,
     settings,
     usage,
     content: EMPTY_CONTENT,
     todayVersion: 0,
+    reconnectedAt: 0 as Seq,
+    messagesLoadedAt: {},
+    loads: {},
   };
 };
 
@@ -61,11 +66,17 @@ export const reduce = (state: AppState, action: Action): AppState => {
       return state.status === "anonymous" ? { ...state, register: action.register } : state;
     case "ready":
       return enteredState(action);
+    // 旧会话在途的回包和推送可能在登出、重新登录之后才落地，不能写进新会话。
+    case "from_session":
+      return state.status === "ready" && state.session === action.session ? reduce(state, action.action) : state;
     default:
       break;
   }
   if (state.status !== "ready") return state;
   if (action.type === "today_version_bumped") return { ...state, todayVersion: state.todayVersion + 1 };
+  if (action.type === "push_reconnected")
+    return { ...state, todayVersion: state.todayVersion + 1, reconnectedAt: action.seq };
+  if (action.type === "load_status") return { ...state, loads: { ...state.loads, [action.key]: action.status } };
   const groups = reduceGroups(state, action);
   const approvals = reduceApprovals(groups, action);
   const routines = reduceRoutines(approvals, action);

@@ -14,6 +14,9 @@ const screenshotPath = async (testInfo: TestInfo, name: string): Promise<string>
 const STAR_GOAL = "推广白泽的开源仓库，年底 1000 星";
 const DOUYIN_GOAL = "把抖音号做起来，年底 1000 粉";
 
+const projectHeading = (page: Page, title: string) =>
+  page.getByTestId("project-page").getByRole("heading", { name: title, exact: true });
+
 const offerCard = (page: Page) => page.getByTestId("message-list").getByTestId("project-offer");
 
 /** 侧栏加号说一句，发完落在主助理单聊里，等主助理回方案卡。 */
@@ -77,7 +80,7 @@ test("加号发出的一句话出现在主助理单聊里", async ({ page }, tes
   await card.screenshot({ path: await screenshotPath(testInfo, "card.png") });
 });
 
-test("方案卡上改项目名后开始，新群的标题是新名字", async ({ page }, testInfo) => {
+test("方案卡上改项目名后开始，项目页标题是新名字", async ({ page }, testInfo) => {
   await login(page);
   const card = await proposeFromSidebar(page, STAR_GOAL);
 
@@ -89,13 +92,15 @@ test("方案卡上改项目名后开始，新群的标题是新名字", async ({
   await expect(card.getByTestId("project-offer-name")).toHaveText("白泽千星");
 
   await card.getByTestId("project-offer-start").click();
-  await expect(page, "开始后跳进新项目的群").toHaveURL(/\/g\/(?!grp_assistant$)[^/]+$/);
-  await expect(page.getByTestId("chat-title")).toHaveText("白泽千星");
-  await expect(page.getByTestId("chat-subtitle"), "主助理带两个队员").toContainText("你 + 3 个 Bot");
+  await expect(page, "开始后跳进新项目的项目页").toHaveURL(/\/p\/(?!grp_assistant$)[^/]+$/);
+  await expect(projectHeading(page, "白泽千星"), "项目页标题是新名字").toBeVisible();
   const created = page.locator('[data-testid=group-item][data-group-title="白泽千星"]');
   await expect(created, "侧栏不刷新就多一行，标题是新名字").toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("group-item")).toHaveCount(2);
   const projectUrl = page.url();
+  await page.getByTestId("project-open-group").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("白泽千星");
+  await expect(page.getByTestId("chat-subtitle"), "主助理带两个队员").toContainText("你 + 3 个 Bot");
 
   await page.goto("/g/grp_assistant");
   const started = offerCard(page);
@@ -133,8 +138,8 @@ test("点两次开始只跳一次，卡只变一次", async ({ page }) => {
     button.click();
     button.click();
   });
-  await expect(page).toHaveURL(/\/g\/(?!grp_assistant$)[^/]+$/);
-  await expect(page.getByTestId("chat-title")).toHaveText("推广白泽");
+  await expect(page).toHaveURL(/\/p\/(?!grp_assistant$)[^/]+$/);
+  await expect(projectHeading(page, "推广白泽")).toBeVisible();
   const projectUrl = page.url();
   expect(requests, "点两下只发一次开始").toEqual(["POST"]);
   expect(await page.evaluate(() => history.length), "只跳一次").toBe(historyBefore + 1);
@@ -147,7 +152,7 @@ test("点两次开始只跳一次，卡只变一次", async ({ page }) => {
   expect(again.status(), "已经开始过的卡再点回 200，不是错").toBe(200);
   const settled = DecideProjectOfferResponse.parse(await again.json());
   expect(settled.message.body).toMatchObject({ status: "started" });
-  expect(projectUrl.endsWith(`/g/${settled.group?.id ?? "没有群"}`), "回的还是那个项目").toBe(true);
+  expect(projectUrl.endsWith(`/p/${settled.group?.id ?? "没有群"}`), "回的还是那个项目").toBe(true);
   const projects = GroupListResponse.parse(await (await page.request.get("/api/groups")).json()).items;
   expect(projects, "只建出一个项目").toHaveLength(2);
   await expect(page.getByTestId("group-item")).toHaveCount(2);
@@ -238,7 +243,7 @@ test("卡已在别处放弃时，按回包收成一行灰字，不跳", async ({
   await expect(page.getByTestId("group-item"), "没建出项目").toHaveCount(1);
 });
 
-test("卡已在别处开始时，按回包跳进那个群", async ({ page }) => {
+test("卡已在别处开始时，按回包跳进那个项目的项目页", async ({ page }) => {
   await login(page);
   const card = await proposeFromSidebar(page, STAR_GOAL);
   const offer = await offerMessage(page);
@@ -254,18 +259,18 @@ test("卡已在别处开始时，按回包跳进那个群", async ({ page }) => 
   );
 
   await card.getByTestId("project-offer-start").click();
-  await expect(page, "跳进回包里的那个群").toHaveURL(new RegExp(`/g/${existing.group.id}$`));
-  await expect(page.getByTestId("chat-title")).toHaveText(existing.task.title);
+  await expect(page, "跳进回包里那个群的项目页").toHaveURL(new RegExp(`/p/${existing.group.id}$`));
+  await expect(projectHeading(page, existing.task.title)).toBeVisible();
   await expect(page.getByTestId("group-item"), "没有多建一个项目").toHaveCount(1);
 
   await page.getByTestId("assistant-nav").click();
   const started = offerCard(page);
   await expect(started, "卡换成已开始靠的是回包，没有推送").toHaveAttribute("data-status", "started");
   await started.getByTestId("project-offer-open").click();
-  await expect(page, "去看看指向回包里的群").toHaveURL(new RegExp(`/g/${existing.group.id}$`));
+  await expect(page, "去看看指向回包里那个群的项目页").toHaveURL(new RegExp(`/p/${existing.group.id}$`));
 });
 
-test("新群的推送晚于回包时，开始后照样留在新群", async ({ page }) => {
+test("新群的推送晚于回包时，开始后照样进得了新项目的项目页", async ({ page }) => {
   const held: string[] = [];
   let release = () => {};
   await page.routeWebSocket(/\/api\/ws$/, (ws) => {
@@ -286,8 +291,8 @@ test("新群的推送晚于回包时，开始后照样留在新群", async ({ pa
   const card = await proposeFromSidebar(page, STAR_GOAL);
 
   await card.getByTestId("project-offer-start").click();
-  await expect(page.getByTestId("chat-title"), "推送没到也进得了新群").toHaveText("推广白泽");
-  await expect(page).toHaveURL(/\/g\/(?!grp_assistant$)[^/]+$/);
+  await expect(projectHeading(page, "推广白泽"), "推送没到也进得了新项目的项目页").toBeVisible();
+  await expect(page).toHaveURL(/\/p\/(?!grp_assistant$)[^/]+$/);
   await expect(page.getByTestId("group-item"), "侧栏从补拉里拿到了新群").toHaveCount(2);
   expect(held, "group_created 确实被扣在路上").toHaveLength(1);
   const projectUrl = page.url();
@@ -298,7 +303,7 @@ test("新群的推送晚于回包时，开始后照样留在新群", async ({ pa
   await expect(offerCard(page)).toHaveAttribute("data-status", "started");
   await expect(page.getByTestId("group-item"), "推送晚到不会多出一行").toHaveCount(2);
   await page.getByTestId("group-item").filter({ hasText: "推广白泽" }).click();
-  await expect(page, "侧栏的项目进这个项目的项目页").toHaveURL(projectUrl.replace("/g/", "/p/"));
+  await expect(page, "侧栏的项目进这个项目的项目页").toHaveURL(projectUrl);
   await expect(
     page.getByTestId("project-page").getByRole("heading", { name: "推广白泽" }),
     "项目页真的渲染出了这个项目",
@@ -331,7 +336,7 @@ test("开始后团队页不刷新就能和新队员单聊", async ({ page }) => 
   await login(page);
   const card = await proposeFromSidebar(page, STAR_GOAL);
   await card.getByTestId("project-offer-start").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("推广白泽");
+  await expect(projectHeading(page, "推广白泽")).toBeVisible();
 
   const solo = BotListResponse.parse(await (await page.request.get("/api/bots")).json()).items.find(
     (item) => item.bot.name === "小内",
@@ -363,6 +368,6 @@ test("改名时按 Escape 回到原名，不提交", async ({ page }) => {
   await expect(card.getByTestId("project-offer-name"), "Escape 回到原名").toHaveText("推广白泽");
 
   await card.getByTestId("project-offer-start").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("推广白泽");
+  await expect(projectHeading(page, "推广白泽")).toBeVisible();
   expect(bodies, "开始时不带名字，按原名建").toEqual([{ decision: "start" }]);
 });

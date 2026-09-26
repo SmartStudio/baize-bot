@@ -69,7 +69,13 @@ export const RegisterPage = () => {
             注册 <ArrowRight size={16} aria-hidden="true" />
           </button>
           <p className="fine">
-            <Link to="/login">
+            <Link
+              to="/login"
+              aria-disabled={busy}
+              onClick={(event) => {
+                if (busy) event.preventDefault();
+              }}
+            >
               <ArrowLeft size={14} aria-hidden="true" /> 返回登录
             </Link>
           </p>

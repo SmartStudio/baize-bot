@@ -3,11 +3,10 @@ import {
   bots,
   createBot,
   groupIdByBotId,
-  groups,
   lastMessageOf,
-  messagesByGroupId,
   pendingApprovalsOf,
   pendingHandoffsOf,
+  removeBot,
 } from "../state.js";
 import { defined, readBody, send, type Route } from "./http.js";
 
@@ -77,13 +76,11 @@ export const botRoutes: Route = async ({ req, res, path, method, push }) => {
       send(res, 200, { bot: next });
     }
   } else if (method === "DELETE") {
-    bots.delete(botId);
-    const groupId = groupIdByBotId.get(botId);
-    if (groupId) {
-      groups.delete(groupId);
-      messagesByGroupId.delete(groupId);
-      groupIdByBotId.delete(botId);
+    if (bot.role === "assistant") {
+      send(res, 409, { error: "主助理不能删，你在首页说的话都由它来接" });
+      return true;
     }
+    removeBot(bot.id);
     push({ type: "bot_deleted", botId: bot.id });
     send(res, 204);
   } else return false;

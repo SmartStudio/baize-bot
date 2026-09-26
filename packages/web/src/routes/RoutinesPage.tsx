@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronLeft, Clock, Copy, Globe, Play, Plus, ShieldCheck, X } from "lucide-react";
 import { OnFailure, type Bot, type BotId, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
@@ -323,16 +323,13 @@ export const RoutinesPage = () => {
 
   const ready = state.status === "ready" ? state : null;
   const bots = ready === null ? [] : Object.values(ready.bots);
-  const missing = bots.filter((bot) => ready?.routines[bot.id] === undefined).map((bot) => bot.id);
-  // 几个 Bot 的请求各回各的，先回来的会让这一页重渲一遍。记下发过的，免得还在路上的那几个被再要一次。
-  const requested = useRef(new Set<BotId>());
+  const missing = bots.filter((bot) => ready?.routines.rows[bot.id] === undefined).map((bot) => bot.id);
+  const statusOf = (botId: BotId) => ready?.loads[`routines:${botId}`] ?? "idle";
+  const failed = missing.filter((botId) => statusOf(botId) === "failed");
 
+  // 在途的和拉失败的都不再自动要：前者等它回来，后者等用户点重试，免得 500 时每次重渲都打一遍。
   useEffect(() => {
-    for (const botId of missing) {
-      if (requested.current.has(botId)) continue;
-      requested.current.add(botId);
-      void actions.loadRoutines(botId);
-    }
+    for (const botId of missing) if (statusOf(botId) === "idle") void actions.loadRoutines(botId);
   });
 
   useEffect(() => {
@@ -343,7 +340,7 @@ export const RoutinesPage = () => {
 
   if (ready === null) return null;
 
-  const rows = bots.flatMap((bot) => (ready.routines[bot.id] ?? []).map((routine) => ({ routine, bot })));
+  const rows = bots.flatMap((bot) => (ready.routines.rows[bot.id] ?? []).map((routine) => ({ routine, bot })));
   const toList = () => {
     setDeleteRoutineId(null);
     setView({ kind: "list" });
@@ -507,7 +504,22 @@ export const RoutinesPage = () => {
           <h3>日常</h3>
           <span>只属于你，不挂项目</span>
         </div>
-        {missing.length > 0 && rows.length === 0 ? <p className="routines-empty">在拉例行任务…</p> : null}
+        {failed.length > 0 ? (
+          <p className="routines-empty" role="alert" data-testid="routines-failed">
+            有 {failed.length} 个 Bot 的例行没拉下来。{" "}
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="routines-retry"
+              onClick={() => {
+                for (const botId of failed) void actions.loadRoutines(botId);
+              }}
+            >
+              重试
+            </button>
+          </p>
+        ) : null}
+        {missing.length > failed.length && rows.length === 0 ? <p className="routines-empty">在拉例行任务…</p> : null}
         {missing.length === 0 && rows.length === 0 ? (
           <p className="routines-empty">还没有例行任务。走通一次的活可以存下来，让它定时自己跑。</p>
         ) : null}

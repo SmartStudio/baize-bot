@@ -41,14 +41,32 @@ test("侧栏只有今天、主助理、项目、例行、团队、你，没有�
   }
 });
 
-test("没有主助理 Bot 时侧栏不出主助理", async ({ page }) => {
+test("删主助理被拒，回控制面那句原因，主助理还在", async ({ page }) => {
   await login(page);
-  expect((await page.request.delete("/api/bots/bot_assistant")).status(), "先把 mock 里的主助理删掉").toBe(204);
+  const refused = await page.request.delete("/api/bots/bot_assistant");
+  expect(refused.status()).toBe(409);
+  expect(await refused.json()).toEqual({ error: "主助理不能删，你在首页说的话都由它来接" });
   await page.reload();
+  await expect(page.getByTestId("assistant-nav")).toBeVisible();
+});
+
+test("没有主助理 Bot 时侧栏不出主助理", async ({ page }) => {
+  expect((await page.request.post("/api/test/without-assistant")).status(), "mock 造一个还没有主助理的账号").toBe(204);
+  await login(page);
 
   await expect(page.getByTestId("today-nav")).toBeVisible();
   await expect(page.getByTestId("team-nav")).toBeVisible();
   await expect(page.getByTestId("assistant-nav")).toHaveCount(0);
+});
+
+test("主助理单聊的第一句是它先开口问你要做成什么事", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("assistant-nav").click();
+  const first = page.getByTestId("message-list").getByTestId("message").first();
+  await expect(first).toHaveAttribute("data-kind", "bot");
+  await expect(first.getByTestId("bot-bubble"), "和控制面 ASSISTANT_GREETING 逐字一致").toHaveText(
+    "想让我帮你做成什么事？说一句就行",
+  );
 });
 
 test("点主助理进它的单 Bot 群", async ({ page }) => {

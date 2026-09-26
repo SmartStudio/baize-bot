@@ -23,6 +23,10 @@ export const authed = (req: IncomingMessage): boolean => {
   return token !== null && sessions.has(token);
 };
 
+export const expireSessions = (): void => {
+  sessions.clear();
+};
+
 export const resetRegisteredEmails = (): void => {
   registeredEmails.clear();
   registeredEmails.add(MOCK_EMAIL);

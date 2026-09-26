@@ -176,12 +176,24 @@ const seeds: Seed[] = [
     tag: "主助理",
     description: "拆活、排期、找你拍板。",
     hue: "violet",
-    bodies: [],
+    // 照控制面 ASSISTANT_GREETING：注册时主助理先在单聊里说这一句。
+    bodies: [
+      { kind: "bot", botId: BotId.parse("bot_assistant"), text: "想让我帮你做成什么事？说一句就行", streaming: false },
+    ],
   },
 ];
 
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
   Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes) });
+
+export const removeBot = (botId: BotId): void => {
+  bots.delete(botId);
+  const groupId = groupIdByBotId.get(botId);
+  if (groupId === undefined) return;
+  groups.delete(groupId);
+  messagesByGroupId.delete(groupId);
+  groupIdByBotId.delete(botId);
+};
 
 export const reseed = (): void => {
   advanceGeneration();

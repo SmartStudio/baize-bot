@@ -1,4 +1,4 @@
-import { ProjectResponse } from "@baize/shared";
+import { GroupListResponse, ProjectResponse } from "@baize/shared";
 import { TEAM_TITLE, expect, login, teamItem, test, type APIRequestContext, type Page } from "./fixtures";
 
 const seedProject = async (request: APIRequestContext) => {
@@ -93,4 +93,38 @@ test("成果每一条都有链接", async ({ page, request }) => {
     await expect(row, "每一条都在新标签页打开原帖").toHaveAttribute("target", "_blank");
     await expect(row).toContainText("已发布");
   }
+});
+
+test("推 task_updated 改了节奏，项目页节奏行跟着变，不重拉", async ({ page, request }) => {
+  await seedProject(request);
+  await page.clock.install();
+  await login(page);
+  await openProject(page);
+  await expect(page.getByTestId("project-cadence"), "订单群还没定节奏，不出这一行").toHaveCount(0);
+  const groups = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
+  const taskId = groups.items.find((item) => item.group.id === "grp_order")?.task.id;
+  if (taskId === undefined) throw new Error("mock 里没有订单群的任务卡");
+
+  // 项目页重拉有 100ms 防抖。停住页面时钟，节奏行变了之后再把时钟往前拨，挂着的重拉在这时一定发出去。
+  await page.clock.pauseAt(Date.now() + 60_000);
+  const refetched: string[] = [];
+  page.on("request", (req) => {
+    const path = new URL(req.url()).pathname;
+    if (path.startsWith("/api/projects/") || path === "/api/today" || path.startsWith("/api/groups"))
+      refetched.push(path);
+  });
+  const patched = await page.request.patch(`/api/tasks/${taskId}`, { data: { cadence: "每周一、四各发一条" } });
+  expect(patched.status(), "别处改了节奏").toBe(200);
+  await expect(page.getByTestId("project-cadence")).toHaveText("节奏：每周一、四各发一条");
+  await page.clock.runFor(1_000);
+  await page.evaluate(() => fetch("/api/health").then(() => undefined));
+  expect(refetched, "节奏读的是推送换好的任务卡，不重拉项目页、首页和群").toEqual([]);
+});
+
+test("项目页回 401 时切回登录页", async ({ page }) => {
+  await login(page);
+  await page.route("**/api/projects/**", (route) => route.fulfill({ status: 401, json: { error: "没登录" } }));
+  await teamItem(page).click();
+  await expect(page.getByTestId("login-submit"), "会话过期，项目页这一路也把界面切回登录").toBeVisible();
+  await expect(page.getByTestId("main-window")).toHaveCount(0);
 });

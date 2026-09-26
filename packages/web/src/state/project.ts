@@ -17,7 +17,7 @@ export const useProject = (groupId: GroupId) => {
   const loadProject = actions.loadProject;
   const ready = state.status === "ready" ? state : null;
   const todayVersion = ready?.todayVersion ?? 0;
-  const messageCount = ready?.messages[groupId]?.length ?? 0;
+  const messageCount = ready?.messages.rows[groupId]?.length ?? 0;
   const speaking = ready?.groupTurns[groupId]?.current ?? null;
   const [load, setLoad] = useState<ProjectLoad & { groupId: GroupId }>({
     status: "loading",
@@ -41,6 +41,7 @@ export const useProject = (groupId: GroupId) => {
     requestVersion.current = currentRequest;
     try {
       const data = await loadProject(groupId);
+      if (data === undefined) return;
       if (mounted.current && requestVersion.current === currentRequest)
         setLoad({ status: "ready", data, error: null, groupId });
     } catch {

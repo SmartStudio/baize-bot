@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { type ServerPush } from "@baize/shared";
 import { accountRoutes } from "./routes/account.js";
-import { authRoutes, authed } from "./routes/auth.js";
+import { authRoutes, authed, expireSessions } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
 import { contentRoutes } from "./routes/content.js";
 import { groupRoutes } from "./routes/groups.js";
@@ -25,7 +25,18 @@ const push: Push = (event: ServerPush) => {
   }
 };
 
-const publicRoutes: Route[] = [testRoutes, authRoutes, hookRoutes];
+// 断线和登录过期只能从服务端这头造：一个把现有推送连接全掐掉，一个先让全部登录作废再掐。
+const socketRoutes: Route = async ({ res, path, method }) => {
+  if (method !== "POST") return false;
+  if (path === "/api/test/sessions/expire") expireSessions();
+  else if (path !== "/api/test/sockets/drop") return false;
+  for (const socket of sockets) socket.terminate();
+  sockets.clear();
+  send(res, 204);
+  return true;
+};
+
+const publicRoutes: Route[] = [socketRoutes, testRoutes, authRoutes, hookRoutes];
 const protectedRoutes: Route[] = [
   accountRoutes,
   botRoutes,

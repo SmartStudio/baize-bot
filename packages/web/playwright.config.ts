@@ -15,6 +15,7 @@ const bundledChromium = ((): boolean => {
 
 export default defineConfig({
   testDir: "./e2e",
+  globalSetup: "./e2e/prewarm.ts",
   fullyParallel: false,
   workers: 1,
   retries: 0,

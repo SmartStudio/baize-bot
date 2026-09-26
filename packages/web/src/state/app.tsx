@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import {
   ServerPush,
   type AccountId,
@@ -32,11 +32,14 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import { RequestFailed, api, type BotDraft, type DecideProjectOfferRequest } from "../api/client.js";
+import { RequestFailed, type Api, type BotDraft, type DecideProjectOfferRequest } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
-import type { Action, AppState, SnapshotMerge } from "./types.js";
+import { reconnectDelay } from "./reconnect.js";
+import { createSessions, type Attempt, type Flight, type Session } from "./session.js";
+import { createClock, type Seq } from "./stamped.js";
+import type { Action, AppState, LoadKey } from "./types.js";
 
 export { memberIdsOf } from "./types.js";
 export type { AppState, Conversation, GroupTurn, LoginPhase } from "./types.js";
@@ -50,15 +53,16 @@ export type AppActions = {
   createBot: () => Promise<GroupId | undefined>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
-  loadMessages: (groupId: GroupId) => Promise<void>;
+  // after 是推送最近一次重连的号：在途那趟发得比它早，回来后要补拉一次。
+  loadMessages: (groupId: GroupId, after: Seq) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
   decideApproval: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
   decideDraft: (draftId: DraftId, request: DecideDraftRequest) => Promise<void>;
   approvePlan: (planId: ContentPlanId, request: ApprovePlanRequest) => Promise<void>;
   returnPlan: (planId: ContentPlanId) => Promise<void>;
-  // 首页快照里带着草稿和计划，顺手补进同一张表，首页展开的卡和群里的卡读的是同一份。
-  loadToday: () => Promise<TodayResponse>;
-  loadProject: (groupId: GroupId) => Promise<ProjectResponse>;
+  // 首页快照里带着草稿和计划，顺手补进同一张表，首页展开的卡和群里的卡读的是同一份。登录过期时是 undefined。
+  loadToday: () => Promise<TodayResponse | undefined>;
+  loadProject: (groupId: GroupId) => Promise<ProjectResponse | undefined>;
   loadAccounts: () => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loadGrants: () => Promise<void>;
@@ -95,7 +99,9 @@ export const useApp = () => {
 
 const isUnauthorized = (cause: unknown): boolean => cause instanceof RequestFailed && cause.status === 401;
 
-const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>> => {
+type Ready = Extract<Action, { type: "ready" }>;
+
+const loadEntry = async (api: Api, user: User): Promise<Omit<Ready, "session">> => {
   const [bots, groups, tools, settings, usage] = await Promise.all([
     api.bots(),
     api.groups(),
@@ -114,98 +120,171 @@ const loadEntry = async (user: User): Promise<Extract<Action, { type: "ready" }>
   };
 };
 
-const RECONNECT_DELAY_MS = 1000;
+// 会话里的动作只拿这几样：挂在会话 signal 上的请求，带着会话号的 dispatch，和这次会话的在途表。
+type Scope = { api: Api; put: (action: Action) => void; session: Session };
+
+// 例行和会做的活不跟重连走，在途的那趟无论多早发出都算数。
+const ANY_FLIGHT = 0 as Seq;
 
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(reduce, { status: "loading" } satisfies AppState);
-  // 推送重连时置上，下一次发出的首页快照拿去 resync，发出去就收回。
-  const resyncPending = useRef(false);
+  const stateRef = useRef<AppState>(state);
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  // 请求发出时、推送到达时各取一个号，reducer 按号排先后，见 stamped.ts。
+  const [nextSeq] = useState(createClock);
+  const [sessions] = useState(createSessions);
+
+  // 入口数据齐了才进会话；这期间有了更新的尝试，这一次整个作废，返回 null。
+  const enter = useMemo(
+    () =>
+      async (attempt: Attempt, user: User): Promise<Ready | null> => {
+        const entry = await loadEntry(attempt.api, user);
+        const session = sessions.begin(attempt);
+        return session === null ? null : { ...entry, session };
+      },
+    [sessions],
+  );
 
   const actions = useMemo<AppActions>(() => {
     // 会话过期后每个请求都会 401。不接住的话界面停在 ready 上，发消息、存设置全都静悄悄地不生效。
-    const signedIn = <A extends unknown[], R>(run: (...args: A) => Promise<R>) => {
+    const signedIn = <A extends unknown[], R>(run: (scope: Scope, ...args: A) => Promise<R>) => {
       return async (...args: A): Promise<R | undefined> => {
+        const session = sessions.current();
+        if (session === null) return undefined;
+        const put = (action: Action) => dispatch({ type: "from_session", session: session.id, action });
         try {
-          return await run(...args);
+          return await run({ api: session.api, put, session }, ...args);
         } catch (cause) {
+          if (session.signal.aborted) return undefined;
           if (!isUnauthorized(cause)) throw cause;
-          dispatch({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
+          sessions.end(session.id);
+          put({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
           return undefined;
         }
       };
     };
+    // 同一会话里同一个桶只留一趟在途请求。在途那趟发得不比 after 晚就直接跟着它；早了就记一笔待补，它回来后再拉一次。
+    // 失败只记在桶上由界面给重试，不再往外抛；401 和会话取消照旧交给 signedIn。
+    const loadBucket = async ({ put, session }: Scope, key: LoadKey, after: Seq, run: (seq: Seq) => Promise<void>) => {
+      const flying = session.flights.get(key);
+      if (flying !== undefined) {
+        if (flying.seq <= after) flying.again = true;
+        return;
+      }
+      const flight: Flight = { seq: nextSeq(), again: false };
+      session.flights.set(key, flight);
+      put({ type: "load_status", key, status: "loading" });
+      try {
+        await run(flight.seq);
+        while (flight.again) {
+          flight.again = false;
+          flight.seq = nextSeq();
+          await run(flight.seq);
+        }
+        put({ type: "load_status", key, status: "idle" });
+      } catch (cause) {
+        if (session.signal.aborted || isUnauthorized(cause)) throw cause;
+        put({ type: "load_status", key, status: "failed" });
+      } finally {
+        session.flights.delete(key);
+      }
+    };
     return {
       login: async (email, password) => {
+        const attempt = sessions.attempt();
         dispatch({ type: "anonymous", login: { kind: "submitting" } });
         try {
-          const { user } = await api.login(email, password);
-          dispatch(await loadEntry(user));
+          const { user } = await attempt.api.login(email, password);
+          const ready = await enter(attempt, user);
+          if (ready !== null) dispatch(ready);
         } catch (cause) {
+          if (!sessions.isCurrent(attempt)) return;
           const message = cause instanceof RequestFailed ? cause.message : "登录失败，再试一次";
           dispatch({ type: "anonymous", login: { kind: "failed", message } });
         }
       },
       register: async (email, password, name) => {
+        const attempt = sessions.attempt();
+        // 被这次注册取代的登录不会再回来收尾，它的「登录中」要在这里清掉。
+        dispatch({ type: "anonymous", login: { kind: "idle" } });
         dispatch({ type: "register_phase", register: { kind: "submitting" } });
         try {
-          const { user } = await api.register(email, password, name);
-          dispatch(await loadEntry(user));
+          const { user } = await attempt.api.register(email, password, name);
+          const ready = await enter(attempt, user);
+          if (ready !== null) dispatch(ready);
         } catch (cause) {
+          if (!sessions.isCurrent(attempt)) return;
           const message = cause instanceof RequestFailed ? cause.message : "注册失败，再试一次";
           dispatch({ type: "register_phase", register: { kind: "failed", message } });
         }
       },
+      // 登出也占一个尝试号。之后的登录或注册会取消它，晚到的登出回包连同清 cookie 的 Set-Cookie 一起作废，不会结束新会话。
       logout: async () => {
-        await api.logout();
+        const session = sessions.current();
+        const attempt = sessions.attempt();
+        try {
+          await attempt.api.logout();
+        } catch (cause) {
+          if (attempt.signal.aborted) return;
+          throw cause;
+        }
+        if (!sessions.isCurrent(attempt)) return;
+        if (session !== null) sessions.end(session.id);
         dispatch({ type: "anonymous", login: { kind: "idle" } });
       },
-      createBot: signedIn(async () => {
+      createBot: signedIn(async ({ api, put }) => {
         const { bot, group } = await api.createBot({});
-        dispatch({ type: "bot_created", bot, groupId: group.id });
+        put({ type: "bot_created", bot, groupId: group.id });
         return group.id;
       }),
-      updateBot: signedIn(async (botId: BotId, draft: BotDraft) => {
-        dispatch({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
+      updateBot: signedIn(async ({ api, put }, botId: BotId, draft: BotDraft) => {
+        put({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
       }),
-      setChecklist: signedIn(async (task: TopicTask, checklist: ChecklistItem[]) => {
-        dispatch({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
+      setChecklist: signedIn(async ({ api, put }, task: TopicTask, checklist: ChecklistItem[]) => {
+        put({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
       }),
-      loadMessages: signedIn(async (groupId: GroupId) => {
-        const { messages, approvals, handoffs, drafts, plans, publications } = await api.messages(groupId);
-        dispatch({ type: "content_loaded", drafts, plans });
-        dispatch({ type: "publications_loaded", publications });
-        dispatch({ type: "messages_set", groupId, messages });
-        dispatch({ type: "approvals_loaded", approvals });
-        dispatch({ type: "handoffs_loaded", handoffs });
-      }),
-      sendMessage: signedIn(async (groupId: GroupId, text: string) => {
+      loadMessages: signedIn((scope, groupId: GroupId, after: Seq) =>
+        loadBucket(scope, `messages:${groupId}`, after, async (seq) => {
+          const { put } = scope;
+          const { messages, approvals, handoffs, drafts, plans, publications } = await scope.api.messages(groupId);
+          put({ type: "content_loaded", drafts, plans, seq });
+          put({ type: "publications_loaded", publications });
+          put({ type: "messages_set", groupId, messages, seq });
+          put({ type: "approvals_loaded", approvals });
+          put({ type: "handoffs_loaded", handoffs });
+        }),
+      ),
+      sendMessage: signedIn(async ({ api, put }, groupId: GroupId, text: string) => {
+        const seq = nextSeq();
         const { message } = await api.sendMessage(groupId, text);
-        dispatch({ type: "message_upserted", message });
+        put({ type: "message_upserted", message, seq });
       }),
-      decideApproval: signedIn(async (approvalId: ApprovalId, request: DecideApprovalRequest) => {
+      decideApproval: signedIn(async ({ api, put }, approvalId: ApprovalId, request: DecideApprovalRequest) => {
         const result = await api.decideApproval(approvalId, request);
-        dispatch({ type: "approval_pushed", approval: result.approval });
-        if (result.grant !== null) dispatch({ type: "grant_upserted", grant: result.grant });
+        put({ type: "approval_pushed", approval: result.approval });
+        if (result.grant !== null) put({ type: "grant_upserted", grant: result.grant });
       }),
-      decideDraft: signedIn(async (draftId: DraftId, request: DecideDraftRequest) => {
+      decideDraft: signedIn(async ({ api, put }, draftId: DraftId, request: DecideDraftRequest) => {
+        const seq = nextSeq();
         const { draft } = await api.decideDraft(draftId, request);
-        dispatch({ type: "content_loaded", drafts: [draft], plans: [] });
+        put({ type: "content_loaded", drafts: [draft], plans: [], seq });
       }),
-      approvePlan: signedIn(async (planId: ContentPlanId, request: ApprovePlanRequest) => {
+      approvePlan: signedIn(async ({ api, put }, planId: ContentPlanId, request: ApprovePlanRequest) => {
+        const seq = nextSeq();
         const { plan, drafts } = await api.approvePlan(planId, request);
-        dispatch({ type: "content_loaded", drafts, plans: [plan] });
+        put({ type: "content_loaded", drafts, plans: [plan], seq });
       }),
-      returnPlan: signedIn(async (planId: ContentPlanId) => {
+      returnPlan: signedIn(async ({ api, put }, planId: ContentPlanId) => {
+        const seq = nextSeq();
         const { plan } = await api.returnPlan(planId);
-        dispatch({ type: "content_loaded", drafts: [], plans: [plan] });
+        put({ type: "content_loaded", drafts: [], plans: [plan], seq });
       }),
-      loadToday: async () => {
-        const merge: SnapshotMerge = resyncPending.current ? "resync" : "fill";
-        resyncPending.current = false;
-        const today = await api.today().catch((cause: unknown) => {
-          if (merge === "resync") resyncPending.current = true;
-          throw cause;
-        });
+      loadToday: signedIn(async ({ api, put }) => {
+        const seq = nextSeq();
+        const today = await api.today();
         const plans = today.pending.flatMap((item) => (item.kind === "plan" ? [item.plan] : []));
         const drafts = [
           ...today.pending.flatMap((item) =>
@@ -213,10 +292,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           ),
           ...today.next.flatMap((item) => (item.kind === "draft" ? [item.draft] : [])),
         ];
-        dispatch({ type: "today_snapshot_loaded", drafts, plans, merge });
+        put({ type: "content_loaded", drafts, plans, seq });
         return today;
-      },
-      loadProject: async (groupId: GroupId) => {
+      }),
+      loadProject: signedIn(async ({ api, put }, groupId: GroupId) => {
+        const seq = nextSeq();
         const project = await api.project(groupId);
         const plans = [
           ...project.pending.flatMap((item) => (item.kind === "plan" ? [item.plan] : [])),
@@ -229,191 +309,214 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           ...(project.plan?.drafts ?? []),
           ...(project.next?.kind === "draft" ? [project.next.draft] : []),
         ];
-        dispatch({ type: "today_snapshot_loaded", drafts, plans, merge: "fill" });
+        put({ type: "content_loaded", drafts, plans, seq });
         return project;
-      },
-      loadAccounts: signedIn(async () => {
+      }),
+      loadAccounts: signedIn(async ({ api, put }) => {
         const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);
-        dispatch({ type: "accounts_loaded", accounts, computers });
+        put({ type: "accounts_loaded", accounts, computers });
       }),
-      updateAccountTier: signedIn(async (accountId: AccountId, tier: AccountTier) => {
-        dispatch({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account });
+      updateAccountTier: signedIn(async ({ api, put }, accountId: AccountId, tier: AccountTier) => {
+        put({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account });
       }),
-      loadGrants: signedIn(async () => {
-        dispatch({ type: "grants_loaded", grants: (await api.grants()).grants });
+      loadGrants: signedIn(async ({ api, put }) => {
+        put({ type: "grants_loaded", grants: (await api.grants()).grants });
       }),
-      deleteGrant: signedIn(async (grantId: GrantId) => {
+      deleteGrant: signedIn(async ({ api, put }, grantId: GrantId) => {
         await api.deleteGrant(grantId);
-        dispatch({ type: "grant_deleted", grantId });
+        put({ type: "grant_deleted", grantId });
       }),
-      pauseBot: signedIn(async (botId: BotId) => {
-        dispatch({ type: "bot_updated", bot: await api.pauseBot(botId) });
+      pauseBot: signedIn(async ({ api, put }, botId: BotId) => {
+        put({ type: "bot_updated", bot: await api.pauseBot(botId) });
       }),
-      resumeBot: signedIn(async (botId: BotId) => {
-        dispatch({ type: "bot_updated", bot: await api.resumeBot(botId) });
+      resumeBot: signedIn(async ({ api, put }, botId: BotId) => {
+        put({ type: "bot_updated", bot: await api.resumeBot(botId) });
       }),
-      loadRoutines: signedIn(async (botId: BotId) => {
-        dispatch({ type: "routines_loaded", botId, routines: (await api.routines(botId)).items });
+      loadRoutines: signedIn((scope, botId: BotId) =>
+        loadBucket(scope, `routines:${botId}`, ANY_FLIGHT, async (seq) => {
+          scope.put({ type: "routines_loaded", botId, routines: (await scope.api.routines(botId)).items, seq });
+        }),
+      ),
+      createRoutine: signedIn(async ({ api, put }, botId: BotId, draft: CreateRoutineRequest) => {
+        const seq = nextSeq();
+        put({ type: "routine_upserted", routine: await api.createRoutine(botId, draft), seq });
       }),
-      createRoutine: signedIn(async (botId: BotId, draft: CreateRoutineRequest) => {
-        dispatch({ type: "routine_upserted", routine: await api.createRoutine(botId, draft) });
-      }),
-      updateRoutine: signedIn(async (routineId: RoutineId, patch: UpdateRoutineRequest) => {
-        dispatch({ type: "routine_upserted", routine: await api.updateRoutine(routineId, patch) });
+      updateRoutine: signedIn(async ({ api, put }, routineId: RoutineId, patch: UpdateRoutineRequest) => {
+        const seq = nextSeq();
+        put({ type: "routine_upserted", routine: await api.updateRoutine(routineId, patch), seq });
       }),
       // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
-      deleteRoutine: signedIn(async (routine: Routine) => {
+      deleteRoutine: signedIn(async ({ api, put }, routine: Routine) => {
+        const seq = nextSeq();
         await api.deleteRoutine(routine.id);
-        dispatch({ type: "routine_removed", botId: routine.botId, routineId: routine.id });
+        put({ type: "routine_removed", botId: routine.botId, routineId: routine.id, seq });
       }),
-      runRoutine: signedIn(async (routineId: RoutineId) => {
-        dispatch({ type: "routine_upserted", routine: await api.runRoutine(routineId) });
+      runRoutine: signedIn(async ({ api, put }, routineId: RoutineId) => {
+        const seq = nextSeq();
+        put({ type: "routine_upserted", routine: await api.runRoutine(routineId), seq });
       }),
-      loadSkills: signedIn(async (botId: BotId) => {
-        dispatch({ type: "skills_loaded", botId, skills: (await api.skills(botId)).items });
+      loadSkills: signedIn((scope, botId: BotId) =>
+        loadBucket(scope, `skills:${botId}`, ANY_FLIGHT, async (seq) => {
+          scope.put({ type: "skills_loaded", botId, skills: (await scope.api.skills(botId)).items, seq });
+        }),
+      ),
+      createSkill: signedIn(async ({ api, put }, botId: BotId, draft: CreateSkillRequest) => {
+        const seq = nextSeq();
+        put({ type: "skill_upserted", skill: await api.createSkill(botId, draft), seq });
       }),
-      createSkill: signedIn(async (botId: BotId, draft: CreateSkillRequest) => {
-        dispatch({ type: "skill_upserted", skill: await api.createSkill(botId, draft) });
-      }),
-      updateSkill: signedIn(async (skillId: SkillId, patch: UpdateSkillRequest) => {
-        dispatch({ type: "skill_upserted", skill: await api.updateSkill(skillId, patch) });
+      updateSkill: signedIn(async ({ api, put }, skillId: SkillId, patch: UpdateSkillRequest) => {
+        const seq = nextSeq();
+        put({ type: "skill_upserted", skill: await api.updateSkill(skillId, patch), seq });
       }),
       // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
-      deleteSkill: signedIn(async (skill: Skill) => {
+      deleteSkill: signedIn(async ({ api, put }, skill: Skill) => {
+        const seq = nextSeq();
         await api.deleteSkill(skill.id);
-        dispatch({ type: "skill_removed", botId: skill.botId, skillId: skill.id });
+        put({ type: "skill_removed", botId: skill.botId, skillId: skill.id, seq });
       }),
-      copySkill: signedIn(async (skillId: SkillId, botId: BotId) => {
-        dispatch({ type: "skill_upserted", skill: await api.copySkill(skillId, botId) });
+      copySkill: signedIn(async ({ api, put }, skillId: SkillId, botId: BotId) => {
+        const seq = nextSeq();
+        put({ type: "skill_upserted", skill: await api.copySkill(skillId, botId), seq });
       }),
       // 结论随这条消息的正文走，所以先落那条消息。存下来的那条 skill 是顺带回来的，dismiss 时没有。
-      decideSkillOffer: signedIn(async (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => {
-        const res = await api.decideSkillOffer(messageId, decision);
-        dispatch({ type: "message_upserted", message: res.message });
-        if (res.skill !== null) dispatch({ type: "skill_upserted", skill: res.skill });
-      }),
-      decideProjectOffer: signedIn(async (messageId: MessageId, request: DecideProjectOfferRequest) => {
+      decideSkillOffer: signedIn(
+        async ({ api, put }, messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => {
+          const seq = nextSeq();
+          const res = await api.decideSkillOffer(messageId, decision);
+          put({ type: "message_upserted", message: res.message, seq });
+          if (res.skill !== null) put({ type: "skill_upserted", skill: res.skill, seq });
+        },
+      ),
+      decideProjectOffer: signedIn(async ({ api, put }, messageId: MessageId, request: DecideProjectOfferRequest) => {
+        const seq = nextSeq();
         const { message, group } = await api.decideProjectOffer(messageId, request);
-        dispatch({ type: "message_upserted", message });
+        put({ type: "message_upserted", message, seq });
         if (group === null) return undefined;
         // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页。回包没带任务卡，从列表补一份。
         // 控制面给每个新队员都建了单聊却不推，一并从 Bot 列表补进来，团队页才有「单聊」。
         const [groups, bots] = await Promise.all([api.groups(), api.bots()]);
         const joined = groups.items.find((item) => item.group.id === group.id);
         for (const item of bots.items) {
-          if (group.botIds.includes(item.bot.id))
-            dispatch({ type: "bot_created", bot: item.bot, groupId: item.groupId });
+          if (group.botIds.includes(item.bot.id)) put({ type: "bot_created", bot: item.bot, groupId: item.groupId });
         }
-        if (joined !== undefined) dispatch({ type: "group_created", group: joined.group, task: joined.task });
+        if (joined !== undefined) put({ type: "group_created", group: joined.group, task: joined.task });
         return group.id;
       }),
-      createTool: signedIn(async (draft: CreateToolRequest) => {
-        dispatch({ type: "tool_upserted", tool: await api.createTool(draft) });
+      createTool: signedIn(async ({ api, put }, draft: CreateToolRequest) => {
+        put({ type: "tool_upserted", tool: await api.createTool(draft) });
       }),
-      updateTool: signedIn(async (toolId: ToolConnectionId, patch: UpdateToolRequest) => {
-        dispatch({ type: "tool_upserted", tool: await api.updateTool(toolId, patch) });
+      updateTool: signedIn(async ({ api, put }, toolId: ToolConnectionId, patch: UpdateToolRequest) => {
+        put({ type: "tool_upserted", tool: await api.updateTool(toolId, patch) });
       }),
-      deleteTool: signedIn(async (toolId: ToolConnectionId) => {
+      deleteTool: signedIn(async ({ api, put }, toolId: ToolConnectionId) => {
         await api.deleteTool(toolId);
-        dispatch({ type: "tool_removed", toolId });
+        put({ type: "tool_removed", toolId });
       }),
-      updateSettings: signedIn(async (patch: Partial<Settings>) => {
-        dispatch({ type: "settings_set", settings: await api.updateSettings(patch) });
+      updateSettings: signedIn(async ({ api, put }, patch: Partial<Settings>) => {
+        put({ type: "settings_set", settings: await api.updateSettings(patch) });
       }),
-      loadUsage: signedIn(async () => {
-        dispatch({ type: "usage_loaded", usage: await api.usage() });
+      loadUsage: signedIn(async ({ api, put }) => {
+        put({ type: "usage_loaded", usage: await api.usage() });
       }),
     };
-  }, []);
+  }, [nextSeq, sessions, enter]);
 
   useEffect(() => {
-    let live = true;
-    api
+    const attempt = sessions.attempt();
+    attempt.api
       .me()
-      .then(({ user }) => loadEntry(user))
-      .then((action) => {
-        if (live) dispatch(action);
+      .then(({ user }) => enter(attempt, user))
+      .then((ready) => {
+        if (ready !== null) dispatch(ready);
       })
       .catch((cause: unknown) => {
-        if (!live) return;
+        if (!sessions.isCurrent(attempt)) return;
         // 没登录和「服务挂了」得说不一样的话，不然用户看到的都是一个空登录页。
         const login: LoginPhase = isUnauthorized(cause)
           ? { kind: "idle" }
           : { kind: "failed", message: "连不上服务，稍后再试" };
         dispatch({ type: "anonymous", login });
       });
-    return () => {
-      live = false;
-    };
-  }, []);
+  }, [sessions, enter]);
 
-  const settings = state.status === "ready" ? state.settings : null;
-  const settingsRef = useRef<Settings | null>(null);
-  useEffect(() => {
-    settingsRef.current = settings;
-  }, [settings]);
-
-  const stateRef = useRef(state);
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
-
-  const connected = state.status === "ready";
+  const session = state.status === "ready" ? state.session : null;
   // 卡片上的「从哪台电脑发」和账号页都读这两张表。拉不到只是少写一句电脑名，不该拖住整个入口。
   useEffect(() => {
-    if (connected) actions.loadAccounts().catch(() => undefined);
-  }, [connected, actions]);
+    if (session !== null) actions.loadAccounts().catch(() => undefined);
+  }, [session, actions]);
 
   useEffect(() => {
-    if (!connected) return;
+    const scoped = sessions.current();
+    if (session === null || scoped?.id !== session) return;
+    const put = (action: Action) => dispatch({ type: "from_session", session, action });
     let cancelled = false;
     let socket: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
+    let failures = 0;
     let hasConnected = false;
     let countsQueued = false;
+    // 旧连接关掉之前已经排进事件队列的回调仍会跑，每个回调先认一下这还是不是当前会话。
+    const live = () => !cancelled && sessions.current()?.id === session;
+    const expire = () => {
+      sessions.end(session);
+      put({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
+    };
     const refreshPendingCounts = () => {
       if (countsQueued) return;
       countsQueued = true;
       queueMicrotask(() => {
         countsQueued = false;
         if (cancelled) return;
-        void Promise.all([api.bots(), api.groups()])
+        void Promise.all([scoped.api.bots(), scoped.api.groups()])
           .then(([bots, groups]) => {
-            if (!cancelled) dispatch({ type: "pending_counts_loaded", bots: bots.items, groups: groups.items });
+            if (!cancelled) put({ type: "pending_counts_loaded", bots: bots.items, groups: groups.items });
           })
           .catch((cause: unknown) => {
-            if (!cancelled && isUnauthorized(cause)) {
-              dispatch({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
-            }
+            if (!cancelled && isUnauthorized(cause)) expire();
           });
       });
     };
     const pushHandlers = createPushHandlers({
-      dispatch,
+      session,
+      live,
+      dispatch: put,
       stateRef,
-      settingsRef,
       refreshPendingCounts,
     });
+    const retryLater = () => {
+      retry = setTimeout(open, reconnectDelay(failures));
+      failures += 1;
+    };
     const open = () => {
-      dispatch({ type: "turns_cleared" });
+      put({ type: "turns_cleared" });
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
       socket.addEventListener("open", () => {
-        if (hasConnected) {
-          resyncPending.current = true;
-          dispatch({ type: "today_version_bumped" });
-        }
+        failures = 0;
+        if (hasConnected) put({ type: "push_reconnected", seq: nextSeq() });
         hasConnected = true;
       });
       socket.addEventListener("message", (event) => {
+        if (!live()) return;
         const parsed = ServerPush.safeParse(JSON.parse(String(event.data)));
         if (!parsed.success) return;
         const push = parsed.data;
-        dispatchServerPush(pushHandlers, push);
+        dispatchServerPush(pushHandlers, push, nextSeq());
       });
-      // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。
+      // 断了不重连的话 HTTP 还通，界面看着是活的，其实再也收不到推送。握手被 401 拒掉时浏览器也只给一个 close，
+      // 分不出是登录过期还是断网，拿这次会话打一下 /api/me 问清楚：401 回登录页，别的按退避再连。
       socket.addEventListener("close", () => {
-        if (!cancelled) retry = setTimeout(open, RECONNECT_DELAY_MS);
+        if (!live()) return;
+        scoped.api.me().then(
+          () => {
+            if (live()) retryLater();
+          },
+          (cause: unknown) => {
+            if (!live()) return;
+            if (isUnauthorized(cause)) expire();
+            else retryLater();
+          },
+        );
       });
     };
     open();
@@ -422,7 +525,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       if (retry !== null) clearTimeout(retry);
       socket?.close();
     };
-  }, [connected]);
+  }, [session, sessions, nextSeq]);
 
   const theme = state.status === "ready" ? state.settings.theme : "system";
   useEffect(() => applyTheme(theme), [theme]);

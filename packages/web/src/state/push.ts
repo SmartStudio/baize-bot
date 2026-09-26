@@ -1,35 +1,45 @@
-import type { Settings } from "@baize/shared";
-import type { Action, AppState } from "./types.js";
 import type { ServerPush } from "@baize/shared";
+import type { Action, AppState, ReadyState, SessionId } from "./types.js";
 import { notifyNotice } from "./notify.js";
+import type { Seq } from "./stamped.js";
 
+// seq 是这条推送到达时取的号。
 export type PushHandlers = {
-  [K in ServerPush["type"]]: (push: Extract<ServerPush, { type: K }>) => void;
+  [K in ServerPush["type"]]: (push: Extract<ServerPush, { type: K }>, seq: Seq) => void;
 };
 
+// 一套处理函数只属于创建它的那次会话。dispatch 出去的动作由 reducer 按会话号把关；不经 reducer 的副作用
+// （读当前状态、弹系统通知）得自己先问 live，读状态也只认这次会话的那份。
 type PushContext = {
+  session: SessionId;
+  live: () => boolean;
   dispatch: (action: Action) => void;
   stateRef: { current: AppState };
-  settingsRef: { current: Settings | null };
   refreshPendingCounts: () => void;
 };
 
 export const createPushHandlers = ({
+  session,
+  live,
   dispatch,
   stateRef,
-  settingsRef,
   refreshPendingCounts,
 }: PushContext): PushHandlers => {
   const bumpToday = () => dispatch({ type: "today_version_bumped" });
+  const mine = (): ReadyState | null => {
+    const state = stateRef.current;
+    return live() && state.status === "ready" && state.session === session ? state : null;
+  };
   return {
-    message: (push) => dispatch({ type: "message_upserted", message: push.message }),
-    message_delta: (push) =>
+    message: (push, seq) => dispatch({ type: "message_upserted", message: push.message, seq }),
+    message_delta: (push, seq) =>
       dispatch({
         type: "message_delta",
         messageId: push.messageId,
         groupId: push.groupId,
         delta: push.delta,
         done: push.done,
+        seq,
       }),
     bot_updated: (push) => dispatch({ type: "bot_updated", bot: push.bot }),
     bot_deleted: (push) => dispatch({ type: "bot_removed", botId: push.botId }),
@@ -41,10 +51,9 @@ export const createPushHandlers = ({
     group_turn: (push) => dispatch({ type: "group_turn", turn: push }),
     task_updated: (push) => dispatch({ type: "task_updated", task: push.task }),
     approval_updated: (push) => {
+      const state = mine();
       const unseenTerminal =
-        push.approval.status !== "pending" &&
-        stateRef.current.status === "ready" &&
-        stateRef.current.approvals[push.approval.id] === undefined;
+        push.approval.status !== "pending" && state !== null && state.approvals[push.approval.id] === undefined;
       dispatch({ type: "approval_pushed", approval: push.approval });
       if (unseenTerminal) refreshPendingCounts();
       bumpToday();
@@ -52,23 +61,23 @@ export const createPushHandlers = ({
     grant_deleted: (push) => dispatch({ type: "grant_deleted", grantId: push.grantId }),
     handoff_updated: (push) => {
       // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
+      const state = mine();
       const unseenTerminal =
-        push.handoff.status !== "pending" &&
-        stateRef.current.status === "ready" &&
-        stateRef.current.handoffs[push.handoff.id] === undefined;
+        push.handoff.status !== "pending" && state !== null && state.handoffs[push.handoff.id] === undefined;
       dispatch({ type: "handoff_pushed", handoff: push.handoff });
       if (unseenTerminal) refreshPendingCounts();
     },
-    routine_updated: (push) => dispatch({ type: "routine_upserted", routine: push.routine }),
-    routine_deleted: (push) => dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId }),
-    skill_updated: (push) => dispatch({ type: "skill_upserted", skill: push.skill }),
-    skill_deleted: (push) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId }),
-    draft_updated: (push) => {
-      dispatch({ type: "content_loaded", drafts: [push.draft], plans: [] });
+    routine_updated: (push, seq) => dispatch({ type: "routine_upserted", routine: push.routine, seq }),
+    routine_deleted: (push, seq) =>
+      dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId, seq }),
+    skill_updated: (push, seq) => dispatch({ type: "skill_upserted", skill: push.skill, seq }),
+    skill_deleted: (push, seq) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId, seq }),
+    draft_updated: (push, seq) => {
+      dispatch({ type: "content_loaded", drafts: [push.draft], plans: [], seq });
       bumpToday();
     },
-    plan_updated: (push) => {
-      dispatch({ type: "content_loaded", drafts: [], plans: [push.plan] });
+    plan_updated: (push, seq) => {
+      dispatch({ type: "content_loaded", drafts: [], plans: [push.plan], seq });
       bumpToday();
     },
     account_updated: (push) => {
@@ -86,13 +95,13 @@ export const createPushHandlers = ({
     computer_updated: (push) => dispatch({ type: "computer_upserted", computer: push.computer }),
     notify: (push) => {
       bumpToday();
-      const current = settingsRef.current;
-      if (current !== null) notifyNotice(push.notice, current);
+      const state = mine();
+      if (state !== null) notifyNotice(push.notice, state.settings);
     },
   };
 };
 
-export const dispatchServerPush = (handlers: PushHandlers, push: ServerPush): void => {
-  const handler = handlers[push.type] as (push: ServerPush) => void;
-  handler(push);
+export const dispatchServerPush = (handlers: PushHandlers, push: ServerPush, seq: Seq): void => {
+  const handler = handlers[push.type] as (push: ServerPush, seq: Seq) => void;
+  handler(push, seq);
 };

@@ -1,6 +1,14 @@
+import { writeTable } from "./stamped.js";
 import type { Action, ContentBook, ReadyState } from "./types.js";
 
-export const EMPTY_CONTENT: ContentBook = { drafts: {}, plans: {}, accounts: {}, computers: {}, publications: {} };
+export const EMPTY_CONTENT: ContentBook = {
+  drafts: {},
+  plans: {},
+  accounts: {},
+  computers: {},
+  publications: {},
+  stamps: {},
+};
 
 const keyed = <T extends { id: string }>(table: Record<string, T>, rows: T[]): Record<string, T> => {
   const next = { ...table };
@@ -8,32 +16,16 @@ const keyed = <T extends { id: string }>(table: Record<string, T>, rows: T[]): R
   return next;
 };
 
-const filled = <T extends { id: string }>(table: Record<string, T>, rows: T[]): Record<string, T> => {
-  const next = { ...table };
-  for (const row of rows) next[row.id] ??= row;
-  return next;
-};
-
 const withContent = (state: ReadyState, content: ContentBook): ReadyState => ({ ...state, content });
 
-// 草稿不是只进不退的：批过的被 Bot 改了会回到 pending，所以不能像审批那样拿「已有结论」挡旧数据。
-// 接口响应和推送谁后到谁作数；首页快照照 SnapshotMerge 只补缺。
 export const reduceContent = (state: ReadyState, action: Action): ReadyState => {
   const content = state.content;
   switch (action.type) {
-    case "content_loaded":
-      return withContent(state, {
-        ...content,
-        drafts: keyed(content.drafts, action.drafts),
-        plans: keyed(content.plans, action.plans),
-      });
-    case "today_snapshot_loaded": {
-      const merge = action.merge === "resync" ? keyed : filled;
-      return withContent(state, {
-        ...content,
-        drafts: merge(content.drafts, action.drafts),
-        plans: merge(content.plans, action.plans),
-      });
+    case "content_loaded": {
+      // 草稿不是只进不退的：批过的被 Bot 改了会回到 pending，所以不能像审批那样拿「已有结论」挡旧数据，只能比先后。
+      const drafts = writeTable(content.drafts, content.stamps, action.seq, action.drafts);
+      const plans = writeTable(content.plans, drafts.stamps, action.seq, action.plans);
+      return withContent(state, { ...content, drafts: drafts.rows, plans: plans.rows, stamps: plans.stamps });
     }
     case "accounts_loaded":
       return withContent(state, {

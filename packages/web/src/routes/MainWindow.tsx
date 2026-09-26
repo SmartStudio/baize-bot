@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
+import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
 import { NewProjectDialog } from "../components/NewProjectDialog.js";
 import { ChatPanel } from "../components/ChatPanel.js";
@@ -50,11 +51,13 @@ export const MainWindow = () => {
   const projectOpen = screen?.kind === "project" && focused?.kind === "team" ? focused : null;
   const groupId = conversation?.groupId ?? null;
   const focusedId = focused?.groupId ?? null;
-  const loaded = focusedId !== null && ready !== null && ready.messages[focusedId] !== undefined;
+  // 推送重连过的话，之前拉的历史可能漏了断线时的推送：开着的群立刻重拉，别的群下次进来时重拉。
+  const reconnectedAt = ready?.reconnectedAt ?? (0 as Seq);
+  const loaded = focusedId !== null && ready !== null && (ready.messagesLoadedAt[focusedId] ?? 0) > reconnectedAt;
 
   useEffect(() => {
-    if (focusedId !== null && !loaded) void actions.loadMessages(focusedId);
-  }, [focusedId, loaded, actions]);
+    if (focusedId !== null && !loaded) void actions.loadMessages(focusedId, reconnectedAt);
+  }, [focusedId, loaded, reconnectedAt, actions]);
 
   // 今天页原来每次切回来都重新挂载、重新拉一遍。清单提到主窗口给侧栏数待办之后不再重挂，切回来时补拉这一下。
   const onToday = screen?.kind === "today";
@@ -77,6 +80,9 @@ export const MainWindow = () => {
 
   const openGroupPage = (target: GroupId | undefined) => {
     if (target !== undefined) navigate(pathOf({ kind: "group", groupId: target }));
+  };
+  const openProjectPage = (target: GroupId | undefined) => {
+    if (target !== undefined) navigate(pathOf({ kind: "project", groupId: target }));
   };
 
   const bots = ready.bots;
@@ -121,20 +127,22 @@ export const MainWindow = () => {
           conversation={conversation}
           bots={bots}
           turn={ready.groupTurns[conversation.groupId]}
-          messages={ready.messages[conversation.groupId] ?? NO_MESSAGES}
+          messages={ready.messages.rows[conversation.groupId] ?? NO_MESSAGES}
+          history={ready.loads[`messages:${conversation.groupId}`] ?? "idle"}
+          onRetryHistory={() => void actions.loadMessages(conversation.groupId, reconnectedAt)}
           lookup={lookup}
           approvals={ready.approvals}
           handoffs={ready.handoffs}
-          skills={ready.skills}
+          skills={ready.skills.rows}
           content={ready.content}
           contentActions={contentActions}
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
           onDecideProjectOffer={(messageId, request) =>
-            actions.decideProjectOffer(messageId, request).then(openGroupPage)
+            actions.decideProjectOffer(messageId, request).then(openProjectPage)
           }
-          onOpenGroup={openGroupPage}
+          onOpenProject={openProjectPage}
           onInspectTool={(view) => {
             if (groupId !== null) setInspectedTool({ groupId, tool: view });
           }}
@@ -149,7 +157,7 @@ export const MainWindow = () => {
         <ProjectView
           conversation={projectOpen}
           bots={bots}
-          messages={ready.messages[projectOpen.groupId] ?? NO_MESSAGES}
+          messages={ready.messages.rows[projectOpen.groupId] ?? NO_MESSAGES}
           lookup={lookup}
           cards={{ content: ready.content, actions: contentActions, lookup }}
           onSend={actions.sendMessage}

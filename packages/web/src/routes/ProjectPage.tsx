@@ -167,7 +167,11 @@ export const ProjectPage = ({
           <div className="project-head-main">
             <h1>{task.title}</h1>
             {task.summary === "" ? null : <p className="project-goal">{task.summary}</p>}
-            {task.cadence === "" ? null : <p className="project-cadence">节奏：{task.cadence}</p>}
+            {task.cadence === "" ? null : (
+              <p className="project-cadence" data-testid="project-cadence">
+                节奏：{task.cadence}
+              </p>
+            )}
             <div className="project-progress" data-testid="project-progress">
               <span>
                 <b>{done}</b> / {task.checklist.length} 项
