@@ -248,7 +248,7 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 | `set_cadence` | `projectGroupId`、`cadence` | `「<项目>」的节奏改成了「<节奏>」。` 加一句让它说清下次在哪里看到结果 | `set_cadence` |
 | `propose_project` | `name`、`goal`、`team`、`platforms`、`cadence`、`firstStep`，形状照协议的 `project_offer` | `方案卡「<名字>」已经发到群里，等用户点开始。` | `project_offer` |
 
-`set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
+`set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。`propose_project` 只在单聊里能用：这次 prompt 的 `group.kind` 不是 `solo` 就抛「方案卡只能在你和用户的单聊里出」，不发上行。控制面只收主助理单聊里的方案卡，别的群发来的静默丢掉，不在运行器这头拦，模型会拿到「已经发到群里」而卡其实没落。判断用 `group.kind` 而不是任务卡是否为 null：两者在控制面都由群里 Bot 的个数定，`group.kind` 是直接写明的那一个；工具只挂给主助理，主助理唯一的 solo 群就是它的单聊。`set_cadence` 没有这个限制，控制面按主助理身份和项目归属校验，不看是哪个群发的，在项目群里改节奏照常生效。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
 
 ## 助理浏览器
 

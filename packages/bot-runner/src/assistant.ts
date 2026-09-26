@@ -124,10 +124,16 @@ export function createAssistantTools(options: {
       label: "出方案卡",
       description:
         "用户想做成一件新的事时，出一张项目方案卡给用户看：名字、目标、队员（1 到 5 个）、平台、节奏、第一步。" +
-        "平台里 github、x、xiaohongshu 写成 supported，抖音这类还不支持的写成 unsupported 并写上名字。发出去之后等用户点开始。",
+        "平台里 github、x、xiaohongshu 写成 supported，抖音这类还不支持的写成 unsupported 并写上名字。发出去之后等用户点开始。只能在你和用户的单聊里用，项目群里调会报错。",
       parameters: PROPOSE_PROJECT_PARAMS,
       execute: async (_callId, params) => {
         const active = activeOrThrow("出方案卡");
+        // 控制面只收主助理单聊里的方案卡，别的群发来的静默丢掉；不在这里拦，模型会以为发出去了。
+        if (active.groupKind !== "solo") {
+          throw new Error(
+            "方案卡只能在你和用户的单聊里出，这里是项目群，没发出去。在这里把想法说给用户听，请用户回单聊找你出方案卡。",
+          );
+        }
         const { name, goal, team, platforms, cadence, firstStep } = params as Static<typeof PROPOSE_PROJECT_PARAMS>;
         // 协议允许空串，但 P1-9 拿这一句建队员 Bot，空了建出来的 Bot 就没有边界。
         const blank = team.find((member) => member.description.trim() === "");

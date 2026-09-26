@@ -23,6 +23,7 @@ export type GroupMember = PromptMessage["members"][number];
 /** 工具执行时手头要有的东西：这次运行的身份，加这次 prompt 的任务卡、成员名单和待接手的交接。 */
 export interface ActiveRun {
   readonly run: RunIdentity;
+  readonly groupKind: PromptMessage["group"]["kind"];
   readonly task: PromptMessage["task"];
   readonly members: readonly GroupMember[];
   /** 这次 prompt 是为了处理某份交接派来的才有值。 */

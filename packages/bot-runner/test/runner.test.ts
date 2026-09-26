@@ -4281,6 +4281,63 @@ ${join(h.dataDir, "bot-1", "work")}
     expect(seen.toolResults.join("")).toContain("team 至少要 1 条");
   });
 
+  it("主助理在项目群里调 propose_project：抛中文错，不发上行，也不说已经发到群里", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      script: scriptRecording(seen, [["@bot-1 再起一个项目", callTool("propose_project", OFFER_ARGS)]]),
+    });
+
+    await h.runner.prompt({
+      ...promptMessage("bot-1", "run-1", "@bot-1 再起一个项目", {
+        groupId: "group-xhs",
+        members: [member("bot-1", "主助理"), member("bot-2", "小文")],
+      }),
+      projects: PROJECTS,
+    });
+
+    expect(h.sent.filter((message) => message.type === "project_offer")).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join(""), "项目群里发不出方案卡，不能让模型以为发出去了").not.toContain("已经发到群里");
+    expect(seen.toolResults.join(""), "告诉模型为什么没发、该怎么办").toContain(
+      "方案卡只能在你和用户的单聊里出，这里是项目群，没发出去。",
+    );
+  });
+
+  it("主助理在项目群里调 set_cadence 照常上行：控制面不看是哪个群发的", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      script: scriptRecording(seen, [
+        ["@bot-1 改成每周 3 篇", callTool("set_cadence", { projectGroupId: "group-xhs", cadence: "每周 3 篇" })],
+      ]),
+    });
+
+    await h.runner.prompt({
+      ...promptMessage("bot-1", "run-1", "@bot-1 改成每周 3 篇", {
+        groupId: "group-xhs",
+        members: [member("bot-1", "主助理"), member("bot-2", "小文")],
+      }),
+      projects: PROJECTS,
+    });
+
+    expect(h.sent.filter((message) => message.type === "set_cadence")).toEqual([
+      {
+        type: "set_cadence",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-xhs",
+        projectGroupId: "group-xhs",
+        cadence: "每周 3 篇",
+      },
+    ]);
+  });
+
   it("队员连的工具有同名 set_cadence 操作：不注册，调用碰不到工具连接，不会不经审批就放行", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const seen = toolRecorder();

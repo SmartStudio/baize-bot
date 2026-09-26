@@ -71,6 +71,7 @@ describe("配图读的时候上级目录被换成禁区链接", () => {
           groupId: GroupId.parse("group-1"),
           messageId: MessageId.parse("message-1"),
         },
+        groupKind: "solo",
         task: null,
         members: [],
         handoffId: undefined,

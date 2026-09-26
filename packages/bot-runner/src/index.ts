@@ -586,6 +586,7 @@ export function createRunner(config: RunnerConfig): Runner {
         botId: message.botId,
         groupId: message.groupId,
       },
+      groupKind: message.group.kind,
       task: message.task,
       members: message.members,
       handoffId: message.handoffId,
