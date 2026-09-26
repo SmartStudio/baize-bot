@@ -42,7 +42,7 @@
 
 ### 派到哪台电脑
 
-一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
+一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接，而且这条连接 hello 的那份 `config` 已经发出。握手到 `config` 之间还要对账、查库，这段时间里派的 prompt 会比 `config` 先到，新起的代理还没有运行器，只能回 `prompt_before_config` 丢掉它，所以这段时间按不在线算。代理的 `agent_error` 带了 `runId` 就是说那个 run 不会再有 `run_done`，控制面按断线收尾同一套替它收尾：run 结束、挂着的审批过期、群里一句、例行记失败，重报只收一次。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
 
 | 这次要碰的账号 | 派到 |
 | --- | --- |

@@ -134,6 +134,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
             code: "prompt_before_config",
             detail: `run ${message.runId} 的 prompt 比 config 先到`,
             groupId: message.groupId,
+            runId: message.runId,
           });
           return;
         }

@@ -450,6 +450,18 @@ describe("电脑代理连控制面", () => {
     const reply = await server.waitForMessage("bot_text", 1, 3000);
     expect(reply.runId).toBe("run-1");
     expect(server.messages.filter((message) => message.type === "bot_text")).toHaveLength(1);
+    expect(
+      server.messages.filter((message) => message.type === "agent_error"),
+      "报错带上 runId，控制面才知道替哪个 run 收尾",
+    ).toEqual([
+      {
+        type: "agent_error",
+        code: "prompt_before_config",
+        detail: "run run-早了 的 prompt 比 config 先到",
+        groupId: "group-1",
+        runId: "run-早了",
+      },
+    ]);
   });
 
   it("坏报文只被丢弃，不拖垮连接", async () => {

@@ -19,15 +19,12 @@ import {
   markComputersSleeping,
   rotateGatewayKey,
 } from "../repo/computers.js";
-import { expireApprovalsOfRun } from "../repo/approvals.js";
 import { listGrants } from "../repo/grants.js";
 import { listSkillsByOwner } from "../repo/skills.js";
-import { appendMessage, failRunningToolCalls } from "../repo/messages.js";
-import { finishRun, openRunsForComputer } from "../repo/runs.js";
+import { openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
-import { EXPIRED_APPROVAL_NOTE, failRoutineRunOf } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { clearTextPrefixes, handleAgentEvent } from "./events.js";
+import { abandonRun, handleAgentEvent } from "./events.js";
 import type { GroupTurns } from "./group-turn.js";
 
 export const AGENT_PATH = "/agent";
@@ -73,6 +70,11 @@ export type AgentHubDeps = {
 export class AgentHub {
   readonly #deps: AgentHubDeps;
   readonly #connections = new Map<ComputerId, AgentConnection>();
+  /**
+   * hello 那条 config 已经发出去的连接。连接一握手就进 #connections，好让断线收尾停手、并发的 sendConfig 送得到；
+   * 但在 config 发出之前派 prompt，新起的代理还没有运行器，会把它丢掉，那个 run 就永远不收尾。
+   */
+  readonly #configured = new WeakSet<AgentConnection>();
   readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
   readonly #finishChains = new Map<ComputerId, Promise<void>>();
   readonly #pendingFinishes = new Set<Promise<void>>();
@@ -121,9 +123,9 @@ export class AgentHub {
           const timer = setTimeout(() => {
             this.#graceTimers.delete(closed.computerId);
             const job = this.#enqueueFinish(closed.computerId, async () => {
-              if (this.isOnline(closed.computerId)) return;
+              if (this.#connected(closed.computerId)) return;
               await this.#finishMissingRuns(closed.computerId, closed.ownerId, [], () =>
-                this.isOnline(closed.computerId),
+                this.#connected(closed.computerId),
               );
             }).catch((error: unknown) => console.error("断连后收尾 run 出错", error));
             this.#pendingFinishes.add(job);
@@ -146,7 +148,13 @@ export class AgentHub {
     });
   }
 
+  /** 能派活：连着，而且 hello 的 config 已经发出。 */
   isOnline(computerId: ComputerId): boolean {
+    const conn = this.#connections.get(computerId);
+    return conn !== undefined && this.#configured.has(conn) && conn.socket.readyState === conn.socket.OPEN;
+  }
+
+  #connected(computerId: ComputerId): boolean {
     const conn = this.#connections.get(computerId);
     return conn !== undefined && conn.socket.readyState === conn.socket.OPEN;
   }
@@ -260,6 +268,7 @@ export class AgentHub {
     // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
     const assistant = await this.#deps.db.transaction((tx) => ensureAssistant(tx, computer.ownerId));
     await this.#sendConfig(accepted, "hello");
+    this.#configured.add(accepted);
     if (assistant !== null) {
       const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
       await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
@@ -278,31 +287,7 @@ export class AgentHub {
       if (shouldStop?.()) return;
       if (active.has(run.runId)) continue;
       if (shouldStop?.()) return;
-      const result = await this.#deps.db.transaction(async (tx) => {
-        const usage = await finishRun(tx, run.runId, run.groupId, {
-          steps: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          amount: 0,
-        });
-        if (usage === null) return null;
-        const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
-        const failedTools = run.groupId === null ? [] : await failRunningToolCalls(tx, run.groupId, run.runId);
-        const message =
-          run.groupId === null
-            ? null
-            : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: DISCONNECT_NOTICE });
-        return { expiredApprovals, failedTools, message };
-      });
-      if (result === null) continue;
-      clearTextPrefixes(run.runId);
-      if (run.groupId !== null) this.#deps.groupTurns.abandon(run.groupId, run.runId);
-      for (const approval of result.expiredApprovals) {
-        this.#deps.push.push(ownerId, { type: "approval_updated", approval });
-      }
-      for (const message of result.failedTools) this.#deps.push.push(ownerId, { type: "message", message });
-      if (result.message !== null) this.#deps.push.push(ownerId, { type: "message", message: result.message });
-      const routine = await failRoutineRunOf(
+      const abandoned = await abandonRun(
         {
           db: this.#deps.db,
           push: this.#deps.push,
@@ -310,9 +295,11 @@ export class AgentHub {
           groupTurns: this.#deps.groupTurns,
           notifications: this.#deps.notifications,
         },
-        run.runId,
-        result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : DISCONNECT_NOTICE,
+        ownerId,
+        run,
+        { text: DISCONNECT_NOTICE, reason: DISCONNECT_NOTICE },
       );
+      const routine = abandoned?.routine ?? null;
       if (routine !== null) {
         await this.#deps.notifications.publish(ownerId, {
           kind: "stuck",

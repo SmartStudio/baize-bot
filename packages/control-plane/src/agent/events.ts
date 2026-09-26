@@ -12,7 +12,7 @@ import {
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { findAccountOnComputer } from "../repo/accounts.js";
-import { approvalRun, createApproval, expireApproval } from "../repo/approvals.js";
+import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
@@ -28,12 +28,18 @@ import {
   replaceMessageBody,
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
-import { routineRunOfRun } from "../repo/routines.js";
+import { routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
-import { finishRun, latestOpenRun, runBelongsTo } from "../repo/runs.js";
+import { finishRun, latestOpenRun, openRunsForComputer, runBelongsTo } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
-import { chargeRoutineRunOf, EXPIRED_APPROVAL_NOTE, failRoutineRunOf, holdRoutineRunOf } from "../routines/run.js";
+import {
+  chargeRoutineRunOf,
+  EXPIRED_APPROVAL_NOTE,
+  failRoutineRunOf,
+  holdRoutineRunOf,
+  type RoutineDeps,
+} from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
@@ -185,9 +191,44 @@ type TextPrefix =
 const textPrefixes = new Map<string, TextPrefix>();
 const resultRuns = new Set<RunId>();
 
-export function clearTextPrefixes(runId: RunId): void {
+function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
   resultRuns.delete(runId);
+}
+
+/**
+ * 替等不到 run_done 的 run 收尾：run 行结束，挂着的审批过期，还在跑的工具行失败，群里说一句 notice，例行记失败。
+ * 幂等靠 finishRun 的 WHERE ended_at IS NULL，已经收过尾的返回 null，什么都不再做。
+ */
+export async function abandonRun(
+  deps: RoutineDeps,
+  ownerId: UserId,
+  run: { readonly runId: RunId; readonly groupId: GroupId | null },
+  notice: { readonly text: string; readonly reason: string },
+): Promise<{ readonly routine: RoutineRunRef | null } | null> {
+  const result = await deps.db.transaction(async (tx) => {
+    const usage = await finishRun(tx, run.runId, run.groupId, { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 });
+    if (usage === null) return null;
+    const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
+    const failedTools = run.groupId === null ? [] : await failRunningToolCalls(tx, run.groupId, run.runId);
+    const message =
+      run.groupId === null
+        ? null
+        : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: notice.text });
+    return { expiredApprovals, failedTools, message };
+  });
+  if (result === null) return null;
+  clearTextPrefixes(run.runId);
+  if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
+  for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
+  for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
+  if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
+  const routine = await failRoutineRunOf(
+    deps,
+    run.runId,
+    result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
+  );
+  return { routine };
 }
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
@@ -369,6 +410,16 @@ function modelFailureMessage(detail: string): string {
 }
 
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
+  const text =
+    event.code === "model_failed"
+      ? modelFailureMessage(event.detail)
+      : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`;
+  if (event.runId !== undefined) {
+    // runId 是外部输入，只认这台电脑上还没结束的活。已经收过尾的重报落在这里，什么都不做。
+    const run = (await openRunsForComputer(deps.db, conn.computerId)).find((open) => open.runId === event.runId);
+    if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason: ERROR_REASONS[event.code] });
+    return;
+  }
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
   const open = await latestOpenRun(deps.db, conn.computerId);
@@ -377,14 +428,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);
     return;
   }
-  await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "system",
-    tone: "error",
-    text:
-      event.code === "model_failed"
-        ? modelFailureMessage(event.detail)
-        : `电脑那边没干成这件事，${ERROR_REASONS[event.code]}。原话是：${event.detail}`,
-  });
+  await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });
   // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
   if (open !== null && open.groupId === groupId) {
     await failRoutineRunOf(deps, open.runId, ERROR_REASONS[event.code]);
