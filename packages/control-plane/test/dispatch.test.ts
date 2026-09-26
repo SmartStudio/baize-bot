@@ -51,12 +51,12 @@ async function ownerWithBot(): Promise<Owner> {
   return { ownerId: user.id, client, computer, groupId: created.group.id, botId: created.bot.id };
 }
 
-function dispatchDeps() {
+function dispatchDeps(Hub: typeof AgentHub = AgentHub) {
   return {
     db: database.db,
     push: server.server.hub,
     groupTurns: new GroupTurns(database.db, server.server.hub),
-    agents: new AgentHub({
+    agents: new Hub({
       db: database.db,
       push: server.server.hub,
       priceInputPerM: 0,
@@ -107,11 +107,12 @@ async function drain(push: PushClient) {
 }
 
 describe("派活", () => {
-  it("电脑离线时单 Bot 群和无人经手的多 Bot 群都返回 offline", async () => {
+  it("电脑离线时单 Bot 群和无人经手的多 Bot 群都返回派不出去和原因", async () => {
     const owner = await ownerWithBot();
     const offline = await appendMessage(database.db, owner.groupId, { kind: "user", text: "先存着" });
     expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, owner.groupId, offline)).toEqual({
-      kind: "offline",
+      kind: "unplaced",
+      reason: "no_computer_online",
     });
 
     const second = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小销" })).json());
@@ -120,8 +121,36 @@ describe("派活", () => {
     );
     const unaddressed = await appendMessage(database.db, group.group.id, { kind: "user", text: "谁来处理" });
     expect(await dispatchUserMessage(dispatchDeps(), owner.ownerId, group.group.id, unaddressed)).toEqual({
-      kind: "offline",
+      kind: "unplaced",
+      reason: "no_computer_online",
     });
+  });
+
+  it("选中电脑之后连接就断了，run 仍记在选中的那台上，交给断线收尾", async () => {
+    const owner = await ownerWithBot();
+    class DropsRightAfterSelection extends AgentHub {
+      #looks = 0;
+      override isOnline(): boolean {
+        this.#looks += 1;
+        return this.#looks === 1;
+      }
+      override send(): boolean {
+        return false;
+      }
+    }
+    const message = await appendMessage(database.db, owner.groupId, { kind: "user", text: "排一下本周" });
+
+    expect(
+      await dispatchUserMessage(dispatchDeps(DropsRightAfterSelection), owner.ownerId, owner.groupId, message),
+    ).toEqual({
+      kind: "sent",
+    });
+    const runs = await database.sql<{ computer_id: string; ended_at: Date | null }[]>`
+      SELECT computer_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
+    `;
+    expect(runs, "报了 sent 就要有一行没收尾的 run，断线收尾才找得到它，例行才不会一直停在运行中").toEqual([
+      { computer_id: owner.computer.computerId, ended_at: null },
+    ]);
   });
 
   it("电脑在线时收到 prompt，runs 多一行", async () => {

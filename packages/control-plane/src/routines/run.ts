@@ -2,7 +2,8 @@ import { BotId, GroupId, RoutineId, type Routine, type RunId, type UserId } from
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
-import { dispatchUserMessage } from "../agent/dispatch.js";
+import { dispatchUserMessage, type DispatchOutcome } from "../agent/dispatch.js";
+import { SELECTION_FAILURE } from "../agent/computer-selection.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { findSoloGroup } from "../repo/groups.js";
 import { appendMessage } from "../repo/messages.js";
@@ -27,8 +28,15 @@ export type RoutineDeps = {
   readonly notifications: NoticePublisher;
 };
 
-/** 派活那一步就没成，群里已经有一句「电脑不在线」，运行记录不该停在「运行中」。 */
-export const NOT_DISPATCHED_NOTE = "电脑不在线，没跑起来";
+/**
+ * 派活那一步就没成，群里已经有一句为什么，运行记录不该停在「运行中」。
+ * 选不到电脑的原因和群里那句同源，运行记录只留原因，不补跑。
+ */
+function notDispatchedNote(outcome: Exclude<DispatchOutcome, { kind: "sent" }>): string {
+  return outcome.kind === "unplaced"
+    ? `${SELECTION_FAILURE[outcome.reason].why}，没跑起来`
+    : "群里没有能派的 Bot，没跑起来";
+}
 export const WAITING_APPROVAL_NOTE = "1 条等你点头";
 export const RETRY_NEXT_TIME_NOTE = "等你点头，下次照常跑";
 export const EXPIRED_APPROVAL_NOTE = "审批已失效";
@@ -67,13 +75,13 @@ export async function runRoutine(
     purpose: row.purpose,
   });
   if (outcome.kind !== "sent") {
-    await settleRoutineRun(deps.db, started.id, "failed", NOT_DISPATCHED_NOTE);
+    await settleRoutineRun(deps.db, started.id, "failed", notDispatchedNote(outcome));
   }
   // 用户自己发的消息派不出去，群里那句 system 他当场看得到；例行任务没人在看，才要找他。
-  if (outcome.kind === "offline") {
+  if (outcome.kind === "unplaced") {
     await deps.notifications.publish(ownerId, {
       kind: "stuck",
-      text: `例行任务「${row.name}」没跑：电脑不在线`,
+      text: `例行任务「${row.name}」没跑：${SELECTION_FAILURE[outcome.reason].why}`,
       groupId,
     });
   }

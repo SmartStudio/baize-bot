@@ -1,6 +1,6 @@
 import { AccountConfig, AccountId, Computer, ComputerId, UserId } from "@baize/shared";
 import { describe, expect, it } from "vitest";
-import { selectComputer, type ComputerCandidate } from "../src/agent/computer-selection.js";
+import { selectComputer, selectionNotice, type ComputerCandidate } from "../src/agent/computer-selection.js";
 
 const ownerId = UserId.parse("user-selection");
 
@@ -43,8 +43,15 @@ describe("选电脑", () => {
     expect(selected.kind === "selected" ? selected.computer.kind : null).toBe(kind);
   });
 
-  it("两台都离线时返回失败原因", () => {
+  it("两台都离线时说电脑都不在线，看得出不止一台", () => {
     expect(selectComputer([], candidates("sleeping", "sleeping"))).toEqual({
+      kind: "failed",
+      reason: "all_computers_offline",
+    });
+  });
+
+  it("只有一台且离线时照旧说电脑不在线", () => {
+    expect(selectComputer([], [{ computer: computer("local", "sleeping"), accounts: [] }])).toEqual({
       kind: "failed",
       reason: "no_computer_online",
     });
@@ -55,5 +62,31 @@ describe("选电脑", () => {
       kind: "failed",
       reason: "required_computer_offline",
     });
+  });
+
+  it("碰远程账号的活本机在线也派远程，按账号选不按本机优先", () => {
+    const selected = selectComputer(
+      [account],
+      [
+        { computer: computer("local", "online"), accounts: [] },
+        { computer: computer("remote", "online"), accounts: [account] },
+      ],
+    );
+    expect(selected.kind === "selected" ? selected.computer.kind : selected).toBe("remote");
+  });
+});
+
+describe("选不到电脑时群里那句话", () => {
+  it.each([
+    ["no_computer_online", "电脑不在线，这条没派出去，电脑回来后再说一次"],
+    ["all_computers_offline", "你的电脑都不在线，这条没派出去，有一台回来后再说一次"],
+    ["required_account_not_found", "要用的账号已经不在账号页里，这条没派出去，把账号挂上后再说一次"],
+    ["accounts_on_multiple_computers", "要用的账号分在两台电脑上，这条没派出去，拆成两句，每句只碰一台电脑上的账号"],
+    [
+      "required_computer_offline",
+      "要用的账号所在的那台电脑不在线，这条没派出去，也不会改派到另一台，那台回来后再说一次",
+    ],
+  ] as const)("%s", (reason, text) => {
+    expect(selectionNotice(reason)).toBe(text);
   });
 });

@@ -598,6 +598,23 @@ describe("运行记录收尾", () => {
     expect(row?.status, "一条活都没派出去，不该停在运行中").toBe("failed");
     expect(row?.note).toBe("电脑不在线，没跑起来");
   });
+
+  it("群里没有能派的 Bot 时记 failed，写的是没有 Bot 而不是电脑不在线", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    try {
+      const routine = await makeRoutine(owner, { triggers: [] });
+      // 接口上走不到一个没有成员的群：Bot 删了例行跟着删，项目群里主助理删不掉。这里直接拆掉成员关系。
+      await database.sql`DELETE FROM group_members WHERE group_id = ${owner.groupId}`;
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+
+      const [row] = await runsOf(routine.id);
+      expect(row?.status, "一条活都没派出去，不该停在运行中").toBe("failed");
+      expect(row?.note, "电脑明明在线，原因是群里没有 Bot").toBe("群里没有能派的 Bot，没跑起来");
+    } finally {
+      agent.close();
+    }
+  });
 });
 
 /** 等收尾落库。上行报文是异步处理的，回应答的那一刻状态还可能没改。 */

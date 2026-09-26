@@ -2,9 +2,9 @@ import {
   toolViewText,
   type Approval,
   type ApprovalId,
-  type AccountConfig,
   type AccountId,
   type BotId,
+  type Computer,
   type ContentPlan,
   type ContentPlanId,
   type ControlToAgent,
@@ -34,7 +34,12 @@ import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
 import type { AgentHub } from "./hub.js";
-import { selectComputer, type ComputerSelection } from "./computer-selection.js";
+import {
+  selectComputer,
+  selectionNotice,
+  type ComputerSelection,
+  type SelectionFailure,
+} from "./computer-selection.js";
 import { GroupTurns, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 
@@ -43,8 +48,6 @@ export const CONTEXT_MESSAGES = 20;
 
 /** 一条上下文的正文上限，长消息在这里截断，prompt 不替 Bot 读全文。 */
 const CONTEXT_TEXT_LIMIT = 200;
-
-export const OFFLINE_NOTICE = "电脑不在线，这条没派出去，电脑回来后再说一次";
 
 export type DispatchDeps = {
   readonly db: Db;
@@ -60,17 +63,16 @@ export type DispatchOptions = {
   readonly purpose?: ModelPurpose | undefined;
 };
 
-export type DispatchOutcome = { readonly kind: "sent" } | { readonly kind: "offline" } | { readonly kind: "no_target" };
+export type DispatchOutcome =
+  | { readonly kind: "sent" }
+  | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
+  | { readonly kind: "no_target" };
 
-async function computerFor(
-  db: Db,
-  agents: AgentHub,
-  ownerId: UserId,
-  requiredAccounts: readonly AccountConfig[],
-): Promise<ComputerSelection> {
+/** 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。 */
+async function computerFor(db: Db, agents: AgentHub, ownerId: UserId): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
   return selectComputer(
-    requiredAccounts,
+    [],
     computers.map((computer) => ({
       computer: agents.isOnline(computer.id)
         ? { ...computer, status: "online" }
@@ -84,7 +86,7 @@ async function computerFor(
 
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
- * 电脑不在线时只在群里留一句话，不建 run，免得表里堆永远不会结束的行。
+ * 选不到电脑时只在群里留一句为什么，不建 run，免得表里堆永远不会结束的行。
  */
 export async function dispatchUserMessage(
   deps: DispatchDeps & { readonly groupTurns: GroupTurns },
@@ -119,18 +121,29 @@ export async function dispatchUserMessage(
           : task?.currentBotId !== null && task?.currentBotId !== undefined
             ? "current"
             : "everyone";
-  const selected = await computerFor(deps.db, deps.agents, ownerId, []);
+  const selected = await computerFor(deps.db, deps.agents, ownerId);
   if (selected.kind === "failed") {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
-    return { kind: "offline" };
+    await appendAndPush(deps, ownerId, groupId, {
+      kind: "system",
+      tone: "error",
+      text: selectionNotice(selected.reason),
+    });
+    return { kind: "unplaced", reason: selected.reason };
   }
+  // 头一个 speaker 就用这次选中的电脑。再选一次的话，两次之间掉线会让它不建 run 就派空，
+  // 这里却已经报了 sent，例行就一直停在运行中。后面的 speaker 要等前一个跑完才派，到时再选。
+  let placed: Computer | null = selected.computer;
   await deps.groupTurns.start({
     groupId,
     ownerId,
     epoch: await messageSeq(deps.db, trigger.id),
     members,
     speakers: targets.map((botId) => ({ botId, trigger, reason })),
-    send: (speaker, includeRecent) => sendSpeaker(deps, ownerId, groupId, members, speaker, includeRecent, options),
+    send: (speaker, includeRecent) => {
+      const computer = placed;
+      placed = null;
+      return sendSpeaker(deps, ownerId, groupId, members, speaker, includeRecent, options, computer);
+    },
   });
   return { kind: "sent" };
 }
@@ -151,10 +164,16 @@ async function sendSpeaker(
   speaker: Speaker,
   includeRecent: boolean,
   options: DispatchOptions,
+  placed: Computer | null,
 ): Promise<RunId | null> {
-  const selected = await computerFor(deps.db, deps.agents, ownerId, []);
+  const selected: ComputerSelection =
+    placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
   if (selected.kind === "failed") {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
+    await appendAndPush(deps, ownerId, groupId, {
+      kind: "system",
+      tone: "error",
+      text: selectionNotice(selected.reason),
+    });
     return null;
   }
 
@@ -210,7 +229,11 @@ async function sendSpeaker(
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
   });
   if (!sent) {
-    await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: OFFLINE_NOTICE });
+    await appendAndPush(deps, ownerId, groupId, {
+      kind: "system",
+      tone: "error",
+      text: selectionNotice("no_computer_online"),
+    });
     return null;
   }
   return runId;
