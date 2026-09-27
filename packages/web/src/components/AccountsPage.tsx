@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { Account, AccountId, AccountTier, Computer, ComputerId } from "@baize/shared";
+import type { Account, AccountId, AccountTier, Computer, ComputerId, OAuthPlatform } from "@baize/shared";
+import { oauthStartUrl } from "../api/client.js";
 import {
   COMPUTER_STATUS_CLASS,
   COMPUTER_STATUS_TEXT,
@@ -131,6 +132,25 @@ const groupsOf = (accounts: Account[], computers: Record<string, Computer>): Gro
   return [...groups.values()].sort((left, right) => rank(left) - rank(right));
 };
 
+const OAUTH_PLATFORMS: OAuthPlatform[] = ["github", "x"];
+
+// 整页跳去平台授权，回来落在首页，结果由主窗口读查询串提示。
+const ConnectEntries = () => (
+  <div className="account-connect" data-testid="account-connect">
+    {OAUTH_PLATFORMS.map((platform) => (
+      <a
+        key={platform}
+        className="ghost-button"
+        href={oauthStartUrl(platform)}
+        data-testid="account-connect-link"
+        data-platform={platform}
+      >
+        接入 {PLATFORM[platform]}
+      </a>
+    ))}
+  </div>
+);
+
 // 进来就重拉一遍。拉不到得明说，不然空表会被读成「真的没有账号」。
 export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Props) => {
   const [load, setLoad] = useState<Load>("loading");
@@ -148,6 +168,7 @@ export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Prop
 
   return (
     <>
+      <ConnectEntries />
       {load === "failed" ? (
         <p className="later" data-testid="accounts-failed" role="alert">
           账号没取到。{" "}

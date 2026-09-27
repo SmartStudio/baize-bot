@@ -22,6 +22,10 @@ export const hookRoutes: Route = async ({ res, path, method, push }) => {
 };
 
 export const routineRoutes: Route = async ({ req, res, path, method, push }) => {
+  if (path === "/api/routines" && method === "GET") {
+    send(res, 200, { items: [...routines.values()] });
+    return true;
+  }
   const botMatch = /^\/api\/bots\/([^/]+)\/routines$/.exec(path);
   if (botMatch !== null) {
     const rawBotId = botMatch[1];

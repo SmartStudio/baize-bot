@@ -296,7 +296,7 @@ test("新群的推送晚于回包时，开始后照样进得了新项目的项�
   await card.getByTestId("project-offer-start").click();
   await expect(projectHeading(page, "推广白泽"), "推送没到也进得了新项目的项目页").toBeVisible();
   await expect(page).toHaveURL(/\/p\/(?!grp_assistant$)[^/]+$/);
-  await expect(page.getByTestId("group-item"), "侧栏从补拉里拿到了新群").toHaveCount(2);
+  await expect(page.getByTestId("group-item"), "侧栏从开始的回包里拿到了新群").toHaveCount(2);
   expect(held, "group_created 确实被扣在路上").toHaveLength(1);
   const projectUrl = page.url();
 

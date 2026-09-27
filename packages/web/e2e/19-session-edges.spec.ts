@@ -160,7 +160,7 @@ test("群历史首次拉取 500，界面说没拉下来，点重试后历史出�
 test("例行首次拉取 500，界面说没拉下来，点重试后例行出现", async ({ page }) => {
   const errors = pageErrors(page);
   let failing = true;
-  await page.route("**/api/bots/*/routines", (route) =>
+  await page.route("**/api/routines", (route) =>
     route.request().method() === "GET" && failing
       ? route.fulfill({ status: 500, json: { error: "服务挂了" } })
       : route.continue(),

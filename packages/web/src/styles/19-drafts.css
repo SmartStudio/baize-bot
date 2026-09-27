@@ -353,3 +353,14 @@
 .today-login .today-row-main small {
   white-space: normal;
 }
+
+.account-connect {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.account-connect a {
+  text-decoration: none;
+}

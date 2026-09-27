@@ -9,6 +9,7 @@ import {
   type AccountTier,
   LoginFailure,
   type CreateAccountRequest,
+  type OAuthPlatform,
   type DraftContent,
   type Message,
   type Publication,
@@ -137,6 +138,38 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
   });
   accounts.set(next.id, next);
   return { ok: true, value: { account: next, created: true } };
+};
+
+// 照控制面授权回调：不去平台，当平台认出的是固定的 mock_<平台> 这个号。同一平台同一 handle 已有的行挪到
+// 远程电脑、登录记回 valid；没有就在远程电脑新建（有远程挂远程）。
+export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
+  const handle = `mock_${platform}`;
+  const remote = computersOf().computers.find((c) => c.kind === "remote") ?? computersOf().computers[0];
+  if (remote === undefined) throw new Error("mock 里至少有一台电脑");
+  const existing = [...accounts.values()].find((a) => a.platform === platform && a.handle === handle);
+  const stamp = now();
+  const next = Account.parse(
+    existing === undefined
+      ? {
+          id: `acc_${nextSuffix()}`,
+          ownerId: user.id,
+          computerId: remote.id,
+          platform,
+          handle,
+          tier: "confirm_publish",
+          login: "valid",
+          loginChangedAt: stamp,
+          createdAt: stamp,
+        }
+      : {
+          ...existing,
+          computerId: remote.id,
+          login: "valid",
+          loginChangedAt: existing.login === "valid" ? existing.loginChangedAt : stamp,
+        },
+  );
+  accounts.set(next.id, next);
+  return next;
 };
 
 // 照控制面：只是把登录窗口打开，账号原样回 202，带回页面取的尝试号；登上没有要等电脑报 login_state，

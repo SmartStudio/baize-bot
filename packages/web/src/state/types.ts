@@ -35,6 +35,7 @@ import {
   type UsageResponse,
 } from "@baize/shared";
 import type { BotListItem, GroupListItem } from "@baize/shared";
+import type { MY_ROUTINES } from "./routines.js";
 import type { Seq, Shelf, Stamps } from "./stamped.js";
 
 // 一次登录就绪算一个会话，每次就绪换一个号。会话里发起的异步动作都带着发起时的号，号对不上就丢，见 reducer.ts。
@@ -42,7 +43,7 @@ export type SessionId = number & { readonly __session: unique symbol };
 
 // 群历史、例行、会做的活三种按桶拉的列表各自的拉取状态。没有记录就是 idle。
 export type LoadStatus = "idle" | "loading" | "failed";
-export type LoadKey = `messages:${GroupId}` | `routines:${BotId}` | `skills:${BotId}`;
+export type LoadKey = `messages:${GroupId}` | "routines" | `skills:${BotId}`;
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
 
@@ -109,7 +110,7 @@ export type AppState =
       messages: Shelf<GroupId, Message>;
       approvals: Record<ApprovalId, Approval>;
       handoffs: Record<HandoffId, Handoff>;
-      routines: Shelf<BotId, Routine>;
+      routines: Shelf<typeof MY_ROUTINES, Routine>;
       skills: Shelf<BotId, Skill>;
       tools: ToolConnection[];
       settings: Settings;
@@ -158,9 +159,9 @@ export type Action =
   | { type: "handoffs_loaded"; handoffs: Handoff[] }
   | { type: "handoff_pushed"; handoff: Handoff }
   | { type: "pending_counts_loaded"; bots: BotListItem[]; groups: GroupListItem[] }
-  | { type: "routines_loaded"; botId: BotId; routines: Routine[]; seq: Seq }
+  | { type: "routines_loaded"; routines: Routine[]; seq: Seq }
   | { type: "routine_upserted"; routine: Routine; seq: Seq }
-  | { type: "routine_removed"; botId: BotId; routineId: RoutineId; seq: Seq }
+  | { type: "routine_removed"; routineId: RoutineId; seq: Seq }
   | { type: "skills_loaded"; botId: BotId; skills: Skill[]; seq: Seq }
   | { type: "skill_upserted"; skill: Skill; seq: Seq }
   | { type: "skill_removed"; botId: BotId; skillId: SkillId; seq: Seq }

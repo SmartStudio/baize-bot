@@ -7,6 +7,7 @@ import {
   GroupId,
   GrantTarget,
   LoginAttemptId,
+  MessageBody,
   Notice,
   ServerPush,
   RunId,
@@ -28,6 +29,7 @@ import {
   publishDraft,
   removeBot,
   reseed,
+  restoreAssistant,
   resetToday,
   seedProjectPage,
   reviseDraft,
@@ -46,7 +48,7 @@ const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
   .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
   .strict();
-const TestMessageRequest = z.object({ groupId: GroupId, text: z.string().min(1) }).strict();
+const TestMessageRequest = z.object({ groupId: GroupId, text: z.string().min(1), botId: BotId.optional() }).strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
@@ -72,6 +74,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
   // 控制面不让删主助理，mock 也不让；还没有主助理的账号只能从这里直接造。
   if (method === "POST" && path === "/api/test/without-assistant") {
     removeBot(BotId.parse("bot_assistant"));
+    send(res, 204);
+    return true;
+  }
+
+  // 照控制面电脑 hello 补建主助理：推送依次是 bot_updated、group_created、开场白那条 message。
+  if (method === "POST" && path === "/api/test/assistant-hello") {
+    const restored = restoreAssistant();
+    push({ type: "bot_updated", bot: restored.bot });
+    push({ type: "group_created", group: restored.group, task: restored.task });
+    push({ type: "message", message: restored.greeting });
     send(res, 204);
     return true;
   }
@@ -155,7 +167,10 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     const parsed = TestMessageRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "消息参数不对" });
     else {
-      push({ type: "message", message: appendMessage(parsed.data.groupId, { kind: "user", text: parsed.data.text }) });
+      const { groupId, text, botId } = parsed.data;
+      const body: MessageBody =
+        botId === undefined ? { kind: "user", text } : { kind: "bot", botId, text, streaming: false };
+      push({ type: "message", message: appendMessage(groupId, body) });
       send(res, 204);
     }
     return true;

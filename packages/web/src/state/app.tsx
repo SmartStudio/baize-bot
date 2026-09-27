@@ -22,7 +22,6 @@ import {
   type CreateSkillRequest,
   type CreateToolRequest,
   type DecideSkillOfferRequest,
-  type Routine,
   type RoutineId,
   type Settings,
   type Skill,
@@ -76,10 +75,10 @@ export type AppActions = {
   deleteGrant: (grantId: GrantId) => Promise<void>;
   pauseBot: (botId: BotId) => Promise<void>;
   resumeBot: (botId: BotId) => Promise<void>;
-  loadRoutines: (botId: BotId) => Promise<void>;
+  loadRoutines: () => Promise<void>;
   createRoutine: (botId: BotId, draft: CreateRoutineRequest) => Promise<void>;
   updateRoutine: (routineId: RoutineId, patch: UpdateRoutineRequest) => Promise<void>;
-  deleteRoutine: (routine: Routine) => Promise<void>;
+  deleteRoutine: (routineId: RoutineId) => Promise<void>;
   runRoutine: (routineId: RoutineId) => Promise<void>;
   loadSkills: (botId: BotId) => Promise<void>;
   createSkill: (botId: BotId, draft: CreateSkillRequest) => Promise<void>;
@@ -375,9 +374,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       resumeBot: signedIn(async ({ api, put }, botId: BotId) => {
         put({ type: "bot_updated", bot: await api.resumeBot(botId) });
       }),
-      loadRoutines: signedIn((scope, botId: BotId) =>
-        loadBucket(scope, `routines:${botId}`, ANY_FLIGHT, async (seq) => {
-          scope.put({ type: "routines_loaded", botId, routines: (await scope.api.routines(botId)).items, seq });
+      loadRoutines: signedIn((scope) =>
+        loadBucket(scope, "routines", ANY_FLIGHT, async (seq) => {
+          scope.put({ type: "routines_loaded", routines: (await scope.api.routines()).items, seq });
         }),
       ),
       createRoutine: signedIn(async ({ api, put }, botId: BotId, draft: CreateRoutineRequest) => {
@@ -388,11 +387,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const seq = nextSeq();
         put({ type: "routine_upserted", routine: await api.updateRoutine(routineId, patch), seq });
       }),
-      // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
-      deleteRoutine: signedIn(async ({ api, put }, routine: Routine) => {
+      deleteRoutine: signedIn(async ({ api, put }, routineId: RoutineId) => {
         const seq = nextSeq();
-        await api.deleteRoutine(routine.id);
-        put({ type: "routine_removed", botId: routine.botId, routineId: routine.id, seq });
+        await api.deleteRoutine(routineId);
+        put({ type: "routine_removed", routineId, seq });
       }),
       runRoutine: signedIn(async ({ api, put }, routineId: RoutineId) => {
         const seq = nextSeq();
@@ -432,17 +430,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       ),
       decideProjectOffer: signedIn(async ({ api, put }, messageId: MessageId, request: DecideProjectOfferRequest) => {
         const seq = nextSeq();
-        const { message, group } = await api.decideProjectOffer(messageId, request);
+        const { message, group, task } = await api.decideProjectOffer(messageId, request);
         put({ type: "message_upserted", message, seq });
-        if (group === null) return undefined;
-        // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页。回包没带任务卡，从列表补一份。
-        // 控制面给每个新队员都建了单聊却不推，一并从 Bot 列表补进来，团队页才有「单聊」。
-        const [groups, bots] = await Promise.all([api.groups(), api.bots()]);
-        const joined = groups.items.find((item) => item.group.id === group.id);
-        for (const item of bots.items) {
+        if (group === null || task === null) return undefined;
+        // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页，所以拿回包先入列。
+        put({ type: "group_created", group, task });
+        // 控制面给每个新队员都建了单聊，推送里的 bot_updated 却不带单聊的群 id，只能从 Bot 列表补，团队页才有「单聊」。
+        for (const item of (await api.bots()).items) {
           if (group.botIds.includes(item.bot.id)) put({ type: "bot_created", bot: item.bot, groupId: item.groupId });
         }
-        if (joined !== undefined) put({ type: "group_created", group: joined.group, task: joined.task });
         return group.id;
       }),
       createTool: signedIn(async ({ api, put }, draft: CreateToolRequest) => {

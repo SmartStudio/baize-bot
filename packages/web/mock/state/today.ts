@@ -53,7 +53,7 @@ const assistantGroupIdOf = (): GroupId | null => {
 const assistantLatestOf = (): TodayAssistantLine | null => {
   const groupId = groupIdByBotId.get("bot_assistant");
   const said = (groupId === undefined ? [] : (messagesByGroupId.get(groupId) ?? [])).findLast(
-    (message) => message.body.kind === "bot" && message.body.text !== "",
+    (message) => message.body.kind === "bot" && !message.body.streaming && message.body.text !== "",
   );
   if (said === undefined || said.body.kind !== "bot") return null;
   // 跟控制面同一个口径：按 UTF-16 码元数到 200，一个码点一个码点地收，不劈开 emoji。

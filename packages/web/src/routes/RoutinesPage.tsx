@@ -3,6 +3,7 @@ import { ChevronLeft, Clock, Copy, Globe, Play, Plus, ShieldCheck, X } from "luc
 import { OnFailure, type Bot, type BotId, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { useApp } from "../state/app.js";
+import { MY_ROUTINES } from "../state/routines.js";
 import { CRON_PRESETS, DEFAULT_TIME, cronExprOf, cronPresetOf, describeTriggers } from "../components/routines/cron.js";
 
 type RoutineRun = Routine["runs"][number];
@@ -313,7 +314,6 @@ const RoutineRow = ({ routine, bot, onOpen }: { routine: Routine; bot: Bot; onOp
   );
 };
 
-// 例行现在都挂在单 Bot 群上，控制面只有按 Bot 取的接口，这一页把每个 Bot 的那一份拼起来。
 export const RoutinesPage = () => {
   const { state, actions } = useApp();
   const [view, setView] = useState<View>({ kind: "list" });
@@ -323,13 +323,12 @@ export const RoutinesPage = () => {
 
   const ready = state.status === "ready" ? state : null;
   const bots = ready === null ? [] : Object.values(ready.bots);
-  const missing = bots.filter((bot) => ready?.routines.rows[bot.id] === undefined).map((bot) => bot.id);
-  const statusOf = (botId: BotId) => ready?.loads[`routines:${botId}`] ?? "idle";
-  const failed = missing.filter((botId) => statusOf(botId) === "failed");
+  const loaded = ready?.routines.rows[MY_ROUTINES];
+  const load = ready?.loads.routines ?? "idle";
 
   // 在途的和拉失败的都不再自动要：前者等它回来，后者等用户点重试，免得 500 时每次重渲都打一遍。
   useEffect(() => {
-    for (const botId of missing) if (statusOf(botId) === "idle") void actions.loadRoutines(botId);
+    if (ready !== null && loaded === undefined && load === "idle") void actions.loadRoutines();
   });
 
   useEffect(() => {
@@ -340,7 +339,11 @@ export const RoutinesPage = () => {
 
   if (ready === null) return null;
 
-  const rows = bots.flatMap((bot) => (ready.routines.rows[bot.id] ?? []).map((routine) => ({ routine, bot })));
+  // 例行跟着 Bot 走，Bot 删了例行也删；推送先后没对上的那一小会儿，找不到 Bot 的先不显示。
+  const rows = (loaded ?? []).flatMap((routine) => {
+    const bot = ready.bots[routine.botId];
+    return bot === undefined ? [] : [{ routine, bot }];
+  });
   const toList = () => {
     setDeleteRoutineId(null);
     setView({ kind: "list" });
@@ -439,7 +442,7 @@ export const RoutinesPage = () => {
                   onClick={() => {
                     setDeleteRoutineId(null);
                     void actions
-                      .deleteRoutine(routine)
+                      .deleteRoutine(routine.id)
                       .then(toList)
                       .catch(() => undefined);
                   }}
@@ -504,23 +507,21 @@ export const RoutinesPage = () => {
           <h3>日常</h3>
           <span>只属于你，不挂项目</span>
         </div>
-        {failed.length > 0 ? (
+        {loaded === undefined && load === "failed" ? (
           <p className="routines-empty" role="alert" data-testid="routines-failed">
-            有 {failed.length} 个 Bot 的例行没拉下来。{" "}
+            例行没拉下来。{" "}
             <button
               type="button"
               className="ghost-button"
               data-testid="routines-retry"
-              onClick={() => {
-                for (const botId of failed) void actions.loadRoutines(botId);
-              }}
+              onClick={() => void actions.loadRoutines()}
             >
               重试
             </button>
           </p>
         ) : null}
-        {missing.length > failed.length && rows.length === 0 ? <p className="routines-empty">在拉例行任务…</p> : null}
-        {missing.length === 0 && rows.length === 0 ? (
+        {loaded === undefined && load !== "failed" ? <p className="routines-empty">在拉例行任务…</p> : null}
+        {loaded !== undefined && rows.length === 0 ? (
           <p className="routines-empty">还没有例行任务。走通一次的活可以存下来，让它定时自己跑。</p>
         ) : null}
         {rows.map(({ routine, bot }) => (

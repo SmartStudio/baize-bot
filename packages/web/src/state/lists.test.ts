@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BotId, Routine, Skill } from "@baize/shared";
-import { reduceRoutines } from "./routines.js";
+import { MY_ROUTINES, reduceRoutines } from "./routines.js";
 import { reduceSkills } from "./skills.js";
 import { createClock, emptyShelf } from "./stamped.js";
 import type { ReadyState } from "./types.js";
@@ -36,7 +36,7 @@ const skill = (id: string) =>
 // 这几条动作只读写例行任务和 skill，别的字段用不上。
 const initial = { routines: emptyShelf(), skills: emptyShelf() } as unknown as ReadyState;
 
-const routineIds = (state: ReadyState) => state.routines.rows[BOT_ID]?.map((r) => r.id);
+const routineIds = (state: ReadyState) => state.routines.rows[MY_ROUTINES]?.map((r) => r.id);
 const skillIds = (state: ReadyState) => state.skills.rows[BOT_ID]?.map((s) => s.id);
 
 describe("删除推送和在途的列表", () => {
@@ -44,20 +44,17 @@ describe("删除推送和在途的列表", () => {
     const next = createClock();
     const loaded = reduceRoutines(initial, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_1"), routine("routine_2")],
       seq: next(),
     });
     const inFlight = next();
     const removed = reduceRoutines(loaded, {
       type: "routine_removed",
-      botId: BOT_ID,
       routineId: "routine_1" as Routine["id"],
       seq: next(),
     });
     const late = reduceRoutines(removed, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_1"), routine("routine_2")],
       seq: inFlight,
     });
@@ -111,7 +108,6 @@ describe("删除推送和在途的列表", () => {
     const next = createClock();
     const loaded = reduceRoutines(initial, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_1"), routine("routine_2")],
       seq: next(),
     });
@@ -119,7 +115,6 @@ describe("删除推送和在途的列表", () => {
     const created = reduceRoutines(loaded, { type: "routine_upserted", routine: routine("routine_3"), seq: next() });
     const reloaded = reduceRoutines(created, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_2")],
       seq: request,
     });
@@ -153,14 +148,12 @@ describe("首次列表还在路上时到的推送", () => {
     const request = next();
     const removed = reduceRoutines(initial, {
       type: "routine_removed",
-      botId: BOT_ID,
       routineId: "routine_1" as Routine["id"],
       seq: next(),
     });
     expect(routineIds(removed), "推送不能把列表算成拉过").toBeUndefined();
     const late = reduceRoutines(removed, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_1"), routine("routine_2")],
       seq: request,
     });
@@ -174,7 +167,6 @@ describe("首次列表还在路上时到的推送", () => {
     expect(routineIds(created), "推送不能把列表算成拉过").toBeUndefined();
     const late = reduceRoutines(created, {
       type: "routines_loaded",
-      botId: BOT_ID,
       routines: [routine("routine_1")],
       seq: request,
     });

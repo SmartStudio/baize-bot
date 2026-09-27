@@ -1,4 +1,4 @@
-import type { ComputerId, ServerPush } from "@baize/shared";
+import type { ComputerId, GroupId, ServerPush } from "@baize/shared";
 import type { Action, AppState, ReadyState, SessionId } from "./types.js";
 import { notifyNotice } from "./notify.js";
 import type { Seq } from "./stamped.js";
@@ -33,9 +33,19 @@ export const createPushHandlers = ({
     const state = stateRef.current;
     return live() && state.status === "ready" && state.session === session ? state : null;
   };
+  // 首页那句「主助理最近一句」来自今天快照，主助理在单聊里说完一句就得重拉。
+  const inAssistantChat = (groupId: GroupId): boolean => {
+    const state = mine();
+    const chat = state?.conversations.find((c) => c.groupId === groupId);
+    return chat?.kind === "solo" && state?.bots[chat.botId]?.role === "assistant";
+  };
   return {
-    message: (push, seq) => dispatch({ type: "message_upserted", message: push.message, seq }),
-    message_delta: (push, seq) =>
+    message: (push, seq) => {
+      dispatch({ type: "message_upserted", message: push.message, seq });
+      const { body, groupId } = push.message;
+      if (body.kind === "bot" && !body.streaming && body.text !== "" && inAssistantChat(groupId)) bumpToday();
+    },
+    message_delta: (push, seq) => {
       dispatch({
         type: "message_delta",
         messageId: push.messageId,
@@ -43,12 +53,16 @@ export const createPushHandlers = ({
         delta: push.delta,
         done: push.done,
         seq,
-      }),
+      });
+      if (push.done && inAssistantChat(push.groupId)) bumpToday();
+    },
     bot_updated: (push) => dispatch({ type: "bot_updated", bot: push.bot }),
     bot_deleted: (push) => dispatch({ type: "bot_removed", botId: push.botId }),
     group_created: (push) => {
       // 建群的人已经从 POST 的响应知道了这个群。这条推送是给同一个账号别的窗口看的，不抢它们当下的选中。
       dispatch({ type: "group_created", group: push.group, task: push.task });
+      // 电脑 hello 补建主助理时首页的快照里 assistantGroupId 还是 null，输入框禁用着，要重拉才解开。
+      bumpToday();
     },
     group_updated: (push) => dispatch({ type: "group_updated", group: push.group }),
     group_turn: (push) => dispatch({ type: "group_turn", turn: push }),
@@ -71,8 +85,7 @@ export const createPushHandlers = ({
       if (unseenTerminal) refreshPendingCounts();
     },
     routine_updated: (push, seq) => dispatch({ type: "routine_upserted", routine: push.routine, seq }),
-    routine_deleted: (push, seq) =>
-      dispatch({ type: "routine_removed", botId: push.botId, routineId: push.routineId, seq }),
+    routine_deleted: (push, seq) => dispatch({ type: "routine_removed", routineId: push.routineId, seq }),
     skill_updated: (push, seq) => dispatch({ type: "skill_upserted", skill: push.skill, seq }),
     skill_deleted: (push, seq) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId, seq }),
     draft_updated: (push, seq) => {

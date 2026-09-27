@@ -36,6 +36,7 @@ import {
   drafts,
   messagesByGroupId,
   nextSuffix,
+  nextTaskNumber,
   ranAt,
   resetSuffix,
   resetTaskNumber,
@@ -195,6 +196,58 @@ export const removeBot = (botId: BotId): void => {
   groups.delete(groupId);
   messagesByGroupId.delete(groupId);
   groupIdByBotId.delete(botId);
+};
+
+// 照控制面电脑 hello 时的 ensureAssistant：给还没有主助理的账号补建主助理、它的单聊和那一句开场白。
+export const restoreAssistant = () => {
+  const seed = seeds.find((item) => item.key === "assistant");
+  if (seed === undefined) throw new Error("mock 种子里没有主助理");
+  const stamp = new Date().toISOString();
+  const bot = Bot.parse({
+    id: "bot_assistant",
+    ownerId: user.id,
+    role: seed.role,
+    runState: "running",
+    name: seed.name,
+    tag: seed.tag,
+    description: seed.description,
+    hue: seed.hue,
+    notify: true,
+    toolConnectionIds: [],
+    createdAt: stamp,
+  });
+  const group = Group.parse({
+    id: "grp_assistant",
+    ownerId: user.id,
+    botIds: [bot.id],
+    taskId: "tsk_assistant",
+    chiefBotId: null,
+    createdAt: stamp,
+  });
+  const task = TopicTask.parse({
+    id: group.taskId,
+    groupId: group.id,
+    number: nextTaskNumber(),
+    title: seed.name,
+    summary: "",
+    cadence: "",
+    dueAt: null,
+    checklist: [],
+    currentBotId: null,
+    handled: [],
+    status: "active",
+  });
+  const greeting = Message.parse({
+    id: `msg_${nextSuffix()}`,
+    groupId: group.id,
+    body: seed.bodies[0],
+    createdAt: stamp,
+  });
+  bots.set(bot.id, bot);
+  groups.set(group.id, group);
+  groupIdByBotId.set(bot.id, group.id);
+  messagesByGroupId.set(group.id, [greeting]);
+  return { bot, group, task, greeting };
 };
 
 export const reseed = (): void => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { X } from "lucide-react";
 import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
 import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
@@ -19,6 +20,7 @@ import { useApp } from "../state/app.js";
 import { useToday } from "../state/today.js";
 import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
+import { oauthNoticeText, oauthReturnOf, type OAuthReturn } from "./oauth.js";
 
 type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-project";
 
@@ -36,7 +38,8 @@ const ProjectView = (props: Omit<React.ComponentProps<typeof ProjectPage>, "proj
 export const MainWindow = () => {
   const { state, actions } = useApp();
   const navigate = useNavigate();
-  const screen = screenOf(useLocation().pathname);
+  const location = useLocation();
+  const screen = screenOf(location.pathname);
   const today = useToday();
   const [overlay, setOverlay] = useState<Overlay>("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
@@ -67,6 +70,17 @@ export const MainWindow = () => {
     if (onToday && !wasOnToday.current) void refreshToday();
     wasOnToday.current = onToday;
   }, [onToday, refreshToday]);
+
+  // 授权回跳是整页 302 回来的，主窗口挂上那一刻读一次；读完把查询串从地址栏换掉，刷新不再提示。
+  const [oauth, setOauth] = useState<OAuthReturn | null>(() => oauthReturnOf(new URLSearchParams(location.search)));
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has("oauth") && !params.has("result")) return;
+    params.delete("oauth");
+    params.delete("result");
+    const rest = params.toString();
+    navigate({ pathname: location.pathname, search: rest === "" ? "" : `?${rest}` }, { replace: true });
+  }, [location.pathname, location.search, navigate]);
 
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
@@ -195,6 +209,33 @@ export const MainWindow = () => {
           onResume={actions.resumeBot}
           onOpenTools={() => setOverlay("tools")}
         />
+      ) : null}
+      {oauth !== null ? (
+        <div className="oauth-notice" role="status" data-testid="oauth-notice" data-result={oauth.result}>
+          <span>{oauthNoticeText(oauth)}</span>
+          {oauth.result === "connected" ? (
+            <button
+              type="button"
+              className="link-button"
+              data-testid="oauth-notice-accounts"
+              onClick={() => {
+                setOauth(null);
+                setOverlay("accounts");
+              }}
+            >
+              看账号
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="关掉提示"
+            data-testid="oauth-notice-close"
+            onClick={() => setOauth(null)}
+          >
+            <X size={14} aria-hidden="true" />
+          </button>
+        </div>
       ) : null}
       {inspected === null && team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />

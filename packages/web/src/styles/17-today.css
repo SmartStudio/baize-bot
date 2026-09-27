@@ -375,3 +375,38 @@ a.today-row {
     flex-direction: column-reverse;
   }
 }
+
+.today-assistant {
+  display: flex;
+  gap: var(--space-4);
+  align-items: baseline;
+  width: 100%;
+  margin: 0 0 var(--space-5);
+  padding: var(--space-4) var(--space-5);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  color: var(--fg-2);
+  text-align: left;
+}
+
+button.today-assistant {
+  cursor: pointer;
+}
+
+button.today-assistant:hover {
+  color: var(--fg-1);
+}
+
+.today-assistant-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-assistant small {
+  flex: none;
+  color: var(--fg-4);
+}

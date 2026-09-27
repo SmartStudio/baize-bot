@@ -10,7 +10,7 @@ import {
   Sparkles,
   TriangleAlert,
 } from "lucide-react";
-import type { ApprovalId, DecideApprovalRequest, GroupId, TodayResponse } from "@baize/shared";
+import type { ApprovalId, DecideApprovalRequest, GroupId, TodayAssistantLine, TodayResponse } from "@baize/shared";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
 import { DraftCard, PlanCard, type ContentActions } from "../components/messages/DraftCards.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
@@ -320,6 +320,28 @@ const TodaySection = ({
   </section>
 );
 
+// 主助理最近说的那一句，点了进单聊接着聊。
+const AssistantLatest = ({ line, onOpen }: { line: TodayAssistantLine; onOpen: (() => void) | null }) => {
+  const content = (
+    <>
+      <span className="today-kicker">主助理</span>
+      <span className="today-assistant-text" data-testid="today-assistant-text">
+        {line.text}
+      </span>
+      <small>{timeText(line.at)}</small>
+    </>
+  );
+  return onOpen === null ? (
+    <p className="today-assistant" data-testid="today-assistant-latest">
+      {content}
+    </p>
+  ) : (
+    <button type="button" className="today-assistant" data-testid="today-assistant-latest" onClick={onOpen}>
+      {content}
+    </button>
+  );
+};
+
 type Props = {
   today: Today;
   userName: string;
@@ -355,14 +377,15 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
   }
 
   const pendingCount = data.pending.length;
-  const disabled = data.assistantGroupId === null;
+  const assistantGroupId = data.assistantGroupId;
+  const disabled = assistantGroupId === null;
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
-    if (disabled || sending || text.length === 0 || data.assistantGroupId === null) return;
+    if (sending || text.length === 0 || assistantGroupId === null) return;
     setSending(true);
     setSendError(null);
-    void onSend(data.assistantGroupId, text)
+    void onSend(assistantGroupId, text)
       .then(() => setDraft(""))
       .catch(() => setSendError("没发出去，请重试"))
       .finally(() => setSending(false));
@@ -377,6 +400,12 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
             {pendingCount > 0 ? `${pendingCount} 件事等你，其余在按计划跑。` : "没有要你处理的事，其余在按计划跑。"}
           </p>
         </header>
+        {data.assistantLatest === null ? null : (
+          <AssistantLatest
+            line={data.assistantLatest}
+            onOpen={assistantGroupId === null ? null : () => onOpenGroup(assistantGroupId)}
+          />
+        )}
         {error === null ? null : (
           <p className="today-refresh-error" role="status">
             {error}

@@ -73,6 +73,9 @@ import {
 // shared 只导出了这份请求的 schema，没有同名类型。
 export type DecideProjectOfferRequest = z.infer<typeof DecideProjectOfferRequestSchema>;
 
+// 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它当链接。
+export const oauthStartUrl = (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`;
+
 export class RequestFailed extends Error {
   constructor(
     readonly status: number,
@@ -173,8 +176,6 @@ export const createApi = (signal?: AbortSignal) => {
       const body: LoginAccountRequest = { attempt };
       return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
     },
-    // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它设 location。
-    oauthStartUrl: (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`,
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
     grants: async () => json(GrantListResponse, await send("GET", "/grants")),
     deleteGrant: async (id: GrantId): Promise<void> => {
@@ -184,8 +185,7 @@ export const createApi = (signal?: AbortSignal) => {
       (await json(BotResponse, await send("POST", `/bots/${encodeURIComponent(id)}/pause`))).bot,
     resumeBot: async (id: BotId): Promise<Bot> =>
       (await json(BotResponse, await send("POST", `/bots/${encodeURIComponent(id)}/resume`))).bot,
-    routines: async (botId: BotId) =>
-      json(RoutineListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/routines`)),
+    routines: async () => json(RoutineListResponse, await send("GET", "/routines")),
     createRoutine: async (botId: BotId, body: CreateRoutineRequest): Promise<Routine> =>
       (await json(RoutineResponse, await send("POST", `/bots/${encodeURIComponent(botId)}/routines`, body))).routine,
     updateRoutine: async (id: RoutineId, patch: UpdateRoutineRequest): Promise<Routine> =>
