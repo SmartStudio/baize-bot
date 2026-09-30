@@ -97,6 +97,9 @@ const TOKEN_TIMEOUT_MS = 10_000;
  */
 const UNSAFE_TOKEN_CHAR = /[\\%]|[^\x20-\x7e]/;
 
+/** 访问令牌含账号代理替换不了的字符。令牌端点和 account-add 脚本两个入口都拿它挡。 */
+export const unsafeAccessToken = (token: string): boolean => UNSAFE_TOKEN_CHAR.test(token);
+
 export function notConfigured(platform: OAuthPlatform, endpoints: OAuthEndpoints): string | null {
   const provider = PROVIDERS[platform];
   return provider.client(endpoints) === null ? provider.notConfigured : null;
@@ -194,8 +197,10 @@ export async function requestToken(
   }
   const accessToken = at(json, "access_token");
   if (typeof accessToken !== "string" || accessToken === "") throw new Error("令牌端点的回应里没有 access_token");
-  if (UNSAFE_TOKEN_CHAR.test(accessToken)) {
-    throw new Error("令牌端点发来的访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收");
+  if (unsafeAccessToken(accessToken)) {
+    console.error(`${platform} 令牌端点发来的访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收`);
+    // 授权码和刷新令牌都只能用一次，平台发出这把令牌时已经把它们用掉了，再试也换不到，只能让用户重新授权。
+    return { kind: "rejected" };
   }
   const refreshToken = at(json, "refresh_token");
   const scope = at(json, "scope");

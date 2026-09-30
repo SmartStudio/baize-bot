@@ -4,6 +4,7 @@ import { addAccountWithToken, CredentialCrypto } from "../credentials.js";
 import { connect } from "../db/client.js";
 import { credentialsKey, databaseUrl } from "../env.js";
 import { ensureComputer } from "../repo/computers.js";
+import { unsafeAccessToken } from "../oauth-providers.js";
 import { findUserByEmail } from "../repo/users.js";
 
 // 只给开发用：手里有一把令牌，想跳过授权页直接挂一个 GitHub、X 账号调发布器。令牌加密进 account_credentials，
@@ -37,6 +38,13 @@ if (
   (tier !== undefined && !tier.success)
 ) {
   console.error(USAGE);
+  process.exit(1);
+}
+// 和令牌端点同一道校验：这类字符会让账号代理替换回显令牌时回溯卡死，或者认不出单字节写法。
+if (unsafeAccessToken(values.token)) {
+  console.error(
+    "令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收。GitHub、X 的令牌不含这些字符，看看是不是复制错了",
+  );
   process.exit(1);
 }
 

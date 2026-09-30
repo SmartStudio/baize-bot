@@ -1,6 +1,8 @@
 import { CreateBotResponse, MessageListResponse, type GroupId, type RunId, type ServerPush } from "@baize/shared";
+import { format } from "node:util";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
+import * as runsRepo from "../src/repo/runs.js";
 import * as skillsRepo from "../src/repo/skills.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -178,6 +180,10 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
   const other = await ownerWithBot();
   const otherAgent = (await helloAgent(server.port, other.computer.computerId, other.computer.token)).agent;
   const push = await connectPush(server.port, other.client.cookie ?? "");
+  const logged: string[] = [];
+  const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    logged.push(format(...args));
+  });
   try {
     await post(victim.client, victim.groupId, "做这件事");
     const { runId } = await victimAgent.expect("prompt");
@@ -198,7 +204,12 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
       "哨兵那句",
     );
     expect(await openRuns(victim.groupId), "别的电脑报的 runId 是外部输入，不能拿来收尾这台电脑的活").toBe(1);
+    expect(
+      logged.filter((line) => line.includes(foreign) && line.includes("prompt_before_config")),
+      "对不上的报错不在群里说，但留一行日志",
+    ).toHaveLength(1);
   } finally {
+    errors.mockRestore();
     victimAgent.close();
     otherAgent.close();
     push.close();
@@ -244,8 +255,8 @@ it("代理拒了 config：这台电脑不再接活，派出去的 run 按版本�
     expect(await openRuns(owner.groupId), "被拒之后不再往这台电脑派活，也不留 running 的 run").toBe(0);
     expect(
       (await systemTexts(owner.client, owner.groupId)).at(-1),
-      "被拒期间发的话，群里说的是配置被拒这个真实原因，不是电脑不在线",
-    ).toContain("电脑拒收了配置");
+      "被拒期间发的话，群里说真实原因和该做什么：电脑上的白泽要升级或重启，不是电脑不在线",
+    ).toBe("电脑上的白泽版本和控制面对不上，这条没派出去，把电脑上的白泽升级或重启后再说一次");
 
     agent.send({ type: "config_applied", generation: 1 });
     await post(owner.client, owner.groupId, "收下新 config 之后的活");
@@ -263,6 +274,98 @@ it("代理拒了 config：这台电脑不再接活，派出去的 run 按版本�
     ).toBe(false);
   } finally {
     agent.close();
+    push.close();
+  }
+});
+
+it("agent_error 带的群号和 runId 所在的群不一致：按库里 run 的群收尾，报文里的群号不作数", async () => {
+  const owner = await ownerWithBot();
+  const other = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小二" })).json());
+  const { agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  try {
+    await post(owner.client, other.group.id, "在第二个群里做这件事");
+    const { runId } = await agent.expect("prompt");
+    agent.send({
+      type: "agent_error",
+      code: "prompt_before_config",
+      detail: "报文里的群号指错了",
+      groupId: owner.groupId,
+      runId,
+    });
+    const note = await nextMatching(
+      push,
+      (event) =>
+        event.type === "message" &&
+        event.message.body.kind === "system" &&
+        event.message.body.text.includes("配置还没到就先接到了活"),
+      "收尾那句",
+    );
+    expect(note.type === "message" ? note.message.groupId : null, "收尾那句落在 run 所在的群").toBe(other.group.id);
+    expect(await openRuns(other.group.id), "run 所在的群里那个 run 收了尾").toBe(0);
+  } finally {
+    agent.close();
+    push.close();
+  }
+});
+
+it("代理报错收尾和新连接 hello 对账同时读到同一个还开着的 run：只有一边收尾，群里只说一句", async () => {
+  const owner = await ownerWithBot();
+  const first = await helloAgent(server.port, owner.computer.computerId, owner.computer.token);
+  const push = await connectPush(server.port, owner.client.cookie ?? "");
+  const original = runsRepo.openRunsForComputer;
+  let arrived = 0;
+  let firstRead!: () => void;
+  const firstReadDone = new Promise<void>((resolve) => (firstRead = resolve));
+  let bothRead!: () => void;
+  const bothReadDone = new Promise<void>((resolve) => (bothRead = resolve));
+  const spy = vi.spyOn(runsRepo, "openRunsForComputer").mockImplementation(async (db, computerId) => {
+    const open = await original(db, computerId);
+    arrived += 1;
+    if (arrived === 1) firstRead();
+    if (arrived === 2) bothRead();
+    if (arrived <= 2) await bothReadDone;
+    return open;
+  });
+  let second: AgentClient | null = null;
+  try {
+    await post(owner.client, owner.groupId, "做这件事");
+    const { runId } = await first.agent.expect("prompt");
+    first.agent.send({
+      type: "agent_error",
+      code: "prompt_before_config",
+      detail: `run ${runId} 的 prompt 比 config 先到`,
+      groupId: owner.groupId,
+      runId,
+    });
+    first.agent.send({ type: "agent_error", code: "unsupported", detail: "哨兵", groupId: owner.groupId });
+    await firstReadDone;
+
+    second = await openAgent(server.port);
+    second.send({
+      type: "hello",
+      computerId: owner.computer.computerId,
+      token: owner.computer.token,
+      version: "test",
+      activeRuns: [],
+    });
+    await second.expect("welcome");
+    await nextMatching(
+      push,
+      (event) =>
+        event.type === "message" && event.message.body.kind === "system" && event.message.body.text.includes("哨兵"),
+      "哨兵那句",
+    );
+
+    expect(await openRuns(owner.groupId)).toBe(0);
+    const notes = (await systemTexts(owner.client, owner.groupId)).filter(
+      (text) => text.includes("配置还没到就先接到了活") || text.includes("电脑断过线"),
+    );
+    expect(notes, "两边都以为 run 还开着，只有先结束它的那边说话").toHaveLength(1);
+  } finally {
+    spy.mockRestore();
+    first.agent.close();
+    second?.close();
     push.close();
   }
 });

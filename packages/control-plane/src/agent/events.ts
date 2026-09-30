@@ -469,9 +469,13 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
       ? modelFailureMessage(event.detail)
       : `电脑那边没干成这件事，${reason}。原话是：${event.detail}`;
   if (event.runId !== undefined) {
-    // runId 是外部输入，只认这台电脑上还没结束的活。已经收过尾的重报落在这里，什么都不做。
+    // runId 是外部输入，只认这台电脑上还没结束的活。已经收过尾的重报落在这里，只留一行日志。
     const run = (await openRunsForComputer(deps.db, conn.computerId)).find((open) => open.runId === event.runId);
     if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason });
+    else
+      console.error(
+        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${event.detail}`,
+      );
     return;
   }
   // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。

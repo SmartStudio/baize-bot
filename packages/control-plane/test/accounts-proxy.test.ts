@@ -371,6 +371,70 @@ describe("账号代理", () => {
     expect(s.fake.requests().findLast(isUser)?.authorization, "重试用的是刷出来的新令牌").toBe(`Bearer ${newToken}`);
   });
 
+  /** 旧令牌挨一次 401，刷出 freshOf(旧令牌) 这把新令牌，拿新令牌重试时平台回 bodyOf(旧, 新)。 */
+  async function afterRefresh(
+    freshOf: (old: string) => string,
+    bodyOf: (old: string, fresh: string) => string,
+  ): Promise<{ readonly response: Response; readonly oldToken: string; readonly newToken: string }> {
+    const before = s.fake.requests().length;
+    const { owner, linked } = await ownerWith(["github"]);
+    const [github] = linked;
+    if (github === undefined) throw new Error("没连上 GitHub");
+    const oldToken =
+      s.fake
+        .requests()
+        .slice(before)
+        .find((request) => request.method === "GET")
+        ?.authorization?.replace(/^Bearer /, "") ?? "";
+    expect(oldToken, "连 GitHub 时发出过访问令牌").not.toBe("");
+    const newToken = freshOf(oldToken);
+    const sentWith = (token: string) => (request: { platform: string; path: string; authorization: string | null }) =>
+      isUser(request) && request.authorization === `Bearer ${token}`;
+    s.fake.failNext(401, sentWith(oldToken));
+    s.fake.failNext(200, isRefresh, {
+      access_token: newToken,
+      expires_in: 8 * 3600,
+      refresh_token: "github_refresh_next",
+      token_type: "bearer",
+    });
+    s.fake.failNext(200, sentWith(newToken), bodyOf(oldToken, newToken));
+    const response = await proxyFetch(owner, `/${github.id}/user`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get(TRUNCATED_HEADER)).toBe("true");
+    return { response, oldToken, newToken };
+  }
+
+  it("截断落在以旧令牌开头的新令牌中间：在原始字节上算截断再替换，旧令牌不会先吞掉开头、把新令牌的后半截留下", async () => {
+    let head = "";
+    const { response, newToken } = await afterRefresh(
+      (old) => `${old}_next`,
+      (old, fresh) => {
+        head = "a".repeat(ACCOUNTS_PROXY_MAX_BYTES - old.length - "_ne".length);
+        return `${head}${fresh}${"b".repeat(4096)}`;
+      },
+    );
+    const text = await response.text();
+    expect(newToken.slice(0, ACCOUNTS_PROXY_MAX_BYTES - head.length), "上限落在新令牌的 _ne 后面").toMatch(/_ne$/);
+    expect(text, "新令牌从开头起整截去掉，不剩 [已隐藏]_ne").toBe(head);
+  });
+
+  it("截断前整把写完的旧令牌，尾巴正好是跨过上限的新令牌的开头：旧令牌整把去掉，不留前半截", async () => {
+    let head = "";
+    const { response, oldToken } = await afterRefresh(
+      (old) => `${old.slice(-1)}zz_next`,
+      (old, fresh) => {
+        head = "a".repeat(ACCOUNTS_PROXY_MAX_BYTES - old.length);
+        return `${head}${old}${fresh.slice(1)}${"b".repeat(4096)}`;
+      },
+    );
+    const text = await response.text();
+    expect(text.startsWith(head), "上限之前的正文原样留着").toBe(true);
+    expect(["", "[已隐藏]"], `截断处不留旧令牌的碎片，实际留下「${text.slice(head.length)}」`).toContain(
+      text.slice(head.length),
+    );
+    expect(oldToken.length, "旧令牌够长，留下前半截就是泄露").toBeGreaterThan(10);
+  });
+
   it("读到上限 cancel 之后放掉 reader lock，平台中途断连时也放掉", async () => {
     let canceled = false;
     const endless = new Response(
@@ -399,6 +463,23 @@ describe("账号代理", () => {
     );
     await expect(readCapped(broken, 100)).rejects.toThrow("平台断连");
     expect(broken.body?.locked, "读出错时 reader lock 也放掉了").toBe(false);
+  });
+
+  it("读到上限 cancel 抛错：照样交出截断的正文，不让整条代理请求变 500", async () => {
+    const throwing = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array(64).fill(0x61));
+        },
+        cancel() {
+          throw new Error("cancel 出错");
+        },
+      }),
+    );
+    const read = await readCapped(throwing, 100);
+    expect(read.truncated, "上限前的正文已经读齐，cancel 出错不影响它").toBe(true);
+    expect(read.bytes.length).toBe(100);
+    expect(throwing.body?.locked, "reader lock 照样放掉").toBe(false);
   });
 
   it("白名单响应头回显令牌：这个头整个丢掉，别的头和正文照常，请求成功", async () => {

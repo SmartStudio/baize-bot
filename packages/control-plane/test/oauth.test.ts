@@ -425,37 +425,50 @@ describe("令牌端点发来不安全的访问令牌", () => {
     { name: "十二个连续百分号", token: `ghu_${"%".repeat(12)}X` },
     { name: "控制字符", token: "ghu_a\u0001b" },
     { name: "Latin-1 字符", token: "ghu_toké" },
-  ])("含$name：授权回调不建账号，刷新回 502，这把令牌都进不了库", async ({ token }) => {
-    const s = await stack();
-    const o = await owner(s, true);
-    const logged = captureErrors();
-    const grant = {
-      access_token: token,
-      expires_in: 3600,
-      refresh_token: "github_refresh_unsafe",
-      token_type: "bearer",
-    };
+  ])(
+    "含$name：授权回调不建账号；刷新时旧刷新令牌已被平台用掉，账号记过期让用户重新登录；这把令牌都进不了库",
+    async ({ token }) => {
+      const s = await stack();
+      const o = await owner(s, true);
+      const logged = captureErrors();
+      const grant = {
+        access_token: token,
+        expires_in: 3600,
+        refresh_token: "github_refresh_unsafe",
+        token_type: "bearer",
+      };
 
-    s.fake.failNext(200, isExchange, grant);
-    const walk = await connectPlatform(o.client, "github");
-    expect(Object.fromEntries(walk.landed.searchParams)).toEqual({ oauth: "github", result: "failed" });
-    expect(await accountsOf(o), "账号没建").toEqual([]);
-    expect(await s.database.db.select().from(accountCredentials), "凭据没落库").toEqual([]);
-    expect(s.fake.requests().filter(isRead), "没拿这把令牌去问我是谁").toEqual([]);
+      s.fake.failNext(200, isExchange, grant);
+      const walk = await connectPlatform(o.client, "github");
+      expect(Object.fromEntries(walk.landed.searchParams)).toEqual({ oauth: "github", result: "failed" });
+      expect(await accountsOf(o), "账号没建").toEqual([]);
+      expect(await s.database.db.select().from(accountCredentials), "凭据没落库").toEqual([]);
+      expect(s.fake.requests().filter(isRead), "没拿这把令牌去问我是谁").toEqual([]);
 
-    s.fake.setTokenLifetime(SHORT_LIFETIME_S);
-    await connectPlatform(o.client, "github");
-    const account = await connected(o);
-    const stored = await credentialsOf(s, account.id);
-    s.fake.failNext(200, isRefresh, grant);
-    const failed = await proxyFetch(o, `/${account.id}${WHOAMI.github}`);
-    expect(failed.status, "当平台出错，让 Bot 稍后再试").toBe(502);
-    expect(await credentialsOf(s, account.id), "刷出来的这把没写进库，还是原来那一代").toEqual(stored);
-    expect(
-      logged.filter((line) => line.includes("访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收")),
-    ).toHaveLength(2);
-    expect(logged.join("\n"), "日志里没有这把令牌").not.toContain(token);
-  });
+      s.fake.setTokenLifetime(SHORT_LIFETIME_S);
+      await connectPlatform(o.client, "github");
+      const account = await connected(o);
+      const stored = await credentialsOf(s, account.id);
+      s.fake.failNext(200, isRefresh, grant);
+      const failed = await proxyFetch(o, `/${account.id}${WHOAMI.github}`);
+      expect(failed.status, "刷新令牌只能用一次，稍后再试也救不回来，按登录过期回").toBe(409);
+      expect((await nextOf(o.push, "account_updated")).account).toMatchObject({ id: account.id, login: "expired" });
+      const notice = await nextNotice(o.push);
+      expect(notice.kind).toBe("failed");
+      expect(notice.text, "通知用户重新登录").toContain("重新登录");
+      const after = await credentialsOf(s, account.id);
+      expect(after?.accessEnc, "刷出来的这把没写进库").toBe(stored?.accessEnc);
+      expect(after?.generation, "代际不动，过期的就是这一代").toBe(stored?.generation);
+      expect(after?.refreshEnc, "用掉的刷新令牌不留").toBeNull();
+      const tokenCalls = tokenRequests(s).length;
+      expect((await proxyFetch(o, `/${account.id}${WHOAMI.github}`)).status, "过期之后不再拿它去刷").toBe(409);
+      expect(tokenRequests(s)).toHaveLength(tokenCalls);
+      expect(
+        logged.filter((line) => line.includes("访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收")),
+      ).toHaveLength(2);
+      expect(logged.join("\n"), "日志里没有这把令牌").not.toContain(token);
+    },
+  );
 });
 
 describe("令牌刷新", () => {

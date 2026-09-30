@@ -124,7 +124,9 @@ it("config 被拒后，旧代际的 config_applied 不能把电脑恢复成在�
       "派不出去的那句系统话",
     );
     const texts = await systemTexts(owner.client, owner.groupId);
-    expect(texts.at(-1), "旧代际的回执不算数，这台电脑仍是拒收状态，群里说清是配置被拒").toContain("电脑拒收了配置");
+    expect(texts.at(-1), "旧代际的回执不算数，这台电脑仍是拒收状态，群里说清是版本对不上").toBe(
+      "电脑上的白泽版本和控制面对不上，这条没派出去，把电脑上的白泽升级或重启后再说一次",
+    );
 
     agent.send({ type: "config_applied", generation: 2 });
     expect(

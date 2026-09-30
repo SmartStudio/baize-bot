@@ -114,12 +114,12 @@ async function forward(upstream: Response, tokens: readonly string[]): Promise<R
     }
   }
   const read = await readCapped(upstream, ACCOUNTS_PROXY_MAX_BYTES);
-  let body = secrets.redact(read.bytes);
-  if (read.truncated) {
-    // 上限可能正好落在一把令牌（或它的某种写法）中间，截下来的前半截没法整把匹配，只能连它一起去掉。
-    body = body.subarray(0, body.length - secrets.partialTail(body, read.beyond));
-    forwarded.set(TRUNCATED_HEADER, "true");
-  }
+  // 上限可能正好落在一把令牌（或它的某种写法）中间，截下来的前半截没法整把匹配，只能连它一起去掉。
+  // 截断处在替换之前、按原始字节找：先替换的话，一把令牌是另一把的开头时短的会吞掉长的开头，长的余下那截就认不出来了。
+  const body = secrets.redact(
+    read.truncated ? read.bytes.subarray(0, secrets.cutAt(read.bytes, read.beyond)) : read.bytes,
+  );
+  if (read.truncated) forwarded.set(TRUNCATED_HEADER, "true");
   return new Response(upstream.body === null ? null : new Uint8Array(body), {
     status: upstream.status,
     headers: forwarded,
@@ -144,7 +144,8 @@ export async function readCapped(response: Response, max: number): Promise<Cappe
       chunks.push(value);
       total += value.length;
       if (total > max) {
-        await reader.cancel();
+        // 上限前的正文已经读齐了，cancel 只是告诉平台不用再发。它出错就记一笔，截断的正文照样交出去。
+        await reader.cancel().catch((error: unknown) => console.error("账号代理读到上限后取消平台回包出错", error));
         const all = Buffer.concat(chunks);
         return { truncated: true, bytes: all.subarray(0, max), beyond: all.subarray(max) };
       }
@@ -201,11 +202,14 @@ const atomSource = (atom: Atom): string => {
 const spellingSource = (spelling: Spelling): string =>
   spelling.map((forms) => `(?:${forms.map((form) => form.map(atomSource).join("")).join("|")})`).join("");
 
-/** text 从头起能不能是这把令牌的某种写法：整把写完了，或者写到一半 text 就到头了。 */
-function startsSpelling(text: string, spelling: Spelling, at = 0, char = 0): boolean {
-  if (at === text.length) return true;
+/**
+ * text 从头起能不能是这把令牌的某种写法，而且写过了 boundary（上限在 text 里的位置）：
+ * 整把写完且越过了上限，或者写到一半 text 就到头了（后面读到的不够判断，按接得成算）。整把落在上限之前的不算，它会被整把替换。
+ */
+function crossesLimit(text: string, spelling: Spelling, boundary: number, at = 0, char = 0): boolean {
   const forms = spelling[char];
-  if (forms === undefined) return true;
+  if (forms === undefined) return at > boundary;
+  if (at === text.length) return true;
   return forms.some((form) => {
     let pos = at;
     for (const atom of form) {
@@ -213,7 +217,7 @@ function startsSpelling(text: string, spelling: Spelling, at = 0, char = 0): boo
       if (!atom.includes(text.charCodeAt(pos))) return false;
       pos += 1;
     }
-    return startsSpelling(text, spelling, pos, char + 1);
+    return crossesLimit(text, spelling, boundary, pos, char + 1);
   });
 }
 
@@ -246,17 +250,24 @@ function secretMatcher(tokens: readonly string[]) {
       return pattern !== null && value.search(pattern) !== -1;
     },
     /**
-     * 结尾有多长是某把令牌某种写法被截断的前半截。接上上限之后读到的 beyond 一起看，接不成令牌的就不算；
-     * beyond 不够长、看不出接不接得成的，按接得成算。
+     * 截断的正文留到哪个字节：有令牌的某种写法从这里起跨过上限，就从它的起点切掉。接上上限之后读到的 beyond 一起看，
+     * 接不成令牌的不算；beyond 不够长、看不出接不接得成的，按接得成算。起点落在一把整个写在上限之前的令牌中间时，
+     * 切到那把令牌的起点，不然它的前半截没法整把匹配，会原样留下。
      */
-    partialTail(body: Buffer, beyond: Buffer): number {
+    cutAt(body: Buffer, beyond: Buffer): number {
       const text = body.toString("latin1");
-      const next = beyond.subarray(0, longest).toString("latin1");
-      for (let length = Math.min(longest - 1, text.length); length > 0; length--) {
-        const tail = text.slice(text.length - length) + next;
-        if (spellings.some((spelling) => startsSpelling(tail, spelling))) return length;
+      const reach = Math.min(longest - 1, text.length);
+      const tail = text.slice(text.length - reach) + beyond.subarray(0, longest).toString("latin1");
+      const start = [...Array(reach).keys()].find((at) =>
+        spellings.some((spelling) => crossesLimit(tail.slice(at), spelling, reach - at)),
+      );
+      if (start === undefined || pattern === null) return text.length;
+      const cut = text.length - reach + start;
+      for (const match of text.matchAll(pattern)) {
+        if (match.index >= cut) break;
+        if (match.index + match[0].length > cut) return match.index;
       }
-      return 0;
+      return cut;
     },
   };
 }
