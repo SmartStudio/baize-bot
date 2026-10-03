@@ -496,6 +496,8 @@ export const ServerPush = z.discriminatedUnion("type", [
     done: z.boolean(),
   }),
   z.object({ type: z.literal("bot_updated"), bot: Bot }),
+  // 项目开始时给新队员推：带单聊群 id，客户端不用再拉 Bot 列表才认得它的单聊。
+  z.object({ type: z.literal("bot_created"), bot: Bot, groupId: GroupId }),
   z.object({ type: z.literal("bot_deleted"), botId: BotId }),
   z.object({ type: z.literal("group_created"), group: Group, task: TopicTask }),
   // 群本身变了（目前只有首席）推整条，客户端整条替换。

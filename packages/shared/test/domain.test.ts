@@ -41,11 +41,19 @@ describe("id 品牌", () => {
 
 describe("domain schemas reject illegal states", () => {
   it("a group needs 1 to 6 bots", () => {
-    const base = { id: "g1", ownerId: "u1", taskId: "t1", chiefBotId: null, createdAt: now };
+    const base = { id: "g1", ownerId: "u1", taskId: "t1", kind: "team", chiefBotId: null, createdAt: now };
     expect(Group.safeParse({ ...base, botIds: ["b1"], chiefBotId: undefined }).success, "首席字段不可省").toBe(false);
     expect(Group.safeParse({ ...base, botIds: [] }).success).toBe(false);
     expect(Group.safeParse({ ...base, botIds: ["b1", "b2", "b3", "b4", "b5", "b6", "b7"] }).success).toBe(false);
     expect(Group.safeParse({ ...base, botIds: ["b1"] }).success).toBe(true);
+    expect(Group.safeParse({ ...base, kind: undefined, botIds: ["b1"] }).success, "kind 不可省").toBe(false);
+  });
+
+  it("a solo group is exactly one bot and never has a chief", () => {
+    const base = { id: "g1", ownerId: "u1", taskId: "t1", kind: "solo", chiefBotId: null, createdAt: now };
+    expect(Group.safeParse({ ...base, botIds: ["b1"] }).success).toBe(true);
+    expect(Group.safeParse({ ...base, botIds: ["b1", "b2"] }).success, "单聊不能两个成员").toBe(false);
+    expect(Group.safeParse({ ...base, botIds: ["b1"], chiefBotId: "b1" }).success, "单聊没有首席").toBe(false);
   });
 
   it("task numbers are T plus four digits", () => {

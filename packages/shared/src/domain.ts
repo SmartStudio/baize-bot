@@ -127,15 +127,24 @@ export const TopicTask = z.object({
 });
 export type TopicTask = z.infer<typeof TopicTask>;
 
-export const Group = z.object({
+const GroupBase = {
   id: GroupId,
   ownerId: UserId,
-  botIds: z.array(BotId).min(1).max(6),
   taskId: TaskId,
-  // 没人点名时先到谁。和任务卡的 currentBotId 是两件事：经手人随交接换，首席随用户一句话换。单 Bot 群恒为 null。
-  chiefBotId: BotId.nullable(),
   createdAt: Timestamp,
-});
+};
+
+// kind 是群的出身：建 Bot 时自动建的是 solo，之后不变；其余都是 team，哪怕成员删到只剩一个。
+// 单聊恒一个成员、没有首席。团队群没人点名时先到首席，和任务卡的 currentBotId 是两件事：经手人随交接换，首席随用户一句话换。
+export const Group = z.discriminatedUnion("kind", [
+  z.object({ ...GroupBase, kind: z.literal("solo"), botIds: z.tuple([BotId]), chiefBotId: z.null() }),
+  z.object({
+    ...GroupBase,
+    kind: z.literal("team"),
+    botIds: z.array(BotId).min(1).max(6),
+    chiefBotId: BotId.nullable(),
+  }),
+]);
 export type Group = z.infer<typeof Group>;
 
 export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired"]);
