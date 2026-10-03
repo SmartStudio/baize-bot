@@ -165,6 +165,38 @@ const sleep = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
   delay(ms, undefined, signal === undefined ? {} : { signal });
 
 /**
+ * 等一个 promise，signal 一响当场以中止结束，不等它。promise 本身留着自己收尾：
+ * 中止之后才兑现的结果交给 onLate，不给就丢掉；中止之后才拒绝的错误也吞掉，不冒成未处理的拒绝。
+ */
+const raceAbort = <T>(
+  pending: Promise<T>,
+  signal: AbortSignal | undefined,
+  onLate?: (result: T) => void,
+): Promise<T> => {
+  if (signal === undefined) return pending;
+  return new Promise<T>((resolve, reject) => {
+    let abandoned = false;
+    const onAbort = (): void => {
+      abandoned = true;
+      reject(abortedError());
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    void pending
+      .then(
+        (result) => {
+          if (abandoned) onLate?.(result);
+          resolve(result);
+        },
+        (error: unknown) => {
+          if (!abandoned) reject(error);
+        },
+      )
+      .finally(() => signal.removeEventListener("abort", onAbort));
+  });
+};
+
+/**
  * 关一页，最多等 CLOSE_BUDGET_MS，关不掉也不报错：管道已断时这一页跟着 Chrome 一起没了，
  * Chrome 不回包时命令已经发出，它自己会做完。所有关页都走这里，预算是按资源给的，不按路径。
  */
@@ -216,26 +248,14 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     params: Record<string, unknown> = {},
     sessionId?: string,
     onLate?: (result: Record<string, unknown>) => void,
-  ): Promise<Record<string, unknown>> => {
-    const signal = active;
-    const sent = connection.send(method, params, sessionId);
-    if (signal === undefined) return sent;
-    return new Promise<Record<string, unknown>>((resolve, reject) => {
-      let abandoned = false;
-      const onAbort = (): void => {
-        abandoned = true;
-        reject(abortedError());
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-      void sent
-        .then((result) => {
-          if (abandoned) onLate?.(result);
-          resolve(result);
-        }, reject)
-        .finally(() => signal.removeEventListener("abort", onAbort));
-    });
-  };
+  ): Promise<Record<string, unknown>> => raceAbort(connection.send(method, params, sessionId), active, onLate);
+
+  /**
+   * 取连接也跟当前调用的 signal 走：Chrome 正在起时 connection() 最长要等启动超时，
+   * 停机时会话被 abort，不跟 signal 走的话排在后面的 close() 就得等它起完。
+   * 连接是电脑代理那边共享的，起完归它管，这次调用放弃了就不拿它，不用替它收尾。
+   */
+  const connect = (): Promise<CdpConnection> => raceAbort(config.connection(), active);
 
   const send = (open: OpenTab, method: string, params: Record<string, unknown> = {}) =>
     command(open.connection, method, params, open.sessionId);
@@ -379,7 +399,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
    * 上次的网址可能是一次提交或一次性链接，替 Bot 再 GET 一遍会重复动作，只在结果里告诉模型上次在哪。
    */
   const ensureTab = async (): Promise<{ readonly open: OpenTab; readonly notice: string | null }> => {
-    const connection = await config.connection();
+    const connection = await connect();
     if (tab.kind === "open" && tab.connection === connection && connection.isOpen()) return { open: tab, notice: null };
     if (tab.kind === "open") await retire(tab);
     const opened = await openTab(connection);

@@ -2398,6 +2398,66 @@ describe("每群一份会话", () => {
     expect(messages, "第二次 prompt 时模型要看到第一次的回答").toContain("记下了青鸟。");
   });
 
+  it("首个上游请求发出时落盘的会话，重启后被续上：不虚构 assistant，两条 user 都在", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "baize-runner-"));
+    const sessionsOf = (): string[] => jsonlIn(groupDir(dataDir, "bot-1", "group-a"));
+    // 断言放在上游回调外面：回调里抛错会变成一次上游 500，掩盖真正的失败位置。
+    let checkpoint: { readonly files: string[]; readonly text: string } | null = null;
+    const first = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      script: () => {
+        // Pi 1.0 在首条 user 消息时就写会话文件。这一刻 assistant 还没回，磁盘上的就是进程此刻被杀会留下的状态。
+        const files = sessionsOf();
+        checkpoint = { files, text: files.length === 1 ? readFileSync(files[0]!, "utf8") : "" };
+        return { textChunks: ["检查点之后才写下的回答。"], usage: { input: 10, output: 3 } };
+      },
+    });
+
+    await first.runner.prompt(promptMessage("bot-1", "run-1", "断点前的话", { groupId: "group-a" }));
+    await first.runner.stop();
+    expect(runDoneIds(first), "第一次 prompt 的 run_done 恰好一次").toEqual(["run-1"]);
+    expect(checkpoint, "假上游应当被调用过").not.toBeNull();
+    const { files, text } = checkpoint!;
+    expect(files, "首个上游请求发出时会话文件已经在 sessionDir 下").toHaveLength(1);
+    const roles = text
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { type: string; message?: { role: string } })
+      .filter((entry) => entry.type === "message")
+      .map((entry) => entry.message?.role);
+    // Pi 1.0 还会在会话里记一条 system 条目，和对话轮次无关。
+    expect(
+      roles.filter((role) => role !== "system"),
+      "检查点里只有用户消息，没有 assistant",
+    ).toEqual(["user"]);
+
+    // 把磁盘退回检查点，模拟进程在 assistant 回来之前被杀。
+    writeFileSync(files[0]!, text);
+
+    let seen: readonly { readonly role: string; readonly content?: unknown }[] = [];
+    const second = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      script: (req) => {
+        seen = req.messages;
+        return { textChunks: ["已续上。"], usage: { input: 20, output: 3 } };
+      },
+    });
+    await second.runner.prompt(promptMessage("bot-1", "run-2", "断点后的话", { groupId: "group-a" }));
+
+    expect(sessionsOf(), "续上同一个文件，不新建").toEqual(files);
+    expect(
+      seen.filter((m) => m.role === "user").map((m) => JSON.stringify(m.content)),
+      "第二次请求带两条 user，先后顺序不变",
+    ).toEqual([expect.stringContaining("断点前的话"), expect.stringContaining("断点后的话")]);
+    expect(
+      seen.filter((m) => m.role === "assistant"),
+      "没回完的那轮不能被虚构出 assistant",
+    ).toEqual([]);
+    expect(runDoneIds(second), "第二次 prompt 的 run_done 恰好一次").toEqual(["run-2"]);
+  });
+
   it("同一 Bot 两个群只连一次 MCP", async () => {
     const mcp = await startFakeMcp();
     try {
@@ -5556,6 +5616,38 @@ const approvalsOf = (h: Harness): readonly { readonly tool: string; readonly dom
 
 type PlannedCall = readonly [name: string, args: Record<string, unknown>];
 
+/** connection() 被调用后一直挂着，直到测试放行；放行的是一条记录所有命令的假连接。 */
+const slowStart = (): {
+  readonly connection: () => Promise<CdpConnection>;
+  requested(): number;
+  up(): void;
+  sent(): readonly string[];
+} => {
+  let requested = 0;
+  const sent: string[] = [];
+  let up!: () => void;
+  const started = new Promise<CdpConnection>((resolve) => {
+    up = () =>
+      resolve({
+        send: async (method) => {
+          sent.push(method);
+          return {};
+        },
+        onEvent: () => () => undefined,
+        isOpen: () => true,
+      });
+  });
+  return {
+    connection: () => {
+      requested += 1;
+      return started;
+    },
+    requested: () => requested,
+    up: () => up(),
+    sent: () => sent,
+  };
+};
+
 /**
  * 按「当前这条」里的字眼挑一串工具调用，本次 prompt 已经回来几个工具结果就点第几个。
  * pi-ai 把工具结果里的图另起一条 user 消息，找「当前这条」时要跳过它。
@@ -5766,6 +5858,32 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       stuck.closeAllConnections();
       await new Promise<void>((resolve) => stuck.close(() => resolve()));
     }
+  }, 40_000);
+
+  it("停机时 connection() 还没返回，停机秒级结束，run_done 恰好一次，迟到的连接不会被拿去建页", async () => {
+    const chromeStart = slowStart();
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, connection: chromeStart.connection },
+      script: scriptPlans(requests, { 等Chrome: [["browser_open", { url: `${site.url}/chrome-starting` }]] }),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "等Chrome"));
+      await until(() => chromeStart.requested() > 0, "浏览器工具已经在等 connection()");
+      const startedAt = performance.now();
+
+      await Promise.race([Promise.all([running, h.runner.stop()]), delay(8000)]);
+
+      expect(performance.now() - startedAt, "不等 Chrome 起完").toBeLessThan(5000);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      chromeStart.up();
+    }
+    // 迟到的连接没有可观察的完成事件，固定等一小会儿，只为让错误的实现有机会发出建页命令。
+    await delay(100);
+    expect(chromeStart.sent(), "中止之后连接才到，这次调用不得再拿它建页").toEqual([]);
   }, 40_000);
 
   /**
