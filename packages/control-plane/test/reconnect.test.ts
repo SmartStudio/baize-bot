@@ -206,10 +206,13 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
       "哨兵那句",
     );
     expect(await openRuns(victim.groupId), "别的电脑报的 runId 是外部输入，不能拿来收尾这台电脑的活").toBe(1);
+    const mismatched = logged.filter((line) => line.includes(foreign) && line.includes("prompt_before_config"));
+    expect(mismatched, "对不上的报错不在群里说，但留一行日志").toHaveLength(1);
+    expect(mismatched[0], "日志点名是哪台电脑报的").toContain(other.computer.computerId);
     expect(
-      logged.filter((line) => line.includes(foreign) && line.includes("prompt_before_config")),
-      "对不上的报错不在群里说，但留一行日志",
-    ).toHaveLength(1);
+      logged.some((line) => line.includes(other.computer.token) || line.includes(victim.computer.token)),
+      "日志不带电脑令牌",
+    ).toBe(false);
   } finally {
     errors.mockRestore();
     victimAgent.close();

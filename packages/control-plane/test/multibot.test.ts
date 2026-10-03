@@ -7,6 +7,7 @@ import {
   MessageListResponse,
   type Bot,
   type BotId,
+  type ControlToAgent,
   type ChecklistItem,
   type Group,
   type GroupId,
@@ -159,6 +160,14 @@ async function runFor(team: Team, groupId: GroupId, text: string): Promise<RunId
   await say(team, groupId, text);
   const prompt = await team.agent.expect("prompt");
   return prompt.runId;
+}
+
+/** 下一条 prompt。建 Bot、删 Bot 都会先给代理重发 config，那些跳过。 */
+async function nextPrompt(team: Team): Promise<Extract<ControlToAgent, { type: "prompt" }>> {
+  for (;;) {
+    const message = await team.agent.next();
+    if (message.type === "prompt") return message;
+  }
 }
 
 function finish(team: Team, runId: RunId, botId: BotId, groupId: GroupId = team.group.id): void {
@@ -391,6 +400,38 @@ describe("多 Bot 群派活", () => {
       const second = await team.agent.expect("prompt");
       expect(second.botId).toBe(team.service.id);
       expect(second.reason).toBe("mentioned");
+    } finally {
+      team.close();
+    }
+  });
+
+  it("同一回合里排在中间的 Bot 跑前一位时被删，只跳过它，排在后面的照常派到", async () => {
+    const team = await makeTeam();
+    try {
+      const ops = await makeBot(team.client, "小运", "运营");
+      const response = await team.client.post("/api/groups", {
+        title: "三人群",
+        botIds: [team.sales.id, team.service.id, ops.bot.id],
+      });
+      expect(response.status).toBe(201);
+      const trio = CreateGroupResponse.parse(await response.json()).group;
+
+      await say(team, trio.id, "@小销 @小服 @小运 都看一眼");
+      const first = await nextPrompt(team);
+      expect(first.botId).toBe(team.sales.id);
+      expect((await team.client.delete(`/api/bots/${team.service.id}`)).status).toBe(204);
+      finish(team, first.runId, team.sales.id, trio.id);
+      for (;;) {
+        const push = await team.push.nextRaw();
+        if (push.type === "group_turn" && push.groupId === trio.id && push.current !== team.sales.id) {
+          expect(push.current, "被删的小服跳过，这一回合接着派给排在它后面的小运，不关轮").toBe(ops.bot.id);
+          expect(push.next).toEqual([]);
+          break;
+        }
+      }
+      const next = await nextPrompt(team);
+      expect(next.botId).toBe(ops.bot.id);
+      expect(next.messageId, "小运接的还是用户那一句").toBe(first.messageId);
     } finally {
       team.close();
     }

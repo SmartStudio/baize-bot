@@ -17,6 +17,7 @@ import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { connectPush } from "./helpers/ws.js";
 
 let database: TestDb;
 let server: TestServer;
@@ -710,6 +711,45 @@ describe("例行聚合与项目群里的例行", () => {
       await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
     ).messages;
     expect(inSolo).toEqual([]);
+  });
+
+  it("项目群换了首席，例行仍只派给它所属的 Bot，不跟着首席走", async () => {
+    const owner = await ownerWithBot();
+    const member = await secondBot(owner);
+    const groupId = await projectGroup(owner, [owner.botId, member]);
+    const routine = await makeRoutine(owner, { name: "周一排本周计划", groupId, triggers: [] });
+    const agent = await online(owner);
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小服 让小内当首席" })).status).toBe(
+        201,
+      );
+      const setup = await agent.expect("prompt");
+      agent.send({ type: "set_chief", runId: setup.runId, botId: owner.botId, groupId, targetBotId: member });
+      agent.send({
+        type: "run_done",
+        runId: setup.runId,
+        botId: owner.botId,
+        groupId,
+        steps: 1,
+        inputTokens: 0,
+        outputTokens: 0,
+      });
+      for (;;) {
+        const event = await push.nextRaw();
+        if (event.type === "group_turn" && event.groupId === groupId && event.current === null) break;
+      }
+
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`, {})).status).toBe(202);
+      let prompt = await agent.next();
+      while (prompt.type !== "prompt") prompt = await agent.next();
+      expect(prompt.members.find((one) => one.id === member)?.seat, "首席已经换成小内").toBe("chief");
+      expect(prompt.botId, "例行属于小服，换了首席也还是小服接，不派给新首席").toBe(owner.botId);
+      expect(prompt.origin).toEqual({ kind: "routine" });
+    } finally {
+      agent.close();
+      push.close();
+    }
   });
 
   it("groupId 是别人的群 404，Bot 不在那个群里 400，都不建", async () => {

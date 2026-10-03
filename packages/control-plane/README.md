@@ -24,7 +24,9 @@
 
 `@所有人` 派给全员，顺序按成员表。首席是群属性，可以由 Bot 调用 `set_chief` 设置或卸任；首席优先于当前经手。Bot 没有话要说时以 `(pass)` 或 `（pass）` 开头回复，控制面不落这条消息，也不推给 Web。运行器每个文字块报一条消息，`(pass)` 按块判断：一个 run 只要有一块可见的话就不算 pass，花费卡照留，后面那块 `(pass)` 本身仍不显示；整个 run 没有可见块才算 pass，花费并进这一轮。
 
-同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
+例行任务写进群里的那条 user 消息不走这张表，只派给例行所属的 Bot，原因是 `prompt.reason` 记 `mentioned`，见「例行任务」。
+
+同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。轮到的那位在这之前被删了（比如「@A @B @C」里 B 在 A 跑的时候被删），`sendSpeaker` 回 `skipped`，回合跳过它接着派 C，不关轮；选不到电脑或发不出去回 `stopped`，群里已经留了一句，后面的人同样派不出去，关轮。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
 
 ### `@名` 在写入前解析
 
@@ -100,7 +102,7 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 
 收尾之后这个 run 名下晚到的帧作废：不落库、不推送、不回电脑。危险的是帧已经过了 `resolveRun`、正要写，收尾这时提交了。同一个进程里这台电脑的帧和收尾排在同一条链上，排不出这种交错；挡的是多个控制面共库（滚动重启）时另一个进程里的收尾。做法是每条 run 名下的写在自己的事务里先过 `lockOpenRun`（`SELECT id FROM runs WHERE id = ? AND bot_id = ? AND group_id = ? AND ended_at IS NULL FOR SHARE`，Bot 和群是 `resolveRun` 校验过的那两个，Bot 被删、外键把 `bot_id` 置空后在途的帧也查不到行），拿不到行整条不写，`whileRunOpen` 把「开事务、过这一道、再写」包成一步。只在写的 WHERE 里带 `EXISTS (... ended_at IS NULL)` 不够：READ COMMITTED 下子查询看不见收尾还没提交的结束，插进来的行又不在收尾那几条 UPDATE 开始时的快照里。共享锁和 `finishRun` 的 UPDATE 互斥：写先拿到锁，收尾等它提交，后面打 failed、收文字的语句看得见它；收尾先拿到，写等它提交后重查，查不到行。用 `FOR SHARE` 不用 `FOR KEY SHARE`，后者和 `finishRun` 的 `FOR NO KEY UPDATE` 不冲突。锁的顺序固定是先 run 行后消息行，收尾的事务在 advisory 锁之后第一句就是 `finishRun`，不会死锁。
 
-删 Bot 也守这个锁序。外键级联会改 run 行（`runs.bot_id`、单 Bot 群被删时的 `runs.group_id` 置空），也会改任务卡（`tasks.current_bot_id` 置空）、群（`chief_bot_id` 置空，单 Bot 群整个删掉连带它的任务、消息、审批、交接）、交接和审批（级联删）。run 名下的写先拿 run 的共享锁再碰这些行，级联反过来先碰这些行、最后才改 runs，各拿一半就是死锁，删除回 500。所以 `deleteBot` 的事务开头、碰任何别的行之前先调 `lockRunsOfBot`：先拿这个 Bot 的排他 advisory 锁（同样是两参数形式，命名空间常量和收尾锁不同，键只有 Bot），再把它的 open run 和它单 Bot 群里的 open run `FOR UPDATE` 锁上。`startRun` 在收尾锁之前拿同一把的共享锁，所以删除拿到排他锁时这个 Bot 已有的 run 都已提交、`FOR UPDATE` 看得见；之后它在任何群里都建不出新 run，包括删除开始后才建、才把它拉进去的群。早先按成员表逐群拿收尾锁做不到这一点：成员表是删除开始那一刻的快照，之后新建的群里照样能生出删除没锁住的 run，那条 run 的写帧和删除的级联又各拿一半。在 Bot 锁上等到删除提交的 `startRun`，接着查 `group_members`，这个 Bot 已不在这个群里就回 null，不建 run；`sendSpeaker` 把它当作派不出去，这一轮到此为止，不留 system（单聊群已随 Bot 删掉）。用户发消息和例行任务两条派活路都走这里，建 run 这一步不会再撞外键失败。在途的写要么先提交、删除等它，要么等删除提交后重查，查不到自己的 run 整条不写。锁完 run 再锁这个 Bot 交出和接手的交接卡（`FOR UPDATE`）。这一步防的是别的 Bot 的写：别的 Bot 确认它交出来的活，先改交接卡、再把任务卡的经手换成自己；级联的先后由外键触发器的名字排，新建的库里先置空经手、后删交接卡，两边各拿一半就是死锁。先锁交接卡，删除的顺序就和确认一致。别的 Bot 其余的写各只碰一行级联会改的行（清单改任务卡、设首席改群、建交接和审批只插新行），排不成环。
+删 Bot 也守这个锁序。外键级联会改 run 行（`runs.bot_id`、单 Bot 群被删时的 `runs.group_id` 置空），也会改任务卡（`tasks.current_bot_id` 置空）、群（`chief_bot_id` 置空，单 Bot 群整个删掉连带它的任务、消息、审批、交接）、交接和审批（级联删）。run 名下的写先拿 run 的共享锁再碰这些行，级联反过来先碰这些行、最后才改 runs，各拿一半就是死锁，删除回 500。所以 `deleteBot` 的事务开头、碰任何别的行之前先调 `lockRunsOfBot`：先拿这个 Bot 的排他 advisory 锁（同样是两参数形式，命名空间常量和收尾锁不同，键只有 Bot），再把它的 open run 和它单 Bot 群里的 open run `FOR UPDATE` 锁上。`startRun` 在收尾锁之前拿同一把的共享锁，所以删除拿到排他锁时这个 Bot 已有的 run 都已提交、`FOR UPDATE` 看得见；之后它在任何群里都建不出新 run，包括删除开始后才建、才把它拉进去的群。早先按成员表逐群拿收尾锁做不到这一点：成员表是删除开始那一刻的快照，之后新建的群里照样能生出删除没锁住的 run，那条 run 的写帧和删除的级联又各拿一半。在 Bot 锁上等到删除提交的 `startRun`，接着查 `group_members`，这个 Bot 已不在这个群里就回 null，不建 run；`sendSpeaker` 回 `skipped`，回合只跳过它，同一回合排在后面的照常派，不留 system（单聊群已随 Bot 删掉，多 Bot 群里页面已收到 `bot_deleted`）。用户发消息和例行任务两条派活路都走这里，建 run 这一步不会再撞外键失败。在途的写要么先提交、删除等它，要么等删除提交后重查，查不到自己的 run 整条不写。锁完 run 再锁这个 Bot 交出和接手的交接卡（`FOR UPDATE`）。这一步防的是别的 Bot 的写：别的 Bot 确认它交出来的活，先改交接卡、再把任务卡的经手换成自己；级联的先后由外键触发器的名字排，新建的库里先置空经手、后删交接卡，两边各拿一半就是死锁。先锁交接卡，删除的顺序就和确认一致。别的 Bot 其余的写各只碰一行级联会改的行（清单改任务卡、设首席改群、建交接和审批只插新行），排不成环。
 
 过这一道的写：`bot_text`（建空壳和接正文）、`bot_tool_call`（新建工具行，也包括改已有那行，收尾打成 `failed` 的不会被晚到的 `ok` 盖回去）、`approval_request`（`createApproval`）、`mention`、`skill_offer`、`project_offer`、`draft_create`、`plan_propose`、`draft_edit`，以及改任务卡和群状态的 `handoff`（建卡、排进下一轮派活、超限提示）、`handoff_accept`（接卡和换经手在同一个事务里）、`task_checklist`（清单和那条系统消息）、`set_chief`、`set_cadence`。后五种不是这个 run 的产物，但晚到时会盖掉用户此后的选择：结束的 run 晚到的清单盖掉用户刚改的清单，晚到的确认把经手换回一个已经收尾的 Bot，晚到的交接建出一张错卡还真的派活，所以同样整条丢掉。只剩两种不过这一道：`run_done` 自己，它是收尾动作，`finishRun` 以 `ended_at IS NULL` 为条件做 UPDATE，拿的是更新锁，重复收尾返回 null；`approval_abandoned` 是单向的终态清理，只把 pending 改成 expired，重开不了审批，已有结论或重复到达都更新 0 行。`test/run-end.test.ts` 钉着三种收尾都收文字、多 Bot 群里只收收尾那个 Bot 的、同 Bot 在别的电脑上还有 run 开着时旧 run 收尾不收（`run_done` 和对账收尾两条路）、晚到的每种帧都不落，以及两台控制面共库时的两种交错：帧卡在锁之前、收尾先提交；收尾的事务结束了 run 还没提交，帧在锁上等它。还钉着排队的六件事：同 Bot 同群两条 run 在两台控制面上同时收尾，两条文字都收成定稿；收尾持锁时新消息的派活等它提交才建 run；清单帧拿着 run 的共享锁时删 Bot，删除等它、回 204 不死锁；帧已过 `resolveRun` 时它的 Bot 被删，放行后一行不写；删除锁好 run 之后才建群把这个 Bot 拉进去并派活，建 run 等删除提交、查不到成员就不建，删除回 204；别的 Bot 正在确认被删 Bot 交出来的活时删它，删除等确认提交、回 204，经手换成确认的那位。
 
@@ -129,7 +131,7 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 1. `UPDATE messages ... WHERE body ->> 'status' = 'offered'`，同时写进 `status: "started"`、预先生成的项目群 id 和最终的项目名（请求给了 `name` 就是它）。卡的状态只住在这条正文里，改名不另存一份。并发的第二个请求在行锁上等，醒来 `WHERE` 已不成立，一行都改不到，事务回滚，什么都不建。
 2. 按 `team` 建队员 Bot，每个都带自己的单聊群（`listBots` 按单聊 join，没有单聊的 Bot 进不了 `config`）。`tag` 对 `tag`，`description` 对 `description`。
 3. 建项目群和主题任务卡。群名取请求里的 `name`，没给用正文的；`summary` 取 `goal`，`cadence` 取正文，`firstStep` 是清单第一项。成员是主助理在前、队员在后，首席是主助理。
-4. 建 `PROJECT_ROUTINES` 两条例行：「周一 09:00 排本周计划」让主助理调 `propose_plan`，「周五复盘」只复盘。例行的 Bot 是主助理，`groupId` 是项目群，`purpose` 是 `plan`。
+4. 建 `PROJECT_ROUTINES` 两条例行：「周一 09:00 排本周计划」让主助理调 `propose_plan`，「周五复盘」只复盘。例行的 Bot 是主助理，`groupId` 是项目群，`purpose` 是 `plan`。之后项目群换了首席，这两条照样派给主助理，见「例行任务」。
 
 提交之后重推这条消息，给每个新队员推 `bot_created`（带这个 Bot 的单聊群 id，Web 不必再拉 Bot 列表），再推 `group_created` 和每条 `routine_updated`，最后重发 `config`，新队员这时才跑得起来。回包带这条消息、项目群和它的主题任务卡。`dismiss` 用同一个条件 `UPDATE` 改成 `dismissed` 并重推，回包的群和卡都是 null。抢不到卡时回 200 带当前消息，已开始的顺带项目群和卡，不再推送。
 
@@ -270,7 +272,7 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 
 
 ## 例行任务
 
-例行任务属于一个 Bot。**一次运行就是归属人在群里发了一条消息**，`groupId` 为空时是这个 Bot 的单 Bot 群，不为空时是那个群（建项目时的两条例行发进项目群）：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`，派到哪台电脑也是同一条规则（见「派到哪台电脑」），本机合盖、远程在线时例行照常在远程跑。运行器和电脑代理因此不认识例行任务，没有新报文。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
+例行任务属于一个 Bot。**一次运行就是归属人在群里发了一条消息**，`groupId` 为空时是这个 Bot 的单 Bot 群，不为空时是那个群（建项目时的两条例行发进项目群）：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`，派到哪台电脑也是同一条规则（见「派到哪台电脑」），本机合盖、远程在线时例行照常在远程跑。运行器和电脑代理因此不认识例行任务，没有新报文。派给谁不走路由表：`runRoutine` 带上例行的 `botId`，只派这一个 Bot，`reason` 记 `mentioned`，不改当前经手。按路由表走的话，项目群里换了首席，主助理的「周一 09:00 排本周计划」会派给新首席，那位手上没有项目清单，例行页面上却仍挂在主助理名下；首席卸任时没首席也没经手，就成了全员各排一份计划；队员自己在项目群里建的例行也会被首席截走。例行属于哪个 Bot 就由哪个 Bot 做，换首席不改例行，也不把例行改挂到新首席名下。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
 
 `POST /api/bots/:id/routines` 带的 `groupId` 照存进 `routines.group_id`。群按归属人查，别人的群和不存在一样回 404；Bot 不在那个群里回 400。`GET /api/routines` 是这个用户全部 Bot 的例行，每条就是 `Routine`（带 `botId`、`groupId` 和最近 20 条运行记录），按建的先后排。
 

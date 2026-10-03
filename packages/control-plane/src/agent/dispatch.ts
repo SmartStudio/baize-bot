@@ -18,7 +18,6 @@ import {
   type Message,
   type MessageBody,
   type ModelPurpose,
-  type RunId,
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
@@ -41,7 +40,7 @@ import {
   type ComputerSelection,
   type SelectionFailure,
 } from "./computer-selection.js";
-import { GroupTurns, type Speaker } from "./group-turn.js";
+import { GroupTurns, type SendOutcome, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
@@ -62,6 +61,8 @@ export type DispatchOptions = {
   readonly routineRunId?: string | undefined;
   /** 例行任务按保存的用途选模型；普通消息不带，固定走 plan。 */
   readonly purpose?: ModelPurpose | undefined;
+  /** 例行任务只派给它所属的 Bot，不走路由规则，换了首席或经手都不改它。普通消息不带。 */
+  readonly botId?: BotId | undefined;
 };
 
 export type DispatchOutcome =
@@ -118,12 +119,16 @@ export async function dispatchUserMessage(
     if (task !== null) deps.push.push(ownerId, { type: "task_updated", task });
   }
   const chiefBotId = await findChiefBotId(deps.db, groupId);
-  const targets = routeTargets({ members, chiefBotId, currentBotId: task?.currentBotId ?? null, mentions });
+  const owner = options.botId;
+  const targets =
+    owner === undefined
+      ? routeTargets({ members, chiefBotId, currentBotId: task?.currentBotId ?? null, mentions })
+      : members.filter((member) => member.id === owner).map((member) => member.id);
   if (targets.length === 0) return { kind: "no_target" };
 
   const reason = solo
     ? "solo"
-    : mentions.length > 0
+    : mentions.length > 0 || owner !== undefined
       ? "mentioned"
       : chiefBotId !== null
         ? "chief"
@@ -174,7 +179,7 @@ async function sendSpeaker(
   includeRecent: boolean,
   options: DispatchOptions,
   placed: Computer | null,
-): Promise<RunId | null> {
+): Promise<SendOutcome> {
   const selected: ComputerSelection =
     placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
   if (selected.kind === "failed") {
@@ -183,7 +188,7 @@ async function sendSpeaker(
       tone: "error",
       text: selectionNotice(selected.reason),
     });
-    return null;
+    return { kind: "stopped" };
   }
 
   const context = await contextFor(deps.db, ownerId, groupId, speaker, includeRecent, members);
@@ -211,9 +216,9 @@ async function sendSpeaker(
     triggerMessageId: speaker.trigger.id,
     routineRunId: options.routineRunId,
   });
-  // Bot 在派活途中被删了，这一轮到此为止。不留 system：
+  // Bot 在派活途中被删了，只跳过它。不留 system：
   // 单聊群已随 Bot 级联删掉，写不进去；多 Bot 群里页面已收到 bot_deleted。
-  if (runId === null) return null;
+  if (runId === null) return { kind: "skipped" };
   await recordUnsettled(
     deps.db,
     runId,
@@ -251,9 +256,9 @@ async function sendSpeaker(
       tone: "error",
       text: selectionNotice("no_computer_online"),
     });
-    return null;
+    return { kind: "stopped" };
   }
-  return runId;
+  return { kind: "sent", runId };
 }
 
 function triggerText(body: MessageBody): string {

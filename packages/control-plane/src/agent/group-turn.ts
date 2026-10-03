@@ -25,6 +25,13 @@ export type Speaker = {
   readonly handoff?: { readonly id: HandoffId; readonly text: string; readonly fromBotId: BotId };
 };
 
+/**
+ * 派一位的结果。skipped：它在派活途中被删了，只跳过它，同一回合排在后面的照常派。
+ * stopped：电脑选不到或发不出去，后面的人同样派不出去，群里已经留了一句，关轮。
+ */
+export type SendOutcome =
+  { readonly kind: "sent"; readonly runId: RunId } | { readonly kind: "skipped" } | { readonly kind: "stopped" };
+
 type TurnCost = {
   messageId: MessageId;
   runId: RunId;
@@ -42,7 +49,7 @@ type Turn = {
   readonly ownerId: UserId;
   readonly epoch: number;
   readonly members: readonly RoutingMember[];
-  readonly send: (speaker: Speaker, includeRecent: boolean) => Promise<RunId | null>;
+  readonly send: (speaker: Speaker, includeRecent: boolean) => Promise<SendOutcome>;
   readonly seen: Set<string>;
   /** 说过正文的 run。运行器每个文字块一条消息，一个 run 的正文只算一句，不然一段带工具的长回复就撞上限。 */
   readonly talked: Set<RunId>;
@@ -235,13 +242,17 @@ export class GroupTurns {
       this.#close(turn);
       return;
     }
-    const runId = await turn.send(speaker, turn.dispatched > 0);
+    const outcome = await turn.send(speaker, turn.dispatched > 0);
     if (this.#turns.get(turn.groupId) !== turn) return;
-    if (runId === null) {
+    if (outcome.kind === "skipped") {
+      await this.#advance(turn);
+      return;
+    }
+    if (outcome.kind === "stopped") {
       this.#close(turn);
       return;
     }
-    turn.current = { speaker, runId };
+    turn.current = { speaker, runId: outcome.runId };
     turn.dispatched += 1;
     this.#publish(turn);
   }
