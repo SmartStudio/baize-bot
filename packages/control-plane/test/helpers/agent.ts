@@ -118,7 +118,12 @@ export async function expectHello(agent: AgentClient): Promise<Omit<HelloResult,
   const config = await agent.expect("config");
   const runStates: Extract<ControlToAgent, { type: "pause" | "resume" }>[] = [];
   for (const bot of config.bots) {
-    const synced = await agent.next();
+    // 缺了要说清缺的是谁，不然只看到一个通用超时。
+    const synced = await agent.next().catch(() => {
+      throw new Error(
+        `config 之后等不到 ${bot.id} 的运行状态补发，已收到 ${runStates.length}/${config.bots.length} 条：${JSON.stringify(runStates)}`,
+      );
+    });
     if ((synced.type !== "pause" && synced.type !== "resume") || synced.botId !== bot.id) {
       throw new Error(`config 之后本应按顺序补发 ${bot.id} 的运行状态，实际是 ${JSON.stringify(synced)}`);
     }

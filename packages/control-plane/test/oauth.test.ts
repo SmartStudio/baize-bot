@@ -469,6 +469,39 @@ describe("令牌端点发来不安全的访问令牌", () => {
       expect(logged.join("\n"), "日志里没有这把令牌").not.toContain(token);
     },
   );
+
+  it("十几个请求一起等刷新、刷出来的令牌不安全：每个都回 409，但账号只推一次过期、只通知一次", async () => {
+    const s = await stack();
+    const o = await owner(s, true);
+    captureErrors();
+    s.fake.setTokenLifetime(SHORT_LIFETIME_S);
+    await connectPlatform(o.client, "github");
+    const account = await connected(o);
+
+    s.fake.failNext(200, isRefresh, {
+      access_token: `ghu_${"\\".repeat(12)}X`,
+      expires_in: 3600,
+      refresh_token: "github_refresh_unsafe",
+      token_type: "bearer",
+    });
+    const release = s.fake.hold(isRefresh);
+    cleanups.push(release);
+    const burst = Array.from({ length: 12 }, () => proxyFetch(o, `/${account.id}${WHOAMI.github}`));
+    await waitFor(async () => refreshes(s).length === 1, "第一条刷新挂在假平台上");
+    release();
+    const responses = await Promise.all(burst);
+
+    expect(
+      responses.map((response) => response.status),
+      "每个请求都被告知要重新登录",
+    ).toEqual(Array(12).fill(409));
+    expect(refreshes(s), "只刷一次").toHaveLength(1);
+    expect((await nextOf(o.push, "account_updated")).account).toMatchObject({ id: account.id, login: "expired" });
+    expect((await nextOf(o.push, "notify")).notice.kind).toBe("failed");
+    // 多出来的过期推送或通知会排在占位账号那条前面，nextOf 当场认出。去重靠 markLoginExpired 的 login = 'valid' 守卫。
+    await expectQuietUntilPlaceholder(o);
+    expect(await loginOf(o, account.id)).toBe("expired");
+  });
 });
 
 describe("令牌刷新", () => {

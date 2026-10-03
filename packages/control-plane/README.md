@@ -152,7 +152,7 @@
 
 暂停状态住在控制面，电脑那头只是照着执行。
 
-**hello 按状态补发。** 电脑 hello 成功后照发 `welcome` 加 `config`，紧跟着给 `config` 里的每个 Bot 各补一条：`run_state` 是 `paused` 的补 `pause`，其余的补 `resume`。代理在收到 `config` 之前收到的 `pause`、`resume` 会被丢掉（那时还没有运行器），所以只能排在 `config` 后面。补发和 `config` 用的是同一次 `listBots` 的结果。
+**hello 按状态补发。** 电脑 hello 成功后照发 `welcome` 加 `config`，紧跟着给 `config` 里的每个 Bot 各补一条：`run_state` 是 `paused` 的补 `pause`，其余的补 `resume`。新起的代理进程在收到 `config` 之前收到的 `pause`、`resume` 会被丢掉（那时还没有运行器），同一个进程重连时运行器还在，早到的会立刻生效；补发要对两种进程都成立，所以排在 `config` 后面。补发和 `config` 用的是同一次 `listBots` 的结果。
 
 **断线期间点的「继续」不会丢。** 断线时点继续，库里照样写成 `running`，但这时没有连接，那条 `resume` 发不出去。代理重连有两种情况：
 

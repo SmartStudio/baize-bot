@@ -428,8 +428,9 @@ export class AgentHub {
   /**
    * hello 时 config 后面紧跟每个 Bot 的运行状态，停着的补 pause，其余的补 resume。
    * 暂停状态住在控制面：新起的代理不记得谁停着；同一个代理进程重连则还记得断线前的状态，
-   * 断线期间点的继续没送到，只补 pause 的话它会一直停着。代理收到 config 之前的 pause、resume 会被丢掉，
-   * 所以只能排在 config 后面。
+   * 断线期间点的继续没送到，只补 pause 的话它会一直停着。
+   * 新起的代理进程收到 config 之前的 pause、resume 会被丢掉（还没有运行器），同一个进程重连时运行器还在，早到的会立刻生效；
+   * 补发要对两种进程都成立，所以排在 config 后面。
    */
   async #sendConfig(conn: AgentConnection, reason: "hello" | "changed"): Promise<void> {
     const config = this.#configs.get(conn) ?? { sent: 0, acked: 0, state: "handshaking" as const };
