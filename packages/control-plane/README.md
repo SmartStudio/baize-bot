@@ -14,13 +14,13 @@
 
 ### 路由规则
 
-| 群 | 这条消息的目标 |
-| --- | --- |
-| 单 Bot 群 | 恒为它，@ 了谁、上一句谁经手都改变不了 |
-| 多 Bot 群，正文 @ 了人 | 被 @ 的那些，按正文首次出现顺序去重 |
-| 多 Bot 群，没 @ 人、有首席 | 只派首席 |
-| 多 Bot 群，没 @ 人、没首席、有当前经手 | 只派当前经手 |
-| 多 Bot 群，没 @ 人、没首席也没当前经手 | 全员按成员表顺序轮流说 |
+| 群                                     | 这条消息的目标                         |
+| -------------------------------------- | -------------------------------------- |
+| 单 Bot 群                              | 恒为它，@ 了谁、上一句谁经手都改变不了 |
+| 多 Bot 群，正文 @ 了人                 | 被 @ 的那些，按正文首次出现顺序去重    |
+| 多 Bot 群，没 @ 人、有首席             | 只派首席                               |
+| 多 Bot 群，没 @ 人、没首席、有当前经手 | 只派当前经手                           |
+| 多 Bot 群，没 @ 人、没首席也没当前经手 | 全员按成员表顺序轮流说                 |
 
 `@所有人` 派给全员，顺序按成员表。首席是群属性，可以由 Bot 调用 `set_chief` 设置或卸任；首席优先于当前经手。Bot 没有话要说时以 `(pass)` 或 `（pass）` 开头回复，控制面不落这条消息，也不推给 Web。运行器每个文字块报一条消息，`(pass)` 按块判断：一个 run 只要有一块可见的话就不算 pass，花费卡照留，后面那块 `(pass)` 本身仍不显示；整个 run 没有可见块才算 pass，花费并进这一轮。
 
@@ -42,12 +42,12 @@
 
 ### 派到哪台电脑
 
-一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接，而且这条连接 hello 的那份 `config` 已经发出。握手到 `config` 之间还要对账、查库，这段时间里派的 prompt 会比 `config` 先到，新起的代理还没有运行器，只能回 `prompt_before_config` 丢掉它，所以这段时间按不在线算。代理解析不了 config（多半是两边版本对不上）会回 `agent_error` `config_rejected`，detail 写校验不过的字段路径；控制面把这条连接记成被拒，按不在线算，推一条 stuck「电脑代理和控制面版本对不上，配置被拒」，被拒期间代理回的 `prompt_before_config` 也按这个原因收尾。代理每收下一条 config 回 `config_applied`，控制面收到才恢复派活。hello 那条 config 发出去就算在线不变，不回 `config_applied` 也照常能派。config 带每条连接单调递增的 `generation`：`AgentHub` 在开始读快照时就领号，并发的两次重发先领号的号小，但后领号的那条可能先发出去，代理丢掉比已应用代际小的 config，不回执；`config_applied` 和 `config_rejected` 都带同一个代际，控制面只认最后发出那一代的 `config_applied`，被拒之后又发过一代的话，早先那一代晚到的回执不能把它提前恢复成在线。拒收也只认最后发出那一代：带代际的拒收代际对不上就忽略；不带代际的拒收只在这条连接还没收到过带代际的回执时才认，收到过之后它不可能说的是当前这一代。被忽略的拒收没有任何副作用，不改连接状态，不记拒收警告，不推 stuck，所以也不会占掉这段在线期唯一那条 stuck，之后当前代际真被拒照样推（`test/config-generation.test.ts` 钉着）。不兼容旧代理的回执：基底那版代理回的 `config_applied` 不带代际，新协议 parse 不过，整条丢掉，被拒之后靠它恢复不了。控制面和电脑代理按同一个版本一起升，第一版只有自用，不写兼容分支。被拒期间用户再发消息，群里那句说的是「电脑上的白泽版本和控制面对不上，这条没派出去，把电脑上的白泽升级或重启后再说一次」，不是「电脑不在线」。代理的 `agent_error` 带了 `runId` 就是说那个 run 不会再有 `run_done`，控制面按断线收尾同一套替它收尾：run 结束、挂着的审批过期、群里一句、例行记失败。收尾找的是库里这台电脑还开着的 run，群按库里 run 的群，报文里的群号不作数；找不到（别的电脑的 run、已经收过尾的重报）不收尾，只打一行 `console.error`。它和新连接 hello 对账可能同时读到同一个还开着的 run，两边都进 `abandonRun`，靠 `finishRun` 的 `WHERE ended_at IS NULL` 只让先落的那边收尾、说那一句（`test/reconnect.test.ts` 钉着）。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
+一个用户最多两台电脑，本机和远程。规则是 `agent/computer-selection.ts` 的纯函数 `selectComputer`，输入是这次要碰的账号和候选电脑，每台候选电脑可以带上挂在它上面的账号，在线看 `AgentHub` 此刻有没有这台的连接，而且这条连接 hello 的那份 `config` 已经发出。握手到 `config` 之间还要对账、查库，这段时间里派的 prompt 会比 `config` 先到，新起的代理还没有运行器，只能回 `prompt_before_config` 丢掉它，所以这段时间按不在线算。代理解析不了 config（多半是两边版本对不上）会回 `agent_error` `config_rejected`，detail 写校验不过的字段路径；控制面把这条连接记成被拒，按不在线算，推一条 stuck「电脑代理和控制面版本对不上，配置被拒」，被拒期间代理回的 `prompt_before_config` 也按这个原因收尾。代理每收下一条 config 回 `config_applied`，控制面收到才恢复派活。hello 那条 config 发出去就算在线不变，不回 `config_applied` 也照常能派。config 带每条连接单调递增的 `generation`：`AgentHub` 在开始读快照时就领号，并发的两次重发先领号的号小，但后领号的那条可能先发出去，代理丢掉比已应用代际小的 config，不回执；`config_applied` 和 `config_rejected` 都带同一个代际，控制面只认最后发出那一代的 `config_applied`，被拒之后又发过一代的话，早先那一代晚到的回执不能把它提前恢复成在线。拒收也只认最后发出那一代：带代际的拒收代际对不上就忽略；不带代际的拒收只在这条连接还没收到过带代际的回执时才认，收到过之后它不可能说的是当前这一代。被忽略的拒收没有任何副作用，不改连接状态，不记拒收警告，不推 stuck，所以也不会占掉这段在线期唯一那条 stuck，之后当前代际真被拒照样推（`test/config-generation.test.ts` 钉着）。不兼容旧代理的回执：基底那版代理回的 `config_applied` 不带代际，新协议 parse 不过，整条丢掉，被拒之后靠它恢复不了。控制面和电脑代理按同一个版本一起升，第一版只有自用，不写兼容分支。被拒期间用户再发消息，群里那句说的是「电脑上的白泽版本和控制面对不上，这条没派出去，把电脑上的白泽升级或重启后再说一次」，不是「电脑不在线」。代理的 `agent_error` 带了 `runId` 就是说那个 run 不会再有 `run_done`，控制面按断线收尾同一套替它收尾：run 结束、挂着的审批过期、群里一句、例行记失败。收尾找的是库里这台电脑还开着的 run，群按库里 run 的群，报文里的群号不作数；找不到（别的电脑的 run、已经收过尾的重报）不收尾，只打一行 `console.error`。它和新连接 hello 的对账排在同一台电脑的链上，先到的整个做完（事务提交）另一个才开始读 run，所以不会两边同时读到同一个还开着的 run：旧连接的报错收尾先做完，新 hello 对账时那个 run 已经结束，群里只有收尾那一句（`test/reconnect.test.ts` 扣住收尾的第一次读、排进新 hello 再放开，钉着这个先后）。`finishRun` 的 `WHERE ended_at IS NULL` 仍然在，挡的是 HTTP 路径和别的进程并发结束同一个 run。`dispatchUserMessage` 选一次，头一个 speaker 就派到这台，不再重选：重选的话两次之间掉线，头一个就不建 run 派空了，调用方却已经拿到 `sent`，例行会一直停在运行中。同一回合后面的 speaker 要等前一个跑完才派，那时各自再选。
 
-| 这次要碰的账号 | 派到 |
-| --- | --- |
-| 不碰账号 | 本机在线派本机，否则远程在线派远程，都不在线就派不出去 |
-| 碰账号 | 账号所在的那台；那台离线就派不出去，不改派到另一台 |
+| 这次要碰的账号 | 派到                                                   |
+| -------------- | ------------------------------------------------------ |
+| 不碰账号       | 本机在线派本机，否则远程在线派远程，都不在线就派不出去 |
+| 碰账号         | 账号所在的那台；那台离线就派不出去，不改派到另一台     |
 
 **这一版派活不要求账号，候选电脑也不带账号。** `dispatch.ts` 的 `computerFor` 给 `selectComputer` 传的要求账号和每台电脑的账号都是空数组，实际走的是上表第一行。没有哪张表把群、例行或 Bot 绑到账号上，能从数据里算出来的只有群里草稿用过的账号。拿它来算不对：起草只要 `config.accounts` 里有这个账号，哪台电脑都能起，真发由发布循环按账号所在的电脑去发，不走派活。按草稿账号算的话，小红书项目的「排本周计划」会被钉在本机，合上 Mac 就不跑；主助理单聊里草稿跨了两台电脑的账号，就再也派不出去。例行任务也不加账号字段：例行只是归属人发的一句话，例行和 Bot 在派出去之前都不知道这一轮会碰哪个账号，填了也只能靠猜。眼下真正碰账号的动作只有发布草稿，它按 `accounts.computer_id` 下发，账号过期的隔离也落在发布上，见「账号」一节。
 
@@ -55,13 +55,13 @@
 
 派不出去时不建 run，群里落一句 `tone: "error"` 的 system，每种原因一句，写在 `SELECTION_FAILURE`。有两台电脑而都不在线时单说一句，让人看得出不是只有一台：
 
-| 原因 | 群里那句 |
-| --- | --- |
-| `no_computer_online` | 电脑不在线，这条没派出去，电脑回来后再说一次 |
-| `all_computers_offline` | 你的电脑都不在线，这条没派出去，有一台回来后再说一次 |
-| `required_account_not_found` | 要用的账号已经不在账号页里，这条没派出去，把账号挂上后再说一次 |
-| `accounts_on_multiple_computers` | 要用的账号分在两台电脑上，这条没派出去，拆成两句，每句只碰一台电脑上的账号 |
-| `required_computer_offline` | 要用的账号所在的那台电脑不在线，这条没派出去，也不会改派到另一台，那台回来后再说一次 |
+| 原因                             | 群里那句                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| `no_computer_online`             | 电脑不在线，这条没派出去，电脑回来后再说一次                                         |
+| `all_computers_offline`          | 你的电脑都不在线，这条没派出去，有一台回来后再说一次                                 |
+| `required_account_not_found`     | 要用的账号已经不在账号页里，这条没派出去，把账号挂上后再说一次                       |
+| `accounts_on_multiple_computers` | 要用的账号分在两台电脑上，这条没派出去，拆成两句，每句只碰一台电脑上的账号           |
+| `required_computer_offline`      | 要用的账号所在的那台电脑不在线，这条没派出去，也不会改派到另一台，那台回来后再说一次 |
 
 ### 上行 `task_checklist` 和 `mention`
 
@@ -110,12 +110,12 @@
 
 ### 一条链
 
-| 这一步 | 谁做 | 结果 |
-| --- | --- | --- |
-| 拦下要点头的工具 | 运行器 | 发一条 `approval_request` 上来，handler 挂起等结论 |
-| `approval_request` 到达 | `agent/events.ts` | 一个事务里建群消息和 approvals 行，先推 `approval_updated` 再推那条 `message` |
-| 归属人点批准或拒绝 | `POST /api/approvals/:id` | 定结论，选了长期范围就落授权并先重发 `config`，再向电脑发 `approval_result`、推 `approval_updated` |
-| 结论到达 | 运行器 | 批了就往下跑，拒了就 `block`，这个工具调用的终态是 `blocked` |
+| 这一步                  | 谁做                      | 结果                                                                                               |
+| ----------------------- | ------------------------- | -------------------------------------------------------------------------------------------------- |
+| 拦下要点头的工具        | 运行器                    | 发一条 `approval_request` 上来，handler 挂起等结论                                                 |
+| `approval_request` 到达 | `agent/events.ts`         | 一个事务里建群消息和 approvals 行，先推 `approval_updated` 再推那条 `message`                      |
+| 归属人点批准或拒绝      | `POST /api/approvals/:id` | 定结论，选了长期范围就落授权并先重发 `config`，再向电脑发 `approval_result`、推 `approval_updated` |
+| 结论到达                | 运行器                    | 批了就往下跑，拒了就 `block`，这个工具调用的终态是 `blocked`                                       |
 
 控制面收到 `approval_request` 时**不回任何东西**，运行器就一直挂着等。这是审批的本意：没人点头就不往下走。
 
@@ -129,10 +129,10 @@
 
 `DecideApprovalRequest.scope` 是 `once`、`project`、`forever` 之一，省了是 `once`。
 
-| 范围 | 落什么 |
-| --- | --- |
-| `once` | 不落授权，只放行这一次 |
-| `project` | 一条绑在这个群上的授权，别的群同类动作照样问 |
+| 范围      | 落什么                                                                   |
+| --------- | ------------------------------------------------------------------------ |
+| `once`    | 不落授权，只放行这一次                                                   |
+| `project` | 一条绑在这个群上的授权，别的群同类动作照样问                             |
 | `forever` | 一条对这个用户全局生效的授权。表里没有 Bot 列，同一个用户的所有 Bot 都认 |
 
 越级的范围在边界回 400，不落授权，审批还在等：
@@ -167,7 +167,7 @@
 2. 这次查询的结果还没回来，一个 `resume` 的 UPDATE 提交了，路由把 `resume` 发了出去。
 3. hello 拿到结果，按旧快照补发 `pause`。
 
-结果是运行器里停着，库里却是 `running`。反过来点暂停也一样，停不住。窗口是一次查询的往返，用户再点一次就能恢复，这一版不修。要彻底关掉，得把同一个用户的 hello 补发和 pause、resume 路由串到一条链上（做法同 `agent/hub.ts` 里按电脑串行的 `#enqueueFinish`），让「读状态加下发」和「写状态加下发」不再交错。
+结果是运行器里停着，库里却是 `running`。反过来点暂停也一样，停不住。窗口是一次查询的往返，用户再点一次就能恢复，这一版不修。要彻底关掉，得把同一个用户的 hello 补发和 pause、resume 路由串到一条链上（做法同 `agent/hub.ts` 里按电脑一条链的 `#enqueue`，见下面「电脑断线」），让「读状态加下发」和「写状态加下发」不再交错。
 
 ### 删 Bot 时的审批
 
@@ -191,6 +191,12 @@ approvals 行的 `bot_id` 外键是级联删除，事务提交后那一行随 Bo
 
 断线有两种：socket 真的关了，或者 45 秒收不到这条连接的任何报文。后一种是合盖的 Mac，进程冻住发不出 FIN，服务端手里的 socket 一直是 OPEN，只看 `readyState` 的话例行照样派给它。电脑代理每 15 秒发一次 `heartbeat`，45 秒是连丢两次还不判、第三次也没到才判。计时挂在每条 socket 上，收到任何一帧就重置，到点只 `terminate()`，之后标记休眠、推 `computer_updated`、宽限、收尾、推 `stuck` 全走下面这条普通断线的路，不另写一遍。用 `terminate()` 不用 `close()`：后者要等对端回关闭帧，冻住的对端不会回。没有用协议层 ping：心跳已经每 15 秒一帧，pong 能证明的它都能证明。被新连接顶掉的旧连接到点只关它自己，碰不到新连接。阈值是 `startServer` 的 `silenceTimeoutMs`，测试调短用。
 
+**同一台电脑一条链。** 同一台电脑可能同时有两条连接在手里：代理重连时旧 socket 还没关，或者旧连接的某个任务停在一次查库上。`agent/hub.ts` 把同一台电脑的所有处理排成一条链（`#enqueue`，一个 `Map<ComputerId, Promise>`）：hello 认完身份之后的全部（轮换网关 key、登记连接、顶掉旧 socket、按 `activeRuns` 对账 run、上线写和推送、`welcome`、补建主助理、下发 `config`）是一个任务，已握手连接的每一帧、socket 的关闭、宽限到点的收尾各是一个任务。一个任务从开始到它的推送结束，这台电脑的另一条连接插不进来，所以「旧连接停在某个 await 上、新连接趁这时做完、旧连接醒来再写库或推送」这整类交错不存在，任务中间的 await 后面不用再判自己还是不是当前连接。每个任务只在开头看一次：帧和关闭看 `#connections` 里挂的还是不是这条连接，不是就整条丢掉，被顶掉的旧连接 inbox 里排着的帧是旧代理的旧话（`test/stale-connection.test.ts`）；宽限收尾看这台电脑有没有连接、有没有认完身份还在排队的 hello，有就停手，run 留给 hello 按 `activeRuns` 对账。认身份（`authenticateComputer`）在链外做，那时还不知道是哪台电脑。同一条 socket 的帧按到达顺序：上一帧在链上做完，下一帧才排进链，并发跑的话三段 `bot_text` 会乱序落库；两帧之间可能插进另一条连接的 hello，之后这条连接剩下的帧在开头丢掉。排队期间 socket 已经断了的 hello 也照做，它的关闭排在它自己后面把电脑写成休眠，电脑来过这件事才记得下来。不同电脑的链互相并行；同一用户两台电脑写同一个账号靠数据库的 advisory lock 和行锁。链上的任务不会等这台电脑后续的报文（`events.ts`、`dispatch.ts`、`group-turn.ts`、`account-expiry.ts` 里的 await 都是查库、事务、`notifications.publish` 和同步的 `agents.send`），所以链不会卡死；一个任务抛错由排它的那一方接住记日志，后面的任务照跑。复核过的五条交错序列各有一条用例钉着（`test/chain-order.test.ts`）。
+
+**SQL 条件是数据库层的约束。** 上线和休眠这两条状态写（`markComputerOnline`、`markComputerSleeping`）带着这条连接的网关 key，UPDATE 的 WHERE 里要求行上的 `gateway_key_hash` 还是它；`markLoginValid` 和 `markLoginExpired` 带报它的那条连接（`ReportingConnection`），在锁里校验电脑行上的 key 还是这条连接的；心跳刷的 `last_seen_at` 走同一个函数。网关 key 每次 hello 都轮换，行上的 hash 就是最近一次握手的代次。这些条件挡的是 HTTP 路径上并发改电脑的写，以及以后多个控制面共库时另一个进程里的旧连接；同一个进程里两条连接的交错由链挡住，不靠它们。其余上行事件要么只写内存（`config_applied`、`config_rejected`），要么按 run 落在群里：run 绑的是电脑不是连接，同一个代理进程重连后继续报的那个 run 是正当的，该挡它们的是 run 的生命周期（`finishRun` 的 `ended_at IS NULL`、`acceptHandoff` 和 `publish_result` 各自 WHERE 里的状态），不是连接代次。
+
+**停机只进不出。** `closeAll` 先把 hub 记成停机，这一刻起不再有新的生产者：之后升级上来的 socket 当场关掉（close code 1012，代理按退避重连）；认身份在链外、停机期间才回来的 hello 也当场关掉不排链；已有 socket 再来的帧在 message 回调里同步丢掉，不进 inbox；socket 关闭只清它自己的计时器，不再排任务；没到点的宽限计时器在这一刻同步清掉，之后 `#onClose` 不再新建，所以没有计时器会在库关了之后才到点。剩下的只有停机前已经收下的那些帧：每条 socket 还没做完的 inbox 那一步记在一个 Set 里（做完就删，认身份那一步也在里面），`closeAll` 等一遍这些 inbox 尾，再等一遍各电脑的链，两个集合都是有限的，各等一次就够，不用循环。然后清空连接表、逐条关 socket、一条 UPDATE 把这几台写成休眠。先清表再写库：那条批量休眠之后没人再写这几台的状态，`closeAll` 返回时库里的休眠就是最终状态（`test/shutdown.test.ts` 钉着：认身份扣住再停机，放开后那条连接没有 welcome、库里不是在线、批量休眠扣住期间 `server.close` 不返回；停机前收下、还排在 inbox 里的第二帧做完才批量休眠；两台电脑停机后交替续帧，续的帧都丢掉，停机只做完停机前那两帧就返回）。
+
 有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次。
 
 pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 Bot 的 `pause` 或 `resume`），**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。
@@ -203,11 +209,11 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 
 
 ### 一条链
 
-| 这一步 | 谁做 | 结果 |
-| --- | --- | --- |
-| 决定交出去 | 运行器 | 发一条 `handoff` 上来，带目标 Bot 和 done / notDone / next / checklistIndex |
-| `handoff` 到达 | `agent/events.ts` | 一个事务里建群消息和 handoffs 行，先推 `handoff_updated` 再推那条 `message`，目标 prompt 排到当前 run 的 `run_done` 之后，带 `handoffId`，正文是 `agent/handoff.ts` 渲染出来的报文 |
-| 目标确认接手 | 运行器发 `handoff_accept` | 状态改 accepted、`tasks.current_bot_id` 换人、经手记录补上一位的 `to` 再加新一位，推 `handoff_updated` 和 `task_updated` |
+| 这一步         | 谁做                      | 结果                                                                                                                                                                               |
+| -------------- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 决定交出去     | 运行器                    | 发一条 `handoff` 上来，带目标 Bot 和 done / notDone / next / checklistIndex                                                                                                        |
+| `handoff` 到达 | `agent/events.ts`         | 一个事务里建群消息和 handoffs 行，先推 `handoff_updated` 再推那条 `message`，目标 prompt 排到当前 run 的 `run_done` 之后，带 `handoffId`，正文是 `agent/handoff.ts` 渲染出来的报文 |
+| 目标确认接手   | 运行器发 `handoff_accept` | 状态改 accepted、`tasks.current_bot_id` 换人、经手记录补上一位的 `to` 再加新一位，推 `handoff_updated` 和 `task_updated`                                                           |
 
 **确认之前当前经手不换人。** 交出去的那一个照旧收群里不 @ 人的消息，目标只是多收到一份报文。换人发生在 accept，不在发起，所以目标一直不确认时活不会悬在半空。
 
@@ -292,16 +298,16 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### 哪个动作推什么
 
-| 动作 | 推送 | 重发 config |
-| --- | --- | --- |
-| `POST /api/bots/:id/skills` | `skill_updated` | 是 |
-| `PATCH /api/skills/:id` | `skill_updated` | 是 |
-| `DELETE /api/skills/:id` | `skill_deleted` | 是 |
-| `POST /api/skills/:id/copy` | `skill_updated`（新那条） | 是 |
-| 上行 `skill_offer` | `message` | 否，还没建 skill 行 |
-| 点「存」 | `message`、`skill_updated` | 是 |
-| 点「不存」 | `message` | 否，什么都没变 |
-| 正文里 `/名` | 每条命中一条 `skill_updated` | 否，只有 `use_count` 变了，它不进 SKILL.md |
+| 动作                        | 推送                         | 重发 config                                |
+| --------------------------- | ---------------------------- | ------------------------------------------ |
+| `POST /api/bots/:id/skills` | `skill_updated`              | 是                                         |
+| `PATCH /api/skills/:id`     | `skill_updated`              | 是                                         |
+| `DELETE /api/skills/:id`    | `skill_deleted`              | 是                                         |
+| `POST /api/skills/:id/copy` | `skill_updated`（新那条）    | 是                                         |
+| 上行 `skill_offer`          | `message`                    | 否，还没建 skill 行                        |
+| 点「存」                    | `message`、`skill_updated`   | 是                                         |
+| 点「不存」                  | `message`                    | 否，什么都没变                             |
+| 正文里 `/名`                | 每条命中一条 `skill_updated` | 否，只有 `use_count` 变了，它不进 SKILL.md |
 
 ## 账号
 
@@ -371,7 +377,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 不变式。对有控制面凭据的账号，`login = 'expired'` 成立，当且仅当当前这一代凭据被判定为死了。过期是针对某一代凭据下的结论：记过期的 UPDATE 带着那一代，库里已经是下一代就什么都不改。凭据代际一推进（刷新成功、重新授权，都经 `saveGrant`），账号必须回到 `valid`，所以 `saveGrant` 写下新一代之后在同一个事务里把 `login <> 'valid'` 的账号改回 `valid`；代际不推进，账号就没有从 `expired` 回到 `valid` 的路（唯一例外是 `markLoginValid`，只给电脑报小红书登录用，这种账号没有控制面凭据）。刷新被拒只清 `refresh_enc`、不推进代际，因为死的还是这一代。选「刷新成功时在锁里写回 `valid`」而不是「发现已 `expired` 就不刷新」，是因为过期先提交、刷新随后成功这条交错里刷新已经拿到了平台发的新令牌，扔掉它就要用户再授权一次；写回 `valid` 让不变式直接成立，`account_updated` 和 `config` 在提交后补推。
 
-唯一锁序。所有同时碰 `accounts` 和 `account_credentials` 的路径都先锁账号行，再碰凭据行，入口只有一个：`withAccountLock(db, accountId, run)`，它开事务、`SELECT ... FOR UPDATE` 锁账号行、把一个只有它造得出来的 `AccountLock` 交给 `run`。写凭据的 `saveGrant`、`saveAccessToken`，刷新的整趟（锁到后再查、打平台、被拒清 `refresh_enc`、成功写回），`markLoginExpired`，授权回调写凭据，`addAccountWithToken`，`markLoginValid` 都收这个 `AccountLock` 或从这里进，不收 `Db`，绕过锁的写法编译不过。凭据行不再单独加 `FOR UPDATE OF account_credentials` 或 `FOR SHARE`：账号行锁已经把这些路径排成一队，后到的在账号行上等，醒来跑的 UPDATE 看到的是前一个提交之后的世界，两边不会互等成死锁（`test/oauth.test.ts` 的「锁序」用例把回调停在「锁了账号、还没写凭据」的窗口，这时记过期，两边都能完成）。授权回调和 `addAccountWithToken` 的 advisory lock（`oauth-account:<ownerId>:<platform>`）在它外面，管的是「挂哪一行」，两条路径都先拿它、选定行之后才进 `withAccountLock`，顺序一致，不会互等。发布路径的会话代次条件（`login_generation = claimed_login_generation`）只留给电脑发的草稿：那些账号没有控制面凭据，只能靠它挡「认领之后重登」；走接口的草稿只看凭据代际。0016 之前认领的草稿 `claimed_login_generation` 是 NULL，滚动升级期间旧控制面重登也不推进 `login_generation`，所以这些行不用代次，改用基底那条 `login_generation = 1 AND login_changed_at <= claimed_at`：代次仍是 1 说明没经过新控制面重登，认领时刻挡旧控制面的重登。`markLoginValid` 先在电脑上取 advisory lock（`login-valid:<computerId>`），再锁电脑报上来的那一行，合并到同名的 known 行时嵌套一层 `withAccountLock(known)` 才改它，和结算它的发布结果排成一队。要先排队，是因为两把行锁的顺序由报文决定：甲报成乙、乙报成甲同时到，一边先锁甲等乙，另一边先锁乙等甲，PostgreSQL 报 40P01，一次登录结果就丢了（`test/login-merge-lock.test.ts` 用两个控制面共用一库钉着）。同一台电脑的登录结果一次只进一个，结算发布结果的那头只拿一把行锁，不会互等。
+唯一锁序。所有同时碰 `accounts` 和 `account_credentials` 的路径都先锁账号行，再碰凭据行，入口只有一个：`withAccountLock(db, accountId, run)`，它开事务、`SELECT ... FOR UPDATE` 锁账号行、把一个只有它造得出来的 `AccountLock` 交给 `run`。写凭据的 `saveGrant`、`saveAccessToken`，刷新的整趟（锁到后再查、打平台、被拒清 `refresh_enc`、成功写回），`markLoginExpired`，授权回调写凭据，`addAccountWithToken`，`markLoginValid` 都收这个 `AccountLock` 或从这里进，不收 `Db`，绕过锁的写法编译不过。凭据行不再单独加 `FOR UPDATE OF account_credentials` 或 `FOR SHARE`：账号行锁已经把这些路径排成一队，后到的在账号行上等，醒来跑的 UPDATE 看到的是前一个提交之后的世界，两边不会互等成死锁（`test/oauth.test.ts` 的「锁序」用例把回调停在「锁了账号、还没写凭据」的窗口，这时记过期，两边都能完成）。授权回调和 `addAccountWithToken` 的 advisory lock（`oauth-account:<ownerId>:<platform>`）在它外面，管的是「挂哪一行」，两条路径都先拿它、选定行之后才进 `withAccountLock`，顺序一致，不会互等。发布路径的会话代次条件（`login_generation = claimed_login_generation`）只留给电脑发的草稿：那些账号没有控制面凭据，只能靠它挡「认领之后重登」；走接口的草稿只看凭据代际。0016 之前认领的草稿 `claimed_login_generation` 是 NULL，滚动升级期间旧控制面重登也不推进 `login_generation`，所以这些行不用代次，改用基底那条 `login_generation = 1 AND login_changed_at <= claimed_at`：代次仍是 1 说明没经过新控制面重登，认领时刻挡旧控制面的重登。`markLoginValid` 先在电脑上取 advisory lock（`login-valid:<computerId>`），再锁电脑报上来的那一行，合并到同名的 known 行时嵌套一层 `withAccountLock(known)` 才改它，和结算它的发布结果排成一队。要先排队，是因为两把行锁的顺序由报文决定：甲报成乙、乙报成甲同时到，一边先锁甲等乙，另一边先锁乙等甲，PostgreSQL 报 40P01，一次登录结果就丢了。控制面是单实例，同一台电脑的两条连接在 hub 里排成一条链，经连接报上来的两次合并本就先后进库；这把锁挡的是以后多个控制面共库，或者别的路径并发调 `markLoginValid`（`test/login-merge-lock.test.ts` 直接调仓库函数让两次合并并发进库钉着）。同一台电脑的登录结果一次只进一个，结算发布结果的那头只拿一把行锁，不会互等。
 
 交错里那一次旧请求本身的结论不变：代理回 409，发布把那条草稿记 `login_expired`；账号不动，因为账号这边已经有了更新的结论，草稿失败时也不再发通知（同 `settleFailed` 的 `already_known`）。
 

@@ -13,7 +13,7 @@ import { and, asc, desc, eq, lte, ne, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
 import { accountCredentials, accounts, computers, drafts } from "../db/schema.js";
-import { newId } from "../ids.js";
+import { hashSecret, newId } from "../ids.js";
 import { withAccountLock } from "./account-lock.js";
 import { ensureComputer, findComputerByOwner } from "./computers.js";
 import { toAccount } from "./rows.js";
@@ -203,6 +203,17 @@ export async function findAccount(db: Db, ownerId: UserId, accountId: AccountId)
 export type LoginValid = { readonly account: Account; readonly deleted: AccountId | null };
 
 /**
+ * 电脑代理报登录状态的那条连接。网关 key 每次 hello 都轮换，电脑行上的 hash 就是最近一次握手的代次。
+ * 写库那一刻在同一个事务里校验它还是这条连接的。同一台电脑的两条连接在同一个控制面里不会交错（hub 按电脑排成一条链），
+ * 这道条件是数据库层的约束：挡 HTTP 路径上并发改电脑的写，也挡以后多个控制面共库的情况。
+ */
+export type ReportingConnection = { readonly computerId: ComputerId; readonly gatewayKey: string };
+
+function reportedBy(connection: ReportingConnection): SQL {
+  return sql`EXISTS (SELECT 1 FROM ${computers} WHERE ${computers.id} = ${connection.computerId} AND ${computers.gatewayKeyHash} = ${hashSecret(connection.gatewayKey)})`;
+}
+
+/**
  * 扫码登上了。这台电脑上同平台已经有这个名字的行（多半是以前过期的那行），就把它记回已登录，
  * 报上来的要是占位就删掉，占位上的草稿挪过去；没有就给报上来的这行写上名字。
  * 报上来的行锁住，同一个账号连报两次也只收敛成一行。
@@ -211,19 +222,28 @@ export type LoginValid = { readonly account: Account; readonly deleted: AccountI
 export async function markLoginValid(
   db: Db,
   ownerId: UserId,
-  computerId: ComputerId,
+  connection: ReportingConnection,
   accountId: AccountId,
   handle: string,
 ): Promise<LoginValid | null> {
+  const { computerId } = connection;
   return db.transaction(async (outer) => {
     // 合并要锁两行：报上来的和同名的 known。两次合并互为对方的 known 时各自先锁自己的行就互等成 deadlock，
     // 所以先在电脑上排队，同一台电脑的登录结果一次只进一个，两把行锁的顺序才有意义。
     await outer.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`login-valid:${computerId}`}, 0))`);
     return withAccountLock(outer, accountId, async ({ tx }) => {
+      // 锁到手之后才查连接代次：新连接的写要么已经提交（这里看得到它换过的 key），要么还在锁上等。
       const [reported] = await tx
         .select()
         .from(accounts)
-        .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId), eq(accounts.computerId, computerId)));
+        .where(
+          and(
+            eq(accounts.id, accountId),
+            eq(accounts.ownerId, ownerId),
+            eq(accounts.computerId, computerId),
+            reportedBy(connection),
+          ),
+        );
       if (reported === undefined) return null;
       const now = new Date();
       const loggedIn = {
@@ -278,11 +298,12 @@ export type ClaimedSession =
 
 /**
  * 过期的依据。rejected 是控制面拿着某一代凭据被平台拒了，结论只算在那一代头上；
- * reported 是电脑代理看着浏览器说的，带 session 的是某次发布认领的结论，不带的是此刻看到的。
+ * reported 是电脑代理看着浏览器说的，带 session 的是某次发布认领的结论，不带的是此刻看到的；
+ * 带 connection 的只算在报它的那条连接头上，连接被顶掉之后写不进去。
  */
 export type ExpiryEvidence =
   | ({ readonly kind: "rejected" } & RejectedCredentials)
-  | { readonly kind: "reported"; readonly session?: ClaimedSession };
+  | { readonly kind: "reported"; readonly session?: ClaimedSession; readonly connection?: ReportingConnection };
 
 export type ExpiryTarget = {
   readonly ownerId: UserId;
@@ -316,10 +337,11 @@ export async function markLoginExpired(db: Db | Tx, target: ExpiryTarget): Promi
 
 function stillHolds(evidence: ExpiryEvidence): SQL | undefined {
   if (evidence.kind === "reported") {
-    const session = evidence.session;
-    if (session === undefined) return undefined;
-    if (session.kind === "generation") return eq(accounts.loginGeneration, session.generation);
-    return and(eq(accounts.loginGeneration, 1), lte(accounts.loginChangedAt, session.claimedAt));
+    const { session, connection } = evidence;
+    const sameConnection = connection === undefined ? undefined : reportedBy(connection);
+    if (session === undefined) return sameConnection;
+    if (session.kind === "generation") return and(eq(accounts.loginGeneration, session.generation), sameConnection);
+    return and(eq(accounts.loginGeneration, 1), lte(accounts.loginChangedAt, session.claimedAt), sameConnection);
   }
   if (evidence.generation === null) {
     return sql`NOT EXISTS (SELECT 1 FROM ${accountCredentials} WHERE ${accountCredentials.accountId} = ${accounts.id})`;

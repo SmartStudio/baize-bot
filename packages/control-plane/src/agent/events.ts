@@ -10,9 +10,9 @@ import {
   type RunId,
   type UserId,
 } from "@baize/shared";
-import { expireLogin } from "../account-expiry.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
+import { expireLogin } from "../account-expiry.js";
 import { findAccountOnComputer, markLoginValid } from "../repo/accounts.js";
 import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
@@ -68,7 +68,7 @@ export async function handleAgentEvent(
     case "hello":
       return;
     case "heartbeat":
-      await markComputerOnline(deps.db, conn.computerId);
+      await markComputerOnline(deps.db, conn.computerId, conn.gatewayKey);
       return;
     case "config_applied":
       deps.agents.markConfigApplied(conn, message.generation);
@@ -173,20 +173,20 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
     );
     return;
   }
+  // 两种写都带这条连接：落库那一刻连接已经被顶掉的话一行都不改，新连接刚写下的事实不会被在途的旧帧盖掉。
   const { state } = event;
   switch (state.login) {
     case "valid": {
-      const change = await markLoginValid(deps.db, conn.ownerId, conn.computerId, event.accountId, state.handle);
+      const change = await markLoginValid(deps.db, conn.ownerId, conn, event.accountId, state.handle);
       if (change === null) return;
       if (change.deleted !== null) deps.push.push(conn.ownerId, { type: "account_deleted", accountId: change.deleted });
       deps.push.push(conn.ownerId, { type: "account_updated", account: change.account });
       await deps.agents.sendConfig(conn.ownerId);
       return;
     }
-    case "expired": {
-      await expireLogin(deps, conn.ownerId, event.accountId);
+    case "expired":
+      await expireLogin(deps, conn.ownerId, event.accountId, conn);
       return;
-    }
     case "failed":
       // 登录没成不等于账号过期，accounts.login 不动。页面按 accountId 和 attempt 结算那张卡，通知只是给人看的。
       deps.push.push(conn.ownerId, {

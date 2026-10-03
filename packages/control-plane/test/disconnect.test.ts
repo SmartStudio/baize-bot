@@ -14,7 +14,8 @@ import * as runsRepo from "../src/repo/runs.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
-import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
+import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { queueHello } from "./helpers/queued-hello.js";
 import { connectPush } from "./helpers/ws.js";
 
 const notice = "电脑断过线，这次活没做完";
@@ -290,29 +291,8 @@ it("计时器收尾进行时 hello 对账仍保留 activeRuns", async () => {
     first.close();
     await first.closed();
     await timerReadEntered;
-    const beforeGatewayKey = (
-      await database.sql<{ gateway_key_hash: string }[]>`
-        SELECT gateway_key_hash FROM computers WHERE id = ${owner.computer.computerId}
-      `
-    )[0]?.gateway_key_hash;
-
-    const second = await openAgent(server.port);
-    second.send({
-      type: "hello",
-      computerId: owner.computer.computerId,
-      token: owner.computer.token,
-      version: "test",
-      activeRuns: [active],
-    });
-    await waitFor(async () => {
-      const row = (
-        await database.sql<{ gateway_key_hash: string }[]>`
-            SELECT gateway_key_hash FROM computers WHERE id = ${owner.computer.computerId}
-          `
-      )[0];
-      return row !== undefined && row.gateway_key_hash !== beforeGatewayKey;
-    }, "hello 轮换网关 key");
-    await new Promise((resolve) => setImmediate(resolve));
+    // 新连接的 hello 排在计时器收尾后面；收尾读完 run 之后要看到这条排着的 hello，不动它报活着的 run。
+    const second = await queueHello(server.port, owner.computer.computerId, owner.computer.token, [active]);
     releaseTimerRead();
     await second.expect("welcome");
     await second.expect("config");

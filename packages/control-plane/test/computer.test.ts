@@ -1,7 +1,12 @@
 import { ApiError, ComputerListResponse, ComputerTokenResponse, type ComputerId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { DEV_EMAIL, DEV_PASSWORD, seed } from "../src/seed.js";
-import { authenticateComputer, findComputerByOwner, markComputerOnline } from "../src/repo/computers.js";
+import {
+  authenticateComputer,
+  findComputerByOwner,
+  markComputerOnline,
+  rotateGatewayKey,
+} from "../src/repo/computers.js";
 import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -169,7 +174,8 @@ describe("在线状态不跨进程留存", () => {
 
   it("起服务时把上次没关干净留下的在线改成休眠", async () => {
     const stale = await makeComputer(database.db, (await makeUser(database.db)).id);
-    await markComputerOnline(database.db, stale.computerId);
+    // 照 hello 的样子留下一条在线：先轮换网关 key，再带着它写上线。
+    await markComputerOnline(database.db, stale.computerId, await rotateGatewayKey(database.db, stale.computerId));
     const untouched = await makeComputer(database.db, (await makeUser(database.db)).id);
 
     const own = await startTestServer(database.db);

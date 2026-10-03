@@ -2,6 +2,7 @@ import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
 import {
   AgentToControl,
   ControlToAgent,
+  type Computer,
   type ComputerId,
   type MessageId,
   type RunId,
@@ -35,6 +36,8 @@ const HELLO_TIMEOUT_MS = 10_000;
 
 const CLOSE_SUPERSEDED = 4000;
 const CLOSE_BAD_HELLO = 4001;
+/** RFC 6455 的 Service Restart。电脑代理收到任何关闭都按退避重连，停机结束它自己回来。 */
+const CLOSE_SHUTTING_DOWN = 1012;
 const DISCONNECT_NOTICE = "电脑断过线，这次活没做完";
 const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
 /**
@@ -87,9 +90,25 @@ export class AgentHub {
     { sent: number; acked: number; state: "handshaking" | "ready" | "rejected" }
   >();
   readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
-  readonly #finishChains = new Map<ComputerId, Promise<void>>();
-  readonly #pendingFinishes = new Set<Promise<void>>();
-  readonly #sleepingWrites = new Map<ComputerId, Promise<void>>();
+  /**
+   * 每台电脑一条链。hello、每一帧、关闭、宽限到点的收尾都排在上面，一个任务从开始到它的推送结束，
+   * 这台电脑的另一条连接插不进来。一个任务只在开头看一次自己还作不作数，中间的 await 不用再看。
+   * 不同电脑的链互相并行；同一用户两台电脑写同一个账号，靠数据库的 advisory lock 和行锁。
+   * 写库时带连接 key 的条件和 reportedBy 是数据库层的约束，挡的是 HTTP 路径和以后的多进程，不靠它们挡同进程交错。
+   */
+  readonly #chains = new Map<ComputerId, Promise<void>>();
+  /** 认完身份、还在链上排队的 hello 数。宽限收尾看到有 hello 排着就停手，run 留给它按 activeRuns 对账。 */
+  readonly #queuedHellos = new Map<ComputerId, number>();
+  /**
+   * 每条 socket 的 inbox 尾：还没做完的那一步。closeAll 靠它等停机前已经收下的帧，做完一步就删。
+   * 认身份那一步也在里面，所以停机会等正在认身份的 hello 回来；回来之后它自己看停机，关 socket 不入链。
+   */
+  readonly #inboxTails = new Set<Promise<void>>();
+  /**
+   * 停机只进不出。进了之后：新 socket 和刚认完身份的 hello 当场关掉；已有 socket 再来的帧在 message 回调里同步丢掉，
+   * 不进 inbox；关闭只清计时器，不再排任务、不再起宽限计时器。生产者只剩停机前已经收下的有限几帧。
+   */
+  #lifecycle: "serving" | "closing" = "serving";
 
   constructor(deps: AgentHubDeps) {
     this.#deps = deps;
@@ -97,6 +116,10 @@ export class AgentHub {
 
   /** 握手之后才算这台电脑在线。升级时不认身份，认不认得上由 hello 决定。 */
   accept(socket: WebSocket): void {
+    if (this.#lifecycle === "closing") {
+      socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
+      return;
+    }
     let conn: AgentConnection | null = null;
     const deadline = setTimeout(() => socket.close(CLOSE_BAD_HELLO, "没有报 hello"), HELLO_TIMEOUT_MS);
     deadline.unref();
@@ -105,57 +128,62 @@ export class AgentHub {
     const silence = setTimeout(() => socket.terminate(), this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS);
     silence.unref();
 
-    // 报文按到达顺序串行处理。并发跑的话三段 delta 会乱序落库，config 后面紧跟的 prompt 也可能先到。
+    // 同一条 socket 的帧按到达顺序：上一帧在链上做完，下一帧才排进链。并发跑的话三段 delta 会乱序落库。
+    // 两帧之间可能插进这台电脑另一条连接的 hello，插进来之后这条连接剩下的帧在任务开头整条丢掉。
     let inbox: Promise<void> = Promise.resolve();
+    const queue = (step: () => Promise<void>, failure: string) => {
+      const tail = inbox.then(step).catch((error: unknown) => console.error(failure, error));
+      inbox = tail;
+      this.#inboxTails.add(tail);
+      void tail.then(() => this.#inboxTails.delete(tail));
+    };
 
     socket.on("message", (raw) => {
+      // 停机后收到的帧同步丢掉：socket 马上就关，等它做完只会让停机等不到头。
+      if (this.#lifecycle === "closing") return;
       silence.refresh();
       const text = raw.toString();
-      inbox = inbox
-        .then(async () => {
-          conn = await this.#onFrame(socket, conn, deadline, text);
-        })
-        .catch((error: unknown) => console.error("处理电脑代理报文出错", error));
+      queue(async () => {
+        const current = conn;
+        if (current !== null) {
+          await this.#enqueue(current.computerId, () => this.#onFrame(current, text));
+          return;
+        }
+        const message = parseFrame(text, "未握手的连接");
+        // 还没认上身份，除了 hello 一律不理。
+        if (message === null || message.type !== "hello") return;
+        clearTimeout(deadline);
+        // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
+        const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
+        if (computer === null) {
+          socket.close(CLOSE_BAD_HELLO, "电脑号或 token 对不上");
+          return;
+        }
+        if (this.#lifecycle === "closing") {
+          socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
+          return;
+        }
+        this.#countQueuedHello(computer.id, 1);
+        await this.#enqueue(computer.id, async () => {
+          this.#countQueuedHello(computer.id, -1);
+          conn = await this.#onHello(socket, computer, message.activeRuns);
+        });
+      }, "处理电脑代理报文出错");
     });
 
     socket.on("error", () => socket.close());
 
-    // 关闭也排在同一条链上。hello 还在查库时断开的话，直接读 conn 会读到 null，那台电脑就永远挂在在线。
+    // 关闭排在这条 socket 的帧后面。hello 还在排队时断开的话，等 hello 任务做完再读 conn，不然读到 null，那台电脑就永远挂在在线。
+    // 停机后的关闭不排：连接留在表里，closeAll 一起写成休眠。
     socket.on("close", () => {
       clearTimeout(deadline);
       clearTimeout(silence);
-      inbox = inbox
-        .then(async () => {
-          const closed = conn;
-          if (closed === null) return;
-          // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
-          if (this.#connections.get(closed.computerId) !== closed) return;
-          this.#connections.delete(closed.computerId);
-          const timer = setTimeout(() => {
-            this.#graceTimers.delete(closed.computerId);
-            const job = this.#enqueueFinish(closed.computerId, async () => {
-              if (this.#connected(closed.computerId)) return;
-              await this.#finishMissingRuns(closed.computerId, closed.ownerId, [], () =>
-                this.#connected(closed.computerId),
-              );
-            }).catch((error: unknown) => console.error("断连后收尾 run 出错", error));
-            this.#pendingFinishes.add(job);
-            void job.then(() => this.#pendingFinishes.delete(job));
-          }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
-          timer.unref();
-          this.#graceTimers.set(closed.computerId, timer);
-          const sleeping = markComputerSleeping(this.#deps.db, closed.computerId).then((computer) => {
-            if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });
-          });
-          this.#sleepingWrites.set(closed.computerId, sleeping);
-          try {
-            await sleeping;
-          } finally {
-            if (this.#sleepingWrites.get(closed.computerId) === sleeping)
-              this.#sleepingWrites.delete(closed.computerId);
-          }
-        })
-        .catch((error: unknown) => console.error("把电脑标记为休眠出错", error));
+      if (this.#lifecycle === "closing") return;
+      queue(async () => {
+        const closed = conn;
+        if (closed === null) return;
+        await this.#enqueue(closed.computerId, () => this.#onClose(closed));
+      }, "把电脑标记为休眠出错");
     });
   }
 
@@ -193,9 +221,10 @@ export class AgentHub {
     config.state = "ready";
   }
 
-  #connected(computerId: ComputerId): boolean {
-    const conn = this.#connections.get(computerId);
-    return conn !== undefined && conn.socket.readyState === conn.socket.OPEN;
+  #countQueuedHello(computerId: ComputerId, delta: 1 | -1): void {
+    const count = (this.#queuedHellos.get(computerId) ?? 0) + delta;
+    if (count > 0) this.#queuedHellos.set(computerId, count);
+    else this.#queuedHellos.delete(computerId);
   }
 
   onlineComputerIds(): ComputerId[] {
@@ -222,56 +251,53 @@ export class AgentHub {
     return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
 
-  /** 先落库再断线：反过来的话 socket 的 close 回调要和进程退出抢，那台电脑就永远挂在在线。 */
+  /**
+   * 先进停机，这一刻起 message、close 回调都不再往 inbox 和链上排，宽限计时器也全清掉、不再新建，
+   * 所以要等的就是此刻各 socket 还没做完的那一步，和链上已经排着的任务，两个集合都是有限的，各等一次就够：
+   * inbox 的一步做完才算完，它排进链的任务也随之做完；链上剩下的只有停机前到点的宽限收尾，它不再排别的任务。
+   * 然后先清表再关 socket 再写库：清表之后没有谁会再写这几台的状态，这条批量休眠就是最终状态，
+   * 不用和 socket 的 close 回调抢。
+   */
   async closeAll(): Promise<void> {
+    this.#lifecycle = "closing";
     for (const timer of this.#graceTimers.values()) clearTimeout(timer);
     this.#graceTimers.clear();
-    await Promise.all(this.#pendingFinishes);
+    await Promise.allSettled(this.#inboxTails);
+    await Promise.allSettled(this.#chains.values());
     const open = [...this.#connections.values()];
+    this.#connections.clear();
+    for (const conn of open) conn.socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
     await markComputersSleeping(
       this.#deps.db,
       open.map((conn) => conn.computerId),
     );
-    for (const conn of open) conn.socket.close();
-    this.#connections.clear();
   }
 
-  async #onFrame(
-    socket: WebSocket,
-    conn: AgentConnection | null,
-    deadline: NodeJS.Timeout,
-    raw: string,
-  ): Promise<AgentConnection | null> {
-    const message = parseFrame(raw, conn === null ? "未握手的连接" : `电脑 ${conn.computerId}`);
-    if (message === null) return conn;
+  async #onFrame(conn: AgentConnection, raw: string): Promise<void> {
+    // 被新连接顶掉之后这条连接还排着的帧是旧代理的旧话，整条丢掉。从这里到 handler 返回，这台电脑不会换连接。
+    if (this.#connections.get(conn.computerId) !== conn) return;
+    const message = parseFrame(raw, `电脑 ${conn.computerId}`);
+    if (message === null) return;
+    await handleAgentEvent(
+      {
+        db: this.#deps.db,
+        push: this.#deps.push,
+        agents: this,
+        groupTurns: this.#deps.groupTurns,
+        priceInputPerM: this.#deps.priceInputPerM,
+        priceOutputPerM: this.#deps.priceOutputPerM,
+        notifications: this.#deps.notifications,
+      },
+      conn,
+      message,
+    );
+  }
 
-    if (conn !== null) {
-      await handleAgentEvent(
-        {
-          db: this.#deps.db,
-          push: this.#deps.push,
-          agents: this,
-          groupTurns: this.#deps.groupTurns,
-          priceInputPerM: this.#deps.priceInputPerM,
-          priceOutputPerM: this.#deps.priceOutputPerM,
-          notifications: this.#deps.notifications,
-        },
-        conn,
-        message,
-      );
-      return conn;
-    }
-
-    // 还没认上身份，除了 hello 一律不理。
-    if (message.type !== "hello") return null;
-    clearTimeout(deadline);
-
-    const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
-    if (computer === null) {
-      socket.close(CLOSE_BAD_HELLO, "电脑号或 token 对不上");
-      return null;
-    }
-
+  /**
+   * 认完身份的 hello 轮到它了。排队期间 socket 已经断了也照做：它排在这条 socket 的关闭前面，关闭跟在后面把电脑写成休眠，
+   * 电脑来过这件事才记得下来。
+   */
+  async #onHello(socket: WebSocket, computer: Computer, activeRuns: readonly RunId[]): Promise<AgentConnection> {
     const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
     const accepted: AgentConnection = {
       computerId: computer.id,
@@ -290,11 +316,8 @@ export class AgentHub {
     }
     previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
 
-    await this.#enqueueFinish(computer.id, async () => {
-      await this.#sleepingWrites.get(computer.id);
-      await this.#finishMissingRuns(computer.id, computer.ownerId, message.activeRuns);
-    });
-    const online = await markComputerOnline(this.#deps.db, computer.id);
+    await this.#finishMissingRuns(computer.id, computer.ownerId, activeRuns);
+    const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
     if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
     await this.#deps.notifications.computerOnline(computer.ownerId);
     this.#send(accepted, {
@@ -315,11 +338,45 @@ export class AgentHub {
     await this.#sendConfig(accepted, "hello");
     const handshake = this.#configs.get(accepted);
     if (handshake !== undefined) handshake.state = "ready";
+    // 主助理是这次建的：这个用户其他电脑的 hello 再补只会撞索引，不推也不重发，所以要送到它们那里。
     if (assistant !== null) {
       const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
       await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
     }
     return accepted;
+  }
+
+  async #onClose(closed: AgentConnection): Promise<void> {
+    // 停机前排进来、停机后才轮到的关闭：连接留在表里由 closeAll 一起写成休眠，也不起宽限计时器，
+    // 停机时已经把计时器清过一遍，这之后起的没人清，到点时库多半已经关了。
+    if (this.#lifecycle === "closing") return;
+    // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
+    if (this.#connections.get(closed.computerId) !== closed) return;
+    this.#connections.delete(closed.computerId);
+    const timer = setTimeout(() => {
+      this.#graceTimers.delete(closed.computerId);
+      this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
+        (error: unknown) => console.error("断连后收尾 run 出错", error),
+      );
+    }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
+    timer.unref();
+    this.#graceTimers.set(closed.computerId, timer);
+    const computer = await markComputerSleeping(this.#deps.db, closed.computerId, closed.gatewayKey);
+    // 新连接的上线排在这个任务后面，这条休眠一定推在它的上线之前。
+    if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });
+  }
+
+  /**
+   * 收尾的前提是这台电脑还没回来。计时器到点和 hello 认完身份都只是排队，谁先排上谁先跑：
+   * hello 先跑的话它已经清掉计时器；收尾先跑的话每收一个 run 之前再看一眼，有 hello 排在后面就停手，
+   * run 留给它按 activeRuns 对账，不然代理还在跑的 run 会被当成断线丢掉。
+   * 停机时这里不用看停机：没到点的计时器在 closeAll 开头同步清掉，停机后 #onClose 不再建，
+   * 已经到点排进链的这一次在 closeAll 等链时做完，库还开着。
+   */
+  async #finishAfterGrace(computerId: ComputerId, ownerId: UserId): Promise<void> {
+    const returning = () => this.#connections.has(computerId) || this.#queuedHellos.has(computerId);
+    if (returning()) return;
+    await this.#finishMissingRuns(computerId, ownerId, [], returning);
   }
 
   async #finishMissingRuns(
@@ -356,18 +413,15 @@ export class AgentHub {
     }
   }
 
-  #enqueueFinish(computerId: ComputerId, task: () => Promise<void>): Promise<void> {
-    const previous = this.#finishChains.get(computerId) ?? Promise.resolve();
+  /** 排进这台电脑的链。上一个任务抛错不影响下一个，错误由排任务的那一方接住记日志。 */
+  #enqueue(computerId: ComputerId, task: () => Promise<void>): Promise<void> {
+    const previous = this.#chains.get(computerId) ?? Promise.resolve();
     const current = previous.catch(() => undefined).then(task);
-    this.#finishChains.set(computerId, current);
-    void current.then(
-      () => {
-        if (this.#finishChains.get(computerId) === current) this.#finishChains.delete(computerId);
-      },
-      () => {
-        if (this.#finishChains.get(computerId) === current) this.#finishChains.delete(computerId);
-      },
-    );
+    this.#chains.set(computerId, current);
+    const settled = () => {
+      if (this.#chains.get(computerId) === current) this.#chains.delete(computerId);
+    };
+    void current.then(settled, settled);
     return current;
   }
 

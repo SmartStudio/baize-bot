@@ -10,6 +10,8 @@ export type AgentClient = {
   expect<T extends ControlToAgent["type"]>(type: T, timeoutMs?: number): Promise<Extract<ControlToAgent, { type: T }>>;
   /** 连接关闭时的 close code。 */
   closed(timeoutMs?: number): Promise<number>;
+  /** 收到还没取走的报文。关闭帧之后不会再来，所以 closed 兑现之后这就是这条连接收到的全部。 */
+  received(): readonly ControlToAgent[];
   close(): void;
 };
 
@@ -77,6 +79,7 @@ export async function openAgent(port: number): Promise<AgentClient> {
         const timer = setTimeout(() => reject(new Error("等连接关闭超时")), timeoutMs);
         closeWaiters.push(waiter);
       }),
+    received: () => [...inbox],
     close: () => socket.close(),
   };
 }
@@ -96,7 +99,21 @@ export async function helloAgent(
   activeRuns: readonly RunId[] = [],
 ): Promise<HelloResult> {
   const agent = await openAgent(port);
+  sendHello(agent, computerId, token, activeRuns);
+  return { agent, ...(await expectHello(agent)) };
+}
+
+export function sendHello(
+  agent: AgentClient,
+  computerId: ComputerId,
+  token: string,
+  activeRuns: readonly RunId[] = [],
+): void {
   agent.send({ type: "hello", computerId, token, version: "test", activeRuns: [...activeRuns] });
+}
+
+/** 收 hello 的回应：welcome、config，再按 config 里的 Bot 顺序各收一条 pause 或 resume。 */
+export async function expectHello(agent: AgentClient): Promise<Omit<HelloResult, "agent">> {
   const welcome = await agent.expect("welcome");
   const config = await agent.expect("config");
   const runStates: Extract<ControlToAgent, { type: "pause" | "resume" }>[] = [];
@@ -107,5 +124,5 @@ export async function helloAgent(
     }
     runStates.push(synced);
   }
-  return { agent, welcome, config, runStates };
+  return { welcome, config, runStates };
 }

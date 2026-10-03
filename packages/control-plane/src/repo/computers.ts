@@ -86,23 +86,36 @@ export async function findComputerByGatewayKey(db: Db, key: string): Promise<Com
   return row === undefined ? null : toComputer(row);
 }
 
-export async function markComputerOnline(db: Db, computerId: ComputerId): Promise<Computer | null> {
+/**
+ * 网关 key 每次 hello 都轮换，行上的 hash 就是最近一次握手的代次。带上它，写在途时被更新的 hello 顶掉的那条连接
+ * 什么都写不进去：内存里判「还是当前连接」只能挡 UPDATE 发出之前，发出之后落库之前这段只有数据库自己挡得住。
+ * hello 和心跳都走这里，都带自己那条连接的 key；不对应某条连接的进程级写是下面 markComputersSleeping 那两条。
+ */
+export async function markComputerOnline(db: Db, computerId: ComputerId, gatewayKey: string): Promise<Computer | null> {
   const [row] = await db
     .update(computers)
     .set({ status: "online", lastSeenAt: new Date(), idleSince: null })
-    .where(eq(computers.id, computerId))
+    .where(ofConnection(computerId, gatewayKey))
     .returning();
   return row === undefined ? null : toComputer(row);
 }
 
-/** 调用方负责确认这条连接还是当前那条，被顶掉的旧连接关闭时不该把在线的那台写成休眠。 */
-export async function markComputerSleeping(db: Db, computerId: ComputerId): Promise<Computer | null> {
+/** 只写这条连接自己那一代：它关闭时更新的 hello 已经轮换过 key 的话，这次写不落，在线的那台不会被写成休眠。 */
+export async function markComputerSleeping(
+  db: Db,
+  computerId: ComputerId,
+  gatewayKey: string,
+): Promise<Computer | null> {
   const [row] = await db
     .update(computers)
     .set({ status: "sleeping", idleSince: new Date() })
-    .where(eq(computers.id, computerId))
+    .where(ofConnection(computerId, gatewayKey))
     .returning();
   return row === undefined ? null : toComputer(row);
+}
+
+function ofConnection(computerId: ComputerId, gatewayKey: string) {
+  return and(eq(computers.id, computerId), eq(computers.gatewayKeyHash, hashSecret(gatewayKey)));
 }
 
 /** 关服务时一次写完。socket 的 close 回调排在事件循环后面，进程退出之前跑不完。 */

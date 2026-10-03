@@ -2,12 +2,14 @@ import { CreateBotResponse, MessageListResponse, type GroupId, type RunId, type 
 import { format } from "node:util";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
+import * as events from "../src/agent/events.js";
 import * as runsRepo from "../src/repo/runs.js";
 import * as skillsRepo from "../src/repo/skills.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
 import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
+import { queueHello } from "./helpers/queued-hello.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -309,23 +311,34 @@ it("agent_error 带的群号和 runId 所在的群不一致：按库里 run 的�
   }
 });
 
-it("代理报错收尾和新连接 hello 对账同时读到同一个还开着的 run：只有一边收尾，群里只说一句", async () => {
+it("代理报错收尾进行时来了新连接：hello 对账排在它后面，只有一边收尾，群里只说一句", async () => {
   const owner = await ownerWithBot();
   const first = await helloAgent(server.port, owner.computer.computerId, owner.computer.token);
-  const push = await connectPush(server.port, owner.client.cookie ?? "");
   const original = runsRepo.openRunsForComputer;
   let arrived = 0;
   let firstRead!: () => void;
   const firstReadDone = new Promise<void>((resolve) => (firstRead = resolve));
-  let bothRead!: () => void;
-  const bothReadDone = new Promise<void>((resolve) => (bothRead = resolve));
+  let releaseFirst!: () => void;
+  const firstReleased = new Promise<void>((resolve) => (releaseFirst = resolve));
   const spy = vi.spyOn(runsRepo, "openRunsForComputer").mockImplementation(async (db, computerId) => {
     const open = await original(db, computerId);
     arrived += 1;
-    if (arrived === 1) firstRead();
-    if (arrived === 2) bothRead();
-    if (arrived <= 2) await bothReadDone;
+    if (arrived === 1) {
+      firstRead();
+      await firstReleased;
+    }
     return open;
+  });
+  // 旧连接那条 agent_error 的处理整个返回才算它收完尾：最后一步是事务提交，在这之前新连接的 hello 都排着。
+  const originalHandle = events.handleAgentEvent;
+  let firstSettled!: () => void;
+  const firstSettledDone = new Promise<void>((resolve) => (firstSettled = resolve));
+  const handleSpy = vi.spyOn(events, "handleAgentEvent").mockImplementation(async (deps, conn, message) => {
+    try {
+      await originalHandle(deps, conn, message);
+    } finally {
+      if (message.type === "agent_error") firstSettled();
+    }
   });
   let second: AgentClient | null = null;
   try {
@@ -338,24 +351,14 @@ it("代理报错收尾和新连接 hello 对账同时读到同一个还开着的
       groupId: owner.groupId,
       runId,
     });
-    first.agent.send({ type: "agent_error", code: "unsupported", detail: "哨兵", groupId: owner.groupId });
     await firstReadDone;
 
-    second = await openAgent(server.port);
-    second.send({
-      type: "hello",
-      computerId: owner.computer.computerId,
-      token: owner.computer.token,
-      version: "test",
-      activeRuns: [],
-    });
+    second = await queueHello(server.port, owner.computer.computerId, owner.computer.token);
+    releaseFirst();
+    // 新连接的 hello 排在旧连接那条处理后面，config 是它 hello 的最后一次查库。两边都停了再看群里。
+    await firstSettledDone;
     await second.expect("welcome");
-    await nextMatching(
-      push,
-      (event) =>
-        event.type === "message" && event.message.body.kind === "system" && event.message.body.text.includes("哨兵"),
-      "哨兵那句",
-    );
+    await second.expect("config");
 
     expect(await openRuns(owner.groupId)).toBe(0);
     const notes = (await systemTexts(owner.client, owner.groupId)).filter(
@@ -363,9 +366,9 @@ it("代理报错收尾和新连接 hello 对账同时读到同一个还开着的
     );
     expect(notes, "两边都以为 run 还开着，只有先结束它的那边说话").toHaveLength(1);
   } finally {
+    handleSpy.mockRestore();
     spy.mockRestore();
     first.agent.close();
     second?.close();
-    push.close();
   }
 });
