@@ -50,6 +50,8 @@ export const user: User = User.parse({
 export const bots = new Map<string, Bot>();
 export const groups = new Map<string, Group>();
 export const tasks = new Map<string, TopicTask>();
+// 和控制面同一套口径：勾选时刻不在 TopicTask 上，按任务 id 存「文字 → 勾上的时刻」，种子里本来就勾着的不记。
+export const checkedAt = new Map<string, Map<string, string>>();
 export const groupIdByBotId = new Map<string, string>();
 export const messagesByGroupId = new Map<string, Message[]>();
 export const approvals = new Map<string, Approval>();

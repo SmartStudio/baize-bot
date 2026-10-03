@@ -1,5 +1,6 @@
 import { GroupId, type BotId, type ChecklistItem, type TaskId, type TopicTask, type UserId } from "@baize/shared";
-import { and, asc, eq, exists, inArray, isNull } from "drizzle-orm";
+import { and, asc, eq, exists, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { bots, groups, tasks } from "../db/schema.js";
 import { groupHasMembers } from "./live-groups.js";
@@ -33,12 +34,12 @@ export async function updateTask(
   taskId: TaskId,
   input: UpdateTaskInput,
 ): Promise<TopicTask | null> {
-  const patch: Partial<typeof tasks.$inferInsert> = {};
+  const patch: PgUpdateSetSource<typeof tasks> = {};
   if (input.title !== undefined) patch.title = input.title;
   if (input.summary !== undefined) patch.summary = input.summary;
   if (input.dueAt !== undefined) patch.dueAt = input.dueAt === null ? null : new Date(input.dueAt);
   // 清单是整份替换，不是逐项合并。
-  if (input.checklist !== undefined) patch.checklist = [...input.checklist];
+  if (input.checklist !== undefined) patch.checklist = stampedChecklist(input.checklist, tasks.checklist);
   if (input.status !== undefined) patch.status = input.status;
   if (input.cadence !== undefined) patch.cadence = input.cadence;
   if (Object.keys(patch).length === 0) return findTask(db, ownerId, taskId);
@@ -90,6 +91,25 @@ export async function setCurrentBot(db: Db | Tx, groupId: string, botId: BotId, 
   });
 }
 
+/**
+ * 整份替换进来的清单，每项补上勾选时刻，在写库的那条语句里算，previous 是被替换掉的那份。
+ * 按文字认旧项：同一段文字原来就勾着，沿用原来的时刻，迁移前勾的 null 也照留，重发同一份不会把它们算成刚勾的；
+ * 原来没有或没勾的，现在勾上记库时钟；没勾的清成 null。
+ */
+export function stampedChecklist(next: readonly ChecklistItem[], previous: SQL | typeof tasks.checklist): SQL {
+  return sql`coalesce((
+    select jsonb_agg(
+      fresh.item || jsonb_build_object('doneAt', case
+        when (fresh.item ->> 'done')::boolean then coalesce(
+          (select old.item -> 'doneAt' from jsonb_array_elements(${previous}) as old(item)
+            where old.item ->> 'text' = fresh.item ->> 'text' and (old.item ->> 'done')::boolean limit 1),
+          to_jsonb(to_char(now() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')))
+        else 'null'::jsonb end)
+      order by fresh.ord)
+    from jsonb_array_elements(${JSON.stringify(next)}::jsonb) with ordinality as fresh(item, ord)
+  ), '[]'::jsonb)`;
+}
+
 /** 清单整份替换。同一份重发两遍结果不变。 */
 export async function replaceChecklist(
   db: Db | Tx,
@@ -98,7 +118,7 @@ export async function replaceChecklist(
 ): Promise<TopicTask | null> {
   const [row] = await db
     .update(tasks)
-    .set({ checklist: [...checklist] })
+    .set({ checklist: stampedChecklist(checklist, tasks.checklist) })
     .where(eq(tasks.groupId, groupId))
     .returning();
   return row === undefined ? null : toTask(row);

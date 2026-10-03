@@ -149,9 +149,15 @@ export async function connectOAuthAccount(
   return toAccount(row);
 }
 
+/**
+ * login_changed_at 一律取库时钟：迁移前认领的草稿拿它和 claimed_at（库时钟）比先后，控制面多进程部署时各自的进程时钟不齐。
+ * 取语句执行那一刻而不是事务开始那一刻：登录事务开头要在电脑和账号的锁上排队，等锁期间认领的草稿不能算在新登录之后。
+ */
+export const LOGIN_CLOCK = sql`clock_timestamp()`;
+
 /** login 真变了才换时刻：重复报一次 valid 不该让今天页以为刚登上。 */
-function loginChangedAt(login: Account["login"], now: Date): SQL {
-  return sql`case when ${accounts.login} = ${login} then ${accounts.loginChangedAt} else ${now.toISOString()}::timestamptz end`;
+function loginChangedAt(login: Account["login"]): SQL {
+  return sql`case when ${accounts.login} = ${login} then ${accounts.loginChangedAt} else ${LOGIN_CLOCK} end`;
 }
 
 export type CreatePlaceholderResult =
@@ -245,10 +251,9 @@ export async function markLoginValid(
           ),
         );
       if (reported === undefined) return null;
-      const now = new Date();
       const loggedIn = {
         login: "valid" as const,
-        loginChangedAt: loginChangedAt("valid", now),
+        loginChangedAt: loginChangedAt("valid"),
         loginGeneration: sql`${accounts.loginGeneration} + 1`,
       };
       const [found] = await tx
@@ -321,7 +326,7 @@ export async function markLoginExpired(db: Db | Tx, target: ExpiryTarget): Promi
   return withAccountLock(db, target.accountId, async ({ tx }) => {
     const [row] = await tx
       .update(accounts)
-      .set({ login: "expired", loginChangedAt: new Date() })
+      .set({ login: "expired", loginChangedAt: LOGIN_CLOCK })
       .where(
         and(
           eq(accounts.id, target.accountId),

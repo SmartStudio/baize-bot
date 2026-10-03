@@ -3,6 +3,7 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   GroupResponse,
+  ProjectResponse,
   MessageId,
   MessageListResponse,
   type Bot,
@@ -834,6 +835,8 @@ describe("上行 task_checklist", () => {
         kind: "system",
         text: "小销更新了清单，1/2 完成",
       });
+      const project = ProjectResponse.parse(await (await team.client.get(`/api/projects/${team.group.id}`)).json());
+      expect(project.weekChecked, "Bot 报上来的清单也按控制面的时刻记勾选，项目页本周勾掉一项").toBe(1);
     } finally {
       team.close();
     }

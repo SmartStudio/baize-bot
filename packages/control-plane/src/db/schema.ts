@@ -201,6 +201,10 @@ export const groupMembers = pgTable(
   (t) => [primaryKey({ columns: [t.groupId, t.botId] }), index("group_members_bot_id_idx").on(t.botId)],
 );
 
+// 清单项在库里多存一个勾选时刻，只供项目页数本周勾掉几项，toTask 不往外带。
+// 和 checklist 一起整份替换，勾选时刻由控制面按文字从旧清单里接（repo/tasks.ts 的 stampedChecklist），不收外面给的。
+export type StoredChecklistItem = ChecklistItem & { readonly doneAt: string | null };
+
 // 群和主题任务一一对应。外键放在任务这边，群不存 taskId，避免两张表互相引用。
 export const tasks = pgTable("tasks", {
   id: text("id").primaryKey(),
@@ -212,7 +216,7 @@ export const tasks = pgTable("tasks", {
   title: text("title").notNull(),
   summary: text("summary").notNull().default(""),
   dueAt: timestamp("due_at", { withTimezone: true }),
-  checklist: jsonb("checklist").$type<ChecklistItem[]>().notNull().default([]),
+  checklist: jsonb("checklist").$type<StoredChecklistItem[]>().notNull().default([]),
   currentBotId: text("current_bot_id").references(() => bots.id, { onDelete: "set null" }),
   handled: jsonb("handled").$type<{ botId: string; from: string; to: string | null }[]>().notNull().default([]),
   status: text("status").$type<TaskStatus>().notNull().default("active"),

@@ -1343,4 +1343,57 @@ describe("小红书登录过期", () => {
     const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(listed.find((one) => one.id === xhs.id)?.login).toBe("valid");
   });
+
+  it("0016 之前认领的草稿：记登录成功的那个进程时钟慢一小时，登录时刻取库时钟，认领之后的重登照样挡住旧 login_expired", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, post("迁移之前认领的"));
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    await claimedBeforeMigration(s, spec);
+
+    job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "expired" } });
+    expect((await nextOf(job.push, "account_updated")).account.login).toBe("expired");
+    expect((await nextOf(job.push, "notify")).notice.kind).toBe("failed");
+    await job.agent.expect("config");
+    const skewed = Date.now() - 3_600_000;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(skewed);
+      job.agent.send({ type: "login_state", accountId: xhs.id, state: { login: "valid", handle: XHS.handle } });
+      expect((await nextOf(job.push, "account_updated")).account.login).toBe("valid");
+      await job.agent.expect("config");
+    } finally {
+      vi.useRealTimers();
+    }
+    await s.database.db.update(accountsTable).set({ loginGeneration: 1 }).where(eq(accountsTable.id, xhs.id));
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "login_expired", detail: "重登之前跳到了登录页" },
+    });
+    job.agent.send({
+      type: "login_state",
+      accountId: xhs.id,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-5") },
+    });
+    const seen: ServerPush[] = [];
+    for (;;) {
+      const next = await job.push.next();
+      seen.push(next);
+      if (next.type === "notify" && next.notice.text.includes("登录窗口")) break;
+    }
+    expect(
+      seen.map((pushed) => pushed.type),
+      "登录时刻和认领时刻都出自库时钟，进程时钟慢了也看得出重登在认领之后，旧结论不改账号",
+    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(listed.find((one) => one.id === xhs.id)?.login).toBe("valid");
+  });
 });

@@ -17,6 +17,7 @@ import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup, type Tx } from "./messages.js";
 import { toBot, toGroup, toTask } from "./rows.js";
+import { stampedChecklist } from "./tasks.js";
 
 export type CreateGroupInput = {
   readonly title: string;
@@ -127,7 +128,7 @@ export async function openGroup(
       summary: spec.summary,
       dueAt: spec.dueAt === null ? null : new Date(spec.dueAt),
       cadence: spec.cadence,
-      checklist: [...spec.checklist],
+      checklist: stampedChecklist(spec.checklist, sql`'[]'::jsonb`),
     })
     .returning();
   if (taskRow === undefined) throw new Error("建主题任务没有返回行");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Message } from "@baize/shared";
-import { latestTurnOf } from "./ProjectPage.js";
+import { latestTurnOf, weekChangesOf } from "./ProjectPage.js";
 
 let nextMessageId = 0;
 
@@ -75,5 +75,14 @@ describe("latestTurnOf", () => {
 
   it("你一句都没说过：没有最近一轮，更早是零轮", () => {
     expect(latestTurnOf(null, 0, [bot("我先读资料", 1), cost(2)])).toEqual({ turn: [], older: 0 });
+  });
+});
+
+describe("weekChangesOf", () => {
+  it("本周勾掉的项排在发出的条数前面，两样都是零就一句不出", () => {
+    expect(weekChangesOf({ weekChecked: 3, weekPublished: 2 })).toEqual(["本周勾掉 3 项", "本周发出 2 条"]);
+    expect(weekChangesOf({ weekChecked: 1, weekPublished: 0 })).toEqual(["本周勾掉 1 项"]);
+    expect(weekChangesOf({ weekChecked: 0, weekPublished: 4 })).toEqual(["本周发出 4 条"]);
+    expect(weekChangesOf({ weekChecked: 0, weekPublished: 0 })).toEqual([]);
   });
 });

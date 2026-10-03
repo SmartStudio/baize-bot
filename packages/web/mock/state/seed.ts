@@ -27,6 +27,7 @@ import {
   approvals,
   at,
   bots,
+  checkedAt,
   groupIdByBotId,
   groups,
   grants,
@@ -274,6 +275,7 @@ export const reseed = (): void => {
   bots.clear();
   groups.clear();
   tasks.clear();
+  checkedAt.clear();
   groupIdByBotId.clear();
   messagesByGroupId.clear();
   resetSuffix();

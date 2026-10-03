@@ -2,6 +2,7 @@ import { Bot, BotId, Group, GroupId, TaskId, TopicTask, type ChecklistItem } fro
 import {
   HUES,
   bots,
+  checkedAt,
   groupIdByBotId,
   groups,
   messagesByGroupId,
@@ -94,6 +95,22 @@ export const writeTask = (id: string, patch: Partial<Record<keyof TopicTask, unk
   if (task === undefined) return null;
   const next = TopicTask.parse({ ...task, ...patch });
   tasks.set(next.id, next);
+  if (patch.checklist !== undefined) {
+    const previous = checkedAt.get(next.id) ?? new Map<string, string>();
+    const wasDone = new Set(task.checklist.filter((item) => item.done).map((item) => item.text));
+    const now = new Date().toISOString();
+    checkedAt.set(
+      next.id,
+      new Map(
+        next.checklist.flatMap((item): [string, string][] => {
+          if (!item.done) return [];
+          if (!wasDone.has(item.text)) return [[item.text, now]];
+          const kept = previous.get(item.text);
+          return kept === undefined ? [] : [[item.text, kept]];
+        }),
+      ),
+    );
+  }
   return next;
 };
 

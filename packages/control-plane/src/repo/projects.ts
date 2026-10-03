@@ -5,6 +5,7 @@ import {
   type Message,
   type MessageBody,
   type MessageId,
+  type ProjectOfferMember,
   type Routine,
   type TopicTask,
   type UserId,
@@ -104,8 +105,8 @@ export async function decideProjectOffer(
       const projectGroupId = GroupId.parse(newId());
       const name = decision.name ?? offer.body.name;
       // 卡正文就是这张卡的状态，项目改了名，卡上也得是新名字，别处没有第二份。
-      const message = await claimOffer(tx, offer, { ...offer.body, name, status: "started", groupId: projectGroupId });
-      if (message === null) {
+      const started: ProjectOfferBody = { ...offer.body, name, status: "started", groupId: projectGroupId };
+      if ((await claimOffer(tx, offer, started)) === null) {
         lost = true;
         return tx.rollback();
       }
@@ -114,15 +115,21 @@ export async function decideProjectOffer(
       const assistant = await findAssistant(tx, ownerId);
       if (assistant === null) throw new Error(`用户 ${ownerId} 有方案卡却没有主助理`);
 
+      // 队员和已有的 Bot 或彼此重名就自动换个名字，否则同一个群里两个「小内」，@ 永远只认得第一个。
       const memberIds: BotId[] = [];
+      const team: ProjectOfferMember[] = [];
       for (const member of offer.body.team) {
-        const created = await insertMemberBot(tx, ownerId, {
-          name: member.name,
-          tag: member.tag,
-          description: member.description,
-        });
+        const created = await insertMemberBot(
+          tx,
+          ownerId,
+          { name: member.name, tag: member.tag, description: member.description },
+          "untaken",
+        );
         memberIds.push(created.bot.id);
+        team.push({ ...member, name: created.bot.name });
       }
+      // 卡上的队员名单也换成实际建出来的名字，和项目名一样只有正文这一份。
+      const message = await rewriteOffer(tx, offer.id, { ...started, team });
 
       const opened = await openGroup(tx, ownerId, {
         id: projectGroupId,
@@ -165,6 +172,13 @@ export async function decideProjectOffer(
     if (error instanceof TransactionRollbackError && lost) return settled(db, ownerId, offer);
     throw error;
   }
+}
+
+/** 抢到卡之后在同一个事务里改写正文，行锁还在手里。 */
+async function rewriteOffer(tx: Tx, id: MessageId, body: ProjectOfferBody): Promise<Message> {
+  const [row] = await tx.update(messages).set({ body }).where(eq(messages.id, id)).returning();
+  if (row === undefined) throw new Error(`方案卡 ${id} 抢到之后不见了`);
+  return toMessage(row);
 }
 
 /** 只改还挂在 offered 的那一条，改不动就是已经有人点过了。 */

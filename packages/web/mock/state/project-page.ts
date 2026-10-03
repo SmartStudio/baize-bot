@@ -1,6 +1,6 @@
 import { ProjectResponse, type GroupId, type Message } from "@baize/shared";
 import { pendingOf } from "./today.js";
-import { drafts, groups, isTeamGroup, messagesByGroupId, plans, publications, routines } from "./store.js";
+import { checkedAt, drafts, groups, isTeamGroup, messagesByGroupId, plans, publications, routines } from "./store.js";
 
 const titleOf = (draftId: string | null): string => {
   const draft = draftId === null ? undefined : drafts.get(draftId);
@@ -54,6 +54,8 @@ export const projectOf = (groupId: string): ProjectResponse | null => {
   return ProjectResponse.parse({
     groupId: group.id,
     weekPublished: achievements.length,
+    // 和 weekPublished 一样不按周切：mock 里的勾选都是这次进程里刚勾的。
+    weekChecked: checkedAt.get(group.taskId)?.size ?? 0,
     ...turnOf(messagesByGroupId.get(groupId) ?? []),
     working: [],
     pending: pendingOf().filter((item) => {

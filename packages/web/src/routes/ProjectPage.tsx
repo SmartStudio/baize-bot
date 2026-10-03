@@ -9,7 +9,7 @@ import {
   SendHorizontal,
   Users,
 } from "lucide-react";
-import type { Bot, BotId, GroupId, Message, ProjectTurn } from "@baize/shared";
+import type { Bot, BotId, GroupId, Message, ProjectResponse, ProjectTurn } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
 import { Markdown } from "../components/messages/markdown.js";
@@ -21,6 +21,12 @@ import type { Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
 
 type Team = Extract<Conversation, { kind: "team" }>;
+
+// 进度条后面跟的本周变化，原型里是一句「本周 +N」。勾掉的项和发出的条数各一句，是零就不说。
+export const weekChangesOf = (week: Pick<ProjectResponse, "weekChecked" | "weekPublished">): string[] => [
+  ...(week.weekChecked > 0 ? [`本周勾掉 ${week.weekChecked} 项`] : []),
+  ...(week.weekPublished > 0 ? [`本周发出 ${week.weekPublished} 条`] : []),
+];
 
 // 一轮是你说的一句话，连同它之后、你下一句之前群里的其他消息，cost 不算。最近一轮以服务端给的为准，它不受群历史窗口限制。
 // 本地群历史跟着推送走，比服务端那份新：同 id 的换成本地这份（流式正文在长），服务端没有的新消息接在后面，
@@ -190,7 +196,11 @@ export const ProjectPage = ({
                 <b>{done}</b> / {task.checklist.length} 项
               </span>
               <progress value={done} max={Math.max(task.checklist.length, 1)} />
-              {data.weekPublished > 0 ? <span className="project-up">本周发出 {data.weekPublished} 条</span> : null}
+              {weekChangesOf(data).map((text) => (
+                <span key={text} className="project-up" data-testid="project-week">
+                  {text}
+                </span>
+              ))}
             </div>
           </div>
           <button

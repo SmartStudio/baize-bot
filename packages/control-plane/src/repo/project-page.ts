@@ -49,7 +49,7 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
   const openDraft = and(isNull(drafts.planId), inArray(drafts.status, ["pending", "approved"]));
   const ownPublication = and(eq(publications.groupId, groupId), eq(publications.ownerId, ownerId));
   const said = sql`${messages.body}->>'kind' = 'user'`;
-  const [approvalRows, draftRows, publicationRows, [weekRow], [saidRow], [turnRow], runRows, routineRows] =
+  const [approvalRows, draftRows, publicationRows, [weekRow], [saidRow], [turnRow], runRows, routineRows, [taskRow]] =
     await Promise.all([
       db
         .select()
@@ -103,6 +103,7 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
         .where(eq(routines.groupId, groupId))
         .orderBy(routines.createdAt, routines.id)
         .limit(50),
+      db.select({ checklist: tasks.checklist }).from(tasks).where(eq(tasks.groupId, groupId)).limit(1),
     ]);
   // 同一毫秒的先后按 seq 判，上一轮和你这句同一时刻落库的消息不会混进来。
   const replyRows =
@@ -133,6 +134,9 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
   return ProjectResponse.parse({
     groupId,
     weekPublished: weekRow?.value ?? 0,
+    weekChecked: (taskRow?.checklist ?? []).filter(
+      (item) => item.done && item.doneAt !== null && new Date(item.doneAt) >= weekStart(now),
+    ).length,
     latestTurn:
       saidRow === undefined ? null : { said: toMessage(saidRow), replies: replyRows.toReversed().map(toMessage) },
     olderTurns: saidRow === undefined ? 0 : Math.max(0, (turnRow?.value ?? 1) - 1),

@@ -5,7 +5,7 @@ import type { Db } from "./db/client.js";
 import { accountCredentials, accounts } from "./db/schema.js";
 import { requestToken, type OAuthEndpoints, type TokenGrant } from "./oauth-providers.js";
 import { withAccountLock, type AccountLock } from "./repo/account-lock.js";
-import { addAccount, findOwnerAccount, lockOwnerPlatform, type NewAccount } from "./repo/accounts.js";
+import { LOGIN_CLOCK, addAccount, findOwnerAccount, lockOwnerPlatform, type NewAccount } from "./repo/accounts.js";
 import type { Tx } from "./repo/messages.js";
 import { toAccount } from "./repo/rows.js";
 
@@ -103,7 +103,7 @@ export async function saveGrant(lock: AccountLock, crypto: CredentialCrypto, gra
   if (saved === undefined) throw new Error("写凭据没有返回行");
   const [restored] = await lock.tx
     .update(accounts)
-    .set({ login: "valid", loginChangedAt: now })
+    .set({ login: "valid", loginChangedAt: LOGIN_CLOCK })
     .where(and(eq(accounts.id, lock.accountId), ne(accounts.login, "valid")))
     .returning();
   return { generation: saved.generation, restored: restored === undefined ? null : toAccount(restored) };

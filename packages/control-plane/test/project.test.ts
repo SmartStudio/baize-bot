@@ -7,8 +7,9 @@ import {
   type GroupId,
   type UserId,
 } from "@baize/shared";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { accounts, drafts, messages, publications, runs } from "../src/db/schema.js";
+import { accounts, drafts, messages, publications, runs, tasks } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -33,6 +34,7 @@ type Owner = {
   readonly computer: TestComputer;
   readonly soloGroupId: GroupId;
   readonly projectId: GroupId;
+  readonly projectTaskId: string;
   readonly botIds: readonly [BotId, BotId];
 };
 
@@ -52,6 +54,7 @@ async function ownerWithProject(title = "白泽开源首发"): Promise<Owner> {
     computer,
     soloGroupId: first.group.id,
     projectId: project.group.id,
+    projectTaskId: project.task.id,
     botIds: [first.bot.id, second.bot.id],
   };
 }
@@ -223,6 +226,46 @@ describe("GET /api/projects/:groupId", () => {
       "别人的发布记录即使 groupId 指着我的项目也不出现",
     ).toEqual(["我的"]);
     expect(project.weekPublished, "本周发出也只数我的").toBe(1);
+  });
+
+  it("本周勾掉只数这周勾上、现在还勾着的项：重存不刷新老的勾选时刻，取消勾选就不算", async () => {
+    const owner = await ownerWithProject();
+    const save = async (done: readonly boolean[]) => {
+      const checklist = ["比三家价", "定交期", "写报价"].map((text, at) => ({
+        text,
+        done: done[at] ?? false,
+        ownerBotId: null,
+      }));
+      const res = await owner.client.patch(`/api/tasks/${owner.projectTaskId}`, { checklist });
+      expect(res.status).toBe(200);
+      expect((await res.json()).task.checklist, "勾选时刻不往外带，回的清单就是存进去的那份").toEqual(checklist);
+    };
+
+    expect((await projectOf(owner)).weekChecked, "一项没勾").toBe(0);
+    await save([true, false, false]);
+    expect((await projectOf(owner)).weekChecked, "刚勾上第一项").toBe(1);
+
+    const lastWeek = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    await database.db
+      .update(tasks)
+      .set({ checklist: sql`jsonb_set(${tasks.checklist}, '{0,doneAt}', to_jsonb(${lastWeek}::text))` })
+      .where(eq(tasks.id, owner.projectTaskId));
+    expect((await projectOf(owner)).weekChecked, "第一项是八天前勾的，不算这周").toBe(0);
+
+    await save([true, true, false]);
+    expect((await projectOf(owner)).weekChecked, "整份重存时第一项接着用八天前的时刻，只有第二项算这周").toBe(1);
+    const [row] = await database.db
+      .select({ checklist: tasks.checklist })
+      .from(tasks)
+      .where(eq(tasks.id, owner.projectTaskId));
+    expect(row?.checklist.map((item) => item.doneAt)).toEqual([lastWeek, expect.any(String), null]);
+
+    await save([true, false, true]);
+    expect((await projectOf(owner)).weekChecked, "第二项取消、第三项勾上，本周还是一项").toBe(1);
+    await save([false, false, false]);
+    expect((await projectOf(owner)).weekChecked, "全取消就是零").toBe(0);
+    await save([true, false, false]);
+    expect((await projectOf(owner)).weekChecked, "取消过再勾上记的是这回的时刻，八天前那次不留").toBe(1);
   });
 
   it("不是本人的群、单 Bot 群回 404", async () => {

@@ -9,7 +9,7 @@ import {
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, bots, groupMembers, groups, handoffs, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -87,20 +87,60 @@ export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput):
   return db.transaction((tx) => insertMemberBot(tx, ownerId, input));
 }
 
-/** 建一个队员连同它的单聊。单聊不能省：`listBots` 按单聊 join，没有单聊的 Bot 进不了 config。 */
+/**
+ * 这个用户名下还没有 Bot 叫的名字：base 空着就用 base，否则依次试 base2、base3……，超长时截掉 base 的尾巴给数字让位。
+ * 候选比他已有的 Bot 多两个，总有一个空着。只在拿到发号器行锁之后用：同一用户建 Bot 的事务都先抢那一行，
+ * 锁到手时前一个事务已经提交，这条语句看得到它建的名字，并发的两次挑不到同一个。
+ */
+function untakenName(ownerId: UserId, base: string): SQL {
+  // 名字上限 20 按 JS 的码元算，库里的 left 按码点算，截尾巴在这边按码元做好，SQL 按序号位数取。
+  const heads = [1, 2, 3, 4, 5, 6].map((digits) => headWithin(base, BOT_NAME_MAX - digits));
+  return sql`(
+    select candidate.name from (
+      select ${base}::text as name, 1 as n
+      union all
+      select (array[${sql.join(
+        heads.map((head) => sql`${head}::text`),
+        sql`, `,
+      )}])[length(suffix::text)] || suffix, suffix
+      from generate_series(2, (select count(*)::int + 2 from ${bots} where ${bots.ownerId} = ${ownerId})) as suffix
+    ) as candidate
+    where not exists (select 1 from ${bots} where ${bots.ownerId} = ${ownerId} and ${bots.name} = candidate.name)
+    order by candidate.n
+    limit 1
+  )`;
+}
+
+const BOT_NAME_MAX = 20;
+
+function headWithin(text: string, units: number): string {
+  let head = "";
+  for (const char of text) {
+    if (head.length + char.length > units) break;
+    head += char;
+  }
+  return head;
+}
+
+/**
+ * 建一个队员连同它的单聊。单聊不能省：`listBots` 按单聊 join，没有单聊的 Bot 进不了 config。
+ * naming 为 untaken 时名字和这个用户已有的 Bot 撞了就自动避开（见 untakenName），建出来的名字以返回的 bot 为准。
+ */
 export async function insertMemberBot(
   tx: Tx,
   ownerId: UserId,
   input: CreateBotInput,
+  naming: "as_given" | "untaken" = "as_given",
 ): Promise<{ bot: Bot; group: Group }> {
   // 用户自己挑了色就不推进轮转，免得下一个自动分配的跳色。
   const counter = await claimCounter(tx, ownerId, input.hue === undefined);
+  const name = input.name ?? generateBotName();
   const [botRow] = await tx
     .insert(bots)
     .values({
       id: newId(),
       ownerId,
-      name: input.name ?? generateBotName(),
+      name: naming === "untaken" ? untakenName(ownerId, name) : name,
       tag: input.tag ?? "",
       description: input.description ?? "",
       hue: input.hue ?? hueAt(counter.nextHueIndex - 1),

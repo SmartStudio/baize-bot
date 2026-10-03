@@ -128,8 +128,15 @@ async function finishRun(agent: AgentClient, push: PushClient, prompt: Prompt): 
   }
 }
 
-function sendOffer(agent: AgentClient, prompt: Prompt): void {
-  agent.send({ type: "project_offer", runId: prompt.runId, botId: prompt.botId, groupId: prompt.groupId, ...OFFER });
+function sendOffer(agent: AgentClient, prompt: Prompt, team: ProjectOfferEvent["team"] = OFFER.team): void {
+  agent.send({
+    type: "project_offer",
+    runId: prompt.runId,
+    botId: prompt.botId,
+    groupId: prompt.groupId,
+    ...OFFER,
+    team,
+  });
 }
 
 type Session = { readonly me: Owner; readonly agent: AgentClient; readonly push: PushClient; close(): void };
@@ -150,10 +157,10 @@ async function session(): Promise<Session> {
 }
 
 /** 跟主助理说一句，它出一张方案卡，这次活收尾。回的是推过来的那条卡。 */
-async function offerCard(s: Session): Promise<Message> {
+async function offerCard(s: Session, team?: ProjectOfferEvent["team"]): Promise<Message> {
   const prompt = await sendAndPrompt(s.me.client, s.agent, s.me.assistant.groupId, "推广白泽的开源仓库，年底 1000 星");
   expect(prompt.botId, "首页那句话归主助理").toBe(s.me.assistant.botId);
-  sendOffer(s.agent, prompt);
+  sendOffer(s.agent, prompt, team);
   let card: Message | null = null;
   while (card === null) {
     const item = await nextOfType(s.push, "message");
@@ -388,6 +395,102 @@ describe("方案卡", () => {
       const again = await decide(s.me.client, card.id, { decision: "start", name: "又一个名字" });
       expect(again.message, "已经开始的卡再点，名字不再改").toEqual(started.message);
       expect(again.task, "已经开始的卡回同一张任务卡").toEqual(started.task);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("队员名字和你已有的 Bot 撞了就接序号避开，卡上写回建出来的名字并重推", async () => {
+    const s = await session();
+    try {
+      expect((await s.me.client.post("/api/bots", { name: "小内" })).status).toBe(201);
+      await s.agent.expect("config");
+      const card = await offerCard(s);
+      const started = await decide(s.me.client, card.id, { decision: "start" });
+      if (started.group === null) throw new Error("开始了却没回项目群");
+
+      const names = (await bots(s.me.client)).map((item) => item.bot.name);
+      expect(new Set(names).size, `同一个用户名下没有重名的 Bot：${names.join("、")}`).toBe(names.length);
+      expect(names).toEqual(expect.arrayContaining(["小内", "小内2", "小社"]));
+
+      expect(offerBody(started.message).team, "卡上的队员名就是建出来的名字，别的不动").toEqual([
+        { ...OFFER.team[0], name: "小内2" },
+        OFFER.team[1],
+      ]);
+      const detail = GroupResponse.parse(await (await s.me.client.get(`/api/groups/${started.group.id}`)).json());
+      expect(
+        detail.bots
+          .filter((bot) => bot.role !== "assistant")
+          .map((bot) => bot.name)
+          .toSorted(),
+      ).toEqual(["小内2", "小社"]);
+
+      let repushed: Message | null = null;
+      while (repushed === null) {
+        const item = await nextOfType(s.push, "message");
+        if (item.message.id === card.id) repushed = item.message;
+      }
+      expect(repushed, "重推的是写回了新名字的那条卡").toEqual(started.message);
+      const stored = (await messagesOf(s.me.client, s.me.assistant.groupId)).find((message) => message.id === card.id);
+      expect(stored, "刷新后卡上还是建出来的名字").toEqual(started.message);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("两张同样队员的卡同时点开始，建出来的名字也不重", async () => {
+    const s = await session();
+    try {
+      const first = await offerCard(s);
+      const second = await offerCard(s);
+      const decided = await Promise.all([
+        decide(s.me.client, first.id, { decision: "start" }),
+        decide(s.me.client, second.id, { decision: "start" }),
+      ]);
+
+      const all = (await bots(s.me.client)).map((item) => item.bot.name);
+      expect(new Set(all).size, `并发开始也没有重名：${all.join("、")}`).toBe(all.length);
+      expect(decided.flatMap((item) => offerBody(item.message).team.map((member) => member.name)).toSorted()).toEqual(
+        ["小内", "小内2", "小社", "小社2"].toSorted(),
+      );
+      for (const item of decided) {
+        if (item.group === null) throw new Error("开始了却没回项目群");
+        const detail = GroupResponse.parse(await (await s.me.client.get(`/api/groups/${item.group.id}`)).json());
+        expect(
+          detail.bots
+            .filter((bot) => bot.role !== "assistant")
+            .map((bot) => bot.name)
+            .toSorted(),
+          "每张卡写的是它自己那个群里的队员",
+        ).toEqual(
+          offerBody(item.message)
+            .team.map((member) => member.name)
+            .toSorted(),
+        );
+      }
+    } finally {
+      s.close();
+    }
+  });
+
+  it("名字已经顶满 20 个字，避让时截掉尾巴给序号让位，emoji 不劈开", async () => {
+    const s = await session();
+    try {
+      const long = "一二三四五六七八九十一二三四五六七八九十";
+      const emoji = "😀".repeat(10);
+      for (const name of [long, emoji]) {
+        expect((await s.me.client.post("/api/bots", { name })).status).toBe(201);
+        await s.agent.expect("config");
+      }
+      const card = await offerCard(s, [
+        { name: long, tag: "", description: "" },
+        { name: emoji, tag: "", description: "" },
+      ]);
+      const started = await decide(s.me.client, card.id, { decision: "start" });
+      expect(offerBody(started.message).team.map((member) => member.name)).toEqual([
+        "一二三四五六七八九十一二三四五六七八九2",
+        `${"😀".repeat(9)}2`,
+      ]);
     } finally {
       s.close();
     }

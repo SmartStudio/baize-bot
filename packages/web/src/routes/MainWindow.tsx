@@ -31,7 +31,7 @@ const NO_MESSAGES: Message[] = [];
 
 // 拉项目数据的 hook 只在项目页挂着时跑。
 const ProjectView = (props: Omit<React.ComponentProps<typeof ProjectPage>, "project">) => {
-  const project = useProject(props.conversation.groupId);
+  const project = useProject(props.conversation.groupId, props.conversation.task.checklist);
   return <ProjectPage project={project} {...props} />;
 };
 
