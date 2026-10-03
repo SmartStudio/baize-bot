@@ -393,6 +393,9 @@ export type LoginFailure = z.infer<typeof LoginFailure>;
 // 登上是账号的事实，不用认尝试；没成只属于某一次尝试，旧尝试的失败不能盖掉新的。
 export const LoginAttemptId = dirId("LoginAttemptId");
 export type LoginAttemptId = z.infer<typeof LoginAttemptId>;
+// 账号上最近一次登录没成。login_failed 推送过去了就没了，页面刷新、换设备或当时没开着都靠这个还看得到；登上就清掉。
+export const LastLoginFailure = z.object({ reason: LoginFailure, at: Timestamp });
+export type LastLoginFailure = z.infer<typeof LastLoginFailure>;
 
 export const Account = z.object({
   id: AccountId,
@@ -404,6 +407,7 @@ export const Account = z.object({
   login: AccountLogin,
   // login 最近一次变的时刻。建占位时等于 createdAt，今天页的过期卡按它写「什么时候过期的」。
   loginChangedAt: Timestamp,
+  lastLoginFailure: LastLoginFailure.nullable(),
   createdAt: Timestamp,
 });
 export type Account = z.infer<typeof Account>;

@@ -386,6 +386,7 @@ describe("今日页的共享形状", () => {
       tier: "confirm_publish",
       login: "valid",
       loginChangedAt: now,
+      lastLoginFailure: null,
       createdAt: now,
     };
     const response = {
