@@ -19,10 +19,6 @@ export function isAlive(pid: number): boolean {
   }
 }
 
-export async function waitForExit(pid: number): Promise<void> {
-  while (isAlive(pid)) await delay(100);
-}
-
 export async function terminate(pid: number): Promise<void> {
   if (!isAlive(pid)) return;
   try {
@@ -38,7 +34,7 @@ export async function terminate(pid: number): Promise<void> {
   } catch {
     return;
   }
-  await waitForExit(pid);
+  while (isAlive(pid)) await delay(100);
 }
 
 function listProcesses(): Promise<string> {

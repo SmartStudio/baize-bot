@@ -855,6 +855,109 @@ describe("电脑代理连控制面", () => {
     ]);
   });
 
+  it("断线期间完成的登录，重连收到 welcome 后补发，同一账号只补最新一条", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const outcomes: BrowserLoginState[] = [
+      { login: "failed", reason: "window_failed" },
+      { login: "valid", handle: "白泽工厂日记" },
+      { login: "valid", handle: "白泽二号" },
+    ];
+    const logs: string[] = [];
+    let logins = 0;
+    spawnAgent(await server.url(), {
+      backoff: { initialMs: 200, maxMs: 200, factor: 1 },
+      log: (line) => logs.push(line),
+      makeChrome: () => ({
+        ...fakeChrome(),
+        login: async () => {
+          logins += 1;
+          const outcome = outcomes.shift();
+          await gate;
+          return outcome ?? Promise.reject(new Error("多登了一次"));
+        },
+      }),
+    });
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    for (const [accountId, attempt] of [
+      ["account-1", "try-1"],
+      ["account-1", "try-2"],
+      ["account-2", "try-3"],
+    ])
+      first.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
+    await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
+
+    first.terminate();
+    await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
+    release?.();
+    // 三次登录都只等 gate，结果在微任务里就排完了，等一轮 setImmediate 它们都已经到 send 了，重连定时器还没到。
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(logins, "前提：三次登录都在断线期间做完").toBe(3);
+
+    const second = await server.waitForSocket(2);
+    await server.waitForMessage("hello", 2);
+    second.send(
+      JSON.stringify({ type: "welcome", ownerId: "owner-1", kind: "local", serverTime: new Date().toISOString() }),
+    );
+    second.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+
+    expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽二号" } },
+    ]);
+  });
+
+  it("断线期间留下的登录结果，被重连后 welcome 前做完的同一账号新结果顶掉，welcome 时不再补旧的", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const gates: Array<() => void> = [];
+    const outcomes: BrowserLoginState[] = [
+      { login: "failed", reason: "window_failed" },
+      { login: "valid", handle: "白泽工厂日记" },
+    ];
+    const logs: string[] = [];
+    spawnAgent(await server.url(), {
+      backoff: { initialMs: 200, maxMs: 200, factor: 1 },
+      log: (line) => logs.push(line),
+      makeChrome: () => ({
+        ...fakeChrome(),
+        login: async () => {
+          const outcome = outcomes.shift();
+          await new Promise<void>((resolve) => gates.push(resolve));
+          return outcome ?? Promise.reject(new Error("多登了一次"));
+        },
+      }),
+    });
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    for (const attempt of ["try-1", "try-2"])
+      first.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt }));
+    await poll(() => gates[0], 3000, "第一次登录开始");
+
+    first.terminate();
+    await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
+    gates[0]?.();
+    const second = await server.waitForSocket(2);
+    await server.waitForMessage("hello", 2);
+    (await poll(() => gates[1], 3000, "第二次登录开始"))();
+    await server.waitForMessage("login_state", 1);
+    second.send(
+      JSON.stringify({ type: "welcome", ownerId: "owner-1", kind: "local", serverTime: new Date().toISOString() }),
+    );
+    second.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+
+    expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
+    ]);
+  });
+
   it.runIf(process.platform === "darwin")(
     "代理正常停机后，这个 profile 的 Chrome 不在了",
     async () => {

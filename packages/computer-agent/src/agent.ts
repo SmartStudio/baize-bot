@@ -67,6 +67,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
   let loginQueue: Promise<void> = Promise.resolve();
+  // 断线期间做完的登录，按账号只留最新一条，等下一次 welcome 补发。丢掉的话用户只能等超时再点一次。
+  const unsentLogins = new Map<string, Extract<AgentToControl, { type: "login_state" }>>();
 
   const send = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
@@ -74,6 +76,18 @@ export function startAgent(options: AgentOptions): AgentHandle {
       return;
     }
     link.socket.send(JSON.stringify(message));
+  };
+
+  const sendLoginState = (message: Extract<AgentToControl, { type: "login_state" }>): void => {
+    if (stopping) return;
+    // 同一账号手里这条总比留着的新。重连后 welcome 前直接发出去的话，留着的旧结果不能在 welcome 时再补上去盖掉它。
+    unsentLogins.delete(message.accountId);
+    if (link.phase === "open" && link.socket.readyState === WebSocket.OPEN) {
+      send(message);
+      return;
+    }
+    unsentLogins.set(message.accountId, message);
+    log(`连接不在，${message.accountId} 的 login_state 留到重连后补发`);
   };
 
   const stopHeartbeat = (): void => {
@@ -134,6 +148,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
         attempt = 0;
         log(`控制面已接纳，owner ${message.ownerId}`);
         process.stdout.write('{"type":"online"}\n');
+        for (const pending of unsentLogins.values()) send(pending);
+        unsentLogins.clear();
         return;
       case "config": {
         const config: AgentRunnerConfig = {
@@ -200,8 +216,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
             return untilAborted(chrome.login(message.platform, deadline), deadline);
           })
           .then((state) => {
-            if (stopping) return;
-            send({
+            sendLoginState({
               type: "login_state",
               accountId: message.accountId,
               state: state.login === "failed" ? { ...state, attempt: message.attempt } : state,
@@ -209,13 +224,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
           })
           .catch((error: unknown) => {
             log(`登录 ${message.platform} 失败：${String(error)}`);
-            if (!stopping) {
-              send({
-                type: "login_state",
-                accountId: message.accountId,
-                state: { login: "failed", reason: "window_failed", attempt: message.attempt },
-              });
-            }
+            sendLoginState({
+              type: "login_state",
+              accountId: message.accountId,
+              state: { login: "failed", reason: "window_failed", attempt: message.attempt },
+            });
           });
         return;
       }

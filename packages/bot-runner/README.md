@@ -256,7 +256,7 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 助理 Chrome 用 `--remote-debugging-pipe` 起，不开任何 TCP 端口：Chrome 从 fd 3 读命令、往 fd 4 写回复和事件，一条消息一段 JSON，以 NUL 结尾。一台电脑只有这一条管道，由电脑代理起 Chrome 时建好，`connectPipe` 包成 `CdpConnection`，`connection()` 回的就是它。所有 Bot 的浏览器工具、发布器和登录窗口都挂在这条管道上，各自 `Target.attachToTarget({ flatten: true })` 自己的标签页，命令带 `sessionId`，事件按 `sessionId` 分给各自的标签页，挂上的监听在关页时摘掉。
 
-Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起它，第一次有人调 `connection()` 才起，起完用 `Browser.getVersion` 判就绪。Chrome 退出或管道断了，在途命令当场以「助理 Chrome 退出了，这条命令没做完」结束，之后的命令直接报错；电脑代理清掉这份状态，不自己重起，下次有人调 `connection()` 再起一个新的。管道一断 Chrome 自己退出，电脑代理被 SIGKILL 也不留孤儿 Chrome。
+Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起它，第一次有人调 `connection()` 才起，起完用 `Browser.getVersion` 判就绪。Chrome 退出或管道断了，在途命令当场以「助理 Chrome 退出了，这条命令没做完」结束，之后的命令直接报错；电脑代理清掉这份状态，不自己重起，下次有人调 `connection()` 再起一个新的。管道一断 Chrome 自己退出，电脑代理被 SIGKILL 也不留孤儿 Chrome。复用已在跑的 Chrome 前先在管道上探一次活，退出事件没到也不会拿到死连接；连着起不成时第一次立刻重起，之后按 0.5 秒起翻倍、封顶 30 秒退避，退避期间直接报错。就绪后不到 30 秒就退出都记一次没起成，分不出崩溃和用户手动关掉，用户连着快速关掉助理 Chrome 时，接下来的调用会在退避窗口里收到这句错误。登录窗口的结果在电脑代理断线期间只留在进程内存里，每个账号留最新一条，重连收到 welcome 时补发，控制面不回确认：代理进程重启、hello 被拒，或补发后连接又在控制面处理之前断掉，这条结果都会丢，账号停在旧状态，用户要再点一次登录。
 
 | 工具 | 动作 | 做什么 |
 | --- | --- | --- |

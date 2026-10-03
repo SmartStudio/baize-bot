@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import type { BrowserPlatform, ComputerKind, LoginFailure } from "@baize/shared";
 import { type CdpConnection, type CdpPipe, connectPipe } from "@baize/bot-runner";
+import { backoffDelay, type BackoffOptions } from "./backoff.js";
 import { chromeProfileDir, isAlive, reapProfileChromes, terminate } from "./chrome-process.js";
 
 export interface BrowserPage {
@@ -21,6 +22,10 @@ const WINDOW_FAILED: BrowserLoginState = { login: "failed", reason: "window_fail
 
 const READY_TIMEOUT_MS = 15_000;
 
+// 起来不到这么久就退了，算这一轮没起成。连着没起成就按退避等，不然一起就崩的 Chrome 每次调用都重起一次。
+const CRASH_WINDOW_MS = 30_000;
+const RESTART_BACKOFF: BackoffOptions = { initialMs: 500, maxMs: 30_000, factor: 2 };
+
 export interface AssistantChrome {
   /** 远程电脑上的这个 Chrome 只给 Bot 的浏览器工具用：没人扫码登录，也就不拿它发布。 */
   readonly kind: ComputerKind;
@@ -28,6 +33,7 @@ export interface AssistantChrome {
   /**
    * 这台电脑唯一的那条管道。第一次要时才起 Chrome，这一轮启动失败就 reject，不会一直挂着。
    * Chrome 退了不自己重起，下次再要时起新的，旧连接上的命令已经全以错误结束。
+   * 连着起不成（起不来或起来就崩）时，第一次立刻重起，之后按退避等，等的期间直接 reject。
    */
   connection(): Promise<CdpConnection>;
   /** signal 到点就收起登录窗口、回 failed window_failed，等 Chrome 起来的时间也算在内。 */
@@ -150,6 +156,18 @@ export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promi
   });
 }
 
+// Chrome 被杀之后、退出事件到之前，管道看着还开着。探一条命令：真死了它会随管道掐断而失败，就当它没了重起。
+async function answers(connection: CdpConnection): Promise<boolean> {
+  if (!connection.isOpen()) return false;
+  try {
+    await connection.send("Browser.getVersion");
+    return true;
+  } catch (error) {
+    if (connection.isOpen()) throw error;
+    return false;
+  }
+}
+
 async function activateProcess(pid: number): Promise<void> {
   await run("osascript", [
     "-e",
@@ -194,6 +212,14 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
   let starting: Promise<Running> | null = null;
   let running: Running | null = null;
   let stopPromise: Promise<void> | null = null;
+  // 连着没起成几次、下一次最早什么时候再起。起来撑过 CRASH_WINDOW_MS 再退的才清零。
+  let crashes = 0;
+  let retryAt = 0;
+
+  const noteCrash = (): void => {
+    retryAt = crashes === 0 ? 0 : Date.now() + backoffDelay(crashes - 1, RESTART_BACKOFF);
+    crashes += 1;
+  };
 
   const launch = async (): Promise<Running> => {
     await mkdir(profileDir, { recursive: true, mode: 0o700 });
@@ -230,34 +256,53 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     }
   };
 
-  const ready = (): Promise<Running> => {
-    if (stopped.signal.aborted) return Promise.reject(new Error("助理 Chrome 已停止"));
-    // 管道断了而退出事件还没到时，手里这个已经不能用了，当它没了重起。
-    if (running !== null && !running.connection.isOpen()) {
-      running = null;
-      starting = null;
+  const start = (): Promise<Running> => {
+    const waitMs = retryAt - Date.now();
+    if (waitMs > 0) {
+      return Promise.reject(
+        new Error(`助理 Chrome 起不来：连着 ${crashes} 次没起成，${Math.ceil(waitMs / 1000)} 秒后再试`),
+      );
     }
-    if (starting !== null) return starting;
     const attempt: Promise<Running> = launch().then(
       (up) => {
         running = up;
+        const readyAt = Date.now();
         log(`助理 Chrome 已就绪，PID ${up.process.pid}，走管道`);
         void up.process.exited.then(() => {
           if (running === up) running = null;
           if (starting === attempt) starting = null;
-          if (!stopped.signal.aborted) log("助理 Chrome 已退出，下次用时重新起");
+          if (stopped.signal.aborted) return;
+          if (Date.now() - readyAt < CRASH_WINDOW_MS) noteCrash();
+          else crashes = 0;
+          log("助理 Chrome 已退出，下次用时重新起");
         });
         return up;
       },
       (error: unknown) => {
         if (starting === attempt) starting = null;
         const reason = error instanceof Error ? error.message : String(error);
-        if (!stopped.signal.aborted) log(`助理 Chrome 启动失败：${reason}`);
+        if (!stopped.signal.aborted) {
+          noteCrash();
+          log(`助理 Chrome 启动失败：${reason}`);
+        }
         throw new Error(`助理 Chrome 起不来：${reason}`);
       },
     );
     starting = attempt;
     return attempt;
+  };
+
+  const ready = async (): Promise<Running> => {
+    for (;;) {
+      if (stopped.signal.aborted) throw new Error("助理 Chrome 已停止");
+      // 这次调用之前就在跑的才要探，刚起好的已经用 Browser.getVersion 判过就绪。
+      const earlier = running;
+      const pending = starting ?? start();
+      const up = await pending;
+      if (up !== earlier || (await answers(up.connection))) return up;
+      if (running === up) running = null;
+      if (starting === pending) starting = null;
+    }
   };
 
   return {

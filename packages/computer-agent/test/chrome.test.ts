@@ -5,13 +5,13 @@ import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { basename, dirname, join } from "node:path";
-import type { Readable } from "node:stream";
+import { PassThrough, type Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BotId } from "@baize/shared";
 import { botDirs, forbiddenZones } from "../../bot-runner/src/paths.js";
 import { createSandboxedBash } from "../../bot-runner/src/sandbox.js";
-import { startAssistantChrome, type AssistantChrome } from "../src/chrome.js";
+import { startAssistantChrome, type AssistantChrome, type ChromeProcess } from "../src/chrome.js";
 import { chromeProfileDir, isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 
 const chromes: AssistantChrome[] = [];
@@ -72,6 +72,7 @@ function exited(child: Host["child"]): Promise<void> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const host of hosts.splice(0)) host.kill("SIGKILL");
   await Promise.all(chromes.splice(0).map((chrome) => chrome.stop()));
   await Promise.all(dataDirs.map((directory) => reapProfileChromes(chromeProfileDir(directory))));
@@ -96,6 +97,239 @@ describe("助理 Chrome 按需起", () => {
     await expect(chrome.connection()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
     await expect(chrome.connection()).rejects.toThrow("助理 Chrome 起不来：没装 Chrome");
     expect(launches).toBe(2);
+  });
+});
+
+type Reply = Record<string, unknown> | "hold";
+
+/** 管道那头的假 Chrome。respond 回 "hold" 就不回这条命令；killed 之后什么都不回，exit() 才算进程退出。 */
+interface FakeChrome {
+  readonly commands: string[];
+  kill(): void;
+  exit(): void;
+}
+
+function fakeChromes(respond: (method: string, params: Record<string, unknown>) => Reply = () => ({})) {
+  const launched: FakeChrome[] = [];
+  const launchChrome = async (): Promise<ChromeProcess> => {
+    const toChrome = new PassThrough();
+    const fromChrome = new PassThrough();
+    const commands: string[] = [];
+    let answering = true;
+    let markExited: (() => void) | undefined;
+    const processExited = new Promise<void>((resolve) => {
+      markExited = resolve;
+    });
+    let buffered = "";
+    toChrome.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString("utf8");
+      for (let end = buffered.indexOf("\0"); end !== -1; end = buffered.indexOf("\0")) {
+        const { id, method, params } = JSON.parse(buffered.slice(0, end)) as {
+          id: number;
+          method: string;
+          params: Record<string, unknown>;
+        };
+        buffered = buffered.slice(end + 1);
+        commands.push(method);
+        const reply = answering ? respond(method, params) : "hold";
+        if (reply !== "hold") fromChrome.write(`${JSON.stringify({ id, result: reply })}\0`);
+      }
+    });
+    const fake: FakeChrome = {
+      commands,
+      kill: () => {
+        answering = false;
+      },
+      exit: () => {
+        answering = false;
+        markExited?.();
+      },
+    };
+    launched.push(fake);
+    return {
+      pid: 4_000_000 + launched.length,
+      exited: processExited,
+      pipe: { toChrome, fromChrome },
+      stop: async () => fake.exit(),
+    };
+  };
+  return { launched, launchChrome };
+}
+
+describe("助理 Chrome 连接失效和重起退避", () => {
+  it("Chrome 刚被杀、退出事件还没到时要连接，拿到的是重起的新连接，不是旧的", async () => {
+    const { launched, launchChrome } = fakeChromes();
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {}, launchChrome });
+    chromes.push(chrome);
+    const first = await chrome.connection();
+    const old = launched[0];
+    if (old === undefined) throw new Error("前提：起过一个 Chrome");
+
+    old.kill();
+    const next = chrome.connection();
+    // 要连接的调用先到，进程退出事件晚一轮才到。
+    await new Promise((resolve) => setImmediate(resolve));
+    old.exit();
+
+    const again = await next;
+    expect(again, "拿到的不是旧连接").not.toBe(first);
+    expect(launched, "重起了一个 Chrome").toHaveLength(2);
+    await expect(again.send("Target.getTargets")).resolves.toEqual({});
+  });
+
+  it("起来就崩的 Chrome：第一次立刻重起，之后按 0.5 秒起翻倍退避，等的期间直接 reject 不起", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { launched, launchChrome } = fakeChromes();
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {}, launchChrome });
+    chromes.push(chrome);
+    const crashNext = async (): Promise<void> => {
+      await chrome.connection();
+      launched.at(-1)?.exit();
+      await poll(() => (chrome.pid() === null ? true : undefined), 3_000, "Chrome 退出被看到");
+    };
+
+    await crashNext();
+    await crashNext();
+    expect(launched, "第一次崩了立刻重起").toHaveLength(2);
+
+    await expect(chrome.connection()).rejects.toThrow("助理 Chrome 起不来：连着 2 次没起成，1 秒后再试");
+    vi.setSystemTime(Date.now() + 499);
+    await expect(chrome.connection()).rejects.toThrow("秒后再试");
+    expect(launched, "退避期间不起").toHaveLength(2);
+
+    vi.setSystemTime(Date.now() + 1);
+    await crashNext();
+    expect(launched).toHaveLength(3);
+    vi.setSystemTime(Date.now() + 999);
+    await expect(chrome.connection()).rejects.toThrow("连着 3 次没起成");
+    vi.setSystemTime(Date.now() + 1);
+    await chrome.connection();
+    expect(launched).toHaveLength(4);
+
+    vi.setSystemTime(Date.now() + 30_000);
+    launched.at(-1)?.exit();
+    await poll(() => (chrome.pid() === null ? true : undefined), 3_000, "Chrome 退出被看到");
+    await crashNext();
+    await chrome.connection();
+    expect(launched, "撑过 30 秒才退的不算崩，计数清零，之后第一次崩照样立刻重起").toHaveLength(6);
+  });
+});
+
+// 假时钟只接管 setTimeout，这里靠 setImmediate 让管道和微任务走完，不碰假时钟。
+async function settle(ready: () => boolean, label: string): Promise<void> {
+  for (let turn = 0; turn < 10_000; turn += 1) {
+    if (ready()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`管道走完了还没等到${label}`);
+}
+
+describe("登录窗口的轮询出口", () => {
+  const WINDOW_FAILED = { login: "failed", reason: "window_failed" };
+
+  async function startLogin(evaluate: (count: number) => Reply) {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let evaluations = 0;
+    const { launched, launchChrome } = fakeChromes((method) => {
+      if (method === "Target.createTarget") return { targetId: "login-tab" };
+      if (method === "Target.attachToTarget") return { sessionId: "login-session" };
+      if (method !== "Runtime.evaluate") return {};
+      evaluations += 1;
+      return evaluate(evaluations);
+    });
+    const backgrounded: number[] = [];
+    const chrome = startAssistantChrome({
+      dataDir: await dataDir(),
+      log: () => {},
+      platform: "darwin",
+      launchChrome,
+      activateProcess: async () => {},
+      backgroundProcess: async (pid) => {
+        backgrounded.push(pid);
+      },
+    });
+    chromes.push(chrome);
+    const controller = new AbortController();
+    const outcome = chrome.login("xiaohongshu", controller.signal);
+    const settled = { value: undefined as unknown, rejected: undefined as unknown, done: false };
+    outcome.then(
+      (value) => Object.assign(settled, { value, done: true }),
+      (error: unknown) => Object.assign(settled, { rejected: error, done: true }),
+    );
+    return {
+      chrome,
+      controller,
+      settled,
+      evaluations: () => evaluations,
+      commands: () => launched.flatMap((fake) => fake.commands),
+      backgrounded,
+    };
+  }
+
+  it("登录元素第三次才出现：每 250ms 查一次，查到回 valid，关掉登录页并退回后台", async () => {
+    const login = await startLogin((count) =>
+      count < 3 ? { result: { type: "object", value: null } } : { result: { type: "string", value: "白泽工厂日记" } },
+    );
+    await settle(() => login.evaluations() === 1, "第一次查登录元素");
+
+    await vi.advanceTimersByTimeAsync(249);
+    expect(login.evaluations(), "没到 250ms 不查第二次").toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle(() => login.evaluations() === 2, "第二次查登录元素");
+    await vi.advanceTimersByTimeAsync(250);
+    await settle(() => login.settled.done, "登录结束");
+
+    expect(login.settled.value).toEqual({ login: "valid", handle: "白泽工厂日记" });
+    expect(login.evaluations()).toBe(3);
+    expect(login.commands()).toContain("Target.closeTarget");
+    expect(login.backgrounded).toHaveLength(1);
+  });
+
+  it("两次轮询之间到点：不再查，回 failed window_failed，登录页照样关", async () => {
+    const login = await startLogin(() => ({ result: { type: "object", value: null } }));
+    await settle(() => login.evaluations() === 1, "第一次查登录元素");
+
+    login.controller.abort();
+    await vi.advanceTimersByTimeAsync(250);
+    await settle(() => login.settled.done, "登录结束");
+    // 登录先结束、多发的那条命令晚一轮才被假 Chrome 读到，排空一轮管道再数。
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(login.settled.value).toEqual(WINDOW_FAILED);
+    expect(login.evaluations(), "到点后不再查").toBe(1);
+    expect(login.commands()).toContain("Target.closeTarget");
+    expect(login.backgrounded).toHaveLength(1);
+  });
+
+  it("查登录元素的命令挂着时到点：不等它回，当场回 failed window_failed", async () => {
+    const login = await startLogin(() => "hold");
+    await settle(() => login.evaluations() === 1, "第一次查登录元素");
+
+    login.controller.abort();
+    await settle(() => login.settled.done, "登录结束");
+
+    expect(login.settled.value).toEqual(WINDOW_FAILED);
+    expect(login.commands()).toContain("Target.closeTarget");
+  });
+
+  it("轮询中助理 Chrome 停了：回 failed window_failed", async () => {
+    const login = await startLogin(() => ({ result: { type: "object", value: null } }));
+    await settle(() => login.evaluations() === 1, "第一次查登录元素");
+
+    await login.chrome.stop();
+    await vi.advanceTimersByTimeAsync(250);
+    await settle(() => login.settled.done, "登录结束");
+
+    expect(login.settled.value).toEqual(WINDOW_FAILED);
+    expect(login.evaluations(), "停了之后不再查").toBe(1);
+  });
+
+  it("登录页脚本抛异常：登录以错误结束，不当成没登上", async () => {
+    const login = await startLogin(() => ({ result: {}, exceptionDetails: { text: "Uncaught" } }));
+    await settle(() => login.settled.done, "登录结束");
+
+    expect(String(login.settled.rejected)).toContain("登录页脚本执行失败");
+    expect(login.commands()).toContain("Target.closeTarget");
   });
 });
 
@@ -241,6 +475,23 @@ describe.runIf(realChrome)("助理 Chrome 只有一条管道", () => {
     const again = await chrome.connection();
     expect(chrome.pid(), "下次要连接时起的是新 Chrome").not.toBe(firstPid);
     expect(String((await again.send("Browser.getVersion")).product)).toContain("Chrome");
+  }, 30_000);
+});
+
+describe.runIf(realChrome)("助理 Chrome 被杀的那一刻", () => {
+  it("SIGKILL 之后紧接着要连接，拿到的是新 Chrome 的连接，命令照常回", async () => {
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {} });
+    chromes.push(chrome);
+    const first = await chrome.connection();
+    const firstPid = chrome.pid();
+    if (firstPid === null) throw new Error("Chrome 没有 PID");
+
+    process.kill(firstPid, "SIGKILL");
+    const again = await chrome.connection();
+
+    expect(again, "不是被杀的那条旧连接").not.toBe(first);
+    expect(chrome.pid()).not.toBe(firstPid);
+    expect(String((await again.send("Browser.getVersion")).product)).toMatch(/Chrome/u);
   }, 30_000);
 });
 
