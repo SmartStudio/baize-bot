@@ -7,7 +7,7 @@ import { z } from "zod";
 
 // 测试夹具。本地假 MCP，四个工具：send_email 记下收到的参数和 Authorization 头，lookup_stock 回一段固定文字，
 // SKU-BAD 时回 isError，render_chart 回一段文字加一张图（字节是 MCP_CHART_BYTES，不是真 PNG），
-// render_image 按参数回任意格式和大小的图。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
+// render_image 按参数回任意格式和大小的图，wait_forever 挂到客户端取消为止。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
 // 每个请求新建一对 server 和 transport，记录放在外面共享。
 
 export const MCP_CHART_BYTES = Buffer.from("mcp-chart-p1-5");
@@ -63,6 +63,19 @@ function makeServer(calls: McpCall[], onInitialized: () => void): McpServer {
         { type: "image", data: MCP_CHART_BYTES.toString("base64"), mimeType: "image/png" },
       ],
     }),
+  );
+  server.registerTool(
+    "wait_forever",
+    { description: "一直不回，直到客户端取消这次调用。", inputSchema: {} },
+    async (_args, extra) => {
+      calls.push({
+        name: "wait_forever",
+        args: {},
+        authorization: header(extra.requestInfo?.headers, "authorization"),
+      });
+      await new Promise<void>((resolve) => extra.signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { content: [{ type: "text", text: "被取消了" }] };
+    },
   );
   server.registerTool(
     "render_image",

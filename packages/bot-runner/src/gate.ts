@@ -37,6 +37,8 @@ export interface GateCall extends GateContext {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   readonly mcpOperation: Pick<ToolOperation, "name" | "needsApproval"> | null;
+  /** 助理浏览器当前页的主机名，点和填按它授权。没有浏览器、还没开页或停在空白页是 null。 */
+  readonly browserHost?: string | null;
 }
 
 export interface GateDecision {
@@ -172,12 +174,20 @@ const stringField = (input: Record<string, unknown>, names: readonly string[]): 
   return null;
 };
 
+/** 域名统一成 URL 解析出的主机名：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。 */
 const domainOf = (value: string): string | null => {
   try {
-    return new URL(value.includes("://") ? value : `https://${value}`).hostname.toLowerCase();
+    const hostname = new URL(value.includes("://") ? value : `https://${value}`).hostname.toLowerCase();
+    const trimmed = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+    return trimmed === "" ? null : trimmed;
   } catch {
     return null;
   }
+};
+
+const browserTarget = (host: string | null): GrantTarget | null => {
+  const domain = host === null ? null : domainOf(host);
+  return domain === null ? null : { kind: "domain", domain };
 };
 
 const targetFromInput = (input: Record<string, unknown>, call: GateContext): GrantTarget | null => {
@@ -504,6 +514,8 @@ const classifyTool = (call: GateCall): readonly ClassifiedAction[] => {
   // 只发 GET，账号越权在工具里、令牌在控制面，这里归 read 不问。
   if (call.toolName === ACCOUNT_READ_TOOL) return [plainAction("read", targetFromInput(call.input, call))];
   const browserAction = BROWSER_TOOL_ACTIONS.get(call.toolName);
+  // 点和填的目标只认浏览器自己报的当前页主机名：入参是模型写的，写个 hostname 就能冒领别的域名的授权。
+  if (browserAction === "engage") return [plainAction(browserAction, browserTarget(call.browserHost ?? null))];
   if (browserAction !== undefined) return [plainAction(browserAction, targetFromInput(call.input, call))];
   if (call.mcpOperation === null) return [plainAction("write_workspace")];
   return [plainAction(mcpAction(call.toolName, call.mcpOperation.needsApproval), targetFromInput(call.input, call))];
@@ -513,8 +525,8 @@ const sameTarget = (left: GrantTarget, right: GrantTarget, platform: NodeJS.Plat
   if (left.kind !== right.kind) return false;
   if (left.kind === "account" && right.kind === "account") return left.accountId === right.accountId;
   if (left.kind === "domain" && right.kind === "domain") {
-    const granted = left.domain.toLowerCase();
-    const actual = right.domain.toLowerCase();
+    const granted = domainOf(left.domain) ?? left.domain.toLowerCase();
+    const actual = domainOf(right.domain) ?? right.domain.toLowerCase();
     return actual === granted || actual.endsWith(`.${granted}`);
   }
   if (left.kind === "path" && right.kind === "path") {

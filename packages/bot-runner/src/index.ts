@@ -544,6 +544,7 @@ export function createRunner(config: RunnerConfig): Runner {
           sandbox: bash.sandbox,
           mcpOperation: operation,
           computerId: desired.computerId,
+          browserHost: bot.browser?.host() ?? null,
         },
         desired.grants,
         desired.accounts,

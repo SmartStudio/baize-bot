@@ -6,7 +6,14 @@ import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type BotBrowser, createBotBrowser } from "../src/browser.js";
 import { type CdpConnection, type CdpEvent, connectPipe } from "../src/cdp.js";
-import { chromeBinary, launchTestChrome, pageTargets, settledPageCount, type TestChrome } from "./helpers/chrome.js";
+import {
+  chromeBinary,
+  evaluateIn,
+  launchTestChrome,
+  pageTargets,
+  settledPageCount,
+  type TestChrome,
+} from "./helpers/chrome.js";
 
 const resultText = (result: { content: ReadonlyArray<{ type: string; text?: string }> }): string =>
   result.content.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("\n");
@@ -23,10 +30,30 @@ const errorOf = (work: Promise<unknown>): Promise<string> =>
     (error: unknown) => String(error),
   );
 
+/**
+ * 敌意页：主世界里把编号表的全局钉死成只回诱饵按钮、把 querySelectorAll 改成只回诱饵、把真按钮的 getClientRects 改成空。
+ * 三处都只改主世界的对象，隔离世界看到的是干净的 DOM。
+ */
+const HOSTILE_PAGE = `<!doctype html><meta charset="utf-8"><title>敌意页</title>
+<button id="real" onclick="document.getElementById('out').textContent='REAL-CLICKED'">真按钮</button>
+<button id="decoy" onclick="document.getElementById('out').textContent='DECOY-CLICKED'">诱饵按钮</button>
+<p id="out"></p>
+<script>
+  const decoy = document.getElementById("decoy");
+  Object.defineProperty(window, Symbol.for("baize.browser.refs"), { get: () => [decoy], set() {} });
+  document.querySelectorAll = () => [decoy];
+  const rects = Element.prototype.getClientRects;
+  Element.prototype.getClientRects = function () { return this.id === "real" ? [] : rects.call(this); };
+</script>`;
+
 async function startSite(): Promise<{ readonly url: string; close(): Promise<void> }> {
   const server = createHttpServer((request, response) => {
     const path = new URL(request.url ?? "/", "http://127.0.0.1").pathname;
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (path === "/hostile") {
+      response.end(HOSTILE_PAGE);
+      return;
+    }
     response.end(`<!doctype html><meta charset="utf-8"><title>页 ${path}</title><p>PAGE-TEXT${path}</p>`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -134,6 +161,22 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
 
     expect(page).toContain(`Chrome 重启过，上次在 ${site.url}/moved`);
     expect(await settled(before + 1), "旧页关掉，只剩新开的一页").toBe(before + 1);
+  });
+
+  it("页面主世界伪造编号表全局、改掉 querySelectorAll 和 getClientRects，编号表照样按真实 DOM 建，点到的是真按钮", async () => {
+    const browser = botBrowser();
+    await call(browser, "browser_open", { url: `${site.url}/hostile` });
+
+    const snapshot = await call(browser, "browser_snapshot");
+    expect(snapshot, "编号按真实 DOM 排，真按钮在前").toContain("[1] 按钮「真按钮」");
+    expect(snapshot).toContain("[2] 按钮「诱饵按钮」");
+
+    await call(browser, "browser_click", { ref: 1 });
+    const mine = (await pageTargets(chrome.connection)).find((target) => target.url === `${site.url}/hostile`);
+    if (mine === undefined) throw new Error("找不到 Bot 的标签页");
+    expect(await evaluateIn(mine, "document.getElementById('out').textContent"), "点 [1] 落在真按钮上").toBe(
+      "REAL-CLICKED",
+    );
   });
 
   it("开标签页半路失败，建好的那页不留下", async () => {

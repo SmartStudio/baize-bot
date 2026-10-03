@@ -14,10 +14,17 @@ export interface McpToolSet {
   close(): Promise<void>;
 }
 
+/** 一次共享的连接：几条工具调用一起等同一个 initialize，谁的 signal 先响就把它整个撤掉。 */
+interface Pending {
+  readonly client: Promise<Client>;
+  readonly control: AbortController;
+  settled: boolean;
+}
+
 interface Link {
   readonly connection: ToolConnectionConfig;
-  /** 正在连或已经连上的 client。连失败就清回 null，下一次调用再试。 */
-  client: Promise<Client> | null;
+  /** 正在连或已经连上的 client。连失败或被撤就清回 null，下一次调用再连。 */
+  pending: Pending | null;
 }
 
 /** config.tools 里分配给这个 Bot 的连接，保持 config 里的先后。 */
@@ -67,7 +74,7 @@ const reasonOf = (error: unknown): string => {
   return `${error.message}${cause}`;
 };
 
-async function connect(connection: ToolConnectionConfig): Promise<Client> {
+async function connect(connection: ToolConnectionConfig, signal: AbortSignal): Promise<Client> {
   const client = new Client({ name: "baize-bot-runner", version: "0.1.0" });
   const transport = new StreamableHTTPClientTransport(
     new URL(connection.url),
@@ -75,18 +82,38 @@ async function connect(connection: ToolConnectionConfig): Promise<Client> {
   );
   // SDK 1.30 的 StreamableHTTPClientTransport 把 sessionId 声明成 `string | undefined`，Transport 要的是可省属性，
   // exactOptionalPropertyTypes 下两者不相容，只能在这里转一次。
-  await client.connect(transport as unknown as Transport);
+  // signal 只管 initialize 这一问：一响 SDK 就拒掉并自己关掉 transport，不等它 60 秒的请求超时。
+  await client.connect(transport as unknown as Transport, { signal });
   return client;
 }
 
-const clientOf = (link: Link): Promise<Client> => {
-  if (link.client === null) {
-    link.client = connect(link.connection).catch((error: unknown) => {
-      link.client = null;
-      throw error;
-    });
-  }
-  return link.client;
+const startConnect = (link: Link): Pending => {
+  const control = new AbortController();
+  const pending: Pending = { control, settled: false, client: connect(link.connection, control.signal) };
+  pending.client.then(
+    () => (pending.settled = true),
+    () => {
+      pending.settled = true;
+      if (link.pending === pending) link.pending = null;
+    },
+  );
+  link.pending = pending;
+  return pending;
+};
+
+// initialize 回了之后再 abort，SDK 还会照发一条 cancelled 通知，所以只撤还没回的。
+const cancelConnect = (pending: Pending): void => {
+  if (!pending.settled) pending.control.abort();
+};
+
+/** 拿连好的 client，没连就连。等 initialize 的时候 signal 一响，这次连接整个撤掉，本次调用当场结束。 */
+const clientOf = (link: Link, signal: AbortSignal | undefined): Promise<Client> => {
+  const pending = link.pending ?? startConnect(link);
+  if (signal === undefined) return pending.client;
+  const onAbort = (): void => cancelConnect(pending);
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  return pending.client.finally(() => signal.removeEventListener("abort", onAbort));
 };
 
 /**
@@ -104,7 +131,7 @@ export function createMcpTools(options: {
   const servers = new Map<string, string>();
 
   for (const connection of options.connections) {
-    const link: Link = { connection, client: null };
+    const link: Link = { connection, pending: null };
     links.push(link);
     for (const op of connection.operations) {
       if (taken.has(op.name)) {
@@ -119,17 +146,22 @@ export function createMcpTools(options: {
         description: op.description,
         // 控制面已经按 ToolOperation 收过这份 JSON Schema，这里原样交给 Pi 校验参数，不再翻译一遍。
         parameters: Type.Unsafe<Record<string, unknown>>(op.inputSchema),
-        execute: async (_callId, params) => {
+        execute: async (_callId, params, signal) => {
           let client: Client;
           try {
-            client = await clientOf(link);
+            client = await clientOf(link, signal);
           } catch (error) {
             return {
               content: [{ type: "text", text: `工具连接「${connection.name}」连不上：${reasonOf(error)}` }],
               details: {},
             };
           }
-          const result = await client.callTool({ name: op.name, arguments: params as Record<string, unknown> });
+          // 停机和暂停的 abort 顺着 signal 传给 MCP，服务端收到 cancelled 通知，这边不等它回。
+          const result = await client.callTool(
+            { name: op.name, arguments: params as Record<string, unknown> },
+            undefined,
+            signal === undefined ? {} : { signal },
+          );
           const blocks = blocksOf(result.content);
           const text = textOf(blocks);
           if (result.isError === true) throw new Error(text === "" ? `工具「${op.name}」报错，没有说明` : text);
@@ -148,9 +180,11 @@ export function createMcpTools(options: {
     close: async () => {
       await Promise.all(
         links.map(async (link) => {
-          const pending = link.client;
-          link.client = null;
-          const client = await pending?.catch(() => null);
+          const pending = link.pending;
+          link.pending = null;
+          if (pending === null) return;
+          cancelConnect(pending);
+          const client = await pending.client.catch(() => null);
           await client?.close();
         }),
       );

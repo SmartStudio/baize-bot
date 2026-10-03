@@ -412,6 +412,58 @@ describe("浏览器工具", () => {
     expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "ask", action: "engage" });
   });
 
+  it("点和填的授权目标是浏览器当前页的主机名，命中 engage 的域名授权就不问", () => {
+    const grants = [grant("engage", domainTarget("127.0.0.1"))];
+    expect(decide({ ...call("browser_click", { ref: 3 }), browserHost: "127.0.0.1" }, grants, [])).toMatchObject({
+      verdict: "allow",
+      action: "engage",
+      target: { kind: "domain", domain: "127.0.0.1" },
+    });
+    expect(
+      decide({ ...call("browser_type", { ref: 3, text: "你好" }), browserHost: "127.0.0.1" }, grants, []).verdict,
+    ).toBe("allow");
+  });
+
+  it("当前页是别的域名，engage 的域名授权不算，照样问", () => {
+    const grants = [grant("engage", domainTarget("127.0.0.1"))];
+    expect(decide({ ...call("browser_click", { ref: 3 }), browserHost: "localhost" }, grants, [])).toMatchObject({
+      verdict: "ask",
+      target: { kind: "domain", domain: "localhost" },
+    });
+  });
+
+  it("没有当前页时授权目标为空，模型在入参里塞的 hostname 不算数", () => {
+    const grants = [grant("engage", domainTarget("127.0.0.1"))];
+    const decision = decide(
+      { ...call("browser_click", { ref: 3, hostname: "127.0.0.1", url: "http://127.0.0.1/" }), browserHost: null },
+      grants,
+      [],
+    );
+    expect(decision).toMatchObject({ verdict: "ask", target: null });
+  });
+
+  it.each([
+    ["localhost.", "localhost", "localhost"],
+    ["localhost", "localhost.", "localhost"],
+    ["xn--fiq228c.example", "中文.example", "xn--fiq228c.example"],
+    ["中文.example.", "xn--fiq228c.example", "xn--fiq228c.example"],
+    ["[::1]", "[::1]", "[::1]"],
+  ] as const)("当前页主机 %s 与授权 %s 是同一个域名，放行且目标写成 %s", (host, grantedDomain, expected) => {
+    const grants = [grant("engage", domainTarget(grantedDomain))];
+    expect(decide({ ...call("browser_click", { ref: 3 }), browserHost: host }, grants, [])).toMatchObject({
+      verdict: "allow",
+      target: { kind: "domain", domain: expected },
+    });
+  });
+
+  it("当前页主机名是空串，目标为空，有授权也问", () => {
+    const grants = [grant("engage", domainTarget("localhost"))];
+    expect(decide({ ...call("browser_click", { ref: 3 }), browserHost: "" }, grants, [])).toMatchObject({
+      verdict: "ask",
+      target: null,
+    });
+  });
+
   it("account_read 归 read，没有授权也直接放行", () => {
     expect(decide(call("account_read", { accountId: "acc-gh", path: "repos/o/r/issues" }), [], [])).toMatchObject({
       verdict: "allow",

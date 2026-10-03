@@ -68,7 +68,7 @@ bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行�
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写和删某个 socket 所在目录的上级，bash 能把那个目录整个挪进工作目录再连，这一条还没挡。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写工作目录外的路径，bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放，`test/sandbox.test.ts` 的「挪进工作目录也连不上」用例钉着它。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
 - **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
@@ -104,7 +104,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
-`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
+`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。abort 不等在途的工具：Pi 的 bash 按进程组杀掉子进程；MCP 工具把 Pi 给的 `signal` 传进 `callTool`，服务端收到 cancelled 通知，这边当场返回；第一次调用还在等 `client.connect` 的 initialize 时，signal 一响就撤掉这次共享的连接（几条调用一起等同一个 initialize，谁先中止都撤），下次调用重新连，`close()` 也先撤还没回的 initialize 再关；浏览器工具排队中的调用一收到 signal 就以「这次浏览器操作被中止了」结束，正在跑的那次在下一条 CDP 命令处停下，工具步骤不等 30 秒的命令超时。被中止的只是这边的后续步骤：已经进管道的命令 Chrome 照样做完，它的回包和后面关闭路径发的命令在底层是交叠的。回包一般丢掉，只有 `Target.createTarget` 的迟到回包要接住，把建出来的页关掉，不然停机后留一个没人管的后台标签页。关页是清理，不走 signal，所以预算钉在 `closeTarget` 这一个函数上：每次 `Target.closeTarget` 最多等 `CLOSE_BUDGET_MS`（2 秒），Chrome 不回也不等 CDP 的 30 秒超时，命令已经发出，Chrome 自己会关。停机、换标签页、建页失败的收尾都走同一条，没有哪条关页路径能无界地挡住 serial 队列后面的 `close()`；关旧页之前标签页已经记成关闭，一次停机只会落在其中一条关页上，最多等一个预算。正在 `Page.navigate` 的还会发 `Page.stopLoading` 让 Chrome 放弃加载，`settle` 的轮询也跟着停。`test/runner.test.ts` 的几条「停机时…」用例分别对着不回应的网址、卡住的 `Runtime.evaluate` 和 `Page.captureScreenshot`、迟到的 `Target.createTarget`、不回的 `Target.closeTarget`、建页半路中止后清理关页也不回、不回 initialize 的 HTTP 服务和挂着不回的假 MCP 量停机耗时。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
 ## 主题任务工具
 
@@ -266,7 +266,7 @@ Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起�
 | `browser_click` | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent` |
 | `browser_type` | `engage`，默认问 | 按编号填字，替换原内容，可选按回车 |
 
-没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标现在是空的，每次都问；按域名授权见报告里的提议。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（最近一次打开或 snapshot 看到的网址的主机名）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
+没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标是浏览器当前页的主机名（`BotBrowser.host()`，随 `GateCall.browserHost` 进闸门），不看模型的入参，模型在 `browser_click` 的参数里塞 `hostname` 也冒领不了；域名两边都按 URL 解析出的主机名比较：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。批过的域名（`once`、`project`、`forever` 三种范围）再点不问，`browser_open` 到别的域名或页面自己跳到别的域名之后再点重新问。还没开页或停在空白页时目标为空，每次都问。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（当前页的主机名，页面自己跳走也跟着变）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
 
 snapshot 的形状：
 
@@ -283,7 +283,7 @@ snapshot 的形状：
 [4] 链接「帮助」→ https://…
 ```
 
-编号按 DOM 顺序，只收看得见的元素，最多 200 个，编号表挂在页面上，下一次 snapshot 重建。`type="password"`，以及 `autocomplete` 含 `current-password` 或 `new-password` 的输入框都算密码框，只报「密码框」不报值，`document.cookie` 和 `Set-Cookie` 都不读。截图前把所有密码框的值清空，截完在 `finally` 里填回去，页面不收到 input 事件。
+所有脚本都在 `Page.createIsolatedWorld` 建的隔离世界里跑，页面主世界改掉 `querySelectorAll`、`getClientRects` 或伪造编号表的全局都碰不到它，`test/browser.test.ts` 的「敌意页」用例钉着这三处。编号按 DOM 顺序，只收看得见的元素，最多 200 个，编号表挂在隔离世界的 window 上，页面拿不到；主框架换了文档世界就作废（`Page.frameNavigated` 或命令报找不到 context 时重建），下一次 snapshot 重建。`type="password"`，以及 `autocomplete` 含 `current-password` 或 `new-password` 的输入框都算密码框，只报「密码框」不报值，`document.cookie` 和 `Set-Cookie` 都不读。截图前把所有密码框的值清空，截完在 `finally` 里填回去，页面不收到 input 事件。
 
 **标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 

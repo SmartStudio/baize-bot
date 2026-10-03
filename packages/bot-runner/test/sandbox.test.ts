@@ -349,6 +349,43 @@ describe("bash 沙箱性能", () => {
     },
   );
 
+  it.skipIf(process.platform !== "darwin")(
+    "seatbelt 下同一次调用批了外面目录的写和联网，把 socket 所在目录挪进工作目录也连不上",
+    async () => {
+      const outside = mkdtempSync(join(tmpdir(), "baize-sandbox-mv-"));
+      const socketDir = join(outside, "sub");
+      mkdirSync(socketDir);
+      const server = await listenUnix(join(socketDir, "s.sock"));
+      const node = shellQuote(process.execPath);
+      // spawnSync 期间测试进程的事件循环停着，服务端不会回 FIN，客户端连上就 destroy，不等对端。
+      const connectScript = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{process.stdout.write("CONNECTED\\n");s.destroy()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
+      const command = [
+        `mv ${shellQuote(socketDir)} ./moved-sub && echo DIR-MOVED`,
+        `${node} -e ${shellQuote(connectScript)} ./moved-sub/s.sock`,
+        "true",
+      ].join("; ");
+      try {
+        const result = spawnSync(
+          "/usr/bin/sandbox-exec",
+          ["-p", sandboxProfile(workDir, { network: true, writePaths: [outside] }, zones), "/bin/bash", "-c", command],
+          {
+            cwd: workDir,
+            encoding: "utf8",
+            env: whitelistEnv(process.env, workDir, join(workDir, ".tmp")),
+            timeout: 20_000,
+          },
+        );
+        expect(result.stdout, "批了写外面的目录，目录挪得进工作目录").toContain("DIR-MOVED");
+        expect(result.stdout, "挪进来的 socket 连不上").not.toContain("CONNECTED");
+        expect(server.accepted(), "服务端一次连接都没收到").toBe(0);
+      } finally {
+        await server.close();
+        rmSync(join(workDir, "moved-sub"), { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")("seatbelt 下禁区落在工作目录里，批了联网也连不上里面的 socket", async () => {
     const nestedProfile = join(workDir, "nested-profile");
     mkdirSync(nestedProfile, { recursive: true });

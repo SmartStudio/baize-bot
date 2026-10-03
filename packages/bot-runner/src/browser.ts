@@ -27,6 +27,12 @@ export const BROWSER_TOOL_ACTIONS: ReadonlyMap<string, ActionKind> = new Map<str
 export const BROWSER_TOOL_NAMES: readonly string[] = [...BROWSER_TOOL_ACTIONS.keys()];
 
 const LOAD_TIMEOUT_MS = 15_000;
+/**
+ * 关标签页最多等这么久，所有发 Target.closeTarget 的地方都按它。Chrome 关一页正常几十毫秒，2 秒盖得住它忙的时候；
+ * 关页是清理，排在 serial 队列里，它无界等待就会挡住后面的 close()，停机整体要秒级结束（用例预算 5 秒），
+ * 其余时间留给 abort、dispose 这些收尾，不能等 CDP 的 30 秒命令超时。
+ */
+const CLOSE_BUDGET_MS = 2_000;
 const PAGE_TEXT_MAX = 8_000;
 const ELEMENTS_MAX = 200;
 const APPROVAL_TEXT_MAX = 80;
@@ -56,7 +62,10 @@ const NOTHING_SEEN: Seen = { url: null, elements: [] };
 const PASSWORD_SELECTOR =
   'input[type="password" i], input[autocomplete~="current-password" i], input[autocomplete~="new-password" i]';
 
-// 编号表和暂存的密码值挂在页面的 window 上，下一次 snapshot 重建。
+// 所有脚本都在 Page.createIsolatedWorld 建的隔离世界里跑：页面脚本改不了这个世界的全局和 DOM 原型，
+// 编号表和暂存的密码值也挂在这个世界的 window 上，页面拿不到。换了文档世界就没了，下一次 snapshot 重建。
+const WORLD_NAME = "baize";
+const STALE_CONTEXT = "Cannot find context with specified id";
 const REFS_KEY = 'Symbol.for("baize.browser.refs")';
 const PASSWORDS_KEY = 'Symbol.for("baize.browser.passwords")';
 
@@ -135,22 +144,48 @@ const clip = (text: string, max: number): string => {
   return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : text;
 };
 
-const hostOf = (url: string | null): string => {
-  if (url === null) return "（空白页）";
+const hostnameOf = (url: string | null): string | null => {
+  if (url === null) return null;
   try {
-    return new URL(url).hostname || url;
+    return new URL(url).hostname || null;
   } catch {
-    return url;
+    return null;
   }
 };
 
-const send = (open: OpenTab, method: string, params: Record<string, unknown> = {}) =>
-  open.connection.send(method, params, open.sessionId);
+const hostOf = (url: string | null): string => (url === null ? "（空白页）" : (hostnameOf(url) ?? url));
+
+const abortedError = (): Error => new Error("这次浏览器操作被中止了");
+
+const throwIfAborted = (signal: AbortSignal | undefined): void => {
+  if (signal?.aborted === true) throw abortedError();
+};
+
+const sleep = (ms: number, signal: AbortSignal | undefined): Promise<void> =>
+  delay(ms, undefined, signal === undefined ? {} : { signal });
+
+/**
+ * 关一页，最多等 CLOSE_BUDGET_MS，关不掉也不报错：管道已断时这一页跟着 Chrome 一起没了，
+ * Chrome 不回包时命令已经发出，它自己会做完。所有关页都走这里，预算是按资源给的，不按路径。
+ */
+const closeTarget = async (connection: CdpConnection, targetId: string): Promise<void> => {
+  const budget = new AbortController();
+  const closing = connection.send("Target.closeTarget", { targetId }).then(
+    () => undefined,
+    () => undefined,
+  );
+  await Promise.race([
+    closing.finally(() => budget.abort()),
+    delay(CLOSE_BUDGET_MS, undefined, { signal: budget.signal }).catch(() => undefined),
+  ]);
+};
 
 const textResult = (text: string) => ({ content: [{ type: "text" as const, text }], details: {} });
 
 export interface BotBrowser {
   readonly tools: readonly RunnerTool[];
+  /** 当前页的主机名，点和填按它授权。还没开页、停在空白页或网址没有主机名时是 null。 */
+  host(): string | null;
   /** 点和填的审批卡：当前页的域名和 snapshot 里那个元素，别的工具给 null。 */
   approvalView(toolName: string, input: unknown): ToolView | null;
   close(): Promise<void>;
@@ -162,14 +197,71 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
   let tab: Tab = { kind: "closed" };
   let seen: Seen = NOTHING_SEEN;
   let lastConnection: CdpConnection | null = null;
+  /** 当前标签页里的隔离世界，换了文档就作废。 */
+  let world: { readonly open: OpenTab; readonly contextId: number } | null = null;
   const loadWaiters = new Set<() => void>();
   // 一个 Bot 的浏览器调用排成一队，重建标签页和导航不交叠。
   let queue: Promise<unknown> = Promise.resolve();
+  /** 正在跑的那次调用的 signal。调用串行，所以同一时刻最多一个。 */
+  let active: AbortSignal | undefined;
 
-  const serial = <T>(work: () => Promise<T>): Promise<T> => {
-    const next = queue.then(work, work);
+  /**
+   * 发一条 CDP 命令。当前调用的 signal 一响，这次等待当场以中止结束；命令本身留给 CDP 自己超时。
+   * 这样正在跑的调用在下一条命令处停下，队列很快排空，关闭不用等 30 秒的命令超时。
+   * 命令已经进了管道，Chrome 照样会做完：中止之后才到的回包交给 onLate，建页这种留下资源的命令靠它收尾，其余丢掉。
+   */
+  const command = (
+    connection: CdpConnection,
+    method: string,
+    params: Record<string, unknown> = {},
+    sessionId?: string,
+    onLate?: (result: Record<string, unknown>) => void,
+  ): Promise<Record<string, unknown>> => {
+    const signal = active;
+    const sent = connection.send(method, params, sessionId);
+    if (signal === undefined) return sent;
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      let abandoned = false;
+      const onAbort = (): void => {
+        abandoned = true;
+        reject(abortedError());
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+      void sent
+        .then((result) => {
+          if (abandoned) onLate?.(result);
+          resolve(result);
+        }, reject)
+        .finally(() => signal.removeEventListener("abort", onAbort));
+    });
+  };
+
+  const send = (open: OpenTab, method: string, params: Record<string, unknown> = {}) =>
+    command(open.connection, method, params, open.sessionId);
+
+  /**
+   * 排队跑一次调用。Pi 的 signal 一响（停机、abort）这次调用当场以中止结束，不等排在前面的做完；
+   * 已经在跑的那次在下一条 CDP 命令或下一次 sleep 处收手，队列很快排空。
+   */
+  const serial = <T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> => {
+    const run = async (): Promise<T> => {
+      throwIfAborted(signal);
+      active = signal;
+      try {
+        return await work();
+      } finally {
+        active = undefined;
+      }
+    };
+    const next = queue.then(run, run);
     queue = next.catch(() => undefined);
-    return next;
+    if (signal === undefined) return next;
+    return new Promise<T>((resolve, reject) => {
+      const onAbort = (): void => reject(abortedError());
+      signal.addEventListener("abort", onAbort, { once: true });
+      void next.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    });
   };
 
   const remember = (url: string | null, elements?: readonly string[]): void => {
@@ -177,30 +269,61 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     seen = { url: next, elements: elements ?? (next === seen.url ? seen.elements : []) };
   };
 
-  // 管道已断时这一页跟着 Chrome 一起没了，关不关得掉都不用记。
   const retire = async (open: OpenTab): Promise<void> => {
     if (tab === open) tab = { kind: "closed" };
     open.unsubscribe();
-    await open.connection.send("Target.closeTarget", { targetId: open.targetId }).catch(() => undefined);
+    await closeTarget(open.connection, open.targetId);
   };
 
-  const evaluate = async (open: OpenTab, expression: string): Promise<unknown> => {
-    const result = await send(open, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true });
+  const contextFor = async (open: OpenTab): Promise<number> => {
+    if (world?.open === open) return world.contextId;
+    const tree = (await send(open, "Page.getFrameTree")) as { frameTree?: { frame?: { id?: string } } };
+    const frameId = tree.frameTree?.frame?.id;
+    if (frameId === undefined) throw new Error("助理 Chrome 没有回主框架");
+    const created = await send(open, "Page.createIsolatedWorld", { frameId, worldName: WORLD_NAME });
+    const contextId = created.executionContextId;
+    if (typeof contextId !== "number") throw new Error("助理 Chrome 没有建出隔离世界");
+    world = { open, contextId };
+    return contextId;
+  };
+
+  const evaluate = async (open: OpenTab, expression: string, retry = true): Promise<unknown> => {
+    const contextId = await contextFor(open);
+    let result: Record<string, unknown>;
+    try {
+      result = await send(open, "Runtime.evaluate", { expression, contextId, returnByValue: true, awaitPromise: true });
+    } catch (error) {
+      // 页面在这条命令路上换了文档，旧世界没了，重建一次再跑。
+      if (retry && String(error).includes(STALE_CONTEXT)) {
+        world = null;
+        return evaluate(open, expression, false);
+      }
+      throw error;
+    }
     if (result.exceptionDetails !== undefined) throw new Error("页面里的脚本出错了，先 browser_snapshot 再试");
     return (result.result as { value?: unknown } | undefined)?.value;
   };
 
-  const navigate = async (open: OpenTab, url: string): Promise<void> => {
+  /**
+   * 对方不回应时 Page.navigate 本身就不回来。signal 一响这边的等待当场结束，
+   * 同时让 Chrome 停止加载，免得它替一个已经中止的调用继续等那个站。
+   */
+  const navigate = async (open: OpenTab, url: string, signal: AbortSignal | undefined): Promise<void> => {
     let loaded!: () => void;
     const fired = new Promise<void>((resolve) => (loaded = resolve));
     loadWaiters.add(loaded);
+    const stopLoading = (): void => void send(open, "Page.stopLoading").catch(() => undefined);
+    signal?.addEventListener("abort", stopLoading, { once: true });
     try {
+      throwIfAborted(signal);
       const result = await send(open, "Page.navigate", { url });
+      throwIfAborted(signal);
       if (typeof result.errorText === "string") throw new Error(`没打开：${result.errorText}`);
       // 同一文档里的跳转没有 loaderId，也不会再有 load 事件。
       if (result.loaderId === undefined) return;
-      await Promise.race([fired, delay(LOAD_TIMEOUT_MS)]);
+      await Promise.race([fired, sleep(LOAD_TIMEOUT_MS, signal)]);
     } finally {
+      signal?.removeEventListener("abort", stopLoading);
       loadWaiters.delete(loaded);
     }
   };
@@ -209,9 +332,16 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     let targetId: string | null = null;
     let unsubscribe: (() => void) | null = null;
     try {
-      const created = await connection.send("Target.createTarget", { url: "about:blank", background: true });
+      // 建页被中止时 Chrome 多半已经建好了页，回包迟到也要接住，把那一页关掉，不然就是一个没人管的后台标签页。
+      const created = await command(
+        connection,
+        "Target.createTarget",
+        { url: "about:blank", background: true },
+        undefined,
+        (late) => void closeTarget(connection, String(late.targetId)),
+      );
       targetId = String(created.targetId);
-      const attached = await connection.send("Target.attachToTarget", { targetId, flatten: true });
+      const attached = await command(connection, "Target.attachToTarget", { targetId, flatten: true });
       const sessionId = String(attached.sessionId);
       // 管道上是所有 Bot、发布器和登录窗口的事件，只认自己这一页的 session。
       unsubscribe = connection.onEvent((event) => {
@@ -223,6 +353,14 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
         if (event.method === "Page.loadEventFired") {
           for (const waiter of loadWaiters) waiter();
         }
+        // 主框架换了文档：隔离世界作废；页面自己跳走的也记下来，点和填按跳过去的域名授权。
+        if (event.method === "Page.frameNavigated") {
+          const frame = event.params.frame as { parentId?: string; url?: string } | undefined;
+          if (frame?.parentId === undefined) {
+            world = null;
+            if (typeof frame?.url === "string") remember(frame.url);
+          }
+        }
       });
       const opened: OpenTab = { kind: "open", connection, sessionId, targetId, unsubscribe };
       // 后台标签页里 document.hasFocus() 是 false，不少页面据此不响应输入。焦点模拟只骗这一页，不碰桌面焦点。
@@ -231,7 +369,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       return opened;
     } catch (error) {
       unsubscribe?.();
-      if (targetId !== null) await connection.send("Target.closeTarget", { targetId }).catch(() => undefined);
+      if (targetId !== null) await closeTarget(connection, targetId);
       throw error;
     }
   };
@@ -263,10 +401,12 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
     return open;
   };
 
-  const settle = async (open: OpenTab): Promise<void> => {
-    await delay(300);
+  const settle = async (open: OpenTab, signal: AbortSignal | undefined): Promise<void> => {
+    await sleep(300, signal);
     const deadline = Date.now() + LOAD_TIMEOUT_MS;
-    while (Date.now() < deadline && (await evaluate(open, "document.readyState")) !== "complete") await delay(100);
+    while (Date.now() < deadline && (await evaluate(open, "document.readyState")) !== "complete") {
+      await sleep(100, signal);
+    }
   };
 
   const rememberUrl = async (open: OpenTab): Promise<void> => {
@@ -296,11 +436,11 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       description:
         "在你自己的后台标签页里打开一个网址。用户看不到这一页，焦点也不会被抢。打开后用 browser_snapshot 读内容。",
       parameters: OPEN_PARAMS,
-      execute: (_callId, params) =>
-        serial(async () => {
+      execute: (_callId, params, signal) =>
+        serial(signal, async () => {
           const { open } = await ensureTab();
           const url = checkedUrl((params as Static<typeof OPEN_PARAMS>).url);
-          await navigate(open, url);
+          await navigate(open, url, signal);
           await rememberUrl(open);
           const title = await evaluate(open, "document.title");
           return textResult(`已打开「${String(title)}」\n地址：${seen.url ?? url}\n要看内容用 browser_snapshot。`);
@@ -311,8 +451,8 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       label: "读网页",
       description: "读后台标签页当前的页面：标题、网址、正文，和带编号的可点元素。点和填都用这里的编号。",
       parameters: EMPTY_PARAMS,
-      execute: () =>
-        serial(async () => {
+      execute: (_callId, _params, signal) =>
+        serial(signal, async () => {
           const { open, notice } = await ensureTab();
           const snapshot = (await evaluate(open, SNAPSHOT_SCRIPT)) as {
             title: string;
@@ -338,8 +478,8 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       label: "截图",
       description: "截后台标签页当前这一屏给自己看。密码框截的时候是空的。",
       parameters: EMPTY_PARAMS,
-      execute: () =>
-        serial(async () => {
+      execute: (_callId, _params, signal) =>
+        serial(signal, async () => {
           const { open, notice } = await ensureTab();
           await evaluate(open, CLEAR_PASSWORDS);
           let data: unknown;
@@ -365,15 +505,15 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       description:
         "点后台标签页里的一个元素，编号来自最近一次 browser_snapshot。会替用户在网站上留下动作，默认要用户点头。",
       parameters: CLICK_PARAMS,
-      execute: (_callId, params) =>
-        serial(async () => {
+      execute: (_callId, params, signal) =>
+        serial(signal, async () => {
           const { ref } = params as Static<typeof CLICK_PARAMS>;
           const open = await tabForRef();
           const { x, y } = await pointOf(open, ref);
           await send(open, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
           await send(open, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
           await send(open, "Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
-          await settle(open);
+          await settle(open, signal);
           await rememberUrl(open);
           return textResult(`点了 [${ref}]。要看结果用 browser_snapshot。`);
         }),
@@ -383,8 +523,8 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       label: "填网页",
       description: "往后台标签页里的输入框填字，替换原有内容，编号来自最近一次 browser_snapshot。默认要用户点头。",
       parameters: TYPE_PARAMS,
-      execute: (_callId, params) =>
-        serial(async () => {
+      execute: (_callId, params, signal) =>
+        serial(signal, async () => {
           const { ref, text, submit } = params as Static<typeof TYPE_PARAMS>;
           const open = await tabForRef();
           const focused = await evaluate(
@@ -404,7 +544,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
             const enter = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 };
             await send(open, "Input.dispatchKeyEvent", { type: "keyDown", text: "\r", ...enter });
             await send(open, "Input.dispatchKeyEvent", { type: "keyUp", ...enter });
-            await settle(open);
+            await settle(open, signal);
             await rememberUrl(open);
           }
           return textResult(`在 [${ref}] 填了 ${[...text].length} 个字${submit === true ? "，按了回车" : ""}。`);
@@ -420,6 +560,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
 
   return {
     tools,
+    host: () => hostnameOf(seen.url),
     approvalView: (toolName, input) => {
       if (toolName !== "browser_click" && toolName !== "browser_type") return null;
       const args = (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
@@ -436,7 +577,7 @@ export function createBotBrowser(config: BrowserConfig): BotBrowser {
       };
     },
     close: () =>
-      serial(async () => {
+      serial(undefined, async () => {
         if (tab.kind === "open") await retire(tab);
       }),
   };

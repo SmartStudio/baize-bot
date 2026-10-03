@@ -18,6 +18,7 @@ import { createServer as createHttpServer } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   type AccountConfig,
   AccountId,
@@ -53,6 +54,7 @@ import {
   type RunnerConfig,
   type RunnerTool,
 } from "../src/index.js";
+import type { CdpConnection } from "../src/cdp.js";
 import { simpleToolView } from "../src/reporter.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
 import {
@@ -2081,6 +2083,58 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
   afterEach(async () => {
     await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
   });
+
+  it("停机时 MCP 工具还没回，调用当场取消，不等它，run_done 恰好一次", async () => {
+    const mcp = await fakeMcp();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection([{ name: "wait_forever", needsApproval: false }], { url: mcp.url })],
+      script: scriptBy([["等", callTool("wait_forever", {})]]),
+    });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "等"));
+    await until(() => mcp.calls.some((call) => call.name === "wait_forever"), "假 MCP 收到调用");
+    const startedAt = performance.now();
+
+    await Promise.all([running, h.runner.stop()]);
+
+    expect(performance.now() - startedAt, "不等 MCP 的 60 秒请求超时").toBeLessThan(5000);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  }, 30_000);
+
+  it("停机时 MCP 还在 initialize、服务端一直不回包，连接当场放弃，不等它，run_done 恰好一次", async () => {
+    let initializes = 0;
+    const stuck = createHttpServer((request) => {
+      initializes += 1;
+      request.resume();
+    });
+    await new Promise<void>((resolve) => stuck.listen(0, "127.0.0.1", resolve));
+    const address = stuck.address();
+    if (address === null || typeof address === "string") throw new Error("不回包的 MCP 没有端口");
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [
+        toolConnection([{ name: "lookup_stock", needsApproval: false }], {
+          url: `http://127.0.0.1:${address.port}/mcp`,
+        }),
+      ],
+      script: scriptBy([["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+      await until(() => initializes > 0, "不回包的 MCP 收到了 initialize");
+      const startedAt = performance.now();
+
+      await Promise.all([running, h.runner.stop()]);
+
+      expect(performance.now() - startedAt, "不等 initialize 的 60 秒请求超时").toBeLessThan(5000);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      stuck.closeAllConnections();
+      await new Promise<void>((resolve) => stuck.close(() => resolve()));
+    }
+  }, 30_000);
 
   it("分配了的 Bot：名单里有两个操作，调用 lookup_stock 时假 MCP 收到参数和 Authorization 头，结果文字回到模型", async () => {
     const mcp = await fakeMcp();
@@ -5400,6 +5454,7 @@ const LONG_LABEL = "很长的按钮".repeat(30);
 
 const staticPage = (
   name: string,
+  hop: string,
 ): string => `<!doctype html><html><head><meta charset="utf-8"><title>测试页 ${name}</title>
 <style>body{font:16px sans-serif;margin:20px}input{display:block;margin:8px 0;width:240px}</style></head><body>
 <h1>白泽测试页 ${name}</h1><p>这里是页面正文 PAGE-TEXT-${name}</p>
@@ -5407,18 +5462,24 @@ const staticPage = (
 <button type="button" onclick="document.getElementById('out').textContent='点过了：'+document.getElementById('user').value">登录</button>
 <input id="cur" autocomplete="current-password" placeholder="当前密码"><input id="new" autocomplete="username new-password" placeholder="新密码">
 <button type="button">${LONG_LABEL}</button>
+<a href="${hop}">换个域名</a>
 <div id="out"></div>
 <script>document.cookie="js_token=COOKIE-JS-SECRET; path=/";document.getElementById("pw").value="PASSWORD-SECRET";
 document.getElementById("cur").value="CURRENT-PW-SECRET";document.getElementById("new").value="NEW-PW-SECRET";</script>
 </body></html>`;
 
-/** 本地静态页。每页带一个 Set-Cookie、一个脚本写的 cookie 和三个脚本填好的密码框，正文里有页名。hits 记每个路径被 GET 了几次。 */
+/**
+ * 本地静态页。每页带一个 Set-Cookie、一个脚本写的 cookie 和三个脚本填好的密码框，正文里有页名，
+ * 末尾一个链接 [7] 指向同一站的 localhost 主机名，点它就换了域名。hits 记每个路径被 GET 了几次。
+ */
 async function startStaticSite(): Promise<{
   readonly url: string;
+  readonly hopUrl: string;
   readonly hits: ReadonlyMap<string, number>;
   close(): Promise<void>;
 }> {
   const hits = new Map<string, number>();
+  let hopUrl = "";
   const server = createHttpServer((request, response) => {
     const name = (request.url ?? "/").slice(1) || "index";
     hits.set(`/${name}`, (hits.get(`/${name}`) ?? 0) + 1);
@@ -5426,17 +5487,42 @@ async function startStaticSite(): Promise<{
       "content-type": "text/html; charset=utf-8",
       "set-cookie": "sid=COOKIE-HEADER-SECRET; Path=/",
     });
-    response.end(staticPage(name));
+    response.end(staticPage(name, `${hopUrl}/hop-${name}`));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("静态页没有端口");
+  hopUrl = `http://localhost:${address.port}`;
   return {
     url: `http://127.0.0.1:${address.port}`,
+    hopUrl,
     hits,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   };
 }
+
+/** 单 Bot 群 group-1 里对某个域名的 engage 授权。 */
+const engageGrant = (domain: string): Grant => ({
+  id: GrantId.parse(`grant-engage-${domain}`),
+  scope: "project",
+  groupId: GroupId.parse("group-1"),
+  action: "engage",
+  target: { kind: "domain", domain },
+  createdAt: "2026-09-26T00:00:00.000Z",
+});
+
+/** 发出去的每条审批：工具名和审批卡上的「域名」。 */
+const approvalsOf = (h: Harness): readonly { readonly tool: string; readonly domain: unknown }[] =>
+  h.sent.flatMap((message) =>
+    message.type === "approval_request"
+      ? [
+          {
+            tool: message.tool,
+            domain: message.view.kind === "mcp" ? message.view.params.find((p) => p.key === "域名")?.value : null,
+          },
+        ]
+      : [],
+  );
 
 type PlannedCall = readonly [name: string, args: Record<string, unknown>];
 
@@ -5563,6 +5649,274 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     expect(typeof longElement === "string" ? [...longElement].length : null, "元素描述截到 80 字").toBe(80);
     expect(String(longElement), "截的是 snapshot 里那一行").toMatch(/^按钮「很长的按钮很长的按钮/);
   });
+
+  it("点和填按当前页的域名授权：批过的域名再点不问，换个域名打开再点要问", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      browser: browser(),
+      grants: [engageGrant("127.0.0.1")],
+      script: scriptPlans(requests, {
+        两个域名: [
+          ["browser_open", { url: `${site.url}/granted` }],
+          ["browser_snapshot", {}],
+          ["browser_type", { ref: 1, text: "小满" }],
+          ["browser_click", { ref: 3 }],
+          ["browser_click", { ref: 3 }],
+          ["browser_snapshot", {}],
+          ["browser_open", { url: `${site.hopUrl}/other-host` }],
+          ["browser_snapshot", {}],
+          ["browser_click", { ref: 3 }],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "两个域名各点一下"));
+
+    expect(toolResultsOf(requests), "批过的域名上填和点都真落到页面").toContain("点过了：小满");
+    expect(approvalsOf(h), "127.0.0.1 上的填和两次点都不问，localhost 上的点才问").toEqual([
+      { tool: "browser_click", domain: "localhost" },
+    ]);
+  });
+
+  it("页面里点链接跳到别的域名后，再点要重新问", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      browser: browser(),
+      grants: [engageGrant("127.0.0.1")],
+      script: scriptPlans(requests, {
+        跳走: [
+          ["browser_open", { url: `${site.url}/hop-from` }],
+          ["browser_snapshot", {}],
+          ["browser_click", { ref: 7 }],
+          ["browser_snapshot", {}],
+          ["browser_click", { ref: 3 }],
+        ],
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "点链接跳走再点"));
+
+    expect(toolResultsOf(requests), "链接真把页面带到了 localhost").toContain(`${site.hopUrl}/hop-hop-from`);
+    expect(approvalsOf(h), "点链接时还在 127.0.0.1 不问，跳到 localhost 之后的点要问").toEqual([
+      { tool: "browser_click", domain: "localhost" },
+    ]);
+  });
+
+  it("停机时正在打开一个不回应的网址，浏览器工具当场中止，不等加载超时，run_done 恰好一次", async () => {
+    let connections = 0;
+    const stuck = createHttpServer(() => {
+      connections += 1;
+    });
+    await new Promise<void>((resolve) => stuck.listen(0, "127.0.0.1", resolve));
+    const address = stuck.address();
+    if (address === null || typeof address === "string") throw new Error("不回应的站没有端口");
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: browser(),
+      script: scriptPlans(requests, { 卡住: [["browser_open", { url: `http://127.0.0.1:${address.port}/never` }]] }),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "打开卡住的页"));
+      await until(() => connections > 0, "Chrome 已经在等那个站回应");
+      const startedAt = performance.now();
+
+      await Promise.all([running, h.runner.stop()]);
+
+      expect(performance.now() - startedAt, "不等 15 秒的加载超时").toBeLessThan(5000);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      stuck.closeAllConnections();
+      await new Promise<void>((resolve) => stuck.close(() => resolve()));
+    }
+  }, 40_000);
+
+  /**
+   * 同一条管道外面包一层：挑中的 CDP 命令照发给 Chrome，但回包扣住不给，直到测试放行。
+   * 顺便记下发过的 Target.closeTarget，看迟到的页最后有没有被关掉。
+   */
+  const hangingConnection = (
+    shouldHang: (method: string, params: Record<string, unknown> | undefined) => boolean,
+  ): {
+    readonly connection: CdpConnection;
+    hung(): number;
+    closedTargets(): readonly string[];
+    /** 把扣住的回包放出去，按发出顺序返回 Chrome 真正回的结果；页关了之后才回的命令要等 CDP 自己超时，所以不在这里等。 */
+    release(): Promise<Record<string, unknown>>[];
+  } => {
+    let hung = 0;
+    const closed: string[] = [];
+    const held: { readonly real: Promise<Record<string, unknown>>; pass(): void }[] = [];
+    return {
+      connection: {
+        send: (method, params, sessionId) => {
+          if (method === "Target.closeTarget") closed.push(String(params?.targetId));
+          const real = chrome.connection.send(method, params, sessionId);
+          if (!shouldHang(method, params)) return real;
+          hung += 1;
+          return new Promise((resolve, reject) => held.push({ real, pass: () => real.then(resolve, reject) }));
+        },
+        onEvent: (listener) => chrome.connection.onEvent(listener),
+        isOpen: () => chrome.connection.isOpen(),
+      },
+      hung: () => hung,
+      closedTargets: () => closed,
+      release: () => {
+        const releasing = held.splice(0);
+        for (const entry of releasing) entry.pass();
+        return releasing.map((entry) => entry.real.catch(() => ({})));
+      },
+    };
+  };
+
+  const stopWhileHung = async (
+    hanging: ReturnType<typeof hangingConnection>,
+    plans: Record<string, readonly PlannedCall[]>,
+    text: string,
+  ): Promise<{ readonly elapsed: number; readonly runDone: string[] }> => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, connection: async () => hanging.connection },
+      script: scriptPlans(requests, plans),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", text));
+      await until(() => hanging.hung() > 0, "卡住的那条 CDP 命令已经发出");
+      const startedAt = performance.now();
+      const stopped = Promise.all([running, h.runner.stop()]);
+      await Promise.race([stopped, delay(8000)]);
+      return { elapsed: performance.now() - startedAt, runDone: runDoneIds(h) };
+    } finally {
+      hanging.release();
+    }
+  };
+
+  it("停机时建页的 Target.createTarget 回包迟到，停机秒级结束，迟到的页之后还是被关掉", async () => {
+    const hanging = hangingConnection((method) => method === "Target.createTarget");
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, connection: async () => hanging.connection },
+      script: scriptPlans(requests, { 开迟到的页: [["browser_open", { url: `${site.url}/late-tab` }]] }),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "开迟到的页"));
+      await until(() => hanging.hung() > 0, "建页命令已经发出");
+      const startedAt = performance.now();
+      const stopped = Promise.all([running, h.runner.stop()]);
+      await Promise.race([stopped, delay(8000)]);
+      const elapsed = performance.now() - startedAt;
+
+      const created = await hanging.release()[0];
+      const targetId = String(created?.targetId);
+
+      expect(elapsed, "不等迟到的建页回包").toBeLessThan(5000);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+      await until(() => hanging.closedTargets().includes(targetId), "迟到建出来的页被关掉");
+    } finally {
+      hanging.release();
+    }
+  }, 40_000);
+
+  it("停机落在建页的 attach 上、清理关页又不回，停机仍秒级结束，run_done 恰好一次", async () => {
+    const hanging = hangingConnection(
+      (method) => method === "Target.attachToTarget" || method === "Target.closeTarget",
+    );
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, connection: async () => hanging.connection },
+      script: scriptPlans(requests, { 建页半路停: [["browser_open", { url: `${site.url}/attach-hangs` }]] }),
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "建页半路停"));
+      await until(() => hanging.hung() > 0, "attach 已经发出，页已经建好");
+      const startedAt = performance.now();
+      const stopped = Promise.all([running, h.runner.stop()]);
+      await until(() => hanging.closedTargets().length === 1, "中止后建页的清理发了关页命令");
+      await Promise.race([stopped, delay(8000)]);
+
+      expect(performance.now() - startedAt, "建页的清理关页不回也不挡停机").toBeLessThan(5000);
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+    } finally {
+      hanging.release();
+    }
+  }, 40_000);
+
+  it("停机时 Target.closeTarget 一直不回，停机不等 CDP 的 30 秒超时", async () => {
+    const hanging = hangingConnection((method) => method === "Target.closeTarget");
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir, connection: async () => hanging.connection },
+      script: scriptPlans(requests, { 开好再关: [["browser_open", { url: `${site.url}/close-hangs` }]] }),
+    });
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "开好再关"));
+      expect(toolResultsOf(requests), "页先开好了").toContain("close-hangs");
+      const startedAt = performance.now();
+
+      const stopped = h.runner.stop();
+      await Promise.race([stopped, delay(8000)]);
+
+      const elapsed = performance.now() - startedAt;
+      expect(elapsed, "关页不回时等满 2 秒预算才放弃").toBeGreaterThanOrEqual(2000);
+      expect(elapsed, "预算 2 秒，加上其它收尾也要在 3 秒内，别把 5 秒的停机余量吃掉").toBeLessThan(3000);
+      expect(hanging.hung(), "停机确实发了关页命令").toBeGreaterThan(0);
+    } finally {
+      hanging.release();
+    }
+  }, 40_000);
+
+  it("停机时 snapshot 的 Runtime.evaluate 一直不回，停机秒级结束，run_done 恰好一次", async () => {
+    const hanging = hangingConnection(
+      (method, params) => method === "Runtime.evaluate" && String(params?.expression).includes("getClientRects"),
+    );
+
+    const { elapsed, runDone } = await stopWhileHung(
+      hanging,
+      {
+        读卡住的页: [
+          ["browser_open", { url: `${site.url}/stuck-eval` }],
+          ["browser_snapshot", {}],
+        ],
+      },
+      "读卡住的页",
+    );
+
+    expect(elapsed, "不等 CDP 的 30 秒命令超时").toBeLessThan(5000);
+    expect(runDone).toEqual(["run-1"]);
+  }, 40_000);
+
+  it("停机时截图的 Page.captureScreenshot 一直不回，停机秒级结束，run_done 恰好一次", async () => {
+    const hanging = hangingConnection((method) => method === "Page.captureScreenshot");
+
+    const { elapsed, runDone } = await stopWhileHung(
+      hanging,
+      {
+        截卡住的图: [
+          ["browser_open", { url: `${site.url}/stuck-shot` }],
+          ["browser_screenshot", {}],
+        ],
+      },
+      "截卡住的图",
+    );
+
+    expect(elapsed, "不等 CDP 的 30 秒命令超时").toBeLessThan(5000);
+    expect(runDone).toEqual(["run-1"]);
+  }, 40_000);
 
   it("截图进模型是图片，截的时候密码框是空的，截完填回去", async () => {
     const requests: ChatCompletionRequest[] = [];

@@ -63,12 +63,15 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
     '(allow file-write* (literal "/dev/dtracehelper"))',
     // 连 unix socket 在 seatbelt 里算 network-outbound，裸的 (allow network-outbound) 会把本机所有 unix socket
     // 一起放开（docker.sock、用户自己 Chrome 的 SingletonSocket）。批了联网只放 IP、DNS 走的 mDNSResponder
-    // 和工作目录里 Bot 自己起的 socket。
+    // 和工作目录里 Bot 自己起的 socket。seatbelt 按 socket 当前的路径判，同一次调用还批了写外面的目录时，
+    // bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放。
     ...(access.network
       ? [
           "(allow network-outbound (remote ip))",
           `(allow network-outbound (remote unix-socket (path-literal ${seatbeltString(MDNS_RESPONDER_SOCKET)})))`,
-          `(allow network-outbound (remote unix-socket (subpath ${seatbeltString(work)})))`,
+          ...(access.writePaths.length === 0
+            ? [`(allow network-outbound (remote unix-socket (subpath ${seatbeltString(work)})))`]
+            : []),
           "(allow network-inbound)",
           "(allow network-bind)",
         ]
