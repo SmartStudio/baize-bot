@@ -35,7 +35,7 @@ export function contextSince(context: readonly ContextLine[], watermark: Waterma
   return context.filter((line) => !settled.has(line.messageId) && partial.get(line.messageId) !== line.text);
 }
 
-/** 只留这一批和触发消息：窗口只往后滑，掉出窗口的行不会再回来，水位因此不涨。 */
+/** 只留这一批和触发消息：控制面在窗口前接着送的是它记下的上一次没定稿的行，定稿以后掉出这一批的行不会再回来，水位因此不涨。 */
 export function recordWatermark(sessions: SessionManager, message: PromptMessage, previous: Watermark | null): void {
   const next: Watermark = {
     settled: [

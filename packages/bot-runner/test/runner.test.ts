@@ -84,6 +84,7 @@ const botSessionProbe = vi.hoisted(() => ({
   disposeError: null as Error | null,
   disposeErrorFor: null as string | null,
   createGate: null as Promise<void> | null,
+  createError: null as Error | null,
   promptError: null as Error | null,
   promptHook: null as (() => void) | null,
   assistantEnds: [] as Array<{ stopReason: string; errorMessage: string | undefined }>,
@@ -97,6 +98,7 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
       const key = { botId: String(options.botId), sessionDir: options.dirs.sessionDir };
       botSessionProbe.creations.push(key);
       if (botSessionProbe.createGate !== null) await botSessionProbe.createGate;
+      if (botSessionProbe.createError !== null) throw botSessionProbe.createError;
       const created = await actual.createBotSession(options);
       const prompt = created.session.prompt.bind(created.session);
       Object.defineProperty(created.session, "prompt", {
@@ -491,6 +493,7 @@ afterEach(async () => {
   botSessionProbe.disposeError = null;
   botSessionProbe.disposeErrorFor = null;
   botSessionProbe.createGate = null;
+  botSessionProbe.createError = null;
   botSessionProbe.promptError = null;
   botSessionProbe.promptHook = null;
   botSessionProbe.assistantEnds.splice(0);
@@ -3484,6 +3487,36 @@ describe("config 按 Bot 增量对账", () => {
     }
 
     expect(runDoneIds(h)).toEqual(["run-1"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("建会话失败、prompt 还没进会话时，runner_failed 带上 runId；调过 session.prompt 再抛的不带", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    const failures = () =>
+      h.sent.flatMap((message) =>
+        message.type === "agent_error" && message.code === "runner_failed" ? [message.runId] : [],
+      );
+    botSessionProbe.createError = new Error("模拟建会话失败");
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "建会话就失败"));
+    } finally {
+      botSessionProbe.createError = null;
+    }
+    botSessionProbe.promptError = new Error("模拟 prompt 预检失败");
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "调了 prompt 才失败"));
+    } finally {
+      botSessionProbe.promptError = null;
+    }
+
+    expect(failures(), "建会话失败带 runId，控制面据此收尾；调过 session.prompt 的维持不带").toEqual([
+      "run-1",
+      undefined,
+    ]);
+    expect(runDoneIds(h), "两次都照样恰好一条 run_done").toEqual(["run-1", "run-2"]);
     expect(h.runner.activeRuns()).toEqual([]);
   });
 

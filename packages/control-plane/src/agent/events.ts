@@ -30,6 +30,7 @@ import {
   settleStreamingText,
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
+import { confirmContext } from "../repo/context-window.js";
 import { routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
@@ -380,6 +381,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
       amount,
     });
     if (usage === null) return null;
+    await confirmContext(tx, event.runId);
     return {
       usage,
       failedTools: await failRunningToolCalls(tx, event.groupId, event.runId),

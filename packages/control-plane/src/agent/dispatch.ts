@@ -30,6 +30,7 @@ import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot }
 import { findChiefBotId, findSoloBotId } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
+import { recordUnsettled, unsettledAtLastRun } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
@@ -185,8 +186,7 @@ async function sendSpeaker(
     return null;
   }
 
-  const history = await recentBodies(deps.db, groupId, speaker.trigger, includeRecent);
-  const context = await summarizeAll(deps.db, ownerId, history, speaker.botId, members);
+  const context = await contextFor(deps.db, ownerId, groupId, speaker, includeRecent, members);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
@@ -214,6 +214,11 @@ async function sendSpeaker(
   // Bot 在派活途中被删了，这一轮到此为止。不留 system：
   // 单聊群已随 Bot 级联删掉，写不进去；多 Bot 群里页面已收到 bot_deleted。
   if (runId === null) return null;
+  await recordUnsettled(
+    deps.db,
+    runId,
+    context.filter((line) => !line.settled).map((line) => line.messageId),
+  );
   const origin: PromptOrigin =
     speaker.handoff !== undefined
       ? botOrigin(members, speaker.handoff.fromBotId)
@@ -262,6 +267,32 @@ type ContextLine = {
   readonly text: string;
   readonly settled: boolean;
 };
+
+/**
+ * 窗口前面接着送的上限，留最新的。还没定稿的行每轮都带，永远停在半截的消息、一直没发出去的草稿也占着位置，
+ * 超出的最老几条就此不再送。
+ */
+const CONTEXT_CATCHUP = 10;
+
+/**
+ * 最近 20 条，前面再接上这个 Bot 最近一次正常回了 run_done 的派活里没定稿、这次滑出窗口的行。
+ * 还没定稿的照送，字没变运行器的水位会挡掉，变了就拼；定稿那一轮整句再拼一次，之后不再记，也就不再送。
+ */
+async function contextFor(
+  db: Db,
+  ownerId: UserId,
+  groupId: GroupId,
+  speaker: Speaker,
+  includeRecent: boolean,
+  members: readonly GroupBot[],
+): Promise<ContextLine[]> {
+  const window = await recentBodies(db, groupId, speaker.trigger, includeRecent);
+  const inWindow = new Set([speaker.trigger.id, ...window.map(({ id }) => id)]);
+  const carried = (await unsettledAtLastRun(db, groupId, speaker.botId))
+    .filter((message) => !inWindow.has(message.id))
+    .slice(-CONTEXT_CATCHUP);
+  return summarizeAll(db, ownerId, [...carried, ...window], speaker.botId, members);
+}
 
 async function recentBodies(db: Db, groupId: GroupId, trigger: Message, includeRecent: boolean): Promise<Message[]> {
   const result = await listMessages(db, groupId, {
@@ -367,6 +398,40 @@ const PROJECT_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "project_offer"
   dismissed: "你没要",
 };
 
+// 卡停在哪些状态就不会再变，即上下文行的 settled。还会变的标 false，状态一变字就变，运行器的水位会把整句再拼一次。
+const APPROVAL_SETTLED: Record<Approval["status"], boolean> = {
+  pending: false,
+  approved: true,
+  rejected: true,
+  expired: true,
+};
+
+const HANDOFF_SETTLED: Record<Handoff["status"], boolean> = { pending: false, accepted: true };
+
+// 发出去之前都还会变：批了的等着发或者改了档再发，退回的和没发出去的 Bot 还能改了再交，改完回到待看。
+const DRAFT_SETTLED: Record<Draft["status"], boolean> = {
+  pending: false,
+  approved: false,
+  publishing: false,
+  published: true,
+  returned: false,
+  failed: false,
+};
+
+const PLAN_SETTLED: Record<ContentPlan["status"], boolean> = { pending: false, approved: true, returned: true };
+
+const SKILL_OFFER_SETTLED: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], boolean> = {
+  offered: false,
+  saved: true,
+  dismissed: true,
+};
+
+const PROJECT_OFFER_SETTLED: Record<Extract<MessageBody, { kind: "project_offer" }>["status"], boolean> = {
+  offered: false,
+  started: true,
+  dismissed: true,
+};
+
 /**
  * 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。
  * 卡写成「谁做了什么，现在怎样」一句结论；卡指的行查不到就不写，免得说错状态。
@@ -378,15 +443,19 @@ function summarize(
   members: readonly GroupBot[],
 ): ContextLine | null {
   const body = message.body;
-  // 只有 Bot 正在流的那条还会长，运行器的水位靠它决定下一轮要不要再拼一次。
-  const settled = !(body.kind === "bot" && body.streaming);
-  const line = (from: string, text: string): ContextLine => ({ messageId: message.id, from, text, settled });
+  // settled 说的是这一行的字还会不会变，运行器的水位靠它决定下一轮要不要再拼一次。
+  const line = (from: string, text: string, settled = true): ContextLine => ({
+    messageId: message.id,
+    from,
+    text,
+    settled,
+  });
   const who = (botId: BotId | null) => sender(botId, recipient, members);
   switch (body.kind) {
     case "user":
       return line("你", clip(body.text));
     case "bot":
-      return line(who(body.botId), clip(body.text));
+      return line(who(body.botId), clip(body.text), !body.streaming);
     case "system":
       return line("系统", clip(body.text));
     case "tool_call":
@@ -399,6 +468,7 @@ function summarize(
       return line(
         "系统",
         `${who(approval.botId)}${clip(toolViewText(approval.view))}，${APPROVAL_OUTCOME[approval.status]}`,
+        APPROVAL_SETTLED[approval.status],
       );
     }
     case "handoff": {
@@ -408,6 +478,7 @@ function summarize(
       return line(
         "系统",
         `${who(handoff.fromBotId)}把活交给${to}，下一步是「${clip(handoff.next)}」，${HANDOFF_OUTCOME[handoff.status](to)}`,
+        HANDOFF_SETTLED[handoff.status],
       );
     }
     case "draft": {
@@ -417,6 +488,7 @@ function summarize(
       return line(
         "系统",
         `${who(draft.botId)}起草的${noun}「${titleOf(draft)}」（${PLATFORM_LABEL[draft.platform]}），${DRAFT_OUTCOME[draft.status](cards.publishingAccounts.has(draft.accountId))}`,
+        DRAFT_SETTLED[draft.status],
       );
     }
     case "plan": {
@@ -425,12 +497,21 @@ function summarize(
       return line(
         "系统",
         `${who(plan.botId)}排的内容计划「${plan.title}」共 ${plan.draftIds.length} 篇，${PLAN_OUTCOME[plan.status]}`,
+        PLAN_SETTLED[plan.status],
       );
     }
     case "skill_offer":
-      return line("系统", `问过要不要存成 skill「${body.name}」，${SKILL_OFFER_OUTCOME[body.status]}`);
+      return line(
+        "系统",
+        `问过要不要存成 skill「${body.name}」，${SKILL_OFFER_OUTCOME[body.status]}`,
+        SKILL_OFFER_SETTLED[body.status],
+      );
     case "project_offer":
-      return line("系统", `${who(body.botId)}出的方案卡「${body.name}」，${PROJECT_OFFER_OUTCOME[body.status]}`);
+      return line(
+        "系统",
+        `${who(body.botId)}出的方案卡「${body.name}」，${PROJECT_OFFER_OUTCOME[body.status]}`,
+        PROJECT_OFFER_SETTLED[body.status],
+      );
   }
 }
 

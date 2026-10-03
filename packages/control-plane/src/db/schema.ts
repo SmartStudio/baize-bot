@@ -16,6 +16,7 @@ import type {
   GrantTarget,
   HandoffStatus as HandoffStatusSchema,
   MessageBody,
+  MessageId,
   ModelPurpose as ModelPurposeSchema,
   OAuthPlatform,
   OnFailure as OnFailureSchema,
@@ -396,6 +397,12 @@ export const runs = pgTable(
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
     amount: numeric("amount", { precision: 14, scale: 6 }).notNull().default("0"),
+    // 这次 prompt 的上下文里没定稿的行。下一次给同一个 Bot 派活，滑出窗口的这些行接着送，直到定稿那一轮。
+    // 派活时就写上，但只有 contextConfirmedAt 有值才作数：没送到、执行前被收尾的 run 里那条新定稿的结论
+    // 模型没读到，名单却已经把它划掉了，下一次只能接着用更早那份确认过的名单。
+    unsettledContext: jsonb("unsettled_context").$type<MessageId[]>(),
+    // 这次 run 的 run_done 被正常收下的时刻。null 是还没跑完、没送到、被 abandon，或迁移前的 run。
+    contextConfirmedAt: timestamp("context_confirmed_at", { withTimezone: true }),
   },
   (t) => [
     index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt),

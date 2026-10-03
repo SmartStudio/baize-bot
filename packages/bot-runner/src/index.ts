@@ -277,8 +277,9 @@ export function createRunner(config: RunnerConfig): Runner {
     code: Extract<AgentToControl, { type: "agent_error" }>["code"],
     detail: string,
     groupId: GroupId,
+    runId?: RunId,
   ): void => {
-    config.send({ type: "agent_error", code, detail, groupId });
+    config.send({ type: "agent_error", code, detail, groupId, ...(runId === undefined ? {} : { runId }) });
   };
 
   const initialSkills = config.skills ?? [];
@@ -595,6 +596,7 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     let unsubscribe: (() => void) | null = null;
     let botSession: BotSession | null = null;
+    let prompted = false;
     try {
       bot.active = active;
       if (!(await waitUntilRunning(bot, undefined))) return;
@@ -617,13 +619,20 @@ export function createRunner(config: RunnerConfig): Runner {
         },
       );
       const watermark = readWatermark(session.sessionManager);
-      await session.prompt(
-        composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts),
-      );
+      const text = composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts);
+      prompted = true;
+      await session.prompt(text);
       // prompt 抛错就不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
       recordWatermark(session.sessionManager, message, watermark);
     } catch (error) {
-      fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
+      // 还没调 session.prompt 就失败，这批上下文没进过会话。带上 runId 让控制面把这个 run 收尾，
+      // 后面补的 run_done 落空，控制面不会把这次的名单当送到了。
+      fail(
+        "runner_failed",
+        `run ${message.runId} 跑失败：${String(error)}`,
+        message.groupId,
+        prompted ? undefined : message.runId,
+      );
     } finally {
       unsubscribe?.();
       botSession?.clearBashRun(message.runId);
