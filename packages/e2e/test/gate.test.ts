@@ -246,6 +246,7 @@ describe("端到端：统一闸门和授权", () => {
       expect(BotResponse.parse(await stack.post(`/api/bots/${bot.id}/pause`, {})).bot.runState).toBe("paused");
 
       // 探针用同一台电脑的身份 hello，把在进程里的真代理顶下线。代理进程和运行器都还在，运行器记得小服停着。
+      const configsBefore = stack.configsApplied();
       const probe = await stack.connectComputer();
       await expect.poll(() => probe.frames().some((frame) => frame.type === "config"), POLL).toBe(true);
       expect(BotResponse.parse(await stack.post(`/api/bots/${bot.id}/resume`, {})).bot.runState).toBe("running");
@@ -257,6 +258,10 @@ describe("端到端：统一闸门和授权", () => {
         .toBe(true);
 
       await expect.poll(() => probe.closed()?.code ?? null, POLL).toBe(4000);
+      // 探针被顶掉只说明真代理的 hello 到了，控制面这时还没给它发 config，此刻发消息会得到「电脑不在线」而不建 run。
+      await expect
+        .poll(() => stack.configsApplied(), { ...POLL, message: "真代理重连后收下了新的 config" })
+        .toBeGreaterThan(configsBefore);
       await stack.post(`/api/groups/${groupId}/messages`, { text: "继续之后还能干活吗" });
       await waitForRunEnd(stack, groupId);
       expect(

@@ -73,6 +73,11 @@ export type Stack = {
   /** 模拟电脑突然没了：SIGKILL 电脑代理进程，运行器来不及发任何收尾报文。只在 agentProcess 下可用。 */
   killComputer(): Promise<void>;
   prompts(): readonly PromptMessage[];
+  /**
+   * 进程内的电脑代理累计收下并应用了几份 config。控制面只对「hello 的 config 已经发出」的连接派活，
+   * 此前派的活落成一句「电脑不在线」而不建 run。重连之后等这个数涨过重连前的值，再发消息。
+   */
+  configsApplied(): number;
   connectComputer(): Promise<ComputerProbe>;
   /** 手动跑一轮发布循环，跑完时这一轮抢到的草稿都有了结论（走电脑的除外）。 */
   publishTick(): Promise<void>;
@@ -170,6 +175,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       },
     };
     const prompts: PromptMessage[] = [];
+    let configsApplied = 0;
     let agent: ReturnType<typeof startAgent> | undefined;
     let agentChild: ChildProcess | undefined;
     const stopComputer = async (): Promise<void> => {
@@ -253,8 +259,13 @@ export async function startStack(options: StackOptions): Promise<Stack> {
           ...agentOptions,
           makeRunner: (config) => {
             const runner = createRunner(config);
+            configsApplied += 1;
             return {
               ...runner,
+              applyConfig: async (next) => {
+                await runner.applyConfig(next);
+                configsApplied += 1;
+              },
               prompt: (message) => {
                 prompts.push(message);
                 return runner.prompt(message);
@@ -286,6 +297,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       stopComputer,
       killComputer,
       prompts: () => prompts,
+      configsApplied: () => configsApplied,
       connectComputer: async () => {
         const probe = await connectComputer(agentOptions);
         closers.push(probe.close);
