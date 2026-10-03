@@ -577,6 +577,58 @@ describe("电脑代理连控制面", () => {
     ).toEqual(["第一条连接的第七代", "第二条连接的第一代"]);
   });
 
+  it("两条 config 背靠背到达、前一条的 applyConfig 卡住：后一条等它做完才进运行器，最终生效的是后一条", async () => {
+    // 「旧不盖新」靠全局 inbox 串行：并发处理的话，后一代先做完、前一代卡住的晚做完，运行器会停在旧的那份上。
+    // 改成并发处理时这条会红；到那时要改成按连接重放最新配置，不能只靠做完后核连接来源。
+    let releaseSecond!: () => void;
+    const secondBlocked = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const entered: string[] = [];
+    const tookEffect: string[] = [];
+    const server = startControlPlane();
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      makeRunner: (config) => ({
+        ...runnerOf(config, runnerCalls()),
+        applyConfig: async (next) => {
+          const name = next.bots[0]?.name ?? "";
+          entered.push(name);
+          if (name === "第二代") await secondBlocked;
+          tookEffect.push(name);
+        },
+      }),
+    });
+    const named = (generation: number, name: string) => ({
+      ...configMessage,
+      generation,
+      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+    });
+    const socket = await server.waitForSocket(1);
+
+    try {
+      socket.send(JSON.stringify(named(1, "第一代")));
+      await server.waitForMessage("config_applied", 1, 3000);
+
+      socket.send(JSON.stringify(named(2, "第二代")));
+      socket.send(JSON.stringify(named(3, "第三代")));
+      // ws 按帧的顺序处理：ping 在第三代之后到，代理的 message 回调已经为第三代跑过，pong 才会回来。
+      const ponged = new Promise<void>((resolve) => socket.once("pong", () => resolve()));
+      socket.ping();
+      await ponged;
+      expect(entered, "第二代还卡着，第三代不能先进运行器").toEqual(["第二代"]);
+
+      releaseSecond();
+      await server.waitForMessage("config_applied", 3, 3000);
+      expect(tookEffect, "先后生效，最后停在第三代上").toEqual(["第二代", "第三代"]);
+      expect(
+        server.messages.filter((message) => message.type === "config_applied").map((message) => message.generation),
+      ).toEqual([1, 2, 3]);
+    } finally {
+      releaseSecond();
+    }
+  });
+
   it("已应用新代际后，晚到的旧代际 config 就算不合版本也按代际丢掉，不回 config_rejected", async () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
