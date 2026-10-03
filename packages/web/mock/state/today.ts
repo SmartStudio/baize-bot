@@ -81,6 +81,7 @@ const accountOf = (
     tier,
     login: where.login,
     loginChangedAt: at(-120),
+    lastLoginFailure: null,
     createdAt: at(-120),
   });
 

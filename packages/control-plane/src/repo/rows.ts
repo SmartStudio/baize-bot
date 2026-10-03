@@ -215,6 +215,11 @@ export function toAccount(row: typeof schema.accounts.$inferSelect): Account {
     tier: row.tier,
     login: row.login,
     loginChangedAt: row.loginChangedAt.toISOString(),
+    // 两列成对由 accounts_login_failure_ck 保证。
+    lastLoginFailure:
+      row.loginFailure === null || row.loginFailedAt === null
+        ? null
+        : { reason: row.loginFailure, at: row.loginFailedAt.toISOString() },
     createdAt: row.createdAt.toISOString(),
   });
 }

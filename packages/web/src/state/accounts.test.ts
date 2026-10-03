@@ -27,6 +27,7 @@ const account = (
     tier: "confirm_publish",
     login,
     loginChangedAt: at,
+    lastLoginFailure: null,
     createdAt: at,
   });
 

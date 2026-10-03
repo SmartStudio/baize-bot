@@ -364,7 +364,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 - `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
 - `expired`：`UPDATE ... WHERE login = 'valid'` 记成 `expired`，推 `account_updated` 和一条 `failed` 通知，重发 `config`。已经过期或还没登录的行不命中这条 UPDATE，重复报不再通知。
-- `failed{reason, attempt}`：登录窗口没成，`accounts.login` 不动，所以没有 `account_updated`。先推 `login_failed { accountId, attempt, reason }`，`attempt` 原样带回 `browser_login` 里的那个，页面靠它结算对应那次点击的卡；再推 `failed` 通知给人看，见下面通知一节。
+- `failed{reason, attempt}`：登录窗口没成，`accounts.login` 不动。原因和库时钟时刻写进 `login_failure`、`login_failed_at`（账号上的 `lastLoginFailure`，只留最近一次，表上 CHECK 保证两列成对），推 `account_updated`，页面刷新、换设备或当时没开着都还看得到；`valid` 落库时两列一起清空。这次写和上面两种一样在账号行锁里带连接代次，连接已经被顶掉就不落库也不推 `account_updated`。然后推 `login_failed { accountId, attempt, reason }`，`attempt` 原样带回 `browser_login` 里的那个，页面靠它结算对应那次点击的卡；再推 `failed` 通知给人看，见下面通知一节。这两条只说那一次尝试，不看连接代次。
 
 ### 过期隔离和重登收敛
 

@@ -15,6 +15,7 @@ import type {
   DraftStatus as DraftStatusSchema,
   GrantTarget,
   HandoffStatus as HandoffStatusSchema,
+  LoginFailure as LoginFailureSchema,
   MessageBody,
   MessageId,
   ModelPurpose as ModelPurposeSchema,
@@ -50,6 +51,7 @@ import {
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
 type AccountLogin = z.infer<typeof AccountLoginSchema>;
 type AccountTier = z.infer<typeof AccountTierSchema>;
+type LoginFailure = z.infer<typeof LoginFailureSchema>;
 type ActionKind = z.infer<typeof ActionKindSchema>;
 type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
 type BotRole = z.infer<typeof BotRoleSchema>;
@@ -281,6 +283,9 @@ export const accounts = pgTable(
     // 浏览器登录的会话是第几代：每次报上来登录成功都加一，valid 重登到 valid 也加。
     // 发布认领时抄一份到 drafts.claimed_login_generation，晚到的 login_expired 只在代次还一样时算数。
     loginGeneration: integer("login_generation").notNull().default(1),
+    // 最近一次登录没成：原因和库时钟时刻成对出现，登上时一起清空。
+    loginFailure: text("login_failure").$type<LoginFailure>(),
+    loginFailedAt: timestamp("login_failed_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -291,6 +296,7 @@ export const accounts = pgTable(
       .where(sql`${t.login} = 'none'`),
     check("accounts_xhs_tier_ck", sql`${t.platform} <> 'xiaohongshu' OR ${t.tier} <> 'direct_publish'`),
     check("accounts_handle_ck", sql`(${t.login} = 'none') = (${t.handle} IS NULL)`),
+    check("accounts_login_failure_ck", sql`(${t.loginFailure} IS NULL) = (${t.loginFailedAt} IS NULL)`),
   ],
 );
 

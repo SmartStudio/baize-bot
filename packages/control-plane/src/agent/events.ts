@@ -13,7 +13,7 @@ import {
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { expireLogin } from "../account-expiry.js";
-import { findAccountOnComputer, markLoginValid } from "../repo/accounts.js";
+import { findAccountOnComputer, markLoginFailed, markLoginValid } from "../repo/accounts.js";
 import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
@@ -182,7 +182,7 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
     );
     return;
   }
-  // 两种写都带这条连接：落库那一刻连接已经被顶掉的话一行都不改，新连接刚写下的事实不会被在途的旧帧盖掉。
+  // 三种写都带这条连接：落库那一刻连接已经被顶掉的话一行都不改，新连接刚写下的事实不会被在途的旧帧盖掉。
   const { state } = event;
   switch (state.login) {
     case "valid": {
@@ -196,8 +196,11 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
     case "expired":
       await expireLogin(deps, conn.ownerId, event.accountId, conn);
       return;
-    case "failed":
-      // 登录没成不等于账号过期，accounts.login 不动。页面按 accountId 和 attempt 结算那张卡，通知只是给人看的。
+    case "failed": {
+      // 登录没成不等于账号过期，accounts.login 不动，只在账号上记下最近这一次，页面刷新之后还看得到。
+      // 页面按 accountId 和 attempt 结算那张卡，通知只是给人看的；这两样只说那一次尝试，不看库里的连接代次。
+      const account = await markLoginFailed(deps.db, conn.ownerId, conn, event.accountId, state.reason);
+      if (account !== null) deps.push.push(conn.ownerId, { type: "account_updated", account });
       deps.push.push(conn.ownerId, {
         type: "login_failed",
         accountId: event.accountId,
@@ -210,6 +213,7 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
         groupId: null,
       });
       return;
+    }
   }
 }
 

@@ -25,7 +25,8 @@ function signal() {
 
 type Login = Extract<ServerPush, { type: "account_updated" }>["account"];
 
-const label = (account: Login) => `${account.login}:${account.handle ?? ""}`;
+const label = (account: Login) =>
+  `${account.login}:${account.handle ?? ""}${account.lastLoginFailure === null ? "" : ` 没成:${account.lastLoginFailure.reason}`}`;
 
 /** 收推送直到 until 命中，返回命中之前看到的账号快照和登录失败。 */
 async function collect(
@@ -58,8 +59,18 @@ async function setup(secondAccount = false) {
   const computer = await makeComputer(database.db, user.id);
   const a = AccountId.parse(newId());
   const b = secondAccount ? AccountId.parse(newId()) : a;
+  // 哨兵报在这个号上：登录失败会记到它身上并推它的快照，collect 只收被测账号的快照，哨兵到了不会被当成晚到的写。
+  const beacon = AccountId.parse(newId());
   await database.db.insert(accounts).values([
     { id: a, ownerId: user.id, computerId: computer.computerId, platform: "xiaohongshu", handle: "@A", login: "valid" },
+    {
+      id: beacon,
+      ownerId: user.id,
+      computerId: computer.computerId,
+      platform: "xiaohongshu",
+      handle: "@哨兵",
+      login: "valid",
+    },
     ...(secondAccount
       ? [
           {
@@ -91,7 +102,8 @@ async function setup(secondAccount = false) {
   };
   const account = async (id: AccountId) =>
     AccountListResponse.parse(await (await client.get("/api/accounts")).json()).accounts.find((one) => one.id === id);
-  return { database, gated, server, computer, a, b, client, push, stale, reconnect, close, account };
+  const sentinel = (attempt: string) => failed(beacon, attempt);
+  return { database, gated, server, computer, a, b, client, push, stale, reconnect, close, account, sentinel };
 }
 
 it("高 1：旧连接报甲改名成乙、停在找 known 行那一步，新连接把乙报成过期：旧写先落、新写后落，乙最终过期", async () => {
@@ -110,7 +122,7 @@ it("高 1：旧连接报甲改名成乙、停在找 known 行那一步，新连�
     expect(written, "旧连接的合并先落，乙先被记成 valid，然后才是新连接的过期").toEqual(["valid:@B", "expired:@B"]);
     await expectHello(fresh);
     await fresh.expect("config");
-    fresh.send(failed(s.b, "sentinel"));
+    fresh.send(s.sentinel("sentinel"));
     const late = await collect(
       s.push,
       s.b,
@@ -177,7 +189,7 @@ async function lateReturn(
   );
   await expectHello(fresh);
   await fresh.expect("config");
-  fresh.send(failed(s.a, "sentinel"));
+  fresh.send(s.sentinel("sentinel"));
   const late = await collect(s.push, s.a, (pushed) => pushed.type === "login_failed" && pushed.attempt === "sentinel");
   return { before, late };
 }
@@ -257,14 +269,19 @@ it("中 2：旧连接的登录失败已进 handler，新连接报 valid：失败
     );
     await expectHello(fresh);
     await fresh.expect("config");
-    fresh.send(failed(s.a, "sentinel"));
+    fresh.send(s.sentinel("sentinel"));
     const late = await collect(
       s.push,
       s.a,
       (pushed) => pushed.type === "login_failed" && pushed.attempt === "sentinel",
     );
-    expect(before, "旧连接的失败和它的通知都在新连接的 valid 之前").toEqual(["failure:old-failed", "notify:failed"]);
+    expect(before, "旧连接的失败落在账号上，快照、失败和通知都在新连接的 valid 之前").toEqual([
+      "valid:@A 没成:window_failed",
+      "failure:old-failed",
+      "notify:failed",
+    ]);
     expect(late, "valid 之后只剩哨兵自己").toEqual([]);
+    expect((await s.account(s.a))?.lastLoginFailure, "新连接登上之后旧连接那次失败已清掉").toBeNull();
   } finally {
     gate.release();
     await s.close();
@@ -292,7 +309,7 @@ it("链上一个任务抛错，排在它后面的任务照跑：旧连接那帧�
 
     expect(await s.stale.closed(), "抛错的任务之后轮到新连接的 hello，旧连接被顶掉").toBe(4000);
     await expectHello(fresh);
-    fresh.send(failed(s.a, "after"));
+    fresh.send(s.sentinel("after"));
     const seen = await collect(s.push, s.a, (pushed) => pushed.type === "login_failed" && pushed.attempt === "after");
     expect(seen, "抛错那帧自己的推送没发出去").toEqual([]);
   } finally {

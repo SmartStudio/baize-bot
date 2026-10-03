@@ -1,10 +1,12 @@
 import {
   AccountId,
+  AccountListResponse,
   ComputerTokenResponse,
   LoginAccountResponse,
   LoginAttemptId,
   TodayResponse,
   type ComputerId,
+  type LoginFailure,
   type Notice,
   type ServerPush,
   type UserId,
@@ -109,6 +111,49 @@ describe("login_state failed", () => {
         reason: "remote_refused",
       });
       expect((await nextOf(push, "notify")).notice.kind, "给人看的通知照旧").toBe("failed");
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("登录没成记在账号上：推 account_updated，刷新后 GET 还带着；再没成换成新的，登上之后清掉", async () => {
+    const owner = await makeOwner();
+    const accountId = await validAccount(owner);
+    const { agent, push } = await online(owner);
+    const listed = async () =>
+      AccountListResponse.parse(await (await owner.client.get("/api/accounts")).json()).accounts.find(
+        (account) => account.id === accountId,
+      );
+    const failed = (reason: LoginFailure, attempt: string) =>
+      agent.send({
+        type: "login_state",
+        accountId,
+        state: { login: "failed", reason, attempt: LoginAttemptId.parse(attempt) },
+      });
+
+    try {
+      expect((await listed())?.lastLoginFailure, "还没失败过").toBeNull();
+
+      failed("window_failed", "try-1");
+      const first = (await nextOf(push, "account_updated")).account;
+      expect(first.lastLoginFailure?.reason, "页面不刷新也收到这次的原因").toBe("window_failed");
+      expect(first.login, "登录没成不改登录状态").toBe("valid");
+      expect((await nextOf(push, "login_failed")).attempt, "卡照样按这一次结算").toBe("try-1");
+      expect(await listed(), "刷新页面重新拉账号，痕迹还在").toEqual(first);
+
+      failed("remote_refused", "try-2");
+      const second = (await nextOf(push, "account_updated")).account;
+      expect(second.lastLoginFailure?.reason, "只留最近一次").toBe("remote_refused");
+      expect(Date.parse(second.lastLoginFailure?.at ?? ""), "时刻跟着这一次走").toBeGreaterThanOrEqual(
+        Date.parse(first.lastLoginFailure?.at ?? ""),
+      );
+
+      agent.send({ type: "login_state", accountId, state: { login: "valid", handle: "@小红" } });
+      const loggedIn = (await nextOf(push, "account_updated")).account;
+      expect(loggedIn.lastLoginFailure, "登上了，推出去的快照不再带痕迹").toBeNull();
+      expect((await listed())?.lastLoginFailure, "库里也清掉了").toBeNull();
+      await agent.expect("config");
     } finally {
       agent.close();
       push.close();

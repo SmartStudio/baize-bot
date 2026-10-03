@@ -61,6 +61,35 @@ test("账号页按电脑分组，小红书没有可直接发布", async ({ page,
   );
 });
 
+test("登录没成在账号页留一句，刷新后还在，登上之后消失", async ({ page, request }) => {
+  const openAccounts = async () => {
+    await openSettings(page);
+    await page.getByTestId("settings-nav-accounts").click();
+    return page.getByTestId("accounts-page").getByTestId("account-row").filter({ hasText: "要务机械星球" });
+  };
+  await login(page);
+  let row = await openAccounts();
+  await expect(row.getByTestId("account-login"), "账号页先拉到了").toContainText("登录已过期");
+  await expect(row.getByTestId("account-login-failure"), "还没失败过，不写").toHaveCount(0);
+
+  await reportLogin(request, EXPIRED_ID, { login: "failed", reason: "window_failed" });
+  await expect(row.getByTestId("account-login-failure"), "不刷新，推送到了就写在登录状态下面").toHaveText(
+    /^上次登录没成（今天 \d\d:\d\d）：登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。$/,
+  );
+  await expect(row.getByTestId("account-login"), "登录状态不变").toContainText("登录已过期");
+
+  await page.reload();
+  await expect(page.getByTestId("main-window")).toBeVisible();
+  row = await openAccounts();
+  await expect(row.getByTestId("account-login-failure"), "刷新之后从账号列表里读回来，还在").toContainText(
+    "上次登录没成",
+  );
+
+  await reportLogin(request, EXPIRED_ID, { login: "valid", handle: "要务机械星球" });
+  await expect(row.getByTestId("account-login")).toHaveText("已登录");
+  await expect(row.getByTestId("account-login-failure"), "登上之后不再写").toHaveCount(0);
+});
+
 test("登录卡从未登录到点打开登录窗口，推送登上后变成已登录", async ({ page, request }) => {
   const card = await openLoginCard(page, request);
   await expect(card.getByTestId("login-card-title")).toHaveText("小红书 还没登录");

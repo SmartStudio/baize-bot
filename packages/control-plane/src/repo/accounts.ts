@@ -5,6 +5,7 @@ import {
   type AccountConfig,
   type AccountTier,
   type CreateAccountRequest,
+  type LoginFailure,
   type OAuthPlatform,
   type Platform,
   type UserId,
@@ -255,6 +256,8 @@ export async function markLoginValid(
         login: "valid" as const,
         loginChangedAt: loginChangedAt("valid"),
         loginGeneration: sql`${accounts.loginGeneration} + 1`,
+        loginFailure: null,
+        loginFailedAt: null,
       };
       const [found] = await tx
         .select({ id: accounts.id })
@@ -286,6 +289,34 @@ export async function markLoginValid(
       if (row === undefined) throw new Error("锁住的账号行更新时不见了");
       return { account: toAccount(row), deleted: null };
     });
+  });
+}
+
+/**
+ * 一次登录没成，记在账号上，login 不动。和过期一样在账号行锁里写、只算在报它的那条连接头上：
+ * 锁到手之后这条 UPDATE 才取快照，连接已经被顶掉的话一行都不改，新连接刚登上清掉的痕迹不会被在途的旧帧写回来。
+ */
+export async function markLoginFailed(
+  db: Db,
+  ownerId: UserId,
+  connection: ReportingConnection,
+  accountId: AccountId,
+  reason: LoginFailure,
+): Promise<Account | null> {
+  return withAccountLock(db, accountId, async ({ tx }) => {
+    const [row] = await tx
+      .update(accounts)
+      .set({ loginFailure: reason, loginFailedAt: LOGIN_CLOCK })
+      .where(
+        and(
+          eq(accounts.id, accountId),
+          eq(accounts.ownerId, ownerId),
+          eq(accounts.computerId, connection.computerId),
+          reportedBy(connection),
+        ),
+      )
+      .returning();
+    return row === undefined ? null : toAccount(row);
   });
 }
 

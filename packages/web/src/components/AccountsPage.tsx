@@ -5,6 +5,7 @@ import { oauthStartUrl } from "../api/client.js";
 import {
   COMPUTER_STATUS_CLASS,
   COMPUTER_STATUS_TEXT,
+  LOGIN_FAILURE_TEXT,
   LOGIN_TEXT,
   PLATFORM,
   TIER,
@@ -66,6 +67,12 @@ const AccountRow = ({
             {LOGIN_TEXT[account.login]}
             {account.login === "expired" ? ` · ${timeText(account.loginChangedAt)}` : ""}
           </small>
+          {account.lastLoginFailure === null ? null : (
+            <small className="account-login-failure" data-testid="account-login-failure">
+              上次登录没成（{timeText(account.lastLoginFailure.at)}）：
+              {LOGIN_FAILURE_TEXT[account.lastLoginFailure.reason]}
+            </small>
+          )}
         </span>
         <span className="account-tier" data-testid="account-tier">
           {TIER[account.tier].title}

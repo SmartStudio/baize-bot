@@ -1,4 +1,11 @@
-import { AccountId, ComputerListResponse, LoginAttemptId, type AgentToControl, type ServerPush } from "@baize/shared";
+import {
+  AccountId,
+  AccountListResponse,
+  ComputerListResponse,
+  LoginAttemptId,
+  type AgentToControl,
+  type ServerPush,
+} from "@baize/shared";
 import { expect, it } from "vitest";
 import { accounts } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
@@ -393,7 +400,7 @@ it("已经进入 handler 的旧连接 valid 先落库，新连接排在后面报
   }
 });
 
-/** 登录失败只推不写库，数据库挡不住它：被顶掉的旧连接 inbox 里排着的帧要靠任务开头的判断整条丢掉。 */
+/** 登录失败的推送不看库里的连接代次：被顶掉的旧连接 inbox 里排着的帧要靠任务开头的判断整条丢掉。 */
 it("被新连接顶掉的旧连接，inbox 里排着的登录失败不再推给页面", async () => {
   const database = await createTestDb();
   const gated = gatedDb(database.sql);
@@ -448,6 +455,71 @@ it("被新连接顶掉的旧连接，inbox 里排着的登录失败不再推给�
     fresh?.close();
     push.close();
     await server.close();
+    await database.close();
+  }
+});
+
+/**
+ * 两个控制面共一个库：旧连接在甲上，它报的登录失败停在 handler 里；同一台电脑在乙上握手（轮换了 key）并登上。
+ * 同一个控制面里链会把新 hello 排在旧帧后面，到不了这一步，只有库里的连接代次挡得住旧帧把痕迹写回去。
+ */
+it("两个控制面共库：被另一个控制面上的新连接顶掉之后，旧连接在途的登录失败不落到账号上", async () => {
+  const database = await createTestDb();
+  const gated = gatedDb(database.sql);
+  const first = await startTestServer(gated.db);
+  const second = await startTestServer(database.db);
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const targetId = AccountId.parse(newId());
+  await database.db.insert(accounts).values({
+    id: targetId,
+    ownerId: user.id,
+    computerId: computer.computerId,
+    platform: "xiaohongshu",
+    handle: "@old",
+    login: "expired",
+  });
+  const client = first.client();
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const firstPush = await connectPush(first.server.port, client.cookie ?? "");
+  const secondPush = await connectPush(second.server.port, client.cookie ?? "");
+  const stale = (await helloAgent(first.server.port, computer.computerId, computer.token)).agent;
+  let fresh: AgentClient | null = null;
+  const gate = gated.arm(/select "platform" from "accounts"/);
+
+  try {
+    stale.send({
+      type: "login_state",
+      accountId: targetId,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("stale") },
+    });
+    await gate.reached;
+    fresh = (await helloAgent(second.server.port, computer.computerId, computer.token)).agent;
+    fresh.send({ type: "login_state", accountId: targetId, state: { login: "valid", handle: "@fresh" } });
+    const loggedIn = await nextOf(secondPush, "account_updated", (pushed) => pushed.account.id === targetId);
+    expect(loggedIn.account.login, "新连接先登上").toBe("valid");
+    await fresh.expect("config");
+
+    gate.release();
+    const before: string[] = [];
+    for (;;) {
+      const pushed = await firstPush.next();
+      if (pushed.type === "login_failed") break;
+      if (pushed.type === "account_updated") before.push(pushed.account.lastLoginFailure?.reason ?? "none");
+    }
+    expect(before, "旧连接的失败没落库，甲上没有推带痕迹的账号").toEqual([]);
+    const listed = AccountListResponse.parse(await (await client.get("/api/accounts")).json()).accounts;
+    const account = listed.find((item) => item.id === targetId);
+    expect(account?.login, "账号还是新连接登上的样子").toBe("valid");
+    expect(account?.lastLoginFailure, "旧连接的失败没把痕迹写回登上之后的账号").toBeNull();
+  } finally {
+    gate.release();
+    stale.close();
+    fresh?.close();
+    firstPush.close();
+    secondPush.close();
+    await first.close();
+    await second.close();
     await database.close();
   }
 });

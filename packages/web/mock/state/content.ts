@@ -134,6 +134,7 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
     tier: "confirm_publish",
     login: "none",
     loginChangedAt: stamp,
+    lastLoginFailure: null,
     createdAt: stamp,
   });
   accounts.set(next.id, next);
@@ -159,6 +160,7 @@ export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
           tier: "confirm_publish",
           login: "valid",
           loginChangedAt: stamp,
+          lastLoginFailure: null,
           createdAt: stamp,
         }
       : {
@@ -185,8 +187,8 @@ export const loginAccount = (id: string, attempt: string): Outcome<{ account: Ac
   return { ok: true, value: { account, attempt } };
 };
 
-// 照控制面 agent/events.ts 的 onLoginState：登上记 valid 并换 handle，过期记 expired，
-// 没成推一条 login_failed 再发一条通知、账号不动。失败不带尝试号就算最近一次点击的。
+// 照控制面 agent/events.ts 的 onLoginState：登上记 valid、换 handle、清掉上次没成的痕迹，过期记 expired，
+// 没成 login 不动、账号上记下这一次，推 account_updated 再推 login_failed 和一条通知。失败不带尝试号就算最近一次点击的。
 export const LoginState = z.discriminatedUnion("login", [
   z.object({ login: z.literal("valid"), handle: z.string().min(1).max(100) }).strict(),
   z.object({ login: z.literal("expired") }).strict(),
@@ -211,9 +213,11 @@ export const reportLoginState = (
   if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
   if (state.login === "failed") {
     const attempt = state.attempt ?? loginAttempts.get(id) ?? "try_none";
+    const traced = Account.parse({ ...account, lastLoginFailure: { reason: state.reason, at: now() } });
+    accounts.set(traced.id, traced);
     return {
       ok: true,
-      value: { account: null, notice: LOGIN_FAILURE_NOTICE[state.reason], failed: { attempt, reason: state.reason } },
+      value: { account: traced, notice: LOGIN_FAILURE_NOTICE[state.reason], failed: { attempt, reason: state.reason } },
     };
   }
   if (state.login === "expired" && account.login === "expired")
@@ -223,6 +227,7 @@ export const reportLoginState = (
     handle: state.login === "valid" ? state.handle : account.handle,
     login: state.login,
     loginChangedAt: now(),
+    lastLoginFailure: state.login === "valid" ? null : account.lastLoginFailure,
   });
   accounts.set(next.id, next);
   const notice =

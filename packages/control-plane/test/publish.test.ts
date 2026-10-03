@@ -1060,6 +1060,7 @@ describe("小红书登录过期", () => {
       "draft_updated",
       "account_updated",
       "notify",
+      "account_updated",
       "login_failed",
       "notify",
     ]);
@@ -1110,6 +1111,7 @@ describe("小红书登录过期", () => {
       "account_updated",
       "notify",
       "draft_updated",
+      "account_updated",
       "login_failed",
       "notify",
     ]);
@@ -1200,7 +1202,15 @@ describe("小红书登录过期", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "旧 attempt 只结算旧草稿，不动账号、不推过期通知",
-    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    ).toEqual(["draft_updated", "account_updated", "login_failed", "notify"]);
+    expect(
+      seen[1]?.type === "account_updated" && seen[1].account,
+      "唯一的账号快照是那次登录窗口失败，账号仍是 valid",
+    ).toMatchObject({
+      id: xhs.id,
+      login: "valid",
+      lastLoginFailure: { reason: "window_failed" },
+    });
     expect(seen[0]?.type === "draft_updated" && seen[0].draft).toMatchObject({
       id: spec.draftId,
       status: "failed",
@@ -1209,8 +1219,8 @@ describe("小红书登录过期", () => {
     const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(
       accounts.find((one) => one.id === xhs.id),
-      "认领之后已经重登，账号保持重登后的样子",
-    ).toEqual(relogged);
+      "认领之后已经重登，账号保持重登后的样子，只多了哨兵那次登录窗口失败",
+    ).toEqual({ ...relogged, lastLoginFailure: { reason: "window_failed", at: expect.any(String) } });
   });
 
   it("认领后账号从 valid 直接重登成 valid，旧 attempt 晚到的 login_expired 只记草稿失败，账号仍是 valid", async () => {
@@ -1250,8 +1260,16 @@ describe("小红书登录过期", () => {
     }
     expect(
       seen.map((pushed) => pushed.type),
-      "旧 attempt 只结算旧草稿，新会话不算过期，不推 account_updated 也不推过期通知",
-    ).toEqual(["draft_updated", "login_failed", "notify"]);
+      "旧 attempt 只结算旧草稿，新会话不算过期，不推过期快照也不推过期通知",
+    ).toEqual(["draft_updated", "account_updated", "login_failed", "notify"]);
+    expect(
+      seen[1]?.type === "account_updated" && seen[1].account,
+      "唯一的账号快照是那次登录窗口失败，账号仍是 valid",
+    ).toMatchObject({
+      id: xhs.id,
+      login: "valid",
+      lastLoginFailure: { reason: "window_failed" },
+    });
     const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(accounts.find((one) => one.id === xhs.id)?.login, "valid 重登到 valid 之后账号还是 valid").toBe("valid");
   });
@@ -1292,7 +1310,15 @@ describe("小红书登录过期", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "认领代次为 null 的按迁移基线第 1 代算，重登后已是第 2 代，旧结论不改账号、不推过期通知",
-    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    ).toEqual(["draft_updated", "account_updated", "login_failed", "notify"]);
+    expect(
+      seen[1]?.type === "account_updated" && seen[1].account,
+      "唯一的账号快照是那次登录窗口失败，账号仍是 valid",
+    ).toMatchObject({
+      id: xhs.id,
+      login: "valid",
+      lastLoginFailure: { reason: "window_failed" },
+    });
     const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(accounts.find((one) => one.id === xhs.id)?.login).toBe("valid");
   });
@@ -1339,7 +1365,15 @@ describe("小红书登录过期", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "代次对不上时看认领时刻：登录时刻晚于认领，旧结论不改账号",
-    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    ).toEqual(["draft_updated", "account_updated", "login_failed", "notify"]);
+    expect(
+      seen[1]?.type === "account_updated" && seen[1].account,
+      "唯一的账号快照是那次登录窗口失败，账号仍是 valid",
+    ).toMatchObject({
+      id: xhs.id,
+      login: "valid",
+      lastLoginFailure: { reason: "window_failed" },
+    });
     const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(listed.find((one) => one.id === xhs.id)?.login).toBe("valid");
   });
@@ -1392,7 +1426,15 @@ describe("小红书登录过期", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "登录时刻和认领时刻都出自库时钟，进程时钟慢了也看得出重登在认领之后，旧结论不改账号",
-    ).toEqual(["draft_updated", "login_failed", "notify"]);
+    ).toEqual(["draft_updated", "account_updated", "login_failed", "notify"]);
+    expect(
+      seen[1]?.type === "account_updated" && seen[1].account,
+      "唯一的账号快照是那次登录窗口失败，账号仍是 valid",
+    ).toMatchObject({
+      id: xhs.id,
+      login: "valid",
+      lastLoginFailure: { reason: "window_failed" },
+    });
     const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(listed.find((one) => one.id === xhs.id)?.login).toBe("valid");
   });

@@ -346,10 +346,15 @@ describe("login_state valid 和 expired", () => {
     expect(
       seen.map((pushed) => pushed.type),
       "第二次 expired 什么都不推，下一条就是登录窗口那次失败",
-    ).toEqual(["login_failed", "notify"]);
-    expect(seen[1]?.type === "notify" && seen[1].notice.text).toContain("登录窗口");
+    ).toEqual(["account_updated", "login_failed", "notify"]);
+    const failed = seen[0]?.type === "account_updated" ? seen[0].account : null;
+    expect(failed, "失败只在过期的账号上添一条痕迹，其余照旧").toEqual({
+      ...expired,
+      lastLoginFailure: { reason: "window_failed", at: expect.any(String) },
+    });
+    expect(seen[2]?.type === "notify" && seen[2].notice.text).toContain("登录窗口");
     const [after] = await listed(owner);
-    expect(after, "重复报过期不改过期时刻").toEqual(expired);
+    expect(after, "重复报过期不改过期时刻").toEqual(failed);
   });
 
   it("另一台电脑报这个账号 expired，账号不变", async () => {
@@ -369,9 +374,10 @@ describe("login_state valid 和 expired", () => {
     const seen = await pushesUntil(owner.push, (pushed) => pushed.type === "notify");
     expect(
       seen.map((pushed) => pushed.type),
-      "本机账号那条整条丢掉，没推账号也没推通知",
-    ).toEqual(["login_failed", "notify"]);
-    expect(seen[1]?.type === "notify" && seen[1].notice.text).toContain("登录窗口");
+      "本机账号那条整条丢掉，没推账号也没推通知；后面推的都是远程号那次失败",
+    ).toEqual(["account_updated", "login_failed", "notify"]);
+    expect(seen[0]?.type === "account_updated" && seen[0].account.id).toBe(onRemote);
+    expect(seen[2]?.type === "notify" && seen[2].notice.text).toContain("登录窗口");
     expect((await listed(owner)).find((one) => one.id === onLocal)?.login).toBe("valid");
   });
 
