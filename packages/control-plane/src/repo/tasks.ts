@@ -3,6 +3,7 @@ import { and, asc, eq, exists, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groups, tasks } from "../db/schema.js";
 import { groupHasMembers } from "./live-groups.js";
+import type { Tx } from "./messages.js";
 import { toTask } from "./rows.js";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，从列上取回来。
@@ -63,7 +64,7 @@ export async function findTaskByGroup(db: Db, groupId: string): Promise<TopicTas
  * 已经是当前经手时什么都不做，重复 @ 同一个人不会在经手记录里堆重复的行。
  * handled 是读出来改完写回去，所以整段在事务里按行锁串行：不加锁的话两条并发消息会互相覆盖掉一条经手记录。
  */
-export async function setCurrentBot(db: Db, groupId: string, botId: BotId, at: Date): Promise<TopicTask | null> {
+export async function setCurrentBot(db: Db | Tx, groupId: string, botId: BotId, at: Date): Promise<TopicTask | null> {
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(tasks).where(eq(tasks.groupId, groupId)).limit(1).for("update");
     if (row === undefined) return null;
@@ -91,7 +92,7 @@ export async function setCurrentBot(db: Db, groupId: string, botId: BotId, at: D
 
 /** 清单整份替换。同一份重发两遍结果不变。 */
 export async function replaceChecklist(
-  db: Db,
+  db: Db | Tx,
   groupId: string,
   checklist: readonly ChecklistItem[],
 ): Promise<TopicTask | null> {
@@ -116,7 +117,7 @@ async function findTask(db: Db, ownerId: UserId, taskId: TaskId): Promise<TopicT
 export type Project = { readonly groupId: GroupId; readonly title: string; readonly cadence: string };
 
 /** 项目就是多 Bot 群，单聊不算。派给主助理的 prompt 带这一份，set_cadence 也只认这里面的群。 */
-function projectGroupsOf(db: Db, ownerId: UserId) {
+function projectGroupsOf(db: Db | Tx, ownerId: UserId) {
   return db
     .select({ id: groups.id })
     .from(groups)
@@ -138,7 +139,7 @@ export async function listProjects(db: Db, ownerId: UserId): Promise<Project[]> 
  * 任一不成立更新不到行，返回 null。
  */
 export async function setProjectCadence(
-  db: Db,
+  db: Db | Tx,
   ownerId: UserId,
   assistantId: BotId,
   projectGroupId: GroupId,

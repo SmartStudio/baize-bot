@@ -410,23 +410,14 @@ it("断线时排队的交接不留到下一回合", async () => {
         inputTokens: 0,
         outputTokens: 0,
       });
-      second.send({
-        type: "bot_tool_call",
-        runId: fresh.runId,
-        botId: owner.sales.id,
-        groupId: owner.groupId,
-        callId: "disconnect-handoff-settled",
-        tool: "test.sentinel",
-        view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
-        status: "ok",
-        durationMs: 0,
-      });
+      // 收尾之后这个 run 名下的帧不再落库，屏障用不带 runId 的报错：它排在 run_done 后面，推出来就说明 run_done 做完了。
+      second.send({ type: "agent_error", code: "runner_failed", detail: "屏障", groupId: owner.groupId });
       for (;;) {
         const event = await push.next();
         if (
           event.type === "message" &&
-          event.message.body.kind === "tool_call" &&
-          event.message.body.tool === "test.sentinel"
+          event.message.body.kind === "system" &&
+          event.message.body.text.endsWith("原话是：屏障")
         )
           break;
       }

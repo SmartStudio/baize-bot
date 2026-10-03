@@ -24,7 +24,7 @@ export type CreateHandoffInput = {
 export type CreatedHandoff = { readonly handoff: Handoff; readonly message: Message };
 
 /** 建一份待确认的交接报文和群里那张卡。两者在一个事务里生，所以群里不会出现没有报文的孤儿卡。 */
-export async function createHandoff(db: Db, input: CreateHandoffInput): Promise<CreatedHandoff> {
+export async function createHandoff(db: Db | Tx, input: CreateHandoffInput): Promise<CreatedHandoff> {
   const handoffId = HandoffId.parse(newId());
   return db.transaction(async (tx) => {
     // 卡先落地，handoffs.message_id 是非空外键。
@@ -44,7 +44,7 @@ export async function createHandoff(db: Db, input: CreateHandoffInput): Promise<
  * 归属校验和幂等都靠这条 UPDATE 的 WHERE 本身，不靠先查后写。
  */
 export async function acceptHandoff(
-  db: Db,
+  db: Db | Tx,
   input: {
     readonly handoffId: HandoffId;
     readonly groupId: string;

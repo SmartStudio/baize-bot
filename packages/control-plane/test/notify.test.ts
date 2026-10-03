@@ -154,11 +154,17 @@ function sendRunDone(owner: Owner, job: Job): void {
   });
 }
 
-/** 同一条电脑连接再发一段话当标记，报文按到达顺序处理，run_done 该推的都排在它前面。 */
-function noticesBeforeTextMarker(owner: Owner, job: Job): Promise<Notice[]> {
+/**
+ * 同一条电脑连接再报一条不带 runId 的错当标记，报文按到达顺序处理，run_done 该推的都排在它前面。
+ * 不用 bot_text：run 收尾后它名下的话不再落库。
+ */
+function noticesBeforeErrorMarker(owner: Owner, job: Job): Promise<Notice[]> {
   const marker = `顺序标记 ${randomUUID()}`;
-  sendText(owner, job, marker);
-  return noticesBefore(job.push, (item) => item.type === "message_delta" && item.delta === marker);
+  job.agent.send({ type: "agent_error", code: "runner_failed", detail: marker, groupId: owner.groupId });
+  return noticesBefore(
+    job.push,
+    (item) => item.type === "message" && item.message.body.kind === "system" && item.message.body.text.endsWith(marker),
+  );
 }
 
 async function expectOfflineMessages(owner: Owner, push: PushClient): Promise<void> {
@@ -213,7 +219,7 @@ describe("confirm 和 result", () => {
     try {
       sendText(owner, job, "库存结果已经整理好");
       sendRunDone(owner, job);
-      expect(await noticesBeforeTextMarker(owner, job), "用户就在群里看着，回一句话不该弹通知").toEqual([]);
+      expect(await noticesBeforeErrorMarker(owner, job), "用户就在群里看着，回一句话不该弹通知").toEqual([]);
     } finally {
       job.close();
     }
@@ -225,7 +231,7 @@ describe("confirm 和 result", () => {
     try {
       sendText(owner, job, "工单早报已经整理好");
       sendRunDone(owner, job);
-      const notices = await noticesBeforeTextMarker(owner, job);
+      const notices = await noticesBeforeErrorMarker(owner, job);
       expect(notices).toHaveLength(1);
       expect(notices[0]).toMatchObject({
         kind: "result",
@@ -242,7 +248,7 @@ describe("confirm 和 result", () => {
     const job = await routineJob(owner);
     try {
       sendRunDone(owner, job);
-      expect(await noticesBeforeTextMarker(owner, job)).toEqual([]);
+      expect(await noticesBeforeErrorMarker(owner, job)).toEqual([]);
     } finally {
       job.close();
     }

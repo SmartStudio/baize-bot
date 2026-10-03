@@ -20,20 +20,28 @@ import { findAssistant } from "../repo/bots.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
 import {
-  appendBotDelta,
+  appendBotText,
   appendMessage,
-  appendMessageWithId,
   appendSkillOffer,
   failRunningToolCalls,
   findGroupId,
   listGroupBots,
   replaceMessageBody,
+  settleStreamingText,
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
-import { finishRun, latestOpenRun, openRunsForComputer, runBelongsTo } from "../repo/runs.js";
+import {
+  finishRun,
+  latestOpenRun,
+  lockSettlement,
+  lockSettlementOfRun,
+  openRunsForComputer,
+  runBelongsTo,
+  whileRunOpen,
+} from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
 import {
   chargeRoutineRunOf,
@@ -231,8 +239,22 @@ function clearTextPrefixes(runId: RunId): void {
   resultRuns.delete(runId);
 }
 
+/** 收成定稿的 Bot 文字沿用流式那条推送：空 delta 带 done，客户端照常把它收尾。 */
+function pushSettled(push: PushHub, ownerId: UserId, settled: readonly Message[]): void {
+  for (const message of settled) {
+    push.push(ownerId, {
+      type: "message_delta",
+      messageId: message.id,
+      groupId: message.groupId,
+      delta: "",
+      done: true,
+    });
+  }
+}
+
 /**
- * 替等不到 run_done 的 run 收尾：run 行结束，挂着的审批过期，还在跑的工具行失败，群里说一句 notice，例行记失败。
+ * 替等不到 run_done 的 run 收尾：run 行结束，挂着的审批过期，还在跑的工具行失败，还在流的 Bot 文字收成定稿，
+ * 群里说一句 notice，例行记失败。
  * 幂等靠 finishRun 的 WHERE ended_at IS NULL，已经收过尾的返回 null，什么都不再做。
  */
 export async function abandonRun(
@@ -242,21 +264,27 @@ export async function abandonRun(
   notice: { readonly text: string; readonly reason: string },
 ): Promise<{ readonly routine: RoutineRunRef | null } | null> {
   const result = await deps.db.transaction(async (tx) => {
+    await lockSettlementOfRun(tx, run.runId);
     const usage = await finishRun(tx, run.runId, run.groupId, { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 });
     if (usage === null) return null;
     const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
     const failedTools = run.groupId === null ? [] : await failRunningToolCalls(tx, run.groupId, run.runId);
+    const settled =
+      run.groupId === null || usage.botId === null
+        ? []
+        : await settleStreamingText(tx, run.groupId, usage.botId, run.runId);
     const message =
       run.groupId === null
         ? null
         : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: notice.text });
-    return { expiredApprovals, failedTools, message };
+    return { expiredApprovals, failedTools, settled, message };
   });
   if (result === null) return null;
   clearTextPrefixes(run.runId);
   if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
   for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
   for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
+  pushSettled(deps.push, ownerId, result.settled);
   if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
   const routine = await failRoutineRunOf(
     deps,
@@ -287,21 +315,18 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     textPrefixes.set(event.messageId, { kind: "visible", runId: event.runId });
   }
 
-  const appended = await appendMessageWithId(deps.db, event.messageId, groupId, {
-    kind: "bot",
-    botId: event.botId,
-    text: "",
-    streaming: true,
-  });
+  const text = { messageId: event.messageId, groupId, botId: event.botId };
+  const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    appendBotText(tx, text, delta, event.done),
+  );
+  // run 已经收尾：这条要么从没落过，要么收尾时已经收成定稿，晚到的这段不接上去，也不推。
+  if (appended === null) return;
   if (appended.kind === "taken") {
     console.warn(`电脑 ${conn.computerId} 报的消息编号 ${event.messageId} 已经被别的群占了，整条丢掉`);
     return;
   }
-  // 先推空壳再推 delta，客户端才有一条可以往上追加正文的消息。
-  if (appended.kind === "created") deps.push.push(conn.ownerId, { type: "message", message: appended.message });
-
-  const updated = await appendBotDelta(deps.db, event.messageId, groupId, delta, event.done);
-  if (updated !== null && delta.trim() !== "") resultRuns.add(event.runId);
+  if (appended.created !== null) deps.push.push(conn.ownerId, { type: "message", message: appended.created });
+  if (delta.trim() !== "") resultRuns.add(event.runId);
   deps.push.push(conn.ownerId, {
     type: "message_delta",
     messageId: event.messageId,
@@ -309,7 +334,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     delta,
     done: event.done,
   });
-  if (event.done && updated !== null) await deps.groupTurns.recordBotMessage(groupId, event.runId, updated, "text");
+  if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }
 
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
@@ -328,10 +353,10 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
 
   const key = `${event.runId}:${event.callId}`;
   const known = conn.toolCallMessages.get(key);
-  const message =
-    known === undefined
-      ? await appendMessage(deps.db, groupId, body)
-      : await replaceMessageBody(deps.db, known, groupId, body);
+  // run 收尾时已经把还在跑的工具行改成 failed，晚到的这一帧不能再建一行或把它盖回去。
+  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    known === undefined ? appendMessage(tx, groupId, body) : replaceMessageBody(tx, known, groupId, body),
+  );
   if (message === null) return;
 
   // 同一个 id 推第二次，客户端按 id 覆盖那张卡。
@@ -347,6 +372,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   const amount =
     (event.inputTokens / 1_000_000) * deps.priceInputPerM + (event.outputTokens / 1_000_000) * deps.priceOutputPerM;
   const finished = await deps.db.transaction(async (tx) => {
+    await lockSettlement(tx, groupId, event.botId);
     const usage = await finishRun(tx, event.runId, event.groupId, {
       steps: event.steps,
       inputTokens: event.inputTokens,
@@ -354,12 +380,17 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
       amount,
     });
     if (usage === null) return null;
-    return { usage, failedTools: await failRunningToolCalls(tx, event.groupId, event.runId) };
+    return {
+      usage,
+      failedTools: await failRunningToolCalls(tx, event.groupId, event.runId),
+      settled: await settleStreamingText(tx, event.groupId, event.botId, event.runId),
+    };
   });
   // 重复的 runId 和不认识的 runId 在这里都是 null，不再多记一行也不再多一张花费卡。
   if (finished === null) return;
   const { usage } = finished;
   for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
+  pushSettled(deps.push, conn.ownerId, finished.settled);
 
   const passed = runPassed(event.runId);
   const hasResult = !passed && resultRuns.has(event.runId);
@@ -557,16 +588,20 @@ async function onTaskChecklist(deps: AgentEventDeps, conn: AgentConnection, even
     return;
   }
 
-  const task = await replaceChecklist(deps.db, groupId, event.checklist);
-  if (task === null) return;
-  deps.push.push(conn.ownerId, { type: "task_updated", task });
-
   const botName = members.find((member) => member.id === event.botId)?.name ?? "Bot";
   const done = event.checklist.filter((item) => item.done).length;
-  await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "system",
-    text: `${botName}更新了清单，${done}/${event.checklist.length} 完成`,
+  const written = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
+    const task = await replaceChecklist(tx, groupId, event.checklist);
+    if (task === null) return null;
+    const message = await appendMessage(tx, groupId, {
+      kind: "system",
+      text: `${botName}更新了清单，${done}/${event.checklist.length} 完成`,
+    });
+    return { task, message };
   });
+  if (written === null) return;
+  deps.push.push(conn.ownerId, { type: "task_updated", task: written.task });
+  deps.push.push(conn.ownerId, { type: "message", message: written.message });
 }
 
 /**
@@ -584,13 +619,17 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
     return;
   }
 
-  const said = await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "bot",
-    botId: event.botId,
-    text: event.text,
-    streaming: false,
-    mentions: [event.targetBotId],
-  });
+  const said = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    appendMessage(tx, groupId, {
+      kind: "bot",
+      botId: event.botId,
+      text: event.text,
+      streaming: false,
+      mentions: [event.targetBotId],
+    }),
+  );
+  if (said === null) return;
+  deps.push.push(conn.ownerId, { type: "message", message: said });
   await deps.groupTurns.recordBotMessage(groupId, event.runId, said, "mention");
 }
 
@@ -607,12 +646,22 @@ async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: 
   if (groupId === null) return;
 
   const source = (await routineRunOfRun(deps.db, event.runId)) !== null ? "routine" : "chat";
-  const message = await appendSkillOffer(
-    deps.db,
-    groupId,
-    { kind: "skill_offer", botId: event.botId, name: event.name, steps: event.steps, status: "offered", skillId: null },
-    source,
+  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    appendSkillOffer(
+      tx,
+      groupId,
+      {
+        kind: "skill_offer",
+        botId: event.botId,
+        name: event.name,
+        steps: event.steps,
+        status: "offered",
+        skillId: null,
+      },
+      source,
+    ),
   );
+  if (message === null) return;
   deps.push.push(conn.ownerId, { type: "message", message });
 }
 
@@ -639,25 +688,28 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
   }
 
   if (deps.groupTurns.isBlocked(event.runId)) {
-    if (deps.groupTurns.claimHandoffLimitNotice(event.runId)) {
-      await appendAndPush(deps, conn.ownerId, groupId, {
-        kind: "system",
-        tone: "error",
-        text: HANDOFF_LIMIT_NOTICE,
-      });
-    }
+    const notice = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+      deps.groupTurns.claimHandoffLimitNotice(event.runId)
+        ? appendMessage(tx, groupId, { kind: "system", tone: "error", text: HANDOFF_LIMIT_NOTICE })
+        : Promise.resolve(null),
+    );
+    if (notice !== null) deps.push.push(conn.ownerId, { type: "message", message: notice });
     return;
   }
 
-  const created = await createHandoff(deps.db, {
-    groupId,
-    fromBotId: event.botId,
-    toBotId: event.toBotId,
-    done: event.done,
-    notDone: event.notDone,
-    next: event.next,
-    checklistIndex: event.checklistIndex,
-  });
+  // run 已经收尾：交接卡不落，也不排进下一轮派活。
+  const created = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    createHandoff(tx, {
+      groupId,
+      fromBotId: event.botId,
+      toBotId: event.toBotId,
+      done: event.done,
+      notDone: event.notDone,
+      next: event.next,
+      checklistIndex: event.checklistIndex,
+    }),
+  );
+  if (created === null) return;
 
   // 先推交接再推卡，客户端画那张卡的时候状态已经在手上了。
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: created.handoff });
@@ -689,14 +741,19 @@ async function onSetChief(deps: AgentEventDeps, conn: AgentConnection, event: Se
   if (members.length < 2) return;
   if (event.targetBotId !== null && !members.some((member) => member.id === event.targetBotId)) return;
   const previousChief = await findChiefBotId(deps.db, groupId);
-  if (!(await setChiefBotId(deps.db, groupId, event.targetBotId))) return;
+  const name = members.find((member) => member.id === (event.targetBotId ?? previousChief))?.name ?? "Bot";
+  const notice = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) =>
+    (await setChiefBotId(tx, groupId, event.targetBotId))
+      ? appendMessage(tx, groupId, {
+          kind: "system",
+          text: `${name}${event.targetBotId === null ? "卸任首席" : "成为首席"}`,
+        })
+      : null,
+  );
+  if (notice === null) return;
   const detail = await findGroup(deps.db, conn.ownerId, groupId);
   if (detail !== null) deps.push.push(conn.ownerId, { type: "group_updated", group: detail.group });
-  const name = members.find((member) => member.id === (event.targetBotId ?? previousChief))?.name ?? "Bot";
-  await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "system",
-    text: `${name}${event.targetBotId === null ? "卸任首席" : "成为首席"}`,
-  });
+  deps.push.push(conn.ownerId, { type: "message", message: notice });
 }
 
 /**
@@ -706,7 +763,11 @@ async function onSetChief(deps: AgentEventDeps, conn: AgentConnection, event: Se
 async function onSetCadence(deps: AgentEventDeps, conn: AgentConnection, event: SetCadenceEvent): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
-  const task = await setProjectCadence(deps.db, conn.ownerId, event.botId, event.projectGroupId, event.cadence);
+  const set = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => ({
+    task: await setProjectCadence(tx, conn.ownerId, event.botId, event.projectGroupId, event.cadence),
+  }));
+  if (set === null) return;
+  const { task } = set;
   if (task === null) {
     console.warn(
       `电脑 ${conn.computerId} 报的节奏改动指向 ${event.projectGroupId}，它不是这个用户的项目群或 ${event.botId} 不是主助理，整条丢掉`,
@@ -729,18 +790,21 @@ async function onProjectOffer(deps: AgentEventDeps, conn: AgentConnection, event
     return;
   }
   const { name, goal, team, platforms, cadence, firstStep } = event;
-  await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "project_offer",
-    botId: event.botId,
-    name,
-    goal,
-    team,
-    platforms,
-    cadence,
-    firstStep,
-    status: "offered",
-    groupId: null,
-  });
+  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    appendMessage(tx, groupId, {
+      kind: "project_offer",
+      botId: event.botId,
+      name,
+      goal,
+      team,
+      platforms,
+      cadence,
+      firstStep,
+      status: "offered",
+      groupId: null,
+    }),
+  );
+  if (message !== null) deps.push.push(conn.ownerId, { type: "message", message });
 }
 
 /**
@@ -754,15 +818,20 @@ async function onHandoffAccept(deps: AgentEventDeps, conn: AgentConnection, even
 
   // 同一个时刻既是 accepted_at 也是经手记录里新那一条的 from，卡上和任务页因此对得起来。
   const at = new Date();
-  const accepted = await acceptHandoff(deps.db, { handoffId: event.handoffId, groupId, toBotId: event.botId, at });
+  // 确认和换经手在同一个事务里，跟在 run 还开着的那道检查后面：已经收尾的 run 晚到的确认，不能盖掉用户此后的选择。
+  const result = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
+    const accepted = await acceptHandoff(tx, { handoffId: event.handoffId, groupId, toBotId: event.botId, at });
+    if (accepted === null) return { accepted, task: null };
+    return { accepted, task: await setCurrentBot(tx, groupId, event.botId, at) };
+  });
+  if (result === null) return;
+  const { accepted, task } = result;
   if (accepted === null) {
     console.warn(
       `电脑 ${conn.computerId} 报的确认 ${event.handoffId} 不是群 ${event.groupId} 里等 ${event.botId} 接手的交接，整条丢掉`,
     );
     return;
   }
-
-  const task = await setCurrentBot(deps.db, groupId, event.botId, at);
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: accepted });
   if (task !== null) deps.push.push(conn.ownerId, { type: "task_updated", task });
 }
@@ -806,7 +875,12 @@ async function onPlanPropose(deps: AgentEventDeps, conn: AgentConnection, event:
 async function onDraftEdit(deps: AgentEventDeps, conn: AgentConnection, event: DraftEditEvent): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
-  const draft = await editDraft(deps.db, { ownerId: conn.ownerId, groupId }, event.draftId, event.content);
+  const draft = await editDraft(
+    deps.db,
+    { ownerId: conn.ownerId, groupId, botId: event.botId, runId: event.runId },
+    event.draftId,
+    event.content,
+  );
   if (draft !== null) deps.push.push(conn.ownerId, { type: "draft_updated", draft });
 }
 

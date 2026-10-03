@@ -382,18 +382,13 @@ describe("run_done", () => {
       await job.push.next();
       job.agent.send(done);
 
-      // 再发一条能落地的报文，它先推出来就说明重发那条什么也没做，不靠超时。
-      job.agent.send({
-        type: "bot_text",
-        runId: job.runId,
-        botId: job.botId,
-        groupId: job.groupId,
-        messageId: MessageId.parse(randomUUID()),
-        delta: "收尾",
-        done: true,
-      });
+      // 再报一条不带 runId 的错当标记，它先推出来就说明重发那条什么也没做，不靠超时。
+      // run 收尾后它名下的话不再落库，标记不能用 bot_text。
+      job.agent.send({ type: "agent_error", code: "runner_failed", detail: "收尾", groupId: job.groupId });
       const next = await job.push.next();
-      expect(next.type === "message" ? next.message.body.kind : null).toBe("bot");
+      expect(next.type === "message" && next.message.body.kind === "system" ? next.message.body.text : null).toBe(
+        "电脑那边没干成这件事，跑活的进程出错了。原话是：收尾",
+      );
 
       const rows = await database.sql<{ n: string }[]>`
         SELECT count(*) AS n FROM runs WHERE group_id = ${job.groupId}

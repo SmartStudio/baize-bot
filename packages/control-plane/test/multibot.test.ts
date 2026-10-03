@@ -12,6 +12,7 @@ import {
   type GroupId,
   type Message,
   type RunId,
+  type ServerPush,
   type TopicTask,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -93,6 +94,25 @@ async function makeTeam(): Promise<Team> {
 async function say(team: Team, groupId: GroupId, text: string): Promise<void> {
   const response = await team.client.post(`/api/groups/${groupId}/messages`, { text });
   expect(response.status).toBe(201);
+}
+
+/**
+ * 收尾之后这个 run 名下的帧不再落库，拿它当屏障推不出东西。改用不带 runId 的报文出错：落在 Bot 单聊里推一条 system，
+ * 它排在前面所有帧后面，推出来就说明前面的都做完了。返回屏障之前收到的推送。
+ */
+async function barrier(team: Team, tag: string): Promise<ServerPush[]> {
+  team.agent.send({ type: "agent_error", code: "runner_failed", detail: tag, groupId: team.soloGroupId });
+  const before: ServerPush[] = [];
+  for (;;) {
+    const push = await team.push.next();
+    if (
+      push.type === "message" &&
+      push.message.body.kind === "system" &&
+      push.message.body.text.endsWith(`原话是：${tag}`)
+    )
+      return before;
+    before.push(push);
+  }
 }
 
 async function messagesIn(team: Team, groupId: GroupId): Promise<Message[]> {
@@ -513,26 +533,7 @@ describe("多 Bot 群派活", () => {
         inputTokens: 0,
         outputTokens: 1_000_000,
       });
-      team.agent.send({
-        type: "bot_tool_call",
-        runId: second.runId,
-        botId: team.service.id,
-        groupId: team.group.id,
-        callId: "all-pass-settled",
-        tool: "test.sentinel",
-        view: { kind: "mcp", server: "", tool: "test.sentinel", params: [] },
-        status: "ok",
-        durationMs: 0,
-      });
-      for (;;) {
-        const push = await team.push.next();
-        if (
-          push.type === "message" &&
-          push.message.body.kind === "tool_call" &&
-          push.message.body.tool === "test.sentinel"
-        )
-          break;
-      }
+      await barrier(team, "全轮 pass");
 
       const messages = await messagesIn(team, team.group.id);
       expect(
@@ -585,28 +586,9 @@ describe("多 Bot 群派活", () => {
           done: true,
         });
         finish(team, runId, team.sales.id);
-        team.agent.send({
-          type: "bot_tool_call",
-          runId,
-          botId: team.sales.id,
-          groupId: team.group.id,
-          callId: `pass-settled-${index}`,
-          tool: `test.sentinel.${index}`,
-          view: { kind: "mcp", server: "", tool: `test.sentinel.${index}`, params: [] },
-          status: "ok",
-          durationMs: 0,
-        });
-        for (;;) {
-          const push = await team.push.next();
-          expect(push.type === "message_delta" ? push.messageId : null).not.toBe(messageId);
-          expect(push.type === "message" ? push.message.id : null).not.toBe(messageId);
-          if (
-            push.type === "message" &&
-            push.message.body.kind === "tool_call" &&
-            push.message.body.tool === `test.sentinel.${index}`
-          )
-            break;
-        }
+        const pushed = await barrier(team, `第 ${index + 1} 次`);
+        expect(pushed.filter((push) => push.type === "message_delta" && push.messageId === messageId)).toEqual([]);
+        expect(pushed.filter((push) => push.type === "message" && push.message.id === messageId)).toEqual([]);
       }
       expect((await messagesIn(team, team.group.id)).filter((message) => message.body.kind === "bot")).toHaveLength(0);
     } finally {

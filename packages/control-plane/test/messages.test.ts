@@ -11,9 +11,9 @@ import {
 } from "@baize/shared";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { accounts, contentPlans, drafts, publications } from "../src/db/schema.js";
+import { accounts, contentPlans, drafts, messages, publications } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
-import { appendMessage, appendMessageWithId } from "../src/repo/messages.js";
+import { appendMessage } from "../src/repo/messages.js";
 import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -287,7 +287,9 @@ describe("跨群改消息", () => {
     const victimBot = CreateBotResponse.parse(await (await victimClient.post("/api/bots", {})).json());
     const victimMessageId = MessageId.parse(randomUUID());
     const victimBody = { kind: "bot", botId: victimBot.bot.id, text: "别人群里的正文", streaming: false } as const;
-    await appendMessageWithId(database.db, victimMessageId, victimBot.group.id, victimBody);
+    await database.db
+      .insert(messages)
+      .values({ id: victimMessageId, groupId: victimBot.group.id, body: victimBody, createdAt: new Date() });
 
     const attackerOwner = await makeUser(database.db);
     const computer = await makeComputer(database.db, attackerOwner.id);

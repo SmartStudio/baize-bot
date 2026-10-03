@@ -28,6 +28,7 @@ import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
+import { lockOpenRun } from "./runs.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 
@@ -108,6 +109,7 @@ function draftValues(source: DraftSource, spec: DraftSpec, platform: Platform, c
 
 /**
  * 单条草稿和群里那张卡一起落。draftId 由运行器生成，重复报上来撞主键什么都不做，也不再出一张卡。
+ * 它和 proposePlan、editDraft 都是 run 名下的写，事务开头先过 lockOpenRun，run 收尾之后晚到的报文一行都不写。
  * 可直接发布档的草稿建出来就是已批，其余等人批。
  */
 export async function createDraft(
@@ -116,6 +118,7 @@ export async function createDraft(
   spec: DraftSpec,
 ): Promise<{ draft: Draft; message: Message } | null> {
   return db.transaction(async (tx) => {
+    if (!(await lockOpenRun(tx, source))) return null;
     const account = await admit(tx, source.ownerId, spec);
     if (account === null) return null;
     const now = new Date();
@@ -149,6 +152,7 @@ export async function proposePlan(
   if (new Set(specs.map((spec) => spec.draftId)).size !== specs.length) return null;
   return db
     .transaction(async (tx) => {
+      if (!(await lockOpenRun(tx, source))) return null;
       const now = new Date();
       const [plan] = await tx
         .insert(contentPlans)
@@ -193,11 +197,12 @@ class Rollback extends Error {}
  */
 export async function editDraft(
   db: Db,
-  owner: { readonly ownerId: UserId; readonly groupId: GroupId },
+  owner: DraftSource,
   draftId: DraftId,
   content: DraftContent,
 ): Promise<Draft | null> {
   return db.transaction(async (tx) => {
+    if (!(await lockOpenRun(tx, owner))) return null;
     const [current] = await tx
       .select()
       .from(drafts)

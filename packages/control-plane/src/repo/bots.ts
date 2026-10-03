@@ -9,15 +9,16 @@ import {
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { approvals, bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
+import { approvals, bots, groupMembers, groups, handoffs, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
 import { generateBotName, hueAt, taskNumber } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
+import { lockRunsOfBot } from "./runs.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -225,6 +226,18 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
   return db.transaction(async (tx): Promise<DeleteBotResult> => {
     const deletable = and(eq(bots.id, botId), eq(bots.ownerId, ownerId), eq(bots.role, "member"));
     const owned = tx.select({ id: bots.id }).from(bots).where(deletable);
+    // 锁序和 run 名下的写一致：runs 在前，见 lockRunsOfBot。别人的 Bot 和主助理不拿锁。
+    const [target] = await owned;
+    if (target !== undefined) {
+      await lockRunsOfBot(tx, botId);
+      // 别的 Bot 确认它交出来的活，是先改交接卡、再换任务卡的经手。级联的先后由外键触发器的名字排，
+      // 新建的库里是先置空经手、后删交接卡，两边各拿一半就是死锁。先把要级联删的交接卡锁上，顺序就和确认一致。
+      await tx
+        .select({ id: handoffs.id })
+        .from(handoffs)
+        .where(or(eq(handoffs.fromBotId, botId), eq(handoffs.toBotId, botId)))
+        .for("update");
+    }
     const expired = await tx
       .update(approvals)
       .set({ status: "expired" })

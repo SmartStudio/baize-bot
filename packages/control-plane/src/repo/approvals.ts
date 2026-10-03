@@ -23,6 +23,7 @@ import { approvals, grants, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
+import { lockOpenRun } from "./runs.js";
 import { toApproval, toGrant } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
 
@@ -34,7 +35,7 @@ export const STALE_APPROVAL_MS = 24 * 60 * 60 * 1000;
 export type CreateApprovalInput = {
   readonly runId: RunId;
   readonly botId: BotId;
-  readonly groupId: string;
+  readonly groupId: GroupId;
   readonly callId: string;
   readonly tool: string;
   readonly action: ActionKind;
@@ -48,12 +49,14 @@ export type ApprovalRun = { readonly botId: BotId; readonly groupId: GroupId };
 
 /**
  * 建一条待批审批和群里那张卡。两者在一个事务里生，所以群里不会出现没有审批的孤儿卡。
- * 电脑重发同一条 approval_request 时唯一索引拦下，整条事务回滚，返回 null。
+ * 电脑重发同一条 approval_request 时唯一索引拦下，整条事务回滚，返回 null；run 已经结束也返回 null。
  */
 export async function createApproval(db: Db, input: CreateApprovalInput): Promise<CreatedApproval | null> {
   const approvalId = ApprovalId.parse(newId());
   try {
-    return await db.transaction(async (tx): Promise<CreatedApproval> => {
+    return await db.transaction(async (tx): Promise<CreatedApproval | null> => {
+      // run 收尾时已经把它的审批打成过期，之后晚到的请求再出一张卡就永远等不到结论。
+      if (!(await lockOpenRun(tx, input))) return null;
       // 卡先落地，approvals.message_id 是非空外键。
       const message = await appendMessage(tx, input.groupId, { kind: "approval", approvalId });
 

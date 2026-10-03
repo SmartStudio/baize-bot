@@ -211,6 +211,9 @@ async function sendSpeaker(
     triggerMessageId: speaker.trigger.id,
     routineRunId: options.routineRunId,
   });
+  // Bot 在派活途中被删了，这一轮到此为止。不留 system：
+  // 单聊群已随 Bot 级联删掉，写不进去；多 Bot 群里页面已收到 bot_deleted。
+  if (runId === null) return null;
   const origin: PromptOrigin =
     speaker.handoff !== undefined
       ? botOrigin(members, speaker.handoff.fromBotId)

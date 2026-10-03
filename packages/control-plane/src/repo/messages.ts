@@ -8,9 +8,9 @@ import {
   type RunId,
   type UserId,
 } from "@baize/shared";
-import { and, asc, desc, eq, inArray, lt, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, max, ne, notExists, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, messages } from "../db/schema.js";
+import { bots, groupMembers, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toMessage } from "./rows.js";
 
@@ -92,7 +92,7 @@ type SkillSource = NonNullable<(typeof messages.$inferSelect)["skillOfferSource"
  * 那个函数只收 `MessageBody`，多一个恒为 undefined 的参数会让别的十几个调用点一起背上这个字段。
  */
 export async function appendSkillOffer(
-  db: Db,
+  db: Db | Tx,
   groupId: string,
   body: SkillOfferBody,
   source: SkillSource,
@@ -105,50 +105,25 @@ export async function appendSkillOffer(
   return toMessage(row);
 }
 
-export type AppendResult =
-  | { readonly kind: "created"; readonly message: Message }
-  | { readonly kind: "existing"; readonly message: Message }
+export type BotText = { readonly messageId: MessageId; readonly groupId: string; readonly botId: BotId };
+
+export type BotTextResult =
+  | { readonly kind: "appended"; readonly created: Message | null; readonly message: Message }
   | { readonly kind: "taken" };
 
 /**
- * 用报文里给的编号写一条。同一个编号重复到达时不再插入，回库里已有的那条。
- * bot_text 的第一条 delta 和它的重发走的就是这里，靠主键冲突做幂等。
- * 编号由电脑那头给，撞上的可能是别的群里那条，所以回查按群过滤，不是这个群的回 taken。
- */
-export async function appendMessageWithId(
-  db: Db,
-  messageId: MessageId,
-  groupId: string,
-  body: MessageBody,
-): Promise<AppendResult> {
-  const [inserted] = await db
-    .insert(messages)
-    .values({ id: messageId, groupId, body, createdAt: new Date() })
-    .onConflictDoNothing({ target: messages.id })
-    .returning();
-  if (inserted !== undefined) return { kind: "created", message: toMessage(inserted) };
-
-  const [existing] = await db
-    .select()
-    .from(messages)
-    .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId)))
-    .limit(1);
-  if (existing === undefined) return { kind: "taken" };
-  return { kind: "existing", message: toMessage(existing) };
-}
-
-/**
- * 把一段 delta 接到 Bot 消息正文后面。累加在一条 UPDATE 里做完，
- * 所以不用在内存里攒正文，进程重启也不会把已落库的正文冲掉。
+ * 一段 bot_text 落库。第一段先用报文给的编号建一条空壳，created 就是它，调用方先推它，客户端才有一条可以往上追加的消息。
+ * 同一个编号重复到达时靠主键冲突不再插入；编号由电脑那头给，撞上的可能是别的群里那条，接正文那条 UPDATE 按群过滤，对不上回 taken。
+ * 累加在一条 UPDATE 里做完，不用在内存里攒正文，进程重启也不会把已落库的正文冲掉。
  * 限定 kind = 'bot'：正文没有 text 的（比如 tool_call）做 jsonb_set 会写出 NULL 正文，整行就废了。
  */
-export async function appendBotDelta(
-  db: Db,
-  messageId: MessageId,
-  groupId: string,
-  delta: string,
-  done: boolean,
-): Promise<Message | null> {
+export async function appendBotText(db: Db | Tx, text: BotText, delta: string, done: boolean): Promise<BotTextResult> {
+  const shell: MessageBody = { kind: "bot", botId: text.botId, text: "", streaming: true };
+  const [inserted] = await db
+    .insert(messages)
+    .values({ id: text.messageId, groupId: text.groupId, body: shell, createdAt: new Date() })
+    .onConflictDoNothing({ target: messages.id })
+    .returning();
   const [row] = await db
     .update(messages)
     .set({
@@ -158,13 +133,56 @@ export async function appendBotDelta(
         ${done ? sql`'false'::jsonb` : sql`'true'::jsonb`}
       )`,
     })
-    .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId), sql`${messages.body} ->> 'kind' = 'bot'`))
+    .where(
+      and(
+        eq(messages.id, text.messageId),
+        eq(messages.groupId, text.groupId),
+        sql`${messages.body} ->> 'kind' = 'bot'`,
+      ),
+    )
     .returning();
-  return row === undefined ? null : toMessage(row);
+  if (row === undefined) return { kind: "taken" };
+  return { kind: "appended", created: inserted === undefined ? null : toMessage(inserted), message: toMessage(row) };
+}
+
+/**
+ * run 收尾时把这个 Bot 在这个群里还在流的文字收成定稿。文字行上没有 runId，只能按 Bot 和群找。
+ * 同一个 Bot 在同一个群里可能还有别的 run 开着：本机掉线后派到远程电脑的，或另一台控制面上的。
+ * 那时按 Bot 找会把它还在长的文字一起收掉，所以只要还有别的 run 开着就整条跳过，留给最后一条结束的 run 收。
+ * 那条 run 收尾时按 Bot 找，会把这里留下的一并收掉。重复收尾不会再次命中。
+ * 调用方的事务先拿 (群, Bot) 的收尾锁（lockSettlement），同 Bot 同群的另一条收尾和新 run 都排在它后面，
+ * 这里的「没有别的 open run」在提交前不会被推翻。
+ * 「收它没错」依赖一条文字只属于一个 run：正常运行器每个文字块生成新的 messageId，成立；
+ * 控制面不校验 messageId 是否被另一条 run 复用过，复用时那条文字可能被提前收掉。
+ */
+export async function settleStreamingText(
+  db: Db | Tx,
+  groupId: GroupId,
+  botId: BotId,
+  runId: RunId,
+): Promise<Message[]> {
+  const otherOpenRun = db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.botId, botId), eq(runs.groupId, groupId), ne(runs.id, runId), isNull(runs.endedAt)));
+  const rows = await db
+    .update(messages)
+    .set({ body: sql`jsonb_set(${messages.body}, '{streaming}', 'false'::jsonb)` })
+    .where(
+      and(
+        eq(messages.groupId, groupId),
+        sql`${messages.body} ->> 'kind' = 'bot'`,
+        sql`${messages.body} ->> 'botId' = ${botId}`,
+        sql`${messages.body} ->> 'streaming' = 'true'`,
+        notExists(otherOpenRun),
+      ),
+    )
+    .returning();
+  return rows.map(toMessage);
 }
 
 export async function replaceMessageBody(
-  db: Db,
+  db: Db | Tx,
   messageId: MessageId,
   groupId: string,
   body: MessageBody,
