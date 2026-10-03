@@ -46,10 +46,12 @@ export function toBot(row: typeof schema.bots.$inferSelect): Bot {
   });
 }
 
+/** kind 的唯一出处：solo_bot_id 非空就是单聊，成员数不算，团队群删到只剩一个也还是团队群。 */
 export function toGroup(row: typeof schema.groups.$inferSelect, botIds: readonly string[], taskId: string): Group {
   return Group.parse({
     id: row.id,
     ownerId: row.ownerId,
+    kind: row.soloBotId === null ? "team" : "solo",
     botIds,
     taskId,
     chiefBotId: row.chiefBotId,

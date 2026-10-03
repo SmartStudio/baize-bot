@@ -245,3 +245,39 @@ describe("重拉只回最近一窗历史", () => {
     expect(idsIn(resynced)).toEqual(["msg_one", "msg_two"]);
   });
 });
+
+describe("群入列按 kind，不按成员数和首席猜", () => {
+  const task = {
+    id: "tsk_x",
+    groupId: GROUP_ID,
+    number: "T-0001",
+    title: "x",
+    summary: "",
+    cadence: "",
+    dueAt: null,
+    checklist: [],
+    currentBotId: null,
+    handled: [],
+    status: "active",
+  };
+  const created = (group: Record<string, unknown>) => {
+    const state = reduceGroups({ ...initial, conversations: [] }, {
+      type: "group_created",
+      group: { id: "grp_new", ownerId: "u1", taskId: "tsk_x", createdAt: at, ...group },
+      task,
+    } as unknown as Action);
+    return state.conversations;
+  };
+
+  it("kind 为 solo 入成单聊", () => {
+    expect(created({ kind: "solo", botIds: ["bot_a"], chiefBotId: null })).toEqual([
+      expect.objectContaining({ kind: "solo", groupId: "grp_new", botId: "bot_a" }),
+    ]);
+  });
+
+  it("kind 为 team 入成团队群，哪怕只剩一个成员、没有首席", () => {
+    expect(created({ kind: "team", botIds: ["bot_a"], chiefBotId: null })).toEqual([
+      expect.objectContaining({ kind: "team", groupId: "grp_new", botIds: ["bot_a"], chiefBotId: null }),
+    ]);
+  });
+});

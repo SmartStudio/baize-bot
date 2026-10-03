@@ -51,13 +51,9 @@ const written = (state: ReadyState, groupId: GroupId, message: Message, seq: Seq
   };
 };
 
-// Group 不带 kind。建出来那一刻只有单聊是一个成员、没有首席：手建的群至少两个 Bot，项目群的首席是主助理。
-// 之后删队员删到只剩一个的项目群不再推 group_created，所以这条只在建群推送上用。
 const conversationOf = (group: Group, task: TopicTask): Conversation => {
-  const [only] = group.botIds;
   const base = { groupId: group.id, lastMessage: null, pendingApprovals: 0, pendingHandoffs: 0 };
-  if (only !== undefined && group.botIds.length === 1 && group.chiefBotId === null)
-    return { kind: "solo", botId: only, ...base };
+  if (group.kind === "solo") return { kind: "solo", botId: group.botIds[0], ...base };
   return { kind: "team", botIds: group.botIds, chiefBotId: group.chiefBotId, task, ...base };
 };
 

@@ -13,12 +13,13 @@ import {
   runs,
   tasks,
 } from "../db/schema.js";
+import { groupHasMembers } from "./live-groups.js";
 import type { Tx } from "./messages.js";
 import { toDraft, toMessage, toPlan } from "./rows.js";
 import { draftTitle, draftsByPlanOf, nextItems, nextRoutineAt, pendingItems } from "./today.js";
 import { runTitle, weekStart } from "./usage.js";
 
-/** 项目就是本人的多 Bot 群。别人的群、单 Bot 群、不存在的群都是 null，路由据此回 404。 */
+/** 项目就是本人的多 Bot 群。别人的群、单 Bot 群、成员删光的群、不存在的群都是 null，路由据此回 404。 */
 export function getProject(
   db: Db,
   ownerId: UserId,
@@ -36,7 +37,7 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
   const [group] = await db
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId)))
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), groupHasMembers(db)))
     .limit(1);
   if (group === undefined) return null;
 

@@ -71,7 +71,7 @@ export const settings: { current: Settings } = {
   current: Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" }),
 };
 
-export const isTeamGroup = (group: Group): boolean => group.botIds.length > 1;
+export const isTeamGroup = (group: Group): boolean => group.kind === "team";
 
 const FIRST_TASK_NUMBER = 2481;
 let lastTaskNumber = FIRST_TASK_NUMBER;

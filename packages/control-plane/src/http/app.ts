@@ -92,7 +92,8 @@ import { createBot, deleteBot, ensureAssistant, findBot, listBots, setRunState, 
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
-import { appendMessage, findGroupId, listGroupBots, listMessages } from "../repo/messages.js";
+import { findLiveGroupId } from "../repo/live-groups.js";
+import { appendMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import {
   createRoutine,
@@ -670,10 +671,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
       return c.json(DecideProjectOfferResponse.parse({ message: decided.message, group: null, task: null }));
     }
     // 队员先到，Web 画新群时才认得每个人，不会显示成「Bot」。同一事务建出的队员 createdAt 相同，按群里的顺序推。
-    const owned = new Map((await listBots(db, ownerId)).map(({ bot }) => [bot.id, bot]));
+    // bot_created 带单聊群 id，Web 不用再拉 Bot 列表才认得新队员的单聊。
+    const owned = new Map((await listBots(db, ownerId)).map((entry) => [entry.bot.id, entry]));
     for (const botId of decided.group.botIds) {
-      const bot = owned.get(botId);
-      if (bot !== undefined && botId !== decided.group.chiefBotId) hub.push(ownerId, { type: "bot_updated", bot });
+      const entry = owned.get(botId);
+      if (entry !== undefined && botId !== decided.group.chiefBotId) {
+        hub.push(ownerId, { type: "bot_created", bot: entry.bot, groupId: entry.groupId });
+      }
     }
     hub.push(ownerId, { type: "group_created", group: decided.group, task: decided.task });
     for (const routine of decided.routines) hub.push(ownerId, { type: "routine_updated", routine });
@@ -712,7 +716,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/groups/:id/messages", async (c) => {
     const groupId = GroupId.safeParse(c.req.param("id"));
     if (!groupId.success) return c.json(NOT_FOUND, 404);
-    const owned = await findGroupId(db, c.get("user").id, groupId.data);
+    const owned = await findLiveGroupId(db, c.get("user").id, groupId.data);
     if (owned === null) return c.json(NOT_FOUND, 404);
 
     const query = MessageQuery.safeParse({
@@ -745,7 +749,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.post("/api/groups/:id/messages", async (c) => {
     const groupId = GroupId.safeParse(c.req.param("id"));
     if (!groupId.success) return c.json(NOT_FOUND, 404);
-    const owned = await findGroupId(db, c.get("user").id, groupId.data);
+    const owned = await findLiveGroupId(db, c.get("user").id, groupId.data);
     if (owned === null) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, SendMessageRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);

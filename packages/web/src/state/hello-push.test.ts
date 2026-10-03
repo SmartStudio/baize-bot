@@ -24,6 +24,7 @@ const assistant = Bot.parse({
 const solo = Group.parse({
   id: "group_assistant",
   ownerId: "user_me",
+  kind: "solo",
   botIds: [assistant.id],
   taskId: "task_assistant",
   chiefBotId: null,
@@ -103,9 +104,16 @@ describe("电脑 hello 补建主助理的三条推送", () => {
 
   it("多 Bot 群和有首席的项目群仍按项目入列", () => {
     const page = opened();
-    const team = Group.parse({ ...solo, id: "group_team", botIds: ["bot_a", "bot_b"], taskId: "task_team" });
+    const team = Group.parse({
+      ...solo,
+      kind: "team",
+      id: "group_team",
+      botIds: ["bot_a", "bot_b"],
+      taskId: "task_team",
+    });
     const project = Group.parse({
       ...solo,
+      kind: "team",
       id: "group_project",
       botIds: [assistant.id],
       taskId: "task_project",

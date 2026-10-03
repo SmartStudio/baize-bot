@@ -36,6 +36,7 @@ export const createBot = (input: {
   const group = Group.parse({
     id: groupId,
     ownerId: user.id,
+    kind: "solo",
     botIds: [botId],
     taskId: TaskId.parse(`tsk_new_${suffix}`),
     chiefBotId: null,
@@ -63,6 +64,7 @@ export const createGroup = (input: {
   const group = Group.parse({
     id: groupId,
     ownerId: user.id,
+    kind: "team",
     botIds: input.botIds,
     taskId,
     chiefBotId: input.chiefBotId ?? null,
@@ -107,7 +109,7 @@ export const mentionsIn = (groupId: string, text: string): BotId[] => {
 export const responderOf = (groupId: string, mentions: BotId[]): BotId | null => {
   const group = groups.get(groupId);
   if (group === undefined) return null;
-  if (group.botIds.length === 1) return group.botIds[0] ?? null;
+  if (group.kind === "solo") return group.botIds[0];
   return mentions[0] ?? tasks.get(group.taskId)?.currentBotId ?? null;
 };
 

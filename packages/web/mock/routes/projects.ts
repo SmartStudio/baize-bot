@@ -1,5 +1,5 @@
-import { DecideProjectOfferRequest } from "@baize/shared";
-import { findMessage, startProject, writeMessageBody } from "../state.js";
+import { DecideProjectOfferRequest, GroupId } from "@baize/shared";
+import { findMessage, groupIdByBotId, startProject, writeMessageBody } from "../state.js";
 import { readBody, send, type Route } from "./http.js";
 
 export const projectRoutes: Route = async ({ req, res, path, method, push }) => {
@@ -29,7 +29,11 @@ export const projectRoutes: Route = async ({ req, res, path, method, push }) => 
     send(res, 200, { message: started.message, group: started.group, task: started.task });
   else {
     push({ type: "message", message: started.message });
-    for (const bot of started.members) push({ type: "bot_updated", bot });
+    for (const bot of started.members) {
+      const groupId = groupIdByBotId.get(bot.id);
+      if (groupId === undefined) throw new Error(`mock 新队员 ${bot.id} 没有单聊群`);
+      push({ type: "bot_created", bot, groupId: GroupId.parse(groupId) });
+    }
     push({ type: "group_created", group: started.group, task: started.task });
     send(res, 200, { message: started.message, group: started.group, task: started.task });
   }

@@ -441,10 +441,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         if (group === null || task === null) return undefined;
         // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页，所以拿回包先入列。
         put({ type: "group_created", group, task });
-        // 控制面给每个新队员都建了单聊，推送里的 bot_updated 却不带单聊的群 id，只能从 Bot 列表补，团队页才有「单聊」。
-        for (const item of (await api.bots()).items) {
-          if (group.botIds.includes(item.bot.id)) put({ type: "bot_created", bot: item.bot, groupId: item.groupId });
-        }
         return group.id;
       }),
       createTool: signedIn(async ({ api, put }, draft: CreateToolRequest) => {

@@ -332,6 +332,7 @@ describe("主助理", () => {
         { type: "message", message: greeting },
       ]);
       expect(detail.bots.map((bot) => bot.role)).toEqual(["assistant"]);
+      expect(detail.group.kind, "补建的主助理群是单聊").toBe("solo");
     } finally {
       first.agent.close();
     }

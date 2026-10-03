@@ -188,7 +188,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
 
 export type GroupDetail = { readonly group: Group; readonly task: TopicTask; readonly bots: Bot[] };
 
-/** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。单 Bot 群也照常返回。 */
+/** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。单 Bot 群也照常返回，成员删光的团队群当作不存在。 */
 export async function findGroup(db: Db, ownerId: UserId, groupId: GroupId): Promise<GroupDetail | null> {
   const [row] = await db
     .select({ group: groups, task: tasks })
@@ -205,6 +205,7 @@ export async function findGroup(db: Db, ownerId: UserId, groupId: GroupId): Prom
     .where(eq(groupMembers.groupId, row.group.id))
     .orderBy(asc(groupMembers.position));
   const members = memberRows.map((member) => toBot(member.bot));
+  if (members.length === 0) return null;
 
   return {
     group: toGroup(

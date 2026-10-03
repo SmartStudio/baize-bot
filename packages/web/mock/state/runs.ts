@@ -244,7 +244,7 @@ export const settleUnseenHandoff = (): Handoff | null => {
 const playHandoff = async (groupId: string, botId: BotId, push: (event: ServerPush) => void): Promise<void> => {
   const run = currentGeneration();
   const group = groups.get(groupId);
-  if (group === undefined || group.botIds.length === 1 || botId !== HANDOFF_SCRIPT.fromBotId) return;
+  if (group === undefined || group.kind === "solo" || botId !== HANDOFF_SCRIPT.fromBotId) return;
   const toBotId = group.botIds.find((id) => id === HANDOFF_SCRIPT.toBotId);
   if (toBotId === undefined) return;
   // 演一次就够。再 @ 一次小服不该又长出一张卡，不然角标是几全看用例发过几条消息。

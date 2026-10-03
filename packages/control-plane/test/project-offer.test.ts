@@ -241,6 +241,7 @@ describe("方案卡", () => {
       expect(repushed.message, "卡的状态住在正文里，点完要重推那条卡").toEqual(started.message);
       const created = await nextOfType(s.push, "group_created");
       expect(created.group).toEqual(started.group);
+      expect(started.group.kind, "项目群是团队群").toBe("team");
 
       const config = await s.agent.expect("config");
       const members = config.bots.filter((bot) => OFFER.team.some((member) => member.name === bot.name));
@@ -302,24 +303,30 @@ describe("方案卡", () => {
     }
   });
 
-  it("开始后每个新队员都先推一条 bot_updated，再推新群", async () => {
+  it("开始后每个新队员都先推一条带单聊群 id 的 bot_created，再推新群", async () => {
     const s = await session();
     try {
       const card = await offerCard(s);
       const { group } = await decide(s.me.client, card.id, { decision: "start" });
       if (group === null) throw new Error("开始了却没回项目群");
 
-      const updated: { name: string; tag: string; description: string; role: string }[] = [];
+      const created: { name: string; tag: string; description: string; role: string; groupId: string }[] = [];
       for (;;) {
         const item = await s.push.next();
-        if (item.type === "group_created") break;
-        if (item.type === "bot_updated") {
+        if (item.type === "group_created") {
+          expect(item.group.kind, "项目群是团队群").toBe("team");
+          break;
+        }
+        expect(item.type, "新队员不再推 bot_updated，Web 靠 bot_created 认单聊").not.toBe("bot_updated");
+        if (item.type === "bot_created") {
           const { name, tag, description, role } = item.bot;
-          updated.push({ name, tag, description, role });
+          created.push({ name, tag, description, role, groupId: item.groupId });
         }
       }
-      expect(updated, "Web 拿到新群时已经认识每个队员，不会显示成「Bot」").toEqual(
-        OFFER.team.map((member) => ({ ...member, role: "member" })),
+      const listed = BotListResponse.parse(await (await s.me.client.get("/api/bots")).json());
+      const soloGroupOf = new Map(listed.items.map((entry) => [entry.bot.name, entry.groupId]));
+      expect(created, "Web 拿到新群时已经认识每个队员，也知道它的单聊群").toEqual(
+        OFFER.team.map((member) => ({ ...member, role: "member", groupId: soloGroupOf.get(member.name) })),
       );
     } finally {
       s.close();

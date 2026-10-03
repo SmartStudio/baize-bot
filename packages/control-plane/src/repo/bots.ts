@@ -30,7 +30,7 @@ export type UpdateBotInput = CreateBotInput & { readonly notify?: boolean | unde
 
 export type BotListEntry = {
   readonly bot: Bot;
-  readonly groupId: string;
+  readonly groupId: GroupId;
   readonly lastMessage: Message | null;
   readonly pendingApprovals: number;
   readonly pendingHandoffs: number;
@@ -162,7 +162,7 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
   const handedOff = await pendingHandoffCounts(db, groupIds);
   return rows.map((row) => ({
     bot: toBot(row.bot),
-    groupId: row.groupId,
+    groupId: GroupId.parse(row.groupId),
     lastMessage: lastMessages.get(row.groupId) ?? null,
     pendingApprovals: pending.get(row.groupId) ?? 0,
     pendingHandoffs: handedOff.get(row.groupId) ?? 0,

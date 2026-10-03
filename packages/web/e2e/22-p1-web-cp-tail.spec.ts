@@ -84,6 +84,29 @@ test("方案卡点开始后，新项目用回包里的群和任务卡，不另�
   ).toEqual([]);
 });
 
+test("方案卡点开始后，新队员的单聊靠推送里的群 id 认出来，不再拉 Bot 列表", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("new-project").click();
+  await page.getByTestId("new-project-input").fill("推广白泽的开源仓库，年底 1000 星");
+  await page.getByTestId("new-project-submit").click();
+  const card = page.getByTestId("message-list").getByTestId("project-offer");
+  await expect(card).toHaveAttribute("data-status", "offered");
+
+  const seen = apiRequests(page);
+  await card.getByTestId("project-offer-start").click();
+  await expect(page.getByTestId("project-page")).toBeVisible();
+  await page.getByTestId("team-nav").click();
+
+  for (const name of ["小内", "小社"]) {
+    const botCard = page.locator(`[data-testid=team-bot][data-bot-name="${name}"]`);
+    await expect(botCard.getByTestId("team-bot-chat"), `${name} 的单聊入口随推送出现`).toBeVisible();
+  }
+  expect(
+    seen.filter((line) => line === "GET /api/bots"),
+    "开始之后不再拉 Bot 列表",
+  ).toEqual([]);
+});
+
 test("设置的账号页点接入 GitHub，授权回来首页提示接好了，地址栏的查询串清掉，刷新不再提示", async ({ page }) => {
   await login(page);
   await openSettings(page);

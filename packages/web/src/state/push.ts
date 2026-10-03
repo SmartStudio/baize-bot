@@ -56,6 +56,7 @@ export const createPushHandlers = ({
       });
       if (push.done && inAssistantChat(push.groupId)) bumpToday();
     },
+    bot_created: (push) => dispatch({ type: "bot_created", bot: push.bot, groupId: push.groupId }),
     bot_updated: (push) => dispatch({ type: "bot_updated", bot: push.bot }),
     bot_deleted: (push) => dispatch({ type: "bot_removed", botId: push.botId }),
     group_created: (push) => {

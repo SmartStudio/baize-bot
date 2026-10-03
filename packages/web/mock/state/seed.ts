@@ -219,6 +219,7 @@ export const restoreAssistant = () => {
   const group = Group.parse({
     id: "grp_assistant",
     ownerId: user.id,
+    kind: "solo",
     botIds: [bot.id],
     taskId: "tsk_assistant",
     chiefBotId: null,
@@ -302,6 +303,7 @@ export const reseed = (): void => {
       Group.parse({
         id: groupId,
         ownerId: user.id,
+        kind: "solo",
         botIds: [botId],
         taskId: `tsk_${seed.key}`,
         chiefBotId: null,
@@ -320,6 +322,7 @@ export const reseed = (): void => {
     Group.parse({
       id: TEAM_GROUP_ID,
       ownerId: user.id,
+      kind: "team",
       botIds: TEAM_BOT_IDS,
       taskId: TEAM_TASK_ID,
       chiefBotId: null,

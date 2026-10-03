@@ -216,6 +216,8 @@ describe("建群", () => {
       expect(pushed.type).toBe("group_created");
       expect(pushed.type === "group_created" ? pushed.group.id : null).toBe(created.group.id);
       expect(pushed.type === "group_created" ? pushed.task.number : null).toBe(created.task.number);
+      expect(pushed.type === "group_created" ? pushed.group.kind : null, "手建的多 Bot 群是 team").toBe("team");
+      expect(created.group.kind).toBe("team");
     } finally {
       push.close();
     }
@@ -236,6 +238,48 @@ describe("群列表", () => {
       "单 Bot 群在 /api/bots 里，不在这里",
     ).toEqual([created.group.id]);
     expect(list.items[0]?.task.title).toBe("定价");
+    expect(list.items.map((item) => item.group.kind)).toEqual(["team"]);
+  });
+
+  it("单 Bot 群的 kind 是 solo，即使多 Bot 群删到只剩一个成员也仍是 team", async () => {
+    const client = await loggedInClient();
+    const sales = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小销" })).json());
+    const buyer = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小采" })).json());
+    expect(sales.group.kind, "POST /api/bots 回的单聊群").toBe("solo");
+    expect(sales.group.chiefBotId).toBeNull();
+
+    const team = await openGroup(client, { title: "定价", botIds: [sales.bot.id, buyer.bot.id] });
+    const solo = GroupResponse.parse(await (await client.get(`/api/groups/${sales.group.id}`)).json());
+    expect(solo.group.kind, "GET /api/groups/:id 读单聊群").toBe("solo");
+    const detail = GroupResponse.parse(await (await client.get(`/api/groups/${team.group.id}`)).json());
+    expect(detail.group.kind).toBe("team");
+
+    expect((await client.delete(`/api/bots/${buyer.bot.id}`)).status).toBe(204);
+    const shrunk = GroupResponse.parse(await (await client.get(`/api/groups/${team.group.id}`)).json());
+    expect(shrunk.group.botIds, "删掉小采后只剩一个成员").toEqual([sales.bot.id]);
+    expect(shrunk.group.kind, "kind 看出身不看成员数，Web 不会把它当单聊").toBe("team");
+  });
+
+  it("团队群成员删光后对外当作不存在：详情、消息、任务卡都是 404，列表里也没有", async () => {
+    const client = await loggedInClient();
+    const sales = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小销" })).json());
+    const buyer = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小采" })).json());
+    const team = await openGroup(client, { title: "定价", botIds: [sales.bot.id, buyer.bot.id] });
+    const path = `/api/groups/${team.group.id}`;
+
+    expect((await client.delete(`/api/bots/${buyer.bot.id}`)).status).toBe(204);
+    expect((await client.get(path)).status, "还剩一个成员，群还在").toBe(200);
+    expect((await client.delete(`/api/bots/${sales.bot.id}`)).status).toBe(204);
+
+    expect((await client.get(path)).status, "成员数为 0：详情不再 500").toBe(404);
+    expect((await client.get(`${path}/messages`)).status).toBe(404);
+    expect((await client.post(`${path}/messages`, { text: "还有人吗" })).status, "空群不收消息，也就不会派活").toBe(
+      404,
+    );
+    expect((await client.patch(`/api/tasks/${team.task.id}`, { title: "改名" })).status).toBe(404);
+    expect((await client.get(`/api/projects/${team.group.id}`)).status).toBe(404);
+    const list = GroupListResponse.parse(await (await client.get("/api/groups")).json());
+    expect(list.items.map((item) => item.group.id)).not.toContain(team.group.id);
   });
 
   it("带上最近一条消息和待批审批数", async () => {

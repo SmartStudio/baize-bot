@@ -2,6 +2,7 @@ import { GroupId, type BotId, type ChecklistItem, type TaskId, type TopicTask, t
 import { and, asc, eq, exists, inArray, isNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groups, tasks } from "../db/schema.js";
+import { groupHasMembers } from "./live-groups.js";
 import { toTask } from "./rows.js";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，从列上取回来。
@@ -16,6 +17,13 @@ export type UpdateTaskInput = {
   readonly status?: TaskStatus | undefined;
   readonly cadence?: string | undefined;
 };
+
+// 成员删光的团队群当作不存在，它的任务卡也一样查不到、改不了。
+const ownedLiveGroups = (db: Db, ownerId: UserId) =>
+  db
+    .select({ id: groups.id })
+    .from(groups)
+    .where(and(eq(groups.ownerId, ownerId), groupHasMembers(db)));
 
 /** 按归属人过滤。别人的任务在这里更新不到，路由层因此 404。 */
 export async function updateTask(
@@ -35,7 +43,7 @@ export async function updateTask(
   if (Object.keys(patch).length === 0) return findTask(db, ownerId, taskId);
 
   // drizzle 的 update 不能 join，归属只能靠这个子查询过滤。
-  const ownedGroups = db.select({ id: groups.id }).from(groups).where(eq(groups.ownerId, ownerId));
+  const ownedGroups = ownedLiveGroups(db, ownerId);
   const [row] = await db
     .update(tasks)
     .set(patch)
@@ -96,7 +104,7 @@ export async function replaceChecklist(
 }
 
 async function findTask(db: Db, ownerId: UserId, taskId: TaskId): Promise<TopicTask | null> {
-  const ownedGroups = db.select({ id: groups.id }).from(groups).where(eq(groups.ownerId, ownerId));
+  const ownedGroups = ownedLiveGroups(db, ownerId);
   const [row] = await db
     .select()
     .from(tasks)
