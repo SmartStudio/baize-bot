@@ -282,6 +282,7 @@ export const MainWindow = () => {
           onLoadGrants={actions.loadGrants}
           onRevokeGrant={actions.deleteGrant}
           onLoadAccounts={actions.loadAccounts}
+          onLoadComputers={actions.loadComputers}
           onChangeTier={actions.updateAccountTier}
           onChange={actions.updateSettings}
           onLogout={() => void actions.logout()}

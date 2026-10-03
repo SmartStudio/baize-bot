@@ -8,7 +8,9 @@ import {
   GrantTarget,
   LoginAttemptId,
   MessageBody,
+  MessageId,
   Notice,
+  Timestamp,
   ServerPush,
   RunId,
 } from "@baize/shared";
@@ -48,7 +50,19 @@ const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
   .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
   .strict();
-const TestMessageRequest = z.object({ groupId: GroupId, text: z.string().min(1), botId: BotId.optional() }).strict();
+const TestMessageRequest = z
+  .object({
+    groupId: GroupId,
+    text: z.string().min(1),
+    botId: BotId.optional(),
+    createdAt: Timestamp.optional(),
+    id: MessageId.optional(),
+    silent: z.boolean().optional(),
+  })
+  .strict();
+const TestDeltaRequest = z
+  .object({ groupId: GroupId, messageId: MessageId, delta: z.string().min(1), done: z.boolean() })
+  .strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
@@ -167,10 +181,23 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     const parsed = TestMessageRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "消息参数不对" });
     else {
-      const { groupId, text, botId } = parsed.data;
+      const { groupId, text, botId, createdAt, id, silent } = parsed.data;
       const body: MessageBody =
         botId === undefined ? { kind: "user", text } : { kind: "bot", botId, text, streaming: false };
-      push({ type: "message", message: appendMessage(groupId, body) });
+      const message = appendMessage(groupId, body, { createdAt, id });
+      // silent 只落 mock 状态不推送，这条消息页面只能从重拉的历史里读到。
+      if (silent !== true) push({ type: "message", message });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  // 只推 delta，不落 mock 状态，用来造「没收到空壳就先来了 delta」。
+  if (method === "POST" && path === "/api/test/message-delta") {
+    const parsed = TestDeltaRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "delta 参数不对" });
+    else {
+      push({ type: "message_delta", ...parsed.data });
       send(res, 204);
     }
     return true;

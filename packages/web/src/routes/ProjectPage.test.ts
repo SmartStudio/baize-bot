@@ -58,6 +58,21 @@ describe("latestTurnOf", () => {
     expect(texts(turn)).toEqual(["开干"]);
   });
 
+  it("同一毫秒的两条回复保持服务端给的次序，id 顺序和它相反也不翻", () => {
+    const said = user("开干", 1);
+    const tied = (id: string, text: string) =>
+      Message.parse({
+        id,
+        groupId: "group-1",
+        body: { kind: "bot", botId: "bot-a", text, streaming: false },
+        createdAt: at(2),
+      });
+    const first = tied("ffffffff-ffff-4fff-bfff-ffffffffffff", "服务端排第一");
+    const second = tied("00000000-0000-4000-8000-000000000000", "服务端排第二");
+    const { turn } = latestTurnOf({ said, replies: [first, second] }, 0, []);
+    expect(texts(turn)).toEqual(["开干", "服务端排第一", "服务端排第二"]);
+  });
+
   it("你一句都没说过：没有最近一轮，更早是零轮", () => {
     expect(latestTurnOf(null, 0, [bot("我先读资料", 1), cost(2)])).toEqual({ turn: [], older: 0 });
   });

@@ -16,7 +16,6 @@ import {
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
-  DecideProjectOfferRequest as DecideProjectOfferRequestSchema,
   DecideProjectOfferResponse,
   DecideSkillOfferResponse,
   GroupListResponse,
@@ -52,6 +51,7 @@ import {
   type CreateToolRequest,
   type CreateSkillRequest,
   type DecideApprovalRequest,
+  type DecideProjectOfferRequest,
   type DecideSkillOfferRequest,
   type GroupId,
   type GrantId,
@@ -69,9 +69,6 @@ import {
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
 } from "@baize/shared";
-
-// shared 只导出了这份请求的 schema，没有同名类型。
-export type DecideProjectOfferRequest = z.infer<typeof DecideProjectOfferRequestSchema>;
 
 // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它当链接。
 export const oauthStartUrl = (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`;

@@ -152,6 +152,7 @@
 
 .row-card > .computer-status {
   flex-direction: row;
+  gap: var(--space-3);
   align-items: center;
   color: var(--fg-2);
   font: var(--type-caption);

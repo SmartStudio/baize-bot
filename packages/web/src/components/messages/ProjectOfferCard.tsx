@@ -1,7 +1,14 @@
 import { useRef, useState } from "react";
 import { ArrowRight, Play, ShieldCheck, Sparkles } from "lucide-react";
-import type { Account, AccountId, GroupId, MessageBody, MessageId, ProjectOfferPlatform } from "@baize/shared";
-import type { DecideProjectOfferRequest } from "../../api/client.js";
+import type {
+  Account,
+  AccountId,
+  DecideProjectOfferRequest,
+  GroupId,
+  MessageBody,
+  MessageId,
+  ProjectOfferPlatform,
+} from "@baize/shared";
 import { PLATFORM } from "./content.js";
 
 export type ProjectOfferActions = {

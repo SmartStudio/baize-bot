@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { AtSign, Cpu, Download, Gauge, KeyRound, Plug, Settings as SettingsIcon, X } from "lucide-react";
 import {
-  ComputerListResponse,
   Settings,
   type Account,
   type AccountId,
@@ -59,6 +58,7 @@ type Props = {
   onLoadGrants: () => Promise<void>;
   onRevokeGrant: (id: GrantId) => Promise<void>;
   onLoadAccounts: () => Promise<void>;
+  onLoadComputers: () => Promise<void>;
   onChangeTier: (id: AccountId, tier: AccountTier) => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
@@ -234,51 +234,44 @@ const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
   remote: "远程",
 };
 
-const ComputerPage = () => {
-  const [computers, setComputers] = useState<Computer[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+type ComputerLoad = { status: "loading" | "ready" } | { status: "failed"; message: string };
+
+// 列表读的是 store 里那张表，computer_updated 推送写的也是它，别处上下线这里跟着变。进页再拉一次补断线期间错过的。
+const ComputerPage = ({ computers, onLoad }: { computers: Record<string, Computer>; onLoad: () => Promise<void> }) => {
+  const [load, setLoad] = useState<ComputerLoad>({ status: "loading" });
 
   useEffect(() => {
     let active = true;
-
-    void fetch("/api/computers", { credentials: "same-origin" })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`请求失败（${response.status}）`);
-        return ComputerListResponse.parse(await response.json());
-      })
-      .then((data) => {
-        if (active) setComputers(data.computers);
-      })
-      .catch((cause: unknown) => {
-        if (active) setError(cause instanceof Error ? cause.message : "加载电脑失败，请重试");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-
+    onLoad().then(
+      () => active && setLoad({ status: "ready" }),
+      (cause: unknown) =>
+        active &&
+        setLoad({ status: "failed", message: cause instanceof Error ? cause.message : "加载电脑失败，请重试" }),
+    );
     return () => {
       active = false;
     };
-  }, []);
+  }, [onLoad]);
 
-  if (loading)
+  const rows = Object.values(computers);
+  if (load.status === "failed" && rows.length === 0) {
+    return (
+      <p className="later" data-testid="computer-error" role="alert">
+        电脑列表加载失败：{load.message}
+      </p>
+    );
+  }
+  if (load.status === "loading" && rows.length === 0) {
     return (
       <p className="later" data-testid="computer-loading">
         加载中…
-      </p>
-    );
-  if (error !== null) {
-    return (
-      <p className="later" data-testid="computer-error" role="alert">
-        电脑列表加载失败：{error}
       </p>
     );
   }
 
   return (
     <div className="computers-page" data-testid="computer-list">
-      {computers?.map((computer) => (
+      {rows.map((computer) => (
         <div
           className="row-card computer-row"
           data-testid="computer-row"
@@ -395,6 +388,7 @@ export const SettingsWindow = ({
   onLoadGrants,
   onRevokeGrant,
   onLoadAccounts,
+  onLoadComputers,
   onChangeTier,
   onChange,
   onLogout,
@@ -468,7 +462,7 @@ export const SettingsWindow = ({
               onDelete={onDeleteTool}
             />
           ) : page === "computer" ? (
-            <ComputerPage />
+            <ComputerPage computers={computers} onLoad={onLoadComputers} />
           ) : page === "accounts" ? (
             <AccountsPage
               accounts={accounts}

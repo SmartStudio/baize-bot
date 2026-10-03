@@ -1,12 +1,19 @@
 import { Message, MessageId, type MessageBody } from "@baize/shared";
 import { messagesByGroupId, nextSuffix } from "./store.js";
 
-export const appendMessage = (groupId: string, body: MessageBody): Message => {
+export const appendMessage = (
+  groupId: string,
+  body: MessageBody,
+  {
+    createdAt = new Date().toISOString(),
+    id = `msg_${nextSuffix()}`,
+  }: { createdAt?: string | undefined; id?: string | undefined } = {},
+): Message => {
   const message = Message.parse({
-    id: MessageId.parse(`msg_${nextSuffix()}`),
+    id: MessageId.parse(id),
     groupId,
     body,
-    createdAt: new Date().toISOString(),
+    createdAt,
   });
   const list = messagesByGroupId.get(groupId);
   if (list) list.push(message);

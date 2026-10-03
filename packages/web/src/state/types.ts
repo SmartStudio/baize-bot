@@ -182,6 +182,7 @@ export type Action =
       computerId: ComputerId | null;
       flow: Extract<LoginFlow, { status: "offline" | "lapsed" }>;
     }
+  | { type: "computers_loaded"; computers: Computer[]; seq: Seq }
   | { type: "computer_upserted"; computer: Computer; seq: Seq }
   | { type: "publications_loaded"; publications: Publication[] }
   | { type: "today_version_bumped" }

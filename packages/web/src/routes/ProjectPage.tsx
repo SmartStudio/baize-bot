@@ -16,6 +16,7 @@ import { Markdown } from "../components/messages/markdown.js";
 import { previewOf } from "../components/messages/preview.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import type { Conversation } from "../state/types.js";
+import { byCreatedAt } from "../state/order.js";
 import type { Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
 
@@ -37,9 +38,7 @@ export const latestTurnOf = (
   const knownIds = new Set(known.map((message) => message.id));
   const extra = local.filter((message) => !knownIds.has(message.id) && message.body.kind !== "cost");
   const since = server === null ? -Infinity : at(server.said);
-  const newer = extra
-    .filter((message) => message.body.kind === "user" && at(message) > since)
-    .toSorted((left, right) => at(left) - at(right));
+  const newer = extra.filter((message) => message.body.kind === "user" && at(message) > since).toSorted(byCreatedAt);
   const said = newer.at(-1) ?? known[0];
   if (said === undefined) return { turn: [], older: olderTurns };
   const from = at(said);
@@ -48,24 +47,38 @@ export const latestTurnOf = (
       (message) =>
         message.body.kind !== "user" && (knownIds.has(message.id) ? at(message) >= from : at(message) > from),
     )
-    .toSorted((left, right) => at(left) - at(right));
+    .toSorted(byCreatedAt);
   return {
     turn: [said, ...replies],
     older: newer.length === 0 ? olderTurns : olderTurns + (server === null ? 0 : 1) + newer.length - 1,
   };
 };
 
-const TurnMessage = ({ message, lookup }: { message: Message; lookup: BotLookup }) => {
+// 一块一条消息的流式形态下，同一个 Bot 连着说的几条只在第一条上露头像和名字。中间隔了别人或别的消息就重新露。
+const continuesBot = (message: Message, before: Message | undefined): boolean =>
+  message.body.kind === "bot" && before?.body.kind === "bot" && before.body.botId === message.body.botId;
+
+const TurnMessage = ({
+  message,
+  before,
+  lookup,
+}: {
+  message: Message;
+  before: Message | undefined;
+  lookup: BotLookup;
+}) => {
   const body = message.body;
   if (body.kind === "user") return <p className="bubble bubble-user project-turn-me">{body.text}</p>;
   if (body.kind === "bot") {
     const bot = lookup(body.botId);
     return (
       <div className="project-turn-bot">
-        <span className="project-turn-who">
-          <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
-          {bot.name}
-        </span>
+        {continuesBot(message, before) ? null : (
+          <span className="project-turn-who" data-testid="project-turn-who">
+            <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+            {bot.name}
+          </span>
+        )}
         <Markdown text={body.text} />
       </div>
     );
@@ -223,7 +236,9 @@ export const ProjectPage = ({
             {turn.length === 0 ? (
               <p className="today-empty">你还没在这个项目里说过话，在上面说一句就是第一轮</p>
             ) : (
-              turn.map((message) => <TurnMessage message={message} lookup={lookup} key={message.id} />)
+              turn.map((message, at) => (
+                <TurnMessage message={message} before={turn[at - 1]} lookup={lookup} key={message.id} />
+              ))
             )}
           </div>
           <button

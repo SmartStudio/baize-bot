@@ -5,7 +5,7 @@ import { turnsOf, type Turn } from "./turns.js";
 let nextMessageId = 0;
 
 const message = (body: unknown, createdAt = "2026-09-19T12:00:00.000Z") =>
-  Message.parse({ id: `message-${nextMessageId++}`, groupId: "group-1", body, createdAt });
+  Message.parse({ id: `message-${String(nextMessageId++).padStart(4, "0")}`, groupId: "group-1", body, createdAt });
 
 const user = (text = "hello") => message({ kind: "user", text });
 const bot = (botId: string, text = "reply", createdAt?: string) =>
@@ -44,12 +44,32 @@ describe("turnsOf", () => {
     expect(turnsOf([])).toEqual([]);
   });
 
-  it("保留输入顺序", () => {
-    const late = bot("bot-a", "late", "2026-09-19T12:10:00.000Z");
-    const early = user("early");
-    expect(turnsOf([late, early])).toEqual([
-      { kind: "bot", botId: "bot-a", items: [late] },
-      { kind: "user", message: early },
+  it("按 createdAt 排，到达顺序颠倒也是你那句在前、系统回应在后", () => {
+    const reply = bot("bot-a", "late", "2026-09-19T12:00:02.000Z");
+    const said = user("early");
+    expect(turnsOf([reply, said])).toEqual([
+      { kind: "user", message: said },
+      { kind: "bot", botId: "bot-a", items: [reply] },
+    ]);
+  });
+
+  it("同一毫秒的保留输入次序，不按 id 重排", () => {
+    const at = "2026-09-19T12:00:00.000Z";
+    const said = Message.parse({
+      id: "message-z",
+      groupId: "group-1",
+      body: { kind: "user", text: "z" },
+      createdAt: at,
+    });
+    const reply = Message.parse({
+      id: "message-a",
+      groupId: "group-1",
+      body: { kind: "bot", botId: "bot-a", text: "a", streaming: false },
+      createdAt: at,
+    });
+    expect(turnsOf([said, reply])).toEqual([
+      { kind: "user", message: said },
+      { kind: "bot", botId: "bot-a", items: [reply] },
     ]);
   });
 

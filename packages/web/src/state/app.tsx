@@ -9,6 +9,7 @@ import {
   type ApprovePlanRequest,
   type ContentPlanId,
   type DecideDraftRequest,
+  type DecideProjectOfferRequest,
   type DraftId,
   type ProjectResponse,
   type TodayResponse,
@@ -33,7 +34,7 @@ import {
   type TopicTask,
   type User,
 } from "@baize/shared";
-import { RequestFailed, type Api, type BotDraft, type DecideProjectOfferRequest } from "../api/client.js";
+import { RequestFailed, type Api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
@@ -69,6 +70,7 @@ export type AppActions = {
   loadToday: () => Promise<TodayResponse | undefined>;
   loadProject: (groupId: GroupId) => Promise<ProjectResponse | undefined>;
   loadAccounts: () => Promise<void>;
+  loadComputers: () => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
   loadGrants: () => Promise<void>;
@@ -328,6 +330,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         return project;
       }),
       loadAccounts,
+      loadComputers: signedIn(async ({ api, put }) => {
+        const seq = nextSeq();
+        put({ type: "computers_loaded", computers: (await api.computers()).computers, seq });
+      }),
       updateAccountTier: signedIn(async ({ api, put }, accountId: AccountId, tier: AccountTier) => {
         const seq = nextSeq();
         put({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account, seq });

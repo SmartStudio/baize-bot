@@ -1,4 +1,5 @@
 import type { BotId, Message } from "@baize/shared";
+import { byCreatedAt } from "../../state/order.js";
 
 export type Turn =
   | { kind: "user"; message: Message }
@@ -8,7 +9,7 @@ export type Turn =
 export const turnsOf = (messages: Message[]): Turn[] => {
   const turns: Turn[] = [];
 
-  for (const message of messages) {
+  for (const message of messages.toSorted(byCreatedAt)) {
     const body = message.body;
     const previous = turns.at(-1);
 

@@ -87,6 +87,10 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
       }
       return withContent(state, { ...content, logins });
     }
+    case "computers_loaded": {
+      const computers = loadTable(content.computers, content.stamps, action.seq, action.computers);
+      return withContent(state, { ...content, computers: computers.rows, stamps: computers.stamps });
+    }
     case "computer_upserted": {
       const computers = writeTable(content.computers, content.stamps, action.seq, [action.computer]);
       return withContent(state, { ...content, computers: computers.rows, stamps: computers.stamps });

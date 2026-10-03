@@ -112,11 +112,21 @@ export const loadList = <T extends Row>(
     }
     local.delete(row.id);
   }
-  for (const item of local.values()) {
-    if (absent === "kept" || !newer(stamps, item.id, seq)) rows.push(item);
-    else nextStamps[item.id] = seq;
+  // 本地独有的行保留它们在旧列表里的先后：排在第一条「快照也有的行」之前的，仍放在快照前面，其余接在后面。
+  // 消息历史只回最近一窗，窗口外但本地还留着的行不能因为接到末尾，就和窗口内同毫秒的行换了位。
+  // deleted 模式同样适用：号比快照新的本地独有行也按这条规则放，例行、skill、账号、电脑的展示次序因此可能和先前「快照后接本地」不同。
+  const anchor = (list ?? []).findIndex((item) => !local.has(item.id));
+  const leading: T[] = [];
+  const trailing: T[] = [];
+  for (const [at, item] of (list ?? []).entries()) {
+    if (!local.has(item.id)) continue;
+    if (absent === "deleted" && newer(stamps, item.id, seq)) {
+      nextStamps[item.id] = seq;
+      continue;
+    }
+    (anchor >= 0 && at < anchor ? leading : trailing).push(item);
   }
-  return { rows, stamps: nextStamps };
+  return { rows: [...leading, ...rows, ...trailing], stamps: nextStamps };
 };
 
 // 按键分桶的列表，rows 里有这个键才算这一桶的完整列表拉回来过。列表还没到时先到的写入放在 early，号照记，

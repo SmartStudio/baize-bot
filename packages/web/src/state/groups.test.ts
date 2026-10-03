@@ -114,3 +114,134 @@ describe("群历史还在路上时到的推送", () => {
     expect(replyIn(loaded)).toEqual(bot("收到。我这就", true).body);
   });
 });
+
+describe("没有空壳的 delta 和 lastMessage", () => {
+  const lastOf = (state: ReadyState) => state.conversations[0]?.lastMessage ?? null;
+  const timed = (message: Message, createdAt: string): Message => ({ ...message, createdAt });
+
+  it("没有空壳的 delta 取群里已知最新一条的时间，不用本地时钟，排在已知消息之后", () => {
+    const next = createClock();
+    const said = timed(user("msg_said", "开干"), "2026-09-26T08:00:05.000Z");
+    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [said], seq: next() });
+    const streamed = reduceGroups(loaded, delta(next(), "收到", false));
+    const row = streamed.messages.rows[GROUP_ID]?.find((m) => m.id === MESSAGE_ID);
+    expect(row?.createdAt, "本地时钟现在远晚于 2026-09-26，取到它就说明用了本地时间").toBe(said.createdAt);
+    expect(idsIn(streamed)).toEqual(["msg_said", MESSAGE_ID]);
+  });
+
+  it("同 id 的完整消息到了，时间以服务端为准", () => {
+    const next = createClock();
+    const said = timed(user("msg_said", "开干"), "2026-09-26T08:00:05.000Z");
+    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [said], seq: next() });
+    const streamed = reduceGroups(loaded, delta(next(), "收到", false));
+    const settled = reduceGroups(streamed, {
+      type: "message_upserted",
+      message: timed(bot("收到。", false), "2026-09-26T08:00:06.000Z"),
+      seq: next(),
+    });
+    expect(settled.messages.rows[GROUP_ID]?.find((m) => m.id === MESSAGE_ID)?.createdAt).toBe(
+      "2026-09-26T08:00:06.000Z",
+    );
+  });
+
+  it("晚到的旧消息不顶掉 lastMessage，同 id 的更新照旧能换", () => {
+    const next = createClock();
+    const late = timed(bot("较晚的回复", false), "2026-09-26T08:00:09.000Z");
+    const early = timed(user("msg_early", "较早的话"), "2026-09-26T08:00:01.000Z");
+    const afterLate = reduceGroups(initial, { type: "message_upserted", message: late, seq: next() });
+    const afterEarly = reduceGroups(afterLate, { type: "message_upserted", message: early, seq: next() });
+    expect(lastOf(afterEarly)?.id).toBe(MESSAGE_ID);
+    const edited = timed(bot("较晚的回复，改了", false), "2026-09-26T08:00:08.000Z");
+    const afterEdit = reduceGroups(afterEarly, { type: "message_upserted", message: edited, seq: next() });
+    expect(lastOf(afterEdit)).toEqual(edited);
+  });
+});
+
+describe("重拉只回最近一窗历史", () => {
+  it("窗口外但本地还留着的行，和窗口内第一条同毫秒时仍排在它前面", () => {
+    const next = createClock();
+    const sameMs = "2026-09-26T08:00:00.000Z";
+    const outside = Message.parse({
+      id: "msg_zzzz",
+      groupId: GROUP_ID,
+      body: { kind: "user", text: "A" },
+      createdAt: sameMs,
+    });
+    const first = Message.parse({
+      id: "msg_aaaa",
+      groupId: GROUP_ID,
+      body: { kind: "bot", botId: "bot_sales", text: "B", streaming: false },
+      createdAt: sameMs,
+    });
+    const later = user("msg_later", "更晚的");
+    const laterAt = { ...later, createdAt: "2026-09-26T08:00:09.000Z" };
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [outside, first, laterAt],
+      seq: next(),
+    });
+    const resynced = reduceGroups(loaded, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [first, laterAt],
+      seq: next(),
+    });
+    expect(idsIn(resynced), "A 在窗口外，不能因为接到末尾而排到同毫秒的 B 后面").toEqual([
+      "msg_zzzz",
+      "msg_aaaa",
+      "msg_later",
+    ]);
+  });
+
+  it("锚点取第一条共享行：A 夹在两条共享行之间，仍接在末尾", () => {
+    const next = createClock();
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_b", "B"), user("msg_a", "A"), user("msg_c", "C")],
+      seq: next(),
+    });
+    const resynced = reduceGroups(loaded, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_b", "B"), user("msg_c", "C")],
+      seq: next(),
+    });
+    expect(idsIn(resynced)).toEqual(["msg_b", "msg_c", "msg_a"]);
+  });
+
+  it("对照：A 在第一条共享行之前，放到快照前面", () => {
+    const next = createClock();
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_a", "A"), user("msg_b", "B"), user("msg_c", "C")],
+      seq: next(),
+    });
+    const resynced = reduceGroups(loaded, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_b", "B"), user("msg_c", "C")],
+      seq: next(),
+    });
+    expect(idsIn(resynced)).toEqual(["msg_a", "msg_b", "msg_c"]);
+  });
+
+  it("本地独有、排在快照之后的行照旧接在末尾", () => {
+    const next = createClock();
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_one", "一"), user("msg_two", "二")],
+      seq: next(),
+    });
+    const resynced = reduceGroups(loaded, {
+      type: "messages_set",
+      groupId: GROUP_ID,
+      messages: [user("msg_one", "一")],
+      seq: next(),
+    });
+    expect(idsIn(resynced)).toEqual(["msg_one", "msg_two"]);
+  });
+});
