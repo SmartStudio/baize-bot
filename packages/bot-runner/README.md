@@ -1,6 +1,6 @@
 # @baize/bot-runner
 
-Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
+Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.0.0 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
 
 `createRunner(config)` 返回六个方法：
 
@@ -33,7 +33,7 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 0.87.1 的 SDK，一个 Bo
 
 provider 注册 `baize:plan`、`baize:fast` 两个模型，名字就是控制面网关认的那两个，由 shared 的 `gatewayAlias(purpose)` 生成，运行器不自己拼，网关再按 `GATEWAY_MODELS` 映射到真模型。每次 prompt 前 `usePurpose(prompt.purpose)` 挑对应那个，用途和网关地址都没变就不动，变了在同一个会话上 `setModel`，历史接着用。`config.modelGateway` 只带网关地址和 key，不带模型名。
 
-Pi 0.87.1 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
+Pi 1.0.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
 
 ## 目录布局
 
@@ -427,6 +427,8 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 `DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按七段排列：白泽基础人设、身份、描述与边界、协作规则、起草规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间五段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
 
 主助理在描述与边界之后、协作规则之前多一段 `ASSISTANT_RULE`，队员没有这一段。身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` 协作规则之后是 `src/drafts.ts` 的 `DRAFT_RULE`，所有角色都有：往外发东西只能起草，不要用 bash、浏览器或工具连接里的操作自己去发。`PROPOSE_SKILL_RULE` 保持原文。后六段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
+
+**内置 bash 的失败有两种形态。** Pi 1.0.0 起，命令以非零退出码结束时，bash 不再抛异常，而是正常返回 `isError: true` 的结果：`content` 文本是命令输出加一行 `Command exited with code N`，`structuredContent` 带 `exit_code`。超时（`Command timed out after N seconds`）、中止（`Command aborted`）、退出码为 null 这三种仍然抛。生产链路不受影响，沙箱 bash 只转发 `execute`，`reporter` 读的是 Pi 事件上的 `isError`，两种写法都记成 `failed`。受影响的是直接调 `tool.execute` 的测试：断言「沙箱拦住了」要看返回值的 `isError` 和 `content` 文本，泄露断言也落在这段文本上，不能再写 `rejects` 或 `.catch`；`test/sandbox.test.ts` 的 `blocked` 就是这个断言。这条变化 Pi 的 CHANGELOG 没写。
 
 ## 跑测试
 

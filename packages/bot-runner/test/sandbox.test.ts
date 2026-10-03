@@ -41,6 +41,15 @@ const until = async (ready: () => boolean, label: string): Promise<void> => {
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
+type BashOutcome = Awaited<ReturnType<ReturnType<typeof createSandboxedBash>["tool"]["execute"]>>;
+
+// Pi 1.0 起 bash 非零退出不再抛异常，改成 resolve 一个 isError 的结果；沙箱拦住了就是这个结果，泄露断言也要落在它的文本上。
+const blocked = async (pending: Promise<BashOutcome>, label: string): Promise<string> => {
+  const result = await pending;
+  expect(result.isError, label).toBe(true);
+  return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+};
+
 const availablePort = (): Promise<number> =>
   new Promise((resolve, reject) => {
     const server = createServer();
@@ -143,15 +152,12 @@ describe("bash 沙箱性能", () => {
           `${shellQuote(process.execPath)} -e 'process.stdout.write(require("node:fs").readFileSync(process.argv[1], "utf8"))' ${shellQuote(join(profileDir, "Default", "Cookies"))}`,
         ];
         for (const [index, command] of commands.entries()) {
-          const result = sandbox.tool.execute(
-            `cookies-${index}`,
-            { command },
-            undefined,
-            undefined,
-            undefined as never,
+          const text = await blocked(
+            sandbox.tool.execute(`cookies-${index}`, { command }, undefined, undefined, undefined as never),
+            command,
           );
-          await expect(result, command).rejects.toThrow();
-          await result.catch((error: unknown) => expect(String(error)).not.toContain("cookie-secret-p1-5"));
+          expect(text, command).toMatch(/operation not permitted|EPERM/i);
+          expect(text, command).not.toContain("cookie-secret-p1-5");
         }
       } finally {
         rmSync(profileDir, { recursive: true, force: true });
@@ -419,7 +425,7 @@ describe("bash 沙箱性能", () => {
     let runId = "run-drafts";
     const sandbox = createSandboxedBash(workDir, zones, () => runId);
     sandbox.allow(runId, "widened", { network: false, writePaths: [join(dataDir, "bot-1")] });
-    await expect(
+    const swapped = await blocked(
       sandbox.tool.execute(
         "widened",
         { command: `echo swapped > ${shellQuote(join(drafts, "copy.png"))}` },
@@ -427,7 +433,9 @@ describe("bash 沙箱性能", () => {
         undefined,
         undefined as never,
       ),
-    ).rejects.toThrow();
+      "批准写 Bot 目录也写不进配图拷贝",
+    );
+    expect(swapped).toContain("Operation not permitted");
     expect(readFileSync(join(drafts, "copy.png"), "utf8")).toBe("approved-bytes");
     runId = "run-read";
     const read = await sandbox.tool.execute(
@@ -522,7 +530,14 @@ describe("bash 沙箱性能", () => {
         [],
       );
       expect(decision.verdict).toBe("allow");
-      await sandbox.execute(`sandbox-${index}`, { command: "echo ok" }, undefined, undefined, undefined as never);
+      const outcome = await sandbox.execute(
+        `sandbox-${index}`,
+        { command: "echo ok" },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      expect(outcome.isError, "沙箱里 echo ok 要真跑成功，失败会让增量偏小").not.toBe(true);
       sandboxTimes.push(performance.now() - startedAt);
     }
 
@@ -561,29 +576,35 @@ describe("bash 沙箱性能", () => {
         sandbox.clearRun(runId);
         runId = "run-2";
         const afterClear = join(outside, "after-clear.txt");
-        await expect(
-          sandbox.tool.execute(
-            "same-call",
-            { command: `/usr/bin/touch ${shellQuote(afterClear)}` },
-            undefined,
-            undefined,
-            undefined as never,
+        expect(
+          await blocked(
+            sandbox.tool.execute(
+              "same-call",
+              { command: `/usr/bin/touch ${shellQuote(afterClear)}` },
+              undefined,
+              undefined,
+              undefined as never,
+            ),
+            "afterClear",
           ),
-        ).rejects.toThrow("Operation not permitted");
+        ).toContain("Operation not permitted");
         expect(existsSync(afterClear)).toBe(false);
 
         sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] });
         sandbox.allow(runId, "same-call", { network: false, writePaths: [] });
         const afterEmpty = join(outside, "after-empty.txt");
-        await expect(
-          sandbox.tool.execute(
-            "same-call",
-            { command: `/usr/bin/touch ${shellQuote(afterEmpty)}` },
-            undefined,
-            undefined,
-            undefined as never,
+        expect(
+          await blocked(
+            sandbox.tool.execute(
+              "same-call",
+              { command: `/usr/bin/touch ${shellQuote(afterEmpty)}` },
+              undefined,
+              undefined,
+              undefined as never,
+            ),
+            "afterEmpty",
           ),
-        ).rejects.toThrow("Operation not permitted");
+        ).toContain("Operation not permitted");
         expect(existsSync(afterEmpty)).toBe(false);
       } finally {
         rmSync(outside, { recursive: true, force: true });
@@ -743,11 +764,9 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     ["工作目录里指向别的 Bot 的符号链接", () => "cat bot-2-link/secret.txt"],
     ["数据目录外的助理 Chrome profile 里的 Cookies", () => `f=Cook; cat ${shellQuote(profileDir)}/Default/\${f}ies`],
   ])("bwrap 下禁区读不到：%s", async (_label, command) => {
-    const result = run(command());
-    await expect(result).rejects.toThrow();
-    await result.catch((error: unknown) => {
-      expect(String(error)).not.toContain("secret-p1-6");
-    });
+    const text = await blocked(run(command()), command());
+    expect(text, "命令自己报了失败").toContain("Command exited with code");
+    expect(text).not.toContain("secret-p1-6");
   });
 
   it("bwrap 下工作目录外写不进，工作目录里能写", async () => {
@@ -755,10 +774,10 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     const homeFile = join(fakeHome, "leak.txt");
     const otherBotFile = join(otherBot, "leak.txt");
     for (const target of [outsideFile, homeFile, otherBotFile]) {
-      await expect(run(`echo leak > ${shellQuote(target)}`), target).rejects.toThrow();
+      await blocked(run(`echo leak > ${shellQuote(target)}`), target);
       expect(existsSync(target), target).toBe(false);
     }
-    await run("echo ok > inside.txt && mkdir -p nested && touch nested/b.txt");
+    expect((await run("echo ok > inside.txt && mkdir -p nested && touch nested/b.txt")).isError).not.toBe(true);
     expect(readFileSync(join(botWork, "inside.txt"), "utf8")).toBe("ok\n");
     expect(existsSync(join(botWork, "nested", "b.txt"))).toBe(true);
   });
@@ -767,13 +786,17 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     const approved = join(outside, "approved.txt");
     const callId = nextCall();
     sandbox.allow(runId, callId, { network: false, writePaths: [approved] });
-    await run(`echo ok > ${shellQuote(approved)}`, callId);
+    expect((await run(`echo ok > ${shellQuote(approved)}`, callId)).isError).not.toBe(true);
     expect(readFileSync(approved, "utf8")).toBe("ok\n");
-    await expect(run(`echo again > ${shellQuote(approved)}`), "放宽只管批准的那一次").rejects.toThrow();
+    await blocked(run(`echo again > ${shellQuote(approved)}`), "放宽只管批准的那一次");
 
     const widened = nextCall();
     sandbox.allow(runId, widened, { network: false, writePaths: [root] });
-    await expect(run(`cat ${shellQuote(join(otherBot, "secret.txt"))}`, widened)).rejects.toThrow();
+    const widenedRead = await blocked(
+      run(`cat ${shellQuote(join(otherBot, "secret.txt"))}`, widened),
+      "放宽写路径后别的 Bot 目录照样读不到",
+    );
+    expect(widenedRead).not.toContain("bot-2-secret-p1-6");
   });
 
   it.skipIf(!existsSync("/tmp/.X11-unix"))("bwrap 下批准写 /tmp 也看不到 X 的 socket 目录", async () => {
@@ -842,7 +865,8 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     if (address === null || typeof address === "string") throw new Error("没有拿到本地测试端口");
     const fetchLoopback = `${shellQuote(process.execPath)} -e 'fetch("http://127.0.0.1:${address.port}/").then((r) => r.text()).then((t) => process.stdout.write(t))'`;
     try {
-      await expect(run(fetchLoopback), "默认连本机回环也不通").rejects.toThrow();
+      const offline = await blocked(run(fetchLoopback), "默认连本机回环也不通");
+      expect(offline).not.toContain("pong-p1-6");
       const callId = nextCall();
       sandbox.allow(runId, callId, { network: true, writePaths: [] });
       const result = await run(fetchLoopback, callId);

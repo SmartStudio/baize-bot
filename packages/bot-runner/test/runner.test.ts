@@ -805,6 +805,36 @@ describe("运行器跑一次 prompt", () => {
     ]);
     expect(toolResults.join(""), "ls 的真实输出要回到模型那一轮").toContain("report.md");
   });
+
+  // Pi 1.0 起 bash 非零退出不抛、自己返回 isError 的结果，终态仍要记 failed，错误输出要回到模型那一轮。
+  it("内置 bash 命令非零退出：终态记 failed，退出码和错误输出回到模型", async () => {
+    const toolResults: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        if (!isFollowUpTurn(req)) {
+          return {
+            textChunks: [],
+            toolCall: { id: "call-1", name: "bash", args: { command: "ls missing-report.md" } },
+            usage: { input: 800, output: 20 },
+          };
+        }
+        toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+        return { textChunks: ["没有这个文件。"], usage: { input: 900, output: 12 } };
+      },
+    });
+    mkdirSync(botDirs(h.dataDir, BotId.parse("bot-1")).workDir, { recursive: true });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看 missing-report.md"));
+
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(toolResults.join(""), "非零退出码要告诉模型").toContain("Command exited with code");
+    expect(toolResults.join(""), "命令自己的错误输出要告诉模型").toContain("missing-report.md");
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
 });
 
 describe("运行器的审批", () => {
