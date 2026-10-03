@@ -120,6 +120,11 @@
   font: var(--type-caption);
 }
 
+/* --fg-4 压在选中底色上，深色下只有 3.3，选中行的副标题抬一档到 --fg-2。 */
+.sidebar .nav[aria-current="page"] .project-body small {
+  color: var(--fg-2);
+}
+
 .project-badges {
   display: flex;
   flex-wrap: wrap;
