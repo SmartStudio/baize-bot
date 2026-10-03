@@ -416,7 +416,7 @@ export type TodayResponse = z.infer<typeof TodayResponse>;
 
 // GET /api/projects/:groupId  项目页。项目就是多 Bot 群加它的任务卡，项目 id 就是群 id；别人的群、单 Bot 群都回 404。
 // 标题、目标和清单进度 Web 从已有的群和任务卡里读，task_updated 会更新那一份，这里只给那边没有的。
-// weekPublished 是本周（周一 00:00 Asia/Shanghai 起）这个群发出了几条。
+// weekPublished 是本周（周一 00:00 Asia/Shanghai 起）这个群发出了几条，weekChecked 是本周勾上、现在还勾着的清单项有几项。
 // 一轮是你说的一句话，连同它之后、你下一句之前群里的其他消息。latestTurn 是最近一轮：said 是你按 createdAt 最后说的那句，
 // replies 是它之后的消息，按 createdAt 升序，不含 cost，超过 50 条只给最近的 50 条；你一句都没说过是 null。
 // 它直接从库里取，不受群历史分页的窗口限制。olderTurns 是更早的轮数，也就是你说过的句数减一。
@@ -453,6 +453,7 @@ export const ProjectResponse = z
   .object({
     groupId: GroupId,
     weekPublished: z.number().int().nonnegative(),
+    weekChecked: z.number().int().nonnegative(),
     latestTurn: ProjectTurn.nullable(),
     olderTurns: z.number().int().nonnegative(),
     working: z.array(ProjectWorkingItem).max(20),
