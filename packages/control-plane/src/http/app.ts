@@ -205,7 +205,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
 
   // 第 2 期的接缝路由，都在登录中间件之后，各自的子单元把 501 换掉。
   app.route("/api", createGoalRoutes());
-  app.route("/api", createPreferenceRoutes());
+  app.route("/api", createPreferenceRoutes({ db, push: hub, agents }));
   app.route("/api", createBrandRoutes());
   app.route("/api", createTeamOfferRoutes());
   app.route("/api", createRoutineOfferRoutes());

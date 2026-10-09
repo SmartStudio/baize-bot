@@ -4,14 +4,25 @@ import {
   type Bot,
   type BotHue,
   type BotId,
+  type BotProfileResponse,
   type Group,
   type Message,
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { approvals, bots, groupMembers, groups, handoffs, tasks, userCounters } from "../db/schema.js";
+import {
+  approvals,
+  botPreferences,
+  bots,
+  groupMembers,
+  groups,
+  handoffs,
+  skills,
+  tasks,
+  userCounters,
+} from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
@@ -263,4 +274,22 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
     const assistant = await findAssistant(tx, ownerId);
     return assistant?.bot.id === botId ? { kind: "assistant" } : { kind: "not_found" };
   });
+}
+
+/**
+ * Bot 页头部「记住 N 条 · 会 N 件事 · 在 N 个项目」。项目就是它在里面的多 Bot 群，单聊不算。
+ * 别人的、不存在的 Bot 回 null。三个数各查各的，互不相乘。
+ */
+export async function botProfile(db: Db, ownerId: UserId, botId: BotId): Promise<BotProfileResponse | null> {
+  if ((await findBot(db, ownerId, botId)) === null) return null;
+  const [[preferences], [taught], [projects]] = await Promise.all([
+    db.select({ n: count() }).from(botPreferences).where(eq(botPreferences.botId, botId)),
+    db.select({ n: count() }).from(skills).where(eq(skills.botId, botId)),
+    db
+      .select({ n: count() })
+      .from(groupMembers)
+      .innerJoin(groups, eq(groups.id, groupMembers.groupId))
+      .where(and(eq(groupMembers.botId, botId), isNull(groups.soloBotId))),
+  ]);
+  return { preferences: preferences?.n ?? 0, skills: taught?.n ?? 0, projects: projects?.n ?? 0 };
 }

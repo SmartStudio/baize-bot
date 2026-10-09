@@ -20,10 +20,6 @@ afterAll(async () => {
 
 const SEAM_ROUTES = [
   ["POST", "/api/projects/g1/metric", { value: 1 }],
-  ["GET", "/api/bots/b1/preferences", undefined],
-  ["PATCH", "/api/preferences/p1", { private: true }],
-  ["DELETE", "/api/preferences/p1", undefined],
-  ["GET", "/api/bots/b1/profile", undefined],
   ["GET", "/api/brand", undefined],
   ["PUT", "/api/brand", { facts: "", voice: "", taboo: "", assetsDir: null, edits: [] }],
   ["POST", "/api/messages/m1/team-offer", { decision: "defer" }],
@@ -76,7 +72,6 @@ const STUB_EVENTS = [
       projectGroupId: null,
     },
   ],
-  ["preference_add", { text: "喜欢短句", private: false, sourceMessageId: null }],
   ["metric_report", { value: 2, label: "星" }],
   ["review_submit", { body: "本周完成了三篇" }],
 ] as const;
