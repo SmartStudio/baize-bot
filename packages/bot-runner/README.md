@@ -1,6 +1,6 @@
 # @baize/bot-runner
 
-Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.0.0 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
+Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
 
 `createRunner(config)` 返回六个方法：
 
@@ -33,7 +33,7 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.0.0 的 SDK，一个 Bot
 
 provider 注册 `baize:plan`、`baize:fast` 两个模型，名字就是控制面网关认的那两个，由 shared 的 `gatewayAlias(purpose)` 生成，运行器不自己拼，网关再按 `GATEWAY_MODELS` 映射到真模型。每次 prompt 前 `usePurpose(prompt.purpose)` 挑对应那个，用途和网关地址都没变就不动，变了在同一个会话上 `setModel`，历史接着用。`config.modelGateway` 只带网关地址和 key，不带模型名。
 
-Pi 1.0.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
+Pi 1.1.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
 
 ## 目录布局
 
