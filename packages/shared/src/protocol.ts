@@ -328,6 +328,9 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),
+  // 控制面处理完一条 run_done 就回，重复的、run 已被对账收尾的也回。代理留着每条 run_done 直到收到它：
+  // 没收到就在下次 hello 的 activeRuns 里把这个 run 报成还在跑，welcome 之后补发。
+  z.object({ type: z.literal("run_done_ack"), runId: RunId }),
   z.object({
     type: z.literal("approval_result"),
     runId: RunId,
