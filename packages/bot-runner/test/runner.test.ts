@@ -243,6 +243,12 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   ...overrides,
 });
 
+const metricOf = (current: number, weekDelta: number): NonNullable<TopicTask["metric"]> => ({
+  current,
+  weekDelta,
+  sampledAt: "2026-10-09T08:00:00.000Z",
+});
+
 const skillOf = (id: string, botId: string, name: string, steps: readonly string[]): Skill => ({
   id: SkillId.parse(id),
   botId: BotId.parse(botId),
@@ -1357,6 +1363,73 @@ describe("运行器的主题任务工具", () => {
       "清单：\n（空）",
     );
     expect(renderTaskCard(topicTask(), []), "没有成员也占一行").toContain("群成员：\n（空）");
+  });
+
+  describe("任务卡上的目标和进度", () => {
+    const GOAL = { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z" } as const;
+    const goalLinesOf = (task: TopicTask): string[] =>
+      renderTaskCard(task, TWO_MEMBERS)
+        .split("\n")
+        .filter((line) => line.startsWith("目标：") || line.startsWith("进度："));
+
+    it("带目标时在截止之后、当前经手之前写目标和进度两行，其余行不动", () => {
+      expect(renderTaskCard(topicTask({ goal: GOAL, metric: metricOf(412, 37) }), TWO_MEMBERS)).toBe(
+        [
+          "T-2482 给老客户回一封询价邮件",
+          "说明：先翻历史邮件再动笔",
+          "截止：2026-09-20T10:00:00.000Z",
+          "目标：1000 星，期限：2026-12-31T00:00:00.000Z",
+          "进度：412 / 1000 星，还差 588，本周 +37",
+          "当前经手：小白",
+          "群成员：",
+          "- 小白",
+          "- 小黑",
+          "清单：",
+          "1. [x] 翻历史邮件（经手：小白）",
+          "2. [ ] 起草回信（经手：未指派）",
+        ].join("\n"),
+      );
+    });
+
+    it.each([
+      ["本周掉了", 412, -5, "进度：412 / 1000 星，还差 588，本周 -5"],
+      ["本周没变", 412, 0, "进度：412 / 1000 星，还差 588，本周 0"],
+      ["小数不带浮点尾巴", 412.3, 0.1 + 0.2, "进度：412.3 / 1000 星，还差 587.7，本周 +0.3"],
+      ["刚好到目标", 1000, 12, "进度：1000 / 1000 星，已达成，本周 +12"],
+      ["超过目标不写负的差额", 1043, 20, "进度：1043 / 1000 星，已达成，本周 +20"],
+      ["十进制半分值按两位小数舍入，不丢半分", 1.005, 1.005, "进度：1.01 / 1000 星，还差 999，本周 +1.01"],
+      ["离目标不足一分：不写还差 0", 999.999, 0, "进度：1000 / 1000 星，还差不足 0.01，本周 0"],
+      ["差额刚好舍入成一分", 999.994, 0, "进度：999.99 / 1000 星，还差 0.01，本周 0"],
+      ["舍入成零的负读数不带负号", -0.001, -0.004, "进度：0 / 1000 星，还差 1000，本周 0"],
+    ] as const)("%s", (_name, current, weekDelta, expected) => {
+      expect(goalLinesOf(topicTask({ goal: GOAL, metric: metricOf(current, weekDelta) }))[1]).toBe(expected);
+    });
+
+    it("协议接受的大有限值照原样写出来，不在渲染时变成 Infinity", () => {
+      expect(goalLinesOf(topicTask({ goal: GOAL, metric: metricOf(1e308, 0) }))[1]).toMatch(
+        /^进度：10{308} \/ 1000 星，已达成，本周 0$/,
+      );
+    });
+
+    it("设了目标还没有样本：进度行说没有数据，不写成 0 / 1000", () => {
+      expect(goalLinesOf(topicTask({ goal: GOAL, metric: null }))).toEqual([
+        "目标：1000 星，期限：2026-12-31T00:00:00.000Z",
+        "进度：还没有数据",
+      ]);
+    });
+
+    it("目标没定期限时期限写不限", () => {
+      expect(goalLinesOf(topicTask({ goal: { ...GOAL, dueAt: null }, metric: metricOf(412, 37) }))[0]).toBe(
+        "目标：1000 星，期限：不限",
+      );
+    });
+
+    it("没有目标就不出这两行，哪怕已经有样本：卡片和加目标之前逐字相同", () => {
+      const withoutGoal = topicTask({ metric: metricOf(412, 37) });
+
+      expect(goalLinesOf(withoutGoal)).toEqual([]);
+      expect(renderTaskCard(withoutGoal, TWO_MEMBERS)).toBe(renderTaskCard(topicTask(), TWO_MEMBERS));
+    });
   });
 
   it("update_checklist 上报一条 task_checklist，经手的名字解析成 id，没给经手的补成 null", async () => {
@@ -4229,6 +4302,142 @@ describe("统一闸门", () => {
 const toolNamesSent = (requests: readonly ChatCompletionRequest[]): string[] =>
   (requests[0]?.tools ?? []).map((tool) => tool.function.name);
 
+const metricReports = (sent: readonly AgentToControl[]) => sent.filter((message) => message.type === "metric_report");
+const userTextOf = (firstTurn: string): string =>
+  (JSON.parse(firstTurn) as Array<{ role: string; content: Array<{ text?: string }> }>)
+    .filter((message) => message.role === "user")
+    .flatMap((message) => message.content)
+    .map((part) => part.text ?? "")
+    .join("\n");
+
+describe("运行器的指标上报", () => {
+  const REPORT = { value: 412, label: "小红书粉丝" };
+  const reply: ScriptedTurn = { textChunks: ["好"], usage: { input: 800, output: 2 } };
+
+  it("report_metric 发出带 runId 的 metric_report，值和名字原样上行", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["报一下粉丝数", callTool("report_metric", REPORT)]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "报一下粉丝数", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(metricReports(h.sent)).toEqual([
+      { type: "metric_report", runId: "run-1", botId: "bot-1", groupId: "group-1", value: 412, label: "小红书粉丝" },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(seen.toolResults.join(""), "回给模型的话说清报的是什么").toContain("已上报：小红书粉丝 412");
+  });
+
+  it("同一个会话里先后两次 run 各带各的 runId，小数照样上行", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      // 第二次的请求里带着第一次的工具结果和用户消息，按最后一条消息分派，scriptBy 的整份匹配分不开。
+      script: (req) => {
+        const last = req.messages.at(-1);
+        if (last?.role === "tool") return reply;
+        return JSON.stringify(last).includes("报第二次")
+          ? callTool("report_metric", { value: 449.5, label: "小红书粉丝" })
+          : callTool("report_metric", { value: 412, label: "小红书粉丝" });
+      },
+    });
+    const group = { task: topicTask(), members: TWO_MEMBERS };
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "报第一次", group));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "报第二次", group));
+
+    expect(
+      metricReports(h.sent).map((message) => [message.runId, message.value]),
+      "runId 是控制面认「这个 run 属于这个项目群」的依据，不能缓存第一次的",
+    ).toEqual([
+      ["run-1", 412],
+      ["run-2", 449.5],
+    ]);
+    expect(sessionCreationsFor("bot-1"), "两次在同一个会话里").toBe(1);
+  });
+
+  it("项目群的工具名单里有 report_metric，单聊里没有", async () => {
+    const teamRequests: ChatCompletionRequest[] = [];
+    const soloRequests: ChatCompletionRequest[] = [];
+    const team = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        teamRequests.push(req);
+        return reply;
+      },
+    });
+    const solo = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        soloRequests.push(req);
+        return reply;
+      },
+    });
+
+    await team.runner.prompt(promptMessage("bot-1", "run-1", "随便聊", { task: topicTask(), members: TWO_MEMBERS }));
+    await solo.runner.prompt(promptMessage("bot-1", "run-1", "随便聊"));
+
+    expect(toolNamesSent(teamRequests)).toContain("report_metric");
+    expect(toolNamesSent(soloRequests), "单聊没有项目，报一个数没有地方落").not.toContain("report_metric");
+    expect(toolNamesSent(soloRequests), "单聊里别的内部工具照常在").toContain("read_task");
+  });
+
+  it.each([
+    ["label 是空白", { value: 412, label: "   " }, "label 是这个数的名字"],
+    ["label 超过 40 个字", { value: 412, label: "粉".repeat(41) }, "label 最多 40 个字"],
+  ] as const)("%s：不上报，终态 failed，错误文本是中文", async (_name, args, expected) => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["报一下粉丝数", callTool("report_metric", args)]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "报一下粉丝数", { task: topicTask(), members: TWO_MEMBERS }));
+
+    expect(metricReports(h.sent), "形状不合格的数不能发到控制面当样本").toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(seen.toolResults.join("")).toContain(expected);
+  });
+
+  it("任务卡带目标时 prompt 里有「412 / 1000 星」这一行，Bot 排计划时看得到差多少", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["排本周计划", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
+    });
+    const task = topicTask({
+      goal: { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z" },
+      metric: { current: 412, weekDelta: 37, sampledAt: "2026-10-09T08:00:00.000Z" },
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "排本周计划", { task, members: TWO_MEMBERS }));
+
+    const lines = userTextOf(seen.firstTurn[0] ?? "[]").split("\n");
+    expect(lines).toContain("目标：1000 星，期限：2026-12-31T00:00:00.000Z");
+    expect(lines).toContain("进度：412 / 1000 星，还差 588，本周 +37");
+  });
+
+  it("任务卡没有目标时 prompt 里没有目标和进度两行", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["排本周计划", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "排本周计划", { task: topicTask(), members: TWO_MEMBERS }));
+
+    const lines = userTextOf(seen.firstTurn[0] ?? "[]").split("\n");
+    expect(lines.filter((line) => line.startsWith("目标：") || line.startsWith("进度："))).toEqual([]);
+  });
+});
+
 describe("运行器的主助理", () => {
   const PROJECTS: NonNullable<PromptMessage["projects"]> = [
     { groupId: GroupId.parse("group-xhs"), title: "小红书运营", cadence: "每周 2 篇" },
@@ -4362,7 +4571,10 @@ ${join(h.dataDir, "bot-1", "work")}
         ],
       },
     ]);
-    expect(toolNamesSent(requests), "队员的工具只多了三件起草工具和读 GitHub、X 的 account_read").toEqual([
+    expect(
+      toolNamesSent(requests),
+      "队员的工具只多了三件起草工具、读 GitHub、X 的 account_read，和项目群里的 report_metric",
+    ).toEqual([
       "read",
       "bash",
       "edit",
@@ -4376,6 +4588,7 @@ ${join(h.dataDir, "bot-1", "work")}
       "handoff_task",
       "accept_handoff",
       "propose_skill",
+      "report_metric",
       "create_draft",
       "edit_draft",
       "propose_plan",

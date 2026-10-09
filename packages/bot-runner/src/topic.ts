@@ -4,6 +4,8 @@ import {
   ChecklistItem,
   type ControlToAgent,
   type HandoffId,
+  type ProjectGoal,
+  type TaskMetric,
   type TopicTask,
 } from "@baize/shared";
 import { type Static, Type } from "typebox";
@@ -41,6 +43,36 @@ const EMPTY = "（空）";
 const nameOf = (members: readonly GroupMember[], id: BotId): string =>
   members.find((member) => member.id === id)?.name ?? id;
 
+// 两位小数以内原样写，浮点加减的尾巴（0.1 + 0.2）不进卡片。不乘 100 再 round：1.005 会丢掉进位，1e308 会溢出成 Infinity。
+const TWO_DECIMALS = new Intl.NumberFormat("en-US", { useGrouping: false, maximumFractionDigits: 2 });
+
+// 舍入成零的负数 Intl 写成 "-0"，卡片上只认 "0"。
+const plain = (value: number): string => {
+  const text = TWO_DECIMALS.format(value);
+  return text === "-0" ? "0" : text;
+};
+
+const signed = (value: number): string => {
+  const text = plain(value);
+  return value > 0 && text !== "0" ? `+${text}` : text;
+};
+
+/**
+ * 目标的两行：目标和期限，当前值 / 目标、还差多少、本周变化。没有目标一行都不出，这样没设目标的项目
+ * 卡片和加这两行之前逐字相同；设了目标还没有样本，进度写「还没有数据」而不是 0，0 是一个真实的读数。
+ */
+function renderGoal(goal: ProjectGoal | null, metric: TaskMetric | null): string[] {
+  if (goal === null) return [];
+  const { target, unit } = goal;
+  const head = `目标：${target} ${unit}，期限：${goal.dueAt ?? NO_DUE}`;
+  if (metric === null) return [head, "进度：还没有数据"];
+  const gap = target - metric.current;
+  // 达成按真实差额判，显示再舍入。正差额舍入后是 0 就说不足一分，不能写「还差 0」让模型以为到了。
+  const shown = plain(gap);
+  const remaining = gap <= 0 ? "已达成" : shown === "0" ? "还差不足 0.01" : `还差 ${shown}`;
+  return [head, `进度：${plain(metric.current)} / ${target} ${unit}，${remaining}，本周 ${signed(metric.weekDelta)}`];
+}
+
 /**
  * 任务卡的文本形式。全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。
  * 模型看到的行数因此是固定的，「这行没出现」和「这个字段是空的」不会混起来。
@@ -72,6 +104,7 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     `截止：${task.dueAt ?? NO_DUE}`,
     // 节奏只有例行派来的主题才有，空着不出这一行，队员的 prompt 字节不变。
     ...(task.cadence === "" ? [] : [`节奏：${task.cadence}`]),
+    ...renderGoal(task.goal, task.metric),
     `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
     "群成员：",
     ...roster,
@@ -162,7 +195,7 @@ export function createTopicTools(options: {
     {
       name: "read_task",
       label: "看任务卡",
-      description: "读这个群的主题任务卡：编号、标题、说明、截止、当前经手、群成员和清单。",
+      description: "读这个群的主题任务卡：编号、标题、说明、截止、目标和进度（设了目标才有）、当前经手、群成员和清单。",
       parameters: Type.Object({}),
       execute: async () => {
         const active = activeOrThrow("读任务卡");

@@ -96,6 +96,10 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 `RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
+## 指标上报
+
+`src/metric.ts` 的 `report_metric` 只挂在多 Bot 群的会话里，单聊没有这个工具。参数是 `value` 和 `label`，当前 run 的 runId、botId、groupId 随 `metric_report` 一起上行；label 去首尾空白，空白或超过 40 字时报中文错误，不发上行。只能走浏览器的平台读到真实数值后用它上报，不能编读数。`renderTaskCard` 与 `read_task` 共用目标与进度文本：有目标时写目标值、期限、当前值、还差多少和本周变化；没有样本写「还没有数据」，达标写「已达成」，没有目标不增加这两行。
+
 ## 工具连接
 
 `config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具和 client 这个 Bot 的所有群共用，不按群各连一次。
