@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { connect as connectTcp, createServer as createTcpServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +53,8 @@ export type StackOptions = {
   readonly disconnectGraceMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
   readonly agentProcess?: boolean;
+  /** 进程内电脑代理经一个 TCP 转发连 /agent，用例可以掐断再接上这一段，模型网关仍直连控制面。 */
+  readonly cuttableAgentLink?: boolean;
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
@@ -80,6 +83,9 @@ export type Stack = {
   stopComputer(): Promise<void>;
   /** 模拟电脑突然没了：SIGKILL 电脑代理进程，运行器来不及发任何收尾报文。只在 agentProcess 下可用。 */
   killComputer(): Promise<void>;
+  /** 掐断电脑代理到 /agent 的连接，接上之前它每次重连都被当场断开。只在 cuttableAgentLink 下可用。 */
+  cutAgentLink(): void;
+  restoreAgentLink(): void;
   prompts(): readonly PromptMessage[];
   /**
    * 进程内的电脑代理累计收下并应用了几份 config。控制面只对「hello 的 config 已经发出」的连接派活，
@@ -176,9 +182,18 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     const dataDir = mkdtempSync(join(tmpdir(), "e2e-m3-bots-"));
     closers.push(async () => rmSync(dataDir, { recursive: true, force: true }));
 
+    const link = options.cuttableAgentLink ? await startLinkProxy(server.port) : null;
+    if (link !== null) closers.push(link.close);
+    const requireLink = () => {
+      if (link === null) throw new Error("掐断连接要求 cuttableAgentLink");
+      return link;
+    };
+
     let log = "";
     const agentOptions = {
-      url: `ws://127.0.0.1:${server.port}/agent`,
+      url: `ws://127.0.0.1:${link?.port ?? server.port}/agent`,
+      // 掐断期间重连一次次被当场断开，默认退避会越拉越长。
+      ...(link === null ? {} : { backoff: { initialMs: 100, maxMs: 200, factor: 1 } }),
       computerId,
       token: computerToken,
       version: AGENT_VERSION,
@@ -310,6 +325,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       startComputer,
       stopComputer,
       killComputer,
+      cutAgentLink: () => requireLink().cut(),
+      restoreAgentLink: () => requireLink().restore(),
       prompts: () => prompts,
       configsApplied: () => configsApplied,
       connectComputer: async () => {
@@ -337,6 +354,50 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     await closeAll();
     throw error;
   }
+}
+
+async function startLinkProxy(targetPort: number) {
+  const sockets = new Set<Socket>();
+  let cut = false;
+  const server = createTcpServer((client) => {
+    if (cut) {
+      client.destroy();
+      return;
+    }
+    const upstream = connectTcp(targetPort, "127.0.0.1");
+    const drop = () => {
+      for (const socket of [client, upstream]) {
+        socket.destroy();
+        sockets.delete(socket);
+      }
+    };
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.on("error", drop);
+      socket.on("close", drop);
+    }
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const destroyAll = () => {
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
+  };
+  return {
+    port: (server.address() as AddressInfo).port,
+    cut: () => {
+      cut = true;
+      destroyAll();
+    },
+    restore: () => {
+      cut = false;
+    },
+    close: async () => {
+      destroyAll();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    },
+  };
 }
 
 export type ComputerProbe = {

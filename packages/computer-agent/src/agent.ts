@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
-import { type AgentToControl, type ComputerId, ControlToAgent } from "@baize/shared";
+import { type AgentToControl, type ComputerId, ControlToAgent, type RunId } from "@baize/shared";
 import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
@@ -31,6 +31,17 @@ export interface AgentOptions {
   readonly makeChrome?: AssistantChromeFactory;
   /** 一次 browser_login 从收到到回 login_state 的上限，排队和等 Chrome 起来都算在内。 */
   readonly loginTimeoutMs?: number;
+}
+
+/** 一条 run_done 重连补发这么多次都没等到确认，下一次 hello 就不再报它，交给控制面对账按断线收尾。 */
+export const RUN_DONE_REPLAY_LIMIT = 3;
+/** 待确认的 run_done 最多留这么多条，再多就丢最老的。控制面一直不确认时，表和 hello 都不能无限长。 */
+export const UNACKED_RUN_DONE_LIMIT = 64;
+
+interface PendingRunDone {
+  readonly message: Extract<AgentToControl, { type: "run_done" }>;
+  /** welcome 之后补发过几次。连接在时那次直接发送不算。 */
+  replays: number;
 }
 
 export interface AgentHandle {
@@ -69,6 +80,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let loginQueue: Promise<void> = Promise.resolve();
   // 断线期间做完的登录，按账号只留最新一条，等下一次 welcome 补发。丢掉的话用户只能等超时再点一次。
   const unsentLogins = new Map<string, Extract<AgentToControl, { type: "login_state" }>>();
+  // 控制面还没回 run_done_ack 的 run_done，按 runId 留第一条。和登录不同，这里连接在时发出去也留着：
+  // 连接看着开着、帧却没进控制面（停机中丢帧、握手前的帧不认、TCP 半开）只有控制面知道，等它确认才删。
+  // 留着的 run 报进 hello 的 activeRuns，对账就不会按断线收尾它，welcome 后补发的真结果才收得了尾。
+  // 控制面一直不确认（处理一直抛错、老版本不发确认）时，补发够次数或表满就放手，让对账按断线把 run 收掉。
+  const unackedRunDones = new Map<RunId, PendingRunDone>();
 
   const send = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
@@ -88,6 +104,31 @@ export function startAgent(options: AgentOptions): AgentHandle {
     }
     unsentLogins.set(message.accountId, message);
     log(`连接不在，${message.accountId} 的 login_state 留到重连后补发`);
+  };
+
+  // 运行器的上行都走这里，只有 run_done 要留底。
+  const report = (message: AgentToControl): void => {
+    if (message.type !== "run_done") {
+      send(message);
+      return;
+    }
+    if (unackedRunDones.has(message.runId)) {
+      log(`run ${message.runId} 的 run_done 已经留着，丢弃重复的这条`);
+      return;
+    }
+    unackedRunDones.set(message.runId, { message, replays: 0 });
+    if (unackedRunDones.size > UNACKED_RUN_DONE_LIMIT) {
+      const [oldest] = unackedRunDones.keys();
+      if (oldest !== undefined) {
+        unackedRunDones.delete(oldest);
+        log(`待确认的 run_done 超过 ${UNACKED_RUN_DONE_LIMIT} 条，丢掉最老的 run ${oldest}，交给控制面按断线收尾`);
+      }
+    }
+    if (link.phase === "open" && link.socket.readyState === WebSocket.OPEN) {
+      send(message);
+      return;
+    }
+    log(`连接不在，run ${message.runId} 的 run_done 留到重连后补发`);
   };
 
   const stopHeartbeat = (): void => {
@@ -148,8 +189,15 @@ export function startAgent(options: AgentOptions): AgentHandle {
         attempt = 0;
         log(`控制面已接纳，owner ${message.ownerId}`);
         process.stdout.write('{"type":"online"}\n');
+        for (const pending of unackedRunDones.values()) {
+          pending.replays += 1;
+          send(pending.message);
+        }
         for (const pending of unsentLogins.values()) send(pending);
         unsentLogins.clear();
+        return;
+      case "run_done_ack":
+        unackedRunDones.delete(message.runId);
         return;
       case "config": {
         const config: AgentRunnerConfig = {
@@ -163,7 +211,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           // 不透传的话运行器按空数组对账，每来一条 config 就把所有 Bot 盘上的 skill 清空。
           skills: message.skills,
           dataDir,
-          send,
+          send: report,
           browser: browserConfig,
         };
         if (runner === null) {
@@ -265,7 +313,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
     socket.on("open", () => {
       if (stopping) return;
       link = { phase: "open", socket, applied: 0 };
-      const activeRuns = runner?.activeRuns() ?? [];
+      for (const [runId, pending] of unackedRunDones) {
+        if (pending.replays < RUN_DONE_REPLAY_LIMIT) continue;
+        unackedRunDones.delete(runId);
+        log(`run ${runId} 的 run_done 补发 ${pending.replays} 次都没等到确认，不再报它，交给控制面按断线收尾`);
+      }
+      const activeRuns = new Set([...(runner?.activeRuns() ?? []), ...unackedRunDones.keys()]);
       send({
         type: "hello",
         computerId: options.computerId,
@@ -273,7 +326,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         version: options.version,
         activeRuns: [...activeRuns],
       });
-      log(`已发 hello，报告 ${activeRuns.length} 个仍在跑的 run`);
+      log(`已发 hello，报告 ${activeRuns.size} 个仍在跑或待补发 run_done 的 run`);
       stopHeartbeat();
       heartbeat = setInterval(() => send({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
       heartbeat.unref();

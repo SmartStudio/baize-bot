@@ -90,6 +90,9 @@ export async function handleAgentEvent(
       return;
     case "run_done":
       await onRunDone(deps, conn, message);
+      // 处理完才回。不认的、重复的也回，不然代理每次重连都要补发它；处理抛错就不回，留给下次补发。
+      // 确认只保证 run 行的收尾提交了：事务之后的费用卡、例行记账这些副作用失败过的，补发撞上已结束的行直接回确认，不补（todo 584）。
+      deps.agents.send(conn.computerId, { type: "run_done_ack", runId: message.runId });
       return;
     case "agent_error":
       await onAgentError(deps, conn, message);

@@ -8,6 +8,11 @@ export type AgentClient = {
   send(message: AgentToControl): void;
   next(timeoutMs?: number): Promise<ControlToAgent>;
   expect<T extends ControlToAgent["type"]>(type: T, timeoutMs?: number): Promise<Extract<ControlToAgent, { type: T }>>;
+  /**
+   * 等控制面回这个 run 的第 nth 条 run_done_ack。确认帧不进 next、expect、received：每条 run_done 都会回一条，
+   * 混在下行里的话，只关心派活和握手的用例都得跳过它。
+   */
+  ack(runId: RunId, nth?: number, timeoutMs?: number): Promise<void>;
   /** 连接关闭时的 close code。 */
   closed(timeoutMs?: number): Promise<number>;
   /** 收到还没取走的报文。关闭帧之后不会再来，所以 closed 兑现之后这就是这条连接收到的全部。 */
@@ -21,9 +26,16 @@ export async function openAgent(port: number): Promise<AgentClient> {
   const waiters: ((message: ControlToAgent) => void)[] = [];
   let closeCode: number | null = null;
   const closeWaiters: ((code: number) => void)[] = [];
+  const acks: RunId[] = [];
+  const ackWaiters: (() => void)[] = [];
 
   socket.on("message", (raw) => {
     const message = ControlToAgent.parse(JSON.parse(raw.toString()));
+    if (message.type === "run_done_ack") {
+      acks.push(message.runId);
+      for (const waiter of ackWaiters.splice(0)) waiter();
+      return;
+    }
     const waiter = waiters.shift();
     if (waiter === undefined) inbox.push(message);
     else waiter(message);
@@ -79,6 +91,20 @@ export async function openAgent(port: number): Promise<AgentClient> {
         const timer = setTimeout(() => reject(new Error("等连接关闭超时")), timeoutMs);
         closeWaiters.push(waiter);
       }),
+    ack: async (runId, nth = 1, timeoutMs = 5000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (acks.filter((acked) => acked === runId).length < nth) {
+        const left = deadline - Date.now();
+        if (left <= 0) throw new Error(`等 ${runId} 的第 ${nth} 条 run_done_ack 超时，已收到 ${JSON.stringify(acks)}`);
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, left);
+          ackWaiters.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
+    },
     received: () => [...inbox],
     close: () => socket.close(),
   };

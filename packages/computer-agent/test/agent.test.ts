@@ -14,6 +14,8 @@ import {
   type AgentOptions,
   type AgentRunnerConfig,
   type RunnerFactory,
+  RUN_DONE_REPLAY_LIMIT,
+  UNACKED_RUN_DONE_LIMIT,
 } from "../src/agent.js";
 import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } from "../src/chrome.js";
 import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
@@ -1444,6 +1446,170 @@ describe("电脑代理连控制面", () => {
     expect(gaps[1], `间隔应逐次拉大，实际 ${gaps.join("、")}`).toBeGreaterThan(gaps[0] ?? 0);
     expect(gaps[2], `间隔应逐次拉大，实际 ${gaps.join("、")}`).toBeGreaterThan(gaps[1] ?? 0);
   }, 15_000);
+});
+
+const welcomeFrame = () =>
+  JSON.stringify({ type: "welcome", ownerId: "owner-1", kind: "local", serverTime: new Date().toISOString() });
+const runDoneOf = (runId: string) =>
+  ({
+    type: "run_done",
+    runId: RunId.parse(runId),
+    botId: BotId.parse("bot-1"),
+    groupId: GroupId.parse("group-1"),
+    steps: 3,
+    inputTokens: 120,
+    outputTokens: 40,
+  }) as const;
+const runDonesSeen = (server: ControlPlane) => server.messages.filter((message) => message.type === "run_done");
+
+describe("run_done 补发", () => {
+  /** 运行器在 prompt 里等 finish 放行，然后按 finish 给的 runId 逐条报 run_done。 */
+  function gatedRunner(server: ControlPlane, logs: string[]) {
+    let finish: ((runIds: readonly string[]) => void) | undefined;
+    let started = false;
+    return {
+      spawn: async () =>
+        spawnAgent(await server.url(), {
+          backoff: { initialMs: 200, maxMs: 200, factor: 1 },
+          log: (line) => logs.push(line),
+          makeRunner: (config) => ({
+            ...runnerOf(config, runnerCalls()),
+            async prompt() {
+              started = true;
+              const runIds = await new Promise<readonly string[]>((resolve) => {
+                finish = resolve;
+              });
+              for (const runId of runIds) config.send(runDoneOf(runId));
+            },
+          }),
+        }),
+      started: () => started,
+      finish: (runIds: readonly string[]) => finish?.(runIds),
+    };
+  }
+
+  it("断线期间跑完的 run：hello 把它报成还在跑，welcome 之后才补发，同一个 runId 报两次只补一条", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const logs: string[] = [];
+    const runner = gatedRunner(server, logs);
+    await runner.spawn();
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    first.send(JSON.stringify(configMessage));
+    first.send(JSON.stringify(promptMessage));
+    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
+
+    first.terminate();
+    await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
+    runner.finish(["run-1", "run-1"]);
+    await poll(
+      () => (logs.some((line) => line.includes("run run-1 的 run_done 留到重连后补发")) ? true : undefined),
+      3000,
+      "run_done 留下",
+    );
+
+    const second = await server.waitForSocket(2);
+    const hello = await server.waitForMessage("hello", 2);
+    expect(hello.activeRuns, "运行器已经不跑它了，但 run_done 还没送到，对账不能按断线收尾").toEqual(["run-1"]);
+    expect(runDonesSeen(server), "welcome 之前控制面不认这条连接的帧，不能先发").toEqual([]);
+
+    second.send(welcomeFrame());
+    second.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 2);
+    expect(runDonesSeen(server)).toEqual([runDoneOf("run-1")]);
+  });
+
+  it("连接在时发出去的 run_done 也留到控制面确认：没确认就每次重连补发，确认之后不再报也不再补", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const logs: string[] = [];
+    const runner = gatedRunner(server, logs);
+    await runner.spawn();
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    first.send(JSON.stringify(configMessage));
+    first.send(JSON.stringify(promptMessage));
+    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
+    runner.finish(["run-1", "run-1"]);
+    await server.waitForMessage("run_done", 1);
+    first.send(JSON.stringify({ ...configMessage, generation: 2 }));
+    await server.waitForMessage("config_applied", 2);
+    expect(runDonesSeen(server), "同一个 runId 报两次，连接在时也只发一条").toHaveLength(1);
+
+    first.terminate();
+    const second = await server.waitForSocket(2);
+    expect((await server.waitForMessage("hello", 2)).activeRuns, "发出去了但没确认，仍报成还在跑").toEqual(["run-1"]);
+    second.send(welcomeFrame());
+    await server.waitForMessage("run_done", 2);
+    second.send(JSON.stringify({ type: "run_done_ack", runId: "run-1" }));
+    second.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 3);
+
+    second.terminate();
+    const third = await server.waitForSocket(3);
+    expect((await server.waitForMessage("hello", 3)).activeRuns, "确认过的不再报").toEqual([]);
+    third.send(welcomeFrame());
+    third.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 4);
+    expect(runDonesSeen(server), "确认之后重连不再补发").toEqual([runDoneOf("run-1"), runDoneOf("run-1")]);
+  });
+
+  it("控制面一直不确认：补发够次数后 hello 不再报它，交给对账按断线收尾，补发也停", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const logs: string[] = [];
+    const runner = gatedRunner(server, logs);
+    await runner.spawn();
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    first.send(JSON.stringify(configMessage));
+    first.send(JSON.stringify(promptMessage));
+    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
+    runner.finish(["run-1"]);
+    await server.waitForMessage("run_done", 1);
+
+    let current = first;
+    for (let replay = 1; replay <= RUN_DONE_REPLAY_LIMIT; replay += 1) {
+      current.terminate();
+      current = await server.waitForSocket(replay + 1);
+      const hello = await server.waitForMessage("hello", replay + 1);
+      expect(hello.activeRuns, `第 ${replay} 次重连还在补发次数里，仍报它`).toEqual(["run-1"]);
+      current.send(welcomeFrame());
+      await server.waitForMessage("run_done", replay + 1);
+    }
+
+    current.terminate();
+    const last = await server.waitForSocket(RUN_DONE_REPLAY_LIMIT + 2);
+    const hello = await server.waitForMessage("hello", RUN_DONE_REPLAY_LIMIT + 2);
+    expect(hello.activeRuns, "补发够次数没确认，不再报，控制面对账才能按断线收尾").toEqual([]);
+    last.send(welcomeFrame());
+    last.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 2);
+    expect(runDonesSeen(server), "放手之后不再补发").toHaveLength(RUN_DONE_REPLAY_LIMIT + 1);
+  });
+
+  it("待确认的 run_done 超过上限时丢最老的，hello 只报留下的", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const logs: string[] = [];
+    const runner = gatedRunner(server, logs);
+    await runner.spawn();
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    first.send(JSON.stringify(configMessage));
+    first.send(JSON.stringify(promptMessage));
+    await poll(() => (runner.started() ? true : undefined), 3000, "run 开始");
+    const runIds = Array.from({ length: UNACKED_RUN_DONE_LIMIT + 1 }, (_, index) => `run-${index}`);
+    runner.finish(runIds);
+    await server.waitForMessage("run_done", runIds.length);
+
+    first.terminate();
+    await server.waitForSocket(2);
+    const hello = await server.waitForMessage("hello", 2);
+    expect(hello.activeRuns, "最老的 run-0 被丢掉，交给对账；其余照报").toEqual(runIds.slice(1));
+    expect(logs.some((line) => line.includes("丢掉最老的 run run-0"))).toBe(true);
+  });
 });
 
 describe("退避", () => {
