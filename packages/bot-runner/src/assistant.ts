@@ -4,10 +4,11 @@ import type { z } from "zod";
 import type { RunnerTool } from "./bot-session.js";
 import type { ActiveRun } from "./topic.js";
 
-// 主助理（role = assistant）比队员多的东西：系统提示里一段规则、prompt 里一段项目清单、两件工具。
-// 两件工具都不走审批：用户当面说的话就是他的决定，再弹一张确认卡是多问一遍。
+// 主助理（role = assistant）比队员多的东西：系统提示里一段规则、prompt 里一段项目清单、几件工具。
+// set_cadence、propose_project 在这里，propose_team 在 team.ts。它们都不走审批：用户当面说的话就是他的决定，
+// 再弹一张确认卡是多问一遍；建队卡、方案卡本身就是等用户点的卡，不是审批。
 
-/** 队员的工具连接也不能占这两个名字：闸门按名字把它们归成内部工具直接放行。 */
+/** 队员的工具连接也不能占这些名字：闸门按名字把它们归成内部工具直接放行。 */
 export const ASSISTANT_TOOL_NAMES = [
   "set_cadence",
   "propose_project",
@@ -25,6 +26,8 @@ export const ASSISTANT_RULE =
   "属于某个项目的活，说清交给哪个项目、去哪个群看；要改某个项目的节奏（多久做一次、一次做多少），" +
   "调 set_cadence 改那个项目，别口头答应，改完在回复里说清下次在哪里看到结果。" +
   "用户想做成一件新的事，调 propose_project 出一张方案卡，发出去就等用户点开始，别自己接着建。" +
+  "项目缺人时，调 propose_team 出一张建队卡，每个人选写一句为什么要他，卡上只问用户要不要这个人，不问权限和模型，" +
+  "发出去就等用户确认，别自己拉人进群。" +
   "每条消息里的「你管的项目」就是你手上的全部项目。";
 
 /** 清单是空的也出这一段：主助理得知道自己手上没项目，不然会拿猜的 id 去调 set_cadence。 */

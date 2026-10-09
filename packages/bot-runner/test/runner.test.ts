@@ -4438,6 +4438,15 @@ describe("运行器的指标上报", () => {
   });
 });
 
+const newMember = (index: number) => ({
+  kind: "new",
+  name: `新人${index}`,
+  description: "干一件事",
+  note: "缺人",
+  suggested: false,
+});
+const teamOffers = (h: Harness) => h.sent.filter((message) => message.type === "team_offer");
+
 describe("运行器的主助理", () => {
   const PROJECTS: NonNullable<PromptMessage["projects"]> = [
     { groupId: GroupId.parse("group-xhs"), title: "小红书运营", cadence: "每周 2 篇" },
@@ -5021,6 +5030,326 @@ ${join(h.dataDir, "bot-1", "work")}
       "bot_tool_call:failed",
     ]);
     expect(seen.toolResults.join("")).toContain("节奏没发出去，改好再调：cadence 是空的");
+  });
+
+  describe("建队卡 propose_team", () => {
+    const TEAM_ARGS = {
+      projectGroupId: "group-xhs",
+      members: [
+        { kind: "existing", botId: "bot-2", note: "上次的封面就是他做的", suggested: false },
+        {
+          kind: "new",
+          name: "小数",
+          tags: ["数据"],
+          description: "盯阅读量和涨粉",
+          note: "现在没人看数据",
+          suggested: true,
+        },
+      ],
+    };
+    const failedOnce = (h: Harness) =>
+      expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+        "bot_tool_call:running",
+        "bot_tool_call:failed",
+      ]);
+
+    it("propose_team 发出 team_offer，不产生审批，工具结果让它等用户确认", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [["小红书缺个看数据的", callTool("propose_team", TEAM_ARGS)]]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "小红书缺个看数据的"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(teamOffers(h)).toEqual([
+        {
+          type: "team_offer",
+          runId: "run-1",
+          botId: "bot-1",
+          groupId: "group-1",
+          projectGroupId: "group-xhs",
+          members: [
+            { kind: "existing", botId: "bot-2", note: "上次的封面就是他做的", suggested: false },
+            {
+              kind: "new",
+              name: "小数",
+              tags: ["数据"],
+              description: "盯阅读量和涨粉",
+              note: "现在没人看数据",
+              suggested: true,
+            },
+          ],
+        },
+      ]);
+      expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+        "bot_tool_call:running",
+        "bot_tool_call:ok",
+      ]);
+      expect(seen.toolResults.join(""), "建队卡发在单聊里，工具结果不能说成已经加进群").toContain("等用户确认");
+      expect(seen.toolResults.join("")).toContain("别自己拉人");
+    });
+
+    it("propose_team 新人没写 tags、人选没写 suggested 时补默认，模型多写的键不上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "补个人",
+            callTool("propose_team", {
+              projectGroupId: "group-gh",
+              members: [
+                { kind: "new", name: "小审", description: "看 PR", note: "没人审代码", reason: "多余" },
+                { kind: "existing", botId: "bot-2", note: "熟这个仓库", extra: 1 },
+              ],
+            }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "补个人"));
+
+      expect(teamOffers(h)).toEqual([
+        {
+          type: "team_offer",
+          runId: "run-1",
+          botId: "bot-1",
+          groupId: "group-1",
+          projectGroupId: "group-gh",
+          members: [
+            { kind: "new", name: "小审", tags: [], description: "看 PR", note: "没人审代码", suggested: false },
+            { kind: "existing", botId: "bot-2", note: "熟这个仓库", suggested: false },
+          ],
+        },
+      ]);
+    });
+
+    it("队员会话里没有 propose_team，主助理有", async () => {
+      const memberRequests: ChatCompletionRequest[] = [];
+      const teammate = await startHarness({
+        bots: ["bot-1"],
+        script: (req) => {
+          memberRequests.push(req);
+          return reply;
+        },
+      });
+      const assistantRequests: ChatCompletionRequest[] = [];
+      const assistant = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: (req) => {
+          assistantRequests.push(req);
+          return reply;
+        },
+      });
+
+      await teammate.runner.prompt(promptMessage("bot-1", "run-1", "小红书缺个看数据的"));
+      await assistant.runner.prompt(assistantPrompt("run-1", "小红书缺个看数据的"));
+
+      expect(toolNamesSent(memberRequests)).not.toContain("propose_team");
+      expect(toolNamesSent(assistantRequests)).toContain("propose_team");
+    });
+
+    it("队员调 propose_team：工具不存在，不发上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        script: scriptRecording(seen, [["小红书缺个看数据的", callTool("propose_team", TEAM_ARGS)]]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "小红书缺个看数据的"));
+
+      expect(teamOffers(h)).toEqual([]);
+      expect(seen.toolResults.join("")).toContain("Tool propose_team not found");
+    });
+
+    it("成员超 5 个时工具报中文错误，不发上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "再拉几个人",
+            callTool("propose_team", { projectGroupId: "group-xhs", members: [1, 2, 3, 4, 5, 6].map(newMember) }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "再拉几个人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      expect(seen.toolResults.join(""), "主助理自己占一个座位，说清为什么是 5 个").toContain(
+        "建队卡没发出去，改好再调：成员最多 5 个（项目群连主助理最多 6 个 Bot），现在有 6 个",
+      );
+    });
+
+    it("成员正好 5 个照常发出", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "拉五个人",
+            callTool("propose_team", { projectGroupId: "group-xhs", members: [1, 2, 3, 4, 5].map(newMember) }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "拉五个人"));
+
+      expect(teamOffers(h).map((offer) => offer.members.length)).toEqual([5]);
+    });
+
+    it("成员是空的：本地拦住，错误文本是中文", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          ["不用加人", callTool("propose_team", { projectGroupId: "group-xhs", members: [] })],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "不用加人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      expect(seen.toolResults.join("")).toContain("建队卡没发出去，改好再调：members 至少要 1 条");
+    });
+
+    it("已有人选的 botId 是空的：报中文错，不发上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "补个人",
+            callTool("propose_team", {
+              projectGroupId: "group-xhs",
+              members: [{ kind: "existing", botId: "", note: "熟这个仓库" }],
+            }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "补个人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      expect(seen.toolResults.join("")).toContain("建队卡没发出去，改好再调：existing 人选的 botId 是空的");
+    });
+
+    it("新人的 description 是空的：报错，建出来的 Bot 没有边界", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "补个人",
+            callTool("propose_team", {
+              projectGroupId: "group-xhs",
+              members: [{ ...newMember(1), name: "小空", description: " " }],
+            }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "补个人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      expect(seen.toolResults.join("")).toContain("建队卡没发出去，改好再调：新人「小空」的 description 是空的");
+    });
+
+    it("新人名字或理由超长：长度交给协议校验，错误文本是中文", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          [
+            "补个人",
+            callTool("propose_team", {
+              projectGroupId: "group-xhs",
+              members: [{ ...newMember(1), name: "名".repeat(21), note: "理".repeat(201) }],
+            }),
+          ],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "补个人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      const error = seen.toolResults.join("");
+      expect(error).toContain("members.0.name 最多 20 个字");
+      expect(error).toContain("members.0.note 最多 200 个字");
+    });
+
+    it("projectGroupId 不在清单里：报错并列出能选的项目，不发上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [
+          ["抖音缺人", callTool("propose_team", { ...TEAM_ARGS, projectGroupId: "group-douyin" })],
+        ]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "抖音缺人"));
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      const error = seen.toolResults.join("");
+      expect(error).toContain("group-douyin");
+      expect(error, "列出能选的项目，模型下一轮才不用瞎猜").toContain("小红书运营（projectGroupId：group-xhs）");
+    });
+
+    it("主助理在项目群里调 propose_team：抛中文错，不发上行，也不说已经发出去", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [["@bot-1 缺个人", callTool("propose_team", TEAM_ARGS)]]),
+      });
+
+      await h.runner.prompt({
+        ...promptMessage("bot-1", "run-1", "@bot-1 缺个人", {
+          groupId: "group-xhs",
+          members: [member("bot-1", "主助理"), member("bot-2", "小文")],
+        }),
+        projects: PROJECTS,
+      });
+
+      expect(teamOffers(h)).toEqual([]);
+      failedOnce(h);
+      expect(seen.toolResults.join(""), "项目群里发不出建队卡，不能让模型以为发出去了").not.toContain("等用户确认");
+      expect(seen.toolResults.join("")).toContain("建队卡只能在你和用户的单聊里出，这里是项目群，没发出去。");
+    });
+
+    it("主助理的系统提示写明项目缺人时出建队卡、只问要不要这个人", async () => {
+      const assistant = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(assistant, [["随便说句话", reply]]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "随便说句话"));
+
+      const system = assistant.firstTurn.join("");
+      expect(system).toContain("propose_team");
+      expect(system).toContain("只问用户要不要这个人");
+    });
   });
 });
 

@@ -557,7 +557,6 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
       ...createMemoryTools({ activeRun, send: config.send }),
-      ...createTeamTools({ activeRun, send: config.send }),
       ...createHelperTools({ activeRun, send: config.send }),
       ...createRoutineOfferTools({ activeRun, send: config.send }),
       ...createDraftTools({
@@ -566,7 +565,12 @@ export function createRunner(config: RunnerConfig): Runner {
         accounts: () => desiredConfig(bot)!.accounts,
         images: { workDir: dirs.workDir, draftsDir: realpathSync(dirs.draftsDir), hidden: zones.hidden },
       }),
-      ...(definition.config.role === "assistant" ? createAssistantTools({ activeRun, send: config.send }) : []),
+      ...(definition.config.role === "assistant"
+        ? [
+            ...createAssistantTools({ activeRun, send: config.send }),
+            ...createTeamTools({ activeRun, send: config.send }),
+          ]
+        : []),
       ...(bot.browser?.tools ?? []),
       createAccountReadTool({
         described: definition.readable,
