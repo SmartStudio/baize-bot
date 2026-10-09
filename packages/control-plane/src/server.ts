@@ -49,6 +49,8 @@ export type RunningServer = {
 export type StartOptions = {
   readonly db: Db;
   readonly port: number;
+  /** 不给就监听通配地址。测试给 127.0.0.1：macOS 分临时端口时不避开别的进程占在 127.0.0.1 上的同号端口，客户端连 127.0.0.1 会连到别人那里。 */
+  readonly hostname?: string;
   readonly secureCookie?: boolean;
   readonly config?: RuntimeConfig;
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
@@ -136,7 +138,11 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   // 还没开始监听就不可能有电脑连上来，库里剩下的在线必然是上一个进程没关干净留下的。
   await markOnlineComputersSleeping(options.db);
 
-  const server = serve({ fetch: app.fetch, port: options.port });
+  const server = serve({
+    fetch: app.fetch,
+    port: options.port,
+    ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
+  });
   const clients = new WebSocketServer({ noServer: true });
   const agentSockets = new WebSocketServer({ noServer: true });
 

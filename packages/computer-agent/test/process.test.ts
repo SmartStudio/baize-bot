@@ -77,7 +77,7 @@ async function createDataDir(): Promise<string> {
 }
 
 async function startWelcomeServer(): Promise<{ readonly url: string; readonly close: () => Promise<void> }> {
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   server.on("connection", (socket) => {
     socket.on("message", (data) => {

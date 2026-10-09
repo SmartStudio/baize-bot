@@ -46,7 +46,7 @@ async function writeLaunch(path: string, launch: object, mode: number): Promise<
 type Hello = { readonly type: "hello"; readonly token: string; readonly computerId: string };
 
 async function startWelcomeServer(): Promise<{ readonly url: string; readonly hellos: Hello[] }> {
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const hellos: Hello[] = [];
   server.on("connection", (socket) => {

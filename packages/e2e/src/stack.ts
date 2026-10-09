@@ -142,6 +142,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     const server = await startServer({
       db,
       port: 0,
+      hostname: "127.0.0.1",
       config: runtimeConfig(),
       // 发布只在用例调 publishTick 时跑，到点的草稿什么时候发由用例说了算。
       publisher: { intervalMs: DAY_MS },

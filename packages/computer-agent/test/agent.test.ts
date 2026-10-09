@@ -175,7 +175,7 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
 }
 
 function startControlPlane() {
-  const server = new WebSocketServer({ port: 0 });
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const sockets: WebSocket[] = [];
   const messages: AgentToControl[] = [];
   const parseErrors: string[] = [];
