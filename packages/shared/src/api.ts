@@ -174,6 +174,10 @@ export const MessageListResponse = z.object({
 export const SendMessageRequest = z.object({ text: z.string().min(1) });
 export const SendMessageResponse = z.object({ message: Message });
 
+// GET /api/messages/:id  这一条的当前版本。客户端发现某条消息的 delta 漏了版本时只补这一条：它可能早已落出最近一页。
+// 别人的、不存在的、所在群已经没有 Bot 的，一律 404。
+export const MessageResponse = z.object({ message: Message });
+
 // POST /api/approvals/:id  归属人点批准或拒绝。别人的审批 404，已经有结论的 409。
 export const DecideApprovalRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("approved"), scope: ApprovalScope.default("once") }).strict(),
@@ -588,6 +592,7 @@ export const UpdateSettingsRequest = Settings.partial();
 
 // WebSocket /api/ws  登录后客户端连上，服务端推送。客户端不发报文。
 // Bot 流式回复先推一条空正文的 message，随后每段 delta 推一条 message_delta，客户端按 messageId 往上追加。
+// delta 的 revision 是接上这一段之后那条消息的 revision，手上那份恰好比它小一才接得上；更小是旧帧，更大是中间漏了。
 export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("message"), message: Message }),
   z.object({
@@ -596,6 +601,7 @@ export const ServerPush = z.discriminatedUnion("type", [
     groupId: GroupId,
     delta: z.string(),
     done: z.boolean(),
+    revision: z.number().int().positive(),
   }),
   z.object({ type: z.literal("bot_updated"), bot: Bot }),
   // 项目开始时给新队员推：带单聊群 id，客户端不用再拉 Bot 列表才认得它的单聊。

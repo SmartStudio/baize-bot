@@ -463,11 +463,14 @@ export const MessageBody = z.discriminatedUnion("kind", [
 ]);
 export type MessageBody = z.infer<typeof MessageBody>;
 
+// revision 是这条消息被写过几次：建出来是 0，之后正文每改一次（流式接一段、收成定稿、卡片改状态）加一。
+// 同一条消息会经推送、历史、侧栏几条路到客户端，先后没有保证，客户端只认 revision 更大的那份。
 export const Message = z.object({
   id: MessageId,
   groupId: GroupId,
   body: MessageBody,
   createdAt: Timestamp,
+  revision: z.number().int().nonnegative(),
 });
 export type Message = z.infer<typeof Message>;
 

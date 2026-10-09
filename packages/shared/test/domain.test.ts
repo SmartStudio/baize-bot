@@ -100,7 +100,7 @@ describe("domain schemas reject illegal states", () => {
   });
 
   it("message body is discriminated by kind", () => {
-    const msg = { id: "m1", groupId: "g1", createdAt: now };
+    const msg = { id: "m1", groupId: "g1", createdAt: now, revision: 0 };
     expect(Message.safeParse({ ...msg, body: { kind: "user", text: "hi" } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { kind: "bot", text: "hi" } }).success).toBe(false);
   });
@@ -205,7 +205,7 @@ describe("domain schemas reject illegal states", () => {
 
 describe("M7 群与主题任务的共享形状", () => {
   it("消息正文的 mentions 可省，带了必须是 Bot id 数组", () => {
-    const msg = { id: "m1", groupId: "g1", createdAt: now };
+    const msg = { id: "m1", groupId: "g1", createdAt: now, revision: 0 };
     expect(Message.safeParse({ ...msg, body: { kind: "user", text: "@小服 查一下" } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { kind: "user", text: "x", mentions: ["b1"] } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { kind: "user", text: "x", mentions: "b1" } }).success).toBe(false);
@@ -381,7 +381,7 @@ describe("M10 skill 的共享形状", () => {
   });
 
   it("skill_offer 消息正文自带步骤和结论，存了之后 skillId 才有值", () => {
-    const msg = { id: "m1", groupId: "g1", createdAt: now };
+    const msg = { id: "m1", groupId: "g1", createdAt: now, revision: 0 };
     const offer = { kind: "skill_offer", botId: "b1", name: "Globex 报价", steps: ["建报价单", "生成 PDF"] };
     expect(Message.safeParse({ ...msg, body: { ...offer, status: "offered", skillId: null } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { ...offer, status: "saved", skillId: "s1" } }).success).toBe(true);
@@ -570,6 +570,7 @@ describe("C0 工具视图与审批报文", () => {
         id: "m1",
         groupId: "g1",
         createdAt: now,
+        revision: 0,
         body: {
           kind: "tool_call",
           runId: "r1",
@@ -737,5 +738,24 @@ describe("登录失败、发布失败和网关别名", () => {
   it("网关别名是 baize: 加用途", () => {
     expect(gatewayAlias("plan")).toBe("baize:plan");
     expect(gatewayAlias("fast")).toBe("baize:fast");
+  });
+});
+
+describe("消息版本", () => {
+  const body = { kind: "user", text: "hi" };
+
+  it("消息必须带非负整数 revision，客户端靠它判新旧", () => {
+    const msg = { id: "m1", groupId: "g1", createdAt: now, body };
+    expect(Message.safeParse({ ...msg, revision: 0 }).success).toBe(true);
+    expect(Message.safeParse(msg).success, "不带 revision 不是一条完整的消息").toBe(false);
+    expect(Message.safeParse({ ...msg, revision: -1 }).success).toBe(false);
+    expect(Message.safeParse({ ...msg, revision: 1.5 }).success).toBe(false);
+  });
+
+  it("流式 delta 带接上之后的 revision，至少是 1", () => {
+    const delta = { type: "message_delta", messageId: "m1", groupId: "g1", delta: "嗯", done: false };
+    expect(ServerPush.safeParse({ ...delta, revision: 1 }).success).toBe(true);
+    expect(ServerPush.safeParse(delta).success).toBe(false);
+    expect(ServerPush.safeParse({ ...delta, revision: 0 }).success, "空壳是 0，接过一段的不会是 0").toBe(false);
   });
 });
