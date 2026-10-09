@@ -29,6 +29,8 @@ export const DraftId = id("DraftId");
 export const ContentPlanId = id("ContentPlanId");
 export const PublicationId = id("PublicationId");
 export const AccountId = id("AccountId");
+export const PreferenceId = id("PreferenceId");
+export const ProjectReviewId = id("ProjectReviewId");
 
 export type UserId = z.infer<typeof UserId>;
 export type ComputerId = z.infer<typeof ComputerId>;
@@ -47,6 +49,8 @@ export type DraftId = z.infer<typeof DraftId>;
 export type ContentPlanId = z.infer<typeof ContentPlanId>;
 export type PublicationId = z.infer<typeof PublicationId>;
 export type AccountId = z.infer<typeof AccountId>;
+export type PreferenceId = z.infer<typeof PreferenceId>;
+export type ProjectReviewId = z.infer<typeof ProjectReviewId>;
 
 export const Timestamp = z.string().datetime();
 
@@ -82,12 +86,39 @@ export type BotRole = z.infer<typeof BotRole>;
 export const BotRunState = z.enum(["running", "paused"]);
 export type BotRunState = z.infer<typeof BotRunState>;
 
+export const Platform = z.enum(["github", "x", "xiaohongshu"]);
+export type Platform = z.infer<typeof Platform>;
+export const BrowserPlatform = Platform.extract(["xiaohongshu"]);
+export type BrowserPlatform = z.infer<typeof BrowserPlatform>;
+export const OAuthPlatform = Platform.extract(["github", "x"]);
+export type OAuthPlatform = z.infer<typeof OAuthPlatform>;
+
+export const ModelPurpose = z.enum(["plan", "fast"]);
+export type ModelPurpose = z.infer<typeof ModelPurpose>;
+/** 模型网关对外的模型名，控制面按它映射到 GATEWAY_MODELS 里的真实模型。 */
+export type GatewayModels = Record<ModelPurpose, string>;
+export function gatewayAlias(purpose: ModelPurpose): `baize:${ModelPurpose}` {
+  return `baize:${purpose}`;
+}
+
+// 例行任务三态：on 到点就跑；paused 是用户停的；auto_paused 是连续三次没人看结果后自己停的，恢复都回 on。
+export const RoutineState = z.enum(["on", "paused", "auto_paused"]);
+export type RoutineState = z.infer<typeof RoutineState>;
+// 例行运行里 Bot 能做到哪一步：read_only 拦发布、私信、互动、删、工作目录外写和起草（D5）；draft 照常起草等批。
+export const RoutineBoundary = z.enum(["read_only", "draft"]);
+export type RoutineBoundary = z.infer<typeof RoutineBoundary>;
+
+// 标签最多 5 个，照原型 editBotModal。每个的上限沿用第 1 期 tag 的 20 码元而不是原型的 8：第 1 期合法的长标签
+// 迁移后原样装进单元素数组，读和写共用这一个 schema，收紧到 8 会让旧行解析失败。描述的 80 字上限只收在写入请求上。
+export const BotTags = z.array(z.string().min(1).max(20)).max(5);
+export type BotTags = z.infer<typeof BotTags>;
+
 export const Bot = z.object({
   id: BotId,
   ownerId: UserId,
   role: BotRole,
   name: z.string().min(1).max(20),
-  tag: z.string().max(20).default(""),
+  tags: BotTags.default([]),
   description: z.string().default(""),
   hue: BotHue,
   notify: z.boolean().default(true),
@@ -112,6 +143,33 @@ export const HandledRecord = z.object({
 
 export const TaskStatus = z.enum(["active", "done"]);
 
+// 目标数落在 tasks.goal_target 这列 integer 上，超过上限不能让落库入口 500，在边界就拒掉。
+export const GoalTarget = z.number().int().positive().max(2147483647, "目标数最多 2147483647");
+// 一个项目只有一个主指标（D2）：目标是「到 dueAt 之前做到 target 个 unit」，进度条按它画；没有目标就退回清单进度。
+export const ProjectGoal = z
+  .object({ target: GoalTarget, unit: z.string().min(1).max(8), dueAt: Timestamp.nullable() })
+  .strict();
+export type ProjectGoal = z.infer<typeof ProjectGoal>;
+
+// 指标从哪来：GitHub 星数由控制面每 6 小时直读；只能走浏览器的平台由 Bot 在例行里读完调 report_metric 报上来（D1）。
+export const MetricSource = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("github_stars"),
+      accountId: AccountId,
+      repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    })
+    .strict(),
+  z.object({ kind: z.literal("reported"), platform: Platform, label: z.string().min(1).max(40) }).strict(),
+]);
+export type MetricSource = z.infer<typeof MetricSource>;
+
+// 最新一个样本和本周变化。weekDelta 是周一 00:00 上海时区之后的最新样本减之前的最后一个样本（D18）。
+export const TaskMetric = z
+  .object({ current: z.number().finite(), weekDelta: z.number().finite(), sampledAt: Timestamp })
+  .strict();
+export type TaskMetric = z.infer<typeof TaskMetric>;
+
 export const TopicTask = z.object({
   id: TaskId,
   groupId: GroupId,
@@ -124,6 +182,10 @@ export const TopicTask = z.object({
   currentBotId: BotId.nullable(),
   handled: z.array(HandledRecord),
   status: TaskStatus,
+  goal: ProjectGoal.nullable(),
+  metricSource: MetricSource.nullable(),
+  // 没有样本就是 null，哪怕 metricSource 已经设了。
+  metric: TaskMetric.nullable(),
 });
 export type TopicTask = z.infer<typeof TopicTask>;
 
@@ -275,17 +337,10 @@ export type Skill = z.infer<typeof Skill>;
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
 
-export const Platform = z.enum(["github", "x", "xiaohongshu"]);
-export type Platform = z.infer<typeof Platform>;
-export const BrowserPlatform = Platform.extract(["xiaohongshu"]);
-export type BrowserPlatform = z.infer<typeof BrowserPlatform>;
-export const OAuthPlatform = Platform.extract(["github", "x"]);
-export type OAuthPlatform = z.infer<typeof OAuthPlatform>;
-
 export const ProjectOfferStatus = z.enum(["offered", "started", "dismissed"]);
 export type ProjectOfferStatus = z.infer<typeof ProjectOfferStatus>;
 export const ProjectOfferMember = z
-  .object({ name: z.string().min(1).max(20), tag: z.string().max(20), description: z.string().max(200) })
+  .object({ name: z.string().min(1).max(20), tags: BotTags, description: z.string().max(200) })
   .strict();
 export type ProjectOfferMember = z.infer<typeof ProjectOfferMember>;
 export const ProjectOfferPlatform = z.discriminatedUnion("kind", [
@@ -293,6 +348,40 @@ export const ProjectOfferPlatform = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("unsupported"), name: z.string().min(1).max(20) }).strict(),
 ]);
 export type ProjectOfferPlatform = z.infer<typeof ProjectOfferPlatform>;
+
+// 建队卡。主助理在自己的单聊里出，目标是一个项目群。每行一个人选：existing 是已有的 Bot，new 是要新请的；
+// note 是为什么要这个人，suggested 为 true 的是建议人选，默认不勾，用户点「加上」才算（D7：只加人，不减人）。
+export const TeamOfferMember = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("existing"), botId: BotId, note: z.string().max(200), suggested: z.boolean() }).strict(),
+  z
+    .object({
+      kind: z.literal("new"),
+      name: z.string().min(1).max(20),
+      tags: BotTags,
+      description: z.string().max(80),
+      note: z.string().max(200),
+      suggested: z.boolean(),
+    })
+    .strict(),
+]);
+export type TeamOfferMember = z.infer<typeof TeamOfferMember>;
+// deferred 是用户点了「先放着」：卡还在等你确认，只是不再排在前面。
+export const TeamOfferStatus = z.enum(["offered", "confirmed", "deferred", "dismissed"]);
+export type TeamOfferStatus = z.infer<typeof TeamOfferStatus>;
+
+// 例行确认卡。主助理提议的一条例行，点「加上」才建行；added 之后 routineId 指向建出来的那条。
+export const RoutineOfferStatus = z.enum(["offered", "added", "dismissed"]);
+export type RoutineOfferStatus = z.infer<typeof RoutineOfferStatus>;
+// 和 AgentToControl.routine_offer 共用的字段。
+export const RoutineOfferSpec = {
+  name: z.string().min(1).max(40),
+  instruction: z.string().min(1).max(4000),
+  cron: z.string().min(1).max(100),
+  executorBotId: BotId,
+  boundary: RoutineBoundary,
+  purpose: ModelPurpose,
+  onToday: z.boolean(),
+};
 
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
@@ -345,11 +434,32 @@ export const MessageBody = z.discriminatedUnion("kind", [
     platforms: z.array(ProjectOfferPlatform).max(6),
     cadence: z.string().max(200),
     firstStep: z.string().min(1).max(200),
+    // 主指标的目标。两个一起给才算有目标，开始项目时写进任务卡的 goal；旧卡没有这两个字段。
+    goalTarget: GoalTarget.optional(),
+    goalUnit: z.string().min(1).max(8).optional(),
     status: ProjectOfferStatus,
     groupId: GroupId.nullable(),
   }),
   z.object({ kind: z.literal("draft"), draftId: DraftId }),
   z.object({ kind: z.literal("plan"), planId: ContentPlanId }),
+  // 建队卡的人选就在正文里，和 skill_offer 一样状态随正文走，点了就改这条消息再重推。groupId 是要加人的项目群。
+  // 人选最多 5 个：项目群最多 6 个 Bot，主助理自己占一个。
+  z.object({
+    kind: z.literal("team_offer"),
+    botId: BotId,
+    members: z.array(TeamOfferMember).min(1).max(5),
+    status: TeamOfferStatus,
+    groupId: GroupId,
+  }),
+  // 例行确认卡。groupId 为 null 是发进执行者的单聊。
+  z.object({
+    kind: z.literal("routine_offer"),
+    botId: BotId,
+    ...RoutineOfferSpec,
+    groupId: GroupId.nullable(),
+    status: RoutineOfferStatus,
+    routineId: RoutineId.nullable(),
+  }),
 ]);
 export type MessageBody = z.infer<typeof MessageBody>;
 
@@ -513,14 +623,6 @@ export const Notice = z
   .strict();
 export type Notice = z.infer<typeof Notice>;
 
-export const ModelPurpose = z.enum(["plan", "fast"]);
-export type ModelPurpose = z.infer<typeof ModelPurpose>;
-/** 模型网关对外的模型名，控制面按它映射到 GATEWAY_MODELS 里的真实模型。 */
-export type GatewayModels = Record<ModelPurpose, string>;
-export function gatewayAlias(purpose: ModelPurpose): `baize:${ModelPurpose}` {
-  return `baize:${purpose}`;
-}
-
 export const Trigger = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cron"), expr: z.string() }),
   z.object({ kind: z.literal("webhook"), token: z.string() }),
@@ -537,6 +639,8 @@ export const RoutineRun = z.object({
   startedAt: Timestamp,
   status: RoutineRunStatus,
   note: z.string(),
+  // 用户什么时候看过这次的结果（打开过结果所在的群或项目页，D3）。连续三次都没看过，例行自己停。
+  seenAt: Timestamp.nullable(),
 });
 export type RoutineRun = z.infer<typeof RoutineRun>;
 
@@ -549,10 +653,40 @@ export const Routine = z.object({
   instruction: z.string(),
   triggers: z.array(Trigger),
   onFailure: OnFailure,
-  enabled: z.boolean(),
+  state: RoutineState,
+  boundary: RoutineBoundary,
+  // 要不要在首页「接下来」里露出。
+  onToday: z.boolean(),
   runs: z.array(RoutineRun).max(20),
 });
 export type Routine = z.infer<typeof Routine>;
+
+// Bot 在单聊里当场记下的一条偏好（D10）。private 的默认不进分享包；sourceMessageId 是它从哪句话记的。
+export const Preference = z.object({
+  id: PreferenceId,
+  botId: BotId,
+  text: z.string().min(1).max(200),
+  sourceMessageId: MessageId.nullable(),
+  private: z.boolean(),
+  createdAt: Timestamp,
+});
+export type Preference = z.infer<typeof Preference>;
+
+// 品牌手册属于全队，一个用户一本。Bot 不能直接改，只有你批过的草稿改动自动追加进 edits（D8）。
+// version 每次写入加一，运行器靠它判断要不要重送。
+export const BrandEdit = z.object({ draftId: DraftId, before: z.string(), after: z.string(), at: Timestamp }).strict();
+export type BrandEdit = z.infer<typeof BrandEdit>;
+export const BrandBook = z.object({
+  facts: z.string(),
+  voice: z.string(),
+  taboo: z.string(),
+  // 本机一个文件夹，设了就给它建一条本机读授权（D9）。
+  assetsDir: z.string().min(1).nullable(),
+  edits: z.array(BrandEdit).max(50),
+  version: z.number().int().nonnegative(),
+  updatedAt: Timestamp,
+});
+export type BrandBook = z.infer<typeof BrandBook>;
 
 // 用量是账，Bot 或群删了账要留着，所以这两个归属可空。
 export const UsageRecord = z.object({

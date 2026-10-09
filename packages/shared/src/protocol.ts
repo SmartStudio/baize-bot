@@ -6,6 +6,7 @@ import {
   ActionKind,
   BotId,
   BotRole,
+  BotTags,
   BrowserPlatform,
   ChecklistItem,
   ComputerKind,
@@ -15,6 +16,7 @@ import {
   DraftId,
   Grant,
   GrantTarget,
+  GoalTarget,
   GroupId,
   HandoffId,
   LoginAttemptId,
@@ -22,11 +24,16 @@ import {
   MessageId,
   ModelPurpose,
   Platform,
+  Preference,
   ProjectOfferMember,
   ProjectOfferPlatform,
   PublishFailureReason,
+  RoutineBoundary,
+  RoutineId,
+  RoutineOfferSpec,
   RunId,
   Skill,
+  TeamOfferMember,
   Timestamp,
   ToolConnection,
   TopicTask,
@@ -196,6 +203,53 @@ export const AgentToControl = z.discriminatedUnion("type", [
     platforms: z.array(ProjectOfferPlatform).max(6),
     cadence: z.string().max(200),
     firstStep: z.string().min(1).max(200),
+    goalTarget: GoalTarget.optional(),
+    goalUnit: z.string().min(1).max(8).optional(),
+  }),
+  // 主助理在单聊里出建队卡，projectGroupId 是要加人的项目群。控制面只收主助理发的、只落在主助理单聊。
+  z.object({
+    type: z.literal("team_offer"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    projectGroupId: GroupId,
+    members: z.array(TeamOfferMember).min(1).max(5),
+  }),
+  // 主助理提议一条例行。projectGroupId 为 null 是发进执行者的单聊。
+  z.object({
+    type: z.literal("routine_offer"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    ...RoutineOfferSpec,
+    projectGroupId: GroupId.nullable(),
+  }),
+  // Bot 在单聊里当场记一条偏好。控制面只收该 Bot 单聊里的 run，项目群里的静默丢弃。
+  z.object({
+    type: z.literal("preference_add"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    text: z.string().min(1).max(200),
+    private: z.boolean(),
+    sourceMessageId: MessageId.nullable(),
+  }),
+  // Bot 在项目群的例行里读到一个数报上来，控制面落一条样本。只收这个 run 属于这个项目群的。
+  z.object({
+    type: z.literal("metric_report"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    value: z.number().finite(),
+    label: z.string().max(40),
+  }),
+  // 主助理在项目群的例行里交一份周复盘。周界由控制面按收到时刻算，同一周再交覆盖。
+  z.object({
+    type: z.literal("review_submit"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    body: z.string().min(1).max(8000),
   }),
   z.object({
     type: z.literal("set_cadence"),
@@ -276,11 +330,15 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条连接上第几份 config，从 1 起按开始读快照的先后编号。并发重发时后开始的可能先到，
     // 代理丢掉比已应用代际小的，回执带同一个数。
     generation: z.number().int().positive(),
-    bots: z.array(z.object({ id: BotId, role: BotRole, name: z.string(), tag: z.string(), description: z.string() })),
+    bots: z.array(z.object({ id: BotId, role: BotRole, name: z.string(), tags: BotTags, description: z.string() })),
     // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
     tools: z.array(ToolConnectionConfig),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
     skills: z.array(Skill).optional(),
+    // 品牌手册由控制面拼成一段文字下发，version 变了运行器才重送给模型；没写过手册是 null。
+    brand: z.object({ version: z.number().int().nonnegative(), text: z.string() }).strict().nullable(),
+    // 该用户全部 Bot 的偏好，恒带：空也带空数组，运行器靠它对账「之前说过、这里没有的已作废」，理由同 skills。
+    preferences: z.array(Preference),
     accounts: z.array(AccountConfig),
     grants: z.array(Grant),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
@@ -299,9 +357,11 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 例行任务那条是归属人定时发的，没有人在等回复。
     origin: z.discriminatedUnion("kind", [
       z.object({ kind: z.literal("user") }),
-      z.object({ kind: z.literal("bot"), id: BotId, name: z.string(), tag: z.string() }),
+      z.object({ kind: z.literal("bot"), id: BotId, name: z.string(), tags: BotTags }),
       z.object({ kind: z.literal("routine") }),
     ]),
+    // 例行触发的带这条例行的 id 和边界，运行器的闸门按 boundary 收紧；用户当面派的是 null。
+    routine: z.object({ routineId: RoutineId, boundary: RoutineBoundary }).strict().nullable(),
     // solo 是建 Bot 时自动建的单聊群，title 就是 Bot 名；team 是拉了 2 到 6 个 Bot 的群。
     group: z.object({ id: GroupId, number: z.string(), title: z.string(), kind: z.enum(["solo", "team"]) }),
     // settled 为 false 的是 Bot 还在往下说的那条，下一轮它会长。运行器的水位不能把它当看完了。
@@ -320,7 +380,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
       z.object({
         id: BotId,
         name: z.string(),
-        tag: z.string(),
+        tags: BotTags,
         description: z.string(),
         seat: z.enum(["chief", "member"]),
       }),

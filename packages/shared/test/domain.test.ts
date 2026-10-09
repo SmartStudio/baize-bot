@@ -14,6 +14,7 @@ import {
   Handoff,
   Message,
   MessageBody,
+  ProjectGoal,
   ProjectOfferPlatform,
   RoutineRun,
   ServerPush,
@@ -67,6 +68,9 @@ describe("domain schemas reject illegal states", () => {
       dueAt: null,
       cadence: "",
       status: "active",
+      goal: null,
+      metricSource: null,
+      metric: null,
     };
     expect(TopicTask.safeParse({ ...task, number: "T-2481" }).success).toBe(true);
     expect(TopicTask.safeParse({ ...task, number: "2481" }).success).toBe(false);
@@ -76,6 +80,23 @@ describe("domain schemas reject illegal states", () => {
     const bot = { id: "b1", ownerId: "u1", name: "小服", role: "member", runState: "running", createdAt: now };
     expect(Bot.safeParse({ ...bot, hue: "mint" }).success).toBe(true);
     expect(Bot.safeParse({ ...bot, hue: "red" }).success).toBe(false);
+  });
+
+  it("标签最多 5 个、每个最多 20 码元，上限和第 1 期的 tag 一样，迁移过来的长标签照样读得出来", () => {
+    const bot = {
+      id: "b1",
+      ownerId: "u1",
+      name: "小服",
+      role: "member",
+      runState: "running",
+      createdAt: now,
+      hue: "sky",
+    };
+    expect(Bot.safeParse({ ...bot, tags: ["123456789", "12345678901234567890", "😀".repeat(10)] }).success).toBe(true);
+    expect(Bot.safeParse({ ...bot, tags: ["123456789012345678901"] }).success).toBe(false);
+    expect(Bot.safeParse({ ...bot, tags: ["😀".repeat(11)] }).success).toBe(false);
+    expect(Bot.safeParse({ ...bot, tags: ["a", "b", "c", "d", "e", "f"] }).success).toBe(false);
+    expect(Bot.safeParse({ ...bot, tags: [""] }).success).toBe(false);
   });
 
   it("message body is discriminated by kind", () => {
@@ -114,7 +135,7 @@ describe("domain schemas reject illegal states", () => {
       botId: "b1",
       name: "内容项目",
       goal: "每周发帖",
-      team: [{ name: "小编", tag: "edit", description: "负责写作" }],
+      team: [{ name: "小编", tags: ["edit"], description: "负责写作" }],
       platforms: [{ kind: "unsupported", name: "抖音" }],
       cadence: "每周 3 篇",
       firstStep: "先写第一篇",
@@ -124,6 +145,61 @@ describe("domain schemas reject illegal states", () => {
     expect(MessageBody.safeParse(offer).success).toBe(true);
     expect(MessageBody.safeParse({ kind: "draft", draftId: "d1" }).success).toBe(true);
     expect(MessageBody.safeParse({ kind: "plan", planId: "p1" }).success).toBe(true);
+  });
+
+  it("目标数最多 2147483647，和 tasks.goal_target 的 integer 对齐，三个入口同一条线", () => {
+    const limit = 2147483647;
+    const goal = { target: limit, unit: "星", dueAt: null };
+    expect(ProjectGoal.safeParse(goal).success).toBe(true);
+    const over = ProjectGoal.safeParse({ ...goal, target: limit + 1 });
+    expect(over.success).toBe(false);
+    expect(over.success ? [] : over.error.issues.map((issue) => issue.message)).toEqual(["目标数最多 2147483647"]);
+
+    const offer = {
+      kind: "project_offer",
+      botId: "b1",
+      name: "内容项目",
+      goal: "涨星",
+      team: [{ name: "小编", tags: ["edit"], description: "负责写作" }],
+      platforms: [],
+      cadence: "",
+      firstStep: "先写第一篇",
+      goalTarget: limit,
+      goalUnit: "星",
+      status: "offered",
+      groupId: null,
+    };
+    expect(MessageBody.safeParse(offer).success).toBe(true);
+    expect(MessageBody.safeParse({ ...offer, goalTarget: limit + 1 }).success).toBe(false);
+
+    const { kind: _kind, status: _status, groupId: _groupId, ...fields } = offer;
+    const event = { type: "project_offer", runId: "run-1", groupId: "g-solo", ...fields };
+    expect(AgentToControl.safeParse(event).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...event, goalTarget: limit + 1 }).success).toBe(false);
+  });
+
+  it("建队卡最多请 5 个人：项目群上限 6 个 Bot，主助理自己占一个；卡正文和上行报文同一条线", () => {
+    const member = { kind: "existing", botId: "b2", note: "帮忙", suggested: false };
+    const card = (count: number) => ({
+      kind: "team_offer",
+      botId: "b1",
+      members: Array.from({ length: count }, () => member),
+      status: "offered",
+      groupId: "g1",
+    });
+    const event = (count: number) => ({
+      type: "team_offer",
+      runId: "run-1",
+      botId: "b1",
+      groupId: "g-solo",
+      projectGroupId: "g1",
+      members: Array.from({ length: count }, () => member),
+    });
+    expect(MessageBody.safeParse(card(5)).success).toBe(true);
+    expect(MessageBody.safeParse(card(6)).success).toBe(false);
+    expect(MessageBody.safeParse(card(0)).success).toBe(false);
+    expect(AgentToControl.safeParse(event(5)).success).toBe(true);
+    expect(AgentToControl.safeParse(event(6)).success).toBe(false);
   });
 });
 
@@ -162,6 +238,7 @@ describe("M7 群与主题任务的共享形状", () => {
       group: { id: "g1", number: "", title: "", kind: "solo" },
       context: [{ messageId: "m1", from: "用户", text: "hi", settled: true }],
       purpose: "plan",
+      routine: null,
       members: [],
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
@@ -182,6 +259,7 @@ describe("M7 群与主题任务的共享形状", () => {
       group: { id: "g1", number: "", title: "", kind: "solo" },
       context: [{ messageId: "m1", from: "用户", text: "x", settled: true }],
       purpose: "plan",
+      routine: null,
       task: null,
       members: [],
     };
@@ -191,7 +269,7 @@ describe("M7 群与主题任务的共享形状", () => {
 
   it("prompt 必须说明派到你的原因，成员必须带座次；set_chief 的目标可为 null 表示卸任", () => {
     const run = { runId: "r1", botId: "b1", groupId: "g1" };
-    const member = { id: "b1", name: "小服", tag: "", description: "" };
+    const member = { id: "b1", name: "小服", tags: [], description: "" };
     const prompt = {
       type: "prompt",
       ...run,
@@ -202,6 +280,7 @@ describe("M7 群与主题任务的共享形状", () => {
       group: { id: "g1", number: "T-0001", title: "群", kind: "team" },
       context: [{ messageId: "m1", from: "用户", text: "x", settled: true }],
       purpose: "plan",
+      routine: null,
       task: null,
       members: [{ ...member, seat: "chief" }],
     };
@@ -249,7 +328,12 @@ describe("M9 例行任务的共享形状", () => {
   it("webhook 触发器建的时候不带 token，token 由控制面发", () => {
     const withHook = { ...routine, triggers: [{ kind: "webhook" }] };
     expect(CreateRoutineRequest.safeParse(withHook).success).toBe(true);
-    expect(CreateRoutineRequest.parse(routine).enabled).toBe(true);
+    const parsed = CreateRoutineRequest.parse(routine);
+    expect([parsed.state, parsed.boundary, parsed.onToday], "没说就是开着、能起草、不上首页").toEqual([
+      "on",
+      "draft",
+      false,
+    ]);
   });
 
   it("cron 表达式不能是空串，触发器最多 10 个", () => {
@@ -260,9 +344,10 @@ describe("M9 例行任务的共享形状", () => {
 
   it("运行记录触发时是 running，收尾后才是另外三种", () => {
     for (const status of ["running", "ok", "failed", "stopped"]) {
-      expect(RoutineRun.safeParse({ startedAt: now, status, note: "" }).success).toBe(true);
+      expect(RoutineRun.safeParse({ startedAt: now, status, note: "", seenAt: null }).success).toBe(true);
     }
-    expect(RoutineRun.safeParse({ startedAt: now, status: "pending", note: "" }).success).toBe(false);
+    expect(RoutineRun.safeParse({ startedAt: now, status: "pending", note: "", seenAt: null }).success).toBe(false);
+    expect(RoutineRun.safeParse({ startedAt: now, status: "ok", note: "" }).success, "看没看过不可省").toBe(false);
   });
 
   it("删例行任务的推送带 botId，客户端按 Bot 分列表", () => {
@@ -410,7 +495,7 @@ describe("今日页的共享形状", () => {
         { kind: "plan_approved", at: now, groupId: "g1", title: "本周计划", draftCount: 1 },
         { kind: "routine", at: now, groupId: null, title: "每日早报", note: "新增 3 条线索" },
       ],
-      running: [{ groupId: "g1", title: "本周计划", published: 1, planned: 3 }],
+      running: [{ groupId: "g1", title: "本周计划", published: 1, planned: 3, goal: null, metric: null }],
       next: [
         { kind: "draft", at: now, draft },
         { kind: "routine", at: now, routineId: "routine-1", groupId: null, botId: "b1", title: "每日早报" },
@@ -427,6 +512,27 @@ describe("今日页的共享形状", () => {
     ).toBe(false);
     expect(TodayResponse.safeParse({ ...response, pending: undefined }).success).toBe(false);
     expect(TodayResponse.safeParse({ ...response, extra: [] }).success).toBe(false);
+    const [runningItem] = response.running;
+    expect(
+      TodayResponse.safeParse({
+        ...response,
+        running: [
+          {
+            ...runningItem,
+            goal: { target: 100, unit: "星", dueAt: null },
+            metric: { current: 42, weekDelta: 5, sampledAt: now },
+          },
+        ],
+      }).success,
+      "进行中一行带目标和最新指标，首页按目标画进度",
+    ).toBe(true);
+    expect(
+      TodayResponse.safeParse({ ...response, running: [{ ...runningItem, goal: undefined }] }).success,
+      "goal 和 metric 必填，没有就显式给 null",
+    ).toBe(false);
+    expect(TodayResponse.safeParse({ ...response, running: [{ ...runningItem, metric: undefined }] }).success).toBe(
+      false,
+    );
     expect(
       TodayResponse.safeParse({
         ...response,
@@ -528,7 +634,7 @@ describe("C0 工具视图与审批报文", () => {
     ).toBe(false);
   });
 
-  it("toolViewText 四种视图都说人话且没有花括号", () => {
+  it("toolViewText 五种视图都说人话且没有花括号", () => {
     const samples = [
       toolViewText({ kind: "bash", command: "ls ~/Downloads", raw: { command: "ls ~/Downloads" } }),
       toolViewText({ kind: "write", path: "报价.md", preview: ["第一行"], raw: { path: "报价.md" } }),
@@ -540,12 +646,14 @@ describe("C0 工具视图与审批报文", () => {
         params: [{ key: "sku", value: "A-001" }],
         raw: { sku: "A-001" },
       }),
+      toolViewText({ kind: "helper", name: "资料员", task: "查三家竞品的定价", status: "running" }),
     ];
     expect(samples).toEqual([
       "要执行 `ls ~/Downloads`",
       "要写 `报价.md`",
       "要改 `报价.md` 的 3 行",
       "要用库存服务的 lookup_stock，参数：sku=A-001",
+      "拉临时帮手：资料员，查三家竞品的定价",
     ]);
     expect(samples.every((sample) => !/[{}]/.test(sample))).toBe(true);
   });

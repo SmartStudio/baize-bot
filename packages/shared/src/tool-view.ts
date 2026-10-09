@@ -32,6 +32,17 @@ export const ToolView = z.discriminatedUnion("kind", [
       raw: JsonValue.optional(),
     })
     .strict(),
+  // 主助理拉的临时帮手（D6）。name 是帮手的称呼（资料员、翻译），task 是交给它的那句话；
+  // status 是帮手会话本身的进度，和这条工具调用的 ToolCallStatus 分开，帮手跑完了工具调用才有结果。
+  z
+    .object({
+      kind: z.literal("helper"),
+      name: z.string().min(1).max(20),
+      task: z.string().max(200),
+      status: z.enum(["running", "done", "failed"]),
+      raw: JsonValue.optional(),
+    })
+    .strict(),
 ]);
 export type ToolView = z.infer<typeof ToolView>;
 
@@ -59,5 +70,7 @@ export function toolViewText(view: ToolView): string {
       if (view.params.length === 0) return action;
       return `${action}，参数：${view.params.map(({ key, value }) => `${key}=${valueText(value)}`).join("、")}`;
     }
+    case "helper":
+      return view.task.length === 0 ? `拉临时帮手：${view.name}` : `拉临时帮手：${view.name}，${view.task}`;
   }
 }

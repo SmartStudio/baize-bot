@@ -8,6 +8,9 @@ import {
   Bot,
   BotHue,
   BotId,
+  BotTags,
+  BrandBook,
+  BrandEdit,
   ChecklistItem,
   Computer,
   ComputerId,
@@ -22,8 +25,14 @@ import {
   Handoff,
   Message,
   MessageId,
+  MetricSource,
   OnFailure,
   Platform,
+  Preference,
+  PreferenceId,
+  ProjectGoal,
+  TaskMetric,
+  ProjectReviewId,
   Publication,
   PublicationId,
   BrowserPlatform,
@@ -32,6 +41,8 @@ import {
   Notice,
   ModelPurpose,
   Routine,
+  RoutineBoundary,
+  RoutineState,
   RunId,
   RoutineId,
   Skill,
@@ -83,11 +94,11 @@ export const BotListItem = z.object({
 export type BotListItem = z.infer<typeof BotListItem>;
 export const BotListResponse = z.object({ items: z.array(BotListItem) });
 
-// POST /api/bots  建 Bot 时同步建它的单 Bot 群。全部字段可省，省了系统起名。
+// POST /api/bots  建 Bot 时同步建它的单 Bot 群。全部字段可省，省了系统起名。描述 80 字只在写入时收紧。
 export const CreateBotRequest = z.object({
   name: z.string().min(1).max(20).optional(),
-  tag: z.string().max(20).optional(),
-  description: z.string().optional(),
+  tags: BotTags.optional(),
+  description: z.string().max(80).optional(),
   hue: BotHue.optional(),
 });
 export const CreateBotResponse = z.object({ bot: Bot, group: Group });
@@ -124,7 +135,7 @@ export const GroupListResponse = z.object({ items: z.array(GroupListItem) });
 // GET /api/groups/:id  群顶部的任务卡和成员。
 export const GroupResponse = z.object({ group: Group, task: TopicTask, bots: z.array(Bot) });
 
-// PATCH /api/tasks/:id  用户改任务卡。清单整份替换。
+// PATCH /api/tasks/:id  用户改任务卡。清单整份替换。goal 和 metricSource 给 null 就是去掉。
 export const UpdateTaskRequest = z
   .object({
     title: z.string().min(1).max(60),
@@ -133,9 +144,18 @@ export const UpdateTaskRequest = z
     checklist: z.array(ChecklistItem).max(50),
     status: TaskStatus,
     cadence: z.string().max(200),
+    goal: ProjectGoal.nullable(),
+    metricSource: MetricSource.nullable(),
   })
   .partial();
 export const UpdateTaskResponse = z.object({ task: TopicTask });
+
+// POST /api/projects/:groupId/metric  手动记一个数，落一条样本，回 UpdateTaskResponse，task.metric 已是最新。
+// 别人的群、单 Bot 群 404。
+export const ReportMetricRequest = z.object({ value: z.number().finite() }).strict();
+export type ReportMetricRequest = z.infer<typeof ReportMetricRequest>;
+
+// POST /api/groups/:id/seen  用户打开了这个群或它的项目页，群里已结束未看的例行运行全记成看过（D3）。回 204。别人的群 404。
 
 // GET /api/groups/:id/messages?before=<messageId>&limit=50  按时间正序返回。
 // approval 和 handoff 类消息的正文只有一个 id，状态在 Approval 或 Handoff 上，所以这一页引用到的都跟着一起回，
@@ -223,7 +243,9 @@ export const CreateRoutineRequest = z.object({
   onFailure: OnFailure,
   groupId: GroupId.nullable().optional(),
   purpose: ModelPurpose.optional(),
-  enabled: z.boolean().default(true),
+  state: RoutineState.default("on"),
+  boundary: RoutineBoundary.default("draft"),
+  onToday: z.boolean().default(false),
 });
 export type CreateRoutineRequest = z.infer<typeof CreateRoutineRequest>;
 export const RoutineResponse = z.object({ routine: Routine });
@@ -235,7 +257,15 @@ export type UpdateRoutineRequest = z.infer<typeof UpdateRoutineRequest>;
 // DELETE /api/routines/:id  回 204，运行记录跟着删。
 // POST /api/routines/:id/run  试跑一次。和到点触发走同一条路，回 202 与 RoutineResponse，runs 最前面已多一条 running。
 // 停用的也能试跑，停用只挡自动触发。
-// POST /api/hooks/:token  不要登录，请求体忽略。回 202 空体；token 对不上 404；例行任务停用 409。
+// POST /api/hooks/:token  不要登录，请求体忽略。回 202 空体；token 对不上 404；例行任务不是 on 409。
+
+// POST /api/messages/:id/routine-offer  例行确认卡点「加上」或「不要」。消息不是 routine_offer 404，已有结论 409。
+// add 按卡上的字段建例行（状态 on），把卡的 status 改成 added、routineId 指向它并重推那条 message，再推 routine_updated；
+// 执行者不在目标项目群里 400，卡留在 offered。dismiss 只改 status，routine 回 null。
+export const DecideRoutineOfferRequest = z.object({ decision: z.enum(["add", "dismiss"]) }).strict();
+export type DecideRoutineOfferRequest = z.infer<typeof DecideRoutineOfferRequest>;
+export const DecideRoutineOfferResponse = z.object({ message: Message, routine: Routine.nullable() });
+export type DecideRoutineOfferResponse = z.infer<typeof DecideRoutineOfferResponse>;
 
 // GET /api/bots/:id/skills  该 Bot 会做的活。别人的 Bot 404。
 export const SkillListResponse = z.object({ items: z.array(Skill) });
@@ -274,6 +304,57 @@ export const DecideProjectOfferResponse = z.object({
   group: Group.nullable(),
   task: TopicTask.nullable(),
 });
+
+// POST /api/messages/:id/team-offer  建队卡点「确认组队」或「先放着」。消息不是 team_offer 404，已确认 409。
+// picked 是卡上 members 里最终勾上的下标；confirm 时新请的人建 Bot（重名自动避开）、全部加进目标群、
+// 推 bot_created、group_updated 并重推那条消息，加完超过 6 人 400 且卡留在 offered。点两次只加一次。
+// defer 只把 status 改成 deferred，bots 为空、group 为 null。
+export const DecideTeamOfferRequest = z.discriminatedUnion("decision", [
+  z.object({ decision: z.literal("confirm"), picked: z.array(z.number().int().nonnegative()).max(6) }).strict(),
+  z.object({ decision: z.literal("defer") }).strict(),
+]);
+export type DecideTeamOfferRequest = z.infer<typeof DecideTeamOfferRequest>;
+export const DecideTeamOfferResponse = z.object({
+  message: Message,
+  group: Group.nullable(),
+  bots: z.array(Bot).max(6),
+});
+export type DecideTeamOfferResponse = z.infer<typeof DecideTeamOfferResponse>;
+
+// GET /api/bots/:id/preferences  这个 Bot 记住的偏好，按记下的先后排。别人的 Bot 404。
+export const PreferenceListResponse = z.object({ items: z.array(Preference) });
+export type PreferenceListResponse = z.infer<typeof PreferenceListResponse>;
+// PATCH /api/preferences/:id  只能切私人与否。别人的 404。
+export const UpdatePreferenceRequest = z.object({ private: z.boolean() }).strict();
+export type UpdatePreferenceRequest = z.infer<typeof UpdatePreferenceRequest>;
+export const PreferenceResponse = z.object({ preference: Preference });
+export type PreferenceResponse = z.infer<typeof PreferenceResponse>;
+// DELETE /api/preferences/:id  回 204，下一份 config 里没有它。
+// GET /api/bots/:id/profile  Bot 页头部那行「记住 N 条 · 会 N 件事 · 在 N 个项目」。
+export const BotProfileResponse = z
+  .object({
+    preferences: z.number().int().nonnegative(),
+    skills: z.number().int().nonnegative(),
+    projects: z.number().int().nonnegative(),
+  })
+  .strict();
+export type BotProfileResponse = z.infer<typeof BotProfileResponse>;
+
+// GET /api/brand  没写过是 brand: null。
+// PUT /api/brand  整本替换，四段文本加素材文件夹加「改过的地方」（删单条就是少传一条）；四段加起来超 8000 字 400。
+// 每次写入 version 加一，推 brand_updated 并重发 config。
+export const BrandResponse = z.object({ brand: BrandBook.nullable() });
+export type BrandResponse = z.infer<typeof BrandResponse>;
+export const UpdateBrandRequest = z
+  .object({
+    facts: z.string(),
+    voice: z.string(),
+    taboo: z.string(),
+    assetsDir: z.string().min(1).nullable(),
+    edits: z.array(BrandEdit).max(50),
+  })
+  .strict();
+export type UpdateBrandRequest = z.infer<typeof UpdateBrandRequest>;
 
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
 export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
@@ -335,6 +416,9 @@ export const TodayPendingItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("plan"), since: Timestamp, plan: ContentPlan, drafts: z.array(Draft).max(20) }).strict(),
   z.object({ kind: z.literal("draft"), since: Timestamp, draft: Draft }).strict(),
   z.object({ kind: z.literal("account"), since: Timestamp, account: Account }).strict(),
+  // 两种确认卡的内容都在消息正文里，整条消息带回来，客户端用画群里那张卡的同一个组件。
+  z.object({ kind: z.literal("team_offer"), since: Timestamp, message: Message }).strict(),
+  z.object({ kind: z.literal("routine_offer"), since: Timestamp, message: Message }).strict(),
 ]);
 export type TodayPendingItem = z.infer<typeof TodayPendingItem>;
 
@@ -372,12 +456,15 @@ export const TodayDoneItem = z.discriminatedUnion("kind", [
 export type TodayDoneItem = z.infer<typeof TodayDoneItem>;
 
 // 进行中一个项目一行，进度是这个项目当前计划里已发出的稿子数对总数，没有计划时两个都是 0。
+// goal 和 metric 是第 2 期按目标画进度用的：有目标就按 metric.current 对 goal.target 画，没有退回稿子数；控制面现在一律填 null。
 export const TodayRunningItem = z
   .object({
     groupId: GroupId,
     title: z.string().min(1),
     published: z.number().int().nonnegative(),
     planned: z.number().int().nonnegative(),
+    goal: ProjectGoal.nullable(),
+    metric: TaskMetric.nullable(),
   })
   .strict();
 export type TodayRunningItem = z.infer<typeof TodayRunningItem>;
@@ -422,27 +509,41 @@ export type TodayResponse = z.infer<typeof TodayResponse>;
 // 它直接从库里取，不受群历史分页的窗口限制。olderTurns 是更早的轮数，也就是你说过的句数减一。
 // working 是这个群里还没结束的 run，title 的取法和用量页一样。pending 只有这个群的卡，排法同首页。
 // plan 是最近批准的那份计划和它的稿子，next 是这个群最近一件排了时间的事。
-// achievements 只来自发布记录，不读历史消息，按 at 降序；url 是原帖链接，读不到笔记 id 时是管理页链接。
+// achievements 是发布记录和周复盘合在一起按 at 降序，不读历史消息；url 是原帖链接，读不到笔记 id 时是管理页链接。
+// 复盘的 title 由服务端取好（「第 N 周复盘」），body 是正文，点开才展。
 export const ProjectWorkingItem = z
   .object({ botId: BotId.nullable(), title: z.string().min(1).max(80), since: Timestamp })
   .strict();
 export type ProjectWorkingItem = z.infer<typeof ProjectWorkingItem>;
-export const ProjectAchievement = z
-  .object({
-    id: PublicationId,
-    at: Timestamp,
-    title: z.string().min(1).max(80),
-    platform: Platform,
-    url: z.string().url(),
-  })
-  .strict();
+export const ProjectAchievement = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("publication"),
+      id: PublicationId,
+      at: Timestamp,
+      title: z.string().min(1).max(80),
+      platform: Platform,
+      url: z.string().url(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("review"),
+      id: ProjectReviewId,
+      at: Timestamp,
+      title: z.string().min(1).max(80),
+      weekStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      body: z.string().min(1).max(8000),
+    })
+    .strict(),
+]);
 export type ProjectAchievement = z.infer<typeof ProjectAchievement>;
 export const ProjectRoutineItem = z
   .object({
     routineId: RoutineId,
     botId: BotId,
     name: z.string().min(1),
-    enabled: z.boolean(),
+    state: RoutineState,
     nextAt: Timestamp.nullable(),
   })
   .strict();
@@ -534,5 +635,10 @@ export const ServerPush = z.discriminatedUnion("type", [
   // 一次登录没成。账号的 login 不变，所以没有 account_updated；attempt 是 POST /api/accounts/:id/login 回的那个。
   z.object({ type: z.literal("login_failed"), accountId: AccountId, attempt: LoginAttemptId, reason: LoginFailure }),
   z.object({ type: z.literal("notify"), notice: Notice }),
+  // Bot 记下一条、用户切了私人与否都推整条偏好，客户端按 id 替换。忘掉推 preference_deleted。
+  z.object({ type: z.literal("preference_updated"), preference: Preference }),
+  z.object({ type: z.literal("preference_deleted"), preferenceId: PreferenceId, botId: BotId }),
+  // 手册每次写入（用户改、草稿批准追加改动）都推整本。
+  z.object({ type: z.literal("brand_updated"), brand: BrandBook }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;
