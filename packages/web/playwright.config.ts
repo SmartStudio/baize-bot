@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { chromium, defineConfig, devices } from "@playwright/test";
 
-// 端到端自带一套端口，免得撞上开发机上别的进程或真控制面。
-const API_PORT = "3317";
-const WEB_PORT = "5377";
+// 端到端自带一套端口，免得撞上开发机上别的进程或真控制面。几个工作树同时跑时各自用 E2E_API_PORT、E2E_WEB_PORT 错开。
+const API_PORT = process.env.E2E_API_PORT ?? "3317";
+const WEB_PORT = process.env.E2E_WEB_PORT ?? "5377";
 
 const bundledChromium = ((): boolean => {
   try {
