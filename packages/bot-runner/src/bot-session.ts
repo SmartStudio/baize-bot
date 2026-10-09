@@ -201,6 +201,13 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
     noPromptTemplates: true,
     noThemes: true,
     noContextFiles: true,
+    // 不装外来的 Pi 扩展：它们能在 prompt 还没进会话时另起一回合、或把输入拦成 handled，run_done 的 entered 就不可信。
+    // noExtensions 让 resource loader 丢掉整套 enabledExtensions（`core/resource-loader.js` 257、383、403-405）：
+    // 自动发现的 agentDir/extensions 和 cwd/.pi/extensions（`core/package-manager.js` 2055、2037）、settings 里
+    // 写的扩展路径（2000、2006）、settings 里装的包带的扩展（710-718）、内置扩展（739-743）都在这套里。
+    // 还能进来的只有命令行的 additionalExtensionPaths（白泽没传）和这里的 extensionFactories，后者走
+    // loadFinalExtensionSet 另一条路（560-566），不受它影响。
+    noExtensions: true,
     extensionFactories: [botExtension(options)],
   });
   await resourceLoader.reload();

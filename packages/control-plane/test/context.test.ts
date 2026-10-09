@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
   ApprovalId,
+  BotListResponse,
   ContentPlanId,
   CreateBotResponse,
   CreateGroupResponse,
   MessageId,
+  SkillResponse,
   type BotId,
   type ControlToAgent,
   type GroupId,
@@ -18,6 +20,7 @@ import * as schema from "../src/db/schema.js";
 import { databaseUrl } from "../src/env.js";
 import { acceptHandoff, createHandoff } from "../src/repo/handoffs.js";
 import { appendMessage } from "../src/repo/messages.js";
+import * as taskRepo from "../src/repo/tasks.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { contentJob, createDraft, issuePost, setTier, specOf, tweet } from "./helpers/content.js";
@@ -429,16 +432,24 @@ async function requestPay(owner: Owner, runId: Prompt["runId"], groupId: GroupId
   }
 }
 
+/** run_done 里运行器怎么说这次触发：进了会话、没进，或者是不带这个字段的旧运行器。 */
+type RunDoneSaid = "entered" | "dropped" | "unsaid";
+
 /**
- * 电脑报这次 run 正常跑完，它记下的名单从此作数。花费卡在确认之后才推，等到它就是确认落了库。
+ * 电脑报这次 run 跑完，默认说触发进了会话，它记下的名单从此作数。花费卡在确认之后才推，等到它就是确认落了库。
  * 花费卡也占 20 条窗口的一格，要在闲聊之前收尾，窗口里才正好是最近 20 条闲聊。
  */
-async function runDone(owner: Pick<Owner, "agent" | "push">, prompt: Prompt): Promise<void> {
+async function runDone(
+  owner: Pick<Owner, "agent" | "push">,
+  prompt: Prompt,
+  said: RunDoneSaid = "entered",
+): Promise<void> {
   owner.agent.send({
     type: "run_done",
     runId: prompt.runId,
     botId: prompt.botId,
     groupId: prompt.groupId,
+    ...(said === "unsaid" ? {} : { prompt: said }),
     steps: 1,
     inputTokens: 0,
     outputTokens: 0,
@@ -814,6 +825,332 @@ describe("名单等送达确认以后才生效", () => {
       expect(payCard(overlapping), "接着用更早那份确认过的名单，结论再送一次").toEqual(approvedCard(card));
       expect(payCard(later), "这一次确认了，之后不再送").toBeUndefined();
     } finally {
+      owner.close();
+    }
+  });
+});
+
+/** 小服看过的卡批了、滑出了窗口，这一次派活带着结论，运行器照 said 回 run_done，再派一次看接不接。 */
+async function conclusionDelivered(owner: Owner, said: RunDoneSaid) {
+  const card = await cardSettledOutsideWindow(owner);
+  await say(owner.client, owner.groupId, "刚批准了，看看");
+  const attempt = await nextPrompt(owner.agent);
+  expect(payCard(attempt), "这一次带着结论").toEqual(approvedCard(card));
+  await runDone(owner, attempt, said);
+  await say(owner.client, owner.groupId, "再查一次");
+  return { card, attempt, later: await nextPrompt(owner.agent) };
+}
+
+describe("名单确认与否由运行器说这次触发进没进会话", () => {
+  it("运行器报进了会话，名单确认，结论之后不再送", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { attempt, later } = await conclusionDelivered(owner, "entered");
+      expect(await listOf(attempt.runId), "进了会话就确认").toMatchObject({ context_confirmed_at: expect.any(String) });
+      expect(payCard(later), "送到过一次，之后不再送").toBeUndefined();
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("运行器报没进会话，run 照样收尾但名单不确认，下一次派活照样补送这条结论", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { card, attempt, later } = await conclusionDelivered(owner, "dropped");
+      expect(await listOf(attempt.runId), "run 收了尾，名单照记，但没确认").toEqual({
+        unsettled_context: [],
+        context_confirmed_at: null,
+      });
+      expect(
+        (await database.sql`SELECT 1 FROM runs WHERE id = ${attempt.runId} AND ended_at IS NOT NULL`).length,
+        "dropped 的 run_done 一样收尾",
+      ).toBe(1);
+      expect(payCard(later), "结论没进过会话，再送一次").toEqual(approvedCard(card));
+
+      await runDone(owner, later);
+      await say(owner.client, owner.groupId, "还有别的吗");
+      expect(payCard(await nextPrompt(owner.agent)), "这一次进了会话，之后不再送").toBeUndefined();
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("旧运行器的 run_done 不带这个字段，按进了会话算：名单确认，之后不再送", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { attempt, later } = await conclusionDelivered(owner, "unsaid");
+      expect(await listOf(attempt.runId), "不带字段照旧确认").toMatchObject({
+        context_confirmed_at: expect.any(String),
+      });
+      expect(payCard(later), "之后不再送").toBeUndefined();
+    } finally {
+      owner.close();
+    }
+  });
+});
+
+/** 等群里这条用户消息推到。消息路由先落库推送，再加 skill 用量，最后才派活。 */
+async function userMessagePushed(push: PushClient, text: string): Promise<void> {
+  for (;;) {
+    const pushed = await push.next();
+    if (pushed.type === "message" && pushed.message.body.kind === "user" && pushed.message.body.text === text) return;
+  }
+}
+
+describe("相邻两次派活交错时，建得更晚的名单盖不掉触发更靠后那份", () => {
+  it("后建的 run 基于更早的消息，下一次派活接的仍是触发消息更靠后那份名单", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { skill } = SkillResponse.parse(
+        await (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "对账", steps: ["翻账本"] })).json(),
+      );
+      await say(owner.client, owner.groupId, "付这笔款");
+      const first = await nextPrompt(owner.agent);
+
+      // 锁住 skill 行：带 `/对账` 的那条消息落库、推送以后卡在加用量上，等它派活时后一条消息已经派完了。
+      let unlock!: () => void;
+      const unlocked = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holding = database.sql.begin(async (tx) => {
+        await tx`SELECT 1 FROM skills WHERE id = ${skill.id} FOR UPDATE`;
+        locked();
+        await unlocked;
+      });
+      await lockHeld;
+      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 这笔付了没" });
+      await userMessagePushed(owner.push, "/对账 这笔付了没");
+      const approvalId = await requestPay(owner, first.runId, owner.groupId);
+      await say(owner.client, owner.groupId, "付了没");
+      const newer = await nextPrompt(owner.agent);
+      unlock();
+      await holding;
+      expect((await stuck).status).toBe(201);
+      const older = await nextPrompt(owner.agent);
+      const card = payCard(newer);
+
+      await runDone(owner, newer);
+      await runDone(owner, older);
+      await chatter(owner.groupId, 25);
+      expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
+      await say(owner.client, owner.groupId, "现在呢");
+      const later = await nextPrompt(owner.agent);
+
+      expect(card, "基于后一条消息的那次看到了还在等批的卡").toMatchObject({ settled: false });
+      expect(payCard(older), "后建的 run 基于前一条消息，窗口里还没有这张卡").toBeUndefined();
+      expect(
+        (
+          await database.sql`SELECT id FROM runs WHERE id IN ${database.sql([newer.runId, older.runId])} ORDER BY started_at DESC`
+        ).map((row) => row.id),
+        "基于前一条消息的 run 建得更晚",
+      ).toEqual([older.runId, newer.runId]);
+      if (card === undefined) throw new Error("没看到付款卡");
+      expect(payCard(later), "建得更晚那份名单里没有卡，也盖不掉触发更靠后那份里的卡").toEqual(approvedCard(card));
+    } finally {
+      owner.close();
+    }
+  });
+});
+
+/** 等群里的交接卡推到，拿它的消息 id。 */
+async function handoffMessagePushed(push: PushClient): Promise<MessageId> {
+  for (;;) {
+    const pushed = await push.next();
+    if (pushed.type === "message" && pushed.message.body.kind === "handoff") return pushed.message.id;
+  }
+}
+
+describe("交接排到后面才派时，被 @ 那份更晚的名单盖不掉交接那份", () => {
+  it("交接触发的消息更早、窗口却更新，下一次派活接的是交接那份名单，付款结论照样补送", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { groupId, wenId } = await withTeammate(owner);
+      await say(owner.client, groupId, "@小服 请交给阿文");
+      const from = await nextPrompt(owner.agent);
+      owner.agent.send({
+        type: "handoff",
+        runId: from.runId,
+        botId: owner.botId,
+        groupId,
+        toBotId: wenId,
+        done: "查过了",
+        notDone: "付款待核",
+        next: "核付款",
+        checklistIndex: null,
+      });
+      const handoffMessageId = await handoffMessagePushed(owner.push);
+      // 阿文被 @ 的这条先派，交接的 prompt 排在它后面；等交接派出去时付款卡已经落库，它读的最近 20 条里有卡。
+      await say(owner.client, groupId, "@阿文 先看这条新消息");
+      const newerTrigger = await nextPrompt(owner.agent);
+      expect(newerTrigger.botId).toBe(wenId);
+      expect(payCard(newerTrigger), "被 @ 的那次派活时卡还没落库").toBeUndefined();
+      const approvalId = await requestPay(owner, from.runId, groupId);
+      await runDone(owner, newerTrigger);
+      const laterWindow = await nextPrompt(owner.agent);
+      expect(laterWindow.botId).toBe(wenId);
+      expect(laterWindow.messageId, "交接那次的触发是更早的交接卡").toBe(handoffMessageId);
+      const card = payCard(laterWindow);
+      expect(card, "交接那次读到了还在等批的卡").toMatchObject({ settled: false });
+      await runDone(owner, laterWindow);
+      await chatter(groupId, 25);
+      expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
+      await say(owner.client, groupId, "@阿文 再核付款");
+      const retry = await nextPrompt(owner.agent);
+
+      if (card === undefined) throw new Error("没看到付款卡");
+      expect(payCard(retry), "被 @ 那份名单触发更晚却没有卡，盖不掉交接那份里的卡，定稿后照样补送结论").toEqual(
+        approvedCard(card),
+      );
+    } finally {
+      owner.close();
+    }
+  });
+});
+
+describe("几次派活读到的消息集合互不包含时，哪份名单都盖不掉别的", () => {
+  it("触发最早的 run 接回了卡、触发最晚的 run 窗口里没卡、中间那次直接读到卡，三份名单并起来，卡批了以后结论补送一次", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { skill } = SkillResponse.parse(
+        await (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "对账", steps: ["翻账本"] })).json(),
+      );
+      await say(owner.client, owner.groupId, "付这笔款");
+      const first = await nextPrompt(owner.agent);
+
+      let unlock!: () => void;
+      const unlocked = new Promise<void>((resolve) => {
+        unlock = resolve;
+      });
+      let locked!: () => void;
+      const lockHeld = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const holding = database.sql.begin(async (tx) => {
+        await tx`SELECT 1 FROM skills WHERE id = ${skill.id} FOR UPDATE`;
+        locked();
+        await unlocked;
+      });
+      await lockHeld;
+      // 卡在加用量上的这条触发最早，等它派出去时卡已经确认在别的名单里，它靠接着送读到卡。
+      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 这笔付了没" });
+      await userMessagePushed(owner.push, "/对账 这笔付了没");
+      const approvalId = await requestPay(owner, first.runId, owner.groupId);
+      await say(owner.client, owner.groupId, "付了没");
+      const direct = await nextPrompt(owner.agent);
+      const card = payCard(direct);
+      expect(card, "中间那次在窗口里直接读到了还在等批的卡").toMatchObject({ settled: false });
+      await chatter(owner.groupId, 25);
+      // 触发最晚的这条，窗口里全是闲聊，又没有确认过的名单可接，什么卡都没读到。
+      await say(owner.client, owner.groupId, "现在呢");
+      const latest = await nextPrompt(owner.agent);
+      expect(payCard(latest), "触发最晚那次窗口里没有卡，也还没有名单可接").toBeUndefined();
+      await runDone(owner, direct);
+      unlock();
+      await holding;
+      expect((await stuck).status).toBe(201);
+      const earliest = await nextPrompt(owner.agent);
+      expect(payCard(earliest), "触发最早那次从中间那次的名单接回了还在等批的卡").toMatchObject({ settled: false });
+      await runDone(owner, latest);
+      await runDone(owner, earliest);
+      expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
+
+      await say(owner.client, owner.groupId, "再看看");
+      const retry = await nextPrompt(owner.agent);
+      if (card === undefined) throw new Error("没看到付款卡");
+      expect(payCard(retry), "三份名单里无论按触发还是按读到的消息挑哪一份，都不能把卡丢掉").toEqual(
+        approvedCard(card),
+      );
+      await runDone(owner, retry);
+      await say(owner.client, owner.groupId, "还有吗");
+      const after = await nextPrompt(owner.agent);
+      expect(payCard(after), "结论送过一次、那次进了会话，之后不再送").toBeUndefined();
+    } finally {
+      owner.close();
+    }
+  });
+});
+
+describe("名单的寿命从确认算起，不从建 run 算起", () => {
+  it("建得最早、送得最晚的 run 刚确认，它那份名单撑得过后面 20 次确认，卡批了以后结论照样补送一次", async () => {
+    const owner = await onlineOwner();
+    const bots = BotListResponse.parse(await (await owner.client.get("/api/bots")).json());
+    const assistant = bots.items.find((item) => item.bot.role === "assistant");
+    if (assistant === undefined) throw new Error("没有主助理");
+    const team = CreateGroupResponse.parse(
+      await (
+        await owner.client.post("/api/groups", { title: "延后派活", botIds: [owner.botId, assistant.bot.id] })
+      ).json(),
+    );
+    const groupId = team.group.id;
+    const mention = `@${assistant.bot.name} `;
+    // 观察者是主助理：它的 prompt 送出去之前控制面还要读项目清单，只把这一次读扣住，建 run、记名单、送、确认都是真的。
+    let reached!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = taskRepo.listProjects;
+    let held = false;
+    const spy = vi.spyOn(taskRepo, "listProjects").mockImplementation(async (...args) => {
+      if (!held) {
+        held = true;
+        reached();
+        await released;
+      }
+      return original(...args);
+    });
+    let stuck: Promise<Response> | undefined;
+    try {
+      await say(owner.client, groupId, "@小服 付这笔款");
+      const source = await nextPrompt(owner.agent);
+      expect(source.botId).toBe(owner.botId);
+      const approvalId = await requestPay(owner, source.runId, groupId);
+      stuck = owner.client.post(`/api/groups/${groupId}/messages`, { text: `${mention}这笔付了没` });
+      await blocked;
+      const [early] = await database.sql`
+        SELECT id, unsettled_context FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id}`;
+      expect(early?.unsettled_context, "prompt 还没送出去，名单已经记下了还在等批的卡").toHaveLength(1);
+      await chatter(groupId, 25);
+      for (let n = 1; n <= 20; n += 1) {
+        await say(owner.client, groupId, `${mention}晚一步 ${n}`);
+        const later = await nextPrompt(owner.agent);
+        expect(payCard(later), "早那份名单还没确认，卡不在窗口里，也没有名单可接").toBeUndefined();
+        await runDone(owner, later);
+      }
+      release();
+      expect((await stuck).status).toBe(201);
+      const delayed = await nextPrompt(owner.agent);
+      expect(delayed.runId, "扣住的那条放开后送到的就是最早建的 run").toBe(early?.id);
+      const card = payCard(delayed);
+      expect(card, "它在窗口里直接读到了还在等批的卡").toMatchObject({ settled: false });
+      await runDone(owner, delayed);
+      const [earliest] = await database.sql`
+        SELECT id FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id} ORDER BY started_at ASC LIMIT 1`;
+      expect(earliest?.id, "按建 run 的时刻数它排在 21 个里的最后一位，按 started_at 截 20 份就把它截掉了").toBe(
+        delayed.runId,
+      );
+      expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
+      await say(owner.client, groupId, `${mention}批完了吗`);
+      const retry = await nextPrompt(owner.agent);
+      if (card === undefined) throw new Error("没看到付款卡");
+      expect(payCard(retry), "只记过这一张卡，刚确认的名单还在最近 20 份里，批了以后结论补送").toEqual(
+        approvedCard(card),
+      );
+      await runDone(owner, retry);
+      await say(owner.client, groupId, `${mention}还有吗`);
+      const after = await nextPrompt(owner.agent);
+      expect(payCard(after), "结论送过一次、那次进了会话，之后不再送").toBeUndefined();
+    } finally {
+      release();
+      spy.mockRestore();
+      if (stuck !== undefined) await stuck.catch(() => undefined);
       owner.close();
     }
   });

@@ -18,7 +18,7 @@ import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision } from "./gate.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
-import { reportRun, simpleToolView } from "./reporter.js";
+import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
@@ -329,12 +329,14 @@ export function createRunner(config: RunnerConfig): Runner {
     config.send(done);
   };
 
+  /** 这条 prompt 没进过会话就收尾。进了会话的那条 run_done 由 reportRun 先发，这里的会被 finishRun 去重掉。 */
   const finishWithoutRun = (message: PromptMessage): void => {
     finishRun({
       type: "run_done",
       runId: message.runId,
       botId: message.botId,
       groupId: message.groupId,
+      prompt: "dropped",
       steps: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -594,7 +596,7 @@ export function createRunner(config: RunnerConfig): Runner {
       handoffId: message.handoffId,
       projects: message.projects ?? [],
     };
-    let unsubscribe: (() => void) | null = null;
+    let report: RunReport | null = null;
     let botSession: BotSession | null = null;
     let prompted = false;
     try {
@@ -606,10 +608,13 @@ export function createRunner(config: RunnerConfig): Runner {
       await botSession.usePurpose(message.purpose);
       const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
-      unsubscribe = reportRun(
+      const watermark = readWatermark(session.sessionManager);
+      const text = composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts);
+      report = reportRun(
         session,
         statsBeforeRun,
         active.run,
+        text,
         () => runnerAbortedRuns.has(active.run.runId),
         approvals.consumeBlocked,
         bot.mcp?.serverFor ?? (() => ""),
@@ -618,15 +623,15 @@ export function createRunner(config: RunnerConfig): Runner {
           else config.send(outgoing);
         },
       );
-      const watermark = readWatermark(session.sessionManager);
-      const text = composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts);
       prompted = true;
       await session.prompt(text);
-      // prompt 抛错就不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
-      recordWatermark(session.sessionManager, message, watermark);
+      // 只在触发进了会话才记水位。prompt 抛错、正常返回却没进会话（比如 AgentSession 把它当 handled 收下）
+      // 都不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
+      if (report.entered()) recordWatermark(session.sessionManager, message, watermark);
     } catch (error) {
-      // 还没调 session.prompt 就失败，这批上下文没进过会话。带上 runId 让控制面把这个 run 收尾，
-      // 后面补的 run_done 落空，控制面不会把这次的名单当送到了。
+      // 还没调 session.prompt 就失败，带上 runId 让控制面立刻把这个 run 收尾，不等 finally 补的 run_done。
+      // 调过 session.prompt 才抛的，进没进会话由 run_done 的 prompt 字段说：reporter 见过触发消息的 message_end
+      // 才是 entered，没来过 agent_settled 的由 finally 补一条 dropped。
       fail(
         "runner_failed",
         `run ${message.runId} 跑失败：${String(error)}`,
@@ -634,7 +639,7 @@ export function createRunner(config: RunnerConfig): Runner {
         prompted ? undefined : message.runId,
       );
     } finally {
-      unsubscribe?.();
+      report?.unsubscribe();
       botSession?.clearBashRun(message.runId);
       bot.active = null;
       runnerAbortedRuns.delete(message.runId);

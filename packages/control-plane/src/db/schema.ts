@@ -408,14 +408,24 @@ export const runs = pgTable(
     outputTokens: integer("output_tokens").notNull().default(0),
     amount: numeric("amount", { precision: 14, scale: 6 }).notNull().default("0"),
     // 这次 prompt 的上下文里没定稿的行。下一次给同一个 Bot 派活，滑出窗口的这些行接着送，直到定稿那一轮。
-    // 派活时就写上，但只有 contextConfirmedAt 有值才作数：没送到、执行前被收尾的 run 里那条新定稿的结论
-    // 模型没读到，名单却已经把它划掉了，下一次只能接着用更早那份确认过的名单。
+    // 派活时就写上，但只有 contextConfirmedAt 有值才作数：没送到、没进会话、执行前被收尾的 run 里那条新定稿
+    // 的结论模型没读到，名单却已经把它划掉了，下一次只能接着用更早那份确认过的名单。
     unsettledContext: jsonb("unsettled_context").$type<MessageId[]>(),
-    // 这次 run 的 run_done 被正常收下的时刻。null 是还没跑完、没送到、被 abandon，或迁移前的 run。
+    // 运行器报这次触发进了会话（run_done 带 prompt: entered，旧运行器不带也算）的时刻。
+    // null 是还没跑完、没送到、没进会话、被 abandon，或迁移前的 run。
     contextConfirmedAt: timestamp("context_confirmed_at", { withTimezone: true }),
+    // 这次 prompt 的上下文里读到时已定稿的行。下一次派活的候选是最近几次确认过的 run 的 unsettled_context 并起来、
+    // 再减掉任何一次确认过的 run 的这一列：定稿是终态，哪次读到过定稿的字，模型就已经看过结论。
+    // 不在名单之间挑「最新的一份」：派活交错、交接延后时各 run 读到的消息集合互不包含，没有一份能盖住别的。
+    // 迁移前的 run 是 null，当空。
+    settledContext: jsonb("settled_context").$type<MessageId[]>(),
   },
   (t) => [
     index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt),
+    // 每次派活取这个 Bot 在这个群最近确认的几份名单，按确认时刻倒着取前几条就停，不扫全群的 run。
+    index("runs_context_confirmed_idx")
+      .on(t.groupId, t.botId, t.contextConfirmedAt.desc().nullsFirst(), t.startedAt.desc().nullsFirst())
+      .where(sql`${t.contextConfirmedAt} IS NOT NULL`),
     index("runs_bot_id_idx").on(t.botId),
     index("runs_owner_id_started_at_idx").on(t.ownerId, t.startedAt),
     index("runs_routine_run_id_idx").on(t.routineRunId),

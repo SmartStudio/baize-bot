@@ -41,6 +41,7 @@ import {
   type ToolOperation,
   type TopicTask,
 } from "@baize/shared";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -87,6 +88,10 @@ const botSessionProbe = vi.hoisted(() => ({
   createError: null as Error | null,
   promptError: null as Error | null,
   promptHook: null as (() => void) | null,
+  /** AgentSession 把消息拼好、正要交给 Agent 的那一刻（preflightResult("started")）。 */
+  started: null as ((session: AgentSession) => void) | null,
+  /** 不调真 prompt 直接 resolve，冒充 AgentSession 把输入当 handled 收下的那条返回路径。 */
+  promptSwallow: false,
   assistantEnds: [] as Array<{ stopReason: string; errorMessage: string | undefined }>,
 }));
 
@@ -106,7 +111,14 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
         value: (input: string) => {
           if (botSessionProbe.promptError !== null) throw botSessionProbe.promptError;
           botSessionProbe.promptHook?.();
-          return prompt(input);
+          if (botSessionProbe.promptSwallow) return Promise.resolve();
+          const started = botSessionProbe.started;
+          if (started === null) return prompt(input);
+          return prompt(input, {
+            preflightResult: (disposition) => {
+              if (disposition === "started") started(created.session);
+            },
+          });
         },
       });
       const unsubscribe = created.session.subscribe((event) => {
@@ -486,7 +498,15 @@ async function startHarness(options: {
 }
 
 afterEach(async () => {
-  await Promise.all(open.splice(0).map((harness) => harness.close()));
+  const closing = open.splice(0);
+  await Promise.all(closing.map((harness) => harness.close()));
+  for (const message of closing.flatMap((harness) => harness.sent)) {
+    if (message.type === "run_done")
+      expect(
+        message.prompt,
+        `run ${message.runId} 的 run_done 要说清触发进没进会话，字段不带是旧运行器才有的`,
+      ).toBeDefined();
+  }
   botSessionProbe.creations.splice(0);
   botSessionProbe.disposals.splice(0);
   botSessionProbe.disposeGate = null;
@@ -496,6 +516,8 @@ afterEach(async () => {
   botSessionProbe.createError = null;
   botSessionProbe.promptError = null;
   botSessionProbe.promptHook = null;
+  botSessionProbe.started = null;
+  botSessionProbe.promptSwallow = false;
   botSessionProbe.assistantEnds.splice(0);
 });
 
@@ -549,6 +571,12 @@ const holdTool = (): { readonly hold: RunnerTool; readonly started: () => boolea
 
 const runDoneIds = (harness: Harness): string[] =>
   harness.sent.filter((message) => message.type === "run_done").map((message) => message.runId);
+
+/** 每条 run_done 说的这次触发进没进会话，按 runId。 */
+const runDoneSaid = (harness: Harness): Record<string, string | undefined> =>
+  Object.fromEntries(
+    harness.sent.flatMap((message) => (message.type === "run_done" ? [[message.runId, message.prompt]] : [])),
+  );
 
 const sessionFilesOf = (dataDir: string, botId: string): string[] => {
   const dir = botDirs(dataDir, BotId.parse(botId)).sessionDir;
@@ -3520,6 +3548,100 @@ describe("config 按 Bot 增量对账", () => {
     expect(h.runner.activeRuns()).toEqual([]);
   });
 
+  it("run_done 说清触发进没进会话：建会话失败、prompt 进会话前抛错、config 里没这个 Bot 都是 dropped，正常跑完是 entered", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    botSessionProbe.createError = new Error("模拟建会话失败");
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "建会话就失败"));
+    } finally {
+      botSessionProbe.createError = null;
+    }
+    botSessionProbe.promptError = new Error("模拟 prompt 预检失败");
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "进会话前抛错"));
+    } finally {
+      botSessionProbe.promptError = null;
+    }
+    await h.runner.prompt(promptMessage("bot-9", "run-3", "config 里没这个 Bot"));
+    await h.runner.prompt(promptMessage("bot-1", "run-4", "正常跑完"));
+
+    expect(runDoneSaid(h), "没把消息交给会话的都报 dropped，agent_settled 来过的报 entered").toEqual({
+      "run-1": "dropped",
+      "run-2": "dropped",
+      "run-3": "dropped",
+      "run-4": "entered",
+    });
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("触发消息交给 Agent 之前它被另一回合占住：agent_settled 照来，run_done 仍报 dropped，会话里没有这条", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-0", "先建会话"));
+    // AgentSession 把消息拼好、正要交给 Agent 的那一刻直接在 Agent 上另起一回合，
+    // 外面那条就在 Agent.prompt 的 activeRun 检查上抛，_runAgentPrompt 的 finally 照发 agent_settled。
+    const intruder = { turn: null as Promise<void> | null };
+    botSessionProbe.started = (session) => {
+      intruder.turn = session.agent.prompt("插队的另一回合");
+    };
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "被插队的触发"));
+    } finally {
+      botSessionProbe.started = null;
+    }
+    await intruder.turn;
+
+    expect(runDoneSaid(h), "agent_settled 来了不算进会话，没见到触发那条 user 消息的 message_end 就是 dropped").toEqual(
+      {
+        "run-0": "entered",
+        "run-1": "dropped",
+      },
+    );
+    expect(
+      h.sent.flatMap((message) => (message.type === "agent_error" ? [[message.code, message.runId]] : [])),
+      "调过 session.prompt 才抛的 runner_failed 不带 runId",
+    ).toEqual([["runner_failed", undefined]]);
+    const transcript = sessionFilesOf(h.dataDir, "bot-1").map((file) => readFileSync(file, "utf8"));
+    expect(
+      transcript.some((text) => text.includes("先建会话")),
+      "头一条进了会话",
+    ).toBe(true);
+    expect(
+      transcript.some((text) => text.includes("被插队的触发")),
+      "被插队那条没进会话",
+    ).toBe(false);
+    expect(h.runner.activeRuns()).toEqual([]);
+  });
+
+  it("agentDir 下放的 Pi 扩展不会被装上，只有白泽自己注入的 botExtension", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "baize-runner-"));
+    const extensionsDir = join(botDirs(dataDir, BotId.parse("bot-1")).agentDir, "extensions");
+    mkdirSync(extensionsDir, { recursive: true });
+    const marker = join(dataDir, "extension-loaded");
+    writeFileSync(
+      join(extensionsDir, "probe.js"),
+      [
+        'import { writeFileSync } from "node:fs";',
+        `export default function probe() { writeFileSync(${JSON.stringify(marker)}, "loaded"); }`,
+        "",
+      ].join("\n"),
+    );
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "照常跑"));
+
+    expect(existsSync(marker), "外来扩展没被加载，它一加载就会写这个文件").toBe(false);
+    expect(runDoneSaid(h), "白泽自己的 botExtension 照常在，prompt 照常进会话").toEqual({ "run-1": "entered" });
+  });
+
   it("run 收尾对账关资源期间来第二条 config：applyConfig 不等后面的审批 run", async () => {
     const mcp = await startFakeMcp();
     const tool = holdTool();
@@ -6415,6 +6537,25 @@ describe("群聊上下文按水位增量", () => {
     await h.runner.prompt(withContext("run-2", "之后", chatLines("g1", 3, 22)));
 
     expect(contextOf(prompts.at(-1)), "抛错那次没进会话，第 6 到 20 条不能被水位跳过").toBe(
+      rendered(chatLines("g1", 6, 22)),
+    );
+  });
+
+  it("prompt 正常返回却没进会话：run_done 报 dropped，不记水位，这批下次照拼", async () => {
+    const { prompts, script } = promptsSeen();
+    const h = await startHarness({ bots: ["bot-1"], script });
+
+    await h.runner.prompt(withContext("run-0", "先建会话", chatLines("g1", 1, 5)));
+    botSessionProbe.promptSwallow = true;
+    try {
+      await h.runner.prompt(withContext("run-1", "被收下却没进会话这一次", chatLines("g1", 1, 20)));
+    } finally {
+      botSessionProbe.promptSwallow = false;
+    }
+    await h.runner.prompt(withContext("run-2", "之后", chatLines("g1", 3, 22)));
+
+    expect(runDoneSaid(h)["run-1"], "没见到触发那条 user 消息的 message_end").toBe("dropped");
+    expect(contextOf(prompts.at(-1)), "没进会话那次不记水位，第 6 到 20 条不能被跳过").toBe(
       rendered(chatLines("g1", 6, 22)),
     );
   });

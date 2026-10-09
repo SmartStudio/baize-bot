@@ -385,7 +385,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
       amount,
     });
     if (usage === null) return null;
-    await confirmContext(tx, event.runId);
+    // 旧运行器不带 prompt 字段，它的 run_done 一直是「收下就确认」，维持原样。
+    if ((event.prompt ?? "entered") === "entered") await confirmContext(tx, event.runId);
     return {
       usage,
       failedTools: await failRunningToolCalls(tx, event.groupId, event.runId),

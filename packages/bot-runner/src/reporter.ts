@@ -60,20 +60,36 @@ export function simpleToolView(toolName: string, args: unknown, server = ""): To
   return { kind: "mcp", server, tool: toolName, params, ...rawOf(args) };
 }
 
+export interface RunReport {
+  readonly unsubscribe: () => void;
+  /** 这次 run 里见过触发那条 user 消息的 message_end，也就是它真进了会话。 */
+  readonly entered: () => boolean;
+}
+
+const firstText = (message: { readonly content: string | readonly { readonly type: string }[] }): string | null => {
+  if (typeof message.content === "string") return message.content;
+  const block = message.content[0];
+  return block !== undefined && block.type === "text" && "text" in block && typeof block.text === "string"
+    ? block.text
+    : null;
+};
+
 export function reportRun(
   session: AgentSession,
   statsBeforeRun: SessionStats,
   identity: RunIdentity,
+  promptText: string,
   runnerAborted: () => boolean,
   consumeBlockedCall: (callId: string) => boolean,
   serverForTool: (toolName: string) => string,
   send: (message: AgentToControl) => void,
-): () => void {
+): RunReport {
   const ids = { runId: identity.runId, botId: identity.botId, groupId: identity.groupId };
   const startedAt = new Map<string, number>();
   const views = new Map<string, ToolView>();
   let steps = 0;
   let lastModelError: string | null = null;
+  let entered = false;
   // 每个文字块一条群消息。text_end 之后这条不再长，工具之后的正文另起一条，
   // 控制面的 streaming 因此就等于「这条还会长」，别的 Bot 的水位靠它。
   let block: MessageId | null = null;
@@ -82,7 +98,14 @@ export function reportRun(
     send(AgentToControl.parse(message));
   };
 
-  return session.subscribe((event) => {
+  const unsubscribe = session.subscribe((event) => {
+    // Agent 的 processEvents 先把 message_end 的消息 push 进 state（dist/agent.js 403-405）再叫订阅者（431-433），
+    // 见到触发这条 user 消息的 message_end 就是它进了会话。按正文认而不是「第一条 user 消息」：
+    // 排队的 prompt 和续跑都会发 user 消息的 message_end。
+    if (event.type === "message_end" && event.message.role === "user") {
+      if (firstText(event.message) === promptText) entered = true;
+      return;
+    }
     if (event.type === "message_end" && event.message.role === "assistant") {
       lastModelError =
         event.message.stopReason === "error" ? (event.message.errorMessage || "模型上游没回话").slice(0, 500) : null;
@@ -145,7 +168,18 @@ export function reportRun(
       // config 切换或会话重建会让累计值回零，差值最低按零报，不能把负数送出边界。
       const inputTokens = Math.max(0, statsAfterRun.tokens.input - statsBeforeRun.tokens.input);
       const outputTokens = Math.max(0, statsAfterRun.tokens.output - statsBeforeRun.tokens.output);
-      push({ type: "run_done", ...ids, steps, inputTokens, outputTokens });
+      // agent_settled 从 _runAgentPrompt 的 finally 发（dist/core/agent-session.js 1376），一次 prompt 恰好一次，
+      // 但它不等于消息进了会话：Agent.prompt 在 activeRun 占着时抛（dist/agent.js 243-248）也走这个 finally。
+      // 进没进看上面那条 message_end。
+      push({
+        type: "run_done",
+        ...ids,
+        prompt: entered ? "entered" : "dropped",
+        steps,
+        inputTokens,
+        outputTokens,
+      });
     }
   });
+  return { unsubscribe, entered: () => entered };
 }

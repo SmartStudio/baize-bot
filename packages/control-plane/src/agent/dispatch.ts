@@ -29,7 +29,7 @@ import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot }
 import { findChiefBotId, findSoloBotId } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
-import { recordUnsettled, unsettledAtLastRun } from "../repo/context-window.js";
+import { pendingLines, recordContext } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
@@ -219,11 +219,10 @@ async function sendSpeaker(
   // Bot 在派活途中被删了，只跳过它。不留 system：
   // 单聊群已随 Bot 级联删掉，写不进去；多 Bot 群里页面已收到 bot_deleted。
   if (runId === null) return { kind: "skipped" };
-  await recordUnsettled(
-    deps.db,
-    runId,
-    context.filter((line) => !line.settled).map((line) => line.messageId),
-  );
+  await recordContext(deps.db, runId, {
+    unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+    settled: context.filter((line) => line.settled).map((line) => line.messageId),
+  });
   const origin: PromptOrigin =
     speaker.handoff !== undefined
       ? botOrigin(members, speaker.handoff.fromBotId)
@@ -280,8 +279,8 @@ type ContextLine = {
 const CONTEXT_CATCHUP = 10;
 
 /**
- * 最近 20 条，前面再接上这个 Bot 最近一次正常回了 run_done 的派活里没定稿、这次滑出窗口的行。
- * 还没定稿的照送，字没变运行器的水位会挡掉，变了就拼；定稿那一轮整句再拼一次，之后不再记，也就不再送。
+ * 最近 20 条，前面再接上这个 Bot 最近几次进了会话的派活读到时没定稿、之后也没有哪次读到它定稿、这次滑出窗口的行。
+ * 还没定稿的照送，字没变运行器的水位会挡掉，变了就拼；定稿那一轮整句再拼一次，记成读过定稿，之后不再送。
  */
 async function contextFor(
   db: Db,
@@ -293,7 +292,7 @@ async function contextFor(
 ): Promise<ContextLine[]> {
   const window = await recentBodies(db, groupId, speaker.trigger, includeRecent);
   const inWindow = new Set([speaker.trigger.id, ...window.map(({ id }) => id)]);
-  const carried = (await unsettledAtLastRun(db, groupId, speaker.botId))
+  const carried = (await pendingLines(db, groupId, speaker.botId))
     .filter((message) => !inWindow.has(message.id))
     .slice(-CONTEXT_CATCHUP);
   return summarizeAll(db, ownerId, [...carried, ...window], speaker.botId, members);

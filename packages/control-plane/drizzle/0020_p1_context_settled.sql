@@ -1,0 +1,2 @@
+ALTER TABLE "runs" ADD COLUMN "settled_context" jsonb;--> statement-breakpoint
+CREATE INDEX "runs_context_confirmed_idx" ON "runs" USING btree ("group_id","bot_id","context_confirmed_at" DESC NULLS FIRST,"started_at" DESC NULLS FIRST) WHERE "runs"."context_confirmed_at" IS NOT NULL;
