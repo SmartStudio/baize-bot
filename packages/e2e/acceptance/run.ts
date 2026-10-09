@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { chromium, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import {
   AccountListResponse,
-  AccountResponse,
   BotListResponse,
   ComputerListResponse,
   RoutineListResponse,
@@ -95,7 +94,7 @@ const turn = (request: ChatRequest): ScriptedTurn => {
   }
   if (current.includes(XHS_ASK)) {
     return afterTool
-      ? say("第一篇小红书写好了，在等你批。小红书还没登录，批之前先扫一次码。")
+      ? say("第一篇小红书写好了，在等你批。")
       : call("xhs-first", "create_draft", {
           accountId: accountOf("xiaohongshu"),
           content: {
@@ -410,7 +409,7 @@ const run = async (): Promise<void> => {
     await check(p.getByTestId("project-cadence")).toContainText("每周 2 篇小红书");
     await shot(p, "U2-2-project");
 
-    begin("U3 第一篇小红书要登录：首页出登录卡，扫码后变已登录");
+    begin("U3 给它开一个小红书号：账号页主动接入，扫码后多一行已登录");
     const computerId = ComputerListResponse.parse(await s.get("/api/computers")).computers[0]?.id;
     if (computerId === undefined) throw new Error("没有本机");
     const before = AccountListResponse.parse(await s.get("/api/accounts")).accounts;
@@ -418,38 +417,38 @@ const run = async (): Promise<void> => {
       before.some((account) => account.platform === "xiaohongshu"),
       "点开始不会替用户建小红书占位",
     ).toBe(false);
-    // 产品缺口：账号页只有 GitHub/X 的授权入口，没有加小红书的地方，只能直接调建占位的接口。
     const configsBefore = s.configsApplied();
-    const placeholder = AccountResponse.parse(
-      await s.post("/api/accounts", { platform: "xiaohongshu", computerId }),
-    ).account;
+    await openSettings(p, "accounts");
+    await p.locator("[data-testid=account-connect-browser][data-platform=xiaohongshu]").click();
+    const xhsRow = p.getByTestId("account-row").filter({ hasText: "小红书" });
+    await check(xhsRow).toHaveAttribute("data-login", "none");
+    await check(xhsRow.getByTestId("login-open"), "接入一点就开登录窗口").toHaveText("等你扫码…");
+    await check(xhsRow.getByTestId("login-card-note")).toHaveText("登录窗口已在本机打开，扫码后这里会变成已登录。");
+    await waitFor("电脑上开出了登录窗口", () => chrome.waitingLogins() === 1);
+    const placeholder = AccountListResponse.parse(await s.get("/api/accounts")).accounts.find(
+      (account) => account.platform === "xiaohongshu",
+    );
+    if (placeholder === undefined) throw new Error("点接入小红书之后控制面没有这个号");
+    check(placeholder.computerId, "小红书号挂在本机").toBe(computerId);
     ids.accounts.xiaohongshu = placeholder.id;
     await waitFor("加了小红书之后电脑收到新 config", () => s.configsApplied() > configsBefore);
+    await shot(p, "U3-1-connect");
+    chrome.scan("白泽工厂日记");
+    await check(xhsRow).toHaveAttribute("data-login", "valid");
+    await check(xhsRow).toContainText("小红书 · 白泽工厂日记");
+    await check(xhsRow.getByTestId("account-tier"), "权限默认发布要确认").toHaveText("发布要确认");
+    await check(xhsRow.getByTestId("login-open"), "登上之后行上不再有登录按钮").toHaveCount(0);
+    await shot(p, "U3-2-accounts");
+    await p.getByTestId("settings-close").click();
     await putCover(s, "阿文");
     await p.getByTestId("project-composer-input").fill(XHS_ASK);
     await p.getByTestId("project-composer-send").click();
     await waitFor("阿文起好了草稿", async () => (await draftStatus(s, XHS_TITLE)) === "pending");
     await openHome(p, home);
-    const xhsCard = loginCard(p, placeholder.id);
-    await check(xhsCard).toHaveAttribute("data-state", "needed");
-    await check(xhsCard.getByTestId("login-card-title")).toHaveText("小红书 还没登录");
+    await check(pendingRow(p, "draft", XHS_TITLE)).toBeVisible();
+    await check(loginCard(p, placeholder.id), "号已经登上，第一篇稿子不再要登录卡").toHaveCount(0);
     await assertPlainHome(p, s);
-    await shot(p, "U3-1-login-needed");
-    await xhsCard.getByTestId("login-open").click();
-    await check(xhsCard).toHaveAttribute("data-state", "opening");
-    await waitFor("电脑上开出了登录窗口", () => chrome.waitingLogins() === 1);
-    await assertPlainHome(p, s);
-    await shot(p, "U3-2-waiting-scan");
-    chrome.scan("白泽工厂日记");
-    await check(xhsCard).toHaveAttribute("data-state", "signed_in");
-    await check(xhsCard.getByTestId("login-card-title")).toContainText("白泽工厂日记 已登录");
-    await assertPlainHome(p, s);
-    await shot(p, "U3-3-signed-in");
-    await openSettings(p, "accounts");
-    const xhsRow = p.getByTestId("account-row").filter({ hasText: "白泽工厂日记" });
-    await check(xhsRow).toHaveAttribute("data-login", "valid");
-    await shot(p, "U3-4-accounts");
-    await p.getByTestId("settings-close").click();
+    await shot(p, "U3-3-first-draft");
     skip("登录后 Bot 发一条测试请求确认能用（假浏览器给不出真登录态）");
 
     begin("U4 周一早上的计划：菜单栏看数，首页改一条，批准");
@@ -538,7 +537,7 @@ const run = async (): Promise<void> => {
     await shot(p, "U6-2-done");
     skip("小红书评论回复（本机发布器只接了发帖），评论平台换成 GitHub");
 
-    begin("U7 登录过期：发不出去，首页出过期行并通知，其余稿子不受影响");
+    begin("U7 登录过期：发不出去，首页出登录卡并通知，当场扫码，排着的稿子照常");
     const xhsDraft = pendingRow(p, "draft", XHS_TITLE);
     await xhsDraft.getByTestId("today-expand").click();
     await xhsDraft.getByTestId("draft-approve").click();
@@ -549,9 +548,12 @@ const run = async (): Promise<void> => {
       SELECT d.failure, a.login FROM drafts d JOIN accounts a ON a.id = d.account_id
       WHERE d.content->>'title' = ${XHS_TITLE}`;
     check(failure[0], "发布器认出登录过期，账号跟着变过期").toEqual({ failure: "login_expired", login: "expired" });
-    // 等着发的只剩计划里批过的稿子，不算待批，所以首页给的是一行「登录过期」，点进去是账号页，不是带扫码按钮的登录卡。
-    const expiredRow = p.locator(`[data-testid=today-row][data-kind=account]`).filter({ hasText: "登录过期" });
-    await check(expiredRow).toContainText("小红书 · 白泽工厂日记");
+    // 等着发的只剩计划里批过的稿子，过期号照样换成能当场扫码的登录卡，不再是一行只能点去账号页的提示。
+    const expiredCard = loginCard(p, accountOf("xiaohongshu"));
+    await check(expiredCard).toHaveAttribute("data-state", "needed");
+    await check(expiredCard.getByTestId("login-card-title")).toHaveText("小红书 · 白泽工厂日记 登录过期了");
+    await check(expiredCard.getByTestId("login-open")).toHaveText("打开登录窗口");
+    await check(p.locator("[data-testid=today-row][data-kind=account]")).toHaveCount(0);
     await waitFor("系统通知说登录过期了", async () => (await notices(p)).includes("登录过期"));
     const planned = await s.sql<{ status: string }[]>`SELECT status FROM drafts WHERE plan_id IS NOT NULL`;
     check(
@@ -560,14 +562,40 @@ const run = async (): Promise<void> => {
     ).toEqual(["approved", "approved", "approved", "approved", "approved"]);
     await assertPlainHome(p, s);
     await shot(p, "U7-1-expired");
-    await expiredRow.click();
+    await openSettings(p, "accounts");
     const expiredAccount = p.getByTestId("account-row").filter({ hasText: "白泽工厂日记" });
     await check(expiredAccount).toHaveAttribute("data-login", "expired");
-    await expiredAccount.getByTestId("account-tier-toggle").click();
-    await check(p.getByTestId("accounts-page").getByTestId("login-open"), "账号页没有重新登录的入口").toHaveCount(0);
+    await check(expiredAccount.getByTestId("login-open"), "账号页的行上也能重新登录").toHaveText("打开登录窗口");
     await shot(p, "U7-2-accounts-expired");
     await p.getByTestId("settings-close").click();
-    skip("点一下重新扫码（走不通：过期行指向账号页，账号页没有小红书的登录按钮）");
+    await expiredCard.getByTestId("login-open").click();
+    await check(expiredCard).toHaveAttribute("data-state", "opening");
+    await waitFor("电脑上开出了登录窗口", () => chrome.waitingLogins() === 1);
+    await assertPlainHome(p, s);
+    await shot(p, "U7-3-waiting-scan");
+    chrome.scan("白泽工厂日记");
+    await check(expiredCard, "扫码后卡片变成已登录").toHaveAttribute("data-state", "signed_in");
+    await check(expiredCard.getByTestId("login-card-title")).toContainText("白泽工厂日记 已登录");
+    await check(
+      p.getByTestId("today-pending").getByTestId("today-section-count"),
+      "登上之后等你确认不再计这件事，已登录的卡只是回执",
+    ).toHaveCount(0);
+    await check(p.getByTestId("today-page").locator(".today-greeting p")).toHaveText(
+      "没有要你处理的事，其余在按计划跑。",
+    );
+    await check(expiredCard, "服务端那行重拉后没了，已登录的卡还在").toHaveAttribute("data-state", "signed_in");
+    const relogged = await s.sql<
+      { login: string }[]
+    >`SELECT login FROM accounts WHERE id = ${accountOf("xiaohongshu")}`;
+    check(relogged[0]?.login, "账号回到已登录").toBe("valid");
+    const stillPlanned = await s.sql<{ status: string }[]>`SELECT status FROM drafts WHERE plan_id IS NOT NULL`;
+    check(
+      stillPlanned.map((row) => row.status),
+      "重新登录后计划里的稿子照常排着",
+    ).toEqual(["approved", "approved", "approved", "approved", "approved"]);
+    await check(p.getByTestId("today-next"), "周四那条小红书照常排着").toContainText("AI 队友怎么分工");
+    await assertPlainHome(p, s);
+    await shot(p, "U7-4-signed-in");
     process.stdout.write(`  假 Chrome 收到的 CDP：${chrome.cdpCalls().join(" ")}\n`);
 
     begin("U8 第二个项目：抖音暂不支持");

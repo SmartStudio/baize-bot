@@ -18,24 +18,33 @@ const stateOf = (account: Account, flow: LoginFlow | undefined): State => {
   return flow.status;
 };
 
-const noteOf = (account: Account, flow: LoginFlow | undefined, where: string): string => {
+// 点了登录之后这一次怎么样了，首页的登录卡和账号页的行共用。还没点、或者这次已经登上时是 null。
+export const loginFlowNote = (flow: LoginFlow | undefined, where: string): { text: string; alert: boolean } | null => {
   switch (flow?.status) {
     case "opening":
-      return `登录窗口已在${where}打开，扫码后这里会变成已登录。`;
+      return { text: `登录窗口已在${where}打开，扫码后这里会变成已登录。`, alert: false };
     case "offline":
-      return `${where}不在线，打开电脑上的白泽后再点登录。`;
+      return { text: `${where}不在线，打开电脑上的白泽后再点登录。`, alert: true };
     case "refused":
-      return `登录窗口没打开：${flow.message}`;
+      return { text: `登录窗口没打开：${flow.message}`, alert: true };
     case "failed":
-      return `登录没成。${LOGIN_FAILURE_TEXT[flow.reason]}`;
+      return { text: `登录没成。${LOGIN_FAILURE_TEXT[flow.reason]}`, alert: true };
     case "lapsed":
-      return "没等到登录结果，可以再点一次登录。";
-    default:
-      return account.login === "expired"
-        ? `${timeText(account.loginChangedAt)} 过期的 · 账号在${where}，稿子先不发。`
-        : `稿子等着发到这个号，在${where}的助理浏览器里扫一次码。密码不经过 Bot。`;
+      return { text: "没等到登录结果，可以再点一次登录。", alert: true };
+    case "signed_in":
+    case undefined:
+      return null;
   }
 };
+
+const noteOf = (account: Account, flow: LoginFlow | undefined, where: string): { text: string; alert: boolean } =>
+  loginFlowNote(flow, where) ?? {
+    text:
+      account.login === "expired"
+        ? `${timeText(account.loginChangedAt)} 过期的 · 账号在${where}，稿子先不发。`
+        : `稿子等着发到这个号，在${where}的助理浏览器里扫一次码。密码不经过 Bot。`,
+    alert: false,
+  };
 
 export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
   const where = computer === undefined ? "账号所在的电脑" : computerName(computer);
@@ -59,7 +68,7 @@ export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
       </article>
     );
   }
-  const alert = state === "offline" || state === "refused" || state === "failed" || state === "lapsed";
+  const note = noteOf(account, flow, where);
   return (
     <article className="today-row today-login" {...common}>
       <TriangleAlert size={18} aria-hidden="true" />
@@ -70,11 +79,11 @@ export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
           {account.login === "expired" ? ` · ${account.handle ?? "账号"} 登录过期了` : " 还没登录"}
         </strong>
         <small
-          className={alert ? "today-inline-error" : undefined}
+          className={note.alert ? "today-inline-error" : undefined}
           data-testid="login-card-note"
-          role={alert ? "alert" : undefined}
+          role={note.alert ? "alert" : undefined}
         >
-          {noteOf(account, flow, where)}
+          {note.text}
         </small>
       </span>
       <span className="today-row-actions">

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Account, AccountId, Computer, ComputerId, Draft, LoginAttemptId, TodayPendingItem } from "@baize/shared";
-import { withLoginCards } from "./accounts.js";
+import { rememberLoginCards, withLoginCards } from "./accounts.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
 import { createClock } from "./stamped.js";
 import type { Action, ContentBook, ReadyState } from "./types.js";
@@ -197,77 +197,121 @@ describe("一次登录尝试的结算", () => {
 });
 
 describe("等你确认里的登录卡", () => {
-  const book = (accounts: Account[], logins: ContentBook["logins"] = {}, drafts: Draft[] = []): ContentBook => ({
+  const book = (accounts: Account[], drafts: Draft[] = []): ContentBook => ({
     ...EMPTY_CONTENT,
     accounts: Object.fromEntries(accounts.map((item) => [item.id, item])),
     drafts: Object.fromEntries(drafts.map((item) => [item.id, item])),
-    logins,
   });
   const draftItem = (accountId = "acc_1", status: Draft["status"] = "pending"): TodayPendingItem =>
     TodayPendingItem.parse({ kind: "draft", draft: draftFor(accountId, status), since: at });
   const kinds = (entries: ReturnType<typeof withLoginCards>) => entries.map((entry) => entry.kind);
+  const none = new Map<AccountId, ReadonlySet<string>>();
+  // 照今天页的做法：一屏渲染完就记下登录卡的位置。
+  const shown = (entries: ReturnType<typeof withLoginCards>, watched = new Map<AccountId, ReadonlySet<string>>()) => {
+    rememberLoginCards(entries, watched);
+    return watched;
+  };
+  const labels = (entries: ReturnType<typeof withLoginCards>) =>
+    entries.map((entry) =>
+      entry.kind === "draft" ? entry.draft.id : entry.kind === "login" ? `login:${entry.account.login}` : entry.kind,
+    );
 
   const accountRow = (login: Account["login"], handle: string | null = "要务机械星球") =>
     TodayPendingItem.parse({ kind: "account", account: account(login, handle), since: at });
 
   it("没登录的小红书号有稿子等着，登录卡换掉服务端那行，放在稿子前面", () => {
     const pending = [accountRow("none", null), draftItem()];
-    const entries = withLoginCards(pending, book([account("none", null)]));
+    const entries = withLoginCards(pending, book([account("none", null)]), none);
     expect(kinds(entries)).toEqual(["login", "draft"]);
     expect(entries.length, "一张卡换一行，条数和服务端 pending 一样").toBe(pending.length);
   });
 
   it("服务端没列账号行的号，不论没登录还是过期，都不凭空放卡", () => {
-    expect(kinds(withLoginCards([draftItem()], book([account("none", null)])))).toEqual(["draft"]);
-    expect(kinds(withLoginCards([draftItem()], book([account("expired")])))).toEqual(["draft"]);
+    expect(kinds(withLoginCards([draftItem()], book([account("none", null)]), none))).toEqual(["draft"]);
+    expect(kinds(withLoginCards([draftItem()], book([account("expired")]), none))).toEqual(["draft"]);
   });
 
   it("两条稿子发到同一个号只放一张卡", () => {
     const pending = [accountRow("expired"), draftItem(), draftItem()];
-    expect(kinds(withLoginCards(pending, book([account("expired")])))).toEqual(["login", "draft", "draft"]);
+    expect(kinds(withLoginCards(pending, book([account("expired")]), none))).toEqual(["login", "draft", "draft"]);
   });
 
-  it("号已登录、非浏览器平台、没有稿子等着，都不放卡", () => {
-    expect(kinds(withLoginCards([draftItem()], book([account("valid")])))).toEqual(["draft"]);
+  it("号已登录、非浏览器平台都不放卡，OAuth 平台的行照原样列", () => {
+    expect(kinds(withLoginCards([draftItem()], book([account("valid")]), none))).toEqual(["draft"]);
     const xRow = TodayPendingItem.parse({ kind: "account", account: account("none", null, "x"), since: at });
-    expect(kinds(withLoginCards([xRow, draftItem()], book([account("none", null, "x")])))).toEqual([
+    expect(kinds(withLoginCards([xRow, draftItem()], book([account("none", null, "x")]), none))).toEqual([
       "account",
       "draft",
     ]);
-    expect(kinds(withLoginCards([accountRow("none", null)], book([account("none", null)])))).toEqual(["account"]);
   });
 
-  it("点过登录的号登上之后卡片留着说已登录", () => {
-    const entries = withLoginCards([draftItem()], book([account("valid")], { [ACC]: { status: "signed_in" } }));
-    expect(kinds(entries)).toEqual(["login", "draft"]);
-  });
-
-  it("服务端单列的过期号照原样列，不换成登录卡", () => {
-    const pending = [TodayPendingItem.parse({ kind: "account", account: account("expired"), since: at })];
-    expect(kinds(withLoginCards(pending, book([account("expired")])))).toEqual(["account"]);
+  it("服务端单列的过期号没有待批的稿子，也换成能当场扫码的登录卡", () => {
+    const entries = withLoginCards([accountRow("expired")], book([account("expired")]), none);
+    expect(kinds(entries), "排着的稿子已经批过，过期号照样要能当场重新登录").toEqual(["login"]);
+    expect(entries.length).toBe(1);
   });
 
   it("过期号有稿子等着，只放登录卡，服务端那行过期号不再列，不论它排在稿子前还是后", () => {
-    const row = TodayPendingItem.parse({ kind: "account", account: account("expired"), since: at });
+    const row = accountRow("expired");
     const content = book([account("expired")]);
-    expect(kinds(withLoginCards([row, draftItem()], content))).toEqual(["login", "draft"]);
-    expect(kinds(withLoginCards([draftItem(), row], content))).toEqual(["login", "draft"]);
+    expect(kinds(withLoginCards([row, draftItem()], content, none))).toEqual(["login", "draft"]);
+    expect(kinds(withLoginCards([draftItem(), row], content, none))).toEqual(["login", "draft"]);
     expect(
-      withLoginCards([row, draftItem()], content).length,
+      withLoginCards([row, draftItem()], content, none).length,
       "一张卡换一行过期号，条数和服务端 pending 一样，计数才能只数服务端的",
     ).toBe(2);
   });
 
-  it("稿子在本地已经批掉或退回，today 还没刷新，也不再放卡", () => {
+  it("稿子在本地已经批掉或退回，过期号那行照样是登录卡，留在服务端排的位置", () => {
     const approved = draftFor("acc_1", "approved");
     const row = accountRow("expired");
-    expect(kinds(withLoginCards([row, draftItem()], book([account("expired")], {}, [approved])))).toEqual([
-      "account",
+    expect(kinds(withLoginCards([draftItem(), row], book([account("expired")], [approved]), none))).toEqual([
       "draft",
+      "login",
     ]);
-    expect(kinds(withLoginCards([row, draftItem("acc_1", "returned")], book([account("expired")])))).toEqual([
-      "account",
-      "draft",
+  });
+
+  it("过期卡原本排在多项待办之后，登上后回执仍在原位，不跳到最前", () => {
+    const other = (id: string) =>
+      TodayPendingItem.parse({ kind: "draft", draft: draftFor("acc_2", "pending", id), since: at });
+    const others = [other("d1"), other("d2"), other("d3")];
+    const before = withLoginCards([...others, accountRow("expired")], book([account("expired")]), none);
+    expect(labels(before)).toEqual(["d1", "d2", "d3", "login:expired"]);
+    const watched = shown(before);
+    const after = withLoginCards(others, book([account("valid")]), watched);
+    expect(labels(after), "服务端那行没了，回执还排在三件待办后面").toEqual(["d1", "d2", "d3", "login:valid"]);
+    const later = withLoginCards(
+      [other("d1"), other("d3"), other("d4")],
+      book([account("valid")]),
+      shown(after, watched),
+    );
+    expect(labels(later), "前面有一件批掉了、后面新来一件，回执跟着原先前面那些里还在的最后一条").toEqual([
+      "d1",
+      "d3",
+      "login:valid",
+      "d4",
     ]);
+  });
+
+  it("这一页上出过卡的号登上了，前面那些条目一条都不在了，回执排最前；等你确认空了也留", () => {
+    const before = withLoginCards([draftItem(OTHER), accountRow("expired")], book([account("expired")]), none);
+    const watched = shown(before);
+    const entries = withLoginCards([draftItem("acc_3")], book([account("valid")]), watched);
+    expect(labels(entries), "没有待办引用它也留回执").toEqual(["login:valid", "draft_acc_3"]);
+    expect(kinds(withLoginCards([], book([account("valid")]), watched)), "等你确认空了也留").toEqual(["login"]);
+  });
+
+  it("有待办等着的号登上了，回执放在那件待办前面", () => {
+    const watched = new Map([[ACC, new Set<string>()]]);
+    const entries = withLoginCards([draftItem(OTHER), draftItem()], book([account("valid")]), watched);
+    expect(
+      entries.map((entry) =>
+        entry.kind === "login" ? "login" : `draft:${entry.kind === "draft" ? entry.draft.accountId : ""}`,
+      ),
+    ).toEqual(["draft:acc_2", "login", "draft:acc_1"]);
+  });
+
+  it("这一页没出过卡的已登录号不放回执", () => {
+    expect(kinds(withLoginCards([draftItem()], book([account("valid")]), none))).toEqual(["draft"]);
   });
 });

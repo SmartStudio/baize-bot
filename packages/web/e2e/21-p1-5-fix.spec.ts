@@ -249,7 +249,7 @@ test("断线时批准了稿子，登录卡跟着走", async ({ page, request }) 
   ).toHaveCount(0);
 });
 
-test("没有稿子等着的过期号，今天页照原样列，不换成登录卡", async ({ page, request }) => {
+test("没有稿子等着的过期号，今天页也换成能当场扫码的登录卡，不再是只能点去账号页的一行", async ({ page, request }) => {
   await login(page);
   const created = await page.request.post("/api/accounts", {
     data: { platform: "xiaohongshu", computerId: "cmp_local" },
@@ -258,10 +258,14 @@ test("没有稿子等着的过期号，今天页照原样列，不换成登录�
   const { account } = AccountResponse.parse(await created.json());
   await reportLogin(request, account.id, { login: "valid", handle: "没稿子的号" });
   await reportLogin(request, account.id, { login: "expired" });
+  await page.reload();
 
   const rows = page.getByTestId("today-pending").locator("[data-testid=today-row][data-kind=account]");
-  await expect(rows.filter({ hasText: "没稿子的号" })).toHaveCount(1);
-  await expect(loginCard(page, account.id)).toHaveCount(0);
+  await expect(rows.filter({ hasText: "没稿子的号" })).toHaveCount(0);
+  await expect(loginCard(page, account.id)).toHaveAttribute("data-state", "needed");
+  await expect(loginCard(page, account.id).getByTestId("login-card-title")).toHaveText(
+    "小红书 · 没稿子的号 登录过期了",
+  );
 });
 
 test("电脑的旧快照晚于状态推送到，账号页仍写推送里的状态", async ({ page, request }) => {

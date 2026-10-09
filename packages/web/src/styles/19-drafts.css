@@ -344,6 +344,27 @@
   color: var(--warning);
 }
 
+.account-login-action {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: flex-end;
+  margin: var(--space-3) 0 0;
+  padding: 0 var(--space-2);
+}
+
+.account-login-note {
+  flex: 1;
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+.account-login-note.is-alert,
+.account-connect-error {
+  color: var(--danger);
+  font: var(--type-caption);
+}
+
 /* ---------- 等你确认里的登录卡 ---------- */
 
 .today-login > svg {
@@ -361,6 +382,7 @@
 .account-connect {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: var(--space-3);
   margin-bottom: var(--space-4);
 }

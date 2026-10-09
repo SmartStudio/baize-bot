@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { Account, AccountId, AccountTier, Computer, ComputerId, OAuthPlatform } from "@baize/shared";
+import {
+  BrowserPlatform,
+  type Account,
+  type AccountId,
+  type AccountTier,
+  type Computer,
+  type ComputerId,
+  type OAuthPlatform,
+} from "@baize/shared";
 import { oauthStartUrl } from "../api/client.js";
+import { useApp } from "../state/app.js";
+import type { LoginFlow } from "../state/types.js";
+import { loginFlowNote } from "./LoginCard.js";
 import {
   COMPUTER_STATUS_CLASS,
   COMPUTER_STATUS_TEXT,
@@ -26,13 +37,46 @@ type Load = "loading" | "ready" | "failed";
 
 type Change = { status: "idle" } | { status: "busy" } | { status: "failed"; message: string };
 
+type Login = { flows: Partial<Record<AccountId, LoginFlow>>; open: (accountId: AccountId) => Promise<void> };
+
+// 扫码登录的平台没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
+const LoginAction = ({ account, where, login }: { account: Account; where: string; login: Login }) => {
+  const flow = login.flows[account.id];
+  const note = loginFlowNote(flow, where);
+  const opening = flow?.status === "opening";
+  return (
+    <div className="account-login-action" data-testid="account-login-action">
+      {note === null ? null : (
+        <small
+          className={note.alert ? "account-login-note is-alert" : "account-login-note"}
+          data-testid="login-card-note"
+          role={note.alert ? "alert" : undefined}
+        >
+          {note.text}
+        </small>
+      )}
+      <button
+        type="button"
+        className="primary-button"
+        data-testid="login-open"
+        disabled={opening}
+        onClick={() => void login.open(account.id).catch(() => undefined)}
+      >
+        {opening ? "等你扫码…" : "打开登录窗口"}
+      </button>
+    </div>
+  );
+};
+
 const AccountRow = ({
   account,
   computer,
+  login,
   onChangeTier,
 }: {
   account: Account;
   computer: Computer | undefined;
+  login: Login;
   onChangeTier: Props["onChangeTier"];
 }) => {
   const [open, setOpen] = useState(false);
@@ -79,6 +123,13 @@ const AccountRow = ({
         </span>
         {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
       </button>
+      {account.login !== "valid" && BrowserPlatform.safeParse(account.platform).success ? (
+        <LoginAction
+          account={account}
+          where={computer === undefined ? "账号所在的电脑" : computerName(computer)}
+          login={login}
+        />
+      ) : null}
       {open ? (
         <fieldset className="account-tiers" aria-label={`${handle} 的档位`} disabled={change.status === "busy"}>
           {TIERS.map((tier) => {
@@ -141,25 +192,70 @@ const groupsOf = (accounts: Account[], computers: Record<string, Computer>): Gro
 
 const OAUTH_PLATFORMS: OAuthPlatform[] = ["github", "x"];
 
-// 整页跳去平台授权，回来落在首页，结果由主窗口读查询串提示。
-const ConnectEntries = () => (
-  <div className="account-connect" data-testid="account-connect">
-    {OAUTH_PLATFORMS.map((platform) => (
-      <a
-        key={platform}
-        className="ghost-button"
-        href={oauthStartUrl(platform)}
-        data-testid="account-connect-link"
-        data-platform={platform}
-      >
-        接入 {PLATFORM[platform]}
-      </a>
-    ))}
-  </div>
-);
+type Connect = { status: "idle" } | { status: "busy" } | { status: "failed"; message: string };
+
+// OAuth 平台整页跳去平台授权，回来落在首页，结果由主窗口读查询串提示。
+// 扫码登录的平台先在本机建一个未登录的号（已经有就用那个），再在它上面开登录窗口，扫码的进度写在那一行上。
+const ConnectEntries = ({ local, login }: { local: Computer | undefined; login: Login }) => {
+  const { actions } = useApp();
+  const [connect, setConnect] = useState<Connect>({ status: "idle" });
+  const start = (platform: BrowserPlatform) => {
+    if (local === undefined || connect.status === "busy") return;
+    setConnect({ status: "busy" });
+    actions
+      .addAccount(platform, local.id)
+      .then(async (accountId) => {
+        if (accountId !== undefined) await login.open(accountId);
+        setConnect({ status: "idle" });
+      })
+      .catch((cause: unknown) =>
+        setConnect({ status: "failed", message: cause instanceof Error ? cause.message : "请重试" }),
+      );
+  };
+  return (
+    <div className="account-connect" data-testid="account-connect">
+      {OAUTH_PLATFORMS.map((platform) => (
+        <a
+          key={platform}
+          className="ghost-button"
+          href={oauthStartUrl(platform)}
+          data-testid="account-connect-link"
+          data-platform={platform}
+        >
+          接入 {PLATFORM[platform]}
+        </a>
+      ))}
+      {BrowserPlatform.options.map((platform) => (
+        <button
+          type="button"
+          key={platform}
+          className="ghost-button"
+          data-testid="account-connect-browser"
+          data-platform={platform}
+          disabled={local === undefined || connect.status === "busy"}
+          title={local === undefined ? "要在装了白泽的本机上扫码登录" : undefined}
+          onClick={() => start(platform)}
+        >
+          接入 {PLATFORM[platform]}
+        </button>
+      ))}
+      {connect.status === "failed" ? (
+        <small className="account-connect-error" data-testid="account-connect-error" role="alert">
+          没接上：{connect.message}
+        </small>
+      ) : null}
+    </div>
+  );
+};
 
 // 进来就重拉一遍。拉不到得明说，不然空表会被读成「真的没有账号」。
 export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Props) => {
+  const { state, actions } = useApp();
+  const login: Login = {
+    flows: state.status === "ready" ? state.content.logins : {},
+    open: actions.loginAccount,
+  };
+  const local = Object.values(computers).find((computer) => computer.kind === "local");
   const [load, setLoad] = useState<Load>("loading");
   const fetchAccounts = useCallback(() => {
     onLoad().then(
@@ -175,7 +271,7 @@ export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Prop
 
   return (
     <>
-      <ConnectEntries />
+      <ConnectEntries local={local} login={login} />
       {load === "failed" ? (
         <p className="later" data-testid="accounts-failed" role="alert">
           账号没取到。{" "}
@@ -203,7 +299,13 @@ export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Prop
                 )}
               </header>
               {group.accounts.map((account) => (
-                <AccountRow key={account.id} account={account} computer={group.computer} onChangeTier={onChangeTier} />
+                <AccountRow
+                  key={account.id}
+                  account={account}
+                  computer={group.computer}
+                  login={login}
+                  onChangeTier={onChangeTier}
+                />
               ))}
             </section>
           ))}

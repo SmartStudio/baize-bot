@@ -5,6 +5,7 @@ import {
   type AccountId,
   type ComputerId,
   type AccountTier,
+  type BrowserPlatform,
   type ApprovalId,
   type ApprovePlanRequest,
   type ContentPlanId,
@@ -73,6 +74,8 @@ export type AppActions = {
   loadComputers: () => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
+  // 建这个平台的未登录占位，已经有就回那一行。登录窗口由调用方接着在它上面开。登录过期时是 undefined。
+  addAccount: (platform: BrowserPlatform, computerId: ComputerId) => Promise<AccountId | undefined>;
   loadGrants: () => Promise<void>;
   deleteGrant: (grantId: GrantId) => Promise<void>;
   pauseBot: (botId: BotId) => Promise<void>;
@@ -337,6 +340,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       updateAccountTier: signedIn(async ({ api, put }, accountId: AccountId, tier: AccountTier) => {
         const seq = nextSeq();
         put({ type: "account_upserted", account: (await api.updateAccount(accountId, { tier })).account, seq });
+      }),
+      addAccount: signedIn(async ({ api, put }, platform: BrowserPlatform, computerId: ComputerId) => {
+        const seq = nextSeq();
+        const { account } = await api.createAccount({ platform, computerId });
+        put({ type: "account_upserted", account, seq });
+        return account.id;
       }),
       // 尝试号在点击时就取好，卡一开就带着它，202 之前到的旧尝试失败也对不上号。
       // 202 只说窗口在开了，登上没有随 account_updated 推回来；回包里那份账号比推送旧，按号挡掉。

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ArrowRight,
   CalendarClock,
@@ -10,13 +10,20 @@ import {
   Sparkles,
   TriangleAlert,
 } from "lucide-react";
-import type { ApprovalId, DecideApprovalRequest, GroupId, TodayAssistantLine, TodayResponse } from "@baize/shared";
+import type {
+  AccountId,
+  ApprovalId,
+  DecideApprovalRequest,
+  GroupId,
+  TodayAssistantLine,
+  TodayResponse,
+} from "@baize/shared";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
 import { DraftCard, PlanCard, type ContentActions } from "../components/messages/DraftCards.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import { ToolViewContent } from "../components/messages/ToolViewContent.js";
 import type { ContentBook } from "../state/types.js";
-import { withLoginCards } from "../state/accounts.js";
+import { rememberLoginCards, withLoginCards } from "../state/accounts.js";
 import type { Today } from "../state/today.js";
 import { LoginCard } from "../components/LoginCard.js";
 
@@ -167,7 +174,12 @@ const PendingRow = ({
 };
 
 export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGroup, onOpenAccounts }: PendingProps) => {
-  if (data.length === 0) {
+  // 上过屏的登录卡记下来，连同它前面排着哪些条目。登上后服务端那行没了，下一次渲染靠它把回执留在原位。
+  // 提交后再记，渲染本身不改它。
+  const [watched] = useState(() => new Map<AccountId, ReadonlySet<string>>());
+  const entries = cards === undefined ? data : withLoginCards(data, cards.content, watched);
+  useEffect(() => rememberLoginCards(entries, watched));
+  if (entries.length === 0) {
     return (
       <p className="today-empty" data-testid="today-empty">
         没有要你处理的事
@@ -176,7 +188,7 @@ export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGro
   }
   return (
     <div className={`today-list${compact ? " is-compact" : ""}`}>
-      {(cards === undefined ? data : withLoginCards(data, cards.content)).map((item) => {
+      {entries.map((item) => {
         switch (item.kind) {
           case "login":
             return cards === undefined ? null : (
