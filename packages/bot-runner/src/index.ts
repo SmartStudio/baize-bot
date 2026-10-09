@@ -18,7 +18,7 @@ import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS } from "./gate.js";
 import { createHelperTools } from "./helper.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
-import { createMemoryTools } from "./memory.js";
+import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
@@ -26,8 +26,8 @@ import { createRoutineOfferTools } from "./routine-offer.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import { createTeamTools } from "./team.js";
-import { type ActiveRun, createTopicTools, renderTaskCard } from "./topic.js";
-import { contextSince, readWatermark, recordWatermark } from "./watermark.js";
+import { createTopicTools, renderTaskCard } from "./topic.js";
+import { contextSince, readMemoryShown, readWatermark, recordMemoryShown, recordWatermark } from "./watermark.js";
 
 export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
 export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -52,7 +52,7 @@ export interface RunnerConfig {
   readonly grants: ConfigMessage["grants"];
   /** 该用户全部 Bot 的 skill，按 botId 分开落盘。省略按空数组对账，也就是把留在盘上的旧 skill 清掉。 */
   readonly skills?: ConfigMessage["skills"];
-  /** 品牌手册和该用户全部 Bot 的偏好，和 config 报文一样恒带。第 2 期形状先透传进对账指纹，怎么进提示留给 p2-memory-runner。 */
+  /** 品牌手册和该用户全部 Bot 的偏好，和 config 报文一样恒带；每次运行按最新配置注入记忆。 */
   readonly brand: ConfigMessage["brand"];
   readonly preferences: ConfigMessage["preferences"];
   readonly send: (message: AgentToControl) => void;
@@ -94,6 +94,7 @@ interface BotDesired {
   readonly computerId: ComputerId;
   readonly accounts: ConfigMessage["accounts"];
   readonly grants: ConfigMessage["grants"];
+  /** 手册和偏好不进 fingerprint：它们变了不重建会话，每次 prompt 开跑时读最新的一份整段放进系统提示。 */
   readonly brand: ConfigMessage["brand"];
   readonly preferences: ConfigMessage["preferences"];
 }
@@ -133,7 +134,7 @@ interface BotRuntime {
   /** pause 只让下一次 prompt 入场或工具过闸挂起；已经执行中的工具不被中止。 */
   paused: boolean;
   pauseWaiters: Set<PauseWaiter>;
-  active: ActiveRun | null;
+  active: RememberingRun | null;
   /** prompt、建会话、配置对账和资源关闭都只从这一条队列进入。 */
   chain: Promise<void>;
 }
@@ -176,9 +177,6 @@ function definitionFor(
       connections: connections.map((connection) => Object.assign({}, connection, { assignedBotIds: [bot.id] })),
       skills: botSkills.map((skill) => ({ id: skill.id, name: skill.name, steps: skill.steps })),
       skillsReady,
-      // 手册只认版本号：正文变了版本必变，别把整段正文塞进指纹。偏好改一条就换人重建会话，第 2 期先这么简单。
-      brand: brand === null ? null : brand.version,
-      preferences: botPreferences.map(({ id, text, private: isPrivate }) => ({ id, text, private: isPrivate })),
       // 登录态和档位不进：它们只影响调用时的判断，那时现取。
       readable: readable.map(({ id, platform, handle }) => ({ id, platform, handle })),
     }),
@@ -342,6 +340,7 @@ export function createRunner(config: RunnerConfig): Runner {
         dirs.skillsDir,
         initialSkills.filter((skill) => skill.botId === botConfig.id),
       );
+      writeBrandFile(brandFileOf(config.dataDir, botConfig.id), config.brand);
       const current = definitionFor(
         botConfig,
         config.tools,
@@ -492,6 +491,13 @@ export function createRunner(config: RunnerConfig): Runner {
           fail("runner_failed", `Bot ${bot.botId} 对账 skill 失败：${String(error)}`, bot.lastGroupId);
         }
       }
+      try {
+        writeBrandFile(brandFileOf(config.dataDir, bot.botId), desired.brand);
+      } catch (error) {
+        if (bot.lastGroupId !== null) {
+          fail("runner_failed", `Bot ${bot.botId} 落品牌手册失败：${String(error)}`, bot.lastGroupId);
+        }
+      }
       const prepared = definitionFor(
         desired.config,
         desired.tools,
@@ -540,13 +546,17 @@ export function createRunner(config: RunnerConfig): Runner {
     }
   };
 
-  const sessionFor = async (bot: BotRuntime, groupId: GroupId): Promise<BotSession> => {
+  const sessionFor = async (
+    bot: BotRuntime,
+    groupId: GroupId,
+    groupKind: PromptMessage["group"]["kind"],
+  ): Promise<BotSession> => {
     bot.lastGroupId = groupId;
     const existing = bot.sessions.get(groupId);
     if (existing !== undefined) return existing;
     const definition = currentDefinition(bot);
     if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
-    const activeRun = (): ActiveRun | null => bot.active;
+    const activeRun = (): RememberingRun | null => bot.active;
     const dirs = ensureBotDirs(bot.dirs);
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
     const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null);
@@ -556,7 +566,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
-      ...createMemoryTools({ activeRun, send: config.send }),
+      ...createMemoryTools({ groupKind, activeRun, send: config.send }),
       ...createHelperTools({ activeRun, send: config.send }),
       ...createRoutineOfferTools({ activeRun, send: config.send }),
       ...createDraftTools({
@@ -638,6 +648,7 @@ export function createRunner(config: RunnerConfig): Runner {
       clearBashRun: bash.clearRun,
       approvals,
       activeRun,
+      memory: () => bot.active?.memory ?? null,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });
     bot.sessions.set(groupId, created);
@@ -651,7 +662,9 @@ export function createRunner(config: RunnerConfig): Runner {
       return;
     }
 
-    const active: ActiveRun = {
+    const active: RememberingRun = {
+      messageId: message.messageId,
+      memory: null,
       run: {
         runId: message.runId,
         botId: message.botId,
@@ -669,14 +682,18 @@ export function createRunner(config: RunnerConfig): Runner {
     try {
       bot.active = active;
       if (!(await waitUntilRunning(bot, undefined))) return;
-      botSession = await sessionFor(bot, message.groupId);
+      botSession = await sessionFor(bot, message.groupId, message.group.kind);
       if (!(await waitUntilRunning(bot, undefined))) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
       await botSession.usePurpose(message.purpose);
       const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
       const watermark = readWatermark(session.sessionManager);
-      const text = composePrompt(message, contextSince(message.context, watermark), desiredConfig(bot)!.accounts);
+      const desired = desiredConfig(bot)!;
+      const shown = readMemoryShown(session.sessionManager);
+      const memory = renderMemory(bot.botId, desired.brand, desired.preferences, shown);
+      active.memory = memory.text;
+      const text = composePrompt(message, contextSince(message.context, watermark), desired.accounts);
       report = reportRun(
         session,
         statsBeforeRun,
@@ -694,7 +711,10 @@ export function createRunner(config: RunnerConfig): Runner {
       await session.prompt(text);
       // 只在触发进了会话才记水位。prompt 抛错、正常返回却没进会话（比如 AgentSession 把它当 handled 收下）
       // 都不记，下一次宁可把这批再读一遍，也不让它们从没进过会话就被水位跳过。
-      if (report.entered()) recordWatermark(session.sessionManager, message, watermark);
+      if (report.entered()) {
+        recordWatermark(session.sessionManager, message, watermark);
+        recordMemoryShown(session.sessionManager, memory.shown, shown);
+      }
     } catch (error) {
       // 还没调 session.prompt 就失败，带上 runId 让控制面立刻把这个 run 收尾，不等 finally 补的 run_done。
       // 调过 session.prompt 才抛的，进没进会话由 run_done 的 prompt 字段说：reporter 见过触发消息的 message_end

@@ -33,6 +33,8 @@ import {
   HandoffId,
   MessageId,
   ModelPurpose,
+  type Preference,
+  PreferenceId,
   RunId,
   type Skill,
   SkillId,
@@ -483,7 +485,7 @@ async function startHarness(options: {
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     accountsProxy: overrides.accountsProxy ?? options.accountsProxy ?? { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
-    brand: overrides.brand ?? options.brand ?? null,
+    brand: overrides.brand !== undefined ? overrides.brand : (options.brand ?? null),
     preferences: [...(overrides.preferences ?? options.preferences ?? [])],
     dataDir,
     ...(overrides.skills !== undefined
@@ -4904,7 +4906,7 @@ ${join(h.dataDir, "bot-1", "work")}
   });
 
   it.each(["report_metric", "remember_preference"])(
-    "工厂还是空桩的内部工具名 %s 也保留：队员连的工具有同名操作时不注册，调用碰不到工具连接，也不会免审批放行",
+    "当前会话不提供的内部工具名 %s 也保留：队员连的工具有同名操作时不注册，调用碰不到工具连接，也不会免审批放行",
     async (name) => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
       const seen = toolRecorder();
@@ -4920,7 +4922,14 @@ ${join(h.dataDir, "bot-1", "work")}
         script: scriptSeeingTools(seen, [["记一下", callTool(name, { value: 1, label: "星", text: "短句" })]]),
       });
 
-      await h.runner.prompt(promptMessage("bot-1", "run-1", "记一下"));
+      await h.runner.prompt(
+        promptMessage(
+          "bot-1",
+          "run-1",
+          "记一下",
+          name === "remember_preference" ? { task: topicTask(), members: TWO_MEMBERS } : {},
+        ),
+      );
 
       expect(seen.toolNames[0], "同一条连接里不撞名的操作照常注册").toContain("list_orders");
       expect(seen.toolNames[0], "名字被运行器保留，工具连接占不走").not.toContain(name);
@@ -7313,6 +7322,396 @@ describe("群聊上下文按水位增量", () => {
     expect(lengths[4], `五轮上下文字数 ${lengths.join(" / ")}，第五轮要不到整窗 ${fullWindow} 的三分之一`).toBeLessThan(
       fullWindow / 3,
     );
+  });
+});
+
+const preferenceOf = (id: string, botId: string, text: string, createdAt: string): Preference => ({
+  id: PreferenceId.parse(id),
+  botId: BotId.parse(botId),
+  text,
+  sourceMessageId: null,
+  private: false,
+  createdAt,
+});
+const textOf = (content: unknown): string =>
+  typeof content === "string"
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((part: unknown) =>
+            typeof part === "object" && part !== null && "text" in part ? String(part.text) : "",
+          )
+          .join("")
+      : "";
+
+const brandFileOf = (dataDir: string, botId: string): string => join(dataDir, botId, "brand.md");
+
+/** 这条请求发给模型的全部消息里有没有这段字，不管它在系统提示、历史还是当前这条里。 */
+const requestCarries = (req: ChatCompletionRequest, text: string): boolean =>
+  JSON.stringify(req.messages).includes(text);
+
+const hasCompaction = (session: AgentSession | null): boolean =>
+  session?.sessionManager.getBranch().some((entry) => entry.type === "compaction") ?? false;
+
+describe("运行器的记忆：偏好和品牌手册", () => {
+  const PREFERENCES_HEADER = "你现在记住的偏好（之前说过、这里没有的已作废）：";
+  const NO_PREFERENCES = "（现在一条都没有，之前记的全部作废）";
+  const BRAND_WITHDRAWN = "品牌手册已经撤掉，之前给过的版本全部作废。";
+  const SHORT_TITLE = preferenceOf("pref-title", "bot-1", "标题不超过 20 个字", "2026-10-09T08:00:00.000Z");
+  const NO_EMOJI = preferenceOf("pref-emoji", "bot-1", "正文里不要表情符号", "2026-10-09T09:00:00.000Z");
+  const OTHER_BOT = preferenceOf("pref-other", "bot-2", "报价一律含税", "2026-10-09T08:30:00.000Z");
+  const BRAND_V3 = { version: 3, text: "口吻：轻松，像朋友聊天\n禁区：不提竞品" };
+
+  /** 每次 prompt 头一轮请求里最后一条 user 消息的正文，也就是这次 composePrompt 拼出来的那段。 */
+  const promptTexts = (requests: readonly ChatCompletionRequest[]): string[] =>
+    requests
+      .filter((req) => !isFollowUpTurn(req))
+      .map((req) => textOf(req.messages.findLast((message) => message.role === "user")?.content));
+
+  const systemOf = (req: ChatCompletionRequest): string =>
+    textOf(req.messages.find((message) => message.role === "system")?.content);
+
+  /** 系统提示里 `<memory>` 段的正文，没有这一段就是 null。 */
+  const memoryOf = (req: ChatCompletionRequest): string | null =>
+    /<memory>\n([\s\S]*?)\n<\/memory>/.exec(systemOf(req))?.[1] ?? null;
+
+  const memoryHarness = async (options: {
+    readonly preferences?: RunnerConfig["preferences"];
+    readonly brand?: RunnerConfig["brand"];
+    readonly dataDir?: string;
+    readonly settings?: RunnerConfig["settings"];
+    /** 不给就每轮回「好」，用量很小。 */
+    readonly script?: (req: ChatCompletionRequest) => ScriptedTurn;
+  }) => {
+    const requests: ChatCompletionRequest[] = [];
+    const script = options.script ?? (() => ({ textChunks: ["好"], usage: { input: 800, output: 2 } }));
+    const h = await startHarness({
+      bots: ["bot-1"],
+      ...(options.preferences === undefined ? {} : { preferences: options.preferences }),
+      ...(options.brand === undefined ? {} : { brand: options.brand }),
+      ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
+      ...(options.settings === undefined ? {} : { settings: options.settings }),
+      script: (req) => {
+        requests.push(req);
+        return script(req);
+      },
+    });
+    return { h, requests, prompts: () => promptTexts(requests) };
+  };
+
+  /** 拿到 AgentSession 本身，好看会话分支上有没有真的压缩条目。 */
+  const captureSession = (): { session: AgentSession | null } => {
+    const capture = { session: null as AgentSession | null };
+    botSessionProbe.started = (session) => {
+      capture.session = session;
+    };
+    return capture;
+  };
+
+  it("第一次 prompt 就在系统提示里带全量偏好和手册，当前这条不带", async () => {
+    const { h, requests, prompts } = await memoryHarness({
+      preferences: [NO_EMOJI, OTHER_BOT, SHORT_TITLE],
+      brand: BRAND_V3,
+    });
+    const task = topicTask();
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "写一条新品笔记", { task, members: TWO_MEMBERS }));
+
+    const [first] = requests;
+    const system = systemOf(first!);
+    expect(memoryOf(first!), "偏好整段全量，每条一行，先记的在前；手册带版本号和全文").toBe(
+      `${PREFERENCES_HEADER}\n- 标题不超过 20 个字\n- 正文里不要表情符号\n\n` +
+        "品牌手册 v3（写每一条内容前先照它，之前给过的版本作废）：\n口吻：轻松，像朋友聊天\n禁区：不提竞品",
+    );
+    expect(system, "别的 Bot 的偏好不送给这个 Bot").not.toContain("报价一律含税");
+    expect(system.indexOf("</cwd>"), "记忆段排在 Pi 自己的几段之后").toBeLessThan(system.indexOf("<memory>"));
+    const [prompt = ""] = prompts();
+    expect(prompt, "记忆不进 user 消息，压缩也就带不走它").not.toContain(PREFERENCES_HEADER);
+    expect(prompt).not.toContain("品牌手册");
+    expect(prompt).toContain("任务卡：");
+    expect(readFileSync(brandFileOf(h.dataDir, "bot-1"), "utf8"), "手册落成 brand.md 给 Bot 自己再读").toBe(
+      `# 品牌手册 v3\n\n${BRAND_V3.text}\n`,
+    );
+  });
+
+  it("没有偏好也没有手册时系统提示和 prompt 逐字不变，也不落 brand.md", async () => {
+    const { h, requests, prompts } = await memoryHarness({});
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "随便聊聊"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "再聊聊"));
+
+    expect(requests).toHaveLength(2);
+    for (const req of requests) {
+      expect(systemOf(req), "没东西可记就不出 memory 段，首次空会话和基底逐字一致").not.toContain("<memory>");
+      expect(requestCarries(req, "作废")).toBe(false);
+    }
+    expect(prompts()).toEqual([
+      "[这是你和用户的单聊]\n\n当前这条：\n用户：随便聊聊",
+      "[这是你和用户的单聊]\n\n当前这条：\n用户：再聊聊",
+    ]);
+    expect(existsSync(brandFileOf(h.dataDir, "bot-1"))).toBe(false);
+  });
+
+  it("偏好没变的第二次 prompt 和同一次 prompt 里回工具结果的那轮，系统提示都带全量", async () => {
+    const { h, requests } = await memoryHarness({
+      preferences: [SHORT_TITLE],
+      brand: BRAND_V3,
+      script: scriptBy([
+        ["第一条", callTool("list_files", { dir: "/work" })],
+        ["第二条", { textChunks: ["好"], usage: { input: 800, output: 2 } }],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    // 控制面因为别的事重发 config，偏好和手册内容一样，只是换了一份新数组。
+    await h.runner.applyConfig(h.config({ preferences: [{ ...SHORT_TITLE }], brand: { ...BRAND_V3 } }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+
+    expect(requests, "头一次 prompt 两轮（点工具、回结果），第二次一轮").toHaveLength(3);
+    expect(textOf(requests[2]!.messages.at(-1)?.content)).toContain("用户：第二条");
+    for (const req of requests) {
+      expect(memoryOf(req), "每次请求都带，不靠「上次送过」").toContain(`${PREFERENCES_HEADER}\n- 标题不超过 20 个字`);
+      expect(memoryOf(req)).toContain("品牌手册 v3");
+    }
+  });
+
+  it("首次 prompt 内 Pi 真自动压缩后，下一轮请求照样带全量", async () => {
+    const capture = captureSession();
+    const { h, requests } = await memoryHarness({
+      preferences: [SHORT_TITLE],
+      brand: BRAND_V3,
+      settings: { compaction: { enabled: true, reserveTokens: 16384, keepRecentTokens: 1 } },
+      script: () => ({
+        textChunks: ["核验摘要"],
+        usage: { input: requests.length === 1 ? 120000 : 800, output: 2 },
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    expect(hasCompaction(capture.session), "确实走了 Pi 的响应后自动压缩，不是人工插的条目").toBe(true);
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+
+    const last = requests.at(-1)!;
+    expect(requestCarries(last, "标题不超过 20 个字"), "压缩把之前的原文揉进摘要了，这一轮还得看见偏好").toBe(true);
+    expect(requestCarries(last, "品牌手册 v3")).toBe(true);
+  });
+
+  it("配置没变，prompt 入口 Pi 真自动压缩后，当轮请求仍带原文", async () => {
+    const capture = captureSession();
+    const { h, requests } = await memoryHarness({
+      preferences: [SHORT_TITLE],
+      brand: BRAND_V3,
+      settings: { compaction: { enabled: false, reserveTokens: 16384, keepRecentTokens: 1 } },
+      script: () => ({
+        textChunks: ["核验摘要"],
+        usage: { input: requests.length === 1 ? 120000 : 800, output: 2 },
+      }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    expect(hasCompaction(capture.session), "第一次用量超了但压缩关着，没压").toBe(false);
+    capture.session!.setAutoCompactionEnabled(true);
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "入口压缩的第二条"));
+
+    expect(hasCompaction(capture.session), "第二次 prompt 进会话前被压缩了").toBe(true);
+    const last = requests.at(-1)!;
+    expect(requestCarries(last, "标题不超过 20 个字"), "入口压缩发生在拼 prompt 之后，记忆不能只靠拼进 user 消息").toBe(
+      true,
+    );
+    expect(requestCarries(last, "品牌手册 v3")).toBe(true);
+  });
+
+  it("压缩摘要里留着旧偏好时删光仍明确作废，手册撤掉也说明", async () => {
+    const capture = captureSession();
+    const { h, requests } = await memoryHarness({ preferences: [SHORT_TITLE], brand: BRAND_V3 });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    capture.session!.sessionManager.appendCompaction(
+      "用户长期偏好：标题不超过 20 个字；品牌手册 v3 口吻轻松",
+      null,
+      1000,
+    );
+    await h.runner.applyConfig(h.config({ preferences: [], brand: null }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "删光以后的第二条"));
+
+    const last = requests.at(-1)!;
+    expect(requestCarries(last, "用户长期偏好：标题不超过 20 个字"), "摘要还留着旧偏好").toBe(true);
+    expect(memoryOf(last), "给过的东西没了要说作废，不能因为集合空了就一声不吭").toBe(
+      `${PREFERENCES_HEADER}\n${NO_PREFERENCES}\n\n${BRAND_WITHDRAWN}`,
+    );
+  });
+
+  it("删一条偏好后下一次请求的全量里没有它，删光了写明已作废", async () => {
+    const { h, requests } = await memoryHarness({ preferences: [SHORT_TITLE, NO_EMOJI], brand: BRAND_V3 });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await h.runner.applyConfig(h.config({ preferences: [SHORT_TITLE] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    await h.runner.applyConfig(h.config({ preferences: [] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三条"));
+
+    const [, second, third] = requests;
+    expect(memoryOf(second!), "全量重送，标题写明没列出的已作废").toContain(
+      `${PREFERENCES_HEADER}\n- 标题不超过 20 个字`,
+    );
+    expect(memoryOf(second!), "删掉的那条不在全量里").not.toContain("正文里不要表情符号");
+    expect(memoryOf(third!), "删光了也要有一段，说之前记的都作废").toContain(
+      `${PREFERENCES_HEADER}\n${NO_PREFERENCES}`,
+    );
+    expect(memoryOf(third!), "手册没动就照常带").toContain("品牌手册 v3");
+  });
+
+  it("同一条偏好 id 只改文字，下一次请求的全量是新文字，旧文字不再出现", async () => {
+    const { h, requests } = await memoryHarness({ preferences: [SHORT_TITLE, NO_EMOJI], brand: BRAND_V3 });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await h.runner.applyConfig(h.config({ preferences: [{ ...SHORT_TITLE, text: "标题不超过 12 个字" }, NO_EMOJI] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+
+    const [first, second] = requests;
+    expect(memoryOf(first!), "改字之前模型确实见过旧文字").toContain("- 标题不超过 20 个字");
+    expect(memoryOf(second!), "id 和 createdAt 都没变，新文字仍排在原位置").toContain(
+      `${PREFERENCES_HEADER}\n- 标题不超过 12 个字\n- 正文里不要表情符号`,
+    );
+    expect(requestCarries(second!, "标题不超过 20 个字"), "旧文字在这次请求的任何位置都不能再有").toBe(false);
+    expect(memoryOf(second!), "没改的偏好和手册照常带").toContain("品牌手册 v3");
+  });
+
+  it("同一个 Bot 在第一个群用过记忆后进到新群，新群的普通请求仍带它当前的全量，含私人偏好，不含别的 Bot 的", async () => {
+    const PRIVATE_TITLE = { ...SHORT_TITLE, private: true };
+    const FULL_MEMORY =
+      `${PREFERENCES_HEADER}\n- 标题不超过 20 个字\n- 正文里不要表情符号\n\n` +
+      "品牌手册 v3（写每一条内容前先照它，之前给过的版本作废）：\n口吻：轻松，像朋友聊天\n禁区：不提竞品";
+    const { h, requests } = await memoryHarness({
+      preferences: [NO_EMOJI, OTHER_BOT, PRIVATE_TITLE],
+      brand: BRAND_V3,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "单聊里先说一句"));
+    await h.runner.prompt(
+      promptMessage("bot-1", "run-2", "项目群里头一句", { members: TWO_MEMBERS, groupId: "group-team" }),
+    );
+
+    expect(sessionCreationsFor("bot-1"), "第二个群是另起的一份会话，不是沿用第一个").toBe(2);
+    expect(requests).toHaveLength(2);
+    const [first, second] = requests;
+    expect(isFollowUpTurn(second!), "新群这条是普通请求，不是回工具结果的续轮").toBe(false);
+    expect(memoryOf(first!)).toBe(FULL_MEMORY);
+    expect(memoryOf(second!), "新群没见过记忆，也拿全量，私人偏好照常给自己的 Bot").toBe(FULL_MEMORY);
+    expect(systemOf(second!), "别的 Bot 的偏好不送给这个 Bot").not.toContain("报价一律含税");
+  });
+
+  it("手册跟着版本走，撤掉后说明作废并删 brand.md，没有偏好不出偏好段", async () => {
+    const { h, requests } = await memoryHarness({ brand: { version: 1, text: "口吻：正式" } });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await h.runner.applyConfig(h.config({ brand: { version: 2, text: "口吻：轻松" } }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
+    expect(readFileSync(brandFileOf(h.dataDir, "bot-1"), "utf8"), "brand.md 跟着新版本重写").toBe(
+      "# 品牌手册 v2\n\n口吻：轻松\n",
+    );
+    await h.runner.applyConfig(h.config({ brand: null }));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三条"));
+
+    expect(requests.map(memoryOf)).toEqual([
+      "品牌手册 v1（写每一条内容前先照它，之前给过的版本作废）：\n口吻：正式",
+      "品牌手册 v2（写每一条内容前先照它，之前给过的版本作废）：\n口吻：轻松",
+      BRAND_WITHDRAWN,
+    ]);
+    expect(existsSync(brandFileOf(h.dataDir, "bot-1")), "撤掉以后 brand.md 也删掉").toBe(false);
+  });
+
+  it("prompt 没进会话那次不算给过，之后清空不说作废", async () => {
+    const { h, requests } = await memoryHarness({ preferences: [SHORT_TITLE], brand: BRAND_V3 });
+    botSessionProbe.promptSwallow = true;
+    try {
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "被当 handled 收下"));
+    } finally {
+      botSessionProbe.promptSwallow = false;
+    }
+    await h.runner.applyConfig(h.config({ preferences: [], brand: null }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "这次真进了"));
+
+    expect(runDoneSaid(h)).toEqual({ "run-1": "dropped", "run-2": "entered" });
+    expect(requests).toHaveLength(1);
+    expect(memoryOf(requests[0]!), "模型从没见过偏好和手册，没什么可作废的").toBeNull();
+  });
+
+  it("同一个数据目录重启运行器后会话续上，清空后仍说明作废", async () => {
+    const first = await memoryHarness({ preferences: [SHORT_TITLE], brand: BRAND_V3 });
+    await first.h.runner.prompt(promptMessage("bot-1", "run-1", "第一条"));
+    await first.h.runner.stop();
+
+    const second = await memoryHarness({ preferences: [], brand: null, dataDir: first.h.dataDir });
+    await second.h.runner.prompt(promptMessage("bot-1", "run-2", "重启之后"));
+
+    expect(memoryOf(second.requests[0]!), "给过的记号跟着会话 JSONL 走，重启不丢").toBe(
+      `${PREFERENCES_HEADER}\n${NO_PREFERENCES}\n\n${BRAND_WITHDRAWN}`,
+    );
+  });
+
+  it("项目群里没有 remember_preference", async () => {
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptSeeingTools(seen, [
+        ["项目群里说一句", { textChunks: ["好"], usage: { input: 800, output: 2 } }],
+        ["单聊里说一句", { textChunks: ["好"], usage: { input: 800, output: 2 } }],
+      ]),
+    });
+
+    await h.runner.prompt(
+      promptMessage("bot-1", "run-1", "项目群里说一句", { members: TWO_MEMBERS, groupId: "group-team" }),
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "单聊里说一句", { groupId: "group-solo" }));
+
+    expect(seen.toolNames[0], "项目群不给记偏好的工具").not.toContain("remember_preference");
+    expect(seen.toolNames[1], "单聊里有").toContain("remember_preference");
+  });
+
+  it("单聊里 remember_preference 上行 preference_add，来源是触发那条消息，不进审批", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["以后标题都别超过 20 字", callTool("remember_preference", { text: "标题不超过 20 个字", private: false })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "以后标题都别超过 20 字"));
+
+    expect(h.sent.filter((message) => message.type === "preference_add")).toEqual([
+      {
+        type: "preference_add",
+        runId: RunId.parse("run-1"),
+        botId: BotId.parse("bot-1"),
+        groupId: GroupId.parse("group-1"),
+        text: "标题不超过 20 个字",
+        private: false,
+        sourceMessageId: MessageId.parse("message-run-1"),
+      },
+    ]);
+    expect(
+      h.sent.some((message) => message.type === "approval_request"),
+      "记偏好不找人批",
+    ).toBe(false);
+    expect(seen.toolResults.join(""), "回给模型一句记下了").toContain("记下了");
+  });
+
+  it("remember_preference 超过 200 字：不上报，终态 failed，错误文本是中文", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["记一条很长的", callTool("remember_preference", { text: "长".repeat(201), private: true })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "记一条很长的"));
+
+    expect(h.sent.some((message) => message.type === "preference_add")).toBe(false);
+    expect(shape(h.sent)).toContain("bot_tool_call:failed");
+    expect(seen.toolResults.join("")).toContain("最多 200 个字");
   });
 });
 

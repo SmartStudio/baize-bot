@@ -24,6 +24,7 @@ import { ASSISTANT_RULE } from "./assistant.js";
 import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
 import type { BotDirs } from "./paths.js";
+import { injectMemory } from "./memory.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 
@@ -57,6 +58,8 @@ export interface BotSessionOptions {
   readonly approvals: ApprovalGate;
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
+  /** 每次模型请求前读。偏好和手册整段放进系统提示，不进会话历史；null 就不加这一段。 */
+  readonly memory: () => string | null;
   readonly settings?: PiSettings;
 }
 
@@ -118,6 +121,12 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
     for (const tool of options.tools) pi.registerTool(tool);
 
     pi.on("context", (event) => ({ messages: pruneImages(event.messages) }));
+
+    // context_with_system 在自动压缩之后、每次发请求之前跑，拿到的是带系统消息的整份副本（extensions/runner.js emitContext）。
+    pi.on("context_with_system", (event) => {
+      const memory = options.memory();
+      return memory === null ? undefined : { messages: injectMemory(event.messages, memory) };
+    });
 
     pi.on("tool_call", async (event, ctx) => {
       const active = options.activeRun();

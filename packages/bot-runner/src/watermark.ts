@@ -46,3 +46,26 @@ export function recordWatermark(sessions: SessionManager, message: PromptMessage
   if (previous !== null && JSON.stringify(previous) === JSON.stringify(next)) return;
   sessions.appendCustomEntry(WATERMARK_TYPE, next satisfies Watermark);
 }
+
+// 偏好和手册不进会话历史，每次请求都整份放在系统提示里，所以不需要「送到哪了」的水位。
+// 这里只记模型有没有见过它们：见过的东西后来没了，得明确说作废，压缩摘要和历史里的旧原文才不会继续生效；
+// 从没见过就什么都不说，首次空会话的请求和基底逐字一致。记号只增不减，压缩也不抹掉。
+const MEMORY_SHOWN_TYPE = "baize.memory-shown";
+const MemoryShown = z.object({ brand: z.boolean(), preferences: z.boolean() });
+export type MemoryShown = z.infer<typeof MemoryShown>;
+const NEVER_SHOWN: MemoryShown = { brand: false, preferences: false };
+
+/** 这份会话里模型见没见过手册、见没见过偏好。JSONL 是外部输入，对不上形状就当没见过。 */
+export function readMemoryShown(sessions: SessionManager): MemoryShown {
+  for (const entry of sessions.getBranch().toReversed()) {
+    if (entry.type !== "custom" || entry.customType !== MEMORY_SHOWN_TYPE) continue;
+    const parsed = MemoryShown.safeParse(entry.data);
+    return parsed.success ? parsed.data : NEVER_SHOWN;
+  }
+  return NEVER_SHOWN;
+}
+
+export function recordMemoryShown(sessions: SessionManager, next: MemoryShown, previous: MemoryShown): void {
+  if (previous.brand === next.brand && previous.preferences === next.preferences) return;
+  sessions.appendCustomEntry(MEMORY_SHOWN_TYPE, next satisfies MemoryShown);
+}

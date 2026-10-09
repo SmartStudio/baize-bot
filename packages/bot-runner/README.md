@@ -45,6 +45,7 @@ Pi 1.1.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一�
 <dataDir>/<botId>/work                  会话的 cwd，Bot 干活的地方
 <dataDir>/<botId>/skills                config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 <dataDir>/<botId>/drafts                起草时拷来的配图，<sha256>.<扩展名>，Bot 能读不能写
+<dataDir>/<botId>/brand.md              config.brand 落成的品牌手册，撤掉就删
 ```
 
 直接放在 `sessions/` 里的旧 JSONL 不迁移、不删除。升级后那个 Bot 会丢一次旧记忆，之后按群续用。
@@ -95,6 +96,10 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 ## 扩展工具
 
 `RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+
+## 偏好和品牌手册
+
+`src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_add` 带 runId 和触发消息的 sourceMessageId，不走审批。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
 
 ## 建队卡
 
@@ -166,6 +171,8 @@ T-2482 给老客户回一封询价邮件
 经手的 id 按 `members` 解析成名字。**名单里没有的 id 原样渲染那个 id**，不丢信息：成员名单是可能滞后于任务卡的，换成 `未指派` 就查不出到底是谁。
 
 ### prompt 拼法
+
+偏好和品牌手册不由 `composePrompt` 拼进当前这条，而是在每次模型请求的系统提示末尾全量注入，见「偏好和品牌手册」。
 
 第一段固定为群标签：team 群是 `[群 T-0007 双十一大促 · 成员 小销、小服]`，首席在名字后标成 `（首席）`，solo 群是 `[这是你和用户的单聊]`。群标签后按 `reason` 追加一句说明，再依次放项目清单（`projects` 有这个字段时）、能用的账号（`config.accounts` 非空时）、任务卡（非空时）、交接报文（有 `handoffId` 时）、群里刚才说的（有上下文时）、当前这条（没有 `handoffId` 时）。`reason` 的说明是：
 
@@ -432,7 +439,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 ### Pi 集成与系统提示
 
-`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按七段排列：白泽基础人设、身份、描述与边界、协作规则、起草规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间五段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。段落内容和顺序没变。
+`DefaultResourceLoader.systemPrompt` 使用任务书指定的白泽基础人设，替换 Pi 默认的编码助手文案。Pi 集成的系统提示按八段组织：白泽基础人设、身份、描述与边界、协作规则、起草规则、存 skill 规则、Pi 自动追加的 skill 列表和工作目录、动态记忆段（有偏好、手册或作废声明时）。Pi 0.86 起这些段落按段名拼，除打头的人设（`preamble`）外每段都包一层 `<段名>`：中间五段整体落在 `<addendum>` 里，skill 列表在 `<skills>` 里，工作目录从 `Current working directory: X` 变成 `<cwd>\nX\n</cwd>`。动态记忆段由 `context_with_system` 加在这些段落之后，不进入会话历史。
 
 主助理在描述与边界之后、协作规则之前多一段 `ASSISTANT_RULE`，队员没有这一段。身份来自 `config.bots` 的 `name` 和 `tag`，形如 `你叫 小销，标签 销售`，tag 为空就只写名字。描述为空省略整段。协作规则要求只在需要专长时 @ 一个队友，整段交活用交接，队友的话按任务卡判断，并固定写入三条规则：`@所有人 会把话同时发给群里每一位；`、`没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；`、`用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。` 协作规则之后是 `src/drafts.ts` 的 `DRAFT_RULE`，所有角色都有：往外发东西只能起草，不要用 bash、浏览器或工具连接里的操作自己去发。`PROPOSE_SKILL_RULE` 保持原文。后六段通过 `appendSystemPrompt` 和 Pi 原生 skill 拼接完成，段名和包裹由 Pi 决定，运行器只管内容。
 
