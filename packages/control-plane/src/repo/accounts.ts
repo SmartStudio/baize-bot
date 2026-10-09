@@ -275,7 +275,14 @@ export async function markLoginValid(
         return withAccountLock(tx, AccountId.parse(found.id), async ({ tx: locked }) => {
           const [known] = await locked.update(accounts).set(loggedIn).where(eq(accounts.id, found.id)).returning();
           if (known === undefined) throw new Error("锁住的账号行更新时不见了");
-          if (reported.login !== "none") return { account: toAccount(known), deleted: null };
+          if (reported.login !== "none") {
+            // 报上来的这行不删，这次登录对它也算成了，旧的失败痕迹一起清掉，和下面直接写名字的分支一致。
+            await locked
+              .update(accounts)
+              .set({ loginFailure: null, loginFailedAt: null })
+              .where(eq(accounts.id, accountId));
+            return { account: toAccount(known), deleted: null };
+          }
           await locked.update(drafts).set({ accountId: known.id }).where(eq(drafts.accountId, accountId));
           await locked.delete(accounts).where(eq(accounts.id, accountId));
           return { account: toAccount(known), deleted: accountId };

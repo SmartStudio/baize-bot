@@ -496,6 +496,31 @@ describe("方案卡", () => {
     }
   });
 
+  it("原名顶满 20 码元且以数字结尾时仍能挑出空名", async () => {
+    const s = await session();
+    try {
+      const stem = "一二三四五六七八九十一二三四五六七八";
+      // stem10 到 stem19 都被占：stem11 避让时，stem1 接 2 到 9 和 stem 接 12 到 19 拼出来是同十个名字，候选里挑不出空的。
+      for (let n = 10; n <= 19; n += 1) {
+        expect((await s.me.client.post("/api/bots", { name: `${stem}${n}` })).status).toBe(201);
+        await s.agent.expect("config");
+      }
+      const card = await offerCard(s, [{ name: `${stem}11`, tag: "", description: "" }]);
+
+      const response = await s.me.client.post(`/api/messages/${card.id}/project-offer`, { decision: "start" });
+      expect(response.status, "挑不出空名时整个开始项目回滚成 500").toBe(200);
+      const started = DecideProjectOfferResponse.parse(await response.json());
+      expect(
+        offerBody(started.message).team.map((member) => member.name),
+        "stem10 到 stem19 之后第一个空名是 stem20",
+      ).toEqual([`${stem}20`]);
+      const names = (await bots(s.me.client)).map((item) => item.bot.name);
+      expect(new Set(names).size, `同一个用户名下没有重名的 Bot：${names.join("、")}`).toBe(names.length);
+    } finally {
+      s.close();
+    }
+  });
+
   it("点两次开始只建一个项目", async () => {
     const s = await session();
     try {

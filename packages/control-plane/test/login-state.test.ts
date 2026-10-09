@@ -47,14 +47,18 @@ async function makeOwner(): Promise<Owner> {
   return { userId: user.id, client, computer };
 }
 
-async function validAccount(owner: Owner, computerId: ComputerId = owner.computer.computerId): Promise<AccountId> {
+async function validAccount(
+  owner: Owner,
+  computerId: ComputerId = owner.computer.computerId,
+  handle = "@小红",
+): Promise<AccountId> {
   const accountId = AccountId.parse(newId());
   await database.db.insert(accounts).values({
     id: accountId,
     ownerId: owner.userId,
     computerId,
     platform: "xiaohongshu",
-    handle: "@小红",
+    handle,
     login: "valid",
     tier: "confirm_publish",
   });
@@ -154,6 +158,42 @@ describe("login_state failed", () => {
       expect(loggedIn.lastLoginFailure, "登上了，推出去的快照不再带痕迹").toBeNull();
       expect((await listed())?.lastLoginFailure, "库里也清掉了").toBeNull();
       await agent.expect("config");
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("非占位行合并登上后账号页不再显示上次没成", async () => {
+    const owner = await makeOwner();
+    const known = await validAccount(owner);
+    const reported = await validAccount(owner, owner.computer.computerId, "@小蓝");
+    const { agent, push } = await online(owner);
+    const listed = async (id: AccountId) => {
+      const account = AccountListResponse.parse(await (await owner.client.get("/api/accounts")).json()).accounts.find(
+        (one) => one.id === id,
+      );
+      if (account === undefined) throw new Error(`账号页里没有 ${id}`);
+      return account;
+    };
+
+    try {
+      agent.send({
+        type: "login_state",
+        accountId: reported,
+        state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
+      });
+      await nextOf(push, "login_failed");
+      expect((await listed(reported)).lastLoginFailure?.reason, "前提：这一行记着上次没成").toBe("window_failed");
+
+      // 这次扫出来的是电脑上已有的 @小红：报上来的 @小蓝 不是占位，不删，登录结果记在 @小红 那一行。
+      agent.send({ type: "login_state", accountId: reported, state: { login: "valid", handle: "@小红" } });
+      const merged = (await nextOf(push, "account_updated")).account;
+      expect(merged.id, "登录结果记在已有的那一行").toBe(known);
+      await agent.expect("config");
+
+      expect((await listed(reported)).lastLoginFailure, "报上来的那一行登上了，不再带上次没成").toBeNull();
+      expect((await listed(known)).lastLoginFailure, "已有的那一行也不带").toBeNull();
     } finally {
       agent.close();
       push.close();

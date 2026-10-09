@@ -9,14 +9,14 @@ import {
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, eq, inArray, or, sql, type SQL } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, bots, groupMembers, groups, handoffs, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
-import { generateBotName, hueAt, taskNumber } from "../naming.js";
+import { generateBotName, hueAt, taskNumber, untakenBotName } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
 import { lockRunsOfBot } from "./runs.js";
 
@@ -88,38 +88,12 @@ export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput):
 }
 
 /**
- * 这个用户名下还没有 Bot 叫的名字：base 空着就用 base，否则依次试 base2、base3……，超长时截掉 base 的尾巴给数字让位。
- * 候选比他已有的 Bot 多两个，总有一个空着。只在拿到发号器行锁之后用：同一用户建 Bot 的事务都先抢那一行，
- * 锁到手时前一个事务已经提交，这条语句看得到它建的名字，并发的两次挑不到同一个。
+ * 这个用户名下还没有 Bot 叫的名字，候选怎么排见 untakenBotName。只在拿到发号器行锁之后用：
+ * 同一用户建 Bot 的事务都先抢那一行，锁到手时前一个事务已经提交，这里读得到它建的名字，并发的两次挑不到同一个。
  */
-function untakenName(ownerId: UserId, base: string): SQL {
-  // 名字上限 20 按 JS 的码元算，库里的 left 按码点算，截尾巴在这边按码元做好，SQL 按序号位数取。
-  const heads = [1, 2, 3, 4, 5, 6].map((digits) => headWithin(base, BOT_NAME_MAX - digits));
-  return sql`(
-    select candidate.name from (
-      select ${base}::text as name, 1 as n
-      union all
-      select (array[${sql.join(
-        heads.map((head) => sql`${head}::text`),
-        sql`, `,
-      )}])[length(suffix::text)] || suffix, suffix
-      from generate_series(2, (select count(*)::int + 2 from ${bots} where ${bots.ownerId} = ${ownerId})) as suffix
-    ) as candidate
-    where not exists (select 1 from ${bots} where ${bots.ownerId} = ${ownerId} and ${bots.name} = candidate.name)
-    order by candidate.n
-    limit 1
-  )`;
-}
-
-const BOT_NAME_MAX = 20;
-
-function headWithin(text: string, units: number): string {
-  let head = "";
-  for (const char of text) {
-    if (head.length + char.length > units) break;
-    head += char;
-  }
-  return head;
+async function untakenName(tx: Tx, ownerId: UserId, base: string): Promise<string> {
+  const rows = await tx.select({ name: bots.name }).from(bots).where(eq(bots.ownerId, ownerId));
+  return untakenBotName(base, new Set(rows.map((row) => row.name)));
 }
 
 /**
@@ -140,7 +114,7 @@ export async function insertMemberBot(
     .values({
       id: newId(),
       ownerId,
-      name: naming === "untaken" ? untakenName(ownerId, name) : name,
+      name: naming === "untaken" ? await untakenName(tx, ownerId, name) : name,
       tag: input.tag ?? "",
       description: input.description ?? "",
       hue: input.hue ?? hueAt(counter.nextHueIndex - 1),

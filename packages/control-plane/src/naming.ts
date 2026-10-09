@@ -17,6 +17,31 @@ export function generateBotName(): string {
   return `小${char}`;
 }
 
+const BOT_NAME_MAX = 20;
+
+/** 名字上限按 JS 的码元算。截到 units 个码元以内，落在代理对中间就把整个字丢掉，不留半个。 */
+function headWithin(text: string, units: number): string {
+  let head = "";
+  for (const char of text) {
+    if (head.length + char.length > units) break;
+    head += char;
+  }
+  return head;
+}
+
+/**
+ * 没被占的名字：base 空着就用 base，否则依次试 base2、base3……，超长时截掉 base 的尾巴给数字让位。
+ * 序号位数相同的候选头一样、数字不同，彼此不会撞，位数往上走总有一档候选比 taken 多，所以一定挑得出。
+ * 以数字结尾的 base 会让不同位数的候选拼出同一个名字（stem1 接 2、stem 接 12），那只是白试一次。
+ */
+export function untakenBotName(base: string, taken: ReadonlySet<string>): string {
+  if (!taken.has(base)) return base;
+  for (let suffix = 2; ; suffix += 1) {
+    const candidate = headWithin(base, BOT_NAME_MAX - String(suffix).length) + suffix;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 export function taskNumber(n: number): string {
   if (n < 0 || n > 9999) throw new Error(`主题任务编号 ${n} 放不进 T- 四位`);
   return `T-${String(n).padStart(4, "0")}`;
