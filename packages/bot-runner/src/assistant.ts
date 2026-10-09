@@ -8,7 +8,14 @@ import type { ActiveRun } from "./topic.js";
 // 两件工具都不走审批：用户当面说的话就是他的决定，再弹一张确认卡是多问一遍。
 
 /** 队员的工具连接也不能占这两个名字：闸门按名字把它们归成内部工具直接放行。 */
-export const ASSISTANT_TOOL_NAMES = ["set_cadence", "propose_project"] as const;
+export const ASSISTANT_TOOL_NAMES = [
+  "set_cadence",
+  "propose_project",
+  "propose_team",
+  "call_helper",
+  "propose_routine",
+  "submit_review",
+] as const;
 
 export type Project = NonNullable<Extract<ControlToAgent, { type: "prompt" }>["projects"]>[number];
 
@@ -38,7 +45,9 @@ const SET_CADENCE_PARAMS = Type.Object({ projectGroupId: Type.String(), cadence:
 const PROPOSE_PROJECT_PARAMS = Type.Object({
   name: Type.String(),
   goal: Type.String(),
-  team: Type.Array(Type.Object({ name: Type.String(), tag: Type.Optional(Type.String()), description: Type.String() })),
+  team: Type.Array(
+    Type.Object({ name: Type.String(), tags: Type.Optional(Type.Array(Type.String())), description: Type.String() }),
+  ),
   platforms: Type.Array(
     Type.Union([
       Type.Object({
@@ -154,7 +163,7 @@ export function createAssistantTools(options: {
               goal,
               team: team.map((member) => ({
                 name: member.name,
-                tag: member.tag ?? "",
+                tags: member.tags ?? [],
                 description: member.description,
               })),
               platforms: platforms.map((platform) =>

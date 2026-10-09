@@ -289,13 +289,13 @@ describe("例行任务到点触发", () => {
     const agent = await online(owner);
 
     try {
-      const routine = await makeRoutine(owner, { enabled: false });
+      const routine = await makeRoutine(owner, { state: "paused" });
       await server.server.routines.tick();
       advanceOneMinute();
       await server.server.routines.tick();
       expect(await runsOf(routine.id)).toHaveLength(0);
 
-      expect((await owner.client.patch(`/api/routines/${routine.id}`, { enabled: true })).status).toBe(200);
+      expect((await owner.client.patch(`/api/routines/${routine.id}`, { state: "on" })).status).toBe(200);
       await server.server.routines.tick();
       expect(await runsOf(routine.id), "停用期间游标照推，启用后要等下一个时刻").toHaveLength(0);
 
@@ -344,7 +344,7 @@ describe("webhook 触发", () => {
       "不登录只豁免 /api/hooks/:token 这一条，多一段路径就要认人",
     ).toBe(401);
 
-    expect((await owner.client.patch(`/api/routines/${routine.id}`, { enabled: false })).status).toBe(200);
+    expect((await owner.client.patch(`/api/routines/${routine.id}`, { state: "paused" })).status).toBe(200);
     expect((await stranger.post(`/api/hooks/${token}`)).status).toBe(409);
     expect(await runsOf(routine.id), "409 就是没跑，运行记录里不该多一条").toHaveLength(0);
   });
@@ -369,7 +369,7 @@ describe("试跑", () => {
     const agent = await online(owner);
 
     try {
-      const routine = await makeRoutine(owner, { purpose: "plan", triggers: [], enabled: false });
+      const routine = await makeRoutine(owner, { purpose: "plan", triggers: [], state: "paused" });
       const changed = await owner.client.patch(`/api/routines/${routine.id}`, { purpose: "fast" });
       expect(changed.status).toBe(200);
       expect(RoutineResponse.parse(await changed.json()).routine.purpose).toBe("fast");
@@ -392,7 +392,7 @@ describe("试跑", () => {
     const agent = await online(owner);
 
     try {
-      const routine = await makeRoutine(owner, { enabled: false });
+      const routine = await makeRoutine(owner, { state: "paused" });
       const response = await owner.client.post(`/api/routines/${routine.id}/run`);
       expect(response.status, "停用只挡自动触发，试跑照跑").toBe(202);
 

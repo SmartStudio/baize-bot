@@ -164,7 +164,9 @@ describe("GET /api/projects/:groupId", () => {
 
     const project = await projectOf(owner);
     expect(
-      project.achievements.map(({ url, platform, title }) => ({ url, platform, title })),
+      project.achievements.map((item) =>
+        item.kind === "publication" ? { url: item.url, platform: item.platform, title: item.title } : item.kind,
+      ),
       "只有这个群的三条发布记录，按时间倒序；Bot 消息里那条链接不算成果，读不到笔记 id 的管理页链接照样给",
     ).toEqual([
       { url: "https://creator.xiaohongshu.com/new/note-manager", platform: "xiaohongshu", title: "三张图看懂白泽" },

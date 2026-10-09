@@ -86,7 +86,8 @@ const OPAQUE_COMMANDS = new Set([
 ]);
 const NETWORK_COMMANDS = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "socat", "ftp"]);
 const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm", "pip", "pip3", "yarn"]);
-const INTERNAL_TOOLS = new Set([
+/** 闸门按名字直接放行的内部工具。运行器把这里的名字全部保留，工具连接里同名的操作不注册：工厂还是空桩时名字也占着，不然同名的 MCP 操作会顶着这个名字免审批执行。 */
+export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
   "update_checklist",
   "mention_bot",
@@ -96,6 +97,12 @@ const INTERNAL_TOOLS = new Set([
   "propose_skill",
   "set_cadence",
   "propose_project",
+  "report_metric",
+  "remember_preference",
+  "propose_team",
+  "call_helper",
+  "propose_routine",
+  "submit_review",
 ]);
 
 type ZoneHit = "hidden" | "read_only" | null;

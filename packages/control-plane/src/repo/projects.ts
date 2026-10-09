@@ -122,7 +122,7 @@ export async function decideProjectOffer(
         const created = await insertMemberBot(
           tx,
           ownerId,
-          { name: member.name, tag: member.tag, description: member.description },
+          { name: member.name, tags: member.tags, description: member.description },
           "untaken",
         );
         memberIds.push(created.bot.id);
@@ -155,7 +155,7 @@ export async function decideProjectOffer(
             triggers: [{ kind: "cron" as const, expr: routine.expr, lastFiredAt: null }],
             onFailure: "stop_and_tell" as const,
             purpose: "plan" as const,
-            enabled: true,
+            state: "on" as const,
           })),
         )
         .returning();

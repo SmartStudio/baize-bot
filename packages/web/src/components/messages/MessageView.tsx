@@ -25,7 +25,7 @@ import { timeOf } from "./preview.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
-export type BotLookup = (botId: BotId) => { name: string; tag: string; hue: BotHue };
+export type BotLookup = (botId: BotId) => { name: string; tags: readonly string[]; hue: BotHue };
 export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
@@ -51,7 +51,7 @@ const BotBubble = ({
       {showSource || (body.mentions?.length ?? 0) > 0 ? (
         <div className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
           <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
-          {bot.tag ? `${bot.name} · ${bot.tag}` : bot.name}
+          {bot.tags.length > 0 ? `${bot.name} · ${bot.tags.join("、")}` : bot.name}
           {body.mentions?.length ? (
             <span className="tag" data-testid="bot-recipient">
               发给 {body.mentions.map((id) => lookup(id).name).join("、")}
@@ -465,6 +465,10 @@ const MessageView = ({
                 actions={projectOfferActions}
               />
             );
+          case "team_offer":
+          case "routine_offer":
+            // 第 2 期形状占位：建队卡归 p2-team-web，例行确认卡归 p2-routine-web，画出来之前不渲染。
+            return null;
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。
             const unreached: never = body;

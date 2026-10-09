@@ -255,7 +255,7 @@ describe("上下文里的卡写结论", () => {
         botId: job.botId,
         name: "小红书起号",
         goal: "三个月一千粉",
-        team: [{ name: "小图", tag: "", description: "做图" }],
+        team: [{ name: "小图", tags: [], description: "做图" }],
         platforms: [],
         cadence: "",
         firstStep: "定人设",

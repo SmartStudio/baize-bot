@@ -12,17 +12,23 @@ import {
   ReturnPlanResponse,
   BotResponse,
   BotListResponse,
+  BotProfileResponse,
+  BrandResponse,
   CreateBotResponse,
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
   DecideProjectOfferResponse,
+  DecideRoutineOfferResponse,
   DecideSkillOfferResponse,
+  DecideTeamOfferResponse,
   GroupListResponse,
   GrantListResponse,
   LoginResponse,
   MeResponse,
   MessageListResponse,
+  PreferenceListResponse,
+  PreferenceResponse,
   RegisterResponse,
   RoutineListResponse,
   RoutineResponse,
@@ -46,17 +52,22 @@ import {
   type Bot,
   type BotHue,
   type BotId,
+  type BrandBook,
   type ChecklistItem,
   type CreateRoutineRequest,
   type CreateToolRequest,
   type CreateSkillRequest,
   type DecideApprovalRequest,
   type DecideProjectOfferRequest,
+  type DecideRoutineOfferRequest,
   type DecideSkillOfferRequest,
+  type DecideTeamOfferRequest,
   type GroupId,
   type GrantId,
   type MessageId,
   type OAuthPlatform,
+  type Preference,
+  type PreferenceId,
   type Routine,
   type RoutineId,
   type Skill,
@@ -66,6 +77,7 @@ import {
   type ToolConnectionId,
   type TopicTask,
   type UpdateToolRequest,
+  type UpdateBrandRequest,
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
 } from "@baize/shared";
@@ -83,7 +95,7 @@ export class RequestFailed extends Error {
   }
 }
 
-type Method = "GET" | "POST" | "PATCH" | "DELETE";
+type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 const messageFor = async (res: Response): Promise<string> => {
   const body: unknown = await res.json().catch(() => null);
@@ -115,7 +127,7 @@ const json = async <S extends z.ZodTypeAny>(schema: S, res: Response): Promise<z
 
 export type BotDraft = {
   name?: string;
-  tag?: string;
+  tags?: string[];
   description?: string;
   hue?: BotHue;
   notify?: boolean;
@@ -213,6 +225,39 @@ export const createApi = (signal?: AbortSignal) => {
         DecideProjectOfferResponse,
         await send("POST", `/messages/${encodeURIComponent(messageId)}/project-offer`, request),
       ),
+    decideTeamOffer: async (messageId: MessageId, request: DecideTeamOfferRequest) =>
+      json(
+        DecideTeamOfferResponse,
+        await send("POST", `/messages/${encodeURIComponent(messageId)}/team-offer`, request),
+      ),
+    decideRoutineOffer: async (messageId: MessageId, decision: DecideRoutineOfferRequest["decision"]) =>
+      json(
+        DecideRoutineOfferResponse,
+        await send("POST", `/messages/${encodeURIComponent(messageId)}/routine-offer`, { decision }),
+      ),
+    reportMetric: async (groupId: GroupId, value: number): Promise<TopicTask> =>
+      (await json(UpdateTaskResponse, await send("POST", `/projects/${encodeURIComponent(groupId)}/metric`, { value })))
+        .task,
+    markSeen: async (groupId: GroupId) => {
+      await send("POST", `/groups/${encodeURIComponent(groupId)}/seen`);
+    },
+    preferences: async (botId: BotId): Promise<Preference[]> =>
+      (await json(PreferenceListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/preferences`))).items,
+    updatePreference: async (id: PreferenceId, isPrivate: boolean): Promise<Preference> =>
+      (
+        await json(
+          PreferenceResponse,
+          await send("PATCH", `/preferences/${encodeURIComponent(id)}`, { private: isPrivate }),
+        )
+      ).preference,
+    deletePreference: async (id: PreferenceId) => {
+      await send("DELETE", `/preferences/${encodeURIComponent(id)}`);
+    },
+    botProfile: async (botId: BotId) =>
+      json(BotProfileResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/profile`)),
+    brand: async (): Promise<BrandBook | null> => (await json(BrandResponse, await send("GET", "/brand"))).brand,
+    updateBrand: async (body: UpdateBrandRequest): Promise<BrandBook | null> =>
+      (await json(BrandResponse, await send("PUT", "/brand", body))).brand,
     settings: async () => json(Settings, await send("GET", "/settings")),
     updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
   };

@@ -201,6 +201,7 @@ const promptMessage = (
     },
     context: [],
     purpose: "plan",
+    routine: null,
     task: group?.task ?? null,
     members: [...(group?.members ?? [member(botId, botId)])],
     ...(group?.handoffId === undefined ? {} : { handoffId: HandoffId.parse(group.handoffId) }),
@@ -210,15 +211,15 @@ const promptMessage = (
 const member = (botId: string, name: string): GroupMember => ({
   id: BotId.parse(botId),
   name,
-  tag: "",
+  tags: [],
   description: "",
   seat: "member",
 });
 /** 两个 Bot 的群。bot-1 是跑这次 prompt 的那个，bot-2 是它能 @ 的队友。 */
 const TWO_MEMBERS: readonly GroupMember[] = [member("bot-1", "小白"), member("bot-2", "小黑")];
 const CHIEF_MEMBERS: readonly GroupMember[] = [
-  { ...member("bot-1", "小服"), tag: "客服", description: "负责售后", seat: "chief" },
-  { ...member("bot-2", "小销"), tag: "销售", description: "负责报价" },
+  { ...member("bot-1", "小服"), tags: ["客服"], description: "负责售后", seat: "chief" },
+  { ...member("bot-2", "小销"), tags: ["销售"], description: "负责报价" },
 ];
 
 const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
@@ -236,6 +237,9 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   handled: [],
   status: "active",
   cadence: "",
+  goal: null,
+  metricSource: null,
+  metric: null,
   ...overrides,
 });
 
@@ -355,6 +359,8 @@ interface Harness {
     readonly grants?: readonly Grant[];
     readonly tools?: readonly ToolConnectionConfig[];
     readonly skills?: readonly Skill[];
+    readonly brand?: RunnerConfig["brand"];
+    readonly preferences?: RunnerConfig["preferences"];
     readonly modelGateway?: RunnerConfig["modelGateway"];
     readonly accountsProxy?: RunnerConfig["accountsProxy"];
   }): RunnerConfig;
@@ -408,10 +414,12 @@ async function startHarness(options: {
   readonly approve?: boolean;
   readonly settings?: RunnerConfig["settings"];
   readonly skills?: readonly Skill[];
+  readonly brand?: RunnerConfig["brand"];
+  readonly preferences?: RunnerConfig["preferences"];
   /** 每个 Bot 的描述，进系统提示。 */
   readonly description?: string;
   readonly name?: string;
-  readonly tag?: string;
+  readonly tags?: readonly string[];
   /** 每个 Bot 的角色，不给就是队员。 */
   readonly role?: BotRole;
   /** 复用上一台的数据目录，用来模拟同一台电脑上又来一条 config。 */
@@ -438,7 +446,7 @@ async function startHarness(options: {
     id: BotId.parse(id),
     role: options.role ?? "member",
     name: options.name ?? id,
-    tag: options.tag ?? "",
+    tags: [...(options.tags ?? [])],
     description: options.description ?? "",
   }));
   const tools = options.tools ?? [];
@@ -456,6 +464,8 @@ async function startHarness(options: {
       readonly grants?: readonly Grant[];
       readonly tools?: readonly ToolConnectionConfig[];
       readonly skills?: readonly Skill[];
+      readonly brand?: RunnerConfig["brand"];
+      readonly preferences?: RunnerConfig["preferences"];
       readonly modelGateway?: RunnerConfig["modelGateway"];
       readonly accountsProxy?: RunnerConfig["accountsProxy"];
     } = {},
@@ -467,6 +477,8 @@ async function startHarness(options: {
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     accountsProxy: overrides.accountsProxy ?? options.accountsProxy ?? { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
+    brand: overrides.brand ?? options.brand ?? null,
+    preferences: [...(overrides.preferences ?? options.preferences ?? [])],
     dataDir,
     ...(overrides.skills !== undefined
       ? { skills: [...overrides.skills] }
@@ -1139,14 +1151,14 @@ describe("运行器的通信提示", () => {
       },
     });
     const members = [
-      { ...member("bot-2", "小销"), tag, description: "负责销售" },
-      { ...member("bot-1", "小服"), tag: "客服", description: "负责售后" },
+      { ...member("bot-2", "小销"), tags: tag === "" ? [] : [tag], description: "负责销售" },
+      { ...member("bot-1", "小服"), tags: ["客服"], description: "负责售后" },
     ];
     const task = topicTask({ number: "T-0007", title: "双十一大促" });
     await h.runner.prompt({
       ...promptMessage("bot-1", "run-1", "请核对售后口径", { task, members }),
       group: { id: GroupId.parse("group-1"), number: "T-0007", title: "双十一大促", kind: "team" },
-      origin: { kind: "bot", id: BotId.parse("bot-2"), name: "小销", tag },
+      origin: { kind: "bot", id: BotId.parse("bot-2"), name: "小销", tags: tag === "" ? [] : [tag] },
       context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排", settled: true }],
     });
     const prompt = requests[0]?.messages.find((message) => message.role === "user")?.content;
@@ -1216,7 +1228,7 @@ describe("运行器的通信提示", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       name: "小销",
-      tag,
+      tags: tag === "" ? [] : [tag],
       description: "只管报价的事，发出去之前先问我",
       skills: [GLOBEX_SKILL],
       script: (req) => {
@@ -1268,8 +1280,8 @@ describe("运行器的通信提示", () => {
 
   it("任务卡成员带标签和描述，空字段不留括号或冒号", () => {
     const members = [
-      { ...member("bot-1", "小销"), tag: "销售", description: "负责报价" },
-      { ...member("bot-2", "小服"), tag: "客服" },
+      { ...member("bot-1", "小销"), tags: ["销售"], description: "负责报价" },
+      { ...member("bot-2", "小服"), tags: ["客服"] },
       { ...member("bot-3", "小采"), description: "负责采购" },
       member("bot-4", "小白"),
     ];
@@ -2552,7 +2564,7 @@ describe("config 按 Bot 增量对账", () => {
       id: BotId.parse(id),
       role: "member",
       name: id,
-      tag: "",
+      tags: [],
       description: id === "bot-5" ? description : "",
     }));
 
@@ -2593,8 +2605,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "" },
-            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新描述" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tags: [], description: "新描述" },
           ],
         }),
       );
@@ -2736,8 +2748,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "" },
-            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新描述" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tags: [], description: "新描述" },
           ],
         }),
       );
@@ -2789,7 +2801,7 @@ describe("config 按 Bot 增量对账", () => {
     try {
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "只处理新版任务" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "只处理新版任务" }],
         }),
       );
     } finally {
@@ -2876,7 +2888,7 @@ describe("config 按 Bot 增量对账", () => {
       await until(() => started, "第一条进入工具");
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "新描述" }],
         }),
       );
       rmSync(dirs.workDir, { recursive: true, force: true });
@@ -2921,7 +2933,7 @@ describe("config 按 Bot 增量对账", () => {
       await expect(
         h.runner.applyConfig(
           h.config({
-            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "新描述" }],
           }),
         ),
         "对账失败只上报 runner_failed，不向电脑代理抛异常",
@@ -3054,7 +3066,7 @@ describe("config 按 Bot 增量对账", () => {
     try {
       const applying = h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "新描述" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "新描述" }],
         }),
       );
       await until(() => botSessionProbe.disposals.length > 0, "开始关旧会话");
@@ -3148,8 +3160,8 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.applyConfig(
         h.config({
           bots: [
-            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "原 Bot 新定义" },
-            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tag: "", description: "新增 Bot 定义" },
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "原 Bot 新定义" },
+            { id: BotId.parse("bot-2"), role: "member", name: "bot-2", tags: [], description: "新增 Bot 定义" },
           ],
         }),
       );
@@ -3305,7 +3317,7 @@ describe("config 按 Bot 增量对账", () => {
             id: BotId.parse("bot-1"),
             role: "member",
             name: "bot-1",
-            tag: "",
+            tags: [],
             description: "暂停期间换上的新定义",
           },
         ],
@@ -3423,7 +3435,7 @@ describe("config 按 Bot 增量对账", () => {
     try {
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改一下" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "改一下" }],
         }),
       );
       await until(
@@ -3662,7 +3674,7 @@ describe("config 按 Bot 增量对账", () => {
       await until(tool.started, "run-1 进工具");
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改一" }],
+          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "改一" }],
         }),
       );
       const second = h.runner.prompt(promptMessage("bot-1", "run-2", "第二条"));
@@ -3673,7 +3685,7 @@ describe("config 按 Bot 增量对账", () => {
       const applying = h.runner
         .applyConfig(
           h.config({
-            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "改二" }],
+            bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "改二" }],
           }),
         )
         .then(() => {
@@ -3858,7 +3870,9 @@ describe("config 按 Bot 增量对账", () => {
     try {
       await h.runner.applyConfig(
         h.config({
-          bots: [{ id: BotId.parse("bot-1"), role: "member", name: "bot-1", tag: "", description: "描述改成了紫罗兰" }],
+          bots: [
+            { id: BotId.parse("bot-1"), role: "member", name: "bot-1", tags: [], description: "描述改成了紫罗兰" },
+          ],
         }),
       );
       await until(
@@ -4226,7 +4240,7 @@ describe("运行器的主助理", () => {
     name: "小红书起号",
     goal: "三个月做到一千粉",
     team: [
-      { name: "小文", tag: "文案", description: "写笔记" },
+      { name: "小文", tags: ["文案"], description: "写笔记" },
       { name: "小图", description: "做封面图" },
     ],
     platforms: [
@@ -4295,7 +4309,7 @@ describe("运行器的主助理", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       name: "小服",
-      tag: "客服",
+      tags: ["客服"],
       description: "负责售后",
       script: (req) => {
         requests.push(req);
@@ -4553,8 +4567,8 @@ ${join(h.dataDir, "bot-1", "work")}
         groupId: "group-1",
         ...OFFER_ARGS,
         team: [
-          { name: "小文", tag: "文案", description: "写笔记" },
-          { name: "小图", tag: "", description: "做封面图" },
+          { name: "小文", tags: ["文案"], description: "写笔记" },
+          { name: "小图", tags: [], description: "做封面图" },
         ],
       },
     ]);
@@ -4667,13 +4681,50 @@ ${join(h.dataDir, "bot-1", "work")}
     warn.mockRestore();
   });
 
+  it.each(["report_metric", "remember_preference"])(
+    "工厂还是空桩的内部工具名 %s 也保留：队员连的工具有同名操作时不注册，调用碰不到工具连接，也不会免审批放行",
+    async (name) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const seen = toolRecorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        tools: [
+          toolConnection([
+            { name, needsApproval: true },
+            { name: "list_orders", needsApproval: true },
+          ]),
+        ],
+        script: scriptSeeingTools(seen, [["记一下", callTool(name, { value: 1, label: "星", text: "短句" })]]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "记一下"));
+
+      expect(seen.toolNames[0], "同一条连接里不撞名的操作照常注册").toContain("list_orders");
+      expect(seen.toolNames[0], "名字被运行器保留，工具连接占不走").not.toContain(name);
+      expect(seen.toolResults.join(""), "调用没有打到工具连接").not.toContain("连不上");
+      expect(seen.toolResults.join("")).toContain(`Tool ${name} not found`);
+      expect(
+        h.sent.filter((message) => message.type === "approval_request"),
+        "没注册的工具不会走到闸门，更不会被当成内部工具免审批",
+      ).toEqual([]);
+      expect(h.sent.some((message) => message.type === "metric_report" || message.type === "preference_add")).toBe(
+        false,
+      );
+      expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+        `Bot bot-1：连接「客服工具」的操作「${name}」和已注册的工具重名，跳过`,
+      ]);
+      warn.mockRestore();
+    },
+  );
+
   it("propose_project 缺 description 报错且不发上行", async () => {
     const seen = recorder();
     const h = await startHarness({
       bots: ["bot-1"],
       role: "assistant",
       script: scriptRecording(seen, [
-        ["我想做小红书", callTool("propose_project", { ...OFFER_ARGS, team: [{ name: "小文", tag: "文案" }] })],
+        ["我想做小红书", callTool("propose_project", { ...OFFER_ARGS, team: [{ name: "小文", tags: ["文案"] }] })],
       ]),
     });
 
@@ -4703,7 +4754,7 @@ ${join(h.dataDir, "bot-1", "work")}
           callTool("propose_project", {
             ...OFFER_ARGS,
             team: [
-              { name: "小文", tag: "文案", description: "写笔记" },
+              { name: "小文", tags: ["文案"], description: "写笔记" },
               { name: "小图", description: " " },
             ],
           }),

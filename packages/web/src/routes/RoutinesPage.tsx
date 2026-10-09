@@ -269,7 +269,7 @@ const RoutineRow = ({ routine, bot, onOpen }: { routine: Routine; bot: Bot; onOp
   return (
     <div className="routine-row" data-testid="routine-row" data-routine-name={routine.name} data-bot-name={bot.name}>
       <span className="when-col" data-testid="routine-row-note">
-        {routine.enabled ? describeTriggers(routine.triggers) : "已停用"}
+        {routine.state === "on" ? describeTriggers(routine.triggers) : "已停用"}
       </span>
       <div className="routine-row-body">
         <button type="button" className="routine-open" data-testid="routine-open" onClick={onOpen}>
@@ -303,11 +303,11 @@ const RoutineRow = ({ routine, bot, onOpen }: { routine: Routine; bot: Bot; onOp
         <button
           type="button"
           role="switch"
-          aria-checked={routine.enabled}
+          aria-checked={routine.state === "on"}
           aria-label={`启用 ${routine.name}`}
-          className={`switch${routine.enabled ? " is-on" : ""}`}
+          className={`switch${routine.state === "on" ? " is-on" : ""}`}
           data-testid="routine-switch"
-          onClick={() => void actions.updateRoutine(routine.id, { enabled: !routine.enabled })}
+          onClick={() => void actions.updateRoutine(routine.id, { state: routine.state === "on" ? "paused" : "on" })}
         />
       </div>
     </div>
@@ -392,7 +392,7 @@ export const RoutinesPage = () => {
               onClick={() => {
                 if (botId === null) return;
                 void actions
-                  .createRoutine(botId, { ...draft, enabled: true })
+                  .createRoutine(botId, { ...draft, state: "on", boundary: "draft", onToday: false })
                   .then(() => {
                     setDraft(EMPTY_FORM);
                     toList();
@@ -421,13 +421,15 @@ export const RoutinesPage = () => {
             <button
               type="button"
               role="switch"
-              aria-checked={routine.enabled}
+              aria-checked={routine.state === "on"}
               aria-label="启用"
-              className={`switch${routine.enabled ? " is-on" : ""}`}
+              className={`switch${routine.state === "on" ? " is-on" : ""}`}
               data-testid="routine-enabled-switch"
-              onClick={() => void actions.updateRoutine(routine.id, { enabled: !routine.enabled })}
+              onClick={() =>
+                void actions.updateRoutine(routine.id, { state: routine.state === "on" ? "paused" : "on" })
+              }
             />
-            <b>{routine.enabled ? "已启用" : "已停用"}</b>
+            <b>{routine.state === "on" ? "已启用" : "已停用"}</b>
             <span className="routine-row-meta">
               <BotAvatar name={editing.bot.name} hue={editing.bot.hue} size="xs" />
               {editing.bot.name}

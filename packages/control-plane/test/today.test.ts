@@ -210,7 +210,7 @@ async function seedFourColumns(owner: Owner): Promise<{ readonly nestedDraftId: 
     triggers: [{ kind: "cron", expr: "* * * * *", lastFiredAt: new Date(now - 60_000).toISOString() }],
     onFailure: "stop_and_tell",
     purpose: "fast",
-    enabled: true,
+    state: "on",
     createdAt: new Date(now - 3_000),
   });
   await database.db.insert(routineRuns).values({
@@ -286,7 +286,9 @@ describe("GET /api/today", () => {
       title: "已经发布的客户周报",
       url: "https://example.com/customer-weekly",
     });
-    expect(today.running).toEqual([{ groupId: owner.groupId, title: "客户周报", published: 1, planned: 2 }]);
+    expect(today.running).toEqual([
+      { groupId: owner.groupId, title: "客户周报", published: 1, planned: 2, goal: null, metric: null },
+    ]);
     expect(today.next.map((item) => item.kind)).toEqual(["routine", "draft"]);
   });
 
@@ -375,7 +377,9 @@ describe("GET /api/today", () => {
     ]);
 
     const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
-    expect(today.running).toEqual([{ groupId: owner.groupId, title: "新计划", published: 0, planned: 1 }]);
+    expect(today.running).toEqual([
+      { groupId: owner.groupId, title: "新计划", published: 0, planned: 1, goal: null, metric: null },
+    ]);
   });
 
   it("approved 计划的稿子全部发布后不再显示在进行中", async () => {

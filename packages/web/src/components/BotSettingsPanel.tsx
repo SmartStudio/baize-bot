@@ -16,6 +16,16 @@ type Props = {
 
 type Tab = "settings" | "skills";
 
+// 标签框里用顿号隔开，逗号和空白也认；个数和长度交给 shared 校验，超了接口回 400。
+const splitTags = (text: string): string[] => [
+  ...new Set(
+    text
+      .split(/[、,，\s]+/)
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0),
+  ),
+];
+
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "settings", label: "设置", icon: <SlidersHorizontal size={14} aria-hidden="true" /> },
   { id: "skills", label: "会做的活", icon: <Sparkles size={14} aria-hidden="true" /> },
@@ -69,15 +79,15 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
 
 export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOpenTools }: Props) => {
   const [name, setName] = useState(bot.name);
-  const [tag, setTag] = useState(bot.tag);
+  const [tags, setTags] = useState(bot.tags.join("、"));
   const [description, setDescription] = useState(bot.description);
   const [tab, setTab] = useState<Tab>("settings");
 
   useEffect(() => {
     setName(bot.name);
-    setTag(bot.tag);
+    setTags(bot.tags.join("、"));
     setDescription(bot.description);
-  }, [bot.id, bot.name, bot.tag, bot.description]);
+  }, [bot.id, bot.name, bot.tags, bot.description]);
 
   const commit = (draft: BotDraft) => void onChange(bot.id, draft);
 
@@ -133,13 +143,16 @@ export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOp
           <label className="field">
             <span>标签（可选）</span>
             <input
-              data-testid="bot-tag-input"
-              value={tag}
+              data-testid="bot-tags-input"
+              value={tags}
               placeholder="销售、客服、采购"
-              onChange={(e) => setTag(e.target.value)}
-              onBlur={() => tag !== bot.tag && commit({ tag })}
+              onChange={(e) => setTags(e.target.value)}
+              onBlur={() => {
+                const next = splitTags(tags);
+                if (next.join("、") !== bot.tags.join("、")) commit({ tags: next });
+              }}
             />
-            <small>出现在名字旁边，方便一眼认出</small>
+            <small>出现在名字旁边，方便一眼认出。顿号隔开，最多 5 个，每个 8 字内</small>
           </label>
           <label className="field">
             <span>描述</span>

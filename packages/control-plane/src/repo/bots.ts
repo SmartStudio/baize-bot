@@ -22,7 +22,7 @@ import { lockRunsOfBot } from "./runs.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
-  readonly tag?: string | undefined;
+  readonly tags?: readonly string[] | undefined;
   readonly description?: string | undefined;
   readonly hue?: BotHue | undefined;
 };
@@ -115,7 +115,7 @@ export async function insertMemberBot(
       id: newId(),
       ownerId,
       name: naming === "untaken" ? await untakenName(tx, ownerId, name) : name,
-      tag: input.tag ?? "",
+      tags: [...(input.tags ?? [])],
       description: input.description ?? "",
       hue: input.hue ?? hueAt(counter.nextHueIndex - 1),
     })
@@ -196,7 +196,7 @@ export async function findBot(db: Db, ownerId: UserId, botId: BotId): Promise<Bo
 export async function updateBot(db: Db, ownerId: UserId, botId: BotId, input: UpdateBotInput): Promise<Bot | null> {
   const patch: Partial<typeof bots.$inferInsert> = {};
   if (input.name !== undefined) patch.name = input.name;
-  if (input.tag !== undefined) patch.tag = input.tag;
+  if (input.tags !== undefined) patch.tags = [...input.tags];
   if (input.description !== undefined) patch.description = input.description;
   if (input.hue !== undefined) patch.hue = input.hue;
   if (input.notify !== undefined) patch.notify = input.notify;

@@ -24,7 +24,7 @@ import { oauthNoticeText, oauthReturnOf, type OAuthReturn } from "./oauth.js";
 
 type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-project";
 
-const FALLBACK: { name: string; tag: string; hue: BotHue } = { name: "Bot", tag: "", hue: "sky" };
+const FALLBACK: { name: string; tags: readonly string[]; hue: BotHue } = { name: "Bot", tags: [], hue: "sky" };
 
 // 历史还没拉回来时也得给 ChatPanel 一个数组。写成字面量的话每次渲染都是新身份，滚到底的 effect 会空转。
 const NO_MESSAGES: Message[] = [];
@@ -110,7 +110,7 @@ export const MainWindow = () => {
   );
   const lookup = (botId: BotId) => {
     const found = bots[botId];
-    return found ? { name: found.name, tag: found.tag, hue: found.hue } : FALLBACK;
+    return found ? { name: found.name, tags: found.tags, hue: found.hue } : FALLBACK;
   };
   const contentActions = {
     decideDraft: actions.decideDraft,

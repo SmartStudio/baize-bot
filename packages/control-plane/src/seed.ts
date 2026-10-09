@@ -8,10 +8,10 @@ import { createUser, findUserByEmail } from "./repo/users.js";
 export const DEV_EMAIL = "chen@baize.dev";
 export const DEV_PASSWORD = "baize-dev";
 
-const DEV_BOTS: readonly { name: string; tag: string; hue: BotHue; firstMessage: string }[] = [
-  { name: "小服", tag: "客服", hue: "coral", firstMessage: "帮我看看今天还有哪些工单没回。" },
-  { name: "小销", tag: "销售", hue: "tangerine", firstMessage: "把这周新进来的线索整理成一张表。" },
-  { name: "小采", tag: "采购", hue: "lime", firstMessage: "比一下这三家供应商的报价。" },
+const DEV_BOTS: readonly { name: string; tags: readonly string[]; hue: BotHue; firstMessage: string }[] = [
+  { name: "小服", tags: ["客服"], hue: "coral", firstMessage: "帮我看看今天还有哪些工单没回。" },
+  { name: "小销", tags: ["销售"], hue: "tangerine", firstMessage: "把这周新进来的线索整理成一张表。" },
+  { name: "小采", tags: ["采购"], hue: "lime", firstMessage: "比一下这三家供应商的报价。" },
 ];
 
 export type SeedResult = {
@@ -41,9 +41,9 @@ export async function seed(db: Db): Promise<SeedResult> {
     if (present.has(spec.name)) continue;
     const { bot, group } = await createBot(db, user.id, {
       name: spec.name,
-      tag: spec.tag,
+      tags: spec.tags,
       hue: spec.hue,
-      description: `${spec.tag}方向的活先找我。`,
+      description: `${spec.tags.join("、")}方向的活先找我。`,
     });
     await appendMessage(db, group.id, { kind: "user", text: spec.firstMessage });
     createdBots.push(bot.name);

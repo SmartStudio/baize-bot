@@ -333,24 +333,27 @@ export const ProjectPage = ({
             <p className="today-empty">还没有发出去的成果</p>
           ) : (
             <div className="today-list">
-              {data.achievements.map((item) => (
-                <a
-                  className="today-row today-result"
-                  data-testid="project-achievement"
-                  href={item.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  key={item.id}
-                >
-                  <Check size={18} aria-hidden="true" />
-                  <span className="today-row-main">
-                    <span className="today-kicker">{PLATFORM[item.platform]} · 已发布</span>
-                    <strong>{item.title}</strong>
-                    <small>{timeText(item.at)}</small>
-                  </span>
-                  <ExternalLink size={16} aria-hidden="true" />
-                </a>
-              ))}
+              {data.achievements.map((item) =>
+                // 第 2 期形状占位：复盘那种成果由 p2-goal-web 画，画出来之前只列发布记录。
+                item.kind === "review" ? null : (
+                  <a
+                    className="today-row today-result"
+                    data-testid="project-achievement"
+                    href={item.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    key={item.id}
+                  >
+                    <Check size={18} aria-hidden="true" />
+                    <span className="today-row-main">
+                      <span className="today-kicker">{PLATFORM[item.platform]} · 已发布</span>
+                      <strong>{item.title}</strong>
+                      <small>{timeText(item.at)}</small>
+                    </span>
+                    <ExternalLink size={16} aria-hidden="true" />
+                  </a>
+                ),
+              )}
             </div>
           )}
         </Block>
@@ -366,7 +369,7 @@ export const ProjectPage = ({
                 <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
                 <span className="today-row-main">
                   <strong>{bot.name}</strong>
-                  <small>{bot.tag === "" ? "队员" : bot.tag}</small>
+                  <small>{bot.tags.length === 0 ? "队员" : bot.tags.join("、")}</small>
                 </span>
               </article>
             ))}
@@ -377,7 +380,7 @@ export const ProjectPage = ({
                   <span className="today-kicker">例行 · {lookup(routine.botId).name}</span>
                   <strong>{routine.name}</strong>
                   <small>
-                    {!routine.enabled
+                    {routine.state !== "on"
                       ? "已停用"
                       : routine.nextAt === null
                         ? "没有排下次"

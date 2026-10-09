@@ -69,7 +69,7 @@ export const TaskPanel = ({ task, memberIds, bots, onClose }: Props) => {
               <span>
                 {bot === undefined ? null : <BotAvatar name={bot.name} hue={bot.hue} size="xs" />}
                 {bot?.name ?? "Bot"}
-                {bot?.tag ? ` · ${bot.tag}` : ""}
+                {bot !== undefined && bot.tags.length > 0 ? ` · ${bot.tags.join("、")}` : ""}
                 {record.to === null ? <em className="tag">当前</em> : null}
               </span>
               <small>{timeRangeOf(record.from, record.to)}</small>
@@ -83,7 +83,7 @@ export const TaskPanel = ({ task, memberIds, bots, onClose }: Props) => {
               <span>
                 {bot === undefined ? null : <BotAvatar name={bot.name} hue={bot.hue} size="xs" />}
                 {bot?.name ?? "Bot"}
-                {bot?.tag ? ` · ${bot.tag}` : ""}
+                {bot !== undefined && bot.tags.length > 0 ? ` · ${bot.tags.join("、")}` : ""}
               </span>
               <small>等待接手</small>
             </li>

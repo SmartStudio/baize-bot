@@ -167,7 +167,7 @@ type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
 /** 发信 Bot 已经不在群里时退回 user：报文是它留下的，但没有名字可署。 */
 function botOrigin(members: readonly GroupBot[], botId: BotId): PromptOrigin {
   const bot = members.find((member) => member.id === botId);
-  return bot === undefined ? { kind: "user" } : { kind: "bot", id: bot.id, name: bot.name, tag: bot.tag };
+  return bot === undefined ? { kind: "user" } : { kind: "bot", id: bot.id, name: bot.name, tags: bot.tags };
 }
 
 async function sendSpeaker(
@@ -195,10 +195,10 @@ async function sendSpeaker(
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
-  const roster = members.map(({ id, name, tag, description }) => ({
+  const roster = members.map(({ id, name, tags, description }) => ({
     id,
     name,
-    tag,
+    tags,
     description,
     seat: id === chiefBotId ? ("chief" as const) : ("member" as const),
   }));
@@ -244,6 +244,8 @@ async function sendSpeaker(
     group,
     context,
     purpose: options.purpose ?? "plan",
+    // 第 2 期形状：例行任务的边界要由 U-例行边界 从 routine 行带进来，这里先恒为 null。
+    routine: null,
     task: solo ? null : task,
     members: roster,
     ...(projects === undefined ? {} : { projects }),
@@ -516,15 +518,19 @@ function summarize(
         `${who(body.botId)}出的方案卡「${body.name}」，${PROJECT_OFFER_OUTCOME[body.status]}`,
         PROJECT_OFFER_SETTLED[body.status],
       );
+    // 第 2 期形状：组队卡和例行提议卡的上下文一句话由对应单元补，补之前这两种卡不进上下文。
+    case "team_offer":
+    case "routine_offer":
+      return null;
   }
 }
 
-/** 收件人看自己只看到自己的名字，看别人带上 tag 才分得清同名的两位。 */
+/** 收件人看自己只看到自己的名字，看别人带上 tags 才分得清同名的两位。 */
 function sender(botId: BotId | null, recipient: BotId, members: readonly GroupBot[]): string {
   const member = botId === null ? undefined : members.find((one) => one.id === botId);
   if (member === undefined) return "别的 Bot";
   if (member.id === recipient) return member.name;
-  return member.tag === "" ? member.name : `${member.name} · ${member.tag}`;
+  return member.tags.length === 0 ? member.name : `${member.name} · ${member.tags.join("、")}`;
 }
 
 function clip(text: string): string {

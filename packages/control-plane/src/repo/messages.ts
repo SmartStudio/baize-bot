@@ -231,14 +231,14 @@ export type GroupBot = {
   readonly id: BotId;
   readonly role: BotRole;
   readonly name: string;
-  readonly tag: string;
+  readonly tags: string[];
   readonly description: string;
 };
 
 /** 群成员按展示顺序。派活、路由、上下文署名都用这一份。 */
 export async function listGroupBots(db: Db, groupId: string): Promise<GroupBot[]> {
   const rows = await db
-    .select({ id: bots.id, role: bots.role, name: bots.name, tag: bots.tag, description: bots.description })
+    .select({ id: bots.id, role: bots.role, name: bots.name, tags: bots.tags, description: bots.description })
     .from(groupMembers)
     .innerJoin(bots, eq(bots.id, groupMembers.botId))
     .where(eq(groupMembers.groupId, groupId))

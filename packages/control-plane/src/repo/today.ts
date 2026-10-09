@@ -106,7 +106,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
         .select({ routine: routines })
         .from(routines)
         .innerJoin(bots, eq(bots.id, routines.botId))
-        .where(and(eq(bots.ownerId, ownerId), eq(routines.enabled, true))),
+        .where(and(eq(bots.ownerId, ownerId), eq(routines.state, "on"))),
     ]);
 
   const draftsByPlan = draftsByPlanOf(draftRows);
@@ -194,6 +194,8 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
           title: row.title,
           published,
           planned: planDrafts.length,
+          goal: null,
+          metric: null,
         },
       };
     })

@@ -159,10 +159,11 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
     next:
       nextItems(
         draftRows,
-        routineRows.filter((routine) => routine.enabled),
+        routineRows.filter((routine) => routine.state === "on"),
         now,
       )[0] ?? null,
     achievements: publicationRows.map(({ publication, draft }) => ({
+      kind: "publication",
       id: PublicationId.parse(publication.id),
       at: publication.publishedAt.toISOString(),
       title: draft === null ? "成果已发布" : draftTitle(draft),
@@ -170,12 +171,12 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
       url: publication.url,
     })),
     routines: routineRows.map((routine) => {
-      const at = routine.enabled ? nextRoutineAt(routine, now) : null;
+      const at = routine.state === "on" ? nextRoutineAt(routine, now) : null;
       return {
         routineId: RoutineId.parse(routine.id),
         botId: BotId.parse(routine.botId),
         name: routine.name,
-        enabled: routine.enabled,
+        state: routine.state,
         nextAt: at === null ? null : at.toISOString(),
       };
     }),

@@ -22,6 +22,8 @@ const pendingAccountIdsOf = (item: TodayPendingItem, content: ContentBook): Acco
     }
     case "account":
     case "approval":
+    case "team_offer":
+    case "routine_offer":
       return [];
   }
 };
@@ -35,6 +37,9 @@ export const entryKey = (entry: PendingEntry): string => {
       return `plan:${entry.plan.id}`;
     case "approval":
       return `approval:${entry.approval.id}`;
+    case "team_offer":
+    case "routine_offer":
+      return `${entry.kind}:${entry.message.id}`;
     case "account":
     case "login":
       return `account:${entry.account.id}`;

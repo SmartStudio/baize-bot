@@ -69,7 +69,7 @@ describe("建 Bot", () => {
     for (let i = 0; i < HUE_ROTATION.length + 1; i += 1) {
       const { bot } = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
       expect(bot.name, "系统起的名字是「小」加一个汉字").toMatch(/^小[一-龥]$/);
-      expect(bot.tag).toBe("");
+      expect(bot.tags).toEqual([]);
       expect(bot.notify).toBe(true);
       hues.push(bot.hue);
     }
@@ -82,14 +82,14 @@ describe("建 Bot", () => {
     const client = await loggedInClient();
     const response = await client.post("/api/bots", {
       name: "小服",
-      tag: "客服",
+      tags: ["客服"],
       description: "退款先找我点头。",
       hue: "violet",
     });
     const { bot } = CreateBotResponse.parse(await response.json());
     expect(bot).toMatchObject({
       name: "小服",
-      tag: "客服",
+      tags: ["客服"],
       description: "退款先找我点头。",
       hue: "violet",
     });
@@ -141,7 +141,7 @@ describe("改 Bot", () => {
   it("只改传了的字段", async () => {
     const client = await loggedInClient();
     const { bot } = CreateBotResponse.parse(
-      await (await client.post("/api/bots", { name: "小销", tag: "销售", description: "原描述" })).json(),
+      await (await client.post("/api/bots", { name: "小销", tags: ["销售"], description: "原描述" })).json(),
     );
 
     const response = await client.patch(`/api/bots/${bot.id}`, { description: "新描述", notify: false });
@@ -151,7 +151,7 @@ describe("改 Bot", () => {
     expect(updated.description).toBe("新描述");
     expect(updated.notify).toBe(false);
     expect(updated.name, "没传的字段不动").toBe("小销");
-    expect(updated.tag).toBe("销售");
+    expect(updated.tags).toEqual(["销售"]);
     expect(updated.hue).toBe(bot.hue);
   });
 
@@ -212,7 +212,7 @@ describe("删 Bot", () => {
 
       // 再建一个并等它的推送。先到的是建出来的那条 bot_updated，说明第二次删没推。
       const next = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
-      await client.patch(`/api/bots/${next.bot.id}`, { tag: "标记" });
+      await client.patch(`/api/bots/${next.bot.id}`, { tags: ["标记"] });
       expect((await push.next()).type).toBe("bot_updated");
     } finally {
       push.close();
@@ -234,10 +234,10 @@ describe("Bot 变更的 WebSocket 推送", () => {
     const push = await connectPush(server.server.port, client.cookie ?? "");
 
     try {
-      await client.patch(`/api/bots/${bot.id}`, { tag: "测试" });
+      await client.patch(`/api/bots/${bot.id}`, { tags: ["测试"] });
       const updated = await push.next();
       expect(updated.type).toBe("bot_updated");
-      expect(updated.type === "bot_updated" ? updated.bot.tag : null).toBe("测试");
+      expect(updated.type === "bot_updated" ? updated.bot.tags : null).toEqual(["测试"]);
 
       await client.delete(`/api/bots/${bot.id}`);
       const deleted = await push.next();

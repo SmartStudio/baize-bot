@@ -220,7 +220,11 @@ export const ChatPanel = ({
           <>
             <BotAvatar name={lead?.name ?? "Bot"} hue={lead?.hue ?? "sky"} size="sm" />
             <b data-testid="chat-title">{lead?.name ?? "Bot"}</b>
-            {lead?.tag ? <em className="tag">{lead.tag}</em> : null}
+            {lead?.tags.map((tag) => (
+              <em className="tag" key={tag}>
+                {tag}
+              </em>
+            ))}
           </>
         )}
       </header>
@@ -315,7 +319,7 @@ export const ChatPanel = ({
               >
                 <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
                 {bot.name}
-                {bot.tag ? <span className="menu-trail">{bot.tag}</span> : null}
+                {bot.tags.length > 0 ? <span className="menu-trail">{bot.tags.join("、")}</span> : null}
               </button>
             ))}
           </div>

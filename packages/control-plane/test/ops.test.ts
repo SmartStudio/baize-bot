@@ -57,7 +57,7 @@ describe("迁移", () => {
     }
   });
 
-  it("建出二十五张业务表加一张迁移记账表", async () => {
+  it("建出二十九张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -68,7 +68,9 @@ describe("迁移", () => {
       "account_credentials",
       "accounts",
       "approvals",
+      "bot_preferences",
       "bots",
+      "brand_books",
       "computers",
       "content_plans",
       "drafts",
@@ -77,7 +79,9 @@ describe("迁移", () => {
       "groups",
       "handoffs",
       "messages",
+      "metric_samples",
       "oauth_states",
+      "project_reviews",
       "publications",
       "routine_runs",
       "routines",
@@ -110,7 +114,7 @@ describe("seed", () => {
       list.items.map((i) => i.bot.name),
       "开发账号和注册的用户一样先有主助理",
     ).toEqual(["主助理", "小服", "小销", "小采"]);
-    expect(list.items.map((i) => i.bot.tag)).toEqual(["", "客服", "销售", "采购"]);
+    expect(list.items.map((i) => i.bot.tags)).toEqual([[], ["客服"], ["销售"], ["采购"]]);
     expect(
       list.items.map((i) => i.lastMessage?.body.kind),
       "主助理先开口，三个队员各有一条示例消息",

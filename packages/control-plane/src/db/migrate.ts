@@ -13,9 +13,12 @@ const MIGRATION_LOCK = 0x6261697a;
 /**
  * 应用 drizzle-kit 生成的 SQL，已应用的记在 _migrations 里跳过。
  * 整批在一个事务里，并发的第二个进程被咨询锁挡在外面，进来时已经能看到前一个的记账。
+ * `through` 只在迁移测试里用：只应用到这个文件名为止（含），好先造出一个旧版本的库再插旧数据。
  */
-export async function runMigrations(sql: Sql): Promise<string[]> {
-  const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).toSorted();
+export async function runMigrations(sql: Sql, through?: string): Promise<string[]> {
+  const files = (await readdir(migrationsDir))
+    .filter((f) => f.endsWith(".sql") && (through === undefined || f <= through))
+    .toSorted();
 
   return sql.begin(async (tx) => {
     await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK})`;

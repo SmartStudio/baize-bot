@@ -42,7 +42,9 @@ export const createRoutine = (botId: string, input: CreateRoutineRequest): Routi
     onFailure: input.onFailure,
     groupId: input.groupId ?? null,
     purpose: input.purpose ?? "plan",
-    enabled: input.enabled,
+    state: input.state,
+    boundary: input.boundary,
+    onToday: input.onToday,
     runs: [],
   });
   routines.set(routine.id, routine);
@@ -67,10 +69,10 @@ export const runRoutine = (id: string): { routine: Routine; messages: Message[] 
     appendMessage(groupId, { kind: "system", text: `例行任务「${routine.name}」自动运行` }),
     appendMessage(groupId, { kind: "user", text: routine.instruction }),
   ];
-  const runs = [{ startedAt: new Date().toISOString(), status: "running", note: "" }, ...routine.runs].slice(
-    0,
-    RUN_CAP,
-  );
+  const runs = [
+    { startedAt: new Date().toISOString(), status: "running", note: "", seenAt: null },
+    ...routine.runs,
+  ].slice(0, RUN_CAP);
   const next = Routine.parse({ ...routine, runs });
   routines.set(next.id, next);
   return { routine: next, messages };

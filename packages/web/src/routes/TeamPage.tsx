@@ -29,9 +29,13 @@ const BotCard = ({ bot, solo, projects }: { bot: Bot; solo: Solo | undefined; pr
         </span>
       </div>
       {bot.description.length > 0 ? <p className="team-bot-desc">{bot.description}</p> : null}
-      {bot.tag.length > 0 ? (
+      {bot.tags.length > 0 ? (
         <div className="team-bot-tags">
-          <em className="tag">{bot.tag}</em>
+          {bot.tags.map((tag) => (
+            <em className="tag" key={tag}>
+              {tag}
+            </em>
+          ))}
         </div>
       ) : null}
       {hasBadges ? (

@@ -60,10 +60,10 @@ async function ownerWithTeam(): Promise<{
   const client = new ApiClient(server.port);
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const sales = CreateBotResponse.parse(
-    await (await client.post("/api/bots", { name: "小销", tag: "销售" })).json(),
+    await (await client.post("/api/bots", { name: "小销", tags: ["销售"] })).json(),
   ).bot;
   const service = CreateBotResponse.parse(
-    await (await client.post("/api/bots", { name: "小服", tag: "客服" })).json(),
+    await (await client.post("/api/bots", { name: "小服", tags: ["客服"] })).json(),
   ).bot;
   const group = CreateGroupResponse.parse(
     await (await client.post("/api/groups", { title: "双十一大促", botIds: [sales.id, service.id] })).json(),

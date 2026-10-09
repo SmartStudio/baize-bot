@@ -13,7 +13,7 @@ const assistant = Bot.parse({
   ownerId: "user_me",
   role: "assistant",
   name: "主助理",
-  tag: "",
+  tags: [],
   description: "",
   hue: "sky",
   notify: true,
@@ -53,6 +53,9 @@ const taskOf = (group: Group) =>
     currentBotId: null,
     handled: [],
     status: "active",
+    goal: null,
+    metricSource: null,
+    metric: null,
   });
 
 const created = { type: "bot_created", bot: member, groupId: memberChat.id } as const;

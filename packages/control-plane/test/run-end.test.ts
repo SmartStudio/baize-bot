@@ -219,10 +219,10 @@ const newMessageId = (): MessageId => MessageId.parse(randomUUID());
 async function teamRun() {
   const who = await owner();
   const sales = CreateBotResponse.parse(
-    await (await who.client.post("/api/bots", { name: "小销", tag: "销售" })).json(),
+    await (await who.client.post("/api/bots", { name: "小销", tags: ["销售"] })).json(),
   ).bot;
   const service = CreateBotResponse.parse(
-    await (await who.client.post("/api/bots", { name: "小服", tag: "客服" })).json(),
+    await (await who.client.post("/api/bots", { name: "小服", tags: ["客服"] })).json(),
   ).bot;
   const group = CreateGroupResponse.parse(
     await (await who.client.post("/api/groups", { title: "双十一大促", botIds: [sales.id, service.id] })).json(),
@@ -289,10 +289,10 @@ describe("收尾时收掉还在流的文字", () => {
   it("多 Bot 群里只收收尾那个 Bot 的文字，另一个 Bot 还在流的那条不动", async () => {
     const who = await owner();
     const sales = CreateBotResponse.parse(
-      await (await who.client.post("/api/bots", { name: "小销", tag: "销售" })).json(),
+      await (await who.client.post("/api/bots", { name: "小销", tags: ["销售"] })).json(),
     ).bot;
     const service = CreateBotResponse.parse(
-      await (await who.client.post("/api/bots", { name: "小服", tag: "客服" })).json(),
+      await (await who.client.post("/api/bots", { name: "小服", tags: ["客服"] })).json(),
     ).bot;
     const group = CreateGroupResponse.parse(
       await (await who.client.post("/api/groups", { title: "双十一大促", botIds: [sales.id, service.id] })).json(),
@@ -461,10 +461,10 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
   it("@ 队友不落消息、不派活", async () => {
     const who = await owner();
     const sales = CreateBotResponse.parse(
-      await (await who.client.post("/api/bots", { name: "小销", tag: "销售" })).json(),
+      await (await who.client.post("/api/bots", { name: "小销", tags: ["销售"] })).json(),
     ).bot;
     const service = CreateBotResponse.parse(
-      await (await who.client.post("/api/bots", { name: "小服", tag: "客服" })).json(),
+      await (await who.client.post("/api/bots", { name: "小服", tags: ["客服"] })).json(),
     ).bot;
     const group = CreateGroupResponse.parse(
       await (await who.client.post("/api/groups", { title: "双十一大促", botIds: [sales.id, service.id] })).json(),
@@ -495,7 +495,7 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
         type: "project_offer",
         name: "推广白泽",
         goal: "年底 1000 星",
-        team: [{ name: "小内", tag: "内容", description: "写帖子" }],
+        team: [{ name: "小内", tags: ["内容"], description: "写帖子" }],
         platforms: [{ kind: "supported", platform: "github" }],
         cadence: "每周两篇",
         firstStep: "先改 README",

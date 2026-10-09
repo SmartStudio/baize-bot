@@ -50,7 +50,7 @@ type Team = {
 };
 
 async function makeBot(client: ApiClient, name: string, tag: string): Promise<Bot> {
-  const response = await client.post("/api/bots", { name, tag });
+  const response = await client.post("/api/bots", { name, tags: [tag] });
   expect(response.status).toBe(201);
   return CreateBotResponse.parse(await response.json()).bot;
 }
@@ -393,7 +393,7 @@ describe("上行 handoff", () => {
         kind: "bot",
         id: team.sales.id,
         name: "小销",
-        tag: "销售",
+        tags: ["销售"],
       });
 
       const stored = await page(team);

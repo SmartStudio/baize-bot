@@ -82,7 +82,7 @@ export class RoutineScheduler {
       // 推得动才算这一刻归我。另一个进程抢到时它看到的已经是新值，推不动就跳过。
       if (!(await advanceCronTrigger(this.#options.db, row.id, index, trigger, due))) continue;
       // 停用的只推游标不跑：不这样的话重新启用时会把停用期间攒下的那一刻补跑掉。
-      if (!row.enabled) continue;
+      if (row.state !== "on") continue;
       await runRoutine(this.#options, ownerId, row, due);
     }
   }

@@ -4,13 +4,18 @@ import { type ServerPush } from "@baize/shared";
 import { accountRoutes } from "./routes/account.js";
 import { authRoutes, authed, expireSessions } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
+import { brandRoutes } from "./routes/brand.js";
 import { contentRoutes } from "./routes/content.js";
+import { goalRoutes } from "./routes/goals.js";
 import { groupRoutes } from "./routes/groups.js";
 import { grantRoutes } from "./routes/grants.js";
+import { preferenceRoutes } from "./routes/preferences.js";
+import { routineOfferRoutes } from "./routes/routine-offers.js";
 import { send, type Push, type Route, type RouteContext } from "./routes/http.js";
 import { projectRoutes } from "./routes/projects.js";
 import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
+import { teamOfferRoutes } from "./routes/team-offers.js";
 import { currentTurns, testRoutes } from "./routes/test.js";
 import { todayRoutes } from "./routes/today.js";
 import { toolRoutes } from "./routes/tools.js";
@@ -38,6 +43,12 @@ const socketRoutes: Route = async ({ res, path, method }) => {
 
 const publicRoutes: Route[] = [socketRoutes, testRoutes, authRoutes, hookRoutes];
 const protectedRoutes: Route[] = [
+  // 第 2 期的接缝路由排在前面，免得被同前缀的老路由先截住。
+  goalRoutes,
+  preferenceRoutes,
+  brandRoutes,
+  teamOfferRoutes,
+  routineOfferRoutes,
   accountRoutes,
   botRoutes,
   toolRoutes,

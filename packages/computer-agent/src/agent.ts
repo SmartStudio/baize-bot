@@ -210,6 +210,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
           accountsProxy: message.accountsProxy,
           // 不透传的话运行器按空数组对账，每来一条 config 就把所有 Bot 盘上的 skill 清空。
           skills: message.skills,
+          brand: message.brand,
+          preferences: message.preferences,
           dataDir,
           send: report,
           browser: browserConfig,

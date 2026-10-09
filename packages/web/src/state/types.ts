@@ -6,6 +6,7 @@ import {
   type ApprovalId,
   type Bot,
   type BotId,
+  type BrandBook,
   type Computer,
   type ComputerId,
   type ContentPlan,
@@ -22,6 +23,8 @@ import {
   type LoginFailure,
   type Message,
   type MessageId,
+  type Preference,
+  type PreferenceId,
   type Publication,
   type Routine,
   type RoutineId,
@@ -43,7 +46,7 @@ export type SessionId = number & { readonly __session: unique symbol };
 
 // 群历史、例行、会做的活三种按桶拉的列表各自的拉取状态。没有记录就是 idle。
 export type LoadStatus = "idle" | "loading" | "failed";
-export type LoadKey = `messages:${GroupId}` | "routines" | `skills:${BotId}`;
+export type LoadKey = `messages:${GroupId}` | "routines" | `skills:${BotId}` | `preferences:${BotId}`;
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
 
@@ -112,6 +115,9 @@ export type AppState =
       handoffs: Record<HandoffId, Handoff>;
       routines: Shelf<typeof MY_ROUTINES, Routine>;
       skills: Shelf<BotId, Skill>;
+      preferences: Shelf<BotId, Preference>;
+      // 没写过是 null。
+      brand: BrandBook | null;
       tools: ToolConnection[];
       settings: Settings;
       grants: Grant[];
@@ -165,6 +171,10 @@ export type Action =
   | { type: "skills_loaded"; botId: BotId; skills: Skill[]; seq: Seq }
   | { type: "skill_upserted"; skill: Skill; seq: Seq }
   | { type: "skill_removed"; botId: BotId; skillId: SkillId; seq: Seq }
+  | { type: "preferences_loaded"; botId: BotId; preferences: Preference[]; seq: Seq }
+  | { type: "preference_upserted"; preference: Preference; seq: Seq }
+  | { type: "preference_removed"; botId: BotId; preferenceId: PreferenceId; seq: Seq }
+  | { type: "brand_set"; brand: BrandBook | null }
   | { type: "tool_upserted"; tool: ToolConnection }
   | { type: "tool_removed"; toolId: ToolConnectionId }
   | { type: "settings_set"; settings: Settings }

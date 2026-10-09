@@ -36,7 +36,7 @@ export function toBot(row: typeof schema.bots.$inferSelect): Bot {
     role: row.role,
     runState: row.runState,
     name: row.name,
-    tag: row.tag,
+    tags: row.tags,
     description: row.description,
     hue: row.hue,
     notify: row.notify,
@@ -72,6 +72,14 @@ export function toTask(row: typeof schema.tasks.$inferSelect): TopicTask {
     handled: row.handled,
     status: row.status,
     cadence: row.cadence,
+    // 三列要么全空要么全有，谁写谁保证（UpdateTaskRequest.goal 整个替换）。单位缺了就当没定目标。
+    goal:
+      row.goalTarget === null || row.goalUnit === null
+        ? null
+        : { target: row.goalTarget, unit: row.goalUnit, dueAt: row.goalDueAt?.toISOString() ?? null },
+    metricSource: row.metricSource,
+    // 第 2 期形状：当前值和周涨幅要从 metric_samples 算，由 U-指标 接上，这里先恒为 null。
+    metric: null,
   });
 }
 
@@ -147,11 +155,14 @@ export function toRoutine(
     onFailure: row.onFailure,
     groupId: row.groupId,
     purpose: row.purpose,
-    enabled: row.enabled,
+    state: row.state,
+    boundary: row.boundary,
+    onToday: row.onToday,
     runs: runs.map((run) => ({
       startedAt: run.startedAt.toISOString(),
       status: run.status,
       note: run.note,
+      seenAt: run.seenAt?.toISOString() ?? null,
     })),
   });
 }

@@ -38,6 +38,9 @@ const fakeChrome = (): AssistantChrome => ({
 });
 const initialRunnerConfigs: AgentRunnerConfig[] = [];
 
+// 只挑 config 里第 2 期新加的两项，断言时不带其余字段。
+const carried = (config: RunnerConfig) => ({ brand: config.brand, preferences: config.preferences });
+
 function startAgent(options: AgentOptions): AgentHandle {
   return startProductAgent({ ...options, makeChrome: options.makeChrome ?? fakeChrome });
 }
@@ -105,8 +108,10 @@ function runnerOf(
 const configMessage = {
   type: "config",
   generation: 1,
-  bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "客服 Bot" }],
+  bots: [{ id: "bot-1", role: "member", name: "小服", tags: [], description: "客服 Bot" }],
   tools: [],
+  brand: null,
+  preferences: [],
   accounts: [],
   grants: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },
@@ -126,7 +131,8 @@ const promptMessage = {
   context: [],
   purpose: "plan",
   task: null,
-  members: [{ id: "bot-1", name: "小服", tag: "", description: "客服 Bot", seat: "member" }],
+  routine: null,
+  members: [{ id: "bot-1", name: "小服", tags: [], description: "客服 Bot", seat: "member" }],
 };
 
 async function poll<T>(get: () => T | undefined, timeoutMs: number, label: string): Promise<T> {
@@ -344,7 +350,7 @@ describe("电脑代理连控制面", () => {
     const secondConfig = {
       ...configMessage,
       generation: 2,
-      bots: [{ id: "bot-1", role: "member", name: "新版小服", tag: "", description: "新版客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", name: "新版小服", tags: [], description: "新版客服 Bot" }],
     };
 
     try {
@@ -443,6 +449,30 @@ describe("电脑代理连控制面", () => {
     expect(runnerCalls().appliedConfigs.map((config) => config.skills)).toEqual([undefined]);
   });
 
+  it("config 里的 brand 和 preferences 原样交给运行器，建运行器和后面的配置更新都带", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const brand = { version: 2, text: "白泽：说人话，不用感叹号" };
+    const preference = {
+      id: "pref-1",
+      botId: "bot-1",
+      text: "喜欢短句",
+      sourceMessageId: null,
+      private: false,
+      createdAt: "2026-09-19T00:00:00.000Z",
+    };
+
+    socket.send(JSON.stringify({ ...configMessage, brand, preferences: [preference] }));
+    socket.send(JSON.stringify({ ...configMessage, generation: 2 }));
+    socket.send(JSON.stringify(promptMessage));
+
+    await server.waitForMessage("bot_text", 1, 3000);
+    expect(initialRunnerConfigs.map(carried)).toEqual([{ brand, preferences: [preference] }]);
+    expect(runnerCalls().appliedConfigs.map(carried), "后一代把手册和偏好清空也要原样到运行器").toEqual([
+      { brand: null, preferences: [] },
+    ]);
+  });
+
   it("还没收到 config 的 prompt 被丢弃，只有 config 之后的那条回 bot_text", async () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
@@ -501,7 +531,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
     });
 
     socket.send(JSON.stringify(named(2, "第二代")));
@@ -548,7 +578,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
     });
     const first = await server.waitForSocket(1);
     first.send(JSON.stringify(named(1, "第一条连接的第一代")));
@@ -604,7 +634,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tag: "", description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
     });
     const socket = await server.waitForSocket(1);
 
@@ -1239,7 +1269,7 @@ describe("电脑代理连控制面", () => {
       JSON.stringify({
         ...configMessage,
         generation: 2,
-        bots: [{ id: "bot-1", role: "member", name: "小服", tag: "", description: "新版客服 Bot" }],
+        bots: [{ id: "bot-1", role: "member", name: "小服", tags: [], description: "新版客服 Bot" }],
       }),
     );
     socket.send(JSON.stringify({ ...promptMessage, runId: "run-2", text: "发报价邮件" }));

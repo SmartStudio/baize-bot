@@ -18,7 +18,9 @@ const routine = (id: string) =>
     instruction: "看一眼询价邮箱",
     triggers: [],
     onFailure: "stop_and_tell",
-    enabled: true,
+    state: "on",
+    boundary: "draft",
+    onToday: false,
     runs: [],
   });
 

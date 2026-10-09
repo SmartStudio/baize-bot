@@ -45,8 +45,8 @@ const OFFER = {
   name: "推广白泽",
   goal: "白泽的开源仓库年底 1000 星",
   team: [
-    { name: "小内", tag: "内容", description: "写小红书笔记和 X 帖子，不回评论" },
-    { name: "小社", tag: "社区", description: "回 GitHub issue 和评论，不写长文" },
+    { name: "小内", tags: ["内容"], description: "写小红书笔记和 X 帖子，不回评论" },
+    { name: "小社", tags: ["社区"], description: "回 GitHub issue 和评论，不写长文" },
   ],
   platforms: [
     { kind: "supported", platform: "github" },
@@ -253,8 +253,8 @@ describe("方案卡", () => {
       const config = await s.agent.expect("config");
       const members = config.bots.filter((bot) => OFFER.team.some((member) => member.name === bot.name));
       expect(
-        members.map((bot) => ({ name: bot.name, role: bot.role, tag: bot.tag, description: bot.description })),
-        "新队员随 config 下发，tag 和 description 取提议里的",
+        members.map((bot) => ({ name: bot.name, role: bot.role, tags: bot.tags, description: bot.description })),
+        "新队员随 config 下发，tags 和 description 取提议里的",
       ).toEqual(expect.arrayContaining(OFFER.team.map((member) => ({ ...member, role: "member" }))));
       expect(members).toHaveLength(OFFER.team.length);
 
@@ -277,7 +277,7 @@ describe("方案卡", () => {
           groupId: routine.groupId,
           purpose: routine.purpose,
           triggers: routine.triggers,
-          enabled: routine.enabled,
+          state: routine.state,
         })),
       ).toEqual([
         {
@@ -285,14 +285,14 @@ describe("方案卡", () => {
           groupId: projectGroupId,
           purpose: "plan",
           triggers: [{ kind: "cron", expr: "0 9 * * 1" }],
-          enabled: true,
+          state: "on",
         },
         {
           name: "周五复盘",
           groupId: projectGroupId,
           purpose: "plan",
           triggers: [{ kind: "cron", expr: "0 17 * * 5" }],
-          enabled: true,
+          state: "on",
         },
       ]);
       expect(
@@ -317,7 +317,7 @@ describe("方案卡", () => {
       const { group } = await decide(s.me.client, card.id, { decision: "start" });
       if (group === null) throw new Error("开始了却没回项目群");
 
-      const created: { name: string; tag: string; description: string; role: string; groupId: string }[] = [];
+      const created: { name: string; tags: string[]; description: string; role: string; groupId: string }[] = [];
       for (;;) {
         const item = await s.push.next();
         if (item.type === "group_created") {
@@ -326,8 +326,8 @@ describe("方案卡", () => {
         }
         expect(item.type, "新队员不再推 bot_updated，Web 靠 bot_created 认单聊").not.toBe("bot_updated");
         if (item.type === "bot_created") {
-          const { name, tag, description, role } = item.bot;
-          created.push({ name, tag, description, role, groupId: item.groupId });
+          const { name, tags, description, role } = item.bot;
+          created.push({ name, tags, description, role, groupId: item.groupId });
         }
       }
       const listed = BotListResponse.parse(await (await s.me.client.get("/api/bots")).json());
@@ -483,8 +483,8 @@ describe("方案卡", () => {
         await s.agent.expect("config");
       }
       const card = await offerCard(s, [
-        { name: long, tag: "", description: "" },
-        { name: emoji, tag: "", description: "" },
+        { name: long, tags: [], description: "" },
+        { name: emoji, tags: [], description: "" },
       ]);
       const started = await decide(s.me.client, card.id, { decision: "start" });
       expect(offerBody(started.message).team.map((member) => member.name)).toEqual([
@@ -505,7 +505,7 @@ describe("方案卡", () => {
         expect((await s.me.client.post("/api/bots", { name: `${stem}${n}` })).status).toBe(201);
         await s.agent.expect("config");
       }
-      const card = await offerCard(s, [{ name: `${stem}11`, tag: "", description: "" }]);
+      const card = await offerCard(s, [{ name: `${stem}11`, tags: [], description: "" }]);
 
       const response = await s.me.client.post(`/api/messages/${card.id}/project-offer`, { decision: "start" });
       expect(response.status, "挑不出空名时整个开始项目回滚成 500").toBe(200);

@@ -14,7 +14,7 @@ import {
 
 export const createBot = (input: {
   name?: string | undefined;
-  tag?: string | undefined;
+  tags?: string[] | undefined;
   description?: string | undefined;
   hue?: (typeof HUES)[number] | undefined;
 }) => {
@@ -27,7 +27,7 @@ export const createBot = (input: {
     role: "member",
     runState: "running",
     name: input.name ?? `新 Bot ${bots.size + 1}`,
-    tag: input.tag ?? "",
+    tags: input.tags ?? [],
     description: input.description ?? "",
     hue: input.hue ?? HUES[bots.size % HUES.length] ?? "sky",
     notify: true,
@@ -83,6 +83,9 @@ export const createGroup = (input: {
     handled: [],
     status: "active",
     cadence: input.cadence ?? "",
+    goal: null,
+    metricSource: null,
+    metric: null,
   });
   groups.set(group.id, group);
   tasks.set(task.id, task);

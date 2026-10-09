@@ -135,6 +135,12 @@ import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
+import { createBrandRoutes } from "./routes/brand.js";
+import { createGoalRoutes } from "./routes/goals.js";
+import { createPreferenceRoutes } from "./routes/preferences.js";
+import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
+import { createSeenRoutes } from "./routes/seen.js";
+import { createTeamOfferRoutes } from "./routes/team-offers.js";
 
 export type AppDeps = {
   readonly db: Db;
@@ -153,7 +159,7 @@ export type AppDeps = {
   };
 };
 
-type Env = { Variables: { user: User } };
+export type Env = { Variables: { user: User } };
 
 const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout", "/api/register"]);
 /** webhook 的 token 本身就是凭据，打这条的人手上没有会话。只豁免这一条路由，多一段路径都不算。 */
@@ -195,6 +201,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
     c.set("user", user);
     await next();
   });
+
+  // 第 2 期的接缝路由，都在登录中间件之后，各自的子单元把 501 换掉。
+  app.route("/api", createGoalRoutes());
+  app.route("/api", createPreferenceRoutes());
+  app.route("/api", createBrandRoutes());
+  app.route("/api", createTeamOfferRoutes());
+  app.route("/api", createRoutineOfferRoutes());
+  app.route("/api", createSeenRoutes());
 
   app.route(
     OAUTH_PATH,
@@ -553,7 +567,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.post("/api/hooks/:token", async (c) => {
     const owned = await findRoutineByWebhookToken(db, c.req.param("token"));
     if (owned === null) return c.json(NOT_FOUND, 404);
-    if (!owned.row.enabled) return c.json({ error: "这条例行任务已停用" }, 409);
+    if (owned.row.state !== "on") return c.json({ error: "这条例行任务已停用" }, 409);
     if ((await runRoutine(routineDeps, owned.ownerId, owned.row, new Date())) === null) return c.json(NOT_FOUND, 404);
     return c.body(null, 202);
   });

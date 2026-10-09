@@ -57,7 +57,7 @@ type Seed = {
   key: string;
   role: BotRole;
   name: string;
-  tag: string;
+  tags: string[];
   description: string;
   hue: BotHue;
   bodies: MessageBody[];
@@ -68,7 +68,7 @@ const seeds: Seed[] = [
     key: "service",
     role: "member",
     name: "小服",
-    tag: "客服",
+    tags: ["客服"],
     description: "接工单、查订单、回答标准问题。改交期、退款、对外发邮件先找我点头。",
     hue: "sky",
     bodies: [
@@ -145,7 +145,7 @@ const seeds: Seed[] = [
     key: "sales",
     role: "member",
     name: "小销",
-    tag: "销售",
+    tags: ["销售"],
     description: "跟线索、出报价、写跟进邮件。对外发送前先找我点头。",
     hue: "tangerine",
     bodies: [
@@ -165,7 +165,7 @@ const seeds: Seed[] = [
     key: "buy",
     role: "member",
     name: "小采",
-    tag: "采购",
+    tags: ["采购"],
     description: "比价、询价、盯到货。下单和付钱先找我点头。",
     hue: "mint",
     bodies: [
@@ -177,7 +177,7 @@ const seeds: Seed[] = [
     key: "assistant",
     role: "assistant",
     name: "主助理",
-    tag: "主助理",
+    tags: ["主助理"],
     description: "拆活、排期、找你拍板。",
     hue: "violet",
     // 照控制面 ASSISTANT_GREETING：注册时主助理先在单聊里说这一句。
@@ -210,7 +210,7 @@ export const restoreAssistant = () => {
     role: seed.role,
     runState: "running",
     name: seed.name,
-    tag: seed.tag,
+    tags: seed.tags,
     description: seed.description,
     hue: seed.hue,
     notify: true,
@@ -238,6 +238,9 @@ export const restoreAssistant = () => {
     currentBotId: null,
     handled: [],
     status: "active",
+    goal: null,
+    metricSource: null,
+    metric: null,
   });
   const greeting = Message.parse({
     id: `msg_${nextSuffix()}`,
@@ -292,7 +295,7 @@ export const reseed = (): void => {
         role: seed.role,
         runState: "running",
         name: seed.name,
-        tag: seed.tag,
+        tags: seed.tags,
         description: seed.description,
         hue: seed.hue,
         notify: true,
@@ -345,6 +348,9 @@ export const reseed = (): void => {
       handled: [],
       status: "active",
       cadence: "",
+      goal: null,
+      metricSource: null,
+      metric: null,
     }),
   );
   // 群里先只有一条系统消息。谁开口都是被 @ 出来的，用例才数得清「只有被 @ 的那个回了」。
@@ -363,12 +369,14 @@ export const reseed = (): void => {
       onFailure: "stop_and_tell",
       groupId: null,
       purpose: "plan",
-      enabled: true,
+      state: "on",
+      boundary: "draft",
+      onToday: false,
       // 对着原型 2c 那三行。
       runs: [
-        { startedAt: ranAt(0), status: "stopped", note: "1 条等你点头 · ¥0.8" },
-        { startedAt: ranAt(5), status: "ok", note: "¥0.7" },
-        { startedAt: ranAt(6), status: "failed", note: "工单系统登录过期 · ¥0.2" },
+        { startedAt: ranAt(0), status: "stopped", note: "1 条等你点头 · ¥0.8", seenAt: null },
+        { startedAt: ranAt(5), status: "ok", note: "¥0.7", seenAt: null },
+        { startedAt: ranAt(6), status: "failed", note: "工单系统登录过期 · ¥0.2", seenAt: null },
       ],
     }),
   );

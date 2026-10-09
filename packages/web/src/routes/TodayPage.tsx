@@ -298,6 +298,10 @@ export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGro
               </button>
             );
           }
+          case "team_offer":
+          case "routine_offer":
+            // 第 2 期形状占位：这两种卡由 p2-team-web 和 p2-routine-web 画。
+            return null;
           default: {
             const unreachable: never = item;
             return unreachable;

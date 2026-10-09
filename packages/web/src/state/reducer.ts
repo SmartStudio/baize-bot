@@ -1,7 +1,9 @@
 import type { Bot, BotId } from "@baize/shared";
 import { reduceApprovals } from "./approvals.js";
+import { reduceBrand } from "./brand.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
 import { reduceGroups } from "./groups.js";
+import { reducePreferences } from "./preferences.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
 import { reduceSkills } from "./skills.js";
@@ -47,6 +49,8 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     revokedGrantIds: [],
     routines: emptyShelf(),
     skills: emptyShelf(),
+    preferences: emptyShelf(),
+    brand: null,
     tools,
     settings,
     usage,
@@ -81,5 +85,7 @@ export const reduce = (state: AppState, action: Action): AppState => {
   const approvals = reduceApprovals(groups, action);
   const routines = reduceRoutines(approvals, action);
   const skills = reduceSkills(routines, action);
-  return reduceContent(reduceSettings(skills, action), action);
+  const preferences = reducePreferences(skills, action);
+  const brand = reduceBrand(preferences, action);
+  return reduceContent(reduceSettings(brand, action), action);
 };

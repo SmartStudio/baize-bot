@@ -640,6 +640,8 @@ export const todayOf = (): TodayResponse => {
       title: plan.title,
       published: plan.draftIds.filter((id) => drafts.get(id)?.status === "published").length,
       planned: plan.draftIds.length,
+      goal: null,
+      metric: null,
     }));
 
   const next: TodayResponse["next"] = [...drafts.values()]
@@ -647,7 +649,7 @@ export const todayOf = (): TodayResponse => {
     .map((draft) => ({ kind: "draft" as const, at: draft.scheduledAt ?? draft.createdAt, draft }));
   if (mode === "full") {
     for (const routine of routines.values()) {
-      if (routine.enabled) {
+      if (routine.state === "on") {
         next.push({
           kind: "routine",
           at: at(60 * 24),

@@ -55,7 +55,7 @@ type Team = {
 type SoloBot = { readonly bot: Bot; readonly groupId: GroupId };
 
 async function makeBot(client: ApiClient, name: string, tag: string): Promise<SoloBot> {
-  const response = await client.post("/api/bots", { name, tag });
+  const response = await client.post("/api/bots", { name, tags: [tag] });
   expect(response.status).toBe(201);
   const created = CreateBotResponse.parse(await response.json());
   return { bot: created.bot, groupId: created.group.id };
@@ -254,8 +254,8 @@ describe("多 Bot 群派活", () => {
       expect(first.task?.number, "多 Bot 群的 prompt 带的是这个群的任务卡").toBe(team.task.number);
       expect(first.task?.currentBotId, "任务卡是改完经手之后的那份").toBe(team.sales.id);
       expect(first.members, "成员名单是全体成员，按位置顺序，带 tag 和描述，没设首席时都是普通成员").toEqual([
-        { id: team.sales.id, name: "小销", tag: "销售", description: "", seat: "member" },
-        { id: team.service.id, name: "小服", tag: "客服", description: "", seat: "member" },
+        { id: team.sales.id, name: "小销", tags: ["销售"], description: "", seat: "member" },
+        { id: team.service.id, name: "小服", tags: ["客服"], description: "", seat: "member" },
       ]);
       expect(first.origin, "用户手打的消息").toEqual({ kind: "user" });
       expect(first.reason, "派活原因是被 @").toBe("mentioned");
@@ -325,7 +325,7 @@ describe("多 Bot 群派活", () => {
       expect(prompt.botId, "单 Bot 群 @ 谁都派给它").toBe(team.service.id);
       expect(prompt.task, "单 Bot 群不带任务卡").toBeNull();
       expect(prompt.members).toEqual([
-        { id: team.service.id, name: "小服", tag: "客服", description: "", seat: "member" },
+        { id: team.service.id, name: "小服", tags: ["客服"], description: "", seat: "member" },
       ]);
       expect(prompt.reason, "单 Bot 群的派活原因").toBe("solo");
       expect(prompt.group, "单 Bot 群的任务卡不下发，但群标签仍取它的编号，标题就是 Bot 名").toEqual({
@@ -958,7 +958,7 @@ describe("上行 mention", () => {
         kind: "bot",
         id: team.sales.id,
         name: "小销",
-        tag: "销售",
+        tags: ["销售"],
       });
 
       const stored = await messagesIn(team, team.group.id);

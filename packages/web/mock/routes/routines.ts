@@ -16,7 +16,7 @@ export const hookRoutes: Route = async ({ res, path, method, push }) => {
   const rawToken = match[1];
   const routine = routineByToken(rawToken === undefined ? "" : decodeURIComponent(rawToken));
   if (routine === null) send(res, 404, { error: "没有这个 webhook" });
-  else if (!routine.enabled) send(res, 409, { error: "这条例行任务停用了" });
+  else if (routine.state !== "on") send(res, 409, { error: "这条例行任务停用了" });
   else send(res, fireRoutine(routine.id, push) === null ? 404 : 202);
   return true;
 };

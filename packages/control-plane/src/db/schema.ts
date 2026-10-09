@@ -6,6 +6,7 @@ import type {
   BotHue,
   BotRole as BotRoleSchema,
   BotRunState as BotRunStateSchema,
+  BrandEdit,
   ChecklistItem,
   ComputerKind as ComputerKindSchema,
   ComputerStatus,
@@ -18,12 +19,15 @@ import type {
   LoginFailure as LoginFailureSchema,
   MessageBody,
   MessageId,
+  MetricSource,
   ModelPurpose as ModelPurposeSchema,
   OAuthPlatform,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
   PublishFailureReason as PublishFailureReasonSchema,
+  RoutineBoundary as RoutineBoundarySchema,
   RoutineRunStatus as RoutineRunStatusSchema,
+  RoutineState as RoutineStateSchema,
   SkillSource,
   ToolOperation,
   ToolView,
@@ -35,6 +39,7 @@ import {
   bigserial,
   boolean,
   check,
+  date,
   index,
   integer,
   jsonb,
@@ -65,6 +70,8 @@ type OnFailure = z.infer<typeof OnFailureSchema>;
 type Platform = z.infer<typeof PlatformSchema>;
 type PublishFailureReason = z.infer<typeof PublishFailureReasonSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
+type RoutineState = z.infer<typeof RoutineStateSchema>;
+type RoutineBoundary = z.infer<typeof RoutineBoundarySchema>;
 
 /**
  * 触发器在库里的样子：shared 的 `Trigger` 加上 cron 的 `lastFiredAt`。
@@ -127,7 +134,7 @@ export const bots = pgTable(
     role: text("role").$type<BotRole>().notNull().default("member"),
     runState: text("run_state").$type<BotRunState>().notNull().default("running"),
     name: text("name").notNull(),
-    tag: text("tag").notNull().default(""),
+    tags: text("tags").array().notNull().default([]),
     description: text("description").notNull().default(""),
     hue: text("hue").$type<BotHue>().notNull(),
     notify: boolean("notify").notNull().default(true),
@@ -223,7 +230,45 @@ export const tasks = pgTable("tasks", {
   handled: jsonb("handled").$type<{ botId: string; from: string; to: string | null }[]>().notNull().default([]),
   status: text("status").$type<TaskStatus>().notNull().default("active"),
   cadence: text("cadence").notNull().default(""),
+  // 项目目标（D1、D2）拆成三列而不是一个 jsonb：目标数和截止要参与「本周该到哪」的算术，
+  // 三列要么全空要么全有，由 UpdateTaskRequest.goal 整个替换。指标来源是闭合联合，jsonb 存。
+  goalTarget: integer("goal_target"),
+  goalUnit: text("goal_unit"),
+  goalDueAt: timestamp("goal_due_at", { withTimezone: true }),
+  metricSource: jsonb("metric_source").$type<MetricSource>(),
 });
+
+// 指标采样。每个项目群一条时间序列，source 记这次数是谁报的（github 轮询还是 Bot 的 report_metric）。
+// 「本周涨了多少」是读的时候按 sampled_at 回看一周算的，不另存。
+export const metricSamples = pgTable(
+  "metric_samples",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    value: numeric("value").notNull(),
+    source: text("source").notNull(),
+    sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [index("metric_samples_group_id_sampled_at_idx").on(t.groupId, t.sampledAt)],
+);
+
+// 项目周复盘。一个群一周至多一篇，重跑撞唯一索引就是幂等；写它的 run 删了复盘留着。
+export const projectReviews = pgTable(
+  "project_reviews",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
+    weekStart: date("week_start").notNull(),
+    body: text("body").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("project_reviews_group_id_week_start_idx").on(t.groupId, t.weekStart)],
+);
 
 // seq 是群内消息的唯一排序依据。created_at 在同一事务里会撞在一起，翻页不能靠它。
 export const messages = pgTable(
@@ -359,7 +404,10 @@ export const routines = pgTable(
     onFailure: text("on_failure").$type<OnFailure>().notNull().default("stop_and_tell"),
     groupId: text("group_id").references(() => groups.id, { onDelete: "cascade" }),
     purpose: text("purpose").$type<ModelPurpose>().notNull().default("plan"),
-    enabled: boolean("enabled").notNull().default(true),
+    // 开关从布尔变三态：auto_paused 是连着失败后控制面自己停的，和用户手动 paused 要分开显示、分开恢复。
+    state: text("state").$type<RoutineState>().notNull().default("on"),
+    boundary: text("boundary").$type<RoutineBoundary>().notNull().default("draft"),
+    onToday: boolean("on_today").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [
@@ -381,6 +429,8 @@ export const routineRuns = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     status: text("status").$type<RoutineRunStatus>().notNull().default("running"),
     note: text("note").notNull().default(""),
+    // 用户看过这次运行的时刻。首页「例行结果」只列没看过的，POST /api/groups/:id/seen 批量盖章。
+    seenAt: timestamp("seen_at", { withTimezone: true }),
   },
   (t) => [index("routine_runs_routine_id_started_at_idx").on(t.routineId, t.startedAt)],
 );
@@ -626,3 +676,33 @@ export const skills = pgTable(
   },
   (t) => [uniqueIndex("skills_bot_id_name_idx").on(t.botId, t.name)],
 );
+
+// Bot 记住的用户偏好（D8）。一条一句话，来源消息删了偏好留着；private 的不进 config 下发给运行器。
+export const botPreferences = pgTable(
+  "bot_preferences",
+  {
+    id: text("id").primaryKey(),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    sourceMessageId: text("source_message_id").references(() => messages.id, { onDelete: "set null" }),
+    private: boolean("private").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [index("bot_preferences_bot_id_idx").on(t.botId)],
+);
+
+// 品牌手册（D9）。一个用户一本，主键就是 owner_id；version 每次 PUT 加一，运行器据此判断要不要重拼系统提示。
+export const brandBooks = pgTable("brand_books", {
+  ownerId: text("owner_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  facts: text("facts").notNull().default(""),
+  voice: text("voice").notNull().default(""),
+  taboo: text("taboo").notNull().default(""),
+  assetsDir: text("assets_dir"),
+  edits: jsonb("edits").$type<BrandEdit[]>().notNull().default([]),
+  version: integer("version").notNull().default(0),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

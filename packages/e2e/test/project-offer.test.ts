@@ -16,8 +16,8 @@ const PROPOSAL = {
   name: "推广白泽",
   goal: "白泽的开源仓库年底 1000 星",
   team: [
-    { name: "小内", tag: "内容", description: "写小红书笔记和 X 帖子，不回评论" },
-    { name: "小社", tag: "社区", description: "回 GitHub issue 和评论，不写长文" },
+    { name: "小内", tags: ["内容"], description: "写小红书笔记和 X 帖子，不回评论" },
+    { name: "小社", tags: ["社区"], description: "回 GitHub issue 和评论，不写长文" },
   ],
   platforms: [
     { kind: "supported", platform: "github" },

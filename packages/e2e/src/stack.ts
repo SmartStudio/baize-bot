@@ -174,7 +174,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     }
     const api = makeApi(baseUrl, cookie);
     if (bootstrap === "register") {
-      await api.post("/api/bots", { name: "注册助手", tag: "助手", description: "注册路径的 E2E 助手" });
+      await api.post("/api/bots", { name: "注册助手", tags: ["助手"], description: "注册路径的 E2E 助手" });
     }
 
     const push = await connectPush(server.port, cookie);

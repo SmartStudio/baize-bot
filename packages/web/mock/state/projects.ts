@@ -12,8 +12,8 @@ const STARS: Offer = {
   name: "推广白泽",
   goal: "白泽的开源仓库年底 1000 星",
   team: [
-    { name: "小内", tag: "内容", description: "写 X 帖子和 GitHub 周报，不回评论" },
-    { name: "小社", tag: "社区", description: "回 GitHub issue 和评论，不写长文" },
+    { name: "小内", tags: ["内容"], description: "写 X 帖子和 GitHub 周报，不回评论" },
+    { name: "小社", tags: ["社区"], description: "回 GitHub issue 和评论，不写长文" },
   ],
   platforms: [
     { kind: "supported", platform: "github" },
@@ -27,8 +27,8 @@ const DOUYIN: Offer = {
   name: "抖音起号",
   goal: "抖音号年底 1000 粉",
   team: [
-    { name: "阿文", tag: "脚本", description: "写短视频脚本和标题，不剪片" },
-    { name: "老周", tag: "数据", description: "每周看一次播放和涨粉，不碰账号" },
+    { name: "阿文", tags: ["脚本"], description: "写短视频脚本和标题，不剪片" },
+    { name: "老周", tags: ["数据"], description: "每周看一次播放和涨粉，不碰账号" },
   ],
   platforms: [
     { kind: "unsupported", name: "抖音" },

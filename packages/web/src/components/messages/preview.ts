@@ -17,6 +17,10 @@ export const previewOf = (body: MessageBody): string => {
       return `存成 skill「${body.name}」？`;
     case "project_offer":
       return `项目方案「${body.name}」`;
+    case "team_offer":
+      return "一张建队卡";
+    case "routine_offer":
+      return `例行「${body.name}」加不加？`;
     case "draft":
       return "一条草稿";
     case "plan":

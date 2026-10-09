@@ -79,9 +79,9 @@ const turn = (request: ChatRequest): ScriptedTurn => {
           name: PROJECT,
           goal: "白泽开源仓库年底到 1000 星",
           team: [
-            { name: "阿文", tag: "小红书", description: "写小红书图文，只起草不直接发" },
-            { name: "小满", tag: "社区", description: "回 GitHub 和 X 上的评论，回复先给你看" },
-            { name: "老周", tag: "GitHub", description: "写 GitHub 讨论和 X 推文，不改代码" },
+            { name: "阿文", tags: ["小红书"], description: "写小红书图文，只起草不直接发" },
+            { name: "小满", tags: ["社区"], description: "回 GitHub 和 X 上的评论，回复先给你看" },
+            { name: "老周", tags: ["GitHub"], description: "写 GitHub 讨论和 X 推文，不改代码" },
           ],
           platforms: [
             { kind: "supported", platform: "github" },
@@ -180,7 +180,7 @@ const turn = (request: ChatRequest): ScriptedTurn => {
       : call("offer-douyin", "propose_project", {
           name: DOUYIN,
           goal: "抖音号年底到 1000 粉",
-          team: [{ name: "阿影", tag: "短视频", description: "写短视频脚本和标题，不剪片子不发视频" }],
+          team: [{ name: "阿影", tags: ["短视频"], description: "写短视频脚本和标题，不剪片子不发视频" }],
           platforms: [{ kind: "unsupported", name: "抖音" }],
           cadence: "每周 3 条短视频脚本",
           firstStep: "阿影先写 3 条短视频脚本给你挑",

@@ -6,7 +6,9 @@ import {
   type OnFailure as OnFailureSchema,
   type ModelPurpose,
   type Routine,
+  type RoutineBoundary,
   type RoutineRunStatus as RoutineRunStatusSchema,
+  type RoutineState,
   type TriggerInput,
 } from "@baize/shared";
 import { randomBytes } from "node:crypto";
@@ -121,7 +123,9 @@ export type RoutineInput = {
   /** null 或不给是发进 Bot 的单聊。 */
   readonly groupId?: GroupId | null | undefined;
   readonly purpose?: ModelPurpose | undefined;
-  readonly enabled: boolean;
+  readonly state: RoutineState;
+  readonly boundary: RoutineBoundary;
+  readonly onToday: boolean;
 };
 
 export async function createRoutine(db: Db, botId: BotId, input: RoutineInput): Promise<Routine> {
@@ -136,7 +140,9 @@ export async function createRoutine(db: Db, botId: BotId, input: RoutineInput): 
       onFailure: input.onFailure,
       groupId: input.groupId ?? null,
       purpose: input.purpose ?? "plan",
-      enabled: input.enabled,
+      state: input.state,
+      boundary: input.boundary,
+      onToday: input.onToday,
     })
     .returning();
   if (row === undefined) throw new Error("建例行任务没有返回行");
@@ -158,7 +164,9 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
   if (input.instruction !== undefined) patch.instruction = input.instruction;
   if (input.onFailure !== undefined) patch.onFailure = input.onFailure;
   if (input.purpose !== undefined) patch.purpose = input.purpose;
-  if (input.enabled !== undefined) patch.enabled = input.enabled;
+  if (input.state !== undefined) patch.state = input.state;
+  if (input.boundary !== undefined) patch.boundary = input.boundary;
+  if (input.onToday !== undefined) patch.onToday = input.onToday;
 
   const ok = await db.transaction(async (tx) => {
     const [locked] = await tx.select().from(routines).where(eq(routines.id, routineId)).limit(1).for("update");

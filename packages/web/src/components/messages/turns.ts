@@ -26,6 +26,8 @@ export const turnsOf = (messages: Message[]): Turn[] => {
       case "approval":
       case "handoff":
       case "project_offer":
+      case "team_offer":
+      case "routine_offer":
       case "draft":
       case "plan":
         if (previous?.kind === "bot") previous.items.push(message);

@@ -13,6 +13,7 @@ import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import type { NoticePublisher } from "../notifications.js";
 import { listAccountConfigs } from "../repo/accounts.js";
+import { listBrandForConfig } from "../repo/brand.js";
 import { ensureAssistant, listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
@@ -22,6 +23,7 @@ import {
   rotateGatewayKey,
 } from "../repo/computers.js";
 import { listGrants } from "../repo/grants.js";
+import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
@@ -437,11 +439,13 @@ export class AgentHub {
     this.#configs.set(conn, config);
     config.sent += 1;
     const generation = config.sent;
-    const [tools, skills, grants, accounts] = await Promise.all([
+    const [tools, skills, grants, accounts, brand, preferences] = await Promise.all([
       listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
       listSkillsByOwner(this.#deps.db, conn.ownerId),
       listGrants(this.#deps.db, conn.ownerId),
       listAccountConfigs(this.#deps.db, conn.ownerId),
+      listBrandForConfig(this.#deps.db, conn.ownerId),
+      listPreferencesForConfig(this.#deps.db, conn.ownerId),
     ]);
     // listBots 是判暂停状态的快照，放在最后一个 await，查完同步发出 config 和补发，
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
@@ -453,7 +457,7 @@ export class AgentHub {
         id: bot.id,
         role: bot.role,
         name: bot.name,
-        tag: bot.tag,
+        tags: bot.tags,
         description: bot.description,
       })),
       tools,
@@ -462,6 +466,9 @@ export class AgentHub {
       skills,
       accounts,
       grants,
+      // brand 和 preferences 同 skills 一样恒带：运行器靠它们判断要不要重拼系统提示，省掉就分不清「没有」和「没说」。
+      brand,
+      preferences,
       modelGateway: {
         baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
         apiKey: conn.gatewayKey,

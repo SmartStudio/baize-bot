@@ -39,6 +39,7 @@ export const projectOf = (groupId: string): ProjectResponse | null => {
     .sort((left, right) => right.publishedAt.localeCompare(left.publishedAt))
     .slice(0, 20)
     .map((publication) => ({
+      kind: "publication" as const,
       id: publication.id,
       at: publication.publishedAt,
       title: titleOf(publication.draftId),
@@ -91,7 +92,7 @@ export const projectOf = (groupId: string): ProjectResponse | null => {
         routineId: routine.id,
         botId: routine.botId,
         name: routine.name,
-        enabled: routine.enabled,
+        state: routine.state,
         nextAt: null,
       })),
   });

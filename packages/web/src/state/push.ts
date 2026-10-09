@@ -89,6 +89,10 @@ export const createPushHandlers = ({
     routine_deleted: (push, seq) => dispatch({ type: "routine_removed", routineId: push.routineId, seq }),
     skill_updated: (push, seq) => dispatch({ type: "skill_upserted", skill: push.skill, seq }),
     skill_deleted: (push, seq) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId, seq }),
+    preference_updated: (push, seq) => dispatch({ type: "preference_upserted", preference: push.preference, seq }),
+    preference_deleted: (push, seq) =>
+      dispatch({ type: "preference_removed", botId: push.botId, preferenceId: push.preferenceId, seq }),
+    brand_updated: (push) => dispatch({ type: "brand_set", brand: push.brand }),
     draft_updated: (push, seq) => {
       dispatch({ type: "content_loaded", drafts: [push.draft], plans: [], seq });
       bumpToday();

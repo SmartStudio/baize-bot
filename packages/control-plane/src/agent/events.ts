@@ -54,6 +54,11 @@ import {
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
+import { handleMetricReport } from "./events/metric-report.js";
+import { handlePreferenceAdd } from "./events/preference-add.js";
+import { handleReviewSubmit } from "./events/review-submit.js";
+import { handleRoutineOffer } from "./events/routine-offer.js";
+import { handleTeamOffer } from "./events/team-offer.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
 
 export type AgentEventDeps = {
@@ -141,6 +146,21 @@ export async function handleAgentEvent(
       return;
     case "publish_result":
       await onPublishResult(deps, conn, message);
+      return;
+    case "team_offer":
+      await handleTeamOffer(deps, conn, message);
+      return;
+    case "routine_offer":
+      await handleRoutineOffer(deps, conn, message);
+      return;
+    case "preference_add":
+      await handlePreferenceAdd(deps, conn, message);
+      return;
+    case "metric_report":
+      await handleMetricReport(deps, conn, message);
+      return;
+    case "review_submit":
+      await handleReviewSubmit(deps, conn, message);
       return;
   }
 }
