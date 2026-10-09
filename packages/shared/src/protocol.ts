@@ -115,6 +115,10 @@ export const AgentToControl = z.discriminatedUnion("type", [
     botId: BotId,
     groupId: GroupId,
     // 一次 prompt 恰好一份，对应 Pi 的 agent_settled 而不是 agent_end（后者重试时会发多遍）。控制面按 runId 幂等。
+    // 这次触发的消息进没进 Pi 会话：entered 是 agent_settled 报的，消息已经进了会话；dropped 是运行器
+    // 没把它交给会话就收尾了（停机、Bot 没了、建会话失败、Pi 在消息进会话前抛错）。控制面只在 entered
+    // 时把这次派活记下的没定稿名单确认掉。不带是旧运行器，按 entered 算：它本来就是这么确认的。
+    prompt: z.enum(["entered", "dropped"]).optional(),
     // steps 是这次运行里模型回合数（Pi 的 turn_end 次数），不是工具调用次数。
     steps: z.number().int().nonnegative().max(10_000),
     inputTokens: z.number().int().nonnegative().max(1_000_000_000),
