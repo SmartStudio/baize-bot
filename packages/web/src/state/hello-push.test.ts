@@ -52,6 +52,7 @@ const greeting = Message.parse({
   groupId: solo.id,
   body: { kind: "bot", botId: assistant.id, text: "想让我帮你做成什么事？说一句就行", streaming: false },
   createdAt: at,
+  revision: 0,
 });
 
 // 老用户会话一直有效、登录时没补上主助理：首页打开时 bots 和 groups 都是空的。
@@ -160,9 +161,9 @@ describe("首页的主助理最近一句跟着单聊走", () => {
     const page = joined();
     const next = said("好，我", true);
     page.push({ type: "message", message: next });
-    page.push({ type: "message_delta", groupId: solo.id, messageId: next.id, delta: "排进", done: false });
+    page.push({ type: "message_delta", groupId: solo.id, messageId: next.id, delta: "排进", done: false, revision: 1 });
     expect(page.state().todayVersion, "半句不是最近一句").toBe(page.before);
-    page.push({ type: "message_delta", groupId: solo.id, messageId: next.id, delta: "计划", done: true });
+    page.push({ type: "message_delta", groupId: solo.id, messageId: next.id, delta: "计划", done: true, revision: 2 });
     expect(page.state().todayVersion).toBeGreaterThan(page.before);
   });
 

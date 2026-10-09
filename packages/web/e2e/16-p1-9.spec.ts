@@ -225,9 +225,14 @@ test("卡已在别处放弃时，按回包收成一行灰字，不跳", async ({
   const card = await proposeFromSidebar(page, STAR_GOAL);
   const offer = await offerMessage(page);
   // 控制面抢不到卡时只回 200 加卡现在的样子，不推送；这里整条替掉，卡能换样子只可能靠回包。
+  // 别处改过的卡在库里版本一定更大，回包照实带 revision + 1，否则 Web 按版本当它是旧帧丢掉。
   await page.route("**/project-offer", (route) =>
     route.fulfill({
-      json: { message: { ...offer, body: { ...offer.body, status: "dismissed" } }, group: null, task: null },
+      json: {
+        message: { ...offer, revision: offer.revision + 1, body: { ...offer.body, status: "dismissed" } },
+        group: null,
+        task: null,
+      },
     }),
   );
 
@@ -254,7 +259,11 @@ test("卡已在别处开始时，按回包跳进那个项目的项目页", async
   await page.route("**/project-offer", (route) =>
     route.fulfill({
       json: {
-        message: { ...offer, body: { ...offer.body, status: "started", groupId: existing.group.id } },
+        message: {
+          ...offer,
+          revision: offer.revision + 1,
+          body: { ...offer.body, status: "started", groupId: existing.group.id },
+        },
         group: existing.group,
         task: existing.task,
       },

@@ -267,7 +267,7 @@ function clearTextPrefixes(runId: RunId): void {
   resultRuns.delete(runId);
 }
 
-/** 收成定稿的 Bot 文字沿用流式那条推送：空 delta 带 done，客户端照常把它收尾。 */
+/** 收成定稿的 Bot 文字沿用流式那条推送：空 delta 带 done 和收尾那次写下的 revision，客户端照常把它收尾。 */
 function pushSettled(push: PushHub, ownerId: UserId, settled: readonly Message[]): void {
   for (const message of settled) {
     push.push(ownerId, {
@@ -276,6 +276,7 @@ function pushSettled(push: PushHub, ownerId: UserId, settled: readonly Message[]
       groupId: message.groupId,
       delta: "",
       done: true,
+      revision: message.revision,
     });
   }
 }
@@ -361,6 +362,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     groupId: event.groupId,
     delta,
     done: event.done,
+    revision: appended.message.revision,
   });
   if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }

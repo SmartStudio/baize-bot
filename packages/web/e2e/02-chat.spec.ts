@@ -48,18 +48,21 @@ test("错误 system 显示左对齐提示卡，也不露单轮花费", async ({ 
         groupId,
         body: { kind: "user", text: "刚才的请求有结果吗？" },
         createdAt: new Date(now - 2000).toISOString(),
+        revision: 0,
       }),
       Message.parse({
         id: "message_error_notice",
         groupId,
         body: { kind: "system", tone: "error", text: "模型上游没回话，请稍后再试。" },
         createdAt: new Date(now - 1000).toISOString(),
+        revision: 0,
       }),
       Message.parse({
         id: "message_error_cost",
         groupId,
         body: { kind: "cost", runId: "run_error", steps: 1, amount: 0.000372 },
         createdAt: new Date(now).toISOString(),
+        revision: 0,
       }),
     ];
     await route.fulfill({ response, json: { ...payload, messages: [...payload.messages, ...extra] } });
@@ -125,6 +128,7 @@ test("离底部超过一屏显示回到底部，新消息不抢阅读位置", as
         groupId,
         body: { kind: "user", text: `历史问题 ${index + 1}：请核对这一轮的记录。` },
         createdAt: new Date(Date.now() - (35 - index) * 60_000).toISOString(),
+        revision: 0,
       }),
     );
     await route.fulfill({ response, json: { ...payload, messages: [...payload.messages, ...extra] } });

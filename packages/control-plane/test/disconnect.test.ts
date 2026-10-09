@@ -245,6 +245,7 @@ it("电脑断线后，这次运行里还在跑的工具行变成 failed 并推�
       const event = await push.next(1500);
       if (event.type === "message" && event.message.body.kind === "tool_call") {
         expect(event.message.body).toMatchObject({ runId, status: "failed" });
+        expect(event.message.revision, "打成 failed 那次写也加版本").toBeGreaterThan(0);
         failedMessageId = event.message.id;
       }
     }

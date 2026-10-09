@@ -22,6 +22,7 @@ import {
   computerStatus,
   computersOf,
   LoginState,
+  messageFetchFaults,
   reportLoginState,
   seedLoginCard,
   createApproval,
@@ -58,10 +59,18 @@ const TestMessageRequest = z
     createdAt: Timestamp.optional(),
     id: MessageId.optional(),
     silent: z.boolean().optional(),
+    revision: z.number().int().nonnegative().optional(),
   })
   .strict();
+const MessageFetchFaultRequest = z.object({ messageId: MessageId, count: z.number().int().min(0).max(10) }).strict();
 const TestDeltaRequest = z
-  .object({ groupId: GroupId, messageId: MessageId, delta: z.string().min(1), done: z.boolean() })
+  .object({
+    groupId: GroupId,
+    messageId: MessageId,
+    delta: z.string().min(1),
+    done: z.boolean(),
+    revision: z.number().int().positive().default(1),
+  })
   .strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
@@ -181,10 +190,10 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     const parsed = TestMessageRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "消息参数不对" });
     else {
-      const { groupId, text, botId, createdAt, id, silent } = parsed.data;
+      const { groupId, text, botId, createdAt, id, silent, revision } = parsed.data;
       const body: MessageBody =
         botId === undefined ? { kind: "user", text } : { kind: "bot", botId, text, streaming: false };
-      const message = appendMessage(groupId, body, { createdAt, id });
+      const message = appendMessage(groupId, body, { createdAt, id, revision });
       // silent 只落 mock 状态不推送，这条消息页面只能从重拉的历史里读到。
       if (silent !== true) push({ type: "message", message });
       send(res, 204);
@@ -198,6 +207,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     if (!parsed.success) send(res, 400, { error: "delta 参数不对" });
     else {
       push({ type: "message_delta", ...parsed.data });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/message-fetch-failures") {
+    const parsed = MessageFetchFaultRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "失败次数参数不对" });
+    else {
+      messageFetchFaults.set(parsed.data.messageId, parsed.data.count);
       send(res, 204);
     }
     return true;

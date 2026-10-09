@@ -1,19 +1,24 @@
 import { Message, MessageId, type MessageBody } from "@baize/shared";
 import { messagesByGroupId, nextSuffix } from "./store.js";
 
+// 测试钩子：按消息记接下来几次单拉回 503，造「单拉失败了一次」。
+export const messageFetchFaults = new Map<string, number>();
+
 export const appendMessage = (
   groupId: string,
   body: MessageBody,
   {
     createdAt = new Date().toISOString(),
     id = `msg_${nextSuffix()}`,
-  }: { createdAt?: string | undefined; id?: string | undefined } = {},
+    revision = 0,
+  }: { createdAt?: string | undefined; id?: string | undefined; revision?: number | undefined } = {},
 ): Message => {
   const message = Message.parse({
     id: MessageId.parse(id),
     groupId,
     body,
     createdAt,
+    revision,
   });
   const list = messagesByGroupId.get(groupId);
   if (list) list.push(message);
@@ -26,7 +31,7 @@ export const rewriteMessage = (groupId: string, id: MessageId, body: MessageBody
   const at = list.findIndex((message) => message.id === id);
   const previous = list[at];
   if (previous === undefined) throw new Error(`消息 ${id} 不在 ${groupId} 里，mock 状态坏了`);
-  const next = Message.parse({ ...previous, body });
+  const next = Message.parse({ ...previous, body, revision: previous.revision + 1 });
   list[at] = next;
   return next;
 };

@@ -12,6 +12,7 @@ import { and, asc, desc, eq, inArray, isNull, lt, max, ne, notExists, sql } from
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
+import { groupHasMembers } from "./live-groups.js";
 import { toMessage } from "./rows.js";
 
 export const DEFAULT_MESSAGE_LIMIT = 50;
@@ -70,11 +71,25 @@ export async function listMessages(
   return { kind: "ok", page: { messages: page, hasMore } };
 }
 
+/** 按归属人取一条消息，可见范围和按群 id 访问的接口一致：别人的群、空群里的都查不到。 */
+export async function findOwnedMessage(db: Db, ownerId: UserId, messageId: MessageId): Promise<Message | null> {
+  const [found] = await db
+    .select({ row: messages })
+    .from(messages)
+    .innerJoin(groups, eq(groups.id, messages.groupId))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), groupHasMembers(db)))
+    .limit(1);
+  return found === undefined ? null : toMessage(found.row);
+}
+
 export async function appendMessage(db: Db | Tx, groupId: string, body: MessageBody): Promise<Message> {
   const [row] = await db.insert(messages).values({ id: newId(), groupId, body, createdAt: new Date() }).returning();
   if (row === undefined) throw new Error("写消息没有返回行");
   return toMessage(row);
 }
+
+/** 改消息的每条 UPDATE 都把它放进 set：在同一句里加一，并发的两次改写拿到的号不会相同。 */
+export const nextRevision = () => sql<number>`${messages.revision} + 1`;
 
 export async function messageSeq(db: Db, messageId: MessageId): Promise<number> {
   const [row] = await db.select({ seq: messages.seq }).from(messages).where(eq(messages.id, messageId)).limit(1);
@@ -132,6 +147,7 @@ export async function appendBotText(db: Db | Tx, text: BotText, delta: string, d
         '{streaming}',
         ${done ? sql`'false'::jsonb` : sql`'true'::jsonb`}
       )`,
+      revision: nextRevision(),
     })
     .where(
       and(
@@ -167,7 +183,7 @@ export async function settleStreamingText(
     .where(and(eq(runs.botId, botId), eq(runs.groupId, groupId), ne(runs.id, runId), isNull(runs.endedAt)));
   const rows = await db
     .update(messages)
-    .set({ body: sql`jsonb_set(${messages.body}, '{streaming}', 'false'::jsonb)` })
+    .set({ body: sql`jsonb_set(${messages.body}, '{streaming}', 'false'::jsonb)`, revision: nextRevision() })
     .where(
       and(
         eq(messages.groupId, groupId),
@@ -189,7 +205,7 @@ export async function replaceMessageBody(
 ): Promise<Message | null> {
   const [row] = await db
     .update(messages)
-    .set({ body })
+    .set({ body, revision: nextRevision() })
     .where(and(eq(messages.id, messageId), eq(messages.groupId, groupId)))
     .returning();
   return row === undefined ? null : toMessage(row);
@@ -199,7 +215,7 @@ export async function replaceMessageBody(
 export async function failRunningToolCalls(db: Db | Tx, groupId: GroupId, runId: RunId): Promise<Message[]> {
   const rows = await db
     .update(messages)
-    .set({ body: sql`jsonb_set(${messages.body}, '{status}', '"failed"'::jsonb)` })
+    .set({ body: sql`jsonb_set(${messages.body}, '{status}', '"failed"'::jsonb)`, revision: nextRevision() })
     .where(
       and(
         eq(messages.groupId, groupId),

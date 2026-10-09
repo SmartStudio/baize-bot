@@ -11,6 +11,7 @@ import {
   isTeamGroup,
   lastMessageOf,
   mentionsIn,
+  messageFetchFaults,
   messagesByGroupId,
   pendingApprovalsOf,
   pendingHandoffsOf,
@@ -76,6 +77,19 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
         send(res, 200, { task: next });
       }
     }
+    return true;
+  }
+
+  const messageMatch = /^\/api\/messages\/([^/]+)$/.exec(path);
+  if (messageMatch !== null && method === "GET") {
+    const messageId = decodeURIComponent(messageMatch[1] ?? "");
+    const message = [...messagesByGroupId.values()].flat().find((item) => item.id === messageId);
+    const faults = messageFetchFaults.get(messageId) ?? 0;
+    if (faults > 0) {
+      messageFetchFaults.set(messageId, faults - 1);
+      send(res, 503, { error: "单拉消息暂时失败" });
+    } else if (message === undefined) send(res, 404, { error: "没有这条消息" });
+    else send(res, 200, { message });
     return true;
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
-import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message } from "@baize/shared";
+import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
 import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
 import { NewProjectDialog } from "../components/NewProjectDialog.js";
@@ -17,6 +17,7 @@ import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
+import { MESSAGE_GAP_ATTEMPTS } from "../state/types.js";
 import { useToday } from "../state/today.js";
 import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
@@ -61,6 +62,13 @@ export const MainWindow = () => {
   useEffect(() => {
     if (focusedId !== null && !loaded) void actions.loadMessages(focusedId, reconnectedAt);
   }, [focusedId, loaded, reconnectedAt, actions]);
+
+  // 流式 delta 漏了版本的消息不论在哪个群都单独拉回来，侧栏的最近一条也靠它补齐。连着失败到上限的先不拉。
+  const messageGaps = ready?.messageGaps;
+  useEffect(() => {
+    for (const [messageId, gap] of Object.entries(messageGaps ?? {}))
+      if (gap.attempts < MESSAGE_GAP_ATTEMPTS) void actions.loadMessage(messageId as MessageId, gap.seq);
+  }, [messageGaps, actions]);
 
   // 今天页原来每次切回来都重新挂载、重新拉一遍。清单提到主窗口给侧栏数待办之后不再重挂，切回来时补拉这一下。
   const onToday = screen?.kind === "today";

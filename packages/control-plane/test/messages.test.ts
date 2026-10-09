@@ -2,9 +2,11 @@ import {
   ApiError,
   ContentPlanId,
   CreateBotResponse,
+  CreateGroupResponse,
   DraftId,
   MessageId,
   MessageListResponse,
+  MessageResponse,
   RunId,
   SendMessageResponse,
   type Message,
@@ -367,6 +369,97 @@ describe("跨群改消息", () => {
       agent.close();
       push.close();
     }
+  });
+});
+
+describe("消息版本", () => {
+  it("同一条消息每改一次，推出去的 revision 加一，历史读到的是最后一版", async () => {
+    const owner = await makeUser(database.db);
+    const computer = await makeComputer(database.db, owner.id);
+    const client = server.client();
+    expect((await client.login(owner.email, PASSWORD)).status).toBe(200);
+    const created = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
+    const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+    const push = await connectPush(server.server.port, client.cookie ?? "");
+    const runId = RunId.parse(randomUUID());
+    await database.sql`
+      INSERT INTO runs (id, bot_id, group_id, computer_id, started_at)
+      VALUES (${runId}, ${created.bot.id}, ${created.group.id}, ${computer.computerId}, now())
+    `;
+    const route = { runId, botId: created.bot.id, groupId: created.group.id };
+    const saying = MessageId.parse(randomUUID());
+    const tool = { ...route, callId: "call-1", tool: "read", view: { kind: "bash", command: "cat a.md" } as const };
+
+    try {
+      agent.send({ type: "bot_text", ...route, messageId: saying, delta: "先说第一段，", done: false });
+      agent.send({ type: "bot_text", ...route, messageId: saying, delta: "再说第二段。", done: false });
+      agent.send({ type: "bot_tool_call", ...tool, status: "running", durationMs: null });
+      agent.send({ type: "bot_tool_call", ...tool, status: "ok", durationMs: 12 });
+      // 文字还在流，run_done 把它收成定稿，这又是一次改写；花费卡最后落，看到它就说明前面的都推完了。
+      agent.send({ type: "run_done", ...route, steps: 1, inputTokens: 1, outputTokens: 1 });
+
+      const revisions: string[] = [];
+      let toolId: string | null = null;
+      for (;;) {
+        const received = await push.next();
+        if (received.type === "message_delta" && received.messageId === saying)
+          revisions.push(`delta:${received.revision}:${received.done}`);
+        if (received.type === "message" && received.message.id === saying)
+          revisions.push(`shell:${received.message.revision}`);
+        if (received.type === "message" && received.message.body.kind === "tool_call") {
+          toolId = received.message.id;
+          revisions.push(`tool:${received.message.revision}:${received.message.body.status}`);
+        }
+        if (received.type === "message" && received.message.body.kind === "cost") break;
+      }
+      expect(revisions, "空壳 0 版，每段 delta 和每次收尾、改状态都加一").toEqual([
+        "shell:0",
+        "delta:1:false",
+        "delta:2:false",
+        "tool:0:running",
+        "tool:1:ok",
+        "delta:3:true",
+      ]);
+
+      const page = MessageListResponse.parse(
+        await (await client.get(`/api/groups/${created.group.id}/messages`)).json(),
+      );
+      const said = page.messages.find((m) => m.id === saying);
+      expect(said?.revision, "历史和最后一帧同版").toBe(3);
+      expect(said?.body).toEqual({
+        kind: "bot",
+        botId: created.bot.id,
+        text: "先说第一段，再说第二段。",
+        streaming: false,
+      });
+      expect(page.messages.find((m) => m.id === toolId)?.revision).toBe(1);
+
+      const single = MessageResponse.parse(await (await client.get(`/api/messages/${saying}`)).json());
+      expect(single.message, "按 id 取单条，和历史里那一条同版同文").toEqual(said);
+      const stranger = server.client();
+      const other = await makeUser(database.db);
+      expect((await stranger.login(other.email, PASSWORD)).status).toBe(200);
+      expect((await stranger.get(`/api/messages/${saying}`)).status, "别人的消息查不到").toBe(404);
+    } finally {
+      agent.close();
+      push.close();
+    }
+  });
+
+  it("团队群成员删光后，群里的消息按 id 也取不到，和读历史一样是 404", async () => {
+    const client = await loggedInClient();
+    const sales = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小销" })).json());
+    const buyer = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小采" })).json());
+    const opened = await client.post("/api/groups", { title: "定价", botIds: [sales.bot.id, buyer.bot.id] });
+    expect(opened.status).toBe(201);
+    const team = CreateGroupResponse.parse(await opened.json());
+    const said = await appendMessage(database.db, team.group.id, { kind: "user", text: "这单怎么报价" });
+    expect((await client.get(`/api/messages/${said.id}`)).status, "群里还有成员，取得到").toBe(200);
+
+    expect((await client.delete(`/api/bots/${buyer.bot.id}`)).status).toBe(204);
+    expect((await client.delete(`/api/bots/${sales.bot.id}`)).status).toBe(204);
+    expect((await client.get(`/api/groups/${team.group.id}/messages`)).status).toBe(404);
+    expect((await client.get(`/api/messages/${said.id}`)).status, "空群的消息单拉也是 404，Web 据此清掉漏档").toBe(404);
   });
 });
 

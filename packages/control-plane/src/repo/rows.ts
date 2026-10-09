@@ -89,6 +89,7 @@ export function toMessage(row: typeof schema.messages.$inferSelect): Message {
     groupId: row.groupId,
     body: row.body,
     createdAt: row.createdAt.toISOString(),
+    revision: row.revision,
   });
 }
 

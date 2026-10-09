@@ -29,6 +29,7 @@ import {
   MessageListResponse,
   PreferenceListResponse,
   PreferenceResponse,
+  MessageResponse,
   RegisterResponse,
   RoutineListResponse,
   RoutineResponse,
@@ -166,6 +167,8 @@ export const createApi = (signal?: AbortSignal) => {
       (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
     messages: async (groupId: GroupId) =>
       json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
+    message: async (id: MessageId) =>
+      (await json(MessageResponse, await send("GET", `/messages/${encodeURIComponent(id)}`))).message,
     sendMessage: async (groupId: GroupId, text: string) =>
       json(SendMessageResponse, await send("POST", `/groups/${encodeURIComponent(groupId)}/messages`, { text })),
     decideApproval: async (id: ApprovalId, request: DecideApprovalRequest) =>

@@ -340,8 +340,8 @@ export const streamBotReply = async (
     if (abandoned()) return;
     text += delta;
     const done = index === parts.length - 1;
-    rewriteMessage(groupId, draft.id, { kind: "bot", botId, text, streaming: !done });
-    push({ type: "message_delta", messageId: draft.id, groupId: draft.groupId, delta, done });
+    const { revision } = rewriteMessage(groupId, draft.id, { kind: "bot", botId, text, streaming: !done });
+    push({ type: "message_delta", messageId: draft.id, groupId: draft.groupId, delta, done, revision });
   }
 
   await sleep(DELTA_MS);

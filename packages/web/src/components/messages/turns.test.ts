@@ -5,7 +5,13 @@ import { turnsOf, type Turn } from "./turns.js";
 let nextMessageId = 0;
 
 const message = (body: unknown, createdAt = "2026-09-19T12:00:00.000Z") =>
-  Message.parse({ id: `message-${String(nextMessageId++).padStart(4, "0")}`, groupId: "group-1", body, createdAt });
+  Message.parse({
+    id: `message-${String(nextMessageId++).padStart(4, "0")}`,
+    groupId: "group-1",
+    body,
+    createdAt,
+    revision: 0,
+  });
 
 const user = (text = "hello") => message({ kind: "user", text });
 const bot = (botId: string, text = "reply", createdAt?: string) =>
@@ -60,12 +66,14 @@ describe("turnsOf", () => {
       groupId: "group-1",
       body: { kind: "user", text: "z" },
       createdAt: at,
+      revision: 0,
     });
     const reply = Message.parse({
       id: "message-a",
       groupId: "group-1",
       body: { kind: "bot", botId: "bot-a", text: "a", streaming: false },
       createdAt: at,
+      revision: 0,
     });
     expect(turnsOf([said, reply])).toEqual([
       { kind: "user", message: said },

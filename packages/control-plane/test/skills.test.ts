@@ -424,6 +424,7 @@ describe("群里那张卡", () => {
 
       expect(decided.skill, "说了不存就没有这条 skill").toBeNull();
       expect(offerBody(decided.message)).toMatchObject({ status: "dismissed", skillId: null });
+      expect(decided.message.revision, "点完那次写版本加一").toBe(card.revision + 1);
       expect(await skillsOf(owner, owner.botId), "一条活都没多").toEqual([]);
 
       const again = await owner.client.post(`/api/messages/${card.id}/skill-offer`, { decision: "save" });

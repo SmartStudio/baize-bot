@@ -243,6 +243,7 @@ describe("方案卡", () => {
       const projectGroupId = started.group.id;
       expect(started.message.id).toBe(card.id);
       expect(offerBody(started.message)).toMatchObject({ status: "started", groupId: projectGroupId });
+      expect(started.message.revision, "抢卡写一次、写回队员名再写一次，版本各加一").toBe(card.revision + 2);
 
       const repushed = await nextOfType(s.push, "message");
       expect(repushed.message, "卡的状态住在正文里，点完要重推那条卡").toEqual(started.message);
@@ -552,6 +553,7 @@ describe("方案卡", () => {
       expect(dismissed.group).toBeNull();
       expect(dismissed.task).toBeNull();
       expect(offerBody(dismissed.message)).toMatchObject({ status: "dismissed", groupId: null });
+      expect(dismissed.message.revision, "抢卡那次写版本加一").toBe(card.revision + 1);
       const repushed = await nextOfType(s.push, "message");
       expect(repushed.message).toEqual(dismissed.message);
 

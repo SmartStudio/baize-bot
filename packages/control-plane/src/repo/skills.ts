@@ -4,7 +4,7 @@ import { parseSkillRefs } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, skills } from "../db/schema.js";
 import { newId } from "../ids.js";
-import type { SkillOfferBody, Tx } from "./messages.js";
+import { nextRevision, type SkillOfferBody, type Tx } from "./messages.js";
 import { toMessage, toSkill } from "./rows.js";
 
 export type SkillRow = typeof skills.$inferSelect;
@@ -243,7 +243,7 @@ export async function decideSkillOffer(
 async function settleOffer(db: Db | Tx, offer: SkillOfferMessage, body: SkillOfferBody): Promise<Message | null> {
   const [row] = await db
     .update(messages)
-    .set({ body })
+    .set({ body, revision: nextRevision() })
     .where(
       and(
         eq(messages.id, offer.id),

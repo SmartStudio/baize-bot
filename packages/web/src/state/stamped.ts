@@ -3,10 +3,12 @@
 // 已知缺口一：客户端的号只表达本地的先后，不代表服务端状态的新旧。先发出的请求可能被服务端后处理、读到更新的状态，
 // 它的回包仍会被后发出的请求挡掉。首次加载的缓冲（Shelf 的 early）让这个缺口从「已加载的桶」扩大到「还没加载的桶」：
 // 列表到之前先到的推送不再丢，而是带着更大的号等着，服务端其实更新的那份列表里的同一条会被它挡掉。
-// 已知缺口二：重连后补拉的群历史还在途时，先到的流式 delta 取的号比它大，会挡住历史里那条消息的完整正文。
-// 这两个都要等服务端给实体和消息带单调 revision，届时只换号的来源，调用方不动。
+// 群消息已经换了号的来源：服务端给每条消息带 revision，消息那一架按条取号（见 groups.ts 的 messageStamp），
+// 推送和历史谁先到都不要紧，只认 revision 大的。别的实体还没有 revision，仍是缺口一。
 export type Seq = number & { readonly __seq: unique symbol };
 export type Stamps = Readonly<Record<string, Seq>>;
+// 一份快照里每条的号：整份同一个号，或按条从行上取。按条取号只配 absent 为 kept，删除没有行可取号。
+export type Stamp<T> = Seq | ((row: T) => Seq);
 
 export const createClock = (): (() => Seq) => {
   let last = 0;
@@ -95,14 +97,16 @@ export const removeFromList = <T extends Row>(
 export const loadList = <T extends Row>(
   list: readonly T[] | undefined,
   stamps: Stamps,
-  seq: Seq,
+  stamp: Stamp<T>,
   snapshot: readonly T[],
   absent: "deleted" | "kept",
 ): Stamped<T[]> => {
   const local = new Map((list ?? []).map((item) => [item.id, item]));
   const nextStamps: Record<string, Seq> = { ...stamps };
+  const seqOf = (row: T): Seq => (typeof stamp === "function" ? stamp(row) : stamp);
   const rows: T[] = [];
   for (const row of snapshot) {
+    const seq = seqOf(row);
     if (newer(stamps, row.id, seq)) {
       rows.push(row);
       nextStamps[row.id] = seq;
@@ -120,8 +124,8 @@ export const loadList = <T extends Row>(
   const trailing: T[] = [];
   for (const [at, item] of (list ?? []).entries()) {
     if (!local.has(item.id)) continue;
-    if (absent === "deleted" && newer(stamps, item.id, seq)) {
-      nextStamps[item.id] = seq;
+    if (absent === "deleted" && newer(stamps, item.id, seqOf(item))) {
+      nextStamps[item.id] = seqOf(item);
       continue;
     }
     (anchor >= 0 && at < anchor ? leading : trailing).push(item);
@@ -165,11 +169,11 @@ export const shelfRemove = <K extends string, T extends Row>(
 export const shelfLoad = <K extends string, T extends Row>(
   shelf: Shelf<K, T>,
   key: K,
-  seq: Seq,
+  stamp: Stamp<T>,
   snapshot: readonly T[],
   absent: "deleted" | "kept",
 ): Shelf<K, T> => {
-  const next = loadList(shelf.rows[key] ?? shelf.early[key], shelf.stamps, seq, snapshot, absent);
+  const next = loadList(shelf.rows[key] ?? shelf.early[key], shelf.stamps, stamp, snapshot, absent);
   const early = { ...shelf.early };
   delete early[key];
   return { rows: { ...shelf.rows, [key]: next.rows }, early, stamps: next.stamps };

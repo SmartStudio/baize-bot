@@ -52,6 +52,7 @@ import {
   user,
   waiters,
 } from "./store.js";
+import { messageFetchFaults } from "./messages.js";
 
 type Seed = {
   key: string;
@@ -188,7 +189,7 @@ const seeds: Seed[] = [
 ];
 
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
-  Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes) });
+  Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes), revision: 0 });
 
 export const removeBot = (botId: BotId): void => {
   bots.delete(botId);
@@ -247,6 +248,7 @@ export const restoreAssistant = () => {
     groupId: group.id,
     body: seed.bodies[0],
     createdAt: stamp,
+    revision: 0,
   });
   bots.set(bot.id, bot);
   groups.set(group.id, group);
@@ -281,6 +283,7 @@ export const reseed = (): void => {
   checkedAt.clear();
   groupIdByBotId.clear();
   messagesByGroupId.clear();
+  messageFetchFaults.clear();
   resetSuffix();
   resetTaskNumber();
   settings.current = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" });

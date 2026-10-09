@@ -2,7 +2,7 @@ import type { Bot, BotId } from "@baize/shared";
 import { reduceApprovals } from "./approvals.js";
 import { reduceBrand } from "./brand.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
-import { reduceGroups } from "./groups.js";
+import { rearmGaps, reduceGroups } from "./groups.js";
 import { reducePreferences } from "./preferences.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
@@ -58,6 +58,8 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     todayVersion: 0,
     reconnectedAt: 0 as Seq,
     messagesLoadedAt: {},
+    messageGaps: {},
+    deletedBotIds: [],
     loads: {},
   };
 };
@@ -79,7 +81,12 @@ export const reduce = (state: AppState, action: Action): AppState => {
   if (state.status !== "ready") return state;
   if (action.type === "today_version_bumped") return { ...state, todayVersion: state.todayVersion + 1 };
   if (action.type === "push_reconnected")
-    return { ...state, todayVersion: state.todayVersion + 1, reconnectedAt: action.seq };
+    return {
+      ...state,
+      todayVersion: state.todayVersion + 1,
+      reconnectedAt: action.seq,
+      messageGaps: rearmGaps(state.messageGaps),
+    };
   if (action.type === "load_status") return { ...state, loads: { ...state.loads, [action.key]: action.status } };
   const groups = reduceGroups(state, action);
   const approvals = reduceApprovals(groups, action);

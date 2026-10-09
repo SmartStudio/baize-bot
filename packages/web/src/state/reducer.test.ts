@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { GroupId, Message } from "@baize/shared";
+import { GroupId, Message, MessageId } from "@baize/shared";
 import { reduce } from "./reducer.js";
 import { createClock } from "./stamped.js";
 import type { Action, AppState, ReadyState, SessionId } from "./types.js";
@@ -25,6 +25,7 @@ const history = (text: string) => [
     groupId: GROUP_ID,
     body: { kind: "user", text },
     createdAt: "2026-09-26T08:00:00.000Z",
+    revision: 0,
   }),
 ];
 
@@ -68,5 +69,26 @@ describe("会话号", () => {
       action: { type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } },
     });
     expect(late.status).toBe("ready");
+  });
+});
+
+describe("漏档单拉的恢复", () => {
+  it("单拉失败到上限之后，推送重连给一轮新机会：次数清零，漏档目标不变", () => {
+    const next = createClock();
+    const messageId = MessageId.parse("msg_reply");
+    const gapped = reduce(reduce({ status: "loading" }, ready(1)), {
+      type: "message_delta",
+      groupId: GROUP_ID,
+      messageId,
+      delta: "缺",
+      done: false,
+      revision: 3,
+      seq: next(),
+    });
+    const failed: Action = { type: "message_gap_failed", messageId };
+    const exhausted = asReady([failed, failed, failed].reduce(reduce, gapped));
+    expect(exhausted.messageGaps[messageId]?.attempts).toBe(3);
+    const reconnected = asReady(reduce(exhausted, { type: "push_reconnected", seq: next() }));
+    expect(reconnected.messageGaps[messageId]).toMatchObject({ revision: 3, attempts: 0 });
   });
 });

@@ -285,6 +285,8 @@ export const messages = pgTable(
     // 不出边界，`toMessage` 不读它。
     skillOfferSource: text("skill_offer_source").$type<SkillSource>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    // 每条改这一行的 UPDATE 都在同一句里加一（nextRevision），不先读再写。
+    revision: integer("revision").notNull().default(0),
   },
   (t) => [index("messages_group_id_seq_idx").on(t.groupId, t.seq)],
 );

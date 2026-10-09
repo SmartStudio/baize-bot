@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
 import {
   LoginAttemptId,
@@ -46,6 +47,8 @@ import { createClock, type Seq } from "./stamped.js";
 // 电脑代理给一次登录最多等 120 秒（computer-agent 的 loginTimeoutMs），这里再宽 30 秒给两跳报文和推送。
 // 过了这个点还没结果，就当电脑那边的结果丢了：重拉一遍账号，还在等的卡改成没等到。
 const LOGIN_TIMEOUT_MS = 150_000;
+// 单拉漏档失败后隔一会儿再报失败计数，免得服务端一时不可用时几趟重试挤在同一瞬间用完。
+const MESSAGE_GAP_RETRY_MS = 1_000;
 import type { Action, AppState, LoadKey, LoginFlow } from "./types.js";
 
 export { memberIdsOf } from "./types.js";
@@ -62,6 +65,8 @@ export type AppActions = {
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   // after 是推送最近一次重连的号：在途那趟发得比它早，回来后要补拉一次。
   loadMessages: (groupId: GroupId, after: Seq) => Promise<void>;
+  // 单拉一条消息，补流式 delta 漏掉的那几版。after 是最近一次发现漏档的号。
+  loadMessage: (messageId: MessageId, after: Seq) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
   decideApproval: (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
   decideDraft: (draftId: DraftId, request: DecideDraftRequest) => Promise<void>;
@@ -132,16 +137,84 @@ const loadEntry = async (api: Api, user: User): Promise<Omit<Ready, "session">> 
 };
 
 // 会话里的动作只拿这几样：挂在会话 signal 上的请求，带着会话号的 dispatch，和这次会话的在途表。
-type Scope = { api: Api; put: (action: Action) => void; session: Session };
+export type Scope = { api: Api; put: (action: Action) => void; session: Session };
 
 // 例行和会做的活不跟重连走，在途的那趟无论多早发出都算数。
 const ANY_FLIGHT = 0 as Seq;
+
+// 同一会话里同一个桶只留一趟在途请求。在途那趟发得不比 after 晚就直接跟着它；早了就记一笔待补，它回来后再拉一次。
+// 失败只记在桶上由界面给重试，不再往外抛；401 和会话取消照旧交给 signedIn。
+// run 回 "terminal" 表示结果已是终态，待补的那一笔作废，不再拉。
+export type LoadBucket = (
+  scope: Scope,
+  key: LoadKey,
+  after: Seq,
+  run: (seq: Seq) => Promise<void | "terminal">,
+) => Promise<void>;
+
+export const createLoadBucket =
+  (nextSeq: () => Seq): LoadBucket =>
+  async ({ put, session }, key, after, run) => {
+    const flying = session.flights.get(key);
+    if (flying !== undefined) {
+      if (flying.seq <= after) flying.again = true;
+      return;
+    }
+    const flight: Flight = { seq: nextSeq(), again: false };
+    session.flights.set(key, flight);
+    put({ type: "load_status", key, status: "loading" });
+    try {
+      let outcome = await run(flight.seq);
+      while (flight.again && outcome !== "terminal") {
+        flight.again = false;
+        flight.seq = nextSeq();
+        outcome = await run(flight.seq);
+      }
+      put({ type: "load_status", key, status: "idle" });
+    } catch (cause) {
+      if (session.signal.aborted || isUnauthorized(cause)) throw cause;
+      put({ type: "load_status", key, status: "failed" });
+    } finally {
+      session.flights.delete(key);
+    }
+  };
+
+// 单拉一条漏档。404 是终态：桶里排着的补拉一并作废，报 message_gone。
+// 失败先在桶里等一会儿再收尾，这期间别处的漏档变化再触发也只撞上在途记录；
+// 结果等在途记录删掉之后再报，失败计数一涨 MainWindow 立刻再拉，那时得能发出新的一趟。
+export const loadMessageGap = async (
+  loadBucket: LoadBucket,
+  scope: Scope,
+  messageId: MessageId,
+  after: Seq,
+  retryMs = MESSAGE_GAP_RETRY_MS,
+): Promise<void> => {
+  const result: { outcome: "settled" | "gone" | "failed" } = { outcome: "settled" };
+  await loadBucket(scope, `message:${messageId}`, after, async (seq) => {
+    try {
+      scope.put({ type: "message_upserted", message: await scope.api.message(messageId), seq });
+    } catch (cause) {
+      if (cause instanceof RequestFailed && cause.status === 404) {
+        result.outcome = "gone";
+        return "terminal";
+      }
+      if (isUnauthorized(cause)) throw cause;
+      result.outcome = "failed";
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
+      throw cause;
+    }
+  });
+  if (result.outcome === "gone") scope.put({ type: "message_gone", messageId });
+  if (result.outcome === "failed") scope.put({ type: "message_gap_failed", messageId });
+};
 
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(reduce, { status: "loading" } satisfies AppState);
   const stateRef = useRef<AppState>(state);
   useEffect(() => {
     stateRef.current = state;
+    // 开发构建把当前状态挂到 window 上，端到端测试等确定的状态再断言，不靠请求之间的时间先后。
+    if (import.meta.env.DEV) (window as Window & { __baizeState?: AppState }).__baizeState = state;
   }, [state]);
 
   // 请求发出时、推送到达时各取一个号，reducer 按号排先后，见 stamped.ts。
@@ -177,32 +250,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
       };
     };
-    // 同一会话里同一个桶只留一趟在途请求。在途那趟发得不比 after 晚就直接跟着它；早了就记一笔待补，它回来后再拉一次。
-    // 失败只记在桶上由界面给重试，不再往外抛；401 和会话取消照旧交给 signedIn。
-    const loadBucket = async ({ put, session }: Scope, key: LoadKey, after: Seq, run: (seq: Seq) => Promise<void>) => {
-      const flying = session.flights.get(key);
-      if (flying !== undefined) {
-        if (flying.seq <= after) flying.again = true;
-        return;
-      }
-      const flight: Flight = { seq: nextSeq(), again: false };
-      session.flights.set(key, flight);
-      put({ type: "load_status", key, status: "loading" });
-      try {
-        await run(flight.seq);
-        while (flight.again) {
-          flight.again = false;
-          flight.seq = nextSeq();
-          await run(flight.seq);
-        }
-        put({ type: "load_status", key, status: "idle" });
-      } catch (cause) {
-        if (session.signal.aborted || isUnauthorized(cause)) throw cause;
-        put({ type: "load_status", key, status: "failed" });
-      } finally {
-        session.flights.delete(key);
-      }
-    };
+    const loadBucket = createLoadBucket(nextSeq);
     const loadAccounts = signedIn(async ({ api, put }) => {
       const seq = nextSeq();
       const [{ accounts }, { computers }] = await Promise.all([api.accounts(), api.computers()]);
@@ -272,6 +320,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           put({ type: "approvals_loaded", approvals });
           put({ type: "handoffs_loaded", handoffs });
         }),
+      ),
+      loadMessage: signedIn((scope, messageId: MessageId, after: Seq) =>
+        loadMessageGap(loadBucket, scope, messageId, after),
       ),
       sendMessage: signedIn(async ({ api, put }, groupId: GroupId, text: string) => {
         const seq = nextSeq();

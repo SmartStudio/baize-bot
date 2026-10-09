@@ -22,12 +22,14 @@ test("Bot 定向气泡在署名旁标收件人，用户和普通 Bot 消息不�
         id: "msg_direct_one",
         groupId: "grp_order",
         createdAt: "2026-09-18T01:00:00.000Z",
+        revision: 0,
         body: { kind: "bot", botId: "bot_service", text: "请查供应商库存。", streaming: false, mentions: ["bot_buy"] },
       }),
       Message.parse({
         id: "msg_direct_many",
         groupId: "grp_order",
         createdAt: "2026-09-18T01:01:00.000Z",
+        revision: 0,
         body: {
           kind: "bot",
           botId: "bot_service",
@@ -40,18 +42,21 @@ test("Bot 定向气泡在署名旁标收件人，用户和普通 Bot 消息不�
         id: "msg_direct_user",
         groupId: "grp_order",
         createdAt: "2026-09-18T01:02:00.000Z",
+        revision: 0,
         body: { kind: "user", text: "@小采 查一下。", mentions: ["bot_buy"] },
       }),
       Message.parse({
         id: "msg_direct_empty",
         groupId: "grp_order",
         createdAt: "2026-09-18T01:03:00.000Z",
+        revision: 0,
         body: { kind: "bot", botId: "bot_buy", text: "收到。", streaming: false, mentions: [] },
       }),
       Message.parse({
         id: "msg_direct_absent",
         groupId: "grp_order",
         createdAt: "2026-09-18T01:04:00.000Z",
+        revision: 0,
         body: { kind: "bot", botId: "bot_buy", text: "正在查询。", streaming: false },
       }),
     ];

@@ -52,6 +52,7 @@ export const createPushHandlers = ({
         groupId: push.groupId,
         delta: push.delta,
         done: push.done,
+        revision: push.revision,
         seq,
       });
       if (push.done && inAssistantChat(push.groupId)) bumpToday();

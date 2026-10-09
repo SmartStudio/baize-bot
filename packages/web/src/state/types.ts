@@ -46,7 +46,14 @@ export type SessionId = number & { readonly __session: unique symbol };
 
 // 群历史、例行、会做的活三种按桶拉的列表各自的拉取状态。没有记录就是 idle。
 export type LoadStatus = "idle" | "loading" | "failed";
-export type LoadKey = `messages:${GroupId}` | "routines" | `skills:${BotId}` | `preferences:${BotId}`;
+export type LoadKey =
+  `messages:${GroupId}` | `message:${MessageId}` | "routines" | `skills:${BotId}` | `preferences:${BotId}`;
+
+// 某条消息的流式 delta 漏了版本：手上这份到 revision 为止都不可信，要单独把这一条拉回来，见 groups.ts 的 message_delta。
+// seq 是最近一次发现漏档时取的号，比它早发出的那趟拉取不算数。attempts 是单拉连着失败了几次，
+// 到 MESSAGE_GAP_ATTEMPTS 就不再自己拉，等重连或这个群重拉历史再给一轮机会。
+export type MessageGap = { groupId: GroupId; revision: number; seq: Seq; attempts: number };
+export const MESSAGE_GAP_ATTEMPTS = 3;
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
 
@@ -128,10 +135,13 @@ export type AppState =
       // 推送最近一次重连时取的号，messagesLoadedAt 是每个群的历史请求发出时取的号。比重连早的历史可能漏了断线时的推送。
       reconnectedAt: Seq;
       messagesLoadedAt: Record<GroupId, Seq>;
+      messageGaps: Record<MessageId, MessageGap>;
+      // 本会话收到过删除推送的 Bot。Bot 表和群表是入口分两次取的，表里没有的成员可能只是建得比 Bot 表晚，不算删了。
+      deletedBotIds: BotId[];
       loads: Partial<Record<LoadKey, LoadStatus>>;
     };
 
-export type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean };
+export type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean; revision: number };
 
 export type Action =
   | { type: "anonymous"; login: LoginPhase }
@@ -157,6 +167,10 @@ export type Action =
   | { type: "messages_set"; groupId: GroupId; messages: Message[]; seq: Seq }
   | { type: "message_upserted"; message: Message; seq: Seq }
   | ({ type: "message_delta"; seq: Seq } & Delta)
+  // 单拉漏档的那条失败了（不含 404）。
+  | { type: "message_gap_failed"; messageId: MessageId }
+  // 单拉回 404：消息已删或所在群已没有 Bot，这条漏档不会再补齐。
+  | { type: "message_gone"; messageId: MessageId }
   | { type: "approvals_loaded"; approvals: Approval[] }
   | { type: "approval_pushed"; approval: Approval }
   | { type: "grants_loaded"; grants: Grant[] }

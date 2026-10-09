@@ -42,6 +42,7 @@ import {
   MeResponse,
   MessageId,
   MessageListResponse,
+  MessageResponse,
   ProjectResponse,
   RegisterRequest,
   RegisterResponse,
@@ -93,7 +94,7 @@ import { ensureComputer, listComputers, resetComputerToken } from "../repo/compu
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { findLiveGroupId } from "../repo/live-groups.js";
-import { appendMessage, listGroupBots, listMessages } from "../repo/messages.js";
+import { appendMessage, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import {
   createRoutine,
@@ -632,6 +633,14 @@ export function createApp(deps: AppDeps): Hono<Env> {
     await agents.sendConfig(c.get("user").id);
     hub.push(c.get("user").id, { type: "skill_updated", skill });
     return c.json(SkillResponse.parse({ skill }), 201);
+  });
+
+  app.get("/api/messages/:id", async (c) => {
+    const messageId = MessageId.safeParse(c.req.param("id"));
+    if (!messageId.success) return c.json(NOT_FOUND, 404);
+    const message = await findOwnedMessage(db, c.get("user").id, messageId.data);
+    if (message === null) return c.json(NOT_FOUND, 404);
+    return c.json(MessageResponse.parse({ message }));
   });
 
   app.post("/api/messages/:id/skill-offer", async (c) => {

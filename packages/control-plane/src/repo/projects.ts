@@ -16,7 +16,7 @@ import { groups, messages, routines } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { findAssistant, insertMemberBot } from "./bots.js";
 import { findGroup, openGroup } from "./groups.js";
-import type { Tx } from "./messages.js";
+import { nextRevision, type Tx } from "./messages.js";
 import { toMessage, toRoutine } from "./rows.js";
 
 export type ProjectOfferBody = Extract<MessageBody, { kind: "project_offer" }>;
@@ -176,7 +176,11 @@ export async function decideProjectOffer(
 
 /** 抢到卡之后在同一个事务里改写正文，行锁还在手里。 */
 async function rewriteOffer(tx: Tx, id: MessageId, body: ProjectOfferBody): Promise<Message> {
-  const [row] = await tx.update(messages).set({ body }).where(eq(messages.id, id)).returning();
+  const [row] = await tx
+    .update(messages)
+    .set({ body, revision: nextRevision() })
+    .where(eq(messages.id, id))
+    .returning();
   if (row === undefined) throw new Error(`方案卡 ${id} 抢到之后不见了`);
   return toMessage(row);
 }
@@ -185,7 +189,7 @@ async function rewriteOffer(tx: Tx, id: MessageId, body: ProjectOfferBody): Prom
 async function claimOffer(db: Db | Tx, offer: ProjectOfferMessage, body: ProjectOfferBody): Promise<Message | null> {
   const [row] = await db
     .update(messages)
-    .set({ body })
+    .set({ body, revision: nextRevision() })
     .where(
       and(
         eq(messages.id, offer.id),
