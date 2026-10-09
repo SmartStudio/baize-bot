@@ -1,40 +1,70 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { chromium, expect, type Browser, type Page } from "@playwright/test";
+import { chromium, expect, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import {
+  AccountListResponse,
+  AccountResponse,
   BotListResponse,
-  GroupListResponse,
-  MessageListResponse,
-  ToolListResponse,
-  UsageResponse,
+  ComputerListResponse,
+  RoutineListResponse,
+  type Platform,
 } from "@baize/shared";
-import { startTestMcp, type TestMcp } from "../src/mcp.js";
+import { startFakePlatforms, type FakePlatforms } from "@baize/control-plane/testing";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream, type ChatRequest, type ScriptedTurn } from "../src/upstream.js";
+import { fakeChrome } from "./fake-chrome.js";
 
 const screenshots = fileURLToPath(new URL("./screenshots/", import.meta.url));
 const webDir = fileURLToPath(new URL("../../web/", import.meta.url));
 const viteBin = fileURLToPath(new URL("../../web/node_modules/vite/bin/vite.js", import.meta.url));
 const check = expect.configure({ timeout: 30_000 });
+const usage = { input: 1_200, output: 30 };
 
-const ORDER = "Globex X3 × 200 订单";
-const ORDER_ASK = "Globex 的 Lisa 要 200 台 X3，10 月 30 日前交，帮我把这单张罗起来";
-// 点开始时控制面按方案一个个新建队员，不认已有的 Bot，所以队员不能和种子里的小服、小销、小采重名。
-const ORDER_PROPOSAL = {
-  name: ORDER,
-  goal: "Lisa 的 200 台 X3 在 10 月 30 日前交齐",
-  team: [
-    { name: "小库", tag: "库存", description: "查库存和排产、给交期方案，不直接回客户" },
-    { name: "小价", tag: "报价", description: "算两批交付的报价，不改交期" },
-    { name: "小供", tag: "供货", description: "确认供货和到货，下单先找你点头" },
-  ],
-  platforms: [],
-  cadence: "每天下午同步一次交付进度",
-  firstStep: "先查 X3 的库存和排产",
+// 1x1 的 PNG。发布器在打开发布页那一步就因登录过期停下，图的内容不重要，只要是工作目录里的真文件。
+const COVER = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+const PROJECT_ASK = "推广白泽的开源仓库，年底 1000 星";
+const PROJECT = "白泽开源推广";
+const DOUYIN_ASK = "把抖音号做起来，年底 1000 粉";
+const DOUYIN = "抖音号起步";
+const XHS_ASK = "@阿文 写第一篇小红书，讲白泽是怎么来的，配上封面图";
+const XHS_TITLE = "我们为什么做白泽";
+const CADENCE_ASK = "下周多发点小红书";
+const REPLY_ASK = "@小满 issue 12 里 lark-fan 问能不能接飞书，回他一句";
+const REVIEW_ASK = "周五复盘加上小红书的数据";
+const ISSUE_URL = "https://github.com/baize/baize-bot/issues/12";
+
+// 剧本要用的 id 跑起来才知道，各段拿到后填进来。
+const ids: { project: string; accounts: Partial<Record<Platform, string>> } = { project: "", accounts: {} };
+
+const accountOf = (platform: Platform): string => {
+  const id = ids.accounts[platform];
+  if (id === undefined) throw new Error(`剧本要用 ${platform} 账号，但还没连上`);
+  return id;
 };
+
+// 下周第 day 天（0 是周一）北京时间 hour 点。排在下周，publishTick 不会把它们当到点的发出去。
+const nextWeek = (day: number, hour: number): string => {
+  const beijing = new Date(Date.now() + 8 * 3_600_000);
+  const untilMonday = (8 - beijing.getUTCDay()) % 7 || 7;
+  return new Date(
+    Date.UTC(beijing.getUTCFullYear(), beijing.getUTCMonth(), beijing.getUTCDate() + untilMonday + day, hour - 8),
+  ).toISOString();
+};
+
+const call = (id: string, name: string, args: Record<string, unknown>): ScriptedTurn => ({
+  textChunks: [],
+  toolCall: { id, name, args },
+  usage,
+});
+const say = (...textChunks: string[]): ScriptedTurn => ({ textChunks, usage });
 
 const turn = (request: ChatRequest): ScriptedTurn => {
   const lastUser = request.messages.findLastIndex((message) => message.role === "user");
@@ -42,85 +72,125 @@ const turn = (request: ChatRequest): ScriptedTurn => {
   const prompt = typeof content === "string" ? content : JSON.stringify(content ?? "");
   const current = prompt.split("当前这条：").at(-1) ?? prompt;
   const afterTool = request.messages.slice(lastUser + 1).some((message) => message.role === "tool");
-  const usage = { input: 1_200, output: 30 };
 
-  if (current.includes(ORDER_ASK)) {
+  if (current.includes(PROJECT_ASK)) {
     return afterTool
-      ? { textChunks: ["方案卡发好了，等你点开始。"], usage }
-      : { textChunks: [], toolCall: { id: "propose-order", name: "propose_project", args: ORDER_PROPOSAL }, usage };
-  }
-  if (prompt.includes("交接报文：")) {
-    return afterTool
-      ? { textChunks: ["我已接手，接下来确认供货。"], usage }
-      : { textChunks: [], toolCall: { id: "accept-handoff", name: "accept_handoff", args: {} }, usage };
-  }
-  if (current.includes("先查库存和排产")) {
-    return afterTool
-      ? {
-          textChunks: [
-            "查完库存和排产。方案一：10 月 20 日先交 120 台，剩余 80 台 10 月 27 日到。",
-            "方案二：200 台一起在 10 月 30 日前交。先确认交期，再回复 Lisa。",
+      ? say("方案卡发好了，你看一眼，没问题就点开始。")
+      : call("offer-oss", "propose_project", {
+          name: PROJECT,
+          goal: "白泽开源仓库年底到 1000 星",
+          team: [
+            { name: "阿文", tag: "小红书", description: "写小红书图文，只起草不直接发" },
+            { name: "小满", tag: "社区", description: "回 GitHub 和 X 上的评论，回复先给你看" },
+            { name: "老周", tag: "GitHub", description: "写 GitHub 讨论和 X 推文，不改代码" },
           ],
-          usage,
-        }
-      : {
-          textChunks: [],
-          toolCall: {
-            id: "stock-check",
-            name: "bash",
-            args: { command: "printf 'X3 现货 160 台；10 月 20 日可交 120 台，剩余 80 台 10 月 27 日到。'" },
-          },
-          usage,
-        };
+          platforms: [
+            { kind: "supported", platform: "github" },
+            { kind: "supported", platform: "x" },
+            { kind: "supported", platform: "xiaohongshu" },
+          ],
+          cadence: "每周 2 篇小红书、3 条 X、1 篇 GitHub 讨论",
+          firstStep: "阿文先写第一篇小红书，讲白泽是怎么来的",
+        });
   }
-  if (current.includes("分两批，回复先给我看")) {
+  if (current.includes(XHS_ASK)) {
     return afterTool
-      ? { textChunks: ["你批准了，我已把确认邮件发给 Lisa。"], usage }
-      : {
-          textChunks: [],
-          toolCall: {
-            id: "send-draft",
-            name: "send_email",
-            args: { to: "lisa@globex.example", subject: "X3 交期确认", body: "先交 120 台，再交 80 台。" },
+      ? say("第一篇小红书写好了，在等你批。小红书还没登录，批之前先扫一次码。")
+      : call("xhs-first", "create_draft", {
+          accountId: accountOf("xiaohongshu"),
+          content: {
+            kind: "post",
+            title: XHS_TITLE,
+            text: "一个人的公司，也想有一支队伍。白泽把写稿、回评论、排计划交给几个 AI 队友，你只管点头。",
+            images: [{ path: "cover.png" }],
           },
-          usage,
-        };
+        });
   }
-  if (current.includes("交接给小供")) {
+  if (current.includes("排这个项目本周的计划")) {
     return afterTool
-      ? { textChunks: ["交接报文已发给小供，等它确认。"], usage }
-      : {
-          textChunks: [],
-          toolCall: {
-            id: "handoff-to-procurement",
-            name: "handoff_task",
-            args: {
-              to: "小供",
-              done: "确认了两批交付方案并给 Lisa 发信",
-              notDone: "尚未确认供货",
-              next: "核对供货与交期",
+      ? say("本周计划排好了，5 条，等你确认。")
+      : call("plan-week", "propose_plan", {
+          title: "本周推广计划",
+          drafts: [
+            {
+              accountId: accountOf("x"),
+              content: { kind: "post", text: "白泽开源了：一个人也能带一支 AI 小队做推广。github.com/baize/baize-bot" },
+              scheduledAt: nextWeek(0, 10),
             },
-          },
-          usage,
-        };
+            {
+              accountId: accountOf("xiaohongshu"),
+              content: {
+                kind: "post",
+                title: "我用 5 个 AI 做推广",
+                text: "我用 5 个 AI 做推广，一周省下 10 个小时。它们各管一摊：写稿、回评论、排计划。",
+                images: [{ path: "cover.png" }],
+              },
+              scheduledAt: nextWeek(1, 12),
+            },
+            {
+              accountId: accountOf("github"),
+              content: {
+                kind: "post",
+                title: "白泽 v0.2 想听听你的用法",
+                text: "我们在收集大家用白泽做推广的方式，欢迎在这里留言。",
+                github: { repo: "baize/baize-bot", as: "discussion" },
+              },
+              scheduledAt: nextWeek(2, 10),
+            },
+            {
+              accountId: accountOf("x"),
+              content: { kind: "post", text: "本周白泽新增：计划卡一次批完，改过的地方记进品牌手册。" },
+              scheduledAt: nextWeek(3, 10),
+            },
+            {
+              accountId: accountOf("xiaohongshu"),
+              content: {
+                kind: "post",
+                title: "AI 队友怎么分工",
+                text: "写稿的、回评论的、排计划的，各自有边界，越界的事先问你。",
+                images: [{ path: "cover.png" }],
+              },
+              scheduledAt: nextWeek(3, 20),
+            },
+          ],
+        });
   }
-  if (current.includes("请生成今日线索早报")) {
-    return { textChunks: ["今日线索早报已生成。"], usage };
-  }
-  if (current.includes("整理 Globex 报价步骤")) {
+  if (current.includes(CADENCE_ASK)) {
     return afterTool
-      ? { textChunks: ["报价步骤已经整理，等你决定要不要存。"], usage }
-      : {
-          textChunks: [],
-          toolCall: {
-            id: "offer-quote-skill",
-            name: "propose_skill",
-            args: { name: "Globex 报价", steps: ["核对库存与交期", "计算两批交付报价", "把报价发给客户确认"] },
-          },
-          usage,
-        };
+      ? say("好，下周小红书从 2 篇加到 3 篇，周一的计划里给你看。")
+      : call("cadence-xhs", "set_cadence", {
+          projectGroupId: ids.project,
+          cadence: "每周 3 篇小红书、3 条 X、1 篇 GitHub 讨论",
+        });
   }
-  throw new Error(`假上游没有这条请求的剧本：${prompt.slice(-160)}`);
+  if (current.includes(REPLY_ASK)) {
+    return afterTool
+      ? say("回复写好了，等你批。")
+      : call("reply-lark", "create_draft", {
+          accountId: accountOf("github"),
+          content: {
+            kind: "reply",
+            text: "可以的，飞书的接入在路线图上，下个版本先支持消息推送，进展会在这个 issue 里同步。",
+            replyTo: { url: ISSUE_URL, author: "lark-fan", quote: "这个能接飞书吗" },
+          },
+        });
+  }
+  if (current.includes(DOUYIN_ASK)) {
+    return afterTool
+      ? say("方案卡发好了。抖音现在还不支持自动发，先把队伍和节奏定下来。")
+      : call("offer-douyin", "propose_project", {
+          name: DOUYIN,
+          goal: "抖音号年底到 1000 粉",
+          team: [{ name: "阿影", tag: "短视频", description: "写短视频脚本和标题，不剪片子不发视频" }],
+          platforms: [{ kind: "unsupported", name: "抖音" }],
+          cadence: "每周 3 条短视频脚本",
+          firstStep: "阿影先写 3 条短视频脚本给你挑",
+        });
+  }
+  if (current.includes(REVIEW_ASK)) {
+    return say("记下了，这周五的复盘会把小红书的阅读和收藏一起列出来。");
+  }
+  throw new Error(`假上游没有这条请求的剧本：${prompt.slice(-200)}`);
 };
 
 const freePort = (): Promise<number> =>
@@ -138,12 +208,12 @@ const freePort = (): Promise<number> =>
     });
   });
 
-const startWeb = async (stack: Stack): Promise<{ url: string; child: ChildProcess }> => {
+const startWeb = async (apiPort: number): Promise<{ url: string; child: ChildProcess }> => {
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, [viteBin], {
     cwd: webDir,
-    env: { ...process.env, API_PORT: String(stack.port), WEB_PORT: String(port) },
+    env: { ...process.env, API_PORT: String(apiPort), WEB_PORT: String(port) },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -176,249 +246,365 @@ const stopWeb = async (child: ChildProcess): Promise<void> => {
   if (child.exitCode === null) child.kill("SIGKILL");
 };
 
-const shot = (step: number | string): string => `${screenshots}/step-${step}.png`;
-
-const login = async (page: Page, url: string): Promise<void> => {
-  await page.goto(url);
-  await page.getByTestId("email-input").fill("chen@baize.dev");
-  await page.getByTestId("password-input").fill("baize-dev");
-  await page.getByTestId("login-submit").click();
-  await check(page.getByTestId("main-window")).toBeVisible();
+const shot = async (page: Page, name: string): Promise<void> => {
+  await page.screenshot({ path: join(screenshots, `${name}.png`) });
+  process.stdout.write(`  截图 ${name}.png\n`);
 };
 
-const teamCard = (page: Page, name: string) => page.locator(`[data-testid=team-bot][data-bot-name="${name}"]`);
-
-const openBot = async (page: Page, name: string): Promise<void> => {
-  await page.getByTestId("team-nav").click();
-  await teamCard(page, name).getByTestId("team-bot-chat").click();
-  await check(page.getByTestId("chat-title")).toHaveText(name);
+// P1-7：首页只说人话。运行编号、模型名、任务卡编号是给开发看的，出现在首页就是漏了。
+const assertPlainHome = async (page: Page, stack: Stack): Promise<void> => {
+  const text = await page.locator("body").innerText();
+  const runs = await stack.sql<{ id: string }[]>`SELECT id::text AS id FROM runs`;
+  for (const { id } of runs) check(text.includes(id), `首页不露 runId ${id}`).toBe(false);
+  check(text, "首页不露模型名").not.toMatch(/e2e-(plan|fast)-model|baize:(plan|fast)/);
+  check(text, "首页不露 T- 编号").not.toMatch(/T-\d{4}/);
 };
 
-const addBot = async (page: Page, name: string, tag: string): Promise<void> => {
-  await page.getByTestId("team-nav").click();
-  const before = await page.getByTestId("team-bot").count();
-  await page.getByTestId("new-bot").click();
-  const input = page.getByTestId("bot-name-input");
-  await check(input).toBeVisible();
-  await check(page.getByTestId("bot-tag-input")).toHaveValue("");
-  await input.fill(name);
-  await input.press("Tab");
-  await check(page.getByTestId("chat-title")).toHaveText(name);
-  const label = page.getByTestId("bot-tag-input");
-  await label.fill(tag);
-  await label.press("Tab");
-  await page.getByTestId("team-nav").click();
-  await check(page.getByTestId("team-bot")).toHaveCount(before + 1);
-  await check(teamCard(page, name)).toContainText(tag);
+// 代替系统通知中心：Web 发的原生通知记在页面里，验收读出来看。
+const RECORD_NOTICES = `
+  window.__notices = [];
+  window.Notification = class {
+    static permission = "granted";
+    static requestPermission() { return Promise.resolve("granted"); }
+    constructor(title, options) { window.__notices.push({ title, body: (options && options.body) || "" }); }
+  };
+`;
+
+const notices = async (page: Page): Promise<string> => JSON.stringify(await page.evaluate("window.__notices"));
+
+const openHome = async (page: Page, web: string): Promise<void> => {
+  await page.goto(web);
+  await check(page.getByTestId("today-page")).toBeVisible();
+  await check(page.locator(".today-loading")).toHaveCount(0);
 };
 
-const send = async (page: Page, text: string): Promise<void> => {
-  await page.getByTestId("composer-input").fill(text);
-  await page.getByTestId("composer-send").click();
+const openSettings = async (page: Page, section: string): Promise<void> => {
+  await page.getByTestId("account-button").click();
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId(`settings-nav-${section}`).click();
+};
+
+const loginCard = (page: Page, accountId: string) =>
+  page.locator(`[data-testid=today-row][data-kind=login][data-account-id="${accountId}"]`);
+
+const pendingRow = (page: Page, kind: "plan" | "draft", text: string) =>
+  page.locator(`[data-testid=today-row][data-kind=${kind}]`).filter({ hasText: text });
+
+const waitFor = async (what: string, probe: () => Promise<boolean> | boolean): Promise<void> => {
+  await check.poll(probe, { message: what }).toBe(true);
+};
+
+const botId = async (stack: Stack, name: string): Promise<string> => {
+  const bot = BotListResponse.parse(await stack.get("/api/bots")).items.find((item) => item.bot.name === name);
+  if (bot === undefined) throw new Error(`没有叫「${name}」的 Bot`);
+  return bot.bot.id;
+};
+
+const putCover = async (stack: Stack, name: string): Promise<void> => {
+  const work = join(stack.dataDir, await botId(stack, name), "work");
+  mkdirSync(work, { recursive: true });
+  writeFileSync(join(work, "cover.png"), COVER);
+};
+
+const draftStatus = async (stack: Stack, title: string): Promise<string | undefined> => {
+  const rows = await stack.sql<{ status: string }[]>`
+    SELECT status FROM drafts WHERE content->>'title' = ${title}`;
+  return rows[0]?.status;
+};
+
+const openProject = async (page: Page, title: string): Promise<void> => {
+  await page.locator(`[data-testid=group-item][data-group-title="${title}"]`).click();
+  await check(page.getByTestId("project-page")).toBeVisible();
+};
+
+const skip = (why: string): void => {
+  process.stdout.write(`  跳过：${why}\n`);
 };
 
 const run = async (): Promise<void> => {
+  rmSync(screenshots, { recursive: true, force: true });
   mkdirSync(screenshots, { recursive: true });
   const upstream = await startUpstream(turn);
-  let mcp: TestMcp | undefined;
+  const chrome = fakeChrome();
+  let platforms: FakePlatforms | undefined;
   let stack: Stack | undefined;
-  let web: Awaited<ReturnType<typeof startWeb>> | undefined;
+  let web: { url: string; child: ChildProcess } | undefined;
   let browser: Browser | undefined;
-  let activeStep = "启动";
+  let context: BrowserContext | undefined;
+  let page: Page | undefined;
+  let step = "启动";
+  const begin = (name: string): void => {
+    step = name;
+    process.stdout.write(`${name}\n`);
+  };
   try {
-    mcp = await startTestMcp();
-    stack = await startStack({ upstreamBaseUrl: upstream.baseUrl, priceInputPerM: 300, priceOutputPerM: 1_500 });
-    web = await startWeb(stack);
-    browser = await chromium.launch(existsSync(chromium.executablePath()) ? {} : { channel: "chrome" });
-    const context = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
-    const page = await context.newPage();
+    platforms = await startFakePlatforms();
+    const fake = platforms;
 
-    activeStep = "1";
-    await login(page, web.url);
-    const seeded = BotListResponse.parse(await stack.get("/api/bots"));
-    check(seeded.items.filter((item) => item.bot.role === "member").map((item) => item.bot.name)).toEqual([
-      "小服",
-      "小销",
-      "小采",
-    ]);
-    check(seeded.items.filter((item) => item.bot.role === "assistant")).toHaveLength(1);
-    await addBot(page, "小品", "产品");
-    await addBot(page, "小设", "设计");
-    await check(page.getByTestId("team-bot")).toHaveCount(5);
-    check(BotListResponse.parse(await stack.get("/api/bots")).items, "5 个队员加主助理").toHaveLength(6);
-    await page.screenshot({ path: shot(1) });
-    process.stdout.write("step 1: 5 Bot\n");
-
-    activeStep = "2";
-    const assistant = seeded.items.find((item) => item.bot.role === "assistant");
-    if (assistant === undefined) throw new Error("种子数据缺少主助理");
-    await page.getByTestId("new-project").click();
-    await page.getByTestId("new-project-input").fill(ORDER_ASK);
-    await page.getByTestId("new-project-submit").click();
-    await check(page, "加号那句话发进主助理单聊").toHaveURL(new RegExp(`/g/${assistant.groupId}$`));
-    const proposal = page.getByTestId("message-list").getByTestId("project-offer");
-    await check(proposal).toHaveAttribute("data-status", "offered");
-    await check(proposal.getByTestId("project-offer-member")).toHaveCount(3);
-    await page.screenshot({ path: shot("2a") });
-    await proposal.getByTestId("project-offer-start").click();
-    await check(page.getByTestId("task-card")).toBeVisible();
-    await check(page.getByTestId("chat-title")).toHaveText(ORDER);
-    const group = GroupListResponse.parse(await stack.get("/api/groups")).items.find(
-      (item) => item.task.title === ORDER,
-    );
-    if (group === undefined) throw new Error("第 2 步点开始后，控制面没有这个项目群");
-    await check(page, "开始后跳进的正是控制面刚建的项目群").toHaveURL(new RegExp(`/g/${group.group.id}$`));
-    const crew = BotListResponse.parse(await stack.get("/api/bots")).items;
-    const nameOf = (botId: string) => crew.find((item) => item.bot.id === botId)?.bot.name;
-    check(group.group.botIds.map(nameOf), "主助理带方案里的三个队员").toEqual(["主助理", "小库", "小价", "小供"]);
-    await page.screenshot({ path: shot(2) });
-    process.stdout.write("step 2: 一句话出方案卡，点开始建出项目群\n");
-
-    activeStep = "3";
-    await send(page, "@小库 Lisa 要 200 台 X3，10 月 30 日前交，先查库存和排产");
-    await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-status", "ok");
-    await check(page.getByTestId("tool-call-card")).toHaveAttribute("data-view-kind", "bash");
-    await check(page.getByTestId("bot-bubble").filter({ hasText: "方案一" })).toContainText("方案二");
-    const history = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
-    check(history.messages.some((message) => message.body.kind === "tool_call" && message.body.tool === "bash")).toBe(
-      true,
-    );
-    check(history.messages.some((message) => message.body.kind === "bot" && message.body.text.includes("方案二"))).toBe(
-      true,
-    );
-    await page.screenshot({ path: shot(3) });
-    process.stdout.write("step 3: bash 与两方案已落到群里\n");
-
-    activeStep = "4a";
-    await page.getByTestId("account-button").click();
-    await check(page.getByTestId("account-menu")).toBeVisible();
-    await page.getByTestId("open-settings").click();
-    await page.getByTestId("settings-nav-tools").click();
-    await check(page.getByTestId("tools-page")).toBeVisible();
-    await page.getByTestId("tool-name-input").fill("邮箱");
-    await page.getByTestId("tool-url-input").fill(mcp.baseUrl);
-    await page.getByTestId("tool-authorization-input").fill("Bearer e2e-token");
-    await page.getByTestId("tool-connect").click();
-    const mail = page.locator('[data-testid=tool-card][data-tool-name="邮箱"]');
-    await check(mail).toBeVisible();
-    if (!(await mail.getByTestId("tool-details").isVisible())) await mail.getByTestId("tool-edit-assignment").click();
-    const serviceCheckbox = mail.locator('[data-testid=tool-bot-checkbox][data-bot-name="小库"]');
-    await serviceCheckbox.click();
-    await check(serviceCheckbox).toBeChecked();
-    const service = crew.find((item) => item.bot.name === "小库");
-    if (service === undefined) throw new Error("项目群里缺少小库");
-    await check
-      .poll(async () =>
-        ToolListResponse.parse(await stack.get("/api/tools")).items[0]?.assignedBotIds.includes(service.bot.id),
-      )
-      .toBe(true);
-    await page.screenshot({ path: shot("4a") });
-    await page.getByTestId("settings-close").click();
-    process.stdout.write("step 4a: 邮箱 MCP 已连接并分配给小库\n");
-
-    activeStep = "4";
-    await send(page, "@小库 分两批，回复先给我看");
-    const approval = page.getByTestId("approval-card");
-    await check(approval).toHaveAttribute("data-status", "pending");
-    const pendingHistory = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
-    check(pendingHistory.approvals.some((item) => item.status === "pending")).toBe(true);
-    check(mcp.calls(), "批准前绝不能调用 send_email").toHaveLength(0);
-    await page.screenshot({ path: shot(4) });
-    await approval.getByTestId("approval-approve").click();
-    await check(page.getByTestId("bot-bubble").filter({ hasText: "你批准了" })).toBeVisible();
-    await check(page.getByTestId("tool-call-card").filter({ hasText: "send_email" })).toHaveAttribute(
-      "data-status",
-      "ok",
-    );
-    check(mcp.calls()).toEqual([
-      {
-        name: "send_email",
-        args: { to: "lisa@globex.example", subject: "X3 交期确认", body: "先交 120 台，再交 80 台。" },
-        authorization: "Bearer e2e-token",
+    begin("U1 注册，装好白泽，首页什么都不用填");
+    stack = await startStack({
+      upstreamBaseUrl: upstream.baseUrl,
+      priceInputPerM: 300,
+      priceOutputPerM: 1_500,
+      githubApiBaseUrl: fake.githubBaseUrl,
+      xApiBaseUrl: fake.xBaseUrl,
+      makeChrome: chrome.factory,
+      startComputer: false,
+      bootstrap: async (port) => {
+        const started = await startWeb(port);
+        web = started;
+        browser = await chromium.launch(existsSync(chromium.executablePath()) ? {} : { channel: "chrome" });
+        const opened = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+        context = opened;
+        await opened.addInitScript({ content: RECORD_NOTICES });
+        const first = await opened.newPage();
+        page = first;
+        await first.goto(`${started.url}/register`);
+        await first.getByTestId("register-email").fill("chen@baize-acceptance.example");
+        await first.getByTestId("register-password").fill("acceptance-pass");
+        await first.getByTestId("register-name").fill("陈");
+        await shot(first, "U1-1-register");
+        await first.getByTestId("register-submit").click();
+        await check(first.getByTestId("today-page")).toBeVisible();
+        const cookies = await opened.cookies(started.url);
+        check(cookies.length, "注册后浏览器拿到登录 cookie").toBeGreaterThan(0);
+        return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
       },
-    ]);
-    process.stdout.write("step 4: 邮件先审批后发送，工具卡 ok\n");
+    });
+    if (web === undefined || page === undefined || context === undefined) throw new Error("注册阶段没把页面起来");
+    const s = stack;
+    const p: Page = page;
+    const ctx: BrowserContext = context;
+    const home = (web as { url: string }).url;
+    // 账号页授权 GitHub 和 X 要跳真平台，这里直接把假平台的令牌挂上，等同授权完回来。代理起来前挂，hello 的 config 就带上。
+    ids.accounts.github = (await s.addAccount({ platform: "github", handle: fake.handles.github, token: "gh-e2e" })).id;
+    ids.accounts.x = (await s.addAccount({ platform: "x", handle: fake.handles.x, token: "x-e2e" })).id;
+    await s.startComputer();
+    await openHome(p, home);
+    await check(p.getByTestId("today-assistant-text")).toContainText("想让我帮你做成什么事");
+    await check(p.locator(".today-template")).toHaveText(["推广一个产品", "运营一个号"]);
+    const firstHome = await p.locator("body").innerText();
+    for (const word of ["企业", "团队结算", "同事"]) check(firstHome, `首页不出现「${word}」`).not.toContain(word);
+    await assertPlainHome(p, s);
+    await shot(p, "U1-2-today");
+    await openSettings(p, "computer");
+    await check(p.getByTestId("computer-status")).toHaveAttribute("data-status", "online");
+    await shot(p, "U1-3-computer");
+    await p.getByTestId("settings-close").click();
+    skip("首页的「和 AI 打一局」模板（第 3 期）");
 
-    activeStep = "5";
-    await send(page, "@小库 现在把这单交接给小供");
-    await check(page.getByTestId("handoff-card")).toHaveAttribute("data-status", "accepted");
-    await check(page.getByTestId("task-current")).toHaveText("当前 小供");
-    const handed = MessageListResponse.parse(await stack.get(`/api/groups/${group.group.id}/messages`));
-    check(handed.handoffs.some((item) => item.status === "accepted")).toBe(true);
-    await page.screenshot({ path: shot(5) });
-    process.stdout.write("step 5: 小供确认交接并成为当前经手\n");
-
-    activeStep = "6";
-    process.stdout.write("step 6: skip，已登录站点 gated\n");
-
-    activeStep = "7";
-    await page.getByTestId("routines-nav").click();
-    await check(page.getByTestId("routine-list")).toBeVisible();
-    await page.getByTestId("routine-new").click();
-    await page.getByTestId("routine-bot-select").selectOption({ label: "小销" });
-    await page.getByTestId("routine-name-input").fill("每日线索早报");
-    await page.getByTestId("routine-instruction-input").fill("请生成今日线索早报");
-    await page.getByTestId("trigger-add").click();
-    await page.getByTestId("trigger-preset-daily").click();
-    await page.getByTestId("routine-save").click();
-    const routine = page.locator('[data-testid=routine-row][data-routine-name="每日线索早报"]');
-    await check(routine).toBeVisible();
-    await routine.getByTestId("routine-open").click();
-    await page.getByTestId("routine-run-now").click();
-    await openBot(page, "小销");
-    await check(page.getByTestId("message-list").getByText("例行任务「每日线索早报」自动运行")).toBeVisible();
-    await check(page.getByTestId("bot-bubble").filter({ hasText: "今日线索早报已生成" })).toBeVisible();
-    await page.screenshot({ path: shot(7) });
-    process.stdout.write("step 7: 小销例行任务试跑出结果\n");
-
-    activeStep = "8";
-    await page.locator(`[data-testid=group-item][data-group-title="${ORDER}"]`).click();
-    await check(page.getByTestId("project-page")).toBeVisible();
-    await page.getByTestId("project-open-group").click();
-    await check(page.getByTestId("task-card")).toBeVisible();
-    await send(page, "@小库 请整理 Globex 报价步骤，问我要不要存");
-    const offer = page.getByTestId("skill-offer").filter({ hasText: "Globex 报价" });
+    begin("U2 一句话开项目，点开始");
+    await p.getByTestId("new-project").click();
+    await p.getByTestId("new-project-input").fill(PROJECT_ASK);
+    await p.getByTestId("new-project-submit").click();
+    const offer = p.getByTestId("project-offer").filter({ hasText: PROJECT });
     await check(offer).toHaveAttribute("data-status", "offered");
-    await offer.getByTestId("skill-offer-save").click();
-    await check(offer).toHaveAttribute("data-status", "saved");
-    await openBot(page, "小库");
-    await page.getByTestId("bot-tab-skills").click();
-    await check(page.locator('[data-testid=skill-row][data-skill-name="Globex 报价"]')).toBeVisible();
-    await page.screenshot({ path: shot(8) });
-    process.stdout.write("step 8: Globex 报价已存为小库的会做的活\n");
+    await check(offer.getByTestId("project-offer-member")).toHaveCount(3);
+    await check(offer.getByTestId("project-offer-platform")).toHaveCount(3);
+    await shot(p, "U2-1-offer");
+    await offer.getByTestId("project-offer-start").click();
+    await check(p.getByTestId("project-page")).toBeVisible();
+    const projectMatch = /\/p\/([^/?#]+)/.exec(p.url());
+    if (projectMatch?.[1] === undefined) throw new Error(`点开始后没进项目页：${p.url()}`);
+    ids.project = projectMatch[1];
+    await check(p.getByTestId("project-cadence")).toContainText("每周 2 篇小红书");
+    await shot(p, "U2-2-project");
 
-    activeStep = "9";
-    await page.getByTestId("account-button").click();
-    await check(page.getByTestId("account-menu")).toBeVisible();
-    await page.getByTestId("open-settings").click();
-    await page.getByTestId("settings-nav-usage").click();
-    await check(page.getByTestId("usage-page")).toBeVisible();
-    const usage = UsageResponse.parse(await stack.get("/api/usage"));
-    const serviceUsage = usage.bots.find((item) => item.botId === service.bot.id);
-    if (serviceUsage === undefined) throw new Error("用量接口没有小库这一行");
-    check(serviceUsage.amount).toBeGreaterThan(0);
-    const serviceLine = page.getByTestId("usage-bots").locator(".usage-bot").filter({ hasText: "小库" });
-    await check(serviceLine).toBeVisible();
-    await check
-      .poll(async () => Number((await serviceLine.locator("strong").textContent())?.replace(/[¥,]/g, "")))
-      .toBeGreaterThan(0);
-    await check(
-      page.getByTestId("usage-bots").locator(".usage-bot"),
-      "原来 6 行加方案新建的小库、小价、小供",
-    ).toHaveCount(9);
-    await page.screenshot({ path: shot(9) });
-    process.stdout.write(`step 9: 小库本周用量 ¥${serviceUsage.amount.toFixed(2)}\n`);
-    process.stdout.write("acceptance: 9 步（第 6 步 skip）\n");
-  } catch (error) {
-    throw new Error(
-      `第 ${activeStep} 步失败：${String(error)}\n电脑代理日志：${stack?.agentLog().slice(-2_000) ?? "未启动"}`,
-      { cause: error },
+    begin("U3 第一篇小红书要登录：首页出登录卡，扫码后变已登录");
+    const computerId = ComputerListResponse.parse(await s.get("/api/computers")).computers[0]?.id;
+    if (computerId === undefined) throw new Error("没有本机");
+    const before = AccountListResponse.parse(await s.get("/api/accounts")).accounts;
+    check(
+      before.some((account) => account.platform === "xiaohongshu"),
+      "点开始不会替用户建小红书占位",
+    ).toBe(false);
+    // 产品缺口：账号页只有 GitHub/X 的授权入口，没有加小红书的地方，只能直接调建占位的接口。
+    const configsBefore = s.configsApplied();
+    const placeholder = AccountResponse.parse(
+      await s.post("/api/accounts", { platform: "xiaohongshu", computerId }),
+    ).account;
+    ids.accounts.xiaohongshu = placeholder.id;
+    await waitFor("加了小红书之后电脑收到新 config", () => s.configsApplied() > configsBefore);
+    await putCover(s, "阿文");
+    await p.getByTestId("project-composer-input").fill(XHS_ASK);
+    await p.getByTestId("project-composer-send").click();
+    await waitFor("阿文起好了草稿", async () => (await draftStatus(s, XHS_TITLE)) === "pending");
+    await openHome(p, home);
+    const xhsCard = loginCard(p, placeholder.id);
+    await check(xhsCard).toHaveAttribute("data-state", "needed");
+    await check(xhsCard.getByTestId("login-card-title")).toHaveText("小红书 还没登录");
+    await assertPlainHome(p, s);
+    await shot(p, "U3-1-login-needed");
+    await xhsCard.getByTestId("login-open").click();
+    await check(xhsCard).toHaveAttribute("data-state", "opening");
+    await waitFor("电脑上开出了登录窗口", () => chrome.waitingLogins() === 1);
+    await assertPlainHome(p, s);
+    await shot(p, "U3-2-waiting-scan");
+    chrome.scan("白泽工厂日记");
+    await check(xhsCard).toHaveAttribute("data-state", "signed_in");
+    await check(xhsCard.getByTestId("login-card-title")).toContainText("白泽工厂日记 已登录");
+    await assertPlainHome(p, s);
+    await shot(p, "U3-3-signed-in");
+    await openSettings(p, "accounts");
+    const xhsRow = p.getByTestId("account-row").filter({ hasText: "白泽工厂日记" });
+    await check(xhsRow).toHaveAttribute("data-login", "valid");
+    await shot(p, "U3-4-accounts");
+    await p.getByTestId("settings-close").click();
+    skip("登录后 Bot 发一条测试请求确认能用（假浏览器给不出真登录态）");
+
+    begin("U4 周一早上的计划：菜单栏看数，首页改一条，批准");
+    await putCover(s, "主助理");
+    const monday = RoutineListResponse.parse(await s.get("/api/routines")).items.find(
+      (item) => item.name === "周一 09:00 排本周计划" && item.groupId === ids.project,
     );
+    if (monday === undefined) throw new Error("点开始后没有周一计划的例行");
+    await s.post(`/api/routines/${monday.id}/run`, {});
+    await waitFor("主助理排出计划", async () => {
+      const rows = await s.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM content_plans`;
+      return (rows[0]?.n ?? 0) > 0;
+    });
+    await openHome(p, home);
+    const planRow = pendingRow(p, "plan", "本周推广计划");
+    await check(planRow).toBeVisible();
+    const menubar = await ctx.newPage();
+    await menubar.setViewportSize({ width: 380, height: 560 });
+    await menubar.goto(`${home}/menubar`);
+    await check(menubar.getByTestId("menubar-page")).toContainText("件等你");
+    const pendingBefore = Number(await menubar.locator(".menubar-count").textContent());
+    await assertPlainHome(menubar, s);
+    await shot(menubar, "U4-1-menubar");
+    await planRow.getByTestId("today-expand").click();
+    const plan = planRow.getByTestId("plan-card");
+    await check(plan.getByTestId("plan-draft")).toHaveCount(5);
+    await plan.getByTestId("plan-draft-toggle").nth(1).click();
+    const editor = plan.getByTestId("draft-editor");
+    await editor.fill((await editor.inputValue()).replaceAll("5 个 AI", "一支 AI 小队"));
+    await check(plan.getByTestId("brand-hint")).toBeVisible();
+    await check(plan.getByTestId("plan-approve")).toHaveText("批准 5 条（改了 1 条）");
+    await assertPlainHome(p, s);
+    await shot(p, "U4-2-plan-edit");
+    await plan.getByTestId("plan-approve").click();
+    await check(pendingRow(p, "plan", "本周推广计划")).toHaveCount(0);
+    await menubar.reload();
+    await check(menubar.locator(".menubar-count")).toHaveText(String(pendingBefore - 1));
+    await assertPlainHome(menubar, s);
+    await shot(menubar, "U4-3-menubar-after");
+    await menubar.close();
+    const edited = await s.sql<{ text: string }[]>`
+      SELECT content->>'text' AS text FROM drafts WHERE content->>'title' = '我用 5 个 AI 做推广'`;
+    check(edited[0]?.text, "改过的那条照改后的文字批").toContain("一支 AI 小队");
+    skip("品牌手册积累、下次照着写（第 2 期）");
+
+    begin("U5 随口一句改节奏");
+    await openHome(p, home);
+    const pendingCount = p.getByTestId("today-pending").getByTestId("today-section-count");
+    const countBefore = (await pendingCount.textContent()) ?? "";
+    await p.getByTestId("today-composer-input").fill(CADENCE_ASK);
+    await p.getByTestId("today-composer-send").click();
+    await check(p.getByTestId("today-assistant-text")).toContainText("周一的计划里给你看");
+    await check(pendingCount, "改节奏不多出要确认的事").toHaveText(countBefore);
+    const cadence = await s.sql<{ cadence: string }[]>`SELECT cadence FROM tasks WHERE group_id = ${ids.project}`;
+    check(cadence[0]?.cadence, "节奏落到项目的任务卡上").toContain("每周 3 篇小红书");
+    await assertPlainHome(p, s);
+    await shot(p, "U5-1-cadence");
+
+    begin("U6 回评论：草稿卡带原话，批了发出去，刚做完多一条带链接");
+    await openProject(p, PROJECT);
+    await p.getByTestId("project-composer-input").fill(REPLY_ASK);
+    await p.getByTestId("project-composer-send").click();
+    await waitFor("小满起好了回复", async () => {
+      const rows = await s.sql<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM drafts WHERE content->>'kind' = 'reply' AND status = 'pending'`;
+      return (rows[0]?.n ?? 0) === 1;
+    });
+    await openHome(p, home);
+    const replyRow = pendingRow(p, "draft", "飞书");
+    await replyRow.getByTestId("today-expand").click();
+    await check(replyRow.getByTestId("draft-quote")).toContainText("这个能接飞书吗");
+    await assertPlainHome(p, s);
+    await shot(p, "U6-1-reply-draft");
+    await replyRow.getByTestId("draft-approve").click();
+    await check(replyRow).toHaveCount(0);
+    await s.publishTick();
+    check(
+      fake.requests().some((request) => request.method === "POST" && request.path.includes("/issues/12/comments")),
+      "假 GitHub 收到 issue 12 的评论",
+    ).toBe(true);
+    await openHome(p, home);
+    const published = p.getByTestId("today-done").locator("a.today-row");
+    await check(published).toHaveCount(1);
+    await check(published).toContainText("GitHub · 已发布");
+    await assertPlainHome(p, s);
+    await shot(p, "U6-2-done");
+    skip("小红书评论回复（本机发布器只接了发帖），评论平台换成 GitHub");
+
+    begin("U7 登录过期：发不出去，首页出过期行并通知，其余稿子不受影响");
+    const xhsDraft = pendingRow(p, "draft", XHS_TITLE);
+    await xhsDraft.getByTestId("today-expand").click();
+    await xhsDraft.getByTestId("draft-approve").click();
+    await check(xhsDraft).toHaveCount(0);
+    await s.publishTick();
+    await waitFor("小红书那条发失败", async () => (await draftStatus(s, XHS_TITLE)) === "failed");
+    const failure = await s.sql<{ failure: string | null; login: string }[]>`
+      SELECT d.failure, a.login FROM drafts d JOIN accounts a ON a.id = d.account_id
+      WHERE d.content->>'title' = ${XHS_TITLE}`;
+    check(failure[0], "发布器认出登录过期，账号跟着变过期").toEqual({ failure: "login_expired", login: "expired" });
+    // 等着发的只剩计划里批过的稿子，不算待批，所以首页给的是一行「登录过期」，点进去是账号页，不是带扫码按钮的登录卡。
+    const expiredRow = p.locator(`[data-testid=today-row][data-kind=account]`).filter({ hasText: "登录过期" });
+    await check(expiredRow).toContainText("小红书 · 白泽工厂日记");
+    await waitFor("系统通知说登录过期了", async () => (await notices(p)).includes("登录过期"));
+    const planned = await s.sql<{ status: string }[]>`SELECT status FROM drafts WHERE plan_id IS NOT NULL`;
+    check(
+      planned.map((row) => row.status),
+      "过期只卡住发不出去的那条，计划里其余的稿子照常等排期",
+    ).toEqual(["approved", "approved", "approved", "approved", "approved"]);
+    await assertPlainHome(p, s);
+    await shot(p, "U7-1-expired");
+    await expiredRow.click();
+    const expiredAccount = p.getByTestId("account-row").filter({ hasText: "白泽工厂日记" });
+    await check(expiredAccount).toHaveAttribute("data-login", "expired");
+    await expiredAccount.getByTestId("account-tier-toggle").click();
+    await check(p.getByTestId("accounts-page").getByTestId("login-open"), "账号页没有重新登录的入口").toHaveCount(0);
+    await shot(p, "U7-2-accounts-expired");
+    await p.getByTestId("settings-close").click();
+    skip("点一下重新扫码（走不通：过期行指向账号页，账号页没有小红书的登录按钮）");
+    process.stdout.write(`  假 Chrome 收到的 CDP：${chrome.cdpCalls().join(" ")}\n`);
+
+    begin("U8 第二个项目：抖音暂不支持");
+    await p.getByTestId("new-project").click();
+    await p.getByTestId("new-project-input").fill(DOUYIN_ASK);
+    await p.getByTestId("new-project-submit").click();
+    const douyin = p.getByTestId("project-offer").filter({ hasText: DOUYIN });
+    await check(douyin).toHaveAttribute("data-status", "offered");
+    await check(douyin.locator("[data-testid=project-offer-platform][data-supported=false]")).toContainText(
+      "抖音暂不支持",
+    );
+    await shot(p, "U8-1-offer");
+    await douyin.getByTestId("project-offer-start").click();
+    await check(p.getByTestId("project-page")).toBeVisible();
+    await check(p.getByTestId("project-cadence")).toContainText("每周 3 条短视频脚本");
+    await shot(p, "U8-2-project");
+
+    begin("U9 项目页：最新一轮贴着输入框，成果在下面");
+    await openProject(p, PROJECT);
+    await p.getByTestId("project-composer-input").fill(REVIEW_ASK);
+    await p.getByTestId("project-composer-send").click();
+    await check(p.getByTestId("project-latest-turn")).toContainText("小红书的阅读和收藏");
+    await check(p.getByTestId("project-achievements")).toContainText("GitHub");
+    await shot(p, "U9-1-project");
+    await p.getByTestId("project-achievements").scrollIntoViewIfNeeded();
+    await shot(p, "U9-2-achievements");
+    skip("目标与指标、数字变化（第 2 期）");
+    process.stdout.write("acceptance: U1 到 U9 走完\n");
+  } catch (error) {
+    throw new Error(`${step} 失败：${String(error)}\n电脑代理日志：${stack?.agentLog().slice(-2_000) ?? "未启动"}`, {
+      cause: error,
+    });
   } finally {
     await browser?.close();
-    if (web !== undefined) await stopWeb(web.child);
+    if (web !== undefined) await stopWeb((web as { child: ChildProcess }).child);
     await stack?.close();
-    await mcp?.close();
+    await platforms?.close();
     await upstream.close();
   }
 };

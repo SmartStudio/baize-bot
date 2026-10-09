@@ -19,7 +19,7 @@ import {
   type Platform,
 } from "@baize/shared";
 import { createRunner, type PromptMessage } from "@baize/bot-runner";
-import { startAgent } from "@baize/computer-agent";
+import { type AgentOptions, startAgent } from "@baize/computer-agent";
 import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
 import {
   connect,
@@ -43,8 +43,11 @@ export type StackOptions = {
   readonly upstreamBaseUrl: string;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
-  /** 默认沿用 seed；注册路径通过 HTTP 创建账号、本机 token 和一个可对话 Bot。 */
-  readonly bootstrap?: "seed" | "register";
+  /**
+   * 默认沿用 seed；注册路径通过 HTTP 创建账号、本机 token 和一个可对话 Bot。
+   * 给函数就由调用方自己注册（比如在浏览器里点注册页），交回登录 cookie；之后照 App 的做法拿这个 cookie 注册本机。
+   */
+  readonly bootstrap?: "seed" | "register" | SignUp;
   readonly startComputer?: boolean;
   readonly disconnectGraceMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
@@ -52,7 +55,12 @@ export type StackOptions = {
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
+  /** 换掉进程内电脑代理的助理 Chrome。不给就是真 Chrome，只在 Bot 要用浏览器时才起。 */
+  readonly makeChrome?: AgentOptions["makeChrome"];
 };
+
+/** 拿到控制面端口后由调用方完成注册，回 `name=value` 形式的登录 cookie。 */
+export type SignUp = (port: number) => Promise<string>;
 
 export type Stack = {
   readonly port: number;
@@ -140,7 +148,12 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     let computerId: ComputerId;
     let computerToken: string;
     let cookie: string;
-    if (bootstrap === "register") {
+    if (typeof bootstrap === "function") {
+      cookie = await bootstrap(server.port);
+      const local = await registerLocal(baseUrl, cookie);
+      computerId = local.computerId;
+      computerToken = local.token;
+    } else if (bootstrap === "register") {
       const registered = await register(baseUrl);
       cookie = registered.cookie;
       computerId = registered.computerId;
@@ -257,6 +270,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       } else {
         agent = startAgent({
           ...agentOptions,
+          ...(options.makeChrome === undefined ? {} : { makeChrome: options.makeChrome }),
           makeRunner: (config) => {
             const runner = createRunner(config);
             configsApplied += 1;
@@ -390,14 +404,14 @@ async function register(baseUrl: string): Promise<{
   const setCookie = response.headers.getSetCookie()[0];
   if (setCookie === undefined) throw new Error("注册成功但没发 cookie");
   const cookie = setCookie.split(";")[0] ?? "";
-
-  const localResponse = await fetch(`${baseUrl}/api/computers/local`, {
-    method: "POST",
-    headers: { cookie },
-  });
-  if (!localResponse.ok) throw new Error(`注册本机失败 ${localResponse.status}：${await localResponse.text()}`);
-  const local = ComputerTokenResponse.parse(await localResponse.json());
+  const local = await registerLocal(baseUrl, cookie);
   return { cookie, computerId: local.computerId, computerToken: local.token };
+}
+
+async function registerLocal(baseUrl: string, cookie: string): Promise<{ computerId: ComputerId; token: string }> {
+  const response = await fetch(`${baseUrl}/api/computers/local`, { method: "POST", headers: { cookie } });
+  if (!response.ok) throw new Error(`注册本机失败 ${response.status}：${await response.text()}`);
+  return ComputerTokenResponse.parse(await response.json());
 }
 
 async function login(baseUrl: string): Promise<string> {
