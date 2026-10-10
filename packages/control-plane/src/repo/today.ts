@@ -29,6 +29,7 @@ import {
 import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
 import { hasMembers } from "./groups.js";
+import { listPendingRoutineOffers } from "./routine-offers.js";
 import { toAccount, toDraft, toMessage, toPlan } from "./rows.js";
 
 type DraftRow = typeof drafts.$inferSelect;
@@ -142,6 +143,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
     expiredAccounts: expiredAccountRows,
     placeholders: placeholderRows,
     teamOffers: teamOfferRows.map(({ row }) => row),
+    routineOffers: await listPendingRoutineOffers(db, ownerId),
   });
 
   const done: { at: Date; id: string; item: TodayDoneItem }[] = [];
@@ -281,6 +283,8 @@ export function pendingItems(input: {
   readonly placeholders: readonly AccountRow[];
   /** 项目页还不出建队卡，所以可省。 */
   readonly teamOffers?: readonly MessageRow[];
+  /** 项目页不出例行确认卡，所以可省。 */
+  readonly routineOffers?: readonly MessageRow[];
 }): TodayPendingItem[] {
   const draftsByPlan = draftsByPlanOf(input.drafts);
   const pendingPlans = input.plans.filter((row) => row.status === "pending");
@@ -334,6 +338,13 @@ export function pendingItems(input: {
       at: row.createdAt,
       id: row.id,
       item: { kind: "team_offer", since: row.createdAt.toISOString(), message: toMessage(row) },
+    });
+  }
+  for (const row of input.routineOffers ?? []) {
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: { kind: "routine_offer", since: row.createdAt.toISOString(), message: toMessage(row) },
     });
   }
   for (const { row, at } of accountRows) {

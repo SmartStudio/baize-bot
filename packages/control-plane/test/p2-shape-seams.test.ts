@@ -18,23 +18,6 @@ afterAll(async () => {
   await database.close();
 });
 
-const SEAM_ROUTES = [["POST", "/api/messages/m1/routine-offer", { decision: "dismiss" }]] as const;
-
-it("第 2 期的接缝路由登录前 401、登录后 501，各子单元换掉 501 之前先占住路径", async () => {
-  const user = await makeUser(database.db);
-  const anonymous = new ApiClient(server.server.port);
-  for (const [method, path, body] of SEAM_ROUTES) {
-    expect((await anonymous.request(method, path, body)).status, `${method} ${path} 未登录`).toBe(401);
-  }
-  const client = new ApiClient(server.server.port);
-  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
-  for (const [method, path, body] of SEAM_ROUTES) {
-    const response = await client.request(method, path, body);
-    expect(response.status, `${method} ${path} 已登录`).toBe(501);
-    expect(await response.json()).toEqual({ error: "未实现" });
-  }
-});
-
 it("config 恒带 preferences 和 brand：没有偏好是空数组，没写过手册是 null，运行器靠它们对账", async () => {
   const user = await makeUser(database.db);
   const computer = await makeComputer(database.db, user.id);
@@ -47,22 +30,7 @@ it("config 恒带 preferences 和 brand：没有偏好是空数组，没写过�
   }
 });
 
-const STUB_EVENTS = [
-  [
-    "routine_offer",
-    {
-      name: "周报",
-      instruction: "汇总",
-      cron: "0 9 * * 1",
-      executorBotId: "{bot}",
-      boundary: "draft",
-      purpose: "plan",
-      onToday: false,
-      projectGroupId: null,
-    },
-  ],
-  ["metric_report", { value: 2, label: "星" }],
-] as const;
+const STUB_EVENTS = [["metric_report", { value: 2, label: "星" }]] as const;
 
 const fill = (value: unknown, ids: { readonly bot: string; readonly group: string }): unknown =>
   JSON.parse(JSON.stringify(value).replaceAll("{bot}", ids.bot).replaceAll("{group}", ids.group));

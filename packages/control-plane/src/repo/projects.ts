@@ -18,7 +18,7 @@ import { findAssistant, insertMemberBot } from "./bots.js";
 import { findGroup, openGroup } from "./groups.js";
 import { nextRevision, type Tx } from "./messages.js";
 import { toMessage, toRoutine, toTask } from "./rows.js";
-import { lockOwner } from "./runs.js";
+import { lockOwner, shareBotRunsLock } from "./runs.js";
 
 export type ProjectOfferBody = Extract<MessageBody, { kind: "project_offer" }>;
 
@@ -108,6 +108,19 @@ export async function decideProjectOffer(
     return await db.transaction(async (tx): Promise<DecideProjectOfferResult> => {
       // 开项目要建群、建助理 Bot，和建 Bot、建群一样先过归属人的共享锁，理由见 createBot 和 createGroup。
       await lockOwner(tx, ownerId, "shared");
+      // 两条例行的执行者是主助理。建例行的入口都要先拿执行者的共享锁，和删 Bot 的排他锁互斥，
+      // 而且得在抢卡、建队员、推 counter 之前拿，否则锁序倒挂。锁之前那次读不算数，拿锁后用新语句重查。
+      const locking = await findAssistant(tx, ownerId);
+      // 主助理删不掉，查不到只能是账号在预查之后删了，卡随单聊一起没了，交给 settled 回 gone。
+      if (locking === null) {
+        lost = true;
+        return tx.rollback();
+      }
+      await shareBotRunsLock(tx, locking.bot.id);
+      // 卡在主助理的单聊里，主助理删不掉，单聊随它级联，所以查得到卡就一定查得到主助理。
+      const assistant = await findAssistant(tx, ownerId);
+      if (assistant?.bot.id !== locking.bot.id) throw new Error(`用户 ${ownerId} 的主助理在拿锁时换了`);
+
       const projectGroupId = GroupId.parse(newId());
       const name = decision.name ?? offer.body.name;
       // 卡正文就是这张卡的状态，项目改了名，卡上也得是新名字，别处没有第二份。
@@ -116,10 +129,6 @@ export async function decideProjectOffer(
         lost = true;
         return tx.rollback();
       }
-
-      // 卡在主助理的单聊里，主助理删不掉，单聊随它级联，所以查得到卡就一定查得到主助理。
-      const assistant = await findAssistant(tx, ownerId);
-      if (assistant === null) throw new Error(`用户 ${ownerId} 有方案卡却没有主助理`);
 
       // 队员和已有的 Bot 或彼此重名就自动换个名字，否则同一个群里两个「小内」，@ 永远只认得第一个。
       const memberIds: BotId[] = [];
