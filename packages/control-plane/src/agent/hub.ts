@@ -147,11 +147,13 @@ export class AgentHub {
       if (this.#lifecycle === "closing") return;
       silence.refresh();
       const text = raw.toString();
+      // 收帧时刻在排队、等锁之前取：周复盘的周界和同一周谁覆盖谁都按它算。
+      const receivedAt = new Date();
       queue(
         async () => {
           const current = conn;
           if (current !== null) {
-            await this.#enqueue(current.computerId, () => this.#onFrame(current, text));
+            await this.#enqueue(current.computerId, () => this.#onFrame(current, text, receivedAt));
             return;
           }
           const message = parseFrame(text, "未握手的连接");
@@ -283,7 +285,7 @@ export class AgentHub {
     );
   }
 
-  async #onFrame(conn: AgentConnection, raw: string): Promise<void> {
+  async #onFrame(conn: AgentConnection, raw: string, receivedAt: Date): Promise<void> {
     // 被新连接顶掉之后这条连接还排着的帧是旧代理的旧话，整条丢掉。从这里到 handler 返回，这台电脑不会换连接。
     if (this.#connections.get(conn.computerId) !== conn) return;
     const message = parseFrame(raw, `电脑 ${conn.computerId}`);
@@ -300,6 +302,7 @@ export class AgentHub {
       },
       conn,
       message,
+      receivedAt,
     );
   }
 

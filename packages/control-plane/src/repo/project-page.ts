@@ -1,5 +1,15 @@
-import { BotId, GroupId, ProjectResponse, PublicationId, RoutineId, type UserId } from "@baize/shared";
-import { and, count, desc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
+import {
+  BotId,
+  GroupId,
+  ProjectResponse,
+  ProjectReviewId,
+  PublicationId,
+  RoutineId,
+  type ProjectAchievement,
+  type RunId,
+  type UserId,
+} from "@baize/shared";
+import { and, count, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   approvals,
@@ -7,17 +17,49 @@ import {
   drafts,
   groups,
   messages,
+  projectReviews,
   publications,
   routineRuns,
   routines,
   runs,
   tasks,
 } from "../db/schema.js";
+import { newId } from "../ids.js";
 import { groupHasMembers } from "./live-groups.js";
 import type { Tx } from "./messages.js";
 import { toDraft, toMessage, toPlan } from "./rows.js";
 import { draftTitle, draftsByPlanOf, nextItems, nextRoutineAt, pendingItems } from "./today.js";
 import { runTitle, weekStart } from "./usage.js";
+
+const ACHIEVEMENT_LIMIT = 20;
+const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
+
+/**
+ * 周复盘按收到时刻在上海时区的周一记周界，同一周再交覆盖那一份。两台电脑的链并行，先收到的那份可能被锁拖到后面才写，
+ * 所以只让收到得更晚的覆盖，不按写库先后。
+ */
+export async function saveReview(
+  db: Tx,
+  input: { readonly groupId: GroupId; readonly runId: RunId; readonly body: string; readonly receivedAt: Date },
+): Promise<void> {
+  const { receivedAt } = input;
+  const week = new Date(weekStart(receivedAt).getTime() + SHANGHAI_OFFSET_MS).toISOString().slice(0, 10);
+  await db
+    .insert(projectReviews)
+    .values({
+      id: newId(),
+      groupId: input.groupId,
+      runId: input.runId,
+      weekStart: week,
+      body: input.body,
+      createdAt: receivedAt,
+    })
+    .onConflictDoUpdate({
+      target: [projectReviews.groupId, projectReviews.weekStart],
+      set: { runId: input.runId, body: input.body, createdAt: receivedAt },
+      setWhere: lt(projectReviews.createdAt, receivedAt),
+    });
+}
 
 /** 项目就是本人的多 Bot 群。别人的群、单 Bot 群、成员删光的群、不存在的群都是 null，路由据此回 404。 */
 export function getProject(
@@ -72,7 +114,7 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
         .leftJoin(drafts, eq(drafts.id, publications.draftId))
         .where(ownPublication)
         .orderBy(desc(publications.publishedAt), desc(publications.id))
-        .limit(20),
+        .limit(ACHIEVEMENT_LIMIT),
       db
         .select({ value: count() })
         .from(publications)
@@ -105,6 +147,12 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
         .limit(50),
       db.select({ checklist: tasks.checklist }).from(tasks).where(eq(tasks.groupId, groupId)).limit(1),
     ]);
+  const reviewRows = await db
+    .select()
+    .from(projectReviews)
+    .where(eq(projectReviews.groupId, groupId))
+    .orderBy(desc(projectReviews.createdAt), desc(projectReviews.id))
+    .limit(ACHIEVEMENT_LIMIT);
   // 同一毫秒的先后按 seq 判，上一轮和你这句同一时刻落库的消息不会混进来。
   const replyRows =
     saidRow === undefined
@@ -162,14 +210,26 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
         routineRows.filter((routine) => routine.state === "on"),
         now,
       )[0] ?? null,
-    achievements: publicationRows.map(({ publication, draft }) => ({
-      kind: "publication",
-      id: PublicationId.parse(publication.id),
-      at: publication.publishedAt.toISOString(),
-      title: draft === null ? "成果已发布" : draftTitle(draft),
-      platform: publication.platform,
-      url: publication.url,
-    })),
+    achievements: [
+      ...publicationRows.map(({ publication, draft }): ProjectAchievement => ({
+        kind: "publication",
+        id: PublicationId.parse(publication.id),
+        at: publication.publishedAt.toISOString(),
+        title: draft === null ? "成果已发布" : draftTitle(draft),
+        platform: publication.platform,
+        url: publication.url,
+      })),
+      ...reviewRows.map((review): ProjectAchievement => ({
+        kind: "review",
+        id: ProjectReviewId.parse(review.id),
+        at: review.createdAt.toISOString(),
+        title: `${review.weekStart} 那周的复盘`,
+        weekStart: review.weekStart,
+        body: review.body,
+      })),
+    ]
+      .toSorted((left, right) => right.at.localeCompare(left.at))
+      .slice(0, ACHIEVEMENT_LIMIT),
     routines: routineRows.map((routine) => {
       const at = routine.state === "on" ? nextRoutineAt(routine, now) : null;
       return {

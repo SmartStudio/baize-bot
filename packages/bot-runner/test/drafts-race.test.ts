@@ -76,6 +76,7 @@ describe("配图读的时候上级目录被换成禁区链接", () => {
         members: [],
         handoffId: undefined,
         projects: [],
+        routine: null,
       }),
       accounts: () => [],
       images: { workDir, draftsDir, hidden: [profile] },

@@ -300,6 +300,10 @@ describe("方案卡", () => {
         routines.find((routine) => routine.name.startsWith("周一"))?.instruction,
         "周一那条让主助理排本周计划",
       ).toContain("propose_plan");
+      expect(
+        routines.find((routine) => routine.name === "周五复盘")?.instruction,
+        "周五那条让主助理把复盘交进项目页的成果",
+      ).toContain("submit_review");
 
       expect(await counts(s.me), "抖音这类 unsupported 的平台什么都不建").toEqual({
         projects: before.projects + 1,

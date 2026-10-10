@@ -32,6 +32,8 @@ export interface ActiveRun {
   readonly handoffId: HandoffId | undefined;
   /** 主助理手上的项目，set_cadence 只认这里面的。队员的 prompt 不带，是空的。 */
   readonly projects: readonly Project[];
+  /** 例行派来的才有值。复盘这类只该在例行里做的事按它收放。 */
+  readonly routine: PromptMessage["routine"];
 }
 
 const NO_SUMMARY = "无";

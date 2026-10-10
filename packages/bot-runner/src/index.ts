@@ -28,6 +28,7 @@ import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writ
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
+import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
@@ -607,6 +608,7 @@ export function createRunner(config: RunnerConfig): Runner {
               tools: () => [accountRead, ...(bot.browser?.tools ?? [])],
               gate,
             }),
+            ...createReviewTools({ groupKind, activeRun, send: config.send }),
           ]
         : []),
       ...(bot.browser?.tools ?? []),
@@ -692,6 +694,7 @@ export function createRunner(config: RunnerConfig): Runner {
       members: message.members,
       handoffId: message.handoffId,
       projects: message.projects ?? [],
+      routine: message.routine,
     };
     let report: RunReport | null = null;
     let botSession: BotSession | null = null;

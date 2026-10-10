@@ -72,7 +72,6 @@ const STUB_EVENTS = [
     },
   ],
   ["metric_report", { value: 2, label: "星" }],
-  ["review_submit", { body: "本周完成了三篇" }],
 ] as const;
 
 const fill = (value: unknown, ids: { readonly bot: string; readonly group: string }): unknown =>

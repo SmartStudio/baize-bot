@@ -83,6 +83,7 @@ export async function handleAgentEvent(
   deps: AgentEventDeps,
   conn: AgentConnection,
   message: AgentToControl,
+  receivedAt = new Date(),
 ): Promise<void> {
   switch (message.type) {
     // 握手在 hub 里做完了，重复的 hello 不再认一次身份。
@@ -167,7 +168,7 @@ export async function handleAgentEvent(
       await handleMetricReport(deps, conn, message);
       return;
     case "review_submit":
-      await handleReviewSubmit(deps, conn, message);
+      await handleReviewSubmit(deps, conn, message, receivedAt);
       return;
   }
 }

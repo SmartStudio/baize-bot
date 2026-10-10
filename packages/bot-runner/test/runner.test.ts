@@ -35,6 +35,7 @@ import {
   ModelPurpose,
   type Preference,
   PreferenceId,
+  RoutineId,
   RunId,
   type Skill,
   SkillId,
@@ -4440,6 +4441,91 @@ describe("运行器的指标上报", () => {
   });
 });
 
+const reviewSubmits = (sent: readonly AgentToControl[]) => sent.filter((message) => message.type === "review_submit");
+
+const routineOf = (prompt: PromptMessage): PromptMessage => ({
+  ...prompt,
+  origin: { kind: "routine" },
+  routine: { routineId: RoutineId.parse("routine-friday"), boundary: "draft" },
+});
+
+describe("运行器的周复盘", () => {
+  const reply: ScriptedTurn = { textChunks: ["好"], usage: { input: 800, output: 2 } };
+  const inProject = { task: topicTask(), members: TWO_MEMBERS };
+
+  it("不是例行触发的 prompt 里没有 submit_review", async () => {
+    const byRun = new Map<string, ChatCompletionRequest[]>();
+    let current = "";
+    const record = (runId: string) => {
+      current = runId;
+      byRun.set(runId, []);
+    };
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      script: (req) => {
+        byRun.get(current)?.push(req);
+        return reply;
+      },
+    });
+    const sent = (runId: string) => toolNamesSent(byRun.get(runId) ?? []);
+
+    record("run-1");
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "这周怎么样", inProject));
+    record("run-2");
+    await h.runner.prompt(routineOf(promptMessage("bot-1", "run-2", "复盘这个项目本周", inProject)));
+    record("run-3");
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "再说说", inProject));
+    record("run-4");
+    await h.runner.prompt(routineOf(promptMessage("bot-1", "run-4", "复盘一下", { groupId: "group-solo" })));
+
+    expect(sent("run-1"), "项目群里当面聊天，复盘不该被顶掉").not.toContain("submit_review");
+    expect(sent("run-2"), "项目群的例行里主助理能交复盘").toContain("submit_review");
+    expect(sent("run-3"), "同一个会话里下一条不是例行的，工具又收回去").not.toContain("submit_review");
+    expect(sent("run-4"), "单聊没有项目页，例行里也不给").not.toContain("submit_review");
+    expect(sessionCreationsFor("bot-1"), "项目群那三次在同一个会话里，工具按次收放不重建会话").toBe(2);
+
+    const memberRequests: ChatCompletionRequest[] = [];
+    const teammate = await startHarness({
+      bots: ["bot-1"],
+      script: (req) => {
+        memberRequests.push(req);
+        return reply;
+      },
+    });
+    await teammate.runner.prompt(routineOf(promptMessage("bot-1", "run-1", "复盘这个项目本周", inProject)));
+    expect(toolNamesSent(memberRequests), "复盘是主助理的活，队员的例行里没有").not.toContain("submit_review");
+  });
+
+  it("submit_review 发出 review_submit", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      script: scriptRecording(seen, [
+        ["复盘这个项目本周", callTool("submit_review", { body: "本周发了三篇，星数 +37。下周改周二发。" })],
+      ]),
+    });
+
+    await h.runner.prompt(routineOf(promptMessage("bot-1", "run-1", "复盘这个项目本周", inProject)));
+
+    expect(reviewSubmits(h.sent)).toEqual([
+      {
+        type: "review_submit",
+        runId: "run-1",
+        botId: "bot-1",
+        groupId: "group-1",
+        body: "本周发了三篇，星数 +37。下周改周二发。",
+      },
+    ]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(seen.toolResults.join(""), "回给模型的话说清交到了哪").toContain("成果");
+  });
+});
+
 const newMember = (index: number) => ({
   kind: "new",
   name: `新人${index}`,
@@ -6777,7 +6863,8 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       await Promise.race([stopped, delay(8000)]);
 
       const elapsed = performance.now() - startedAt;
-      expect(elapsed, "关页不回时等满 2 秒预算才放弃").toBeGreaterThanOrEqual(2000);
+      // 预算走 node 的 setTimeout，按 libuv 毫秒取整的循环时钟到点，拿 performance.now 量会略早于 2000；这条只防明显提前，不精确保护预算参数。
+      expect(elapsed, "粗粒度：没有明显提前结束").toBeGreaterThanOrEqual(1990);
       expect(elapsed, "预算 2 秒，加上其它收尾也要在 3 秒内，别把 5 秒的停机余量吃掉").toBeLessThan(3000);
       expect(hanging.hung(), "停机确实发了关页命令").toBeGreaterThan(0);
     } finally {
