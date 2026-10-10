@@ -821,7 +821,9 @@ async function onProjectOffer(deps: AgentEventDeps, conn: AgentConnection, event
     console.warn(`电脑 ${conn.computerId} 报的方案卡来自 ${event.botId}，不是主助理在它单聊里发的，整条丢掉`);
     return;
   }
-  const { name, goal, team, platforms, cadence, firstStep } = event;
+  const { name, goal, team, platforms, cadence, firstStep, goalTarget, goalUnit } = event;
+  // 目标数和单位成对才算有目标，半个目标不落进卡正文。
+  const target = goalTarget === undefined || goalUnit === undefined ? {} : { goalTarget, goalUnit };
   const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
     appendMessage(tx, groupId, {
       kind: "project_offer",
@@ -832,6 +834,7 @@ async function onProjectOffer(deps: AgentEventDeps, conn: AgentConnection, event
       platforms,
       cadence,
       firstStep,
+      ...target,
       status: "offered",
       groupId: null,
     }),

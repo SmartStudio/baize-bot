@@ -1,10 +1,20 @@
-import { GroupId, type BotId, type ChecklistItem, type TaskId, type TopicTask, type UserId } from "@baize/shared";
+import {
+  GroupId,
+  type BotId,
+  type ChecklistItem,
+  type MetricSource,
+  type ProjectGoal,
+  type TaskId,
+  type TopicTask,
+  type UserId,
+} from "@baize/shared";
 import { and, asc, eq, exists, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { bots, groups, tasks } from "../db/schema.js";
 import { groupHasMembers } from "./live-groups.js";
 import type { Tx } from "./messages.js";
+import { withMetric } from "./metrics.js";
 import { toTask } from "./rows.js";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，从列上取回来。
@@ -18,7 +28,14 @@ export type UpdateTaskInput = {
   readonly checklist?: readonly ChecklistItem[] | undefined;
   readonly status?: TaskStatus | undefined;
   readonly cadence?: string | undefined;
+  readonly goal?: ProjectGoal | null | undefined;
+  readonly metricSource?: MetricSource | null | undefined;
 };
+
+/** 任务卡从这里出去都带上指标，行上没有那一份。 */
+function taskOut(db: Db | Tx, row: TaskRow | undefined): Promise<TopicTask | null> {
+  return row === undefined ? Promise.resolve(null) : withMetric(db, toTask(row));
+}
 
 // 成员删光的团队群当作不存在，它的任务卡也一样查不到、改不了。
 const ownedLiveGroups = (db: Db, ownerId: UserId) =>
@@ -42,6 +59,14 @@ export async function updateTask(
   if (input.checklist !== undefined) patch.checklist = stampedChecklist(input.checklist, tasks.checklist);
   if (input.status !== undefined) patch.status = input.status;
   if (input.cadence !== undefined) patch.cadence = input.cadence;
+  // 目标三列整个替换，给 null 三列一起清空，不会剩下半个目标。
+  const { goal } = input;
+  if (goal !== undefined) {
+    patch.goalTarget = goal === null ? null : goal.target;
+    patch.goalUnit = goal === null ? null : goal.unit;
+    patch.goalDueAt = goal === null || goal.dueAt === null ? null : new Date(goal.dueAt);
+  }
+  if (input.metricSource !== undefined) patch.metricSource = input.metricSource;
   if (Object.keys(patch).length === 0) return findTask(db, ownerId, taskId);
 
   // drizzle 的 update 不能 join，归属只能靠这个子查询过滤。
@@ -51,13 +76,13 @@ export async function updateTask(
     .set(patch)
     .where(and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedGroups)))
     .returning();
-  return row === undefined ? null : toTask(row);
+  return taskOut(db, row);
 }
 
 /** 群和主题任务一一对应，派活拿它取当前经手和要送进 prompt 的那张卡。 */
 export async function findTaskByGroup(db: Db, groupId: string): Promise<TopicTask | null> {
   const [row] = await db.select().from(tasks).where(eq(tasks.groupId, groupId)).limit(1);
-  return row === undefined ? null : toTask(row);
+  return taskOut(db, row);
 }
 
 /**
@@ -69,7 +94,7 @@ export async function setCurrentBot(db: Db | Tx, groupId: string, botId: BotId, 
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(tasks).where(eq(tasks.groupId, groupId)).limit(1).for("update");
     if (row === undefined) return null;
-    if (row.currentBotId === botId) return toTask(row);
+    if (row.currentBotId === botId) return taskOut(tx, row);
 
     const stamp = at.toISOString();
     const handled = [...row.handled];
@@ -87,7 +112,7 @@ export async function setCurrentBot(db: Db | Tx, groupId: string, botId: BotId, 
       .set({ currentBotId: botId, handled })
       .where(eq(tasks.id, row.id))
       .returning();
-    return updated === undefined ? null : toTask(updated);
+    return taskOut(tx, updated);
   });
 }
 
@@ -121,7 +146,7 @@ export async function replaceChecklist(
     .set({ checklist: stampedChecklist(checklist, tasks.checklist) })
     .where(eq(tasks.groupId, groupId))
     .returning();
-  return row === undefined ? null : toTask(row);
+  return taskOut(db, row);
 }
 
 async function findTask(db: Db, ownerId: UserId, taskId: TaskId): Promise<TopicTask | null> {
@@ -131,7 +156,7 @@ async function findTask(db: Db, ownerId: UserId, taskId: TaskId): Promise<TopicT
     .from(tasks)
     .where(and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedGroups)))
     .limit(1);
-  return row === undefined ? null : toTask(row);
+  return taskOut(db, row);
 }
 
 export type Project = { readonly groupId: GroupId; readonly title: string; readonly cadence: string };
@@ -176,5 +201,5 @@ export async function setProjectCadence(
       and(eq(tasks.groupId, projectGroupId), inArray(tasks.groupId, projectGroupsOf(db, ownerId)), exists(isAssistant)),
     )
     .returning();
-  return row === undefined ? null : toTask(row);
+  return taskOut(db, row);
 }

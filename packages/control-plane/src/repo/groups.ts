@@ -16,6 +16,7 @@ import { taskNumber } from "../naming.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup, type Tx } from "./messages.js";
+import { metricsOf, withMetric } from "./metrics.js";
 import { toBot, toGroup, toTask } from "./rows.js";
 import { stampedChecklist } from "./tasks.js";
 
@@ -178,9 +179,10 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
   const lastMessages = await latestMessagePerGroup(db, groupIds);
   const pending = await pendingApprovalCounts(db, groupIds);
   const handedOff = await pendingHandoffCounts(db, groupIds);
+  const metrics = await metricsOf(db, groupIds, new Date());
   return rows.map((row) => ({
     group: toGroup(row.group, membersOf.get(row.group.id) ?? [], row.task.id),
-    task: toTask(row.task),
+    task: { ...toTask(row.task), metric: metrics.get(row.group.id) ?? null },
     lastMessage: lastMessages.get(row.group.id) ?? null,
     pendingApprovals: pending.get(row.group.id) ?? 0,
     pendingHandoffs: handedOff.get(row.group.id) ?? 0,
@@ -214,7 +216,7 @@ export async function findGroup(db: Db, ownerId: UserId, groupId: GroupId): Prom
       members.map((bot) => bot.id),
       row.task.id,
     ),
-    task: toTask(row.task),
+    task: await withMetric(db, toTask(row.task)),
     bots: members,
   };
 }

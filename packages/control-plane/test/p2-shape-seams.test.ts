@@ -19,7 +19,6 @@ afterAll(async () => {
 });
 
 const SEAM_ROUTES = [
-  ["POST", "/api/projects/g1/metric", { value: 1 }],
   ["GET", "/api/brand", undefined],
   ["PUT", "/api/brand", { facts: "", voice: "", taboo: "", assetsDir: null, edits: [] }],
   ["POST", "/api/messages/m1/team-offer", { decision: "defer" }],

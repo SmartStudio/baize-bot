@@ -12,12 +12,12 @@ import {
 } from "@baize/shared";
 import { TransactionRollbackError, and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { groups, messages, routines } from "../db/schema.js";
+import { groups, messages, routines, tasks } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { findAssistant, insertMemberBot } from "./bots.js";
 import { findGroup, openGroup } from "./groups.js";
 import { nextRevision, type Tx } from "./messages.js";
-import { toMessage, toRoutine } from "./rows.js";
+import { toMessage, toRoutine, toTask } from "./rows.js";
 
 export type ProjectOfferBody = Extract<MessageBody, { kind: "project_offer" }>;
 
@@ -141,6 +141,7 @@ export async function decideProjectOffer(
         cadence: offer.body.cadence,
         checklist: [{ text: offer.body.firstStep, done: false, ownerBotId: null }],
       });
+      const task = await writeOfferGoal(tx, opened.task, offer.body);
 
       const rows = await tx
         .insert(routines)
@@ -164,7 +165,7 @@ export async function decideProjectOffer(
         kind: "started",
         message,
         group: opened.group,
-        task: opened.task,
+        task,
         routines: rows.map((row) => toRoutine(row, [])),
       };
     });
@@ -172,6 +173,19 @@ export async function decideProjectOffer(
     if (error instanceof TransactionRollbackError && lost) return settled(db, ownerId, offer);
     throw error;
   }
+}
+
+/** 卡上目标数和单位都给了才写进任务卡；没给就是 null，进度按清单画。刚建的群没有样本，不用带指标。 */
+async function writeOfferGoal(tx: Tx, task: TopicTask, body: ProjectOfferBody): Promise<TopicTask> {
+  const { goalTarget, goalUnit } = body;
+  if (goalTarget === undefined || goalUnit === undefined) return task;
+  const [row] = await tx
+    .update(tasks)
+    .set({ goalTarget, goalUnit, goalDueAt: null })
+    .where(eq(tasks.id, task.id))
+    .returning();
+  if (row === undefined) throw new Error(`任务卡 ${task.id} 刚建就不见了`);
+  return toTask(row);
 }
 
 /** 抢到卡之后在同一个事务里改写正文，行锁还在手里。 */
