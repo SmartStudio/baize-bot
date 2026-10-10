@@ -12,7 +12,13 @@ import {
 import { ACCOUNT_READ_TOOL, createAccountReadTool, readableAccounts } from "./account-read.js";
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
 import { ASSISTANT_TOOL_NAMES, createAssistantTools, renderProjects } from "./assistant.js";
-import { type BotSession, createBotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
+import {
+  type BotSession,
+  createBotSession,
+  type PiSettings,
+  type RunnerTool,
+  type SessionGate,
+} from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS } from "./gate.js";
@@ -561,13 +567,27 @@ export function createRunner(config: RunnerConfig): Runner {
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
     const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null);
     if (config.browser !== undefined) bot.browser ??= createBotBrowser(config.browser);
+    const accountRead = createAccountReadTool({
+      described: definition.readable,
+      live: () => {
+        const desired = desiredConfig(bot)!;
+        return { accounts: desired.accounts, proxy: desired.accountsProxy, gateway: desired.gateway };
+      },
+    });
+    const gate: SessionGate = {
+      approvalView: (toolName, input) =>
+        bot.browser?.approvalView(toolName, input) ?? simpleToolView(toolName, input, mcp.serverFor(toolName)),
+      decideTool: (toolName, input) => decideTool(toolName, input),
+      waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+      approvals,
+      activeRun,
+    };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
       ...createMemoryTools({ groupKind, activeRun, send: config.send }),
-      ...createHelperTools({ activeRun, send: config.send }),
       ...createRoutineOfferTools({ activeRun, send: config.send }),
       ...createDraftTools({
         activeRun,
@@ -579,16 +599,18 @@ export function createRunner(config: RunnerConfig): Runner {
         ? [
             ...createAssistantTools({ activeRun, send: config.send }),
             ...createTeamTools({ activeRun, send: config.send }),
+            ...createHelperTools({
+              agentDir: dirs.agentDir,
+              workDir: dirs.workDir,
+              gateway: () => bot.appliedGateway,
+              settings: config.settings,
+              tools: () => [accountRead, ...(bot.browser?.tools ?? [])],
+              gate,
+            }),
           ]
         : []),
       ...(bot.browser?.tools ?? []),
-      createAccountReadTool({
-        described: definition.readable,
-        live: () => {
-          const desired = desiredConfig(bot)!;
-          return { accounts: desired.accounts, proxy: desired.accountsProxy, gateway: desired.gateway };
-        },
-      }),
+      accountRead,
     ];
     const mcp =
       bot.mcp ??
@@ -640,14 +662,9 @@ export function createRunner(config: RunnerConfig): Runner {
       gateway: bot.appliedGateway,
       bashTool: bash.tool,
       tools: [...builtIn, ...mcp.tools],
-      approvalView: (toolName, input) =>
-        bot.browser?.approvalView(toolName, input) ?? simpleToolView(toolName, input, mcp.serverFor(toolName)),
-      decideTool,
-      waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+      ...gate,
       allowBash: bash.allow,
       clearBashRun: bash.clearRun,
-      approvals,
-      activeRun,
       memory: () => bot.active?.memory ?? null,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });

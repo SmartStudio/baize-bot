@@ -7715,6 +7715,171 @@ describe("运行器的记忆：偏好和品牌手册", () => {
   });
 });
 
+// 帮手会话的系统提示开头。只出现在帮手发给网关的请求里，盘上哪个文件里有它就是帮手的会话落了盘。
+const HELPER_MARKER = "你是主助理临时拉来的帮手";
+
+const isHelperRequest = (req: ChatCompletionRequest): boolean =>
+  JSON.stringify(req.messages[0] ?? null).includes(HELPER_MARKER);
+const toolResultCount = (req: ChatCompletionRequest): number => req.messages.filter((m) => m.role === "tool").length;
+const helperToolResults = (req: ChatCompletionRequest | undefined): string =>
+  JSON.stringify((req?.messages ?? []).filter((m) => m.role === "tool"));
+const helperCalls = (h: Harness) =>
+  h.sent.flatMap((message) => (message.type === "bot_tool_call" && message.tool === "call_helper" ? [message] : []));
+
+/** 帮手的请求按它已经拿到几个工具结果挑第几轮，主助理的请求交给 main。 */
+const withHelper =
+  (
+    main: (req: ChatCompletionRequest) => ScriptedTurn,
+    helperTurns: readonly ScriptedTurn[],
+    helperRequests: ChatCompletionRequest[] = [],
+  ) =>
+  (req: ChatCompletionRequest): ScriptedTurn => {
+    if (!isHelperRequest(req)) return main(req);
+    helperRequests.push(req);
+    const turn = helperTurns[toolResultCount(req)];
+    if (turn === undefined) throw new Error(`帮手多请求了一轮：${JSON.stringify(req.messages).slice(-300)}`);
+    return turn;
+  };
+
+describe("运行器的临时帮手 call_helper", () => {
+  const HELPER_ARGS = { kind: "researcher", task: "查一下 Pi 的最新版本号" };
+  const HELPER_ANSWER = "Pi 最新是 1.1.0，出处是 npm 页面";
+
+  it("call_helper 结束后 dataDir 下没有新会话文件", async () => {
+    const helperRequests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      extensionTools: [],
+      script: withHelper(
+        scriptBy([["查版本", callTool("call_helper", HELPER_ARGS)]]),
+        [{ textChunks: [HELPER_ANSWER], usage: { input: 300, output: 20 } }],
+        helperRequests,
+      ),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查版本"));
+
+    expect(helperRequests.length, "帮手真的开过工").toBe(1);
+    const files = filesNewerThan(h.dataDir, 0);
+    expect(
+      files.filter((file) => file.endsWith(".jsonl")),
+      "盘上只有主助理这个群的一份会话",
+    ).toEqual(jsonlIn(groupDir(h.dataDir, "bot-1", "group-1")));
+    expect(jsonlIn(groupDir(h.dataDir, "bot-1", "group-1"))).toHaveLength(1);
+    expect(
+      files.filter((file) => readFileSync(file, "utf8").includes(HELPER_MARKER)),
+      "帮手的系统提示不在任何落盘文件里",
+    ).toEqual([]);
+  });
+
+  it("帮手调 write 被闸门拒绝", async () => {
+    const helperRequests: ChatCompletionRequest[] = [];
+    const sshKey = join(homedir(), ".ssh", "id_rsa");
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      extensionTools: [],
+      script: withHelper(
+        scriptBy([["查版本", callTool("call_helper", HELPER_ARGS)]]),
+        [
+          callTool("write", { path: "帮手写的.txt", content: "不该落盘" }),
+          callTool("read", { path: sshKey }),
+          { textChunks: ["写不了也读不了"], usage: { input: 300, output: 10 } },
+        ],
+        helperRequests,
+      ),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查版本"));
+
+    expect(helperRequests).toHaveLength(3);
+    for (const req of helperRequests) {
+      expect((req.tools ?? []).map((tool) => tool.function.name).toSorted(), "帮手手上只有读类工具").toEqual([
+        "account_read",
+        "read",
+      ]);
+    }
+    expect(existsSync(join(botDirs(h.dataDir, BotId.parse("bot-1")).workDir, "帮手写的.txt"))).toBe(false);
+    expect(helperToolResults(helperRequests[1]), "write 没执行，帮手拿到的是错误").toMatch(/write/);
+    expect(helperToolResults(helperRequests[1])).not.toContain("Successfully");
+    expect(helperToolResults(helperRequests[2]), "帮手的 read 照样过闸门，禁区被拒").toContain(
+      "这个路径属于固定禁区，不能读取或修改。",
+    );
+    expect(shape(h.sent), "读禁区是拒，不是问").not.toContain("approval_request");
+    expect(
+      helperCalls(h).map((call) => call.status),
+      "帮手的工具调用和主助理的 callId 撞了也不把 call_helper 记成被拦",
+    ).toEqual(["running", "ok"]);
+  });
+
+  it("帮手的结果作为工具结果回给主助理", async () => {
+    const results = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      extensionTools: [],
+      script: withHelper(scriptRecording(results, [["查版本", callTool("call_helper", HELPER_ARGS)]]), [
+        { textChunks: [HELPER_ANSWER], usage: { input: 300, output: 20 } },
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查版本"));
+
+    expect(results.toolResults.join(""), "主助理那一轮的工具结果是帮手的话").toContain(HELPER_ANSWER);
+    const calls = helperCalls(h);
+    expect(calls.map((call) => [call.status, call.view])).toEqual([
+      ["running", { kind: "helper", name: "资料员", task: HELPER_ARGS.task, status: "running", raw: HELPER_ARGS }],
+      ["ok", { kind: "helper", name: "资料员", task: HELPER_ARGS.task, status: "done", raw: HELPER_ARGS }],
+    ]);
+    expect(h.sent.filter((message) => message.type === "bot_tool_call").length, "帮手自己的过程不进群").toBe(2);
+    expect(
+      h.sent.flatMap((message) => (message.type === "bot_text" ? [message.delta] : [])).join(""),
+      "帮手的话不直接发到群里",
+    ).not.toContain(HELPER_ANSWER);
+    expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
+  it("主助理 abort 时帮手会话一起停", async () => {
+    let helperStarted = false;
+    let release!: () => void;
+    const hung = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const main = scriptedUpstream(scriptBy([["查版本", callTool("call_helper", HELPER_ARGS)]]));
+    const h = await startHarness({
+      bots: ["bot-1"],
+      role: "assistant",
+      extensionTools: [],
+      script: scriptBy([]),
+      upstream: async function* (req, key) {
+        if (!isHelperRequest(req)) {
+          yield* main(req, key);
+          return;
+        }
+        helperStarted = true;
+        yield streamChunk("chatcmpl-helper", req.model, { role: "assistant" }, null);
+        yield streamChunk("chatcmpl-helper", req.model, { content: "查到一半" }, null);
+        await hung;
+      },
+    });
+    try {
+      const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查版本"));
+      await until(() => helperStarted, "帮手的请求发到网关");
+
+      const stopped = Promise.all([running, h.runner.stop()]).then(() => "stopped" as const);
+      const outcome = await Promise.race([stopped, delay(8000).then(() => "timeout" as const)]);
+
+      expect(outcome, "主助理停下时帮手跟着停，不等它的模型请求").toBe("stopped");
+      expect(runDoneIds(h)).toEqual(["run-1"]);
+      expect(helperCalls(h).map((call) => call.status)).toEqual(["running", "failed"]);
+      expect(helperCalls(h).at(-1)?.view).toMatchObject({ kind: "helper", status: "failed" });
+    } finally {
+      release();
+    }
+  });
+});
+
 describe("落盘位置", () => {
   it("Pi 的落盘全在钉死的临时目录里，~/.pi 下一个新文件都没有", () => {
     // 先证明这个探针能看见新文件，否则下面那条空断言是空的。

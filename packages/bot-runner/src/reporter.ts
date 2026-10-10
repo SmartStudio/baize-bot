@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AgentToControl, type BotId, type GroupId, MessageId, type RunId, type ToolView } from "@baize/shared";
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
+import { HELPER_TOOL, helperToolView } from "./helper.js";
 
 // 一次 prompt 的会话事件翻成上行报文。出边界前一律过 AgentToControl.parse，schema 不过就抛。
 
@@ -35,6 +36,7 @@ const isScalar = (value: unknown): value is string | number | boolean | null =>
   value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 
 export function simpleToolView(toolName: string, args: unknown, server = ""): ToolView {
+  if (toolName === HELPER_TOOL) return helperToolView(args, "running");
   const object = objectOf(args);
   if (toolName === "bash") {
     const command = object !== null && typeof object.command === "string" ? object.command : "";
@@ -143,13 +145,15 @@ export function reportRun(
         views.get(event.toolCallId) ?? simpleToolView(event.toolName, undefined, serverForTool(event.toolName));
       startedAt.delete(event.toolCallId);
       views.delete(event.toolCallId);
+      const status = consumeBlockedCall(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok";
       push({
         type: "bot_tool_call",
         ...ids,
         callId: event.toolCallId,
         tool: event.toolName,
-        view,
-        status: consumeBlockedCall(event.toolCallId) ? "blocked" : event.isError ? "failed" : "ok",
+        // 帮手那一行自带进度，跟着这条调用的终态走。
+        view: view.kind === "helper" ? { ...view, status: status === "ok" ? "done" : "failed" } : view,
+        status,
         durationMs: began === undefined ? null : Date.now() - began,
       });
       return;
