@@ -249,10 +249,12 @@ export const GRANTABLE_SCOPES: Readonly<Record<ActionKind, readonly ApprovalScop
   external_write: ["once", "project", "forever"],
 };
 
+export const GrantPathPrefix = z.string().startsWith("/").max(1024);
+
 export const GrantTarget = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("account"), accountId: AccountId }).strict(),
   z.object({ kind: z.literal("domain"), domain: z.string().min(1).max(253) }).strict(),
-  z.object({ kind: z.literal("path"), computerId: ComputerId, prefix: z.string().startsWith("/").max(1024) }).strict(),
+  z.object({ kind: z.literal("path"), computerId: ComputerId, prefix: GrantPathPrefix }).strict(),
 ]);
 export type GrantTarget = z.infer<typeof GrantTarget>;
 

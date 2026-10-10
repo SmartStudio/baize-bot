@@ -20,6 +20,7 @@ import {
   DraftId,
   Grant,
   GrantId,
+  GrantPathPrefix,
   Group,
   GroupId,
   Handoff,
@@ -346,6 +347,7 @@ export type BotProfileResponse = z.infer<typeof BotProfileResponse>;
 
 // GET /api/brand  没写过是 brand: null。
 // PUT /api/brand  整本替换，四段文本加素材文件夹加「改过的地方」（删单条就是少传一条）；四段加起来超 8000 字 400。
+// version 是「我基于哪一版改的」，还没有手册传 0；手册在这之后被改过（比如批准草稿追加了改动）回 409，什么都不写。
 // 每次写入 version 加一，推 brand_updated 并重发 config。
 export const BrandResponse = z.object({ brand: BrandBook.nullable() });
 export type BrandResponse = z.infer<typeof BrandResponse>;
@@ -354,8 +356,11 @@ export const UpdateBrandRequest = z
     facts: z.string(),
     voice: z.string(),
     taboo: z.string(),
-    assetsDir: z.string().min(1).nullable(),
+    // 设了就原样落成一条本机读授权，所以和授权的路径同一个契约。
+    assetsDir: GrantPathPrefix.nullable(),
     edits: z.array(BrandEdit).max(50),
+    // 写入时存 version + 1，列是 PostgreSQL integer，上限 2147483647。
+    version: z.number().int().nonnegative().max(2147483646),
   })
   .strict();
 export type UpdateBrandRequest = z.infer<typeof UpdateBrandRequest>;
