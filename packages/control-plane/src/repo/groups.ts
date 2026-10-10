@@ -8,7 +8,7 @@ import {
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, asc, count, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNull, sql, type AnyColumn, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, tasks, userCounters } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -146,6 +146,64 @@ export async function openGroup(
   return { group: toGroup(groupRow, [...spec.botIds], taskRow.id), task: toTask(taskRow) };
 }
 
+/** 一个群最多几个 Bot，和建群请求的上限一致。 */
+export const GROUP_BOT_LIMIT = 6;
+
+/** 项目群就是这个用户还有成员的多 Bot 群，单聊不算。别人的、不存在的、成员删光的都是 null，和 findGroup 一个口径。 */
+export async function findProjectGroupId(db: Db | Tx, ownerId: UserId, groupId: GroupId): Promise<GroupId | null> {
+  const [row] = await db
+    .select({ id: groups.id })
+    .from(groups)
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), hasMembers(groups.id)))
+    .limit(1);
+  return row === undefined ? null : GroupId.parse(row.id);
+}
+
+/** 群还有成员。成员删光的多 Bot 群行还留着，对外却当作不存在：findProjectGroupId 和首页待办一个口径。 */
+export function hasMembers(groupId: SQL | AnyColumn): SQL {
+  return sql`exists (select 1 from ${groupMembers} where ${groupMembers.groupId} = ${groupId})`;
+}
+
+/**
+ * 锁住项目群那一行再读成员，往群里加人的事务都先抢这把锁，并发的两次加人各自数到的人数不会都是旧的。
+ * 不是这个用户的项目群、或者成员删空了，都回 null：删空的群 findGroup 也当它不存在。nextPosition 是下一个人该排的位置。
+ */
+export async function lockProjectMembers(
+  tx: Tx,
+  ownerId: UserId,
+  groupId: GroupId,
+): Promise<{ readonly botIds: readonly BotId[]; readonly nextPosition: number } | null> {
+  const [locked] = await tx
+    .select({ id: groups.id })
+    .from(groups)
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId)))
+    .for("update");
+  if (locked === undefined) return null;
+  const rows = await tx
+    .select({ botId: groupMembers.botId, position: groupMembers.position })
+    .from(groupMembers)
+    .where(eq(groupMembers.groupId, groupId))
+    .orderBy(asc(groupMembers.position));
+  if (rows.length === 0) return null;
+  return {
+    botIds: rows.map((row) => BotId.parse(row.botId)),
+    nextPosition: rows.reduce((max, row) => Math.max(max, row.position + 1), 0),
+  };
+}
+
+/** 接在群尾加人。调用方先 lockProjectMembers，保证这些 Bot 是自己的、还不在群里、加完不过上限。 */
+export async function appendGroupMembers(
+  tx: Tx,
+  groupId: GroupId,
+  botIds: readonly BotId[],
+  nextPosition: number,
+): Promise<void> {
+  if (botIds.length === 0) return;
+  await tx
+    .insert(groupMembers)
+    .values(botIds.map((botId, offset) => ({ groupId, botId, position: nextPosition + offset })));
+}
+
 export type GroupListEntry = {
   readonly group: Group;
   readonly task: TopicTask;
@@ -201,7 +259,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
 export type GroupDetail = { readonly group: Group; readonly task: TopicTask; readonly bots: Bot[] };
 
 /** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。单 Bot 群也照常返回，成员删光的团队群当作不存在。 */
-export async function findGroup(db: Db, ownerId: UserId, groupId: GroupId): Promise<GroupDetail | null> {
+export async function findGroup(db: Db | Tx, ownerId: UserId, groupId: GroupId): Promise<GroupDetail | null> {
   const [row] = await db
     .select({ group: groups, task: tasks })
     .from(groups)

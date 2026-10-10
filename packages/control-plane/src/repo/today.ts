@@ -28,11 +28,13 @@ import {
 } from "../db/schema.js";
 import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
-import { toAccount, toDraft, toPlan } from "./rows.js";
+import { hasMembers } from "./groups.js";
+import { toAccount, toDraft, toMessage, toPlan } from "./rows.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 type PlanRow = typeof contentPlans.$inferSelect;
 type AccountRow = typeof accounts.$inferSelect;
+type MessageRow = typeof messages.$inferSelect;
 
 export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promise<TodayResponse> {
   const planRows = await db
@@ -60,54 +62,77 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
               ),
             ),
           );
-  const [approvalRows, draftRows, expiredAccountRows, placeholderRows, publicationRows, routineDoneRows, routineRows] =
-    await Promise.all([
-      db
-        .select({ row: approvals })
-        .from(approvals)
-        .innerJoin(groups, eq(groups.id, approvals.groupId))
-        .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending")))
-        .orderBy(desc(approvals.createdAt), desc(approvals.id))
-        .limit(50),
-      draftRowsQuery,
-      db
-        .select()
-        .from(accounts)
-        .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "expired")))
-        .orderBy(desc(accounts.loginChangedAt), desc(accounts.id))
-        .limit(50),
-      // 每个平台至多一个占位（accounts_owner_platform_none_idx），不用 limit。
-      db
-        .select()
-        .from(accounts)
-        .where(
-          and(
-            eq(accounts.ownerId, ownerId),
-            eq(accounts.login, "none"),
-            inArray(accounts.platform, BrowserPlatform.options),
-          ),
+  const [
+    approvalRows,
+    draftRows,
+    expiredAccountRows,
+    placeholderRows,
+    publicationRows,
+    routineDoneRows,
+    routineRows,
+    teamOfferRows,
+  ] = await Promise.all([
+    db
+      .select({ row: approvals })
+      .from(approvals)
+      .innerJoin(groups, eq(groups.id, approvals.groupId))
+      .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending")))
+      .orderBy(desc(approvals.createdAt), desc(approvals.id))
+      .limit(50),
+    draftRowsQuery,
+    db
+      .select()
+      .from(accounts)
+      .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "expired")))
+      .orderBy(desc(accounts.loginChangedAt), desc(accounts.id))
+      .limit(50),
+    // 每个平台至多一个占位（accounts_owner_platform_none_idx），不用 limit。
+    db
+      .select()
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.ownerId, ownerId),
+          eq(accounts.login, "none"),
+          inArray(accounts.platform, BrowserPlatform.options),
         ),
-      db
-        .select({ publication: publications, draft: drafts })
-        .from(publications)
-        .leftJoin(drafts, eq(drafts.id, publications.draftId))
-        .where(eq(publications.ownerId, ownerId))
-        .orderBy(desc(publications.publishedAt), desc(publications.id))
-        .limit(20),
-      db
-        .select({ run: routineRuns, routine: routines })
-        .from(routineRuns)
-        .innerJoin(routines, eq(routines.id, routineRuns.routineId))
-        .innerJoin(bots, eq(bots.id, routines.botId))
-        .where(and(eq(bots.ownerId, ownerId), eq(routineRuns.status, "ok")))
-        .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
-        .limit(20),
-      db
-        .select({ routine: routines })
-        .from(routines)
-        .innerJoin(bots, eq(bots.id, routines.botId))
-        .where(and(eq(bots.ownerId, ownerId), eq(routines.state, "on"))),
-    ]);
+      ),
+    db
+      .select({ publication: publications, draft: drafts })
+      .from(publications)
+      .leftJoin(drafts, eq(drafts.id, publications.draftId))
+      .where(eq(publications.ownerId, ownerId))
+      .orderBy(desc(publications.publishedAt), desc(publications.id))
+      .limit(20),
+    db
+      .select({ run: routineRuns, routine: routines })
+      .from(routineRuns)
+      .innerJoin(routines, eq(routines.id, routineRuns.routineId))
+      .innerJoin(bots, eq(bots.id, routines.botId))
+      .where(and(eq(bots.ownerId, ownerId), eq(routineRuns.status, "ok")))
+      .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
+      .limit(20),
+    db
+      .select({ routine: routines })
+      .from(routines)
+      .innerJoin(bots, eq(bots.id, routines.botId))
+      .where(and(eq(bots.ownerId, ownerId), eq(routines.state, "on"))),
+    // 建队卡只落在主助理单聊，先放着的也还在等你确认。卡落下之后目标群才删空的，确认只会 404，不再列。
+    db
+      .select({ row: messages })
+      .from(messages)
+      .innerJoin(groups, eq(groups.id, messages.groupId))
+      .where(
+        and(
+          eq(groups.ownerId, ownerId),
+          sql`${messages.body} ->> 'kind' = 'team_offer'`,
+          sql`${messages.body} ->> 'status' in ('offered', 'deferred')`,
+          hasMembers(sql`${messages.body} ->> 'groupId'`),
+        ),
+      )
+      .orderBy(desc(messages.createdAt), desc(messages.id))
+      .limit(50),
+  ]);
 
   const draftsByPlan = draftsByPlanOf(draftRows);
   const orderedPending = pendingItems({
@@ -116,6 +141,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
     drafts: draftRows,
     expiredAccounts: expiredAccountRows,
     placeholders: placeholderRows,
+    teamOffers: teamOfferRows.map(({ row }) => row),
   });
 
   const done: { at: Date; id: string; item: TodayDoneItem }[] = [];
@@ -214,7 +240,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
   return TodayResponse.parse({
     assistantGroupId: assistant?.groupId ?? null,
     assistantLatest: assistant === null ? null : await latestBotLine(db, assistant.groupId),
-    pending: orderedPending.slice(-50),
+    pending: deferredLast(orderedPending.slice(-50)),
     done: orderedDone.slice(0, 20).map(({ item }) => item),
     running,
     next: orderedNext.slice(0, 20),
@@ -253,6 +279,8 @@ export function pendingItems(input: {
   readonly drafts: readonly DraftRow[];
   readonly expiredAccounts: readonly AccountRow[];
   readonly placeholders: readonly AccountRow[];
+  /** 项目页还不出建队卡，所以可省。 */
+  readonly teamOffers?: readonly MessageRow[];
 }): TodayPendingItem[] {
   const draftsByPlan = draftsByPlanOf(input.drafts);
   const pendingPlans = input.plans.filter((row) => row.status === "pending");
@@ -301,6 +329,13 @@ export function pendingItems(input: {
       return at === undefined ? [] : [{ row, at }];
     }),
   ];
+  for (const row of input.teamOffers ?? []) {
+    pending.push({
+      at: row.createdAt,
+      id: row.id,
+      item: { kind: "team_offer", since: row.createdAt.toISOString(), message: toMessage(row) },
+    });
+  }
   for (const { row, at } of accountRows) {
     pending.push({
       at,
@@ -318,6 +353,17 @@ export function pendingItems(input: {
 
 // 账号行和等它的第一件待办同一刻时排在前面，菜单栏里先看到要登录。
 const rank = (item: TodayPendingItem): number => (item.kind === "account" ? 0 : 1);
+
+/**
+ * 先放着的建队卡还在等你确认，只是不再排在前面：整组挪到仍待处理的项之后，组内照旧按来的先后。
+ * 在按来的先后截好最新 50 条之后再挪，先挪再截会让一堆先放着的卡把更新的待办挤出去。
+ */
+function deferredLast(items: readonly TodayPendingItem[]): TodayPendingItem[] {
+  return [...items.filter((item) => !isDeferredOffer(item)), ...items.filter(isDeferredOffer)];
+}
+
+const isDeferredOffer = (item: TodayPendingItem): boolean =>
+  item.kind === "team_offer" && item.message.body.kind === "team_offer" && item.message.body.status === "deferred";
 
 /** 排了时间的已批稿子和启用中的例行下一次触发，按时间升序。首页和项目页共用。 */
 export function nextItems(

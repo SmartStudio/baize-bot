@@ -208,7 +208,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createGoalRoutes({ db, push: hub }));
   app.route("/api", createPreferenceRoutes({ db, push: hub, agents }));
   app.route("/api", createBrandRoutes(brandDeps));
-  app.route("/api", createTeamOfferRoutes());
+  app.route("/api", createTeamOfferRoutes({ db, hub, agents }));
   app.route("/api", createRoutineOfferRoutes());
   app.route("/api", createSeenRoutes());
 

@@ -147,6 +147,40 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 
 提交之后重推这条消息，给每个新队员推 `bot_created`（带这个 Bot 的单聊群 id，Web 不必再拉 Bot 列表），再推 `group_created` 和每条 `routine_updated`，最后重发 `config`，新队员这时才跑得起来。回包带这条消息、项目群和它的主题任务卡。`dismiss` 用同一个条件 `UPDATE` 改成 `dismissed` 并重推，回包的群和卡都是 null。抢不到卡时回 200 带当前消息，已开始的顺带项目群和卡，不再推送。
 
+### 建队卡
+
+主助理给已有的项目补人，走上行 `team_offer`：先照常校验 run 归属，再要求发报文的是主助理、run 在它的单聊里、`projectGroupId` 是这个用户还有成员的项目群（`findProjectGroupId`，成员删光的群和 `findGroup` 一样当作不存在，否则落下的卡永远确认不了）、`existing` 人选都是他的 Bot。任一不成立整条静默丢弃。后两道查在落卡的那个 `whileRunOpen` 事务里做，而且先锁后查（`repo/team-offers.ts` 的 `lockOfferTarget`）：先读目标群现在的成员，和卡上的既有候选并在一起，只取这个用户的，按 `bots.id` 升序 `FOR KEY SHARE`；锁到手之后重读成员，现在的成员里至少一个在锁里才往下走：读成员和上锁之间成员可能被整批换掉（确认别的卡把人加进来，再删掉原班人马），只锁旧那批就挡不住删新来的人。一个都不在就把前后两批并起来按 id 升序再锁一回、再读，还不在就当目标没了，整条丢弃。之后再用新语句查目标是他的项目群、候选都归他。删 Bot 要拿这些行的排他锁，`KEY SHARE` 把删除挡到卡提交之后；锁之前已提交的删除，锁之后的新语句看得见。只把查挪进事务而不锁是不够的：`READ COMMITTED` 下每条语句各取快照，查完到落卡之间成员被删空，卡照样落下。成立就在单聊里落一条 `team_offer` 消息，`status: "offered"`，谁都不加。卡落下之后目标群才删空的，确认只会回 404，首页待办用同一个 `hasMembers` 条件把它过滤掉（`repo/today.ts`），卡本身留在单聊里不改状态。
+
+`POST /api/messages/:id/team-offer` 的 `defer` 只把 `offered` 改成 `deferred` 并重推；首页先按到达时间截好最新 50 条，再在这 50 条里把先放着的卡整组排到仍待处理的项之后；先挪再截会让一堆先放着的卡把更新的审批挤出首页。`confirm` 在一个事务里按下面的顺序取锁，顺序本身就是设计：
+
+1. `UPDATE messages ... WHERE status IN ('offered', 'deferred')` 抢卡，改不到就是已经确认过了，回 409。
+2. 勾选的已有 Bot 全部按 `bots.id` 升序 `FOR KEY SHARE`，已经在群里的也锁。锁不到的就是已经删了，回 409「卡上第 N 位已经不在了」，整个事务回滚、卡原样。`KEY SHARE` 和删 Bot 的 `DELETE` 冲突，所以删除排在确认提交之后：入群不撞外键，写进终态正文的人在提交那一刻也都还在群里，正文的 `members` 和回包的 `group.botIds` 一致。
+3. 项目群行 `FOR UPDATE`，然后才读成员名单：前一次加人提交了才看得见。零成员回 404 回滚。已在群里的勾选项跳过，不重复加；加完超过 6 人回 400 回滚。
+4. 新人走 `insertMemberBot(..., "untaken")`，在 `user_counters` 行上排队、避名，再接在群尾。改写卡正文为只剩勾选的人、新人换成实际建出的名字，最后在同一事务里读群回包。
+
+提交之后推 `group_updated` 用的不是事务里的快照，而是重读的群：同一个群两次确认都成功时，两份提交回执可能逆序到达，先提交那份人少的快照会把后一份覆盖掉，Web 的群推送没有版本号，拦不住。只重读也不够，两次重读的结果一样可能逆序推出去，所以路由（`http/routes/team-offers.ts` 的 `publishGroup`）把同一个群的「重读加推送」在进程内排成一队：后进队的那次读一定在先进队那次的提交之后，最后一次推的就是库里最新的名单。回包仍用事务里的快照，跟卡上写下的人一致。这个队列只管建队确认这一条路径，并且假定控制面是单进程（推送本来就只发给连在本进程的连接）；set_chief、删 Bot 这些基底上已有的 `group_updated` 推送没有进队。
+
+为什么是 Bot 在群前面：删 Bot 是先锁 Bot 行，再由外键级联到它当首席的群行（`chief_bot_id SET NULL`）。确认若先持群再等 Bot，两个项目互邀对方的首席、同时删这两个首席，就是「确认 A 持 A 等 y → 删 y 持 y 等 B → 确认 B 持 B 等 x → 删 x 持 x 等 A」的四方死锁，数据库报 40P01、一方 500。改成 Bot 在前，确认持群时手里已经有它要的所有 Bot，只剩发号器和自己新建的行要拿，没有谁持着群行等 Bot。各条路径的锁序：
+
+| 路径 | 锁序 |
+| --- | --- |
+| 建队确认 | 卡消息行 → 勾选 Bot 按 id 升序 KEY SHARE → 项目群 FOR UPDATE → user_counters → 新 Bot、单聊、group_members |
+| 建队卡落卡 | run 共享锁 → 目标群成员和既有候选 Bot 按 id 升序 KEY SHARE（成员被整批换掉时前后两批并起来再锁一回） → 单聊里的消息新行 |
+| 删 Bot | Bot 的 advisory 锁 → open runs FOR UPDATE → 相关交接 FOR UPDATE → 审批 UPDATE → DELETE Bot → 级联到首席群行、成员行 |
+| 开始项目 | 方案卡消息行 → user_counters → 新 Bot、单聊 → 新群、成员 |
+| 交接接受 | run 共享锁 → 交接行 UPDATE → 新经手 Bot KEY SHARE → 任务行 FOR UPDATE |
+| setCurrentBot | Bot KEY SHARE → 任务行 FOR UPDATE |
+| createGroup | 输入的成员 Bot 按归属查出并 KEY SHARE → user_counters → 新群、成员 |
+| set_chief | run 共享锁 → 群行 UPDATE → 新首席 Bot 的外键 KEY SHARE |
+
+全局的序是：已有的 Bot 行 → 群行 → `user_counters` → 本事务自己新建的行。关键在发号器：拿着 `user_counters` 的事务不再等任何别人可能持有的锁。确认到发号器时勾选的 Bot 和群都已在手里；createGroup 在发号器之前就把输入的 Bot 锁好；开始项目在发号器之后只碰主助理和自己新建的行，而主助理不可删，没有谁对它拿排他锁；`insertMemberBot` 之后只插新行。这几条都对 Bot 只取 KEY SHARE，彼此不冲突，所以发号器上只有排队，没有环。删 Bot 和确认都是 Bot 在群前，同向；删 Bot 不碰发号器。落卡只对 Bot 取 KEY SHARE，之后只插自己单聊里的消息行，不碰群行和发号器，删 Bot 对它只有单向等待。交接接受、setCurrentBot 先对新经手 Bot 取 KEY SHARE 再锁任务行，Bot 在前，同向；它们碰的 run、交接、任务行确认一个都不碰，最多单向等确认的群锁。两个确认之间：同群在群行上串行，不同群对同一个 Bot 都是 KEY SHARE，不冲突。
+
+createGroup 早先是先拿发号器、插成员时才靠外键锁 Bot，和这个序反着，三方就能成环：只勾新人的确认持着项目群 G、停在发号器前；删 G 的首席 x 持着 x 行，级联置空 G 的 `chief_bot_id` 时等 G；拉 x 建另一群的事务持着发号器，插成员撞到 x 的锁等删除；确认放行后等发号器，40P01、删除回 500。把归属查询挪进事务并 KEY SHARE 之后，建群在发号器之前就等删除，确认拿到发号器提交，删除再提交，建群醒来查不到 x 回 404。
+
+set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条边。它和一次删 Bot 排不成环：`is distinct from` 让重设同一个首席不改行、不取锁，级联也只碰现任首席是被删者的群。两个群同时互换首席、同时删这两位就凑成四方环，复核时用探针真的跑出了 40P01。这条路径基底就有，建队卡这一单不改它，登记为已知缺口一：要修就得让 set_chief 先对新首席取 KEY SHARE 再改群行。`test/team-offer.test.ts` 用测试自己持群行和发号器行、或 `gated-db` 停在某条 SQL 前当屏障，用 `pg_stat_activity` 数锁等待，把互邀首席四方交错、群内成员确认中被删、群锁未到手时删候选、只勾新人时建群与删首席三方交错、落卡前目标群被删空、落卡校验后删成员和删候选都要等卡落下、锁之前删空不落卡、读成员后成员被整批换掉时删新成员也要等卡落下九条交错都钉成确定的用例。
+
+已知缺口二：卡落下之后候选全被删。确认回 409「卡上第 N 位已经不在了」，`defer` 照常 200，首页的过滤只看目标群还有没有成员，这张卡留在待办里清不掉。`test/team-offer.test.ts` 的「落下后候选没了」用例钉的是这个现状，改了它就要改 `repo/today.ts` 的过滤。
+
 ## 审批
 
 群消息是事实来源，审批是唯一一件「群消息本身说不全」的事：那张卡的正文只有一个 approvalId，批没批写在 approvals 行上。所以结论只随 `approval_updated` 推，重推那条 message 一个字都不会变。
@@ -458,7 +492,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
 
-`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排，待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`pending` 里的账号行（`kind: "account"`，带整个 `Account`）有两种：`login='expired'` 的账号恒出一行，`since` 是 `login_changed_at`，也就是什么时候过期的；`login='none'` 的浏览器登录类占位（`BrowserPlatform`，现在只有小红书）只在被当前 pending 稿子（不属于计划的，或挂在 approved 计划下的）或 pending 计划里的 pending 稿子引用时出一行，一个号只出一行，`since` 是引用它的待办里最早那件的 `since`：占位可能几天前就建了，要登录是从有稿子等着它那一刻开始的。GitHub、X 的 `none` 不出行，它们走授权页，不在电脑上登录。账号行和同一刻的待办并列时排在前面。这样待办数恒等于 `pending` 的条数：Web 首页的登录卡只替换这一行、挪到第一张要用它的稿子前面，服务端没列的号不凭空放卡；菜单栏不放卡，照原样列这一行，`none` 写「还没登录」，`expired` 写「登录过期」。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
+`GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排（先放着的建队卡在截好之后整组挪到末尾），待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`pending` 里的账号行（`kind: "account"`，带整个 `Account`）有两种：`login='expired'` 的账号恒出一行，`since` 是 `login_changed_at`，也就是什么时候过期的；`login='none'` 的浏览器登录类占位（`BrowserPlatform`，现在只有小红书）只在被当前 pending 稿子（不属于计划的，或挂在 approved 计划下的）或 pending 计划里的 pending 稿子引用时出一行，一个号只出一行，`since` 是引用它的待办里最早那件的 `since`：占位可能几天前就建了，要登录是从有稿子等着它那一刻开始的。GitHub、X 的 `none` 不出行，它们走授权页，不在电脑上登录。账号行和同一刻的待办并列时排在前面。这样待办数恒等于 `pending` 的条数：Web 首页的登录卡只替换这一行、挪到第一张要用它的稿子前面，服务端没列的号不凭空放卡；菜单栏不放卡，照原样列这一行，`none` 写「还没登录」，`expired` 写「登录过期」。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
 
 `GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 只读本人的 `publications`，按发布时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条，`weekChecked` 是任务卡清单里本周勾上、现在还勾着的项数；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数。整页在一个 `REPEATABLE READ` 只读事务里查，起点、轮数和回应出自同一个快照：分开查的话，查完起点才落库的下一句不算起点，却会被当成回应带出来；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
 

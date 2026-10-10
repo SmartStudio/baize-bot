@@ -1,14 +1,50 @@
 import type { AgentToControl } from "@baize/shared";
+import { findAssistant } from "../../repo/bots.js";
+import { appendMessage } from "../../repo/messages.js";
+import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
+import { lockOfferTarget } from "../../repo/team-offers.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
 
 export type TeamOfferEvent = Extract<AgentToControl, { type: "team_offer" }>;
 
-/** 第 2 期形状占位。p2-team-offer-cp 在这里接上：只收主助理、只落在主助理单聊、目标群必须是自己的项目群。 */
+/**
+ * 主助理出的建队卡，只落一条消息，谁都不加，要等用户点确认。
+ * 只认主助理在自己单聊里发的、目标是这个用户的项目群、existing 的人都是他的 Bot；任一不成立整条丢掉。
+ * 单聊是按归属人查出来的，所以 run 归属只剩 runBelongsTo 一道：这台电脑上主助理在单聊里的活。
+ */
 export async function handleTeamOffer(
-  _deps: AgentEventDeps,
-  _conn: AgentConnection,
-  _event: TeamOfferEvent,
+  deps: AgentEventDeps,
+  conn: AgentConnection,
+  event: TeamOfferEvent,
 ): Promise<void> {
-  throw new Error("未实现：team_offer 由 p2-team-offer-cp 接上");
+  const assistant = await findAssistant(deps.db, conn.ownerId);
+  if (assistant === null || assistant.bot.id !== event.botId || assistant.groupId !== event.groupId) {
+    console.warn(`电脑 ${conn.computerId} 报的建队卡来自 ${event.botId}，不是主助理在它单聊里发的，整条丢掉`);
+    return;
+  }
+  const groupId = assistant.groupId;
+  if (!(await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId))) {
+    console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是主助理在单聊里的活，建队卡整条丢掉`);
+    return;
+  }
+  const existing = event.members.flatMap((member) => (member.kind === "existing" ? [member.botId] : []));
+  // 目标群和人选在落卡的事务里先锁后查：事务外查、或查完不锁，查到落卡之间目标被删空，落下的卡就永远确认不了。
+  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
+    const projectGroupId = await lockOfferTarget(tx, conn.ownerId, event.projectGroupId, existing);
+    if (projectGroupId === null) {
+      console.warn(
+        `电脑 ${conn.computerId} 报的建队卡指向 ${event.projectGroupId}，不是这个用户的项目群或人选不是他的 Bot，整条丢掉`,
+      );
+      return null;
+    }
+    return appendMessage(tx, groupId, {
+      kind: "team_offer",
+      botId: event.botId,
+      members: event.members,
+      status: "offered",
+      groupId: projectGroupId,
+    });
+  });
+  if (message !== null) deps.push.push(conn.ownerId, { type: "message", message });
 }

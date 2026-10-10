@@ -19,7 +19,6 @@ afterAll(async () => {
 });
 
 const SEAM_ROUTES = [
-  ["POST", "/api/messages/m1/team-offer", { decision: "defer" }],
   ["POST", "/api/messages/m1/routine-offer", { decision: "dismiss" }],
   ["POST", "/api/groups/g1/seen", {}],
 ] as const;
@@ -52,10 +51,6 @@ it("config 恒带 preferences 和 brand：没有偏好是空数组，没写过�
 });
 
 const STUB_EVENTS = [
-  [
-    "team_offer",
-    { projectGroupId: "{group}", members: [{ kind: "existing", botId: "{bot}", note: "帮忙", suggested: true }] },
-  ],
   [
     "routine_offer",
     {
