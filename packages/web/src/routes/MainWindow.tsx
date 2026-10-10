@@ -141,6 +141,8 @@ export const MainWindow = () => {
         groupTurns={ready.groupTurns}
         user={ready.user}
         pendingCount={today.data === null ? 0 : today.data.pending.length}
+        countsStale={ready.loads.counts === "failed"}
+        onRetryCounts={() => void actions.loadPendingCounts().catch(() => undefined)}
         onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
         onOpenSettings={() => setOverlay("settings")}

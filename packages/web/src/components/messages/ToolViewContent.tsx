@@ -52,5 +52,14 @@ export const ToolViewContent = ({ view, approval = false }: { view: ToolView; ap
           <McpParams params={view.params} />
         </span>
       );
+    case "helper":
+      return (
+        <span className="tool-view-content" data-view-kind={view.kind}>
+          <span>
+            {approval ? "要拉临时帮手" : "拉临时帮手"}：{view.name}
+          </span>
+          <span className="tool-view-detail">{view.task}</span>
+        </span>
+      );
   }
 };

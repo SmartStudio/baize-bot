@@ -14,6 +14,8 @@ type Props = {
   groupTurns: Record<GroupId, GroupTurn>;
   user: User;
   pendingCount: number;
+  countsStale: boolean;
+  onRetryCounts: () => void;
   onNewProject: () => void;
   onOpenAccount: () => void;
   onOpenSettings: () => void;
@@ -87,6 +89,8 @@ export const Sidebar = ({
   groupTurns,
   user,
   pendingCount,
+  countsStale,
+  onRetryCounts,
   onNewProject,
   onOpenAccount,
   onOpenSettings,
@@ -141,6 +145,14 @@ export const Sidebar = ({
           current={openGroup === project.groupId}
         />
       ))}
+      {countsStale ? (
+        <p className="team-offer-error" data-testid="counts-stale" role="alert">
+          待办数没刷新上，角标可能不准
+          <button type="button" className="ghost-button" onClick={onRetryCounts}>
+            重试
+          </button>
+        </p>
+      ) : null}
       <div className="side-low">
         <Link
           to={pathOf({ kind: "routines" })}

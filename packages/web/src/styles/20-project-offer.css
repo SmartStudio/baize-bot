@@ -112,3 +112,99 @@
   border-color: var(--border-1);
   color: var(--fg-4);
 }
+
+/* ---------- 建队卡 ---------- */
+
+.team-offer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-5) var(--space-6);
+}
+
+.team-offer .card-title {
+  color: var(--fg-1);
+}
+
+.team-offer-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-offer-member {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2) var(--space-4);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-sm);
+}
+
+.team-offer-member[data-picked="true"] {
+  border-color: var(--border-2);
+  background: var(--bg-selected);
+}
+
+.team-offer-who {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.team-offer-detail {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.team-offer-note {
+  grid-column: 1;
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.team-offer-pick {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.team-offer-in {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.team-offer-error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}
+
+.team-offer.is-folded {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-6);
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.team-offer.is-muted {
+  border-color: var(--border-1);
+  color: var(--fg-4);
+}
+
+.project-adjust-team {
+  margin-top: var(--space-4);
+}

@@ -69,6 +69,8 @@ export const projectOf = (groupId: string): ProjectResponse | null => {
           return inGroup(item.draft.groupId);
         case "account":
           return false;
+        case "team_offer":
+          return item.message.body.kind === "team_offer" && inGroup(item.message.body.groupId);
       }
     }),
     plan:

@@ -20,6 +20,7 @@ import {
   type TodayPendingItem,
 } from "@baize/shared";
 import { appendMessage } from "./messages.js";
+import { isDeferredTeamOffer, pendingTeamOffers } from "./team-offers.js";
 import {
   accounts,
   approvals,
@@ -579,8 +580,13 @@ export const pendingOf = (): TodayPendingItem[] => {
       items.push({ kind: "account", since: waiting, account });
     }
   }
+  items.push(...pendingTeamOffers());
   const rank = (item: TodayPendingItem) => (item.kind === "account" ? 0 : 1);
-  return items.sort((left, right) => left.since.localeCompare(right.since) || rank(left) - rank(right));
+  // 先放着的建队卡还在，只是排到别的待办后面。
+  const behind = (item: TodayPendingItem) => Number(isDeferredTeamOffer(item));
+  return items.sort(
+    (left, right) => behind(left) - behind(right) || left.since.localeCompare(right.since) || rank(left) - rank(right),
+  );
 };
 
 export const todayOf = (): TodayResponse => {

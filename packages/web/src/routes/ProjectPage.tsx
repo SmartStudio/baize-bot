@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   CalendarClock,
   Check,
@@ -7,6 +7,7 @@ import {
   History,
   MessagesSquare,
   SendHorizontal,
+  UserPlus,
   Users,
 } from "lucide-react";
 import type { Bot, BotId, GroupId, Message, ProjectResponse, ProjectTurn } from "@baize/shared";
@@ -21,6 +22,8 @@ import type { Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
 
 type Team = Extract<Conversation, { kind: "team" }>;
+
+const ADJUST_TEAM_DRAFT = "想调整队伍：";
 
 // 进度条后面跟的本周变化，原型里是一句「本周 +N」。勾掉的项和发出的条数各一句，是零就不说。
 export const weekChangesOf = (week: Pick<ProjectResponse, "weekChecked" | "weekPublished">): string[] => [
@@ -139,6 +142,7 @@ export const ProjectPage = ({
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
   const task = conversation.task;
   const groupId = conversation.groupId;
   const members = conversation.botIds.flatMap((botId) => {
@@ -167,6 +171,11 @@ export const ProjectPage = ({
   const done = task.checklist.filter((item) => item.done).length;
   const { turn, older } = latestTurnOf(data.latestTurn, data.olderTurns, messages);
   const working = data.working[0];
+  // 调整队伍就是跟主助理说一句：预填开头把话头递过去，已经打了字的不覆盖。
+  const adjustTeam = () => {
+    setDraft((current) => (current.trim() === "" ? ADJUST_TEAM_DRAFT : current));
+    input.current?.focus();
+  };
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
@@ -220,6 +229,7 @@ export const ProjectPage = ({
         )}
         <form className="today-composer project-composer" onSubmit={submit}>
           <input
+            ref={input}
             data-testid="project-composer-input"
             value={draft}
             aria-label="对这个项目说一句"
@@ -390,6 +400,15 @@ export const ProjectPage = ({
               </article>
             ))}
           </div>
+          <button
+            type="button"
+            className="ghost-button project-adjust-team"
+            data-testid="project-adjust-team"
+            onClick={adjustTeam}
+          >
+            <UserPlus size={14} aria-hidden="true" />
+            调整队伍
+          </button>
         </details>
       </div>
     </main>

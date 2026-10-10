@@ -1,7 +1,7 @@
 // 推送、快照、操作回包谁先谁后，这里只按客户端这一侧收到的先后排：请求在发出时取号，推送在到达时取号，号只增不减。
 // 每个条目记最后一次写它的号，号更小的写入碰不到它；删除也记号，留下的号就是墓碑。
 // 已知缺口一：客户端的号只表达本地的先后，不代表服务端状态的新旧。先发出的请求可能被服务端后处理、读到更新的状态，
-// 它的回包仍会被后发出的请求挡掉。首次加载的缓冲（Shelf 的 early）让这个缺口从「已加载的桶」扩大到「还没加载的桶」：
+// 它的回包仍会被后发出的请求挡掉。群名单在这里有兜底：被挡下的群写入换一次 /api/groups 补拉（groups.ts），补拉同样在发出时取号。首次加载的缓冲（Shelf 的 early）让这个缺口从「已加载的桶」扩大到「还没加载的桶」：
 // 列表到之前先到的推送不再丢，而是带着更大的号等着，服务端其实更新的那份列表里的同一条会被它挡掉。
 // 群消息已经换了号的来源：服务端给每条消息带 revision，消息那一架按条取号（见 groups.ts 的 messageStamp），
 // 推送和历史谁先到都不要紧，只认 revision 大的。别的实体还没有 revision，仍是缺口一。
@@ -15,7 +15,7 @@ export const createClock = (): (() => Seq) => {
   return () => ++last as Seq;
 };
 
-const newer = (stamps: Stamps, id: string, seq: Seq): boolean => seq > (stamps[id] ?? 0);
+export const newer = (stamps: Stamps, id: string, seq: Seq): boolean => seq > (stamps[id] ?? 0);
 
 type Row = { readonly id: string };
 

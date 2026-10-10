@@ -22,6 +22,7 @@ import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
 import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
+import { TeamOfferCard } from "./TeamOfferCard.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
@@ -466,8 +467,9 @@ const MessageView = ({
               />
             );
           case "team_offer":
+            return <TeamOfferCard body={body} messageId={message.id} />;
           case "routine_offer":
-            // 第 2 期形状占位：建队卡归 p2-team-web，例行确认卡归 p2-routine-web，画出来之前不渲染。
+            // 第 2 期形状占位：例行确认卡归 p2-routine-web，画出来之前不渲染。
             return null;
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。

@@ -27,6 +27,7 @@ const initial = {
   messagesLoadedAt: {},
   messageGaps: {},
   deletedBotIds: [],
+  unlistedCounts: {},
 } as unknown as ReadyState;
 
 const delta = (
@@ -577,10 +578,11 @@ describe("群入列按 kind，不按成员数和首席猜", () => {
     metric: null,
   };
   const created = (group: Record<string, unknown>) => {
-    const state = reduceGroups({ ...initial, conversations: [] }, {
+    const state = reduceGroups({ ...initial, conversations: [], groupStamps: {} }, {
       type: "group_created",
       group: { id: "grp_new", ownerId: "u1", taskId: "tsk_x", createdAt: at, ...group },
       task,
+      seq: 1,
     } as unknown as Action);
     return state.conversations;
   };
@@ -595,5 +597,137 @@ describe("群入列按 kind，不按成员数和首席猜", () => {
     expect(created({ kind: "team", botIds: ["bot_a"], chiefBotId: null })).toEqual([
       expect.objectContaining({ kind: "team", groupId: "grp_new", botIds: ["bot_a"], chiefBotId: null }),
     ]);
+  });
+});
+
+describe("新群入列前先回来的计数", () => {
+  const task = { id: "tsk_new", title: "新项目", currentBotId: null };
+  const group = { id: "grp_new", kind: "team", botIds: ["bot_a", "bot_b"], chiefBotId: null };
+  const item = (pendingApprovals: number) => ({ group, task, lastMessage: null, pendingApprovals, pendingHandoffs: 0 });
+  const empty = { ...initial, conversations: [], groupStamps: {}, countStamps: {} } as unknown as ReadyState;
+  const counted = (seq: Seq) =>
+    reduceGroups(empty, { type: "pending_counts_loaded", bots: [], groups: [item(1)], seq } as unknown as Action);
+  const pendingOf = (state: ReadyState) => state.conversations.find((c) => c.groupId === "grp_new")?.pendingApprovals;
+
+  it("更早发出的名单后到，新群入列用较新的计数，不写名单里的旧数", () => {
+    const next = createClock();
+    const roster = next();
+    const listed = reduceGroups(counted(next()), {
+      type: "groups_loaded",
+      groups: [item(0)],
+      seq: roster,
+    } as unknown as Action);
+    expect(pendingOf(listed)).toBe(1);
+  });
+
+  it("更晚发出的名单照常写它自己的数", () => {
+    const next = createClock();
+    const early = counted(next());
+    const listed = reduceGroups(early, { type: "groups_loaded", groups: [item(0)], seq: next() } as unknown as Action);
+    expect(pendingOf(listed)).toBe(0);
+  });
+
+  it("建群推送晚于计数到，新群带着已收到的计数入列", () => {
+    const next = createClock();
+    const created = reduceGroups(counted(next()), {
+      type: "group_created",
+      group: { ...group, ownerId: "u1", taskId: "tsk_new", createdAt: at },
+      task,
+      seq: next(),
+    } as unknown as Action);
+    expect(pendingOf(created)).toBe(1);
+  });
+});
+
+describe("没入列的群，计数缓存只留最新完整计数里还有的", () => {
+  const task = { id: "tsk_new", title: "新项目", currentBotId: null };
+  const group = { id: "grp_new", kind: "team", botIds: ["bot_a", "bot_b"], chiefBotId: null };
+  const GROUP = GroupId.parse("grp_new");
+  const team = (id: string, pendingApprovals: number, pendingHandoffs = 0) => ({
+    group: { ...group, id },
+    task,
+    lastMessage: null,
+    pendingApprovals,
+    pendingHandoffs,
+  });
+  const solo = (botId: string, groupId: string, pendingApprovals: number, pendingHandoffs = 0) => ({
+    bot: { id: botId },
+    groupId,
+    lastMessage: null,
+    pendingApprovals,
+    pendingHandoffs,
+  });
+  const empty = { ...initial, conversations: [], groupStamps: {}, countStamps: {} } as unknown as ReadyState;
+  const counts = (
+    state: ReadyState,
+    seq: Seq,
+    groups: ReturnType<typeof team>[],
+    bots: ReturnType<typeof solo>[] = [],
+  ) => reduceGroups(state, { type: "pending_counts_loaded", bots, groups, seq } as unknown as Action);
+  const roster = (state: ReadyState, seq: Seq, groups: ReturnType<typeof team>[]) =>
+    reduceGroups(state, { type: "groups_loaded", groups, seq } as unknown as Action);
+
+  it("后发的完整计数里没有这个群，缓存回收；更早发出的计数晚到也塞不回来", () => {
+    const next = createClock();
+    const [first, rosterSeq, laggard, full] = [next(), next(), next(), next()];
+    const cached = counts(empty, first, [team("grp_new", 1, 2)]);
+    expect(cached.unlistedCounts[GROUP], "入列前先到的计数先记着").toEqual({ pendingApprovals: 1, pendingHandoffs: 2 });
+    const unlisted = roster(cached, rosterSeq, []);
+    const swept = counts(unlisted, full, [team("grp_other", 0)]);
+    expect(swept.unlistedCounts[GROUP], "更晚的完整计数确认没有这个群").toBeUndefined();
+    const afterLaggard = counts(swept, laggard, [team("grp_new", 1, 2)]);
+    expect(afterLaggard.unlistedCounts[GROUP], "回收那份之前发出的计数晚到，不再写回").toBeUndefined();
+  });
+
+  it("更早发出的完整计数里没有这个群，不清掉较新的缓存", () => {
+    const next = createClock();
+    const stale = next();
+    const fresh = next();
+    const cached = counts(empty, fresh, [team("grp_new", 1, 2)]);
+    const afterStale = counts(cached, stale, [team("grp_other", 0)]);
+    expect(afterStale.unlistedCounts[GROUP], "旧快照没资格说这个群不存在").toEqual({
+      pendingApprovals: 1,
+      pendingHandoffs: 2,
+    });
+    const listed = roster(afterStale, next(), [team("grp_new", 0)]);
+    expect(listed.conversations.find((c) => c.groupId === GROUP)?.pendingApprovals).toBe(0);
+  });
+
+  it("完整计数里还有这个群就留着，换成最新的数", () => {
+    const next = createClock();
+    const first = counts(empty, next(), [team("grp_new", 1, 2)]);
+    const second = counts(first, next(), [team("grp_new", 3, 0)]);
+    expect(second.unlistedCounts[GROUP]).toEqual({ pendingApprovals: 3, pendingHandoffs: 0 });
+  });
+
+  it("名单里移除的群，更早发出的计数晚到，不再缓存", () => {
+    const next = createClock();
+    const admitted = next();
+    const lateCounts = next();
+    const removed = next();
+    const listed = roster(empty, admitted, [team("grp_new", 0)]);
+    expect(
+      listed.conversations.map((c) => c.groupId),
+      "名单把它收进来",
+    ).toEqual([GROUP]);
+    const gone = roster(listed, removed, []);
+    expect(gone.conversations, "更晚的名单没有它，移掉").toEqual([]);
+    const afterLate = counts(gone, lateCounts, [team("grp_new", 1, 2)]);
+    expect(afterLate.unlistedCounts[GROUP], "移除之前发出的计数不能把它的数塞回缓存").toBeUndefined();
+    const afterNewer = counts(afterLate, next(), [team("grp_other", 0)]);
+    expect(afterNewer.unlistedCounts[GROUP], "更晚的完整计数里没有它，也不会被带回来").toBeUndefined();
+  });
+
+  it("单聊 Bot 在建群推送之前被删，之后的完整计数里没有它，缓存回收", () => {
+    const next = createClock();
+    const cached = counts(empty, next(), [], [solo("bot_new", "grp_solo", 2, 1)]);
+    expect(cached.unlistedCounts[GroupId.parse("grp_solo")], "新 Bot 的计数先到").toEqual({
+      pendingApprovals: 2,
+      pendingHandoffs: 1,
+    });
+    const removed = reduceGroups(cached, { type: "bot_removed", botId: "bot_new" } as unknown as Action);
+    const after = counts(removed, next(), [team("grp_other", 0)], [solo("bot_kept", "grp_kept", 0)]);
+    expect(after.unlistedCounts[GroupId.parse("grp_solo")], "被删的 Bot 不在完整计数里").toBeUndefined();
+    expect(Object.keys(after.unlistedCounts).sort(), "别的没入列的群照旧").toEqual(["grp_kept", "grp_other"]);
   });
 });

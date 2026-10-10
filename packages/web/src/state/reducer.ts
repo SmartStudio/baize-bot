@@ -2,7 +2,7 @@ import type { Bot, BotId } from "@baize/shared";
 import { reduceApprovals } from "./approvals.js";
 import { reduceBrand } from "./brand.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
-import { rearmGaps, reduceGroups } from "./groups.js";
+import { rearmGaps, reduceGroups, teamOf } from "./groups.js";
 import { reducePreferences } from "./preferences.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
@@ -23,16 +23,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
       pendingApprovals: item.pendingApprovals,
       pendingHandoffs: item.pendingHandoffs,
     })),
-    ...groups.map((item): Conversation => ({
-      kind: "team",
-      groupId: item.group.id,
-      botIds: item.group.botIds,
-      chiefBotId: item.group.chiefBotId,
-      task: item.task,
-      lastMessage: item.lastMessage,
-      pendingApprovals: item.pendingApprovals,
-      pendingHandoffs: item.pendingHandoffs,
-    })),
+    ...groups.map(teamOf),
   ];
   return {
     status: "ready",
@@ -42,6 +33,12 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     conversations,
     groupTurns: {},
     turnEpochs: {},
+    groupStamps: {},
+    groupsVersion: 0,
+    countStamps: {},
+    unlistedCounts: {},
+    offerOutcomes: {},
+    offersInFlight: {},
     messages: emptyShelf(),
     approvals: {},
     handoffs: {},
@@ -85,6 +82,7 @@ export const reduce = (state: AppState, action: Action): AppState => {
     return {
       ...state,
       todayVersion: state.todayVersion + 1,
+      groupsVersion: state.groupsVersion + 1,
       reconnectedAt: action.seq,
       messageGaps: rearmGaps(state.messageGaps),
     };

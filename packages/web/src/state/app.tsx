@@ -12,6 +12,7 @@ import {
   type ContentPlanId,
   type DecideDraftRequest,
   type DecideProjectOfferRequest,
+  type DecideTeamOfferRequest,
   type DraftId,
   type ProjectResponse,
   type TodayResponse,
@@ -20,6 +21,7 @@ import {
   type DecideApprovalRequest,
   type GrantId,
   type GroupId,
+  type Message,
   type MessageId,
   type Preference,
   type CreateRoutineRequest,
@@ -106,6 +108,13 @@ export type AppActions = {
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
   decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
+  // 确认后新请的人和变大的团队由推送带来；这里只落那条卡和团队的新名单。
+  // 回的是服务端落定后的那条消息，卡拿它的状态，不用等清单重拉；会话没了回 undefined。
+  decideTeamOffer: (messageId: MessageId, request: DecideTeamOfferRequest) => Promise<Message | undefined>;
+  // 补拉团队名单。连着失败 REFRESH_TRIES 趟才停，停了由界面给重试。
+  loadGroups: () => Promise<void>;
+  // 补拉待办角标的服务端绝对数，失败和停下的规则同 loadGroups。
+  loadPendingCounts: () => Promise<void>;
   createTool: (draft: CreateToolRequest) => Promise<void>;
   updateTool: (toolId: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
@@ -150,7 +159,24 @@ export type Scope = { api: Api; put: (action: Action) => void; session: Session 
 // 例行和会做的活不跟重连走，在途的那趟无论多早发出都算数。
 const ANY_FLIGHT = 0 as Seq;
 
+const REFRESH_TRIES = 3;
+const retryDelay = (failures: number): number => 500 * 2 ** (failures - 1);
+
+const pause = (ms: number, signal: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+
 // 同一会话里同一个桶只留一趟在途请求。在途那趟发得不比 after 晚就直接跟着它；早了就记一笔待补，它回来后再拉一次。
+// 失败的那趟按 tries 退避重来，重来的一趟取新号，也就兑现了在途时记下的待补。连着失败 tries 趟才停，
 // 失败只记在桶上由界面给重试，不再往外抛；401 和会话取消照旧交给 signedIn。
 // run 回 "terminal" 表示结果已是终态，待补的那一笔作废，不再拉。
 export type LoadBucket = (
@@ -158,11 +184,12 @@ export type LoadBucket = (
   key: LoadKey,
   after: Seq,
   run: (seq: Seq) => Promise<void | "terminal">,
+  tries?: number,
 ) => Promise<void>;
 
 export const createLoadBucket =
   (nextSeq: () => Seq): LoadBucket =>
-  async ({ put, session }, key, after, run) => {
+  async ({ put, session }, key, after, run, tries = 1) => {
     const flying = session.flights.get(key);
     if (flying !== undefined) {
       if (flying.seq <= after) flying.again = true;
@@ -172,11 +199,20 @@ export const createLoadBucket =
     session.flights.set(key, flight);
     put({ type: "load_status", key, status: "loading" });
     try {
-      let outcome = await run(flight.seq);
-      while (flight.again && outcome !== "terminal") {
+      let failures = 0;
+      for (;;) {
+        try {
+          const outcome = await run(flight.seq);
+          failures = 0;
+          if (outcome === "terminal" || !flight.again) break;
+        } catch (cause) {
+          if (session.signal.aborted || isUnauthorized(cause)) throw cause;
+          failures += 1;
+          if (failures >= tries) throw cause;
+          await pause(retryDelay(failures), session.signal);
+        }
         flight.again = false;
         flight.seq = nextSeq();
-        outcome = await run(flight.seq);
       }
       put({ type: "load_status", key, status: "idle" });
     } catch (cause) {
@@ -532,9 +568,48 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "message_upserted", message, seq });
         if (group === null || task === null) return undefined;
         // 推送里的 group_created 可能还在路上，侧栏没这个群时跳过去会被弹回首页，所以拿回包先入列。
-        put({ type: "group_created", group, task });
+        put({ type: "group_created", group, task, seq });
         return group.id;
       }),
+      decideTeamOffer: signedIn(async ({ api, put }, messageId: MessageId, request: DecideTeamOfferRequest) => {
+        const seq = nextSeq();
+        put({ type: "team_offer_sending", messageId });
+        try {
+          const { message, group } = await api.decideTeamOffer(messageId, request);
+          put({ type: "message_upserted", message, seq });
+          if (group !== null) put({ type: "group_updated", group, seq });
+          // 首页和项目页的「等你」是服务端的快照，卡的去留（确认走了、先放着排到后面）得重拉才对。
+          put({ type: "today_version_bumped" });
+          return message;
+        } finally {
+          put({ type: "team_offer_sent", messageId });
+        }
+      }),
+      // 号在请求发出时取，和别的群写入同一套规则。在途那趟总比这次要的旧，一律记待补。
+      loadGroups: signedIn((scope) =>
+        loadBucket(
+          scope,
+          "groups",
+          nextSeq(),
+          async (seq) => {
+            const { items } = await scope.api.groups();
+            scope.put({ type: "groups_loaded", groups: items, seq });
+          },
+          REFRESH_TRIES,
+        ),
+      ),
+      loadPendingCounts: signedIn((scope) =>
+        loadBucket(
+          scope,
+          "counts",
+          nextSeq(),
+          async (seq) => {
+            const [bots, groups] = await Promise.all([scope.api.bots(), scope.api.groups()]);
+            scope.put({ type: "pending_counts_loaded", bots: bots.items, groups: groups.items, seq });
+          },
+          REFRESH_TRIES,
+        ),
+      ),
       createTool: signedIn(async ({ api, put }, draft: CreateToolRequest) => {
         put({ type: "tool_upserted", tool: await api.createTool(draft) });
       }),
@@ -570,6 +645,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           : { kind: "failed", message: "连不上服务，稍后再试" };
         dispatch({ type: "anonymous", login });
       });
+    // 会话的请求、退避等待和待补的那趟都只听会话的 signal，Provider 卸载时不结束会话，它们会接着跑。
+    return () => sessions.end();
   }, [sessions, enter]);
 
   const session = state.status === "ready" ? state.session : null;
@@ -587,27 +664,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     let retry: ReturnType<typeof setTimeout> | null = null;
     let failures = 0;
     let hasConnected = false;
-    let countsQueued = false;
+    let countsTimer: ReturnType<typeof setTimeout> | null = null;
     // 旧连接关掉之前已经排进事件队列的回调仍会跑，每个回调先认一下这还是不是当前会话。
     const live = () => !cancelled && sessions.current()?.id === session;
     const expire = () => {
       sessions.end(session);
       put({ type: "anonymous", login: { kind: "failed", message: "登录已过期，请重新登录" } });
     };
+    // 角标只认服务端绝对数。会改待办数的推送和重连都只换来一趟补拉：去抖 200ms 攒成一趟，
+    // 在途、失败重试和停下后的重试都归 loadPendingCounts 的桶管。
     const refreshPendingCounts = () => {
-      if (countsQueued) return;
-      countsQueued = true;
-      queueMicrotask(() => {
-        countsQueued = false;
-        if (cancelled) return;
-        void Promise.all([scoped.api.bots(), scoped.api.groups()])
-          .then(([bots, groups]) => {
-            if (!cancelled) put({ type: "pending_counts_loaded", bots: bots.items, groups: groups.items });
-          })
-          .catch((cause: unknown) => {
-            if (!cancelled && isUnauthorized(cause)) expire();
-          });
-      });
+      if (countsTimer !== null) return;
+      countsTimer = setTimeout(() => {
+        countsTimer = null;
+        if (!cancelled) actions.loadPendingCounts().catch(() => undefined);
+      }, 200);
     };
     // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
     // 重拉失败也结，卡不能一直停在「等你扫码」；重拉期间新点的登录 startedAt 更大，不受影响。
@@ -645,6 +716,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         failures = 0;
         if (hasConnected) {
           put({ type: "push_reconnected", seq: nextSeq() });
+          refreshPendingCounts();
           recoverLogins(null, "lapsed");
         }
         hasConnected = true;
@@ -676,9 +748,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     return () => {
       cancelled = true;
       if (retry !== null) clearTimeout(retry);
+      if (countsTimer !== null) clearTimeout(countsTimer);
       socket?.close();
     };
-  }, [session, sessions, nextSeq]);
+  }, [session, sessions, nextSeq, actions]);
+
+  const groupsVersion = state.status === "ready" ? state.groupsVersion : 0;
+  useEffect(() => {
+    if (session !== null && groupsVersion > 0) actions.loadGroups().catch(() => undefined);
+  }, [session, groupsVersion, actions]);
 
   const theme = state.status === "ready" ? state.settings.theme : "system";
   useEffect(() => applyTheme(theme), [theme]);

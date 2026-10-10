@@ -47,7 +47,13 @@ export type SessionId = number & { readonly __session: unique symbol };
 // 群历史、例行、会做的活三种按桶拉的列表各自的拉取状态。没有记录就是 idle。
 export type LoadStatus = "idle" | "loading" | "failed";
 export type LoadKey =
-  `messages:${GroupId}` | `message:${MessageId}` | "routines" | `skills:${BotId}` | `preferences:${BotId}`;
+  | `messages:${GroupId}`
+  | `message:${MessageId}`
+  | "routines"
+  | "groups"
+  | "counts"
+  | `skills:${BotId}`
+  | `preferences:${BotId}`;
 
 // 某条消息的流式 delta 漏了版本：手上这份到 revision 为止都不可信，要单独把这一条拉回来，见 groups.ts 的 message_delta。
 // seq 是最近一次发现漏档时取的号，比它早发出的那趟拉取不算数。attempts 是单拉连着失败了几次，
@@ -56,6 +62,8 @@ export type MessageGap = { groupId: GroupId; revision: number; seq: Seq; attempt
 export const MESSAGE_GAP_ATTEMPTS = 3;
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
+
+export type PendingCounts = { pendingApprovals: number; pendingHandoffs: number };
 
 export type Conversation =
   | {
@@ -106,6 +114,8 @@ export type ContentBook = {
 
 export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
+export type TeamOfferOutcome = "confirmed" | "dismissed";
+
 export type AppState =
   | { status: "loading" }
   | { status: "anonymous"; login: LoginPhase; register: LoginPhase }
@@ -117,6 +127,20 @@ export type AppState =
       conversations: Conversation[];
       groupTurns: Record<GroupId, GroupTurn>;
       turnEpochs: Record<GroupId, number>;
+      // 团队名单最后一次写入的号。操作回包带请求发出时的号，比它晚到的队伍推送写过的名单不会被旧回包盖回去。
+      groupStamps: Stamps;
+      // 名单可能落后于服务端时加一：群写入被序号挡掉、推送重连。每加一次补拉一趟 /api/groups。
+      groupsVersion: number;
+      // 待办角标只认 groups_loaded 和 pending_counts_loaded 两份绝对快照，按群记最后写入的那趟请求发出时的号。
+      // 更早发出的请求回包不写；推送不改数，只换来一趟补拉。
+      countStamps: Stamps;
+      // 群还没入列时就写进来的计数。名单和建群推送各走各的路，计数可能先到；群入列时用这里的数，不用入列那份里更早的。
+      // 不入列的记录由更晚的完整计数回收：里面没有这个群就删，并盖号挡住更早发出的计数晚到。会话重建时整表清空。
+      unlistedCounts: Record<GroupId, PendingCounts>;
+      // 建队卡点完拿到的终态。首页、项目页读的清单正文可能是旧快照，三个入口的卡都先认这里。
+      offerOutcomes: Record<MessageId, TeamOfferOutcome>;
+      // 建队卡点下去还没回包的。卡折叠重开、换页都是新实例，读这里才知道该锁着。
+      offersInFlight: Record<MessageId, true>;
       messages: Shelf<GroupId, Message>;
       approvals: Record<ApprovalId, Approval>;
       handoffs: Record<HandoffId, Handoff>;
@@ -161,8 +185,8 @@ export type Action =
   | { type: "bot_created"; bot: Bot; groupId: GroupId }
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
-  | { type: "group_created"; group: Group; task: TopicTask }
-  | { type: "group_updated"; group: Group }
+  | { type: "group_created"; group: Group; task: TopicTask; seq: Seq }
+  | { type: "group_updated"; group: Group; seq: Seq }
   | { type: "group_turn"; turn: GroupTurn }
   | { type: "turns_cleared" }
   | { type: "task_updated"; task: TopicTask }
@@ -180,7 +204,10 @@ export type Action =
   | { type: "grant_deleted"; grantId: GrantId }
   | { type: "handoffs_loaded"; handoffs: Handoff[] }
   | { type: "handoff_pushed"; handoff: Handoff }
-  | { type: "pending_counts_loaded"; bots: BotListItem[]; groups: GroupListItem[] }
+  | { type: "pending_counts_loaded"; bots: BotListItem[]; groups: GroupListItem[]; seq: Seq }
+  | { type: "team_offer_sending"; messageId: MessageId }
+  | { type: "team_offer_sent"; messageId: MessageId }
+  | { type: "groups_loaded"; groups: GroupListItem[]; seq: Seq }
   | { type: "routines_loaded"; routines: Routine[]; seq: Seq }
   | { type: "routine_upserted"; routine: Routine; seq: Seq }
   | { type: "routine_removed"; routineId: RoutineId; seq: Seq }

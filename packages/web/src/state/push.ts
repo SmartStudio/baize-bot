@@ -44,6 +44,8 @@ export const createPushHandlers = ({
       dispatch({ type: "message_upserted", message: push.message, seq });
       const { body, groupId } = push.message;
       if (body.kind === "bot" && !body.streaming && body.text !== "" && inAssistantChat(groupId)) bumpToday();
+      // 建队卡是首页和项目页「等你」里的一行，新卡落地、别的窗口点了确认都得重拉。
+      if (body.kind === "team_offer") bumpToday();
     },
     message_delta: (push, seq) => {
       dispatch({
@@ -60,31 +62,26 @@ export const createPushHandlers = ({
     bot_created: (push) => dispatch({ type: "bot_created", bot: push.bot, groupId: push.groupId }),
     bot_updated: (push) => dispatch({ type: "bot_updated", bot: push.bot }),
     bot_deleted: (push) => dispatch({ type: "bot_removed", botId: push.botId }),
-    group_created: (push) => {
+    group_created: (push, seq) => {
       // 建群的人已经从 POST 的响应知道了这个群。这条推送是给同一个账号别的窗口看的，不抢它们当下的选中。
-      dispatch({ type: "group_created", group: push.group, task: push.task });
+      dispatch({ type: "group_created", group: push.group, task: push.task, seq });
       // 电脑 hello 补建主助理时首页的快照里 assistantGroupId 还是 null，输入框禁用着，要重拉才解开。
       bumpToday();
     },
-    group_updated: (push) => dispatch({ type: "group_updated", group: push.group }),
+    group_updated: (push, seq) => dispatch({ type: "group_updated", group: push.group, seq }),
     group_turn: (push) => dispatch({ type: "group_turn", turn: push }),
     task_updated: (push) => dispatch({ type: "task_updated", task: push.task }),
+    // 审批、交接的推送只改卡，角标等补拉回来的服务端数。
     approval_updated: (push) => {
-      const state = mine();
-      const unseenTerminal =
-        push.approval.status !== "pending" && state !== null && state.approvals[push.approval.id] === undefined;
       dispatch({ type: "approval_pushed", approval: push.approval });
-      if (unseenTerminal) refreshPendingCounts();
+      refreshPendingCounts();
       bumpToday();
     },
     grant_deleted: (push) => dispatch({ type: "grant_deleted", grantId: push.grantId }),
     handoff_updated: (push) => {
       // 交接是 Bot 等 Bot，不是等你。它记角标，但不该弹一个系统通知把你从别的事上拽回来。
-      const state = mine();
-      const unseenTerminal =
-        push.handoff.status !== "pending" && state !== null && state.handoffs[push.handoff.id] === undefined;
       dispatch({ type: "handoff_pushed", handoff: push.handoff });
-      if (unseenTerminal) refreshPendingCounts();
+      refreshPendingCounts();
     },
     routine_updated: (push, seq) => dispatch({ type: "routine_upserted", routine: push.routine, seq }),
     routine_deleted: (push, seq) => dispatch({ type: "routine_removed", routineId: push.routineId, seq }),
