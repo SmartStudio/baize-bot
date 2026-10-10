@@ -1,6 +1,7 @@
-import { mkdirSync, realpathSync } from "node:fs";
+import { lstatSync, mkdirSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { BotId, GroupId } from "@baize/shared";
 
 // Pi 有四个独立的落盘回落点，不给就各自回落到 ~/.pi/agent：
@@ -52,6 +53,8 @@ export function ensureBotDirs(dirs: BotDirs): BotDirs {
 export interface ForbiddenZones {
   readonly hidden: readonly string[];
   readonly readOnly: readonly string[];
+  /** `hidden` 里来自 `config.browser.profileDir` 的那一条，解不出真实路径时报错要点名这项配置。 */
+  readonly browserProfileDir: string | null;
 }
 
 // 助理 Chrome 的 profile 只认 config 给的路径，不按数据目录的布局去猜：猜错了等于没禁。
@@ -72,19 +75,104 @@ export function forbiddenZones(dirs: Pick<BotDirs, "draftsDir">, browserProfileD
       ...(browserProfileDir === null ? [] : [browserProfileDir]),
     ],
     readOnly: [dirs.draftsDir],
+    browserProfileDir,
   };
 }
 
-export function logicalResolve(input: string, cwd: string): string {
-  let normalized = input;
+/** 路径按 Pi 的规则解不出来（比如 `file://` 带了主机名）。闸门拿到它就拒绝，不猜。 */
+export class PathError extends Error {}
+
+/** 符号链接成环或套得太深，解不到真正的目标。调用方可以按这一类单独给出路。 */
+export class LinkLoopError extends PathError {}
+
+// 下面三段是 Pi dist/utils/paths.js 的 normalizePath / resolvePath 的移植，参数固定成 read、write、edit 打开文件时用的
+// `{ normalizeUnicodeSpaces: true, stripAtPrefix: true }`。Pi 没有导出它们；gate.test.ts 拿同一批输入和 Pi 对账。
+// 闸门看到的路径必须和 Pi 真正打开的是同一个文件，少一条规则就是一条绕过。
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+const normalizeWindowsShellPath = (filePath: string): string => {
+  if (!filePath.startsWith("/") || filePath.startsWith("//") || filePath.includes("\\")) return filePath;
+  const match = /^\/(?:mnt\/|cygdrive\/)?([a-z])(?:\/(.*))?$/i.exec(filePath);
+  if (match === null || match[1] === undefined) return filePath;
+  const suffix = match[2]?.replaceAll("/", "\\");
+  return `${match[1].toUpperCase()}:\\${suffix ?? ""}`;
+};
+
+const normalizeLikePi = (input: string): string => {
+  let normalized = input.replace(UNICODE_SPACES, " ");
   if (normalized.startsWith("@")) normalized = normalized.slice(1);
-  let expanded = normalized;
-  if (expanded === "~") expanded = homedir();
-  else if (expanded.startsWith("~/")) expanded = join(homedir(), expanded.slice(2));
-  return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
+  if (process.platform === "win32") normalized = normalizeWindowsShellPath(normalized);
+  const home = homedir();
+  if (normalized === "~") return home;
+  if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
+    return join(home, normalized.slice(2));
+  }
+  if (normalized.startsWith("file://")) {
+    try {
+      return fileURLToPath(normalized);
+    } catch (error) {
+      throw new PathError(`file:// 地址解不出本地路径：${normalized}`, { cause: error });
+    }
+  }
+  return normalized;
+};
+
+export function logicalResolve(input: string, cwd: string): string {
+  const normalized = normalizeLikePi(input);
+  return isAbsolute(normalized) ? resolve(normalized) : resolve(cwd, normalized);
 }
 
+/** 沿链接往下解最多这么多层，和 Linux 内核的 MAXSYMLINKS 一样；macOS 内核是 32，套到这里 Pi 的 open 早已报 ELOOP。 */
+const MAX_LINK_HOPS = 40;
+
+const errorCode = (error: unknown): unknown =>
+  error && typeof error === "object" && "code" in error ? error.code : undefined;
+
+const realOrSelf = (path: string): string => {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+};
+
+/**
+ * 内核解链接目标串的顺序：逐段往下走，`..` 退的是已解开链接的目录。`path.resolve` 是字面归一化，`dirlink/../x`
+ * 会把 `dirlink/..` 直接抵消，而内核先进 dirlink 的真实目录再退一级，两者落点不同，字面算法就是一条绕过。
+ */
+const walkTarget = (base: string, raw: string): string => {
+  let current = base;
+  for (const part of raw.split("/")) {
+    if (part === "" || part === ".") continue;
+    current = part === ".." ? dirname(realOrSelf(current)) : join(current, part);
+  }
+  return current;
+};
+
+/**
+ * `path` 是符号链接就给出它指向的绝对路径，不是链接或读不到返回 null。相对目标的基准是链接所在目录的字面路径：
+ * `..` 在 walkTarget 里先 realpath 再退，其余段由调用方接着 realpath，所以基准不必先解开。
+ */
+const linkTarget = (path: string): string | null => {
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return null;
+    const raw = readlinkSync(path);
+    return isAbsolute(raw) ? walkTarget("/", raw) : walkTarget(dirname(path), raw);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 已存在的部分用 realpath，不存在的尾巴原样接上。悬空链接 realpath 解不出来，但 Pi 写它时内核会沿链接把那头的文件
+ * 建出来，所以这里也沿 readlink 走到那头再接尾巴，不然工作目录里一条指向外面的悬空链接就是一条绕过。
+ * 成环或套得太深的链接解不到真正的目标，抛 PathError，调用方不该猜它落在哪。
+ */
 export function realpathExisting(logical: string): string {
+  return resolveExisting(logical, 0);
+}
+
+function resolveExisting(logical: string, hops: number): string {
   const suffix: string[] = [];
   let current = logical;
   for (;;) {
@@ -92,8 +180,17 @@ export function realpathExisting(logical: string): string {
       const real = realpathSync.native(current);
       return suffix.length === 0 ? real : join(real, ...suffix);
     } catch (error) {
-      const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
-      if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM" && code !== "ENOTDIR") return logical;
+      const code = errorCode(error);
+      if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM" && code !== "ENOTDIR" && code !== "ELOOP") {
+        return logical;
+      }
+      const target = linkTarget(current);
+      if (target !== null) {
+        if (hops >= MAX_LINK_HOPS) {
+          throw new LinkLoopError(`符号链接成环或套了超过 ${MAX_LINK_HOPS} 层，解不到真正的目标：${logical}`);
+        }
+        return resolveExisting(suffix.length === 0 ? target : join(target, ...suffix), hops + 1);
+      }
       const parent = dirname(current);
       if (parent === current) return logical;
       suffix.unshift(current.slice(parent.length + 1));

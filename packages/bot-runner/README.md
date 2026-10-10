@@ -4,14 +4,14 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot
 
 `createRunner(config)` 返回六个方法：
 
-| 方法 | 对应的下行报文 | 干什么 |
-| --- | --- | --- |
-| `applyConfig(config)` | `config` | 按 Bot 增量对账定义、工具、skill 和网关凭据 |
-| `prompt(message)` | `prompt` | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done` |
-| `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论 |
-| `pause(botId)` | `pause` | 立起这个 Bot 的暂停闸门；正在执行的工具跑完，下一次工具调用或新 prompt 挂起 |
-| `resume(botId)` | `resume` | 放开暂停闸门，原 run 从等待点继续 |
-| `stop()` | 连接关闭 | 停掉所有会话 |
+| 方法                               | 对应的下行报文    | 干什么                                                                      |
+| ---------------------------------- | ----------------- | --------------------------------------------------------------------------- |
+| `applyConfig(config)`              | `config`          | 按 Bot 增量对账定义、工具、skill 和网关凭据                                 |
+| `prompt(message)`                  | `prompt`          | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done`                        |
+| `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论                                                        |
+| `pause(botId)`                     | `pause`           | 立起这个 Bot 的暂停闸门；正在执行的工具跑完，下一次工具调用或新 prompt 挂起 |
+| `resume(botId)`                    | `resume`          | 放开暂停闸门，原 run 从等待点继续                                           |
+| `stop()`                           | 连接关闭          | 停掉所有会话                                                                |
 
 上行报文不从这里直接出网，交给 `config.send` 回调，由电脑代理写进 WebSocket。每条出边界前过 `AgentToControl.parse`。
 
@@ -63,7 +63,7 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 每次 Pi `tool_call` 都先走 `src/gate.ts` 的纯函数。判定顺序固定为禁区、硬清单、`config.grants` 与账号权限档、默认表。禁区授权也不能越过；`spend`、`account_security` 和 `delete` 每次都问。项目授权只在同一 `groupId` 生效，永久授权还会再过 `GRANTABLE_SCOPES`，畸形的硬清单或 `write_outside` 永久授权不会被采用。
 
-`read`、`write`、`edit` 先展开 `~` 和开头的 `@`，再对已存在的路径段做 realpath。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。禁区由 `src/paths.ts` 的 `forbiddenZones` 给出，闸门和两种沙箱共用一份。`hidden` 读写都拒：`~/.ssh`、钥匙串、用户自己浏览器的登录资料，给了 `config.browser` 时再加上助理 Chrome 的整个 `profileDir`；没给就不加，也不按数据目录去猜。`readOnly` 只拒改：这个 Bot 的 `drafts/`。写和删的目标若是禁区的祖先（比如删整个 Bot 目录）也直接拒。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
+`read`、`write`、`edit` 的路径按 Pi 打开文件时的同一套规则归一化（`src/paths.ts` 的 `logicalResolve`，移植自 Pi 未导出的 `normalizePath`/`resolvePath`）：Unicode 空格换成普通空格，去掉开头的 `@`，展开 `~`，`file://` 地址转成本地路径，再对已存在的路径段做 realpath。悬空的符号链接 realpath 解不出来，但 Pi 写它时内核会沿链接把那头的文件建出来，所以 `realpathExisting` 对悬空链接沿 `readlink` 逐层走到那头，再按那头的位置判：指到工作目录外就是 `write_outside`，`read_only` 里拒绝；指到禁区就拒绝。链接的目标串按内核的顺序逐段走：相对目标以链接所在目录为基准，`..` 退的是已解开链接的真实目录，不是字面上的上一级，`dirlink/../x` 先进 `dirlink` 的真实目录再退一级，躺在目录链接下的链接写 `../x` 退到的是真实目录的上一级；`test/gate.test.ts` 的「链接目标里的 `..` 按内核的顺序退已解开的目录」一组让 Pi 的 write 真写一次，断言闸门的判定和 Pi 的落点一致。成环或超过 40 层（Linux 的 MAXSYMLINKS）解不到真正的目标，抛 `LinkLoopError`（`PathError` 的子类），闸门变成拒绝，理由点名符号链接；`rm`、`unlink`、`mv` 的对象是成环的链接本身时，理由再补一句出路：告诉用户在电脑上直接删掉它，或换一条不经过它的路径。禁区本身解不出来（`config.browser.profileDir` 指向成环的链接）时两种沙箱都起不来，bash 报错点名这项配置，不会裸跑。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。Pi 打不开的 `file://`（带主机名、百分号编码坏掉）抛 `PathError`，闸门接住变成拒绝，不往 Pi 的 `tool_call` 外抛。`test/gate.test.ts` 拿同一批输入和 Pi 的 `resolvePath` 对账，闸门看到的路径必须和 Pi 真正打开的是同一个文件。禁区由 `src/paths.ts` 的 `forbiddenZones` 给出，闸门和两种沙箱共用一份。`hidden` 读写都拒：`~/.ssh`、钥匙串、用户自己浏览器的登录资料，给了 `config.browser` 时再加上助理 Chrome 的整个 `profileDir`；没给就不加，也不按数据目录去猜。`readOnly` 只拒改：这个 Bot 的 `drafts/`。写和删的目标若是禁区的祖先（比如删整个 Bot 目录）也直接拒。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
 
 bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。
 
@@ -95,7 +95,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具、`src/team.ts` 的 `propose_team` 和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 偏好和品牌手册
 
@@ -104,6 +104,49 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 ## 建队卡
 
 `src/team.ts` 的 `propose_team` 只挂给主助理，且只在主助理单聊里能调用。参数是项目清单里的 `projectGroupId` 和 1 到 5 个人选，已有 Bot 给 botId，新人给名字、tags、描述和理由。工具补齐 tags 与 suggested 默认值，只挑协议字段再校验，错误翻成中文；通过后发 `team_offer`，不走工具审批，卡本身等用户确认。`ASSISTANT_RULE` 要求项目缺人时出建队卡，每个人选写理由，只问要不要这个人，不问权限与模型，发出去后等确认。
+
+## 例行卡和例行边界
+
+`src/routine-offer.ts` 的 `propose_routine` 只挂给主助理。参数是 name（最多 40 字）、instruction、cron、boundary（`read_only` 或 `draft`），可选 `projectGroupId`、`executorBotId`、`purpose`（缺省 `plan`）和 `onToday`（缺省 false）。运行器只查 cron 是不是 5 段（分 时 日 月 周），写法对不对由控制面在用户点「加上」时用 croner 校验。`projectGroupId` 必须在项目清单里，不写时落在当前群（当前群是项目群才算），都不是就不挂项目。`executorBotId` 不写就是调用它的这个助理；执行者在当前项目群里时才对着成员名单查，别的群的成员运行器看不到，原样交给控制面。通过后发 `routine_offer`，不走工具审批，卡本身等用户确认；工具结果叫模型等「加上」，别自己建例行，也别再出第二张。`ASSISTANT_RULE` 写明用户说了要重复做的事、想定期做时调它出卡，不替用户直接建。
+
+例行触发的 run 在 `prompt` 里带 `routine: { routineId, boundary }`，运行器存进 `ActiveRun.routine`，用户当面派的 run 是 `null`。`src/gate.ts` 的 `decide` 对 `boundary` 为 `read_only` 的 run 一律「失败即关」：认得出是读的放行，认得出是写的拒绝，认不出的也拒绝，不退化成问用户。分四层，前三层排在授权和默认表之前，永久授权也救不了被拦的调用。`draft` 边界和 `routine` 为 `null` 的 run 一层都不过。`GateCall.routine` 是必填字段，漏传的调用方编译不过，不会悄悄不设防。
+
+1. 按工具名拦，表是 `READ_ONLY_TOOL_BARS`。这些工具平时归 `write_workspace` 直接放行，靠动作拦不住。「只读」按不改东西理解，所以下面这些都在表里：
+
+   | 工具                                                                  | 理由里的「不能……」                                             |
+   | --------------------------------------------------------------------- | -------------------------------------------------------------- |
+   | `create_draft`、`edit_draft`、`propose_plan`                          | 起草                                                           |
+   | `propose_project`、`propose_team`、`propose_routine`、`propose_skill` | 出方案卡、出建队卡、出例行卡、问用户存不存 skill               |
+   | `set_cadence`                                                         | 改项目节奏                                                     |
+   | `update_checklist`                                                    | 改任务卡清单                                                   |
+   | `set_chief`                                                           | 换首席                                                         |
+   | `handoff_task`、`accept_handoff`                                      | 发起交接、接手交接                                             |
+   | `mention_bot`                                                         | 叫别的 Bot 干活：被叫的 Bot 会起一条不带只读边界的 run，是旁路 |
+
+   放行的是 `read_task`、`report_metric`、`submit_review`、`remember_preference` 和 `call_helper`。`test/gate.test.ts` 有一条分区用例把 `INTERNAL_TOOLS` 和起草工具逐个过一遍，每个名字要么在上面的表里被拒、要么在放行清单里被放行，新增一个内部工具而不表态，这条用例就红。
+
+2. 工具连接（MCP）里的操作，只在 `read_only` 里不看 `needsApproval`。它是用户能改的审批偏好，不是操作的性质，免审批的发信插件也不该因此在只读例行里放行。判断只看名字，函数是 `readOnlyConnectedDenial`：
+
+   | 名字                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | 处理                                                                                                                                                                                                                                                                                                                                         |
+   | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | 名字先切段：下划线、连字符、点号、驼峰边界（含 `getXDelete` 这种大写连着的）都是分隔，段统一小写，所以 `GET_orders`、`getOrders`、`get-orders`、`get.orders` 是同一个名字。第一段是 `get`、`list`、`read`、`search`、`fetch`、`query`、`find`、`lookup`、`describe`、`view`、`count`，后面至少还有一段，且后面的段没有连词也没有写词                                                                                                                                                                                                                                                                                                                                           | 放行；`needsApproval` 为 true 时仍按原规则问用户，不比普通 run 松                                                                                                                                                                                                                                                                            |
+   | 读类开头但后面有连词 `and`、`then`、`or`：`fetch_and_store`、`get_or_create_user`、`list_then_archive`、`get_and_open_pr`，连词后面接的是什么都当没把握                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 拒绝，理由说不确定是否只读                                                                                                                                                                                                                                                                                                                   |
+   | 读类开头但后面有写词，词表是 `WRITE_WORDS`。`verb` 类（`delete`、`create`、`send`、`pay`、`drop`、`truncate`、`exec`、`kill`、`reboot`、`restart`、`reset`、`wipe`、`replace`、`unlock`、`deploy`、`enable`、`invite`、`shutdown`、`clear`、`assign`、`refund` 等）落在哪一段都算写：`get_and_delete_rows`、`get_x-delete`、`getXDelete`、`get_truncate_table`、`fetch_reboot`、`describe_shutdown`、`fetch_refund`。`verb_or_noun` 类（`update`、`set`、`store`、`comment`、`message`、`email`、`post`、`run`、`ban`、`edit`、`import`、`mark` 等）只在后面还跟着别的段时算写：`view_update_profile`、`lookup_set_price`、`get_store_file`、`view_edit_page`、`get_mark_read` | 拒绝，理由说不确定是否只读；写词落在末段是宾语，`get_update`、`get_run`、`get_comment`、`list_message`、`get_user_email`、`get_store` 仍算读类；`get_user_posts`、`list_deleted_rows`、`count_updates` 的段只是像写词，也算读类。`open` 不在词表里，`get_open_issues`、`list_open_prs`、`get_open_ticket` 是读，`get_and_open_pr` 由连词兜住 |
+   | 按名字认得出的写：`publish_`、`post_`、`comment_`、`reply_`、`create_pr_` 开头                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 拒绝，理由点名发布                                                                                                                                                                                                                                                                                                                           |
+   | `send_`、`message_`、`email_`、`dm_` 开头                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 拒绝，理由点名联系别人                                                                                                                                                                                                                                                                                                                       |
+   | `delete_`、`remove_` 开头                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | 拒绝，理由点名删东西                                                                                                                                                                                                                                                                                                                         |
+   | `like_`、`follow_`、`favorite_`、`star_`、`engage_` 开头                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 拒绝，理由点名在网页上点或填                                                                                                                                                                                                                                                                                                                 |
+   | 其余名字：`render_chart` 这类认不出的，`pay_`、`install_`、`authorize_` 这类普通 run 里会问、但不在只读例行拒绝表里的，驼峰的 `sendEmail`，只有一段的 `get`、`Get`、`get-`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 拒绝，理由是「这是「只读」例行，不能用不确定是否只读的插件操作」                                                                                                                                                                                                                                                                             |
+
+   写的名字识别沿用普通 run 的 `mcpAction`，只认小写加下划线的前缀；读类的切段归一化只用在只读例行的放行判断上。认不出的一律走最后一行，所以多半是被误拒，不会被误放。误放只剩两类，是这套规则的上限，不修：词表之外的写动词（读头加一张写词黑名单，黑名单没有的词就放），以及切分器看不见的写词：粘在一段里的（`get_deleteall`、`get_sendmail`、`get_removeuser`，`deleteall` 不等于 `delete`）和非 ASCII 的（`get_orders_删除`，非 ASCII 段被 `[^a-z0-9]+` 切掉后直接消失）。要在这两类上也失败即关，只读例行就得只信服务端声明的 `readOnlyHint`，名字只用来补充拒绝。查不到归属的名字（`GateCall.source` 为 `null`，撤销连接后会话里残留的旧 MCP 工具）和调用方直接注入的 `extensionTools`（`source.kind === "extension"`）既不是运行器自己的工具，也认不出是只读，`read_only` 里一律拒绝，理由说只能用运行器自带的工具和认得出是只读的插件操作。普通 run 里查不到归属的当未知外部操作（`external_write`）问用户，`extensionTools` 是宿主代码，仍按 `write_workspace` 放行。
+
+3. 没有系统沙箱时（`GateCall.sandbox === "none"`，`bash` 工具读的是 `createSandboxedBash` 回报的种类）`bash` 一律拒绝，理由「这台电脑没有沙箱，只读例行里不能执行命令」。没有沙箱时命令只剩解析，挡不住同义写法，问用户点个允许等于没有边界，所以不看命令内容，也不退化成审批。有沙箱时仍按命令分类：只读命令放行，删东西被第四层拒，`curl` 这类仍问用户。
+
+4. 按动作拦：其余工具分类之后，`publish`、`message_person`、`engage`、`write_outside`、`delete` 一律 `deny`。表是 `Record<ActionKind, string | null>`，新增动作种类编译就会要求表态。读网页、读工作目录里的文件照常放行，`shell`（有沙箱时）、`install`、`spend`、`account_security`、`external_write` 不在这层拦，仍按原来的规则问。
+
+四层的理由都是中文，说明这是「只读」例行、不能做什么，需要的话请用户改成「草稿等你批」。
+
+`composePrompt` 在「当前这条」之前按边界加一段「例行边界：」：`read_only` 写「这次只读，不起草不发布不联系人，查到的结果写在回复里」，让模型动手前就知道，不是撞了闸门才知道；`draft` 边界和用户当面派的 run 不写。表 `ROUTINE_BOUNDARY_NOTES` 是 `Record<RoutineBoundary, string | null>`，新增边界编译会要求表态。
 
 ## 指标上报
 
@@ -115,7 +158,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
+撞名先到先得：Pi 自带工具的名字（`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`，`src/mcp-tools.ts` 的 `PI_BUILT_IN_TOOLS` 从 Pi 导出的工厂取，`test/runner.test.ts` 拿它和 Pi 的 `allToolNames` 对账）整组保留，不管会话实际装了哪几个；运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。abort 不等在途的工具：Pi 的 bash 按进程组杀掉子进程；MCP 工具把 Pi 给的 `signal` 传进 `callTool`，服务端收到 cancelled 通知，这边当场返回；第一次调用还在等 `client.connect` 的 initialize 时，signal 一响就撤掉这次共享的连接（几条调用一起等同一个 initialize，谁先中止都撤），下次调用重新连，`close()` 也先撤还没回的 initialize 再关；浏览器工具排队中的调用一收到 signal 就以「这次浏览器操作被中止了」结束，正在跑的那次在下一条 CDP 命令处停下，工具步骤不等 30 秒的命令超时。被中止的只是这边的后续步骤：已经进管道的命令 Chrome 照样做完，它的回包和后面关闭路径发的命令在底层是交叠的。回包一般丢掉，只有 `Target.createTarget` 的迟到回包要接住，把建出来的页关掉，不然停机后留一个没人管的后台标签页。关页是清理，不走 signal，所以预算钉在 `closeTarget` 这一个函数上：每次 `Target.closeTarget` 最多等 `CLOSE_BUDGET_MS`（2 秒），Chrome 不回也不等 CDP 的 30 秒超时，命令已经发出，Chrome 自己会关。停机、换标签页、建页失败的收尾都走同一条，没有哪条关页路径能无界地挡住 serial 队列后面的 `close()`；关旧页之前标签页已经记成关闭，一次停机只会落在其中一条关页上，最多等一个预算。正在 `Page.navigate` 的还会发 `Page.stopLoading` 让 Chrome 放弃加载，`settle` 的轮询也跟着停。`test/runner.test.ts` 的几条「停机时…」用例分别对着不回应的网址、卡住的 `Runtime.evaluate` 和 `Page.captureScreenshot`、迟到的 `Target.createTarget`、不回的 `Target.closeTarget`、建页半路中止后清理关页也不回、不回 initialize 的 HTTP 服务和挂着不回的假 MCP 量停机耗时。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -123,14 +166,14 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 `src/topic.ts` 的 `createTopicTools` 挂六个工具，由 `createRunner` 按 Bot 建，不用调用方注册。
 
-| 工具 | 参数 | 返回 | 上行报文 |
-| --- | --- | --- | --- |
-| `read_task` | 无 | 整张任务卡的文本；群里没有任务卡时是 `这个群没有任务卡` | 无 |
-| `update_checklist` | `items: { text, done, ownerBotId? }[]`，最多 50 条 | `清单已更新，n/m 完成` | `task_checklist`，整份替换 |
-| `mention_bot` | `name`、`text` | `已经在群里 @ 了 <名字>。` | `mention`，带 `targetBotId` |
-| `handoff_task` | `to`、`done`、`notDone`、`next`、`checklistIndex?` | `已发交接报文给 <名字>，等它确认。` | `handoff`，带 `toBotId` |
-| `accept_handoff` | 无 | `已确认接手，你现在是当前经手。` | `handoff_accept`，带 `handoffId` |
-| `set_chief` | `name?` | `已请求将<名字>设为首席。` 或 `已请求卸任首席。` | `set_chief`，带 `targetBotId`；省略名字时为 `null` |
+| 工具               | 参数                                               | 返回                                                    | 上行报文                                           |
+| ------------------ | -------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------- |
+| `read_task`        | 无                                                 | 整张任务卡的文本；群里没有任务卡时是 `这个群没有任务卡` | 无                                                 |
+| `update_checklist` | `items: { text, done, ownerBotId? }[]`，最多 50 条 | `清单已更新，n/m 完成`                                  | `task_checklist`，整份替换                         |
+| `mention_bot`      | `name`、`text`                                     | `已经在群里 @ 了 <名字>。`                              | `mention`，带 `targetBotId`                        |
+| `handoff_task`     | `to`、`done`、`notDone`、`next`、`checklistIndex?` | `已发交接报文给 <名字>，等它确认。`                     | `handoff`，带 `toBotId`                            |
+| `accept_handoff`   | 无                                                 | `已确认接手，你现在是当前经手。`                        | `handoff_accept`，带 `handoffId`                   |
+| `set_chief`        | `name?`                                            | `已请求将<名字>设为首席。` 或 `已请求卸任首席。`        | `set_chief`，带 `targetBotId`；省略名字时为 `null` |
 
 `update_checklist` 在边界上把缺省的 `ownerBotId` 补成 `null`（协议里它是可空不是可省），再过 `z.array(ChecklistItem).max(50)`。`mention_bot` 和 `handoff_task` 的目标都走同一个 `otherMemberByName`，按 `members` 里的 `name` 精确匹配，匹配不上或者匹配到自己都是错误。
 
@@ -159,14 +202,14 @@ T-2482 给老客户回一封询价邮件
 2. [ ] 起草回信（经手：未指派）
 ```
 
-| 字段 | 空值渲染成 |
-| --- | --- |
-| `summary` 为空串 | `无` |
-| `dueAt` 为 null | `不限` |
-| `currentBotId` 为 null | `未指派` |
-| 清单项的 `ownerBotId` 为 null | `未指派` |
-| 清单为空 | 单独一行 `（空）` |
-| 成员名单为空 | `（空）` |
+| 字段                          | 空值渲染成        |
+| ----------------------------- | ----------------- |
+| `summary` 为空串              | `无`              |
+| `dueAt` 为 null               | `不限`            |
+| `currentBotId` 为 null        | `未指派`          |
+| 清单项的 `ownerBotId` 为 null | `未指派`          |
+| 清单为空                      | 单独一行 `（空）` |
+| 成员名单为空                  | `（空）`          |
 
 经手的 id 按 `members` 解析成名字。**名单里没有的 id 原样渲染那个 id**，不丢信息：成员名单是可能滞后于任务卡的，换成 `未指派` 就查不出到底是谁。
 
@@ -219,10 +262,10 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 `checklistIndex` 收的是**任务卡上那个序号**，从 1 起；协议里的 `checklistIndex` 是下标，从 0 起。换算和范围检查都在 `handoff_task` 里做：
 
-| 模型写的 | 结果 |
-| --- | --- |
-| 1 到清单长度 | 减一，上行成下标 |
-| 缺省 | `null` |
+| 模型写的              | 结果                           |
+| --------------------- | ------------------------------ |
+| 1 到清单长度          | 减一，上行成下标               |
+| 缺省                  | `null`                         |
 | 0、负数、超过清单长度 | 抛错，错误文本给出清单一共几条 |
 
 范围**故意不写进 typebox 的 schema**。Pi 在 `execute` 之前按 schema 校验参数，被它挡下来的模型只能看到一条 `Validation` 报错，看不出该写几；交给这个 if 统一报，0 和越界给的是同一句能照着改的话。
@@ -237,12 +280,12 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 `ownerBotId` 收的是**卡片上写着的那个字**，`src/topic.ts` 的 `ownerResolver` 在边界上把它解析成 `BotId`：
 
-| 模型写的 | 解析成 |
-| --- | --- |
-| 群成员的名字 | 那个成员的 id |
-| 卡片上出现过的 id（成员的 id，或清单里已有的经手） | 原样当 id |
-| 缺省 | `null`，未指派 |
-| 其余 | 抛错，错误文本列出群成员的名字 |
+| 模型写的                                           | 解析成                         |
+| -------------------------------------------------- | ------------------------------ |
+| 群成员的名字                                       | 那个成员的 id                  |
+| 卡片上出现过的 id（成员的 id，或清单里已有的经手） | 原样当 id                      |
+| 缺省                                               | `null`，未指派                 |
+| 其余                                               | 抛错，错误文本列出群成员的名字 |
 
 名字是主路，因为卡片上经手渲染的就是名字，模型没有别的地方能拿到 id。名单外的 id 也认，是因为经手的 Bot 可能已经退群，这时卡片渲染的是原始 id，模型读一遍改一条再整份写回来会原样抄回来，拦住它等于把正常的读改写打挂。
 
@@ -258,10 +301,10 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 - prompt 多一段项目清单，见上面「prompt 拼法」。
 - 多两件工具，只挂给主助理，都不走审批。`src/gate.ts` 按名字把它们归成运行器自己的工具，所以这两个名字对队员也保留（`ASSISTANT_TOOL_NAMES`）：队员连的工具里有同名操作也不注册，同名操作改不了它们的归类，也借不到这条放行。
 
-| 工具 | 参数 | 返回 | 上行报文 |
-| --- | --- | --- | --- |
-| `set_cadence` | `projectGroupId`、`cadence` | `「<项目>」的节奏改成了「<节奏>」。` 加一句让它说清下次在哪里看到结果 | `set_cadence` |
-| `propose_project` | `name`、`goal`、`team`、`platforms`、`cadence`、`firstStep`，形状照协议的 `project_offer` | `方案卡「<名字>」已经发到群里，等用户点开始。` | `project_offer` |
+| 工具              | 参数                                                                                      | 返回                                                                  | 上行报文        |
+| ----------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------- | --------------- |
+| `set_cadence`     | `projectGroupId`、`cadence`                                                               | `「<项目>」的节奏改成了「<节奏>」。` 加一句让它说清下次在哪里看到结果 | `set_cadence`   |
+| `propose_project` | `name`、`goal`、`team`、`platforms`、`cadence`、`firstStep`，形状照协议的 `project_offer` | `方案卡「<名字>」已经发到群里，等用户点开始。`                        | `project_offer` |
 
 `set_cadence` 只认这次 prompt 的 `projects` 里的 `projectGroupId`，别的一律抛错并列出能改的项目。`set_cadence` 的 `cadence` 是空的就抛错，协议允许空串，但「清空节奏」不是用户会说的话。`propose_project` 的队员 `tag` 可省，边界上补成空串；`description` 必填，空的也抛错，P1-9 拿这一句建队员 Bot，没有它建出来的 Bot 没有边界；平台 `github`、`x`、`xiaohongshu` 写 `supported`，抖音这类写 `unsupported` 加名字。`propose_project` 只在单聊里能用：这次 prompt 的 `group.kind` 不是 `solo` 就抛「方案卡只能在你和用户的单聊里出」，不发上行。控制面只收主助理单聊里的方案卡，别的群发来的静默丢掉，不在运行器这头拦，模型会拿到「已经发到群里」而卡其实没落。判断用 `group.kind` 而不是任务卡是否为 null：两者在控制面都由群里 Bot 的个数定，`group.kind` 是直接写明的那一个；工具只挂给主助理，主助理唯一的 solo 群就是它的单聊。`set_cadence` 没有这个限制，控制面按主助理身份和项目归属校验，不看是哪个群发的，在项目群里改节奏照常生效。两件工具的长度范围都交给 `AgentToControl` 校验，不合格时把 zod 的 issue 翻成一句中文抛出，比如 `方案卡没发出去，改好再调：team 至少要 1 条`。
 
@@ -273,13 +316,13 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起它，第一次有人调 `connection()` 才起，起完用 `Browser.getVersion` 判就绪。Chrome 退出或管道断了，在途命令当场以「助理 Chrome 退出了，这条命令没做完」结束，之后的命令直接报错；电脑代理清掉这份状态，不自己重起，下次有人调 `connection()` 再起一个新的。管道一断 Chrome 自己退出，电脑代理被 SIGKILL 也不留孤儿 Chrome。复用已在跑的 Chrome 前先在管道上探一次活，退出事件没到也不会拿到死连接；连着起不成时第一次立刻重起，之后按 0.5 秒起翻倍、封顶 30 秒退避，退避期间直接报错。就绪后不到 30 秒就退出都记一次没起成，分不出崩溃和用户手动关掉，用户连着快速关掉助理 Chrome 时，接下来的调用会在退避窗口里收到这句错误。登录窗口的结果在电脑代理断线期间只留在进程内存里，每个账号留最新一条，重连收到 welcome 时补发，控制面不回确认：代理进程重启、hello 被拒，或补发后连接又在控制面处理之前断掉，这条结果都会丢，账号停在旧状态，用户要再点一次登录。
 
-| 工具 | 动作 | 做什么 |
-| --- | --- | --- |
-| `browser_open` | `read`，放行 | 在自己的后台标签页打开 http 或 https 网址，回标题和网址 |
-| `browser_snapshot` | `read`，放行 | 回标题、网址、正文（`innerText`，截到 8000 字）和编号的可点元素 |
-| `browser_screenshot` | `read`，放行 | 截当前这一屏，PNG 作为图片进模型 |
-| `browser_click` | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent` |
-| `browser_type` | `engage`，默认问 | 按编号填字，替换原内容，可选按回车 |
+| 工具                 | 动作             | 做什么                                                          |
+| -------------------- | ---------------- | --------------------------------------------------------------- |
+| `browser_open`       | `read`，放行     | 在自己的后台标签页打开 http 或 https 网址，回标题和网址         |
+| `browser_snapshot`   | `read`，放行     | 回标题、网址、正文（`innerText`，截到 8000 字）和编号的可点元素 |
+| `browser_screenshot` | `read`，放行     | 截当前这一屏，PNG 作为图片进模型                                |
+| `browser_click`      | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent`                         |
+| `browser_type`       | `engage`，默认问 | 按编号填字，替换原内容，可选按回车                              |
 
 没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标是浏览器当前页的主机名（`BotBrowser.host()`，随 `GateCall.browserHost` 进闸门），不看模型的入参，模型在 `browser_click` 的参数里塞 `hostname` 也冒领不了；域名两边都按 URL 解析出的主机名比较：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。批过的域名（`once`、`project`、`forever` 三种范围）再点不问，`browser_open` 到别的域名或页面自己跳到别的域名之后再点重新问。还没开页或停在空白页时目标为空，每次都问。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（当前页的主机名，页面自己跳走也跟着变）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
 
@@ -333,21 +376,21 @@ snapshot 的形状：
 
 页面结构全在 `XIAOHONGSHU_PAGES` 一张常量表里，改版只改这一处。测试通过 `deps.xiaohongshu` 把两个网址换成本地假页，选择器照用，不走环境变量。`deps.connect` 也只给测试换，用来把关标签页拖慢，看超时之后还有没有命令发给标签页。
 
-| 表项 | 取值 | 出处 | 核实过没有 |
-| --- | --- | --- | --- |
-| `publishUrl` | `https://creator.xiaohongshu.com/publish/publish` | 任务书默认值。xiaohongshu-mcp 的 `publish.go` 带 `?source=official` | 没有 |
-| `isLoginPage` | 路径以 `/login` 开头 | 推断，没有公开出处 | 没有 |
-| `imageTab` | `div.creator-tab`，文字含「上传图文」 | xiaohongshu-mcp `publish.go` | 没有 |
-| `imageInput` | `input.upload-input`，或 accept 含 image、.jpg、.png 的文件框 | xiaohongshu-mcp `publish.go` | 没有 |
-| `imagePreview` | `.img-preview-area .pr`，每传完一张多一个 | xiaohongshu-mcp `publish.go` | 没有 |
-| `titleInput` | `div.d-input input` | xiaohongshu-mcp `publish.go` | 没有 |
-| `bodyEditor` | `div[role="textbox"][contenteditable="true"]`、`div.tiptap[contenteditable="true"]`、`div.ql-editor` | xiaohongshu-mcp `publish.go` | 没有 |
-| `publishButton` | `xhs-publish-btn`（排除 `is-publish="false"` 和 `submit-disabled="true"`），或老版的 `.publish-page-publish-btn button.bg-red`，点在宽度 65% 处 | xiaohongshu-mcp `publish.go` | 没有 |
-| `isPublished` | 路径不再以 `/publish/publish` 开头 | xiaohongshu-mcp `publish.go` | 没有 |
-| `manageUrl` | `https://creator.xiaohongshu.com/new/note-manager` | OpenCLI `clis/xiaohongshu/creator-notes.js` | 没有 |
-| `noteCard` | `div.note[data-impression]`，id 按 `"noteId":"<24 位十六进制>"` 抠 | OpenCLI `creator-notes.js` | 没有 |
-| `noteCard.signedLink` | 卡片里的 `a[href*="xsec_token"]`，网址要含笔记 id | 推断。OpenCLI `note-helpers.js` 说要带 `xsec_token` 才稳定能打开，卡片上有没有这样的链接没有出处 | 没有，待实机核 |
-| `noteUrl` | `https://www.xiaohongshu.com/explore/<id>`，只在读不到带 token 的原链接时兜底 | 推断 | 没有 |
+| 表项                  | 取值                                                                                                                                            | 出处                                                                                             | 核实过没有     |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | -------------- |
+| `publishUrl`          | `https://creator.xiaohongshu.com/publish/publish`                                                                                               | 任务书默认值。xiaohongshu-mcp 的 `publish.go` 带 `?source=official`                              | 没有           |
+| `isLoginPage`         | 路径以 `/login` 开头                                                                                                                            | 推断，没有公开出处                                                                               | 没有           |
+| `imageTab`            | `div.creator-tab`，文字含「上传图文」                                                                                                           | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `imageInput`          | `input.upload-input`，或 accept 含 image、.jpg、.png 的文件框                                                                                   | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `imagePreview`        | `.img-preview-area .pr`，每传完一张多一个                                                                                                       | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `titleInput`          | `div.d-input input`                                                                                                                             | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `bodyEditor`          | `div[role="textbox"][contenteditable="true"]`、`div.tiptap[contenteditable="true"]`、`div.ql-editor`                                            | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `publishButton`       | `xhs-publish-btn`（排除 `is-publish="false"` 和 `submit-disabled="true"`），或老版的 `.publish-page-publish-btn button.bg-red`，点在宽度 65% 处 | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `isPublished`         | 路径不再以 `/publish/publish` 开头                                                                                                              | xiaohongshu-mcp `publish.go`                                                                     | 没有           |
+| `manageUrl`           | `https://creator.xiaohongshu.com/new/note-manager`                                                                                              | OpenCLI `clis/xiaohongshu/creator-notes.js`                                                      | 没有           |
+| `noteCard`            | `div.note[data-impression]`，id 按 `"noteId":"<24 位十六进制>"` 抠                                                                              | OpenCLI `creator-notes.js`                                                                       | 没有           |
+| `noteCard.signedLink` | 卡片里的 `a[href*="xsec_token"]`，网址要含笔记 id                                                                                               | 推断。OpenCLI `note-helpers.js` 说要带 `xsec_token` 才稳定能打开，卡片上有没有这样的链接没有出处 | 没有，待实机核 |
+| `noteUrl`             | `https://www.xiaohongshu.com/explore/<id>`，只在读不到带 token 的原链接时兜底                                                                   | 推断                                                                                             | 没有           |
 
 xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwener/OpenCLI。真页面要登录才看得到，表里每一条都要在实机关卡里核一遍。
 
@@ -357,10 +400,10 @@ xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwe
 
 Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具挂给所有 Bot，主助理和队员都能起草，三个名字（`DRAFT_TOOL_NAMES`）对工具连接一律保留。三件都不走审批，闸门只看账号档，见「统一闸门和沙箱」。
 
-| 工具 | 参数 | 返回 | 上行报文 |
-| --- | --- | --- | --- |
-| `create_draft` | `accountId`、`content`、`scheduledAt?` | `草稿已建（draftId：…），等用户在卡上批。` 加一句别说已经发了 | `draft_create` |
-| `edit_draft` | `draftId`、`content` | `草稿 … 已改，改过的稿子会重新等用户批` | `draft_edit` |
+| 工具           | 参数                                                     | 返回                                                           | 上行报文       |
+| -------------- | -------------------------------------------------------- | -------------------------------------------------------------- | -------------- |
+| `create_draft` | `accountId`、`content`、`scheduledAt?`                   | `草稿已建（draftId：…），等用户在卡上批。` 加一句别说已经发了  | `draft_create` |
+| `edit_draft`   | `draftId`、`content`                                     | `草稿 … 已改，改过的稿子会重新等用户批`                        | `draft_edit`   |
 | `propose_plan` | `title`、`drafts[]`（每条同 `create_draft`，1 到 20 条） | `计划「…」已发出，N 条草稿等用户在计划卡上批` 加每条的 draftId | `plan_propose` |
 
 - **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
@@ -427,8 +470,8 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 存不存由 Bot 发起。`src/skills.ts` 的 `createSkillTools` 挂一个工具：
 
-| 工具 | 参数 | 返回 | 上行报文 |
-| --- | --- | --- | --- |
+| 工具            | 参数                                                                     | 返回                                           | 上行报文      |
+| --------------- | ------------------------------------------------------------------------ | ---------------------------------------------- | ------------- |
 | `propose_skill` | `name`（1 到 40 字）、`steps`（2 到 20 条，每条非空、每条不超过 500 字） | `已经在群里问用户存不存「<名字>」了，等他点。` | `skill_offer` |
 
 控制面收到 `skill_offer` 落一条消息，Web 画成一张带「存」「不存」的卡，用户点存才有 skill 行，再随新的 `config` 发回来。

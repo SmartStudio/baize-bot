@@ -36,6 +36,7 @@ import {
   type Preference,
   PreferenceId,
   RoutineId,
+  type RoutineBoundary,
   RunId,
   type Skill,
   SkillId,
@@ -59,6 +60,7 @@ import {
   type RunnerTool,
 } from "../src/index.js";
 import type { CdpConnection } from "../src/cdp.js";
+import { PI_BUILT_IN_TOOLS } from "../src/mcp-tools.js";
 import { simpleToolView } from "../src/reporter.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
 import {
@@ -145,6 +147,22 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
           await created.dispose();
         },
       };
+    },
+  };
+});
+
+const sandboxProbe = vi.hoisted(() => ({
+  /** 冒充这台电脑没有系统沙箱：运行器拿到的 `sandbox` 是 "none"，其余照真的走。 */
+  forceNone: false,
+}));
+
+vi.mock("../src/sandbox.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/sandbox.js")>();
+  return {
+    ...actual,
+    createSandboxedBash(...args: Parameters<typeof actual.createSandboxedBash>) {
+      const created = actual.createSandboxedBash(...args);
+      return sandboxProbe.forceNone ? { ...created, sandbox: "none" as const } : created;
     },
   };
 });
@@ -540,6 +558,7 @@ afterEach(async () => {
   botSessionProbe.started = null;
   botSessionProbe.promptSwallow = false;
   botSessionProbe.assistantEnds.splice(0);
+  sandboxProbe.forceNone = false;
 });
 
 afterAll(() => {
@@ -2433,6 +2452,45 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
       "bot_tool_call:failed",
     ]);
     expect(seen.toolResults[0]).toContain("没有这个 SKU");
+  });
+
+  it("Pi 自带工具的名字整组保留，名单和 Pi 的工具注册表一致", async () => {
+    const url = new URL("../node_modules/@earendil-works/pi-coding-agent/dist/core/tools/index.js", import.meta.url);
+    const pi = (await import(url.href)) as { allToolNames: ReadonlySet<string> };
+    expect([...pi.allToolNames].toSorted(), "探针得先看见 Pi 的注册表，不然下面的比较是空的").toContain("powershell");
+    expect([...PI_BUILT_IN_TOOLS].toSorted()).toEqual([...pi.allToolNames].toSorted());
+  });
+
+  it("操作名顶着 Pi 自带的 write 注册：跳过并 warn，模型调 write 写的是工作目录里的文件，假 MCP 没被调用", async () => {
+    const mcp = await fakeMcp();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { dataDir, workDir } = botWorkDir();
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      dataDir,
+      tools: [
+        toolConnection(
+          [
+            { name: "write", needsApproval: false },
+            { name: "lookup_stock", needsApproval: false },
+          ],
+          { url: mcp.url },
+        ),
+      ],
+      script: scriptPlans(requests, { 写笔记: [["write", { path: "note.txt", content: "工作目录里的笔记" }]] }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "写笔记"));
+
+    expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
+      "Bot bot-1：连接「客服工具」的操作「write」和已注册的工具重名，跳过",
+    ]);
+    warn.mockRestore();
+    expect(mcp.calls, "write 没被 MCP 操作顶掉，假 MCP 一次都没收到").toEqual([]);
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    expect(readFileSync(join(workDir, "note.txt"), "utf8")).toBe("工作目录里的笔记");
   });
 
   it("两条连接撞了 lookup_stock：config 里靠前的赢，后面的跳过并 warn 一次", async () => {
@@ -4534,6 +4592,7 @@ const newMember = (index: number) => ({
   suggested: false,
 });
 const teamOffers = (h: Harness) => h.sent.filter((message) => message.type === "team_offer");
+const routineOffers = (h: Harness) => h.sent.filter((message) => message.type === "routine_offer");
 
 describe("运行器的主助理", () => {
   const PROJECTS: NonNullable<PromptMessage["projects"]> = [
@@ -5444,6 +5503,291 @@ ${join(h.dataDir, "bot-1", "work")}
       const system = assistant.firstTurn.join("");
       expect(system).toContain("propose_team");
       expect(system).toContain("只问用户要不要这个人");
+    });
+  });
+
+  describe("例行卡 propose_routine", () => {
+    const ROUTINE_ARGS = {
+      name: "小红书周报",
+      instruction: "读上周的笔记数据，写三句话的周报回在群里",
+      cron: "0 18 * * 5",
+      projectGroupId: "group-xhs",
+      boundary: "read_only",
+      purpose: "fast",
+      onToday: true,
+    };
+    const projectGroupPrompt = (text: string): PromptMessage => ({
+      ...promptMessage("bot-1", "run-1", text, {
+        groupId: "group-xhs",
+        members: [member("bot-1", "主助理"), member("bot-2", "小文")],
+      }),
+      projects: PROJECTS,
+    });
+    const assistantHarness = (seen: ReturnType<typeof recorder>, args: Record<string, unknown>, marker: string) =>
+      startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(seen, [[marker, callTool("propose_routine", args)]]),
+      });
+
+    it("propose_routine 发出 routine_offer，不产生审批，工具结果让它等用户点加上", async () => {
+      const seen = recorder();
+      const h = await assistantHarness(seen, ROUTINE_ARGS, "每周五给小红书出周报");
+
+      await h.runner.prompt(assistantPrompt("run-1", "每周五给小红书出周报"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(routineOffers(h)).toEqual([
+        {
+          type: "routine_offer",
+          runId: "run-1",
+          botId: "bot-1",
+          groupId: "group-1",
+          name: "小红书周报",
+          instruction: "读上周的笔记数据，写三句话的周报回在群里",
+          cron: "0 18 * * 5",
+          executorBotId: "bot-1",
+          boundary: "read_only",
+          purpose: "fast",
+          onToday: true,
+          projectGroupId: "group-xhs",
+        },
+      ]);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+      const result = seen.toolResults.join("");
+      expect(result, "卡还没点加上，不能让模型以为例行已经建了").toContain("等用户点「加上」");
+      expect(result).toContain("别自己建例行");
+      expect(result, "结果里说清挂在哪个项目、谁执行、什么边界").toContain("挂在项目「小红书运营」下");
+      expect(result).toContain("你自己");
+      expect(result).toContain("只读");
+    });
+
+    it("没写的字段补默认：不挂项目、自己执行、plan、不上首页；模型多写的键不上行", async () => {
+      const seen = recorder();
+      const h = await assistantHarness(
+        seen,
+        { name: "晨读", instruction: "把昨晚的消息读一遍", cron: "30 8 * * *", boundary: "draft", extra: "多余" },
+        "每天早上",
+      );
+
+      await h.runner.prompt(assistantPrompt("run-1", "每天早上八点半读一遍消息"));
+
+      expect(routineOffers(h)).toEqual([
+        {
+          type: "routine_offer",
+          runId: "run-1",
+          botId: "bot-1",
+          groupId: "group-1",
+          name: "晨读",
+          instruction: "把昨晚的消息读一遍",
+          cron: "30 8 * * *",
+          executorBotId: "bot-1",
+          boundary: "draft",
+          purpose: "plan",
+          onToday: false,
+          projectGroupId: null,
+        },
+      ]);
+      expect(seen.toolResults.join("")).toContain("不挂项目");
+      expect(seen.toolResults.join("")).toContain("草稿等你批");
+    });
+
+    it("cron 里多余的空白收成单个空格再上行", async () => {
+      const h = await assistantHarness(
+        recorder(),
+        { name: "晨读", instruction: "读", cron: "  30   8 * *  * ", boundary: "read_only" },
+        "每天",
+      );
+
+      await h.runner.prompt(assistantPrompt("run-1", "每天早上八点半"));
+
+      expect(routineOffers(h).map((message) => message.cron)).toEqual(["30 8 * * *"]);
+    });
+
+    it("在项目群里提议：没写 projectGroupId 就挂在这个群的项目上，执行者按成员名单认", async () => {
+      const seen = recorder();
+      const h = await assistantHarness(
+        seen,
+        { ...ROUTINE_ARGS, projectGroupId: undefined, executorBotId: "bot-2" },
+        "@bot-1 每周五",
+      );
+
+      await h.runner.prompt(projectGroupPrompt("@bot-1 每周五给这个项目出周报"));
+
+      expect(routineOffers(h)).toMatchObject([
+        { groupId: "group-xhs", projectGroupId: "group-xhs", executorBotId: "bot-2" },
+      ]);
+      expect(seen.toolResults.join("")).toContain("由小文执行");
+    });
+
+    it("项目群里执行者不在成员名单里：抛中文错并列出名单，不发上行", async () => {
+      const seen = recorder();
+      const h = await assistantHarness(seen, { ...ROUTINE_ARGS, executorBotId: "bot-9" }, "@bot-1 每周五");
+
+      await h.runner.prompt(projectGroupPrompt("@bot-1 每周五给这个项目出周报"));
+
+      expect(routineOffers(h)).toEqual([]);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+      const error = seen.toolResults.join("");
+      expect(error).toContain("没有 botId 是「bot-9」的成员");
+      expect(error, "把能选的人列给模型").toContain("小文（botId：bot-2）");
+      expect(error, "出错了不能说成已发出").not.toContain("等用户点");
+    });
+
+    it("单聊里看不到别的 Bot，写了别人的 botId 照样上行，由控制面在点加上时核对", async () => {
+      const h = await assistantHarness(recorder(), { ...ROUTINE_ARGS, executorBotId: "bot-2" }, "每周五");
+
+      await h.runner.prompt(assistantPrompt("run-1", "每周五给小红书出周报"));
+
+      expect(routineOffers(h)).toMatchObject([{ executorBotId: "bot-2" }]);
+    });
+
+    it.each([
+      ["cron 只有四段", { cron: "0 18 * *" }, "cron 要写 5 段"],
+      ["cron 有六段", { cron: "0 0 18 * * 5" }, "cron 要写 5 段"],
+      ["名字是空的", { name: "" }, "例行卡没发出去"],
+      ["名字超过 40 字", { name: "长".repeat(41) }, "例行卡没发出去"],
+      ["projectGroupId 不是自己管的项目", { projectGroupId: "group-zzz" }, "没有 projectGroupId 是「group-zzz」的项目"],
+      ["executorBotId 是空串", { executorBotId: "" }, "executorBotId 是空的"],
+    ] as const)("%s：抛中文错，不发上行，也不说已经发出去", async (_label, patch, expected) => {
+      const seen = recorder();
+      const h = await assistantHarness(seen, { ...ROUTINE_ARGS, ...patch }, "每周五");
+
+      await h.runner.prompt(assistantPrompt("run-1", "每周五给小红书出周报"));
+
+      expect(routineOffers(h)).toEqual([]);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+      expect(seen.toolResults.join("")).toContain(expected);
+      expect(seen.toolResults.join("")).not.toContain("等用户点");
+    });
+
+    it("boundary 不是只读也不是草稿：参数校验不过，不发上行", async () => {
+      const seen = recorder();
+      const h = await assistantHarness(seen, { ...ROUTINE_ARGS, boundary: "full" }, "每周五");
+
+      await h.runner.prompt(assistantPrompt("run-1", "每周五给小红书出周报"));
+
+      expect(routineOffers(h)).toEqual([]);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+      expect(seen.toolResults.join(""), "工具存在，是参数没过校验").toContain("Validation failed for tool");
+      expect(seen.toolResults.join("")).toContain("boundary: must match a schema in anyOf");
+    });
+
+    it("队员会话里没有 propose_routine，主助理有", async () => {
+      const memberRequests: ChatCompletionRequest[] = [];
+      const teammate = await startHarness({
+        bots: ["bot-1"],
+        script: (req) => {
+          memberRequests.push(req);
+          return reply;
+        },
+      });
+      const assistantRequests: ChatCompletionRequest[] = [];
+      const assistant = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: (req) => {
+          assistantRequests.push(req);
+          return reply;
+        },
+      });
+
+      await teammate.runner.prompt(promptMessage("bot-1", "run-1", "每周五出周报"));
+      await assistant.runner.prompt(assistantPrompt("run-1", "每周五出周报"));
+
+      expect(toolNamesSent(memberRequests)).not.toContain("propose_routine");
+      expect(toolNamesSent(assistantRequests)).toContain("propose_routine");
+    });
+
+    it("队员调 propose_routine：工具不存在，不发上行", async () => {
+      const seen = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        script: scriptRecording(seen, [["每周五", callTool("propose_routine", ROUTINE_ARGS)]]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五出周报"));
+
+      expect(routineOffers(h)).toEqual([]);
+      expect(seen.toolResults.join("")).toContain("Tool propose_routine not found");
+    });
+
+    it("主助理的系统提示写明用户想定期做事时调 propose_routine 提议，不替用户直接建", async () => {
+      const assistant = recorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        role: "assistant",
+        script: scriptRecording(assistant, [["随便说句话", reply]]),
+      });
+
+      await h.runner.prompt(assistantPrompt("run-1", "随便说句话"));
+
+      const system = assistant.firstTurn.join("");
+      expect(system).toContain("propose_routine");
+      expect(system).toContain("别自己建例行");
+    });
+
+    describe("只读例行里不出提案卡、不改项目状态", () => {
+      const CARDS: ReadonlyArray<
+        readonly [
+          toolName: string,
+          args: Record<string, unknown>,
+          upstream: "project_offer" | "team_offer" | "routine_offer" | "skill_offer" | "set_cadence",
+          bar: string,
+        ]
+      > = [
+        ["propose_project", OFFER_ARGS, "project_offer", "出方案卡"],
+        [
+          "propose_team",
+          { projectGroupId: "group-xhs", members: [{ kind: "existing", botId: "bot-2", note: "", suggested: false }] },
+          "team_offer",
+          "出建队卡",
+        ],
+        ["propose_routine", ROUTINE_ARGS, "routine_offer", "出例行卡"],
+        ["propose_skill", PROPOSE_ARGS, "skill_offer", "问用户存不存 skill"],
+        ["set_cadence", { projectGroupId: "group-xhs", cadence: "每周 3 篇" }, "set_cadence", "改项目节奏"],
+      ];
+      const routineAssistantPrompt = (text: string, boundary: RoutineBoundary): PromptMessage => ({
+        ...projectGroupPrompt(text),
+        origin: { kind: "routine" },
+        routine: { routineId: RoutineId.parse("routine-1"), boundary },
+      });
+      const cardHarness = (seen: ReturnType<typeof recorder>, toolName: string, args: Record<string, unknown>) =>
+        startHarness({
+          bots: ["bot-1"],
+          role: "assistant",
+          script: scriptRecording(seen, [["每周五复盘", callTool(toolName, args)]]),
+        });
+
+      it.each(CARDS)(
+        "read_only 例行里 %s 被拒绝：不发上行，不弹审批，理由是中文",
+        async (toolName, args, upstream, bar) => {
+          const seen = recorder();
+          const h = await cardHarness(seen, toolName, args);
+
+          await h.runner.prompt(routineAssistantPrompt("每周五复盘", "read_only"));
+
+          expect(
+            h.sent.filter((message) => message.type === upstream),
+            "只读例行不往「等你确认」里堆卡，也不改项目状态",
+          ).toEqual([]);
+          expect(shape(h.sent), "拒绝不是问").not.toContain("approval_request");
+          expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+          const result = seen.toolResults.join("");
+          expect(result).toContain("「只读」例行");
+          expect(result).toContain(`不能${bar}`);
+        },
+      );
+
+      it.each(CARDS)("draft 边界的例行里 %s 不被边界拦", async (toolName, args) => {
+        const seen = recorder();
+        const h = await cardHarness(seen, toolName, args);
+
+        await h.runner.prompt(routineAssistantPrompt("每周五复盘", "draft"));
+
+        expect(toolStatuses(h), "draft 边界不拦提案，工具自己报不报错另说").not.toContain("bot_tool_call:blocked");
+        expect(seen.toolResults.join("")).not.toContain("「只读」例行");
+      });
     });
   });
 });
@@ -6517,6 +6861,9 @@ const scriptPlans =
 
 const toolResultsOf = (requests: readonly ChatCompletionRequest[]): string =>
   JSON.stringify(requests.at(-1)?.messages.filter((message) => message.role === "tool") ?? []);
+
+const lastUserText = (requests: readonly ChatCompletionRequest[]): string =>
+  JSON.stringify(requests.at(-1)?.messages.findLast((message) => message.role === "user")?.content);
 
 const pngsIn = (req: ChatCompletionRequest | undefined): string[] =>
   [...JSON.stringify(req?.messages ?? []).matchAll(/data:image\/png;base64,([A-Za-z0-9+/=]+)/g)].map(
@@ -7964,6 +8311,670 @@ describe("运行器的临时帮手 call_helper", () => {
     } finally {
       release();
     }
+  });
+});
+
+describe("运行器的例行边界", () => {
+  const XHS = accountOf("acc-xhs", "xiaohongshu", "小满的日常", "confirm_publish");
+  const DRAFT_ARGS = {
+    accountId: "acc-xhs",
+    content: { kind: "post", title: "周一早安", text: "新的一周从一杯咖啡开始" },
+  };
+  const routinePrompt = (
+    runId: string,
+    text: string,
+    boundary: RoutineBoundary,
+    group?: Parameters<typeof promptMessage>[3],
+  ): PromptMessage => ({
+    ...promptMessage("bot-1", runId, text, group),
+    origin: { kind: "routine" },
+    routine: { routineId: RoutineId.parse("routine-1"), boundary },
+  });
+  const draftHarness = (requests: ChatCompletionRequest[]) =>
+    startHarness({
+      bots: ["bot-1"],
+      accounts: [XHS],
+      extensionTools: [],
+      script: scriptPlans(requests, {
+        每周五复盘: [["create_draft", DRAFT_ARGS]],
+        现在起草: [["create_draft", DRAFT_ARGS]],
+      }),
+    });
+
+  it("read_only 例行里 create_draft 被拒绝：不建草稿，不弹审批，理由是中文", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await draftHarness(requests);
+
+    await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+    expect(drafted(h), "只读例行不产出要用户批的草稿").toEqual([]);
+    expect(shape(h.sent), "拒绝不是问").not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    const error = toolResultsOf(requests);
+    expect(error).toContain("「只读」例行");
+    expect(error).toContain("不能起草");
+    expect(error, "告诉模型下一步怎么办").toContain("「草稿等你批」");
+  });
+
+  it("read_only 例行里读网页照常放行：闸门不拦，调用走到浏览器那一层", async () => {
+    let asked = 0;
+    const refuse = (): Promise<never> => {
+      asked += 1;
+      return Promise.reject(new Error("这条用例不开真浏览器"));
+    };
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      script: scriptPlans(requests, { 每周五复盘: [["browser_open", { url: "https://example.com/stats" }]] }),
+    });
+
+    await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+    expect(shape(h.sent)).not.toContain("approval_request");
+    expect(toolStatuses(h), "failed 是浏览器那层拒了连接，被闸门拦下会是 blocked").toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    expect(asked, "闸门放行后工具真的去要了浏览器").toBe(1);
+    expect(toolResultsOf(requests)).toContain("这条用例不开真浏览器");
+  });
+
+  it("read_only 例行里浏览器的点被拒绝，也不去拉起浏览器", async () => {
+    let asked = 0;
+    const refuse = (): Promise<never> => {
+      asked += 1;
+      return Promise.reject(new Error("这条用例不该开浏览器"));
+    };
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      script: scriptPlans(requests, { 每周五复盘: [["browser_click", { ref: 3 }]] }),
+    });
+
+    await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+    expect(shape(h.sent)).not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    expect(toolResultsOf(requests)).toContain("在网页上点或填");
+    expect(asked).toBe(0);
+  });
+
+  it("不是例行触发的 run 不受边界影响：同一个 create_draft 照常起草", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await draftHarness(requests);
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "现在起草一条"));
+
+    expect(drafted(h)).toMatchObject([{ accountId: "acc-xhs" }]);
+    expect(shape(h.sent)).not.toContain("approval_request");
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+  });
+
+  it("draft 边界的例行里 create_draft 照常起草", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await draftHarness(requests);
+
+    await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "draft"));
+
+    expect(drafted(h)).toMatchObject([{ accountId: "acc-xhs" }]);
+    expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+  });
+
+  describe("只读例行里不改任务状态、不叫别的 Bot", () => {
+    const STATE_TOOLS: ReadonlyArray<
+      readonly [
+        toolName: string,
+        args: Record<string, unknown>,
+        upstream: AgentToControl["type"],
+        bar: string,
+        group: Parameters<typeof promptMessage>[3],
+      ]
+    > = [
+      [
+        "update_checklist",
+        { items: [{ text: "翻历史邮件", done: true, ownerBotId: "小白" }] },
+        "task_checklist",
+        "改任务卡清单",
+        { task: topicTask(), members: TWO_MEMBERS },
+      ],
+      ["set_chief", { name: "小黑" }, "set_chief", "换首席", { members: TWO_MEMBERS }],
+      [
+        "handoff_task",
+        { to: "小黑", done: "翻完历史邮件", notDone: "回信还没起草", next: "照旧模板起草", checklistIndex: 2 },
+        "handoff",
+        "发起交接",
+        { task: topicTask(), members: TWO_MEMBERS },
+      ],
+      [
+        "accept_handoff",
+        {},
+        "handoff_accept",
+        "接手交接",
+        { task: topicTask(), members: TWO_MEMBERS, handoffId: "handoff-1" },
+      ],
+      [
+        "mention_bot",
+        { name: "小黑", text: "这单报价你帮我核一下" },
+        "mention",
+        "叫别的 Bot 干活",
+        { task: topicTask(), members: TWO_MEMBERS },
+      ],
+    ];
+    const stateHarness = (requests: ChatCompletionRequest[], toolName: string, args: Record<string, unknown>) =>
+      startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        script: scriptPlans(requests, { 每周五复盘: [[toolName, args]] }),
+      });
+
+    it.each(STATE_TOOLS)(
+      "read_only 例行里 %s 被拒绝：不发上行，不弹审批，理由是中文",
+      async (toolName, args, upstream, bar, group) => {
+        const requests: ChatCompletionRequest[] = [];
+        const h = await stateHarness(requests, toolName, args);
+
+        await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only", group));
+
+        expect(
+          h.sent.filter((message) => message.type === upstream),
+          "只读例行不改任务卡、不换首席、不交接，也不叫别的 Bot 起一条不带只读边界的 run",
+        ).toEqual([]);
+        expect(shape(h.sent), "拒绝不是问").not.toContain("approval_request");
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+        const result = toolResultsOf(requests);
+        expect(result).toContain("「只读」例行");
+        expect(result).toContain(`不能${bar}`);
+      },
+    );
+
+    it.each(STATE_TOOLS)("draft 边界的例行里 %s 照常上行一条", async (toolName, args, upstream, _bar, group) => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await stateHarness(requests, toolName, args);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "draft", group));
+
+      expect(h.sent.filter((message) => message.type === upstream)).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    });
+
+    it.each(STATE_TOOLS)("用户当面派的 run 里 %s 不受边界影响", async (toolName, args, upstream, _bar, group) => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await stateHarness(requests, toolName, args);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘", group));
+
+      expect(h.sent.filter((message) => message.type === upstream)).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    });
+  });
+
+  describe("只读例行里的插件操作：失败即关，不看免审批设置", () => {
+    const openMcps: { close(): Promise<void> }[] = [];
+    afterEach(async () => {
+      await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+    });
+    const EMAIL = ["send_email", { to: "客户@example.com", subject: "周报" }] as const;
+    const mcpHarness = async (
+      requests: ChatCompletionRequest[],
+      operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>,
+      call: PlannedCall,
+      approve = false,
+    ) => {
+      const mcp = await startFakeMcp();
+      openMcps.push(mcp);
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        approve,
+        tools: [toolConnection(operations, { url: mcp.url })],
+        script: scriptPlans(requests, { 每周五复盘: [call] }),
+      });
+      return { h, mcp };
+    };
+
+    it.each([true, false])(
+      "read_only 例行里名字是发邮件的 send_email（needsApproval=%s）被拒绝：假 MCP 没被调用，不弹审批",
+      async (needsApproval) => {
+        const requests: ChatCompletionRequest[] = [];
+        const { h, mcp } = await mcpHarness(requests, [{ name: "send_email", needsApproval }], EMAIL);
+
+        await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+        expect(mcp.calls, "免审批只是插件自己的设置，不是只读例行放行的理由").toEqual([]);
+        expect(shape(h.sent), "拒绝不是问").not.toContain("approval_request");
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+        const result = toolResultsOf(requests);
+        expect(result).toContain("「只读」例行");
+        expect(result).toContain("不能联系别人");
+      },
+    );
+
+    it.each([true, false])(
+      "read_only 例行里认不出是不是只读的 render_chart（needsApproval=%s）被拒绝，理由说不确定是否只读",
+      async (needsApproval) => {
+        const requests: ChatCompletionRequest[] = [];
+        const { h } = await mcpHarness(
+          requests,
+          [{ name: "render_chart", needsApproval }],
+          ["render_chart", { sku: "SKU-1" }],
+        );
+
+        await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+        expect(shape(h.sent)).not.toContain("approval_request");
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+        const result = toolResultsOf(requests);
+        expect(result).toContain("不能用不确定是否只读的插件操作");
+        expect(result, "工具没跑，它的返回文字不会出现").not.toContain("的库存图");
+      },
+    );
+
+    it("read_only 例行里读类前缀的 lookup_stock（免审批）照常调用", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, mcp } = await mcpHarness(
+        requests,
+        [{ name: "lookup_stock", needsApproval: false }],
+        ["lookup_stock", { sku: "SKU-1" }],
+      );
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(mcp.calls.map((call) => call.name)).toEqual(["lookup_stock"]);
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    });
+
+    it("读类前缀但插件自己要求审批：read_only 例行里照样问，拒绝后假 MCP 没被调用", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, mcp } = await mcpHarness(
+        requests,
+        [{ name: "lookup_stock", needsApproval: true }],
+        ["lookup_stock", { sku: "SKU-1" }],
+      );
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(shape(h.sent), "只读例行不比普通 run 松，用户设的审批还在").toContain("approval_request");
+      expect(mcp.calls).toEqual([]);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    });
+
+    it.each([
+      ["draft 边界的例行", routinePrompt("run-1", "每周五复盘", "draft")],
+      ["用户当面派的 run", promptMessage("bot-1", "run-1", "每周五复盘")],
+    ] as const)("%s里免审批的 send_email 照常调用：只读例行的失败即关不外溢", async (_label, message) => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, mcp } = await mcpHarness(requests, [{ name: "send_email", needsApproval: false }], EMAIL);
+
+      await h.runner.prompt(message);
+
+      expect(mcp.calls.map((call) => call.name)).toEqual(["send_email"]);
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    });
+  });
+
+  describe("查不到归属的工具：撤销连接后残留的旧工具和调用方注入的扩展工具", () => {
+    const openMcps: { close(): Promise<void> }[] = [];
+    afterEach(async () => {
+      await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+    });
+    const UNTRACED = "只能用运行器自带的工具和认得出是只读的插件操作";
+    // 第二次请求（lookup_stock 的结果回来之后）才撤销连接，这时会话里已经注册好的 send_email 还在，
+    // applyConfig 要等这次 run 结束才重建会话。
+    const revokedMidRun = async (requests: ChatCompletionRequest[]) => {
+      const mcp = await startFakeMcp();
+      openMcps.push(mcp);
+      const holder: { h: Harness | null } = { h: null };
+      let seen = 0;
+      const inner = scriptPlans(requests, {
+        每周五复盘: [
+          ["lookup_stock", { sku: "SKU-1" }],
+          ["send_email", { to: "客户@example.com", subject: "周报" }],
+        ],
+      });
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        approve: false,
+        tools: [
+          toolConnection(
+            [
+              { name: "lookup_stock", needsApproval: false },
+              { name: "send_email", needsApproval: false },
+            ],
+            { url: mcp.url },
+          ),
+        ],
+        script: (req) => {
+          seen += 1;
+          if (seen === 2 && holder.h !== null) void holder.h.runner.applyConfig(holder.h.config({ tools: [] }));
+          return inner(req);
+        },
+      });
+      holder.h = h;
+      return { h, mcp };
+    };
+
+    it("read_only 例行跑到一半连接被撤销：残留的 send_email 被拒绝，假 MCP 只收到撤销前的 lookup_stock", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, mcp } = await revokedMidRun(requests);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(mcp.calls.map((call) => call.name)).toEqual(["lookup_stock"]);
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual([
+        "bot_tool_call:running",
+        "bot_tool_call:ok",
+        "bot_tool_call:running",
+        "bot_tool_call:blocked",
+      ]);
+      expect(toolResultsOf(requests)).toContain(UNTRACED);
+    });
+
+    it("用户当面派的 run 跑到一半连接被撤销：残留的免审批 send_email 改成问用户，拒绝后假 MCP 没收到它", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, mcp } = await revokedMidRun(requests);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘"));
+
+      expect(mcp.calls.map((call) => call.name)).toEqual(["lookup_stock"]);
+      expect(
+        shape(h.sent).filter((type) => type === "approval_request"),
+        "撤销前免审批，撤销后当未知外部操作问",
+      ).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual([
+        "bot_tool_call:running",
+        "bot_tool_call:ok",
+        "bot_tool_call:running",
+        "bot_tool_call:blocked",
+      ]);
+    });
+
+    it.each([
+      [
+        "read_only 例行",
+        "被拒绝，没发出去",
+        routinePrompt("run-1", "每周五复盘", "read_only"),
+        "bot_tool_call:blocked",
+        [],
+      ],
+      [
+        "用户当面派的 run",
+        "照旧放行",
+        promptMessage("bot-1", "run-1", "每周五复盘"),
+        "bot_tool_call:ok",
+        ["send_email:a@b.c"],
+      ],
+    ] as const)(
+      "%s里调用方注入的扩展工具 send_email %s，不弹审批",
+      async (_label, _outcome, message, status, sideEffects) => {
+        const requests: ChatCompletionRequest[] = [];
+        const h = await startHarness({
+          bots: ["bot-1"],
+          approve: false,
+          script: scriptPlans(requests, { 每周五复盘: [["send_email", { to: "a@b.c" }]] }),
+        });
+
+        await h.runner.prompt(message);
+
+        expect(h.sideEffects).toEqual(sideEffects);
+        expect(shape(h.sent)).not.toContain("approval_request");
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", status]);
+      },
+    );
+  });
+
+  describe("write 和 edit 的目标路径按 Pi 打开文件的归一化算", () => {
+    const outsideFile = (name: string): string => {
+      const dir = mkdtempSync(join(tmpdir(), "baize-outside-"));
+      usedDataDirs.push(dir);
+      return join(realpathSync(dir), name);
+    };
+    const writeHarness = (requests: ChatCompletionRequest[], dataDir: string, call: PlannedCall) =>
+      startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        approve: false,
+        script: scriptPlans(requests, { 每周五复盘: [call] }),
+      });
+
+    it.each([
+      ["file:// 地址", true],
+      ["普通绝对路径", false],
+    ] as const)(
+      "read_only 例行里 write 到工作目录外的%s被拒绝：不弹审批，磁盘上没有这个文件",
+      async (_label, asUrl) => {
+        const requests: ChatCompletionRequest[] = [];
+        const { dataDir } = botWorkDir();
+        const target = outsideFile("leak.txt");
+        const h = await writeHarness(requests, dataDir, [
+          "write",
+          { path: asUrl ? `file://${target}` : target, content: "泄露" },
+        ]);
+
+        await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+        expect(shape(h.sent)).not.toContain("approval_request");
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+        expect(toolResultsOf(requests)).toContain("「只读」例行");
+        expect(existsSync(target), "闸门拒了，Pi 没有真的写").toBe(false);
+      },
+    );
+
+    it.each(["write", "edit"] as const)(
+      "用户当面派的 run 里 %s file:// 地址的工作目录外文件照旧问：拒绝后磁盘上的内容没变",
+      async (tool) => {
+        const requests: ChatCompletionRequest[] = [];
+        const { dataDir } = botWorkDir();
+        const target = outsideFile("leak.txt");
+        if (tool === "edit") writeFileSync(target, "原样");
+        const args =
+          tool === "edit"
+            ? { path: `file://${target}`, edits: [{ oldText: "原样", newText: "改了" }] }
+            : { path: `file://${target}`, content: "泄露" };
+        const h = await writeHarness(requests, dataDir, [tool, args]);
+
+        await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘"));
+
+        expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
+        expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+        expect(existsSync(target) ? readFileSync(target, "utf8") : null).toBe(tool === "edit" ? "原样" : null);
+      },
+    );
+
+    it("read_only 例行里 write 到指向工作目录外尚不存在文件的悬空链接被拒绝：不弹审批，链接那头的文件没被建出来", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { dataDir, workDir } = botWorkDir();
+      const target = outsideFile("ghost.txt");
+      symlinkSync(target, join(workDir, "lnk.txt"));
+      const h = await writeHarness(requests, dataDir, ["write", { path: "lnk.txt", content: "泄露" }]);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(toolResultsOf(requests)).toContain("「只读」例行");
+      expect(existsSync(target), "闸门按链接那头的位置判，Pi 没有沿链接把外面的文件建出来").toBe(false);
+    });
+
+    it("用户当面派的 run 里 write 到悬空链接照旧问：拒绝后链接那头的文件没被建出来", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { dataDir, workDir } = botWorkDir();
+      const target = outsideFile("ghost.txt");
+      symlinkSync(target, join(workDir, "lnk.txt"));
+      const h = await writeHarness(requests, dataDir, ["write", { path: "lnk.txt", content: "泄露" }]);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘"));
+
+      expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(existsSync(target)).toBe(false);
+    });
+
+    it("edit file:// 地址的配图拷贝目录文件被拒绝：不弹审批，文件内容没变", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { dataDir } = botWorkDir();
+      const draftsDir = join(dataDir, "bot-1", "drafts");
+      mkdirSync(draftsDir, { recursive: true });
+      const target = join(realpathSync(draftsDir), "cover.txt");
+      writeFileSync(target, "原样");
+      const h = await writeHarness(requests, dataDir, [
+        "edit",
+        { path: `file://${target}`, edits: [{ oldText: "原样", newText: "改了" }] },
+      ]);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(toolResultsOf(requests)).toContain("配图拷贝目录");
+      expect(readFileSync(target, "utf8")).toBe("原样");
+    });
+
+    it("write 到 file:// 地址的工作目录里的文件照常落盘", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { dataDir, workDir } = botWorkDir();
+      const target = join(realpathSync(workDir), "note.txt");
+      const h = await writeHarness(requests, dataDir, ["write", { path: `file://${target}`, content: "笔记" }]);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "每周五复盘"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+      expect(readFileSync(target, "utf8")).toBe("笔记");
+    });
+  });
+
+  describe("这台电脑没有系统沙箱", () => {
+    const NO_SANDBOX = "这台电脑没有沙箱，只读例行里不能执行命令";
+    const touchHarness = async (requests: ChatCompletionRequest[]) => {
+      sandboxProbe.forceNone = true;
+      const { dataDir, workDir } = botWorkDir();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        approve: false,
+        script: scriptPlans(requests, { 每周五复盘: [["bash", { command: "touch ran.txt" }]] }),
+      });
+      return { h, marker: join(workDir, "ran.txt") };
+    };
+
+    it("read_only 例行里 bash 被拒绝：不退化成审批，命令没执行，理由是中文", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, marker } = await touchHarness(requests);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(shape(h.sent), "没有沙箱时不能让用户点个允许就放过，只读例行一律不跑命令").not.toContain(
+        "approval_request",
+      );
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(toolResultsOf(requests)).toContain(NO_SANDBOX);
+      expect(existsSync(marker), "命令没执行，工作目录里不会有它建的文件").toBe(false);
+    });
+
+    it.each([
+      ["draft 边界的例行", routinePrompt("run-1", "每周五复盘", "draft")],
+      ["用户当面派的 run", promptMessage("bot-1", "run-1", "每周五复盘")],
+    ] as const)("%s里 bash 照旧走审批：弹一次，用户拒绝后命令没执行", async (_label, message) => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, marker } = await touchHarness(requests);
+
+      await h.runner.prompt(message);
+
+      expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(toolResultsOf(requests)).not.toContain(NO_SANDBOX);
+      expect(existsSync(marker)).toBe(false);
+    });
+
+    it.skipIf(process.platform !== "darwin")("有系统沙箱时 read_only 例行里只读命令照常跑", async () => {
+      const { dataDir, workDir } = botWorkDir();
+      writeFileSync(join(workDir, "notes.txt"), "只读例行里读到的内容\n");
+      const requests: ChatCompletionRequest[] = [];
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        approve: false,
+        script: scriptPlans(requests, { 每周五复盘: [["bash", { command: "cat notes.txt" }]] }),
+      });
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+      expect(toolResultsOf(requests)).toContain("只读例行里读到的内容");
+    });
+  });
+
+  describe("prompt 里的边界提示", () => {
+    const ONLY_READ = "这次只读，不起草不发布不联系人，查到的结果写在回复里";
+    const quietHarness = (requests: ChatCompletionRequest[]) =>
+      startHarness({ bots: ["bot-1"], extensionTools: [], script: scriptPlans(requests, { 每周五复盘: [] }) });
+
+    it("read_only 例行的 prompt 里告诉模型这次只读，不起草不发布不联系人，结果写在回复里", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await quietHarness(requests);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+
+      const prompt = lastUserText(requests);
+      expect(prompt).toContain(ONLY_READ);
+      expect(prompt.indexOf(ONLY_READ), "提示排在当前这条之前，模型读到任务时已经知道边界").toBeLessThan(
+        prompt.indexOf("当前这条："),
+      );
+    });
+
+    it.each([
+      ["draft 边界的例行", routinePrompt("run-1", "每周五复盘", "draft")],
+      ["用户当面派的 run", promptMessage("bot-1", "run-1", "每周五复盘")],
+    ] as const)("%s的 prompt 里没有只读提示", async (_label, message) => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await quietHarness(requests);
+
+      await h.runner.prompt(message);
+
+      expect(lastUserText(requests)).not.toContain("这次只读");
+    });
+
+    it("提示只跟这一次 run：例行之后用户当面派的下一条，prompt 里不再带它", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const h = await quietHarness(requests);
+
+      await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+      await h.runner.prompt(promptMessage("bot-1", "run-2", "每周五复盘"));
+
+      expect(requests.length, "两次 run 各发了请求").toBeGreaterThanOrEqual(2);
+      expect(lastUserText(requests)).not.toContain("这次只读");
+    });
+  });
+
+  it("边界只跟这一次 run：同一个会话里例行、用户消息、例行依次来，只有两条例行被拦", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await draftHarness(requests);
+
+    await h.runner.prompt(routinePrompt("run-1", "每周五复盘", "read_only"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "现在起草一条"));
+    await h.runner.prompt(routinePrompt("run-3", "每周五复盘", "read_only"));
+
+    expect(toolStatuses(h)).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+    expect(drafted(h), "只有用户当面派的那一条起草了").toHaveLength(1);
   });
 });
 

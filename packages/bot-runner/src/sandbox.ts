@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
 import type { GateAccess, SandboxKind } from "./gate.js";
-import { type ForbiddenZones, realpathExisting } from "./paths.js";
+import { type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
 const MACH_LOOKUP_NAMES = [
@@ -34,6 +34,23 @@ export function whitelistEnv(env: NodeJS.ProcessEnv, cwd: string, tmpDir: string
   }
   return next;
 }
+
+// 禁区来自配置，Bot 改不动它；解不出来就是配置本身的问题，报错点名那一项，让用户知道改哪里。
+const realZone = (zones: ForbiddenZones, prefix: string): string => {
+  try {
+    return realpathExisting(prefix);
+  } catch (error) {
+    if (error instanceof PathError && prefix === zones.browserProfileDir) {
+      throw new PathError(
+        `config.browser.profileDir 指向的助理 Chrome profile 解不出真实路径，请让用户改这项配置：${error.message}`,
+        {
+          cause: error,
+        },
+      );
+    }
+    throw error;
+  }
+};
 
 export function sandboxProfile(workDir: string, access: GateAccess, zones: ForbiddenZones): string {
   const work = realpathExisting(workDir);
@@ -78,14 +95,14 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
       : ["(deny network*)"]),
     // 禁区落在工作目录里面时，上面放开的工作目录 socket 在这里拒回去。
     ...zones.hidden.flatMap((prefix) => {
-      const real = seatbeltString(realpathExisting(prefix));
+      const real = seatbeltString(realZone(zones, prefix));
       return [
         `(deny file-read* (subpath ${real}))`,
         `(deny file-write* (subpath ${real}))`,
         `(deny network-outbound (remote unix-socket (subpath ${real})))`,
       ];
     }),
-    ...zones.readOnly.map((prefix) => `(deny file-write* (subpath ${seatbeltString(realpathExisting(prefix))}))`),
+    ...zones.readOnly.map((prefix) => `(deny file-write* (subpath ${seatbeltString(realZone(zones, prefix))}))`),
   ];
   return lines.join("\n");
 }
@@ -177,15 +194,15 @@ const writeMountPoint = (path: string): string | null => {
 // 沙箱的 /tmp 本来就是空的；批准写 /tmp 下的新文件会把真 /tmp 挂进来，所以这个目录单独盖住。
 const X11_SOCKET_DIR = "/tmp/.X11-unix";
 
-const existingReal = (paths: readonly string[]): readonly string[] => [
-  ...new Set(paths.map(realpathExisting).filter(existsSync)),
+const existingReal = (zones: ForbiddenZones, paths: readonly string[]): readonly string[] => [
+  ...new Set(paths.map((path) => realZone(zones, path)).filter(existsSync)),
 ];
 
 const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
   const work = realpathExisting(workDir);
-  const forbidden = existingReal([...zones.hidden, ...otherBotDirs(work), X11_SOCKET_DIR]);
+  const forbidden = existingReal(zones, [...zones.hidden, ...otherBotDirs(work), X11_SOCKET_DIR]);
   const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
-  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden, existingReal(zones.readOnly));
+  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden, existingReal(zones, zones.readOnly));
   return ["bwrap", ...args, "/bin/bash", "-c", command].map(shSingleQuote).join(" ");
 };
 

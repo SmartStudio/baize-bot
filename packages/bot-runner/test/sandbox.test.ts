@@ -524,7 +524,8 @@ describe("bash 沙箱性能", () => {
           computerId: ComputerId.parse("computer-1"),
           platform: process.platform,
           sandbox: sandboxKind(),
-          mcpOperation: null,
+          source: null,
+          routine: null,
         },
         [],
         [],
@@ -875,4 +876,51 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
       await new Promise((resolve) => server.close(resolve));
     }
   });
+});
+
+/** 一套临时布局，助理 Chrome 的 profileDir 配成一对互指的符号链接。 */
+const loopProfile = (): { root: string; work: string; zones: ForbiddenZones } => {
+  const root = mkdtempSync(join(tmpdir(), "baize-sandbox-loop-"));
+  const work = join(root, "bot-1", "work");
+  mkdirSync(work, { recursive: true });
+  const profile = join(root, "loop-profile");
+  symlinkSync(join(root, "loop-profile-2"), profile);
+  symlinkSync(profile, join(root, "loop-profile-2"));
+  return { root, work, zones: forbiddenZones(botDirs(root, BotId.parse("bot-1")), profile) };
+};
+
+describe("禁区配置指向成环的符号链接", () => {
+  it("browserProfileDir 成环：seatbelt profile 生成失败，报错点名 config.browser.profileDir", () => {
+    const { root, work, zones: loopZones } = loopProfile();
+    try {
+      expect(() => sandboxProfile(work, { network: false, writePaths: [] }, loopZones)).toThrow(
+        /config\.browser\.profileDir[^]*成环/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "browserProfileDir 成环：bash 不放行也不裸跑，错误点名 config.browser.profileDir",
+    async () => {
+      const { root, work, zones: loopZones } = loopProfile();
+      const marker = join(root, "ran.txt");
+      try {
+        const sandbox = createSandboxedBash(work, loopZones);
+        await expect(
+          sandbox.tool.execute(
+            "loop-1",
+            { command: `touch ${shellQuote(marker)}` },
+            undefined,
+            undefined,
+            undefined as never,
+          ),
+        ).rejects.toThrow(/config\.browser\.profileDir/);
+        expect(existsSync(marker), "命令没有在沙箱外跑起来").toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

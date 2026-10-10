@@ -1,6 +1,16 @@
 import type { BotId, ToolConnectionConfig } from "@baize/shared";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
+  createPowerShellToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
@@ -26,6 +36,24 @@ interface Link {
   /** 正在连或已经连上的 client。连失败或被撤就清回 null，下一次调用再连。 */
   pending: Pending | null;
 }
+
+/**
+ * Pi 自带工具的名字整组保留，不管这个 Bot 的会话实际装了哪几个：闸门按这些名字认运行器自己的工具，
+ * 一个 MCP 操作叫 `write` 一旦注册成功，模型调 `write` 就走到了插件而闸门还按工作目录放行。
+ * 名字从 Pi 导出的工厂拿，Pi 加工具这里跟着变；runner.test.ts 有一条用例拿它和 Pi 的 allToolNames 对账。
+ */
+export const PI_BUILT_IN_TOOLS: ReadonlySet<string> = new Set(
+  [
+    createReadToolDefinition,
+    createBashToolDefinition,
+    createPowerShellToolDefinition,
+    createEditToolDefinition,
+    createWriteToolDefinition,
+    createGrepToolDefinition,
+    createFindToolDefinition,
+    createLsToolDefinition,
+  ].map((factory) => factory(process.cwd()).name),
+);
 
 /** config.tools 里分配给这个 Bot 的连接，保持 config 里的先后。 */
 export function connectionsFor(botId: BotId, tools: readonly ToolConnectionConfig[]): readonly ToolConnectionConfig[] {
@@ -118,14 +146,14 @@ const clientOf = (link: Link, signal: AbortSignal | undefined): Promise<Client> 
 
 /**
  * 把分配给 Bot 的连接里的每个 operation 变成一个 Pi 工具。
- * 撞名先到先得：`reserved` 里已有的名字和前面连接已注册的名字都跳过，每个跳过 console.warn 一次。
+ * 撞名先到先得：Pi 自带的名字、`reserved` 里已有的名字和前面连接已注册的名字都跳过，每个跳过 console.warn 一次。
  */
 export function createMcpTools(options: {
   readonly botId: BotId;
   readonly connections: readonly ToolConnectionConfig[];
   readonly reserved: ReadonlySet<string>;
 }): McpToolSet {
-  const taken = new Set(options.reserved);
+  const taken = new Set([...PI_BUILT_IN_TOOLS, ...options.reserved]);
   const links: Link[] = [];
   const tools: RunnerTool[] = [];
   const servers = new Map<string, string>();

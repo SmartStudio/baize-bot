@@ -107,7 +107,7 @@ async function imageOf(path: string, dirs: ImageDirs, where: string): Promise<Dr
   const label = `${where}配图「${path}」`;
   const loop = `${label}是符号链接绕成了环，换成真正的图片文件。`;
   const logical = logicalResolve(path, dirs.workDir);
-  // realpathExisting 遇到成环会退回逻辑路径，再被当成「不在工作目录」，报错就偏了，所以先单独认出成环。
+  // realpathExisting 遇到成环抛的是通用的 PathError，报错就偏了，所以先单独认出成环，点名是配图。
   const real = await realpath(logical).catch((error: unknown) => {
     if (errorCode(error) === "ELOOP") throw new Error(loop);
     return realpathExisting(logical);

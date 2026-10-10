@@ -7,6 +7,7 @@ import {
   type Grant,
   type GrantTarget,
   type GroupId,
+  type RoutineBoundary,
   type ToolOperation,
   type Verdict,
 } from "@baize/shared";
@@ -14,7 +15,14 @@ import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
-import { type ForbiddenZones, isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
+import {
+  type ForbiddenZones,
+  isInsideRoot,
+  LinkLoopError,
+  logicalResolve,
+  PathError,
+  realpathExisting,
+} from "./paths.js";
 
 export interface GateAccess {
   readonly network: boolean;
@@ -32,13 +40,20 @@ export interface GateContext {
 /** bash 实际跑在哪种系统沙箱里。`none` 时禁区和写范围只剩命令解析，挡不住，所以 bash 一律问。 */
 export type SandboxKind = "seatbelt" | "bwrap" | "none";
 
+export type ToolSource =
+  | { readonly kind: "connected"; readonly operation: Pick<ToolOperation, "name" | "needsApproval"> }
+  | { readonly kind: "extension" };
+
 export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
-  readonly mcpOperation: Pick<ToolOperation, "name" | "needsApproval"> | null;
+  /** 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属（撤销连接后会话里残留的旧工具）是 null。 */
+  readonly source: ToolSource | null;
   /** 助理浏览器当前页的主机名，点和填按它授权。没有浏览器、还没开页或停在空白页是 null。 */
   readonly browserHost?: string | null;
+  /** 这次 run 是例行触发的就带它的边界，用户当面派的是 null。必填：漏传会让只读例行悄悄放开。 */
+  readonly routine: { readonly boundary: RoutineBoundary } | null;
 }
 
 export interface GateDecision {
@@ -160,7 +175,19 @@ const writePath = (path: string, call: GateContext): ClassifiedAction => {
   );
 };
 
-const deletePath = (path: string, call: GateContext): ClassifiedAction => pathAction("delete", path, call);
+// 删或改名动的是链接本身，但闸门按链接那头判；成环的链接解不出那头，一律不放行，出路只有用户亲手删。
+const LOOP_DELETE_HINT = "要删或改名的是这条成环的链接本身，请告诉用户在电脑上直接删掉它，或者换一条不经过它的路径。";
+
+const deletePath = (path: string, call: GateContext): ClassifiedAction => {
+  try {
+    return pathAction("delete", path, call);
+  } catch (error) {
+    if (error instanceof LinkLoopError) {
+      throw new LinkLoopError(`${error.message}${LOOP_DELETE_HINT}`, { cause: error });
+    }
+    throw error;
+  }
+};
 
 const plainAction = (
   action: ActionKind,
@@ -508,7 +535,8 @@ const classifyBash = (call: GateCall): readonly ClassifiedAction[] => {
   ];
 };
 
-const classifyTool = (call: GateCall): readonly ClassifiedAction[] => {
+/** 运行器自己的工具、浏览器和账号读：名字就能定动作。认不出的返回 null，那是工具连接里的操作，或调用方注入的扩展工具。 */
+const classifyOwnTool = (call: GateCall): readonly ClassifiedAction[] | null => {
   const path = stringField(call.input, ["path"]);
   if (call.toolName === "read") return [path === null ? plainAction("read") : readPath(path, call)];
   if (call.toolName === "write" || call.toolName === "edit") {
@@ -524,8 +552,17 @@ const classifyTool = (call: GateCall): readonly ClassifiedAction[] => {
   // 点和填的目标只认浏览器自己报的当前页主机名：入参是模型写的，写个 hostname 就能冒领别的域名的授权。
   if (browserAction === "engage") return [plainAction(browserAction, browserTarget(call.browserHost ?? null))];
   if (browserAction !== undefined) return [plainAction(browserAction, targetFromInput(call.input, call))];
-  if (call.mcpOperation === null) return [plainAction("write_workspace")];
-  return [plainAction(mcpAction(call.toolName, call.mcpOperation.needsApproval), targetFromInput(call.input, call))];
+  return null;
+};
+
+// 查不到归属的名字（撤销连接后会话里残留的旧 MCP 工具）按未知外部操作问用户：它既不是运行器自己的，也没有 needsApproval 可看。
+// 调用方注入的扩展工具是宿主代码，和运行器自己的工具一样放行。
+const classifyConnected = (call: GateCall): readonly ClassifiedAction[] => {
+  if (call.source === null) return [plainAction("external_write", targetFromInput(call.input, call))];
+  if (call.source.kind === "extension") return [plainAction("write_workspace")];
+  return [
+    plainAction(mcpAction(call.toolName, call.source.operation.needsApproval), targetFromInput(call.input, call)),
+  ];
 };
 
 const sameTarget = (left: GrantTarget, right: GrantTarget, platform: NodeJS.Platform): boolean => {
@@ -608,6 +645,214 @@ export function verdictFor(
 
 const DRAFT_TOOLS: ReadonlySet<string> = new Set(DRAFT_TOOL_NAMES);
 
+/**
+ * 「只读」例行不许做的事，值是理由里那句「不能……」。null 是不拦，归原来的判定管。
+ * 每个动作都得表个态：新增 ActionKind 时这里编译不过，不会悄悄漏拦。
+ */
+const READ_ONLY_BARS: Readonly<Record<ActionKind, string | null>> = {
+  read: null,
+  write_workspace: null,
+  shell: null,
+  install: null,
+  spend: null,
+  account_security: null,
+  external_write: null,
+  publish: "发布",
+  message_person: "联系别人",
+  engage: "在网页上点或填",
+  write_outside: "写工作目录以外的文件",
+  delete: "删东西",
+};
+
+interface ReadOnlyDenial {
+  readonly action: ActionKind;
+  readonly reason: string;
+}
+
+interface ToolBar {
+  readonly action: ActionKind;
+  readonly bar: string;
+}
+
+/**
+ * 「只读」例行里按工具名拦的：起草工具，往「等你确认」里堆卡的提案类工具，和直接改状态或叫别人干活的内部工具。
+ * 这些工具平时归 write_workspace 直接放行（卡本身就是确认，改节奏是用户当面说的话），所以不能靠 READ_ONLY_BARS 按动作拦。
+ * 「只读」按不改东西理解：改清单、换首席、交接都会写任务的状态；mention_bot 会让别的 Bot 起一条不带只读边界的 run，是旁路。
+ * 新增的内部工具要么在这里登记，要么进 gate.test.ts 的放行清单，那里有一条用例把 INTERNAL_TOOLS 逐个过一遍。
+ */
+const READ_ONLY_TOOL_BARS: ReadonlyMap<string, ToolBar> = new Map<string, ToolBar>([
+  ...DRAFT_TOOL_NAMES.map((name): [string, ToolBar] => [name, { action: "publish", bar: "起草" }]),
+  ["propose_project", { action: "write_workspace", bar: "出方案卡" }],
+  ["propose_team", { action: "write_workspace", bar: "出建队卡" }],
+  ["propose_routine", { action: "write_workspace", bar: "出例行卡" }],
+  ["propose_skill", { action: "write_workspace", bar: "问用户存不存 skill" }],
+  ["set_cadence", { action: "write_workspace", bar: "改项目节奏" }],
+  ["update_checklist", { action: "write_workspace", bar: "改任务卡清单" }],
+  ["set_chief", { action: "write_workspace", bar: "换首席" }],
+  ["handoff_task", { action: "write_workspace", bar: "发起交接" }],
+  ["accept_handoff", { action: "write_workspace", bar: "接手交接" }],
+  ["mention_bot", { action: "write_workspace", bar: "叫别的 Bot 干活" }],
+]);
+
+const READ_ONLY_NEXT_STEP =
+  "只读例行只读取和汇报，不产出要用户批的东西，要说的写在回复里；需要的话请告诉用户把这条例行改成「草稿等你批」。";
+
+const readOnlyReason = (bar: string): string => `这是「只读」例行，不能${bar}。${READ_ONLY_NEXT_STEP}`;
+
+const NO_SANDBOX_REASON = `这台电脑没有沙箱，只读例行里不能执行命令。${READ_ONLY_NEXT_STEP}`;
+
+const UNKNOWN_CONNECTED_REASON = `这是「只读」例行，不能用不确定是否只读的插件操作。${READ_ONLY_NEXT_STEP}`;
+
+const UNTRACED_TOOL_REASON = `这是「只读」例行，只能用运行器自带的工具和认得出是只读的插件操作，这个工具两边都不是。${READ_ONLY_NEXT_STEP}`;
+
+const PATH_UNRESOLVED_REASON = "闸门解不出这个路径指向哪里，不猜，不放行。";
+
+/**
+ * 工具连接里的操作在「只读」例行里能放行的名字：第一段是这些读动词。needsApproval 是用户能改的审批偏好，
+ * 不是操作的性质，名字之外没有别的只读标记，所以认不出的一律当不确定，失败即关。
+ */
+const READ_VERBS: ReadonlySet<string> = new Set([
+  "get",
+  "list",
+  "read",
+  "search",
+  "fetch",
+  "query",
+  "find",
+  "lookup",
+  "describe",
+  "view",
+  "count",
+]);
+
+/** 名字里出现连词就是两个动作接在一起（`fetch_and_store`、`get_or_create`），后半截是什么都当没把握。 */
+const CONJUNCTIONS: ReadonlySet<string> = new Set(["and", "then", "or"]);
+
+/**
+ * 读动词后面出现的写词。`verb` 在哪个位置都算写（`get_x_delete` 是删）；`verb_or_noun` 只在后面还跟着别的段时算写，
+ * 落在末段是宾语（`get_update`、`list_message`、`get_user_email` 是读，`view_update_profile`、`lookup_set_price` 是写）。
+ */
+type WriteWord = "verb" | "verb_or_noun";
+const WRITE_WORDS: ReadonlyMap<string, WriteWord> = new Map<string, WriteWord>([
+  ["add", "verb"],
+  ["approve", "verb"],
+  ["archive", "verb_or_noun"],
+  ["assign", "verb"],
+  ["authorize", "verb"],
+  ["ban", "verb_or_noun"],
+  ["buy", "verb"],
+  ["cancel", "verb"],
+  ["charge", "verb_or_noun"],
+  ["clear", "verb"],
+  ["comment", "verb_or_noun"],
+  ["connect", "verb"],
+  ["create", "verb"],
+  ["delete", "verb"],
+  ["deploy", "verb"],
+  ["dm", "verb_or_noun"],
+  ["drop", "verb"],
+  ["edit", "verb_or_noun"],
+  ["email", "verb_or_noun"],
+  ["enable", "verb"],
+  ["engage", "verb"],
+  ["exec", "verb"],
+  ["execute", "verb"],
+  ["follow", "verb"],
+  ["grant", "verb_or_noun"],
+  ["import", "verb_or_noun"],
+  ["install", "verb"],
+  ["invite", "verb"],
+  ["kill", "verb"],
+  ["like", "verb_or_noun"],
+  ["mark", "verb_or_noun"],
+  ["merge", "verb"],
+  ["message", "verb_or_noun"],
+  ["move", "verb"],
+  ["oauth", "verb_or_noun"],
+  ["password", "verb_or_noun"],
+  ["patch", "verb_or_noun"],
+  ["pay", "verb"],
+  ["post", "verb_or_noun"],
+  ["publish", "verb"],
+  ["purchase", "verb_or_noun"],
+  ["push", "verb"],
+  ["put", "verb"],
+  ["reboot", "verb"],
+  ["refund", "verb"],
+  ["reject", "verb"],
+  ["remove", "verb"],
+  ["rename", "verb"],
+  ["replace", "verb"],
+  ["reply", "verb_or_noun"],
+  ["reset", "verb"],
+  ["restart", "verb"],
+  ["revoke", "verb"],
+  ["run", "verb_or_noun"],
+  ["send", "verb"],
+  ["set", "verb_or_noun"],
+  ["shutdown", "verb"],
+  ["star", "verb_or_noun"],
+  ["store", "verb_or_noun"],
+  ["submit", "verb"],
+  ["sync", "verb"],
+  ["transfer", "verb_or_noun"],
+  ["trigger", "verb_or_noun"],
+  ["truncate", "verb"],
+  ["unlock", "verb"],
+  ["update", "verb_or_noun"],
+  ["upload", "verb_or_noun"],
+  ["wipe", "verb"],
+  ["write", "verb"],
+]);
+
+/**
+ * 下划线、连字符、点号、驼峰边界都是段的分隔，段统一成小写：`getXDelete`、`get_x-delete`、`GET_X_DELETE` 是同一个名字。
+ * 连续大写后面接小写也是边界，`getXDelete` 的 X 和 Delete 分开。
+ */
+const nameSegments = (toolName: string): readonly string[] =>
+  toolName
+    .replace(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/g, "_")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((segment) => segment !== "");
+
+const isReadOnlyName = (toolName: string): boolean => {
+  const [head, ...rest] = nameSegments(toolName);
+  if (head === undefined || rest.length === 0 || !READ_VERBS.has(head)) return false;
+  return rest.every((segment, index) => {
+    if (CONJUNCTIONS.has(segment)) return false;
+    const word = WRITE_WORDS.get(segment);
+    return word === undefined || (word === "verb_or_noun" && index === rest.length - 1);
+  });
+};
+
+/** 按名字能认出的写动作拒绝并点名是哪一类，其余没把握的拒绝并说不确定。读类名字返回 null，交给后面的原判定。 */
+const readOnlyConnectedDenial = (toolName: string): ReadOnlyDenial | null => {
+  if (isReadOnlyName(toolName)) return null;
+  const named = mcpAction(toolName, true);
+  const bar = READ_ONLY_BARS[named];
+  return bar === null
+    ? { action: "external_write", reason: UNKNOWN_CONNECTED_REASON }
+    : { action: named, reason: readOnlyReason(bar) };
+};
+
+/** 不用分类就能定的：登记的工具名，和没有沙箱时的 bash。 */
+const readOnlyNameDenial = (call: GateCall): ReadOnlyDenial | null => {
+  const toolBar = READ_ONLY_TOOL_BARS.get(call.toolName);
+  if (toolBar !== undefined) return { action: toolBar.action, reason: readOnlyReason(toolBar.bar) };
+  // 没有沙箱时 bash 只剩命令解析，挡不住同义的写法，所以不看命令内容，一律不跑；有沙箱时仍按命令分类。
+  if (call.toolName === "bash" && call.sandbox === "none") return { action: "shell", reason: NO_SANDBOX_REASON };
+  return null;
+};
+
+const readOnlyDecision = (denial: ReadOnlyDenial): GateDecision => ({
+  verdict: "deny",
+  action: denial.action,
+  target: null,
+  reason: denial.reason,
+  access: NO_ACCESS,
+});
+
 const draftAccountIds = (input: Record<string, unknown>): readonly unknown[] =>
   Array.isArray(input["drafts"])
     ? input["drafts"].map((draft: unknown) =>
@@ -633,11 +878,44 @@ function decideDraft(input: Record<string, unknown>, accounts: readonly AccountC
   };
 }
 
+/** Pi 的 tool_call 事件不接住处理器抛的错，所以路径解不出来在这里变成拒绝，不往外抛。 */
 export function decide(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
-  // 同名的 MCP 操作注册时就被跳过，所以这个名字一定是运行器自己的起草工具，不看 mcpOperation。
+  try {
+    return decideResolved(call, grants, accounts);
+  } catch (error) {
+    if (!(error instanceof PathError)) throw error;
+    return {
+      verdict: "deny",
+      action: call.toolName === "read" ? "read" : "write_outside",
+      target: null,
+      reason: `${PATH_UNRESOLVED_REASON}${error.message}`,
+      access: NO_ACCESS,
+    };
+  }
+}
+
+function decideResolved(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
+  const readOnly = call.routine?.boundary === "read_only";
+  // 同名的 MCP 操作注册时就被跳过，所以这些名字一定是运行器自己的工具，不看 source。
+  const nameDenial = readOnly ? readOnlyNameDenial(call) : null;
+  if (nameDenial !== null) return readOnlyDecision(nameDenial);
   if (DRAFT_TOOLS.has(call.toolName)) return decideDraft(call.input, accounts);
-  const items = classifyTool(call);
-  const evaluated = items.map((item) => ({ item, verdict: verdictForItem(item, call, grants, accounts) }));
+  const own = classifyOwnTool(call);
+  if (readOnly && own === null) {
+    const denial =
+      call.source?.kind === "connected"
+        ? readOnlyConnectedDenial(call.toolName)
+        : { action: "external_write" as const, reason: UNTRACED_TOOL_REASON };
+    if (denial !== null) return readOnlyDecision(denial);
+  }
+  const items = own ?? classifyConnected(call);
+  const evaluated = items.map((item) => {
+    // 边界排在授权和默认表前面：永久授权也救不了只读例行。
+    const bar = readOnly ? READ_ONLY_BARS[item.action] : null;
+    return bar === null
+      ? { item, verdict: verdictForItem(item, call, grants, accounts), reason: null }
+      : { item, verdict: "deny" as const, reason: readOnlyReason(bar) };
+  });
   const denied = evaluated.find((entry) => entry.verdict === "deny");
   const asked = evaluated.find((entry) => entry.verdict === "ask");
   const selected = denied ?? asked ?? evaluated[0];
@@ -649,9 +927,10 @@ export function decide(call: GateCall, grants: readonly Grant[], accounts: reado
     action: selected.item.action,
     target: selected.item.target,
     reason:
-      selected.verdict === "deny" && selected.item.path !== null
+      selected.reason ??
+      (selected.verdict === "deny" && selected.item.path !== null
         ? ZONE_REASONS[zoneHit(selected.item.action, selected.item.path, call) ?? "hidden"]
-        : null,
+        : null),
     access: mergeAccess(items),
   };
 }

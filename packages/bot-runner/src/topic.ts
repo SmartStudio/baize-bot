@@ -32,7 +32,7 @@ export interface ActiveRun {
   readonly handoffId: HandoffId | undefined;
   /** 主助理手上的项目，set_cadence 只认这里面的。队员的 prompt 不带，是空的。 */
   readonly projects: readonly Project[];
-  /** 例行派来的才有值。复盘这类只该在例行里做的事按它收放。 */
+  /** 这次 run 是不是例行触发的，是的话带这条例行的边界，复盘这类只该在例行里做的事也按它收放；用户当面派的是 null。 */
   readonly routine: PromptMessage["routine"];
 }
 

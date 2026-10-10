@@ -6,6 +6,7 @@ import {
   type ComputerId,
   type ControlToAgent,
   type GroupId,
+  type RoutineBoundary,
   type RunId,
   type ToolConnectionConfig,
 } from "@baize/shared";
@@ -21,7 +22,7 @@ import {
 } from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { createDraftTools, renderAccounts } from "./drafts.js";
-import { decide, type GateDecision, INTERNAL_TOOLS } from "./gate.js";
+import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createHelperTools } from "./helper.js";
 import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
 import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
@@ -237,6 +238,16 @@ const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
   }
 };
 
+/**
+ * 例行边界在 prompt 里的提示，和闸门的拦法对着写。draft 边界不写：起草照常，批不批是用户的事。
+ * 表是穷尽的，新增边界时这里编译不过。
+ */
+const ROUTINE_BOUNDARY_NOTES: Readonly<Record<RoutineBoundary, string | null>> = {
+  read_only:
+    "这次只读，不起草不发布不联系人，查到的结果写在回复里。方案卡、建队卡、例行卡这类要用户确认的卡这次也不出。",
+  draft: null,
+};
+
 // 群标签之后先放任务卡：它是这一轮的目标，上下文和当前这条都是围着它说的。放末尾的话
 // 群里的闲聊会把它挤远，模型更容易照着最后几句走。
 function composePrompt(
@@ -283,6 +294,8 @@ function composePrompt(
   if (context.length > 0) {
     sections.push(`群里刚才说的：\n${context.map((line) => `${line.from}：${line.text}`).join("\n")}`);
   }
+  const boundaryNote = message.routine === null ? null : ROUTINE_BOUNDARY_NOTES[message.routine.boundary];
+  if (boundaryNote !== null) sections.push(`例行边界：${boundaryNote}`);
   if (message.handoffId === undefined) {
     const origin = message.origin;
     let current: string;
@@ -311,6 +324,7 @@ export function createRunner(config: RunnerConfig): Runner {
   const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const extensionTools = config.extensionTools ?? [];
+  const extensionNames: ReadonlySet<string> = new Set(extensionTools.map((tool) => tool.name));
   const liveRuns = new Set<RunId>();
   const runnerAbortedRuns = new Set<RunId>();
   let nextConfigVersion = 1;
@@ -589,7 +603,6 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
       ...createMemoryTools({ groupKind, activeRun, send: config.send }),
-      ...createRoutineOfferTools({ activeRun, send: config.send }),
       ...createDraftTools({
         activeRun,
         send: config.send,
@@ -609,6 +622,7 @@ export function createRunner(config: RunnerConfig): Runner {
               gate,
             }),
             ...createReviewTools({ groupKind, activeRun, send: config.send }),
+            ...createRoutineOfferTools({ activeRun, send: config.send }),
           ]
         : []),
       ...(bot.browser?.tools ?? []),
@@ -637,6 +651,12 @@ export function createRunner(config: RunnerConfig): Runner {
       const operation =
         connections.flatMap((connection) => connection.operations).find((candidate) => candidate.name === toolName) ??
         null;
+      const source: ToolSource | null =
+        operation !== null
+          ? { kind: "connected", operation }
+          : extensionNames.has(toolName)
+            ? { kind: "extension" }
+            : null;
       return decide(
         {
           toolName,
@@ -646,9 +666,10 @@ export function createRunner(config: RunnerConfig): Runner {
           groupId,
           platform: process.platform,
           sandbox: bash.sandbox,
-          mcpOperation: operation,
+          source,
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,
+          routine: bot.active?.routine ?? null,
         },
         desired.grants,
         desired.accounts,
