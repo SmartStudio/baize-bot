@@ -66,8 +66,6 @@ type TurnCost = {
 
 type PassCredit = { steps: number; amount: number };
 
-type HeldPass = PassCredit & { readonly runId: RunId; readonly botId: BotId };
-
 type Turn = {
   readonly groupId: GroupId;
   readonly ownerId: UserId;
@@ -85,10 +83,7 @@ type Turn = {
   botMessages: number;
   dispatched: number;
   summary: TurnCost | null;
-  heldPass: HeldPass | null;
 };
-
-const EMPTY_PASS: PassCredit = { steps: 0, amount: 0 };
 
 /** 这一轮正在跑的是这个 run 时才认，派活途中和空档里的 run 号都对不上。 */
 function isRunning(turn: Turn | undefined, runId: RunId): turn is Turn {
@@ -144,7 +139,6 @@ export class GroupTurns {
       botMessages: 0,
       dispatched: 0,
       summary: null,
-      heldPass: null,
     };
     this.#turns.set(input.groupId, turn);
     const outcome = await this.#advance(turn);
@@ -192,12 +186,6 @@ export class GroupTurns {
     const turn = this.#turns.get(groupId);
     if (!isRunning(turn, runId)) return { kind: "miss" };
     if (turn.summary === null) {
-      turn.heldPass = {
-        steps: (turn.heldPass?.steps ?? 0) + extra.steps,
-        amount: (turn.heldPass?.amount ?? 0) + extra.amount,
-        runId,
-        botId: extra.botId,
-      };
       return { kind: "held" };
     }
     turn.summary = {
@@ -206,14 +194,6 @@ export class GroupTurns {
       amount: turn.summary.amount + extra.amount,
     };
     return { kind: "merged", cost: turn.summary };
-  }
-
-  takeHeldPass(groupId: GroupId, runId: RunId): PassCredit {
-    const turn = this.#turns.get(groupId);
-    if (!isRunning(turn, runId) || turn.heldPass === null) return { ...EMPTY_PASS };
-    const held = turn.heldPass;
-    turn.heldPass = null;
-    return held;
   }
 
   rememberCost(groupId: GroupId, runId: RunId, cost: TurnCost): void {
@@ -391,6 +371,5 @@ export class GroupTurns {
     turn.speakers = [];
     this.#publish(turn);
     if (pending.length > 0) this.#deferred.set(turn.groupId, [...(this.#deferred.get(turn.groupId) ?? []), ...pending]);
-    turn.heldPass = null;
   }
 }
