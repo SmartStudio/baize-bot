@@ -21,6 +21,7 @@ import {
   type RuntimeConfig,
 } from "./env.js";
 import { createApp } from "./http/app.js";
+import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
 import { Notifications, type NotificationOptions } from "./notifications.js";
 import { PublishLoop, type PublishLoopOptions } from "./publish/loop.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
@@ -43,6 +44,8 @@ export type RunningServer = {
   readonly notifications: Notifications;
   /** 同 routines，测试里手动 tick。 */
   readonly publisher: PublishLoop;
+  /** 同 routines，测试里手动 tick。 */
+  readonly metrics: MetricPoller;
   close(): Promise<void>;
 };
 
@@ -62,6 +65,7 @@ export type StartOptions = {
   /** 不给就读 CREDENTIALS_KEY，缺了或不对启动失败。 */
   readonly credentialsKey?: string;
   readonly publisher?: Pick<PublishLoopOptions, "now" | "intervalMs">;
+  readonly metrics?: Pick<MetricPollerOptions, "now" | "intervalMs">;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -188,6 +192,17 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   });
   await publisher.start();
 
+  const metrics = new MetricPoller({
+    db: options.db,
+    push: hub,
+    notifications,
+    agents,
+    tokens,
+    githubApiBaseUrl: config.githubApiBaseUrl,
+    ...options.metrics,
+  });
+  metrics.start();
+
   const reminders = setInterval(() => {
     const now = new Date();
     void remindStaleApprovals(options.db, hub, now).catch((error: unknown) => console.error("扫超时审批出错", error));
@@ -201,9 +216,11 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     routines,
     notifications,
     publisher,
+    metrics,
     close: async () => {
       routines.stop();
       publisher.stop();
+      metrics.stop();
       clearInterval(reminders);
       await hub.closeAll();
       await agents.closeAll();
