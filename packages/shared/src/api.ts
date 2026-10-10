@@ -413,8 +413,9 @@ export type UpdateToolRequest = z.infer<typeof UpdateToolRequest>;
 
 // DELETE /api/tools/:id  回 204，重发 config。
 
-// GET /api/usage  设置的用量页。本周从周一 00:00（Asia/Shanghai）起算，weekStartsAt 告诉客户端这一刻。
-// 每个自己的 Bot 一行，本周没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。预算是后续，响应里没有 budget。
+// GET /api/usage  设置的用量页。本月从 1 号 00:00（Asia/Shanghai）起算，monthStartsAt 告诉客户端这一刻。
+// 每个自己的 Bot 一行，本月没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。recent 只列本月的。
+// budget 同 Settings.budget。projects 只列本月有 run 的项目群，按 amount 降序。
 export const UsageBotLine = z.object({
   botId: BotId,
   amount: z.number().nonnegative(),
@@ -433,10 +434,18 @@ export const UsageRunItem = z.object({
   amount: z.number().nonnegative(),
 });
 export type UsageRunItem = z.infer<typeof UsageRunItem>;
+export const UsageProjectLine = z.object({
+  groupId: GroupId,
+  amount: z.number().nonnegative(),
+  runs: z.number().int().nonnegative(),
+});
+export type UsageProjectLine = z.infer<typeof UsageProjectLine>;
 export const UsageResponse = z.object({
-  weekStartsAt: Timestamp,
+  monthStartsAt: Timestamp,
   total: z.number().nonnegative(),
+  budget: z.number().int().positive().nullable(),
   bots: z.array(UsageBotLine),
+  projects: z.array(UsageProjectLine),
   recent: z.array(UsageRunItem).max(20),
 });
 export type UsageResponse = z.infer<typeof UsageResponse>;
@@ -615,6 +624,8 @@ export const Settings = z.object({
     .string()
     .regex(/^\d{2}:\d{2}$/)
     .nullable(),
+  // 元每月，null 是不设。本月花费到了预算，例行的自动触发就不跑；用到 80% 时提醒一次。
+  budget: z.number().int().positive().nullable(),
 });
 export type Settings = z.infer<typeof Settings>;
 export const UpdateSettingsRequest = Settings.partial();

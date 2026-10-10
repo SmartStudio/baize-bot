@@ -415,10 +415,19 @@ describe("M11 用量的共享形状", () => {
       steps: 3,
       amount: 0.4,
     };
-    const usage = { weekStartsAt: now, total: 0.4, bots: [{ botId: "b1", amount: 0.4, runs: 1 }], recent: [run] };
+    const usage = {
+      monthStartsAt: now,
+      total: 0.4,
+      budget: null,
+      bots: [{ botId: "b1", amount: 0.4, runs: 1 }],
+      projects: [{ groupId: "g1", amount: 0.4, runs: 1 }],
+      recent: [run],
+    };
     expect(UsageResponse.safeParse(usage).success).toBe(true);
     expect(UsageResponse.safeParse({ ...usage, recent: Array.from({ length: 21 }, () => run) }).success).toBe(false);
     expect(UsageResponse.safeParse({ ...usage, bots: [{ botId: "b1", amount: -1, runs: 0 }] }).success).toBe(false);
+    expect(UsageResponse.safeParse({ ...usage, budget: 300 }).success).toBe(true);
+    expect(UsageResponse.safeParse({ ...usage, budget: 0 }).success, "预算不设是 null，不是 0").toBe(false);
     expect(UsageRunItem.safeParse({ ...run, botId: null, groupId: null }).success).toBe(true);
   });
 });
