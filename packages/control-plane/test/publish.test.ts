@@ -217,6 +217,10 @@ describe("发布循环", () => {
     await createDraft(job, spec);
     const approved = await approve(job, spec.draftId, issuePost("改过的稿"));
     expect(approved.content.text).toBe("改过的稿");
+    expect(
+      (await nextOf(job.push, "brand_updated")).brand.edits.map(({ before, after }) => ({ before, after })),
+      "改过字的批准顺手进品牌手册",
+    ).toEqual([{ before: "原稿", after: "改过的稿" }]);
     expect(approved.edits.map(({ before, after }) => ({ before, after }))).toEqual([
       { before: "原稿", after: "改过的稿" },
     ]);

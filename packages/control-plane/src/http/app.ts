@@ -136,7 +136,7 @@ import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
-import { createBrandRoutes } from "./routes/brand.js";
+import { announceBrand, createBrandRoutes } from "./routes/brand.js";
 import { createGoalRoutes } from "./routes/goals.js";
 import { createPreferenceRoutes } from "./routes/preferences.js";
 import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
@@ -178,6 +178,7 @@ const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 export function createApp(deps: AppDeps): Hono<Env> {
   const { agents, db, hub } = deps;
   const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns, notifications: deps.notifications };
+  const brandDeps = { db, push: hub, agents };
   const app = new Hono<Env>();
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
@@ -206,7 +207,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   // 第 2 期的接缝路由，都在登录中间件之后，各自的子单元把 501 换掉。
   app.route("/api", createGoalRoutes({ db, push: hub }));
   app.route("/api", createPreferenceRoutes({ db, push: hub, agents }));
-  app.route("/api", createBrandRoutes());
+  app.route("/api", createBrandRoutes(brandDeps));
   app.route("/api", createTeamOfferRoutes());
   app.route("/api", createRoutineOfferRoutes());
   app.route("/api", createSeenRoutes());
@@ -392,8 +393,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (decided.kind === "not_found") return c.json(NO_DRAFT, 404);
     if (decided.kind === "already_decided") return c.json({ error: "这条草稿已经有结论了" }, 409);
     if (decided.kind === "invalid") return c.json({ error: decided.error }, 400);
-    hub.push(ownerId, { type: "draft_updated", draft: decided.value });
-    return c.json(DecideDraftResponse.parse({ draft: decided.value }));
+    const { draft, brand } = decided.value;
+    hub.push(ownerId, { type: "draft_updated", draft });
+    if (brand !== null) await announceBrand(brandDeps, ownerId, brand);
+    return c.json(DecideDraftResponse.parse({ draft }));
   });
 
   app.post("/api/plans/:id/approve", async (c) => {
@@ -406,9 +409,11 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (decided.kind === "not_found") return c.json(NO_PLAN, 404);
     if (decided.kind === "already_decided") return c.json({ error: "这份计划已经有结论了" }, 409);
     if (decided.kind === "invalid") return c.json({ error: decided.error }, 400);
-    hub.push(ownerId, { type: "plan_updated", plan: decided.value.plan });
-    for (const draft of decided.value.drafts) hub.push(ownerId, { type: "draft_updated", draft });
-    return c.json(ApprovePlanResponse.parse(decided.value));
+    const { plan, drafts, brand } = decided.value;
+    hub.push(ownerId, { type: "plan_updated", plan });
+    for (const draft of drafts) hub.push(ownerId, { type: "draft_updated", draft });
+    if (brand !== null) await announceBrand(brandDeps, ownerId, brand);
+    return c.json(ApprovePlanResponse.parse({ plan, drafts }));
   });
 
   app.post("/api/plans/:id/return", async (c) => {

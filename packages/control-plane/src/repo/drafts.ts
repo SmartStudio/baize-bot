@@ -6,6 +6,7 @@ import {
   UserId,
   type Account,
   type BotId,
+  type BrandBook,
   type ContentPlan,
   type ContentPlanId,
   type DecideDraftRequest,
@@ -26,6 +27,7 @@ import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
+import { recordApprovedEdit } from "./brand.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
 import { lockOpenRun } from "./runs.js";
@@ -69,9 +71,9 @@ function kindRefusal(before: DraftContent, after: DraftContent): string | null {
 }
 
 /** 人在卡上改了正文才记一笔。标题、配图的改动不进 edits：edits 只为回看 Bot 写的和人改的差在哪。 */
-function appendEdit(edits: readonly DraftEdit[], before: DraftContent, after: DraftContent, at: Date): DraftEdit[] {
-  if (before.text === after.text) return [...edits];
-  return [...edits, { before: before.text, after: after.text, at: at.toISOString() }].slice(-MAX_EDITS);
+function editOf(before: DraftContent, after: DraftContent, at: Date): DraftEdit | undefined {
+  if (before.text === after.text) return undefined;
+  return { before: before.text, after: after.text, at: at.toISOString() };
 }
 
 // ---- Bot 起草 ----
@@ -242,7 +244,7 @@ export async function decideDraft(
   ownerId: UserId,
   draftId: DraftId,
   decision: DecideDraftRequest,
-): Promise<DecideResult<Draft>> {
+): Promise<DecideResult<{ draft: Draft; brand: BrandBook | null }>> {
   return db.transaction(async (tx) => {
     const [current] = await tx
       .select()
@@ -259,7 +261,9 @@ export async function decideDraft(
         .set({ status: "returned", decidedAt: now })
         .where(and(eq(drafts.id, draftId), eq(drafts.status, "pending")))
         .returning();
-      return row === undefined ? { kind: "already_decided" } : { kind: "ok", value: toDraft(row) };
+      return row === undefined
+        ? { kind: "already_decided" }
+        : { kind: "ok", value: { draft: toDraft(row), brand: null } };
     }
     const approved = approval(current, decision.content, now);
     if (approved.kind === "invalid") return approved;
@@ -268,7 +272,9 @@ export async function decideDraft(
       .set(approved.set)
       .where(and(eq(drafts.id, draftId), eq(drafts.status, "pending")))
       .returning();
-    return row === undefined ? { kind: "already_decided" } : { kind: "ok", value: toDraft(row) };
+    if (row === undefined) return { kind: "already_decided" };
+    const brand = await recordApprovedEdit(tx, ownerId, draftId, approved.edit);
+    return { kind: "ok", value: { draft: toDraft(row), brand } };
   });
 }
 
@@ -277,14 +283,16 @@ function approval(current: DraftRow, content: DraftContent | undefined, now: Dat
   const refusal = kindRefusal(current.content, next) ?? contentRefusal(current.platform, next);
   if (refusal !== null) return { kind: "invalid" as const, error: refusal };
   const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content: next });
+  const edit = editOf(current.content, next, now);
   return {
     kind: "ok" as const,
+    edit,
     set: {
       status: "approved" as const,
       content: next,
       contentHash: hash,
       approvedHash: hash,
-      edits: appendEdit(current.edits, current.content, next, now),
+      edits: edit === undefined ? current.edits : [...current.edits, edit].slice(-MAX_EDITS),
       failure: null,
       decidedAt: now,
     },
@@ -318,6 +326,9 @@ async function claimPlan(
 
 class Refused extends Error {}
 
+/** brand 是这次批准追加过改动之后的手册，没追加是 null。 */
+type ApprovedPlan = { plan: ContentPlan; drafts: Draft[]; brand: BrandBook | null };
+
 /**
  * 一次批准整份计划：计划下每条还在待批的草稿都批掉，edits 里给了新内容的先换内容。
  * 已经单条决定过的草稿不动。返回的 drafts 只含这次状态变了的。
@@ -327,9 +338,9 @@ export async function approvePlan(
   ownerId: UserId,
   planId: ContentPlanId,
   edits: readonly { readonly draftId: DraftId; readonly content: DraftContent }[],
-): Promise<DecideResult<{ plan: ContentPlan; drafts: Draft[] }>> {
+): Promise<DecideResult<ApprovedPlan>> {
   return db
-    .transaction(async (tx): Promise<DecideResult<{ plan: ContentPlan; drafts: Draft[] }>> => {
+    .transaction(async (tx): Promise<DecideResult<ApprovedPlan>> => {
       const now = new Date();
       const claimed = await claimPlan(tx, ownerId, planId, "approved", now);
       if (claimed.kind !== "ok") return claimed;
@@ -346,6 +357,7 @@ export async function approvePlan(
         contentFor.set(edit.draftId, edit.content);
       }
       const changed: Draft[] = [];
+      let brand: BrandBook | null = null;
       for (const row of rows) {
         if (row.status !== "pending") continue;
         const approved = approval(row, contentFor.get(row.id), now);
@@ -355,9 +367,12 @@ export async function approvePlan(
           .set(approved.set)
           .where(and(eq(drafts.id, row.id), eq(drafts.status, "pending")))
           .returning();
-        if (updated !== undefined) changed.push(toDraft(updated));
+        if (updated === undefined) continue;
+        const draft = toDraft(updated);
+        changed.push(draft);
+        brand = (await recordApprovedEdit(tx, ownerId, draft.id, approved.edit)) ?? brand;
       }
-      return { kind: "ok", value: { plan: toPlan(claimed.value, rows), drafts: changed } };
+      return { kind: "ok", value: { plan: toPlan(claimed.value, rows), drafts: changed, brand } };
     })
     .catch((error: unknown) => {
       if (error instanceof Refused) return { kind: "invalid", error: error.message };
