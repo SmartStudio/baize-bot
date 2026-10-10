@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowDown, Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
+import { useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
 import {
   TurnView,
@@ -15,6 +16,7 @@ import { BotAvatar } from "./BotAvatar.js";
 import { BotHeader } from "./BotHeader.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
+import { prefillOf } from "./routines/prefill.js";
 import type { ContentBook, LoadStatus } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
@@ -132,6 +134,17 @@ export const ChatPanel = ({
     setShowScroll(false);
     if (thread.current) thread.current.scrollTop = thread.current.scrollHeight;
   }, [groupId]);
+
+  // 例行页的「改」和「新建」带着一句话跳过来。读完就把这次跳转的 state 换掉，刷新或后退回来都不再填一遍。
+  const location = useLocation();
+  const navigate = useNavigate();
+  const prefill = prefillOf(location.state);
+  useEffect(() => {
+    if (prefill === null) return;
+    setDraft(prefill);
+    input.current?.focus();
+    navigate(location.pathname, { replace: true, state: null });
+  }, [prefill, location.pathname, navigate]);
 
   // 流式回复只让最后一条变长，条数不变；用户向上读历史时不能抢走滚动位置。
   useEffect(() => {

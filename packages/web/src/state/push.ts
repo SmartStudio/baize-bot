@@ -44,8 +44,8 @@ export const createPushHandlers = ({
       dispatch({ type: "message_upserted", message: push.message, seq });
       const { body, groupId } = push.message;
       if (body.kind === "bot" && !body.streaming && body.text !== "" && inAssistantChat(groupId)) bumpToday();
-      // 建队卡是首页和项目页「等你」里的一行，新卡落地、别的窗口点了确认都得重拉。
-      if (body.kind === "team_offer") bumpToday();
+      // 建队卡和例行确认卡都是首页「等你」里的一行，新卡落地、别的窗口拍了板都得重拉。
+      if (body.kind === "team_offer" || body.kind === "routine_offer") bumpToday();
     },
     message_delta: (push, seq) => {
       dispatch({
@@ -83,8 +83,15 @@ export const createPushHandlers = ({
       dispatch({ type: "handoff_pushed", handoff: push.handoff });
       refreshPendingCounts();
     },
-    routine_updated: (push, seq) => dispatch({ type: "routine_upserted", routine: push.routine, seq }),
-    routine_deleted: (push, seq) => dispatch({ type: "routine_removed", routineId: push.routineId, seq }),
+    // 项目页折叠行的例行三态读项目快照，跟着 todayVersion 重拉。
+    routine_updated: (push, seq) => {
+      dispatch({ type: "routine_upserted", routine: push.routine, seq });
+      bumpToday();
+    },
+    routine_deleted: (push, seq) => {
+      dispatch({ type: "routine_removed", routineId: push.routineId, seq });
+      bumpToday();
+    },
     skill_updated: (push, seq) => dispatch({ type: "skill_upserted", skill: push.skill, seq }),
     skill_deleted: (push, seq) => dispatch({ type: "skill_removed", botId: push.botId, skillId: push.skillId, seq }),
     preference_updated: (push, seq) => dispatch({ type: "preference_upserted", preference: push.preference, seq }),

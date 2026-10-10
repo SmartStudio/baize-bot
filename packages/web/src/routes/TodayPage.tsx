@@ -29,6 +29,7 @@ import type { ContentBook } from "../state/types.js";
 import { rememberLoginCards, withLoginCards } from "../state/accounts.js";
 import type { Today } from "../state/today.js";
 import { LoginCard } from "../components/LoginCard.js";
+import { RoutineOfferCard } from "../components/messages/RoutineOfferCard.js";
 
 const greeting = (name: string): string => {
   const hour = new Date().getHours();
@@ -349,8 +350,16 @@ export const TodayPending = ({ data, compact = false, cards, onDecide, onOpenGro
             ) : null;
           }
           case "routine_offer":
-            // 第 2 期形状占位：例行确认卡由 p2-routine-web 画。
-            return null;
+            return (
+              <article
+                className="today-row today-confirm"
+                data-testid="today-row"
+                data-kind={item.kind}
+                key={item.message.id}
+              >
+                <RoutineOfferCard message={item.message} />
+              </article>
+            );
           default: {
             const unreachable: never = item;
             return unreachable;

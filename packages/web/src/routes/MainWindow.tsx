@@ -17,6 +17,7 @@ import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
+import { MY_ROUTINES } from "../state/routines.js";
 import { MESSAGE_GAP_ATTEMPTS } from "../state/types.js";
 import { useToday } from "../state/today.js";
 import { useProject } from "../state/project.js";
@@ -62,6 +63,18 @@ export const MainWindow = () => {
   useEffect(() => {
     if (focusedId !== null && !loaded) void actions.loadMessages(focusedId, reconnectedAt);
   }, [focusedId, loaded, reconnectedAt, actions]);
+
+  // 打开群页或项目页算看过（D3），首页扫到不算。项目页进同一个项目群还是这个群，不再记一次。
+  useEffect(() => {
+    if (focusedId !== null) void actions.markSeen(focusedId).catch(() => undefined);
+  }, [focusedId, actions]);
+
+  // 侧栏要知道有没有例行自己停了，例行不等进例行页才拉。在途和拉失败的不自动再要，失败等例行页上点重试。
+  const routinesLoaded = ready?.routines.rows[MY_ROUTINES];
+  const routinesLoad = ready?.loads.routines ?? "idle";
+  useEffect(() => {
+    if (ready !== null && routinesLoaded === undefined && routinesLoad === "idle") void actions.loadRoutines();
+  }, [ready, routinesLoaded, routinesLoad, actions]);
 
   // 流式 delta 漏了版本的消息不论在哪个群都单独拉回来，侧栏的最近一条也靠它补齐。连着失败到上限的先不拉。
   const messageGaps = ready?.messageGaps;
@@ -143,6 +156,7 @@ export const MainWindow = () => {
         pendingCount={today.data === null ? 0 : today.data.pending.length}
         countsStale={ready.loads.counts === "failed"}
         onRetryCounts={() => void actions.loadPendingCounts().catch(() => undefined)}
+        routinesStopped={(routinesLoaded ?? []).some((routine) => routine.state === "auto_paused")}
         onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
         onOpenSettings={() => setOverlay("settings")}

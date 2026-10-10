@@ -1,34 +1,28 @@
 import { expect, test, SHOT, login, openRoutines, openSeededBot } from "./fixtures";
 
-test("在例行页新建一条每分钟的例行任务，存下来就出现在列表里", async ({ page }) => {
+test("在例行详情里加一个每分钟的触发器，存下来列表就跟着改", async ({ page }) => {
   await login(page);
   await openRoutines(page, "小服");
-  await expect(page.getByTestId("routine-row"), "预置的只有「每日工单早报」一条").toHaveCount(1);
+  const row = page.locator('[data-testid=routine-row][data-routine-name="每日工单早报"]');
+  await expect(row.getByTestId("routine-row-note")).toHaveText("工作日 09:00");
 
-  await page.getByTestId("routine-new").click();
-  await page.getByTestId("routine-bot-select").selectOption({ label: "小服" });
-  await page.getByTestId("routine-name-input").fill("每分钟看一眼工单");
-  await page.getByTestId("routine-instruction-input").fill("看一眼有没有新工单，有紧急的就告诉我。");
+  await row.getByTestId("routine-open").click();
+  const saved = page.waitForResponse(
+    (res) => /\/api\/routines\/[^/]+$/.test(new URL(res.url()).pathname) && res.request().method() === "PATCH",
+  );
   await page.getByTestId("trigger-add").click();
   await page.getByTestId("trigger-preset-minutely").click();
-  await expect(page.getByTestId("trigger-chip"), "挑完预设先落在编辑器里").toHaveText(/每分钟/);
-
-  const saved = page.waitForResponse(
-    (res) => res.url().endsWith("/routines") && res.request().method() === "POST" && res.status() === 201,
-  );
-  await page.getByTestId("routine-save").click();
   await saved;
-
-  const created = page.locator('[data-testid=routine-row][data-routine-name="每分钟看一眼工单"]');
-  await expect(page.getByTestId("routine-row")).toHaveCount(2);
-  await expect(created, "存到选中的那个 Bot 名下").toHaveAttribute("data-bot-name", "小服");
-  await expect(created.getByTestId("routine-row-note"), "列表上的下次触发是从表达式反推的文案").toHaveText("每分钟");
+  await expect(page.getByTestId("trigger-chip"), "挑完预设就落在编辑器里").toHaveCount(2);
+  await page.getByTestId("routine-back").click();
+  await expect(row.getByTestId("routine-row-note"), "列表上的触发是从表达式反推的文案").toHaveText(
+    "工作日 09:00 · 每分钟",
+  );
 
   // 刷新才分得清「存住了」和「界面自己记了一笔」。
   await page.reload();
   await openRoutines(page, "小服");
-  await expect(page.getByTestId("routine-row")).toHaveCount(2);
-  await expect(created.getByTestId("routine-row-note")).toHaveText("每分钟");
+  await expect(row.getByTestId("routine-row-note")).toHaveText("工作日 09:00 · 每分钟");
 });
 
 test("试跑一次后群里出现「自动运行」那条 system，运行记录多一条", async ({ page }) => {
@@ -97,20 +91,23 @@ test("删除例行任务要二次确认，取消和超时都不删除", async ({
   await expect(rows, "确认删除后列表少一条").toHaveCount(0);
 });
 
-test("在列表里停用一条例行任务，那一行的状态变「已停用」", async ({ page }) => {
+test("在列表里暂停一条例行任务，那一行的状态变「暂停了」，只剩恢复", async ({ page }) => {
   await login(page);
   await openRoutines(page, "小服");
   const row = page.getByTestId("routine-row").first();
-  await expect(row.getByTestId("routine-row-note"), "启用着就说下次什么时候跑").toHaveText("工作日 09:00");
+  await expect(row.getByTestId("routine-state")).toHaveText("在跑");
+  await expect(row.getByTestId("routine-row-note"), "触发时刻一直写着，停没停看 chip").toHaveText("工作日 09:00");
 
-  await row.getByTestId("routine-switch").click();
+  await row.getByTestId("routine-toggle").click();
 
-  await expect(row.getByTestId("routine-switch")).toHaveAttribute("aria-checked", "false");
-  await expect(row.getByTestId("routine-row-note"), "停用的不触发，列表上就别再说下次什么时候跑").toHaveText("已停用");
+  await expect(row.getByTestId("routine-state")).toHaveText("暂停了");
+  await expect(row.getByTestId("routine-toggle"), "停着的只给恢复").toHaveText("恢复");
+  await expect(row.getByTestId("routine-run"), "停着的不在列表上试跑").toHaveCount(0);
+  await expect(page.getByTestId("routine-stopped"), "自己暂停的不出横幅").toHaveCount(0);
 
   await page.reload();
   await openRoutines(page, "小服");
-  await expect(page.getByTestId("routine-row").first().getByTestId("routine-row-note")).toHaveText("已停用");
+  await expect(page.getByTestId("routine-row").first().getByTestId("routine-state")).toHaveText("暂停了");
 });
 
 test("给 webhook 地址打一下，群里照样跑起来，运行记录靠推送回到列表", async ({ page }) => {

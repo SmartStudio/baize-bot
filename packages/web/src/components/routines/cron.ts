@@ -18,6 +18,9 @@ const MINUTELY_EXPR = "* * * * *";
 
 const DAILY_EXPR = /^(\d{1,2}) (\d{1,2}) \* \* \*$/;
 const WEEKDAY_EXPR = /^(\d{1,2}) (\d{1,2}) \* \* 1-5$/;
+// 每周某天编辑器挑不出来，主助理的例行确认卡会提，所以只认来说给人听，不算预设。
+const WEEKLY_EXPR = /^(\d{1,2}) (\d{1,2}) \* \* ([0-7])$/;
+const WEEK_DAYS = ["日", "一", "二", "三", "四", "五", "六", "日"];
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
@@ -54,6 +57,8 @@ export const cronPresetOf = (expr: string): CronPreset | null => {
 
 export const describeCron = (expr: string): string => {
   const preset = cronPresetOf(expr);
+  const weekly = WEEKLY_EXPR.exec(expr);
+  if (preset === null && weekly !== null) return `每周${WEEK_DAYS[Number(weekly[3])] ?? ""} ${clockOf(weekly)}`;
   if (preset === null) return expr;
   const label = CRON_PRESETS.find((item) => item.id === preset.id)?.label ?? expr;
   return preset.time === null ? label : `${label} ${preset.time}`;

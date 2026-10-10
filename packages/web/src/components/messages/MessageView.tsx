@@ -19,6 +19,7 @@ import type { ContentBook } from "../../state/types.js";
 import { BotAvatar } from "../BotAvatar.js";
 import { ACTION_TEXT, SCOPE_TEXT, offeredScopes, targetText } from "../grantText.js";
 import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
+import { RoutineOfferCard } from "./RoutineOfferCard.js";
 import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
@@ -469,8 +470,7 @@ const MessageView = ({
           case "team_offer":
             return <TeamOfferCard body={body} messageId={message.id} />;
           case "routine_offer":
-            // 第 2 期形状占位：例行确认卡归 p2-routine-web，画出来之前不渲染。
-            return null;
+            return <RoutineOfferCard message={message} />;
           default: {
             // MessageBody 多一种时这里编译不过，逼着新卡片有人画，而不是静悄悄地什么都不渲染。
             const unreached: never = body;

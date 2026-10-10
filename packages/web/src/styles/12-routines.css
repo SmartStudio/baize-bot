@@ -358,3 +358,58 @@
 .run-row[data-status="failed"] .run-dot {
   background: var(--danger);
 }
+
+.badge-warning {
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.routine-row-title {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+/* 自己停了的例行不在列表里埋着，顶上一条一条说出来，恢复就在手边。 */
+.routine-stopped {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  margin-bottom: var(--space-6);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-md);
+  background: var(--warning-soft);
+}
+
+.routine-stopped p {
+  flex: 1;
+  margin: 0;
+  color: var(--fg-2);
+}
+
+.routine-stopped b {
+  margin-right: var(--space-3);
+  color: var(--fg-1);
+}
+
+.nav-alert {
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-left: auto;
+  border-radius: var(--radius-full);
+  background: var(--warning);
+}
+
+/* 确认卡的名字、指令可以是一长串不带空格的字，得在卡里折行，不能顶出卡去。 */
+.routine-offer .card-title,
+.routine-offer .offer-kv dd,
+.routine-offer.is-folded span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.routine-offer-error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}

@@ -24,9 +24,9 @@ import {
   type Message,
   type MessageId,
   type Preference,
-  type CreateRoutineRequest,
   type CreateSkillRequest,
   type CreateToolRequest,
+  type DecideRoutineOfferRequest,
   type DecideSkillOfferRequest,
   type RoutineId,
   type Settings,
@@ -91,7 +91,6 @@ export type AppActions = {
   pauseBot: (botId: BotId) => Promise<void>;
   resumeBot: (botId: BotId) => Promise<void>;
   loadRoutines: () => Promise<void>;
-  createRoutine: (botId: BotId, draft: CreateRoutineRequest) => Promise<void>;
   updateRoutine: (routineId: RoutineId, patch: UpdateRoutineRequest) => Promise<void>;
   deleteRoutine: (routineId: RoutineId) => Promise<void>;
   runRoutine: (routineId: RoutineId) => Promise<void>;
@@ -106,6 +105,9 @@ export type AppActions = {
   loadBrand: () => Promise<BrandBook | null | undefined>;
   updateBrand: (body: UpdateBrandRequest) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+  decideRoutineOffer: (messageId: MessageId, decision: DecideRoutineOfferRequest["decision"]) => Promise<void>;
+  // 打开群页或项目页算看过这个群里例行的结果（D3），连续三次没看例行自己停。
+  markSeen: (groupId: GroupId) => Promise<void>;
   // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
   decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
   // 确认后新请的人和变大的团队由推送带来；这里只落那条卡和团队的新名单。
@@ -489,10 +491,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           scope.put({ type: "routines_loaded", routines: (await scope.api.routines()).items, seq });
         }),
       ),
-      createRoutine: signedIn(async ({ api, put }, botId: BotId, draft: CreateRoutineRequest) => {
-        const seq = nextSeq();
-        put({ type: "routine_upserted", routine: await api.createRoutine(botId, draft), seq });
-      }),
       updateRoutine: signedIn(async ({ api, put }, routineId: RoutineId, patch: UpdateRoutineRequest) => {
         const seq = nextSeq();
         put({ type: "routine_upserted", routine: await api.updateRoutine(routineId, patch), seq });
@@ -562,6 +560,32 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           if (res.skill !== null) put({ type: "skill_upserted", skill: res.skill, seq });
         },
       ),
+      decideRoutineOffer: signedIn(
+        async ({ api, put }, messageId: MessageId, decision: DecideRoutineOfferRequest["decision"]) => {
+          const seq = nextSeq();
+          try {
+            const res = await api.decideRoutineOffer(messageId, decision);
+            put({ type: "message_upserted", message: res.message, seq });
+            if (res.routine !== null) put({ type: "routine_upserted", routine: res.routine, seq });
+          } catch (cause) {
+            // 409 是别处已经结了这张卡，取回那份结论盖上，卡照它收起；错还照抛，让卡上说一句。
+            if (cause instanceof RequestFailed && cause.status === 409) {
+              const fetched = nextSeq();
+              await api.message(messageId).then(
+                (message) => put({ type: "message_upserted", message, seq: fetched }),
+                () => undefined,
+              );
+            }
+            throw cause;
+          } finally {
+            // 首页待办里也排着这张卡，断线时等不到推送，结完自己重拉。
+            put({ type: "today_version_bumped" });
+          }
+        },
+      ),
+      markSeen: signedIn(async ({ api }, groupId: GroupId) => {
+        await api.markSeen(groupId);
+      }),
       decideProjectOffer: signedIn(async ({ api, put }, messageId: MessageId, request: DecideProjectOfferRequest) => {
         const seq = nextSeq();
         const { message, group, task } = await api.decideProjectOffer(messageId, request);

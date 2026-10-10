@@ -16,6 +16,7 @@ type Props = {
   pendingCount: number;
   countsStale: boolean;
   onRetryCounts: () => void;
+  routinesStopped: boolean;
   onNewProject: () => void;
   onOpenAccount: () => void;
   onOpenSettings: () => void;
@@ -91,6 +92,7 @@ export const Sidebar = ({
   pendingCount,
   countsStale,
   onRetryCounts,
+  routinesStopped,
   onNewProject,
   onOpenAccount,
   onOpenSettings,
@@ -162,6 +164,14 @@ export const Sidebar = ({
         >
           <Repeat size={16} aria-hidden="true" />
           例行
+          {routinesStopped ? (
+            <span
+              className="nav-alert"
+              data-testid="routines-alert"
+              title="有例行自己停了"
+              aria-label="有例行自己停了"
+            />
+          ) : null}
         </Link>
         <Link
           to={pathOf({ kind: "team" })}

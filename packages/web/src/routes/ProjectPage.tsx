@@ -14,6 +14,7 @@ import type { Bot, BotId, GroupId, Message, ProjectResponse, ProjectTurn } from 
 import { BotAvatar } from "../components/BotAvatar.js";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
 import { Markdown } from "../components/messages/markdown.js";
+import { RoutineStateChip } from "../components/routines/RoutineStateChip.js";
 import { previewOf } from "../components/messages/preview.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import type { Conversation } from "../state/types.js";
@@ -390,11 +391,12 @@ export const ProjectPage = ({
                   <span className="today-kicker">例行 · {lookup(routine.botId).name}</span>
                   <strong>{routine.name}</strong>
                   <small>
+                    <RoutineStateChip state={routine.state} />
                     {routine.state !== "on"
-                      ? "已停用"
+                      ? null
                       : routine.nextAt === null
-                        ? "没有排下次"
-                        : `下次 ${timeText(routine.nextAt)}`}
+                        ? " 没有排下次"
+                        : ` 下次 ${timeText(routine.nextAt)}`}
                   </small>
                 </span>
               </article>

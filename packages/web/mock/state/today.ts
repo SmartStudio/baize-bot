@@ -571,6 +571,13 @@ export const pendingOf = (): TodayPendingItem[] => {
     waitOn(draft, since);
     items.push({ kind: "draft", since, draft });
   }
+  for (const messages of messagesByGroupId.values()) {
+    for (const message of messages) {
+      if (message.body.kind === "routine_offer" && message.body.status === "offered") {
+        items.push({ kind: "routine_offer", since: message.createdAt, message });
+      }
+    }
+  }
   for (const account of accounts.values()) {
     if (account.login === "expired") {
       items.push({ kind: "account", since: pendingSince.get(account.id) ?? account.createdAt, account });
