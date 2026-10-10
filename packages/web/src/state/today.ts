@@ -17,6 +17,27 @@ export const useToday = () => {
   const { state, actions } = useApp();
   const loadToday = actions.loadToday;
   const todayVersion = state.status === "ready" ? state.todayVersion : 0;
+  // 「在进行」画的是还有成员的项目的任务卡标题、状态、目标和指标。推送和本地保存都先换掉会话里的卡，
+  // 只盯这几样，改节奏、勾清单这类首页不画的字段不重拉。成员删空只推 bot_deleted，卡不变，得单看。
+  const runningKey =
+    state.status === "ready"
+      ? JSON.stringify(
+          state.conversations.flatMap((c) =>
+            c.kind === "team"
+              ? [
+                  [
+                    c.task.id,
+                    c.task.title,
+                    c.task.status,
+                    c.task.goal,
+                    c.task.metric,
+                    c.botIds.some((id) => !state.deletedBotIds.includes(id)),
+                  ],
+                ]
+              : [],
+          ),
+        )
+      : "";
   const [load, setLoad] = useState<TodayLoad>({ status: "loading", data: null, error: null });
   // 同一时刻只让一个 today 请求在途；在途时再来的触发只记成 rerun，落定后最多补拉一次。
   // drained 在这一串请求全部排空后落定，调用方 await refresh() 等的就是它。
@@ -77,7 +98,7 @@ export const useToday = () => {
     firstLoad.current = false;
     const timer = setTimeout(() => void refresh(), delay);
     return () => clearTimeout(timer);
-  }, [loadToday, refresh, todayVersion]);
+  }, [loadToday, refresh, todayVersion, runningKey]);
 
   return { ...load, refresh };
 };

@@ -12,6 +12,7 @@ import {
   learnFrom,
   lastMessageOf,
   mentionsIn,
+  metricOf,
   messageFetchFaults,
   messagesByGroupId,
   pendingApprovalsOf,
@@ -41,7 +42,7 @@ const groupListItems = () =>
     if (task === undefined) throw new Error(`群 ${group.id} 没有主题任务，mock 状态坏了`);
     return {
       group,
-      task,
+      task: { ...task, metric: metricOf(group.id, new Date()) },
       lastMessage: lastMessageOf(group.id),
       pendingApprovals: pendingApprovalsOf(group.id),
       pendingHandoffs: pendingHandoffsOf(group.id),

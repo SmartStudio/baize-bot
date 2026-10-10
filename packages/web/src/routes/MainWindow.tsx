@@ -187,8 +187,8 @@ export const MainWindow = () => {
           }}
           inspectedToolId={inspected?.messageId ?? null}
           onLoadSkills={actions.loadSkills}
-          onToggleChecklist={(checklist: ChecklistItem[]) => {
-            if (team !== null) void actions.setChecklist(team.task, checklist);
+          onToggleChecklist={async (checklist: ChecklistItem[]) => {
+            if (team !== null) await actions.setChecklist(team.task, checklist);
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
         />

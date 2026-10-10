@@ -493,7 +493,7 @@ test("断线期间别处确认了建队卡，重连后补拉群名单", async ({
   await expect(fold, "推送断着，页面还不知道").not.toContainText("小服");
 
   const count = sockets.length;
-  const roster = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/groups");
+  const roster = page.waitForResponse((response) => isGroups(response.url()));
   await sockets.at(-1)?.close();
   await expect.poll(() => sockets.length, "应用自己重连").toBe(count + 1);
   forward = true;
@@ -543,7 +543,11 @@ const openProjectCard = async (page: Page, groupId: string) => {
   return card;
 };
 
-const isGroups = (url: string) => new URL(url).pathname === "/api/groups";
+// 任务卡补读（for=task）归 28 管，这里只数名单快照和补计数。
+const isGroups = (url: string) => {
+  const parsed = new URL(url);
+  return parsed.pathname === "/api/groups" && parsed.searchParams.get("for") !== "task";
+};
 
 for (const surface of ["today", "project"] as const) {
   test(`${surface === "today" ? "首页" : "项目页"}确认成功后清单回旧快照，收起再展开也不再放出确认按钮`, async ({
@@ -576,6 +580,7 @@ test("首页确认成功后换到项目页，项目页旧快照里的同一张�
   const { groupId } = await seedOffer(page);
   const project: unknown = await (await page.request.get(`/api/projects/${groupId}`)).json();
   const today: unknown = await (await page.request.get("/api/today")).json();
+  await expect(todayRow(page), "静音之前建队卡的推送已经进了首页").toHaveCount(1);
   wire.quiet(true);
   await page.route(`**/api/projects/${groupId}`, (route) => route.fulfill({ json: project }));
   await page.route("**/api/today", (route) => route.fulfill({ json: today }));

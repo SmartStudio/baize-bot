@@ -1,7 +1,10 @@
 import {
   BotListResponse,
+  CreateBotResponse,
+  CreateGroupResponse,
   DecideProjectOfferResponse,
   GroupResponse,
+  TodayResponse,
   UpdateTaskResponse,
   type AgentToControl,
   type BotId,
@@ -12,7 +15,7 @@ import {
   type TopicTask,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { metricSamples } from "../src/db/schema.js";
+import { accounts, contentPlans, drafts, metricSamples } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
 import { weekStart } from "../src/repo/usage.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
@@ -52,6 +55,8 @@ type Session = {
   readonly agent: AgentClient;
   readonly push: PushClient;
   readonly assistant: { readonly botId: BotId; readonly groupId: GroupId };
+  readonly userId: string;
+  readonly computerId: string;
   close(): void;
 };
 
@@ -70,6 +75,8 @@ async function session(): Promise<Session> {
     agent,
     push,
     assistant: { botId: entry.bot.id, groupId: entry.groupId },
+    userId: user.id,
+    computerId: computer.computerId,
     close: () => {
       agent.close();
       push.close();
@@ -88,12 +95,16 @@ async function nextOfType<T extends ServerPush["type"]>(push: PushClient, type: 
 /** 跟主助理说一句，它出一张方案卡，这次活收尾。回的是推过来的那条卡。 */
 async function offerCard(s: Session, fields: OfferFields): Promise<Message> {
   expect((await s.client.post(`/api/groups/${s.assistant.groupId}/messages`, { text: "推广白泽" })).status).toBe(201);
-  const prompt: Prompt = await s.agent.expect("prompt");
+  // 前一个项目建出来的 Bot 会先换来一条 config，跳过去等这句话派出的 prompt。
+  let next: ControlToAgent = await s.agent.next();
+  while (next.type !== "prompt") next = await s.agent.next();
+  const prompt: Prompt = next;
   s.agent.send({ type: "project_offer", runId: prompt.runId, botId: prompt.botId, groupId: prompt.groupId, ...fields });
   let card: Message | null = null;
   while (card === null) {
     const item = await nextOfType(s.push, "message");
-    if (item.message.body.kind === "project_offer") card = item.message;
+    // 前一张卡开始后会重推一次，那张已经不是待定的了。
+    if (item.message.body.kind === "project_offer" && item.message.body.status === "offered") card = item.message;
   }
   s.agent.send({
     type: "run_done",
@@ -478,6 +489,136 @@ describe("已有样本的项目", () => {
       await pushed("交接接受", (t) => t.currentBotId === member.id);
       done(handed);
       await s.agent.ack(handed.runId);
+    } finally {
+      s.close();
+    }
+  });
+});
+
+/** 给项目群直接落一份已批计划，里面一篇稿子还没发。计划挂在主助理名下，删项目成员时它不跟着走。 */
+async function approvedPlanWithUnsent(s: Session, groupId: string): Promise<void> {
+  const accountId = newId();
+  const planId = newId();
+  await database.db.insert(accounts).values({
+    id: accountId,
+    ownerId: s.userId,
+    computerId: s.computerId,
+    platform: "x",
+    handle: `@${accountId}`,
+    login: "valid",
+  });
+  await database.db.insert(contentPlans).values({
+    id: planId,
+    ownerId: s.userId,
+    groupId,
+    botId: s.assistant.botId,
+    title: "还没发完的计划",
+    status: "approved",
+    decidedAt: new Date(),
+  });
+  await database.db.insert(drafts).values({
+    id: newId(),
+    ownerId: s.userId,
+    groupId,
+    botId: s.assistant.botId,
+    planId,
+    accountId,
+    platform: "x",
+    content: { kind: "post", title: "未发稿", text: "正文", images: [], github: null },
+    contentHash: planId,
+    status: "approved",
+  });
+}
+
+async function runningGroups(client: ApiClient): Promise<Set<string>> {
+  const today = TodayResponse.parse(await (await client.get("/api/today")).json());
+  return new Set(today.running.map((item) => item.groupId));
+}
+
+describe("首页在进行", () => {
+  it("首页在进行一行按目标画进度", async () => {
+    const s = await session();
+    try {
+      const stars = await startProject(s, { ...OFFER, goalTarget: 1000, goalUnit: "星" });
+      await reportMetric(s.client, stars.group.id, 412);
+      const fresh = await startProject(s, { ...OFFER, name: "抖音起号", goalTarget: 1000, goalUnit: "粉丝" });
+      const plain = await startProject(s, { ...OFFER, name: "没定目标" });
+      const finished = await startProject(s, { ...OFFER, name: "做完了", goalTarget: 10, goalUnit: "篇" });
+      expect((await s.client.patch(`/api/tasks/${finished.task.id}`, { status: "done" })).status).toBe(200);
+
+      const today = TodayResponse.parse(await (await s.client.get("/api/today")).json());
+      const byGroup = new Map(today.running.map((item) => [item.groupId, item]));
+      expect(byGroup.get(stars.group.id), "有目标有样本：按 412 / 1000 星画，没有计划稿子数是 0").toEqual({
+        groupId: stars.group.id,
+        title: stars.task.title,
+        published: 0,
+        planned: 0,
+        goal: { target: 1000, unit: "星", dueAt: null },
+        metric: expect.objectContaining({ current: 412 }),
+      });
+      expect(byGroup.get(fresh.group.id), "有目标还没样本也出一行，metric 是 null").toMatchObject({
+        goal: { target: 1000, unit: "粉丝", dueAt: null },
+        metric: null,
+      });
+      expect(byGroup.has(plain.group.id), "没目标也没计划的项目不出行").toBe(false);
+      expect(byGroup.has(finished.group.id), "任务卡做完了的项目不出行").toBe(false);
+      expect(today.running, "只有两个有目标的进行中项目").toHaveLength(2);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("done 项目有未发完计划也不出在进行", async () => {
+    const s = await session();
+    try {
+      const withGoal = await startProject(s, { ...OFFER, goalTarget: 1000, goalUnit: "星" });
+      await reportMetric(s.client, withGoal.group.id, 412);
+      await approvedPlanWithUnsent(s, withGoal.group.id);
+      const noGoal = await startProject(s, { ...OFFER, name: "没定目标" });
+      await approvedPlanWithUnsent(s, noGoal.group.id);
+      const before = await runningGroups(s.client);
+      expect(before.has(withGoal.group.id), "做完之前有目标的项目在进行").toBe(true);
+      expect(before.has(noGoal.group.id), "做完之前没目标但计划没发完的项目在进行").toBe(true);
+
+      for (const project of [withGoal, noGoal])
+        expect((await s.client.patch(`/api/tasks/${project.task.id}`, { status: "done" })).status).toBe(200);
+      const after = await runningGroups(s.client);
+      expect(after.has(withGoal.group.id), "有目标的项目做完后不从计划那一路回来").toBe(false);
+      expect(after.has(noGoal.group.id), "没目标的项目做完后计划没发完也不出行").toBe(false);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("成员删空的项目不出在进行", async () => {
+    const s = await session();
+    try {
+      const team = async (title: string) => {
+        const botIds: BotId[] = [];
+        for (const name of [`${title}甲`, `${title}乙`]) {
+          const response = await s.client.post("/api/bots", { name });
+          expect(response.status).toBe(201);
+          botIds.push(CreateBotResponse.parse(await response.json()).bot.id);
+        }
+        const response = await s.client.post("/api/groups", { title, botIds });
+        expect(response.status).toBe(201);
+        return { ...CreateGroupResponse.parse(await response.json()), botIds };
+      };
+      const withGoal = await team("有目标");
+      const goal = { target: 1000, unit: "星", dueAt: null };
+      expect((await s.client.patch(`/api/tasks/${withGoal.task.id}`, { goal })).status).toBe(200);
+      await approvedPlanWithUnsent(s, withGoal.group.id);
+      const noGoal = await team("没目标");
+      await approvedPlanWithUnsent(s, noGoal.group.id);
+      const before = await runningGroups(s.client);
+      expect(before.has(withGoal.group.id), "删成员之前有目标的项目在进行").toBe(true);
+      expect(before.has(noGoal.group.id), "删成员之前计划没发完的项目在进行").toBe(true);
+
+      for (const botId of [...withGoal.botIds, ...noGoal.botIds])
+        expect((await s.client.delete(`/api/bots/${botId}`)).status).toBe(204);
+      const after = await runningGroups(s.client);
+      expect(after.has(withGoal.group.id), "成员删空后有目标的项目不出行").toBe(false);
+      expect(after.has(noGoal.group.id), "成员删空后计划没发完也不出行").toBe(false);
     } finally {
       s.close();
     }

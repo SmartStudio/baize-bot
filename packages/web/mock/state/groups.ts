@@ -11,6 +11,7 @@ import {
   tasks,
   user,
 } from "./store.js";
+import { metricOf } from "./project-page.js";
 
 export const createBot = (input: {
   name?: string | undefined;
@@ -96,7 +97,8 @@ export const createGroup = (input: {
 export const writeTask = (id: string, patch: Partial<Record<keyof TopicTask, unknown>>): TopicTask | null => {
   const task = tasks.get(id);
   if (task === undefined) return null;
-  const next = TopicTask.parse({ ...task, ...patch });
+  // 指标照控制面 withMetric 每次现算，存着的那份过了周界就旧了。
+  const next = TopicTask.parse({ ...task, ...patch, metric: metricOf(task.groupId, new Date()) });
   tasks.set(next.id, next);
   if (patch.checklist !== undefined) {
     const previous = checkedAt.get(next.id) ?? new Map<string, string>();

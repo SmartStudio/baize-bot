@@ -18,6 +18,7 @@ import {
   type TodayResponse,
   type BotId,
   type ChecklistItem,
+  type ProjectGoal,
   type DecideApprovalRequest,
   type GrantId,
   type GroupId,
@@ -38,6 +39,7 @@ import {
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
   type UpdateToolRequest,
+  type TaskId,
   type TopicTask,
   type User,
 } from "@baize/shared";
@@ -68,6 +70,9 @@ export type AppActions = {
   createBot: () => Promise<GroupId | undefined>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
+  setTaskGoal: (task: TopicTask, goal: ProjectGoal | null) => Promise<void>;
+  // 只重读群列表认回这张任务卡，不重发写入。
+  reloadTask: (task: TaskId) => Promise<void>;
   // after 是推送最近一次重连的号：在途那趟发得比它早，回来后要补拉一次。
   loadMessages: (groupId: GroupId, after: Seq) => Promise<void>;
   // 单拉一条消息，补流式 delta 漏掉的那几版。after 是最近一次发现漏档的号。
@@ -254,6 +259,78 @@ export const loadMessageGap = async (
   if (result.outcome === "failed") scope.put({ type: "message_gap_failed", messageId });
 };
 
+// 保存已经写进服务端，只是回包被丢后补读群列表没成功。调用方要说「存上了、刷新没成功」，不能说没存上。
+export class TaskRefreshFailed extends Error {
+  constructor(cause: unknown) {
+    super("任务卡已保存，刷新没成功", { cause });
+    this.name = "TaskRefreshFailed";
+  }
+}
+
+// 任务卡快照有三条来路：task_updated 推送、PATCH 回包、重读的群列表。TopicTask 上没有服务端写的单调字段，只能在本地排先后。
+// pushSeq 数这张卡接受过几份推送和回包，补读落地不动它：一趟补读发出后它变过，读到的就可能比那份推送旧，丢掉。
+// 补读之间按票号排，landed 记这张卡已落地的最大票号，更早发出的补读晚到也不回退。
+// 这些只能说明本地接受的先后，说明不了推送和这次写入谁先落库，所以 PATCH 回包被丢时要补读确认：
+// 本趟或更晚的补读落了地、或者之后又接受了推送，就算认回；票号不小于本趟的补读全结束了还没认回，就是刷新失败。
+const createTaskPushes = () => {
+  const pushSeq = new Map<TaskId, number>();
+  const landed = new Map<TaskId, number>();
+  const seqOf = (id: TaskId) => pushSeq.get(id) ?? 0;
+  const pushed = (id: TaskId) => void pushSeq.set(id, seqOf(id) + 1);
+  const running = new Map<number, Promise<{ cause: unknown } | null>>();
+  let tickets = 0;
+  const reload = ({ api, put }: Pick<Scope, "api" | "put">) => {
+    tickets += 1;
+    const ticket = tickets;
+    const sent = new Map(pushSeq);
+    const run = async () => {
+      try {
+        const { items } = await api.groups("task");
+        for (const { task } of items) {
+          if (ticket <= (landed.get(task.id) ?? 0) || seqOf(task.id) !== (sent.get(task.id) ?? 0)) continue;
+          landed.set(task.id, ticket);
+          put({ type: "task_updated", task });
+        }
+        return null;
+      } catch (cause) {
+        return { cause };
+      } finally {
+        running.delete(ticket);
+      }
+    };
+    const outcome = run();
+    running.set(ticket, outcome);
+    return { ticket, outcome };
+  };
+  const confirm = async (scope: Pick<Scope, "api" | "put">, id: TaskId) => {
+    const sent = seqOf(id);
+    const { ticket } = reload(scope);
+    let failure: unknown;
+    while ((landed.get(id) ?? 0) < ticket && seqOf(id) === sent) {
+      const waiting = [...running].filter(([at]) => at >= ticket).map(([, outcome]) => outcome);
+      if (waiting.length === 0) throw new TaskRefreshFailed(failure);
+      const outcome = await Promise.race(waiting);
+      if (outcome !== null && isUnauthorized(outcome.cause)) throw outcome.cause;
+      failure = outcome?.cause ?? failure;
+    }
+  };
+  return {
+    pushed,
+    save: async (scope: Scope, task: TopicTask, patch: Parameters<Api["updateTask"]>[1]) => {
+      const sent = seqOf(task.id);
+      const saved = await scope.api.updateTask(task.id, patch);
+      if (seqOf(task.id) !== sent) return confirm(scope, task.id);
+      pushed(task.id);
+      scope.put({ type: "task_updated", task: saved });
+    },
+    reload: async (scope: Pick<Scope, "api" | "put">) => {
+      const outcome = await reload(scope).outcome;
+      if (outcome !== null) throw outcome.cause;
+    },
+    confirm,
+  };
+};
+
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(reduce, { status: "loading" } satisfies AppState);
   const stateRef = useRef<AppState>(state);
@@ -266,6 +343,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // 请求发出时、推送到达时各取一个号，reducer 按号排先后，见 stamped.ts。
   const [nextSeq] = useState(createClock);
   const [sessions] = useState(createSessions);
+  const [taskPushes] = useState(createTaskPushes);
 
   // 入口数据齐了才进会话；这期间有了更新的尝试，这一次整个作废，返回 null。
   const enter = useMemo(
@@ -353,9 +431,13 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       updateBot: signedIn(async ({ api, put }, botId: BotId, draft: BotDraft) => {
         put({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
       }),
-      setChecklist: signedIn(async ({ api, put }, task: TopicTask, checklist: ChecklistItem[]) => {
-        put({ type: "task_updated", task: await api.updateTask(task.id, { checklist }) });
-      }),
+      setChecklist: signedIn((scope, task: TopicTask, checklist: ChecklistItem[]) =>
+        taskPushes.save(scope, task, { checklist }),
+      ),
+      setTaskGoal: signedIn((scope, task: TopicTask, goal: ProjectGoal | null) =>
+        taskPushes.save(scope, task, { goal }),
+      ),
+      reloadTask: signedIn((scope, task: TaskId) => taskPushes.confirm(scope, task)),
       loadMessages: signedIn((scope, groupId: GroupId, after: Seq) =>
         loadBucket(scope, `messages:${groupId}`, after, async (seq) => {
           const { put } = scope;
@@ -651,7 +733,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "usage_loaded", usage: await api.usage() });
       }),
     };
-  }, [nextSeq, sessions, enter]);
+  }, [nextSeq, sessions, enter, taskPushes]);
 
   useEffect(() => {
     const attempt = sessions.attempt();
@@ -723,7 +805,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     const pushHandlers = createPushHandlers({
       session,
       live,
-      dispatch: put,
+      dispatch: (action) => {
+        if (action.type === "task_updated") taskPushes.pushed(action.task.id);
+        put(action);
+      },
       stateRef,
       refreshPendingCounts,
       recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
@@ -742,6 +827,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           put({ type: "push_reconnected", seq: nextSeq() });
           refreshPendingCounts();
           recoverLogins(null, "lapsed");
+          // 断线期间的 task_updated 收不到，项目头部、任务卡、首页「在进行」都读会话里的卡，重读一遍群列表认回来。
+          void taskPushes.reload({ api: scoped.api, put }).catch((cause: unknown) => {
+            if (live() && isUnauthorized(cause)) expire();
+          });
         }
         hasConnected = true;
       });
@@ -775,7 +864,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       if (countsTimer !== null) clearTimeout(countsTimer);
       socket?.close();
     };
-  }, [session, sessions, nextSeq, actions]);
+  }, [session, sessions, nextSeq, actions, taskPushes]);
 
   const groupsVersion = state.status === "ready" ? state.groupsVersion : 0;
   useEffect(() => {

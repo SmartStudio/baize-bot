@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChecklistItem, GroupId, ProjectResponse } from "@baize/shared";
+import type { ChecklistItem, GroupId, ProjectGoal, ProjectResponse, TaskMetric } from "@baize/shared";
 import { useApp } from "./app.js";
 
 type ProjectLoad =
@@ -72,3 +72,41 @@ export const useProject = (groupId: GroupId, checklist: readonly ChecklistItem[]
 };
 
 export type Project = ReturnType<typeof useProject>;
+
+// 有目标就按「当前值 / 目标」画进度，一个项目只有一个主指标（D2）。还没有样本当前值算 0，本周变化是 null。
+export type GoalProgress = {
+  readonly current: number;
+  readonly target: number;
+  readonly unit: string;
+  readonly weekDelta: number | null;
+};
+
+// 周一 00:00 上海时区，和控制面 usage.ts#weekStart 同一个周界（D18）。
+const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
+const weekStartOf = (now: Date): number => {
+  const local = new Date(now.getTime() + SHANGHAI_OFFSET_MS);
+  const day = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate());
+  return day - ((local.getUTCDay() + 6) % 7) * 86_400_000 - SHANGHAI_OFFSET_MS;
+};
+
+// 会话里的卡可能是上周推来的，跨过周界又没有新样本，服务端此刻算的本周变化就是 0。
+export const goalProgressOf = (goal: ProjectGoal | null, metric: TaskMetric | null, now: Date): GoalProgress | null => {
+  if (goal === null) return null;
+  const weekDelta = metric === null ? null : Date.parse(metric.sampledAt) < weekStartOf(now) ? 0 : metric.weekDelta;
+  return { current: metric?.current ?? 0, target: goal.target, unit: goal.unit, weekDelta };
+};
+
+// 样本可以是小数，减出来的变化会带浮点尾巴；目标数常到四位，不加千分位，和原型的「412 / 1000」一致。
+const NUMBER = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, useGrouping: false });
+export const numberText = (value: number): string => NUMBER.format(value);
+
+export const goalText = (progress: GoalProgress): string =>
+  `${numberText(progress.current)} / ${numberText(progress.target)} ${progress.unit}`;
+
+// 进度条超过目标就画满，掉成负数画空。
+export const goalBarValue = (progress: GoalProgress): number =>
+  Math.min(Math.max(progress.current, 0), progress.target);
+
+// 本周没动或还没有样本就不说。
+export const weekDeltaText = (delta: number | null): string | null =>
+  delta === null || delta === 0 ? null : `本周 ${delta > 0 ? "+" : ""}${numberText(delta)}`;

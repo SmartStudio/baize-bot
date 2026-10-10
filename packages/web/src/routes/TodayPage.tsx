@@ -27,6 +27,7 @@ import { GroupsStale, TeamOfferCard, useOfferProject } from "../components/messa
 import { ToolViewContent } from "../components/messages/ToolViewContent.js";
 import type { ContentBook } from "../state/types.js";
 import { rememberLoginCards, withLoginCards } from "../state/accounts.js";
+import { goalBarValue, goalProgressOf, goalText } from "../state/project.js";
 import type { Today } from "../state/today.js";
 import { LoginCard } from "../components/LoginCard.js";
 import { RoutineOfferCard } from "../components/messages/RoutineOfferCard.js";
@@ -623,25 +624,37 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
                 </p>
               ) : (
                 <div className="today-list">
-                  {data.running.map((item) => (
-                    <button
-                      type="button"
-                      className="today-row today-progress"
-                      data-testid="today-row"
-                      key={item.groupId}
-                      onClick={() => onOpenGroup(item.groupId)}
-                    >
-                      <span className="today-row-main">
-                        <span className="today-kicker">项目</span>
-                        <strong>{item.title}</strong>
-                        <progress value={item.published} max={Math.max(item.planned, 1)} />
-                        <small>
-                          {item.published} / {item.planned} 条已发布
-                        </small>
-                      </span>
-                      <ArrowRight size={16} aria-hidden="true" />
-                    </button>
-                  ))}
+                  {data.running.map((item) => {
+                    const goal = goalProgressOf(item.goal, item.metric, new Date());
+                    return (
+                      <button
+                        type="button"
+                        className="today-row today-progress"
+                        data-testid="today-row"
+                        key={item.groupId}
+                        onClick={() => onOpenGroup(item.groupId)}
+                      >
+                        <span className="today-row-main">
+                          <span className="today-kicker">项目</span>
+                          <strong>{item.title}</strong>
+                          {goal === null ? (
+                            <>
+                              <progress value={item.published} max={Math.max(item.planned, 1)} />
+                              <small>
+                                {item.published} / {item.planned} 条已发布
+                              </small>
+                            </>
+                          ) : (
+                            <>
+                              <progress value={goalBarValue(goal)} max={goal.target} />
+                              <small>{goalText(goal)}</small>
+                            </>
+                          )}
+                        </span>
+                        <ArrowRight size={16} aria-hidden="true" />
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </TodaySection>

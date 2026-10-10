@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ExternalLink,
   History,
+  NotebookText,
   MessagesSquare,
   SendHorizontal,
   UserPlus,
@@ -19,7 +20,8 @@ import { previewOf } from "../components/messages/preview.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import type { Conversation } from "../state/types.js";
 import { byCreatedAt } from "../state/order.js";
-import type { Project } from "../state/project.js";
+import { dueTextOf } from "../components/TaskCard.js";
+import { goalBarValue, goalProgressOf, goalText, numberText, weekDeltaText, type Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
 
 type Team = Extract<Conversation, { kind: "team" }>;
@@ -170,6 +172,8 @@ export const ProjectPage = ({
   }
 
   const done = task.checklist.filter((item) => item.done).length;
+  const goal = goalProgressOf(task.goal, task.metric, new Date());
+  const goalWeek = goal === null ? null : weekDeltaText(goal.weekDelta);
   const { turn, older } = latestTurnOf(data.latestTurn, data.olderTurns, messages);
   const working = data.working[0];
   // 调整队伍就是跟主助理说一句：预填开头把话头递过去，已经打了字的不覆盖。
@@ -202,10 +206,26 @@ export const ProjectPage = ({
               </p>
             )}
             <div className="project-progress" data-testid="project-progress">
-              <span>
-                <b>{done}</b> / {task.checklist.length} 项
-              </span>
-              <progress value={done} max={Math.max(task.checklist.length, 1)} />
+              {goal === null ? (
+                <span>
+                  <b>{done}</b> / {task.checklist.length} 项
+                </span>
+              ) : (
+                <>
+                  <span>
+                    <b>{numberText(goal.current)}</b> / {numberText(goal.target)} {goal.unit}
+                  </span>
+                  <progress value={goalBarValue(goal)} max={goal.target} aria-label={goalText(goal)} />
+                  {goalWeek === null ? null : (
+                    <span className="project-up" data-testid="project-goal-week">
+                      {goalWeek}
+                    </span>
+                  )}
+                  {task.goal === null || task.goal.dueAt === null ? null : (
+                    <span>截止 {dueTextOf(task.goal.dueAt)}</span>
+                  )}
+                </>
+              )}
               {weekChangesOf(data).map((text) => (
                 <span key={text} className="project-up" data-testid="project-week">
                   {text}
@@ -345,8 +365,22 @@ export const ProjectPage = ({
           ) : (
             <div className="today-list">
               {data.achievements.map((item) =>
-                // 第 2 期形状占位：复盘那种成果由 p2-goal-web 画，画出来之前只列发布记录。
-                item.kind === "review" ? null : (
+                item.kind === "review" ? (
+                  <details className="project-review" data-testid="project-review" key={item.id}>
+                    <summary className="today-row today-result">
+                      <NotebookText size={18} aria-hidden="true" />
+                      <span className="today-row-main">
+                        <span className="today-kicker">周复盘</span>
+                        <strong>{item.title}</strong>
+                        <small>{timeText(item.at)}</small>
+                      </span>
+                      <ChevronDown size={16} aria-hidden="true" />
+                    </summary>
+                    <div className="project-review-body" data-testid="project-review-body">
+                      <Markdown text={item.body} />
+                    </div>
+                  </details>
+                ) : (
                   <a
                     className="today-row today-result"
                     data-testid="project-achievement"

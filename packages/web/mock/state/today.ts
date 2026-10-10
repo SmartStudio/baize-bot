@@ -20,6 +20,7 @@ import {
   type TodayPendingItem,
 } from "@baize/shared";
 import { appendMessage } from "./messages.js";
+import { hasMembers, metricOf } from "./project-page.js";
 import { isDeferredTeamOffer, pendingTeamOffers } from "./team-offers.js";
 import {
   accounts,
@@ -34,10 +35,16 @@ import {
   plans,
   publications,
   routines,
+  tasks,
   user,
 } from "./store.js";
 
 export type TodayMode = "full" | "empty" | "performance";
+
+const decidedTime = (plan: ContentPlan) =>
+  plan.decidedAt === null ? Number.NEGATIVE_INFINITY : Date.parse(plan.decidedAt);
+const laterPlan = (plan: ContentPlan, than: ContentPlan) =>
+  decidedTime(plan) > decidedTime(than) || (decidedTime(plan) === decidedTime(than) && plan.id > than.id);
 
 let mode: TodayMode = "full";
 const pendingSince = new Map<string, string>();
@@ -646,16 +653,45 @@ export const todayOf = (): TodayResponse => {
   }
   done.sort((left, right) => right.at.localeCompare(left.at));
 
-  const running: TodayResponse["running"] = [...plans.values()]
-    .filter((plan) => plan.status === "approved")
-    .map((plan) => ({
-      groupId: plan.groupId,
-      title: plan.title,
-      published: plan.draftIds.filter((id) => drafts.get(id)?.status === "published").length,
-      planned: plan.draftIds.length,
-      goal: null,
-      metric: null,
-    }));
+  // 照控制面 repo/today.ts：每个群只看最新一份已批计划（decidedAt，同刻比 id）。进「在进行」只有一道门，
+  // 任务卡 active、群里还有成员；有目标的多 Bot 群恒出一行，没目标的只在最新计划还有稿子没发时出一行。
+  const latestPlans = new Map<string, ContentPlan>();
+  for (const plan of plans.values()) {
+    if (plan.status !== "approved") continue;
+    const current = latestPlans.get(plan.groupId);
+    if (current === undefined || laterPlan(plan, current)) latestPlans.set(plan.groupId, plan);
+  }
+  const now = new Date();
+  const running = [...groups.values()]
+    .flatMap((group): { at: string; id: string; item: TodayResponse["running"][number] }[] => {
+      const task = tasks.get(group.taskId);
+      // mock 只给多 Bot 群存任务卡，单聊没有卡，当它进行中。
+      if ((task !== undefined && task.status !== "active") || !hasMembers(group)) return [];
+      const plan = latestPlans.get(group.id);
+      const planDrafts = plan?.draftIds ?? [];
+      const published = planDrafts.filter((id) => drafts.get(id)?.status === "published").length;
+      const counts = { published, planned: planDrafts.length };
+      if (group.kind === "team" && task !== undefined && task.goal !== null) {
+        return [
+          {
+            at: plan?.decidedAt ?? group.createdAt,
+            id: plan?.id ?? task.id,
+            item: { groupId: group.id, title: task.title, ...counts, goal: task.goal, metric: metricOf(group.id, now) },
+          },
+        ];
+      }
+      if (plan === undefined || published === planDrafts.length) return [];
+      return [
+        {
+          at: plan.decidedAt ?? plan.createdAt,
+          id: plan.id,
+          item: { groupId: group.id, title: plan.title, ...counts, goal: null, metric: null },
+        },
+      ];
+    })
+    .toSorted((left, right) => right.at.localeCompare(left.at) || right.id.localeCompare(left.id))
+    .slice(0, 20)
+    .map(({ item }) => item);
 
   const next: TodayResponse["next"] = [...drafts.values()]
     .filter((draft) => draft.status === "approved" && draft.scheduledAt !== null)

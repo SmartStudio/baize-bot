@@ -55,6 +55,7 @@ import {
   type BotId,
   type BrandBook,
   type ChecklistItem,
+  type ProjectGoal,
   type CreateRoutineRequest,
   type CreateToolRequest,
   type CreateSkillRequest,
@@ -154,7 +155,9 @@ export const createApi = (signal?: AbortSignal) => {
     createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),
     updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
       (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
-    groups: async () => json(GroupListResponse, await send("GET", "/groups")),
+    // 任务卡补读带 for=task，服务端不看它，只让名单快照、补计数、补读三类请求在网络层分得开。
+    groups: async (purpose?: "task") =>
+      json(GroupListResponse, await send("GET", purpose === undefined ? "/groups" : `/groups?for=${purpose}`)),
     tools: async () => json(ToolListResponse, await send("GET", "/tools")),
     createTool: async (draft: CreateToolRequest): Promise<ToolConnection> =>
       (await json(ToolResponse, await send("POST", "/tools", draft))).tool,
@@ -163,7 +166,10 @@ export const createApi = (signal?: AbortSignal) => {
     deleteTool: async (id: ToolConnectionId): Promise<void> => {
       await send("DELETE", `/tools/${encodeURIComponent(id)}`);
     },
-    updateTask: async (id: TaskId, patch: { checklist: ChecklistItem[] }): Promise<TopicTask> =>
+    updateTask: async (
+      id: TaskId,
+      patch: { checklist: ChecklistItem[] } | { goal: ProjectGoal | null },
+    ): Promise<TopicTask> =>
       (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
     messages: async (groupId: GroupId) =>
       json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),

@@ -42,7 +42,7 @@ type Props = {
   onInspectTool: InspectTool;
   inspectedToolId: MessageId | null;
   onLoadSkills: (botId: BotId) => Promise<void>;
-  onToggleChecklist: (checklist: ChecklistItem[]) => void;
+  onToggleChecklist: (checklist: ChecklistItem[]) => Promise<void>;
   onOpenTask: () => void;
 };
 
@@ -240,6 +240,7 @@ export const ChatPanel = ({
       )}
       {conversation.kind === "team" ? (
         <TaskCard
+          key={conversation.task.id}
           task={conversation.task}
           memberIds={conversation.botIds}
           bots={bots}

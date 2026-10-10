@@ -180,3 +180,86 @@
 .project-fold[open] > summary {
   margin-bottom: var(--space-5);
 }
+
+/* 周复盘收着是成果里的一行，点开在这一行下面接正文，不跳走。 */
+.project-review {
+  border-top: 1px solid var(--border-1);
+}
+
+.project-review:first-child {
+  border-top: 0;
+}
+
+.project-review > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.project-review > summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-review > summary > svg:last-child {
+  color: var(--fg-3);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.project-review[open] > summary > svg:last-child {
+  transform: rotate(180deg);
+}
+
+/* 复盘是 Bot 写的，一长串链接或命令会撑出成果栏；正文、链接、行内代码都折，代码围栏照旧在自己里面横向滚。 */
+.project-review-body {
+  min-width: 0;
+  padding: 0 var(--space-3) var(--space-5);
+  color: var(--fg-1);
+  overflow-wrap: anywhere;
+}
+
+/* 任务卡上的目标入口和编辑表单 */
+.task-goal {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.task-goal:hover {
+  color: var(--fg-1);
+}
+
+.task-goal-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-end;
+}
+
+.task-goal-form .field input {
+  width: 9rem;
+}
+
+.task-goal-actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.task-goal-actions .primary-button {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+  font: var(--type-caption);
+}
+
+.task-goal-error {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}

@@ -12,7 +12,7 @@ import {
   type TodayRunningItem,
   type UserId,
 } from "@baize/shared";
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   accounts,
@@ -25,12 +25,15 @@ import {
   publications,
   routineRuns,
   routines,
+  tasks,
 } from "../db/schema.js";
 import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
 import { hasMembers } from "./groups.js";
+import { groupHasMembers } from "./live-groups.js";
+import { metricsOf } from "./metrics.js";
 import { listPendingRoutineOffers } from "./routine-offers.js";
-import { toAccount, toDraft, toMessage, toPlan } from "./rows.js";
+import { toAccount, toDraft, toMessage, toPlan, toTask } from "./rows.js";
 
 type DraftRow = typeof drafts.$inferSelect;
 type PlanRow = typeof contentPlans.$inferSelect;
@@ -209,22 +212,55 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       latestApprovedPlans.set(row.groupId, row);
     }
   }
-  const running = [...latestApprovedPlans.values()]
-    .map((row): { at: Date; id: string; item: TodayRunningItem } | null => {
-      const planDrafts = draftsByPlan.get(row.id) ?? [];
+  // 进「在进行」只有一道门：任务卡 active、群里还有成员。有目标的项目恒出一行，进度按目标画；
+  // 没有目标的项目只在计划还有稿子没发时出一行，按稿子数画。
+  const hasGoal = and(isNull(groups.soloBotId), isNotNull(tasks.goalTarget), isNotNull(tasks.goalUnit));
+  const planGroupIds = [...latestApprovedPlans.keys()];
+  const liveRows = await db
+    .select({ task: tasks, createdAt: groups.createdAt, soloBotId: groups.soloBotId })
+    .from(tasks)
+    .innerJoin(groups, eq(groups.id, tasks.groupId))
+    .where(
+      and(
+        eq(groups.ownerId, ownerId),
+        groupHasMembers(db),
+        eq(tasks.status, "active"),
+        planGroupIds.length === 0 ? hasGoal : or(hasGoal, inArray(groups.id, planGroupIds)),
+      ),
+    );
+  const liveGroupIds = new Set(liveRows.map(({ task }) => GroupId.parse(task.groupId)));
+  const goalTasks = new Map(
+    liveRows
+      .map(({ task, createdAt, soloBotId }) => ({ task: toTask(task), createdAt, soloBotId }))
+      .filter(({ task, soloBotId }) => soloBotId === null && task.goal !== null)
+      .map(({ task, createdAt }) => [task.groupId, { task, createdAt }]),
+  );
+  const metrics = await metricsOf(db, [...goalTasks.keys()], now);
+  const running = [...liveGroupIds]
+    .map((groupId): { at: Date; id: string; item: TodayRunningItem } | null => {
+      const plan = latestApprovedPlans.get(groupId);
+      const planDrafts = plan === undefined ? [] : (draftsByPlan.get(plan.id) ?? []);
       const published = planDrafts.filter((draft) => draft.status === "published").length;
-      if (published === planDrafts.length) return null;
+      const counts = { published, planned: planDrafts.length };
+      const goalTask = goalTasks.get(groupId);
+      if (goalTask !== undefined) {
+        return {
+          at: plan?.decidedAt ?? goalTask.createdAt,
+          id: plan?.id ?? goalTask.task.id,
+          item: {
+            groupId,
+            title: goalTask.task.title,
+            ...counts,
+            goal: goalTask.task.goal,
+            metric: metrics.get(groupId) ?? null,
+          },
+        };
+      }
+      if (plan === undefined || published === planDrafts.length) return null;
       return {
-        at: row.decidedAt ?? row.createdAt,
-        id: row.id,
-        item: {
-          groupId: GroupId.parse(row.groupId),
-          title: row.title,
-          published,
-          planned: planDrafts.length,
-          goal: null,
-          metric: null,
-        },
+        at: plan.decidedAt ?? plan.createdAt,
+        id: plan.id,
+        item: { groupId, title: plan.title, ...counts, goal: null, metric: null },
       };
     })
     .filter((row): row is { at: Date; id: string; item: TodayRunningItem } => row !== null)
