@@ -123,6 +123,8 @@ export type AppState =
       routines: Shelf<typeof MY_ROUTINES, Routine>;
       skills: Shelf<BotId, Skill>;
       preferences: Shelf<BotId, Preference>;
+      // 本地已确认删掉的偏好 id。id 不复用，所以删除是终态：之后到的该 id 的更新一律丢，不看序号。
+      deletedPreferences: Record<PreferenceId, true>;
       // 没写过是 null。
       brand: BrandBook | null;
       tools: ToolConnection[];

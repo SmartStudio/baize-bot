@@ -12,6 +12,7 @@ import {
 } from "./messages/MessageView.js";
 import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
+import { BotHeader } from "./BotHeader.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 import type { ContentBook, LoadStatus } from "../state/types.js";
@@ -189,45 +190,41 @@ export const ChatPanel = ({
 
   return (
     <section className="chat" data-testid="chat">
-      <header className={`chat-header${team ? " chat-header-team" : ""}`}>
-        {team ? (
-          <>
-            <div className="chat-heading">
-              <Users size={16} aria-hidden="true" />
-              <b data-testid="chat-title">{conversation.task.title}</b>
-              <span className="chat-sub" data-testid="chat-subtitle">
-                你 + {members.length} 个 Bot
-              </span>
-            </div>
-            <div className="chat-members" data-testid="chat-members">
-              {members.map((bot) => (
-                <span className="chat-member" data-testid="chat-member" key={bot.id}>
-                  <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
-                  {bot.name}
-                  {conversation.chiefBotId === bot.id ? <em className="tag">首席</em> : null}
-                  {conversation.task.currentBotId === bot.id ? <em className="tag">经手</em> : null}
+      {team || lead === undefined ? (
+        <header className={`chat-header${team ? " chat-header-team" : ""}`}>
+          {team ? (
+            <>
+              <div className="chat-heading">
+                <Users size={16} aria-hidden="true" />
+                <b data-testid="chat-title">{conversation.task.title}</b>
+                <span className="chat-sub" data-testid="chat-subtitle">
+                  你 + {members.length} 个 Bot
                 </span>
-              ))}
-              {turn?.current ? (
-                <span className="chat-turn" data-testid="group-turn">
-                  轮到 {bots[turn.current]?.name ?? turn.current}
-                  {turn.next.length > 0 ? `，接着 ${turn.next.map((id) => bots[id]?.name ?? id).join("、")}` : null}
-                </span>
-              ) : null}
-            </div>
-          </>
-        ) : (
-          <>
-            <BotAvatar name={lead?.name ?? "Bot"} hue={lead?.hue ?? "sky"} size="sm" />
-            <b data-testid="chat-title">{lead?.name ?? "Bot"}</b>
-            {lead?.tags.map((tag) => (
-              <em className="tag" key={tag}>
-                {tag}
-              </em>
-            ))}
-          </>
-        )}
-      </header>
+              </div>
+              <div className="chat-members" data-testid="chat-members">
+                {members.map((bot) => (
+                  <span className="chat-member" data-testid="chat-member" key={bot.id}>
+                    <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                    {bot.name}
+                    {conversation.chiefBotId === bot.id ? <em className="tag">首席</em> : null}
+                    {conversation.task.currentBotId === bot.id ? <em className="tag">经手</em> : null}
+                  </span>
+                ))}
+                {turn?.current ? (
+                  <span className="chat-turn" data-testid="group-turn">
+                    轮到 {bots[turn.current]?.name ?? turn.current}
+                    {turn.next.length > 0 ? `，接着 ${turn.next.map((id) => bots[id]?.name ?? id).join("、")}` : null}
+                  </span>
+                ) : null}
+              </div>
+            </>
+          ) : (
+            <b data-testid="chat-title">Bot</b>
+          )}
+        </header>
+      ) : (
+        <BotHeader bot={lead} />
+      )}
       {conversation.kind === "team" ? (
         <TaskCard
           task={conversation.task}

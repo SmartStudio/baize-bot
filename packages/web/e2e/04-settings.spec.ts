@@ -1,4 +1,4 @@
-import { expect, test, login, openBot, openSettings, openTools, toolCard, fillTool, SHOT } from "./fixtures";
+import { expect, test, login, openSettings, openTools, toolCard, fillTool, SHOT } from "./fixtures";
 
 test("设置通用页切到深色，电脑页列出两台在线电脑，html 的 data-theme 变 dark", async ({ page }) => {
   await login(page);
@@ -91,19 +91,6 @@ test("断开工具后卡片消失，刷新也不回来", async ({ page }) => {
   await page.reload();
   await openTools(page);
   await expect(toolCard(page, "供应商门户")).toHaveCount(0);
-});
-
-test("Bot 设置显示可用工具，点击直达设置的工具页", async ({ page }) => {
-  await login(page);
-  await openBot(page, "小服");
-  await expect(page.getByTestId("bot-available-tools-summary")).toHaveText("工单系统 · 邮箱");
-  await openBot(page, "小销");
-  await expect(page.getByTestId("bot-available-tools-summary")).toHaveText("邮箱");
-  await openBot(page, "小服");
-  await page.screenshot({ path: `${SHOT}/07b.png` });
-  await page.getByTestId("bot-available-tools").click();
-  await expect(page.getByTestId("tools-page")).toBeVisible();
-  await expect(page.getByTestId("settings-nav-tools")).toHaveClass(/is-selected/);
 });
 
 test("375px 工具页能看见连接与表单，没有横向溢出", async ({ page }) => {

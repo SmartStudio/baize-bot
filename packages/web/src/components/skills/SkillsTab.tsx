@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, Pencil, Plus, Trash2 } from "lucide-react";
-import { CreateSkillRequest, type BotId, type Skill, type SkillId, type SkillSource } from "@baize/shared";
+import { CreateSkillRequest, type BotId, type Skill, type SkillId } from "@baize/shared";
 import { useApp } from "../../state/app.js";
 import { BotAvatar } from "../BotAvatar.js";
 
@@ -23,18 +23,12 @@ const stepsOf = (text: string): string[] =>
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-const SOURCE_TEXT: Record<SkillSource, string> = {
-  chat: "来自对话",
-  routine: "来自例行任务",
-  taught: "你教的",
-};
-
 const pad = (value: number) => String(value).padStart(2, "0");
 
 const noteOf = (skill: Skill): string => {
   const at = new Date(skill.createdAt);
   const day = `${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
-  return `${SOURCE_TEXT[skill.source]} · ${day} 存的 · 用过 ${skill.useCount} 次`;
+  return `${day} 存的 · 用过 ${skill.useCount} 次`;
 };
 
 const Crumb = ({ count, current, onBack }: { count: number; current: string; onBack: () => void }) => (

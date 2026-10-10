@@ -53,6 +53,7 @@ import {
   waiters,
 } from "./store.js";
 import { messageFetchFaults } from "./messages.js";
+import { seedPreferences } from "./preferences.js";
 
 type Seed = {
   key: string;
@@ -385,6 +386,7 @@ export const reseed = (): void => {
   );
 
   for (const skill of SEEDED_SKILLS) skills.set(skill.id, skill);
+  seedPreferences();
 
   tools.set(
     "tool_tickets",

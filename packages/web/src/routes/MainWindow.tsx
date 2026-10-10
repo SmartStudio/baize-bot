@@ -211,11 +211,9 @@ export const MainWindow = () => {
       ) : soloBot !== null ? (
         <BotSettingsPanel
           bot={soloBot}
-          tools={ready.tools}
           onChange={actions.updateBot}
           onPause={actions.pauseBot}
           onResume={actions.resumeBot}
-          onOpenTools={() => setOverlay("tools")}
         />
       ) : null}
       {oauth !== null ? (

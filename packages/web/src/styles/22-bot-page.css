@@ -1,0 +1,164 @@
+/* Bot 页：单聊的头部换成 Bot 名片，下面一条「它知道的」折叠。 */
+.bot-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-6) var(--space-7);
+  border-bottom: 1px solid var(--border-1);
+}
+
+.bot-header-main {
+  display: flex;
+  gap: var(--space-5);
+  align-items: flex-start;
+}
+
+.bot-header-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.bot-header-text h2 {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.bot-header-text p {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.bot-header-tags,
+.bot-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.bot-header-actions .ghost-button {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding-inline: var(--space-4);
+}
+
+.bot-know-toggle {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-ui);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bot-know-toggle span {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.bot-know {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-5);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.bot-know h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--fg-3);
+  font: var(--type-label);
+}
+
+.bot-know ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bot-know-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  color: var(--fg-1);
+  font: var(--type-body);
+}
+
+.bot-know-row > span {
+  flex: 1;
+  min-width: 0;
+}
+
+.bot-know-row small,
+.bot-know-empty {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.bot-know-error,
+.edit-bot-error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}
+
+.edit-bot-close {
+  margin-left: auto;
+}
+
+.edit-bot-count {
+  align-self: flex-end;
+}
+
+.edit-bot-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.edit-bot-tag {
+  display: inline-flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.edit-bot-tag-remove {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.edit-bot-tag-input {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* 整张卡都能点进 Bot 页：「单聊」链接的点击区铺满卡片。 */
+.team-bot {
+  position: relative;
+}
+
+.team-bot [data-testid="team-bot-chat"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}

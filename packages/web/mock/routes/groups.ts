@@ -9,6 +9,7 @@ import {
   grants,
   handoffsIn,
   isTeamGroup,
+  learnFrom,
   lastMessageOf,
   mentionsIn,
   messageFetchFaults,
@@ -141,6 +142,10 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
               streamBotReply(groupId, responder, text, push).catch((cause: unknown) => {
                 process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
               });
+              const group = groups.get(groupId);
+              const learned =
+                group !== undefined && !isTeamGroup(group) ? learnFrom(responder, text, message.id) : null;
+              if (learned !== null) push({ type: "preference_updated", preference: learned });
               send(res, 200, { message });
             }
           }

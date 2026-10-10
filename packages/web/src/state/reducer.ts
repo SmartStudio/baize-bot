@@ -50,6 +50,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     routines: emptyShelf(),
     skills: emptyShelf(),
     preferences: emptyShelf(),
+    deletedPreferences: {},
     brand: null,
     tools,
     settings,

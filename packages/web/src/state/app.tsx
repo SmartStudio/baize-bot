@@ -21,6 +21,7 @@ import {
   type GrantId,
   type GroupId,
   type MessageId,
+  type Preference,
   type CreateRoutineRequest,
   type CreateSkillRequest,
   type CreateToolRequest,
@@ -95,6 +96,8 @@ export type AppActions = {
   updateSkill: (skillId: SkillId, patch: UpdateSkillRequest) => Promise<void>;
   deleteSkill: (skill: Skill) => Promise<void>;
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
+  loadPreferences: (botId: BotId) => Promise<void>;
+  deletePreference: (preference: Preference) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
   decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
@@ -484,6 +487,22 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       copySkill: signedIn(async ({ api, put }, skillId: SkillId, botId: BotId) => {
         const seq = nextSeq();
         put({ type: "skill_upserted", skill: await api.copySkill(skillId, botId), seq });
+      }),
+      loadPreferences: signedIn((scope, botId: BotId) =>
+        loadBucket(scope, `preferences:${botId}`, ANY_FLIGHT, async (seq) => {
+          scope.put({ type: "preferences_loaded", botId, preferences: await scope.api.preferences(botId), seq });
+        }),
+      ),
+      // 和 deleteSkill 一样整条传进来：DELETE 回 204，少了 botId 不知道从哪个桶里删。
+      // 204 和 404 都是服务端说这条已经没了，是定论，所以号在回包之后才取：
+      // 删除在途时先到的更新推送拿着更大的号，回包前取号会被它挡住；404 是错过了删除推送，同样就地去掉。
+      deletePreference: signedIn(async ({ api, put }, preference: Preference) => {
+        try {
+          await api.deletePreference(preference.id);
+        } catch (error) {
+          if (!(error instanceof RequestFailed && error.status === 404)) throw error;
+        }
+        put({ type: "preference_removed", botId: preference.botId, preferenceId: preference.id, seq: nextSeq() });
       }),
       // 结论随这条消息的正文走，所以先落那条消息。存下来的那条 skill 是顺带回来的，dismiss 时没有。
       decideSkillOffer: signedIn(

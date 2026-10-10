@@ -1,6 +1,7 @@
 import {
   AccountId,
   ActionKind,
+  Bot,
   BotId,
   ComputerStatus,
   Group,
@@ -18,6 +19,7 @@ import { z } from "zod";
 import {
   confirmNextHandoff,
   addTodayApproval,
+  bots,
   appendMessage,
   computerStatus,
   computersOf,
@@ -72,6 +74,7 @@ const TestDeltaRequest = z
     revision: z.number().int().positive().default(1),
   })
   .strict();
+const LegacyDescriptionRequest = z.object({ botId: BotId, description: z.string() }).strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
@@ -91,6 +94,20 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     activeTurns.clear();
     turnEpochs.clear();
     send(res, 204);
+    return true;
+  }
+
+  // 写入上限收紧之前存下的长描述，PATCH 造不出来，只能从这里直接种。
+  if (method === "POST" && path === "/api/test/bot-description") {
+    const parsed = LegacyDescriptionRequest.safeParse(await readBody(req));
+    const bot = parsed.success ? bots.get(parsed.data.botId) : undefined;
+    if (!parsed.success || bot === undefined) send(res, 400, { error: "要种描述的 Bot 不对" });
+    else {
+      const next = Bot.parse({ ...bot, description: parsed.data.description });
+      bots.set(next.id, next);
+      push({ type: "bot_updated", bot: next });
+      send(res, 204);
+    }
     return true;
   }
 

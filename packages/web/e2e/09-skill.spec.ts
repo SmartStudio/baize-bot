@@ -14,7 +14,7 @@ test("存下 Bot 提议的 skill，卡片变已存且小销列表多一条", asy
   await openSkills(page, "小销");
   await expect(page.getByTestId("skill-row")).toHaveCount(4);
   const saved = page.locator('[data-testid=skill-row][data-skill-name="Initech 报价"]');
-  await expect(saved).toContainText("来自对话");
+  await expect(saved, "列表不露来源").toContainText("用过 0 次");
   await page.screenshot({ path: `${SHOT}/10a.png` });
 
   await page.reload();
@@ -27,7 +27,7 @@ test("会做的活详情改步骤后保存，列表与详情都显示新内容",
   await openSkills(page, "小销");
   await expect(page.getByTestId("skill-row"), "小销预置三条 skill").toHaveCount(3);
   const quote = page.locator('[data-testid=skill-row][data-skill-name="Globex 报价"]');
-  await expect(quote.getByTestId("skill-row-note")).toContainText("来自对话");
+  await expect(quote.getByTestId("skill-row-note")).toContainText("存的");
   await quote.getByTestId("skill-open").click();
   await expect(page.getByTestId("skill-step")).toHaveCount(4);
   await page.getByTestId("skill-edit").click();
@@ -77,7 +77,7 @@ test("教小销一个 skill，再复制给小采并删掉原件", async ({ page 
   await expect(page.getByTestId("skill-save")).toBeEnabled();
   await page.getByTestId("skill-save").click();
   const taught = page.locator('[data-testid=skill-row][data-skill-name="客户回访清单"]');
-  await expect(taught).toContainText("你教的");
+  await expect(taught).toContainText("用过 0 次");
   await expect(page.getByTestId("skill-row")).toHaveCount(4);
   await taught.getByTestId("skill-open").click();
   await expect(page.getByTestId("skill-detail").getByTestId("skill-step")).toHaveText([
@@ -93,8 +93,7 @@ test("教小销一个 skill，再复制给小采并删掉原件", async ({ page 
 
   await openSkills(page, "小采");
   const copied = page.locator('[data-testid=skill-row][data-skill-name="客户回访清单"]');
-  await expect(copied).toContainText("你教的");
-  await expect(copied, "复制保留来源，但新 Bot 的使用次数从零算").toContainText("用过 0 次");
+  await expect(copied, "新 Bot 的使用次数从零算").toContainText("用过 0 次");
 });
 
 test("不存 Bot 的提议，卡片变没存且列表不增加", async ({ page }) => {

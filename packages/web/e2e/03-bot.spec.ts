@@ -14,7 +14,9 @@ test("团队页点新 Bot 建的 Bot 进团队并直接进入它的对话", asyn
   const created = await page.getByTestId("chat-title").textContent();
   await expect(page.getByTestId("team-nav"), "新 Bot 的单聊算在团队底下").toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("message-list").getByTestId("message")).toHaveCount(0);
-  await expect(page.getByTestId("bot-name-input")).toHaveValue(String(created));
+  await page.getByTestId("bot-edit").click();
+  await expect(page.getByTestId("edit-bot-name"), "编辑弹窗带着系统起的名字").toHaveValue(String(created));
+  await page.keyboard.press("Escape");
   await page.screenshot({ path: `${SHOT}/2b.png` });
 
   await page.getByTestId("team-nav").click();
@@ -28,11 +30,13 @@ test("改完描述刷新页面还在", async ({ page }) => {
   const description = "只比价和询价，下单和付钱先找我点头。";
 
   const saved = page.waitForResponse((res) => res.url().includes("/api/bots/") && res.request().method() === "PATCH");
-  await page.getByTestId("bot-description-input").fill(description);
-  await page.getByTestId("bot-name-input").click();
+  await page.getByTestId("bot-edit").click();
+  await page.getByTestId("edit-bot-description").fill(description);
+  await page.getByTestId("edit-bot-save").click();
   await saved;
+  await expect(page.getByTestId("bot-header-description")).toHaveText(description);
 
   await page.reload();
   await openBot(page, "小采");
-  await expect(page.getByTestId("bot-description-input")).toHaveValue(description);
+  await expect(page.getByTestId("bot-header-description")).toHaveText(description);
 });

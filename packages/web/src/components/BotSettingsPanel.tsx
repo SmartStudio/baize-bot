@@ -1,30 +1,18 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronRight, SlidersHorizontal, Sparkles } from "lucide-react";
-import { BotHue, type Bot, type BotId, type ToolConnection } from "@baize/shared";
+import { BotHue, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { SkillsTab } from "./skills/SkillsTab.js";
 
 type Props = {
   bot: Bot;
-  tools: ToolConnection[];
   onChange: (botId: BotId, draft: BotDraft) => Promise<void>;
   onPause: (botId: BotId) => Promise<void>;
   onResume: (botId: BotId) => Promise<void>;
-  onOpenTools: () => void;
 };
 
 type Tab = "settings" | "skills";
-
-// 标签框里用顿号隔开，逗号和空白也认；个数和长度交给 shared 校验，超了接口回 400。
-const splitTags = (text: string): string[] => [
-  ...new Set(
-    text
-      .split(/[、,，\s]+/)
-      .map((tag) => tag.trim())
-      .filter((tag) => tag.length > 0),
-  ),
-];
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: "settings", label: "设置", icon: <SlidersHorizontal size={14} aria-hidden="true" /> },
@@ -77,24 +65,16 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
   );
 };
 
-export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOpenTools }: Props) => {
-  const [name, setName] = useState(bot.name);
-  const [tags, setTags] = useState(bot.tags.join("、"));
-  const [description, setDescription] = useState(bot.description);
+// 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、通知和暂停。
+export const BotSettingsPanel = ({ bot, onChange, onPause, onResume }: Props) => {
   const [tab, setTab] = useState<Tab>("settings");
-
-  useEffect(() => {
-    setName(bot.name);
-    setTags(bot.tags.join("、"));
-    setDescription(bot.description);
-  }, [bot.id, bot.name, bot.tags, bot.description]);
 
   const commit = (draft: BotDraft) => void onChange(bot.id, draft);
 
   return (
     <aside className="bot-panel" data-testid="bot-panel">
       <header className="bot-panel-head">
-        <BotAvatar name={name} hue={bot.hue} size="lg" />
+        <BotAvatar name={bot.name} hue={bot.hue} size="lg" />
         <div className="hue-row">
           {BotHue.options.map((hue) => (
             <button
@@ -127,45 +107,6 @@ export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOp
       {tab === "skills" ? <SkillsTab botId={bot.id} key={bot.id} /> : null}
       {tab === "settings" ? (
         <>
-          <label className="field">
-            <span>名称</span>
-            <input
-              data-testid="bot-name-input"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => {
-                const next = name.trim();
-                if (next.length === 0) return setName(bot.name);
-                if (next !== bot.name) commit({ name: next });
-              }}
-            />
-          </label>
-          <label className="field">
-            <span>标签（可选）</span>
-            <input
-              data-testid="bot-tags-input"
-              value={tags}
-              placeholder="销售、客服、采购"
-              onChange={(e) => setTags(e.target.value)}
-              onBlur={() => {
-                const next = splitTags(tags);
-                if (next.join("、") !== bot.tags.join("、")) commit({ tags: next });
-              }}
-            />
-            <small>出现在名字旁边，方便一眼认出。顿号隔开，最多 5 个，每个 8 字内</small>
-          </label>
-          <label className="field">
-            <span>描述</span>
-            <textarea
-              data-testid="bot-description-input"
-              rows={5}
-              value={description}
-              placeholder="它负责什么、怎么干活、什么不做"
-              onChange={(e) => setDescription(e.target.value)}
-              onBlur={() => description !== bot.description && commit({ description })}
-            />
-            <small>它怎么干活、什么不做，都写在这里。改完自动保存。</small>
-          </label>
           <div className="row-card">
             <span>
               <b>通知</b>
@@ -182,23 +123,6 @@ export const BotSettingsPanel = ({ bot, tools, onChange, onPause, onResume, onOp
             />
           </div>
           <RunStateRow bot={bot} onPause={onPause} onResume={onResume} key={bot.id} />
-          <button
-            type="button"
-            className="row-card bot-tools-link"
-            data-testid="bot-available-tools"
-            onClick={onOpenTools}
-          >
-            <span>
-              <b>可用工具</b>
-              <small data-testid="bot-available-tools-summary">
-                {tools
-                  .filter((tool) => tool.assignedBotIds.includes(bot.id))
-                  .map((tool) => tool.name)
-                  .join(" · ") || "还没勾。去「设置 · 工具」连 MCP 再勾给它"}
-              </small>
-            </span>
-            <ChevronRight size={16} aria-hidden="true" />
-          </button>
           {LATER_ROWS.map((row) => (
             <div className="row-card is-later" key={row.title}>
               <span>

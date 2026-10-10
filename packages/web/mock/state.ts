@@ -1,6 +1,7 @@
 export * from "./state/content.js";
 export * from "./state/groups.js";
 export * from "./state/messages.js";
+export * from "./state/preferences.js";
 export * from "./state/project-page.js";
 export * from "./state/projects.js";
 export * from "./state/reports.js";
