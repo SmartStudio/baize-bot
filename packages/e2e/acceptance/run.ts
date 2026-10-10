@@ -38,6 +38,8 @@ const XHS_TITLE = "我们为什么做白泽";
 const CADENCE_ASK = "下周多发点小红书";
 const REPLY_ASK = "@小满 issue 12 里 lark-fan 问能不能接飞书，回他一句";
 const REVIEW_ASK = "周五复盘加上小红书的数据";
+const METRIC_BASELINE_ASK = "@老周 记录 GitHub 星数，当前读数 375";
+const METRIC_UPDATE_ASK = "@老周 更新 GitHub 星数，当前读数 412";
 const ISSUE_URL = "https://github.com/baize/baize-bot/issues/12";
 const ROUTINE_ASK = "每周五六点给白泽开源推广出一份周报";
 const ROUTINE_NAME = "白泽开源推广周报";
@@ -199,6 +201,12 @@ const turn = (request: ChatRequest): ScriptedTurn => {
   }
   if (current.includes(REVIEW_ASK)) {
     return say("记下了，这周五的复盘会把小红书的阅读和收藏一起列出来。");
+  }
+  if (current.includes(METRIC_BASELINE_ASK) || current.includes(METRIC_UPDATE_ASK)) {
+    const value = current.includes(METRIC_BASELINE_ASK) ? 375 : 412;
+    return afterTool
+      ? say(`已记下 GitHub 星数 ${value}，项目进度更新了。`)
+      : call(`metric-stars-${value}`, "report_metric", { value, label: "GitHub 星数" });
   }
   if (current.includes(ROUTINE_ASK)) {
     return afterTool
@@ -708,16 +716,105 @@ const run = async (): Promise<void> => {
     await check(p.getByTestId("project-cadence")).toContainText("每周 3 条短视频脚本");
     await shot(p, "U8-2-project");
 
-    begin("U9 项目页：最新一轮贴着输入框，成果在下面");
+    begin("U9 项目页：设目标，Bot 报指标，项目与首页进度跟着变，最新一轮贴着输入框");
     await openProject(p, PROJECT);
+    await check(p.getByTestId("project-page").locator("h1")).toHaveText(PROJECT);
+    // 当前定目标的入口在项目群的任务卡上，从项目页进群，存好再回项目页。
+    await p.getByTestId("project-open-group").click();
+    await p.getByTestId("task-goal").click();
+    const goalForm = p.getByTestId("task-goal-form");
+    const goalDue = `${new Date().getFullYear()}-12-31T23:59`;
+    await goalForm.getByTestId("task-goal-target").fill("1000");
+    await goalForm.getByTestId("task-goal-unit").fill("星");
+    await goalForm.getByTestId("task-goal-due").fill(goalDue);
+    await check(goalForm.getByTestId("task-goal-target")).toHaveValue("1000");
+    await check(goalForm.getByTestId("task-goal-unit")).toHaveValue("星");
+    await check(goalForm.getByTestId("task-goal-due")).toHaveValue(goalDue);
+    await assertPlainHome(p, s);
+    await shot(p, "U9-1-goal-form");
+    await goalForm.getByTestId("task-goal-save").click();
+    await check(goalForm).toHaveCount(0);
+    await check(p.getByTestId("task-goal")).toHaveText("目标 0 / 1000 星");
+    await openProject(p, PROJECT);
+    const progress = p.getByTestId("project-progress");
+    await check(progress).toContainText("0 / 1000 星");
+    await check(progress).toContainText("截止 12-31 23:59");
+    await check(progress.locator("progress")).toHaveAttribute("max", "1000");
+    await check(progress.locator("progress")).toHaveAttribute("value", "0");
+    await check(p.getByTestId("project-goal-week"), "还没有样本，不编本周变化").toHaveCount(0);
+    await assertPlainHome(p, s);
+    await shot(p, "U9-2-goal");
+
+    await p.getByTestId("project-composer-input").fill(METRIC_BASELINE_ASK);
+    await p.getByTestId("project-composer-send").click();
+    await check(p.getByTestId("project-latest-turn")).toContainText("已记下 GitHub 星数 375");
+    await check(progress, "Bot 报的第一个读数出现在项目页").toContainText("375 / 1000 星");
+    await check(progress.locator("progress")).toHaveAttribute("value", "375");
+    await check(p.getByTestId("project-goal-week"), "第一个读数是本周基线，变化为零不显示").toHaveCount(0);
+    await assertPlainHome(p, s);
+    await shot(p, "U9-3-metric-baseline");
+
+    const homeProgressPage = await ctx.newPage();
+    try {
+      await openHome(homeProgressPage, home);
+      const running = homeProgressPage
+        .getByTestId("today-running")
+        .getByTestId("today-row")
+        .filter({ hasText: PROJECT });
+      await check(running).toContainText("375 / 1000 星");
+      await check(running.locator("progress")).toHaveAttribute("max", "1000");
+      await check(running.locator("progress")).toHaveAttribute("value", "375");
+      await assertPlainHome(homeProgressPage, s);
+      await shot(homeProgressPage, "U9-4-home-baseline");
+
+      await p.getByTestId("project-composer-input").fill(METRIC_UPDATE_ASK);
+      await p.getByTestId("project-composer-send").click();
+      await check(p.getByTestId("project-latest-turn")).toContainText("已记下 GitHub 星数 412");
+      await check(progress, "不刷新项目页也能看到新读数").toContainText("412 / 1000 星");
+      await check(progress.locator("progress")).toHaveAttribute("value", "412");
+      await check(p.getByTestId("project-goal-week"), "本周变化取两个读数之差").toHaveText("本周 +37");
+      await assertPlainHome(p, s);
+      await shot(p, "U9-5-metric-updated");
+      await check(running, "已经打开的首页收到推送，进度也跟着变").toContainText("412 / 1000 星");
+      await check(running.locator("progress")).toHaveAttribute("value", "412");
+      await assertPlainHome(homeProgressPage, s);
+      await shot(homeProgressPage, "U9-6-home-updated");
+    } finally {
+      await homeProgressPage.close();
+    }
+    skip("GitHub 自动取样：startStack 没暴露 metrics.tick，现有假平台也没仓库星数接口；不改产品扫描间隔");
+
     await p.getByTestId("project-composer-input").fill(REVIEW_ASK);
     await p.getByTestId("project-composer-send").click();
+    await check(p.getByTestId("project-latest-turn")).toContainText(REVIEW_ASK);
     await check(p.getByTestId("project-latest-turn")).toContainText("小红书的阅读和收藏");
+    await check(p.getByTestId("project-latest-turn"), "更早的指标对话收起，只展示最新一轮").not.toContainText(
+      "已记下 GitHub 星数",
+    );
+    await check(p.getByTestId("project-older")).toContainText(/更早 \d+ 轮 · 完整对话在项目群里/);
+    check(
+      await p
+        .getByTestId("project-thread")
+        .evaluate((thread) => thread.previousElementSibling?.matches("form.project-composer")),
+      "最新一轮紧贴在项目输入框下面",
+    ).toBe(true);
+    await check(progress, "聊天没有冲掉目标和指标").toContainText("412 / 1000 星");
+    await check(p.getByTestId("project-goal-week")).toHaveText("本周 +37");
     await check(p.getByTestId("project-achievements")).toContainText("GitHub");
-    await shot(p, "U9-1-project");
+    await check(p.getByTestId("project-pending")).toBeVisible();
+    await check(p.getByTestId("project-plan")).toContainText("本周计划");
+    await check(p.getByTestId("project-fold")).not.toHaveAttribute("open", "");
+    await check(p.getByTestId("project-fold").locator("summary")).toContainText("队伍 4 · 例行");
+    await assertPlainHome(p, s);
+    await shot(p, "U9-7-project");
     await p.getByTestId("project-achievements").scrollIntoViewIfNeeded();
-    await shot(p, "U9-2-achievements");
-    skip("目标与指标、数字变化（第 2 期）");
+    await check(p.getByTestId("project-achievement")).toHaveCount(1);
+    await check(p.getByTestId("project-achievement"), "成果带着假平台发布返回的原帖链接").toHaveAttribute(
+      "href",
+      /^https:\/\/github\.com\/baize\/baize-bot\/issues\/12#issuecomment-\d+$/,
+    );
+    await assertPlainHome(p, s);
+    await shot(p, "U9-8-achievements");
 
     begin("U10 例行自己会停：一句话加一次「加上」，三次没人看自己停，侧栏亮点，点恢复");
     skip("在项目里说：例行卡只在主助理单聊里出，项目群里调会报错让 Bot 转告，这句改在首页对主助理说");
