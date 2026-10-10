@@ -316,8 +316,9 @@ export type Handoff = z.infer<typeof Handoff>;
 export const ToolCallStatus = z.enum(["running", "ok", "failed", "blocked"]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
 
-// 来源：对话里 Bot 提议存下的记 chat，例行任务运行里提议的记 routine，用户在 Web 教的记 taught。复制给别的 Bot 保留原来源。
-export const SkillSource = z.enum(["chat", "routine", "taught"]);
+// 来源：对话里 Bot 提议存下的记 chat，例行任务运行里提议的记 routine，用户在 Web 教的记 taught，从分享链接导入的记 template。
+// 复制给别的 Bot 保留原来源。
+export const SkillSource = z.enum(["chat", "routine", "taught", "template"]);
 export type SkillSource = z.infer<typeof SkillSource>;
 
 export const SkillName = z.string().min(1).max(40);
@@ -334,6 +335,31 @@ export const Skill = z.object({
   createdAt: Timestamp,
 });
 export type Skill = z.infer<typeof Skill>;
+
+// 分享链接里的整包（D11、D12）。没有任何 id、token、authorization：插件 url 由导出方剥掉查询串和 userinfo，
+// 导入方拿到后自己授权。strict 让多出来的字段整包拒收，而不是悄悄丢掉。
+export const BotTemplate = z
+  .object({
+    format: z.literal(1),
+    name: z.string().min(1).max(20),
+    tags: BotTags,
+    description: z.string().max(200),
+    skills: z.array(z.object({ name: SkillName, steps: SkillSteps }).strict()).max(50),
+    plugins: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(40),
+            url: z.string().url(),
+            operations: z.array(z.object({ name: z.string().min(1), needsApproval: z.boolean() }).strict()),
+          })
+          .strict(),
+      )
+      .max(20),
+    preferences: z.array(z.object({ text: z.string().min(1).max(200) }).strict()).max(50),
+  })
+  .strict();
+export type BotTemplate = z.infer<typeof BotTemplate>;
 
 // Bot 问「存不存」的那张卡。offered 是还没点，saved 之后 skillId 指向存下的那条，dismissed 是用户说不存。
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
