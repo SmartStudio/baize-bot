@@ -9,10 +9,11 @@ import {
   AccountListResponse,
   BotListResponse,
   ComputerListResponse,
+  GroupResponse,
   RoutineListResponse,
   type Platform,
 } from "@baize/shared";
-import { startFakePlatforms, type FakePlatforms } from "@baize/control-plane/testing";
+import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream, type ChatRequest, type ScriptedTurn } from "../src/upstream.js";
 import { fakeChrome } from "./fake-chrome.js";
@@ -428,6 +429,7 @@ const run = async (): Promise<void> => {
   mkdirSync(screenshots, { recursive: true });
   const upstream = await startUpstream(turn);
   const chrome = fakeChrome();
+  let metricsNow = new Date();
   let platforms: FakePlatforms | undefined;
   let stack: Stack | undefined;
   let web: { url: string; child: ChildProcess } | undefined;
@@ -450,6 +452,7 @@ const run = async (): Promise<void> => {
       priceOutputPerM: 1_500,
       githubApiBaseUrl: fake.githubBaseUrl,
       xApiBaseUrl: fake.xBaseUrl,
+      metricsNow: () => metricsNow,
       makeChrome: chrome.factory,
       startComputer: false,
       bootstrap: async (port) => {
@@ -782,7 +785,6 @@ const run = async (): Promise<void> => {
     } finally {
       await homeProgressPage.close();
     }
-    skip("GitHub 自动取样：startStack 没暴露 metrics.tick，现有假平台也没仓库星数接口；不改产品扫描间隔");
 
     await p.getByTestId("project-composer-input").fill(REVIEW_ASK);
     await p.getByTestId("project-composer-send").click();
@@ -815,6 +817,58 @@ const run = async (): Promise<void> => {
     );
     await assertPlainHome(p, s);
     await shot(p, "U9-8-achievements");
+
+    begin("U9 自动取样：GitHub 500 星，同格不重取，下一格更新为 520，两屏收到推送");
+    await progress.scrollIntoViewIfNeeded();
+    // 页面没有指标来源设置入口，走任务卡 PATCH 接口；目标仍由前面的界面步骤设置。
+    const metricTask = GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task;
+    await s.patch(`/api/tasks/${metricTask.id}`, {
+      metricSource: { kind: "github_stars", accountId: accountOf("github"), repo: "baize/baize-bot" },
+    });
+    const automaticHome = await ctx.newPage();
+    try {
+      await openHome(automaticHome, home);
+      const running = automaticHome.getByTestId("today-running").getByTestId("today-row").filter({ hasText: PROJECT });
+      await check(running).toContainText("412 / 1000 星");
+      const reads = () =>
+        fake.requests().filter((request) => request.method === "GET" && request.path === "/repos/baize/baize-bot");
+      const initialReads = reads().length;
+      const assertMetric = async (value: number) => {
+        await check(progress, "项目页不刷新收到自动取样").toContainText(`${value} / 1000 星`);
+        await check(progress.locator("progress")).toHaveAttribute("value", String(value));
+        await check(running, "首页不刷新收到自动取样").toContainText(`${value} / 1000 星`);
+        await check(running.locator("progress")).toHaveAttribute("value", String(value));
+        check(GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task.metric?.current).toBe(value);
+      };
+      fake.setGithubStars("baize/baize-bot", 500);
+      metricsNow = new Date(Date.now() + 1_000);
+      await s.metricsTick();
+      await assertMetric(500);
+      check(reads()).toHaveLength(initialReads + 1);
+      await shot(p, "U9-auto-1-project-500");
+      await shot(automaticHome, "U9-auto-2-home-500");
+      const firstSample = GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task.metric;
+
+      fake.setGithubStars("baize/baize-bot", 520);
+      await s.metricsTick();
+      await assertMetric(500);
+      check(reads(), "同格去重不再请求假平台").toHaveLength(initialReads + 1);
+      check(GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task.metric, "同格不落新样本").toEqual(
+        firstSample,
+      );
+      await shot(p, "U9-auto-3-project-same-slot");
+      await shot(automaticHome, "U9-auto-4-home-same-slot");
+
+      const windowMs = 6 * 60 * 60 * 1_000;
+      metricsNow = new Date((Math.floor(metricsNow.getTime() / windowMs) + 1) * windowMs);
+      await s.metricsTick();
+      await assertMetric(520);
+      check(reads()).toHaveLength(initialReads + 2);
+      await shot(p, "U9-auto-5-project-520");
+      await shot(automaticHome, "U9-auto-6-home-520");
+    } finally {
+      await automaticHome.close();
+    }
 
     begin("U10 例行自己会停：一句话加一次「加上」，三次没人看自己停，侧栏亮点，点恢复");
     skip("在项目里说：例行卡只在主助理单聊里出，项目群里调会报错让 Bot 转告，这句改在首页对主助理说");

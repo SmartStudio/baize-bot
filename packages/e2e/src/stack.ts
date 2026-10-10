@@ -58,6 +58,8 @@ export type StackOptions = {
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
+  /** 只控制指标取样的时间，不改产品的扫描间隔和六小时格子。 */
+  readonly metricsNow?: () => Date;
   /** 换掉进程内电脑代理的助理 Chrome。不给就是真 Chrome，只在 Bot 要用浏览器时才起。 */
   readonly makeChrome?: AgentOptions["makeChrome"];
 };
@@ -95,6 +97,8 @@ export type Stack = {
   connectComputer(): Promise<ComputerProbe>;
   /** 手动跑一轮发布循环，跑完时这一轮抢到的草稿都有了结论（走电脑的除外）。 */
   publishTick(): Promise<void>;
+  /** 手动跑服务器已有的指标扫描，返回时取样和推送都已完成。 */
+  metricsTick(): Promise<void>;
   /** 照 account-add 脚本的做法，给当前用户挂一个走接口发布的账号，令牌加密入库。 */
   addAccount(input: { platform: Platform; handle: string; token: string }): Promise<Account>;
   close(): Promise<void>;
@@ -146,6 +150,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       config: runtimeConfig(),
       // 发布只在用例调 publishTick 时跑，到点的草稿什么时候发由用例说了算。
       publisher: { intervalMs: DAY_MS },
+      ...(options.metricsNow === undefined ? {} : { metrics: { now: options.metricsNow } }),
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
     });
     closers.push(() => server.close());
@@ -336,6 +341,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         return probe;
       },
       publishTick: () => server.publisher.tick(),
+      metricsTick: () => server.metrics.tick(),
       addAccount: async ({ platform, handle, token }) => {
         const { user } = MeResponse.parse(await api.get("/api/me"));
         return addAccountWithToken(
