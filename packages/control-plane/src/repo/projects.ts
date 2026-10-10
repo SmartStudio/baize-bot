@@ -24,7 +24,7 @@ export type ProjectOfferBody = Extract<MessageBody, { kind: "project_offer" }>;
 
 /**
  * 点开始时和项目一起建的两条例行，Bot 是主助理，发进项目群，首席是它，所以活落在它身上。
- * cron 按服务器本地时区。propose_plan 要到 P1-4 才有，工具不在时主助理照文案自己说做不到。
+ * cron 按服务器本地时区。
  */
 export const PROJECT_ROUTINES = [
   {
