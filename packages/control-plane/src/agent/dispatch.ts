@@ -26,7 +26,7 @@ import { listAccounts } from "../repo/accounts.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
-import { findChiefBotId, findSoloBotId } from "../repo/groups.js";
+import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
 import { pendingLines, recordContext } from "../repo/context-window.js";
@@ -48,6 +48,8 @@ export const CONTEXT_MESSAGES = 20;
 
 /** 一条上下文的正文上限，长消息在这里截断，prompt 不替 Bot 读全文。 */
 const CONTEXT_TEXT_LIMIT = 200;
+
+export const NO_TARGET_NOTICE = "这条消息没人接，@ 一个 Bot 派活";
 
 export type DispatchDeps = {
   readonly db: Db;
@@ -104,9 +106,6 @@ export async function dispatchUserMessage(
   trigger: Message,
   options: DispatchOptions = {},
 ): Promise<DispatchOutcome> {
-  const members = await listGroupBots(deps.db, groupId);
-  if (members.length === 0) return { kind: "no_target" };
-
   const mentions = trigger.body.kind === "user" ? (trigger.body.mentions ?? []) : [];
   const [first] = mentions;
   // @ 了好几个也只认第一个当经手。单 Bot 群没有经手可言，它的任务卡也不出边界。
@@ -116,25 +115,19 @@ export async function dispatchUserMessage(
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   if (!solo && first !== undefined && task !== null && task.currentBotId !== first) {
     task = await setCurrentBot(deps.db, groupId, first, new Date());
-    if (task !== null) deps.push.push(ownerId, { type: "task_updated", task });
+    // 被 @ 的那位刚被删掉就不换经手，也就没有任务卡要推。
+    if (task?.currentBotId === first) deps.push.push(ownerId, { type: "task_updated", task });
   }
-  const chiefBotId = await findChiefBotId(deps.db, groupId);
   const owner = options.botId;
-  const targets =
-    owner === undefined
-      ? routeTargets({ members, chiefBotId, currentBotId: task?.currentBotId ?? null, mentions })
-      : members.filter((member) => member.id === owner).map((member) => member.id);
-  if (targets.length === 0) return { kind: "no_target" };
+  // 例行的运行记录自己会留原因；用户发的消息不能静默，群里要有一句为什么没人接。
+  // 群本身没了（单聊随 Bot 级联删掉）就什么都不写，写了也只会撞外键；调用方把读到的那次状态传进来。
+  const noTarget = async (groupAlive: boolean): Promise<DispatchOutcome> => {
+    if (owner === undefined && groupAlive) {
+      await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: NO_TARGET_NOTICE });
+    }
+    return { kind: "no_target" };
+  };
 
-  const reason = solo
-    ? "solo"
-    : mentions.length > 0 || owner !== undefined
-      ? "mentioned"
-      : chiefBotId !== null
-        ? "chief"
-        : task?.currentBotId !== null && task?.currentBotId !== undefined
-          ? "current"
-          : "everyone";
   const selected = await computerFor(deps.db, deps.agents, ownerId);
   if (selected.kind === "failed") {
     await appendAndPush(deps, ownerId, groupId, {
@@ -147,19 +140,51 @@ export async function dispatchUserMessage(
   // 头一个 speaker 就用这次选中的电脑。再选一次的话，两次之间掉线会让它不建 run 就派空，
   // 这里却已经报了 sent，例行就一直停在运行中。后面的 speaker 要等前一个跑完才派，到时再选。
   let placed: Computer | null = selected.computer;
-  await deps.groupTurns.start({
-    groupId,
-    ownerId,
-    epoch: await messageSeq(deps.db, trigger.id),
-    members,
-    speakers: targets.map((botId) => ({ botId, trigger, reason })),
-    send: (speaker, includeRecent) => {
-      const computer = placed;
-      placed = null;
-      return sendSpeaker(deps, ownerId, groupId, members, speaker, includeRecent, options, computer);
-    },
-  });
-  return { kind: "sent" };
+  // 设完经手再读名单：被 @ 的那位刚删掉时名单里已经没有它，路由直接落到原经手，不会派给一个不存在的 Bot。
+  // 被 @ 的人全在派活途中被删时再路由一次，这回不认 @，只退回组长或经手，不替用户扩到全员；仍没人就留一句，不静默。
+  // 例行只派给它自己的 Bot，没有第二次。
+  const passes = owner === undefined && mentions.length > 0 ? [mentions, []] : [[]];
+  for (const [pass, effectiveMentions] of passes.entries()) {
+    const members = await listGroupBots(deps.db, groupId);
+    // 名单空有两种：多 Bot 群被删空，群还在，留话给人看；单聊随 Bot 没了，群也没了，没地方留。
+    if (members.length === 0) return noTarget(await groupExists(deps.db, groupId));
+    // 触发消息随群级联删掉时这条会抛，放在名单之后，群没了多数时候在上一行就回掉了。
+    const epoch = await messageSeq(deps.db, trigger.id);
+    const chiefBotId = await findChiefBotId(deps.db, groupId);
+    const currentBotId = (await findTaskByGroup(deps.db, groupId))?.currentBotId ?? null;
+    if (pass > 0 && chiefBotId === null && currentBotId === null) break;
+    // @ 的人已经不在名单里就当没 @，理由也跟着落到经手那档。
+    const mentioned = effectiveMentions.filter((botId) => members.some((member) => member.id === botId));
+    const targets =
+      owner === undefined
+        ? routeTargets({ members, chiefBotId, currentBotId, mentions: mentioned })
+        : members.filter((member) => member.id === owner).map((member) => member.id);
+    if (targets.length === 0) break;
+    const reason = solo
+      ? "solo"
+      : mentioned.length > 0 || owner !== undefined
+        ? "mentioned"
+        : chiefBotId !== null
+          ? "chief"
+          : currentBotId !== null
+            ? "current"
+            : "everyone";
+    const started = await deps.groupTurns.start({
+      groupId,
+      ownerId,
+      epoch,
+      members,
+      speakers: targets.map((botId) => ({ botId, trigger, reason })),
+      send: (speaker, includeRecent) => {
+        const computer = placed;
+        placed = null;
+        return sendSpeaker(deps, ownerId, groupId, speaker, includeRecent, options, computer);
+      },
+    });
+    if (started === "gone") return noTarget(false);
+    if (started !== "nobody") return { kind: "sent" };
+  }
+  return noTarget(true);
 }
 
 type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
@@ -174,7 +199,6 @@ async function sendSpeaker(
   deps: DispatchDeps,
   ownerId: UserId,
   groupId: GroupId,
-  members: readonly GroupBot[],
   speaker: Speaker,
   includeRecent: boolean,
   options: DispatchOptions,
@@ -191,6 +215,8 @@ async function sendSpeaker(
     return { kind: "stopped" };
   }
 
+  // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
+  const members = await listGroupBots(deps.db, groupId);
   const context = await contextFor(deps.db, ownerId, groupId, speaker, includeRecent, members);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
@@ -216,9 +242,9 @@ async function sendSpeaker(
     triggerMessageId: speaker.trigger.id,
     routineRunId: options.routineRunId,
   });
-  // Bot 在派活途中被删了，只跳过它。不留 system：
-  // 单聊群已随 Bot 级联删掉，写不进去；多 Bot 群里页面已收到 bot_deleted。
-  if (runId === null) return { kind: "skipped" };
+  // Bot 在派活途中被删了，只跳过它，不留 system，多 Bot 群里页面已收到 bot_deleted。
+  // 单聊群已随 Bot 级联删掉，连「没人接」都写不进去，把「群没了」和「跳过」分开报给回合和调用方。
+  if (runId === null) return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
   await recordContext(deps.db, runId, {
     unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
     settled: context.filter((line) => line.settled).map((line) => line.messageId),

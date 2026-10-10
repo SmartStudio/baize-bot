@@ -48,6 +48,12 @@ export async function setChiefBotId(db: Db | Tx, groupId: GroupId, targetBotId: 
   return changed !== undefined;
 }
 
+/** 群这一行还在不在。单聊随 Bot 级联删掉，成员全没的多 Bot 群这行还在，两者对外都不可见，能不能往里写消息却不一样。 */
+export async function groupExists(db: Db, groupId: GroupId): Promise<boolean> {
+  const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  return row !== undefined;
+}
+
 /** 单聊群里的那个 Bot；多 Bot 群是 null。群是不是单聊只看这一列，不看此刻剩几个成员。 */
 export async function findSoloBotId(db: Db, groupId: GroupId): Promise<BotId | null> {
   const [row] = await db.select({ soloBotId: groups.soloBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
@@ -63,26 +69,29 @@ export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | nul
 export async function createGroup(db: Db, ownerId: UserId, input: CreateGroupInput): Promise<CreateGroupResult> {
   if (new Set(input.botIds).size !== input.botIds.length) return { kind: "duplicate_bot" };
 
-  // 别人的 Bot 和不存在的 Bot 在这里是同一种结果，路由层因此都回 404，不泄露有没有这个 Bot。
-  const owned = await db
-    .select({ id: bots.id })
-    .from(bots)
-    .where(and(eq(bots.ownerId, ownerId), inArray(bots.id, [...input.botIds])));
-  if (owned.length !== input.botIds.length) return { kind: "unknown_bot" };
-
-  return db.transaction(async (tx) => ({
-    kind: "ok" as const,
-    ...(await openGroup(tx, ownerId, {
-      id: GroupId.parse(newId()),
-      title: input.title,
-      botIds: input.botIds,
-      summary: input.summary ?? "",
-      dueAt: input.dueAt ?? null,
-      chiefBotId: null,
-      cadence: "",
-      checklist: [],
-    })),
-  }));
+  return db.transaction(async (tx): Promise<CreateGroupResult> => {
+    // 别人的 Bot 和不存在的 Bot 在这里是同一种结果，路由层因此都回 404，不泄露有没有这个 Bot。
+    // 查归属在事务里并锁住这几行：同时删其中一位时，删除等建群提交，或者先提交、这里就查不到它，不会插成员时撞外键。
+    const owned = await tx
+      .select({ id: bots.id })
+      .from(bots)
+      .where(and(eq(bots.ownerId, ownerId), inArray(bots.id, [...input.botIds])))
+      .for("key share");
+    if (owned.length !== input.botIds.length) return { kind: "unknown_bot" };
+    return {
+      kind: "ok",
+      ...(await openGroup(tx, ownerId, {
+        id: GroupId.parse(newId()),
+        title: input.title,
+        botIds: input.botIds,
+        summary: input.summary ?? "",
+        dueAt: input.dueAt ?? null,
+        chiefBotId: null,
+        cadence: "",
+        checklist: [],
+      })),
+    };
+  });
 }
 
 export type OpenGroupSpec = {

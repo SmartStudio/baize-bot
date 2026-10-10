@@ -481,6 +481,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
     for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
+    await deps.groupTurns.botDeleted(c.get("user").id, botId.data);
     return c.body(null, 204);
   });
 

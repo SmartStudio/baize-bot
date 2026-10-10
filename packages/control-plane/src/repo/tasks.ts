@@ -89,12 +89,15 @@ export async function findTaskByGroup(db: Db, groupId: string): Promise<TopicTas
  * 用户 @ 谁谁就成为当前经手：上一位的 handled 记录补上 to，新一位追加一条。
  * 已经是当前经手时什么都不做，重复 @ 同一个人不会在经手记录里堆重复的行。
  * handled 是读出来改完写回去，所以整段在事务里按行锁串行：不加锁的话两条并发消息会互相覆盖掉一条经手记录。
+ * 新经手先拿 Bot 行的 key share 锁，再锁任务卡，和删 Bot「先删 Bot 行、再级联置空经手」同序。
+ * 它已经被删就不换，原样返回任务卡；锁住了，删除等这里提交后再把经手置空。
  */
 export async function setCurrentBot(db: Db | Tx, groupId: string, botId: BotId, at: Date): Promise<TopicTask | null> {
   return db.transaction(async (tx) => {
+    const [alive] = await tx.select({ id: bots.id }).from(bots).where(eq(bots.id, botId)).for("key share");
     const [row] = await tx.select().from(tasks).where(eq(tasks.groupId, groupId)).limit(1).for("update");
     if (row === undefined) return null;
-    if (row.currentBotId === botId) return taskOut(tx, row);
+    if (alive === undefined || row.currentBotId === botId) return taskOut(tx, row);
 
     const stamp = at.toISOString();
     const handled = [...row.handled];
