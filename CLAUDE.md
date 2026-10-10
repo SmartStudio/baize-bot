@@ -81,7 +81,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - 例行任务就是归属人在单 Bot 群里发了一条消息，运行器和电脑代理不认识它。调度游标用 `UPDATE ... WHERE lastFiredAt = 旧值` 抢，停机不补跑。
 - 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
 - Pi 的四个落盘点（authPath、modelsStorePath、两个 agentDir、sessionDir）都在 `bot-runner/src/bot-session.ts` 钉到 `<dataDir>/<botId>/` 下，`~/.pi` 不能出现任何新文件，`bot-runner/test/runner.test.ts` 最后一条用例钉着这件事。
-- Pi 没有 pause。暂停实现成先把挂起的审批打成拒绝再 `abort()`，期间的 prompt 进内存队列。
+- Pi 没有 pause。暂停状态住在控制面的 `bots.run_state`，运行器收到 `pause` 只立起这个 Bot 的暂停闸门，在 prompt 入场和每次 `tool_call` 前等它，不 `abort()`。正在跑的工具和模型请求不截断，挂起的审批不失效，期间的新 prompt 留在原来的串行队列里，`resume` 只放开闸门、不重发。
 
 ### 文档在哪
 

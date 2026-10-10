@@ -15,7 +15,7 @@ Web 前端不在这份 compose 里，控制面也不托管静态文件。上线�
 
 ## 要准备的东西
 
-**域名和 TLS。** 给控制面一个域名，比如 `baize.example.com`。TLS 在反向代理上终结（Caddy、nginx 都行），反向代理转到本机的 `CONTROL_PLANE_PORT`（默认 3201）。`/api/ws` 和 `/agent` 是 WebSocket，反向代理要放行 Upgrade。上了 HTTPS 以后把 `COOKIE_SECURE=1` 打开。
+**域名和 TLS。** 给控制面一个域名，比如 `baize.example.com`。TLS 在反向代理上终结（Caddy、nginx 都行），反向代理转到本机的 `CONTROL_PLANE_PORT`（默认 3201）。compose 只把这个端口绑在 `127.0.0.1` 上，反向代理要和 compose 在同一台机器。`/api/ws` 和 `/agent` 是 WebSocket，反向代理要放行 Upgrade。上了 HTTPS 以后把 `COOKIE_SECURE=1` 打开。
 
 **上游 key。** `UPSTREAM_BASE_URL` 是 OpenAI 兼容的上游地址，`UPSTREAM_API_KEY` 是它的 key，必须是 ASCII，否则每次上游请求都是 502。`GATEWAY_MODELS` 写 `plan=<模型>,fast=<模型>`。
 
@@ -52,6 +52,9 @@ GITHUB_APP_CLIENT_SECRET=...
 X_CLIENT_ID=...
 # 公共客户端留空
 X_CLIENT_SECRET=
+# 每百万 token 的价，不填用量金额恒为 0
+PRICE_INPUT_PER_M=0
+PRICE_OUTPUT_PER_M=0
 POSTGRES_PASSWORD=...
 COOKIE_SECURE=1
 CONTROL_PLANE_PORT=3201
@@ -103,11 +106,13 @@ docker compose logs remote-computer | tail
 - `seccomp=./seccomp-bwrap.json`。它等于 docker 默认 profile 再加一条规则，放行 `clone`、`unshare`、`mount`、`umount2`、`pivot_root`、`setns`。bubblewrap 建 user、mount、net 命名空间要这几个，Chromium 自带的沙箱也要。默认 profile 下 bubblewrap 报「No permissions to create new namespace」，Chromium 报「No usable sandbox」。
 - `apparmor=unconfined`。在带 AppArmor 的主机上，docker 的默认 profile `docker-default` 禁止容器里的 mount，bubblewrap 要在新命名空间里 mount。这一条是按 profile 内容推断的，本机 OrbStack 没有 AppArmor，没有实测。
 
-Ubuntu 23.10 以后的内核默认开着 `kernel.apparmor_restrict_unprivileged_userns=1`，它在宿主机层面限制非特权 user namespace，容器的 `apparmor=unconfined` 管不到它。部署前在服务器上跑一遍：
+Ubuntu 23.10 以后的内核默认开着 `kernel.apparmor_restrict_unprivileged_userns=1`，它在宿主机层面限制非特权 user namespace，容器的 `apparmor=unconfined` 管不到它。部署前在服务器上跑一遍，参数和运行器启动时的探测（`packages/bot-runner/src/sandbox.ts` 的 `detectSandbox`）一字不差：
 
 ```
-docker compose exec remote-computer bwrap --ro-bind / / --dev /dev --unshare-net --unshare-pid /bin/true && echo 能用
+docker compose exec remote-computer bwrap --ro-bind / / --unshare-net --unshare-pid true && echo 能用
 ```
+
+探测不通时运行器不会起不来，而是退成没有沙箱、每条 bash 都问，日志里留一行「bubblewrap 起不来」。
 
 不通的话，要么在宿主机上把那个 sysctl 设成 0，要么给 bwrap 单独配一份宿主机的 AppArmor profile。这件事只在 OrbStack（没有 AppArmor）上验过，没在 Ubuntu 服务器上验过。
 

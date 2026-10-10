@@ -27,9 +27,10 @@ EXPOSE 3001
 CMD ["node", "--import", "tsx", "src/main.ts"]
 
 # 远程电脑：看护进程是主进程，Xvfb 给助理 Chrome 一块没人看的屏幕，bubblewrap 留给运行器的 bash 沙箱。
+# git、python3 给 Bot 的 bash 用，运行器的命令分类认这两个命令（bot-runner/src/gate.ts）。
 FROM node:22-bookworm-slim AS remote-computer
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends chromium xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk \
+  && apt-get install -y --no-install-recommends chromium xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk git python3 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 COPY deploy/remote/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh

@@ -58,8 +58,17 @@ services:
       GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
       X_CLIENT_ID: ${X_CLIENT_ID:-}
       X_CLIENT_SECRET: ${X_CLIENT_SECRET:-}
+      # 每百万输入、输出 token 的价，折算 run 的花费。不设就是 0，用量金额恒为 0。
+      PRICE_INPUT_PER_M: ${PRICE_INPUT_PER_M:-0}
+      PRICE_OUTPUT_PER_M: ${PRICE_OUTPUT_PER_M:-0}
+      # 平台接口和授权页的根地址，默认官方地址，只在验证时指到假平台。
+      GITHUB_API_BASE_URL: ${GITHUB_API_BASE_URL:-https://api.github.com}
+      X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
+      GITHUB_OAUTH_BASE_URL: ${GITHUB_OAUTH_BASE_URL:-https://github.com}
+      X_OAUTH_BASE_URL: ${X_OAUTH_BASE_URL:-https://x.com}
+    # 只绑本机回环，对外由宿主机上的反向代理终结 TLS 再转进来。docker 发布到 0.0.0.0 的端口会绕过 ufw。
     ports:
-      - "${CONTROL_PLANE_PORT:-3201}:3001"
+      - "127.0.0.1:${CONTROL_PLANE_PORT:-3201}:3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

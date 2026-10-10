@@ -95,7 +95,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的两件工具、`src/team.ts` 的 `propose_team` 和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `src/index.ts:600-630` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 偏好和品牌手册
 
@@ -151,6 +151,29 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 ## 指标上报
 
 `src/metric.ts` 的 `report_metric` 只挂在多 Bot 群的会话里，单聊没有这个工具。参数是 `value` 和 `label`，当前 run 的 runId、botId、groupId 随 `metric_report` 一起上行；label 去首尾空白，空白或超过 40 字时报中文错误，不发上行。只能走浏览器的平台读到真实数值后用它上报，不能编读数。`renderTaskCard` 与 `read_task` 共用目标与进度文本：有目标时写目标值、期限、当前值、还差多少和本周变化；没有样本写「还没有数据」，达标写「已达成」，没有目标不增加这两行。
+
+只给多 Bot 群，是因为单聊没有任务卡，报了也没有地方落。会话按群建，群的出身不变，所以建会话时一次定下，单聊会话的工具名单里压根没有它（`src/metric.ts:10-21`）。控制面那一半在 `packages/control-plane/src/agent/events/metric-report.ts`，校验 run 归属后落一条样本并推任务卡更新，run 收尾之后才到的报文作废。`test/runner.test.ts` 的「运行器的指标上报」一组只钉运行器这一半，控制面那一半由 `packages/control-plane/test/metric-poller.test.ts` 钉。
+
+## 临时帮手
+
+`src/helper.ts` 的 `call_helper` 只挂给主助理（`src/index.ts:616-623`）。主助理遇到一件读类的小活，拉一个帮手干完就散：不建 Bot 行，不进团队页，不留记忆。参数 `kind` 是 `researcher`（资料员）或 `translator`（翻译），`task` 写清要它干什么、交回什么。帮手看不到群里的对话，要用的上下文都得写进 `task`，工具说明里写明了这一点（第 69-73 行）。
+
+一次调用起一个 `createEphemeralSession`（`src/bot-session.ts:317-339`）。会话只在内存里（`SessionManager.inMemory`），不落 JSONL，不加载 skill，不带偏好和品牌手册，用完 `dispose`。`agentDir` 仍钉在主助理自己的目录下，`auth.json` 和 `models-store.json` 不回落到 `~/.pi`。`test/runner.test.ts` 的「call_helper 结束后 dataDir 下没有新会话文件」钉着它。
+
+帮手只能读（`src/helper.ts:91-102`）。Pi 内置工具只开 `read`，扩展工具只从主助理手上挑 `account_read` 和浏览器的 `browser_open`、`browser_snapshot`。截图对资料员没用，点和填会替用户留下动作，所以都不给。它的工具调用照样过主助理的闸门：`gate` 是主助理那份，`activeRun` 也是主助理这次 run，所以只读例行里拉的帮手同样受例行边界管（第 83-90 行）。两处改动：
+
+- 帮手的工具调用 id 是它自己的模型起的，会和主助理的撞。审批按 callId 认，所以挂到 `<call_helper 的 id>/<帮手的 id>` 下面。
+- 被拦的记号只给主会话的工具行定终态用，帮手的过程不进群，`block` 不记。
+
+`test/runner.test.ts` 的「帮手调 write 被闸门拒绝」钉着这一层。
+
+帮手的最后一段话就是这次的工具结果，前面加一句「资料员交回来的：」（第 117-118 行）。模型上游出错时抛中文错误，Pi 做成 `isError` 工具结果。主助理被中止时 `signal` 的 abort 连着帮手会话的 `abort()`，帮手跟着停（第 103-112 行），`test/runner.test.ts` 的「主助理 abort 时帮手会话一起停」钉着它。网关和工具都按调用时读（第 51-60 行），主助理换了 key，下一次拉的帮手跟着用新的。
+
+## 周复盘工具
+
+`src/review.ts` 的 `submit_review` 只挂给主助理，而且只在项目群的会话里（第 24 行），单聊没有项目页。参数只有 `body`，是复盘全文；长度交给 `AgentToControl` 校验，空白直接报中文错误。通过后发 `review_submit`，带当前 run 的 runId、botId、groupId（第 36-55 行）。
+
+群的出身随会话定，是不是例行却是按次的：同一个项目群的会话里既有例行也有当面聊天。所以 `prepareLoadout` 每次请求前按这次 run 收放声明，不是例行派的 run 里模型看不到这个工具（第 34-35 行），不会把一句闲聊交成本周复盘、顶掉周五那份。执行时再查一次，`routine` 为 null 就报错。控制面那边同样只收例行派的 run（见控制面 README「周复盘」）。`test/runner.test.ts` 的「运行器的周复盘」一组钉着这两点。
 
 ## 工具连接
 

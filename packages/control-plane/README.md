@@ -183,6 +183,37 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 已知缺口二：卡落下之后候选全被删。确认回 409「卡上第 N 位已经不在了」，`defer` 照常 200，首页的过滤只看目标群还有没有成员，这张卡留在待办里清不掉。`test/team-offer.test.ts` 的「落下后候选没了」用例钉的是这个现状，改了它就要改 `repo/today.ts` 的过滤。
 
+### 目标与手动记数
+
+任务卡上的目标是三列 `goal_target`、`goal_unit`、`goal_due_at`，契约是 `ProjectGoal`（`shared/src/domain.ts:146-187`）：目标数是正整数，上限 2147483647；单位 1 到 8 个字；期限可空。PATCH 任务卡给 `goal` 就三列整体替换，给 `null` 三列一起清空（`repo/tasks.ts:69-74`），不单改一列。没有单位的数、没有数的期限在卡上都读不懂。方案卡也一样，`goalTarget` 和 `goalUnit` 两个都给了才写进任务卡（`repo/projects.ts:194-199`），只给一个就当没有目标（`test/goals.test.ts:164`）。
+
+当前值不住在任务卡行上，住在 `metric_samples`，每记一次插一行。任务卡出边界前都过 `withMetric`（`repo/metrics.ts:66-70`），从样本算出 `current`、`weekDelta`、`sampledAt`；不过这一道，推出去的 `task_updated` 会把 Web 上的当前值冲成 null。存样本而不是覆盖一个数，是因为本周变化要拿得到周一之前的值。规则写在 `metricsOf`（第 21-64 行）：
+
+- 本周从上海时区周一 00:00 起。
+- 当前值减周一之前的最后一个样本。
+- 周一之前一个样本都没有，就减本周第一个。
+- 最新样本本身在周一之前，本周就是没动，记 0。
+
+三个样本必须出自同一条语句，`metricsOf` 用三个 CTE 一次取齐（第 31-51 行）。分开查各拿各的快照，夹在中间的写入能拼出一个从没存在过的变化，`test/goals.test.ts:329` 的「读指标读到一半有人记数」钉着这一点。先后一律按 `sampled_at` 再按 id。
+
+手动记数是 `POST /api/projects/:groupId/metric`（`http/routes/goals.ts:16-29`），样本的 source 记 `manual`。`recordSample`（`repo/metrics.ts:72-100`）用一句 `INSERT ... SELECT` 同时判定和插入，只认本人的、还有成员的多 Bot 群，插不进就回 404，不先查后写。采样时间取库里的 `clock_timestamp()`，微秒精度，同一毫秒里先后两次记数也分得出先后（`test/goals.test.ts:309`）。记成了推一条带新指标的 `task_updated`。
+
+任务卡上还有一列可空的 `metric_source`，契约 `MetricSource`（`shared/src/domain.ts:155-165`）是 `kind` 区分的两种：`github_stars` 带账号和仓库，`reported` 带平台和名字。PATCH 能改它（`repo/tasks.ts:75`）。`metrics/poller.ts` 的 `MetricPoller` 每 10 分钟扫一遍 `github_stars` 来源的项目，按 UTC 对齐的六小时一格，库里这一格没有样本才去 GitHub 读星数，重启不会重取。同一群同一来源在一格里只落一条，`repo/metrics.ts` 的 `recordPolledSample` 先拿事务级 advisory 锁再做 NOT EXISTS 写入。运行器上报的 `metric_report` 进 `agent/events/metric-report.ts`，校验群和 run 的归属之后在 `whileRunOpen` 里落一条 `reported` 样本，run 收尾之后才到的报文作废，落了就推 `task_updated`。
+
+首页 `GET /api/today` 的 running 项里 `goal` 和 `metric` 一律是 null（`repo/today.ts:225-226`），目标和进度只出现在任务卡、群列表和项目页上。
+
+### 周复盘
+
+开项目时建的「周五复盘」例行叫主助理写完调 `submit_review` 交上去（`repo/projects.ts:38-45`）。上行 `review_submit` 要过三道（`agent/events/review-submit.ts:17-41`），任一不成立整条丢掉，记一行日志：
+
+- 群是本人的、不是单聊。单聊没有项目页。
+- run 是这台电脑上这个 Bot 在这个群里的活（`runBelongsTo`）。
+- run 是例行派的（`routineRunOfRun`）。用户当面叫它复盘那次是聊天，交上去会顶掉周五那份。
+
+一周只留一份。`project_reviews` 有唯一索引 `(group_id, week_start)`（`db/schema.ts:258-270`），`saveReview`（`repo/project-page.ts:37-60`）用 upsert，冲突时只在旧的 `created_at` 早于这次 `receivedAt` 时覆盖。周界和先后都按 `receivedAt` 算，它是 hub 收到这一帧的时刻（`agent/hub.ts:159`），等链、等锁都不改它。不按写库先后，是因为两台电脑的链并行，先收到的那份可能被锁拖到后面才写，按写库先后它会顶掉后收到的新稿。同理，周日深夜收到、拖到周一才写库的复盘仍算上一周。`test/review.test.ts` 的「先收到但被拖住的旧稿不会顶掉后收到的新稿」和两条「周日深夜收到……仍算上一周」钉着这三种交错。
+
+复盘在项目页的 `achievements` 里是一条 `kind: "review"` 的成果，标题「<weekStart> 那周的复盘」（`repo/project-page.ts:222-229`）。
+
 ## 审批
 
 群消息是事实来源，审批是唯一一件「群消息本身说不全」的事：那张卡的正文只有一个 approvalId，批没批写在 approvals 行上。所以结论只随 `approval_updated` 推，重推那条 message 一个字都不会变。
@@ -333,6 +364,12 @@ pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 
 例行任务属于一个 Bot。**一次运行就是归属人在群里发了一条消息**，`groupId` 为空时是这个 Bot 的单 Bot 群，不为空时是那个群（建项目时的两条例行发进项目群）：先落一条 system「例行任务「X」自动运行」，再落一条正文是 `instruction` 的 user 消息，然后走和手打消息同一个 `dispatchUserMessage`，派到哪台电脑也是同一条规则（见「派到哪台电脑」），本机合盖、远程在线时例行照常在远程跑。运行器和电脑代理因此不认识例行任务，没有新报文。派给谁不走路由表：`runRoutine` 带上例行的 `botId`，只派这一个 Bot，`reason` 记 `mentioned`，不改当前经手。按路由表走的话，项目群里换了首席，主助理的「周一 09:00 排本周计划」会派给新首席，那位手上没有项目清单，例行页面上却仍挂在主助理名下；首席卸任时没首席也没经手，就成了全员各排一份计划；队员自己在项目群里建的例行也会被首席截走。例行属于哪个 Bot 就由哪个 Bot 做，换首席不改例行，也不把例行改挂到新首席名下。到点触发、`POST /api/hooks/:token`、`POST /api/routines/:id/run` 三个入口走的都是 `routines/run.ts` 的 `runRoutine`。
 
 `POST /api/bots/:id/routines` 带的 `groupId` 照存进 `routines.group_id`。群按归属人查，别人的群和不存在一样回 404；Bot 不在那个群里回 400。`GET /api/routines` 是这个用户全部 Bot 的例行，每条就是 `Routine`（带 `botId`、`groupId` 和最近 20 条运行记录），按建的先后排。
+
+### 主助理在单聊里提议例行
+
+上行 `routine_offer` 只认主助理在它自己单聊里发的（`agent/events/routine-offer.ts:15-52`）。群号不用报文自报的，直接取 `findAssistant` 查到的那个单聊（第 22-25 行）。主助理单聊里只有主助理的 run，run 对得上这个群就说明是主助理在单聊里发的，再信报文里的群号只多一个能伪造的口子。接着校验 cron 写法（`isValidCron`，第 29 行）、执行者是这个人的 Bot（第 30 行）、给了 `projectGroupId` 时那个群也是他的（第 31-32 行）。任一不成立整条丢掉，记一行日志。全部通过才在 `whileRunOpen` 里落一张 `status: "offered"`、`routineId: null` 的卡（第 35-50 行），不建例行。卡本身就是确认，和方案卡、建队卡同一套做法。
+
+执行者在不在目标群里，落卡时不查，留到点加上那一刻查（`repo/routine-offers.ts` 的 `executorPlacement`，第 99-125 行）。卡落下到点加上之间，群成员和执行者都会变，落卡时查过的结论到点加上时已经不算数。点加上时执行者已删回 404，不在目标群里回 400（`http/routes/routine-offers.ts:27-28`）。点不要只用同一个带 `status = 'offered'` 的条件 UPDATE 改卡（`repo/routine-offers.ts:53-56`），不拿锁，也不建任何东西。`test/routine-offer.test.ts` 的「确认卡没点加上时不建例行」「不是主助理发的例行卡整条丢掉，冒充主助理的、主助理在项目群里发的也丢掉」「执行者不在目标项目群里回 400」钉着这几条。
 
 ### 确认卡点加上：锁序
 
@@ -516,6 +553,20 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 为什么令牌不出控制面。电脑上跑的是 Bot 写的命令，Bot 的上下文又会进模型。令牌一旦下发，就等于交给了模型和电脑上任何能读文件的进程，撤销只能去平台后台点。留在控制面，电脑只拿得到一把网关 key，它只能以这个用户的名义读、不能写，写一律走草稿和审批；要收回，删账号或换网关 key 就行。刷新也只有一处在做，锁行才管得住。
 
+## 偏好
+
+偏好属于一个 Bot，`bot_preferences` 一行一条，只有 Bot 自己在单聊里能记。上行 `preference_add` 要求群是本人的、恰好是这个 Bot 的单聊、run 是它在这里的活，任一不成立整条丢掉（`agent/events/preference-add.ts:11-29`）。项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好，`test/preferences.test.ts` 的「项目群里的 preference_add 静默丢弃」钉着它。写在 `whileRunOpen` 里（第 31 行），和别的 run 名下的写一样，run 收尾后晚到的帧不落。来源消息 id 是电脑报上来的，外键只保证它存在，不在这个群里就记成 null（`repo/preferences.ts:57-79`）。
+
+私人标记 `private` 只管分享时默认不勾（`shared/src/domain.ts:696`）。控制面只存它、切它，`config` 照样下发私人的偏好，Bot 写作时照样要套用（`repo/preferences.ts:35-47`）。`config.preferences` 是这个用户全部 Bot 的偏好，数组恒带，运行器靠整份对账，理由和 `config.skills` 一样，省掉就分不清「没有」和「没说」（`agent/hub.ts:519`）。
+
+用户在 Bot 页能切私人（`PATCH /api/preferences/:id`）和删（`DELETE`），两条都按归属人过滤，别人的回 404（`repo/preferences.ts:81-102`）。三处写的推送顺序（`http/routes/preferences.ts:35-58`）：
+
+- 切私人写库一返回就推 `preference_updated`，再 `sendConfig`。`sendConfig` 读库可能拖到别的请求删掉这条之后，那时再推更新会把已删的偏好推回页面。`test/preferences.test.ts` 的「切私人的 config 还没读回来时偏好被删，推送顺序仍是先更新后删除」钉着它。
+- 删除先 `sendConfig`，再推 `preference_deleted`。
+- 上行记下的偏好先推 `preference_updated`，再 `sendConfig`（`agent/events/preference-add.ts:41-42`）。
+
+`GET /api/bots/:id/profile` 回 Bot 页头部的三个数：偏好数、skill 数、在几个项目里（`repo/bots.ts:320-337`）。项目只数多 Bot 群，单聊不算。三个数各查各的，不 join 在一起相乘。
+
 ## 品牌手册
 
 一个用户一本，`brand_books` 一行。PUT 整本替换，带 `version` 表示「我基于哪一版改的」：库里已经不是这一版就回 409，什么都不写、不推、不建授权，草稿批准随时会往手册里追加改动，拿旧版整本覆盖会把它冲掉。`version` 上限 2147483646，写入时存的是加一后的值，列是 PostgreSQL integer，越界在请求边界回 400。
@@ -526,13 +577,27 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 推送不按版本排队：两次写各自提交后各推一条 `brand_updated`，晚提交的可能先到。页面按 `version` 只收比手上新的那本，控制面不按 owner 串行广播。运行器那边靠 config 的代际，不受影响。
 
+## 数据导出与删号
+
+`GET /api/export` 回一个 JSON 附件，文件名 `baize-export-YYYY-MM-DD.json`（`http/routes/privacy.ts:19-25`）。内容是账号、设置、品牌手册、每个 Bot 连同它的 skill 和偏好（私人的也在）、例行、项目任务卡、草稿，`format` 为 1（`repo/export.ts:36-46`）。每一段都按白名单从领域对象拼，工具连接、平台账号、电脑三类带凭据的对象整段不进（第 32-35 行）。不按表整行导出，是为了让以后往领域对象里加字段的人不会顺手把凭据带进来。webhook 的 token 本身就是触发凭据，导出只留 `{ kind: "webhook" }`（第 27-29、48-49 行）。`test/privacy.test.ts` 的「导出里有偏好和品牌手册，grep 不到 token 和 authorization」钉着它。各段查询并行跑，不在一个事务里（第 52-61 行），导出不保证是同一时刻的快照。
+
+`DELETE /api/me` 要请求体里的邮箱等于当前账号，不对回 400（`http/routes/privacy.ts:27-31`）。删完关掉这个人连着的电脑代理（`disconnectOwner`）、删 cookie、回 204（第 32-36 行）。`deleteAccount`（`repo/export.ts:80-107`）的锁序：
+
+1. 账号排他 advisory 锁（`lockOwner`）。
+2. 按 Bot id 升序对每个 Bot 调 `lockRunsOfBot`。
+3. 这些 Bot 交出和接手的交接卡 `FOR UPDATE`。
+4. 删本人的 runs。runs 对用户的外键是置空，账要跟人一起走。
+5. 删 users，其余的表级联。
+
+为什么账号锁在最前、多把 Bot 锁按 id 升序拿，以及删号和建 Bot、建群、开项目、建 run 的各种交错，见「run 收尾」一节删账号那一段。
+
 ## 用量、今天与通知
 
 `GET /api/usage` 按用户返回本周合计、每个现存 Bot 的花费与 run 数（零花费也有一行），以及不限本周的最近 20 次 run。周起点是 Asia/Shanghai 的周一 00:00，响应里的 `weekStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-09-21 00:00 对应 `2026-09-20T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
 
 `GET /api/today` 只聚合当前用户的数据。计划只看 pending 和 approved 两种，稿子只看这些计划的稿子，加上不属于计划的 pending、approved 稿子，退回的计划和它的历史稿子不出现。`pending` 超过 50 条时保留最新 50 条，仍按到达时间正序排（先放着的建队卡在截好之后整组挪到末尾），待批计划里的稿子只嵌在计划项里；`done` 按时间倒序保留最新 20 条；`running` 每个群至多一行，取该群 `decidedAt` 最新的一份 approved 计划，这份计划的稿子全部发布（published 等于 planned）就不出行，没有计划的群这一期不出行，按批准时间倒序保留最新 20 条；`next` 按排期正序保留最近 20 条。`pending` 里的账号行（`kind: "account"`，带整个 `Account`）有两种：`login='expired'` 的账号恒出一行，`since` 是 `login_changed_at`，也就是什么时候过期的；`login='none'` 的浏览器登录类占位（`BrowserPlatform`，现在只有小红书）只在被当前 pending 稿子（不属于计划的，或挂在 approved 计划下的）或 pending 计划里的 pending 稿子引用时出一行，一个号只出一行，`since` 是引用它的待办里最早那件的 `since`：占位可能几天前就建了，要登录是从有稿子等着它那一刻开始的。GitHub、X 的 `none` 不出行，它们走授权页，不在电脑上登录。账号行和同一刻的待办并列时排在前面。这样待办数恒等于 `pending` 的条数：Web 首页的登录卡只替换这一行、挪到第一张要用它的稿子前面，服务端没列的号不凭空放卡；菜单栏不放卡，照原样列这一行，`none` 写「还没登录」，`expired` 写「登录过期」。`assistantGroupId` 是主助理的单聊群，只有 P1-13 之前注册、之后还没登录过的老用户才是 `null`。`assistantLatest` 是这个单聊里按 `seq` 最新的一条正文非空的 Bot 消息，正文按 UTF-16 码元截到 200、不劈开 emoji，加上它的 `createdAt`；用户的话、别的群的话都不算，没有主助理或它一句没说过时是 `null`。
 
-`GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 只读本人的 `publications`，按发布时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条，`weekChecked` 是任务卡清单里本周勾上、现在还勾着的项数；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数。整页在一个 `REPEATABLE READ` 只读事务里查，起点、轮数和回应出自同一个快照：分开查的话，查完起点才落库的下一句不算起点，却会被当成回应带出来；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
+`GET /api/projects/:groupId` 是项目页，同一套查询只看这一个群：群必须是本人的多 Bot 群，别人的群、单 Bot 群、不存在的群一律 404。`pending` 只有这个群的审批、计划和稿子，不带账号过期卡；`achievements` 读本人的 `publications` 和这个群的周复盘（见「周复盘」），合起来按时间倒序最新 20 条，小红书读不到笔记 id 时的管理页链接照样给，历史消息里长得像发布成功的话不算；`weekPublished` 是本周（周一 00:00，Asia/Shanghai）这个群发了几条，`weekChecked` 是任务卡清单里本周勾上、现在还勾着的项数；一句话连同它之后、下一句之前群里的其他消息算一轮，`latestTurn` 直接从 `messages` 取最近一轮，起点是按 `(createdAt, seq)` 最晚的那句用户消息，回应不含 cost、最多给最近 50 条，不受群历史分页窗口的限制，用户一句没说过时是 null，`olderTurns` 是更早的轮数。整页在一个 `REPEATABLE READ` 只读事务里查，起点、轮数和回应出自同一个快照：分开查的话，查完起点才落库的下一句不算起点，却会被当成回应带出来；`working` 是这个群还没结束的 run，标题规则和用量页一致；`plan` 是这个群最近批准的一份计划和它的稿子，`next` 是这个群最近一件排了时间的事，`routines` 是这个群的例行任务。
 
 系统通知在这几种时候产生：
 
