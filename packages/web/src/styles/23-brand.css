@@ -1,0 +1,72 @@
+/* ---------- 品牌手册 ---------- */
+
+.brand-hint-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.brand-edits {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.brand-edits-h {
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.brand-edit-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.brand-edit {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-md);
+  background: var(--bg-inset);
+}
+
+.brand-edit-pair {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  font: var(--type-caption);
+}
+
+.brand-edit-pair del,
+.brand-edit-pair ins {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.brand-edit-pair del {
+  color: var(--fg-4);
+}
+
+.brand-edit-pair ins {
+  color: var(--fg-1);
+  text-decoration: none;
+}
+
+.brand-edit > small {
+  color: var(--fg-4);
+  font: var(--type-caption);
+  white-space: nowrap;
+}

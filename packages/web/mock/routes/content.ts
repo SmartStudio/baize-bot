@@ -9,6 +9,7 @@ import {
 } from "@baize/shared";
 import {
   accounts,
+  brand,
   connectOAuthAccount,
   createAccount,
   decideDraft,
@@ -16,9 +17,14 @@ import {
   setAccountTier,
   settlePlan,
 } from "../state.js";
-import { readBody, send, type Route } from "./http.js";
+import { readBody, send, type Push, type Route } from "./http.js";
 
 const idOf = (match: RegExpExecArray): string => decodeURIComponent(match[1] ?? "");
+
+// 批准可能往品牌手册里追加了改动；版本动了才推，和控制面「同一处改动不重复推」一致。
+const pushBrandIfChanged = (push: Push, before: number | undefined): void => {
+  if (brand.current !== null && brand.current.version !== before) push({ type: "brand_updated", brand: brand.current });
+};
 
 export const contentRoutes: Route = async ({ req, res, path, method, push }) => {
   const draftMatch = /^\/api\/drafts\/([^/]+)$/.exec(path);
@@ -26,10 +32,12 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
     const parsed = DecideDraftRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "结论只能是批准或退回" });
     else {
+      const brandVersion = brand.current?.version;
       const outcome = decideDraft(idOf(draftMatch), parsed.data);
       if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
       else {
         push({ type: "draft_updated", draft: outcome.value });
+        pushBrandIfChanged(push, brandVersion);
         send(res, 200, { draft: outcome.value });
       }
     }
@@ -42,6 +50,7 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
     const parsed = planMatch[2] === "approve" ? ApprovePlanRequest.safeParse(body) : null;
     if (parsed !== null && !parsed.success) send(res, 400, { error: "改动的格式不对" });
     else {
+      const brandVersion = brand.current?.version;
       const outcome = settlePlan(
         idOf(planMatch),
         parsed === null ? { decision: "return" } : { decision: "approve", edits: parsed.data.edits },
@@ -50,6 +59,7 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
       else {
         push({ type: "plan_updated", plan: outcome.value.plan });
         for (const draft of outcome.value.drafts) push({ type: "draft_updated", draft });
+        pushBrandIfChanged(push, brandVersion);
         send(res, 200, parsed === null ? { plan: outcome.value.plan } : outcome.value);
       }
     }

@@ -16,6 +16,7 @@ import {
 } from "@baize/shared";
 import { accounts, at, computerStatus, drafts, loginAttempts, nextSuffix, plans, publications, user } from "./store.js";
 import { publicationOf } from "./today.js";
+import { recordApprovedEdit } from "./brand.js";
 
 type PlanDecision =
   { decision: "approve"; edits: z.infer<typeof ApprovePlanRequest>["edits"] } | { decision: "return" };
@@ -66,6 +67,14 @@ const write = (draft: Draft): Draft => {
   return draft;
 };
 
+// 和控制面一样，批准时记下的那笔改动同时追加进品牌手册的「改过的地方」。
+const approve = (draft: Draft, content: DraftContent | undefined, decidedAt: string): Draft => {
+  const approved = write(approveDraft(draft, content, decidedAt));
+  const edit = approved.edits.length > draft.edits.length ? approved.edits.at(-1) : undefined;
+  if (edit !== undefined) recordApprovedEdit({ draftId: approved.id, ...edit });
+  return approved;
+};
+
 export const decideDraft = (id: string, decision: z.infer<typeof DecideDraftRequest>): Outcome<Draft> => {
   const draft = drafts.get(id);
   if (draft === undefined) return { ok: false, status: 404, error: "没有这条草稿" };
@@ -76,7 +85,7 @@ export const decideDraft = (id: string, decision: z.infer<typeof DecideDraftRequ
   if (decision.content !== undefined && decision.content.kind !== draft.content.kind) {
     return { ok: false, status: 400, error: "不能把帖子改成回复" };
   }
-  return { ok: true, value: write(approveDraft(draft, decision.content, now())) };
+  return { ok: true, value: approve(draft, decision.content, now()) };
 };
 
 export const settlePlan = (id: string, decision: PlanDecision): Outcome<{ plan: ContentPlan; drafts: Draft[] }> => {
@@ -93,7 +102,7 @@ export const settlePlan = (id: string, decision: PlanDecision): Outcome<{ plan: 
     if (draft === undefined || draft.status !== "pending") return [];
     if (decision.decision === "return") return [write(Draft.parse({ ...draft, status: "returned", decidedAt }))];
     const edit = edits.find((item) => item.draftId === draftId);
-    return [write(approveDraft(draft, edit?.content, decidedAt))];
+    return [approve(draft, edit?.content, decidedAt)];
   });
   const next = ContentPlan.parse({
     ...plan,

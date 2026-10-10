@@ -13,6 +13,7 @@ import type {
   DraftStatus,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
+import { BrandBookOpener } from "../BrandBookDialog.js";
 import { PLATFORM, accountText, computerText, draftText, timeText } from "./content.js";
 
 export type ContentActions = {
@@ -23,8 +24,6 @@ export type ContentActions = {
 };
 
 type Deciding = "approve" | "return" | null;
-
-const BRAND_HINT = "改过的地方会记进品牌手册，下次照着写";
 
 const STATUS: Record<DraftStatus, { label: string; tone: string }> = {
   pending: { label: "等你确认", tone: "badge-pending" },
@@ -103,7 +102,7 @@ const DraftBody = ({
     )}
     {onText !== null && text !== draft.content.text ? (
       <p className="brand-hint" data-testid="brand-hint">
-        {BRAND_HINT}
+        改过的地方会记进<BrandBookOpener className="brand-hint-link">品牌手册</BrandBookOpener>，下次照着写
       </p>
     ) : null}
   </>

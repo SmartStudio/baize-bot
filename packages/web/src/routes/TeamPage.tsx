@@ -1,7 +1,8 @@
-import { ArrowRightLeft, Hand, MessageSquare, Plus } from "lucide-react";
+import { ArrowRightLeft, BookOpen, Hand, MessageSquare, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Bot, BotId } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
+import { BrandBookOpener } from "../components/BrandBookDialog.js";
 import { activityOf, previewOf } from "../components/messages/preview.js";
 import type { Conversation } from "../state/app.js";
 import { pathOf } from "./screen.js";
@@ -88,6 +89,10 @@ export const TeamPage = ({ bots, conversations, onCreateBot }: Props) => {
           <h2>团队</h2>
           <p>派活你不用管。点开一个 Bot 就是和它单聊，想让它以后怎么做，说一句就行。</p>
         </div>
+        <BrandBookOpener className="ghost-button" testId="brand-open">
+          <BookOpen size={14} aria-hidden="true" />
+          品牌手册
+        </BrandBookOpener>
         <button type="button" className="ghost-button" data-testid="new-bot" onClick={onCreateBot}>
           <Plus size={14} aria-hidden="true" />新 Bot
         </button>

@@ -54,6 +54,7 @@ import {
 } from "./store.js";
 import { messageFetchFaults } from "./messages.js";
 import { seedPreferences } from "./preferences.js";
+import { resetBrand } from "./brand.js";
 
 type Seed = {
   key: string;
@@ -282,6 +283,7 @@ export const reseed = (): void => {
   groups.clear();
   tasks.clear();
   checkedAt.clear();
+  resetBrand();
   groupIdByBotId.clear();
   messagesByGroupId.clear();
   messageFetchFaults.clear();

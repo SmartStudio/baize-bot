@@ -31,6 +31,8 @@ import {
   type Skill,
   type SkillId,
   type ToolConnectionId,
+  type BrandBook,
+  type UpdateBrandRequest,
   type UpdateRoutineRequest,
   type UpdateSkillRequest,
   type UpdateToolRequest,
@@ -98,6 +100,9 @@ export type AppActions = {
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   loadPreferences: (botId: BotId) => Promise<void>;
   deletePreference: (preference: Preference) => Promise<void>;
+  // 手册回来的都是整本，走同一个 brand_set，切片只收版本更新的那本。读回的那本也交给弹窗当底稿；保存 409 时抛给弹窗。
+  loadBrand: () => Promise<BrandBook | null | undefined>;
+  updateBrand: (body: UpdateBrandRequest) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
   decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
@@ -504,6 +509,14 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         put({ type: "preference_removed", botId: preference.botId, preferenceId: preference.id, seq: nextSeq() });
       }),
+      loadBrand: signedIn(async ({ api, put }) => {
+        const brand = await api.brand();
+        put({ type: "brand_set", brand });
+        return brand;
+      }),
+      updateBrand: signedIn(async ({ api, put }, body: UpdateBrandRequest) =>
+        put({ type: "brand_set", brand: await api.updateBrand(body) }),
+      ),
       // 结论随这条消息的正文走，所以先落那条消息。存下来的那条 skill 是顺带回来的，dismiss 时没有。
       decideSkillOffer: signedIn(
         async ({ api, put }, messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => {
