@@ -1,6 +1,6 @@
 import { expect, test, login, openSettings, openTools, toolCard, fillTool, SHOT } from "./fixtures";
 
-test("设置通用页切到深色，电脑页列出两台在线电脑，html 的 data-theme 变 dark", async ({ page }) => {
+test("设置通用页切到深色，账号与电脑页列出两台在线电脑，html 的 data-theme 变 dark", async ({ page }) => {
   await login(page);
   await expect(page.locator("html")).not.toHaveAttribute("data-theme", "dark");
 
@@ -12,7 +12,7 @@ test("设置通用页切到深色，电脑页列出两台在线电脑，html 的
   await expect(page.getByTestId("dnd-from")).toHaveValue("22:00");
   await page.screenshot({ path: `${SHOT}/07.png` });
 
-  await page.getByTestId("settings-nav-computer").click();
+  await page.getByTestId("settings-nav-accounts").click();
   await expect(page.getByTestId("computer-row")).toHaveCount(2);
   await expect(page.getByTestId("computer-row").nth(0)).toHaveText("本机在线");
   await expect(page.getByTestId("computer-row").nth(1)).toHaveText("远程在线");
@@ -22,15 +22,15 @@ test("设置通用页切到深色，电脑页列出两台在线电脑，html 的
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
 });
 
-test("工具页列出两个预置 MCP 连接和分配摘要", async ({ page }) => {
+test("插件页列出两个预置 MCP 连接和谁在用", async ({ page }) => {
   await login(page);
   await openTools(page);
 
   await expect(page.getByTestId("tool-card")).toHaveCount(2);
   await expect(toolCard(page, "工单系统")).toContainText("tickets.acme.internal · MCP");
-  await expect(toolCard(page, "工单系统").getByTestId("tool-assignment")).toHaveText("小服");
+  await expect(toolCard(page, "工单系统").getByTestId("tool-assignment")).toHaveText("小服 在用");
   await expect(toolCard(page, "邮箱")).toContainText("mail.acme.com · MCP");
-  await expect(toolCard(page, "邮箱").getByTestId("tool-assignment")).toHaveText("全部 4 个 Bot");
+  await expect(toolCard(page, "邮箱").getByTestId("tool-assignment")).toHaveText("全部 4 个 Bot 在用");
   await page.screenshot({ path: `${SHOT}/09a.png` });
 });
 

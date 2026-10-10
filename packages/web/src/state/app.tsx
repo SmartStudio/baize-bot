@@ -64,6 +64,8 @@ export { memberIdsOf } from "./types.js";
 export type { AppState, Conversation, GroupTurn, LoginPhase } from "./types.js";
 import type { LoginPhase } from "./types.js";
 
+export type RemotePairing = { computerId: ComputerId; token: string };
+
 export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
@@ -95,6 +97,10 @@ export type AppActions = {
   loadProject: (groupId: GroupId) => Promise<ProjectResponse | undefined>;
   loadAccounts: () => Promise<void>;
   loadComputers: () => Promise<void>;
+  // token 明文只在这次回包里，交给调用方显示一次，不进 store。登录过期时是 undefined。
+  addRemoteComputer: () => Promise<RemotePairing | undefined>;
+  // 删成了就和登出一样回登录页；邮箱不符等失败照常抛给界面。
+  deleteAccount: (email: string) => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
   // 建这个平台的未登录占位，已经有就回那一行。登录窗口由调用方接着在它上面开。登录过期时是 undefined。
@@ -538,6 +544,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       loadComputers: signedIn(async ({ api, put }) => {
         const seq = nextSeq();
         put({ type: "computers_loaded", computers: (await api.computers()).computers, seq });
+      }),
+      addRemoteComputer: signedIn(async ({ api, put }) => {
+        const pairing = await api.createRemoteComputer();
+        const seq = nextSeq();
+        put({ type: "computers_loaded", computers: (await api.computers()).computers, seq });
+        return pairing;
+      }),
+      deleteAccount: signedIn(async ({ api, put, session }, email: string) => {
+        await api.deleteAccount(email);
+        sessions.end(session.id);
+        put({ type: "anonymous", login: { kind: "idle" } });
       }),
       updateAccountTier: signedIn(async ({ api, put }, accountId: AccountId, tier: AccountTier) => {
         const seq = nextSeq();

@@ -1,5 +1,5 @@
 import { BotId, GroupId, RunId, UsageResponse } from "@baize/shared";
-import { bots, groups } from "./store.js";
+import { bots, groups, settings } from "./store.js";
 
 const MONTHLY_SPEND = [
   { botId: BotId.parse("bot_sales"), amount: 21.4, runs: 9 },
@@ -41,7 +41,7 @@ export const usageOf = (): UsageResponse => {
   return UsageResponse.parse({
     monthStartsAt: monthStart(),
     total: MONTHLY_SPEND.reduce((sum, line) => sum + line.amount, 0),
-    budget: null,
+    budget: settings.current.budget,
     projects: [],
     bots: [...bots.values()]
       .map((bot) => {

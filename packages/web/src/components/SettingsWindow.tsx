@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { AtSign, Cpu, Download, Gauge, KeyRound, Plug, Settings as SettingsIcon, X } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
+import { AtSign, Gauge, Puzzle, Settings as SettingsIcon, Shield, X } from "lucide-react";
 import {
   Settings,
   type Account,
@@ -21,19 +21,16 @@ import {
 import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
 import { AccountsPage } from "./AccountsPage.js";
-import { COMPUTER_STATUS_CLASS, COMPUTER_STATUS_TEXT } from "./messages/content.js";
-import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
+import { PrivacyPage } from "./PrivacyPage.js";
 
-export type PageId = "general" | "computer" | "accounts" | "tools" | "grants" | "usage" | "update";
+export type PageId = "general" | "accounts" | "tools" | "usage" | "privacy";
 
 const PAGES: Record<PageId, { title: string; icon: React.ReactNode }> = {
   general: { title: "通用", icon: <SettingsIcon size={16} aria-hidden="true" /> },
-  computer: { title: "电脑", icon: <Cpu size={16} aria-hidden="true" /> },
-  accounts: { title: "账号", icon: <AtSign size={16} aria-hidden="true" /> },
-  tools: { title: "工具", icon: <Plug size={16} aria-hidden="true" /> },
-  grants: { title: "授权", icon: <KeyRound size={16} aria-hidden="true" /> },
-  usage: { title: "用量与账单", icon: <Gauge size={16} aria-hidden="true" /> },
-  update: { title: "更新", icon: <Download size={16} aria-hidden="true" /> },
+  accounts: { title: "账号与电脑", icon: <AtSign size={16} aria-hidden="true" /> },
+  tools: { title: "插件", icon: <Puzzle size={16} aria-hidden="true" /> },
+  usage: { title: "用量", icon: <Gauge size={16} aria-hidden="true" /> },
+  privacy: { title: "数据与隐私", icon: <Shield size={16} aria-hidden="true" /> },
 };
 
 const PAGE_IDS = Object.keys(PAGES) as PageId[];
@@ -48,7 +45,7 @@ type Props = {
   projectNames: Record<GroupId, string>;
   accounts: Account[];
   computers: Record<string, Computer>;
-  // 首页版本号，重连和审批变化都会让它加一。授权页开着就照它重拉，补上断线期间别处撤掉的和别处新批的授权。
+  // 首页版本号，重连和审批变化都会让它加一。账号与电脑页开着就照它重拉授权，补上断线期间别处撤掉的和别处新批的。
   grantsVersion: number;
   initialPage?: PageId;
   onCreateTool: (draft: CreateToolRequest) => Promise<void>;
@@ -142,156 +139,11 @@ const GeneralPage = ({
   </>
 );
 
-const GrantRow = ({
-  grant,
-  projectName,
-  onRevoke,
-}: {
-  grant: Grant;
-  projectName: string | undefined;
-  onRevoke: (id: GrantId) => Promise<void>;
-}) => {
-  const [revoke, setRevoke] = useState<"idle" | "busy" | "failed">("idle");
-  const run = async () => {
-    setRevoke("busy");
-    try {
-      await onRevoke(grant.id);
-    } catch {
-      setRevoke("failed");
-    }
-  };
-  return (
-    <div className="row-card grant-row" data-testid="grant-row" data-grant-id={grant.id}>
-      <span>
-        <b>{SCOPE_TEXT[grant.scope]}</b>
-        <small>
-          {ACTION_TEXT[grant.action]} · {targetText(grant.target)}
-        </small>
-        {grant.scope === "project" ? <small>项目：{projectName ?? "已删除的对话"}</small> : null}
-        {revoke === "failed" ? (
-          <small className="grant-error" data-testid="grant-revoke-error" role="alert">
-            没撤掉，再试一次
-          </small>
-        ) : null}
-      </span>
-      <button
-        type="button"
-        className="ghost-button"
-        data-testid="grant-revoke"
-        disabled={revoke === "busy"}
-        onClick={() => void run()}
-      >
-        撤销
-      </button>
-    </div>
-  );
-};
-
-const GrantsPage = ({
-  grants,
-  projectNames,
-  loading,
-  error,
-  onRevoke,
-}: {
-  grants: Grant[];
-  projectNames: Record<GroupId, string>;
-  loading: boolean;
-  error: string | null;
-  onRevoke: (id: GrantId) => Promise<void>;
-}) => {
-  if (loading) return <p className="later">正在加载授权…</p>;
-  if (error !== null) {
-    return (
-      <p className="later" data-testid="grants-error" role="alert">
-        授权列表加载失败：{error}
-      </p>
-    );
-  }
-  if (grants.length === 0) {
-    return (
-      <p className="later" data-testid="grants-empty">
-        还没有长期授权
-      </p>
-    );
-  }
-  return (
-    <div className="grants-page" data-testid="grants-page">
-      {grants.map((grant) => (
-        <GrantRow
-          key={grant.id}
-          grant={grant}
-          projectName={grant.scope === "project" ? projectNames[grant.groupId] : undefined}
-          onRevoke={onRevoke}
-        />
-      ))}
-    </div>
-  );
-};
-
-const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
-  local: "本机",
-  remote: "远程",
-};
-
-type ComputerLoad = { status: "loading" | "ready" } | { status: "failed"; message: string };
-
-// 列表读的是 store 里那张表，computer_updated 推送写的也是它，别处上下线这里跟着变。进页再拉一次补断线期间错过的。
-const ComputerPage = ({ computers, onLoad }: { computers: Record<string, Computer>; onLoad: () => Promise<void> }) => {
-  const [load, setLoad] = useState<ComputerLoad>({ status: "loading" });
-
-  useEffect(() => {
-    let active = true;
-    onLoad().then(
-      () => active && setLoad({ status: "ready" }),
-      (cause: unknown) =>
-        active &&
-        setLoad({ status: "failed", message: cause instanceof Error ? cause.message : "加载电脑失败，请重试" }),
-    );
-    return () => {
-      active = false;
-    };
-  }, [onLoad]);
-
-  const rows = Object.values(computers);
-  if (load.status === "failed" && rows.length === 0) {
-    return (
-      <p className="later" data-testid="computer-error" role="alert">
-        电脑列表加载失败：{load.message}
-      </p>
-    );
-  }
-  if (load.status === "loading" && rows.length === 0) {
-    return (
-      <p className="later" data-testid="computer-loading">
-        加载中…
-      </p>
-    );
-  }
-
-  return (
-    <div className="computers-page" data-testid="computer-list">
-      {rows.map((computer) => (
-        <div
-          className="row-card computer-row"
-          data-testid="computer-row"
-          data-computer-id={computer.id}
-          key={computer.id}
-        >
-          <span>
-            <b>{COMPUTER_KIND_TEXT[computer.kind]}</b>
-          </span>
-          <span className="computer-status" data-testid="computer-status" data-status={computer.status}>
-            <i className={`status-dot ${COMPUTER_STATUS_CLASS[computer.status]}`} aria-hidden="true" />
-            <b>{COMPUTER_STATUS_TEXT[computer.status]}</b>
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-};
-
 const money = (amount: number): string => `¥${amount.toFixed(1)}`;
+// 预算只收整数元，照原样写，不带小数。
+const budgetText = (budget: number): string => `¥${budget}`;
+
+const monthDay = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", month: "long", day: "numeric" });
 
 const when = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai",
@@ -302,15 +154,123 @@ const when = new Intl.DateTimeFormat("zh-CN", {
   hour12: false,
 });
 
-const UsagePage = ({ usage, bots }: Pick<Props, "usage" | "bots">) => (
+type BudgetEdit =
+  | { status: "viewing" }
+  | { status: "editing"; draft: string; error: string | null }
+  | { status: "saving"; draft: string };
+
+// 预算是设置里的一项，读写都走 settings；用量回包里那份 budget 要等下次拉用量才跟上，这里不读它。
+const BudgetRow = ({ budget, onChange }: { budget: number | null; onChange: Props["onChange"] }) => {
+  const [edit, setEdit] = useState<BudgetEdit>({ status: "viewing" });
+  const save = async (next: number | null, draft: string) => {
+    setEdit({ status: "saving", draft });
+    try {
+      await onChange({ budget: next });
+      setEdit({ status: "viewing" });
+    } catch (cause) {
+      setEdit({ status: "editing", draft, error: cause instanceof Error ? cause.message : "没存上，请重试" });
+    }
+  };
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (edit.status !== "editing") return;
+    const amount = Number(edit.draft);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      setEdit({ ...edit, error: "填一个大于 0 的整数，单位是元" });
+      return;
+    }
+    void save(amount, edit.draft);
+  };
+
+  if (edit.status === "viewing") {
+    return (
+      <div className="row-card">
+        <span>
+          <b>每月预算</b>
+          <small>用到 80% 提醒你一次；到了预算，例行的自动触发就停下，你自己派的活照常。</small>
+        </span>
+        <button
+          type="button"
+          className="ghost-button"
+          data-testid="budget-edit"
+          onClick={() => setEdit({ status: "editing", draft: budget === null ? "" : String(budget), error: null })}
+        >
+          {budget === null ? "设一个" : `${budgetText(budget)} · 改`}
+        </button>
+      </div>
+    );
+  }
+  const saving = edit.status === "saving";
+  return (
+    <form className="row-card budget-form" data-testid="budget-form" onSubmit={submit}>
+      <label className="field">
+        <span>每月预算（元）</span>
+        <input
+          type="number"
+          min={1}
+          step={1}
+          inputMode="numeric"
+          data-testid="budget-input"
+          value={edit.draft}
+          disabled={saving}
+          onChange={(event) => setEdit({ status: "editing", draft: event.target.value, error: null })}
+        />
+        {edit.status === "editing" && edit.error !== null ? (
+          <small className="error" role="alert" data-testid="budget-error">
+            {edit.error}
+          </small>
+        ) : null}
+      </label>
+      <span className="budget-actions">
+        {budget === null ? null : (
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="budget-clear"
+            disabled={saving}
+            onClick={() => void save(null, edit.draft)}
+          >
+            不设预算
+          </button>
+        )}
+        <button type="button" className="ghost-button" disabled={saving} onClick={() => setEdit({ status: "viewing" })}>
+          取消
+        </button>
+        <button type="submit" className="primary-button" data-testid="budget-save" disabled={saving}>
+          存
+        </button>
+      </span>
+    </form>
+  );
+};
+
+const UsagePage = ({
+  usage,
+  bots,
+  budget,
+  onChange,
+}: Pick<Props, "usage" | "bots" | "onChange"> & { budget: number | null }) => (
   <div className="usage-page" data-testid="usage-page">
     <section className="usage-section">
-      <h3>本月</h3>
+      <h3>本月 · {monthDay.format(new Date(usage.monthStartsAt))}到今天，所有 Bot 加起来</h3>
       <div className="usage-panel">
         <div className="usage-summary">
           <strong data-testid="usage-total">{money(usage.total)}</strong>
-          <span>周预算 · 后续</span>
+          <span data-testid="usage-budget">{budget === null ? "没设预算" : `/ 预算 ${budgetText(budget)}`}</span>
         </div>
+        {budget === null ? null : (
+          <div
+            className="usage-meter"
+            data-testid="usage-meter"
+            role="meter"
+            aria-label="本月花费占预算"
+            aria-valuemin={0}
+            aria-valuemax={budget}
+            aria-valuenow={Math.min(usage.total, budget)}
+          >
+            <i style={{ width: `${Math.min(100, (usage.total / budget) * 100)}%` }} />
+          </div>
+        )}
         <div className="usage-bots" data-testid="usage-bots">
           {usage.bots.map((line) => {
             const bot = bots[line.botId];
@@ -330,12 +290,11 @@ const UsagePage = ({ usage, bots }: Pick<Props, "usage" | "bots">) => (
             );
           })}
         </div>
-        <div className="usage-future" aria-label="后续功能">
-          <span>快用完时提醒 · 后续</span>
-          <span>负责人加额 · 后续</span>
-          <span>默认档位 · 后续</span>
-        </div>
       </div>
+    </section>
+    <section className="usage-section">
+      <h3>预算</h3>
+      <BudgetRow budget={budget} onChange={onChange} />
     </section>
     <section className="usage-section">
       <h3>最近任务</h3>
@@ -359,10 +318,6 @@ const UsagePage = ({ usage, bots }: Pick<Props, "usage" | "bots">) => (
               </div>
             );
           })}
-        </div>
-        <div className="usage-foot">
-          <span>对内第一版只看用量，团队统一结算是后续。</span>
-          <span>导出本月明细 · 后续</span>
         </div>
       </div>
     </section>
@@ -388,37 +343,17 @@ export const SettingsWindow = ({
   onLoadGrants,
   onRevokeGrant,
   onLoadAccounts,
-  onLoadComputers,
   onChangeTier,
   onChange,
   onLogout,
   onClose,
 }: Props) => {
   const [page, setPage] = useState<PageId>(initialPage);
-  const [grantsLoading, setGrantsLoading] = useState(initialPage === "grants");
-  const [grantsError, setGrantsError] = useState<string | null>(null);
   const current = PAGES[page];
 
   useEffect(() => {
     if (page === "usage") void onLoadUsage();
   }, [page, onLoadUsage]);
-
-  useEffect(() => {
-    if (page !== "grants") return;
-    void onLoadGrants()
-      .then(() => setGrantsError(null))
-      .catch((cause: unknown) => setGrantsError(cause instanceof Error ? cause.message : "请重试"))
-      .finally(() => setGrantsLoading(false));
-  }, [page, grantsVersion, onLoadGrants]);
-
-  const selectPage = (next: PageId) => {
-    if (next === page) return;
-    if (next === "grants") {
-      setGrantsLoading(true);
-      setGrantsError(null);
-    }
-    setPage(next);
-  };
 
   return (
     <div className="scrim" data-testid="settings-window">
@@ -431,7 +366,7 @@ export const SettingsWindow = ({
               type="button"
               className={`menu-row${id === page ? " is-selected" : ""}`}
               data-testid={`settings-nav-${id}`}
-              onClick={() => selectPage(id)}
+              onClick={() => setPage(id)}
             >
               {PAGES[id].icon}
               {PAGES[id].title}
@@ -453,6 +388,18 @@ export const SettingsWindow = ({
           </header>
           {page === "general" ? (
             <GeneralPage user={user} settings={settings} onChange={onChange} onLogout={onLogout} />
+          ) : page === "accounts" ? (
+            <AccountsPage
+              accounts={accounts}
+              computers={computers}
+              grants={grants}
+              projectNames={projectNames}
+              grantsVersion={grantsVersion}
+              onLoad={onLoadAccounts}
+              onLoadGrants={onLoadGrants}
+              onRevokeGrant={onRevokeGrant}
+              onChangeTier={onChangeTier}
+            />
           ) : page === "tools" ? (
             <ToolsPage
               tools={tools}
@@ -461,29 +408,10 @@ export const SettingsWindow = ({
               onUpdate={onUpdateTool}
               onDelete={onDeleteTool}
             />
-          ) : page === "computer" ? (
-            <ComputerPage computers={computers} onLoad={onLoadComputers} />
-          ) : page === "accounts" ? (
-            <AccountsPage
-              accounts={accounts}
-              computers={computers}
-              onLoad={onLoadAccounts}
-              onChangeTier={onChangeTier}
-            />
-          ) : page === "grants" ? (
-            <GrantsPage
-              grants={grants}
-              projectNames={projectNames}
-              loading={grantsLoading}
-              error={grantsError}
-              onRevoke={onRevokeGrant}
-            />
           ) : page === "usage" ? (
-            <UsagePage usage={usage} bots={bots} />
+            <UsagePage usage={usage} bots={bots} budget={settings.budget} onChange={onChange} />
           ) : (
-            <p className="later" data-testid="settings-later">
-              {current.title} · 后续
-            </p>
+            <PrivacyPage user={user} />
           )}
         </section>
       </div>

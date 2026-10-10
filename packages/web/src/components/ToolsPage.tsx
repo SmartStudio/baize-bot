@@ -9,11 +9,11 @@ type Props = {
   onDelete: (id: ToolConnectionId) => Promise<void>;
 };
 
-const assignmentSummary = (tool: ToolConnection, bots: Bot[]): string => {
+const usersOf = (tool: ToolConnection, bots: Bot[]): string => {
   const assigned = bots.filter((bot) => tool.assignedBotIds.includes(bot.id));
-  if (assigned.length === 0) return "还没勾";
-  if (assigned.length === bots.length) return `全部 ${bots.length} 个 Bot`;
-  return assigned.map((bot) => bot.name).join(" · ");
+  if (assigned.length === 0) return "没人在用";
+  if (assigned.length === bots.length) return `全部 ${bots.length} 个 Bot 在用`;
+  return `${assigned.map((bot) => bot.name).join("、")} 在用`;
 };
 
 const ToolCard = ({
@@ -66,7 +66,7 @@ const ToolCard = ({
           <small>{new URL(tool.url).host} · MCP</small>
         </span>
         <div className="tool-connection-actions">
-          <span data-testid="tool-assignment">{assignmentSummary(tool, bots)}</span>
+          <span data-testid="tool-assignment">{usersOf(tool, bots)}</span>
           <button
             type="button"
             className="ghost-button"
@@ -186,7 +186,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
 
   return (
     <div className="tools-page" data-testid="tools-page">
-      <p className="tools-intro">已连接的工具（MCP）· 你连一次，勾给哪些 Bot 用</p>
+      <p className="tools-intro">插件归你，不归某个 Bot。连一次，勾给哪些 Bot 用。</p>
       <div className="tools-list" data-testid="tools-list">
         {tools.map((tool) => (
           <ToolCard
@@ -202,7 +202,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
       </div>
 
       <section className="tools-create">
-        <h3>连接新工具</h3>
+        <h3>接一个新插件（MCP）</h3>
         <form className="tools-create-form" data-testid="tool-create-form" onSubmit={(event) => void create(event)}>
           <label className="field">
             <span>名字</span>
@@ -244,13 +244,9 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
         </form>
       </section>
 
-      <section className="tools-sites">
-        <h3>电脑里已登录的站点 · 所有 Bot 的桌面共用</h3>
-        <p>后续</p>
-      </section>
       <p className="tools-foot">
-        Bot 设置里的「可用工具」「已登录站点」点进来也是这一页。登录态在你的电脑上，过期了 Bot
-        不会猜密码，会停下请你接管登录。没有别的权限设置。
+        Bot 设置里的「可用工具」点进来也是这一页。平台账号和登录在「账号与电脑」里，过期了 Bot
+        不会猜密码，会停下请你接管登录。
       </p>
     </div>
   );

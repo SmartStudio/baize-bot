@@ -492,7 +492,7 @@ const run = async (): Promise<void> => {
     for (const word of ["企业", "团队结算", "同事"]) check(firstHome, `首页不出现「${word}」`).not.toContain(word);
     await assertPlainHome(p, s);
     await shot(p, "U1-2-today");
-    await openSettings(p, "computer");
+    await openSettings(p, "accounts");
     await check(p.getByTestId("computer-status")).toHaveAttribute("data-status", "online");
     await shot(p, "U1-3-computer");
     await p.getByTestId("settings-close").click();

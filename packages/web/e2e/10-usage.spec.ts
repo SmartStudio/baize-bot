@@ -1,6 +1,6 @@
 import { expect, test, SHOT, UsageResponse, login, openSettings } from "./fixtures";
 
-test("用量与账单按 Bot 分列本周花费，并列出五条最近任务", async ({ page }) => {
+test("用量页按 Bot 分列本月花费，没设预算，并列出五条最近任务", async ({ page }) => {
   await login(page);
   await openSettings(page);
   const loaded = page.waitForResponse((response) => response.url().endsWith("/api/usage") && response.ok());
@@ -15,12 +15,8 @@ test("用量与账单按 Bot 分列本周花费，并列出五条最近任务", 
   }
   await expect(usage.getByTestId("usage-recent").locator(".usage-run")).toHaveCount(5);
   await expect(usage).toContainText("Globex X3 × 200 报价");
-  await expect(usage).toContainText("周预算 · 后续");
-  await expect(usage).toContainText("快用完时提醒 · 后续");
-  await expect(usage).toContainText("负责人加额 · 后续");
-  await expect(usage).toContainText("默认档位 · 后续");
-  await expect(usage).toContainText("导出本月明细 · 后续");
-  await expect(usage.getByRole("button")).toHaveCount(0);
+  await expect(usage.getByTestId("usage-budget")).toHaveText("没设预算");
+  await expect(usage, "旧的「后续」占位都去掉了").not.toContainText("后续");
   await page.screenshot({ path: `${SHOT}/11a.png` });
 });
 

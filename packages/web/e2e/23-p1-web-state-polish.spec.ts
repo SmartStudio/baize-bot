@@ -4,7 +4,7 @@ test("电脑页听 computer_updated 推送：另一台休眠，状态不刷新�
   await login(page);
   await openSettings(page);
   const listed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/computers");
-  await page.getByTestId("settings-nav-computer").click();
+  await page.getByTestId("settings-nav-accounts").click();
   await listed;
   const remote = page.locator("[data-testid=computer-row][data-computer-id=cmp_remote]");
   await expect(remote.getByTestId("computer-status")).toHaveAttribute("data-status", "online");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight, Lock } from "lucide-react";
 import {
   BrowserPlatform,
   type Account,
@@ -7,12 +7,16 @@ import {
   type AccountTier,
   type Computer,
   type ComputerId,
+  type Grant,
+  type GrantId,
+  type GroupId,
   type OAuthPlatform,
 } from "@baize/shared";
 import { oauthStartUrl } from "../api/client.js";
-import { useApp } from "../state/app.js";
+import { useApp, type RemotePairing } from "../state/app.js";
 import type { LoginFlow } from "../state/types.js";
 import { loginFlowNote } from "./LoginCard.js";
+import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 import {
   COMPUTER_STATUS_CLASS,
   COMPUTER_STATUS_TEXT,
@@ -29,7 +33,13 @@ import {
 type Props = {
   accounts: Account[];
   computers: Record<string, Computer>;
+  grants: Grant[];
+  projectNames: Record<GroupId, string>;
+  grantsVersion: number;
+  // 账号和电脑两张表一起拉。
   onLoad: () => Promise<void>;
+  onLoadGrants: () => Promise<void>;
+  onRevokeGrant: (id: GrantId) => Promise<void>;
   onChangeTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
 };
 
@@ -248,8 +258,241 @@ const ConnectEntries = ({ local, login }: { local: Computer | undefined; login: 
   );
 };
 
+const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
+  local: "本机",
+  remote: "远程",
+};
+
+type Pairing =
+  | { status: "idle" }
+  | { status: "busy" }
+  | { status: "shown"; pairing: RemotePairing }
+  | { status: "failed"; message: string };
+
+// token 明文只在建好的那次回包里，住在这个组件里：点「记下了」或离开这一页就没了，再也取不回来。
+// 本机和远程各至多一台，已经有远程时不给按钮，免得一点就把那台正在用的 token 换掉。
+const ComputersSection = ({ computers, ready }: { computers: Record<string, Computer>; ready: boolean }) => {
+  const { actions } = useApp();
+  const [pairing, setPairing] = useState<Pairing>({ status: "idle" });
+  const rows = Object.values(computers);
+  const hasRemote = rows.some((computer) => computer.kind === "remote");
+  const add = () => {
+    setPairing({ status: "busy" });
+    actions
+      .addRemoteComputer()
+      .then((created) => setPairing(created === undefined ? { status: "idle" } : { status: "shown", pairing: created }))
+      .catch((cause: unknown) =>
+        setPairing({ status: "failed", message: cause instanceof Error ? cause.message : "请重试" }),
+      );
+  };
+  return (
+    <section className="computers-page" data-testid="computer-list">
+      <p className="group-label">电脑</p>
+      {rows.map((computer) => (
+        <div
+          className="row-card computer-row"
+          data-testid="computer-row"
+          data-computer-id={computer.id}
+          key={computer.id}
+        >
+          <span>
+            <b>{COMPUTER_KIND_TEXT[computer.kind]}</b>
+          </span>
+          <span className="computer-status" data-testid="computer-status" data-status={computer.status}>
+            <i className={`status-dot ${COMPUTER_STATUS_CLASS[computer.status]}`} aria-hidden="true" />
+            <b>{COMPUTER_STATUS_TEXT[computer.status]}</b>
+          </span>
+        </div>
+      ))}
+      {pairing.status === "shown" ? (
+        <div className="row-card computer-pairing" data-testid="computer-pairing" role="status">
+          <span>
+            <b>远程电脑建好了，把这串交给那台电脑上的白泽代理</b>
+            <small>只显示这一次。关掉就看不到了，丢了只能重置。</small>
+            <code data-testid="computer-pairing-id">{pairing.pairing.computerId}</code>
+            <code data-testid="computer-pairing-token">{pairing.pairing.token}</code>
+          </span>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="computer-pairing-done"
+            onClick={() => setPairing({ status: "idle" })}
+          >
+            记下了
+          </button>
+        </div>
+      ) : ready && !hasRemote ? (
+        <div className="row-card">
+          <span>
+            <b>加一台远程电脑</b>
+            <small>合上本机它也照样跑。在那台电脑上装白泽代理，用这里给的 token 连上来。</small>
+            {pairing.status === "failed" ? (
+              <small className="grant-error" role="alert" data-testid="computer-add-error">
+                没建成：{pairing.message}
+              </small>
+            ) : null}
+          </span>
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="computer-add-remote"
+            disabled={pairing.status === "busy"}
+            onClick={add}
+          >
+            加一台远程电脑
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+};
+
+// 本机能碰的文件夹就是给本机路径的永久读授权，素材文件夹设了就会建一条（D9）。撤销在下面授权列表里。
+const LocalFolders = ({ grants, local }: { grants: Grant[]; local: Computer | undefined }) => {
+  const folders = grants.flatMap((grant) =>
+    grant.scope === "forever" &&
+    grant.action === "read" &&
+    grant.target.kind === "path" &&
+    grant.target.computerId === local?.id
+      ? [grant.target.prefix]
+      : [],
+  );
+  return (
+    <div className="row-card" data-testid="local-folders">
+      <span>
+        <b>本机能碰的文件夹</b>
+        <small>{folders.length === 0 ? "还没有。哪里都要先问你" : `${folders.join("、")}。别的地方要先问你`}</small>
+      </span>
+    </div>
+  );
+};
+
+const GrantRow = ({
+  grant,
+  projectName,
+  onRevoke,
+}: {
+  grant: Grant;
+  projectName: string | undefined;
+  onRevoke: (id: GrantId) => Promise<void>;
+}) => {
+  const [revoke, setRevoke] = useState<"idle" | "busy" | "failed">("idle");
+  const run = async () => {
+    setRevoke("busy");
+    try {
+      await onRevoke(grant.id);
+    } catch {
+      setRevoke("failed");
+    }
+  };
+  return (
+    <div className="row-card grant-row" data-testid="grant-row" data-grant-id={grant.id}>
+      <span>
+        <b>{SCOPE_TEXT[grant.scope]}</b>
+        <small>
+          {ACTION_TEXT[grant.action]} · {targetText(grant.target)}
+        </small>
+        {grant.scope === "project" ? <small>项目：{projectName ?? "已删除的对话"}</small> : null}
+        {revoke === "failed" ? (
+          <small className="grant-error" data-testid="grant-revoke-error" role="alert">
+            没撤掉，再试一次
+          </small>
+        ) : null}
+      </span>
+      <button
+        type="button"
+        className="ghost-button"
+        data-testid="grant-revoke"
+        disabled={revoke === "busy"}
+        onClick={() => void run()}
+      >
+        撤销
+      </button>
+    </div>
+  );
+};
+
+type GrantsLoad = { status: "loading" | "ready" } | { status: "failed"; message: string };
+
+// 版本号一变就重拉，补上断线期间别处撤掉的和别处新批的授权。
+const GrantsSection = ({
+  grants,
+  projectNames,
+  grantsVersion,
+  onLoad,
+  onRevoke,
+}: {
+  grants: Grant[];
+  projectNames: Record<GroupId, string>;
+  grantsVersion: number;
+  onLoad: () => Promise<void>;
+  onRevoke: (id: GrantId) => Promise<void>;
+}) => {
+  const [load, setLoad] = useState<GrantsLoad>({ status: "loading" });
+  useEffect(() => {
+    let active = true;
+    onLoad().then(
+      () => active && setLoad({ status: "ready" }),
+      (cause: unknown) =>
+        active && setLoad({ status: "failed", message: cause instanceof Error ? cause.message : "请重试" }),
+    );
+    return () => {
+      active = false;
+    };
+  }, [grantsVersion, onLoad]);
+
+  return (
+    <section className="grants-page" data-testid="grants-page">
+      <p className="group-label">长期授权</p>
+      {load.status === "failed" ? (
+        <p className="later" data-testid="grants-error" role="alert">
+          授权列表加载失败：{load.message}
+        </p>
+      ) : load.status === "loading" && grants.length === 0 ? (
+        <p className="later">正在加载授权…</p>
+      ) : grants.length === 0 ? (
+        <p className="later" data-testid="grants-empty">
+          还没有长期授权
+        </p>
+      ) : (
+        grants.map((grant) => (
+          <GrantRow
+            key={grant.id}
+            grant={grant}
+            projectName={grant.scope === "project" ? projectNames[grant.groupId] : undefined}
+            onRevoke={onRevoke}
+          />
+        ))
+      )}
+    </section>
+  );
+};
+
+// 和 shared 里只能批「这一次」的动作（spend、account_security、delete）对着写，档位开到最大也一样。
+const ALWAYS_ASK = ["花钱", "改密码或绑定手机", "授权第三方应用", "删除你电脑上的文件"] as const;
+
+const AlwaysAsk = () => (
+  <div className="always-ask" data-testid="always-ask">
+    <Lock size={16} aria-hidden="true" />
+    <p>
+      <b>这几件事不管权限开多大都会问你：</b>
+      {ALWAYS_ASK.join("，")}。
+    </p>
+  </div>
+);
+
 // 进来就重拉一遍。拉不到得明说，不然空表会被读成「真的没有账号」。
-export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Props) => {
+export const AccountsPage = ({
+  accounts,
+  computers,
+  grants,
+  projectNames,
+  grantsVersion,
+  onLoad,
+  onLoadGrants,
+  onRevokeGrant,
+  onChangeTier,
+}: Props) => {
   const { state, actions } = useApp();
   const login: Login = {
     flows: state.status === "ready" ? state.content.logins : {},
@@ -317,6 +560,16 @@ export const AccountsPage = ({ accounts, computers, onLoad, onChangeTier }: Prop
       ) : load === "loading" ? (
         <p className="later">正在读取账号…</p>
       ) : null}
+      <ComputersSection computers={computers} ready={load === "ready"} />
+      <LocalFolders grants={grants} local={local} />
+      <GrantsSection
+        grants={grants}
+        projectNames={projectNames}
+        grantsVersion={grantsVersion}
+        onLoad={onLoadGrants}
+        onRevoke={onRevokeGrant}
+      />
+      <AlwaysAsk />
     </>
   );
 };

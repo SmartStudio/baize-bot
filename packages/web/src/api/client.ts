@@ -8,6 +8,7 @@ import {
   ApiError,
   ApprovePlanResponse,
   ComputerListResponse,
+  ComputerTokenResponse,
   DecideDraftResponse,
   ReturnPlanResponse,
   BotResponse,
@@ -61,6 +62,7 @@ import {
   type CreateRoutineRequest,
   type CreateToolRequest,
   type CreateSkillRequest,
+  type DeleteAccountRequest,
   type DecideApprovalRequest,
   type DecideProjectOfferRequest,
   type DecideRoutineOfferRequest,
@@ -88,6 +90,9 @@ import {
 
 // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它当链接。
 export const oauthStartUrl = (platform: OAuthPlatform): string => `/api/oauth/${encodeURIComponent(platform)}/start`;
+
+// 导出是一个带 content-disposition 的附件，交给浏览器自己下载，界面拿它当链接。
+export const exportDataUrl = "/api/export";
 
 export class RequestFailed extends Error {
   constructor(
@@ -197,6 +202,11 @@ export const createApi = (signal?: AbortSignal) => {
       return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
     },
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
+    createRemoteComputer: async () => json(ComputerTokenResponse, await send("POST", "/computers/remote")),
+    deleteAccount: async (email: string) => {
+      const body: DeleteAccountRequest = { email };
+      await send("DELETE", "/me", body);
+    },
     grants: async () => json(GrantListResponse, await send("GET", "/grants")),
     deleteGrant: async (id: GrantId): Promise<void> => {
       await send("DELETE", `/grants/${encodeURIComponent(id)}`);

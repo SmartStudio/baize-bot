@@ -32,7 +32,7 @@ const addApproval = async (
 
 const openGrants = async (page: Page) => {
   await openSettings(page);
-  await page.getByTestId("settings-nav-grants").click();
+  await page.getByTestId("settings-nav-accounts").click();
 };
 
 test("spend 审批卡只有这一次和拒绝", async ({ page }) => {
@@ -77,7 +77,7 @@ test("选这个项目里后设置里有授权，撤销后消失", async ({ page 
   await card.getByTestId("approval-scope-project").click();
 
   await openSettings(page);
-  await page.getByTestId("settings-nav-grants").click();
+  await page.getByTestId("settings-nav-accounts").click();
   const grant = page.getByTestId("grant-row");
   await expect(grant).toContainText("Globex X3 × 200 订单");
   await expect(grant).toContainText("这个项目里");
@@ -93,14 +93,14 @@ test("另一个标签页撤销授权后本页靠推送立即消失", async ({ pa
   const card = await addApproval(page, "write_workspace");
   await card.getByTestId("approval-scope-project").click();
   await openSettings(page);
-  await page.getByTestId("settings-nav-grants").click();
+  await page.getByTestId("settings-nav-accounts").click();
   await expect(page.getByTestId("grant-row")).toHaveCount(1);
 
   const other = await context.newPage();
   await other.goto("/");
   await expect(other.getByTestId("main-window")).toBeVisible();
   await openSettings(other);
-  await other.getByTestId("settings-nav-grants").click();
+  await other.getByTestId("settings-nav-accounts").click();
   await expect(other.getByTestId("grant-row")).toHaveCount(1);
   await other.getByTestId("grant-revoke").click();
 
