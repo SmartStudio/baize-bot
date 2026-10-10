@@ -402,9 +402,10 @@ export const ToolResponse = z.object({ tool: ToolConnection });
 // assignedBotIds 里不是自己的 Bot 400。改完重发 config。别人的 404。
 // 给了 authorization 就换掉凭据，并当场重新 initialize 加 tools/list：连不上回 400、旧凭据不动；连上了按新列表重建
 // operations，同名操作沿用原来的 needsApproval。从分享链接导入的插件靠这一步补授权、取回真实的操作表。
+// authorization 给 null 是不带凭据重新探测：连上了清掉旧凭据，导入的匿名插件靠这一步激活。
 export const UpdateToolRequest = z.object({
   name: z.string().min(1).max(40).optional(),
-  authorization: z.string().min(1).optional(),
+  authorization: z.string().min(1).nullable().optional(),
   assignedBotIds: z.array(BotId).optional(),
   operations: z.array(ToolOperation.pick({ name: true, needsApproval: true })).optional(),
 });

@@ -44,8 +44,16 @@ import { ToolView } from "./tool-view.js";
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
+// 从分享链接导入的插件，操作表是包里带的占位，补授权取回真实列表之前运行器不许执行它。
+// 不能拿 authorization 为 null 判：自己建的匿名 MCP 也是 null，那是能用的。
+export const ToolConnectionStatus = z.enum(["ready", "awaiting_authorization"]);
+export type ToolConnectionStatus = z.infer<typeof ToolConnectionStatus>;
+
 // 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
-export const ToolConnectionConfig = ToolConnection.extend({ authorization: z.string().nullable() });
+export const ToolConnectionConfig = ToolConnection.extend({
+  authorization: z.string().nullable(),
+  status: ToolConnectionStatus,
+});
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
 export const AccountConfig = z
