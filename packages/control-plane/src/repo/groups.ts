@@ -18,6 +18,7 @@ import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup, type Tx } from "./messages.js";
 import { metricsOf, withMetric } from "./metrics.js";
 import { toBot, toGroup, toTask } from "./rows.js";
+import { lockOwner } from "./runs.js";
 import { stampedChecklist } from "./tasks.js";
 
 export type CreateGroupInput = {
@@ -70,6 +71,9 @@ export async function createGroup(db: Db, ownerId: UserId, input: CreateGroupInp
   if (new Set(input.botIds).size !== input.botIds.length) return { kind: "duplicate_bot" };
 
   return db.transaction(async (tx): Promise<CreateGroupResult> => {
+    // 先过归属人的共享锁：删号先删 users 行再级联到 Bot 行和发号器，这里先锁 Bot 行再占发号器，和它反序；
+    // 有这把锁，删号要么等建群提交再把新群级联掉，要么先提交、下面查不到 Bot 就回 404。
+    await lockOwner(tx, ownerId, "shared");
     // 别人的 Bot 和不存在的 Bot 在这里是同一种结果，路由层因此都回 404，不泄露有没有这个 Bot。
     // 查归属在事务里并锁住这几行：同时删其中一位时，删除等建群提交，或者先提交、这里就查不到它，不会插成员时撞外键。
     const owned = await tx

@@ -88,13 +88,24 @@ export async function appendMessage(db: Db | Tx, groupId: string, body: MessageB
   return toMessage(row);
 }
 
+/**
+ * 派活失败时往群里留提示用。群可能刚随 Bot 或账号级联删掉，先查后写在两个事务里拦不住中间的删除，
+ * 所以在同一个事务里先对群行拿 KEY SHARE：删除等这条写完，或者先提交、这里查不到行就回 null，一个字都不写。
+ */
+export async function appendMessageIfGroupAlive(db: Db, groupId: string, body: MessageBody): Promise<Message | null> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx.select({ id: groups.id }).from(groups).where(eq(groups.id, groupId)).for("key share");
+    return row === undefined ? null : appendMessage(tx, groupId, body);
+  });
+}
+
 /** 改消息的每条 UPDATE 都把它放进 set：在同一句里加一，并发的两次改写拿到的号不会相同。 */
 export const nextRevision = () => sql<number>`${messages.revision} + 1`;
 
-export async function messageSeq(db: Db, messageId: MessageId): Promise<number> {
+/** 消息已经不在（随群级联删掉）回 null。 */
+export async function messageSeq(db: Db, messageId: MessageId): Promise<number | null> {
   const [row] = await db.select({ seq: messages.seq }).from(messages).where(eq(messages.id, messageId)).limit(1);
-  if (row === undefined) throw new Error(`消息 ${messageId} 不存在`);
-  return row.seq;
+  return row?.seq ?? null;
 }
 
 /** 正文里那支 `skill_offer`。落卡和点存两处都只认这一支，别的 kind 编译期就进不来。 */

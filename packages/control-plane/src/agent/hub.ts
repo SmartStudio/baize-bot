@@ -39,8 +39,11 @@ const HELLO_TIMEOUT_MS = 10_000;
 
 const CLOSE_SUPERSEDED = 4000;
 const CLOSE_BAD_HELLO = 4001;
+const CLOSE_ACCOUNT_DELETED = 4002;
 /** RFC 6455 的 Service Restart。电脑代理收到任何关闭都按退避重连，停机结束它自己回来。 */
 const CLOSE_SHUTTING_DOWN = 1012;
+/** RFC 6455 的 Internal Error。握手中途出错，代理按退避重连再握一次。 */
+const CLOSE_HANDSHAKE_FAILED = 1011;
 const DISCONNECT_NOTICE = "电脑断过线，这次活没做完";
 const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
 /**
@@ -112,6 +115,11 @@ export class AgentHub {
    * 不进 inbox；关闭只清计时器，不再排任务、不再起宽限计时器。生产者只剩停机前已经收下的有限几帧。
    */
   #lifecycle: "serving" | "closing" = "serving";
+  /**
+   * 删过号的用户。认身份在链外、入表在链上，删号落在两者之间时 disconnectOwner 在表里找不到这条连接，
+   * #onHello 入表前看这里。用户 id 不复用，只进不出，一个进程里删号的次数就是它的大小。
+   */
+  readonly #deletedOwners = new Set<UserId>();
 
   constructor(deps: AgentHubDeps) {
     this.#deps = deps;
@@ -259,6 +267,18 @@ export class AgentHub {
     await Promise.all(this.#ownerConnections(ownerId).map((connection) => this.#sendConfig(connection, "changed")));
   }
 
+  /**
+   * 账号删了，关掉这个人的每条代理连接。先出表再关：关闭回调看到连接不在表里就什么都不写，
+   * 不标休眠、不起宽限收尾，这几台电脑的行已经随账号删掉了。
+   */
+  disconnectOwner(ownerId: UserId): void {
+    this.#deletedOwners.add(ownerId);
+    for (const connection of this.#ownerConnections(ownerId)) {
+      this.#connections.delete(connection.computerId);
+      connection.socket.close(CLOSE_ACCOUNT_DELETED, "账号已删除");
+    }
+  }
+
   #ownerConnections(ownerId: UserId): AgentConnection[] {
     return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
@@ -310,57 +330,70 @@ export class AgentHub {
    * 认完身份的 hello 轮到它了。排队期间 socket 已经断了也照做：它排在这条 socket 的关闭前面，关闭跟在后面把电脑写成休眠，
    * 电脑来过这件事才记得下来。
    */
-  async #onHello(socket: WebSocket, computer: Computer, activeRuns: readonly RunId[]): Promise<AgentConnection> {
-    const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
-    const accepted: AgentConnection = {
-      computerId: computer.id,
-      ownerId: computer.ownerId,
-      socket,
-      gatewayKey,
-      toolCallMessages: new Map(),
-    };
+  async #onHello(socket: WebSocket, computer: Computer, activeRuns: readonly RunId[]): Promise<AgentConnection | null> {
+    let accepted: AgentConnection | null = null;
+    try {
+      const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
+      // 判删号和入表之间没有 await：删号在前，这里看得见；在后，disconnectOwner 在表里找得到它。
+      if (this.#deletedOwners.has(computer.ownerId)) {
+        socket.close(CLOSE_ACCOUNT_DELETED, "账号已删除");
+        return null;
+      }
+      accepted = {
+        computerId: computer.id,
+        ownerId: computer.ownerId,
+        socket,
+        gatewayKey,
+        toolCallMessages: new Map(),
+      };
 
-    const previous = this.#connections.get(computer.id);
-    this.#connections.set(computer.id, accepted);
-    const timer = this.#graceTimers.get(computer.id);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      this.#graceTimers.delete(computer.id);
-    }
-    previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
+      const previous = this.#connections.get(computer.id);
+      this.#connections.set(computer.id, accepted);
+      const timer = this.#graceTimers.get(computer.id);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        this.#graceTimers.delete(computer.id);
+      }
+      previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
 
-    await this.#finishMissingRuns(computer.id, computer.ownerId, activeRuns);
-    const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
-    if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
-    await this.#deps.notifications.computerOnline(computer.ownerId);
-    this.#send(accepted, {
-      type: "welcome",
-      ownerId: computer.ownerId,
-      kind: computer.kind,
-      serverTime: new Date().toISOString(),
-    });
-    // 登录时补建管不到会话还有效的老用户，他们下次登录前一直没有主助理。hello 这里再补一次，
-    // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
-    const assistant = await this.#deps.db.transaction((tx) => ensureAssistant(tx, computer.ownerId));
-    if (assistant !== null) {
-      // 已经打开的首页靠这三条认识主助理，不用刷新输入框就能用。
-      this.#deps.push.push(computer.ownerId, { type: "bot_updated", bot: assistant.bot });
-      this.#deps.push.push(computer.ownerId, { type: "group_created", group: assistant.group, task: assistant.task });
-      this.#deps.push.push(computer.ownerId, { type: "message", message: assistant.greeting });
+      await this.#finishMissingRuns(computer.id, computer.ownerId, activeRuns);
+      const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
+      if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
+      await this.#deps.notifications.computerOnline(computer.ownerId);
+      this.#send(accepted, {
+        type: "welcome",
+        ownerId: computer.ownerId,
+        kind: computer.kind,
+        serverTime: new Date().toISOString(),
+      });
+      // 登录时补建管不到会话还有效的老用户，他们下次登录前一直没有主助理。hello 这里再补一次，
+      // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
+      const assistant = await this.#deps.db.transaction((tx) => ensureAssistant(tx, computer.ownerId));
+      if (assistant !== null) {
+        // 已经打开的首页靠这三条认识主助理，不用刷新输入框就能用。
+        this.#deps.push.push(computer.ownerId, { type: "bot_updated", bot: assistant.bot });
+        this.#deps.push.push(computer.ownerId, { type: "group_created", group: assistant.group, task: assistant.task });
+        this.#deps.push.push(computer.ownerId, { type: "message", message: assistant.greeting });
+      }
+      await this.#sendConfig(accepted, "hello");
+      const handshake = this.#configs.get(accepted);
+      if (handshake !== undefined) handshake.state = "ready";
+      // 主助理是这次建的：这个用户其他电脑的 hello 再补只会撞索引，不推也不重发，所以要送到它们那里。
+      if (assistant !== null) {
+        const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
+        await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
+      }
+      // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
+      await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
+        console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
+      );
+      return accepted;
+    } catch (error) {
+      // 握手没走完，conn 留空，这条 socket 的关闭回调什么都不做。表里还挂着它的话照断线处理一遍：出表、记休眠、起宽限收尾。
+      socket.close(CLOSE_HANDSHAKE_FAILED, "握手没走完");
+      if (accepted !== null && this.#connections.get(computer.id) === accepted) await this.#onClose(accepted);
+      throw error;
     }
-    await this.#sendConfig(accepted, "hello");
-    const handshake = this.#configs.get(accepted);
-    if (handshake !== undefined) handshake.state = "ready";
-    // 主助理是这次建的：这个用户其他电脑的 hello 再补只会撞索引，不推也不重发，所以要送到它们那里。
-    if (assistant !== null) {
-      const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
-      await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
-    }
-    // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
-    await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
-      console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
-    );
-    return accepted;
   }
 
   async #onClose(closed: AgentConnection): Promise<void> {

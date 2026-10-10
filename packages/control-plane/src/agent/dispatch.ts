@@ -25,7 +25,7 @@ import { decideApproval, latestPendingApproval, listApprovals } from "../repo/ap
 import { listAccounts } from "../repo/accounts.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
-import { appendMessage, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
+import { appendMessageIfGroupAlive, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
 import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
 import { startRun } from "../repo/runs.js";
@@ -120,17 +120,18 @@ export async function dispatchUserMessage(
   }
   const owner = options.botId;
   // 例行的运行记录自己会留原因；用户发的消息不能静默，群里要有一句为什么没人接。
-  // 群本身没了（单聊随 Bot 级联删掉）就什么都不写，写了也只会撞外键；调用方把读到的那次状态传进来。
-  const noTarget = async (groupAlive: boolean): Promise<DispatchOutcome> => {
-    if (owner === undefined && groupAlive) {
-      await appendAndPush(deps, ownerId, groupId, { kind: "system", tone: "error", text: NO_TARGET_NOTICE });
+  // 群本身没了（单聊随 Bot 级联删掉）就什么都不写，noticeIfGroupAlive 在写的事务里判。
+  const noTarget = async (): Promise<DispatchOutcome> => {
+    if (owner === undefined) {
+      await noticeIfGroupAlive(deps, ownerId, groupId, { kind: "system", tone: "error", text: NO_TARGET_NOTICE });
     }
     return { kind: "no_target" };
   };
 
   const selected = await computerFor(deps.db, deps.agents, ownerId);
   if (selected.kind === "failed") {
-    await appendAndPush(deps, ownerId, groupId, {
+    // 选电脑之前账号被删（删号先断代理，这里就选不到电脑），群已随账号没了，提示写不进去也不该写。
+    await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
       text: selectionNotice(selected.reason),
@@ -147,9 +148,10 @@ export async function dispatchUserMessage(
   for (const [pass, effectiveMentions] of passes.entries()) {
     const members = await listGroupBots(deps.db, groupId);
     // 名单空有两种：多 Bot 群被删空，群还在，留话给人看；单聊随 Bot 没了，群也没了，没地方留。
-    if (members.length === 0) return noTarget(await groupExists(deps.db, groupId));
-    // 触发消息随群级联删掉时这条会抛，放在名单之后，群没了多数时候在上一行就回掉了。
+    if (members.length === 0) return noTarget();
+    // 读完名单到这里之间群可能随账号或单聊 Bot 级联删掉，触发消息跟着没了，群里没地方留话，这一轮就此结束。
     const epoch = await messageSeq(deps.db, trigger.id);
+    if (epoch === null) return { kind: "no_target" };
     const chiefBotId = await findChiefBotId(deps.db, groupId);
     const currentBotId = (await findTaskByGroup(deps.db, groupId))?.currentBotId ?? null;
     if (pass > 0 && chiefBotId === null && currentBotId === null) break;
@@ -181,10 +183,10 @@ export async function dispatchUserMessage(
         return sendSpeaker(deps, ownerId, groupId, speaker, includeRecent, options, computer);
       },
     });
-    if (started === "gone") return noTarget(false);
+    if (started === "gone") return { kind: "no_target" };
     if (started !== "nobody") return { kind: "sent" };
   }
-  return noTarget(true);
+  return noTarget();
 }
 
 type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
@@ -207,12 +209,12 @@ async function sendSpeaker(
   const selected: ComputerSelection =
     placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
   if (selected.kind === "failed") {
-    await appendAndPush(deps, ownerId, groupId, {
+    const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
       text: selectionNotice(selected.reason),
     });
-    return { kind: "stopped" };
+    return written ? { kind: "stopped" } : { kind: "gone" };
   }
 
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
@@ -278,12 +280,13 @@ async function sendSpeaker(
     ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
   });
   if (!sent) {
-    await appendAndPush(deps, ownerId, groupId, {
+    // run 建好之后账号被删：删号提交后才断开代理，发不出去时群已随账号没了，和上面一样报「群没了」，不往里写提示。
+    const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
       text: selectionNotice("no_computer_online"),
     });
-    return { kind: "stopped" };
+    return written ? { kind: "stopped" } : { kind: "gone" };
   }
   return { kind: "sent", runId };
 }
@@ -563,9 +566,17 @@ function clip(text: string): string {
   return text.length <= CONTEXT_TEXT_LIMIT ? text : `${text.slice(0, CONTEXT_TEXT_LIMIT)}…`;
 }
 
-async function appendAndPush(deps: DispatchDeps, ownerId: UserId, groupId: string, body: MessageBody): Promise<void> {
-  const message = await appendMessage(deps.db, groupId, body);
+/** 群还在就留一句提示并推送，回 true；群已删就一个字不写，回 false。 */
+async function noticeIfGroupAlive(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: string,
+  body: MessageBody,
+): Promise<boolean> {
+  const message = await appendMessageIfGroupAlive(deps.db, groupId, body);
+  if (message === null) return false;
   deps.push.push(ownerId, { type: "message", message });
+  return true;
 }
 
 /** 群里回这四个词等于按了审批卡上的按钮。回话没法选范围，批准一律只批这一次。 */

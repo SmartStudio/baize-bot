@@ -39,12 +39,14 @@ export async function seed(db: Db): Promise<SeedResult> {
   const createdBots: string[] = [];
   for (const spec of DEV_BOTS) {
     if (present.has(spec.name)) continue;
-    const { bot, group } = await createBot(db, user.id, {
+    const created = await createBot(db, user.id, {
       name: spec.name,
       tags: spec.tags,
       hue: spec.hue,
       description: `${spec.tags.join("、")}方向的活先找我。`,
     });
+    if (created === null) throw new Error("开发账号刚建好就不在了");
+    const { bot, group } = created;
     await appendMessage(db, group.id, { kind: "user", text: spec.firstMessage });
     createdBots.push(bot.name);
   }

@@ -52,6 +52,25 @@ export async function lockSettlementOfRun(tx: Tx, runId: RunId): Promise<void> {
 const BOT_RUNS_LOCK = 0x627a6274;
 
 /**
+ * 账号级的边界，键是用户。删号拿排他，建 Bot、建群、开项目、建 run 拿共享，都在事务第一句、碰任何行之前。
+ * 删号枚举 Bot 拿 Bot 锁那一步是开始那一刻的快照，之后才建的 Bot 不在里头，它的 run 会成为归属人置空的孤儿；
+ * 建 Bot 和建 run 先过这把锁，删号拿到排他时过锁建出的 Bot 都已提交、枚举得到，之后到提交前过锁的入口建不出 Bot 和 run。
+ * 补建主助理不过它，枚举之后插出的主助理随 users 级联删掉，建不出 run 靠 startRun 自己过这把锁。
+ * 建群和开项目也过它，是为了不和删号的级联反序：它们先锁 Bot 行再占发号器，删号先删 users 行再级联到 Bot 和发号器。
+ * 锁序硬约束：同一个事务要这把锁和 Bot 锁时，这把永远在前。删号是账号排他在前、Bot 排他在后，反过来拿就各拿一半成环。
+ * 不用 users 行锁：run 名下的写要插带归属人外键的行（草稿、项目卡），插入隐式拿 users 的 KEY SHARE，和删号的 DELETE 各拿一半就成环。
+ */
+const OWNER_LOCK = 0x627a6f77;
+
+export async function lockOwner(tx: Tx, ownerId: UserId, mode: "exclusive" | "shared"): Promise<void> {
+  await tx.execute(
+    mode === "exclusive"
+      ? sql`SELECT pg_advisory_xact_lock(${OWNER_LOCK}::int4, hashtext(${ownerId}::text))`
+      : sql`SELECT pg_advisory_xact_lock_shared(${OWNER_LOCK}::int4, hashtext(${ownerId}::text))`,
+  );
+}
+
+/**
  * 删 Bot 的事务开头调用，先于删 Bot 碰的任何一行。两件事：
  * 拿这个 Bot 的排他锁，删除提交前它不会再生新 run；
  * 再把外键级联要改的 open run（它自己的，和它单 Bot 群里的）先锁成 FOR UPDATE。
@@ -69,11 +88,13 @@ export async function lockRunsOfBot(tx: Tx, botId: BotId): Promise<void> {
 }
 
 /**
- * 建 run 先拿 Bot 的共享锁，再拿收尾锁：同一个 Bot 在同一个群里正在收尾时，新 run 等它提交再出生，不会让定稿的判断失真。
- * 等到的若是删 Bot 的提交，Bot 已经不在这个群里，回 null，不建 run。
+ * 建 run 先拿归属人的共享锁，再拿 Bot 的共享锁，再拿收尾锁：同一个 Bot 在同一个群里正在收尾时，新 run 等它提交再出生，不会让定稿的判断失真。
+ * 等到的若是删 Bot 或删号的提交，Bot 已经不在这个群里，锁之后这条查成员的新语句看得见，回 null，不建 run。
+ * 归属人的锁管的是 Bot 锁管不到的 Bot：删号枚举 Bot 之后才进库的（hello 补建的主助理、项目群的助理），它的 Bot 锁不在删号手里。
  */
 export async function startRun(db: Db, input: StartRunInput): Promise<RunId | null> {
   return db.transaction(async (tx) => {
+    await lockOwner(tx, input.ownerId, "shared");
     await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${BOT_RUNS_LOCK}::int4, hashtext(${input.botId}::text))`);
     await lockSettlement(tx, input.groupId, input.botId);
     const [member] = await tx

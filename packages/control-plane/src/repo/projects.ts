@@ -18,6 +18,7 @@ import { findAssistant, insertMemberBot } from "./bots.js";
 import { findGroup, openGroup } from "./groups.js";
 import { nextRevision, type Tx } from "./messages.js";
 import { toMessage, toRoutine, toTask } from "./rows.js";
+import { lockOwner } from "./runs.js";
 
 export type ProjectOfferBody = Extract<MessageBody, { kind: "project_offer" }>;
 
@@ -83,7 +84,9 @@ export type DecideProjectOfferResult =
       readonly kind: "settled";
       readonly message: Message;
       readonly project: { readonly group: Group; readonly task: TopicTask } | null;
-    };
+    }
+  /** 路由预查之后、事务拿到账号锁之前账号被删，卡随单聊级联没了，和没找到这张卡是一回事。 */
+  | { readonly kind: "gone" };
 
 /**
  * 开始或不要。两种都靠 `UPDATE ... WHERE status = 'offered'` 抢这张卡：并发的第二次在行锁上等第一次提交，
@@ -103,6 +106,8 @@ export async function decideProjectOffer(
   let lost = false;
   try {
     return await db.transaction(async (tx): Promise<DecideProjectOfferResult> => {
+      // 开项目要建群、建助理 Bot，和建 Bot、建群一样先过归属人的共享锁，理由见 createBot 和 createGroup。
+      await lockOwner(tx, ownerId, "shared");
       const projectGroupId = GroupId.parse(newId());
       const name = decision.name ?? offer.body.name;
       // 卡正文就是这张卡的状态，项目改了名，卡上也得是新名字，别处没有第二份。
@@ -218,7 +223,7 @@ async function claimOffer(db: Db | Tx, offer: ProjectOfferMessage, body: Project
 
 async function settled(db: Db, ownerId: UserId, offer: ProjectOfferMessage): Promise<DecideProjectOfferResult> {
   const [row] = await db.select().from(messages).where(eq(messages.id, offer.id)).limit(1);
-  if (row === undefined) throw new Error(`方案卡 ${offer.id} 点完就不见了`);
+  if (row === undefined) return { kind: "gone" };
   const message = toMessage(row);
   const projectGroupId = message.body.kind === "project_offer" ? message.body.groupId : null;
   const detail = projectGroupId === null ? null : await findGroup(db, ownerId, projectGroupId);

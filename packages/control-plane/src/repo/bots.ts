@@ -22,6 +22,7 @@ import {
   skills,
   tasks,
   userCounters,
+  users,
 } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
@@ -29,7 +30,7 @@ import { pendingHandoffCounts } from "./handoffs.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
 import { generateBotName, hueAt, taskNumber, untakenBotName } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
-import { lockRunsOfBot } from "./runs.js";
+import { lockOwner, lockRunsOfBot } from "./runs.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -94,8 +95,20 @@ async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Pr
   return { bot: toBot(botRow), group: toGroup(groupRow, [botRow.id], taskRow.id), task: toTask(taskRow) };
 }
 
-export async function createBot(db: Db, ownerId: UserId, input: CreateBotInput): Promise<{ bot: Bot; group: Group }> {
-  return db.transaction((tx) => insertMemberBot(tx, ownerId, input));
+/**
+ * 先拿归属人的共享锁再建：删号正在进行就等它提交，醒来后这个人已经不在，回 null，路由层按未登录回；
+ * 不等的话删号枚举 Bot 时它还不存在，建出来的 Bot 和它的 run 会留成归属人置空的孤儿。
+ */
+export async function createBot(
+  db: Db,
+  ownerId: UserId,
+  input: CreateBotInput,
+): Promise<{ bot: Bot; group: Group } | null> {
+  return db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "shared");
+    const [owner] = await tx.select({ id: users.id }).from(users).where(eq(users.id, ownerId));
+    return owner === undefined ? null : insertMemberBot(tx, ownerId, input);
+  });
 }
 
 /**

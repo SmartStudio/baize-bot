@@ -139,6 +139,7 @@ import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
 import { createGoalRoutes } from "./routes/goals.js";
 import { createPreferenceRoutes } from "./routes/preferences.js";
+import { createPrivacyRoutes } from "./routes/privacy.js";
 import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
 import { createSeenRoutes } from "./routes/seen.js";
 import { createTeamOfferRoutes } from "./routes/team-offers.js";
@@ -211,6 +212,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createTeamOfferRoutes({ db, hub, agents }));
   app.route("/api", createRoutineOfferRoutes());
   app.route("/api", createSeenRoutes());
+  app.route("/api", createPrivacyRoutes({ db, agents }));
 
   app.route(
     OAUTH_PATH,
@@ -460,6 +462,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, CreateBotRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     const created = await createBot(db, c.get("user").id, body.value);
+    if (created === null) return c.json(UNAUTHORIZED, 401);
     await agents.sendConfig(c.get("user").id);
     return c.json(CreateBotResponse.parse(created), 201);
   });
@@ -684,6 +687,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
 
     const decided = await decideProjectOffer(db, ownerId, offer, body.value);
+    if (decided.kind === "gone") return c.json(NOT_FOUND, 404);
     // 已经有结论的卡回它现在的样子，不算错：点两次开始的人要的就是那个项目。
     if (decided.kind === "settled") {
       const { project } = decided;
