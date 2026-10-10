@@ -79,7 +79,7 @@ const fill = (value: unknown, ids: { readonly bot: string; readonly group: strin
   JSON.parse(JSON.stringify(value).replaceAll("{bot}", ids.bot).replaceAll("{group}", ids.group));
 
 it.each(STUB_EVENTS)(
-  "第 2 期的上行 %s 到了只记一条「未实现」，同一条连接上接着发的 bot_text 落库、run_done 收到确认",
+  "第 2 期的上行 %s 抛错只记错误类别和 id，同一条连接上接着发的 bot_text 落库、run_done 收到确认",
   async (type, fields) => {
     const user = await makeUser(database.db);
     const computer = await makeComputer(database.db, user.id);
@@ -112,12 +112,9 @@ it.each(STUB_EVENTS)(
         history.messages.map((message) => (message.body.kind === "bot" ? message.body.text : message.body.kind)),
         "桩抛错之后同一条连接上的 bot_text 要落库",
       ).toContain("桩之后照常说话");
-      expect(
-        logged.mock.calls.flatMap((call) =>
-          call.filter((arg) => arg instanceof Error && arg.message.includes("未实现")),
-        ),
-        "接缝占位抛的「未实现」要落到日志里，而不是静默",
-      ).toHaveLength(1);
+      expect(logged.mock.calls, "接缝占位抛错要记录错误类别和 id，不打印异常对象").toEqual([
+        [`处理电脑 ${computer.computerId} run ${prompt.runId} 的报文出错：Error`],
+      ]);
     } finally {
       logged.mockRestore();
       agent.close();

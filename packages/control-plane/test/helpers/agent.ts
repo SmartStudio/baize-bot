@@ -13,6 +13,8 @@ export type AgentClient = {
    * 混在下行里的话，只关心派活和握手的用例都得跳过它。
    */
   ack(runId: RunId, nth?: number, timeoutMs?: number): Promise<void>;
+  /** 到现在为止收到这个 run 的几条 run_done_ack。 */
+  ackCount(runId: RunId): number;
   /** 连接关闭时的 close code。 */
   closed(timeoutMs?: number): Promise<number>;
   /** 收到还没取走的报文。关闭帧之后不会再来，所以 closed 兑现之后这就是这条连接收到的全部。 */
@@ -105,6 +107,7 @@ export async function openAgent(port: number): Promise<AgentClient> {
         });
       }
     },
+    ackCount: (runId) => acks.filter((acked) => acked === runId).length,
     received: () => [...inbox],
     close: () => socket.close(),
   };

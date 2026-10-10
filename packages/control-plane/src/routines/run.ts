@@ -6,7 +6,7 @@ import { dispatchUserMessage, type DispatchOutcome } from "../agent/dispatch.js"
 import { SELECTION_FAILURE } from "../agent/computer-selection.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { findSoloGroup } from "../repo/groups.js";
-import { appendMessage } from "../repo/messages.js";
+import { appendMessage, type Tx } from "../repo/messages.js";
 import {
   chargeRoutineRun,
   failRoutineRun,
@@ -96,16 +96,18 @@ export async function runRoutine(
 /**
  * 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费。
  * 回 null 说明这个 run 不是例行任务派的。
+ * 在 run_done 的结账事务里记：note 是往后缀的，自身不幂等，只记一次靠这个事务的 claimCharge。
+ * 推送留给调用方在提交之后做（pushRoutineUpdated），事务回滚了页面不能先看到「ok · ¥0.60」。
  */
-export async function chargeRoutineRunOf(
-  deps: RoutineDeps,
-  runId: RunId,
-  amount: number,
-): Promise<RoutineRunRef | null> {
-  const ref = await routineRunOfRun(deps.db, runId);
+export async function chargeRoutineRunIn(tx: Tx, runId: RunId, amount: number): Promise<RoutineRunRef | null> {
+  const ref = await routineRunOfRun(tx, runId);
   if (ref === null) return null;
-  await pushIfChanged(deps, await chargeRoutineRun(deps.db, ref.routineRunId, `¥${amount.toFixed(2)}`));
+  await chargeRoutineRun(tx, ref.routineRunId, `¥${amount.toFixed(2)}`);
   return ref;
+}
+
+export async function pushRoutineUpdated(deps: RoutineDeps, routineId: string): Promise<void> {
+  await pushIfChanged(deps, routineId);
 }
 
 export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<RoutineRunRef | null> {

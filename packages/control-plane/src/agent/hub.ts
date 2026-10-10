@@ -27,8 +27,9 @@ import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
+import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { abandonRun, handleAgentEvent } from "./events.js";
+import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
 import type { GroupTurns } from "./group-turn.js";
 
 export const AGENT_PATH = "/agent";
@@ -133,8 +134,9 @@ export class AgentHub {
     // 同一条 socket 的帧按到达顺序：上一帧在链上做完，下一帧才排进链。并发跑的话三段 delta 会乱序落库。
     // 两帧之间可能插进这台电脑另一条连接的 hello，插进来之后这条连接剩下的帧在任务开头整条丢掉。
     let inbox: Promise<void> = Promise.resolve();
-    const queue = (step: () => Promise<void>, failure: string) => {
-      const tail = inbox.then(step).catch((error: unknown) => console.error(failure, error));
+    // 日志只记错误类别和 id，异常原文可能夹着用户正文或凭据。
+    const queue = (step: () => Promise<void>, failure: (error: unknown) => string) => {
+      const tail = inbox.then(step).catch((error: unknown) => console.error(failure(error)));
       inbox = tail;
       this.#inboxTails.add(tail);
       void tail.then(() => this.#inboxTails.delete(tail));
@@ -145,32 +147,35 @@ export class AgentHub {
       if (this.#lifecycle === "closing") return;
       silence.refresh();
       const text = raw.toString();
-      queue(async () => {
-        const current = conn;
-        if (current !== null) {
-          await this.#enqueue(current.computerId, () => this.#onFrame(current, text));
-          return;
-        }
-        const message = parseFrame(text, "未握手的连接");
-        // 还没认上身份，除了 hello 一律不理。
-        if (message === null || message.type !== "hello") return;
-        clearTimeout(deadline);
-        // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
-        const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
-        if (computer === null) {
-          socket.close(CLOSE_BAD_HELLO, "电脑号或 token 对不上");
-          return;
-        }
-        if (this.#lifecycle === "closing") {
-          socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
-          return;
-        }
-        this.#countQueuedHello(computer.id, 1);
-        await this.#enqueue(computer.id, async () => {
-          this.#countQueuedHello(computer.id, -1);
-          conn = await this.#onHello(socket, computer, message.activeRuns);
-        });
-      }, "处理电脑代理报文出错");
+      queue(
+        async () => {
+          const current = conn;
+          if (current !== null) {
+            await this.#enqueue(current.computerId, () => this.#onFrame(current, text));
+            return;
+          }
+          const message = parseFrame(text, "未握手的连接");
+          // 还没认上身份，除了 hello 一律不理。
+          if (message === null || message.type !== "hello") return;
+          clearTimeout(deadline);
+          // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
+          const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
+          if (computer === null) {
+            socket.close(CLOSE_BAD_HELLO, "电脑号或 token 对不上");
+            return;
+          }
+          if (this.#lifecycle === "closing") {
+            socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
+            return;
+          }
+          this.#countQueuedHello(computer.id, 1);
+          await this.#enqueue(computer.id, async () => {
+            this.#countQueuedHello(computer.id, -1);
+            conn = await this.#onHello(socket, computer, message.activeRuns);
+          });
+        },
+        (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
+      );
     });
 
     socket.on("error", () => socket.close());
@@ -181,11 +186,14 @@ export class AgentHub {
       clearTimeout(deadline);
       clearTimeout(silence);
       if (this.#lifecycle === "closing") return;
-      queue(async () => {
-        const closed = conn;
-        if (closed === null) return;
-        await this.#enqueue(closed.computerId, () => this.#onClose(closed));
-      }, "把电脑标记为休眠出错");
+      queue(
+        async () => {
+          const closed = conn;
+          if (closed === null) return;
+          await this.#enqueue(closed.computerId, () => this.#onClose(closed));
+        },
+        (error) => `把电脑 ${conn?.computerId ?? "（未握手）"} 标记为休眠出错：${errorKind(error)}`,
+      );
     });
   }
 
@@ -345,6 +353,10 @@ export class AgentHub {
       const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
       await Promise.all(others.map((connection) => this.#sendConfig(connection, "changed")));
     }
+    // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
+    await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
+      console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
+    );
     return accepted;
   }
 
@@ -358,7 +370,7 @@ export class AgentHub {
     const timer = setTimeout(() => {
       this.#graceTimers.delete(closed.computerId);
       this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
-        (error: unknown) => console.error("断连后收尾 run 出错", error),
+        (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
       );
     }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
     timer.unref();
@@ -392,18 +404,10 @@ export class AgentHub {
       if (shouldStop?.()) return;
       if (active.has(run.runId)) continue;
       if (shouldStop?.()) return;
-      const abandoned = await abandonRun(
-        {
-          db: this.#deps.db,
-          push: this.#deps.push,
-          agents: this,
-          groupTurns: this.#deps.groupTurns,
-          notifications: this.#deps.notifications,
-        },
-        ownerId,
-        run,
-        { text: DISCONNECT_NOTICE, reason: DISCONNECT_NOTICE },
-      );
+      const abandoned = await abandonRun(this.#routineDeps(), ownerId, run, {
+        text: DISCONNECT_NOTICE,
+        reason: DISCONNECT_NOTICE,
+      });
       const routine = abandoned?.routine ?? null;
       if (routine !== null) {
         await this.#deps.notifications.publish(ownerId, {
@@ -413,6 +417,16 @@ export class AgentHub {
         });
       }
     }
+  }
+
+  #routineDeps(): RoutineDeps {
+    return {
+      db: this.#deps.db,
+      push: this.#deps.push,
+      agents: this,
+      groupTurns: this.#deps.groupTurns,
+      notifications: this.#deps.notifications,
+    };
   }
 
   /** 排进这台电脑的链。上一个任务抛错不影响下一个，错误由排任务的那一方接住记日志。 */
@@ -491,6 +505,18 @@ export class AgentHub {
  * 丢弃时打一行警告，只带 type 和出错的字段路径：正文里有 token、草稿和链接，不进日志。
  * 新旧版本混跑时形状对不上就走到这里，不留痕的话已经发出去的帖子会在十分钟后被记成没发出去，查不到原因。
  */
+/** 出错日志里带上报文的 runId，只认校验过的报文。 */
+function frameRunId(raw: string): string {
+  try {
+    const parsed = AgentToControl.safeParse(JSON.parse(raw));
+    return parsed.success && "runId" in parsed.data && parsed.data.runId !== undefined
+      ? ` run ${parsed.data.runId}`
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 function parseFrame(raw: string, from: string): AgentToControl | null {
   let json: unknown;
   try {

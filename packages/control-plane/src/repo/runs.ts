@@ -1,5 +1,5 @@
 import { BotId, ComputerId, GroupId, RunId, type MessageId, type UsageRecord, type UserId } from "@baize/shared";
-import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -110,17 +110,21 @@ export type RunTotals = {
 /**
  * 只结束还没结束的那一行。重复的 run_done、不认识的 runId、以及对不上群的 runId 都返回 null，
  * 幂等靠这条 UPDATE 的 WHERE 本身，不靠先查后写。
+ * `run_done` 结束的行账还没结，charged_at 留空等 claimCharge；abandonRun 结束的行没有账，同一句就写上。
  */
 export async function finishRun(
   db: Db | Tx,
   runId: RunId,
   groupId: GroupId | null,
   totals: RunTotals,
+  ending: "run_done" | "abandoned",
 ): Promise<UsageRecord | null> {
+  const now = new Date();
   const [row] = await db
     .update(runs)
     .set({
-      endedAt: new Date(),
+      endedAt: now,
+      chargedAt: ending === "abandoned" ? now : null,
       steps: totals.steps,
       inputTokens: totals.inputTokens,
       outputTokens: totals.outputTokens,
@@ -133,6 +137,20 @@ export async function finishRun(
         isNull(runs.endedAt),
       ),
     )
+    .returning();
+  return row === undefined ? null : toUsageRecord(row);
+}
+
+/**
+ * 认领结账：已结束、还没结过账的行才给，RETURNING 的是结束时写下的用量，费用卡按它出。
+ * 已结过账的、还没结束的、abandonRun 收掉的都回 null。两条 run_done 先后撞上同一行时第二条拿不到行，
+ * 幂等靠 WHERE charged_at IS NULL，不先查后写。调用方在事务里拿，账没写完事务回滚，认领一起回滚。
+ */
+export async function claimCharge(tx: Tx, runId: RunId): Promise<UsageRecord | null> {
+  const [row] = await tx
+    .update(runs)
+    .set({ chargedAt: new Date() })
+    .where(and(eq(runs.id, runId), isNotNull(runs.endedAt), isNull(runs.chargedAt)))
     .returning();
   return row === undefined ? null : toUsageRecord(row);
 }
@@ -190,6 +208,31 @@ export async function openRunsForComputer(
   return rows.map((row) => ({
     runId: RunId.parse(row.runId),
     groupId: row.groupId === null ? null : GroupId.parse(row.groupId),
+  }));
+}
+
+/**
+ * 这台电脑名下结束了、没结账的 run：结账事务没提交过，或是先记着、还没进费用卡的 pass。
+ * 群或 Bot 删掉了的行没有费用卡可落，不在里面。
+ */
+export async function unchargedRunsForComputer(db: Db, computerId: ComputerId): Promise<readonly RunScope[]> {
+  const rows = await db
+    .select({ runId: runs.id, botId: runs.botId, groupId: runs.groupId })
+    .from(runs)
+    .where(
+      and(
+        eq(runs.computerId, computerId),
+        isNotNull(runs.endedAt),
+        isNull(runs.chargedAt),
+        isNotNull(runs.botId),
+        isNotNull(runs.groupId),
+      ),
+    )
+    .orderBy(runs.endedAt);
+  return rows.map((row) => ({
+    runId: RunId.parse(row.runId),
+    botId: BotId.parse(row.botId),
+    groupId: GroupId.parse(row.groupId),
   }));
 }
 

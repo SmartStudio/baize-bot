@@ -15,6 +15,7 @@ import { randomBytes } from "node:crypto";
 import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import type { z } from "zod";
 import type { Db } from "../db/client.js";
+import type { Tx } from "./messages.js";
 import { bots, routineRuns, routines, runs, type StoredTrigger } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toRoutine } from "./rows.js";
@@ -284,7 +285,7 @@ export type RoutineRunRef = {
 };
 
 /** 这个 run 是哪条运行记录派出去的。回 null 就是普通的一次对话，不是例行任务。 */
-export async function routineRunOfRun(db: Db, runId: string): Promise<RoutineRunRef | null> {
+export async function routineRunOfRun(db: Db | Tx, runId: string): Promise<RoutineRunRef | null> {
   const [row] = await db
     .select({
       routineRunId: routineRuns.id,
@@ -339,7 +340,7 @@ export async function noteRoutineRun(db: Db, routineRunId: string, note: string)
  * 活跑完了。还在 running 的记成 ok，已经停下的保持原状，两种都在 note 后面缀上这次的花费。
  * 停下等点头的那条因此长成「1 条等你点头 · ¥0.80」。
  */
-export async function chargeRoutineRun(db: Db, routineRunId: string, cost: string): Promise<string | null> {
+export async function chargeRoutineRun(db: Db | Tx, routineRunId: string, cost: string): Promise<string | null> {
   const [row] = await db
     .update(routineRuns)
     .set({

@@ -42,14 +42,14 @@
 
 每行上下文带 `settled`，说的是这一行的字还会不会变。Bot 消息 `streaming` 为 true 时是 false。运行器每个文字块一条消息，`text_end` 之后那条不再长，所以 `streaming` 就是「这条还会长」。卡按状态定，每种一张表写在 `dispatch.ts`，加状态时编译器逼着表态：
 
-| 卡       | 还会变（`settled: false`）                                   | 不再变                         |
-| -------- | ------------------------------------------------------------ | ------------------------------ |
-| 审批     | `pending`                                                    | `approved` `rejected` `expired` |
-| 交接     | `pending`                                                    | `accepted`                     |
-| 草稿     | `pending` `approved` `publishing` `returned` `failed`        | `published`                    |
-| 内容计划 | `pending`                                                    | `approved` `returned`          |
-| skill 卡 | `offered`                                                    | `saved` `dismissed`            |
-| 方案卡   | `offered`                                                    | `started` `dismissed`          |
+| 卡       | 还会变（`settled: false`）                            | 不再变                          |
+| -------- | ----------------------------------------------------- | ------------------------------- |
+| 审批     | `pending`                                             | `approved` `rejected` `expired` |
+| 交接     | `pending`                                             | `accepted`                      |
+| 草稿     | `pending` `approved` `publishing` `returned` `failed` | `published`                     |
+| 内容计划 | `pending`                                             | `approved` `returned`           |
+| skill 卡 | `offered`                                             | `saved` `dismissed`             |
+| 方案卡   | `offered`                                             | `started` `dismissed`           |
 
 草稿发出去之前都算还会变：批了的会发，没开自动发的账号改了档字也跟着变；退回的和没发出去的 Bot 还能改了再交，改完回到待看。用户消息、system、工具行一律 true，工具行的状态会变但写出来的字不含状态。状态一变字就变，运行器的水位把这一行当半截记着，字变了再拼一次整句，所以批之前 Bot 看到「还在等你点头」，批了以后下一轮看到「你批准了」。拼法见 bot-runner README 的「prompt 拼法」。run 收尾时这个 Bot 在这个群里还停在 `streaming: true` 的文字一并收成 false，同一个 Bot 在这个群里还有别的 run 开着时这次不收，留给最后结束的那条（见「run 收尾」），收尾之后它就是定稿；早先断掉的旧半截要等这个 Bot 下次在这个群里收尾才收掉，在那之前 `settled` 一直是 false，运行器靠「字没变不重拼」挡住重复。没定稿的卡每轮都标 false 送过去，也是靠这一条只拼一次。报文里 `settled` 缺省为 true，控制面和电脑代理升级不分先后：旧控制面不发这个字段，新代理把行都当定稿，退回升级前的拼法，不会因为 parse 不过把整条 prompt 丢掉；新控制面配旧代理，多出来的字段被 zod 丢掉，照旧工作。
 
@@ -101,6 +101,16 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 消息表没有 run 列，Bot 文字的正文里也没有 runId，收尾只能按「这个群里这个 Bot 还在流的文字」找。同一个群里另一个 Bot 的 run（插话派出去的）不受影响。同一个 Bot 却不一定只有这一条 run：本机掉线后下一条派到远程电脑，或另一台控制面上同 Bot 同群的 run 还开着，这时按 Bot 找会把那条 run 还在长的文字一起收掉。所以收文字的 UPDATE 带一个条件：这个 Bot 在这个群里除了正在收尾的这条，没有别的 `ended_at IS NULL` 的 run；有就整条跳过，一个字不收，也不推定稿。让最后一条结束的 run 收，它按 Bot 找时会把前面跳过留下的一并收掉。
 
 这个条件要在提交前一直成立，靠一把按 (群, Bot) 算键的事务级 advisory 锁：`run_done` 和 `abandonRun` 的事务第一句先拿它（`lockSettlement`、`lockSettlementOfRun`，`pg_advisory_xact_lock` 的两参数形式，第一参数是这块自己的命名空间常量，和仓库里别处单参数的 advisory 锁不在一个键空间），再 `finishRun`；`startRun` 也在自己的事务里先拿同一把再插 run 行。于是同 Bot 同群的两条收尾排队，后来的那条等前一条提交，之后的语句拿新快照，看得见前一条已经结束，把两条的文字一起收掉；收尾进行中也不会冒出新 run。每个收尾事务只收一条 run，只拿一把键。锁序固定是 advisory → runs → messages，run 名下的写帧不拿 advisory。在这把锁之下，`NOT EXISTS` 看见的「别的 run 已经结束」是对的，「收它没错」还依赖一条文字只属于一个 run：正常运行器每个文字块生成新的 UUID 当 messageId，成立。剩下的代价：一条 run 挂在掉线电脑上没收尾时，同 Bot 同群的定稿要等它被对账或宽限收尾，只是晚收，不会收错。没往正文里塞 runId，是因为正文 jsonb 的形状别处直接读（e2e 用例按整条正文比对），shared 和迁移也都不动。早先没收尾就断掉的半截，在这个 Bot 下次在这个群里收尾时一并收掉。
+
+**结账是收尾之后的第二个事务。** `run_done` 的费用卡和例行记账不在结束 run 行的事务里：费用卡要并进多 Bot 回合的汇总或先记着（下一段），这要看回合的内存状态，结束行的事务里不读它。两个事务之间控制面可能抛错或停机，结束了的行不能让补发的 `run_done` 直接回确认，所以 `runs` 表多一列 `charged_at`：`run_done` 结束行时留空，`abandonRun` 没有账要结，结束行的同一句就写上。结账事务（`events.ts` 的 `chargeRun`）第一句 `claimCharge`（`UPDATE runs SET charged_at = now() WHERE id = ? AND ended_at IS NOT NULL AND charged_at IS NULL RETURNING *`），拿不到行就是已结过账或已被对账收掉，什么都不写；拿到行就在同一个事务里落费用卡（`appendMessage` 或并进汇总的 `replaceMessageBody`）和例行记账（`chargeRoutineRunIn`），哪一件抛错整个事务回滚，认领一起回滚，下一次补发再认领一次。例行记账的 note 是往后缀的（`¥0.60 · ¥0.30`），自身不幂等，只记一次靠这个事务。费用卡按 `claimCharge` 返回的行上的步骤和金额出，不按补发那条报文算，于是补发带来的数字和第一次一样。结账提交之后才推送费用卡、推送例行任务、推进回合（`groupTurns.runDone` 只认当前回合的 runId，重复调用是空操作）。例行状态推送只管实时视图：丢了这条推送，已加载的例行列表停在旧状态，WebSocket 重连不会补拉它，只有整页刷新或重新进入时的 HTTP 读取拿到库里的正确状态。所以结账提交后这条推送抛错只记日志，不挡确认、回合推进和同一次 hello 里后面的行，也不为它另设补推入口。推送按 id 整条覆盖，补发撞上已结账的行也再推一次，重复无害。
+
+费用卡单落、并进汇总还是先记着，看运行器此前的文字块（`(pass)`）和回合的内存状态，这两样只在第一次结账时读，读到的结论记在 `events.ts` 的 `costBookings` 里，结账失败后补发沿用，不再并第二次；控制面重启后这份记忆没了，补发按普通回话单落一张卡。先记着的 pass 不结账：认领在同一个事务里回滚，`charged_at` 留空就是它落库的样子，金额在它自己的 run 行上，确认照回。这个群下一张费用卡在自己的结账事务里逐个 `claimCharge` 这些 pass，认领到的才把步骤和金额加进卡里，所以卡上的数字只来自库里认领成功的行，和 `group-turn.ts` 里 `heldPass` 记的数不再相干。
+
+**欠账在 hello 时补齐。** 结账失败的行要等代理补发，而代理的补发只在重连 hello 之后发，每条最多三次，待发表最多 64 条，放手之后这条 run 就只剩库里的「`ended_at` 有值、`charged_at` 为空」记得。所以 `hub.ts` 的 hello 在发完 config 之后调 `settleUnchargedRuns`：把这台电脑名下这样的行按 `run_done` 的同一条路（`settleCharge`）一条条结掉，推送费用卡和例行状态、推进回合，结果通知只在这个进程里还记得那次结账结论时弹。补发能到的时刻（重连 hello，包括控制面重启后所有电脑的重连）这里都在，而且不受次数和容量上限，所以故障排除后的下一次 hello 就把欠账补齐；故障还在时补结账一样抛错，只记日志，不挡上线，也不为清代理的待发表提前回确认；一条结不成也不挡后面的行，各行的认领互不相干。日志只记错误类别（`name`，pg 错误带 `code`）和电脑、run 的 id，不打印异常原文，原文可能夹着用户正文或凭据。还在回合里先记着的 pass（按回合的 epoch 认，只认得本进程内存里的回合，别的实例的回合它不知道）不动，它等下一张费用卡；回合已经没了的（比如这一轮人人都 pass）、或是控制面重启后谁也不记得它是 pass 的，单落一张卡。重启后的退化就是多一张卡：卡上合计和 run 账本一致，只是本该并成一张的拆成两张。群或 Bot 删掉了的行（`group_id` 或 `bot_id` 已置空）不在 hello 的枚举里，不补；这只管 hello 枚举，删 Bot 之前已经缓存进同群后续结账结论（`costBookings` 的 `heldRuns`）的 pass，照样由那张卡认领并入，金额只算一次，不跨用户。没走定时扫描：欠账只会出在某台电脑的 `run_done` 上，那台电脑不重连时没有新的补发要接，下一次 hello 和补发够得着的时刻是同一个。
+
+**迁移 0023 和部署顺序。** 迁移把已有的结束行的 `charged_at` 回填成 `ended_at`，不然老 run 的 `run_done` 晚到会再出一张卡。回填只覆盖迁移执行时已经结束的行，旧版控制面不认这一列：迁移之后还在跑的旧实例结束 run 时不写 `charged_at`，补发落到新实例上会再结一次账，多一张卡、例行 note 多缀一次。所以部署顺序固定：先停完所有旧控制面实例，再跑 0023，再起新实例，不和旧实例混跑。没写兼容代码。迁移前旧实现里已结束、费用卡没写成的历史行也会被回填成已结账，迁移不识别也不补它们。
+
+`test/run-done-sidefx.test.ts` 钉着费用卡写入抛错后补发补出费用卡、例行记账中途失败后补发补齐且只记一次、正常 `run_done` 重复送达不重复出费用卡也不重复推进回合、先记着的 pass 由下一张卡认领、已确认的 pass 在真重启子进程后自己成一张卡且合计一致、结账后例行推送抛错只记日志且确认照回、补发放手之后的欠账在故障排除后的下一次 hello 补齐、hello 里前一条推送抛错或结账失败都不挡后一条、补结账出错的日志不带异常原文。
 
 收尾之后这个 run 名下晚到的帧作废：不落库、不推送、不回电脑。危险的是帧已经过了 `resolveRun`、正要写，收尾这时提交了。同一个进程里这台电脑的帧和收尾排在同一条链上，排不出这种交错；挡的是多个控制面共库（滚动重启）时另一个进程里的收尾。做法是每条 run 名下的写在自己的事务里先过 `lockOpenRun`（`SELECT id FROM runs WHERE id = ? AND bot_id = ? AND group_id = ? AND ended_at IS NULL FOR SHARE`，Bot 和群是 `resolveRun` 校验过的那两个，Bot 被删、外键把 `bot_id` 置空后在途的帧也查不到行），拿不到行整条不写，`whileRunOpen` 把「开事务、过这一道、再写」包成一步。只在写的 WHERE 里带 `EXISTS (... ended_at IS NULL)` 不够：READ COMMITTED 下子查询看不见收尾还没提交的结束，插进来的行又不在收尾那几条 UPDATE 开始时的快照里。共享锁和 `finishRun` 的 UPDATE 互斥：写先拿到锁，收尾等它提交，后面打 failed、收文字的语句看得见它；收尾先拿到，写等它提交后重查，查不到行。用 `FOR SHARE` 不用 `FOR KEY SHARE`，后者和 `finishRun` 的 `FOR NO KEY UPDATE` 不冲突。锁的顺序固定是先 run 行后消息行，收尾的事务在 advisory 锁之后第一句就是 `finishRun`，不会死锁。
 
@@ -236,7 +246,7 @@ approvals 行的 `bot_id` 外键是级联删除，事务提交后那一行随 Bo
 
 有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次，收尾做的事见「run 收尾」。
 
-**断线期间跑完的 run 不丢结果。** 运行器的每条 `run_done` 先进电脑代理的待发表（按 runId 留第一条，`computer-agent/src/agent.ts` 的 `unackedRunDones`），连接在就当场发，不在就留着。控制面处理完一条 `run_done` 回 `run_done_ack`，代理收到才删；重复的、不认识的、run 已经被对账收尾的也回，不然代理每次重连都会补发它；处理抛错不回，留给下次补发。确认只说明 run 行的收尾（`finishRun` 那个条件写和同一事务里的工具行、文字定稿）已经提交，不说明事务之后的费用卡、例行记账、多 Bot 回合推进都做完了：`finishRun` 已提交、费用卡写失败时这次不回确认，可下一次补发撞上 `ended_at IS NULL` 什么都不做就回确认，漏掉的这些副作用不会随补发补齐。这是基底就有的收尾完整性缺口（todo 584），这里不修。代理重连时把待发表里的 runId 并进 hello 的 `activeRuns`，对账当它还在跑、不按断线收尾，welcome 之后按留下的顺序补发，于是 run 的步骤、token、费用卡都是真值（`test/run-done-replay.test.ts`、e2e `test/run-done-replay.test.ts` 掐断代理那一段连接钉着）。
+**断线期间跑完的 run 不丢结果。** 运行器的每条 `run_done` 先进电脑代理的待发表（按 runId 留第一条，`computer-agent/src/agent.ts` 的 `unackedRunDones`），连接在就当场发，不在就留着。控制面处理完一条 `run_done` 回 `run_done_ack`，代理收到才删；重复的、不认识的、run 已经被对账收尾的也回，不然代理每次重连都会补发它；处理抛错不回，留给下次补发。确认说明 run 行的收尾（`finishRun` 那个条件写和同一事务里的工具行、文字定稿）、结账（费用卡和例行记账，见「run 收尾」里的结账一段）和多 Bot 回合推进都已经做完：结账事务抛错这次不回确认，下一次补发撞上「`ended_at` 有值、`charged_at` 为空」的行接着结账，结完才回。结果通知是例外，它只是一条推送，没有落库的地方做幂等，结账提交之后、通知之前抛错的那次补发不再弹，最多弹一次，用户没收到就从群里和例行运行记录里看结果。代理放手之后的欠账由 hello 补结账接住，见「run 收尾」里的欠账一段。代理重连时把待发表里的 runId 并进 hello 的 `activeRuns`，对账当它还在跑、不按断线收尾，welcome 之后按留下的顺序补发，于是 run 的步骤、token、费用卡都是真值（`test/run-done-replay.test.ts`、e2e `test/run-done-replay.test.ts` 掐断代理那一段连接钉着）。
 
 为什么要确认帧，不靠「发出去就算」：连接看着开着、帧却没进控制面的情形只有控制面知道。停机时已有 socket 来的帧同步丢掉（上一段），hello 认完身份之前到的非 hello 帧不理，TCP 半开时 `send` 也不报错。为什么让对账等补发，不让晚到的 `run_done` 改写断线收尾：断线收尾已经推过群里那句、把审批打成过期、给例行记了失败和 stuck，改写得把这些一件件撤回，还会在一句「断过线」之后再冒一张费用卡，一个 run 推两次结束。等补发的话收尾仍只发生一次。补发和断线收尾不论谁先，都只有一边推：`finishRun` 的 `WHERE ended_at IS NULL` 让后到的那条什么都不做，只回确认。
 

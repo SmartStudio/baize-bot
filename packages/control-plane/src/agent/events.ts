@@ -3,13 +3,16 @@ import {
   GroupId,
   type AgentToControl,
   type BotId,
+  type ComputerId,
   type LoginFailure,
   type Message,
   type MessageBody,
   type Platform,
   type RunId,
+  type UsageRecord,
   type UserId,
 } from "@baize/shared";
+import { TransactionRollbackError } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { expireLogin } from "../account-expiry.js";
@@ -35,24 +38,28 @@ import { routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
+  claimCharge,
   finishRun,
   latestOpenRun,
   lockSettlement,
   lockSettlementOfRun,
   openRunsForComputer,
   runBelongsTo,
+  unchargedRunsForComputer,
   whileRunOpen,
+  type RunScope,
 } from "../repo/runs.js";
 import { findTaskByGroup, replaceChecklist, setCurrentBot, setProjectCadence } from "../repo/tasks.js";
 import {
-  chargeRoutineRunOf,
+  chargeRoutineRunIn,
   EXPIRED_APPROVAL_NOTE,
   failRoutineRunOf,
   holdRoutineRunOf,
+  pushRoutineUpdated,
   type RoutineDeps,
 } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { HANDOFF_LIMIT_NOTICE, type GroupTurns } from "./group-turn.js";
+import { HANDOFF_LIMIT_NOTICE, type GroupTurns, type PassAbsorption } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
 import { handlePreferenceAdd } from "./events/preference-add.js";
@@ -96,7 +103,7 @@ export async function handleAgentEvent(
     case "run_done":
       await onRunDone(deps, conn, message);
       // 处理完才回。不认的、重复的也回，不然代理每次重连都要补发它；处理抛错就不回，留给下次补发。
-      // 确认只保证 run 行的收尾提交了：事务之后的费用卡、例行记账这些副作用失败过的，补发撞上已结束的行直接回确认，不补（todo 584）。
+      // 处理完是指结束行、结账（费用卡和例行记账）、回合推进都做完了；补发撞上结束了没结账的行接着结账。
       deps.agents.send(conn.computerId, { type: "run_done_ack", runId: message.runId });
       return;
     case "agent_error":
@@ -265,6 +272,7 @@ const resultRuns = new Set<RunId>();
 function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
   resultRuns.delete(runId);
+  costBookings.delete(runId);
 }
 
 /** 收成定稿的 Bot 文字沿用流式那条推送：空 delta 带 done 和收尾那次写下的 revision，客户端照常把它收尾。 */
@@ -294,7 +302,13 @@ export async function abandonRun(
 ): Promise<{ readonly routine: RoutineRunRef | null } | null> {
   const result = await deps.db.transaction(async (tx) => {
     await lockSettlementOfRun(tx, run.runId);
-    const usage = await finishRun(tx, run.runId, run.groupId, { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 });
+    const usage = await finishRun(
+      tx,
+      run.runId,
+      run.groupId,
+      { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 },
+      "abandoned",
+    );
     if (usage === null) return null;
     const expiredApprovals = await expireApprovalsOfRun(tx, run.runId);
     const failedTools = run.groupId === null ? [] : await failRunningToolCalls(tx, run.groupId, run.runId);
@@ -395,6 +409,12 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
   else conn.toolCallMessages.delete(key);
 }
 
+/**
+ * run_done 分两个事务。第一个结束 run 行（finishRun 的 WHERE ended_at IS NULL 让重复的什么都不做），
+ * 第二个结账（chargeRun）。两个都提交后才推进回合、弹通知，确认帧在这之后回。
+ * 费用卡怎么出（单落、并进汇总、先记着）看运行器此前的文字块和回合的内存状态，这两样只在第一次结账时读，
+ * 读到的结论记在 costBookings 里，结账事务失败后补发沿用，不再碰回合状态第二次。
+ */
 async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: RunDone): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
@@ -403,78 +423,212 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     (event.inputTokens / 1_000_000) * deps.priceInputPerM + (event.outputTokens / 1_000_000) * deps.priceOutputPerM;
   const finished = await deps.db.transaction(async (tx) => {
     await lockSettlement(tx, groupId, event.botId);
-    const usage = await finishRun(tx, event.runId, event.groupId, {
-      steps: event.steps,
-      inputTokens: event.inputTokens,
-      outputTokens: event.outputTokens,
-      amount,
-    });
+    const usage = await finishRun(
+      tx,
+      event.runId,
+      event.groupId,
+      { steps: event.steps, inputTokens: event.inputTokens, outputTokens: event.outputTokens, amount },
+      "run_done",
+    );
     if (usage === null) return null;
     // 旧运行器不带 prompt 字段，它的 run_done 一直是「收下就确认」，维持原样。
     if ((event.prompt ?? "entered") === "entered") await confirmContext(tx, event.runId);
     return {
-      usage,
       failedTools: await failRunningToolCalls(tx, event.groupId, event.runId),
       settled: await settleStreamingText(tx, event.groupId, event.botId, event.runId),
     };
   });
-  // 重复的 runId 和不认识的 runId 在这里都是 null，不再多记一行也不再多一张花费卡。
-  if (finished === null) return;
-  const { usage } = finished;
-  for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
-  pushSettled(deps.push, conn.ownerId, finished.settled);
+  // 重复的、对账已经收尾的 run 在这里是 null：行已经结束，工具行和文字定稿都推过了，剩下的只有可能没结完的账。
+  if (finished !== null) {
+    for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
+    pushSettled(deps.push, conn.ownerId, finished.settled);
+  }
 
-  const passed = runPassed(event.runId);
-  const hasResult = !passed && resultRuns.has(event.runId);
-  clearTextPrefixes(event.runId);
+  const run = { runId: event.runId, botId: event.botId, groupId };
+  await settleCharge(deps, conn.ownerId, run, (usage) => bookCost(deps, conn.ownerId, run, usage));
+}
+
+/**
+ * hello 时补结账：这台电脑名下结束了、没结账的 run，按 run_done 的路子一条条结掉。
+ * 代理的补发只在重连 hello 之后发，有次数和容量上限，放手的那些账只剩库里 charged_at 为空记得；
+ * 补发够得着的时刻这里都在，而且不受上限，所以故障排除后的下一次 hello（包括控制面重启后的重连）就把欠账补齐。
+ * 还在回合里先记着的 pass 不动，它等这一轮下一张费用卡；回合已经没了的，单落一张卡。
+ * 费用卡沿用这个进程里结账失败时记下的结论，没有就单落，结果通知同 run_done 一样只在结账提交的这次弹。
+ */
+export async function settleUnchargedRuns(deps: RoutineDeps, computerId: ComputerId, ownerId: UserId): Promise<void> {
+  for (const run of await unchargedRunsForComputer(deps.db, computerId)) {
+    const held = heldPasses.get(run.runId);
+    if (held !== undefined) {
+      const live = deps.groupTurns
+        .snapshots(ownerId)
+        .some((turn) => turn.groupId === run.groupId && turn.epoch === held.epoch);
+      if (live) continue;
+      heldPasses.delete(run.runId);
+    }
+    // 一条结不成不挡后面的：各行的认领互不相干，账留在库里等下一次 hello。
+    await settleCharge(deps, ownerId, run, () => ({ kind: "card", heldRuns: [], hasResult: false })).catch(
+      (error: unknown) => console.error(`电脑 ${computerId} 上线补结账 run ${run.runId} 失败：${errorKind(error)}`),
+    );
+  }
+}
+
+/** 日志只记错误类别（name，pg 错误带 code）。异常原文可能夹着用户正文或凭据，不进日志。 */
+export function errorKind(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  return "code" in error && typeof error.code === "string" ? `${error.name} ${error.code}` : error.name;
+}
+
+/**
+ * 结账提交之后推送费用卡、推送例行任务、推进回合、弹结果通知。run_done 和 hello 补结账共用。
+ * 回合推进只认当前回合的 runId，重复调用是空操作；结账提交后推进抛错的，补发时账已结、回合还在这里，接着推。
+ */
+async function settleCharge(
+  deps: RoutineDeps,
+  ownerId: UserId,
+  run: RunScope,
+  book: (usage: UsageRecord) => CostBooking,
+): Promise<void> {
+  const charge = heldPasses.has(run.runId) ? null : await chargeRun(deps, run, book);
+  clearTextPrefixes(run.runId);
+  if (charge?.kind === "card") {
+    deps.push.push(ownerId, { type: "message", message: charge.message });
+    deps.groupTurns.rememberCost(run.groupId, run.runId, {
+      messageId: charge.message.id,
+      runId: run.runId,
+      botId: run.botId,
+      steps: charge.steps,
+      amount: charge.amount,
+    });
+  }
+  if (charge?.kind === "merged" && charge.message !== null) {
+    deps.push.push(ownerId, { type: "message", message: charge.message });
+  }
+  // 例行状态推送只管实时视图，推送失败只记日志，不挡回合推进和后面的行。丢了这条，已加载的例行列表停在旧状态，
+  // WebSocket 重连不补拉它，要整页刷新或重新进入时的 HTTP 读取才拿到库里的状态。
+  // 推送按 id 整条覆盖，重放已结账的行也再推一次。
+  try {
+    const routine =
+      charge !== null && charge.kind !== "held" ? charge.routine : await routineRunOfRun(deps.db, run.runId);
+    if (routine !== null) await pushRoutineUpdated(deps, routine.routineId);
+  } catch (error) {
+    console.error(`run ${run.runId} 结账后推送例行状态失败：${errorKind(error)}`);
+  }
+  await deps.groupTurns.runDone(run.groupId, run.runId);
+  // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
+  // 通知只是一条推送，没有落库的地方可以做幂等：结账提交后到这里之前抛错的那次，补发不再弹，最多弹一次。
+  if (charge?.kind === "card" && charge.hasResult && charge.routine !== null) {
+    await deps.notifications.publish(ownerId, {
+      kind: "result",
+      text: `例行任务「${charge.routine.name}」做完了，打开群聊看结果`,
+      groupId: run.groupId,
+    });
+  }
+}
+
+type Charge =
+  | {
+      readonly kind: "card";
+      readonly message: Message;
+      readonly steps: number;
+      readonly amount: number;
+      readonly hasResult: boolean;
+      readonly routine: RoutineRunRef | null;
+    }
+  | { readonly kind: "merged"; readonly message: Message | null; readonly routine: RoutineRunRef | null }
+  | { readonly kind: "held" };
+
+/**
+ * 结账事务：claimCharge 认领 charged_at，费用卡和例行记账在同一个事务里落，哪一件抛错整个事务回滚，认领也回滚，
+ * 下一次补发或 hello 补结账再认领一次。已经结过账的回 null。
+ * 先记着的 pass 不结账，认领回滚：charged_at 为空就是它落库的样子，金额在 run 行上，
+ * 等这一轮下一张费用卡在自己的事务里认领它、把金额加进卡里；控制面重启了就由 hello 补结账单落一张。
+ */
+async function chargeRun(
+  deps: RoutineDeps,
+  run: RunScope,
+  book: (usage: UsageRecord) => CostBooking,
+): Promise<Charge | null> {
+  try {
+    return await deps.db.transaction(async (tx) => {
+      const usage = await claimCharge(tx, run.runId);
+      if (usage === null) return null;
+      const booking = costBookings.get(run.runId) ?? book(usage);
+      costBookings.set(run.runId, booking);
+      if (booking.kind === "held") return tx.rollback();
+      const routine = await chargeRoutineRunIn(tx, run.runId, usage.amount);
+      if (booking.kind === "merged") {
+        const message = await replaceMessageBody(tx, booking.cost.messageId, run.groupId, {
+          kind: "cost",
+          runId: booking.cost.runId,
+          botId: booking.cost.botId,
+          steps: booking.cost.steps,
+          amount: booking.cost.amount,
+        });
+        return { kind: "merged", message, routine } as const;
+      }
+      let { steps, amount } = usage;
+      // 先记着的 pass 只出在多 Bot 回合里，例行任务只在单 Bot 群，它们没有例行账要记。
+      for (const heldRunId of booking.heldRuns) {
+        const held = await claimCharge(tx, heldRunId);
+        if (held === null) continue;
+        steps += held.steps;
+        amount += held.amount;
+      }
+      const message = await appendMessage(tx, run.groupId, {
+        kind: "cost",
+        runId: run.runId,
+        botId: run.botId,
+        steps,
+        amount,
+      });
+      return { kind: "card", message, steps, amount, hasResult: booking.hasResult, routine } as const;
+    });
+  } catch (error) {
+    if (error instanceof TransactionRollbackError) return { kind: "held" };
+    throw error;
+  }
+}
+
+type CostBooking =
+  | { readonly kind: "card"; readonly heldRuns: readonly RunId[]; readonly hasResult: boolean }
+  | { readonly kind: "merged"; readonly cost: Extract<PassAbsorption, { kind: "merged" }>["cost"] }
+  | { readonly kind: "held" };
+
+// 结账事务失败后留着的费用卡结论，按 runId 记，结账提交或 run 被收掉时清。控制面重启就没了，
+// 那时补发的 run_done 按「普通回话」单落一张卡：文字块记忆已丢，分不出 (pass)，宁可多一张卡也不丢账。
+const costBookings = new Map<RunId, CostBooking>();
+
+// 先记着、还没进费用卡的 pass。epoch 认回合：hello 补结账时回合还在的不动，回合没了的单落。
+const heldPasses = new Map<RunId, { readonly groupId: GroupId; readonly epoch: number }>();
+
+/**
+ * `(pass)` 不单落花费。这一轮已经有汇总行就并进去，还没有就先记着，等这个群下一张费用卡一起写；
+ * 对不上当前回合的照旧单落一条。真回话的把这个群先记着的 pass 一起认领。
+ * 这里会改回合的内存状态（并进汇总、记下或取走先记着的），所以一次结账只算一次。
+ */
+function bookCost(
+  deps: AgentEventDeps,
+  ownerId: UserId,
+  { runId, botId, groupId }: RunScope,
+  usage: UsageRecord,
+): CostBooking {
+  const passed = runPassed(runId);
   if (passed) {
-    const absorbed = deps.groupTurns.absorbPassCost(groupId, event.runId, {
+    const absorbed = deps.groupTurns.absorbPassCost(groupId, runId, {
       steps: usage.steps,
       amount: usage.amount,
-      botId: event.botId,
+      botId,
     });
-    if (absorbed.kind === "merged") {
-      const updated = await replaceMessageBody(deps.db, absorbed.cost.messageId, groupId, {
-        kind: "cost",
-        runId: absorbed.cost.runId,
-        botId: absorbed.cost.botId,
-        steps: absorbed.cost.steps,
-        amount: absorbed.cost.amount,
-      });
-      if (updated !== null) deps.push.push(conn.ownerId, { type: "message", message: updated });
-    }
-    if (absorbed.kind !== "miss") {
-      await chargeRoutineRunOf(deps, event.runId, usage.amount);
-      await deps.groupTurns.runDone(event.groupId, event.runId);
-      return;
+    if (absorbed.kind === "merged") return absorbed;
+    if (absorbed.kind === "held") {
+      const turn = deps.groupTurns.snapshots(ownerId).find((snapshot) => snapshot.groupId === groupId);
+      heldPasses.set(runId, { groupId, epoch: turn?.epoch ?? -1 });
+      return absorbed;
     }
   }
-
-  const held = deps.groupTurns.takeHeldPass(groupId, event.runId);
-  const message = await appendAndPush(deps, conn.ownerId, groupId, {
-    kind: "cost",
-    runId: event.runId,
-    botId: event.botId,
-    steps: usage.steps + held.steps,
-    amount: usage.amount + held.amount,
-  });
-  deps.groupTurns.rememberCost(groupId, event.runId, {
-    messageId: message.id,
-    runId: event.runId,
-    botId: event.botId,
-    steps: usage.steps + held.steps,
-    amount: usage.amount + held.amount,
-  });
-  const routine = await chargeRoutineRunOf(deps, event.runId, usage.amount);
-  await deps.groupTurns.runDone(event.groupId, event.runId);
-  // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
-  if (hasResult && routine !== null) {
-    await deps.notifications.publish(conn.ownerId, {
-      kind: "result",
-      text: `例行任务「${routine.name}」做完了，打开群聊看结果`,
-      groupId,
-    });
-  }
+  const heldRuns = [...heldPasses].flatMap(([heldRunId, held]) => (held.groupId === groupId ? [heldRunId] : []));
+  for (const heldRunId of heldRuns) heldPasses.delete(heldRunId);
+  return { kind: "card", heldRuns, hasResult: !passed && resultRuns.has(runId) };
 }
 
 // 一个 run 按文字块分成好几条，先说了可见的话再回 (pass) 的 run 仍是回了话，花费卡要留。

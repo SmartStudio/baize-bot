@@ -455,6 +455,10 @@ export const runs = pgTable(
     isRoutine: boolean("is_routine").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
+    // 账结清的时刻：费用卡和例行记账在一个事务里落库并提交。run_done 先写 ended_at 结束行，结账提交才写这一列；
+    // abandonRun 没有账要结，结束行的同一句就写上。ended_at 有值、这一列为空的行只有一种来历：
+    // 上一次结账没提交，代理补发 run_done 撞上来时接着结，条件写 WHERE charged_at IS NULL 保证只结一次。
+    chargedAt: timestamp("charged_at", { withTimezone: true }),
     steps: integer("steps").notNull().default(0),
     inputTokens: integer("input_tokens").notNull().default(0),
     outputTokens: integer("output_tokens").notNull().default(0),
