@@ -5604,34 +5604,25 @@ ${join(h.dataDir, "bot-1", "work")}
       expect(routineOffers(h).map((message) => message.cron)).toEqual(["30 8 * * *"]);
     });
 
-    it("在项目群里提议：没写 projectGroupId 就挂在这个群的项目上，执行者按成员名单认", async () => {
+    it("项目群里 propose_routine 报错且不发 routine_offer", async () => {
       const seen = recorder();
-      const h = await assistantHarness(
-        seen,
-        { ...ROUTINE_ARGS, projectGroupId: undefined, executorBotId: "bot-2" },
-        "@bot-1 每周五",
-      );
+      const h = await assistantHarness(seen, { ...ROUTINE_ARGS, executorBotId: "bot-2" }, "@bot-1 每周五");
 
       await h.runner.prompt(projectGroupPrompt("@bot-1 每周五给这个项目出周报"));
 
-      expect(routineOffers(h)).toMatchObject([
-        { groupId: "group-xhs", projectGroupId: "group-xhs", executorBotId: "bot-2" },
-      ]);
-      expect(seen.toolResults.join("")).toContain("由小文执行");
-    });
-
-    it("项目群里执行者不在成员名单里：抛中文错并列出名单，不发上行", async () => {
-      const seen = recorder();
-      const h = await assistantHarness(seen, { ...ROUTINE_ARGS, executorBotId: "bot-9" }, "@bot-1 每周五");
-
-      await h.runner.prompt(projectGroupPrompt("@bot-1 每周五给这个项目出周报"));
-
-      expect(routineOffers(h)).toEqual([]);
+      expect(routineOffers(h), "控制面只收单聊里的例行卡，项目群里发了也会被丢掉").toEqual([]);
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
       const error = seen.toolResults.join("");
-      expect(error).toContain("没有 botId 是「bot-9」的成员");
-      expect(error, "把能选的人列给模型").toContain("小文（botId：bot-2）");
       expect(error, "出错了不能说成已发出").not.toContain("等用户点");
+      expect(error, "让 Bot 能如实转告用户去哪说").toContain("例行要在首页跟主助理说，主助理来定执行者");
+    });
+
+    it("没写 projectGroupId 就不挂项目，不会落到当前群上", async () => {
+      const h = await assistantHarness(recorder(), { ...ROUTINE_ARGS, projectGroupId: undefined }, "每周五");
+
+      await h.runner.prompt(assistantPrompt("run-1", "每周五出周报"));
+
+      expect(routineOffers(h)).toMatchObject([{ groupId: "group-1", projectGroupId: null }]);
     });
 
     it("单聊里看不到别的 Bot，写了别人的 botId 照样上行，由控制面在点加上时核对", async () => {

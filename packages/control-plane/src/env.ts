@@ -6,7 +6,7 @@ const DEV_TOOL_SECRET_KEY = "8f8d7b86df250e27ea4f1bb66c7f4dc57b75ad623154f343890
 let warnedToolSecret = false;
 
 export function databaseUrl(): string {
-  return process.env["DATABASE_URL"] ?? DEFAULT_DATABASE_URL;
+  return nonEmpty("DATABASE_URL") ?? DEFAULT_DATABASE_URL;
 }
 
 export function secureCookie(): boolean {
@@ -14,8 +14,8 @@ export function secureCookie(): boolean {
 }
 
 export function toolSecretKey(): string {
-  const key = process.env["TOOL_SECRET_KEY"];
-  if (key !== undefined) return key;
+  const key = nonEmpty("TOOL_SECRET_KEY");
+  if (key !== null) return key;
   if (!warnedToolSecret) {
     console.warn("TOOL_SECRET_KEY 没设，工具认证信息用开发密钥加密");
     warnedToolSecret = true;
@@ -89,14 +89,14 @@ export const DEFAULT_X_OAUTH_BASE_URL = "https://x.com";
 export function runtimeConfig(): RuntimeConfig {
   const gatewayModels = configuredGatewayModels();
   return {
-    publicBaseUrl: process.env["PUBLIC_BASE_URL"] ?? null,
+    publicBaseUrl: nonEmpty("PUBLIC_BASE_URL"),
     gatewayModels,
-    upstreamBaseUrl: process.env["UPSTREAM_BASE_URL"] ?? DEFAULT_UPSTREAM_BASE_URL,
+    upstreamBaseUrl: nonEmpty("UPSTREAM_BASE_URL") ?? DEFAULT_UPSTREAM_BASE_URL,
     upstreamApiKey: upstreamApiKey(),
     priceInputPerM: price("PRICE_INPUT_PER_M"),
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
-    githubApiBaseUrl: process.env["GITHUB_API_BASE_URL"] ?? DEFAULT_GITHUB_API_BASE_URL,
-    xApiBaseUrl: process.env["X_API_BASE_URL"] ?? DEFAULT_X_API_BASE_URL,
+    githubApiBaseUrl: nonEmpty("GITHUB_API_BASE_URL") ?? DEFAULT_GITHUB_API_BASE_URL,
+    xApiBaseUrl: nonEmpty("X_API_BASE_URL") ?? DEFAULT_X_API_BASE_URL,
     webBaseUrl: nonEmpty("WEB_BASE_URL"),
     oauth: oauthConfig(),
   };
@@ -119,8 +119,8 @@ function oauthConfig(): OAuthConfig {
   return {
     github: githubId === null || githubSecret === null ? null : { clientId: githubId, clientSecret: githubSecret },
     x: xId === null ? null : { clientId: xId, clientSecret: xSecret },
-    githubOauthBaseUrl: process.env["GITHUB_OAUTH_BASE_URL"] ?? DEFAULT_GITHUB_OAUTH_BASE_URL,
-    xOauthBaseUrl: process.env["X_OAUTH_BASE_URL"] ?? DEFAULT_X_OAUTH_BASE_URL,
+    githubOauthBaseUrl: nonEmpty("GITHUB_OAUTH_BASE_URL") ?? DEFAULT_GITHUB_OAUTH_BASE_URL,
+    xOauthBaseUrl: nonEmpty("X_OAUTH_BASE_URL") ?? DEFAULT_X_OAUTH_BASE_URL,
   };
 }
 

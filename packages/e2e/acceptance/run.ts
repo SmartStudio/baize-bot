@@ -39,6 +39,17 @@ const CADENCE_ASK = "下周多发点小红书";
 const REPLY_ASK = "@小满 issue 12 里 lark-fan 问能不能接飞书，回他一句";
 const REVIEW_ASK = "周五复盘加上小红书的数据";
 const ISSUE_URL = "https://github.com/baize/baize-bot/issues/12";
+const ROUTINE_ASK = "每周五六点给白泽开源推广出一份周报";
+const ROUTINE_NAME = "白泽开源推广周报";
+const ROUTINE_INSTRUCTION = "汇总白泽开源推广这一周各平台发了什么、阅读和互动多少，写成一份周报";
+const TEAM_ASK = "白泽开源推广想加一个排版的";
+const HELPER_TASK = "查一下小红书图文排版常见的做法，列三条";
+const LAYOUT_ASK = "@小墨 给第一篇小红书排个版";
+const TEACH_ASK = "标题别超过 15 个字";
+const PREFERENCE = "小红书标题都在 15 个字以内";
+const TITLE_ASK = "给周四那篇起个标题";
+const TITLE_AGAIN_ASK = "再起一个标题";
+const WRITER_DESCRIPTION = "写小红书图文和长文，只起草不直接发";
 
 // 剧本要用的 id 跑起来才知道，各段拿到后填进来。
 const ids: { project: string; accounts: Partial<Record<Platform, string>> } = { project: "", accounts: {} };
@@ -189,6 +200,60 @@ const turn = (request: ChatRequest): ScriptedTurn => {
   if (current.includes(REVIEW_ASK)) {
     return say("记下了，这周五的复盘会把小红书的阅读和收藏一起列出来。");
   }
+  if (current.includes(ROUTINE_ASK)) {
+    return afterTool
+      ? say("例行卡发好了，在等你确认里，点「加上」就每周五 18:00 出周报。")
+      : call("routine-weekly", "propose_routine", {
+          name: ROUTINE_NAME,
+          instruction: ROUTINE_INSTRUCTION,
+          cron: "0 18 * * 5",
+          boundary: "read_only",
+          projectGroupId: ids.project,
+        });
+  }
+  if (current.includes(ROUTINE_INSTRUCTION)) {
+    return say("本周周报：小红书发了 2 篇，GitHub 回了 1 条评论，X 发了 3 条。详细数字等下周对比。");
+  }
+  if (current.includes(HELPER_TASK)) {
+    return say("小红书图文排版常见三条：封面大字标题，正文分段加小标题，每段不超过 4 行。");
+  }
+  if (current.includes(TEAM_ASK)) {
+    const tools = request.messages.slice(lastUser + 1).filter((message) => message.role === "tool").length;
+    if (tools === 0) return call("helper-layout", "call_helper", { kind: "researcher", task: HELPER_TASK });
+    if (tools === 1) {
+      return call("team-layout", "propose_team", {
+        projectGroupId: ids.project,
+        members: [
+          {
+            kind: "new",
+            name: "小墨",
+            tags: ["排版"],
+            description: "给小红书图文排版、做封面，不写正文不发布",
+            note: "阿文写完的稿子现在要你自己排版，小墨接过来你就只用批",
+          },
+          {
+            kind: "new",
+            name: "阿彩",
+            tags: ["配图"],
+            description: "给小红书图文配插图，不写正文不发布",
+            note: "先不带：现在一周 3 篇，封面图阿文自己配得过来，发得多了再请",
+            suggested: true,
+          },
+        ],
+      });
+    }
+    return say("建队卡发好了，想给白泽开源推广加一个排版，你挑一下。");
+  }
+  if (current.includes(LAYOUT_ASK)) {
+    return say("排好了：封面大字标题，正文分三段，每段加一个小标题。");
+  }
+  if (current.includes(TEACH_ASK)) {
+    return afterTool
+      ? say(`记下了，以后${PREFERENCE}`)
+      : call("remember-title", "remember_preference", { text: PREFERENCE, private: false });
+  }
+  if (current.includes(TITLE_ASK)) return say("「一个人带一支 AI 小队」");
+  if (current.includes(TITLE_AGAIN_ASK)) return say("「白泽：一个人的公司也能有队伍」");
   throw new Error(`假上游没有这条请求的剧本：${prompt.slice(-200)}`);
 };
 
@@ -314,6 +379,36 @@ const draftStatus = async (stack: Stack, title: string): Promise<string | undefi
 const openProject = async (page: Page, title: string): Promise<void> => {
   await page.locator(`[data-testid=group-item][data-group-title="${title}"]`).click();
   await check(page.getByTestId("project-page")).toBeVisible();
+};
+
+const finishedRuns = async (stack: Stack, routineId: string): Promise<number> => {
+  const rows = await stack.sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM routine_runs WHERE routine_id = ${routineId} AND status <> 'running'`;
+  return rows[0]?.n ?? 0;
+};
+
+const routineState = async (stack: Stack, routineId: string): Promise<string | undefined> => {
+  const rows = await stack.sql<{ state: string }[]>`SELECT state FROM routines WHERE id = ${routineId}`;
+  return rows[0]?.state;
+};
+
+const lastUserText = (request: ChatRequest): string => {
+  const content = request.messages.findLast((message) => message.role === "user")?.content;
+  return typeof content === "string" ? content : JSON.stringify(content ?? "");
+};
+
+/** 偏好放在系统提示的记忆段里，不进会话历史，所以只看 system 那几条。 */
+const systemPromptFor = (requests: readonly ChatRequest[], ask: string): string => {
+  const request = requests.findLast((candidate) => lastUserText(candidate).includes(ask));
+  if (request === undefined) throw new Error(`假上游没收到「${ask}」这一句的请求`);
+  return JSON.stringify(
+    request.messages.filter((message) => message.role === "system" || message.role === "developer"),
+  );
+};
+
+const sendInChat = async (page: Page, text: string): Promise<void> => {
+  await page.getByTestId("composer-input").fill(text);
+  await page.getByTestId("composer-send").click();
 };
 
 const skip = (why: string): void => {
@@ -623,7 +718,176 @@ const run = async (): Promise<void> => {
     await p.getByTestId("project-achievements").scrollIntoViewIfNeeded();
     await shot(p, "U9-2-achievements");
     skip("目标与指标、数字变化（第 2 期）");
-    process.stdout.write("acceptance: U1 到 U9 走完\n");
+
+    begin("U10 例行自己会停：一句话加一次「加上」，三次没人看自己停，侧栏亮点，点恢复");
+    skip("在项目里说：例行卡只在主助理单聊里出，项目群里调会报错让 Bot 转告，这句改在首页对主助理说");
+    await openHome(p, home);
+    await p.getByTestId("today-composer-input").fill(ROUTINE_ASK);
+    await p.getByTestId("today-composer-send").click();
+    await check(p.getByTestId("today-assistant-text")).toContainText("例行卡发好了");
+    const routineOffer = p.locator("[data-testid=today-row][data-kind=routine_offer]").getByTestId("routine-offer");
+    await check(routineOffer).toHaveAttribute("data-status", "offered");
+    await check(routineOffer.getByTestId("routine-offer-when"), "卡上写清什么时候").toHaveText("每周五 18:00");
+    await check(routineOffer.getByTestId("routine-offer-where"), "卡上写清哪个项目").toContainText(PROJECT);
+    await check(routineOffer.getByTestId("routine-offer-executor"), "卡上写清谁来做").toHaveText("主助理");
+    await check(routineOffer.getByTestId("routine-offer-boundary"), "卡上写清边界").toHaveText("只读，不发东西");
+    await check(routineOffer, "建例行不用填表").not.toContainText("cron");
+    await check(routineOffer, "用户自己开口要的例行，卡上不说成主助理看他常这么做").not.toContainText("常这么做");
+    await assertPlainHome(p, s);
+    await shot(p, "U10-1-offer");
+    await routineOffer.getByTestId("routine-offer-add").click();
+    await check(routineOffer).toHaveAttribute("data-status", "added");
+    const weekly = RoutineListResponse.parse(await s.get("/api/routines")).items.find(
+      (item) => item.name === ROUTINE_NAME,
+    );
+    if (weekly === undefined) throw new Error("点了加上没有建出例行");
+    check(weekly.groupId, "例行挂在项目上").toBe(ids.project);
+    check(weekly.boundary, "边界照卡上的只读").toBe("read_only");
+    await p.getByTestId("routines-nav").click();
+    const projectSection = p.locator(`[data-testid=routine-section][data-section-title="${PROJECT}"]`);
+    const weeklyRow = projectSection.locator(`[data-testid=routine-row][data-routine-name="${ROUTINE_NAME}"]`);
+    await check(weeklyRow, "例行页按项目分组，周报在项目那组").toHaveAttribute("data-state", "on");
+    await check(weeklyRow.getByTestId("routine-run"), "在跑的能立即跑一次").toBeVisible();
+    await check(weeklyRow.getByTestId("routine-toggle"), "在跑的能暂停").toHaveText("暂停");
+    await check(weeklyRow.getByTestId("routine-edit"), "每条能改").toBeVisible();
+    await check(p.getByTestId("routines-alert")).toHaveCount(0);
+    await shot(p, "U10-2-routines");
+    // 几周过去：例行到点跑了三次，用户一次也没打开项目看结果。人停在例行页上，不算看过。
+    for (let week = 1; week <= 3; week += 1) {
+      await s.post(`/api/routines/${weekly.id}/run`, {});
+      await waitFor(`第 ${week} 次周报跑完`, async () => (await finishedRuns(s, weekly.id)) === week);
+    }
+    await waitFor("连续三次没人看，周报自己停了", async () => (await routineState(s, weekly.id)) === "auto_paused");
+    await check(p.getByTestId("routines-alert"), "侧栏「例行」旁边亮一个点").toBeVisible();
+    await check(p.getByTestId("routine-stopped")).toContainText(`「${ROUTINE_NAME}」连续 3 次没人看，自己停了。`);
+    await check(weeklyRow).toHaveAttribute("data-state", "auto_paused");
+    await check(weeklyRow.getByTestId("routine-state"), "自己停和手动停分开显示").toHaveText("自己停了");
+    await check(weeklyRow.getByTestId("routine-run-count")).toHaveText("跑过 3 次");
+    await shot(p, "U10-3-auto-paused");
+    await weeklyRow.getByTestId("routine-edit").click();
+    await check(p.getByTestId("composer-input"), "改例行回到对话里，输入框预填一句话").toHaveValue(
+      `把「${ROUTINE_NAME}」改成`,
+    );
+    await shot(p, "U10-4-edit-prefill");
+    await p.getByTestId("routines-nav").click();
+    await p.getByTestId("routine-resume").click();
+    await check(weeklyRow).toHaveAttribute("data-state", "on");
+    await check(p.getByTestId("routine-stopped")).toHaveCount(0);
+    await check(p.getByTestId("routines-alert"), "恢复之后侧栏的点灭了").toHaveCount(0);
+    check(await routineState(s, weekly.id), "恢复回到 on").toBe("on");
+    await shot(p, "U10-5-resumed");
+
+    begin("U11 主助理提议加一个人：首页建队卡，默认不勾的人写着理由，选小墨确认");
+    await openHome(p, home);
+    await p.getByTestId("today-composer-input").fill(TEAM_ASK);
+    await p.getByTestId("today-composer-send").click();
+    await check(p.getByTestId("today-assistant-text")).toContainText("建队卡发好了");
+    const teamRow = p.locator("[data-testid=today-row][data-kind=team_offer]");
+    await check(teamRow).toContainText(PROJECT);
+    await teamRow.getByTestId("today-expand").click();
+    const teamOffer = teamRow.getByTestId("team-offer");
+    await check(teamOffer).toHaveAttribute("data-status", "offered");
+    const candidates = teamOffer.getByTestId("team-offer-member");
+    await check(candidates).toHaveCount(2);
+    const xiaomo = candidates.filter({ hasText: "小墨" });
+    const acai = candidates.filter({ hasText: "阿彩" });
+    await check(xiaomo.getByTestId("team-offer-new"), "新请的标「新」").toHaveText("新");
+    await check(xiaomo, "写为什么要它、它会什么").toContainText("给小红书图文排版、做封面");
+    await check(xiaomo).toContainText("小墨接过来你就只用批");
+    await check(xiaomo).toHaveAttribute("data-picked", "true");
+    await check(acai, "建议先不带的默认不勾").toHaveAttribute("data-picked", "false");
+    await check(acai, "不勾的写着理由").toContainText("先不带");
+    const offerText = await teamOffer.innerText();
+    check(offerText, "建队卡不问权限、不问模型").not.toMatch(/权限|模型/);
+    await assertPlainHome(p, s);
+    await shot(p, "U11-1-team-offer");
+    await teamOffer.getByTestId("team-offer-confirm").click();
+    await check(teamRow).toHaveCount(0);
+    const roster = BotListResponse.parse(await s.get("/api/bots")).items.map((item) => item.bot.name);
+    check(roster, "小墨请进来了").toContain("小墨");
+    check(roster, "没勾的阿彩不请").not.toContain("阿彩");
+    check(roster, "临时帮手不建 Bot").not.toContain("资料员");
+    await p.getByTestId("assistant-nav").click();
+    await check(p.getByTestId("message-list"), "临时帮手只在过程里出现一行").toContainText("拉临时帮手：资料员");
+    await shot(p, "U11-2-helper-line");
+    await p.getByTestId("team-nav").click();
+    await check(p.locator("[data-testid=team-bot][data-bot-name=小墨]")).toContainText(PROJECT);
+    await check(p.locator("[data-testid=team-bot][data-bot-name=阿彩]")).toHaveCount(0);
+    await check(p.locator("[data-testid=team-bot][data-bot-name=资料员]"), "临时帮手不进团队页").toHaveCount(0);
+    await shot(p, "U11-3-team");
+    await openProject(p, PROJECT);
+    await p.getByTestId("project-composer-input").fill(LAYOUT_ASK);
+    await p.getByTestId("project-composer-send").click();
+    await check(p.getByTestId("project-latest-turn")).toContainText("正文分三段");
+    const layoutPrompt = s.prompts().findLast((prompt) => prompt.group.id === ids.project);
+    check(
+      layoutPrompt?.members.map((member) => member.name),
+      "确认后新队员在下一次 prompt 的成员名单里",
+    ).toContain("小墨");
+    await shot(p, "U11-4-new-member");
+
+    begin("U12 教阿文一句话：当场记下，记住的条数加一，下一次写作套用，忘掉后不再套用");
+    const writerId = await botId(s, "阿文");
+    await p.getByTestId("team-nav").click();
+    await p.locator("[data-testid=team-bot][data-bot-name=阿文]").getByTestId("team-bot-chat").click();
+    const knowToggle = p.getByTestId("bot-know-toggle");
+    await check(knowToggle).toContainText("记住 0 条");
+    await sendInChat(p, TEACH_ASK);
+    await check(p.getByTestId("message-list")).toContainText(`记下了，以后${PREFERENCE}`);
+    await check(knowToggle, "单聊顶上记住的条数当场加一").toContainText("记住 1 条");
+    await knowToggle.click();
+    await check(p.getByTestId("bot-pref-text"), "点开能看到这一条").toHaveText([PREFERENCE]);
+    await check(p.getByTestId("bot-pref-forget")).toHaveText("忘掉");
+    const botPage = await p.locator("body").innerText();
+    check(botPage, "Bot 页上没有技能来源、插件勾选、模型选择").not.toMatch(/技能来源|插件|模型/);
+    await shot(p, "U12-1-remembered");
+    await sendInChat(p, TITLE_ASK);
+    await check(p.getByTestId("message-list")).toContainText("一个人带一支 AI 小队");
+    check(systemPromptFor(upstream.requests(), TITLE_ASK), "下一次写作带着这条偏好").toContain(PREFERENCE);
+    await p.getByTestId("bot-pref-forget").click();
+    await check(knowToggle, "忘掉之后条数减一").toContainText("记住 0 条");
+    await check(p.getByTestId("bot-pref")).toHaveCount(0);
+    await sendInChat(p, TITLE_AGAIN_ASK);
+    await check(p.getByTestId("message-list")).toContainText("一个人的公司也能有队伍");
+    const afterForget = systemPromptFor(upstream.requests(), TITLE_AGAIN_ASK);
+    check(afterForget, "忘掉之后下一次写作不再套用").not.toContain(PREFERENCE);
+    check(afterForget, "忘掉之后明确告诉它旧的作废").toContain("现在一条都没有");
+    await shot(p, "U12-2-forgotten");
+
+    begin("U13 改名字和标签：小弹窗，回车加标签，描述改一句；三个字段全空也能存");
+    await p.getByTestId("bot-edit").click();
+    const dialog = p.getByTestId("edit-bot-dialog");
+    await check(dialog, "弹窗上写都可以不填").toContainText("都可以不填，它干活时自己会记");
+    await dialog.getByTestId("edit-bot-tag-input").fill("长文");
+    await dialog.getByTestId("edit-bot-tag-input").press("Enter");
+    await check(dialog.getByTestId("edit-bot-tag"), "回车加上标签").toHaveText(["小红书", "长文"]);
+    await dialog.getByTestId("edit-bot-description").fill(WRITER_DESCRIPTION);
+    await shot(p, "U13-1-edit");
+    await dialog.getByTestId("edit-bot-save").click();
+    await check(dialog).toHaveCount(0);
+    await check(p.getByTestId("bot-header").locator(".bot-header-tags .tag")).toHaveText(["小红书", "长文"]);
+    await check(p.getByTestId("bot-header-description")).toHaveText(WRITER_DESCRIPTION);
+    await shot(p, "U13-2-saved");
+    await p.getByTestId("team-nav").click();
+    await check(p.locator("[data-testid=team-bot][data-bot-name=阿文]"), "团队页上显示新标签").toContainText("长文");
+    await p.locator("[data-testid=team-bot][data-bot-name=阿文]").getByTestId("team-bot-chat").click();
+    await p.getByTestId("bot-edit").click();
+    await dialog.getByTestId("edit-bot-name").fill("");
+    await dialog.getByTestId("edit-bot-description").fill("");
+    for (let left = 2; left > 0; left -= 1) await dialog.getByTestId("edit-bot-tag-remove").first().click();
+    await check(dialog.getByTestId("edit-bot-tag")).toHaveCount(0);
+    await shot(p, "U13-3-all-empty");
+    await dialog.getByTestId("edit-bot-save").click();
+    await check(dialog, "三个字段全空也能保存").toHaveCount(0);
+    const writer = BotListResponse.parse(await s.get("/api/bots")).items.find((item) => item.bot.id === writerId);
+    check(
+      writer?.bot && { name: writer.bot.name, tags: writer.bot.tags, description: writer.bot.description },
+      "名字空着不改名，标签和描述清空",
+    ).toEqual({ name: "阿文", tags: [], description: "" });
+    await check(p.getByTestId("bot-header-description")).toHaveCount(0);
+    await shot(p, "U13-4-empty-saved");
+    skip("U14 分享（代码还没合进 int）");
+    process.stdout.write("acceptance: U1 到 U13 走完\n");
   } catch (error) {
     throw new Error(`${step} 失败：${String(error)}\n电脑代理日志：${stack?.agentLog().slice(-2_000) ?? "未启动"}`, {
       cause: error,

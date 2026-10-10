@@ -76,7 +76,7 @@ export const RoutineOfferCard = ({ message }: { message: Message }) => {
         <Repeat size={16} aria-hidden="true" />
         加一条例行 · {body.name}
       </div>
-      <p className="offer-hint">主助理看你常这么做，问要不要让它到点自己跑</p>
+      <p className="offer-hint">点「加上」之后它到点自己跑，不用你再开口</p>
       <dl className="offer-kv">
         <dt>什么时候</dt>
         <dd data-testid="routine-offer-when">{describeCron(body.cron)}</dd>

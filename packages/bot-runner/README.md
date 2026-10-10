@@ -107,7 +107,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 例行卡和例行边界
 
-`src/routine-offer.ts` 的 `propose_routine` 只挂给主助理。参数是 name（最多 40 字）、instruction、cron、boundary（`read_only` 或 `draft`），可选 `projectGroupId`、`executorBotId`、`purpose`（缺省 `plan`）和 `onToday`（缺省 false）。运行器只查 cron 是不是 5 段（分 时 日 月 周），写法对不对由控制面在用户点「加上」时用 croner 校验。`projectGroupId` 必须在项目清单里，不写时落在当前群（当前群是项目群才算），都不是就不挂项目。`executorBotId` 不写就是调用它的这个助理；执行者在当前项目群里时才对着成员名单查，别的群的成员运行器看不到，原样交给控制面。通过后发 `routine_offer`，不走工具审批，卡本身等用户确认；工具结果叫模型等「加上」，别自己建例行，也别再出第二张。`ASSISTANT_RULE` 写明用户说了要重复做的事、想定期做时调它出卡，不替用户直接建。
+`src/routine-offer.ts` 的 `propose_routine` 只挂给主助理。参数是 name（最多 40 字）、instruction、cron、boundary（`read_only` 或 `draft`），可选 `projectGroupId`、`executorBotId`、`purpose`（缺省 `plan`）和 `onToday`（缺省 false）。运行器只查 cron 是不是 5 段（分 时 日 月 周），写法对不对由控制面在用户点「加上」时用 croner 校验。只能在主助理单聊里调，项目群里直接抛中文错，告诉模型例行要在首页跟主助理说、由主助理定执行者，因为控制面只收单聊里的例行卡，不拦的话模型会以为发出去了。`projectGroupId` 必须在项目清单里，不写就不挂项目。`executorBotId` 不写就是调用它的这个助理；单聊里看不到项目成员，执行者原样交给控制面在点「加上」时核对。通过后发 `routine_offer`，不走工具审批，卡本身等用户确认；工具结果叫模型等「加上」，别自己建例行，也别再出第二张。`ASSISTANT_RULE` 写明用户说了要重复做的事、想定期做时调它出卡，不替用户直接建。
 
 例行触发的 run 在 `prompt` 里带 `routine: { routineId, boundary }`，运行器存进 `ActiveRun.routine`，用户当面派的 run 是 `null`。`src/gate.ts` 的 `decide` 对 `boundary` 为 `read_only` 的 run 一律「失败即关」：认得出是读的放行，认得出是写的拒绝，认不出的也拒绝，不退化成问用户。分四层，前三层排在授权和默认表之前，永久授权也救不了被拦的调用。`draft` 边界和 `routine` 为 `null` 的 run 一层都不过。`GateCall.routine` 是必填字段，漏传的调用方编译不过，不会悄悄不设防。
 

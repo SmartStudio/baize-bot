@@ -1,6 +1,16 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { CredentialCrypto } from "../src/credentials.js";
-import { DEFAULT_GATEWAY_MODEL, credentialsKey, runtimeConfig } from "../src/env.js";
+import {
+  DEFAULT_GATEWAY_MODEL,
+  DEFAULT_GITHUB_API_BASE_URL,
+  DEFAULT_GITHUB_OAUTH_BASE_URL,
+  DEFAULT_UPSTREAM_BASE_URL,
+  DEFAULT_X_API_BASE_URL,
+  DEFAULT_X_OAUTH_BASE_URL,
+  credentialsKey,
+  runtimeConfig,
+  toolSecretKey,
+} from "../src/env.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -153,4 +163,28 @@ it("没配 OAuth 变量时两个平台都是 null，WEB_BASE_URL 留空就是 nu
   const config = runtimeConfig();
   expect(config.webBaseUrl).toBeNull();
   expect([config.oauth.github, config.oauth.x]).toEqual([null, null]);
+});
+
+it(".env 里留空的地址和工具密钥按没设处理，不把空串下发成网关地址", () => {
+  for (const name of [
+    "PUBLIC_BASE_URL",
+    "UPSTREAM_BASE_URL",
+    "GITHUB_API_BASE_URL",
+    "X_API_BASE_URL",
+    "GITHUB_OAUTH_BASE_URL",
+    "X_OAUTH_BASE_URL",
+    "TOOL_SECRET_KEY",
+  ]) {
+    vi.stubEnv(name, "");
+  }
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+
+  const config = runtimeConfig();
+  expect(config.publicBaseUrl).toBeNull();
+  expect(config.upstreamBaseUrl).toBe(DEFAULT_UPSTREAM_BASE_URL);
+  expect(config.githubApiBaseUrl).toBe(DEFAULT_GITHUB_API_BASE_URL);
+  expect(config.xApiBaseUrl).toBe(DEFAULT_X_API_BASE_URL);
+  expect(config.oauth.githubOauthBaseUrl).toBe(DEFAULT_GITHUB_OAUTH_BASE_URL);
+  expect(config.oauth.xOauthBaseUrl).toBe(DEFAULT_X_OAUTH_BASE_URL);
+  expect(toolSecretKey()).not.toBe("");
 });
