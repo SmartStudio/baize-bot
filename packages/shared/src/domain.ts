@@ -337,13 +337,14 @@ export const Skill = z.object({
 export type Skill = z.infer<typeof Skill>;
 
 // 分享链接里的整包（D11、D12）。没有任何 id、token、authorization：插件 url 由导出方剥掉查询串和 userinfo，
-// 导入方拿到后自己授权。strict 让多出来的字段整包拒收，而不是悄悄丢掉。
+// 导入方拿到后自己授权。strict 让多出来的字段整包拒收，而不是悄悄丢掉。描述和建 Bot 的写入上限一样是 80，
+// 第 1 期留下的更长描述由导出方截断。
 export const BotTemplate = z
   .object({
     format: z.literal(1),
     name: z.string().min(1).max(20),
     tags: BotTags,
-    description: z.string().max(200),
+    description: z.string().max(80),
     skills: z.array(z.object({ name: SkillName, steps: SkillSteps }).strict()).max(50),
     plugins: z
       .array(

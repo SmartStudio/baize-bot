@@ -9,6 +9,7 @@ import {
   BotHue,
   BotId,
   BotTags,
+  BotTemplate,
   BrandBook,
   BrandEdit,
   ChecklistItem,
@@ -110,6 +111,25 @@ export const UpdateBotResponse = z.object({ bot: Bot });
 export const BotResponse = z.object({ bot: Bot });
 
 // POST /api/bots/:id/pause、POST /api/bots/:id/resume 无请求体，回 BotResponse。
+
+// POST /api/bots/:id/template  导出分享包（D11、D12），回 BotTemplate。三类缺省都带；偏好只带没标私人的。别人的 404。
+export const ExportTemplateRequest = z.object({
+  skills: z.boolean().default(true),
+  plugins: z.boolean().default(true),
+  preferences: z.boolean().default(true),
+});
+export type ExportTemplateRequest = z.infer<typeof ExportTemplateRequest>;
+
+// POST /api/bots/import  按整包建新 Bot 和它的单 Bot 群，回 201 和 CreateBotResponse。名字撞了自动避开；
+// skill 来源记 template；插件建成没有 authorization 的工具连接并分给新 Bot。包不合 BotTemplate 回 400。
+export const ImportTemplateRequest = z.object({ template: BotTemplate });
+export type ImportTemplateRequest = z.infer<typeof ImportTemplateRequest>;
+
+// GET /api/export  数据与隐私页的导出（D14），回一个 JSON 附件，不含凭据和 token 哈希。
+
+// DELETE /api/me  删账号（D14）。邮箱和当前账号不符 400；成功回 204，级联删数据并断开这个用户的电脑连接。
+export const DeleteAccountRequest = z.object({ email: z.string().email() });
+export type DeleteAccountRequest = z.infer<typeof DeleteAccountRequest>;
 
 // DELETE /api/bots/:id 响应 204。
 
