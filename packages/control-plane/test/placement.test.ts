@@ -239,6 +239,8 @@ describe("派到哪台电脑", () => {
       await finishRoutine(remote, owner);
       await waitFor(async () => (await routineRuns(routineId))[1]?.status === "ok", "第二周记 ok");
       expect(await errorNotices(owner), "前两周都派出去了").toEqual([]);
+      // 连着三次没人看会自己停，这条用例看的是放置，第三周之前用户来看过一眼。
+      expect((await owner.client.post(`/api/groups/${owner.groupId}/seen`, {})).status, "看过群").toBe(204);
 
       await offline(remote, owner.remote.computerId);
       await tickAt("2030-01-21T09:00:00");

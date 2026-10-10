@@ -39,9 +39,10 @@ export type SendOutcome =
 /**
  * 开一轮的结果。dispatched：有人跑起来了。nobody：排着的人一个都没派出去（都在派活途中被删），
  * 回合已收，群里没留话，调用方可以换一批目标再开。stopped：回合因别的原因收了，群里已经留了一句，
- * 或者被更新的一轮顶掉了，调用方不要再开。gone：群已经不在了，什么都别再往里写。
+ * 或者被更新的一轮顶掉了，调用方不要再开。failed：给头一位派活抛了错，回合已收，群里留了一句，
+ * 调用方按没派出去收尾，不当成有人在跑。gone：群已经不在了，什么都别再往里写。
  */
-export type StartOutcome = "dispatched" | "nobody" | "stopped" | "gone";
+export type StartOutcome = "dispatched" | "nobody" | "stopped" | "failed" | "gone";
 
 export const dispatchFailedNotice = (name: string): string => `派给${name}的活没发出去，@ 它再试一次`;
 
@@ -54,7 +55,7 @@ type Stage =
   | { readonly kind: "sending"; readonly speaker: Speaker; readonly deleted: boolean }
   | { readonly kind: "running"; readonly speaker: Speaker; readonly runId: RunId };
 
-type AdvanceOutcome = "dispatched" | "exhausted" | "closed" | "gone";
+type AdvanceOutcome = "dispatched" | "exhausted" | "closed" | "failed" | "gone";
 
 type TurnCost = {
   messageId: MessageId;
@@ -142,7 +143,7 @@ export class GroupTurns {
     };
     this.#turns.set(input.groupId, turn);
     const outcome = await this.#advance(turn);
-    if (outcome === "dispatched" || outcome === "gone") return outcome;
+    if (outcome === "dispatched" || outcome === "failed" || outcome === "gone") return outcome;
     return outcome === "exhausted" && turn.dispatched === 0 ? "nobody" : "stopped";
   }
 
@@ -294,7 +295,7 @@ export class GroupTurns {
     } catch (error) {
       if (this.#turns.get(turn.groupId) !== turn) return "closed";
       await this.#failDispatch(turn, speaker, error);
-      return "closed";
+      return "failed";
     }
     if (this.#turns.get(turn.groupId) !== turn) return "closed";
     if (outcome.kind === "gone") {

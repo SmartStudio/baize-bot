@@ -27,7 +27,9 @@ import {
 import { newId } from "../ids.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
+import { joinGroups } from "./groups.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
+import { transferRoutines } from "./routines.js";
 import { generateBotName, hueAt, taskNumber, untakenBotName } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
 import { lockOwner, lockRunsOfBot } from "./runs.js";
@@ -250,15 +252,23 @@ export async function setRunState(
 }
 
 export type DeleteBotResult =
-  | { readonly kind: "deleted"; readonly expired: Approval[] }
+  | {
+      readonly kind: "deleted";
+      readonly expired: Approval[];
+      readonly movedRoutineIds: string[];
+      /** 成员或首席因这次删除变了的项目群，调用方提交后按它推 group_updated。 */
+      readonly changedGroupIds: string[];
+    }
   | { readonly kind: "assistant" }
   | { readonly kind: "not_found" };
 
 /**
  * 删 Bot。单 Bot 群、主题任务、消息由外键级联一起走，重复删或删别人的是 not_found。主助理删不掉，每个用户恰好一个。
  * 它挂着的审批先在同一个事务里收成 expired 再删，回给调用方推终态：运行器删 Bot 时不再报 approval_abandoned。
+ * 它执行的例行不跟着删，转给主助理，转走的 id 回给调用方推 routine_updated。项目群里的例行照旧发进原群，主助理不在那个群就补进去。
  * 用 UPDATE ... WHERE status = 'pending' 而不是先查，和同时点下的批准抢行锁，谁先落谁算。
  * UPDATE 自己带归属和角色条件，别人的 Bot 和主助理连审批行锁都不碰。
+ * 它当首席的群级联把首席置空，补进主助理的群多了一位，这两种群的号回给调用方，提交后推整份群快照。
  */
 export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<DeleteBotResult> {
   return db.transaction(async (tx): Promise<DeleteBotResult> => {
@@ -276,16 +286,35 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
         .where(or(eq(handoffs.fromBotId, botId), eq(handoffs.toBotId, botId)))
         .for("update");
     }
+    const assistant = target === undefined ? null : await findAssistant(tx, ownerId);
+    const moved = assistant === null ? [] : await transferRoutines(tx, botId, assistant.bot.id);
     const expired = await tx
       .update(approvals)
       .set({ status: "expired" })
       .where(and(inArray(approvals.botId, owned), eq(approvals.status, "pending")))
       .returning();
+    const chaired =
+      target === undefined ? [] : await tx.select({ id: groups.id }).from(groups).where(eq(groups.chiefBotId, botId));
     const deleted = await tx.delete(bots).where(deletable).returning({ id: bots.id });
-    if (deleted.length > 0) return { kind: "deleted", expired: expired.map(toApproval) };
+    if (deleted.length > 0) {
+      // 删掉 Bot 行之后才碰群和成员，锁序是 Bot 行在前；被删的这位腾出的位置正好给主助理。
+      const joined =
+        assistant === null
+          ? []
+          : await joinGroups(
+              tx,
+              assistant.bot.id,
+              moved.flatMap((one) => one.groupId ?? []),
+            );
+      return {
+        kind: "deleted",
+        expired: expired.map(toApproval),
+        movedRoutineIds: moved.map((one) => one.id),
+        changedGroupIds: [...new Set([...chaired.map((one) => one.id), ...joined])],
+      };
+    }
     // 没删到才分辨是哪一种，只为回对那句话。
-    const assistant = await findAssistant(tx, ownerId);
-    return assistant?.bot.id === botId ? { kind: "assistant" } : { kind: "not_found" };
+    return (await findAssistant(tx, ownerId))?.bot.id === botId ? { kind: "assistant" } : { kind: "not_found" };
   });
 }
 

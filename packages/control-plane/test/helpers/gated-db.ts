@@ -15,6 +15,7 @@ export type HoldAt = "before" | "after";
 
 type Armed = {
   readonly pattern: RegExp;
+  readonly param: string | undefined;
   readonly hold: HoldAt;
   readonly hit: () => void;
   readonly done: () => void;
@@ -24,8 +25,12 @@ type Armed = {
 /**
  * 在 postgres.js 这一层包一道屏障：`arm` 之后，SQL 文本匹配 pattern 的下一条查询停住，测试放行才往下走。
  * 事务里的查询一样拦，所以服务端怎么组织查询都不影响屏障落在哪条 SQL 上。
+ * 给了 param 就还要参数里带着它：调度器一次扫描会碰库里所有例行，拦的得是这条例行的那一次。
  */
-export function gatedDb(sql: Sql): { readonly db: Db; arm(pattern: RegExp, hold?: HoldAt): QueryGate } {
+export function gatedDb(sql: Sql): {
+  readonly db: Db;
+  arm(pattern: RegExp, hold?: HoldAt, param?: string): QueryGate;
+} {
   let armed: Armed | null = null;
 
   const wrap = (client: Sql): Sql =>
@@ -36,7 +41,7 @@ export function gatedDb(sql: Sql): { readonly db: Db; arm(pattern: RegExp, hold?
             const run = () =>
               (target.unsafe as (q: string, ...r: unknown[]) => ReturnType<Sql["unsafe"]>)(query, ...rest);
             const gate = armed;
-            if (gate === null || !gate.pattern.test(query)) return run();
+            if (gate === null || !gate.pattern.test(query) || !carries(rest[0], gate.param)) return run();
             armed = null;
             // drizzle 拿到查询对象后当场决定要不要 .values()，真正发出时照它选的形状只发一次。
             let asValues = false;
@@ -78,15 +83,19 @@ export function gatedDb(sql: Sql): { readonly db: Db; arm(pattern: RegExp, hold?
 
   return {
     db: drizzle(wrap(sql), { schema }),
-    arm: (pattern, hold = "before") => {
+    arm: (pattern, hold = "before", param) => {
       let hit!: () => void;
       let done!: () => void;
       let release!: () => void;
       const reached = new Promise<void>((resolve) => (hit = resolve));
       const finished = new Promise<void>((resolve) => (done = resolve));
       const open = new Promise<void>((resolve) => (release = resolve));
-      armed = { pattern, hold, hit, done, open };
+      armed = { pattern, param, hold, hit, done, open };
       return { reached, finished, release };
     },
   };
+}
+
+function carries(params: unknown, param: string | undefined): boolean {
+  return param === undefined || (Array.isArray(params) && params.includes(param));
 }

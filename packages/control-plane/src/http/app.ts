@@ -74,6 +74,7 @@ import {
   type Settings,
   type TriggerInput,
   type User,
+  type UserId,
 } from "@baize/shared";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
@@ -103,11 +104,12 @@ import {
   findRoutineByWebhookToken,
   listOwnerRoutines,
   listRoutines,
+  loadRoutine,
   updateRoutine,
   type OwnedRoutine,
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
-import { runRoutine } from "../routines/run.js";
+import { pushRoutineUpdated, runRoutine } from "../routines/run.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
@@ -182,6 +184,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
   const brandDeps = { db, push: hub, agents };
   const app = new Hono<Env>();
 
+  const pushRoutines = async (ownerId: UserId, routineIds: readonly string[]): Promise<void> => {
+    for (const routineId of routineIds) {
+      const loaded = await loadRoutine(db, RoutineId.parse(routineId));
+      if (loaded !== null) hub.push(ownerId, { type: "routine_updated", routine: loaded.routine });
+    }
+  };
+
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
   const { platformAccounts } = deps;
   app.route(
@@ -211,7 +220,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createBrandRoutes(brandDeps));
   app.route("/api", createTeamOfferRoutes({ db, hub, agents }));
   app.route("/api", createRoutineOfferRoutes());
-  app.route("/api", createSeenRoutes());
+  app.route("/api", createSeenRoutes({ db, push: hub }));
   app.route("/api", createPrivacyRoutes({ db, agents }));
 
   app.route(
@@ -489,6 +498,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
     for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
+    // 转走的例行里刚被收成 failed 的记录也算一次没人看的收尾，和别的收尾一样过三次自停再推快照。
+    for (const routineId of deleted.movedRoutineIds) await pushRoutineUpdated(routineDeps, routineId);
+    // 补进主助理、卸了首席的项目群推整份快照，在线的项目页才换得掉成员名单。
+    for (const groupId of deleted.changedGroupIds) {
+      const detail = await findGroup(db, c.get("user").id, GroupId.parse(groupId));
+      if (detail !== null) hub.push(c.get("user").id, { type: "group_updated", group: detail.group });
+    }
     await deps.groupTurns.botDeleted(c.get("user").id, botId.data);
     return c.body(null, 204);
   });
@@ -535,7 +551,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
       if (target === null) return c.json(NOT_FOUND, 404);
       if (!target.group.botIds.includes(botId.data)) return c.json({ error: "这个 Bot 不在那个群里" }, 400);
     }
-    const routine = await createRoutine(db, botId.data, body.value);
+    const routine = await createRoutine(db, c.get("user").id, botId.data, body.value);
+    // 预检之后 Bot 被删完了，和一开始就不存在一样回 404。
+    if (routine === null) return c.json(NOT_FOUND, 404);
     hub.push(c.get("user").id, { type: "routine_updated", routine });
     return c.json(RoutineResponse.parse({ routine }), 201);
   });
@@ -569,7 +587,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const owned = await ownedRoutine(db, c);
     if (owned === null) return c.json(NOT_FOUND, 404);
     // 停用只挡自动触发，试跑照跑。
-    const routine = await runRoutine(routineDeps, owned.ownerId, owned.row, new Date());
+    const routine = await runRoutine(routineDeps, owned.ownerId, owned.row, new Date(), "trial");
     if (routine === null) return c.json(NOT_FOUND, 404);
     return c.json(RoutineResponse.parse({ routine }), 202);
   });
@@ -578,7 +596,9 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const owned = await findRoutineByWebhookToken(db, c.req.param("token"));
     if (owned === null) return c.json(NOT_FOUND, 404);
     if (owned.row.state !== "on") return c.json({ error: "这条例行任务已停用" }, 409);
-    if ((await runRoutine(routineDeps, owned.ownerId, owned.row, new Date())) === null) return c.json(NOT_FOUND, 404);
+    if ((await runRoutine(routineDeps, owned.ownerId, owned.row, new Date(), "webhook")) === null) {
+      return c.json(NOT_FOUND, 404);
+    }
     return c.body(null, 202);
   });
 
@@ -849,10 +869,11 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!taskId.success) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, UpdateTaskRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
-    const task = await updateTask(db, c.get("user").id, taskId.data, body.value);
-    if (task === null) return c.json(NOT_FOUND, 404);
-    hub.push(c.get("user").id, { type: "task_updated", task });
-    return c.json(UpdateTaskResponse.parse({ task }));
+    const updated = await updateTask(db, c.get("user").id, taskId.data, body.value);
+    if (updated === null) return c.json(NOT_FOUND, 404);
+    hub.push(c.get("user").id, { type: "task_updated", task: updated.task });
+    await pushRoutines(c.get("user").id, updated.pausedRoutineIds);
+    return c.json(UpdateTaskResponse.parse({ task: updated.task }));
   });
 
   app.get("/api/settings", async (c) => {

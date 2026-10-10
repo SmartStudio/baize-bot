@@ -18,10 +18,7 @@ afterAll(async () => {
   await database.close();
 });
 
-const SEAM_ROUTES = [
-  ["POST", "/api/messages/m1/routine-offer", { decision: "dismiss" }],
-  ["POST", "/api/groups/g1/seen", {}],
-] as const;
+const SEAM_ROUTES = [["POST", "/api/messages/m1/routine-offer", { decision: "dismiss" }]] as const;
 
 it("第 2 期的接缝路由登录前 401、登录后 501，各子单元换掉 501 之前先占住路径", async () => {
   const user = await makeUser(database.db);

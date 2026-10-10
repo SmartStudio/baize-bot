@@ -15,6 +15,7 @@ import { bots, groups, tasks } from "../db/schema.js";
 import { groupHasMembers } from "./live-groups.js";
 import type { Tx } from "./messages.js";
 import { withMetric } from "./metrics.js";
+import { pauseGroupRoutines } from "./routines.js";
 import { toTask } from "./rows.js";
 
 // shared 只导出了 TaskStatus 的 schema，没有导出类型，从列上取回来。
@@ -44,13 +45,18 @@ const ownedLiveGroups = (db: Db, ownerId: UserId) =>
     .from(groups)
     .where(and(eq(groups.ownerId, ownerId), groupHasMembers(db)));
 
-/** 按归属人过滤。别人的任务在这里更新不到，路由层因此 404。 */
+export type UpdatedTask = { readonly task: TopicTask; readonly pausedRoutineIds: string[] };
+
+/**
+ * 按归属人过滤。别人的任务在这里更新不到，路由层因此 404。
+ * 标成 done 就是项目归档，群里的例行在同一个事务里一起停，停了的 id 回给路由层推送。
+ */
 export async function updateTask(
   db: Db,
   ownerId: UserId,
   taskId: TaskId,
   input: UpdateTaskInput,
-): Promise<TopicTask | null> {
+): Promise<UpdatedTask | null> {
   const patch: PgUpdateSetSource<typeof tasks> = {};
   if (input.title !== undefined) patch.title = input.title;
   if (input.summary !== undefined) patch.summary = input.summary;
@@ -67,16 +73,24 @@ export async function updateTask(
     patch.goalDueAt = goal === null || goal.dueAt === null ? null : new Date(goal.dueAt);
   }
   if (input.metricSource !== undefined) patch.metricSource = input.metricSource;
-  if (Object.keys(patch).length === 0) return findTask(db, ownerId, taskId);
+  if (Object.keys(patch).length === 0) {
+    const task = await findTask(db, ownerId, taskId);
+    return task === null ? null : { task, pausedRoutineIds: [] };
+  }
 
   // drizzle 的 update 不能 join，归属只能靠这个子查询过滤。
-  const ownedGroups = ownedLiveGroups(db, ownerId);
-  const [row] = await db
-    .update(tasks)
-    .set(patch)
-    .where(and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedGroups)))
-    .returning();
-  return taskOut(db, row);
+  const owned = and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedLiveGroups(db, ownerId)));
+  return db.transaction(async (tx) => {
+    // 先停例行再改任务卡：删 Bot 是先改例行、再级联碰任务卡，两边同序才不会互等。
+    const pausedRoutineIds =
+      input.status === "done"
+        ? await pauseGroupRoutines(tx, tx.select({ groupId: tasks.groupId }).from(tasks).where(owned))
+        : [];
+    const [row] = await tx.update(tasks).set(patch).where(owned).returning();
+    if (row === undefined) return null;
+    const task = await taskOut(tx, row);
+    return task === null ? null : { task, pausedRoutineIds };
+  });
 }
 
 /** 群和主题任务一一对应，派活拿它取当前经手和要送进 prompt 的那张卡。 */

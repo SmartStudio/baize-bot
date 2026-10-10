@@ -1,8 +1,8 @@
 import {
+  BotId,
+  GroupId,
   RoutineId,
   UserId,
-  type BotId,
-  type GroupId,
   type OnFailure as OnFailureSchema,
   type ModelPurpose,
   type Routine,
@@ -12,13 +12,14 @@ import {
   type TriggerInput,
 } from "@baize/shared";
 import { randomBytes } from "node:crypto";
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { z } from "zod";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
-import { bots, routineRuns, routines, runs, type StoredTrigger } from "../db/schema.js";
+import { bots, groupMembers, groups, routineRuns, routines, runs, type StoredTrigger } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toRoutine } from "./rows.js";
+import { exclusiveBotRunsLock, shareBotRunsLock } from "./runs.js";
 
 type OnFailure = z.infer<typeof OnFailureSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
@@ -34,7 +35,7 @@ export function newWebhookToken(): string {
 
 export type OwnedRoutine = { readonly row: RoutineRow; readonly ownerId: UserId };
 
-async function selectRoutine(db: Db, where: SQL | undefined): Promise<OwnedRoutine | null> {
+async function selectRoutine(db: Db | Tx, where: SQL | undefined): Promise<OwnedRoutine | null> {
   const [found] = await db
     .select({ row: routines, ownerId: bots.ownerId })
     .from(routines)
@@ -100,7 +101,10 @@ async function withRuns(db: Db, rows: readonly RoutineRow[]): Promise<Routine[]>
 
 type RoutineRunRow = typeof routineRuns.$inferSelect;
 
-/** 每条例行任务最近 20 条运行记录，新的在前。插入时已经裁到 20 条，这里照 started_at 排就够。 */
+/**
+ * 每条例行任务最近 20 条运行记录，新的在前。库里会多于 20 条（还在跑的和同刻查重要留的不裁，见 trimRoutineRuns），
+ * 给出去的还是最近 20 条。
+ */
 async function listRunsByRoutine(db: Db, routineIds: readonly string[]): Promise<Map<string, RoutineRunRow[]>> {
   const rows = await db
     .select()
@@ -111,7 +115,7 @@ async function listRunsByRoutine(db: Db, routineIds: readonly string[]): Promise
   for (const row of rows) {
     const bucket = byRoutine.get(row.routineId);
     if (bucket === undefined) byRoutine.set(row.routineId, [row]);
-    else bucket.push(row);
+    else if (bucket.length < MAX_ROUTINE_RUNS) bucket.push(row);
   }
   return byRoutine;
 }
@@ -129,25 +133,44 @@ export type RoutineInput = {
   readonly onToday: boolean;
 };
 
-export async function createRoutine(db: Db, botId: BotId, input: RoutineInput): Promise<Routine> {
-  const [row] = await db
-    .insert(routines)
-    .values({
-      id: newId(),
-      botId,
-      name: input.name,
-      instruction: input.instruction,
-      triggers: mergeTriggers([], input.triggers),
-      onFailure: input.onFailure,
-      groupId: input.groupId ?? null,
-      purpose: input.purpose ?? "plan",
-      state: input.state,
-      boundary: input.boundary,
-      onToday: input.onToday,
-    })
-    .returning();
-  if (row === undefined) throw new Error("建例行任务没有返回行");
-  return toRoutine(row, []);
+/**
+ * 建例行先拿执行者的共享锁，锁到之后用新语句确认它还在且是本人的，再插。
+ * 删 Bot 拿的是同一把锁的排他：删除先赢，这里看见 Bot 没了回 null；建例行先赢，删除的转交扫描一定看得见这一行。
+ * 路由层的归属预检挡不住这个窗口，预检过了之后到插入之间删除可以整个做完。
+ */
+export async function createRoutine(
+  db: Db,
+  ownerId: UserId,
+  botId: BotId,
+  input: RoutineInput,
+): Promise<Routine | null> {
+  return db.transaction(async (tx) => {
+    await shareBotRunsLock(tx, botId);
+    const [alive] = await tx
+      .select({ id: bots.id })
+      .from(bots)
+      .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
+      .limit(1);
+    if (alive === undefined) return null;
+    const [row] = await tx
+      .insert(routines)
+      .values({
+        id: newId(),
+        botId,
+        name: input.name,
+        instruction: input.instruction,
+        triggers: mergeTriggers([], input.triggers),
+        onFailure: input.onFailure,
+        groupId: input.groupId ?? null,
+        purpose: input.purpose ?? "plan",
+        state: input.state,
+        boundary: input.boundary,
+        onToday: input.onToday,
+      })
+      .returning();
+    if (row === undefined) throw new Error("建例行任务没有返回行");
+    return toRoutine(row, []);
+  });
 }
 
 /** `UpdateRoutineRequest` 解出来的样子：没给的字段是 undefined，不是缺席。 */
@@ -187,9 +210,76 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
   return loaded?.routine ?? null;
 }
 
+/**
+ * 删例行级联删运行记录，运行记录又经外键把 run 的 routine_run_id 置空，所以它也要守「runs 在前、运行记录在后」：
+ * 先把能建出指着这些记录的 run 的 Bot 全锁成排他（lockRoutineWriters），再锁例行行，再按 id 升序锁住这些记录名下的 run，
+ * 最后才删。结账是先锁 run 再改记录，两边同序只会排队。
+ * 只锁执行者不够：项目群里执行者 @ 了同群的另一位，那位的 run 带着同一条记录，它在预锁和 DELETE 之间出生，级联就和它的结账互等。
+ */
 export async function deleteRoutine(db: Db, routineId: RoutineId): Promise<boolean> {
-  const deleted = await db.delete(routines).where(eq(routines.id, routineId)).returning({ id: routines.id });
-  return deleted.length > 0;
+  return db.transaction(async (tx) => {
+    if ((await lockRoutineWriters(tx, routineId)) === null) return false;
+    if ((await lockRoutines(tx, eq(routines.id, routineId))).length === 0) return false;
+    const records = await tx
+      .select({ id: routineRuns.id })
+      .from(routineRuns)
+      .where(eq(routineRuns.routineId, routineId));
+    await lockRunsOfRecords(
+      tx,
+      records.map((one) => one.id),
+    );
+    const deleted = await tx.delete(routines).where(eq(routines.id, routineId)).returning({ id: routines.id });
+    return deleted.length > 0;
+  });
+}
+
+/**
+ * 锁住所有能以这条例行的名义建 run 的 Bot，按 id 升序拿排他锁，拿到之后到提交前没有人能建出指着它的运行记录的 run。
+ * 能建的是它所在群的成员（startRun 查成员表，不是成员建不出），单聊就是执行者自己。
+ * 这份名单只在删 Bot 里变：成员被删（它拿着自己的排他锁，和这里互斥）、例行转给主助理、主助理补进项目群。
+ * 删 Bot 里能加进来的只有主助理，所以主助理从一开始就在名单里，第一轮锁完再重读，名单只会少不会多，
+ * 不会出现「已持几把锁再去拿一把 id 更小的」。建队确认往项目群加成员不拿这些锁，是 README 里的已知项。例行没了回 null。
+ */
+async function lockRoutineWriters(tx: Tx, routineId: string): Promise<OwnedRoutine | null> {
+  const locked = new Set<string>();
+  for (;;) {
+    const current = await selectRoutine(tx, eq(routines.id, routineId));
+    if (current === null) return null;
+    const missing = (await writersOf(tx, current)).filter((id) => !locked.has(id));
+    if (missing.length === 0) return current;
+    for (const id of missing) {
+      await exclusiveBotRunsLock(tx, BotId.parse(id));
+      locked.add(id);
+    }
+  }
+}
+
+async function writersOf(tx: Tx, routine: OwnedRoutine): Promise<string[]> {
+  const members =
+    routine.row.groupId === null
+      ? []
+      : await tx
+          .select({ id: groupMembers.botId })
+          .from(groupMembers)
+          .where(eq(groupMembers.groupId, routine.row.groupId));
+  const assistants = await tx
+    .select({ id: bots.id })
+    .from(bots)
+    .where(and(eq(bots.ownerId, routine.ownerId), eq(bots.role, "assistant")));
+  return [
+    ...new Set([routine.row.botId, ...members.map((one) => one.id), ...assistants.map((one) => one.id)]),
+  ].toSorted();
+}
+
+/** 这些运行记录名下的 run 按 id 升序 FOR UPDATE，和结账的 lockRuns、删 Bot 的 lockRunsOfBot 同序。 */
+async function lockRunsOfRecords(tx: Tx, routineRunIds: readonly string[]): Promise<void> {
+  if (routineRunIds.length === 0) return;
+  await tx
+    .select({ id: runs.id })
+    .from(runs)
+    .where(inArray(runs.routineRunId, [...routineRunIds]))
+    .orderBy(asc(runs.id))
+    .for("update");
 }
 
 /**
@@ -208,6 +298,123 @@ function mergeTriggers(existing: readonly StoredTrigger[], inputs: readonly Trig
     if (input.token !== undefined && unclaimed.delete(input.token)) return { kind: "webhook", token: input.token };
     return { kind: "webhook", token: newWebhookToken() };
   });
+}
+
+/** 连着这么多次结果没人看，例行自己停下。 */
+export const UNSEEN_RUNS_TO_PAUSE = 3;
+
+/**
+ * seen 和自停的共同锁边界：两边都先锁住相关例行行（多条按 id 升序），锁到之后才读或改运行记录。
+ * READ COMMITTED 下锁到之后的下一条语句拿新快照，看得见先拿到锁的那一边已经提交的 seen_at。
+ */
+async function lockRoutines(tx: Tx, where: SQL | undefined): Promise<string[]> {
+  const locked = await tx
+    .select({ id: routines.id })
+    .from(routines)
+    .where(where)
+    .orderBy(asc(routines.id))
+    .for("update");
+  return locked.map((row) => row.id);
+}
+
+/**
+ * 最近三条已结束的运行都没人看过，就把它从 on 停成 auto_paused，真的改了回 true。
+ * 和 seen 谁先锁到例行行谁赢：seen 先就看见已读不停，自停先就停下，seen 随后只盖章。
+ * 改写仍只认 state = 'on'：手动停的、已经自己停了的都不碰，重复收尾也只改一次。
+ */
+export async function autoPauseIfUnseen(db: Db, routineId: string): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    if ((await lockRoutines(tx, eq(routines.id, routineId))).length === 0) return false;
+    const latest = await tx
+      .select({ seenAt: routineRuns.seenAt })
+      .from(routineRuns)
+      .where(and(eq(routineRuns.routineId, routineId), ne(routineRuns.status, "running")))
+      .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
+      .limit(UNSEEN_RUNS_TO_PAUSE);
+    if (latest.length < UNSEEN_RUNS_TO_PAUSE || latest.some((run) => run.seenAt !== null)) return false;
+    const paused = await tx
+      .update(routines)
+      .set({ state: "auto_paused" })
+      .where(and(eq(routines.id, routineId), eq(routines.state, "on")))
+      .returning({ id: routines.id });
+    return paused.length > 0;
+  });
+}
+
+/**
+ * 用户打开了这个群：群里已结束、还没看过的例行运行全记成看过，回盖了章的例行 id。别人的群回 null。
+ * 「这个群里的」是落进这个群的例行：groupId 指着它的，加上它是单聊时那个 Bot 不带群号的。
+ */
+export async function markGroupRoutineRunsSeen(db: Db, ownerId: UserId, groupId: GroupId): Promise<string[] | null> {
+  return db.transaction(async (tx) => {
+    const [group] = await tx
+      .select({ soloBotId: groups.soloBotId })
+      .from(groups)
+      .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId)))
+      .limit(1);
+    if (group === undefined) return null;
+    const inGroup = await lockRoutines(
+      tx,
+      group.soloBotId === null
+        ? eq(routines.groupId, groupId)
+        : or(eq(routines.groupId, groupId), and(isNull(routines.groupId), eq(routines.botId, group.soloBotId))),
+    );
+    if (inGroup.length === 0) return [];
+    const stamped = await tx
+      .update(routineRuns)
+      .set({ seenAt: sql`now()` })
+      .where(
+        and(inArray(routineRuns.routineId, inGroup), isNull(routineRuns.seenAt), ne(routineRuns.status, "running")),
+      )
+      .returning({ routineId: routineRuns.routineId });
+    return [...new Set(stamped.map((row) => row.routineId))];
+  });
+}
+
+/**
+ * 项目归档，群里没停的例行一起记成手动暂停，回改了的例行 id。群由调用方的子查询给出，查不到就一条不改。
+ * 多行 UPDATE 按扫描顺序逐行上锁，和 seen 的 id 升序撞上就成环，所以先按 lockRoutines 的顺序锁好，再用新语句改。
+ */
+export async function pauseGroupRoutines(tx: Tx, group: SQLWrapper): Promise<string[]> {
+  const ids = await lockRoutines(tx, and(inArray(routines.groupId, group), ne(routines.state, "paused")));
+  if (ids.length === 0) return [];
+  const paused = await tx
+    .update(routines)
+    .set({ state: "paused" })
+    .where(and(inArray(routines.id, ids), ne(routines.state, "paused")))
+    .returning({ id: routines.id });
+  return paused.map((row) => row.id);
+}
+
+export type MovedRoutine = { readonly id: string; readonly groupId: string | null };
+
+/** 执行者被删时，它还在跑的例行运行记录收成失败用的 note。 */
+export const EXECUTOR_DELETED_NOTE = "执行者已删除，这次没跑完";
+
+/**
+ * 执行者要被删了，它的例行转给主助理，回转走的例行和它们留着的群号。
+ * 指着它单聊群的例行改成不带群号：单聊随 Bot 级联删掉，留着群号就会跟着被删，不带群号的发进主助理的单聊。
+ * 项目群的群号保留，主助理进不进那个群由调用方在删掉 Bot 行之后补（joinGroups）。
+ * 先按 id 升序锁行再改，和归档、seen 同序。它还在跑的运行记录一并收成失败：
+ * 删除把 run 的 bot_id 置空，旧执行者的收尾报文过不了归属校验，不在这里收就永远停在 running。
+ */
+export async function transferRoutines(tx: Tx, fromBotId: BotId, toBotId: BotId): Promise<MovedRoutine[]> {
+  const ids = await lockRoutines(tx, eq(routines.botId, fromBotId));
+  if (ids.length === 0) return [];
+  const soloGroup = tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, fromBotId));
+  const moved = await tx
+    .update(routines)
+    .set({
+      botId: toBotId,
+      groupId: sql`CASE WHEN ${routines.groupId} IN (${soloGroup}) THEN NULL ELSE ${routines.groupId} END`,
+    })
+    .where(inArray(routines.id, ids))
+    .returning({ id: routines.id, groupId: routines.groupId });
+  await tx
+    .update(routineRuns)
+    .set({ status: "failed", note: EXECUTOR_DELETED_NOTE })
+    .where(and(inArray(routineRuns.routineId, ids), eq(routineRuns.status, "running")));
+  return moved;
 }
 
 /** 带 cron 触发器的例行任务，停用的也在里面：停用的不跑，但游标照推，重新启用时不会补跑攒下的那些时刻。 */
@@ -253,28 +460,129 @@ export async function advanceCronTrigger(
   return claimed.length > 0;
 }
 
-export type StartedRoutineRun = { readonly id: string };
+/**
+ * cron：到点，例行不是 on 就不跑，同一刻只落一条记录。webhook：外部调用，不是 on 也不跑。
+ * trial：用户点的试跑，停着也照跑。
+ */
+export type RunOrigin = "cron" | "webhook" | "trial";
 
-/** 触发那一刻就落一条 running，随后把多出 20 条的裁掉。 */
-export async function startRoutineRun(db: Db, routineId: string, startedAt: Date): Promise<StartedRoutineRun> {
-  return db.transaction(async (tx) => {
-    const [row] = await tx.insert(routineRuns).values({ id: newId(), routineId, startedAt }).returning({
-      id: routineRuns.id,
-    });
-    if (row === undefined) throw new Error("建运行记录没有返回行");
-    // started_at 在同一毫秒里会撞，所以再拿 id 兜一道，裁掉的和列出来时排在后面的是同一批。
-    await tx.execute(sql`
-      DELETE FROM ${routineRuns}
-      WHERE ${routineRuns.routineId} = ${routineId}
-        AND ${routineRuns.id} NOT IN (
-          SELECT ${routineRuns.id} FROM ${routineRuns}
-          WHERE ${routineRuns.routineId} = ${routineId}
-          ORDER BY ${routineRuns.startedAt} DESC, ${routineRuns.id} DESC
-          LIMIT ${MAX_ROUTINE_RUNS}
-        )
-    `);
-    return { id: row.id };
+export type OpenedRoutineRun = {
+  readonly id: string;
+  /** 锁到之后重读的例行，派发按它而不是调用方手里那份。 */
+  readonly row: RoutineRow;
+  /** 这次运行落进哪个群：例行带群号就是它，不带就是执行者的单聊。 */
+  readonly groupId: GroupId;
+};
+
+/**
+ * 触发那一刻落一条 running。调用方的事务里做，群里那两条消息和它一起提交；多出 20 条的裁剪不在这里，派发收尾之后另开事务（trimRoutineRuns）。
+ * 先拿执行者的共享锁再用新语句重读：调用方手里的例行是扫到时的样子，删 Bot 可能已经把它转给主助理、连单聊一起删了。
+ * 重读到的执行者换了人就对新执行者再锁一次再读，直到锁住的就是读到的那位。例行没了回 null，不落记录。
+ * 自动触发（到点、webhook）锁住执行者之后再锁例行行：这是 seen、自停、转交、暂停共用的那道边界，
+ * 锁到之后重读的状态是这些事提交后的样子，不是 on 就不跑：调度器扫到时是 on，前一个触发器的收尾让它刚自己停下，
+ * 这一个就不能再跑。两个调度器各认领同一刻的一个 cron 时，先到的锁着例行行直到提交，后到的推游标那条 UPDATE 就排在它后面，
+ * 轮到它时看见同一刻已经有记录就不再落第二条；记录在库里，控制面重启或两个进程各自认领都挡得住。
+ * 试跑是用户点的，停着也照跑，也不锁例行行：它和 seen、自停谁先谁后无所谓。
+ */
+export async function openRoutineRun(
+  tx: Tx,
+  routineId: string,
+  startedAt: Date,
+  origin: RunOrigin,
+): Promise<OpenedRoutineRun | null> {
+  let current = await lockExecutor(tx, routineId, shareBotRunsLock);
+  if (current === null) return null;
+  if (origin !== "trial") {
+    if ((await lockRoutines(tx, eq(routines.id, routineId))).length === 0) return null;
+    current = await selectRoutine(tx, eq(routines.id, routineId));
+    if (current === null || current.row.state !== "on") return null;
+  }
+  if (origin === "cron") {
+    const [sameMoment] = await tx
+      .select({ id: routineRuns.id })
+      .from(routineRuns)
+      .where(and(eq(routineRuns.routineId, routineId), eq(routineRuns.startedAt, startedAt)))
+      .limit(1);
+    if (sameMoment !== undefined) return null;
+  }
+  const groupId =
+    current.row.groupId ??
+    (await tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, current.row.botId)).limit(1))[0]?.id;
+  if (groupId === undefined) return null;
+
+  const [row] = await tx.insert(routineRuns).values({ id: newId(), routineId, startedAt }).returning({
+    id: routineRuns.id,
   });
+  if (row === undefined) throw new Error("建运行记录没有返回行");
+  return { id: row.id, row: current.row, groupId: GroupId.parse(groupId) };
+}
+
+/**
+ * 先拿执行者的锁再用新语句重读，直到锁住的就是读到的那位：调用方手里的例行是扫到时的样子，
+ * 删 Bot 可能已经把它转给主助理。例行没了回 null。
+ */
+async function lockExecutor(
+  tx: Tx,
+  routineId: string,
+  lock: (tx: Tx, botId: BotId) => Promise<void>,
+): Promise<OwnedRoutine | null> {
+  let locked: string | null = null;
+  let current = await selectRoutine(tx, eq(routines.id, routineId));
+  while (current !== null && current.row.botId !== locked) {
+    locked = current.row.botId;
+    await lock(tx, BotId.parse(locked));
+    current = await selectRoutine(tx, eq(routines.id, routineId));
+  }
+  return current;
+}
+
+/**
+ * 把前 20 条之外的运行记录裁掉，触发事务提交之后另开一个事务做。
+ * 两种记录留着不裁：
+ * 还在跑的，派活建 run 的事务可能还没提交，裁了它 run 就指着不存在的记录（23503），收尾也找不回它；
+ * started_at 正好等于某个 cron 游标的，到点触发靠「同一刻已有记录」挡第二个触发器，另一个调度器推完游标才来查重，
+ * 它查的就是这一刻。只认相等：游标之后的试跑和 webhook 记录照裁，否则周更、月更的例行配上 webhook，库里一整个周期都封不了顶。
+ * 删记录经外键把 run 的 routine_run_id 置空，先按 id 升序锁住这些 run 再删：结账是先锁 run 再改记录，同序只会排队。
+ * 锁 run 之前先把能建出这种 run 的 Bot 全锁成排他（lockRoutineWriters）：项目群里执行者 @ 了同群的另一位，
+ * 那位的 run 指着被裁的记录，在预锁和 DELETE 之间出生就和它的结账互等。触发事务持着执行者的共享锁，升不成排他，所以裁剪不在它里面做。
+ * 锁序和删例行一样：Bot 排他 → 例行行 → run → 运行记录。锁到例行行之后重读触发器，游标是这一刻的样子。
+ */
+export async function trimRoutineRuns(db: Db, routineId: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    if ((await lockRoutineWriters(tx, routineId)) === null) return;
+    if ((await lockRoutines(tx, eq(routines.id, routineId))).length === 0) return;
+    const current = await selectRoutine(tx, eq(routines.id, routineId));
+    if (current === null) return;
+    const cursors = cursorMoments(current.row.triggers);
+    const kept = tx
+      .select({ id: routineRuns.id })
+      .from(routineRuns)
+      .where(eq(routineRuns.routineId, routineId))
+      .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
+      .limit(MAX_ROUTINE_RUNS);
+    const retired = await tx
+      .select({ id: routineRuns.id })
+      .from(routineRuns)
+      .where(
+        and(
+          eq(routineRuns.routineId, routineId),
+          ne(routineRuns.status, "running"),
+          cursors.length === 0 ? undefined : notInArray(routineRuns.startedAt, cursors),
+          notInArray(routineRuns.id, kept),
+        ),
+      );
+    if (retired.length === 0) return;
+    const ids = retired.map((one) => one.id);
+    await lockRunsOfRecords(tx, ids);
+    await tx.delete(routineRuns).where(inArray(routineRuns.id, ids));
+  });
+}
+
+/** 各 cron 触发器的游标。没对齐过的还没有游标，它认领的时刻一定晚于现在，现在库里没有要留的记录。 */
+function cursorMoments(triggers: readonly StoredTrigger[]): Date[] {
+  return triggers.flatMap((trigger) =>
+    trigger.kind === "cron" && trigger.lastFiredAt !== null ? [new Date(trigger.lastFiredAt)] : [],
+  );
 }
 
 export type RoutineRunRef = {

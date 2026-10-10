@@ -1,5 +1,5 @@
 import { BotId, ComputerId, GroupId, RunId, type MessageId, type UsageRecord, type UserId } from "@baize/shared";
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -73,18 +73,45 @@ export async function lockOwner(tx: Tx, ownerId: UserId, mode: "exclusive" | "sh
 /**
  * 删 Bot 的事务开头调用，先于删 Bot 碰的任何一行。两件事：
  * 拿这个 Bot 的排他锁，删除提交前它不会再生新 run；
- * 再把外键级联要改的 open run（它自己的，和它单 Bot 群里的）先锁成 FOR UPDATE。
+ * 再把外键级联要改的、还有人会写的 run（它自己的，和它单 Bot 群里的）先锁成 FOR UPDATE。
  * run 名下的写都是先拿 run 的共享锁、再碰任务、群、交接这些行，删除的级联反过来先碰那些行、最后才改 runs，
  * 两边各拿一半就成了死锁环。这里让删除也是 runs 在前，在途的写要么先提交，要么等删除提交后查不到自己的 run。
+ * 条件是 charged_at 为空而不是 ended_at 为空：结束了还没结账的行，结账事务先认领它再改运行记录，
+ * 删除的转交先改运行记录再级联置空它的 bot_id，只锁 open run 的话这两边又各拿一半。结过账的行没人再写。
+ * 多行按 id 升序锁：一张费用卡会把这个群先记着的 pass 一并认领，也是几行，两边不同序就各持一行互等。
  */
 export async function lockRunsOfBot(tx: Tx, botId: BotId): Promise<void> {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(${BOT_RUNS_LOCK}::int4, hashtext(${botId}::text))`);
+  await exclusiveBotRunsLock(tx, botId);
   const soloGroup = tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId));
   await tx
     .select({ id: runs.id })
     .from(runs)
-    .where(and(or(eq(runs.botId, botId), inArray(runs.groupId, soloGroup)), isNull(runs.endedAt)))
+    .where(and(or(eq(runs.botId, botId), inArray(runs.groupId, soloGroup)), isNull(runs.chargedAt)))
+    .orderBy(asc(runs.id))
     .for("update");
+}
+
+/** 一个事务要改几条 run 时先按 id 升序把它们锁上，和 lockRunsOfBot 同序。ORDER BY 在 FOR UPDATE 之前生效，行按排好的次序逐一上锁。 */
+export async function lockRuns(tx: Tx, runIds: readonly RunId[]): Promise<void> {
+  await tx
+    .select({ id: runs.id })
+    .from(runs)
+    .where(inArray(runs.id, [...runIds]))
+    .orderBy(asc(runs.id))
+    .for("update");
+}
+
+/** 这个 Bot 的排他锁：删 Bot 和删它的例行拿，拿到之后到提交前它生不出新 run。 */
+export async function exclusiveBotRunsLock(tx: Tx, botId: BotId): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${BOT_RUNS_LOCK}::int4, hashtext(${botId}::text))`);
+}
+
+/**
+ * 以这个 Bot 的名义写东西之前拿它的共享锁：建 run、建例行、触发例行都走这里。
+ * 和 lockRunsOfBot 的排他锁相斥，所以锁到之后的下一条语句要么看见 Bot 还在，要么看见删除已经提交。
+ */
+export async function shareBotRunsLock(tx: Tx, botId: BotId): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${BOT_RUNS_LOCK}::int4, hashtext(${botId}::text))`);
 }
 
 /**
@@ -95,7 +122,7 @@ export async function lockRunsOfBot(tx: Tx, botId: BotId): Promise<void> {
 export async function startRun(db: Db, input: StartRunInput): Promise<RunId | null> {
   return db.transaction(async (tx) => {
     await lockOwner(tx, input.ownerId, "shared");
-    await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${BOT_RUNS_LOCK}::int4, hashtext(${input.botId}::text))`);
+    await shareBotRunsLock(tx, input.botId);
     await lockSettlement(tx, input.groupId, input.botId);
     const [member] = await tx
       .select({ botId: groupMembers.botId })

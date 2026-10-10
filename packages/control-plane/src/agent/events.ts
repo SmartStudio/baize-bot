@@ -41,6 +41,7 @@ import {
   claimCharge,
   finishRun,
   latestOpenRun,
+  lockRuns,
   lockSettlement,
   lockSettlementOfRun,
   openRunsForComputer,
@@ -446,7 +447,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   }
 
   const run = { runId: event.runId, botId: event.botId, groupId };
-  await settleCharge(deps, conn.ownerId, run, (usage) => bookCost(deps, conn.ownerId, run, usage));
+  await settleCharge(deps, conn.ownerId, run, (usage, heldRuns) => bookCost(deps, conn.ownerId, run, usage, heldRuns));
 }
 
 /**
@@ -487,7 +488,7 @@ async function settleCharge(
   deps: RoutineDeps,
   ownerId: UserId,
   run: RunScope,
-  book: (usage: UsageRecord) => CostBooking,
+  book: (usage: UsageRecord, heldRuns: readonly RunId[]) => CostBooking,
 ): Promise<void> {
   const charge = heldPasses.has(run.runId) ? null : await chargeRun(deps, run, book);
   clearTextPrefixes(run.runId);
@@ -543,17 +544,22 @@ type Charge =
  * 下一次补发或 hello 补结账再认领一次。已经结过账的回 null。
  * 先记着的 pass 不结账，认领回滚：charged_at 为空就是它落库的样子，金额在 run 行上，
  * 等这一轮下一张费用卡在自己的事务里认领它、把金额加进卡里；控制面重启了就由 hello 补结账单落一张。
+ * 事务开头先把这条 run 和它可能一并认领的 pass 按 id 升序锁住，再逐条认领：认领的次序是「当前这条、再按记下的顺序」，
+ * 删 Bot 锁它名下的 run 是 id 序，两边各持一行互等就是死锁。要锁哪些在事务外定下来，认领的就是锁过的这几条。
  */
 async function chargeRun(
   deps: RoutineDeps,
   run: RunScope,
-  book: (usage: UsageRecord) => CostBooking,
+  book: (usage: UsageRecord, heldRuns: readonly RunId[]) => CostBooking,
 ): Promise<Charge | null> {
+  const retained = costBookings.get(run.runId);
+  const heldRuns = retained?.kind === "card" ? retained.heldRuns : heldRunsOfGroup(run.groupId);
   try {
     return await deps.db.transaction(async (tx) => {
+      await lockRuns(tx, [run.runId, ...heldRuns]);
       const usage = await claimCharge(tx, run.runId);
       if (usage === null) return null;
-      const booking = costBookings.get(run.runId) ?? book(usage);
+      const booking = retained ?? book(usage, heldRuns);
       costBookings.set(run.runId, booking);
       if (booking.kind === "held") return tx.rollback();
       const routine = await chargeRoutineRunIn(tx, run.runId, usage.amount);
@@ -602,9 +608,16 @@ const costBookings = new Map<RunId, CostBooking>();
 // 先记着、还没进费用卡的 pass。epoch 认回合：hello 补结账时回合还在的不动，回合没了的单落。
 const heldPasses = new Map<RunId, { readonly groupId: GroupId; readonly epoch: number }>();
 
+/** 这个群先记着、还没进费用卡的 pass，按 id 升序。 */
+function heldRunsOfGroup(groupId: GroupId): readonly RunId[] {
+  return [...heldPasses]
+    .flatMap(([heldRunId, held]) => (held.groupId === groupId ? [heldRunId] : []))
+    .toSorted((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 /**
  * `(pass)` 不单落花费。这一轮已经有汇总行就并进去，还没有就先记着，等这个群下一张费用卡一起写；
- * 对不上当前回合的照旧单落一条。真回话的把这个群先记着的 pass 一起认领。
+ * 对不上当前回合的照旧单落一条。真回话的把这个群先记着的 pass 一起认领，认领的就是结账事务开头锁过的那几条 `heldRuns`。
  * 这里会改回合的内存状态（并进汇总、记下或取走先记着的），所以一次结账只算一次。
  */
 function bookCost(
@@ -612,6 +625,7 @@ function bookCost(
   ownerId: UserId,
   { runId, botId, groupId }: RunScope,
   usage: UsageRecord,
+  heldRuns: readonly RunId[],
 ): CostBooking {
   const passed = runPassed(runId);
   if (passed) {
@@ -627,7 +641,6 @@ function bookCost(
       return absorbed;
     }
   }
-  const heldRuns = [...heldPasses].flatMap(([heldRunId, held]) => (held.groupId === groupId ? [heldRunId] : []));
   for (const heldRunId of heldRuns) heldPasses.delete(heldRunId);
   return { kind: "card", heldRuns, hasResult: !passed && resultRuns.has(runId) };
 }

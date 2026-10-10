@@ -61,11 +61,6 @@ export async function findSoloBotId(db: Db, groupId: GroupId): Promise<BotId | n
   return row?.soloBotId === undefined || row.soloBotId === null ? null : BotId.parse(row.soloBotId);
 }
 
-export async function findSoloGroup(db: Db, botId: BotId): Promise<GroupId | null> {
-  const [row] = await db.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId)).limit(1);
-  return row === undefined ? null : GroupId.parse(row.id);
-}
-
 /** 建多 Bot 群，同时建它的主题任务。单 Bot 群不走这里，建 Bot 时自动建。 */
 export async function createGroup(db: Db, ownerId: UserId, input: CreateGroupInput): Promise<CreateGroupResult> {
   if (new Set(input.botIds).size !== input.botIds.length) return { kind: "duplicate_bot" };
@@ -206,6 +201,26 @@ export async function appendGroupMembers(
   await tx
     .insert(groupMembers)
     .values(botIds.map((botId, offset) => ({ groupId, botId, position: nextPosition + offset })));
+}
+
+/**
+ * 把 Bot 补进这几个多 Bot 群，已在群里的不动，排在现有成员后面。单聊不补。回真的多了一位的群号。
+ * 按群号升序插，主键冲突即已在，所以同一个群给几次都只多一位。
+ */
+export async function joinGroups(tx: Tx, botId: BotId, groupIds: readonly string[]): Promise<string[]> {
+  const targets = [...new Set(groupIds)].toSorted();
+  if (targets.length === 0) return [];
+  const joined = await tx.execute(sql`
+    INSERT INTO ${groupMembers} (group_id, bot_id, position)
+    SELECT ${groups.id}, ${botId},
+      (SELECT coalesce(max(m.position) + 1, 0) FROM ${groupMembers} AS m WHERE m.group_id = ${groups.id})
+    FROM ${groups}
+    WHERE ${inArray(groups.id, targets)} AND ${groups.soloBotId} IS NULL
+    ORDER BY ${groups.id}
+    ON CONFLICT DO NOTHING
+    RETURNING group_id
+  `);
+  return [...joined].map((row) => String(row.group_id));
 }
 
 export type GroupListEntry = {

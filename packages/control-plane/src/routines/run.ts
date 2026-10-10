@@ -1,22 +1,24 @@
-import { BotId, GroupId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
+import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
 import { dispatchUserMessage, type DispatchOutcome } from "../agent/dispatch.js";
 import { SELECTION_FAILURE } from "../agent/computer-selection.js";
 import type { GroupTurns } from "../agent/group-turn.js";
-import { findSoloGroup } from "../repo/groups.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import {
+  autoPauseIfUnseen,
   chargeRoutineRun,
   failRoutineRun,
   loadRoutine,
   noteRoutineRun,
+  openRoutineRun,
   routineRunOfRun,
   settleRoutineRun,
-  startRoutineRun,
+  trimRoutineRuns,
   type RoutineRow,
   type RoutineRunRef,
+  type RunOrigin,
 } from "../repo/routines.js";
 import type { PushHub } from "../ws/hub.js";
 
@@ -33,13 +35,19 @@ export type RoutineDeps = {
  * 选不到电脑的原因和群里那句同源，运行记录只留原因，不补跑。
  */
 function notDispatchedNote(outcome: Exclude<DispatchOutcome, { kind: "sent" }>): string {
-  return outcome.kind === "unplaced"
-    ? `${SELECTION_FAILURE[outcome.reason].why}，没跑起来`
-    : "群里没有能派的 Bot，没跑起来";
+  switch (outcome.kind) {
+    case "unplaced":
+      return `${SELECTION_FAILURE[outcome.reason].why}，没跑起来`;
+    case "no_target":
+      return "群里没有能派的 Bot，没跑起来";
+    case "failed":
+      return DISPATCH_FAILED_NOTE;
+  }
 }
 export const WAITING_APPROVAL_NOTE = "1 条等你点头";
 export const RETRY_NEXT_TIME_NOTE = "等你点头，下次照常跑";
 export const EXPIRED_APPROVAL_NOTE = "审批已失效";
+export const DISPATCH_FAILED_NOTE = "派活出错，没跑起来";
 
 /**
  * 跑一次例行任务。到点触发、webhook、试跑走的都是这一条路。
@@ -48,45 +56,61 @@ export const EXPIRED_APPROVAL_NOTE = "审批已失效";
  * 先落一条 system 说是例行任务自动跑的，再落一条正文是 `instruction` 的 user 消息，
  * 然后走现有的 `dispatchUserMessage`，只派给例行所属的 Bot：项目群换了首席，主助理的周一计划也还是主助理排。
  * 运行器和电脑代理因此不用认识例行任务，没有新报文。
+ *
+ * 运行记录和两条消息在一个事务里落，事务开头 openRoutineRun 锁住执行者并重读：调用方手里的 `row` 是扫到时的样子，
+ * 派发按重读到的执行者和群，自动触发还按重读到的状态决定跑不跑。记录落了之后派发抛错也要收尾，不能留 running，
+ * 收尾和别的收尾一样要过三次没人看的判断、推一次快照，再把错往外抛。
+ * 回 null 是例行没了，或者自动触发撞上它刚停下。
  */
 export async function runRoutine(
   deps: RoutineDeps,
   ownerId: UserId,
   row: RoutineRow,
   at: Date,
+  origin: RunOrigin,
 ): Promise<Routine | null> {
-  const botId = BotId.parse(row.botId);
-  const groupId = row.groupId === null ? await findSoloGroup(deps.db, botId) : GroupId.parse(row.groupId);
-  if (groupId === null) return null;
-
-  const started = await startRoutineRun(deps.db, row.id, at);
-
-  const notice = await appendMessage(deps.db, groupId, {
-    kind: "system",
-    text: `例行任务「${row.name}」自动运行`,
+  const opened = await deps.db.transaction(async (tx) => {
+    const run = await openRoutineRun(tx, row.id, at, origin);
+    if (run === null) return null;
+    const notice = await appendMessage(tx, run.groupId, {
+      kind: "system",
+      text: `例行任务「${run.row.name}」自动运行`,
+    });
+    const instruction = await appendMessage(tx, run.groupId, { kind: "user", text: run.row.instruction });
+    return { ...run, notice, instruction };
   });
-  deps.push.push(ownerId, { type: "message", message: notice });
+  if (opened === null) return null;
+  const { groupId, row: current } = opened;
+  deps.push.push(ownerId, { type: "message", message: opened.notice });
+  deps.push.push(ownerId, { type: "message", message: opened.instruction });
 
-  const instruction = await appendMessage(deps.db, groupId, { kind: "user", text: row.instruction });
-  deps.push.push(ownerId, { type: "message", message: instruction });
-
-  const outcome = await dispatchUserMessage(deps, ownerId, groupId, instruction, {
-    routineRunId: started.id,
-    purpose: row.purpose,
-    botId,
+  const outcome = await dispatchUserMessage(deps, ownerId, groupId, opened.instruction, {
+    routineRunId: opened.id,
+    purpose: current.purpose,
+    botId: BotId.parse(current.botId),
+    routine: { routineId: RoutineId.parse(row.id), boundary: current.boundary },
+  }).catch(async (error: unknown) => {
+    await settleRoutineRun(deps.db, opened.id, "failed", DISPATCH_FAILED_NOTE);
+    await pushRoutineUpdated(deps, row.id);
+    throw error;
   });
   if (outcome.kind !== "sent") {
-    await settleRoutineRun(deps.db, started.id, "failed", notDispatchedNote(outcome));
+    await settleRoutineRun(deps.db, opened.id, "failed", notDispatchedNote(outcome));
+    await autoPauseIfUnseen(deps.db, row.id);
   }
   // 用户自己发的消息派不出去，群里那句 system 他当场看得到；例行任务没人在看，才要找他。
   if (outcome.kind === "unplaced") {
     await deps.notifications.publish(ownerId, {
       kind: "stuck",
-      text: `例行任务「${row.name}」没跑：${SELECTION_FAILURE[outcome.reason].why}`,
+      text: `例行任务「${current.name}」没跑：${SELECTION_FAILURE[outcome.reason].why}`,
       groupId,
     });
   }
 
+  // 活已经派出去了，裁剪失败往外抛的话试跑和 webhook 回 500，平台一重试就重复派活。只是多留几条，下次裁剪收回。
+  await trimRoutineRuns(deps.db, row.id).catch((error: unknown) => {
+    console.error(`例行任务 ${row.id} 裁剪运行记录出错`, error);
+  });
   const loaded = await loadRoutine(deps.db, RoutineId.parse(row.id));
   if (loaded === null) return null;
   deps.push.push(loaded.ownerId, { type: "routine_updated", routine: loaded.routine });
@@ -131,9 +155,13 @@ export async function holdRoutineRunOf(deps: RoutineDeps, runId: RunId): Promise
   await pushIfChanged(deps, changed);
 }
 
-/** 每次状态或 note 变了就把整条例行任务推一遍，客户端整条替换。没改动就不推。 */
+/**
+ * 每次状态或 note 变了就把整条例行任务推一遍，客户端整条替换。没改动就不推。
+ * 运行记录变了就可能刚好凑满三次没人看，自己停下的那一下和这次收尾合成一次推送。
+ */
 async function pushIfChanged(deps: RoutineDeps, routineId: string | null): Promise<void> {
   if (routineId === null) return;
+  await autoPauseIfUnseen(deps.db, routineId);
   const loaded = await loadRoutine(deps.db, RoutineId.parse(routineId));
   if (loaded === null) return;
   deps.push.push(loaded.ownerId, { type: "routine_updated", routine: loaded.routine });

@@ -65,12 +65,18 @@ export type DispatchOptions = {
   readonly purpose?: ModelPurpose | undefined;
   /** 例行任务只派给它所属的 Bot，不走路由规则，换了首席或经手都不改它。普通消息不带。 */
   readonly botId?: BotId | undefined;
+  /** 例行派的活带上它是哪条例行、什么边界，运行器按边界收紧闸门。普通消息不带。 */
+  readonly routine?: PromptRoutine | undefined;
 };
 
+type PromptRoutine = NonNullable<Extract<ControlToAgent, { type: "prompt" }>["routine"]>;
+
+/** failed：给头一位派活抛了错（比如建 run 的事务失败），群里已经留了一句，没人在跑。 */
 export type DispatchOutcome =
   | { readonly kind: "sent" }
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
-  | { readonly kind: "no_target" };
+  | { readonly kind: "no_target" }
+  | { readonly kind: "failed" };
 
 /**
  * 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。
@@ -184,6 +190,7 @@ export async function dispatchUserMessage(
       },
     });
     if (started === "gone") return { kind: "no_target" };
+    if (started === "failed") return { kind: "failed" };
     if (started !== "nobody") return { kind: "sent" };
   }
   return noTarget();
@@ -272,8 +279,7 @@ async function sendSpeaker(
     group,
     context,
     purpose: options.purpose ?? "plan",
-    // 第 2 期形状：例行任务的边界要由 U-例行边界 从 routine 行带进来，这里先恒为 null。
-    routine: null,
+    routine: options.routine ?? null,
     task: solo ? null : task,
     members: roster,
     ...(projects === undefined ? {} : { projects }),
