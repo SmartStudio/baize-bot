@@ -53,7 +53,8 @@ select {
   background: var(--btn-primary-hover);
 }
 
-.primary-button:disabled {
+.primary-button:disabled,
+.primary-button[aria-disabled="true"] {
   opacity: 0.4;
 }
 

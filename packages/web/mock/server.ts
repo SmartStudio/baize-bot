@@ -16,6 +16,7 @@ import { projectRoutes } from "./routes/projects.js";
 import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
 import { teamOfferRoutes } from "./routes/team-offers.js";
+import { templateRoutes } from "./routes/templates.js";
 import { currentTurns, testRoutes } from "./routes/test.js";
 import { todayRoutes } from "./routes/today.js";
 import { toolRoutes } from "./routes/tools.js";
@@ -49,6 +50,7 @@ const protectedRoutes: Route[] = [
   brandRoutes,
   teamOfferRoutes,
   routineOfferRoutes,
+  templateRoutes,
   accountRoutes,
   botRoutes,
   toolRoutes,

@@ -17,6 +17,8 @@ import {
   type ProjectResponse,
   type TodayResponse,
   type BotId,
+  type BotTemplate,
+  type ExportTemplateRequest,
   type ChecklistItem,
   type ProjectGoal,
   type DecideApprovalRequest,
@@ -68,6 +70,12 @@ export type AppActions = {
   logout: () => Promise<void>;
   // 建完返回新群，由调用方跳过去。登录过期时是 undefined。
   createBot: () => Promise<GroupId | undefined>;
+  // 分享包建出的新 Bot 只进团队，不跳走。登录过期时是 undefined。
+  importBot: (template: BotTemplate) => Promise<BotId | undefined>;
+  // 导入在服务端新建了插件连接，不补进本地工具表，马上再分享时说明会漏数插件。和导入分开，失败了只重试这一步。
+  // 没对上之前 Bot 记在 toolsUnsynced 里，谁调都一样，成功才划掉。
+  syncBotTools: (botId: BotId) => Promise<void>;
+  exportTemplate: (botId: BotId, choice: ExportTemplateRequest) => Promise<BotTemplate | undefined>;
   updateBot: (botId: BotId, draft: BotDraft) => Promise<void>;
   setChecklist: (task: TopicTask, checklist: ChecklistItem[]) => Promise<void>;
   setTaskGoal: (task: TopicTask, goal: ProjectGoal | null) => Promise<void>;
@@ -428,6 +436,21 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "bot_created", bot, groupId: group.id });
         return group.id;
       }),
+      importBot: signedIn(async ({ api, put }, template: BotTemplate) => {
+        const { bot, group } = await api.importTemplate(template);
+        if (template.plugins.length > 0) put({ type: "tools_unsynced", botId: bot.id });
+        put({ type: "bot_created", bot, groupId: group.id });
+        return bot.id;
+      }),
+      syncBotTools: signedIn(async ({ api, put }, botId: BotId) => {
+        for (const tool of (await api.tools()).items) {
+          if (tool.assignedBotIds.includes(botId)) put({ type: "tool_upserted", tool });
+        }
+        put({ type: "tools_synced", botId });
+      }),
+      exportTemplate: signedIn(async ({ api }, botId: BotId, choice: ExportTemplateRequest) =>
+        api.exportTemplate(botId, choice),
+      ),
       updateBot: signedIn(async ({ api, put }, botId: BotId, draft: BotDraft) => {
         put({ type: "bot_updated", bot: await api.updateBot(botId, draft) });
       }),

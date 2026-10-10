@@ -164,6 +164,8 @@ export type AppState =
       messageGaps: Record<MessageId, MessageGap>;
       // 本会话收到过删除推送的 Bot。Bot 表和群表是入口分两次取的，表里没有的成员可能只是建得比 Bot 表晚，不算删了。
       deletedBotIds: BotId[];
+      // 导入带了插件、工具表还没对上的 Bot。同步在导入弹窗之外也作数，关了弹窗单聊头上还能补同步。
+      toolsUnsynced: BotId[];
       loads: Partial<Record<LoadKey, LoadStatus>>;
     };
 
@@ -220,6 +222,8 @@ export type Action =
   | { type: "brand_set"; brand: BrandBook | null }
   | { type: "tool_upserted"; tool: ToolConnection }
   | { type: "tool_removed"; toolId: ToolConnectionId }
+  | { type: "tools_unsynced"; botId: BotId }
+  | { type: "tools_synced"; botId: BotId }
   | { type: "settings_set"; settings: Settings }
   | { type: "usage_loaded"; usage: UsageResponse }
   | { type: "content_loaded"; drafts: Draft[]; plans: ContentPlan[]; seq: Seq }

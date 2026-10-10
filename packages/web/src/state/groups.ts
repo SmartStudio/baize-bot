@@ -167,6 +167,8 @@ const conversationOf = (group: Group, task: TopicTask): Conversation => {
 export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
   switch (action.type) {
     case "bot_created": {
+      // 删除推送比建 Bot 的回包先到，这个 Bot 已经没了，不能再加回来。
+      if (state.deletedBotIds.includes(action.bot.id)) return state;
       const bots = { ...state.bots, [action.bot.id]: action.bot };
       if (state.conversations.some((c) => c.groupId === action.groupId)) return { ...state, bots };
       return admitted(
@@ -201,6 +203,12 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
         bots,
         conversations,
         deletedBotIds,
+        // 删掉的 Bot 不再是任何插件的分配对象，否则改分配会把它的 id 原样提交回去，服务端拒收。
+        tools: state.tools.map((tool) =>
+          tool.assignedBotIds.includes(action.botId)
+            ? { ...tool, assignedBotIds: tool.assignedBotIds.filter((id) => id !== action.botId) }
+            : tool,
+        ),
         messageGaps: dropGaps(state.messageGaps, (gap) => gone.has(gap.groupId)),
       };
     }

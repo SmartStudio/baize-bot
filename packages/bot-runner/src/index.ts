@@ -24,7 +24,7 @@ import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrows
 import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createHelperTools } from "./helper.js";
-import { connectionsFor, createMcpTools, type McpToolSet } from "./mcp-tools.js";
+import { connectionsFor, createMcpTools, unusableReason, type McpToolSet } from "./mcp-tools.js";
 import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
@@ -643,17 +643,26 @@ export function createRunner(config: RunnerConfig): Runner {
           ...BROWSER_TOOL_NAMES,
           ACCOUNT_READ_TOOL,
         ]),
+        latest: () => connectionsFor(bot.botId, desiredConfig(bot)?.tools ?? []),
       });
     bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
       const desired = desiredConfig(bot)!;
-      const connections = connectionsFor(bot.botId, desired.tools);
-      const operation =
-        connections.flatMap((connection) => connection.operations).find((candidate) => candidate.name === toolName) ??
-        null;
+      // 会话里的 MCP 工具是建会话时那份 config 定的；按最新下发的连接和操作表判，撤掉的、待授权的在审批之前就拒。
+      // 不是本会话注册的 MCP 工具不按名字去操作表里借审批：同名连接一撤，借来的审批就跟着没了。
+      const callable = mcp.resolve(toolName);
+      if (callable !== null && callable.kind !== "ready") {
+        return {
+          verdict: "deny",
+          action: "external_write",
+          target: null,
+          reason: unusableReason(callable),
+          access: { network: false, writePaths: [] },
+        };
+      }
       const source: ToolSource | null =
-        operation !== null
-          ? { kind: "connected", operation }
+        callable !== null
+          ? { kind: "connected", operation: callable.operation }
           : extensionNames.has(toolName)
             ? { kind: "extension" }
             : null;

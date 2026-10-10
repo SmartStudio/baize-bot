@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Pencil, Share2 } from "lucide-react";
-import type { Bot, Preference } from "@baize/shared";
+import type { Bot, BotId, Preference } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
 import { EditBotDialog } from "./EditBotDialog.js";
+import { ShareDialog } from "./ShareDialog.js";
 import { describeTriggers } from "./routines/cron.js";
 import { useApp } from "../state/app.js";
 import { MY_ROUTINES } from "../state/routines.js";
@@ -47,10 +48,17 @@ export const BotHeader = ({ bot }: { bot: Bot }) => {
   const { state, actions } = useApp();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [syncingTools, setSyncingTools] = useState<BotId | null>(null);
   const editButton = useRef<HTMLButtonElement>(null);
+  const shareButton = useRef<HTMLButtonElement>(null);
   const closeEditor = useCallback(() => {
     setEditing(false);
     editButton.current?.focus();
+  }, []);
+  const closeShare = useCallback(() => {
+    setSharing(false);
+    shareButton.current?.focus();
   }, []);
 
   const ready = state.status === "ready" ? state : null;
@@ -60,6 +68,18 @@ export const BotHeader = ({ bot }: { bot: Bot }) => {
   const skillStatus = ready?.loads[`skills:${bot.id}`] ?? "idle";
   const routines = ready?.routines.rows[MY_ROUTINES];
   const routineStatus = ready?.loads.routines ?? "idle";
+  // 导入带来的插件还没进本地工具表，这时分享摘要会少报插件，先同步再分享。
+  const toolsUnsynced = ready?.toolsUnsynced.includes(bot.id) ?? false;
+  const syncTools = async () => {
+    setSyncingTools(bot.id);
+    try {
+      await actions.syncBotTools(bot.id);
+    } catch {
+      // 失败了 toolsUnsynced 还记着，入口留着再点。
+    } finally {
+      setSyncingTools(null);
+    }
+  };
 
   // 拉失败了不自己再要，展开里给重试。
   useEffect(() => {
@@ -107,12 +127,33 @@ export const BotHeader = ({ bot }: { bot: Bot }) => {
             <Pencil size={14} aria-hidden="true" />
             编辑
           </button>
-          <button type="button" className="ghost-button" data-testid="bot-share" disabled title="分享稍后接上">
+          <button
+            ref={shareButton}
+            type="button"
+            className="ghost-button"
+            data-testid="bot-share"
+            disabled={skills === undefined || preferences === undefined || toolsUnsynced}
+            onClick={() => setSharing(true)}
+          >
             <Share2 size={14} aria-hidden="true" />
             分享
           </button>
         </div>
       </div>
+      {toolsUnsynced ? (
+        <p className="dialog-note" data-testid="bot-tools-unsynced" role="status">
+          导入时带来的插件还没同步过来，同步后才能分享
+          <button
+            type="button"
+            className="link-button"
+            data-testid="bot-sync-tools"
+            disabled={syncingTools === bot.id}
+            onClick={() => void syncTools()}
+          >
+            {syncingTools === bot.id ? "正在同步插件…" : "同步插件"}
+          </button>
+        </p>
+      ) : null}
       <button
         type="button"
         className="bot-know-toggle"
@@ -199,6 +240,17 @@ export const BotHeader = ({ bot }: { bot: Bot }) => {
             )}
           </section>
         </div>
+      ) : null}
+      {sharing && skills !== undefined && preferences !== undefined ? (
+        <ShareDialog
+          // 勾选、复制结果和在途导出都属于这个 Bot。换 Bot 单聊时组件不卸载，靠 key 换一个新弹窗。
+          key={bot.id}
+          bot={bot}
+          skills={skills}
+          plugins={(ready?.tools ?? NONE).filter((tool) => tool.assignedBotIds.includes(bot.id))}
+          preferences={preferences}
+          onClose={closeShare}
+        />
       ) : null}
       {editing ? (
         <EditBotDialog bot={bot} onSave={(draft) => actions.updateBot(bot.id, draft)} onClose={closeEditor} />

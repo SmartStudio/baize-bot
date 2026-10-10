@@ -181,7 +181,9 @@ const SUITE_STARTED_AT = Date.now();
 /** 一条分配给 bot-1 的工具连接。不给 url 就指向一个没人听的地址，工具真被调用时会连不上。 */
 const toolConnection = (
   operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>,
-  overrides: Partial<Pick<ToolConnectionConfig, "id" | "name" | "url" | "authorization" | "assignedBotIds">> = {},
+  overrides: Partial<
+    Pick<ToolConnectionConfig, "id" | "name" | "url" | "authorization" | "status" | "assignedBotIds">
+  > = {},
 ): ToolConnectionConfig => ({
   id: "tc-1" as ToolConnectionConfig["id"],
   ownerId: "user-1" as ToolConnectionConfig["ownerId"],
@@ -190,6 +192,7 @@ const toolConnection = (
   operations: operations.map((op) => ({ ...op, description: "", inputSchema: {} })),
   assignedBotIds: [BotId.parse("bot-1")],
   authorization: null,
+  status: "ready",
   ...overrides,
 });
 
@@ -914,15 +917,33 @@ describe("运行器的审批", () => {
       "发邮件",
       {
         textChunks: ["这就发。"],
-        toolCall: { id: "call-1", name: "send_email", args: { to: "kehu@example.com" } },
+        toolCall: { id: "call-1", name: "send_email", args: { to: "kehu@example.com", subject: "报价" } },
         usage: { input: 1200, output: 64 },
       },
     ],
   ]);
   const tools = [toolConnection([{ name: "send_email", needsApproval: true }])];
+  const openMcps: { close(): Promise<void> }[] = [];
+  afterEach(async () => {
+    await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+  });
+  /** send_email 走真 MCP 注册，审批来源就是会话里这条 MCP 工具本身。 */
+  const withMcp = async (approve?: boolean) => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      tools: [toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url })],
+      extensionTools: [],
+      script: approvalScript,
+      ...(approve === undefined ? {} : { approve }),
+    });
+    const sentTo = (): unknown[] => mcp.calls.map((call) => call.args["to"]);
+    return { h, sentTo };
+  };
 
   it("审批还挂着的时候 pause 不让审批失效，批准后仍等 resume 才执行", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script: approvalScript });
+    const { h, sentTo } = await withMcp();
 
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
     await until(() => h.sent.some((m) => m.type === "approval_request"), "approval_request");
@@ -932,12 +953,12 @@ describe("运行器的审批", () => {
     if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
     h.runner.approve(request.runId, request.callId, true);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(h.sideEffects).toEqual([]);
+    expect(sentTo()).toEqual([]);
 
     await h.runner.resume(BotId.parse("bot-1"));
     await running;
 
-    expect(h.sideEffects).toEqual(["send_email:kehu@example.com"]);
+    expect(sentTo()).toEqual(["kehu@example.com"]);
     expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:ok",
@@ -946,7 +967,7 @@ describe("运行器的审批", () => {
   }, 10_000);
 
   it("approve(false) 之后 bot_tool_call 终态是 blocked，工具体没执行", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script: approvalScript, approve: false });
+    const { h, sentTo } = await withMcp(false);
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
 
@@ -958,11 +979,11 @@ describe("运行器的审批", () => {
       "bot_tool_call:running",
       "bot_tool_call:blocked",
     ]);
-    expect(h.sideEffects, "被拒绝的调用不该进工具函数体").toEqual([]);
+    expect(sentTo(), "被拒绝的调用不该打到 MCP").toEqual([]);
   });
 
   it("approve(true) 之后终态是 ok，工具体执行了", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script: approvalScript, approve: true });
+    const { h, sentTo } = await withMcp(true);
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
 
@@ -971,7 +992,45 @@ describe("运行器的审批", () => {
       "bot_tool_call:running",
       "bot_tool_call:ok",
     ]);
-    expect(h.sideEffects).toEqual(["send_email:kehu@example.com"]);
+    expect(sentTo()).toEqual(["kehu@example.com"]);
+  });
+
+  it("扩展工具不借同名 MCP 操作的审批：同名连接在与撤掉，判定都一样", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      tools,
+      approve: false,
+      script: scriptBy([
+        [
+          "再发一封",
+          {
+            textChunks: ["再发。"],
+            toolCall: { id: "call-2", name: "send_email", args: { to: "kehu2@example.com" } },
+            usage: { input: 1200, output: 64 },
+          },
+        ],
+        [
+          "发邮件",
+          {
+            textChunks: ["这就发。"],
+            toolCall: { id: "call-1", name: "send_email", args: { to: "kehu@example.com" } },
+            usage: { input: 1200, output: 64 },
+          },
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+    const whileConnected = h.sent.filter((m) => m.type === "approval_request").length;
+    await h.runner.applyConfig(h.config({ tools: [] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "再发一封", { groupId: "group-2" }));
+    const afterRevoked = h.sent.filter((m) => m.type === "approval_request").length - whileConnected;
+
+    expect(
+      [whileConnected, afterRevoked],
+      "审批来源只认本会话注册的 MCP 工具，同名连接撤掉前后，扩展工具的判定不该一边要审批一边免审批",
+    ).toEqual([0, 0]);
+    expect(h.sideEffects).toEqual(["send_email:kehu@example.com", "send_email:kehu2@example.com"]);
   });
 
   it("没在任何工具连接里出现的工具不进审批", async () => {
@@ -2236,6 +2295,33 @@ describe("运行器的 skill", () => {
   });
 });
 
+/** 按请求先后依次回 turns，第 holdAt 个请求先停住，等 release 之后才回。工具结果顺手记下。 */
+const sequenced = (turns: readonly ScriptedTurn[], holdAt: number) => {
+  const toolResults: string[] = [];
+  let arrive!: () => void;
+  let release!: () => void;
+  const arrived = new Promise<void>((resolve) => (arrive = resolve));
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let next = 0;
+  const done: ScriptedTurn = { textChunks: ["好了"], usage: { input: 900, output: 8 } };
+  const upstream: Upstream = async function* (req, key) {
+    const index = next;
+    next += 1;
+    if (isFollowUpTurn(req)) toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+    if (index === holdAt) {
+      arrive();
+      await released;
+    }
+    yield* scriptedUpstream(() => turns[index] ?? done)(req, key);
+  };
+  return { upstream, arrived, release, toolResults };
+};
+const callAs = (id: string, name: string, args: Record<string, unknown>): ScriptedTurn => ({
+  ...callTool(name, args),
+  toolCall: { id, name, args },
+});
+const unusedScript = (): ScriptedTurn => ({ textChunks: [], usage: { input: 1, output: 1 } });
+
 describe("运行器按 Bot 加载 MCP 工具", () => {
   const OPS: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">> = [
     { name: "send_email", needsApproval: true },
@@ -2491,6 +2577,192 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
     expect(mcp.calls, "write 没被 MCP 操作顶掉，假 MCP 一次都没收到").toEqual([]);
     expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
     expect(readFileSync(join(workDir, "note.txt"), "utf8")).toBe("工作目录里的笔记");
+  });
+
+  it("导入后还没补授权的连接：闸门当场拦下，中文说先补授权，假 MCP 一次都没连", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [
+        toolConnection([{ name: "send_email", needsApproval: false }], {
+          url: mcp.url,
+          status: "awaiting_authorization",
+        }),
+      ],
+      script: scriptSeeingTools(seen, [
+        ["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+    expect(mcp.connections, "没补授权就不去连").toBe(0);
+    expect(mcp.calls).toEqual([]);
+    expect(seen.toolResults[0]).toContain("工具连接「客服工具」还没补授权");
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+    expect(shape(h.sent).at(-1)).toBe("run_done");
+  });
+
+  it("MCP 报错里回显了凭据：回到模型的工具结果和发给控制面的报文里都换成 [已隐藏]", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const token = "sk-echo-runner-08";
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [
+        toolConnection([{ name: "echo_secret", needsApproval: false }], {
+          url: mcp.url,
+          authorization: `Bearer ${token}`,
+        }),
+      ],
+      script: scriptSeeingTools(seen, [["试试", callTool("echo_secret", {})]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "试试"));
+
+    expect(
+      mcp.calls.map((call) => call.authorization),
+      "MCP 确实收到了凭据",
+    ).toEqual([`Bearer ${token}`]);
+    expect(seen.toolResults[0], "整个头换掉，MCP 的其余说明照留").toContain("拒绝：你发来的是 [已隐藏]");
+    expect(JSON.stringify(seen.toolResults), "回到模型的没有凭据").not.toContain(token);
+    expect(JSON.stringify(h.sent), "发给控制面的报文里没有凭据").not.toContain(token);
+  });
+
+  it("运行中补授权后操作表里没了 send_email：旧会话里的 send_email 不出审批卡、不带旧凭据执行，当场拒绝", async () => {
+    const mcp = await fakeMcp();
+    const model = sequenced([callTool("send_email", { to: "kehu@example.com", subject: "报价" })], 0);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      tools: [
+        toolConnection([{ name: "send_email", needsApproval: true }], {
+          url: mcp.url,
+          authorization: "Bearer sk-old-10",
+        }),
+      ],
+      upstream: model.upstream,
+      script: unusedScript,
+    });
+
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+    await model.arrived;
+    await h.runner.applyConfig(
+      h.config({ tools: [toolConnection([], { url: mcp.url, authorization: "Bearer sk-new-10" })] }),
+    );
+    model.release();
+    await running;
+
+    expect(
+      h.sent.filter((m) => m.type === "approval_request"),
+      "已经撤下的操作不送审批",
+    ).toEqual([]);
+    expect(mcp.calls, "旧凭据一次都没发出去").toEqual([]);
+    expect(model.toolResults[0]).toContain("已经不再提供这个操作");
+    expect(
+      shape(h.sent).filter((s) => s.startsWith("bot_tool_call")),
+      "撤下的操作在闸门处就拒，终态是 blocked，不是放行后执行时失败",
+    ).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    expect(shape(h.sent).at(-1)).toBe("run_done");
+  });
+
+  it("运行中换了凭据、操作还在：下一次调用丢掉旧连接，带新凭据重连", async () => {
+    const mcp = await fakeMcp();
+    const model = sequenced(
+      [callAs("call-1", "lookup_stock", { sku: "SKU-1" }), callAs("call-2", "lookup_stock", { sku: "SKU-2" })],
+      1,
+    );
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [toolConnection(OPS, { url: mcp.url, authorization: "Bearer sk-old-11" })],
+      upstream: model.upstream,
+      script: unusedScript,
+    });
+
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "查两次库存"));
+    await model.arrived;
+    await h.runner.applyConfig(
+      h.config({ tools: [toolConnection(OPS, { url: mcp.url, authorization: "Bearer sk-new-11" })] }),
+    );
+    model.release();
+    await running;
+
+    expect(
+      mcp.calls.map((call) => [call.args, call.authorization]),
+      "换凭据之前用旧的，之后用新的",
+    ).toEqual([
+      [{ sku: "SKU-1" }, "Bearer sk-old-11"],
+      [{ sku: "SKU-2" }, "Bearer sk-new-11"],
+    ]);
+  });
+
+  it("还没补授权的连接上要审批的操作：不出审批卡，直接告诉模型先补授权", async () => {
+    const mcp = await fakeMcp();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      approve: true,
+      tools: [
+        toolConnection([{ name: "send_email", needsApproval: true }], {
+          url: mcp.url,
+          status: "awaiting_authorization",
+        }),
+      ],
+      script: scriptSeeingTools(seen, [
+        ["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+    expect(
+      h.sent.filter((m) => m.type === "approval_request"),
+      "审批之前就拒，不让人批一个注定执行不了的动作",
+    ).toEqual([]);
+    expect(mcp.connections, "没补授权就不去连").toBe(0);
+    expect(seen.toolResults[0]).toContain("工具连接「客服工具」还没补授权");
+  });
+
+  it("MCP 连不上、回的 HTTP 正文里写了凭据的 base64：工具结果只给固定分类，不带对端原文", async () => {
+    const authorization = "Bearer sk-b64-runner-12";
+    const encoded = [Buffer.from(authorization).toString("base64"), Buffer.from("sk-b64-runner-12").toString("base64")];
+    const echo = createHttpServer((req, res) => {
+      res
+        .writeHead(401, { "content-type": "text/plain" })
+        .end(`bad token ${encoded.join(" ")} ${req.headers.authorization}`);
+    });
+    await new Promise<void>((resolve) => echo.listen(0, "127.0.0.1", resolve));
+    const address = echo.address();
+    if (address === null || typeof address === "string") throw new Error("回显服务没拿到端口");
+    try {
+      const seen = toolRecorder();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        tools: [toolConnection(OPS, { url: `http://127.0.0.1:${address.port}/mcp`, authorization })],
+        script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+      expect(seen.toolResults[0]).toContain("工具连接「客服工具」连不上：");
+      for (const leaked of [...encoded, "sk-b64-runner-12", "bad token"]) {
+        expect(seen.toolResults[0], `工具结果里不该有「${leaked}」`).not.toContain(leaked);
+        expect(JSON.stringify(h.sent), `发给控制面的报文里不该有「${leaked}」`).not.toContain(leaked);
+      }
+    } finally {
+      echo.closeAllConnections();
+      await new Promise<void>((resolve) => echo.close(() => resolve()));
+    }
   });
 
   it("两条连接撞了 lookup_stock：config 里靠前的赢，后面的跳过并 warn 一次", async () => {
@@ -4085,6 +4357,7 @@ describe("config 按 Bot 增量对账", () => {
 });
 
 describe("放弃挂起的审批", () => {
+  // 没有扩展工具：send_email 是会话里注册的 MCP 工具，审批卡从它自己的 needsApproval 来。
   const tools = [
     toolConnection([{ name: "send_email", needsApproval: true }], {
       assignedBotIds: [BotId.parse("bot-1"), BotId.parse("bot-2")],
@@ -4110,7 +4383,7 @@ describe("放弃挂起的审批", () => {
   ]);
 
   it("停机时每条挂起审批各发一条放弃", async () => {
-    const h = await startHarness({ bots: ["bot-1", "bot-2"], tools, script });
+    const h = await startHarness({ bots: ["bot-1", "bot-2"], tools, extensionTools: [], script });
     const first = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     const second = h.runner.prompt(promptMessage("bot-2", "run-2", "乙发邮件"));
     await until(() => h.sent.filter((message) => message.type === "approval_request").length === 2, "两条审批");
@@ -4129,7 +4402,7 @@ describe("放弃挂起的审批", () => {
   }, 10_000);
 
   it("停机时挂着审批的 run 不再请求模型，run_done 恰好一次", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const h = await startHarness({ bots: ["bot-1"], tools, extensionTools: [], script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
     const requestsBeforeStop = h.gateway.requestCount();
@@ -4141,7 +4414,7 @@ describe("放弃挂起的审批", () => {
   }, 10_000);
 
   it("暂停时挂起的审批不失效，拒绝后正常收尾", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const h = await startHarness({ bots: ["bot-1"], tools, extensionTools: [], script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
 
@@ -4157,7 +4430,7 @@ describe("放弃挂起的审批", () => {
   }, 10_000);
 
   it("删除 Bot 解开挂起审批但不发 approval_abandoned", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const h = await startHarness({ bots: ["bot-1"], tools, extensionTools: [], script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
 
@@ -4169,7 +4442,7 @@ describe("放弃挂起的审批", () => {
   }, 10_000);
 
   it("批准之后停机不发放弃", async () => {
-    const h = await startHarness({ bots: ["bot-1"], tools, script });
+    const h = await startHarness({ bots: ["bot-1"], tools, extensionTools: [], script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
     const request = h.sent.find((message) => message.type === "approval_request");
@@ -8614,7 +8887,7 @@ describe("运行器的例行边界", () => {
     afterEach(async () => {
       await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
     });
-    const UNTRACED = "只能用运行器自带的工具和认得出是只读的插件操作";
+    const WITHDRAWN = "工具连接「客服工具」已经不再提供这个操作";
     // 第二次请求（lookup_stock 的结果回来之后）才撤销连接，这时会话里已经注册好的 send_email 还在，
     // applyConfig 要等这次 run 结束才重建会话。
     const revokedMidRun = async (requests: ChatCompletionRequest[]) => {
@@ -8665,10 +8938,10 @@ describe("运行器的例行边界", () => {
         "bot_tool_call:running",
         "bot_tool_call:blocked",
       ]);
-      expect(toolResultsOf(requests)).toContain(UNTRACED);
+      expect(toolResultsOf(requests)).toContain(WITHDRAWN);
     });
 
-    it("用户当面派的 run 跑到一半连接被撤销：残留的免审批 send_email 改成问用户，拒绝后假 MCP 没收到它", async () => {
+    it("用户当面派的 run 跑到一半连接被撤销：残留的免审批 send_email 不出审批卡，当场拒绝，假 MCP 没收到它", async () => {
       const requests: ChatCompletionRequest[] = [];
       const { h, mcp } = await revokedMidRun(requests);
 
@@ -8677,8 +8950,9 @@ describe("运行器的例行边界", () => {
       expect(mcp.calls.map((call) => call.name)).toEqual(["lookup_stock"]);
       expect(
         shape(h.sent).filter((type) => type === "approval_request"),
-        "撤销前免审批，撤销后当未知外部操作问",
-      ).toHaveLength(1);
+        "撤下的操作批了也执行不了，不让人批",
+      ).toEqual([]);
+      expect(toolResultsOf(requests)).toContain(WITHDRAWN);
       expect(toolStatuses(h)).toEqual([
         "bot_tool_call:running",
         "bot_tool_call:ok",

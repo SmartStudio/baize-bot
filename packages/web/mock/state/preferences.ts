@@ -27,6 +27,21 @@ export const seedPreferences = (): void => {
   });
 };
 
+// 分享包偏好有 50 条上限，界面要能碰到上限，教一句一条太慢，测试从这里直接种。
+export const seedManyPreferences = (botId: BotId, count: number): void => {
+  for (let n = 1; n <= count; n += 1) {
+    const preference = Preference.parse({
+      id: `prf_${nextSuffix()}`,
+      botId,
+      text: `第 ${n} 条记住的偏好`,
+      sourceMessageId: null,
+      private: false,
+      createdAt: at(n),
+    });
+    preferences.set(preference.id, preference);
+  }
+};
+
 export const preferencesOf = (botId: string): Preference[] =>
   [...preferences.values()].filter((preference) => preference.botId === botId);
 

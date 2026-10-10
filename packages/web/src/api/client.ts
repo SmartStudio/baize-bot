@@ -13,6 +13,7 @@ import {
   BotResponse,
   BotListResponse,
   BotProfileResponse,
+  BotTemplate,
   BrandResponse,
   CreateBotResponse,
   ToolListResponse,
@@ -54,6 +55,7 @@ import {
   type BotHue,
   type BotId,
   type BrandBook,
+  type ExportTemplateRequest,
   type ChecklistItem,
   type ProjectGoal,
   type CreateRoutineRequest,
@@ -264,6 +266,10 @@ export const createApi = (signal?: AbortSignal) => {
     },
     botProfile: async (botId: BotId) =>
       json(BotProfileResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/profile`)),
+    exportTemplate: async (botId: BotId, choice: ExportTemplateRequest): Promise<BotTemplate> =>
+      json(BotTemplate, await send("POST", `/bots/${encodeURIComponent(botId)}/template`, choice)),
+    importTemplate: async (template: BotTemplate) =>
+      json(CreateBotResponse, await send("POST", "/bots/import", { template })),
     brand: async (): Promise<BrandBook | null> => (await json(BrandResponse, await send("GET", "/brand"))).brand,
     updateBrand: async (body: UpdateBrandRequest): Promise<BrandBook | null> =>
       (await json(BrandResponse, await send("PUT", "/brand", body))).brand,

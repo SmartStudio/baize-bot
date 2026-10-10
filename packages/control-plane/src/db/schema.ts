@@ -30,6 +30,7 @@ import type {
   RoutineState as RoutineStateSchema,
   SkillSource,
   ToolOperation,
+  ToolConnectionStatus as ToolConnectionStatusSchema,
   ToolView,
   TaskStatus as TaskStatusSchema,
 } from "@baize/shared";
@@ -54,6 +55,7 @@ import {
 
 // shared 只导出了这几个的 schema，没有导出类型，这里从 schema 推回来。
 type TaskStatus = z.infer<typeof TaskStatusSchema>;
+type ToolConnectionStatus = z.infer<typeof ToolConnectionStatusSchema>;
 type AccountLogin = z.infer<typeof AccountLoginSchema>;
 type AccountTier = z.infer<typeof AccountTierSchema>;
 type LoginFailure = z.infer<typeof LoginFailureSchema>;
@@ -159,6 +161,7 @@ export const toolConnections = pgTable(
     url: text("url").notNull(),
     authorizationEnc: text("authorization_enc"),
     operations: jsonb("operations").$type<ToolOperation[]>().notNull().default([]),
+    status: text("status").$type<ToolConnectionStatus>().notNull().default("ready"),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],

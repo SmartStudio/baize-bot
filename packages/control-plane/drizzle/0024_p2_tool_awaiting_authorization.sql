@@ -1,0 +1,1 @@
+ALTER TABLE "tool_connections" ADD COLUMN "status" text DEFAULT 'ready' NOT NULL;

@@ -48,7 +48,10 @@ export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
-  /** 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属（撤销连接后会话里残留的旧工具）是 null。 */
+  /**
+   * 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属是 null。撤销连接后会话里残留的旧 MCP 工具
+   * 到不了这里：运行器按 `mcp.resolve` 认出它已撤下，在闸门之前就拒。
+   */
   readonly source: ToolSource | null;
   /** 助理浏览器当前页的主机名，点和填按它授权。没有浏览器、还没开页或停在空白页是 null。 */
   readonly browserHost?: string | null;
@@ -555,7 +558,7 @@ const classifyOwnTool = (call: GateCall): readonly ClassifiedAction[] | null => 
   return null;
 };
 
-// 查不到归属的名字（撤销连接后会话里残留的旧 MCP 工具）按未知外部操作问用户：它既不是运行器自己的，也没有 needsApproval 可看。
+// 查不到归属的名字按未知外部操作问用户：它既不是运行器自己的，也没有 needsApproval 可看。
 // 调用方注入的扩展工具是宿主代码，和运行器自己的工具一样放行。
 const classifyConnected = (call: GateCall): readonly ClassifiedAction[] => {
   if (call.source === null) return [plainAction("external_write", targetFromInput(call.input, call))];

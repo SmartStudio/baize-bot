@@ -85,7 +85,7 @@ import type { GroupTurns } from "../agent/group-turn.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
-import { discoverTools } from "../mcp/discover.js";
+import { DiscoveryError, discoverTools } from "../mcp/discover.js";
 import { createPlaceholder, findAccount, listAccounts, setAccountTier } from "../repo/accounts.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPlan } from "../repo/drafts.js";
@@ -128,7 +128,14 @@ import {
   type SkillRow,
 } from "../repo/skills.js";
 import { updateTask } from "../repo/tasks.js";
-import { createTool, deleteTool, findOwnedTool, listToolsByOwner, updateTool } from "../repo/tools.js";
+import {
+  createTool,
+  deleteTool,
+  findOwnedTool,
+  listToolsByOwner,
+  updateTool,
+  type Reauthorized,
+} from "../repo/tools.js";
 import { authenticate, createUser, isEmailTaken } from "../repo/users.js";
 import { getUsage } from "../repo/usage.js";
 import type { NoticePublisher } from "../notifications.js";
@@ -144,6 +151,7 @@ import { createPreferenceRoutes } from "./routes/preferences.js";
 import { createPrivacyRoutes } from "./routes/privacy.js";
 import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
 import { createSeenRoutes } from "./routes/seen.js";
+import { createTemplateRoutes } from "./routes/templates.js";
 import { createTeamOfferRoutes } from "./routes/team-offers.js";
 
 export type AppDeps = {
@@ -222,6 +230,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createRoutineOfferRoutes({ db, push: hub }));
   app.route("/api", createSeenRoutes({ db, push: hub }));
   app.route("/api", createPrivacyRoutes({ db, agents }));
+  app.route("/api", createTemplateRoutes({ db, agents }));
 
   app.route(
     OAUTH_PATH,
@@ -297,7 +306,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     try {
       operations = await discoverTools(body.value);
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : "连不上 MCP" }, 400);
+      if (!(error instanceof DiscoveryError)) throw error;
+      return c.json({ error: error.message }, 400);
     }
     const tool = await createTool(db, c.get("user").id, body.value, operations, deps.toolCrypto);
     if (tool === null) return c.json({ error: "已有同名工具连接" }, 409);
@@ -312,7 +322,26 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (current === null) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, UpdateToolRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
-    const result = await updateTool(db, c.get("user").id, current, body.value);
+    const { authorization } = body.value;
+    let reauthorized: Reauthorized | undefined;
+    if (authorization !== undefined) {
+      // 换凭据当场重新探测一次：连不上就什么都不改，旧凭据和操作表照旧。null 是不带凭据探测。
+      try {
+        const discovered = await discoverTools({
+          name: current.name,
+          url: current.url,
+          ...(authorization === null ? {} : { authorization }),
+        });
+        reauthorized = {
+          authorizationEnc: authorization === null ? null : deps.toolCrypto.encrypt(authorization),
+          discovered,
+        };
+      } catch (error) {
+        if (!(error instanceof DiscoveryError)) throw error;
+        return c.json({ error: error.message }, 400);
+      }
+    }
+    const result = await updateTool(db, c.get("user").id, current, body.value, reauthorized);
     if (result.kind === "gone") return c.json(NOT_FOUND, 404);
     if (result.kind === "name_taken") return c.json({ error: "已有同名工具连接" }, 409);
     if (result.kind === "invalid_operation") return c.json({ error: "操作名不在这条工具连接上" }, 400);

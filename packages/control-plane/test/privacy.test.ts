@@ -373,6 +373,46 @@ it("删号拿完 Bot 快照后建 Bot：建 Bot 停在账号锁上等删号提�
   }
 });
 
+it("删号拿完 Bot 快照后从分享包导入：导入停在账号锁上等删号提交，之后按未登录回，不留 Bot 和插件", async () => {
+  const job = await contentJob(server, database.db, []);
+  const deleteHeld = gate.arm(DELETE_RUNS, "after");
+  const template = {
+    format: 1,
+    name: "删号期间导入",
+    tags: [],
+    description: "",
+    skills: [],
+    plugins: [{ name: "公司工具", url: "https://mcp.example.com/mcp", operations: [] }],
+    preferences: [],
+  };
+  let deleting: Promise<Response> | undefined;
+  let importing: Promise<Response> | undefined;
+  try {
+    deleting = deleteAccount(job.client, job.user.email);
+    await deleteHeld.reached;
+    let imported = false;
+    importing = job.client.post("/api/bots/import", { template }).then((response) => {
+      imported = true;
+      return response;
+    });
+    await waitFor(async () => imported || (await lockWaiters()) > 0, "导入回了或停在账号锁上");
+    expect(imported, "删号没提交前导入建不出 Bot").toBe(false);
+    deleteHeld.release();
+
+    expect((await deleting).status).toBe(204);
+    const response = await importing;
+    expect(response.status, await response.clone().text()).toBe(401);
+    expect((await leftovers(job.user.id)).bots, "删号之后没有这个人的 Bot").toBe(0);
+    const [tools] = await database.sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM tool_connections WHERE owner_id = ${job.user.id}`;
+    expect(tools?.n, "删号之后没有这个人的插件").toBe(0);
+  } finally {
+    deleteHeld.release();
+    await Promise.all([deleting, importing]);
+    job.close();
+  }
+});
+
 it("没经过建 Bot 那道锁就进库的 Bot：删号期间给它派活，建 run 等删号提交，不留孤儿 run", async () => {
   const job = await contentJob(server, database.db, []);
   const deleteHeld = gate.arm(DELETE_RUNS, "after");

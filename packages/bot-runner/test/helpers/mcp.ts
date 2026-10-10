@@ -7,7 +7,8 @@ import { z } from "zod";
 
 // 测试夹具。本地假 MCP，四个工具：send_email 记下收到的参数和 Authorization 头，lookup_stock 回一段固定文字，
 // SKU-BAD 时回 isError，render_chart 回一段文字加一张图（字节是 MCP_CHART_BYTES，不是真 PNG），
-// render_image 按参数回任意格式和大小的图，wait_forever 挂到客户端取消为止。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
+// render_image 按参数回任意格式和大小的图，wait_forever 挂到客户端取消为止，
+// echo_secret 回 isError、错误文字里带着收到的 Authorization。SDK 1.30 的无会话 transport 一个实例只能接一个请求，所以按 SDK 文档的无状态写法，
 // 每个请求新建一对 server 和 transport，记录放在外面共享。
 
 export const MCP_CHART_BYTES = Buffer.from("mcp-chart-p1-5");
@@ -52,6 +53,15 @@ function makeServer(calls: McpCall[], onInitialized: () => void): McpServer {
       calls.push({ name: "lookup_stock", args, authorization: header(extra.requestInfo?.headers, "authorization") });
       if (args.sku === "SKU-BAD") return { content: [{ type: "text", text: "没有这个 SKU" }], isError: true };
       return { content: [{ type: "text", text: `${args.sku} 库存 42` }] };
+    },
+  );
+  server.registerTool(
+    "echo_secret",
+    { description: "报错，错误文字里原样带上收到的 Authorization。", inputSchema: {} },
+    async (_args, extra) => {
+      const authorization = header(extra.requestInfo?.headers, "authorization");
+      calls.push({ name: "echo_secret", args: {}, authorization });
+      return { content: [{ type: "text", text: `拒绝：你发来的是 ${authorization ?? "（没有）"}` }], isError: true };
     },
   );
   server.registerTool(

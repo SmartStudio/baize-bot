@@ -1,4 +1,10 @@
-import type { BotId, ToolConnectionConfig } from "@baize/shared";
+import {
+  describeMcpFailure,
+  redactCredential,
+  type BotId,
+  type ToolConnectionConfig,
+  type ToolOperation,
+} from "@baize/shared";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -16,12 +22,35 @@ import { Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
 
 // 每条工具连接一个 MCP Client，第一次调用它的工具时才连。连不上不抛：工具结果里放一句中文，
-// Bot 转述给用户，比整次 run 崩掉强。
+// Bot 转述给用户，比整次 run 崩掉强。连接、协议这类错误只给固定的中文分类，不带对端的原文：对端能把收到的凭据
+// 以任意编码写进报错。工具的正文（成功的和 isError 的）是对端的业务输出，原样进模型，只换掉凭据的原文、
+// 百分号编码和 JSON 转义三种写法，别的编码不保证。
+
+/**
+ * 会话里注册的 MCP 工具按最新下发的 config 能不能用。工具表在会话建好时就定了，config 中途换了，
+ * 旧会话里的工具还在，闸门和执行都要以最新的连接和操作表为准。
+ */
+export type McpCallable =
+  | { readonly kind: "ready"; readonly connection: ToolConnectionConfig; readonly operation: ToolOperation }
+  | { readonly kind: "awaiting_authorization"; readonly connection: ToolConnectionConfig }
+  | { readonly kind: "withdrawn"; readonly connectionName: string };
 
 export interface McpToolSet {
   readonly tools: readonly RunnerTool[];
   serverFor(toolName: string): string;
+  /** 不是这一组注册的 MCP 工具回 null。 */
+  resolve(toolName: string): McpCallable | null;
   close(): Promise<void>;
+}
+
+/** 用不了的时候给模型的那句话。闸门在审批之前拒，执行时再拒一次。 */
+export function unusableReason(callable: Exclude<McpCallable, { kind: "ready" }>): string {
+  switch (callable.kind) {
+    case "awaiting_authorization":
+      return `工具连接「${callable.connection.name}」还没补授权，这个操作现在用不了。请到插件页给它补上授权，取回真实的操作表之后再用。`;
+    case "withdrawn":
+      return `工具连接「${callable.connectionName}」已经不再提供这个操作，或者不再分配给这个 Bot，这次没有执行。`;
+  }
 }
 
 /** 一次共享的连接：几条工具调用一起等同一个 initialize，谁的 signal 先响就把它整个撤掉。 */
@@ -32,7 +61,8 @@ interface Pending {
 }
 
 interface Link {
-  readonly connection: ToolConnectionConfig;
+  /** 换了凭据就换成最新的一份，旧的 client 随之作废。 */
+  connection: ToolConnectionConfig;
   /** 正在连或已经连上的 client。连失败或被撤就清回 null，下一次调用再连。 */
   pending: Pending | null;
 }
@@ -96,12 +126,6 @@ const blocksOf = (content: unknown): ResultBlock[] =>
 const textOf = (blocks: readonly ResultBlock[]): string =>
   blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 
-const reasonOf = (error: unknown): string => {
-  if (!(error instanceof Error)) return String(error);
-  const cause = error.cause instanceof Error ? `（${error.cause.message}）` : "";
-  return `${error.message}${cause}`;
-};
-
 async function connect(connection: ToolConnectionConfig, signal: AbortSignal): Promise<Client> {
   const client = new Client({ name: "baize-bot-runner", version: "0.1.0" });
   const transport = new StreamableHTTPClientTransport(
@@ -134,6 +158,13 @@ const cancelConnect = (pending: Pending): void => {
   if (!pending.settled) pending.control.abort();
 };
 
+const dropPending = async (pending: Pending | null): Promise<void> => {
+  if (pending === null) return;
+  cancelConnect(pending);
+  const client = await pending.client.catch(() => null);
+  await client?.close();
+};
+
 /** 拿连好的 client，没连就连。等 initialize 的时候 signal 一响，这次连接整个撤掉，本次调用当场结束。 */
 const clientOf = (link: Link, signal: AbortSignal | undefined): Promise<Client> => {
   const pending = link.pending ?? startConnect(link);
@@ -152,15 +183,32 @@ export function createMcpTools(options: {
   readonly botId: BotId;
   readonly connections: readonly ToolConnectionConfig[];
   readonly reserved: ReadonlySet<string>;
+  /** 最新下发的 config 里分配给这个 Bot 的连接。 */
+  readonly latest: () => readonly ToolConnectionConfig[];
 }): McpToolSet {
   const taken = new Set([...PI_BUILT_IN_TOOLS, ...options.reserved]);
   const links: Link[] = [];
   const tools: RunnerTool[] = [];
   const servers = new Map<string, string>();
+  const registered = new Map<string, ToolConnectionConfig>();
+
+  const resolveOn = (registeredOn: ToolConnectionConfig, toolName: string): McpCallable => {
+    const connection = options.latest().find((one) => one.id === registeredOn.id);
+    if (connection === undefined) return { kind: "withdrawn", connectionName: registeredOn.name };
+    if (connection.status === "awaiting_authorization") return { kind: "awaiting_authorization", connection };
+    const operation = connection.operations.find((one) => one.name === toolName);
+    if (operation === undefined) return { kind: "withdrawn", connectionName: connection.name };
+    return { kind: "ready", connection, operation };
+  };
+  const resolve = (toolName: string): McpCallable | null => {
+    const registeredOn = registered.get(toolName);
+    return registeredOn === undefined ? null : resolveOn(registeredOn, toolName);
+  };
 
   for (const connection of options.connections) {
     const link: Link = { connection, pending: null };
     links.push(link);
+    const scrub = (text: string): string => redactCredential(text, link.connection.authorization);
     for (const op of connection.operations) {
       if (taken.has(op.name)) {
         console.warn(`Bot ${options.botId}：连接「${connection.name}」的操作「${op.name}」和已注册的工具重名，跳过`);
@@ -168,6 +216,7 @@ export function createMcpTools(options: {
       }
       taken.add(op.name);
       servers.set(op.name, connection.name);
+      registered.set(op.name, connection);
       tools.push({
         name: op.name,
         label: op.name,
@@ -175,22 +224,37 @@ export function createMcpTools(options: {
         // 控制面已经按 ToolOperation 收过这份 JSON Schema，这里原样交给 Pi 校验参数，不再翻译一遍。
         parameters: Type.Unsafe<Record<string, unknown>>(op.inputSchema),
         execute: async (_callId, params, signal) => {
+          const callable = resolveOn(connection, op.name);
+          if (callable.kind !== "ready") throw new Error(unusableReason(callable));
+          if (callable.connection.authorization !== link.connection.authorization) {
+            const stale = link.pending;
+            link.pending = null;
+            link.connection = callable.connection;
+            await dropPending(stale);
+          }
           let client: Client;
           try {
             client = await clientOf(link, signal);
           } catch (error) {
             return {
-              content: [{ type: "text", text: `工具连接「${connection.name}」连不上：${reasonOf(error)}` }],
+              content: [{ type: "text", text: `工具连接「${connection.name}」连不上：${describeMcpFailure(error)}` }],
               details: {},
             };
           }
-          // 停机和暂停的 abort 顺着 signal 传给 MCP，服务端收到 cancelled 通知，这边不等它回。
-          const result = await client.callTool(
-            { name: op.name, arguments: params as Record<string, unknown> },
-            undefined,
-            signal === undefined ? {} : { signal },
+          let result: Awaited<ReturnType<Client["callTool"]>>;
+          try {
+            // 停机和暂停的 abort 顺着 signal 传给 MCP，服务端收到 cancelled 通知，这边不等它回。
+            result = await client.callTool(
+              { name: op.name, arguments: params as Record<string, unknown> },
+              undefined,
+              signal === undefined ? {} : { signal },
+            );
+          } catch (error) {
+            throw new Error(`工具「${op.name}」调用失败：${describeMcpFailure(error)}`, { cause: error });
+          }
+          const blocks = blocksOf(result.content).map((block) =>
+            block.type === "text" ? { type: "text" as const, text: scrub(block.text) } : block,
           );
-          const blocks = blocksOf(result.content);
           const text = textOf(blocks);
           if (result.isError === true) throw new Error(text === "" ? `工具「${op.name}」报错，没有说明` : text);
           return {
@@ -205,15 +269,13 @@ export function createMcpTools(options: {
   return {
     tools,
     serverFor: (toolName) => servers.get(toolName) ?? "",
+    resolve,
     close: async () => {
       await Promise.all(
         links.map(async (link) => {
           const pending = link.pending;
           link.pending = null;
-          if (pending === null) return;
-          cancelConnect(pending);
-          const client = await pending.client.catch(() => null);
-          await client?.close();
+          await dropPending(pending);
         }),
       );
     },

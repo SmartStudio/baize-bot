@@ -58,6 +58,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     messagesLoadedAt: {},
     messageGaps: {},
     deletedBotIds: [],
+    toolsUnsynced: [],
     loads: {},
   };
 };

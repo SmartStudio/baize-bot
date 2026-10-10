@@ -34,6 +34,7 @@ import {
   publishDraft,
   removeBot,
   reseed,
+  seedManyPreferences,
   restoreAssistant,
   resetToday,
   seedProjectGoal,
@@ -76,6 +77,7 @@ const TestDeltaRequest = z
   })
   .strict();
 const LegacyDescriptionRequest = z.object({ botId: BotId, description: z.string() }).strict();
+const ManyPreferencesRequest = z.object({ botId: BotId, count: z.number().int().min(1).max(100) }).strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
@@ -107,6 +109,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       const next = Bot.parse({ ...bot, description: parsed.data.description });
       bots.set(next.id, next);
       push({ type: "bot_updated", bot: next });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/preferences") {
+    const parsed = ManyPreferencesRequest.safeParse(await readBody(req));
+    if (!parsed.success || !bots.has(parsed.data.botId)) send(res, 400, { error: "要种偏好的 Bot 不对" });
+    else {
+      seedManyPreferences(parsed.data.botId, parsed.data.count);
       send(res, 204);
     }
     return true;

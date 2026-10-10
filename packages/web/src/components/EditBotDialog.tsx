@@ -3,6 +3,7 @@ import { X } from "lucide-react";
 import { BotTags, UpdateBotRequest, type Bot } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
+import { trapTab } from "./trapTab.js";
 
 type Props = {
   bot: Bot;
@@ -26,21 +27,6 @@ const changesOf = (bot: Bot, name: string, tags: string[], description: string):
     ...(sameTags ? {} : { tags }),
     ...(description === bot.description ? {} : { description }),
   };
-};
-
-const FOCUSABLE = "input:not([disabled]), textarea:not([disabled]), button:not([disabled])";
-
-// 弹窗是 aria-modal，Tab 走到头要绕回来，不能落到背后的页面上。
-const trapTab = (event: React.KeyboardEvent<HTMLFormElement>) => {
-  if (event.key !== "Tab") return;
-  const focusable = [...event.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
-  const first = focusable[0];
-  const last = focusable[focusable.length - 1];
-  if (first === undefined || last === undefined) return;
-  const edge = event.shiftKey ? first : last;
-  if (document.activeElement !== edge) return;
-  event.preventDefault();
-  (event.shiftKey ? last : first).focus();
 };
 
 export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
@@ -71,7 +57,7 @@ export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (tooLong) return;
+    if (tooLong || request === "busy") return;
     setRequest("busy");
     try {
       await onSave(changesOf(bot, name, tags, description));
@@ -88,6 +74,7 @@ export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
         role="dialog"
         aria-modal="true"
         aria-label={`编辑 ${bot.name}`}
+        tabIndex={-1}
         onSubmit={submit}
         onKeyDown={trapTab}
       >
@@ -179,7 +166,8 @@ export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
             type="submit"
             className="primary-button"
             data-testid="edit-bot-save"
-            disabled={request === "busy" || tooLong}
+            disabled={tooLong}
+            aria-disabled={request === "busy"}
           >
             保存
           </button>

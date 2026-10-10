@@ -13,6 +13,7 @@ import type { ToolCrypto } from "../crypto.js";
 import type { Db } from "../db/client.js";
 import { bots, toolConnectionBots, toolConnections } from "../db/schema.js";
 import { newId } from "../ids.js";
+import type { Tx } from "./messages.js";
 
 type ToolRow = typeof toolConnections.$inferSelect;
 
@@ -26,7 +27,7 @@ const toTool = (row: ToolRow, assignedBotIds: BotId[]): ToolConnection =>
     assignedBotIds,
   });
 
-const assignments = async (db: Db, ids: string[]): Promise<Map<string, BotId[]>> => {
+const assignments = async (db: Db | Tx, ids: string[]): Promise<Map<string, BotId[]>> => {
   const byTool = new Map<string, BotId[]>();
   if (ids.length === 0) return byTool;
   const rows = await db
@@ -85,6 +86,7 @@ export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypt
     ToolConnectionConfig.parse({
       ...toTool(row, byTool.get(row.id) ?? []),
       authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc),
+      status: row.status,
     }),
   );
 }
@@ -120,28 +122,46 @@ export type UpdateToolResult =
   | { kind: "invalid_operation" }
   | { kind: "invalid_bot" };
 
+/** 换了凭据之后重新探测到的操作表，和加密好的新凭据。 */
+export type Reauthorized = { readonly authorizationEnc: string | null; readonly discovered: readonly ToolOperation[] };
+
+/**
+ * 补授权按新列表重建：同名的沿用原来定过的 needsApproval，新出现的按注解定，列表里没有了的就去掉。
+ * 再叠上这次请求自己带的 needsApproval；带了不在表上的操作名就是 null。
+ */
+function nextOperations(
+  stored: readonly ToolOperation[],
+  reauthorized: Reauthorized | undefined,
+  patched: UpdateToolRequest["operations"],
+): ToolOperation[] | null {
+  const base =
+    reauthorized === undefined
+      ? stored
+      : reauthorized.discovered.map((operation) => ({
+          ...operation,
+          needsApproval:
+            stored.find((before) => before.name === operation.name)?.needsApproval ?? operation.needsApproval,
+        }));
+  if (patched === undefined) return [...base];
+  const byName = new Map(patched.map((operation) => [operation.name, operation.needsApproval]));
+  if (byName.size !== patched.length || [...byName.keys()].some((name) => !base.some((op) => op.name === name))) {
+    return null;
+  }
+  return base.map(({ name, description, inputSchema, needsApproval }) => ({
+    name,
+    description,
+    inputSchema,
+    needsApproval: byName.get(name) ?? needsApproval,
+  }));
+}
+
 export async function updateTool(
   db: Db,
   ownerId: UserId,
   current: ToolConnection,
   patch: UpdateToolRequest,
+  reauthorized?: Reauthorized,
 ): Promise<UpdateToolResult> {
-  const changes: Partial<typeof toolConnections.$inferInsert> = {};
-  if (patch.name !== undefined) changes.name = patch.name;
-  if (patch.operations !== undefined) {
-    const byName = new Map(patch.operations.map((operation) => [operation.name, operation.needsApproval]));
-    if (
-      byName.size !== patch.operations.length ||
-      [...byName.keys()].some((name) => !current.operations.some((op) => op.name === name))
-    ) {
-      return { kind: "invalid_operation" };
-    }
-    changes.operations = current.operations.map((operation) => ({
-      ...operation,
-      needsApproval: byName.get(operation.name) ?? operation.needsApproval,
-    }));
-  }
-
   const assigned = patch.assignedBotIds === undefined ? undefined : [...new Set(patch.assignedBotIds)];
   if (assigned !== undefined && assigned.length > 0) {
     const owned = await db
@@ -153,18 +173,28 @@ export async function updateTool(
 
   try {
     return await db.transaction(async (tx): Promise<UpdateToolResult> => {
+      // 补授权要等 MCP 回列表，这期间别的请求可能已经改了操作表。锁住行、按落库的最新一版合并，不拿进来时那份旧的。
+      const [locked] = await tx
+        .select()
+        .from(toolConnections)
+        .where(and(eq(toolConnections.id, current.id), eq(toolConnections.ownerId, ownerId)))
+        .for("update");
+      if (locked === undefined) return { kind: "gone" };
+      const changes: Partial<typeof toolConnections.$inferInsert> = {};
+      if (patch.name !== undefined) changes.name = patch.name;
+      if (reauthorized !== undefined || patch.operations !== undefined) {
+        const operations = nextOperations(locked.operations, reauthorized, patch.operations);
+        if (operations === null) return { kind: "invalid_operation" };
+        changes.operations = operations;
+      }
+      if (reauthorized !== undefined) {
+        changes.authorizationEnc = reauthorized.authorizationEnc;
+        changes.status = "ready";
+      }
       const [row] =
         Object.keys(changes).length === 0
-          ? await tx
-              .select()
-              .from(toolConnections)
-              .where(and(eq(toolConnections.id, current.id), eq(toolConnections.ownerId, ownerId)))
-              .limit(1)
-          : await tx
-              .update(toolConnections)
-              .set(changes)
-              .where(and(eq(toolConnections.id, current.id), eq(toolConnections.ownerId, ownerId)))
-              .returning();
+          ? [locked]
+          : await tx.update(toolConnections).set(changes).where(eq(toolConnections.id, locked.id)).returning();
       if (row === undefined) return { kind: "gone" };
       if (assigned !== undefined) {
         await tx.delete(toolConnectionBots).where(eq(toolConnectionBots.toolConnectionId, current.id));
@@ -174,7 +204,9 @@ export async function updateTool(
             .values(assigned.map((botId) => ({ toolConnectionId: current.id, botId })));
         }
       }
-      return { kind: "ok", tool: toTool(row, assigned ?? current.assignedBotIds) };
+      // 不改分配就按锁住之后读到的最新分配回，不拿进来时那份：等 MCP 的这段时间别的请求可能改过。
+      const assignedNow = assigned ?? (await assignments(tx, [locked.id])).get(locked.id) ?? [];
+      return { kind: "ok", tool: toTool(row, assignedNow) };
     });
   } catch (error) {
     if (isNameTaken(error)) return { kind: "name_taken" };

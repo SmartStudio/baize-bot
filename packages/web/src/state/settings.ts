@@ -4,15 +4,23 @@ export const reduceSettings = (state: ReadyState, action: Action): ReadyState =>
   switch (action.type) {
     case "tool_upserted": {
       const known = state.tools.some((tool) => tool.id === action.tool.id);
+      // 删 Bot 之前发出的请求晚到，快照里还挂着它，按本会话的删除记录剔掉。
+      const tool = {
+        ...action.tool,
+        assignedBotIds: action.tool.assignedBotIds.filter((id) => !state.deletedBotIds.includes(id)),
+      };
       return {
         ...state,
-        tools: known
-          ? state.tools.map((tool) => (tool.id === action.tool.id ? action.tool : tool))
-          : [...state.tools, action.tool],
+        tools: known ? state.tools.map((old) => (old.id === tool.id ? tool : old)) : [...state.tools, tool],
       };
     }
     case "tool_removed":
       return { ...state, tools: state.tools.filter((tool) => tool.id !== action.toolId) };
+    case "tools_unsynced":
+      if (state.toolsUnsynced.includes(action.botId)) return state;
+      return { ...state, toolsUnsynced: [...state.toolsUnsynced, action.botId] };
+    case "tools_synced":
+      return { ...state, toolsUnsynced: state.toolsUnsynced.filter((id) => id !== action.botId) };
     case "settings_set":
       return { ...state, settings: action.settings };
     case "usage_loaded":

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BotId, GroupId, Message, MessageId } from "@baize/shared";
+import { BotId, GroupId, Message, MessageId, type Bot, type ToolConnection } from "@baize/shared";
 import { reduceGroups } from "./groups.js";
 import { createClock, emptyShelf, type Seq } from "./stamped.js";
 import type { Action, ReadyState } from "./types.js";
@@ -28,6 +28,7 @@ const initial = {
   messageGaps: {},
   deletedBotIds: [],
   unlistedCounts: {},
+  tools: [],
 } as unknown as ReadyState;
 
 const delta = (
@@ -729,5 +730,33 @@ describe("没入列的群，计数缓存只留最新完整计数里还有的", (
     const after = counts(removed, next(), [team("grp_other", 0)], [solo("bot_kept", "grp_kept", 0)]);
     expect(after.unlistedCounts[GroupId.parse("grp_solo")], "被删的 Bot 不在完整计数里").toBeUndefined();
     expect(Object.keys(after.unlistedCounts).sort(), "别的没入列的群照旧").toEqual(["grp_kept", "grp_other"]);
+  });
+});
+
+describe("建 Bot 的回包和删除推送的先后", () => {
+  it("删除推送先到，晚到的建 Bot 回包不把它加回团队和单聊", () => {
+    const botId = BotId.parse("bot_imported");
+    const groupId = GroupId.parse("grp_imported");
+    const created = { id: botId, name: "导入的" } as unknown as Bot;
+    const removed = reduceGroups({ ...initial, bots: {} } as ReadyState, { type: "bot_removed", botId });
+    const late = reduceGroups(removed, { type: "bot_created", bot: created, groupId });
+    expect(late.bots[botId], "已删的 Bot 不回到 Bot 表").toBeUndefined();
+    expect(
+      late.conversations.some((c) => c.groupId === groupId),
+      "已删的 Bot 不多出一个单聊",
+    ).toBe(false);
+  });
+});
+
+describe("删 Bot 和插件分配", () => {
+  it("删掉的 Bot 从每个插件的分配里拿掉，没分给它的插件原样不动", () => {
+    const gone = BotId.parse("bot_gone");
+    const kept = BotId.parse("bot_service");
+    const both = { id: "tool_both", assignedBotIds: [gone, kept] } as unknown as ToolConnection;
+    const other = { id: "tool_other", assignedBotIds: [kept] } as unknown as ToolConnection;
+    const state = { ...initial, bots: {}, tools: [both, other] } as ReadyState;
+    const removed = reduceGroups(state, { type: "bot_removed", botId: gone });
+    expect(removed.tools.map((tool) => tool.assignedBotIds)).toEqual([[kept], [kept]]);
+    expect(removed.tools[1], "没分给它的插件不换对象").toBe(other);
   });
 });

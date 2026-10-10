@@ -1,8 +1,10 @@
-import { ArrowRightLeft, BookOpen, Hand, MessageSquare, Plus } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import { ArrowRightLeft, BookOpen, Download, Hand, MessageSquare, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Bot, BotId } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { BrandBookOpener } from "../components/BrandBookDialog.js";
+import { ImportDialog } from "../components/ImportDialog.js";
 import { activityOf, previewOf } from "../components/messages/preview.js";
 import type { Conversation } from "../state/app.js";
 import { pathOf } from "./screen.js";
@@ -79,6 +81,12 @@ const BotCard = ({ bot, solo, projects }: { bot: Bot; solo: Solo | undefined; pr
 };
 
 export const TeamPage = ({ bots, conversations, onCreateBot }: Props) => {
+  const [importing, setImporting] = useState(false);
+  const importButton = useRef<HTMLButtonElement>(null);
+  const closeImport = useCallback(() => {
+    setImporting(false);
+    importButton.current?.focus();
+  }, []);
   const members = Object.values(bots).filter((bot) => bot.role === "member");
   const projectsOf = (botId: BotId): string[] =>
     conversations.flatMap((c) => (c.kind === "team" && c.botIds.includes(botId) ? [c.task.title] : []));
@@ -93,6 +101,16 @@ export const TeamPage = ({ bots, conversations, onCreateBot }: Props) => {
           <BookOpen size={14} aria-hidden="true" />
           品牌手册
         </BrandBookOpener>
+        <button
+          ref={importButton}
+          type="button"
+          className="ghost-button"
+          data-testid="import-bot"
+          onClick={() => setImporting(true)}
+        >
+          <Download size={14} aria-hidden="true" />
+          从链接导入
+        </button>
         <button type="button" className="ghost-button" data-testid="new-bot" onClick={onCreateBot}>
           <Plus size={14} aria-hidden="true" />新 Bot
         </button>
@@ -113,6 +131,7 @@ export const TeamPage = ({ bots, conversations, onCreateBot }: Props) => {
           ))}
         </div>
       </section>
+      {importing ? <ImportDialog onClose={closeImport} /> : null}
     </main>
   );
 };
