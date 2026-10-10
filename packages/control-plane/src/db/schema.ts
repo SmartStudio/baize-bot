@@ -124,6 +124,9 @@ export const settings = pgTable("settings", {
   notify: boolean("notify").notNull().default(true),
   dndFrom: text("dnd_from"),
   dndTo: text("dnd_to"),
+  budget: integer("budget"),
+  // 本月 80% 提醒发过的那个上海时区月份，形如 2026-10。一个月只发一次靠 WHERE 它不等于本月去抢。
+  budgetAlertedMonth: text("budget_alerted_month"),
 });
 
 export const bots = pgTable(

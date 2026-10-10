@@ -186,6 +186,7 @@ export function toSettings(row: typeof schema.settings.$inferSelect): Settings {
     notify: row.notify,
     dndFrom: row.dndFrom,
     dndTo: row.dndTo,
+    budget: row.budget,
   });
 }
 

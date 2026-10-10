@@ -1,7 +1,7 @@
 import { BotId, GroupId, RunId, UsageResponse } from "@baize/shared";
 import { bots, groups } from "./store.js";
 
-const WEEKLY_SPEND = [
+const MONTHLY_SPEND = [
   { botId: BotId.parse("bot_sales"), amount: 21.4, runs: 9 },
   { botId: BotId.parse("bot_service"), amount: 8.1, runs: 5 },
   { botId: BotId.parse("bot_buy"), amount: 8.7, runs: 4 },
@@ -9,9 +9,9 @@ const WEEKLY_SPEND = [
 
 const hoursAgo = (hours: number): string => new Date(Date.now() - hours * 60 * 60_000).toISOString();
 
-const weekStart = (): string => {
+const monthStart = (): string => {
   const shanghai = new Date(Date.now() + 8 * 60 * 60_000);
-  shanghai.setUTCDate(shanghai.getUTCDate() - ((shanghai.getUTCDay() + 6) % 7));
+  shanghai.setUTCDate(1);
   shanghai.setUTCHours(0, 0, 0, 0);
   return new Date(shanghai.getTime() - 8 * 60 * 60_000).toISOString();
 };
@@ -39,11 +39,13 @@ export const usageOf = (): UsageResponse => {
     },
   ];
   return UsageResponse.parse({
-    weekStartsAt: weekStart(),
-    total: WEEKLY_SPEND.reduce((sum, line) => sum + line.amount, 0),
+    monthStartsAt: monthStart(),
+    total: MONTHLY_SPEND.reduce((sum, line) => sum + line.amount, 0),
+    budget: null,
+    projects: [],
     bots: [...bots.values()]
       .map((bot) => {
-        const spend = WEEKLY_SPEND.find((line) => line.botId === bot.id);
+        const spend = MONTHLY_SPEND.find((line) => line.botId === bot.id);
         return { botId: bot.id, amount: spend?.amount ?? 0, runs: spend?.runs ?? 0 };
       })
       .sort((a, b) => b.amount - a.amount),

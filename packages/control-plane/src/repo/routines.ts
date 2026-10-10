@@ -302,6 +302,8 @@ function mergeTriggers(existing: readonly StoredTrigger[], inputs: readonly Trig
 
 /** 连着这么多次结果没人看，例行自己停下。 */
 export const UNSEEN_RUNS_TO_PAUSE = 3;
+/** 超预算没派活时记的那条 stopped 的 note。它不是一次真跑，不算进三次没人看。 */
+export const OVER_BUDGET_NOTE = "本月超预算，没跑";
 
 /**
  * seen 和自停的共同锁边界：两边都先锁住相关例行行（多条按 id 升序），锁到之后才读或改运行记录。
@@ -328,7 +330,13 @@ export async function autoPauseIfUnseen(db: Db, routineId: string): Promise<bool
     const latest = await tx
       .select({ seenAt: routineRuns.seenAt })
       .from(routineRuns)
-      .where(and(eq(routineRuns.routineId, routineId), ne(routineRuns.status, "running")))
+      .where(
+        and(
+          eq(routineRuns.routineId, routineId),
+          ne(routineRuns.status, "running"),
+          ne(routineRuns.note, OVER_BUDGET_NOTE),
+        ),
+      )
       .orderBy(desc(routineRuns.startedAt), desc(routineRuns.id))
       .limit(UNSEEN_RUNS_TO_PAUSE);
     if (latest.length < UNSEEN_RUNS_TO_PAUSE || latest.some((run) => run.seenAt !== null)) return false;
@@ -607,6 +615,11 @@ export async function routineRunOfRun(db: Db | Tx, runId: string): Promise<Routi
     .where(eq(runs.id, runId))
     .limit(1);
   return row ?? null;
+}
+
+/** 没派活的一次：落库就是 stopped，不经过 running，也没有 run 行记账。 */
+export async function recordStoppedRoutineRun(db: Db, routineId: string, startedAt: Date, note: string): Promise<void> {
+  await db.insert(routineRuns).values({ id: newId(), routineId, startedAt, status: "stopped", note });
 }
 
 /** 收尾。只改还在 running 的那一条，重复的报文和已经停下的记录都不再动。 */

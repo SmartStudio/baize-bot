@@ -1,6 +1,6 @@
 import type { GroupId, NotifyKind, UserId } from "@baize/shared";
 import type { Db } from "./db/client.js";
-import { getSettings } from "./repo/settings.js";
+import { claimBudgetAlert, getSettings } from "./repo/settings.js";
 import type { PushHub } from "./ws/hub.js";
 
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60_000;
@@ -17,6 +17,8 @@ export type NoticePublisher = {
   publish(userId: UserId, notice: NoticeInput): Promise<void>;
   /** 该用户有一台电脑代理握手成功，一段离线期结束，下一次卡住再推。 */
   computerOnline(userId: UserId): Promise<void>;
+  /** 一次 run 结完账。本月花费到了预算的 80% 就提醒一次，一个月只一次。 */
+  usageCharged(userId: UserId): Promise<void>;
 };
 
 export type NotificationOptions = {
@@ -68,6 +70,22 @@ export class Notifications implements NoticePublisher {
     });
   }
 
+  usageCharged(userId: UserId): Promise<void> {
+    return this.#enqueue(async () => {
+      const alert = await claimBudgetAlert(this.#db, userId, this.#now());
+      if (alert === null) return;
+      // 不走 stuck 的离线去重：那一位是「电脑掉线」那一串卡住的，这条和电脑在不在线无关，月份已经替它去过重。
+      await this.#deliver(userId, {
+        kind: "stuck",
+        text:
+          alert.total >= alert.budget
+            ? `本月已花 ¥${alert.total.toFixed(2)}，超过了预算 ¥${alert.budget}，例行任务先不自动跑了`
+            : `本月已花 ¥${alert.total.toFixed(2)}，到了预算 ¥${alert.budget} 的 80%，超了预算例行任务就不自动跑了`,
+        groupId: null,
+      });
+    });
+  }
+
   /** 推送连接刚连上。他不在线时留下的 stuck 和汇总，这时补上。 */
   connected(userId: UserId): Promise<void> {
     return this.#enqueue(() => this.#flush(userId, this.#now()));
@@ -99,7 +117,10 @@ export class Notifications implements NoticePublisher {
       if (this.#stuckSent.has(userId)) return;
       this.#stuckSent.add(userId);
     }
+    await this.#deliver(userId, notice);
+  }
 
+  async #deliver(userId: UserId, notice: NoticeInput): Promise<void> {
     const now = this.#now();
     const settings = await getSettings(this.#db, userId);
     if (!settings.notify) {

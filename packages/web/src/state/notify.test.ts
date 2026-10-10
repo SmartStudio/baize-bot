@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Notice, Settings } from "@baize/shared";
 import { notifyNotice } from "./notify.js";
 
-const settings = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" });
+const settings = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00", budget: null });
 const notice = Notice.parse({
   kind: "confirm",
   text: "本周推广计划等你确认",

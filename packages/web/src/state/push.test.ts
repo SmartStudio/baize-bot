@@ -6,7 +6,7 @@ import type { AppState, SessionId } from "./types.js";
 
 const A = 1 as SessionId;
 const B = 2 as SessionId;
-const settings = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" });
+const settings = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00", budget: null });
 const notice = Notice.parse({
   kind: "result",
   text: "A 账号的机密通知",

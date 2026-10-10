@@ -176,6 +176,13 @@
       "when": 1791605288581,
       "tag": "0024_p2_tool_awaiting_authorization",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791672913084,
+      "tag": "0025_p2_budget",
+      "breakpoints": true
     }
   ]
 }

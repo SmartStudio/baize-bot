@@ -6,13 +6,16 @@ import { dispatchUserMessage, type DispatchOutcome } from "../agent/dispatch.js"
 import { SELECTION_FAILURE } from "../agent/computer-selection.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
+import { isOverBudget } from "../repo/usage.js";
 import {
   autoPauseIfUnseen,
   chargeRoutineRun,
   failRoutineRun,
   loadRoutine,
   noteRoutineRun,
+  OVER_BUDGET_NOTE,
   openRoutineRun,
+  recordStoppedRoutineRun,
   routineRunOfRun,
   settleRoutineRun,
   trimRoutineRuns,
@@ -69,6 +72,16 @@ export async function runRoutine(
   at: Date,
   origin: RunOrigin,
 ): Promise<Routine | null> {
+  // D13：超预算只停自动触发（到点和 webhook），试跑是用户当面点的，照跑。记一条 stopped 让他看得到为什么没跑，
+  // 不改例行状态，这条也不算进三次没人看（autoPauseIfUnseen 按 note 排除）：下个月或者调高预算后它接着按点跑。
+  if (origin !== "trial" && (await isOverBudget(deps.db, ownerId, at))) {
+    await recordStoppedRoutineRun(deps.db, row.id, at, OVER_BUDGET_NOTE);
+    await trimRoutineRuns(deps.db, row.id);
+    const loaded = await loadRoutine(deps.db, RoutineId.parse(row.id));
+    if (loaded === null) return null;
+    deps.push.push(loaded.ownerId, { type: "routine_updated", routine: loaded.routine });
+    return loaded.routine;
+  }
   const opened = await deps.db.transaction(async (tx) => {
     const run = await openRoutineRun(tx, row.id, at, origin);
     if (run === null) return null;

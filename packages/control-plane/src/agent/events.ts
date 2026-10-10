@@ -525,6 +525,7 @@ async function settleCharge(
       groupId: run.groupId,
     });
   }
+  if (charge !== null) await deps.notifications.usageCharged(ownerId);
 }
 
 type Charge =

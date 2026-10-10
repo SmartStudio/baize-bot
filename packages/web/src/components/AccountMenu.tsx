@@ -37,7 +37,7 @@ export const AccountMenu = ({ user, usageTotal, onOpenUsage, onOpenSettings, onL
       </div>
       <button type="button" className="menu-row" role="menuitem" data-testid="open-usage" onClick={onOpenUsage}>
         <Gauge size={16} aria-hidden="true" />
-        本周花费
+        本月花费
         <span className="menu-trail" data-testid="account-usage-total">
           ¥{usageTotal.toFixed(1)}
         </span>

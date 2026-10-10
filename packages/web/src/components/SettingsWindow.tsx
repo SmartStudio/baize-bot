@@ -305,7 +305,7 @@ const when = new Intl.DateTimeFormat("zh-CN", {
 const UsagePage = ({ usage, bots }: Pick<Props, "usage" | "bots">) => (
   <div className="usage-page" data-testid="usage-page">
     <section className="usage-section">
-      <h3>本周</h3>
+      <h3>本月</h3>
       <div className="usage-panel">
         <div className="usage-summary">
           <strong data-testid="usage-total">{money(usage.total)}</strong>

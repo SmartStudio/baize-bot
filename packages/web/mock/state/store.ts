@@ -70,7 +70,7 @@ export const skills = new Map<string, Skill>();
 export const tools = new Map<string, ToolConnection>();
 
 export const settings: { current: Settings } = {
-  current: Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" }),
+  current: Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00", budget: null }),
 };
 
 export const isTeamGroup = (group: Group): boolean => group.kind === "team";

@@ -1,9 +1,16 @@
-import { BotListResponse, CreateBotResponse, UsageResponse, type BotId, type UserId } from "@baize/shared";
+import {
+  BotListResponse,
+  CreateBotResponse,
+  CreateGroupResponse,
+  UsageResponse,
+  type BotId,
+  type UserId,
+} from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { messages, routineRuns, routines, runs } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
-import { weekStart } from "../src/repo/usage.js";
+import { monthKey, monthStart, weekStart } from "../src/repo/usage.js";
 import { startTestServer, type ApiClient, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeUser } from "./helpers/fixtures.js";
@@ -63,11 +70,28 @@ describe("本周起点", () => {
   });
 });
 
+describe("本月起点", () => {
+  it("上海 1 号 00:00 前一秒仍属上月，00:00 起属新月", () => {
+    expect(monthStart(new Date("2026-09-30T15:59:59.999Z")).toISOString()).toBe("2026-08-31T16:00:00.000Z");
+    expect(monthKey(new Date("2026-09-30T15:59:59.999Z"))).toBe("2026-09");
+    expect(monthStart(new Date("2026-09-30T16:00:00.000Z")).toISOString()).toBe("2026-09-30T16:00:00.000Z");
+    expect(monthKey(new Date("2026-09-30T16:00:00.000Z"))).toBe("2026-10");
+  });
+
+  it("跨年：上海 1 月 1 日 00:00 属新年 1 月", () => {
+    expect(monthStart(new Date("2026-12-31T16:00:00.000Z")).toISOString()).toBe("2026-12-31T16:00:00.000Z");
+    expect(monthKey(new Date("2026-12-31T16:00:00.000Z"))).toBe("2027-01");
+  });
+});
+
 describe("GET /api/usage", () => {
-  it("零花费 Bot 仍列出，上周 run 只进 recent，最近任务有标题", async () => {
+  it("用量按月汇总不含上月的 run", async () => {
     const { client, ownerId } = await signedIn();
     const [a, b, zero] = await Promise.all([bot(client, "小采"), bot(client, "小服"), bot(client, "小销")]);
-    const start = weekStart(new Date());
+    const project = CreateGroupResponse.parse(
+      await (await client.post("/api/groups", { title: "推广白泽", botIds: [a.bot.id, b.bot.id] })).json(),
+    );
+    const start = monthStart(new Date());
     const current = new Date(Math.max(start.getTime(), Date.now() - 60_000));
     const previous = new Date(start.getTime() - 1);
     const userMessageId = newId();
@@ -83,6 +107,9 @@ describe("GET /api/usage", () => {
         { ...run(ownerId, a.bot.id, a.group.id, current, "2.500000"), triggerMessageId: userMessageId },
         run(ownerId, b.bot.id, b.group.id, current, "1.250000"),
         run(ownerId, b.bot.id, b.group.id, previous, "9.000000"),
+        run(ownerId, a.bot.id, project.group.id, current, "0.500000"),
+        run(ownerId, b.bot.id, project.group.id, current, "0.250000"),
+        run(ownerId, b.bot.id, project.group.id, previous, "7.000000"),
       ]);
     const other = await signedIn();
     const outsider = await bot(other.client, "别人的");
@@ -91,10 +118,15 @@ describe("GET /api/usage", () => {
     const response = await client.get("/api/usage");
     expect(response.status).toBe(200);
     const usage = UsageResponse.parse(await response.json());
-    expect(usage.weekStartsAt).toBe(start.toISOString());
-    expect(usage.bots.slice(0, 2), "花了钱的按金额从高到低").toEqual([
-      { botId: a.bot.id, amount: 2.5, runs: 1 },
-      { botId: b.bot.id, amount: 1.25, runs: 1 },
+    expect(usage.monthStartsAt).toBe(start.toISOString());
+    expect(usage.budget, "没设预算是 null").toBeNull();
+    expect(usage.total, "上月那两笔 9 和 7 不算").toBe(4.5);
+    expect(usage.bots.slice(0, 2), "花了钱的按金额从高到低，上月的不算").toEqual([
+      { botId: a.bot.id, amount: 3, runs: 2 },
+      { botId: b.bot.id, amount: 1.5, runs: 2 },
+    ]);
+    expect(usage.projects, "只列项目群，单聊群不算项目，上月的 run 不算").toEqual([
+      { groupId: project.group.id, amount: 0.75, runs: 2 },
     ]);
     expect(usage.bots.slice(2).toSorted(byBotId), "零花费的也列出，主助理没跑过也在").toEqual(
       [
@@ -103,10 +135,10 @@ describe("GET /api/usage", () => {
       ].toSorted(byBotId),
     );
     expect(usage.total).toBe(usage.bots.reduce((sum, row) => sum + row.amount, 0));
-    expect(usage.recent).toHaveLength(3);
+    expect(usage.recent, "recent 也只列本月的").toHaveLength(4);
     expect(usage.recent.find((item) => item.title === "查一下供应商的交期，然后整理采购对照表")?.amount).toBe(2.5);
     expect(usage.recent.find((item) => item.amount === 1.25)?.title).toBe("小服");
-    expect(usage.recent.find((item) => item.amount === 9)?.startedAt).toBe(previous.toISOString());
+    expect(usage.recent.some((item) => item.startedAt === previous.toISOString())).toBe(false);
   });
 
   it("已删 Bot 的 run 留在 total 和 recent，不伪造 Bot 分列", async () => {

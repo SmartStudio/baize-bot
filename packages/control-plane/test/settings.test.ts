@@ -35,6 +35,7 @@ describe("设置", () => {
       notify: true,
       dndFrom: null,
       dndTo: null,
+      budget: null,
     });
   });
 
@@ -44,7 +45,7 @@ describe("设置", () => {
     const first = Settings.parse(
       await (await client.patch("/api/settings", { theme: "dark", dndFrom: "22:00", dndTo: "08:00" })).json(),
     );
-    expect(first).toEqual({ theme: "dark", notify: true, dndFrom: "22:00", dndTo: "08:00" });
+    expect(first).toEqual({ theme: "dark", notify: true, dndFrom: "22:00", dndTo: "08:00", budget: null });
 
     const second = Settings.parse(await (await client.patch("/api/settings", { notify: false })).json());
     expect(second, "没传的字段保持上一次的值").toEqual({
@@ -52,6 +53,7 @@ describe("设置", () => {
       notify: false,
       dndFrom: "22:00",
       dndTo: "08:00",
+      budget: null,
     });
 
     expect(Settings.parse(await (await client.get("/api/settings")).json())).toEqual(second);
@@ -63,6 +65,22 @@ describe("设置", () => {
     const cleared = Settings.parse(await (await client.patch("/api/settings", { dndFrom: null, dndTo: null })).json());
     expect(cleared.dndFrom).toBeNull();
     expect(cleared.dndTo).toBeNull();
+  });
+
+  it("预算按整数元收，给 null 是取消，0、负数和小数 400", async () => {
+    const client = await loggedInClient();
+    const set = Settings.parse(await (await client.patch("/api/settings", { budget: 300 })).json());
+    expect(set.budget).toBe(300);
+    expect(Settings.parse(await (await client.get("/api/settings")).json()).budget, "读得回来").toBe(300);
+    for (const budget of [0, -5, 12.5]) {
+      expect((await client.patch("/api/settings", { budget })).status, `预算 ${budget} 不收`).toBe(400);
+    }
+    expect(
+      Settings.parse(await (await client.patch("/api/settings", { theme: "dark" })).json()).budget,
+      "没传不动",
+    ).toBe(300);
+    const cleared = Settings.parse(await (await client.patch("/api/settings", { budget: null })).json());
+    expect(cleared.budget).toBeNull();
   });
 
   it("空 PATCH 不改任何东西", async () => {

@@ -289,7 +289,7 @@ export const reseed = (): void => {
   messageFetchFaults.clear();
   resetSuffix();
   resetTaskNumber();
-  settings.current = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00" });
+  settings.current = Settings.parse({ theme: "system", notify: true, dndFrom: "22:00", dndTo: "08:00", budget: null });
   seeds.forEach((seed, seedIndex) => {
     const botId = `bot_${seed.key}`;
     const groupId = `grp_${seed.key}`;
