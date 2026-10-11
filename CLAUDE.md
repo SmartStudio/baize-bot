@@ -79,6 +79,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - skill 单向：真相源是控制面 `skills` 表，随 `config` 下发，运行器落成 `<dataDir>/<botId>/skills/<skillId>/SKILL.md`，不回传。`config.skills` 恒带，空也带空数组，运行器靠它整目录对账。
 - 电脑代理的启动配置是一行 JSON `{ url, computerId, token, dataDir }`，由调用方写入 stdin；`COMPUTER_ID`、`AGENT_TOKEN`、`CONTROL_PLANE_AGENT_URL`、`BAIZE_DATA_DIR` 不得出现在代理环境中。
 - 例行任务就是归属人在单 Bot 群里发了一条消息，运行器和电脑代理不认识它。调度游标用 `UPDATE ... WHERE lastFiredAt = 旧值` 抢，停机不补跑。
+- 牌桌就是一个群，用户固定坐 4 号，1 到 3 号是牌友 Bot，老白不入座。`control-plane/src/poker/` 放它的引擎和推进逻辑。`engine.ts` 是不碰库和时钟的纯引擎，一手牌只存种子、起始座位和事件日志，靠 `replay` 还原。`converge.ts` 在桌锁（`store.ts` 的 `withTableLock`）里推进，牌友 60 秒不出牌就兜底，`sweeper.ts` 每秒扫一遍 `playing` 的手。`hint.ts` 管问老白，`leave.ts` 管散场和复盘。牌友和老白的 run 是隐藏 run，触发消息只写给 `visibleTo` 里的人，prompt 不带群历史。设计理由读 `packages/control-plane/README.md` 的「牌桌」一节，运行器一侧读 `packages/bot-runner/README.md` 的「牌桌」。
 - 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
 - Pi 的四个落盘点（authPath、modelsStorePath、两个 agentDir、sessionDir）都在 `bot-runner/src/bot-session.ts` 钉到 `<dataDir>/<botId>/` 下，`~/.pi` 不能出现任何新文件，`bot-runner/test/runner.test.ts` 最后一条用例钉着这件事。
 - Pi 没有 pause。暂停状态住在控制面的 `bots.run_state`，运行器收到 `pause` 只立起这个 Bot 的暂停闸门，在 prompt 入场和每次 `tool_call` 前等它，不 `abort()`。正在跑的工具和模型请求不截断，挂起的审批不失效，期间的新 prompt 留在原来的串行队列里，`resume` 只放开闸门、不重发。
@@ -86,8 +87,8 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 ### 文档在哪
 
 - `README.md` 跑起来、环境变量、控制面握手。
-- `packages/control-plane/README.md` 路由、审批、交接、例行、skill、用量的设计理由，改这些前先读对应一节。
-- `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法。
+- `packages/control-plane/README.md` 路由、审批、交接、例行、skill、牌桌、用量的设计理由，改这些前先读对应一节。
+- `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法、牌桌工具。
 - `spec/规格.md` 产品规格 v0.2，方向已转成个人助理，每个对象写了目标和「现在」的差距。`spec/用户故事.md` 按天讲用户怎么用，每期的验收就是走通对应的故事。`spec/原型/个人助理-v4.html` 是可点的交互原型，一次性的，不照着抄代码，prettier 忽略它。
 - `plan/开发计划.md` 分期和单元，第四节列了 v0.1 的 M 和 N 单元去哪了。
 - `research/` 竞品对照，Grok Bot 和个人助理几家。
@@ -107,6 +108,7 @@ herdr agent start <名> --kind codex --pane <pane_id> -- --yolo -m gpt-5.6-sol -
 
 - 根 `tsconfig.base.json` 是唯一编译选项来源，`noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes` 都开着，可省属性和 `undefined` 不是一回事。
 - 状态用字面量联合，不用布尔组合。错误在工具里靠抛异常表达，中文文案，Pi 会把它做成 `isError` 工具结果。
+- 读消息必须带收件人。`messages.visible_to` 为 null 是全群可见，否则只给数组里的 `Viewer`（用户或某个 Bot），空数组被数据库拒绝。`repo/messages.ts` 的 `listMessages`、`findOwnedMessage`、`messageSeq` 都要必填的 `viewer` 参数并拼上 `messageVisibleTo(viewer)`，用量、今天、项目页、skill、审批、上下文窗口的聚合同样如此。HTTP 一律传 `{ kind: "user" }`，派活拼上下文传被派的 Bot。新写读 `messages` 列表的查询先带 `viewer`。现在不带的是按 id 取单行或计数的几处，读的是代码自己写下的行或用户点的卡，例如出牌回执、团队提议卡、例行提议卡、偏好的来源消息。`test/p3-visible-read.test.ts` 钉着这条。
 - 注释只留代码说不出来的原因。测试断言信息就是文档。
 - 控制面测试只通过 HTTP 和两条 WebSocket 碰服务，不直接调路由函数。等异步效果不靠超时，发一条确定会落地的报文，断言它先到。
 - Prettier `printWidth` 120，双引号，尾逗号。oxlint 的 `typescript/no-explicit-any` 是 error。

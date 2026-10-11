@@ -511,6 +511,55 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 **内置 bash 的失败有两种形态。** Pi 1.0.0 起，命令以非零退出码结束时，bash 不再抛异常，而是正常返回 `isError: true` 的结果：`content` 文本是命令输出加一行 `Command exited with code N`，`structuredContent` 带 `exit_code`。超时（`Command timed out after N seconds`）、中止（`Command aborted`）、退出码为 null 这三种仍然抛。生产链路不受影响，沙箱 bash 只转发 `execute`，`reporter` 读的是 Pi 事件上的 `isError`，两种写法都记成 `failed`。受影响的是直接调 `tool.execute` 的测试：断言「沙箱拦住了」要看返回值的 `isError` 和 `content` 文本，泄露断言也落在这段文本上，不能再写 `rejects` 或 `.catch`；`test/sandbox.test.ts` 的 `blocked` 就是这个断言。这条变化 Pi 的 CHANGELOG 没写。
 
+## 牌桌
+
+牌桌的 run 不走群里那套。控制面发来的 `prompt` 带非空的 `table` 时，运行器按牌桌处理，设计理由和控制面一侧的做法见控制面 README 的「牌桌」一节。代码在 `src/table.ts`。
+
+### prompt 拼法
+
+`composePrompt` 看到 `message.table !== null` 就交给 `composeTablePrompt`，不拼群标签、任务卡、交接报文和群里刚才说的。控制面发来的牌桌 prompt 里 `text` 是空串，`context` 是空数组，`task` 是 null，这些本来就没有。`table.role` 有三种。
+
+**牌友（`player`）。** 依次是 `本手：<handId>；决策点：<seq>`，座位视图，`公开日志：` 加逐条旁白（没有写 `暂无`），最后一句「请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额，台词最多 40 字，可以不说。其他文字不会公开。」
+
+**老白问牌（`advisor`）。** 前面和牌友相同，最后换成「用户问：<question>」和「请在 120 字内给出建议和理由，只用给定视图。」`question` 缺省写「这手怎么打」。
+
+**老白复盘（`reviewer`）。** 开头一句「散场复盘：只根据以下关键手的用户视角写建议，不推测未公开的底牌。」然后每手一段，`第 N 手：标题`、`用户筹码变化：Δ` 和那手 4 号座的视图。结尾要求调 `poker_review` 一次，没有关键手时提交空数组。
+
+牌友和问牌的 `view` 为 null 时直接抛「出牌或建议缺少座位视图。」，不会拿空视图去问模型。`renderView` 把控制面给的视图逐项写出来，包括位置、牌力摘要（`summary`）、手牌、阶段、公共牌、底池、自己的筹码和盲注、各家的位置、筹码、本街下注和状态（亮过牌的带上）、合法动作和本手公开事件。运行器不自己算牌力，也不补牌面，这一点同样写进了系统提示，见下面「会话」。
+
+### 会话
+
+牌桌用单独的 Pi 会话，不和同一个群里的普通会话混。会话目录是群会话目录下的 `table/`，仍在 `<dataDir>/<botId>/` 之内。`createTableSession` 的做法和普通会话不同。
+
+- 系统提示是 `tablePersona(preset)`，一句人设加一条规则，规则要求牌面、位置、牌力摘要和合法动作只采用控制面给定的视图，不自行计算牌力，不猜测未公开的底牌，不编造牌面。人设在 `src/persona.ts`，老白是「不入座，负责解说、建议和复盘」。
+- `noSkills`、`noExtensions`、`noContextFiles`、`noPromptTemplates`、`noThemes` 全开，不加载 skill，也不带群协作提示。`toolExecution` 设为 `sequential`。
+- 只启用本角色的牌桌工具。一个 `tool_call` 处理器拦住不在本角色工具表里的调用，并在放行前等暂停闸门，行为和普通会话一致，见「暂停和继续」。
+- 起始模型是 `plan`，每次 prompt 前按 `message.purpose` 切换。控制面给牌友 `fast`，给问牌和复盘 `plan`。
+- `sessionFor` 在 Bot 的 `tableRole` 变了时重建会话，所以老白从问牌转到复盘会换一个新会话，不带着上一个角色的工具和上下文。
+
+牌桌 run 的文字上报也由运行器先筛一遍。reporter 上报的报文里，除了 `run_done`，牌桌 run 只有问牌角色的 `bot_text` 会发给控制面，牌友和复盘角色的 `bot_text` 在这里就丢掉，牌友的公开台词只能随 `poker_act` 走。控制面那一侧还有按角色的默认拒绝白名单，两边各自把关。`gate.ts` 把 `poker_act` 和 `poker_review` 登记成内部工具，牌桌 run 不带只读边界，登记只为了让每个内部工具都有一条明确的表态。
+
+### `poker_act`
+
+只有牌友会话有这个工具。入参是 `{ action: string, amount?: number, say?: string }`，故意不用 typebox 去卡取值，范围检查统一在工具里做，给的是能照着改的中文，理由同「主题任务工具」。
+
+- `say` 超过 40 字抛「台词最多 40 字，请缩短后再出牌。」同一个上限在 shared 的 `poker_act` 报文上也是 `max(40)`。
+- `action` 是 `raise` 时拿 `amount` 当加注的本街总额，其他动作忽略 `amount`。
+- 拼出的报文带当前 run 的 `runId`、Pi 给的 `callId`、prompt 里的 `handId` 和 `seq`，再用 `AgentToControl.safeParse` 校验。动作只能是 `fold`、`check`、`call`、`raise`（`amount` 为整数）、`all_in`，其他抛「出牌动作不合法」并列出可选值。
+- 工具不属于当前角色，或当前没有这条 run，抛「这个工具不属于当前牌桌角色。」
+
+发出去之后工具不立即返回，它等控制面的 `poker_result`。`createPokerResults` 按 `(runId, callId)` 记下等待的出牌，最长等 65 秒（`POKER_RESULT_TIMEOUT_MS`），比控制面的 60 秒兜底多留 5 秒，让控制面正常兜底的失败回执先到。`ok: false` 让工具抛带中文原因的错，Pi 把它做成 `isError` 工具结果，牌友在同一次 run 里照原因重试。`ok: true` 返回「出牌已确认。」中止、发送失败、超时、运行器停止或牌友被移除（`cancel`）都按失败结算，等待不会悬着。同一个 `callId` 的重复帧，控制面回的是同一个结果。
+
+### `poker_review`
+
+只有复盘会话有这个工具。入参是 `{ hands: [{ number, title, text }] }`。
+
+- 一次 run 只能交一次，再交抛「本次复盘已经提交，请勿重复提交。」
+- 先过 `AgentToControl.safeParse`，`number` 必须是正整数，`title` 和 `text` 是字符串，不合格抛「复盘格式不正确，请给每手提供整数序号、标题和正文。」
+- 提交的序号必须和 prompt 里给的关键手完全一致，不重复、不遗漏、不增加，否则抛「请只提交给定的关键手，每手一次，不得遗漏或增加手序号。」
+- 每手 `text` 最多 120 字（`REVIEW_TEXT_LIMIT`），超了抛「每手正文最多 120 字，请缩短后再提交。」这个常量和控制面 `poker/leave.ts` 的同值，两边各自把关。长度按 JavaScript 字符串的 `length` 算。
+- 校验通过后用 `send` 发走，没有回执。控制面那边不合格就整条丢掉，用户再点一次散场会重派一条复盘 run。
+
 ## 跑测试
 
 ```

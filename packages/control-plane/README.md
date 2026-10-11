@@ -595,6 +595,119 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 为什么账号锁在最前、多把 Bot 锁按 id 升序拿，以及删号和建 Bot、建群、开项目、建 run 的各种交错，见「run 收尾」一节删账号那一段。
 
+## 牌桌
+
+一张牌桌就是一个群。`poker_tables` 以 `group_id` 为主键，`(owner_id, request_id)` 唯一，重发建桌请求回同一张桌。桌上四个座位，用户固定坐 4 号，1 到 3 号是牌友 Bot，默认是 `leopard`、`old_k`、`jasmine`，盲注 10/20，起始筹码 2000。主持人老白（`laobai`）不入座，只在群里说话、回答问牌、写复盘。五位牌友和老白每个用户各建一次，靠 `bots` 上 `(owner_id, preset)` 的唯一索引。他们的 role 是 `player` 和 `host`（`TABLE_ROLES`），`/api/bots` 不列出，也不能 `PATCH`。代码在 `src/poker/`。
+
+- `engine.ts` 是确定性的纯引擎，只有 `newHand`、`apply`、`replay`、`legalActions`、`settle`，不碰库和时钟。
+- `view.ts`、`wire.ts`、`table-view.ts` 把引擎状态裁成某个座位看得到的样子。
+- `converge-plan.ts` 是纯函数 `nextStep`，说下一步该做什么。`converge.ts` 执行它。`store.ts` 放桌锁和查询，`hint.ts`、`leave.ts` 管问牌和散场，`sweeper.ts` 是定时扫描。
+
+### 一手牌怎么存
+
+库里只存种子、`seats_start`、`button_seat`、盲注和 `poker_events` 日志，牌面本身不存，`replay` 把它们重放成当前状态。所以种子是整手牌的全部秘密，它不出控制面，响应、prompt 和日志都不带。路由里的错误处理也特意不把数据库的原异常交给公共日志，因为数据库的插入错误可能带整行。
+
+几条唯一约束替代了先查后写。`poker_events` 主键是 `(hand_id, seq)`，同一个决策点只能落一条事件。`poker_hands` 有 `(group_id) WHERE status = 'playing'` 的部分唯一索引，一桌同时只有一手。`poker_sessions` 有 `(group_id) WHERE ended_at IS NULL` 的部分唯一索引，一桌同时只开一场。`poker_hints` 主键是 `(hand_id, seq)`。
+
+`poker_tables.version` 每次桌面变化加一。`poker_table_updated` 带整张桌的视图只推给归属人，客户端只认更大的版本。`snapshot` 和 `currentHandOf` 在 `REPEATABLE READ` 只读事务里读，桌面和当前手出自同一个快照。
+
+### 路由
+
+都挂在 `/api` 下，归属不对一律 404。
+
+| 路由                                  | 请求体           | 行为                                                                                                                                                |
+| ------------------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /poker/tables`                  | `{ requestId }`  | 新建回 201，同一个 `requestId` 重发回 200。先补建缺的预设牌友，有新建的就向电脑代理重发一次 `config`，因为代理要认得这些 Bot                          |
+| `GET /poker/tables`                   |                  | 当前用户所有牌桌的视图                                                                                                                              |
+| `GET /poker/tables/:groupId`          |                  | 一张桌的视图，视角是 4 号                                                                                                                           |
+| `POST /poker/tables/:groupId/seats/:seat` | `{ persona }` | 把 1 到 3 号座换成另一位牌友，不能换成老白。非牌友座位或已在桌上回 400，手进行中回 409。筹码留在座位上，不跟人走。推 `group_updated`、一条 `message` 和 `poker_table_updated` |
+| `POST /poker/tables/:groupId/hands`   | 空               | 开一手，201。桌上已有一手回 409                                                                                                                     |
+| `POST /poker/hands/:id/act`           | `{ seq, action }` | 用户出牌。没轮到 4 号回 409「还没轮到你出牌」，`seq` 不等于已落事件数回 409「出牌序号已过期」，引擎不收回 400                                      |
+| `POST /poker/hands/:id/hint`          | `{ seq }`        | 问老白，见「问老白为什么挂在决策点上」                                                                                                              |
+| `POST /poker/tables/:groupId/leave`   | 空               | 散场，见「散场、复盘和战绩」                                                                                                                        |
+
+牌桌群不收普通消息。`POST /api/groups/:id/messages` 对牌桌群回 409「牌桌里请用按钮出牌」，用户在这里只有按钮，没有自由文字。
+
+### 桌锁
+
+所有改动牌桌的动作都过 `withTableLock`，包括出牌、开手、`converge`、问牌、散场、牌友的 `poker_act` 和老白的 `poker_review`。它开一个事务，先拿账号共享锁，再拿 `pg_advisory_xact_lock`，最后 `SELECT ... FOR UPDATE` 锁住 `poker_tables` 那一行。顺序固定是账号锁、咨询锁、行锁。账号锁排在最前的理由见「run 收尾」一节删账号那一段。
+
+因为同一张桌的所有写入排队，锁内每一步都重新从库里载入手牌。库中的日志是唯一事实来源，内存里没有牌局状态，重复推进不会再落同一个动作，也不会重复结算。要在锁外做的事（发 prompt、推送）等事务提交后再做，否则运行器收到 prompt 时 run 行还没落地，重连对账看不到它。
+
+### 牌友看不到别人的底牌
+
+这件事分三层守。
+
+**视图只含这个座位的信息。** `viewFor(state, seat)` 给出公共信息加这个座位自己的底牌，不含种子和牌堆。别的座位的牌只有一手牌里出现了摊牌事件之后才以 `shown` 出现。`wire.ts` 里 `PokerSeatView` 是引擎 `SeatView` 的 zod 镜像，一条类型相等断言把两者钉在一起，字段对不上编译就失败。`buildTableView` 的出口再过一遍 `PokerTableView.parse`，多余字段被去掉。
+
+**消息表带收件人。** `messages.visible_to` 是 `Viewer[]` 或 null。null 是全群可见，数组只给列出的人，空数组被 `messages_visible_to_check` 挡掉。`Viewer` 是 `{ kind: "user" }` 或 `{ kind: "bot", botId }`。读消息的查询把 `messageVisibleTo(viewer)` 拼进 `WHERE`，`listMessages`、`findOwnedMessage`、`messageSeq` 的 `viewer` 参数是必填，漏传编译不过。HTTP 一律以 `{ kind: "user" }` 读，派活拼上下文以被派的 Bot 读。推送也过滤，`ws/hub.ts` 对 `visibleTo` 里没有 user 的 `message` 和 `message_delta` 直接不推。
+
+**牌桌 run 是隐藏 run。** `sendHiddenRun` 为牌友、问牌和复盘各起一条 run。`startTableRun` 在一个事务里写一条系统触发消息「牌桌回合」（带 `visibleTo`）和一条 `runs` 行（带 `visible_to` 和 `table_role`）。发出去的 `prompt` 的 `text` 是空串，`context` 是空数组，`task` 是 null，`members` 是空数组，座位视图、公开日志、问题、复盘材料都在 `table` 字段里。所以牌友拿到的只有自己座位的视图和公开日志，没有群历史，也没有任务卡。模型按角色选用途，牌友用 `fast`，老白问牌和复盘用 `plan`。发不出去（电脑刚好掉线）就把 run 收成 `abandoned`，不占着座位的唯一索引。
+
+谁看得到什么：
+
+| 内容                                         | 谁看得到       |
+| -------------------------------------------- | -------------- |
+| 牌友回合的触发消息、`poker-result:` 出牌回执 | 只有这个牌友   |
+| 问牌的触发消息                               | 老白和用户     |
+| 老白回答问牌的文字                           | 只有用户       |
+| 复盘的触发消息                               | 只有老白       |
+| 老白的旁白（`narrate.ts` 生成，不过模型）、牌友的台词 | 全群           |
+
+隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
+
+牌桌这边有三处读 `messages` 不带 viewer，读的都是代码自己刚写下的行。`poker/converge.ts` 数重派的触发消息，`poker/hint.ts` 按 id 查老白答出来的那一条，`events/poker-act.ts` 读出牌回执。列表类查询的 viewer 规则由 `test/p3-visible-read.test.ts` 钉着。
+
+### converge 怎么推进
+
+`converge(deps, handId)` 是推进一手牌的唯一入口，在桌锁里循环，每圈重新载入桌和手，调 `nextStep` 得到下一步。
+
+| 下一步           | 做什么                                                                                                                                                                                         |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `await_user`     | 轮到 4 号，用户不限时。如果手上还记着牌友的回合就清掉，然后返回                                                                                                                                |
+| `wait_bot`       | 牌友的回合在路上且没超时，返回                                                                                                                                                                 |
+| `dispatch_bot`   | 轮到牌友而手上没有这个座位的回合。发一条隐藏 player run，在 `poker_hands` 记下 `turn_seat`、`turn_run_id`、`turn_deadline`，截止时间是现在加 60 秒（`BOT_TURN_TIMEOUT_MS`），同座位重派沿用原来的截止时间 |
+| `timeout_action` | 超时，或同一个决策点被引擎拒绝满三次（`MAX_REJECTED_ACTIONS`）。收掉那条 run，老白说一句「没有及时出牌」或「连续三次出牌无效」，再落兜底动作，然后接着循环                                      |
+| `settle`         | 引擎已走完而手还没标完成。`UPDATE ... WHERE status = 'playing'` 标成 `complete`，把各座位最终筹码写回桌子，桌子回 `idle`                                                                        |
+| `hand_over`      | 已经结算过，返回                                                                                                                                                                               |
+
+**兜底动作。** `fallbackAction` 能过牌就过牌，否则弃牌，从不往里投筹码。超时的牌友因此最多输掉已经投进去的，不会因为掉线被迫跟注。
+
+**牌友的 `poker_act`。** `events/poker-act.ts` 在桌锁里先校验 run 属于这台电脑、角色是 `player`、这个 Bot 在这手牌里有座位，然后才碰牌局。幂等靠一条回执消息，id 是 `poker-result:` 加 `(runId, callId)` 的 SHA-256，`ON CONFLICT DO NOTHING` 认领，重复的帧读回已存的结果，不再碰牌局。没有轮到它、`seq` 过期、手已结束都回 `ok: false` 和中文原因，不推进。引擎拒绝时 `turn_attempts` 加一，回 `ok: false` 让牌友在同一次 run 里改，同时重新 `converge`。成功就落事件，台词非空就以牌友的名义发一条全群可见的消息。每次落动作都清掉手上的回合记录，下一个决策点重新派。
+
+**派出去的 prompt 在提交后才发。** `converge` 把 prompt 收进列表，事务提交后再发。发送失败就把 run 收成 `abandoned`，下一轮扫描会重派。
+
+**丢失的 run。** 手上记着回合，但 run 行没了，或 run 已结束而 prompt 没确认进会话（`context_confirmed_at` 为空），就当它丢了，沿用原截止时间重派。重派次数按群里带 `牌桌决策点 <handId>/<seq>` 标记的触发消息计数，首派加三次重派，计数在库里，重启后还作数。如果 run 已结束且 prompt 确认进过会话却没出牌，就把截止时间设成现在，下一圈直接兜底。电脑代理重连时 `hello` 里的 `activeRuns` 没有的 run 由 `AgentHub` 收成 `abandoned`（`#finishMissingRuns`），所以掉线再连上的牌友会被这里重派。
+
+**谁来触发。** 三处。用户出牌和牌友出牌的路由在提交后调用。`PokerSweeper` 每秒扫描所有 `playing` 的手并逐手 `converge`，`tick` 串行，一手出错不挡后面的手，`stop` 等当前一轮扫完。扫描器让超时兜底、掉线重派和重启后接着打都不靠内存里的定时器，控制面重启后第一次扫描就接上。它在 `server.ts` 启动，`close` 时停。测试用 `configurePoker(db, { now, turnTimeoutMs })` 注入时钟和超时，时钟同样是参数不是全局。
+
+### 问老白为什么挂在决策点上
+
+建议是针对某个视图给的。任何一个人再出一手牌，视图就变了，旧建议可能已经不对。所以建议的身份是 `(hand_id, seq)`，`seq` 是问的时候已落的事件数。
+
+- 只能在轮到用户时问，否则 409「还没轮到你出牌，轮到你再问老白」。`seq` 不等于当前事件数回 409「问牌序号已过期」。
+- 每个决策点一条，主键保证重复点返回同一条视图。`failed` 的可以再问，`onConflictDoUpdate` 换掉 run 重来。
+- `hintOf` 只取当前手、`seq` 等于当前事件数的那一条，所以上一街的建议不会带到下一次行动上。
+- 状态是推出来的。回答消息非空且不在流式中是 `done`。run 已结束而 prompt 没确认进会话，或没有回答，是 `failed`。其余是 `waiting`。对账收尾和报错收尾不确认 prompt，半截正文被通用收尾收成定稿也不算成功回答。
+- 电脑离线时也要有结果。这时插一条已结束、零费用的 run，让 `failed` 在重连后还能读到。
+- 老白同时只答一个问题。`runs_table_role_open_idx` 是 `(group_id, table_role)` 上的部分唯一索引，每张桌未结束的 advisor run 和 reviewer run 各至多一个。`runs_table_bot_open_idx` 另外限制同一个 Bot 在同一张桌至多一个未结束的牌桌 run。上一条没答完再问回 409「老白还在回答上一条，等它说完再问」。
+
+老白的 prompt 用 4 号座的视图，所以他只知道用户知道的。答案落库后 `refreshHintForRun` 在桌锁里更新，它在 `bot_text` 和收尾事务提交之后才调用，避免 run 锁和桌锁反序。它只认 `visibleTo` 恰好是 `[user]` 的消息，并且比对手和决策点，旧 run 的回调盖不掉重试后的行。
+
+### 散场、复盘和战绩
+
+**散场。** `leaveTable` 在手进行中回 409「这一手还没打完，打完再散场」，从没打过牌回 409「还没打过牌，没有要散的场」。否则用 `ended_at IS NULL` 的条件更新结束这一场。最近一场已散场而复盘还空时，再点一次会重派复盘，已经有复盘的再点什么都不做。重复点击撞 reviewer 的唯一索引回 busy，所以同一场只会有一份复盘在路上。
+
+**关键手。** `keyHandsOf` 从这一场已结算的手里挑用户（4 号）筹码变化绝对值最大的几手，最多 3 手（`KEY_HAND_LIMIT`），变化相同时先打的优先，按手序返回。挑手的是控制面，不是模型。老白只写话。
+
+**复盘 prompt。** 每手带序号、标题（「你赢了 N」「你输了 N」「不输不赢」）、用户筹码变化和 4 号座的视图，没有种子，也没有别人没亮的牌。一手都没结算的场没有可复盘的，直接写一份空复盘，老白说「散场了，复盘在项目页」，不派 run。
+
+**交复盘。** `events/poker-review.ts` 要求 run 是这台电脑上还没结束的 reviewer run，session 是这张桌已散场的一场，提交的手和控制面自己挑的关键手一一对上（不重复、不遗漏、不多出，每手正文不超过 120 字，`REVIEW_TEXT_LIMIT`），任一不成立整条丢掉，没有回执，用户再点一次散场就重派。落库用 `UPDATE ... WHERE review IS NULL`，同一场重复交只有第一份生效，老白的收尾话也只说一次。运行器那边有同一道长度检查，各自把关。
+
+**战绩。** 没有单独的战绩表，每次读 `tableState` 现算。每手已结算的牌，用户净输赢是 4 号座最终筹码减 `seats_start` 里的起始筹码，按场累加。开着的那场给 `session.net` 和 `handCount`。`stats.sessions` 是已散场的场数，`sessionsWon` 是净值大于 0 的场数，`net` 是已散场各场之和。`lastReview` 是最近一场有复盘的已散场。
+
+**开下一手。** `startHand` 用 `UPDATE ... WHERE status = 'idle'` 认领桌子，抢不到回 409「桌上已有一手牌在进行」。没有开着的场就新建一场。庄位从上一手的庄位往后，按座位号找下一个有筹码的座位，第一手从 1 号找起。筹码不为正的座位按 `startingStack` 补码，老白在群里说「N 号位补码 X」。
+
 ## 用量、今天与通知
 
 `GET /api/usage` 按用户返回本月合计、每个现存 Bot 的花费与 run 数（零花费也有一行）、本月有 run 的项目群（多 Bot 群，按金额降序），以及本月最近 20 次 run。月起点是 Asia/Shanghai 的 1 号 00:00，响应里的 `monthStartsAt` 是该时刻的 UTC ISO 时间。例如上海 2026-10-01 00:00 对应 `2026-09-30T16:00:00.000Z`。金额取 run 已保存的 `amount`，不重算历史价格。`runs.owner_id` 在 Bot 和群删除后仍保留，所以删掉的 Bot 的 run 计入 total，不再出现在 Bot 分列；迁移时只能回填仍能从 Bot 或群识别归属的旧 run。
