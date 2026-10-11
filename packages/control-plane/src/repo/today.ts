@@ -150,7 +150,7 @@ export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = ne
     expiredAccounts: expiredAccountRows,
     placeholders: placeholderRows,
     teamOffers: teamOfferRows.map(({ row }) => row),
-    routineOffers: await listPendingRoutineOffers(db, ownerId),
+    routineOffers: await listPendingRoutineOffers(db, ownerId, viewer),
   });
 
   const done: { at: Date; id: string; item: TodayDoneItem }[] = [];

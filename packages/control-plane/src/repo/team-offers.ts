@@ -9,13 +9,14 @@ import {
   type TeamOfferMember,
   type TeamOfferStatus,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
 import { TransactionRollbackError, and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages } from "../db/schema.js";
 import { insertMemberBot } from "./bots.js";
 import { GROUP_BOT_LIMIT, appendGroupMembers, findGroup, findProjectGroupId, lockProjectMembers } from "./groups.js";
-import { nextRevision, type Tx } from "./messages.js";
+import { messageVisibleTo, nextRevision, type Tx } from "./messages.js";
 import { toBot, toMessage } from "./rows.js";
 
 export type TeamOfferBody = Extract<MessageBody, { kind: "team_offer" }>;
@@ -31,12 +32,13 @@ export async function findOwnedTeamOffer(
   db: Db,
   ownerId: UserId,
   messageId: MessageId,
+  viewer: Viewer,
 ): Promise<TeamOfferMessage | null> {
   const [found] = await db
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), messageVisibleTo(viewer)))
     .limit(1);
   if (found === undefined || found.row.body.kind !== "team_offer") return null;
   return { id: messageId, groupId: found.row.groupId, body: found.row.body };

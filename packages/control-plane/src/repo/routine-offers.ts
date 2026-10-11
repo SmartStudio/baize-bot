@@ -1,9 +1,17 @@
-import { RoutineId, type Message, type MessageBody, type MessageId, type Routine, type UserId } from "@baize/shared";
+import {
+  RoutineId,
+  type Message,
+  type MessageBody,
+  type MessageId,
+  type Routine,
+  type UserId,
+  type Viewer,
+} from "@baize/shared";
 import { TransactionRollbackError, and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, routines } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { nextRevision, type Tx } from "./messages.js";
+import { messageVisibleTo, nextRevision, type Tx } from "./messages.js";
 import { toMessage, toRoutine } from "./rows.js";
 import { shareBotRunsLock } from "./runs.js";
 
@@ -20,12 +28,13 @@ export async function findOwnedRoutineOffer(
   db: Db,
   ownerId: UserId,
   messageId: MessageId,
+  viewer: Viewer,
 ): Promise<RoutineOfferMessage | null> {
   const [found] = await db
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), messageVisibleTo(viewer)))
     .limit(1);
   if (found === undefined || found.row.body.kind !== "routine_offer") return null;
   return { id: messageId, groupId: found.row.groupId, body: found.row.body };
@@ -140,7 +149,11 @@ async function settleOffer(db: Db | Tx, offer: RoutineOfferMessage, body: Routin
 }
 
 /** 首页「等你确认」里还没点的例行卡，新的在前，最多 50 张。 */
-export async function listPendingRoutineOffers(db: Db, ownerId: UserId): Promise<(typeof messages.$inferSelect)[]> {
+export async function listPendingRoutineOffers(
+  db: Db,
+  ownerId: UserId,
+  viewer: Viewer,
+): Promise<(typeof messages.$inferSelect)[]> {
   const rows = await db
     .select({ row: messages })
     .from(messages)
@@ -148,6 +161,7 @@ export async function listPendingRoutineOffers(db: Db, ownerId: UserId): Promise
     .where(
       and(
         eq(groups.ownerId, ownerId),
+        messageVisibleTo(viewer),
         sql`${messages.body} ->> 'kind' = 'routine_offer'`,
         sql`${messages.body} ->> 'status' = 'offered'`,
       ),

@@ -16,6 +16,7 @@ import type { AgentHub } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
 import { messages, pokerEvents, pokerHands, pokerHints, pokerTables, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
+import { messageVisibleTo } from "../repo/messages.js";
 import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
 import { narrate } from "./narrate.js";
@@ -33,7 +34,7 @@ async function decisionHint(db: Db, handId: string, seq: number): Promise<Hint |
     .select({ hint: pokerHints, endedAt: runs.endedAt, confirmedAt: runs.contextConfirmedAt, body: messages.body })
     .from(pokerHints)
     .innerJoin(runs, eq(runs.id, pokerHints.runId))
-    .leftJoin(messages, eq(messages.id, pokerHints.messageId))
+    .leftJoin(messages, and(eq(messages.id, pokerHints.messageId), messageVisibleTo({ kind: "user" })))
     .where(and(eq(pokerHints.handId, handId), eq(pokerHints.seq, seq)));
   if (!row) return null;
   const answered = row.body?.kind === "bot" && row.body.text.trim() !== "" && !row.body.streaming;

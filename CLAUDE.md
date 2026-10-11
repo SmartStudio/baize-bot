@@ -108,7 +108,7 @@ herdr agent start <名> --kind codex --pane <pane_id> -- --yolo -m gpt-5.6-sol -
 
 - 根 `tsconfig.base.json` 是唯一编译选项来源，`noUncheckedIndexedAccess` 和 `exactOptionalPropertyTypes` 都开着，可省属性和 `undefined` 不是一回事。
 - 状态用字面量联合，不用布尔组合。错误在工具里靠抛异常表达，中文文案，Pi 会把它做成 `isError` 工具结果。
-- 读消息必须带收件人。`messages.visible_to` 为 null 是全群可见，否则只给数组里的 `Viewer`（用户或某个 Bot），空数组被数据库拒绝。`repo/messages.ts` 的 `listMessages`、`findOwnedMessage`、`messageSeq` 都要必填的 `viewer` 参数并拼上 `messageVisibleTo(viewer)`，用量、今天、项目页、skill、审批、上下文窗口的聚合同样如此。HTTP 一律传 `{ kind: "user" }`，派活拼上下文传被派的 Bot。新写读 `messages` 列表的查询先带 `viewer`。现在不带的是按 id 取单行或计数的几处，读的是代码自己写下的行或用户点的卡，例如出牌回执、团队提议卡、例行提议卡、偏好的来源消息。`test/p3-visible-read.test.ts` 钉着这条。
+- 读消息必须带收件人。`messages.visible_to` 为 null 是全群可见，否则只给数组里的 `Viewer`（用户或某个 Bot），空数组被数据库拒绝。`repo/messages.ts` 的 `listMessages`、`findOwnedMessage`、`messageSeq` 都要必填的 `viewer` 参数并拼上 `messageVisibleTo(viewer)`，用量、今天、项目页、skill、审批、上下文窗口的聚合同样如此。HTTP 一律传 `{ kind: "user" }`，派活拼上下文传被派的 Bot。新写读 `messages` 列表的查询先带 `viewer`。不带 viewer 的读只剩 `test/messages-read-guard.test.ts` 的 `EXCEPTIONS` 里登记的几处，每处写了理由。这个测试扫 `src/` 源码，`repo/messages.ts` 之外直接读 `messages` 的查询，既没在同一条查询链里拼 `messageVisibleTo(viewer)` 又不在白名单里就红。行为由 `test/p3-visible-read.test.ts` 钉着。
 - 注释只留代码说不出来的原因。测试断言信息就是文档。
 - 控制面测试只通过 HTTP 和两条 WebSocket 碰服务，不直接调路由函数。等异步效果不靠超时，发一条确定会落地的报文，断言它先到。
 - Prettier `printWidth` 120，双引号，尾逗号。oxlint 的 `typescript/no-explicit-any` 是 error。

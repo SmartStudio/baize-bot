@@ -38,7 +38,7 @@ export function createTeamOfferRoutes({ db, hub, agents }: TeamOfferRouteDeps): 
     const messageId = MessageId.safeParse(c.req.param("id"));
     if (!messageId.success) return c.json(NOT_FOUND, 404);
     const ownerId = c.get("user").id;
-    const offer = await findOwnedTeamOffer(db, ownerId, messageId.data);
+    const offer = await findOwnedTeamOffer(db, ownerId, messageId.data, { kind: "user" });
     if (offer === null) return c.json(NOT_FOUND, 404);
     const body = DecideTeamOfferRequest.safeParse(await c.req.json().catch(() => null));
     if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
