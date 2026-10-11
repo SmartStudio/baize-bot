@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -10,19 +11,25 @@ import {
   BotListResponse,
   BotTemplate,
   ComputerListResponse,
+  ControlToAgent,
   GroupResponse,
+  PokerTableResponse,
   RoutineListResponse,
   RoutineResponse,
   ToolListResponse,
   ToolResponse,
   UsageResponse,
   type Platform,
+  type PokerTableView,
 } from "@baize/shared";
+import { newHand } from "../../control-plane/src/poker/engine.js";
+import { seatNextHand } from "../../control-plane/src/poker/seating.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { startTestMcp, type TestMcp } from "../src/mcp.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream, type ChatRequest, type ScriptedTurn } from "../src/upstream.js";
 import { fakeChrome } from "./fake-chrome.js";
+import { contentText, POKER_HINT, pokerScript, pokerTurn } from "./fake-poker.js";
 
 const screenshots = fileURLToPath(new URL("./screenshots/", import.meta.url));
 const webDir = fileURLToPath(new URL("../../web/", import.meta.url));
@@ -64,6 +71,7 @@ const PRIVATE_PREFERENCE = "私人号的验收暗号是 p2-private-731";
 const PLUGIN = "分享验收插件";
 const PLUGIN_SECRET = "Bearer p2-acceptance-d-secret";
 const BUDGET_ROUTINE = "预算到点验收";
+const POKER_SEEDS = ["p3-acceptance-9576", "p3-acceptance-hand-2-4", "p3-acceptance-hand-3-100"] as const;
 
 // 剧本要用的 id 跑起来才知道，各段拿到后填进来。
 const ids: { project: string; accounts: Partial<Record<Platform, string>> } = { project: "", accounts: {} };
@@ -440,10 +448,72 @@ const skip = (why: string): void => {
   process.stdout.write(`  跳过：${why}\n`);
 };
 
+const filesUnder = (dir: string): string[] => {
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    return entry.isDirectory() ? filesUnder(path) : [path];
+  });
+};
+
+const pokerTable = async (stack: Stack, groupId: string): Promise<PokerTableView> =>
+  PokerTableResponse.parse(await stack.get(`/api/poker/tables/${groupId}`)).table;
+
+const playPokerHand = async (page: Page, stack: Stack, opened: PokerTableView): Promise<PokerTableView> => {
+  if (opened.hand === null) throw new Error("牌桌没有正在打的手牌");
+  const handId = opened.hand.id;
+  for (let actions = 0; actions < 20; actions++) {
+    let ready = opened;
+    await waitFor("牌友出完，轮到你或摊牌", async () => {
+      ready = await pokerTable(stack, opened.groupId);
+      return ready.status === "idle" || ready.hand?.toAct === 4;
+    });
+    check(ready.hand?.id, "续打的是同一手牌").toBe(handId);
+    if (ready.status === "idle") {
+      await check(page.getByTestId("hand-end")).toBeVisible();
+      await check(page.getByTestId("felt-opponent").getByTestId("card-face")).toHaveCount(6);
+      await check(page.getByTestId("board-slot").getByTestId("card-face")).toHaveCount(5);
+      await shot(page, `U15-hand-${opened.hand.number}-showdown`);
+      return ready;
+    }
+    const hand = ready.hand;
+    if (hand === null) throw new Error("续打时手牌不见了");
+    await check(page.getByTestId("action-bar")).toHaveAttribute("data-mine", "true");
+    await check(page.getByTestId("action-pass")).toBeEnabled();
+    await shot(page, `U15-hand-${hand.number}-${hand.view.street}`);
+    const response = page.waitForResponse(
+      (reply) => reply.request().method() === "POST" && reply.url().endsWith(`/poker/hands/${handId}/act`),
+    );
+    await page.getByTestId("action-pass").click();
+    check((await response).status(), "界面过牌或跟注由引擎接受").toBe(200);
+    await waitFor("用户动作已经落定", async () => {
+      const latest = await pokerTable(stack, opened.groupId);
+      return (latest.hand?.view.events.length ?? 0) > hand.view.events.length;
+    });
+  }
+  throw new Error("一手牌超过 20 次用户行动");
+};
+
+const cardsIn = (request: ChatRequest): Set<string> => {
+  const raw = JSON.stringify(request);
+  const suits: Record<string, string> = { "♠": "s", "♥": "h", "♦": "d", "♣": "c" };
+  return new Set([
+    ...(raw.match(/\b[2-9TJQKA][shdc]\b/g) ?? []),
+    ...[...raw.matchAll(/(10|[2-9TJQKA])([♠♥♦♣])/g)].map(
+      (match) => `${match[1] === "10" ? "T" : match[1]}${suits[match[2]!]}`,
+    ),
+  ]);
+};
+
 const run = async (): Promise<void> => {
   rmSync(screenshots, { recursive: true, force: true });
   mkdirSync(screenshots, { recursive: true });
-  const upstream = await startUpstream(turn);
+  const piBefore = new Set(filesUnder(join(homedir(), ".pi")));
+  const poker = pokerScript();
+  const upstream = await startUpstream((request) =>
+    pokerTurn(request) === undefined ? turn(request) : poker.script(request),
+  );
+  let seedCalls = 0;
   const chrome = fakeChrome();
   let metricsNow = new Date();
   let routinesNow = new Date();
@@ -472,6 +542,11 @@ const run = async (): Promise<void> => {
       xApiBaseUrl: fake.xBaseUrl,
       metricsNow: () => metricsNow,
       routinesNow: () => routinesNow,
+      pokerSeed: () => {
+        const seed = POKER_SEEDS[seedCalls++];
+        if (seed === undefined) throw new Error("U15 只应开三手牌");
+        return seed;
+      },
       makeChrome: chrome.factory,
       startComputer: false,
       bootstrap: async (port) => {
@@ -517,7 +592,6 @@ const run = async (): Promise<void> => {
     await check(p.getByTestId("computer-status")).toHaveAttribute("data-status", "online");
     await shot(p, "U1-3-computer");
     await p.getByTestId("settings-close").click();
-    skip("首页的「和 AI 打一局」模板（第 3 期）");
 
     begin("U2 一句话开项目，点开始");
     await p.getByTestId("new-project").click();
@@ -1220,7 +1294,230 @@ const run = async (): Promise<void> => {
       await friend.close();
     }
 
-    process.stdout.write("acceptance: U1 到 U14、预算和设置五页走完\n");
+    begin("U15 周末德州：茉莉换大刘，A♠ K♦，问老白，加注，三手摊牌，散场复盘");
+    await p.getByTestId("new-project").click();
+    const configsBeforePoker = s.configsApplied();
+    await p.getByTestId("new-project-table").click();
+    await check(p.getByTestId("poker-project")).toBeVisible();
+    const pokerGroupId = await p.getByTestId("poker-project").getAttribute("data-poker-project");
+    if (pokerGroupId === null) throw new Error("牌局项目没有 groupId");
+    await waitFor("预置牌友已随 config 到真运行器", () => s.configsApplied() > configsBeforePoker);
+    const beforeSwap = await pokerTable(s, pokerGroupId);
+    const groupBefore = GroupResponse.parse(await s.get(`/api/groups/${pokerGroupId}`)).group;
+    check(beforeSwap.seats.map((seat) => seat.name)).toEqual(["阿豹", "老K", "茉莉", "陈"]);
+    await shot(p, "U15-01-project");
+    await p.locator('[data-testid=poker-seat][data-seat-name="茉莉"]').getByTestId("poker-seat-swap").click();
+    await check(p.getByTestId("swap-seat-dialog")).toBeVisible();
+    await shot(p, "U15-02-swap-dialog");
+    await p.getByTestId("swap-seat-option").filter({ hasText: "大刘" }).click();
+    await check(p.getByTestId("swap-seat-dialog")).toHaveCount(0);
+    await check(p.getByTestId("poker-swap-notice")).toHaveText("茉莉 下桌，大刘 上桌");
+    const swapped = await pokerTable(s, pokerGroupId);
+    const groupAfter = GroupResponse.parse(await s.get(`/api/groups/${pokerGroupId}`)).group;
+    const outgoing = beforeSwap.seats.find((seat) => seat.seat === 3);
+    const incoming = swapped.seats.find((seat) => seat.seat === 3);
+    check(
+      swapped.seats.filter((seat) => seat.seat !== 3),
+      "换人只改 3 号位，其他座位完全相同",
+    ).toEqual(beforeSwap.seats.filter((seat) => seat.seat !== 3));
+    check(incoming).toMatchObject({ seat: 3, name: "大刘", persona: "dalu", stack: outgoing?.stack });
+    check(incoming?.botId, "3 号位真的换了 Bot").not.toBe(outgoing?.botId);
+    check(groupAfter.botIds.filter((id) => id !== incoming?.botId).toSorted(), "群成员也只换一个 Bot").toEqual(
+      groupBefore.botIds.filter((id) => id !== outgoing?.botId).toSorted(),
+    );
+    await shot(p, "U15-03-swapped");
+
+    const seating = seatNextHand(swapped.seats, null, 2_000);
+    const seeded = newHand(
+      POKER_SEEDS[0],
+      seating.seats.map((seat) => ({ id: String(seat.seat), stack: seat.stack })),
+      String(seating.button),
+      { small: 10, big: 20 },
+    );
+    check(seeded.seats.find((seat) => seat.id === "4")?.hole, "种子洗牌规则变了就让验收失败").toEqual(["As", "Kd"]);
+    await p.getByTestId("poker-start").click();
+    await check(p.getByTestId("table-page")).toBeVisible();
+    await check(p.getByTestId("felt-me").locator('[data-card="As"]')).toHaveAttribute("aria-label", "A♠");
+    await check(p.getByTestId("felt-me").locator('[data-card="Kd"]')).toHaveAttribute("aria-label", "K♦");
+    await check(p.getByTestId("felt-opponent").getByTestId("card-back")).toHaveCount(6);
+    await check(p.getByTestId("table-chips-note")).toHaveText("虚拟筹码，不涉及真钱");
+    const first = await pokerTable(s, pokerGroupId);
+    check(first.hand?.view.hole).toEqual(["As", "Kd"]);
+    await shot(p, "U15-04-AK");
+    await p.getByTestId("hint-ask").click();
+    await check(p.getByTestId("hint-card")).toContainText(POKER_HINT);
+    await check(p.getByTestId("hint-private")).toHaveText("仅你可见");
+    await check(p.getByTestId("table-log")).not.toContainText(POKER_HINT);
+    await shot(p, "U15-05-hint");
+
+    const advised = await pokerTable(s, pokerGroupId);
+    const hand = advised.hand;
+    const legal = hand?.view.legal;
+    const raise = legal?.kind === "your_turn" ? legal.options.find((option) => option.kind === "raise") : undefined;
+    if (hand === null || raise?.kind !== "raise") throw new Error("首手轮到用户时应该能加注");
+    await p.getByTestId("raise-amount").fill(String(raise.min - 1));
+    await check(p.getByTestId("action-raise"), "界面不足额加注不可提交").toBeDisabled();
+    const rejectedRaise = await ctx.request.post(`${home}/api/poker/hands/${hand.id}/act`, {
+      data: { seq: hand.view.events.length, action: { kind: "raise", amount: raise.min - 1 } },
+    });
+    check(rejectedRaise.status(), "绕过界面后引擎仍拒绝不足额加注").toBe(400);
+    const rejectedRaiseBody: unknown = await rejectedRaise.json();
+    check(rejectedRaiseBody).toEqual({ error: `加注额不够，最少要加到 ${raise.min}` });
+    const unchanged = await pokerTable(s, pokerGroupId);
+    check(unchanged.hand?.view.events, "拒绝的动作不落公开事件").toEqual(hand.view.events);
+    check(unchanged.seats, "拒绝的动作不改筹码").toEqual(advised.seats);
+    await shot(p, "U15-06-illegal-raise");
+    await p.getByTestId("raise-amount").fill(String(raise.min));
+    const raiseResponse = p.waitForResponse(
+      (reply) => reply.request().method() === "POST" && reply.url().endsWith(`/poker/hands/${hand.id}/act`),
+    );
+    await p.getByTestId("action-raise").click();
+    check((await raiseResponse).status()).toBe(200);
+    await waitFor(
+      "合法加注已落库",
+      async () =>
+        (await pokerTable(s, pokerGroupId)).hand?.view.events.some(
+          (event) => event.kind === "action" && event.seatId === "4" && event.action.kind === "raise",
+        ) === true,
+    );
+    await shot(p, "U15-07-raise");
+    const completed: PokerTableView[] = [await playPokerHand(p, s, first)];
+    await p.reload();
+    await check(p.getByTestId("hand-end"), "摊牌后刷新仍可再来一手或散场").toBeVisible();
+    await shot(p, "U15-hand-1-reloaded");
+    for (const number of [2, 3]) {
+      await p.getByTestId("hand-again").click();
+      await waitFor(`再来第 ${number} 手`, async () => (await pokerTable(s, pokerGroupId)).hand?.number === number);
+      await check(p.getByTestId("hand-end")).toHaveCount(0);
+      await shot(p, `U15-hand-${number}-again`);
+      completed.push(await playPokerHand(p, s, await pokerTable(s, pokerGroupId)));
+    }
+    for (const table of completed) {
+      check(
+        table.hand?.view.events.filter((event) => event.kind === "showdown"),
+        "每手四个座位摊牌",
+      ).toHaveLength(4);
+      check(
+        table.seats.reduce((total, seat) => total + seat.stack, 0),
+        "每手结算后虚拟筹码守恒",
+      ).toBe(8_000);
+    }
+    await check(p.getByTestId("table-log")).toContainText("大刘在3号位出牌。");
+    await check(p.getByTestId("table-log")).not.toContainText("茉莉在3号位出牌。");
+    await p.getByTestId("hand-leave").click();
+    await check(p.getByTestId("poker-project")).toBeVisible();
+    await shot(p, "U15-08-left");
+    await check(p.getByTestId("review-hand")).toHaveCount(3);
+    await check(p.getByTestId("review-hand")).toContainText(["第 1 手复盘", "第 2 手复盘", "第 3 手复盘"]);
+    const reviewAboveSeats = await p.getByTestId("review-card").evaluate((element) => {
+      const seats = document.querySelector('[data-testid="poker-seats"]');
+      return seats !== null && Boolean(element.compareDocumentPosition(seats) & Node.DOCUMENT_POSITION_FOLLOWING);
+    });
+    check(reviewAboveSeats, "复盘在项目页牌友区之上").toBe(true);
+    const reviewed = await pokerTable(s, pokerGroupId);
+    check(reviewed.session, "散场已结束会话").toBeNull();
+    check(reviewed.lastReview?.hands.map((entry) => entry.number)).toEqual([1, 2, 3]);
+    await waitFor("牌局 run 全部收尾", async () => {
+      const [row] = await s.sql<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM runs WHERE group_id = ${pokerGroupId} AND ended_at IS NULL`;
+      return row?.count === 0;
+    });
+    await shot(p, "U15-09-review");
+
+    const pokerRequests = upstream.requests().filter((request) => pokerTurn(request) !== undefined);
+    const playerRequests = pokerRequests.filter((request) => pokerTurn(request)?.persona !== "laobai");
+    check(playerRequests.length, "三位牌友都经过真网关").toBeGreaterThan(0);
+    check(new Set(playerRequests.map((request) => pokerTurn(request)?.persona))).toEqual(
+      new Set(["leopard", "old_k", "dalu"]),
+    );
+    for (const table of completed) {
+      const [stored] = await s.sql<
+        {
+          seed: string;
+          seats_start: { seat: number; stack: number }[];
+          button_seat: number;
+          blinds: { small: number; big: number };
+        }[]
+      >`SELECT seed, seats_start, button_seat, blinds FROM poker_hands WHERE id = ${table.hand?.id ?? ""}`;
+      if (stored === undefined) throw new Error("数据库没有已摊牌的手牌");
+      const dealt = newHand(
+        stored.seed,
+        stored.seats_start.map((seat) => ({ id: String(seat.seat), stack: seat.stack })),
+        String(stored.button_seat),
+        stored.blinds,
+      );
+      const requests = playerRequests.filter((request) =>
+        pokerTurn(request)?.prompt.startsWith(`本手：${table.hand?.id}；`),
+      );
+      check(new Set(requests.map((request) => pokerTurn(request)?.persona)), "每手三位牌友都出过牌").toEqual(
+        new Set(["leopard", "old_k", "dalu"]),
+      );
+      for (const request of requests) {
+        const seat = /你的位置：(\d)，/.exec(pokerTurn(request)?.prompt ?? "")?.[1];
+        const mine = dealt.seats.find((candidate) => candidate.id === seat);
+        if (mine === undefined) throw new Error("牌友请求没有自己的座位");
+        const cards = cardsIn(request);
+        for (const card of mine.hole) check(cards.has(card), "牌友收到自己的底牌").toBe(true);
+        for (const other of dealt.seats.filter((candidate) => candidate.id !== seat)) {
+          for (const card of other.hole) check(cards.has(card), "牌友完整请求体没有用户或别的牌友底牌").toBe(false);
+        }
+        check(JSON.stringify(request), "牌友完整请求体没有种子").not.toContain(stored.seed);
+        check(JSON.stringify(request), "牌友完整请求体没有用户私密建议").not.toContain(POKER_HINT);
+        if (seat === "3") check(pokerTurn(request)?.persona, "3 号位的新台词跟着大刘").toBe("dalu");
+      }
+    }
+    const hintRequests = pokerRequests.filter(
+      (request) => pokerTurn(request)?.persona === "laobai" && !pokerTurn(request)?.prompt.startsWith("散场复盘："),
+    );
+    check(hintRequests).toHaveLength(1);
+    for (const card of ["As", "Kd"]) check(cardsIn(hintRequests[0]!).has(card), "老白的建议收到用户手牌").toBe(true);
+    for (const card of seeded.seats.filter((seat) => seat.id !== "4").flatMap((seat) => seat.hole)) {
+      check(cardsIn(hintRequests[0]!).has(card), "老白的建议没有牌友底牌").toBe(false);
+    }
+    const rejected = poker.rejected();
+    check(rejected, "确实故意发过一次非法跟注").toBeDefined();
+    const retries = poker.actions.filter((action) => action.handId === rejected?.handId && action.seq === rejected.seq);
+    check(
+      retries.map((action) => action.action),
+      "同决策点被拒绝后重试过牌",
+    ).toEqual(["call", "check"]);
+    const resultRows = await s.sql<{ body: { text: string } }[]>`
+      SELECT body FROM messages WHERE group_id = ${pokerGroupId} AND id LIKE 'poker-result:%'`;
+    const receipts = resultRows
+      .map((row) => ControlToAgent.parse(JSON.parse(row.body.text)))
+      .flatMap((message) =>
+        message.type === "poker_result" && retries.some((retry) => retry.callId === message.callId) ? [message] : [],
+      );
+    check(receipts.find((receipt) => receipt.callId === retries[0]?.callId)?.result).toEqual({
+      ok: false,
+      error: "没人下注，不能跟注，可以过牌",
+    });
+    check(receipts.find((receipt) => receipt.callId === retries[1]?.callId)?.result).toEqual({ ok: true });
+    check(new Set(receipts.map((receipt) => receipt.runId)).size, "重试在同一次 run 内完成").toBe(1);
+    check(
+      playerRequests.some((request) =>
+        pokerTurn(request)?.tools.some((tool) => contentText(tool.content).includes("没人下注，不能跟注，可以过牌")),
+      ),
+    ).toBe(true);
+    check(
+      completed
+        .flatMap((table) => table.hand?.view.events ?? [])
+        .filter(
+          (event) =>
+            event.kind === "action" &&
+            event.seatId === rejected?.seat &&
+            event.action.kind === "call" &&
+            event.put === 0,
+        ),
+      "非法跟注没有落成出牌事件",
+    ).toEqual([]);
+    check(seedCalls, "一场共三手，全部使用已有种子注入点").toBe(3);
+    writeFileSync(
+      join(screenshots, "U15-assertions.txt"),
+      `${JSON.stringify({ seeds: POKER_SEEDS, beforeSwap: beforeSwap.seats, afterSwap: swapped.seats, playerRequests: playerRequests.length, rejectedRaise: { status: rejectedRaise.status(), body: rejectedRaiseBody }, retries, receipts, review: reviewed.lastReview }, null, 2)}\n`,
+    );
+    process.stdout.write("  U15 隐藏底牌、引擎拒绝非法动作、只换一个座位三条标准 passed\n");
+    process.stdout.write("acceptance: U1 到 U15、预算和设置五页 passed\n");
   } catch (error) {
     throw new Error(`${step} 失败：${String(error)}\n电脑代理日志：${stack?.agentLog().slice(-2_000) ?? "未启动"}`, {
       cause: error,
@@ -1232,6 +1529,17 @@ const run = async (): Promise<void> => {
     await platforms?.close();
     await mcp?.close();
     await upstream.close();
+    writeFileSync(
+      join(screenshots, "U15-upstream-requests.jsonl"),
+      `${upstream
+        .requests()
+        .map((request) => JSON.stringify(request))
+        .join("\n")}\n`,
+    );
+    check(
+      filesUnder(join(homedir(), ".pi")).filter((path) => !piBefore.has(path)),
+      "~/.pi 没有新文件",
+    ).toEqual([]);
   }
 };
 

@@ -190,7 +190,7 @@ export async function currentHandOf(db: Db, tableId: GroupId): Promise<CurrentHa
     async (tx) => {
       const table = await loadTable(tx as unknown as Db, tableId);
       if (!table) return null;
-      const hand = await latestHand(tx as unknown as Db, tableId, true);
+      const hand = await latestHand(tx as unknown as Db, tableId);
       return hand ? (await tableView(tx as unknown as Db, table, hand)).hand : null;
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },

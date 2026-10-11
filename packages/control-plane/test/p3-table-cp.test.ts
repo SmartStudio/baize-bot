@@ -274,6 +274,13 @@ it("摊牌结算后各座位筹码之和不变", async () => {
   const view = await tablePush((candidate) => candidate.status === "idle");
   expect(view.seats.reduce((sum, seat) => sum + seat.stack, 0)).toBe(160);
   expect((await stored(handId)).events.filter((event) => event.kind === "showdown")).toHaveLength(4);
+  const response = await table.client.get(`/api/poker/tables/${table.groupId}`);
+  expect(response.status).toBe(200);
+  const reloaded = PokerTableResponse.parse(await response.json()).table;
+  expect(reloaded.hand?.id, "结算后刷新仍保留这一手").toBe(handId);
+  expect(reloaded.hand?.view.street).toBe("complete");
+  expect(reloaded.hand?.view.events.filter((event) => event.kind === "showdown")).toHaveLength(4);
+  expect(reloaded.hand?.view.awards).toEqual(view.hand?.view.awards);
 });
 it("再来一手庄位轮转、破产座位补码", async () => {
   await fixture();

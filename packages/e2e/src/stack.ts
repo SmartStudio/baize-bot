@@ -62,6 +62,8 @@ export type StackOptions = {
   readonly metricsNow?: () => Date;
   /** 只控制例行调度器的时钟；配合 routinesTick 走真实到点触发。 */
   readonly routinesNow?: () => Date;
+  /** 用已有的开手注入点固定验收发牌，不改变产品默认随机种子。 */
+  readonly pokerSeed?: () => string;
   /** 换掉进程内电脑代理的助理 Chrome。不给就是真 Chrome，只在 Bot 要用浏览器时才起。 */
   readonly makeChrome?: AgentOptions["makeChrome"];
 };
@@ -155,6 +157,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       publisher: { intervalMs: DAY_MS },
       ...(options.metricsNow === undefined ? {} : { metrics: { now: options.metricsNow } }),
       ...(options.routinesNow === undefined ? {} : { scheduler: { now: options.routinesNow, intervalMs: DAY_MS } }),
+      ...(options.pokerSeed === undefined ? {} : { poker: { seed: options.pokerSeed } }),
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
     });
     closers.push(() => server.close());
