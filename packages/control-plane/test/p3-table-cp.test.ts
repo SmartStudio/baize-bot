@@ -793,6 +793,86 @@ it("扫描器对同一手连续失败到上限就作废它，桌子回 idle、�
     await database.sql`DELETE FROM users WHERE id=${broken.ownerId}`;
   }
 });
+it("同一手失败到差一次上限时成功一次，计数清零，再失败到差一次上限也不作废", async () => {
+  let clock: "steady" | "fail" | "pass_once" | "fail_again" | "pass" = "steady";
+  let reached!: () => void;
+  const done = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  await restartWith({
+    intervalMs: 20,
+    turnTimeoutMs: 60_000,
+    now: () => {
+      if (clock === "fail" || clock === "fail_again") throw new Error("推进时钟故障");
+      if (clock === "pass_once") clock = "fail_again";
+      if (clock === "pass") reached();
+      return now;
+    },
+  });
+  await fixture();
+  const id = await seeded();
+  await table.agent.expect("prompt");
+  const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    if (args[1] !== id) return;
+    if (args[0] === "扫描牌桌手失败" && args[2] === `${SWEEP_FAILURE_LIMIT - 1}/${SWEEP_FAILURE_LIMIT}`)
+      clock = clock === "fail" ? "pass_once" : "pass";
+    if (args[0] !== "扫描牌桌手失败") reached();
+  });
+  clock = "fail";
+  await done;
+  const round = Array.from({ length: SWEEP_FAILURE_LIMIT - 1 }, (_, i) => `${i + 1}/${SWEEP_FAILURE_LIMIT}`);
+  const calls = logged.mock.calls.filter((args) => args[1] === id);
+  expect(
+    calls.map((args) => args[2]),
+    "成功一次之后从 1 重新数，两轮都没碰到上限",
+  ).toEqual([...round, ...round]);
+  expect(
+    calls.every((args) => args[0] === "扫描牌桌手失败"),
+    "没有试过作废",
+  ).toBe(true);
+  const [hand] = await database.sql<{ status: string }[]>`SELECT status FROM poker_hands WHERE id = ${id}`;
+  expect(hand!.status).toBe("playing");
+});
+it("作废本身失败时之后的扫描不再每次记日志，满一轮才再试，库恢复后下一次作废成功", async () => {
+  let down = false;
+  await restartWith({
+    intervalMs: 20,
+    turnTimeoutMs: 60_000,
+    // 坏手在载入时就抛错，推进读不到时钟；读时钟的只有作废，时钟抛错就是作废写不进库。
+    now: () => {
+      if (down) throw new Error("库断开");
+      return now;
+    },
+  });
+  await fixture();
+  const id = await seeded();
+  await table.agent.expect("prompt");
+  let abandonFailures = 0;
+  let abandoned!: () => void;
+  const done = new Promise<void>((resolve) => {
+    abandoned = resolve;
+  });
+  const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    if (args[1] !== id) return;
+    if (args[0] === "作废牌桌手失败" && ++abandonFailures === 2) down = false;
+    if (args[0] === "牌桌手连续推进失败，已作废") abandoned();
+  });
+  down = true;
+  await corrupt(id);
+  await done;
+  const scan = (n: number) => ["扫描牌桌手失败", id, `${n}/${SWEEP_FAILURE_LIMIT}`, expect.any(String)];
+  expect(logged.mock.calls.filter((args) => args[1] === id)).toEqual([
+    ...Array.from({ length: SWEEP_FAILURE_LIMIT }, (_, i) => scan(i + 1)),
+    ["作废牌桌手失败", id, "Error"],
+    scan(2 * SWEEP_FAILURE_LIMIT),
+    ["作废牌桌手失败", id, "Error"],
+    scan(3 * SWEEP_FAILURE_LIMIT),
+    ["牌桌手连续推进失败，已作废", id],
+  ]);
+  expect(JSON.stringify(logged.mock.calls)).not.toContain("库断开");
+  const [hand] = await database.sql<{ status: string }[]>`SELECT status FROM poker_hands WHERE id = ${id}`;
+  expect(hand!.status).toBe("abandoned");
+});
 for (const failure of ["message_push", "converge", "table_push", "snapshot"] as const satisfies AfterCommitStep[]) {
   const failAt = (step: AfterCommitStep): void => {
     if (step === failure) throw new Error("后处理失败");

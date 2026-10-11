@@ -5,7 +5,10 @@ import { abandonHand, configurePoker, converge, type PokerDeps, type PokerOption
 
 export type PokerSweeperOptions = PokerOptions & { readonly intervalMs?: number };
 
-/** 一手连续推进失败这么多次就作废。默认每秒一扫，约半分钟；偶发的库抖动撑不到这么久，撑到的多半是数据或代码出了错。 */
+/**
+ * 一手连续推进失败这么多次就作废。默认每秒一扫，约半分钟；偶发的库抖动撑不到这么久，撑到的多半是数据或代码出了错。
+ * 作废本身也失败时计数接着涨，每满一轮再试一次，其间的失败不记日志，库断开时不会每秒刷一条。
+ */
 export const SWEEP_FAILURE_LIMIT = 30;
 
 /**
@@ -55,8 +58,10 @@ export class PokerSweeper {
       } catch (error) {
         const failures = (this.#failures.get(hand.id) ?? 0) + 1;
         this.#failures.set(hand.id, failures);
-        console.error("扫描牌桌手失败", hand.id, `${failures}/${SWEEP_FAILURE_LIMIT}`, errorKind(error));
-        if (failures >= SWEEP_FAILURE_LIMIT) await this.#abandon(hand.id);
+        const retry = failures % SWEEP_FAILURE_LIMIT === 0;
+        if (failures <= SWEEP_FAILURE_LIMIT || retry)
+          console.error("扫描牌桌手失败", hand.id, `${failures}/${SWEEP_FAILURE_LIMIT}`, errorKind(error));
+        if (retry) await this.#abandon(hand.id);
       }
     }
   }
