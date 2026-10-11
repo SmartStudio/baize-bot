@@ -1,9 +1,19 @@
-import { BotId, ComputerId, GroupId, RunId, type MessageId, type UsageRecord, type UserId } from "@baize/shared";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import {
+  BotId,
+  ComputerId,
+  GroupId,
+  RunId,
+  type MessageId,
+  type PokerTableRole,
+  type UsageRecord,
+  UserId,
+  type Viewer,
+} from "@baize/shared";
+import { TransactionRollbackError, and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
-import type { Tx } from "./messages.js";
+import { appendMessage, type Tx } from "./messages.js";
 import { toUsageRecord } from "./rows.js";
 
 export type StartRunInput = {
@@ -121,14 +131,7 @@ export async function shareBotRunsLock(tx: Tx, botId: BotId): Promise<void> {
  */
 export async function startRun(db: Db, input: StartRunInput): Promise<RunId | null> {
   return db.transaction(async (tx) => {
-    await lockOwner(tx, input.ownerId, "shared");
-    await shareBotRunsLock(tx, input.botId);
-    await lockSettlement(tx, input.groupId, input.botId);
-    const [member] = await tx
-      .select({ botId: groupMembers.botId })
-      .from(groupMembers)
-      .where(and(eq(groupMembers.groupId, input.groupId), eq(groupMembers.botId, input.botId)));
-    if (member === undefined) return null;
+    if (!(await enterRunLocks(tx, input))) return null;
     const [row] = await tx
       .insert(runs)
       .values({
@@ -146,6 +149,93 @@ export async function startRun(db: Db, input: StartRunInput): Promise<RunId | nu
     if (row === undefined) throw new Error("建 run 没有返回行");
     return RunId.parse(row.id);
   });
+}
+
+/** 建 run 的前半：三把锁按固定次序拿，再确认 Bot 还是这个群的成员。不是了回 false，调用方不建。 */
+async function enterRunLocks(
+  tx: Tx,
+  input: { readonly ownerId: UserId; readonly botId: BotId; readonly groupId: GroupId },
+): Promise<boolean> {
+  await lockOwner(tx, input.ownerId, "shared");
+  await shareBotRunsLock(tx, input.botId);
+  await lockSettlement(tx, input.groupId, input.botId);
+  const [member] = await tx
+    .select({ botId: groupMembers.botId })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.groupId, input.groupId), eq(groupMembers.botId, input.botId)));
+  return member !== undefined;
+}
+
+export type StartTableRunInput = {
+  readonly ownerId: UserId;
+  readonly computerId: ComputerId;
+  readonly botId: BotId;
+  readonly groupId: GroupId;
+  readonly role: PokerTableRole;
+  /** 触发消息和 run 行共用：只有这些人看得到这次派活。 */
+  readonly visibleTo: readonly [Viewer, ...Viewer[]];
+};
+
+/**
+ * busy：这个 Bot 在这个群已有未收尾的表桌 run，或这个群已有未收尾的 advisor、reviewer。
+ * 判定是 runs 上两条部分唯一索引，不先查后写；撞了整个事务回滚，触发消息也不留。
+ */
+export type StartTableRunResult =
+  | { readonly kind: "started"; readonly runId: RunId; readonly messageId: MessageId }
+  | { readonly kind: "busy" }
+  | { readonly kind: "not_member" };
+
+const TABLE_TURN_TEXT = "牌桌回合";
+
+/**
+ * 隐藏派活的 run：同一个事务里写一条不含内容的系统触发消息（可见范围同 run）加 runs 行。
+ * 锁和 startRun 同序，消息在锁之后才写，不和删 Bot、删号的级联反序。
+ */
+export async function startTableRun(db: Db, input: StartTableRunInput): Promise<StartTableRunResult> {
+  try {
+    return await db.transaction(async (tx) => {
+      if (!(await enterRunLocks(tx, input))) return { kind: "not_member" };
+      const trigger = await appendMessage(tx, input.groupId, { kind: "system", text: TABLE_TURN_TEXT }, [
+        ...input.visibleTo,
+      ]);
+      const [row] = await tx
+        .insert(runs)
+        .values({
+          id: newId(),
+          ownerId: input.ownerId,
+          computerId: input.computerId,
+          botId: input.botId,
+          groupId: input.groupId,
+          triggerMessageId: trigger.id,
+          startedAt: new Date(),
+          visibleTo: [...input.visibleTo],
+          tableRole: input.role,
+        })
+        .onConflictDoNothing()
+        .returning({ id: runs.id });
+      if (row === undefined) return tx.rollback();
+      return { kind: "started", runId: RunId.parse(row.id), messageId: trigger.id };
+    });
+  } catch (error) {
+    if (error instanceof TransactionRollbackError) return { kind: "busy" };
+    throw error;
+  }
+}
+
+/** missing：run 行不存在。plain：普通 run。 */
+export type RunTableRole =
+  { readonly kind: "missing" } | { readonly kind: "plain" } | { readonly kind: "table"; readonly role: PokerTableRole };
+
+export async function tableRoleOfRun(db: Db, runId: RunId): Promise<RunTableRole> {
+  const [row] = await db.select({ role: runs.tableRole }).from(runs).where(eq(runs.id, runId)).limit(1);
+  if (row === undefined) return { kind: "missing" };
+  return row.role === null ? { kind: "plain" } : { kind: "table", role: row.role };
+}
+
+/** 群的归属人。群已经没了回 null。 */
+export async function ownerOfGroup(db: Db, groupId: GroupId): Promise<UserId | null> {
+  const [row] = await db.select({ ownerId: groups.ownerId }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  return row === undefined ? null : UserId.parse(row.ownerId);
 }
 
 export type RunTotals = {

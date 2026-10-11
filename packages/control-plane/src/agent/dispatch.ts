@@ -83,7 +83,11 @@ export type DispatchOutcome =
  * 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。
  * 拒了 config 的电脑连着却派不了活，按「不在线」选不中时把真实原因说出来：版本对不上，升级或重启电脑上的白泽就好。
  */
-async function computerFor(db: Db, agents: AgentHub, ownerId: UserId): Promise<ComputerSelection> {
+export async function computerFor(
+  db: Db,
+  agents: Pick<AgentHub, "isOnline" | "configRejected">,
+  ownerId: UserId,
+): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
   const selected = selectComputer(
     [],

@@ -155,7 +155,13 @@ export async function appendSkillOffer(
   return toMessage(row);
 }
 
-export type BotText = { readonly messageId: MessageId; readonly groupId: string; readonly botId: BotId };
+export type BotText = {
+  readonly messageId: MessageId;
+  readonly groupId: string;
+  readonly botId: BotId;
+  /** 只在第一段建壳时写；后面的段落接在同一行上，可见范围不变。 */
+  readonly visibleTo: Message["visibleTo"];
+};
 
 export type BotTextResult =
   | { readonly kind: "appended"; readonly created: Message | null; readonly message: Message }
@@ -171,7 +177,13 @@ export async function appendBotText(db: Db | Tx, text: BotText, delta: string, d
   const shell: MessageBody = { kind: "bot", botId: text.botId, text: "", streaming: true };
   const [inserted] = await db
     .insert(messages)
-    .values({ id: text.messageId, groupId: text.groupId, body: shell, createdAt: new Date() })
+    .values({
+      id: text.messageId,
+      groupId: text.groupId,
+      body: shell,
+      createdAt: new Date(),
+      visibleTo: text.visibleTo,
+    })
     .onConflictDoNothing({ target: messages.id })
     .returning();
   const [row] = await db

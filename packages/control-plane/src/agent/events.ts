@@ -67,7 +67,7 @@ import { handlePokerAct } from "./events/poker-act.js";
 import { handlePokerReview } from "./events/poker-review.js";
 import { handlePreferenceAdd } from "./events/preference-add.js";
 import { handleReviewSubmit } from "./events/review-submit.js";
-import { isUplinkAllowed } from "./table-run-policy.js";
+import { botTextVisibility, isUplinkAllowed } from "./table-run-policy.js";
 import { handleRoutineOffer } from "./events/routine-offer.js";
 import { handleTeamOffer } from "./events/team-offer.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
@@ -385,7 +385,12 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     textPrefixes.set(event.messageId, { kind: "visible", runId: event.runId });
   }
 
-  const text = { messageId: event.messageId, groupId, botId: event.botId };
+  const text = {
+    messageId: event.messageId,
+    groupId,
+    botId: event.botId,
+    visibleTo: await botTextVisibility(deps.db, event.runId),
+  };
   const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
     appendBotText(tx, text, delta, event.done),
   );
