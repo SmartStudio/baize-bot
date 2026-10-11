@@ -240,6 +240,7 @@ describe("M7 群与主题任务的共享形状", () => {
       purpose: "plan",
       routine: null,
       members: [],
+      table: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, task: null }).success).toBe(true);
@@ -262,6 +263,7 @@ describe("M7 群与主题任务的共享形状", () => {
       routine: null,
       task: null,
       members: [],
+      table: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
@@ -283,6 +285,7 @@ describe("M7 群与主题任务的共享形状", () => {
       routine: null,
       task: null,
       members: [{ ...member, seat: "chief" }],
+      table: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     const { reason: _reason, ...withoutReason } = prompt;
@@ -580,6 +583,7 @@ describe("C0 工具视图与审批报文", () => {
         groupId: "g1",
         createdAt: now,
         revision: 0,
+        visibleTo: null,
         body: {
           kind: "tool_call",
           runId: "r1",
