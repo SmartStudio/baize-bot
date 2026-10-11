@@ -1,0 +1,167 @@
+/* 牌桌页的右栏、老白的建议、一手结束。颜色和尺寸只用 _ds 的 tokens。 */
+
+.table-chips-note {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.table-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-inset);
+}
+
+.table-log h4 {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-ui);
+}
+
+/* 高度是定的：话再多也只在这里面滚，下面的按钮位置不动。 */
+.table-log-lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: calc(var(--space-12) * 3);
+  overflow-y: auto;
+}
+
+.table-log-line {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  font: var(--type-caption);
+  line-height: 1.45;
+}
+
+.table-log-name {
+  margin-right: var(--space-2);
+  color: var(--fg-1);
+}
+
+.table-log-text {
+  color: var(--fg-2);
+}
+
+.table-log-hint,
+.table-hint-muted {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.table-log-note {
+  margin: 0;
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
+.table-hint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.table-hint:empty {
+  display: none;
+}
+
+.table-hint-ask {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.table-hint-waiting {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.table-hint-card {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font: var(--type-caption);
+}
+
+.table-hint-card svg {
+  flex: none;
+  margin-top: var(--space-2);
+}
+
+.table-hint-head {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  margin: 0 0 var(--space-2);
+}
+
+.table-hint-private {
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--fg-3);
+  font: var(--type-label);
+}
+
+.table-hint-text {
+  margin: 0;
+  font: var(--type-body);
+}
+
+.table-end {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.table-end-result {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.table-end[data-tone="win"] .table-end-result {
+  color: var(--success);
+}
+
+.table-end[data-tone="lose"] .table-end-result {
+  color: var(--danger);
+}
+
+.table-end-detail {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.table-end-actions {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.table-end-leave {
+  display: inline-flex;
+  padding: 0 var(--space-6);
+}

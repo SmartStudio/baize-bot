@@ -28,6 +28,7 @@ import {
 } from "../state/poker.js";
 import { pokerProjectTestRoute } from "../state/poker-project-review.js";
 import { pokerProjectRoutes } from "../state/poker-project-seats.js";
+import { tableSideRoutes } from "../state/poker-table-side.js";
 import { readBody, send, type Push, type Route } from "./http.js";
 
 // 牌桌接口，契约在 shared/poker.ts，每个都回整份牌桌视图 { table }。桌子的变化另外推 poker_table_updated。
@@ -85,6 +86,7 @@ const testRoute: Route = async (context) => {
 
 export const pokerRoutes: Route = async (context) => {
   const { res, path, method, push } = context;
+  if (await tableSideRoutes(context)) return true;
   if (!path.startsWith("/api/poker/")) return false;
   if (await pokerProjectTestRoute(context)) return true;
   if (path.startsWith("/api/poker/test/")) return testRoute(context);
