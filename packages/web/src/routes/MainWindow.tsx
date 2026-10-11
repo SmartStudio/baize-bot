@@ -12,11 +12,14 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
 import { TodayPage } from "./TodayPage.js";
+import { PokerProjectPage } from "./PokerProjectPage.js";
 import { ProjectPage } from "./ProjectPage.js";
+import { TablePage } from "./TablePage.js";
 import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
 import { useApp } from "../state/app.js";
+import { pokerTableOf } from "../state/poker.js";
 import { MY_ROUTINES } from "../state/routines.js";
 import { MESSAGE_GAP_ATTEMPTS } from "../state/types.js";
 import { useToday } from "../state/today.js";
@@ -54,6 +57,7 @@ export const MainWindow = () => {
   const focused = ready?.conversations.find((c) => c.groupId === focusGroup) ?? null;
   const conversation = screen?.kind === "group" ? focused : null;
   const projectOpen = screen?.kind === "project" && focused?.kind === "team" ? focused : null;
+  const tableOpen = screen?.kind === "table" ? screen.groupId : null;
   const groupId = conversation?.groupId ?? null;
   const focusedId = focused?.groupId ?? null;
   // 推送重连过的话，之前拉的历史可能漏了断线时的推送：开着的群立刻重拉，别的群下次进来时重拉。
@@ -119,6 +123,8 @@ export const MainWindow = () => {
   const openProjectPage = (target: GroupId | undefined) => {
     if (target !== undefined) navigate(pathOf({ kind: "project", groupId: target }));
   };
+  const openTablePage = (target: GroupId) => navigate(pathOf({ kind: "table", groupId: target }));
+  const pokerTable = projectOpen === null ? undefined : pokerTableOf(ready, projectOpen.groupId);
 
   const bots = ready.bots;
   const assistantGroupId = today.data?.assistantGroupId ?? null;
@@ -192,6 +198,10 @@ export const MainWindow = () => {
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
         />
+      ) : tableOpen !== null ? (
+        <TablePage groupId={tableOpen} table={pokerTableOf(ready, tableOpen) ?? null} />
+      ) : projectOpen !== null && pokerTable !== undefined ? (
+        <PokerProjectPage table={pokerTable} onOpenTable={openTablePage} />
       ) : projectOpen !== null ? (
         <ProjectView
           conversation={projectOpen}

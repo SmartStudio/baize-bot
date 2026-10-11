@@ -240,7 +240,14 @@ describe("Bot 变动重发 config", () => {
       const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
       const afterCreate = await agent.expect("config");
       expect(afterCreate.bots.filter((bot) => bot.role === "member")).toEqual([
-        { id: created.bot.id, role: "member", name: "小服", tags: [], description: created.bot.description },
+        {
+          id: created.bot.id,
+          role: "member",
+          name: "小服",
+          tags: [],
+          description: created.bot.description,
+          preset: null,
+        },
       ]);
 
       expect((await client.patch(`/api/bots/${created.bot.id}`, { name: "小采", description: "买东西" })).status).toBe(
@@ -248,7 +255,7 @@ describe("Bot 变动重发 config", () => {
       );
       const afterRename = await agent.expect("config");
       expect(afterRename.bots.filter((bot) => bot.role === "member")).toEqual([
-        { id: created.bot.id, role: "member", name: "小采", tags: [], description: "买东西" },
+        { id: created.bot.id, role: "member", name: "小采", tags: [], description: "买东西", preset: null },
       ]);
 
       expect((await client.delete(`/api/bots/${created.bot.id}`)).status).toBe(204);

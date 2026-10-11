@@ -64,11 +64,12 @@ describe("单拉漏档的 404 终态", () => {
       body: { kind: "bot", botId: "bot_service", text: "完整", streaming: false },
       createdAt: "2026-10-09T00:00:00.000Z",
       revision: 3,
+      visibleTo: null,
     });
     calls[0]?.resolve(message);
     await settled();
     expect(calls, "成功之后待补的那一趟照发").toHaveLength(2);
-    calls[1]?.resolve({ ...message, revision: 4 });
+    calls[1]?.resolve({ ...message, revision: 4, visibleTo: null });
     await first;
     expect(actions.filter((action) => action.type === "message_upserted")).toHaveLength(2);
   });

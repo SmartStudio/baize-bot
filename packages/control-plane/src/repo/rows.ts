@@ -90,6 +90,7 @@ export function toMessage(row: typeof schema.messages.$inferSelect): Message {
     body: row.body,
     createdAt: row.createdAt.toISOString(),
     revision: row.revision,
+    visibleTo: row.visibleTo,
   });
 }
 

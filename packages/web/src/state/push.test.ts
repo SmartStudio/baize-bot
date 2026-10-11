@@ -59,6 +59,7 @@ describe("建队卡落地要让首页和项目页的等你重拉", () => {
       body,
       createdAt: "2026-10-09T08:00:00.000Z",
       revision: 0,
+      visibleTo: null,
     });
 
   const pushedActions = (message: Message) => {

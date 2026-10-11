@@ -33,6 +33,7 @@ import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
+import { composeTablePrompt, createTableTools } from "./table.js";
 import { createTeamTools } from "./team.js";
 import { createTopicTools, renderTaskCard } from "./topic.js";
 import { contextSince, readMemoryShown, readWatermark, recordMemoryShown, recordWatermark } from "./watermark.js";
@@ -255,6 +256,7 @@ function composePrompt(
   context: readonly PromptMessage["context"][number][],
   accounts: ConfigMessage["accounts"],
 ): string {
+  if (message.table !== null) return composeTablePrompt(message);
   const sections: string[] = [
     message.group.kind === "solo"
       ? "[这是你和用户的单聊]"
@@ -309,6 +311,8 @@ function composePrompt(
       case "routine":
         current = `例行任务（归属人定时发的，现在没有人在等回复）：${message.text}`;
         break;
+      case "table":
+        throw new Error("牌桌 prompt 必须带 table，控制面发错了");
       default: {
         const exhaustive: never = origin;
         throw new Error(`未知的消息来源：${exhaustive}`);
@@ -602,6 +606,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
+      ...createTableTools({ activeRun, send: config.send }),
       ...createMemoryTools({ groupKind, activeRun, send: config.send }),
       ...createDraftTools({
         activeRun,

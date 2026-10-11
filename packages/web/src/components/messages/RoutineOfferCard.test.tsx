@@ -25,6 +25,7 @@ const offer = Message.parse({
   },
   createdAt: "2026-10-10T10:00:00.000Z",
   revision: 0,
+  visibleTo: null,
 });
 
 describe("RoutineOfferCard", () => {

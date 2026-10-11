@@ -29,6 +29,7 @@ import {
   LoginResponse,
   MeResponse,
   MessageListResponse,
+  PokerTableResponse,
   PreferenceListResponse,
   PreferenceResponse,
   MessageResponse,
@@ -72,6 +73,13 @@ import {
   type GrantId,
   type MessageId,
   type OAuthPlatform,
+  type CreatePokerTableRequest,
+  type HintRequest,
+  type PokerActRequest,
+  type PokerHandId,
+  type PokerSeatNo,
+  type PokerTableView,
+  type SwapSeatRequest,
   type Preference,
   type PreferenceId,
   type Routine,
@@ -283,6 +291,30 @@ export const createApi = (signal?: AbortSignal) => {
     brand: async (): Promise<BrandBook | null> => (await json(BrandResponse, await send("GET", "/brand"))).brand,
     updateBrand: async (body: UpdateBrandRequest): Promise<BrandBook | null> =>
       (await json(BrandResponse, await send("PUT", "/brand", body))).brand,
+    // 牌局接口按 shared/poker.ts 的契约，每个都回整份牌桌视图。S3 里控制面和 mock 都还回 501。
+    createPokerTable: async (request: CreatePokerTableRequest): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("POST", "/poker/tables", request))).table,
+    pokerTable: async (groupId: GroupId): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("GET", `/poker/tables/${encodeURIComponent(groupId)}`))).table,
+    startHand: async (groupId: GroupId): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("POST", `/poker/tables/${encodeURIComponent(groupId)}/hands`, {})))
+        .table,
+    pokerAct: async (handId: PokerHandId, request: PokerActRequest): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("POST", `/poker/hands/${encodeURIComponent(handId)}/act`, request)))
+        .table,
+    askHint: async (handId: PokerHandId, request: HintRequest): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("POST", `/poker/hands/${encodeURIComponent(handId)}/hint`, request)))
+        .table,
+    swapSeat: async (groupId: GroupId, seat: PokerSeatNo, request: SwapSeatRequest): Promise<PokerTableView> =>
+      (
+        await json(
+          PokerTableResponse,
+          await send("POST", `/poker/tables/${encodeURIComponent(groupId)}/seats/${seat}`, request),
+        )
+      ).table,
+    leaveTable: async (groupId: GroupId): Promise<PokerTableView> =>
+      (await json(PokerTableResponse, await send("POST", `/poker/tables/${encodeURIComponent(groupId)}/leave`, {})))
+        .table,
     settings: async () => json(Settings, await send("GET", "/settings")),
     updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
   };

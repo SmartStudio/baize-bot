@@ -34,6 +34,7 @@ test("登出再登录后，旧会话在途的群历史被取消、不写进新�
       body: { kind: "user", text: LEAK },
       createdAt: new Date().toISOString(),
       revision: 0,
+      visibleTo: null,
     });
     oldSettled = oldResponse.gate.then(() =>
       route.fulfill({ response, json: { ...payload, messages: [...payload.messages, leak] } }).catch(() => undefined),

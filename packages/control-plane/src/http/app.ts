@@ -86,6 +86,7 @@ import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import { DiscoveryError, discoverTools } from "../mcp/discover.js";
+import { assertNotTable, TableGroupError } from "../poker/store.js";
 import { createPlaceholder, findAccount, listAccounts, setAccountTier } from "../repo/accounts.js";
 import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPlan } from "../repo/drafts.js";
@@ -147,6 +148,10 @@ import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
 import { createGoalRoutes } from "./routes/goals.js";
+import { createPokerHandRoutes } from "./routes/poker-hands.js";
+import { createPokerHintRoutes } from "./routes/poker-hint.js";
+import { createPokerReviewRoutes } from "./routes/poker-review.js";
+import { createPokerTableRoutes } from "./routes/poker-tables.js";
 import { createPreferenceRoutes } from "./routes/preferences.js";
 import { createPrivacyRoutes } from "./routes/privacy.js";
 import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
@@ -231,6 +236,11 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createSeenRoutes({ db, push: hub }));
   app.route("/api", createPrivacyRoutes({ db, agents }));
   app.route("/api", createTemplateRoutes({ db, agents }));
+  // 第 3 期牌桌的接缝路由，同样在登录中间件之后，各自的子单元把 501 换掉。
+  app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));
+  app.route("/api", createPokerHandRoutes({ db, push: hub, agents }));
+  app.route("/api", createPokerHintRoutes({ db, push: hub, agents }));
+  app.route("/api", createPokerReviewRoutes({ db, push: hub, agents }));
 
   app.route(
     OAUTH_PATH,
@@ -833,6 +843,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!groupId.success) return c.json(NOT_FOUND, 404);
     const owned = await findLiveGroupId(db, c.get("user").id, groupId.data);
     if (owned === null) return c.json(NOT_FOUND, 404);
+    // 牌桌群里不能发普通消息，只能按按钮出牌（单元 7 填）。
+    try {
+      await assertNotTable(db, owned);
+    } catch (error) {
+      if (error instanceof TableGroupError) return c.json({ error: error.message }, 409);
+      throw error;
+    }
     const body = await readJson(c.req.raw, SendMessageRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 

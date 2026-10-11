@@ -63,8 +63,11 @@ import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns, type PassAbsorption } from "./group-turn.js";
 import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
+import { handlePokerAct } from "./events/poker-act.js";
+import { handlePokerReview } from "./events/poker-review.js";
 import { handlePreferenceAdd } from "./events/preference-add.js";
 import { handleReviewSubmit } from "./events/review-submit.js";
+import { isUplinkAllowed } from "./table-run-policy.js";
 import { handleRoutineOffer } from "./events/routine-offer.js";
 import { handleTeamOffer } from "./events/team-offer.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
@@ -171,22 +174,43 @@ export async function handleAgentEvent(
     case "review_submit":
       await handleReviewSubmit(deps, conn, message, receivedAt);
       return;
+    case "poker_act":
+      await handlePokerAct(deps, conn, message);
+      return;
+    case "poker_review":
+      await handlePokerReview(deps, conn, message);
+      return;
   }
 }
 
-/** 群要是这台电脑主人的，run 要是这个 Bot 在这个群里的。任一不成立整条丢掉。 */
+/**
+ * 群要是这台电脑主人的，run 要是这个 Bot 在这个群里的，这种报文要是这个 run 在牌桌上能发的。任一不成立整条丢掉。
+ * 报文的 type 一并带进来，牌桌 run 的放行名单按它查（table-run-policy）。
+ */
 async function resolveRun(
   deps: AgentEventDeps,
   conn: AgentConnection,
-  event: { readonly runId: RunId; readonly botId: BotId; readonly groupId: GroupId },
+  event: {
+    readonly type: AgentToControl["type"];
+    readonly runId: RunId;
+    readonly botId: BotId;
+    readonly groupId: GroupId;
+  },
 ): Promise<GroupId | null> {
   // 报文里的群号是外部输入，findGroupId 按归属人过滤，不是这台电脑主人的群整条丢掉。
   const groupId = await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (groupId === null) return null;
   // 外键只保证 runId 存在，管不了它指到哪个群：不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。
-  if (await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId)) return GroupId.parse(groupId);
-  console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
-  return null;
+  if (!(await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId))) {
+    console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
+    return null;
+  }
+  const run = { runId: event.runId, botId: event.botId, groupId: GroupId.parse(groupId) };
+  if (!(await isUplinkAllowed(deps.db, run, event.type))) {
+    console.warn(`电脑 ${conn.computerId} 的牌桌 run ${event.runId} 发了它不能发的 ${event.type}，整条丢掉`);
+    return null;
+  }
+  return run.groupId;
 }
 
 type LoginState = Extract<AgentToControl, { type: "login_state" }>;
@@ -287,6 +311,7 @@ function pushSettled(push: PushHub, ownerId: UserId, settled: readonly Message[]
       delta: "",
       done: true,
       revision: message.revision,
+      visibleTo: message.visibleTo,
     });
   }
 }
@@ -379,6 +404,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     delta,
     done: event.done,
     revision: appended.message.revision,
+    visibleTo: appended.message.visibleTo,
   });
   if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }
@@ -764,7 +790,12 @@ async function onApprovalAbandoned(
 ): Promise<void> {
   const scope = await approvalRun(deps.db, event.runId, event.callId);
   if (scope === null) return;
-  const groupId = await resolveRun(deps, conn, { runId: event.runId, botId: scope.botId, groupId: scope.groupId });
+  const groupId = await resolveRun(deps, conn, {
+    type: event.type,
+    runId: event.runId,
+    botId: scope.botId,
+    groupId: scope.groupId,
+  });
   if (groupId === null) return;
 
   const approval = await expireApproval(deps.db, event.runId, event.callId);

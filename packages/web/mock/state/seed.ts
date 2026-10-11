@@ -191,7 +191,7 @@ const seeds: Seed[] = [
 ];
 
 const buildMessage = (groupId: string, body: MessageBody, minutes: number): Message =>
-  Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes), revision: 0 });
+  Message.parse({ id: `msg_${nextSuffix()}`, groupId, body, createdAt: at(minutes), revision: 0, visibleTo: null });
 
 export const removeBot = (botId: BotId): void => {
   bots.delete(botId);
@@ -251,6 +251,7 @@ export const restoreAssistant = () => {
     body: seed.bodies[0],
     createdAt: stamp,
     revision: 0,
+    visibleTo: null,
   });
   bots.set(bot.id, bot);
   groups.set(group.id, group);

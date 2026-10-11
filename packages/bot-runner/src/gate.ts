@@ -121,6 +121,8 @@ export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "call_helper",
   "propose_routine",
   "submit_review",
+  "poker_act",
+  "poker_review",
 ]);
 
 type ZoneHit = "hidden" | "read_only" | null;
@@ -695,6 +697,9 @@ const READ_ONLY_TOOL_BARS: ReadonlyMap<string, ToolBar> = new Map<string, ToolBa
   ["handoff_task", { action: "write_workspace", bar: "发起交接" }],
   ["accept_handoff", { action: "write_workspace", bar: "接手交接" }],
   ["mention_bot", { action: "write_workspace", bar: "叫别的 Bot 干活" }],
+  // 牌桌 run 不会带只读边界，登记只为了给每个内部工具一个表态。
+  ["poker_act", { action: "write_workspace", bar: "出牌" }],
+  ["poker_review", { action: "write_workspace", bar: "交复盘" }],
 ]);
 
 const READ_ONLY_NEXT_STEP =

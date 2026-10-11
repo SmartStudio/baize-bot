@@ -23,6 +23,7 @@ import {
   type LoginFailure,
   type Message,
   type MessageId,
+  type PokerTableView,
   type Preference,
   type PreferenceId,
   type Publication,
@@ -151,6 +152,8 @@ export type AppState =
       deletedPreferences: Record<PreferenceId, true>;
       // 没写过是 null。
       brand: BrandBook | null;
+      // 按群存牌桌视图，只有拉过或推过的桌子在这里。
+      poker: Record<GroupId, PokerTableView>;
       tools: ToolConnection[];
       settings: Settings;
       grants: Grant[];
@@ -169,7 +172,14 @@ export type AppState =
       loads: Partial<Record<LoadKey, LoadStatus>>;
     };
 
-export type Delta = { groupId: GroupId; messageId: MessageId; delta: string; done: boolean; revision: number };
+export type Delta = {
+  groupId: GroupId;
+  messageId: MessageId;
+  delta: string;
+  done: boolean;
+  revision: number;
+  visibleTo: Message["visibleTo"];
+};
 
 export type Action =
   | { type: "anonymous"; login: LoginPhase }
@@ -185,6 +195,7 @@ export type Action =
       usage: UsageResponse;
     }
   | { type: "bot_created"; bot: Bot; groupId: GroupId }
+  | { type: "poker_table_set"; table: PokerTableView }
   | { type: "bot_updated"; bot: Bot }
   | { type: "bot_removed"; botId: BotId }
   | { type: "group_created"; group: Group; task: TopicTask; seq: Seq }

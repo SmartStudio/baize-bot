@@ -246,7 +246,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     const parsed = TestDeltaRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "delta 参数不对" });
     else {
-      push({ type: "message_delta", ...parsed.data });
+      push({ type: "message_delta", ...parsed.data, visibleTo: null });
       send(res, 204);
     }
     return true;

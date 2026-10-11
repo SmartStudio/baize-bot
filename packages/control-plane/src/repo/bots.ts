@@ -7,6 +7,7 @@ import {
   type BotProfileResponse,
   type Group,
   type Message,
+  type PokerPersona,
   type TopicTask,
   type UserId,
 } from "@baize/shared";
@@ -45,6 +46,8 @@ export type UpdateBotInput = CreateBotInput & { readonly notify?: boolean | unde
 
 export type BotListEntry = {
   readonly bot: Bot;
+  /** 预置牌友或老白的人设 id，只进 config 下发给运行器，不出 HTTP 边界。 */
+  readonly preset: PokerPersona | null;
   readonly groupId: GroupId;
   readonly lastMessage: Message | null;
   readonly pendingApprovals: number;
@@ -203,6 +206,7 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
   const handedOff = await pendingHandoffCounts(db, groupIds);
   return rows.map((row) => ({
     bot: toBot(row.bot),
+    preset: row.bot.preset,
     groupId: GroupId.parse(row.groupId),
     lastMessage: lastMessages.get(row.groupId) ?? null,
     pendingApprovals: pending.get(row.groupId) ?? 0,

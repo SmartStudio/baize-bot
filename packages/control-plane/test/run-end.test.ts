@@ -185,6 +185,7 @@ const settledDelta = (live: Live, messageId: MessageId): ServerPush => ({
   delta: "",
   done: true,
   revision: expect.any(Number) as number,
+  visibleTo: null,
 });
 
 const pushesAbout = (pushed: readonly ServerPush[], messageId: MessageId): ServerPush[] =>

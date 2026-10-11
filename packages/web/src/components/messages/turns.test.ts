@@ -11,6 +11,7 @@ const message = (body: unknown, createdAt = "2026-09-19T12:00:00.000Z") =>
     body,
     createdAt,
     revision: 0,
+    visibleTo: null,
   });
 
 const user = (text = "hello") => message({ kind: "user", text });
@@ -67,6 +68,7 @@ describe("turnsOf", () => {
       body: { kind: "user", text: "z" },
       createdAt: at,
       revision: 0,
+      visibleTo: null,
     });
     const reply = Message.parse({
       id: "message-a",
@@ -74,6 +76,7 @@ describe("turnsOf", () => {
       body: { kind: "bot", botId: "bot-a", text: "a", streaming: false },
       createdAt: at,
       revision: 0,
+      visibleTo: null,
     });
     expect(turnsOf([said, reply])).toEqual([
       { kind: "user", message: said },

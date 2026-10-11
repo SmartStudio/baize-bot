@@ -6,7 +6,14 @@ let nextMessageId = 0;
 
 const at = (second: number) => new Date(Date.UTC(2026, 8, 26, 12, 0, second)).toISOString();
 const message = (body: unknown, second: number) =>
-  Message.parse({ id: `message-${nextMessageId++}`, groupId: "group-1", body, createdAt: at(second), revision: 0 });
+  Message.parse({
+    id: `message-${nextMessageId++}`,
+    groupId: "group-1",
+    body,
+    createdAt: at(second),
+    revision: 0,
+    visibleTo: null,
+  });
 const user = (text: string, second: number) => message({ kind: "user", text }, second);
 const bot = (text: string, second: number, streaming = false) =>
   message({ kind: "bot", botId: "bot-a", text, streaming }, second);
@@ -67,6 +74,7 @@ describe("latestTurnOf", () => {
         body: { kind: "bot", botId: "bot-a", text, streaming: false },
         createdAt: at(2),
         revision: 0,
+        visibleTo: null,
       });
     const first = tied("ffffffff-ffff-4fff-bfff-ffffffffffff", "服务端排第一");
     const second = tied("00000000-0000-4000-8000-000000000000", "服务端排第二");

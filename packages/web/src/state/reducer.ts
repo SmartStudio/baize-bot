@@ -3,6 +3,7 @@ import { reduceApprovals } from "./approvals.js";
 import { reduceBrand } from "./brand.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
 import { rearmGaps, reduceGroups, teamOf } from "./groups.js";
+import { reducePoker } from "./poker.js";
 import { reducePreferences } from "./preferences.js";
 import { reduceRoutines } from "./routines.js";
 import { reduceSettings } from "./settings.js";
@@ -49,6 +50,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     preferences: emptyShelf(),
     deletedPreferences: {},
     brand: null,
+    poker: {},
     tools,
     settings,
     usage,
@@ -94,5 +96,6 @@ export const reduce = (state: AppState, action: Action): AppState => {
   const skills = reduceSkills(routines, action);
   const preferences = reducePreferences(skills, action);
   const brand = reduceBrand(preferences, action);
-  return reduceContent(reduceSettings(brand, action), action);
+  const poker = reducePoker(brand, action);
+  return reduceContent(reduceSettings(poker, action), action);
 };

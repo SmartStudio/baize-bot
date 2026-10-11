@@ -19,6 +19,7 @@ export const appendMessage = (
     body,
     createdAt,
     revision,
+    visibleTo: null,
   });
   const list = messagesByGroupId.get(groupId);
   if (list) list.push(message);

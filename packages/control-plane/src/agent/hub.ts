@@ -499,16 +499,18 @@ export class AgentHub {
     ]);
     // listBots 是判暂停状态的快照，放在最后一个 await，查完同步发出 config 和补发，
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
-    const bots = (await listBots(this.#deps.db, conn.ownerId)).map((item) => item.bot);
+    const entries = await listBots(this.#deps.db, conn.ownerId);
+    const bots = entries.map((item) => item.bot);
     this.#send(conn, {
       type: "config",
       generation,
-      bots: bots.map((bot) => ({
+      bots: entries.map(({ bot, preset }) => ({
         id: bot.id,
         role: bot.role,
         name: bot.name,
         tags: bot.tags,
         description: bot.description,
+        preset,
       })),
       tools,
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，

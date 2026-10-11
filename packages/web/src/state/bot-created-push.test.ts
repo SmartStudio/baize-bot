@@ -122,6 +122,7 @@ describe("项目开始后新队员的 bot_created 推送", () => {
         body: { kind: "bot", botId: member.id, text: "原有历史", streaming: false },
         createdAt: at,
         revision: 0,
+        visibleTo: null,
       }),
     });
     const before = page.state().conversations;

@@ -55,6 +55,7 @@ export const createPushHandlers = ({
         delta: push.delta,
         done: push.done,
         revision: push.revision,
+        visibleTo: push.visibleTo,
         seq,
       });
       if (push.done && inAssistantChat(push.groupId)) bumpToday();
@@ -98,6 +99,7 @@ export const createPushHandlers = ({
     preference_deleted: (push, seq) =>
       dispatch({ type: "preference_removed", botId: push.botId, preferenceId: push.preferenceId, seq }),
     brand_updated: (push) => dispatch({ type: "brand_set", brand: push.brand }),
+    poker_table_updated: (push) => dispatch({ type: "poker_table_set", table: push.table }),
     draft_updated: (push, seq) => {
       dispatch({ type: "content_loaded", drafts: [push.draft], plans: [], seq });
       bumpToday();

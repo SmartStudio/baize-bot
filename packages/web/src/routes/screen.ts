@@ -5,10 +5,13 @@ export type Screen =
   | { kind: "today" }
   | { kind: "group"; groupId: GroupId }
   | { kind: "project"; groupId: GroupId }
+  | { kind: "table"; groupId: GroupId }
   | { kind: "routines" }
   | { kind: "team" };
 
-const GROUP_PATH = /^\/(g|p)\/([^/]+)\/?$/;
+const GROUP_PATH = /^\/(g|p|t)\/([^/]+)\/?$/;
+
+const GROUP_KINDS = { g: "group", p: "project", t: "table" } as const;
 
 export const screenOf = (pathname: string): Screen | null => {
   if (pathname === "/") return { kind: "today" };
@@ -18,7 +21,8 @@ export const screenOf = (pathname: string): Screen | null => {
   if (match === null) return null;
   const parsed = GroupId.safeParse(decodeSegment(match[2] ?? ""));
   if (!parsed.success) return null;
-  return match[1] === "p" ? { kind: "project", groupId: parsed.data } : { kind: "group", groupId: parsed.data };
+  const prefix = match[1] as keyof typeof GROUP_KINDS;
+  return { kind: GROUP_KINDS[prefix], groupId: parsed.data };
 };
 
 const decodeSegment = (segment: string): string | null => {
@@ -41,5 +45,7 @@ export const pathOf = (screen: Screen): string => {
       return `/g/${encodeURIComponent(screen.groupId)}`;
     case "project":
       return `/p/${encodeURIComponent(screen.groupId)}`;
+    case "table":
+      return `/t/${encodeURIComponent(screen.groupId)}`;
   }
 };

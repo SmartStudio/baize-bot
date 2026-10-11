@@ -9,6 +9,7 @@ import { contentRoutes } from "./routes/content.js";
 import { goalRoutes } from "./routes/goals.js";
 import { groupRoutes } from "./routes/groups.js";
 import { grantRoutes } from "./routes/grants.js";
+import { pokerRoutes } from "./routes/poker.js";
 import { preferenceRoutes } from "./routes/preferences.js";
 import { routineOfferRoutes } from "./routes/routine-offers.js";
 import { send, type Push, type Route, type RouteContext } from "./routes/http.js";
@@ -44,7 +45,8 @@ const socketRoutes: Route = async ({ res, path, method }) => {
 
 const publicRoutes: Route[] = [socketRoutes, testRoutes, authRoutes, hookRoutes];
 const protectedRoutes: Route[] = [
-  // 第 2 期的接缝路由排在前面，免得被同前缀的老路由先截住。
+  // 第 2 期的接缝路由排在前面，免得被同前缀的老路由先截住。第 3 期的牌局路由同理。
+  pokerRoutes,
   goalRoutes,
   preferenceRoutes,
   brandRoutes,

@@ -24,6 +24,13 @@ import type {
   OAuthPlatform,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
+  PokerBlinds,
+  PokerEvent,
+  PokerPersona,
+  PokerReview,
+  PokerSeatNo,
+  PokerTableRole,
+  PokerTableStatus,
   PublishFailureReason as PublishFailureReasonSchema,
   RoutineBoundary as RoutineBoundarySchema,
   RoutineRunStatus as RoutineRunStatusSchema,
@@ -33,6 +40,7 @@ import type {
   ToolConnectionStatus as ToolConnectionStatusSchema,
   ToolView,
   TaskStatus as TaskStatusSchema,
+  Viewer,
 } from "@baize/shared";
 import { sql } from "drizzle-orm";
 import type { z } from "zod";
@@ -82,6 +90,10 @@ type RoutineBoundary = z.infer<typeof RoutineBoundarySchema>;
 export type StoredTrigger =
   | { readonly kind: "cron"; readonly expr: string; readonly lastFiredAt: string | null }
   | { readonly kind: "webhook"; readonly token: string };
+
+/** 牌桌一个座位在库里的样子：座位号、坐着的 Bot（4 号位是用户，为 null）、筹码。筹码跟座位走（D27）。 */
+export type StoredPokerSeat = { readonly seat: PokerSeatNo; readonly botId: string | null; readonly stack: number };
+export type StoredPokerHandStatus = "playing" | "complete";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -143,6 +155,8 @@ export const bots = pgTable(
     description: text("description").notNull().default(""),
     hue: text("hue").$type<BotHue>().notNull(),
     notify: boolean("notify").notNull().default(true),
+    // 预置牌友和老白的人设 id。每个用户一套（D36），所以 (owner_id, preset) 唯一。
+    preset: text("preset").$type<PokerPersona>(),
     createdAt: createdAt(),
   },
   (t) => [
@@ -150,6 +164,9 @@ export const bots = pgTable(
     uniqueIndex("bots_owner_id_assistant_idx")
       .on(t.ownerId)
       .where(sql`${t.role} = 'assistant'`),
+    uniqueIndex("bots_owner_id_preset_idx")
+      .on(t.ownerId, t.preset)
+      .where(sql`${t.preset} IS NOT NULL`),
   ],
 );
 
@@ -293,8 +310,16 @@ export const messages = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     // 每条改这一行的 UPDATE 都在同一句里加一（nextRevision），不先读再写。
     revision: integer("revision").notNull().default(0),
+    // 收件人名单，null 是全群可见。空数组在库这一级就禁掉，免得和 null 两种写法。
+    visibleTo: jsonb("visible_to").$type<Viewer[]>(),
   },
-  (t) => [index("messages_group_id_seq_idx").on(t.groupId, t.seq)],
+  (t) => [
+    index("messages_group_id_seq_idx").on(t.groupId, t.seq),
+    check(
+      "messages_visible_to_check",
+      sql`${t.visibleTo} IS NULL OR (jsonb_typeof(${t.visibleTo}) = 'array' AND jsonb_array_length(${t.visibleTo}) > 0)`,
+    ),
+  ],
 );
 
 // 每个用户每种电脑至多一台。token 给电脑代理登录 /agent，gateway key 给模型网关认账，两把都是 32 字节随机数，
@@ -481,8 +506,21 @@ export const runs = pgTable(
     // 不在名单之间挑「最新的一份」：派活交错、交接延后时各 run 读到的消息集合互不包含，没有一份能盖住别的。
     // 迁移前的 run 是 null，当空。
     settledContext: jsonb("settled_context").$type<MessageId[]>(),
+    // 牌桌 run 的产出只给这些人看；普通 run 为 null。
+    visibleTo: jsonb("visible_to").$type<Viewer[]>(),
+    // 这个 run 在牌桌上扮演什么，普通 run 为 null。上行报文按它放行（table-run-policy）。
+    tableRole: text("table_role").$type<PokerTableRole>(),
   },
   (t) => [
+    check("runs_table_role_check", sql`${t.tableRole} IS NULL OR ${t.tableRole} IN ('player', 'advisor', 'reviewer')`),
+    // 每张桌同时至多一个没收尾的 advisor run 和一个 reviewer run。
+    uniqueIndex("runs_table_role_open_idx")
+      .on(t.groupId, t.tableRole)
+      .where(sql`${t.tableRole} IN ('advisor', 'reviewer') AND ${t.endedAt} IS NULL`),
+    // 同一个 Bot 在同一张桌同时至多一个没收尾的牌桌 run。
+    uniqueIndex("runs_table_bot_open_idx")
+      .on(t.botId, t.groupId)
+      .where(sql`${t.tableRole} IS NOT NULL AND ${t.endedAt} IS NULL`),
     index("runs_group_id_started_at_idx").on(t.groupId, t.startedAt),
     // 每次派活取这个 Bot 在这个群最近确认的几份名单，按确认时刻倒着取前几条就停，不扫全群的 run。
     index("runs_context_confirmed_idx")
@@ -718,3 +756,118 @@ export const brandBooks = pgTable("brand_books", {
   version: integer("version").notNull().default(0),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// 牌桌。一个群就是一张桌，主键就是 group_id。request_id 是建桌请求的幂等键，重发撞唯一索引就回原来那张。
+// version 每次桌面有变化加一，poker_table_updated 带它，客户端只认更大的。
+export const pokerTables = pgTable(
+  "poker_tables",
+  {
+    groupId: text("group_id")
+      .primaryKey()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    requestId: text("request_id").notNull(),
+    seats: jsonb("seats").$type<StoredPokerSeat[]>().notNull(),
+    buttonSeat: integer("button_seat").$type<PokerSeatNo>().notNull(),
+    smallBlind: integer("small_blind").notNull(),
+    bigBlind: integer("big_blind").notNull(),
+    startingStack: integer("starting_stack").notNull(),
+    handCount: integer("hand_count").notNull().default(0),
+    status: text("status").$type<PokerTableStatus>().notNull().default("idle"),
+    version: integer("version").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("poker_tables_owner_id_request_id_idx").on(t.ownerId, t.requestId),
+    check("poker_tables_status_check", sql`${t.status} IN ('idle', 'in_hand')`),
+  ],
+);
+
+// 一场牌：从坐下到「散场看复盘」。ended_at 为空是还没散的那场，一张桌同时只有一场（D33）。复盘写在 review。
+export const pokerSessions = pgTable(
+  "poker_sessions",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => pokerTables.groupId, { onDelete: "cascade" }),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    review: jsonb("review").$type<PokerReview>(),
+  },
+  (t) => [
+    index("poker_sessions_group_id_idx").on(t.groupId),
+    uniqueIndex("poker_sessions_group_id_open_idx")
+      .on(t.groupId)
+      .where(sql`${t.endedAt} IS NULL`),
+  ],
+);
+
+// 一手牌。seed 加 seats_start、button_seat、blinds 和 poker_events 就能 replay 出整手，所以牌面本身不存。
+// seed 永远不出控制面的响应、prompt 和日志。turn_* 是当前轮到的座位和催它的 run（D23 兜底靠 turn_deadline）。
+export const pokerHands = pgTable(
+  "poker_hands",
+  {
+    id: text("id").primaryKey(),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => pokerTables.groupId, { onDelete: "cascade" }),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => pokerSessions.id, { onDelete: "cascade" }),
+    number: integer("number").notNull(),
+    seed: text("seed").notNull(),
+    seatsStart: jsonb("seats_start").$type<StoredPokerSeat[]>().notNull(),
+    buttonSeat: integer("button_seat").$type<PokerSeatNo>().notNull(),
+    blinds: jsonb("blinds").$type<PokerBlinds>().notNull(),
+    status: text("status").$type<StoredPokerHandStatus>().notNull().default("playing"),
+    turnSeat: integer("turn_seat").$type<PokerSeatNo>(),
+    turnRunId: text("turn_run_id").references(() => runs.id, { onDelete: "set null" }),
+    turnAttempts: integer("turn_attempts").notNull().default(0),
+    turnDeadline: timestamp("turn_deadline", { withTimezone: true }),
+    version: integer("version").notNull().default(0),
+    createdAt: createdAt(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("poker_hands_group_id_number_idx").on(t.groupId, t.number),
+    uniqueIndex("poker_hands_group_id_playing_idx")
+      .on(t.groupId)
+      .where(sql`${t.status} = 'playing'`),
+    index("poker_hands_session_id_idx").on(t.sessionId),
+    check("poker_hands_status_check", sql`${t.status} IN ('playing', 'complete')`),
+  ],
+);
+
+// 一手牌的事件日志，seq 从 0 起连续。主键 (hand_id, seq) 就是幂等：同一个决策点写第二次撞主键。
+export const pokerEvents = pgTable(
+  "poker_events",
+  {
+    handId: text("hand_id")
+      .notNull()
+      .references(() => pokerHands.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    event: jsonb("event").$type<PokerEvent>().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.handId, t.seq] })],
+);
+
+// 「问老白」：每个决策点一次（D31），主键 (hand_id, seq) 保证重复点返回同一条。message_id 是老白答出来那条。
+export const pokerHints = pgTable(
+  "poker_hints",
+  {
+    handId: text("hand_id")
+      .notNull()
+      .references(() => pokerHands.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.handId, t.seq] })],
+);

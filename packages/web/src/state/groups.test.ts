@@ -16,6 +16,7 @@ const bot = (text: string, streaming: boolean, revision: number) =>
     body: { kind: "bot", botId: "bot_sales", text, streaming },
     createdAt: at,
     revision,
+    visibleTo: null,
   });
 
 // 这几条动作只读写群消息，别的字段用不上。
@@ -44,6 +45,7 @@ const delta = (
   delta: text,
   done,
   revision,
+  visibleTo: null,
   seq,
 });
 
@@ -51,7 +53,7 @@ const replyIn = (state: ReadyState) => state.messages.rows[GROUP_ID]?.find((m) =
 const idsIn = (state: ReadyState) => state.messages.rows[GROUP_ID]?.map((m) => m.id);
 
 const user = (id: string, text: string) =>
-  Message.parse({ id, groupId: GROUP_ID, body: { kind: "user", text }, createdAt: at, revision: 0 });
+  Message.parse({ id, groupId: GROUP_ID, body: { kind: "user", text }, createdAt: at, revision: 0, visibleTo: null });
 
 describe("群历史和流式推送的先后", () => {
   it("断线前只收到半句，重连后重拉的历史换成服务端的完整正文", () => {
@@ -480,6 +482,7 @@ describe("重拉只回最近一窗历史", () => {
       body: { kind: "user", text: "A" },
       createdAt: sameMs,
       revision: 0,
+      visibleTo: null,
     });
     const first = Message.parse({
       id: "msg_aaaa",
@@ -487,6 +490,7 @@ describe("重拉只回最近一窗历史", () => {
       body: { kind: "bot", botId: "bot_sales", text: "B", streaming: false },
       createdAt: sameMs,
       revision: 0,
+      visibleTo: null,
     });
     const later = user("msg_later", "更晚的");
     const laterAt = { ...later, createdAt: "2026-09-26T08:00:09.000Z" };

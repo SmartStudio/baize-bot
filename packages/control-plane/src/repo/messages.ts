@@ -82,8 +82,17 @@ export async function findOwnedMessage(db: Db, ownerId: UserId, messageId: Messa
   return found === undefined ? null : toMessage(found.row);
 }
 
-export async function appendMessage(db: Db | Tx, groupId: string, body: MessageBody): Promise<Message> {
-  const [row] = await db.insert(messages).values({ id: newId(), groupId, body, createdAt: new Date() }).returning();
+/** visibleTo 不给就是全群可见。读口按收件人过滤的参数不在这里，归单元 1。 */
+export async function appendMessage(
+  db: Db | Tx,
+  groupId: string,
+  body: MessageBody,
+  visibleTo: Message["visibleTo"] = null,
+): Promise<Message> {
+  const [row] = await db
+    .insert(messages)
+    .values({ id: newId(), groupId, body, createdAt: new Date(), visibleTo })
+    .returning();
   if (row === undefined) throw new Error("写消息没有返回行");
   return toMessage(row);
 }

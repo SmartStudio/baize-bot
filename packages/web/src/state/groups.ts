@@ -29,6 +29,7 @@ const streamedInto = (previous: Message | undefined, botId: BotId, delta: Delta,
     body: { kind: "bot", botId, text: (grown?.text ?? "") + delta.delta, streaming: !delta.done },
     createdAt: previous?.createdAt ?? fallbackAt,
     revision: delta.revision,
+    visibleTo: delta.visibleTo,
   };
 };
 

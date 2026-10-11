@@ -26,6 +26,7 @@ const history = (text: string) => [
     body: { kind: "user", text },
     createdAt: "2026-09-26T08:00:00.000Z",
     revision: 0,
+    visibleTo: null,
   }),
 ];
 
@@ -83,6 +84,7 @@ describe("漏档单拉的恢复", () => {
       delta: "缺",
       done: false,
       revision: 3,
+      visibleTo: null,
       seq: next(),
     });
     const failed: Action = { type: "message_gap_failed", messageId };
