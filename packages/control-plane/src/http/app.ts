@@ -168,6 +168,7 @@ export type AppDeps = {
   readonly groupTurns: GroupTurns;
   readonly notifications: NoticePublisher;
   readonly secureCookie: boolean;
+  readonly pokerSeed?: () => string;
   readonly gateway: Omit<GatewayDeps, "db">;
   readonly platformAccounts: {
     readonly crypto: CredentialCrypto;
@@ -239,7 +240,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createTemplateRoutes({ db, agents }));
   // 第 3 期牌桌的接缝路由，同样在登录中间件之后，各自的子单元把 501 换掉。
   app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));
-  app.route("/api", createPokerHandRoutes({ db, push: hub, agents }));
+  app.route(
+    "/api",
+    createPokerHandRoutes({ db, push: hub, agents, ...(deps.pokerSeed === undefined ? {} : { seed: deps.pokerSeed }) }),
+  );
   app.route("/api", createPokerHintRoutes({ db, push: hub, agents }));
   app.route("/api", createPokerReviewRoutes({ db, push: hub, agents }));
 

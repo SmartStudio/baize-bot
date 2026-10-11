@@ -245,7 +245,11 @@ export async function appendEvents(db: Db, table: TableRow, hand: StoredHand, st
     );
   return messages;
 }
-export async function startHand(db: Db, table: TableRow): Promise<{ handId: PokerHandId; messages: Message[] }> {
+export async function startHand(
+  db: Db,
+  table: TableRow,
+  seed: string = randomBytes(32).toString("hex"),
+): Promise<{ handId: PokerHandId; messages: Message[] }> {
   const [claimed] = await db
     .update(pokerTables)
     .set({ status: "in_hand", handCount: sql`${pokerTables.handCount} + 1`, version: sql`${pokerTables.version} + 1` })
@@ -264,7 +268,6 @@ export async function startHand(db: Db, table: TableRow): Promise<{ handId: Poke
     .from(pokerSessions)
     .where(and(eq(pokerSessions.groupId, table.groupId), isNull(pokerSessions.endedAt)));
   if (!session) throw new Error("牌桌没有未散场的会话");
-  const seed = randomBytes(32).toString("hex");
   const state = newHand(
     seed,
     seats.toSorted((a, b) => a.seat - b.seat).map((seat) => ({ id: engineSeatId(seat.seat), stack: seat.stack })),

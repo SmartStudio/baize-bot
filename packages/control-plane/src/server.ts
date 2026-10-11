@@ -51,7 +51,8 @@ export type RunningServer = {
 };
 
 export type StartOptions = {
-  readonly poker?: PokerSweeperOptions;
+  /** seed 是每手牌的发牌种子，真栈验收靠它发出确定的牌。不给就是 32 字节随机数，main.ts 不传。 */
+  readonly poker?: PokerSweeperOptions & { readonly seed?: () => string };
   readonly db: Db;
   readonly port: number;
   /** 不给就监听通配地址。测试给 127.0.0.1：macOS 分临时端口时不避开别的进程占在 127.0.0.1 上的同号端口，客户端连 127.0.0.1 会连到别人那里。 */
@@ -129,6 +130,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     groupTurns,
     notifications,
     secureCookie: options.secureCookie ?? false,
+    ...(options.poker?.seed === undefined ? {} : { pokerSeed: options.poker.seed }),
     gateway: {
       models: config.gatewayModels,
       upstreamBaseUrl: config.upstreamBaseUrl,

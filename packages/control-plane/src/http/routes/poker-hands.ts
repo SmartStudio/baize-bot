@@ -14,7 +14,7 @@ import {
 } from "../../poker/store.js";
 import type { Env } from "../app.js";
 
-export type PokerHandRouteDeps = PokerDeps;
+export type PokerHandRouteDeps = PokerDeps & { readonly seed?: () => string };
 
 // 提交成功后只做尽力推进。事务内的视图作兜底，避免读库或推送失败把已落库动作报成 500。
 async function afterCommit(
@@ -54,7 +54,7 @@ export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
     try {
       const result = await withTableLock(deps.db, c.req.param("groupId"), async (db, table) => {
         if (table.ownerId !== c.get("user").id) throw new PokerError(404, "没有这张牌桌");
-        const started = await startHand(db, table);
+        const started = await startHand(db, table, deps.seed?.());
         return {
           ...started,
           ownerId: table.ownerId,

@@ -824,3 +824,26 @@ it("dropped run 在同一决策点最多重派三次，重启后仍受限并等�
   expect((await table.agent.expect("prompt")).botId).toBe(table.botIds[1]);
   expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
 });
+
+it("启动时给了发牌种子，开手就用它，同一个种子发出同样的手牌", async () => {
+  await fixture();
+  await server.close();
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker: { intervalMs: 20, now: () => now, turnTimeoutMs: 60_000, seed: () => "验收固定种子" },
+  });
+  table.client = new ApiClient(server.port);
+  const [owner] = await database.sql<{ email: string }[]>`SELECT email FROM users WHERE id = ${table.ownerId}`;
+  expect((await table.client.login(owner!.email, PASSWORD)).status).toBe(200);
+  table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token)).agent;
+  const view = await start();
+  const [hand] = await database.sql<
+    { id: string; seed: string }[]
+  >`SELECT id, seed FROM poker_hands WHERE group_id = ${table.groupId}`;
+  expect(hand!.seed, "开手用的是注入的种子").toBe("验收固定种子");
+  const expected = (await stored(hand!.id)).seats.find((seat) => seat.id === "4")!.hole;
+  expect(view.hand?.view.hole, "用户看到的两张牌由种子决定").toEqual(expected);
+});
