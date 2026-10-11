@@ -13,6 +13,7 @@ export type PokerHandId = z.infer<typeof PokerHandId>;
 /** 桌上的座位号。你固定坐 4 号位（D22），1 到 3 号是牌友。 */
 export const PokerSeatNo = z.number().int().min(1).max(4);
 export type PokerSeatNo = z.infer<typeof PokerSeatNo>;
+export const POKER_USER_SEAT: PokerSeatNo = 4;
 
 export const POKER_RANKS = ["2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A"] as const;
 export const POKER_SUITS = ["s", "h", "d", "c"] as const;
@@ -156,12 +157,19 @@ export const PokerReviewHand = z.object({ number: z.number().int().positive(), t
 export type PokerReviewHand = z.infer<typeof PokerReviewHand>;
 export const PokerReview = z.object({ sessionId: PokerSessionId, hands: z.array(PokerReviewHand) });
 export type PokerReview = z.infer<typeof PokerReview>;
+/** 复盘里每手正文的字数上限。控制面收复盘和运行器的 poker_review 工具各自按它把关。 */
+export const POKER_REVIEW_TEXT_LIMIT = 120;
+/** generating 是老白还在写；failed 是 run 结束了复盘却没落下来，或者根本没派出去，可以重试；done 时复盘就是 lastReview。 */
+export const PokerReviewStatus = z.enum(["generating", "done", "failed"]);
+export type PokerReviewStatus = z.infer<typeof PokerReviewStatus>;
 
 export const PokerTableStatus = z.enum(["idle", "in_hand"]);
 export type PokerTableStatus = z.infer<typeof PokerTableStatus>;
 
 export const PokerTableSeat = z.object({
   seat: PokerSeatNo,
+  /** 这个座位在引擎里的 id。手牌视图里的 seatId、事件里的 seatId 都用它对回座位，客户端不自己猜。 */
+  engineSeatId: PokerEngineSeatId,
   kind: z.enum(["user", "bot"]),
   botId: BotId.nullable(),
   name: z.string(),
@@ -206,7 +214,10 @@ export const PokerTableView = z.object({
       messageId: MessageId.nullable(),
     })
     .nullable(),
+  /** 最近一场有复盘的已散场场次的复盘。开了新一场还没散时仍是上一场的。 */
   lastReview: PokerReview.nullable(),
+  /** 最近一场已散场场次的复盘状态。没散过场是 null。done 时它就是 lastReview 那一场。 */
+  reviewState: z.object({ sessionId: PokerSessionId, status: PokerReviewStatus }).nullable(),
   stats: PokerStats,
 });
 export type PokerTableView = z.infer<typeof PokerTableView>;
@@ -224,6 +235,9 @@ export const SwapSeatRequest = z.object({ persona: PokerPersona.exclude(["laobai
 export type SwapSeatRequest = z.infer<typeof SwapSeatRequest>;
 export const LeaveTableRequest = z.object({}).strict();
 export type LeaveTableRequest = z.infer<typeof LeaveTableRequest>;
+/** 重派最近一场的复盘。带场次 id 是为了让旧页面上的按钮撞上已经不是最近一场时得到 409，而不是把别的场重派了。 */
+export const RetryReviewRequest = z.object({ sessionId: PokerSessionId }).strict();
+export type RetryReviewRequest = z.infer<typeof RetryReviewRequest>;
 export const PokerTableResponse = z.object({ table: PokerTableView });
 export type PokerTableResponse = z.infer<typeof PokerTableResponse>;
 
