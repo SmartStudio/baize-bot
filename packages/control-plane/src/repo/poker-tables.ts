@@ -17,7 +17,7 @@ import { and, asc, count, desc, eq, inArray, isNotNull, isNull } from "drizzle-o
 import type { Db } from "../db/client.js";
 import { bots, groups, pokerHands, pokerSessions, pokerTables, users, type StoredPokerSeat } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { currentHandOf } from "../poker/store.js";
+import { currentHandOf, tableState } from "../poker/store.js";
 import { hintOf } from "../poker/hint.js";
 import { buildTableView, type TableState } from "../poker/table-view.js";
 import { openGroup, swapGroupMember } from "./groups.js";
@@ -190,7 +190,6 @@ export async function listPokerTableIds(db: Db, ownerId: UserId): Promise<GroupI
 
 /**
  * 用户视角的整张桌。别人的桌和不存在的桌都是 null。手牌那截走 currentHandOf（单元 7），这里只拼桌子这一层。
- * 战绩和提示还没有来源：stats 由散场复盘那条线填，hint 由问老白那条线填，在它们落地前恒为零和 null。
  */
 export async function loadPokerTableView(db: Db, ownerId: UserId, groupId: GroupId): Promise<PokerTableView | null> {
   const [found] = await db
@@ -243,7 +242,7 @@ export async function loadPokerTableView(db: Db, ownerId: UserId, groupId: Group
     session: await openSessionOf(db, groupId, table.seats),
     hint: await hintOf(db, groupId),
     lastReview: await lastReviewOf(db, groupId),
-    stats: { sessions: 0, sessionsWon: 0, net: 0 },
+    stats: (await tableState(db, table)).stats,
   };
   const view = buildTableView(state, null, USER_SEAT);
   return { ...view, hand: await currentHandOf(db, groupId) };

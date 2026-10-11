@@ -398,6 +398,29 @@ describe("p3-runner-table 验收", () => {
     expect(JSON.stringify(h.requests[3]?.messages)).toContain("本次复盘已经提交");
   });
 
+  it("reviewer 的正文超过 120 字时工具报中文错误，恰好 120 字可以交", async () => {
+    const h = await harness((request) => {
+      const count = request.messages.filter((m) => m.role === "tool").length;
+      return count >= 2
+        ? finish
+        : call(`review-${count}`, "poker_review", {
+            hands: [{ number: 3, title: "复盘", text: "长".repeat(count === 0 ? 121 : 120) }],
+          });
+    });
+    const message = prompt("reviewer");
+    message.table!.review = [{ number: 3, title: "关键手", view: view(), userDelta: 80 }];
+    await h.runner.prompt(message);
+    expect(h.sent.filter((m) => m.type === "poker_review")).toEqual([
+      {
+        type: "poker_review",
+        runId: "run-table",
+        sessionId: "session-from-control",
+        hands: [{ number: 3, title: "复盘", text: "长".repeat(120) }],
+      },
+    ]);
+    expect(JSON.stringify(h.requests[1]?.messages)).toContain("每手正文最多 120 字");
+  });
+
   it.each(["fold", "check", "call", "all_in"])("poker_act 的 %s 不附带加注金额，40 字台词通过", async (action) => {
     const h = await harness(
       (request) =>
