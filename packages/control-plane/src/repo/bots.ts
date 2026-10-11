@@ -1,9 +1,9 @@
 import {
+  BotId,
   GroupId,
   type Approval,
   type Bot,
   type BotHue,
-  type BotId,
   type BotProfileResponse,
   type Group,
   type Message,
@@ -221,6 +221,16 @@ export async function findBot(db: Db, ownerId: UserId, botId: BotId): Promise<Bo
     .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
     .limit(1);
   return row === undefined ? null : toBot(row);
+}
+
+/** 这个用户名下这些 Bot 的名字，一条查询查完。已经删掉的不在返回里。 */
+export async function listBotNames(db: Db, ownerId: UserId, botIds: readonly BotId[]): Promise<Map<BotId, string>> {
+  if (botIds.length === 0) return new Map();
+  const rows = await db
+    .select({ id: bots.id, name: bots.name })
+    .from(bots)
+    .where(and(eq(bots.ownerId, ownerId), inArray(bots.id, [...new Set(botIds)])));
+  return new Map(rows.map((row) => [BotId.parse(row.id), row.name]));
 }
 
 export async function updateBot(db: Db, ownerId: UserId, botId: BotId, input: UpdateBotInput): Promise<Bot | null> {

@@ -18,12 +18,15 @@ import {
   type Message,
   type MessageBody,
   type ModelPurpose,
+  type RoutineOfferStatus,
+  type TeamOfferStatus,
   type UserId,
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval, listApprovals } from "../repo/approvals.js";
 import { listAccounts } from "../repo/accounts.js";
+import { listBotNames } from "../repo/bots.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { appendMessageIfGroupAlive, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
@@ -371,6 +374,8 @@ type CardRows = {
   readonly plans: ReadonlyMap<ContentPlanId, ContentPlan>;
   /** 档位能自动发的账号。草稿批了之后等不等着发看它。 */
   readonly publishingAccounts: ReadonlySet<AccountId>;
+  /** 建队卡上 existing 那几行指的 Bot 现在叫什么。卡正文只有 botId，删掉的查不到。 */
+  readonly botNames: ReadonlyMap<BotId, string>;
 };
 
 function byId<K, T extends { readonly id: K }>(rows: readonly T[]): ReadonlyMap<K, T> {
@@ -387,7 +392,7 @@ async function summarizeAll(
 ): Promise<ContextLine[]> {
   const bodies = messages.map((message) => message.body);
   const draftIds = bodies.flatMap((body) => (body.kind === "draft" ? [body.draftId] : []));
-  const [approvals, handoffs, drafts, plans, accounts] = await Promise.all([
+  const [approvals, handoffs, drafts, plans, accounts, botNames] = await Promise.all([
     listApprovals(
       db,
       bodies.flatMap((body) => (body.kind === "approval" ? [body.approvalId] : [])),
@@ -403,6 +408,13 @@ async function summarizeAll(
       bodies.flatMap((body) => (body.kind === "plan" ? [body.planId] : [])),
     ),
     draftIds.length === 0 ? [] : listAccounts(db, ownerId),
+    listBotNames(
+      db,
+      ownerId,
+      bodies.flatMap((body) =>
+        body.kind === "team_offer" ? body.members.flatMap((one) => (one.kind === "existing" ? [one.botId] : [])) : [],
+      ),
+    ),
   ]);
   const cards: CardRows = {
     approvals: byId(approvals),
@@ -412,6 +424,7 @@ async function summarizeAll(
     publishingAccounts: new Set(
       accounts.filter(({ tier }) => PUBLISHING_TIERS.some((one) => one === tier)).map(({ id }) => id),
     ),
+    botNames,
   };
   return messages.flatMap((message) => {
     const line = summarize(message, cards, recipient, members);
@@ -458,6 +471,19 @@ const PROJECT_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "project_offer"
   dismissed: "你没要",
 };
 
+const TEAM_OFFER_OUTCOME: Record<TeamOfferStatus, string> = {
+  offered: "还在等你定",
+  confirmed: "你确认了，人都拉进群了",
+  deferred: "你说先放着，还没定",
+  dismissed: "你没要",
+};
+
+const ROUTINE_OFFER_OUTCOME: Record<RoutineOfferStatus, string> = {
+  offered: "还在等你点加上",
+  added: "你点了加上，例行建好了",
+  dismissed: "你没要",
+};
+
 // 卡停在哪些状态就不会再变，即上下文行的 settled。还会变的标 false，状态一变字就变，运行器的水位会把整句再拼一次。
 const APPROVAL_SETTLED: Record<Approval["status"], boolean> = {
   pending: false,
@@ -491,6 +517,15 @@ const PROJECT_OFFER_SETTLED: Record<Extract<MessageBody, { kind: "project_offer"
   started: true,
   dismissed: true,
 };
+
+const TEAM_OFFER_SETTLED: Record<TeamOfferStatus, boolean> = {
+  offered: false,
+  confirmed: true,
+  deferred: false,
+  dismissed: true,
+};
+
+const ROUTINE_OFFER_SETTLED: Record<RoutineOfferStatus, boolean> = { offered: false, added: true, dismissed: true };
 
 /**
  * 群里每种消息在上下文里长什么样。加一种消息就在这里加一支。任务卡不进上下文，它走 prompt 的 task 字段。
@@ -572,10 +607,22 @@ function summarize(
         `${who(body.botId)}出的方案卡「${body.name}」，${PROJECT_OFFER_OUTCOME[body.status]}`,
         PROJECT_OFFER_SETTLED[body.status],
       );
-    // 第 2 期形状：组队卡和例行提议卡的上下文一句话由对应单元补，补之前这两种卡不进上下文。
-    case "team_offer":
+    case "team_offer": {
+      const names = body.members.map((one) =>
+        one.kind === "new" ? one.name : (cards.botNames.get(one.botId) ?? "已删除的 Bot"),
+      );
+      return line(
+        "系统",
+        `${who(body.botId)}提议拉${names.join("、")}进项目群，${TEAM_OFFER_OUTCOME[body.status]}`,
+        TEAM_OFFER_SETTLED[body.status],
+      );
+    }
     case "routine_offer":
-      return null;
+      return line(
+        "系统",
+        `${who(body.botId)}提议的例行「${body.name}」（cron ${body.cron}），${ROUTINE_OFFER_OUTCOME[body.status]}`,
+        ROUTINE_OFFER_SETTLED[body.status],
+      );
   }
 }
 

@@ -6,10 +6,13 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   MessageId,
+  MessageListResponse,
   SkillResponse,
   type BotId,
   type ControlToAgent,
   type GroupId,
+  type RunId,
+  type TeamOfferMember,
   type ToolView,
 } from "@baize/shared";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -290,6 +293,152 @@ describe("上下文里的卡写结论", () => {
       ).toEqual([2, 1]);
     } finally {
       job.close();
+    }
+  });
+});
+
+type Assistant = { readonly botId: BotId; readonly groupId: GroupId };
+type AssistantRun = { readonly runId: RunId; readonly botId: BotId; readonly groupId: GroupId };
+
+async function assistantOf(client: ApiClient): Promise<Assistant> {
+  const listed = BotListResponse.parse(await (await client.get("/api/bots")).json()).items;
+  const found = listed.find((item) => item.bot.role === "assistant");
+  if (found === undefined) throw new Error("登录后应当有主助理");
+  return { botId: found.bot.id, groupId: found.groupId };
+}
+
+/**
+ * 在主助理单聊里说一句，用那条 run 上报一张卡再收尾，回库里那张卡的消息 id。
+ * run_done 的确认回来，同一条连接上排在它前面的卡就已经落库。
+ */
+async function offerThroughAssistant(
+  owner: Owner,
+  assistant: Assistant,
+  report: (run: AssistantRun) => void,
+): Promise<MessageId> {
+  await say(owner.client, assistant.groupId, "帮我安排一下");
+  const prompt = await nextPrompt(owner.agent);
+  const run = { runId: prompt.runId, botId: assistant.botId, groupId: assistant.groupId };
+  report(run);
+  owner.agent.send({ type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 });
+  await owner.agent.ack(prompt.runId);
+  const page = MessageListResponse.parse(
+    await (await owner.client.get(`/api/groups/${assistant.groupId}/messages`)).json(),
+  );
+  const card = page.messages.findLast(({ body }) => body.kind === "team_offer" || body.kind === "routine_offer");
+  if (card === undefined) throw new Error("上报之后单聊里应当有一张卡");
+  return card.id;
+}
+
+const existingMember = (botId: BotId): TeamOfferMember => ({ kind: "existing", botId, note: "", suggested: false });
+
+const newMember = (name: string): TeamOfferMember => ({
+  kind: "new",
+  name,
+  tags: [],
+  description: "",
+  note: "",
+  suggested: false,
+});
+
+/** 单聊里只有卡和用户的话，卡都是「系统」说的。 */
+const cardLines = (prompt: Prompt) =>
+  prompt.context.filter(({ from }) => from === "系统").map(({ text, settled }) => ({ text, settled }));
+
+describe("上下文里的组队卡和例行提议卡", () => {
+  it("组队卡写谁提的、拉哪几位和结论，四种状态各一句，点完状态跟着变，删掉的 Bot 不留名", async () => {
+    const owner = await onlineOwner();
+    try {
+      const assistant = await assistantOf(owner.client);
+      const { groupId: projectGroupId } = await withTeammate(owner);
+      const [helper, photographer] = await Promise.all(
+        ["小图", "小摄"].map(async (name) =>
+          CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name })).json()),
+        ),
+      );
+      if (helper === undefined || photographer === undefined) throw new Error("两个既有 Bot 都应当建出来");
+      const offer = (members: readonly TeamOfferMember[]) =>
+        offerThroughAssistant(owner, assistant, (run) =>
+          owner.agent.send({ type: "team_offer", ...run, projectGroupId, members: [...members] }),
+        );
+      const decide = (messageId: MessageId, body: unknown) =>
+        owner.client.post(`/api/messages/${messageId}/team-offer`, body);
+
+      await offer([existingMember(helper.bot.id), existingMember(photographer.bot.id), newMember("小研")]);
+      const deferred = await offer([newMember("小设")]);
+      const confirmed = await offer([existingMember(helper.bot.id), newMember("小文")]);
+      expect((await decide(deferred, { decision: "defer" })).status).toBe(200);
+      expect((await decide(confirmed, { decision: "confirm", picked: [1] })).status).toBe(200);
+      await appendMessage(database.db, assistant.groupId, {
+        kind: "team_offer",
+        botId: assistant.botId,
+        members: [newMember("小录")],
+        status: "dismissed",
+        groupId: projectGroupId,
+      });
+
+      serverQueries.length = 0;
+      await say(owner.client, assistant.groupId, "刚才的组队怎样了");
+      const prompt = await nextPrompt(owner.agent);
+
+      expect(cardLines(prompt), "每张卡一句：谁提的、拉哪几位、结论；确认的卡只剩勾进来的人").toEqual([
+        { text: "主助理提议拉小图、小摄、小研进项目群，还在等你定", settled: false },
+        { text: "主助理提议拉小设进项目群，你说先放着，还没定", settled: false },
+        { text: "主助理提议拉小文进项目群，你确认了，人都拉进群了", settled: true },
+        { text: "主助理提议拉小录进项目群，你没要", settled: true },
+      ]);
+      expect(readsOf("bots"), "两张卡上三个既有 Bot（两个不同的）一条查询查名字，不按人逐条查").toBe(1);
+
+      expect((await owner.client.delete(`/api/bots/${helper.bot.id}`)).status).toBe(204);
+      await say(owner.client, assistant.groupId, "再看一眼");
+      const after = await nextPrompt(owner.agent);
+      expect(cardLines(after)[0], "删掉的 Bot 查不到名字，不冒用别人的名字").toEqual({
+        text: "主助理提议拉已删除的 Bot、小摄、小研进项目群，还在等你定",
+        settled: false,
+      });
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("例行提议卡写谁提的、例行名、cron 原文和结论，三种状态各一句", async () => {
+    const owner = await onlineOwner();
+    try {
+      const assistant = await assistantOf(owner.client);
+      const offer = (name: string, cron: string) =>
+        offerThroughAssistant(owner, assistant, (run) =>
+          owner.agent.send({
+            type: "routine_offer",
+            ...run,
+            name,
+            instruction: "读一下仓库星数，报回来",
+            cron,
+            executorBotId: owner.botId,
+            boundary: "read_only",
+            purpose: "plan",
+            onToday: true,
+            projectGroupId: null,
+          }),
+        );
+      const decide = (messageId: MessageId, decision: "add" | "dismiss") =>
+        owner.client.post(`/api/messages/${messageId}/routine-offer`, { decision });
+
+      await offer("周一读星数", "0 9 * * 1");
+      const added = await offer("每天晨报", "30 8 * * *");
+      const dismissed = await offer("周五复盘", "0 17 * * 5");
+      expect((await decide(added, "add")).status).toBe(200);
+      expect((await decide(dismissed, "dismiss")).status).toBe(200);
+
+      await say(owner.client, assistant.groupId, "刚才的例行怎样了");
+      const prompt = await nextPrompt(owner.agent);
+
+      expect(cardLines(prompt), "每张卡一句：谁提的、例行名、cron 原文、结论").toEqual([
+        { text: "主助理提议的例行「周一读星数」（cron 0 9 * * 1），还在等你点加上", settled: false },
+        { text: "主助理提议的例行「每天晨报」（cron 30 8 * * *），你点了加上，例行建好了", settled: true },
+        { text: "主助理提议的例行「周五复盘」（cron 0 17 * * 5），你没要", settled: true },
+      ]);
+    } finally {
+      owner.close();
     }
   });
 });
