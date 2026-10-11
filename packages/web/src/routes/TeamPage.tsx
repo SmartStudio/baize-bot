@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ArrowRightLeft, BookOpen, Download, Hand, MessageSquare, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Bot, BotId } from "@baize/shared";
@@ -131,7 +132,8 @@ export const TeamPage = ({ bots, conversations, onCreateBot }: Props) => {
           ))}
         </div>
       </section>
-      {importing ? <ImportDialog onClose={closeImport} /> : null}
+      {/* 遮罩不能留在 .page 里：.page > * 会把它夹到内容区最大宽度并居中，两侧露白。 */}
+      {importing ? createPortal(<ImportDialog onClose={closeImport} />, document.body) : null}
     </main>
   );
 };
