@@ -231,6 +231,8 @@ export type PokerTableResponse = z.infer<typeof PokerTableResponse>;
 export const TablePrompt = z
   .object({
     role: PokerTableRole,
+    // poker_review 上行要回这一场的 id，运行器只从这里抄，不自造。
+    sessionId: PokerSessionId,
     handId: PokerHandId,
     seq: z.number().int().nonnegative(),
     view: PokerSeatView.nullable(),
