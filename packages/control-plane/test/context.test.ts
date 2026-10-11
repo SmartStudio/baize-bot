@@ -13,6 +13,7 @@ import {
   type GroupId,
   type RunId,
   type TeamOfferMember,
+  type ToolCallStatus,
   type ToolView,
 } from "@baize/shared";
 import { drizzle } from "drizzle-orm/postgres-js";
@@ -803,6 +804,108 @@ async function cardSettledOutsideWindow(owner: Owner): Promise<NonNullable<Retur
   expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
   return card;
 }
+
+/** 阿文在这个 run 里报一次工具调用的状态，等那条消息落库。同一个 callId 再报一次就是同一行换状态。 */
+async function toolCall(
+  owner: Pick<Owner, "agent" | "push">,
+  run: Prompt,
+  callId: string,
+  command: string,
+  status: ToolCallStatus,
+): Promise<void> {
+  owner.agent.send({
+    type: "bot_tool_call",
+    runId: run.runId,
+    botId: run.botId,
+    groupId: run.groupId,
+    callId,
+    tool: "bash",
+    view: bash(command),
+    status,
+    durationMs: status === "running" ? null : 12,
+  });
+  for (;;) {
+    const pushed = await owner.push.next();
+    const body = pushed.type === "message" ? pushed.message.body : null;
+    if (
+      body?.kind === "tool_call" &&
+      body.status === status &&
+      body.view.kind === "bash" &&
+      body.view.command === command
+    )
+      return;
+  }
+}
+
+describe("上下文里的工具调用行", () => {
+  it("四种状态各写一句，只有还在跑的标没定稿", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { groupId } = await withTeammate(owner);
+      await say(owner.client, groupId, "@阿文 查下库存");
+      const wen = await nextPrompt(owner.agent);
+      await toolCall(owner, wen, "call-ls", "ls", "running");
+      await toolCall(owner, wen, "call-cat", "cat a", "ok");
+      await toolCall(owner, wen, "call-rm", "rm b", "failed");
+      await toolCall(owner, wen, "call-curl", "curl c", "blocked");
+
+      await say(owner.client, groupId, "@小服 看下排产");
+      const prompt = await nextPrompt(owner.agent);
+
+      expect(fullLines(prompt)).toEqual([
+        { from: "你", text: "@阿文 查下库存", settled: true },
+        { from: "阿文", text: "要执行 `ls`，还没跑完", settled: false },
+        { from: "阿文", text: "要执行 `cat a`，跑完了", settled: true },
+        { from: "阿文", text: "要执行 `rm b`，没跑成", settled: true },
+        { from: "阿文", text: "要执行 `curl c`，被拦下了，没执行", settled: true },
+      ]);
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("工具还在跑时滑出窗口，照样接着送；跑完以后同一行换成结论，那一轮之后不再送", async () => {
+    const owner = await onlineOwner();
+    try {
+      const { groupId } = await withTeammate(owner);
+      await say(owner.client, groupId, "@阿文 查下库存");
+      const wen = await nextPrompt(owner.agent);
+      await toolCall(owner, wen, "call-ls", "ls", "running");
+      await say(owner.client, groupId, "@小服 看下排产");
+      const during = await nextPrompt(owner.agent);
+      await runDone(owner, during);
+      await chatter(groupId, 25);
+      await say(owner.client, groupId, "@小服 还没好吗");
+      const outside = await nextPrompt(owner.agent);
+      await runDone(owner, outside);
+      await toolCall(owner, wen, "call-ls", "ls", "ok");
+      await say(owner.client, groupId, "@小服 现在呢");
+      const finished = await nextPrompt(owner.agent);
+      await runDone(owner, finished);
+      await say(owner.client, groupId, "@小服 还有别的吗");
+      const later = await nextPrompt(owner.agent);
+
+      const running = during.context.find((line) => line.text.startsWith("要执行 `ls`"));
+      expect(running, "头一次看到时还在跑").toMatchObject({ text: "要执行 `ls`，还没跑完", settled: false });
+      expect(fullLines(outside), "工具行已经滑出窗口，还没定稿，接在窗口前面").toEqual([
+        { from: "阿文", text: "要执行 `ls`，还没跑完", settled: false },
+        ...chatterLines(6, 25),
+      ]);
+      expect(finished.context[0], "同一行换成结论，不再会变").toEqual({
+        messageId: running?.messageId,
+        from: "阿文",
+        text: "要执行 `ls`，跑完了",
+        settled: true,
+      });
+      expect(
+        later.context.some((line) => line.text.startsWith("要执行 `ls`")),
+        "定稿那一轮送过了，之后不再送",
+      ).toBe(false);
+    } finally {
+      owner.close();
+    }
+  });
+});
 
 const approvedCard = (card: NonNullable<ReturnType<typeof payCard>>) => ({
   messageId: card.messageId,

@@ -20,6 +20,7 @@ import {
   type ModelPurpose,
   type RoutineOfferStatus,
   type TeamOfferStatus,
+  type ToolCallStatus,
   type UserId,
   type Viewer,
 } from "@baize/shared";
@@ -439,6 +440,13 @@ const APPROVAL_OUTCOME: Record<Approval["status"], string> = {
   expired: "没批下来，过期了",
 };
 
+const TOOL_CALL_OUTCOME: Record<ToolCallStatus, string> = {
+  running: "还没跑完",
+  ok: "跑完了",
+  failed: "没跑成",
+  blocked: "被拦下了，没执行",
+};
+
 const HANDOFF_OUTCOME: Record<Handoff["status"], (to: string) => string> = {
   pending: (to) => `交接还在等${to}接`,
   accepted: (to) => `${to}接了`,
@@ -493,6 +501,9 @@ const APPROVAL_SETTLED: Record<Approval["status"], boolean> = {
 };
 
 const HANDOFF_SETTLED: Record<Handoff["status"], boolean> = { pending: false, accepted: true };
+
+// 工具行只有 running 还会变。run 收尾时还停在 running 的会被改成 failed，所以不会永远标没定稿。
+const TOOL_CALL_SETTLED: Record<ToolCallStatus, boolean> = { running: false, ok: true, failed: true, blocked: true };
 
 // 发出去之前都还会变：批了的等着发或者改了档再发，退回的和没发出去的 Bot 还能改了再交，改完回到待看。
 const DRAFT_SETTLED: Record<Draft["status"], boolean> = {
@@ -554,7 +565,11 @@ function summarize(
     case "system":
       return line("系统", clip(body.text));
     case "tool_call":
-      return line(who(body.botId), clip(toolViewText(body.view)));
+      return line(
+        who(body.botId),
+        `${clip(toolViewText(body.view))}，${TOOL_CALL_OUTCOME[body.status]}`,
+        TOOL_CALL_SETTLED[body.status],
+      );
     case "cost":
       return null;
     case "approval": {

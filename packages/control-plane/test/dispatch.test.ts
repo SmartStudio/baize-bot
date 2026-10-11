@@ -277,7 +277,7 @@ describe("派活", () => {
         { from: "你", text: "你好" },
         { from: "小服", text: "在的" },
         { from: "系统", text: "电脑睡了" },
-        { from: "小服", text: "要用ERP的 query，参数：查询=库存" },
+        { from: "小服", text: "要用ERP的 query，参数：查询=库存，跑完了" },
       ]);
     } finally {
       agent.close();

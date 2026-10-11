@@ -1,0 +1,38 @@
+{
+  "format": 1,
+  "name": "阿文",
+  "tags": [
+    "小红书",
+    "长文"
+  ],
+  "description": "写小红书图文和长文，只起草不直接发",
+  "skills": [
+    {
+      "name": "检查标题",
+      "steps": [
+        "标题不超过 15 个字"
+      ]
+    }
+  ],
+  "plugins": [
+    {
+      "name": "分享验收插件",
+      "url": "http://127.0.0.1:61441/mcp",
+      "operations": [
+        {
+          "name": "send_email",
+          "needsApproval": true
+        },
+        {
+          "name": "lookup_stock",
+          "needsApproval": false
+        }
+      ]
+    }
+  ],
+  "preferences": [
+    {
+      "text": "小红书标题都在 15 个字以内"
+    }
+  ]
+}

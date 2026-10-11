@@ -1,0 +1,147 @@
+{
+  "seeds": [
+    "p3-acceptance-9576",
+    "p3-acceptance-hand-2-4",
+    "p3-acceptance-hand-3-100"
+  ],
+  "beforeSwap": [
+    {
+      "seat": 1,
+      "kind": "bot",
+      "botId": "8fb39c1e-1391-441b-a2ba-4021f4adc12c",
+      "name": "阿豹",
+      "persona": "leopard",
+      "hue": "coral",
+      "stack": 2000
+    },
+    {
+      "seat": 2,
+      "kind": "bot",
+      "botId": "f807a8a4-8437-41ab-9f97-f3055a340007",
+      "name": "老K",
+      "persona": "old_k",
+      "hue": "violet",
+      "stack": 2000
+    },
+    {
+      "seat": 3,
+      "kind": "bot",
+      "botId": "d65e1167-913d-4b2f-9f3a-2b2c51b08a2c",
+      "name": "茉莉",
+      "persona": "jasmine",
+      "hue": "pink",
+      "stack": 2000
+    },
+    {
+      "seat": 4,
+      "kind": "user",
+      "botId": null,
+      "name": "陈",
+      "persona": null,
+      "hue": "lime",
+      "stack": 2000
+    }
+  ],
+  "afterSwap": [
+    {
+      "seat": 1,
+      "kind": "bot",
+      "botId": "8fb39c1e-1391-441b-a2ba-4021f4adc12c",
+      "name": "阿豹",
+      "persona": "leopard",
+      "hue": "coral",
+      "stack": 2000
+    },
+    {
+      "seat": 2,
+      "kind": "bot",
+      "botId": "f807a8a4-8437-41ab-9f97-f3055a340007",
+      "name": "老K",
+      "persona": "old_k",
+      "hue": "violet",
+      "stack": 2000
+    },
+    {
+      "seat": 3,
+      "kind": "bot",
+      "botId": "44a3a0da-6896-46e9-a33c-c78e47e7773d",
+      "name": "大刘",
+      "persona": "dalu",
+      "hue": "tangerine",
+      "stack": 2000
+    },
+    {
+      "seat": 4,
+      "kind": "user",
+      "botId": null,
+      "name": "陈",
+      "persona": null,
+      "hue": "lime",
+      "stack": 2000
+    }
+  ],
+  "playerRequests": 73,
+  "rejectedRaise": {
+    "status": 400,
+    "body": {
+      "error": "加注额不够，最少要加到 40"
+    }
+  },
+  "retries": [
+    {
+      "persona": "old_k",
+      "handId": "6fa58ff2-f575-4193-a259-ab4c817d785b",
+      "seq": 7,
+      "seat": "2",
+      "action": "call",
+      "callId": "act-4"
+    },
+    {
+      "persona": "old_k",
+      "handId": "6fa58ff2-f575-4193-a259-ab4c817d785b",
+      "seq": 7,
+      "seat": "2",
+      "action": "check",
+      "callId": "act-5"
+    }
+  ],
+  "receipts": [
+    {
+      "type": "poker_result",
+      "runId": "cf98a2d1-264f-45fc-9b1a-5afa0270391d",
+      "callId": "act-5",
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "type": "poker_result",
+      "runId": "cf98a2d1-264f-45fc-9b1a-5afa0270391d",
+      "callId": "act-4",
+      "result": {
+        "ok": false,
+        "error": "没人下注，不能跟注，可以过牌"
+      }
+    }
+  ],
+  "review": {
+    "sessionId": "7c67b33a-962c-4a20-ad67-140bbac9ba10",
+    "hands": [
+      {
+        "number": 1,
+        "title": "第 1 手复盘",
+        "text": "按位置和合法动作控制投入。"
+      },
+      {
+        "number": 2,
+        "title": "第 2 手复盘",
+        "text": "按位置和合法动作控制投入。"
+      },
+      {
+        "number": 3,
+        "title": "第 3 手复盘",
+        "text": "按位置和合法动作控制投入。"
+      }
+    ]
+  }
+}
