@@ -1,4 +1,4 @@
-import { expect, test as base, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test as base, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
 import { Message, MessageListResponse, ServerPush, SkillResponse, UsageResponse } from "@baize/shared";
 
 export { expect, Message, MessageListResponse, ServerPush, SkillResponse, UsageResponse };
@@ -9,7 +9,16 @@ export const PASSWORD = "baize-dev";
 export const SHOT = "e2e/screenshots";
 export const AUDIT_SHOT = "/Users/zouyanjian/other-try/prepare/baize/baize-bot/.audit/v1/p0-5";
 
+// 产品的 fonts.css 用 @import 引 Google Fonts，load 要等那份 CSS 下完，外网慢时 goto 能被拖过 30 秒。
+// 字体文件是这份 CSS 里的 @font-face 才引出来的，CSS 换成空的，fonts.gstatic.com 就不会被请求。
+export const stubExternalFonts = (context: BrowserContext) =>
+  context.route(/^https:\/\/fonts\.googleapis\.com\//, (route) => route.fulfill({ contentType: "text/css", body: "" }));
+
 export const test = base.extend<{ resetMock: void }>({
+  context: async ({ context }, use) => {
+    await stubExternalFonts(context);
+    await use(context);
+  },
   resetMock: [
     async ({ request }, use) => {
       expect((await request.post("/api/test/reset")).status(), "mock 状态倒回预置的四个 Bot").toBe(204);
