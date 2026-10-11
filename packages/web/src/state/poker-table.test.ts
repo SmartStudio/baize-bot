@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PokerTableView, type PokerEvent } from "@baize/shared";
-import { actionBarOf, feltOf, newerTable, raiseCheck, seatNoOfEngineId } from "./poker.js";
+import { actionBarOf, feltOf, raiseCheck, seatNoOfEngineId } from "./poker.js";
 
 type SeatSpec = {
   id: string;
@@ -94,16 +94,6 @@ describe("座位 id 对回座位号", () => {
     expect(seatNoOfEngineId("s3")).toBe(3);
     expect(seatNoOfEngineId("seat-x")).toBeNull();
     expect(seatNoOfEngineId("9")).toBeNull();
-  });
-});
-
-describe("牌桌视图只认更大的版本", () => {
-  it("新版换旧版，旧版和同版不换", () => {
-    const v5 = handTable({ version: 5 });
-    expect(newerTable(v5, handTable({ version: 6 })).version).toBe(6);
-    expect(newerTable(v5, handTable({ version: 4 })).version).toBe(5);
-    expect(newerTable(v5, handTable({ version: 5, board: ["2c"] })).hand?.view.board).toEqual([]);
-    expect(newerTable(undefined, v5)).toBe(v5);
   });
 });
 

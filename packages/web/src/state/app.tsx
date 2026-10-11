@@ -27,6 +27,9 @@ import {
   type Message,
   type MessageId,
   type Preference,
+  type HintRequest,
+  type PokerActRequest,
+  type PokerHandId,
   type PokerSeatNo,
   type SwapSeatRequest,
   type CreateSkillRequest,
@@ -143,13 +146,19 @@ export type AppActions = {
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   loadUsage: () => Promise<void>;
-  // 项目页不知道这个群是不是牌桌，拉一次视图问服务端：true 是牌桌，视图已入列；404 是普通项目。登录过期时是 undefined。
-  probePokerTable: (groupId: GroupId) => Promise<boolean | undefined>;
+  // 牌桌视图只有 store 里一份，项目页和牌桌页都用它拉：true 是牌桌，视图已入列，和推送一样只认更大的版本；
+  // 404 是这个群不是牌桌，回 false。别的失败照常抛。登录过期时是 undefined。
+  loadPokerTable: (groupId: GroupId) => Promise<boolean | undefined>;
   // 建桌后补拉群列表再回群 id，调用方跳过去才不会被弹回首页。requestId 同一次点击内不变，重试不会建出第二张桌。
   createPokerTable: (requestId: string) => Promise<GroupId | undefined>;
   swapPokerSeat: (groupId: GroupId, seat: PokerSeatNo, persona: SwapSeatRequest["persona"]) => Promise<void>;
   // 桌上还没有会话时开第一手；回的是整份视图，入列后页面按版本更新。
   startPokerHand: (groupId: GroupId) => Promise<void>;
+  // 出牌、问老白、散场回的都是整份视图，一样入列。
+  actPoker: (handId: PokerHandId, request: PokerActRequest) => Promise<void>;
+  askPokerHint: (handId: PokerHandId, request: HintRequest) => Promise<void>;
+  // 散场成了回牌桌群，由调用方跳去项目页；登录过期时是 undefined。
+  leavePokerTable: (groupId: GroupId) => Promise<GroupId | undefined>;
 };
 
 const AppContext = createContext<{ state: AppState; actions: AppActions } | null>(null);
@@ -781,7 +790,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       loadUsage: signedIn(async ({ api, put }) => {
         put({ type: "usage_loaded", usage: await api.usage() });
       }),
-      probePokerTable: signedIn(async ({ api, put }, groupId: GroupId) => {
+      loadPokerTable: signedIn(async ({ api, put }, groupId: GroupId) => {
         try {
           put({ type: "poker_table_set", table: await api.pokerTable(groupId) });
           return true;
@@ -805,6 +814,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       ),
       startPokerHand: signedIn(async ({ api, put }, groupId: GroupId) => {
         put({ type: "poker_table_set", table: await api.startHand(groupId) });
+      }),
+      actPoker: signedIn(async ({ api, put }, handId: PokerHandId, request: PokerActRequest) => {
+        put({ type: "poker_table_set", table: await api.pokerAct(handId, request) });
+      }),
+      askPokerHint: signedIn(async ({ api, put }, handId: PokerHandId, request: HintRequest) => {
+        put({ type: "poker_table_set", table: await api.askHint(handId, request) });
+      }),
+      leavePokerTable: signedIn(async ({ api, put }, groupId: GroupId) => {
+        const table = await api.leaveTable(groupId);
+        put({ type: "poker_table_set", table });
+        return table.groupId;
       }),
     };
   }, [nextSeq, sessions, enter, taskPushes]);

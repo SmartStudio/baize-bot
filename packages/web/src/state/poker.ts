@@ -34,10 +34,6 @@ export const seatNoOfEngineId = (seatId: string): PokerSeatNo | null => {
   return matched === null ? null : (Number(matched[1]) as PokerSeatNo);
 };
 
-/** 整视图只认更大的版本。本地拉到的和 store 里推来的各有一份，取新的那份。 */
-export const newerTable = (known: PokerTableView | undefined, incoming: PokerTableView): PokerTableView =>
-  known === undefined || incoming.version > known.version ? incoming : known;
-
 const SUIT_SYMBOL = { s: "♠", h: "♥", d: "♦", c: "♣" } as const;
 
 export const cardParts = (card: PokerCard): { rank: string; suit: string; red: boolean } => {

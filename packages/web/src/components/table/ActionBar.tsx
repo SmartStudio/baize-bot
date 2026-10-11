@@ -1,20 +1,20 @@
 import { useState } from "react";
 import type { PokerAction, PokerTableView } from "@baize/shared";
-import { api, RequestFailed } from "../../api/client.js";
+import { RequestFailed } from "../../api/client.js";
+import { useApp } from "../../state/app.js";
 import { actionBarOf, raiseCheck, type ActionBarModel, type RaiseRange } from "../../state/poker.js";
 import "./action-bar.css";
 
 type Props = {
   table: PokerTableView | null;
-  /** 接口回的整份牌桌交回页面，和推送一样只认更大的版本。 */
-  onTable?: (table: PokerTableView) => void;
 };
 
 const passText = (pass: ActionBarModel["pass"]): string => (pass.kind === "check" ? "过牌" : `跟 ${pass.amount}`);
 
 const clamp = (range: RaiseRange, amount: number): number => Math.min(range.max, Math.max(range.min, amount));
 
-export const ActionBar = ({ table, onTable }: Props) => {
+export const ActionBar = ({ table }: Props) => {
+  const { actions } = useApp();
   // 记的是发出时的牌桌版本：更大的版本一到（接口回的或推送来的）就不再算在途。
   const [sentAt, setSentAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,16 +35,13 @@ export const ActionBar = ({ table, onTable }: Props) => {
     setSentAt(table.version);
     setError(null);
     try {
-      onTable?.(await api.pokerAct(model.handId, { seq: model.seq, action }));
+      await actions.actPoker(model.handId, { seq: model.seq, action });
     } catch (cause) {
       setSentAt(null);
       setError(cause instanceof RequestFailed ? cause.message : "出牌没成功，稍后再试");
       // 409 是你看的牌桌已经过时了，补拉一份最新的。
       if (cause instanceof RequestFailed && cause.status === 409) {
-        void api.pokerTable(table.groupId).then(
-          (latest) => onTable?.(latest),
-          () => undefined,
-        );
+        void actions.loadPokerTable(table.groupId).catch(() => undefined);
       }
     }
   };

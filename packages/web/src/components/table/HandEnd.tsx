@@ -2,13 +2,15 @@ import { useState } from "react";
 import { List, RotateCcw } from "lucide-react";
 import type { PokerTableView } from "@baize/shared";
 import { useNavigate } from "react-router-dom";
-import { api, RequestFailed } from "../../api/client.js";
+import { RequestFailed } from "../../api/client.js";
+import { useApp } from "../../state/app.js";
 import { pathOf } from "../../routes/screen.js";
 import { handResult } from "./table-side.js";
 import "./table-side.css";
 
 const HandEndView = ({ table }: { table: PokerTableView }) => {
   const navigate = useNavigate();
+  const { actions } = useApp();
   const [busy, setBusy] = useState<"again" | "leave" | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const result = handResult(table);
@@ -18,10 +20,10 @@ const HandEndView = ({ table }: { table: PokerTableView }) => {
     setBusy(kind);
     setFailure(null);
     try {
-      if (kind === "again") await api.startHand(table.groupId);
+      if (kind === "again") await actions.startPokerHand(table.groupId);
       else {
-        await api.leaveTable(table.groupId);
-        navigate(pathOf({ kind: "project", groupId: table.groupId }));
+        const left = await actions.leavePokerTable(table.groupId);
+        if (left !== undefined) navigate(pathOf({ kind: "project", groupId: left }));
       }
     } catch (cause) {
       setFailure(cause instanceof RequestFailed ? cause.message : "没成，再试一次");

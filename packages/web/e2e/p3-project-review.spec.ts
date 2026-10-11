@@ -60,15 +60,10 @@ const leaveAndWaitForReview = async (request: APIRequestContext, groupId: string
   throw new Error("复盘 20 拍还没写好");
 };
 
-// 测试先登录，接口走同一个会话的 page.request；页面是后开的，推送要等它的 WebSocket 连上才收得到；重推到项目页的牌桌块出现为止。
-const openProject = async (page: Page, request: APIRequestContext, groupId: string): Promise<void> => {
+// 项目页进来先拉一次牌桌视图，不等推送。
+const openProject = async (page: Page, groupId: string): Promise<void> => {
   await page.goto(`/p/${encodeURIComponent(groupId)}`);
-  await expect
-    .poll(async () => {
-      await request.post("/api/poker/test/republish");
-      return page.locator(`[data-poker-project="${groupId}"]`).count();
-    }, "牌桌项目页出现")
-    .toBe(1);
+  await expect(page.locator(`[data-poker-project="${groupId}"]`), "牌桌项目页出现").toHaveCount(1);
 };
 
 const signed = (net: number): string => (net > 0 ? `+${net}` : `${net}`);
@@ -81,7 +76,7 @@ test("散场后回项目页顶上是老白的三手复盘", async ({ page }) => 
   for (let hand = 0; hand < 3; hand += 1) await playHandToEnd(request, groupId);
   await leaveAndWaitForReview(request, groupId);
 
-  await openProject(page, request, groupId);
+  await openProject(page, groupId);
   const card = page.getByTestId("review-card");
   await expect(card).toBeVisible();
   await expect(
@@ -98,7 +93,7 @@ test("没打过时不显示复盘卡", async ({ page }) => {
   const groupId = await createTable(request);
   await attachProjectGroup(request, groupId);
 
-  await openProject(page, request, groupId);
+  await openProject(page, groupId);
   await expect(page.getByTestId("review-card")).toHaveCount(0);
   await expect(page.getByTestId("stats-sessions")).toHaveText("0");
 });
@@ -113,7 +108,7 @@ test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
   const { stats } = finished;
   expect(stats.sessions, "这一场记进战绩").toBe(1);
 
-  await openProject(page, request, groupId);
+  await openProject(page, groupId);
   await expect(page.getByTestId("stats-sessions")).toHaveText(String(stats.sessions));
   await expect(page.getByTestId("stats-won")).toHaveText(String(stats.sessionsWon));
   await expect(page.getByTestId("stats-net")).toHaveText(signed(stats.net));
@@ -130,7 +125,7 @@ test("开了新一场还没散，复盘卡仍是上一场", async ({ page }) => 
   const started = await request.post(`/api/poker/tables/${groupId}/hands`, { data: {} });
   expect(started.status(), "开新一场的第一手").toBe(200);
 
-  await openProject(page, request, groupId);
+  await openProject(page, groupId);
   await expect(page.getByTestId("review-card").getByTestId("review-hand")).toHaveCount(3);
   await expect(page.getByTestId("stats-sessions")).toHaveText("1");
 });

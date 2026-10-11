@@ -117,7 +117,7 @@ export const MainWindow = () => {
   useEffect(() => {
     if (!probing || projectGroupId === null) return;
     void actions
-      .probePokerTable(projectGroupId)
+      .loadPokerTable(projectGroupId)
       .catch(() => false)
       .then((isTable) => {
         if (isTable === false) setOrdinary((known) => new Set(known).add(projectGroupId));

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Lightbulb, LoaderCircle } from "lucide-react";
 import type { PokerHandId, PokerTableView } from "@baize/shared";
-import { api, RequestFailed } from "../../api/client.js";
+import { RequestFailed } from "../../api/client.js";
+import { useApp } from "../../state/app.js";
 import { hintStage, hintText } from "./table-side.js";
 import { useTableMessages } from "./use-table-messages.js";
 import "./table-side.css";
@@ -12,6 +13,7 @@ type Hand = NonNullable<PokerTableView["hand"]>;
 type Asked = { handId: PokerHandId; seq: number };
 
 const HostHintView = ({ table, hand }: { table: PokerTableView; hand: Hand }) => {
+  const { actions } = useApp();
   const { messages, history, retry } = useTableMessages(table.groupId);
   const [asked, setAsked] = useState<Asked | null>(null);
   const [pending, setPending] = useState(false);
@@ -26,7 +28,7 @@ const HostHintView = ({ table, hand }: { table: PokerTableView; hand: Hand }) =>
     setPending(true);
     setFailure(null);
     try {
-      await api.askHint(hand.id, { seq });
+      await actions.askPokerHint(hand.id, { seq });
       setAsked({ handId: hand.id, seq });
     } catch (cause) {
       setFailure(cause instanceof RequestFailed ? cause.message : "没问成，再试一次");

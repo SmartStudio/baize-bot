@@ -2,7 +2,7 @@ import { PokerTableResponse, type PokerTableView } from "@baize/shared";
 import { expect, login, test, type Page } from "./fixtures";
 
 // 牌桌 mock 里的牌桌没有对应的 Group，侧栏点不进去，用例直接按 URL 进页面。
-// 进页面不拉牌桌视图（单元 11 的事），视图靠 mock 的重发推送带进来：delay 接口顺手把每张桌重推一遍。
+// 进页面先拉一次牌桌视图；delay 接口顺手把每张桌重推一遍，enter 里轮询它只是保证节奏已经设上。
 // 节奏默认手动（ms 为 null），牌友出牌用 tick 一拍一拍走；要一口气走完的地方改成 0。
 
 type Pace = number | null;
@@ -227,3 +227,57 @@ test("牌友的名字在牌桌上的话里能显示", async ({ page }) => {
   const opening = page.getByTestId("table-log-line").filter({ hasText: "新一手。" });
   await expect(opening.locator(".table-log-name"), "老白的话署老白").toHaveText(table.host.name);
 });
+
+test("点散场看复盘后离桌，回到这张桌的项目页，复盘写好后在顶上", async ({ page }) => {
+  await login(page);
+  const groupId = await createTable(page);
+  const attached = await page.request.post("/api/poker/test/project-group", { data: { groupId, title: "周末德州" } });
+  expect(attached.status(), "牌桌挂上项目群，项目页才认得出").toBe(200);
+  await enter(page, groupId);
+  await playToShowdown(page, groupId);
+
+  const left = page.waitForResponse((response) => response.url().endsWith(`/api/poker/tables/${groupId}/leave`));
+  await page.getByTestId("hand-leave").click();
+  expect((await left).status(), "散场被接受").toBe(200);
+  await expect(page, "离桌后跳到这张桌的项目页").toHaveURL(`/p/${groupId}`);
+  await expect(page.getByTestId("table-page"), "牌桌页收起").toHaveCount(0);
+  await expect(page.locator(`[data-poker-project="${groupId}"]`)).toHaveCount(1);
+  expect((await tableOf(page, groupId)).stats.sessions, "这一场记进战绩").toBe(1);
+  await expect(page.getByTestId("stats-sessions"), "项目页的战绩跟着散场的视图走").toHaveText("1");
+  await expect(page.getByTestId("review-card"), "节奏是 0，复盘任务自己跑完，推到项目页").toBeVisible();
+});
+
+// 牌桌上三处按钮的请求都走会话动作：会话过期回 401 时和别的页面一样回登录页，而不是只在按钮下面报错。
+const expiredCases = [
+  {
+    name: "问老白",
+    route: "**/api/poker/hands/*/hint",
+    setup: async (page: Page, groupId: string) => toMyTurn(page, groupId),
+    press: "hint-ask",
+  },
+  {
+    name: "出牌",
+    route: "**/api/poker/hands/*/act",
+    setup: async (page: Page, groupId: string) => toMyTurn(page, groupId),
+    press: "action-pass",
+  },
+  {
+    name: "散场",
+    route: "**/api/poker/tables/*/leave",
+    setup: async (page: Page, groupId: string) => playToShowdown(page, groupId),
+    press: "hand-leave",
+  },
+] as const;
+
+for (const expired of expiredCases) {
+  test(`${expired.name}的请求回 401 时回到登录页`, async ({ page }) => {
+    const groupId = await openTable(page);
+    await expired.setup(page, groupId);
+    await page.route(expired.route, (route) => route.fulfill({ status: 401, json: { error: "没登录" } }));
+    await expect(page.getByTestId("table-page"), "点之前还在牌桌上").toBeVisible();
+
+    await page.getByTestId(expired.press).click();
+    await expect(page.getByTestId("login-submit"), "会话过期，牌桌这一路也切回登录").toBeVisible();
+    await expect(page.getByTestId("table-page")).toHaveCount(0);
+  });
+}
