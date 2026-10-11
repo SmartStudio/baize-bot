@@ -66,7 +66,7 @@ type BotRow = typeof bots.$inferSelect;
  * 一次 UPDATE ... RETURNING 同时占住编号和色相，并发建 Bot 不会拿到同一个号。
  * 不推进色相时返回的 nextHueIndex 不用。
  */
-async function claimCounter(tx: Tx, ownerId: UserId, advanceHue: boolean) {
+export async function claimCounter(tx: Tx, ownerId: UserId, advanceHue: boolean) {
   const [counter] = await tx
     .update(userCounters)
     .set({
@@ -82,7 +82,7 @@ async function claimCounter(tx: Tx, ownerId: UserId, advanceHue: boolean) {
 /** 给刚插进去的 Bot 建单聊群、入群、主题任务卡。 */
 type SoloOpened = { readonly bot: Bot; readonly group: Group; readonly task: TopicTask };
 
-async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Promise<SoloOpened> {
+export async function openSoloGroup(tx: Tx, botRow: BotRow, nextTaskNumber: number): Promise<SoloOpened> {
   const [groupRow] = await tx
     .insert(groups)
     .values({ id: newId(), ownerId: botRow.ownerId, soloBotId: botRow.id })

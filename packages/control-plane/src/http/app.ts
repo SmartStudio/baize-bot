@@ -92,6 +92,7 @@ import { findApprovalId, listApprovals } from "../repo/approvals.js";
 import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPlan } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, ensureAssistant, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
+import { TABLE_ROLES } from "../repo/poker-presets.js";
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
@@ -506,7 +507,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
   });
 
   app.get("/api/bots", async (c) => {
-    const items = await listBots(db, c.get("user").id);
+    // 牌友和老白只在牌桌里露面，不进队伍页；它们在 config 里照带，运行器靠那里找到自己。
+    const items = (await listBots(db, c.get("user").id)).filter((item) => !TABLE_ROLES.includes(item.bot.role));
     return c.json(BotListResponse.parse({ items }));
   });
 
@@ -524,6 +526,10 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!botId.success) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, UpdateBotRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
+    const current = await findBot(db, c.get("user").id, botId.data);
+    if (current !== null && TABLE_ROLES.includes(current.role)) {
+      return c.json({ error: "牌桌里的牌友和老白不能改，要换人去牌桌里换座位" }, 409);
+    }
     const bot = await updateBot(db, c.get("user").id, botId.data, body.value);
     if (bot === null) return c.json(NOT_FOUND, 404);
     await agents.sendConfig(c.get("user").id);
