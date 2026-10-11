@@ -1,0 +1,155 @@
+/* ---------- 牌桌项目页：牌友、规则和例行、新项目里的牌桌入口 ---------- */
+
+.poker-seats {
+  margin-top: var(--space-8);
+}
+
+.poker-seats-head {
+  display: flex;
+  gap: var(--space-4);
+  align-items: baseline;
+  padding-bottom: var(--space-5);
+}
+
+.poker-seats-head h2 {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.poker-seats-head span {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.poker-seat-list {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.poker-seat {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.poker-seat-who {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  text-align: left;
+}
+
+.poker-seat-who b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.poker-seat-who small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.poker-seat .ghost-button:disabled {
+  opacity: 0.4;
+}
+
+.poker-seats-note {
+  margin: var(--space-4) 0 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.poker-swap-notice {
+  margin: var(--space-4) 0 0;
+  color: var(--success);
+  font: var(--type-caption);
+}
+
+.poker-rules {
+  margin-top: var(--space-8);
+  padding: var(--space-5) var(--space-6);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.poker-rules summary {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  color: var(--fg-2);
+  font: var(--type-ui);
+  cursor: pointer;
+}
+
+.poker-rules dl {
+  display: grid;
+  gap: var(--space-4);
+  margin: var(--space-5) 0 0;
+}
+
+.poker-rules dl > div {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.poker-rules dt {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.poker-rules dd {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  margin: 0;
+  color: var(--fg-1);
+}
+
+.swap-options {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.swap-option,
+.new-project-table {
+  display: flex;
+  gap: var(--space-5);
+  align-items: center;
+  padding: var(--space-5) var(--space-6);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  text-align: left;
+}
+
+.swap-option:hover:not(:disabled),
+.new-project-table:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.swap-option:disabled,
+.new-project-table:disabled {
+  opacity: 0.4;
+}
+
+.swap-option span,
+.new-project-table span {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.swap-option small,
+.new-project-table small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}

@@ -87,7 +87,7 @@ export const ProjectOfferCard = ({
     const groupId = body.groupId;
     return (
       <div className="card project-offer is-folded" data-testid="project-offer" data-status={body.status}>
-        <span>项目已开始</span>
+        <span>项目「{body.name}」已开始</span>
         {groupId === null ? null : (
           <button
             type="button"

@@ -105,7 +105,7 @@ test("方案卡上改项目名后开始，项目页标题是新名字", async ({
   await page.goto("/g/grp_assistant");
   const started = offerCard(page);
   await expect(started, "卡随重推的消息收成一行").toHaveAttribute("data-status", "started");
-  await expect(started).toContainText("项目已开始");
+  await expect(started, "收起的卡写最终项目名").toContainText("项目「白泽千星」已开始");
   await expect(started.getByTestId("project-offer-start"), "开始过的卡没有按钮").toHaveCount(0);
   await started.screenshot({ path: await screenshotPath(testInfo, "started.png") });
   await started.getByTestId("project-offer-open").click();

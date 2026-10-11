@@ -1,18 +1,31 @@
-import { useState } from "react";
-import { Sparkles } from "lucide-react";
+import { useRef, useState } from "react";
+import { Spade, Sparkles } from "lucide-react";
 
 type Props = {
   // 主助理单聊还没拉回来时是 null，这时不能发。
   canSend: boolean;
   onSend: (text: string) => Promise<void>;
+  // 牌桌不用方案卡，点了直接建桌。requestId 一次打开内不变，建桌失败再点不会建出第二张。
+  onCreateTable: (requestId: string) => Promise<void>;
   onClose: () => void;
 };
 
 // 只收一句话。这句话就是主助理单聊里的一条普通消息，方案卡由主助理回在那里。
-export const NewProjectDialog = ({ canSend, onSend, onClose }: Props) => {
+export const NewProjectDialog = ({ canSend, onSend, onCreateTable, onClose }: Props) => {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
+  const [tableError, setTableError] = useState<string | null>(null);
+  const tableRequestId = useRef(crypto.randomUUID());
   const ready = canSend && text.trim().length > 0 && !sending;
+
+  const createTable = () => {
+    setSending(true);
+    setTableError(null);
+    onCreateTable(tableRequestId.current).catch((cause: unknown) => {
+      setSending(false);
+      setTableError(cause instanceof Error ? cause.message : "建桌没成功，再试一次");
+    });
+  };
 
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -44,6 +57,24 @@ export const NewProjectDialog = ({ canSend, onSend, onClose }: Props) => {
         <p className="dialog-note">
           名字、队伍、要用的账号、多久跑一次，主助理排成一张方案卡给你看。你点开始就开工，不用先填表。
         </p>
+        <button
+          type="button"
+          className="new-project-table"
+          data-testid="new-project-table"
+          disabled={sending}
+          onClick={createTable}
+        >
+          <Spade size={20} aria-hidden="true" />
+          <span>
+            <b>和 AI 打一局德州</b>
+            <small>三个 AI 牌友加老白，不用方案卡，现在就能开</small>
+          </span>
+        </button>
+        {tableError === null ? null : (
+          <p className="today-inline-error" role="alert" data-testid="new-project-table-error">
+            {tableError}
+          </p>
+        )}
         <div className="dialog-actions">
           <button type="button" className="ghost-button" data-testid="new-project-cancel" onClick={onClose}>
             取消

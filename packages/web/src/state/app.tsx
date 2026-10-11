@@ -27,6 +27,8 @@ import {
   type Message,
   type MessageId,
   type Preference,
+  type PokerSeatNo,
+  type SwapSeatRequest,
   type CreateSkillRequest,
   type CreateToolRequest,
   type DecideRoutineOfferRequest,
@@ -141,6 +143,13 @@ export type AppActions = {
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   loadUsage: () => Promise<void>;
+  // 项目页不知道这个群是不是牌桌，拉一次视图问服务端：true 是牌桌，视图已入列；404 是普通项目。登录过期时是 undefined。
+  probePokerTable: (groupId: GroupId) => Promise<boolean | undefined>;
+  // 建桌后补拉群列表再回群 id，调用方跳过去才不会被弹回首页。requestId 同一次点击内不变，重试不会建出第二张桌。
+  createPokerTable: (requestId: string) => Promise<GroupId | undefined>;
+  swapPokerSeat: (groupId: GroupId, seat: PokerSeatNo, persona: SwapSeatRequest["persona"]) => Promise<void>;
+  // 桌上还没有会话时开第一手；回的是整份视图，入列后页面按版本更新。
+  startPokerHand: (groupId: GroupId) => Promise<void>;
 };
 
 const AppContext = createContext<{ state: AppState; actions: AppActions } | null>(null);
@@ -771,6 +780,31 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }),
       loadUsage: signedIn(async ({ api, put }) => {
         put({ type: "usage_loaded", usage: await api.usage() });
+      }),
+      probePokerTable: signedIn(async ({ api, put }, groupId: GroupId) => {
+        try {
+          put({ type: "poker_table_set", table: await api.pokerTable(groupId) });
+          return true;
+        } catch (cause) {
+          if (cause instanceof RequestFailed && cause.status === 404) return false;
+          throw cause;
+        }
+      }),
+      createPokerTable: signedIn(async ({ api, put }, requestId: string) => {
+        const seq = nextSeq();
+        const table = await api.createPokerTable({ requestId });
+        put({ type: "poker_table_set", table });
+        const { items } = await api.groups();
+        put({ type: "groups_loaded", groups: items, seq });
+        return table.groupId;
+      }),
+      swapPokerSeat: signedIn(
+        async ({ api, put }, groupId: GroupId, seat: PokerSeatNo, persona: SwapSeatRequest["persona"]) => {
+          put({ type: "poker_table_set", table: await api.swapSeat(groupId, seat, { persona }) });
+        },
+      ),
+      startPokerHand: signedIn(async ({ api, put }, groupId: GroupId) => {
+        put({ type: "poker_table_set", table: await api.startHand(groupId) });
       }),
     };
   }, [nextSeq, sessions, enter, taskPushes]);

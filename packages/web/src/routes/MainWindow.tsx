@@ -109,6 +109,21 @@ export const MainWindow = () => {
 
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
+  // 项目页进来时还不知道这个群是不是牌桌。问过一次记下结果，问的这段时间不画普通项目页，免得先闪一下再换。
+  const projectGroupId = projectOpen?.groupId ?? null;
+  const pokerTable = ready === null || projectGroupId === null ? undefined : pokerTableOf(ready, projectGroupId);
+  const [ordinary, setOrdinary] = useState<ReadonlySet<GroupId>>(new Set());
+  const probing = projectGroupId !== null && pokerTable === undefined && !ordinary.has(projectGroupId);
+  useEffect(() => {
+    if (!probing || projectGroupId === null) return;
+    void actions
+      .probePokerTable(projectGroupId)
+      .catch(() => false)
+      .then((isTable) => {
+        if (isTable === false) setOrdinary((known) => new Set(known).add(projectGroupId));
+      });
+  }, [actions, probing, projectGroupId]);
+
   if (!ready) return null;
   if (
     screen === null ||
@@ -124,7 +139,6 @@ export const MainWindow = () => {
     if (target !== undefined) navigate(pathOf({ kind: "project", groupId: target }));
   };
   const openTablePage = (target: GroupId) => navigate(pathOf({ kind: "table", groupId: target }));
-  const pokerTable = projectOpen === null ? undefined : pokerTableOf(ready, projectOpen.groupId);
 
   const bots = ready.bots;
   const assistantGroupId = today.data?.assistantGroupId ?? null;
@@ -201,7 +215,18 @@ export const MainWindow = () => {
       ) : tableOpen !== null ? (
         <TablePage groupId={tableOpen} table={pokerTableOf(ready, tableOpen) ?? null} />
       ) : projectOpen !== null && pokerTable !== undefined ? (
-        <PokerProjectPage table={pokerTable} onOpenTable={openTablePage} />
+        <PokerProjectPage
+          table={pokerTable}
+          title={projectOpen.task.title}
+          routines={(routinesLoaded ?? []).filter((routine) => routine.groupId === projectOpen.groupId)}
+          onOpenTable={openTablePage}
+          onStartHand={actions.startPokerHand}
+          onSwapSeat={actions.swapPokerSeat}
+        />
+      ) : probing ? (
+        <main className="today-page today-loading" data-testid="project-probing">
+          正在整理这个项目
+        </main>
       ) : projectOpen !== null ? (
         <ProjectView
           conversation={projectOpen}
@@ -290,6 +315,11 @@ export const MainWindow = () => {
             await actions.sendMessage(assistantGroupId, text);
             setOverlay("none");
             openGroupPage(assistantGroupId);
+          }}
+          onCreateTable={async (requestId) => {
+            const created = await actions.createPokerTable(requestId);
+            setOverlay("none");
+            openProjectPage(created);
           }}
           onClose={() => setOverlay("none")}
         />
