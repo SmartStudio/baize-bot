@@ -14,6 +14,7 @@ import {
 } from "@baize/shared";
 import { TransactionRollbackError } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { refreshHintForRun } from "../poker/hint.js";
 import type { NoticePublisher } from "../notifications.js";
 import { expireLogin } from "../account-expiry.js";
 import { findAccountOnComputer, markLoginFailed, markLoginValid } from "../repo/accounts.js";
@@ -350,6 +351,7 @@ export async function abandonRun(
     return { expiredApprovals, failedTools, settled, message };
   });
   if (result === null) return null;
+  await refreshHintForRun(deps, run.runId);
   clearTextPrefixes(run.runId);
   if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
   for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
@@ -411,6 +413,7 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     revision: appended.message.revision,
     visibleTo: appended.message.visibleTo,
   });
+  if (appended.created !== null || event.done) await refreshHintForRun(deps, event.runId, appended.message.id);
   if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }
 
@@ -475,6 +478,7 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   if (finished !== null) {
     for (const message of finished.failedTools) deps.push.push(conn.ownerId, { type: "message", message });
     pushSettled(deps.push, conn.ownerId, finished.settled);
+    await refreshHintForRun(deps, event.runId);
   }
 
   const run = { runId: event.runId, botId: event.botId, groupId };

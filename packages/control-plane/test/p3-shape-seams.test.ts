@@ -25,7 +25,7 @@ const POKER_SEAMS: readonly [string, string][] = [
   ["POST", "/api/poker/tables/g-any/leave"],
 ];
 
-it("四条牌局接口没登录先 401，已接的开手与出牌对未知对象回 404，问老白和散场的桩回 501", async () => {
+it("四条牌局接口没登录先 401，已接的开手、出牌与问老白对未知对象回 404，散场的桩回 501", async () => {
   const anonymous = new ApiClient(server.server.port);
   for (const [method, path] of POKER_SEAMS) {
     expect(
@@ -37,8 +37,8 @@ it("四条牌局接口没登录先 401，已接的开手与出牌对未知对象
   const client = new ApiClient(server.server.port);
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   for (const [method, path] of POKER_SEAMS) {
-    const response = await client.request(method, path, method === "GET" ? undefined : {});
-    if (path.endsWith("/hands") || path.endsWith("/act")) {
+    const response = await client.request(method, path, path.endsWith("/hint") ? { seq: 0 } : {});
+    if (path.endsWith("/hands") || path.endsWith("/act") || path.endsWith("/hint")) {
       expect(response.status, `${method} ${path}`).toBe(404);
       expect(await response.json()).toEqual({ error: path.endsWith("/hands") ? "没有这张牌桌" : "没有这手牌" });
     } else {

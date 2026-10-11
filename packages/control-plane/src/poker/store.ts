@@ -17,6 +17,7 @@ import { appendMessage } from "../repo/messages.js";
 import { lockOwner } from "../repo/runs.js";
 import { newHand, replay, type HandState } from "./engine.js";
 import { narrate } from "./narrate.js";
+import { hintOf } from "./hint.js";
 import { engineSeatId, seatNextHand } from "./seating.js";
 import { buildTableView, type TableState } from "./table-view.js";
 
@@ -151,7 +152,7 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
     session: open
       ? { id: PokerSessionId.parse(open.id), handCount: counts?.value ?? 0, net: netBySession.get(open.id) ?? 0 }
       : null,
-    hint: null,
+    hint: await hintOf(db, table.groupId),
     lastReview: ended.find((session) => session.review !== null)?.review ?? null,
     stats: {
       sessions: ended.length,

@@ -18,6 +18,7 @@ import type { Db } from "../db/client.js";
 import { bots, groups, pokerHands, pokerSessions, pokerTables, users, type StoredPokerSeat } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { currentHandOf } from "../poker/store.js";
+import { hintOf } from "../poker/hint.js";
 import { buildTableView, type TableState } from "../poker/table-view.js";
 import { openGroup, swapGroupMember } from "./groups.js";
 import { appendMessage } from "./messages.js";
@@ -240,7 +241,7 @@ export async function loadPokerTableView(db: Db, ownerId: UserId, groupId: Group
     }),
     host: { botId: BotId.parse(host.id), name: host.name, hue: host.hue },
     session: await openSessionOf(db, groupId, table.seats),
-    hint: null,
+    hint: await hintOf(db, groupId),
     lastReview: await lastReviewOf(db, groupId),
     stats: { sessions: 0, sessionsWon: 0, net: 0 },
   };
