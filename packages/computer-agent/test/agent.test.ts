@@ -48,6 +48,7 @@ function startAgent(options: AgentOptions): AgentHandle {
 // 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
 interface RunnerCalls {
   readonly approvals: Array<{ runId: RunId; callId: string; approved: boolean }>;
+  readonly pokerResults: Array<{ runId: RunId; callId: string; result: { ok: true } | { ok: false; error: string } }>;
   readonly activeRuns: RunId[];
   readonly paused: BotId[];
   readonly resumed: BotId[];
@@ -94,6 +95,9 @@ function runnerOf(
     approve: (runId, callId, approved) => {
       calls.approvals.push({ runId, callId, approved });
     },
+    pokerResult: (runId, callId, result) => {
+      calls.pokerResults.push({ runId, callId, result });
+    },
     pause: async (botId) => {
       calls.paused.push(botId);
     },
@@ -108,7 +112,7 @@ function runnerOf(
 const configMessage = {
   type: "config",
   generation: 1,
-  bots: [{ id: "bot-1", role: "member", name: "小服", tags: [], description: "客服 Bot" }],
+  bots: [{ id: "bot-1", role: "member", preset: null, name: "小服", tags: [], description: "客服 Bot" }],
   tools: [],
   brand: null,
   preferences: [],
@@ -132,6 +136,7 @@ const promptMessage = {
   purpose: "plan",
   task: null,
   routine: null,
+  table: null,
   members: [{ id: "bot-1", name: "小服", tags: [], description: "客服 Bot", seat: "member" }],
 };
 
@@ -256,6 +261,7 @@ function spawnAgent(
 ): AgentHandle {
   const calls: RunnerCalls = {
     approvals: [],
+    pokerResults: [],
     activeRuns: [],
     paused: [],
     resumed: [],
@@ -350,7 +356,7 @@ describe("电脑代理连控制面", () => {
     const secondConfig = {
       ...configMessage,
       generation: 2,
-      bots: [{ id: "bot-1", role: "member", name: "新版小服", tags: [], description: "新版客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", preset: null, name: "新版小服", tags: [], description: "新版客服 Bot" }],
     };
 
     try {
@@ -531,7 +537,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", preset: null, name, tags: [], description: "客服 Bot" }],
     });
 
     socket.send(JSON.stringify(named(2, "第二代")));
@@ -578,7 +584,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", preset: null, name, tags: [], description: "客服 Bot" }],
     });
     const first = await server.waitForSocket(1);
     first.send(JSON.stringify(named(1, "第一条连接的第一代")));
@@ -634,7 +640,7 @@ describe("电脑代理连控制面", () => {
     const named = (generation: number, name: string) => ({
       ...configMessage,
       generation,
-      bots: [{ id: "bot-1", role: "member", name, tags: [], description: "客服 Bot" }],
+      bots: [{ id: "bot-1", role: "member", preset: null, name, tags: [], description: "客服 Bot" }],
     });
     const socket = await server.waitForSocket(1);
 
@@ -703,6 +709,72 @@ describe("电脑代理连控制面", () => {
     // 报文有序，等到 prompt 的回复就说明前面那条也处理完了。
     await server.waitForMessage("bot_text", 1, 3000);
     expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: false }]);
+  });
+
+  it("poker_result 报文到达后调用运行器的 pokerResult，成功和中文拒绝都原样转发", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify({ type: "poker_result", runId: "run-1", callId: "act-1", result: { ok: true } }));
+    socket.send(
+      JSON.stringify({
+        type: "poker_result",
+        runId: "run-1",
+        callId: "act-2",
+        result: { ok: false, error: "加注额不足" },
+      }),
+    );
+    socket.send(JSON.stringify(promptMessage));
+    await server.waitForMessage("bot_text");
+    expect(runnerCalls().pokerResults).toEqual([
+      { runId: "run-1", callId: "act-1", result: { ok: true } },
+      { runId: "run-1", callId: "act-2", result: { ok: false, error: "加注额不足" } },
+    ]);
+  });
+
+  it("prompt 等出牌回执时仍派发 poker_result，让这次 run 收尾", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    let release!: () => void;
+    const decision = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    spawnAgent(await server.url(), {
+      makeRunner: (config) => ({
+        ...runnerOf(config, runnerCalls()),
+        async prompt(message) {
+          config.send({
+            type: "poker_act",
+            runId: message.runId,
+            callId: "act-waiting",
+            handId: "hand-1" as Extract<AgentToControl, { type: "poker_act" }>["handId"],
+            seq: 1,
+            action: { kind: "fold" },
+          });
+          await decision;
+          config.send({
+            type: "run_done",
+            runId: message.runId,
+            botId: message.botId,
+            groupId: message.groupId,
+            steps: 1,
+            inputTokens: 1,
+            outputTokens: 1,
+          });
+        },
+        pokerResult(runId, callId, result) {
+          runnerCalls().pokerResults.push({ runId, callId, result });
+          release();
+        },
+      }),
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify(promptMessage));
+    const act = await server.waitForMessage("poker_act");
+    socket.send(JSON.stringify({ type: "poker_result", runId: act.runId, callId: act.callId, result: { ok: true } }));
+    expect((await server.waitForMessage("run_done")).runId).toBe(act.runId);
+    expect(runnerCalls().pokerResults).toEqual([{ runId: "run-1", callId: "act-waiting", result: { ok: true } }]);
   });
 
   it("收 browser_login 后回一条 login_state", async () => {
@@ -1105,6 +1177,7 @@ describe("电脑代理连控制面", () => {
             approvals.push({ runId, callId, approved });
             if (runId === "run-1" && callId === "call-1" && approved) release?.();
           },
+          pokerResult: () => {},
           pause: async () => {},
           resume: async () => {},
           activeRuns: () => [],
@@ -1152,6 +1225,7 @@ describe("电脑代理连控制面", () => {
             applyConfig: async () => {},
             prompt: async () => {},
             approve: (runId, callId, approved) => approvals.push({ runId, callId, approved }),
+            pokerResult: () => {},
             pause: async () => {},
             resume: async () => {
               resumeStarted = true;
@@ -1250,6 +1324,7 @@ describe("电脑代理连控制面", () => {
               approved.push({ runId, callId, approved: approvedResult });
               approveSecondRun();
             },
+            pokerResult: () => {},
             pause: async () => {},
             resume: async () => {},
             activeRuns: () => [],
@@ -1269,7 +1344,7 @@ describe("电脑代理连控制面", () => {
       JSON.stringify({
         ...configMessage,
         generation: 2,
-        bots: [{ id: "bot-1", role: "member", name: "小服", tags: [], description: "新版客服 Bot" }],
+        bots: [{ id: "bot-1", role: "member", preset: null, name: "小服", tags: [], description: "新版客服 Bot" }],
       }),
     );
     socket.send(JSON.stringify({ ...promptMessage, runId: "run-2", text: "发报价邮件" }));
@@ -1348,6 +1423,7 @@ describe("电脑代理连控制面", () => {
           });
         },
         approve: () => {},
+        pokerResult: () => {},
         pause: async () => {},
         resume: async () => {},
         activeRuns: () => [RunId.parse("run-1")],
@@ -1416,6 +1492,7 @@ describe("电脑代理连控制面", () => {
         return {
           ...runnerOf(config, {
             approvals: [],
+            pokerResults: [],
             activeRuns: [],
             paused: [],
             resumed: [],

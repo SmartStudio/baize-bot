@@ -257,6 +257,14 @@ export function startAgent(options: AgentOptions): AgentHandle {
         runner.approve(message.runId, message.callId, message.approved);
         return;
       }
+      case "poker_result": {
+        if (runner === null) {
+          log(`还没收到 config，丢弃 run ${message.runId} 的出牌回执`);
+          return;
+        }
+        runner.pokerResult(message.runId, message.callId, message.result);
+        return;
+      }
       case "browser_login": {
         const deadline = AbortSignal.timeout(loginTimeoutMs);
         // 到点就不再等这次登录，队列接着走。login 自己也收 deadline，会收起窗口。

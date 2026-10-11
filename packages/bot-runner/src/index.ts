@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import {
   type AccountConfig,
   type AgentToControl,
@@ -33,7 +34,13 @@ import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
 import { createSandboxedBash } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
-import { composeTablePrompt, createTableTools } from "./table.js";
+import {
+  composeTablePrompt,
+  createPokerResults,
+  createTableSession,
+  createTableTools,
+  type PokerResult,
+} from "./table.js";
 import { createTeamTools } from "./team.js";
 import { createTopicTools, renderTaskCard } from "./topic.js";
 import { contextSince, readMemoryShown, readWatermark, recordMemoryShown, recordWatermark } from "./watermark.js";
@@ -86,6 +93,8 @@ export interface Runner {
   activeRuns(): readonly RunId[];
   /** 控制面的审批结论。runId 对不上的结论不作数。 */
   approve(runId: RunId, callId: string, approved: boolean): void;
+  /** 出牌回执只结算 runId 和 callId 都匹配的等待。 */
+  pokerResult(runId: RunId, callId: string, result: PokerResult): void;
   pause(botId: BotId): Promise<void>;
   resume(botId: BotId): Promise<void>;
   stop(): Promise<void>;
@@ -135,7 +144,7 @@ interface BotRuntime {
   configState: BotConfigState;
   appliedGateway: RunnerConfig["modelGateway"];
   lastGroupId: GroupId | null;
-  sessions: Map<GroupId, BotSession>;
+  sessions: Map<GroupId, BotSession & { readonly tableRole: NonNullable<PromptMessage["table"]>["role"] | null }>;
   /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
   mcp: McpToolSet | null;
   /** 同样所有群共用：一个 Bot 一个后台标签页，不按群分。 */
@@ -143,7 +152,7 @@ interface BotRuntime {
   /** pause 只让下一次 prompt 入场或工具过闸挂起；已经执行中的工具不被中止。 */
   paused: boolean;
   pauseWaiters: Set<PauseWaiter>;
-  active: RememberingRun | null;
+  active: (RememberingRun & { readonly table: PromptMessage["table"] }) | null;
   /** prompt、建会话、配置对账和资源关闭都只从这一条队列进入。 */
   chain: Promise<void>;
 }
@@ -327,6 +336,7 @@ export function createRunner(config: RunnerConfig): Runner {
   let state: RunnerState = "ready";
   const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
+  const pokerResults = createPokerResults(config.send);
   const extensionTools = config.extensionTools ?? [];
   const extensionNames: ReadonlySet<string> = new Set(extensionTools.map((tool) => tool.name));
   const liveRuns = new Set<RunId>();
@@ -578,11 +588,31 @@ export function createRunner(config: RunnerConfig): Runner {
   ): Promise<BotSession> => {
     bot.lastGroupId = groupId;
     const existing = bot.sessions.get(groupId);
-    if (existing !== undefined) return existing;
+    const table = () => bot.active?.table ?? null;
+    const tableRole = table()?.role ?? null;
+    if (existing !== undefined) {
+      if (existing.tableRole === tableRole) return existing;
+      await existing.dispose();
+      bot.sessions.delete(groupId);
+    }
     const definition = currentDefinition(bot);
     if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
     const activeRun = (): RememberingRun | null => bot.active;
     const dirs = ensureBotDirs(bot.dirs);
+    if (tableRole !== null) {
+      const created = await createTableSession({
+        dirs: { ...dirs, sessionDir: join(groupSessionDir(dirs, groupId), "table") },
+        preset: definition.config.preset,
+        gateway: bot.appliedGateway,
+        role: tableRole,
+        tools: createTableTools({ role: tableRole, activeRun, table, send: config.send, results: pokerResults }),
+        waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+        table,
+        settings: config.settings,
+      });
+      bot.sessions.set(groupId, { ...created, tableRole });
+      return created;
+    }
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
     const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null);
     if (config.browser !== undefined) bot.browser ??= createBotBrowser(config.browser);
@@ -606,7 +636,6 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
-      ...createTableTools({ activeRun, send: config.send }),
       ...createMemoryTools({ groupKind, activeRun, send: config.send }),
       ...createDraftTools({
         activeRun,
@@ -705,7 +734,7 @@ export function createRunner(config: RunnerConfig): Runner {
       memory: () => bot.active?.memory ?? null,
       ...(config.settings === undefined ? {} : { settings: config.settings }),
     });
-    bot.sessions.set(groupId, created);
+    bot.sessions.set(groupId, { ...created, tableRole: null });
     return created;
   };
 
@@ -716,7 +745,8 @@ export function createRunner(config: RunnerConfig): Runner {
       return;
     }
 
-    const active: RememberingRun = {
+    const active: NonNullable<BotRuntime["active"]> = {
+      table: message.table,
       messageId: message.messageId,
       memory: null,
       run: {
@@ -759,7 +789,8 @@ export function createRunner(config: RunnerConfig): Runner {
         bot.mcp?.serverFor ?? (() => ""),
         (outgoing) => {
           if (outgoing.type === "run_done") finishRun(outgoing);
-          else config.send(outgoing);
+          else if (message.table === null || (message.table.role === "advisor" && outgoing.type === "bot_text"))
+            config.send(outgoing);
         },
       );
       prompted = true;
@@ -832,6 +863,7 @@ export function createRunner(config: RunnerConfig): Runner {
         bot.configState = { phase: "pending", current: currentDefinition(bot), desired };
         if (desired === null) {
           approvals.cancel(bot.botId);
+          pokerResults.cancel(bot.botId);
           settlePauseWaiters(bot, false);
         }
         append(bot, () => reconcileBot(bot));
@@ -879,6 +911,10 @@ export function createRunner(config: RunnerConfig): Runner {
       approvals.settle(runId, callId, approved);
     },
 
+    pokerResult(runId, callId, result) {
+      pokerResults.settle(runId, callId, result);
+    },
+
     async pause(botId) {
       const bot = bots.get(botId);
       if (bot === undefined || bot.paused) return;
@@ -895,6 +931,7 @@ export function createRunner(config: RunnerConfig): Runner {
     async stop() {
       state = "stopped";
       approvals.abandon("stopped");
+      pokerResults.cancel();
       const stoppingBots = [...bots.values()];
       for (const bot of stoppingBots) settlePauseWaiters(bot, false);
       const aborting = stoppingBots.map((bot) => {
