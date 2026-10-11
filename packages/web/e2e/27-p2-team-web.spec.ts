@@ -6,8 +6,31 @@ import type { ProviderProbe } from "./support/mount-provider";
 declare global {
   interface Window {
     __provider?: ProviderProbe;
+    __pushOpens?: number;
   }
 }
+
+/**
+ * 登录后等推送连接在页面上 open 了再往下走。主窗口出来时推送连接可能还在握手，紧跟着造的数据赶在服务端
+ * 登记这条连接之前，推送就丢了。Playwright 转发的连接要等服务端握手完成才在页面上触发 open。
+ */
+const signIn = async (page: Page) => {
+  await page.addInitScript(() => {
+    window.__pushOpens = 0;
+    const Native = window.WebSocket;
+    window.WebSocket = class extends Native {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        if (!String(url).includes("/api/ws")) return;
+        this.addEventListener("open", () => {
+          window.__pushOpens = (window.__pushOpens ?? 0) + 1;
+        });
+      }
+    };
+  });
+  await login(page);
+  await page.waitForFunction(() => (window.__pushOpens ?? 0) > 0);
+};
 
 const Seeded = z.object({ groupId: GroupId, messageId: MessageId });
 type Seeded = z.infer<typeof Seeded>;
@@ -66,7 +89,7 @@ const openTodayCard = async (page: Page) => {
 };
 
 test("建队卡勾上建议人选后确认，团队页多一张卡", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await page.getByTestId("team-nav").click();
   await expect(page.getByTestId("team-bot")).not.toHaveCount(0);
@@ -123,7 +146,7 @@ test("建队卡勾上建议人选后确认，团队页多一张卡", async ({ pa
 });
 
 test("先放着之后卡还在等你确认", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const before = await botCount(page);
 
@@ -150,7 +173,7 @@ test("先放着之后卡还在等你确认", async ({ page }) => {
 });
 
 test("建队卡上没有权限和模型字样", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const forbidden = /权限|模型/;
 
@@ -177,7 +200,7 @@ test("建队卡上没有权限和模型字样", async ({ page }) => {
 });
 
 test("临时帮手的工具行只显示一行人话", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   expect((await page.request.post("/api/test/helper-tool")).status(), "mock 里塞一条临时帮手的工具调用").toBe(200);
   await page.getByTestId("assistant-nav").click();
 
@@ -193,7 +216,7 @@ test("临时帮手的工具行只显示一行人话", async ({ page }) => {
 });
 
 test("项目页队伍折叠里点调整队伍，输入框预填一句话", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await page.goto(`/p/${groupId}`);
   await page.getByTestId("project-fold").locator("summary").click();
@@ -210,7 +233,7 @@ test("项目页队伍折叠里点调整队伍，输入框预填一句话", async
 });
 
 test("默认勾上的已有人选被删了，确认得 409，取消这一行后同一张卡确认成功", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   expect((await page.request.delete("/api/bots/bot_service")).status(), "卡上默认勾上的小服被删了").toBe(204);
   const botsBefore = await botCount(page);
@@ -246,7 +269,7 @@ test("默认勾上的已有人选被删了，确认得 409，取消这一行后�
 });
 
 test("加上和不加了来回切，焦点留在同一行的按钮上", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   await seedOffer(page);
   const card = await openTodayCard(page);
   const checker = card.getByTestId("team-offer-member").nth(1);
@@ -264,7 +287,7 @@ test("加上和不加了来回切，焦点留在同一行的按钮上", async ({
 });
 
 test("首页确认成功后清单还没刷新，连点和 Enter 都只发一次", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   await seedOffer(page);
   const card = await openTodayCard(page);
   const posts = confirmPosts(page);
@@ -286,7 +309,7 @@ test("首页确认成功后清单还没刷新，连点和 Enter 都只发一次"
 });
 
 test("项目页确认成功后清单还没刷新，连点和 Enter 都只发一次", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await page.goto(`/p/${groupId}`);
   const row = page.getByTestId("project-pending").locator("[data-testid=today-row][data-kind=team_offer]");
@@ -318,7 +341,7 @@ test("确认回包晚于后来的队伍推送，旧回包不把新队员盖掉",
     socket.connectToServer();
     toPage = (frame) => socket.send(frame);
   });
-  await login(page);
+  await signIn(page);
   const { messageId, groupId } = await seedOffer(page);
   await page.goto(`/p/${groupId}`);
   await page.getByTestId("project-fold").locator("summary").click();
@@ -367,7 +390,7 @@ for (const surface of ["today", "project"] as const) {
     test(`${surface === "today" ? "首页" : "项目页"}先放着成功后清单${refresh === "stale" ? "回旧快照" : "刷新失败"}，卡照样能改人选、确认，确认后不再发第二趟`, async ({
       page,
     }) => {
-      await login(page);
+      await signIn(page);
       const { messageId, groupId } = await seedOffer(page);
       const url = surface === "today" ? "/api/today" : `/api/projects/${groupId}`;
       let card;
@@ -426,7 +449,7 @@ test("确认请求发出后先到首席推送，服务端后处理的确认回�
       if (forward) socket.send(frame);
     });
   });
-  await login(page);
+  await signIn(page);
   const { messageId, groupId } = await seedOffer(page);
   await page.goto(`/p/${groupId}`);
   const row = page.getByTestId("project-pending").locator("[data-testid=today-row][data-kind=team_offer]");
@@ -477,7 +500,7 @@ test("断线期间别处确认了建队卡，重连后补拉群名单", async ({
     });
     sockets.push(socket);
   });
-  await login(page);
+  await signIn(page);
   const { messageId, groupId } = await seedOffer(page);
   await page.goto(`/p/${groupId}`);
   await page.getByTestId("project-fold").locator("summary").click();
@@ -554,7 +577,7 @@ for (const surface of ["today", "project"] as const) {
     page,
   }) => {
     const wire = await wires(page);
-    await login(page);
+    await signIn(page);
     const { groupId } = await seedOffer(page);
     const url = surface === "today" ? "/api/today" : `/api/projects/${groupId}`;
     const snapshot: unknown = await (await page.request.get(url)).json();
@@ -576,7 +599,7 @@ for (const surface of ["today", "project"] as const) {
 
 test("首页确认成功后换到项目页，项目页旧快照里的同一张卡也是已组好", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const project: unknown = await (await page.request.get(`/api/projects/${groupId}`)).json();
   const today: unknown = await (await page.request.get("/api/today")).json();
@@ -598,7 +621,7 @@ test("首页确认成功后换到项目页，项目页旧快照里的同一张�
 /** 两张卡各在自己的项目里确认，确认回包都被请求发出后到的首席推送挡掉。A 挡下后的补拉在途时 B 再被挡。 */
 const blockedPair = async (page: Page, answerFirst: (route: import("@playwright/test").Route) => Promise<void>) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const a = await seedOffer(page);
   const b = await seedOffer(page);
   const initial = GroupListResponse.parse(await (await page.request.get("/api/groups")).json()).items;
@@ -692,7 +715,7 @@ test("名单补拉连着失败三趟就停，给出没刷新的提示，点重�
 
 test("断线期间别处新建的项目，重连后出现在侧栏，也能进它的项目页", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   wire.quiet(true);
   const answer = await page.request.post("/api/groups", {
     data: { title: "断线时新建的项目", botIds: ["bot_sales", "bot_service"] },
@@ -712,7 +735,7 @@ test("断线期间别处新建的项目，重连后出现在侧栏，也能进�
 
 test("快照里没有的项目从侧栏移除，正停在它的项目页上的回首页", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const listed = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
   const target = listed.items.find((item) => item.group.botIds.length >= 2);
   if (target === undefined) throw new Error("mock 里应当有一个两人以上的项目");
@@ -734,7 +757,7 @@ test("快照里没有的项目从侧栏移除，正停在它的项目页上的�
 
 test("快照发起之后才推来的新项目，不被这份旧快照移除", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const before = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -772,7 +795,7 @@ test("快照发起之后才推来的新项目，不被这份旧快照移除", as
 
 test("断线期间项目里来了审批，重连后侧栏角标按快照补上", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
   await expect(badge).toHaveCount(0);
@@ -788,8 +811,9 @@ test("断线期间项目里来了审批，重连后侧栏角标按快照补上",
 
 test("快照发起之后才推来的审批，角标不被旧快照的计数压回去", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
+  await expect(projectLink(page, groupId), "重连之前项目已经在侧栏，之后只看角标").toHaveCount(1);
   const before = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
   let release!: () => void;
@@ -863,7 +887,7 @@ const seedHandoff = async (page: Page) => {
 
 test("批准 A 后断线重连，再进项目拉到 A 已批准的历史，角标仍是剩下的 B 那 1 个", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await expect(projectLink(page, groupId)).toHaveCount(1);
   const a = await seedApproval(page, groupId);
@@ -897,7 +921,7 @@ test("批准 A 后断线重连，再进项目拉到 A 已批准的历史，角�
 
 test("接受交接 A 后断线重连，再进项目拉到 A 已接受的历史，角标仍是剩下的 B 那 1 个", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const a = await seedHandoff(page);
   const b = await seedHandoff(page);
   const groupId = a.groupId;
@@ -986,7 +1010,7 @@ const acceptHandoff = async (page: Page) =>
 
 test("审批终态触发补计数，回包前又来新审批，在途回来后再补一趟，角标是服务端数", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await expect(projectLink(page, groupId)).toHaveCount(1);
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
@@ -1009,7 +1033,7 @@ test("审批终态触发补计数，回包前又来新审批，在途回来后�
 
 test("交接终态触发补计数，回包前又来新交接，在途回来后再补一趟，角标是服务端数", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   wire.quiet(true);
   const a = await seedHandoff(page);
   const groupId = a.groupId;
@@ -1032,7 +1056,7 @@ test("交接终态触发补计数，回包前又来新交接，在途回来后�
 
 test("R5-1 快照已算过 A 的批准，A 的终态推送晚到，角标不再扣一次", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await expect(projectLink(page, groupId)).toHaveCount(1);
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
@@ -1060,7 +1084,7 @@ test("R5-1 快照已算过 A 的批准，A 的终态推送晚到，角标不再�
 
 test("R5-1 快照已算过 A 的接受，A 的终态推送晚到，角标不再扣一次", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const a = await seedHandoff(page);
   const b = await seedHandoff(page);
   const groupId = a.groupId;
@@ -1089,7 +1113,7 @@ test("R5-1 快照已算过 A 的接受，A 的终态推送晚到，角标不再�
 
 test("R5-2 重连快照扣在路上，期间新审批换来更晚的补拉，旧快照放行后角标仍是服务端数", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await expect(projectLink(page, groupId)).toHaveCount(1);
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
@@ -1117,7 +1141,7 @@ test("R5-2 重连快照扣在路上，期间新审批换来更晚的补拉，旧
 
 test("R5-2 重连快照扣在路上，期间新交接换来更晚的补拉，旧快照放行后角标仍是服务端数", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const a = await seedHandoff(page);
   const b = await seedHandoff(page);
   const groupId = a.groupId;
@@ -1147,7 +1171,7 @@ test("R5-2 重连快照扣在路上，期间新交接换来更晚的补拉，旧
 
 test("补拉扣在路上，重连快照先落地，旧补拉放行后不把角标改回去", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   await expect(projectLink(page, groupId)).toHaveCount(1);
   const badge = projectLink(page, groupId).getByTestId("bot-pending");
@@ -1184,7 +1208,7 @@ for (const surface of ["today", "project"] as const) {
     page,
   }) => {
     const wire = await wires(page);
-    await login(page);
+    await signIn(page);
     const { messageId, groupId } = await seedOffer(page);
     const card = surface === "today" ? await openTodayCard(page) : await openProjectCard(page, groupId);
     wire.quiet(true);
@@ -1216,7 +1240,7 @@ for (const surface of ["today", "project"] as const) {
 
 test("确认失败清掉在途，重新展开的卡回到原状态可以重试", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const { messageId } = await seedOffer(page);
   const card = await openTodayCard(page);
   await card.getByTestId("team-offer-defer").click();
@@ -1247,7 +1271,7 @@ test("确认失败清掉在途，重新展开的卡回到原状态可以重试",
 
 test("R6-1 新项目还没进侧栏时较新的补计数先回，旧名单随后放行，角标用较新的那份", async ({ page }) => {
   const wire = await wires(page);
-  await login(page);
+  await signIn(page);
   const listed = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
   const marker = listed.items[0];
   if (marker === undefined) throw new Error("mock 里应当有项目");
@@ -1282,7 +1306,7 @@ test("R6-1 新项目还没进侧栏时较新的补计数先回，旧名单随后
 });
 
 test("R6-2 补计数遇到一趟 503，自己重试，角标回到服务端数", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const link = projectLink(page, groupId);
   await expect(link).toHaveCount(1);
@@ -1301,7 +1325,7 @@ test("R6-2 补计数遇到一趟 503，自己重试，角标回到服务端数",
 });
 
 test("R6-2 补计数连着失败就停，侧栏给出没刷新的提示，点重试补回来", async ({ page }) => {
-  await login(page);
+  await signIn(page);
   const { groupId } = await seedOffer(page);
   const link = projectLink(page, groupId);
   await expect(link).toHaveCount(1);
