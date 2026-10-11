@@ -14,7 +14,7 @@ export const SeatsBlock = ({ table, notice, onSwap }: Props) => {
 
   return (
     <section className="poker-seats" data-testid="poker-seats">
-      <div className="poker-seats-head">
+      <div className="poker-block-head">
         <h2>牌友</h2>
         <span>你坐 4 号位</span>
       </div>

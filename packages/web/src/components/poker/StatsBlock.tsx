@@ -4,14 +4,12 @@ import type { PokerTableView } from "@baize/shared";
 export const StatsBlock = ({ table }: { table: PokerTableView }) => {
   const { sessions, sessionsWon, net } = table.stats;
   return (
-    <section data-testid="stats-block" style={block}>
-      <header style={head}>
-        <h3 style={heading}>战绩</h3>
-        <span data-testid="stats-note" style={note}>
-          虚拟筹码，不涉及真钱
-        </span>
-      </header>
-      <div style={stats}>
+    <section className="poker-stats" data-testid="stats-block">
+      <div className="poker-block-head">
+        <h2>战绩</h2>
+        <span data-testid="stats-note">虚拟筹码，不涉及真钱</span>
+      </div>
+      <div className="poker-stats-figures">
         <div>
           <b data-testid="stats-sessions">{sessions}</b>局
         </div>
@@ -25,19 +23,3 @@ export const StatsBlock = ({ table }: { table: PokerTableView }) => {
     </section>
   );
 };
-
-const block = { display: "flex", flexDirection: "column", gap: "var(--space-4)" } as const;
-
-const head = { display: "flex", gap: "var(--space-5)", alignItems: "baseline" } as const;
-
-const heading = { margin: 0, color: "var(--fg-1)", font: "var(--type-heading)" } as const;
-
-const note = { color: "var(--fg-3)", font: "var(--type-caption)" } as const;
-
-const stats = {
-  display: "flex",
-  flexWrap: "wrap",
-  gap: "var(--space-9)",
-  color: "var(--fg-3)",
-  font: "var(--type-caption)",
-} as const;

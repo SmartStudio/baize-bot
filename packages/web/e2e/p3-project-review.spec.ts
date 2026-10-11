@@ -124,6 +124,30 @@ test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
   await expect(page.getByTestId("stats-note")).toHaveText("虚拟筹码，不涉及真钱");
 });
 
+test("项目页各块之间的段间距一致，战绩块不贴着牌友块", async ({ page }) => {
+  await login(page);
+  const request = page.request;
+  const groupId = await createTable(request);
+  await attachProjectGroup(request, groupId);
+  for (let hand = 0; hand < 2; hand += 1) await playHandToEnd(request, groupId);
+  await leaveAndWaitForReview(request, groupId);
+
+  await openProject(page, groupId);
+  const boxes = await Promise.all(
+    ["review-card", "poker-seats", "stats-block", "poker-rules"].map(async (id) => {
+      const box = await page.getByTestId(id).boundingBox();
+      if (box === null) throw new Error(`${id} 在页面上没有位置`);
+      return box;
+    }),
+  );
+  const gaps = boxes.flatMap((above, index) => {
+    const below = boxes[index + 1];
+    return below === undefined ? [] : [below.y - (above.y + above.height)];
+  });
+  expect(gaps, "复盘卡、牌友、战绩、规则相邻两块之间的间距一样").toEqual([gaps[0], gaps[0], gaps[0]]);
+  expect(gaps[0], "块之间有段间距").toBeGreaterThan(0);
+});
+
 test("老白还在写复盘时，复盘卡是生成中的提示", async ({ page }) => {
   await login(page);
   const request = page.request;

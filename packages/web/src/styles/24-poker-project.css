@@ -1,23 +1,26 @@
-/* ---------- 牌桌项目页：牌友、规则和例行、新项目里的牌桌入口 ---------- */
+/* ---------- 牌桌项目页：牌友、战绩、规则和例行、新项目里的牌桌入口 ---------- */
 
-.poker-seats {
+/* 块之间的段间距由后一块往上留，新加一块要进这个选择器。复盘卡紧跟页头，不在里面。 */
+.poker-seats,
+.poker-stats,
+.poker-rules {
   margin-top: var(--space-8);
 }
 
-.poker-seats-head {
+.poker-block-head {
   display: flex;
   gap: var(--space-4);
   align-items: baseline;
   padding-bottom: var(--space-5);
 }
 
-.poker-seats-head h2 {
+.poker-block-head h2 {
   margin: 0;
   color: var(--fg-1);
   font: var(--type-heading);
 }
 
-.poker-seats-head span {
+.poker-block-head span {
   color: var(--fg-3);
   font: var(--type-caption);
 }
@@ -72,8 +75,15 @@
   font: var(--type-caption);
 }
 
+.poker-stats-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-9);
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
 .poker-rules {
-  margin-top: var(--space-8);
   padding: var(--space-5) var(--space-6);
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
