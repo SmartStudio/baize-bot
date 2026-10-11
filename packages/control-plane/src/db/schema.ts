@@ -869,5 +869,5 @@ export const pokerHints = pgTable(
     messageId: text("message_id").references(() => messages.id, { onDelete: "set null" }),
     createdAt: createdAt(),
   },
-  (t) => [primaryKey({ columns: [t.handId, t.seq] })],
+  (t) => [primaryKey({ columns: [t.handId, t.seq] }), index("poker_hints_run_id_idx").on(t.runId)],
 );

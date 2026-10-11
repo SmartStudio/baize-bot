@@ -1,0 +1,1 @@
+CREATE INDEX "poker_hints_run_id_idx" ON "poker_hints" USING btree ("run_id");
