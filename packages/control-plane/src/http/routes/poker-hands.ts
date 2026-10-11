@@ -1,7 +1,15 @@
 import { PokerActRequest, StartHandRequest, type Message, type PokerTableView } from "@baize/shared";
 import { Hono } from "hono";
 import { apply } from "../../poker/engine.js";
-import { converge, pushMessages, pushTable, type PokerDeps } from "../../poker/converge.js";
+import { errorKind } from "../../agent/events.js";
+import {
+  converge,
+  pokerOptions,
+  pushMessages,
+  pushTable,
+  type AfterCommitStep,
+  type PokerDeps,
+} from "../../poker/converge.js";
 import {
   appendEvents,
   loadHand,
@@ -23,27 +31,20 @@ async function afterCommit(
   handId: string,
   committed: { ownerId: string; messages: Message[]; view: PokerTableView },
 ): Promise<PokerTableView> {
-  try {
-    pushMessages(deps, committed.ownerId, committed.messages);
-  } catch {
-    console.error("牌桌提交后消息推送失败", handId, "message_push_failed");
-  }
-  try {
-    await converge(deps, handId);
-  } catch {
-    console.error("牌桌提交后推进失败", handId, "converge_failed");
-  }
-  try {
-    await pushTable(deps, groupId);
-  } catch {
-    console.error("牌桌提交后视图推送失败", handId, "table_push_failed");
-  }
-  try {
-    return (await snapshot(deps.db, groupId)) ?? committed.view;
-  } catch {
-    console.error("牌桌提交后读取视图失败", handId, "snapshot_failed");
-    return committed.view;
-  }
+  const probe = pokerOptions(deps.db).afterCommitProbe;
+  const attempt = async <T>(step: AfterCommitStep, run: () => T | Promise<T>): Promise<T | undefined> => {
+    try {
+      probe?.(step);
+      return await run();
+    } catch (error) {
+      console.error("牌桌提交后这一步失败", handId, step, errorKind(error));
+      return undefined;
+    }
+  };
+  await attempt("message_push", () => pushMessages(deps, committed.ownerId, committed.messages));
+  await attempt("converge", () => converge(deps, handId));
+  await attempt("table_push", () => pushTable(deps, groupId));
+  return (await attempt("snapshot", () => snapshot(deps.db, groupId))) ?? committed.view;
 }
 
 export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
@@ -65,8 +66,8 @@ export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
       return c.json({ table: await afterCommit(deps, c.req.param("groupId"), result.handId, result) }, 201);
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
-      // 数据库插入错误可能带整行（含种子），不能把原异常交给公共日志。
-      console.error("牌桌开手失败");
+      // 数据库插入错误可能带整行（含种子），日志只记错误类别。
+      console.error("牌桌开手失败", errorKind(error));
       return c.json({ error: "服务端出错" }, 500);
     }
   });
@@ -104,7 +105,7 @@ export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
       return c.json({ table: await afterCommit(deps, initial.row.groupId, initial.row.id, result) }, 200);
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
-      console.error("牌桌出牌失败");
+      console.error("牌桌出牌失败", errorKind(error));
       return c.json({ error: "服务端出错" }, 500);
     }
   });

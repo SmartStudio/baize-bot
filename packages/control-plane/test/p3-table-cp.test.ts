@@ -16,11 +16,11 @@ import {
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { apply, newHand, replay, type HandState } from "../src/poker/engine.js";
-import * as pokerConverge from "../src/poker/converge.js";
-import * as pokerStore from "../src/poker/store.js";
+import type { AfterCommitStep } from "../src/poker/converge.js";
+import { SWEEP_FAILURE_LIMIT } from "../src/poker/sweeper.js";
 import { ensureComputer } from "../src/repo/computers.js";
 import { ensurePokerPresets } from "../src/repo/poker-presets.js";
-import { startServer, type RunningServer } from "../src/server.js";
+import { startServer, type RunningServer, type StartOptions } from "../src/server.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -46,6 +46,21 @@ beforeEach(async () => {
     poker: { intervalMs: 20, now: () => now, turnTimeoutMs: 60_000 },
   });
 });
+/** 换一套牌桌启动参数重起控制面，故障和时钟都从这里注入。要在 fixture() 之前调用，fixture 连的是新端口。 */
+async function restartWith(poker: NonNullable<StartOptions["poker"]>): Promise<void> {
+  await server.close();
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker,
+  });
+}
+/** 日志里第一条事件换成解析不了的样子，载入这手必然抛错：从库这一侧做出一手推进不下去的牌。 */
+async function corrupt(handId: PokerHandId): Promise<void> {
+  await database.sql`UPDATE poker_events SET event = ${JSON.stringify({ kind: "种子不得出现在日志" })}::jsonb WHERE hand_id = ${handId} AND seq = 0`;
+}
 afterEach(async () => {
   vi.restoreAllMocks();
   table?.agent.close();
@@ -710,13 +725,9 @@ it("控制面重启后重复成功出牌仍回原成功结果且台词只落一�
 });
 it("扫描器一手失败仍推进后面的桌且日志不含原异常", async () => {
   const broken = await fixture();
-  let brokenId = "";
-  const actual = pokerConverge.converge;
-  vi.spyOn(pokerConverge, "converge").mockImplementation((deps, id) =>
-    id === brokenId ? Promise.reject(new Error("种子不得出现在日志")) : actual(deps, id),
-  );
   const logged = vi.spyOn(console, "error").mockImplementation(() => {});
-  brokenId = await seeded();
+  const brokenId = await seeded();
+  await corrupt(brokenId);
   broken.agent.close();
   broken.push.close();
   try {
@@ -731,33 +742,75 @@ it("扫描器一手失败仍推进后面的桌且日志不含原异常", async (
     await database.sql`DELETE FROM users WHERE id=${broken.ownerId}`;
   }
 });
-for (const failure of ["converge", "pushMessages", "pushTable", "snapshot"] as const) {
-  it(`开手提交后 ${failure} 失败仍返回 201 和已落库视图`, async () => {
+it("扫描器对同一手连续失败到上限就作废它，桌子回 idle、筹码退回开手时，之后不再扫它", async () => {
+  const broken = await fixture();
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  const brokenId = await seeded(2, [], 1500);
+  await database.sql`UPDATE poker_tables SET seats = ${JSON.stringify(
+    [1, 2, 3, 4].map((seat) => ({ seat, botId: seat === 4 ? null : broken.botIds[seat - 1], stack: 1 })),
+  )}::jsonb WHERE group_id = ${broken.groupId}`;
+  const runId = (await broken.agent.expect("prompt")).runId;
+  await corrupt(brokenId);
+  for (;;) {
+    const push = await broken.push.next(10_000);
+    if (push.type === "message" && JSON.stringify(push.message.body).includes("这一手作废")) break;
+  }
+  const failures = () => logged.mock.calls.filter((args) => args[0] === "扫描牌桌手失败" && args[1] === brokenId);
+  expect(failures()).toHaveLength(SWEEP_FAILURE_LIMIT);
+  const [hand] = await database.sql<
+    { status: string; turn_run_id: string | null }[]
+  >`SELECT status, turn_run_id FROM poker_hands WHERE id = ${brokenId}`;
+  expect(hand).toEqual({ status: "abandoned", turn_run_id: null });
+  const [row] = await database.sql<
+    { status: string; seats: { stack: number }[] }[]
+  >`SELECT status, seats FROM poker_tables WHERE group_id = ${broken.groupId}`;
+  expect(row!.status).toBe("idle");
+  expect(row!.seats.map((seat) => seat.stack)).toEqual([1500, 1500, 1500, 1500]);
+  const [run] = await database.sql<
+    { ended: boolean }[]
+  >`SELECT ended_at IS NOT NULL AS ended FROM runs WHERE id = ${runId}`;
+  expect(run!.ended, "在途的牌友 run 收掉了").toBe(true);
+  broken.agent.close();
+  broken.push.close();
+  try {
     await fixture();
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    if (failure === "snapshot") vi.spyOn(pokerStore, failure).mockRejectedValue(new Error("后处理失败"));
-    else if (failure === "pushMessages")
-      vi.spyOn(pokerConverge, failure).mockImplementation(() => {
-        throw new Error("后处理失败");
-      });
-    else vi.spyOn(pokerConverge, failure).mockRejectedValue(new Error("后处理失败"));
+    await seeded();
+    await table.agent.expect("prompt");
+    expect(failures(), "作废之后扫描器不再碰这一手").toHaveLength(SWEEP_FAILURE_LIMIT);
+  } finally {
+    await database.sql`DELETE FROM users WHERE id=${broken.ownerId}`;
+  }
+});
+for (const failure of ["message_push", "converge", "table_push", "snapshot"] as const satisfies AfterCommitStep[]) {
+  const failAt = (step: AfterCommitStep): void => {
+    if (step === failure) throw new Error("后处理失败");
+  };
+  it(`开手提交后 ${failure} 失败仍返回 201 和已落库视图`, async () => {
+    await restartWith({ intervalMs: 20, now: () => now, turnTimeoutMs: 60_000, afterCommitProbe: failAt });
+    await fixture();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const response = await table.client.post(`/api/poker/tables/${table.groupId}/hands`);
     expect(response.status).toBe(201);
     const view = PokerTableResponse.parse(await response.json()).table;
     expect(view.status).toBe("in_hand");
     expect(view.hand).not.toBeNull();
     expect((await stored(view.hand!.id)).events).toEqual(view.hand!.view.events);
+    expect(logged.mock.calls).toContainEqual(["牌桌提交后这一步失败", view.hand!.id, failure, "Error"]);
   });
   it(`用户动作提交后 ${failure} 失败仍返回 200 和已落库视图`, async () => {
+    let armed = false;
+    await restartWith({
+      intervalMs: 20,
+      now: () => now,
+      turnTimeoutMs: 60_000,
+      afterCommitProbe: (step) => {
+        if (armed) failAt(step);
+      },
+    });
     await fixture();
     const view = await start();
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    if (failure === "snapshot") vi.spyOn(pokerStore, failure).mockRejectedValue(new Error("后处理失败"));
-    else if (failure === "pushMessages")
-      vi.spyOn(pokerConverge, failure).mockImplementation(() => {
-        throw new Error("后处理失败");
-      });
-    else vi.spyOn(pokerConverge, failure).mockRejectedValue(new Error("后处理失败"));
+    armed = true;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     const response = await advanceUser(view, { kind: "call" });
     expect(response.status).toBe(200);
     const after = PokerTableResponse.parse(await response.json()).table;
@@ -766,6 +819,7 @@ for (const failure of ["converge", "pushMessages", "pushTable", "snapshot"] as c
     expect(
       (await stored(view.hand!.id)).events.filter((event) => event.kind === "action" && event.seatId === "4"),
     ).toHaveLength(1);
+    expect(logged.mock.calls).toContainEqual(["牌桌提交后这一步失败", view.hand!.id, failure, "Error"]);
   });
 }
 it("dropped run 在同一决策点最多重派三次，重启后仍受限并等截止兜底", async () => {
@@ -801,21 +855,24 @@ it("dropped run 在同一决策点最多重派三次，重启后仍受限并等�
   table.agent.close();
   table.push.close();
   await server.close();
+  // 库里只有这一手在打，converge 每圈取一次时钟、扫描串行：第二次取时钟时第一次扫描已经推进完。
   let scanned!: () => void;
   const scan = new Promise<void>((resolve) => {
     scanned = resolve;
   });
-  const actual = pokerConverge.converge;
-  vi.spyOn(pokerConverge, "converge").mockImplementation(async (deps, handId) => {
-    await actual(deps, handId);
-    if (handId === id) scanned();
-  });
+  let clockReads = 0;
   server = await startServer({
     db: database.db,
     port: 0,
     credentialsKey: TEST_CREDENTIALS_KEY,
     toolSecretKey: "a".repeat(64),
-    poker: { intervalMs: 20, now: () => now },
+    poker: {
+      intervalMs: 20,
+      now: () => {
+        if (++clockReads === 2) scanned();
+        return now;
+      },
+    },
   });
   table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token)).agent;
   await scan;

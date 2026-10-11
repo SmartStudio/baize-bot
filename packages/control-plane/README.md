@@ -648,7 +648,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 | 内容                                         | 谁看得到       |
 | -------------------------------------------- | -------------- |
-| 牌友回合的触发消息、`poker-result:` 出牌回执 | 只有这个牌友   |
+| 牌友回合的触发消息                           | 只有这个牌友   |
 | 问牌的触发消息                               | 老白和用户     |
 | 老白回答问牌的文字                           | 只有用户       |
 | 复盘的触发消息                               | 只有老白       |
@@ -656,7 +656,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
 
-牌桌这边有三处读 `messages` 不带 viewer，读的都是代码自己刚写下的行。`poker/converge.ts` 数重派的触发消息，`poker/hint.ts` 按 id 查老白答出来的那一条，`events/poker-act.ts` 读出牌回执。列表类查询的 viewer 规则由 `test/p3-visible-read.test.ts` 钉着。
+牌桌这边只有一处读 `messages` 不带 viewer：`poker/hint.ts` 按 id 查老白答出来的那一条，读的是代码自己刚写下的行。出牌回执和重派计数都不在 `messages` 里，见下一节。列表类查询的 viewer 规则由 `test/p3-visible-read.test.ts` 钉着。
 
 ### converge 怎么推进
 
@@ -673,13 +673,15 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 **兜底动作。** `fallbackAction` 能过牌就过牌，否则弃牌，从不往里投筹码。超时的牌友因此最多输掉已经投进去的，不会因为掉线被迫跟注。
 
-**牌友的 `poker_act`。** `events/poker-act.ts` 在桌锁里先校验 run 属于这台电脑、角色是 `player`、这个 Bot 在这手牌里有座位，然后才碰牌局。幂等靠一条回执消息，id 是 `poker-result:` 加 `(runId, callId)` 的 SHA-256，`ON CONFLICT DO NOTHING` 认领，重复的帧读回已存的结果，不再碰牌局。没有轮到它、`seq` 过期、手已结束都回 `ok: false` 和中文原因，不推进。引擎拒绝时 `turn_attempts` 加一，回 `ok: false` 让牌友在同一次 run 里改，同时重新 `converge`。成功就落事件，台词非空就以牌友的名义发一条全群可见的消息。每次落动作都清掉手上的回合记录，下一个决策点重新派。
+**牌友的 `poker_act`。** `events/poker-act.ts` 在桌锁里先校验 run 属于这台电脑、角色是 `player`、这个 Bot 在这手牌里有座位，然后才碰牌局。幂等靠专表 `poker_act_receipts`，主键 `(run_id, call_id)`，`ON CONFLICT DO NOTHING` 认领，结果和动作同事务写进 `result`，重复的帧读回已存的结果，不再碰牌局。回执以前是 `messages` 里 id 以 `poker-result:` 开头的隐藏行，迁移 0028 把它们搬进专表后删掉了原行。没有轮到它、`seq` 过期、手已结束都回 `ok: false` 和中文原因，不推进。引擎拒绝时 `turn_attempts` 加一，回 `ok: false` 让牌友在同一次 run 里改，同时重新 `converge`。成功就落事件，台词非空就以牌友的名义发一条全群可见的消息。每次落动作都清掉手上的回合记录，下一个决策点重新派。
 
 **派出去的 prompt 在提交后才发。** `converge` 把 prompt 收进列表，事务提交后再发。发送失败就把 run 收成 `abandoned`，下一轮扫描会重派。
 
-**丢失的 run。** 手上记着回合，但 run 行没了，或 run 已结束而 prompt 没确认进会话（`context_confirmed_at` 为空），就当它丢了，沿用原截止时间重派。重派次数按群里带 `牌桌决策点 <handId>/<seq>` 标记的触发消息计数，首派加三次重派，计数在库里，重启后还作数。如果 run 已结束且 prompt 确认进过会话却没出牌，就把截止时间设成现在，下一圈直接兜底。电脑代理重连时 `hello` 里的 `activeRuns` 没有的 run 由 `AgentHub` 收成 `abandoned`（`#finishMissingRuns`），所以掉线再连上的牌友会被这里重派。
+**丢失的 run。** 手上记着回合，但 run 行没了，或 run 已结束而 prompt 没确认进会话（`context_confirmed_at` 为空），就当它丢了，沿用原截止时间重派。重派次数记在 `poker_hands` 的 `dispatch_seq` 和 `dispatch_count` 上：每发出一条牌友 run，`dispatch_seq` 等于当前事件数就加一，否则从 1 重新数。读的时候 `dispatch_seq` 对不上当前事件数就当 0，所以换决策点不用清。首派加三次重派，计数在库里，重启后还作数。如果 run 已结束且 prompt 确认进过会话却没出牌，就把截止时间设成现在，下一圈直接兜底。电脑代理重连时 `hello` 里的 `activeRuns` 没有的 run 由 `AgentHub` 收成 `abandoned`（`#finishMissingRuns`），所以掉线再连上的牌友会被这里重派。
 
-**谁来触发。** 三处。用户出牌和牌友出牌的路由在提交后调用。`PokerSweeper` 每秒扫描所有 `playing` 的手并逐手 `converge`，`tick` 串行，一手出错不挡后面的手，`stop` 等当前一轮扫完。扫描器让超时兜底、掉线重派和重启后接着打都不靠内存里的定时器，控制面重启后第一次扫描就接上。它在 `server.ts` 启动，`close` 时停。测试用 `configurePoker(db, { now, turnTimeoutMs })` 注入时钟和超时，时钟同样是参数不是全局。
+**谁来触发。** 三处。用户出牌和牌友出牌的路由在提交后调用。`PokerSweeper` 每秒扫描所有 `playing` 的手并逐手 `converge`，`tick` 串行，一手出错不挡后面的手，`stop` 等当前一轮扫完。日志只记手 id、第几次和 `errorKind`，不记原异常。扫描器让超时兜底、掉线重派和重启后接着打都不靠内存里的定时器，控制面重启后第一次扫描就接上。它在 `server.ts` 启动，`close` 时停。测试用 `configurePoker(db, { now, turnTimeoutMs, afterCommitProbe })` 注入时钟、超时和提交后的故障，都随 `startServer` 的 `poker` 参数传进来，时钟同样是参数不是全局。`afterCommitProbe` 在开手和出牌提交后的每一步（推消息、`converge`、推视图、读视图）之前调用，抛错就当这一步失败，路由照样回已落库的视图，日志记手 id、步骤和 `errorKind`。生产不传它。
+
+**一直推进不下去的手。** 同一手连续失败 30 次（`SWEEP_FAILURE_LIMIT`，约半分钟），扫描器调 `abandonHand` 把它作废：手标成 `abandoned`，不结算，在途的牌友 run 收成 `abandoned`，各座位筹码退回 `seats_start`，桌子回 `idle`，老白说一句这一手作废。选作废不选兜底散场，是因为散场在手进行中被拒，而且要读这一手的结果写复盘，推进失败时这些多半也读不出来；作废只碰手和桌两行，不重放日志，日志坏了也收得掉，用户之后能开下一手或散场。`abandoned` 的手不算进战绩和关键手，那两处只认 `complete`。计数在扫描器内存里，一成功就清零，重启也清零，坏手在新进程里要再失败满一轮才作废。偶发的库抖动撑不满半分钟，库整个断开时作废本身也写不进去，所以不会误伤正常的手。
 
 ### 问老白为什么挂在决策点上
 

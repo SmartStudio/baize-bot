@@ -57,7 +57,7 @@ describe("迁移", () => {
     }
   });
 
-  it("建出三十四张业务表加一张迁移记账表", async () => {
+  it("建出三十五张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -81,6 +81,7 @@ describe("迁移", () => {
       "messages",
       "metric_samples",
       "oauth_states",
+      "poker_act_receipts",
       "poker_events",
       "poker_hands",
       "poker_hints",

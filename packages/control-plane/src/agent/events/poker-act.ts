@@ -1,7 +1,6 @@
-import { BotId, ControlToAgent, type AgentToControl, type Message } from "@baize/shared";
-import { eq, sql } from "drizzle-orm";
-import { createHash } from "node:crypto";
-import { messages as storedMessages, pokerHands, runs } from "../../db/schema.js";
+import { BotId, type AgentToControl, type Message } from "@baize/shared";
+import { and, eq, sql } from "drizzle-orm";
+import { pokerActReceipts, pokerHands, runs, type PokerActResult } from "../../db/schema.js";
 import { apply } from "../../poker/engine.js";
 import { converge, pushMessages, pushTable } from "../../poker/converge.js";
 import { appendEvents, loadHand, withTableLock } from "../../poker/store.js";
@@ -9,7 +8,6 @@ import { appendMessage } from "../../repo/messages.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
 
-type PokerResult = Extract<ControlToAgent, { type: "poker_result" }>["result"];
 export type PokerActEvent = Extract<AgentToControl, { type: "poker_act" }>;
 export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection, event: PokerActEvent): Promise<void> {
   const initial = await loadHand(deps.db, event.handId);
@@ -28,39 +26,20 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
     )
       return null;
 
-    // 首次回执和动作同事务落库。主键认领挡重复帧，隐藏系统消息让重启后仍能回同一个结果。
-    const receiptId = `poker-result:${createHash("sha256")
-      .update(JSON.stringify([event.runId, event.callId]))
-      .digest("hex")}`;
+    // 首次回执和动作同事务落库。主键认领挡重复帧，重启后重复的帧读回同一个结果。
+    const receipt = and(eq(pokerActReceipts.runId, event.runId), eq(pokerActReceipts.callId, event.callId));
     const [claimed] = await db
-      .insert(storedMessages)
-      .values({
-        id: receiptId,
-        groupId: table.groupId,
-        body: { kind: "system", text: "出牌确认处理中" },
-        visibleTo: [{ kind: "bot", botId: BotId.parse(run.botId) }],
-        createdAt: new Date(),
-      })
-      .onConflictDoNothing({ target: storedMessages.id })
+      .insert(pokerActReceipts)
+      .values({ runId: event.runId, callId: event.callId, result: null })
+      .onConflictDoNothing()
       .returning();
     if (!claimed) {
-      const [receipt] = await db.select().from(storedMessages).where(eq(storedMessages.id, receiptId));
-      if (receipt?.body.kind !== "system") throw new Error("出牌回执记录不完整");
-      const saved = ControlToAgent.parse(JSON.parse(receipt.body.text));
-      if (saved.type !== "poker_result") throw new Error("出牌回执记录格式不对");
+      const [saved] = await db.select({ result: pokerActReceipts.result }).from(pokerActReceipts).where(receipt);
+      if (!saved?.result) throw new Error("出牌回执记录不完整");
       return { ownerId: table.ownerId, messages: [] as Message[], result: saved.result, advance: false };
     }
-    const reply = async (result: PokerResult, messages: Message[] = [], advance = false) => {
-      await db
-        .update(storedMessages)
-        .set({
-          body: {
-            kind: "system",
-            text: JSON.stringify({ type: "poker_result", runId: event.runId, callId: event.callId, result }),
-          },
-          revision: sql`${storedMessages.revision} + 1`,
-        })
-        .where(eq(storedMessages.id, receiptId));
+    const reply = async (result: PokerActResult, messages: Message[] = [], advance = false) => {
+      await db.update(pokerActReceipts).set({ result }).where(receipt);
       return { ownerId: table.ownerId, messages, result, advance };
     };
     if (

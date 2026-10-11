@@ -11,6 +11,7 @@ import type {
   ComputerKind as ComputerKindSchema,
   ComputerStatus,
   ContentPlanStatus as ContentPlanStatusSchema,
+  ControlToAgent,
   DraftContent,
   DraftEdit,
   DraftStatus as DraftStatusSchema,
@@ -93,7 +94,9 @@ export type StoredTrigger =
 
 /** 牌桌一个座位在库里的样子：座位号、坐着的 Bot（4 号位是用户，为 null）、筹码。筹码跟座位走（D27）。 */
 export type StoredPokerSeat = { readonly seat: PokerSeatNo; readonly botId: string | null; readonly stack: number };
-export type StoredPokerHandStatus = "playing" | "complete";
+export type PokerActResult = Extract<ControlToAgent, { type: "poker_result" }>["result"];
+/** abandoned 是扫描器连续推进失败后作废的手：不结算，桌子回 idle，座位筹码退回 seats_start。 */
+export type StoredPokerHandStatus = "playing" | "complete" | "abandoned";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
 
@@ -827,6 +830,9 @@ export const pokerHands = pgTable(
     turnRunId: text("turn_run_id").references(() => runs.id, { onDelete: "set null" }),
     turnAttempts: integer("turn_attempts").notNull().default(0),
     turnDeadline: timestamp("turn_deadline", { withTimezone: true }),
+    // 当前决策点（事件数为 dispatch_seq）已发出几次牌友 run，首派加重派。换了决策点 seq 对不上就当 0，不用清。
+    dispatchSeq: integer("dispatch_seq"),
+    dispatchCount: integer("dispatch_count").notNull().default(0),
     version: integer("version").notNull().default(0),
     createdAt: createdAt(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -837,7 +843,8 @@ export const pokerHands = pgTable(
       .on(t.groupId)
       .where(sql`${t.status} = 'playing'`),
     index("poker_hands_session_id_idx").on(t.sessionId),
-    check("poker_hands_status_check", sql`${t.status} IN ('playing', 'complete')`),
+    check("poker_hands_status_check", sql`${t.status} IN ('playing', 'complete', 'abandoned')`),
+    check("poker_hands_dispatch_check", sql`(${t.dispatchSeq} IS NULL) = (${t.dispatchCount} = 0)`),
   ],
 );
 
@@ -870,4 +877,19 @@ export const pokerHints = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.handId, t.seq] }), index("poker_hints_run_id_idx").on(t.runId)],
+);
+
+// 牌友 poker_act 的回执。主键 (run_id, call_id) 就是幂等：重复的帧撞主键，读回已存的 result 原样回。
+// result 为空只在认领它的那个事务里出现，和动作同事务提交，提交后恒非空。
+export const pokerActReceipts = pgTable(
+  "poker_act_receipts",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => runs.id, { onDelete: "cascade" }),
+    callId: text("call_id").notNull(),
+    result: jsonb("result").$type<PokerActResult>(),
+    createdAt: createdAt(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.callId] })],
 );

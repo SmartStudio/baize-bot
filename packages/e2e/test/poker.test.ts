@@ -339,11 +339,12 @@ describe("端到端：U15 牌局", () => {
           actions.map((action) => action.action),
           CASES[2],
         ).toEqual(["call", "check"]);
-        const rows = await stack.sql<{ body: { text: string } }[]>`
-        SELECT body FROM messages WHERE group_id = ${table.groupId} AND id LIKE 'poker-result:%'
+        const rows = await stack.sql<{ runId: string; callId: string; result: unknown }[]>`
+        SELECT r.run_id AS "runId", r.call_id AS "callId", r.result
+        FROM poker_act_receipts r JOIN runs ON runs.id = r.run_id WHERE runs.group_id = ${table.groupId}
       `;
         const receipts = rows
-          .map((row) => ControlToAgent.parse(JSON.parse(row.body.text)))
+          .map((row) => ControlToAgent.parse({ type: "poker_result", ...row }))
           .flatMap((message) =>
             message.type === "poker_result" && actions.some((action) => action.callId === message.callId)
               ? [message]

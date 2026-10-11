@@ -25,9 +25,16 @@ const indexesOf = async (database: TestDb, table: string): Promise<Set<string>> 
   return new Set(rows.map((row) => row.indexname));
 };
 
-const POKER_TABLES = ["poker_events", "poker_hands", "poker_hints", "poker_sessions", "poker_tables"];
+const POKER_TABLES = [
+  "poker_act_receipts",
+  "poker_events",
+  "poker_hands",
+  "poker_hints",
+  "poker_sessions",
+  "poker_tables",
+];
 
-it("空库从头跑通：三张老表各加了列，五张牌局表都在，带条件的唯一索引都建了", async () => {
+it("空库从头跑通：三张老表各加了列，六张牌局表都在，带条件的唯一索引都建了", async () => {
   const database = await createTestDb();
   try {
     const columns = await columnsOf(database, ["bots", "messages", "runs", ...POKER_TABLES]);

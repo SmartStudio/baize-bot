@@ -22,18 +22,6 @@ type Exception = {
  */
 const EXCEPTIONS: readonly Exception[] = [
   {
-    file: "agent/events/poker-act.ts",
-    fn: "handlePokerAct",
-    sites: 1,
-    reason: "出牌回执是这个函数刚在同一事务里按哈希 id 认领的隐藏行，只给 Bot 看，读回来的是自己写的那一条",
-  },
-  {
-    file: "poker/converge.ts",
-    fn: "converge",
-    sites: 1,
-    reason: "数本局已发出的决策触发消息，这些消息按设计只有被派的牌友看得见，加 viewer 反而数不到",
-  },
-  {
     file: "poker/hint.ts",
     fn: "refreshHintForRun",
     sites: 1,

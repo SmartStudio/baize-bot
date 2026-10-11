@@ -1481,10 +1481,11 @@ const run = async (): Promise<void> => {
       retries.map((action) => action.action),
       "同决策点被拒绝后重试过牌",
     ).toEqual(["call", "check"]);
-    const resultRows = await s.sql<{ body: { text: string } }[]>`
-      SELECT body FROM messages WHERE group_id = ${pokerGroupId} AND id LIKE 'poker-result:%'`;
+    const resultRows = await s.sql<{ runId: string; callId: string; result: unknown }[]>`
+      SELECT r.run_id AS "runId", r.call_id AS "callId", r.result
+      FROM poker_act_receipts r JOIN runs ON runs.id = r.run_id WHERE runs.group_id = ${pokerGroupId}`;
     const receipts = resultRows
-      .map((row) => ControlToAgent.parse(JSON.parse(row.body.text)))
+      .map((row) => ControlToAgent.parse({ type: "poker_result", ...row }))
       .flatMap((message) =>
         message.type === "poker_result" && retries.some((retry) => retry.callId === message.callId) ? [message] : [],
       );
