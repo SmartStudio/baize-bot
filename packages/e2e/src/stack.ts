@@ -60,6 +60,8 @@ export type StackOptions = {
   readonly xApiBaseUrl?: string;
   /** 只控制指标取样的时间，不改产品的扫描间隔和六小时格子。 */
   readonly metricsNow?: () => Date;
+  /** 只控制例行调度器的时钟；配合 routinesTick 走真实到点触发。 */
+  readonly routinesNow?: () => Date;
   /** 换掉进程内电脑代理的助理 Chrome。不给就是真 Chrome，只在 Bot 要用浏览器时才起。 */
   readonly makeChrome?: AgentOptions["makeChrome"];
 };
@@ -99,6 +101,7 @@ export type Stack = {
   publishTick(): Promise<void>;
   /** 手动跑服务器已有的指标扫描，返回时取样和推送都已完成。 */
   metricsTick(): Promise<void>;
+  routinesTick(): Promise<void>;
   /** 照 account-add 脚本的做法，给当前用户挂一个走接口发布的账号，令牌加密入库。 */
   addAccount(input: { platform: Platform; handle: string; token: string }): Promise<Account>;
   close(): Promise<void>;
@@ -151,6 +154,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       // 发布只在用例调 publishTick 时跑，到点的草稿什么时候发由用例说了算。
       publisher: { intervalMs: DAY_MS },
       ...(options.metricsNow === undefined ? {} : { metrics: { now: options.metricsNow } }),
+      ...(options.routinesNow === undefined ? {} : { scheduler: { now: options.routinesNow, intervalMs: DAY_MS } }),
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
     });
     closers.push(() => server.close());
@@ -342,6 +346,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       },
       publishTick: () => server.publisher.tick(),
       metricsTick: () => server.metrics.tick(),
+      routinesTick: () => server.routines.tick(),
       addAccount: async ({ platform, handle, token }) => {
         const { user } = MeResponse.parse(await api.get("/api/me"));
         return addAccountWithToken(

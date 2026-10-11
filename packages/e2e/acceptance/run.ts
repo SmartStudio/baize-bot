@@ -8,12 +8,18 @@ import { chromium, expect, type Browser, type BrowserContext, type Page } from "
 import {
   AccountListResponse,
   BotListResponse,
+  BotTemplate,
   ComputerListResponse,
   GroupResponse,
   RoutineListResponse,
+  RoutineResponse,
+  ToolListResponse,
+  ToolResponse,
+  UsageResponse,
   type Platform,
 } from "@baize/shared";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
+import { startTestMcp, type TestMcp } from "../src/mcp.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream, type ChatRequest, type ScriptedTurn } from "../src/upstream.js";
 import { fakeChrome } from "./fake-chrome.js";
@@ -53,6 +59,11 @@ const PREFERENCE = "小红书标题都在 15 个字以内";
 const TITLE_ASK = "给周四那篇起个标题";
 const TITLE_AGAIN_ASK = "再起一个标题";
 const WRITER_DESCRIPTION = "写小红书图文和长文，只起草不直接发";
+const PRIVATE_ASK = "只给我记住：私人号的验收暗号是 p2-private-731";
+const PRIVATE_PREFERENCE = "私人号的验收暗号是 p2-private-731";
+const PLUGIN = "分享验收插件";
+const PLUGIN_SECRET = "Bearer p2-acceptance-d-secret";
+const BUDGET_ROUTINE = "预算到点验收";
 
 // 剧本要用的 id 跑起来才知道，各段拿到后填进来。
 const ids: { project: string; accounts: Partial<Record<Platform, string>> } = { project: "", accounts: {} };
@@ -261,6 +272,11 @@ const turn = (request: ChatRequest): ScriptedTurn => {
       ? say(`记下了，以后${PREFERENCE}`)
       : call("remember-title", "remember_preference", { text: PREFERENCE, private: false });
   }
+  if (current.includes(PRIVATE_ASK)) {
+    return afterTool
+      ? say("这条私人偏好记下了，不默认分享。")
+      : call("remember-private", "remember_preference", { text: PRIVATE_PREFERENCE, private: true });
+  }
   if (current.includes(TITLE_ASK)) return say("「一个人带一支 AI 小队」");
   if (current.includes(TITLE_AGAIN_ASK)) return say("「白泽：一个人的公司也能有队伍」");
   throw new Error(`假上游没有这条请求的剧本：${prompt.slice(-200)}`);
@@ -430,7 +446,9 @@ const run = async (): Promise<void> => {
   const upstream = await startUpstream(turn);
   const chrome = fakeChrome();
   let metricsNow = new Date();
+  let routinesNow = new Date();
   let platforms: FakePlatforms | undefined;
+  let mcp: TestMcp | undefined;
   let stack: Stack | undefined;
   let web: { url: string; child: ChildProcess } | undefined;
   let browser: Browser | undefined;
@@ -453,6 +471,7 @@ const run = async (): Promise<void> => {
       githubApiBaseUrl: fake.githubBaseUrl,
       xApiBaseUrl: fake.xBaseUrl,
       metricsNow: () => metricsNow,
+      routinesNow: () => routinesNow,
       makeChrome: chrome.factory,
       startComputer: false,
       bootstrap: async (port) => {
@@ -476,7 +495,9 @@ const run = async (): Promise<void> => {
         return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
       },
     });
-    if (web === undefined || page === undefined || context === undefined) throw new Error("注册阶段没把页面起来");
+    if (web === undefined || page === undefined || context === undefined || browser === undefined) {
+      throw new Error("注册阶段没把页面起来");
+    }
     const s = stack;
     const p: Page = page;
     const ctx: BrowserContext = context;
@@ -1037,8 +1058,169 @@ const run = async (): Promise<void> => {
     ).toEqual({ name: "阿文", tags: [], description: "" });
     await check(p.getByTestId("bot-header-description")).toHaveCount(0);
     await shot(p, "U13-4-empty-saved");
-    skip("U14 分享（代码还没合进 int）");
-    process.stdout.write("acceptance: U1 到 U13 走完\n");
+    // U13 清空的资料恢复成分享配方；技能和已授权插件用真实 HTTP 创建，本地 MCP 不碰真实平台。
+    await s.patch(`/api/bots/${writerId}`, { tags: ["小红书", "长文"], description: WRITER_DESCRIPTION });
+    await s.post(`/api/bots/${writerId}/skills`, { name: "检查标题", steps: ["标题不超过 15 个字"] });
+    mcp = await startTestMcp();
+    const plugin = ToolResponse.parse(
+      await s.post("/api/tools", { name: PLUGIN, url: mcp.baseUrl, authorization: PLUGIN_SECRET }),
+    ).tool;
+    await s.patch(`/api/tools/${plugin.id}`, { assignedBotIds: [writerId] });
+    // HTTP 预置插件不经过 Web actions，重新载入后界面才拿到这份配置。
+    await p.reload();
+    await check(p.getByTestId("bot-header")).toBeVisible();
+    begin("设置五页和预算：假上游已结账，预算 1 元，到点没跑且保持开启，试跑照常");
+    await openSettings(p, "general");
+    await check(p.getByTestId("theme-select")).toBeVisible();
+    await check(p.getByTestId("notify-switch")).toBeVisible();
+    await shot(p, "settings-1-general");
+    await p.getByTestId("settings-nav-accounts").click();
+    await check(p.getByTestId("computer-status")).toHaveAttribute("data-status", "online");
+    await check(p.getByTestId("account-row")).toHaveCount(3);
+    await shot(p, "settings-2-accounts");
+    await p.getByTestId("settings-nav-tools").click();
+    await check(p.getByTestId("tool-card").filter({ hasText: PLUGIN })).toBeVisible();
+    await shot(p, "settings-3-tools");
+    await p.getByTestId("settings-nav-usage").click();
+    const spent = UsageResponse.parse(await s.get("/api/usage"));
+    check(spent.total, "前面故事经假上游 usage 和真实 run_done 结账，花费已超过 1 元").toBeGreaterThan(1);
+    await p.getByTestId("budget-edit").click();
+    await p.getByTestId("budget-input").fill("1");
+    await p.getByTestId("budget-save").click();
+    await check(p.getByTestId("usage-budget")).toHaveText("/ 预算 ¥1");
+    await check(p.getByTestId("usage-meter")).toHaveAttribute("aria-valuenow", "1");
+    await check(p.getByTestId("usage-meter").locator("i")).toHaveAttribute("style", "width: 100%;");
+    await shot(p, "settings-4-usage-over-budget");
+    await p.getByTestId("settings-nav-privacy").click();
+    await check(p.getByTestId("privacy-export")).toBeVisible();
+    await check(p.getByTestId("privacy-delete")).toBeVisible();
+    await shot(p, "settings-5-privacy");
+    await p.getByTestId("settings-close").click();
+    const budgetRoutine = RoutineResponse.parse(
+      await s.post(`/api/bots/${weekly.botId}/routines`, {
+        name: BUDGET_ROUTINE,
+        instruction: ROUTINE_INSTRUCTION,
+        triggers: [{ kind: "cron", expr: "* * * * *" }],
+        onFailure: "stop_and_tell",
+        boundary: "read_only",
+      }),
+    ).routine;
+    await p.getByTestId("routines-nav").click();
+    const budgetRow = p.getByTestId("routine-row").filter({ hasText: BUDGET_ROUTINE });
+    await check(budgetRow).toHaveAttribute("data-state", "on");
+    await shot(p, "budget-1-enabled");
+    // 到点时刻留在真实现在之前，后面的试跑才能按开始时间排在运行记录最前面。
+    routinesNow = new Date(Date.now() - 60_000);
+    await s.routinesTick();
+    const promptsBeforeBudget = s.prompts().length;
+    routinesNow = new Date(Math.floor(routinesNow.getTime() / 60_000) * 60_000 + 60_000);
+    await s.routinesTick();
+    await check(budgetRow.getByTestId("routine-last")).toContainText("本月超预算，没跑");
+    await check(budgetRow).toHaveAttribute("data-state", "on");
+    check(await routineState(s, budgetRoutine.id)).toBe("on");
+    check(s.prompts().length, "到点超预算没有向电脑派活").toBe(promptsBeforeBudget);
+    const stopped = RoutineListResponse.parse(await s.get("/api/routines")).items.find(
+      (item) => item.id === budgetRoutine.id,
+    );
+    check(stopped?.runs.map(({ status, note }) => ({ status, note }))).toEqual([
+      { status: "stopped", note: "本月超预算，没跑" },
+    ]);
+    await shot(p, "budget-2-cron-stopped");
+    await budgetRow.getByTestId("routine-run").click();
+    await waitFor("超预算的试跑照常派活并结账", async () => {
+      const item = RoutineListResponse.parse(await s.get("/api/routines")).items.find(
+        (routine) => routine.id === budgetRoutine.id,
+      );
+      return item?.runs.some((entry) => entry.status === "ok") === true;
+    });
+    check(s.prompts().length, "用户点试跑向真运行器派活").toBeGreaterThan(promptsBeforeBudget);
+    await check(budgetRow.getByTestId("routine-last")).toContainText("完成");
+    await check(budgetRow).toHaveAttribute("data-state", "on");
+    await shot(p, "budget-3-trial-ran");
+    process.stdout.write("  设置五页和预算 passed\n");
+    begin("U14 分享阿文：默认配方无凭据和对话，私人偏好留下，第二个账号粘贴导入独立副本");
+    await p.getByTestId("team-nav").click();
+    await p.locator("[data-testid=team-bot][data-bot-name=阿文]").getByTestId("team-bot-chat").click();
+    await sendInChat(p, TEACH_ASK);
+    await check(knowToggle).toContainText("记住 1 条");
+    await sendInChat(p, PRIVATE_ASK);
+    await check(knowToggle).toContainText("记住 2 条");
+    await knowToggle.click();
+    await check(p.getByTestId("bot-pref").filter({ hasText: PRIVATE_PREFERENCE })).toContainText("私人");
+    await p.getByTestId("bot-share").click();
+    const share = p.getByTestId("share-dialog");
+    await check(share.getByTestId("share-summary")).toContainText("你的登录、对话、文件和项目不带");
+    await check(share.getByTestId("share-summary")).toContainText("1 个技能、1 个插件的配置、1 条偏好");
+    await check(share.getByTestId("share-summary")).toContainText("有 1 条只和你的号有关，自动留下");
+    await check(share.getByTestId("share-more")).toHaveAttribute("aria-expanded", "false");
+    await check(share.getByTestId("share-pref")).toHaveCount(0);
+    await shot(p, "U14-1-share-default");
+    await share.getByTestId("share-copy").click();
+    await check(share.getByTestId("share-link")).toBeVisible();
+    const link = await share.getByTestId("share-link").inputValue();
+    const decoded = Buffer.from(new URL(link).hash.slice(1), "base64url").toString("utf8");
+    const template = BotTemplate.parse(JSON.parse(decoded));
+    check(decoded, "解码后的分享包 grep 不到凭据字段").not.toMatch(/token|cookie|authorization/i);
+    for (const secret of [PLUGIN_SECRET, "gh-e2e", "x-e2e", PRIVATE_PREFERENCE]) {
+      check(decoded, "分享包不带原账号的凭据和私人偏好").not.toContain(secret);
+    }
+    for (const cookie of await ctx.cookies(home))
+      check(decoded, "分享包不带登录 cookie 值").not.toContain(cookie.value);
+    for (const text of [XHS_ASK, TEACH_ASK, TITLE_ASK, PRIVATE_ASK, "一个人带一支 AI 小队"]) {
+      check(decoded, "分享包不带对话正文").not.toContain(text);
+    }
+    check(template.preferences).toEqual([{ text: PREFERENCE }]);
+    check(template.skills).toEqual([{ name: "检查标题", steps: ["标题不超过 15 个字"] }]);
+    check(template.plugins).toHaveLength(1);
+    writeFileSync(join(screenshots, "U14-share-package.txt"), `${JSON.stringify(template, null, 2)}\n`);
+    process.stdout.write("  U14 分享包凭据、对话和私人偏好检查 passed\n");
+    await shot(p, "U14-2-share-link");
+    await share.getByTestId("share-close").click();
+
+    const friend = await browser.newContext({ viewport: { width: 1_440, height: 900 } });
+    try {
+      const f = await friend.newPage();
+      await f.goto(`${home}/register`);
+      await f.getByTestId("register-email").fill("friend@baize-acceptance.example");
+      await f.getByTestId("register-password").fill("acceptance-pass");
+      await f.getByTestId("register-name").fill("朋友");
+      await f.getByTestId("register-submit").click();
+      await check(f.getByTestId("today-page")).toBeVisible();
+      // 预置同名 Bot，确保导入方的撞名分支在第二个账号上真实发生。
+      const existing = await friend.request.post(`${home}/api/bots`, { data: { name: "阿文" } });
+      check(existing.status()).toBe(201);
+      await f.getByTestId("team-nav").click();
+      await f.getByTestId("import-bot").click();
+      await f.getByTestId("import-link").fill(link);
+      await shot(f, "U14-3-friend-paste");
+      await f.getByTestId("import-go").click();
+      await check(f.getByTestId("import-dialog")).toHaveCount(0);
+      const importedRow = f.locator("[data-testid=team-bot][data-bot-name=阿文2]");
+      await check(importedRow).toContainText("还没进项目");
+      await check(importedRow).toContainText(WRITER_DESCRIPTION);
+      await shot(f, "U14-4-friend-team");
+      const friendTools = ToolListResponse.parse(await (await friend.request.get(`${home}/api/tools`)).json()).items;
+      check(friendTools).toHaveLength(1);
+      const importedPlugin = friendTools[0];
+      if (importedPlugin === undefined) throw new Error("导入后没有插件");
+      const storedPlugins = await s.sql<{ status: string; authorization_enc: string | null }[]>`
+        SELECT status, authorization_enc FROM tool_connections WHERE id = ${importedPlugin.id}`;
+      check(storedPlugins, "导入的插件在数据库里待授权且没有凭据").toEqual([
+        { status: "awaiting_authorization", authorization_enc: null },
+      ]);
+      process.stdout.write("  U14 第二账号导入后缀和插件落库待授权检查 passed\n");
+      await openSettings(f, "tools");
+      await shot(f, "U14-5-friend-plugins");
+      const pluginCard = f.locator(`[data-testid=tool-card][data-tool-name="${PLUGIN}"]`);
+      await check(pluginCard.getByTestId("tool-status"), "导入的插件卡显示待授权").toHaveText("待授权");
+      await check(pluginCard.getByTestId("tool-pending")).toContainText("点开填授权，或无凭据再试");
+      await check(pluginCard.getByTestId("tool-authorize-open"), "卡上有填授权的入口").toBeVisible();
+      await check(pluginCard.getByTestId("tool-retry-anonymous")).toBeVisible();
+    } finally {
+      await friend.close();
+    }
+
+    process.stdout.write("acceptance: U1 到 U14、预算和设置五页走完\n");
   } catch (error) {
     throw new Error(`${step} 失败：${String(error)}\n电脑代理日志：${stack?.agentLog().slice(-2_000) ?? "未启动"}`, {
       cause: error,
@@ -1048,6 +1230,7 @@ const run = async (): Promise<void> => {
     if (web !== undefined) await stopWeb((web as { child: ChildProcess }).child);
     await stack?.close();
     await platforms?.close();
+    await mcp?.close();
     await upstream.close();
   }
 };
