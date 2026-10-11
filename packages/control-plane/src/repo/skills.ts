@@ -1,10 +1,10 @@
-import { SkillId, UserId, type BotId, type Message, type MessageId, type Skill } from "@baize/shared";
+import { SkillId, UserId, type BotId, type Message, type MessageId, type Skill, type Viewer } from "@baize/shared";
 import { TransactionRollbackError, and, asc, eq, inArray, sql } from "drizzle-orm";
 import { parseSkillRefs } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, skills } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { nextRevision, type SkillOfferBody, type Tx } from "./messages.js";
+import { messageVisibleTo, nextRevision, type SkillOfferBody, type Tx } from "./messages.js";
 import { toMessage, toSkill } from "./rows.js";
 
 export type SkillRow = typeof skills.$inferSelect;
@@ -157,12 +157,13 @@ export async function findOwnedSkillOfferMessage(
   db: Db,
   ownerId: UserId,
   messageId: MessageId,
+  viewer: Viewer,
 ): Promise<SkillOfferMessage | null> {
   const [found] = await db
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), messageVisibleTo(viewer)))
     .limit(1);
   if (found === undefined || found.row.body.kind !== "skill_offer") return null;
   return {

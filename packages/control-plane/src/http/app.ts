@@ -367,13 +367,17 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.body(null, 204);
   });
 
-  app.get("/api/usage", async (c) => c.json(UsageResponse.parse(await getUsage(db, c.get("user").id))));
+  app.get("/api/usage", async (c) =>
+    c.json(UsageResponse.parse(await getUsage(db, c.get("user").id, { kind: "user" }))),
+  );
 
-  app.get("/api/today", async (c) => c.json(TodayResponse.parse(await getToday(db, c.get("user").id))));
+  app.get("/api/today", async (c) =>
+    c.json(TodayResponse.parse(await getToday(db, c.get("user").id, { kind: "user" }))),
+  );
 
   app.get("/api/projects/:groupId", async (c) => {
     const groupId = GroupId.safeParse(c.req.param("groupId"));
-    const project = groupId.success ? await getProject(db, c.get("user").id, groupId.data) : null;
+    const project = groupId.success ? await getProject(db, c.get("user").id, groupId.data, { kind: "user" }) : null;
     return project === null ? c.json(NOT_FOUND, 404) : c.json(ProjectResponse.parse(project));
   });
 
@@ -706,7 +710,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.get("/api/messages/:id", async (c) => {
     const messageId = MessageId.safeParse(c.req.param("id"));
     if (!messageId.success) return c.json(NOT_FOUND, 404);
-    const message = await findOwnedMessage(db, c.get("user").id, messageId.data);
+    const message = await findOwnedMessage(db, c.get("user").id, messageId.data, { kind: "user" });
     if (message === null) return c.json(NOT_FOUND, 404);
     return c.json(MessageResponse.parse({ message }));
   });
@@ -715,7 +719,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const messageId = MessageId.safeParse(c.req.param("id"));
     if (!messageId.success) return c.json(NOT_FOUND, 404);
     // 别人的消息、不存在的消息、正文不是这张卡的消息，在这里都是 null，一律 404。
-    const offer = await findOwnedSkillOfferMessage(db, c.get("user").id, messageId.data);
+    const offer = await findOwnedSkillOfferMessage(db, c.get("user").id, messageId.data, { kind: "user" });
     if (offer === null) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, DecideSkillOfferRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
@@ -740,7 +744,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const messageId = MessageId.safeParse(c.req.param("id"));
     if (!messageId.success) return c.json(NOT_FOUND, 404);
     const ownerId = c.get("user").id;
-    const offer = await findOwnedProjectOffer(db, ownerId, messageId.data);
+    const offer = await findOwnedProjectOffer(db, ownerId, messageId.data, { kind: "user" });
     if (offer === null) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, DecideProjectOfferRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
@@ -817,10 +821,15 @@ export function createApp(deps: AppDeps): Hono<Env> {
     });
     if (!query.success) return c.json({ error: "查询参数不合法" }, 400);
 
-    const result = await listMessages(db, owned, {
-      before: query.data.before,
-      limit: query.data.limit,
-    });
+    const result = await listMessages(
+      db,
+      owned,
+      { kind: "user" },
+      {
+        before: query.data.before,
+        limit: query.data.limit,
+      },
+    );
     if (result.kind === "unknown_cursor") return c.json(NOT_FOUND, 404);
 
     const approvalIds = result.page.messages.flatMap((m) => (m.body.kind === "approval" ? [m.body.approvalId] : []));
@@ -886,7 +895,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const approvalId = ApprovalId.safeParse(c.req.param("id"));
     if (!approvalId.success) return c.json(NOT_FOUND, 404);
     // 别人的审批查不到，和不存在一样是 404，不泄露有没有这条。
-    const owned = await findApprovalId(db, c.get("user").id, approvalId.data);
+    const owned = await findApprovalId(db, c.get("user").id, approvalId.data, { kind: "user" });
     if (owned === null) return c.json(NOT_FOUND, 404);
     const body = await readJson(c.req.raw, DecideApprovalRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);

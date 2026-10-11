@@ -19,6 +19,7 @@ import {
   type MessageBody,
   type ModelPurpose,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { decideApproval, latestPendingApproval, listApprovals } from "../repo/approvals.js";
@@ -156,7 +157,7 @@ export async function dispatchUserMessage(
     // 名单空有两种：多 Bot 群被删空，群还在，留话给人看；单聊随 Bot 没了，群也没了，没地方留。
     if (members.length === 0) return noTarget();
     // 读完名单到这里之间群可能随账号或单聊 Bot 级联删掉，触发消息跟着没了，群里没地方留话，这一轮就此结束。
-    const epoch = await messageSeq(deps.db, trigger.id);
+    const epoch = await messageSeq(deps.db, trigger.id, { kind: "user" });
     if (epoch === null) return { kind: "no_target" };
     const chiefBotId = await findChiefBotId(deps.db, groupId);
     const currentBotId = (await findTaskByGroup(deps.db, groupId))?.currentBotId ?? null;
@@ -254,10 +255,15 @@ async function sendSpeaker(
   // Bot 在派活途中被删了，只跳过它，不留 system，多 Bot 群里页面已收到 bot_deleted。
   // 单聊群已随 Bot 级联删掉，连「没人接」都写不进去，把「群没了」和「跳过」分开报给回合和调用方。
   if (runId === null) return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
-  await recordContext(deps.db, runId, {
-    unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
-    settled: context.filter((line) => line.settled).map((line) => line.messageId),
-  });
+  await recordContext(
+    deps.db,
+    runId,
+    { kind: "bot", botId: speaker.botId },
+    {
+      unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+      settled: context.filter((line) => line.settled).map((line) => line.messageId),
+    },
+  );
   const origin: PromptOrigin =
     speaker.handoff !== undefined
       ? botOrigin(members, speaker.handoff.fromBotId)
@@ -329,16 +335,23 @@ async function contextFor(
   includeRecent: boolean,
   members: readonly GroupBot[],
 ): Promise<ContextLine[]> {
-  const window = await recentBodies(db, groupId, speaker.trigger, includeRecent);
+  const viewer: Viewer = { kind: "bot", botId: speaker.botId };
+  const window = await recentBodies(db, groupId, speaker.trigger, viewer, includeRecent);
   const inWindow = new Set([speaker.trigger.id, ...window.map(({ id }) => id)]);
-  const carried = (await pendingLines(db, groupId, speaker.botId))
+  const carried = (await pendingLines(db, groupId, speaker.botId, viewer))
     .filter((message) => !inWindow.has(message.id))
     .slice(-CONTEXT_CATCHUP);
   return summarizeAll(db, ownerId, [...carried, ...window], speaker.botId, members);
 }
 
-async function recentBodies(db: Db, groupId: GroupId, trigger: Message, includeRecent: boolean): Promise<Message[]> {
-  const result = await listMessages(db, groupId, {
+async function recentBodies(
+  db: Db,
+  groupId: GroupId,
+  trigger: Message,
+  viewer: Viewer,
+  includeRecent: boolean,
+): Promise<Message[]> {
+  const result = await listMessages(db, groupId, viewer, {
     ...(includeRecent ? {} : { before: trigger.id }),
     limit: CONTEXT_MESSAGES,
   });
@@ -640,7 +653,7 @@ export async function settleByReply(
 ): Promise<boolean> {
   const decision = REPLY_DECISIONS.get(text.trim());
   if (decision === undefined) return false;
-  const pending = await latestPendingApproval(deps.db, groupId);
+  const pending = await latestPendingApproval(deps.db, groupId, { kind: "user" });
   if (pending === null) return false;
   await settleApproval(deps, ownerId, pending, decision);
   return true;

@@ -8,8 +8,9 @@ import {
   type ProjectAchievement,
   type RunId,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
-import { and, count, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, getTableColumns, count, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
   approvals,
@@ -26,7 +27,7 @@ import {
 } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { groupHasMembers } from "./live-groups.js";
-import type { Tx } from "./messages.js";
+import { messageVisibleTo, type Tx } from "./messages.js";
 import { toDraft, toMessage, toPlan } from "./rows.js";
 import { draftTitle, draftsByPlanOf, nextItems, nextRoutineAt, pendingItems } from "./today.js";
 import { runTitle, weekStart } from "./usage.js";
@@ -66,16 +67,23 @@ export function getProject(
   db: Db,
   ownerId: UserId,
   groupId: GroupId,
+  viewer: Viewer,
   now = new Date(),
 ): Promise<ProjectResponse | null> {
   // 起点、轮数、回应分几条查。不在同一个快照里的话，查起点之后才落库的新一句不算起点，却会被当成回应带出来。
-  return db.transaction((tx) => readProject(tx, ownerId, groupId, now), {
+  return db.transaction((tx) => readProject(tx, ownerId, groupId, viewer, now), {
     isolationLevel: "repeatable read",
     accessMode: "read only",
   });
 }
 
-async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date): Promise<ProjectResponse | null> {
+async function readProject(
+  db: Tx,
+  ownerId: UserId,
+  groupId: GroupId,
+  viewer: Viewer,
+  now: Date,
+): Promise<ProjectResponse | null> {
   const [group] = await db
     .select({ id: groups.id })
     .from(groups)
@@ -94,9 +102,10 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
   const [approvalRows, draftRows, publicationRows, [weekRow], [saidRow], [turnRow], runRows, routineRows, [taskRow]] =
     await Promise.all([
       db
-        .select()
+        .select(getTableColumns(approvals))
         .from(approvals)
-        .where(and(eq(approvals.groupId, groupId), eq(approvals.status, "pending")))
+        .innerJoin(messages, eq(messages.id, approvals.messageId))
+        .where(and(eq(approvals.groupId, groupId), eq(approvals.status, "pending"), messageVisibleTo(viewer)))
         .orderBy(desc(approvals.createdAt), desc(approvals.id))
         .limit(50),
       db
@@ -122,17 +131,17 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
       db
         .select()
         .from(messages)
-        .where(and(eq(messages.groupId, groupId), said))
+        .where(and(eq(messages.groupId, groupId), said, messageVisibleTo(viewer)))
         .orderBy(desc(messages.createdAt), desc(messages.seq))
         .limit(1),
       db
         .select({ value: count() })
         .from(messages)
-        .where(and(eq(messages.groupId, groupId), said)),
+        .where(and(eq(messages.groupId, groupId), said, messageVisibleTo(viewer))),
       db
         .select({ run: runs, trigger: messages.body, routineName: routines.name, taskTitle: tasks.title })
         .from(runs)
-        .leftJoin(messages, eq(messages.id, runs.triggerMessageId))
+        .leftJoin(messages, and(eq(messages.id, runs.triggerMessageId), messageVisibleTo(viewer)))
         .leftJoin(routineRuns, eq(routineRuns.id, runs.routineRunId))
         .leftJoin(routines, eq(routines.id, routineRuns.routineId))
         .leftJoin(tasks, eq(tasks.groupId, runs.groupId))
@@ -163,6 +172,7 @@ async function readProject(db: Tx, ownerId: UserId, groupId: GroupId, now: Date)
           .where(
             and(
               eq(messages.groupId, groupId),
+              messageVisibleTo(viewer),
               sql`${messages.body}->>'kind' <> 'cost'`,
               sql`(${messages.createdAt}, ${messages.seq}) > (select created_at, seq from messages where id = ${saidRow.id})`,
             ),

@@ -7,6 +7,7 @@ import {
   type MessageId,
   type RunId,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
 import { and, asc, desc, eq, inArray, isNull, lt, max, ne, notExists, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
@@ -22,6 +23,10 @@ export type MessagePage = { readonly messages: Message[]; readonly hasMore: bool
 
 /** `db.transaction` 回调里那个句柄。写一条消息在事务内外是同一件事，收哪个由调用方定。 */
 export type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+export function messageVisibleTo(viewer: Viewer) {
+  return sql`(${messages.visibleTo} is null or ${messages.visibleTo} @> ${JSON.stringify([viewer])}::jsonb)`;
+}
 
 /** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。 */
 export async function findGroupId(db: Db, ownerId: UserId, groupId: GroupId): Promise<string | null> {
@@ -39,6 +44,7 @@ export type ListMessagesResult =
 export async function listMessages(
   db: Db,
   groupId: string,
+  viewer: Viewer,
   options: { readonly before?: MessageId | undefined; readonly limit?: number | undefined },
 ): Promise<ListMessagesResult> {
   const limit = Math.min(options.limit ?? DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
@@ -48,7 +54,7 @@ export async function listMessages(
     const [cursor] = await db
       .select({ seq: messages.seq })
       .from(messages)
-      .where(and(eq(messages.id, options.before), eq(messages.groupId, groupId)))
+      .where(and(eq(messages.id, options.before), eq(messages.groupId, groupId), messageVisibleTo(viewer)))
       .limit(1);
     if (cursor === undefined) return { kind: "unknown_cursor" };
     beforeSeq = cursor.seq;
@@ -62,7 +68,7 @@ export async function listMessages(
   const rows = await db
     .select()
     .from(messages)
-    .where(where)
+    .where(and(where, messageVisibleTo(viewer)))
     .orderBy(desc(messages.seq))
     .limit(limit + 1);
 
@@ -72,17 +78,22 @@ export async function listMessages(
 }
 
 /** 按归属人取一条消息，可见范围和按群 id 访问的接口一致：别人的群、空群里的都查不到。 */
-export async function findOwnedMessage(db: Db, ownerId: UserId, messageId: MessageId): Promise<Message | null> {
+export async function findOwnedMessage(
+  db: Db,
+  ownerId: UserId,
+  messageId: MessageId,
+  viewer: Viewer,
+): Promise<Message | null> {
   const [found] = await db
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), groupHasMembers(db)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), groupHasMembers(db), messageVisibleTo(viewer)))
     .limit(1);
   return found === undefined ? null : toMessage(found.row);
 }
 
-/** visibleTo 不给就是全群可见。读口按收件人过滤的参数不在这里，归单元 1。 */
+/** visibleTo 不给就是全群可见。 */
 export async function appendMessage(
   db: Db | Tx,
   groupId: string,
@@ -112,8 +123,12 @@ export async function appendMessageIfGroupAlive(db: Db, groupId: string, body: M
 export const nextRevision = () => sql<number>`${messages.revision} + 1`;
 
 /** 消息已经不在（随群级联删掉）回 null。 */
-export async function messageSeq(db: Db, messageId: MessageId): Promise<number | null> {
-  const [row] = await db.select({ seq: messages.seq }).from(messages).where(eq(messages.id, messageId)).limit(1);
+export async function messageSeq(db: Db, messageId: MessageId, viewer: Viewer): Promise<number | null> {
+  const [row] = await db
+    .select({ seq: messages.seq })
+    .from(messages)
+    .where(and(eq(messages.id, messageId), messageVisibleTo(viewer)))
+    .limit(1);
   return row?.seq ?? null;
 }
 
@@ -249,11 +264,15 @@ export async function failRunningToolCalls(db: Db | Tx, groupId: GroupId, runId:
 }
 
 /** 每个群的最近一条消息。侧栏和群列表都要它，一次查询查完所有群。 */
-export async function latestMessagePerGroup(db: Db, groupIds: readonly string[]): Promise<Map<string, Message>> {
+export async function latestMessagePerGroup(
+  db: Db,
+  groupIds: readonly string[],
+  viewer: Viewer,
+): Promise<Map<string, Message>> {
   const latest = db
     .select({ groupId: messages.groupId, maxSeq: max(messages.seq).as("max_seq") })
     .from(messages)
-    .where(inArray(messages.groupId, [...groupIds]))
+    .where(and(inArray(messages.groupId, [...groupIds]), messageVisibleTo(viewer)))
     .groupBy(messages.groupId)
     .as("latest");
   const rows = await db

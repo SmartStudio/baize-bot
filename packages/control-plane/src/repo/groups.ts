@@ -262,7 +262,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
     else existing.push(row.botId);
   }
 
-  const lastMessages = await latestMessagePerGroup(db, groupIds);
+  const lastMessages = await latestMessagePerGroup(db, groupIds, { kind: "user" });
   const pending = await pendingApprovalCounts(db, groupIds);
   const handedOff = await pendingHandoffCounts(db, groupIds);
   const metrics = await metricsOf(db, groupIds, new Date());

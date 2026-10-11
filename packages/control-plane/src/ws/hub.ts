@@ -24,6 +24,10 @@ export class PushHub {
   }
 
   push(userId: string, push: ServerPush): void {
+    if (push.type === "message" || push.type === "message_delta") {
+      const visibleTo = push.type === "message" ? push.message.visibleTo : push.visibleTo;
+      if (visibleTo !== null && !visibleTo.some((viewer) => viewer.kind === "user")) return;
+    }
     const sockets = this.#connections.get(userId);
     if (sockets === undefined) return;
     const payload = JSON.stringify(ServerPush.parse(push));

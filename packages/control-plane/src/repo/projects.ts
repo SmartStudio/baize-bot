@@ -9,6 +9,7 @@ import {
   type Routine,
   type TopicTask,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
 import { TransactionRollbackError, and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
@@ -16,7 +17,7 @@ import { groups, messages, routines, tasks } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { findAssistant, insertMemberBot } from "./bots.js";
 import { findGroup, openGroup } from "./groups.js";
-import { nextRevision, type Tx } from "./messages.js";
+import { messageVisibleTo, nextRevision, type Tx } from "./messages.js";
 import { toMessage, toRoutine, toTask } from "./rows.js";
 import { lockOwner, shareBotRunsLock } from "./runs.js";
 
@@ -59,12 +60,13 @@ export async function findOwnedProjectOffer(
   db: Db,
   ownerId: UserId,
   messageId: MessageId,
+  viewer: Viewer,
 ): Promise<ProjectOfferMessage | null> {
   const [found] = await db
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), messageVisibleTo(viewer)))
     .limit(1);
   if (found === undefined || found.row.body.kind !== "project_offer") return null;
   return { id: messageId, groupId: found.row.groupId, body: found.row.body };
@@ -100,7 +102,7 @@ export async function decideProjectOffer(
 ): Promise<DecideProjectOfferResult> {
   if (decision.decision === "dismiss") {
     const message = await claimOffer(db, offer, { ...offer.body, status: "dismissed" });
-    return message === null ? settled(db, ownerId, offer) : { kind: "dismissed", message };
+    return message === null ? settled(db, ownerId, offer, { kind: "user" }) : { kind: "dismissed", message };
   }
 
   let lost = false;
@@ -185,7 +187,7 @@ export async function decideProjectOffer(
       };
     });
   } catch (error) {
-    if (error instanceof TransactionRollbackError && lost) return settled(db, ownerId, offer);
+    if (error instanceof TransactionRollbackError && lost) return settled(db, ownerId, offer, { kind: "user" });
     throw error;
   }
 }
@@ -230,8 +232,17 @@ async function claimOffer(db: Db | Tx, offer: ProjectOfferMessage, body: Project
   return row === undefined ? null : toMessage(row);
 }
 
-async function settled(db: Db, ownerId: UserId, offer: ProjectOfferMessage): Promise<DecideProjectOfferResult> {
-  const [row] = await db.select().from(messages).where(eq(messages.id, offer.id)).limit(1);
+async function settled(
+  db: Db,
+  ownerId: UserId,
+  offer: ProjectOfferMessage,
+  viewer: Viewer,
+): Promise<DecideProjectOfferResult> {
+  const [row] = await db
+    .select()
+    .from(messages)
+    .where(and(eq(messages.id, offer.id), messageVisibleTo(viewer)))
+    .limit(1);
   if (row === undefined) return { kind: "gone" };
   const message = toMessage(row);
   const projectGroupId = message.body.kind === "project_offer" ? message.body.groupId : null;

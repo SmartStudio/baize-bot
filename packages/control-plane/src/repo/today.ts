@@ -11,6 +11,7 @@ import {
   type TodayPendingItem,
   type TodayRunningItem,
   type UserId,
+  type Viewer,
 } from "@baize/shared";
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
@@ -31,6 +32,7 @@ import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
 import { hasMembers } from "./groups.js";
 import { groupHasMembers } from "./live-groups.js";
+import { messageVisibleTo } from "./messages.js";
 import { metricsOf } from "./metrics.js";
 import { listPendingRoutineOffers } from "./routine-offers.js";
 import { toAccount, toDraft, toMessage, toPlan, toTask } from "./rows.js";
@@ -40,7 +42,7 @@ type PlanRow = typeof contentPlans.$inferSelect;
 type AccountRow = typeof accounts.$inferSelect;
 type MessageRow = typeof messages.$inferSelect;
 
-export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promise<TodayResponse> {
+export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = new Date()): Promise<TodayResponse> {
   const planRows = await db
     .select()
     .from(contentPlans)
@@ -80,7 +82,8 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       .select({ row: approvals })
       .from(approvals)
       .innerJoin(groups, eq(groups.id, approvals.groupId))
-      .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending")))
+      .innerJoin(messages, eq(messages.id, approvals.messageId))
+      .where(and(eq(groups.ownerId, ownerId), eq(approvals.status, "pending"), messageVisibleTo(viewer)))
       .orderBy(desc(approvals.createdAt), desc(approvals.id))
       .limit(50),
     draftRowsQuery,
@@ -129,6 +132,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
       .where(
         and(
           eq(groups.ownerId, ownerId),
+          messageVisibleTo(viewer),
           sql`${messages.body} ->> 'kind' = 'team_offer'`,
           sql`${messages.body} ->> 'status' in ('offered', 'deferred')`,
           hasMembers(sql`${messages.body} ->> 'groupId'`),
@@ -277,7 +281,7 @@ export async function getToday(db: Db, ownerId: UserId, now = new Date()): Promi
   const assistant = await findAssistant(db, ownerId);
   return TodayResponse.parse({
     assistantGroupId: assistant?.groupId ?? null,
-    assistantLatest: assistant === null ? null : await latestBotLine(db, assistant.groupId),
+    assistantLatest: assistant === null ? null : await latestBotLine(db, assistant.groupId, viewer),
     pending: deferredLast(orderedPending.slice(-50)),
     done: orderedDone.slice(0, 20).map(({ item }) => item),
     running,
@@ -480,13 +484,14 @@ export function draftTitle(row: DraftRow): string {
 }
 
 // 流式中的消息还会变，断在半路就永远是半句，只认说完的；空壳不算说过话。
-async function latestBotLine(db: Db, groupId: GroupId): Promise<TodayAssistantLine | null> {
+async function latestBotLine(db: Db, groupId: GroupId, viewer: Viewer): Promise<TodayAssistantLine | null> {
   const [row] = await db
     .select({ text: sql<string>`${messages.body}->>'text'`, createdAt: messages.createdAt })
     .from(messages)
     .where(
       and(
         eq(messages.groupId, groupId),
+        messageVisibleTo(viewer),
         sql`${messages.body}->>'kind' = 'bot'`,
         sql`${messages.body}->>'streaming' = 'false'`,
         sql`${messages.body}->>'text' <> ''`,

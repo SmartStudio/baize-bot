@@ -201,7 +201,7 @@ export async function listBots(db: Db, ownerId: UserId): Promise<BotListEntry[]>
   if (rows.length === 0) return [];
 
   const groupIds = rows.map((r) => r.groupId);
-  const lastMessages = await latestMessagePerGroup(db, groupIds);
+  const lastMessages = await latestMessagePerGroup(db, groupIds, { kind: "user" });
   const pending = await pendingApprovalCounts(db, groupIds);
   const handedOff = await pendingHandoffCounts(db, groupIds);
   return rows.map((row) => ({

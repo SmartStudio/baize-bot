@@ -16,12 +16,13 @@ import {
   type GrantTarget,
   type Message,
   type ToolView,
+  type Viewer,
 } from "@baize/shared";
 import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, grants, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { appendMessage, type Tx } from "./messages.js";
+import { appendMessage, messageVisibleTo, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
 import { lockOpenRun } from "./runs.js";
 import { toApproval, toGrant } from "./rows.js";
@@ -117,23 +118,29 @@ export async function expireApprovalsOfRun(db: Db | Tx, runId: RunId): Promise<A
 }
 
 /** 审批按归属人过滤。别人的审批在这里查不到，路由层因此返回 404 而不是 403。 */
-export async function findApprovalId(db: Db, ownerId: UserId, approvalId: ApprovalId): Promise<ApprovalId | null> {
+export async function findApprovalId(
+  db: Db,
+  ownerId: UserId,
+  approvalId: ApprovalId,
+  viewer: Viewer,
+): Promise<ApprovalId | null> {
   const [row] = await db
     .select({ id: approvals.id })
     .from(approvals)
     .innerJoin(groups, eq(groups.id, approvals.groupId))
-    .where(and(eq(approvals.id, approvalId), eq(groups.ownerId, ownerId)))
+    .innerJoin(messages, eq(messages.id, approvals.messageId))
+    .where(and(eq(approvals.id, approvalId), eq(groups.ownerId, ownerId), messageVisibleTo(viewer)))
     .limit(1);
   return row === undefined ? null : approvalId;
 }
 
 /** 群里最近一条还没有结论的审批。群里回「批准」这类词落到它身上。 */
-export async function latestPendingApproval(db: Db, groupId: string): Promise<ApprovalId | null> {
+export async function latestPendingApproval(db: Db, groupId: string, viewer: Viewer): Promise<ApprovalId | null> {
   const [row] = await db
     .select({ id: approvals.id, seq: messages.seq })
     .from(approvals)
     .innerJoin(messages, eq(messages.id, approvals.messageId))
-    .where(and(eq(approvals.groupId, groupId), eq(approvals.status, "pending")))
+    .where(and(eq(approvals.groupId, groupId), eq(approvals.status, "pending"), messageVisibleTo(viewer)))
     // 按卡的 seq 排，不按 created_at：后者是事务开始时刻，两条事务交错时和用户在群里看到的顺序会反过来。
     .orderBy(desc(messages.seq))
     .limit(1);

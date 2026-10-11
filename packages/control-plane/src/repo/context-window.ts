@@ -1,8 +1,8 @@
-import type { BotId, GroupId, Message, MessageId, RunId } from "@baize/shared";
+import type { BotId, GroupId, Message, MessageId, RunId, Viewer } from "@baize/shared";
 import { and, asc, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { messages, runs } from "../db/schema.js";
-import type { Tx } from "./messages.js";
+import { messageVisibleTo, type Tx } from "./messages.js";
 import { toMessage } from "./rows.js";
 
 export interface PromptContextRecord {
@@ -12,10 +12,23 @@ export interface PromptContextRecord {
   readonly settled: readonly MessageId[];
 }
 
-export async function recordContext(db: Db, runId: RunId, record: PromptContextRecord): Promise<void> {
+export async function recordContext(db: Db, runId: RunId, viewer: Viewer, record: PromptContextRecord): Promise<void> {
+  const ids = [...record.unsettled, ...record.settled];
+  const visible =
+    ids.length === 0
+      ? []
+      : await db
+          .select({ id: messages.id })
+          .from(messages)
+          .innerJoin(runs, and(eq(runs.id, runId), eq(runs.groupId, messages.groupId)))
+          .where(and(inArray(messages.id, ids), messageVisibleTo(viewer)));
+  const allowed = new Set(visible.map(({ id }) => id));
   await db
     .update(runs)
-    .set({ unsettledContext: [...record.unsettled], settledContext: [...record.settled] })
+    .set({
+      unsettledContext: record.unsettled.filter((id) => allowed.has(id)),
+      settledContext: record.settled.filter((id) => allowed.has(id)),
+    })
     .where(eq(runs.id, runId));
 }
 
@@ -43,7 +56,7 @@ const CONFIRMED_RUNS_CONSIDERED = 20;
  * 定稿是终态，所以减法不看先后：哪次读到过定稿的字，模型就看过结论了。
  * 没进会话、被收尾、还在跑的 run 都不算；一次都没确认过就是空。
  */
-export async function pendingLines(db: Db, groupId: GroupId, botId: BotId): Promise<Message[]> {
+export async function pendingLines(db: Db, groupId: GroupId, botId: BotId, viewer: Viewer): Promise<Message[]> {
   const recent = await db
     .select({ unsettled: runs.unsettledContext, settled: runs.settledContext })
     .from(runs)
@@ -56,7 +69,7 @@ export async function pendingLines(db: Db, groupId: GroupId, botId: BotId): Prom
   const rows = await db
     .select()
     .from(messages)
-    .where(and(eq(messages.groupId, groupId), inArray(messages.id, ids)))
+    .where(and(eq(messages.groupId, groupId), inArray(messages.id, ids), messageVisibleTo(viewer)))
     .orderBy(asc(messages.seq));
   return rows.map(toMessage);
 }

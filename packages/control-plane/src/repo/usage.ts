@@ -1,7 +1,8 @@
-import { BotId, GroupId, RunId, type MessageBody, type UsageResponse, type UserId } from "@baize/shared";
+import { BotId, GroupId, RunId, type MessageBody, type UsageResponse, type UserId, type Viewer } from "@baize/shared";
 import { and, asc, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, groups, messages, routineRuns, routines, runs, settings, tasks } from "../db/schema.js";
+import { messageVisibleTo } from "./messages.js";
 import { clip } from "./today.js";
 
 const shanghai = new Intl.DateTimeFormat("en-GB", {
@@ -74,7 +75,7 @@ export function runTitle(input: {
   );
 }
 
-export async function getUsage(db: Db, ownerId: UserId, now = new Date()): Promise<UsageResponse> {
+export async function getUsage(db: Db, ownerId: UserId, viewer: Viewer, now = new Date()): Promise<UsageResponse> {
   const start = monthStart(now);
   const inMonth = and(eq(runs.ownerId, ownerId), gte(runs.startedAt, start));
   const amount = sql<string>`coalesce(sum(${runs.amount}), 0)`;
@@ -99,7 +100,7 @@ export async function getUsage(db: Db, ownerId: UserId, now = new Date()): Promi
   const recentRows = await db
     .select({ run: runs, trigger: messages.body, routineName: routines.name, taskTitle: tasks.title })
     .from(runs)
-    .leftJoin(messages, eq(messages.id, runs.triggerMessageId))
+    .leftJoin(messages, and(eq(messages.id, runs.triggerMessageId), messageVisibleTo(viewer)))
     .leftJoin(routineRuns, eq(routineRuns.id, runs.routineRunId))
     .leftJoin(routines, eq(routines.id, routineRuns.routineId))
     .leftJoin(tasks, eq(tasks.groupId, runs.groupId))
