@@ -400,7 +400,14 @@ it("导入的插件 PATCH 带授权后操作表换成真实列表，同名操作
       { name: "lookup_stock", description: "查询库存", needsApproval: false },
     ]);
     expect(mcp.authorizations(), "探测时带的是新凭据").toContain(secret);
-    expect({ ...tool, operations: [] }, "其余字段不变").toEqual({ ...before, operations: [] });
+    expect(
+      { ...tool, operations: [], status: "awaiting_authorization" },
+      "其余字段不变，只有状态从待授权转为可用",
+    ).toEqual({
+      ...before,
+      operations: [],
+    });
+    expect(tool.status).toBe("ready");
 
     const listed = await (await owner.client.get("/api/tools")).text();
     expect(listed.includes(secret), "工具列表里没有凭据").toBe(false);
@@ -601,4 +608,20 @@ it("导入的匿名插件不带凭据补授权（authorization: null）：不带
   } finally {
     agent.close();
   }
+});
+
+it("导入的插件在 GET /api/tools 里是待授权，补授权后变可用；自己建的连接一直是可用", async () => {
+  const owner = await ownerWithBot();
+  const own = await plugin(owner, "自己的工具", [owner.botId]);
+  expect(own.status, "自己建的连接建出来就可用").toBe("ready");
+
+  const { bot } = await importInto(owner, sharedPlugin(mcp.url, [{ name: "send_email", needsApproval: false }]));
+  const imported = await importedTool(owner, bot.id);
+  expect(imported.status, "包里带的占位操作表，补授权之前不许用").toBe("awaiting_authorization");
+
+  const authorized = await owner.client.patch(`/api/tools/${imported.id}`, { authorization: "Bearer sk-ready-0005" });
+  expect(authorized.status).toBe(200);
+  const listed = await toolsOf(owner.client);
+  expect(listed.find((tool) => tool.id === imported.id)?.status, "补完授权就可用").toBe("ready");
+  expect(listed.find((tool) => tool.id === own.id)?.status).toBe("ready");
 });

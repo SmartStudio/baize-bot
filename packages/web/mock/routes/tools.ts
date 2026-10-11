@@ -38,6 +38,7 @@ export const toolRoutes: Route = async ({ req, res, path, method }) => {
             },
           ],
           assignedBotIds: [],
+          status: "ready",
         });
         tools.set(tool.id, tool);
         send(res, 201, { tool });
@@ -72,7 +73,9 @@ export const toolRoutes: Route = async ({ req, res, path, method }) => {
             });
       if (operations.some((operation) => operation === null)) send(res, 400, { error: "工具操作不存在" });
       else {
-        const next = ToolConnection.parse({ ...tool, ...defined(parsed.data), operations });
+        // 给了 authorization（含 null）就是重新探测过了，探测成功即可用。
+        const status = parsed.data.authorization === undefined ? tool.status : "ready";
+        const next = ToolConnection.parse({ ...tool, ...defined(parsed.data), operations, status });
         tools.set(next.id, next);
         send(res, 200, { tool: next });
       }

@@ -421,6 +421,7 @@ export const reseed = (): void => {
         },
       ] satisfies ToolOperation[],
       assignedBotIds: ["bot_service"],
+      status: "ready",
     }),
   );
   tools.set(
@@ -449,6 +450,7 @@ export const reseed = (): void => {
         },
       ] satisfies ToolOperation[],
       assignedBotIds: ["bot_service", "bot_sales", "bot_buy", "bot_assistant"],
+      status: "ready",
     }),
   );
 };

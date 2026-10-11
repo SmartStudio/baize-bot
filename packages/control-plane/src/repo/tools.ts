@@ -25,6 +25,7 @@ const toTool = (row: ToolRow, assignedBotIds: BotId[]): ToolConnection =>
     url: row.url,
     operations: row.operations,
     assignedBotIds,
+    status: row.status,
   });
 
 const assignments = async (db: Db | Tx, ids: string[]): Promise<Map<string, BotId[]>> => {
@@ -86,7 +87,6 @@ export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypt
     ToolConnectionConfig.parse({
       ...toTool(row, byTool.get(row.id) ?? []),
       authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc),
-      status: row.status,
     }),
   );
 }

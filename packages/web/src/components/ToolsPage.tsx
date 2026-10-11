@@ -33,17 +33,25 @@ const ToolCard = ({
 }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [token, setToken] = useState("");
+  const pending = tool.status === "awaiting_authorization";
 
-  const update = async (patch: UpdateToolRequest) => {
+  const update = async (patch: UpdateToolRequest): Promise<boolean> => {
     setBusy(true);
     setError("");
     try {
       await onUpdate(tool.id, patch);
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "保存失败，请重试");
+      return false;
     } finally {
       setBusy(false);
     }
+  };
+
+  const authorize = async () => {
+    if (await update({ authorization: token.trim() })) setToken("");
   };
 
   const disconnect = async () => {
@@ -63,6 +71,11 @@ const ToolCard = ({
       <div className="row-card tool-connection-head">
         <span>
           <b>{tool.name}</b>
+          {pending ? (
+            <em className="tool-status" data-testid="tool-status">
+              待授权
+            </em>
+          ) : null}
           <small>{new URL(tool.url).host} · MCP</small>
         </span>
         <div className="tool-connection-actions">
@@ -78,8 +91,62 @@ const ToolCard = ({
           </button>
         </div>
       </div>
+      {pending ? (
+        <div className="tool-pending" data-testid="tool-pending">
+          <p>待授权，还用不了。点开填授权，或无凭据再试。</p>
+          <div className="tool-pending-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="tool-authorize-open"
+              aria-expanded={expanded}
+              disabled={busy}
+              onClick={onToggle}
+            >
+              填授权
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="tool-retry-anonymous"
+              disabled={busy}
+              onClick={() => void update({ authorization: null })}
+            >
+              无凭据再试
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {error ? (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      ) : null}
       {expanded ? (
         <div className="tool-connection-detail" data-testid="tool-details">
+          {pending ? (
+            <>
+              <p className="tool-section-label">授权</p>
+              <div className="tool-authorize">
+                <input
+                  data-testid="tool-authorization-patch"
+                  value={token}
+                  placeholder="Bearer …"
+                  disabled={busy}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="primary-button"
+                  data-testid="tool-authorize-save"
+                  disabled={busy || token.trim() === ""}
+                  onClick={() => void authorize()}
+                >
+                  保存授权
+                </button>
+              </div>
+            </>
+          ) : null}
           <p className="tool-section-label">哪些 Bot 能用</p>
           <div className="tool-bot-list">
             {bots.map((bot) => (
@@ -133,11 +200,6 @@ const ToolCard = ({
               </div>
             ))}
           </div>
-          {error ? (
-            <p className="error" role="alert">
-              {error}
-            </p>
-          ) : null}
           <button
             type="button"
             className="ghost-button tool-disconnect"
