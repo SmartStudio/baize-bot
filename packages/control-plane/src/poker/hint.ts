@@ -19,8 +19,7 @@ import { newId } from "../ids.js";
 import { messageVisibleTo } from "../repo/messages.js";
 import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
-import { narrate } from "./narrate.js";
-import { engineSeatId } from "./seating.js";
+import { narrate, seatNamer } from "./narrate.js";
 import { latestHand, loadHand, loadTable, PokerError, tableState, tableView, withTableLock } from "./store.js";
 import { viewFor } from "./view.js";
 import { toWire } from "./wire.js";
@@ -156,9 +155,7 @@ export async function askHint(
           handId: PokerHandId.parse(handId),
           seq,
           view: toWire(viewFor(hand.state, "4")),
-          publicLog: hand.state.events.map((event) =>
-            narrate(event, (id) => state.seats.find((seat) => engineSeatId(seat.seat) === id)?.name ?? id),
-          ),
+          publicLog: hand.state.events.map((event) => narrate(event, seatNamer(state.seats))),
           question: "这手怎么打？请给我建议和理由。",
           review: null,
         },

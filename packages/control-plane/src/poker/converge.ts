@@ -18,7 +18,7 @@ import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
 import { BOT_TURN_TIMEOUT_MS, nextStep, type PlanTurn, type Step } from "./converge-plan.js";
 import { apply } from "./engine.js";
-import { narrate } from "./narrate.js";
+import { narrate, seatNamer } from "./narrate.js";
 import { engineSeatId } from "./seating.js";
 import {
   appendEvents,
@@ -153,12 +153,7 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
                 handId: PokerHandId.parse(handId),
                 seq: step.seq,
                 view: toWire(viewFor(hand.state, engineSeatId(step.seat))),
-                publicLog: hand.state.events.map((event) =>
-                  narrate(
-                    event,
-                    (id) => state.seats.find((candidate) => engineSeatId(candidate.seat) === id)?.name ?? id,
-                  ),
-                ),
+                publicLog: hand.state.events.map((event) => narrate(event, seatNamer(state.seats))),
                 question: null,
                 review: null,
               },

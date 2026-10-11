@@ -1,11 +1,9 @@
 import {
   BotId,
   GroupId,
-  PokerPersona,
-  PokerReview,
-  PokerSessionId,
   POKER_PERSONAS,
-  type BotHue,
+  POKER_USER_SEAT,
+  PokerPersona,
   type Group,
   type Message,
   type PokerSeatNo,
@@ -13,27 +11,21 @@ import {
   type TopicTask,
   type UserId,
 } from "@baize/shared";
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull } from "drizzle-orm";
+import { and, asc, eq, isNotNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groups, pokerHands, pokerSessions, pokerTables, users, type StoredPokerSeat } from "../db/schema.js";
+import { bots, groups, pokerTables, type StoredPokerSeat } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { currentHandOf, tableState } from "../poker/store.js";
-import { hintOf } from "../poker/hint.js";
-import { buildTableView, type TableState } from "../poker/table-view.js";
+import { loadTable, snapshot } from "../poker/store.js";
 import { openGroup, swapGroupMember } from "./groups.js";
 import { appendMessage } from "./messages.js";
 import { lockOwner } from "./runs.js";
 
 export const DEFAULT_TABLE_TITLE = "周末德州";
-export const USER_SEAT: PokerSeatNo = 4;
 export const SMALL_BLIND = 10;
 export const BIG_BLIND = 20;
 export const STARTING_STACK = 2000;
 /** 默认三位牌友，按座位 1 到 3 排（D22）。 */
 export const DEFAULT_OPPONENTS: readonly PokerPersona[] = ["leopard", "old_k", "jasmine"];
-
-// 用户座位的头像色，和 Web mock 一致；牌友的色相取自人设表。
-const USER_HUE: BotHue = "lime";
 
 export type CreateTableResult = {
   readonly groupId: GroupId;
@@ -80,7 +72,7 @@ export async function createPokerTable(db: Db, ownerId: UserId, requestId: strin
           botId: botId as string | null,
           stack: STARTING_STACK,
         })),
-        { seat: USER_SEAT, botId: null, stack: STARTING_STACK },
+        { seat: POKER_USER_SEAT, botId: null, stack: STARTING_STACK },
       ];
       // button_seat 记「上一手的庄位」。取 4 号位，第一手顺时针找到的就是 1 号位。
       const [inserted] = await tx
@@ -90,7 +82,7 @@ export async function createPokerTable(db: Db, ownerId: UserId, requestId: strin
           ownerId,
           requestId,
           seats,
-          buttonSeat: USER_SEAT,
+          buttonSeat: POKER_USER_SEAT,
           smallBlind: SMALL_BLIND,
           bigBlind: BIG_BLIND,
           startingStack: STARTING_STACK,
@@ -188,97 +180,9 @@ export async function listPokerTableIds(db: Db, ownerId: UserId): Promise<GroupI
   return rows.map((row) => GroupId.parse(row.groupId));
 }
 
-/**
- * 用户视角的整张桌。别人的桌和不存在的桌都是 null。手牌那截走 poker/store.ts 的 currentHandOf，这里只拼桌子这一层。
- */
+/** 用户视角的整张桌，别人的桌和不存在的桌都是 null。拼装只有 poker/store.ts 一处，这里只做归属校验。 */
 export async function loadPokerTableView(db: Db, ownerId: UserId, groupId: GroupId): Promise<PokerTableView | null> {
-  const [found] = await db
-    .select({ table: pokerTables, chiefBotId: groups.chiefBotId })
-    .from(pokerTables)
-    .innerJoin(groups, eq(groups.id, pokerTables.groupId))
-    .where(and(eq(pokerTables.groupId, groupId), eq(pokerTables.ownerId, ownerId)));
-  if (found === undefined || found.chiefBotId === null) return null;
-  const { table } = found;
-
-  const botIds = [found.chiefBotId, ...table.seats.flatMap((seat) => (seat.botId === null ? [] : [seat.botId]))];
-  const botRows = await db.select().from(bots).where(inArray(bots.id, botIds));
-  const botOf = (id: string) => {
-    const row = botRows.find((candidate) => candidate.id === id);
-    if (row === undefined) throw new Error(`牌桌 ${groupId} 引用的 Bot ${id} 不存在`);
-    return row;
-  };
-  const [owner] = await db.select({ name: users.name }).from(users).where(eq(users.id, ownerId));
-  if (owner === undefined) return null;
-  const host = botOf(found.chiefBotId);
-
-  const state: TableState = {
-    groupId,
-    status: table.status,
-    version: table.version,
-    seats: table.seats.map((seat) => {
-      if (seat.botId === null) {
-        return {
-          seat: seat.seat,
-          kind: "user",
-          botId: null,
-          name: owner.name,
-          persona: null,
-          hue: USER_HUE,
-          stack: seat.stack,
-        };
-      }
-      const bot = botOf(seat.botId);
-      return {
-        seat: seat.seat,
-        kind: "bot",
-        botId: BotId.parse(bot.id),
-        name: bot.name,
-        persona: bot.preset,
-        hue: bot.hue,
-        stack: seat.stack,
-      };
-    }),
-    host: { botId: BotId.parse(host.id), name: host.name, hue: host.hue },
-    session: await openSessionOf(db, groupId, table.seats),
-    hint: await hintOf(db, groupId),
-    lastReview: await lastReviewOf(db, groupId),
-    stats: (await tableState(db, table)).stats,
-  };
-  const view = buildTableView(state, null, USER_SEAT);
-  return { ...view, hand: await currentHandOf(db, groupId) };
-}
-
-async function openSessionOf(
-  db: Db,
-  groupId: GroupId,
-  seats: readonly StoredPokerSeat[],
-): Promise<PokerTableView["session"]> {
-  const [open] = await db
-    .select({ id: pokerSessions.id })
-    .from(pokerSessions)
-    .where(and(eq(pokerSessions.groupId, groupId), isNull(pokerSessions.endedAt)));
-  if (open === undefined) return null;
-  const [played] = await db.select({ n: count() }).from(pokerHands).where(eq(pokerHands.sessionId, open.id));
-  const [first] = await db
-    .select({ seatsStart: pokerHands.seatsStart })
-    .from(pokerHands)
-    .where(eq(pokerHands.sessionId, open.id))
-    .orderBy(asc(pokerHands.number))
-    .limit(1);
-  const stackOf = (list: readonly StoredPokerSeat[]) => list.find((seat) => seat.seat === USER_SEAT)?.stack ?? 0;
-  return {
-    id: PokerSessionId.parse(open.id),
-    handCount: played?.n ?? 0,
-    net: first === undefined ? 0 : stackOf(seats) - stackOf(first.seatsStart),
-  };
-}
-
-async function lastReviewOf(db: Db, groupId: GroupId): Promise<PokerReview | null> {
-  const [row] = await db
-    .select({ review: pokerSessions.review })
-    .from(pokerSessions)
-    .where(and(eq(pokerSessions.groupId, groupId), isNotNull(pokerSessions.endedAt), isNotNull(pokerSessions.review)))
-    .orderBy(desc(pokerSessions.endedAt))
-    .limit(1);
-  return row?.review === null || row?.review === undefined ? null : PokerReview.parse(row.review);
+  const table = await loadTable(db, groupId);
+  if (!table || table.ownerId !== ownerId) return null;
+  return snapshot(db, groupId);
 }

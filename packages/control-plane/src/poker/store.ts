@@ -1,30 +1,46 @@
 import {
   BotId,
   GroupId,
+  POKER_USER_SEAT,
   PokerEvent,
   PokerHandId,
   PokerSessionId,
   UserId,
+  type BotHue,
   type Message,
   type PokerTableView,
 } from "@baize/shared";
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { randomBytes } from "node:crypto";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, pokerEvents, pokerHands, pokerSessions, pokerTables } from "../db/schema.js";
+import {
+  bots,
+  groupMembers,
+  pokerEvents,
+  pokerHands,
+  pokerSessions,
+  pokerTables,
+  runs,
+  users,
+  type StoredPokerHandStatus,
+} from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage } from "../repo/messages.js";
 import { lockOwner } from "../repo/runs.js";
 import { newHand, replay, type HandState } from "./engine.js";
-import { narrate } from "./narrate.js";
+import { narrate, seatNamer } from "./narrate.js";
 import { hintOf } from "./hint.js";
 import { engineSeatId, seatNextHand } from "./seating.js";
 import { buildTableView, type TableState } from "./table-view.js";
 
 export type TableRow = typeof pokerTables.$inferSelect;
 export type HandRow = typeof pokerHands.$inferSelect;
+type SessionRow = typeof pokerSessions.$inferSelect;
 export type StoredHand = { row: HandRow; state: HandState };
 export type CurrentHand = NonNullable<PokerTableView["hand"]>;
+
+// 用户座位的头像色，和 Web mock 一致；牌友的色相取自人设表。
+const USER_HUE: BotHue = "lime";
 
 export class PokerError extends Error {
   constructor(
@@ -88,16 +104,52 @@ async function restoreHand(db: Db, row: HandRow): Promise<StoredHand> {
     ),
   };
 }
+// 视图只认打着的和打完的手。扫描器作废的手（status 'abandoned'，筹码已退回）不算这桌的当前手，
+// 否则视图会画出一手停在下注中、看似轮到用户的牌。
+const VISIBLE_HAND_STATUSES: StoredPokerHandStatus[] = ["playing", "complete"];
 export async function latestHand(db: Db, groupId: string, playingOnly = false): Promise<StoredHand | null> {
   const [row] = await db
     .select()
     .from(pokerHands)
-    .where(and(eq(pokerHands.groupId, groupId), playingOnly ? eq(pokerHands.status, "playing") : undefined))
+    .where(
+      and(
+        eq(pokerHands.groupId, groupId),
+        playingOnly ? eq(pokerHands.status, "playing") : inArray(pokerHands.status, VISIBLE_HAND_STATUSES),
+      ),
+    )
     .orderBy(desc(pokerHands.number))
     .limit(1);
   return row ? restoreHand(db, row) : null;
 }
 
+/** 这一手用户筹码的变化：结算后的筹码减开手时的。 */
+export function userDeltaOf(hand: StoredHand): number {
+  const now = hand.state.seats.find((seat) => seat.id === engineSeatId(POKER_USER_SEAT))?.stack ?? 0;
+  const start = hand.row.seatsStart.find((seat) => seat.seat === POKER_USER_SEAT)?.stack ?? 0;
+  return now - start;
+}
+
+/**
+ * 最近一场已散场的复盘状态，全部从现有列推：复盘落了是 done；老白的 reviewer run 还开着是 generating；
+ * 其余都是 failed，包括散场时没有电脑在线、复盘根本没派出去的情况。reviewer run 一桌最多一条开着，只会是这一场的。
+ */
+async function reviewStateOf(
+  db: Db,
+  groupId: string,
+  latest: SessionRow | undefined,
+): Promise<PokerTableView["reviewState"]> {
+  if (!latest) return null;
+  const sessionId = PokerSessionId.parse(latest.id);
+  if (latest.review !== null) return { sessionId, status: "done" };
+  const [open] = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.groupId, groupId), eq(runs.tableRole, "reviewer"), isNull(runs.endedAt)))
+    .limit(1);
+  return { sessionId, status: open ? "generating" : "failed" };
+}
+
+/** 除了正在打的手之外的整张桌，HTTP 读视图和推送都从这里拼，用户座位用归属人的名字。 */
 export async function tableState(db: Db, table: TableRow): Promise<TableState> {
   const members = await db
     .select({ bot: bots })
@@ -106,6 +158,8 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
     .where(eq(groupMembers.groupId, table.groupId));
   const host = members.find(({ bot }) => bot.preset === "laobai")?.bot;
   if (!host) throw new Error("牌桌没有老白");
+  const [owner] = await db.select({ name: users.name }).from(users).where(eq(users.id, table.ownerId));
+  if (!owner) throw new Error("牌桌的归属人不存在");
   const sessions = await db
     .select()
     .from(pokerSessions)
@@ -117,10 +171,7 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
     .where(and(eq(pokerHands.groupId, table.groupId), eq(pokerHands.status, "complete")));
   const netBySession = new Map<string, number>();
   for (const row of hands) {
-    const { state } = await restoreHand(db, row);
-    const delta =
-      (state.seats.find((seat) => seat.id === "4")?.stack ?? 0) -
-      (row.seatsStart.find((seat) => seat.seat === 4)?.stack ?? 0);
+    const delta = userDeltaOf(await restoreHand(db, row));
     netBySession.set(row.sessionId, (netBySession.get(row.sessionId) ?? 0) + delta);
   }
   const open = sessions.find((session) => session.endedAt === null);
@@ -129,7 +180,7 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
     ? await db
         .select({ value: sql<number>`count(*)::int` })
         .from(pokerHands)
-        .where(eq(pokerHands.sessionId, open.id))
+        .where(and(eq(pokerHands.sessionId, open.id), inArray(pokerHands.status, VISIBLE_HAND_STATUSES)))
     : [];
   return {
     groupId: GroupId.parse(table.groupId),
@@ -140,11 +191,12 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
       if (seat.botId !== null && !bot) throw new Error(`座位 ${seat.seat} 的牌友不在群里`);
       return {
         seat: seat.seat,
+        engineSeatId: engineSeatId(seat.seat),
         kind: seat.botId === null ? "user" : "bot",
         botId: bot ? BotId.parse(bot.id) : null,
-        name: bot?.name ?? "你",
+        name: bot?.name ?? owner.name,
         persona: bot?.preset ?? null,
-        hue: bot?.hue ?? "sky",
+        hue: bot?.hue ?? USER_HUE,
         stack: seat.stack,
       };
     }),
@@ -154,6 +206,7 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
       : null,
     hint: await hintOf(db, table.groupId),
     lastReview: ended.find((session) => session.review !== null)?.review ?? null,
+    reviewState: await reviewStateOf(db, table.groupId, ended[0]),
     stats: {
       sessions: ended.length,
       sessionsWon: ended.filter((session) => (netBySession.get(session.id) ?? 0) > 0).length,
@@ -173,7 +226,7 @@ export async function tableView(db: Db, table: TableRow, hand: StoredHand | null
           turnDeadline: hand.row.turnDeadline,
         }
       : null,
-    4,
+    POKER_USER_SEAT,
   );
 }
 export async function snapshot(db: Db, groupId: string): Promise<PokerTableView | null> {
@@ -235,14 +288,7 @@ export async function appendEvents(db: Db, table: TableRow, hand: StoredHand, st
     .where(eq(pokerTables.groupId, table.groupId));
   const names = (await tableState(db, table)).seats;
   const messages: Message[] = [];
-  for (const event of added)
-    messages.push(
-      await hostMessage(
-        db,
-        table,
-        narrate(event, (id) => names.find((seat) => engineSeatId(seat.seat) === id)?.name ?? id),
-      ),
-    );
+  for (const event of added) messages.push(await hostMessage(db, table, narrate(event, seatNamer(names))));
   return messages;
 }
 export async function startHand(
@@ -295,13 +341,6 @@ export async function startHand(
   for (const rebuy of seating.rebuys)
     messages.push(await hostMessage(db, table, `${rebuy.seat} 号位补码 ${rebuy.amount}`));
   const names = (await tableState(db, table)).seats;
-  for (const event of state.events)
-    messages.push(
-      await hostMessage(
-        db,
-        table,
-        narrate(event, (id) => names.find((seat) => engineSeatId(seat.seat) === id)?.name ?? id),
-      ),
-    );
+  for (const event of state.events) messages.push(await hostMessage(db, table, narrate(event, seatNamer(names))));
   return { handId, messages };
 }

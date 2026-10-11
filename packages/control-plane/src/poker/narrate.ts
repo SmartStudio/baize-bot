@@ -27,6 +27,15 @@ function actionText(action: Action, put: number): string {
   }
 }
 
+// 播报和牌友、老白看的公开记录里，用户座位一律叫「你」；视图里用户位用的是主人名。
+export const seatNamer =
+  (seats: readonly { engineSeatId: string; kind: "user" | "bot"; name: string }[]) =>
+  (id: SeatId): string => {
+    const seat = seats.find((candidate) => candidate.engineSeatId === id);
+    if (seat === undefined) return id;
+    return seat.kind === "user" ? "你" : seat.name;
+  };
+
 export function narrate(event: Event, nameOf: (seatId: SeatId) => string): string {
   switch (event.kind) {
     case "blind":

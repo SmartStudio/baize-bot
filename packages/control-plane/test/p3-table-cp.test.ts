@@ -1,6 +1,7 @@
 import {
   BotId,
   CreateGroupResponse,
+  MessageListResponse,
   GroupId,
   PokerHandId,
   PokerEvent,
@@ -370,6 +371,17 @@ it("牌友超时没出牌，扫描后自动过牌；不能过牌时弃牌", asyn
       .filter((event) => event.kind === "action" && event.seatId === "3")
       .map((event) => (event.kind === "action" ? event.action.kind : "")),
   ).toEqual(["check", "fold"]);
+});
+it("群里的播报把用户座位叫「你」，不写主人名", async () => {
+  await fixture();
+  const view = await start();
+  expect((await advanceUser(view, { kind: "call" })).status).toBe(200);
+  const [owner] = await database.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${table.ownerId}`;
+  const history = JSON.stringify(
+    MessageListResponse.parse(await (await table.client.get(`/api/groups/${table.groupId}/messages`)).json()),
+  );
+  expect(history, "用户的跟注播报成「你 跟注」").toMatch(/你 跟注/);
+  expect(history, "播报里没有主人名").not.toContain(`${owner!.name} `);
 });
 it("用户加注不足最小额回 400 和中文原因", async () => {
   await fixture();

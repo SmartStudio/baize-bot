@@ -74,6 +74,11 @@ describe("建桌", () => {
 
     expect(status).toBe(201);
     expect(table.seats.map((seat) => seat.seat)).toEqual([1, 2, 3, 4]);
+    expect(
+      table.seats.map((seat) => seat.engineSeatId),
+      "座位号到引擎座位 id 的对照由控制面给",
+    ).toEqual(["1", "2", "3", "4"]);
+    expect(table.reviewState, "还没散过场就没有复盘状态").toBeNull();
     expect([1, 2, 3].map((seat) => personaAt(table, seat))).toEqual(["leopard", "old_k", "jasmine"]);
     const you = table.seats.find((seat) => seat.seat === 4);
     expect(you).toMatchObject({ kind: "user", botId: null, persona: null, name: user.name });

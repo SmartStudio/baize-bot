@@ -176,6 +176,12 @@ async function seedFiveHands(): Promise<Seeded> {
 }
 
 const leavePath = () => `/api/poker/tables/${table.groupId}/leave`;
+const retryPath = () => `/api/poker/tables/${table.groupId}/review`;
+async function retry(sessionId: string): Promise<PokerTableView> {
+  const response = await table.client.post(retryPath(), { sessionId });
+  expect(response.status).toBe(200);
+  return PokerTableResponse.parse(await response.json()).table;
+}
 async function leave(): Promise<PokerTableView> {
   const response = await table.client.post(leavePath());
   expect(response.status).toBe(200);
@@ -580,6 +586,152 @@ it("别人的牌桌、不存在的牌桌和还没开过局的牌桌散场的回�
   expect((await table.client.post(leavePath())).status).toBe(409);
   expect((await table.client.post(leavePath(), { extra: 1 })).status).toBe(400);
   await database.sql`DELETE FROM users WHERE id = ${stranger.id}`;
+});
+
+it("散场后视图带复盘状态：老白在写是生成中，交上来是已完成", async () => {
+  await fixture();
+  const session = await seedFiveHands();
+  const left = await leave();
+  expect(left.reviewState).toEqual({ sessionId: session.sessionId, status: "generating" });
+  expect(left.lastReview, "生成中还没有复盘正文").toBeNull();
+  expect((await getTable()).reviewState).toEqual({ sessionId: session.sessionId, status: "generating" });
+
+  await submit(await reviewerPrompt());
+  const done = await tablePush((view) => view.reviewState?.status === "done");
+  expect(done.reviewState).toEqual({ sessionId: session.sessionId, status: "done" });
+  expect(done.lastReview!.sessionId).toBe(session.sessionId);
+  expect((await getTable()).reviewState).toEqual(done.reviewState);
+});
+
+it("复盘运行失败后状态是失败，用户开了新一场也能从重试接口给旧场补派", async () => {
+  await fixture();
+  const session = await seedFiveHands();
+  await leave();
+  const first = await reviewerPrompt();
+  agentOf().send({ type: "agent_error", code: "runner_failed", detail: "模型没响应", runId: first.runId });
+  await barrier(table.hostId);
+  expect((await getTable()).reviewState).toEqual({ sessionId: session.sessionId, status: "failed" });
+
+  const fresh = await seedSession([WIN_BLINDS], { ended: false });
+  expect((await getTable()).session, "用户已经开了新一场").toMatchObject({ id: fresh.sessionId });
+  expect((await getTable()).reviewState, "新一场还开着，复盘状态仍指旧场").toEqual({
+    sessionId: session.sessionId,
+    status: "failed",
+  });
+
+  const retried = await retry(session.sessionId);
+  expect(retried.reviewState).toEqual({ sessionId: session.sessionId, status: "generating" });
+  expect(retried.session, "重试不动新一场").toMatchObject({ id: fresh.sessionId });
+  expect((await tablePush((view) => view.reviewState?.status === "generating")).reviewState).toEqual(
+    retried.reviewState,
+  );
+  const second = await reviewerPrompt();
+  expect(second.runId).not.toBe(first.runId);
+  expect(second.table!.sessionId).toBe(session.sessionId);
+  expect(second.table!.review!.map((hand) => hand.number)).toEqual([2, 4, 5]);
+  expect(await reviewerRuns()).toBe(2);
+
+  await submit(second);
+  const done = await tablePush((view) => view.reviewState?.status === "done");
+  expect(done.reviewState).toEqual({ sessionId: session.sessionId, status: "done" });
+  expect(done.lastReview!.sessionId).toBe(session.sessionId);
+  expect(await reviewOf(session.sessionId)).toEqual(done.lastReview);
+});
+
+it("重试复盘只认最近一场；已有复盘的再试不派；别人、乱传、不带场次都拒", async () => {
+  await fixture();
+  const old = await seedSession([WIN_BLINDS, LOSE_RAISE], { ended: true });
+  const session = await seedFiveHands();
+  await leave();
+  const prompt = await reviewerPrompt();
+
+  const stale = await table.client.post(retryPath(), { sessionId: old.sessionId });
+  expect(stale.status, "不是最近一场").toBe(409);
+  expect((await table.client.post(retryPath(), { sessionId: randomUUID() })).status).toBe(409);
+  expect((await table.client.post(retryPath(), {})).status).toBe(400);
+  expect((await table.client.post(retryPath(), { sessionId: session.sessionId, extra: 1 })).status).toBe(400);
+  expect(
+    (await table.client.post("/api/poker/tables/不存在的桌/review", { sessionId: session.sessionId })).status,
+  ).toBe(404);
+  const stranger = await makeUser(database.db);
+  const other = new ApiClient(server.port);
+  expect((await other.login(stranger.email, PASSWORD)).status).toBe(200);
+  expect((await other.post(retryPath(), { sessionId: session.sessionId })).status).toBe(404);
+  await database.sql`DELETE FROM users WHERE id = ${stranger.id}`;
+
+  const busy = await retry(session.sessionId);
+  expect(busy.reviewState, "老白还在写，重试不重派").toEqual({ sessionId: session.sessionId, status: "generating" });
+  expect(await reviewerRuns()).toBe(1);
+
+  await submit(prompt);
+  const done = await tablePush((view) => view.reviewState?.status === "done");
+  const again = await retry(session.sessionId);
+  expect(again.reviewState).toEqual({ sessionId: session.sessionId, status: "done" });
+  expect(again.lastReview).toEqual(done.lastReview);
+  expect(await reviewerRuns()).toBe(1);
+  await barrier(table.hostId);
+  expect(agentOf().received(), "已有复盘不再派 prompt").toEqual([]);
+});
+
+it("没有电脑在线散场后复盘状态是失败，重试回 409，电脑回来后重试才派", async () => {
+  await fixture({ online: false });
+  const session = await seedFiveHands();
+  const left = await leave();
+  expect(left.reviewState).toEqual({ sessionId: session.sessionId, status: "failed" });
+  const offline = await table.client.post(retryPath(), { sessionId: session.sessionId });
+  expect(offline.status).toBe(409);
+  expect(await reviewerRuns()).toBe(0);
+
+  table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token)).agent;
+  const retried = await retry(session.sessionId);
+  expect(retried.reviewState).toEqual({ sessionId: session.sessionId, status: "generating" });
+  const prompt = await reviewerPrompt();
+  expect(prompt.table!.sessionId).toBe(session.sessionId);
+  await submit(prompt);
+  expect((await tablePush((view) => view.reviewState?.status === "done")).lastReview!.sessionId).toBe(
+    session.sessionId,
+  );
+  expect(await reviewerRuns()).toBe(1);
+});
+
+// 扫描器作废的一手：status 'abandoned'，筹码已退回。
+async function seedAbandonedHand(sessionId: PokerSessionId, number: number): Promise<PokerHandId> {
+  const handId = PokerHandId.parse(randomUUID());
+  const seats = [1, 2, 3, 4].map((seat) => ({ seat, botId: seat === 4 ? null : table.botIds[seat - 1], stack: 2000 }));
+  const state = newHand(
+    `p3-abandoned-${number}`,
+    seats.map((seat) => ({ id: String(seat.seat), stack: seat.stack })),
+    "1",
+    { small: 10, big: 20 },
+  );
+  await database.sql.begin(async (sql) => {
+    await sql`INSERT INTO poker_hands (id, group_id, session_id, number, seed, seats_start, button_seat, blinds, status, version, created_at) VALUES (${handId}, ${table.groupId}, ${sessionId}, ${number}, ${state.seed}, ${JSON.stringify(seats)}::jsonb, 1, ${JSON.stringify(state.blinds)}::jsonb, 'abandoned', 1, now())`;
+    for (const [seq, event] of state.events.entries())
+      await sql`INSERT INTO poker_events (hand_id, seq, event, created_at) VALUES (${handId}, ${seq}, ${JSON.stringify(event)}::jsonb, now())`;
+    await sql`UPDATE poker_tables SET status = 'idle', hand_count = ${number} WHERE group_id = ${table.groupId}`;
+  });
+  return handId;
+}
+
+it("作废的一手不是当前手：视图回到上一手打完的样子，handCount 不算它", async () => {
+  await fixture();
+  const session = await seedSession([WIN_BLINDS, LOSE_RAISE], { ended: false });
+  const abandoned = await seedAbandonedHand(session.sessionId, 3);
+
+  const view = await getTable();
+  expect(view.status).toBe("idle");
+  expect(view.hand?.id, "最近一手是作废的，当前手退回上一手打完的").toBe(session.hands[1]!.id);
+  expect(view.hand?.view.street).toBe("complete");
+  expect(view.hand?.id).not.toBe(abandoned);
+  expect(view.session).toMatchObject({ id: session.sessionId, handCount: 2, net: 30 - 200 });
+
+  await database.sql`UPDATE poker_sessions SET ended_at = now() WHERE id = ${session.sessionId}`;
+  const alone = await seedSession([], { ended: false });
+  await seedAbandonedHand(alone.sessionId, 4);
+  const only = await getTable();
+  expect(only.status).toBe("idle");
+  expect(only.hand?.id, "新一场只有一手作废的，桌面仍停在上一场最后打完的那手").toBe(session.hands[1]!.id);
+  expect(only.session).toMatchObject({ id: alone.sessionId, handCount: 0, net: 0 });
 });
 
 void PokerEvent;

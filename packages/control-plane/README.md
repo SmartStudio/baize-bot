@@ -625,6 +625,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | `POST /poker/hands/:id/act`           | `{ seq, action }` | 用户出牌。没轮到 4 号回 409「还没轮到你出牌」，`seq` 不等于已落事件数回 409「出牌序号已过期」，引擎不收回 400                                      |
 | `POST /poker/hands/:id/hint`          | `{ seq }`        | 问老白，见「问老白为什么挂在决策点上」                                                                                                              |
 | `POST /poker/tables/:groupId/leave`   | 空               | 散场，见「散场、复盘和战绩」                                                                                                                        |
+| `POST /poker/tables/:groupId/review` | `{ sessionId }` | 给最近一场已散场的场次重派复盘。不是最近一场或没有电脑在线回 409，复盘已落或老白还在写回现状 |
 
 牌桌群不收普通消息。`POST /api/groups/:id/messages` 对牌桌群回 409「牌桌里请用按钮出牌」，用户在这里只有按钮，没有自由文字。
 
@@ -700,6 +701,8 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 **散场。** `leaveTable` 在手进行中回 409「这一手还没打完，打完再散场」，从没打过牌回 409「还没打过牌，没有要散的场」。否则用 `ended_at IS NULL` 的条件更新结束这一场。最近一场已散场而复盘还空时，再点一次会重派复盘，已经有复盘的再点什么都不做。重复点击撞 reviewer 的唯一索引回 busy，所以同一场只会有一份复盘在路上。
 
+**复盘状态。** 视图的 `reviewState` 只说最近一场已散场的那一场，全部从现有列推（`store.ts` 的 `reviewStateOf`）。`review` 非空是 `done`；这张桌有开着的 reviewer run 是 `generating`，一桌最多一条，只会是这一场的；其余都是 `failed`，包括散场时没有电脑在线、复盘根本没派出去。项目页的重试按钮打 `POST /poker/tables/:groupId/review`，带场次 id 是为了用户开了新一场之后还能给上一场补派，又不会误派到别的场。
+
 **关键手。** `keyHandsOf` 从这一场已结算的手里挑用户（4 号）筹码变化绝对值最大的几手，最多 3 手（`KEY_HAND_LIMIT`），变化相同时先打的优先，按手序返回。挑手的是控制面，不是模型。老白只写话。
 
 **复盘 prompt。** 每手带序号、标题（「你赢了 N」「你输了 N」「不输不赢」）、用户筹码变化和 4 号座的视图，没有种子，也没有别人没亮的牌。一手都没结算的场没有可复盘的，直接写一份空复盘，老白说「散场了，复盘在项目页」，不派 run。
@@ -707,6 +710,8 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 **交复盘。** `events/poker-review.ts` 要求 run 是这台电脑上还没结束的 reviewer run，session 是这张桌已散场的一场，提交的手和控制面自己挑的关键手一一对上（不重复、不遗漏、不多出，每手正文不超过 120 字，`REVIEW_TEXT_LIMIT`），任一不成立整条丢掉，没有回执，用户再点一次散场就重派。落库用 `UPDATE ... WHERE review IS NULL`，同一场重复交只有第一份生效，老白的收尾话也只说一次。运行器那边有同一道长度检查，各自把关。
 
 **战绩。** 没有单独的战绩表，每次读 `tableState` 现算。每手已结算的牌，用户净输赢是 4 号座最终筹码减 `seats_start` 里的起始筹码，按场累加。开着的那场给 `session.net` 和 `handCount`。`stats.sessions` 是已散场的场数，`sessionsWon` 是净值大于 0 的场数，`net` 是已散场各场之和。`lastReview` 是最近一场有复盘的已散场。
+
+**群里怎么称呼用户。** 视图里 4 号位的名字是主人名。老白的播报、牌友和老白看的公开记录里，4 号位一律叫「你」，名字由 `narrate.ts` 的 `seatNamer` 统一换，`store.ts`、`hint.ts`、`converge.ts` 三处调 `narrate` 都经过它。
 
 **开下一手。** `startHand` 用 `UPDATE ... WHERE status = 'idle'` 认领桌子，抢不到回 409「桌上已有一手牌在进行」。没有开着的场就新建一场。庄位从上一手的庄位往后，按座位号找下一个有筹码的座位，第一手从 1 号找起。筹码不为正的座位按 `startingStack` 补码，老白在群里说「N 号位补码 X」。
 

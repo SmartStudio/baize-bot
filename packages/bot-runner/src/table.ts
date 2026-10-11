@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import {
   AgentToControl,
+  POKER_REVIEW_TEXT_LIMIT,
   type BotId,
   type ControlToAgent,
   gatewayAlias,
@@ -47,8 +48,6 @@ const ACT_PARAMS = Type.Object({
   amount: Type.Optional(Type.Number()),
   say: Type.Optional(Type.String()),
 });
-// 与控制面 poker/leave.ts 的 REVIEW_TEXT_LIMIT 同值，两边各自把关。
-const REVIEW_TEXT_LIMIT = 120;
 const REVIEW_PARAMS = Type.Object({
   hands: Type.Array(Type.Object({ number: Type.Number(), title: Type.String(), text: Type.String() })),
 });
@@ -283,8 +282,8 @@ export function createTableTools(options: {
             numbers.some((number) => !selected.includes(number))
           )
             throw new Error("请只提交给定的关键手，每手一次，不得遗漏或增加手序号。");
-          if (parsed.data.hands.some((hand) => hand.text.length > REVIEW_TEXT_LIMIT))
-            throw new Error(`每手正文最多 ${REVIEW_TEXT_LIMIT} 字，请缩短后再提交。`);
+          if (parsed.data.hands.some((hand) => hand.text.length > POKER_REVIEW_TEXT_LIMIT))
+            throw new Error(`每手正文最多 ${POKER_REVIEW_TEXT_LIMIT} 字，请缩短后再提交。`);
           options.send(parsed.data);
           submitted = active.run.runId;
           return { content: [{ type: "text", text: "复盘已提交。" }], details: {} };
