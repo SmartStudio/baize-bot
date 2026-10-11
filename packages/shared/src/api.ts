@@ -1,6 +1,8 @@
 import { z } from "zod";
+import { PokerTableView } from "./poker.js";
 import {
   Account,
+  Viewer,
   AccountId,
   AccountTier,
   Approval,
@@ -642,7 +644,11 @@ export const ServerPush = z.discriminatedUnion("type", [
     delta: z.string(),
     done: z.boolean(),
     revision: z.number().int().positive(),
+    // 和那条 message 的 visibleTo 一样，推送出口靠它过滤，不回库查。
+    visibleTo: z.array(Viewer).min(1).nullable(),
   }),
+  // 牌桌变了推整张桌，用户视角，只推给桌子的主人。客户端只认 version 更大的。
+  z.object({ type: z.literal("poker_table_updated"), table: PokerTableView }),
   z.object({ type: z.literal("bot_updated"), bot: Bot }),
   // 项目开始时给新队员推：带单聊群 id，客户端不用再拉 Bot 列表才认得它的单聊。
   z.object({ type: z.literal("bot_created"), bot: Bot, groupId: GroupId }),

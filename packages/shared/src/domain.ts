@@ -81,7 +81,8 @@ export type Computer = z.infer<typeof Computer>;
 // 七个队友色相，来自设计系统 tokens/colors.css 的 --bot-*。
 export const BotHue = z.enum(["coral", "tangerine", "lime", "mint", "sky", "violet", "pink"]);
 export type BotHue = z.infer<typeof BotHue>;
-export const BotRole = z.enum(["assistant", "member"]);
+// player 是牌桌上的预置牌友，host 是解说老白，都是建牌桌时自动建出来的，不进队伍页。
+export const BotRole = z.enum(["assistant", "member", "player", "host"]);
 export type BotRole = z.infer<typeof BotRole>;
 export const BotRunState = z.enum(["running", "paused"]);
 export type BotRunState = z.infer<typeof BotRunState>;
@@ -494,12 +495,21 @@ export type MessageBody = z.infer<typeof MessageBody>;
 
 // revision 是这条消息被写过几次：建出来是 0，之后正文每改一次（流式接一段、收成定稿、卡片改状态）加一。
 // 同一条消息会经推送、历史、侧栏几条路到客户端，先后没有保证，客户端只认 revision 更大的那份。
+// 一条消息的收件人。visibleTo 为 null 是全群可见；给了数组就至少一个人，没有「空数组」这种写法，
+// 库里的检查约束也禁掉它，免得「空」和「没有」两种意思。
+export const Viewer = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("user") }),
+  z.object({ kind: z.literal("bot"), botId: BotId }),
+]);
+export type Viewer = z.infer<typeof Viewer>;
+
 export const Message = z.object({
   id: MessageId,
   groupId: GroupId,
   body: MessageBody,
   createdAt: Timestamp,
   revision: z.number().int().nonnegative(),
+  visibleTo: z.array(Viewer).min(1).nullable(),
 });
 export type Message = z.infer<typeof Message>;
 

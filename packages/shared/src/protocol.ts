@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PokerAction, PokerHandId, PokerPersona, PokerReviewHand, PokerSessionId, TablePrompt } from "./poker.js";
 import {
   AccountId,
   AccountLogin,
@@ -259,6 +260,24 @@ export const AgentToControl = z.discriminatedUnion("type", [
     groupId: GroupId,
     body: z.string().min(1).max(8000),
   }),
+  // 牌友在牌桌 run 里出一手。seq 是它拿到的决策点，桌子换了手或别人先动就按过期拒。
+  // say 是随动作带的一句台词，公开显示；牌友其他文字输出一律丢弃（D30）。
+  z.object({
+    type: z.literal("poker_act"),
+    runId: RunId,
+    callId: z.string(),
+    handId: PokerHandId,
+    seq: z.number().int().nonnegative(),
+    action: PokerAction,
+    say: z.string().max(40).optional(),
+  }),
+  // 老白在复盘 run 里交一份复盘，哪几手由控制面按筹码变化挑好带在 prompt 里，它只写话（D32）。
+  z.object({
+    type: z.literal("poker_review"),
+    runId: RunId,
+    sessionId: PokerSessionId,
+    hands: z.array(PokerReviewHand),
+  }),
   z.object({
     type: z.literal("set_cadence"),
     runId: RunId,
@@ -338,7 +357,17 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条连接上第几份 config，从 1 起按开始读快照的先后编号。并发重发时后开始的可能先到，
     // 代理丢掉比已应用代际小的，回执带同一个数。
     generation: z.number().int().positive(),
-    bots: z.array(z.object({ id: BotId, role: BotRole, name: z.string(), tags: BotTags, description: z.string() })),
+    // preset 是预置牌友或老白的人设 id，运行器据它取长文案；普通 Bot 为 null。
+    bots: z.array(
+      z.object({
+        id: BotId,
+        role: BotRole,
+        name: z.string(),
+        tags: BotTags,
+        description: z.string(),
+        preset: PokerPersona.nullable(),
+      }),
+    ),
     // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
     tools: z.array(ToolConnectionConfig),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
@@ -367,7 +396,10 @@ export const ControlToAgent = z.discriminatedUnion("type", [
       z.object({ kind: z.literal("user") }),
       z.object({ kind: z.literal("bot"), id: BotId, name: z.string(), tags: BotTags }),
       z.object({ kind: z.literal("routine") }),
+      z.object({ kind: z.literal("table") }),
     ]),
+    // 牌桌 prompt 带这个，context 恒为空数组、task 为 null、members 为空；messageId 指向隐藏的触发消息。
+    table: TablePrompt.nullable(),
     // 例行触发的带这条例行的 id 和边界，运行器的闸门按 boundary 收紧；用户当面派的是 null。
     routine: z.object({ routineId: RoutineId, boundary: RoutineBoundary }).strict().nullable(),
     // solo 是建 Bot 时自动建的单聊群，title 就是 Bot 名；team 是拉了 2 到 6 个 Bot 的群。
@@ -404,6 +436,16 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     runId: RunId,
     callId: z.string(),
     approved: z.boolean(),
+  }),
+  // poker_act 的回执：引擎拒了带中文原因，运行器把它做成工具错误让牌友重试（D24）。
+  z.object({
+    type: z.literal("poker_result"),
+    runId: RunId,
+    callId: z.string(),
+    result: z.discriminatedUnion("ok", [
+      z.object({ ok: z.literal(true) }),
+      z.object({ ok: z.literal(false), error: z.string() }),
+    ]),
   }),
   z.object({ type: z.literal("pause"), botId: BotId }),
   z.object({ type: z.literal("resume"), botId: BotId }),
