@@ -10,7 +10,7 @@ import type { Env } from "../app.js";
 export type PokerReviewRouteDeps = { readonly db: Db; readonly push: PushHub; readonly agents: AgentHub };
 
 /**
- * 挂在 /api 下。散场看复盘（单元 10）。
+ * 挂在 /api 下。散场看复盘，逻辑在 poker/leave.ts 的 leaveTable。
  * POST /poker/tables/:groupId/leave   LeaveTableRequest → PokerTableResponse。手进行中回 409（D33），
  * 散场后给老白派一条 reviewer prompt，复盘回来走 poker_review 上行（agent/events/poker-review.ts）。
  */

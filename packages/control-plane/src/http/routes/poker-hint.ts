@@ -10,7 +10,7 @@ import type { Env } from "../app.js";
 export type PokerHintRouteDeps = { readonly db: Db; readonly push: PushHub; readonly agents: AgentHub };
 
 /**
- * 挂在 /api 下。问老白，单元 9 实现。
+ * 挂在 /api 下。问老白的逻辑在 poker/hint.ts 的 askHint。
  * POST /poker/hands/:id/hint   HintRequest → PokerTableResponse。每个决策点一次（D31）：撞 poker_hints 主键就回原来那条。
  */
 export function createPokerHintRoutes(deps: PokerHintRouteDeps): Hono<Env> {

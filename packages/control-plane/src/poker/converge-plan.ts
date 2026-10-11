@@ -4,15 +4,15 @@ import { fallbackAction } from "./fallback.js";
 import { engineSeatId, seatNoOf } from "./seating.js";
 
 // converge 的决策半边：给定库里读出来的一手牌和桌子，说下一步该做什么。副作用（派活、写事件、
-// 结算）在单元 7，这里不碰库、不读时钟，now 由调用方给。
+// 结算）在 converge.ts，这里不碰库、不读时钟，now 由调用方给。
 
-/** D23：牌友 60 秒没出牌就兜底，用户不限时。单元 7 派活时用它算 turn_deadline。 */
+/** D23：牌友 60 秒没出牌就兜底，用户不限时。converge.ts 派活时用它算 turn_deadline。 */
 export const BOT_TURN_TIMEOUT_MS = 60_000;
 /** D24：同一个决策点牌友被引擎拒绝这么多次就不再等，直接兜底（两次重试都失败）。 */
 export const MAX_REJECTED_ACTIONS = 3;
 
 /**
- * 已经派给牌友的那次回合。单元 7 每次落一个动作都要把它清掉：这里只认座位对得上，
+ * 已经派给牌友的那次回合。converge.ts 每次落一个动作都要把它清掉：这里只认座位对得上，
  * 座位没换时一份没清的旧记录会被当成新决策点的记录。
  */
 export interface PlanTurn {

@@ -290,7 +290,7 @@ async function sendSpeaker(
     context,
     purpose: options.purpose ?? "plan",
     routine: options.routine ?? null,
-    // 群消息派出去的活不是牌桌 prompt。牌桌那条由单元 7 自己拼，不走这里。
+    // 群消息派出去的活不是牌桌 prompt。牌桌那条由 poker/converge.ts 自己拼，不走这里。
     table: null,
     task: solo ? null : task,
     members: roster,

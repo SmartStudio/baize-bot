@@ -189,7 +189,7 @@ export async function listPokerTableIds(db: Db, ownerId: UserId): Promise<GroupI
 }
 
 /**
- * 用户视角的整张桌。别人的桌和不存在的桌都是 null。手牌那截走 currentHandOf（单元 7），这里只拼桌子这一层。
+ * 用户视角的整张桌。别人的桌和不存在的桌都是 null。手牌那截走 poker/store.ts 的 currentHandOf，这里只拼桌子这一层。
  */
 export async function loadPokerTableView(db: Db, ownerId: UserId, groupId: GroupId): Promise<PokerTableView | null> {
   const [found] = await db

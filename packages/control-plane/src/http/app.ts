@@ -229,7 +229,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     await next();
   });
 
-  // 第 2 期的接缝路由，都在登录中间件之后，各自的子单元把 501 换掉。
+  // 第 2 期的路由，都在登录中间件之后。
   app.route("/api", createGoalRoutes({ db, push: hub }));
   app.route("/api", createPreferenceRoutes({ db, push: hub, agents }));
   app.route("/api", createBrandRoutes(brandDeps));
@@ -238,7 +238,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createSeenRoutes({ db, push: hub }));
   app.route("/api", createPrivacyRoutes({ db, agents }));
   app.route("/api", createTemplateRoutes({ db, agents }));
-  // 第 3 期牌桌的接缝路由，同样在登录中间件之后，各自的子单元把 501 换掉。
+  // 第 3 期牌桌的路由，同样在登录中间件之后。
   app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));
   app.route(
     "/api",
@@ -862,7 +862,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!groupId.success) return c.json(NOT_FOUND, 404);
     const owned = await findLiveGroupId(db, c.get("user").id, groupId.data);
     if (owned === null) return c.json(NOT_FOUND, 404);
-    // 牌桌群里不能发普通消息，只能按按钮出牌（单元 7 填）。
+    // 牌桌群里不能发普通消息，只能按按钮出牌。
     try {
       await assertNotTable(db, owned);
     } catch (error) {
