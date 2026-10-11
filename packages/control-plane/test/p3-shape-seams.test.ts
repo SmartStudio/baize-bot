@@ -19,16 +19,13 @@ afterAll(async () => {
 });
 
 const POKER_SEAMS: readonly [string, string][] = [
-  ["POST", "/api/poker/tables"],
-  ["GET", "/api/poker/tables/g-any"],
-  ["POST", "/api/poker/tables/g-any/seats/2"],
   ["POST", "/api/poker/tables/g-any/hands"],
   ["POST", "/api/poker/hands/h-any/act"],
   ["POST", "/api/poker/hands/h-any/hint"],
   ["POST", "/api/poker/tables/g-any/leave"],
 ];
 
-it("七条牌局接口登录后一律 501「未实现」，没登录先 401", async () => {
+it("四条牌局接口登录后一律 501「未实现」，没登录先 401", async () => {
   const anonymous = new ApiClient(server.server.port);
   for (const [method, path] of POKER_SEAMS) {
     expect(

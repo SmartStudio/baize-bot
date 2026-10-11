@@ -223,6 +223,16 @@ export async function joinGroups(tx: Tx, botId: BotId, groupIds: readonly string
   return [...joined].map((row) => String(row.group_id));
 }
 
+/** 同一个位置上换人：旧成员那行改成新成员，position 不动。旧成员不在群里回 false，新成员已在群里会撞主键。 */
+export async function swapGroupMember(tx: Tx, groupId: GroupId, fromBotId: BotId, toBotId: BotId): Promise<boolean> {
+  const swapped = await tx
+    .update(groupMembers)
+    .set({ botId: toBotId })
+    .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.botId, fromBotId)))
+    .returning({ botId: groupMembers.botId });
+  return swapped.length > 0;
+}
+
 export type GroupListEntry = {
   readonly group: Group;
   readonly task: TopicTask;
