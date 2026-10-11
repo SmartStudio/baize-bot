@@ -286,9 +286,40 @@ describe("牌桌 mock 的规则", () => {
     expect(left.session).toBeNull();
     expect(left.stats).toEqual({ sessions: 1, sessionsWon: 1, net: 440 });
     expect(left.lastReview, "复盘还没写好").toBeNull();
+    expect(left.reviewState, "复盘生成中").toEqual({ sessionId: table.session!.id, status: "generating" });
     const reviewed = (await c.tick()).table;
     expect(reviewed.lastReview).toMatchObject({ hands: [expect.objectContaining({ number: 1 })] });
+    expect(reviewed.reviewState).toEqual({ sessionId: table.session!.id, status: "done" });
     expect((await c.call("POST", leave, {})).status, "没有打着的一场了").toBe(409);
+  });
+
+  it("复盘失败后状态是失败，重试只认最近一场，重试后再写一遍", async () => {
+    const c = client();
+    let table = await c.open();
+    const sessionId = table.session!.id;
+    for (const action of [{ kind: "call" }, { kind: "call" }, { kind: "check" }, { kind: "call" }] as const) {
+      table = await c.play(table, action);
+    }
+    const review = `/api/poker/tables/${table.groupId}/review`;
+    expect((await c.call("POST", review, { sessionId })).status, "还没散场就没有可重试的复盘").toBe(409);
+    await c.call("POST", `/api/poker/tables/${table.groupId}/leave`, {});
+    expect((await c.call("POST", "/api/poker/test/fail-review", { groupId: table.groupId })).status).toBe(200);
+    const failed = c.tableOf(await c.call("GET", `/api/poker/tables/${table.groupId}`));
+    expect(failed.reviewState).toEqual({ sessionId, status: "failed" });
+    expect(failed.lastReview).toBeNull();
+    expect((await c.tick()).ran, "失败后队里没有复盘任务").toBe(false);
+
+    expect((await c.call("POST", review, { sessionId: "ses_other" })).status, "不是最近一场").toBe(409);
+    expect((await c.call("POST", review, {})).status).toBe(400);
+    const retried = c.tableOf(await c.call("POST", review, { sessionId }));
+    expect(retried.reviewState).toEqual({ sessionId, status: "generating" });
+    const again = c.tableOf(await c.call("POST", review, { sessionId }));
+    expect(again.version, "生成中再试不排第二条").toBe(retried.version);
+    const done = (await c.tick()).table;
+    expect(done.reviewState).toEqual({ sessionId, status: "done" });
+    expect(done.lastReview?.sessionId).toBe(sessionId);
+    const after = c.tableOf(await c.call("POST", review, { sessionId }));
+    expect(after.version, "写好了再试什么都不做").toBe(done.version);
   });
 
   it("没筹码的座位下一手补回 2000，创建桌子按 requestId 幂等", async () => {

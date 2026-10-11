@@ -8,9 +8,10 @@ const tableWith = (personas: readonly PokerPersona[]) =>
     status: "idle",
     version: 1,
     seats: [
-      { seat: 4, kind: "user", botId: null, name: "你", persona: null, hue: "sky", stack: 2000 },
+      { seat: 4, engineSeatId: "4", kind: "user", botId: null, name: "你", persona: null, hue: "sky", stack: 2000 },
       ...personas.map((persona, index) => ({
         seat: index + 1,
+        engineSeatId: String(index + 1),
         kind: "bot",
         botId: `bot_poker_${persona}`,
         name: persona,
@@ -24,6 +25,7 @@ const tableWith = (personas: readonly PokerPersona[]) =>
     hand: null,
     hint: null,
     lastReview: null,
+    reviewState: null,
     stats: { sessions: 0, sessionsWon: 0, net: 0 },
   });
 

@@ -3,6 +3,8 @@ import {
   HintRequest,
   LeaveTableRequest,
   PokerActRequest,
+  PokerSessionId,
+  RetryReviewRequest,
   StartHandRequest,
   SwapSeatRequest,
   type PokerTableResponse,
@@ -13,8 +15,10 @@ import {
   PokerMockError,
   pokerAskHint,
   pokerCreateTable,
+  pokerFailReview,
   pokerLeave,
   pokerPublish,
+  pokerRetryReview,
   pokerStartHand,
   pokerStep,
   pokerSwapSeat,
@@ -35,11 +39,12 @@ import { readBody, send, type Push, type Route } from "./http.js";
 // 牌桌接口，契约在 shared/poker.ts，每个都回整份牌桌视图 { table }。桌子的变化另外推 poker_table_updated。
 // 牌友出牌排成任务队，默认每 600ms 走一条；测试用 /api/poker/test/* 改节奏或手动走一拍，不用等真实时间。
 
-const TablePath = /^\/api\/poker\/tables\/([^/]+)(?:\/(hands|leave|seats\/(\d+)))?$/;
+const TablePath = /^\/api\/poker\/tables\/([^/]+)(?:\/(hands|leave|review|seats\/(\d+)))?$/;
 const HandPath = /^\/api\/poker\/hands\/([^/]+)\/(act|hint)$/;
 
 const DelayRequest = z.object({ ms: z.number().int().min(0).nullable() }).strict();
 const TickRequest = z.object({ groupId: z.string().optional() }).strict();
+const FailReviewRequest = z.object({ groupId: z.string() }).strict();
 
 const reply = (res: Parameters<Route>[0]["res"], table: PokerTableView, status = 200): void => {
   const body: PokerTableResponse = { table };
@@ -80,6 +85,24 @@ const testRoute: Route = async (context) => {
     }
     const ran = pokerStep(table, push);
     send(res, 200, { ran, table: pokerView(table) });
+    return true;
+  }
+  if (path === "/api/poker/test/fail-review") {
+    const body = await parseBody(context, FailReviewRequest);
+    if (body === null) return true;
+    const table = pokerTableOf(body.groupId);
+    if (table === null) {
+      send(res, 404, { error: "没有这张桌" });
+      return true;
+    }
+    try {
+      pokerFailReview(table);
+    } catch (cause) {
+      if (!(cause instanceof PokerMockError)) throw cause;
+      send(res, cause.status, { error: cause.message });
+      return true;
+    }
+    reply(res, changed(table, push));
     return true;
   }
   return false;
@@ -127,6 +150,10 @@ export const pokerRoutes: Route = async (context) => {
       } else if (tail === "leave") {
         if ((await parseBody(context, LeaveTableRequest)) === null) return true;
         pokerLeave(table, push);
+      } else if (tail === "review") {
+        const body = await parseBody(context, RetryReviewRequest);
+        if (body === null) return true;
+        pokerRetryReview(table, PokerSessionId.parse(body.sessionId), push);
       } else {
         const body = await parseBody(context, SwapSeatRequest);
         if (body === null) return true;

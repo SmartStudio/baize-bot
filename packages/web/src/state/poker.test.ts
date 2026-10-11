@@ -8,12 +8,13 @@ const table = (version: number, stack: number) =>
     groupId: "grp_table",
     status: "idle",
     version,
-    seats: [{ seat: 1, kind: "user", botId: null, name: "你", persona: null, hue: "sky", stack }],
+    seats: [{ seat: 1, engineSeatId: "1", kind: "user", botId: null, name: "你", persona: null, hue: "sky", stack }],
     host: { botId: "bot_laobai", name: "老白", hue: "sky" },
     session: null,
     hand: null,
     hint: null,
     lastReview: null,
+    reviewState: null,
     stats: { sessions: 0, sessionsWon: 0, net: 0 },
   });
 

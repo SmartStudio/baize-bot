@@ -48,16 +48,25 @@ const playHandToEnd = async (request: APIRequestContext, groupId: string): Promi
   throw new Error("一手牌 200 步还没打完");
 };
 
-// 散场之后复盘排成任务，晚一拍才写好，这里走到 lastReview 出现为止。
-const leaveAndWaitForReview = async (request: APIRequestContext, groupId: string): Promise<PokerTableView> => {
-  const left = await request.post(`/api/poker/tables/${groupId}/leave`, { data: {} });
-  expect(left.status(), "散场").toBe(200);
+// 散场之后复盘排成任务，晚一拍才写好，这里走到复盘状态变成已完成为止。
+const waitForReview = async (request: APIRequestContext, groupId: string): Promise<PokerTableView> => {
   for (let step = 0; step < 20; step += 1) {
     const table = await fetchTable(request, groupId);
-    if (table.lastReview !== null) return table;
+    if (table.reviewState?.status === "done") return table;
     await request.post("/api/poker/test/tick", { data: { groupId } });
   }
   throw new Error("复盘 20 拍还没写好");
+};
+
+const leave = async (request: APIRequestContext, groupId: string): Promise<PokerTableView> => {
+  const left = await request.post(`/api/poker/tables/${groupId}/leave`, { data: {} });
+  expect(left.status(), "散场").toBe(200);
+  return PokerTableResponse.parse(await left.json()).table;
+};
+
+const leaveAndWaitForReview = async (request: APIRequestContext, groupId: string): Promise<PokerTableView> => {
+  await leave(request, groupId);
+  return waitForReview(request, groupId);
 };
 
 // 项目页进来先拉一次牌桌视图，不等推送。
@@ -113,6 +122,50 @@ test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
   await expect(page.getByTestId("stats-won")).toHaveText(String(stats.sessionsWon));
   await expect(page.getByTestId("stats-net")).toHaveText(signed(stats.net));
   await expect(page.getByTestId("stats-note")).toHaveText("虚拟筹码，不涉及真钱");
+});
+
+test("老白还在写复盘时，复盘卡是生成中的提示", async ({ page }) => {
+  await login(page);
+  const request = page.request;
+  const groupId = await createTable(request);
+  await attachProjectGroup(request, groupId);
+  await playHandToEnd(request, groupId);
+  const left = await leave(request, groupId);
+  expect(left.reviewState?.status, "散场时复盘在写").toBe("generating");
+
+  await openProject(page, groupId);
+  const card = page.getByTestId("review-card");
+  await expect(card).toHaveAttribute("data-review-status", "generating");
+  await expect(card.getByTestId("review-generating")).toContainText("老白正在写");
+  await expect(card.getByTestId("review-hand")).toHaveCount(0);
+  await expect(card.getByTestId("review-retry")).toHaveCount(0);
+
+  await waitForReview(request, groupId);
+  await expect(card).toHaveAttribute("data-review-status", "done");
+  await expect(card.getByTestId("review-hand"), "推送到了就列出关键手").toHaveCount(1);
+});
+
+test("复盘失败后卡上有重新生成，点了回到生成中，写好后列出关键手", async ({ page }) => {
+  await login(page);
+  const request = page.request;
+  const groupId = await createTable(request);
+  await attachProjectGroup(request, groupId);
+  for (let hand = 0; hand < 3; hand += 1) await playHandToEnd(request, groupId);
+  await leave(request, groupId);
+  const failed = await request.post("/api/poker/test/fail-review", { data: { groupId } });
+  expect(failed.status(), "把复盘弄失败").toBe(200);
+
+  await openProject(page, groupId);
+  const card = page.getByTestId("review-card");
+  await expect(card).toHaveAttribute("data-review-status", "failed");
+  await expect(card.getByTestId("review-failed")).toContainText("没写成");
+  await card.getByTestId("review-retry").click();
+  await expect(card, "点了重试，复盘回到生成中").toHaveAttribute("data-review-status", "generating");
+  await expect(card.getByTestId("review-retry")).toHaveCount(0);
+
+  await waitForReview(request, groupId);
+  await expect(card).toHaveAttribute("data-review-status", "done");
+  await expect(card.getByTestId("review-hand"), "三手关键牌").toHaveCount(3);
 });
 
 test("开了新一场还没散，复盘卡仍是上一场", async ({ page }) => {

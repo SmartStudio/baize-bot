@@ -79,6 +79,7 @@ import {
   type PokerHandId,
   type PokerSeatNo,
   type PokerTableView,
+  type RetryReviewRequest,
   type SwapSeatRequest,
   type Preference,
   type PreferenceId,
@@ -315,6 +316,13 @@ export const createApi = (signal?: AbortSignal) => {
     leaveTable: async (groupId: GroupId): Promise<PokerTableView> =>
       (await json(PokerTableResponse, await send("POST", `/poker/tables/${encodeURIComponent(groupId)}/leave`, {})))
         .table,
+    retryPokerReview: async (groupId: GroupId, request: RetryReviewRequest): Promise<PokerTableView> =>
+      (
+        await json(
+          PokerTableResponse,
+          await send("POST", `/poker/tables/${encodeURIComponent(groupId)}/review`, request),
+        )
+      ).table,
     settings: async () => json(Settings, await send("GET", "/settings")),
     updateSettings: async (patch: Partial<Settings>) => json(Settings, await send("PATCH", "/settings", patch)),
   };

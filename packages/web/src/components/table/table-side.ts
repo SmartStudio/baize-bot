@@ -55,12 +55,6 @@ export const hintText = (messages: readonly Message[], table: PokerTableView): s
   return body?.kind === "bot" ? body.text : null;
 };
 
-// 引擎的座位 id 是任意字符串：mock 里是 s1 到 s4，控制面里是座位号本身。桌子那一层按末位数字对回座位号。
-const seatNoOf = (engineSeatId: string): number | null => {
-  const digit = /(\d)$/.exec(engineSeatId)?.[1];
-  return digit === undefined ? null : Number(digit);
-};
-
 /** 这一手你的筹码净变化：赢回来的减去投进去的（盲注加每次动作的投入）。 */
 export const netOf = (view: PokerSeatView): number => {
   const paid = view.events.reduce((sum, event) => {
@@ -80,8 +74,7 @@ export const handResult = (table: PokerTableView): HandResult | null => {
   const net = netOf(view);
   const nameOf = (engineSeatId: string): string => {
     if (engineSeatId === view.seatId) return "你";
-    const no = seatNoOf(engineSeatId);
-    return table.seats.find((seat) => seat.seat === no)?.name ?? "对手";
+    return table.seats.find((seat) => seat.engineSeatId === engineSeatId)?.name ?? "对手";
   };
   const taken = new Map<string, number>();
   for (const award of view.awards ?? []) taken.set(award.seatId, (taken.get(award.seatId) ?? 0) + award.amount);

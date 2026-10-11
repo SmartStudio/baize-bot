@@ -28,12 +28,6 @@ export const pokerTableOf = (state: ReadyState, groupId: GroupId): PokerTableVie
 export const isPokerTable = (state: ReadyState, groupId: GroupId): boolean =>
   pokerTableOf(state, groupId) !== undefined;
 
-// 控制面的引擎座位 id 是 "1" 到 "4"，Web mock 是 "s1" 到 "s4"。两边都只在末尾带座位号，认不出的当没有。
-export const seatNoOfEngineId = (seatId: string): PokerSeatNo | null => {
-  const matched = /^s?([1-4])$/.exec(seatId);
-  return matched === null ? null : (Number(matched[1]) as PokerSeatNo);
-};
-
 const SUIT_SYMBOL = { s: "♠", h: "♥", d: "♦", c: "♣" } as const;
 
 export const cardParts = (card: PokerCard): { rank: string; suit: string; red: boolean } => {
@@ -92,14 +86,14 @@ const actionLabel = (action: PokerAction, put: number): string => {
   }
 };
 
-// 标签只留本街最后一个动作：换街的事件一来就清。盲注不算动作。
-const lastActionLabels = (events: readonly PokerEvent[]) => {
+// 标签只留本街最后一个动作：换街的事件一来就清。盲注不算动作。事件里是引擎座位 id，按视图里的对照换成座位号。
+const lastActionLabels = (events: readonly PokerEvent[], seats: PokerTableView["seats"]) => {
   const labels = new Map<PokerSeatNo, string>();
   for (const event of events) {
     if (event.kind === "street") labels.clear();
     if (event.kind !== "action") continue;
-    const seat = seatNoOfEngineId(event.seatId);
-    if (seat !== null) labels.set(seat, actionLabel(event.action, event.put));
+    const seat = seats.find((candidate) => candidate.engineSeatId === event.seatId);
+    if (seat !== undefined) labels.set(seat.seat, actionLabel(event.action, event.put));
   }
   return labels;
 };
@@ -108,10 +102,10 @@ export const feltOf = (table: PokerTableView | null): FeltModel | null => {
   if (table === null) return null;
   const hand = table.hand;
   const view = hand?.view ?? null;
-  const labels = view === null ? new Map<PokerSeatNo, string>() : lastActionLabels(view.events);
+  const labels = view === null ? new Map<PokerSeatNo, string>() : lastActionLabels(view.events, table.seats);
 
   const seatModel = (seat: PokerTableView["seats"][number]): FeltSeat => {
-    const engine = view?.seats.find((other) => seatNoOfEngineId(other.seatId) === seat.seat);
+    const engine = view?.seats.find((other) => other.seatId === seat.engineSeatId);
     const status = engine?.status ?? "active";
     const own = seat.kind === "user";
     const shown = engine?.shown ?? null;

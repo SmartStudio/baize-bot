@@ -98,7 +98,7 @@ type Job =
   | { kind: "play"; seat: BotSeatNo; move: Move; say: string | null }
   | { kind: "close" }
   | { kind: "hint"; seq: number }
-  | { kind: "review"; review: PokerReview };
+  | { kind: "review" };
 
 type MockHand = {
   id: PokerHandId;
@@ -126,6 +126,9 @@ type HandRecord = {
 
 type Session = { id: PokerSessionId; handCount: number; net: number; records: HandRecord[] };
 
+// 最近一场散场后复盘的去向：老白写完之前正文先攥在这里，写好了才落到 lastReview。
+type ReviewJob = { sessionId: PokerSessionId; status: "generating" | "failed"; review: PokerReview };
+
 export type MockPokerTable = {
   groupId: GroupId;
   requestId: string;
@@ -137,6 +140,7 @@ export type MockPokerTable = {
   jobs: Job[];
   hint: PokerTableView["hint"];
   lastReview: PokerReview | null;
+  reviewJob: ReviewJob | null;
   stats: PokerStats;
   timer: ReturnType<typeof setTimeout> | null;
 };
@@ -176,9 +180,9 @@ export const pokerTableOfHand = (handId: string): MockPokerTable | null =>
   pokerTableList().find((table) => table.hand?.id === handId) ?? null;
 
 const botIdOf = (persona: PokerPersona): BotId => BotId.parse(`bot_poker_${persona}`);
-const engineSeatId = (no: SeatNo): string => `s${no}`;
+const engineSeatIdOf = (no: SeatNo): string => `s${no}`;
 const seatNoOf = (seatId: string): SeatNo => {
-  const found = SEAT_NOS.find((no) => engineSeatId(no) === seatId);
+  const found = SEAT_NOS.find((no) => engineSeatIdOf(no) === seatId);
   if (found === undefined) throw new Error(`mock 里没有座位 ${seatId}`);
   return found;
 };
@@ -235,7 +239,7 @@ const hostSays = (table: MockPokerTable, text: string, emit: Emit): void => {
 const legalOf = (table: MockPokerTable, hand: MockHand): PokerSeatView["legal"] => {
   if (hand.street === "complete") return { kind: "complete" };
   const toAct = toActOf(table);
-  if (toAct !== USER_SEAT) return { kind: "waiting", toAct: engineSeatId(toAct ?? USER_SEAT) };
+  if (toAct !== USER_SEAT) return { kind: "waiting", toAct: engineSeatIdOf(toAct ?? USER_SEAT) };
   const me = handSeat(hand, USER_SEAT);
   const toCall = hand.currentBet - me.committed;
   const options: Extract<PokerSeatView["legal"], { kind: "your_turn" }>["options"] = [{ kind: "fold" }];
@@ -254,7 +258,7 @@ const seatViewOf = (table: MockPokerTable, hand: MockHand): PokerSeatView => {
     hand.events.flatMap((event) => (event.kind === "showdown" ? [[event.seatId, event.hole] as const] : [])),
   );
   return structuredClone({
-    seatId: engineSeatId(USER_SEAT),
+    seatId: engineSeatIdOf(USER_SEAT),
     position: POSITION[USER_SEAT],
     hole: HOLE[USER_SEAT],
     stack: me.stack,
@@ -264,17 +268,22 @@ const seatViewOf = (table: MockPokerTable, hand: MockHand): PokerSeatView => {
     pot: potOf(hand),
     blinds: POKER_BLINDS,
     seats: hand.seats.map((seat) => ({
-      seatId: engineSeatId(seat.no),
+      seatId: engineSeatIdOf(seat.no),
       position: POSITION[seat.no],
       stack: seat.stack,
       committed: seat.committed,
       status: seat.status,
-      shown: shown.get(engineSeatId(seat.no)) ?? null,
+      shown: shown.get(engineSeatIdOf(seat.no)) ?? null,
     })),
     legal: legalOf(table, hand),
     awards: hand.awards,
     events: hand.events,
   });
+};
+
+const reviewStateOf = (table: MockPokerTable): PokerTableView["reviewState"] => {
+  if (table.reviewJob !== null) return { sessionId: table.reviewJob.sessionId, status: table.reviewJob.status };
+  return table.lastReview === null ? null : { sessionId: table.lastReview.sessionId, status: "done" };
 };
 
 // 用户视角的整张桌，过一遍 shared 的 schema：mock 吐出去的形状和控制面是同一份。
@@ -286,11 +295,21 @@ export const pokerView = (table: MockPokerTable): PokerTableView => {
     status: hand !== null && hand.street !== "complete" ? "in_hand" : "idle",
     version: table.version,
     seats: table.seats.map(({ seat, persona, stack }) => {
+      const engineSeatId = engineSeatIdOf(seat);
       if (persona === null) {
-        return { seat, kind: "user", botId: null, name: user.name, persona: null, hue: "lime", stack };
+        return { seat, engineSeatId, kind: "user", botId: null, name: user.name, persona: null, hue: "lime", stack };
       }
       const card = POKER_PERSONAS[persona];
-      return { seat, kind: "bot", botId: botIdOf(persona), name: card.name, persona, hue: card.hue, stack };
+      return {
+        seat,
+        engineSeatId,
+        kind: "bot",
+        botId: botIdOf(persona),
+        name: card.name,
+        persona,
+        hue: card.hue,
+        stack,
+      };
     }),
     host: { botId: botIdOf(HOST_PERSONA), name: host.name, hue: host.hue },
     session:
@@ -310,6 +329,7 @@ export const pokerView = (table: MockPokerTable): PokerTableView => {
           },
     hint: table.hint,
     lastReview: table.lastReview,
+    reviewState: reviewStateOf(table),
     stats: table.stats,
   });
 };
@@ -335,7 +355,7 @@ const applyAction = (hand: MockHand, no: SeatNo, action: PokerAction): void => {
     if (raisedBy >= hand.minRaise) hand.minRaise = raisedBy;
     hand.currentBet = seat.committed;
   }
-  hand.events.push({ kind: "action", seatId: engineSeatId(no), action, put });
+  hand.events.push({ kind: "action", seatId: engineSeatIdOf(no), action, put });
 };
 
 const deal = (table: MockPokerTable, hand: MockHand, street: LaterStreet, emit: Emit): void => {
@@ -355,7 +375,7 @@ const settleAwards = (hand: MockHand, ending: "fold" | "showdown"): PokerAward[]
   const live = hand.seats.filter(isLive);
   const total = potOf(hand);
   const [only] = live;
-  if (ending === "fold" && only !== undefined) return [{ seatId: engineSeatId(only.no), amount: total, pot: 0 }];
+  if (ending === "fold" && only !== undefined) return [{ seatId: engineSeatIdOf(only.no), amount: total, pot: 0 }];
   const levels = [...new Set(live.map((seat) => seat.contributed))].toSorted((a, b) => a - b);
   const awards: PokerAward[] = [];
   let floor = 0;
@@ -366,7 +386,7 @@ const settleAwards = (hand: MockHand, ending: "fold" | "showdown"): PokerAward[]
     );
     const eligible = live.filter((seat) => seat.contributed >= level);
     const winner = STRENGTH_ORDER.find((no) => eligible.some((seat) => seat.no === no));
-    if (winner !== undefined && amount > 0) awards.push({ seatId: engineSeatId(winner), amount, pot });
+    if (winner !== undefined && amount > 0) awards.push({ seatId: engineSeatIdOf(winner), amount, pot });
     floor = level;
   });
   const last = awards.at(-1);
@@ -380,7 +400,7 @@ const finishHand = (table: MockPokerTable, hand: MockHand, ending: "fold" | "sho
   if (ending === "showdown") {
     for (const seat of hand.seats) seat.committed = 0;
     for (const seat of hand.seats.filter(isLive)) {
-      hand.events.push({ kind: "showdown", seatId: engineSeatId(seat.no), hole: HOLE[seat.no] });
+      hand.events.push({ kind: "showdown", seatId: engineSeatIdOf(seat.no), hole: HOLE[seat.no] });
     }
   }
   const awards = settleAwards(hand, ending);
@@ -494,8 +514,11 @@ export const pokerRunNextJob = (table: MockPokerTable, emit: Emit): boolean => {
   if (job === undefined) return false;
   const hand = table.hand;
   if (job.kind === "review") {
-    table.lastReview = job.review;
-    hostSays(table, "这场的复盘写好了。", emit);
+    if (table.reviewJob !== null) {
+      table.lastReview = table.reviewJob.review;
+      table.reviewJob = null;
+      hostSays(table, "这场的复盘写好了。", emit);
+    }
   } else if (job.kind === "hint" && hand !== null && hand.street !== "complete") {
     const message = post(table, HOST_PERSONA, hintText(table, hand.street), emit, [{ kind: "user" }]);
     table.hint = { seq: job.seq, status: "done", messageId: message.id };
@@ -566,6 +589,7 @@ export const pokerCreateTable = (requestId: string): { table: MockPokerTable; cr
     jobs: [],
     hint: null,
     lastReview: null,
+    reviewJob: null,
     stats: { sessions: 0, sessionsWon: 0, net: 0 },
     timer: null,
   };
@@ -607,7 +631,7 @@ export const pokerStartHand = (table: MockPokerTable, emit: Emit): void => {
     [1, POKER_BLINDS.small],
     [2, POKER_BLINDS.big],
   ] as const) {
-    hand.events.push({ kind: "blind", seatId: engineSeatId(no), amount: putChips(handSeat(hand, no), amount) });
+    hand.events.push({ kind: "blind", seatId: engineSeatIdOf(no), amount: putChips(handSeat(hand, no), amount) });
   }
   table.hand = hand;
   table.jobs = [{ kind: "play", seat: 3, move: { raise: 60 }, say: "加到 60。" }, ...table.jobs];
@@ -738,7 +762,32 @@ export const pokerLeave = (table: MockPokerTable, emit: Emit): void => {
   };
   table.session = null;
   table.hint = null;
-  table.jobs.push({ kind: "review", review: reviewOf(session) });
+  table.reviewJob = { sessionId: session.id, status: "generating", review: reviewOf(session) };
+  table.jobs.push({ kind: "review" });
   hostSays(table, "这场散了，复盘稍后给你。", emit);
+  table.version += 1;
+};
+
+// 测试入口：把正在写的复盘弄失败，和控制面老白的 run 失败是同一个状态。
+export const pokerFailReview = (table: MockPokerTable): void => {
+  const job = table.reviewJob;
+  if (job === null || job.status !== "generating") throw new PokerMockError(409, "没有正在写的复盘");
+  table.jobs = table.jobs.filter((pending) => pending.kind !== "review");
+  job.status = "failed";
+  table.version += 1;
+};
+
+// 重试复盘只认最近一场：正在写的回现状，已写好的什么都不做，失败的重新排一条复盘任务。
+export const pokerRetryReview = (table: MockPokerTable, sessionId: PokerSessionId, emit: Emit): void => {
+  const job = table.reviewJob;
+  if (job === null) {
+    if (table.lastReview?.sessionId === sessionId) return;
+    throw new PokerMockError(409, "只能重试最近一场的复盘");
+  }
+  if (job.sessionId !== sessionId) throw new PokerMockError(409, "只能重试最近一场的复盘");
+  if (job.status === "generating") return;
+  job.status = "generating";
+  table.jobs.push({ kind: "review" });
+  hostSays(table, "我再写一遍这场的复盘。", emit);
   table.version += 1;
 };
