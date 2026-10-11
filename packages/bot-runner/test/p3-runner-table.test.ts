@@ -15,7 +15,7 @@ import {
   type TablePrompt,
   TaskId,
 } from "@baize/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRunner, type PromptMessage, type Runner, type RunnerConfig } from "../src/index.js";
 import { composeTablePrompt, createPokerResults } from "../src/table.js";
 import { tablePersona } from "../src/persona.js";
@@ -116,6 +116,8 @@ const actionMessage = (runId: string) => ({
 
 const resources: Array<{ runner: Runner; gateway: Gateway; dataDir: string }> = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.useRealTimers();
   for (const resource of resources.splice(0)) {
     await resource.runner.stop();
     await resource.gateway.close();
@@ -445,3 +447,41 @@ describe("p3-runner-table 验收", () => {
     expect(states).toEqual(["a", "b"]);
   });
 });
+
+it("运行器等回执超时后同一 Bot 的下一个 prompt 能照常执行", async () => {
+  const actualSetTimeout = globalThis.setTimeout;
+  vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, timeout, ...args) =>
+    actualSetTimeout(handler, timeout === 65_000 ? 10 : timeout, ...args),
+  );
+  const h = await harness((request) =>
+    request.messages.some((message) => message.role === "tool")
+      ? finish
+      : call("timeout-call", "poker_act", { action: "call" }),
+  );
+  const first = h.runner.prompt(prompt());
+  const second = h.runner.prompt(
+    prompt("player", { runId: RunId.parse("run-after-timeout"), messageId: MessageId.parse("after-timeout") }),
+  );
+  await Promise.all([first, second]);
+  expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
+    "run-table",
+    "run-after-timeout",
+  ]);
+  expect(
+    JSON.stringify(h.requests.flatMap((request) => request.messages.filter((message) => message.role === "tool"))),
+  ).toContain("出牌确认超时");
+}, 10_000);
+it("出牌回执超时清理等待，晚到的同 call 回执不串到另一 run", async () => {
+  vi.useFakeTimers();
+  const results = createPokerResults(() => {});
+  const first = results.ask(actionMessage("expired"), BotId.parse("bot-a"), undefined);
+  const rejected = expect(first).rejects.toThrow("出牌确认超时");
+  await vi.advanceTimersByTimeAsync(65_000);
+  await rejected;
+  const second = results.ask(actionMessage("next"), BotId.parse("bot-a"), undefined);
+  results.settle(RunId.parse("expired"), "same-call", { ok: true });
+  expect(vi.getTimerCount()).toBe(1);
+  results.settle(RunId.parse("next"), "same-call", { ok: true });
+  await second;
+  expect(vi.getTimerCount()).toBe(0);
+}, 10_000);

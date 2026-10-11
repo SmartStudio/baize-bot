@@ -28,6 +28,9 @@ import type { ActiveRun } from "./topic.js";
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type PokerResult = Extract<ControlToAgent, { type: "poker_result" }>["result"];
 
+// 比控制面的 60 秒兜底多留 5 秒，让正常的兜底失败回执先到。
+const POKER_RESULT_TIMEOUT_MS = 65_000;
+
 const POSITIONS = {
   button: "庄位",
   small_blind: "小盲位",
@@ -167,11 +170,21 @@ export function createPokerResults(send: (message: AgentToControl) => void) {
       if (signal?.aborted) return Promise.reject(new Error("这次出牌被中止了。"));
       return new Promise<void>((resolve, reject) => {
         const onAbort = () => settle(message.runId, message.callId, { ok: false, error: "这次出牌被中止了。" });
+        const timer = setTimeout(
+          () =>
+            settle(message.runId, message.callId, {
+              ok: false,
+              error: "出牌确认超时，这次出牌没有确认，请等待新的决策点。",
+            }),
+          POKER_RESULT_TIMEOUT_MS,
+        );
+        timer.unref();
         waiting.set(actionKey(message.runId, message.callId), {
           runId: message.runId,
           callId: message.callId,
           botId,
           settle: (result) => {
+            clearTimeout(timer);
             signal?.removeEventListener("abort", onAbort);
             if (result.ok) resolve();
             else reject(new Error(result.error));

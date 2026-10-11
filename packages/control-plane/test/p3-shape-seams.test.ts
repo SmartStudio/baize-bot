@@ -25,7 +25,7 @@ const POKER_SEAMS: readonly [string, string][] = [
   ["POST", "/api/poker/tables/g-any/leave"],
 ];
 
-it("四条牌局接口登录后一律 501「未实现」，没登录先 401", async () => {
+it("四条牌局接口没登录先 401，已接的开手与出牌对未知对象回 404，问老白和散场的桩回 501", async () => {
   const anonymous = new ApiClient(server.server.port);
   for (const [method, path] of POKER_SEAMS) {
     expect(
@@ -38,8 +38,13 @@ it("四条牌局接口登录后一律 501「未实现」，没登录先 401", as
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   for (const [method, path] of POKER_SEAMS) {
     const response = await client.request(method, path, method === "GET" ? undefined : {});
-    expect(response.status, `${method} ${path}`).toBe(501);
-    expect(await response.json()).toEqual({ error: "未实现" });
+    if (path.endsWith("/hands") || path.endsWith("/act")) {
+      expect(response.status, `${method} ${path}`).toBe(404);
+      expect(await response.json()).toEqual({ error: path.endsWith("/hands") ? "没有这张牌桌" : "没有这手牌" });
+    } else {
+      expect(response.status, `${method} ${path}`).toBe(501);
+      expect(await response.json()).toEqual({ error: "未实现" });
+    }
   }
 });
 
@@ -66,7 +71,7 @@ it("普通群发消息不受牌桌守卫影响，新消息和历史里的 visibl
     const groupId = bots[0]?.groupId;
     if (groupId === undefined) throw new Error("新用户应有主助理和它的单聊");
 
-    // 先发一条 poker_act。桩只会抛「未实现」，hub 记一行日志不断连接，后面的派活得照常到达。
+    // 先发一条 poker_act。未知手牌会静默丢弃，不断连接，后面的派活得照常到达。
     agent.send({
       type: "poker_act",
       runId: RunId.parse("run-nobody"),

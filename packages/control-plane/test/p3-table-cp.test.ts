@@ -1,0 +1,826 @@
+import {
+  BotId,
+  CreateGroupResponse,
+  GroupId,
+  PokerHandId,
+  PokerEvent,
+  PokerSessionId,
+  PokerTableResponse,
+  RunId,
+  UserId,
+  type ControlToAgent,
+  type PokerAction,
+  type PokerSeatNo,
+  type PokerTableView,
+} from "@baize/shared";
+import { randomUUID } from "node:crypto";
+import { afterAll, afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { apply, newHand, replay, type HandState } from "../src/poker/engine.js";
+import * as pokerConverge from "../src/poker/converge.js";
+import * as pokerStore from "../src/poker/store.js";
+import { ensureComputer } from "../src/repo/computers.js";
+import { ensurePokerPresets } from "../src/repo/poker-presets.js";
+import { startServer, type RunningServer } from "../src/server.js";
+import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
+import { createTestDb, type TestDb } from "./helpers/db.js";
+import { makeComputer, makeUser, PASSWORD, type TestComputer } from "./helpers/fixtures.js";
+import { connectPush, type PushClient } from "./helpers/ws.js";
+
+type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
+let database: TestDb;
+let server: RunningServer;
+let now: Date;
+let table: Fixture;
+
+beforeAll(async () => {
+  database = await createTestDb();
+});
+beforeEach(async () => {
+  now = new Date();
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker: { intervalMs: 20, now: () => now, turnTimeoutMs: 60_000 },
+  });
+});
+afterEach(async () => {
+  vi.restoreAllMocks();
+  table?.agent.close();
+  table?.push.close();
+  await server.close();
+  if (table) await database.sql`DELETE FROM users WHERE id = ${table.ownerId}`;
+});
+afterAll(async () => {
+  await database.close();
+});
+
+type Fixture = {
+  ownerId: string;
+  groupId: GroupId;
+  client: ApiClient;
+  computer: TestComputer;
+  agent: AgentClient;
+  push: PushClient;
+  botIds: BotId[];
+};
+async function fixture(): Promise<Fixture> {
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  await ensurePokerPresets(database.db, user.id);
+  const client = new ApiClient(server.port);
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const bots = await database.sql<
+    { id: string; preset: string }[]
+  >`SELECT id, preset FROM bots WHERE owner_id = ${user.id} AND preset IS NOT NULL`;
+  const botIds = ["leopard", "old_k", "jasmine", "laobai"].map((preset) =>
+    BotId.parse(bots.find((bot) => bot.preset === preset)?.id),
+  );
+  const response = await client.post("/api/groups", { title: "测试德州", botIds });
+  expect(response.status).toBe(201);
+  const groupId = CreateGroupResponse.parse(await response.json()).group.id;
+  await database.sql`UPDATE groups SET chief_bot_id = ${botIds[3]!} WHERE id = ${groupId}`;
+  const seats = [1, 2, 3, 4].map((seat) => ({ seat, botId: seat === 4 ? null : botIds[seat - 1], stack: 2000 }));
+  await database.sql`INSERT INTO poker_tables (group_id, owner_id, request_id, seats, button_seat, small_blind, big_blind, starting_stack, created_at) VALUES (${groupId}, ${user.id}, ${randomUUID()}, ${JSON.stringify(seats)}::jsonb, 4, 10, 20, 2000, now())`;
+  const { agent } = await helloAgent(server.port, computer.computerId, computer.token);
+  const push = await connectPush(server.port, client.cookie ?? "");
+  table = { ownerId: user.id, groupId, computer, client, botIds, agent, push };
+  return table;
+}
+async function start(): Promise<PokerTableView> {
+  const response = await table.client.post(`/api/poker/tables/${table.groupId}/hands`);
+  expect(response.status).toBe(201);
+  const raw: unknown = await response.json();
+  expect(JSON.stringify(raw)).not.toMatch(/seed|deck/);
+  return PokerTableResponse.parse(raw).table;
+}
+async function seeded(button: PokerSeatNo = 2, actions: PokerAction[] = [], stack = 2000): Promise<PokerHandId> {
+  const handId = PokerHandId.parse(randomUUID());
+  const sessionId = PokerSessionId.parse(randomUUID());
+  const seats = [1, 2, 3, 4].map((seat) => ({ seat, botId: seat === 4 ? null : table.botIds[seat - 1], stack }));
+  let state = newHand(
+    "本单固定种子",
+    seats.map((seat) => ({ id: String(seat.seat), stack })),
+    String(button),
+    { small: 10, big: 20 },
+  );
+  for (const action of actions) {
+    if (state.phase.kind !== "betting") throw new Error("夹具已经结算");
+    state = apply(state, state.phase.pending[0]!, action);
+  }
+  await database.sql.begin(async (sql) => {
+    await sql`INSERT INTO poker_sessions (id, group_id) VALUES (${sessionId}, ${table.groupId})`;
+    await sql`INSERT INTO poker_hands (id, group_id, session_id, number, seed, seats_start, button_seat, blinds, created_at) VALUES (${handId}, ${table.groupId}, ${sessionId}, 1, ${state.seed}, ${JSON.stringify(seats)}::jsonb, ${button}, ${JSON.stringify(state.blinds)}::jsonb, now())`;
+    for (const [seq, event] of state.events.entries())
+      await sql`INSERT INTO poker_events (hand_id, seq, event, created_at) VALUES (${handId}, ${seq}, ${JSON.stringify(event)}::jsonb, now())`;
+    await sql`UPDATE poker_tables SET seats = ${JSON.stringify(seats)}::jsonb, status = 'in_hand', hand_count = 1, button_seat = ${button} WHERE group_id = ${table.groupId}`;
+  });
+  return handId;
+}
+async function stored(handId: string): Promise<HandState> {
+  const [hand] = await database.sql<
+    {
+      seed: string;
+      seats_start: { seat: number; stack: number }[];
+      button_seat: number;
+      blinds: { small: number; big: number };
+    }[]
+  >`SELECT * FROM poker_hands WHERE id = ${handId}`;
+  if (!hand) throw new Error("没有测试手牌");
+  const events = await database.sql<
+    { event: HandState["events"][number] }[]
+  >`SELECT event FROM poker_events WHERE hand_id = ${handId} ORDER BY seq`;
+  return replay(
+    hand.seed,
+    hand.seats_start.map((seat) => ({ id: String(seat.seat), stack: seat.stack })),
+    String(hand.button_seat),
+    hand.blinds,
+    events.map((row) => PokerEvent.parse(row.event)),
+  );
+}
+function act(
+  prompt: Prompt,
+  action: PokerAction,
+  extra: { runId?: ReturnType<typeof RunId.parse>; seq?: number; say?: string } = {},
+): void {
+  if (!prompt.table) throw new Error("不是牌桌 prompt");
+  table.agent.send({
+    type: "poker_act",
+    runId: extra.runId ?? prompt.runId,
+    callId: randomUUID(),
+    handId: prompt.table.handId,
+    seq: extra.seq ?? prompt.table.seq,
+    action,
+    ...(extra.say === undefined ? {} : { say: extra.say }),
+  });
+}
+async function finish(prompt: Prompt): Promise<void> {
+  table.agent.send({
+    type: "run_done",
+    runId: prompt.runId,
+    botId: prompt.botId,
+    groupId: prompt.groupId,
+    steps: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    prompt: "entered",
+  });
+  await table.agent.ack(prompt.runId);
+}
+async function barrier(prompt: Prompt): Promise<void> {
+  const runId = RunId.parse(randomUUID());
+  const messageId = randomUUID() as import("@baize/shared").MessageId;
+  await database.sql`INSERT INTO runs (id, bot_id, group_id, computer_id, started_at) VALUES (${runId}, ${prompt.botId}, ${table.groupId}, ${table.computer.computerId}, now())`;
+  table.agent.send({
+    type: "bot_text",
+    runId,
+    botId: prompt.botId,
+    groupId: table.groupId,
+    messageId,
+    delta: "确定落地的哨兵",
+    done: true,
+  });
+  for (;;) {
+    const push = await table.push.next();
+    if (push.type === "message_delta" && push.messageId === messageId) return;
+  }
+}
+async function tablePush(predicate: (view: PokerTableView) => boolean): Promise<PokerTableView> {
+  for (;;) {
+    const push = await table.push.next();
+    if (push.type === "poker_table_updated" && predicate(push.table)) return push.table;
+  }
+}
+async function advanceUser(view: PokerTableView, action: PokerAction): Promise<Response> {
+  if (!view.hand) throw new Error("没有手牌");
+  return table.client.post(`/api/poker/hands/${view.hand.id}/act`, { seq: view.hand.view.events.length, action });
+}
+
+it("开一手后用户的响应里找不到别的座位的牌和种子", async () => {
+  await fixture();
+  const view = await start();
+  const state = await stored(view.hand!.id);
+  const json = JSON.stringify(view);
+  expect(json).not.toMatch(/seed|deck/);
+  expect(json).not.toContain(state.seed);
+  for (const seat of state.seats)
+    for (const card of seat.hole) expect(json.includes(`"${card}"`)).toBe(seat.id === "4");
+  expect(view.status).toBe("in_hand");
+  expect(view.hand!.deadline).toBeNull();
+  expect((await table.client.post(`/api/poker/tables/${table.groupId}/hands`)).status).toBe(409);
+});
+it("轮到牌友时给对应 Bot 派一次表桌活，prompt 里只有它自己的底牌且找不到种子", async () => {
+  await fixture();
+  const handId = await seeded();
+  const prompt = await table.agent.expect("prompt");
+  expect(prompt.botId).toBe(table.botIds[0]);
+  expect(prompt.table!.role).toBe("player");
+  expect(prompt.context).toEqual([]);
+  expect(prompt.task).toBeNull();
+  expect(prompt.members).toEqual([]);
+  const state = await stored(handId);
+  const json = JSON.stringify(prompt);
+  expect(json).not.toContain(state.seed);
+  expect(json).not.toMatch(/seed|deck/);
+  for (const seat of state.seats)
+    for (const card of seat.hole) expect(json.includes(`"${card}"`)).toBe(seat.id === "1");
+  table.agent.send({ type: "heartbeat", at: new Date().toISOString() });
+  await table.client.get("/api/bots");
+  const [count] = await database.sql<
+    { n: number }[]
+  >`SELECT count(*)::int AS n FROM runs WHERE group_id = ${table.groupId} AND table_role = 'player'`;
+  expect(count!.n).toBe(1);
+});
+it("牌友出牌后推进到下一位，用户的 WebSocket 收到 poker_table_updated 且版本递增", async () => {
+  await fixture();
+  await seeded();
+  const prompt = await table.agent.expect("prompt");
+  const before = await tablePush((view) => view.hand?.toAct === 1);
+  act(prompt, { kind: "call" }, { say: "跟你玩一手" });
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  const next = await table.agent.expect("prompt");
+  expect(next.botId).toBe(table.botIds[1]);
+  const after = await tablePush((view) => view.hand?.toAct === 2);
+  expect(after.version).toBeGreaterThan(before.version);
+  const [say] = await database.sql<
+    { body: { kind: string; text: string }; visible_to: unknown }[]
+  >`SELECT body, visible_to FROM messages WHERE group_id = ${table.groupId} AND body ->> 'text' = '跟你玩一手'`;
+  expect(say!.body.kind).toBe("bot");
+  expect(say!.visible_to).toBeNull();
+});
+it("所有人弃牌只剩一人时不摊牌直接收池，桌子回 idle", async () => {
+  await fixture();
+  const handId = await seeded(2, [{ kind: "fold" }, { kind: "fold" }]);
+  const p = await table.agent.expect("prompt");
+  act(p, { kind: "fold" });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(true);
+  const view = await tablePush((candidate) => candidate.status === "idle");
+  const state = await stored(handId);
+  expect(state.phase.kind).toBe("complete");
+  expect(state.events.some((event) => event.kind === "showdown")).toBe(false);
+  expect(view.seats.reduce((sum, seat) => sum + seat.stack, 0)).toBe(8000);
+});
+it("摊牌结算后各座位筹码之和不变", async () => {
+  await fixture();
+  const handId = await seeded(1, [{ kind: "all_in" }], 40);
+  for (let i = 0; i < 3; i++) {
+    const p = await table.agent.expect("prompt");
+    act(p, { kind: "all_in" });
+    expect((await table.agent.expect("poker_result")).result.ok).toBe(true);
+    await finish(p);
+  }
+  const view = await tablePush((candidate) => candidate.status === "idle");
+  expect(view.seats.reduce((sum, seat) => sum + seat.stack, 0)).toBe(160);
+  expect((await stored(handId)).events.filter((event) => event.kind === "showdown")).toHaveLength(4);
+});
+it("再来一手庄位轮转、破产座位补码", async () => {
+  await fixture();
+  await database.sql`UPDATE poker_tables SET hand_count=2, button_seat=1, seats=jsonb_set(seats,'{1,stack}','0') WHERE group_id=${table.groupId}`;
+  const view = await start();
+  const [hand] = await database.sql<
+    { button_seat: number }[]
+  >`SELECT button_seat FROM poker_hands WHERE id=${view.hand!.id}`;
+  expect(hand!.button_seat).toBe(3);
+  expect(view.hand!.number).toBe(3);
+  const state = await stored(view.hand!.id);
+  expect(
+    state.seats.find((seat) => seat.id === "2")!.stack + state.seats.find((seat) => seat.id === "2")!.committed,
+  ).toBe(2000);
+  const rebuy =
+    await database.sql`SELECT * FROM messages WHERE group_id=${table.groupId} AND body ->> 'text' LIKE '%补码%'`;
+  expect(rebuy).toHaveLength(1);
+});
+it("牌友出非法动作得到失败结果和中文原因，手牌不变", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const before = await stored(id);
+  act(p, { kind: "check" });
+  const result = await table.agent.expect("poker_result");
+  expect(result.result.ok).toBe(false);
+  expect(JSON.stringify(result.result)).toMatch(/[\u4e00-\u9fff]/);
+  expect(await stored(id)).toEqual(before);
+  const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
+  expect(hand!.turn_attempts).toBe(1);
+});
+it("同一回合第三次非法动作按兜底处理", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  for (let i = 0; i < 3; i++) {
+    act(p, { kind: "check" });
+    expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  }
+  const next = await table.agent.expect("prompt");
+  expect(next.botId).toBe(table.botIds[1]);
+  const state = await stored(id);
+  expect(state.events.filter((event) => event.kind === "action")).toEqual([
+    { kind: "action", seatId: "1", action: { kind: "fold" }, put: 0 },
+  ]);
+  const [row] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
+  expect(row!.turn_attempts).toBe(0);
+});
+it("牌友超时没出牌，扫描后自动过牌；不能过牌时弃牌", async () => {
+  await fixture();
+  const id = await seeded(1, [{ kind: "call" }, { kind: "call" }, { kind: "call" }]);
+  await table.agent.expect("prompt");
+  now = new Date(now.getTime() + 60_001);
+  await tablePush((view) =>
+    view.hand!.view.events.some(
+      (event) => event.kind === "action" && event.seatId === "3" && event.action.kind === "check",
+    ),
+  );
+  const p = await table.agent.expect("prompt");
+  expect(p.botId).toBe(table.botIds[1]);
+  act(p, { kind: "raise", amount: 40 });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(true);
+  await table.agent.expect("prompt");
+  now = new Date(now.getTime() + 60_001);
+  await tablePush((view) =>
+    view.hand!.view.events.some(
+      (event) => event.kind === "action" && event.seatId === "3" && event.action.kind === "fold",
+    ),
+  );
+  expect(
+    (await stored(id)).events
+      .filter((event) => event.kind === "action" && event.seatId === "3")
+      .map((event) => (event.kind === "action" ? event.action.kind : "")),
+  ).toEqual(["check", "fold"]);
+});
+it("用户加注不足最小额回 400 和中文原因", async () => {
+  await fixture();
+  const view = await start();
+  const r = await advanceUser(view, { kind: "raise", amount: 21 });
+  expect(r.status).toBe(400);
+  expect(JSON.stringify(await r.json())).toMatch(/加注/);
+});
+it("过期 run 的 poker_act 得到失败回执、不落动作", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const before = await stored(id);
+  const replacement = RunId.parse(randomUUID());
+  await database.sql`INSERT INTO runs(id,bot_id,group_id,computer_id,started_at) VALUES(${replacement},${p.botId},${table.groupId},${table.computer.computerId},now())`;
+  await database.sql`UPDATE poker_hands SET turn_run_id=${replacement} WHERE id=${id}`;
+  act(p, { kind: "fold" });
+  const result = await table.agent.expect("poker_result");
+  expect(result.result.ok).toBe(false);
+  expect(JSON.stringify(result.result)).toMatch(/[\u4e00-\u9fff]/);
+  await barrier(p);
+  expect(await stored(id)).toEqual(before);
+});
+it("seq 过期的牌友出牌得到失败回执、不增加拒绝次数", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const before = await stored(id);
+  act(p, { kind: "call" }, { seq: 0 });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  await barrier(p);
+  expect(await stored(id)).toEqual(before);
+  const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
+  expect(hand!.turn_attempts).toBe(0);
+});
+it("seq 过期的用户出牌回 409", async () => {
+  await fixture();
+  const view = await start();
+  const r = await table.client.post(`/api/poker/hands/${view.hand!.id}/act`, { seq: 0, action: { kind: "fold" } });
+  expect(r.status).toBe(409);
+});
+it("不轮到用户时出牌回 409", async () => {
+  await fixture();
+  const id = await seeded();
+  const r = await table.client.post(`/api/poker/hands/${id}/act`, { seq: 2, action: { kind: "fold" } });
+  expect(r.status).toBe(409);
+});
+it("同一个 poker_act 重复上行只落一次", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const duplicate = {
+    type: "poker_act",
+    runId: p.runId,
+    callId: "重复",
+    handId: id,
+    seq: p.table!.seq,
+    action: { kind: "call" },
+  } as const;
+  table.agent.send(duplicate);
+  table.agent.send(duplicate);
+  const results: Extract<ControlToAgent, { type: "poker_result" }>[] = [];
+  while (results.length < 2) {
+    const message = await table.agent.next();
+    if (message.type === "poker_result") results.push(message);
+  }
+  expect(results.map((message) => message.result)).toEqual([{ ok: true }, { ok: true }]);
+  await barrier(p);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
+  expect(table.agent.received().filter((event) => event.type === "poker_result")).toHaveLength(0);
+});
+it("用户出牌和扫描器兜底同时到，只落一个动作", async () => {
+  await fixture();
+  const view = await start();
+  now = new Date(now.getTime() + 120_000);
+  const results = await Promise.all([advanceUser(view, { kind: "call" }), advanceUser(view, { kind: "call" })]);
+  expect(results.map((r) => r.status).toSorted()).toEqual([200, 409]);
+  const state = await stored(view.hand!.id);
+  expect(state.events.filter((event) => event.kind === "action" && event.seatId === "4")).toHaveLength(1);
+});
+it("控制面重启后手牌从种子和日志恢复，轮到的人不变", async () => {
+  await fixture();
+  const view = await start();
+  const state = await stored(view.hand!.id);
+  await server.close();
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker: { intervalMs: 20 },
+  });
+  table.client = new ApiClient(server.port);
+  expect(
+    (
+      await table.client.login(
+        (await database.sql<{ email: string }[]>`SELECT email FROM users WHERE id=${table.ownerId}`)[0]!.email,
+        PASSWORD,
+      )
+    ).status,
+  ).toBe(200);
+  const response = await advanceUser(view, { kind: "call" });
+  expect(response.status).toBe(200);
+  const next = PokerTableResponse.parse(await response.json()).table;
+  expect(next.hand!.view.hole).toEqual(state.seats.find((seat) => seat.id === "4")!.hole);
+  expect(next.hand!.toAct).toBe(1);
+  expect(next.hand!.view.events.slice(0, 2)).toEqual(state.events);
+});
+it("代理重连后，轮到牌友但 run 已丢，重新派活", async () => {
+  await fixture();
+  const id = await seeded();
+  const old = await table.agent.expect("prompt");
+  table.agent.close();
+  await table.agent.closed();
+  table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token, [])).agent;
+  const next = await table.agent.expect("prompt");
+  expect(next.runId).not.toBe(old.runId);
+  expect(next.botId).toBe(old.botId);
+  expect(next.table!.seq).toBe(old.table!.seq);
+  expect((await stored(id)).events).toHaveLength(2);
+});
+it("向牌桌群发普通消息回 409", async () => {
+  await fixture();
+  const r = await table.client.post(`/api/groups/${table.groupId}/messages`, { text: "来打牌" });
+  expect(r.status).toBe(409);
+  expect(await r.json()).toEqual({ error: "牌桌里请用按钮出牌" });
+});
+
+it("牌友 run 已收尾却没出牌，扫描后立即兜底", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  await finish(p);
+  const next = await table.agent.expect("prompt");
+  expect(next.botId).toBe(table.botIds[1]);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toEqual([
+    { kind: "action", seatId: "1", action: { kind: "fold" }, put: 0 },
+  ]);
+});
+it("同一牌友连续两个决策点清掉拒绝次数并派新 run", async () => {
+  await fixture();
+  const id = await seeded(1, [{ kind: "call" }, { kind: "fold" }, { kind: "fold" }]);
+  const first = await table.agent.expect("prompt");
+  expect(first.botId).toBe(table.botIds[2]);
+  act(first, { kind: "raise", amount: 21 });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  act(first, { kind: "check" });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(true);
+  await finish(first);
+  const next = await table.agent.expect("prompt");
+  expect(next.botId).toBe(first.botId);
+  expect(next.runId).not.toBe(first.runId);
+  expect(next.table!.seq).toBeGreaterThan(first.table!.seq);
+  const [row] = await database.sql<
+    { turn_attempts: number; turn_run_id: string }[]
+  >`SELECT turn_attempts,turn_run_id FROM poker_hands WHERE id=${id}`;
+  expect(row!.turn_attempts).toBe(0);
+  expect(row!.turn_run_id).toBe(next.runId);
+});
+it("牌友出牌和到点扫描竞争只落一次动作", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  now = new Date(now.getTime() + 60_001);
+  act(p, { kind: "call" });
+  await tablePush((view) => view.hand!.view.events.some((event) => event.kind === "action" && event.seatId === "1"));
+  await barrier(p);
+  expect((await stored(id)).events.filter((event) => event.kind === "action" && event.seatId === "1")).toHaveLength(1);
+});
+it("六条并发用户出牌只接受一条且不耗尽连接池", async () => {
+  await fixture();
+  const view = await start();
+  const responses = await Promise.all(Array.from({ length: 6 }, () => advanceUser(view, { kind: "call" })));
+  expect(responses.map((response) => response.status).toSorted()).toEqual([200, 409, 409, 409, 409, 409]);
+});
+it("用户回合保留过期的牌友记录也不触发兜底", async () => {
+  await fixture();
+  const view = await start();
+  await database.sql`UPDATE poker_hands SET turn_seat=4, turn_deadline=now()-interval '1 minute', turn_attempts=3 WHERE id=${view.hand!.id}`;
+  const r = await advanceUser(view, { kind: "call" });
+  expect(r.status).toBe(200);
+  expect(
+    (await stored(view.hand!.id)).events.filter((event) => event.kind === "action" && event.seatId === "4"),
+  ).toEqual([{ kind: "action", seatId: "4", action: { kind: "call" }, put: 20 }]);
+});
+it("重连仍带当前 activeRun 时不重复派活", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  table.agent.close();
+  await table.agent.closed();
+  table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token, [p.runId])).agent;
+  await barrier(p);
+  act(p, { kind: "call" });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(true);
+  await table.agent.expect("prompt");
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
+  const [count] = await database.sql<
+    { n: number }[]
+  >`SELECT count(*)::int AS n FROM runs WHERE group_id=${table.groupId} AND bot_id=${p.botId} AND table_role='player'`;
+  expect(count!.n).toBe(1);
+});
+it("别人的开手与用户出牌均回 404，坏请求回 400", async () => {
+  await fixture();
+  const other = await makeUser(database.db);
+  const client = new ApiClient(server.port);
+  await client.login(other.email, PASSWORD);
+  expect((await client.post(`/api/poker/tables/${table.groupId}/hands`)).status).toBe(404);
+  const view = await start();
+  expect(
+    (await client.post(`/api/poker/hands/${view.hand!.id}/act`, { seq: 2, action: { kind: "fold" } })).status,
+  ).toBe(404);
+  expect(
+    (await table.client.post(`/api/poker/hands/${view.hand!.id}/act`, { seq: -1, action: { kind: "fold" } })).status,
+  ).toBe(400);
+});
+
+it("开手落库失败时日志和响应也不泄露种子", async () => {
+  await fixture();
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  await database.sql`ALTER TABLE poker_hands ADD CONSTRAINT p3_table_cp_seed_logging CHECK (false) NOT VALID`;
+  try {
+    const response = await table.client.post(`/api/poker/tables/${table.groupId}/hands`);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: "服务端出错" });
+    expect(JSON.stringify(logged.mock.calls)).not.toMatch(/[a-f0-9]{64}/);
+    expect(String(logged.mock.calls[0]?.[0])).toContain("牌桌开手失败");
+    const [row] = await database.sql<
+      { status: string; hand_count: number }[]
+    >`SELECT status,hand_count FROM poker_tables WHERE group_id=${table.groupId}`;
+    expect(row).toEqual({ status: "idle", hand_count: 0 });
+  } finally {
+    await database.sql`ALTER TABLE poker_hands DROP CONSTRAINT p3_table_cp_seed_logging`;
+    logged.mockRestore();
+  }
+});
+
+it("第三次非法被兜底后同一 run 再出牌得到失败回执", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  for (let attempt = 0; attempt < 3; attempt++) {
+    act(p, { kind: "check" });
+    expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  }
+  await table.agent.expect("prompt");
+  const before = await stored(id);
+  act(p, { kind: "call" });
+  const receipt = await table.agent.expect("poker_result");
+  expect(receipt.runId).toBe(p.runId);
+  expect(receipt.result.ok).toBe(false);
+  expect(JSON.stringify(receipt.result)).toMatch(/[\u4e00-\u9fff]/);
+  expect(await stored(id)).toEqual(before);
+});
+it("兜底之后晚到的出牌得到失败回执", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  now = new Date(now.getTime() + 60_001);
+  await table.agent.expect("prompt");
+  const before = await stored(id);
+  act(p, { kind: "call" });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  expect(await stored(id)).toEqual(before);
+});
+it("已收尾 run 仍对着当前 turn 时出牌得到失败回执", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
+  act(p, { kind: "call" });
+  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
+});
+it("不属于这台电脑、这个 Bot 或这个群的出牌静默丢弃", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const { computer: other } = await ensureComputer(database.db, UserId.parse(table.ownerId), "remote");
+  const [solo] = await database.sql<
+    { id: string }[]
+  >`SELECT id FROM groups WHERE owner_id=${table.ownerId} AND id<>${table.groupId} LIMIT 1`;
+  const invalids = [
+    { bot: p.botId, group: table.groupId, computer: other.id, role: "player" },
+    { bot: table.botIds[3]!, group: table.groupId, computer: table.computer.computerId, role: "player" },
+    { bot: p.botId, group: solo!.id, computer: table.computer.computerId, role: "player" },
+    { bot: p.botId, group: table.groupId, computer: table.computer.computerId, role: "advisor" },
+  ];
+  for (const invalid of invalids) {
+    const runId = RunId.parse(randomUUID());
+    await database.sql`INSERT INTO runs(id,bot_id,group_id,computer_id,started_at,ended_at,table_role) VALUES(${runId},${invalid.bot},${invalid.group},${invalid.computer},now(),now(),${invalid.role})`;
+    act(p, { kind: "call" }, { runId });
+  }
+  await barrier(p);
+  expect(table.agent.received().some((message) => message.type === "poker_result")).toBe(false);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
+});
+it("重复非法动作回同一失败结果且拒绝次数只加一次", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const duplicate = {
+    type: "poker_act",
+    runId: p.runId,
+    callId: "非法重复",
+    handId: id,
+    seq: p.table!.seq,
+    action: { kind: "check" },
+  } as const;
+  table.agent.send(duplicate);
+  const first = await table.agent.expect("poker_result");
+  table.agent.send(duplicate);
+  expect((await table.agent.expect("poker_result")).result).toEqual(first.result);
+  const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
+  expect(hand!.turn_attempts).toBe(1);
+});
+it("控制面重启后重复成功出牌仍回原成功结果且台词只落一次", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const duplicate = {
+    type: "poker_act",
+    runId: p.runId,
+    callId: "重启重复",
+    handId: id,
+    seq: p.table!.seq,
+    action: { kind: "call" },
+    say: "只说一次",
+  } as const;
+  table.agent.send(duplicate);
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  const next = await table.agent.expect("prompt");
+  table.agent.close();
+  table.push.close();
+  await server.close();
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker: { intervalMs: 20, now: () => now },
+  });
+  table.agent = (
+    await helloAgent(server.port, table.computer.computerId, table.computer.token, [p.runId, next.runId])
+  ).agent;
+  table.agent.send(duplicate);
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
+  const [said] = await database.sql<
+    { n: number }[]
+  >`SELECT count(*)::int AS n FROM messages WHERE group_id=${table.groupId} AND body->>'text'='只说一次'`;
+  expect(said!.n).toBe(1);
+});
+it("扫描器一手失败仍推进后面的桌且日志不含原异常", async () => {
+  const broken = await fixture();
+  let brokenId = "";
+  const actual = pokerConverge.converge;
+  vi.spyOn(pokerConverge, "converge").mockImplementation((deps, id) =>
+    id === brokenId ? Promise.reject(new Error("种子不得出现在日志")) : actual(deps, id),
+  );
+  const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+  brokenId = await seeded();
+  broken.agent.close();
+  broken.push.close();
+  try {
+    await fixture();
+    await seeded();
+    await table.agent.expect("prompt");
+    expect(logged.mock.calls.length).toBeGreaterThan(0);
+    expect(JSON.stringify(logged.mock.calls)).not.toContain("种子不得出现在日志");
+    expect(logged.mock.calls.some((args) => args.includes(brokenId))).toBe(true);
+    expect(logged.mock.calls.every((args) => args.every((arg) => typeof arg === "string"))).toBe(true);
+  } finally {
+    await database.sql`DELETE FROM users WHERE id=${broken.ownerId}`;
+  }
+});
+for (const failure of ["converge", "pushMessages", "pushTable", "snapshot"] as const) {
+  it(`开手提交后 ${failure} 失败仍返回 201 和已落库视图`, async () => {
+    await fixture();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    if (failure === "snapshot") vi.spyOn(pokerStore, failure).mockRejectedValue(new Error("后处理失败"));
+    else if (failure === "pushMessages")
+      vi.spyOn(pokerConverge, failure).mockImplementation(() => {
+        throw new Error("后处理失败");
+      });
+    else vi.spyOn(pokerConverge, failure).mockRejectedValue(new Error("后处理失败"));
+    const response = await table.client.post(`/api/poker/tables/${table.groupId}/hands`);
+    expect(response.status).toBe(201);
+    const view = PokerTableResponse.parse(await response.json()).table;
+    expect(view.status).toBe("in_hand");
+    expect(view.hand).not.toBeNull();
+    expect((await stored(view.hand!.id)).events).toEqual(view.hand!.view.events);
+  });
+  it(`用户动作提交后 ${failure} 失败仍返回 200 和已落库视图`, async () => {
+    await fixture();
+    const view = await start();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    if (failure === "snapshot") vi.spyOn(pokerStore, failure).mockRejectedValue(new Error("后处理失败"));
+    else if (failure === "pushMessages")
+      vi.spyOn(pokerConverge, failure).mockImplementation(() => {
+        throw new Error("后处理失败");
+      });
+    else vi.spyOn(pokerConverge, failure).mockRejectedValue(new Error("后处理失败"));
+    const response = await advanceUser(view, { kind: "call" });
+    expect(response.status).toBe(200);
+    const after = PokerTableResponse.parse(await response.json()).table;
+    expect(after.hand!.view.events.some((event) => event.kind === "action" && event.seatId === "4")).toBe(true);
+    expect(after.version).toBeGreaterThan(view.version);
+    expect(
+      (await stored(view.hand!.id)).events.filter((event) => event.kind === "action" && event.seatId === "4"),
+    ).toHaveLength(1);
+  });
+}
+it("dropped run 在同一决策点最多重派三次，重启后仍受限并等截止兜底", async () => {
+  await fixture();
+  const id = await seeded();
+  let p = await table.agent.expect("prompt");
+  for (let retry = 0; retry < 3; retry++) {
+    table.agent.send({
+      type: "run_done",
+      runId: p.runId,
+      botId: p.botId,
+      groupId: p.groupId,
+      steps: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      prompt: "dropped",
+    });
+    await table.agent.ack(p.runId);
+    p = await table.agent.expect("prompt");
+    expect(p.botId).toBe(table.botIds[0]);
+  }
+  table.agent.send({
+    type: "run_done",
+    runId: p.runId,
+    botId: p.botId,
+    groupId: p.groupId,
+    steps: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    prompt: "dropped",
+  });
+  await table.agent.ack(p.runId);
+  table.agent.close();
+  table.push.close();
+  await server.close();
+  let scanned!: () => void;
+  const scan = new Promise<void>((resolve) => {
+    scanned = resolve;
+  });
+  const actual = pokerConverge.converge;
+  vi.spyOn(pokerConverge, "converge").mockImplementation(async (deps, handId) => {
+    await actual(deps, handId);
+    if (handId === id) scanned();
+  });
+  server = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    poker: { intervalMs: 20, now: () => now },
+  });
+  table.agent = (await helloAgent(server.port, table.computer.computerId, table.computer.token)).agent;
+  await scan;
+  const [runs] = await database.sql<
+    { n: number }[]
+  >`SELECT count(*)::int AS n FROM runs WHERE group_id=${table.groupId} AND table_role='player'`;
+  expect(runs!.n).toBe(4);
+  const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
+  expect(hand!.turn_attempts).toBe(0);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
+  expect(table.agent.received().filter((message) => message.type === "prompt")).toHaveLength(0);
+  now = new Date(now.getTime() + 60_001);
+  expect((await table.agent.expect("prompt")).botId).toBe(table.botIds[1]);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
+});

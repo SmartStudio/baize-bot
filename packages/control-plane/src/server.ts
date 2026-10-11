@@ -30,6 +30,7 @@ import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
 import { RoutineScheduler, type SchedulerOptions } from "./routines/scheduler.js";
 import { PushHub } from "./ws/hub.js";
+import { PokerSweeper, type PokerSweeperOptions } from "./poker/sweeper.js";
 
 export const WS_PATH = "/api/ws";
 
@@ -50,6 +51,7 @@ export type RunningServer = {
 };
 
 export type StartOptions = {
+  readonly poker?: PokerSweeperOptions;
   readonly db: Db;
   readonly port: number;
   /** 不给就监听通配地址。测试给 127.0.0.1：macOS 分临时端口时不避开别的进程占在 127.0.0.1 上的同号端口，客户端连 127.0.0.1 会连到别人那里。 */
@@ -203,6 +205,9 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   });
   metrics.start();
 
+  const poker = new PokerSweeper({ db: options.db, push: hub, agents }, options.poker);
+  poker.start();
+
   const reminders = setInterval(() => {
     const now = new Date();
     void remindStaleApprovals(options.db, hub, now).catch((error: unknown) => console.error("扫超时审批出错", error));
@@ -218,12 +223,14 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     publisher,
     metrics,
     close: async () => {
+      const pokerStopped = poker.stop();
       routines.stop();
       publisher.stop();
       metrics.stop();
       clearInterval(reminders);
       await hub.closeAll();
       await agents.closeAll();
+      await pokerStopped;
       // 断线收尾可能还在推 stuck，等它们排完再关。
       await notifications.close();
       clients.close();
