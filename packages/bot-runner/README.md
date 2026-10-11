@@ -548,7 +548,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 - 拼出的报文带当前 run 的 `runId`、Pi 给的 `callId`、prompt 里的 `handId` 和 `seq`，再用 `AgentToControl.safeParse` 校验。动作只能是 `fold`、`check`、`call`、`raise`（`amount` 为整数）、`all_in`，其他抛「出牌动作不合法」并列出可选值。
 - 工具不属于当前角色，或当前没有这条 run，抛「这个工具不属于当前牌桌角色。」
 
-发出去之后工具不立即返回，它等控制面的 `poker_result`。`createPokerResults` 按 `(runId, callId)` 记下等待的出牌，最长等 65 秒（`POKER_RESULT_TIMEOUT_MS`），比控制面的 60 秒兜底多留 5 秒，让控制面正常兜底的失败回执先到。`ok: false` 让工具抛带中文原因的错，Pi 把它做成 `isError` 工具结果，牌友在同一次 run 里照原因重试。`ok: true` 返回「出牌已确认。」中止、发送失败、超时、运行器停止或牌友被移除（`cancel`）都按失败结算，等待不会悬着。同一个 `callId` 的重复帧，控制面回的是同一个结果。
+发出去之后工具不立即返回，它等控制面的 `poker_result`。`createPokerResults` 按 `(runId, callId)` 记下等待的出牌，最长等 20 秒（`POKER_RESULT_TIMEOUT_MS`）。控制面在桌锁里落完动作就回执，它的 60 秒兜底不给运行器发报文，所以这里只兜回执丢失，等得短是为了不长时间占住这个 Bot 的串行队列。`ok: false` 让工具抛带中文原因的错，Pi 把它做成 `isError` 工具结果，牌友在同一次 run 里照原因重试。`ok: true` 返回「出牌已确认。」中止、发送失败、超时、运行器停止或牌友被移除（`cancel`）都按失败结算，等待不会悬着。同一个 `callId` 的重复帧，控制面回的是同一个结果。
 
 ### `poker_review`
 

@@ -474,7 +474,7 @@ describe("p3-runner-table 验收", () => {
 it("运行器等回执超时后同一 Bot 的下一个 prompt 能照常执行", async () => {
   const actualSetTimeout = globalThis.setTimeout;
   vi.spyOn(globalThis, "setTimeout").mockImplementation((handler, timeout, ...args) =>
-    actualSetTimeout(handler, timeout === 65_000 ? 10 : timeout, ...args),
+    actualSetTimeout(handler, timeout === 20_000 ? 10 : timeout, ...args),
   );
   const h = await harness((request) =>
     request.messages.some((message) => message.role === "tool")
@@ -498,8 +498,15 @@ it("出牌回执超时清理等待，晚到的同 call 回执不串到另一 run
   vi.useFakeTimers();
   const results = createPokerResults(() => {});
   const first = results.ask(actionMessage("expired"), BotId.parse("bot-a"), undefined);
-  const rejected = expect(first).rejects.toThrow("出牌确认超时");
-  await vi.advanceTimersByTimeAsync(65_000);
+  let timedOut = false;
+  const rejected = expect(first)
+    .rejects.toThrow("出牌确认超时")
+    .then(() => {
+      timedOut = true;
+    });
+  await vi.advanceTimersByTimeAsync(19_999);
+  expect(timedOut, "回执丢失最多占串行队列 20 秒，没到点还在等").toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
   await rejected;
   const second = results.ask(actionMessage("next"), BotId.parse("bot-a"), undefined);
   results.settle(RunId.parse("expired"), "same-call", { ok: true });
