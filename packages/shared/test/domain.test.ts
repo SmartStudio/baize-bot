@@ -21,6 +21,7 @@ import {
   Skill,
   SkillId,
   TopicTask,
+  ToolConnection,
   toolViewText,
   gatewayAlias,
   TodayResponse,
@@ -773,5 +774,24 @@ describe("消息版本", () => {
       ServerPush.safeParse({ ...delta, revision: 0, visibleTo: null }).success,
       "空壳是 0，接过一段的不会是 0",
     ).toBe(false);
+  });
+});
+
+describe("插件连接的状态", () => {
+  const connection = {
+    id: "tool_1",
+    ownerId: "user_1",
+    name: "工单",
+    url: "https://tickets.example.com/mcp",
+    operations: [],
+    assignedBotIds: [],
+  };
+
+  it("状态必带，只有 ready 和 awaiting_authorization 两种", () => {
+    expect(ToolConnection.parse({ ...connection, status: "awaiting_authorization" }).status).toBe(
+      "awaiting_authorization",
+    );
+    expect(ToolConnection.safeParse(connection).success, "不带状态的连接不是完整的").toBe(false);
+    expect(ToolConnection.safeParse({ ...connection, status: "pending" }).success).toBe(false);
   });
 });

@@ -523,6 +523,11 @@ export const ToolOperation = z.object({
 });
 export type ToolOperation = z.infer<typeof ToolOperation>;
 
+// 从分享链接导入的插件，操作表是包里带的占位，补授权取回真实列表之前运行器不许执行它。
+// 不能拿 authorization 为 null 判：自己建的匿名 MCP 也是 null，那是能用的。
+export const ToolConnectionStatus = z.enum(["ready", "awaiting_authorization"]);
+export type ToolConnectionStatus = z.infer<typeof ToolConnectionStatus>;
+
 export const ToolConnection = z.object({
   id: ToolConnectionId,
   ownerId: UserId,
@@ -530,6 +535,7 @@ export const ToolConnection = z.object({
   url: z.string().url(),
   operations: z.array(ToolOperation),
   assignedBotIds: z.array(BotId),
+  status: ToolConnectionStatus,
 });
 export type ToolConnection = z.infer<typeof ToolConnection>;
 
