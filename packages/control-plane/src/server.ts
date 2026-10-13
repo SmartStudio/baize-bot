@@ -249,10 +249,13 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       await notifications.close();
       clients.close();
       agentSockets.close();
-      await new Promise<void>((resolve, reject) =>
-        server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
-      );
-      await app.closeMcpClients();
+      try {
+        await new Promise<void>((resolve, reject) =>
+          server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
+        );
+      } finally {
+        await app.closeMcpClients();
+      }
     },
   };
 }
