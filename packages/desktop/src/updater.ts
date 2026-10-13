@@ -6,6 +6,7 @@ export type UpdateState =
   | { readonly status: "checking"; readonly manual: boolean }
   | { readonly status: "downloading"; readonly manual: boolean }
   | { readonly status: "ready"; readonly version: string }
+  | { readonly status: "installing"; readonly version: string }
   | { readonly status: "none" }
   | { readonly status: "unsupported"; readonly reason: "dev" | "unsigned" }
   | { readonly status: "error"; readonly message: string };
@@ -15,11 +16,14 @@ export type UpdateEvent =
   | { readonly type: "available" }
   | { readonly type: "not-available" }
   | { readonly type: "downloaded"; readonly version: string }
+  | { readonly type: "restart-confirmed" }
   | { readonly type: "failed"; readonly message: string };
 
 export type UpdateEffect =
   | { readonly type: "start-check" }
   | { readonly type: "ask-restart"; readonly version: string }
+  | { readonly type: "install" }
+  | { readonly type: "install-failed"; readonly message: string }
   | { readonly type: "inform"; readonly level: "info" | "error"; readonly text: string };
 
 export const UNSIGNED_TEXT = "这个版本没有正式签名，不能自动更新";
@@ -80,6 +84,8 @@ export function decide(
           return stay({ ...state, manual: state.manual || event.manual });
         case "ready":
           return { next: state, effect: event.manual ? { type: "ask-restart", version: state.version } : null };
+        case "installing":
+          return stay(state);
         case "unsupported":
           return {
             next: state,
@@ -104,17 +110,28 @@ export function decide(
         next: { status: "ready", version: event.version },
         effect: { type: "ask-restart", version: event.version },
       };
+    case "restart-confirmed":
+      return state.status === "ready"
+        ? { next: { status: "installing", version: state.version }, effect: { type: "install" } }
+        : stay(state);
     case "failed": {
-      if (state.status !== "checking" && state.status !== "downloading") return stay(state);
+      if (state.status === "installing") {
+        return {
+          next: { status: "error", message: event.message },
+          effect: { type: "install-failed", message: event.message },
+        };
+      }
+      if (state.status !== "idle" && state.status !== "checking" && state.status !== "downloading") return stay(state);
+      const manual = state.status !== "idle" && state.manual;
       if (isSignatureError(event.message)) {
         return {
           next: { status: "unsupported", reason: "unsigned" },
-          effect: state.manual ? { type: "inform", level: "info", text: UNSIGNED_TEXT } : null,
+          effect: manual ? { type: "inform", level: "info", text: UNSIGNED_TEXT } : null,
         };
       }
       return {
         next: { status: "error", message: event.message },
-        effect: state.manual ? { type: "inform", level: "error", text: `检查更新失败：${event.message}` } : null,
+        effect: manual ? { type: "inform", level: "error", text: `检查更新失败：${event.message}` } : null,
       };
     }
   }
@@ -128,7 +145,8 @@ export type UpdaterDeps = {
   readonly source: UpdaterSource;
   readonly askRestart: (prompt: { readonly message: string; readonly detail: string }) => Promise<boolean>;
   readonly inform: (level: "info" | "error", text: string) => void;
-  readonly beforeRestart: () => Promise<void>;
+  readonly prepareInstall: () => Promise<void>;
+  readonly resumeAfterFailedInstall: () => void;
   readonly log: (line: string) => void;
 };
 
@@ -146,11 +164,6 @@ export function createUpdater(deps: UpdaterDeps): Updater {
   let timer: NodeJS.Timeout | null = null;
   let started = false;
 
-  const restart = async (): Promise<void> => {
-    await deps.beforeRestart();
-    deps.source.quitAndInstall();
-  };
-
   const run = (effect: UpdateEffect): void => {
     switch (effect.type) {
       case "start-check":
@@ -166,11 +179,21 @@ export function createUpdater(deps: UpdaterDeps): Updater {
       case "ask-restart":
         void deps
           .askRestart(restartPrompt(effect.version))
-          .then((confirmed) => (confirmed ? restart() : undefined))
+          .then((confirmed) => (confirmed ? dispatch({ type: "restart-confirmed" }) : undefined))
           .catch((error: unknown) => {
             deps.log(`update-restart-failed ${messageOf(error)}`);
             deps.inform("error", `重启安装失败：${messageOf(error)}`);
           });
+        return;
+      case "install":
+        void deps
+          .prepareInstall()
+          .then(() => deps.source.quitAndInstall())
+          .catch((error: unknown) => dispatch({ type: "failed", message: messageOf(error) }));
+        return;
+      case "install-failed":
+        deps.inform("error", `重启安装失败：${effect.message}`);
+        deps.resumeAfterFailedInstall();
         return;
     }
   };
@@ -194,10 +217,9 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     try {
       source.setFeedURL({ url: deps.feedUrl, serverType: "json" });
     } catch (error) {
-      state = { status: "error", message: messageOf(error) };
-      deps.log(`update-feed-rejected ${messageOf(error)}`);
-      return;
+      dispatch({ type: "failed", message: messageOf(error) });
     }
+    if (state.status !== "idle") return;
     dispatch({ type: "check", manual: false });
     timer = setInterval(() => dispatch({ type: "check", manual: false }), CHECK_INTERVAL_MS);
   };

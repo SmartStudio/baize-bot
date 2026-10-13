@@ -14,6 +14,16 @@ const autoUpdater = vi.hoisted(() => ({
   quitAndInstall: vi.fn(),
 }));
 const appOn = vi.hoisted(() => vi.fn());
+const appExit = vi.hoisted(() => vi.fn());
+const showMessageBox = vi.hoisted(() => vi.fn());
+const windows = vi.hoisted((): Array<{ on: MockInstance }> => []);
+const fsState = vi.hoisted(() => ({ credentials: null as string | null }));
+const fsWrites = vi.hoisted((): string[] => []);
+const fetchState = vi.hoisted(() => ({
+  meOk: false,
+  localComputer: null as Promise<unknown> | null,
+  urls: [] as string[],
+}));
 // 比任何系统的 pid_max 都大，真发出信号也落不到别人的进程上。
 const FAKE_PID_BASE = 2 ** 30;
 
@@ -44,12 +54,18 @@ class FakeChild extends EventEmitter {
   }
 }
 
-const fakeWindow = (): object => ({
-  webContents: { setWindowOpenHandler: vi.fn() },
-  once: vi.fn(),
-  on: vi.fn(),
-  loadURL: vi.fn(async () => undefined),
-});
+const fakeWindow = (): object => {
+  const window = {
+    webContents: { setWindowOpenHandler: vi.fn() },
+    once: vi.fn(),
+    on: vi.fn(),
+    isDestroyed: () => false,
+    hide: vi.fn(),
+    loadURL: vi.fn(async () => undefined),
+  };
+  windows.push(window);
+  return window;
+};
 
 vi.mock("electron", () => {
   return {
@@ -65,26 +81,51 @@ vi.mock("electron", () => {
       getLoginItemSettings: () => ({ openAtLogin: false }),
       setLoginItemSettings: vi.fn(),
       setAboutPanelOptions: vi.fn(),
-      exit: vi.fn(),
+      exit: appExit,
       quit: vi.fn(),
     },
     autoUpdater,
     BrowserWindow: vi.fn(fakeWindow),
-    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    dialog: { showErrorBox: vi.fn(), showMessageBox },
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
     nativeImage: { createFromDataURL: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
     Notification: Object.assign(vi.fn(), { isSupported: () => false }),
-    safeStorage: { isEncryptionAvailable: () => false },
+    safeStorage: {
+      isEncryptionAvailable: () => true,
+      encryptString: (text: string) => Buffer.from(text),
+      decryptString: (data: Buffer) => data.toString(),
+    },
     session: {
       defaultSession: {
         webRequest: { onCompleted: vi.fn() },
-        fetch: vi.fn(async () => ({ ok: false })),
+        cookies: { get: vi.fn(async () => []) },
+        fetch: vi.fn(async (url: string) => {
+          fetchState.urls.push(url);
+          if (url.endsWith("/api/me")) return { ok: fetchState.meOk };
+          if (url.endsWith("/api/computers/local") && fetchState.localComputer !== null)
+            return fetchState.localComputer;
+          return { ok: false };
+        }),
       },
     },
     Tray: vi.fn(() => ({ setToolTip: vi.fn(), on: vi.fn() })),
   };
 });
 
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+  return {
+    ...actual,
+    readFile: async (path: string) => {
+      if (path.endsWith("computer-credentials.json") && fsState.credentials !== null) return fsState.credentials;
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    },
+    writeFile: async (path: string) => {
+      fsWrites.push(path);
+    },
+    unlink: async () => undefined,
+  };
+});
 vi.mock("../src/proxy.js", () => ({ startUiServer: async () => ({ origin: "http://127.0.0.1:1" }) }));
 vi.mock("ws", () => ({ default: FakeSocket }));
 vi.mock("node:child_process", async () => {
@@ -114,6 +155,9 @@ async function loadMain(): Promise<typeof import("../src/main.js")> {
   sockets.length = 0;
   children.length = 0;
   reapedProfiles.length = 0;
+  windows.length = 0;
+  fsWrites.length = 0;
+  fetchState.urls.length = 0;
   return import("../src/main.js");
 }
 
@@ -121,12 +165,25 @@ const credentials = { computerId: "computer-1" as ComputerId, token: "token-1" }
 
 const agentChromeProfile = "/tmp/baize-desktop-test/bots/chrome-profile";
 
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const fakeEvent = (): { preventDefault: MockInstance } => ({ preventDefault: vi.fn() });
+
 describe("桌面主进程代理流程", () => {
   let kill: MockInstance<typeof process.kill>;
 
   beforeEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+    fsState.credentials = null;
+    fetchState.meOk = false;
+    fetchState.localComputer = null;
     kill = vi.spyOn(process, "kill").mockImplementation(() => true);
   });
 
@@ -245,6 +302,111 @@ describe("桌面主进程代理流程", () => {
 
       expect(autoUpdater.setFeedURL).not.toHaveBeenCalled();
       expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("更新重启", () => {
+    type Handler = (...args: unknown[]) => unknown;
+    const handlerOf = (spy: MockInstance, name: string): Handler => {
+      const call = spy.mock.calls.find((args) => args[0] === name);
+      if (call === undefined) throw new Error(`没有注册 ${name}`);
+      return call[1] as Handler;
+    };
+    const menubarClose = (): Handler => handlerOf(windows[1]!.on, "close");
+    const downloaded = (): void => {
+      handlerOf(autoUpdater.on, "update-downloaded")({}, "", "0.2.0");
+    };
+
+    beforeEach(() => {
+      electronState.packaged = true;
+      electronState.ready = true;
+      Object.defineProperty(process, "resourcesPath", {
+        value: "/tmp/baize-desktop-test/resources",
+        configurable: true,
+      });
+      showMessageBox.mockResolvedValue({ response: 0 });
+      autoUpdater.quitAndInstall.mockReset();
+    });
+
+    afterEach(() => {
+      Reflect.deleteProperty(process, "resourcesPath");
+      electronState.packaged = false;
+      electronState.ready = false;
+    });
+
+    const boot = async (): Promise<void> => {
+      await loadMain();
+      await vi.waitFor(() => expect(autoUpdater.checkForUpdates).toHaveBeenCalled());
+      await vi.waitFor(() => expect(windows).toHaveLength(2));
+    };
+
+    it("点「现在重启」后关窗口不被菜单栏窗口拦住，随后的 before-quit 也放行，不走 app.exit", async () => {
+      await boot();
+      const closeEvent = fakeEvent();
+      const quitEvent = fakeEvent();
+      autoUpdater.quitAndInstall.mockImplementation(() => {
+        menubarClose()(closeEvent);
+        handlerOf(appOn, "before-quit")(quitEvent);
+      });
+
+      downloaded();
+      await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+
+      expect(closeEvent.preventDefault, "安装前窗口 close 放行").not.toHaveBeenCalled();
+      expect(quitEvent.preventDefault, "before-quit 不拦，交给 Squirrel 退出").not.toHaveBeenCalled();
+      expect(appExit).not.toHaveBeenCalled();
+    });
+
+    it("平时关菜单栏窗口只是隐藏，普通退出仍先停代理再 app.exit(0)", async () => {
+      await boot();
+      const closeEvent = fakeEvent();
+      menubarClose()(closeEvent);
+      expect(closeEvent.preventDefault).toHaveBeenCalledTimes(1);
+
+      const quitEvent = fakeEvent();
+      handlerOf(appOn, "before-quit")(quitEvent);
+      expect(quitEvent.preventDefault).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(appExit).toHaveBeenCalledWith(0));
+    });
+
+    it("停代理之后在途配对返回，不再启动代理", async () => {
+      const pairing = deferred<unknown>();
+      fetchState.meOk = true;
+      fetchState.localComputer = pairing.promise;
+      await boot();
+      await vi.waitFor(() => expect(fetchState.urls.some((url) => url.endsWith("/api/computers/local"))).toBe(true));
+
+      downloaded();
+      await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+      pairing.resolve({ ok: true, json: async () => ({ computerId: "computer-1", token: "token-1" }) });
+      await vi.waitFor(() => expect(fsWrites.some((path) => path.endsWith("computer-credentials.json"))).toBe(true));
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(children, "配对返回后不得再起代理").toHaveLength(0);
+    });
+
+    it("quitAndInstall 异步报错：提示失败、窗口守卫恢复、代理重新起来", async () => {
+      await boot();
+      downloaded();
+      await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+      expect(children).toHaveLength(0);
+      fsState.credentials = JSON.stringify({
+        computerId: "computer-1",
+        encryptedToken: Buffer.from("token-1").toString("base64"),
+      });
+
+      handlerOf(autoUpdater.on, "error")(new Error("Failed to launch ShipIt"));
+
+      await vi.waitFor(() =>
+        expect(showMessageBox).toHaveBeenCalledWith(
+          expect.anything(),
+          expect.objectContaining({ type: "error", message: "重启安装失败：Failed to launch ShipIt" }),
+        ),
+      );
+      await vi.waitFor(() => expect(children, "失败后恢复代理").toHaveLength(1));
+      const closeEvent = fakeEvent();
+      menubarClose()(closeEvent);
+      expect(closeEvent.preventDefault, "失败后恢复隐藏式关窗").toHaveBeenCalledTimes(1);
     });
   });
 });

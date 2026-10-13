@@ -45,6 +45,7 @@ const startedAt = Date.now();
 const DEFAULT_CONTROL_ORIGIN = "http://localhost:3001";
 const AGENT_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL"] as const;
 
+type AppPhase = "running" | "installing" | "quitting";
 type Settings = { readonly controlOrigin: string; readonly updateFeed?: string };
 type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string };
 let mainWindow: BrowserWindow | null = null;
@@ -55,7 +56,7 @@ let agentState: AgentState = { status: "none" };
 let pushSocket: WebSocket | null = null;
 let pushRetry: NodeJS.Timeout | null = null;
 let pushGeneration = 0;
-let quitting = false;
+let phase: AppPhase = "running";
 let provisioning: Promise<void> | null = null;
 let controlOrigin = DEFAULT_CONTROL_ORIGIN;
 let uiOrigin = "";
@@ -166,6 +167,8 @@ export function startAgent(
   timeoutMs = 45_000,
 ): Promise<void> {
   if (agentState.status === "starting" || agentState.status === "online") return Promise.resolve();
+  // 安装更新或退出已经开始，晚到的配对不能再把代理拉起来。
+  if (phase !== "running") return Promise.reject(new AgentReplacedError());
   const launch = AgentLaunch.parse({
     url: agentUrl(controlOrigin),
     computerId: credentials.computerId,
@@ -389,7 +392,7 @@ export function connectPush(session: Session, origin = uiOrigin): void {
   pushSocket = null;
   previous?.close();
   void session.cookies.get({ url: origin }).then((cookies) => {
-    if (quitting || generation !== pushGeneration) return;
+    if (phase !== "running" || generation !== pushGeneration) return;
     const url = new URL("/api/ws", origin);
     url.protocol = "ws:";
     const socket = new WebSocket(url, {
@@ -403,7 +406,7 @@ export function connectPush(session: Session, origin = uiOrigin): void {
       });
     });
     socket.on("close", () => {
-      if (!shouldRetryPush(quitting, pushSocket, socket)) return;
+      if (!shouldRetryPush(phase !== "running", pushSocket, socket)) return;
       pushSocket = null;
       pushRetry = setTimeout(() => connectPush(session, origin), 1_000);
     });
@@ -499,11 +502,11 @@ async function createWindows(session: Session): Promise<void> {
     menubarWindow = window;
     window.on("blur", () => {
       setTimeout(() => {
-        if (!quitting && !window.isFocused()) window.hide();
+        if (phase === "running" && !window.isFocused()) window.hide();
       }, 0);
     });
     window.on("close", (event) => {
-      if (!quitting) {
+      if (phase === "running") {
         event.preventDefault();
         window.hide();
       }
@@ -574,6 +577,38 @@ function showBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> {
     : dialog.showMessageBox(options);
 }
 
+function stopPush(): void {
+  if (pushRetry !== null) clearTimeout(pushRetry);
+  pushGeneration += 1;
+  pushSocket?.close();
+}
+
+// quitAndInstall 先关全部窗口，这条路径不经过 before-quit，所以相位要在这里切走。
+async function prepareInstall(): Promise<void> {
+  phase = "installing";
+  stopPush();
+  await stopAgent();
+}
+
+function resumeAfterFailedInstall(): void {
+  phase = "running";
+  const session = electronSession.defaultSession;
+  void loadCredentials()
+    .then((credentials) => (credentials === null ? undefined : launchSavedAgent(session, credentials)))
+    .catch((error: unknown) => void dialog.showErrorBox("电脑代理不可用", errorText(error)));
+}
+
+function launchSavedAgent(
+  session: Session,
+  credentials: { readonly computerId: ComputerId; readonly token: string },
+): void {
+  void startAgent(credentials).catch((error: unknown) => {
+    if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
+  });
+  void refreshPending(session);
+  connectPush(session);
+}
+
 function createAppUpdater(): Updater {
   return createUpdater({
     packaged: app.isPackaged,
@@ -591,7 +626,8 @@ function createAppUpdater(): Updater {
       return response === 0;
     },
     inform: (level, text) => void showBox({ type: level, message: text }),
-    beforeRestart: stopAgent,
+    prepareInstall,
+    resumeAfterFailedInstall,
     log: logLine,
   });
 }
@@ -618,11 +654,7 @@ async function main(): Promise<void> {
     void dialog.showErrorBox("电脑代理不可用", errorText(error));
   }
   if (credentials !== null) {
-    void startAgent(credentials).catch((error: unknown) => {
-      if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
-    });
-    void refreshPending(session);
-    connectPush(session);
+    launchSavedAgent(session, credentials);
   } else {
     void session
       .fetch(`${uiOrigin}/api/me`)
@@ -640,13 +672,13 @@ async function main(): Promise<void> {
 }
 
 app.on("before-quit", (event) => {
+  // 更新安装时代理已停，退出交给 Squirrel，不拦也不 app.exit。
+  if (phase === "installing") return;
   event.preventDefault();
-  if (quitting) return;
-  quitting = true;
+  if (phase === "quitting") return;
+  phase = "quitting";
   updater?.stop();
-  if (pushRetry !== null) clearTimeout(pushRetry);
-  pushGeneration += 1;
-  pushSocket?.close();
+  stopPush();
   void stopAgent().finally(() => app.exit(0));
 });
 

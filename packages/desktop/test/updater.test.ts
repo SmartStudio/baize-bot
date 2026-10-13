@@ -16,6 +16,14 @@ import {
   type UpdaterDeps,
 } from "../src/updater.js";
 
+function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 function replay(from: UpdateState, events: readonly UpdateEvent[]): UpdateState {
   return events.reduce((state, event) => decide(state, event).next, from);
 }
@@ -92,6 +100,39 @@ describe("更新状态机", () => {
     });
   });
 
+  it("确认重启后进 installing，之后的检查、下载事件都不再触发副作用", () => {
+    const ready: UpdateState = { status: "ready", version: "0.2.0" };
+    const installing = decide(ready, { type: "restart-confirmed" });
+    expect(installing).toEqual({ next: { status: "installing", version: "0.2.0" }, effect: { type: "install" } });
+    expect(decide(installing.next, { type: "restart-confirmed" })).toEqual({ next: installing.next, effect: null });
+    expect(decide(installing.next, { type: "check", manual: true })).toEqual({ next: installing.next, effect: null });
+    expect(decide(installing.next, { type: "downloaded", version: "0.3.0" })).toEqual({
+      next: installing.next,
+      effect: null,
+    });
+    expect(decide({ status: "none" }, { type: "restart-confirmed" }).effect).toBeNull();
+  });
+
+  it("installing 收到错误进 error 并要求提示和恢复，不论签名与否", () => {
+    const installing: UpdateState = { status: "installing", version: "0.2.0" };
+    expect(decide(installing, { type: "failed", message: "Failed to launch ShipIt" })).toEqual({
+      next: { status: "error", message: "Failed to launch ShipIt" },
+      effect: { type: "install-failed", message: "Failed to launch ShipIt" },
+    });
+    expect(decide(installing, { type: "failed", message: "code signature invalid" }).next.status).toBe("error");
+  });
+
+  it("idle 阶段收到错误按检查失败分类，且不提示", () => {
+    expect(decide({ status: "idle" }, { type: "failed", message: "Could not get code signature" })).toEqual({
+      next: { status: "unsupported", reason: "unsigned" },
+      effect: null,
+    });
+    expect(decide({ status: "idle" }, { type: "failed", message: "read-only volume" })).toEqual({
+      next: { status: "error", message: "read-only volume" },
+      effect: null,
+    });
+  });
+
   it("只有签名类报错文案被当成签名错误", () => {
     expect(isSignatureError("Code signature at URL file:///x did not pass validation")).toBe(true);
     expect(isSignatureError("The application is not code signed")).toBe(true);
@@ -150,8 +191,11 @@ describe("更新器接线", () => {
       source: source as never,
       askRestart,
       inform,
-      beforeRestart: async () => {
+      prepareInstall: async () => {
         order.push("stopAgent");
+      },
+      resumeAfterFailedInstall: () => {
+        order.push("resume");
       },
       log: () => undefined,
     };
@@ -231,5 +275,99 @@ describe("更新器接线", () => {
     expect(source.setFeedURL).not.toHaveBeenCalled();
     expect(source.checkForUpdates).not.toHaveBeenCalled();
     expect(inform).toHaveBeenCalledWith("info", DEV_TEXT);
+  });
+
+  it("初始化 setFeedURL 时同步报签名错误：进 unsupported，不检查，手动检查弹没有正式签名", () => {
+    source.setFeedURL.mockImplementation(() => {
+      source.emit("error", new Error("Could not get code signature for running application"));
+    });
+    const updater = createUpdater(deps);
+    updater.start();
+    expect(updater.state()).toEqual({ status: "unsupported", reason: "unsigned" });
+    expect(source.checkForUpdates).not.toHaveBeenCalled();
+    expect(inform).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(CHECK_INTERVAL_MS);
+    expect(source.checkForUpdates, "初始化失败后定时检查也不发起").not.toHaveBeenCalled();
+    updater.checkNow();
+    expect(inform).toHaveBeenCalledWith("info", UNSIGNED_TEXT);
+    expect(source.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it("setFeedURL 抛异常按同一条路径处理", () => {
+    source.setFeedURL.mockImplementation(() => {
+      throw new Error("bad feed");
+    });
+    const updater = createUpdater(deps);
+    updater.start();
+    expect(updater.state()).toEqual({ status: "error", message: "bad feed" });
+    expect(source.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it("安装阶段 quitAndInstall 异步报错：提示失败并恢复代理，状态不停在 ready", async () => {
+    const updater = createUpdater(deps);
+    updater.start();
+    source.emit("update-downloaded", {}, "", "0.2.0");
+    await vi.waitFor(() => expect(order).toEqual(["stopAgent", "quitAndInstall"]));
+    expect(updater.state()).toEqual({ status: "installing", version: "0.2.0" });
+
+    source.emit("error", new Error("Failed to launch ShipIt"));
+    expect(updater.state()).toEqual({ status: "error", message: "Failed to launch ShipIt" });
+    expect(inform).toHaveBeenCalledWith("error", "重启安装失败：Failed to launch ShipIt");
+    expect(order).toEqual(["stopAgent", "quitAndInstall", "resume"]);
+  });
+
+  it("停代理失败也算安装失败：不调 quitAndInstall，提示并恢复", async () => {
+    deps = {
+      ...deps,
+      prepareInstall: async () => {
+        throw new Error("stop failed");
+      },
+    };
+    const updater = createUpdater(deps);
+    updater.start();
+    source.emit("update-downloaded", {}, "", "0.2.0");
+    await vi.waitFor(() => expect(inform).toHaveBeenCalledWith("error", "重启安装失败：stop failed"));
+    expect(source.quitAndInstall).not.toHaveBeenCalled();
+    expect(order).toEqual(["resume"]);
+  });
+
+  it("停代理等待期间再次手动检查，安装流程只进一次", async () => {
+    const gate = deferred<void>();
+    const prepare = vi.fn(() => gate.promise);
+    const updater = createUpdater({ ...deps, prepareInstall: prepare });
+    updater.start();
+    source.emit("update-downloaded", {}, "", "0.2.0");
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+
+    updater.checkNow();
+    await Promise.resolve();
+    expect(askRestart, "安装中不再弹第二张确认").toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
+
+    gate.resolve();
+    await vi.waitFor(() => expect(source.quitAndInstall).toHaveBeenCalledTimes(1));
+  });
+
+  it("两张重启对话框先后确认，只安装一次", async () => {
+    const answers: Array<(value: boolean) => void> = [];
+    askRestart.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          answers.push(resolve);
+        }),
+    );
+    const updater = createUpdater(deps);
+    updater.start();
+    source.emit("update-downloaded", {}, "", "0.2.0");
+    updater.checkNow();
+    expect(answers).toHaveLength(2);
+    answers[0]?.(true);
+    await vi.waitFor(() => expect(source.quitAndInstall).toHaveBeenCalledTimes(1));
+    answers[1]?.(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(source.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(order.filter((item) => item === "stopAgent")).toHaveLength(1);
   });
 });
