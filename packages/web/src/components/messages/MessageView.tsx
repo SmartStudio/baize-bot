@@ -164,9 +164,16 @@ const PreferenceOfferCard = ({
   onDecide: DecidePreferenceOffer;
 }) => {
   const [sent, setSent] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const decide = (decision: DecidePreferenceOfferRequest["decision"]) => {
     setSent(true);
-    void onDecide(messageId, decision).catch(() => setSent(false));
+    setFailure(null);
+    void onDecide(messageId, decision).catch((cause: unknown) => {
+      setFailure(
+        `${decision === "save" ? "没记上" : "没撤下"}：${cause instanceof Error ? cause.message : "请求失败"}`,
+      );
+      setSent(false);
+    });
   };
   return (
     <div
@@ -180,6 +187,11 @@ const PreferenceOfferCard = ({
       </div>
       <p data-testid="preference-offer-text">{body.text}</p>
       {body.private ? <p data-testid="preference-offer-private">分享 Bot 时默认不带这条</p> : null}
+      {failure === null || body.status !== "offered" ? null : (
+        <p className="team-offer-error" role="alert" data-testid="preference-offer-error">
+          {failure}
+        </p>
+      )}
       {body.status === "offered" ? (
         <div className="approval-actions">
           <button

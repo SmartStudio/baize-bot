@@ -706,9 +706,30 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       decidePreferenceOffer: signedIn(
         async ({ api, put }, messageId: MessageId, decision: DecidePreferenceOfferRequest["decision"]) => {
           const seq = nextSeq();
-          const res = await api.decidePreferenceOffer(messageId, decision);
-          put({ type: "message_upserted", message: res.message, seq });
-          if (res.preference !== null) put({ type: "preference_upserted", preference: res.preference, seq });
+          try {
+            const res = await api.decidePreferenceOffer(messageId, decision);
+            put({ type: "message_upserted", message: res.message, seq });
+            if (res.preference !== null) put({ type: "preference_upserted", preference: res.preference, seq });
+          } catch (cause) {
+            // 409 是别处已经结了这张卡，推送又没到。取回那份结论盖上，别处点的是「记住」就把这个 Bot 的偏好列表一并重拉，
+            // 卡和计数一起收敛；错还照抛，让卡上说一句。补读本身失败就只剩这句话，404 和网络错也一样。
+            if (cause instanceof RequestFailed && cause.status === 409) {
+              const fetched = nextSeq();
+              const message = await api.message(messageId).catch(() => undefined);
+              if (message !== undefined) {
+                put({ type: "message_upserted", message, seq: fetched });
+                if (message.body.kind === "preference_offer" && message.body.status === "saved") {
+                  const botId = message.body.botId;
+                  const listed = nextSeq();
+                  await api.preferences(botId).then(
+                    (preferences) => put({ type: "preferences_loaded", botId, preferences, seq: listed }),
+                    () => undefined,
+                  );
+                }
+              }
+            }
+            throw cause;
+          }
         },
       ),
       decideRoutineOffer: signedIn(
