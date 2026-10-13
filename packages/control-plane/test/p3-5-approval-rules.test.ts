@@ -15,18 +15,21 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
+import { gatedDb } from "./helpers/gated-db.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
 let server: RunningServer;
+let gates: ReturnType<typeof gatedDb>;
 let scheduleTime = new Date("2030-01-01T09:00:00");
 
 beforeAll(async () => {
   database = await createTestDb();
+  gates = gatedDb(database.sql);
   server = await startServer({
-    db: database.db,
+    db: gates.db,
     port: 0,
     toolSecretKey: "a".repeat(64),
     credentialsKey: TEST_CREDENTIALS_KEY,
@@ -226,22 +229,27 @@ describe("P3-5 审批期限与作废规则", () => {
   });
 
   it.each(["按钮", "群里答复"])(
-    "截止已过但扫描器还没跑时，%s不能批准，就地结算 timed_out 且只推一次",
+    "注入时钟已过截止但数据库时钟未到时，%s就地结算 timed_out 且只推一次",
     async (source) => {
       const who = await owner(["小服"]);
       try {
         await makeRoutine(who);
         const prompt = await who.agent.expect("prompt");
-        vi.useFakeTimers({ toFake: ["Date"] });
-        vi.setSystemTime(new Date(Date.now() - 11 * 60_000));
         const approval = await raise(who, prompt, "call-overdue");
-        vi.useRealTimers();
         if (approval.deadlineAt === null) throw new Error("例行审批必须有截止时间");
-        expect(new Date(approval.deadlineAt).getTime()).toBeLessThan(Date.now());
+        expect(new Date(approval.deadlineAt).getTime()).toBeGreaterThan(Date.now());
+        const now = new Date(new Date(approval.deadlineAt).getTime() + 1);
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(now);
         expect((await page(who)).approvals).toMatchObject([{ id: approval.id, status: "pending" }]);
 
         if (source === "按钮") {
-          expect((await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(409);
+          const response = await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved" });
+          expect(response.status).toBe(409);
+          expect(await response.json()).toMatchObject({
+            error: "这条审批已经有结论了",
+            approval: { id: approval.id, status: "timed_out", decidedAt: now.toISOString() },
+          });
         } else {
           expect((await who.client.post(`/api/groups/${who.groupId}/messages`, { text: "批准" })).status).toBe(201);
           const reply = await who.push.next();
@@ -257,8 +265,23 @@ describe("P3-5 审批期限与作废规则", () => {
           id: approval.id,
           status: "timed_out",
           grantId: null,
+          decidedAt: now.toISOString(),
         });
-        expect(pushed.type === "approval_updated" ? pushed.approval.decidedAt : null).not.toBeNull();
+        if (source === "群里答复") {
+          expect((await who.client.post(`/api/bots/${prompt.botId}/resume`, {})).status).toBe(200);
+          const nextPrompt = await who.agent.expect("prompt");
+          expect(nextPrompt).toMatchObject({ botId: prompt.botId, text: "批准" });
+          expect(nextPrompt.context).toContainEqual(
+            expect.objectContaining({
+              from: "系统",
+              text: "小服要用工具服务的 shop.refund，10 分钟没人批，按拒绝处理",
+              settled: true,
+            }),
+          );
+          expect(await who.agent.expect("resume")).toMatchObject({ botId: prompt.botId });
+          const resumed = await who.push.next();
+          expect(resumed.type).toBe("bot_updated");
+        }
         expect((await page(who)).approvals).toMatchObject([{ id: approval.id, status: "timed_out", grantId: null }]);
         expect((await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(409);
         expect(await server.scanApprovalTimeouts(new Date())).toBe(0);
@@ -280,6 +303,143 @@ describe("P3-5 审批期限与作废规则", () => {
       }
     },
   );
+
+  it("人工决定和就地结算用同一个 Node 时刻，等数据库期间时钟前进不改变决议时间", async () => {
+    const who = await owner(["小服"]);
+    let gate: ReturnType<typeof gates.arm> | undefined;
+    try {
+      await makeRoutine(who);
+      const prompt = await who.agent.expect("prompt");
+      const approval = await raise(who, prompt, "call-one-clock");
+      if (approval.deadlineAt === null) throw new Error("例行审批必须有截止时间");
+      const now = new Date(approval.deadlineAt);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(now);
+      gate = gates.arm(/^update "approvals" set "status"/i, "after", approval.id);
+      const deciding = who.client.post(`/api/approvals/${approval.id}`, { decision: "approved" });
+      await gate.reached;
+      vi.setSystemTime(new Date(now.getTime() + 60_000));
+      gate.release();
+
+      const response = await deciding;
+      expect(response.status).toBe(409);
+      expect(await response.json(), "截止恰好到点不能批准；就地结算沿用这次调用最初的时刻").toMatchObject({
+        approval: { id: approval.id, status: "timed_out", decidedAt: now.toISOString() },
+      });
+      expect(await who.agent.expect("approval_result")).toMatchObject({
+        callId: "call-one-clock",
+        outcome: "timed_out",
+      });
+      const pushed = await who.push.next();
+      expect(pushed.type === "approval_updated" ? pushed.approval : null).toMatchObject({
+        id: approval.id,
+        status: "timed_out",
+        decidedAt: now.toISOString(),
+      });
+    } finally {
+      gate?.release();
+      vi.useRealTimers();
+      who.close();
+    }
+  });
+
+  it.each(["批准", "同意", "拒绝", "不行"])("已超时卡上的「%s」照常作为单 Bot 群新消息派活", async (word) => {
+    const who = await owner(["小服"]);
+    try {
+      await makeRoutine(who);
+      const prompt = await who.agent.expect("prompt");
+      const approval = await raise(who, prompt, "call-timed-out-reply");
+      if (approval.deadlineAt === null) throw new Error("例行审批必须有截止时间");
+      expect(await server.scanApprovalTimeouts(new Date(approval.deadlineAt))).toBe(1);
+      expect(await who.agent.expect("approval_result")).toMatchObject({ outcome: "timed_out" });
+      expect((await who.push.next()).type).toBe("approval_updated");
+      expect((await who.client.post(`/api/groups/${who.groupId}/messages`, { text: word })).status).toBe(201);
+      expect((await who.client.post(`/api/bots/${prompt.botId}/resume`, {})).status).toBe(200);
+      expect(await who.agent.expect("prompt")).toMatchObject({ botId: prompt.botId, text: word });
+      expect(await who.agent.expect("resume")).toMatchObject({ botId: prompt.botId });
+      expect((await page(who)).approvals).toMatchObject([{ id: approval.id, status: "timed_out" }]);
+    } finally {
+      who.close();
+    }
+  });
+
+  it("未结算的过期答复按多 Bot 群经手路由，并先作废目标 Bot 的其他待批卡", async () => {
+    const who = await owner(["小销", "小服"]);
+    try {
+      const handoff = await handoffPrompt(who);
+      const current = await promptFor(who, "@小销 等我确认另一个动作");
+      const waiting = await raise(who, current, "call-reply-void");
+      const overdue = await raise(who, handoff, "call-reply-overdue");
+      if (overdue.deadlineAt === null) throw new Error("交接审批必须有截止时间");
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(overdue.deadlineAt));
+      expect((await who.client.post(`/api/groups/${who.groupId}/messages`, { text: "同意" })).status).toBe(201);
+      expect((await who.client.post(`/api/bots/${current.botId}/resume`, {})).status).toBe(200);
+      expect(await who.agent.expect("approval_result")).toMatchObject({
+        callId: "call-reply-overdue",
+        outcome: "timed_out",
+      });
+      expect(await who.agent.expect("approval_result")).toMatchObject({ callId: "call-reply-void", outcome: "voided" });
+      expect(await who.agent.expect("prompt")).toMatchObject({ botId: current.botId, text: "同意" });
+      expect(await who.agent.expect("resume")).toMatchObject({ botId: current.botId });
+      const approvals = (await page(who)).approvals;
+      expect(approvals.find((item) => item.id === overdue.id)?.status).toBe("timed_out");
+      expect(approvals.find((item) => item.id === waiting.id)?.status).toBe("voided");
+    } finally {
+      vi.useRealTimers();
+      who.close();
+    }
+  });
+
+  it.each(["截止已过未扫描", "已超时", "已失效"])("%s的审批带错误 scope 点击先回 400", async (state) => {
+    const who = await owner(["小服"]);
+    try {
+      await makeRoutine(who);
+      const prompt = await who.agent.expect("prompt");
+      const approval = await raise(who, prompt, "call-invalid-scope");
+      if (approval.deadlineAt === null) throw new Error("例行审批必须有截止时间");
+      const deadline = new Date(approval.deadlineAt);
+      if (state === "已超时") {
+        expect(await server.scanApprovalTimeouts(deadline)).toBe(1);
+        expect(await who.agent.expect("approval_result")).toMatchObject({ outcome: "timed_out" });
+        expect((await who.push.next()).type).toBe("approval_updated");
+      } else if (state === "已失效") {
+        who.agent.send({
+          type: "approval_abandoned",
+          runId: prompt.runId,
+          callId: "call-invalid-scope",
+          reason: "disconnected",
+        });
+        const update = await who.push.next();
+        expect(update.type === "approval_updated" ? update.approval.status : null).toBe("expired");
+      }
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(deadline);
+      const response = await who.client.post(`/api/approvals/${approval.id}`, {
+        decision: "approved",
+        scope: "project",
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "这类动作只能批这一次" });
+      expect(
+        (await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved", scope: "invalid" })).status,
+      ).toBe(400);
+      expect((await page(who)).approvals).toMatchObject([
+        { id: approval.id, status: state === "已超时" ? "timed_out" : state === "已失效" ? "expired" : "pending" },
+      ]);
+      expect((await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(409);
+      if (state === "截止已过未扫描") {
+        expect(await who.agent.expect("approval_result")).toMatchObject({ outcome: "timed_out" });
+        expect((await who.push.next()).type).toBe("approval_updated");
+      }
+      expect((await who.client.post(`/api/bots/${prompt.botId}/resume`, {})).status).toBe(200);
+      expect(await who.agent.expect("resume")).toMatchObject({ botId: prompt.botId });
+      expect(who.agent.received()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      who.close();
+    }
+  });
 
   it("交接触发的审批期限也等于交接卡 createdAt 加十分钟", async () => {
     const who = await owner(["小销", "小服"]);

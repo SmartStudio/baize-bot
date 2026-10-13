@@ -795,7 +795,7 @@ const REPLY_DECISIONS = new Map<string, DecideApprovalRequest>([
 
 export type SettleResult =
   | { readonly kind: "ok"; readonly approval: Approval; readonly grant: Grant | null }
-  | { readonly kind: "already_decided" }
+  | { readonly kind: "already_decided"; readonly approval: Approval | null }
   | { readonly kind: "scope_not_allowed"; readonly error: string };
 
 type ApprovalDelivery = {
@@ -904,6 +904,7 @@ export async function settleApproval(
   approvalId: ApprovalId,
   request: DecideApprovalRequest,
 ): Promise<SettleResult> {
+  const now = new Date();
   const { outcome, timedOut } = await deps.db.transaction(async (tx) => {
     const scopes = await pendingApprovalDeliveries(tx, eq(approvalRows.id, approvalId));
     await lockApprovalDeliveries(tx, scopes);
@@ -911,16 +912,20 @@ export async function settleApproval(
       tx,
       scopes.map((scope) => scope.runId),
     );
-    const result = await decideApproval(tx as unknown as Db, ownerId, approvalId, request);
+    const result = await decideApproval(tx as unknown as Db, ownerId, approvalId, request, now);
     const expired =
       result.kind === "already_decided"
         ? await timeOutDueApprovals(
             tx,
-            new Date(),
+            now,
             scopes.map((scope) => scope.id),
           )
         : [];
     await enqueueAutomaticApprovals(tx, expired, "timed_out");
+    if (result.kind === "already_decided") {
+      const [approval] = await listApprovals(tx as unknown as Db, [approvalId]);
+      return { outcome: { kind: "already_decided" as const, approval: approval ?? null }, timedOut: expired };
+    }
     if (result.kind === "decided" && result.decided.computerId !== null) {
       const decided = result.decided;
       await enqueueDownlink(
@@ -961,6 +966,6 @@ export async function settleByReply(
   if (decision === undefined) return false;
   const pending = await latestPendingApproval(deps.db, groupId, { kind: "user" });
   if (pending === null) return false;
-  await settleApproval(deps, ownerId, pending, decision);
-  return true;
+  const settled = await settleApproval(deps, ownerId, pending, decision);
+  return settled.kind === "ok";
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   BotListResponse,
   CreateBotResponse,
+  DownlinkFrame,
   MessageId,
   MessageListResponse,
   toolViewText,
@@ -12,6 +13,7 @@ import {
   type ToolView,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { AgentHub } from "../src/agent/hub.js";
 import { STALE_APPROVAL_MS, remindStaleApprovals } from "../src/repo/approvals.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -223,7 +225,10 @@ describe("放弃审批", () => {
 
       const response = await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" });
       expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({ error: "这条审批已经有结论了" });
+      expect(await response.json()).toMatchObject({
+        error: "这条审批已经有结论了",
+        approval: { id: approval.id, status: "expired" },
+      });
     } finally {
       job.close();
     }
@@ -335,7 +340,10 @@ describe("点按钮", () => {
 
       const again = await job.client.post(`/api/approvals/${approval.id}`, { decision: "rejected" });
       expect(again.status).toBe(409);
-      expect(await again.json(), "409 的正文要是人话").toEqual({ error: "这条审批已经有结论了" });
+      expect(await again.json(), "409 的正文要是人话并带回当前结论").toMatchObject({
+        error: "这条审批已经有结论了",
+        approval: { id: approval.id, status: "approved" },
+      });
 
       await expectNextDownlinkIsPrompt(job, "接着干");
     } finally {
@@ -480,6 +488,58 @@ describe("提醒的写入不会半程丢掉", () => {
       expect(again, "reminded_at 已经占住了，再扫一遍一行都不该命中").toBe(0);
     } finally {
       for (const job of jobs) job.close();
+    }
+  });
+});
+
+describe("审批结论可靠投递", () => {
+  it.each(["approved", "rejected"] as const)("人工决定 %s 先入发件箱，恢复发送后按原序号投递", async (decision) => {
+    const job = await runningJob();
+    let restoreFlush: (() => void) | undefined;
+    try {
+      const approval = await raiseApproval(job, "call-reliable-decision");
+      const blocked = vi.spyOn(AgentHub.prototype, "flushOutbox").mockImplementation(async () => undefined);
+      restoreFlush = () => blocked.mockRestore();
+      const response = await job.client.post(`/api/approvals/${approval.id}`, { decision });
+      expect(response.status).toBe(200);
+      expect((await page(job)).approvals).toMatchObject([{ id: approval.id, status: decision }]);
+      const queued = await database.sql<{ seq: number; body: unknown; run_id: string }[]>`
+        SELECT seq, body, run_id FROM agent_outbox
+        WHERE computer_id = ${job.computer.computerId} AND body->>'type' = 'approval_result'
+      `;
+      expect(queued, "发送暂不可用时，已提交的人工结论留在可靠发件箱").toEqual([
+        {
+          seq: expect.any(Number),
+          run_id: job.runId,
+          body: { type: "approval_result", runId: job.runId, callId: "call-reliable-decision", outcome: decision },
+        },
+      ]);
+      expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+      expect(await job.agent.next(), "没有绕过发件箱直接发送审批结论").toMatchObject({
+        type: "pause",
+        botId: job.botId,
+      });
+
+      const frames: ReturnType<typeof DownlinkFrame.parse>[] = [];
+      job.agent.socket.on("message", (raw) => {
+        const frame = DownlinkFrame.safeParse(JSON.parse(raw.toString()));
+        if (frame.success) frames.push(frame.data);
+      });
+      blocked.mockRestore();
+      expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "继续查库存" })).status).toBe(201);
+      expect(await job.agent.next()).toMatchObject({
+        type: "approval_result",
+        callId: "call-reliable-decision",
+        outcome: decision,
+      });
+      expect(await job.agent.next()).toMatchObject({ type: "prompt", text: "继续查库存" });
+      expect(frames[0], "补送的是原先入箱的序号和 run，电脑能按可靠信封确认").toMatchObject({
+        seq: queued[0]?.seq,
+        body: { type: "approval_result", runId: job.runId, outcome: decision },
+      });
+    } finally {
+      restoreFlush?.();
+      job.close();
     }
   });
 });

@@ -858,6 +858,7 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
     .where(eq(runs.id, event.runId))
     .limit(1);
   if (run === undefined) return;
+  // 来源看触发消息：交接和例行 run 等十分钟，用户当面发起的 run 不设截止。
   const trigger =
     run.triggerMessageId === null
       ? null

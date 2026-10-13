@@ -132,6 +132,39 @@ test("超时审批卡显示已拒绝且没有决定按钮", async ({ page, reque
   );
 });
 
+test("已作废和超时审批卡沿用失效卡的淡化样式", async ({ page, request }) => {
+  await login(page);
+  const expired = await sendForApproval(page, "小销");
+  expect((await request.post("/api/test/approval/expire")).status()).toBe(204);
+  await expect(expired).toHaveAttribute("data-status", "expired");
+  const muted = await expired.evaluate((element) => ({
+    background: getComputedStyle(element).backgroundColor,
+    border: getComputedStyle(element).borderTopColor,
+    color: getComputedStyle(element.querySelector(".card-title")!).color,
+  }));
+
+  await sendText(page, "帮我处理退款");
+  const pending = page.getByTestId("approval-card").last();
+  await expect(pending).toHaveAttribute("data-status", "pending");
+  await sendText(page, "查一下库存");
+  await expect(pending).toHaveAttribute("data-status", "voided");
+  const voided = page.locator('[data-testid="approval-card"][data-status="voided"]');
+
+  await sendText(page, "帮我处理退款");
+  const timedOut = page.getByTestId("approval-card").last();
+  await expect(timedOut).toHaveAttribute("data-status", "pending");
+  expect((await request.post("/api/test/approval/timeout")).status()).toBe(204);
+  await expect(timedOut).toHaveAttribute("data-status", "timed_out");
+
+  for (const card of [voided, timedOut]) {
+    await expect(card, "卡片背景与失效卡一致").toHaveCSS("background-color", muted.background);
+    await expect(card, "卡片边框与失效卡一致").toHaveCSS("border-top-color", muted.border);
+    await expect(card.locator(".approval-compact-text"), "摘要文字淡化").toHaveCSS("color", muted.color);
+    await expect(card.getByTestId("approval-decided"), "结论文字淡化").toHaveCSS("color", muted.color);
+    await expect(card.getByTestId("approval-decided"), "结论背景淡化").toHaveCSS("background-color", muted.background);
+  }
+});
+
 test("pending 审批有截止时间时显示按拒绝处理的提示", async ({ page, request }) => {
   await login(page);
   await openBot(page, "小销");

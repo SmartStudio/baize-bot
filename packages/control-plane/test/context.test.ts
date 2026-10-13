@@ -128,10 +128,10 @@ const readsOf = (table: string) =>
 
 describe("上下文里的卡写结论", () => {
   it("审批卡按审批行现在的状态写结论，四张审批卡只做一次摘要查询", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
-      await say(owner.client, owner.groupId, "把四笔款付了");
-      const first = await owner.agent.expect("prompt");
+      await say(owner.client, owner.groupId, "@小服 把四笔款付了");
+      const first = await nextPrompt(owner.agent);
       const approvals: ApprovalId[] = [];
       for (const [index, command] of ["pay 100", "pay 200", "pay 300", "pay 400"].entries()) {
         owner.agent.send({
@@ -163,20 +163,56 @@ describe("上下文里的卡写结论", () => {
       }
 
       serverQueries.length = 0;
-      await say(owner.client, owner.groupId, "付完说一声");
+      await say(owner.client, owner.groupId, "@阿文 付完说一声");
       const prompt = await nextPrompt(owner.agent);
 
-      expect(lines(prompt), "审批卡按审批行现在的状态写成结论").toEqual([
-        { from: "你", text: "把四笔款付了" },
-        { from: "系统", text: "小服要执行 `pay 100`，你批准了" },
-        { from: "系统", text: "小服要执行 `pay 200`，你拒绝了" },
-        { from: "系统", text: "小服要执行 `pay 300`，你发了新消息，这一步作废了" },
-        { from: "系统", text: "小服要执行 `pay 400`，没批下来，过期了" },
+      expect(
+        prompt.context.map(({ from, text, settled }) => ({ from, text, settled })),
+        "同一次查询里已批准、已拒绝、待批和失效并存，待批卡还没定稿",
+      ).toEqual([
+        { from: "你", text: "@小服 把四笔款付了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 100`，你批准了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 200`，你拒绝了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 300`，还在等你点头", settled: false },
+        { from: "系统", text: "小服要执行 `pay 400`，没批下来，过期了", settled: true },
       ]);
-      expect(settledOnly(prompt), "新消息已作废剩下的待批卡，四张卡都有终态").toEqual([true, true, true, true, true]);
       const summaryReads = serverQueries.filter((query) => /^select\b[\s\S]*from "approvals" where /i.test(query));
       expect(summaryReads, "四张审批卡仍用一条摘要查询查完，不按卡逐条查").toHaveLength(1);
       expect(readsOf("approvals"), "摘要查询和作废投递范围各一条，不随卡数增长").toBe(2);
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("同 Bot 的新消息作废审批，上下文保留作废文案且已定稿", async () => {
+    const owner = await onlineOwner();
+    try {
+      await say(owner.client, owner.groupId, "把款付了");
+      const first = await nextPrompt(owner.agent);
+      owner.agent.send({
+        type: "approval_request",
+        runId: first.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        callId: "call-voided-context",
+        tool: "bash",
+        action: "spend",
+        target: null,
+        view: bash("pay 100"),
+      });
+      for (;;) {
+        if ((await owner.push.next()).type === "approval_updated") break;
+      }
+
+      await say(owner.client, owner.groupId, "先别付款，查一下库存");
+      const prompt = await nextPrompt(owner.agent);
+      expect(prompt.context, "新消息作废的审批带上确定的原因，运行器不用再等待它变更").toContainEqual(
+        expect.objectContaining({
+          from: "系统",
+          text: "小服要执行 `pay 100`，你发了新消息，这一步作废了",
+          settled: true,
+        }),
+      );
     } finally {
       owner.close();
     }

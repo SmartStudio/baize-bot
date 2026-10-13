@@ -962,7 +962,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (!body.ok) return c.json({ error: body.error }, 400);
 
     const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value);
-    if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
+    if (settled.kind === "already_decided")
+      return c.json({ error: "这条审批已经有结论了", approval: settled.approval }, 409);
     if (settled.kind === "scope_not_allowed") return c.json({ error: settled.error }, 400);
     return c.json(DecideApprovalResponse.parse({ approval: settled.approval, grant: settled.grant }));
   });

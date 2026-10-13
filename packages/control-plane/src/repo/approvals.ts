@@ -235,7 +235,7 @@ export type DecideOutcome =
   | { readonly kind: "scope_not_allowed"; readonly error: string };
 
 /** 这条审批能不能批到这个范围。不能就给一句人话，能就是 null。 */
-function scopeRefusal(row: ApprovalRow, scope: ApprovalScope): string | null {
+function scopeRefusal(row: Pick<ApprovalRow, "action" | "target">, scope: ApprovalScope): string | null {
   if (scope === "once") return null;
   const allowed = GRANTABLE_SCOPES[row.action];
   if (!allowed.includes(scope))
@@ -255,27 +255,36 @@ export async function decideApproval(
   ownerId: UserId,
   approvalId: ApprovalId,
   request: DecideApprovalRequest,
+  now: Date,
 ): Promise<DecideOutcome> {
   // 回滚只能靠抛异常，拒绝的原因从这里带出事务。
   const refused: { error: string | null } = { error: null };
   try {
     const decided = await db.transaction(async (tx): Promise<DecidedApproval | null> => {
+      const scope = request.decision === "approved" ? request.scope : "once";
+      if (scope !== "once") {
+        // 范围是否合法不取决于卡片状态；过期卡上的错误范围也要先回 400。
+        const [candidate] = await tx
+          .select({ action: approvals.action, target: approvals.target })
+          .from(approvals)
+          .where(eq(approvals.id, approvalId))
+          .limit(1);
+        if (candidate === undefined) return null;
+        refused.error = scopeRefusal(candidate, scope);
+        if (refused.error !== null) return tx.rollback();
+      }
       const [row] = await tx
         .update(approvals)
-        .set({ status: request.decision, decidedAt: new Date() })
+        .set({ status: request.decision, decidedAt: now })
         .where(
           and(
             eq(approvals.id, approvalId),
             eq(approvals.status, "pending"),
-            or(isNull(approvals.deadlineAt), gt(approvals.deadlineAt, sql`now()`)),
+            or(isNull(approvals.deadlineAt), gt(approvals.deadlineAt, now)),
           ),
         )
         .returning();
       if (row === undefined) return null;
-
-      const scope = request.decision === "approved" ? request.scope : "once";
-      refused.error = scopeRefusal(row, scope);
-      if (refused.error !== null) return tx.rollback();
 
       let settled = row;
       let grant: Grant | null = null;
