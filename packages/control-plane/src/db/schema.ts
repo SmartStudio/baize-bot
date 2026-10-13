@@ -185,6 +185,8 @@ export const toolConnections = pgTable(
     authorizationEnc: text("authorization_enc"),
     operations: jsonb("operations").$type<ToolOperation[]>().notNull().default([]),
     status: text("status").$type<ToolConnectionStatus>().notNull().default("ready"),
+    // 只在本机的连接，凭据只下发给本机电脑、由运行器直连；其余由控制面代执行。
+    localOnly: boolean("local_only").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],
@@ -590,10 +592,13 @@ export const approvals = pgTable(
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    // 例行和交接触发的审批到这个时刻还没人批就按拒绝处理，用户当面发起的为空、不按时间过期。
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }),
   },
   (t) => [
     index("approvals_group_id_status_idx").on(t.groupId, t.status),
     uniqueIndex("approvals_run_id_call_id_idx").on(t.runId, t.callId),
+    index("approvals_status_deadline_at_idx").on(t.status, t.deadlineAt),
   ],
 );
 
