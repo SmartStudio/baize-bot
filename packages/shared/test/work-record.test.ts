@@ -5,13 +5,16 @@ import {
   RETAIN_TEXT_LIMIT_BYTES,
   SEARCH_TEXT_LIMIT,
   chainHead,
-  isRetained,
-  retainEntry,
+  createRetainer,
   searchTextOf,
+  type RetainContext,
 } from "../src/work-record.js";
 
 const ctx = { localOnlyToolNames: new Set<string>() };
 const localCtx = { localOnlyToolNames: new Set(["mail_read"]) };
+
+const retainEntry = (line: string, c: RetainContext) => createRetainer(c).retain(line);
+const isRetained = (line: string, c: RetainContext) => createRetainer(c).check(line);
 
 const entry = (message: object, extra: object = {}) =>
   JSON.stringify({
@@ -88,13 +91,15 @@ describe("retainEntry 图片", () => {
 
   it("用户消息、custom_message、context_edit 里的图片同样换掉", () => {
     const img = { type: "image", data: "AAAA", mimeType: "image/png" };
+    const retainer = createRetainer(ctx);
+    expect(retainer.retain(userText("先有目标条目")).retention).toBe("verbatim");
     const lines = [
       entry({ role: "user", content: [img], timestamp: 1 }),
       JSON.stringify({ type: "custom_message", id: "e2", customType: "x", content: [img], display: true }),
       JSON.stringify({ type: "context_edit", id: "e3", targetId: "e1", replacement: { content: [img] } }),
     ];
     for (const line of lines) {
-      const out = retainEntry(line, ctx);
+      const out = retainer.retain(line);
       expect(out.retention).toBe("redacted");
       expect(out.line).not.toContain("AAAA");
       expect(out.line).toContain("（之前的截图已省略）");
@@ -419,5 +424,346 @@ describe("chainHead", () => {
 
   it("空行也能滚，按 UTF-8 字节算", () => {
     expect(chainHead(CHAIN_GENESIS, "")).toBe("a52a21f725cb0dd2daf7c11bd583b94248c564712c1daa5b86d30cb17847aa11");
+  });
+});
+
+const SECRET = "SYNTHETIC_PRIVATE_RESULT_123";
+const ISO = "2026-10-13T10:00:00.000Z";
+const SECRET_SHA = "477423f9f82a9b652acfa974889414f5023914e0d9b4ba8aa813fb69d5605055";
+const secretResult = (extra: object = {}, entryExtra: object = {}, timestamp: unknown = ISO) =>
+  JSON.stringify({
+    type: "message",
+    id: "e1",
+    parentId: null,
+    timestamp,
+    message: {
+      role: "toolResult",
+      toolCallId: "c1",
+      toolName: "mail_read",
+      content: [{ type: "text", text: SECRET }],
+      isError: false,
+      timestamp: 1,
+      ...extra,
+    },
+    ...entryExtra,
+  });
+const localPlaceholder = (time: string) =>
+  `{"type":"message","id":"e1","parentId":null,"timestamp":${JSON.stringify(ISO)},"message":{"role":"toolResult","toolCallId":"c1","toolName":"mail_read","content":[{"type":"text","text":"[本机工具结果，原文未上传 tool=mail_read time=${time} bytes=55 sha256=${SECRET_SHA}]"}],"isError":false,"timestamp":1}}`;
+
+describe("第二轮：没被过滤动到的数字原文保值", () => {
+  it("超精度整数、超精度小数、1e400、1.0、-0 过滤后仍是输入里的原文", () => {
+    const line =
+      '{"type":"message","n":9007199254740993,"decimal":0.123456789012345678901,"huge":1e400,"one":1.0,"neg":-0,"plain":42,"nested":{"list":[1e3,2.50,7]},"message":{"role":"user","content":[{"type":"image","data":"AAAA"}]}}';
+    const out = retainEntry(line, ctx);
+    expect(out.retention).toBe("redacted");
+    expect(out.line).toBe(
+      '{"type":"message","n":9007199254740993,"decimal":0.123456789012345678901,"huge":1e400,"one":1.0,"neg":-0,"plain":42,"nested":{"list":[1e3,2.50,7]},"message":{"role":"user","content":[{"type":"text","text":"（之前的截图已省略）"}]}}',
+    );
+  });
+
+  it("超长文字过滤时，工具调用参数里的超精度数字也原样", () => {
+    const line =
+      '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","id":"c","name":"w","arguments":{"n":9007199254740993}},{"type":"text","text":"' +
+      "a".repeat(20000) +
+      '"}]}}';
+    const out = retainEntry(line, ctx);
+    expect(out.retention).toBe("redacted");
+    expect(out.line).toContain('"arguments":{"n":9007199254740993}');
+  });
+
+  it("本机工具结果的 timestamp 是超精度数字时保留原文", () => {
+    const line = secretResult({ timestamp: 1 }).replace('"timestamp":1}}', '"timestamp":9007199254740993}}');
+    const out = retainEntry(line, localCtx);
+    expect(out.line).toContain('"timestamp":9007199254740993}}');
+    expect(isRetained(out.line, localCtx)).toBe(true);
+  });
+});
+
+describe("第二轮：本机工具结果按白名单只留元字段", () => {
+  it.each(["rawResult", "output", "error", "extra", "usage", "details", "nestedCalls"])(
+    "消息里多出 %s：整个字段丢掉，输出等于标准占位行",
+    (key) => {
+      const line = secretResult({ [key]: { nested: { content: [{ type: "text", text: SECRET }] } } });
+      const out = retainEntry(line, localCtx);
+      expect(out.retention).toBe("redacted");
+      expect(out.line).toBe(localPlaceholder(ISO));
+      expect(isRetained(line, localCtx)).toBe(false);
+      expect(isRetained(out.line, localCtx)).toBe(true);
+    },
+  );
+
+  it.each(["rawResult", "output", "error", "extra"])("条目一层多出 %s 同样丢掉", (key) => {
+    const out = retainEntry(secretResult({}, { [key]: SECRET }), localCtx);
+    expect(out.line).toBe(localPlaceholder(ISO));
+  });
+
+  it("已经是标准占位的行再塞一个 rawResult 不算已过滤，会被剥掉", () => {
+    const forged = JSON.stringify({ ...JSON.parse(localPlaceholder(ISO)), rawResult: SECRET });
+    expect(isRetained(forged, localCtx)).toBe(false);
+    const forgedInMessage = JSON.parse(localPlaceholder(ISO));
+    forgedInMessage.message.rawResult = SECRET;
+    const line = JSON.stringify(forgedInMessage);
+    expect(isRetained(line, localCtx)).toBe(false);
+    expect(retainEntry(line, localCtx).line).toBe(localPlaceholder(ISO));
+  });
+
+  it("类型不对的元字段也丢掉：toolCallId 是对象、isError 是字符串", () => {
+    const line = secretResult({ toolCallId: { x: SECRET }, isError: SECRET });
+    expect(retainEntry(line, localCtx).line).toBe(
+      `{"type":"message","id":"e1","parentId":null,"timestamp":"${ISO}","message":{"role":"toolResult","toolName":"mail_read","content":[{"type":"text","text":"[本机工具结果，原文未上传 tool=mail_read time=${ISO} bytes=55 sha256=${SECRET_SHA}]"}],"timestamp":1}}`,
+    );
+  });
+
+  it("没有 content 字段的本机结果也补上占位，字节数按 null 算", () => {
+    const line = JSON.stringify({
+      type: "message",
+      id: "e1",
+      parentId: null,
+      timestamp: ISO,
+      message: { role: "toolResult", toolName: "mail_read", output: SECRET },
+    });
+    const out = retainEntry(line, localCtx);
+    expect(out.line).toBe(
+      `{"type":"message","id":"e1","parentId":null,"timestamp":"${ISO}","message":{"role":"toolResult","toolName":"mail_read","content":[{"type":"text","text":"[本机工具结果，原文未上传 tool=mail_read time=${ISO} bytes=4 sha256=74234e98afe7498fb5daf1f36ac2d78acc339464f950703b8c019892f982b90b]"}]}}`,
+    );
+  });
+});
+
+describe("第二轮：占位里的时间由条目 timestamp 唯一决定", () => {
+  it.each([
+    ["空格分隔", "2026-10-14 00:00:00"],
+    ["斜杠", "2026/10/14"],
+    ["空串", ""],
+    ["中文", "中文时间"],
+    ["下划线时区", "2026-10-14T00:00:00_UTC"],
+    ["带换行", "bad\ntime"],
+    ["等号和空格", "x bytes=1 sha256=00"],
+    ["不是字符串", 1760000000000],
+  ])("条目 timestamp %s：写 unknown，输出过复查且再过滤不变", (_name, timestamp) => {
+    const out = retainEntry(secretResult({}, {}, timestamp), localCtx);
+    expect(out.line).toContain(`tool=mail_read time=unknown bytes=55 sha256=${SECRET_SHA}]`);
+    expect(out.line).not.toContain(SECRET);
+    expect(isRetained(out.line, localCtx)).toBe(true);
+    const again = retainEntry(out.line, localCtx);
+    expect(again.line === out.line).toBe(true);
+    expect(again.retention).toBe("verbatim");
+  });
+
+  it("带时区偏移和纳秒的合法 ISO 原样写进占位", () => {
+    const out = retainEntry(secretResult({}, {}, "2026-10-14T08:00:00.123456789+08:00"), localCtx);
+    expect(out.line).toContain("time=2026-10-14T08:00:00.123456789+08:00 bytes=55");
+    expect(isRetained(out.line, localCtx)).toBe(true);
+  });
+
+  it("占位里的 time 和条目 timestamp 对不上就不算已过滤（time=sk-secret123）", () => {
+    const forged = JSON.parse(localPlaceholder(ISO));
+    forged.message.content[0].text = `[本机工具结果，原文未上传 tool=mail_read time=sk-secret123 bytes=1 sha256=${"0".repeat(64)}]`;
+    const line = JSON.stringify(forged);
+    expect(isRetained(line, localCtx)).toBe(false);
+    const out = retainEntry(line, localCtx);
+    expect(out.line).not.toContain("sk-secret123");
+    expect(isRetained(out.line, localCtx)).toBe(true);
+  });
+
+  it("条目 timestamp 不是 ISO 时，占位写 unknown 才算已过滤；写别的都不算", () => {
+    const base = JSON.parse(localPlaceholder(ISO));
+    base.timestamp = "not a time";
+    base.message.content[0].text = base.message.content[0].text.replace(`time=${ISO}`, "time=unknown");
+    expect(isRetained(JSON.stringify(base), localCtx)).toBe(true);
+    base.message.content[0].text = base.message.content[0].text.replace("time=unknown", "time=not a time");
+    expect(isRetained(JSON.stringify(base), localCtx)).toBe(false);
+  });
+});
+
+describe("第二轮：context_edit 不能把本机工具结果的原文带回去", () => {
+  const edit = (id: string, targetId: unknown, content: unknown) =>
+    JSON.stringify({ type: "context_edit", id, parentId: "e1", timestamp: ISO, targetId, replacement: { content } });
+  const secretContent = [{ type: "text", text: SECRET }];
+  const editPlaceholder = (id: string, targetId: string) =>
+    `{"type":"context_edit","id":"${id}","parentId":"e1","timestamp":"${ISO}","targetId":"${targetId}","replacement":{"content":[{"type":"text","text":"[上下文编辑，原文未上传 bytes=55 sha256=${SECRET_SHA}]"}]}}`;
+
+  it("指向本机工具结果的编辑，replacement 换成占位（字面量）", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(secretResult());
+    const out = retainer.retain(edit("e2", "e1", secretContent));
+    expect(out.retention).toBe("redacted");
+    expect(out.line).toBe(editPlaceholder("e2", "e1"));
+  });
+
+  it("复查：同一条流里的原文编辑判不合规，过滤后的编辑合规", () => {
+    const filtered = createRetainer(localCtx);
+    const l1 = filtered.retain(secretResult()).line;
+    const l2 = filtered.retain(edit("e2", "e1", secretContent)).line;
+    const server = createRetainer(localCtx);
+    expect(server.check(l1)).toBe(true);
+    expect(server.check(l2)).toBe(true);
+    const bad = createRetainer(localCtx);
+    expect(bad.check(l1)).toBe(true);
+    expect(bad.check(edit("e2", "e1", secretContent))).toBe(false);
+  });
+
+  it("编辑指向还没见过的条目（前向引用）同样按本机处理", () => {
+    const retainer = createRetainer(localCtx);
+    const out = retainer.retain(edit("e2", "e9", secretContent));
+    expect(out.line).toBe(editPlaceholder("e2", "e9"));
+    expect(retainer.check(out.line)).toBe(true);
+  });
+
+  it("targetId 不是字符串也按本机处理", () => {
+    const out = retainEntry(edit("e2", { x: 1 }, secretContent), localCtx);
+    expect(out.line).not.toContain(SECRET);
+  });
+
+  it("指向普通条目的编辑照常：内容原样，图片和超长文字照常过滤", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(userText("目标"));
+    const plain = edit("e2", "e1", [{ type: "text", text: "改过的话" }]);
+    expect(retainer.retain(plain).line === plain).toBe(true);
+    const big = edit("e3", "e1", [{ type: "text", text: "a".repeat(20000) }]);
+    expect(retainer.retain(big).retention).toBe("redacted");
+  });
+
+  it("replacement 为 null（从上下文里去掉目标）原样放行，本机目标也一样", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(secretResult());
+    const line = JSON.stringify({ type: "context_edit", id: "e2", parentId: "e1", targetId: "e1", replacement: null });
+    expect(retainer.retain(line)).toEqual({ line, retention: "verbatim" });
+  });
+
+  it("编辑的 replacement 里多出别的键，对本机目标只留占位", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(secretResult());
+    const line = JSON.stringify({
+      type: "context_edit",
+      id: "e2",
+      parentId: "e1",
+      timestamp: ISO,
+      targetId: "e1",
+      replacement: { content: secretContent, extra: SECRET },
+    });
+    expect(retainer.retain(line).line).toBe(editPlaceholder("e2", "e1"));
+  });
+
+  it("字符串形式的 replacement.content 对本机目标同样换占位", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(secretResult());
+    const out = retainer.retain(edit("e2", "e1", SECRET));
+    expect(out.line).not.toContain(SECRET);
+    expect(retainer.check(out.line)).toBe(true);
+  });
+
+  it("snapshot 带到下一帧：新 Retainer 照样认得本机条目", () => {
+    const first = createRetainer(localCtx);
+    first.retain(secretResult());
+    first.retain(userText("别的"));
+    const snapshot = first.snapshot();
+    expect(snapshot).toEqual({ knownIds: ["e1"], localIds: ["e1"] });
+    const second = createRetainer(localCtx, snapshot);
+    expect(second.retain(edit("e2", "e1", secretContent)).line).toBe(editPlaceholder("e2", "e1"));
+    expect(createRetainer(localCtx).retain(edit("e2", "e1", secretContent)).line).toBe(editPlaceholder("e2", "e1"));
+  });
+
+  it("名单里没有 mail_read 时，同样的编辑是普通编辑", () => {
+    const retainer = createRetainer(ctx);
+    retainer.retain(secretResult());
+    const line = edit("e2", "e1", secretContent);
+    expect(retainer.retain(line).line === line).toBe(true);
+  });
+});
+
+describe("第二轮：随机流的性质", () => {
+  const MARK = "RANDOM_PRIVATE_MARK";
+  const names = ["mail_read", "tool with spaces", "tool[time=]", "web_search"];
+  const randomCtx: RetainContext = { localOnlyToolNames: new Set(names.slice(0, 3)) };
+  const times: unknown[] = [
+    ISO,
+    "2026-10-14T08:00:00+08:00",
+    "2026-10-14 00:00:00",
+    "2026/10/14",
+    "",
+    "中文时间",
+    "time=sk-secret",
+    "bad\ntime",
+    "2026-10-14T00:00:00_UTC",
+    1760000000000,
+    null,
+  ];
+
+  it("2000 条随机流：过滤输出逐行过复查、再过滤不变、本机原文一个字不剩", () => {
+    let seed = 0x12a2026;
+    const rand = (n: number) => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) % n;
+    };
+    const pick = <T>(list: readonly T[]): T => list[rand(list.length)] as T;
+    const numbers = ["9007199254740993", "0.123456789012345678901", "1e400", "1.0", "-0", "7"];
+    const extraKeys = ["rawResult", "output", "error", "extra", "details", "nestedCalls", "usage"];
+    let redacted = 0;
+    let editsToGuarded = 0;
+    for (let stream = 0; stream < 200; stream += 1) {
+      const ids: Array<{ id: string; local: boolean }> = [];
+      const lines: string[] = [];
+      for (let i = 0; i < 10; i += 1) {
+        const id = `s${stream}-${i}`;
+        const time = pick(times);
+        const shape = rand(4);
+        if (shape === 0 || shape === 1) {
+          const local = shape === 0;
+          const name = local ? pick(names.slice(0, 3)) : pick(["web_search", "bash"]);
+          const extra: Record<string, unknown> = {};
+          for (let k = local ? rand(3) : 0; k > 0; k -= 1)
+            extra[pick(extraKeys)] = { content: [{ type: "text", text: MARK }] };
+          const text = local ? MARK : "普通结果";
+          const body =
+            `{"type":"message","id":${JSON.stringify(id)},"parentId":null,"timestamp":${JSON.stringify(time)},` +
+            (rand(2) === 0 && local ? `"rawResult":${JSON.stringify(MARK)},` : "") +
+            `"n":${pick(numbers)},"message":${JSON.stringify({
+              role: "toolResult",
+              toolCallId: "c",
+              toolName: name,
+              content: [rand(3) === 0 ? { type: "image", data: "IMG" } : { type: "text", text }],
+              isError: false,
+              timestamp: i,
+              ...extra,
+            })}}`;
+          lines.push(body);
+          ids.push({ id, local });
+        } else if (shape === 2) {
+          lines.push(
+            entry({ role: pick(["user", "assistant"]), content: [{ type: "text", text: "你好" }], timestamp: i }),
+          );
+          ids.push({ id: "e1", local: false });
+        } else {
+          const target = ids.length > 0 && rand(4) > 0 ? pick(ids) : { id: `ghost-${i}`, local: true };
+          const guarded = target.local;
+          editsToGuarded += Number(guarded);
+          lines.push(
+            JSON.stringify({
+              type: "context_edit",
+              id,
+              parentId: null,
+              timestamp: pick(times),
+              targetId: target.id,
+              replacement: { content: [{ type: "text", text: guarded ? MARK : "改写" }] },
+            }),
+          );
+        }
+      }
+      const filter = createRetainer(randomCtx);
+      const out = lines.map((line) => filter.retain(line));
+      redacted += out.filter((o) => o.retention === "redacted").length;
+      const server = createRetainer(randomCtx);
+      const again = createRetainer(randomCtx);
+      out.forEach((o, i) => {
+        wellFormed(o.line);
+        expect(server.check(o.line), `流 ${stream} 行 ${i} 复查`).toBe(true);
+        expect(again.retain(o.line), `流 ${stream} 行 ${i} 幂等`).toEqual({ line: o.line, retention: "verbatim" });
+        expect(o.line, `流 ${stream} 行 ${i} 原文`).not.toContain(MARK);
+      });
+    }
+    expect(redacted).toBeGreaterThan(500);
+    expect(editsToGuarded).toBeGreaterThan(100);
   });
 });
