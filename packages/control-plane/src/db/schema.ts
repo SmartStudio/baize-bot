@@ -730,7 +730,7 @@ export const skills = pgTable(
   (t) => [uniqueIndex("skills_bot_id_name_idx").on(t.botId, t.name)],
 );
 
-// Bot 记住的用户偏好（D8）。一条一句话，来源消息删了偏好留着；private 的不进 config 下发给运行器。
+// Bot 记住的用户偏好（D8）。一条一句话，来源消息删了偏好留着；private 只管分享时默认不勾，照样随 config 下发。
 export const botPreferences = pgTable(
   "bot_preferences",
   {

@@ -79,7 +79,7 @@ export interface RunnerConfig {
   /** 覆盖 Pi 的会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
   readonly settings?: PiSettings;
   /**
-   * 本机的助理 Chrome。给了才注册五件浏览器工具，profile 目录进禁区。远程电脑不给。
+   * 助理 Chrome。给了才注册五件浏览器工具，profile 目录进禁区。远程电脑也给，但那份 profile 没有登录态，发布只走本机。
    * 只认 createRunner 时的这一份，applyConfig 里带的不换。
    */
   readonly browser?: BrowserConfig;
