@@ -45,7 +45,8 @@ const startedAt = Date.now();
 const DEFAULT_CONTROL_ORIGIN = "http://localhost:3001";
 const AGENT_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL"] as const;
 
-type AppPhase = "running" | "installing" | "quitting";
+// preparing-install 是确认重启后在停代理，窗口照常能关、退出照常等停机；installing 是代理已停好、退出交给 Squirrel。
+type AppPhase = "running" | "preparing-install" | "installing" | "quitting";
 type Settings = { readonly controlOrigin: string; readonly updateFeed?: string };
 type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string };
 let mainWindow: BrowserWindow | null = null;
@@ -452,6 +453,8 @@ function showMenubar(): void {
   menubarWindow.focus();
 }
 
+const closeHidesMenubar = (): boolean => phase === "running" || phase === "preparing-install";
+
 async function createWindows(session: Session): Promise<void> {
   // 登录页一加载完就能提交，钩子晚于 loadURL 装上会漏掉这次登录，代理就永远不启动。
   if (!authHookInstalled) {
@@ -502,14 +505,17 @@ async function createWindows(session: Session): Promise<void> {
     menubarWindow = window;
     window.on("blur", () => {
       setTimeout(() => {
-        if (phase === "running" && !window.isFocused()) window.hide();
+        if (closeHidesMenubar() && !window.isFocused()) window.hide();
       }, 0);
     });
     window.on("close", (event) => {
-      if (phase === "running") {
+      if (closeHidesMenubar()) {
         event.preventDefault();
         window.hide();
       }
+    });
+    window.on("closed", () => {
+      if (menubarWindow === window) menubarWindow = null;
     });
     await window.loadURL(`${uiOrigin}/menubar`);
   }
@@ -583,16 +589,24 @@ function stopPush(): void {
   pushSocket?.close();
 }
 
-// quitAndInstall 先关全部窗口，这条路径不经过 before-quit，所以相位要在这里切走。
+// quitAndInstall 先关全部窗口，这条路径不经过 before-quit，所以相位要在交给 Squirrel 前切走。
+// 停代理期间只是 preparing-install，外部退出仍走普通退出的停机等待。
 async function prepareInstall(): Promise<void> {
-  phase = "installing";
+  phase = "preparing-install";
   stopPush();
   await stopAgent();
 }
 
+function commitInstall(): void {
+  if (phase === "preparing-install") phase = "installing";
+}
+
+// Squirrel 失败时窗口可能已被关掉，恢复要把窗口补回来，托盘和 Dock 才有可用的对象。
 function resumeAfterFailedInstall(): void {
+  if (phase === "quitting") return;
   phase = "running";
   const session = electronSession.defaultSession;
+  void createWindows(session).catch((error: unknown) => logLine(`窗口恢复失败 ${errorText(error)}`));
   void loadCredentials()
     .then((credentials) => (credentials === null ? undefined : launchSavedAgent(session, credentials)))
     .catch((error: unknown) => void dialog.showErrorBox("电脑代理不可用", errorText(error)));
@@ -627,6 +641,7 @@ function createAppUpdater(): Updater {
     },
     inform: (level, text) => void showBox({ type: level, message: text }),
     prepareInstall,
+    commitInstall,
     resumeAfterFailedInstall,
     log: logLine,
   });

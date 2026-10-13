@@ -65,7 +65,7 @@ describe("更新状态机", () => {
   it("其他错误进 error，只在手动检查时提示，之后还能再检查", () => {
     const failed = decide({ status: "downloading", manual: true }, { type: "failed", message: "net down" });
     expect(failed).toEqual({
-      next: { status: "error", message: "net down" },
+      next: { status: "error", message: "net down", stage: "check" },
       effect: { type: "inform", level: "error", text: "检查更新失败：net down" },
     });
     expect(decide(failed.next, { type: "check", manual: false }).effect).toEqual({ type: "start-check" });
@@ -116,7 +116,7 @@ describe("更新状态机", () => {
   it("installing 收到错误进 error 并要求提示和恢复，不论签名与否", () => {
     const installing: UpdateState = { status: "installing", version: "0.2.0" };
     expect(decide(installing, { type: "failed", message: "Failed to launch ShipIt" })).toEqual({
-      next: { status: "error", message: "Failed to launch ShipIt" },
+      next: { status: "error", message: "Failed to launch ShipIt", stage: "check" },
       effect: { type: "install-failed", message: "Failed to launch ShipIt" },
     });
     expect(decide(installing, { type: "failed", message: "code signature invalid" }).next.status).toBe("error");
@@ -128,9 +128,28 @@ describe("更新状态机", () => {
       effect: null,
     });
     expect(decide({ status: "idle" }, { type: "failed", message: "read-only volume" })).toEqual({
-      next: { status: "error", message: "read-only volume" },
+      next: { status: "error", message: "read-only volume", stage: "init" },
       effect: null,
     });
+  });
+
+  it("初始化失败的 error 不发起检查：手动检查直接提示已有错误，自动检查静默", () => {
+    const failedInit: UpdateState = { status: "error", message: "bad feed", stage: "init" };
+    expect(decide(failedInit, { type: "check", manual: true })).toEqual({
+      next: failedInit,
+      effect: { type: "inform", level: "error", text: "检查更新失败：bad feed" },
+    });
+    expect(decide(failedInit, { type: "check", manual: false })).toEqual({ next: failedInit, effect: null });
+  });
+
+  it("retry-init 只把初始化失败的 error 放回 idle 并要求重新初始化", () => {
+    expect(decide({ status: "error", message: "bad feed", stage: "init" }, { type: "retry-init" })).toEqual({
+      next: { status: "idle" },
+      effect: { type: "init" },
+    });
+    const checkFailed: UpdateState = { status: "error", message: "net down", stage: "check" };
+    expect(decide(checkFailed, { type: "retry-init" })).toEqual({ next: checkFailed, effect: null });
+    expect(decide({ status: "none" }, { type: "retry-init" }).effect).toBeNull();
   });
 
   it("只有签名类报错文案被当成签名错误", () => {
@@ -194,6 +213,9 @@ describe("更新器接线", () => {
       prepareInstall: async () => {
         order.push("stopAgent");
       },
+      commitInstall: () => {
+        order.push("commit");
+      },
       resumeAfterFailedInstall: () => {
         order.push("resume");
       },
@@ -226,7 +248,7 @@ describe("更新器接线", () => {
       message: "新版本 0.2.0 已下载，重启后生效",
       detail: expect.any(String),
     });
-    await vi.waitFor(() => expect(order).toEqual(["stopAgent", "quitAndInstall"]));
+    await vi.waitFor(() => expect(order).toEqual(["stopAgent", "commit", "quitAndInstall"]));
   });
 
   it("点「稍后」不停代理也不安装", async () => {
@@ -265,7 +287,7 @@ describe("更新器接线", () => {
     });
     const updater = createUpdater(deps);
     updater.start();
-    expect(updater.state()).toEqual({ status: "error", message: "boom" });
+    expect(updater.state()).toEqual({ status: "error", message: "boom", stage: "check" });
   });
 
   it("未打包不订阅也不检查，手动检查说明开发态不更新", () => {
@@ -300,7 +322,7 @@ describe("更新器接线", () => {
     });
     const updater = createUpdater(deps);
     updater.start();
-    expect(updater.state()).toEqual({ status: "error", message: "bad feed" });
+    expect(updater.state()).toEqual({ status: "error", message: "bad feed", stage: "init" });
     expect(source.checkForUpdates).not.toHaveBeenCalled();
   });
 
@@ -308,13 +330,13 @@ describe("更新器接线", () => {
     const updater = createUpdater(deps);
     updater.start();
     source.emit("update-downloaded", {}, "", "0.2.0");
-    await vi.waitFor(() => expect(order).toEqual(["stopAgent", "quitAndInstall"]));
+    await vi.waitFor(() => expect(order).toEqual(["stopAgent", "commit", "quitAndInstall"]));
     expect(updater.state()).toEqual({ status: "installing", version: "0.2.0" });
 
     source.emit("error", new Error("Failed to launch ShipIt"));
-    expect(updater.state()).toEqual({ status: "error", message: "Failed to launch ShipIt" });
+    expect(updater.state()).toEqual({ status: "error", message: "Failed to launch ShipIt", stage: "check" });
     expect(inform).toHaveBeenCalledWith("error", "重启安装失败：Failed to launch ShipIt");
-    expect(order).toEqual(["stopAgent", "quitAndInstall", "resume"]);
+    expect(order).toEqual(["stopAgent", "commit", "quitAndInstall", "resume"]);
   });
 
   it("停代理失败也算安装失败：不调 quitAndInstall，提示并恢复", async () => {
@@ -369,5 +391,146 @@ describe("更新器接线", () => {
     await Promise.resolve();
     expect(source.quitAndInstall).toHaveBeenCalledTimes(1);
     expect(order.filter((item) => item === "stopAgent")).toHaveLength(1);
+  });
+
+  describe("安装代次", () => {
+    const confirm = (): void => {
+      source.emit("update-downloaded", {}, "", "0.2.0");
+    };
+
+    it("准备期收到 error 恢复之后，旧的准备完成不再 commit 也不 quitAndInstall", async () => {
+      const gate = deferred<void>();
+      const updater = createUpdater({ ...deps, prepareInstall: () => gate.promise });
+      updater.start();
+      confirm();
+      await vi.waitFor(() => expect(updater.state().status).toBe("installing"));
+
+      source.emit("error", new Error("Failed to launch ShipIt"));
+      expect(order, "error 立刻提示并恢复").toEqual(["resume"]);
+      gate.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(order, "旧续作不再 commit").toEqual(["resume"]);
+      expect(source.quitAndInstall).not.toHaveBeenCalled();
+      expect(updater.state().status).toBe("error");
+    });
+
+    it("失败后又开了新一轮安装，旧续作仍不能抢先安装", async () => {
+      const gates = [deferred<void>(), deferred<void>()];
+      const prepare = vi
+        .fn<UpdaterDeps["prepareInstall"]>()
+        .mockImplementation(() => gates[prepare.mock.calls.length - 1]!.promise);
+      const updater = createUpdater({ ...deps, prepareInstall: prepare });
+      updater.start();
+      confirm();
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+      source.emit("error", new Error("first round failed"));
+
+      updater.checkNow();
+      confirm();
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(2));
+      expect(updater.state().status).toBe("installing");
+
+      gates[0]!.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(source.quitAndInstall, "旧代次不能替新一轮安装").not.toHaveBeenCalled();
+
+      gates[1]!.resolve();
+      await vi.waitFor(() => expect(source.quitAndInstall).toHaveBeenCalledTimes(1));
+    });
+
+    it("stop() 之后准备期的续作作废，退出路径不会再调用安装", async () => {
+      const gate = deferred<void>();
+      const updater = createUpdater({ ...deps, prepareInstall: () => gate.promise });
+      updater.start();
+      confirm();
+      await vi.waitFor(() => expect(updater.state().status).toBe("installing"));
+
+      updater.stop();
+      gate.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(source.quitAndInstall).not.toHaveBeenCalled();
+      expect(order).toEqual([]);
+    });
+
+    it("过期的准备失败不会把别的状态拖进 error", async () => {
+      const gate = deferred<void>();
+      const rejecting = vi.fn(async () => {
+        await gate.promise;
+        throw new Error("late stop failure");
+      });
+      const updater = createUpdater({ ...deps, prepareInstall: rejecting });
+      updater.start();
+      confirm();
+      await vi.waitFor(() => expect(rejecting).toHaveBeenCalled());
+      source.emit("error", new Error("Failed to launch ShipIt"));
+      source.emit("update-not-available");
+      updater.checkNow();
+      expect(updater.state()).toEqual({ status: "checking", manual: true });
+
+      gate.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(updater.state()).toEqual({ status: "checking", manual: true });
+    });
+  });
+
+  describe("初始化失败", () => {
+    it("非签名的初始化异常后，手动检查重试一次初始化，成功就正常检查", () => {
+      source.setFeedURL.mockImplementationOnce(() => {
+        throw new Error("bad feed");
+      });
+      const updater = createUpdater(deps);
+      updater.start();
+      expect(updater.state()).toEqual({ status: "error", message: "bad feed", stage: "init" });
+      expect(source.checkForUpdates).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(CHECK_INTERVAL_MS);
+      expect(source.checkForUpdates, "初始化失败时没有定时检查").not.toHaveBeenCalled();
+
+      updater.checkNow();
+      expect(source.setFeedURL).toHaveBeenCalledTimes(2);
+      expect(source.checkForUpdates).toHaveBeenCalledTimes(1);
+      expect(updater.state()).toEqual({ status: "checking", manual: true });
+      vi.advanceTimersByTime(CHECK_INTERVAL_MS);
+      expect(source.checkForUpdates, "重试成功后恢复定时检查").toHaveBeenCalledTimes(1);
+      source.emit("update-not-available");
+      vi.advanceTimersByTime(CHECK_INTERVAL_MS);
+      expect(source.checkForUpdates).toHaveBeenCalledTimes(2);
+    });
+
+    it("重试仍失败：直接提示已有错误，不进 checking，也不发起检查", () => {
+      source.setFeedURL.mockImplementation(() => {
+        throw new Error("bad feed");
+      });
+      const updater = createUpdater(deps);
+      updater.start();
+      expect(inform).not.toHaveBeenCalled();
+
+      updater.checkNow();
+      expect(updater.state()).toEqual({ status: "error", message: "bad feed", stage: "init" });
+      expect(inform).toHaveBeenCalledTimes(1);
+      expect(inform).toHaveBeenCalledWith("error", "检查更新失败：bad feed");
+      expect(source.checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it("重试时才暴露签名错误：按 unsupported 弹没有正式签名", () => {
+      source.setFeedURL.mockImplementationOnce(() => {
+        throw new Error("bad feed");
+      });
+      const updater = createUpdater(deps);
+      updater.start();
+      source.setFeedURL.mockImplementationOnce(() => {
+        source.emit("error", new Error("Could not get code signature for running application"));
+      });
+
+      updater.checkNow();
+      expect(updater.state()).toEqual({ status: "unsupported", reason: "unsigned" });
+      expect(inform).toHaveBeenCalledWith("info", UNSIGNED_TEXT);
+      expect(source.checkForUpdates).not.toHaveBeenCalled();
+    });
   });
 });

@@ -9,7 +9,9 @@ export type UpdateState =
   | { readonly status: "installing"; readonly version: string }
   | { readonly status: "none" }
   | { readonly status: "unsupported"; readonly reason: "dev" | "unsigned" }
-  | { readonly status: "error"; readonly message: string };
+  | { readonly status: "error"; readonly message: string; readonly stage: ErrorStage };
+
+export type ErrorStage = "init" | "check";
 
 export type UpdateEvent =
   | { readonly type: "check"; readonly manual: boolean }
@@ -17,9 +19,11 @@ export type UpdateEvent =
   | { readonly type: "not-available" }
   | { readonly type: "downloaded"; readonly version: string }
   | { readonly type: "restart-confirmed" }
+  | { readonly type: "retry-init" }
   | { readonly type: "failed"; readonly message: string };
 
 export type UpdateEffect =
+  | { readonly type: "init" }
   | { readonly type: "start-check" }
   | { readonly type: "ask-restart"; readonly version: string }
   | { readonly type: "install" }
@@ -65,6 +69,8 @@ export function parseUpdateFeed(value: unknown): string | undefined {
 export const initialUpdateState = (packaged: boolean): UpdateState =>
   packaged ? { status: "idle" } : { status: "unsupported", reason: "dev" };
 
+const checkFailedText = (message: string): string => `检查更新失败：${message}`;
+
 const unsupportedText = (reason: "dev" | "unsigned"): string => (reason === "dev" ? DEV_TEXT : UNSIGNED_TEXT);
 
 const stay = (state: UpdateState): { readonly next: UpdateState; readonly effect: null } => ({
@@ -91,9 +97,16 @@ export function decide(
             next: state,
             effect: event.manual ? { type: "inform", level: "info", text: unsupportedText(state.reason) } : null,
           };
+        case "error":
+          if (state.stage === "init") {
+            return {
+              next: state,
+              effect: event.manual ? { type: "inform", level: "error", text: checkFailedText(state.message) } : null,
+            };
+          }
+          return { next: { status: "checking", manual: event.manual }, effect: { type: "start-check" } };
         case "idle":
         case "none":
-        case "error":
           return { next: { status: "checking", manual: event.manual }, effect: { type: "start-check" } };
       }
     case "available":
@@ -114,10 +127,14 @@ export function decide(
       return state.status === "ready"
         ? { next: { status: "installing", version: state.version }, effect: { type: "install" } }
         : stay(state);
+    case "retry-init":
+      return state.status === "error" && state.stage === "init"
+        ? { next: { status: "idle" }, effect: { type: "init" } }
+        : stay(state);
     case "failed": {
       if (state.status === "installing") {
         return {
-          next: { status: "error", message: event.message },
+          next: { status: "error", message: event.message, stage: "check" },
           effect: { type: "install-failed", message: event.message },
         };
       }
@@ -130,8 +147,8 @@ export function decide(
         };
       }
       return {
-        next: { status: "error", message: event.message },
-        effect: manual ? { type: "inform", level: "error", text: `检查更新失败：${event.message}` } : null,
+        next: { status: "error", message: event.message, stage: state.status === "idle" ? "init" : "check" },
+        effect: manual ? { type: "inform", level: "error", text: checkFailedText(event.message) } : null,
       };
     }
   }
@@ -146,6 +163,7 @@ export type UpdaterDeps = {
   readonly askRestart: (prompt: { readonly message: string; readonly detail: string }) => Promise<boolean>;
   readonly inform: (level: "info" | "error", text: string) => void;
   readonly prepareInstall: () => Promise<void>;
+  readonly commitInstall: () => void;
   readonly resumeAfterFailedInstall: () => void;
   readonly log: (line: string) => void;
 };
@@ -163,9 +181,43 @@ export function createUpdater(deps: UpdaterDeps): Updater {
   let state = initialUpdateState(deps.packaged);
   let timer: NodeJS.Timeout | null = null;
   let started = false;
+  let installRound = 0;
+
+  const initialize = (): void => {
+    try {
+      deps.source.setFeedURL({ url: deps.feedUrl, serverType: "json" });
+    } catch (error) {
+      dispatch({ type: "failed", message: messageOf(error) });
+    }
+    if (state.status === "idle" && timer === null) {
+      timer = setInterval(() => dispatch({ type: "check", manual: false }), CHECK_INTERVAL_MS);
+    }
+  };
+
+  const install = (): void => {
+    const round = ++installRound;
+    const current = (): boolean => round === installRound && state.status === "installing";
+    deps
+      .prepareInstall()
+      .then(() => {
+        if (!current()) {
+          deps.log("update-install-stale");
+          return;
+        }
+        deps.commitInstall();
+        deps.source.quitAndInstall();
+      })
+      .catch((error: unknown) => {
+        if (current()) dispatch({ type: "failed", message: messageOf(error) });
+        else deps.log(`update-install-stale ${messageOf(error)}`);
+      });
+  };
 
   const run = (effect: UpdateEffect): void => {
     switch (effect.type) {
+      case "init":
+        initialize();
+        return;
       case "start-check":
         try {
           deps.source.checkForUpdates();
@@ -186,10 +238,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
           });
         return;
       case "install":
-        void deps
-          .prepareInstall()
-          .then(() => deps.source.quitAndInstall())
-          .catch((error: unknown) => dispatch({ type: "failed", message: messageOf(error) }));
+        install();
         return;
       case "install-failed":
         deps.inform("error", `重启安装失败：${effect.message}`);
@@ -214,20 +263,18 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     source.on("update-not-available", () => dispatch({ type: "not-available" }));
     source.on("update-downloaded", (_event, _notes, name) => dispatch({ type: "downloaded", version: name }));
     source.on("error", (error) => dispatch({ type: "failed", message: error.message }));
-    try {
-      source.setFeedURL({ url: deps.feedUrl, serverType: "json" });
-    } catch (error) {
-      dispatch({ type: "failed", message: messageOf(error) });
-    }
-    if (state.status !== "idle") return;
-    dispatch({ type: "check", manual: false });
-    timer = setInterval(() => dispatch({ type: "check", manual: false }), CHECK_INTERVAL_MS);
+    initialize();
+    if (state.status === "idle") dispatch({ type: "check", manual: false });
   };
 
   return {
     start,
-    checkNow: () => dispatch({ type: "check", manual: true }),
+    checkNow: () => {
+      dispatch({ type: "retry-init" });
+      dispatch({ type: "check", manual: true });
+    },
     stop: () => {
+      installRound += 1;
       if (timer !== null) clearInterval(timer);
       timer = null;
     },
