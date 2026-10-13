@@ -123,6 +123,100 @@ const runInSandbox = (command: string, network = false) =>
   );
 
 describe("bash 沙箱性能", () => {
+  it.skipIf(process.platform !== "darwin")(
+    "数据根元数据可读：绝对路径的 node、git、mkdir 和共享产出正常，其他 Bot 仍隔离",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-metadata-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const other = ensureBotDirs(botDirs(root, BotId.parse("bot-2")));
+        const script = join(dirs.workDir, "hello.cjs");
+        const nested = join(dirs.workDir, "nested", "child");
+        const shared = join(dirs.sharedDir, "delivery.txt");
+        const secret = join(other.agentDir, "secret.txt");
+        writeFileSync(script, 'process.stdout.write("node-ok")');
+        writeFileSync(secret, "other-bot-secret");
+        const profile = sandboxProfile(dirs.workDir, { network: false, writePaths: [] }, forbiddenZones(dirs, null));
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: dirs.workDir,
+            encoding: "utf8",
+            env: whitelistEnv(process.env, dirs.workDir, join(dirs.workDir, ".tmp")),
+          });
+        for (const [command, output] of [
+          [`${shellQuote(process.execPath)} ${shellQuote(script)}`, "node-ok"],
+          [`git init -q ${shellQuote(dirs.workDir)} && git -C ${shellQuote(dirs.workDir)} status --short`, "hello.cjs"],
+          [`mkdir -p ${shellQuote(nested)} && printf mkdir-ok`, "mkdir-ok"],
+          [`printf shared-ok > ${shellQuote(shared)} && cat ${shellQuote(shared)}`, "shared-ok"],
+          [
+            `rsync ${shellQuote(script)} ${shellQuote(dirs.sharedDir)}/ && cat ${shellQuote(join(dirs.sharedDir, "hello.cjs"))}`,
+            "node-ok",
+          ],
+        ] as const) {
+          const result = run(command);
+          expect(result.status, `${command}\n${result.stderr}`).toBe(0);
+          expect(result.stdout).toContain(output);
+        }
+        expect(existsSync(nested)).toBe(true);
+        expect(readFileSync(shared, "utf8")).toBe("shared-ok");
+        const metadata = run(`stat ${shellQuote(root)}`);
+        expect(metadata.status, metadata.stderr).toBe(0);
+        for (const command of [
+          `cat ${shellQuote(secret)}`,
+          `stat ${shellQuote(other.agentDir)}`,
+          `ls ${shellQuote(root)}`,
+        ]) {
+          const denied = run(command);
+          expect(denied.status, denied.stderr).not.toBe(0);
+          expect(denied.stderr).toMatch(/operation not permitted/i);
+          expect(denied.stdout).not.toContain("other-bot-secret");
+        }
+        expect(readFileSync(secret, "utf8")).toBe("other-bot-secret");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("批准数据根及祖先的写权限也不能写其他 Bot，本 Bot 和共享区仍可写", () => {
+    const root = mkdtempSync(join(homedir(), "baize-seatbelt-ancestor-"));
+    try {
+      const data = join(root, "data");
+      const dirs = ensureBotDirs(botDirs(data, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(data, BotId.parse("bot-2")));
+      const secret = join(other.agentDir, "secret.txt");
+      const leaked = join(other.workDir, "leak.txt");
+      writeFileSync(secret, "other-bot-secret");
+      for (const approved of [data, root, homedir()]) {
+        const profile = sandboxProfile(
+          dirs.workDir,
+          { network: false, writePaths: [approved] },
+          forbiddenZones(dirs, null),
+        );
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: dirs.workDir,
+            encoding: "utf8",
+          });
+        for (const target of [secret, leaked]) {
+          const denied = run(`printf overwritten > ${shellQuote(target)}`);
+          expect(denied.status, `${approved}: ${denied.stderr}`).not.toBe(0);
+          expect(denied.stderr).toMatch(/operation not permitted/i);
+        }
+        for (const base of [dirs.workDir, dirs.sharedDir]) {
+          const target = join(base, "allowed.txt");
+          const allowed = run(`printf own-shared-ok > ${shellQuote(target)} && cat ${shellQuote(target)}`);
+          expect(allowed.status, allowed.stderr).toBe(0);
+          expect(allowed.stdout).toBe("own-shared-ok");
+        }
+      }
+      expect(readFileSync(secret, "utf8")).toBe("other-bot-secret");
+      expect(existsSync(leaked)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform !== "darwin")("共享区和工作目录的根不能删除或替换，内部文件仍可写", async () => {
     const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-root-"));
     try {

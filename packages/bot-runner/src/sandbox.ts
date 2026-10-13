@@ -67,14 +67,16 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
     "(allow file-ioctl)",
     "(allow file-map-executable)",
     "(allow file-read*)",
-    `(deny file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.dataDir))}))`,
-    `(allow file-read* (subpath ${seatbeltString(realpathExisting(zones.botDir))}))`,
-    `(allow file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.sharedDir))}))`,
-    `(allow file-write* (subpath ${seatbeltString(work)}))`,
     ...access.writePaths.flatMap((path) => {
       const real = realpathExisting(path);
       return [`(allow file-write* (subpath ${seatbeltString(real)}))`];
     }),
+    `(deny file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.dataDir))}))`,
+    // Node、git 和 mkdir 的绝对路径校验会逐段 stat；只放数据根本身的元数据，不放列目录或文件内容。
+    `(allow file-read-metadata (literal ${seatbeltString(realpathExisting(zones.dataDir))}))`,
+    `(allow file-read* (subpath ${seatbeltString(realpathExisting(zones.botDir))}))`,
+    `(allow file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.sharedDir))}))`,
+    `(allow file-write* (subpath ${seatbeltString(work)}))`,
     '(allow file-write* (literal "/dev/null"))',
     '(allow file-write* (literal "/dev/stdout"))',
     '(allow file-write* (literal "/dev/stderr"))',

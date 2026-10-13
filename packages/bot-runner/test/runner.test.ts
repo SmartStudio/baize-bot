@@ -3014,6 +3014,40 @@ describe("config 按 Bot 增量对账", () => {
     expect(readdirSync(dirs.sessionDir)).not.toEqual([]);
   });
 
+  it.each([".", "..", "shared", "SHARED", "nested/bot", "nested\\bot", "../outside", "bot-1/."])(
+    "config 删除非法 Bot ID %j：上报失败并保留目标、数据根和共享区",
+    async (id) => {
+      const fixture = mkdtempSync(join(tmpdir(), "baize-delete-boundary-"));
+      const dataDir = join(fixture, "data");
+      try {
+        const h = await startHarness({
+          dataDir,
+          bots: ["bot-1", id],
+          script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+        });
+        const markers = [
+          join(fixture, "keep-parent.txt"),
+          join(dataDir, "keep-root.txt"),
+          join(dataDir, "shared", "keep-shared.txt"),
+          join(dataDir, id, "keep-target.txt"),
+        ];
+        for (const path of markers) {
+          mkdirSync(dirname(path), { recursive: true });
+          writeFileSync(path, "must-keep");
+        }
+        await h.runner.applyConfig(h.config({ bots: h.config().bots.filter((bot) => bot.id !== id) }));
+        await h.runner.prompt(promptMessage(id, "run-deleted", "等待删除对账完成"));
+        for (const path of markers) expect(readFileSync(path, "utf8"), path).toBe("must-keep");
+        expect(h.sent.filter((message) => message.type === "agent_error" && message.code === "runner_failed")).toEqual([
+          expect.objectContaining({ detail: expect.stringContaining("目录删除边界无效") }),
+        ]);
+        await h.runner.stop();
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("Bot A 在跑时改 Bot B，A 的 run 正常 run_done", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => {

@@ -510,7 +510,24 @@ export function createRunner(config: RunnerConfig): Runner {
           bot.configState = { phase: "pending", current: null, desired: latest };
           continue;
         }
-        rmSync(join(config.dataDir, bot.botId), { recursive: true, force: true });
+        const dataRoot = realpathSync(config.dataDir);
+        const target = join(dataRoot, bot.botId);
+        if (
+          bot.botId === "." ||
+          bot.botId === ".." ||
+          bot.botId.toLowerCase() === "shared" ||
+          /[/\\]/.test(bot.botId) ||
+          join(target, "..") !== dataRoot
+        ) {
+          config.send({
+            type: "agent_error",
+            code: "runner_failed",
+            detail: `Bot ${bot.botId} 目录删除边界无效：目标必须是数据根的直接子目录，且不能是共享区。未删除目录。`,
+            ...(bot.lastGroupId === null ? {} : { groupId: bot.lastGroupId }),
+          });
+        } else {
+          rmSync(target, { recursive: true, force: true });
+        }
         deleteBot(bot, true);
         return;
       }

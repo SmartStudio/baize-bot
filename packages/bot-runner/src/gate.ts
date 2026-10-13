@@ -130,16 +130,18 @@ type ZoneHit = "hidden" | "read_only" | "other_bot" | "protected_root" | null;
 const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
 
 // 改动落在禁区的祖先上（放宽写整个数据目录、删掉上一级）也算碰禁区。
-const zoneHit = (action: ActionKind, path: string, call: GateContext): ZoneHit => {
+const zoneHit = (action: ActionKind, path: string, call: GateContext & { readonly toolName?: string }): ZoneHit => {
   const real = realpathExisting(path);
   const inside = (zone: readonly string[]): boolean => zone.some((prefix) => isInsideRoot(real, prefix, call.platform));
   const covers = (zone: readonly string[]): boolean =>
     MUTATIONS.has(action) &&
     action !== "write_workspace" &&
     zone.some((prefix) => isInsideRoot(prefix, path, call.platform));
+  if (covers([call.zones.dataDir])) return "other_bot";
   if (inside(call.zones.hidden) || covers(call.zones.hidden)) return "hidden";
   if (MUTATIONS.has(action) && (inside(call.zones.readOnly) || covers(call.zones.readOnly))) return "read_only";
   if (
+    call.toolName !== "bash" &&
     MUTATIONS.has(action) &&
     [call.workDir, call.zones.sharedDir].some(
       (root) => isInsideRoot(real, root, call.platform) && isInsideRoot(root, real, call.platform),

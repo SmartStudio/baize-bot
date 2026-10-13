@@ -1,5 +1,5 @@
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
@@ -335,6 +335,20 @@ describe("read、write、edit 的路径归一化和 Pi 打开文件用的一致"
   it("共享区和工作目录的根不能写或删除，内部文件读写不受影响", () => {
     for (const path of [workDir, dirs().sharedDir]) {
       expect(decide(call("read", { path }), [], []).verdict).toBe("allow");
+      for (const toolName of ["write", "edit", "delete_file"]) {
+        const toolCall = call(toolName, { path });
+        const deleting: GateCall = {
+          ...toolCall,
+          source: { kind: "connected", operation: { name: toolName, needsApproval: true } },
+        };
+        expect(
+          decide(toolName === "delete_file" ? deleting : toolCall, [], []),
+          `${toolName} 不能替换或删除根`,
+        ).toMatchObject({
+          verdict: "deny",
+          reason: expect.stringContaining("根不能删除或替换"),
+        });
+      }
       for (const action of ["write_workspace", "write_outside", "delete"] as const) {
         expect(actionVerdict(action, pathTarget(path))).toBe("deny");
       }
@@ -661,6 +675,53 @@ describe("bash 分类", () => {
     sandbox: "seatbelt",
     source: null,
     routine: null,
+  });
+
+  it.each(["seatbelt", "bwrap"] as const)("%s 下 bash 把 work 或 shared 根当目标目录时不误拒", (sandbox) => {
+    for (const command of [
+      "cp x .",
+      "cp x ./",
+      "touch .",
+      `cp x ${dirs().sharedDir}/`,
+      `mkdir -p ${dirs().sharedDir}`,
+      `mkdir -p ${workDir}`,
+    ]) {
+      expect(decide({ ...bashCall(command), sandbox }, [], []), command).toMatchObject({
+        verdict: "allow",
+        reason: null,
+      });
+    }
+    for (const command of ["mv x .", `mv x ${dirs().sharedDir}/`]) {
+      expect(decide({ ...bashCall(command), sandbox }, [], []), command).toMatchObject({
+        verdict: "ask",
+        action: "delete",
+        reason: null,
+      });
+    }
+  });
+
+  it("批准数据根及祖先写权限仍拒绝，理由点名其他 Bot 私有区域", () => {
+    const fixture = mkdtempSync(join(homedir(), "baize-gate-ancestor-"));
+    try {
+      const data = join(fixture, "data");
+      const own = botDirs(data, BotId.parse("bot-1"));
+      mkdirSync(own.workDir, { recursive: true });
+      const context = { workDir: own.workDir, zones: forbiddenZones(own, null) };
+      for (const path of [data, fixture, "~"]) {
+        const target = pathTarget(path === "~" ? homedir() : path);
+        const decision = decide(
+          { ...bashCall(`cp x ${path}/`), ...context },
+          [grant("write_outside", target, "forever")],
+          [],
+        );
+        expect(decision.verdict, path).toBe("deny");
+        expect(decision.reason, path).toContain("其他 Bot");
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+    const safe = decide(bashCall(`cp x ${outsideDir}/`), [grant("write_outside", pathTarget(outsideDir))], []);
+    expect(safe.verdict).toBe("allow");
   });
 
   it("识别管道、&& 和重定向", () => {
