@@ -1,5 +1,6 @@
 import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
 import {
+  AgentCloseCode,
   AgentToControl,
   ControlToAgent,
   type Computer,
@@ -17,6 +18,7 @@ import { listBrandForConfig } from "../repo/brand.js";
 import { ensureAssistant, listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
+  findComputerById,
   markComputerOnline,
   markComputerSleeping,
   markComputersSleeping,
@@ -37,10 +39,7 @@ export const AGENT_PATH = "/agent";
 /** 连上来不报 hello 就白占一条连接。 */
 const HELLO_TIMEOUT_MS = 10_000;
 
-const CLOSE_SUPERSEDED = 4000;
-const CLOSE_BAD_HELLO = 4001;
-const CLOSE_ACCOUNT_DELETED = 4002;
-/** RFC 6455 的 Service Restart。电脑代理收到任何关闭都按退避重连，停机结束它自己回来。 */
+/** RFC 6455 的 Service Restart。电脑代理按退避重连，停机结束它自己回来。 */
 const CLOSE_SHUTTING_DOWN = 1012;
 /** RFC 6455 的 Internal Error。握手中途出错，代理按退避重连再握一次。 */
 const CLOSE_HANDSHAKE_FAILED = 1011;
@@ -132,7 +131,7 @@ export class AgentHub {
       return;
     }
     let conn: AgentConnection | null = null;
-    const deadline = setTimeout(() => socket.close(CLOSE_BAD_HELLO, "没有报 hello"), HELLO_TIMEOUT_MS);
+    const deadline = setTimeout(() => socket.close(AgentCloseCode.badHello, "没有报 hello"), HELLO_TIMEOUT_MS);
     deadline.unref();
     // 到点只 terminate，离线处理全交给下面的 close。close() 要等对端回关闭帧，冻住的对端永远不回。
     // 计时器挂在这条 socket 上，被新连接顶掉的旧连接到点也只关它自己。
@@ -165,13 +164,19 @@ export class AgentHub {
             return;
           }
           const message = parseFrame(text, "未握手的连接");
-          // 还没认上身份，除了 hello 一律不理。
-          if (message === null || message.type !== "hello") return;
+          if (message === null || message.type !== "hello") {
+            socket.close(AgentCloseCode.badHello, "首条报文必须是合法 hello");
+            return;
+          }
           clearTimeout(deadline);
           // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
           const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
           if (computer === null) {
-            socket.close(CLOSE_BAD_HELLO, "电脑号或 token 对不上");
+            const existing = await findComputerById(this.#deps.db, message.computerId);
+            socket.close(
+              existing === null ? AgentCloseCode.badHello : AgentCloseCode.displaced,
+              existing === null ? "电脑号不存在" : "这个账号已在另一台 Mac 上登录",
+            );
             return;
           }
           if (this.#lifecycle === "closing") {
@@ -181,7 +186,21 @@ export class AgentHub {
           this.#countQueuedHello(computer.id, 1);
           await this.#enqueue(computer.id, async () => {
             this.#countQueuedHello(computer.id, -1);
-            conn = await this.#onHello(socket, computer, message.activeRuns);
+            if (this.#deletedOwners.has(computer.ownerId)) {
+              socket.close(AgentCloseCode.accountDeleted, "账号已删除");
+              return;
+            }
+            // 排队期间可能已重新配对，旧 token 不能在顶号之后再入表。
+            const authenticated = await authenticateComputer(this.#deps.db, message.computerId, message.token);
+            if (authenticated === null) {
+              const existing = await findComputerById(this.#deps.db, message.computerId);
+              socket.close(
+                existing === null ? AgentCloseCode.badHello : AgentCloseCode.displaced,
+                existing === null ? "电脑号不存在" : "这个账号已在另一台 Mac 上登录",
+              );
+              return;
+            }
+            conn = await this.#onHello(socket, authenticated, message.activeRuns);
           });
         },
         (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
@@ -267,6 +286,16 @@ export class AgentHub {
     await Promise.all(this.#ownerConnections(ownerId).map((connection) => this.#sendConfig(connection, "changed")));
   }
 
+  /** 和 hello、上行帧排同一条链，已在握手中的旧连接也会在配对返回之前退出。 */
+  async displaceComputer(computerId: ComputerId): Promise<void> {
+    await this.#enqueue(computerId, async () => {
+      const connection = this.#connections.get(computerId);
+      if (connection === undefined) return;
+      connection.socket.close(AgentCloseCode.displaced, "这个账号已在另一台 Mac 上登录");
+      await this.#onClose(connection);
+    });
+  }
+
   /**
    * 账号删了，关掉这个人的每条代理连接。先出表再关：关闭回调看到连接不在表里就什么都不写，
    * 不标休眠、不起宽限收尾，这几台电脑的行已经随账号删掉了。
@@ -275,7 +304,7 @@ export class AgentHub {
     this.#deletedOwners.add(ownerId);
     for (const connection of this.#ownerConnections(ownerId)) {
       this.#connections.delete(connection.computerId);
-      connection.socket.close(CLOSE_ACCOUNT_DELETED, "账号已删除");
+      connection.socket.close(AgentCloseCode.accountDeleted, "账号已删除");
     }
   }
 
@@ -336,7 +365,7 @@ export class AgentHub {
       const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
       // 判删号和入表之间没有 await：删号在前，这里看得见；在后，disconnectOwner 在表里找得到它。
       if (this.#deletedOwners.has(computer.ownerId)) {
-        socket.close(CLOSE_ACCOUNT_DELETED, "账号已删除");
+        socket.close(AgentCloseCode.accountDeleted, "账号已删除");
         return null;
       }
       accepted = {
@@ -354,7 +383,7 @@ export class AgentHub {
         clearTimeout(timer);
         this.#graceTimers.delete(computer.id);
       }
-      previous?.socket.close(CLOSE_SUPERSEDED, "同一台电脑有了新连接");
+      previous?.socket.close(AgentCloseCode.superseded, "同一台电脑有了新连接");
 
       await this.#finishMissingRuns(computer.id, computer.ownerId, activeRuns);
       const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);

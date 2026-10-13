@@ -1,7 +1,14 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
-import { type AgentToControl, type ComputerId, ControlToAgent, type RunId } from "@baize/shared";
+import {
+  AgentCloseCode,
+  AgentStatusLine,
+  type AgentToControl,
+  type ComputerId,
+  ControlToAgent,
+  type RunId,
+} from "@baize/shared";
 import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
@@ -188,7 +195,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "welcome":
         attempt = 0;
         log(`控制面已接纳，owner ${message.ownerId}`);
-        process.stdout.write('{"type":"online"}\n');
+        process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "online" }))}\n`);
         for (const pending of unackedRunDones.values()) {
           pending.replays += 1;
           send(pending.message);
@@ -353,54 +360,59 @@ export function startAgent(options: AgentOptions): AgentHandle {
       log(`连接出错：${error.message}`);
     });
 
-    socket.on("close", () => {
+    socket.on("close", (code) => {
       stopHeartbeat();
+      if (code === AgentCloseCode.displaced) {
+        process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "displaced" }))}\n`);
+        void stop().catch((error: unknown) => log(`代理停机失败：${String(error)}`));
+        return;
+      }
       scheduleReconnect();
     });
   }
 
   connect();
 
-  return {
-    stop() {
-      if (stopPromise !== null) return stopPromise;
-      stopping = true;
+  function stop(): Promise<void> {
+    if (stopPromise !== null) return stopPromise;
+    stopping = true;
+    stopHeartbeat();
+    if (link.phase === "waiting") clearTimeout(link.timer);
+
+    stopPromise = (async () => {
+      const chromeStopping = chrome.stop().catch((error: unknown) => log(`助理 Chrome 停机失败：${String(error)}`));
+      const currentRunner = runner;
+      if (currentRunner !== null) {
+        let timeout: NodeJS.Timeout | null = null;
+        const result = await Promise.race([
+          Promise.resolve()
+            .then(() => currentRunner.stop())
+            .then(
+              () => "stopped" as const,
+              (error: unknown) => {
+                log(`运行器停机失败：${String(error)}`);
+                return "stopped" as const;
+              },
+            ),
+          new Promise<"timed-out">((resolve) => {
+            timeout = setTimeout(() => resolve("timed-out"), runnerStopTimeoutMs);
+            timeout.unref();
+          }),
+        ]);
+        if (timeout !== null) clearTimeout(timeout);
+        if (result === "timed-out") log(`运行器停机超过 ${runnerStopTimeoutMs}ms，继续关闭连接`);
+      }
+      runner = null;
+      await chromeStopping;
+
+      const current = link;
+      link = { phase: "stopped" };
       stopHeartbeat();
-      if (link.phase === "waiting") clearTimeout(link.timer);
+      if (current.phase === "waiting") clearTimeout(current.timer);
+      if (current.phase === "connecting" || current.phase === "open") current.socket.close();
+    })();
+    return stopPromise;
+  }
 
-      stopPromise = (async () => {
-        const chromeStopping = chrome.stop().catch((error: unknown) => log(`助理 Chrome 停机失败：${String(error)}`));
-        const currentRunner = runner;
-        if (currentRunner !== null) {
-          let timeout: NodeJS.Timeout | null = null;
-          const result = await Promise.race([
-            Promise.resolve()
-              .then(() => currentRunner.stop())
-              .then(
-                () => "stopped" as const,
-                (error: unknown) => {
-                  log(`运行器停机失败：${String(error)}`);
-                  return "stopped" as const;
-                },
-              ),
-            new Promise<"timed-out">((resolve) => {
-              timeout = setTimeout(() => resolve("timed-out"), runnerStopTimeoutMs);
-              timeout.unref();
-            }),
-          ]);
-          if (timeout !== null) clearTimeout(timeout);
-          if (result === "timed-out") log(`运行器停机超过 ${runnerStopTimeoutMs}ms，继续关闭连接`);
-        }
-        runner = null;
-        await chromeStopping;
-
-        const current = link;
-        link = { phase: "stopped" };
-        stopHeartbeat();
-        if (current.phase === "waiting") clearTimeout(current.timer);
-        if (current.phase === "connecting" || current.phase === "open") current.socket.close();
-      })();
-      return stopPromise;
-    },
-  };
+  return { stop };
 }

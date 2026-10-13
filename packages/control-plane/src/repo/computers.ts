@@ -56,7 +56,12 @@ export async function listComputers(db: Db, ownerId: UserId): Promise<Computer[]
     .toSorted((left, right) => (left.kind === right.kind ? 0 : left.kind === "local" ? -1 : 1));
 }
 
-/** token 对得上才认。电脑号查不到和 token 不对回同一个 null，连接那头分不出差别。 */
+export async function findComputerById(db: Db, computerId: ComputerId): Promise<Computer | null> {
+  const [row] = await db.select().from(computers).where(eq(computers.id, computerId)).limit(1);
+  return row === undefined ? null : toComputer(row);
+}
+
+/** token 对得上才认；关闭码由调用方根据电脑号是否仍存在决定。 */
 export async function authenticateComputer(db: Db, computerId: ComputerId, token: string): Promise<Computer | null> {
   const [row] = await db.select().from(computers).where(eq(computers.id, computerId)).limit(1);
   if (row === undefined) return null;

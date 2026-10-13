@@ -43,6 +43,8 @@ import {
   MessageId,
   MessageListResponse,
   MessageResponse,
+  PairLocalComputerRequest,
+  PairLocalConflictResponse,
   ProjectResponse,
   RegisterRequest,
   RegisterResponse,
@@ -493,11 +495,27 @@ export function createApp(deps: AppDeps): Hono<Env> {
   );
 
   app.post("/api/computers/local", async (c) => {
+    let raw: unknown;
+    try {
+      const text = await c.req.text();
+      raw = text === "" ? {} : JSON.parse(text);
+    } catch {
+      return c.json({ error: "请求体不是合法 JSON" }, 400);
+    }
+    const body = PairLocalComputerRequest.partial().safeParse(raw);
+    if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
     const ownerId = c.get("user").id;
     const { computer } = await ensureComputer(db, ownerId);
+    if ((computer.lastSeenAt !== null || agents.isOnline(computer.id)) && !body.data.confirmDisplace) {
+      return c.json(
+        PairLocalConflictResponse.parse({ error: "这个账号已经在另一台 Mac 上用过，继续会让那台退出", computer }),
+        409,
+      );
+    }
     const local = await resetComputerToken(db, ownerId);
     if (local === null) throw new Error(`用户 ${ownerId} 的本机电脑既没建成也无法重置 token`);
     hub.push(ownerId, { type: "computer_updated", computer });
+    await agents.displaceComputer(computer.id);
     return c.json(ComputerTokenResponse.parse(local));
   });
 

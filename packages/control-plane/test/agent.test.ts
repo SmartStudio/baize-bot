@@ -56,7 +56,7 @@ describe("握手", () => {
       activeRuns: [],
     });
 
-    expect(await agent.closed()).toBe(4001);
+    expect(await agent.closed()).toBe(4004);
   });
 
   it("电脑号不存在也关连接", async () => {

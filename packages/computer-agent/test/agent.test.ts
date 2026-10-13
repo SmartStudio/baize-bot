@@ -6,7 +6,17 @@ import { PassThrough } from "node:stream";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
-import { AgentToControl, BotId, ComputerId, GroupId, MessageId, RunId, Skill } from "@baize/shared";
+import {
+  AgentCloseCode,
+  AgentStatusLine,
+  AgentToControl,
+  BotId,
+  ComputerId,
+  GroupId,
+  MessageId,
+  RunId,
+  Skill,
+} from "@baize/shared";
 import type { CdpConnection, RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
@@ -59,6 +69,7 @@ interface RunnerCalls {
   readonly configSkills: Array<readonly Skill[] | undefined>;
   /** 已有运行器收到的配置更新，原样记下。 */
   readonly appliedConfigs: RunnerConfig[];
+  readonly stopCount: { value: number };
 }
 
 function fakeRunner(calls: RunnerCalls): RunnerFactory {
@@ -105,7 +116,9 @@ function runnerOf(
       calls.resumed.push(botId);
     },
     activeRuns: () => calls.activeRuns,
-    stop: async () => {},
+    stop: async () => {
+      calls.stopCount.value += 1;
+    },
   };
 }
 
@@ -269,6 +282,7 @@ function spawnAgent(
     promptContexts: [],
     configSkills: [],
     appliedConfigs: [],
+    stopCount: { value: 0 },
   };
   runnerCallsLog.push(calls);
   const handle = startAgent({
@@ -1500,6 +1514,7 @@ describe("电脑代理连控制面", () => {
             promptContexts: [],
             configSkills: [],
             appliedConfigs: [],
+            stopCount: { value: 0 },
           }),
           stop: () => new Promise<void>(() => {}),
         };
@@ -1553,6 +1568,88 @@ describe("电脑代理连控制面", () => {
     expect(gaps[1], `间隔应逐次拉大，实际 ${gaps.join("、")}`).toBeGreaterThan(gaps[0] ?? 0);
     expect(gaps[2], `间隔应逐次拉大，实际 ${gaps.join("、")}`).toBeGreaterThan(gaps[1] ?? 0);
   }, 15_000);
+
+  it("收到 displaced 后输出一次状态并彻底停机", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const statusLines: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      statusLines.push(chunk.toString());
+      return true;
+    }) as typeof process.stdout.write;
+    let chromeStops = 0;
+    try {
+      const handle = spawnAgent(await server.url(), {
+        backoff: { initialMs: 40, maxMs: 40, factor: 1 },
+        makeChrome: () => ({
+          ...fakeChrome(),
+          stop: async () => {
+            chromeStops += 1;
+          },
+        }),
+        makeRunner: (config) => {
+          const calls = runnerCalls();
+          calls.configSkills.push(config.skills);
+          return {
+            ...runnerOf(config, calls),
+            stop: async () => {
+              calls.stopCount.value += 1;
+            },
+          };
+        },
+      });
+      const socket = await server.waitForSocket(1);
+      await server.waitForMessage("hello", 1);
+      socket.send(welcomeFrame());
+      socket.send(JSON.stringify(configMessage));
+      await server.waitForMessage("config_applied", 1);
+
+      socket.close(AgentCloseCode.displaced);
+      await poll(
+        () => (statusLines.some((line) => line.includes('"displaced"')) ? true : undefined),
+        3000,
+        "displaced 状态",
+      );
+      await poll(
+        () => (runnerCalls().stopCount.value === 1 && chromeStops === 1 ? true : undefined),
+        3000,
+        "运行器和 Chrome 停止",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 180));
+
+      const parsedStatuses = statusLines
+        .flatMap((chunk) => chunk.split("\n"))
+        .filter((line) => line.length > 0)
+        .map((line) => AgentStatusLine.parse(JSON.parse(line)));
+      expect(
+        parsedStatuses.filter((status) => status.type === "displaced"),
+        "displaced 状态只输出一次",
+      ).toEqual([{ type: "displaced" }]);
+      expect(server.sockets, "停机后经过多个退避周期仍只有原连接").toHaveLength(1);
+      await Promise.all([handle.stop(), handle.stop()]);
+      expect(runnerCalls().stopCount.value, "重复 stop 不会重复停止运行器").toBe(1);
+      expect(chromeStops, "重复 stop 不会重复停止 Chrome").toBe(1);
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  }, 15_000);
+
+  it.each([4000, 4001, 4002, 4003, 1011, 1012])(
+    "关闭码 %i 仍按退避重连",
+    async (code) => {
+      const server = await startPair({ backoff: { initialMs: 40, maxMs: 40, factor: 1 } });
+      const first = await server.waitForSocket(1);
+      await server.waitForMessage("hello", 1);
+
+      first.close(code);
+      await server.waitForSocket(2, 3000);
+      await server.waitForMessage("hello", 2, 3000);
+
+      expect(server.sockets).toHaveLength(2);
+    },
+    10_000,
+  );
 });
 
 const welcomeFrame = () =>

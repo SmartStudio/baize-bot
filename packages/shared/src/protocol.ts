@@ -45,6 +45,16 @@ import { ToolView } from "./tool-view.js";
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
+// 4003 留给第 3 期信封单元的版本握手。
+export const AgentCloseCode = { superseded: 4000, badHello: 4001, accountDeleted: 4002, displaced: 4004 } as const;
+
+// 电脑代理 stdout 每行一个状态，桌面端读它。
+export const AgentStatusLine = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("online") }),
+  z.object({ type: z.literal("displaced") }),
+]);
+export type AgentStatusLine = z.infer<typeof AgentStatusLine>;
+
 // 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
 export const ToolConnectionConfig = ToolConnection.extend({
   authorization: z.string().nullable(),

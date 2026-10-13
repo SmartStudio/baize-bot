@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
+import { AgentCloseCode, AgentStatusLine } from "@baize/shared";
 
 // 断开期间进程里没有别的 handle 撑着事件循环，这个缺陷只有真起进程才看得见：
 // vitest 自己 ref 着事件循环，同样的代码在单元测试里永远是活的。
@@ -193,6 +194,45 @@ describe("电脑代理进程", () => {
         }
       }
       await server.close();
+    }
+  }, 15_000);
+
+  it("顶号后 stdout 报 displaced，stdin 开放时以停止状态驻留，关闭 stdin 正常退出", async () => {
+    const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    let connections = 0;
+    server.on("connection", (socket) => {
+      connections += 1;
+      socket.once("message", () => socket.close(AgentCloseCode.displaced));
+    });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const address = server.address() as AddressInfo;
+    const child = spawnAgent({});
+    child.stdin.write(
+      `${JSON.stringify({
+        url: `ws://127.0.0.1:${address.port}/agent`,
+        computerId: "computer-1",
+        token: "旧 token",
+        dataDir: await createDataDir(),
+      })}\n`,
+    );
+    try {
+      await child.waitForOutput('{"type":"displaced"}');
+      // 默认首次重连至少等 500ms，留过这个窗口才能发现误排重连。
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      const lines = child
+        .stdout()
+        .split("\n")
+        .filter((line) => line.startsWith("{"))
+        .map((line) => AgentStatusLine.parse(JSON.parse(line)));
+      expect(lines).toEqual([{ type: "displaced" }]);
+      expect(connections, "旧 token 被顶后不能无限重新 hello").toBe(1);
+      expect(child.output()).not.toContain("后重连");
+      expect(child.process.exitCode, "stdin 仍开放时代理保留停止态进程").toBeNull();
+      child.stdin.end();
+      await expect(child.waitForExit(5_000)).resolves.toBe("退出 0");
+    } finally {
+      if (child.process.exitCode === null) child.process.kill("SIGKILL");
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 15_000);
 });

@@ -28,7 +28,9 @@
 
 四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。
 
-每人至多两台电脑，本机（local）和远程（remote）各一台，`computers` 在 `(owner_id, kind)` 上唯一。注册或登录时建出本机那一行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接顶掉旧连接。
+每人至多两台电脑，本机（local）和远程（remote）各一台，`computers` 在 `(owner_id, kind)` 上唯一。注册或登录时建出本机那一行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接用 4000 顶掉旧连接。
+
+App 通过 `POST /api/computers/local` 配对本机，无请求体或空对象按未确认处理。已有本机连上过（`lastSeenAt` 非空或此刻在线）时回 409 和 `{ error, computer }`，原 token 和连接继续有效；用户确认后带 `{ "confirmDisplace": true }` 再请求，才轮换 token 并用 4004 关闭旧本机。旧 token 再 hello 也收到 4004，电脑号不存在或 hello 不合法仍是 4001。代理收到 4004 输出一行 `{"type":"displaced"}`，清理资源、停止重连；stdout 的上线行和顶号行统一由 shared 的 `AgentStatusLine` 定义。其他关闭码仍按退避重连。桌面端确认弹框与顶号展示由后续 P3-15b 接入。
 
 拿电脑 token：
 

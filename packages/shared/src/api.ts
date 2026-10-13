@@ -82,6 +82,10 @@ export const RegisterResponse = z.object({ user: User });
 export const ComputerTokenResponse = z.object({ computerId: ComputerId, token: z.string() });
 export const ComputerListResponse = z.object({ computers: z.array(Computer) });
 
+// POST /api/computers/local。无请求体时按未确认处理，已有连上过的本机电脑则回 409。
+export const PairLocalComputerRequest = z.object({ confirmDisplace: z.boolean() });
+export const PairLocalConflictResponse = z.object({ error: z.string(), computer: Computer });
+
 // POST /api/auth/logout 无请求体，响应 204。
 // GET /api/me
 export const MeResponse = z.object({ user: User });

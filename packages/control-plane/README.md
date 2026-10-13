@@ -2,6 +2,18 @@
 
 控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。四个对外的面在同一个 3001 端口上：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
 
+## 电脑配对
+
+一个用户本机和远程各至多一台。`POST /api/computers/local` 无请求体或空对象时按 `confirmDisplace: false` 处理；本机从未握手过就直接返回 `ComputerTokenResponse`。本机的 `lastSeenAt` 非空或此刻在线时，未确认回 409 和 `PairLocalConflictResponse`：`error` 是「这个账号已经在另一台 Mac 上用过，继续会让那台退出」，`computer` 是已有电脑的公开对象。409 不重置 token，也不关闭旧连接；已休眠的电脑同样需要确认。
+
+用户确认后重新 POST `{ "confirmDisplace": true }`，电脑号沿用，token 轮换，在线的旧本机连接用 4004 和「这个账号已在另一台 Mac 上登录」关闭。顶号排在这台电脑的处理链上，先前正在握手的连接也会被关闭；排队中的 hello 入场前再次校验 token，旧 token 不能在重新配对后入表。远程电脑的 token 和连接不受本机配对影响。
+
+## 电脑代理握手
+
+合法 hello 的电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接仍用 `superseded`（4000），删账号用 `accountDeleted`（4002）；4003 留给第 3 期信封单元的版本握手，1011 和 1012 保留原行为。
+
+电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码仍按退避重连。
+
 ## 工具连接
 
 工具连接是用户级对象。`tool_connections` 存 MCP 地址、发现的操作及其 `needsApproval` 标记，并把认证信息以 AES-256-GCM 密文存入 `authorization_enc`；`tool_connection_bots` 记录它分配给哪些 Bot，删 Bot 时对应分配由外键级联清除。API 列表和写入响应都不返回认证信息，电脑代理的 `config.tools` 才带解密后的值和 Bot 分配。
