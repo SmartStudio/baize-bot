@@ -6,6 +6,7 @@ import {
   ModelPurpose,
   type ToolView,
 } from "@baize/shared";
+import { PRUNED_IMAGE_TEXT } from "@baize/shared/work-record";
 import {
   type AgentSession,
   createAgentSession,
@@ -97,7 +98,6 @@ const gatewayProvider = (gateway: Gateway) => ({
 
 // 上游一次请求限 20 MiB，截图原样留着几轮就超。只留最近几张原图，更早的换成一行字。
 export const KEPT_IMAGES = 3;
-export const PRUNED_IMAGE_TEXT = "（之前的截图已省略）";
 
 /** 从新往旧数图片块，第 KEPT_IMAGES 张以外的换成文字。会话 JSONL 里的原消息不动，只改这一轮发给上游的副本。 */
 export function pruneImages<M extends { readonly role: string; readonly content?: unknown }>(
