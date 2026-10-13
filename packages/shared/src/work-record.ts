@@ -27,7 +27,7 @@ type Json = Record<string, unknown>;
 interface JsonWithSource {
   parse(
     text: string,
-    reviver: (this: unknown, key: string, value: unknown, context: { source?: string }) => unknown,
+    reviver: (this: unknown, key: string, value: unknown, context?: { source?: string }) => unknown,
   ): unknown;
   rawJSON(text: string): object;
   isRawJSON(value: unknown): boolean;
@@ -41,18 +41,46 @@ const isString = (value: unknown): value is string => typeof value === "string";
 
 const sha256 = (data: string): string => createHash("sha256").update(data, "utf8").digest("hex");
 
+/**
+ * 数字原文保值靠 JSON.rawJSON、JSON.isRawJSON 和 reviver 的 context.source。缺任何一个都不能退回丢精度或整行放行，
+ * 所以创建 Retainer 和复查一帧时先探一次，缺了就抛，让环境问题和「这行不是 JSON」分开。
+ */
+export function assertRawJsonSupport(): void {
+  const api = JSON as unknown as Partial<JsonWithSource>;
+  const missing: string[] = [];
+  if (typeof api.rawJSON !== "function") missing.push("JSON.rawJSON");
+  if (typeof api.isRawJSON !== "function") missing.push("JSON.isRawJSON");
+  if (typeof api.parse === "function") {
+    let source: string | undefined;
+    try {
+      JSON_WITH_SOURCE.parse("[9007199254740993]", (_key, value, context) => {
+        if (typeof value === "number") source = context?.source;
+        return value;
+      });
+    } catch {
+      source = undefined;
+    }
+    if (source !== "9007199254740993") missing.push("JSON.parse 的 reviver context.source");
+  }
+  if (missing.length > 0) {
+    throw new Error(`工作记录留存需要 ${missing.join("、")}（Node 22+），当前运行时没有，不退回丢精度或整行放行`);
+  }
+}
+
 /** 数字原文和 JS 数值写回来不一致的（超精度、1e400、1.0），留成原文，改写别处时 JSON.stringify 原样写回。 */
 function parseObject(line: string): Json | undefined {
+  let parsed: unknown;
   try {
-    const parsed = JSON_WITH_SOURCE.parse(line, (_key, value, context) =>
-      typeof value === "number" && context.source !== undefined && context.source !== String(value)
+    parsed = JSON_WITH_SOURCE.parse(line, (_key, value, context) =>
+      typeof value === "number" && context?.source !== undefined && context.source !== String(value)
         ? JSON_WITH_SOURCE.rawJSON(context.source)
         : value,
     );
-    return isRecord(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined;
+    throw error;
   }
+  return isRecord(parsed) ? parsed : undefined;
 }
 
 /** 值没变就返回原对象，调用方靠引用相等判断这一行动没动。 */
@@ -186,13 +214,14 @@ function isEditPlaceholder(replacement: Json): boolean {
   );
 }
 
+/** Pi 的 appendContextEdit 要求 replacement 是 null，或带字符串/数组 content 的对象。 */
+const isEditReplacement = (value: unknown): value is Json | null =>
+  value === null || (isRecord(value) && (isString(value.content) || Array.isArray(value.content)));
+
 /** 指向本机工具结果、或指向还没见过的条目的编辑，替换内容原文不留：Pi 投影时会拿它盖住目标的 content。 */
-function redactGuardedEdit(replacement: unknown): unknown {
-  if (replacement === null) return replacement;
-  if (isRecord(replacement) && isEditPlaceholder(replacement)) return replacement;
-  const serialized = JSON.stringify(
-    isRecord(replacement) && "content" in replacement ? replacement.content : replacement,
-  );
+function redactGuardedEdit(replacement: Json | null): Json | null {
+  if (replacement === null || isEditPlaceholder(replacement)) return replacement;
+  const serialized = JSON.stringify(replacement.content);
   const text = `${EDIT_PREFIX}${Buffer.byteLength(serialized, "utf8")} sha256=${sha256(serialized)}]`;
   return { content: [placeholderBlock(text)] };
 }
@@ -220,69 +249,171 @@ function redactMessage(message: Json): Json {
   }
 }
 
-function redactEntry(entry: Json, ctx: RetainContext, seen: SeenIds): Json {
+/** 返回 undefined 表示已知类型的条目形状不对（Pi 自己写不出来的），由调用方拒收，不猜着放行。 */
+function redactEntry(entry: Json, ctx: RetainContext, seen: SeenIds): Json | undefined {
   switch (entry.type) {
     case "message": {
       const message = entry.message;
-      if (!isRecord(message)) return entry;
+      if (!isRecord(message)) return undefined;
       const toolName = localToolName(message, ctx);
       if (toolName !== undefined) return redactLocalOnlyEntry(entry, message, toolName);
       return withField(entry, "message", () => redactMessage(message));
     }
     case "custom_message":
+      if (!isString(entry.content) && !Array.isArray(entry.content)) return undefined;
       return withField(entry, "content", redactContent);
     case "context_edit": {
-      const guarded = !isString(entry.targetId) || !seen.known.has(entry.targetId) || seen.local.has(entry.targetId);
-      return withField(entry, "replacement", (replacement) => {
+      const { targetId, replacement } = entry;
+      if (!isString(targetId) || !isEditReplacement(replacement)) return undefined;
+      const guarded = !seen.known.has(targetId) || seen.local.has(targetId);
+      return withField(entry, "replacement", () => {
         if (guarded) return redactGuardedEdit(replacement);
-        return isRecord(replacement) ? withField(replacement, "content", redactContent) : replacement;
+        return replacement === null ? null : withField(replacement, "content", redactContent);
       });
     }
     default:
       return entry;
   }
 }
-
-function trackIds(entry: Json, ctx: RetainContext, seen: SeenIds): void {
-  if (!isString(entry.id)) return;
-  seen.known.add(entry.id);
-  if (entry.type === "message" && isRecord(entry.message) && localToolName(entry.message, ctx) !== undefined) {
-    seen.local.add(entry.id);
-  }
-}
-
-export interface RetainerSnapshot {
+/**
+ * 一条流的留存状态：见过的条目 id，和其中属于本机工具结果的。
+ * 数据形状：
+ * - 运行器 Retainer 在内存里持有一份，一行行 retain，只有被接受的行才推进它。
+ * - 服务器在数据库里存 RetainSnapshot（已提交部分的状态），每帧用 checkFrame 纯函数复查，不持有可变状态。
+ */
+export interface RetainSnapshot {
+  readonly version: 1;
+  /** 本机工具名单的指纹。名单变了，已存的 localIds 就不再可信，checkFrame 拒收并要求调用方重建。 */
+  readonly toolFingerprint: string;
   readonly knownIds: readonly string[];
   readonly localIds: readonly string[];
 }
 
-export interface Retainer {
-  /** 上传前的留存过滤。没动的行原样返回同一个字符串，哈希链和逐字等价测试都靠这一点。 */
-  retain(line: string): { line: string; retention: Retention };
-  /** 服务器复查：这一行是不是已经过滤干净了，就是 retain 对它没有可改之处。 */
-  check(line: string): boolean;
-  /** 到目前为止见过的条目 id，服务器跨帧复查时存下来，下一帧用它起一个新的 Retainer。 */
-  snapshot(): RetainerSnapshot;
+/** 这一行本身的毛病。 */
+export type LineRejectReason =
+  /** 条目 id 在这条流里第二次被定义：Pi 的 id 索引后写覆盖，已放行的 context_edit 会盖到后来的条目上。 */
+  | "duplicate_id"
+  /** 已知类型的条目形状不对（context_edit 缺 replacement、message 不是对象……），或处理时抛了异常。 */
+  | "malformed_entry"
+  /** 只有 checkFrame 会给：这行还有没过滤的内容（图片、超长文字、本机工具结果原文……）。 */
+  | "unfiltered";
+
+export type StreamRejectReason = Exclude<LineRejectReason, "unfiltered"> | "tool_list_changed";
+
+export type RetainResult =
+  | { readonly status: "retained"; readonly line: string; readonly retention: Retention }
+  | { readonly status: "rejected"; readonly reason: StreamRejectReason };
+
+export type FrameCheck =
+  | { readonly ok: true; readonly snapshot: RetainSnapshot }
+  | { readonly ok: false; readonly reason: "tool_list_changed" }
+  | { readonly ok: false; readonly reason: LineRejectReason; readonly lineIndex: number };
+
+/** 名单排序去重后取哈希：顺序不同的同一份名单指纹相同。 */
+export function toolListFingerprint(names: ReadonlySet<string>): string {
+  return sha256(JSON.stringify([...names].toSorted()));
+}
+
+export function emptySnapshot(ctx: RetainContext): RetainSnapshot {
+  return { version: 1, toolFingerprint: toolListFingerprint(ctx.localOnlyToolNames), knownIds: [], localIds: [] };
+}
+
+const idsOf = (snapshot: RetainSnapshot): SeenIds => ({
+  known: new Set(snapshot.knownIds),
+  local: new Set(snapshot.localIds),
+});
+
+const snapshotOf = (ctx: RetainContext, seen: SeenIds): RetainSnapshot => ({
+  version: 1,
+  toolFingerprint: toolListFingerprint(ctx.localOnlyToolNames),
+  knownIds: [...seen.known],
+  localIds: [...seen.local],
+});
+
+type Step =
+  | { readonly kind: "ok"; readonly line: string; readonly retention: Retention }
+  | { readonly kind: "reject"; readonly reason: Exclude<LineRejectReason, "unfiltered"> };
+
+/**
+ * 单行的唯一实现，retain 和 checkFrame 都走它，两边不会漂开。只有返回 ok 时才推进 seen；
+ * 过滤阶段的任何异常都转成拒收，不让它穿出整帧复查。
+ * 不是 JSON、不认识的条目类型原样返回：Pi 升级加了新类型，上传不能因此断。
+ */
+function step(ctx: RetainContext, seen: SeenIds, line: string): Step {
+  try {
+    const entry = parseObject(line);
+    if (entry === undefined) return { kind: "ok", line, retention: "verbatim" };
+    const id = entry.id;
+    if (isString(id) && seen.known.has(id)) return { kind: "reject", reason: "duplicate_id" };
+    const next = redactEntry(entry, ctx, seen);
+    if (next === undefined) return { kind: "reject", reason: "malformed_entry" };
+    if (isString(id)) {
+      seen.known.add(id);
+      if (entry.type === "message" && isRecord(entry.message) && localToolName(entry.message, ctx) !== undefined) {
+        seen.local.add(id);
+      }
+    }
+    return next === entry
+      ? { kind: "ok", line, retention: "verbatim" }
+      : { kind: "ok", line: JSON.stringify(next), retention: "redacted" };
+  } catch {
+    return { kind: "reject", reason: "malformed_entry" };
+  }
 }
 
 /**
- * 按条目顺序吃一条流的行。context_edit 要知道目标是不是本机工具结果，所以必须按会话顺序、每一行都喂进来，
- * 包括不用改的行；retain 和 check 记 id 的方式相同，同一条流在两边得到同样的判断。
- * 不是 JSON、不认识的条目类型原样返回：Pi 升级加了新类型，上传不能因此断。
+ * 服务器复查一帧，纯函数：不改 committed，不留任何状态。输入是已提交的 snapshot 和这一帧的行，
+ * 每一行都要原样合规（verbatim），有一行不行整帧失败，不产出新 snapshot。
+ * 调用方只在追加事务提交成功之后，才把返回的 snapshot 和条目一起存下来；事务回滚就丢掉它。
+ * ctx 里的名单必须是服务器自己工具连接表里的，不信帧里带的。
  */
-export function createRetainer(ctx: RetainContext, resume?: RetainerSnapshot): Retainer {
-  const seen: SeenIds = { known: new Set(resume?.knownIds), local: new Set(resume?.localIds) };
-  const process = (line: string): { line: string; retention: Retention } => {
-    const entry = parseObject(line);
-    if (entry === undefined) return { line, retention: "verbatim" };
-    const next = redactEntry(entry, ctx, seen);
-    trackIds(entry, ctx, seen);
-    return next === entry ? { line, retention: "verbatim" } : { line: JSON.stringify(next), retention: "redacted" };
-  };
+export function checkFrame(ctx: RetainContext, committed: RetainSnapshot, lines: readonly string[]): FrameCheck {
+  assertRawJsonSupport();
+  if (committed.toolFingerprint !== toolListFingerprint(ctx.localOnlyToolNames)) {
+    return { ok: false, reason: "tool_list_changed" };
+  }
+  const seen = idsOf(committed);
+  for (const [lineIndex, line] of lines.entries()) {
+    const result = step(ctx, seen, line);
+    if (result.kind === "reject") return { ok: false, reason: result.reason, lineIndex };
+    if (result.retention === "redacted") return { ok: false, reason: "unfiltered", lineIndex };
+  }
+  return { ok: true, snapshot: snapshotOf(ctx, seen) };
+}
+
+export interface Retainer {
+  /**
+   * 上传前的留存过滤。没动的行原样返回同一个字符串，哈希链和逐字等价测试都靠这一点。
+   * 拒收之后这个 Retainer 停住，之后每次都返回同一个拒收原因：运行器不传这一条也不传它后面的内容。
+   */
+  retain(line: string): RetainResult;
+  /** 到目前为止被接受的行的状态，运行器重连或重建之后用它起新的 Retainer。 */
+  snapshot(): RetainSnapshot;
+}
+
+/**
+ * 运行器侧：按会话顺序把每一条条目行都喂进来，包括不用改的行和未知类型的行（不含首行 SessionHeader）。
+ * context_edit 要知道目标是不是本机工具结果，所以必须有序、有状态；同一个 id 第二次出现算拒收。
+ * resume 的名单指纹和 ctx 对不上，等同第一行就拒收 tool_list_changed。
+ */
+export function createRetainer(ctx: RetainContext, resume?: RetainSnapshot): Retainer {
+  assertRawJsonSupport();
+  const seen = idsOf(resume ?? emptySnapshot(ctx));
+  let halted: StreamRejectReason | undefined =
+    resume !== undefined && resume.toolFingerprint !== toolListFingerprint(ctx.localOnlyToolNames)
+      ? "tool_list_changed"
+      : undefined;
   return {
-    retain: process,
-    check: (line) => process(line).retention === "verbatim",
-    snapshot: () => ({ knownIds: [...seen.known], localIds: [...seen.local] }),
+    retain(line) {
+      if (halted !== undefined) return { status: "rejected", reason: halted };
+      const result = step(ctx, seen, line);
+      if (result.kind === "reject") {
+        halted = result.reason;
+        return { status: "rejected", reason: result.reason };
+      }
+      return { status: "retained", line: result.line, retention: result.retention };
+    },
+    snapshot: () => snapshotOf(ctx, seen),
   };
 }
 
@@ -297,7 +428,14 @@ function capSearchText(text: string): string {
 
 /** 给 trigram 检索的文字：用户和助手的文字块、工具结果的文字。图片、思考、工具参数、usage 都不进。 */
 export function searchTextOf(line: string): string {
-  const entry = parseObject(line);
+  try {
+    return searchTextOfEntry(parseObject(line));
+  } catch {
+    return "";
+  }
+}
+
+function searchTextOfEntry(entry: Json | undefined): string {
   if (entry === undefined || entry.type !== "message" || !isRecord(entry.message)) return "";
   const { role, content } = entry.message;
   if (typeof role !== "string" || !SEARCHABLE_ROLES.has(role)) return "";

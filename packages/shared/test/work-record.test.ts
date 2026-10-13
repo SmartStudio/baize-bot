@@ -5,16 +5,47 @@ import {
   RETAIN_TEXT_LIMIT_BYTES,
   SEARCH_TEXT_LIMIT,
   chainHead,
+  assertRawJsonSupport,
+  checkFrame,
   createRetainer,
+  emptySnapshot,
   searchTextOf,
+  toolListFingerprint,
+  type FrameCheck,
   type RetainContext,
+  type RetainResult,
+  type RetainSnapshot,
 } from "../src/work-record.js";
 
 const ctx = { localOnlyToolNames: new Set<string>() };
 const localCtx = { localOnlyToolNames: new Set(["mail_read"]) };
 
-const retainEntry = (line: string, c: RetainContext) => createRetainer(c).retain(line);
-const isRetained = (line: string, c: RetainContext) => createRetainer(c).check(line);
+const retained = (result: RetainResult) => {
+  if (result.status !== "retained") throw new Error(`被拒收：${result.reason}`);
+  return { line: result.line, retention: result.retention };
+};
+/** 运行器侧的一条流：拒收就让用例失败。 */
+const session = (c: RetainContext, resume?: RetainSnapshot) => {
+  const retainer = createRetainer(c, resume);
+  return { retain: (line: string) => retained(retainer.retain(line)), snapshot: () => retainer.snapshot() };
+};
+/** 服务器侧的一条流：每帧都从已提交 snapshot 复查，成功才提交，和 P3-10 的事务边界同构。 */
+const server = (c: RetainContext, resume?: RetainSnapshot) => {
+  let committed = resume ?? emptySnapshot(c);
+  return {
+    frame(lines: readonly string[]): FrameCheck {
+      const result = checkFrame(c, committed, lines);
+      if (result.ok) committed = result.snapshot;
+      return result;
+    },
+    check(line: string): boolean {
+      return this.frame([line]).ok;
+    },
+    committed: () => committed,
+  };
+};
+const retainEntry = (line: string, c: RetainContext) => retained(createRetainer(c).retain(line));
+const isRetained = (line: string, c: RetainContext) => checkFrame(c, emptySnapshot(c), [line]).ok;
 
 const entry = (message: object, extra: object = {}) =>
   JSON.stringify({
@@ -25,7 +56,8 @@ const entry = (message: object, extra: object = {}) =>
     message,
     ...extra,
   });
-const userText = (text: string) => entry({ role: "user", content: [{ type: "text", text }], timestamp: 1 });
+const userText = (text: string, id = "e1") =>
+  entry({ role: "user", content: [{ type: "text", text }], timestamp: 1 }, { id });
 const textOf = (line: string): string => JSON.parse(line).message.content[0].text;
 const wellFormed = (s: string) => {
   encodeURIComponent(s);
@@ -91,10 +123,10 @@ describe("retainEntry 图片", () => {
 
   it("用户消息、custom_message、context_edit 里的图片同样换掉", () => {
     const img = { type: "image", data: "AAAA", mimeType: "image/png" };
-    const retainer = createRetainer(ctx);
+    const retainer = session(ctx);
     expect(retainer.retain(userText("先有目标条目")).retention).toBe("verbatim");
     const lines = [
-      entry({ role: "user", content: [img], timestamp: 1 }),
+      entry({ role: "user", content: [img], timestamp: 1 }, { id: "e5" }),
       JSON.stringify({ type: "custom_message", id: "e2", customType: "x", content: [img], display: true }),
       JSON.stringify({ type: "context_edit", id: "e3", targetId: "e1", replacement: { content: [img] } }),
     ];
@@ -583,7 +615,7 @@ describe("第二轮：context_edit 不能把本机工具结果的原文带回去
     `{"type":"context_edit","id":"${id}","parentId":"e1","timestamp":"${ISO}","targetId":"${targetId}","replacement":{"content":[{"type":"text","text":"[上下文编辑，原文未上传 bytes=55 sha256=${SECRET_SHA}]"}]}}`;
 
   it("指向本机工具结果的编辑，replacement 换成占位（字面量）", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     retainer.retain(secretResult());
     const out = retainer.retain(edit("e2", "e1", secretContent));
     expect(out.retention).toBe("redacted");
@@ -591,31 +623,26 @@ describe("第二轮：context_edit 不能把本机工具结果的原文带回去
   });
 
   it("复查：同一条流里的原文编辑判不合规，过滤后的编辑合规", () => {
-    const filtered = createRetainer(localCtx);
+    const filtered = session(localCtx);
     const l1 = filtered.retain(secretResult()).line;
     const l2 = filtered.retain(edit("e2", "e1", secretContent)).line;
-    const server = createRetainer(localCtx);
-    expect(server.check(l1)).toBe(true);
-    expect(server.check(l2)).toBe(true);
-    const bad = createRetainer(localCtx);
+    const good = server(localCtx);
+    expect(good.check(l1)).toBe(true);
+    expect(good.check(l2)).toBe(true);
+    const bad = server(localCtx);
     expect(bad.check(l1)).toBe(true);
     expect(bad.check(edit("e2", "e1", secretContent))).toBe(false);
   });
 
   it("编辑指向还没见过的条目（前向引用）同样按本机处理", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     const out = retainer.retain(edit("e2", "e9", secretContent));
     expect(out.line).toBe(editPlaceholder("e2", "e9"));
-    expect(retainer.check(out.line)).toBe(true);
-  });
-
-  it("targetId 不是字符串也按本机处理", () => {
-    const out = retainEntry(edit("e2", { x: 1 }, secretContent), localCtx);
-    expect(out.line).not.toContain(SECRET);
+    expect(server(localCtx).check(out.line)).toBe(true);
   });
 
   it("指向普通条目的编辑照常：内容原样，图片和超长文字照常过滤", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     retainer.retain(userText("目标"));
     const plain = edit("e2", "e1", [{ type: "text", text: "改过的话" }]);
     expect(retainer.retain(plain).line === plain).toBe(true);
@@ -624,14 +651,14 @@ describe("第二轮：context_edit 不能把本机工具结果的原文带回去
   });
 
   it("replacement 为 null（从上下文里去掉目标）原样放行，本机目标也一样", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     retainer.retain(secretResult());
     const line = JSON.stringify({ type: "context_edit", id: "e2", parentId: "e1", targetId: "e1", replacement: null });
     expect(retainer.retain(line)).toEqual({ line, retention: "verbatim" });
   });
 
   it("编辑的 replacement 里多出别的键，对本机目标只留占位", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     retainer.retain(secretResult());
     const line = JSON.stringify({
       type: "context_edit",
@@ -645,26 +672,33 @@ describe("第二轮：context_edit 不能把本机工具结果的原文带回去
   });
 
   it("字符串形式的 replacement.content 对本机目标同样换占位", () => {
-    const retainer = createRetainer(localCtx);
+    const retainer = session(localCtx);
     retainer.retain(secretResult());
     const out = retainer.retain(edit("e2", "e1", SECRET));
     expect(out.line).not.toContain(SECRET);
-    expect(retainer.check(out.line)).toBe(true);
+    const checker = server(localCtx);
+    expect(checker.check(retainEntry(secretResult(), localCtx).line)).toBe(true);
+    expect(checker.check(out.line)).toBe(true);
   });
 
   it("snapshot 带到下一帧：新 Retainer 照样认得本机条目", () => {
-    const first = createRetainer(localCtx);
+    const first = session(localCtx);
     first.retain(secretResult());
-    first.retain(userText("别的"));
+    first.retain(userText("别的", "e7"));
     const snapshot = first.snapshot();
-    expect(snapshot).toEqual({ knownIds: ["e1"], localIds: ["e1"] });
-    const second = createRetainer(localCtx, snapshot);
+    expect(snapshot).toEqual({
+      version: 1,
+      toolFingerprint: toolListFingerprint(localCtx.localOnlyToolNames),
+      knownIds: ["e1", "e7"],
+      localIds: ["e1"],
+    });
+    const second = session(localCtx, snapshot);
     expect(second.retain(edit("e2", "e1", secretContent)).line).toBe(editPlaceholder("e2", "e1"));
-    expect(createRetainer(localCtx).retain(edit("e2", "e1", secretContent)).line).toBe(editPlaceholder("e2", "e1"));
+    expect(session(localCtx).retain(edit("e2", "e1", secretContent)).line).toBe(editPlaceholder("e2", "e1"));
   });
 
   it("名单里没有 mail_read 时，同样的编辑是普通编辑", () => {
-    const retainer = createRetainer(ctx);
+    const retainer = session(ctx);
     retainer.retain(secretResult());
     const line = edit("e2", "e1", secretContent);
     expect(retainer.retain(line).line === line).toBe(true);
@@ -732,9 +766,12 @@ describe("第二轮：随机流的性质", () => {
           ids.push({ id, local });
         } else if (shape === 2) {
           lines.push(
-            entry({ role: pick(["user", "assistant"]), content: [{ type: "text", text: "你好" }], timestamp: i }),
+            entry(
+              { role: pick(["user", "assistant"]), content: [{ type: "text", text: "你好" }], timestamp: i },
+              { id },
+            ),
           );
-          ids.push({ id: "e1", local: false });
+          ids.push({ id, local: false });
         } else {
           const target = ids.length > 0 && rand(4) > 0 ? pick(ids) : { id: `ghost-${i}`, local: true };
           const guarded = target.local;
@@ -751,19 +788,513 @@ describe("第二轮：随机流的性质", () => {
           );
         }
       }
-      const filter = createRetainer(randomCtx);
+      const filter = session(randomCtx);
       const out = lines.map((line) => filter.retain(line));
       redacted += out.filter((o) => o.retention === "redacted").length;
-      const server = createRetainer(randomCtx);
-      const again = createRetainer(randomCtx);
+      const checker = server(randomCtx);
+      const again = session(randomCtx);
       out.forEach((o, i) => {
         wellFormed(o.line);
-        expect(server.check(o.line), `流 ${stream} 行 ${i} 复查`).toBe(true);
+        expect(checker.check(o.line), `流 ${stream} 行 ${i} 复查`).toBe(true);
         expect(again.retain(o.line), `流 ${stream} 行 ${i} 幂等`).toEqual({ line: o.line, retention: "verbatim" });
         expect(o.line, `流 ${stream} 行 ${i} 原文`).not.toContain(MARK);
       });
     }
     expect(redacted).toBeGreaterThan(500);
     expect(editsToGuarded).toBeGreaterThan(100);
+  });
+});
+
+const frozen = (snapshot: RetainSnapshot): RetainSnapshot => {
+  Object.freeze(snapshot.knownIds);
+  Object.freeze(snapshot.localIds);
+  return Object.freeze(snapshot);
+};
+const plainUser = (id: string, parentId: string | null = null, text = "你好") =>
+  entry({ role: "user", content: [{ type: "text", text }], timestamp: 1 }, { id, parentId });
+const plainEdit = (id: string, targetId: string, content: unknown, parentId: string | null = null) =>
+  JSON.stringify({ type: "context_edit", id, parentId, timestamp: ISO, targetId, replacement: { content } });
+const filteredLocal = (id: string, parentId: string | null = null) =>
+  retainEntry(secretResult({}, { id, parentId }), localCtx).line;
+
+describe("第三轮 R2-1：同一条流里 id 只能定义一次", () => {
+  const imageUser = (id: string) =>
+    entry({ role: "user", content: [{ type: "image", data: "IMG", mimeType: "image/png" }], timestamp: 1 }, { id });
+
+  it("复核报告的四行反例，帧内：第三行重定义 x，整帧拒收并指出行号", () => {
+    const lines = [
+      plainUser("x"),
+      plainEdit("e", "x", [{ type: "text", text: SECRET }], "x"),
+      filteredLocal("x"),
+      plainUser("leaf", "e"),
+    ];
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), lines)).toEqual({
+      ok: false,
+      reason: "duplicate_id",
+      lineIndex: 2,
+    });
+  });
+
+  it("跨帧：第一帧提交后，第二帧里的重定义被拒，已提交快照不变", () => {
+    const checker = server(localCtx);
+    expect(checker.frame([plainUser("x")]).ok).toBe(true);
+    const before = JSON.stringify(checker.committed());
+    expect(checker.frame([plainEdit("e", "x", [{ type: "text", text: "公开" }], "x"), filteredLocal("x")])).toEqual({
+      ok: false,
+      reason: "duplicate_id",
+      lineIndex: 1,
+    });
+    expect(JSON.stringify(checker.committed())).toBe(before);
+  });
+
+  it("运行器侧：重定义的 id 拒收，这条和它之后的内容都不再产出，已接受的状态不受影响", () => {
+    const retainer = createRetainer(localCtx);
+    expect(retainer.retain(plainUser("x"))).toEqual({
+      status: "retained",
+      line: plainUser("x"),
+      retention: "verbatim",
+    });
+    expect(retainer.retain(filteredLocal("x"))).toEqual({ status: "rejected", reason: "duplicate_id" });
+    expect(retainer.retain(plainUser("fresh"))).toEqual({ status: "rejected", reason: "duplicate_id" });
+    expect(retainer.snapshot().knownIds).toEqual(["x"]);
+    expect(retainer.snapshot().localIds).toEqual([]);
+  });
+
+  it("不认识的条目类型、非消息条目重复 id 也算重复（Pi 的索引对所有条目一视同仁）", () => {
+    const model = JSON.stringify({ type: "model_change", id: "m1", provider: "p", modelId: "q" });
+    expect(checkFrame(ctx, emptySnapshot(ctx), [model, model])).toEqual({
+      ok: false,
+      reason: "duplicate_id",
+      lineIndex: 1,
+    });
+  });
+
+  it("没有 id 的行、非 JSON 的行不占 id，可以重复出现", () => {
+    const noId = JSON.stringify({ type: "hologram" });
+    expect(checkFrame(ctx, emptySnapshot(ctx), [noId, noId, "oops", "oops"]).ok).toBe(true);
+  });
+
+  it("重复检查先于过滤：带图片的重复行报 duplicate_id，不是 unfiltered", () => {
+    expect(checkFrame(ctx, emptySnapshot(ctx), [plainUser("x"), imageUser("x")])).toMatchObject({
+      reason: "duplicate_id",
+      lineIndex: 1,
+    });
+  });
+});
+
+describe("第三轮 R2-2：服务器复查是纯函数，拒收的帧不产生状态", () => {
+  const imageUser = entry({ role: "user", content: [{ type: "image", data: "IMG" }], timestamp: 1 }, { id: "x" });
+
+  it("复核报告的四步反例：被拒的帧不留痕，用已提交快照时后一帧的编辑行被拒", () => {
+    const committed = frozen(emptySnapshot(localCtx));
+    const rejected = checkFrame(localCtx, committed, [imageUser]);
+    expect(rejected).toEqual({ ok: false, reason: "unfiltered", lineIndex: 0 });
+    expect("snapshot" in rejected).toBe(false);
+    expect(committed).toEqual({
+      version: 1,
+      toolFingerprint: toolListFingerprint(localCtx.localOnlyToolNames),
+      knownIds: [],
+      localIds: [],
+    });
+    const suffix = [plainEdit("e", "x", [{ type: "text", text: SECRET }]), filteredLocal("x", "e")];
+    expect(checkFrame(localCtx, committed, suffix)).toEqual({ ok: false, reason: "unfiltered", lineIndex: 0 });
+  });
+
+  it("帧里前面的行合规、后面的行不合规：整帧失败，同一份已提交快照还能接着收修正后的帧", () => {
+    const committed = frozen(emptySnapshot(localCtx));
+    const good = plainUser("a");
+    expect(checkFrame(localCtx, committed, [good, imageUser])).toEqual({
+      ok: false,
+      reason: "unfiltered",
+      lineIndex: 1,
+    });
+    const retry = checkFrame(localCtx, committed, [good, retainEntry(imageUser, localCtx).line]);
+    expect(retry.ok).toBe(true);
+  });
+
+  it("成功时返回新快照，输入快照一个字节不动（数组冻结，任何写入都会抛）", () => {
+    const first = checkFrame(localCtx, frozen(emptySnapshot(localCtx)), [plainUser("a"), filteredLocal("b", "a")]);
+    if (!first.ok) throw new Error("应通过");
+    expect(first.snapshot.knownIds).toEqual(["a", "b"]);
+    expect(first.snapshot.localIds).toEqual(["b"]);
+    const second = checkFrame(localCtx, frozen(first.snapshot), [
+      plainEdit("e", "b", [{ type: "text", text: "p" }], "b"),
+    ]);
+    expect(second.ok).toBe(false);
+    expect(first.snapshot.knownIds).toEqual(["a", "b"]);
+  });
+
+  it("快照是可 JSON 往返的纯数据：存进数据库再取出来继续复查", () => {
+    const first = checkFrame(localCtx, emptySnapshot(localCtx), [filteredLocal("b")]);
+    if (!first.ok) throw new Error("应通过");
+    const stored = JSON.parse(JSON.stringify(first.snapshot)) as RetainSnapshot;
+    expect(checkFrame(localCtx, stored, [plainEdit("e", "b", [{ type: "text", text: SECRET }], "b")])).toMatchObject({
+      ok: false,
+      reason: "unfiltered",
+    });
+  });
+
+  it("运行器和服务器对同一批行得到同一份快照", () => {
+    const runner = createRetainer(localCtx);
+    const raw = [
+      plainUser("a"),
+      secretResult({}, { id: "b", parentId: "a" }),
+      plainEdit("e", "b", [{ type: "text", text: SECRET }], "b"),
+    ];
+    const lines = raw.map((line) => retained(runner.retain(line)).line);
+    const result = checkFrame(localCtx, emptySnapshot(localCtx), lines);
+    expect(result).toEqual({ ok: true, snapshot: runner.snapshot() });
+  });
+});
+
+const missingReplacement = (targetId: string) => JSON.stringify({ type: "context_edit", id: "e", targetId });
+
+type Patch = Partial<Record<"rawJSON" | "isRawJSON" | "parse", unknown>>;
+const withJson = <T>(patch: Patch, run: () => T): T => {
+  const target = JSON as unknown as Record<string, unknown>;
+  const saved = Object.fromEntries(Object.keys(patch).map((key) => [key, target[key]]));
+  Object.assign(target, patch);
+  try {
+    return run();
+  } finally {
+    Object.assign(target, saved);
+  }
+};
+
+describe("第三轮 R2-3：已知类型的畸形条目拒收，不抛异常", () => {
+  it("复核报告的四个调用组合：缺 replacement 的编辑，目标不存在或是本机结果，retain 和复查都拒收", () => {
+    const withLocal = () => {
+      const retainer = createRetainer(localCtx);
+      retained(retainer.retain(secretResult({}, { id: "l" })));
+      return retainer;
+    };
+    const localSnapshot = withLocal().snapshot();
+    expect(localSnapshot.localIds).toEqual(["l"]);
+    for (const [name, line, retainer, snapshot] of [
+      ["目标不存在", missingReplacement("missing"), createRetainer(localCtx), emptySnapshot(localCtx)],
+      ["目标是本机结果", missingReplacement("l"), withLocal(), localSnapshot],
+    ] as const) {
+      expect(() => retainer.retain(line), `${name} retain`).not.toThrow();
+      expect(retainer.retain(line), `${name} retain`).toEqual({ status: "rejected", reason: "malformed_entry" });
+      expect(() => checkFrame(localCtx, snapshot, [line]), `${name} 复查`).not.toThrow();
+      expect(checkFrame(localCtx, snapshot, [line]), `${name} 复查`).toEqual({
+        ok: false,
+        reason: "malformed_entry",
+        lineIndex: 0,
+      });
+    }
+  });
+
+  it.each([
+    ["replacement 是字符串", { type: "context_edit", id: "e", targetId: "t", replacement: SECRET }],
+    ["replacement 是空对象", { type: "context_edit", id: "e", targetId: "t", replacement: {} }],
+    ["replacement.content 是数字", { type: "context_edit", id: "e", targetId: "t", replacement: { content: 1 } }],
+    ["replacement 是数组", { type: "context_edit", id: "e", targetId: "t", replacement: [SECRET] }],
+    ["缺 targetId", { type: "context_edit", id: "e", replacement: null }],
+    ["targetId 不是字符串", { type: "context_edit", id: "e", targetId: { x: 1 }, replacement: null }],
+    ["message 不是对象", { type: "message", id: "m", message: SECRET }],
+    ["缺 message", { type: "message", id: "m" }],
+    ["custom_message 缺 content", { type: "custom_message", id: "c", customType: "x", display: true }],
+    ["custom_message.content 是对象", { type: "custom_message", id: "c", content: { type: "image" } }],
+  ])("%s：两边都拒收", (_name, entryObject) => {
+    const line = JSON.stringify(entryObject);
+    expect(createRetainer(localCtx).retain(line)).toEqual({ status: "rejected", reason: "malformed_entry" });
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), ["先放一行 JSON 之外的内容", line])).toEqual({
+      ok: false,
+      reason: "malformed_entry",
+      lineIndex: 1,
+    });
+  });
+
+  it("嵌套深到 JSON 遍历栈溢出的行：转成拒收，不抛", () => {
+    const line = `{"type":"message","id":"deep","message":{"role":"user","content":${"[".repeat(200000)}${"]".repeat(200000)}}}`;
+    expect(() => createRetainer(ctx).retain(line)).not.toThrow();
+    expect(createRetainer(ctx).retain(line)).toEqual({ status: "rejected", reason: "malformed_entry" });
+    expect(checkFrame(ctx, emptySnapshot(ctx), [line])).toMatchObject({ ok: false, reason: "malformed_entry" });
+    expect(searchTextOf(line)).toBe("");
+  });
+
+  it("被拒绝的畸形行不推进状态：它的 id 不会变成已知条目", () => {
+    const retainer = createRetainer(localCtx);
+    retainer.retain(missingReplacement("x"));
+    expect(retainer.snapshot().knownIds).toEqual([]);
+  });
+});
+
+describe("第三轮 R2-4：缺原文保值能力时启动就抛，不退回丢精度或整行放行", () => {
+  const nativeParse = JSON.parse.bind(JSON) as (
+    text: string,
+    reviver?: (this: unknown, key: string, value: unknown, ...rest: unknown[]) => unknown,
+  ) => unknown;
+  const reviverWith =
+    (context: (real: unknown) => unknown[]) =>
+    (text: string, reviver?: (this: unknown, key: string, value: unknown, ...rest: unknown[]) => unknown) =>
+      nativeParse(
+        text,
+        reviver === undefined
+          ? undefined
+          : function (this: unknown, key, value, real) {
+              return reviver.call(this, key, value, ...context(real));
+            },
+      );
+
+  it.each([
+    ["JSON.rawJSON 不存在", { rawJSON: undefined }, /JSON\.rawJSON/],
+    ["JSON.isRawJSON 不存在", { isRawJSON: undefined }, /JSON\.isRawJSON/],
+    ["reviver 的 context 里没有 source", { parse: reviverWith(() => [{}]) }, /context\.source/],
+    ["reviver 不传第三个参数", { parse: reviverWith(() => []) }, /context\.source/],
+  ] as const)("%s：createRetainer 和 checkFrame 都抛说清楚的错", (_name, patch, message) => {
+    const snapshot = emptySnapshot(localCtx);
+    const imageLine = entry({ role: "user", content: [{ type: "image", data: "IMG" }], timestamp: 1 });
+    withJson(patch, () => {
+      expect(() => createRetainer(localCtx)).toThrow(message);
+      expect(() => checkFrame(localCtx, snapshot, [imageLine])).toThrow(message);
+      expect(() => assertRawJsonSupport()).toThrow(/不退回丢精度或整行放行/);
+    });
+  });
+
+  it("原生环境探测通过，替换在用例结束后已恢复", () => {
+    expect(() => assertRawJsonSupport()).not.toThrow();
+    expect(
+      retainEntry('{"type":"message","n":9007199254740993,"message":{"role":"user","content":[{"type":"image"}]}}', ctx)
+        .line,
+    ).toBe(
+      '{"type":"message","n":9007199254740993,"message":{"role":"user","content":[{"type":"text","text":"（之前的截图已省略）"}]}}',
+    );
+  });
+});
+
+describe("第三轮 R2-5：本机工具名单的指纹随快照走，名单变了要显式重建", () => {
+  const moreCtx = { localOnlyToolNames: new Set(["mail_read", "web_search"]) };
+
+  it("指纹是排序后名单的 sha256（字面量）", () => {
+    expect(toolListFingerprint(new Set(["mail_read"]))).toBe(
+      "5036183fe3c1e16fed96530f3856fd49da555576b0bfc3722554cf82ac8ca8f2",
+    );
+    expect(toolListFingerprint(new Set())).toBe("4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945");
+    expect(toolListFingerprint(new Set(["web_search", "mail_read"]))).toBe(
+      "7a7d826e4f441b6c84dc3c84cc1c1090947ab1858dfcd067146d51abfcebc8d9",
+    );
+  });
+
+  it("名单变了：checkFrame 给可区分的 tool_list_changed，不带行号，不做任何过滤判断", () => {
+    const snapshot = emptySnapshot(localCtx);
+    expect(checkFrame(moreCtx, snapshot, [plainUser("a")])).toEqual({ ok: false, reason: "tool_list_changed" });
+    expect(checkFrame(ctx, snapshot, [])).toEqual({ ok: false, reason: "tool_list_changed" });
+  });
+
+  it("服务器按自己的名单验证：运行器名单更长时，多出的本机工具原样放行的结果不会被运行器的名单救下", () => {
+    const runnerLine = retainEntry(secretResult({ toolName: "web_search" }, { id: "w" }), moreCtx).line;
+    expect(runnerLine).toContain("本机工具结果，原文未上传 tool=web_search");
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), [runnerLine])).toEqual({
+      ok: true,
+      snapshot: expect.anything(),
+    });
+    const runnerMissed = secretResult({ toolName: "web_search" }, { id: "w" });
+    expect(checkFrame(moreCtx, emptySnapshot(moreCtx), [runnerMissed])).toMatchObject({
+      ok: false,
+      reason: "unfiltered",
+    });
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), [runnerMissed]).ok).toBe(true);
+  });
+
+  it("同一份名单换个顺序、重复写，指纹和复查结果不变", () => {
+    const reordered = { localOnlyToolNames: new Set(["web_search", "mail_read"]) };
+    expect(checkFrame(reordered, emptySnapshot(moreCtx), [plainUser("a")]).ok).toBe(true);
+  });
+
+  it("运行器用旧名单的快照恢复：第一次 retain 就是 tool_list_changed，之后一直是", () => {
+    const snapshot = emptySnapshot(localCtx);
+    const retainer = createRetainer(moreCtx, snapshot);
+    expect(retainer.retain(plainUser("a"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
+    expect(retainer.retain(plainUser("b"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
+    expect(createRetainer(localCtx, snapshot).retain(plainUser("a")).status).toBe("retained");
+  });
+});
+
+describe("第三轮：随机流按帧复查", () => {
+  const MARK = "R3_PRIVATE_MARK";
+  const names = ["mail_read", "tool with spaces", "tool[time=]"];
+  const randomCtx: RetainContext = { localOnlyToolNames: new Set(names) };
+  const times: unknown[] = [
+    ISO,
+    "2026-10-14T08:00:00+08:00",
+    "2026-10-14 00:00:00",
+    "",
+    "time=sk-secret",
+    "bad\ntime",
+    1760000000000,
+    null,
+    { x: "时间对象" },
+  ];
+  const localTimes: unknown[] = [...times, { x: MARK }, [MARK]];
+
+  it("400 条流、每条 16 行、帧长 1 到 5：接受的帧不含原文，重复 id 和畸形行两边同样拒收，快照一致", () => {
+    let seed = 0x3a12b3;
+    const rand = (n: number) => {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      return (seed >>> 0) % n;
+    };
+    const pick = <T>(list: readonly T[]): T => list[rand(list.length)] as T;
+    const counts = {
+      lines: 0,
+      local: 0,
+      edits: 0,
+      forward: 0,
+      extra: 0,
+      nonIso: 0,
+      redacted: 0,
+      dup: 0,
+      malformed: 0,
+      rawAccepted: 0,
+    };
+    for (let stream = 0; stream < 400; stream += 1) {
+      const known: Array<{ id: string; local: boolean }> = [];
+      const raw: Array<{ line: string; fault?: "duplicate_id" | "malformed_entry" }> = [];
+      for (let i = 0; i < 16; i += 1) {
+        const id = `s${stream}-${i}`;
+        const kind = rand(8);
+        const time = pick(kind <= 1 ? localTimes : times);
+        counts.nonIso += Number(time !== ISO);
+        let line: string;
+        let fault: "duplicate_id" | "malformed_entry" | undefined;
+        if (kind <= 1) {
+          const extra: Record<string, unknown> = {};
+          for (let k = rand(3); k > 0; k -= 1)
+            extra[pick(["rawResult", "output", "error", "extra", "usage", "details"])] = { content: MARK };
+          counts.extra += Object.keys(extra).length;
+          line = JSON.stringify({
+            type: "message",
+            id,
+            parentId: null,
+            timestamp: time,
+            message: {
+              role: "toolResult",
+              toolCallId: "c",
+              toolName: pick(names),
+              content: [{ type: "text", text: MARK }],
+              isError: false,
+              timestamp: i,
+              ...extra,
+            },
+          });
+          known.push({ id, local: true });
+          counts.local += 1;
+        } else if (kind <= 3) {
+          const content: unknown[] = [{ type: "text", text: rand(6) === 0 ? "😀".repeat(9000) : "公开" }];
+          if (rand(3) === 0) content.push({ type: "image", data: "IMG" });
+          line = JSON.stringify({
+            type: "message",
+            id,
+            parentId: null,
+            timestamp: time,
+            message: { role: "user", content, timestamp: i },
+          });
+          known.push({ id, local: false });
+        } else if (kind <= 5) {
+          const target = known.length > 0 && rand(4) > 0 ? pick(known) : { id: `future-${stream}-${i}`, local: true };
+          counts.forward += Number(target.id.startsWith("future"));
+          counts.edits += 1;
+          const replacement =
+            rand(8) === 0
+              ? null
+              : {
+                  content: [{ type: "text", text: target.local ? MARK : "改写" }],
+                  note: target.local ? MARK : "元数据",
+                };
+          line = JSON.stringify({
+            type: "context_edit",
+            id,
+            parentId: null,
+            timestamp: time,
+            targetId: target.id,
+            replacement,
+          });
+          known.push({ id, local: false });
+        } else if (kind === 6 && known.length > 0) {
+          line = JSON.stringify({
+            type: "message",
+            id: pick(known).id,
+            parentId: null,
+            timestamp: time,
+            message: { role: "user", content: [{ type: "text", text: "重复" }], timestamp: i },
+          });
+          fault = "duplicate_id";
+          counts.dup += 1;
+        } else {
+          line = JSON.stringify(
+            pick([
+              { type: "context_edit", id, targetId: "x" },
+              { type: "message", id, message: MARK },
+              { type: "custom_message", id },
+            ]),
+          );
+          fault = "malformed_entry";
+          counts.malformed += 1;
+        }
+        raw.push(fault === undefined ? { line } : { line, fault });
+        counts.lines += 1;
+      }
+
+      const runner = createRetainer(randomCtx);
+      const uploaded: string[] = [];
+      let stopped: string | undefined;
+      for (const [index, item] of raw.entries()) {
+        const result = runner.retain(item.line);
+        if (result.status === "rejected") {
+          stopped = result.reason;
+          expect(result.reason, `流 ${stream} 行 ${index} 拒收原因`).toBe(item.fault ?? result.reason);
+          expect(runner.retain(raw[0]?.line ?? ""), `流 ${stream} 拒收后停住`).toEqual({
+            status: "rejected",
+            reason: result.reason,
+          });
+          break;
+        }
+        expect(item.fault, `流 ${stream} 行 ${index} 本该被拒收`).toBeUndefined();
+        counts.redacted += Number(result.retention === "redacted");
+        expect(result.line, `流 ${stream} 行 ${index} 原文`).not.toContain(MARK);
+        uploaded.push(result.line);
+      }
+      if (raw.some((item) => item.fault !== undefined))
+        expect(stopped, `流 ${stream} 有故障行，运行器必须停`).toBeDefined();
+
+      const checker = server(randomCtx);
+      let cursor = 0;
+      while (cursor < uploaded.length) {
+        const frame = uploaded.slice(cursor, cursor + 1 + rand(5));
+        const before = JSON.stringify(checker.committed());
+        const result = checker.frame(frame);
+        expect(result.ok, `流 ${stream} 帧 ${cursor}`).toBe(true);
+        expect(before).not.toBe(JSON.stringify(checker.committed()));
+        cursor += frame.length;
+      }
+      expect(new Set(checker.committed().knownIds)).toEqual(new Set(runner.snapshot().knownIds));
+      expect(new Set(checker.committed().localIds)).toEqual(new Set(runner.snapshot().localIds));
+
+      const rawChecker = server(randomCtx);
+      cursor = 0;
+      while (cursor < raw.length) {
+        const frame = raw.slice(cursor, cursor + 1 + rand(5)).map((item) => item.line);
+        const before = JSON.stringify(rawChecker.committed());
+        const result = rawChecker.frame(frame);
+        if (!result.ok) {
+          expect(JSON.stringify(rawChecker.committed()), `流 ${stream} 拒收帧不留痕`).toBe(before);
+          break;
+        }
+        counts.rawAccepted += 1;
+        expect(frame.join("\n"), `流 ${stream} 接受的原始帧不含原文`).not.toContain(MARK);
+        cursor += frame.length;
+      }
+    }
+    expect(counts.local).toBeGreaterThan(300);
+    expect(counts.edits).toBeGreaterThan(400);
+    expect(counts.forward).toBeGreaterThan(100);
+    expect(counts.extra).toBeGreaterThan(300);
+    expect(counts.nonIso).toBeGreaterThan(2000);
+    expect(counts.dup).toBeGreaterThan(100);
+    expect(counts.malformed).toBeGreaterThan(100);
+    expect(counts.redacted).toBeGreaterThan(300);
   });
 });
