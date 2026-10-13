@@ -60,8 +60,10 @@ test("删除例行任务要二次确认，取消和超时都不删除", async ({
   const rows = page.getByTestId("routine-row");
   await expect(rows).toHaveCount(1);
   await page.getByTestId("routine-open").click();
-  await page.clock.install();
-  await page.clock.pauseAt(new Date());
+  // 浏览器时钟从 install 起自己走，暂停时刻若取 Node 的 new Date()，两边一错开就落在浏览器当前时刻之前。起点钉死，暂停目标再往后留一分钟。
+  const start = new Date();
+  await page.clock.install({ time: start });
+  await page.clock.pauseAt(new Date(start.getTime() + 60_000));
 
   await page.getByTestId("routine-delete").click();
   await expect(page.getByTestId("routine-delete-confirm")).toBeVisible();

@@ -653,7 +653,12 @@ it("已收尾 run 仍对着当前 turn 时出牌得到失败回执", async () =>
   const p = await table.agent.expect("prompt");
   await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
   act(p, { kind: "call" });
-  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  // 扫描器每 20ms 一轮，run 一收尾就会给这个回合重派 prompt，它和回执谁先到不定，所以越过重派等回执。
+  let receipt = await table.agent.next();
+  while (receipt.type === "prompt") receipt = await table.agent.next();
+  if (receipt.type !== "poker_result") throw new Error(`本应收到 poker_result，实际是 ${receipt.type}`);
+  expect(receipt.runId).toBe(p.runId);
+  expect(receipt.result.ok).toBe(false);
   expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
 });
 it("不属于这台电脑、这个 Bot 或这个群的出牌静默丢弃", async () => {
