@@ -12,6 +12,9 @@ import {
   safeStorage,
   session as electronSession,
   Tray,
+  autoUpdater,
+  type MessageBoxOptions,
+  type MessageBoxReturnValue,
   type Rectangle,
   type Session,
 } from "electron";
@@ -32,15 +35,17 @@ import {
   shouldRetryPush,
   type AgentState,
 } from "./agent-state.js";
+import { menuTemplate } from "./menu.js";
 import { normalizedOrigin } from "./origin.js";
 import { receiveServerPush } from "./push.js";
 import { startUiServer } from "./proxy.js";
+import { createUpdater, parseUpdateFeed, resolveUpdateFeed, type Updater } from "./updater.js";
 
 const startedAt = Date.now();
 const DEFAULT_CONTROL_ORIGIN = "http://localhost:3001";
 const AGENT_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL"] as const;
 
-type Settings = { readonly controlOrigin: string };
+type Settings = { readonly controlOrigin: string; readonly updateFeed?: string };
 type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string };
 let mainWindow: BrowserWindow | null = null;
 let menubarWindow: BrowserWindow | null = null;
@@ -55,6 +60,8 @@ let provisioning: Promise<void> | null = null;
 let controlOrigin = DEFAULT_CONTROL_ORIGIN;
 let uiOrigin = "";
 let authHookInstalled = false;
+let settings: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
+let updater: Updater | null = null;
 
 const logLine = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -74,16 +81,21 @@ async function loadSettings(): Promise<Settings> {
   const override = process.argv
     .find((value) => value.startsWith("--control-origin="))
     ?.slice("--control-origin=".length);
-  if (override !== undefined) return { controlOrigin: normalizedOrigin(override) };
+  let stored: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
   try {
     const value: unknown = JSON.parse(await readFile(settingsPath(), "utf8"));
-    if (typeof value === "object" && value !== null && "controlOrigin" in value) {
-      return { controlOrigin: normalizedOrigin(String(value.controlOrigin)) };
+    if (typeof value === "object" && value !== null) {
+      const updateFeed = "updateFeed" in value ? parseUpdateFeed(value.updateFeed) : undefined;
+      stored = {
+        controlOrigin:
+          "controlOrigin" in value ? normalizedOrigin(String(value.controlOrigin)) : DEFAULT_CONTROL_ORIGIN,
+        ...(updateFeed === undefined ? {} : { updateFeed }),
+      };
     }
   } catch {
     // 首次启动没有设置文件。
   }
-  return { controlOrigin: DEFAULT_CONTROL_ORIGIN };
+  return override === undefined ? stored : { ...stored, controlOrigin: normalizedOrigin(override) };
 }
 
 async function saveSettings(next: Settings): Promise<void> {
@@ -525,7 +537,7 @@ function openSettings(): void {
     event.preventDefault();
     void (async () => {
       const next = normalizedOrigin(new URL(target).searchParams.get("origin") ?? "");
-      await saveSettings({ controlOrigin: next });
+      await saveSettings({ ...settings, controlOrigin: next });
       await unlink(credentialsPath()).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       });
@@ -541,33 +553,63 @@ function openSettings(): void {
   void settingsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(settingsHtml(controlOrigin))}`);
 }
 
-function installMenu(): void {
+function installMenu(checkForUpdates: () => void): void {
   Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      {
-        label: "白泽",
-        submenu: [
-          { label: "控制面设置…", click: openSettings },
-          { type: "separator" },
-          { role: "quit", label: "退出白泽" },
-        ],
-      },
-      { role: "editMenu" },
-      { role: "windowMenu" },
-    ]),
+    Menu.buildFromTemplate(
+      menuTemplate({
+        packaged: app.isPackaged,
+        version: app.getVersion(),
+        openAtLogin: () => app.getLoginItemSettings().openAtLogin,
+        setOpenAtLogin: (openAtLogin) => app.setLoginItemSettings({ openAtLogin }),
+        checkForUpdates,
+        openSettings,
+      }),
+    ),
   );
+}
+
+function showBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> {
+  return mainWindow !== null && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options);
+}
+
+function createAppUpdater(): Updater {
+  return createUpdater({
+    packaged: app.isPackaged,
+    feedUrl: resolveUpdateFeed(settings, controlOrigin, process.arch),
+    source: autoUpdater,
+    askRestart: async ({ message, detail }) => {
+      const { response } = await showBox({
+        type: "info",
+        message,
+        detail,
+        buttons: ["现在重启", "稍后"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      return response === 0;
+    },
+    inform: (level, text) => void showBox({ type: level, message: text }),
+    beforeRestart: stopAgent,
+    log: logLine,
+  });
 }
 
 async function main(): Promise<void> {
   await app.whenReady();
-  ({ controlOrigin } = await loadSettings());
+  settings = await loadSettings();
+  ({ controlOrigin } = settings);
   const uiServer = await startUiServer(desktopPaths().web, controlOrigin);
   uiOrigin = uiServer.origin;
   const session = electronSession.defaultSession;
   tray = new Tray(trayImage());
   tray.setToolTip("白泽");
   tray.on("click", () => (menubarWindow?.isVisible() ? menubarWindow.hide() : showMenubar()));
-  installMenu();
+  const appUpdater = createAppUpdater();
+  updater = appUpdater;
+  app.setAboutPanelOptions({ applicationName: "白泽", applicationVersion: app.getVersion() });
+  installMenu(appUpdater.checkNow);
   await createWindows(session);
   let credentials: { readonly computerId: ComputerId; readonly token: string } | null = null;
   try {
@@ -594,12 +636,14 @@ async function main(): Promise<void> {
     if (mainWindow === null) void createWindows(session);
     else mainWindow.show();
   });
+  appUpdater.start();
 }
 
 app.on("before-quit", (event) => {
   event.preventDefault();
   if (quitting) return;
   quitting = true;
+  updater?.stop();
   if (pushRetry !== null) clearTimeout(pushRetry);
   pushGeneration += 1;
   pushSocket?.close();

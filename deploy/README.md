@@ -129,7 +129,7 @@ baize.example.com {
 	handle /api/* {
 		reverse_proxy 127.0.0.1:3201
 	}
-	# 本机桌面端的电脑代理连这里（packages/desktop/src/main.ts:132-136）。
+	# 本机桌面端的电脑代理连这里（packages/desktop/src/main.ts:144-148）。
 	handle /agent {
 		reverse_proxy 127.0.0.1:3201
 	}
@@ -208,7 +208,7 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 	}
 ```
 
-**配对电脑。** 用户的本机电脑走桌面端：设置里填控制面地址，桌面端调 `POST /api/computers/local` 拿 token（`packages/desktop/src/main.ts:329`），再连这个地址下的 `/agent`。远程电脑由运维跑 `./put-launch.sh <邮箱>`（`remote/README.md:74-100`）。compose 只有一个 `remote-computer` 服务，一个容器只放一个账号的启动文件，所以一台服务器现在只给一个账号配远程电脑。多个账号各要一台远程电脑，就得在 compose 里多加服务，仓库里还没有这种写法。
+**配对电脑。** 用户的本机电脑走桌面端：设置里填控制面地址，桌面端调 `POST /api/computers/local` 拿 token（`packages/desktop/src/main.ts:341`），再连这个地址下的 `/agent`。远程电脑由运维跑 `./put-launch.sh <邮箱>`（`remote/README.md:74-100`）。compose 只有一个 `remote-computer` 服务，一个容器只放一个账号的启动文件，所以一台服务器现在只给一个账号配远程电脑。多个账号各要一台远程电脑，就得在 compose 里多加服务，仓库里还没有这种写法。
 
 ## 从零部署的顺序
 

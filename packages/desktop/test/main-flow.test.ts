@@ -6,6 +6,14 @@ import type { ComputerId } from "@baize/shared";
 const sockets: FakeSocket[] = [];
 const children: FakeChild[] = [];
 const reapedProfiles = vi.hoisted((): string[] => []);
+const electronState = vi.hoisted(() => ({ packaged: false, ready: false }));
+const autoUpdater = vi.hoisted(() => ({
+  on: vi.fn(),
+  setFeedURL: vi.fn(),
+  checkForUpdates: vi.fn(),
+  quitAndInstall: vi.fn(),
+}));
+const appOn = vi.hoisted(() => vi.fn());
 // 比任何系统的 pid_max 都大，真发出信号也落不到别人的进程上。
 const FAKE_PID_BASE = 2 ** 30;
 
@@ -36,25 +44,48 @@ class FakeChild extends EventEmitter {
   }
 }
 
-vi.mock("electron", () => ({
-  app: {
-    isPackaged: false,
-    whenReady: () => new Promise<void>(() => undefined),
-    on: vi.fn(),
-    getPath: () => "/tmp/baize-desktop-test",
-    exit: vi.fn(),
-    quit: vi.fn(),
-  },
-  BrowserWindow: vi.fn(),
-  dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
-  Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
-  nativeImage: { createFromDataURL: vi.fn() },
-  Notification: Object.assign(vi.fn(), { isSupported: () => false }),
-  safeStorage: { isEncryptionAvailable: () => false },
-  session: { defaultSession: {} },
-  Tray: vi.fn(),
-}));
+const fakeWindow = (): object => ({
+  webContents: { setWindowOpenHandler: vi.fn() },
+  once: vi.fn(),
+  on: vi.fn(),
+  loadURL: vi.fn(async () => undefined),
+});
 
+vi.mock("electron", () => {
+  return {
+    app: {
+      get isPackaged() {
+        return electronState.packaged;
+      },
+      whenReady: () => (electronState.ready ? Promise.resolve() : new Promise<void>(() => undefined)),
+      on: appOn,
+      getPath: () => "/tmp/baize-desktop-test",
+      getVersion: () => "0.1.0",
+      getAppPath: () => "/tmp/baize-desktop-test/app",
+      getLoginItemSettings: () => ({ openAtLogin: false }),
+      setLoginItemSettings: vi.fn(),
+      setAboutPanelOptions: vi.fn(),
+      exit: vi.fn(),
+      quit: vi.fn(),
+    },
+    autoUpdater,
+    BrowserWindow: vi.fn(fakeWindow),
+    dialog: { showErrorBox: vi.fn(), showMessageBox: vi.fn() },
+    Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
+    nativeImage: { createFromDataURL: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
+    Notification: Object.assign(vi.fn(), { isSupported: () => false }),
+    safeStorage: { isEncryptionAvailable: () => false },
+    session: {
+      defaultSession: {
+        webRequest: { onCompleted: vi.fn() },
+        fetch: vi.fn(async () => ({ ok: false })),
+      },
+    },
+    Tray: vi.fn(() => ({ setToolTip: vi.fn(), on: vi.fn() })),
+  };
+});
+
+vi.mock("../src/proxy.js", () => ({ startUiServer: async () => ({ origin: "http://127.0.0.1:1" }) }));
 vi.mock("ws", () => ({ default: FakeSocket }));
 vi.mock("node:child_process", async () => {
   const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
@@ -179,5 +210,41 @@ describe("桌面主进程代理流程", () => {
     expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGINT");
     expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGKILL");
     expect(reapedProfiles).toEqual([agentChromeProfile]);
+  });
+
+  describe("启动时检查更新", () => {
+    const startMain = async (packaged: boolean): Promise<void> => {
+      electronState.packaged = packaged;
+      electronState.ready = true;
+      Object.defineProperty(process, "resourcesPath", {
+        value: "/tmp/baize-desktop-test/resources",
+        configurable: true,
+      });
+      await loadMain();
+      await vi.waitFor(() => expect(appOn).toHaveBeenCalledWith("activate", expect.any(Function)));
+    };
+
+    afterEach(() => {
+      Reflect.deleteProperty(process, "resourcesPath");
+      electronState.packaged = false;
+      electronState.ready = false;
+    });
+
+    it("打包态设置 feed 并检查一次", async () => {
+      await startMain(true);
+
+      expect(autoUpdater.setFeedURL).toHaveBeenCalledWith({
+        url: `http://localhost:3001/desktop/darwin-${process.arch}/releases.json`,
+        serverType: "json",
+      });
+      expect(autoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+    });
+
+    it("非打包态不设置 feed 也不检查", async () => {
+      await startMain(false);
+
+      expect(autoUpdater.setFeedURL).not.toHaveBeenCalled();
+      expect(autoUpdater.checkForUpdates).not.toHaveBeenCalled();
+    });
   });
 });
