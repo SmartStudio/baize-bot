@@ -57,10 +57,11 @@ export const AgentStatusLine = z.discriminatedUnion("type", [
 ]);
 export type AgentStatusLine = z.infer<typeof AgentStatusLine>;
 
-// 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
-export const ToolConnectionConfig = ToolConnection.extend({
-  authorization: z.string().nullable(),
-});
+// 默认由控制面执行；只有本机连接才下发直连需要的凭据。
+export const ToolConnectionConfig = z.discriminatedUnion("localOnly", [
+  ToolConnection.extend({ localOnly: z.literal(false) }).strict(),
+  ToolConnection.extend({ localOnly: z.literal(true), authorization: z.string().nullable() }).strict(),
+]);
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
 export const AccountConfig = z
@@ -374,8 +375,9 @@ export const ControlToAgent = z.discriminatedUnion("type", [
         preset: PokerPersona.nullable(),
       }),
     ),
-    // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
+    // 本机连接只发给本机电脑，其他连接不带凭据。
     tools: z.array(ToolConnectionConfig),
+    mcpProxy: z.object({ baseUrl: z.string().url() }),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
     skills: z.array(Skill).optional(),
     // 品牌手册由控制面拼成一段文字下发，version 变了运行器才重送给模型；没写过手册是 null。

@@ -134,6 +134,7 @@ const configMessage = {
   grants: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },
   accountsProxy: { baseUrl: "http://localhost:3001/accounts-proxy" },
+  mcpProxy: { baseUrl: "http://localhost:3001/mcp-proxy" },
 };
 
 const promptMessage = {
@@ -359,10 +360,12 @@ describe("电脑代理连控制面", () => {
     const applyConfigDone = new Promise<void>((resolve) => {
       releaseApplyConfig = resolve;
     });
+    const receivedConfigs: AgentRunnerConfig[] = [];
     const server = startControlPlane();
     servers.push(server);
     spawnAgent(await server.url(), {
       makeRunner: (config) => {
+        receivedConfigs.push(config);
         runnerCalls().configSkills.push(config.skills);
         return runnerOf(config, runnerCalls(), applyConfigDone);
       },
@@ -372,11 +375,13 @@ describe("电脑代理连控制面", () => {
       ...configMessage,
       generation: 2,
       bots: [{ id: "bot-1", role: "member", preset: null, name: "新版小服", tags: [], description: "新版客服 Bot" }],
+      mcpProxy: { baseUrl: "http://localhost:3001/mcp-proxy-v2" },
     };
 
     try {
       socket.send(JSON.stringify(configMessage));
       await poll(() => (runnerCalls().configSkills.length === 1 ? true : undefined), 3000, "首个运行器建好");
+      expect(receivedConfigs[0]?.mcpProxy).toEqual({ baseUrl: "http://localhost:3001/mcp-proxy" });
       socket.send(JSON.stringify(secondConfig));
       socket.send(JSON.stringify(promptMessage));
 
@@ -393,6 +398,7 @@ describe("电脑代理连控制面", () => {
       expect(runnerCalls().configSkills).toHaveLength(1);
       expect(runnerCalls().appliedConfigs).toHaveLength(1);
       expect(runnerCalls().appliedConfigs[0]?.bots[0]?.name).toBe("新版小服");
+      expect(runnerCalls().appliedConfigs[0]?.mcpProxy).toEqual({ baseUrl: "http://localhost:3001/mcp-proxy-v2" });
     } finally {
       releaseApplyConfig?.();
     }

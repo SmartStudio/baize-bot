@@ -537,6 +537,7 @@ export const ToolConnection = z.object({
   operations: z.array(ToolOperation),
   assignedBotIds: z.array(BotId),
   status: ToolConnectionStatus,
+  localOnly: z.boolean(),
 });
 export type ToolConnection = z.infer<typeof ToolConnection>;
 

@@ -400,6 +400,7 @@ export const CreateToolRequest = z.object({
   name: z.string().min(1).max(40),
   url: z.string().url(),
   authorization: z.string().min(1).optional(),
+  localOnly: z.boolean().optional(),
 });
 export type CreateToolRequest = z.infer<typeof CreateToolRequest>;
 export const ToolResponse = z.object({ tool: ToolConnection });
@@ -412,12 +413,26 @@ export const ToolResponse = z.object({ tool: ToolConnection });
 export const UpdateToolRequest = z.object({
   name: z.string().min(1).max(40).optional(),
   authorization: z.string().min(1).nullable().optional(),
+  localOnly: z.boolean().optional(),
   assignedBotIds: z.array(BotId).optional(),
   operations: z.array(ToolOperation.pick({ name: true, needsApproval: true })).optional(),
 });
 export type UpdateToolRequest = z.infer<typeof UpdateToolRequest>;
 
 // DELETE /api/tools/:id  回 204，重发 config。
+
+// POST ${mcpProxy.baseUrl}/:connectionId/call，Bearer 用当前 modelGateway.apiKey。
+export const McpProxyCallRequest = z.object({
+  botId: BotId,
+  tool: z.string().min(1),
+  arguments: z.record(z.unknown()),
+});
+export type McpProxyCallRequest = z.infer<typeof McpProxyCallRequest>;
+export const McpProxyCallResponse = z.object({
+  content: z.array(z.record(z.unknown())),
+  isError: z.boolean(),
+});
+export type McpProxyCallResponse = z.infer<typeof McpProxyCallResponse>;
 
 // GET /api/usage  设置的用量页。本月从 1 号 00:00（Asia/Shanghai）起算，monthStartsAt 告诉客户端这一刻。
 // 每个自己的 Bot 一行，本月没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。recent 只列本月的。

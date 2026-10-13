@@ -4,6 +4,7 @@ import {
   ToolConnectionConfig,
   ToolConnectionId,
   type CreateToolRequest,
+  type ComputerKind,
   type ToolOperation,
   type UpdateToolRequest,
   type UserId,
@@ -26,6 +27,7 @@ const toTool = (row: ToolRow, assignedBotIds: BotId[]): ToolConnection =>
     operations: row.operations,
     assignedBotIds,
     status: row.status,
+    localOnly: row.localOnly,
   });
 
 const assignments = async (db: Db | Tx, ids: string[]): Promise<Map<string, BotId[]>> => {
@@ -73,11 +75,18 @@ export async function listToolsByOwner(db: Db, ownerId: UserId): Promise<ToolCon
   return rows.map((row) => toTool(row, byTool.get(row.id) ?? []));
 }
 
-export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypto): Promise<ToolConnectionConfig[]> {
+export async function listToolConfigs(
+  db: Db,
+  ownerId: UserId,
+  crypto: ToolCrypto,
+  kind: ComputerKind,
+): Promise<ToolConnectionConfig[]> {
   const rows = await db
     .select()
     .from(toolConnections)
-    .where(eq(toolConnections.ownerId, ownerId))
+    .where(
+      and(eq(toolConnections.ownerId, ownerId), kind === "remote" ? eq(toolConnections.localOnly, false) : undefined),
+    )
     .orderBy(asc(toolConnections.createdAt), asc(toolConnections.id));
   const byTool = await assignments(
     db,
@@ -86,9 +95,21 @@ export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypt
   return rows.map((row) =>
     ToolConnectionConfig.parse({
       ...toTool(row, byTool.get(row.id) ?? []),
-      authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc),
+      ...(row.localOnly
+        ? { authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc) }
+        : {}),
     }),
   );
+}
+
+export async function toolAuthorization(
+  db: Db,
+  ownerId: UserId,
+  id: ToolConnectionId,
+  crypto: ToolCrypto,
+): Promise<string | null> {
+  const row = await ownedRow(db, ownerId, id);
+  return row === null || row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc);
 }
 
 export async function createTool(
@@ -105,6 +126,7 @@ export async function createTool(
       ownerId,
       name: input.name,
       url: input.url,
+      localOnly: input.localOnly ?? false,
       authorizationEnc: input.authorization === undefined ? null : crypto.encrypt(input.authorization),
       operations,
     })
@@ -182,6 +204,7 @@ export async function updateTool(
       if (locked === undefined) return { kind: "gone" };
       const changes: Partial<typeof toolConnections.$inferInsert> = {};
       if (patch.name !== undefined) changes.name = patch.name;
+      if (patch.localOnly !== undefined) changes.localOnly = patch.localOnly;
       if (reauthorized !== undefined || patch.operations !== undefined) {
         const operations = nextOperations(locked.operations, reauthorized, patch.operations);
         if (operations === null) return { kind: "invalid_operation" };

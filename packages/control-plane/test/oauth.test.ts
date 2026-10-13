@@ -1397,15 +1397,16 @@ describe("电脑报 OAuth 账号的登录状态", () => {
 describe("凭据落库之后", () => {
   it("重发 config 出错：页面照样 connected，账号已连上，错误只进日志", async () => {
     const s = await stack();
-    const o = await owner(s, true);
+    const o = await owner(s, false);
     const logged = captureErrors();
-    // 工具认证的密文坏了，组 config 时解密会抛。
+    // 本机插件随 config 解密，损坏密文可确定触发重发失败。
     await s.database.db.insert(toolConnections).values({
       id: newId(),
       ownerId: o.user.id,
       name: "坏掉的工具",
       url: "https://tool.invalid/mcp",
       authorizationEnc: "不是密文",
+      localOnly: true,
     });
 
     const { landed } = await connectPlatform(o.client, "github");
@@ -1420,18 +1421,19 @@ describe("凭据落库之后", () => {
 
   it("刷新把过期账号带回 valid 之后重发 config 出错：代理照样回 200，账号是新一代的 valid，错误只进日志", async () => {
     const s = await stack();
-    const o = await owner(s, true);
+    const o = await owner(s, false);
     s.fake.setTokenLifetime(SHORT_LIFETIME_S);
     await connectPlatform(o.client, "github");
     const account = await connected(o);
     const logged = captureErrors();
-    // 工具认证的密文坏了，组 config 时解密会抛。
+    // 本机插件随 config 解密，损坏密文可确定触发重发失败。
     await s.database.db.insert(toolConnections).values({
       id: newId(),
       ownerId: o.user.id,
       name: "坏掉的工具",
       url: "https://tool.invalid/mcp",
       authorizationEnc: "不是密文",
+      localOnly: true,
     });
 
     // 代理读到 valid 之后、刷新锁到账号行之前，账号被记过期：这趟刷新成功就是把它带回 valid 的那一下。

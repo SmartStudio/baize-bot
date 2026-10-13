@@ -398,6 +398,7 @@ export const reseed = (): void => {
       ownerId: user.id,
       name: "工单系统",
       url: "https://tickets.acme.internal/mcp",
+      localOnly: false,
       operations: [
         {
           name: "create_ticket",
@@ -431,6 +432,7 @@ export const reseed = (): void => {
       ownerId: user.id,
       name: "邮箱",
       url: "https://mail.acme.com/mcp",
+      localOnly: false,
       operations: [
         {
           name: "send_email",

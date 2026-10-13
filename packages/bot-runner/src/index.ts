@@ -62,6 +62,7 @@ export interface RunnerConfig {
   readonly bots: readonly BotConfig[];
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
+  readonly mcpProxy: ConfigMessage["mcpProxy"];
   readonly modelGateway: ConfigMessage["modelGateway"];
   /** 读 GitHub、X 的 account_read 打这里，见 `src/account-read.ts`。 */
   readonly accountsProxy: ConfigMessage["accountsProxy"];
@@ -110,6 +111,7 @@ interface BotDesired {
   readonly skills: readonly BotSkill[];
   readonly gateway: RunnerConfig["modelGateway"];
   readonly accountsProxy: RunnerConfig["accountsProxy"];
+  readonly mcpProxy: ConfigMessage["mcpProxy"];
   readonly computerId: ComputerId;
   readonly accounts: ConfigMessage["accounts"];
   readonly grants: ConfigMessage["grants"];
@@ -216,6 +218,7 @@ const desiredFor = (
   skills: readonly BotSkill[],
   gateway: RunnerConfig["modelGateway"],
   accountsProxy: RunnerConfig["accountsProxy"],
+  mcpProxy: ConfigMessage["mcpProxy"],
   computerId: ComputerId,
   accounts: ConfigMessage["accounts"],
   grants: ConfigMessage["grants"],
@@ -228,6 +231,7 @@ const desiredFor = (
   skills,
   gateway,
   accountsProxy,
+  mcpProxy,
   computerId,
   accounts,
   grants,
@@ -365,6 +369,7 @@ export function createRunner(config: RunnerConfig): Runner {
         initialSkills,
         config.modelGateway,
         config.accountsProxy,
+        config.mcpProxy,
         config.computerId,
         initialAccounts,
         initialGrants,
@@ -697,6 +702,7 @@ export function createRunner(config: RunnerConfig): Runner {
           ACCOUNT_READ_TOOL,
         ]),
         latest: () => connectionsFor(bot.botId, desiredConfig(bot)?.tools ?? []),
+        liveProxy: () => ({ proxy: desiredConfig(bot)!.mcpProxy, gateway: desiredConfig(bot)!.gateway }),
       });
     bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
@@ -868,6 +874,7 @@ export function createRunner(config: RunnerConfig): Runner {
             nextSkills,
             next.modelGateway,
             next.accountsProxy,
+            next.mcpProxy,
             next.computerId,
             nextAccounts,
             nextGrants,

@@ -32,6 +32,7 @@ import {
   GroupId,
   HandoffId,
   MessageId,
+  McpProxyCallRequest,
   ModelPurpose,
   type Preference,
   PreferenceId,
@@ -182,9 +183,12 @@ const SUITE_STARTED_AT = Date.now();
 const toolConnection = (
   operations: ReadonlyArray<Pick<ToolOperation, "name" | "needsApproval">>,
   overrides: Partial<
-    Pick<ToolConnectionConfig, "id" | "name" | "url" | "authorization" | "status" | "assignedBotIds">
+    Pick<
+      Extract<ToolConnectionConfig, { localOnly: true }>,
+      "id" | "name" | "url" | "authorization" | "status" | "assignedBotIds"
+    >
   > = {},
-): ToolConnectionConfig => ({
+): Extract<ToolConnectionConfig, { localOnly: true }> => ({
   id: "tc-1" as ToolConnectionConfig["id"],
   ownerId: "user-1" as ToolConnectionConfig["ownerId"],
   name: "客服工具",
@@ -192,6 +196,7 @@ const toolConnection = (
   operations: operations.map((op) => ({ ...op, description: "", inputSchema: {} })),
   assignedBotIds: [BotId.parse("bot-1")],
   authorization: null,
+  localOnly: true,
   status: "ready",
   ...overrides,
 });
@@ -394,6 +399,7 @@ interface Harness {
     readonly preferences?: RunnerConfig["preferences"];
     readonly modelGateway?: RunnerConfig["modelGateway"];
     readonly accountsProxy?: RunnerConfig["accountsProxy"];
+    readonly mcpProxy?: RunnerConfig["mcpProxy"];
   }): RunnerConfig;
   close(): Promise<void>;
 }
@@ -459,6 +465,7 @@ async function startHarness(options: {
   readonly browser?: RunnerConfig["browser"];
   /** 不给就指到一个连不上的地址。 */
   readonly accountsProxy?: RunnerConfig["accountsProxy"];
+  readonly mcpProxy?: RunnerConfig["mcpProxy"];
 }): Promise<Harness> {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
@@ -500,6 +507,7 @@ async function startHarness(options: {
       readonly preferences?: RunnerConfig["preferences"];
       readonly modelGateway?: RunnerConfig["modelGateway"];
       readonly accountsProxy?: RunnerConfig["accountsProxy"];
+      readonly mcpProxy?: RunnerConfig["mcpProxy"];
     } = {},
   ): RunnerConfig => ({
     accounts: [...(overrides.accounts ?? options.accounts ?? [])],
@@ -509,6 +517,7 @@ async function startHarness(options: {
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     accountsProxy: overrides.accountsProxy ?? options.accountsProxy ?? { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
+    mcpProxy: overrides.mcpProxy ?? options.mcpProxy ?? { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
     brand: overrides.brand !== undefined ? overrides.brand : (options.brand ?? null),
     preferences: [...(overrides.preferences ?? options.preferences ?? [])],
     dataDir,
@@ -929,6 +938,7 @@ describe("运行器的审批", () => {
   afterEach(async () => {
     await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
   });
+
   /** send_email 走真 MCP 注册，审批来源就是会话里这条 MCP 工具本身。 */
   const withMcp = async (approve?: boolean, script = approvalScript) => {
     const mcp = await startFakeMcp();
@@ -2399,6 +2409,177 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
   };
   afterEach(async () => {
     await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
+  });
+
+  const proxyConnection = (url: string): ToolConnectionConfig => {
+    const { authorization: _authorization, ...connection } = toolConnection(OPS, { url });
+    return { ...connection, localOnly: false };
+  };
+
+  const fakeProxy = async (
+    status = 200,
+    body: unknown = { content: [{ type: "text", text: "代理库存 42" }], isError: false },
+  ) => {
+    const calls: {
+      readonly method: string | undefined;
+      readonly url: string | undefined;
+      readonly authorization: string | undefined;
+      readonly body: McpProxyCallRequest;
+    }[] = [];
+    const server = createHttpServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        calls.push({
+          method: request.method,
+          url: request.url,
+          authorization: request.headers.authorization,
+          body: McpProxyCallRequest.parse(JSON.parse(Buffer.concat(chunks).toString("utf8"))),
+        });
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("假工具代理没有端口");
+    openMcps.push({
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.closeAllConnections();
+          server.close(() => resolve());
+        }),
+    });
+    return { baseUrl: `http://127.0.0.1:${address.port}/mcp-proxy`, calls };
+  };
+
+  it("非本机 MCP 只向控制面代理转发，审批通过后才发 POST，带当前网关 key 和参数", async () => {
+    const mcp = await fakeMcp();
+    const proxy = await fakeProxy();
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [proxyConnection(mcp.url)],
+      mcpProxy: { baseUrl: proxy.baseUrl },
+      script: scriptSeeingTools(seen, [
+        ["发邮件", callTool("send_email", { to: "kehu@example.com", subject: "报价" })],
+      ]),
+    });
+
+    const running = h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+    await until(() => h.sent.some((message) => message.type === "approval_request"), "代理工具的审批卡");
+    expect(proxy.calls, "审批之前不能转发").toEqual([]);
+    expect(mcp.connections, "非本机连接不向 MCP initialize").toBe(0);
+    const approval = h.sent.find((message) => message.type === "approval_request");
+    if (approval?.type !== "approval_request") throw new Error("没有代理工具的审批卡");
+    h.runner.approve(approval.runId, approval.callId, "approved");
+    await running;
+
+    expect(seen.toolNames[0]).toEqual(expect.arrayContaining(["send_email", "lookup_stock"]));
+    expect(proxy.calls).toEqual([
+      {
+        method: "POST",
+        url: "/mcp-proxy/tc-1/call",
+        authorization: "Bearer test-key",
+        body: { botId: "bot-1", tool: "send_email", arguments: { to: "kehu@example.com", subject: "报价" } },
+      },
+    ]);
+    expect(mcp.connections, "运行器始终不直连非本机 MCP").toBe(0);
+    expect(mcp.calls).toEqual([]);
+    expect(seen.toolResults[0]).toContain("代理库存 42");
+    expect(shape(h.sent).filter((state) => state.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+  });
+
+  it("代理 key 轮换和 baseUrl 更新不重建工具会话，下一次调用各用最新值", async () => {
+    const proxy = await fakeProxy();
+    const nextProxy = await fakeProxy();
+    const modelTurns: string[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [proxyConnection("http://127.0.0.1:9/mcp")],
+      mcpProxy: { baseUrl: proxy.baseUrl },
+      script: (request) => {
+        const lastRole = request.messages.at(-1)?.role ?? "";
+        modelTurns.push(lastRole);
+        return lastRole === "tool"
+          ? { textChunks: [], usage: { input: 900, output: 8 } }
+          : callTool("lookup_stock", { sku: "SKU-1" });
+      },
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一次查库存"));
+    const creationsBefore = sessionCreationsFor("bot-1");
+    const beforeFiles = sessionFilesOf(h.dataDir, "bot-1");
+
+    await h.runner.applyConfig(h.config({ modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-mcp-key" } }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次查库存"));
+    await h.runner.applyConfig(
+      h.config({
+        modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-mcp-key" },
+        mcpProxy: { baseUrl: nextProxy.baseUrl },
+      }),
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三次查库存"));
+
+    expect(modelTurns, "历史里的工具结果不应吞掉后续 prompt，每次都要真正调用工具").toEqual([
+      "user",
+      "tool",
+      "user",
+      "tool",
+      "user",
+      "tool",
+    ]);
+    expect(proxy.calls.map((call) => call.authorization)).toEqual(["Bearer test-key", "Bearer rotated-mcp-key"]);
+    expect(nextProxy.calls.map((call) => call.authorization)).toEqual(["Bearer rotated-mcp-key"]);
+    expect(sessionCreationsFor("bot-1"), "key 和代理地址不进入工具定义指纹").toBe(creationsBefore);
+    expect(sessionFilesOf(h.dataDir, "bot-1")).toEqual(beforeFiles);
+  });
+
+  it.each([
+    { name: "HTTP 409", status: 409, body: { error: "这个插件只在本机用" }, reason: "这个插件只在本机用" },
+    {
+      name: "MCP isError",
+      status: 200,
+      body: { content: [{ type: "text", text: "没有这个库存编号" }], isError: true },
+      reason: "没有这个库存编号",
+    },
+    {
+      name: "不合契约的响应",
+      status: 200,
+      body: { content: "wrong", isError: false },
+      reason: "白泽工具代理返回的内容格式不正确",
+    },
+  ])("代理回 $name：Pi 工具结果带 isError 和中文原因，终态 failed", async ({ status, body, reason }) => {
+    const proxy = await fakeProxy(status, body);
+    const seen = toolRecorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      tools: [proxyConnection("http://127.0.0.1:9/mcp")],
+      mcpProxy: { baseUrl: proxy.baseUrl },
+      script: scriptSeeingTools(seen, [["查库存", callTool("lookup_stock", { sku: "SKU-1" })]]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "查库存"));
+
+    expect(seen.toolResults[0]).toContain(reason);
+    expect(shape(h.sent).filter((state) => state.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    const entries = sessionFilesOf(h.dataDir, "bot-1").flatMap((file) =>
+      readFileSync(file, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { message?: { role?: string; isError?: boolean } }),
+    );
+    expect(
+      entries.some((entry) => entry.message?.role === "toolResult" && entry.message.isError === true),
+      "Pi 落盘的工具结果必须是 isError",
+    ).toBe(true);
   });
 
   it("停机时 MCP 工具还没回，调用当场取消，不等它，run_done 恰好一次", async () => {

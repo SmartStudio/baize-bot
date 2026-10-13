@@ -148,6 +148,8 @@ import type { AccountTokens, CredentialCrypto } from "../credentials.js";
 import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
+import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
+import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
 import { createGoalRoutes } from "./routes/goals.js";
@@ -195,11 +197,12 @@ const NO_PLAN = { error: "没有这份计划" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
 const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
-export function createApp(deps: AppDeps): Hono<Env> {
+export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promise<void> } {
   const { agents, db, hub } = deps;
   const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns, notifications: deps.notifications };
   const brandDeps = { db, push: hub, agents };
-  const app = new Hono<Env>();
+  const mcpClients = new McpClients();
+  const app = Object.assign(new Hono<Env>(), { closeMcpClients: () => mcpClients.close() });
 
   const pushRoutines = async (ownerId: UserId, routineIds: readonly string[]): Promise<void> => {
     for (const routineId of routineIds) {
@@ -209,6 +212,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
+  app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(
     ACCOUNTS_PROXY_PATH,
@@ -363,6 +367,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (result.kind === "name_taken") return c.json({ error: "已有同名工具连接" }, 409);
     if (result.kind === "invalid_operation") return c.json({ error: "操作名不在这条工具连接上" }, 400);
     if (result.kind === "invalid_bot") return c.json({ error: "只能分配给自己的 Bot" }, 400);
+    mcpClients.invalidate(current.id);
     await agents.sendConfig(c.get("user").id);
     return c.json(ToolResponse.parse({ tool: result.tool }));
   });
@@ -370,6 +375,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.delete("/api/tools/:id", async (c) => {
     const id = ToolConnectionId.safeParse(c.req.param("id"));
     if (!id.success || !(await deleteTool(db, c.get("user").id, id.data))) return c.json(NOT_FOUND, 404);
+    mcpClients.invalidate(id.data);
     await agents.sendConfig(c.get("user").id);
     return c.body(null, 204);
   });

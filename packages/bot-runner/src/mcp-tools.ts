@@ -1,7 +1,11 @@
 import {
+  ApiError,
   describeMcpFailure,
+  McpProxyCallResponse,
   redactCredential,
   type BotId,
+  type ControlToAgent,
+  type McpProxyCallRequest,
   type ToolConnectionConfig,
   type ToolOperation,
 } from "@baize/shared";
@@ -21,7 +25,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
 
-// 每条工具连接一个 MCP Client，第一次调用它的工具时才连。连不上不抛：工具结果里放一句中文，
+// 只在本机的连接才建 MCP Client，第一次调用它的工具时才连。连不上不抛：工具结果里放一句中文，
 // Bot 转述给用户，比整次 run 崩掉强。连接、协议这类错误只给固定的中文分类，不带对端的原文：对端能把收到的凭据
 // 以任意编码写进报错。工具的正文（成功的和 isError 的）是对端的业务输出，原样进模型，只换掉凭据的原文、
 // 百分号编码和 JSON 转义三种写法，别的编码不保证。
@@ -62,9 +66,58 @@ interface Pending {
 
 interface Link {
   /** 换了凭据就换成最新的一份，旧的 client 随之作废。 */
-  connection: ToolConnectionConfig;
+  connection: Extract<ToolConnectionConfig, { localOnly: true }>;
   /** 正在连或已经连上的 client。连失败或被撤就清回 null，下一次调用再连。 */
   pending: Pending | null;
+}
+
+type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
+
+/** 网关 key 和代理地址随 config 更新，每次调用现取。 */
+export interface McpProxyLive {
+  readonly proxy: ConfigMessage["mcpProxy"];
+  readonly gateway: ConfigMessage["modelGateway"];
+}
+
+/** 控制面等上游最多 60 秒，这边留出回包余量。 */
+const PROXY_TIMEOUT_MS = 65_000;
+
+async function callProxy(
+  connection: ToolConnectionConfig,
+  request: McpProxyCallRequest,
+  live: McpProxyLive,
+  signal: AbortSignal | undefined,
+): Promise<McpProxyCallResponse> {
+  const url = `${live.proxy.baseUrl.replace(/\/+$/, "")}/${encodeURIComponent(connection.id)}/call`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${live.gateway.apiKey}` },
+      body: JSON.stringify(request),
+      redirect: "manual",
+      signal:
+        signal === undefined
+          ? AbortSignal.timeout(PROXY_TIMEOUT_MS)
+          : AbortSignal.any([signal, AbortSignal.timeout(PROXY_TIMEOUT_MS)]),
+    });
+  } catch (error) {
+    if (signal?.aborted === true) throw error;
+    throw new Error(`工具连接「${connection.name}」连不上白泽工具代理：${describeMcpFailure(error)}`, {
+      cause: error,
+    });
+  }
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const parsed = ApiError.safeParse(body);
+    const reason = parsed.success ? parsed.data.error : "没有返回错误说明";
+    throw new Error(
+      `工具「${request.tool}」调用失败，白泽工具代理回 ${response.status}：${redactCredential(reason, `Bearer ${live.gateway.apiKey}`)}`,
+    );
+  }
+  const parsed = McpProxyCallResponse.safeParse(body);
+  if (!parsed.success) throw new Error(`工具「${request.tool}」调用失败：白泽工具代理返回的内容格式不正确`);
+  return parsed.data;
 }
 
 /**
@@ -126,7 +179,7 @@ const blocksOf = (content: unknown): ResultBlock[] =>
 const textOf = (blocks: readonly ResultBlock[]): string =>
   blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
 
-async function connect(connection: ToolConnectionConfig, signal: AbortSignal): Promise<Client> {
+async function connect(connection: Link["connection"], signal: AbortSignal): Promise<Client> {
   const client = new Client({ name: "baize-bot-runner", version: "0.1.0" });
   const transport = new StreamableHTTPClientTransport(
     new URL(connection.url),
@@ -185,6 +238,7 @@ export function createMcpTools(options: {
   readonly reserved: ReadonlySet<string>;
   /** 最新下发的 config 里分配给这个 Bot 的连接。 */
   readonly latest: () => readonly ToolConnectionConfig[];
+  readonly liveProxy: () => McpProxyLive;
 }): McpToolSet {
   const taken = new Set([...PI_BUILT_IN_TOOLS, ...options.reserved]);
   const links: Link[] = [];
@@ -206,9 +260,7 @@ export function createMcpTools(options: {
   };
 
   for (const connection of options.connections) {
-    const link: Link = { connection, pending: null };
-    links.push(link);
-    const scrub = (text: string): string => redactCredential(text, link.connection.authorization);
+    let link: Link | null = null;
     for (const op of connection.operations) {
       if (taken.has(op.name)) {
         console.warn(`Bot ${options.botId}：连接「${connection.name}」的操作「${op.name}」和已注册的工具重名，跳过`);
@@ -226,34 +278,51 @@ export function createMcpTools(options: {
         execute: async (_callId, params, signal) => {
           const callable = resolveOn(connection, op.name);
           if (callable.kind !== "ready") throw new Error(unusableReason(callable));
-          if (callable.connection.authorization !== link.connection.authorization) {
-            const stale = link.pending;
-            link.pending = null;
-            link.connection = callable.connection;
-            await dropPending(stale);
-          }
-          let client: Client;
-          try {
-            client = await clientOf(link, signal);
-          } catch (error) {
-            return {
-              content: [{ type: "text", text: `工具连接「${connection.name}」连不上：${describeMcpFailure(error)}` }],
-              details: {},
-            };
-          }
-          let result: Awaited<ReturnType<Client["callTool"]>>;
-          try {
-            // 停机和暂停的 abort 顺着 signal 传给 MCP，服务端收到 cancelled 通知，这边不等它回。
-            result = await client.callTool(
-              { name: op.name, arguments: params as Record<string, unknown> },
-              undefined,
-              signal === undefined ? {} : { signal },
+          let result: Awaited<ReturnType<Client["callTool"]>> | McpProxyCallResponse;
+          if (!callable.connection.localOnly) {
+            result = await callProxy(
+              callable.connection,
+              { botId: options.botId, tool: op.name, arguments: params as Record<string, unknown> },
+              options.liveProxy(),
+              signal,
             );
-          } catch (error) {
-            throw new Error(`工具「${op.name}」调用失败：${describeMcpFailure(error)}`, { cause: error });
+          } else {
+            if (link === null) {
+              link = { connection: callable.connection, pending: null };
+              links.push(link);
+            } else if (
+              callable.connection.authorization !== link.connection.authorization ||
+              callable.connection.url !== link.connection.url
+            ) {
+              const stale = link.pending;
+              link.pending = null;
+              link.connection = callable.connection;
+              await dropPending(stale);
+            }
+            let client: Client;
+            try {
+              client = await clientOf(link, signal);
+            } catch (error) {
+              return {
+                content: [{ type: "text", text: `工具连接「${connection.name}」连不上：${describeMcpFailure(error)}` }],
+                details: {},
+              };
+            }
+            try {
+              // 停机和暂停的 abort 顺着 signal 传给 MCP，服务端收到 cancelled 通知，这边不等它回。
+              result = await client.callTool(
+                { name: op.name, arguments: params as Record<string, unknown> },
+                undefined,
+                signal === undefined ? {} : { signal },
+              );
+            } catch (error) {
+              throw new Error(`工具「${op.name}」调用失败：${describeMcpFailure(error)}`, { cause: error });
+            }
           }
           const blocks = blocksOf(result.content).map((block) =>
-            block.type === "text" ? { type: "text" as const, text: scrub(block.text) } : block,
+            block.type === "text" && callable.connection.localOnly
+              ? { type: "text" as const, text: redactCredential(block.text, callable.connection.authorization) }
+              : block,
           );
           const text = textOf(blocks);
           if (result.isError === true) throw new Error(text === "" ? `工具「${op.name}」报错，没有说明` : text);

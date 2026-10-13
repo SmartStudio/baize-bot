@@ -87,6 +87,7 @@ const importTemplate = (template: BotTemplate) => {
       ownerId: user.id,
       name: plugin.name,
       url: plugin.url,
+      localOnly: false,
       operations: plugin.operations.map((operation) => ({ ...operation, description: "", inputSchema: {} })),
       assignedBotIds: [created.bot.id],
       status: "awaiting_authorization",

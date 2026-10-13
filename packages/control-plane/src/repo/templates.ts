@@ -161,6 +161,7 @@ export async function importTemplate(
               suffix === 1 ? plugin.name : headWithin(plugin.name, PLUGIN_NAME_MAX - String(suffix).length) + suffix,
             url: shareableUrl(plugin.url),
             authorizationEnc: null,
+            localOnly: false,
             operations: plugin.operations.map(placeholderOperation),
             status: "awaiting_authorization",
           })

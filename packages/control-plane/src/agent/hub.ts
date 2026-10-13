@@ -1,9 +1,11 @@
 import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
+import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
 import {
   AgentCloseCode,
   AgentToControl,
   ControlToAgent,
   type Computer,
+  type ComputerKind,
   type ComputerId,
   type MessageId,
   type RunId,
@@ -53,6 +55,7 @@ const DEFAULT_SILENCE_TIMEOUT_MS = 45_000;
 
 export type AgentConnection = {
   readonly computerId: ComputerId;
+  readonly kind: ComputerKind;
   readonly ownerId: UserId;
   readonly socket: WebSocket;
   /** 这条连接下发给电脑的网关 key 明文。hello 时现生成，只活在这条连接上。 */
@@ -370,6 +373,7 @@ export class AgentHub {
       }
       accepted = {
         computerId: computer.id,
+        kind: computer.kind,
         ownerId: computer.ownerId,
         socket,
         gatewayKey,
@@ -519,7 +523,7 @@ export class AgentHub {
     config.sent += 1;
     const generation = config.sent;
     const [tools, skills, grants, accounts, brand, preferences] = await Promise.all([
-      listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto),
+      listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto, conn.kind),
       listSkillsByOwner(this.#deps.db, conn.ownerId),
       listGrants(this.#deps.db, conn.ownerId),
       listAccountConfigs(this.#deps.db, conn.ownerId),
@@ -542,6 +546,7 @@ export class AgentHub {
         preset,
       })),
       tools,
+      mcpProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${MCP_PROXY_PATH}` },
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,

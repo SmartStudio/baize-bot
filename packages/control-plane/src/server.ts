@@ -252,6 +252,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
       );
+      await app.closeMcpClients();
     },
   };
 }

@@ -49,7 +49,7 @@ async function list(client: ApiClient) {
 }
 
 describe("工具连接", () => {
-  it("发现操作、加密认证、分配 Bot，并随变更重发解密后的 config", async () => {
+  it("发现操作、加密认证、分配 Bot，并随变更重发不带凭据的 config", async () => {
     const { client, botId, computer } = await owner();
     const { agent, config } = await helloAgent(server.server.port, computer.computerId, computer.token);
     expect(config.tools).toEqual([]);
@@ -87,7 +87,7 @@ describe("工具连接", () => {
       expect(ciphertext).not.toBe("Bearer test-secret-42");
 
       const createdConfig = await agent.expect("config");
-      expect(createdConfig.tools).toEqual([{ ...created, authorization: "Bearer test-secret-42", status: "ready" }]);
+      expect(createdConfig.tools).toEqual([created]);
 
       const changed = await client.patch(`/api/tools/${created.id}`, {
         assignedBotIds: [botId],
@@ -101,9 +101,7 @@ describe("工具连接", () => {
         ["lookup_stock", true],
       ]);
       expect(await list(client)).toEqual([updated]);
-      expect((await agent.expect("config")).tools).toEqual([
-        { ...updated, authorization: "Bearer test-secret-42", status: "ready" },
-      ]);
+      expect((await agent.expect("config")).tools).toEqual([updated]);
 
       const deletedBot = await client.delete(`/api/bots/${botId}`);
       expect(deletedBot.status).toBe(204);

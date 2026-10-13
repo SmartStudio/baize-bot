@@ -150,6 +150,7 @@ async function harness(
     preferences: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-table-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
+    mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
     dataDir,
     ...overrides,
     send: (message) => {
@@ -270,6 +271,7 @@ describe("p3-runner-table 验收", () => {
           name: "秘密 MCP",
           url: "http://127.0.0.1:9/mcp",
           authorization: null,
+          localOnly: true,
           status: "ready",
           assignedBotIds: [BotId.parse("bot-table")],
           operations: [{ name: "secret_mcp", description: "", inputSchema: {}, needsApproval: false }],
