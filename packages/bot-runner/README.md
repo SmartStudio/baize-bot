@@ -46,7 +46,10 @@ Pi 1.1.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一�
 <dataDir>/<botId>/skills                config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 <dataDir>/<botId>/drafts                起草时拷来的配图，<sha256>.<扩展名>，Bot 能读不能写
 <dataDir>/<botId>/brand.md              config.brand 落成的品牌手册，撤掉就删
+<dataDir>/shared                       所有 Bot 免审批读写的共享产出目录
 ```
+
+`ensureBotDirs` 同时创建共享区。系统提示给出共享区的绝对路径，要交给用户或其他 Bot 的文件放在那里。会话、记忆、技能和草稿仍在各 Bot 的私有目录；配置删除 Bot 时，先关闭它的会话、浏览器标签和 MCP，再删除 `<dataDir>/<botId>` 整棵目录，共享区保留。停机只关闭资源，保留目录；关闭期间配置又加回这个 Bot 时也保留目录。
 
 直接放在 `sessions/` 里的旧 JSONL 不迁移、不删除。升级后那个 Bot 会丢一次旧记忆，之后按群续用。
 
@@ -63,14 +66,18 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 每次 Pi `tool_call` 都先走 `src/gate.ts` 的纯函数。判定顺序固定为禁区、硬清单、`config.grants` 与账号权限档、默认表。禁区授权也不能越过；`spend`、`account_security` 和 `delete` 每次都问。项目授权只在同一 `groupId` 生效，永久授权还会再过 `GRANTABLE_SCOPES`，畸形的硬清单或 `write_outside` 永久授权不会被采用。
 
+闸门和沙箱共用 `forbiddenZones` 里的数据根目录、本 Bot 目录和共享区路径。Pi 的 `read`、`write`、`edit` 目标经真实路径解析后，落在数据目录里但在本 Bot 和共享区之外就直接拒绝，授权也不能放行；工作目录或共享区中的符号链接指向其他 Bot 时同样拒绝。共享区的读写和工作目录一样免审批，本 Bot 的 agent、sessions、skills 等目录仍按原来的工作目录外规则判；草稿只读和浏览器禁区优先于共享区放行。
+
 `read`、`write`、`edit` 的路径按 Pi 打开文件时的同一套规则归一化（`src/paths.ts` 的 `logicalResolve`，移植自 Pi 未导出的 `normalizePath`/`resolvePath`）：Unicode 空格换成普通空格，去掉开头的 `@`，展开 `~`，`file://` 地址转成本地路径，再对已存在的路径段做 realpath。悬空的符号链接 realpath 解不出来，但 Pi 写它时内核会沿链接把那头的文件建出来，所以 `realpathExisting` 对悬空链接沿 `readlink` 逐层走到那头，再按那头的位置判：指到工作目录外就是 `write_outside`，`read_only` 里拒绝；指到禁区就拒绝。链接的目标串按内核的顺序逐段走：相对目标以链接所在目录为基准，`..` 退的是已解开链接的真实目录，不是字面上的上一级，`dirlink/../x` 先进 `dirlink` 的真实目录再退一级，躺在目录链接下的链接写 `../x` 退到的是真实目录的上一级；`test/gate.test.ts` 的「链接目标里的 `..` 按内核的顺序退已解开的目录」一组让 Pi 的 write 真写一次，断言闸门的判定和 Pi 的落点一致。成环或超过 40 层（Linux 的 MAXSYMLINKS）解不到真正的目标，抛 `LinkLoopError`（`PathError` 的子类），闸门变成拒绝，理由点名符号链接；`rm`、`unlink`、`mv` 的对象是成环的链接本身时，理由再补一句出路：告诉用户在电脑上直接删掉它，或换一条不经过它的路径。禁区本身解不出来（`config.browser.profileDir` 指向成环的链接）时两种沙箱都起不来，bash 报错点名这项配置，不会裸跑。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。Pi 打不开的 `file://`（带主机名、百分号编码坏掉）抛 `PathError`，闸门接住变成拒绝，不往 Pi 的 `tool_call` 外抛。`test/gate.test.ts` 拿同一批输入和 Pi 的 `resolvePath` 对账，闸门看到的路径必须和 Pi 真正打开的是同一个文件。禁区由 `src/paths.ts` 的 `forbiddenZones` 给出，闸门和两种沙箱共用一份。`hidden` 读写都拒：`~/.ssh`、钥匙串、用户自己浏览器的登录资料，给了 `config.browser` 时再加上助理 Chrome 的整个 `profileDir`；没给就不加，也不按数据目录去猜。`readOnly` 只拒改：这个 Bot 的 `drafts/`。写和删的目标若是禁区的祖先（比如删整个 Bot 目录）也直接拒。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
+
+工作目录和共享区的根不能写、删除或替换，目录里的文件照常可写。macOS 沙箱在所有写放行之后用 `literal` 拒绝这两个根的写操作，避免先删根、再换成指向其他 Bot 的链接，导致下一次 realpath 放开其他 Bot。配置建会话时也拒绝 Bot、work 或 shared 根被预先链接到其他位置；数据根目录自身的别名仍可使用。
 
 bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写工作目录外的路径，bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放，`test/sandbox.test.ts` 的「挪进工作目录也连不上」用例钉着它。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
-- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；全局读规则后先拒绝数据根目录的读写，再放开本 Bot 目录的读和共享区的读写；工作目录、获批写路径和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备可以写；所有路径先解析为真实路径；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写工作目录外的路径，bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放，`test/sandbox.test.ts` 的「挪进工作目录也连不上」用例钉着它。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
+- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录、共享区和获批的写路径可写，共享区从其他 Bot 的屏蔽列表中排除，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
 `seatbelt` 和 `bwrap` 走同一套命令分类。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外都把环境裁成基础变量和 `PI_` 前缀，`DISPLAY` 不在里面。两种沙箱都做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。远程电脑上批准网络的那次调用和容器共用网络命名空间，所以 Xvfb 带 `-nolisten local` 关掉抽象 socket，只留 `/tmp/.X11-unix` 下的文件 socket。沙箱私有的 `/tmp` 里没有这个目录，获批写 `/tmp` 把真 `/tmp` 挂进来时它也按禁区盖住。bwrap 挡文件 unix socket 只靠看不看得见：共不共用网络命名空间都不影响文件 socket，沙箱里看得见的 socket 批不批联网都连得上。沙箱私有的 `/tmp` 盖住了真 `/tmp` 里的 socket；远程电脑镜像里没有 docker.sock、D-Bus 和用户会话的 socket，所以不要把宿主的 docker.sock 挂进远程电脑容器。

@@ -125,7 +125,7 @@ export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "poker_review",
 ]);
 
-type ZoneHit = "hidden" | "read_only" | null;
+type ZoneHit = "hidden" | "read_only" | "other_bot" | "protected_root" | null;
 
 const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
 
@@ -139,12 +139,27 @@ const zoneHit = (action: ActionKind, path: string, call: GateContext): ZoneHit =
     zone.some((prefix) => isInsideRoot(prefix, path, call.platform));
   if (inside(call.zones.hidden) || covers(call.zones.hidden)) return "hidden";
   if (MUTATIONS.has(action) && (inside(call.zones.readOnly) || covers(call.zones.readOnly))) return "read_only";
+  if (
+    MUTATIONS.has(action) &&
+    [call.workDir, call.zones.sharedDir].some(
+      (root) => isInsideRoot(real, root, call.platform) && isInsideRoot(root, real, call.platform),
+    )
+  )
+    return "protected_root";
+  if (
+    isInsideRoot(real, call.zones.dataDir, call.platform) &&
+    !isInsideRoot(real, call.zones.botDir, call.platform) &&
+    !isInsideRoot(real, call.zones.sharedDir, call.platform)
+  )
+    return "other_bot";
   return null;
 };
 
 const ZONE_REASONS: Readonly<Record<Exclude<ZoneHit, null>, string>> = {
   hidden: "这个路径属于固定禁区，不能读取或修改。",
   read_only: "这个路径是配图拷贝目录，属于固定禁区，只能读不能改。",
+  other_bot: "这个路径属于其他 Bot 或数据目录的私有区域，不能读取或修改。请使用共享区交换文件。",
+  protected_root: "工作目录和共享区的根不能删除或替换，请只修改目录里的文件。",
 };
 
 const targetForPath = (path: string, computerId: ComputerId): GrantTarget => ({
@@ -174,7 +189,9 @@ const writePath = (path: string, call: GateContext): ClassifiedAction => {
   }
   const absolute = realpathExisting(logical);
   return resolvedPathAction(
-    isInsideRoot(absolute, call.workDir, call.platform) ? "write_workspace" : "write_outside",
+    isInsideRoot(absolute, call.workDir, call.platform) || isInsideRoot(absolute, call.zones.sharedDir, call.platform)
+      ? "write_workspace"
+      : "write_outside",
     absolute,
     call,
   );
@@ -612,7 +629,11 @@ const verdictForItem = (
   }
   switch (item.action) {
     case "read":
-      return item.path === null || isInsideRoot(item.path, call.workDir, call.platform) ? "allow" : "ask";
+      return item.path === null ||
+        isInsideRoot(item.path, call.workDir, call.platform) ||
+        isInsideRoot(item.path, call.zones.sharedDir, call.platform)
+        ? "allow"
+        : "ask";
     case "write_workspace":
       return "allow";
     case "write_outside":

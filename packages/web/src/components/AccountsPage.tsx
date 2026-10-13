@@ -515,6 +515,9 @@ export const AccountsPage = ({
   return (
     <>
       <ConnectEntries local={local} login={login} />
+      <p className="later" data-testid="browser-shared-login-note">
+        助理浏览器的登录状态所有 Bot 共用，在一个 Bot 那里登录过，别的 Bot 也能用这个账号。
+      </p>
       {load === "failed" ? (
         <p className="later" data-testid="accounts-failed" role="alert">
           账号没取到。{" "}

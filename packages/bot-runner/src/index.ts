@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   type AccountConfig,
@@ -510,6 +510,7 @@ export function createRunner(config: RunnerConfig): Runner {
           bot.configState = { phase: "pending", current: null, desired: latest };
           continue;
         }
+        rmSync(join(config.dataDir, bot.botId), { recursive: true, force: true });
         deleteBot(bot, true);
         return;
       }

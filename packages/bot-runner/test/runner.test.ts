@@ -1364,6 +1364,8 @@ describe("运行器的通信提示", () => {
       expect(system, `系统提示要包含「${rule}」`).toContain(rule);
     }
     expect(system).toContain("<name>Globex 报价</name>");
+    expect(system).toContain(`共享区的绝对路径是 ${botDirs(h.dataDir, BotId.parse("bot-1")).sharedDir}。`);
+    expect(system).toContain("要交给用户或别的 Bot 的文件放在这里");
     expect(system.trimEnd().endsWith(`<cwd>\n${botDirs(h.dataDir, BotId.parse("bot-1")).workDir}\n</cwd>`)).toBe(true);
   });
 
@@ -2977,6 +2979,41 @@ describe("config 按 Bot 增量对账", () => {
       preset: null,
     }));
 
+  it("config 删除 Bot 后整棵私有目录消失，共享产出和其他 Bot 留下", async () => {
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    await h.runner.prompt(promptMessage("bot-2", "run-2", "保留另一个 Bot"));
+    const dirs = botDirs(h.dataDir, BotId.parse("bot-1"));
+    for (const dir of [dirs.agentDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir]) {
+      writeFileSync(join(dir, "keep-or-remove.txt"), "private");
+    }
+    writeFileSync(join(dirs.sharedDir, "delivery.txt"), "shared-delivery");
+    await h.runner.applyConfig(h.config({ bots: h.config().bots.filter((bot) => bot.id !== "bot-1") }));
+    await h.runner.prompt(promptMessage("bot-1", "run-deleted", "等待删除对账完成"));
+    expect(existsSync(join(h.dataDir, "bot-1")), "删除整个 Bot 目录，包括会话和草稿").toBe(false);
+    expect(existsSync(join(h.dataDir, "bot-2"))).toBe(true);
+    expect(readFileSync(join(dirs.sharedDir, "delivery.txt"), "utf8")).toBe("shared-delivery");
+  });
+
+  it("运行器停机后 Bot 的私有目录和共享产出仍在", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: () => ({ textChunks: ["好"], usage: { input: 10, output: 1 } }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    const dirs = botDirs(h.dataDir, BotId.parse("bot-1"));
+    writeFileSync(join(dirs.workDir, "keep.txt"), "private-work");
+    writeFileSync(join(dirs.sharedDir, "keep.txt"), "shared-work");
+    await h.runner.stop();
+    expect(readFileSync(join(dirs.workDir, "keep.txt"), "utf8")).toBe("private-work");
+    expect(readFileSync(join(dirs.sharedDir, "keep.txt"), "utf8")).toBe("shared-work");
+    expect(existsSync(dirs.agentDir)).toBe(true);
+    expect(readdirSync(dirs.sessionDir)).not.toEqual([]);
+  });
+
   it("Bot A 在跑时改 Bot B，A 的 run 正常 run_done", async () => {
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => {
@@ -3452,6 +3489,8 @@ describe("config 按 Bot 增量对账", () => {
       ]),
     });
     await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    const keptFile = join(botDirs(h.dataDir, BotId.parse("bot-1")).workDir, "readded.txt");
+    writeFileSync(keptFile, "关资源期间加回，保留文件");
 
     let releaseDispose!: () => void;
     botSessionProbe.disposeGate = new Promise<void>((resolve) => {
@@ -3470,6 +3509,7 @@ describe("config 按 Bot 增量对账", () => {
     }
 
     await h.runner.prompt(promptMessage("bot-1", "run-2", "加回后"));
+    expect(readFileSync(keptFile, "utf8")).toBe("关资源期间加回，保留文件");
 
     expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
     expect(h.sent.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
@@ -4510,6 +4550,67 @@ describe("放弃挂起的审批", () => {
 });
 
 describe("统一闸门", () => {
+  it.each(["read", "write", "edit"])("Pi 的 %s 不能碰其他 Bot 的文件，也不弹审批", async (toolName) => {
+    const dataDir = mkdtempSync(join(tmpdir(), "baize-pi-isolation-"));
+    const otherWork = botDirs(dataDir, BotId.parse("bot-2")).workDir;
+    mkdirSync(otherWork, { recursive: true });
+    const path = join(otherWork, "private.txt");
+    writeFileSync(path, "other-private-content");
+    const args =
+      toolName === "write"
+        ? { path, content: "changed" }
+        : toolName === "edit"
+          ? { path, edits: [{ oldText: "other-private-content", newText: "changed" }] }
+          : { path };
+    const seen = recorder();
+    const h = await startHarness({
+      dataDir,
+      bots: ["bot-1", "bot-2"],
+      extensionTools: [],
+      script: scriptRecording(seen, [["访问其他 Bot", callTool(toolName, args)]]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "访问其他 Bot"));
+    expect(h.sent.some((message) => message.type === "approval_request")).toBe(false);
+    expect(shape(h.sent).filter((type) => type.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
+    expect(seen.toolResults.join("")).toContain("其他 Bot");
+    expect(seen.toolResults.join("")).not.toContain("other-private-content");
+    expect(readFileSync(path, "utf8")).toBe("other-private-content");
+  });
+
+  it("Pi 在共享区跨 Bot 写、改、读都免审批", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "baize-pi-shared-"));
+    const path = join(botDirs(dataDir, BotId.parse("bot-1")).sharedDir, "delivery.txt");
+    const seen = recorder();
+    const h = await startHarness({
+      dataDir,
+      bots: ["bot-1", "bot-2"],
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["共享区读结果", callTool("read", { path })],
+        ["共享区改文件", callTool("edit", { path, edits: [{ oldText: "first-delivery", newText: "final-delivery" }] })],
+        ["共享区写文件", callTool("write", { path, content: "first-delivery" })],
+      ]),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "共享区写文件"));
+    expect(readFileSync(path, "utf8")).toBe("first-delivery");
+    await h.runner.prompt(promptMessage("bot-2", "run-2", "共享区改文件"));
+    expect(readFileSync(path, "utf8")).toBe("final-delivery");
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "共享区读结果", { groupId: "shared-read" }));
+    expect(h.sent.some((message) => message.type === "approval_request")).toBe(false);
+    expect(shape(h.sent).filter((type) => type.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+      "bot_tool_call:running",
+      "bot_tool_call:ok",
+    ]);
+    expect(seen.toolResults.at(-1)).toContain("final-delivery");
+  });
+
   it("bash 用 curl 往外发时挂起等确认，审批请求带 action 和 target", async () => {
     const h = await startHarness({
       bots: ["bot-1"],
@@ -4995,7 +5096,7 @@ describe("运行器的主助理", () => {
     expect(models, "网关认的名字只有 shared 一处定义，运行器不自己拼").toEqual([gatewayAlias(purpose)]);
   });
 
-  it("队员的 prompt 除了起草，和改之前逐字相同", async () => {
+  it("队员的 prompt 保留原有内容并带上起草和共享区规则", async () => {
     const requests: ChatCompletionRequest[] = [];
     const h = await startHarness({
       bots: ["bot-1"],
@@ -5015,7 +5116,6 @@ describe("运行器的主助理", () => {
       context: [{ messageId: MessageId.parse("msg-context-1"), from: "用户", text: "今天确定活动安排", settled: true }],
     });
 
-    // 下面两段是加主助理之前的运行器实际发出的首轮请求，原样抄下来；P1-4 只在系统提示里加了起草规则一段。
     expect(requests[0]?.messages).toEqual([
       {
         role: "system",
@@ -5023,6 +5123,8 @@ describe("运行器的主助理", () => {
 
 <addendum>
 你叫 小服，标签 客服
+
+共享区的绝对路径是 ${botDirs(h.dataDir, BotId.parse("bot-1")).sharedDir}。要交给用户或别的 Bot 的文件放在这里，读写共享区无需审批。
 
 你的描述，也是你的边界：负责售后
 

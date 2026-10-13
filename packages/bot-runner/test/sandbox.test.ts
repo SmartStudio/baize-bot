@@ -9,13 +9,20 @@ import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { BotId, ComputerId, GroupId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decide } from "../src/gate.js";
-import { botDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
-import { bwrapArgs, createSandboxedBash, sandboxKind, sandboxProfile, whitelistEnv } from "../src/sandbox.js";
+import { botDirs, ensureBotDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
+import {
+  bwrapArgs,
+  createSandboxedBash,
+  otherBotDirs,
+  sandboxKind,
+  sandboxProfile,
+  whitelistEnv,
+} from "../src/sandbox.js";
 
 // 照运行器的布局 <dataDir>/<botId>/work：bwrap 把数据目录下别的目录都当别的 Bot 盖住。
 const dataDir = mkdtempSync(join(tmpdir(), "baize-sandbox-perf-"));
 const workDir = join(dataDir, "bot-1", "work");
-mkdirSync(workDir, { recursive: true });
+ensureBotDirs(botDirs(dataDir, BotId.parse("bot-1")));
 const zones: ForbiddenZones = forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), join(dataDir, "chrome-profile"));
 
 afterAll(() => {
@@ -116,6 +123,90 @@ const runInSandbox = (command: string, network = false) =>
   );
 
 describe("bash 沙箱性能", () => {
+  it.skipIf(process.platform !== "darwin")("共享区和工作目录的根不能删除或替换，内部文件仍可写", async () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-root-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const sandbox = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null));
+      for (const [index, path] of [dirs.sharedDir, dirs.workDir].entries()) {
+        await blocked(
+          sandbox.tool.execute(
+            `root-${index}`,
+            { command: `rm -rf ${shellQuote(path)}` },
+            undefined,
+            undefined,
+            undefined as never,
+          ),
+          "不能删掉允许写文件的根目录",
+        );
+        expect(existsSync(path)).toBe(true);
+        const file = join(path, "normal.txt");
+        const written = await sandbox.tool.execute(
+          `file-${index}`,
+          { command: `printf normal-content > ${shellQuote(file)} && cat ${shellQuote(file)}` },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        expect(written.isError).not.toBe(true);
+        expect(JSON.stringify(written.content)).toContain("normal-content");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "darwin")("seatbelt 真机隔离其他 Bot，共享区可读写，草稿和 Chrome 禁区仍拒绝", () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-isolation-"));
+    try {
+      const data = join(root, "data");
+      const dirs = ensureBotDirs(botDirs(data, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(data, BotId.parse("bot-2")));
+      const profileDir = join(data, "chrome-profile");
+      mkdirSync(profileDir);
+      writeFileSync(join(dirs.agentDir, "own.txt"), "own-agent-content");
+      writeFileSync(join(other.workDir, "secret.txt"), "other-bot-secret");
+      writeFileSync(join(profileDir, "Cookies"), "chrome-secret");
+      const alias = join(root, "data-alias");
+      symlinkSync(data, alias);
+      for (const dataPath of [data, alias]) {
+        const visible = botDirs(dataPath, BotId.parse("bot-1"));
+        const profile = sandboxProfile(
+          visible.workDir,
+          { network: false, writePaths: [] },
+          forbiddenZones(visible, profileDir),
+        );
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: visible.workDir,
+            encoding: "utf8",
+          });
+        const own = run(`cat ${shellQuote(join(visible.agentDir, "own.txt"))}`);
+        expect(own.status, own.stderr).toBe(0);
+        expect(own.stdout).toBe("own-agent-content");
+        const shared = join(visible.sharedDir, "delivery.txt");
+        const delivered = run(`printf shared-content > ${shellQuote(shared)} && cat ${shellQuote(shared)}`);
+        expect(delivered.status, delivered.stderr).toBe(0);
+        expect(delivered.stdout).toBe("shared-content");
+        for (const command of [
+          `cat ${shellQuote(join(dataPath, "bot-2", "work", "secret.txt"))}`,
+          `printf leak > ${shellQuote(join(dataPath, "bot-2", "work", "leak.txt"))}`,
+          `printf changed > ${shellQuote(join(visible.draftsDir, "copy.png"))}`,
+          `cat ${shellQuote(join(profileDir, "Cookies"))}`,
+        ]) {
+          const denied = run(command);
+          expect(denied.status, command).not.toBe(0);
+          expect(denied.stderr, command).toMatch(/operation not permitted/i);
+          expect(denied.stdout, command).not.toMatch(/other-bot-secret|chrome-secret/);
+        }
+      }
+      expect(existsSync(join(other.workDir, "leak.txt"))).toBe(false);
+      expect(existsSync(join(dirs.draftsDir, "copy.png"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform !== "darwin")("放宽禁区祖先写权限后仍不能写禁区", () => {
     const sandboxRoot = mkdtempSync(join(tmpdir(), "baize-sandbox-forbidden-"));
     try {
@@ -649,11 +740,25 @@ describe("bash 沙箱性能", () => {
 });
 
 describe("bwrap 参数", () => {
+  it.each(["shared", "bot", "work"])("%s 根预先指向其他 Bot 时拒绝配置", (kind) => {
+    const root = mkdtempSync(join(tmpdir(), "baize-root-config-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(root, BotId.parse("bot-2")));
+      const path = kind === "shared" ? dirs.sharedDir : kind === "bot" ? join(root, "bot-1") : dirs.workDir;
+      rmSync(path, { recursive: true });
+      symlinkSync(kind === "work" ? other.workDir : join(root, "bot-2"), path);
+      expect(() => forbiddenZones(dirs, null)).toThrow(/目录隔离配置无效/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("bwrap 参数：禁区盖在最上面，批准的写路径可写，批准 network 时不断网", () => {
     const work = "/data/bot-1/work";
     const forbidden = ["/home/node/.ssh", "/data/bot-1/work/.ssh", "/data/bot-2", "/outside/chrome-profile"];
     const readOnly = ["/data/bot-1/drafts"];
-    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden, readOnly)).toEqual([
+    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden, readOnly, "/data/shared")).toEqual([
       "--ro-bind",
       "/",
       "/",
@@ -664,6 +769,9 @@ describe("bwrap 参数", () => {
       "--bind",
       work,
       work,
+      "--bind",
+      "/data/shared",
+      "/data/shared",
       "--bind",
       "/outside",
       "/outside",
@@ -695,9 +803,23 @@ describe("bwrap 参数", () => {
       "--chdir",
       work,
     ]);
-    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly);
+    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly, "/data/shared");
     expect(networked, "批准 network 的那一次和容器共用网络").not.toContain("--unshare-net");
     expect(networked, "docker 遮住了部分 /proc，新挂 proc 会失败").not.toContain("--proc");
+  });
+
+  it("共享区排除在其他 Bot 屏蔽列表外，并以可写方式绑定", () => {
+    const forbidden = otherBotDirs("/data/bot-1", "/data/shared", [
+      "/data/bot-1",
+      "/data/bot-2",
+      "/data/shared",
+      "/data/chrome-profile",
+    ]);
+    expect(forbidden).toEqual(["/data/bot-2", "/data/chrome-profile"]);
+    const args = bwrapArgs("/data/bot-1/work", { network: false, writePaths: [] }, forbidden, [], "/data/shared");
+    const shared = args.indexOf("/data/shared");
+    expect(args.slice(shared - 1, shared + 2)).toEqual(["--bind", "/data/shared", "/data/shared"]);
+    expect(args.filter((arg) => arg === "/data/shared")).toHaveLength(2);
   });
 });
 
@@ -722,6 +844,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
 
   beforeAll(() => {
     root = mkdtempSync(join(homedir(), ".baize-bwrap-test-"));
+    ensureBotDirs(botDirs(join(root, "data"), BotId.parse("bot-1")));
     botWork = join(root, "data", "bot-1", "work");
     otherBot = join(root, "data", "bot-2");
     fakeHome = join(root, "home");
