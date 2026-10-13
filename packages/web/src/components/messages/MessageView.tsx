@@ -7,12 +7,14 @@ import type {
   BotId,
   ChecklistItem,
   DecideApprovalRequest,
+  DecidePreferenceOfferRequest,
   DecideSkillOfferRequest,
   Handoff,
   HandoffId,
   Message,
   MessageBody,
   MessageId,
+  PreferenceOfferStatus,
   SkillOfferStatus,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
@@ -32,6 +34,10 @@ export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
 export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+export type DecidePreferenceOffer = (
+  messageId: MessageId,
+  decision: DecidePreferenceOfferRequest["decision"],
+) => Promise<void>;
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 export type InspectedTool = { messageId: MessageId; body: ToolCall };
 export type InspectTool = (tool: InspectedTool) => void;
@@ -136,6 +142,68 @@ const SkillOfferCard = ({
       ) : (
         <p className="approval-decided" data-testid="skill-offer-decided">
           {OFFER_DECIDED_TEXT[body.status]}
+        </p>
+      )}
+    </div>
+  );
+};
+
+const PREFERENCE_DECIDED_TEXT: Record<Exclude<PreferenceOfferStatus, "offered">, string> = {
+  saved: "已记住",
+  dismissed: "没记",
+};
+
+// 和 SkillOfferCard 一样，状态在消息正文里，点完等服务端把改过的那条推回来。点「记住」之前这句话还不是偏好，Bot 不会照着做。
+const PreferenceOfferCard = ({
+  body,
+  messageId,
+  onDecide,
+}: {
+  body: Extract<MessageBody, { kind: "preference_offer" }>;
+  messageId: MessageId;
+  onDecide: DecidePreferenceOffer;
+}) => {
+  const [sent, setSent] = useState(false);
+  const decide = (decision: DecidePreferenceOfferRequest["decision"]) => {
+    setSent(true);
+    void onDecide(messageId, decision).catch(() => setSent(false));
+  };
+  return (
+    <div
+      className="card card-skill-offer card-preference-offer"
+      data-testid="preference-offer"
+      data-status={body.status}
+    >
+      <div className="card-title">
+        <Sparkles size={16} aria-hidden="true" />
+        要记住这一条吗？
+      </div>
+      <p data-testid="preference-offer-text">{body.text}</p>
+      {body.private ? <p data-testid="preference-offer-private">分享 Bot 时默认不带这条</p> : null}
+      {body.status === "offered" ? (
+        <div className="approval-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="preference-offer-dismiss"
+            disabled={sent}
+            onClick={() => decide("dismiss")}
+          >
+            不用
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="preference-offer-save"
+            disabled={sent}
+            onClick={() => decide("save")}
+          >
+            记住
+          </button>
+        </div>
+      ) : (
+        <p className="approval-decided" data-testid="preference-offer-decided">
+          {PREFERENCE_DECIDED_TEXT[body.status]}
         </p>
       )}
     </div>
@@ -385,6 +453,7 @@ type MessageProps = {
   checklist: ChecklistItem[];
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onDecidePreferenceOffer: DecidePreferenceOffer;
   onInspectTool: InspectTool;
   selectedToolId: MessageId | null;
   showSource: boolean;
@@ -401,6 +470,7 @@ const MessageView = ({
   checklist,
   onDecide,
   onDecideSkillOffer,
+  onDecidePreferenceOffer,
   onInspectTool,
   selectedToolId,
   showSource,
@@ -440,6 +510,8 @@ const MessageView = ({
           }
           case "skill_offer":
             return <SkillOfferCard body={body} messageId={message.id} onDecide={onDecideSkillOffer} />;
+          case "preference_offer":
+            return <PreferenceOfferCard body={body} messageId={message.id} onDecide={onDecidePreferenceOffer} />;
           case "handoff": {
             const handoff = handoffs[body.handoffId];
             return handoff === undefined ? (

@@ -5932,7 +5932,7 @@ ${join(h.dataDir, "bot-1", "work")}
         h.sent.filter((message) => message.type === "approval_request"),
         "没注册的工具不会走到闸门，更不会被当成内部工具免审批",
       ).toEqual([]);
-      expect(h.sent.some((message) => message.type === "metric_report" || message.type === "preference_add")).toBe(
+      expect(h.sent.some((message) => message.type === "metric_report" || message.type === "preference_offer")).toBe(
         false,
       );
       expect(warn.mock.calls.map(([line]) => String(line))).toEqual([
@@ -8942,7 +8942,7 @@ describe("运行器的记忆：偏好和品牌手册", () => {
     expect(seen.toolNames[1], "单聊里有").toContain("remember_preference");
   });
 
-  it("单聊里 remember_preference 上行 preference_add，来源是触发那条消息，不进审批", async () => {
+  it("单聊里 remember_preference 上行 preference_offer，来源是触发那条消息，不进审批", async () => {
     const seen = recorder();
     const h = await startHarness({
       bots: ["bot-1"],
@@ -8953,9 +8953,9 @@ describe("运行器的记忆：偏好和品牌手册", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "以后标题都别超过 20 字"));
 
-    expect(h.sent.filter((message) => message.type === "preference_add")).toEqual([
+    expect(h.sent.filter((message) => message.type === "preference_offer")).toEqual([
       {
-        type: "preference_add",
+        type: "preference_offer",
         runId: RunId.parse("run-1"),
         botId: BotId.parse("bot-1"),
         groupId: GroupId.parse("group-1"),
@@ -8968,7 +8968,7 @@ describe("运行器的记忆：偏好和品牌手册", () => {
       h.sent.some((message) => message.type === "approval_request"),
       "记偏好不找人批",
     ).toBe(false);
-    expect(seen.toolResults.join(""), "回给模型一句记下了").toContain("记下了");
+    expect(seen.toolResults.join(""), "回给模型一句等用户确认").toContain("已经请用户确认，用户点了记住才生效。");
   });
 
   it("remember_preference 超过 200 字：不上报，终态 failed，错误文本是中文", async () => {
@@ -8982,7 +8982,7 @@ describe("运行器的记忆：偏好和品牌手册", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "记一条很长的"));
 
-    expect(h.sent.some((message) => message.type === "preference_add")).toBe(false);
+    expect(h.sent.some((message) => message.type === "preference_offer")).toBe(false);
     expect(shape(h.sent)).toContain("bot_tool_call:failed");
     expect(seen.toolResults.join("")).toContain("最多 200 个字");
   });

@@ -323,6 +323,15 @@ export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dis
 export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
 export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
 
+// POST /api/messages/:id/preference-offer  单聊里那张「记不记这条偏好」的卡点「记住」或「不用」。
+// 消息不是 preference_offer、别人的、卡上那个 Bot 已删、消息所在群已不是它的单聊，都是 404；已有结论 409。
+// save 写偏好、把消息 status 改成 saved 并重推那条 message，再推 preference_updated 和新的 config；
+// dismiss 只改 status，preference 回 null。
+export const DecidePreferenceOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
+export type DecidePreferenceOfferRequest = z.infer<typeof DecidePreferenceOfferRequest>;
+export const DecidePreferenceOfferResponse = z.object({ message: Message, preference: Preference.nullable() });
+export type DecidePreferenceOfferResponse = z.infer<typeof DecidePreferenceOfferResponse>;
+
 // POST /api/messages/:id/project-offer
 export const DecideProjectOfferRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("start"), name: z.string().min(1).max(40).optional() }).strict(),

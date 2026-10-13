@@ -258,9 +258,10 @@ export const AgentToControl = z.discriminatedUnion("type", [
     ...RoutineOfferSpec,
     projectGroupId: GroupId.nullable(),
   }),
-  // Bot 在单聊里当场记一条偏好。控制面只收该 Bot 单聊里的 run，项目群里的静默丢弃。
+  // Bot 在单聊里提议记一条偏好。控制面在该 Bot 的单聊里落一张确认卡，用户点了「记住」才写进偏好；
+  // 项目群里的静默丢弃。
   z.object({
-    type: z.literal("preference_add"),
+    type: z.literal("preference_offer"),
     runId: RunId,
     botId: BotId,
     groupId: GroupId,

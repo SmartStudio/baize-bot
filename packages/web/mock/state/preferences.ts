@@ -45,15 +45,25 @@ export const seedManyPreferences = (botId: BotId, count: number): void => {
 export const preferencesOf = (botId: string): Preference[] =>
   [...preferences.values()].filter((preference) => preference.botId === botId);
 
-// 真运行器里是 Bot 自己判断要不要调 remember_preference；mock 只认「以后」开头的一句，够把记住数推一格。
-export const learnFrom = (botId: BotId, text: string, sourceMessageId: MessageId): Preference | null => {
-  if (!text.trim().startsWith("以后")) return null;
+// 真运行器里是 Bot 自己判断要不要调 remember_preference；mock 只认「以后」开头的一句。
+// 这一步只提议，要记的话还没进偏好表，点了卡上的「记住」才由 rememberPreference 写。
+export const learnFrom = (text: string): string | null => {
+  const trimmed = text.trim();
+  return trimmed.startsWith("以后") ? trimmed.slice(0, 200) : null;
+};
+
+export const rememberPreference = (
+  botId: BotId,
+  text: string,
+  isPrivate: boolean,
+  sourceMessageId: MessageId | null,
+): Preference => {
   const preference = Preference.parse({
     id: `prf_${nextSuffix()}`,
     botId,
-    text: text.trim().slice(0, 200),
+    text,
     sourceMessageId,
-    private: false,
+    private: isPrivate,
     createdAt: new Date().toISOString(),
   });
   preferences.set(preference.id, preference);

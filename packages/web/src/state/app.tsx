@@ -35,6 +35,7 @@ import {
   type CreateSkillRequest,
   type CreateToolRequest,
   type DecideRoutineOfferRequest,
+  type DecidePreferenceOfferRequest,
   type DecideSkillOfferRequest,
   type RoutineId,
   type Settings,
@@ -128,6 +129,7 @@ export type AppActions = {
   // 手册回来的都是整本，走同一个 brand_set，切片只收版本更新的那本。读回的那本也交给弹窗当底稿；保存 409 时抛给弹窗。
   loadBrand: () => Promise<BrandBook | null | undefined>;
   updateBrand: (body: UpdateBrandRequest) => Promise<void>;
+  decidePreferenceOffer: (messageId: MessageId, decision: DecidePreferenceOfferRequest["decision"]) => Promise<void>;
   decideSkillOffer: (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
   decideRoutineOffer: (messageId: MessageId, decision: DecideRoutineOfferRequest["decision"]) => Promise<void>;
   // 打开群页或项目页算看过这个群里例行的结果（D3），连续三次没看例行自己停。
@@ -698,6 +700,15 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           const res = await api.decideSkillOffer(messageId, decision);
           put({ type: "message_upserted", message: res.message, seq });
           if (res.skill !== null) put({ type: "skill_upserted", skill: res.skill, seq });
+        },
+      ),
+      // 点「记住」之前这句话不在偏好表里，所以只有 save 才顺带回来那条偏好。
+      decidePreferenceOffer: signedIn(
+        async ({ api, put }, messageId: MessageId, decision: DecidePreferenceOfferRequest["decision"]) => {
+          const seq = nextSeq();
+          const res = await api.decidePreferenceOffer(messageId, decision);
+          put({ type: "message_upserted", message: res.message, seq });
+          if (res.preference !== null) put({ type: "preference_upserted", preference: res.preference, seq });
         },
       ),
       decideRoutineOffer: signedIn(

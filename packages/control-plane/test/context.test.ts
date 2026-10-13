@@ -7,6 +7,7 @@ import {
   CreateGroupResponse,
   MessageId,
   MessageListResponse,
+  PreferenceId,
   SkillResponse,
   ControlToAgent,
   type BotId,
@@ -264,6 +265,15 @@ describe("上下文里的卡写结论", () => {
         skillId: null,
       });
       await appendMessage(database.db, job.groupId, {
+        kind: "preference_offer",
+        botId: job.botId,
+        text: "标题不超过 15 个字",
+        private: false,
+        sourceMessageId: null,
+        status: "saved",
+        preferenceId: PreferenceId.parse(randomUUID()),
+      });
+      await appendMessage(database.db, job.groupId, {
         kind: "project_offer",
         botId: job.botId,
         name: "小红书起号",
@@ -291,12 +301,13 @@ describe("上下文里的卡写结论", () => {
         { from: "系统", text: "小内排的内容计划「下周计划」共 2 篇，你批准了" },
         { from: "系统", text: "小内排的内容计划「下下周计划」共 1 篇，还在等你看" },
         { from: "系统", text: "问过要不要存成 skill「周报」，你没存" },
+        { from: "系统", text: "提议记住「标题不超过 15 个字」，你让记住了" },
         { from: "系统", text: "小内出的方案卡「小红书起号」，还在等你点开始" },
       ]);
       expect(
         settledOnly(prompt).slice(1),
         "草稿没发出去之前都还会变（批了的会发，退回的能改了再交），定了的计划和 skill 卡不再变，没点的方案卡还会变",
-      ).toEqual([false, false, false, false, true, false, true, false]);
+      ).toEqual([false, false, false, false, true, false, true, true, false]);
       expect(
         [readsOf("drafts"), readsOf("content_plans")],
         "草稿表两条（草稿卡一条，计划数篇数一条），计划表一条，都不按卡逐条查",

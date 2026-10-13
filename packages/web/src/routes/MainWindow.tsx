@@ -198,6 +198,7 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
+          onDecidePreferenceOffer={actions.decidePreferenceOffer}
           onDecideProjectOffer={(messageId, request) =>
             actions.decideProjectOffer(messageId, request).then(openProjectPage)
           }

@@ -22,6 +22,7 @@ import { startTestServer, type ApiClient, type TestServer } from "./helpers/clie
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { ECHO_AUTHORIZATION_PREFIX, startTestMcp, type TestMcp } from "./helpers/mcp.js";
+import { offerPreference, savePreferenceOffer } from "./helpers/preference-offer.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -105,20 +106,19 @@ async function plugin(owner: Owner, name: string, botIds: BotId[], url = mcp.url
   return ToolResponse.parse(await assigned.json()).tool;
 }
 
-/** Bot 在单聊里当场记一条偏好，等推送回来。 */
+/** Bot 在单聊里提议记一条偏好，用户点「记住」，等推送回来。 */
 async function remember(owner: Owner, agent: AgentClient, push: PushClient, text: string, isPrivate: boolean) {
   const sent = await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: `记住：${text}` });
   expect(sent.status).toBe(201);
   const { runId } = await agentUntil(agent, "prompt");
-  agent.send({
-    type: "preference_add",
+  const card = await offerPreference(agent, push, {
     runId,
     botId: owner.botId,
     groupId: owner.groupId,
     text,
     private: isPrivate,
-    sourceMessageId: null,
   });
+  expect((await savePreferenceOffer(owner.client, card)).preference?.text).toBe(text);
   const pushed = await pushUntil(push, "preference_updated");
   expect(pushed.preference.text).toBe(text);
 }

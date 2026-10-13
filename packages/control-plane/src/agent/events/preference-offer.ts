@@ -1,21 +1,20 @@
 import type { AgentToControl } from "@baize/shared";
 import { findSoloBotId } from "../../repo/groups.js";
-import { findGroupId } from "../../repo/messages.js";
-import { addPreference } from "../../repo/preferences.js";
+import { appendMessage, findGroupId } from "../../repo/messages.js";
 import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
 
-export type PreferenceAddEvent = Extract<AgentToControl, { type: "preference_add" }>;
+export type PreferenceOfferEvent = Extract<AgentToControl, { type: "preference_offer" }>;
 
 /**
- * Bot 在单聊里当场记一条偏好（D10）。群要是这台电脑主人的、恰好是这个 Bot 的单聊，run 要是这台电脑上它在这里的活，
- * 任一不成立整条静默丢弃：项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好。
+ * Bot 在单聊里提议记一条偏好（D10），落成一张等你点「记住」的卡，这里不写偏好。群要是这台电脑主人的、恰好是这个 Bot 的单聊，
+ * run 要是这台电脑上它在这里的活，任一不成立整条静默丢弃：项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好。
  */
-export async function handlePreferenceAdd(
+export async function handlePreferenceOffer(
   deps: AgentEventDeps,
   conn: AgentConnection,
-  event: PreferenceAddEvent,
+  event: PreferenceOfferEvent,
 ): Promise<void> {
   const { runId, botId, groupId } = event;
   if ((await findGroupId(deps.db, conn.ownerId, groupId)) === null) return;
@@ -28,16 +27,17 @@ export async function handlePreferenceAdd(
     return;
   }
 
-  const preference = await whileRunOpen(deps.db, { runId, botId, groupId }, (tx) =>
-    addPreference(tx, {
+  const message = await whileRunOpen(deps.db, { runId, botId, groupId }, (tx) =>
+    appendMessage(tx, groupId, {
+      kind: "preference_offer",
       botId,
-      groupId,
       text: event.text,
       private: event.private,
       sourceMessageId: event.sourceMessageId,
+      status: "offered",
+      preferenceId: null,
     }),
   );
-  if (preference === null) return;
-  deps.push.push(conn.ownerId, { type: "preference_updated", preference });
-  await deps.agents.sendConfig(conn.ownerId);
+  if (message === null) return;
+  deps.push.push(conn.ownerId, { type: "message", message });
 }

@@ -15,6 +15,7 @@ import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
 import { startTestMcp, type TestMcp } from "./helpers/mcp.js";
+import { offerPreference, savePreferenceOffer } from "./helpers/preference-offer.js";
 
 /** 删号事务删完 runs 的那条。拦在它后面，Bot 锁已经拿着、用户还没删。 */
 const DELETE_RUNS = /^delete from "runs"/;
@@ -115,15 +116,15 @@ it("导出里有偏好和品牌手册，grep 不到 token 和 authorization", as
   await withJob(async (job) => {
     const { client } = job;
 
-    job.agent.send({
-      type: "preference_add",
+    const card = await offerPreference(job.agent, job.push, {
       runId: job.runId,
       botId: job.botId,
       groupId: job.groupId,
       text: "周报不用感叹号",
       private: true,
-      sourceMessageId: null,
     });
+    await savePreferenceOffer(client, card);
+    expect((await nextOf(job.push, "message")).message.body, "卡先重推成 saved").toMatchObject({ status: "saved" });
     expect((await nextOf(job.push, "preference_updated")).preference.text).toBe("周报不用感叹号");
     // 草稿等的是紧接着的两条推送，赶在别的写操作推送之前建。
     const account = job.accounts[0];

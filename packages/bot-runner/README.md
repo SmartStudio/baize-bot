@@ -113,7 +113,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 偏好和品牌手册
 
-`src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_add` 带 runId 和触发消息的 sourceMessageId，不走审批。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
+`src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_offer` 带 runId 和触发消息的 sourceMessageId，不走审批：它只请用户确认，控制面在单聊里出一张卡，用户点了「记住」才写进偏好并随 config 下发，所以工具结果告诉模型「已经请用户确认，用户点了记住才生效」，点之前这句话不影响 Bot 的行为。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
 
 ## 建队卡
 

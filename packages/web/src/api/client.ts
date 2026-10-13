@@ -20,6 +20,7 @@ import {
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
+  DecidePreferenceOfferResponse,
   DecideProjectOfferResponse,
   DecideRoutineOfferResponse,
   DecideSkillOfferResponse,
@@ -65,6 +66,7 @@ import {
   type CreateSkillRequest,
   type DeleteAccountRequest,
   type DecideApprovalRequest,
+  type DecidePreferenceOfferRequest,
   type DecideProjectOfferRequest,
   type DecideRoutineOfferRequest,
   type DecideSkillOfferRequest,
@@ -249,6 +251,11 @@ export const createApi = (signal?: AbortSignal) => {
       json(
         DecideSkillOfferResponse,
         await send("POST", `/messages/${encodeURIComponent(messageId)}/skill-offer`, { decision }),
+      ),
+    decidePreferenceOffer: async (messageId: MessageId, decision: DecidePreferenceOfferRequest["decision"]) =>
+      json(
+        DecidePreferenceOfferResponse,
+        await send("POST", `/messages/${encodeURIComponent(messageId)}/preference-offer`, { decision }),
       ),
     decideProjectOffer: async (messageId: MessageId, request: DecideProjectOfferRequest) =>
       json(

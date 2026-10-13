@@ -1080,6 +1080,14 @@ const run = async (): Promise<void> => {
     await check(knowToggle).toContainText("记住 0 条");
     await sendInChat(p, TEACH_ASK);
     await check(p.getByTestId("message-list")).toContainText(`记下了，以后${PREFERENCE}`);
+    const preferenceCard = p.locator("[data-testid=preference-offer][data-status=offered]");
+    await check(preferenceCard.getByTestId("preference-offer-text"), "Bot 只是提议，卡上写着要记的那句").toHaveText(
+      PREFERENCE,
+    );
+    await check(knowToggle, "点记住之前条数不变").toContainText("记住 0 条");
+    await shot(p, "U12-0-offer");
+    await preferenceCard.getByTestId("preference-offer-save").click();
+    await check(p.getByTestId("preference-offer-decided"), "点完卡上只剩结论").toHaveText("已记住");
     await check(knowToggle, "单聊顶上记住的条数当场加一").toContainText("记住 1 条");
     await knowToggle.click();
     await check(p.getByTestId("bot-pref-text"), "点开能看到这一条").toHaveText([PREFERENCE]);
@@ -1216,8 +1224,10 @@ const run = async (): Promise<void> => {
     await p.getByTestId("team-nav").click();
     await p.locator("[data-testid=team-bot][data-bot-name=阿文]").getByTestId("team-bot-chat").click();
     await sendInChat(p, TEACH_ASK);
+    await p.locator("[data-testid=preference-offer][data-status=offered]").getByTestId("preference-offer-save").click();
     await check(knowToggle).toContainText("记住 1 条");
     await sendInChat(p, PRIVATE_ASK);
+    await p.locator("[data-testid=preference-offer][data-status=offered]").getByTestId("preference-offer-save").click();
     await check(knowToggle).toContainText("记住 2 条");
     await knowToggle.click();
     await check(p.getByTestId("bot-pref").filter({ hasText: PRIVATE_PREFERENCE })).toContainText("私人");

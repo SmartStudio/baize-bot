@@ -72,6 +72,9 @@ const TestMessageRequest = z
     revision: z.number().int().nonnegative().optional(),
   })
   .strict();
+const PreferenceOfferRequest = z
+  .object({ groupId: GroupId, botId: BotId, text: z.string().min(1).max(200), private: z.boolean() })
+  .strict();
 const MessageFetchFaultRequest = z.object({ messageId: MessageId, count: z.number().int().min(0).max(10) }).strict();
 const TestDeltaRequest = z
   .object({
@@ -249,6 +252,27 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
   }
 
   // 只推 delta，不落 mock 状态，用来造「没收到空壳就先来了 delta」。
+  // 真运行器会按 Bot 判断出私人偏好，mock 的 learnFrom 只出非私人的卡，要看「私人」那句提示从这里直接造。
+  if (method === "POST" && path === "/api/test/preference-offer") {
+    const parsed = PreferenceOfferRequest.safeParse(await readBody(req));
+    if (!parsed.success || !groups.has(parsed.data.groupId) || !bots.has(parsed.data.botId)) {
+      send(res, 400, { error: "要出的偏好卡不对" });
+    } else {
+      const message = appendMessage(parsed.data.groupId, {
+        kind: "preference_offer",
+        botId: parsed.data.botId,
+        text: parsed.data.text,
+        private: parsed.data.private,
+        sourceMessageId: null,
+        status: "offered",
+        preferenceId: null,
+      });
+      push({ type: "message", message });
+      send(res, 204);
+    }
+    return true;
+  }
+
   if (method === "POST" && path === "/api/test/message-delta") {
     const parsed = TestDeltaRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "delta 参数不对" });

@@ -568,6 +568,12 @@ const SKILL_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "skill_offer" }>[
   dismissed: "你没存",
 };
 
+const PREFERENCE_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "preference_offer" }>["status"], string> = {
+  offered: "还在等你定",
+  saved: "你让记住了",
+  dismissed: "你说不用记",
+};
+
 const PROJECT_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "project_offer" }>["status"], string> = {
   offered: "还在等你点开始",
   started: "你点了开始，项目群建好了",
@@ -615,6 +621,12 @@ const DRAFT_SETTLED: Record<Draft["status"], boolean> = {
 const PLAN_SETTLED: Record<ContentPlan["status"], boolean> = { pending: false, approved: true, returned: true };
 
 const SKILL_OFFER_SETTLED: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], boolean> = {
+  offered: false,
+  saved: true,
+  dismissed: true,
+};
+
+const PREFERENCE_OFFER_SETTLED: Record<Extract<MessageBody, { kind: "preference_offer" }>["status"], boolean> = {
   offered: false,
   saved: true,
   dismissed: true,
@@ -712,6 +724,12 @@ function summarize(
         "系统",
         `问过要不要存成 skill「${body.name}」，${SKILL_OFFER_OUTCOME[body.status]}`,
         SKILL_OFFER_SETTLED[body.status],
+      );
+    case "preference_offer":
+      return line(
+        "系统",
+        `提议记住「${body.text}」，${PREFERENCE_OFFER_OUTCOME[body.status]}`,
+        PREFERENCE_OFFER_SETTLED[body.status],
       );
     case "project_offer":
       return line(

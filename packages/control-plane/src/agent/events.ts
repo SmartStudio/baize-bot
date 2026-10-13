@@ -78,7 +78,7 @@ import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
 import { handlePokerAct } from "./events/poker-act.js";
 import { handlePokerReview } from "./events/poker-review.js";
-import { handlePreferenceAdd } from "./events/preference-add.js";
+import { handlePreferenceOffer } from "./events/preference-offer.js";
 import { handleReviewSubmit } from "./events/review-submit.js";
 import { botTextVisibility, isUplinkAllowed } from "./table-run-policy.js";
 import { handleRoutineOffer } from "./events/routine-offer.js";
@@ -181,8 +181,8 @@ export async function handleAgentEvent(
     case "routine_offer":
       await handleRoutineOffer(deps, conn, message);
       return;
-    case "preference_add":
-      await handlePreferenceAdd(deps, conn, message);
+    case "preference_offer":
+      await handlePreferenceOffer(deps, conn, message);
       return;
     case "metric_report":
       await handleMetricReport(deps, conn, message);

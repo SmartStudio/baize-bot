@@ -15,6 +15,8 @@ export const previewOf = (body: MessageBody): string => {
       return "交接给别的 Bot";
     case "skill_offer":
       return `存成 skill「${body.name}」？`;
+    case "preference_offer":
+      return `记住「${body.text}」？`;
     case "project_offer":
       return `项目方案「${body.name}」`;
     case "team_offer":

@@ -588,15 +588,19 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 ## 偏好
 
-偏好属于一个 Bot，`bot_preferences` 一行一条，只有 Bot 自己在单聊里能记。上行 `preference_add` 要求群是本人的、恰好是这个 Bot 的单聊、run 是它在这里的活，任一不成立整条丢掉（`agent/events/preference-add.ts:11-29`）。项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好，`test/preferences.test.ts` 的「项目群里的 preference_add 静默丢弃」钉着它。写在 `whileRunOpen` 里（第 31 行），和别的 run 名下的写一样，run 收尾后晚到的帧不落。来源消息 id 是电脑报上来的，外键只保证它存在，不在这个群里就记成 null（`repo/preferences.ts:57-79`）。
+偏好属于一个 Bot，`bot_preferences` 一行一条，只有 Bot 自己在单聊里能提议，用户点了「记住」才记下。上行 `preference_offer` 要求群是本人的、恰好是这个 Bot 的单聊、run 是它在这里的活，任一不成立整条丢掉（`agent/events/preference-offer.ts`）。项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好，`test/preferences.test.ts` 的「项目群里的 preference_offer 静默丢弃」钉着它。
+
+提议只落一张 `preference_offer` 卡，不写偏好、不重发 config，所以点之前这句话不影响 Bot。理由和 `skill_offer` 一样：点之前 text、private、sourceMessageId 不在任何表里，卡的状态（offered、saved、dismissed）随正文走，点了就改这条消息再重推。落卡写在 `whileRunOpen` 里，和别的 run 名下的写一样，run 收尾后晚到的帧不落。
+
+点卡是 `POST /api/messages/:id/preference-offer`（`http/app.ts`，仿 skill-offer 那条）。点的时候 run 多半早就结束了，所以不靠 `whileRunOpen`，归属在 `findOwnedPreferenceOffer` 里重新认：消息是本人的、正文是这张卡、所在群此刻仍是卡上那个 Bot 的单聊，任一不成立 404。结论靠 `UPDATE messages ... WHERE body->>'status' = 'offered'` 抢，0 行回 409；记住时写偏好和改卡在同一个事务里（`repo/preferences.ts` 的 `decidePreferenceOffer`），抢输的整条回滚，并发点三次只会留下一行。来源消息 id 是电脑报上来的，外键只保证它存在，不在这个群里就记成 null（`addPreference`）。给模型的上下文里这张卡写成「提议记住「…」，你让记住了」或「你说不用记」（`agent/dispatch.ts` 的 `PREFERENCE_OFFER_*`）。
 
 私人标记 `private` 只管分享时默认不勾（`shared/src/domain.ts:696`）。控制面只存它、切它，`config` 照样下发私人的偏好，Bot 写作时照样要套用（`repo/preferences.ts:35-47`）。`config.preferences` 是这个用户全部 Bot 的偏好，数组恒带，运行器靠整份对账，理由和 `config.skills` 一样，省掉就分不清「没有」和「没说」（`agent/hub.ts:519`）。
 
-用户在 Bot 页能切私人（`PATCH /api/preferences/:id`）和删（`DELETE`），两条都按归属人过滤，别人的回 404（`repo/preferences.ts:81-102`）。三处写的推送顺序（`http/routes/preferences.ts:35-58`）：
+用户在 Bot 页能切私人（`PATCH /api/preferences/:id`）和删（`DELETE`），两条都按归属人过滤，别人的回 404（`repo/preferences.ts:81-102`）。三处写的推送顺序（切私人、删除在 `http/routes/preferences.ts:35-58`）：
 
 - 切私人写库一返回就推 `preference_updated`，再 `sendConfig`。`sendConfig` 读库可能拖到别的请求删掉这条之后，那时再推更新会把已删的偏好推回页面。`test/preferences.test.ts` 的「切私人的 config 还没读回来时偏好被删，推送顺序仍是先更新后删除」钉着它。
 - 删除先 `sendConfig`，再推 `preference_deleted`。
-- 上行记下的偏好先推 `preference_updated`，再 `sendConfig`（`agent/events/preference-add.ts:41-42`）。
+- 点「记住」写下的偏好，先重推那条卡，再推 `preference_updated`，最后 `sendConfig`；点「不用」只重推卡。
 
 `GET /api/bots/:id/profile` 回 Bot 页头部的三个数：偏好数、skill 数、在几个项目里（`repo/bots.ts:320-337`）。项目只数多 Bot 群，单聊不算。三个数各查各的，不 join 在一起相乘。
 

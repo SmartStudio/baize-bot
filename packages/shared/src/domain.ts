@@ -368,6 +368,10 @@ export type BotTemplate = z.infer<typeof BotTemplate>;
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
 
+// Bot 想记一条偏好，问用户记不记的那张卡。saved 之后 preferenceId 指向写下的那条，dismissed 是用户说不用。
+export const PreferenceOfferStatus = z.enum(["offered", "saved", "dismissed"]);
+export type PreferenceOfferStatus = z.infer<typeof PreferenceOfferStatus>;
+
 export const ProjectOfferStatus = z.enum(["offered", "started", "dismissed"]);
 export type ProjectOfferStatus = z.infer<typeof ProjectOfferStatus>;
 export const ProjectOfferMember = z
@@ -455,6 +459,17 @@ export const MessageBody = z.discriminatedUnion("kind", [
     steps: SkillSteps.min(2),
     status: SkillOfferStatus,
     skillId: SkillId.nullable(),
+  }),
+  // 和 skill_offer 同理：点「记住」之前这句话不在任何表里，所以状态随正文走。sourceMessageId 是 Bot 从哪句话记的，
+  // 写偏好时才校验它在不在这个群里。
+  z.object({
+    kind: z.literal("preference_offer"),
+    botId: BotId,
+    text: z.string().min(1).max(200),
+    private: z.boolean(),
+    sourceMessageId: MessageId.nullable(),
+    status: PreferenceOfferStatus,
+    preferenceId: PreferenceId.nullable(),
   }),
   z.object({
     kind: z.literal("project_offer"),

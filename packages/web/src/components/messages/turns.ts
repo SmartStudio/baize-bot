@@ -20,6 +20,7 @@ export const turnsOf = (messages: Message[]): Turn[] => {
       case "bot":
       case "tool_call":
       case "skill_offer":
+      case "preference_offer":
         if (previous?.kind === "bot" && previous.botId === body.botId) previous.items.push(message);
         else turns.push({ kind: "bot", botId: body.botId, items: [message] });
         break;

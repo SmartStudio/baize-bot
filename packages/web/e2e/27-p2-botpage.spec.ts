@@ -16,7 +16,9 @@ test("在单聊说一句后记住数从 5 变 6", async ({ page }) => {
   await expect(knowToggle(page)).toContainText("记住 5 条");
 
   await sendText(page, "以后回客户先说结论，再说原因");
-  await expect(knowToggle(page), "Bot 当场记下，不用刷新").toContainText("记住 6 条");
+  await expect(knowToggle(page), "卡还没点，不算记住").toContainText("记住 5 条");
+  await page.getByTestId("preference-offer-save").click();
+  await expect(knowToggle(page), "点了记住当场多一条，不用刷新").toContainText("记住 6 条");
   await openKnow(page);
   await expect(prefRows(page)).toHaveCount(6);
   await expect(prefRows(page).last()).toContainText("以后回客户先说结论，再说原因");

@@ -25,6 +25,8 @@ import {
   DecideApprovalResponse,
   DecideDraftRequest,
   DecideDraftResponse,
+  DecidePreferenceOfferRequest,
+  DecidePreferenceOfferResponse,
   DecideProjectOfferRequest,
   DecideProjectOfferResponse,
   DecideSkillOfferRequest,
@@ -115,6 +117,7 @@ import {
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
 import { pushRoutineUpdated, runRoutine } from "../routines/run.js";
+import { decidePreferenceOffer, findOwnedPreferenceOffer } from "../repo/preferences.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
@@ -775,6 +778,27 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       await agents.sendConfig(c.get("user").id);
     }
     return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill: decided.skill }));
+  });
+
+  app.post("/api/messages/:id/preference-offer", async (c) => {
+    const messageId = MessageId.safeParse(c.req.param("id"));
+    if (!messageId.success) return c.json(NOT_FOUND, 404);
+    const ownerId = c.get("user").id;
+    const offer = await findOwnedPreferenceOffer(db, ownerId, messageId.data, { kind: "user" });
+    if (offer === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, DecidePreferenceOfferRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+
+    const decided = await decidePreferenceOffer(db, ownerId, offer, body.value.decision);
+    if (decided.kind === "bot_gone") return c.json(NOT_FOUND, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这条卡已经有结论了" }, 409);
+
+    hub.push(ownerId, { type: "message", message: decided.message });
+    if (decided.preference !== null) {
+      hub.push(ownerId, { type: "preference_updated", preference: decided.preference });
+      await agents.sendConfig(ownerId);
+    }
+    return c.json(DecidePreferenceOfferResponse.parse({ message: decided.message, preference: decided.preference }));
   });
 
   app.post("/api/messages/:id/project-offer", async (c) => {

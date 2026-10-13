@@ -493,6 +493,19 @@ describe("收尾后晚到的帧按可靠性处理", () => {
     }
   });
 
+  it("preference_offer 不落卡", async () => {
+    const live = await soloRun();
+    try {
+      runDone(live);
+      send(live, { type: "preference_offer", text: "标题不超过 15 个字", private: false, sourceMessageId: null });
+      const pushed = await barrier(live.agent, live.push, live.groupId, "晚到的偏好提议之后");
+      expect(pushedKinds(pushed)).not.toContain("message:preference_offer");
+      expect(await bodiesOf(live, "preference_offer")).toEqual([]);
+    } finally {
+      live.close();
+    }
+  });
+
   it("@ 队友不落消息、不派活", async () => {
     const who = await owner();
     const sales = CreateBotResponse.parse(
