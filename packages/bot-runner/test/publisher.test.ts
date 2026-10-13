@@ -16,6 +16,7 @@ import {
   openUserTab,
   type PageTarget,
   pageTargets,
+  settledPages,
   type TestChrome,
 } from "./helpers/chrome.js";
 
@@ -400,6 +401,17 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
   });
   const tabIds = async (): Promise<string[]> =>
     (await pageTargets(chrome.connection)).map((target) => target.id).toSorted();
+  // 上一条用例的发布标签页关了还没从清单里消失时拍的「之前」会多出它，先等假创作者站上除用户页以外的标签页走完。
+  const tabIdsBefore = async (): Promise<string[]> =>
+    (
+      await settledPages(chrome.connection, (pages) =>
+        pages.every(
+          (page) => page.url.endsWith("/user") || !sites.some((started) => page.url.startsWith(`${started.url}/`)),
+        ),
+      )
+    )
+      .map((page) => page.id)
+      .toSorted();
   // closeTarget 先回 success，标签页要等 detachedFromTarget 之后才从清单里消失。
   const tabsSettleTo = async (expected: readonly string[]): Promise<string[]> => {
     const deadline = Date.now() + 3_000;
@@ -452,7 +464,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
   it("发完标签页关掉，建标签页用的是 background", async () => {
     const creator = await site("normal");
     const user: PageTarget = await openUserTab(chrome.connection, `${creator.url}/user`);
-    const before = await tabIds();
+    const before = await tabIdsBefore();
 
     const { result } = await publishDraft(
       draftMessage("draft-bg", { title: "后台发", text: "你照常打字", images: [draftCopy(dataDir, "后台")] }),
@@ -468,7 +480,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
 
   it("撞到登录页回 login_expired", async () => {
     const creator = await site("logged-out");
-    const before = await tabIds();
+    const before = await tabIdsBefore();
 
     const { result } = await publishDraft(
       draftMessage("draft-login", { title: "t", text: "正文", images: [draftCopy(dataDir, "登录")] }),
@@ -522,7 +534,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
 
   it("超时回 error，标签页关掉", async () => {
     const creator = await site("hang");
-    const before = await tabIds();
+    const before = await tabIdsBefore();
     const started = Date.now();
 
     const { result } = await publishDraft(
