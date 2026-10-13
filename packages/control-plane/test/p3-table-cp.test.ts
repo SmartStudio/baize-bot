@@ -660,14 +660,36 @@ it("兜底后新 run 正常出牌，旧 run 的晚到出牌得到 run_closed 确
   expect(await stored(id)).toEqual(before);
 });
 it("已收尾 run 仍对着当前 turn 时出牌得到 run_closed 确认", async () => {
+  await restartWith({ intervalMs: 3_600_000, now: () => now, turnTimeoutMs: 60_000 });
+  await fixture();
+  expect((await advanceUser(await start(), { kind: "call" })).status).toBe(200);
+  const p = await table.agent.expect("prompt");
+  const handId = p.table!.handId;
+  await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
+  const [turn] = await database.sql<{ turn_run_id: string }[]>`SELECT turn_run_id FROM poker_hands WHERE id=${handId}`;
+  expect(turn!.turn_run_id).toBe(p.runId);
+  const before = await stored(handId);
+  act(p, { kind: "call" });
+  await barrier(p);
+  await expectRunClosedAck(table.agent, p.runId);
+  expect(await stored(handId)).toEqual(before);
+});
+it("run 收尾却没确认，扫描器恰好给同一 Bot 的同一决策点重派一次新 run", async () => {
   await fixture();
   const id = await seeded();
   const p = await table.agent.expect("prompt");
   await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
-  act(p, { kind: "call" });
-  // 扫描器仍可能重派 prompt；run_closed 在信封确认里，不消费下行队列中的重派。
-  await barrier(p);
-  await expectRunClosedAck(table.agent, p.runId);
+  const redispatch = await table.agent.expect("prompt");
+  expect(redispatch.runId).not.toBe(p.runId);
+  expect(redispatch.botId).toBe(p.botId);
+  expect(redispatch.groupId).toBe(p.groupId);
+  expect(redispatch.table!.role).toBe("player");
+  expect(redispatch.table!.handId).toBe(p.table!.handId);
+  expect(redispatch.table!.seq).toBe(p.table!.seq);
+  const [hand] = await database.sql<
+    { dispatch_count: number; turn_run_id: string }[]
+  >`SELECT dispatch_count, turn_run_id FROM poker_hands WHERE id=${id}`;
+  expect(hand).toEqual({ dispatch_count: 2, turn_run_id: redispatch.runId });
   expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
 });
 it("不属于这台电脑、这个 Bot 或这个群的出牌静默丢弃", async () => {
