@@ -88,6 +88,8 @@ Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里�
 
 `ask` 发出的 `approval_request` 带 `action` 和能确定时的 `target`。handler 同时监听审批 Promise 和 Pi 的 `ctx.signal`。拒绝或中止返回 `{ block: true, reason }`，工具函数不执行。停机时运行器发送 `approval_abandoned`；删 Bot 时只解开本地等待，不发送该报文，由控制面删除 Bot 的流程收尾审批。暂停不会让审批失效。`bot_tool_call` 的 `blocked` 标记由 `ApprovalGate` 记下，并在 reporter 消费后删除。
 
+`approve(runId, callId, outcome)` 只结算 runId 和 callId 都匹配的等待。`approved` 放行；`rejected` 的工具结果为「归属人拒绝了这个动作。」；`timed_out` 为「10 分钟没人批，按拒绝处理。」；`voided` 为「用户发了新消息，这一步作废了。」。作废结算后复用 `abortSession()` 中止对应群的会话，`runnerAbortedRuns` 标记让 reporter 不追加模型报错行。旧 prompt 从 `agent_settled` 收尾，`finishRun` 保证一个 runId 只发一次 `run_done`，原串行队列随后执行新 prompt。到期拒绝只拦工具，当前轮可继续告诉用户结果。
+
 ## 暂停和继续
 
 Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 prompt 入场和每次 `tool_call` 前等待同一个 Bot 的暂停闸门。正在执行的工具和正在返回的模型请求不会被截断；工具完成后，下一次工具调用停在闸门。审批在暂停前已经发出时仍可决定，批准后也要等 resume 才执行。

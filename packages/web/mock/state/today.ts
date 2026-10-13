@@ -159,6 +159,7 @@ const approvalOf = (input: { id: string; groupId: string; botId: string; runId: 
     view: { kind: "bash", command: input.text, raw: { command: input.text } },
     status: "pending",
     decidedAt: null,
+    deadlineAt: null,
     grantId: null,
   });
 

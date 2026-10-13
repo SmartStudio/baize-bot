@@ -486,7 +486,7 @@ async function startHarness(options: {
   const send = (message: AgentToControl): void => {
     sent.push(AgentToControl.parse(message));
     if (message.type === "approval_request" && options.approve !== undefined) {
-      runner?.approve(message.runId, message.callId, options.approve);
+      runner?.approve(message.runId, message.callId, options.approve ? "approved" : "rejected");
     }
   };
   const config = (
@@ -930,14 +930,14 @@ describe("运行器的审批", () => {
     await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
   });
   /** send_email 走真 MCP 注册，审批来源就是会话里这条 MCP 工具本身。 */
-  const withMcp = async (approve?: boolean) => {
+  const withMcp = async (approve?: boolean, script = approvalScript) => {
     const mcp = await startFakeMcp();
     openMcps.push(mcp);
     const h = await startHarness({
       bots: ["bot-1"],
       tools: [toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url })],
       extensionTools: [],
-      script: approvalScript,
+      script,
       ...(approve === undefined ? {} : { approve }),
     });
     const sentTo = (): unknown[] => mcp.calls.map((call) => call.args["to"]);
@@ -953,7 +953,7 @@ describe("运行器的审批", () => {
     await h.runner.pause(BotId.parse("bot-1"));
     const request = h.sent.find((message) => message.type === "approval_request");
     if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
-    h.runner.approve(request.runId, request.callId, true);
+    h.runner.approve(request.runId, request.callId, "approved");
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(sentTo()).toEqual([]);
 
@@ -968,7 +968,7 @@ describe("运行器的审批", () => {
     expect(h.runner.activeRuns()).toEqual([]);
   }, 10_000);
 
-  it("approve(false) 之后 bot_tool_call 终态是 blocked，工具体没执行", async () => {
+  it("approve(rejected) 之后 bot_tool_call 终态是 blocked，工具体没执行", async () => {
     const { h, sentTo } = await withMcp(false);
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
@@ -984,7 +984,7 @@ describe("运行器的审批", () => {
     expect(sentTo(), "被拒绝的调用不该打到 MCP").toEqual([]);
   });
 
-  it("approve(true) 之后终态是 ok，工具体执行了", async () => {
+  it("approve(approved) 之后终态是 ok，工具体执行了", async () => {
     const { h, sentTo } = await withMcp(true);
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
@@ -995,6 +995,65 @@ describe("运行器的审批", () => {
       "bot_tool_call:ok",
     ]);
     expect(sentTo()).toEqual(["kehu@example.com"]);
+  });
+
+  it("voided 结束挂着的工具并中止旧轮，排队的新 prompt 回答且每轮只有一条 run_done", async () => {
+    const { h, sentTo } = await withMcp(undefined, (req) =>
+      req.messages.at(-1)?.role === "user" && JSON.stringify(req.messages.at(-1)).includes("先别发了")
+        ? { textChunks: ["收到新消息，已经停下发邮件。"], usage: { input: 900, output: 20 } }
+        : approvalScript(req),
+    );
+    const first = h.runner.prompt(promptMessage("bot-1", "run-voided", "发邮件"));
+    await until(() => h.sent.some((m) => m.type === "approval_request"), "旧轮挂着的审批");
+    const next = h.runner.prompt(promptMessage("bot-1", "run-next", "先别发了，回答新消息"));
+    const request = h.sent.find((m) => m.type === "approval_request");
+    if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
+
+    h.runner.approve(RunId.parse("other-run"), request.callId, "voided");
+    expect(runDoneIds(h), "错 run 的作废不能中止当前会话").toEqual([]);
+    h.runner.approve(request.runId, request.callId, "voided");
+    await Promise.all([first, next]);
+
+    expect(sentTo(), "作废动作不能执行").toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-voided", "run-next"]);
+    expect(h.runner.activeRuns()).toEqual([]);
+    expect(
+      h.sent.filter((m) => m.type === "agent_error"),
+      "主动中止不往群里报错",
+    ).toEqual([]);
+    expect(h.sent.filter((m) => m.type === "bot_text" && m.runId === "run-next" && m.done)).toHaveLength(1);
+    expect(h.gateway.requestCount(), "旧轮中止后不再请求模型，只有旧轮首个请求和新消息的请求").toBe(2);
+    expect(
+      h.sent
+        .filter((m) => m.type === "bot_tool_call" && m.runId === "run-voided")
+        .map((m) => (m.type === "bot_tool_call" ? m.status : null)),
+    ).toEqual(["running", "blocked"]);
+    const history = sessionFilesOf(h.dataDir, "bot-1")
+      .map((file) => readFileSync(file, "utf8"))
+      .join("\n");
+    expect(history, "被中止的工具仍要把作废原因落进会话").toContain("用户发了新消息，这一步作废了。");
+  });
+
+  it("timed_out 阻止工具并把十分钟拒绝原因交给模型，当前轮正常收尾", async () => {
+    const toolResults: string[] = [];
+    const { h, sentTo } = await withMcp(undefined, (req) => {
+      if (isFollowUpTurn(req)) toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+      return approvalScript(req);
+    });
+    const running = h.runner.prompt(promptMessage("bot-1", "run-timeout", "发邮件"));
+    await until(() => h.sent.some((m) => m.type === "approval_request"), "审批请求");
+    const request = h.sent.find((m) => m.type === "approval_request");
+    if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
+    h.runner.approve(request.runId, request.callId, "timed_out");
+    await running;
+
+    expect(sentTo()).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-timeout"]);
+    expect(toolResults.join("\n")).toContain("10 分钟没人批，按拒绝处理。");
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
   });
 
   it("扩展工具不借同名 MCP 操作的审批：同名连接在与撤掉，判定都一样", async () => {
@@ -4223,7 +4282,7 @@ describe("config 按 Bot 增量对账", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
       const appliedBeforeApproval = applied;
       const request = h.sent.find((message) => message.type === "approval_request");
-      if (request?.type === "approval_request") h.runner.approve(request.runId, request.callId, false);
+      if (request?.type === "approval_request") h.runner.approve(request.runId, request.callId, "rejected");
       await Promise.all([first, second, applying]);
 
       expect(runDoneIds(h)).toEqual(["run-1", "run-2"]);
@@ -4548,7 +4607,7 @@ describe("放弃挂起的审批", () => {
     await h.runner.pause(BotId.parse("bot-1"));
     const request = h.sent.find((message) => message.type === "approval_request");
     if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
-    h.runner.approve(request.runId, request.callId, false);
+    h.runner.approve(request.runId, request.callId, "rejected");
     await running;
     await h.runner.stop();
 
@@ -4574,7 +4633,7 @@ describe("放弃挂起的审批", () => {
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
     const request = h.sent.find((message) => message.type === "approval_request");
     if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
-    h.runner.approve(request.runId, request.callId, true);
+    h.runner.approve(request.runId, request.callId, "approved");
 
     await Promise.all([running, h.runner.stop()]);
 
@@ -4709,7 +4768,7 @@ describe("统一闸门", () => {
     await new Promise((resolve) => setTimeout(resolve, 400));
     const request = h.sent.find((message) => message.type === "approval_request");
     if (request?.type !== "approval_request") throw new Error("没有找到审批请求");
-    h.runner.approve(request.runId, request.callId, true);
+    h.runner.approve(request.runId, request.callId, "approved");
     await running;
 
     expect(h.gateway.requestCount()).toBeGreaterThan(requestCount);

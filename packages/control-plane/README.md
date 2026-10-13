@@ -247,7 +247,15 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 | 归属人点批准或拒绝      | `POST /api/approvals/:id` | 定结论，选了长期范围就落授权并先重发 `config`，再向电脑发 `approval_result`、推 `approval_updated` |
 | 结论到达                | 运行器                    | 批了就往下跑，拒了就 `block`，这个工具调用的终态是 `blocked`                                       |
 
-控制面收到 `approval_request` 时**不回任何东西**，运行器就一直挂着等。这是审批的本意：没人点头就不往下走。
+控制面收到 `approval_request` 时先落卡，运行器挂着等 `approval_result`。下行用 `outcome` 区分 `approved`、`rejected`、`voided` 和 `timed_out`。
+
+用户当面发起的审批 `deadlineAt` 为 null，不按时间过期；Bot 之间 @ 派活也按这个规则。例行 run 的 `routineRunId` 非空，或 run 的触发消息是交接卡时，审批截止为创建后 10 分钟。服务器每 15 秒扫描一次，`UPDATE ... WHERE status = 'pending' AND deadline_at <= now RETURNING` 把到期审批定为 `timed_out`、记录 `decidedAt`，向所属电脑发超时结论并推 `approval_updated`。测试通过 `scanApprovalTimeouts(now)` 指定扫描时刻，间隔可由 `approvalTimeoutIntervalMs` 注入。
+
+按钮和群里答复的条件 UPDATE 同时要求 `deadline_at IS NULL OR deadline_at > now()`。截止已过、扫描器还没跑时，点按钮返回 409，并通过扫描器共用的 `settleApprovalTimeouts` 就地结算这一张卡，给电脑发 `timed_out`、推 `approval_updated`。重复点按钮或后续扫描不再发结论，也不落授权。
+
+用户的新消息路由到目标 Bot 后、发 prompt 前，控制面把这个 Bot 在同一个群里的 pending 审批定为 `voided`。每张卡先向旧 run 所在电脑发作废结论，再派新 prompt；其他 Bot 和其他群的审批不受影响。例行消息不作废已有审批。群里回「批准、同意、拒绝、不行」先消费为审批决定，消费成功就不派活，也不触发作废。按钮、作废和到期都用 `WHERE status = 'pending'` 争同一行，作废后再点按钮返回 409。
+
+`expired` 保持原义：run 收尾或电脑断线后的审批失效。卡片把新消息作废显示为「已作废 · 你发了新消息，这一步不做了」，到期拒绝显示为「已拒绝 · 10 分钟没人批」。
 
 两处幂等，都靠数据库自己，不靠先查后写：
 

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   type AccountConfig,
   type AgentToControl,
+  type ApprovalOutcome,
   type BotId,
   type ComputerId,
   type ControlToAgent,
@@ -92,7 +93,7 @@ export interface Runner {
   /** 当前仍在运行的 run。只读快照，供电脑代理在重连 hello 时上报。 */
   activeRuns(): readonly RunId[];
   /** 控制面的审批结论。runId 对不上的结论不作数。 */
-  approve(runId: RunId, callId: string, approved: boolean): void;
+  approve(runId: RunId, callId: string, outcome: ApprovalOutcome): void;
   /** 出牌回执只结算 runId 和 callId 都匹配的等待。 */
   pokerResult(runId: RunId, callId: string, result: PokerResult): void;
   pause(botId: BotId): Promise<void>;
@@ -925,8 +926,26 @@ export function createRunner(config: RunnerConfig): Runner {
       return [...liveRuns];
     },
 
-    approve(runId, callId, approved) {
-      approvals.settle(runId, callId, approved);
+    approve(runId, callId, outcome) {
+      if (outcome !== "voided") {
+        approvals.settle(runId, callId, outcome);
+        return;
+      }
+      const bot = [...bots.values()].find((candidate) => candidate.active?.run.runId === runId);
+      const groupId = bot?.active?.run.groupId;
+      const session = groupId === undefined ? undefined : bot?.sessions.get(groupId)?.session;
+      if (bot === undefined || groupId === undefined || session === undefined) {
+        approvals.settle(runId, callId, outcome);
+        return;
+      }
+      // Pi 在闸门返回前收到 abort 会把作废原因覆盖成 Operation aborted，等工具结果定好再中止。
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type === "agent_settled") unsubscribe();
+        if (event.type !== "tool_execution_end" || event.toolCallId !== callId) return;
+        unsubscribe();
+        void abortSession(bot, groupId).catch(() => undefined);
+      });
+      if (!approvals.settle(runId, callId, outcome)) unsubscribe();
     },
 
     pokerResult(runId, callId, result) {

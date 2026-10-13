@@ -25,7 +25,13 @@ import {
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { decideApproval, latestPendingApproval, listApprovals } from "../repo/approvals.js";
+import {
+  decideApproval,
+  latestPendingApproval,
+  listApprovals,
+  timeOutDueApprovals,
+  voidPendingApprovals,
+} from "../repo/approvals.js";
 import { listAccounts } from "../repo/accounts.js";
 import { listBotNames } from "../repo/bots.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
@@ -177,6 +183,21 @@ export async function dispatchUserMessage(
         ? routeTargets({ members, chiefBotId, currentBotId, mentions: mentioned })
         : members.filter((member) => member.id === owner).map((member) => member.id);
     if (targets.length === 0) break;
+    if (trigger.body.kind === "user" && options.routineRunId === undefined) {
+      for (const botId of targets) {
+        const voided = await voidPendingApprovals(deps.db, botId, groupId, new Date());
+        for (const decided of voided) {
+          if (decided.computerId !== null)
+            deps.agents.send(decided.computerId, {
+              type: "approval_result",
+              runId: decided.approval.runId,
+              callId: decided.callId,
+              outcome: "voided",
+            });
+          deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
+        }
+      }
+    }
     const reason = solo
       ? "solo"
       : mentioned.length > 0 || owner !== undefined
@@ -438,6 +459,8 @@ const APPROVAL_OUTCOME: Record<Approval["status"], string> = {
   approved: "你批准了",
   rejected: "你拒绝了",
   expired: "没批下来，过期了",
+  voided: "你发了新消息，这一步作废了",
+  timed_out: "10 分钟没人批，按拒绝处理",
 };
 
 const TOOL_CALL_OUTCOME: Record<ToolCallStatus, string> = {
@@ -498,6 +521,8 @@ const APPROVAL_SETTLED: Record<Approval["status"], boolean> = {
   approved: true,
   rejected: true,
   expired: true,
+  voided: true,
+  timed_out: true,
 };
 
 const HANDOFF_SETTLED: Record<Handoff["status"], boolean> = { pending: false, accepted: true };
@@ -679,6 +704,21 @@ export type SettleResult =
   | { readonly kind: "already_decided" }
   | { readonly kind: "scope_not_allowed"; readonly error: string };
 
+export async function settleApprovalTimeouts(deps: DispatchDeps, now: Date, approvalId?: ApprovalId): Promise<number> {
+  const decided = await timeOutDueApprovals(deps.db, now, approvalId);
+  for (const item of decided) {
+    if (item.computerId !== null)
+      deps.agents.send(item.computerId, {
+        type: "approval_result",
+        runId: item.approval.runId,
+        callId: item.callId,
+        outcome: "timed_out",
+      });
+    deps.push.push(item.ownerId, { type: "approval_updated", approval: item.approval });
+  }
+  return decided.length;
+}
+
 /**
  * 给一条审批定结论、告诉电脑、推给客户端。按钮和群里回话共用这一份。
  * 落了授权就先重发 config 再放行：运行器放行之后紧接着的同类调用要看到这条授权，否则还会再问一次。
@@ -691,6 +731,7 @@ export async function settleApproval(
   request: DecideApprovalRequest,
 ): Promise<SettleResult> {
   const outcome = await decideApproval(deps.db, ownerId, approvalId, request);
+  if (outcome.kind === "already_decided") await settleApprovalTimeouts(deps, new Date(), approvalId);
   if (outcome.kind !== "decided") return outcome;
   const { decided } = outcome;
 
@@ -700,7 +741,7 @@ export async function settleApproval(
       type: "approval_result",
       runId: decided.runId,
       callId: decided.callId,
-      approved: request.decision === "approved",
+      outcome: request.decision,
     });
   deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
   return { kind: "ok", approval: decided.approval, grant: decided.grant };

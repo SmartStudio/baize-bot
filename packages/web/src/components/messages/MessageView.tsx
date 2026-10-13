@@ -182,6 +182,8 @@ const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
   approved: "同意",
   rejected: "不同意",
   expired: "已失效",
+  voided: "已作废 · 你发了新消息，这一步不做了",
+  timed_out: "已拒绝 · 10 分钟没人批",
 };
 
 // timeOf 只认 Message，而结论时间和接手时间挂在 Approval、Handoff 上。借这条消息套一层，免得为同一个格式
@@ -245,6 +247,16 @@ const ApprovalCard = ({
         <ToolViewContent view={approval.view} approval />
       </p>
       {approval.target === null ? null : <p className="approval-target">目标：{targetText(approval.target)}</p>}
+      {approval.deadlineAt === null ? null : (
+        <p className="approval-target" data-testid="approval-deadline">
+          {new Date(approval.deadlineAt).toLocaleTimeString("zh-TW", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          })}{" "}
+          前没人批就按拒绝处理
+        </p>
+      )}
       <div className="approval-actions">
         <button
           type="button"

@@ -24,6 +24,7 @@ import {
   settleLatestPending,
   streamBotReply,
   tasks,
+  voidLatestPendingForBot,
   writeTask,
   type ApprovalDecision,
 } from "../state.js";
@@ -133,6 +134,10 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
             send(res, 200, { message });
           } else {
             const responder = responderOf(groupId, mentions);
+            if (responder !== null) {
+              const voided = voidLatestPendingForBot(groupId, responder);
+              if (voided !== null) push({ type: "approval_updated", approval: voided });
+            }
             if (responder === null) {
               const note = appendMessage(groupId, { kind: "system", text: "没人接这句话。@ 一个 Bot 派活。" });
               push({ type: "message", message: note });

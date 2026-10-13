@@ -1,6 +1,7 @@
 import {
   BrowserPlatform,
   GroupId,
+  MessageId,
   type AgentToControl,
   type BotId,
   type ComputerId,
@@ -12,13 +13,20 @@ import {
   type UsageRecord,
   type UserId,
 } from "@baize/shared";
-import { TransactionRollbackError } from "drizzle-orm";
+import { TransactionRollbackError, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { runs } from "../db/schema.js";
 import { refreshHintForRun } from "../poker/hint.js";
 import type { NoticePublisher } from "../notifications.js";
 import { expireLogin } from "../account-expiry.js";
 import { findAccountOnComputer, markLoginFailed, markLoginValid } from "../repo/accounts.js";
-import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
+import {
+  APPROVAL_AUTO_REJECT_MS,
+  approvalRun,
+  createApproval,
+  expireApproval,
+  expireApprovalsOfRun,
+} from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
@@ -29,6 +37,7 @@ import {
   appendSkillOffer,
   failRunningToolCalls,
   findGroupId,
+  findOwnedMessage,
   listGroupBots,
   replaceMessageBody,
   settleStreamingText,
@@ -760,13 +769,28 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   }
 }
 
-/**
- * 不回 approval_result，电脑上的运行器就一直挂着等，直到归属人点了按钮或在群里回了话。
- * 这是审批的本意：没人点头就不往下走。
- */
 async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, event: ApprovalRequest): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
+
+  const [run] = await deps.db
+    .select({ routineRunId: runs.routineRunId, triggerMessageId: runs.triggerMessageId })
+    .from(runs)
+    .where(eq(runs.id, event.runId))
+    .limit(1);
+  if (run === undefined) return;
+  const trigger =
+    run.triggerMessageId === null
+      ? null
+      : await findOwnedMessage(deps.db, conn.ownerId, MessageId.parse(run.triggerMessageId), {
+          kind: "bot",
+          botId: event.botId,
+        });
+  const createdAt = new Date();
+  const deadlineAt =
+    run.routineRunId !== null || trigger?.body.kind === "handoff"
+      ? new Date(createdAt.getTime() + APPROVAL_AUTO_REJECT_MS)
+      : null;
 
   const created = await createApproval(deps.db, {
     runId: event.runId,
@@ -777,6 +801,8 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
     action: event.action,
     target: event.target,
     view: event.view,
+    createdAt,
+    deadlineAt,
   });
   // 同一条 approval_request 重发时这里是 null：不多一张卡，也不多推一次。
   if (created === null) return;

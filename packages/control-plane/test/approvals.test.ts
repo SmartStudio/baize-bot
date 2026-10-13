@@ -163,7 +163,9 @@ describe("approval_request 到达", () => {
         "这一页引用到的审批跟着一起回",
       ).toEqual([approval?.id]);
 
-      await expectNextDownlinkIsPrompt(job, "再看一眼");
+      await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "再看一眼" });
+      expect(await job.agent.expect("approval_result")).toMatchObject({ callId: "call-1", outcome: "voided" });
+      expect((await job.agent.expect("prompt")).text).toBe("再看一眼");
     } finally {
       job.close();
     }
@@ -265,7 +267,7 @@ describe("放弃审批", () => {
 });
 
 describe("点按钮", () => {
-  it("批准之后电脑收到 approved=true，runId 和 callId 对得上", async () => {
+  it("批准之后电脑收到 approved outcome，runId 和 callId 对得上", async () => {
     const job = await runningJob();
 
     try {
@@ -274,7 +276,7 @@ describe("点按钮", () => {
       expect(response.status).toBe(200);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
       expect(result.runId, "运行器按 runId 加 callId 认是哪个工具在等").toBe(job.runId);
       expect(result.callId).toBe("call-7");
 
@@ -286,7 +288,7 @@ describe("点按钮", () => {
     }
   });
 
-  it("拒绝之后电脑收到 approved=false", async () => {
+  it("拒绝之后电脑收到 rejected outcome", async () => {
     const job = await runningJob();
 
     try {
@@ -294,7 +296,7 @@ describe("点按钮", () => {
       expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "rejected" })).status).toBe(200);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved, "拒绝要让运行器把这个工具调用打成 blocked").toBe(false);
+      expect(result.outcome, "拒绝要让运行器把这个工具调用打成 blocked").toBe("rejected");
       expect(result.callId).toBe("call-8");
     } finally {
       job.close();
@@ -313,7 +315,9 @@ describe("点按钮", () => {
       expect(await response.json(), "和不存在的 id 回一样的话").toEqual({ error: "没有这个对象" });
       const stored = await page(mine);
       expect(stored.approvals[0]?.status, "别人点了也不该改变这条的状态").toBe("pending");
-      await expectNextDownlinkIsPrompt(mine, "它还等着");
+      await mine.client.post(`/api/groups/${mine.groupId}/messages`, { text: "它还等着" });
+      expect(await mine.agent.expect("approval_result")).toMatchObject({ callId: "call-1", outcome: "voided" });
+      expect((await mine.agent.next()).type).toBe("prompt");
     } finally {
       mine.close();
       other.close();
@@ -327,7 +331,7 @@ describe("点按钮", () => {
       const approval = await raiseApproval(job, "call-9");
       expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(200);
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
 
       const again = await job.client.post(`/api/approvals/${approval.id}`, { decision: "rejected" });
       expect(again.status).toBe(409);
@@ -349,7 +353,7 @@ describe("群里回文字", () => {
       expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: " 批准 " })).status).toBe(201);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
       expect(result.callId).toBe("call-2");
 
       // 运行器正挂着等结论，这条「批准」再派一次活就会并发起第二个 run。
@@ -367,7 +371,7 @@ describe("群里回文字", () => {
       expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "不行" })).status).toBe(201);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(false);
+      expect(result.outcome).toBe("rejected");
     } finally {
       job.close();
     }
@@ -499,7 +503,7 @@ describe("电脑断线", () => {
       try {
         expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(200);
         const result = await agent.expect("approval_result");
-        expect(result.approved, "结论要落到重连后的那条连接上").toBe(true);
+        expect(result.outcome, "结论要落到重连后的那条连接上").toBe("approved");
         expect(result.callId).toBe("call-6");
       } finally {
         agent.close();

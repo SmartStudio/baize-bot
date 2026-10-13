@@ -25,6 +25,7 @@ import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
 import { Notifications, type NotificationOptions } from "./notifications.js";
 import { PublishLoop, type PublishLoopOptions } from "./publish/loop.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
+import { settleApprovalTimeouts } from "./agent/dispatch.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
@@ -47,6 +48,7 @@ export type RunningServer = {
   readonly publisher: PublishLoop;
   /** 同 routines，测试里手动 tick。 */
   readonly metrics: MetricPoller;
+  scanApprovalTimeouts(now: Date): Promise<number>;
   close(): Promise<void>;
 };
 
@@ -69,6 +71,7 @@ export type StartOptions = {
   readonly credentialsKey?: string;
   readonly publisher?: Pick<PublishLoopOptions, "now" | "intervalMs">;
   readonly metrics?: Pick<MetricPollerOptions, "now" | "intervalMs">;
+  readonly approvalTimeoutIntervalMs?: number;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -217,6 +220,13 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   }, REMIND_INTERVAL_MS);
   reminders.unref();
 
+  const scanApprovalTimeouts = (now: Date): Promise<number> =>
+    settleApprovalTimeouts({ db: options.db, push: hub, agents }, now);
+  const approvalTimeouts = setInterval(() => {
+    void scanApprovalTimeouts(new Date()).catch((error: unknown) => console.error("扫到期审批出错", error));
+  }, options.approvalTimeoutIntervalMs ?? 15_000);
+  approvalTimeouts.unref();
+
   return {
     port,
     hub,
@@ -224,12 +234,14 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     notifications,
     publisher,
     metrics,
+    scanApprovalTimeouts,
     close: async () => {
       const pokerStopped = poker.stop();
       routines.stop();
       publisher.stop();
       metrics.stop();
       clearInterval(reminders);
+      clearInterval(approvalTimeouts);
       await hub.closeAll();
       await agents.closeAll();
       await pokerStopped;

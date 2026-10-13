@@ -29,6 +29,7 @@ import {
   seedLoginCard,
   createApproval,
   expireLatestPending,
+  timeOutLatestPending,
   groups,
   holdHandoffAccept,
   publishDraft,
@@ -53,7 +54,12 @@ const LoginCardRequest = z.object({ slot: z.union([z.literal(1), z.literal(2)]).
 const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
 const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
-  .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
+  .object({
+    action: ActionKind,
+    groupId: GroupId.default("grp_sales"),
+    target: GrantTarget.nullable().optional(),
+    deadlineAt: Timestamp.nullable().optional(),
+  })
   .strict();
 const TestMessageRequest = z
   .object({
@@ -216,6 +222,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
         runId: RunId.parse(`run_test_${Date.now()}`),
         action: parsed.data.action,
         target: parsed.data.target ?? null,
+        deadlineAt: parsed.data.deadlineAt ?? null,
         view: { kind: "bash", command: "示例调用", raw: { command: "示例调用" } },
       });
       const message = appendMessage(approval.groupId, { kind: "approval", approvalId: approval.id });
@@ -394,6 +401,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     if (expired === null) send(res, 409, { error: "没有待失效的审批" });
     else {
       push({ type: "approval_updated", approval: expired });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/approval/timeout") {
+    const timedOut = timeOutLatestPending();
+    if (timedOut === null) send(res, 409, { error: "没有待超时的审批" });
+    else {
+      push({ type: "approval_updated", approval: timedOut });
       send(res, 204);
     }
     return true;

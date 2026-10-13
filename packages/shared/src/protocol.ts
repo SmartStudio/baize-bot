@@ -43,6 +43,8 @@ import {
 import { ToolView } from "./tool-view.js";
 
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
+export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_out"]);
+export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
 // 4003 留给第 3 期信封单元的版本握手。
@@ -439,7 +441,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     type: z.literal("approval_result"),
     runId: RunId,
     callId: z.string(),
-    approved: z.boolean(),
+    outcome: ApprovalOutcome,
   }),
   // poker_act 的回执：引擎拒了带中文原因，运行器把它做成工具错误让牌友重试（D24）。
   z.object({

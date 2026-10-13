@@ -210,7 +210,7 @@ export const Group = z.discriminatedUnion("kind", [
 ]);
 export type Group = z.infer<typeof Group>;
 
-export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired"]);
+export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired", "voided", "timed_out"]);
 export type ApprovalStatus = z.infer<typeof ApprovalStatus>;
 
 export const ActionKind = z.enum([
@@ -292,6 +292,7 @@ export const Approval = z.object({
   view: ToolView,
   status: ApprovalStatus,
   decidedAt: Timestamp.nullable(),
+  deadlineAt: Timestamp.nullable(),
   grantId: GrantId.nullable(),
 });
 export type Approval = z.infer<typeof Approval>;

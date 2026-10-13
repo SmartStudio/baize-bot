@@ -261,7 +261,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           log(`还没收到 config，丢弃 run ${message.runId} 的审批结论`);
           return;
         }
-        runner.approve(message.runId, message.callId, message.approved);
+        runner.approve(message.runId, message.callId, message.outcome);
         return;
       }
       case "poker_result": {

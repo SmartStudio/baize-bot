@@ -10,6 +10,7 @@ import {
   AgentCloseCode,
   AgentStatusLine,
   AgentToControl,
+  type ApprovalOutcome,
   BotId,
   ComputerId,
   GroupId,
@@ -57,7 +58,7 @@ function startAgent(options: AgentOptions): AgentHandle {
 
 // 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
 interface RunnerCalls {
-  readonly approvals: Array<{ runId: RunId; callId: string; approved: boolean }>;
+  readonly approvals: Array<{ runId: RunId; callId: string; outcome: ApprovalOutcome }>;
   readonly pokerResults: Array<{ runId: RunId; callId: string; result: { ok: true } | { ok: false; error: string } }>;
   readonly activeRuns: RunId[];
   readonly paused: BotId[];
@@ -103,8 +104,8 @@ function runnerOf(
         done: true,
       });
     },
-    approve: (runId, callId, approved) => {
-      calls.approvals.push({ runId, callId, approved });
+    approve: (runId, callId, outcome) => {
+      calls.approvals.push({ runId, callId, outcome });
     },
     pokerResult: (runId, callId, result) => {
       calls.pokerResults.push({ runId, callId, result });
@@ -712,18 +713,21 @@ describe("电脑代理连控制面", () => {
     expect(reply.done).toBe(true);
   });
 
-  it("approval_result 报文到达后调用运行器的 approve", async () => {
-    const server = await startPair();
-    const socket = await server.waitForSocket(1);
+  it.each(["approved", "rejected", "voided", "timed_out"] as const)(
+    "approval_result 原样转发 %s outcome",
+    async (outcome) => {
+      const server = await startPair();
+      const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify(configMessage));
-    socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", approved: false }));
-    socket.send(JSON.stringify(promptMessage));
+      socket.send(JSON.stringify(configMessage));
+      socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", outcome }));
+      socket.send(JSON.stringify(promptMessage));
 
-    // 报文有序，等到 prompt 的回复就说明前面那条也处理完了。
-    await server.waitForMessage("bot_text", 1, 3000);
-    expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: false }]);
-  });
+      // 报文有序，等到 prompt 的回复就说明前面那条也处理完了。
+      await server.waitForMessage("bot_text", 1, 3000);
+      expect(runnerCalls().approvals).toEqual([{ runId: "run-1", callId: "call-1", outcome }]);
+    },
+  );
 
   it("poker_result 报文到达后调用运行器的 pokerResult，成功和中文拒绝都原样转发", async () => {
     const server = await startPair();
@@ -1165,7 +1169,7 @@ describe("电脑代理连控制面", () => {
     const decision = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const approvals: Array<{ runId: RunId; callId: string; approved: boolean }> = [];
+    const approvals: Array<{ runId: RunId; callId: string; outcome: ApprovalOutcome }> = [];
     agents.push(
       startAgent({
         url: await server.url(),
@@ -1187,9 +1191,9 @@ describe("电脑代理连控制面", () => {
               outputTokens: 1,
             });
           },
-          approve: (runId, callId, approved) => {
-            approvals.push({ runId, callId, approved });
-            if (runId === "run-1" && callId === "call-1" && approved) release?.();
+          approve: (runId, callId, outcome) => {
+            approvals.push({ runId, callId, outcome });
+            if (runId === "run-1" && callId === "call-1" && outcome === "approved") release?.();
           },
           pokerResult: () => {},
           pause: async () => {},
@@ -1206,11 +1210,11 @@ describe("电脑代理连控制面", () => {
       socket.send(JSON.stringify(configMessage));
       socket.send(JSON.stringify(promptMessage));
       await poll(() => (started ? true : undefined), 3000, "运行器开始等待审批");
-      socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", approved: true }));
+      socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", outcome: "approved" }));
 
       const done = await server.waitForMessage("run_done", 1, 3000);
       expect(done.runId).toBe("run-1");
-      expect(approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: true }]);
+      expect(approvals).toEqual([{ runId: "run-1", callId: "call-1", outcome: "approved" }]);
     } finally {
       release?.();
     }
@@ -1225,7 +1229,7 @@ describe("电脑代理连控制面", () => {
     const resumeDone = new Promise<void>((resolve) => {
       releaseResume = resolve;
     });
-    const approvals: Array<{ runId: RunId; callId: string; approved: boolean }> = [];
+    const approvals: Array<{ runId: RunId; callId: string; outcome: ApprovalOutcome }> = [];
     agents.push(
       startAgent({
         url: await server.url(),
@@ -1238,7 +1242,7 @@ describe("电脑代理连控制面", () => {
           return {
             applyConfig: async () => {},
             prompt: async () => {},
-            approve: (runId, callId, approved) => approvals.push({ runId, callId, approved }),
+            approve: (runId, callId, outcome) => approvals.push({ runId, callId, outcome }),
             pokerResult: () => {},
             pause: async () => {},
             resume: async () => {
@@ -1257,10 +1261,10 @@ describe("电脑代理连控制面", () => {
     await poll(() => (runnerCreated ? true : undefined), 3000, "运行器建好");
     socket.send(JSON.stringify({ type: "resume", botId: "bot-1" }));
     await poll(() => (resumeStarted ? true : undefined), 3000, "resume 开始补跑");
-    socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", approved: true }));
+    socket.send(JSON.stringify({ type: "approval_result", runId: "run-1", callId: "call-1", outcome: "approved" }));
 
     await poll(() => (approvals.length === 1 ? true : undefined), 3000, "审批结论送到运行器");
-    expect(approvals).toEqual([{ runId: "run-1", callId: "call-1", approved: true }]);
+    expect(approvals).toEqual([{ runId: "run-1", callId: "call-1", outcome: "approved" }]);
     releaseResume();
   });
 
@@ -1279,7 +1283,7 @@ describe("电脑代理连控制面", () => {
     const secondApproval = new Promise<void>((resolve) => {
       approveSecondRun = resolve;
     });
-    const approved: Array<{ runId: RunId; callId: string; approved: boolean }> = [];
+    const approved: Array<{ runId: RunId; callId: string; outcome: ApprovalOutcome }> = [];
     const appliedConfigs: RunnerConfig[] = [];
     agents.push(
       startAgent({
@@ -1334,8 +1338,8 @@ describe("电脑代理连控制面", () => {
                 outputTokens: 1,
               });
             },
-            approve: (runId, callId, approvedResult) => {
-              approved.push({ runId, callId, approved: approvedResult });
+            approve: (runId, callId, outcome) => {
+              approved.push({ runId, callId, outcome });
               approveSecondRun();
             },
             pokerResult: () => {},
@@ -1365,13 +1369,13 @@ describe("电脑代理连控制面", () => {
     await server.waitForMessage("approval_request", 1, 3000);
     releaseFirstRun();
     await server.waitForMessage("run_done", 1, 3000);
-    socket.send(JSON.stringify({ type: "approval_result", runId: "run-2", callId: "call-2", approved: true }));
+    socket.send(JSON.stringify({ type: "approval_result", runId: "run-2", callId: "call-2", outcome: "approved" }));
     await poll(() => (approved.length === 1 ? true : undefined), 3000, "run-2 的审批结论送到运行器");
     await server.waitForMessage("run_done", 2, 3000);
 
     expect(configDuringFinalizing).toBe(true);
     expect(appliedConfigs).toHaveLength(1);
-    expect(approved).toEqual([{ runId: "run-2", callId: "call-2", approved: true }]);
+    expect(approved).toEqual([{ runId: "run-2", callId: "call-2", outcome: "approved" }]);
     expect(server.messages.filter((message) => message.type === "run_done").map((message) => message.runId)).toEqual([
       "run-1",
       "run-2",
@@ -1382,7 +1386,7 @@ describe("电脑代理连控制面", () => {
     const server = await startPair();
     const socket = await server.waitForSocket(1);
 
-    socket.send(JSON.stringify({ type: "approval_result", runId: "run-早了", callId: "call-1", approved: true }));
+    socket.send(JSON.stringify({ type: "approval_result", runId: "run-早了", callId: "call-1", outcome: "approved" }));
     socket.send(JSON.stringify(configMessage));
     socket.send(JSON.stringify(promptMessage));
 

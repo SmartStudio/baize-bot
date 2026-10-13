@@ -18,7 +18,7 @@ import {
   type ToolView,
   type Viewer,
 } from "@baize/shared";
-import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { TransactionRollbackError, and, count, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, grants, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -32,6 +32,7 @@ type ApprovalRow = typeof approvals.$inferSelect;
 
 /** 过了这么久还没有结论就提醒一次。规格里的「24 小时后追加一条 system 提醒」。 */
 export const STALE_APPROVAL_MS = 24 * 60 * 60 * 1000;
+export const APPROVAL_AUTO_REJECT_MS = 10 * 60 * 1000;
 
 export type CreateApprovalInput = {
   readonly runId: RunId;
@@ -42,6 +43,8 @@ export type CreateApprovalInput = {
   readonly action: ActionKind;
   readonly target: GrantTarget | null;
   readonly view: ToolView;
+  readonly createdAt: Date;
+  readonly deadlineAt: Date | null;
 };
 
 export type CreatedApproval = { readonly approval: Approval; readonly message: Message };
@@ -73,6 +76,8 @@ export async function createApproval(db: Db, input: CreateApprovalInput): Promis
           action: input.action,
           target: input.target,
           view: input.view,
+          createdAt: input.createdAt,
+          deadlineAt: input.deadlineAt,
           messageId: message.id,
         })
         .onConflictDoNothing({ target: [approvals.runId, approvals.callId] })
@@ -115,6 +120,63 @@ export async function expireApprovalsOfRun(db: Db | Tx, runId: RunId): Promise<A
     .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")))
     .returning();
   return rows.map(toApproval);
+}
+
+export type AutomaticApproval = {
+  readonly approval: Approval;
+  readonly computerId: ComputerId | null;
+  readonly ownerId: UserId;
+  readonly callId: string;
+};
+
+const automaticReturning = {
+  approval: approvals,
+  computerId: sql<string | null>`(SELECT ${runs.computerId} FROM ${runs} WHERE ${runs.id} = ${approvals.runId})`,
+  ownerId: sql<string>`(SELECT ${groups.ownerId} FROM ${groups} WHERE ${groups.id} = ${approvals.groupId})`,
+  callId: approvals.callId,
+};
+
+function toAutomaticApproval(row: {
+  approval: ApprovalRow;
+  computerId: string | null;
+  ownerId: string;
+  callId: string;
+}): AutomaticApproval {
+  return {
+    approval: toApproval(row.approval),
+    computerId: row.computerId === null ? null : ComputerId.parse(row.computerId),
+    ownerId: UserId.parse(row.ownerId),
+    callId: row.callId,
+  };
+}
+
+export async function timeOutDueApprovals(db: Db, now: Date, approvalId?: ApprovalId): Promise<AutomaticApproval[]> {
+  const rows = await db
+    .update(approvals)
+    .set({ status: "timed_out", decidedAt: now })
+    .where(
+      and(
+        eq(approvals.status, "pending"),
+        lte(approvals.deadlineAt, now),
+        approvalId === undefined ? undefined : eq(approvals.id, approvalId),
+      ),
+    )
+    .returning(automaticReturning);
+  return rows.map(toAutomaticApproval);
+}
+
+export async function voidPendingApprovals(
+  db: Db,
+  botId: BotId,
+  groupId: GroupId,
+  now: Date,
+): Promise<AutomaticApproval[]> {
+  const rows = await db
+    .update(approvals)
+    .set({ status: "voided", decidedAt: now })
+    .where(and(eq(approvals.botId, botId), eq(approvals.groupId, groupId), eq(approvals.status, "pending")))
+    .returning(automaticReturning);
+  return rows.map(toAutomaticApproval);
 }
 
 /** 审批按归属人过滤。别人的审批在这里查不到，路由层因此返回 404 而不是 403。 */
@@ -191,7 +253,13 @@ export async function decideApproval(
       const [row] = await tx
         .update(approvals)
         .set({ status: request.decision, decidedAt: new Date() })
-        .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+        .where(
+          and(
+            eq(approvals.id, approvalId),
+            eq(approvals.status, "pending"),
+            or(isNull(approvals.deadlineAt), gt(approvals.deadlineAt, sql`now()`)),
+          ),
+        )
         .returning();
       if (row === undefined) return null;
 

@@ -143,7 +143,7 @@ function gateToolCalls(
       return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
     }
     if (decision.verdict === "ask") {
-      const approved = await gate.approvals.ask(
+      const outcome = await gate.approvals.ask(
         {
           runId: active.run.runId,
           botId: active.run.botId,
@@ -156,7 +156,14 @@ function gateToolCalls(
         },
         ctx.signal,
       );
-      if (!approved) return { block: true, reason: "归属人拒绝了这个动作。" };
+      if (outcome !== "approved") {
+        const reasons = {
+          rejected: "归属人拒绝了这个动作。",
+          timed_out: "10 分钟没人批，按拒绝处理。",
+          voided: "用户发了新消息，这一步作废了。",
+        };
+        return { block: true, reason: reasons[outcome] };
+      }
     }
     if (!(await gate.waitUntilRunning(ctx.signal))) {
       gate.approvals.block(event.toolCallId);

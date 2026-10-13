@@ -39,6 +39,7 @@ export const createApproval = (input: {
   action: Approval["action"];
   target?: Approval["target"];
   view: Approval["view"];
+  deadlineAt?: Approval["deadlineAt"];
 }): Approval => {
   const approval = Approval.parse({
     id: ApprovalId.parse(`apr_${nextSuffix()}`),
@@ -50,6 +51,7 @@ export const createApproval = (input: {
     view: input.view,
     status: "pending",
     decidedAt: null,
+    deadlineAt: input.deadlineAt ?? null,
     grantId: null,
   });
   approvals.set(approval.id, approval);
@@ -108,6 +110,28 @@ export const expireLatestPending = (): Approval | null => {
   const waiting = [...approvals.values()].findLast((approval) => approval.status === "pending");
   if (waiting === undefined) return null;
   const next = Approval.parse({ ...waiting, status: "expired", decidedAt: null });
+  approvals.set(next.id, next);
+  waiters.get(next.id)?.("rejected");
+  waiters.delete(next.id);
+  return next;
+};
+
+export const timeOutLatestPending = (): Approval | null => {
+  const waiting = [...approvals.values()].findLast((approval) => approval.status === "pending");
+  if (waiting === undefined) return null;
+  const next = Approval.parse({ ...waiting, status: "timed_out", decidedAt: new Date().toISOString() });
+  approvals.set(next.id, next);
+  waiters.get(next.id)?.("rejected");
+  waiters.delete(next.id);
+  return next;
+};
+
+export const voidLatestPendingForBot = (groupId: string, botId: BotId): Approval | null => {
+  const waiting = [...approvals.values()].findLast(
+    (approval) => approval.groupId === groupId && approval.botId === botId && approval.status === "pending",
+  );
+  if (waiting === undefined) return null;
+  const next = Approval.parse({ ...waiting, status: "voided", decidedAt: new Date().toISOString() });
   approvals.set(next.id, next);
   waiters.get(next.id)?.("rejected");
   waiters.delete(next.id);
@@ -299,6 +323,7 @@ export const streamBotReply = async (
   push({ type: "message", message: call });
 
   let status: ToolCallStatus = "ok";
+  let outcome: Approval["status"] = "approved";
   let reply = `收到。${prompt.slice(0, 12)}… 我这就去办。`;
   if (needed === null) {
     await sleep(TOOL_CALL_MS);
@@ -311,6 +336,7 @@ export const streamBotReply = async (
     push({ type: "message", message: card });
     const decision = await waitForDecision(approval.id);
     if (abandoned()) return;
+    outcome = approvals.get(approval.id)?.status ?? decision;
     status = decision === "approved" ? "ok" : "blocked";
     reply =
       decision === "approved" ? `好，${prompt.slice(0, 12)}… 已经办了。` : `明白，这一步我放弃了，别的照原样办完。`;
@@ -326,6 +352,7 @@ export const streamBotReply = async (
     durationMs: TOOL_CALL_MS,
   });
   push({ type: "message", message: settled });
+  if (outcome === "voided") return;
 
   // 接手的 Bot 干完这一步就把清单勾掉一项，这是它维护任务卡的方式，用户在卡上看到的就是这次运行的结果。
   const ticked = status === "ok" ? tickFirstUndone(groupId, botId) : null;

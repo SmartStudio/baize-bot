@@ -472,6 +472,7 @@ function toApproval(row: typeof approvals.$inferSelect): Approval {
     view: row.view,
     status: row.status,
     decidedAt: row.decidedAt?.toISOString() ?? null,
+    deadlineAt: row.deadlineAt?.toISOString() ?? null,
     grantId: row.grantId,
   });
 }

@@ -142,6 +142,12 @@ async function expectNextDownlinkIsPrompt(who: Owner, job: Job, text: string): P
   expect(next.type, `电脑这时本该只收到派活，不该收到 ${next.type}`).toBe("prompt");
 }
 
+/** 待批卡不能用新用户消息探测下行：新消息会主动作废它。resume 帧同样能证明前面没有多发结论。 */
+async function expectNextDownlinkIsResume(who: Owner, job: Job): Promise<void> {
+  expect((await who.client.post(`/api/bots/${job.botId}/resume`)).status).toBe(200);
+  expect(await who.agent.next()).toEqual({ type: "resume", botId: job.botId });
+}
+
 describe("批准时选的范围落成授权", () => {
   it("选这个项目里后同群同类动作的 config 带上授权，别的群不带", async () => {
     const who = await owner(2);
@@ -167,7 +173,7 @@ describe("批准时选的范围落成授权", () => {
       expect(result, "先让后续调用不再问，再放行当前这一次").toMatchObject({
         runId: here.runId,
         callId: "call-read",
-        approved: true,
+        outcome: "approved",
       });
 
       const pushed = await who.push.next();
@@ -203,7 +209,7 @@ describe("批准时选的范围落成授权", () => {
       expect(grant !== null && "groupId" in grant, "一直的授权没有群").toBe(false);
 
       expect((await who.agent.expect("config")).grants).toEqual([grant]);
-      expect((await who.agent.expect("approval_result")).approved).toBe(true);
+      expect((await who.agent.expect("approval_result")).outcome).toBe("approved");
     } finally {
       who.close();
     }
@@ -286,7 +292,7 @@ describe("越级的范围在边界挡下", () => {
       expect(await response.json(), "400 的正文要是人话").toEqual({ error: "这类动作只能批这一次" });
 
       expect(await grantsOf(who)).toEqual([]);
-      await expectNextDownlinkIsPrompt(who, job, "它还等着");
+      await expectNextDownlinkIsResume(who, job);
       const again = await who.client.post(`/api/approvals/${approval.id}`, { decision: "approved", scope: "once" });
       expect(again.status, "被挡下的那次没有定结论，审批还在等").toBe(200);
     } finally {
@@ -307,7 +313,7 @@ describe("越级的范围在边界挡下", () => {
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "这类动作最多批到这个项目里" });
       expect(await grantsOf(who)).toEqual([]);
-      await expectNextDownlinkIsPrompt(who, job, "它还等着");
+      await expectNextDownlinkIsResume(who, job);
     } finally {
       who.close();
     }
@@ -326,7 +332,7 @@ describe("越级的范围在边界挡下", () => {
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: "这条审批没有具体目标，只能批这一次" });
       expect(await grantsOf(who)).toEqual([]);
-      await expectNextDownlinkIsPrompt(who, job, "它还等着");
+      await expectNextDownlinkIsResume(who, job);
     } finally {
       who.close();
     }
@@ -606,7 +612,11 @@ describe("删 Bot", () => {
       const response = await mine.client.post(`/api/approvals/${approval.id}`, { decision: "approved", scope: "once" });
       expect(response.status, "别人删不掉我的 Bot，我的审批也还在等我批").toBe(200);
       expect(DecideApprovalResponse.parse(await response.json()).approval.status).toBe("approved");
-      expect(await mine.agent.next()).toMatchObject({ type: "approval_result", callId: "call-kept", approved: true });
+      expect(await mine.agent.next()).toMatchObject({
+        type: "approval_result",
+        callId: "call-kept",
+        outcome: "approved",
+      });
       const pushed = await mine.push.next();
       expect(pushed.type === "approval_updated" ? pushed.approval.status : pushed.type, "我这边不该先收到失效").toBe(
         "approved",
