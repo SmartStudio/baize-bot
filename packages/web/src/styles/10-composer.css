@@ -1,3 +1,8 @@
+/* 对话区底部被输入框占掉的高度：发送钮、上下内边距、边框、下边距。浮在右下角的接手提示要让开这一截。 */
+:root {
+  --composer-band: calc(var(--control-h-md) + 2 * var(--space-3) + 2px + var(--space-7));
+}
+
 .composer {
   display: flex;
   gap: var(--space-4);

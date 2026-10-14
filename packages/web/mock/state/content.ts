@@ -14,7 +14,18 @@ import {
   type Message,
   type Publication,
 } from "@baize/shared";
-import { accounts, at, computerStatus, drafts, loginAttempts, nextSuffix, plans, publications, user } from "./store.js";
+import {
+  accounts,
+  at,
+  computerStatus,
+  drafts,
+  loginAttempts,
+  nextSuffix,
+  plans,
+  publications,
+  removedComputers,
+  user,
+} from "./store.js";
 import { publicationOf } from "./today.js";
 import { recordApprovedEdit } from "./brand.js";
 
@@ -46,7 +57,7 @@ export const computersOf = () =>
         idleSince: null,
         lastSeenAt: at(1),
       },
-    ],
+    ].filter((computer) => !removedComputers.has(computer.id)),
   });
 
 // 照控制面：批准时带了新正文，先把这一对记进 edits，再换正文。

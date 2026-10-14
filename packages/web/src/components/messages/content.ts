@@ -10,6 +10,7 @@ import type {
   Platform,
   ToolCallStatus,
 } from "@baize/shared";
+import type { TakeoverScreen } from "../../state/live.js";
 
 export const PLATFORM: Record<Platform, string> = {
   github: "GitHub",
@@ -70,13 +71,19 @@ export const LIVE_TEXT = {
   noOrigin: "页面还在打开",
 } as const;
 
-// 接手卡在画面没了之后按工具调用的终态说结论。running 而画面不在，是电脑还没把画面报上来，或者已经收起、结果还在路上。
-export const TAKEOVER_RESULT: Record<ToolCallStatus, string> = {
-  running: "画面还没出来",
+const TAKEOVER_RESULT: Record<Exclude<ToolCallStatus, "running">, string> = {
   ok: "已交还",
   failed: "没接手",
   blocked: "没接手",
 };
+
+const TAKEOVER_WAITING: Record<Exclude<TakeoverScreen["kind"], "open">, string> = {
+  put_away: "画面已收起，等 Bot 接着做",
+  unseen: "画面还没出来",
+};
+
+export const takeoverResult = (status: ToolCallStatus, screen: Exclude<TakeoverScreen["kind"], "open">): string =>
+  status === "running" ? TAKEOVER_WAITING[screen] : TAKEOVER_RESULT[status];
 
 export const TIER: Record<AccountTier, { title: string; note: string }> = {
   read_only: { title: "只读", note: "只看数据和评论，不写任何东西。" },

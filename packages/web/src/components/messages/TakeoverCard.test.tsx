@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Computer, LiveSession, MessageBody, MessageId, ToolCallStatus } from "@baize/shared";
-import type { ContentBook } from "../../state/types.js";
+import { EMPTY_CONTENT, reduceContent } from "../../state/content.js";
+import { createClock } from "../../state/stamped.js";
+import type { ContentBook, ReadyState } from "../../state/types.js";
 import type { ContentActions } from "./DraftCards.js";
 import { TakeoverCard } from "./TakeoverCard.js";
 
@@ -39,17 +41,17 @@ const call = (status: ToolCallStatus) => {
   return { body, view: body.view };
 };
 
-const book = (live: boolean): ContentBook => ({
-  drafts: {},
-  plans: {},
-  accounts: {},
-  computers: { [remote.id]: remote },
-  publications: {},
-  logins: {},
-  live: live ? { [session.liveId]: { ...session, id: session.liveId } } : {},
-  takeover: null,
-  stamps: {},
-});
+type Screen = "open" | "put_away" | "unseen";
+
+// 画面表照网页收推送的路子造：put_away 是会话推来过、又收到 live_closed；unseen 是这一页从没收到过这个会话。
+const book = (screen: Screen): ContentBook => {
+  const next = createClock();
+  let state = { content: { ...EMPTY_CONTENT, computers: { [remote.id]: remote } } } as unknown as ReadyState;
+  if (screen !== "unseen") state = reduceContent(state, { type: "live_upserted", session, seq: next() });
+  if (screen === "put_away")
+    state = reduceContent(state, { type: "live_removed", liveId: session.liveId, seq: next() });
+  return state.content;
+};
 
 const actions: ContentActions = {
   decideDraft: vi.fn(() => Promise.resolve()),
@@ -59,13 +61,13 @@ const actions: ContentActions = {
   openTakeover: vi.fn(() => Promise.resolve()),
 };
 
-const render = (status: ToolCallStatus, live: boolean) =>
+const render = (status: ToolCallStatus, screen: Screen) =>
   renderToStaticMarkup(
     <TakeoverCard
       messageId={MessageId.parse("msg_1")}
       {...call(status)}
       botName="小服"
-      content={book(live)}
+      content={book(screen)}
       actions={actions}
       selected={false}
       onInspect={() => undefined}
@@ -76,7 +78,7 @@ const result = (html: string) => html.match(/data-testid="takeover-result">([^<]
 
 describe("TakeoverCard", () => {
   it("画面还在：写哪个 Bot、原话和电脑，「打开画面」可点", () => {
-    const html = render("running", true);
+    const html = render("running", "open");
     expect(html).toContain("<b>小服请你接手这一页</b>");
     expect(html).toContain(REASON);
     expect(html).toContain("页面开在远程电脑 remote.baize.dev");
@@ -86,27 +88,38 @@ describe("TakeoverCard", () => {
   });
 
   it("画面没了、工具调用成功：写「已交还」，不给打开", () => {
-    const html = render("ok", false);
+    const html = render("ok", "put_away");
     expect(result(html)).toBe("已交还");
     expect(html).not.toContain('data-testid="takeover-open"');
     expect(html, "原话照样留在卡上").toContain(REASON);
   });
 
   it("画面没了、工具调用失败：写「没接手」", () => {
-    const html = render("failed", false);
+    const html = render("failed", "put_away");
     expect(result(html)).toBe("没接手");
     expect(html).not.toContain('data-testid="takeover-open"');
   });
 
-  it("工具调用还在跑、画面却不在：写「画面还没出来」，不给打开", () => {
-    const html = render("running", false);
+  it("工具调用还在跑、这一页没见过画面：写「画面还没出来」，不给打开", () => {
+    const html = render("running", "unseen");
     expect(result(html)).toBe("画面还没出来");
     expect(html).not.toContain('data-testid="takeover-open"');
     expect(html, "画面不在就不知道页面在哪台电脑上").not.toContain("页面开在");
   });
 
+  it("画面出现过、已经收起，工具调用还在跑：写「画面已收起，等 Bot 接着做」，不说还没出来", () => {
+    const html = render("running", "put_away");
+    expect(result(html)).toBe("画面已收起，等 Bot 接着做");
+    expect(html).not.toContain('data-testid="takeover-open"');
+    expect(html, "画面不在就不知道页面在哪台电脑上").not.toContain("页面开在");
+  });
+
+  it("刷新过的页面没见过画面，工具调用有了终态照样按终态说", () => {
+    expect(result(render("ok", "unseen"))).toBe("已交还");
+  });
+
   it("开检查器的按钮和「打开画面」并排，不套在一起", () => {
-    const html = render("running", true);
+    const html = render("running", "open");
     expect(html).not.toMatch(/<button[^>]*>(?:(?!<\/button>).)*<button/);
   });
 });

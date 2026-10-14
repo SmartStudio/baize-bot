@@ -1,14 +1,15 @@
 import { MonitorUp } from "lucide-react";
 import type { MessageBody, MessageId, ToolView } from "@baize/shared";
+import { takeoverScreen } from "../../state/live.js";
 import type { ContentBook } from "../../state/types.js";
 import type { ContentActions } from "./DraftCards.js";
 import type { InspectTool } from "./MessageView.js";
-import { LIVE_TEXT, TAKEOVER_RESULT, computerName } from "./content.js";
+import { LIVE_TEXT, computerName, takeoverResult } from "./content.js";
 
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 
 // 工具调用行整行是一个按钮，「打开画面」放不进去。接手卡拆成两个并排的按钮：左边整块照旧开工具检查器，右边开画面。
-// 结论只看两处：画面还在就能开；画面不在了按工具调用的终态说。电脑名只有画面在时才知道，Bot 和工具调用都不带电脑。
+// 电脑名只有画面在时才知道，Bot 和工具调用都不带电脑。
 export const TakeoverCard = ({
   messageId,
   body,
@@ -28,8 +29,8 @@ export const TakeoverCard = ({
   selected: boolean;
   onInspect: InspectTool;
 }) => {
-  const session = content.live[view.liveId];
-  const computer = session === undefined ? undefined : content.computers[session.computerId];
+  const screen = takeoverScreen(content, view.liveId);
+  const computer = screen.kind === "open" ? content.computers[screen.session.computerId] : undefined;
   return (
     <div
       className={`card takeover-card${selected ? " is-selected" : ""}`}
@@ -53,11 +54,7 @@ export const TakeoverCard = ({
           )}
         </span>
       </button>
-      {session === undefined ? (
-        <span className="takeover-result" data-testid="takeover-result">
-          {TAKEOVER_RESULT[body.status]}
-        </span>
-      ) : (
+      {screen.kind === "open" ? (
         <button
           type="button"
           className="primary-button takeover-open"
@@ -66,6 +63,10 @@ export const TakeoverCard = ({
         >
           {LIVE_TEXT.open}
         </button>
+      ) : (
+        <span className="takeover-result" data-testid="takeover-result">
+          {takeoverResult(body.status, screen.kind)}
+        </span>
       )}
     </div>
   );

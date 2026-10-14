@@ -90,13 +90,14 @@ test("账号页行上点登录时本机不在线，行上写不在线，还能�
   await expect(xhs.getByTestId("login-open")).toBeEnabled();
 });
 
-test("账号页主动接入小红书：在本机建一个号、打开登录窗口，扫码后多一行已登录", async ({ page, request }) => {
+test("账号页主动接入小红书：选本机，在本机建一个号、打开登录窗口，扫码后多一行已登录", async ({ page, request }) => {
   await login(page);
   await openAccounts(page);
   const rows = page.getByTestId("accounts-page").getByTestId("account-row");
   const before = await rows.count();
 
   await page.locator("[data-testid=account-connect-browser][data-platform=xiaohongshu]").click();
+  await page.locator("[data-testid=account-connect-computer][data-computer-id=cmp_local]").click();
   await expect(rows, "多出一行没登录的小红书号").toHaveCount(before + 1);
   const fresh = page.getByTestId("accounts-page").locator("[data-testid=account-row][data-login=none]");
   await expect(fresh).toContainText("小红书 · 未登录");
