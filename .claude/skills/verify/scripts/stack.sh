@@ -252,7 +252,7 @@ start_agent() {
     [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没等到控制面接纳："; tail -20 "$log"; exit 1; }
     sleep 0.5
   done
-  echo "电脑代理已被控制面接纳（stdout 状态行 $AGENT_ONLINE_LINE）"
+  echo "电脑代理已被控制面接纳（stdout 状态行 ${AGENT_ONLINE_LINE}）"
 }
 
 # 库里这台电脑的状态和距上次心跳的秒数，只读。电脑号不是 UUID 或库里没有这行就什么都不输出。
