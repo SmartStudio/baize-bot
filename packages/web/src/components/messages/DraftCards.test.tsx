@@ -28,6 +28,7 @@ const content: ContentBook = {
   publications: {},
   logins: {},
   live: {},
+  takeover: null,
   stamps: {},
 };
 
@@ -36,6 +37,7 @@ const actions: ContentActions = {
   approvePlan: vi.fn(() => Promise.resolve()),
   returnPlan: vi.fn(() => Promise.resolve()),
   loginAccount: vi.fn(() => Promise.resolve()),
+  openTakeover: vi.fn(() => Promise.resolve()),
 };
 
 describe("DraftCard", () => {

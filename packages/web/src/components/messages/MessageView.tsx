@@ -25,6 +25,7 @@ import { RoutineOfferCard } from "./RoutineOfferCard.js";
 import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
+import { TakeoverCard } from "./TakeoverCard.js";
 import { TeamOfferCard } from "./TeamOfferCard.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
@@ -502,7 +503,18 @@ const MessageView = ({
           case "system":
             return <SystemNote body={body} />;
           case "tool_call":
-            return (
+            return body.view.kind === "takeover" ? (
+              <TakeoverCard
+                messageId={message.id}
+                body={body}
+                view={body.view}
+                botName={lookup(body.botId).name}
+                content={content}
+                actions={contentActions}
+                selected={selectedToolId === message.id}
+                onInspect={onInspectTool}
+              />
+            ) : (
               <ToolCallCard
                 messageId={message.id}
                 body={body}
@@ -627,6 +639,9 @@ const Activity = ({
 
 type TurnProps = Omit<MessageProps, "message"> & { turn: Turn };
 
+// 工具调用收进「做了几步」，跑完就折起来。接手卡是要人动手的，交还之后也得看得见结论，不进折叠区。
+const folded = (message: Message) => message.body.kind === "tool_call" && message.body.view.kind !== "takeover";
+
 export const TurnView = ({ turn, ...props }: TurnProps) => {
   if (turn.kind === "system" && turn.message.body.kind === "system" && turn.message.body.tone === "error") {
     return (
@@ -649,12 +664,12 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
       </div>
     );
   }
-  const tools = turn.items.filter((message) => message.body.kind === "tool_call");
+  const tools = turn.items.filter(folded);
   return (
     <div className="turn turn-bot" data-testid="bot-turn" data-bot-id={turn.botId}>
       <div className="turn-content">
         {turn.items
-          .filter((message) => message.body.kind !== "tool_call")
+          .filter((message) => !folded(message))
           .map((message) => (
             <MessageView key={message.id} message={message} {...props} />
           ))}

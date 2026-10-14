@@ -177,7 +177,10 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
   };
 
   const purpose = session.purpose;
-  const title = purpose.kind === "login" ? `登录${PLATFORM[purpose.platform]}` : LIVE_TEXT.takeover;
+  const title =
+    purpose.kind === "login"
+      ? `登录${PLATFORM[purpose.platform]}`
+      : LIVE_TEXT.takeover(state.status === "ready" ? state.bots[purpose.botId]?.name : undefined);
   const where = computer === undefined ? null : computerName(computer);
   const note =
     purpose.kind === "login" ? `扫码或输入都直接发到${where ?? "电脑"}上的这一页，密码不经过 Bot。` : purpose.reason;

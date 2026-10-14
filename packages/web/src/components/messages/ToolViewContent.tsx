@@ -1,4 +1,4 @@
-import { toolViewText, type JsonValue, type ToolView } from "@baize/shared";
+import type { JsonValue, ToolView } from "@baize/shared";
 
 const valueText = (value: JsonValue): string => {
   if (value === null) return "空";
@@ -64,7 +64,8 @@ export const ToolViewContent = ({ view, approval = false }: { view: ToolView; ap
     case "takeover":
       return (
         <span className="tool-view-content" data-view-kind={view.kind}>
-          <span>{toolViewText(view)}</span>
+          <span>请你接手这一页</span>
+          <span className="tool-view-detail">{view.reason}</span>
         </span>
       );
   }

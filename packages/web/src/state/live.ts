@@ -21,6 +21,19 @@ export const shownLogin = (content: ContentBook): ShownLogin | null => {
   return shown;
 };
 
+export type ShownLive = ({ kind: "login" } & ShownLogin) | { kind: "takeover"; openedAt: Seq; session: LiveSession };
+
+// 整页只有一块画面面板。登录是用户点了登录才有的，会话一到就摆；接手是 Bot 发起的，用户点了「打开画面」才摆。
+// 两块都能摆时摆用户最后一次动作指向的那块，同一个钟上比 startedAt 和 openedAt。
+export const shownLive = (content: ContentBook): ShownLive | null => {
+  const login = shownLogin(content);
+  const opened = content.takeover;
+  const session = opened === null ? undefined : content.live[opened.liveId];
+  if (opened !== null && session !== undefined && (login === null || opened.openedAt > login.startedAt))
+    return { kind: "takeover", openedAt: opened.openedAt, session };
+  return login === null ? null : { kind: "login", ...login };
+};
+
 // 画面出现过、现在没了的尝试改成 closed：按钮放开，尝试号留着等晚到的结果。电脑先收起画面、后报结论是常态。
 export const closeScreens = (
   logins: ContentBook["logins"],

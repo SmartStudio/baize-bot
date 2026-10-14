@@ -11,12 +11,16 @@ export const EMPTY_CONTENT: ContentBook = {
   publications: {},
   logins: {},
   live: {},
+  takeover: null,
   stamps: {},
 };
 
 const entryOf = (session: LiveSession): LiveEntry => ({ ...session, id: session.liveId });
 
 const withContent = (state: ReadyState, content: ContentBook): ReadyState => ({ ...state, content });
+
+const openedIn = (takeover: ContentBook["takeover"], live: ContentBook["live"]): ContentBook["takeover"] =>
+  takeover !== null && live[takeover.liveId] !== undefined ? takeover : null;
 
 // 登上是账号的事实，不看是哪次点击等来的：点过登录的号只要读到 valid，卡就说已登录。
 const signedIn = (logins: ContentBook["logins"], accounts: Record<AccountId, Account>): ContentBook["logins"] => {
@@ -112,6 +116,7 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
         ...content,
         live: live.rows,
         logins: closeScreens(content.logins, content.live, live.rows),
+        takeover: openedIn(content.takeover, live.rows),
         stamps: live.stamps,
       });
     }
@@ -125,9 +130,16 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
         ...content,
         live: live.rows,
         logins: closeScreens(content.logins, content.live, live.rows),
+        takeover: openedIn(content.takeover, live.rows),
         stamps: live.stamps,
       });
     }
+    case "takeover_opened":
+      if (content.live[action.liveId] === undefined) return state;
+      return withContent(state, { ...content, takeover: { liveId: action.liveId, openedAt: action.openedAt } });
+    case "takeover_hidden":
+      if (content.takeover?.liveId !== action.liveId) return state;
+      return withContent(state, { ...content, takeover: null });
     case "computers_loaded": {
       const computers = loadTable(content.computers, content.stamps, action.seq, action.computers);
       return withContent(state, { ...content, computers: computers.rows, stamps: computers.stamps });

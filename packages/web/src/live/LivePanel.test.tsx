@@ -8,8 +8,10 @@ const computers = vi.hoisted(() => ({
   cmp_remote: { id: "cmp_remote", kind: "remote", host: "remote.baize.dev" },
 }));
 
+const bots = vi.hoisted(() => ({ bot_1: { id: "bot_1", name: "小服" } }));
+
 vi.mock("../state/app.js", () => ({
-  useApp: () => ({ state: { status: "ready", content: { computers } }, actions: {} }),
+  useApp: () => ({ state: { status: "ready", bots, content: { computers } }, actions: {} }),
 }));
 
 // purpose 走 parse 打上品牌，测试里直接写字面量。
@@ -34,6 +36,15 @@ describe("LivePanel 的按钮来自 liveEndActions", () => {
       ["abandon", "不弄了"],
     ]);
     expect(html).toContain("知乎要登录，请扫码");
+  });
+
+  it("接手的标题说是哪个 Bot 请的；Bot 查不到就写 Bot", () => {
+    const html = renderToStaticMarkup(<LivePanel session={takeover} onDismiss={() => undefined} />);
+    expect(html).toContain("<b>小服请你接手这一页</b>");
+    const stranger = session({ kind: "takeover", botId: "bot_gone", groupId: "grp_1", reason: "知乎要登录" });
+    expect(renderToStaticMarkup(<LivePanel session={stranger} onDismiss={() => undefined} />)).toContain(
+      "<b>Bot请你接手这一页</b>",
+    );
   });
 
   it("「到本机窗口操作」只给本机电脑：远程那台的窗口用户够不着", () => {

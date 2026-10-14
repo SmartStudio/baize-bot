@@ -82,3 +82,117 @@
   resize: none;
   pointer-events: none;
 }
+
+/* 接手卡：左边整块开工具检查器，右边开画面，两个按钮并排，不套。 */
+.takeover-card {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  padding: var(--space-3) var(--space-5) var(--space-3) var(--space-3);
+  border-color: var(--info-soft);
+  background: var(--info-soft);
+}
+
+.takeover-card[data-status="ok"],
+.takeover-card[data-status="failed"],
+.takeover-card[data-status="blocked"] {
+  border-color: var(--border-1);
+  background: var(--bg-surface);
+}
+
+.takeover-card.is-selected {
+  box-shadow: var(--inset-hairline);
+}
+
+.takeover-inspect {
+  display: flex;
+  flex: 1;
+  gap: var(--space-4);
+  align-items: flex-start;
+  min-width: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  color: var(--info);
+  text-align: left;
+}
+
+@media (hover: hover) {
+  .takeover-inspect:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.takeover-card:not([data-status="running"]) .takeover-inspect {
+  color: var(--fg-3);
+}
+
+.takeover-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.takeover-text b {
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.takeover-reason {
+  overflow-wrap: anywhere;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.takeover-text small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.takeover-open,
+.takeover-hint .primary-button {
+  flex: none;
+  height: var(--control-h-md);
+  padding: 0 var(--space-6);
+}
+
+.takeover-result {
+  flex: none;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  white-space: nowrap;
+}
+
+/* 没摆着的接手：右下角一条一条往上叠，盖在画面面板（6）之上，登录面板开着时也点得到。 */
+.takeover-hints {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: min(var(--panel-w), calc(100vw - 2 * var(--space-6)));
+  max-height: calc(100vh - 2 * var(--space-6));
+  overflow-y: auto;
+}
+
+.takeover-hint {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-4);
+  align-items: start;
+  padding: var(--space-5);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--info);
+}
+
+.takeover-hint-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: var(--space-4);
+  justify-content: flex-end;
+}
