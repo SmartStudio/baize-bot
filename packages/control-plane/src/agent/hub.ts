@@ -16,6 +16,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import type { WebSocket } from "ws";
+import { TransactionRollbackError } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import type { NoticePublisher } from "../notifications.js";
@@ -25,6 +26,7 @@ import { ensureAssistant, listBots } from "../repo/bots.js";
 import {
   authenticateComputer,
   findComputerById,
+  listComputers,
   markComputerOnline,
   markComputerSleeping,
   markComputersSleeping,
@@ -33,7 +35,7 @@ import {
 import { listGrants } from "../repo/grants.js";
 import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
-import { openRunsForComputer } from "../repo/runs.js";
+import { lockOwner, openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
@@ -46,6 +48,7 @@ import {
   clearOutbox,
   closedActiveRuns,
   isCurrentConnection,
+  lockEnvelopeComputer,
   pendingPrompts,
   replayOutbox,
 } from "./envelope.js";
@@ -564,15 +567,60 @@ export class AgentHub {
 
   /**
    * 收尾的前提是这台电脑还没回来。计时器到点和 hello 认完身份都只是排队，谁先排上谁先跑：
-   * hello 先跑的话它已经清掉计时器；收尾先跑的话每收一个 run 之前再看一眼，有 hello 排在后面就停手，
-   * run 留给它按 activeRuns 对账，不然代理还在跑的 run 会被当成断线丢掉。
+   * hello 先跑的话它已经清掉计时器；收尾拿到锁之后再看一眼，有 hello 排在后面就停手。
+   * 放弃 run 和清空下行一起提交；提交前有 hello 排队则整批回滚，交给 activeRuns 对账。
    * 停机时这里不用看停机：没到点的计时器在 closeAll 开头同步清掉，停机后 #onClose 不再建，
    * 已经到点排进链的这一次在 closeAll 等链时做完，库还开着。
    */
   async #finishAfterGrace(computerId: ComputerId, ownerId: UserId): Promise<void> {
     const returning = () => this.#connections.has(computerId) || this.#queuedHellos.has(computerId);
     if (returning()) return;
-    await this.#finishMissingRuns(computerId, ownerId, [], returning);
+    const afterCommit: (() => Promise<void>)[] = [];
+    try {
+      await this.#deps.db.transaction(async (tx) => {
+        await lockOwner(tx, ownerId, "shared");
+        const bots = await listBots(tx as unknown as Db, ownerId);
+        // 两台电脑可能各有同群同 Bot 的旧 run；先锁齐电脑，再拿多个收尾锁，不能各持一半。
+        const computers = await listComputers(tx as unknown as Db, ownerId);
+        for (const computer of computers.toSorted((left, right) => left.id.localeCompare(right.id)))
+          await lockEnvelopeComputer(
+            tx,
+            computer.id,
+            bots.map(({ bot }) => bot.id),
+          );
+        if (returning()) return;
+        const open = await openRunsForComputer(tx as unknown as Db, computerId);
+        for (const run of open.toSorted((left, right) => left.runId.localeCompare(right.runId))) {
+          if (returning()) tx.rollback();
+          await abandonRun(
+            this.#routineDeps(),
+            ownerId,
+            run,
+            { text: DISCONNECT_NOTICE, reason: DISCONNECT_NOTICE },
+            {
+              tx,
+              afterCommit: (effect) =>
+                afterCommit.push(async () => {
+                  const { routine } = await effect();
+                  if (routine !== null)
+                    await this.#deps.notifications.publish(ownerId, {
+                      kind: "stuck",
+                      text: `例行任务「${routine.name}」没跑完：电脑中途断线`,
+                      groupId: run.groupId,
+                    });
+                }),
+            },
+          );
+        }
+        if (returning()) tx.rollback();
+        await clearOutbox(tx, computerId);
+        if (returning()) tx.rollback();
+      });
+    } catch (error) {
+      if (error instanceof TransactionRollbackError) return;
+      throw error;
+    }
+    for (const effect of afterCommit) await effect();
   }
 
   async #finishMissingRuns(

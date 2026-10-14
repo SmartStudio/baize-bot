@@ -323,7 +323,10 @@ describe("电脑不在线", () => {
     const page = MessageListResponse.parse(
       await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
     );
-    expect(page.messages.map((m) => m.body.kind)).toEqual(["user", "user"]);
+    expect(page.messages.map((m) => m.body)).toEqual([
+      { kind: "user", text: "第一件事" },
+      { kind: "user", text: "第二件事" },
+    ]);
     expect(await runCount(owner.groupId), "宽限期内的派活仍有 run").toBe(2);
   });
 });

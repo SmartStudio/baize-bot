@@ -23,7 +23,8 @@ import {
 } from "@baize/shared";
 import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
+import { accounts, agentOutbox, contentPlans, drafts, publications } from "../db/schema.js";
+import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
@@ -626,12 +627,14 @@ export async function settleFailed(
   rejected?: RejectedCredentials,
 ): Promise<{ draft: Draft; ownerId: UserId; login: LoginEffect } | null> {
   return db.transaction(async (tx) => {
+    await lockDraftDeliveries(tx, settleWhere(scope));
     const [row] = await tx
       .update(drafts)
       .set({ status: "failed", failure: reason })
       .where(settleWhere(scope))
       .returning();
     if (row === undefined) return null;
+    await deleteDraftDownlinks(tx, [row.id]);
     const ownerId = UserId.parse(row.ownerId);
     const draft = toDraft(row);
     if (reason !== "login_expired") return { draft, ownerId, login: { kind: "unchanged" } };
@@ -661,12 +664,41 @@ function claimedSession(row: {
 
 /** 抢到之后太久没有结论的，多半是发的那个进程没了。记成出错，不重发：平台那边可能已经发出去了。 */
 export async function failStaleDrafts(db: Db, before: Date): Promise<{ draft: Draft; ownerId: UserId }[]> {
-  const rows = await db
-    .update(drafts)
-    .set({ status: "failed", failure: "error" })
-    .where(and(eq(drafts.status, "publishing"), lt(drafts.claimedAt, before)))
-    .returning();
-  return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  return db.transaction(async (tx) => {
+    const condition = and(eq(drafts.status, "publishing"), lt(drafts.claimedAt, before));
+    const candidates = await lockDraftDeliveries(tx, condition);
+    if (candidates.length === 0) return [];
+    const rows = await tx
+      .update(drafts)
+      .set({ status: "failed", failure: "error" })
+      .where(and(condition, inArray(drafts.id, candidates)))
+      .returning();
+    await deleteDraftDownlinks(
+      tx,
+      rows.map(({ id }) => id),
+    );
+    return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  });
+}
+
+async function lockDraftDeliveries(tx: Tx, condition: SQL | undefined): Promise<string[]> {
+  const rows = await tx
+    .select({ id: drafts.id, computerId: accounts.computerId })
+    .from(drafts)
+    .innerJoin(accounts, eq(accounts.id, drafts.accountId))
+    .where(condition);
+  for (const id of [...new Set(rows.map(({ computerId }) => computerId))].toSorted())
+    await lockEnvelopeComputer(tx, ComputerId.parse(id));
+  return rows.map(({ id }) => id);
+}
+
+async function deleteDraftDownlinks(tx: Tx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await tx
+    .delete(agentOutbox)
+    .where(
+      and(sql`${agentOutbox.body}->>'type' = 'publish_draft'`, inArray(sql`${agentOutbox.body}->>'draftId'`, [...ids])),
+    );
 }
 
 /**
@@ -674,22 +706,28 @@ export async function failStaleDrafts(db: Db, before: Date): Promise<{ draft: Dr
  * 判据是批准和到点两者中较晚的那个早于启动时刻减一轮：批的时候已经过了点的，是批完下一轮就该发的，不算错过。
  */
 export async function reopenMissedDrafts(db: Db, missedBefore: Date): Promise<{ draft: Draft; ownerId: UserId }[]> {
-  const rows = await db
-    .update(drafts)
-    .set({ status: "pending", approvedHash: null, decidedAt: null, failure: null })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.id, drafts.accountId),
-        eq(drafts.status, "approved"),
-        inArray(accounts.tier, [...PUBLISHING_TIERS]),
-        // 过期账号的稿本来就停着等重新登录，不算停机错过；重登后由正常轮询抢。
-        eq(accounts.login, "valid"),
-        isNotNull(drafts.scheduledAt),
-        // greatest 跳过 NULL：没记批准时刻的只看到点时刻。
-        sql`greatest(${drafts.scheduledAt}, ${drafts.decidedAt}) < ${missedBefore.toISOString()}::timestamptz`,
-      ),
-    )
-    .returning();
-  return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  return db.transaction(async (tx) => {
+    const condition = and(
+      eq(drafts.status, "approved"),
+      inArray(accounts.tier, [...PUBLISHING_TIERS]),
+      // 过期账号的稿本来就停着等重新登录，不算停机错过；重登后由正常轮询抢。
+      eq(accounts.login, "valid"),
+      isNotNull(drafts.scheduledAt),
+      // greatest 跳过 NULL：没记批准时刻的只看到点时刻。
+      sql`greatest(${drafts.scheduledAt}, ${drafts.decidedAt}) < ${missedBefore.toISOString()}::timestamptz`,
+    );
+    const candidates = await lockDraftDeliveries(tx, condition);
+    if (candidates.length === 0) return [];
+    const rows = await tx
+      .update(drafts)
+      .set({ status: "pending", approvedHash: null, decidedAt: null, failure: null })
+      .from(accounts)
+      .where(and(eq(accounts.id, drafts.accountId), condition, inArray(drafts.id, candidates)))
+      .returning();
+    await deleteDraftDownlinks(
+      tx,
+      rows.map(({ id }) => id),
+    );
+    return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  });
 }

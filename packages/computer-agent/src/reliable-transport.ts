@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AgentToControl, UPLINK_DELIVERY, type AgentToControl as AgentMessage } from "@baize/shared";
 
@@ -17,6 +17,47 @@ interface PendingWrite {
   readonly entry: StoredUplink;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
+}
+
+export interface ReliableTransport {
+  readonly outbox: ReliableOutbox;
+  readonly downlinkCursor: DownlinkCursor;
+}
+
+class TransportStateCorruption extends Error {}
+
+function reportQuarantine(reason: string, path: string, log?: (line: string) => void): void {
+  const line = `可靠传输状态${reason}，已隔离到 ${path}`;
+  console.error(`[computer-agent] ${line}`);
+  log?.(line);
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+export async function quarantineTransportState(
+  dataDir: string,
+  reason: string,
+  log?: (line: string) => void,
+): Promise<string> {
+  const agentDirectory = join(dataDir, ".agent");
+  const destination = join(agentDirectory, `transport-quarantine-${randomUUID()}`);
+  await mkdir(destination, { recursive: false });
+  for (const name of ["computer.json", "downlink.json", "outbox"]) {
+    const source = join(agentDirectory, name);
+    if (await exists(source)) await rename(source, join(destination, name));
+  }
+  await syncDirectory(destination);
+  await syncDirectory(agentDirectory);
+  reportQuarantine(reason, destination, log);
+  return destination;
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -75,14 +116,22 @@ export class ReliableOutbox {
     const statePath = join(directory, "state.json");
     let state: OutboxState;
     try {
-      const parsed = JSON.parse(await readFile(statePath, "utf8")) as Partial<OutboxState>;
+      const contents = await readFile(statePath, "utf8");
+      let parsed: Partial<OutboxState>;
+      try {
+        parsed = JSON.parse(contents) as Partial<OutboxState>;
+      } catch {
+        throw new TransportStateCorruption("outbox state is invalid");
+      }
       if (
+        typeof parsed !== "object" ||
+        parsed === null ||
         typeof parsed.stream !== "string" ||
         parsed.stream.length === 0 ||
         !Number.isSafeInteger(parsed.acked) ||
         (parsed.acked ?? -1) < 0
       ) {
-        throw new Error("outbox state is invalid");
+        throw new TransportStateCorruption("outbox state is invalid");
       }
       state = { stream: parsed.stream, acked: parsed.acked as number };
     } catch (error) {
@@ -115,9 +164,14 @@ export class ReliableOutbox {
 
     const frames: StoredUplink[] = [];
     for (const line of contents.split("\n").filter((item) => item.length > 0)) {
-      const value: unknown = JSON.parse(line);
+      let value: unknown;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        throw new TransportStateCorruption("outbox journal contains invalid JSON");
+      }
       if (typeof value !== "object" || value === null || !("seq" in value) || !("body" in value)) {
-        throw new Error("outbox journal contains an invalid record");
+        throw new TransportStateCorruption("outbox journal contains an invalid record");
       }
       const record = value as { seq: unknown; body: unknown };
       const body = AgentToControl.safeParse(record.body);
@@ -127,7 +181,7 @@ export class ReliableOutbox {
         !body.success ||
         UPLINK_DELIVERY[body.data.type] !== "reliable"
       ) {
-        throw new Error("outbox journal contains an invalid frame");
+        throw new TransportStateCorruption("outbox journal contains an invalid frame");
       }
       // 状态文件先落盘，日志压缩可能被崩溃打断；已确认的旧行仍然合法。
       if ((record.seq as number) <= state.acked) continue;
@@ -135,9 +189,61 @@ export class ReliableOutbox {
     }
     const sortedFrames = frames.toSorted((left, right) => left.seq - right.seq);
     for (let index = 0; index < sortedFrames.length; index += 1) {
-      if (sortedFrames[index]?.seq !== state.acked + index + 1) throw new Error("outbox journal has a sequence gap");
+      if (sortedFrames[index]?.seq !== state.acked + index + 1)
+        throw new TransportStateCorruption("outbox journal has a sequence gap");
     }
     return new ReliableOutbox(directory, state, sortedFrames);
+  }
+
+  static async openForComputer(
+    dataDir: string,
+    computerId: string,
+    log?: (line: string) => void,
+  ): Promise<ReliableTransport> {
+    const agentDirectory = join(dataDir, ".agent");
+    await mkdir(agentDirectory, { recursive: true });
+    const identityPath = join(agentDirectory, "computer.json");
+    let reason: string | null = null;
+    let hasIdentity = false;
+    try {
+      const contents = await readFile(identityPath, "utf8");
+      hasIdentity = true;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(contents);
+      } catch {
+        reason = "归属信息损坏";
+      }
+      if (
+        reason === null &&
+        (typeof parsed !== "object" || parsed === null || !("computerId" in parsed) || parsed.computerId !== computerId)
+      ) {
+        reason = "不属于当前电脑或归属信息无效";
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (
+      !hasIdentity &&
+      ((await exists(join(agentDirectory, "outbox"))) || (await exists(join(agentDirectory, "downlink.json"))))
+    ) {
+      reason = "旧版状态没有电脑归属";
+    }
+    if (reason !== null) await quarantineTransportState(dataDir, reason, log);
+
+    let outbox: ReliableOutbox;
+    let downlinkCursor: DownlinkCursor;
+    try {
+      outbox = await ReliableOutbox.open(dataDir);
+      downlinkCursor = await DownlinkCursor.open(dataDir);
+    } catch (error) {
+      if (!(error instanceof TransportStateCorruption)) throw error;
+      await quarantineTransportState(dataDir, "文件损坏", log);
+      outbox = await ReliableOutbox.open(dataDir);
+      downlinkCursor = await DownlinkCursor.open(dataDir);
+    }
+    await atomicWrite(identityPath, JSON.stringify({ computerId }));
+    return { outbox, downlinkCursor };
   }
 
   get acknowledged(): number {
@@ -246,9 +352,20 @@ export class DownlinkCursor {
     const path = join(dataDir, ".agent", "downlink.json");
     await mkdir(dirname(path), { recursive: true });
     try {
-      const parsed = JSON.parse(await readFile(path, "utf8")) as { applied?: unknown };
-      if (!Number.isSafeInteger(parsed.applied) || (parsed.applied as number) < 0)
-        throw new Error("downlink cursor is invalid");
+      const contents = await readFile(path, "utf8");
+      let parsed: { applied?: unknown };
+      try {
+        parsed = JSON.parse(contents) as { applied?: unknown };
+      } catch {
+        throw new TransportStateCorruption("downlink cursor is invalid");
+      }
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        !Number.isSafeInteger(parsed.applied) ||
+        (parsed.applied as number) < 0
+      )
+        throw new TransportStateCorruption("downlink cursor is invalid");
       return new DownlinkCursor(path, parsed.applied as number);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

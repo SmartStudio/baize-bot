@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { WebSocketServer, type WebSocket } from "ws";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSocket, WebSocketServer, type WebSocket as WebSocketType } from "ws";
 import {
   AgentCloseCode,
   AgentStatusLine,
@@ -34,6 +34,7 @@ import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } fr
 import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 import type { CdpPipe } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
+import { ReliableOutbox } from "../src/reliable-transport.js";
 
 const fakeConnection: CdpConnection = {
   send: () => Promise.reject(new Error("假 Chrome 不接命令")),
@@ -213,15 +214,15 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
   return { pipe: { toChrome, fromChrome }, commands: () => [...commands] };
 }
 
-function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
+function startControlPlane(tuning: { holdWelcomeAfter?: number; welcomeAck?: number } = {}) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-  const sockets: WebSocket[] = [];
+  const sockets: WebSocketType[] = [];
   const messages: AgentToControl[] = [];
   const parseErrors: string[] = [];
   let nextDownlink = 1;
   const streams = new Map<string, number>();
 
-  let onConnection: ((socket: WebSocket) => void) | null = null;
+  let onConnection: ((socket: WebSocketType) => void) | null = null;
 
   server.on("connection", (socket) => {
     sockets.push(socket);
@@ -231,8 +232,8 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
     const originalSend = socket.send.bind(socket);
     socket.send = ((
       data: string,
-      options?: Parameters<WebSocket["send"]>[1],
-      callback?: Parameters<WebSocket["send"]>[2],
+      options?: Parameters<WebSocketType["send"]>[1],
+      callback?: Parameters<WebSocketType["send"]>[2],
     ) => {
       let parsed: { type?: string };
       try {
@@ -244,7 +245,7 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
         welcomed = true;
         const body = JSON.parse(data) as Record<string, unknown>;
         body.conn = connection;
-        body.upAcked = streams.get(stream) ?? 0;
+        body.upAcked = tuning.welcomeAck ?? streams.get(stream) ?? 0;
         return originalSend(JSON.stringify(body), options ?? {}, callback);
       }
       if (!welcomed) {
@@ -271,7 +272,7 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
         );
       }
       return originalSend(data, options ?? {}, callback);
-    }) as WebSocket["send"];
+    }) as WebSocketType["send"];
     onConnection?.(socket);
     socket.on("message", (data) => {
       let json: unknown;
@@ -331,7 +332,7 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
     },
     sockets,
     messages,
-    onConnection(hook: (socket: WebSocket) => void) {
+    onConnection(hook: (socket: WebSocketType) => void) {
       onConnection = hook;
     },
     async waitForMessage<T extends AgentToControl["type"]>(
@@ -350,7 +351,7 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
       );
       return found as Extract<AgentToControl, { type: T }>;
     },
-    waitForSocket(nth: number, timeoutMs = 5000): Promise<WebSocket> {
+    waitForSocket(nth: number, timeoutMs = 5000): Promise<WebSocketType> {
       return poll(() => sockets[nth - 1], timeoutMs, `第 ${nth} 条连接`);
     },
     close(): Promise<void> {
@@ -385,6 +386,7 @@ function spawnAgent(
       | "dataDir"
       | "log"
       | "beforeReliableSend"
+      | "computerId"
     >
   > = {},
 ): AgentHandle {
@@ -405,7 +407,7 @@ function spawnAgent(
   if (tuning.dataDir === undefined) dataDirs.push(dataDir);
   const handle = startAgent({
     url,
-    computerId: ComputerId.parse("computer-1"),
+    computerId: tuning.computerId ?? ComputerId.parse("computer-1"),
     token: "dev-token",
     version: "0.1.0",
     log: () => {},
@@ -439,6 +441,7 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
   runnerCallsLog.splice(0);
   initialRunnerConfigs.splice(0);
+  vi.restoreAllMocks();
 });
 
 describe("电脑代理连控制面", () => {
@@ -461,6 +464,185 @@ describe("电脑代理连控制面", () => {
     );
   });
 
+  it("dataDir 中的状态属于另一台电脑时，第一次握手就用新流和游标零", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const directory = await tempDataDir();
+    const previous = await ReliableOutbox.openForComputer(directory, "computer-1");
+    await previous.outbox.append({
+      type: "run_done",
+      runId: RunId.parse("run-old"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      steps: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+    });
+    await previous.downlinkCursor.persist(8);
+    const oldStream = previous.outbox.stream;
+    const logs: string[] = [];
+    spawnAgent(await server.url(), {
+      dataDir: directory,
+      computerId: ComputerId.parse("computer-2"),
+      log: (line) => logs.push(line),
+    });
+
+    const hello = await server.waitForMessage("hello", 1);
+    const firstSocket = await server.waitForSocket(1);
+    firstSocket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+
+    expect(hello.uplinkStream).not.toBe(oldStream);
+    expect(hello.downApplied).toBe(0);
+    expect(firstSocket.readyState).toBe(WebSocket.OPEN);
+    expect(logs.some((line) => line.includes("已隔离到 "))).toBe(true);
+  });
+
+  it("welcome 确认序号低于本地记录时隔离旧流并重连，后续上行从一开始", async () => {
+    const server = startControlPlane({ welcomeAck: 0 });
+    servers.push(server);
+    const directory = await tempDataDir();
+    const previous = await ReliableOutbox.openForComputer(directory, "computer-1");
+    await previous.outbox.append({
+      type: "run_done",
+      runId: RunId.parse("run-old"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      steps: 6,
+      inputTokens: 6,
+      outputTokens: 6,
+    });
+    await previous.outbox.acknowledge(1);
+    const oldStream = previous.outbox.stream;
+    const logs: string[] = [];
+    spawnAgent(await server.url(), {
+      dataDir: directory,
+      log: (line) => logs.push(line),
+      backoff: { initialMs: 20, maxMs: 20, factor: 1 },
+      makeRunner: (config) => {
+        config.send({
+          type: "run_done",
+          runId: RunId.parse("run-new"),
+          botId: BotId.parse("bot-1"),
+          groupId: GroupId.parse("group-1"),
+          steps: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+        });
+        return runnerOf(config, runnerCalls());
+      },
+    });
+
+    const firstHello = await server.waitForMessage("hello", 1);
+    const secondHello = await server.waitForMessage("hello", 2, 5000);
+    const secondSocket = await server.waitForSocket(2, 5000);
+    secondSocket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("run_done", 1);
+    const newJournal = await readFile(
+      join(directory, ".agent", "outbox", secondHello.uplinkStream, "frames.jsonl"),
+      "utf8",
+    );
+
+    expect(firstHello.uplinkStream).toBe(oldStream);
+    expect(secondHello.uplinkStream).not.toBe(oldStream);
+    expect(newJournal).toContain('"seq":1');
+    expect(newJournal).not.toContain('"seq":6');
+    expect(logs.some((line) => line.includes("服务器确认序号回退") && line.includes("已隔离到 "))).toBe(true);
+  });
+
+  it("确认回退重置等待落盘时连接断开，仍建好新流并重新握手", async () => {
+    const server = startControlPlane({ welcomeAck: 0 });
+    servers.push(server);
+    const directory = await tempDataDir();
+    const previous = await ReliableOutbox.openForComputer(directory, "computer-1");
+    await previous.outbox.append({
+      type: "run_done",
+      runId: RunId.parse("old-run"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      steps: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+    });
+    await previous.outbox.acknowledge(1);
+    let reached!: () => void;
+    const resetting = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const flush = ReliableOutbox.prototype.flush;
+    let flushes = 0;
+    vi.spyOn(ReliableOutbox.prototype, "flush").mockImplementation(async function (this: ReliableOutbox) {
+      flushes += 1;
+      if (flushes === 2) {
+        reached();
+        await released;
+      }
+      await flush.call(this);
+    });
+    const logs: string[] = [];
+    spawnAgent(await server.url(), {
+      dataDir: directory,
+      log: (line) => logs.push(line),
+      backoff: { initialMs: 20, maxMs: 20, factor: 1 },
+    });
+    try {
+      await resetting;
+      const first = await server.waitForSocket(1);
+      first.terminate();
+      await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "重置期间发现断线");
+      release();
+      const hello = await server.waitForMessage("hello", 2, 5000);
+      expect(hello.uplinkStream).not.toBe(previous.outbox.stream);
+      expect(hello.downApplied).toBe(0);
+      const second = await server.waitForSocket(2);
+      second.send(JSON.stringify(configMessage));
+      await server.waitForMessage("config_applied", 1);
+      expect(second.readyState).toBe(WebSocket.OPEN);
+    } finally {
+      release();
+    }
+  });
+
+  it.each([
+    ["完整垃圾行", "{garbage}\n"],
+    [
+      "缺号",
+      `${JSON.stringify({ seq: 2, body: { type: "run_done", runId: "run-2", botId: "bot-1", groupId: "group-1", steps: 1, inputTokens: 1, outputTokens: 1 } })}\n`,
+    ],
+    ["schema 不合", `${JSON.stringify({ seq: 1, body: { type: "unknown_frame" } })}\n`],
+  ])("%s 不会阻止代理连接，且隔离目录保留原文件", async (_label, badJournal) => {
+    const server = startControlPlane();
+    servers.push(server);
+    const directory = await tempDataDir();
+    const previous = await ReliableOutbox.openForComputer(directory, "computer-1");
+    const oldStream = previous.outbox.stream;
+    const journalPath = join(directory, ".agent", "outbox", oldStream, "frames.jsonl");
+    await writeFile(journalPath, badJournal);
+    const logs: string[] = [];
+    vi.spyOn(console, "error").mockImplementation((line: unknown) => logs.push(String(line)));
+    spawnAgent(await server.url(), { dataDir: directory });
+
+    const hello = await server.waitForMessage("hello", 1);
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+    const quarantineLog = logs.find((line) => line.includes("已隔离到 "));
+    const quarantinePath = quarantineLog?.split("已隔离到 ")[1];
+
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+    expect(hello.uplinkStream).not.toBe(oldStream);
+    expect(quarantineLog).toContain("文件损坏");
+    expect(quarantinePath).toBeTruthy();
+    expect(await readFile(join(quarantinePath as string, "outbox", oldStream, "frames.jsonl"), "utf8")).toBe(
+      badJournal,
+    );
+    expect(quarantineLog).not.toContain(badJournal);
+  });
+
   it("重连 hello 报告运行器仍活着的 run", async () => {
     const server = await startPair();
     const first = await server.waitForSocket(1);
@@ -481,7 +663,7 @@ describe("电脑代理连控制面", () => {
     const server = await startControlPlane();
     servers.push(server);
     const directory = await tempDataDir();
-    let first: WebSocket | undefined;
+    let first: WebSocketType | undefined;
     let cut = false;
     let durableAtSend = false;
     let hookCalls = 0;

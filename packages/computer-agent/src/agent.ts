@@ -17,7 +17,7 @@ import {
 import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
-import { DownlinkCursor, ReliableOutbox } from "./reliable-transport.js";
+import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
 
 export interface AgentRunnerConfig extends RunnerConfig {
   readonly browser: NonNullable<RunnerConfig["browser"]>;
@@ -83,6 +83,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let upSent = 0;
   let outbox: ReliableOutbox | null = null;
   let downlinkCursor: DownlinkCursor | null = null;
+  let resettingTransport = false;
+  const resetReports: AgentToControl[] = [];
   const reliableSends = new Set<Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
@@ -133,6 +135,10 @@ export function startAgent(options: AgentOptions): AgentHandle {
       return;
     }
     if (outbox === null) {
+      if (resettingTransport) {
+        resetReports.push(message);
+        return;
+      }
       log(`可靠发件箱未就绪，暂存不了 ${message.type}`);
       return;
     }
@@ -255,6 +261,33 @@ export function startAgent(options: AgentOptions): AgentHandle {
       // welcome 才说明控制面收下了 hello。只看 TCP 连上就清零退避，会被「连上就踢」的控制面打成密集重连。
       case "welcome":
         if (conn !== null) return;
+        if (outbox !== null && message.upAcked < outbox.acknowledged) {
+          const previousOutbox = outbox;
+          resettingTransport = true;
+          outbox = null;
+          downlinkCursor = null;
+          await Promise.all(reliableSends);
+          await previousOutbox.flush();
+          if (stopping) return;
+          try {
+            await quarantineTransportState(dataDir, "服务器确认序号回退", options.log);
+            const fresh = await ReliableOutbox.openForComputer(dataDir, options.computerId, options.log);
+            outbox = fresh.outbox;
+            downlinkCursor = fresh.downlinkCursor;
+            resettingTransport = false;
+            for (const body of resetReports.splice(0)) report(body);
+            if (stopping) return;
+            if (link.phase === "open" && link.socket === from) from.close();
+            else if (link.phase === "waiting") {
+              clearTimeout(link.timer);
+              connect();
+            }
+          } catch (error) {
+            log(`可靠传输状态重置失败：${String(error)}`);
+            await stop();
+          }
+          return;
+        }
         attempt = 0;
         await outbox?.acknowledge(message.upAcked);
         if (stopping || link.phase !== "open" || link.socket !== from) return;
@@ -388,7 +421,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   };
 
   function connect(): void {
-    if (stopping) return;
+    if (stopping || resettingTransport) return;
     const socket = new WebSocket(options.url);
     link = { phase: "connecting", socket };
 
@@ -457,8 +490,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
   }
 
-  void Promise.all([ReliableOutbox.open(dataDir), DownlinkCursor.open(dataDir)])
-    .then(([openedOutbox, openedCursor]) => {
+  void ReliableOutbox.openForComputer(dataDir, options.computerId, options.log)
+    .then(({ outbox: openedOutbox, downlinkCursor: openedCursor }) => {
       outbox = openedOutbox;
       downlinkCursor = openedCursor;
       if (!stopping) connect();

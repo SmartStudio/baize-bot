@@ -21,6 +21,7 @@ import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
 import { DEFAULT_RUNTIME_CONFIG, startServer } from "../src/server.js";
 import { AGENT_PATH } from "../src/agent/hub.js";
+import { gatedDb } from "./helpers/gated-db.js";
 
 type RawMessage = ControlToAgent | DownlinkFrame | UplinkAck;
 type RawAgent = {
@@ -38,6 +39,7 @@ async function rawHello(
   token: string,
   downApplied = 0,
   activeRuns: readonly RunId[] = [],
+  stream = computerId as string,
 ): Promise<RawAgent> {
   const socket = new WebSocket(`ws://localhost:${port}${AGENT_PATH}`);
   const inbox: RawMessage[] = [];
@@ -98,7 +100,7 @@ async function rawHello(
       token,
       version: "test",
       protocol: 2,
-      uplinkStream: computerId,
+      uplinkStream: stream,
       downApplied,
       activeRuns,
     }),
@@ -119,7 +121,7 @@ async function rawHello(
         JSON.stringify({
           type: "uplink",
           conn: welcome.conn,
-          stream: computerId,
+          stream,
           seq,
           body,
         }),
@@ -553,6 +555,140 @@ describe("可靠信封", () => {
       expect(remaining[0]?.count).toBe(0);
     } finally {
       resumed.agent.close();
+    }
+  });
+
+  it("派活等电脑锁期间提交的新审批，锁后读范围并作废", async () => {
+    const gated = gatedDb(database.sql);
+    const running = await startServer({
+      db: gated.db,
+      port: 0,
+      toolSecretKey: "a".repeat(64),
+      credentialsKey: TEST_CREDENTIALS_KEY,
+      config: DEFAULT_RUNTIME_CONFIG,
+      approvalTimeoutIntervalMs: 24 * 60 * 60 * 1000,
+    });
+    const user = await makeUser(database.db);
+    const computer = await makeComputer(database.db, user.id);
+    const client = new ApiClient(running.port);
+    await client.login(user.email, PASSWORD);
+    const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "锁后读" })).json());
+    const agent = await rawHello(running.port, computer.computerId, computer.token);
+    let release: (() => void) | undefined;
+    let posting: Promise<Response> | undefined;
+    try {
+      await client.post(`/api/groups/${created.group.id}/messages`, { text: "先跑一轮" });
+      const first = await agent.next("downlink");
+      if (first.body.type !== "prompt") throw new Error("没有初始 prompt");
+      agent.sendBare({ type: "downlink_ack", upTo: first.seq });
+      const gate = gated.arm(/from "computers" where[^]*for no key update/, "before");
+      release = gate.release;
+      posting = client.post(`/api/groups/${created.group.id}/messages`, { text: "换个做法" });
+      await gate.reached;
+      agent.sendReliable(1, {
+        type: "approval_request",
+        runId: first.body.runId,
+        botId: created.bot.id,
+        groupId: created.group.id,
+        callId: "late-before-computer-lock",
+        tool: "shop.refund",
+        action: "spend",
+        target: null,
+        view: { kind: "mcp", server: "", tool: "shop.refund", params: [], raw: "退款" },
+      });
+      expect((await agent.next("uplink_ack")).upTo).toBe(1);
+      const pending = MessageListResponse.parse(
+        await (await client.get(`/api/groups/${created.group.id}/messages`)).json(),
+      );
+      expect(pending.approvals).toMatchObject([{ status: "pending" }]);
+      gate.release();
+      expect((await posting).status).toBe(201);
+      const after = MessageListResponse.parse(
+        await (await client.get(`/api/groups/${created.group.id}/messages`)).json(),
+      );
+      expect(after.approvals).toMatchObject([{ status: "voided" }]);
+      const voided = await agent.next("downlink");
+      const prompt = await agent.next("downlink");
+      expect(voided.body).toMatchObject({
+        type: "approval_result",
+        outcome: "voided",
+        callId: "late-before-computer-lock",
+      });
+      expect(prompt.body).toMatchObject({ type: "prompt", text: "换个做法" });
+      expect(voided.seq).toBeLessThan(prompt.seq);
+    } finally {
+      release?.();
+      await posting;
+      agent.close();
+      await running.close();
+    }
+  });
+
+  it("run 已结束时，审批决定不把结果放进下行发件箱", async () => {
+    const s = await owner();
+    const agent = await rawHello(server.server.port, s.computer.computerId, s.computer.token);
+    const delivered: DownlinkFrame[] = [];
+    agent.socket.on("message", (raw) => {
+      const parsed = DownlinkFrame.safeParse(JSON.parse(raw.toString()));
+      if (parsed.success) delivered.push(parsed.data);
+    });
+    try {
+      await s.client.post(`/api/groups/${s.groupId}/messages`, { text: "等审批" });
+      const first = await agent.next("downlink");
+      if (first.body.type !== "prompt") throw new Error("没有初始 prompt");
+      agent.sendBare({ type: "downlink_ack", upTo: first.seq });
+      agent.sendReliable(1, {
+        type: "approval_request",
+        runId: first.body.runId,
+        botId: s.botId,
+        groupId: s.groupId,
+        callId: "closed-run-approval",
+        tool: "shop.refund",
+        action: "spend",
+        target: null,
+        view: { kind: "mcp", server: "", tool: "shop.refund", params: [], raw: "退款" },
+      });
+      await agent.next("uplink_ack");
+      const page = MessageListResponse.parse(await (await s.client.get(`/api/groups/${s.groupId}/messages`)).json());
+      const approval = page.approvals[0];
+      if (approval === undefined) throw new Error("审批没落地");
+      await database.sql`UPDATE runs SET ended_at = now() WHERE id = ${first.body.runId}`;
+      delivered.length = 0;
+      expect(
+        (await s.client.post(`/api/approvals/${approval.id}`, { decision: "approved", scope: "once" })).status,
+      ).toBe(200);
+      await s.client.post(`/api/bots/${s.botId}/pause`);
+      await agent.next("pause");
+      expect(delivered).toEqual([]);
+      const rows = await database.sql<
+        { count: number }[]
+      >`SELECT count(*)::int AS count FROM agent_outbox WHERE computer_id = ${s.computer.computerId}`;
+      expect(rows[0]?.count).toBe(0);
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("同一电脑换上行流后 welcome 游标归零，从序号 1 接收", async () => {
+    const s = await owner();
+    const first = await rawHello(server.server.port, s.computer.computerId, s.computer.token);
+    first.sendReliable(1, { type: "agent_error", code: "config_rejected", detail: "流一" });
+    expect((await first.next("uplink_ack")).upTo).toBe(1);
+    first.close();
+    const fresh = await rawHello(
+      server.server.port,
+      s.computer.computerId,
+      s.computer.token,
+      0,
+      [],
+      "replacement-uplink-stream",
+    );
+    try {
+      expect(fresh.welcome.upAcked).toBe(0);
+      fresh.sendReliable(1, { type: "agent_error", code: "config_rejected", detail: "新流" });
+      expect((await fresh.next("uplink_ack")).upTo).toBe(1);
+    } finally {
+      fresh.close();
     }
   });
 

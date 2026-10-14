@@ -28,7 +28,7 @@ import {
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import { and, eq, inArray, lte, type SQL } from "drizzle-orm";
-import { approvals as approvalRows, groups, runs } from "../db/schema.js";
+import { approvals as approvalRows, computers as computerRows, groups, runs } from "../db/schema.js";
 import {
   decideApproval,
   latestPendingApproval,
@@ -309,6 +309,16 @@ async function sendSpeaker(
   const placedRun = await deps.db.transaction(async (tx) => {
     await lockOwner(tx, ownerId, "shared");
     for (const botId of [...new Set([speaker.botId, ...voidTargets])].toSorted()) await shareBotRunsLock(tx, botId);
+    // 待批范围只能在电脑锁之后读；旧 run 在别的电脑上时也必须按同一顺序锁齐。
+    const ownerComputers = await tx
+      .select({ id: computerRows.id })
+      .from(computerRows)
+      .where(eq(computerRows.ownerId, ownerId));
+    await lockApprovalDeliveries(
+      tx,
+      [],
+      ownerComputers.map(({ id }) => ComputerId.parse(id)),
+    );
     const scopes =
       voidTargets.length === 0
         ? []
@@ -316,7 +326,6 @@ async function sendSpeaker(
             tx,
             and(inArray(approvalRows.botId, [...voidTargets]), eq(approvalRows.groupId, groupId)),
           );
-    await lockApprovalDeliveries(tx, scopes, [selected.computer.id]);
     const runId = await startRun(tx as unknown as Db, {
       ownerId,
       computerId: selected.computer.id,

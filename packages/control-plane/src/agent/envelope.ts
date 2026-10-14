@@ -150,7 +150,7 @@ export async function closedActiveRuns(db: Db, computerId: ComputerId, activeRun
   return closed;
 }
 
-export async function clearOutbox(db: Db, computerId: ComputerId): Promise<void> {
+export async function clearOutbox(db: Db | Tx, computerId: ComputerId): Promise<void> {
   await db.delete(agentOutbox).where(eq(agentOutbox.computerId, computerId));
 }
 

@@ -1357,8 +1357,16 @@ describe("修复二轮：删执行者和建例行、触发、归档、看过的�
       const barrier = await nextPrompt(agent);
       runDone(agent, barrier);
       await agent.ack(barrier.runId);
+      expect(
+        agent.uplinkAcks().flatMap((ack) => ack.rejected),
+        "迟到的可靠 run_done 被拒收",
+      ).toContainEqual({
+        seq: 1,
+        code: "invalid",
+        runId: prompt.runId,
+      });
       expect((await runsOf(routine.id)).map((row) => [row.status, row.note])).toEqual([
-        ["failed", EXECUTOR_DELETED_NOTE],
+        ["failed", "执行者已删除，这次没跑完"],
       ]);
     } finally {
       push.close();

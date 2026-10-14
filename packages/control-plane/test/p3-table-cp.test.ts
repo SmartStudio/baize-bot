@@ -331,8 +331,7 @@ it("牌友出非法动作得到失败结果和中文原因，手牌不变", asyn
   const before = await stored(id);
   act(p, { kind: "check" });
   const result = await table.agent.expect("poker_result");
-  expect(result.result.ok).toBe(false);
-  expect(JSON.stringify(result.result)).toMatch(/[\u4e00-\u9fff]/);
+  expect(result.result).toEqual({ ok: false, error: "有人下注了，不能过牌，要跟注或弃牌" });
   expect(await stored(id)).toEqual(before);
   const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
   expect(hand!.turn_attempts).toBe(1);

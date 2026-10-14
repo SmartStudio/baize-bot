@@ -18,7 +18,7 @@ import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
 import { accounts as accountsTable, drafts, publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { withAccountLock } from "../src/repo/account-lock.js";
-import { helloAgent } from "./helpers/agent.js";
+import { helloAgent, openAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import {
   IMAGE,
@@ -940,13 +940,20 @@ describe("小红书走电脑", () => {
       draftId: spec.draftId,
       result: { status: "ok", url: "https://www.xiaohongshu.com/explore/private-url", externalId: "private-id" },
     });
+    const malformed = await openAgent(server.server.port);
+    malformed.socket.send('{"type":"publish_result"');
+    await malformed.closed();
     await waitFor(async () => job.agent.uplinkAcks().some((ack) => ack.upTo >= seq), "无效 publish_result 被确认");
     expect(job.agent.uplinkAcks().flatMap((ack) => ack.rejected)).toContainEqual({ seq, code: "invalid" });
     await agentCaughtUp(job, xhs, { kind: "post", title: "哨兵", text: "哨兵", images: [], github: null });
 
     expect((await draftOnPage(job, spec.draftId)).draft.status, "不合形状的结果不结算").toBe("publishing");
-    const warnings = logged.filter((line) => line.includes("invalid") || line.includes("无效"));
-    expect(warnings.length, "拒收日志包含摘要").toBeGreaterThan(0);
+    expect(logged.toSorted()).toEqual(
+      [
+        `电脑 ${job.computer.computerId} 上行 ${seq} 的 publish_result 被拒收 invalid，出错的字段：body.attempt`,
+        "未握手的连接 报的不是 JSON，丢弃",
+      ].toSorted(),
+    );
     for (const secret of ["private-url", "private-id", spec.draftId]) {
       expect(logged.join("\n"), "日志不带报文正文").not.toContain(secret);
     }

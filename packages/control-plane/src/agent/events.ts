@@ -43,6 +43,7 @@ import {
   listGroupBots,
   replaceMessageBody,
   settleStreamingText,
+  type Tx,
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
@@ -361,8 +362,13 @@ export async function abandonRun(
   ownerId: UserId,
   run: { readonly runId: RunId; readonly groupId: GroupId | null },
   notice: { readonly text: string; readonly reason: string },
+  transaction?: {
+    readonly tx: Tx;
+    afterCommit(effect: () => Promise<{ readonly routine: RoutineRunRef | null }>): void;
+  },
 ): Promise<{ readonly routine: RoutineRunRef | null } | null> {
-  const result = await deps.db.transaction(async (tx) => {
+  const db = transaction === undefined ? deps.db : (transaction.tx as unknown as Db);
+  const result = await db.transaction(async (tx) => {
     await lockSettlementOfRun(tx, run.runId);
     const usage = await finishRun(
       tx,
@@ -385,19 +391,24 @@ export async function abandonRun(
     return { expiredApprovals, failedTools, settled, message };
   });
   if (result === null) return null;
-  await refreshHintForRun(deps, run.runId);
-  clearTextPrefixes(run.runId);
-  if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
-  for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
-  for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
-  pushSettled(deps.push, ownerId, result.settled);
-  if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
-  const routine = await failRoutineRunOf(
-    deps,
-    run.runId,
-    result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
-  );
-  return { routine };
+  const publish = async () => {
+    await refreshHintForRun(deps, run.runId);
+    clearTextPrefixes(run.runId);
+    if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
+    for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
+    for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
+    pushSettled(deps.push, ownerId, result.settled);
+    if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
+    const routine = await failRoutineRunOf(
+      deps,
+      run.runId,
+      result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
+    );
+    return { routine };
+  };
+  if (transaction === undefined) return publish();
+  transaction.afterCommit(publish);
+  return { routine: null };
 }
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {

@@ -119,7 +119,7 @@ async function startWelcomeServer(): Promise<{ readonly url: string; readonly cl
 describe("电脑代理进程", () => {
   it("未确认帧跨代理进程重启补发，累计确认和下行游标保存到磁盘", async () => {
     const dataDir = await createDataDir();
-    const outbox = await ReliableOutbox.open(dataDir);
+    const { outbox } = await ReliableOutbox.openForComputer(dataDir, "computer-1");
     const body = {
       type: "run_done" as const,
       runId: RunId.parse("run-1"),

@@ -189,7 +189,16 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
   const victim = await ownerWithBot();
   const victimAgent = (await helloAgent(server.port, victim.computer.computerId, victim.computer.token)).agent;
   const other = await ownerWithBot();
+  const privateName = "不该入日志的私人电脑名";
+  await database.sql`UPDATE computers SET host = ${privateName} WHERE id = ${other.computer.computerId}`;
   const otherAgent = (await helloAgent(server.port, other.computer.computerId, other.computer.token)).agent;
+  const logged: string[] = [];
+  const warnings = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+    logged.push(String(args[0]));
+  });
+  const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    logged.push(String(args[0]));
+  });
   try {
     await post(victim.client, victim.groupId, "做这件事");
     const { runId } = await victimAgent.expect("prompt");
@@ -198,7 +207,7 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
     otherAgent.send({
       type: "agent_error",
       code: "prompt_before_config",
-      detail: "别人的 run",
+      detail: `${privateName} 的报错，令牌 ${other.computer.token}`,
       groupId: victim.groupId,
       runId: foreign,
     });
@@ -218,7 +227,15 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
     });
     expect(await systemTexts(victim.client, victim.groupId), "拒收外国 runId 不生成群消息").toEqual([]);
     expect(await openRuns(other.groupId), "probe 不创建或收尾 run").toBe(0);
+    expect(logged.join("\n"), "日志不带电脑令牌").not.toContain(other.computer.token);
+    expect(logged.join("\n"), "日志不带别台电脑的令牌").not.toContain(victim.computer.token);
+    expect(logged.join("\n"), "日志不带电脑名").not.toContain(privateName);
+    expect(logged).toEqual([
+      `电脑 ${other.computer.computerId} 上行 ${probeSeq} 的 publish_result 被拒收 invalid，出错的字段：body.draftId、body.attempt、body.result`,
+    ]);
   } finally {
+    warnings.mockRestore();
+    errors.mockRestore();
     victimAgent.close();
     otherAgent.close();
   }
