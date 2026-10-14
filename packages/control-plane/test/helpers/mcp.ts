@@ -1,4 +1,5 @@
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -21,13 +22,16 @@ export type TestMcp = {
   calls(): readonly { readonly name: string; readonly arguments: unknown; readonly authorization: string | null }[];
   authorizations(): readonly (string | null)[];
   activeStreams(): number;
-  waitForStreams(count: number): Promise<void>;
+  waitForStreams(count: number, signal?: AbortSignal): Promise<void>;
   nextStream(): Promise<void>;
   /** 下一条 tools/list 停住，等 release 才往下走。 */
   holdNextList(): HeldList;
   holdNextInitialization(): HeldList;
   holdNextCall(): HeldList;
   nextCancellation(): Promise<void>;
+  nextCallClosed(): Promise<void>;
+  streamedBytes(): number;
+  completedLargeResponses(): number;
   failNextInitialization(): void;
   close(): Promise<void>;
 };
@@ -59,10 +63,15 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
   const heldInitializations: { arrive(): void; released: Promise<void> }[] = [];
   const heldCalls: { arrive(): void; released: Promise<void> }[] = [];
   const cancellations: (() => void)[] = [];
+  const callClosures: (() => void)[] = [];
+  let streamedBytes = 0;
+  let completedLargeResponses = 0;
   const streamArrivals: (() => void)[] = [];
   const streamWaiters: { count: number; resolve(): void }[] = [];
   let failInitialization = false;
   const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport }>();
+  const getResponses = new Map<string, ServerResponse>();
+  const sockets = new Set<Socket>();
   let streams = 0;
   const notifyStreams = () => {
     for (let i = streamWaiters.length - 1; i >= 0; i -= 1) {
@@ -99,12 +108,70 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
         }
       }
       if (isRpc(body, "tools/call") && "params" in body) {
+        res.once("close", () => callClosures.shift()?.());
         const params = body.params as { name: string; arguments: unknown };
         calls.push({ ...params, authorization });
         const hold = heldCalls.shift();
         if (hold !== undefined) {
           hold.arrive();
           await hold.released;
+        }
+        const sku =
+          typeof params.arguments === "object" && params.arguments !== null && "sku" in params.arguments
+            ? params.arguments.sku
+            : undefined;
+        if (sku === "sse-end" || sku === "sse-drop") {
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(`: ${authorization}\n\n`, () => {
+            if (sku === "sse-drop") res.destroy();
+            else res.end();
+          });
+          return;
+        }
+        if (sku === "drop-all") {
+          for (const socket of sockets) socket.destroy();
+          return;
+        }
+        if (sku === "get-end" || sku === "get-drop") {
+          const get = getResponses.get(String(req.headers["mcp-session-id"]));
+          if (get === undefined) throw new Error("没有 GET 流");
+          res.writeHead(202).end();
+          if (sku === "get-end") get.end(`: ${authorization}\n\n`);
+          else get.destroy();
+          return;
+        }
+        if (sku === "stream-json" || sku === "stream-sse" || sku === "stream-sse-error" || sku === "stream-get") {
+          const sse = sku !== "stream-json";
+          const target = sku === "stream-get" ? getResponses.get(String(req.headers["mcp-session-id"])) : res;
+          if (target === undefined) throw new Error("没有 GET 流");
+          if (target === res) res.writeHead(200, { "content-type": sse ? "text/event-stream" : "application/json" });
+          else res.writeHead(202).end();
+          target.write(
+            `${sse ? "data: " : ""}{"jsonrpc":"2.0","id":${JSON.stringify(body.id)},"result":{"content":[{"type":"text","text":"${authorization}`,
+          );
+          streamedBytes = 0;
+          const chunk = "库".repeat(350_000);
+          for (let i = 0; i < 100 && !target.destroyed; i += 1) {
+            streamedBytes += Buffer.byteLength(chunk);
+            if (!target.write(chunk)) {
+              await new Promise<void>((resolve) => {
+                const done = () => {
+                  target.off("drain", done);
+                  target.off("close", done);
+                  resolve();
+                };
+                target.once("drain", done);
+                target.once("close", done);
+              });
+            }
+          }
+          if (!target.destroyed) {
+            completedLargeResponses += 1;
+            const tail = `"}],"isError":${sku === "stream-sse-error"}}}${sse ? "\n\n" : ""}`;
+            if (target === res) res.end(tail);
+            else target.write(tail);
+          }
+          return;
         }
         if (
           typeof params.arguments === "object" &&
@@ -162,10 +229,12 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
       const session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
       if (session !== undefined) {
         if (req.method === "GET") {
+          getResponses.set(String(sessionId), res);
           streams += 1;
           notifyStreams();
           streamArrivals.shift()?.();
           res.once("close", () => {
+            if (getResponses.get(String(sessionId)) === res) getResponses.delete(String(sessionId));
             streams -= 1;
             notifyStreams();
           });
@@ -215,6 +284,10 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
       res.end(String(error));
     });
   });
+  http.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
   await new Promise<void>((resolve, reject) => {
     http.once("error", reject);
     http.listen(0, "127.0.0.1", resolve);
@@ -227,15 +300,37 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
     calls: () => calls,
     authorizations: () => authorizations,
     activeStreams: () => streams,
-    waitForStreams: (count) =>
-      streams === count ? Promise.resolve() : new Promise<void>((resolve) => streamWaiters.push({ count, resolve })),
+    waitForStreams: (count, signal) => {
+      if (streams === count) return Promise.resolve();
+      return new Promise<void>((resolve, reject) => {
+        const waiter = {
+          count,
+          resolve: () => {
+            signal?.removeEventListener("abort", abort);
+            resolve();
+          },
+        };
+        const abort = () => {
+          const index = streamWaiters.indexOf(waiter);
+          if (index !== -1) streamWaiters.splice(index, 1);
+          reject(new Error(`MCP 流数应为 ${count}，实际为 ${streams}`));
+        };
+        streamWaiters.push(waiter);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+    },
     nextStream: () => new Promise<void>((resolve) => streamArrivals.push(resolve)),
     holdNextList: () => holdNext(held),
     holdNextInitialization: () => holdNext(heldInitializations),
     holdNextCall: () => holdNext(heldCalls),
     nextCancellation: () => new Promise<void>((resolve) => cancellations.push(resolve)),
+    nextCallClosed: () => new Promise<void>((resolve) => callClosures.push(resolve)),
+    streamedBytes: () => streamedBytes,
+    completedLargeResponses: () => completedLargeResponses,
     failNextInitialization: () => (failInitialization = true),
     close: async () => {
+      http.closeAllConnections();
       await Promise.all([...sessions.values()].map((session) => session.mcp.close()));
       await new Promise<void>((resolve, reject) => http.close((error) => (error ? reject(error) : resolve())));
     },

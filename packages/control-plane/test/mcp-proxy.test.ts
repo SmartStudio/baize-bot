@@ -10,6 +10,7 @@ import { Server as HttpServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ensureComputer } from "../src/repo/computers.js";
 import { McpClients } from "../src/mcp/call.js";
+import { ToolCrypto } from "../src/crypto.js";
 import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -70,6 +71,191 @@ function call(
 }
 
 describe("MCP 控制面代执行", () => {
+  it.each(["sse-end", "sse-drop", "drop-all", "get-end", "get-drop"])(
+    "响应流 %s 没有回包，5 秒内固定分类失败，健康 POST 调用照常返回",
+    async (sku) => {
+      const persistent = await startTestMcp({ stateful: true });
+      const who = await owner();
+      const tool = await connect(who, false, "断流", persistent.url);
+      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      const hold = persistent.holdNextCall();
+      try {
+        const pending = call(config, tool.id, who.botId);
+        await hold.arrived;
+        await persistent.waitForStreams(1);
+        const before = persistent.initializations();
+        const closed = persistent.nextCallClosed();
+        const started = Date.now();
+        const failed = await call(
+          config,
+          tool.id,
+          who.botId,
+          "lookup_stock",
+          sku,
+          config.modelGateway.apiKey,
+          AbortSignal.timeout(4_000),
+        );
+        expect(failed.status).toBe(502);
+        expect(await failed.json()).toEqual({ error: "插件调用失败：这个地址连不上" });
+        expect(Date.now() - started, "断流不等 60 秒超时").toBeLessThan(5_000);
+        await closed;
+        hold.release();
+        const other = await pending;
+        if (sku === "drop-all") {
+          expect(other.status).toBe(502);
+          expect(await other.json()).toEqual({ error: "插件调用失败：这个地址连不上" });
+        } else {
+          expect(other.status).toBe(200);
+          expect(await other.json()).toEqual({ content: [{ type: "text", text: "160" }], isError: false });
+        }
+        expect((await call(config, tool.id, who.botId)).status).toBe(200);
+        expect(persistent.initializations() - before, "仅 POST 断流保留缓存；连接断开则重建").toBe(
+          sku === "drop-all" || sku === "get-drop" ? 1 : 0,
+        );
+      } finally {
+        hold.release();
+        await who.client.delete(`/api/tools/${tool.id}`);
+        agent.close();
+        await persistent.close();
+      }
+    },
+  );
+
+  it("GET 返回的 SSE 事件也在解析前限长，终止该 Client 的在途调用并作废缓存", async () => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "GET 限长", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const hold = persistent.holdNextCall();
+    try {
+      const pending = call(config, tool.id, who.botId);
+      await hold.arrived;
+      await persistent.waitForStreams(1);
+      const before = persistent.initializations();
+      const result = await call(config, tool.id, who.botId, "lookup_stock", "stream-get");
+      const other = await pending;
+      for (const response of [result, other]) {
+        expect(response.status).toBe(502);
+        expect(await response.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
+      }
+      await expect(persistent.waitForStreams(0, AbortSignal.timeout(2_000))).resolves.toBeUndefined();
+      expect(persistent.completedLargeResponses()).toBe(0);
+      expect((await call(config, tool.id, who.botId)).status).toBe(200);
+      expect(persistent.initializations() - before).toBe(1);
+    } finally {
+      hold.release();
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
+  it.each(["stream-json", "stream-sse", "stream-sse-error"])(
+    "上游 %s 在 SDK 解析前限长，超过 20 MiB 中止请求并关闭对端流",
+    async (sku) => {
+      const persistent = await startTestMcp({ stateful: true });
+      const who = await owner();
+      const tool = await connect(who, false, "流式限长", persistent.url);
+      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      try {
+        expect((await call(config, tool.id, who.botId)).status).toBe(200);
+        await persistent.waitForStreams(1);
+        const before = persistent.initializations();
+        const closed = persistent.nextCallClosed();
+        const result = await call(config, tool.id, who.botId, "lookup_stock", sku);
+        expect(result.status).toBe(502);
+        expect(await result.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
+        await closed;
+        expect(persistent.streamedBytes(), "对端没有发送完整的 100 块正文").toBeLessThan(105_000_000);
+        expect(persistent.completedLargeResponses(), "上游尚未完成 JSON/SSE，请求已被中止").toBe(0);
+        expect(persistent.activeStreams(), "只关闭超限 POST，保留共享 GET").toBe(1);
+        expect((await call(config, tool.id, who.botId)).status).toBe(200);
+        expect(persistent.initializations()).toBe(before);
+      } finally {
+        await who.client.delete(`/api/tools/${tool.id}`);
+        agent.close();
+        await persistent.close();
+      }
+    },
+  );
+
+  it("PATCH 之外更新凭据，下次调用比较指纹、用新 Client，旧 Client 在途归零后关闭", async () => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "指纹", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const hold = persistent.holdNextCall();
+    try {
+      const old = call(config, tool.id, who.botId);
+      await hold.arrived;
+      await persistent.waitForStreams(1);
+      const before = persistent.initializations();
+      const rotated = "Bearer fingerprint-private-token";
+      const encrypted = new ToolCrypto("a".repeat(64)).encrypt(rotated);
+      await database.sql`UPDATE tool_connections SET authorization_enc = ${encrypted} WHERE id = ${tool.id}`;
+      const newStream = persistent.nextStream();
+      expect((await call(config, tool.id, who.botId)).status).toBe(200);
+      expect(persistent.initializations() - before, "未走 PATCH invalidate，凭据指纹仍触发重建").toBe(1);
+      expect(persistent.calls().at(-1)?.authorization).toBe(rotated);
+      await newStream;
+      expect(persistent.activeStreams()).toBe(2);
+      hold.release();
+      expect((await old).status).toBe(200);
+      await expect(
+        persistent.waitForStreams(1, AbortSignal.timeout(2_000)),
+        "旧 Client 确实关闭",
+      ).resolves.toBeUndefined();
+      expect((await call(config, tool.id, who.botId)).status).toBe(200);
+      expect(persistent.initializations() - before).toBe(1);
+      await who.client.delete(`/api/tools/${tool.id}`);
+      await expect(persistent.waitForStreams(0, AbortSignal.timeout(2_000))).resolves.toBeUndefined();
+    } finally {
+      hold.release();
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
+  it("调用方断开后在途计数归零，作废时关闭旧 Client，对端流数归零", async () => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "取消计数", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const controller = new AbortController();
+    const hold = persistent.holdNextCall();
+    try {
+      const cancelled = persistent.nextCancellation();
+      const closed = persistent.nextCallClosed();
+      const pending = call(
+        config,
+        tool.id,
+        who.botId,
+        "lookup_stock",
+        "X3",
+        config.modelGateway.apiKey,
+        controller.signal,
+      ).catch((error: unknown) => error);
+      await hold.arrived;
+      await persistent.waitForStreams(1);
+      controller.abort();
+      expect(await pending).toBeInstanceOf(Error);
+      await cancelled;
+      await closed;
+      expect((await who.client.patch(`/api/tools/${tool.id}`, { name: "取消后作废" })).status).toBe(200);
+      await expect(
+        persistent.waitForStreams(0, AbortSignal.timeout(2_000)),
+        "取消必须减在途计数，作废后旧 Client 应关闭",
+      ).resolves.toBeUndefined();
+    } finally {
+      controller.abort();
+      hold.release();
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
   it("挂着的调用不受另一个调用的 isError 影响，按自己的结果返回", async () => {
     const who = await owner();
     const tool = await connect(who);
@@ -521,20 +707,31 @@ describe("MCP 控制面代执行", () => {
     }
   });
 
-  it("单次调用超过 60 秒回 504，共享 Client 仍可使用", async () => {
+  it("单次调用超过 60 秒回 504，共享 Client 仍可使用，超时后在途计数归零并可关闭", async () => {
+    const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
-    const tool = await connect(who);
+    const tool = await connect(who, false, "超时计数", persistent.url);
     const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
     try {
+      const cancelled = persistent.nextCancellation();
+      const closed = persistent.nextCallClosed();
       const timedOut = await call(config, tool.id, who.botId, "lookup_stock", "hang");
       expect(timedOut.status).toBe(504);
       expect(await timedOut.json()).toEqual({ error: "插件调用超过 60 秒，请稍后再试" });
-      const before = mcp.initializations();
+      await cancelled;
+      await closed;
+      const before = persistent.initializations();
       expect((await call(config, tool.id, who.botId)).status).toBe(200);
-      expect(mcp.initializations() - before).toBe(0);
+      expect(persistent.initializations() - before).toBe(0);
+      expect((await who.client.patch(`/api/tools/${tool.id}`, { name: "超时后作废" })).status).toBe(200);
+      await expect(
+        persistent.waitForStreams(0, AbortSignal.timeout(2_000)),
+        "超时必须减在途计数，作废后旧 Client 应关闭",
+      ).resolves.toBeUndefined();
     } finally {
       await who.client.delete(`/api/tools/${tool.id}`);
       agent.close();
+      await persistent.close();
     }
   }, 70_000);
 

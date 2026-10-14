@@ -1,17 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { McpProxyCallResponse, redactCredential, type ToolConnection } from "@baize/shared";
+import { McpHttpTransport, McpResponseEndedError, McpResultTooLargeError, MCP_MAX_BODY_BYTES } from "./transport.js";
+
+export { McpResultTooLargeError, MCP_MAX_BODY_BYTES } from "./transport.js";
 
 export const MCP_CALL_TIMEOUT_MS = 60_000;
-export const MCP_MAX_BODY_BYTES = 20 * 1024 * 1024;
 
 export class McpClientsClosedError extends Error {}
-export class McpResultTooLargeError extends Error {}
 
 interface CachedClient {
   readonly fingerprint: string;
   readonly client: Client;
+  readonly transport: McpHttpTransport;
   ready: Promise<void>;
   readonly closed: Promise<void>;
   finishClose(): void;
@@ -76,14 +77,13 @@ export class McpClients {
     }
     if (cached === undefined) {
       const client = new Client({ name: "baize-control-plane", version: "0.1.0" });
-      const transport = new StreamableHTTPClientTransport(new URL(connection.url), {
-        requestInit: authorization === null ? {} : { headers: { Authorization: authorization } },
-      });
+      const transport = new McpHttpTransport(new URL(connection.url), authorization);
       let finishClose!: () => void;
       const closed = new Promise<void>((resolve) => (finishClose = resolve));
       cached = {
         fingerprint,
         client,
+        transport,
         ready: Promise.resolve(),
         closed,
         finishClose,
@@ -96,7 +96,9 @@ export class McpClients {
       // Client.onerror 还会报已取消请求的迟到回包；只有 transport.onerror 才说明连接本身出错。
       // SDK 只提供回调属性，没有 addEventListener。
       // oxlint-disable-next-line unicorn/prefer-add-event-listener
-      transport.onerror = () => this.#retire(connection.id, created);
+      transport.onerror = () => {
+        if (!transport.callAborted) this.#retire(connection.id, created);
+      };
       // oxlint-disable-next-line unicorn/prefer-add-event-listener
       client.onclose = () => this.#retire(connection.id, created);
       // 初始化属于连接，不随首个调用取消；SDK 的 sessionId 可省属性声明与 getter 不一致。
@@ -123,14 +125,22 @@ export class McpClients {
       let response: McpProxyCallResponse;
       let serialized: string;
       try {
-        const result = await used.client.callTool({ name: tool, arguments: args }, undefined, {
-          signal,
-          timeout: MCP_CALL_TIMEOUT_MS,
-        });
+        const result = await used.transport.withCallSignal(signal, (callSignal) =>
+          used.client.callTool({ name: tool, arguments: args }, undefined, {
+            signal: callSignal,
+            timeout: MCP_CALL_TIMEOUT_MS,
+          }),
+        );
         serialized = JSON.stringify(result);
         response = McpProxyCallResponse.parse({ content: result.content, isError: result.isError === true });
       } catch (error) {
-        if (!signal.aborted) this.#retire(connection.id, used);
+        if (
+          !signal.aborted &&
+          !(error instanceof McpResponseEndedError) &&
+          !(error instanceof McpResultTooLargeError)
+        ) {
+          this.#retire(connection.id, used);
+        }
         throw error;
       }
       if (Buffer.byteLength(serialized, "utf8") > MCP_MAX_BODY_BYTES) throw new McpResultTooLargeError();
