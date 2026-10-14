@@ -2,6 +2,7 @@ import type { ControlToAgent, GroupId, RunId } from "@baize/shared";
 import type { BotSession } from "./bot-session.js";
 import type { BotGeneration } from "./index.js";
 import type { RememberingRun } from "./memory.js";
+import type { Recalls } from "./recall.js";
 import { SerialQueue } from "./serial-queue.js";
 
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -19,13 +20,22 @@ export interface Lane {
   readonly groupId: GroupId;
   readonly queue: SerialQueue<PromptMessage>;
   readonly sessions: Map<"chat" | "table", LaneSession>;
+  readonly recalls: Recalls;
   active: LaneActive | null;
   phase: "ready" | "stopped";
   stopping: Promise<void> | null;
 }
 
 export function createLane(groupId: GroupId): Lane {
-  return { groupId, queue: new SerialQueue(), sessions: new Map(), active: null, phase: "ready", stopping: null };
+  return {
+    groupId,
+    queue: new SerialQueue(),
+    sessions: new Map(),
+    recalls: new Map(),
+    active: null,
+    phase: "ready",
+    stopping: null,
+  };
 }
 
 export function findLaneRun(lanes: Iterable<Lane>, runId: RunId) {

@@ -1,0 +1,266 @@
+[
+  {
+    "source": "spec/用户故事.md:41",
+    "text": "想让我帮你做成什么事？说一句就行"
+  },
+  {
+    "source": "spec/用户故事.md:55",
+    "text": "推广白泽的开源仓库，年底 1000 星"
+  },
+  {
+    "source": "spec/用户故事.md:109",
+    "text": "好，下周小红书从 2 篇加到 3 篇，周一的计划里给你看"
+  },
+  {
+    "source": "spec/用户故事.md:152",
+    "text": "把抖音号做起来，年底 1000 粉"
+  },
+  {
+    "source": "spec/用户故事.md:164",
+    "text": "周五复盘加上小红书的数据"
+  },
+  {
+    "source": "spec/用户故事.md:187",
+    "text": "每周五六点给这个项目出一份周报"
+  },
+  {
+    "source": "spec/用户故事.md:219",
+    "text": "标题别超过 15 个字"
+  },
+  {
+    "source": "spec/用户故事.md:221",
+    "text": "记下了，以后小红书标题都在 15 个字以内"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:50",
+    "text": "@阿文 写第一篇小红书，讲白泽是怎么来的，配上封面图"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:53",
+    "text": "@小满 issue 12 里 lark-fan 问能不能接飞书，回他一句"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:55",
+    "text": "@老周 记录 GitHub 星数，当前读数 375"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:56",
+    "text": "@老周 更新 GitHub 星数，当前读数 412"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:58",
+    "text": "每周五六点给白泽开源推广出一份周报"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:61",
+    "text": "白泽开源推广想加一个排版的"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:63",
+    "text": "@小墨 给第一篇小红书排个版"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:69",
+    "text": "只给我记住：私人号的验收暗号是 p2-private-731"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:110",
+    "text": "方案卡发好了，你看一眼，没问题就点开始。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:130",
+    "text": "第一篇小红书写好了，在等你批。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:136",
+    "text": "一个人的公司，也想有一支队伍。白泽把写稿、回评论、排计划交给几个 AI 队友，你只管点头。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:143",
+    "text": "本周计划排好了，5 条，等你确认。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:149",
+    "text": "白泽开源了：一个人也能带一支 AI 小队做推广。github.com/baize/baize-bot"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:157",
+    "text": "我用 5 个 AI 做推广，一周省下 10 个小时。它们各管一摊：写稿、回评论、排计划。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:167",
+    "text": "我们在收集大家用白泽做推广的方式，欢迎在这里留言。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:174",
+    "text": "本周白泽新增：计划卡一次批完，改过的地方记进品牌手册。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:182",
+    "text": "写稿的、回评论的、排计划的，各自有边界，越界的事先问你。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:192",
+    "text": "好，下周小红书从 2 篇加到 3 篇，周一的计划里给你看。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:200",
+    "text": "回复写好了，等你批。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:205",
+    "text": "可以的，飞书的接入在路线图上，下个版本先支持消息推送，进展会在这个 issue 里同步。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:212",
+    "text": "方案卡发好了。抖音现在还不支持自动发，先把队伍和节奏定下来。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:223",
+    "text": "记下了，这周五的复盘会把小红书的阅读和收藏一起列出来。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:233",
+    "text": "例行卡发好了，在等你确认里，点「加上」就每周五 18:00 出周报。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:243",
+    "text": "本周周报：小红书发了 2 篇，GitHub 回了 1 条评论，X 发了 3 条。详细数字等下周对比。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:246",
+    "text": "小红书图文排版常见三条：封面大字标题，正文分段加小标题，每段不超过 4 行。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:273",
+    "text": "建队卡发好了，想给白泽开源推广加一个排版，你挑一下。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:276",
+    "text": "排好了：封面大字标题，正文分三段，每段加一个小标题。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:285",
+    "text": "这条私人偏好记下了，不默认分享。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:288",
+    "text": "「一个人带一支 AI 小队」"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:289",
+    "text": "「白泽：一个人的公司也能有队伍」"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:52",
+    "text": "下周多发点小红书"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:66",
+    "text": "给周四那篇起个标题"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:67",
+    "text": "再起一个标题"
+  },
+  {
+    "source": "spec/用户故事.md:55",
+    "derived": true,
+    "text": "推广白泽开源仓库这周先排五条草稿。"
+  },
+  {
+    "source": "spec/用户故事.md:12",
+    "derived": true,
+    "text": "每周两篇小红书，封面先给我挑。"
+  },
+  {
+    "source": "spec/用户故事.md:107",
+    "derived": true,
+    "text": "下周的小红书增加到三篇。"
+  },
+  {
+    "source": "spec/用户故事.md:164",
+    "derived": true,
+    "text": "周五的复盘补上阅读和收藏。"
+  },
+  {
+    "source": "spec/用户故事.md:187",
+    "derived": true,
+    "text": "每周五六点汇总项目周报。"
+  },
+  {
+    "source": "spec/用户故事.md:219",
+    "derived": true,
+    "text": "小红书标题别超过十五个字。"
+  },
+  {
+    "source": "spec/用户故事.md:234",
+    "derived": true,
+    "text": "给阿文加一个长文标签。"
+  },
+  {
+    "source": "spec/用户故事.md:264",
+    "derived": true,
+    "text": "牌友老K先跟注，老白帮我分析底牌。"
+  },
+  {
+    "source": "spec/用户故事.md:264",
+    "derived": true,
+    "text": "这手底牌是黑桃A和方块K。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:243",
+    "derived": true,
+    "text": "本周小红书发布两篇，GitHub回复一条。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:205",
+    "derived": true,
+    "text": "白泽的飞书接入先支持消息推送。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:276",
+    "derived": true,
+    "text": "每篇小红书正文分三段。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:246",
+    "derived": true,
+    "text": "封面用大字标题，分段加小标题。"
+  },
+  {
+    "source": "spec/用户故事.md:204",
+    "derived": true,
+    "text": "建队卡选小墨，先不带阿彩。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:285",
+    "derived": true,
+    "text": "私人偏好只给这个Bot记住。"
+  },
+  {
+    "source": "spec/用户故事.md:91",
+    "derived": true,
+    "text": "草稿写好以后等我批准。"
+  },
+  {
+    "source": "spec/用户故事.md:122",
+    "derived": true,
+    "text": "飞书问题回复完成之后贴出原帖链接。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:192",
+    "derived": true,
+    "text": "计划排好以后周一给我看。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:219",
+    "derived": true,
+    "text": "抖音号的短视频脚本先给我挑三条。"
+  },
+  {
+    "source": "packages/e2e/acceptance/run.ts:56",
+    "derived": true,
+    "text": "星数更新后再给项目出一份周报。"
+  }
+]

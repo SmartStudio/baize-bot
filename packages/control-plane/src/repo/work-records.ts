@@ -1,18 +1,22 @@
 import {
   EMPTY_WORK_HEAD,
+  GroupId,
   PiWorkEntry,
+  RECALL_EXCERPT_LENGTH,
+  RECALL_LIMIT,
   advanceWorkHead,
   extractWorkSearchText,
   type BotId,
-  type GroupId,
   type HubLaneSnapshot,
+  type RecallEntry,
+  type UserId,
   type Viewer,
   type WorkAppend,
   type WorkAppendResult,
   type WorkStream,
 } from "@baize/shared";
 import { RetainSnapshot, checkFrame, emptySnapshot, type RetainContext } from "@baize/shared/work-record";
-import { and, asc, eq, gte, gt, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, gt, isNull, lt, ne, sql } from "drizzle-orm";
 import type { AgentConnection } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
 import {
@@ -22,6 +26,7 @@ import {
   laneLeases,
   pokerTables,
   runs,
+  tasks,
   toolConnections,
   workEntries,
   workStreams,
@@ -309,4 +314,71 @@ export async function readWorkLane(
     .orderBy(asc(workEntries.seq))
     .limit(limit);
   return { entries, nextSeq: metadata.nextSeq, head: metadata.head, piSessionVersion: metadata.piSessionVersion };
+}
+
+export function workEntryVisibleTo(viewer: Viewer) {
+  return sql`(${workEntries.visibleTo} is null or ${workEntries.visibleTo} @> ${JSON.stringify([viewer])}::jsonb)`;
+}
+
+export async function recallWorkRecords(
+  db: Db | Tx,
+  ownerId: UserId,
+  viewer: Extract<Viewer, { kind: "bot" }>,
+  excludeGroupId: GroupId,
+  query: string,
+): Promise<RecallEntry[]> {
+  const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+  const kind = sql<RecallEntry["kind"]>`${workEntries.line}::jsonb->'message'->>'role'`;
+  const at = sql`coalesce(
+    CASE WHEN pg_input_is_valid(${workEntries.line}::jsonb->>'timestamp', 'timestamp with time zone')
+      THEN (${workEntries.line}::jsonb->>'timestamp')::timestamptz END,
+    ${runs.startedAt}, ${groups.createdAt}
+  )`;
+  const rows = await db
+    .select({
+      groupId: workEntries.groupId,
+      groupTitle: tasks.title,
+      at: at.mapWith(groups.createdAt),
+      kind,
+      text: workEntries.searchText,
+    })
+    .from(workEntries)
+    .innerJoin(groups, and(eq(groups.id, workEntries.groupId), eq(groups.ownerId, ownerId)))
+    .innerJoin(groupMembers, and(eq(groupMembers.groupId, groups.id), eq(groupMembers.botId, viewer.botId)))
+    .innerJoin(tasks, eq(tasks.groupId, groups.id))
+    .leftJoin(runs, eq(runs.id, workEntries.runId))
+    .where(
+      and(
+        eq(workEntries.botId, viewer.botId),
+        eq(workEntries.ownerId, ownerId),
+        eq(workEntries.stream, "chat"),
+        workEntryVisibleTo(viewer),
+        isNull(workEntries.visibleTo),
+        ne(workEntries.groupId, excludeGroupId),
+        eq(workEntries.piType, "message"),
+        sql`${kind} IN ('user', 'assistant', 'toolResult')`,
+        sql`${workEntries.searchText} ILIKE ${pattern}`,
+      ),
+    )
+    .orderBy(
+      desc(sql`similarity(${workEntries.searchText}, ${query})`),
+      desc(at),
+      asc(workEntries.groupId),
+      desc(workEntries.seq),
+    )
+    .limit(RECALL_LIMIT);
+  return rows.map((row) => ({
+    groupId: GroupId.parse(row.groupId),
+    groupTitle: row.groupTitle,
+    at: row.at.toISOString(),
+    kind: row.kind,
+    excerpt: recallExcerpt(row.text, query),
+  }));
+}
+
+function recallExcerpt(text: string, query: string): string {
+  const match = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+  const before = Math.floor((RECALL_EXCERPT_LENGTH - query.length) / 2);
+  const start = Math.max(0, Math.min(match - before, text.length - RECALL_EXCERPT_LENGTH));
+  return text.slice(start, start + RECALL_EXCERPT_LENGTH);
 }

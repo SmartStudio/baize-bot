@@ -35,6 +35,7 @@ import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writ
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
+import { createRecallTool } from "./recall.js";
 import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
 import { createSandboxedBash } from "./sandbox.js";
@@ -549,6 +550,7 @@ export function createRunner(config: RunnerConfig): Runner {
   if (config.browser !== undefined) for (const bot of bots.values()) browserMutexFor(bot);
 
   const abortSession = async (lane: Lane): Promise<void> => {
+    lane.recalls.clear();
     if (lane.active !== null) {
       runnerAbortedRuns.add(lane.active.run.runId);
       lane.active.control.abort();
@@ -820,6 +822,19 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
+      createRecallTool({
+        recalls: lane.recalls,
+        live: () => {
+          const active = lane.active;
+          if (active === null || !liveRuns.has(active.run.runId) || active.control.signal.aborted) return null;
+          return {
+            runId: active.run.runId,
+            signal: active.control.signal,
+            gateway: (desiredConfig(bot) ?? runConfig()).gateway,
+            headers: laneFence.headers(active.run.runId),
+          };
+        },
+      }),
       ...createTopicTools({ activeRun, send: config.send }),
       ...createSkillTools({ activeRun, send: config.send }),
       ...createMetricTools({ activeRun, send: config.send }),
@@ -908,6 +923,7 @@ export function createRunner(config: RunnerConfig): Runner {
       allowBash: bash.allow,
       clearBashRun: bash.clearRun,
       memory: () => lane.active?.memory ?? null,
+      recalls: lane.recalls,
       ...(generation.desired.settings === undefined ? {} : { settings: generation.desired.settings }),
     });
     lane.sessions.set(stream, { ...created, tableRole: null, fingerprint: definition.fingerprint });
@@ -1006,6 +1022,7 @@ export function createRunner(config: RunnerConfig): Runner {
     } finally {
       report?.unsubscribe();
       botSession?.clearBashRun(message.runId);
+      lane.recalls.clear();
       lane.active = null;
       runnerAbortedRuns.delete(message.runId);
       if (active.generation !== null) {
@@ -1153,6 +1170,7 @@ export function createRunner(config: RunnerConfig): Runner {
         lane.queue.discard((message) => message.runId === runId);
         return;
       }
+      lane.recalls.clear();
       runnerAbortedRuns.add(runId);
       const stream = lane.active?.table === null ? "chat" : "table";
       const session = lane.sessions.get(stream)?.session;

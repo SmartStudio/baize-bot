@@ -71,9 +71,13 @@ const allowsException = (file: string, fn: string, table: "messages" | "workEntr
   EXCEPTIONS.some((entry) => entry.file === file && entry.fn === fn);
 const scanWorkReadsProbe = (body: string, header = `import { workEntries } from "../db/schema.js";\n`) =>
   scanWorkEntriesTable("repo/probe.ts", header + body).filter((site) => !site.ok);
+const scanWorkRecordReads = (body: string) =>
+  scanWorkEntriesTable("repo/work-records.ts", `import { workEntries } from "../db/schema.js";\n${body}`).filter(
+    (site) => !site.ok,
+  );
 
 describe("消息与工作记录的读取出口", () => {
-  it("messages 必须带 viewer 或登记理由，work_entries 的读只能走登记的授权快照和留存复查", () => {
+  it("messages 必须带 viewer 或登记理由，work_entries 只走带 viewer 的仓库读或登记的授权快照和留存复查", () => {
     const unexplained: string[] = [];
     const seen = new Map<string, number>();
     for (const file of sourceFiles()) {
@@ -92,7 +96,7 @@ describe("消息与工作记录的读取出口", () => {
     }
     expect(
       unexplained,
-      "这些地方绕过读取出口：messages 要带 viewer 或登记理由，work_entries 只能由 repo/work-records.ts 中登记的授权读取函数读",
+      "这些地方绕过读取出口：messages 要带 viewer 或登记理由，work_entries 只能由 repo/work-records.ts 中带 viewer 的读或登记的授权读取函数读",
     ).toEqual([]);
 
     const counts = EXCEPTIONS.map((entry) => ({
@@ -125,8 +129,38 @@ describe("工作记录守卫自己能分辨的写法", () => {
     ).toHaveLength(1);
     expect(
       scanWorkReadsProbe(
+        `export const f = (db: Db, v: Viewer) => db.select().from(workEntries).where(workEntryVisibleTo(v));`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      scanWorkReadsProbe(
         `export const f = (db: Db) => db.select().from(runs).leftJoin(workEntries, eq(workEntries.runId, runs.id));`,
       ),
+    ).toHaveLength(1);
+  });
+
+  it("work-records 内每条查询必须在同链调用 workEntryVisibleTo，消息谓词不能替代", () => {
+    expect(
+      scanWorkRecordReads(
+        `export const f = (db: Db, v: Viewer) => db.select().from(workEntries).where(workEntryVisibleTo(v));`,
+      ),
+    ).toEqual([]);
+    expect(
+      scanWorkRecordReads(
+        `export const f = (db: Db, v: Viewer) => db.select().from(workEntries).where(messageVisibleTo(v));`,
+      ),
+    ).toHaveLength(1);
+    expect(scanWorkRecordReads(`export const f = (db: Db) => db.select().from(workEntries);`)).toHaveLength(1);
+    expect(
+      scanWorkRecordReads(`export function f(db: Db, v: Viewer) {
+        const allowed = db.select().from(workEntries).where(workEntryVisibleTo(v));
+        const denied = db.select().from(workEntries);
+        return [allowed, denied];
+      }`),
+    ).toHaveLength(1);
+    expect(
+      scanWorkRecordReads(`export const f = (db: Db, v: Viewer) => db.select().from(runs)
+        .where(and(workEntryVisibleTo(v), exists(db.select().from(workEntries))));`),
     ).toHaveLength(1);
   });
 

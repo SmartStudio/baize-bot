@@ -139,6 +139,16 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 `src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_offer` 带 runId 和触发消息的 sourceMessageId，不走审批：它只请用户确认，控制面在单聊里出一张卡，用户点了「记住」才写进偏好并随 config 下发，所以工具结果告诉模型「已经请用户确认，用户点了记住才生效」，点之前这句话不影响 Bot 的行为。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
 
+## recall
+
+`src/recall.ts` 的 `recall_memory(query)` 注册在聊天会话，牌桌和临时帮手沿用各自的工具集。查询词去掉首尾空白后为 1 到 100 字，只发 `{query}` 到当前模型网关同源的 `POST /hub/v1/recall`，使用调用时的网关 Bearer 和本次 run 的 `x-baize-lane` 租约头。中枢最多回 8 条，每条摘录最多 400 字，包含群 id、群标题、时间和消息角色。它属于内部只读工具，只读例行允许调用，MCP 连接不能覆盖同名工具。
+
+每个 Lane 的 `recalls` 按 `toolCallId` 暂存结果。工具返回的 `content` 只含固定句 `找到 N 条以前的记录，内容只在这一轮可见`，`details` 是空对象，原会话 JSONL 和留存后的工作记录行都只有这句。模型请求的 `context` 钩子使用 `pruneImages(expandRecalls(messages, recalls))`，只在副本中展开 `role=toolResult`、工具名和调用 id 都匹配的结果；不同 run 复用调用 id 时只展开最新一条。不会按固定句的文本匹配，其他工具的同字结果保持原样。
+
+run 的正常收尾、异常、取消和停机都会清空结果。HTTP 请求同时受工具和 Lane 的取消信号约束；已经取消或结束的 run 不接受迟到响应。Pi 原生自动压缩从原会话条目生成摘要，看到的是固定句；`test/recall.test.ts` 用真实自动压缩的假上游请求验证摘录和出处不进入压缩，不另写 `session_before_compact`。
+
+当前运行器的 `workAppend` 接线只发送 `before_effect` 空探针，会话条目的差分上传由 P3-11 接入。召回测试从真实 `sessionManager.getEntries()` 取原始行，经 shared 留存和哈希链组成 `work_append`，调用现有回调验证占位；这条用例明确标为差分接入模拟，不代表生产差分上传已接入。
+
 ## 建队卡
 
 `src/team.ts` 的 `propose_team` 只挂给主助理，且只在主助理单聊里能调用。参数是项目清单里的 `projectGroupId` 和 1 到 5 个人选，已有 Bot 给 botId，新人给名字、tags、描述和理由。工具补齐 tags 与 suggested 默认值，只挑协议字段再校验，错误翻成中文；通过后发 `team_offer`，不走工具审批，卡本身等用户确认。`ASSISTANT_RULE` 要求项目缺人时出建队卡，每个人选写理由，只问要不要这个人，不问权限与模型，发出去后等确认。

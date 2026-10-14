@@ -642,6 +642,9 @@ export const workEntries = pgTable(
     check("work_entries_stream_check", sql`${t.stream} IN ('chat', 'table')`),
     check("work_entries_retention_check", sql`${t.retention} IN ('verbatim', 'redacted')`),
     check("work_entries_seq_check", sql`${t.seq} >= 0`),
+    index("work_entries_chat_search_idx")
+      .using("gin", t.searchText.op("gin_trgm_ops"))
+      .where(sql`${t.stream} = 'chat' AND ${t.visibleTo} IS NULL`),
     check(
       "work_entries_visible_to_check",
       sql`${t.visibleTo} IS NULL OR (jsonb_typeof(${t.visibleTo}) = 'array' AND jsonb_array_length(${t.visibleTo}) > 0)`,

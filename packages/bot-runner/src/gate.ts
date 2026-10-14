@@ -107,6 +107,7 @@ const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm"
 /** 闸门按名字直接放行的内部工具。运行器把这里的名字全部保留，工具连接里同名的操作不注册：工厂还是空桩时名字也占着，不然同名的 MCP 操作会顶着这个名字免审批执行。 */
 export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
+  "recall_memory",
   "update_checklist",
   "mention_bot",
   "handoff_task",
@@ -568,7 +569,9 @@ const classifyOwnTool = (call: GateCall): readonly ClassifiedAction[] | null => 
   }
   if (call.toolName === "bash") return classifyBash(call);
   if (INTERNAL_TOOLS.has(call.toolName)) {
-    return [plainAction(call.toolName === "read_task" ? "read" : "write_workspace")];
+    return [
+      plainAction(call.toolName === "read_task" || call.toolName === "recall_memory" ? "read" : "write_workspace"),
+    ];
   }
   // 只发 GET，账号越权在工具里、令牌在控制面，这里归 read 不问。
   if (call.toolName === ACCOUNT_READ_TOOL) return [plainAction("read", targetFromInput(call.input, call))];

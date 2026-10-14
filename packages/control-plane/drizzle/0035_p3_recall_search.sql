@@ -1,0 +1,1 @@
+CREATE INDEX "work_entries_chat_search_idx" ON "work_entries" USING gin ("search_text" gin_trgm_ops) WHERE "work_entries"."stream" = 'chat' AND "work_entries"."visible_to" IS NULL;

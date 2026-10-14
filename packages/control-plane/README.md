@@ -75,9 +75,19 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 `GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据，空流回 0、零链头和 null Pi 版本。
 
-租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。守卫禁止其他文件直接读 `work_entries`。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
+租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
 
 删号按归属人、Bot、电脑、道、run 的顺序取锁，在同一事务里入队所有道取消、删除用户和相关记录，电脑与 `agent_outbox` 随外键清空。事务只返回已入队的道取消副本，未发出的 prompt、审批决定等报文随发件箱清空；提交成功后，仅向连接代际仍匹配的在线电脑按序投递，随后以 4002 关闭连接。副本不再落盘，断线电脑不会重放删号取消，旧 token 也不能重新握手。账号已删除时不存在可以持久保留的发件箱，这个最后投递窗口只服务于仍在线的电脑。
+
+## recall
+
+`POST /hub/v1/recall` 使用当前电脑网关 key 的 Bearer 和 `x-baize-lane` 租约头。鉴权后的电脑行、道栅栏和召回查询共用只读可重复读事务。Bot、归属人和当前群都从鉴权或租约头取得，请求只接受 `{query: string}`；关键词去掉首尾空白后须为 1 到 100 个字符，非法请求回 400「召回参数格式不对」。缺头、旧代际、非持有者和过期租约按租约节回 409，cookie 不能代替 Bearer。
+
+`repo/work-records.ts` 的 `recallWorkRecords` 必填被查 Bot 的 viewer，只查它本人、同归属人、全群可见的 `chat` 流，排除当前群。`workEntryVisibleTo(viewer)` 之外还固定要求 `visible_to IS NULL`，对本人私密的记录也不召回；牌桌流、隐藏 run 和别的 Bot 的记录不进入结果。来源群必须仍属当前归属人且 Bot 仍是成员，群标题取该群主题任务的当前标题。删群后同一查询回空；删 Bot 后原道的请求被栅栏拒绝，工作记录随外键级联删除。
+
+查询用字面量 `ILIKE` 子串匹配，转义 `%`、`_` 和反斜线，再按 `similarity` 降序、记录时间降序排列，最多返回 8 条 `{groupId, groupTitle, at, kind, excerpt}`。`kind` 只接受 Pi `message` 的 `user`、`assistant`、`toolResult`。时间取原行的合法 `timestamp`，缺失或非法时依次回退到 run 开始时间和群创建时间，统一为 ISO。摘录围绕关键词截取，最多 400 个字符。`search_text` 使用 `pg_trgm` GIN 部分索引，条件为 `stream = 'chat' AND visible_to IS NULL`；召回内容在运行器里只用于当前 run，历史和上传记录仅保留占位文字。
+
+`test/recall-search.test.ts` 用 61 条中文语料比较 2 到 4 字关键词：默认相似度阈值漏掉全部命中，子串匹配保留全部命中。两字无边界子串没有内部三元组，实测仍需扫描候选；三字「小红书」在清理批量夹具的 GIN pending list 后，默认计划走 `work_entries_chat_search_idx`。索引存在不代表所有查询都由它执行，召回优先保留短词命中。
 
 ## 工具连接
 

@@ -1090,6 +1090,7 @@ describe("例行边界", () => {
   // 每个内部工具和起草工具都得在这里表态：放行的写在清单里，其余一律拒。新增工具没表态，这里红。
   const READ_ONLY_OPEN_TOOLS: ReadonlySet<string> = new Set([
     "read_task",
+    "recall_memory",
     "report_metric",
     "remember_preference",
     "call_helper",

@@ -5802,7 +5802,7 @@ ${join(h.dataDir, "bot-1", "work")}
     ]);
     expect(
       toolNamesSent(requests),
-      "队员的工具只多了三件起草工具、读 GitHub、X 的 account_read，和项目群里的 report_metric",
+      "队员的工具包括 recall_memory、三件起草工具、account_read 和项目群里的 report_metric",
     ).toEqual([
       "read",
       "bash",
@@ -5810,6 +5810,7 @@ ${join(h.dataDir, "bot-1", "work")}
       "write",
       "send_email",
       "list_files",
+      "recall_memory",
       "read_task",
       "update_checklist",
       "mention_bot",

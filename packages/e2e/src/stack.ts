@@ -20,6 +20,7 @@ import {
   type Account,
   type ComputerId,
   type Platform,
+  type WorkAppend,
 } from "@baize/shared";
 import { createRunner, CURRENT_SESSION_VERSION, type PromptMessage } from "@baize/bot-runner";
 import { type AgentOptions, startAgent } from "@baize/computer-agent";
@@ -99,6 +100,8 @@ export type Stack = {
   cutAgentLink(): void;
   restoreAgentLink(): void;
   prompts(): readonly PromptMessage[];
+  /** P3-11 的差分上传尚未合入；用例把真实 Pi 行经电脑代理现有可靠通道送出。 */
+  appendWork(frame: WorkAppend): ReturnType<NonNullable<Parameters<typeof createRunner>[0]["workAppend"]>>;
   /**
    * 进程内的电脑代理累计收下并应用了几份 config。控制面只对「hello 的 config 已经发出」的连接派活，
    * 此前派的活落成一句「电脑不在线」而不建 run。重连之后等这个数涨过重连前的值，再发消息。
@@ -228,6 +231,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     };
     const prompts: PromptMessage[] = [];
     let configsApplied = 0;
+    let appendWork: Parameters<typeof createRunner>[0]["workAppend"];
     let agent: ReturnType<typeof startAgent> | undefined;
     let agentChild: ChildProcess | undefined;
     const stopComputer = async (): Promise<void> => {
@@ -312,11 +316,13 @@ export async function startStack(options: StackOptions): Promise<Stack> {
           ...agentOptions,
           ...(options.makeChrome === undefined ? {} : { makeChrome: options.makeChrome }),
           makeRunner: (config) => {
+            appendWork = config.workAppend;
             const runner = createRunner(config);
             configsApplied += 1;
             return {
               ...runner,
               applyConfig: async (next) => {
+                appendWork = next.workAppend;
                 await runner.applyConfig(next);
                 configsApplied += 1;
               },
@@ -358,6 +364,10 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       cutAgentLink: () => requireLink().cut(),
       restoreAgentLink: () => requireLink().restore(),
       prompts: () => prompts,
+      appendWork: (frame) => {
+        if (appendWork === undefined) throw new Error("电脑代理尚未连上工作记录通道");
+        return appendWork(frame);
+      },
       configsApplied: () => configsApplied,
       connectComputer: async () => {
         const probe = await connectComputer({ ...agentOptions, url: `ws://127.0.0.1:${server.port}/agent` });

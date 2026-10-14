@@ -8,3 +8,4 @@ export * from "./mcp-discovery.js";
 export * from "./poker.js";
 export * from "./attachments.js";
 export * from "./lane-records.js";
+export * from "./recall.js";

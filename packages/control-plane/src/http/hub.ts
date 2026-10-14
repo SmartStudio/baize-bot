@@ -1,10 +1,10 @@
-import { BotId, GroupId, HubLaneSnapshot, WorkStream } from "@baize/shared";
+import { BotId, GroupId, HubLaneSnapshot, RecallRequest, RecallResponse, WorkStream } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { Db } from "../db/client.js";
 import { computers } from "../db/schema.js";
 import { toComputer } from "../repo/rows.js";
-import { readWorkLane } from "../repo/work-records.js";
+import { readWorkLane, recallWorkRecords } from "../repo/work-records.js";
 import { hubAuth, type HubEnv } from "./hub-auth.js";
 import { createAttachmentRoutes } from "./routes/attachments.js";
 import { LANE_FENCE_ERRORS, validateLaneFence } from "./lane-fence.js";
@@ -15,6 +15,33 @@ export function createHub(deps: { readonly db: Db }): Hono<HubEnv> {
   const app = new Hono<HubEnv>();
   app.use("*", hubAuth(deps.db));
   app.route("/", createAttachmentRoutes(deps));
+  app.post("/recall", async (c) =>
+    deps.db.transaction(
+      async (tx) => {
+        const [row] = await tx
+          .select()
+          .from(computers)
+          .where(eq(computers.id, c.get("computerId")));
+        if (row === undefined) return c.json({ error: "网关 key 不对，换一把再来" }, 401);
+        const fence = await validateLaneFence(tx, toComputer(row), c.req.header("x-baize-lane"));
+        if (fence.kind !== "ok") return c.json({ error: LANE_FENCE_ERRORS[fence.kind] }, 409);
+        const request = RecallRequest.safeParse(await c.req.json().catch(() => null));
+        if (!request.success) return c.json({ error: "召回参数格式不对" }, 400);
+        return c.json(
+          RecallResponse.parse(
+            await recallWorkRecords(
+              tx,
+              c.get("ownerId"),
+              { kind: "bot", botId: fence.lane.botId },
+              fence.lane.groupId,
+              request.data.query,
+            ),
+          ),
+        );
+      },
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    ),
+  );
   app.get("/lanes/:botId/:groupId/:stream", async (c) =>
     deps.db.transaction(
       async (tx) => {

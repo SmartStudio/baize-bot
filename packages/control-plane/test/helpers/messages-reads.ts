@@ -20,11 +20,17 @@ const COLUMN_MAP_METHODS = new Set(["select", "selectDistinct", "returning"]);
  * 命名空间导入）每出现一次都要归类，认不出来的归 unclassified，所以把表赋给别的变量、传给别的函数都躲不过去。
  */
 export function scanMessagesTable(fileName: string, text: string): MessagesSite[] {
-  return scanTable(fileName, text, "messages", "messages", true);
+  return scanTable(fileName, text, "messages", "messages", "messageVisibleTo");
 }
 
 export function scanWorkEntriesTable(fileName: string, text: string): MessagesSite[] {
-  return scanTable(fileName, text, "workEntries", "work_entries", false);
+  return scanTable(
+    fileName,
+    text,
+    "workEntries",
+    "work_entries",
+    fileName === "repo/work-records.ts" ? "workEntryVisibleTo" : null,
+  );
 }
 
 function scanTable(
@@ -32,7 +38,7 @@ function scanTable(
   text: string,
   table: string,
   sqlTable: string,
-  allowViewer: boolean,
+  viewerPredicate: string | null,
 ): MessagesSite[] {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const rawTable = new RegExp(`\\b(?:from|join)\\s+(?:"?public"?\\.)?"?${sqlTable}\\b`, "i");
@@ -60,7 +66,7 @@ function scanTable(
 
   const visit = (node: ts.Node): void => {
     if (ts.isTypeQueryNode(node) || ts.isImportDeclaration(node)) return;
-    if (isTableReference(node, tableNames, schemaNamespaces, table)) classifyReference(node, add, allowViewer);
+    if (isTableReference(node, tableNames, schemaNamespaces, table)) classifyReference(node, add, viewerPredicate);
     else if (
       ts.isPropertyAccessExpression(node) &&
       node.name.text === table &&
@@ -120,14 +126,14 @@ function calleeName(call: ts.CallExpression): string | null {
 function classifyReference(
   ref: ts.Node,
   add: (node: ts.Node, kind: MessagesSiteKind, ok: boolean) => void,
-  allowViewer: boolean,
+  viewerPredicate: string | null,
 ): void {
   const parent = ref.parent;
   if (ts.isPropertyAccessExpression(parent) && parent.expression === ref) return;
   if (ts.isCallExpression(parent) && parent.arguments[0] === ref) {
     const method = calleeName(parent);
     if (method !== null && READ_METHODS.has(method)) {
-      add(ref, "read", allowViewer && callsMessageVisibleTo(queryChain(parent)));
+      add(ref, "read", viewerPredicate !== null && callsVisibleTo(queryChain(parent), viewerPredicate));
       return;
     }
     if (method !== null && WRITE_METHODS.has(method)) {
@@ -156,12 +162,11 @@ function queryChain(call: ts.CallExpression): ts.Node {
   }
 }
 
-function callsMessageVisibleTo(root: ts.Node): boolean {
+function callsVisibleTo(root: ts.Node, name: string): boolean {
   let found = false;
   const visit = (node: ts.Node): void => {
     if (found) return;
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "messageVisibleTo")
-      found = true;
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name) found = true;
     else ts.forEachChild(node, visit);
   };
   visit(root);
