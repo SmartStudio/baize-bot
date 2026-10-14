@@ -448,6 +448,7 @@ describe("今日页的共享形状", () => {
       view: { kind: "bash", command: "echo hi" },
       status: "pending",
       decidedAt: null,
+      deadlineAt: null,
       grantId: null,
     };
     const draft = {
@@ -785,6 +786,7 @@ describe("插件连接的状态", () => {
     url: "https://tickets.example.com/mcp",
     operations: [],
     assignedBotIds: [],
+    localOnly: false,
   };
 
   it("状态必带，只有 ready 和 awaiting_authorization 两种", () => {

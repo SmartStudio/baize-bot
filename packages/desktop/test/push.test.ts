@@ -39,6 +39,7 @@ describe("控制面推送", () => {
           view: { kind: "bash", command: "pwd" },
           status: "pending",
           decidedAt: null,
+          deadlineAt: null,
           grantId: null,
         },
       }),
