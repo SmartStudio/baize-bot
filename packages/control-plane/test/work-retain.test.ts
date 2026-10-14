@@ -266,8 +266,8 @@ async function recall(who: Rig, prompt: Prompt, query: string) {
   return RecallResponse.parse(await response.json());
 }
 
-async function snapshot(who: Rig, prompt: Prompt) {
-  const response = await fetch(`${who.client.origin}/hub/v1/lanes/${who.botId}/${who.groupId}/chat`, {
+async function snapshot(who: Rig, prompt: Prompt, paging = "") {
+  const response = await fetch(`${who.client.origin}/hub/v1/lanes/${who.botId}/${who.groupId}/chat${paging}`, {
     headers: {
       authorization: `Bearer ${who.key}`,
       "x-baize-lane": `${who.botId}/${who.groupId}/${prompt.lane.epoch}`,
@@ -295,7 +295,7 @@ describe("服务器工作记录留存复查", () => {
     expect(await recall(who, reader, "本机业务原文")).toEqual([]);
   });
 
-  it("读取侧按当前名单防住残留旧原文，recall 与分页 Hub 均只返回合规内容", async () => {
+  it("某个写入口漏了复查、快照指纹还是旧名单时，recall 与分页 Hub 仍只返回合规内容", async () => {
     const who = await rig();
     const tool = await connectTool(who, false);
     const prompt = await start(who);
@@ -305,8 +305,12 @@ describe("服务器工作记录留存复查", () => {
     const reader = await recallLane(who);
     expect(await recall(who, reader, "本机业务原文")).toHaveLength(1);
     expect((await snapshot(who, prompt)).entries.map((entry) => entry.line)).toEqual(original);
+    const [{ retain_snapshot: staleSnapshot }] = (await database.sql`
+      SELECT retain_snapshot FROM work_streams WHERE bot_id = ${who.botId} AND group_id = ${who.groupId}`) as [
+      { retain_snapshot: unknown },
+    ];
     await changed(who, tool.id, { localOnly: true });
-    // 模拟旧版本或漏复查的历史残留，读取不能依赖写入侧已经修好。
+    // 模拟漏了复查的写入口：名单已改，库里还是旧原文、旧链头和旧名单的快照。
     await database.sql`DELETE FROM work_entries WHERE bot_id = ${who.botId} AND group_id = ${who.groupId}`;
     for (const [seq, raw] of original.entries()) {
       const entry = JSON.parse(raw) as { id: string; parentId: string | null };
@@ -317,7 +321,8 @@ describe("服务器工作记录留存复查", () => {
           ${entry.parentId}, 'message', 'verbatim', ${raw}, ${seq === 0 ? "文字safe" : "本机业务原文"})
       `;
     }
-    await database.sql`UPDATE work_streams SET next_seq = 2, head = ${body.head}, tail_entry_id = 'private'
+    await database.sql`UPDATE work_streams SET next_seq = 2, head = ${body.head}, tail_entry_id = 'private',
+      retain_snapshot = ${JSON.stringify(staleSnapshot)}::jsonb
       WHERE bot_id = ${who.botId} AND group_id = ${who.groupId} AND stream = 'chat'`;
     expect(JSON.stringify((await state(who)).entries)).toContain("本机业务原文");
     expect(await recall(who, reader, "本机业务原文")).toEqual([]);
@@ -325,6 +330,64 @@ describe("服务器工作记录留存复查", () => {
     expect(page.entries.map((entry) => entry.line)).toEqual([original[0]]);
     expect(page.nextSeq).toBe(1);
     expect(page.head).toBe(await advanceWorkHead(EMPTY_WORK_HEAD, original.slice(0, 1)));
+  });
+
+  it("快照指纹与当前名单一致时，Hub 按 seq 直接分页，nextSeq 和 head 取库里的值", async () => {
+    const who = await rig();
+    const prompt = await start(who);
+    const lines = Array.from({ length: 5 }, (_, index) => line(`p${index}`, index === 0 ? null : `p${index - 1}`));
+    const body = await frame(who, lines, { prompt });
+    expect(await send(who.agent, body)).toBeNull();
+    const pages = [];
+    for (let after = -1; ;) {
+      const page = await snapshot(who, prompt, `?after=${after}&limit=2`);
+      pages.push(page);
+      if (page.entries.length < 2) break;
+      after = page.entries.at(-1)!.seq;
+    }
+    expect(pages.map((page) => page.entries.map((entry) => entry.seq))).toEqual([[0, 1], [2, 3], [4]]);
+    expect(pages.flatMap((page) => page.entries.map((entry) => entry.line))).toEqual(lines);
+    for (const page of pages) {
+      expect(page.nextSeq).toBe(5);
+      expect(page.head).toBe(body.head);
+      expect(page.piSessionVersion).toBe(3);
+    }
+    expect((await snapshot(who, prompt, "?after=4&limit=2")).entries).toEqual([]);
+  });
+
+  it("快照指纹与当前名单一致时，分页只读本页的行，不重读前缀", async () => {
+    const who = await rig();
+    await connectTool(who, true);
+    const prompt = await start(who);
+    const lines = Array.from({ length: 4 }, (_, index) => line(`q${index}`, index === 0 ? null : `q${index - 1}`));
+    const body = await frame(who, lines, { prompt });
+    expect(await send(who.agent, body)).toBeNull();
+    // 前缀里的第 0 行被改成本机结果原文：分页若还从头复查，会把整条流截成空。
+    await database.sql`UPDATE work_entries SET line = ${toolLine("q0")}
+      WHERE bot_id = ${who.botId} AND group_id = ${who.groupId} AND seq = 0`;
+    const page = await snapshot(who, prompt, "?after=0&limit=2");
+    expect(page.entries.map((entry) => entry.line)).toEqual([lines[1], lines[2]]);
+    expect(page.nextSeq).toBe(4);
+    expect(page.head).toBe(body.head);
+  });
+
+  it("没有留存快照的旧流仍从头复查，并只返回合规前缀", async () => {
+    const who = await rig();
+    await connectTool(who, true);
+    const prompt = await start(who);
+    const lines = [line("n0"), line("n1", "n0")];
+    expect(await send(who.agent, await frame(who, lines, { prompt }))).toBeNull();
+    await database.sql`
+      INSERT INTO work_entries (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id, parent_id,
+        pi_type, retention, line, search_text)
+      VALUES (${who.botId}, ${who.groupId}, 'chat', 2, 1, ${who.ownerId}, ${prompt.runId}, 'private', 'n1',
+        'message', 'verbatim', ${toolLine("private", "send_email", "n1")}, '本机业务原文')`;
+    await database.sql`UPDATE work_streams SET next_seq = 3, retain_snapshot = NULL
+      WHERE bot_id = ${who.botId} AND group_id = ${who.groupId} AND stream = 'chat'`;
+    const page = await snapshot(who, prompt);
+    expect(page.entries.map((entry) => entry.line)).toEqual(lines);
+    expect(page.nextSeq).toBe(2);
+    expect(page.head).toBe(await advanceWorkHead(EMPTY_WORK_HEAD, lines));
   });
 
   it("非检索元数据含 JSON 转义 NUL 的工作记录照常接收并可召回", async () => {

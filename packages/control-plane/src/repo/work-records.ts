@@ -20,9 +20,10 @@ import {
   checkFrame,
   createRetainer,
   emptySnapshot,
+  toolListFingerprint,
   type RetainContext,
 } from "@baize/shared/work-record";
-import { and, asc, eq, gte, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, isNull, lt, ne, sql } from "drizzle-orm";
 import type { AgentConnection } from "../agent/hub.js";
 import {
   bots,
@@ -308,26 +309,48 @@ export async function readWorkLane(
   const [owner] = await db.select({ id: bots.ownerId }).from(bots).where(eq(bots.id, lane.botId));
   if (owner === undefined) return { entries: [], nextSeq: 0, head: EMPTY_WORK_HEAD, piSessionVersion: null };
   const ctx = await currentRetainContext(db, owner.id);
+  const scope = and(
+    eq(workEntries.botId, lane.botId),
+    eq(workEntries.groupId, lane.groupId),
+    eq(workEntries.stream, stream),
+  );
+  // 快照里的 knownIds 随流增长，分页用不到，只取名单指纹。
   const [metadata] = await db
-    .select()
+    .select({
+      nextSeq: workStreams.nextSeq,
+      head: workStreams.head,
+      piSessionVersion: workStreams.piSessionVersion,
+      toolFingerprint: sql<string | null>`${workStreams.retainSnapshot}->>'toolFingerprint'`,
+    })
     .from(workStreams)
     .where(
       and(eq(workStreams.botId, lane.botId), eq(workStreams.groupId, lane.groupId), eq(workStreams.stream, stream)),
     );
   if (metadata === undefined) return { entries: [], nextSeq: 0, head: EMPTY_WORK_HEAD, piSessionVersion: null };
+  const piSessionVersion = (nextSeq: number) => (nextSeq === 0 ? null : metadata.piSessionVersion);
+
+  // 写入侧每次改名单都在同一事务里复查并更新快照，指纹对得上就说明库里的行已按当前名单合规。
+  if (metadata.toolFingerprint === toolListFingerprint(ctx.localOnlyToolNames)) {
+    const entries = await db
+      .select({ seq: workEntries.seq, line: workEntries.line })
+      .from(workEntries)
+      .where(and(scope, gt(workEntries.seq, after), lt(workEntries.seq, metadata.nextSeq)))
+      .orderBy(asc(workEntries.seq))
+      .limit(limit);
+    return {
+      entries,
+      nextSeq: metadata.nextSeq,
+      head: metadata.head,
+      piSessionVersion: piSessionVersion(metadata.nextSeq),
+    };
+  }
+
+  // 指纹过期或没有快照：某个写入口漏了复查。从头复查才能识别指向本机结果的 context_edit，返回合规前缀。
   const entries = await db
     .select({ seq: workEntries.seq, line: workEntries.line })
     .from(workEntries)
-    .where(
-      and(
-        eq(workEntries.botId, lane.botId),
-        eq(workEntries.groupId, lane.groupId),
-        eq(workEntries.stream, stream),
-        lt(workEntries.seq, metadata.nextSeq),
-      ),
-    )
+    .where(and(scope, lt(workEntries.seq, metadata.nextSeq)))
     .orderBy(asc(workEntries.seq));
-  // 从头复查才能识别指向本机结果的 context_edit；返回合规前缀，链头仍与原样行一致。
   const checked = checkFrame(
     ctx,
     emptySnapshot(ctx),
@@ -345,7 +368,7 @@ export async function readWorkLane(
     entries: prefix.filter((entry) => entry.seq > after).slice(0, limit),
     nextSeq,
     head,
-    piSessionVersion: nextSeq === 0 ? null : metadata.piSessionVersion,
+    piSessionVersion: piSessionVersion(nextSeq),
   };
 }
 
@@ -362,76 +385,82 @@ export async function recallWorkRecords(
 ): Promise<RecallEntry[]> {
   const ctx = await currentRetainContext(db, ownerId);
   const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
-  const rows = await db
-    .select({
-      groupId: workEntries.groupId,
-      groupTitle: tasks.title,
-      runAt: runs.startedAt,
-      groupAt: groups.createdAt,
-      line: workEntries.line,
-      seq: workEntries.seq,
-      score: sql<number>`similarity(${workEntries.searchText}, ${query})`,
-    })
-    .from(workEntries)
-    .innerJoin(groups, and(eq(groups.id, workEntries.groupId), eq(groups.ownerId, ownerId)))
-    .innerJoin(groupMembers, and(eq(groupMembers.groupId, groups.id), eq(groupMembers.botId, viewer.botId)))
-    .innerJoin(tasks, eq(tasks.groupId, groups.id))
-    .leftJoin(runs, eq(runs.id, workEntries.runId))
-    .where(
-      and(
-        eq(workEntries.botId, viewer.botId),
-        eq(workEntries.ownerId, ownerId),
-        eq(workEntries.stream, "chat"),
-        workEntryVisibleTo(viewer),
-        isNull(workEntries.visibleTo),
-        ne(workEntries.groupId, excludeGroupId),
-        eq(workEntries.piType, "message"),
-        sql`${workEntries.searchText} ILIKE ${pattern}`,
-      ),
-    );
-  const safe: { entry: RecallEntry; score: number; seq: number }[] = [];
-  for (const row of rows) {
-    const retained = createRetainer(ctx).retain(row.line);
-    if (retained.status !== "retained") continue;
-    let value: unknown;
-    try {
-      value = JSON.parse(retained.line) as unknown;
-    } catch {
-      continue;
+  // 条目时间在写入时由触发器从行里取出（迁移 0036），排序键全在 SQL 里，Node 端过滤后按原序取前 8 条。
+  // 候选分批拉取，每批翻倍：被当前名单滤掉的候选很少，通常第一批就够；全被滤掉时批数也只是对数级。
+  const score = sql`similarity(${workEntries.searchText}, ${query})`;
+  const entryTime = sql`date_trunc('milliseconds', coalesce(${workEntries.entryAt}, ${runs.startedAt}, ${groups.createdAt}))`;
+  const at = sql<string>`to_char(${entryTime} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+  const matched: RecallEntry[] = [];
+  let offset = 0;
+  let size = RECALL_LIMIT * 4;
+  for (;;) {
+    const rows = await db
+      .select({
+        groupId: workEntries.groupId,
+        groupTitle: tasks.title,
+        at,
+        line: workEntries.line,
+      })
+      .from(workEntries)
+      .innerJoin(groups, and(eq(groups.id, workEntries.groupId), eq(groups.ownerId, ownerId)))
+      .innerJoin(groupMembers, and(eq(groupMembers.groupId, groups.id), eq(groupMembers.botId, viewer.botId)))
+      .innerJoin(tasks, eq(tasks.groupId, groups.id))
+      .leftJoin(runs, eq(runs.id, workEntries.runId))
+      .where(
+        and(
+          eq(workEntries.botId, viewer.botId),
+          eq(workEntries.ownerId, ownerId),
+          eq(workEntries.stream, "chat"),
+          workEntryVisibleTo(viewer),
+          isNull(workEntries.visibleTo),
+          ne(workEntries.groupId, excludeGroupId),
+          eq(workEntries.piType, "message"),
+          sql`${workEntries.searchText} ILIKE ${pattern}`,
+        ),
+      )
+      .orderBy(desc(score), desc(entryTime), sql`${workEntries.groupId} collate "C"`, desc(workEntries.seq))
+      .limit(size)
+      .offset(offset);
+    for (const row of rows) {
+      const entry = recallEntryOf(ctx, row, query);
+      if (entry === undefined) continue;
+      matched.push(entry);
+      if (matched.length === RECALL_LIMIT) return matched;
     }
-    const parsed = PiWorkEntry.safeParse(value);
-    if (!parsed.success) continue;
-    const { message, timestamp } = parsed.data;
-    if (typeof message !== "object" || message === null || !("role" in message)) continue;
-    const kind = message.role;
-    if (kind !== "user" && kind !== "assistant" && kind !== "toolResult") continue;
-    const text = extractWorkSearchText(parsed.data);
-    if (!text.toLocaleLowerCase().includes(query.toLocaleLowerCase())) continue;
-    // JSONL 的非检索字段允许转义 NUL，不能再整行转成 PostgreSQL jsonb。
-    const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
-    const at = Number.isFinite(timestampMs) ? new Date(timestampMs) : (row.runAt ?? row.groupAt);
-    safe.push({
-      entry: {
-        groupId: GroupId.parse(row.groupId),
-        groupTitle: row.groupTitle,
-        at: at.toISOString(),
-        kind,
-        excerpt: recallExcerpt(text, query),
-      },
-      score: row.score,
-      seq: row.seq,
-    });
+    if (rows.length < size) return matched;
+    offset += size;
+    size *= 2;
   }
-  return safe
-    .toSorted(
-      (left, right) =>
-        right.score - left.score ||
-        right.entry.at.localeCompare(left.entry.at) ||
-        left.entry.groupId.localeCompare(right.entry.groupId) ||
-        right.seq - left.seq,
-    )
-    .slice(0, RECALL_LIMIT)
-    .map(({ entry }) => entry);
+}
+
+function recallEntryOf(
+  ctx: RetainContext,
+  row: { groupId: string; groupTitle: string; at: string; line: string },
+  query: string,
+): RecallEntry | undefined {
+  const retained = createRetainer(ctx).retain(row.line);
+  if (retained.status !== "retained") return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(retained.line) as unknown;
+  } catch {
+    return undefined;
+  }
+  const parsed = PiWorkEntry.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { message } = parsed.data;
+  if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
+  const kind = message.role;
+  if (kind !== "user" && kind !== "assistant" && kind !== "toolResult") return undefined;
+  const text = extractWorkSearchText(parsed.data);
+  if (!text.toLocaleLowerCase().includes(query.toLocaleLowerCase())) return undefined;
+  return {
+    groupId: GroupId.parse(row.groupId),
+    groupTitle: row.groupTitle,
+    at: row.at,
+    kind,
+    excerpt: recallExcerpt(text, query),
+  };
 }
 
 function recallExcerpt(text: string, query: string): string {

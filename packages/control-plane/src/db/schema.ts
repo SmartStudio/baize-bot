@@ -635,6 +635,8 @@ export const workEntries = pgTable(
     retention: text("retention").$type<"verbatim" | "redacted">().notNull(),
     line: text("line").notNull(),
     searchText: text("search_text").notNull(),
+    // 迁移 0036 的插入触发器从 line 的 timestamp 写入，应用层不写。
+    entryAt: timestamp("entry_at", { withTimezone: true }),
     visibleTo: jsonb("visible_to").$type<Viewer[]>(),
   },
   (t) => [

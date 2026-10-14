@@ -290,6 +290,43 @@ describe("现查现用的 recall", () => {
     );
   });
 
+  it("最新的命中被过滤掉时分批续取：前几批全是不合规条目也能凑够8条", async () => {
+    const who = await rig();
+    for (let day = 1; day <= 12; day += 1)
+      await record(who, "续取预算", { timestamp: `2026-09-${String(day).padStart(2, "0")}T00:00:00.000Z` });
+    // 比正常条目都新的 70 条非法 role：超过首批（32）和第二批（64）的容量。
+    for (let index = 0; index < 70; index += 1)
+      await record(who, "续取预算", {
+        role: "system",
+        timestamp: `2026-10-01T00:${String(index).padStart(2, "0")}:00.000Z`,
+      });
+    const entries = await recall(who, "续取预算");
+    expect(entries.map((entry) => entry.at)).toEqual(
+      Array.from({ length: 8 }, (_, offset) => `2026-09-${String(12 - offset).padStart(2, "0")}T00:00:00.000Z`),
+    );
+  });
+
+  it("命中全部被过滤时取完即停，回空", async () => {
+    const who = await rig();
+    for (let index = 0; index < 40; index += 1) await record(who, "全滤预算", { role: "system" });
+    expect(await recall(who, "全滤预算")).toEqual([]);
+  });
+
+  it("相似度和时间都相同时按群号的码点序、再按seq倒序", async () => {
+    const who = await rig();
+    const second = CreateGroupResponse.parse(
+      await (await who.client.post("/api/groups", { title: "第二个预算群", botIds: [who.botId, who.peerId] })).json(),
+    );
+    const timestamp = "2026-10-05T00:00:00.000Z";
+    await record(who, "同分预算", { groupId: who.sourceGroupId, timestamp });
+    await record(who, "同分预算", { groupId: second.group.id, timestamp });
+    await record(who, "同分预算", { groupId: second.group.id, timestamp });
+    const entries = await recall(who, "同分预算");
+    const ordered = [who.sourceGroupId, second.group.id].toSorted((a, b) => (a < b ? -1 : 1));
+    const expected = ordered.flatMap((groupId) => (groupId === second.group.id ? [groupId, groupId] : [groupId]));
+    expect(entries.map((entry) => entry.groupId)).toEqual(expected);
+  });
+
   it("摘录最多400字符且保留靠近长文末尾的关键词", async () => {
     const who = await rig();
     const text = `${"历史背景".repeat(250)}末尾预算${"后续安排".repeat(12)}`;

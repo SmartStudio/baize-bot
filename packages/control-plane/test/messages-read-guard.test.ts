@@ -29,8 +29,8 @@ const EXCEPTIONS: readonly Exception[] = [
   {
     file: "repo/work-records.ts",
     fn: "readWorkLane",
-    sites: 1,
-    reason: "持有者拉快照，HTTP同快照租约授权，重建需原样条目",
+    sites: 2,
+    reason: "持有者拉快照，HTTP同快照租约授权，重建需原样条目；快照指纹对得上走按 seq 分页，对不上从头复查，各一处读",
   },
   {
     file: "poker/hint.ts",
