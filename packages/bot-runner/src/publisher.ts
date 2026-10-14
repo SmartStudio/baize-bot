@@ -108,8 +108,8 @@ export interface PublisherDeps {
   readonly dataDir: string;
   /** 每次下载才读，hello 轮换网关 key 后不能继续用旧 key。 */
   readonly liveHub?: () => AttachmentLive;
-  /** 本机电脑代理给的助理浏览器。远程电脑没有。 */
-  readonly browser: Pick<BrowserConfig, "connection"> | null;
+  /** 就是电脑代理给 Bot 浏览器工具的那份助理 Chrome：账号在这个 profile 里登录，发布也只能在这里发。 */
+  readonly browser: Pick<BrowserConfig, "connection">;
   readonly xiaohongshu?: XiaohongshuPages;
   readonly limits?: PublishLimits;
 }
@@ -198,8 +198,6 @@ function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-type DepsWithBrowser = PublisherDeps & { readonly browser: Pick<BrowserConfig, "connection"> };
-
 interface PublishTab {
   send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   isOpen(): boolean;
@@ -207,7 +205,7 @@ interface PublishTab {
 
 /** 在一个自己建的后台标签页里跑完 work，到总时限就停；成功、失败、超时、抛错都关掉这个标签页。 */
 async function inBackgroundTab<T>(
-  deps: DepsWithBrowser,
+  deps: PublisherDeps,
   totalMs: number,
   onTimeout: () => PublishFailure,
   work: (tab: PublishTab) => Promise<T>,
@@ -388,9 +386,9 @@ async function fillAndPublish(
   return { status: "ok", url: note.link ?? pages.noteUrl(note.id), externalId: note.id };
 }
 
-type Publisher = (message: PublishDraftMessage, deps: DepsWithBrowser) => Promise<PublishResult>;
+type Publisher = (message: PublishDraftMessage, deps: PublisherDeps) => Promise<PublishResult>;
 
-async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWithBrowser): Promise<PublishResult> {
+async function publishToXiaohongshu(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResult> {
   const { content } = message;
   if (content.kind !== "post") return failed("error", "小红书发布器只发笔记，回复还没接上");
   if (content.images.length === 0) return failed("error", "小红书笔记至少要一张图");
@@ -426,16 +424,11 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWith
 const PUBLISHERS: Record<BrowserPlatform, Publisher> = { xiaohongshu: publishToXiaohongshu };
 
 export async function publishDraft(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResultMessage> {
-  const { browser } = deps;
-  const lease = message.botId === null || browser === null ? null : acquireBotBrowserMutex(deps.dataDir, message.botId);
+  const lease = message.botId === null ? null : acquireBotBrowserMutex(deps.dataDir, message.botId);
+  const publish = PUBLISHERS[message.platform];
   let result: PublishResult;
   try {
-    result =
-      browser === null
-        ? failed("error", "这台电脑没有助理浏览器")
-        : await (lease === null
-            ? PUBLISHERS[message.platform](message, { ...deps, browser })
-            : lease.run(() => PUBLISHERS[message.platform](message, { ...deps, browser })));
+    result = await (lease === null ? publish(message, deps) : lease.run(() => publish(message, deps)));
   } catch (error) {
     result =
       error instanceof BotPausedError

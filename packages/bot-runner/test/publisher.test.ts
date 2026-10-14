@@ -272,21 +272,6 @@ describe("发布器先验草稿，不碰浏览器", () => {
   });
   afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
 
-  it("没有浏览器配置的电脑回 error", async () => {
-    const image = draftCopy(dataDir, "远程");
-    const result = await publishDraft(draftMessage("draft-remote", { title: "t", text: "正文", images: [image] }), {
-      dataDir,
-      browser: null,
-    });
-
-    expect(result, "认领标识原样带回").toEqual({
-      type: "publish_result",
-      draftId: "draft-remote",
-      attempt: ATTEMPT,
-      result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
-    });
-  });
-
   it("Bot 暂停时发布回 paused，不连接浏览器", async () => {
     const image = draftCopy(dataDir, "暂停");
     const probe = noBrowserCalls();

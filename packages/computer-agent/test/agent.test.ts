@@ -1662,7 +1662,7 @@ describe("电脑代理连控制面", () => {
     expect(connectionCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
   });
 
-  it("远程电脑收到 publish_draft 回 error 并写明没有助理浏览器，Bot 的助理浏览器照旧", async () => {
+  it("远程电脑的发布器和 Bot 用同一个助理 Chrome：开发布页撞上登录页回 login_expired", async () => {
     const server = startControlPlane();
     servers.push(server);
     const wall = startLoginWallPipe();
@@ -1709,23 +1709,29 @@ describe("电脑代理连控制面", () => {
 
     await expect(
       server.waitForMessage("publish_result", 1, 10_000),
-      "远程上扫码登录会被拒，不能回 login_expired 引用户去扫码",
+      "远程电脑上的登录态就在这个 profile 里，过期了引用户去画面上重新扫码；以前这里回 error「这台电脑没有助理浏览器」",
     ).resolves.toEqual({
       type: "publish_result",
       draftId: "draft-1",
       attempt: "2026-09-26T08:00:00.000Z",
-      result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
+      result: { status: "failed", reason: "login_expired", detail: "小红书登录过期了，到账号页重新扫码登录后再发" },
     });
-    expect(launches, "发布器没去起这台电脑上的 Chrome").toBe(0);
-    expect(wall.commands(), "管道上一条命令都没有").toEqual([]);
+    expect(launches, "发布器起了这台电脑上的助理 Chrome").toBe(1);
+    expect(wall.commands(), "发布器开自己的后台标签页去发布页，看到登录页就关掉这一页").toEqual([
+      "Browser.getVersion",
+      "Target.createTarget",
+      "Target.attachToTarget",
+      "Emulation.setFocusEmulationEnabled",
+      "Page.navigate",
+      "Runtime.evaluate",
+      "Target.closeTarget",
+    ]);
     const botBrowser = (await poll(() => initialRunnerConfigs.at(-1), 3000, "运行器收到 config")).browser;
     expect(botBrowser.profileDir).toBe(chromeProfileDir(dataDir));
     const connection = await botBrowser.connection();
     await connection.send("Target.createTarget", { url: "about:blank", background: true });
-    expect(wall.commands(), "Bot 的助理浏览器工具在远程照样拿得到浏览器").toEqual([
-      "Browser.getVersion",
-      "Target.createTarget",
-    ]);
+    expect(launches, "Bot 的浏览器工具接着用发布器起的那个 Chrome，不另起").toBe(1);
+    expect(wall.commands().at(-1)).toBe("Target.createTarget");
   });
 
   it.each([
