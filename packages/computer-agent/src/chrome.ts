@@ -14,8 +14,6 @@ const CRASH_WINDOW_MS = 30_000;
 const RESTART_BACKOFF: BackoffOptions = { initialMs: 500, maxMs: 30_000, factor: 2 };
 
 export interface AssistantChrome {
-  /** 本机还是远程。只差在 reveal、conceal 有没有窗口可拉。 */
-  readonly kind: ComputerKind;
   readonly profileDir: string;
   /**
    * 这台电脑唯一的那条管道。第一次要时才起 Chrome，这一轮启动失败就 reject，不会一直挂着。
@@ -294,7 +292,6 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
   };
 
   return {
-    kind: shell.kind,
     profileDir,
     connection: () => ready().then((up) => up.connection),
     reveal,
