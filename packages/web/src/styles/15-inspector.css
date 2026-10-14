@@ -59,6 +59,20 @@
   font: var(--type-ui);
 }
 
+/* 接手的原因是一句整话，并排放会把「请你接手这一页」挤断、原因截成省略号。检查器里上下排，原因整句折行。 */
+.tool-inspector-summary [data-view-kind="takeover"] {
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.tool-inspector-summary [data-view-kind="takeover"] .tool-view-detail {
+  color: var(--fg-2);
+  font: var(--type-body);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .tool-inspector-advanced {
   border-top: 1px solid var(--border-1);
   color: var(--fg-2);

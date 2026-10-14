@@ -2,11 +2,13 @@ import { LiveFromViewer } from "@baize/shared";
 import { z } from "zod";
 import {
   SHOT,
+  TEAM_TITLE,
   expect,
   login,
   openRoutines,
   openSeededBot,
   openSettings,
+  openTeamGroup,
   test,
   type APIRequestContext,
   type Page,
@@ -14,15 +16,16 @@ import {
 
 // Bot 请人接手：群里一张工具调用卡，右下角一条提示，用户点「打开画面」才摆面板。
 // mock 的 /api/test/live/takeover 同时写卡、登记会话，两处同一个 liveId；观看者发 end 时 mock 先关会话、再替运行器改卡。
+// 带 hold 的卡收到 end 只关会话，等用例点 settle 才改卡，两步之间卡上写什么看得清。
 
 const REASON = "知乎要登录，请扫码或用短信登录，登好后点交还";
 
 const Created = z.object({ liveId: z.string(), messageId: z.string() });
 const Received = z.object({ received: z.array(z.object({ liveId: z.string(), message: LiveFromViewer })) });
 
-const takeover = async (request: APIRequestContext, computerId = "cmp_remote", reason = REASON) => {
+const takeover = async (request: APIRequestContext, computerId = "cmp_remote", reason = REASON, hold = false) => {
   const response = await request.post("/api/test/live/takeover", {
-    data: { computerId, botId: "bot_service", groupId: "grp_service", reason },
+    data: { computerId, botId: "bot_service", groupId: "grp_service", reason, hold },
   });
   expect(response.status(), "mock 造出一次接手").toBe(200);
   return Created.parse(await response.json()).liveId;
@@ -37,6 +40,40 @@ const ends = async (request: APIRequestContext, liveId: string) =>
 const card = (page: Page, liveId: string) => page.locator(`[data-testid=takeover-card][data-live-id="${liveId}"]`);
 const hint = (page: Page, liveId: string) => page.locator(`[data-testid=takeover-hint][data-live-id="${liveId}"]`);
 const panel = (page: Page) => page.getByTestId("live-panel");
+
+// 卡上结论那块每变一次记一笔，网页上一闪而过的字也记得到。按选择器每次重找，卡重挂了照样记。
+const recordResults = (page: Page, liveId: string) =>
+  page.evaluate((selector) => {
+    const seen: string[] = [];
+    Object.assign(window, { takeoverResults: seen });
+    new MutationObserver(() => {
+      const text = document.querySelector(selector)?.querySelector("[data-testid=takeover-result]")?.textContent;
+      if (typeof text === "string" && seen.at(-1) !== text) seen.push(text);
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  }, `[data-testid=takeover-card][data-live-id="${liveId}"]`);
+
+const recordedResults = (page: Page) =>
+  page.evaluate(() => (window as unknown as { takeoverResults: string[] }).takeoverResults);
+
+type Box = { x: number; y: number; width: number; height: number };
+const overlaps = (a: Box, b: Box) =>
+  a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+
+const expectClearOfComposer = async (page: Page, liveId: string, where: string) => {
+  const hintBox = await page.locator(".takeover-hints").boundingBox();
+  const send = await page.getByTestId("composer-send").boundingBox();
+  const composer = await page.locator(".composer").boundingBox();
+  expect(hintBox, `${where}：提示摆出来了`).not.toBeNull();
+  expect(send, `${where}：发送钮摆出来了`).not.toBeNull();
+  expect(composer, `${where}：输入框摆出来了`).not.toBeNull();
+  if (hintBox === null || send === null || composer === null) return;
+  expect(
+    overlaps(hintBox, send),
+    `${where}：提示 ${JSON.stringify(hintBox)} 压住了发送钮 ${JSON.stringify(send)}`,
+  ).toBe(false);
+  expect(overlaps(hintBox, composer), `${where}：提示压住了输入框`).toBe(false);
+  await expect(hint(page, liveId)).toBeVisible();
+};
 
 test("群里出现接手卡，面板不自己弹；点「打开画面」有交还和不弄了，交还后电脑收到 finish，卡写「已交还」，面板消失", async ({
   page,
@@ -60,6 +97,19 @@ test("群里出现接手卡，面板不自己弹；点「打开画面」有交�
     "请你接手这一页",
   );
   await expect(page.getByTestId("tool-inspector-summary")).toContainText(REASON);
+  const view = page.getByTestId("tool-inspector-summary").locator("[data-view-kind=takeover]");
+  const parts = await view.locator(":scope > span").evaluateAll((spans) =>
+    spans.map((span) => ({
+      lines: Math.round(span.getBoundingClientRect().height / parseFloat(getComputedStyle(span).lineHeight)),
+      clipped: span.scrollWidth > span.clientWidth,
+    })),
+  );
+  expect(parts[0]?.lines, "检查器默认宽度下「请你接手这一页」一行放得下").toBe(1);
+  expect(
+    parts.map((part) => part.clipped),
+    "标题和原因都不截成省略号，原因长了整句折行",
+  ).toEqual([false, false]);
+  await page.getByTestId("tool-inspector").screenshot({ path: `${SHOT}/p3-takeover-inspector.png` });
 
   await card(page, liveId).getByTestId("takeover-open").click();
   await expect(panel(page)).toHaveAttribute("data-purpose", "takeover");
@@ -94,7 +144,10 @@ test("点「不弄了」：电脑收到 abandon，卡写「没接手」", async 
   await expect(card(page, liveId).getByTestId("takeover-result")).toHaveText("没接手");
 });
 
-test("电脑那头页面没了、卡还没结论：卡上的按钮收掉，面板跟着消失", async ({ page, request }) => {
+test("电脑那头页面没了、卡还没结论：卡上的按钮收掉，面板跟着消失，卡写画面已收起；刷新后这一页没见过画面", async ({
+  page,
+  request,
+}) => {
   await login(page);
   await openSeededBot(page, "小服");
   const liveId = await takeover(request);
@@ -106,9 +159,42 @@ test("电脑那头页面没了、卡还没结论：卡上的按钮收掉，面�
   await expect(panel(page), "会话不在表里就卸掉").toHaveCount(0);
   await expect(card(page, liveId).getByTestId("takeover-open")).toHaveCount(0);
   await expect(card(page, liveId)).toHaveAttribute("data-status", "running");
-  await expect(card(page, liveId).getByTestId("takeover-result")).toHaveText("画面还没出来");
+  await expect(
+    card(page, liveId).getByTestId("takeover-result"),
+    "这一页见过画面，收起了就说收起了，不倒回去说还没出来",
+  ).toHaveText("画面已收起，等 Bot 接着做");
   await expect(hint(page, liveId)).toHaveCount(0);
   expect(await ends(request, liveId), "网页没替用户发 end").toEqual([]);
+
+  await page.reload();
+  await expect(
+    card(page, liveId).getByTestId("takeover-result"),
+    "见没见过只记在这一次页面加载里，刷新后分不出来",
+  ).toHaveText("画面还没出来");
+});
+
+test("交还后电脑先收起画面、Bot 后报结论：中间卡写「画面已收起，等 Bot 接着做」，再写「已交还」，从不写「画面还没出来」", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await openSeededBot(page, "小服");
+  const liveId = await takeover(request, "cmp_remote", REASON, true);
+  await card(page, liveId).getByTestId("takeover-open").click();
+  await expect(panel(page)).toHaveAttribute("data-state", "live");
+  await recordResults(page, liveId);
+
+  await panel(page).locator("[data-testid=live-end][data-action=finish]").click();
+  await expect.poll(() => ends(request, liveId)).toEqual([{ t: "end", action: "finish" }]);
+  await expect(panel(page)).toHaveCount(0);
+  const result = card(page, liveId).getByTestId("takeover-result");
+  await expect(result, "画面收了，结论还在路上").toHaveText("画面已收起，等 Bot 接着做");
+  await expect(card(page, liveId)).toHaveAttribute("data-status", "running");
+  await card(page, liveId).screenshot({ path: `${SHOT}/p3-takeover-put-away.png` });
+
+  expect((await request.post(`/api/test/live/${liveId}/settle`)).status(), "替运行器补上终态").toBe(204);
+  await expect(result).toHaveText("已交还");
+  expect(await recordedResults(page), "卡上先后写过的话").toEqual(["画面已收起，等 Bot 接着做", "已交还"]);
 });
 
 test("本机电脑的接手面板有「到本机窗口操作」，远程电脑的没有", async ({ page, request }) => {
@@ -216,3 +302,23 @@ test("例行页和牌桌上也看得到提示，点得到：例行页上点「�
   await expect(panel(page)).toHaveAttribute("data-live-id", onTable);
   await expect(page.getByTestId("table-page")).toBeVisible();
 });
+
+for (const width of [1440, 1024]) {
+  test(`${width} 宽：右下角的接手提示不压输入框和发送钮，单聊和收着任务面板的多 Bot 群都一样`, async ({
+    page,
+    request,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await login(page);
+    await openSeededBot(page, "小服");
+    const liveId = await takeover(request);
+    await expect(hint(page, liveId)).toBeVisible();
+    await expectClearOfComposer(page, liveId, "单聊，右边有 Bot 栏");
+    await page.screenshot({ path: `${SHOT}/p3-takeover-hint-${width}-solo.png` });
+
+    await openTeamGroup(page, TEAM_TITLE);
+    await expect(page.getByTestId("main-window"), "任务面板收着，右边没有栏").toHaveClass(/is-wide/);
+    await expectClearOfComposer(page, liveId, "多 Bot 群，对话区占满右边");
+    await page.screenshot({ path: `${SHOT}/p3-takeover-hint-${width}-team.png` });
+  });
+}

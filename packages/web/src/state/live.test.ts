@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountId, ComputerId, LiveId, LiveSession, LoginAttemptId } from "@baize/shared";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
-import { shownLive, shownLogin } from "./live.js";
+import { shownLive, shownLogin, takeoverScreen } from "./live.js";
 import { createClock } from "./stamped.js";
 import type { Action, ReadyState } from "./types.js";
 
@@ -246,5 +246,23 @@ describe("整页只摆一块画面：登录自动摆，接手点开才摆，两�
     put({ type: "takeover_opened", liveId: LIVE_C, openedAt: next() });
     put({ type: "takeover_hidden", liveId: LIVE_B });
     expect(shownLive(get())).toMatchObject({ kind: "takeover", session: { liveId: LIVE_C } });
+  });
+});
+
+describe("接手卡上的画面：还在、收起了、这一页没见过", () => {
+  it("推来过又收到 live_closed 是收起了；从没推来过是没见过", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    expect(takeoverScreen(get(), LIVE_B)).toMatchObject({ kind: "open", session: { liveId: LIVE_B } });
+    put({ type: "live_removed", liveId: LIVE_B, seq: next() });
+    expect(takeoverScreen(get(), LIVE_B)).toEqual({ kind: "put_away" });
+    expect(takeoverScreen(get(), LIVE_C)).toEqual({ kind: "unseen" });
+  });
+
+  it("断线重拉的列表里没了它，也算收起了", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_loaded", sessions: [takeover(LIVE_B)], seq: next() });
+    put({ type: "live_loaded", sessions: [], seq: next() });
+    expect(takeoverScreen(get(), LIVE_B)).toEqual({ kind: "put_away" });
   });
 });

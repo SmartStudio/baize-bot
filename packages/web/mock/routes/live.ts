@@ -34,13 +34,16 @@ const received: Received[] = [];
 let screenOn = false;
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 // 接手会话对应的那张工具调用卡。真栈上卡的终态由运行器回报，这里由 mock 在收到 end 时替它改。
-const takeoverCards = new Map<LiveId, { groupId: GroupId; messageId: MessageId; body: ToolCall }>();
+// hold 的卡收到 end 只关画面，用户怎么结的记在 held 里，等测试点 settle 再改卡，好看清两步之间卡上写什么。
+const takeoverCards = new Map<LiveId, { groupId: GroupId; messageId: MessageId; body: ToolCall; hold: boolean }>();
+const held = new Map<LiveId, LiveUserEnd>();
 
 export const resetLive = (): void => {
   for (const { socket } of viewers.values()) socket.close(LiveViewerClose.gone);
   viewers.clear();
   sessions.clear();
   takeoverCards.clear();
+  held.clear();
   received.length = 0;
   screenOn = false;
 };
@@ -100,7 +103,8 @@ export const attachLiveViewer = (socket: WebSocket, rawId: string, push: Push): 
     if (decoded.header.t !== "end") return;
     // 先推 live_closed 再改卡：真栈上画面由电脑的屏收起，卡的终态要等工具结果经运行器回来，一般晚一步。
     closeSession(liveId, push);
-    settleTakeover(liveId, decoded.header.action, push);
+    if (takeoverCards.get(liveId)?.hold === true) held.set(liveId, decoded.header.action);
+    else settleTakeover(liveId, decoded.header.action, push);
   });
   socket.on("close", () => {
     if (viewers.get(session.computerId)?.socket === socket) viewers.delete(session.computerId);
@@ -115,7 +119,13 @@ export const liveRoutes: Route = async ({ res, path, method }) => {
 
 const ScreenRequest = z.object({ on: z.boolean() }).strict();
 const TakeoverRequest = z
-  .object({ computerId: ComputerId, botId: BotId, groupId: GroupId, reason: z.string().min(1).max(200) })
+  .object({
+    computerId: ComputerId,
+    botId: BotId,
+    groupId: GroupId,
+    reason: z.string().min(1).max(200),
+    hold: z.boolean().optional(),
+  })
   .strict();
 
 // Bot 在群里请人接手：写一张 running 的工具调用卡，同时登记会话推出去，卡和会话用同一个 liveId。
@@ -132,7 +142,7 @@ const announceTakeover = (request: z.infer<typeof TakeoverRequest>, push: Push) 
     durationMs: null,
   };
   const message = appendMessage(request.groupId, body);
-  takeoverCards.set(liveId, { groupId: request.groupId, messageId: message.id, body });
+  takeoverCards.set(liveId, { groupId: request.groupId, messageId: message.id, body, hold: request.hold === true });
   push({ type: "message", message });
   const session = LiveSession.parse({
     liveId,
@@ -146,7 +156,8 @@ const announceTakeover = (request: z.infer<typeof TakeoverRequest>, push: Push) 
 };
 
 // Playwright 造场景用：开关画面面、读收到的输入、直接登记一个会话、造一次 Bot 请人接手、从电脑那头收起
-// （只关会话不改卡）、被别处顶掉、断网（drop：不带关闭码直接掐掉，网页按网络断处理去重连）。
+// （只关会话不改卡）、被别处顶掉、断网（drop：不带关闭码直接掐掉，网页按网络断处理去重连）、
+// 替运行器把 hold 住的接手卡改成终态（settle）。
 export const liveTestRoutes: Route = async ({ req, res, path, method, push }) => {
   if (!path.startsWith("/api/test/live")) return false;
   if (method === "POST" && path === "/api/test/live/screen") {
@@ -178,7 +189,7 @@ export const liveTestRoutes: Route = async ({ req, res, path, method, push }) =>
     }
     return true;
   }
-  const match = /^\/api\/test\/live\/([^/]+)\/(close|replace|drop)$/.exec(path);
+  const match = /^\/api\/test\/live\/([^/]+)\/(close|replace|drop|settle)$/.exec(path);
   if (method !== "POST" || match === null) return false;
   const liveId = LiveId.safeParse(match[1]);
   if (!liveId.success) {
@@ -187,6 +198,16 @@ export const liveTestRoutes: Route = async ({ req, res, path, method, push }) =>
   }
   if (match[2] === "close") {
     send(res, closeSession(liveId.data, push) ? 204 : 404);
+    return true;
+  }
+  if (match[2] === "settle") {
+    const action = held.get(liveId.data);
+    if (action === undefined) send(res, 404, { error: "这张卡没有等着改的结论" });
+    else {
+      held.delete(liveId.data);
+      settleTakeover(liveId.data, action, push);
+      send(res, 204);
+    }
     return true;
   }
   const session = sessions.get(liveId.data);

@@ -177,6 +177,18 @@
   overflow-y: auto;
 }
 
+/* 有右栏时收在右栏里，不伸进对话区，输入框和发送钮整个露着。没有右栏的对话页（多 Bot 群收着任务面板）
+   抬过输入框，再让开它上面那颗「回到底部」。 */
+.window:not(.is-wide) > .takeover-hints {
+  width: calc(var(--panel-w) - 2 * var(--space-6));
+}
+
+.window.is-wide:has(.composer-area) > .takeover-hints {
+  --hints-lift: calc(var(--composer-band) + var(--space-5) + var(--control-h-lg) + var(--space-6));
+  bottom: var(--hints-lift);
+  max-height: calc(100vh - var(--hints-lift) - var(--space-6));
+}
+
 .takeover-hint {
   display: grid;
   grid-template-columns: auto 1fr;

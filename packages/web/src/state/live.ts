@@ -1,4 +1,4 @@
-import type { AccountId, LiveSession, LoginAttemptId } from "@baize/shared";
+import type { AccountId, LiveId, LiveSession, LoginAttemptId } from "@baize/shared";
 import type { Seq } from "./stamped.js";
 import type { ContentBook, LoginFlow } from "./types.js";
 
@@ -47,4 +47,14 @@ export const closeScreens = (
     next = { ...next, [id]: { status: "closed", startedAt: flow.startedAt, attempt: flow.attempt } };
   }
   return next;
+};
+
+// 接手卡上的画面：还在就能开；出现过又没了是电脑收起了、结论还在路上；这一页没见过就是还没报上来。
+// 「出现过」认画面表的号：会话写进来、被删都记号，删掉的号留着当墓碑。号只活在这一次页面加载里，刷新后收起过的也算没见过。
+export type TakeoverScreen = { kind: "open"; session: LiveSession } | { kind: "put_away" } | { kind: "unseen" };
+
+export const takeoverScreen = (content: ContentBook, liveId: LiveId): TakeoverScreen => {
+  const session = content.live[liveId];
+  if (session !== undefined) return { kind: "open", session };
+  return content.stamps[liveId] === undefined ? { kind: "unseen" } : { kind: "put_away" };
 };

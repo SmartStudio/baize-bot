@@ -61,6 +61,8 @@ export const plans = new Map<string, ContentPlan>();
 export const accounts = new Map<string, Account>();
 // 电脑在不在线。没有记录就是在线；控制面判 409 看的是电脑代理连没连着，mock 拿这张表代替。
 export const computerStatus = new Map<string, ComputerStatus>();
+// 测试摘掉的电脑，电脑表里不再列。造「只有一台远程电脑」用，seed 重置时放回来。
+export const removedComputers = new Set<string>();
 // 每个账号最近一次点「打开登录窗口」发出的尝试号，测试入口报失败时不带号就默认是它。
 export const loginAttempts = new Map<string, string>();
 export const publications = new Map<string, Publication>();
