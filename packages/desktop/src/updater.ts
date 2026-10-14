@@ -7,6 +7,7 @@ export type UpdateState =
   | { readonly status: "downloading"; readonly manual: boolean }
   | { readonly status: "ready"; readonly version: string }
   | { readonly status: "installing"; readonly version: string }
+  | { readonly status: "stopped" }
   | { readonly status: "none" }
   | { readonly status: "unsupported"; readonly reason: "dev" | "unsigned" }
   | { readonly status: "error"; readonly message: string; readonly stage: ErrorStage };
@@ -20,6 +21,7 @@ export type UpdateEvent =
   | { readonly type: "downloaded"; readonly version: string }
   | { readonly type: "restart-confirmed" }
   | { readonly type: "retry-init" }
+  | { readonly type: "stop" }
   | { readonly type: "failed"; readonly message: string };
 
 export type UpdateEffect =
@@ -78,10 +80,13 @@ const stay = (state: UpdateState): { readonly next: UpdateState; readonly effect
   effect: null,
 });
 
+// stopped 是终态：应用开始退出后，迟到的事件、确认结果和手动检查都不再产生任何副作用。
 export function decide(
   state: UpdateState,
   event: UpdateEvent,
 ): { readonly next: UpdateState; readonly effect: UpdateEffect | null } {
+  if (event.type === "stop") return stay({ status: "stopped" });
+  if (state.status === "stopped") return stay(state);
   switch (event.type) {
     case "check":
       switch (state.status) {
@@ -234,7 +239,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
           .then((confirmed) => (confirmed ? dispatch({ type: "restart-confirmed" }) : undefined))
           .catch((error: unknown) => {
             deps.log(`update-restart-failed ${messageOf(error)}`);
-            deps.inform("error", `重启安装失败：${messageOf(error)}`);
+            if (state.status !== "stopped") deps.inform("error", `重启安装失败：${messageOf(error)}`);
           });
         return;
       case "install":
@@ -256,7 +261,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
   }
 
   const start = (): void => {
-    if (!deps.packaged || started) return;
+    if (!deps.packaged || started || state.status === "stopped") return;
     started = true;
     const { source } = deps;
     source.on("update-available", () => dispatch({ type: "available" }));
@@ -274,7 +279,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
       dispatch({ type: "check", manual: true });
     },
     stop: () => {
-      installRound += 1;
+      dispatch({ type: "stop" });
       if (timer !== null) clearInterval(timer);
       timer = null;
     },

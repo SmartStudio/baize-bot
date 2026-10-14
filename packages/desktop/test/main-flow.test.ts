@@ -17,6 +17,8 @@ const autoUpdater = vi.hoisted(() => ({
 }));
 const appOn = vi.hoisted(() => vi.fn());
 const appExit = vi.hoisted(() => vi.fn());
+const appQuit = vi.hoisted(() => vi.fn());
+const reapGate = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 const showMessageBox = vi.hoisted(() => vi.fn());
 type FakeWindow = Record<string, unknown> & {
   destroyed: boolean;
@@ -103,7 +105,7 @@ vi.mock("electron", () => {
       setLoginItemSettings: vi.fn(),
       setAboutPanelOptions: vi.fn(),
       exit: appExit,
-      quit: vi.fn(),
+      quit: appQuit,
     },
     autoUpdater,
     BrowserWindow: vi.fn(fakeWindow),
@@ -175,6 +177,7 @@ vi.mock("@baize/computer-agent/chrome-process", async () => {
     ...actual,
     reapProfileChromes: async (profileDir: string) => {
       reapedProfiles.push(profileDir);
+      await reapGate.current;
       return [];
     },
   };
@@ -213,6 +216,7 @@ describe("桌面主进程代理流程", () => {
     vi.useRealTimers();
     vi.clearAllMocks();
     fsState.credentials = null;
+    reapGate.current = null;
     fetchState.meOk = false;
     fetchState.localComputer = null;
     kill = vi.spyOn(process, "kill").mockImplementation(() => true);
@@ -260,6 +264,32 @@ describe("桌面主进程代理流程", () => {
         await ending;
       }
     }
+  }, 5_000);
+
+  it("旧代理还在停机时又换了新代理，停止新代理也要等旧代理停完", async () => {
+    const main = await loadMain();
+    const first = main.startAgent(credentials, 1_000);
+    const firstRejected = expect(first).rejects.toBeInstanceOf(main.AgentReplacedError);
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    const stoppingOld = main.stopAgent();
+    await vi.waitFor(() => expect(children[0]?.stdin.writableEnded).toBe(true));
+    const replacement = main.startAgent(credentials, 1_000);
+    children[1]?.stdout.write('{"type":"online"}\n');
+    await replacement;
+
+    let ended = false;
+    const ending = main.stopAgent().then(() => {
+      ended = true;
+    });
+    children[1]?.emit("exit", 0, null);
+    for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(ended, "旧代理的停机还没完成").toBe(false);
+
+    children[0]?.emit("exit", 0, null);
+    await ending;
+    await stoppingOld;
+    await firstRejected;
+    expect(ended).toBe(true);
   }, 5_000);
 
   it("startAgent 超时杀掉 child、回到 none，并允许下一次重新启动", async () => {
@@ -461,6 +491,7 @@ describe("桌面主进程代理流程", () => {
           window.destroyed = true;
           for (const args of window.on.mock.calls) if (args[0] === "closed") (args[1] as Handler)();
         }
+        handlerOf(appOn, "window-all-closed")();
       };
       const trayClick = (): void => void handlerOf(trays[0]!.on, "click")();
 
@@ -491,6 +522,109 @@ describe("桌面主进程代理流程", () => {
         expect(windows[2]!.show).toHaveBeenCalledTimes(1);
       });
 
+      it("安装关窗触发的 window-all-closed 不退出应用，error 之后窗口补回、应用仍活着", async () => {
+        await boot();
+        autoUpdater.quitAndInstall.mockImplementation(squirrelClosesWindows);
+        downloaded();
+        await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+        expect(appQuit, "交给 Squirrel 结束进程，窗口全关不触发默认退出").not.toHaveBeenCalled();
+
+        handlerOf(autoUpdater.on, "error")(new Error("Failed to launch ShipIt"));
+        await vi.waitFor(() => expect(windows).toHaveLength(4));
+        expect(appQuit).not.toHaveBeenCalled();
+        expect(appExit).not.toHaveBeenCalled();
+      });
+
+      it("非安装期窗口全关仍保持 Electron 默认的 app.quit()", async () => {
+        await boot();
+
+        handlerOf(appOn, "window-all-closed")();
+
+        expect(appQuit).toHaveBeenCalledTimes(1);
+      });
+
+      it("ready 时确认框未答、外部退出、确认返回 true：不安装，相位仍是 quitting", async () => {
+        const answer = deferred<{ response: number }>();
+        showMessageBox.mockReturnValue(answer.promise);
+        await bootWithOnlineAgent();
+        downloaded();
+        await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+
+        handlerOf(appOn, "before-quit")(fakeEvent());
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGINT"));
+        children[0]?.emit("exit", 0, null);
+        await vi.waitFor(() => expect(appExit).toHaveBeenCalledWith(0));
+        answer.resolve({ response: 0 });
+        for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        expect(autoUpdater.quitAndInstall, "退出之后确认返回 true 也不安装").not.toHaveBeenCalled();
+        expect(
+          kill.mock.calls.filter(([, signal]) => signal === "SIGINT"),
+          "没有第二轮停代理",
+        ).toHaveLength(1);
+        const closeEvent = fakeEvent();
+        menubarClose()(closeEvent);
+        expect(closeEvent.preventDefault, "相位仍是 quitting，关窗放行").not.toHaveBeenCalled();
+      });
+
+      it("两次停止、强杀、Chrome 回收挂起时 App 不退出，回收完成后才 exit", async () => {
+        const reaping = deferred<void>();
+        reapGate.current = reaping.promise;
+        await bootWithOnlineAgent();
+        downloaded();
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGINT"));
+
+        handlerOf(appOn, "before-quit")(fakeEvent());
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGKILL"), { timeout: 4_000 });
+        children[0]?.emit("exit", null, "SIGKILL");
+        await vi.waitFor(() => expect(reapedProfiles).toEqual([agentChromeProfile]));
+        for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+
+        expect(appExit, "回收还没完成，第二次停止不能先放行退出").not.toHaveBeenCalled();
+        reaping.resolve();
+        await vi.waitFor(() => expect(appExit).toHaveBeenCalledWith(0));
+        expect(
+          kill.mock.calls.filter(([, signal]) => signal === "SIGINT"),
+          "两次停止只发一次 SIGINT",
+        ).toHaveLength(1);
+        expect(reapedProfiles, "只回收一次").toHaveLength(1);
+        expect(autoUpdater.quitAndInstall).not.toHaveBeenCalled();
+      }, 10_000);
+
+      it("旧 blur 排队、安装关窗、恢复 running 后，延迟回调不碰已销毁的窗口", async () => {
+        await boot();
+        autoUpdater.quitAndInstall.mockImplementation(squirrelClosesWindows);
+        const queued: Array<() => void> = [];
+        const realSetTimeout = globalThis.setTimeout;
+        let capturing = false;
+        const timer = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+          callback: () => void,
+          delay?: number,
+          ...rest: unknown[]
+        ) => {
+          if (capturing && delay === 0) {
+            queued.push(callback);
+            return 0;
+          }
+          return realSetTimeout(callback, delay, ...rest);
+        }) as never);
+        try {
+          capturing = true;
+          handlerOf(windows[1]!.on, "blur")();
+          capturing = false;
+          expect(queued).toHaveLength(1);
+          downloaded();
+          await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+          handlerOf(autoUpdater.on, "error")(new Error("Failed to launch ShipIt"));
+          await vi.waitFor(() => expect(windows).toHaveLength(4));
+
+          expect(() => queued[0]!(), "旧窗口已销毁，回调先确认再用").not.toThrow();
+          expect(windows[1]!.hide).not.toHaveBeenCalled();
+        } finally {
+          timer.mockRestore();
+        }
+      });
+
       it("停代理等待期间 before-quit 被拦下，停机完成后退出，不再调用安装", async () => {
         await bootWithOnlineAgent();
         downloaded();
@@ -513,12 +647,11 @@ describe("桌面主进程代理流程", () => {
         await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGINT"));
         handlerOf(appOn, "before-quit")(fakeEvent());
 
+        showMessageBox.mockClear();
         handlerOf(autoUpdater.on, "error")(new Error("Failed to launch ShipIt"));
-        await vi.waitFor(() =>
-          expect(showMessageBox).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ type: "error" })),
-        );
         children[0]?.emit("exit", 0, null);
         await vi.waitFor(() => expect(appExit).toHaveBeenCalledWith(0));
+        expect(showMessageBox, "updater 已 stop，退出中不再弹安装失败").not.toHaveBeenCalled();
         expect(children, "退出中不再起代理").toHaveLength(1);
         expect(windows, "退出中不重建窗口").toHaveLength(2);
       });

@@ -299,16 +299,13 @@ function descendantPids(rootPid: number): number[] {
   return [...found].filter((pid) => pid !== rootPid);
 }
 
-export async function stopAgent(): Promise<void> {
-  const child = currentAgentChild(agentState);
-  if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
-    agentState = { status: "none" };
-    return;
-  }
-  agentState = { status: "stopping", child };
+// 同一个 child 的停机（SIGINT、超时强杀、Chrome 回收）只有这一份，重入的 stopAgent 拿到同一个 Promise。
+const shutdowns = new Map<ChildProcess, Promise<void>>();
+
+async function shutdownChild(child: ChildProcess, pid: number): Promise<void> {
   child.stdin?.end();
   try {
-    process.kill(-child.pid, "SIGINT");
+    process.kill(-pid, "SIGINT");
   } catch {
     child.kill("SIGINT");
   }
@@ -318,25 +315,41 @@ export async function stopAgent(): Promise<void> {
     new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_500)),
   ]);
   if (graceful) return;
-  const descendants = child.pid === undefined ? [] : descendantPids(child.pid);
-  for (const pid of descendants.toReversed()) {
+  for (const descendant of descendantPids(pid).toReversed()) {
     try {
-      process.kill(-pid, "SIGKILL");
+      process.kill(-descendant, "SIGKILL");
     } catch {
       try {
-        process.kill(pid, "SIGKILL");
+        process.kill(descendant, "SIGKILL");
       } catch {
         // 进程可能已经自行退出。
       }
     }
   }
   try {
-    process.kill(-child.pid, "SIGKILL");
+    process.kill(-pid, "SIGKILL");
   } catch {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
   await Promise.race([exited, new Promise<void>((resolve) => setTimeout(resolve, 500))]);
   await reapAgentChrome();
+}
+
+export async function stopAgent(): Promise<void> {
+  const child = currentAgentChild(agentState);
+  if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+    agentState = { status: "none" };
+  } else {
+    agentState = { status: "stopping", child };
+    const pid = child.pid;
+    let done = shutdowns.get(child);
+    if (done === undefined) {
+      done = shutdownChild(child, pid).finally(() => shutdowns.delete(child));
+      shutdowns.set(child, done);
+    }
+    await done;
+  }
+  await Promise.all(shutdowns.values());
 }
 
 async function postLocalComputer(
@@ -505,7 +518,7 @@ async function createWindows(session: Session): Promise<void> {
     menubarWindow = window;
     window.on("blur", () => {
       setTimeout(() => {
-        if (closeHidesMenubar() && !window.isFocused()) window.hide();
+        if (!window.isDestroyed() && closeHidesMenubar() && !window.isFocused()) window.hide();
       }, 0);
     });
     window.on("close", (event) => {
@@ -592,6 +605,7 @@ function stopPush(): void {
 // quitAndInstall 先关全部窗口，这条路径不经过 before-quit，所以相位要在交给 Squirrel 前切走。
 // 停代理期间只是 preparing-install，外部退出仍走普通退出的停机等待。
 async function prepareInstall(): Promise<void> {
+  if (phase !== "running") throw new Error("应用正在退出或已在安装，不再开始新一轮安装");
   phase = "preparing-install";
   stopPush();
   await stopAgent();
@@ -695,6 +709,12 @@ app.on("before-quit", (event) => {
   updater?.stop();
   stopPush();
   void stopAgent().finally(() => app.exit(0));
+});
+
+// 应用没注册这个事件时 Electron 在窗口全关后默认 app.quit()。quitAndInstall 关完窗口，成功由 Squirrel 的
+// [NSApp terminate:] 结束进程，失败的 error 事件在窗口全关之后才到，默认退出会抢在它前面把恢复出来的窗口关掉。
+app.on("window-all-closed", () => {
+  if (phase !== "installing") app.quit();
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => app.quit());

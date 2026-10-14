@@ -152,6 +152,39 @@ describe("更新状态机", () => {
     expect(decide({ status: "none" }, { type: "retry-init" }).effect).toBeNull();
   });
 
+  it("stop 进入终态 stopped：之后任何事件都不改状态、不产生副作用", () => {
+    const events: UpdateEvent[] = [
+      { type: "check", manual: true },
+      { type: "check", manual: false },
+      { type: "available" },
+      { type: "not-available" },
+      { type: "downloaded", version: "0.2.0" },
+      { type: "restart-confirmed" },
+      { type: "retry-init" },
+      { type: "failed", message: "Failed to launch ShipIt" },
+      { type: "stop" },
+    ];
+    const states: UpdateState[] = [
+      { status: "idle" },
+      { status: "checking", manual: true },
+      { status: "ready", version: "0.2.0" },
+      { status: "installing", version: "0.2.0" },
+      { status: "error", message: "bad feed", stage: "init" },
+    ];
+    for (const from of states) {
+      expect(decide(from, { type: "stop" }), `${from.status} 收到 stop`).toEqual({
+        next: { status: "stopped" },
+        effect: null,
+      });
+      for (const event of events) {
+        expect(decide({ status: "stopped" }, event), `stopped 收到 ${event.type}`).toEqual({
+          next: { status: "stopped" },
+          effect: null,
+        });
+      }
+    }
+  });
+
   it("只有签名类报错文案被当成签名错误", () => {
     expect(isSignatureError("Code signature at URL file:///x did not pass validation")).toBe(true);
     expect(isSignatureError("The application is not code signed")).toBe(true);
@@ -457,6 +490,40 @@ describe("更新器接线", () => {
       expect(order).toEqual([]);
     });
 
+    it("ready 时确认框未答、stop 之后确认返回 true：不开新一轮安装，状态仍是 stopped", async () => {
+      const answer = deferred<boolean>();
+      const prepare = vi.fn(async () => undefined);
+      const updater = createUpdater({ ...deps, askRestart: () => answer.promise, prepareInstall: prepare });
+      updater.start();
+      confirm();
+      expect(updater.state()).toEqual({ status: "ready", version: "0.2.0" });
+
+      updater.stop();
+      answer.resolve(true);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(prepare, "停止后确认结果不能开出新一轮安装").not.toHaveBeenCalled();
+      expect(source.quitAndInstall).not.toHaveBeenCalled();
+      expect(updater.state()).toEqual({ status: "stopped" });
+    });
+
+    it("stop 之后迟到的 downloaded、error 和手动检查都不动状态", () => {
+      const updater = createUpdater(deps);
+      updater.start();
+      updater.stop();
+      inform.mockClear();
+
+      source.emit("update-downloaded", {}, "", "0.2.0");
+      source.emit("error", new Error("late failure"));
+      updater.checkNow();
+
+      expect(updater.state()).toEqual({ status: "stopped" });
+      expect(askRestart).not.toHaveBeenCalled();
+      expect(inform).not.toHaveBeenCalled();
+      expect(source.checkForUpdates, "只有启动那一次").toHaveBeenCalledTimes(1);
+    });
+
     it("过期的准备失败不会把别的状态拖进 error", async () => {
       const gate = deferred<void>();
       const rejecting = vi.fn(async () => {
@@ -515,6 +582,32 @@ describe("更新器接线", () => {
       expect(inform).toHaveBeenCalledTimes(1);
       expect(inform).toHaveBeenCalledWith("error", "检查更新失败：bad feed");
       expect(source.checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it("初始化失败后 stop，再手动检查：不重试初始化也不建 6 小时定时器", () => {
+      source.setFeedURL.mockImplementationOnce(() => {
+        throw new Error("bad feed");
+      });
+      const updater = createUpdater(deps);
+      updater.start();
+      updater.stop();
+
+      updater.checkNow();
+
+      expect(source.setFeedURL, "stop 之后不再初始化").toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount(), "stop 之后不再有定时器").toBe(0);
+      vi.advanceTimersByTime(CHECK_INTERVAL_MS);
+      expect(source.checkForUpdates).not.toHaveBeenCalled();
+      expect(updater.state()).toEqual({ status: "stopped" });
+    });
+
+    it("stop 之后才 start：不订阅、不初始化", () => {
+      const updater = createUpdater(deps);
+      updater.stop();
+      updater.start();
+
+      expect(source.setFeedURL).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     it("重试时才暴露签名错误：按 unsupported 弹没有正式签名", () => {
