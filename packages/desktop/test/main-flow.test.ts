@@ -18,6 +18,7 @@ const autoUpdater = vi.hoisted(() => ({
 const appOn = vi.hoisted(() => vi.fn());
 const appExit = vi.hoisted(() => vi.fn());
 const appQuit = vi.hoisted(() => vi.fn());
+const authCompleted = vi.hoisted(() => vi.fn());
 const reapGate = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 const showMessageBox = vi.hoisted(() => vi.fn());
 type FakeWindow = Record<string, unknown> & {
@@ -39,6 +40,8 @@ const fetchState = vi.hoisted(() => ({
   meOk: false,
   localComputer: null as Promise<unknown> | null,
   urls: [] as string[],
+  localResponses: [] as unknown[],
+  localRequests: [] as Array<RequestInit | undefined>,
 }));
 // 比任何系统的 pid_max 都大，真发出信号也落不到别人的进程上。
 const FAKE_PID_BASE = 2 ** 30;
@@ -120,13 +123,16 @@ vi.mock("electron", () => {
     },
     session: {
       defaultSession: {
-        webRequest: { onCompleted: vi.fn() },
+        webRequest: { onCompleted: authCompleted },
         cookies: { get: vi.fn(async () => []) },
-        fetch: vi.fn(async (url: string) => {
+        fetch: vi.fn(async (url: string, init?: RequestInit) => {
           fetchState.urls.push(url);
           if (url.endsWith("/api/me")) return { ok: fetchState.meOk };
-          if (url.endsWith("/api/computers/local") && fetchState.localComputer !== null)
-            return fetchState.localComputer;
+          if (url.endsWith("/api/computers/local")) {
+            fetchState.localRequests.push(init);
+            if (fetchState.localResponses.length > 0) return fetchState.localResponses.shift();
+            if (fetchState.localComputer !== null) return fetchState.localComputer;
+          }
           return { ok: false };
         }),
       },
@@ -152,10 +158,13 @@ vi.mock("node:fs/promises", async () => {
       if (path.endsWith("computer-credentials.json") && fsState.credentials !== null) return fsState.credentials;
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     },
-    writeFile: async (path: string) => {
+    writeFile: async (path: string, value: string) => {
       fsWrites.push(path);
+      if (path.endsWith("computer-credentials.json")) fsState.credentials = value;
     },
-    unlink: async () => undefined,
+    unlink: vi.fn(async () => {
+      fsState.credentials = null;
+    }),
   };
 });
 vi.mock("../src/proxy.js", () => ({ startUiServer: async () => ({ origin: "http://127.0.0.1:1" }) }));
@@ -209,6 +218,16 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
 
 const fakeEvent = (): { preventDefault: MockInstance } => ({ preventDefault: vi.fn() });
 
+async function reconnectFromMenu(): Promise<void> {
+  const { Menu } = await import("electron");
+  const template = vi.mocked(Menu.buildFromTemplate).mock.calls.at(-1)?.[0];
+  const submenu = template?.[0]?.submenu as import("electron").MenuItemConstructorOptions[];
+  const item = submenu.find((entry) => entry.label === "在这台 Mac 上连接…");
+  expect(submenu.find((entry) => entry.label === "这台 Mac 没有连上")?.enabled).toBe(false);
+  expect(item?.enabled).toBe(true);
+  item?.click?.({} as never, undefined, {} as never);
+}
+
 describe("桌面主进程代理流程", () => {
   let kill: MockInstance<typeof process.kill>;
 
@@ -219,6 +238,9 @@ describe("桌面主进程代理流程", () => {
     reapGate.current = null;
     fetchState.meOk = false;
     fetchState.localComputer = null;
+    fetchState.localResponses.length = 0;
+    fetchState.localRequests.length = 0;
+    showMessageBox.mockReset().mockResolvedValue({ response: 1 });
     kill = vi.spyOn(process, "kill").mockImplementation(() => true);
   });
 
@@ -328,6 +350,232 @@ describe("桌面主进程代理流程", () => {
     expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGINT");
     expect(kill).toHaveBeenCalledWith(-(FAKE_PID_BASE + 0), "SIGKILL");
     expect(reapedProfiles).toEqual([agentChromeProfile]);
+  });
+
+  describe("登录与顶号", () => {
+    let signalListeners: ReadonlyMap<"SIGINT" | "SIGTERM", readonly NodeJS.SignalsListener[]>;
+    beforeEach(() => {
+      signalListeners = new Map((["SIGINT", "SIGTERM"] as const).map((signal) => [signal, process.listeners(signal)]));
+    });
+    const saveLocalCredentials = (): void => {
+      fsState.credentials = JSON.stringify({
+        computerId: credentials.computerId,
+        encryptedToken: Buffer.from(credentials.token).toString("base64"),
+      });
+    };
+    const success = () => ({ ok: true, status: 200, json: async () => credentials });
+    const conflictText = "这个账号已经在另一台 Mac 上用过，继续会让那台退出";
+    const conflict = () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: conflictText,
+        computer: {
+          id: credentials.computerId,
+          ownerId: "user-1",
+          kind: "local",
+          host: "另一台 Mac",
+          status: "online",
+          idleSince: null,
+          lastSeenAt: "2026-10-14T00:00:00.000Z",
+        },
+      }),
+    });
+    const boot = async () => {
+      electronState.ready = true;
+      const main = await loadMain();
+      await vi.waitFor(() => expect(appOn).toHaveBeenCalledWith("activate", expect.any(Function)));
+      return main;
+    };
+    const login = async (statusCode = 200): Promise<void> => {
+      const call = authCompleted.mock.calls[0];
+      if (call === undefined) throw new Error("没有安装登录钩子");
+      (call[1] as (details: { statusCode: number }) => void)({ statusCode });
+    };
+    const emitOnline = async (index = 0): Promise<void> => {
+      await vi.waitFor(() => expect(children).toHaveLength(index + 1));
+      children[index]?.stdout.write('{"type":"online"}\n');
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    afterEach(() => {
+      electronState.ready = false;
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        for (const listener of process.listeners(signal)) {
+          if (!signalListeners.get(signal)?.includes(listener)) process.removeListener(signal, listener);
+        }
+      }
+    });
+
+    it.each(["starting", "online"])("本地有凭据且代理 %s，重新登录不配对也不停机", async (state) => {
+      saveLocalCredentials();
+      await boot();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      if (state === "online") await emitOnline();
+      await login();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(fetchState.localRequests).toEqual([]);
+      expect(children).toHaveLength(1);
+      expect(kill).not.toHaveBeenCalled();
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+      children[0]?.emit("exit", 0, null);
+    });
+
+    it("本地有凭据但代理已退出，登录直接用原 token 启动", async () => {
+      saveLocalCredentials();
+      await boot();
+      await emitOnline();
+      children[0]?.emit("exit", 0, null);
+      await login();
+      await emitOnline(1);
+      expect(fetchState.localRequests).toEqual([]);
+      expect(fsWrites).toEqual([]);
+      expect(children[1]?.stdin.read()?.toString()).toContain('"token":"token-1"');
+    });
+
+    it("409 用服务端文案确认，继续只重发一次带确认的请求并启动", async () => {
+      fetchState.localResponses.push(conflict(), success());
+      showMessageBox.mockResolvedValue({ response: 0 });
+      await boot();
+      await login();
+      await emitOnline();
+      expect(showMessageBox).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ message: conflictText, buttons: ["在这台 Mac 上继续", "取消"] }),
+      );
+      expect(fetchState.localRequests).toHaveLength(2);
+      expect(fetchState.localRequests[0]?.body).toBeUndefined();
+      expect(JSON.parse(String(fetchState.localRequests[1]?.body))).toEqual({ confirmDisplace: true });
+      expect(fsState.credentials).not.toBeNull();
+    });
+
+    it("409 取消不启动、不保存，菜单可再次配对", async () => {
+      fetchState.localResponses.push(conflict());
+      await boot();
+      await login();
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(children).toHaveLength(0);
+      expect(fsWrites).toEqual([]);
+      expect(windows[0]?.destroyed).toBe(false);
+      fetchState.localResponses.push(success());
+      await reconnectFromMenu();
+      await emitOnline();
+      expect(fetchState.localRequests).toHaveLength(2);
+    });
+
+    it("配对请求和 409 确认之前都不停旧代理，取消后原代理仍运行", async () => {
+      const pending = deferred<unknown>();
+      fetchState.localComputer = pending.promise;
+      const main = await boot();
+      const running = main.startAgent(credentials);
+      await emitOnline();
+      await running;
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(1));
+      expect(kill).not.toHaveBeenCalled();
+      pending.resolve(conflict());
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      expect(kill).not.toHaveBeenCalled();
+      expect(children).toHaveLength(1);
+    });
+
+    it("确认拿到新凭据后才停旧代理，停好才启动替换代理", async () => {
+      const answer = deferred<{ response: number }>();
+      const token = deferred<unknown>();
+      fetchState.localResponses.push(conflict(), token.promise);
+      showMessageBox.mockReturnValue(answer.promise);
+      const main = await boot();
+      const running = main.startAgent(credentials);
+      await emitOnline();
+      await running;
+      await login();
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      expect(kill).not.toHaveBeenCalled();
+      answer.resolve({ response: 0 });
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      expect(kill).not.toHaveBeenCalled();
+      token.resolve(success());
+      await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-FAKE_PID_BASE, "SIGINT"));
+      expect(fsState.credentials).not.toBeNull();
+      expect(children).toHaveLength(1);
+      children[0]?.emit("exit", 0, null);
+      await emitOnline(1);
+    });
+
+    it("displaced 只提示一次、凭据作废，知道了后不自动配对或重启", async () => {
+      saveLocalCredentials();
+      await boot();
+      await emitOnline();
+      children[0]?.stdout.write('诊断日志\n{"type":"dis');
+      children[0]?.stdout.write('placed"}\n{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      expect(showMessageBox).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          message: "这个账号已在另一台 Mac 上连接，本机已停止",
+          buttons: ["在这台 Mac 上重新连接", "知道了"],
+        }),
+      );
+      expect(fsState.credentials).toBeNull();
+      expect(fetchState.localRequests).toEqual([]);
+      expect(children).toHaveLength(1);
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+      fetchState.localResponses.push(conflict());
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(1));
+      expect(fetchState.localRequests[0]?.body, "旧 token 不再被复用").toBeUndefined();
+    });
+
+    it("尚未 online 就 displaced，只显示顶号提示，重新连接直接确认配对", async () => {
+      saveLocalCredentials();
+      showMessageBox.mockResolvedValue({ response: 0 });
+      fetchState.localResponses.push(success());
+      await boot();
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await emitOnline(1);
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
+      expect(fetchState.localRequests).toHaveLength(1);
+      expect(JSON.parse(String(fetchState.localRequests[0]?.body))).toEqual({ confirmDisplace: true });
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+    });
+
+    it("旧代理的迟到 displaced 和未知状态不影响当前代理或凭据", async () => {
+      saveLocalCredentials();
+      const main = await boot();
+      await emitOnline();
+      const stopping = main.stopAgent();
+      const replacement = main.startAgent(credentials);
+      await emitOnline(1);
+      await replacement;
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[1]?.stdout.write('{"type":"unknown"}\n');
+      children[0]?.emit("exit", 0, null);
+      await stopping;
+      expect(showMessageBox).not.toHaveBeenCalled();
+      expect(fsState.credentials).not.toBeNull();
+    });
+
+    it("退出时确认框返回继续，不再重发配对或启动代理", async () => {
+      const answer = deferred<{ response: number }>();
+      showMessageBox.mockReturnValue(answer.promise);
+      fetchState.localResponses.push(conflict(), success());
+      const main = await boot();
+      await login();
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      const quit = appOn.mock.calls.find(([name]) => name === "before-quit")?.[1] as (
+        event: ReturnType<typeof fakeEvent>,
+      ) => void;
+      quit(fakeEvent());
+      answer.resolve({ response: 0 });
+      await vi.waitFor(() => expect(appExit).toHaveBeenCalled());
+      await expect(main.startAgent(credentials)).rejects.toBeInstanceOf(main.AgentReplacedError);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(fetchState.localRequests).toHaveLength(1);
+      expect(children).toHaveLength(0);
+    });
   });
 
   describe("启动时检查更新", () => {
@@ -494,6 +742,39 @@ describe("桌面主进程代理流程", () => {
         handlerOf(appOn, "window-all-closed")();
       };
       const trayClick = (): void => void handlerOf(trays[0]!.on, "click")();
+
+      it("准备安装与正在安装时登录钩子都不配对、不拉起代理", async () => {
+        await bootWithOnlineAgent();
+        downloaded();
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(-FAKE_PID_BASE, "SIGINT"));
+        const hook = authCompleted.mock.calls[0]?.[1] as (details: { statusCode: number }) => void;
+        hook({ statusCode: 200 });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(fetchState.localRequests).toEqual([]);
+        expect(children).toHaveLength(1);
+
+        children[0]?.emit("exit", 0, null);
+        await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+        hook({ statusCode: 201 });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(fetchState.localRequests).toEqual([]);
+        expect(children).toHaveLength(1);
+      });
+
+      it("顶号提示未答时开始安装，随后点重新连接也不配对", async () => {
+        const answer = deferred<{ response: number }>();
+        showMessageBox.mockReturnValueOnce(answer.promise).mockResolvedValue({ response: 0 });
+        await bootWithOnlineAgent();
+        children[0]?.stdout.write('{"type":"displaced"}\n');
+        children[0]?.emit("exit", 0, null);
+        await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+        downloaded();
+        await vi.waitFor(() => expect(autoUpdater.quitAndInstall).toHaveBeenCalledTimes(1));
+        answer.resolve({ response: 0 });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(fetchState.localRequests).toEqual([]);
+        expect(children).toHaveLength(1);
+      });
 
       it("安装失败后窗口被补回：点托盘不抛错，能显示新的菜单栏窗口", async () => {
         await boot();

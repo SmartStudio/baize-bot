@@ -10,6 +10,8 @@ function build(overrides: Partial<MenuDeps> = {}) {
     setOpenAtLogin: vi.fn(),
     checkForUpdates: vi.fn(),
     openSettings: vi.fn(),
+    agentStatus: "none",
+    reconnect: vi.fn(),
     ...overrides,
   };
   const submenu = menuTemplate(deps)[0]?.submenu as MenuItemConstructorOptions[];
@@ -41,5 +43,22 @@ describe("应用菜单", () => {
     expect(item("版本 1.2.3")?.enabled).toBe(false);
     item("检查更新…")?.click?.({} as never, undefined, {} as never);
     expect(checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["none", "starting", "online", "stopping"] as const)("连接状态 %s 决定菜单提示和再次连接入口", (status) => {
+    const reconnect = vi.fn();
+    const labels = {
+      none: "这台 Mac 没有连上",
+      starting: "这台 Mac 正在连接",
+      online: "这台 Mac 已连接",
+      stopping: "这台 Mac 正在停止连接",
+    };
+    const { item } = build({ agentStatus: status, reconnect });
+    expect(item(labels[status])?.enabled).toBe(false);
+    expect(item("在这台 Mac 上连接…")?.enabled).toBe(status === "none");
+    if (status === "none") {
+      item("在这台 Mac 上连接…")?.click?.({} as never, undefined, {} as never);
+      expect(reconnect).toHaveBeenCalledTimes(1);
+    }
   });
 });

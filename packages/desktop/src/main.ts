@@ -21,8 +21,11 @@ import {
 import {
   BotListResponse,
   AgentLaunch,
+  AgentStatusLine,
   ComputerTokenResponse,
   GroupListResponse,
+  PairLocalComputerRequest,
+  PairLocalConflictResponse,
   type ComputerId,
   type NotifyKind,
 } from "@baize/shared";
@@ -64,6 +67,12 @@ let uiOrigin = "";
 let authHookInstalled = false;
 let settings: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
 let updater: Updater | null = null;
+let credentialsInvalidated = false;
+
+function setAgentState(next: AgentState): void {
+  agentState = next;
+  if (updater !== null) installMenu(updater.checkNow);
+}
 
 const logLine = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -111,9 +120,11 @@ async function saveCredentials(value: { readonly computerId: ComputerId; readonl
     encryptedToken: safeStorage.encryptString(value.token).toString("base64"),
   };
   await writeFile(credentialsPath(), `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+  credentialsInvalidated = false;
 }
 
 async function loadCredentials(): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
+  if (credentialsInvalidated) return null;
   let rawText: string;
   try {
     rawText = await readFile(credentialsPath(), "utf8");
@@ -192,7 +203,7 @@ export function startAgent(
   if (child.pid === undefined || stdin === null || stdout === null || stderr === null) {
     return Promise.reject(new Error("电脑代理没有起来"));
   }
-  agentState = { status: "starting", child };
+  setAgentState({ status: "starting", child });
   logLine(`agent-pid ${child.pid}`);
   return new Promise((resolve, reject) => {
     let pending = "";
@@ -202,7 +213,7 @@ export function startAgent(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (isCurrentAgent(agentState, child)) agentState = { status: "none" };
+      if (isCurrentAgent(agentState, child)) setAgentState({ status: "none" });
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {
@@ -226,32 +237,41 @@ export function startAgent(
       pending = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const value: unknown = JSON.parse(line.trim());
-          if (
-            !online &&
-            typeof value === "object" &&
-            value !== null &&
-            "type" in value &&
-            value.type === "online" &&
-            isCurrentAgent(agentState, child)
-          ) {
-            online = true;
-            agentState = { status: "online", child };
-            clearTimeout(timer);
-            if (!settled) {
-              settled = true;
-              logLine(`agent-online ${Date.now() - startedAt}`);
-              resolve();
+          const status = AgentStatusLine.safeParse(JSON.parse(line.trim()));
+          if (!status.success || !isCurrentAgent(agentState, child) || agentState.status === "stopping") continue;
+          switch (status.data.type) {
+            case "online":
+              if (online) break;
+              online = true;
+              setAgentState({ status: "online", child });
+              clearTimeout(timer);
+              if (!settled) {
+                settled = true;
+                logLine(`agent-online ${Date.now() - startedAt}`);
+                resolve();
+              }
+              break;
+            case "displaced":
+              credentialsInvalidated = true;
+              setAgentState({ status: "stopping", child });
+              fail(new AgentReplacedError());
+              void handleDisplaced().catch((error: unknown) => {
+                void dialog.showErrorBox("电脑代理不可用", errorText(error));
+              });
+              break;
+            default: {
+              const unhandled: never = status.data;
+              throw new Error(`未处理的代理状态：${JSON.stringify(unhandled)}`);
             }
           }
         } catch {
-          // 代理的 stdout 允许包含诊断日志，只有完整 JSON 行才是上线标记。
+          // 代理的 stdout 允许包含诊断日志，只有符合 shared 契约的完整 JSON 行才是状态。
         }
       }
     };
     const onError = (error: Error): void => {
       const reportFailure = shouldReportStartFailure(agentState, child);
-      if (isCurrentAgent(agentState, child)) agentState = { status: "none" };
+      if (isCurrentAgent(agentState, child)) setAgentState({ status: "none" });
       if (!reportFailure) {
         fail(new AgentReplacedError());
         return;
@@ -266,7 +286,7 @@ export function startAgent(
       clearTimeout(timer);
       const reportFailure = shouldReportStartFailure(agentState, child);
       const current = isCurrentAgent(agentState, child);
-      if (current) agentState = { status: "none" };
+      if (current) setAgentState({ status: "none" });
       logLine(`agent-exit ${code ?? ""} ${signal ?? ""}`.trim());
       if (online || settled) return;
       fail(reportFailure ? new Error("电脑代理在控制面接纳前退出") : new AgentReplacedError());
@@ -338,9 +358,9 @@ async function shutdownChild(child: ChildProcess, pid: number): Promise<void> {
 export async function stopAgent(): Promise<void> {
   const child = currentAgentChild(agentState);
   if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
-    agentState = { status: "none" };
+    setAgentState({ status: "none" });
   } else {
-    agentState = { status: "stopping", child };
+    setAgentState({ status: "stopping", child });
     const pid = child.pid;
     let done = shutdowns.get(child);
     if (done === undefined) {
@@ -354,18 +374,50 @@ export async function stopAgent(): Promise<void> {
 
 async function postLocalComputer(
   session: Session,
-): Promise<{ readonly computerId: ComputerId; readonly token: string }> {
-  const response = await session.fetch(`${uiOrigin}/api/computers/local`, { method: "POST" });
+  confirmDisplace = false,
+): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
+  if (phase !== "running") return null;
+  const response = await session.fetch(`${uiOrigin}/api/computers/local`, {
+    method: "POST",
+    ...(confirmDisplace
+      ? {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(PairLocalComputerRequest.parse({ confirmDisplace: true })),
+        }
+      : {}),
+  });
+  if (response.status === 409 && !confirmDisplace) {
+    const conflict = PairLocalConflictResponse.parse(await response.json());
+    if (phase !== "running") return null;
+    const { response: answer } = await showBox({
+      type: "question",
+      message: conflict.error,
+      buttons: ["在这台 Mac 上继续", "取消"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    return answer === 0 ? postLocalComputer(session, true) : null;
+  }
   if (!response.ok) throw new Error(`申请电脑 token 失败（${response.status}）`);
   return ComputerTokenResponse.parse(await response.json());
 }
 
-async function provision(session: Session): Promise<void> {
+async function provision(session: Session, confirmDisplace = false): Promise<void> {
+  if (phase !== "running") return;
   if (provisioning !== null) return provisioning;
   provisioning = (async () => {
-    await stopAgent();
-    const credentials = await postLocalComputer(session);
-    await saveCredentials(credentials);
+    let credentials = confirmDisplace ? null : await loadCredentials();
+    if (phase !== "running") return;
+    if (credentials !== null) {
+      logLine(`agent-credentials-reused ${agentState.status}`);
+      if (agentState.status === "online" || agentState.status === "starting") return;
+    } else {
+      credentials = await postLocalComputer(session, confirmDisplace);
+      if (credentials === null) return;
+      await saveCredentials(credentials);
+      if (phase !== "running") return;
+      await stopAgent();
+    }
     try {
       await startAgent(credentials);
     } catch (error) {
@@ -378,6 +430,31 @@ async function provision(session: Session): Promise<void> {
     provisioning = null;
   });
   return provisioning;
+}
+
+function requestConnection(session: Session, confirmDisplace = false): void {
+  void provision(session, confirmDisplace).catch((error: unknown) => {
+    if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
+  });
+}
+
+async function handleDisplaced(): Promise<void> {
+  try {
+    await unlink(credentialsPath()).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    });
+  } finally {
+    await stopAgent();
+  }
+  if (phase !== "running") return;
+  const { response } = await showBox({
+    type: "info",
+    message: "这个账号已在另一台 Mac 上连接，本机已停止",
+    buttons: ["在这台 Mac 上重新连接", "知道了"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response === 0) requestConnection(electronSession.defaultSession, true);
 }
 
 async function refreshPending(session: Session): Promise<void> {
@@ -474,9 +551,7 @@ async function createWindows(session: Session): Promise<void> {
     authHookInstalled = true;
     session.webRequest.onCompleted({ urls: [`${uiOrigin}/api/auth/login`, `${uiOrigin}/api/register`] }, (details) => {
       if (details.statusCode >= 200 && details.statusCode < 300) {
-        void provision(session).catch((error: unknown) => {
-          if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
-        });
+        requestConnection(session);
       }
     });
   }
@@ -585,6 +660,8 @@ function installMenu(checkForUpdates: () => void): void {
         setOpenAtLogin: (openAtLogin) => app.setLoginItemSettings({ openAtLogin }),
         checkForUpdates,
         openSettings,
+        agentStatus: agentState.status,
+        reconnect: () => requestConnection(electronSession.defaultSession),
       }),
     ),
   );
