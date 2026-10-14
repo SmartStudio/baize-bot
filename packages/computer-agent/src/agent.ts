@@ -85,11 +85,6 @@ export function startAgent(options: AgentOptions): AgentHandle {
   // 远程登录要等人看到提示、拿出手机扫码或收验证码，2 分钟不够。
   const loginTimeoutMs = options.loginTimeoutMs ?? 15 * 60_000;
   const chrome = (options.makeChrome ?? startAssistantChrome)({ dataDir, log });
-  const browserConfig: AgentRunnerConfig["browser"] = {
-    profileDir: chrome.profileDir,
-    connection: () => chrome.connection(),
-    present: async () => ({ end: { kind: "broken" }, url: null }),
-  };
 
   let link: Link = { phase: "stopped" };
   let stopping = false;
@@ -119,6 +114,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
     log,
   });
   const login = createLogins({ chrome, present: screen.present, pages: defaultLoginPages, log }, loginTimeoutMs);
+  const browserConfig: AgentRunnerConfig["browser"] = {
+    profileDir: chrome.profileDir,
+    connection: () => chrome.connection(),
+    present: screen.present,
+  };
   const sendBare = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
       log(`连接不在，丢弃 ${message.type}`);
