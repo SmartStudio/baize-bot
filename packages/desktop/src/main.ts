@@ -24,8 +24,10 @@ import {
   AgentStatusLine,
   ComputerTokenResponse,
   GroupListResponse,
+  MeResponse,
   PairLocalComputerRequest,
   PairLocalConflictResponse,
+  UserId,
   type ComputerId,
   type NotifyKind,
 } from "@baize/shared";
@@ -51,7 +53,13 @@ const AGENT_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", 
 // preparing-install 是确认重启后在停代理，窗口照常能关、退出照常等停机；installing 是代理已停好、退出交给 Squirrel。
 type AppPhase = "running" | "preparing-install" | "installing" | "quitting";
 type Settings = { readonly controlOrigin: string; readonly updateFeed?: string };
-type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string };
+type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string; readonly ownerId: UserId };
+type SavedCredentials = { readonly computerId: ComputerId; readonly token: string; readonly ownerId?: UserId };
+type LocalRotation = {
+  readonly child: ChildProcess;
+  readonly result: Promise<"saved" | "save-failed" | "request-failed">;
+  finish(result: "saved" | "save-failed" | "request-failed"): void;
+};
 let mainWindow: BrowserWindow | null = null;
 let menubarWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -68,6 +76,13 @@ let authHookInstalled = false;
 let settings: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
 let updater: Updater | null = null;
 let credentialsInvalidated = false;
+let invalidatingCredentials: Promise<void> | null = null;
+let localRotation: LocalRotation | null = null;
+let runningCredentials: {
+  readonly child: ChildProcess;
+  readonly computerId: ComputerId;
+  readonly token: string;
+} | null = null;
 
 function setAgentState(next: AgentState): void {
   agentState = next;
@@ -113,17 +128,18 @@ async function saveSettings(next: Settings): Promise<void> {
   await writeFile(settingsPath(), `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function saveCredentials(value: { readonly computerId: ComputerId; readonly token: string }): Promise<void> {
+async function saveCredentials(value: SavedCredentials & { readonly ownerId: UserId }): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) throw new Error("系统钥匙串不可用，不能安全保存电脑 token");
   const stored: CredentialFile = {
     computerId: value.computerId,
+    ownerId: value.ownerId,
     encryptedToken: safeStorage.encryptString(value.token).toString("base64"),
   };
   await writeFile(credentialsPath(), `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
   credentialsInvalidated = false;
 }
 
-async function loadCredentials(): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
+async function loadCredentials(): Promise<SavedCredentials | null> {
   if (credentialsInvalidated) return null;
   let rawText: string;
   try {
@@ -132,14 +148,22 @@ async function loadCredentials(): Promise<{ readonly computerId: ComputerId; rea
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+  if (typeof raw === "object" && raw !== null && "invalidated" in raw && raw.invalidated === true) return null;
+  if (typeof raw !== "object" || raw === null || !("computerId" in raw) || !("encryptedToken" in raw)) return null;
   if (!safeStorage.isEncryptionAvailable()) throw new Error("系统钥匙串不可用，无法读取电脑 token");
   try {
-    const raw: unknown = JSON.parse(rawText);
-    if (typeof raw !== "object" || raw === null || !("computerId" in raw) || !("encryptedToken" in raw)) return null;
-    return ComputerTokenResponse.parse({
+    const ownerId = "ownerId" in raw ? UserId.parse(raw.ownerId) : undefined;
+    const credentials = ComputerTokenResponse.parse({
       computerId: raw.computerId,
       token: safeStorage.decryptString(Buffer.from(String(raw.encryptedToken), "base64")),
     });
+    return { ...credentials, ...(ownerId === undefined ? {} : { ownerId }) };
   } catch {
     return null;
   }
@@ -204,6 +228,7 @@ export function startAgent(
     return Promise.reject(new Error("电脑代理没有起来"));
   }
   setAgentState({ status: "starting", child });
+  runningCredentials = { child, computerId: credentials.computerId, token: credentials.token };
   logLine(`agent-pid ${child.pid}`);
   return new Promise((resolve, reject) => {
     let pending = "";
@@ -252,10 +277,10 @@ export function startAgent(
               }
               break;
             case "displaced":
-              credentialsInvalidated = true;
+              if (localRotation?.child !== child) credentialsInvalidated = true;
               setAgentState({ status: "stopping", child });
               fail(new AgentReplacedError());
-              void handleDisplaced().catch((error: unknown) => {
+              void handleDisplaced(child).catch((error: unknown) => {
                 void dialog.showErrorBox("电脑代理不可用", errorText(error));
               });
               break;
@@ -375,8 +400,10 @@ export async function stopAgent(): Promise<void> {
 async function postLocalComputer(
   session: Session,
   confirmDisplace = false,
+  onConfirm?: () => void,
 ): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
   if (phase !== "running") return null;
+  if (confirmDisplace) onConfirm?.();
   const response = await session.fetch(`${uiOrigin}/api/computers/local`, {
     method: "POST",
     ...(confirmDisplace
@@ -396,7 +423,7 @@ async function postLocalComputer(
       defaultId: 1,
       cancelId: 1,
     });
-    return answer === 0 ? postLocalComputer(session, true) : null;
+    return answer === 0 ? postLocalComputer(session, true, onConfirm) : null;
   }
   if (!response.ok) throw new Error(`申请电脑 token 失败（${response.status}）`);
   return ComputerTokenResponse.parse(await response.json());
@@ -404,17 +431,56 @@ async function postLocalComputer(
 
 async function provision(session: Session, confirmDisplace = false): Promise<void> {
   if (phase !== "running") return;
-  if (provisioning !== null) return provisioning;
+  if (provisioning !== null) {
+    return provisioning.then(
+      () => provision(session, confirmDisplace),
+      () => provision(session, confirmDisplace),
+    );
+  }
   provisioning = (async () => {
-    let credentials = confirmDisplace ? null : await loadCredentials();
+    const me = await session.fetch(`${uiOrigin}/api/me`);
+    if (!me.ok) return;
+    const ownerId = MeResponse.parse(await me.json()).user.id;
+    await invalidatingCredentials;
+    let credentials = await loadCredentials();
     if (phase !== "running") return;
-    if (credentials !== null) {
+    if (credentials !== null && credentials.ownerId !== ownerId) {
+      await stopAgent();
+      credentials = null;
+    }
+    if (
+      credentials !== null &&
+      (agentState.status === "online" || agentState.status === "starting") &&
+      runningCredentials?.child === currentAgentChild(agentState) &&
+      runningCredentials?.computerId === credentials.computerId &&
+      runningCredentials?.token === credentials.token
+    )
+      return;
+    if (credentials !== null && !confirmDisplace) {
       logLine(`agent-credentials-reused ${agentState.status}`);
-      if (agentState.status === "online" || agentState.status === "starting") return;
     } else {
-      credentials = await postLocalComputer(session, confirmDisplace);
-      if (credentials === null) return;
-      await saveCredentials(credentials);
+      const attempt = { rotation: null as LocalRotation | null };
+      try {
+        credentials = await postLocalComputer(session, confirmDisplace, () => {
+          const child = currentAgentChild(agentState);
+          if (child === null) return;
+          let finish!: LocalRotation["finish"];
+          const result = new Promise<"saved" | "save-failed" | "request-failed">((resolve) => {
+            finish = resolve;
+          });
+          localRotation = attempt.rotation = { child, result, finish };
+        });
+        if (credentials === null) return;
+        try {
+          await saveCredentials({ ...credentials, ownerId });
+        } catch (error) {
+          attempt.rotation?.finish("save-failed");
+          throw error;
+        }
+        attempt.rotation?.finish("saved");
+      } finally {
+        attempt.rotation?.finish("request-failed");
+      }
       if (phase !== "running") return;
       await stopAgent();
     }
@@ -438,18 +504,39 @@ function requestConnection(session: Session, confirmDisplace = false): void {
   });
 }
 
-async function handleDisplaced(): Promise<void> {
+async function handleDisplaced(child: ChildProcess): Promise<void> {
+  // 确认配对会先关旧连接；等存盘结果才能区分本机换 token 与另一台 Mac 顶号。
+  const rotation = localRotation?.child === child ? await localRotation.result : null;
+  if (rotation === "saved") {
+    if (isCurrentAgent(agentState, child)) await stopAgent();
+    return;
+  }
+  if (rotation !== null) credentialsInvalidated = true;
+  const invalidation = (async () => {
+    try {
+      await unlink(credentialsPath()).catch(async (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        logLine(`电脑凭据删除失败 ${errorText(error)}`);
+        await writeFile(credentialsPath(), `${JSON.stringify({ invalidated: true })}\n`, { mode: 0o600 }).catch(
+          (writeError: unknown) => {
+            logLine(`电脑凭据失效标记保存失败 ${errorText(writeError)}`);
+          },
+        );
+      });
+    } finally {
+      if (isCurrentAgent(agentState, child)) await stopAgent();
+    }
+  })();
+  invalidatingCredentials = invalidation;
   try {
-    await unlink(credentialsPath()).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    });
+    await invalidation;
   } finally {
-    await stopAgent();
+    if (invalidatingCredentials === invalidation) invalidatingCredentials = null;
   }
   if (phase !== "running") return;
   const { response } = await showBox({
     type: "info",
-    message: "这个账号已在另一台 Mac 上连接，本机已停止",
+    message: rotation === "save-failed" ? "凭据保存失败，请重新登录" : "这个账号已在另一台 Mac 上连接，本机已停止",
     buttons: ["在这台 Mac 上重新连接", "知道了"],
     defaultId: 1,
     cancelId: 1,

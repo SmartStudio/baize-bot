@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AgentCloseCode, ComputerListResponse, ComputerTokenResponse, RegisterResponse } from "@baize/shared";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import { expectHello, openAgent, sendHello } from "./helpers/agent.js";
 import { type ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -55,6 +56,22 @@ describe("重新配对与 hello 同链", () => {
     const rotate = gate.arm(/^update "computers" set "gateway_key_hash"/, "before", local.computerId);
     const old = await openAgent(server.server.port);
     let confirming: Promise<Response> | undefined;
+    const emit = WebSocket.prototype.emit;
+    const delayedCloses: Array<() => void> = [];
+    // 扣住服务端 socket 的 close 回调，休眠只能由确认请求自己完成，不能被稍后的 close 补上。
+    const closeGate = vi.spyOn(WebSocket.prototype, "emit").mockImplementation(function (
+      this: WebSocket,
+      event,
+      ...args
+    ) {
+      if (event === "close" && args[0] === AgentCloseCode.displaced && this !== old.socket) {
+        delayedCloses.push(() => {
+          emit.call(this, event, ...args);
+        });
+        return true;
+      }
+      return emit.call(this, event, ...args);
+    });
     try {
       expect(await computerStatus(client)).toBe("creating");
       sendHello(old, local.computerId, local.token);
@@ -72,7 +89,6 @@ describe("重新配对与 hello 同链", () => {
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(confirmationDone, "确认请求已轮换 token，但必须等握手链完成才能返回").toBe(false);
-
       rotate.release();
       const hello = await expectHello(old);
       expect(hello.welcome.kind).toBe("local");
@@ -84,7 +100,9 @@ describe("重新配对与 hello 同链", () => {
       const replacement = ComputerTokenResponse.parse(await response.json());
       expect(replacement.computerId).toBe(local.computerId);
       expect(replacement.token).not.toBe(local.token);
-      expect(await computerStatus(client)).toBe("sleeping");
+      expect(await computerStatus(client), "socket close 回调尚未放行，确认请求必须自己完成休眠").toBe("sleeping");
+      closeGate.mockRestore();
+      for (const close of delayedCloses.splice(0)) close();
 
       const fresh = await openAgent(server.server.port);
       try {
@@ -99,6 +117,8 @@ describe("重新配对与 hello 同链", () => {
       }
     } finally {
       rotate.release();
+      closeGate.mockRestore();
+      for (const close of delayedCloses.splice(0)) close();
       old.close();
       push.close();
       await confirming?.catch(() => undefined);
