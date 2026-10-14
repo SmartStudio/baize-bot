@@ -3,12 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { createServer as createHttpServer } from "node:http";
 import { connect, createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { BotId, ComputerId, GroupId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { decide } from "../src/gate.js";
+import { decide, type GateAccess, type GateCall } from "../src/gate.js";
 import { botDirs, ensureBotDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
 import {
   bwrapArgs,
@@ -632,6 +632,63 @@ describe("bash 沙箱性能", () => {
     );
     expect(JSON.stringify(read.content)).toContain("approved-bytes");
   });
+
+  it.skipIf(process.platform !== "darwin")(
+    "Bot 目录的私有部分批了也写不进，所以闸门拒绝；工作目录里的写闸门放行、沙箱真写成功",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-own-private-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const botDir = dirname(dirs.workDir);
+        const ownZones = forbiddenZones(dirs, null);
+        const gateCall = (command: string): GateCall => ({
+          toolName: "bash",
+          input: { command },
+          workDir: dirs.workDir,
+          zones: ownZones,
+          groupId: GroupId.parse("group-1"),
+          computerId: ComputerId.parse("computer-1"),
+          platform: "darwin",
+          sandbox: "seatbelt",
+          source: null,
+          routine: null,
+        });
+        const runIn = (access: GateAccess, command: string) =>
+          spawnSync(
+            "/usr/bin/sandbox-exec",
+            ["-p", sandboxProfile(dirs.workDir, access, ownZones), "/bin/bash", "-c", command],
+            {
+              cwd: dirs.workDir,
+              encoding: "utf8",
+            },
+          );
+
+        const inWork = join(dirs.workDir, "approved.txt");
+        const writeWork = `printf work-ok > ${shellQuote(inWork)}`;
+        const allowed = decide(gateCall(writeWork), [], []);
+        expect(allowed.verdict).toBe("allow");
+        const written = runIn(allowed.access, `${writeWork} && cat ${shellQuote(inWork)}`);
+        expect(written.status, written.stderr).toBe(0);
+        expect(written.stdout).toBe("work-ok");
+
+        for (const path of [
+          join(dirs.agentDir, "note.txt"),
+          join(dirs.skillsDir, "n.txt"),
+          join(dirs.sessionDir, "n.txt"),
+          join(botDir, "top.txt"),
+        ]) {
+          const command = `printf swapped > ${shellQuote(path)}`;
+          expect(decide(gateCall(command), [], []).verdict, path).toBe("deny");
+          const approved = runIn({ network: false, writePaths: [path] }, command);
+          expect(approved.status, `${path}: 批准写也应被沙箱拒绝`).not.toBe(0);
+          expect(approved.stderr).toMatch(/operation not permitted/i);
+          expect(existsSync(path)).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform !== "darwin")("mach-lookup 白名单支持常用 CLI，curl 走受控报错路径", () => {
     const git = spawnSync("/usr/bin/which", ["git"], { encoding: "utf8" }).stdout.trim();

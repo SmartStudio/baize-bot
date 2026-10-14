@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   ComputerId,
@@ -309,9 +309,95 @@ describe("read、write、edit 的路径归一化和 Pi 打开文件用的一致"
     expect(decision.reason).toContain("其他 Bot");
   });
 
-  it.each(["read", "write", "edit"])("%s 在共享区不问，自己的 agent 目录仍问", (toolName) => {
+  it.each(["read", "write", "edit"])("%s 在共享区不问，自己的 agent 目录里读问、写拒", (toolName) => {
     expect(decide(call(toolName, { path: join(dirs().sharedDir, "delivery.txt") }), [], []).verdict).toBe("allow");
-    expect(decide(call(toolName, { path: join(dirs().agentDir, "auth.json") }), [], []).verdict).toBe("ask");
+    expect(decide(call(toolName, { path: join(dirs().agentDir, "auth.json") }), [], []).verdict).toBe(
+      toolName === "read" ? "ask" : "deny",
+    );
+  });
+
+  describe("自己 Bot 目录里 work 和共享区以外的部分，写直接拒绝，读照旧", () => {
+    const botDir = (): string => dirname(workDir);
+    const privatePaths = (): readonly string[] => [
+      join(dirs().agentDir, "note.txt"),
+      join(dirs().skillsDir, "n.txt"),
+      join(dirs().sessionDir, "n.txt"),
+      join(botDir(), "top.txt"),
+    ];
+    const bashOn = (command: string, sandbox: GateCall["sandbox"] = "seatbelt"): GateCall => ({
+      ...call("bash", { command }),
+      sandbox,
+    });
+    const REASON = "自己的配置和会话目录";
+
+    it.each(["write", "edit"])("%s 写这四处直接拒绝，授权也救不了，理由让模型改写工作目录或共享区", (toolName) => {
+      for (const path of privatePaths()) {
+        const decision = decide(call(toolName, { path }), [grant("write_outside", pathTarget(path), "forever")], []);
+        expect(decision, path).toMatchObject({ verdict: "deny", action: "write_outside" });
+        expect(decision.reason, path).toContain(REASON);
+        expect(decision.reason, path).toContain("工作目录或共享区");
+      }
+    });
+
+    it.each(["seatbelt", "bwrap"] as const)("%s 下 bash 的写、改名、删除落在这四处都直接拒绝", (sandbox) => {
+      for (const path of privatePaths()) {
+        for (const command of [
+          `echo ok > ${path}`,
+          `echo ok >> ${path}`,
+          `cp x ${path}`,
+          `touch ${path}`,
+          `mkdir -p ${path}`,
+          `tee ${path}`,
+          `mv x ${path}`,
+          `rm ${path}`,
+          `ln -s x ${path}`,
+        ]) {
+          const decision = decide(bashOn(command, sandbox), [grant("write_outside", pathTarget(path), "forever")], []);
+          expect(decision.verdict, command).toBe("deny");
+          expect(decision.reason, command).toContain(REASON);
+        }
+      }
+    });
+
+    it("从工作目录用相对路径或沿链接绕出去也一样", () => {
+      expect(decide(bashOn("cp x ../agent/note.txt"), [], [])).toMatchObject({ verdict: "deny" });
+      expect(decide(call("write", { path: "../top.txt" }), [], []).verdict).toBe("deny");
+      const link = join(workDir, "to-agent");
+      symlinkSync(dirs().agentDir, link);
+      expect(decide(call("write", { path: join(link, "auth.json") }), [], []).verdict).toBe("deny");
+      expect(decide(bashOn(`echo ok > ${join(link, "auth.json")}`), [], []).verdict).toBe("deny");
+    });
+
+    it("同目录的读不被拒，仍按工作目录外的读问", () => {
+      for (const path of privatePaths()) {
+        expect(decide(call("read", { path }), [], []), path).toMatchObject({
+          verdict: "ask",
+          action: "read",
+          reason: null,
+        });
+        expect(decide(bashOn(`cat ${path}`), [], []), path).toMatchObject({
+          verdict: "ask",
+          action: "read",
+          reason: null,
+        });
+        expect(decide(bashOn(`cp ${path} .`), [], []), path).toMatchObject({ verdict: "ask", action: "read" });
+      }
+    });
+
+    it.each(["seatbelt", "bwrap"] as const)("%s 下工作目录和共享区里的写照原规则放行", (sandbox) => {
+      for (const base of [workDir, dirs().sharedDir]) {
+        const path = join(base, "own-private-ok.txt");
+        expect(decide({ ...call("write", { path }), sandbox }, [], [])).toMatchObject({
+          verdict: "allow",
+          reason: null,
+        });
+        expect(decide(bashOn(`echo ok > ${path}`, sandbox), [], [])).toMatchObject({ verdict: "allow", reason: null });
+        expect(decide(bashOn(`mkdir -p ${join(base, "sub", "deep")}`, sandbox), [], [])).toMatchObject({
+          verdict: "allow",
+          reason: null,
+        });
+      }
+    });
   });
 
   it.each(["read", "write", "edit"])("%s 沿工作目录或共享区的链接仍不能碰别的 Bot", (toolName) => {

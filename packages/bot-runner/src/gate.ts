@@ -126,7 +126,7 @@ export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "poker_review",
 ]);
 
-type ZoneHit = "hidden" | "read_only" | "other_bot" | "protected_root" | null;
+type ZoneHit = "hidden" | "read_only" | "other_bot" | "own_private" | "protected_root" | null;
 
 const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
 
@@ -155,6 +155,13 @@ const zoneHit = (action: ActionKind, path: string, call: GateContext & { readonl
     !isInsideRoot(real, call.zones.sharedDir, call.platform)
   )
     return "other_bot";
+  // Bot 目录里 work 以外是 Pi 和运行器自己的配置与会话。Pi 的 write、edit 在进程内执行，不过沙箱，批了真会写进去；bash 的沙箱只给 work 写权限，批了也写不进。共享区在数据根下，不在 Bot 目录里。
+  if (
+    MUTATIONS.has(action) &&
+    isInsideRoot(real, call.zones.botDir, call.platform) &&
+    !isInsideRoot(real, call.workDir, call.platform)
+  )
+    return "own_private";
   return null;
 };
 
@@ -162,6 +169,7 @@ const ZONE_REASONS: Readonly<Record<Exclude<ZoneHit, null>, string>> = {
   hidden: "这个路径属于固定禁区，不能读取或修改。",
   read_only: "这个路径是配图拷贝目录，属于固定禁区，只能读不能改。",
   other_bot: "这个路径属于其他 Bot 或数据目录的私有区域，不能读取或修改。请使用共享区交换文件。",
+  own_private: "这个路径是 Bot 自己的配置和会话目录，不能修改。请把文件写到工作目录或共享区。",
   protected_root: "工作目录和共享区的根不能删除或替换，请只修改目录里的文件。",
 };
 
