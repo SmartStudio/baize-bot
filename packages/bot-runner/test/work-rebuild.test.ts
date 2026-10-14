@@ -1,23 +1,13 @@
-import { createServer } from "node:http";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  EMPTY_WORK_HEAD,
-  advanceWorkHead,
-  BotId,
-  ComputerId,
-  GroupId,
-  MessageId,
-  RunId,
-  type WorkAppend,
-  type HubLaneSnapshot,
-} from "@baize/shared";
+import { EMPTY_WORK_HEAD, BotId, ComputerId, GroupId, MessageId, RunId, type HubLaneSnapshot } from "@baize/shared";
 import { createRetainer } from "@baize/shared/work-record";
 import { afterEach, expect, it, vi } from "vitest";
 import { createRunner, type Runner, type RunnerConfig, type PromptMessage } from "../src/index.js";
 import { startGateway } from "./fixtures/gateway.js";
 import { scriptedUpstream } from "./fixtures/openai-sse.js";
+import { startWorkHub } from "./helpers/work-hub.js";
 import { WorkMirror } from "../src/work-mirror.js";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -67,49 +57,9 @@ it("Hub 快照原始行和链头不符时拒绝重建", async () => {
 });
 
 async function records() {
-  let lines: string[] = [];
-  const frames: WorkAppend[] = [];
-  const snapshot = async (): Promise<HubLaneSnapshot> => ({
-    entries: lines.map((line, seq) => ({ seq, line })),
-    nextSeq: lines.length,
-    head: await advanceWorkHead(EMPTY_WORK_HEAD, lines),
-    piSessionVersion: lines.length ? 3 : null,
-  });
-  const server = createServer((req, res) => {
-    void (async () => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      const after = Number(url.searchParams.get("after") ?? -1);
-      const limit = Number(url.searchParams.get("limit") ?? 200);
-      const data = await snapshot();
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ...data, entries: data.entries.filter((entry) => entry.seq > after).slice(0, limit) }));
-    })().catch((error: unknown) => {
-      res.writeHead(500).end(String(error));
-    });
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("Hub 没有监听端口");
-  cleanup.push(
-    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
-  );
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}/hub/v1`,
-    frames,
-    snapshot,
-    reset: (next: string[]) => {
-      lines = [...next];
-    },
-    append: async (frame: WorkAppend) => {
-      frames.push(frame);
-      if (frame.lines.length === 0) return { kind: "ok" as const };
-      if (frame.fromSeq !== lines.length) return { kind: "seq_mismatch" as const, nextSeq: lines.length };
-      if ((await advanceWorkHead((await snapshot()).head, frame.lines)) !== frame.head)
-        return { kind: "head_mismatch" as const };
-      lines.push(...frame.lines);
-      return { kind: "ok" as const };
-    },
-  };
+  const hub = await startWorkHub();
+  cleanup.push(hub.close);
+  return hub;
 }
 
 function prompt(text: string, snapshot?: HubLaneSnapshot): PromptMessage {

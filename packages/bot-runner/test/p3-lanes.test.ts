@@ -37,6 +37,7 @@ import { createLane, findLaneRun } from "../src/lane.js";
 import { LaneFence } from "../src/lane-fence.js";
 import { downloadAttachment } from "../src/attachments.js";
 import { startAttachmentHub } from "./helpers/attachments.js";
+import { startWorkHub } from "./helpers/work-hub.js";
 import { acquireBotBrowserMutex, BrowserMutex } from "../src/browser-mutex.js";
 import { startGateway } from "./fixtures/gateway.js";
 import { isFollowUpTurn, scriptedUpstream, type ScriptedTurn, type Upstream } from "./fixtures/openai-sse.js";
@@ -1450,7 +1451,7 @@ describe("分道与租约合并", () => {
     }
   }, 5000);
 
-  it("同道复用会话的两条 run，模型和 MCP 代执行各现取自己的代际", async () => {
+  it("同道换代际的两条 run，会话按服务器重建，模型和 MCP 代执行各带本条 run 的代际", async () => {
     const proxyHeaders: Array<string | string[] | undefined> = [];
     const proxy = createServer(async (request, response) => {
       const parts: Buffer[] = [];
@@ -1468,17 +1469,27 @@ describe("分道与租约合并", () => {
       await new Promise<void>((resolve) => proxy.close(() => resolve()));
     });
     const sessions = vi.spyOn(AgentSession.prototype, "prompt");
+    const hub = await startWorkHub();
+    cleanups.push(() => hub.close());
     const h = await harness(
       scriptedUpstream((request) => (request.messages.at(-1)?.role === "tool" ? finish : call("lookup_lane"))),
       {
         tools: [{ ...connection("http://unused", "lookup_lane", false), localOnly: false }],
         mcpProxy: { baseUrl: `http://127.0.0.1:${address.port}/mcp-proxy` },
+        hub: { baseUrl: hub.baseUrl },
+        workAppend: hub.append,
       },
     );
     await h.runner.prompt({ ...prompt("reuse-old"), lane: { epoch: 3, heads: {} } });
-    await h.runner.prompt({ ...prompt("reuse-new"), lane: { epoch: 8, heads: {} } });
+    const confirmed = await hub.snapshot();
+    await h.runner.prompt({
+      ...prompt("reuse-new"),
+      lane: { epoch: 8, heads: { chat: { seq: confirmed.nextSeq, head: confirmed.head } } },
+    });
     expect(sessions).toHaveBeenCalledTimes(2);
-    expect(sessions.mock.contexts[1]).toBe(sessions.mock.contexts[0]);
+    expect(sessions.mock.contexts[1] === sessions.mock.contexts[0], "换代际后会话对象重建").toBe(false);
+    expect(hub.readHeaders).toEqual(["bot-lanes/group-a/8"]);
+    expect(JSON.stringify(h.gateway.laneRequests.at(-1)?.body.messages)).toContain("reuse-old");
     expect(proxyHeaders).toEqual(["bot-lanes/group-a/3", "bot-lanes/group-a/8"]);
     expect(h.gateway.laneHeaders).toEqual([
       "bot-lanes/group-a/3",
@@ -1511,6 +1522,7 @@ describe("分道与租约合并", () => {
         bots,
         tools: [{ ...connection(mcp.url), assignedBotIds: bots.map((bot) => bot.id) }],
         workAppend: async (frame) => {
+          if (frame.cause !== "before_effect") return { kind: "ok" };
           const bot = frame.lane.botId === "bot-lanes" ? "a" : "b";
           probeArrived[bot].resolve();
           if (bot === "a") return await new Promise(() => {});
@@ -1688,6 +1700,7 @@ describe("分道与租约合并", () => {
             ? { browser: { profileDir: join(tmpdir(), "baize-pause-window"), connection: async () => browser.cdp } }
             : {}),
           workAppend: async (frame) => {
+            if (frame.cause !== "before_effect") return { kind: "ok" };
             probes.push(frame.runId ?? "no-run");
             return { kind: "ok" };
           },
