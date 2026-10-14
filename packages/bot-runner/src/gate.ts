@@ -15,6 +15,7 @@ import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
+import { TAKEOVER_TOOL } from "./takeover.js";
 import {
   type ForbiddenZones,
   isInsideRoot,
@@ -49,8 +50,8 @@ export interface GateCall extends GateContext {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   /**
-   * 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属是 null。撤销连接后会话里残留的旧 MCP 工具
-   * 到不了这里：运行器按 `mcp.resolve` 认出它已撤下，在闸门之前就拒。
+   * 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属是 null。MCP 的操作归属取 run 的代际；
+   * 最新的授权和审批偏好由运行器在调用时传入。
    */
   readonly source: ToolSource | null;
   /** 助理浏览器当前页的主机名，点和填按它授权。没有浏览器、还没开页或停在空白页是 null。 */
@@ -107,6 +108,7 @@ const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm"
 /** 闸门按名字直接放行的内部工具。运行器把这里的名字全部保留，工具连接里同名的操作不注册：工厂还是空桩时名字也占着，不然同名的 MCP 操作会顶着这个名字免审批执行。 */
 export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
+  "recall_memory",
   "update_checklist",
   "mention_bot",
   "handoff_task",
@@ -125,26 +127,51 @@ export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "poker_review",
 ]);
 
-type ZoneHit = "hidden" | "read_only" | null;
+type ZoneHit = "hidden" | "read_only" | "other_bot" | "own_private" | "protected_root" | null;
 
 const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
 
 // 改动落在禁区的祖先上（放宽写整个数据目录、删掉上一级）也算碰禁区。
-const zoneHit = (action: ActionKind, path: string, call: GateContext): ZoneHit => {
+const zoneHit = (action: ActionKind, path: string, call: GateContext & { readonly toolName?: string }): ZoneHit => {
   const real = realpathExisting(path);
   const inside = (zone: readonly string[]): boolean => zone.some((prefix) => isInsideRoot(real, prefix, call.platform));
   const covers = (zone: readonly string[]): boolean =>
     MUTATIONS.has(action) &&
     action !== "write_workspace" &&
     zone.some((prefix) => isInsideRoot(prefix, path, call.platform));
+  if (covers([call.zones.dataDir])) return "other_bot";
   if (inside(call.zones.hidden) || covers(call.zones.hidden)) return "hidden";
   if (MUTATIONS.has(action) && (inside(call.zones.readOnly) || covers(call.zones.readOnly))) return "read_only";
+  if (
+    call.toolName !== "bash" &&
+    MUTATIONS.has(action) &&
+    [call.workDir, call.zones.sharedDir].some(
+      (root) => isInsideRoot(real, root, call.platform) && isInsideRoot(root, real, call.platform),
+    )
+  )
+    return "protected_root";
+  if (
+    isInsideRoot(real, call.zones.dataDir, call.platform) &&
+    !isInsideRoot(real, call.zones.botDir, call.platform) &&
+    !isInsideRoot(real, call.zones.sharedDir, call.platform)
+  )
+    return "other_bot";
+  // Bot 目录里 work 以外是 Pi 和运行器自己的配置与会话。Pi 的 write、edit 在进程内执行，不过沙箱，批了真会写进去；bash 的沙箱只给 work 写权限，批了也写不进。共享区在数据根下，不在 Bot 目录里。
+  if (
+    MUTATIONS.has(action) &&
+    isInsideRoot(real, call.zones.botDir, call.platform) &&
+    !isInsideRoot(real, call.workDir, call.platform)
+  )
+    return "own_private";
   return null;
 };
 
 const ZONE_REASONS: Readonly<Record<Exclude<ZoneHit, null>, string>> = {
   hidden: "这个路径属于固定禁区，不能读取或修改。",
   read_only: "这个路径是配图拷贝目录，属于固定禁区，只能读不能改。",
+  other_bot: "这个路径属于其他 Bot 或数据目录的私有区域，不能读取或修改。请使用共享区交换文件。",
+  own_private: "这个路径是 Bot 自己的配置和会话目录，不能修改。请把文件写到工作目录或共享区。",
+  protected_root: "工作目录和共享区的根不能删除或替换，请只修改目录里的文件。",
 };
 
 const targetForPath = (path: string, computerId: ComputerId): GrantTarget => ({
@@ -174,7 +201,9 @@ const writePath = (path: string, call: GateContext): ClassifiedAction => {
   }
   const absolute = realpathExisting(logical);
   return resolvedPathAction(
-    isInsideRoot(absolute, call.workDir, call.platform) ? "write_workspace" : "write_outside",
+    isInsideRoot(absolute, call.workDir, call.platform) || isInsideRoot(absolute, call.zones.sharedDir, call.platform)
+      ? "write_workspace"
+      : "write_outside",
     absolute,
     call,
   );
@@ -549,10 +578,14 @@ const classifyOwnTool = (call: GateCall): readonly ClassifiedAction[] | null => 
   }
   if (call.toolName === "bash") return classifyBash(call);
   if (INTERNAL_TOOLS.has(call.toolName)) {
-    return [plainAction(call.toolName === "read_task" ? "read" : "write_workspace")];
+    return [
+      plainAction(call.toolName === "read_task" || call.toolName === "recall_memory" ? "read" : "write_workspace"),
+    ];
   }
   // 只发 GET，账号越权在工具里、令牌在控制面，这里归 read 不问。
   if (call.toolName === ACCOUNT_READ_TOOL) return [plainAction("read", targetFromInput(call.input, call))];
+  // 请用户接手：在页上动手的是用户自己，Bot 只把页摆到用户眼前，归 read 不问。
+  if (call.toolName === TAKEOVER_TOOL) return [plainAction("read")];
   const browserAction = BROWSER_TOOL_ACTIONS.get(call.toolName);
   // 点和填的目标只认浏览器自己报的当前页主机名：入参是模型写的，写个 hostname 就能冒领别的域名的授权。
   if (browserAction === "engage") return [plainAction(browserAction, browserTarget(call.browserHost ?? null))];
@@ -612,7 +645,11 @@ const verdictForItem = (
   }
   switch (item.action) {
     case "read":
-      return item.path === null || isInsideRoot(item.path, call.workDir, call.platform) ? "allow" : "ask";
+      return item.path === null ||
+        isInsideRoot(item.path, call.workDir, call.platform) ||
+        isInsideRoot(item.path, call.zones.sharedDir, call.platform)
+        ? "allow"
+        : "ask";
     case "write_workspace":
       return "allow";
     case "write_outside":

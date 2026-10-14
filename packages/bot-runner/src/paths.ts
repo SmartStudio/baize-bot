@@ -1,6 +1,6 @@
 import { lstatSync, mkdirSync, readlinkSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BotId, GroupId } from "@baize/shared";
 
@@ -20,6 +20,8 @@ export interface BotDirs {
   readonly skillsDir: string;
   /** 配图起草时拷到这里，按 sha256 命名。Bot 能读不能写，发布时拿到的就是起草时的字节。 */
   readonly draftsDir: string;
+  /** 所有 Bot 共用的产出目录。 */
+  readonly sharedDir: string;
 }
 
 // GroupId 在边界上已经是这段正则。这里再挡一次：拼路径时不改写，对不上就拒绝。
@@ -39,11 +41,12 @@ export function botDirs(dataDir: string, botId: BotId): BotDirs {
     workDir: join(root, "work"),
     skillsDir: join(root, "skills"),
     draftsDir: join(root, "drafts"),
+    sharedDir: resolve(dataDir, "shared"),
   };
 }
 
 export function ensureBotDirs(dirs: BotDirs): BotDirs {
-  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir]) {
+  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir, dirs.sharedDir]) {
     mkdirSync(dir, { recursive: true });
   }
   return dirs;
@@ -51,6 +54,9 @@ export function ensureBotDirs(dirs: BotDirs): BotDirs {
 
 /** 闸门和两种沙箱共用的禁区。hidden 读写都不行，readOnly 能读不能写。 */
 export interface ForbiddenZones {
+  readonly dataDir: string;
+  readonly botDir: string;
+  readonly sharedDir: string;
   readonly hidden: readonly string[];
   readonly readOnly: readonly string[];
   /** `hidden` 里来自 `config.browser.profileDir` 的那一条，解不出真实路径时报错要点名这项配置。 */
@@ -58,9 +64,26 @@ export interface ForbiddenZones {
 }
 
 // 助理 Chrome 的 profile 只认 config 给的路径，不按数据目录的布局去猜：猜错了等于没禁。
-export function forbiddenZones(dirs: Pick<BotDirs, "draftsDir">, browserProfileDir: string | null): ForbiddenZones {
+export function forbiddenZones(
+  dirs: Pick<BotDirs, "draftsDir" | "workDir" | "sharedDir">,
+  browserProfileDir: string | null,
+): ForbiddenZones {
   const home = homedir();
+  const botDir = dirname(dirs.workDir);
+  const dataDir = realpathExisting(dirname(botDir));
+  const realBotDir = realpathExisting(botDir);
+  const sharedDir = realpathExisting(dirs.sharedDir);
+  if (
+    realBotDir !== join(dataDir, basename(botDir)) ||
+    realpathExisting(dirs.workDir) !== join(realBotDir, "work") ||
+    sharedDir !== join(dataDir, "shared")
+  ) {
+    throw new PathError("Bot 目录隔离配置无效：Bot、工作目录和共享区的根不能通过符号链接指向其他位置。");
+  }
   return {
+    dataDir,
+    botDir: realBotDir,
+    sharedDir,
     hidden: [
       join(home, ".ssh"),
       join(home, "Library", "Keychains"),

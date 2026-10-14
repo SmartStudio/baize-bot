@@ -801,6 +801,10 @@ describe("建队卡", () => {
       const locking = sqlGate.arm(LOCK_OPEN_RUN, "before");
       sendOffer(s, prompt, [RESEARCHER], created.group.id);
       await within(locking.reached, "上行走到落卡事务");
+      const [targetLanes] = await observer<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM lane_leases WHERE bot_id = ANY(${[...s.project.memberIds]})
+      `;
+      expect(targetLanes?.count, "目标成员没有运行过，不持有任何道租约").toBe(0);
       try {
         for (const id of s.project.memberIds) {
           expect((await s.client.delete(`/api/bots/${id}`)).status).toBe(204);

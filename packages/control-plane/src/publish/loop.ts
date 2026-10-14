@@ -1,6 +1,7 @@
 import type { AgentHub } from "../agent/hub.js";
 import type { AccountTokens } from "../credentials.js";
 import type { Db } from "../db/client.js";
+import { enqueueDownlink, lockEnvelopeComputer } from "../agent/envelope.js";
 import type { NoticePublisher } from "../notifications.js";
 import { claimDueDrafts, failStaleDrafts, reopenMissedDrafts, type ClaimedDraft } from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
@@ -17,7 +18,7 @@ export type PublishLoopOptions = {
   readonly notifications: NoticePublisher;
   readonly tokens: AccountTokens;
   readonly bases: ApiBases;
-  readonly computers: Pick<AgentHub, "onlineComputerIds" | "send" | "sendConfig">;
+  readonly computers: Pick<AgentHub, "deliverableComputerIds" | "canDeliver" | "flushOutbox" | "sendConfig">;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;
@@ -70,12 +71,25 @@ export class PublishLoop {
   async tick(): Promise<void> {
     const now = this.#now();
     await this.#failStale(now);
-    const claimed = await claimDueDrafts(
-      this.#options.db,
-      now,
-      COMPUTER_PLATFORMS,
-      this.#options.computers.onlineComputerIds(),
-    );
+    const computerIds = this.#options.computers.deliverableComputerIds();
+    const claimed = await this.#options.db.transaction(async (tx) => {
+      for (const computerId of computerIds.toSorted()) await lockEnvelopeComputer(tx, computerId);
+      return claimDueDrafts(tx as unknown as Db, now, COMPUTER_PLATFORMS, computerIds, async (claimTx, batch) => {
+        for (const one of batch) {
+          const publisher = PUBLISHERS[one.draft.platform];
+          if (publisher.via !== "computer" || !this.#options.computers.canDeliver(one.computerId)) continue;
+          await enqueueDownlink(claimTx, one.computerId, {
+            type: "publish_draft",
+            draftId: one.draft.id,
+            botId: one.draft.botId,
+            accountId: one.draft.accountId,
+            platform: publisher.platform,
+            content: one.draft.content,
+            attempt: one.claimedAt.toISOString(),
+          });
+        }
+      });
+    });
     await Promise.all(
       claimed.map(async (one) => {
         this.#options.push.push(one.ownerId, { type: "draft_updated", draft: one.draft });
@@ -95,16 +109,7 @@ export class PublishLoop {
     const publisher = PUBLISHERS[draft.platform];
     const scope = { draftId: draft.id, claimedAt: claimed.claimedAt };
     if (publisher.via === "computer") {
-      // 发不出去就是电脑刚好在抢完之后断了。留在 publishing，超时记失败。
-      this.#options.computers.send(claimed.computerId, {
-        type: "publish_draft",
-        draftId: draft.id,
-        botId: draft.botId,
-        accountId: draft.accountId,
-        platform: publisher.platform,
-        content: draft.content,
-        attempt: claimed.claimedAt.toISOString(),
-      });
+      await this.#options.computers.flushOutbox(claimed.computerId);
       return;
     }
     try {

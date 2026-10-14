@@ -4,8 +4,8 @@ import { contentHash } from "../src/repo/drafts.js";
 
 const ACCOUNT = AccountId.parse("0d9a3a55-5b8e-4d1c-9f0e-3f7c1f2a6b01");
 const OTHER = AccountId.parse("0d9a3a55-5b8e-4d1c-9f0e-3f7c1f2a6b02");
-const A = { path: "/tmp/a.png", sha256: "a".repeat(64) };
-const B = { path: "/tmp/b.png", sha256: "b".repeat(64) };
+const A = { kind: "path" as const, path: "/tmp/a.png", sha256: "a".repeat(64) };
+const B = { kind: "path" as const, path: "/tmp/b.png", sha256: "b".repeat(64) };
 
 const post: DraftContent = {
   kind: "post",

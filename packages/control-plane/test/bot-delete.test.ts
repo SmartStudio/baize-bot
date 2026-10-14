@@ -21,7 +21,7 @@ import { connectPush, type PushClient } from "./helpers/ws.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
 
-/** 派活建完 run 行、写上下文窗口之前的那条。拦在它前面，run 已提交，prompt 还没发。 */
+/** 派活事务里写上下文窗口的那条。拦在它前面，run 和 prompt outbox 都还没提交。 */
 const RECORD_CONTEXT = /^update "runs" set "unsettled_context"/;
 
 /** 建 run 事务的头一条，拦在它前面，路由已经选好人、run 还没建，删 Bot 不用等任何锁。 */
@@ -257,7 +257,13 @@ describe("删 Bot 和别的写并发", () => {
     let starting: ReturnType<typeof gate.arm> | undefined;
     try {
       expect((await live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小销 先干" })).status).toBe(201);
-      expect((await live.agent.expect("prompt")).botId).toBe(sales.id);
+      const first = await live.agent.expect("prompt");
+      expect(first.botId).toBe(sales.id);
+      // 首条 prompt 的确认也拿 owner 共享锁，必须等它提交，闸门才能只拦第二次派活。
+      await waitFor(async () => {
+        const pending = await database.sql`SELECT 1 FROM agent_outbox WHERE run_id = ${first.runId}`;
+        return pending.length === 0;
+      }, "首条 prompt 的下行确认提交");
 
       starting = gate.arm(START_RUN, "before");
       const posting = live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小服 回客户" });
@@ -481,25 +487,34 @@ describe("删掉回合里的 Bot", () => {
     }
   });
 
-  it("run 已建、prompt 还没发时删掉这一位：回合不把它设成当前说话的，接着派下一位", async () => {
+  it("run、上下文和 prompt 同事务提交，删 Bot 等它提交后推进下一位", async () => {
     const live = await team(["小销", "小服"]);
     const sales = nth(live.bots, 0);
     const service = nth(live.bots, 1);
     const recording = gate.arm(RECORD_CONTEXT, "before");
+    let deleting: Promise<Response> | undefined;
+    let deleted = false;
+    let posting: Promise<Response> | undefined;
     try {
-      const posting = live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小销 @小服 一起干" });
+      posting = live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小销 @小服 一起干" });
       await recording.reached;
-      expect((await live.client.delete(`/api/bots/${sales.id}`)).status).toBe(204);
+      deleting = live.client.delete(`/api/bots/${sales.id}`).then((response) => {
+        deleted = true;
+        return response;
+      });
+      await waitFor(async () => deleted || (await lockWaiters()) > 0, "删 Bot 停在派活事务的 Bot 锁上");
+      expect(deleted, "run、上下文和 prompt outbox 提交前不能删掉 Bot").toBe(false);
       recording.release();
-      expect((await posting).status).toBe(201);
+      const [posted, removed] = await Promise.all([posting, deleting]);
+      expect(posted.status, await posted.clone().text()).toBe(201);
+      expect(removed.status, await removed.clone().text()).toBe(204);
 
       const prompts = await promptsBefore(live, service);
       expect(
         prompts.filter((prompt) => prompt.botId === service.id),
         "小服恰好派到一次",
       ).toHaveLength(1);
-      // 小销的 run 在删除前已提交，那条 prompt 可能已经发出去，运行器那边随 config 换掉它，这里当它跑完了。
-      for (const orphan of prompts.filter((prompt) => prompt.botId === sales.id)) await finish(live, orphan);
+      // 小销的 prompt 若已送达，其 run 随 Bot 一起删除，不能再用 run_done 确认。
 
       const push = await pushOf(live);
       try {
@@ -510,6 +525,7 @@ describe("删掉回合里的 Bot", () => {
       }
     } finally {
       recording.release();
+      await Promise.all([posting, deleting]);
       live.close();
     }
   });

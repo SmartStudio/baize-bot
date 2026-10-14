@@ -21,9 +21,24 @@ import {
   type PublishFailureReason,
   type RunId,
 } from "@baize/shared";
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  notExists,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { accounts, contentPlans, drafts, publications } from "../db/schema.js";
+import { accounts, agentOutbox, bots, contentPlans, drafts, publications } from "../db/schema.js";
+import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
@@ -469,58 +484,70 @@ export async function claimDueDrafts(
   now: Date,
   computerPlatforms: readonly Platform[],
   onlineComputers: readonly ComputerId[],
+  onClaim?: (tx: Tx, claimed: readonly ClaimedDraft[]) => Promise<void>,
 ): Promise<ClaimedDraft[]> {
-  const reachable =
-    computerPlatforms.length === 0
-      ? sql`true`
-      : onlineComputers.length === 0
-        ? notInArray(drafts.platform, [...computerPlatforms])
-        : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
-  const claimed = await db
-    .update(drafts)
-    // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
-    // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
-    // 登录会话代次也在这条语句里抄：它和 login = 'valid' 是同一行同一刻看到的。
-    .set({
-      status: "publishing",
-      claimedAt: sql`date_trunc('milliseconds', now())`,
-      claimedLoginGeneration: sql`${accounts.loginGeneration}`,
-    })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.id, drafts.accountId),
-        eq(drafts.status, "approved"),
-        eq(drafts.approvedHash, drafts.contentHash),
-        inArray(accounts.tier, [...PUBLISHING_TIERS]),
-        // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
-        eq(accounts.login, "valid"),
-        or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
-        reachable,
-      ),
-    )
-    .returning({ id: drafts.id });
-  if (claimed.length === 0) return [];
-  const rows = await db
-    .select({ draft: drafts, handle: accounts.handle, computerId: accounts.computerId })
-    .from(drafts)
-    .innerJoin(accounts, eq(accounts.id, drafts.accountId))
-    .where(
-      inArray(
-        drafts.id,
-        claimed.map((row) => row.id),
-      ),
-    )
-    .orderBy(asc(drafts.createdAt), asc(drafts.id));
-  return rows.map((row) => {
-    if (row.draft.claimedAt === null) throw new Error(`刚认领的草稿 ${row.draft.id} 没有认领时刻`);
-    return {
-      draft: toDraft(row.draft),
-      ownerId: UserId.parse(row.draft.ownerId),
-      handle: row.handle,
-      computerId: ComputerId.parse(row.computerId),
-      claimedAt: row.draft.claimedAt,
-    };
+  return db.transaction(async (tx) => {
+    const reachable =
+      computerPlatforms.length === 0
+        ? sql`true`
+        : onlineComputers.length === 0
+          ? notInArray(drafts.platform, [...computerPlatforms])
+          : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
+    const claimed = await tx
+      .update(drafts)
+      // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
+      // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
+      // 登录会话代次也在这条语句里抄：它和 login = 'valid' 是同一行同一刻看到的。
+      .set({
+        status: "publishing",
+        claimedAt: sql`date_trunc('milliseconds', now())`,
+        claimedLoginGeneration: sql`${accounts.loginGeneration}`,
+      })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.id, drafts.accountId),
+          eq(drafts.status, "approved"),
+          eq(drafts.approvedHash, drafts.contentHash),
+          inArray(accounts.tier, [...PUBLISHING_TIERS]),
+          // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
+          eq(accounts.login, "valid"),
+          // 暂停是挂起，不把到点的稿子抢成终态失败；恢复后下一轮照抢。
+          notExists(
+            tx
+              .select({ id: bots.id })
+              .from(bots)
+              .where(and(eq(bots.id, drafts.botId), eq(bots.runState, "paused"))),
+          ),
+          or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
+          reachable,
+        ),
+      )
+      .returning({ id: drafts.id });
+    if (claimed.length === 0) return [];
+    const rows = await tx
+      .select({ draft: drafts, handle: accounts.handle, computerId: accounts.computerId })
+      .from(drafts)
+      .innerJoin(accounts, eq(accounts.id, drafts.accountId))
+      .where(
+        inArray(
+          drafts.id,
+          claimed.map((row) => row.id),
+        ),
+      )
+      .orderBy(asc(drafts.createdAt), asc(drafts.id));
+    const result = rows.map((row) => {
+      if (row.draft.claimedAt === null) throw new Error(`刚认领的草稿 ${row.draft.id} 没有认领时刻`);
+      return {
+        draft: toDraft(row.draft),
+        ownerId: UserId.parse(row.draft.ownerId),
+        handle: row.handle,
+        computerId: ComputerId.parse(row.computerId),
+        claimedAt: row.draft.claimedAt,
+      };
+    });
+    await onClaim?.(tx, result);
+    return result;
   });
 }
 
@@ -621,12 +648,14 @@ export async function settleFailed(
   rejected?: RejectedCredentials,
 ): Promise<{ draft: Draft; ownerId: UserId; login: LoginEffect } | null> {
   return db.transaction(async (tx) => {
+    await lockDraftDeliveries(tx, settleWhere(scope));
     const [row] = await tx
       .update(drafts)
       .set({ status: "failed", failure: reason })
       .where(settleWhere(scope))
       .returning();
     if (row === undefined) return null;
+    await deleteDraftDownlinks(tx, [row.id]);
     const ownerId = UserId.parse(row.ownerId);
     const draft = toDraft(row);
     if (reason !== "login_expired") return { draft, ownerId, login: { kind: "unchanged" } };
@@ -656,12 +685,41 @@ function claimedSession(row: {
 
 /** 抢到之后太久没有结论的，多半是发的那个进程没了。记成出错，不重发：平台那边可能已经发出去了。 */
 export async function failStaleDrafts(db: Db, before: Date): Promise<{ draft: Draft; ownerId: UserId }[]> {
-  const rows = await db
-    .update(drafts)
-    .set({ status: "failed", failure: "error" })
-    .where(and(eq(drafts.status, "publishing"), lt(drafts.claimedAt, before)))
-    .returning();
-  return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  return db.transaction(async (tx) => {
+    const condition = and(eq(drafts.status, "publishing"), lt(drafts.claimedAt, before));
+    const candidates = await lockDraftDeliveries(tx, condition);
+    if (candidates.length === 0) return [];
+    const rows = await tx
+      .update(drafts)
+      .set({ status: "failed", failure: "error" })
+      .where(and(condition, inArray(drafts.id, candidates)))
+      .returning();
+    await deleteDraftDownlinks(
+      tx,
+      rows.map(({ id }) => id),
+    );
+    return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  });
+}
+
+async function lockDraftDeliveries(tx: Tx, condition: SQL | undefined): Promise<string[]> {
+  const rows = await tx
+    .select({ id: drafts.id, computerId: accounts.computerId })
+    .from(drafts)
+    .innerJoin(accounts, eq(accounts.id, drafts.accountId))
+    .where(condition);
+  for (const id of [...new Set(rows.map(({ computerId }) => computerId))].toSorted())
+    await lockEnvelopeComputer(tx, ComputerId.parse(id));
+  return rows.map(({ id }) => id);
+}
+
+async function deleteDraftDownlinks(tx: Tx, ids: readonly string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await tx
+    .delete(agentOutbox)
+    .where(
+      and(sql`${agentOutbox.body}->>'type' = 'publish_draft'`, inArray(sql`${agentOutbox.body}->>'draftId'`, [...ids])),
+    );
 }
 
 /**
@@ -669,22 +727,28 @@ export async function failStaleDrafts(db: Db, before: Date): Promise<{ draft: Dr
  * 判据是批准和到点两者中较晚的那个早于启动时刻减一轮：批的时候已经过了点的，是批完下一轮就该发的，不算错过。
  */
 export async function reopenMissedDrafts(db: Db, missedBefore: Date): Promise<{ draft: Draft; ownerId: UserId }[]> {
-  const rows = await db
-    .update(drafts)
-    .set({ status: "pending", approvedHash: null, decidedAt: null, failure: null })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.id, drafts.accountId),
-        eq(drafts.status, "approved"),
-        inArray(accounts.tier, [...PUBLISHING_TIERS]),
-        // 过期账号的稿本来就停着等重新登录，不算停机错过；重登后由正常轮询抢。
-        eq(accounts.login, "valid"),
-        isNotNull(drafts.scheduledAt),
-        // greatest 跳过 NULL：没记批准时刻的只看到点时刻。
-        sql`greatest(${drafts.scheduledAt}, ${drafts.decidedAt}) < ${missedBefore.toISOString()}::timestamptz`,
-      ),
-    )
-    .returning();
-  return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  return db.transaction(async (tx) => {
+    const condition = and(
+      eq(drafts.status, "approved"),
+      inArray(accounts.tier, [...PUBLISHING_TIERS]),
+      // 过期账号的稿本来就停着等重新登录，不算停机错过；重登后由正常轮询抢。
+      eq(accounts.login, "valid"),
+      isNotNull(drafts.scheduledAt),
+      // greatest 跳过 NULL：没记批准时刻的只看到点时刻。
+      sql`greatest(${drafts.scheduledAt}, ${drafts.decidedAt}) < ${missedBefore.toISOString()}::timestamptz`,
+    );
+    const candidates = await lockDraftDeliveries(tx, condition);
+    if (candidates.length === 0) return [];
+    const rows = await tx
+      .update(drafts)
+      .set({ status: "pending", approvedHash: null, decidedAt: null, failure: null })
+      .from(accounts)
+      .where(and(eq(accounts.id, drafts.accountId), condition, inArray(drafts.id, candidates)))
+      .returning();
+    await deleteDraftDownlinks(
+      tx,
+      rows.map(({ id }) => id),
+    );
+    return rows.map((row) => ({ draft: toDraft(row), ownerId: UserId.parse(row.ownerId) }));
+  });
 }

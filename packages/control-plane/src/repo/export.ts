@@ -1,5 +1,7 @@
 import {
   BotId,
+  ComputerId,
+  type ControlToAgent,
   type Bot,
   type BrandBook,
   type Draft,
@@ -12,13 +14,14 @@ import {
   type User,
   type UserId,
 } from "@baize/shared";
-import { asc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, drafts, handoffs, runs, users } from "../db/schema.js";
+import { agentOutbox, bots, computers, drafts, handoffs, runs, users } from "../db/schema.js";
+import { cancelLanes, lockLaneComputers } from "../agent/place-run.js";
 import { getBrand } from "./brand.js";
 import { listPreferencesForConfig } from "./preferences.js";
 import { listOwnerRoutines } from "./routines.js";
-import { lockOwner, lockRunsOfBot } from "./runs.js";
+import { exclusiveBotRunsLock, lockOwner, lockRunsOfBot } from "./runs.js";
 import { toBot, toDraft } from "./rows.js";
 import { getSettings } from "./settings.js";
 import { listSkillsByOwner } from "./skills.js";
@@ -84,15 +87,38 @@ export async function exportUserData(db: Db, user: User, now: Date): Promise<Dat
  * 第一句先拿这个人的排他锁（lockOwner）：建 Bot、建群、开项目、建 run 都拿它的共享锁，拿到排他时这些事务都已提交，
  * 提交前它们再也建不出 Bot 和 run；建群和开项目也不会反着锁序和级联各拿一半。
  * 补建主助理（ensureAssistant）不过这把锁，可能在枚举之后插出一个 Bot：它随 users 级联删掉，建不出 run 靠 startRun 的共享锁。
- * 然后和删 Bot 一样对每个 Bot 过 lockRunsOfBot，再锁交接卡，理由见 deleteBot。
+ * 然后按 Bot id 拿排他锁、按电脑 id 锁齐电脑、取消各道，再锁 run 和交接卡，和删 Bot 的顺序一致。
  * 拿到每个 Bot 的排他锁之后，已有的 run 都已提交、删得到；在锁上等的 startRun 醒来时成员行已随 Bot 删掉，不建 run。
  * 多把锁按 Bot id 升序拿，两次删号、删号和删 Bot 之间不会各拿一半。
  */
-export async function deleteAccount(db: Db, userId: UserId): Promise<void> {
-  await db.transaction(async (tx) => {
+export type AccountDeletionFrame = {
+  readonly computerId: ComputerId;
+  readonly conn: number;
+  readonly seq: number;
+  readonly body: ControlToAgent;
+};
+
+export async function deleteAccount(db: Db, userId: UserId): Promise<AccountDeletionFrame[]> {
+  return db.transaction(async (tx) => {
     await lockOwner(tx, userId, "exclusive");
     const owned = await tx.select({ id: bots.id }).from(bots).where(eq(bots.ownerId, userId)).orderBy(asc(bots.id));
     const botIds = owned.map((row) => BotId.parse(row.id));
+    for (const botId of botIds) await exclusiveBotRunsLock(tx, botId);
+    await lockLaneComputers(tx, userId);
+    for (const botId of botIds) await cancelLanes(tx, userId, botId);
+    // 发件箱随电脑级联清空，只带走道取消副本；删号后不能再投递尚未发出的活。
+    const finalFrames = await tx
+      .select({ computerId: computers.id, conn: computers.connGen, seq: agentOutbox.seq, body: agentOutbox.body })
+      .from(computers)
+      .innerJoin(agentOutbox, eq(agentOutbox.computerId, computers.id))
+      .where(
+        and(
+          eq(computers.ownerId, userId),
+          sql`${agentOutbox.body}->>'type' = 'cancel'`,
+          sql`${agentOutbox.body}->'lane' IS NOT NULL`,
+        ),
+      )
+      .orderBy(asc(computers.id), asc(agentOutbox.seq));
     for (const botId of botIds) await lockRunsOfBot(tx, botId);
     if (botIds.length > 0) {
       await tx
@@ -103,5 +129,11 @@ export async function deleteAccount(db: Db, userId: UserId): Promise<void> {
     }
     await tx.delete(runs).where(eq(runs.ownerId, userId));
     await tx.delete(users).where(eq(users.id, userId));
+    return finalFrames.map(({ computerId, conn, seq, body }) => ({
+      computerId: ComputerId.parse(computerId),
+      conn,
+      seq,
+      body,
+    }));
   });
 }

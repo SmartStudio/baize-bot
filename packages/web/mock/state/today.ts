@@ -159,6 +159,7 @@ const approvalOf = (input: { id: string; groupId: string; botId: string; runId: 
     view: { kind: "bash", command: input.text, raw: { command: input.text } },
     status: "pending",
     decidedAt: null,
+    deadlineAt: null,
     grantId: null,
   });
 
@@ -308,6 +309,20 @@ const seedFull = (): void => {
   });
   drafts.set(failed.id, failed);
   appendMessage(failed.groupId, { kind: "draft", draftId: failed.id });
+
+  const paused = draftOf({
+    id: "draft_today_paused",
+    groupId: "grp_buy",
+    botId: "bot_buy",
+    accountId: accountX.id,
+    platform: "x",
+    title: "X3 暂停后答疑",
+    text: "X3 暂停后答疑：恢复 Bot 后让它再起一稿。",
+    status: "failed",
+    failure: "paused",
+  });
+  drafts.set(paused.id, paused);
+  appendMessage(paused.groupId, { kind: "draft", draftId: paused.id });
 
   const replyText = "能接。飞书的审批和群消息都能进白泽，私信我发你接入文档。";
   const reply = draftOf({

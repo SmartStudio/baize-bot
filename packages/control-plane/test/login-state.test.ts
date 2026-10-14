@@ -106,13 +106,13 @@ describe("login_state failed", () => {
       expect(LoginAccountResponse.parse(await response.json()).attempt).toBe(attempt);
       expect((await agent.expect("browser_login")).attempt, "电脑拿到的是页面取的那个号").toBe(attempt);
 
-      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "remote_refused", attempt } });
+      agent.send({ type: "login_state", accountId, state: { login: "failed", reason: "timed_out", attempt } });
       const failed = await nextOf(push, "login_failed");
       expect(failed, "页面按这三样把卡结算到那一次点击上").toEqual({
         type: "login_failed",
         accountId,
         attempt,
-        reason: "remote_refused",
+        reason: "timed_out",
       });
       expect((await nextOf(push, "notify")).notice.kind, "给人看的通知照旧").toBe("failed");
     } finally {
@@ -146,9 +146,9 @@ describe("login_state failed", () => {
       expect((await nextOf(push, "login_failed")).attempt, "卡照样按这一次结算").toBe("try-1");
       expect(await listed(), "刷新页面重新拉账号，痕迹还在").toEqual(first);
 
-      failed("remote_refused", "try-2");
+      failed("timed_out", "try-2");
       const second = (await nextOf(push, "account_updated")).account;
-      expect(second.lastLoginFailure?.reason, "只留最近一次").toBe("remote_refused");
+      expect(second.lastLoginFailure?.reason, "只留最近一次").toBe("timed_out");
       expect(Date.parse(second.lastLoginFailure?.at ?? ""), "时刻跟着这一次走").toBeGreaterThanOrEqual(
         Date.parse(first.lastLoginFailure?.at ?? ""),
       );
@@ -234,7 +234,7 @@ describe("login_state failed", () => {
     }
   });
 
-  it("远程电脑拒绝登录：告诉用户去本机登录", async () => {
+  it("到点没登上：账号还是有效，告诉用户登录窗口已经收起、可以再点", async () => {
     const owner = await makeOwner();
     const accountId = await validAccount(owner);
     const { agent, push } = await online(owner);
@@ -243,13 +243,15 @@ describe("login_state failed", () => {
       agent.send({
         type: "login_state",
         accountId,
-        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
+        state: { login: "failed", reason: "timed_out", attempt: LoginAttemptId.parse("try-1") },
       });
 
       const notice = await nextNotice(push);
       expect(notice.kind, "没办成要用户处理，不能显示成「做完了」").toBe("failed");
-      expect(notice.text).toContain("远程电脑");
-      expect(notice.text).toContain("本机");
+      expect(notice.text).toContain("小红书");
+      expect(notice.text).toContain("还没登上");
+      expect(notice.text, "不再叫人去本机登录，远程电脑也能登").not.toContain("本机");
+      expect(notice.text).toContain("账号状态没变");
       expect(await pendingAccounts(owner)).toEqual([]);
     } finally {
       agent.close();
@@ -269,14 +271,14 @@ describe("login_state failed", () => {
       mine.agent.send({
         type: "login_state",
         accountId: strangersAccount,
-        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
+        state: { login: "failed", reason: "timed_out", attempt: LoginAttemptId.parse("try-1") },
       });
       mine.agent.send({
         type: "login_state",
         accountId,
         state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
       });
-      expect((await nextNotice(mine.push)).text, "别人账号那条没有推给这台电脑的主人").toContain("登录窗口");
+      expect((await nextNotice(mine.push)).text, "别人账号那条没有推给这台电脑的主人").toContain("出错或被关掉");
 
       theirs.agent.send({
         type: "login_state",
@@ -284,7 +286,7 @@ describe("login_state failed", () => {
         state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("try-1") },
       });
       expect((await nextNotice(theirs.push)).text, "也没有推给账号的主人，他收到的第一条是自己电脑发的").toContain(
-        "登录窗口",
+        "出错或被关掉",
       );
     } finally {
       for (const side of [mine, theirs]) {
@@ -306,7 +308,7 @@ describe("login_state failed", () => {
       agent.send({
         type: "login_state",
         accountId: onLocal,
-        state: { login: "failed", reason: "remote_refused", attempt: LoginAttemptId.parse("try-1") },
+        state: { login: "failed", reason: "timed_out", attempt: LoginAttemptId.parse("try-1") },
       });
       agent.send({
         type: "login_state",
@@ -315,8 +317,8 @@ describe("login_state failed", () => {
       });
       expect(
         (await nextNotice(push)).text,
-        "本机账号那条没推：远程电脑管不到本机的登录窗口，推了用户会被一条无关的失败吓到",
-      ).toContain("登录窗口");
+        "本机账号那条没推：远程电脑管不到本机账号的登录窗口，推了用户会被一条无关的失败吓到",
+      ).toContain("出错或被关掉");
     } finally {
       agent.close();
       push.close();

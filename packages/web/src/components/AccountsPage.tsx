@@ -10,11 +10,10 @@ import {
   type Grant,
   type GrantId,
   type GroupId,
-  type OAuthPlatform,
 } from "@baize/shared";
-import { oauthStartUrl } from "../api/client.js";
 import { useApp, type RemotePairing } from "../state/app.js";
 import type { LoginFlow } from "../state/types.js";
+import { ConnectEntries } from "./ConnectEntries.js";
 import { loginFlowNote } from "./LoginCard.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 import {
@@ -49,7 +48,7 @@ type Change = { status: "idle" } | { status: "busy" } | { status: "failed"; mess
 
 type Login = { flows: Partial<Record<AccountId, LoginFlow>>; open: (accountId: AccountId) => Promise<void> };
 
-// 扫码登录的平台没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
+// 浏览器平台的号没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
 const LoginAction = ({ account, where, login }: { account: Account; where: string; login: Login }) => {
   const flow = login.flows[account.id];
   const note = loginFlowNote(flow, where);
@@ -198,64 +197,6 @@ const groupsOf = (accounts: Account[], computers: Record<string, Computer>): Gro
   }
   const rank = (group: Group): number => (group.computer === undefined ? 2 : group.computer.kind === "local" ? 0 : 1);
   return [...groups.values()].sort((left, right) => rank(left) - rank(right));
-};
-
-const OAUTH_PLATFORMS: OAuthPlatform[] = ["github", "x"];
-
-type Connect = { status: "idle" } | { status: "busy" } | { status: "failed"; message: string };
-
-// OAuth 平台整页跳去平台授权，回来落在首页，结果由主窗口读查询串提示。
-// 扫码登录的平台先在本机建一个未登录的号（已经有就用那个），再在它上面开登录窗口，扫码的进度写在那一行上。
-const ConnectEntries = ({ local, login }: { local: Computer | undefined; login: Login }) => {
-  const { actions } = useApp();
-  const [connect, setConnect] = useState<Connect>({ status: "idle" });
-  const start = (platform: BrowserPlatform) => {
-    if (local === undefined || connect.status === "busy") return;
-    setConnect({ status: "busy" });
-    actions
-      .addAccount(platform, local.id)
-      .then(async (accountId) => {
-        if (accountId !== undefined) await login.open(accountId);
-        setConnect({ status: "idle" });
-      })
-      .catch((cause: unknown) =>
-        setConnect({ status: "failed", message: cause instanceof Error ? cause.message : "请重试" }),
-      );
-  };
-  return (
-    <div className="account-connect" data-testid="account-connect">
-      {OAUTH_PLATFORMS.map((platform) => (
-        <a
-          key={platform}
-          className="ghost-button"
-          href={oauthStartUrl(platform)}
-          data-testid="account-connect-link"
-          data-platform={platform}
-        >
-          接入 {PLATFORM[platform]}
-        </a>
-      ))}
-      {BrowserPlatform.options.map((platform) => (
-        <button
-          type="button"
-          key={platform}
-          className="ghost-button"
-          data-testid="account-connect-browser"
-          data-platform={platform}
-          disabled={local === undefined || connect.status === "busy"}
-          title={local === undefined ? "要在装了白泽的本机上扫码登录" : undefined}
-          onClick={() => start(platform)}
-        >
-          接入 {PLATFORM[platform]}
-        </button>
-      ))}
-      {connect.status === "failed" ? (
-        <small className="account-connect-error" data-testid="account-connect-error" role="alert">
-          没接上：{connect.message}
-        </small>
-      ) : null}
-    </div>
-  );
 };
 
 const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
@@ -514,7 +455,10 @@ export const AccountsPage = ({
 
   return (
     <>
-      <ConnectEntries local={local} login={login} />
+      <ConnectEntries computers={Object.values(computers)} openLogin={login.open} />
+      <p className="later" data-testid="browser-shared-login-note">
+        助理浏览器的登录状态所有 Bot 共用，在一个 Bot 那里登录过，别的 Bot 也能用这个账号。
+      </p>
       {load === "failed" ? (
         <p className="later" data-testid="accounts-failed" role="alert">
           账号没取到。{" "}

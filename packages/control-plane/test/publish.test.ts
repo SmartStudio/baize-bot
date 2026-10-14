@@ -18,7 +18,7 @@ import { CredentialCrypto, saveAccessToken } from "../src/credentials.js";
 import { accounts as accountsTable, drafts, publications } from "../src/db/schema.js";
 import { startFakePlatforms, type FakePlatforms } from "../src/fake-platforms.js";
 import { withAccountLock } from "../src/repo/account-lock.js";
-import { helloAgent } from "./helpers/agent.js";
+import { helloAgent, openAgent } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import {
   IMAGE,
@@ -679,6 +679,94 @@ describe("各平台的发法", () => {
 });
 
 describe("小红书走电脑", () => {
+  it("认领后暂停，电脑上报 paused，草稿和通知保留暂停原因；恢复后失败草稿仍不能直接重批", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, {
+      kind: "post",
+      title: "暂停没发出去",
+      text: "这条要等恢复",
+      images: [IMAGE],
+      github: null,
+    });
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    const claim = await job.agent.expect("publish_draft");
+    expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+    expect(await job.agent.expect("pause")).toEqual({ type: "pause", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot.runState).toBe("paused");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "paused", detail: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。" },
+    });
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({
+      id: spec.draftId,
+      status: "failed",
+      failure: "paused",
+    });
+    expect((await nextOf(job.push, "notify")).notice).toMatchObject({
+      kind: "failed",
+      text: "小红书上的「暂停没发出去」没发出去：Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
+      groupId: job.groupId,
+    });
+    expect((await draftOnPage(job, spec.draftId)).draft).toMatchObject({ status: "failed", failure: "paused" });
+    const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json());
+    expect(accounts.accounts.find((account) => account.id === xhs.id)?.login).toBe("valid");
+
+    expect((await job.client.post(`/api/bots/${job.botId}/resume`)).status).toBe(200);
+    expect(await job.agent.expect("resume")).toEqual({ type: "resume", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot.runState).toBe("running");
+    expect((await job.client.post(`/api/drafts/${spec.draftId}`, { decision: "approve" })).status).toBe(409);
+    expect((await draftOnPage(job, spec.draftId)).draft).toMatchObject({ status: "failed", failure: "paused" });
+  });
+
+  it("Bot 暂停期间到点的已批草稿不认领，恢复后下一轮才下发", async () => {
+    const s = await stack();
+    let now = new Date("2026-10-14T01:00:00.000Z");
+    const server = await s.serve(() => now);
+    const job = await jobOn(s, server, [XHS]);
+    const spec = specOf(accountOf(job, "xiaohongshu"), {
+      kind: "post",
+      title: "暂停期间到点",
+      text: "恢复后发布",
+      images: [IMAGE],
+      github: null,
+    });
+    const due = { ...spec, scheduledAt: new Date(now.getTime() + MINUTE).toISOString() };
+    await createApproved(job, due);
+    expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+    expect(await job.agent.expect("pause")).toEqual({ type: "pause", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot).toMatchObject({ id: job.botId, runState: "paused" });
+    now = new Date(due.scheduledAt);
+
+    await server.server.publisher.tick();
+    expect((await draftOnPage(job, due.draftId)).draft.status).toBe("approved");
+    expect(job.agent.received().filter((message) => message.type === "publish_draft")).toEqual([]);
+
+    expect((await job.client.post(`/api/bots/${job.botId}/resume`)).status).toBe(200);
+    // resume 是同一连接上的屏障；此前那轮若下发过发布，下一条就不会是 resume。
+    expect(await job.agent.next()).toEqual({ type: "resume", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot).toMatchObject({ id: job.botId, runState: "running" });
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({ id: due.draftId, status: "publishing" });
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim).toMatchObject({ draftId: due.draftId, botId: job.botId, content: due.content });
+    job.agent.send({
+      type: "publish_result",
+      draftId: due.draftId,
+      attempt: claim.attempt,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/resumed", externalId: "resumed" },
+    });
+    await nextOf(job.push, "publication_created");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("published");
+  });
+
   it("电脑在线就下发 publish_draft，等上行 publish_result 落账", async () => {
     const s = await stack();
     const server = await s.serve();
@@ -923,7 +1011,7 @@ describe("小红书走电脑", () => {
     }
   });
 
-  it("旧运行器回的 publish_result 不带 attempt，整条丢弃，控制面打一行警告，带 type 和字段路径、不带正文", async () => {
+  it("格式无效的可靠 publish_result 被拒并累计确认，日志只记安全摘要", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [XHS]);
@@ -935,30 +1023,31 @@ describe("小红书走电脑", () => {
     expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
 
     const logged = captureConsole();
-    const body = "https://www.xiaohongshu.com/explore/old-runner-secret";
-    job.agent.socket.send(
-      JSON.stringify({
-        type: "publish_result",
-        draftId: spec.draftId,
-        result: { status: "ok", url: body, externalId: "old-runner-note" },
-      }),
-    );
-    const broken = '{"type":"publish_result","draftId":"broken-frame';
-    job.agent.socket.send(broken);
+    const seq = job.agent.sendMalformedReliable({
+      type: "publish_result",
+      draftId: spec.draftId,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/private-url", externalId: "private-id" },
+    });
+    const malformed = await openAgent(server.server.port);
+    malformed.socket.send('{"type":"publish_result"');
+    await malformed.closed();
+    await waitFor(async () => job.agent.uplinkAcks().some((ack) => ack.upTo >= seq), "无效 publish_result 被确认");
+    expect(job.agent.uplinkAcks().flatMap((ack) => ack.rejected)).toContainEqual({ seq, code: "invalid" });
     await agentCaughtUp(job, xhs, { kind: "post", title: "哨兵", text: "哨兵", images: [], github: null });
 
     expect((await draftOnPage(job, spec.draftId)).draft.status, "不合形状的结果不结算").toBe("publishing");
-    const warnings = logged.filter((line) => line.includes("丢弃"));
-    expect(warnings).toEqual([
-      expect.stringMatching(/"publish_result".*attempt/),
-      expect.stringContaining("不是 JSON"),
-    ]);
-    for (const secret of [body, "old-runner-note", spec.draftId, "broken-frame"]) {
+    expect(logged.toSorted()).toEqual(
+      [
+        `电脑 ${job.computer.computerId} 上行 ${seq} 的 publish_result 被拒收 invalid，出错的字段：body.attempt`,
+        "未握手的连接 报的不是 JSON，丢弃",
+      ].toSorted(),
+    );
+    for (const secret of ["private-url", "private-id", spec.draftId]) {
       expect(logged.join("\n"), "日志不带报文正文").not.toContain(secret);
     }
   });
 
-  it("电脑不在线不抢，草稿留在已批", async () => {
+  it("电脑断线宽限期内仍认领草稿并把 publish_draft 留在 outbox", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [XHS]);
@@ -974,7 +1063,11 @@ describe("小红书走电脑", () => {
     expect((await nextOf(job.push, "computer_updated")).computer.status).toBe("sleeping");
 
     await server.server.publisher.tick();
-    expect((await draftOnPage(job, spec.draftId)).draft.status).toBe("approved");
+    expect((await draftOnPage(job, spec.draftId)).draft.status).toBe("publishing");
+    const queued = await s.database.sql<{ type: string }[]>`
+      SELECT body->>'type' AS type FROM agent_outbox WHERE computer_id = ${job.computer.computerId}
+    `;
+    expect(queued).toContainEqual({ type: "publish_draft" });
   });
 });
 

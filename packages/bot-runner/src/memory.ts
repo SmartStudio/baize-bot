@@ -114,7 +114,7 @@ export function createMemoryTools(options: {
       name: "remember_preference",
       label: "记下偏好",
       description:
-        "用户说了以后一直要这样或别再这样的要求（口吻、格式、字数、忌讳），当场记成一条偏好，以后每次干活都照着做。" +
+        "用户说了以后一直要这样或别再这样的要求（口吻、格式、字数、忌讳），把它整理成一条偏好请用户确认；用户点了记住才生效，生效后每次干活都照着做。" +
         "text 用一句话写清这条要求，最多 200 字；涉及账号、联系方式或个人信息的 private 填 true，其余填 false。一次性的吩咐不要记。",
       parameters: REMEMBER_PARAMS,
       execute: async (_callId, params) => {
@@ -128,7 +128,7 @@ export function createMemoryTools(options: {
         }
         options.send(
           AgentToControl.parse({
-            type: "preference_add",
+            type: "preference_offer",
             runId: active.run.runId,
             botId: active.run.botId,
             groupId: active.run.groupId,
@@ -137,7 +137,7 @@ export function createMemoryTools(options: {
             sourceMessageId: active.messageId,
           }),
         );
-        return { content: [{ type: "text", text: `记下了：${trimmed}` }], details: {} };
+        return { content: [{ type: "text", text: "已经请用户确认，用户点了记住才生效。" }], details: {} };
       },
     },
   ];

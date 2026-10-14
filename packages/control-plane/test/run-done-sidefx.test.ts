@@ -11,7 +11,7 @@ import {
   UsageResponse,
   type BotId,
   type ControlToAgent,
-  type GroupId,
+  GroupId,
   type Routine,
   type RunId,
   type ServerPush,
@@ -133,7 +133,12 @@ async function rejectRoutineOk(): Promise<() => Promise<void>> {
  */
 async function barrier(agent: AgentClient, push: PushClient, groupId: GroupId): Promise<ServerPush[]> {
   const tag = `屏障 ${randomUUID()}`;
-  agent.send({ type: "agent_error", code: "runner_failed", detail: tag, groupId });
+  // 毒帧回滚后原 run 仍开着，屏障落到同一人的主助理群，避免把待重试的例行记成失败。
+  const [beacon] = await database.sql<
+    { id: string }[]
+  >`SELECT g.id FROM groups g JOIN bots b ON b.id=g.solo_bot_id WHERE b.role='assistant' AND g.owner_id=(SELECT owner_id FROM groups WHERE id=${groupId}) LIMIT 1`;
+  const beaconGroup = GroupId.parse(beacon?.id ?? groupId);
+  agent.send({ type: "agent_error", code: "runner_failed", detail: tag, groupId: beaconGroup });
   const before: ServerPush[] = [];
   for (;;) {
     const event = await push.nextRaw();
@@ -192,7 +197,12 @@ async function routineOf(client: ApiClient, routineId: string): Promise<Routine>
   return routine;
 }
 
-it("费用卡写入抛错后补发 run_done 补出费用卡", async () => {
+/** 协议 1 的两阶段结账遗留数据：只用于验证升级后的 hello 仍能补结旧账。 */
+async function legacyUncharged(runId: RunId): Promise<void> {
+  await database.sql`UPDATE runs SET ended_at=now(), charged_at=NULL, steps=3, input_tokens=100000, output_tokens=20000, amount=0.6 WHERE id=${runId}`;
+}
+
+it("费用卡毒帧回滚 run 和费用卡，新帧在故障排除后只结一次", async () => {
   const owner = await ownerWithBot();
   const restore = await rejectCostCards();
   try {
@@ -201,10 +211,13 @@ it("费用卡写入抛错后补发 run_done 补出费用卡", async () => {
 
     owner.agent.send(runDone(owner.botId, owner.groupId, runId));
     const failed = await barrier(owner.agent, owner.push, owner.groupId);
-    expect(owner.agent.ackCount(runId), "费用卡没写成，这次不回确认").toBe(0);
+    expect(owner.agent.ackCount(runId), "毒帧只有拒收确认，不计成功").toBe(0);
     expect(pushedCards(failed, runId)).toEqual([]);
     expect(await storedCards(owner.client, owner.groupId, runId)).toEqual([]);
-    expect((await usageOf(owner.client, runId))?.endedAt, "run 行已经结束，欠的只是账").not.toBeNull();
+    expect((await usageOf(owner.client, runId))?.endedAt, "结束和费用卡一起回滚").toBeNull();
+    await vi.waitFor(() => {
+      expect(owner.agent.uplinkAcks().flatMap((ack) => ack.rejected)).toMatchObject([{ code: "invalid", seq: 1 }]);
+    });
 
     await restore();
     owner.agent.send(runDone(owner.botId, owner.groupId, runId));
@@ -221,7 +234,7 @@ it("费用卡写入抛错后补发 run_done 补出费用卡", async () => {
   }
 });
 
-it("例行记账中途失败后补发补齐且只记一次", async () => {
+it("例行毒帧回滚结束、费用卡和例行账，新帧只结一次", async () => {
   const owner = await ownerWithBot();
   const restore = await rejectRoutineOk();
   try {
@@ -247,7 +260,7 @@ it("例行记账中途失败后补发补齐且只记一次", async () => {
 
     owner.agent.send(runDone(owner.botId, owner.groupId, runId));
     const failed = await barrier(owner.agent, owner.push, owner.groupId);
-    expect(owner.agent.ackCount(runId), "记账没写成，这次不回确认").toBe(0);
+    expect(owner.agent.ackCount(runId), "毒帧只有拒收确认，不计成功").toBe(0);
     expect(pushedCards(failed, runId), "费用卡和记账在一个事务里，记账没成费用卡也不出").toEqual([]);
     expect(okUpdates(failed, routine.id)).toEqual([]);
     expect(notices(failed), "账没结清不弹结果通知").toEqual([]);
@@ -455,7 +468,8 @@ it("已确认的 pass 在控制面重启后自己成一张卡，卡上合计和 
     const second = await agent.expect("prompt");
     agent.send(runDone(who.second.bot.id, who.group.id, second.runId));
     await barrier(agent, push, who.group.id);
-    expect(agent.ackCount(second.runId), "小乙的费用卡写不进去，不回确认").toBe(0);
+    expect(agent.ackCount(second.runId), "小乙的毒帧拒收").toBe(0);
+    await legacyUncharged(second.runId);
     expect(await groupCards(who.client, who.group.id)).toEqual([]);
 
     agent.close();
@@ -559,7 +573,9 @@ it("hello 补结账时前一条的例行推送抛错，同一次 hello 里后一
     const second = await agent.expect("prompt");
     agent.send(runDone(owner.botId, owner.groupId, second.runId));
     await barrier(agent, owner.push, owner.groupId);
-    expect(agent.ackCount(first.runId) + agent.ackCount(second.runId), "两条都欠着").toBe(0);
+    expect(agent.ackCount(first.runId) + agent.ackCount(second.runId), "两条都拒收").toBe(0);
+    await legacyUncharged(first.runId);
+    await legacyUncharged(second.runId);
 
     await restore();
     fault = failFirstOkPush(morning.id);
@@ -594,6 +610,7 @@ it("hello 补结账时一条欠账结不成，不挡同一次 hello 里后面的
       const { runId } = await agent.expect("prompt");
       agent.send(runDone(owner.botId, owner.groupId, runId));
       await barrier(agent, owner.push, owner.groupId);
+      await legacyUncharged(runId);
       runs.push(runId);
     }
     const [stuck, later] = runs as [RunId, RunId];
@@ -659,6 +676,7 @@ it("hello 补结账出错的日志只带错误类别和 id，不带异常原文"
     const { runId } = await agent.expect("prompt");
     agent.send(runDone(owner.botId, owner.groupId, runId));
     await barrier(agent, owner.push, owner.groupId);
+    await legacyUncharged(runId);
     logged.mockClear();
 
     agent.close();
@@ -701,7 +719,8 @@ it("补发放手之后欠的账，故障排除后下一次 hello 补齐；故障
     for (let attempt = 0; attempt < 4; attempt++) {
       agent.send(runDone(owner.botId, owner.groupId, runId));
       await barrier(agent, owner.push, owner.groupId);
-      expect(agent.ackCount(runId), `第 ${attempt + 1} 次结账失败不回确认`).toBe(0);
+      expect(agent.ackCount(runId), `第 ${attempt + 1} 次毒帧拒收`).toBe(0);
+      if (attempt === 0) await legacyUncharged(runId);
       agent.close();
       agent = (await helloAgent(server.server.port, computer.computerId, computer.token)).agent;
       await barrier(agent, owner.push, owner.groupId);

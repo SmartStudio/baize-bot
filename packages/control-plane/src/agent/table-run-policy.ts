@@ -12,7 +12,7 @@ type UplinkKind = AgentToControl["type"];
  */
 const UPLINKS_OF_ROLE: Readonly<Record<PokerTableRole, ReadonlySet<UplinkKind>>> = {
   player: new Set<UplinkKind>(["poker_act", "run_done"]),
-  advisor: new Set<UplinkKind>(["bot_text", "run_done"]),
+  advisor: new Set<UplinkKind>(["bot_text", "bot_text_done", "run_done"]),
   reviewer: new Set<UplinkKind>(["poker_review", "run_done"]),
 };
 

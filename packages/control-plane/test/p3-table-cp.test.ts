@@ -203,6 +203,15 @@ async function barrier(prompt: Prompt): Promise<void> {
     if (push.type === "message_delta" && push.messageId === messageId) return;
   }
 }
+async function expectRunClosedAck(agent: AgentClient, runId: RunId): Promise<void> {
+  await vi.waitFor(() => {
+    expect(agent.uplinkAcks().flatMap((ack) => ack.rejected)).toContainEqual({
+      seq: expect.any(Number),
+      code: "run_closed",
+      runId,
+    });
+  });
+}
 async function tablePush(predicate: (view: PokerTableView) => boolean): Promise<PokerTableView> {
   for (;;) {
     const push = await table.push.next();
@@ -322,8 +331,7 @@ it("牌友出非法动作得到失败结果和中文原因，手牌不变", asyn
   const before = await stored(id);
   act(p, { kind: "check" });
   const result = await table.agent.expect("poker_result");
-  expect(result.result.ok).toBe(false);
-  expect(JSON.stringify(result.result)).toMatch(/[\u4e00-\u9fff]/);
+  expect(result.result).toEqual({ ok: false, error: "有人下注了，不能过牌，要跟注或弃牌" });
   expect(await stored(id)).toEqual(before);
   const [hand] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
   expect(hand!.turn_attempts).toBe(1);
@@ -542,6 +550,7 @@ it("同一牌友连续两个决策点清掉拒绝次数并派新 run", async () 
   expect(row!.turn_run_id).toBe(next.runId);
 });
 it("牌友出牌和到点扫描竞争只落一次动作", async () => {
+  const errors = vi.spyOn(console, "error");
   await fixture();
   const id = await seeded();
   const p = await table.agent.expect("prompt");
@@ -550,6 +559,7 @@ it("牌友出牌和到点扫描竞争只落一次动作", async () => {
   await tablePush((view) => view.hand!.view.events.some((event) => event.kind === "action" && event.seatId === "1"));
   await barrier(p);
   expect((await stored(id)).events.filter((event) => event.kind === "action" && event.seatId === "1")).toHaveLength(1);
+  expect(errors.mock.calls.flat().join(" "), "出牌与扫描不能靠死锁重试才成功").not.toContain("40P01");
 });
 it("六条并发用户出牌只接受一条且不耗尽连接池", async () => {
   await fixture();
@@ -619,7 +629,7 @@ it("开手落库失败时日志和响应也不泄露种子", async () => {
   }
 });
 
-it("第三次非法被兜底后同一 run 再出牌得到失败回执", async () => {
+it("第三次非法被兜底后同一 run 再出牌得到 run_closed 确认", async () => {
   await fixture();
   const id = await seeded();
   const p = await table.agent.expect("prompt");
@@ -630,30 +640,56 @@ it("第三次非法被兜底后同一 run 再出牌得到失败回执", async ()
   await table.agent.expect("prompt");
   const before = await stored(id);
   act(p, { kind: "call" });
-  const receipt = await table.agent.expect("poker_result");
-  expect(receipt.runId).toBe(p.runId);
-  expect(receipt.result.ok).toBe(false);
-  expect(JSON.stringify(receipt.result)).toMatch(/[\u4e00-\u9fff]/);
+  await barrier(p);
+  await expectRunClosedAck(table.agent, p.runId);
   expect(await stored(id)).toEqual(before);
 });
-it("兜底之后晚到的出牌得到失败回执", async () => {
+it("兜底后新 run 正常出牌，旧 run 的晚到出牌得到 run_closed 确认", async () => {
   await fixture();
   const id = await seeded();
   const p = await table.agent.expect("prompt");
   now = new Date(now.getTime() + 60_001);
-  await table.agent.expect("prompt");
+  const fresh = await table.agent.expect("prompt");
+  expect(fresh.runId).not.toBe(p.runId);
+  act(fresh, { kind: "call" });
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
   const before = await stored(id);
   act(p, { kind: "call" });
-  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  await barrier(p);
+  await expectRunClosedAck(table.agent, p.runId);
   expect(await stored(id)).toEqual(before);
 });
-it("已收尾 run 仍对着当前 turn 时出牌得到失败回执", async () => {
+it("已收尾 run 仍对着当前 turn 时出牌得到 run_closed 确认", async () => {
+  await restartWith({ intervalMs: 3_600_000, now: () => now, turnTimeoutMs: 60_000 });
+  await fixture();
+  expect((await advanceUser(await start(), { kind: "call" })).status).toBe(200);
+  const p = await table.agent.expect("prompt");
+  const handId = p.table!.handId;
+  await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
+  const [turn] = await database.sql<{ turn_run_id: string }[]>`SELECT turn_run_id FROM poker_hands WHERE id=${handId}`;
+  expect(turn!.turn_run_id).toBe(p.runId);
+  const before = await stored(handId);
+  act(p, { kind: "call" });
+  await barrier(p);
+  await expectRunClosedAck(table.agent, p.runId);
+  expect(await stored(handId)).toEqual(before);
+});
+it("run 收尾却没确认，扫描器恰好给同一 Bot 的同一决策点重派一次新 run", async () => {
   await fixture();
   const id = await seeded();
   const p = await table.agent.expect("prompt");
   await database.sql`UPDATE runs SET ended_at=now(),context_confirmed_at=NULL WHERE id=${p.runId}`;
-  act(p, { kind: "call" });
-  expect((await table.agent.expect("poker_result")).result.ok).toBe(false);
+  const redispatch = await table.agent.expect("prompt");
+  expect(redispatch.runId).not.toBe(p.runId);
+  expect(redispatch.botId).toBe(p.botId);
+  expect(redispatch.groupId).toBe(p.groupId);
+  expect(redispatch.table!.role).toBe("player");
+  expect(redispatch.table!.handId).toBe(p.table!.handId);
+  expect(redispatch.table!.seq).toBe(p.table!.seq);
+  const [hand] = await database.sql<
+    { dispatch_count: number; turn_run_id: string }[]
+  >`SELECT dispatch_count, turn_run_id FROM poker_hands WHERE id=${id}`;
+  expect(hand).toEqual({ dispatch_count: 2, turn_run_id: redispatch.runId });
   expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(0);
 });
 it("不属于这台电脑、这个 Bot 或这个群的出牌静默丢弃", async () => {

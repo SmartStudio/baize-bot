@@ -11,6 +11,7 @@ import { AccountMenu } from "../components/AccountMenu.js";
 import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
+import { LiveHost } from "../live/LiveHost.js";
 import { TodayPage } from "./TodayPage.js";
 import { PokerProjectPage } from "./PokerProjectPage.js";
 import { ProjectPage } from "./ProjectPage.js";
@@ -158,6 +159,7 @@ export const MainWindow = () => {
     approvePlan: actions.approvePlan,
     returnPlan: actions.returnPlan,
     loginAccount: actions.loginAccount,
+    openTakeover: actions.openTakeover,
   };
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
@@ -198,6 +200,7 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onDecideSkillOffer={actions.decideSkillOffer}
+          onDecidePreferenceOffer={actions.decidePreferenceOffer}
           onDecideProjectOffer={(messageId, request) =>
             actions.decideProjectOffer(messageId, request).then(openProjectPage)
           }
@@ -351,6 +354,7 @@ export const MainWindow = () => {
           onClose={() => setOverlay("none")}
         />
       ) : null}
+      <LiveHost />
     </div>
   );
 };

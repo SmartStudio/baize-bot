@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -302,6 +303,28 @@ async function driveProof(
   );
 }
 
+// baize_verify 里的开发账号早就连过电脑，配对会走 409 顶号确认的原生弹框，脚本点不到；每次用新注册的账号，电脑从没连过。
+async function registerProveAccount(): Promise<{ readonly email: string; readonly password: string }> {
+  const credentials = { email: `prove-${Date.now()}-${process.pid}@baize.dev`, password: "baize-prove" };
+  const registered = await fetch(`${controlOrigin}/api/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...credentials, name: "实证" }),
+  });
+  if (registered.status !== 201) throw new Error(`注册实证账号失败（${registered.status}）`);
+  const cookie = registered.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  const created = await fetch(`${controlOrigin}/api/bots`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie },
+    body: JSON.stringify({ name: "小服" }),
+  });
+  if (created.status !== 201) throw new Error(`给实证账号建 Bot 失败（${created.status}）`);
+  return credentials;
+}
+
 function follow(child: ChildProcess): { waitFor(needle: string, timeoutMs: number): Promise<string>; all(): string } {
   let text = "";
   const listeners = new Set<() => void>();
@@ -391,7 +414,11 @@ async function waitDescendants(rootPid: number, timeoutMs: number): Promise<numb
   }
 }
 
-async function launch(mode: "bash" | "stored", screenshot?: string): Promise<{ child: ChildProcess; run: Run }> {
+async function launch(
+  mode: "bash" | "stored",
+  account: { readonly email: string; readonly password: string },
+  screenshot?: string,
+): Promise<{ child: ChildProcess; run: Run }> {
   const env = cleanEnv({});
   const remoteDebuggingPort = await freePort();
   const started = performance.now();
@@ -413,9 +440,7 @@ async function launch(mode: "bash" | "stored", screenshot?: string): Promise<{ c
     try {
       if (mode === "stored") await logs.waitFor("agent-online", 90_000);
       else {
-        await driveProof(page, { email: "chen@baize.dev", password: "baize-dev" }, () =>
-          logs.waitFor("agent-online", 90_000).then(() => undefined),
-        );
+        await driveProof(page, account, () => logs.waitFor("agent-online", 90_000).then(() => undefined));
         if (screenshot !== undefined) await page.screenshot(screenshot);
       }
     } finally {
@@ -460,9 +485,9 @@ async function main(): Promise<void> {
       GATEWAY_MODEL: "fake-model",
       PORT: String(controlPort),
       COOKIE_SECURE: "false",
+      CREDENTIALS_KEY: randomBytes(32).toString("base64"),
     };
     run("pnpm", ["--filter", "@baize/control-plane", "migrate"], baseEnv);
-    run("pnpm", ["--filter", "@baize/control-plane", "seed"], baseEnv);
     control = spawn("pnpm", ["--filter", "@baize/control-plane", "start"], {
       cwd: repo,
       env: cleanEnv(baseEnv),
@@ -471,7 +496,8 @@ async function main(): Promise<void> {
     });
     await follow(control).waitFor("控制面在", 60_000);
 
-    const first = await launch("bash", join(desktop, "dist/prove-app.png"));
+    const account = await registerProveAccount();
+    const first = await launch("bash", account, join(desktop, "dist/prove-app.png"));
     const environment = spawnSync("ps", ["eww", "-p", String(first.run.agentPid)], { encoding: "utf8" }).stdout;
     writeFileSync(join(desktop, "dist/prove-ps.txt"), environment);
     result.envHasAgentToken = environment.includes("AGENT_TOKEN=");
@@ -483,7 +509,7 @@ async function main(): Promise<void> {
     assertHardProof();
 
     for (let index = 0; index < 5; index += 1) {
-      const measured = await launch("stored");
+      const measured = await launch("stored", account);
       result.helloRunsMs.push(measured.run.helloMs);
       await stop(measured.child);
       await sleep(300);
@@ -501,7 +527,7 @@ async function main(): Promise<void> {
       }
     }
     await upstream.close();
-    rmSync(userData, { recursive: true, force: true });
+    rmSync(userData, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
 

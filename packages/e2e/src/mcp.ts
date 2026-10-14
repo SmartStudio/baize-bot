@@ -12,6 +12,7 @@ export type McpCall = {
 export type TestMcp = {
   readonly baseUrl: string;
   calls(): readonly McpCall[];
+  clientNames(): readonly string[];
   close(): Promise<void>;
 };
 
@@ -78,6 +79,7 @@ function makeServer(calls: McpCall[], authorization: string | undefined): McpSer
 
 export async function startTestMcp(): Promise<TestMcp> {
   const calls: McpCall[] = [];
+  const clientNames: string[] = [];
   const http: Server = createServer((req, res) => {
     if (req.url !== "/mcp") {
       res.writeHead(404).end();
@@ -93,6 +95,8 @@ export async function startTestMcp(): Promise<TestMcp> {
       await server.connect(transport);
       try {
         await transport.handleRequest(req, res);
+        const name = server.server.getClientVersion()?.name;
+        if (name !== undefined) clientNames.push(name);
       } finally {
         await server.close();
       }
@@ -113,6 +117,7 @@ export async function startTestMcp(): Promise<TestMcp> {
   return {
     baseUrl: `http://127.0.0.1:${address.port}/mcp`,
     calls: () => calls,
+    clientNames: () => clientNames,
     close: () =>
       new Promise<void>((resolve, reject) => {
         http.close((error) => (error ? reject(error) : resolve()));

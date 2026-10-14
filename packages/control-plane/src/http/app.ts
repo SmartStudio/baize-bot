@@ -25,6 +25,8 @@ import {
   DecideApprovalResponse,
   DecideDraftRequest,
   DecideDraftResponse,
+  DecidePreferenceOfferRequest,
+  DecidePreferenceOfferResponse,
   DecideProjectOfferRequest,
   DecideProjectOfferResponse,
   DecideSkillOfferRequest,
@@ -35,6 +37,7 @@ import {
   GroupId,
   GroupListResponse,
   GroupResponse,
+  LiveSessionsResponse,
   LoginAccountRequest,
   LoginAccountResponse,
   LoginRequest,
@@ -43,6 +46,8 @@ import {
   MessageId,
   MessageListResponse,
   MessageResponse,
+  PairLocalComputerRequest,
+  PairLocalConflictResponse,
   ProjectResponse,
   RegisterRequest,
   RegisterResponse,
@@ -81,6 +86,8 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
+import type { LiveRelay } from "../live/relay.js";
+import { enqueueDownlink } from "../agent/envelope.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
@@ -97,7 +104,7 @@ import { ensureComputer, listComputers, resetComputerToken } from "../repo/compu
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { findLiveGroupId } from "../repo/live-groups.js";
-import { appendMessage, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
+import { appendMessageIfGroupAlive, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import {
   createRoutine,
@@ -112,6 +119,7 @@ import {
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
 import { pushRoutineUpdated, runRoutine } from "../routines/run.js";
+import { decidePreferenceOffer, findOwnedPreferenceOffer } from "../repo/preferences.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
 import { getSettings, updateSettings } from "../repo/settings.js";
@@ -146,6 +154,9 @@ import type { AccountTokens, CredentialCrypto } from "../credentials.js";
 import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
+import { HUB_PATH, createHub } from "./hub.js";
+import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
+import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
 import { createGoalRoutes } from "./routes/goals.js";
@@ -164,6 +175,7 @@ export type AppDeps = {
   readonly db: Db;
   readonly hub: PushHub;
   readonly agents: AgentHub;
+  readonly live: Pick<LiveRelay, "list">;
   readonly toolCrypto: ToolCrypto;
   readonly groupTurns: GroupTurns;
   readonly notifications: NoticePublisher;
@@ -193,11 +205,12 @@ const NO_PLAN = { error: "没有这份计划" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
 const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 
-export function createApp(deps: AppDeps): Hono<Env> {
+export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promise<void> } {
   const { agents, db, hub } = deps;
   const routineDeps = { db, push: hub, agents, groupTurns: deps.groupTurns, notifications: deps.notifications };
   const brandDeps = { db, push: hub, agents };
-  const app = new Hono<Env>();
+  const mcpClients = new McpClients();
+  const app = Object.assign(new Hono<Env>(), { closeMcpClients: () => mcpClients.close() });
 
   const pushRoutines = async (ownerId: UserId, routineIds: readonly string[]): Promise<void> => {
     for (const routineId of routineIds) {
@@ -207,6 +220,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
+  app.route(HUB_PATH, createHub({ db }));
+  app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(
     ACCOUNTS_PROXY_PATH,
@@ -236,7 +251,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.route("/api", createTeamOfferRoutes({ db, hub, agents }));
   app.route("/api", createRoutineOfferRoutes({ db, push: hub }));
   app.route("/api", createSeenRoutes({ db, push: hub }));
-  app.route("/api", createPrivacyRoutes({ db, agents }));
+  app.route("/api", createPrivacyRoutes({ db, push: hub, agents }));
   app.route("/api", createTemplateRoutes({ db, agents }));
   // 第 3 期牌桌的路由，同样在登录中间件之后。
   app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));
@@ -319,10 +334,13 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
     let operations: ToolOperation[];
     try {
-      operations = await discoverTools(body.value);
+      operations =
+        body.value.localOnly === true
+          ? await agents.discoverLocalTools(c.get("user").id, body.value)
+          : await discoverTools(body.value);
     } catch (error) {
       if (!(error instanceof DiscoveryError)) throw error;
-      return c.json({ error: error.message }, 400);
+      return c.json({ error: error.message }, error.status);
     }
     const tool = await createTool(db, c.get("user").id, body.value, operations, deps.toolCrypto);
     if (tool === null) return c.json({ error: "已有同名工具连接" }, 409);
@@ -342,18 +360,22 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (authorization !== undefined) {
       // 换凭据当场重新探测一次：连不上就什么都不改，旧凭据和操作表照旧。null 是不带凭据探测。
       try {
-        const discovered = await discoverTools({
+        const input = {
           name: current.name,
           url: current.url,
           ...(authorization === null ? {} : { authorization }),
-        });
+        };
+        const discovered =
+          (body.value.localOnly ?? current.localOnly)
+            ? await agents.discoverLocalTools(c.get("user").id, input)
+            : await discoverTools(input);
         reauthorized = {
           authorizationEnc: authorization === null ? null : deps.toolCrypto.encrypt(authorization),
           discovered,
         };
       } catch (error) {
         if (!(error instanceof DiscoveryError)) throw error;
-        return c.json({ error: error.message }, 400);
+        return c.json({ error: error.message }, error.status);
       }
     }
     const result = await updateTool(db, c.get("user").id, current, body.value, reauthorized);
@@ -361,6 +383,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (result.kind === "name_taken") return c.json({ error: "已有同名工具连接" }, 409);
     if (result.kind === "invalid_operation") return c.json({ error: "操作名不在这条工具连接上" }, 400);
     if (result.kind === "invalid_bot") return c.json({ error: "只能分配给自己的 Bot" }, 400);
+    mcpClients.invalidate(current.id);
     await agents.sendConfig(c.get("user").id);
     return c.json(ToolResponse.parse({ tool: result.tool }));
   });
@@ -368,6 +391,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
   app.delete("/api/tools/:id", async (c) => {
     const id = ToolConnectionId.safeParse(c.req.param("id"));
     if (!id.success || !(await deleteTool(db, c.get("user").id, id.data))) return c.json(NOT_FOUND, 404);
+    mcpClients.invalidate(id.data);
     await agents.sendConfig(c.get("user").id);
     return c.body(null, 204);
   });
@@ -396,9 +420,6 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const ownerId = c.get("user").id;
     const result = await createPlaceholder(db, ownerId, body.value);
     if (result.kind === "no_computer") return c.json({ error: "没有这台电脑" }, 404);
-    if (result.kind === "remote_computer") {
-      return c.json({ error: "小红书要扫码登录，只能挂在你自己的电脑上，远程电脑没有助理浏览器" }, 400);
-    }
     hub.push(ownerId, { type: "account_updated", account: result.account });
     await agents.sendConfig(ownerId);
     return c.json(AccountResponse.parse({ account: result.account }), result.kind === "created" ? 201 : 200);
@@ -414,16 +435,18 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const body = await readJson(c.req.raw, LoginAccountRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     const { attempt } = body.value;
-    // 电脑刚好在判完在线之后断了，send 返回 false，同样按不在线回。
-    const sent =
-      agents.isOnline(account.computerId) &&
-      agents.send(account.computerId, {
+    if (!agents.canDeliver(account.computerId))
+      return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+    const queued = await db.transaction((tx) =>
+      enqueueDownlink(tx, account.computerId, {
         type: "browser_login",
         accountId: account.id,
         platform: platform.data,
         attempt,
-      });
-    if (!sent) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+      }),
+    );
+    if (!queued) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+    await agents.flushOutbox(account.computerId);
     return c.json(LoginAccountResponse.parse({ account, attempt }), 202);
   });
 
@@ -488,16 +511,35 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.json(ReturnPlanResponse.parse({ plan: decided.value.plan }));
   });
 
+  // 网页启动和 /api/ws 重连时各拉一次：断线期间的 live_session、live_closed 推送丢了。
+  app.get("/api/live", (c) => c.json(LiveSessionsResponse.parse({ sessions: deps.live.list(c.get("user").id) })));
+
   app.get("/api/computers", async (c) =>
     c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),
   );
 
   app.post("/api/computers/local", async (c) => {
+    let raw: unknown;
+    try {
+      const text = await c.req.text();
+      raw = text === "" ? {} : JSON.parse(text);
+    } catch {
+      return c.json({ error: "请求体不是合法 JSON" }, 400);
+    }
+    const body = PairLocalComputerRequest.partial().safeParse(raw);
+    if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
     const ownerId = c.get("user").id;
     const { computer } = await ensureComputer(db, ownerId);
+    if ((computer.lastSeenAt !== null || agents.isOnline(computer.id)) && !body.data.confirmDisplace) {
+      return c.json(
+        PairLocalConflictResponse.parse({ error: "这个账号已经在另一台 Mac 上用过，继续会让那台退出", computer }),
+        409,
+      );
+    }
     const local = await resetComputerToken(db, ownerId);
     if (local === null) throw new Error(`用户 ${ownerId} 的本机电脑既没建成也无法重置 token`);
     hub.push(ownerId, { type: "computer_updated", computer });
+    await agents.displaceComputer(computer.id);
     return c.json(ComputerTokenResponse.parse(local));
   });
 
@@ -547,6 +589,7 @@ export function createApp(deps: AppDeps): Hono<Env> {
     const deleted = await deleteBot(db, c.get("user").id, botId.data);
     if (deleted.kind === "not_found") return c.json(NOT_FOUND, 404);
     if (deleted.kind === "assistant") return c.json({ error: "主助理不能删，你在首页说的话都由它来接" }, 409);
+    for (const computerId of deleted.cancelComputers) await agents.flushOutbox(computerId);
     await agents.sendConfig(c.get("user").id);
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
     for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
@@ -750,6 +793,27 @@ export function createApp(deps: AppDeps): Hono<Env> {
     return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill: decided.skill }));
   });
 
+  app.post("/api/messages/:id/preference-offer", async (c) => {
+    const messageId = MessageId.safeParse(c.req.param("id"));
+    if (!messageId.success) return c.json(NOT_FOUND, 404);
+    const ownerId = c.get("user").id;
+    const offer = await findOwnedPreferenceOffer(db, ownerId, messageId.data, { kind: "user" });
+    if (offer === null) return c.json(NOT_FOUND, 404);
+    const body = await readJson(c.req.raw, DecidePreferenceOfferRequest);
+    if (!body.ok) return c.json({ error: body.error }, 400);
+
+    const decided = await decidePreferenceOffer(db, ownerId, offer, body.value.decision);
+    if (decided.kind === "bot_gone") return c.json(NOT_FOUND, 404);
+    if (decided.kind === "already_decided") return c.json({ error: "这条卡已经有结论了" }, 409);
+
+    hub.push(ownerId, { type: "message", message: decided.message });
+    if (decided.preference !== null) {
+      hub.push(ownerId, { type: "preference_updated", preference: decided.preference });
+      await agents.sendConfig(ownerId);
+    }
+    return c.json(DecidePreferenceOfferResponse.parse({ message: decided.message, preference: decided.preference }));
+  });
+
   app.post("/api/messages/:id/project-offer", async (c) => {
     const messageId = MessageId.safeParse(c.req.param("id"));
     if (!messageId.success) return c.json(NOT_FOUND, 404);
@@ -881,7 +945,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
         : ({ kind: "user", text: body.value.text, mentions } as const);
     deps.groupTurns.cancel(groupId.data);
 
-    const message = await appendMessage(db, owned, sent);
+    const message = await appendMessageIfGroupAlive(db, owned, sent);
+    if (message === null) return c.json(NOT_FOUND, 404);
     hub.push(c.get("user").id, { type: "message", message });
 
     // `/名` 只加一次用量，正文一个字都不改：运行器收到的和用户手打的一模一样，Pi 自己按名字找那份 SKILL.md。
@@ -911,7 +976,8 @@ export function createApp(deps: AppDeps): Hono<Env> {
     if (!body.ok) return c.json({ error: body.error }, 400);
 
     const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value);
-    if (settled.kind === "already_decided") return c.json({ error: "这条审批已经有结论了" }, 409);
+    if (settled.kind === "already_decided")
+      return c.json({ error: "这条审批已经有结论了", approval: settled.approval }, 409);
     if (settled.kind === "scope_not_allowed") return c.json({ error: settled.error }, 400);
     return c.json(DecideApprovalResponse.parse({ approval: settled.approval, grant: settled.grant }));
   });

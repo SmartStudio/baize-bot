@@ -67,17 +67,25 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
     "(allow file-ioctl)",
     "(allow file-map-executable)",
     "(allow file-read*)",
-    `(allow file-write* (subpath ${seatbeltString(work)}))`,
     ...access.writePaths.flatMap((path) => {
       const real = realpathExisting(path);
       return [`(allow file-write* (subpath ${seatbeltString(real)}))`];
     }),
+    `(deny file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.dataDir))}))`,
+    // Node、git 和 mkdir 的绝对路径校验会逐段 stat；只放数据根本身的元数据，不放列目录或文件内容。
+    `(allow file-read-metadata (literal ${seatbeltString(realpathExisting(zones.dataDir))}))`,
+    `(allow file-read* (subpath ${seatbeltString(realpathExisting(zones.botDir))}))`,
+    `(allow file-read* file-write* (subpath ${seatbeltString(realpathExisting(zones.sharedDir))}))`,
+    `(allow file-write* (subpath ${seatbeltString(work)}))`,
     '(allow file-write* (literal "/dev/null"))',
     '(allow file-write* (literal "/dev/stdout"))',
     '(allow file-write* (literal "/dev/stderr"))',
     '(allow file-write* (literal "/dev/fd/1"))',
     '(allow file-write* (literal "/dev/fd/2"))',
     '(allow file-write* (literal "/dev/dtracehelper"))',
+    // 根被换成指向其他 Bot 的链接后，下次 realpath 会把放行范围移过去；只准修改根里面的文件。
+    `(deny file-write* (literal ${seatbeltString(work)}))`,
+    `(deny file-write* (literal ${seatbeltString(realpathExisting(zones.sharedDir))}))`,
     // 连 unix socket 在 seatbelt 里算 network-outbound，裸的 (allow network-outbound) 会把本机所有 unix socket
     // 一起放开（docker.sock、用户自己 Chrome 的 SingletonSocket）。批了联网只放 IP、DNS 走的 mDNSResponder
     // 和工作目录里 Bot 自己起的 socket。seatbelt 按 socket 当前的路径判，同一次调用还批了写外面的目录时，
@@ -145,6 +153,7 @@ export function bwrapArgs(
   access: GateAccess,
   forbidden: readonly string[],
   readOnly: readonly string[],
+  sharedDir: string,
 ): readonly string[] {
   return [
     "--ro-bind",
@@ -157,6 +166,9 @@ export function bwrapArgs(
     "--bind",
     workDir,
     workDir,
+    "--bind",
+    sharedDir,
+    sharedDir,
     ...access.writePaths.flatMap((path) => ["--bind", path, path]),
     ...readOnly.flatMap((path) => ["--ro-bind", path, path]),
     ...forbidden.flatMap((path) => ["--tmpfs", path]),
@@ -172,15 +184,8 @@ export function bwrapArgs(
   ];
 }
 
-// 工作目录是 <dataDir>/<botId>/work，数据目录下除自己以外的目录都是别的 Bot（和 chrome-profile）。
-const otherBotDirs = (workDir: string): readonly string[] => {
-  const botDir = dirname(workDir);
-  const dataDir = dirname(botDir);
-  return readdirSync(dataDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => join(dataDir, entry.name))
-    .filter((path) => path !== botDir);
-};
+export const otherBotDirs = (botDir: string, sharedDir: string, directories: readonly string[]): readonly string[] =>
+  directories.filter((path) => path !== botDir && path !== sharedDir);
 
 // bind 的源必须存在。批准写一个还不存在的路径，就放开它最近的已存在祖先；根目录不放，
 // 整个根可写会盖掉 /dev 和 /tmp 的挂载。
@@ -200,9 +205,23 @@ const existingReal = (zones: ForbiddenZones, paths: readonly string[]): readonly
 
 const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
   const work = realpathExisting(workDir);
-  const forbidden = existingReal(zones, [...zones.hidden, ...otherBotDirs(work), X11_SOCKET_DIR]);
+  const shared = realpathExisting(zones.sharedDir);
+  const directories = readdirSync(realpathExisting(zones.dataDir), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+    .map((entry) => realpathExisting(join(zones.dataDir, entry.name)));
+  const forbidden = existingReal(zones, [
+    ...zones.hidden,
+    ...otherBotDirs(realpathExisting(zones.botDir), shared, directories),
+    X11_SOCKET_DIR,
+  ]);
   const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
-  const args = bwrapArgs(work, { network: access.network, writePaths }, forbidden, existingReal(zones, zones.readOnly));
+  const args = bwrapArgs(
+    work,
+    { network: access.network, writePaths },
+    forbidden,
+    existingReal(zones, zones.readOnly),
+    shared,
+  );
   return ["bwrap", ...args, "/bin/bash", "-c", command].map(shSingleQuote).join(" ");
 };
 

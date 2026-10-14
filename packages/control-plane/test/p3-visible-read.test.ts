@@ -425,7 +425,13 @@ describe("P3 消息可见范围", () => {
           (await o.client.post(`/api/approvals/${approvalPush.approval.id}`, { decision: "approved", scope: "once" }))
             .status,
         ).toBe(404);
-        const next = await o.prompt("批准");
+        expect((await o.client.post(`/api/groups/${o.groupId}/messages`, { text: "批准" })).status).toBe(201);
+        expect(await o.agent.expect("approval_result")).toMatchObject({
+          runId: prompt.runId,
+          callId: "hidden-approval",
+          outcome: "voided",
+        });
+        const next = await o.agent.expect("prompt");
         expect(next.runId).not.toBe(prompt.runId);
       } finally {
         push.close();

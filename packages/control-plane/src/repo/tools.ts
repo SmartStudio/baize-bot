@@ -4,6 +4,7 @@ import {
   ToolConnectionConfig,
   ToolConnectionId,
   type CreateToolRequest,
+  type ComputerKind,
   type ToolOperation,
   type UpdateToolRequest,
   type UserId,
@@ -14,6 +15,8 @@ import type { Db } from "../db/client.js";
 import { bots, toolConnectionBots, toolConnections } from "../db/schema.js";
 import { newId } from "../ids.js";
 import type { Tx } from "./messages.js";
+import { lockOwner } from "./runs.js";
+import { recheckOwnerWorkRecords } from "./work-records.js";
 
 type ToolRow = typeof toolConnections.$inferSelect;
 
@@ -26,6 +29,7 @@ const toTool = (row: ToolRow, assignedBotIds: BotId[]): ToolConnection =>
     operations: row.operations,
     assignedBotIds,
     status: row.status,
+    localOnly: row.localOnly,
   });
 
 const assignments = async (db: Db | Tx, ids: string[]): Promise<Map<string, BotId[]>> => {
@@ -73,11 +77,18 @@ export async function listToolsByOwner(db: Db, ownerId: UserId): Promise<ToolCon
   return rows.map((row) => toTool(row, byTool.get(row.id) ?? []));
 }
 
-export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypto): Promise<ToolConnectionConfig[]> {
+export async function listToolConfigs(
+  db: Db,
+  ownerId: UserId,
+  crypto: ToolCrypto,
+  kind: ComputerKind,
+): Promise<ToolConnectionConfig[]> {
   const rows = await db
     .select()
     .from(toolConnections)
-    .where(eq(toolConnections.ownerId, ownerId))
+    .where(
+      and(eq(toolConnections.ownerId, ownerId), kind === "remote" ? eq(toolConnections.localOnly, false) : undefined),
+    )
     .orderBy(asc(toolConnections.createdAt), asc(toolConnections.id));
   const byTool = await assignments(
     db,
@@ -86,9 +97,21 @@ export async function listToolConfigs(db: Db, ownerId: UserId, crypto: ToolCrypt
   return rows.map((row) =>
     ToolConnectionConfig.parse({
       ...toTool(row, byTool.get(row.id) ?? []),
-      authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc),
+      ...(row.localOnly
+        ? { authorization: row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc) }
+        : {}),
     }),
   );
+}
+
+export async function toolAuthorization(
+  db: Db,
+  ownerId: UserId,
+  id: ToolConnectionId,
+  crypto: ToolCrypto,
+): Promise<string | null> {
+  const row = await ownedRow(db, ownerId, id);
+  return row === null || row.authorizationEnc === null ? null : crypto.decrypt(row.authorizationEnc);
 }
 
 export async function createTool(
@@ -98,19 +121,25 @@ export async function createTool(
   operations: ToolOperation[],
   crypto: ToolCrypto,
 ): Promise<ToolConnection | null> {
-  const [row] = await db
-    .insert(toolConnections)
-    .values({
-      id: ToolConnectionId.parse(newId()),
-      ownerId,
-      name: input.name,
-      url: input.url,
-      authorizationEnc: input.authorization === undefined ? null : crypto.encrypt(input.authorization),
-      operations,
-    })
-    .onConflictDoNothing({ target: [toolConnections.ownerId, toolConnections.name] })
-    .returning();
-  return row === undefined ? null : toTool(row, []);
+  return db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    const [row] = await tx
+      .insert(toolConnections)
+      .values({
+        id: ToolConnectionId.parse(newId()),
+        ownerId,
+        name: input.name,
+        url: input.url,
+        localOnly: input.localOnly ?? false,
+        authorizationEnc: input.authorization === undefined ? null : crypto.encrypt(input.authorization),
+        operations,
+      })
+      .onConflictDoNothing({ target: [toolConnections.ownerId, toolConnections.name] })
+      .returning();
+    if (row === undefined) return null;
+    await recheckOwnerWorkRecords(tx, ownerId);
+    return toTool(row, []);
+  });
 }
 
 const isNameTaken = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "23505";
@@ -173,6 +202,9 @@ export async function updateTool(
 
   try {
     return await db.transaction(async (tx): Promise<UpdateToolResult> => {
+      const changesRetainPolicy =
+        patch.name !== undefined || patch.localOnly !== undefined || reauthorized !== undefined;
+      await lockOwner(tx, ownerId, changesRetainPolicy ? "exclusive" : "shared");
       // 补授权要等 MCP 回列表，这期间别的请求可能已经改了操作表。锁住行、按落库的最新一版合并，不拿进来时那份旧的。
       const [locked] = await tx
         .select()
@@ -182,6 +214,7 @@ export async function updateTool(
       if (locked === undefined) return { kind: "gone" };
       const changes: Partial<typeof toolConnections.$inferInsert> = {};
       if (patch.name !== undefined) changes.name = patch.name;
+      if (patch.localOnly !== undefined) changes.localOnly = patch.localOnly;
       if (reauthorized !== undefined || patch.operations !== undefined) {
         const operations = nextOperations(locked.operations, reauthorized, patch.operations);
         if (operations === null) return { kind: "invalid_operation" };
@@ -196,6 +229,7 @@ export async function updateTool(
           ? [locked]
           : await tx.update(toolConnections).set(changes).where(eq(toolConnections.id, locked.id)).returning();
       if (row === undefined) return { kind: "gone" };
+      if (changesRetainPolicy) await recheckOwnerWorkRecords(tx, ownerId);
       if (assigned !== undefined) {
         await tx.delete(toolConnectionBots).where(eq(toolConnectionBots.toolConnectionId, current.id));
         if (assigned.length > 0) {
@@ -215,9 +249,14 @@ export async function updateTool(
 }
 
 export async function deleteTool(db: Db, ownerId: UserId, id: ToolConnectionId): Promise<boolean> {
-  const deleted = await db
-    .delete(toolConnections)
-    .where(and(eq(toolConnections.id, id), eq(toolConnections.ownerId, ownerId)))
-    .returning({ id: toolConnections.id });
-  return deleted.length > 0;
+  return db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    const deleted = await tx
+      .delete(toolConnections)
+      .where(and(eq(toolConnections.id, id), eq(toolConnections.ownerId, ownerId)))
+      .returning({ id: toolConnections.id });
+    if (deleted.length === 0) return false;
+    await recheckOwnerWorkRecords(tx, ownerId);
+    return true;
+  });
 }

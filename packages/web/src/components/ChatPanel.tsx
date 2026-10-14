@@ -7,6 +7,7 @@ import {
   type ApprovalTable,
   type BotLookup,
   type DecideApproval,
+  type DecidePreferenceOffer,
   type DecideSkillOffer,
   type HandoffTable,
   type InspectTool,
@@ -37,6 +38,7 @@ type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onDecidePreferenceOffer: DecidePreferenceOffer;
   onDecideProjectOffer: ProjectOfferActions["decide"];
   onOpenProject: (groupId: GroupId) => void;
   onInspectTool: InspectTool;
@@ -105,6 +107,7 @@ export const ChatPanel = ({
   onSend,
   onDecide,
   onDecideSkillOffer,
+  onDecidePreferenceOffer,
   onDecideProjectOffer,
   onOpenProject,
   onInspectTool,
@@ -290,6 +293,7 @@ export const ChatPanel = ({
                 checklist={checklist}
                 onDecide={onDecide}
                 onDecideSkillOffer={onDecideSkillOffer}
+                onDecidePreferenceOffer={onDecidePreferenceOffer}
                 projectOfferActions={projectOfferActions}
                 onInspectTool={onInspectTool}
                 selectedToolId={inspectedToolId}

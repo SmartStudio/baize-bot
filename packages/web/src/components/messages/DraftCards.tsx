@@ -11,6 +11,7 @@ import type {
   PublishFailureReason,
   DraftId,
   DraftStatus,
+  LiveId,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
 import { BrandBookOpener } from "../BrandBookDialog.js";
@@ -21,6 +22,7 @@ export type ContentActions = {
   approvePlan: (planId: ContentPlanId, request: ApprovePlanRequest) => Promise<void>;
   returnPlan: (planId: ContentPlanId) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
+  openTakeover: (liveId: LiveId) => Promise<void>;
 };
 
 type Deciding = "approve" | "return" | null;
@@ -35,8 +37,9 @@ const STATUS: Record<DraftStatus, { label: string; tone: string }> = {
 };
 
 const FAILURE: Record<PublishFailureReason, string> = {
-  login_expired: "账号登录过期了，重新登录后再发",
+  login_expired: "账号登录过期了，重新登录后让 Bot 再起一稿",
   page_changed: "平台页面变了，没发出去",
+  paused: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
   error: "没发出去",
 };
 

@@ -2,11 +2,16 @@ import {
   BotProfileResponse,
   CreateBotResponse,
   CreateGroupResponse,
+  DecidePreferenceOfferResponse,
+  MessageListResponse,
   PreferenceListResponse,
   PreferenceResponse,
   type BotId,
   type ControlToAgent,
   type GroupId,
+  type Message,
+  type MessageBody,
+  type MessageId,
   type Preference,
   type RunId,
   type ServerPush,
@@ -15,8 +20,14 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { startTestServer, type ApiClient, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
+import {
+  decidePreferenceOffer,
+  offerPreference,
+  savePreferenceOffer,
+  sendPreferenceOffer,
+} from "./helpers/preference-offer.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -116,12 +127,55 @@ async function configsThrough(agent: AgentClient, done: (config: ConfigMessage) 
   throw new Error("下发的 config 里一直没有要的那一份");
 }
 
-type PreferencePush = Extract<ServerPush, { type: "preference_updated" | "preference_deleted" }>;
+/** Bot 在它的单聊里提议一条偏好，等确认卡推上来。 */
+async function offerNote(
+  owner: Owner,
+  agent: AgentClient,
+  push: PushClient,
+  text: string,
+  options: { readonly runId?: RunId; readonly private?: boolean; readonly sourceMessageId?: MessageId | null } = {},
+): Promise<Message> {
+  const runId = options.runId ?? (await runIn(owner, agent, owner.groupId, `记住：${text}`));
+  return offerPreference(agent, push, {
+    runId,
+    botId: owner.botId,
+    groupId: owner.groupId,
+    text,
+    private: options.private ?? false,
+    sourceMessageId: options.sourceMessageId ?? null,
+  });
+}
+
+/** Bot 提议、用户点「记住」，等偏好推送回来为止。 */
+async function remember(owner: Owner, agent: AgentClient, push: PushClient, text: string): Promise<Preference> {
+  const card = await offerNote(owner, agent, push, text);
+  await savePreferenceOffer(owner.client, card);
+  const pushed = await pushUntil(push, "preference_updated");
+  expect(pushed.preference.text).toBe(text);
+  return pushed.preference;
+}
 
 /**
- * 收屏障之前的全部偏好推送（更新和删除都算），屏障是后发的一条确定会落地的 preference_add。
- * 前面谁多推了、谁推晚了，都落在 before 里，不靠等超时来证明没有。
+ * 提议并点记住，但不碰推送队列：等卡落库靠轮询群消息，不读 WebSocket，前面还没读的偏好推送原样留着给调用方。
+ * 屏障要的就是「前面谁多推了、谁推晚了，都落在 before 里」。
  */
+async function settleNote(owner: Owner, agent: AgentClient, text: string): Promise<void> {
+  const runId = await runIn(owner, agent, owner.groupId, `记住：${text}`);
+  sendPreferenceOffer(agent, { runId, botId: owner.botId, groupId: owner.groupId, text });
+  let card: Message | undefined;
+  await waitFor(async () => {
+    card = (await messagesIn(owner.client, owner.groupId)).find(
+      (one) => one.body.kind === "preference_offer" && one.body.text === text,
+    );
+    return card !== undefined;
+  }, `「${text}」的确认卡落库`);
+  if (card === undefined) throw new Error("卡应当已经落库");
+  await savePreferenceOffer(owner.client, card);
+}
+
+type PreferencePush = Extract<ServerPush, { type: "preference_updated" | "preference_deleted" }>;
+
+/** 收屏障之前的全部偏好推送（更新和删除都算），屏障是后发的一条确定会落地的偏好。 */
 async function preferencePushesBefore(
   push: PushClient,
   barrierText: string,
@@ -138,26 +192,16 @@ async function preferencePushesBefore(
   throw new Error(`推送里一直没有屏障 ${barrierText}`);
 }
 
-/** Bot 在它的单聊里报一条偏好，不等推送。 */
-async function sendNote(owner: Owner, agent: AgentClient, text: string): Promise<void> {
-  const runId = await runIn(owner, agent, owner.groupId, `记住：${text}`);
-  agent.send({
-    type: "preference_add",
-    runId,
-    botId: owner.botId,
-    groupId: owner.groupId,
-    text,
-    private: false,
-    sourceMessageId: null,
-  });
+async function messagesIn(client: ApiClient, groupId: GroupId): Promise<Message[]> {
+  const response = await client.get(`/api/groups/${groupId}/messages`);
+  expect(response.status).toBe(200);
+  return MessageListResponse.parse(await response.json()).messages;
 }
 
-/** Bot 在它的单聊里当场记一条，等到推送回来为止。 */
-async function remember(owner: Owner, agent: AgentClient, push: PushClient, text: string): Promise<Preference> {
-  await sendNote(owner, agent, text);
-  const pushed = await pushUntil(push, "preference_updated");
-  expect(pushed.preference.text).toBe(text);
-  return pushed.preference;
+function offerBody(message: Message): Extract<MessageBody, { kind: "preference_offer" }> {
+  if (message.body.kind !== "preference_offer")
+    throw new Error(`这条消息不是 preference_offer，是 ${message.body.kind}`);
+  return message.body;
 }
 
 async function preferencesOf(client: ApiClient, botId: BotId): Promise<Preference[]> {
@@ -166,41 +210,222 @@ async function preferencesOf(client: ApiClient, botId: BotId): Promise<Preferenc
   return PreferenceListResponse.parse(await response.json()).items;
 }
 
-it("单聊里记一条偏好后列表多一条并推送", async () => {
+it("Bot 提议后群里多一张 offered 的卡，偏好表和 config 都不动", async () => {
   const owner = await ownerWithBot();
   const agent = await online(owner);
   const push = await watch(owner);
   try {
-    expect(await preferencesOf(owner.client, owner.botId), "还没记过").toEqual([]);
-
     const runId = await runIn(owner, agent, owner.groupId, "标题别超过 15 个字，记住");
-    agent.send({
-      type: "preference_add",
-      runId,
-      botId: owner.botId,
-      groupId: owner.groupId,
-      text: "标题别超过 15 个字",
-      private: true,
-      sourceMessageId: null,
-    });
-    const pushed = await pushUntil(push, "preference_updated");
-    expect(pushed.preference, "推的是刚记下的整条").toMatchObject({
-      botId: owner.botId,
-      text: "标题别超过 15 个字",
-      private: true,
-      sourceMessageId: null,
-    });
-    expect(await preferencesOf(owner.client, owner.botId), "列表里多的就是推上来的那条").toEqual([pushed.preference]);
+    const card = await offerNote(owner, agent, push, "标题别超过 15 个字", { runId, private: true });
 
-    const config = await agentUntil(agent, "config");
-    expect(config.preferences, "记下之后重发 config，私人的也照样下发给它写作时套用").toEqual([pushed.preference]);
+    expect(offerBody(card), "卡上写着要记的那句话，还没点").toMatchObject({
+      botId: owner.botId,
+      text: "标题别超过 15 个字",
+      private: true,
+      sourceMessageId: null,
+      status: "offered",
+      preferenceId: null,
+    });
+    expect(
+      (await messagesIn(owner.client, owner.groupId)).filter((one) => one.body.kind === "preference_offer"),
+      "群里恰好这一张卡",
+    ).toEqual([card]);
+    expect(await preferencesOf(owner.client, owner.botId), "点之前偏好表不动").toEqual([]);
+
+    // 建 skill 一定重发 config，当屏障：它之前下发的每一份 config 里都不该有这句偏好。
+    expect(
+      (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "屏障", steps: ["一步", "两步"] })).status,
+    ).toBe(201);
+    const configs = await configsThrough(agent, (config) => config.skills?.length === 1);
+    expect(
+      configs.map((config) => config.preferences),
+      "点之前不下发",
+    ).toEqual(configs.map(() => []));
   } finally {
     push.close();
     agent.close();
   }
 });
 
-it("项目群里的 preference_add 静默丢弃", async () => {
+it("点记住：偏好表多一行，卡变 saved 并重推，Web 收到 preference_updated，电脑收到带这句的新 config", async () => {
+  const owner = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    const runId = await runIn(owner, agent, owner.groupId, "标题别超过 15 个字，记住");
+    const source = (await messagesIn(owner.client, owner.groupId)).find((one) => one.body.kind === "user");
+    if (source === undefined) throw new Error("单聊里该有用户发的那条");
+    const card = await offerNote(owner, agent, push, "标题别超过 15 个字", {
+      runId,
+      private: true,
+      sourceMessageId: source.id,
+    });
+
+    const saved = await savePreferenceOffer(owner.client, card);
+    const preference = saved.preference;
+    expect(preference, "回的是刚写下的整条").toMatchObject({
+      botId: owner.botId,
+      text: "标题别超过 15 个字",
+      private: true,
+      sourceMessageId: source.id,
+    });
+    expect(offerBody(saved.message)).toMatchObject({ status: "saved", preferenceId: preference?.id });
+
+    const repushed = await pushUntil(push, "message");
+    expect(repushed.message, "卡的状态住在正文里，点完重推同一条").toEqual(saved.message);
+    const pushed = await pushUntil(push, "preference_updated");
+    expect(pushed.preference).toEqual(preference);
+    expect(await preferencesOf(owner.client, owner.botId), "列表里多的就是这一条").toEqual([pushed.preference]);
+
+    const config = await agentUntil(agent, "config");
+    expect(config.preferences, "私人的也照样下发给它写作时套用").toEqual([pushed.preference]);
+    expect(
+      (await messagesIn(owner.client, owner.groupId)).find((one) => one.id === card.id)?.body,
+      "库里的卡也变了，刷新页面看到的是 saved",
+    ).toMatchObject({ status: "saved", preferenceId: preference?.id });
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("点不用：卡变 dismissed 并重推，偏好表不动，也不重发 config", async () => {
+  const owner = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    const card = await offerNote(owner, agent, push, "回复都带一句问候");
+
+    const response = await decidePreferenceOffer(owner.client, card, "dismiss");
+    expect(response.status).toBe(200);
+    const decided = DecidePreferenceOfferResponse.parse(await response.json());
+    expect(decided.preference, "不用就没有偏好").toBeNull();
+    expect(offerBody(decided.message)).toMatchObject({ status: "dismissed", preferenceId: null });
+    expect((await pushUntil(push, "message")).message, "重推这条卡").toEqual(decided.message);
+    expect(await preferencesOf(owner.client, owner.botId), "偏好表不动").toEqual([]);
+
+    expect(
+      (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "屏障", steps: ["一步", "两步"] })).status,
+    ).toBe(201);
+    const configs = await configsThrough(agent, (config) => config.skills?.length === 1);
+    expect(
+      configs.map((config) => config.preferences),
+      "点不用不下发",
+    ).toEqual(configs.map(() => []));
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("同一张卡点第二次回 409，先点的那个结果不变，偏好只有一行", async () => {
+  const owner = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    const card = await offerNote(owner, agent, push, "报价一律含税");
+    await savePreferenceOffer(owner.client, card);
+
+    expect((await decidePreferenceOffer(owner.client, card, "save")).status, "再点记住").toBe(409);
+    expect((await decidePreferenceOffer(owner.client, card, "dismiss")).status, "改口点不用").toBe(409);
+    expect(await preferencesOf(owner.client, owner.botId), "只写过一行").toHaveLength(1);
+    expect((await messagesIn(owner.client, owner.groupId)).find((one) => one.id === card.id)?.body).toMatchObject({
+      status: "saved",
+    });
+
+    const dismissed = await offerNote(owner, agent, push, "另一条先说不用");
+    expect((await decidePreferenceOffer(owner.client, dismissed, "dismiss")).status).toBe(200);
+    expect((await decidePreferenceOffer(owner.client, dismissed, "save")).status, "说过不用的卡不能再记").toBe(409);
+    expect(await preferencesOf(owner.client, owner.botId), "说过不用的没写进去").toHaveLength(1);
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("同一张卡并发点记住只写一行", async () => {
+  const owner = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    const card = await offerNote(owner, agent, push, "并发也只记一次");
+    const statuses = (await Promise.all([1, 2, 3].map(() => decidePreferenceOffer(owner.client, card, "save")))).map(
+      (response) => response.status,
+    );
+
+    expect(statuses.toSorted(), "一个 200，其余 409").toEqual([200, 409, 409]);
+    expect(await preferencesOf(owner.client, owner.botId), "没有留下孤儿偏好").toHaveLength(1);
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("不是 preference_offer 的消息、别人的卡、不存在的消息都是 404", async () => {
+  const owner = await ownerWithBot();
+  const stranger = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    const card = await offerNote(owner, agent, push, "只有我能点");
+    const plain = (await messagesIn(owner.client, owner.groupId)).find((one) => one.body.kind === "user");
+    if (plain === undefined) throw new Error("单聊里该有用户发的那条");
+
+    expect((await owner.client.post(`/api/messages/${plain.id}/preference-offer`, { decision: "save" })).status).toBe(
+      404,
+    );
+    expect((await stranger.client.post(`/api/messages/${card.id}/preference-offer`, { decision: "save" })).status).toBe(
+      404,
+    );
+    expect((await owner.client.post("/api/messages/not-a-message/preference-offer", { decision: "save" })).status).toBe(
+      404,
+    );
+    expect(await preferencesOf(owner.client, owner.botId), "404 的都没写").toEqual([]);
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("run 结束以后点记住照样能存", async () => {
+  const owner = await ownerWithBot();
+  const agent = await online(owner);
+  const push = await watch(owner);
+  try {
+    await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "记住：先问价再下单" });
+    const prompt = await agentUntil(agent, "prompt");
+    const card = await offerPreference(agent, push, {
+      runId: prompt.runId,
+      botId: owner.botId,
+      groupId: owner.groupId,
+      text: "先问价再下单",
+      private: false,
+      sourceMessageId: null,
+    });
+    agent.send({
+      type: "run_done",
+      runId: prompt.runId,
+      botId: owner.botId,
+      groupId: owner.groupId,
+      steps: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+    });
+    for (;;) {
+      const one = await push.next();
+      if (one.type === "message" && one.message.body.kind === "cost" && one.message.body.runId === prompt.runId) break;
+    }
+
+    const saved = await savePreferenceOffer(owner.client, card);
+    expect(saved.preference?.text, "run 早收尾了，点卡不靠它").toBe("先问价再下单");
+    expect(await preferencesOf(owner.client, owner.botId)).toEqual([saved.preference]);
+  } finally {
+    push.close();
+    agent.close();
+  }
+});
+
+it("项目群里的 preference_offer 静默丢弃", async () => {
   const owner = await ownerWithBot();
   const other = await addBot(owner, "小财");
   const project = await openProject(owner, "大促", [owner.botId, other]);
@@ -209,7 +434,7 @@ it("项目群里的 preference_add 静默丢弃", async () => {
   try {
     const projectRun = await runIn(owner, agent, project, "@小服 这次大促的标题都写短一点");
     agent.send({
-      type: "preference_add",
+      type: "preference_offer",
       runId: projectRun,
       botId: owner.botId,
       groupId: project,
@@ -217,11 +442,18 @@ it("项目群里的 preference_add 静默丢弃", async () => {
       private: false,
       sourceMessageId: null,
     });
-    await sendNote(owner, agent, "单聊里记的");
+    // 同一条连接上的帧按序处理，单聊那张卡到了，前面项目群那条就已经处理完。
+    const barrier = await offerNote(owner, agent, push, "单聊里记的");
 
-    const { before, barrier } = await preferencePushesBefore(push, "单聊里记的");
-    expect(before, "项目群那条被拒时更新和删除都不推，屏障之前没有任何偏好事件").toEqual([]);
-    expect(await preferencesOf(owner.client, owner.botId), "库里只有单聊那条").toEqual([barrier]);
+    expect(
+      (await messagesIn(owner.client, project)).filter((one) => one.body.kind === "preference_offer"),
+      "项目群里没有落卡",
+    ).toEqual([]);
+    expect(
+      (await messagesIn(owner.client, owner.groupId)).filter((one) => one.body.kind === "preference_offer"),
+      "单聊里只有屏障那张",
+    ).toEqual([barrier]);
+    expect(await preferencesOf(owner.client, owner.botId), "更没有偏好").toEqual([]);
   } finally {
     push.close();
     agent.close();
@@ -302,7 +534,7 @@ it("切私人的 config 还没读回来时偏好被删，推送顺序仍是先�
     held.release();
     expect((await patching).status).toBe(200);
 
-    await sendNote(owner, agent, "放行之后的屏障");
+    await settleNote(owner, agent, "放行之后的屏障");
     const { before: pushes } = await preferencePushesBefore(push, "放行之后的屏障");
     expect(pushes, "页面收到的最后一条关于它的推送必须是删除，否则已删的偏好会在页面上复活").toEqual([
       { type: "preference_updated", preference: { ...before, private: true } },

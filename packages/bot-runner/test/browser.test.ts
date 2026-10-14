@@ -14,6 +14,7 @@ import {
   settledPageCount,
   type TestChrome,
 } from "./helpers/chrome.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 
 const resultText = (result: { content: ReadonlyArray<{ type: string; text?: string }> }): string =>
   result.content.flatMap((block) => (block.type === "text" ? [block.text ?? ""] : [])).join("\n");
@@ -102,7 +103,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
   });
 
   const botBrowser = (connection: () => Promise<CdpConnection> = async () => chrome.connection): BotBrowser => {
-    const browser = createBotBrowser({ profileDir, connection });
+    const browser = createBotBrowser({ profileDir, connection, present: NO_PRESENT });
     opened.push(browser);
     return browser;
   };

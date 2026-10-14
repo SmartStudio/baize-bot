@@ -1,13 +1,4 @@
-import {
-  type ComputerId,
-  type ControlToAgent,
-  GroupId,
-  PokerHandId,
-  PokerSessionId,
-  RunId,
-  UserId,
-  type Message,
-} from "@baize/shared";
+import { type ComputerId, GroupId, PokerHandId, PokerSessionId, RunId, UserId, type Message } from "@baize/shared";
 import { and, eq, sql } from "drizzle-orm";
 import { errorKind } from "../agent/events.js";
 import type { AgentHub } from "../agent/hub.js";
@@ -66,7 +57,7 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
   const initial = await loadHand(deps.db, handId);
   if (!initial) return;
   const options = optionsByDb.get(deps.db);
-  const dispatches: { computerId: ComputerId; message: Extract<ControlToAgent, { type: "prompt" }> }[] = [];
+  const dispatches: ComputerId[] = [];
   const outcome = await withTableLock(deps.db, initial.row.groupId, async (db, locked) => {
     const messages: Message[] = [];
     let changed = false;
@@ -134,12 +125,10 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
               agents: {
                 isOnline: (id) => deps.agents.isOnline(id),
                 configRejected: (id) => deps.agents.configRejected(id),
-                // 外层事务提交后才发 prompt，避免重连对账看不到刚创建的 run。
-                send: (computerId, message) => {
-                  if (!deps.agents.isOnline(computerId)) return false;
-                  if (message.type !== "prompt") throw new Error("隐藏派活只能发送 prompt");
-                  dispatches.push({ computerId, message });
-                  return true;
+                canDeliver: (id) => deps.agents.canDeliver(id),
+                // withTableLock 的外层事务提交后再 flush。
+                flushOutbox: async (computerId) => {
+                  dispatches.push(computerId);
                 },
               },
             },
@@ -242,17 +231,7 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
     }
   });
   if (!outcome) return;
-  for (const dispatch of dispatches) {
-    if (!deps.agents.send(dispatch.computerId, dispatch.message)) {
-      await finishRun(
-        deps.db,
-        dispatch.message.runId,
-        dispatch.message.groupId,
-        { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 },
-        "abandoned",
-      );
-    }
-  }
+  for (const computerId of dispatches) await deps.agents.flushOutbox(computerId);
   pushMessages(deps, outcome.ownerId, outcome.messages);
   if (outcome.changed && outcome.view !== null)
     deps.push.push(UserId.parse(outcome.ownerId), { type: "poker_table_updated", table: outcome.view });

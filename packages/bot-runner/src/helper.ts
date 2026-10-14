@@ -73,7 +73,8 @@ export function createHelperTools(context: HelperContext): readonly RunnerTool[]
         "帮手只能读，不能写文件、发东西、点网页；它交回的话就是这次的工具结果。",
       parameters: CALL_HELPER_PARAMS,
       execute: async (callId, params, signal) => {
-        if (context.gate.activeRun() === null) throw new Error("这次工具调用不属于任何一次运行，没法拉帮手。");
+        const parent = context.gate.activeRun();
+        if (parent === null) throw new Error("这次工具调用不属于任何一次运行，没法拉帮手。");
         const { kind, task } = params as Static<typeof CALL_HELPER_PARAMS>;
         const helper = HELPERS[kind];
         if (task.trim() === "") throw new Error("帮手没拉成，改好再调：task 是空的，写清要它干什么。");
@@ -82,6 +83,14 @@ export function createHelperTools(context: HelperContext): readonly RunnerTool[]
         // 被拦的记号只给主会话的工具行定终态用，帮手的过程不进群，不记。
         const gate: SessionGate = {
           ...context.gate,
+          activeRun: () => parent,
+          laneFence: {
+            headers: () => context.gate.laneFence.headers(parent.run.runId),
+            beforeEffect: (_runId, helperCallId, action) =>
+              context.gate.laneFence.beforeEffect(parent.run.runId, `${callId}/${helperCallId}`, action),
+            toolSettled: (_runId, helperCallId) =>
+              context.gate.laneFence.toolSettled(parent.run.runId, `${callId}/${helperCallId}`),
+          },
           approvals: {
             ask: (request, askSignal) =>
               context.gate.approvals.ask({ ...request, callId: `${callId}/${request.callId}` }, askSignal),

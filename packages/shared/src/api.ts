@@ -1,7 +1,12 @@
 import { z } from "zod";
+import { McpHttpUrl } from "./mcp-discovery.js";
+import { LiveId } from "./live-id.js";
+import { LiveSession } from "./live.js";
 import { PokerTableView } from "./poker.js";
 import {
   Account,
+  AttachmentId,
+  AttachmentSha256,
   Viewer,
   AccountId,
   AccountTier,
@@ -81,6 +86,10 @@ export const RegisterResponse = z.object({ user: User });
 // POST /api/computers/local、POST /api/computers/remote。token 明文只在这次响应里出现。
 export const ComputerTokenResponse = z.object({ computerId: ComputerId, token: z.string() });
 export const ComputerListResponse = z.object({ computers: z.array(Computer) });
+
+// POST /api/computers/local。无请求体时按未确认处理，已有连上过的本机电脑则回 409。
+export const PairLocalComputerRequest = z.object({ confirmDisplace: z.boolean() });
+export const PairLocalConflictResponse = z.object({ error: z.string(), computer: Computer });
 
 // POST /api/auth/logout 无请求体，响应 204。
 // GET /api/me
@@ -230,7 +239,7 @@ export const ReturnPlanResponse = z.object({ plan: ContentPlan });
 
 // GET /api/accounts
 export const AccountListResponse = z.object({ accounts: z.array(Account) });
-// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行，200。浏览器平台只能挂本机电脑。
+// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行并挂到这次选的电脑上，200。
 export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
 export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
@@ -319,6 +328,15 @@ export const DecideSkillOfferRequest = z.object({ decision: z.enum(["save", "dis
 export type DecideSkillOfferRequest = z.infer<typeof DecideSkillOfferRequest>;
 export const DecideSkillOfferResponse = z.object({ message: Message, skill: Skill.nullable() });
 
+// POST /api/messages/:id/preference-offer  单聊里那张「记不记这条偏好」的卡点「记住」或「不用」。
+// 消息不是 preference_offer、别人的、卡上那个 Bot 已删、消息所在群已不是它的单聊，都是 404；已有结论 409。
+// save 写偏好、把消息 status 改成 saved 并重推那条 message，再推 preference_updated 和新的 config；
+// dismiss 只改 status，preference 回 null。
+export const DecidePreferenceOfferRequest = z.object({ decision: z.enum(["save", "dismiss"]) });
+export type DecidePreferenceOfferRequest = z.infer<typeof DecidePreferenceOfferRequest>;
+export const DecidePreferenceOfferResponse = z.object({ message: Message, preference: Preference.nullable() });
+export type DecidePreferenceOfferResponse = z.infer<typeof DecidePreferenceOfferResponse>;
+
 // POST /api/messages/:id/project-offer
 export const DecideProjectOfferRequest = z.discriminatedUnion("decision", [
   z.object({ decision: z.literal("start"), name: z.string().min(1).max(40).optional() }).strict(),
@@ -390,12 +408,13 @@ export type UpdateBrandRequest = z.infer<typeof UpdateBrandRequest>;
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
 export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
 
-// POST /api/tools  连一个 MCP（Streamable HTTP）。控制面当场 initialize 加 tools/list，连不上或不是 MCP 回 400 并说原因；
+// POST /api/tools 连一个 MCP（Streamable HTTP）。localOnly 在本机电脑探测，其余在控制面探测；失败回固定中文原因。
 // operations 按注解定 needsApproval；assignedBotIds 起始为空。回 201。同名 409。
 export const CreateToolRequest = z.object({
   name: z.string().min(1).max(40),
-  url: z.string().url(),
+  url: McpHttpUrl,
   authorization: z.string().min(1).optional(),
+  localOnly: z.boolean().optional(),
 });
 export type CreateToolRequest = z.infer<typeof CreateToolRequest>;
 export const ToolResponse = z.object({ tool: ToolConnection });
@@ -408,12 +427,32 @@ export const ToolResponse = z.object({ tool: ToolConnection });
 export const UpdateToolRequest = z.object({
   name: z.string().min(1).max(40).optional(),
   authorization: z.string().min(1).nullable().optional(),
+  localOnly: z.boolean().optional(),
   assignedBotIds: z.array(BotId).optional(),
   operations: z.array(ToolOperation.pick({ name: true, needsApproval: true })).optional(),
 });
 export type UpdateToolRequest = z.infer<typeof UpdateToolRequest>;
 
 // DELETE /api/tools/:id  回 204，重发 config。
+
+// POST ${mcpProxy.baseUrl}/:connectionId/call，Bearer 用当前 modelGateway.apiKey。
+export const McpProxyCallRequest = z.object({
+  botId: BotId,
+  tool: z.string().min(1),
+  arguments: z.record(z.unknown()),
+});
+export type McpProxyCallRequest = z.infer<typeof McpProxyCallRequest>;
+export const McpProxyCallResponse = z.object({
+  content: z.array(z.record(z.unknown())),
+  isError: z.boolean(),
+});
+export type McpProxyCallResponse = z.infer<typeof McpProxyCallResponse>;
+
+// PUT ${hub.baseUrl}/attachments?botId=&groupId=，请求体是图片字节，Bearer 用当前 modelGateway.apiKey。
+export const AttachmentUploadQuery = z.object({ botId: BotId, groupId: GroupId }).strict();
+export type AttachmentUploadQuery = z.infer<typeof AttachmentUploadQuery>;
+export const AttachmentUploadResponse = z.object({ attachmentId: AttachmentId, sha256: AttachmentSha256 }).strict();
+export type AttachmentUploadResponse = z.infer<typeof AttachmentUploadResponse>;
 
 // GET /api/usage  设置的用量页。本月从 1 号 00:00（Asia/Shanghai）起算，monthStartsAt 告诉客户端这一刻。
 // 每个自己的 Bot 一行，本月没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。recent 只列本月的。
@@ -692,5 +731,12 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("preference_deleted"), preferenceId: PreferenceId, botId: BotId }),
   // 手册每次写入（用户改、草稿批准追加改动）都推整本。
   z.object({ type: z.literal("brand_updated"), brand: BrandBook }),
+  // 远程画面接管：会话登记或变了推整份，结束推 live_closed。画面本身不走这里，走二进制 socket。
+  z.object({ type: z.literal("live_session"), session: LiveSession }),
+  z.object({ type: z.literal("live_closed"), liveId: LiveId }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;
+
+// GET /api/live：当前用户电脑上正在等人的画面，网页刷新后靠它找回。
+export const LiveSessionsResponse = z.object({ sessions: z.array(LiveSession) });
+export type LiveSessionsResponse = z.infer<typeof LiveSessionsResponse>;

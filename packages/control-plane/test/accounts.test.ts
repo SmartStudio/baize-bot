@@ -16,6 +16,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { runMigrations } from "../src/db/migrate.js";
 import { accounts } from "../src/db/schema.js";
 import { newId } from "../src/ids.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
@@ -154,17 +155,57 @@ describe("加账号", () => {
     ).toEqual([account.id]);
   });
 
-  it("小红书账号挂不到远程电脑", async () => {
+  it("远程电脑可以建小红书账号，点登录发到远程电脑", async () => {
     const owner = await makeOwner();
     const remote = await remoteOf(owner);
+    const agent = await online(remote);
 
     const response = await addXiaohongshu(owner, remote.computerId);
-    expect(response.status).toBe(400);
-    expect(((await response.json()) as { error: string }).error).toContain("自己的电脑");
-    expect(await listed(owner), "拒绝时不留占位").toEqual([]);
+    expect(response.status, "登录走画面，远程电脑也能登").toBe(201);
+    const { account } = AccountResponse.parse(await response.json());
+    expect(account).toMatchObject({ platform: "xiaohongshu", computerId: remote.computerId, login: "none" });
+    expect(await nextPush(owner.push, "account_updated")).toEqual({ type: "account_updated", account });
+    await agent.expect("config");
+
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await owner.client.post(`/api/accounts/${account.id}/login`, { attempt })).status).toBe(202);
+    expect((await agent.expect("browser_login")).accountId).toBe(account.id);
 
     const stranger = await makeOwner();
     expect((await addXiaohongshu(owner, stranger.local.computerId)).status, "别人的电脑不能挂").toBe(404);
+  });
+
+  it("本机上没登录的占位，在远程电脑上再加一次：还是那一行，改挂到远程，登录也发到远程", async () => {
+    const owner = await makeOwner();
+    const remote = await remoteOf(owner);
+    const local = await online(owner.local);
+    const other = await online(remote);
+    const onLocal = await placeholder(owner);
+    expect(onLocal.computerId, "前提：占位先挂在本机").toBe(owner.local.computerId);
+    await local.expect("config");
+    await other.expect("config");
+
+    const again = await addXiaohongshu(owner, remote.computerId);
+    expect(again.status, "已有占位，不算新建").toBe(200);
+    const moved = AccountResponse.parse(await again.json()).account;
+    expect(moved, "同一行，只换了电脑").toEqual({ ...onLocal, computerId: remote.computerId });
+    expect(await nextPush(owner.push, "account_updated"), "账号页跟着挪").toEqual({
+      type: "account_updated",
+      account: moved,
+    });
+    expect(await listed(owner), "一个人每个平台还是只有一个占位").toEqual([moved]);
+    await local.expect("config");
+    await other.expect("config");
+
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await owner.client.post(`/api/accounts/${moved.id}/login`, { attempt })).status).toBe(202);
+    expect(await other.expect("browser_login"), "登录发到占位现在挂的远程电脑").toMatchObject({
+      accountId: moved.id,
+      attempt,
+    });
+    // 改档会给两台电脑都重发 config：本机下一条收到的是它，说明登录那条没发给本机。
+    expect((await owner.client.patch(`/api/accounts/${moved.id}`, { tier: "draft" })).status).toBe(200);
+    expect((await local.next()).type, "本机没收到 browser_login").toBe("config");
   });
 });
 
@@ -244,6 +285,36 @@ describe("打开登录窗口", () => {
     const attempt = LoginAttemptId.parse(newId());
     expect((await stranger.client.post(`/api/accounts/${account.id}/login`, { attempt })).status).toBe(404);
     expect((await stranger.client.post("/api/accounts/不是账号/login", { attempt })).status).toBe(404);
+  });
+});
+
+describe("login_state failed", () => {
+  it("到点没登上：timed_out 记在账号上，刷新后还在，推 login_failed，登录状态不变", async () => {
+    const owner = await makeOwner();
+    const agent = await online(owner.local);
+    const account = await placeholder(owner);
+    await agent.expect("config");
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await owner.client.post(`/api/accounts/${account.id}/login`, { attempt })).status).toBe(202);
+    await agent.expect("browser_login");
+
+    agent.send({
+      type: "login_state",
+      accountId: account.id,
+      state: { login: "failed", reason: "timed_out", attempt },
+    });
+
+    const pushed = await pushesUntil(owner.push, (one) => one.type === "login_failed");
+    expect(pushed.at(-1), "页面按这一次点击结算").toEqual({
+      type: "login_failed",
+      accountId: account.id,
+      attempt,
+      reason: "timed_out",
+    });
+    const updated = pushed.flatMap((one) => (one.type === "account_updated" ? [one.account] : []));
+    expect(updated.map((one) => one.lastLoginFailure?.reason)).toEqual(["timed_out"]);
+    expect(updated[0]?.login, "没登上不改登录状态").toBe("none");
+    expect(await listed(owner), "刷新页面重新拉，痕迹还在").toEqual(updated);
   });
 });
 
@@ -400,5 +471,34 @@ describe("login_state valid 和 expired", () => {
     expect(card?.kind === "account" && card.account.id).toBe(accountId);
     expect(card?.since, "账号三天前就挂上了，卡上写的是刚才过期的那一刻").toBe(expired.loginChangedAt);
     expect(Date.parse(card?.since ?? "")).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("迁移 0038", () => {
+  it("记着 remote_refused 的行两列一起清成 NULL，别的失败原因不动", async () => {
+    const old = await createTestDb({ through: "0037_p3_recall_node_entry_time.sql" });
+    try {
+      const user = await makeUser(old.db);
+      const { computerId } = await makeComputer(old.db, user.id);
+      const row = async (handle: string, failure: string): Promise<string> => {
+        const id = newId();
+        await old.sql`INSERT INTO accounts (id, owner_id, computer_id, platform, handle, login, login_failure, login_failed_at)
+          VALUES (${id}, ${user.id}, ${computerId}, 'xiaohongshu', ${handle}, 'valid', ${failure}, now())`;
+        return id;
+      };
+      const refused = await row("@远程", "remote_refused");
+      const timedOut = await row("@本机", "timed_out");
+
+      expect(await runMigrations(old.sql)).toContain("0038_p3_clear_remote_refused.sql");
+
+      const after = await old.sql<{ id: string; login_failure: string | null; failed: boolean }[]>`
+        SELECT id, login_failure, login_failed_at IS NOT NULL AS failed FROM accounts ORDER BY login_failure IS NULL`;
+      expect(after).toEqual([
+        { id: timedOut, login_failure: "timed_out", failed: true },
+        { id: refused, login_failure: null, failed: false },
+      ]);
+    } finally {
+      await old.close();
+    }
   });
 });

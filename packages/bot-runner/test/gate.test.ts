@@ -1,9 +1,10 @@
 import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, relative } from "node:path";
 import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   ComputerId,
+  BotId,
   GrantId,
   GroupId,
   type AccountConfig,
@@ -12,32 +13,37 @@ import {
   type GrantTarget,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BROWSER_TOOL_NAMES } from "../src/browser.js";
 import { DRAFT_TOOL_NAMES } from "../src/drafts.js";
 import { decide, INTERNAL_TOOLS, verdictFor, type GateCall, type GateContext } from "../src/gate.js";
-import { forbiddenZones, logicalResolve, PathError } from "../src/paths.js";
+import { botDirs, forbiddenZones, logicalResolve, PathError } from "../src/paths.js";
+import { TAKEOVER_TOOL } from "../src/takeover.js";
 
 const computerId = ComputerId.parse("computer-1");
 const groupId = GroupId.parse("group-1");
 let root = "";
+let temporaryDir = "";
 let workDir = "";
 let outsideDir = "";
 
 beforeAll(() => {
-  root = mkdtempSync(join(tmpdir(), "baize-gate-"));
+  temporaryDir = mkdtempSync(join(tmpdir(), "baize-gate-"));
+  root = join(temporaryDir, "data");
   workDir = join(root, "bot-1", "work");
-  outsideDir = join(root, "outside");
+  outsideDir = join(temporaryDir, "outside");
   mkdirSync(workDir, { recursive: true });
   mkdirSync(outsideDir);
 });
 
 afterAll(() => {
-  rmSync(root, { recursive: true, force: true });
+  rmSync(temporaryDir, { recursive: true, force: true });
 });
 
 // 助理 Chrome 的 profile 和这个 Bot 的配图拷贝目录，照运行器的布局放。
 const profileDir = (): string => join(root, "chrome-profile");
 const draftsDir = (): string => join(root, "bot-1", "drafts");
-const zones = () => forbiddenZones({ draftsDir: draftsDir() }, profileDir());
+const dirs = () => botDirs(root, BotId.parse("bot-1"));
+const zones = () => forbiddenZones(dirs(), profileDir());
 
 const pathTarget = (prefix: string): GrantTarget => ({ kind: "path", computerId, prefix });
 const domainTarget = (domain: string): GrantTarget => ({ kind: "domain", domain });
@@ -117,8 +123,8 @@ describe("统一闸门四层判定", () => {
   });
 
   it("没给助理 Chrome 时不猜 profile 在哪", () => {
-    const target = pathTarget(join(root, "chrome-profile", "Default", "Cookies"));
-    const remote = gateContext({ zones: forbiddenZones({ draftsDir: draftsDir() }, null) });
+    const target = pathTarget(join(outsideDir, "chrome-profile", "Default", "Cookies"));
+    const remote = gateContext({ zones: forbiddenZones(dirs(), null) });
     expect(actionVerdict("read", target, [], [], remote)).toBe("ask");
   });
 
@@ -143,7 +149,7 @@ describe("统一闸门四层判定", () => {
   it("工作目录外写和删除只覆盖隐藏禁区（不碰配图目录）的祖先时也拒绝", () => {
     const profileParent = join(root, "assistant");
     const context = gateContext({
-      zones: forbiddenZones({ draftsDir: draftsDir() }, join(profileParent, "chrome-profile")),
+      zones: forbiddenZones(dirs(), join(profileParent, "chrome-profile")),
     });
     const target = pathTarget(profileParent);
     expect(
@@ -297,6 +303,147 @@ describe("read、write、edit 的路径归一化和 Pi 打开文件用的一致"
     routine: null,
   });
 
+  it.each(["read", "write", "edit"])("%s 不能访问别的 Bot，批准过也拒绝", (toolName) => {
+    const path = join(root, "bot-2", "agent", "private.txt");
+    const target = pathTarget(path);
+    const decision = decide(call(toolName, { path }), [grant("read", target), grant("write_outside", target)], []);
+    expect(decision.verdict).toBe("deny");
+    expect(decision.reason).toContain("其他 Bot");
+  });
+
+  it.each(["read", "write", "edit"])("%s 在共享区不问，自己的 agent 目录里读问、写拒", (toolName) => {
+    expect(decide(call(toolName, { path: join(dirs().sharedDir, "delivery.txt") }), [], []).verdict).toBe("allow");
+    expect(decide(call(toolName, { path: join(dirs().agentDir, "auth.json") }), [], []).verdict).toBe(
+      toolName === "read" ? "ask" : "deny",
+    );
+  });
+
+  describe("自己 Bot 目录里 work 和共享区以外的部分，写直接拒绝，读照旧", () => {
+    const botDir = (): string => dirname(workDir);
+    const privatePaths = (): readonly string[] => [
+      join(dirs().agentDir, "note.txt"),
+      join(dirs().skillsDir, "n.txt"),
+      join(dirs().sessionDir, "n.txt"),
+      join(botDir(), "top.txt"),
+    ];
+    const bashOn = (command: string, sandbox: GateCall["sandbox"] = "seatbelt"): GateCall => ({
+      ...call("bash", { command }),
+      sandbox,
+    });
+    const REASON = "自己的配置和会话目录";
+
+    it.each(["write", "edit"])("%s 写这四处直接拒绝，授权也救不了，理由让模型改写工作目录或共享区", (toolName) => {
+      for (const path of privatePaths()) {
+        const decision = decide(call(toolName, { path }), [grant("write_outside", pathTarget(path), "forever")], []);
+        expect(decision, path).toMatchObject({ verdict: "deny", action: "write_outside" });
+        expect(decision.reason, path).toContain(REASON);
+        expect(decision.reason, path).toContain("工作目录或共享区");
+      }
+    });
+
+    it.each(["seatbelt", "bwrap"] as const)("%s 下 bash 的写、改名、删除落在这四处都直接拒绝", (sandbox) => {
+      for (const path of privatePaths()) {
+        for (const command of [
+          `echo ok > ${path}`,
+          `echo ok >> ${path}`,
+          `cp x ${path}`,
+          `touch ${path}`,
+          `mkdir -p ${path}`,
+          `tee ${path}`,
+          `mv x ${path}`,
+          `rm ${path}`,
+          `ln -s x ${path}`,
+        ]) {
+          const decision = decide(bashOn(command, sandbox), [grant("write_outside", pathTarget(path), "forever")], []);
+          expect(decision.verdict, command).toBe("deny");
+          expect(decision.reason, command).toContain(REASON);
+        }
+      }
+    });
+
+    it("从工作目录用相对路径或沿链接绕出去也一样", () => {
+      expect(decide(bashOn("cp x ../agent/note.txt"), [], [])).toMatchObject({ verdict: "deny" });
+      expect(decide(call("write", { path: "../top.txt" }), [], []).verdict).toBe("deny");
+      const link = join(workDir, "to-agent");
+      symlinkSync(dirs().agentDir, link);
+      expect(decide(call("write", { path: join(link, "auth.json") }), [], []).verdict).toBe("deny");
+      expect(decide(bashOn(`echo ok > ${join(link, "auth.json")}`), [], []).verdict).toBe("deny");
+    });
+
+    it("同目录的读不被拒，仍按工作目录外的读问", () => {
+      for (const path of privatePaths()) {
+        expect(decide(call("read", { path }), [], []), path).toMatchObject({
+          verdict: "ask",
+          action: "read",
+          reason: null,
+        });
+        expect(decide(bashOn(`cat ${path}`), [], []), path).toMatchObject({
+          verdict: "ask",
+          action: "read",
+          reason: null,
+        });
+        expect(decide(bashOn(`cp ${path} .`), [], []), path).toMatchObject({ verdict: "ask", action: "read" });
+      }
+    });
+
+    it.each(["seatbelt", "bwrap"] as const)("%s 下工作目录和共享区里的写照原规则放行", (sandbox) => {
+      for (const base of [workDir, dirs().sharedDir]) {
+        const path = join(base, "own-private-ok.txt");
+        expect(decide({ ...call("write", { path }), sandbox }, [], [])).toMatchObject({
+          verdict: "allow",
+          reason: null,
+        });
+        expect(decide(bashOn(`echo ok > ${path}`, sandbox), [], [])).toMatchObject({ verdict: "allow", reason: null });
+        expect(decide(bashOn(`mkdir -p ${join(base, "sub", "deep")}`, sandbox), [], [])).toMatchObject({
+          verdict: "allow",
+          reason: null,
+        });
+      }
+    });
+  });
+
+  it.each(["read", "write", "edit"])("%s 沿工作目录或共享区的链接仍不能碰别的 Bot", (toolName) => {
+    const other = join(root, "bot-2", `${toolName}-ghost.txt`);
+    mkdirSync(dirs().sharedDir, { recursive: true });
+    for (const base of [workDir, dirs().sharedDir]) {
+      const link = join(base, `isolation-${toolName}`);
+      symlinkSync(other, link);
+      expect(decide(call(toolName, { path: link }), [], []).verdict).toBe("deny");
+    }
+  });
+
+  it("数据根目录和未配置浏览器的 chrome-profile 也属于私有区域", () => {
+    const remote = { ...call("read", { path: root }), zones: forbiddenZones(dirs(), null) };
+    expect(decide(remote, [], []).verdict).toBe("deny");
+    expect(decide({ ...remote, input: { path: join(root, "chrome-profile", "Cookies") } }, [], []).verdict).toBe(
+      "deny",
+    );
+  });
+
+  it("共享区和工作目录的根不能写或删除，内部文件读写不受影响", () => {
+    for (const path of [workDir, dirs().sharedDir]) {
+      expect(decide(call("read", { path }), [], []).verdict).toBe("allow");
+      for (const toolName of ["write", "edit", "delete_file"]) {
+        const toolCall = call(toolName, { path });
+        const deleting: GateCall = {
+          ...toolCall,
+          source: { kind: "connected", operation: { name: toolName, needsApproval: true } },
+        };
+        expect(
+          decide(toolName === "delete_file" ? deleting : toolCall, [], []),
+          `${toolName} 不能替换或删除根`,
+        ).toMatchObject({
+          verdict: "deny",
+          reason: expect.stringContaining("根不能删除或替换"),
+        });
+      }
+      for (const action of ["write_workspace", "write_outside", "delete"] as const) {
+        expect(actionVerdict(action, pathTarget(path))).toBe("deny");
+      }
+      expect(decide(call("write", { path: join(path, "normal.txt"), content: "ok" }), [], []).verdict).toBe("allow");
+    }
+  });
+
   it.each([
     "file:///tmp/leak.txt",
     "file:///tmp/a%20b/c.txt",
@@ -408,7 +555,7 @@ describe("悬空符号链接按 readlink 解到真正的目标", () => {
 
   it("链接目标是相对路径时按链接所在目录解", () => {
     const ghost = join(outsideDir, "relative-ghost.txt");
-    const path = link("relative", join("..", "..", "..", "outside", "relative-ghost.txt"));
+    const path = link("relative", relative(linkDir, ghost));
     expect(decide(writeCall(path), [], [])).toEqual(decide(writeCall(ghost), [], []));
     expect(decide(writeCall(path), [], [])).toMatchObject({ action: "write_outside" });
   });
@@ -512,9 +659,9 @@ describe("链接目标里的 .. 按内核的顺序退已解开的目录", () => 
     source: null,
     routine,
   });
-  /** 让 Pi 的 write 工具写 `path`，返回这次在 root 下新出现的普通文件（相对 root）。 */
+  /** 让 Pi 的 write 工具写 `path`，返回这次在整套临时目录下新出现的普通文件。 */
   const piWrites = async (path: string): Promise<string[]> => {
-    const before = new Set(regularFiles(root));
+    const before = new Set(regularFiles(temporaryDir));
     await createWriteToolDefinition(workDir).execute(
       "write-1",
       { path, content: CONTENT },
@@ -522,7 +669,7 @@ describe("链接目标里的 .. 按内核的顺序退已解开的目录", () => 
       undefined,
       undefined as never,
     );
-    return regularFiles(root)
+    return regularFiles(temporaryDir)
       .filter((file) => !before.has(file))
       .map((file) => relative(root, file));
   };
@@ -616,6 +763,53 @@ describe("bash 分类", () => {
     sandbox: "seatbelt",
     source: null,
     routine: null,
+  });
+
+  it.each(["seatbelt", "bwrap"] as const)("%s 下 bash 把 work 或 shared 根当目标目录时不误拒", (sandbox) => {
+    for (const command of [
+      "cp x .",
+      "cp x ./",
+      "touch .",
+      `cp x ${dirs().sharedDir}/`,
+      `mkdir -p ${dirs().sharedDir}`,
+      `mkdir -p ${workDir}`,
+    ]) {
+      expect(decide({ ...bashCall(command), sandbox }, [], []), command).toMatchObject({
+        verdict: "allow",
+        reason: null,
+      });
+    }
+    for (const command of ["mv x .", `mv x ${dirs().sharedDir}/`]) {
+      expect(decide({ ...bashCall(command), sandbox }, [], []), command).toMatchObject({
+        verdict: "ask",
+        action: "delete",
+        reason: null,
+      });
+    }
+  });
+
+  it("批准数据根及祖先写权限仍拒绝，理由点名其他 Bot 私有区域", () => {
+    const fixture = mkdtempSync(join(homedir(), "baize-gate-ancestor-"));
+    try {
+      const data = join(fixture, "data");
+      const own = botDirs(data, BotId.parse("bot-1"));
+      mkdirSync(own.workDir, { recursive: true });
+      const context = { workDir: own.workDir, zones: forbiddenZones(own, null) };
+      for (const path of [data, fixture, "~"]) {
+        const target = pathTarget(path === "~" ? homedir() : path);
+        const decision = decide(
+          { ...bashCall(`cp x ${path}/`), ...context },
+          [grant("write_outside", target, "forever")],
+          [],
+        );
+        expect(decision.verdict, path).toBe("deny");
+        expect(decision.reason, path).toContain("其他 Bot");
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+    const safe = decide(bashCall(`cp x ${outsideDir}/`), [grant("write_outside", pathTarget(outsideDir))], []);
+    expect(safe.verdict).toBe("allow");
   });
 
   it("识别管道、&& 和重定向", () => {
@@ -742,6 +936,23 @@ describe("浏览器工具", () => {
     ["browser_type", { ref: 3, text: "你好" }],
   ] as const)("%s 归 engage，默认问", (toolName, input) => {
     expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "ask", action: "engage" });
+  });
+
+  it("browser_ask_user 归 read 直接放行，动手的是用户自己；它不在 BROWSER_TOOL_NAMES 里，会话闸门不为它持锁", () => {
+    expect(TAKEOVER_TOOL).toBe("browser_ask_user");
+    expect(decide(call(TAKEOVER_TOOL, { reason: "请你登录一下" }), [], [])).toMatchObject({
+      verdict: "allow",
+      action: "read",
+      target: null,
+    });
+    expect(BROWSER_TOOL_NAMES).not.toContain(TAKEOVER_TOOL);
+    expect(BROWSER_TOOL_NAMES).toEqual([
+      "browser_open",
+      "browser_snapshot",
+      "browser_screenshot",
+      "browser_click",
+      "browser_type",
+    ]);
   });
 
   it("点和填的授权目标是浏览器当前页的主机名，命中 engage 的域名授权就不问", () => {
@@ -984,6 +1195,7 @@ describe("例行边界", () => {
   // 每个内部工具和起草工具都得在这里表态：放行的写在清单里，其余一律拒。新增工具没表态，这里红。
   const READ_ONLY_OPEN_TOOLS: ReadonlySet<string> = new Set([
     "read_task",
+    "recall_memory",
     "report_metric",
     "remember_preference",
     "call_helper",

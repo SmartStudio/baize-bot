@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { BotListResponse, MessageListResponse, ToolResponse } from "@baize/shared";
+import { describe, expect, it, vi } from "vitest";
+import { BotListResponse, MessageListResponse, ToolListResponse, ToolResponse } from "@baize/shared";
 import { startTestMcp, type McpCall, type TestMcp } from "../src/mcp.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { isFollowUpTurn, startUpstream, type ScriptedTurn } from "../src/upstream.js";
@@ -63,6 +63,7 @@ async function connectTool(stack: Stack, mcp: TestMcp, assignedBotId?: string) {
       name: "邮箱",
       url: mcp.baseUrl,
       authorization: AUTHORIZATION,
+      localOnly: false,
     }),
   ).tool;
   if (assignedBotId === undefined) return created;
@@ -90,6 +91,26 @@ function followUp(text: string): ScriptedTurn {
 }
 
 describe("端到端：MCP 工具连接、分配和审批", () => {
+  it("只监听 127.0.0.1 的本机 MCP 由真电脑代理发现，initialize 从不来自控制面", async () => {
+    await withStack(
+      () => followUp("本机连接成功"),
+      async (stack, mcp) => {
+        const tool = ToolResponse.parse(
+          await stack.post("/api/tools", {
+            name: "本机工具",
+            url: mcp.baseUrl,
+            authorization: AUTHORIZATION,
+            localOnly: true,
+          }),
+        ).tool;
+        expect(tool.localOnly).toBe(true);
+        expect(tool.operations.map((operation) => operation.name)).toEqual(["send_email", "lookup_stock"]);
+        expect(ToolListResponse.parse(await stack.get("/api/tools")).items).toEqual([tool]);
+        expect(mcp.clientNames()).toEqual(["baize-bot-runner"]);
+        expect(mcp.clientNames()).not.toContain("baize-control-plane");
+      },
+    );
+  });
   it("连接 MCP 后发现两条操作，并按只读注解决定默认审批", async () => {
     await withStack(
       () => followUp("连接成功"),
@@ -162,22 +183,39 @@ describe("端到端：MCP 工具连接、分配和审批", () => {
     );
   });
 
-  it("分配给 Bot 的只读 lookup_stock 不出审批，直接调用并成功收尾", async () => {
+  it("非本机 lookup_stock 经真控制面代执行，群里不出现审批卡", async () => {
     await withStack(
       (request) => (isFollowUpTurn(request) ? followUp("X3 库存 120") : callTurn("lookup_stock", { sku: "X3" })),
       async (stack, mcp) => {
         const { bot, groupId } = await serviceBot(stack);
-        await connectTool(stack, mcp, bot.id);
-        await stack.post(`/api/groups/${groupId}/messages`, { text: "查一下 X3 库存" });
+        const tool = await connectTool(stack, mcp, bot.id);
+        expect(tool.localOnly).toBe(false);
+        const fetchCalls = vi.spyOn(globalThis, "fetch");
+        try {
+          await stack.post(`/api/groups/${groupId}/messages`, { text: "查一下 X3 库存" });
 
-        await expect.poll(() => mcp.calls().length, POLL).toBe(1);
-        await waitForRunEnd(stack, groupId);
-        expect(mcp.calls()).toEqual([
-          { name: "lookup_stock", args: { sku: "X3" }, authorization: AUTHORIZATION },
-        ] satisfies readonly McpCall[]);
-        const stored = await messages(stack, groupId);
-        expect(stored.approvals).toEqual([]);
-        expect(toolCallMessages(stored)).toContainEqual({ tool: "lookup_stock", status: "ok" });
+          await expect.poll(() => mcp.calls().length, POLL).toBe(1);
+          await waitForRunEnd(stack, groupId);
+          const forwarded = fetchCalls.mock.calls.filter(
+            ([input]) =>
+              new URL(input instanceof Request ? input.url : String(input)).pathname === `/mcp-proxy/${tool.id}/call`,
+          );
+          expect(forwarded, "运行器必须先 POST 到真控制面的 MCP 代理").toHaveLength(1);
+          expect(forwarded[0]?.[1]?.method).toBe("POST");
+          expect(JSON.parse(String(forwarded[0]?.[1]?.body))).toEqual({
+            botId: bot.id,
+            tool: "lookup_stock",
+            arguments: { sku: "X3" },
+          });
+          expect(mcp.calls()).toEqual([
+            { name: "lookup_stock", args: { sku: "X3" }, authorization: AUTHORIZATION },
+          ] satisfies readonly McpCall[]);
+          const stored = await messages(stack, groupId);
+          expect(stored.approvals).toEqual([]);
+          expect(toolCallMessages(stored)).toContainEqual({ tool: "lookup_stock", status: "ok" });
+        } finally {
+          fetchCalls.mockRestore();
+        }
       },
     );
   });

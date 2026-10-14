@@ -61,5 +61,12 @@ export const ToolViewContent = ({ view, approval = false }: { view: ToolView; ap
           <span className="tool-view-detail">{view.task}</span>
         </span>
       );
+    case "takeover":
+      return (
+        <span className="tool-view-content" data-view-kind={view.kind}>
+          <span>请你接手这一页</span>
+          <span className="tool-view-detail">{view.reason}</span>
+        </span>
+      );
   }
 };

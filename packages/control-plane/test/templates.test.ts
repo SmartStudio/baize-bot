@@ -22,6 +22,7 @@ import { startTestServer, type ApiClient, type TestServer } from "./helpers/clie
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { ECHO_AUTHORIZATION_PREFIX, startTestMcp, type TestMcp } from "./helpers/mcp.js";
+import { offerPreference, savePreferenceOffer } from "./helpers/preference-offer.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -105,20 +106,19 @@ async function plugin(owner: Owner, name: string, botIds: BotId[], url = mcp.url
   return ToolResponse.parse(await assigned.json()).tool;
 }
 
-/** Bot 在单聊里当场记一条偏好，等推送回来。 */
+/** Bot 在单聊里提议记一条偏好，用户点「记住」，等推送回来。 */
 async function remember(owner: Owner, agent: AgentClient, push: PushClient, text: string, isPrivate: boolean) {
   const sent = await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: `记住：${text}` });
   expect(sent.status).toBe(201);
   const { runId } = await agentUntil(agent, "prompt");
-  agent.send({
-    type: "preference_add",
+  const card = await offerPreference(agent, push, {
     runId,
     botId: owner.botId,
     groupId: owner.groupId,
     text,
     private: isPrivate,
-    sourceMessageId: null,
   });
+  expect((await savePreferenceOffer(owner.client, card)).preference?.text).toBe(text);
   const pushed = await pushUntil(push, "preference_updated");
   expect(pushed.preference.text).toBe(text);
 }
@@ -281,9 +281,9 @@ it("导入得到新 Bot，skill 来源是 template", async () => {
 
     const config = await agentUntil(agent, "config", (one) => one.bots.some((entry) => entry.id === bot.id));
     expect(
-      config.tools.filter((tool) => tool.assignedBotIds.includes(bot.id)).map((tool) => tool.authorization),
-      "插件没有授权，导入方自己去授权",
-    ).toEqual([null]);
+      config.tools.filter((tool) => tool.assignedBotIds.includes(bot.id)).map((tool) => "authorization" in tool),
+      "代理插件不下发授权，导入方自己去授权",
+    ).toEqual([false]);
     expect(config.skills?.filter((skill) => skill.botId === bot.id).map((skill) => skill.source)).toEqual(["template"]);
   } finally {
     agent.close();
@@ -415,7 +415,7 @@ it("导入的插件 PATCH 带授权后操作表换成真实列表，同名操作
     expect(JSON.stringify(pushes).includes(secret), "推送里没有凭据").toBe(false);
 
     const config = await agentUntil(agent, "config", (one) =>
-      one.tools.some((entry) => entry.id === tool.id && entry.authorization === secret),
+      one.tools.some((entry) => entry.id === tool.id && entry.status === "ready"),
     );
     expect(config.tools.find((entry) => entry.id === tool.id)?.operations, "下发给电脑的就是新操作表").toEqual(
       tool.operations,
@@ -449,9 +449,9 @@ it("授权后连不上回 400 且原操作表不变", async () => {
       one.bots.some((entry) => entry.id === bot.id && entry.description === "屏障"),
     );
     expect(
-      config.tools.find((entry) => entry.id === before.id)?.authorization,
-      "旧凭据（没有）照旧，新凭据没存下",
-    ).toBeNull();
+      config.tools.find((entry) => entry.id === before.id),
+      "代理配置不带凭据，新凭据没存下",
+    ).not.toHaveProperty("authorization");
   } finally {
     push.close();
     agent.close();
@@ -476,12 +476,12 @@ it("导入的插件补授权之前下发给电脑的是待授权，补完才可�
     expect(
       pending.tools.find((entry) => entry.id === imported.id),
       "没补授权的插件下发成待授权，运行器据此拒绝执行",
-    ).toMatchObject({ authorization: null, status: "awaiting_authorization" });
+    ).toMatchObject({ localOnly: false, status: "awaiting_authorization" });
 
     const authorized = await owner.client.patch(`/api/tools/${imported.id}`, { authorization: "Bearer sk-ready-0004" });
     expect(authorized.status).toBe(200);
     const ready = await agentUntil(agent, "config", (one) =>
-      one.tools.some((entry) => entry.id === imported.id && entry.authorization === "Bearer sk-ready-0004"),
+      one.tools.some((entry) => entry.id === imported.id && entry.status === "ready"),
     );
     expect(ready.tools.find((entry) => entry.id === imported.id)?.status, "补完授权就可用").toBe("ready");
   } finally {
@@ -604,7 +604,10 @@ it("导入的匿名插件不带凭据补授权（authorization: null）：不带
     const ready = await agentUntil(agent, "config", (one) =>
       one.tools.some((entry) => entry.id === imported.id && entry.status === "ready"),
     );
-    expect(ready.tools.find((entry) => entry.id === imported.id)?.authorization, "仍然没有凭据").toBeNull();
+    expect(
+      ready.tools.find((entry) => entry.id === imported.id),
+      "代理配置不带凭据",
+    ).not.toHaveProperty("authorization");
   } finally {
     agent.close();
   }

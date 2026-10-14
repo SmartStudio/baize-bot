@@ -26,6 +26,7 @@ export const RoutineId = id("RoutineId");
 export const RunId = id("RunId");
 export const GrantId = id("GrantId");
 export const DraftId = id("DraftId");
+export const AttachmentId = id("AttachmentId");
 export const ContentPlanId = id("ContentPlanId");
 export const PublicationId = id("PublicationId");
 export const AccountId = id("AccountId");
@@ -46,6 +47,7 @@ export type RoutineId = z.infer<typeof RoutineId>;
 export type RunId = z.infer<typeof RunId>;
 export type GrantId = z.infer<typeof GrantId>;
 export type DraftId = z.infer<typeof DraftId>;
+export type AttachmentId = z.infer<typeof AttachmentId>;
 export type ContentPlanId = z.infer<typeof ContentPlanId>;
 export type PublicationId = z.infer<typeof PublicationId>;
 export type AccountId = z.infer<typeof AccountId>;
@@ -210,7 +212,7 @@ export const Group = z.discriminatedUnion("kind", [
 ]);
 export type Group = z.infer<typeof Group>;
 
-export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired"]);
+export const ApprovalStatus = z.enum(["pending", "approved", "rejected", "expired", "voided", "timed_out"]);
 export type ApprovalStatus = z.infer<typeof ApprovalStatus>;
 
 export const ActionKind = z.enum([
@@ -292,6 +294,7 @@ export const Approval = z.object({
   view: ToolView,
   status: ApprovalStatus,
   decidedAt: Timestamp.nullable(),
+  deadlineAt: Timestamp.nullable(),
   grantId: GrantId.nullable(),
 });
 export type Approval = z.infer<typeof Approval>;
@@ -366,6 +369,10 @@ export type BotTemplate = z.infer<typeof BotTemplate>;
 // Bot 问「存不存」的那张卡。offered 是还没点，saved 之后 skillId 指向存下的那条，dismissed 是用户说不存。
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
+
+// Bot 想记一条偏好，问用户记不记的那张卡。saved 之后 preferenceId 指向写下的那条，dismissed 是用户说不用。
+export const PreferenceOfferStatus = z.enum(["offered", "saved", "dismissed"]);
+export type PreferenceOfferStatus = z.infer<typeof PreferenceOfferStatus>;
 
 export const ProjectOfferStatus = z.enum(["offered", "started", "dismissed"]);
 export type ProjectOfferStatus = z.infer<typeof ProjectOfferStatus>;
@@ -455,6 +462,17 @@ export const MessageBody = z.discriminatedUnion("kind", [
     status: SkillOfferStatus,
     skillId: SkillId.nullable(),
   }),
+  // 和 skill_offer 同理：点「记住」之前这句话不在任何表里，所以状态随正文走。sourceMessageId 是 Bot 从哪句话记的，
+  // 写偏好时才校验它在不在这个群里。
+  z.object({
+    kind: z.literal("preference_offer"),
+    botId: BotId,
+    text: z.string().min(1).max(200),
+    private: z.boolean(),
+    sourceMessageId: MessageId.nullable(),
+    status: PreferenceOfferStatus,
+    preferenceId: PreferenceId.nullable(),
+  }),
   z.object({
     kind: z.literal("project_offer"),
     botId: BotId,
@@ -536,6 +554,7 @@ export const ToolConnection = z.object({
   operations: z.array(ToolOperation),
   assignedBotIds: z.array(BotId),
   status: ToolConnectionStatus,
+  localOnly: z.boolean(),
 });
 export type ToolConnection = z.infer<typeof ToolConnection>;
 
@@ -543,8 +562,9 @@ export const AccountTier = z.enum(["read_only", "draft", "confirm_publish", "dir
 export type AccountTier = z.infer<typeof AccountTier>;
 export const AccountLogin = z.enum(["none", "valid", "expired"]);
 export type AccountLogin = z.infer<typeof AccountLogin>;
-// 一次登录没成，账号本身的 login 不变：window_failed 是登录窗口出错或到点没登上，remote_refused 是远程电脑不许登录。
-export const LoginFailure = z.enum(["window_failed", "remote_refused"]);
+// 一次登录没成，账号本身的 login 不变：window_failed 是登录页出错或没了，timed_out 是到点没登上。
+// 人在画面上点放弃不算没成，电脑不报。
+export const LoginFailure = z.enum(["window_failed", "timed_out"]);
 export type LoginFailure = z.infer<typeof LoginFailure>;
 // 点一次「打开登录窗口」算一次尝试，号由页面在点击时取好带进请求体，卡片一开就认它；
 // 控制面原样写进 browser_login，电脑经 login_state 原样带回。页面取的号只收一段安全的名字，控制面在边界挡。
@@ -570,7 +590,7 @@ export const Account = z.object({
 });
 export type Account = z.infer<typeof Account>;
 
-export const PublishFailureReason = z.enum(["login_expired", "page_changed", "error"]);
+export const PublishFailureReason = z.enum(["login_expired", "page_changed", "paused", "error"]);
 export type PublishFailureReason = z.infer<typeof PublishFailureReason>;
 
 export const DraftStatus = z.enum(["pending", "approved", "publishing", "published", "returned", "failed"]);
@@ -578,12 +598,25 @@ export type DraftStatus = z.infer<typeof DraftStatus>;
 export const DraftKind = z.enum(["post", "reply"]);
 export type DraftKind = z.infer<typeof DraftKind>;
 
-export const DraftImage = z
-  .object({
-    path: z.string().min(1),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  })
-  .strict();
+export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+export const AttachmentMime = z.enum(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+export type AttachmentMime = z.infer<typeof AttachmentMime>;
+export const AttachmentSha256 = z.string().regex(/^[0-9a-f]{64}$/);
+
+export const DraftImage = z.preprocess(
+  (value) => (value !== null && typeof value === "object" && !("kind" in value) ? { ...value, kind: "path" } : value),
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("path"), path: z.string().min(1), sha256: AttachmentSha256 }).strict(),
+    z
+      .object({
+        kind: z.literal("attachment"),
+        attachmentId: AttachmentId,
+        sha256: AttachmentSha256,
+        mime: AttachmentMime,
+      })
+      .strict(),
+  ]),
+);
 export type DraftImage = z.infer<typeof DraftImage>;
 
 export const GithubTarget = z

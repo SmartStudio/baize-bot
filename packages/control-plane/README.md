@@ -1,16 +1,154 @@
 # @baize/control-plane
 
-控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。四个对外的面在同一个 3001 端口上：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
+控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
+
+## 电脑配对
+
+一个用户本机和远程各至多一台。`POST /api/computers/local` 无请求体或空对象时按 `confirmDisplace: false` 处理；本机从未握手过就直接返回 `ComputerTokenResponse`。本机的 `lastSeenAt` 非空或此刻在线时，未确认回 409 和 `PairLocalConflictResponse`：`error` 是「这个账号已经在另一台 Mac 上用过，继续会让那台退出」，`computer` 是已有电脑的公开对象。409 不重置 token，也不关闭旧连接；已休眠的电脑同样需要确认。
+
+用户确认后重新 POST `{ "confirmDisplace": true }`，电脑号沿用，token 轮换，在线的旧本机连接用 4004 和「这个账号已在另一台 Mac 上登录」关闭。顶号排在这台电脑的处理链上，先前正在握手的连接也会被关闭；排队中的 hello 入场前再次校验 token，旧 token 不能在重新配对后入表。远程电脑的 token 和连接不受本机配对影响。
+
+## 电脑代理握手
+
+hello 的协议号和下限都是 3，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。hello 带持久化的安装 UUID `installId` 和运行器的 `piSessionVersion`，握手事务写安装标识并续租；Pi 版本留在连接内存，追加时写入流元数据。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
+
+电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，收到 4003 后输出一次 `{"type":"upgrade_required"}`；4002、4003、4004 都停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码按退避重连。
+
+
+## 可靠信封
+
+shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 reliable 用 `{ type: "uplink", conn, stream, seq, body }`，bare 用 `{ conn, body }`；流式 `bot_text` 只发 `done: false`，每块全文由 reliable 的 `bot_text_done` 定稿。控制面在同一事务里条件推进 `computers.up_acked` 和处理业务，重复帧只回确认，毒帧重试一次后回 `invalid` 并越过。已收尾的 run 允许 `run_done`、`bot_text_done`、`bot_tool_call`、`work_append`，其他动作回 `run_closed`。工作记录有独立的道、持有者和 run 校验，导入或空探针可不带 run。旧连接代际不处理、不确认。
+
+电脑代理上行先写 `<dataDir>/.agent/outbox/<stream>/frames.jsonl`，同一 100ms 窗口共用 fsync，落盘后才发送。控制面以 20ms 合批累计 `uplink_ack`；代理持久化确认再清理旧帧，重启后沿用 stream、序号和未确认帧。
+
+可靠下行在调用方事务里进入 `agent_outbox`，带 `{ type: "downlink", seq, body }` 按序发送；结束或放弃 run 的事务删除它绑定的行，4004 顶号清空该电脑发件箱，删电脑级联删除。在线或断线宽限内可以入队，宽限外沿用派发失败分支。hello 先更新连接代际和游标，再依次发 welcome、config、pause/resume、重放发件箱，随后补历史欠账。代理先持久化 `.agent/downlink.json` 再入运行器队列，重复帧只确认，崩溃窗口内丢失的 prompt 由 hello 的 activeRuns 对账收尾。对账发现已结束的 active run 时现场发 `cancel{runId}`，不入发件箱。
+
+下行确认事务先用连接上的 owner id 拿归属人共享 advisory 锁，再条件更新电脑游标，最后删除已确认的发件箱行。删号拿同一把归属人排他锁，先删 runs 级联到发件箱，再删用户级联到电脑；确认若先锁电脑，两边会各持一行互等。共享锁让两条路径在碰行之前排队，每次确认多一条锁查询，不额外查归属人；更新非键游标本身拿电脑的 `FOR NO KEY UPDATE` 行锁。`test/privacy.test.ts` 用实际锁等待和查询闸门钉住这个交错。
+
+无 `runId` 的 `agent_error` 不能按最近开始时间猜归属。运行器的会话关闭、配置对账和已进入 prompt 的失败路径仍会省略 `runId`：带群号时先校验群属于归属人，只在该群范围内查 open run；不带群号时电脑上恰好一条 open run 才落到它的群，零条或多条不落群，只打一行 `console.warn`（带 computerId、code 和截到 80 个字符的 detail），指定的群已删或不属于归属人时同样打一行。detail 是运行器原样带来的用户内容，没有长度上限，`agent_error` 的所有日志行（含 `config_rejected` 的 warn 和带无效或已结束 runId 的 error）都走同一个 `clipDetail`：按 Unicode 码点数，满 80 个才截，后面加「…」，不会把一个 emoji 的两半劈开。指定群号可以留群级错误提示，但只有该群恰好一条 open run 时才关联例行任务失败。其他带 runId 的上行仍按原有归属校验处理，报文形状和协议号不变。
+
+已知限制：不带群号的错误仍按电脑归属，不按 Bot 或会话归属。同一台电脑上同时有两个以上开着的 run 时，这类错误宁可不落群也不猜；行为没改，要彻底解决得让运行器在这些路径上补带群号（`test/p3-cp-guards-uplink.test.ts` 钉着现在的取舍）。
+
+启动清理和停机批量休眠也遵守删号的锁序：先读目标快照并按 owner 分组，owner id 升序切成批，每批 500 个 owner（`SLEEP_OWNERS_PER_BATCH`，函数参数可注入，测试里设成 2）一个事务，避免几千个 owner 的共享 advisory 锁撞 `max_locks_per_transaction`。每个事务里先按 owner id 升序拿本批归属人共享锁，随后按电脑 id 升序拿 `FOR NO KEY UPDATE`，最后只更新快照中仍符合条件的电脑。批与批之间不持锁，各批互相独立，中途失败已提交的批保留，没做的批下次启动或停机再扫。删号拿 owner 排他锁；批量写等它提交后目标已删除就跳过。每批先拿齐本批 owner 锁再碰任何电脑行，避免多实例滚动启停与删号各持一行互等。快照之后新增的电脑由它自己的连接维护，本次批量写不扩大目标范围。
+
+用户消息插入复用群行 `KEY SHARE` 与插入同一事务的写法。查群之后若删号或删群已提交，插入入口返回 404「没有这个对象」，与群不存在的路由口径一致；若插入先锁住群行，删除等这条消息提交。删号会话级联失效，后续请求返回 401。
+
+## 画面面
+
+`/agent` 上的文本帧是报文，二进制帧是画面面。帧格式是 4 字节大端头长、UTF-8 JSON 头、可选负载，头的 schema 和 `encodeLive`、`decodeLive` 在 shared 的 `live.ts`。电脑上行 `LiveUp`：`session`（整份 upsert）、`frame`（负载是 JPEG）、`closed`。下行 `LiveDown`：`viewer`（attached、detached）、`input`、`end`、`reveal`。网页看画面连 `/api/live/<liveId>`，帧格式相同，收 `LiveToViewer`（`session`、`frame`），发 `LiveFromViewer`（`input`、`end`、`reveal`）。
+
+画面帧和人的输入（含密码）不走可靠信封，不进库、不进发件箱、不进日志。理由有三条：
+
+- 一台电脑的文本报文排在一条串行链上，可靠上行各开一个库事务。帧要是走这条链，就得排在库事务后面。
+- 电脑代理 `computer-agent/src/agent.ts` 处理文本报文出错时会把 zod 的错误原文和 `String(error)` 写进日志。输入要是走文本报文，密码就可能进日志。
+- 帧丢了，下一帧会补上。人的输入是看着当下画面做的，过时重放反而有害。可靠投递对它们没有意义。
+
+所以 hub 在进链之前按 `isBinary` 分流，二进制帧同步交给 `live/relay.ts` 的 `LiveRelay`。中继的构造参数里没有 Db，结构上碰不到库。解不开的帧一律静默丢，不说原因，因为原因里可能夹着用户打的字。`test/live-relay.test.ts` 的最后一条用例跑完一整轮，再逐表比对 public 下的行数，并 spy console 确认输入不进日志。
+
+会话按 `${ownerId}:${liveId}` 记，`computerId` 取自连接，不信帧里的。同一个号已经挂在这个人的另一台电脑上时，后报的忽略。`frame` 和 `closed` 只认报这个会话的那条连接。连接断了，这条连接上的会话全部结束。电脑重连后重报的会话换到新连接上，观看者留着，中继给新连接补发一条 attached。
+
+hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#connections` 里的当前连接。不用 message 回调闭包里的 `conn`，因为它要等 `#onHello` 把 config、发件箱重放和对账全部做完才赋值。这期间电脑已经在报 session 和发帧，按 `conn` 判断会把它们丢掉。入表之前到的二进制帧直接丢。
+
+一台电脑同一时刻最多一个观看者。新观看者进来时，不论看的是同一会话还是这台电脑的另一个会话，旧的都以 4101 关，电脑先收旧会话的 detached，再收新会话的 attached。所以电脑上每个会话的 attached 和 detached 严格交替。观看者的关闭码：
+
+| 码 | 含义 |
+| --- | --- |
+| 4100（`LiveViewerClose.gone`） | 会话结束，电脑报了 closed 或连接断了 |
+| 4101（`LiveViewerClose.replaced`） | 被新观看者顶掉 |
+| 4104（`LiveViewerClose.notFound`） | 号不合法、会话不存在或不是你的，不区分 |
+| 1012 | 控制面停机 |
+
+升级时先查 Origin：带了 Origin 而它的 host 不等于 Host 头，回 403。之后用 cookie 认人，认不出回 401。这条 socket 能往用户登录着的网站里打字，被跨站劫持的后果比 `/api/ws` 大，所以多这一道。观看者 WebSocket 的 `maxPayload` 是 64KB，电脑来的单帧超过 2MB 丢。
+
+人的输入每个观看者每秒最多转 120 条，用令牌桶，多的丢，`end` 和 `reveal` 不计数。`startServer` 的 `live.inputPerSecond`、`live.now` 可注入。发给观看者的帧走 `latestWins`：上一帧还没发完时只留最新的一帧。
+
+`GET /api/live` 列当前用户的会话（`LiveSessionsResponse`），`/api/ws` 推 `live_session`（整份）和 `live_closed`。推送在断线期间会丢，所以网页启动和 `/api/ws` 重连时各拉一次列表。同一个号收到 `live_closed` 之后，电脑重连重报时还会再来一条 `live_session`。
+
+中继的会话表和观看者表都在进程内存里，前提是看画面的人和这台电脑连在同一个控制面进程上。控制面跑多实例时，`/api/live/<liveId>` 必须按电脑粘性路由到持有这台电脑 `/agent` 连接的实例，否则观看者只会拿到 4104。
+
+## 租约
+
+`lane_leases` 用 `(bot_id, group_id)` 作主键，一条道只有一台持有电脑，并固定它的安装标识和正整数代际。`agent/place-run.ts` 的 `placeRun` 是唯一建 run 的入口，用户消息、Bot 之间的 @、例行、交接和牌桌隐藏 run 都走它。认领租约、必要时接管、建 run、可靠 prompt 入队在调用方的同一事务里提交；`test/place-run-guard.test.ts` 扫源码禁止其他入口直接建 run。
+
+持有电脑的 `lease_until` 未过期且安装标识相等，道上又有未收尾的 run 时继续派给它。道闲着时按选机偏好迁回在线本机；持有者失效或闲道迁机时，代际加一，给旧持有者入队 `cancel{lane: {botId, groupId}, epoch: 新代际}`。同电脑、同道的取消只保留最大代际。选不到在线或宽限内的电脑时不建 run、不改租约，沿用群里的派发失败提示。删 Bot 时先给它各道的持有者发下一代取消，再删除；单聊群随 Bot 删除。
+
+`placeRun` 依次拿归属人共享锁、Bot 共享锁、该归属人电脑行、道行和原有结账锁。电脑行按 id 升序锁齐，避免两个群从 A 到 B、从 B 到 A 同时接管时反序。prompt 的 `lane` 带 `{epoch, heads}`，`heads.chat`、`heads.table` 是已存在流的 `{seq: next_seq, head}`，未创建的流省略。
+
+租约时钟和静默计时器共用续期点：默认 45 秒静默加 15 秒宽限，数据库续期同连接每 5 秒至多写一次。续期和断线缩租都在 SQL 中用 `clock_timestamp() + 时长` 写截止；关闭时按数据库返回的剩余毫秒启动宽限计时器，不依赖 Node 墙钟。旧连接的续期或关闭用连接代际条件写，没有更新到该代际就不启动宽限计时器，不能缩短新连接的租约。`startServer` 可注入 `silenceTimeoutMs`、`disconnectGraceMs`、`leaseRenewalIntervalMs`；短时长测试也要把合并窗口缩到租约寿命以内。持有者与派发时的期限判断用 `clock_timestamp()`，事务等锁后按当前时间核验。断线收尾继续走原来的 `abandonRun`。
+
+网关、MCP 代执行和 Hub 都以网关 key Bearer 认电脑，再调用同一个 `validateLaneFence` 检查 `x-baize-lane: <botId>/<groupId>/<epoch>`。道必须属于该归属人，Bot 仍在群中，电脑、当前安装标识和代际须匹配，电脑租约须未过期。网关所有请求都要带头；MCP 请求体的 Bot 还须匹配头里的 Bot。key 不对回 401，租约失败回 409 和固定分类：
+
+| 分类 | 正文的 `error` |
+| --- | --- |
+| `stale_epoch` | 代际过时 |
+| `not_holder` | 不是持有者 |
+| `expired` | 租约已过期 |
+| `invalid` | 缺少或格式不对 |
+
+## 工作记录
+
+可靠上行 `work_append` 带 `{lane: {botId, groupId, stream, epoch}, runId, fromSeq, lines, head, cause}`。`stream` 是 `chat` 或 `table`，每帧至多 64 行。服务器先查持有者与代际，再逐行解析 Pi 条目的 `type`、`id`、`parentId`，拒绝 SessionHeader。保存的是留存过滤之后的原样 JSONL 字符串；服务器接受的行已经是过滤器的不动点，所以 `work_entries.retention` 为 `verbatim`，不能据此推断本机原文是否被过滤过。搜索文本只抽 user、assistant 和 toolResult 的文字，图片和 thinking 不入索引。
+
+服务器从该归属人的 `tool_connections` 里取所有 `localOnly: true` 连接的操作名，包含目前未分配给这个 Bot 的操作；帧自报的名单不起作用。`@baize/shared/work-record` 的 `checkFrame` 逐帧复查图片块、超过 16 KiB 的文字、本机工具结果原文、重复 id、畸形已知条目，以及针对本机结果或未知目标的上下文编辑。有一行失败就整帧拒收，不保存合规前缀、不认领导入道。`work_streams.retain_snapshot` 保存 `RetainSnapshot`；读取 jsonb 时先按其 schema parse，成功追加时新快照和条目、信封游标在同一事务提交。旧流没有快照时从 `emptySnapshot` 开始重放已有行，避免遗失历史 id 和本机结果状态。
+
+`work_streams` 还保存 `next_seq`、链头、末条 id 和连接报告的 Pi 版本。追加的条件 UPDATE 同时要求起始序号相等及租约的电脑、安装标识、代际匹配。序号从 0 开始，链头按 `sha256(上一个32字节摘要 || sha256(原样行))` 重算；空流的摘要是 32 个零字节。共享函数是 `@baize/shared` 的 `advanceWorkHead`。
+
+工具连接新建、改本机范围、改名、补授权和删除时，在修改事务里立即按新名单复查归属人全部 Bot 的两条流。名单是归属人全局操作名集合，因此未分配的 Bot 也受影响。连接修改持归属人排它锁，与追加互斥；即使改名、删除、补授权没有改变操作名集合，也完成复查。从第一条不合规旧行起删除整个后缀（包括 `search_text`），重算合规前缀的链头，同时回退 `next_seq`、`tail_entry_id` 和快照；旧行全部合规就只更新快照。HTTP 返回前已提交撤回，不等新上传。后缀随后由运行器从本地原文按新名单重新过滤补传，本机 JSONL 不动。在途旧帧收到 `seq_mismatch`，按 Hub 的合规前缀对齐；下一轮 prompt 也按新 config 过滤本地前缀核对，保留本地会话。
+
+结果经 `uplink_ack.rejected` 按可靠帧序号返回，无拒收项是 `ok`。运行器按下表处理：
+
+| 结果 | 字段与原因 | 运行器动作 |
+| --- | --- | --- |
+| `ok` | 无拒收项 | 推进已确认游标 |
+| `stale_epoch`、`not_holder` | `lane` | 停掉这条道；下一次 prompt 按服务器记录重建 |
+| `seq_mismatch` | `nextSeq` | 对齐服务器游标；结合 Hub 快照核对链头，不盲目重发同帧 |
+| `head_mismatch` | 链头不符 | 拉 Hub 快照重建镜像 |
+| `invalid`，`reason: "tool_list_changed"` | `nextSeq`、`head`；截掉旧行时还有 `replayReason` 和 `lineIndex`（旧流中从 0 开始的行号） | 用最新 config 的本机工具名单从头过滤本地记录；核对服务器前缀后从 `nextSeq` 重传后缀，重新计算链头 |
+| `invalid`，`reason: "unfiltered"` | `lineIndex`（当前帧从 0 开始的行号） | 先过滤这行和后缀，再组成新帧；原帧不再重传 |
+| `invalid`，`reason: "duplicate_id"` 或 `"malformed_entry"` | `lineIndex` | 停止上传坏流，修复或按服务器快照重建 |
+| 其他 `invalid` | 帧、Pi 条目或 run 不合法 | 修正结构或重建，不能当成成功 |
+
+兼容旧流的非空追加仍会在快照缺失或名单指纹失效时复查。`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。电脑代理的 `WorkAppendChannel` 把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 原样透传给运行器，服务器没给的字段不补。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
+
+`work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目、不触发旧行复查。
+
+非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。导入首帧 `fromSeq: 0` 在没有租约行时必须带代际 1，接受后以代际 1 认领；有租约时必须由当前电脑和安装持有，并带租约的当前代际，接受后保持代际不变。其他持有者或过时代际拒收。目标流已有条目时拒收重复首帧。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
+
+`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；名单和记录也在该快照内读取。流的快照指纹等于当前名单指纹时，写入侧不变式保证库里的行都合规，直接按 `seq > after ORDER BY seq LIMIT limit` 读本页，`nextSeq` 和 `head` 取流元数据，读一页只花一页的代价。指纹不等或没有快照（某个写入口漏了复查的流，或旧流）才从头复查，不合规的残留旧行及其后缀不会读出，`nextSeq` 和 `head` 对应可安全读取的完整前缀；这条路径逐页重读前缀，代价随流长增长，只在异常时走。正常流仍返回全流元数据。空流即使因失败留下 `nextSeq: 0` 的流元数据，也返回 `nextSeq: 0`、零链头和 null Pi 版本。
+
+租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
+
+删号按归属人、Bot、电脑、道、run 的顺序取锁，在同一事务里入队所有道取消、删除用户和相关记录，电脑与 `agent_outbox` 随外键清空。事务只返回已入队的道取消副本，未发出的 prompt、审批决定等报文随发件箱清空；提交成功后，仅向连接代际仍匹配的在线电脑按序投递，随后以 4002 关闭连接。副本不再落盘，断线电脑不会重放删号取消，旧 token 也不能重新握手。账号已删除时不存在可以持久保留的发件箱，这个最后投递窗口只服务于仍在线的电脑。
+
+## recall
+
+写入 `search_text` 和召回复核、摘录时直接删除文字中的 U+0000，跨 NUL 的关键词可连续命中，原始 JSONL 行及哈希链保持不变；Pi 条目的 `id`、`parentId`、`type` 若含 NUL，在解析时整帧回 `invalid`。
+
+`POST /hub/v1/recall` 使用当前电脑网关 key 的 Bearer 和 `x-baize-lane` 租约头。鉴权后的电脑行、道栅栏和召回查询共用只读可重复读事务。Bot、归属人和当前群都从鉴权或租约头取得，请求只接受 `{query: string}`；关键词去掉首尾空白后须为 1 到 100 个字符且不能含 NUL，非法请求回 400「召回参数格式不对」。缺头、旧代际、非持有者和过期租约按租约节回 409，cookie 不能代替 Bearer。
+
+`repo/work-records.ts` 的 `recallWorkRecords` 必填被查 Bot 的 viewer，只查它本人、同归属人、全群可见的 `chat` 流，排除当前群。`workEntryVisibleTo(viewer)` 之外还固定要求 `visible_to IS NULL`，对本人私密的记录也不召回；牌桌流、隐藏 run 和别的 Bot 的记录不进入结果。来源群必须仍属当前归属人且 Bot 仍是成员，群标题取该群主题任务的当前标题。工具名单查询与候选读取也在同一可重复读快照内；候选原行按当前名单再过滤，摘录只从过滤后的文字提取，陈旧 `search_text` 不会带回原文。排序键全部在 SQL 里：相似度降序、条目时间降序、群号（`COLLATE "C"`）升序、seq 降序，条目时间是 `work_entries.entry_at`，缺失时回退到 run 开始时间和群创建时间。候选按这个次序分批取（首批 32 条，之后每批翻倍），每批在 Node 里按当前名单再过滤，凑够 8 条或候选取完就停，不合规命中不会挤掉正常结果，也不把所有 `ILIKE` 命中整行拉进 Node。`entry_at` 在唯一写入口 `appendWorkRecords` 由 Node 从已通过 `JSON.parse` 和 `PiWorkEntry` 的 `chat` 流 `message` 条目计算：只认与共享 `ISO_TIME` 同形状的带时区 ISO 8601，按 `Date.parse` 取毫秒；缺失、非字符串、非法时间，以及 UTC 年份落在 1 到 9999 之外的值为 NULL。后一个范围保证 drizzle 序列化的 ISO 时间能被 PostgreSQL 接收，时区偏移跨年也按 UTC 判定。其他流和其他类型写 NULL。0037 删除 0036 的写入触发器并重算旧消息行：小数先在字符串上截到毫秒，再转时间；整行有真正的 JSON 转义 NUL、非法时间或 SQL 无法保证等价的形状时回填 NULL，不删 NUL 解析。回填函数随迁移删除，后续插入只依赖应用写入，直接 SQL 夹具须显式给出 `entry_at`。删群后同一查询回空；删 Bot 后原道的请求被栅栏拒绝，工作记录随外键级联删除。
+
+查询用字面量 `ILIKE` 子串匹配，转义 `%`、`_` 和反斜线，再按 `similarity` 降序、记录时间降序排列，最多返回 8 条 `{groupId, groupTitle, at, kind, excerpt}`。`kind` 只接受 Pi `message` 的 `user`、`assistant`、`toolResult`。原行在 Node 用 JSON 解析，角色不依赖 `line::jsonb`；非检索字段里的 JSON 转义 NUL 照常保留、接收和召回。条目时间按上一段取 `entry_at` 及其回退，统一为 ISO。摘录围绕关键词截取，最多 400 个字符。`search_text` 使用 `pg_trgm` GIN 部分索引，条件为 `stream = 'chat' AND visible_to IS NULL`；候选仍由数据库的字面量查询筛选，可使用该索引；相似度和排序都由数据库计算，Node 只过滤、不重排。召回内容在运行器里只用于当前 run，历史和上传记录仅保留占位文字。
+
+`test/recall-search.test.ts` 用 61 条中文语料比较 2 到 4 字关键词：默认相似度阈值漏掉全部命中，子串匹配保留全部命中。两字无边界子串没有内部三元组，实测仍需扫描候选；三字「小红书」在清理批量夹具的 GIN pending list 后，默认计划走 `work_entries_chat_search_idx`。索引存在不代表所有查询都由它执行，召回优先保留短词命中。
 
 ## 工具连接
 
-工具连接是用户级对象。`tool_connections` 存 MCP 地址、发现的操作及其 `needsApproval` 标记，并把认证信息以 AES-256-GCM 密文存入 `authorization_enc`；`tool_connection_bots` 记录它分配给哪些 Bot，删 Bot 时对应分配由外键级联清除。API 列表和写入响应都不返回认证信息，电脑代理的 `config.tools` 才带解密后的值和 Bot 分配。
+创建 `localOnly: true` 连接、或按更新后的 `localOnly` 换凭据时，工具发现交给归属人在线的本机电脑；没有在线本机电脑返回 409，远程电脑不会代替它探测。代理独立执行 initialize 和 tools/list 分页，最多 10 秒，client 名为 `baize-bot-runner`；控制面等回报最多 15 秒，断线立即结束等待。非本机连接继续由控制面发现。
+
+`mcp_discover` 和 `mcp_discovered` 在协议 3 登记为 bare。下行带明文凭据，不能进 `agent_outbox`、代理磁盘发件箱或 `.agent/downlink.json`；上行只供当前 HTTP 请求使用，丢失让请求超时、用户重试。待回记录只在内存，绑定用户、电脑和连接代际，未知请求或旧连接回报静默丢弃。控制面按固定枚举映射中文错误，重新校验操作表（最多 256 个操作，JSON UTF-8 最多 1 MiB）和凭据回显，成功后才保存；失败时旧凭据和操作表保持不变。地址仅支持 http 和 https。
+
+工具连接是用户级对象。`tool_connections` 存 MCP 地址、发现的操作及其 `needsApproval` 标记，并把认证信息以 AES-256-GCM 密文存入 `authorization_enc`；`tool_connection_bots` 记录它分配给哪些 Bot，删 Bot 时对应分配由外键级联清除。API 列表和写入响应都不返回认证信息。默认 `localOnly: false`，凭据只留在服务器，`config.tools` 仅下发操作表和 Bot 分配，不含 `authorization`。运行器经 `/mcp-proxy/:connectionId/call` 代执行，本机和远程电脑都能使用。设成「只在本机用」后，本机电脑收到 `localOnly: true` 和解密后的凭据并直连 MCP；远程电脑不收到这条连接。
 
 生产环境设置 `TOOL_SECRET_KEY` 为 64 位十六进制密钥。未设置时启动会警告一次，并使用固定开发密钥；已有密文依赖原密钥解密，换密钥前需迁移密文。MCP 发现时把认证信息作为 `Authorization` 请求头发送。操作默认按 MCP 的 `readOnlyHint` 定审批：明确为 `true` 的不需要，其余都需要；用户可通过 `PATCH /api/tools/:id` 覆盖标记。连接创建、修改、删除后，控制面都会向该用户在线电脑重发整份 `config`。
 
-从分享链接导入的插件没有授权，操作表只有包里带的名字和 `needsApproval`，参数表是占位的空表：导入时控制面不去连包里的地址（D11）。所以导入的连接记成 `awaiting_authorization`，随 `config.tools[].status` 下发，运行器照样注册它的操作，但调用当场拒绝、不去连包里的地址。不能拿 `authorization` 为 null 来判：自己建的匿名 MCP 也是 null，那是 `ready`。导入后要先在 `PATCH /api/tools/:id` 带上 `authorization` 补授权，插件才能用；对端本来就不要认证的，传 `authorization: null`，控制面不带头重新探测，连上了清掉凭据、记成 `ready`。这一步对一种对端会误删凭据：`tools/list` 允许匿名、只有 `tools/call` 才要凭据。不带头的探测照样连得上，凭据一次就被清掉，之后每次调用都是 401，要所有者重新带凭据 PATCH。这不算越权，只有所有者能改自己的连接。Web 现在不发 null，以后接入这个入口时只对 `awaiting_authorization` 的连接开放，或者先二次确认。补授权时控制面当场重新 initialize 加 `tools/list`，连上了就按真实列表重建操作表并记成 `ready`，同名操作沿用原来的 `needsApproval`；连不上回 400，旧凭据和操作表都不动。探测要等对端，期间别的 PATCH 可能已经改了审批，所以写回在事务里先 `SELECT ... FOR UPDATE` 锁住这一行，按落库的最新操作表合并，普通的 operations 修改也走同一把锁。导入撞名时工具名和 Bot 名一样截掉尾巴给序号让位，不超过 40，再导出不会被分享包的上限挡住。对端能把收到的 Authorization 按任意编码写进报错，逐种编码去认认不完，所以探测失败只回固定的中文分类（`describeMcpFailure`，HTTP 状态码、MCP 错误码这一级），对端写的文字一个字都不回；运行器连不上、调用抛错也是同一套分类。探测成功时对端也可能把凭据写进操作的名字、说明或参数表，这些会落库、进回包、进分享包、进模型的工具定义，`discoverTools` 发现其中有凭据（原文、百分号编码、JSON 转义三种写法）就整份不收、回 400，不去改写操作名，改了名字就调不到对端的工具。工具调用的正文是对端的业务输出，运行器原样交给模型，只换掉凭据的那三种写法，别的编码不保证。base64、小写的百分号编码、凭据的片段、Unicode 转义都认不出，成功和 `isError` 的正文一样原样进模型，模型可能转述进群消息，Pi 的 session 文件也会落盘。操作元数据的检查用的是同样三种写法，操作名里放凭据的 base64 能过检查，会落库，也会进再分享包的操作名。这个范围是有意的：对端本来就持有这把凭据，想外传不必借我们的通道，脱敏防的是它无意中原样回显。
+从分享链接导入的插件固定 `localOnly: false`，没有授权，操作表只有包里带的名字和 `needsApproval`，参数表是占位的空表：导入时控制面不去连包里的地址（D11）。所以导入的连接记成 `awaiting_authorization`，随 `config.tools[].status` 下发，运行器照样注册它的操作，但调用当场拒绝、不去连包里的地址。不能拿 `authorization` 为 null 来判：自己建的匿名 MCP 也是 null，那是 `ready`。导入后要先在 `PATCH /api/tools/:id` 带上 `authorization` 补授权，插件才能用；对端本来就不要认证的，传 `authorization: null`，控制面不带头重新探测，连上了清掉凭据、记成 `ready`。这一步对一种对端会误删凭据：`tools/list` 允许匿名、只有 `tools/call` 才要凭据。不带头的探测照样连得上，凭据一次就被清掉，之后每次调用都是 401，要所有者重新带凭据 PATCH。这不算越权，只有所有者能改自己的连接。Web 现在不发 null，以后接入这个入口时只对 `awaiting_authorization` 的连接开放，或者先二次确认。补授权时控制面当场重新 initialize 加 `tools/list`，连上了就按真实列表重建操作表并记成 `ready`，同名操作沿用原来的 `needsApproval`；连不上回 400，旧凭据和操作表都不动。探测要等对端，期间别的 PATCH 可能已经改了审批，所以写回在事务里先 `SELECT ... FOR UPDATE` 锁住这一行，按落库的最新操作表合并，普通的 operations 修改也走同一把锁。导入撞名时工具名和 Bot 名一样截掉尾巴给序号让位，不超过 40，再导出不会被分享包的上限挡住。对端能把收到的 Authorization 按任意编码写进报错，逐种编码去认认不完，所以探测失败只回固定的中文分类（`describeMcpFailure`，HTTP 状态码、MCP 错误码这一级），对端写的文字一个字都不回；运行器连不上、调用抛错也是同一套分类。探测成功时对端也可能把凭据写进操作的名字、说明或参数表，这些会落库、进回包、进分享包、进模型的工具定义，`discoverTools` 发现其中有凭据（原文、百分号编码、JSON 转义三种写法）就整份不收、回 400，不去改写操作名，改了名字就调不到对端的工具。工具调用的正文是对端的业务输出。默认由控制面在返回电脑之前脱敏，本机直连时由运行器脱敏；两条路径都换掉凭据的那三种写法，别的编码不保证。base64、小写的百分号编码、凭据的片段、Unicode 转义都认不出，成功和 `isError` 的正文一样原样进模型，模型可能转述进群消息，Pi 的 session 文件也会落盘。操作元数据的检查用的是同样三种写法，操作名里放凭据的 base64 能过检查，会落库，也会进再分享包的操作名。这个范围是有意的：对端本来就持有这把凭据，想外传不必借我们的通道，脱敏防的是它无意中原样回显。
 
-运行器会话里的 MCP 工具在建会话时就定了，运行中换授权、操作表缩减时旧会话还挂着旧工具。所以运行器的闸门和执行都按最新下发的 config 判：连接没了、不再分给这个 Bot、操作不在最新表上，或者连接待授权，闸门在审批之前就拒，不出审批卡；凭据换了，下一次调用丢掉旧 MCP 连接、带新凭据重连。
+运行器会话里的 MCP 工具在建会话时就定了，运行中换授权、操作表缩减时旧会话还挂着旧工具。所以运行器的闸门和执行都按最新下发的 config 判：连接没了、不再分给这个 Bot、操作不在最新表上，或者连接待授权，闸门在审批之前就拒，不出审批卡；本机连接凭据换了，下一次调用丢掉旧 MCP 连接、带新凭据重连。代理连接的凭据更新不下发到电脑，由控制面废弃缓存并重连。
+
+代执行端点用当前 `modelGateway.apiKey` 的 Bearer 鉴权，按电脑找到归属人，依次检查连接归属、本机限定、ready 状态、Bot 归属和分配、操作名。越权及未知对象回 404，本机限定及待授权回 409。审批仍由运行器先过闸，再转发。SDK Client 按连接缓存，修改、删除、连接或协议错误会作废；每次调用还比较连接与凭据指纹，覆盖未显式作废缓存的写入路径。业务 `isError` 和单次调用取消或超时保留共享 Client。作废后新调用重连，旧 Client 等已有调用各自结束、在途计数归零才关闭。初始化使用连接自己的 60 秒超时信号，不受首个调用取消影响；每个 HTTP 调用从等待初始化开始共用 60 秒上限，超时回 504。调用方取消、超时和结果超限都会中止该调用自己的上游 POST，不关闭其他调用的连接。POST 的响应流断开或正常结束但没有对应 JSON-RPC 回包时，该调用立即回固定分类 502，共享 Client 和其他调用仍可使用。流拿到 SDK 的续传 token 后先交给 SDK 带 Last-Event-ID 续传；每次续传重置 token 标记，续传失败或再次 EOF 且没有新 token 时仍快速失败。POST 回 202、等待 GET 回包的调用，在 GET 断流时同样立即失败；仍通过健康 POST 等结果的调用继续收尾。GET 的读取错误按 SDK 的连接级错误作废缓存，正常 EOF 保留 SDK 的重连行为。控制面停机关闭该实例的全部连接（包括已作废仍在途的连接），之后拒绝新调用；HTTP 服务器关闭失败也执行 MCP 清理。
+
+请求体上限 20 MiB，超限回中文 413。自定义 transport fetch 在 SDK 解析前按原始响应字节限长：POST 按单条响应累计，GET 长连接按每个 SSE 事件累计；超过 20 MiB 就取消读取，上游 POST 关闭，回固定中文 502「插件结果超过 20 MiB 上限」。GET 事件超限时因尚无可用的结果 id，会终止该 Client 的所有在途调用并作废缓存；等待该 GET 回包的调用收到超限文案，被连带取消的 POST 调用收到「插件调用失败：这个地址连不上」。GET 和 POST 的媒体类型比较都忽略大小写和参数。完整结果和脱敏后的响应仍各检查一次 20 MiB，不转发超限结果。连接/协议错误只回 `describeMcpFailure` 的固定中文分类，错误对象及凭据不进日志；成功和业务错误内容都经 `redactCredential` 后才回电脑。网关 key 每次 hello 会轮换，运行器在每次调用现取最新 key，轮换不重建工具。升级 SDK 后整文件跑 `mcp-proxy.test.ts`，断流判定依赖 `onmessage` 和 EOF 之间不跨宏任务。
 
 ## 群与主题任务
 
@@ -30,7 +168,7 @@
 
 例行任务写进群里的那条 user 消息不走这张表，只派给例行所属的 Bot，原因是 `prompt.reason` 记 `mentioned`，见「例行任务」。
 
-同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。回合里「这一位」有三种状态：`idle` 空档，`sending` 已从队列里取出、派活报文还没回来，`running` 带 runId 在跑。带 runId 的上行报文只对 `running` 核，`sending` 这段里没有 runId 能对上。轮到的那位在这之前被删了（比如「@A @B @C」里 B 在 A 跑的时候被删），`sendSpeaker` 回 `skipped`，回合跳过它接着派 C，不关轮；选不到电脑或发不出去回 `stopped`，群里已经留了一句，后面的人同样派不出去，关轮。派活抛了错（比如建 run 的事务失败），回合收掉，群里留一句「派给 X 的活没发出去，@ 它再试一次」，`run_done` 照常确认；不靠代理补发 `run_done` 来重推，回合已经收掉，补发会继续结账并尝试推进，但不会重建已收掉的回合。`DELETE /api/bots/:id` 提交后调 `groupTurns.botDeleted`：正在说话的那位被删了，它的 `run_done` 过不了 `resolveRun`，当它说完，轮下一位，没人了就收轮；正在派活途中的只打标记，派活回来按跳过处理，不把已删的它设成这一位（它的 prompt 可能已经发出去，运行器那边随 config 换掉它）；排在后面的从队列里清掉，连同它交出去的交接，卡已随它级联删掉，派出去接手方也接不了。`start` 回 `nobody` 表示被 @ 的人全在派活途中被删、一个都没派出去，`dispatchUserMessage` 就用新鲜名单不认 @ 再路由一次，只退到首席或经手，不替用户扩到全员（刚建的群里 @ 的那位被删了，剩下的人不该平白接到活），仍没人就在群里留一句「@ 一个 Bot 派活」，POST 仍回 201。群本身没了是另一回事：单聊随 Bot 级联删掉后，`startRun` 查不到成员，`sendSpeaker` 看群行还在不在，在就是 `skipped`，不在就是 `gone`，回合收掉、`start` 回 `gone`，`dispatchUserMessage` 不再往消失的群里写任何提示，POST 仍回 201；名单读出来是空的也按同一条分：多 Bot 群被删空、群行还在才留话。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
+同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。回合里「这一位」有三种状态：`idle` 空档，`sending` 已从队列里取出、派活报文还没回来，`running` 带 runId 在跑。带 runId 的上行报文只对 `running` 核，`sending` 这段里没有 runId 能对上。轮到的那位在这之前被删了（比如「@A @B @C」里 B 在 A 跑的时候被删），`sendSpeaker` 回 `skipped`，回合跳过它接着派 C，不关轮；选不到电脑或发不出去回 `stopped`，群里已经留了一句，后面的人同样派不出去，关轮。派活抛了错（比如建 run 的事务失败），回合收掉，群里留一句「派给 X 的活没发出去，@ 它再试一次」，`run_done` 照常确认；不靠代理补发 `run_done` 来重推，回合已经收掉，补发会继续结账并尝试推进，但不会重建已收掉的回合。`DELETE /api/bots/:id` 提交后调 `groupTurns.botDeleted`：正在说话的那位被删了，它的 `run_done` 过不了 `resolveRun`，当它说完，轮下一位，没人了就收轮；正在派活途中的只打标记，派活回来按跳过处理，不把已删的它设成这一位（它的 prompt 可能已经发出去，运行器那边随 config 换掉它）；排在后面的从队列里清掉，连同它交出去的交接，卡已随它级联删掉，派出去接手方也接不了。`start` 回 `nobody` 表示被 @ 的人全在派活途中被删、一个都没派出去，`dispatchUserMessage` 就用新鲜名单不认 @ 再路由一次，只退到首席或经手，不替用户扩到全员（刚建的群里 @ 的那位被删了，剩下的人不该平白接到活），仍没人就在群里留一句「@ 一个 Bot 派活」，POST 仍回 201。群本身没了是另一回事：单聊随 Bot 级联删掉后，`placeRun` 查不到成员，`sendSpeaker` 看群行还在不在，在就是 `skipped`，不在就是 `gone`，回合收掉、`start` 回 `gone`，`dispatchUserMessage` 不再往消失的群里写任何提示，POST 仍回 201；名单读出来是空的也按同一条分：多 Bot 群被删空、群行还在才留话。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
 
 ### `@名` 在写入前解析
 
@@ -106,11 +244,11 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 
 这个条件要在提交前一直成立，靠一把按 (群, Bot) 算键的事务级 advisory 锁：`run_done` 和 `abandonRun` 的事务第一句先拿它（`lockSettlement`、`lockSettlementOfRun`，`pg_advisory_xact_lock` 的两参数形式，第一参数是这块自己的命名空间常量，和仓库里别处单参数的 advisory 锁不在一个键空间），再 `finishRun`；`startRun` 也在自己的事务里先拿同一把再插 run 行。于是同 Bot 同群的两条收尾排队，后来的那条等前一条提交，之后的语句拿新快照，看得见前一条已经结束，把两条的文字一起收掉；收尾进行中也不会冒出新 run。每个收尾事务只收一条 run，只拿一把键。锁序固定是 advisory → runs → messages，run 名下的写帧不拿 advisory。在这把锁之下，`NOT EXISTS` 看见的「别的 run 已经结束」是对的，「收它没错」还依赖一条文字只属于一个 run：正常运行器每个文字块生成新的 UUID 当 messageId，成立。剩下的代价：一条 run 挂在掉线电脑上没收尾时，同 Bot 同群的定稿要等它被对账或宽限收尾，只是晚收，不会收错。没往正文里塞 runId，是因为正文 jsonb 的形状别处直接读（e2e 用例按整条正文比对），shared 和迁移也都不动。早先没收尾就断掉的半截，在这个 Bot 下次在这个群里收尾时一并收掉。
 
-**结账是收尾之后的第二个事务。** `run_done` 的费用卡和例行记账不在结束 run 行的事务里：费用卡要并进多 Bot 回合的汇总或先记着（下一段），这要看回合的内存状态，结束行的事务里不读它。两个事务之间控制面可能抛错或停机，结束了的行不能让补发的 `run_done` 直接回确认，所以 `runs` 表多一列 `charged_at`：`run_done` 结束行时留空，`abandonRun` 没有账要结，结束行的同一句就写上。结账事务（`events.ts` 的 `chargeRun`）第一句 `lockRuns` 按 id 升序锁住要认领的 run（见「删 Bot 也守这个锁序」），接着 `claimCharge`（`UPDATE runs SET charged_at = now() WHERE id = ? AND ended_at IS NOT NULL AND charged_at IS NULL RETURNING *`），拿不到行就是已结过账或已被对账收掉，什么都不写；拿到行就在同一个事务里落费用卡（`appendMessage` 或并进汇总的 `replaceMessageBody`）和例行记账（`chargeRoutineRunIn`），哪一件抛错整个事务回滚，认领一起回滚，下一次补发再认领一次。例行记账的 note 是往后缀的（`¥0.60 · ¥0.30`），自身不幂等，只记一次靠这个事务。费用卡按 `claimCharge` 返回的行上的步骤和金额出，不按补发那条报文算，于是补发带来的数字和第一次一样。结账提交之后才推送费用卡、推送例行任务、推进回合（`groupTurns.runDone` 只认当前回合的 runId，重复调用是空操作）。例行状态推送只管实时视图：丢了这条推送，已加载的例行列表停在旧状态，WebSocket 重连不会补拉它，只有整页刷新或重新进入时的 HTTP 读取拿到库里的正确状态。所以结账提交后这条推送抛错只记日志，不挡确认、回合推进和同一次 hello 里后面的行，也不为它另设补推入口。推送按 id 整条覆盖，补发撞上已结账的行也再推一次，重复无害。
+**收尾、结账和上行游标共用信封事务。** `run_done` 沿用结束行和结账的两个函数，但都在 `acceptUplinkFrame` 的外层事务里；费用卡或例行记账失败时，结束行和游标一起回滚，重试一次仍失败就只推进游标并回 `rejected invalid`。结束行前先按 id 升序锁住当前 run 和可能合账的 held run，例行 run 还先取得共享 Bot 锁和例行行锁，避免与删除、裁剪反序。`charged_at` 仍区分待结账和已结账：`claimCharge` 用 `UPDATE ... WHERE ended_at IS NOT NULL AND charged_at IS NULL RETURNING *` 认领，认领、费用卡和例行记账共用事务，重复报文不会再加金额。先记着的 pass 留到后续汇总结账，放弃的 run 在结束时直接写 `charged_at`。提交后才推送费用卡、例行任务、回合推进和通知；推送故障只记日志，不回滚已提交的业务结果或阻挡累计确认。例行列表的实时推送丢失后仍需刷新或重新进入，通过 HTTP 读取恢复。
 
 费用卡单落、并进汇总还是先记着，看运行器此前的文字块（`(pass)`）和回合的内存状态，这两样只在第一次结账时读，读到的结论记在 `events.ts` 的 `costBookings` 里，结账失败后补发沿用，不再并第二次；控制面重启后这份记忆没了，补发按普通回话单落一张卡。先记着的 pass 不结账：认领在同一个事务里回滚，`charged_at` 留空就是它落库的样子，金额在它自己的 run 行上，确认照回。这个群下一张费用卡在自己的结账事务里逐个 `claimCharge` 这些 pass，认领到的才把步骤和金额加进卡里，所以卡上的数字只来自库里认领成功的行。要认领哪几条在事务外定下来（本进程记着的结论，或此刻这个群先记着的 pass），事务第一句 `lockRuns` 把当前这条和它们按 id 升序 `FOR UPDATE` 锁上，之后才逐条认领，锁序见下面删 Bot 一段。
 
-**欠账在 hello 时补齐。** 结账失败的行要等代理补发，而代理的补发只在重连 hello 之后发，每条最多三次，待发表最多 64 条，放手之后这条 run 就只剩库里的「`ended_at` 有值、`charged_at` 为空」记得。所以 `hub.ts` 的 hello 在发完 config 之后调 `settleUnchargedRuns`：把这台电脑名下这样的行按 `run_done` 的同一条路（`settleCharge`）一条条结掉，推送费用卡和例行状态、推进回合，结果通知只在这个进程里还记得那次结账结论时弹。补发能到的时刻（重连 hello，包括控制面重启后所有电脑的重连）这里都在，而且不受次数和容量上限，所以故障排除后的下一次 hello 就把欠账补齐；故障还在时补结账一样抛错，只记日志，不挡上线，也不为清代理的待发表提前回确认；一条结不成也不挡后面的行，各行的认领互不相干。日志只记错误类别（`name`，pg 错误带 `code`）和电脑、run 的 id，不打印异常原文，原文可能夹着用户正文或凭据。还在回合里先记着的 pass（按回合的 epoch 认，只认得本进程内存里的回合，别的实例的回合它不知道）不动，它等下一张费用卡；回合已经没了的（比如这一轮人人都 pass）、或是控制面重启后谁也不记得它是 pass 的，单落一张卡。重启后的退化就是多一张卡：卡上合计和 run 账本一致，只是本该并成一张的拆成两张。群或 Bot 删掉了的行（`group_id` 或 `bot_id` 已置空）不在 hello 的枚举里，不补；这只管 hello 枚举，删 Bot 之前已经缓存进同群后续结账结论（`costBookings` 的 `heldRuns`）的 pass，照样由那张卡认领并入，金额只算一次，不跨用户。没走定时扫描：欠账只会出在某台电脑的 `run_done` 上，那台电脑不重连时没有新的补发要接，下一次 hello 和补发够得着的时刻是同一个。
+**历史欠账在 hello 时补齐。** 可靠上行不再设三次或 64 条的内存补发上限，未确认帧留在磁盘发件箱。旧版本、历史故障和先记着的 pass 仍可能留下 `ended_at` 有值、`charged_at` 为空的行，所以 hello 在重放之后调用 `settleUnchargedRuns`，沿用 `settleCharge` 认领并补齐费用卡、例行账和回合推进。还属于当前内存回合的 pass 不动，等下一张费用卡；回合已消失或控制面重启后不再记得 pass 的，单落一张卡，合计金额仍与 run 账本一致。一条补结账失败不挡上线和后面的行，日志只记错误类别（`name`，pg 错误带 `code`）以及电脑、run 的 id，不打印可能含正文或凭据的异常原文。
 
 **迁移 0023 和部署顺序。** 迁移把已有的结束行的 `charged_at` 回填成 `ended_at`，不然老 run 的 `run_done` 晚到会再出一张卡。回填只覆盖迁移执行时已经结束的行，旧版控制面不认这一列：迁移之后还在跑的旧实例结束 run 时不写 `charged_at`，补发落到新实例上会再结一次账，多一张卡、例行 note 多缀一次。所以部署顺序固定：先停完所有旧控制面实例，再跑 0023，再起新实例，不和旧实例混跑。没写兼容代码。迁移前旧实现里已结束、费用卡没写成的历史行也会被回填成已结账，迁移不识别也不补它们。
 
@@ -235,7 +373,17 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 | 归属人点批准或拒绝      | `POST /api/approvals/:id` | 定结论，选了长期范围就落授权并先重发 `config`，再向电脑发 `approval_result`、推 `approval_updated` |
 | 结论到达                | 运行器                    | 批了就往下跑，拒了就 `block`，这个工具调用的终态是 `blocked`                                       |
 
-控制面收到 `approval_request` 时**不回任何东西**，运行器就一直挂着等。这是审批的本意：没人点头就不往下走。
+控制面收到 `approval_request` 时先落卡，运行器挂着等 `approval_result`。下行用 `outcome` 区分 `approved`、`rejected`、`voided` 和 `timed_out`。
+
+用户当面发起的审批 `deadlineAt` 为 null，不按时间过期；Bot 之间 @ 派活也按这个规则。例行 run 的 `routineRunId` 非空，或 run 的触发消息是交接卡时，审批截止为创建后 10 分钟。服务器每 15 秒扫描一次，`UPDATE ... WHERE status = 'pending' AND deadline_at <= now RETURNING` 把到期审批定为 `timed_out`、记录 `decidedAt`，向所属电脑发超时结论并推 `approval_updated`。测试通过 `scanApprovalTimeouts(now)` 指定扫描时刻，间隔可由 `approvalTimeoutIntervalMs` 注入。
+
+按钮和群里答复的条件 UPDATE 同时要求 `deadline_at IS NULL OR deadline_at > now()`。截止已过、扫描器还没跑时，点按钮返回 409，并在原事务内用扫描器同样的条件 UPDATE 就地结算这一张卡，给电脑发 `timed_out`、推 `approval_updated`。重复点按钮或后续扫描不再发结论，也不落授权。
+
+用户的新消息路由到目标 Bot 后、发 prompt 前，控制面把这个 Bot 在同一个群里的 pending 审批定为 `voided`。每张卡先向旧 run 所在电脑发作废结论，再派新 prompt；其他 Bot 和其他群的审批不受影响。例行消息不作废已有审批。群里回「批准、同意、拒绝、不行」先消费为审批决定，消费成功就不派活，也不触发作废。按钮、作废和到期都用 `WHERE status = 'pending'` 争同一行，作废后再点按钮返回 409。
+
+审批的人工决定、文字答复、作废和超时都在调用方事务内把 `approval_result` 入可靠发件箱；新消息的作废与首个新 prompt 同事务提交，作废序号在前。提交之后才刷发件箱和向 Web 推 `approval_updated`，产生长期授权时先重发 config 再放行。锁序为归属人共享锁、Bot 共享锁、按 id 排的电脑行、run、审批行；自动结算只更新已经锁过投递范围的候选审批，仍由 `WHERE status = 'pending'` 决胜。
+
+`expired` 保持原义：run 收尾或电脑断线后的审批失效。卡片把新消息作废显示为「已作废 · 你发了新消息，这一步不做了」，到期拒绝显示为「已拒绝 · 10 分钟没人批」。
 
 两处幂等，都靠数据库自己，不靠先查后写：
 
@@ -268,7 +416,7 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 `POST /api/bots/:id/pause` 和 `resume` 只改 `bots.run_state`，给这个用户在线的每台电脑发 `pause` 或 `resume`，推 `bot_updated`，回 `BotResponse`。运行器那头怎么停在闸门上见 `packages/bot-runner/README.md`。
 
-暂停状态住在控制面，电脑那头只是照着执行。
+暂停状态住在控制面，电脑那头只是照着执行。发布循环不认领暂停 Bot 的到点已批草稿，保留已批状态，恢复后的下一轮照常认领发布；Bot 已删、草稿的 `bot_id` 为 null 时照旧认领。认领后才暂停的窄窗口由运行器兜底上报 `reason: "paused"`，草稿记成 `failed`、`failure: "paused"`，通知和草稿卡显示「Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿」。失败草稿不能直接重新批准，Bot 改稿后草稿回到 `pending` 才能再批；恢复本身不重发，也不改账号登录状态。
 
 **hello 按状态补发。** 电脑 hello 成功后照发 `welcome` 加 `config`，紧跟着给 `config` 里的每个 Bot 各补一条：`run_state` 是 `paused` 的补 `pause`，其余的补 `resume`。新起的代理进程在收到 `config` 之前收到的 `pause`、`resume` 会被丢掉（那时还没有运行器），同一个进程重连时运行器还在，早到的会立刻生效；补发要对两种进程都成立，所以排在 `config` 后面。补发和 `config` 用的是同一次 `listBots` 的结果。
 
@@ -319,17 +467,13 @@ approvals 行的 `bot_id` 外键是级联删除，事务提交后那一行随 Bo
 
 有效连接断开后等 15 秒；期间重连就用 `hello.activeRuns` 对账，缺席的 run 当即结束并在原群提示「电脑断过线，这次活没做完」，未重连则宽限到期后收尾全部未结束的 run。同一个 run 只收尾一次，收尾做的事见「run 收尾」。
 
-**断线期间跑完的 run 不丢结果。** 运行器的每条 `run_done` 先进电脑代理的待发表（按 runId 留第一条，`computer-agent/src/agent.ts` 的 `unackedRunDones`），连接在就当场发，不在就留着。控制面处理完一条 `run_done` 回 `run_done_ack`，代理收到才删；重复的、不认识的、run 已经被对账收尾的也回，不然代理每次重连都会补发它；处理抛错不回，留给下次补发。确认说明 run 行的收尾（`finishRun` 那个条件写和同一事务里的工具行、文字定稿）、结账（费用卡和例行记账，见「run 收尾」里的结账一段）和多 Bot 回合推进都已经做完：结账事务抛错这次不回确认，下一次补发撞上「`ended_at` 有值、`charged_at` 为空」的行接着结账，结完才回。结果通知是例外，它只是一条推送，没有落库的地方做幂等，结账提交之后、通知之前抛错的那次补发不再弹，最多弹一次，用户没收到就从群里和例行运行记录里看结果。代理放手之后的欠账由 hello 补结账接住，见「run 收尾」里的欠账一段。代理重连时把待发表里的 runId 并进 hello 的 `activeRuns`，对账当它还在跑、不按断线收尾，welcome 之后按留下的顺序补发，于是 run 的步骤、token、费用卡都是真值（`test/run-done-replay.test.ts`、e2e `test/run-done-replay.test.ts` 掐断代理那一段连接钉着）。
+**断线期间跑完的 run 走可靠发件箱补发。** `run_done` 和其他有后果的上行统一写入 `<dataDir>/.agent/outbox/<stream>/frames.jsonl`，追加并 fsync 后才发送。代理重连时把未确认帧中的 runId 并进 `hello.activeRuns`，welcome 带服务器的 `upAcked`；代理删除已累计确认的帧，按原序号补发后续帧。上行游标、run 收尾、费用和例行记账在同一事务中提交，重复帧只再回累计确认，处理器不重跑（`test/run-done-replay.test.ts` 和 e2e 同名用例）。提交后的通知和下一轮派活不属于确认的数据库效果。
 
-为什么要确认帧，不靠「发出去就算」：连接看着开着、帧却没进控制面的情形只有控制面知道。停机时已有 socket 来的帧同步丢掉（上一段），hello 认完身份之前到的非 hello 帧不理，TCP 半开时 `send` 也不报错。为什么让对账等补发，不让晚到的 `run_done` 改写断线收尾：断线收尾已经推过群里那句、把审批打成过期、给例行记了失败和 stuck，改写得把这些一件件撤回，还会在一句「断过线」之后再冒一张费用卡，一个 run 推两次结束。等补发的话收尾仍只发生一次。补发和断线收尾不论谁先，都只有一边推：`finishRun` 的 `WHERE ended_at IS NULL` 让后到的那条什么都不做，只回确认。
+无法处理的完整上行帧重试后以 `invalid` 拒收并推进游标，防止毒帧堵住后续报文。发件箱落盘后不按重连次数或内存条数丢帧；进程重启继续读原流。盘上状态记下 `computerId`，电脑身份改变、完整日志损坏或 welcome 的确认序号低于本地记录时，代理隔离旧传输状态、开新上行流并把下行游标归零，stderr 说明隔离目录。没有结尾换行的坏尾行只截断。
 
-待发表有两个出口，免得控制面一直不确认（处理一直抛错、或者是不发确认的老版本）时它无限长、hello 无限长、run 永远开着：一条 `run_done` 重连补发 3 次（`RUN_DONE_REPLAY_LIMIT`）还没确认，下一次 hello 就不再报它；表超过 64 条（`UNACKED_RUN_DONE_LIMIT`）就丢最老的并记日志。被放掉的 run 由下一次 hello 的对账按断线收尾。连接一直不断时，放掉的 run 要等到下一次重连才被收尾。
+宽限到期时，控制面在同一事务里放弃该电脑未结束的 run，并清掉全部未确认下行，包括不绑 run 的 `publish_draft` 和 `browser_login`。草稿被标失败或回收时，同一事务删掉对应发布下行，避免用户已看到失败后晚重连又触发发布。提交前若已有 hello 排队，宽限收尾整批回滚，交给握手对账；用户推送在提交后执行。
 
-剩下的口子，都按断线收尾、结果不补：宽限到期时代理还没回来（和代理还在跑、晚回来的 run 一样）；代理进程重启，待发表只在内存里，重启就没了，hello 不再报这些 run；补发够次数或表满被放掉的 run。
-
-pending 的审批留着。重连后照发 `welcome` 加 `config`（外加每个 Bot 的 `pause` 或 `resume`），**不重发** `approval_request`：那是电脑发给控制面的方向，重连时控制面无从替它再问一遍。重连之后点的结论，`approval_result` 会发到重连后的那条连接上。
-
-电脑不在线时点结论，`agents.send` 返回 false，这一版**决定照样落库**，群里不额外补一句话。运行器那一头本来就已经断了，等它回来是另一件事。
+pending 的审批随原有上行游标去重。每次握手仍按 welcome、config、每个 Bot 的 pause 或 resume、下行发件箱的顺序发送。电脑不在线时点结论，审批决定和 `approval_result` 在同一事务入箱；run 已结束时不入箱。作废审批的派活事务先按归属人、Bot、电脑、run、审批的顺序拿锁，锁住电脑之后再读待批范围，作废下行的序号在新 prompt 之前。
 
 ## 交接
 
@@ -483,11 +627,11 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### 加小红书账号
 
-`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404。小红书要在助理浏览器里扫码，远程电脑没有助理浏览器，挂到 `kind='remote'` 的电脑回 400。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，不改任何列，只为回已有那行（200，新建是 201），不先查后写。每人每种电脑只有一台，占位只能挂本机，所以已有的占位就在这台电脑上。建完推 `account_updated`，再给这个用户重发 `config`。
+`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
 
 ### 打开登录窗口
 
-`POST /api/accounts/:id/login` 带 `{ attempt }`。`attempt` 是页面为这一次点击取的号（`LoginAttemptId`，1 到 64 位安全字符），卡片一点就带着它，不等 202。依次判：账号不是本人的回 404，平台不走浏览器登录回 400，请求体不合 `{ attempt }` 回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login { accountId, platform, attempt }`，接口立刻回 202 和 `{ account, attempt }`，`account` 是账号当前的样子，`attempt` 原样带回。扫码结果由电脑代理的 `login_state` 报回来：登上随 `account_updated` 推给页面，没成推 `login_failed` 带同一个 `attempt`。
+`POST /api/accounts/:id/login` 带 `{ attempt }`。`attempt` 是页面为这一次点击取的号（`LoginAttemptId`，1 到 64 位安全字符），卡片一点就带着它，不等 202。依次判：账号不是本人的回 404，平台不走浏览器登录回 400，请求体不合 `{ attempt }` 回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login { accountId, platform, attempt }`，接口立刻回 202 和 `{ account, attempt }`，`account` 是账号当前的样子，`attempt` 原样带回。电脑在助理 Chrome 后台开平台的登录页，交给电脑上的屏，经上面「画面面」报一个 `purpose: login` 的会话，网页按 `attempt` 认领这个会话、打开画面，人在画面上扫码或输账号密码、验证码，本机和远程电脑一样。电脑自己每 250ms 查一次页面上出没出现已登录的标志，查到就撤回画面、关掉登录页，报 `login_state valid`。人在画面上点放弃、或者同一个账号又点了一次登录把这次顶掉，电脑不报，画面的 `closed` 就是结论。登录页没了或画面没展示出来报 `failed window_failed`；从收到 `browser_login` 起 15 分钟还没登上报 `failed timed_out`，等 Chrome 起来、人在画面上操作都算在这 15 分钟里。登上随 `account_updated` 推给页面，没成推 `login_failed` 带同一个 `attempt`。
 
 `attempt` 只做页面上的关联，不是权限：控制面不存、不签发、不查重，只在边界校验格式，原样转给电脑、原样推回页面。页面按 `accountId` 和 `attempt` 一起结算那张卡，所以再点一次之后，上一次点击的失败晚到也不会把新的一次记成没成。账号归属在 HTTP 这边按会话用户查，在上行那边按电脑主人和账号所在电脑查，乱填别人的号进不来。
 
@@ -559,15 +703,19 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 ## 偏好
 
-偏好属于一个 Bot，`bot_preferences` 一行一条，只有 Bot 自己在单聊里能记。上行 `preference_add` 要求群是本人的、恰好是这个 Bot 的单聊、run 是它在这里的活，任一不成立整条丢掉（`agent/events/preference-add.ts:11-29`）。项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好，`test/preferences.test.ts` 的「项目群里的 preference_add 静默丢弃」钉着它。写在 `whileRunOpen` 里（第 31 行），和别的 run 名下的写一样，run 收尾后晚到的帧不落。来源消息 id 是电脑报上来的，外键只保证它存在，不在这个群里就记成 null（`repo/preferences.ts:57-79`）。
+偏好属于一个 Bot，`bot_preferences` 一行一条，只有 Bot 自己在单聊里能提议，用户点了「记住」才记下。上行 `preference_offer` 要求群是本人的、恰好是这个 Bot 的单聊、run 是它在这里的活，任一不成立整条丢掉（`agent/events/preference-offer.ts`）。项目群里听到的话是对项目说的，不该变成这个 Bot 走到哪都套用的偏好，`test/preferences.test.ts` 的「项目群里的 preference_offer 静默丢弃」钉着它。
+
+提议只落一张 `preference_offer` 卡，不写偏好、不重发 config，所以点之前这句话不影响 Bot。理由和 `skill_offer` 一样：点之前 text、private、sourceMessageId 不在任何表里，卡的状态（offered、saved、dismissed）随正文走，点了就改这条消息再重推。落卡写在 `whileRunOpen` 里，和别的 run 名下的写一样，run 收尾后晚到的帧不落。
+
+点卡是 `POST /api/messages/:id/preference-offer`（`http/app.ts`，仿 skill-offer 那条）。点的时候 run 多半早就结束了，所以不靠 `whileRunOpen`，归属在 `findOwnedPreferenceOffer` 里重新认：消息是本人的、正文是这张卡、所在群此刻仍是卡上那个 Bot 的单聊，任一不成立 404。结论靠 `UPDATE messages ... WHERE body->>'status' = 'offered'` 抢，0 行回 409；记住时写偏好和改卡在同一个事务里（`repo/preferences.ts` 的 `decidePreferenceOffer`），抢输的整条回滚，并发点三次只会留下一行。来源消息 id 是电脑报上来的，外键只保证它存在，不在这个群里就记成 null（`addPreference`）。给模型的上下文里这张卡写成「提议记住「…」，你让记住了」或「你说不用记」（`agent/dispatch.ts` 的 `PREFERENCE_OFFER_*`）。
 
 私人标记 `private` 只管分享时默认不勾（`shared/src/domain.ts:696`）。控制面只存它、切它，`config` 照样下发私人的偏好，Bot 写作时照样要套用（`repo/preferences.ts:35-47`）。`config.preferences` 是这个用户全部 Bot 的偏好，数组恒带，运行器靠整份对账，理由和 `config.skills` 一样，省掉就分不清「没有」和「没说」（`agent/hub.ts:519`）。
 
-用户在 Bot 页能切私人（`PATCH /api/preferences/:id`）和删（`DELETE`），两条都按归属人过滤，别人的回 404（`repo/preferences.ts:81-102`）。三处写的推送顺序（`http/routes/preferences.ts:35-58`）：
+用户在 Bot 页能切私人（`PATCH /api/preferences/:id`）和删（`DELETE`），两条都按归属人过滤，别人的回 404（`repo/preferences.ts:81-102`）。三处写的推送顺序（切私人、删除在 `http/routes/preferences.ts:35-58`）：
 
 - 切私人写库一返回就推 `preference_updated`，再 `sendConfig`。`sendConfig` 读库可能拖到别的请求删掉这条之后，那时再推更新会把已删的偏好推回页面。`test/preferences.test.ts` 的「切私人的 config 还没读回来时偏好被删，推送顺序仍是先更新后删除」钉着它。
 - 删除先 `sendConfig`，再推 `preference_deleted`。
-- 上行记下的偏好先推 `preference_updated`，再 `sendConfig`（`agent/events/preference-add.ts:41-42`）。
+- 点「记住」写下的偏好，先重推那条卡，再推 `preference_updated`，最后 `sendConfig`；点「不用」只重推卡。
 
 `GET /api/bots/:id/profile` 回 Bot 页头部的三个数：偏好数、skill 数、在几个项目里（`repo/bots.ts:320-337`）。项目只数多 Bot 群，单聊不算。三个数各查各的，不 join 在一起相乘。
 
@@ -581,11 +729,21 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 推送不按版本排队：两次写各自提交后各推一条 `brand_updated`，晚提交的可能先到。页面按 `version` 只收比手上新的那本，控制面不按 owner 串行广播。运行器那边靠 config 的代际，不受影响。
 
+## 附件
+
+`attachments` 把草稿配图的原始字节存为 Postgres `bytea`，记录归属人、Bot、群、sha256、MIME 和大小。`(owner_id, bot_id, group_id, sha256)` 唯一；重复上传用一条 `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING id` 返回同一个附件 id，不先查后写。
+
+`PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。先验证网关 key，无效回 401；读体前再检查 Bot 和群的归属及成员关系，不成立回 404；落库事务内再次复核，避免上传期间删除对象的竞态。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。控制面和运行器共用 shared 的 `imageMime` 按魔数识别图片；空体回 400「附件图片不能为空」，无支持的魔数回 400「附件字节不是 PNG、JPEG、WebP 或 GIF 图片」，魔数与声明不符回 400「附件图片格式和 Content-Type 不一致」。服务器重算哈希，声明不符回 400。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
+
+`/hub/v1` 挂在 cookie 登录中间件之前，只接受当前电脑网关 key 的 Bearer。config 恒带 `hub.baseUrl`；hello 轮换 key 后旧 key 立即失效。`http/hub-auth.ts` 将归属人和电脑 id 写入请求上下文，P3-10 的租约头校验接在 `http/hub.ts` 的认证之后、附件路由之前；本单不校验租约头。
+
+附件的归属人、Bot、群三个外键都设 `ON DELETE CASCADE`，删账号、删 Bot 或删群时连带删除。附件不引用草稿 id，删除草稿不会清理附件；上传成功后草稿创建失败也会留下附件，直到所属 Bot、群或账号删除。
+
 ## 数据导出与删号
 
 `GET /api/export` 回一个 JSON 附件，文件名 `baize-export-YYYY-MM-DD.json`（`http/routes/privacy.ts:19-25`）。内容是账号、设置、品牌手册、每个 Bot 连同它的 skill 和偏好（私人的也在）、例行、项目任务卡、草稿，`format` 为 1（`repo/export.ts:36-46`）。每一段都按白名单从领域对象拼，工具连接、平台账号、电脑三类带凭据的对象整段不进（第 32-35 行）。不按表整行导出，是为了让以后往领域对象里加字段的人不会顺手把凭据带进来。webhook 的 token 本身就是触发凭据，导出只留 `{ kind: "webhook" }`（第 27-29、48-49 行）。`test/privacy.test.ts` 的「导出里有偏好和品牌手册，grep 不到 token 和 authorization」钉着它。各段查询并行跑，不在一个事务里（第 52-61 行），导出不保证是同一时刻的快照。
 
-`DELETE /api/me` 要请求体里的邮箱等于当前账号，不对回 400（`http/routes/privacy.ts:27-31`）。删完关掉这个人连着的电脑代理（`disconnectOwner`）、删 cookie、回 204（第 32-36 行）。`deleteAccount`（`repo/export.ts:80-107`）的锁序：
+`DELETE /api/me` 要请求体里的邮箱等于当前账号，不对回 400（`http/routes/privacy.ts:27-31`）。删完关掉这个人连着的电脑代理（`disconnectOwner`）和浏览器推送连接（`PushHub.disconnectUser`，用 1008 关闭，并记下这个用户，握手到一半才入表的连接也会被关）、删 cookie、回 204。消息事务已提交、`hub.push` 还没跑时删号完成，那条推送找不到任何连接，旧页面收不到。`deleteAccount`（`repo/export.ts:80-107`）的锁序：
 
 1. 账号排他 advisory 锁（`lockOwner`）。
 2. 按 Bot id 升序对每个 Bot 调 `lockRunsOfBot`。
@@ -655,7 +813,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | 复盘的触发消息                               | 只有老白       |
 | 老白的旁白（`narrate.ts` 生成，不过模型）、牌友的台词 | 全群           |
 
-隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
+隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text`、`bot_text_done` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
 
 牌桌这边只有一处读 `messages` 不带 viewer：`poker/hint.ts` 按 id 查老白答出来的那一条，读的是代码自己刚写下的行。出牌回执和重派计数都不在 `messages` 里，见下一节。列表类查询的 viewer 规则由 `test/p3-visible-read.test.ts` 钉着。
 
@@ -692,7 +850,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 - 每个决策点一条，主键保证重复点返回同一条视图。`failed` 的可以再问，`onConflictDoUpdate` 换掉 run 重来。
 - `hintOf` 只取当前手、`seq` 等于当前事件数的那一条，所以上一街的建议不会带到下一次行动上。
 - 状态是推出来的。回答消息非空且不在流式中是 `done`。run 已结束而 prompt 没确认进会话，或没有回答，是 `failed`。其余是 `waiting`。对账收尾和报错收尾不确认 prompt，半截正文被通用收尾收成定稿也不算成功回答。
-- 电脑离线时也要有结果。这时插一条已结束、零费用的 run，让 `failed` 在重连后还能读到。
+- 电脑离线时回 409「电脑不在线，这次没有问牌，电脑回来后再问一次」，不建 run 和问牌提示行；在线后用户可在同一决策点重试。
 - 老白同时只答一个问题。`runs_table_role_open_idx` 是 `(group_id, table_role)` 上的部分唯一索引，每张桌未结束的 advisor run 和 reviewer run 各至多一个。`runs_table_bot_open_idx` 另外限制同一个 Bot 在同一张桌至多一个未结束的牌桌 run。上一条没答完再问回 409「老白还在回答上一条，等它说完再问」。
 
 老白的 prompt 用 4 号座的视图，所以他只知道用户知道的。答案落库后 `refreshHintForRun` 在桌锁里更新，它在 `bot_text` 和收尾事务提交之后才调用，避免 run 锁和桌锁反序。它只认 `visibleTo` 恰好是 `[user]` 的消息，并且比对手和决策点，旧 run 的回调盖不掉重试后的行。
@@ -729,7 +887,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 - `confirm`：新来一张审批卡。
 - `result`：例行任务派出的 run 收尾时留下了可见 Bot 回复。用户自己在群里发消息触发的 run 他当场就看得到，不推。
-- `failed`：这件事没办成，要用户处理。有三种来源：草稿发布失败，账号登录过期（见「账号」一节，和草稿失败同时发生时只推草稿那条），电脑代理报 `login_state` 的 `failed`。最后这种文案按原因写一句中文：`window_failed` 是登录窗口出错或到点没登上，`remote_refused` 是远程电脑不许登录、请到本机登录。登录没成不等于账号过期，`accounts.login` 不动。账号不属于哪个群，没有群消息可落，所以只走通知，`groupId` 为 null；用户关了通知就看不到这一句，免打扰期间它和别的通知一样只进汇总的件数。它不走 `stuck` 的去重和暂存，那两样是给电脑掉线的，登录接连失败几次每次都推。账号必须是这台电脑主人、登在这台电脑上的，同一个用户的另一台电脑报也不认，否则整条丢掉。
+- `failed`：这件事没办成，要用户处理。有三种来源：草稿发布失败，账号登录过期（见「账号」一节，和草稿失败同时发生时只推草稿那条），电脑代理报 `login_state` 的 `failed`。最后这种文案按原因写一句中文：`window_failed` 是登录窗口出错或被关掉了，`timed_out` 是开了很久还没登上、已经收起。两句都说账号状态没变、可以再点一次登录。登录没成不等于账号过期，`accounts.login` 不动。账号不属于哪个群，没有群消息可落，所以只走通知，`groupId` 为 null；用户关了通知就看不到这一句，免打扰期间它和别的通知一样只进汇总的件数。它不走 `stuck` 的去重和暂存，那两样是给电脑掉线的，登录接连失败几次每次都推。账号必须是这台电脑主人、登在这台电脑上的，同一个用户的另一台电脑报也不认，否则整条丢掉。
 - `stuck`：例行任务到点时选不到电脑派不出去（原因和群里那句同源），或者跑到一半电脑断线被收尾。文案写明是哪条例行、为什么没跑。用户自己的消息派不出去时群里已经落了一条 system 消息，不再推。同一个用户一段离线期只推一次，他任一台电脑代理 hello 成功后清掉，下次再卡住再推。去重记在内存里。推 stuck 时用户没有推送连接，这条就留在内存里，连上推送时补发，`at` 仍是卡住的时刻。最常见的是本机 Mac 睡着，代理和 App 一起断开，醒来连上就收到。每段离线期至多留一条。代理 hello 只清去重，不清已经留下的。
 
 用户关闭通知后不推。完整设置免打扰起止时间时，Asia/Shanghai 区间内只在内存累计数量，区间结束后由每 30 秒一次的扫描推一条汇总，所以汇总最多晚 30 秒。扫描每次按当前设置判断区间是否结束，缩短免打扰在下一次扫描就生效。跨午夜区间按次日结束计算。扫描时用户没有推送连接就留着计数，他下次连上推送时立刻汇总。留下的 stuck 和汇总一起补发时先推 stuck、后推汇总，连上时还在免打扰里就一起等到区间结束。设置改成不在免打扰里之后来的第一条通知，先推攒下的汇总再推它本身。单个用户汇总出错只清掉他的计数，不挡后面的用户。控制面重启会丢掉尚未汇总的内存计数、留着没发的 stuck 和 stuck 去重。

@@ -232,6 +232,7 @@ describe("M7 群与主题任务的共享形状", () => {
       runId: "r1",
       botId: "b1",
       groupId: "g1",
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "hi",
       origin: { kind: "user" },
@@ -254,6 +255,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "x",
       origin: { kind: "user" },
@@ -276,6 +278,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "x",
       origin: { kind: "user" },
@@ -448,6 +451,7 @@ describe("今日页的共享形状", () => {
       view: { kind: "bash", command: "echo hi" },
       status: "pending",
       decidedAt: null,
+      deadlineAt: null,
       grantId: null,
     };
     const draft = {
@@ -677,13 +681,18 @@ describe("C0 工具视图与审批报文", () => {
 describe("登录失败、发布失败和网关别名", () => {
   it("login_state 的 failed 只收两种原因，并且要带回这一次的尝试号", () => {
     const base = { type: "login_state", accountId: "a1" };
-    for (const reason of ["window_failed", "remote_refused"]) {
+    for (const reason of ["window_failed", "timed_out"]) {
       expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason, attempt: "try_1" } }).success).toBe(
         true,
       );
     }
     expect(
       AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "timeout", attempt: "try_1" } }).success,
+    ).toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "remote_refused", attempt: "try_1" } })
+        .success,
+      "远程电脑也能登录，没有这种原因了",
     ).toBe(false);
     expect(
       AgentToControl.safeParse({ ...base, state: { login: "failed", attempt: "try_1" } }).success,
@@ -716,7 +725,7 @@ describe("登录失败、发布失败和网关别名", () => {
       createdAt: now,
       decidedAt: now,
     };
-    for (const reason of ["login_expired", "page_changed", "error"]) {
+    for (const reason of ["login_expired", "page_changed", "paused", "error"]) {
       expect(AgentToControl.safeParse({ ...failed, result: { ...failed.result, reason } }).success).toBe(true);
       expect(Draft.safeParse({ ...draft, failure: reason }).success, reason).toBe(true);
     }
@@ -785,6 +794,7 @@ describe("插件连接的状态", () => {
     url: "https://tickets.example.com/mcp",
     operations: [],
     assignedBotIds: [],
+    localOnly: false,
   };
 
   it("状态必带，只有 ready 和 awaiting_authorization 两种", () => {

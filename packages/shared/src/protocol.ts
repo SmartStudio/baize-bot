@@ -40,15 +40,36 @@ import {
   TopicTask,
   UserId,
 } from "./domain.js";
+import { WorkRetainReason } from "./lane-records.js";
 import { ToolView } from "./tool-view.js";
+import { McpDiscoveryResult, McpHttpUrl } from "./mcp-discovery.js";
 
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
+export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_out"]);
+export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
-// 运行器拿这个头去连 MCP。控制面存的是密文，下发时解开。
-export const ToolConnectionConfig = ToolConnection.extend({
-  authorization: z.string().nullable(),
-});
+export const AgentCloseCode = {
+  superseded: 4000,
+  badHello: 4001,
+  accountDeleted: 4002,
+  upgradeRequired: 4003,
+  displaced: 4004,
+} as const;
+
+// 电脑代理 stdout 每行一个状态，桌面端读它。
+export const AgentStatusLine = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("online") }),
+  z.object({ type: z.literal("displaced") }),
+  z.object({ type: z.literal("upgrade_required") }),
+]);
+export type AgentStatusLine = z.infer<typeof AgentStatusLine>;
+
+// 默认由控制面执行；只有本机连接才下发直连需要的凭据。
+export const ToolConnectionConfig = z.discriminatedUnion("localOnly", [
+  ToolConnection.extend({ localOnly: z.literal(false) }).strict(),
+  ToolConnection.extend({ localOnly: z.literal(true), authorization: z.string().nullable() }).strict(),
+]);
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
 export const AccountConfig = z
@@ -72,9 +93,16 @@ export const AgentToControl = z.discriminatedUnion("type", [
     computerId: ComputerId,
     token: z.string(),
     version: z.string(),
+    protocol: z.number().int().nonnegative().default(1),
+    installId: z.string().uuid().default("00000000-0000-0000-0000-000000000000"),
+    piSessionVersion: z.number().int().positive().default(1),
+    uplinkStream: z.string().min(1).max(128).default("legacy"),
+    downApplied: z.number().int().nonnegative().default(0),
     activeRuns: z.array(RunId),
   }),
+  z.object({ type: z.literal("downlink_ack"), upTo: z.number().int().nonnegative() }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
+  z.object({ type: z.literal("mcp_discovered"), requestId: z.string().uuid(), result: McpDiscoveryResult }),
   // 代理收下一条 config 并换好了运行器，generation 是收下的那条 config 的代际。
   // 控制面只拿它从 config_rejected 里恢复，且只认当前待确认的那一代。
   // 不兼容旧代理：它回的 config_applied 不带 generation，parse 不过整条丢掉。控制面和代理同版一起升。
@@ -93,7 +121,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     detail: z.string(),
     // config_rejected 时带被拒那条 config 的代际；读不出代际时不带，这时这条连接还没回过带代际的 config_applied 就按当前那一代算，回过之后忽略。
     generation: z.number().int().positive().optional(),
-    // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
+    // 知道是哪个活出的错就带上群号；不带时只有这台电脑恰好一个未结束的 run 才归给它，否则丢弃。
     groupId: GroupId.optional(),
     // 带了就是说这个 run 在代理这头不会再跑、也不会有 run_done，控制面替它收尾。
     runId: RunId.optional(),
@@ -106,6 +134,14 @@ export const AgentToControl = z.discriminatedUnion("type", [
     messageId: MessageId,
     delta: z.string(),
     done: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("bot_text_done"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    messageId: MessageId,
+    text: z.string(),
   }),
   z.object({
     type: z.literal("bot_tool_call"),
@@ -227,9 +263,10 @@ export const AgentToControl = z.discriminatedUnion("type", [
     ...RoutineOfferSpec,
     projectGroupId: GroupId.nullable(),
   }),
-  // Bot 在单聊里当场记一条偏好。控制面只收该 Bot 单聊里的 run，项目群里的静默丢弃。
+  // Bot 在单聊里提议记一条偏好。控制面在该 Bot 的单聊里落一张确认卡，用户点了「记住」才写进偏好；
+  // 项目群里的静默丢弃。
   z.object({
-    type: z.literal("preference_add"),
+    type: z.literal("preference_offer"),
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
@@ -340,12 +377,50 @@ export const AgentToControl = z.discriminatedUnion("type", [
     groupId: GroupId,
     targetBotId: BotId.nullable(),
   }),
+  z.object({
+    type: z.literal("work_append"),
+    lane: z.object({
+      botId: BotId,
+      groupId: GroupId,
+      stream: z.enum(["chat", "table"]),
+      epoch: z.number().int().positive(),
+    }),
+    runId: RunId.nullable(),
+    fromSeq: z.number().int().nonnegative(),
+    lines: z.array(z.string()).max(64),
+    head: z.string().regex(/^[0-9a-f]{64}$/),
+    cause: z.enum(["turn_end", "before_approval", "before_effect", "compact", "settled", "import"]),
+  }),
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
+export type WorkAppend = Extract<AgentToControl, { type: "work_append" }>;
 
 // 控制面收下 hello 后必须回 welcome。电脑代理只在收到 welcome 时把重连退避清零。
-export const ControlToAgent = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("welcome"), ownerId: UserId, kind: ComputerKind, serverTime: z.string().datetime() }),
+const CancelControlMessage = z
+  .object({
+    type: z.literal("cancel"),
+    runId: RunId.optional(),
+    lane: z.object({ botId: BotId, groupId: GroupId }).optional(),
+    epoch: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
+  CancelControlMessage,
+  z.object({
+    type: z.literal("mcp_discover"),
+    requestId: z.string().uuid(),
+    url: McpHttpUrl,
+    authorization: z.string().min(1).optional(),
+  }),
+  z.object({
+    type: z.literal("welcome"),
+    ownerId: UserId,
+    kind: ComputerKind,
+    serverTime: z.string().datetime(),
+    conn: z.number().int().positive(),
+    upAcked: z.number().int().nonnegative(),
+  }),
   z.object({
     type: z.literal("config"),
     // 这条连接上第几份 config，从 1 起按开始读快照的先后编号。并发重发时后开始的可能先到，
@@ -362,8 +437,10 @@ export const ControlToAgent = z.discriminatedUnion("type", [
         preset: PokerPersona.nullable(),
       }),
     ),
-    // 只给分配到的 Bot 加载。authorization 只走这条报文，公开的 ToolConnection 不带。
+    // 本机连接只发给本机电脑，其他连接不带凭据。
     tools: z.array(ToolConnectionConfig),
+    mcpProxy: z.object({ baseUrl: z.string().url() }),
+    hub: z.object({ baseUrl: z.string().url() }),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
     skills: z.array(Skill).optional(),
     // 品牌手册由控制面拼成一段文字下发，version 变了运行器才重送给模型；没写过手册是 null。
@@ -381,6 +458,13 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
+    lane: z.object({
+      epoch: z.number().int().positive(),
+      heads: z.object({
+        chat: z.object({ seq: z.number().int().nonnegative(), head: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+        table: z.object({ seq: z.number().int().nonnegative(), head: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+      }),
+    }),
     // 触发这次 prompt 的那条群消息：用户发的、队友 @ 的、交接卡或例行写进群里的那条。
     messageId: MessageId,
     text: z.string(),
@@ -422,14 +506,11 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),
-  // 控制面处理完一条 run_done 就回，重复的、run 已被对账收尾的也回。代理留着每条 run_done 直到收到它：
-  // 没收到就在下次 hello 的 activeRuns 里把这个 run 报成还在跑，welcome 之后补发。
-  z.object({ type: z.literal("run_done_ack"), runId: RunId }),
   z.object({
     type: z.literal("approval_result"),
     runId: RunId,
     callId: z.string(),
-    approved: z.boolean(),
+    outcome: ApprovalOutcome,
   }),
   // poker_act 的回执：引擎拒了带中文原因，运行器把它做成工具错误让牌友重试（D24）。
   z.object({
@@ -461,4 +542,129 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     attempt: Timestamp,
   }),
 ]);
+export const ControlToAgent = ControlToAgentDiscriminatedUnion.refine(
+  (message) =>
+    message.type !== "cancel" ||
+    (message.runId !== undefined && message.lane === undefined && message.epoch === undefined) ||
+    (message.runId === undefined && message.lane !== undefined && message.epoch !== undefined),
+  { message: "cancel 必须指定一个 run 或带代际的道" },
+);
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
+
+export const AGENT_PROTOCOL = 3;
+export const MIN_AGENT_PROTOCOL = 3;
+
+export const UPLINK_DELIVERY = {
+  hello: "bare",
+  heartbeat: "bare",
+  // 结果只供正在等待的 HTTP 请求使用；丢失由用户重试，不能进入代理磁盘发件箱。
+  mcp_discovered: "bare",
+  config_applied: "bare",
+  downlink_ack: "bare",
+  bot_text: "bare",
+  bot_text_done: "reliable",
+  agent_error: "reliable",
+  bot_tool_call: "reliable",
+  run_done: "reliable",
+  approval_request: "reliable",
+  login_state: "reliable",
+  publish_result: "reliable",
+  draft_create: "reliable",
+  draft_edit: "reliable",
+  plan_propose: "reliable",
+  project_offer: "reliable",
+  team_offer: "reliable",
+  routine_offer: "reliable",
+  preference_offer: "reliable",
+  metric_report: "reliable",
+  review_submit: "reliable",
+  poker_act: "reliable",
+  poker_review: "reliable",
+  set_cadence: "reliable",
+  approval_abandoned: "reliable",
+  task_checklist: "reliable",
+  mention: "reliable",
+  skill_offer: "reliable",
+  work_append: "reliable",
+  handoff: "reliable",
+  handoff_accept: "reliable",
+  set_chief: "reliable",
+} as const satisfies Record<AgentToControl["type"], "bare" | "reliable">;
+
+export const DOWNLINK_DELIVERY = {
+  welcome: "bare",
+  config: "bare",
+  pause: "bare",
+  resume: "bare",
+  // 带明文凭据，不能进入 agent_outbox 或代理的 .agent/downlink.json；丢失让 HTTP 请求超时。
+  mcp_discover: "bare",
+  cancel: "reliable",
+  prompt: "reliable",
+  approval_result: "reliable",
+  poker_result: "reliable",
+  browser_login: "reliable",
+  publish_draft: "reliable",
+} as const satisfies Record<ControlToAgent["type"], "bare" | "reliable">;
+
+export const RUN_CLOSED_ACCEPTS: ReadonlySet<AgentToControl["type"]> = new Set([
+  "run_done",
+  "bot_text_done",
+  "bot_tool_call",
+  "work_append",
+]);
+export const UplinkRejectionCode = z.enum([
+  "stale_epoch",
+  "not_holder",
+  "run_closed",
+  "seq_mismatch",
+  "head_mismatch",
+  "invalid",
+]);
+export type UplinkRejectionCode = z.infer<typeof UplinkRejectionCode>;
+export const UplinkRejection = z.object({
+  seq: z.number().int().positive(),
+  code: UplinkRejectionCode,
+  reason: WorkRetainReason.optional(),
+  lineIndex: z.number().int().nonnegative().optional(),
+  replayReason: WorkRetainReason.exclude(["tool_list_changed"]).optional(),
+  head: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
+  runId: RunId.optional(),
+  nextSeq: z.number().int().nonnegative().optional(),
+  lane: z
+    .object({ botId: BotId, groupId: GroupId, stream: z.enum(["chat", "table"]), epoch: z.number().int().positive() })
+    .optional(),
+});
+export type UplinkRejection = z.infer<typeof UplinkRejection>;
+
+export const UplinkFrame = z.object({
+  type: z.literal("uplink"),
+  conn: z.number().int().positive(),
+  stream: z.string().min(1).max(128),
+  seq: z.number().int().positive(),
+  body: AgentToControl.refine((body) => UPLINK_DELIVERY[body.type] === "reliable"),
+});
+export type UplinkFrame = z.infer<typeof UplinkFrame>;
+export const UplinkHeader = UplinkFrame.omit({ body: true }).extend({ body: z.unknown() });
+export const UplinkAck = z.object({
+  type: z.literal("uplink_ack"),
+  upTo: z.number().int().nonnegative(),
+  rejected: z.array(UplinkRejection),
+});
+export type UplinkAck = z.infer<typeof UplinkAck>;
+export const DownlinkFrame = z.object({
+  type: z.literal("downlink"),
+  seq: z.number().int().positive(),
+  body: ControlToAgent.refine((body) => DOWNLINK_DELIVERY[body.type] === "reliable"),
+});
+export type DownlinkFrame = z.infer<typeof DownlinkFrame>;
+export const BareUplinkFrame = z.object({
+  conn: z.number().int().positive(),
+  body: AgentToControl.refine(
+    (body) =>
+      UPLINK_DELIVERY[body.type] === "bare" && body.type !== "hello" && (body.type !== "bot_text" || !body.done),
+  ),
+});
+export type BareUplinkFrame = z.infer<typeof BareUplinkFrame>;

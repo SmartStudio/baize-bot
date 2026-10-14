@@ -1,6 +1,7 @@
 import {
   BrowserPlatform,
   GroupId,
+  MessageId,
   type AgentToControl,
   type BotId,
   type ComputerId,
@@ -12,26 +13,37 @@ import {
   type UsageRecord,
   type UserId,
 } from "@baize/shared";
-import { TransactionRollbackError } from "drizzle-orm";
+import { TransactionRollbackError, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { runs } from "../db/schema.js";
 import { refreshHintForRun } from "../poker/hint.js";
 import type { NoticePublisher } from "../notifications.js";
 import { expireLogin } from "../account-expiry.js";
 import { findAccountOnComputer, markLoginFailed, markLoginValid } from "../repo/accounts.js";
-import { approvalRun, createApproval, expireApproval, expireApprovalsOfRun } from "../repo/approvals.js";
+import {
+  APPROVAL_AUTO_REJECT_MS,
+  approvalRun,
+  createApproval,
+  expireApproval,
+  expireApprovalsOfRun,
+} from "../repo/approvals.js";
 import { markComputerOnline } from "../repo/computers.js";
 import { findAssistant } from "../repo/bots.js";
 import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
 import {
   appendBotText,
+  finalizeBotText,
+  upsertToolCall,
   appendMessage,
   appendSkillOffer,
   failRunningToolCalls,
   findGroupId,
+  findOwnedMessage,
   listGroupBots,
   replaceMessageBody,
   settleStreamingText,
+  type Tx,
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
@@ -41,7 +53,7 @@ import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
   claimCharge,
   finishRun,
-  latestOpenRun,
+  uniqueOpenRun,
   lockRuns,
   lockSettlement,
   lockSettlementOfRun,
@@ -66,7 +78,7 @@ import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
 import { handlePokerAct } from "./events/poker-act.js";
 import { handlePokerReview } from "./events/poker-review.js";
-import { handlePreferenceAdd } from "./events/preference-add.js";
+import { handlePreferenceOffer } from "./events/preference-offer.js";
 import { handleReviewSubmit } from "./events/review-submit.js";
 import { botTextVisibility, isUplinkAllowed } from "./table-run-policy.js";
 import { handleRoutineOffer } from "./events/routine-offer.js";
@@ -81,6 +93,7 @@ export type AgentEventDeps = {
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly notifications: NoticePublisher;
+  readonly afterCommit?: (effect: (deps: AgentEventDeps) => Promise<void>) => void;
 };
 
 /** 电脑代理报上来的事件。每一条都写进 messages 表再推给 Web 客户端，群消息是事实来源。 */
@@ -92,6 +105,7 @@ export async function handleAgentEvent(
 ): Promise<void> {
   switch (message.type) {
     // 握手在 hub 里做完了，重复的 hello 不再认一次身份。
+    case "downlink_ack":
     case "hello":
       return;
     case "heartbeat":
@@ -103,14 +117,15 @@ export async function handleAgentEvent(
     case "bot_text":
       await onBotText(deps, conn, message);
       return;
+    case "bot_text_done":
+      await onBotTextDone(deps, conn, message);
+      return;
     case "bot_tool_call":
       await onToolCall(deps, conn, message);
       return;
     case "run_done":
       await onRunDone(deps, conn, message);
-      // 处理完才回。不认的、重复的也回，不然代理每次重连都要补发它；处理抛错就不回，留给下次补发。
-      // 处理完是指结束行、结账（费用卡和例行记账）、回合推进都做完了；补发撞上结束了没结账的行接着结账。
-      deps.agents.send(conn.computerId, { type: "run_done_ack", runId: message.runId });
+
       return;
     case "agent_error":
       await onAgentError(deps, conn, message);
@@ -166,8 +181,8 @@ export async function handleAgentEvent(
     case "routine_offer":
       await handleRoutineOffer(deps, conn, message);
       return;
-    case "preference_add":
-      await handlePreferenceAdd(deps, conn, message);
+    case "preference_offer":
+      await handlePreferenceOffer(deps, conn, message);
       return;
     case "metric_report":
       await handleMetricReport(deps, conn, message);
@@ -218,8 +233,8 @@ type LoginState = Extract<AgentToControl, { type: "login_state" }>;
 
 const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> = {
-  window_failed: (platform) => `${platform}的登录窗口出错或到时间还没登上，账号状态没变，可以再点一次登录`,
-  remote_refused: (platform) => `远程电脑上不能登录${platform}，请在本机登录这个账号`,
+  window_failed: (platform) => `${platform}的登录窗口出错或被关掉了，账号状态没变，可以再点一次登录`,
+  timed_out: (platform) => `${platform}的登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次登录`,
 };
 
 /**
@@ -296,6 +311,26 @@ type TextPrefix =
 const textPrefixes = new Map<string, TextPrefix>();
 const resultRuns = new Set<RunId>();
 
+export function eventMemoryRollback(body: AgentToControl): () => void {
+  if (!("runId" in body) || body.runId === undefined || body.runId === null) return () => undefined;
+  const runId = body.runId;
+  const prefixes = new Map([...textPrefixes].filter(([, prefix]) => prefix.runId === runId));
+  const result = resultRuns.has(runId);
+  const booking = costBookings.get(runId);
+  const groupId = "groupId" in body ? body.groupId : undefined;
+  const held = new Map([...heldPasses].filter(([id, value]) => id === runId || value.groupId === groupId));
+  return () => {
+    for (const [id, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(id);
+    for (const [id, prefix] of prefixes) textPrefixes.set(id, prefix);
+    if (result) resultRuns.add(runId);
+    else resultRuns.delete(runId);
+    if (booking === undefined) costBookings.delete(runId);
+    else costBookings.set(runId, booking);
+    for (const [id, value] of held) if (!heldPasses.has(id)) heldPasses.set(id, value);
+    if (!held.has(runId)) heldPasses.delete(runId);
+  };
+}
+
 function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
   resultRuns.delete(runId);
@@ -327,8 +362,13 @@ export async function abandonRun(
   ownerId: UserId,
   run: { readonly runId: RunId; readonly groupId: GroupId | null },
   notice: { readonly text: string; readonly reason: string },
+  transaction?: {
+    readonly tx: Tx;
+    afterCommit(effect: () => Promise<{ readonly routine: RoutineRunRef | null }>): void;
+  },
 ): Promise<{ readonly routine: RoutineRunRef | null } | null> {
-  const result = await deps.db.transaction(async (tx) => {
+  const db = transaction === undefined ? deps.db : (transaction.tx as unknown as Db);
+  const result = await db.transaction(async (tx) => {
     await lockSettlementOfRun(tx, run.runId);
     const usage = await finishRun(
       tx,
@@ -351,19 +391,24 @@ export async function abandonRun(
     return { expiredApprovals, failedTools, settled, message };
   });
   if (result === null) return null;
-  await refreshHintForRun(deps, run.runId);
-  clearTextPrefixes(run.runId);
-  if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
-  for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
-  for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
-  pushSettled(deps.push, ownerId, result.settled);
-  if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
-  const routine = await failRoutineRunOf(
-    deps,
-    run.runId,
-    result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
-  );
-  return { routine };
+  const publish = async () => {
+    await refreshHintForRun(deps, run.runId);
+    clearTextPrefixes(run.runId);
+    if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
+    for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
+    for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
+    pushSettled(deps.push, ownerId, result.settled);
+    if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
+    const routine = await failRoutineRunOf(
+      deps,
+      run.runId,
+      result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
+    );
+    return { routine };
+  };
+  if (transaction === undefined) return publish();
+  transaction.afterCommit(publish);
+  return { routine: null };
 }
 
 async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: BotText): Promise<void> {
@@ -417,6 +462,43 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }
 
+async function onBotTextDone(
+  deps: AgentEventDeps,
+  conn: AgentConnection,
+  event: Extract<AgentToControl, { type: "bot_text_done" }>,
+): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null || deps.groupTurns.isBlocked(event.runId)) return;
+  const passed = event.text.startsWith("(pass)") || event.text.startsWith("（pass）");
+  textPrefixes.set(event.messageId, { kind: passed ? "pass" : "visible", runId: event.runId });
+  if (passed) return;
+  const final = await finalizeBotText(
+    deps.db,
+    {
+      messageId: event.messageId,
+      groupId,
+      botId: event.botId,
+      visibleTo: await botTextVisibility(deps.db, event.runId),
+    },
+    event.text,
+  );
+  if (final.kind === "taken") return;
+  if (event.text.trim() !== "") resultRuns.add(event.runId);
+  if (final.created !== null) deps.push.push(conn.ownerId, { type: "message", message: final.created });
+  if (final.replace) deps.push.push(conn.ownerId, { type: "message", message: final.message });
+  deps.push.push(conn.ownerId, {
+    type: "message_delta",
+    messageId: event.messageId,
+    groupId,
+    delta: final.delta,
+    done: true,
+    revision: final.message.revision,
+    visibleTo: final.message.visibleTo,
+  });
+  await refreshHintForRun(deps, event.runId, final.message.id);
+  await deps.groupTurns.recordBotMessage(groupId, event.runId, final.message, "text");
+}
+
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
@@ -432,11 +514,7 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
   } as const;
 
   const key = `${event.runId}:${event.callId}`;
-  const known = conn.toolCallMessages.get(key);
-  // run 收尾时已经把还在跑的工具行改成 failed，晚到的这一帧不能再建一行或把它盖回去。
-  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
-    known === undefined ? appendMessage(tx, groupId, body) : replaceMessageBody(tx, known, groupId, body),
-  );
+  const message = await upsertToolCall(deps.db, groupId, event.runId, event.callId, body);
   if (message === null) return;
 
   // 同一个 id 推第二次，客户端按 id 覆盖那张卡。
@@ -446,10 +524,10 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
 }
 
 /**
- * run_done 分两个事务。第一个结束 run 行（finishRun 的 WHERE ended_at IS NULL 让重复的什么都不做），
- * 第二个结账（chargeRun）。两个都提交后才推进回合、弹通知，确认帧在这之后回。
+ * 结束 run 和结账沿用各自的函数，在信封路径里共用外层事务；任一步失败，两步和游标一起回滚。
+ * 提交后才推进回合、弹通知，再回累计确认。
  * 费用卡怎么出（单落、并进汇总、先记着）看运行器此前的文字块和回合的内存状态，这两样只在第一次结账时读，
- * 读到的结论记在 costBookings 里，结账事务失败后补发沿用，不再碰回合状态第二次。
+ * 读到的结论记在 costBookings 里；信封事务失败时恢复内存标记，成功后保留结论供后续补结账使用。
  */
 async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: RunDone): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
@@ -459,6 +537,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     (event.inputTokens / 1_000_000) * deps.priceInputPerM + (event.outputTokens / 1_000_000) * deps.priceOutputPerM;
   const finished = await deps.db.transaction(async (tx) => {
     await lockSettlement(tx, groupId, event.botId);
+    // 信封把结束与结账合成一个事务，第一次改 run 前就按同序锁齐可能合账的行。
+    await lockRuns(tx, [event.runId, ...heldRunsOfGroup(groupId)]);
     const usage = await finishRun(
       tx,
       event.runId,
@@ -487,8 +567,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
 
 /**
  * hello 时补结账：这台电脑名下结束了、没结账的 run，按 run_done 的路子一条条结掉。
- * 代理的补发只在重连 hello 之后发，有次数和容量上限，放手的那些账只剩库里 charged_at 为空记得；
- * 补发够得着的时刻这里都在，而且不受上限，所以故障排除后的下一次 hello（包括控制面重启后的重连）就把欠账补齐。
+ * 可靠补发只在重连 hello 之后发；旧版本或历史故障留下的欠账由 charged_at 为空记得，
+ * 故障排除后的下一次 hello（包括控制面重启后的重连）把这些欠账补齐。
  * 还在回合里先记着的 pass 不动，它等这一轮下一张费用卡；回合已经没了的，单落一张卡。
  * 费用卡沿用这个进程里结账失败时记下的结论，没有就单落，结果通知同 run_done 一样只在结账提交的这次弹。
  */
@@ -539,6 +619,14 @@ async function settleCharge(
   }
   if (charge?.kind === "merged" && charge.message !== null) {
     deps.push.push(ownerId, { type: "message", message: charge.message });
+    if (charge.message.body.kind === "cost")
+      deps.groupTurns.rememberCost(run.groupId, run.runId, {
+        messageId: charge.message.id,
+        runId: charge.message.body.runId ?? run.runId,
+        botId: charge.message.body.botId ?? run.botId,
+        steps: charge.message.body.steps,
+        amount: charge.message.body.amount,
+      });
   }
   // 例行状态推送只管实时视图，推送失败只记日志，不挡回合推进和后面的行。丢了这条，已加载的例行列表停在旧状态，
   // WebSocket 重连不补拉它，要整页刷新或重新进入时的 HTTP 读取才拿到库里的状态。
@@ -714,11 +802,25 @@ function modelFailureMessage(detail: string): string {
   return `模型没回话${modelFailureStatus(detail)}。检查控制面的上游地址、key 和模型映射（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODELS）。`;
 }
 
+const LOGGED_DETAIL_CHARS = 80;
+
+/** detail 是运行器原样带来的用户内容，没有长度上限。按码点截，不把一个 emoji 的两半劈开。 */
+function clipDetail(detail: string): string {
+  let end = 0;
+  let kept = 0;
+  for (const point of detail) {
+    if (kept === LOGGED_DETAIL_CHARS) return `${detail.slice(0, end)}…`;
+    end += point.length;
+    kept += 1;
+  }
+  return detail;
+}
+
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
     if (!deps.agents.markConfigRejected(conn, event.generation)) return;
-    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${event.detail}`);
+    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${clipDetail(event.detail)}`);
     await deps.notifications.publish(conn.ownerId, {
       kind: "stuck",
       text: `电脑上的活派不出去：${CONFIG_MISMATCH}。把电脑代理和控制面升到同一个版本再连。`,
@@ -741,32 +843,56 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason });
     else
       console.error(
-        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${event.detail}`,
+        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${clipDetail(event.detail)}`,
       );
     return;
   }
-  // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
+  // 运行器也会发不属于某次 run 的错误。群号明确时只查该群，不带群号时必须能唯一确定进行中的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
-  const open = await latestOpenRun(deps.db, conn.computerId);
+  if (event.groupId !== undefined && named === null) {
+    console.warn(
+      `电脑 ${conn.computerId} 报错指定的群已不存在或不属于归属人，不落群：${event.code} ${clipDetail(event.detail)}`,
+    );
+    return;
+  }
+  const open = await uniqueOpenRun(deps.db, conn.computerId, event.groupId);
   const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
-    console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);
+    console.warn(
+      `电脑 ${conn.computerId} 报错没带群号，也确定不了唯一一个还开着的活，不落群：${event.code} ${clipDetail(event.detail)}`,
+    );
     return;
   }
   await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });
-  // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
+  // 指定群里有多条 open run 时仍可留群级提示，但不能替其中某一条例行任务记失败。
   if (open !== null && open.groupId === groupId) {
     await failRoutineRunOf(deps, open.runId, reason);
   }
 }
 
-/**
- * 不回 approval_result，电脑上的运行器就一直挂着等，直到归属人点了按钮或在群里回了话。
- * 这是审批的本意：没人点头就不往下走。
- */
 async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, event: ApprovalRequest): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
+
+  const [run] = await deps.db
+    .select({ routineRunId: runs.routineRunId, triggerMessageId: runs.triggerMessageId })
+    .from(runs)
+    .where(eq(runs.id, event.runId))
+    .limit(1);
+  if (run === undefined) return;
+  // 来源看触发消息：交接和例行 run 等十分钟，用户当面发起的 run 不设截止。
+  const trigger =
+    run.triggerMessageId === null
+      ? null
+      : await findOwnedMessage(deps.db, conn.ownerId, MessageId.parse(run.triggerMessageId), {
+          kind: "bot",
+          botId: event.botId,
+        });
+  const createdAt = new Date();
+  const deadlineAt =
+    run.routineRunId !== null || trigger?.body.kind === "handoff"
+      ? new Date(createdAt.getTime() + APPROVAL_AUTO_REJECT_MS)
+      : null;
 
   const created = await createApproval(deps.db, {
     runId: event.runId,
@@ -777,6 +903,8 @@ async function onApprovalRequest(deps: AgentEventDeps, conn: AgentConnection, ev
     action: event.action,
     target: event.target,
     view: event.view,
+    createdAt,
+    deadlineAt,
   });
   // 同一条 approval_request 重发时这里是 null：不多一张卡，也不多推一次。
   if (created === null) return;

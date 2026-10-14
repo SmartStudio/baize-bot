@@ -1,14 +1,15 @@
 # 白泽 Bot
 
-产品方向是个人助理。规格在 spec/规格.md，用户故事在 spec/用户故事.md，交互原型在 spec/原型/个人助理-v4.html，开发计划在 plan/开发计划.md，竞品对照在 research/。下面描述的是主干现在的样子，按 v0.1 的企业版做的，要改成什么样看规格。bot-application-prototype/ 是 v0.1 的静态原型，Web 的样式变量还从它取。
+产品方向是个人助理。规格在 spec/规格.md，用户故事在 spec/用户故事.md，交互原型在 spec/原型/个人助理-v4.html，开发计划在 plan/开发计划.md，竞品对照在 research/。下面描述的是主干现在的样子。2026-10-13 定下的交付补强还没做，目标架构在 plan/交付补强架构.md。bot-application-prototype/ 是 v0.1 的静态原型，Web 的样式变量还从它取。
 
 ## 目录
 
 - `packages/shared` 对象模型、控制面与电脑代理的报文、HTTP API 契约。全部是 zod schema，其他包只从这里引用类型。
 - `packages/control-plane` 控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js，迁移用 drizzle-kit。端口 3001。见下面「控制面」。
 - `packages/web` Web 客户端。Vite 加 React 18 加 react-router。样式只用 `bot-application-prototype/_ds/.../tokens` 里的变量。端口 5173，`/api` 代理到 3001。单跑前端用 `pnpm --filter @baize/web mock` 起假控制面；要连真控制面就先 `docker compose up -d`、`pnpm --filter @baize/control-plane migrate`、`pnpm --filter @baize/control-plane seed`，再 `pnpm dev`。侧栏分两段：Bot 是一对一的群，群是多 Bot 的群。加号菜单里「新建 Bot」开前者，「建群」选 2 到 6 个自己的 Bot、写清主题和截止，开后者。Bot 设置抽屉分「设置」「例行」「会做的活」三页：例行页列出这个 Bot 的例行任务和下次什么时候跑，编辑器写每次运行做什么、加触发器（每天、工作日、每小时、每分钟这几个预设，或者一个 webhook 地址）、挑失败时停下告诉你还是下次再试，能「试跑一次」，下面是最近 20 条运行记录。群顶部钉着任务卡，编号由系统发（`T-2482` 这种），上面是清单、截止和当前经手，清单勾一下就是一次 `PATCH /api/tasks/:id`。群里打 `@` 弹成员名单，只有被 @ 的那个 Bot 接活并维护清单，没 @ 谁就落到当前经手身上。Bot 之间交接在群里是一张交接报文卡，写清做了什么、没做什么、下一步和清单指到哪一项，目标 Bot 确认之前卡上是「等某某确认」，侧栏记一笔「等 Bot 确认 N」；这跟「等你点头」是两本账，交接不用你动手，也不弹通知。确认之后任务卡的当前经手和任务详情的经手记录一起跟着换。会做的活页列出这个 Bot 的 skill，一行是名字、来源和用过几次，点进去是编号步骤，能改一改、删掉、复制给自己别的 Bot，也能「教它一个」，名称加一行一步的步骤。群里 Bot 干完一趟活会问「存成 skill「名」？」，那是一张带「存」「不存」两个按钮的卡，点完卡上留下「已存」或「没存」。输入框打 `/` 弹这个群里 Bot 会做的活，选中就插进去一段 `/名 `。
-- `packages/computer-agent` 电脑上的常驻进程。启动配置 `{ url, computerId, token, dataDir }` 作为一行 JSON 经 stdin 传入，出站 WebSocket 连控制面的 `/agent`；这四项不放进代理环境。按 v0.1 规格的结论，它平时跟 App 一起装在用户自己的 Mac 上，另有一份跑在公司那台过夜机上。
-- `packages/bot-runner` Bot 运行器。用 @earendil-works/pi-coding-agent 的 SDK，每个 Bot 一个 AgentSession。
+- `packages/computer-agent` 电脑上的常驻进程。启动配置 `{ url, computerId, token, dataDir }` 作为一行 JSON 经 stdin 传入，出站 WebSocket 连控制面的 `/agent`；这四项不放进代理环境。它平时跟桌面 App 一起装在用户自己的 Mac 上，远程电脑（Linux 容器）上跑另一份。
+- `packages/bot-runner` Bot 运行器。用 @earendil-works/pi-coding-agent 的 SDK，每个 Bot 每个群一份 Pi 会话。
+- `packages/desktop` 桌面 App，Electron 壳。起本机电脑代理，启动配置经 stdin 交给它。
 - `packages/e2e` 端到端联调。真控制面、真电脑代理、真运行器一起跑，只有模型上游是假的。见下面「端到端」。
 - `spikes/` 技术验证，不是产品代码。
 
@@ -27,7 +28,9 @@
 
 四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。
 
-一人一台电脑。用户第一次登录时建出 computers 行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接顶掉旧连接。
+每人至多两台电脑，本机（local）和远程（remote）各一台，`computers` 在 `(owner_id, kind)` 上唯一。注册或登录时建出本机那一行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接用 4000 顶掉旧连接。
+
+App 通过 `POST /api/computers/local` 配对本机，无请求体或空对象按未确认处理。已有本机连上过（`lastSeenAt` 非空或此刻在线）时回 409 和 `{ error, computer }`，原 token 和连接继续有效；用户确认后带 `{ "confirmDisplace": true }` 再请求，才轮换 token 并用 4004 关闭旧本机。旧 token 再 hello 也收到 4004，电脑号不存在或 hello 不合法仍是 4001。代理收到 4004 输出一行 `{"type":"displaced"}`，清理资源、停止重连；stdout 的上线行和顶号行统一由 shared 的 `AgentStatusLine` 定义。其他关闭码仍按退避重连。桌面端确认弹框与顶号展示由后续 P3-15b 接入。
 
 拿电脑 token：
 

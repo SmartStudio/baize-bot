@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer as createTcpServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,17 +9,20 @@ import postgres from "postgres";
 import { WebSocket } from "ws";
 import {
   AgentToControl,
+  AGENT_PROTOCOL,
   ComputerListResponse,
   ComputerTokenResponse,
   ControlToAgent,
+  DownlinkFrame,
   MeResponse,
   RegisterResponse,
   ServerPush,
   type Account,
   type ComputerId,
   type Platform,
+  type WorkAppend,
 } from "@baize/shared";
-import { createRunner, type PromptMessage } from "@baize/bot-runner";
+import { createRunner, CURRENT_SESSION_VERSION, type PromptMessage } from "@baize/bot-runner";
 import { type AgentOptions, startAgent } from "@baize/computer-agent";
 import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
 import {
@@ -51,10 +54,14 @@ export type StackOptions = {
   readonly bootstrap?: "seed" | "register" | SignUp;
   readonly startComputer?: boolean;
   readonly disconnectGraceMs?: number;
+  readonly silenceTimeoutMs?: number;
+  readonly leaseRenewalIntervalMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
   readonly agentProcess?: boolean;
   /** 进程内电脑代理经一个 TCP 转发连 /agent，用例可以掐断再接上这一段，模型网关仍直连控制面。 */
   readonly cuttableAgentLink?: boolean;
+  /** 可靠上行落盘后、实际发送前的确定注入点。 */
+  readonly beforeReliableSend?: AgentOptions["beforeReliableSend"];
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
@@ -93,6 +100,8 @@ export type Stack = {
   cutAgentLink(): void;
   restoreAgentLink(): void;
   prompts(): readonly PromptMessage[];
+  /** P3-11 的差分上传尚未合入；用例把真实 Pi 行经电脑代理现有可靠通道送出。 */
+  appendWork(frame: WorkAppend): ReturnType<NonNullable<Parameters<typeof createRunner>[0]["workAppend"]>>;
   /**
    * 进程内的电脑代理累计收下并应用了几份 config。控制面只对「hello 的 config 已经发出」的连接派活，
    * 此前派的活落成一句「电脑不在线」而不建 run。重连之后等这个数涨过重连前的值，再发消息。
@@ -159,6 +168,10 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       ...(options.routinesNow === undefined ? {} : { scheduler: { now: options.routinesNow, intervalMs: DAY_MS } }),
       ...(options.pokerSeed === undefined ? {} : { poker: { seed: options.pokerSeed } }),
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
+      ...(options.silenceTimeoutMs === undefined ? {} : { silenceTimeoutMs: options.silenceTimeoutMs }),
+      ...(options.leaseRenewalIntervalMs === undefined
+        ? {}
+        : { leaseRenewalIntervalMs: options.leaseRenewalIntervalMs }),
     });
     closers.push(() => server.close());
     const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -211,12 +224,14 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       token: computerToken,
       version: AGENT_VERSION,
       dataDir,
+      ...(options.beforeReliableSend === undefined ? {} : { beforeReliableSend: options.beforeReliableSend }),
       log: (line: string) => {
         log += `${line}\n`;
       },
     };
     const prompts: PromptMessage[] = [];
     let configsApplied = 0;
+    let appendWork: Parameters<typeof createRunner>[0]["workAppend"];
     let agent: ReturnType<typeof startAgent> | undefined;
     let agentChild: ChildProcess | undefined;
     const stopComputer = async (): Promise<void> => {
@@ -257,6 +272,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     const startComputer = async (): Promise<void> => {
       if (agent !== undefined || agentChild !== undefined) throw new Error("电脑代理已经启动");
       let earlyExitError: Error | undefined;
+      const appliedBefore = configsApplied;
       if (options.agentProcess) {
         const agentDir = fileURLToPath(new URL("../../computer-agent", import.meta.url));
         const mainPath = join(agentDir, "src", "main.ts");
@@ -300,11 +316,13 @@ export async function startStack(options: StackOptions): Promise<Stack> {
           ...agentOptions,
           ...(options.makeChrome === undefined ? {} : { makeChrome: options.makeChrome }),
           makeRunner: (config) => {
+            appendWork = config.workAppend;
             const runner = createRunner(config);
             configsApplied += 1;
             return {
               ...runner,
               applyConfig: async (next) => {
+                appendWork = next.workAppend;
                 await runner.applyConfig(next);
                 configsApplied += 1;
               },
@@ -316,13 +334,18 @@ export async function startStack(options: StackOptions): Promise<Stack> {
           },
         });
       }
-      await waitFor(async () => {
-        if (earlyExitError !== undefined) throw earlyExitError;
-        return ComputerListResponse.parse(await api.get("/api/computers")).computers[0]?.status === "online";
-      }, "电脑上线");
+      await waitFor(
+        async () => {
+          if (earlyExitError !== undefined) throw earlyExitError;
+          const online = ComputerListResponse.parse(await api.get("/api/computers")).computers[0]?.status === "online";
+          // 子进程的 config 数不到，只能等 online。
+          return online && (options.agentProcess === true || configsApplied > appliedBefore);
+        },
+        options.agentProcess === true ? "电脑上线" : "电脑上线并收下 config",
+      );
     };
 
-    // 电脑上线之后控制面才会派活，不等的话 dispatch 会走「电脑不在线」那一支。
+    // 只看库里 online 会落进「电脑不在线」那一支，控制面要 config 发出后才认这台电脑能派活，所以还要等进程内代理收下 hello 的 config。
     if (options.startComputer !== false) await startComputer();
 
     return {
@@ -341,9 +364,13 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       cutAgentLink: () => requireLink().cut(),
       restoreAgentLink: () => requireLink().restore(),
       prompts: () => prompts,
+      appendWork: (frame) => {
+        if (appendWork === undefined) throw new Error("电脑代理尚未连上工作记录通道");
+        return appendWork(frame);
+      },
       configsApplied: () => configsApplied,
       connectComputer: async () => {
-        const probe = await connectComputer(agentOptions);
+        const probe = await connectComputer({ ...agentOptions, url: `ws://127.0.0.1:${server.port}/agent` });
         closers.push(probe.close);
         return probe;
       },
@@ -430,18 +457,44 @@ async function connectComputer(options: {
   const socket = new WebSocket(options.url);
   const frames: ControlToAgent[] = [];
   let closed: ReturnType<ComputerProbe["closed"]> = null;
+  let conn: number | undefined;
   const closing = new Promise<void>((resolve) => {
     socket.once("close", (code, reason) => {
       closed = { code, reason: reason.toString() };
       resolve();
     });
   });
-  socket.on("message", (data) => frames.push(ControlToAgent.parse(JSON.parse(data.toString()))));
+  socket.on("message", (data) => {
+    const raw: unknown = JSON.parse(data.toString());
+    const downlink = DownlinkFrame.safeParse(raw);
+    if (downlink.success) {
+      frames.push(ControlToAgent.parse(downlink.data.body));
+      if (conn !== undefined)
+        socket.send(JSON.stringify({ conn, body: { type: "downlink_ack", upTo: downlink.data.seq } }));
+      return;
+    }
+    const frame = ControlToAgent.parse(raw);
+    frames.push(frame);
+    if (frame.type === "welcome") conn = frame.conn;
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  socket.send(JSON.stringify(AgentToControl.parse({ type: "hello", ...options, activeRuns: [] })));
+  socket.send(
+    JSON.stringify(
+      AgentToControl.parse({
+        type: "hello",
+        ...options,
+        protocol: AGENT_PROTOCOL,
+        installId: randomUUID(),
+        piSessionVersion: CURRENT_SESSION_VERSION,
+        uplinkStream: `probe-${randomBytes(8).toString("hex")}`,
+        downApplied: 0,
+        activeRuns: [],
+      }),
+    ),
+  );
   return {
     frames: () => frames,
     closed: () => closed,

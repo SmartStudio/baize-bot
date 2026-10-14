@@ -113,7 +113,7 @@ export const issuePost = (text: string, title = "周报"): DraftContent => ({
 
 export const tweet = (text: string): DraftContent => ({ kind: "post", title: null, text, images: [], github: null });
 
-export const IMAGE = { path: "/tmp/a.png", sha256: "a".repeat(64) } as const;
+export const IMAGE = { kind: "path", path: "/tmp/a.png", sha256: "a".repeat(64) } as const;
 
 export function specOf(account: Account, content: DraftContent, scheduledAt: string | null = null): DraftSpec {
   return { draftId: newDraftId(), accountId: account.id, content, scheduledAt };

@@ -4,6 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { findComputerByGatewayKey } from "../repo/computers.js";
+import { LANE_FENCE_ERRORS, validateLaneFence } from "./lane-fence.js";
 
 export const GATEWAY_PATH = "/gateway/v1";
 const MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024;
@@ -42,6 +43,8 @@ export function createGateway(deps: GatewayDeps): Hono {
     const key = bearerToken(c.req.header("authorization"));
     const computer = key === null ? null : await findComputerByGatewayKey(deps.db, key);
     if (computer === null) return c.json({ error: "网关 key 不对，换一把再来" }, 401);
+    const fence = await validateLaneFence(deps.db, computer, c.req.header("x-baize-lane"));
+    if (fence.kind !== "ok") return c.json({ error: LANE_FENCE_ERRORS[fence.kind] }, 409);
     await next();
   });
 

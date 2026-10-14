@@ -3,6 +3,7 @@ import type {
   AccountTier as AccountTierSchema,
   ActionKind as ActionKindSchema,
   ApprovalStatus as ApprovalStatusSchema,
+  AttachmentMime,
   BotHue,
   BotRole as BotRoleSchema,
   BotRunState as BotRunStateSchema,
@@ -43,12 +44,14 @@ import type {
   TaskStatus as TaskStatusSchema,
   Viewer,
 } from "@baize/shared";
+import type { RetainSnapshot } from "@baize/shared/work-record";
 import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
   bigserial,
   boolean,
   check,
+  customType,
   date,
   index,
   integer,
@@ -99,6 +102,7 @@ export type PokerActResult = Extract<ControlToAgent, { type: "poker_result" }>["
 export type StoredPokerHandStatus = "playing" | "complete" | "abandoned";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => "bytea" });
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -185,6 +189,8 @@ export const toolConnections = pgTable(
     authorizationEnc: text("authorization_enc"),
     operations: jsonb("operations").$type<ToolOperation[]>().notNull().default([]),
     status: text("status").$type<ToolConnectionStatus>().notNull().default("ready"),
+    // 只在本机的连接，凭据只下发给本机电脑、由运行器直连；其余由控制面代执行。
+    localOnly: boolean("local_only").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],
@@ -234,6 +240,28 @@ export const groupMembers = pgTable(
     position: integer("position").notNull(),
   },
   (t) => [primaryKey({ columns: [t.groupId, t.botId] }), index("group_members_bot_id_idx").on(t.botId)],
+);
+
+export const attachments = pgTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    sha256: text("sha256").notNull(),
+    mime: text("mime").$type<AttachmentMime>().notNull(),
+    size: integer("size").notNull(),
+    bytes: bytea("bytes").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("attachments_owner_bot_group_sha256_idx").on(t.ownerId, t.botId, t.groupId, t.sha256)],
 );
 
 // 清单项在库里多存一个勾选时刻，只供项目页数本周勾掉几项，toTask 不往外带。
@@ -338,6 +366,13 @@ export const computers = pgTable(
     status: text("status").$type<ComputerStatus>().notNull().default("creating"),
     tokenHash: text("token_hash").notNull(),
     gatewayKeyHash: text("gateway_key_hash").notNull(),
+    upStream: text("up_stream"),
+    upAcked: integer("up_acked").notNull().default(0),
+    downSeq: integer("down_seq").notNull().default(0),
+    downApplied: integer("down_applied").notNull().default(0),
+    connGen: integer("conn_gen").notNull().default(0),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    installId: text("install_id"),
     host: text("host"),
     idleSince: timestamp("idle_since", { withTimezone: true }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -536,6 +571,89 @@ export const runs = pgTable(
   ],
 );
 
+export const laneLeases = pgTable(
+  "lane_leases",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    holderComputerId: text("holder_computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "cascade" }),
+    holderInstallId: text("holder_install_id").notNull(),
+    epoch: integer("epoch").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.botId, t.groupId] }), check("lane_leases_epoch_check", sql`${t.epoch} > 0`)],
+);
+
+export const workStreams = pgTable(
+  "work_streams",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    stream: text("stream").$type<"chat" | "table">().notNull(),
+    nextSeq: integer("next_seq").notNull().default(0),
+    head: text("head").notNull().default("0".repeat(64)),
+    tailEntryId: text("tail_entry_id"),
+    retainSnapshot: jsonb("retain_snapshot").$type<RetainSnapshot>(),
+    piSessionVersion: integer("pi_session_version").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.botId, t.groupId, t.stream] }),
+    check("work_streams_stream_check", sql`${t.stream} IN ('chat', 'table')`),
+    check("work_streams_next_seq_check", sql`${t.nextSeq} >= 0`),
+  ],
+);
+
+export const workEntries = pgTable(
+  "work_entries",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    stream: text("stream").$type<"chat" | "table">().notNull(),
+    seq: integer("seq").notNull(),
+    epoch: integer("epoch").notNull(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
+    entryId: text("entry_id").notNull(),
+    parentId: text("parent_id"),
+    piType: text("pi_type").notNull(),
+    retention: text("retention").$type<"verbatim" | "redacted">().notNull(),
+    line: text("line").notNull(),
+    searchText: text("search_text").notNull(),
+    // 迁移 0036 的插入触发器从 line 的 timestamp 写入，应用层不写。
+    entryAt: timestamp("entry_at", { withTimezone: true }),
+    visibleTo: jsonb("visible_to").$type<Viewer[]>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.botId, t.groupId, t.stream, t.seq] }),
+    check("work_entries_stream_check", sql`${t.stream} IN ('chat', 'table')`),
+    check("work_entries_retention_check", sql`${t.retention} IN ('verbatim', 'redacted')`),
+    check("work_entries_seq_check", sql`${t.seq} >= 0`),
+    index("work_entries_chat_search_idx")
+      .using("gin", t.searchText.op("gin_trgm_ops"))
+      .where(sql`${t.stream} = 'chat' AND ${t.visibleTo} IS NULL`),
+    check(
+      "work_entries_visible_to_check",
+      sql`${t.visibleTo} IS NULL OR (jsonb_typeof(${t.visibleTo}) = 'array' AND jsonb_array_length(${t.visibleTo}) > 0)`,
+    ),
+  ],
+);
+
 export const grants = pgTable(
   "grants",
   {
@@ -590,10 +708,13 @@ export const approvals = pgTable(
     createdAt: createdAt(),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    // 例行和交接触发的审批到这个时刻还没人批就按拒绝处理，用户当面发起的为空、不按时间过期。
+    deadlineAt: timestamp("deadline_at", { withTimezone: true }),
   },
   (t) => [
     index("approvals_group_id_status_idx").on(t.groupId, t.status),
     uniqueIndex("approvals_run_id_call_id_idx").on(t.runId, t.callId),
+    index("approvals_status_deadline_at_idx").on(t.status, t.deadlineAt),
   ],
 );
 
@@ -730,7 +851,7 @@ export const skills = pgTable(
   (t) => [uniqueIndex("skills_bot_id_name_idx").on(t.botId, t.name)],
 );
 
-// Bot 记住的用户偏好（D8）。一条一句话，来源消息删了偏好留着；private 的不进 config 下发给运行器。
+// Bot 记住的用户偏好（D8）。一条一句话，来源消息删了偏好留着；private 只管分享时默认不勾，照样随 config 下发。
 export const botPreferences = pgTable(
   "bot_preferences",
   {
@@ -892,4 +1013,17 @@ export const pokerActReceipts = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.runId, t.callId] })],
+);
+
+export const agentOutbox = pgTable(
+  "agent_outbox",
+  {
+    computerId: text("computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    body: jsonb("body").$type<ControlToAgent>().notNull(),
+    runId: text("run_id").references(() => runs.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.computerId, t.seq] }), index("agent_outbox_run_id_idx").on(t.runId)],
 );

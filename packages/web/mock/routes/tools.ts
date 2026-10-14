@@ -23,6 +23,7 @@ export const toolRoutes: Route = async ({ req, res, path, method }) => {
           ownerId: user.id,
           name: parsed.data.name,
           url: parsed.data.url,
+          localOnly: parsed.data.localOnly ?? false,
           operations: [
             {
               name: "do_thing",

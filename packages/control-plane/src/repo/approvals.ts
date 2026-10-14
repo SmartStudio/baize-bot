@@ -18,7 +18,7 @@ import {
   type ToolView,
   type Viewer,
 } from "@baize/shared";
-import { TransactionRollbackError, and, count, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { TransactionRollbackError, and, count, desc, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { approvals, grants, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
@@ -32,6 +32,7 @@ type ApprovalRow = typeof approvals.$inferSelect;
 
 /** 过了这么久还没有结论就提醒一次。规格里的「24 小时后追加一条 system 提醒」。 */
 export const STALE_APPROVAL_MS = 24 * 60 * 60 * 1000;
+export const APPROVAL_AUTO_REJECT_MS = 10 * 60 * 1000;
 
 export type CreateApprovalInput = {
   readonly runId: RunId;
@@ -42,6 +43,8 @@ export type CreateApprovalInput = {
   readonly action: ActionKind;
   readonly target: GrantTarget | null;
   readonly view: ToolView;
+  readonly createdAt: Date;
+  readonly deadlineAt: Date | null;
 };
 
 export type CreatedApproval = { readonly approval: Approval; readonly message: Message };
@@ -73,6 +76,8 @@ export async function createApproval(db: Db, input: CreateApprovalInput): Promis
           action: input.action,
           target: input.target,
           view: input.view,
+          createdAt: input.createdAt,
+          deadlineAt: input.deadlineAt,
           messageId: message.id,
         })
         .onConflictDoNothing({ target: [approvals.runId, approvals.callId] })
@@ -115,6 +120,73 @@ export async function expireApprovalsOfRun(db: Db | Tx, runId: RunId): Promise<A
     .where(and(eq(approvals.runId, runId), eq(approvals.status, "pending")))
     .returning();
   return rows.map(toApproval);
+}
+
+export type AutomaticApproval = {
+  readonly approval: Approval;
+  readonly computerId: ComputerId | null;
+  readonly ownerId: UserId;
+  readonly callId: string;
+};
+
+const automaticReturning = {
+  approval: approvals,
+  computerId: sql<string | null>`(SELECT ${runs.computerId} FROM ${runs} WHERE ${runs.id} = ${approvals.runId})`,
+  ownerId: sql<string>`(SELECT ${groups.ownerId} FROM ${groups} WHERE ${groups.id} = ${approvals.groupId})`,
+  callId: approvals.callId,
+};
+
+function toAutomaticApproval(row: {
+  approval: ApprovalRow;
+  computerId: string | null;
+  ownerId: string;
+  callId: string;
+}): AutomaticApproval {
+  return {
+    approval: toApproval(row.approval),
+    computerId: row.computerId === null ? null : ComputerId.parse(row.computerId),
+    ownerId: UserId.parse(row.ownerId),
+    callId: row.callId,
+  };
+}
+
+export async function timeOutDueApprovals(
+  db: Db | Tx,
+  now: Date,
+  approvalIds: readonly ApprovalId[],
+): Promise<AutomaticApproval[]> {
+  if (approvalIds.length === 0) return [];
+  const rows = await db
+    .update(approvals)
+    .set({ status: "timed_out", decidedAt: now })
+    .where(
+      and(eq(approvals.status, "pending"), lte(approvals.deadlineAt, now), inArray(approvals.id, [...approvalIds])),
+    )
+    .returning(automaticReturning);
+  return rows.map(toAutomaticApproval);
+}
+
+export async function voidPendingApprovals(
+  db: Db | Tx,
+  botId: BotId,
+  groupId: GroupId,
+  now: Date,
+  approvalIds: readonly ApprovalId[],
+): Promise<AutomaticApproval[]> {
+  if (approvalIds.length === 0) return [];
+  const rows = await db
+    .update(approvals)
+    .set({ status: "voided", decidedAt: now })
+    .where(
+      and(
+        eq(approvals.botId, botId),
+        eq(approvals.groupId, groupId),
+        eq(approvals.status, "pending"),
+        inArray(approvals.id, [...approvalIds]),
+      ),
+    )
+    .returning(automaticReturning);
+  return rows.map(toAutomaticApproval);
 }
 
 /** 审批按归属人过滤。别人的审批在这里查不到，路由层因此返回 404 而不是 403。 */
@@ -163,7 +235,7 @@ export type DecideOutcome =
   | { readonly kind: "scope_not_allowed"; readonly error: string };
 
 /** 这条审批能不能批到这个范围。不能就给一句人话，能就是 null。 */
-function scopeRefusal(row: ApprovalRow, scope: ApprovalScope): string | null {
+function scopeRefusal(row: Pick<ApprovalRow, "action" | "target">, scope: ApprovalScope): string | null {
   if (scope === "once") return null;
   const allowed = GRANTABLE_SCOPES[row.action];
   if (!allowed.includes(scope))
@@ -183,21 +255,36 @@ export async function decideApproval(
   ownerId: UserId,
   approvalId: ApprovalId,
   request: DecideApprovalRequest,
+  now: Date,
 ): Promise<DecideOutcome> {
   // 回滚只能靠抛异常，拒绝的原因从这里带出事务。
   const refused: { error: string | null } = { error: null };
   try {
     const decided = await db.transaction(async (tx): Promise<DecidedApproval | null> => {
+      const scope = request.decision === "approved" ? request.scope : "once";
+      if (scope !== "once") {
+        // 范围是否合法不取决于卡片状态；过期卡上的错误范围也要先回 400。
+        const [candidate] = await tx
+          .select({ action: approvals.action, target: approvals.target })
+          .from(approvals)
+          .where(eq(approvals.id, approvalId))
+          .limit(1);
+        if (candidate === undefined) return null;
+        refused.error = scopeRefusal(candidate, scope);
+        if (refused.error !== null) return tx.rollback();
+      }
       const [row] = await tx
         .update(approvals)
-        .set({ status: request.decision, decidedAt: new Date() })
-        .where(and(eq(approvals.id, approvalId), eq(approvals.status, "pending")))
+        .set({ status: request.decision, decidedAt: now })
+        .where(
+          and(
+            eq(approvals.id, approvalId),
+            eq(approvals.status, "pending"),
+            or(isNull(approvals.deadlineAt), gt(approvals.deadlineAt, now)),
+          ),
+        )
         .returning();
       if (row === undefined) return null;
-
-      const scope = request.decision === "approved" ? request.scope : "once";
-      refused.error = scopeRefusal(row, scope);
-      if (refused.error !== null) return tx.rollback();
 
       let settled = row;
       let grant: Grant | null = null;

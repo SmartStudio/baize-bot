@@ -7,12 +7,14 @@ import type {
   BotId,
   ChecklistItem,
   DecideApprovalRequest,
+  DecidePreferenceOfferRequest,
   DecideSkillOfferRequest,
   Handoff,
   HandoffId,
   Message,
   MessageBody,
   MessageId,
+  PreferenceOfferStatus,
   SkillOfferStatus,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
@@ -23,6 +25,7 @@ import { RoutineOfferCard } from "./RoutineOfferCard.js";
 import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
 import { timeOf } from "./preview.js";
+import { TakeoverCard } from "./TakeoverCard.js";
 import { TeamOfferCard } from "./TeamOfferCard.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
@@ -32,6 +35,10 @@ export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
 export type DecideSkillOffer = (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => Promise<void>;
+export type DecidePreferenceOffer = (
+  messageId: MessageId,
+  decision: DecidePreferenceOfferRequest["decision"],
+) => Promise<void>;
 type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 export type InspectedTool = { messageId: MessageId; body: ToolCall };
 export type InspectTool = (tool: InspectedTool) => void;
@@ -142,6 +149,80 @@ const SkillOfferCard = ({
   );
 };
 
+const PREFERENCE_DECIDED_TEXT: Record<Exclude<PreferenceOfferStatus, "offered">, string> = {
+  saved: "已记住",
+  dismissed: "没记",
+};
+
+// 和 SkillOfferCard 一样，状态在消息正文里，点完等服务端把改过的那条推回来。点「记住」之前这句话还不是偏好，Bot 不会照着做。
+const PreferenceOfferCard = ({
+  body,
+  messageId,
+  onDecide,
+}: {
+  body: Extract<MessageBody, { kind: "preference_offer" }>;
+  messageId: MessageId;
+  onDecide: DecidePreferenceOffer;
+}) => {
+  const [sent, setSent] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const decide = (decision: DecidePreferenceOfferRequest["decision"]) => {
+    setSent(true);
+    setFailure(null);
+    void onDecide(messageId, decision).catch((cause: unknown) => {
+      setFailure(
+        `${decision === "save" ? "没记上" : "没撤下"}：${cause instanceof Error ? cause.message : "请求失败"}`,
+      );
+      setSent(false);
+    });
+  };
+  return (
+    <div
+      className="card card-skill-offer card-preference-offer"
+      data-testid="preference-offer"
+      data-status={body.status}
+    >
+      <div className="card-title">
+        <Sparkles size={16} aria-hidden="true" />
+        要记住这一条吗？
+      </div>
+      <p data-testid="preference-offer-text">{body.text}</p>
+      {body.private ? <p data-testid="preference-offer-private">分享 Bot 时默认不带这条</p> : null}
+      {failure === null || body.status !== "offered" ? null : (
+        <p className="team-offer-error" role="alert" data-testid="preference-offer-error">
+          {failure}
+        </p>
+      )}
+      {body.status === "offered" ? (
+        <div className="approval-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="preference-offer-dismiss"
+            disabled={sent}
+            onClick={() => decide("dismiss")}
+          >
+            不用
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            data-testid="preference-offer-save"
+            disabled={sent}
+            onClick={() => decide("save")}
+          >
+            记住
+          </button>
+        </div>
+      ) : (
+        <p className="approval-decided" data-testid="preference-offer-decided">
+          {PREFERENCE_DECIDED_TEXT[body.status]}
+        </p>
+      )}
+    </div>
+  );
+};
+
 const TOOL_STATUS_TEXT: Record<ToolCall["status"], string> = {
   running: "运行中",
   ok: "完成",
@@ -182,6 +263,8 @@ const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
   approved: "同意",
   rejected: "不同意",
   expired: "已失效",
+  voided: "已作废 · 你发了新消息，这一步不做了",
+  timed_out: "已拒绝 · 10 分钟没人批",
 };
 
 // timeOf 只认 Message，而结论时间和接手时间挂在 Approval、Handoff 上。借这条消息套一层，免得为同一个格式
@@ -245,6 +328,16 @@ const ApprovalCard = ({
         <ToolViewContent view={approval.view} approval />
       </p>
       {approval.target === null ? null : <p className="approval-target">目标：{targetText(approval.target)}</p>}
+      {approval.deadlineAt === null ? null : (
+        <p className="approval-target" data-testid="approval-deadline">
+          {new Date(approval.deadlineAt).toLocaleTimeString("zh-TW", {
+            hour: "2-digit",
+            minute: "2-digit",
+            hourCycle: "h23",
+          })}{" "}
+          前没人批就按拒绝处理
+        </p>
+      )}
       <div className="approval-actions">
         <button
           type="button"
@@ -373,6 +466,7 @@ type MessageProps = {
   checklist: ChecklistItem[];
   onDecide: DecideApproval;
   onDecideSkillOffer: DecideSkillOffer;
+  onDecidePreferenceOffer: DecidePreferenceOffer;
   onInspectTool: InspectTool;
   selectedToolId: MessageId | null;
   showSource: boolean;
@@ -389,6 +483,7 @@ const MessageView = ({
   checklist,
   onDecide,
   onDecideSkillOffer,
+  onDecidePreferenceOffer,
   onInspectTool,
   selectedToolId,
   showSource,
@@ -408,7 +503,18 @@ const MessageView = ({
           case "system":
             return <SystemNote body={body} />;
           case "tool_call":
-            return (
+            return body.view.kind === "takeover" ? (
+              <TakeoverCard
+                messageId={message.id}
+                body={body}
+                view={body.view}
+                botName={lookup(body.botId).name}
+                content={content}
+                actions={contentActions}
+                selected={selectedToolId === message.id}
+                onInspect={onInspectTool}
+              />
+            ) : (
               <ToolCallCard
                 messageId={message.id}
                 body={body}
@@ -428,6 +534,8 @@ const MessageView = ({
           }
           case "skill_offer":
             return <SkillOfferCard body={body} messageId={message.id} onDecide={onDecideSkillOffer} />;
+          case "preference_offer":
+            return <PreferenceOfferCard body={body} messageId={message.id} onDecide={onDecidePreferenceOffer} />;
           case "handoff": {
             const handoff = handoffs[body.handoffId];
             return handoff === undefined ? (
@@ -531,6 +639,9 @@ const Activity = ({
 
 type TurnProps = Omit<MessageProps, "message"> & { turn: Turn };
 
+// 工具调用收进「做了几步」，跑完就折起来。接手卡是要人动手的，交还之后也得看得见结论，不进折叠区。
+const folded = (message: Message) => message.body.kind === "tool_call" && message.body.view.kind !== "takeover";
+
 export const TurnView = ({ turn, ...props }: TurnProps) => {
   if (turn.kind === "system" && turn.message.body.kind === "system" && turn.message.body.tone === "error") {
     return (
@@ -553,12 +664,12 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
       </div>
     );
   }
-  const tools = turn.items.filter((message) => message.body.kind === "tool_call");
+  const tools = turn.items.filter(folded);
   return (
     <div className="turn turn-bot" data-testid="bot-turn" data-bot-id={turn.botId}>
       <div className="turn-content">
         {turn.items
-          .filter((message) => message.body.kind !== "tool_call")
+          .filter((message) => !folded(message))
           .map((message) => (
             <MessageView key={message.id} message={message} {...props} />
           ))}

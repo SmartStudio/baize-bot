@@ -3,6 +3,7 @@ import {
   GroupId,
   type Approval,
   type Bot,
+  type ComputerId,
   type BotHue,
   type BotProfileResponse,
   type Group,
@@ -33,7 +34,9 @@ import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
 import { transferRoutines } from "./routines.js";
 import { generateBotName, hueAt, taskNumber, untakenBotName } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
-import { lockOwner, lockRunsOfBot } from "./runs.js";
+import { exclusiveBotRunsLock, lockOwner, lockRunsOfBot } from "./runs.js";
+
+import { cancelLanes } from "../agent/place-run.js";
 
 export type CreateBotInput = {
   readonly name?: string | undefined;
@@ -272,6 +275,7 @@ export type DeleteBotResult =
       readonly movedRoutineIds: string[];
       /** 成员或首席因这次删除变了的项目群，调用方提交后按它推 group_updated。 */
       readonly changedGroupIds: string[];
+      readonly cancelComputers: ComputerId[];
     }
   | { readonly kind: "assistant" }
   | { readonly kind: "not_found" };
@@ -286,11 +290,15 @@ export type DeleteBotResult =
  */
 export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<DeleteBotResult> {
   return db.transaction(async (tx): Promise<DeleteBotResult> => {
+    await lockOwner(tx, ownerId, "shared");
+    const cancelComputers: ComputerId[] = [];
     const deletable = and(eq(bots.id, botId), eq(bots.ownerId, ownerId), eq(bots.role, "member"));
     const owned = tx.select({ id: bots.id }).from(bots).where(deletable);
-    // 锁序和 run 名下的写一致：runs 在前，见 lockRunsOfBot。别人的 Bot 和主助理不拿锁。
+    // 取消先锁电脑和道，再锁 run；别人的 Bot 和主助理不进入这个锁域。
     const [target] = await owned;
     if (target !== undefined) {
+      await exclusiveBotRunsLock(tx, botId);
+      cancelComputers.push(...(await cancelLanes(tx, ownerId, botId)));
       await lockRunsOfBot(tx, botId);
       // 别的 Bot 确认它交出来的活，是先改交接卡、再换任务卡的经手。级联的先后由外键触发器的名字排，
       // 新建的库里是先置空经手、后删交接卡，两边各拿一半就是死锁。先把要级联删的交接卡锁上，顺序就和确认一致。
@@ -322,6 +330,7 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
             );
       return {
         kind: "deleted",
+        cancelComputers,
         expired: expired.map(toApproval),
         movedRoutineIds: moved.map((one) => one.id),
         changedGroupIds: [...new Set([...chaired.map((one) => one.id), ...joined])],

@@ -20,7 +20,7 @@ import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { gatedDb } from "./helpers/gated-db.js";
-import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -510,7 +510,7 @@ describe("Bot 报数", () => {
     }
   });
 
-  it("上报与收尾交错：归属已校验、还没写时 run 在另一台控制面上收尾，放行后不落样本", async () => {
+  it("可靠报数未提交时新控制面的握手等待，报数先落地再收尾，旧连接续帧不落样本", async () => {
     // 两台控制面连同一个库，像滚动重启时新旧进程并存。同一台里报文和收尾排在同一条链上，排不出这种交错。
     const gate = gatedDb(database.sql);
     const clock = windowClock();
@@ -519,7 +519,7 @@ describe("Bot 报数", () => {
     const owner = await makeOwner(serverA);
     let agent: AgentClient | null = null;
     let elsewhere: AgentClient | null = null;
-    const held = gate.arm(RUN_BELONGS_TO, "after");
+    let held: ReturnType<typeof gate.arm> | undefined;
     try {
       const { groupId } = await makeProject(owner, "推广白泽");
       ({ agent } = await helloAgent(serverA.port, owner.computer.computerId, owner.computer.token));
@@ -530,27 +530,33 @@ describe("Bot 报数", () => {
       const run = { runId: prompt.runId, botId: prompt.botId, groupId } as const;
       const done = { type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 } as const;
 
+      held = gate.arm(RUN_BELONGS_TO, "after");
       agent.send({ type: "metric_report", ...run, value: 999, label: "星数" });
       await held.reached;
-      // 电脑也连上 B，hello 报这个 run 还在跑，B 不对账收掉它；收尾由 B 上的 run_done 做，确认回来时已提交。
-      ({ agent: elsewhere } = await helloAgent(serverB.port, owner.computer.computerId, owner.computer.token, [
-        prompt.runId,
-      ]));
+      const reconnecting = helloAgent(serverB.port, owner.computer.computerId, owner.computer.token, [prompt.runId]);
+      await waitFor(async () => {
+        const [row] = await database.sql<
+          { n: number }[]
+        >`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=${database.databaseName} AND wait_event_type='Lock'`;
+        return (row?.n ?? 0) > 0;
+      }, "新 hello 等可靠报数事务提交");
+      expect(await samplesOf(groupId)).toEqual([]);
+      held.release();
+      ({ agent: elsewhere } = await reconnecting);
       elsewhere.send(done);
       await elsewhere.ack(prompt.runId, 1);
-      const [ended] = await database.sql<{ ended: boolean }[]>`
-        SELECT ended_at IS NOT NULL AS ended FROM runs WHERE id = ${prompt.runId}`;
-      expect(ended?.ended, "B 上的收尾已经提交").toBe(true);
-
-      held.release();
-      // A 上这条 run_done 排在报数后面，这是这个 run 的第二条确认，它回来时 A 已经处理完报数。
-      agent.send(done);
-      await agent.ack(prompt.runId, 1);
-
-      expect(await samplesOf(groupId), "收尾先提交，晚到的报数不落样本").toEqual([]);
-      expect(withMetric(await pushesBefore(owner, groupId, 5)), "放行后的报数不推任务卡").toEqual([]);
+      expect(await samplesOf(groupId)).toHaveLength(1);
+      agent.send({ type: "metric_report", ...run, value: 1000, label: "旧代际" });
+      elsewhere.send({ type: "metric_report", ...run, value: 1001, label: "收尾后" });
+      await waitFor(
+        async () =>
+          elsewhere?.uplinkAcks().some((ack) => ack.rejected.some((item) => item.code === "run_closed")) === true,
+        "收尾后报数拒收",
+      );
+      expect(await samplesOf(groupId)).toHaveLength(1);
+      expect(agent.uplinkAcks().flatMap((ack) => ack.rejected)).toEqual([]);
     } finally {
-      held.release();
+      held?.release();
       elsewhere?.close();
       agent?.close();
       owner.close();

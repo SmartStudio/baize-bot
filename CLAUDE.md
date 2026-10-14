@@ -49,7 +49,7 @@ pnpm --filter @baize/control-plane computer-token      # 重置并打印电脑 t
 
 ## 架构
 
-五个包，一条链路。`packages/shared` 是唯一的类型来源，对象模型、控制面与电脑代理之间的报文、HTTP API 契约全是 zod schema，其他包只从这里引类型，外部输入在边界 parse，内部函数信任类型。
+七个包，五个在下面这条链路上，另外 `desktop` 是起本机代理的 Electron 壳，`e2e` 是真栈测试和验收剧本。`packages/shared` 是唯一的类型来源，对象模型、控制面与电脑代理之间的报文、HTTP API 契约全是 zod schema，其他包只从这里引类型，外部输入在边界 parse，内部函数信任类型。
 
 ```
 Web (Vite/React, /api 代理到 3001)
@@ -58,8 +58,8 @@ Web (Vite/React, /api 代理到 3001)
 control-plane (Hono + drizzle/postgres.js，3001)
   │ WebSocket /agent：hello → welcome → config（该用户全部 Bot、skill、工具连接、网关 key）
   ▼
-computer-agent（电脑上的常驻进程，出站连接，每收一条 config 整个换 runner）
-  └─ bot-runner：每个 Bot 一个 Pi AgentSession（@earendil-works/pi-coding-agent）
+computer-agent（电脑上的常驻进程，出站连接，第一条 config 建 runner，之后按 Bot 增量对账）
+  └─ bot-runner：每个 Bot 每个群一份 Pi 会话（@earendil-works/pi-coding-agent）
        │ 模型请求走控制面的 /gateway/v1，Bearer 换成 UPSTREAM_API_KEY，baize:plan/baize:fast 按用途映射到 GATEWAY_MODELS
        ▼
      UPSTREAM_BASE_URL
@@ -83,6 +83,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - 幂等一律靠数据库自己的唯一索引或 `WHERE status = 'pending'`，不先查后写。
 - Pi 的四个落盘点（authPath、modelsStorePath、两个 agentDir、sessionDir）都在 `bot-runner/src/bot-session.ts` 钉到 `<dataDir>/<botId>/` 下，`~/.pi` 不能出现任何新文件，`bot-runner/test/runner.test.ts` 最后一条用例钉着这件事。
 - Pi 没有 pause。暂停状态住在控制面的 `bots.run_state`，运行器收到 `pause` 只立起这个 Bot 的暂停闸门，在 prompt 入场和每次 `tool_call` 前等它，不 `abort()`。正在跑的工具和模型请求不截断，挂起的审批不失效，期间的新 prompt 留在原来的串行队列里，`resume` 只放开闸门、不重发。
+- 画面接管。远程和本机电脑上的登录、Bot 请人接手，都靠把助理 Chrome 的一页实时画面送到网页上给人操作。电脑上的屏是 `computer-agent/src/live-screen.ts`，`present` 只 resolve，结局是 `user`、`caller`、`page_gone`、`broken` 四种。画面帧和人的按键走 `/agent` 与 `/api/live/<liveId>` 上的二进制帧，在串行链之前分流，不进库、发件箱和日志，会话只在电脑内存和控制面中继的内存里。一台电脑同一时刻一个观看者，新的进来旧的以 4101 关。登录在 `computer-agent/src/login.ts`，250ms 查一次、15 分钟收起；接手在 `bot-runner/src/takeover.ts`，借出那一页而不持浏览器锁，同群来了新的用户消息就作废，30 分钟收起。`Page.bringToFront` 只许出现在 `live-screen.ts`，`computer-agent/test/bring-to-front-guard.test.ts` 钉着。设计理由读 `packages/control-plane/README.md` 的「画面面」。
 
 ### 文档在哪
 
@@ -91,6 +92,7 @@ computer-agent（电脑上的常驻进程，出站连接，每收一条 config �
 - `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法、牌桌工具。
 - `spec/规格.md` 产品规格 v0.2，方向已转成个人助理，每个对象写了目标和「现在」的差距。`spec/用户故事.md` 按天讲用户怎么用，每期的验收就是走通对应的故事。`spec/原型/个人助理-v4.html` 是可点的交互原型，一次性的，不照着抄代码，prettier 忽略它。
 - `plan/开发计划.md` 分期和单元，第四节列了 v0.1 的 M 和 N 单元去哪了。
+- `plan/交付补强架构.md` 第 3 期交付补强的目标架构，信封、中枢、租约、MCP 代执行、审批规则、隔离各自怎么做、为什么这么做。改 P3-4 起的单元前先读。
 - `research/` 竞品对照，Grok Bot 和个人助理几家。
 - `bot-application-prototype/` v0.1 的静态原型，Web 的样式只用它 `_ds/.../tokens` 里的变量。oxlint 和 prettier 都忽略它。
 

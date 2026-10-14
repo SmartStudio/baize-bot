@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   BotListResponse,
   CreateBotResponse,
+  DownlinkFrame,
   MessageId,
   MessageListResponse,
   toolViewText,
@@ -12,6 +13,7 @@ import {
   type ToolView,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { AgentHub } from "../src/agent/hub.js";
 import { STALE_APPROVAL_MS, remindStaleApprovals } from "../src/repo/approvals.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -163,7 +165,9 @@ describe("approval_request 到达", () => {
         "这一页引用到的审批跟着一起回",
       ).toEqual([approval?.id]);
 
-      await expectNextDownlinkIsPrompt(job, "再看一眼");
+      await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "再看一眼" });
+      expect(await job.agent.expect("approval_result")).toMatchObject({ callId: "call-1", outcome: "voided" });
+      expect((await job.agent.expect("prompt")).text).toBe("再看一眼");
     } finally {
       job.close();
     }
@@ -221,7 +225,10 @@ describe("放弃审批", () => {
 
       const response = await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" });
       expect(response.status).toBe(409);
-      expect(await response.json()).toEqual({ error: "这条审批已经有结论了" });
+      expect(await response.json()).toMatchObject({
+        error: "这条审批已经有结论了",
+        approval: { id: approval.id, status: "expired" },
+      });
     } finally {
       job.close();
     }
@@ -265,7 +272,7 @@ describe("放弃审批", () => {
 });
 
 describe("点按钮", () => {
-  it("批准之后电脑收到 approved=true，runId 和 callId 对得上", async () => {
+  it("批准之后电脑收到 approved outcome，runId 和 callId 对得上", async () => {
     const job = await runningJob();
 
     try {
@@ -274,7 +281,7 @@ describe("点按钮", () => {
       expect(response.status).toBe(200);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
       expect(result.runId, "运行器按 runId 加 callId 认是哪个工具在等").toBe(job.runId);
       expect(result.callId).toBe("call-7");
 
@@ -286,7 +293,7 @@ describe("点按钮", () => {
     }
   });
 
-  it("拒绝之后电脑收到 approved=false", async () => {
+  it("拒绝之后电脑收到 rejected outcome", async () => {
     const job = await runningJob();
 
     try {
@@ -294,7 +301,7 @@ describe("点按钮", () => {
       expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "rejected" })).status).toBe(200);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved, "拒绝要让运行器把这个工具调用打成 blocked").toBe(false);
+      expect(result.outcome, "拒绝要让运行器把这个工具调用打成 blocked").toBe("rejected");
       expect(result.callId).toBe("call-8");
     } finally {
       job.close();
@@ -313,7 +320,9 @@ describe("点按钮", () => {
       expect(await response.json(), "和不存在的 id 回一样的话").toEqual({ error: "没有这个对象" });
       const stored = await page(mine);
       expect(stored.approvals[0]?.status, "别人点了也不该改变这条的状态").toBe("pending");
-      await expectNextDownlinkIsPrompt(mine, "它还等着");
+      await mine.client.post(`/api/groups/${mine.groupId}/messages`, { text: "它还等着" });
+      expect(await mine.agent.expect("approval_result")).toMatchObject({ callId: "call-1", outcome: "voided" });
+      expect((await mine.agent.next()).type).toBe("prompt");
     } finally {
       mine.close();
       other.close();
@@ -327,11 +336,14 @@ describe("点按钮", () => {
       const approval = await raiseApproval(job, "call-9");
       expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(200);
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
 
       const again = await job.client.post(`/api/approvals/${approval.id}`, { decision: "rejected" });
       expect(again.status).toBe(409);
-      expect(await again.json(), "409 的正文要是人话").toEqual({ error: "这条审批已经有结论了" });
+      expect(await again.json(), "409 的正文要是人话并带回当前结论").toMatchObject({
+        error: "这条审批已经有结论了",
+        approval: { id: approval.id, status: "approved" },
+      });
 
       await expectNextDownlinkIsPrompt(job, "接着干");
     } finally {
@@ -349,7 +361,7 @@ describe("群里回文字", () => {
       expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: " 批准 " })).status).toBe(201);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(true);
+      expect(result.outcome).toBe("approved");
       expect(result.callId).toBe("call-2");
 
       // 运行器正挂着等结论，这条「批准」再派一次活就会并发起第二个 run。
@@ -367,7 +379,7 @@ describe("群里回文字", () => {
       expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "不行" })).status).toBe(201);
 
       const result = await job.agent.expect("approval_result");
-      expect(result.approved).toBe(false);
+      expect(result.outcome).toBe("rejected");
     } finally {
       job.close();
     }
@@ -480,6 +492,58 @@ describe("提醒的写入不会半程丢掉", () => {
   });
 });
 
+describe("审批结论可靠投递", () => {
+  it.each(["approved", "rejected"] as const)("人工决定 %s 先入发件箱，恢复发送后按原序号投递", async (decision) => {
+    const job = await runningJob();
+    let restoreFlush: (() => void) | undefined;
+    try {
+      const approval = await raiseApproval(job, "call-reliable-decision");
+      const blocked = vi.spyOn(AgentHub.prototype, "flushOutbox").mockImplementation(async () => undefined);
+      restoreFlush = () => blocked.mockRestore();
+      const response = await job.client.post(`/api/approvals/${approval.id}`, { decision });
+      expect(response.status).toBe(200);
+      expect((await page(job)).approvals).toMatchObject([{ id: approval.id, status: decision }]);
+      const queued = await database.sql<{ seq: number; body: unknown; run_id: string }[]>`
+        SELECT seq, body, run_id FROM agent_outbox
+        WHERE computer_id = ${job.computer.computerId} AND body->>'type' = 'approval_result'
+      `;
+      expect(queued, "发送暂不可用时，已提交的人工结论留在可靠发件箱").toEqual([
+        {
+          seq: expect.any(Number),
+          run_id: job.runId,
+          body: { type: "approval_result", runId: job.runId, callId: "call-reliable-decision", outcome: decision },
+        },
+      ]);
+      expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+      expect(await job.agent.next(), "没有绕过发件箱直接发送审批结论").toMatchObject({
+        type: "pause",
+        botId: job.botId,
+      });
+
+      const frames: ReturnType<typeof DownlinkFrame.parse>[] = [];
+      job.agent.socket.on("message", (raw) => {
+        const frame = DownlinkFrame.safeParse(JSON.parse(raw.toString()));
+        if (frame.success) frames.push(frame.data);
+      });
+      blocked.mockRestore();
+      expect((await job.client.post(`/api/groups/${job.groupId}/messages`, { text: "继续查库存" })).status).toBe(201);
+      expect(await job.agent.next()).toMatchObject({
+        type: "approval_result",
+        callId: "call-reliable-decision",
+        outcome: decision,
+      });
+      expect(await job.agent.next()).toMatchObject({ type: "prompt", text: "继续查库存" });
+      expect(frames[0], "补送的是原先入箱的序号和 run，电脑能按可靠信封确认").toMatchObject({
+        seq: queued[0]?.seq,
+        body: { type: "approval_result", runId: job.runId, outcome: decision },
+      });
+    } finally {
+      restoreFlush?.();
+      job.close();
+    }
+  });
+});
+
 describe("电脑断线", () => {
   it("重连报告 run 还活着时只收到 welcome 和 config，pending 的审批不重发，决定照样发下去", async () => {
     const job = await runningJob();
@@ -499,7 +563,7 @@ describe("电脑断线", () => {
       try {
         expect((await job.client.post(`/api/approvals/${approval.id}`, { decision: "approved" })).status).toBe(200);
         const result = await agent.expect("approval_result");
-        expect(result.approved, "结论要落到重连后的那条连接上").toBe(true);
+        expect(result.outcome, "结论要落到重连后的那条连接上").toBe("approved");
         expect(result.callId).toBe("call-6");
       } finally {
         agent.close();

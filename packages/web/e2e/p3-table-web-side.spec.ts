@@ -281,3 +281,27 @@ for (const expired of expiredCases) {
     await expect(page.getByTestId("table-page")).toHaveCount(0);
   });
 }
+
+test("电脑不在线时问老白回 409，页面显示控制面的原话，没有老白的回话也没有等待态，电脑回来后可再问", async ({
+  page,
+}) => {
+  const groupId = await openTable(page);
+  await toMyTurn(page, groupId);
+  const offline = "电脑不在线，这次没有问牌，电脑回来后再问一次";
+  await page.route("**/api/poker/hands/*/hint", (route) => route.fulfill({ status: 409, json: { error: offline } }), {
+    times: 1,
+  });
+  const lines = page.getByTestId("table-log-line");
+  const before = await lines.count();
+
+  await page.getByTestId("hint-ask").click();
+  await expect(page.getByRole("alert"), "409 的中文文案原样显示在按钮下面").toHaveText(offline);
+  await expect(page.getByTestId("hint-waiting"), "没有问成，不能画成等老白").toHaveCount(0);
+  await expect(page.getByTestId("hint-card")).toHaveCount(0);
+  await expect(lines, "没有多出一条老白的消息").toHaveCount(before);
+  await expect(page.getByTestId("hint-ask"), "按钮回到可点，电脑回来后能再问").toBeEnabled();
+
+  await page.getByTestId("hint-ask").click();
+  await expect(page.getByTestId("hint-waiting"), "再问一次走到真接口，进入等待态").toBeVisible();
+  await expect(page.getByRole("alert"), "上一次的错误随新请求清掉").toHaveCount(0);
+});

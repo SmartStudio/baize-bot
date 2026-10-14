@@ -8,13 +8,14 @@ import {
 } from "@baize/shared";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import * as botsRepo from "../src/repo/bots.js";
-import { helloAgent, openAgent, sendHello } from "./helpers/agent.js";
+import { expectHello, helloAgent, openAgent, sendHello } from "./helpers/agent.js";
 import { startTestServer, type ApiClient, type TestServer } from "./helpers/client.js";
 import { contentJob, createDraft, nextOf, specOf, tweet, type ContentJob } from "./helpers/content.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
 import { startTestMcp, type TestMcp } from "./helpers/mcp.js";
+import { offerPreference, savePreferenceOffer } from "./helpers/preference-offer.js";
 
 /** 删号事务删完 runs 的那条。拦在它后面，Bot 锁已经拿着、用户还没删。 */
 const DELETE_RUNS = /^delete from "runs"/;
@@ -22,7 +23,7 @@ const DELETE_RUNS = /^delete from "runs"/;
 /** 建 run 的插入。拦在它前面，派活已经过了成员检查、拿着 Bot 的共享锁。 */
 const INSERT_RUN = /^insert into "runs"/;
 
-/** 派活建完 run、发 prompt 之前写上下文窗口的那条。 */
+/** 派活事务里写上下文窗口的那条；run 和 outbox 都还没提交。 */
 const RECORD_CONTEXT = /^update "runs" set "unsettled_context"/;
 
 /** 认电脑身份的那条。拦在它后面，身份已经认出来、hello 还没排进链。 */
@@ -61,8 +62,19 @@ afterAll(async () => {
 const ACCOUNT_TOKEN = "ghp_privacy_account_secret";
 const TOOL_SECRET = "Bearer privacy-tool-secret-9";
 
+// 收到 prompt 不代表确认事务已提交；后面的锁闸门必须等这条确认落地，才能只拦待测请求。
+async function acknowledgedJob(specs: Parameters<typeof contentJob>[2]): Promise<ContentJob> {
+  const job = await contentJob(server, database.db, specs);
+  await waitFor(async () => {
+    const rows = await database.sql`
+      SELECT 1 FROM computers WHERE id = ${job.computer.computerId} AND down_applied = down_seq`;
+    return rows.length > 0;
+  }, "派活下行的确认提交");
+  return job;
+}
+
 async function withJob(test: (job: ContentJob) => Promise<void>): Promise<void> {
-  const job = await contentJob(server, database.db, [{ platform: "x", handle: "baize_x", token: ACCOUNT_TOKEN }]);
+  const job = await acknowledgedJob([{ platform: "x", handle: "baize_x", token: ACCOUNT_TOKEN }]);
   try {
     await test(job);
   } finally {
@@ -84,10 +96,13 @@ async function orphanRuns(): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-async function lockWaiters(): Promise<number> {
+async function lockWaiters(ownerId: UserId, mode: "shared" | "exclusive"): Promise<number> {
   const rows = await database.sql<{ waiting: number }[]>`
-    SELECT count(*)::int AS waiting FROM pg_stat_activity
-    WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'`;
+    SELECT count(*)::int AS waiting FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid
+    WHERE a.datname = ${database.databaseName} AND a.wait_event_type = 'Lock'
+      AND NOT l.granted AND l.locktype = 'advisory'
+      AND l.classid = 1652191095::oid AND l.objid = hashtext(${ownerId})::oid
+      AND a.query LIKE ${mode === "shared" ? "SELECT pg_advisory_xact_lock_shared(%" : "SELECT pg_advisory_xact_lock(%"}`;
   return rows[0]?.waiting ?? 0;
 }
 
@@ -115,15 +130,15 @@ it("导出里有偏好和品牌手册，grep 不到 token 和 authorization", as
   await withJob(async (job) => {
     const { client } = job;
 
-    job.agent.send({
-      type: "preference_add",
+    const card = await offerPreference(job.agent, job.push, {
       runId: job.runId,
       botId: job.botId,
       groupId: job.groupId,
       text: "周报不用感叹号",
       private: true,
-      sourceMessageId: null,
     });
+    await savePreferenceOffer(client, card);
+    expect((await nextOf(job.push, "message")).message.body, "卡先重推成 saved").toMatchObject({ status: "saved" });
     expect((await nextOf(job.push, "preference_updated")).preference.text).toBe("周报不用感叹号");
     // 草稿等的是紧接着的两条推送，赶在别的写操作推送之前建。
     const account = job.accounts[0];
@@ -287,7 +302,7 @@ it("删账号后电脑代理的连接被关掉", async () => {
 });
 
 it("删号删完 runs、还没删用户时派活：派活等删号提交，不建 run，不留归属人置空的用量行", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const deleteHeld = gate.arm(DELETE_RUNS, "after");
   let deleting: Promise<Response> | undefined;
   try {
@@ -296,7 +311,10 @@ it("删号删完 runs、还没删用户时派活：派活等删号提交，不�
     const posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "删号交错时的新活" });
     const prompted = () => job.agent.received().some((frame) => frame.type === "prompt");
     // 不拿 Bot 锁的删号挡不住派活，它会建完 run 发出 prompt；拿了锁的话派活停在共享锁上。两种都等到再放行删号。
-    await waitFor(async () => prompted() || (await lockWaiters()) > 0, "派活发出 prompt 或停在 Bot 锁上");
+    await waitFor(
+      async () => prompted() || (await lockWaiters(job.user.id, "shared")) > 0,
+      "派活发出 prompt 或停在 Bot 锁上",
+    );
     deleteHeld.release();
 
     expect((await deleting).status).toBe(204);
@@ -312,41 +330,111 @@ it("删号删完 runs、还没删用户时派活：派活等删号提交，不�
 });
 
 it("派活拿着 Bot 锁建 run 时删号：删号等 run 提交再一并删掉，派活发不出 prompt 也不往已删的群写提示", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const inserting = gate.arm(INSERT_RUN, "before");
   let recording: ReturnType<typeof gate.arm> | undefined;
   let posting: Promise<Response> | undefined;
+  let deleting: Promise<Response> | undefined;
+  let deleted = false;
   try {
     posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "已过成员检查、还没建 run" });
     await inserting.reached;
     recording = gate.arm(RECORD_CONTEXT, "before");
-    let deletedFirst = false;
-    const deleting = deleteAccount(job.client, job.user.email).then((response) => {
-      deletedFirst = true;
+    deleting = deleteAccount(job.client, job.user.email).then((response) => {
+      deleted = true;
       return response;
     });
-    await waitFor(async () => deletedFirst || (await lockWaiters()) > 0, "删号停在 Bot 锁上");
     inserting.release();
-    // run 已提交，删号随后拿到锁、删掉它、关掉代理连接；派活这才去发 prompt。
-    expect((await deleting).status).toBe(204);
-    expect(await job.agent.closed()).toBe(4002);
+    await recording.reached;
+    await waitFor(
+      async () => deleted || (await lockWaiters(job.user.id, "exclusive")) > 0,
+      "删号停在派活事务的 Bot 锁上",
+    );
+    expect(deleted, "上下文和 outbox 提交前删号不能越过派活事务").toBe(false);
     recording.release();
 
-    const response = await posting;
-    expect(response.status, await response.clone().text()).toBe(201);
+    const [posted, removed] = await Promise.all([posting, deleting]);
+    expect(removed.status).toBe(204);
+    expect(posted.status, await posted.clone().text()).toBe(201);
+    expect(await job.agent.closed()).toBe(4002);
     expect(await orphanRuns(), "建出来的 run 随账号删掉").toBe(0);
     const left = await database.sql`SELECT 1 FROM messages WHERE group_id = ${job.groupId}`;
     expect(left, "已删的群里不留任何消息").toEqual([]);
   } finally {
     inserting.release();
     recording?.release();
-    await posting;
+    await Promise.all([posting, deleting]);
     job.close();
   }
 });
 
+it("删号级联删完下行后收到确认：确认先等归属人锁，不持有电脑行与删号互等", async () => {
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const client = server.client();
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "确认交错" })).json());
+  const agent = await openAgent(server.server.port, { ackDownlink: false });
+  let deleting: Promise<Response> | undefined;
+  let deleteHeld: ReturnType<typeof gate.arm> | undefined;
+  let ackHeld: ReturnType<typeof gate.arm> | undefined;
+  try {
+    sendHello(agent, computer.computerId, computer.token);
+    await expectHello(agent);
+    expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "留一条未确认的下行" })).status).toBe(
+      201,
+    );
+    const prompt = await agent.expect("prompt");
+    const [pending] = await database.sql<{ seq: number }[]>`
+      SELECT seq FROM agent_outbox WHERE computer_id = ${computer.computerId} AND run_id = ${prompt.runId}`;
+    if (pending === undefined) throw new Error("prompt 没有留在发件箱");
+
+    deleteHeld = gate.arm(DELETE_RUNS, "after");
+    deleting = deleteAccount(client, user.email);
+    await deleteHeld.reached;
+    // 未修复的确认停在已锁电脑的窗口；修复后停在归属人锁。两个分支都用实际锁等待定位。
+    ackHeld = gate.arm(/^update "computers" set "down_applied"/, "after", computer.computerId);
+    let computerLocked = false;
+    void ackHeld.reached.then(() => (computerLocked = true));
+    agent.send({ type: "downlink_ack", upTo: pending.seq });
+    await waitFor(async () => {
+      const waiting = await database.sql`
+        SELECT 1 FROM pg_stat_activity
+        WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'
+          AND query LIKE 'SELECT pg_advisory_xact_lock_shared(%'`;
+      return computerLocked || waiting.length > 0;
+    }, "确认持有电脑行或等归属人共享锁");
+    const lockedBeforeOwner = computerLocked;
+    deleteHeld.release();
+    if (lockedBeforeOwner) {
+      await waitFor(async () => {
+        const waiting = await database.sql`
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'
+            AND query LIKE 'delete from "users"%'`;
+        return waiting.length > 0;
+      }, "删号等确认持有的电脑行");
+      ackHeld.release();
+    }
+    const removed = await deleting;
+    await ackHeld.reached;
+    ackHeld.release();
+    expect(removed.status, "删号和下行确认都不能触发 40P01").toBe(204);
+    expect(lockedBeforeOwner, "确认必须先等归属人锁，再碰电脑行").toBe(false);
+    expect(await agent.closed()).toBe(4002);
+    expect(await runExists(prompt.runId)).toBe(false);
+    expect(await database.sql`SELECT 1 FROM agent_outbox WHERE computer_id = ${computer.computerId}`).toEqual([]);
+    expect(await database.sql`SELECT 1 FROM computers WHERE id = ${computer.computerId}`).toEqual([]);
+  } finally {
+    deleteHeld?.release();
+    ackHeld?.release();
+    await deleting;
+    agent.close();
+  }
+});
+
 it("删号拿完 Bot 快照后建 Bot：建 Bot 停在账号锁上等删号提交，之后按未登录回", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const deleteHeld = gate.arm(DELETE_RUNS, "after");
   let deleting: Promise<Response> | undefined;
   let creating: Promise<Response> | undefined;
@@ -358,7 +446,7 @@ it("删号拿完 Bot 快照后建 Bot：建 Bot 停在账号锁上等删号提�
       created = true;
       return response;
     });
-    await waitFor(async () => created || (await lockWaiters()) > 0, "建 Bot 回了或停在账号锁上");
+    await waitFor(async () => created || (await lockWaiters(job.user.id, "shared")) > 0, "建 Bot 回了或停在账号锁上");
     expect(created, "删号没提交前建不出 Bot").toBe(false);
     deleteHeld.release();
 
@@ -374,7 +462,7 @@ it("删号拿完 Bot 快照后建 Bot：建 Bot 停在账号锁上等删号提�
 });
 
 it("删号拿完 Bot 快照后从分享包导入：导入停在账号锁上等删号提交，之后按未登录回，不留 Bot 和插件", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const deleteHeld = gate.arm(DELETE_RUNS, "after");
   const template = {
     format: 1,
@@ -395,7 +483,7 @@ it("删号拿完 Bot 快照后从分享包导入：导入停在账号锁上等�
       imported = true;
       return response;
     });
-    await waitFor(async () => imported || (await lockWaiters()) > 0, "导入回了或停在账号锁上");
+    await waitFor(async () => imported || (await lockWaiters(job.user.id, "shared")) > 0, "导入回了或停在账号锁上");
     expect(imported, "删号没提交前导入建不出 Bot").toBe(false);
     deleteHeld.release();
 
@@ -414,7 +502,7 @@ it("删号拿完 Bot 快照后从分享包导入：导入停在账号锁上等�
 });
 
 it("没经过建 Bot 那道锁就进库的 Bot：删号期间给它派活，建 run 等删号提交，不留孤儿 run", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const deleteHeld = gate.arm(DELETE_RUNS, "after");
   let deleting: Promise<Response> | undefined;
   let posting: Promise<Response> | undefined;
@@ -425,7 +513,10 @@ it("没经过建 Bot 那道锁就进库的 Bot：删号期间给它派活，建 
     const late = await database.db.transaction((tx) => botsRepo.insertMemberBot(tx, job.user.id, { name: "晚来的" }));
     posting = job.client.post(`/api/groups/${late.group.id}/messages`, { text: "给晚来的 Bot 派活" });
     const prompted = () => job.agent.received().some((frame) => frame.type === "prompt" && frame.botId === late.bot.id);
-    await waitFor(async () => prompted() || (await lockWaiters()) > 0, "新 Bot 收到 prompt 或建 run 停在账号锁上");
+    await waitFor(
+      async () => prompted() || (await lockWaiters(job.user.id, "shared")) > 0,
+      "新 Bot 收到 prompt 或建 run 停在账号锁上",
+    );
     deleteHeld.release();
 
     expect((await deleting).status).toBe(204);
@@ -441,7 +532,7 @@ it("没经过建 Bot 那道锁就进库的 Bot：删号期间给它派活，建 
 });
 
 it("建群锁着成员 Bot 的行时删号：删号等建群提交，两边都不死锁", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const helper = CreateBotResponse.parse(await (await job.client.post("/api/bots", { name: "建群帮手" })).json());
   const inserting = gate.arm(INSERT_GROUP, "before");
   let creating: Promise<Response> | undefined;
@@ -454,7 +545,7 @@ it("建群锁着成员 Bot 的行时删号：删号等建群提交，两边都�
       deleted = true;
       return response;
     });
-    await waitFor(async () => deleted || (await lockWaiters()) > 0, "删号停在锁上");
+    await waitFor(async () => deleted || (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在锁上");
     inserting.release();
 
     const [groupResponse, deleteResponse] = await Promise.all([creating, deleting]);
@@ -469,7 +560,7 @@ it("建群锁着成员 Bot 的行时删号：删号等建群提交，两边都�
 });
 
 it("派活选电脑前删号：选不到电脑也不往已删的群写提示，消息照常 201", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const listing = gate.arm(LIST_COMPUTERS, "before");
   let posting: Promise<Response> | undefined;
   try {
@@ -572,9 +663,9 @@ async function offeredProject(job: ContentJob): Promise<string> {
 }
 
 it("开项目预查完卡、还没拿账号锁时删号：卡随账号没了，回 404，什么都不建", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const offerId = await offeredProject(job);
-  const locking = gate.arm(SHARED_ADVISORY, "before");
+  const locking = gate.arm(SHARED_ADVISORY, "before", job.user.id);
   let starting: Promise<Response> | undefined;
   try {
     starting = job.client.post(`/api/messages/${offerId}/project-offer`, { decision: "start" });
@@ -601,16 +692,16 @@ it("开项目预查完卡、还没拿账号锁时删号：卡随账号没了，�
 });
 
 it("开项目拿着账号锁时删号：删号等项目提交再一并删掉，两边都不死锁", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const offerId = await offeredProject(job);
-  const locked = gate.arm(SHARED_ADVISORY, "after");
+  const locked = gate.arm(SHARED_ADVISORY, "after", job.user.id);
   let starting: Promise<Response> | undefined;
   let deleting: Promise<Response> | undefined;
   try {
     starting = job.client.post(`/api/messages/${offerId}/project-offer`, { decision: "start" });
     await locked.reached;
     deleting = deleteAccount(job.client, job.user.email);
-    await waitFor(async () => (await lockWaiters()) > 0, "删号停在账号锁上");
+    await waitFor(async () => (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在账号锁上");
     locked.release();
 
     const [started, removed] = await Promise.all([starting, deleting]);
@@ -626,22 +717,28 @@ it("开项目拿着账号锁时删号：删号等项目提交再一并删掉，�
 });
 
 it("建 run 拿着账号锁、还没拿 Bot 锁时删号：账号锁在 Bot 锁之前，删号等 run 提交，不死锁", async () => {
-  const job = await contentJob(server, database.db, []);
-  const locked = gate.arm(SHARED_ADVISORY, "after");
+  const job = await acknowledgedJob([]);
+  const locked = gate.arm(SHARED_ADVISORY, "after", job.user.id);
   let recording: ReturnType<typeof gate.arm> | undefined;
   let posting: Promise<Response> | undefined;
   let deleting: Promise<Response> | undefined;
+  let deleted = false;
   try {
     posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "建 run 的锁序" });
     await locked.reached;
     recording = gate.arm(RECORD_CONTEXT, "before");
-    deleting = deleteAccount(job.client, job.user.email);
-    await waitFor(async () => (await lockWaiters()) > 0, "删号停在账号锁上");
+    deleting = deleteAccount(job.client, job.user.email).then((response) => {
+      deleted = true;
+      return response;
+    });
+    await waitFor(async () => (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在账号锁上");
     locked.release();
+    await recording.reached;
 
-    expect((await deleting).status).toBe(204);
+    expect(deleted, "录上下文时派活仍持有账号锁，删号不能提前提交").toBe(false);
     recording.release();
-    const posted = await posting;
+    const [posted, removed] = await Promise.all([posting, deleting]);
+    expect(removed.status).toBe(204);
     expect(posted.status, await posted.clone().text()).toBe(201);
     expect(await orphanRuns(), "建出来的 run 随账号删掉").toBe(0);
     expect(await runExists(job.runId)).toBe(false);
@@ -654,7 +751,7 @@ it("建 run 拿着账号锁、还没拿 Bot 锁时删号：账号锁在 Bot 锁�
 });
 
 it("派活读完成员、还没读触发消息时删号：不建 run、不写提示，消息照常 201", async () => {
-  const job = await contentJob(server, database.db, []);
+  const job = await acknowledgedJob([]);
   const reading = gate.arm(MESSAGE_SEQ, "before");
   let posting: Promise<Response> | undefined;
   try {

@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import {
+  ATTACHMENT_MAX_BYTES,
   type AccountConfig,
   type AgentToControl,
   ContentPlanId,
@@ -10,6 +11,7 @@ import {
   DraftId,
   type DraftImage,
   type DraftSpec,
+  imageMime,
   type Platform,
 } from "@baize/shared";
 import { type Static, Type } from "typebox";
@@ -17,6 +19,7 @@ import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
 import { isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 import type { ActiveRun } from "./topic.js";
+import { attachmentCopyName, uploadAttachment, type AttachmentLive } from "./attachments.js";
 
 // Bot 往外发东西只有起草这一条路：三件工具都只发上行，群里出草稿卡或计划卡，用户在卡上批了才发。
 // 闸门把它们归 publish，只看账号档，见 gate.ts 的 decideDraft。
@@ -86,7 +89,7 @@ const CONTENT_GUIDE =
   "小红书要写 title，可以带图（images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BYTES = ATTACHMENT_MAX_BYTES;
 
 /** 配图从哪儿收、拷到哪儿、哪些目录碰都不能碰。 */
 export interface ImageDirs {
@@ -101,9 +104,14 @@ export const draftCopyName = (sha256: string, source: string): string => `${sha2
 const errorCode = (error: unknown): unknown =>
   error && typeof error === "object" && "code" in error ? error.code : undefined;
 
-// 用户批的必须就是发出去的那份字节：从 fd 读、算哈希、拷进 Bot 写不到的 drafts 目录，DraftSpec 记拷贝。
+// 用户批的必须就是发出去的那份字节：从 fd 读、算哈希、拷进 Bot 写不到的 drafts 目录，再上传同一份字节。
 // 之后工作目录里的原图怎么改都不影响草稿。禁区先于工作目录判：禁区里的文件不能叫模型挪进工作目录再来。
-async function imageOf(path: string, dirs: ImageDirs, where: string): Promise<DraftImage> {
+interface ImageUpload {
+  readonly run: ActiveRun["run"];
+  readonly live: (() => AttachmentLive) | undefined;
+}
+
+async function imageOf(path: string, dirs: ImageDirs, where: string, upload: ImageUpload): Promise<DraftImage> {
   const label = `${where}配图「${path}」`;
   const loop = `${label}是符号链接绕成了环，换成真正的图片文件。`;
   const logical = logicalResolve(path, dirs.workDir);
@@ -141,21 +149,33 @@ async function imageOf(path: string, dirs: ImageDirs, where: string): Promise<Dr
     }
     const bytes = await file.readFile();
     if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`${label}超过 20 MiB，压小一点再起草。`);
+    const mime = imageMime(bytes);
+    if (mime === null) throw new Error(`${label}不是 PNG、JPEG、WebP 或 GIF 图片，换一张图。`);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const copy = join(dirs.draftsDir, draftCopyName(sha256, real));
+    const copy = join(dirs.draftsDir, attachmentCopyName(sha256, mime));
     const temporary = `${copy}.${randomUUID()}.tmp`;
     await writeFile(temporary, bytes, { flag: "wx", mode: 0o444 });
     await rename(temporary, copy);
-    return { path: copy, sha256 };
+    const uploaded = await uploadAttachment(
+      upload.live,
+      { botId: upload.run.botId, groupId: upload.run.groupId, sha256, mime },
+      bytes,
+    );
+    return { kind: "attachment", attachmentId: uploaded.attachmentId, sha256, mime };
   } finally {
     await file.close();
   }
 }
 
 // 协议里的对象都是 strict，模型多写一个键就整条被拒，所以只挑协议要的字段。
-const contentOf = async (content: Static<typeof CONTENT>, dirs: ImageDirs, where: string): Promise<DraftContent> => {
+const contentOf = async (
+  content: Static<typeof CONTENT>,
+  dirs: ImageDirs,
+  where: string,
+  upload: ImageUpload,
+): Promise<DraftContent> => {
   const images: DraftImage[] = [];
-  for (const image of content.images ?? []) images.push(await imageOf(image.path, dirs, where));
+  for (const image of content.images ?? []) images.push(await imageOf(image.path, dirs, where, upload));
   return content.kind === "post"
     ? {
         kind: "post",
@@ -192,6 +212,7 @@ async function specOf(
   accounts: readonly AccountConfig[],
   dirs: ImageDirs,
   where: string,
+  upload: ImageUpload,
 ): Promise<DraftSpec> {
   const account = accounts.find((candidate) => candidate.id === input.accountId);
   if (account === undefined) {
@@ -203,7 +224,7 @@ async function specOf(
   return {
     draftId: DraftId.parse(randomUUID()),
     accountId: account.id,
-    content: await contentOf(input.content, dirs, where),
+    content: await contentOf(input.content, dirs, where, upload),
     scheduledAt: scheduledAtOf(input.scheduledAt, where),
   };
 }
@@ -214,6 +235,7 @@ export function createDraftTools(options: {
   readonly accounts: () => readonly AccountConfig[];
   /** 配图只收工作目录里的文件，拷进 drafts 目录。 */
   readonly images: ImageDirs;
+  readonly liveHub?: () => AttachmentLive;
   readonly send: (message: AgentToControl) => void;
 }): readonly RunnerTool[] {
   const activeOrThrow = (action: string): ActiveRun => {
@@ -237,6 +259,7 @@ export function createDraftTools(options: {
           options.accounts(),
           options.images,
           "草稿没建，改好再调：",
+          { run: active.run, live: options.liveHub },
         );
         options.send(
           parseOrThrow(
@@ -273,7 +296,10 @@ export function createDraftTools(options: {
               botId: active.run.botId,
               groupId: active.run.groupId,
               draftId: parsedId.data,
-              content: await contentOf(content, options.images, "草稿没改，改好再调："),
+              content: await contentOf(content, options.images, "草稿没改，改好再调：", {
+                run: active.run,
+                live: options.liveHub,
+              }),
             },
             "改动",
           ),
@@ -294,7 +320,12 @@ export function createDraftTools(options: {
         const accounts = options.accounts();
         const specs: DraftSpec[] = [];
         for (const [index, draft] of drafts.entries()) {
-          specs.push(await specOf(draft, accounts, options.images, `计划没发出去，改好再调：第 ${index + 1} 条草稿`));
+          specs.push(
+            await specOf(draft, accounts, options.images, `计划没发出去，改好再调：第 ${index + 1} 条草稿`, {
+              run: active.run,
+              live: options.liveHub,
+            }),
+          );
         }
         options.send(
           parseOrThrow(

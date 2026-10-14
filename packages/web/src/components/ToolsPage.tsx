@@ -77,6 +77,7 @@ const ToolCard = ({
             </em>
           ) : null}
           <small>{new URL(tool.url).host} · MCP</small>
+          <small data-testid="tool-local-only-status">{tool.localOnly ? "只在本机用" : "本机与远程电脑可用"}</small>
         </span>
         <div className="tool-connection-actions">
           <span data-testid="tool-assignment">{usersOf(tool, bots)}</span>
@@ -124,6 +125,22 @@ const ToolCard = ({
       ) : null}
       {expanded ? (
         <div className="tool-connection-detail" data-testid="tool-details">
+          <div className="row-card">
+            <span>
+              <b>只在本机用</b>
+              <small>凭据只发给这台 Mac，远程电脑上的 Bot 用不了这个插件</small>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={tool.localOnly}
+              aria-label="只在本机用"
+              className={`switch${tool.localOnly ? " is-on" : ""}`}
+              data-testid="tool-local-only-switch"
+              disabled={busy}
+              onClick={() => void update({ localOnly: !tool.localOnly })}
+            />
+          </div>
           {pending ? (
             <>
               <p className="tool-section-label">授权</p>
@@ -220,6 +237,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [authorization, setAuthorization] = useState("");
+  const [localOnly, setLocalOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const botList = Object.values(bots);
@@ -229,6 +247,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
     const draft: CreateToolRequest = {
       name: name.trim(),
       url: url.trim(),
+      localOnly,
       ...(authorization.trim() === "" ? {} : { authorization: authorization.trim() }),
     };
     setBusy(true);
@@ -239,6 +258,7 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
       setName("");
       setUrl("");
       setAuthorization("");
+      setLocalOnly(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "连接失败，请重试");
     } finally {
@@ -295,6 +315,22 @@ export const ToolsPage = ({ tools, bots, onCreate, onUpdate, onDelete }: Props) 
               onChange={(event) => setAuthorization(event.target.value)}
             />
           </label>
+          <div className="row-card">
+            <span>
+              <b>只在本机用</b>
+              <small>凭据只发给这台 Mac，远程电脑上的 Bot 用不了这个插件</small>
+            </span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={localOnly}
+              aria-label="只在本机用"
+              className={`switch${localOnly ? " is-on" : ""}`}
+              data-testid="tool-create-local-only-switch"
+              disabled={busy}
+              onClick={() => setLocalOnly(!localOnly)}
+            />
+          </div>
           <button type="submit" className="primary-button" data-testid="tool-connect" disabled={busy}>
             连接
           </button>

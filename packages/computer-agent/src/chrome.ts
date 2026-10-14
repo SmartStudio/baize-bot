@@ -2,23 +2,10 @@ import { execFile, spawn } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import type { BrowserPlatform, ComputerKind, LoginFailure } from "@baize/shared";
+import type { ComputerKind } from "@baize/shared";
 import { type CdpConnection, type CdpPipe, connectPipe } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions } from "./backoff.js";
 import { chromeProfileDir, isAlive, reapProfileChromes, terminate } from "./chrome-process.js";
-
-export interface BrowserPage {
-  readonly url: string;
-  readonly successSelector: string;
-  readonly handleSelector: string;
-}
-
-// 登录窗口只能看出登上了还是没登上，看不出账号过期，所以没有 expired。
-export type BrowserLoginState =
-  { readonly login: "valid"; readonly handle: string } | { readonly login: "failed"; readonly reason: LoginFailure };
-
-// 等到上限时有时停在轮询里、有时停在等 Chrome 上，两条路给用户的是同一个结果。
-const WINDOW_FAILED: BrowserLoginState = { login: "failed", reason: "window_failed" };
 
 const READY_TIMEOUT_MS = 15_000;
 
@@ -27,7 +14,7 @@ const CRASH_WINDOW_MS = 30_000;
 const RESTART_BACKOFF: BackoffOptions = { initialMs: 500, maxMs: 30_000, factor: 2 };
 
 export interface AssistantChrome {
-  /** 远程电脑上的这个 Chrome 只给 Bot 的浏览器工具用：没人扫码登录，也就不拿它发布。 */
+  /** 本机还是远程。只差在 reveal、conceal 有没有窗口可拉。 */
   readonly kind: ComputerKind;
   readonly profileDir: string;
   /**
@@ -36,8 +23,14 @@ export interface AssistantChrome {
    * 连着起不成（起不来或起来就崩）时，第一次立刻重起，之后按退避等，等的期间直接 reject。
    */
   connection(): Promise<CdpConnection>;
-  /** signal 到点就收起登录窗口、回 failed window_failed，等 Chrome 起来的时间也算在内。 */
-  login(platform: BrowserPlatform, signal: AbortSignal): Promise<BrowserLoginState>;
+  /**
+   * Chrome 进程退了，回调拿到它那条连接。管道断了不会再有 CDP 的销毁事件，挂在这条连接上的页只能靠它收场。
+   * 带着连接是因为退出事件到之前新的 Chrome 可能已经起来，只有旧连接上的页没了。
+   */
+  onExit(listener: (connection: CdpConnection) => void): () => void;
+  /** 把助理 Chrome 的窗口拉到前台、再收回去。本机是 macOS 的进程激活和隐藏；远程壳画在 Xvfb 上没人看，是空操作。 */
+  reveal(): Promise<void>;
+  conceal(): Promise<void>;
   pid(): number | null;
   stop(): Promise<void>;
 }
@@ -45,7 +38,6 @@ export interface AssistantChrome {
 export interface AssistantChromeOptions {
   readonly dataDir: string;
   readonly log?: (line: string) => void;
-  readonly platformPages?: Readonly<Record<BrowserPlatform, BrowserPage>>;
   readonly activateProcess?: (pid: number) => Promise<void>;
   readonly backgroundProcess?: (pid: number) => Promise<void>;
   readonly launchChrome?: (profileDir: string) => Promise<ChromeProcess>;
@@ -65,14 +57,6 @@ interface Running {
   readonly connection: CdpConnection;
 }
 
-const defaultPlatformPages: Readonly<Record<BrowserPlatform, BrowserPage>> = {
-  xiaohongshu: {
-    url: "https://creator.xiaohongshu.com/",
-    successSelector: ".user-info .user_avatar",
-    handleSelector: ".user-info span",
-  },
-};
-
 function run(file: string, args: readonly string[]): Promise<{ readonly stdout: string; readonly stderr: string }> {
   return new Promise((resolve, reject) => {
     execFile(file, args, { encoding: "utf8" }, (error, stdout, stderr) => {
@@ -84,8 +68,6 @@ function run(file: string, args: readonly string[]): Promise<{ readonly stdout: 
     });
   });
 }
-
-const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 // 不开 TCP 调试端口：Chrome 只认 fd 3 和 fd 4 这条管道，本机别的进程和页面都够不着它。
 const chromeArgs = (profileDir: string): string[] => [
@@ -103,6 +85,8 @@ const chromeArgs = (profileDir: string): string[] => [
 // 放在系统临时目录时，批了联网的 bash 就连得上；放进 profile，就跟 profile 一起落在 Bot bash 的禁区里。
 // macOS 的 Chrome 不看 TMPDIR，只认 MAC_CHROMIUM_TMPDIR；Linux 的 chromium 看 TMPDIR。
 const chromeTempDir = (profileDir: string): string => join(profileDir, "tmp");
+
+const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
 
 // 单独成进程组，代理收到终端的 Ctrl-C 时不跟着挨信号，由代理自己收尾。管道的两头只有代理拿着：
 // libuv 建的 fd 都带 CLOEXEC，Bot 的 bash 继承不到。代理被强杀时管道断开，Chrome 自己退出。
@@ -135,16 +119,6 @@ const launchMacChrome = (profileDir: string): Promise<ChromeProcess> =>
 async function launchLinuxChrome(profileDir: string): Promise<ChromeProcess> {
   if (!process.env["DISPLAY"]) throw new Error("没有 DISPLAY，远程电脑的 Xvfb 没起来");
   return spawnChrome("/usr/bin/chromium", profileDir, [...chromeArgs(profileDir), "--password-store=basic"]);
-}
-
-function record(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function property(value: unknown, name: string): unknown {
-  return record(value)?.[name];
 }
 
 export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -201,12 +175,12 @@ const unsupportedShell: ChromeShell = {
 export function startAssistantChrome(options: AssistantChromeOptions): AssistantChrome {
   const profileDir = chromeProfileDir(options.dataDir);
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
-  const platformPages = options.platformPages ?? defaultPlatformPages;
   const bringForward = options.activateProcess ?? activateProcess;
   const sendBackward = options.backgroundProcess ?? backgroundProcess;
   const shell = chromeShells[options.platform ?? process.platform] ?? unsupportedShell;
   const launcher = options.launchChrome ?? shell.launch;
   const stopped = new AbortController();
+  const exitListeners = new Set<(connection: CdpConnection) => void>();
 
   // starting 是这一轮 Chrome 的来历，起好之后留着给后来的调用复用；running 是起好了、还没退出的那个。
   let starting: Promise<Running> | null = null;
@@ -230,6 +204,9 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     // 上面都收掉了，整个清空再建。
     await rm(chromeTempDir(profileDir), { recursive: true, force: true });
     await mkdir(chromeTempDir(profileDir), { mode: 0o700 });
+    // 单例锁里记着主机名。远程电脑的容器每次重建主机名都变，Linux 的 chromium 看到别的主机名就认定 profile
+    // 被另一台电脑占着，弹 xmessage 等人点，管道一直不回。用这个 profile 的 Chrome 已经收掉，这几个都是过期的。
+    await Promise.all(SINGLETON_FILES.map((name) => rm(join(profileDir, name), { force: true })));
     const pending = launcher(profileDir);
     const launched = await untilAborted(pending, stopped.signal).catch((error: unknown) => {
       void pending.then((late) => late.stop()).catch(() => {});
@@ -271,6 +248,7 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
         void up.process.exited.then(() => {
           if (running === up) running = null;
           if (starting === attempt) starting = null;
+          for (const listener of exitListeners) listener(up.connection);
           if (stopped.signal.aborted) return;
           if (Date.now() - readyAt < CRASH_WINDOW_MS) noteCrash();
           else crashes = 0;
@@ -305,66 +283,28 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     }
   };
 
+  // Chrome 已经退了就没有窗口可拉可收，直接算做完。
+  const reveal = async (): Promise<void> => {
+    const pid = shell.kind === "local" ? running?.process.pid : undefined;
+    if (pid !== undefined) await bringForward(pid);
+  };
+  const conceal = async (): Promise<void> => {
+    const pid = shell.kind === "local" ? running?.process.pid : undefined;
+    if (pid !== undefined) await sendBackward(pid);
+  };
+
   return {
     kind: shell.kind,
     profileDir,
     connection: () => ready().then((up) => up.connection),
+    reveal,
+    conceal,
     pid: () => running?.process.pid ?? null,
-    async login(platform, signal) {
-      // 远程电脑上没有人看屏幕，扫码或输验证码都没人接。
-      if (shell.kind === "remote") {
-        log("远程电脑上不能登录，请在本机登录这个账号");
-        return { login: "failed", reason: "remote_refused" };
-      }
-      const pageConfig = platformPages[platform];
-      // 管道是共用的，到点不能掐断它，只让这边不再等。
-      const step = <T>(work: Promise<T>): Promise<T> => untilAborted(work, signal);
-      let up: Running | null = null;
-      let targetId: string | undefined;
-      let activated = false;
-      try {
-        up = await step(ready());
-        const { connection } = up;
-        const created = await step(connection.send("Target.createTarget", { url: pageConfig.url, background: true }));
-        if (typeof created.targetId !== "string") throw new Error("CDP 没有返回登录页 targetId");
-        targetId = created.targetId;
-        const attached = await step(connection.send("Target.attachToTarget", { targetId, flatten: true }));
-        const sessionId = String(attached.sessionId);
-        const page = (method: string, params: Record<string, unknown> = {}) =>
-          step(connection.send(method, params, sessionId));
-        await page("Runtime.enable");
-        await page("Page.enable");
-        await page("Emulation.setFocusEmulationEnabled", { enabled: true });
-        await page("Page.bringToFront");
-        activated = true;
-        await bringForward(up.process.pid);
-
-        const successSelector = JSON.stringify(pageConfig.successSelector);
-        const handleSelector = JSON.stringify(pageConfig.handleSelector);
-        const expression = `(() => {
-          if (!document.querySelector(${successSelector})) return null;
-          const handle = document.querySelector(${handleSelector})?.textContent?.trim();
-          return handle || null;
-        })()`;
-        while (!signal.aborted && !stopped.signal.aborted) {
-          const response = await page("Runtime.evaluate", { expression, returnByValue: true });
-          if (response.exceptionDetails !== undefined) throw new Error("登录页脚本执行失败");
-          const handle = property(response.result, "value");
-          if (typeof handle === "string" && handle.length > 0) return { login: "valid", handle };
-          await delay(250);
-        }
-        return WINDOW_FAILED;
-      } catch (error) {
-        if (signal.aborted) return WINDOW_FAILED;
-        throw error;
-      } finally {
-        if (up !== null && targetId !== undefined)
-          await up.connection
-            .send("Target.closeTarget", { targetId })
-            .catch((error: unknown) => log(`关闭登录页失败：${String(error)}`));
-        if (up !== null && activated)
-          await sendBackward(up.process.pid).catch((error: unknown) => log(`登录窗口退回后台失败：${String(error)}`));
-      }
+    onExit(listener) {
+      exitListeners.add(listener);
+      return () => {
+        exitListeners.delete(listener);
+      };
     },
     stop() {
       if (stopPromise !== null) return stopPromise;

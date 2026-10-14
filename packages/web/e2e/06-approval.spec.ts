@@ -101,6 +101,95 @@ test("已失效的审批卡没有批准按钮", async ({ page, request }) => {
   await page.screenshot({ path: `${SHOT}/expired-mock.png` });
 });
 
+test("发出新消息后，派给当前 Bot 的待批卡作废并解开运行等待", async ({ page }) => {
+  await login(page);
+  const card = await sendForApproval(page, "小销");
+
+  await sendText(page, "查一下库存");
+
+  await expect(card, "新消息路由给小销后，这条待批卡作废").toHaveAttribute("data-status", "voided");
+  await expect(card.getByTestId("approval-decided")).toHaveText("已作废 · 你发了新消息，这一步不做了");
+  await expect(card.getByTestId("approval-approve")).toHaveCount(0);
+  await expect(card.getByTestId("approval-reject")).toHaveCount(0);
+  await expect(page.getByTestId("tool-call-card").first(), "作废后运行等待结束，这一步被拦下").toHaveAttribute(
+    "data-status",
+    "blocked",
+  );
+});
+
+test("超时审批卡显示已拒绝且没有决定按钮", async ({ page, request }) => {
+  await login(page);
+  const card = await sendForApproval(page, "小销");
+
+  expect((await request.post("/api/test/approval/timeout")).status(), "mock 让 pending 审批超时").toBe(204);
+  await expect(card).toHaveAttribute("data-status", "timed_out");
+  await expect(card.getByTestId("approval-decided")).toHaveText("已拒绝 · 10 分钟没人批");
+  await expect(card.getByTestId("approval-approve")).toHaveCount(0);
+  await expect(card.getByTestId("approval-reject")).toHaveCount(0);
+  await expect(page.getByTestId("tool-call-card").first(), "超时后运行等待结束，这一步被拦下").toHaveAttribute(
+    "data-status",
+    "blocked",
+  );
+});
+
+test("已作废和超时审批卡沿用失效卡的淡化样式", async ({ page, request }) => {
+  await login(page);
+  const expired = await sendForApproval(page, "小销");
+  expect((await request.post("/api/test/approval/expire")).status()).toBe(204);
+  await expect(expired).toHaveAttribute("data-status", "expired");
+  const muted = await expired.evaluate((element) => ({
+    background: getComputedStyle(element).backgroundColor,
+    border: getComputedStyle(element).borderTopColor,
+    color: getComputedStyle(element.querySelector(".card-title")!).color,
+  }));
+
+  await sendText(page, "帮我处理退款");
+  const pending = page.getByTestId("approval-card").last();
+  await expect(pending).toHaveAttribute("data-status", "pending");
+  await sendText(page, "查一下库存");
+  await expect(pending).toHaveAttribute("data-status", "voided");
+  const voided = page.locator('[data-testid="approval-card"][data-status="voided"]');
+
+  await sendText(page, "帮我处理退款");
+  const timedOut = page.getByTestId("approval-card").last();
+  await expect(timedOut).toHaveAttribute("data-status", "pending");
+  expect((await request.post("/api/test/approval/timeout")).status()).toBe(204);
+  await expect(timedOut).toHaveAttribute("data-status", "timed_out");
+
+  for (const card of [voided, timedOut]) {
+    await expect(card, "卡片背景与失效卡一致").toHaveCSS("background-color", muted.background);
+    await expect(card, "卡片边框与失效卡一致").toHaveCSS("border-top-color", muted.border);
+    await expect(card.locator(".approval-compact-text"), "摘要文字淡化").toHaveCSS("color", muted.color);
+    await expect(card.getByTestId("approval-decided"), "结论文字淡化").toHaveCSS("color", muted.color);
+    await expect(card.getByTestId("approval-decided"), "结论背景淡化").toHaveCSS("background-color", muted.background);
+  }
+});
+
+test("pending 审批有截止时间时显示按拒绝处理的提示", async ({ page, request }) => {
+  await login(page);
+  await openBot(page, "小销");
+  const deadlineAt = new Date(Date.now() + 10 * 60_000).toISOString();
+  expect(
+    (
+      await request.post("/api/test/approval", {
+        data: { action: "message_person", groupId: "grp_sales", deadlineAt },
+      })
+    ).status(),
+    "mock 可种带截止时间的 pending 审批",
+  ).toBe(201);
+
+  const time = await page.evaluate(
+    (value) =>
+      new Date(value).toLocaleTimeString("zh-TW", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }),
+    deadlineAt,
+  );
+  await expect(page.getByTestId("approval-deadline")).toHaveText(`${time} 前没人批就按拒绝处理`);
+});
+
 test("点过按钮就锁住，一次点击只发得出一个结论", async ({ page }) => {
   await login(page);
   const card = await sendForApproval(page, "小销");

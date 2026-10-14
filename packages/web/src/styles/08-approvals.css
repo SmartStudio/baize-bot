@@ -89,3 +89,8 @@
   color: var(--btn-primary-fg);
   font: var(--type-caption);
 }
+
+.card-approval:is([data-status="voided"], [data-status="timed_out"]) .approval-pill {
+  background: var(--bg-surface);
+  color: var(--fg-3);
+}

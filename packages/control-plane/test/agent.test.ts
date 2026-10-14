@@ -6,9 +6,12 @@ import {
   MessageListResponse,
   type UserId,
 } from "@baize/shared";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { findComputerByOwner } from "../src/repo/computers.js";
-import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
+import { AgentHub } from "../src/agent/hub.js";
+import { DEFAULT_RUNTIME_CONFIG, startServer } from "../src/server.js";
+import { gatedDb } from "./helpers/gated-db.js";
+import { ApiClient, startTestServer, TEST_CREDENTIALS_KEY, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, openAgent } from "./helpers/agent.js";
@@ -53,10 +56,15 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: "b".repeat(64),
       version: "test",
+      protocol: 3,
+      installId: computer.computerId,
+      piSessionVersion: 3,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
       activeRuns: [],
     });
 
-    expect(await agent.closed()).toBe(4001);
+    expect(await agent.closed()).toBe(4004);
   });
 
   it("电脑号不存在也关连接", async () => {
@@ -66,6 +74,11 @@ describe("握手", () => {
       computerId: ComputerId.parse("没有这台电脑"),
       token: "b".repeat(64),
       version: "test",
+      protocol: 3,
+      installId: "f112ce55-14af-49b1-a419-18b2e213f288",
+      piSessionVersion: 3,
+      uplinkStream: ComputerId.parse("没有这台电脑"),
+      downApplied: 0,
       activeRuns: [],
     });
 
@@ -113,6 +126,11 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
+      protocol: 3,
+      installId: computer.computerId,
+      piSessionVersion: 3,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
       activeRuns: [],
     });
     // 不等 welcome 就关。认身份那一段是异步的，关闭要排在它后面才看得见这条连接。
@@ -306,4 +324,50 @@ describe("状态", () => {
       agent.close();
     }
   });
+});
+
+it("断线缩租查询挂起时停机，查询放行后不再留下宽限收尾计时器", async () => {
+  const isolated = await createTestDb();
+  const controlled = gatedDb(isolated.sql);
+  const live = await startServer({
+    db: controlled.db,
+    port: 0,
+    hostname: "127.0.0.1",
+    config: DEFAULT_RUNTIME_CONFIG,
+    toolSecretKey: "a".repeat(64),
+    credentialsKey: TEST_CREDENTIALS_KEY,
+  });
+  let shutdown: Promise<void> | undefined;
+  let release: (() => void) | undefined;
+  let restore: (() => void) | undefined;
+  try {
+    const user = await makeUser(isolated.db);
+    const computer = await makeComputer(isolated.db, user.id);
+    const { agent } = await helloAgent(live.port, computer.computerId, computer.token);
+    const gate = controlled.arm(/update "computers" set "lease_until"/i, "after", computer.computerId);
+    release = gate.release;
+    agent.close();
+    await gate.reached;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let entered!: () => void;
+    const closing = new Promise<void>((resolve) => (entered = resolve));
+    const closeAll = AgentHub.prototype.closeAll;
+    const observed = vi.spyOn(AgentHub.prototype, "closeAll").mockImplementation(function (this: AgentHub) {
+      const pending = closeAll.call(this);
+      entered();
+      return pending;
+    });
+    restore = () => observed.mockRestore();
+    shutdown = live.close();
+    await closing;
+    gate.release();
+    await shutdown;
+    expect(vi.getTimerCount(), "停机不能留下会在关库后继续收尾的宽限计时器").toBe(0);
+  } finally {
+    release?.();
+    vi.useRealTimers();
+    await (shutdown ?? live.close());
+    restore?.();
+    await isolated.close();
+  }
 });

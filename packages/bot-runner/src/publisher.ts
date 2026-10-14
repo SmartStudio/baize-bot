@@ -6,16 +6,18 @@ import {
   type DraftImage,
   type PublishFailureReason,
 } from "@baize/shared";
-import { createHash } from "node:crypto";
-import { readFile, realpath } from "node:fs/promises";
-import { basename, dirname } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserConfig } from "./browser.js";
+import { acquireBotBrowserMutex, BotPausedError } from "./browser-mutex.js";
 import { draftCopyName } from "./drafts.js";
 import { botDirs } from "./paths.js";
+import { attachmentCopyName, downloadAttachment, type AttachmentLive } from "./attachments.js";
 
 // 发布器：控制面批准草稿后下行 publish_draft，这里在助理 Chrome 的后台标签页里发出去，回 publish_result。
-// 不挂在 Runner 上，电脑代理收到报文直接调，不经过任何 Bot 的串行队列，也不借 Bot 的标签页。
+// 不挂在 Runner 上，电脑代理收到报文直接调，不经过群道的 prompt 队列；与 Bot 的浏览器工具共用互斥锁，各用各的标签页。
 
 export type PublishDraftMessage = Extract<ControlToAgent, { type: "publish_draft" }>;
 export type PublishResultMessage = Extract<AgentToControl, { type: "publish_result" }>;
@@ -102,10 +104,12 @@ export interface PublishLimits {
 export const PUBLISH_LIMITS: PublishLimits = { totalMs: 180_000, stepMs: 60_000 };
 
 export interface PublisherDeps {
-  /** 配图只认 `<dataDir>/<publish_draft.botId>/drafts/` 里起草时的拷贝。 */
+  /** 配图缓存只放在 `<dataDir>/<publish_draft.botId>/drafts/`。 */
   readonly dataDir: string;
-  /** 本机电脑代理给的助理浏览器。远程电脑没有。 */
-  readonly browser: Pick<BrowserConfig, "connection"> | null;
+  /** 每次下载才读，hello 轮换网关 key 后不能继续用旧 key。 */
+  readonly liveHub?: () => AttachmentLive;
+  /** 就是电脑代理给 Bot 浏览器工具的那份助理 Chrome：账号在这个 profile 里登录，发布也只能在这里发。 */
+  readonly browser: Pick<BrowserConfig, "connection">;
   readonly xiaohongshu?: XiaohongshuPages;
   readonly limits?: PublishLimits;
 }
@@ -133,10 +137,15 @@ const failed = (reason: PublishFailureReason, detail: string): PublishResult => 
 const sha256Of = (bytes: Buffer): string => createHash("sha256").update(bytes).digest("hex");
 
 /**
- * 草稿里的配图换成可以上传的真实路径。只认起草这个草稿的 Bot 自己 drafts 目录里按 sha256 命名的那份拷贝，
- * 字节也还对得上；符号链接先取 realpath 再判。Bot 删了就没有哪个目录算它的，一张都不认。
+ * 草稿配图只从这个 Bot 的 drafts 目录取；附件缺少有效缓存时先下载校验，旧 path 仍按 realpath 验拷贝。
+ * Bot 删了就没有哪个目录算它的，一张都不认。
  */
-async function draftFiles(dataDir: string, botId: BotId | null, images: readonly DraftImage[]): Promise<string[]> {
+async function draftFiles(
+  dataDir: string,
+  botId: BotId | null,
+  images: readonly DraftImage[],
+  liveHub: PublisherDeps["liveHub"],
+): Promise<string[]> {
   if (botId === null) throw new PublishFailure("error", "起草这条的 Bot 已经删了，配图认不出是谁拷的，没有上传");
   const root = await realpath(dataDir).catch(() => {
     throw new PublishFailure("error", "这台电脑的数据目录不在了");
@@ -144,6 +153,30 @@ async function draftFiles(dataDir: string, botId: BotId | null, images: readonly
   const { draftsDir } = botDirs(root, botId);
   const files: string[] = [];
   for (const image of images) {
+    if (image.kind === "attachment") {
+      await mkdir(draftsDir, { recursive: true });
+      if ((await realpath(draftsDir)) !== draftsDir) {
+        throw new PublishFailure("error", "这个 Bot 的配图目录被换成了符号链接，没有上传");
+      }
+      const copy = join(draftsDir, attachmentCopyName(image.sha256, image.mime));
+      const real = await realpath(copy).catch(() => null);
+      const cached = real === copy ? await readFile(copy).catch(() => null) : null;
+      if (cached === null || sha256Of(cached) !== image.sha256) {
+        const bytes = await downloadAttachment(liveHub, image.attachmentId);
+        if (sha256Of(bytes) !== image.sha256) {
+          throw new PublishFailure("error", "配图附件的 SHA-256 和起草时不一致，下载的字节被改过，没有上传");
+        }
+        const temporary = `${copy}.${randomUUID()}.tmp`;
+        try {
+          await writeFile(temporary, bytes, { flag: "wx", mode: 0o444 });
+          await rename(temporary, copy);
+        } finally {
+          await rm(temporary, { force: true });
+        }
+      }
+      files.push(copy);
+      continue;
+    }
     const name = basename(image.path);
     const real = await realpath(image.path).catch(() => null);
     const inCopies =
@@ -165,8 +198,6 @@ function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-type DepsWithBrowser = PublisherDeps & { readonly browser: Pick<BrowserConfig, "connection"> };
-
 interface PublishTab {
   send(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   isOpen(): boolean;
@@ -174,7 +205,7 @@ interface PublishTab {
 
 /** 在一个自己建的后台标签页里跑完 work，到总时限就停；成功、失败、超时、抛错都关掉这个标签页。 */
 async function inBackgroundTab<T>(
-  deps: DepsWithBrowser,
+  deps: PublisherDeps,
   totalMs: number,
   onTimeout: () => PublishFailure,
   work: (tab: PublishTab) => Promise<T>,
@@ -355,9 +386,9 @@ async function fillAndPublish(
   return { status: "ok", url: note.link ?? pages.noteUrl(note.id), externalId: note.id };
 }
 
-type Publisher = (message: PublishDraftMessage, deps: DepsWithBrowser) => Promise<PublishResult>;
+type Publisher = (message: PublishDraftMessage, deps: PublisherDeps) => Promise<PublishResult>;
 
-async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWithBrowser): Promise<PublishResult> {
+async function publishToXiaohongshu(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResult> {
   const { content } = message;
   if (content.kind !== "post") return failed("error", "小红书发布器只发笔记，回复还没接上");
   if (content.images.length === 0) return failed("error", "小红书笔记至少要一张图");
@@ -367,7 +398,7 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWith
   try {
     // 验配图也排在队里：入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。
     return await oneAtATime(async () => {
-      const files = await draftFiles(deps.dataDir, message.botId, content.images);
+      const files = await draftFiles(deps.dataDir, message.botId, content.images, deps.liveHub);
       return inBackgroundTab(
         deps,
         limits.totalMs,
@@ -393,10 +424,18 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: DepsWith
 const PUBLISHERS: Record<BrowserPlatform, Publisher> = { xiaohongshu: publishToXiaohongshu };
 
 export async function publishDraft(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResultMessage> {
-  const { browser } = deps;
-  const result =
-    browser === null
-      ? failed("error", "这台电脑没有助理浏览器")
-      : await PUBLISHERS[message.platform](message, { ...deps, browser });
+  const lease = message.botId === null ? null : acquireBotBrowserMutex(deps.dataDir, message.botId);
+  const publish = PUBLISHERS[message.platform];
+  let result: PublishResult;
+  try {
+    result = await (lease === null ? publish(message, deps) : lease.run(() => publish(message, deps)));
+  } catch (error) {
+    result =
+      error instanceof BotPausedError
+        ? failed("paused", error.message)
+        : failed("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    lease?.release();
+  }
   return { type: "publish_result", draftId: message.draftId, attempt: message.attempt, result };
 }

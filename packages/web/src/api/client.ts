@@ -3,6 +3,7 @@ import {
   AccountListResponse,
   AccountResponse,
   LoginAccountResponse,
+  LiveSessionsResponse,
   type LoginAccountRequest,
   type LoginAttemptId,
   ApiError,
@@ -20,6 +21,7 @@ import {
   ToolListResponse,
   ToolResponse,
   DecideApprovalResponse,
+  DecidePreferenceOfferResponse,
   DecideProjectOfferResponse,
   DecideRoutineOfferResponse,
   DecideSkillOfferResponse,
@@ -65,6 +67,7 @@ import {
   type CreateSkillRequest,
   type DeleteAccountRequest,
   type DecideApprovalRequest,
+  type DecidePreferenceOfferRequest,
   type DecideProjectOfferRequest,
   type DecideRoutineOfferRequest,
   type DecideSkillOfferRequest,
@@ -211,6 +214,7 @@ export const createApi = (signal?: AbortSignal) => {
       return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
     },
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
+    live: async () => json(LiveSessionsResponse, await send("GET", "/live")),
     createRemoteComputer: async () => json(ComputerTokenResponse, await send("POST", "/computers/remote")),
     deleteAccount: async (email: string) => {
       const body: DeleteAccountRequest = { email };
@@ -249,6 +253,11 @@ export const createApi = (signal?: AbortSignal) => {
       json(
         DecideSkillOfferResponse,
         await send("POST", `/messages/${encodeURIComponent(messageId)}/skill-offer`, { decision }),
+      ),
+    decidePreferenceOffer: async (messageId: MessageId, decision: DecidePreferenceOfferRequest["decision"]) =>
+      json(
+        DecidePreferenceOfferResponse,
+        await send("POST", `/messages/${encodeURIComponent(messageId)}/preference-offer`, { decision }),
       ),
     decideProjectOffer: async (messageId: MessageId, request: DecideProjectOfferRequest) =>
       json(

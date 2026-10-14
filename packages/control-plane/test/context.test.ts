@@ -7,9 +7,10 @@ import {
   CreateGroupResponse,
   MessageId,
   MessageListResponse,
+  PreferenceId,
   SkillResponse,
+  ControlToAgent,
   type BotId,
-  type ControlToAgent,
   type GroupId,
   type RunId,
   type TeamOfferMember,
@@ -93,6 +94,13 @@ async function withTeammate(owner: Owner): Promise<{ groupId: GroupId; wenId: Bo
   return { groupId: group.group.id, wenId: wen.bot.id };
 }
 
+/** 小服挂着审批时由阿文查看上下文，观察消息不会作废小服的卡。 */
+async function approvalObserver(): Promise<Owner> {
+  const owner = await onlineOwner();
+  const { groupId } = await withTeammate(owner);
+  return { ...owner, groupId };
+}
+
 async function say(client: ApiClient, groupId: GroupId, text: string): Promise<void> {
   expect((await client.post(`/api/groups/${groupId}/messages`, { text })).status).toBe(201);
 }
@@ -119,11 +127,11 @@ const readsOf = (table: string) =>
   serverQueries.filter((query) => new RegExp(`^select\\b[\\s\\S]*\\bfrom "${table}"`, "i").test(query)).length;
 
 describe("上下文里的卡写结论", () => {
-  it("审批卡按审批行现在的状态写结论，四张审批卡只查一次审批表", async () => {
-    const owner = await onlineOwner();
+  it("审批卡按审批行现在的状态写结论，四张审批卡只做一次摘要查询", async () => {
+    const owner = await approvalObserver();
     try {
-      await say(owner.client, owner.groupId, "把四笔款付了");
-      const first = await owner.agent.expect("prompt");
+      await say(owner.client, owner.groupId, "@小服 把四笔款付了");
+      const first = await nextPrompt(owner.agent);
       const approvals: ApprovalId[] = [];
       for (const [index, command] of ["pay 100", "pay 200", "pay 300", "pay 400"].entries()) {
         owner.agent.send({
@@ -155,18 +163,56 @@ describe("上下文里的卡写结论", () => {
       }
 
       serverQueries.length = 0;
-      await say(owner.client, owner.groupId, "付完说一声");
+      await say(owner.client, owner.groupId, "@阿文 付完说一声");
       const prompt = await nextPrompt(owner.agent);
 
-      expect(lines(prompt), "审批卡按审批行现在的状态写成结论").toEqual([
-        { from: "你", text: "把四笔款付了" },
-        { from: "系统", text: "小服要执行 `pay 100`，你批准了" },
-        { from: "系统", text: "小服要执行 `pay 200`，你拒绝了" },
-        { from: "系统", text: "小服要执行 `pay 300`，还在等你点头" },
-        { from: "系统", text: "小服要执行 `pay 400`，没批下来，过期了" },
+      expect(
+        prompt.context.map(({ from, text, settled }) => ({ from, text, settled })),
+        "同一次查询里已批准、已拒绝、待批和失效并存，待批卡还没定稿",
+      ).toEqual([
+        { from: "你", text: "@小服 把四笔款付了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 100`，你批准了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 200`，你拒绝了", settled: true },
+        { from: "系统", text: "小服要执行 `pay 300`，还在等你点头", settled: false },
+        { from: "系统", text: "小服要执行 `pay 400`，没批下来，过期了", settled: true },
       ]);
-      expect(settledOnly(prompt), "只有还在等批的那张会变，标没定稿").toEqual([true, true, true, false, true]);
-      expect(readsOf("approvals"), "四张审批卡一条查询查完，不按卡逐条查").toBe(1);
+      const summaryReads = serverQueries.filter((query) => /^select\b[\s\S]*from "approvals" where /i.test(query));
+      expect(summaryReads, "四张审批卡仍用一条摘要查询查完，不按卡逐条查").toHaveLength(1);
+      expect(readsOf("approvals"), "摘要查询和作废投递范围各一条，不随卡数增长").toBe(2);
+    } finally {
+      owner.close();
+    }
+  });
+
+  it("同 Bot 的新消息作废审批，上下文保留作废文案且已定稿", async () => {
+    const owner = await onlineOwner();
+    try {
+      await say(owner.client, owner.groupId, "把款付了");
+      const first = await nextPrompt(owner.agent);
+      owner.agent.send({
+        type: "approval_request",
+        runId: first.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        callId: "call-voided-context",
+        tool: "bash",
+        action: "spend",
+        target: null,
+        view: bash("pay 100"),
+      });
+      for (;;) {
+        if ((await owner.push.next()).type === "approval_updated") break;
+      }
+
+      await say(owner.client, owner.groupId, "先别付款，查一下库存");
+      const prompt = await nextPrompt(owner.agent);
+      expect(prompt.context, "新消息作废的审批带上确定的原因，运行器不用再等待它变更").toContainEqual(
+        expect.objectContaining({
+          from: "系统",
+          text: "小服要执行 `pay 100`，你发了新消息，这一步作废了",
+          settled: true,
+        }),
+      );
     } finally {
       owner.close();
     }
@@ -255,6 +301,15 @@ describe("上下文里的卡写结论", () => {
         skillId: null,
       });
       await appendMessage(database.db, job.groupId, {
+        kind: "preference_offer",
+        botId: job.botId,
+        text: "标题不超过 15 个字",
+        private: false,
+        sourceMessageId: null,
+        status: "saved",
+        preferenceId: PreferenceId.parse(randomUUID()),
+      });
+      await appendMessage(database.db, job.groupId, {
         kind: "project_offer",
         botId: job.botId,
         name: "小红书起号",
@@ -282,12 +337,13 @@ describe("上下文里的卡写结论", () => {
         { from: "系统", text: "小内排的内容计划「下周计划」共 2 篇，你批准了" },
         { from: "系统", text: "小内排的内容计划「下下周计划」共 1 篇，还在等你看" },
         { from: "系统", text: "问过要不要存成 skill「周报」，你没存" },
+        { from: "系统", text: "提议记住「标题不超过 15 个字」，你让记住了" },
         { from: "系统", text: "小内出的方案卡「小红书起号」，还在等你点开始" },
       ]);
       expect(
         settledOnly(prompt).slice(1),
         "草稿没发出去之前都还会变（批了的会发，退回的能改了再交），定了的计划和 skill 卡不再变，没点的方案卡还会变",
-      ).toEqual([false, false, false, false, true, false, true, false]);
+      ).toEqual([false, false, false, false, true, false, true, true, false]);
       expect(
         [readsOf("drafts"), readsOf("content_plans")],
         "草稿表两条（草稿卡一条，计划数篇数一条），计划表一条，都不按卡逐条查",
@@ -499,10 +555,10 @@ describe("上下文行带是否定稿", () => {
   });
 
   it("审批还在等时标没定稿，批了之后同一行换成结论并标定稿", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
-      await say(owner.client, owner.groupId, "把这笔款付了");
-      const first = await owner.agent.expect("prompt");
+      await say(owner.client, owner.groupId, "@小服 把这笔款付了");
+      const first = await nextPrompt(owner.agent);
       owner.agent.send({
         type: "approval_request",
         runId: first.runId,
@@ -520,7 +576,7 @@ describe("上下文行带是否定稿", () => {
         if (pushed.type === "approval_updated") approvalId = pushed.approval.id;
       }
 
-      await say(owner.client, owner.groupId, "付了没");
+      await say(owner.client, owner.groupId, "@阿文 付了没");
       const pending = await nextPrompt(owner.agent);
       expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
       await say(owner.client, owner.groupId, "现在呢");
@@ -606,8 +662,14 @@ async function runDone(
   });
   for (;;) {
     const pushed = await owner.push.next();
-    if (pushed.type === "message" && pushed.message.body.kind === "cost" && pushed.message.body.runId === prompt.runId)
+    if (
+      pushed.type === "message" &&
+      pushed.message.body.kind === "cost" &&
+      pushed.message.body.runId === prompt.runId
+    ) {
+      await owner.agent.ack(prompt.runId);
       return;
+    }
   }
 }
 
@@ -648,12 +710,12 @@ describe("滑出窗口时没定稿的行接着送", () => {
   });
 
   it("卡滑出窗口时还在等批，照样接着送；隔了一轮再批，那一轮看到结论，之后不再送", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
-      await say(owner.client, owner.groupId, "把这笔款付了");
+      await say(owner.client, owner.groupId, "@小服 把这笔款付了");
       const first = await nextPrompt(owner.agent);
       const approvalId = await requestPay(owner, first.runId, owner.groupId);
-      await say(owner.client, owner.groupId, "付了没");
+      await say(owner.client, owner.groupId, "@阿文 付了没");
       const asked = await nextPrompt(owner.agent);
       const seen = payCard(asked);
       await runDone(owner, asked);
@@ -760,11 +822,21 @@ describe("滑出窗口时没定稿的行接着送", () => {
   it("接着送的只看这个 Bot 自己上一次派活记下的，别的 Bot 后来派的活不算", async () => {
     const owner = await onlineOwner();
     try {
-      const { groupId } = await withTeammate(owner);
+      const { wenId } = await withTeammate(owner);
+      const observer = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "阿策" })).json());
+      const { group } = CreateGroupResponse.parse(
+        await (
+          await owner.client.post("/api/groups", {
+            title: "审批上下文观察",
+            botIds: [owner.botId, wenId, observer.bot.id],
+          })
+        ).json(),
+      );
+      const groupId = group.id;
       await say(owner.client, groupId, "@小服 把这笔款付了");
       const first = await nextPrompt(owner.agent);
       const approvalId = await requestPay(owner, first.runId, groupId);
-      await say(owner.client, groupId, "@小服 付了没");
+      await say(owner.client, groupId, "@阿策 付了没");
       const asked = await nextPrompt(owner.agent);
       const seen = payCard(asked);
       await runDone(owner, asked);
@@ -773,11 +845,11 @@ describe("滑出窗口时没定稿的行接着送", () => {
       const wen = await nextPrompt(owner.agent);
       await runDone(owner, wen);
       expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
-      await say(owner.client, groupId, "@小服 现在呢");
+      await say(owner.client, groupId, "@阿策 现在呢");
       const decided = await nextPrompt(owner.agent);
 
       expect(fullLines(wen), "阿文头一次被派活，没看过那张卡，不接").toEqual(chatterLines(6, 25));
-      expect(decided.context[0], "小服接的是自己上一次记下的，阿文后来那次不算").toEqual({
+      expect(decided.context[0], "阿策接的是自己上一次记下的，阿文后来那次不算").toEqual({
         messageId: seen?.messageId,
         from: "系统",
         text: "小服要执行 `pay 100`，你批准了",
@@ -789,12 +861,12 @@ describe("滑出窗口时没定稿的行接着送", () => {
   });
 });
 
-/** 小服看过一次还在等批的付款卡，那一轮正常收尾，卡随后滑出窗口，这时才批下来。 */
+/** 阿文看过一次小服还在等批的付款卡，那一轮正常收尾，卡随后滑出窗口，这时才批下来。 */
 async function cardSettledOutsideWindow(owner: Owner): Promise<NonNullable<ReturnType<typeof payCard>>> {
-  await say(owner.client, owner.groupId, "付这笔款");
+  await say(owner.client, owner.groupId, "@小服 付这笔款");
   const first = await nextPrompt(owner.agent);
   const approvalId = await requestPay(owner, first.runId, owner.groupId);
-  await say(owner.client, owner.groupId, "查下审批");
+  await say(owner.client, owner.groupId, "@阿文 查下审批");
   const asked = await nextPrompt(owner.agent);
   const card = payCard(asked);
   if (card === undefined) throw new Error("没看到付款卡");
@@ -919,28 +991,22 @@ const listOf = async (runId: Prompt["runId"]) =>
 
 describe("名单等送达确认以后才生效", () => {
   it("带着新结论的 prompt 没发出去，下一次派活照样补送这条结论", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const card = await cardSettledOutsideWindow(owner);
-      const attempts: Prompt[] = [];
-      const originalSend = AgentHub.prototype.send;
-      const spy = vi.spyOn(AgentHub.prototype, "send").mockImplementation(function (
-        this: AgentHub,
-        computerId,
-        message,
-      ) {
-        if (message.type !== "prompt" || message.groupId !== owner.groupId)
-          return originalSend.call(this, computerId, message);
-        attempts.push(message);
-        return false;
-      });
+      const spy = vi.spyOn(AgentHub.prototype, "flushOutbox").mockImplementation(async () => undefined);
       try {
         await say(owner.client, owner.groupId, "刚批准了，看看");
       } finally {
         spy.mockRestore();
       }
-      const [attempt] = attempts;
-      if (attempt === undefined) throw new Error("这一次没派出去");
+      const rows = await database.sql<{ body: unknown; run_id: string }[]>`
+        SELECT body, run_id FROM agent_outbox WHERE body->>'type' = 'prompt' ORDER BY seq DESC LIMIT 1
+      `;
+      const row = rows[0];
+      if (row === undefined) throw new Error("这一次 prompt 已入箱");
+      const attempt = ControlToAgent.parse(row.body);
+      if (attempt.type !== "prompt") throw new Error("outbox 末条不是 prompt");
       expect(payCard(attempt), "发不出去的那次带着结论").toEqual(approvedCard(card));
       expect(await listOf(attempt.runId), "名单照记，但没确认").toEqual({
         unsettled_context: [],
@@ -950,18 +1016,21 @@ describe("名单等送达确认以后才生效", () => {
       await say(owner.client, owner.groupId, "发送恢复，重新查");
       const retry = await nextPrompt(owner.agent);
       await runDone(owner, retry);
-      await say(owner.client, owner.groupId, "再查一次");
       const later = await nextPrompt(owner.agent);
+      await runDone(owner, later);
+      await say(owner.client, owner.groupId, "再查一次");
+      const after = await nextPrompt(owner.agent);
 
       expect(payCard(retry), "结论没送到过，恢复后补送").toEqual(approvedCard(card));
-      expect(payCard(later), "送到过一次，之后不再送").toBeUndefined();
+      expect(payCard(later), "恢复时已经排入箱的下一条 prompt 仍带这份结论").toEqual(approvedCard(card));
+      expect(payCard(after), "确认后的新派活不再重复送结论").toBeUndefined();
     } finally {
       owner.close();
     }
   });
 
   it("带着新结论的 run 在执行前被电脑拒掉收了尾，下一次派活照样补送这条结论", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const card = await cardSettledOutsideWindow(owner);
       await say(owner.client, owner.groupId, "刚批准了，看看");
@@ -1002,7 +1071,7 @@ describe("名单等送达确认以后才生效", () => {
   });
 
   it("运行器还没把 prompt 交给会话就失败，报带 runId 的错再补零用量 run_done，下一次派活照样补送这条结论", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     /** 等这条 agent_error 的系统消息推到。同一台电脑的报文按到达顺序处理，它前面的报文都已处理完。 */
     const failed = async (detail: string, runId?: Prompt["runId"]) => {
       owner.agent.send({
@@ -1058,7 +1127,7 @@ describe("名单等送达确认以后才生效", () => {
   });
 
   it("上一次 run 还没 run_done 时又派一次活，用的是更早那条已确认的名单", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const card = await cardSettledOutsideWindow(owner);
       await say(owner.client, owner.groupId, "刚批准了，看看");
@@ -1082,7 +1151,7 @@ describe("名单等送达确认以后才生效", () => {
   });
 });
 
-/** 小服看过的卡批了、滑出了窗口，这一次派活带着结论，运行器照 said 回 run_done，再派一次看接不接。 */
+/** 阿文看过的卡批了、滑出了窗口，这一次派活带着结论，运行器照 said 回 run_done，再派一次看接不接。 */
 async function conclusionDelivered(owner: Owner, said: RunDoneSaid) {
   const card = await cardSettledOutsideWindow(owner);
   await say(owner.client, owner.groupId, "刚批准了，看看");
@@ -1095,7 +1164,7 @@ async function conclusionDelivered(owner: Owner, said: RunDoneSaid) {
 
 describe("名单确认与否由运行器说这次触发进没进会话", () => {
   it("运行器报进了会话，名单确认，结论之后不再送", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const { attempt, later } = await conclusionDelivered(owner, "entered");
       expect(await listOf(attempt.runId), "进了会话就确认").toMatchObject({ context_confirmed_at: expect.any(String) });
@@ -1106,7 +1175,7 @@ describe("名单确认与否由运行器说这次触发进没进会话", () => {
   });
 
   it("运行器报没进会话，run 照样收尾但名单不确认，下一次派活照样补送这条结论", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const { card, attempt, later } = await conclusionDelivered(owner, "dropped");
       expect(await listOf(attempt.runId), "run 收了尾，名单照记，但没确认").toEqual({
@@ -1128,7 +1197,7 @@ describe("名单确认与否由运行器说这次触发进没进会话", () => {
   });
 
   it("旧运行器的 run_done 不带这个字段，按进了会话算：名单确认，之后不再送", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const { attempt, later } = await conclusionDelivered(owner, "unsaid");
       expect(await listOf(attempt.runId), "不带字段照旧确认").toMatchObject({
@@ -1151,12 +1220,12 @@ async function userMessagePushed(push: PushClient, text: string): Promise<void> 
 
 describe("相邻两次派活交错时，建得更晚的名单盖不掉触发更靠后那份", () => {
   it("后建的 run 基于更早的消息，下一次派活接的仍是触发消息更靠后那份名单", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const { skill } = SkillResponse.parse(
         await (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "对账", steps: ["翻账本"] })).json(),
       );
-      await say(owner.client, owner.groupId, "付这笔款");
+      await say(owner.client, owner.groupId, "@小服 付这笔款");
       const first = await nextPrompt(owner.agent);
 
       // 锁住 skill 行：带 `/对账` 的那条消息落库、推送以后卡在加用量上，等它派活时后一条消息已经派完了。
@@ -1174,10 +1243,10 @@ describe("相邻两次派活交错时，建得更晚的名单盖不掉触发更�
         await unlocked;
       });
       await lockHeld;
-      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 这笔付了没" });
-      await userMessagePushed(owner.push, "/对账 这笔付了没");
+      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 @阿文 这笔付了没" });
+      await userMessagePushed(owner.push, "/对账 @阿文 这笔付了没");
       const approvalId = await requestPay(owner, first.runId, owner.groupId);
-      await say(owner.client, owner.groupId, "付了没");
+      await say(owner.client, owner.groupId, "@阿文 付了没");
       const newer = await nextPrompt(owner.agent);
       unlock();
       await holding;
@@ -1265,12 +1334,12 @@ describe("交接排到后面才派时，被 @ 那份更晚的名单盖不掉交�
 
 describe("几次派活读到的消息集合互不包含时，哪份名单都盖不掉别的", () => {
   it("触发最早的 run 接回了卡、触发最晚的 run 窗口里没卡、中间那次直接读到卡，三份名单并起来，卡批了以后结论补送一次", async () => {
-    const owner = await onlineOwner();
+    const owner = await approvalObserver();
     try {
       const { skill } = SkillResponse.parse(
         await (await owner.client.post(`/api/bots/${owner.botId}/skills`, { name: "对账", steps: ["翻账本"] })).json(),
       );
-      await say(owner.client, owner.groupId, "付这笔款");
+      await say(owner.client, owner.groupId, "@小服 付这笔款");
       const first = await nextPrompt(owner.agent);
 
       let unlock!: () => void;
@@ -1288,10 +1357,10 @@ describe("几次派活读到的消息集合互不包含时，哪份名单都盖�
       });
       await lockHeld;
       // 卡在加用量上的这条触发最早，等它派出去时卡已经确认在别的名单里，它靠接着送读到卡。
-      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 这笔付了没" });
-      await userMessagePushed(owner.push, "/对账 这笔付了没");
+      const stuck = owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "/对账 @阿文 这笔付了没" });
+      await userMessagePushed(owner.push, "/对账 @阿文 这笔付了没");
       const approvalId = await requestPay(owner, first.runId, owner.groupId);
-      await say(owner.client, owner.groupId, "付了没");
+      await say(owner.client, owner.groupId, "@阿文 付了没");
       const direct = await nextPrompt(owner.agent);
       const card = payCard(direct);
       expect(card, "中间那次在窗口里直接读到了还在等批的卡").toMatchObject({ settled: false });
@@ -1368,7 +1437,7 @@ describe("名单的寿命从确认算起，不从建 run 算起", () => {
       await blocked;
       const [early] = await database.sql`
         SELECT id, unsettled_context FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id}`;
-      expect(early?.unsettled_context, "prompt 还没送出去，名单已经记下了还在等批的卡").toHaveLength(1);
+      expect(early?.unsettled_context ?? null, "上下文仍在读取期间，run、名单和 prompt 还未提交").toBeNull();
       await chatter(groupId, 25);
       for (let n = 1; n <= 20; n += 1) {
         await say(owner.client, groupId, `${mention}晚一步 ${n}`);
@@ -1379,15 +1448,17 @@ describe("名单的寿命从确认算起，不从建 run 算起", () => {
       release();
       expect((await stuck).status).toBe(201);
       const delayed = await nextPrompt(owner.agent);
-      expect(delayed.runId, "扣住的那条放开后送到的就是最早建的 run").toBe(early?.id);
       const card = payCard(delayed);
       expect(card, "它在窗口里直接读到了还在等批的卡").toMatchObject({ settled: false });
+      if (card === undefined) throw new Error("延迟的 prompt 没有付款卡");
+      expect(await listOf(delayed.runId), "gate 放行后，run 和完整未结名单随 prompt 一起提交").toMatchObject({
+        unsettled_context: [card.messageId],
+        context_confirmed_at: null,
+      });
       await runDone(owner, delayed);
-      const [earliest] = await database.sql`
-        SELECT id FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id} ORDER BY started_at ASC LIMIT 1`;
-      expect(earliest?.id, "按建 run 的时刻数它排在 21 个里的最后一位，按 started_at 截 20 份就把它截掉了").toBe(
-        delayed.runId,
-      );
+      const [latest] = await database.sql`
+        SELECT id FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id} ORDER BY started_at DESC LIMIT 1`;
+      expect(latest?.id, "事务 gate 放行后才建立这条 run").toBe(delayed.runId);
       expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
       await say(owner.client, groupId, `${mention}批完了吗`);
       const retry = await nextPrompt(owner.agent);

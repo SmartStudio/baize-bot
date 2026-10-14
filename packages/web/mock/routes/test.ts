@@ -23,12 +23,14 @@ import {
   appendMessage,
   computerStatus,
   computersOf,
+  removedComputers,
   LoginState,
   messageFetchFaults,
   reportLoginState,
   seedLoginCard,
   createApproval,
   expireLatestPending,
+  timeOutLatestPending,
   groups,
   holdHandoffAccept,
   publishDraft,
@@ -45,6 +47,7 @@ import {
   settleUnseenHandoff,
 } from "../state.js";
 import { resetRegisteredEmails } from "./auth.js";
+import { resetLive } from "./live.js";
 import { readBody, send, type Route } from "./http.js";
 
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
@@ -53,7 +56,12 @@ const LoginCardRequest = z.object({ slot: z.union([z.literal(1), z.literal(2)]).
 const TodayPendingRequest = z.object({ title: z.string().min(1).max(80) }).strict();
 const TestReviseRequest = z.object({ text: z.string().min(1) }).strict();
 const TestApprovalRequest = z
-  .object({ action: ActionKind, groupId: GroupId.default("grp_sales"), target: GrantTarget.nullable().optional() })
+  .object({
+    action: ActionKind,
+    groupId: GroupId.default("grp_sales"),
+    target: GrantTarget.nullable().optional(),
+    deadlineAt: Timestamp.nullable().optional(),
+  })
   .strict();
 const TestMessageRequest = z
   .object({
@@ -65,6 +73,9 @@ const TestMessageRequest = z
     silent: z.boolean().optional(),
     revision: z.number().int().nonnegative().optional(),
   })
+  .strict();
+const PreferenceOfferRequest = z
+  .object({ groupId: GroupId, botId: BotId, text: z.string().min(1).max(200), private: z.boolean() })
   .strict();
 const MessageFetchFaultRequest = z.object({ messageId: MessageId, count: z.number().int().min(0).max(10) }).strict();
 const TestDeltaRequest = z
@@ -94,6 +105,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     reseed();
     resetToday();
     resetRegisteredEmails();
+    resetLive();
     activeTurns.clear();
     turnEpochs.clear();
     send(res, 204);
@@ -216,6 +228,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
         runId: RunId.parse(`run_test_${Date.now()}`),
         action: parsed.data.action,
         target: parsed.data.target ?? null,
+        deadlineAt: parsed.data.deadlineAt ?? null,
         view: { kind: "bash", command: "示例调用", raw: { command: "示例调用" } },
       });
       const message = appendMessage(approval.groupId, { kind: "approval", approvalId: approval.id });
@@ -242,6 +255,27 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
   }
 
   // 只推 delta，不落 mock 状态，用来造「没收到空壳就先来了 delta」。
+  // 真运行器会按 Bot 判断出私人偏好，mock 的 learnFrom 只出非私人的卡，要看「私人」那句提示从这里直接造。
+  if (method === "POST" && path === "/api/test/preference-offer") {
+    const parsed = PreferenceOfferRequest.safeParse(await readBody(req));
+    if (!parsed.success || !groups.has(parsed.data.groupId) || !bots.has(parsed.data.botId)) {
+      send(res, 400, { error: "要出的偏好卡不对" });
+    } else {
+      const message = appendMessage(parsed.data.groupId, {
+        kind: "preference_offer",
+        botId: parsed.data.botId,
+        text: parsed.data.text,
+        private: parsed.data.private,
+        sourceMessageId: null,
+        status: "offered",
+        preferenceId: null,
+      });
+      push({ type: "message", message });
+      send(res, 204);
+    }
+    return true;
+  }
+
   if (method === "POST" && path === "/api/test/message-delta") {
     const parsed = TestDeltaRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "delta 参数不对" });
@@ -299,6 +333,17 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       }
       send(res, 204);
     }
+    return true;
+  }
+
+  // 摘掉一台电脑，造「只有一台」的场景。不推送：控制面也没有删电脑的推送，网页进账号页时重拉电脑表才看到。
+  const computerMatch = /^\/api\/test\/computers\/([^/]+)$/.exec(path);
+  if (computerMatch !== null && method === "DELETE") {
+    const id = decodeURIComponent(computerMatch[1] ?? "");
+    if (computersOf().computers.some((item) => item.id === id)) {
+      removedComputers.add(id);
+      send(res, 204);
+    } else send(res, 404, { error: "没有这台电脑" });
     return true;
   }
 
@@ -394,6 +439,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     if (expired === null) send(res, 409, { error: "没有待失效的审批" });
     else {
       push({ type: "approval_updated", approval: expired });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/approval/timeout") {
+    const timedOut = timeOutLatestPending();
+    if (timedOut === null) send(res, 409, { error: "没有待超时的审批" });
+    else {
+      push({ type: "approval_updated", approval: timedOut });
       send(res, 204);
     }
     return true;

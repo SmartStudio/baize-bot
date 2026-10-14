@@ -390,3 +390,70 @@
 .account-connect a {
   text-decoration: none;
 }
+
+.account-connect-note {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+/* 几台电脑时「接入」下面挂一张小菜单选在哪台上登录，本机排第一，不在线的灰着写原因。 */
+.connect-picker {
+  position: relative;
+}
+
+.connect-menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  left: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: max-content;
+  min-width: 240px;
+  max-width: min(360px, calc(100vw - 2 * var(--space-6)));
+  padding: var(--space-3);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.connect-menu-head {
+  margin: 0;
+  padding: var(--space-2) var(--space-5) var(--space-3);
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.connect-choice {
+  gap: var(--space-4);
+}
+
+.connect-choice-name {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.connect-choice-name small {
+  overflow: hidden;
+  color: var(--fg-3);
+  font: var(--type-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-choice[aria-disabled="true"] {
+  color: var(--fg-4);
+  cursor: not-allowed;
+}
+
+.connect-choice[aria-disabled="true"]:hover {
+  background: none;
+}
+
+.connect-choice[aria-disabled="true"] .connect-choice-name small {
+  color: var(--fg-4);
+}

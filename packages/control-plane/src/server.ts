@@ -21,10 +21,13 @@ import {
   type RuntimeConfig,
 } from "./env.js";
 import { createApp } from "./http/app.js";
+import { acceptLiveViewer, LIVE_PATH } from "./live/accept.js";
+import { LiveRelay, type LiveRelayDeps } from "./live/relay.js";
 import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
 import { Notifications, type NotificationOptions } from "./notifications.js";
 import { PublishLoop, type PublishLoopOptions } from "./publish/loop.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
+import { settleApprovalTimeouts } from "./agent/dispatch.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
@@ -47,6 +50,7 @@ export type RunningServer = {
   readonly publisher: PublishLoop;
   /** 同 routines，测试里手动 tick。 */
   readonly metrics: MetricPoller;
+  scanApprovalTimeouts(now: Date): Promise<number>;
   close(): Promise<void>;
 };
 
@@ -64,11 +68,16 @@ export type StartOptions = {
   readonly disconnectGraceMs?: number;
   /** 电脑多久不发任何帧就判掉线，测试调短用。 */
   readonly silenceTimeoutMs?: number;
+  readonly mcpDiscoveryTimeoutMs?: number;
+  readonly leaseRenewalIntervalMs?: number;
   readonly toolSecretKey?: string;
   /** 不给就读 CREDENTIALS_KEY，缺了或不对启动失败。 */
   readonly credentialsKey?: string;
   readonly publisher?: Pick<PublishLoopOptions, "now" | "intervalMs">;
   readonly metrics?: Pick<MetricPollerOptions, "now" | "intervalMs">;
+  readonly approvalTimeoutIntervalMs?: number;
+  /** 画面面的输入限额和它的时钟，测试数限额用。 */
+  readonly live?: Pick<LiveRelayDeps, "inputPerSecond" | "now">;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */
@@ -97,6 +106,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const hub = new PushHub();
   const notifications = new Notifications(options.db, hub, options.notificationScheduler);
   const groupTurns = new GroupTurns(options.db, hub);
+  const live = new LiveRelay({ push: hub, ...options.live });
 
   // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
@@ -110,8 +120,11 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
     silenceTimeoutMs: options.silenceTimeoutMs,
+    mcpDiscoveryTimeoutMs: options.mcpDiscoveryTimeoutMs,
+    leaseRenewalIntervalMs: options.leaseRenewalIntervalMs,
     toolCrypto,
     notifications,
+    live,
   });
   // 刷新成功把过期账号带回 valid 和授权回调走同一套推送：账号页和 config.accounts 都要知道它又能用了。
   const tokens = new AccountTokens(options.db, credentialCrypto, endpoints, async (account) => {
@@ -126,6 +139,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     db: options.db,
     hub,
     agents,
+    live,
     toolCrypto,
     groupTurns,
     notifications,
@@ -153,6 +167,8 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   });
   const clients = new WebSocketServer({ noServer: true });
   const agentSockets = new WebSocketServer({ noServer: true });
+  // 网页往上只发输入、结束和看密码，最大的是 2000 字的整段上屏，64KB 绰绰有余。
+  const viewers = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
   server.on("upgrade", (request, socket, head) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -162,6 +178,10 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     // 电脑代理不带 cookie，身份由它自己报的 hello 定，所以升级这一步不认人。
     if (path === AGENT_PATH) {
       agentSockets.handleUpgrade(request, socket, head, (ws) => agents.accept(ws));
+      return;
+    }
+    if (LIVE_PATH.test(path)) {
+      acceptLiveViewer({ db: options.db, viewers, relay: live }, request, socket, head);
       return;
     }
     if (path !== WS_PATH) {
@@ -217,6 +237,13 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   }, REMIND_INTERVAL_MS);
   reminders.unref();
 
+  const scanApprovalTimeouts = (now: Date): Promise<number> =>
+    settleApprovalTimeouts({ db: options.db, push: hub, agents }, now);
+  const approvalTimeouts = setInterval(() => {
+    void scanApprovalTimeouts(new Date()).catch((error: unknown) => console.error("扫到期审批出错", error));
+  }, options.approvalTimeoutIntervalMs ?? 15_000);
+  approvalTimeouts.unref();
+
   return {
     port,
     hub,
@@ -224,12 +251,15 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     notifications,
     publisher,
     metrics,
+    scanApprovalTimeouts,
     close: async () => {
       const pokerStopped = poker.stop();
       routines.stop();
       publisher.stop();
       metrics.stop();
       clearInterval(reminders);
+      clearInterval(approvalTimeouts);
+      live.closeAll();
       await hub.closeAll();
       await agents.closeAll();
       await pokerStopped;
@@ -237,9 +267,14 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       await notifications.close();
       clients.close();
       agentSockets.close();
-      await new Promise<void>((resolve, reject) =>
-        server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
-      );
+      viewers.close();
+      try {
+        await new Promise<void>((resolve, reject) =>
+          server.close((err) => (err === undefined || err === null ? resolve() : reject(err))),
+        );
+      } finally {
+        await app.closeMcpClients();
+      }
     },
   };
 }

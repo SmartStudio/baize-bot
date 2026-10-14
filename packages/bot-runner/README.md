@@ -1,14 +1,15 @@
 # @baize/bot-runner
 
-Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 的 prompt 仍按到达顺序一条一条跑。
+Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot 在每个群一份 `AgentSession`，跑在电脑代理进程里。同一个 Bot 在不同群可以并行干活，同一群的 prompt 按到达顺序一条一条跑。
 
-`createRunner(config)` 返回六个方法：
+`createRunner(config)` 的主要方法：
 
 | 方法                               | 对应的下行报文    | 干什么                                                                      |
 | ---------------------------------- | ----------------- | --------------------------------------------------------------------------- |
 | `applyConfig(config)`              | `config`          | 按 Bot 增量对账定义、工具、skill 和网关凭据                                 |
-| `prompt(message)`                  | `prompt`          | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done`                        |
-| `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论                                                        |
+| `prompt(message)`                  | `prompt`          | 跑一次，产出 `bot_text`、`bot_text_done`、`bot_tool_call`、`run_done`       |
+| `cancel(runId)`                    | `cancel`          | 中止正在运行的 run 或从队列丢弃排队中的 run，不产出 `run_done`              |
+| `approve(runId, callId, outcome)` | `approval_result` | 给挂起的审批一个结论                                                        |
 | `pause(botId)`                     | `pause`           | 立起这个 Bot 的暂停闸门；正在执行的工具跑完，下一次工具调用或新 prompt 挂起 |
 | `resume(botId)`                    | `resume`          | 放开暂停闸门，原 run 从等待点继续                                           |
 | `stop()`                           | 连接关闭          | 停掉所有会话                                                                |
@@ -17,23 +18,37 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot
 
 ## config 增量对账
 
-电脑代理只在第一条 `config` 创建运行器，后续配置都交给同一个运行器的 `applyConfig`。每个 Bot 有一条串行队列 `chain`：运行、建会话、关会话和 MCP、skill 落盘、网关热更新都排在上面，同一个 Bot 任何时刻只做一件。`applyConfig` 只记下每个 Bot 的期望配置 `desired`，给每个 Bot 排一个对账步骤就返回，不等任何队列。它不能等：电脑代理的 inbox 在 await 它，而队列前面可能有一条在等审批的 run，审批结论也排在那个 inbox 里。config 之后到的 prompt 排在对账步骤后面，所以看得到新定义。
+电脑代理只在第一条 `config` 创建运行器，后续配置交给同一个运行器的 `applyConfig`。每个 Bot 的资源队列只管定义、MCP client、skill 目录、品牌手册和资源关闭；prompt 只进它所在群道的 `SerialQueue`。`applyConfig` 记录期望配置、排入资源对账后返回，不等群道或审批；电脑代理的 inbox 仍可处理审批结论。后续 prompt 等入队时已排入的资源对账，再开始运行。
 
-对账比较每个 Bot 的定义指纹：角色、名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、它实际分到的 MCP 连接（id、名字、地址、Authorization、操作定义和顺序），以及 `account_read` 能读的 GitHub、X 账号（id、平台、handle）。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。skill 要进指纹，因为 Pi 只在建会话时把 skill 列表拼进系统提示；落盘成功与否也进指纹，排障后落好的 skill 才会触发重建。能读的账号进指纹是同一个原因：Pi 只在建会话时抄一次工具描述，账号清单写在 `account_read` 的描述里；登录状态和权限档不进，它们在调用时现判。
+每次对账建立不可变的 `BotGeneration`。run 通过暂停闸门后钉住当时的代际，定义、扩展工具、Pi 设置、本机 MCP 连接和模型网关都用这份跑完。新 config 换当前代际，旧代际在最后一个钉着它的 run 结束后释放；连接定义没变时，新旧代际共用同一个 MCP 工具集和 client，只有最后一个代际释放才关闭。非本机 MCP 的代理地址和 Bearer 仍在调用时现取，允许凭据轮换。
 
-指纹没变的 Bot 保留现有会话。变了就关掉这个 Bot 的会话和 MCP，正在跑的 run 先跑完，因为对账步骤排在它后面。关完不批量重建，下一条 prompt 到了才为那个群建会话，`SessionManager.continueRecent` 续用原 JSONL。会话逐个关，关失败的也从表里删掉并报一条 `runner_failed`，不留已 dispose 的会话给后面复用。删除 Bot 时，暂停闸门上等待的 prompt 各发一条零用量 `run_done`。网关变化时只重新注册同一个 provider：key 是请求时按供应商取的，重新注册就生效；base URL 挂在会话的 Model 上，下一次 prompt 前的 `usePurpose` 发现地址变了才在同一个会话上 `setModel`。
+会话指纹包括 Bot 的角色、名字、标签、描述、skill 的 id、名字和步骤、skill 是否落盘成功、实际分到的 MCP 连接和操作顺序、可读账号清单，以及 Pi 设置和扩展工具定义、实现。一条连接分给别的 Bot 的名单变化不算当前 Bot 变化。Pi 只在建会话时加载 skill 和工具描述，所以这些变化要重建。指纹没变的会话保留；变了只关空闲道的旧会话，正在跑的道先按旧代际跑完。下一条 prompt 为该道懒建新会话，用 `SessionManager.continueRecent` 续用原 JSONL。关闭失败也从表里移除并上报 `runner_failed`。
 
-闸门规则不跟会话走。每次工具调用都按这个 Bot 最新的 `desired` 工具、账号和授权判定，归属人收紧规则或撤销授权对在飞 run 的下一次工具调用立刻生效。只改授权、账号的登录状态和权限档不会重建会话；GitHub、X 账号增删或换了 handle 会，见上一段。删 Bot 会拒绝下一次工具调用，并解开暂停或审批等待，让 run 正常收尾。
+动作发生时仍现判授权、账号登录状态、权限档和已存在操作的审批偏好。撤销授权或收紧审批规则对在飞 run 的下一次工具调用生效。工具定义和本机 Client 随代际钉住，连接、操作和审批要求每次调用都按最新 config 判断。撤下连接或操作后，在飞 run 的下一次调用也会被拒绝；已经开始的调用使用钉住的 Client 跑完。网关变化在下一次 run 前重新注册 provider 和按用途切模型，不改正在跑的模型请求。
 
-暂停和「有 run 在跑」是两个字段。`paused` 是闸门状态，`active` 是当前 run。暂停期间的新 prompt 仍留在原来的 `chain`，排到队首后在模型请求前等待；不另建重放队列。这样恢复后仍按原到达顺序执行，也不需要重发 prompt。
+Bot 从 config 消失时停止它的所有道，再关闭浏览器和 MCP、按原有边界删除私有目录。关闭期间 config 加回这个 Bot 时保留目录、建立新道。停机关闭资源并保留目录。挂着的审批先发 `approval_abandoned(reason: "stopped")`，控制面将其落成 `expired`，随后 abort 当前 run、丢弃排队 prompt、释放会话。已入会话的 run 从 `agent_settled` 收尾；未入会话的 prompt 各发一次零用量、`prompt: "dropped"` 的 `run_done`。
 
-`run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。所以 `activeRuns()` 就是「收到了、还没发 run_done」，停在暂停闸门或 Bot `chain` 里的也算，重连时的 hello 带得上它们。
+`run_done` 只从 `finishRun` 发出，同一个 runId 只发一次，发的同时移出 `activeRuns()`。`activeRuns()` 包括收到后还没收尾的全部道、暂停等待和排队 prompt，供重连 hello 对账。
+
+## 按 (Bot, 群) 分道
+
+`BotRuntime.lanes` 按 groupId 保存道。每条道有自己的队列、当前 run、记忆注入和两份会话：`chat` 与 `table`。它们共用该道的队列，同一时刻只跑一份；牌桌角色变化只重建 `table` 会话。工具、bash 沙箱、主题任务、牌桌工具、skill 提议和例行边界都从所属道读取运行上下文。审批和 blocked 标记用 `(runId, callId)` 作键，相同 callId 不会串道。
+
+工作目录仍为 `<dataDir>/<botId>/work`，各道共享，目录隔离规则不变。同一个 Bot 在不同群同时改同一文件会互相覆盖，本期接受。浏览器标签页也按 Bot 共享；浏览器工具、帮手的浏览器工具和发布器按数据根与 Bot ID 共用一把互斥锁，判断与执行分别持锁，等待审批时释放锁；批准后重新取锁并比较当前动作和审批视图，页面改变时拒绝执行。暂停期间到点的已批草稿由控制面保留，恢复后的下一轮认领发布。发布器入场和取得锁后检查 Bot 暂停状态，兜住认领之后才暂停的窗口；此时立刻返回 `reason: "paused"`，detail 为「Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。」，不等待恢复、不操作浏览器；停机或删除 Bot 会取消取锁等待，已开始的操作不因暂停中断。其他群的模型请求仍能并行。清理自己的标签页不等发布器完成。
+
+`cancel(runId)` 通过 `findRun` 定位道和阶段：排队项定向丢弃，正在跑的只中止该 run，不停道，不影响其他群或同道后续 prompt。取消挂起审批时本地结算为 `expired`，先让 Pi 写下中文错误再中止，不发 `approval_abandoned` 或 `run_done`，最后释放代际引用。
+
+停道只关闭会话并丢弃排队 prompt。本单元没有本地镜像，不搬 JSONL 到 `.stale/`；镜像清理和 JSONL 归档留给 P3-11。
 
 ## 按用途换模型
 
 provider 注册 `baize:plan`、`baize:fast` 两个模型，名字就是控制面网关认的那两个，由 shared 的 `gatewayAlias(purpose)` 生成，运行器不自己拼，网关再按 `GATEWAY_MODELS` 映射到真模型。每次 prompt 前 `usePurpose(prompt.purpose)` 挑对应那个，用途和网关地址都没变就不动，变了在同一个会话上 `setModel`，历史接着用。`config.modelGateway` 只带网关地址和 key，不带模型名。
 
 Pi 1.1.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一条 `model_change`，下一次 prompt 就用新模型。所以不变的时候不调，免得每条 prompt 多写一行。
+
+模型请求和 Hub 附件请求按发起会话的道读取当前 run 的租约头。MCP Client 仍按 Bot 的连接表和代际共享，注册到各道会话的工具执行函数分别绑定本道的头访问器；共享连接不会共享“当前 run”。帮手固定继承父 run，牌桌从本道当前 run 取头。
+
+浏览器工具先过暂停闸门、取锁判断；需要审批时释放锁。批准后再过暂停闸门、重新取锁，复验最新授权和页面，再检查一次暂停状态，最后发 before_effect 探针。最终暂停检查覆盖取锁返回到调用方继续执行之间的微任务窗口；非浏览器工具的取锁入口立即返回，也会经过这个窗口。探针之后不再等待暂停或浏览器锁，避免取锁等待让探针结论过期。按道取消先清理栅栏登记、结算该 run 的审批；探针等待被解除后由工具闸门记成 blocked，等工具结果落下后仅中止该道会话；其他群的暂停等待不受影响。
 
 ## 目录布局
 
@@ -46,7 +61,10 @@ Pi 1.1.0 的 `setModel` 只改 `agent.state.model` 并往会话 JSONL 追加一�
 <dataDir>/<botId>/skills                config.skills 落成的 <skillId>/SKILL.md，见「skill」一节
 <dataDir>/<botId>/drafts                起草时拷来的配图，<sha256>.<扩展名>，Bot 能读不能写
 <dataDir>/<botId>/brand.md              config.brand 落成的品牌手册，撤掉就删
+<dataDir>/shared                       所有 Bot 免审批读写的共享产出目录
 ```
+
+`ensureBotDirs` 同时创建共享区。系统提示给出共享区的绝对路径，要交给用户或其他 Bot 的文件放在那里。会话、记忆、技能和草稿仍在各 Bot 的私有目录；配置删除 Bot 时，先关闭它的会话、浏览器标签和 MCP，再删除 `<dataDir>/<botId>` 整棵目录，共享区保留。删除前验证 Bot ID 不含路径分隔符、不是 `.`、`..` 或 `shared`（忽略大小写），目标必须是数据根的直接子目录；不满足时上报 `runner_failed`、保留目录并移除运行器里的 Bot。停机只关闭资源，保留目录；关闭期间配置又加回这个 Bot 时也保留目录。
 
 直接放在 `sessions/` 里的旧 JSONL 不迁移、不删除。升级后那个 Bot 会丢一次旧记忆，之后按群续用。
 
@@ -63,14 +81,18 @@ Pi 有四个独立的落盘回落点，不显式给就各自回落到 `~/.pi/age
 
 每次 Pi `tool_call` 都先走 `src/gate.ts` 的纯函数。判定顺序固定为禁区、硬清单、`config.grants` 与账号权限档、默认表。禁区授权也不能越过；`spend`、`account_security` 和 `delete` 每次都问。项目授权只在同一 `groupId` 生效，永久授权还会再过 `GRANTABLE_SCOPES`，畸形的硬清单或 `write_outside` 永久授权不会被采用。
 
+闸门和沙箱共用 `forbiddenZones` 里的数据根目录、本 Bot 目录和共享区路径。Pi 的 `read`、`write`、`edit` 目标经真实路径解析后，落在数据目录里但在本 Bot 和共享区之外就直接拒绝，授权也不能放行；工作目录或共享区中的符号链接指向其他 Bot 时同样拒绝。共享区的读写和工作目录一样免审批，本 Bot 目录里工作目录以外的部分（`agent/`、`sessions/`、`skills/`、`brand.md` 这类）读仍按工作目录外的规则问，写、改名、删除（Pi 文件工具和 bash 都一样）直接拒绝，授权也不能放行，理由是「Bot 自己的配置和会话目录，不能修改，请写到工作目录或共享区」。Pi 的 `write`、`edit` 在进程内执行、不过系统沙箱，批准了真会改掉 `agent/auth.json` 这类文件；bash 的系统沙箱只给工作目录写权限，批准了也写不进。两种情况都不该问。skill 由控制面下发、运行器在 Pi 之外落盘，不经过工具调用，所以不受影响；草稿只读和浏览器禁区优先于共享区放行。
+
 `read`、`write`、`edit` 的路径按 Pi 打开文件时的同一套规则归一化（`src/paths.ts` 的 `logicalResolve`，移植自 Pi 未导出的 `normalizePath`/`resolvePath`）：Unicode 空格换成普通空格，去掉开头的 `@`，展开 `~`，`file://` 地址转成本地路径，再对已存在的路径段做 realpath。悬空的符号链接 realpath 解不出来，但 Pi 写它时内核会沿链接把那头的文件建出来，所以 `realpathExisting` 对悬空链接沿 `readlink` 逐层走到那头，再按那头的位置判：指到工作目录外就是 `write_outside`，`read_only` 里拒绝；指到禁区就拒绝。链接的目标串按内核的顺序逐段走：相对目标以链接所在目录为基准，`..` 退的是已解开链接的真实目录，不是字面上的上一级，`dirlink/../x` 先进 `dirlink` 的真实目录再退一级，躺在目录链接下的链接写 `../x` 退到的是真实目录的上一级；`test/gate.test.ts` 的「链接目标里的 `..` 按内核的顺序退已解开的目录」一组让 Pi 的 write 真写一次，断言闸门的判定和 Pi 的落点一致。成环或超过 40 层（Linux 的 MAXSYMLINKS）解不到真正的目标，抛 `LinkLoopError`（`PathError` 的子类），闸门变成拒绝，理由点名符号链接；`rm`、`unlink`、`mv` 的对象是成环的链接本身时，理由再补一句出路：告诉用户在电脑上直接删掉它，或换一条不经过它的路径。禁区本身解不出来（`config.browser.profileDir` 指向成环的链接）时两种沙箱都起不来，bash 报错点名这项配置，不会裸跑。相对路径按 Bot 的 `<dataDir>/<botId>/work` 解。Pi 打不开的 `file://`（带主机名、百分号编码坏掉）抛 `PathError`，闸门接住变成拒绝，不往 Pi 的 `tool_call` 外抛。`test/gate.test.ts` 拿同一批输入和 Pi 的 `resolvePath` 对账，闸门看到的路径必须和 Pi 真正打开的是同一个文件。禁区由 `src/paths.ts` 的 `forbiddenZones` 给出，闸门和两种沙箱共用一份。`hidden` 读写都拒：`~/.ssh`、钥匙串、用户自己浏览器的登录资料，给了 `config.browser` 时再加上助理 Chrome 的整个 `profileDir`；没给就不加，也不按数据目录去猜。`readOnly` 只拒改：这个 Bot 的 `drafts/`。写和删的目标若是禁区的祖先（比如删整个 Bot 目录）也直接拒。MCP 的原始 `readOnlyHint` 已由控制面压成 `needsApproval`：`false` 归 `read`，`true` 再按操作名前缀归动作；用户在工具页改过的 `needsApproval` 也照此生效。
+
+Pi 文件工具对工作目录和共享区根的写、编辑或删除直接拒绝，目录里的文件照常可写。bash 闸门不把 `cp x .`、`cp x shared/`、`mkdir -p` 的目标目录当成根替换；`mv` 仍按删除源文件的规则询问。bash 的根保护由系统沙箱执行：macOS 在所有写放行之后用 `literal` 拒绝这两个根的写操作，Linux 靠 bwrap 的挂载保护根，避免先删根、再换成指向其他 Bot 的链接，导致下一次 realpath 放开其他 Bot。配置建会话时也拒绝 Bot、work 或 shared 根被预先链接到其他位置；数据根目录自身的别名仍可使用。闸门对写或删除数据根的祖先也直接拒绝，理由点名其他 Bot 的私有区域。
 
 bash 用 `shell-quote` 分出管道、`&&`、重定向和简单命令。换行、控制字符、子 shell、变量展开、后台任务、危险选项和未知参数形态都归 `shell`。
 
 bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `src/sandbox.ts` 的 `sandboxKind()` 在进程内探一次，经 `GateCall.sandbox` 交给闸门。闸门只看种类不看平台，`platform` 只管路径比较时折不折大小写。三种种类：
 
-- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；写只开工作目录和 `/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写工作目录外的路径，bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放，`test/sandbox.test.ts` 的「挪进工作目录也连不上」用例钉着它。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
-- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录和获批的写路径可写，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
+- **`seatbelt`**，macOS。执行经过 `sandbox-exec`：默认连外网、DNS、本机回环和本地代理端口都不通；全局读和获批写路径规则之后拒绝数据根目录的读写，再只放数据根本身的元数据读取，让 node、git、`mkdir -p` 的绝对路径校验正常；之后放开本 Bot 目录的读、共享区的读写和工作目录的写。获批写数据根或它的祖先也不能写其他 Bot。`/dev/null`、`/dev/stdout`、`/dev/stderr` 等固定设备可以写；所有路径先解析为真实路径；禁区读写在所有放宽规则之后再次拒绝，`drafts/` 在最后单独拒写，获批写整个 Bot 目录也写不进。连 unix socket 在 seatbelt 里算 `network-outbound`，拒读拒写挡不住。所以批准联网时不写裸的 `(allow network-outbound)`，那样会连本机所有 unix socket 一起放开，`/var/run/docker.sock` 和用户自己 Chrome 的 SingletonSocket 都连得上。实际只放三样：`(remote ip)`，外网、本机回环和本地代理端口都走它；DNS 要连的 `/private/var/run/mDNSResponder`；工作目录里 Bot 自己起的 socket。别的 unix socket 按它现在的路径判，批不批联网都连不上；同一次调用若还批了写工作目录外的路径，bash 能把外面某个 socket 所在的目录整个挪进工作目录再连，所以这种调用连工作目录里的 socket 也不放，`test/sandbox.test.ts` 的「挪进工作目录也连不上」用例钉着它。禁区里的 unix socket 在最后再单独拒连一次，禁区落在工作目录里面时也连不上。助理 Chrome 走 `--remote-debugging-pipe`，不开 TCP 端口，批准联网的 bash 没有调试端口可连。
+- **`bwrap`**，Linux 上 `bwrap --ro-bind / / --unshare-net --unshare-pid true` 跑得通时。参数由纯函数 `bwrapArgs` 拼：根只读挂载，`/tmp` 换成沙箱私有的 tmpfs，工作目录、共享区和获批的写路径可写，共享区从其他 Bot 的屏蔽列表中排除，之后把 `drafts/` 再 `--ro-bind` 一次，获批的写路径盖住它时它仍然只读。禁区、数据目录下别的 Bot 的目录和 X 的 socket 目录 `/tmp/.X11-unix` 各盖一层只读的空 tmpfs，挂在所有 bind 之后，所以禁区落在工作目录或写路径里面也照样盖住。默认 `--unshare-net`，连本机回环都不通。另外隔离 pid、ipc、uts，`--die-with-parent`，abort 时整个 pid 命名空间一起收掉。不挂 `--proc`，docker 下新挂 proc 会失败，沙箱和容器共用 `/proc`。批准写一个还不存在的路径时，放开它最近的已存在祖先，但不放开根目录。镜像和 docker 安全选项见 `deploy/remote/`。
 - **`none`**，Linux 上 bubblewrap 起不来，或者别的平台。启动时 `console.warn` 一行原因。命令解析挡不住禁区，所以 bash 一律问，批准后不进沙箱直接跑。
 
 `seatbelt` 和 `bwrap` 走同一套命令分类。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外都把环境裁成基础变量和 `PI_` 前缀，`DISPLAY` 不在里面。两种沙箱都做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。远程电脑上批准网络的那次调用和容器共用网络命名空间，所以 Xvfb 带 `-nolisten local` 关掉抽象 socket，只留 `/tmp/.X11-unix` 下的文件 socket。沙箱私有的 `/tmp` 里没有这个目录，获批写 `/tmp` 把真 `/tmp` 挂进来时它也按禁区盖住。bwrap 挡文件 unix socket 只靠看不看得见：共不共用网络命名空间都不影响文件 socket，沙箱里看得见的 socket 批不批联网都连得上。沙箱私有的 `/tmp` 盖住了真 `/tmp` 里的 socket；远程电脑镜像里没有 docker.sock、D-Bus 和用户会话的 socket，所以不要把宿主的 docker.sock 挂进远程电脑容器。
@@ -81,25 +103,51 @@ Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里�
 
 `ask` 发出的 `approval_request` 带 `action` 和能确定时的 `target`。handler 同时监听审批 Promise 和 Pi 的 `ctx.signal`。拒绝或中止返回 `{ block: true, reason }`，工具函数不执行。停机时运行器发送 `approval_abandoned`；删 Bot 时只解开本地等待，不发送该报文，由控制面删除 Bot 的流程收尾审批。暂停不会让审批失效。`bot_tool_call` 的 `blocked` 标记由 `ApprovalGate` 记下，并在 reporter 消费后删除。
 
+`approve(runId, callId, outcome)` 只结算 runId 和 callId 都匹配的等待。`approved` 放行；`rejected` 的工具结果为「归属人拒绝了这个动作。」；`timed_out` 为「10 分钟没人批，按拒绝处理。」；`voided` 为「用户发了新消息，这一步作废了。」。作废结算后复用 `abortSession()` 中止对应群的会话，`runnerAbortedRuns` 标记让 reporter 不追加模型报错行。旧 prompt 从 `agent_settled` 收尾，`finishRun` 保证一个 runId 只发一次 `run_done`，原串行队列随后执行新 prompt。到期拒绝只拦工具，当前轮可继续告诉用户结果。
+
 ## 暂停和继续
 
 Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 prompt 入场和每次 `tool_call` 前等待同一个 Bot 的暂停闸门。正在执行的工具和正在返回的模型请求不会被截断；工具完成后，下一次工具调用停在闸门。审批在暂停前已经发出时仍可决定，批准后也要等 resume 才执行。
 
 暂停不拦已经进入模型请求的纯文字回复。Bot 已经开始生成且这一轮没有工具调用时，文字和 `run_done` 会照常发完；暂停只卡新 prompt 入场和下一次工具闸门。
 
-暂停期间的新 prompt 直接留在 Bot 原有的串行 `chain`，第一条排到队首后在模型请求前等待，其余保持原顺序。resume 只放开等待点，不重发 prompt、不换 runId。停机或删 Bot 会把等待结果定为不继续，随后仍从 `finishRun` 发唯一一条零用量 `run_done`。
+几条道共用 Bot 上的 `paused` 和暂停等待者。暂停期间的新 prompt 留在所属道的 `SerialQueue`，每条道的队首在模型请求前等待，同一道的其余 prompt 保持原顺序。resume 只放开等待点，不重发 prompt、不换 runId。停机或删 Bot 会把等待结果定为不继续，随后仍从 `finishRun` 发唯一一条零用量 `run_done`。
 
 ## run_done 挂在 agent_settled 上
 
 不能挂 `agent_end`：自动重试（`willRetry`）和队列续跑时它一次运行会发好几遍。`agent_settled` 在 `_runAgentPrompt` 的 finally 里发，一次 prompt 恰好一次，出错和中止也覆盖。`test/runner.test.ts` 的「上游重试」用例让网关对首个补全请求返 503，断言 Pi 重跑了一轮而 `run_done` 只有一条。
 
+## 最终文字和取消
+
+`bot_text` 是 bare 流式片段，始终带 `done: false`；每个文字块结束时 reporter 汇总该块全文，发送 reliable 的 `bot_text_done`（带相同 `messageId` 和 `text`）。取消当前 run 会先把该 run 挂着的审批在本地结算为 expired，等工具结果写入会话后再沿用 `abortSession` 中止；取消排队中的 run 会直接从它所在的道里丢弃。两种取消都会立刻从 `activeRuns()` 移除该 run，且不发送 `run_done`。过期审批不发 `approval_abandoned`。
+
+每条 prompt 的租约道记录在 `src/lane-fence.ts`，按 runId 固定 Bot、群、代际和 chat/table 流。`cancel{lane, epoch}` 只选同一道上代际小于目标的在跑和排队 run，随后复用单 run 的取消路径；等于或高于目标代际的 run 保持运行。
+
+## 租约头和 before_effect
+
+主会话、牌桌会话和临时帮手都在 Pi `before_provider_headers` 钩子附加 `x-baize-lane: <botId>/<groupId>/<epoch>`。租约信息按本次 runId 取，帮手固定使用父 run，MCP 代执行的 POST 也带同一头。
+
+`tool_call` 先过原有闸门和审批。审批放行后，动作属于 `read` 或 `write_workspace` 就直接继续；其余动作调用 `RunnerConfig.workAppend`，发送空 `lines`、`fromSeq: 0`、`head: EMPTY_WORK_HEAD`、`cause: before_effect` 的可靠探针，并等待累计 ACK。只有 `ok` 可以执行。`stale_epoch` 和 `not_holder` 记 blocked，原因是「这个群已经换到另一台电脑上了」；缺回调、连接不在或等待时断线，原因是「和白泽断开了，这一步先不做」。其他拒收也阻止执行，原因是「工作记录没有确认，这一步先不做」。
+
+被拒的探针留在本地等待表，直到 Pi 写下工具结果；道取消在这个结果之后再中止会话，保留准确的 blocked 原因。运行器停机先解除所有探针等待，继续沿用唯一一条 `run_done` 的收尾。当前仅发送空探针，不上传 Pi 条目，不做镜像或重建；后续哈希链使用 shared `advanceWorkHead`。
+
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `src/index.ts:600-630` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `sessionFor` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具和 `src/takeover.ts` 的 `browser_ask_user`（只给主会话，帮手没有），紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 偏好和品牌手册
 
-`src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_add` 带 runId 和触发消息的 sourceMessageId，不走审批。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
+`src/memory.ts` 的 `remember_preference` 只在单聊注册，参数 text 最多 200 字、private 为布尔，上行 `preference_offer` 带 runId 和触发消息的 sourceMessageId，不走审批：它只请用户确认，控制面在单聊里出一张卡，用户点了「记住」才写进偏好并随 config 下发，所以工具结果告诉模型「已经请用户确认，用户点了记住才生效」，点之前这句话不影响 Bot 的行为。偏好与手册来自 config；每次模型请求经 `context_with_system` 把这个 Bot 的全量偏好与手册注入系统提示末尾的 `<memory>`，不写入会话历史，所以响应后或入口自动压缩都不会漏原文。一轮 run 按开跑时的配置快照注入，运行中来的 config 下一轮才生效；偏好与手册变化不重建会话。会话 JSONL 的 `baize.memory-shown` 只记是否见过，不被压缩清零：删光偏好或撤掉手册后明确声明旧内容作废，首次空会话不增加记忆段。手册同时落成 brand.md，内容不变不重写；当前读它仍走工作目录外读取的闸门，系统提示已带全文。
+
+## recall
+
+`src/recall.ts` 的 `recall_memory(query)` 注册在聊天会话，牌桌和临时帮手沿用各自的工具集。查询词去掉首尾空白后为 1 到 100 字，只发 `{query}` 到当前模型网关同源的 `POST /hub/v1/recall`，使用调用时的网关 Bearer 和本次 run 的 `x-baize-lane` 租约头。中枢最多回 8 条，每条摘录最多 400 字，包含群 id、群标题、时间和消息角色。它属于内部只读工具，只读例行允许调用，MCP 连接不能覆盖同名工具。
+
+每个 Lane 的 `recalls` 按 `toolCallId` 暂存结果。工具返回的 `content` 只含固定句 `找到 N 条以前的记录，内容只在这一轮可见`，`details` 是空对象，原会话 JSONL 和留存后的工作记录行都只有这句。模型请求的 `context` 钩子使用 `pruneImages(expandRecalls(messages, recalls))`，只在副本中展开 `role=toolResult`、工具名和调用 id 都匹配的结果；不同 run 复用调用 id 时只展开最新一条。不会按固定句的文本匹配，其他工具的同字结果保持原样。
+
+run 的正常收尾、异常、取消和停机都会清空结果。HTTP 请求同时受工具和 Lane 的取消信号约束；已经取消或结束的 run 不接受迟到响应。Pi 原生自动压缩从原会话条目生成摘要，看到的是固定句；`test/recall.test.ts` 用真实自动压缩的假上游请求验证摘录和出处不进入压缩，不另写 `session_before_compact`。
+
+当前运行器的 `workAppend` 接线只发送 `before_effect` 空探针，会话条目的差分上传由 P3-11 接入。召回测试从真实 `sessionManager.getEntries()` 取原始行，经 shared 留存和哈希链组成 `work_append`，调用现有回调验证占位；这条用例明确标为差分接入模拟，不代表生产差分上传已接入。
 
 ## 建队卡
 
@@ -138,7 +186,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
    | `like_`、`follow_`、`favorite_`、`star_`、`engage_` 开头                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | 拒绝，理由点名在网页上点或填                                                                                                                                                                                                                                                                                                                 |
    | 其余名字：`render_chart` 这类认不出的，`pay_`、`install_`、`authorize_` 这类普通 run 里会问、但不在只读例行拒绝表里的，驼峰的 `sendEmail`，只有一段的 `get`、`Get`、`get-`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 拒绝，理由是「这是「只读」例行，不能用不确定是否只读的插件操作」                                                                                                                                                                                                                                                                             |
 
-   写的名字识别沿用普通 run 的 `mcpAction`，只认小写加下划线的前缀；读类的切段归一化只用在只读例行的放行判断上。认不出的一律走最后一行，所以多半是被误拒，不会被误放。误放只剩两类，是这套规则的上限，不修：词表之外的写动词（读头加一张写词黑名单，黑名单没有的词就放），以及切分器看不见的写词：粘在一段里的（`get_deleteall`、`get_sendmail`、`get_removeuser`，`deleteall` 不等于 `delete`）和非 ASCII 的（`get_orders_删除`，非 ASCII 段被 `[^a-z0-9]+` 切掉后直接消失）。要在这两类上也失败即关，只读例行就得只信服务端声明的 `readOnlyHint`，名字只用来补充拒绝。查不到归属的名字（`GateCall.source` 为 `null`）和调用方直接注入的 `extensionTools`（`source.kind === "extension"`）既不是运行器自己的工具，也认不出是只读，`read_only` 里一律拒绝，理由说只能用运行器自带的工具和认得出是只读的插件操作。普通 run 里查不到归属的当未知外部操作（`external_write`）问用户，`extensionTools` 是宿主代码，仍按 `write_workspace` 放行。撤销连接后会话里残留的旧 MCP 工具不走这条：`mcp.resolve` 认出它已撤下（`withdrawn`），不论哪种边界都在闸门之前直接拒，不出审批卡，理由说连接已经不再提供这个操作，执行时也再拒一次。
+   写的名字识别沿用普通 run 的 `mcpAction`，只认小写加下划线的前缀；读类的切段归一化只用在只读例行的放行判断上。认不出的一律走最后一行，所以多半是被误拒，不会被误放。误放只剩两类，是这套规则的上限，不修：词表之外的写动词（读头加一张写词黑名单，黑名单没有的词就放），以及切分器看不见的写词：粘在一段里的（`get_deleteall`、`get_sendmail`、`get_removeuser`，`deleteall` 不等于 `delete`）和非 ASCII 的（`get_orders_删除`，非 ASCII 段被 `[^a-z0-9]+` 切掉后直接消失）。要在这两类上也失败即关，只读例行就得只信服务端声明的 `readOnlyHint`，名字只用来补充拒绝。查不到归属的名字（`GateCall.source` 为 `null`）和调用方直接注入的 `extensionTools`（`source.kind === "extension"`）既不是运行器自己的工具，也认不出是只读，`read_only` 里一律拒绝，理由说只能用运行器自带的工具和认得出是只读的插件操作。普通 run 里查不到归属的当未知外部操作（`external_write`）问用户，`extensionTools` 是宿主代码，仍按 `write_workspace` 放行。运行中的道保留代际里的 MCP 操作表；连接撤下后，旧 run 的工具仍受该 run 的例行边界约束，新 run 的工具集里不再注册它。
 
 3. 没有系统沙箱时（`GateCall.sandbox === "none"`，`bash` 工具读的是 `createSandboxedBash` 回报的种类）`bash` 一律拒绝，理由「这台电脑没有沙箱，只读例行里不能执行命令」。没有沙箱时命令只剩解析，挡不住同义写法，问用户点个允许等于没有边界，所以不看命令内容，也不退化成审批。有沙箱时仍按命令分类：只读命令放行，删东西被第四层拒，`curl` 这类仍问用户。
 
@@ -177,17 +225,21 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 工具连接
 
-`config.tools` 是控制面下发的 `ToolConnectionConfig[]`（`ToolConnection` 加 `authorization`）。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具和 client 这个 Bot 的所有群共用，不按群各连一次。
+`discoverMcpTools`（`src/mcp-discover.ts`）用 SDK 的 Streamable HTTP client 探测 MCP 地址并读取全部分页，不创建 Pi 会话。连接和分页共享 10 秒总时限；操作表按 shared 的数量、大小和凭据回显规则逐页校验，失败只返回固定分类，不带服务端原文。
 
-每条连接一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。调用走 `callTool`，结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
+`config.tools` 是控制面下发的 `ToolConnectionConfig[]`。`localOnly: false` 的连接没有 `authorization`，凭据只留在控制面；`localOnly: true` 的连接带 `authorization`，只发给本机电脑，远程电脑拿不到。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具由这个 Bot 的所有群共用。
 
-撞名先到先得：Pi 自带工具的名字（`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`，`src/mcp-tools.ts` 的 `PI_BUILT_IN_TOOLS` 从 Pi 导出的工厂取，`test/runner.test.ts` 拿它和 Pi 的 `allToolNames` 对账）整组保留，不管会话实际装了哪几个；运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。被跳过的操作不再给顶掉它的工具定审批，审批只看 `mcp.resolve` 认到的那个操作。
+非本机连接不创建 MCP `Client`，通过 `POST ${config.mcpProxy.baseUrl}/:connectionId/call` 让控制面代执行，请求带 `botId`、`tool` 和 `arguments`。Bearer 每次现取最新的 `modelGateway.apiKey`，key 轮换或代理地址变化只更新调用配置，不重建工具和会话；响应通过 shared 的 `McpProxyCallResponse` 校验。审批闸门照旧在转发前运行，HTTP 失败或响应格式不正确时抛中文异常，Pi 记成 `isError` 工具结果和 `failed` 终态。
 
-`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。abort 不等在途的工具：Pi 的 bash 按进程组杀掉子进程；MCP 工具把 Pi 给的 `signal` 传进 `callTool`，服务端收到 cancelled 通知，这边当场返回；第一次调用还在等 `client.connect` 的 initialize 时，signal 一响就撤掉这次共享的连接（几条调用一起等同一个 initialize，谁先中止都撤），下次调用重新连，`close()` 也先撤还没回的 initialize 再关；浏览器工具排队中的调用一收到 signal 就以「这次浏览器操作被中止了」结束，正在跑的那次在下一条 CDP 命令处停下，工具步骤不等 30 秒的命令超时。被中止的只是这边的后续步骤：已经进管道的命令 Chrome 照样做完，它的回包和后面关闭路径发的命令在底层是交叠的。回包一般丢掉，只有 `Target.createTarget` 的迟到回包要接住，把建出来的页关掉，不然停机后留一个没人管的后台标签页。关页是清理，不走 signal，所以预算钉在 `closeTarget` 这一个函数上：每次 `Target.closeTarget` 最多等 `CLOSE_BUDGET_MS`（2 秒），Chrome 不回也不等 CDP 的 30 秒超时，命令已经发出，Chrome 自己会关。停机、换标签页、建页失败的收尾都走同一条，没有哪条关页路径能无界地挡住 serial 队列后面的 `close()`；关旧页之前标签页已经记成关闭，一次停机只会落在其中一条关页上，最多等一个预算。正在 `Page.navigate` 的还会发 `Page.stopLoading` 让 Chrome 放弃加载，`settle` 的轮询也跟着停。`test/runner.test.ts` 的几条「停机时…」用例分别对着不回应的网址、卡住的 `Runtime.evaluate` 和 `Page.captureScreenshot`、迟到的 `Target.createTarget`、不回的 `Target.closeTarget`、建页半路中止后清理关页也不回、不回 initialize 的 HTTP 服务和挂着不回的假 MCP 量停机耗时。config 变化时只关受影响 Bot 的这些资源；下一条 prompt 按新定义懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
+只在本机的连接仍各用一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`，同一 Bot 的所有群共用。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。两条执行路径都把结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
+
+撞名先到先得：Pi 自带工具的名字（`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`，`src/mcp-tools.ts` 的 `PI_BUILT_IN_TOOLS` 从 Pi 导出的工厂取，`test/runner.test.ts` 拿它和 Pi 的 `allToolNames` 对账）整组保留，不管会话实际装了哪几个；运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具、`browser_ask_user` 和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。被跳过的操作不再给顶掉它的工具定审批，审批只看 `mcp.resolve` 认到的那个操作。
+
+`stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。abort 不等在途的工具：Pi 的 bash 按进程组杀掉子进程；代理 MCP 工具把 Pi 给的 `signal` 传进 `fetch`，本机 MCP 工具传进 `callTool`，本机服务端收到 cancelled 通知，这边当场返回；第一次调用还在等 `client.connect` 的 initialize 时，signal 一响就撤掉这次共享的连接（几条调用一起等同一个 initialize，谁先中止都撤），下次调用重新连，`close()` 也先撤还没回的 initialize 再关；浏览器工具排队中的调用一收到 signal 就以「这次浏览器操作被中止了」结束，正在跑的那次在下一条 CDP 命令处停下，工具步骤不等 30 秒的命令超时。被中止的只是这边的后续步骤：已经进管道的命令 Chrome 照样做完，它的回包和后面关闭路径发的命令在底层是交叠的。回包一般丢掉，只有 `Target.createTarget` 的迟到回包要接住，把建出来的页关掉，不然停机后留一个没人管的后台标签页。关页是清理，不走 signal，所以预算钉在 `closeTarget` 这一个函数上：每次 `Target.closeTarget` 最多等 `CLOSE_BUDGET_MS`（2 秒），Chrome 不回也不等 CDP 的 30 秒超时，命令已经发出，Chrome 自己会关。停机、换标签页、建页失败的收尾都走同一条，没有哪条关页路径能无界地挡住 serial 队列后面的 `close()`；关旧页之前标签页已经记成关闭，一次停机只会落在其中一条关页上，最多等一个预算。正在 `Page.navigate` 的还会发 `Page.stopLoading` 让 Chrome 放弃加载，`settle` 的轮询也跟着停。`test/runner.test.ts` 的几条「停机时…」用例分别对着不回应的网址、卡住的 `Runtime.evaluate` 和 `Page.captureScreenshot`、迟到的 `Target.createTarget`、不回的 `Target.closeTarget`、建页半路中止后清理关页也不回、不回 initialize 的 HTTP 服务和挂着不回的假 MCP 量停机耗时。config 变化时保留在飞 run 的资源，空闲道和后续 run 按新代际懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
 ## 主题任务工具
 
-`src/topic.ts` 的 `createTopicTools` 挂六个工具，由 `createRunner` 按 Bot 建，不用调用方注册。
+`src/topic.ts` 的 `createTopicTools` 挂六个工具，由 `createRunner` 为每条道的会话建，不用调用方注册。
 
 | 工具               | 参数                                               | 返回                                                    | 上行报文                                           |
 | ------------------ | -------------------------------------------------- | ------------------------------------------------------- | -------------------------------------------------- |
@@ -265,7 +317,7 @@ T-2482 给老客户回一封询价邮件
 - 开源仓库（projectGroupId：group-gh）节奏：未定
 ```
 
-能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、档位和 accountId，平台和账号名沿用 `accountLabel`。取的是 `config.accounts` 最新的一份，和起草工具查的是同一份。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
+能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、档位和 accountId，平台和账号名沿用 `accountLabel`。prompt 取 run 开始时的账号清单；工具调用仍现取最新清单和权限。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
 
 ```
 能用的账号：
@@ -333,7 +385,7 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 ## 助理浏览器
 
-`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, connection() }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`。
+`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, connection(), present }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`。`present` 是「把一页摆到用户眼前」的端口（`src/live-port.ts` 的 `PresentPage`），由电脑代理的屏实现，只有 `browser_ask_user` 用它；测试给 `test/fixtures/present.ts` 的 `NO_PRESENT`，一调就回 `broken`。
 
 助理 Chrome 用 `--remote-debugging-pipe` 起，不开任何 TCP 端口：Chrome 从 fd 3 读命令、往 fd 4 写回复和事件，一条消息一段 JSON，以 NUL 结尾。一台电脑只有这一条管道，由电脑代理起 Chrome 时建好，`connectPipe` 包成 `CdpConnection`，`connection()` 回的就是它。所有 Bot 的浏览器工具、发布器和登录窗口都挂在这条管道上，各自 `Target.attachToTarget({ flatten: true })` 自己的标签页，命令带 `sessionId`，事件按 `sessionId` 分给各自的标签页，挂上的监听在关页时摘掉。
 
@@ -346,6 +398,7 @@ Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起�
 | `browser_screenshot` | `read`，放行     | 截当前这一屏，PNG 作为图片进模型                                |
 | `browser_click`      | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent`                         |
 | `browser_type`       | `engage`，默认问 | 按编号填字，替换原内容，可选按回车                              |
+| `browser_ask_user`   | `read`，放行     | 把当前页摆到用户眼前请用户亲自操作，交还后回网址，见「请用户接手」 |
 
 没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标是浏览器当前页的主机名（`BotBrowser.host()`，随 `GateCall.browserHost` 进闸门），不看模型的入参，模型在 `browser_click` 的参数里塞 `hostname` 也冒领不了；域名两边都按 URL 解析出的主机名比较：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。批过的域名（`once`、`project`、`forever` 三种范围）再点不问，`browser_open` 到别的域名或页面自己跳到别的域名之后再点重新问。还没开页或停在空白页时目标为空，每次都问。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（当前页的主机名，页面自己跳走也跟着变）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
 
@@ -368,6 +421,14 @@ snapshot 的形状：
 
 **标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。等 `connection()`（Chrome 可能正在起）也跟这次调用的 signal 走：停机或中止时当场以「这次浏览器操作被中止了」结束，不等 Chrome 起完；连接归电脑代理共享，晚到的连接这次调用不再拿，也不用替它收尾。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 
+**请用户接手。** `browser_ask_user`（`src/takeover.ts`）让 Bot 把自己后台标签页里当前这一页摆到用户眼前，请用户亲自过登录墙、验证码、付款确认，操作完交还。参数只有一句 `reason`（1 到 200 字），进 `LivePurpose` 的 `takeover`。工具先 `BotBrowser.lend()` 借页：排进这个 Bot 的串行队列并取一次浏览器锁，等正在跑的浏览器调用做完就把标签页换成 `lent` 状态，锁随即放开，借出期间不持锁。然后调 `present({ liveId, targetId, purpose }, signal)`，`liveId` 由 `takeoverLiveId(runId, callId)` 从 runId 和 callId 算出（sha256 截成 UUID 形状，带版本位和变体位），同一次调用重投算出同一个，不生出第二块画面；`bot_tool_call` 运行中卡的 `view` 是 `ToolView` 的 `takeover` 形状，带同一个 `liveId`，Web 按它开画面，`src/reporter.ts` 只对这件工具这样拼卡。`finally` 里 `giveBack()`：标签页换回 `open`，隔离世界作废，接手前的编号作废，点和填先报「用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手」。还没打开页就调它直接抛「你还没打开要接手的那一页，先 browser_open」，不替用户建页。
+
+借出期间这个 Bot 的别的会话（别的群）碰任何浏览器工具，`ensureTab` 立刻抛「这一页正交给用户操作，等用户交还之后再用浏览器。」，不排队、不等用户、不建新页；发布器有自己的后台标签页，锁又没被占着，照常发布。闸门把它归 `read`（在页上动手的是用户自己，Bot 只把页摆到用户眼前），它不在 `BROWSER_TOOL_ACTIONS` 里，会话闸门不为它持锁。只挂给主会话，帮手没有。
+
+结束的几种情况：用户点交还，结果是「用户交还了这一页。地址：<origin 加 path>」，query 和 fragment 不给模型（里面常有一次性 token）；用户点不弄了抛「用户说不弄了，这一页收回来了。」；页在接手时被关掉抛「这一页在接手时被关掉了，要接着弄先 browser_open。」；屏根本没展示出来（Chrome 起不来、attach 失败）抛「助理浏览器出了问题，这次没法请用户接手。」。给 `present` 的 signal 是四路合一：这次调用的 signal（run 被取消、停机）、30 分钟时限（`BrowserConfig.takeoverLimitMs` 只给测试缩短，句子固定写 30 分钟）、作废、这个 Bot 的浏览器要关（Bot 从 config 里移走）。屏只看到 `caller`，是哪一路撤的由工具自己分：run 中止照常是「这次浏览器操作被中止了」，浏览器要关是「助理浏览器关掉了，这次接手没做完。」，作废是「用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。」，剩下就是「等了 30 分钟用户没有接手，这一页收回来了。」。
+
+作废：每个 lane 记着正挂着的接手（`Lane.takeover`），`Runner.prompt` 在排队之前看一眼，`origin.kind === "user"` 且 runId 不同就撤，新消息照常排在这轮之后跑。队友 @ 来的、例行触发的、牌桌的 prompt 不作废，同一个 runId 重投也不作废。用例在 `test/takeover.test.ts`，走真 Pi 会话加假上游、假 CDP、假屏。
+
 **没有调试端口。** 原来的 `--remote-debugging-port=0` 会在本机开一个 CDP 端口，能列出、关掉、接管所有标签页，所以当时挡了三层：`browser_open` 按端口拒、每个标签页开 `Fetch.enable` 拦跳到这个端口的请求、seatbelt 拒批了联网的 bash 连它。换成管道之后本机没有这个端口，这三层一起删了。管道的两个 fd 只在电脑代理进程和 Chrome 之间，Bot 的 bash 是另起的沙箱进程，拿不到。Chrome 的 SingletonSocket 还在，连上它能让助理 Chrome 带着登录态打开任意网址，但拿不到调试端口。它原本建在系统临时目录里，批了联网的 bash 能列出、连上。电脑代理起 Chrome 时把临时目录指到 `<profileDir>/tmp`（Linux 的 chromium 认 `TMPDIR`，macOS 的 Chrome 只认 `MAC_CHROMIUM_TMPDIR`），socket 就跟 profile 一起落在禁区里：seatbelt 拒读和拒连，bwrap 整个盖住，批准联网、批准写 `/tmp` 都不放开它。
 
 **禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。
@@ -388,13 +449,14 @@ snapshot 的形状：
 
 ## 小红书发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
 
-- **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
-- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。每张图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
+- **浏览器和数据目录从依赖参数来。** `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，本机和远程电脑都给，必填。账号在这个 profile 里登录（远程电脑经画面扫码），发布也只能在这里发。每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。
+- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。旧的 `kind: "path"` 配图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
+- **附件配图在本机补齐。** 新草稿的 `kind: "attachment"` 配图按 MIME 对应的扩展名查找 `<dataDir>/<botId>/drafts/<sha256>.png|jpg|webp|gif`。缓存字节的 SHA-256 一致就直接用；缺失或字节不符时从 `${hub.baseUrl}/attachments/<attachmentId>` 下载，重新校验 SHA-256，再以 `.tmp` 加 rename 原子写入、权限 0444。哈希不符时失败，不连接浏览器。下载最多读 20 MiB，超时 60 秒，不跟重定向。`liveHub()` 每次请求读取最新 `config.hub` 和 `modelGateway.apiKey`，不保留 hello 轮换前的 key。旧库里没有 `kind` 的配图由 shared 的 parse 边界补成 `path`，继续走原有本地检查。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。
 - **一台电脑一次只发一条。** 小红书同一个号只能登一处，同时发会互相挤。进程内一条 promise 队列，第二条等第一条连同读链接整个做完。验配图也在队里做，入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。每条的总时限是 `PUBLISH_LIMITS.totalMs`（3 分钟），出队验完配图、开始连 Chrome 时起算，到了回 `error`、关标签页。等某一个元素的时限是 `stepMs`（1 分钟）。
-- **不重试，失败分三种。** 每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
+- **不重试，失败按原因上报。** 暂停时为 `paused`，恢复 Bot 后让它再起一稿；每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
 - **成功带笔记链接。** 离开发布页算发出去了。之后打开笔记管理页，在卡片里找文字含标题的那张（草稿没标题就取最新一张），从 `data-impression` 里抠出 24 位的笔记 id，`externalId` 就是这个 id。链接优先用卡片里带 `xsec_token`、网址又含这个 id 的原链接，OpenCLI 的 `note-helpers` 说笔记详情页要带签名链接才能稳定打开，光有 id 不一定打得开；卡片上读不到才拼 `https://www.xiaohongshu.com/explore/<id>` 兜底。读不到链接时回 `ok`，`url` 是笔记管理页，`externalId` 是 null。链接是从页面上读的，控制面不原样信：不是 https、主机不是 `xiaohongshu.com` 或它的子域，就按 `ok` 落账，链接换成笔记管理页。回 `failed` 会让用户以为没发出去再发一遍，重复发帖比链接不准的代价大。
 
 页面结构全在 `XIAOHONGSHU_PAGES` 一张常量表里，改版只改这一处。测试通过 `deps.xiaohongshu` 把两个网址换成本地假页，选择器照用，不走环境变量。`deps.connect` 也只给测试换，用来把关标签页拖慢，看超时之后还有没有命令发给标签页。
@@ -433,12 +495,12 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
 - **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，在读图之前判。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
-- **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。`DraftSpec` 记的是这份拷贝的路径和 sha256，之后工作目录里的原图怎么改都不影响草稿，发布器读到的就是起草时的字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
+- **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。MIME 按 PNG、JPEG、WebP、GIF 的文件头识别，不信扩展名，拷贝扩展名按 MIME 固定。拷贝后把同一份字节 PUT 到 `${config.hub.baseUrl}/attachments?botId=&groupId=`，声明 `x-baize-sha256`，Bearer 每次现取当前网关 key。`DraftSpec` 只记 `{kind: "attachment", attachmentId, sha256, mime}`。上传失败时抛「配图传到白泽失败，过一会儿再起草」，草稿、改稿或计划不上行；服务器正文和网络异常不拼进工具错误，避免泄露 Bearer 或 URL 查询串。之后工作目录里的原图怎么改都不影响草稿，另一台电脑的发布器能下载同一份字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 
 `src/publisher.ts` 的 `publishDraft` 收控制面下行的 `publish_draft`，回一条 `publish_result`，见「小红书发布器」。
 
-`test/runner.test.ts` 的「运行器的草稿」一节钉住这些，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。
+`test/attachments.test.ts` 覆盖附件上传、MIME、key 轮换、跨目录下载、只读缓存、错误缓存替换、部分写入失败后的原子性与重试、哈希篡改及旧稿兼容；不接真浏览器或真实平台。图片魔数由 shared 的 `imageMime` 判定，控制面上传入口也使用同一函数。`test/runner.test.ts` 的「运行器的草稿」一节钉住本地安全检查及现有会话在 `applyConfig` 换 key 后使用新 key 上传，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。发布附件时配置尚未下发会返回「发布出错：附件配置尚未下发」，实际下载失败仍返回「发布出错：配图从白泽下载失败，请稍后重试」。
 
 ## skill
 
@@ -469,7 +531,7 @@ description: "打开 CRM 找到 Globex 的联系人"
 
 `description` 不能为空：Pi 的 `loadSkillFromFile` 把没有 description 的文件整条丢掉，所以步骤为空的 skill 回落到用名字当 description。两个字段都过 `JSON.stringify` 写成 YAML 的双引号标量，名字里的冒号和引号才不会把 frontmatter 撑破（Pi 用的是真 `yaml` 解析器）。
 
-对账在各 Bot 的 `chain` 上做，**整目录**一次过：`config` 里没有的目录删掉、少的补上、内容变了的重写，内容一样的连 mtime 都不动。重跑同一份 `config` 不改任何文件。不等这个 Bot 被 prompt 就对账，不然一条把 skill 删光的 `config` 下来，没人找它说话的那个 Bot 盘上的旧文件会一直留着。skill 变化会改这个 Bot 的指纹，旧会话关掉后，下一条 prompt 才重新建会话、刷新系统提示。
+对账在各 Bot 的资源队列上做，**整目录**一次过：`config` 里没有的目录删掉、少的补上、内容变了的重写，内容一样的连 mtime 都不动。重跑同一份 `config` 不改任何文件。不等这个 Bot 被 prompt 就对账，不然一条把 skill 删光的 `config` 下来，没人找它说话的那个 Bot 盘上的旧文件会一直留着。skill 变化会改这个 Bot 的指纹；在飞 run 保留旧会话，下一条 prompt 按新代际建会话、刷新系统提示。
 
 两条边界上的防护：
 
@@ -499,7 +561,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 控制面收到 `skill_offer` 落一条消息，Web 画成一张带「存」「不存」的卡，用户点存才有 skill 行，再随新的 `config` 发回来。
 
-**一次运行最多问一次。** 第二次调用抛「这次已经问过了。」。一个 Bot 的运行是串行的，手里最多一次运行，所以记住刚问过的那个 `runId` 就够，不用攒一张表。
+**一次运行最多问一次。** 第二次调用抛「这次已经问过了。」。工具按道的会话建立，同一道串行且手里最多一次运行，所以各工具实例只需记住刚问过的 `runId`。
 
 这几个范围和 `protocol.ts` 里 `skill_offer` 的 schema 一一对齐：本地挡不住的会在 `AgentToControl.parse` 那里变成一坨英文 ZodError 扔给模型。范围和主题任务工具一个路子，**故意不写进 typebox 的 schema**：被 schema 挡下的模型只看得到一条英文 Validation 报错，看不出该写几条；交给工具里的检查统一报，给的是能照着改的中文。错误一律抛，理由见上面「主题任务工具」那节。
 
@@ -535,7 +597,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 - `noSkills`、`noExtensions`、`noContextFiles`、`noPromptTemplates`、`noThemes` 全开，不加载 skill，也不带群协作提示。`toolExecution` 设为 `sequential`。
 - 只启用本角色的牌桌工具。一个 `tool_call` 处理器拦住不在本角色工具表里的调用，并在放行前等暂停闸门，行为和普通会话一致，见「暂停和继续」。
 - 起始模型是 `plan`，每次 prompt 前按 `message.purpose` 切换。控制面给牌友 `fast`，给问牌和复盘 `plan`。
-- `sessionFor` 在 Bot 的 `tableRole` 变了时重建会话，所以老白从问牌转到复盘会换一个新会话，不带着上一个角色的工具和上下文。
+- `sessionFor` 在这条道的 `tableRole` 变了时重建 `table` 会话，所以老白从问牌转到复盘会换一个新会话，不带着上一个角色的工具和上下文。
 
 牌桌 run 的文字上报也由运行器先筛一遍。reporter 上报的报文里，除了 `run_done`，牌桌 run 只有问牌角色的 `bot_text` 会发给控制面，牌友和复盘角色的 `bot_text` 在这里就丢掉，牌友的公开台词只能随 `poker_act` 走。控制面那一侧还有按角色的默认拒绝白名单，两边各自把关。`gate.ts` 把 `poker_act` 和 `poker_review` 登记成内部工具，牌桌 run 不带只读边界，登记只为了让每个内部工具都有一条明确的表态。
 
@@ -548,7 +610,7 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 - 拼出的报文带当前 run 的 `runId`、Pi 给的 `callId`、prompt 里的 `handId` 和 `seq`，再用 `AgentToControl.safeParse` 校验。动作只能是 `fold`、`check`、`call`、`raise`（`amount` 为整数）、`all_in`，其他抛「出牌动作不合法」并列出可选值。
 - 工具不属于当前角色，或当前没有这条 run，抛「这个工具不属于当前牌桌角色。」
 
-发出去之后工具不立即返回，它等控制面的 `poker_result`。`createPokerResults` 按 `(runId, callId)` 记下等待的出牌，最长等 20 秒（`POKER_RESULT_TIMEOUT_MS`）。控制面在桌锁里落完动作就回执，它的 60 秒兜底不给运行器发报文，所以这里只兜回执丢失，等得短是为了不长时间占住这个 Bot 的串行队列。`ok: false` 让工具抛带中文原因的错，Pi 把它做成 `isError` 工具结果，牌友在同一次 run 里照原因重试。`ok: true` 返回「出牌已确认。」中止、发送失败、超时、运行器停止或牌友被移除（`cancel`）都按失败结算，等待不会悬着。同一个 `callId` 的重复帧，控制面回的是同一个结果。
+发出去之后工具不立即返回，它等控制面的 `poker_result`。`createPokerResults` 按 `(runId, callId)` 记下等待的出牌，最长等 20 秒（`POKER_RESULT_TIMEOUT_MS`）。控制面在桌锁里落完动作就回执，它的 60 秒兜底不给运行器发报文，所以这里只兜回执丢失，等得短是为了不长时间占住牌桌道的串行队列。`ok: false` 让工具抛带中文原因的错，Pi 把它做成 `isError` 工具结果，牌友在同一次 run 里照原因重试。`ok: true` 返回「出牌已确认。」中止、发送失败、超时、运行器停止或牌友被移除（`cancel`）都按失败结算，等待不会悬着。同一个 `callId` 的重复帧，控制面回的是同一个结果。
 
 ### `poker_review`
 
@@ -559,6 +621,14 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 - 提交的序号必须和 prompt 里给的关键手完全一致，不重复、不遗漏、不增加，否则抛「请只提交给定的关键手，每手一次，不得遗漏或增加手序号。」
 - 每手 `text` 最多 120 字（`REVIEW_TEXT_LIMIT`），超了抛「每手正文最多 120 字，请缩短后再提交。」这个常量和控制面 `poker/leave.ts` 的同值，两边各自把关。长度按 JavaScript 字符串的 `length` 算。
 - 校验通过后用 `send` 发走，没有回执。控制面那边不合格就整条丢掉，用户再点一次散场会重派一条复盘 run。
+
+## 工作记录与本地镜像
+
+`work-mirror.ts` 按 (Bot, 群, chat/table) 管已确认前缀。五个 Pi 钩子和最终水位写入之后同步尾部，每帧最多 64 条；`createRetainer` 的试算快照只随成功 ACK 推进。`before_effect` 仍在审批之后、执行之前，带尾部差分；没有尾巴时发空探针。帮手会话沿用父 run 的 chat 栅栏，临时过程不独立入流，返回主会话的工具结果随 chat 上传；牌桌会话进入 table。
+
+每次 prompt 用其代际和流头核对 `sessions/<groupId>/lane.json`、本地内存和文件前缀。失败后从持有者授权的 Hub 分页读取全流并核对原始链头，旧缓存移进 `.stale/`，原子写文件后打开；文件打开失败转内存，版本过新或两种打开都失败才冷启动并发送中文说明。悬空工具调用补合成结果，在新 prompt 入模型之前上传。
+
+第一条 prompt 的串行任务先检查旧群目录；没有 `lane.json` 时复制 `continueRecent` 对应的最新文件并导入，原文件保留。代际来自 prompt。导入任何非 ok 拒收都停止该道；断线不在原地循环。`seq_mismatch` 和 `tool_list_changed` 拉 Hub 核对前缀再恢复，`unfiltered` 仅在重新过滤改变了帧时重试。一次 flush 每种恢复最多一次，重复拒收停止上传，下一次 prompt 按服务器重建。
 
 ## 跑测试
 

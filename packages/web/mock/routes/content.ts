@@ -18,6 +18,7 @@ import {
   settlePlan,
 } from "../state.js";
 import { readBody, send, type Push, type Route } from "./http.js";
+import { announceLogin } from "./live.js";
 
 const idOf = (match: RegExpExecArray): string => decodeURIComponent(match[1] ?? "");
 
@@ -107,7 +108,10 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
     }
     const outcome = loginAccount(idOf(loginMatch), parsed.data.attempt);
     if (!outcome.ok) send(res, outcome.status, { error: outcome.error });
-    else send(res, 202, outcome.value);
+    else {
+      send(res, 202, outcome.value);
+      announceLogin(outcome.value.account, outcome.value.attempt, push);
+    }
     return true;
   }
 

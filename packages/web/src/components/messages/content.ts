@@ -1,4 +1,16 @@
-import type { Account, AccountLogin, AccountTier, Computer, Draft, LoginFailure, Platform } from "@baize/shared";
+import type {
+  Account,
+  AccountLogin,
+  AccountTier,
+  Computer,
+  Draft,
+  LivePurpose,
+  LiveUserEnd,
+  LoginFailure,
+  Platform,
+  ToolCallStatus,
+} from "@baize/shared";
+import type { TakeoverScreen } from "../../state/live.js";
 
 export const PLATFORM: Record<Platform, string> = {
   github: "GitHub",
@@ -36,9 +48,42 @@ export const LOGIN_TEXT: Record<AccountLogin, string> = {
 };
 
 export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {
-  window_failed: "登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。",
-  remote_refused: "远程电脑上不能登录这个平台，请在本机登录这个账号。",
+  window_failed: "登录窗口出错或被关掉了，账号状态没变，可以再点一次。",
+  timed_out: "登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次。",
 };
+
+// 画面面板。摆哪几个按钮由 liveEndActions 定：登录只有放弃，交还只出现在接手上。
+export const liveEndText = (kind: LivePurpose["kind"], action: LiveUserEnd): string =>
+  action === "finish" ? "交还给 Bot" : kind === "login" ? "不登了" : "不弄了";
+
+export const LIVE_TEXT = {
+  // Bot 表里查不到（刚删、还没拉到）就说 Bot。
+  takeover: (botName: string | undefined) => `${botName ?? "Bot"}请你接手这一页`,
+  open: "打开画面",
+  later: "稍后",
+  connecting: "正在连上电脑上的画面…",
+  reconnecting: "画面断了，正在重连…",
+  replaced: "画面在别的窗口打开了",
+  reclaim: "在这里看",
+  ended: "画面已经结束了",
+  hide: "收起",
+  reveal: "到本机窗口操作",
+  noOrigin: "页面还在打开",
+} as const;
+
+const TAKEOVER_RESULT: Record<Exclude<ToolCallStatus, "running">, string> = {
+  ok: "已交还",
+  failed: "没接手",
+  blocked: "没接手",
+};
+
+const TAKEOVER_WAITING: Record<Exclude<TakeoverScreen["kind"], "open">, string> = {
+  put_away: "画面已收起，等 Bot 接着做",
+  unseen: "画面还没出来",
+};
+
+export const takeoverResult = (status: ToolCallStatus, screen: Exclude<TakeoverScreen["kind"], "open">): string =>
+  status === "running" ? TAKEOVER_WAITING[screen] : TAKEOVER_RESULT[status];
 
 export const TIER: Record<AccountTier, { title: string; note: string }> = {
   read_only: { title: "只读", note: "只看数据和评论，不写任何东西。" },

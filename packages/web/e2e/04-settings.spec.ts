@@ -13,6 +13,9 @@ test("设置通用页切到深色，账号与电脑页列出两台在线电脑�
   await page.screenshot({ path: `${SHOT}/07.png` });
 
   await page.getByTestId("settings-nav-accounts").click();
+  await expect(page.getByTestId("browser-shared-login-note")).toHaveText(
+    "助理浏览器的登录状态所有 Bot 共用，在一个 Bot 那里登录过，别的 Bot 也能用这个账号。",
+  );
   await expect(page.getByTestId("computer-row")).toHaveCount(2);
   await expect(page.getByTestId("computer-row").nth(0)).toHaveText("本机在线");
   await expect(page.getByTestId("computer-row").nth(1)).toHaveText("远程在线");

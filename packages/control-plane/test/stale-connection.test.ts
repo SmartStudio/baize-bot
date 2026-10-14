@@ -12,7 +12,7 @@ import { newId } from "../src/ids.js";
 import { expectHello, helloAgent, openAgent, sendHello, type AgentClient } from "./helpers/agent.js";
 import { startTestServer } from "./helpers/client.js";
 import { createTestDb } from "./helpers/db.js";
-import { makeComputer, makeUser, PASSWORD } from "./helpers/fixtures.js";
+import { makeComputer, makeUser, PASSWORD, waitFor } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
 import { queueHello } from "./helpers/queued-hello.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
@@ -98,13 +98,13 @@ it("被新连接顶掉的旧连接，inbox 里排着的 expired 不盖新连接�
     stale.send({ type: "login_state", accountId: targetId, state: { login: "expired" } });
     await received(stale);
     fresh = await queueHello(server.server.port, computer.computerId, computer.token);
-    fresh.send({ type: "login_state", accountId: targetId, state: { login: "valid", handle: "@fresh" } });
 
     gate.release();
     await nextOf(push, "login_failed", (pushed) => pushed.attempt === "blocker");
     await nextOf(push, "notify");
     expect(await stale.closed(), "卡着的那条一结束就轮到新连接的 hello，旧连接被顶掉").toBe(4000);
     await expectHello(fresh);
+    fresh.send({ type: "login_state", accountId: targetId, state: { login: "valid", handle: "@fresh" } });
     // 旧连接排着的 expired 在新 hello 之后才入链，真落了的话会推在新连接的 valid 前面。
     const between: string[] = [];
     for (;;) {
@@ -349,10 +349,10 @@ async function staleLoginStateInHandler(
   await gate.reached;
 
   const fresh = await queueHello(server.server.port, computer.computerId, computer.token);
-  fresh.send({ type: "login_state", accountId: targetId, state: freshWrites });
   gate.release();
   expect(await stale.closed(), "旧帧整个做完才轮到新连接的 hello").toBe(4000);
   await expectHello(fresh);
+  fresh.send({ type: "login_state", accountId: targetId, state: freshWrites });
   // 新连接再报一次 valid 当哨兵：它排在新连接那条写之后，中间不该再夹别的快照。
   fresh.send({ type: "login_state", accountId: targetId, state: { login: "valid", handle: "@fresh" } });
   const seen: string[] = [];
@@ -459,61 +459,74 @@ it("被新连接顶掉的旧连接，inbox 里排着的登录失败不再推给�
   }
 });
 
-/**
- * 两个控制面共一个库：旧连接在甲上，它报的登录失败停在 handler 里；同一台电脑在乙上握手（轮换了 key）并登上。
- * 同一个控制面里链会把新 hello 排在旧帧后面，到不了这一步，只有库里的连接代次挡得住旧帧把痕迹写回去。
- */
-it("两个控制面共库：被另一个控制面上的新连接顶掉之后，旧连接在途的登录失败不落到账号上", async () => {
+/** 两个控制面共库：新连接先推进 connGen，旧连接随后到达的可靠上行不处理也不确认。 */
+it("两个控制面共库：旧连接在新 connGen 之后发来的登录失败不落库也不 ACK", async () => {
   const database = await createTestDb();
-  const gated = gatedDb(database.sql);
-  const first = await startTestServer(gated.db);
+  const first = await startTestServer(database.db);
   const second = await startTestServer(database.db);
   const user = await makeUser(database.db);
   const computer = await makeComputer(database.db, user.id);
   const targetId = AccountId.parse(newId());
-  await database.db.insert(accounts).values({
-    id: targetId,
-    ownerId: user.id,
-    computerId: computer.computerId,
-    platform: "xiaohongshu",
-    handle: "@old",
-    login: "expired",
-  });
+  const beaconId = AccountId.parse(newId());
+  await database.db.insert(accounts).values([
+    {
+      id: targetId,
+      ownerId: user.id,
+      computerId: computer.computerId,
+      platform: "xiaohongshu",
+      handle: "@old",
+      login: "expired",
+    },
+    {
+      id: beaconId,
+      ownerId: user.id,
+      computerId: computer.computerId,
+      platform: "xiaohongshu",
+      handle: "@barrier",
+      login: "valid",
+    },
+  ]);
   const client = first.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const firstPush = await connectPush(first.server.port, client.cookie ?? "");
+  const oldPushes: ServerPush[] = [];
+  firstPush.socket.on("message", (raw) => oldPushes.push(JSON.parse(raw.toString()) as ServerPush));
   const secondPush = await connectPush(second.server.port, client.cookie ?? "");
   const stale = (await helloAgent(first.server.port, computer.computerId, computer.token)).agent;
   let fresh: AgentClient | null = null;
-  const gate = gated.arm(/select "platform" from "accounts"/);
 
   try {
+    fresh = (await helloAgent(second.server.port, computer.computerId, computer.token)).agent;
     stale.send({
       type: "login_state",
       accountId: targetId,
       state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("stale") },
     });
-    await gate.reached;
-    fresh = (await helloAgent(second.server.port, computer.computerId, computer.token)).agent;
     fresh.send({ type: "login_state", accountId: targetId, state: { login: "valid", handle: "@fresh" } });
     const loggedIn = await nextOf(secondPush, "account_updated", (pushed) => pushed.account.id === targetId);
     expect(loggedIn.account.login, "新连接先登上").toBe("valid");
     await fresh.expect("config");
+    fresh.send({
+      type: "login_state",
+      accountId: beaconId,
+      state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse("barrier") },
+    });
+    await nextOf(secondPush, "login_failed", (pushed) => pushed.attempt === "barrier");
+    await waitFor(async () => fresh?.uplinkAcks().some((ack) => ack.upTo >= 2) === true, "新连接的屏障帧被确认");
 
-    gate.release();
-    const before: string[] = [];
-    for (;;) {
-      const pushed = await firstPush.next();
-      if (pushed.type === "login_failed") break;
-      if (pushed.type === "account_updated") before.push(pushed.account.lastLoginFailure?.reason ?? "none");
-    }
-    expect(before, "旧连接的失败没落库，甲上没有推带痕迹的账号").toEqual([]);
+    expect(stale.uplinkAcks(), "新 connGen 后旧连接的帧没有被确认").toEqual([]);
+    expect(
+      oldPushes.filter(
+        (pushed) =>
+          pushed.type === "login_failed" || (pushed.type === "account_updated" && pushed.account.id === targetId),
+      ),
+      "旧连接的失败没有推到旧控制面",
+    ).toEqual([]);
     const listed = AccountListResponse.parse(await (await client.get("/api/accounts")).json()).accounts;
     const account = listed.find((item) => item.id === targetId);
     expect(account?.login, "账号还是新连接登上的样子").toBe("valid");
     expect(account?.lastLoginFailure, "旧连接的失败没把痕迹写回登上之后的账号").toBeNull();
   } finally {
-    gate.release();
     stale.close();
     fresh?.close();
     firstPush.close();

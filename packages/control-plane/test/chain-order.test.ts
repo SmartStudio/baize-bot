@@ -1,4 +1,4 @@
-import { AccountId, AccountListResponse, LoginAttemptId, type ServerPush } from "@baize/shared";
+import { AccountId, AccountListResponse, CreateBotResponse, LoginAttemptId, type ServerPush } from "@baize/shared";
 import { expect, it, vi } from "vitest";
 import { accounts, computers } from "../src/db/schema.js";
 import { hashSecret, newId } from "../src/ids.js";
@@ -113,14 +113,14 @@ it("高 1：旧连接报甲改名成乙、停在找 known 行那一步，新连�
     s.stale.send({ type: "login_state", accountId: s.a, state: { login: "valid", handle: "@B" } });
     await gate.reached;
     const fresh = await s.reconnect();
-    fresh.send({ type: "login_state", accountId: s.b, state: { login: "expired" } });
     gate.release();
 
     expect(await s.stale.closed(), "旧连接做完自己那条才被顶掉").toBe(4000);
+    await expectHello(fresh);
+    fresh.send({ type: "login_state", accountId: s.b, state: { login: "expired" } });
     // 过期的推送是快照加一条失败通知，通知是它的最后一条。
     const written = await collect(s.push, s.b, (pushed) => pushed.type === "notify" && pushed.notice.kind === "failed");
     expect(written, "旧连接的合并先落，乙先被记成 valid，然后才是新连接的过期").toEqual(["valid:@B", "expired:@B"]);
-    await expectHello(fresh);
     await fresh.expect("config");
     fresh.send(s.sentinel("sentinel"));
     const late = await collect(
@@ -144,6 +144,7 @@ it("高 2：旧 hello 的 key 轮换已落库、返回晚到，新 hello 排在�
   const computer = await makeComputer(database.db, user.id);
   const client = server.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小轮" })).json());
   const stale = await openAgent(server.server.port);
   const gate = gated.arm(/update "computers" set "gateway_key_hash"/, "after");
   let fresh: AgentClient | null = null;
@@ -158,8 +159,15 @@ it("高 2：旧 hello 的 key 轮换已落库、返回晚到，新 hello 排在�
     const current = await expectHello(fresh);
     const [row] = await database.db.select({ keyHash: computers.gatewayKeyHash }).from(computers);
     expect(row?.keyHash, "库里的 key 是新连接那把").toBe(hashSecret(current.config.modelGateway.apiKey));
+    expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "轮换后派活" })).status).toBe(201);
+    const prompt = await fresh.expect("prompt");
     const gateway = (key: string) =>
-      fetch(`${client.origin}/gateway/v1/models`, { headers: { Authorization: `Bearer ${key}` } });
+      fetch(`${client.origin}/gateway/v1/models`, {
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "x-baize-lane": `${created.bot.id}/${created.group.id}/${prompt.lane.epoch}`,
+        },
+      });
     expect((await gateway(current.config.modelGateway.apiKey)).status, "新连接的 key 能过网关").toBe(200);
     expect((await gateway(old.config.modelGateway.apiKey)).status, "旧连接的 key 已作废").toBe(401);
   } finally {
@@ -179,15 +187,15 @@ async function lateReturn(
   s.stale.send({ type: "login_state", accountId: s.a, state: staleState });
   await held.reached;
   const fresh = await s.reconnect();
-  fresh.send({ type: "login_state", accountId: s.a, state: { login: "valid", handle: "@fresh" } });
   held.release();
 
+  await expectHello(fresh);
+  fresh.send({ type: "login_state", accountId: s.a, state: { login: "valid", handle: "@fresh" } });
   const before = await collect(
     s.push,
     s.a,
     (pushed) => pushed.type === "account_updated" && pushed.account.id === s.a && pushed.account.handle === "@fresh",
   );
-  await expectHello(fresh);
   await fresh.expect("config");
   fresh.send(s.sentinel("sentinel"));
   const late = await collect(s.push, s.a, (pushed) => pushed.type === "login_failed" && pushed.attempt === "sentinel");
@@ -259,15 +267,16 @@ it("中 2：旧连接的登录失败已进 handler，新连接报 valid：失败
     s.stale.send(failed(s.a, "old-failed"));
     await gate.reached;
     const fresh = await s.reconnect();
-    fresh.send({ type: "login_state", accountId: s.a, state: { login: "valid", handle: "@fresh" } });
     gate.release();
 
+    expect(await s.stale.closed(), "旧连接的失败帧处理完才轮到新 hello").toBe(4000);
+    await expectHello(fresh);
+    fresh.send({ type: "login_state", accountId: s.a, state: { login: "valid", handle: "@fresh" } });
     const before = await collect(
       s.push,
       s.a,
       (pushed) => pushed.type === "account_updated" && pushed.account.id === s.a && pushed.account.handle === "@fresh",
     );
-    await expectHello(fresh);
     await fresh.expect("config");
     fresh.send(s.sentinel("sentinel"));
     const late = await collect(

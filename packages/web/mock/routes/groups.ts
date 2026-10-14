@@ -1,4 +1,4 @@
-import { CreateGroupRequest, DecideApprovalRequest, SendMessageRequest, UpdateTaskRequest } from "@baize/shared";
+import { BotId, CreateGroupRequest, DecideApprovalRequest, SendMessageRequest, UpdateTaskRequest } from "@baize/shared";
 import {
   appendMessage,
   approvals,
@@ -24,6 +24,7 @@ import {
   settleLatestPending,
   streamBotReply,
   tasks,
+  voidLatestPendingForBot,
   writeTask,
   type ApprovalDecision,
 } from "../state.js";
@@ -133,6 +134,10 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
             send(res, 200, { message });
           } else {
             const responder = responderOf(groupId, mentions);
+            if (responder !== null) {
+              const voided = voidLatestPendingForBot(groupId, responder);
+              if (voided !== null) push({ type: "approval_updated", approval: voided });
+            }
             if (responder === null) {
               const note = appendMessage(groupId, { kind: "system", text: "没人接这句话。@ 一个 Bot 派活。" });
               push({ type: "message", message: note });
@@ -144,9 +149,19 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
                 process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
               });
               const group = groups.get(groupId);
-              const learned =
-                group !== undefined && !isTeamGroup(group) ? learnFrom(responder, text, message.id) : null;
-              if (learned !== null) push({ type: "preference_updated", preference: learned });
+              const learned = group !== undefined && !isTeamGroup(group) ? learnFrom(text) : null;
+              if (learned !== null) {
+                const card = appendMessage(groupId, {
+                  kind: "preference_offer",
+                  botId: BotId.parse(responder),
+                  text: learned,
+                  private: false,
+                  sourceMessageId: message.id,
+                  status: "offered",
+                  preferenceId: null,
+                });
+                push({ type: "message", message: card });
+              }
               send(res, 200, { message });
             }
           }

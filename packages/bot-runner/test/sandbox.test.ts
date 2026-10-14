@@ -3,19 +3,26 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { createServer as createHttpServer } from "node:http";
 import { connect, createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { BotId, ComputerId, GroupId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { decide } from "../src/gate.js";
-import { botDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
-import { bwrapArgs, createSandboxedBash, sandboxKind, sandboxProfile, whitelistEnv } from "../src/sandbox.js";
+import { decide, type GateAccess, type GateCall } from "../src/gate.js";
+import { botDirs, ensureBotDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
+import {
+  bwrapArgs,
+  createSandboxedBash,
+  otherBotDirs,
+  sandboxKind,
+  sandboxProfile,
+  whitelistEnv,
+} from "../src/sandbox.js";
 
 // 照运行器的布局 <dataDir>/<botId>/work：bwrap 把数据目录下别的目录都当别的 Bot 盖住。
 const dataDir = mkdtempSync(join(tmpdir(), "baize-sandbox-perf-"));
 const workDir = join(dataDir, "bot-1", "work");
-mkdirSync(workDir, { recursive: true });
+ensureBotDirs(botDirs(dataDir, BotId.parse("bot-1")));
 const zones: ForbiddenZones = forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), join(dataDir, "chrome-profile"));
 
 afterAll(() => {
@@ -116,6 +123,184 @@ const runInSandbox = (command: string, network = false) =>
   );
 
 describe("bash 沙箱性能", () => {
+  it.skipIf(process.platform !== "darwin")(
+    "数据根元数据可读：绝对路径的 node、git、mkdir 和共享产出正常，其他 Bot 仍隔离",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-metadata-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const other = ensureBotDirs(botDirs(root, BotId.parse("bot-2")));
+        const script = join(dirs.workDir, "hello.cjs");
+        const nested = join(dirs.workDir, "nested", "child");
+        const shared = join(dirs.sharedDir, "delivery.txt");
+        const secret = join(other.agentDir, "secret.txt");
+        writeFileSync(script, 'process.stdout.write("node-ok")');
+        writeFileSync(secret, "other-bot-secret");
+        const profile = sandboxProfile(dirs.workDir, { network: false, writePaths: [] }, forbiddenZones(dirs, null));
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: dirs.workDir,
+            encoding: "utf8",
+            env: whitelistEnv(process.env, dirs.workDir, join(dirs.workDir, ".tmp")),
+          });
+        for (const [command, output] of [
+          [`${shellQuote(process.execPath)} ${shellQuote(script)}`, "node-ok"],
+          [`git init -q ${shellQuote(dirs.workDir)} && git -C ${shellQuote(dirs.workDir)} status --short`, "hello.cjs"],
+          [`mkdir -p ${shellQuote(nested)} && printf mkdir-ok`, "mkdir-ok"],
+          [`printf shared-ok > ${shellQuote(shared)} && cat ${shellQuote(shared)}`, "shared-ok"],
+          [
+            `rsync ${shellQuote(script)} ${shellQuote(dirs.sharedDir)}/ && cat ${shellQuote(join(dirs.sharedDir, "hello.cjs"))}`,
+            "node-ok",
+          ],
+        ] as const) {
+          const result = run(command);
+          expect(result.status, `${command}\n${result.stderr}`).toBe(0);
+          expect(result.stdout).toContain(output);
+        }
+        expect(existsSync(nested)).toBe(true);
+        expect(readFileSync(shared, "utf8")).toBe("shared-ok");
+        const metadata = run(`stat ${shellQuote(root)}`);
+        expect(metadata.status, metadata.stderr).toBe(0);
+        for (const command of [
+          `cat ${shellQuote(secret)}`,
+          `stat ${shellQuote(other.agentDir)}`,
+          `ls ${shellQuote(root)}`,
+        ]) {
+          const denied = run(command);
+          expect(denied.status, denied.stderr).not.toBe(0);
+          expect(denied.stderr).toMatch(/operation not permitted/i);
+          expect(denied.stdout).not.toContain("other-bot-secret");
+        }
+        expect(readFileSync(secret, "utf8")).toBe("other-bot-secret");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "darwin")("批准数据根及祖先的写权限也不能写其他 Bot，本 Bot 和共享区仍可写", () => {
+    const root = mkdtempSync(join(homedir(), "baize-seatbelt-ancestor-"));
+    try {
+      const data = join(root, "data");
+      const dirs = ensureBotDirs(botDirs(data, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(data, BotId.parse("bot-2")));
+      const secret = join(other.agentDir, "secret.txt");
+      const leaked = join(other.workDir, "leak.txt");
+      writeFileSync(secret, "other-bot-secret");
+      for (const approved of [data, root, homedir()]) {
+        const profile = sandboxProfile(
+          dirs.workDir,
+          { network: false, writePaths: [approved] },
+          forbiddenZones(dirs, null),
+        );
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: dirs.workDir,
+            encoding: "utf8",
+          });
+        for (const target of [secret, leaked]) {
+          const denied = run(`printf overwritten > ${shellQuote(target)}`);
+          expect(denied.status, `${approved}: ${denied.stderr}`).not.toBe(0);
+          expect(denied.stderr).toMatch(/operation not permitted/i);
+        }
+        for (const base of [dirs.workDir, dirs.sharedDir]) {
+          const target = join(base, "allowed.txt");
+          const allowed = run(`printf own-shared-ok > ${shellQuote(target)} && cat ${shellQuote(target)}`);
+          expect(allowed.status, allowed.stderr).toBe(0);
+          expect(allowed.stdout).toBe("own-shared-ok");
+        }
+      }
+      expect(readFileSync(secret, "utf8")).toBe("other-bot-secret");
+      expect(existsSync(leaked)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "darwin")("共享区和工作目录的根不能删除或替换，内部文件仍可写", async () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-root-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const sandbox = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null));
+      for (const [index, path] of [dirs.sharedDir, dirs.workDir].entries()) {
+        await blocked(
+          sandbox.tool.execute(
+            `root-${index}`,
+            { command: `rm -rf ${shellQuote(path)}` },
+            undefined,
+            undefined,
+            undefined as never,
+          ),
+          "不能删掉允许写文件的根目录",
+        );
+        expect(existsSync(path)).toBe(true);
+        const file = join(path, "normal.txt");
+        const written = await sandbox.tool.execute(
+          `file-${index}`,
+          { command: `printf normal-content > ${shellQuote(file)} && cat ${shellQuote(file)}` },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        expect(written.isError).not.toBe(true);
+        expect(JSON.stringify(written.content)).toContain("normal-content");
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "darwin")("seatbelt 真机隔离其他 Bot，共享区可读写，草稿和 Chrome 禁区仍拒绝", () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-isolation-"));
+    try {
+      const data = join(root, "data");
+      const dirs = ensureBotDirs(botDirs(data, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(data, BotId.parse("bot-2")));
+      const profileDir = join(data, "chrome-profile");
+      mkdirSync(profileDir);
+      writeFileSync(join(dirs.agentDir, "own.txt"), "own-agent-content");
+      writeFileSync(join(other.workDir, "secret.txt"), "other-bot-secret");
+      writeFileSync(join(profileDir, "Cookies"), "chrome-secret");
+      const alias = join(root, "data-alias");
+      symlinkSync(data, alias);
+      for (const dataPath of [data, alias]) {
+        const visible = botDirs(dataPath, BotId.parse("bot-1"));
+        const profile = sandboxProfile(
+          visible.workDir,
+          { network: false, writePaths: [] },
+          forbiddenZones(visible, profileDir),
+        );
+        const run = (command: string) =>
+          spawnSync("/usr/bin/sandbox-exec", ["-p", profile, "/bin/bash", "-c", command], {
+            cwd: visible.workDir,
+            encoding: "utf8",
+          });
+        const own = run(`cat ${shellQuote(join(visible.agentDir, "own.txt"))}`);
+        expect(own.status, own.stderr).toBe(0);
+        expect(own.stdout).toBe("own-agent-content");
+        const shared = join(visible.sharedDir, "delivery.txt");
+        const delivered = run(`printf shared-content > ${shellQuote(shared)} && cat ${shellQuote(shared)}`);
+        expect(delivered.status, delivered.stderr).toBe(0);
+        expect(delivered.stdout).toBe("shared-content");
+        for (const command of [
+          `cat ${shellQuote(join(dataPath, "bot-2", "work", "secret.txt"))}`,
+          `printf leak > ${shellQuote(join(dataPath, "bot-2", "work", "leak.txt"))}`,
+          `printf changed > ${shellQuote(join(visible.draftsDir, "copy.png"))}`,
+          `cat ${shellQuote(join(profileDir, "Cookies"))}`,
+        ]) {
+          const denied = run(command);
+          expect(denied.status, command).not.toBe(0);
+          expect(denied.stderr, command).toMatch(/operation not permitted/i);
+          expect(denied.stdout, command).not.toMatch(/other-bot-secret|chrome-secret/);
+        }
+      }
+      expect(existsSync(join(other.workDir, "leak.txt"))).toBe(false);
+      expect(existsSync(join(dirs.draftsDir, "copy.png"))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(process.platform !== "darwin")("放宽禁区祖先写权限后仍不能写禁区", () => {
     const sandboxRoot = mkdtempSync(join(tmpdir(), "baize-sandbox-forbidden-"));
     try {
@@ -448,6 +633,63 @@ describe("bash 沙箱性能", () => {
     expect(JSON.stringify(read.content)).toContain("approved-bytes");
   });
 
+  it.skipIf(process.platform !== "darwin")(
+    "Bot 目录的私有部分批了也写不进，所以闸门拒绝；工作目录里的写闸门放行、沙箱真写成功",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-seatbelt-own-private-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const botDir = dirname(dirs.workDir);
+        const ownZones = forbiddenZones(dirs, null);
+        const gateCall = (command: string): GateCall => ({
+          toolName: "bash",
+          input: { command },
+          workDir: dirs.workDir,
+          zones: ownZones,
+          groupId: GroupId.parse("group-1"),
+          computerId: ComputerId.parse("computer-1"),
+          platform: "darwin",
+          sandbox: "seatbelt",
+          source: null,
+          routine: null,
+        });
+        const runIn = (access: GateAccess, command: string) =>
+          spawnSync(
+            "/usr/bin/sandbox-exec",
+            ["-p", sandboxProfile(dirs.workDir, access, ownZones), "/bin/bash", "-c", command],
+            {
+              cwd: dirs.workDir,
+              encoding: "utf8",
+            },
+          );
+
+        const inWork = join(dirs.workDir, "approved.txt");
+        const writeWork = `printf work-ok > ${shellQuote(inWork)}`;
+        const allowed = decide(gateCall(writeWork), [], []);
+        expect(allowed.verdict).toBe("allow");
+        const written = runIn(allowed.access, `${writeWork} && cat ${shellQuote(inWork)}`);
+        expect(written.status, written.stderr).toBe(0);
+        expect(written.stdout).toBe("work-ok");
+
+        for (const path of [
+          join(dirs.agentDir, "note.txt"),
+          join(dirs.skillsDir, "n.txt"),
+          join(dirs.sessionDir, "n.txt"),
+          join(botDir, "top.txt"),
+        ]) {
+          const command = `printf swapped > ${shellQuote(path)}`;
+          expect(decide(gateCall(command), [], []).verdict, path).toBe("deny");
+          const approved = runIn({ network: false, writePaths: [path] }, command);
+          expect(approved.status, `${path}: 批准写也应被沙箱拒绝`).not.toBe(0);
+          expect(approved.stderr).toMatch(/operation not permitted/i);
+          expect(existsSync(path)).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")("mach-lookup 白名单支持常用 CLI，curl 走受控报错路径", () => {
     const git = spawnSync("/usr/bin/which", ["git"], { encoding: "utf8" }).stdout.trim();
     const python = spawnSync("/usr/bin/which", ["python3"], { encoding: "utf8" }).stdout.trim();
@@ -649,11 +891,25 @@ describe("bash 沙箱性能", () => {
 });
 
 describe("bwrap 参数", () => {
+  it.each(["shared", "bot", "work"])("%s 根预先指向其他 Bot 时拒绝配置", (kind) => {
+    const root = mkdtempSync(join(tmpdir(), "baize-root-config-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const other = ensureBotDirs(botDirs(root, BotId.parse("bot-2")));
+      const path = kind === "shared" ? dirs.sharedDir : kind === "bot" ? join(root, "bot-1") : dirs.workDir;
+      rmSync(path, { recursive: true });
+      symlinkSync(kind === "work" ? other.workDir : join(root, "bot-2"), path);
+      expect(() => forbiddenZones(dirs, null)).toThrow(/目录隔离配置无效/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("bwrap 参数：禁区盖在最上面，批准的写路径可写，批准 network 时不断网", () => {
     const work = "/data/bot-1/work";
     const forbidden = ["/home/node/.ssh", "/data/bot-1/work/.ssh", "/data/bot-2", "/outside/chrome-profile"];
     const readOnly = ["/data/bot-1/drafts"];
-    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden, readOnly)).toEqual([
+    expect(bwrapArgs(work, { network: false, writePaths: ["/outside"] }, forbidden, readOnly, "/data/shared")).toEqual([
       "--ro-bind",
       "/",
       "/",
@@ -664,6 +920,9 @@ describe("bwrap 参数", () => {
       "--bind",
       work,
       work,
+      "--bind",
+      "/data/shared",
+      "/data/shared",
       "--bind",
       "/outside",
       "/outside",
@@ -695,9 +954,23 @@ describe("bwrap 参数", () => {
       "--chdir",
       work,
     ]);
-    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly);
+    const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly, "/data/shared");
     expect(networked, "批准 network 的那一次和容器共用网络").not.toContain("--unshare-net");
     expect(networked, "docker 遮住了部分 /proc，新挂 proc 会失败").not.toContain("--proc");
+  });
+
+  it("共享区排除在其他 Bot 屏蔽列表外，并以可写方式绑定", () => {
+    const forbidden = otherBotDirs("/data/bot-1", "/data/shared", [
+      "/data/bot-1",
+      "/data/bot-2",
+      "/data/shared",
+      "/data/chrome-profile",
+    ]);
+    expect(forbidden).toEqual(["/data/bot-2", "/data/chrome-profile"]);
+    const args = bwrapArgs("/data/bot-1/work", { network: false, writePaths: [] }, forbidden, [], "/data/shared");
+    const shared = args.indexOf("/data/shared");
+    expect(args.slice(shared - 1, shared + 2)).toEqual(["--bind", "/data/shared", "/data/shared"]);
+    expect(args.filter((arg) => arg === "/data/shared")).toHaveLength(2);
   });
 });
 
@@ -722,6 +995,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
 
   beforeAll(() => {
     root = mkdtempSync(join(homedir(), ".baize-bwrap-test-"));
+    ensureBotDirs(botDirs(join(root, "data"), BotId.parse("bot-1")));
     botWork = join(root, "data", "bot-1", "work");
     otherBot = join(root, "data", "bot-2");
     fakeHome = join(root, "home");

@@ -12,14 +12,22 @@ import {
   safeStorage,
   session as electronSession,
   Tray,
+  autoUpdater,
+  type MessageBoxOptions,
+  type MessageBoxReturnValue,
   type Rectangle,
   type Session,
 } from "electron";
 import {
   BotListResponse,
   AgentLaunch,
+  AgentStatusLine,
   ComputerTokenResponse,
   GroupListResponse,
+  MeResponse,
+  PairLocalComputerRequest,
+  PairLocalConflictResponse,
+  UserId,
   type ComputerId,
   type NotifyKind,
 } from "@baize/shared";
@@ -32,16 +40,26 @@ import {
   shouldRetryPush,
   type AgentState,
 } from "./agent-state.js";
+import { menuTemplate } from "./menu.js";
 import { normalizedOrigin } from "./origin.js";
 import { receiveServerPush } from "./push.js";
 import { startUiServer } from "./proxy.js";
+import { createUpdater, parseUpdateFeed, resolveUpdateFeed, type Updater } from "./updater.js";
 
 const startedAt = Date.now();
 const DEFAULT_CONTROL_ORIGIN = "http://localhost:3001";
 const AGENT_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME", "SHELL"] as const;
 
-type Settings = { readonly controlOrigin: string };
-type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string };
+// preparing-install 是确认重启后在停代理，窗口照常能关、退出照常等停机；installing 是代理已停好、退出交给 Squirrel。
+type AppPhase = "running" | "preparing-install" | "installing" | "quitting";
+type Settings = { readonly controlOrigin: string; readonly updateFeed?: string };
+type CredentialFile = { readonly computerId: ComputerId; readonly encryptedToken: string; readonly ownerId: UserId };
+type SavedCredentials = { readonly computerId: ComputerId; readonly token: string; readonly ownerId?: UserId };
+type LocalRotation = {
+  readonly child: ChildProcess;
+  readonly result: Promise<"saved" | "save-failed" | "request-failed">;
+  finish(result: "saved" | "save-failed" | "request-failed"): void;
+};
 let mainWindow: BrowserWindow | null = null;
 let menubarWindow: BrowserWindow | null = null;
 let settingsWindow: BrowserWindow | null = null;
@@ -50,11 +68,26 @@ let agentState: AgentState = { status: "none" };
 let pushSocket: WebSocket | null = null;
 let pushRetry: NodeJS.Timeout | null = null;
 let pushGeneration = 0;
-let quitting = false;
-let provisioning: Promise<void> | null = null;
+let phase: AppPhase = "running";
+let provisioning: Promise<"login-required" | undefined> | null = null;
 let controlOrigin = DEFAULT_CONTROL_ORIGIN;
 let uiOrigin = "";
 let authHookInstalled = false;
+let settings: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
+let updater: Updater | null = null;
+let credentialsInvalidated = false;
+let invalidatingCredentials: Promise<void> | null = null;
+let localRotation: LocalRotation | null = null;
+let runningCredentials: {
+  readonly child: ChildProcess;
+  readonly computerId: ComputerId;
+  readonly token: string;
+} | null = null;
+
+function setAgentState(next: AgentState): void {
+  agentState = next;
+  if (updater !== null) installMenu(updater.checkNow);
+}
 
 const logLine = (line: string): void => {
   process.stdout.write(`${line}\n`);
@@ -74,32 +107,40 @@ async function loadSettings(): Promise<Settings> {
   const override = process.argv
     .find((value) => value.startsWith("--control-origin="))
     ?.slice("--control-origin=".length);
-  if (override !== undefined) return { controlOrigin: normalizedOrigin(override) };
+  let stored: Settings = { controlOrigin: DEFAULT_CONTROL_ORIGIN };
   try {
     const value: unknown = JSON.parse(await readFile(settingsPath(), "utf8"));
-    if (typeof value === "object" && value !== null && "controlOrigin" in value) {
-      return { controlOrigin: normalizedOrigin(String(value.controlOrigin)) };
+    if (typeof value === "object" && value !== null) {
+      const updateFeed = "updateFeed" in value ? parseUpdateFeed(value.updateFeed) : undefined;
+      stored = {
+        controlOrigin:
+          "controlOrigin" in value ? normalizedOrigin(String(value.controlOrigin)) : DEFAULT_CONTROL_ORIGIN,
+        ...(updateFeed === undefined ? {} : { updateFeed }),
+      };
     }
   } catch {
     // 首次启动没有设置文件。
   }
-  return { controlOrigin: DEFAULT_CONTROL_ORIGIN };
+  return override === undefined ? stored : { ...stored, controlOrigin: normalizedOrigin(override) };
 }
 
 async function saveSettings(next: Settings): Promise<void> {
   await writeFile(settingsPath(), `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
 }
 
-async function saveCredentials(value: { readonly computerId: ComputerId; readonly token: string }): Promise<void> {
+async function saveCredentials(value: SavedCredentials & { readonly ownerId: UserId }): Promise<void> {
   if (!safeStorage.isEncryptionAvailable()) throw new Error("系统钥匙串不可用，不能安全保存电脑 token");
   const stored: CredentialFile = {
     computerId: value.computerId,
+    ownerId: value.ownerId,
     encryptedToken: safeStorage.encryptString(value.token).toString("base64"),
   };
   await writeFile(credentialsPath(), `${JSON.stringify(stored, null, 2)}\n`, { mode: 0o600 });
+  credentialsInvalidated = false;
 }
 
-async function loadCredentials(): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
+async function loadCredentials(): Promise<SavedCredentials | null> {
+  if (credentialsInvalidated) return null;
   let rawText: string;
   try {
     rawText = await readFile(credentialsPath(), "utf8");
@@ -107,14 +148,22 @@ async function loadCredentials(): Promise<{ readonly computerId: ComputerId; rea
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
+  let raw: unknown;
+  try {
+    raw = JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+  if (typeof raw === "object" && raw !== null && "invalidated" in raw && raw.invalidated === true) return null;
+  if (typeof raw !== "object" || raw === null || !("computerId" in raw) || !("encryptedToken" in raw)) return null;
   if (!safeStorage.isEncryptionAvailable()) throw new Error("系统钥匙串不可用，无法读取电脑 token");
   try {
-    const raw: unknown = JSON.parse(rawText);
-    if (typeof raw !== "object" || raw === null || !("computerId" in raw) || !("encryptedToken" in raw)) return null;
-    return ComputerTokenResponse.parse({
+    const ownerId = "ownerId" in raw ? UserId.parse(raw.ownerId) : undefined;
+    const credentials = ComputerTokenResponse.parse({
       computerId: raw.computerId,
       token: safeStorage.decryptString(Buffer.from(String(raw.encryptedToken), "base64")),
     });
+    return { ...credentials, ...(ownerId === undefined ? {} : { ownerId }) };
   } catch {
     return null;
   }
@@ -154,6 +203,8 @@ export function startAgent(
   timeoutMs = 45_000,
 ): Promise<void> {
   if (agentState.status === "starting" || agentState.status === "online") return Promise.resolve();
+  // 安装更新或退出已经开始，晚到的配对不能再把代理拉起来。
+  if (phase !== "running") return Promise.reject(new AgentReplacedError());
   const launch = AgentLaunch.parse({
     url: agentUrl(controlOrigin),
     computerId: credentials.computerId,
@@ -176,7 +227,8 @@ export function startAgent(
   if (child.pid === undefined || stdin === null || stdout === null || stderr === null) {
     return Promise.reject(new Error("电脑代理没有起来"));
   }
-  agentState = { status: "starting", child };
+  setAgentState({ status: "starting", child });
+  runningCredentials = { child, computerId: credentials.computerId, token: credentials.token };
   logLine(`agent-pid ${child.pid}`);
   return new Promise((resolve, reject) => {
     let pending = "";
@@ -186,7 +238,7 @@ export function startAgent(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (isCurrentAgent(agentState, child)) agentState = { status: "none" };
+      if (isCurrentAgent(agentState, child)) setAgentState({ status: "none" });
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {
@@ -210,32 +262,46 @@ export function startAgent(
       pending = lines.pop() ?? "";
       for (const line of lines) {
         try {
-          const value: unknown = JSON.parse(line.trim());
-          if (
-            !online &&
-            typeof value === "object" &&
-            value !== null &&
-            "type" in value &&
-            value.type === "online" &&
-            isCurrentAgent(agentState, child)
-          ) {
-            online = true;
-            agentState = { status: "online", child };
-            clearTimeout(timer);
-            if (!settled) {
-              settled = true;
-              logLine(`agent-online ${Date.now() - startedAt}`);
-              resolve();
+          const status = AgentStatusLine.safeParse(JSON.parse(line.trim()));
+          if (!status.success || !isCurrentAgent(agentState, child) || agentState.status === "stopping") continue;
+          switch (status.data.type) {
+            case "online":
+              if (online) break;
+              online = true;
+              setAgentState({ status: "online", child });
+              clearTimeout(timer);
+              if (!settled) {
+                settled = true;
+                logLine(`agent-online ${Date.now() - startedAt}`);
+                resolve();
+              }
+              break;
+            case "displaced":
+              if (localRotation?.child !== child) credentialsInvalidated = true;
+              setAgentState({ status: "stopping", child });
+              fail(new AgentReplacedError());
+              void handleDisplaced(child).catch((error: unknown) => {
+                void dialog.showErrorBox("电脑代理不可用", errorText(error));
+              });
+              break;
+            case "upgrade_required":
+              setAgentState({ status: "stopping", child });
+              fail(new AgentReplacedError());
+              void showUpgradeRequired().catch((error: unknown) => logLine(`upgrade-required-dialog ${String(error)}`));
+              break;
+            default: {
+              const unhandled: never = status.data;
+              throw new Error(`未处理的代理状态：${JSON.stringify(unhandled)}`);
             }
           }
         } catch {
-          // 代理的 stdout 允许包含诊断日志，只有完整 JSON 行才是上线标记。
+          // 代理的 stdout 允许包含诊断日志，只有符合 shared 契约的完整 JSON 行才是状态。
         }
       }
     };
     const onError = (error: Error): void => {
       const reportFailure = shouldReportStartFailure(agentState, child);
-      if (isCurrentAgent(agentState, child)) agentState = { status: "none" };
+      if (isCurrentAgent(agentState, child)) setAgentState({ status: "none" });
       if (!reportFailure) {
         fail(new AgentReplacedError());
         return;
@@ -250,7 +316,7 @@ export function startAgent(
       clearTimeout(timer);
       const reportFailure = shouldReportStartFailure(agentState, child);
       const current = isCurrentAgent(agentState, child);
-      if (current) agentState = { status: "none" };
+      if (current) setAgentState({ status: "none" });
       logLine(`agent-exit ${code ?? ""} ${signal ?? ""}`.trim());
       if (online || settled) return;
       fail(reportFailure ? new Error("电脑代理在控制面接纳前退出") : new AgentReplacedError());
@@ -283,16 +349,13 @@ function descendantPids(rootPid: number): number[] {
   return [...found].filter((pid) => pid !== rootPid);
 }
 
-export async function stopAgent(): Promise<void> {
-  const child = currentAgentChild(agentState);
-  if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
-    agentState = { status: "none" };
-    return;
-  }
-  agentState = { status: "stopping", child };
+// 同一个 child 的停机（SIGINT、超时强杀、Chrome 回收）只有这一份，重入的 stopAgent 拿到同一个 Promise。
+const shutdowns = new Map<ChildProcess, Promise<void>>();
+
+async function shutdownChild(child: ChildProcess, pid: number): Promise<void> {
   child.stdin?.end();
   try {
-    process.kill(-child.pid, "SIGINT");
+    process.kill(-pid, "SIGINT");
   } catch {
     child.kill("SIGINT");
   }
@@ -302,20 +365,19 @@ export async function stopAgent(): Promise<void> {
     new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_500)),
   ]);
   if (graceful) return;
-  const descendants = child.pid === undefined ? [] : descendantPids(child.pid);
-  for (const pid of descendants.toReversed()) {
+  for (const descendant of descendantPids(pid).toReversed()) {
     try {
-      process.kill(-pid, "SIGKILL");
+      process.kill(-descendant, "SIGKILL");
     } catch {
       try {
-        process.kill(pid, "SIGKILL");
+        process.kill(descendant, "SIGKILL");
       } catch {
         // 进程可能已经自行退出。
       }
     }
   }
   try {
-    process.kill(-child.pid, "SIGKILL");
+    process.kill(-pid, "SIGKILL");
   } catch {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
@@ -323,20 +385,120 @@ export async function stopAgent(): Promise<void> {
   await reapAgentChrome();
 }
 
+export async function stopAgent(): Promise<void> {
+  const child = currentAgentChild(agentState);
+  if (child === null || child.pid === undefined || child.exitCode !== null || child.signalCode !== null) {
+    setAgentState({ status: "none" });
+  } else {
+    setAgentState({ status: "stopping", child });
+    const pid = child.pid;
+    let done = shutdowns.get(child);
+    if (done === undefined) {
+      done = shutdownChild(child, pid).finally(() => shutdowns.delete(child));
+      shutdowns.set(child, done);
+    }
+    await done;
+  }
+  await Promise.all(shutdowns.values());
+}
+
 async function postLocalComputer(
   session: Session,
-): Promise<{ readonly computerId: ComputerId; readonly token: string }> {
-  const response = await session.fetch(`${uiOrigin}/api/computers/local`, { method: "POST" });
+  confirmDisplace = false,
+  onConfirm?: () => void,
+): Promise<{ readonly computerId: ComputerId; readonly token: string } | null> {
+  if (phase !== "running") return null;
+  if (confirmDisplace) onConfirm?.();
+  const response = await session.fetch(`${uiOrigin}/api/computers/local`, {
+    method: "POST",
+    ...(confirmDisplace
+      ? {
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(PairLocalComputerRequest.parse({ confirmDisplace: true })),
+        }
+      : {}),
+  });
+  if (response.status === 409 && !confirmDisplace) {
+    const conflict = PairLocalConflictResponse.parse(await response.json());
+    if (phase !== "running") return null;
+    const { response: answer } = await showBox({
+      type: "question",
+      message: conflict.error,
+      buttons: ["在这台 Mac 上继续", "取消"],
+      defaultId: 1,
+      cancelId: 1,
+    });
+    return answer === 0 ? postLocalComputer(session, true, onConfirm) : null;
+  }
   if (!response.ok) throw new Error(`申请电脑 token 失败（${response.status}）`);
   return ComputerTokenResponse.parse(await response.json());
 }
 
-async function provision(session: Session): Promise<void> {
-  if (provisioning !== null) return provisioning;
-  provisioning = (async () => {
-    await stopAgent();
-    const credentials = await postLocalComputer(session);
-    await saveCredentials(credentials);
+interface ProvisionIntent {
+  readonly confirmDisplace: boolean;
+  readonly interactive: boolean;
+}
+
+const SILENT: ProvisionIntent = { confirmDisplace: false, interactive: false };
+const MENU_CONNECT: ProvisionIntent = { confirmDisplace: false, interactive: true };
+const DISPLACE_RECONNECT: ProvisionIntent = { confirmDisplace: true, interactive: true };
+
+async function provision(session: Session, intent: ProvisionIntent = SILENT): Promise<void> {
+  if (phase !== "running") return;
+  if (provisioning !== null) {
+    return provisioning.then(
+      () => provision(session, intent),
+      () => provision(session, intent),
+    );
+  }
+  const { confirmDisplace } = intent;
+  const outcome = (async (): Promise<"login-required" | undefined> => {
+    const me = await session.fetch(`${uiOrigin}/api/me`);
+    if (!me.ok) return intent.interactive ? "login-required" : undefined;
+    const ownerId = MeResponse.parse(await me.json()).user.id;
+    await invalidatingCredentials;
+    let credentials = await loadCredentials();
+    if (phase !== "running") return;
+    if (credentials !== null && credentials.ownerId !== ownerId) {
+      await stopAgent();
+      credentials = null;
+    }
+    if (
+      credentials !== null &&
+      (agentState.status === "online" || agentState.status === "starting") &&
+      runningCredentials?.child === currentAgentChild(agentState) &&
+      runningCredentials?.computerId === credentials.computerId &&
+      runningCredentials?.token === credentials.token
+    )
+      return;
+    if (credentials !== null && !confirmDisplace) {
+      logLine(`agent-credentials-reused ${agentState.status}`);
+    } else {
+      const attempt = { rotation: null as LocalRotation | null };
+      try {
+        credentials = await postLocalComputer(session, confirmDisplace, () => {
+          const child = currentAgentChild(agentState);
+          if (child === null) return;
+          let finish!: LocalRotation["finish"];
+          const result = new Promise<"saved" | "save-failed" | "request-failed">((resolve) => {
+            finish = resolve;
+          });
+          localRotation = attempt.rotation = { child, result, finish };
+        });
+        if (credentials === null) return;
+        try {
+          await saveCredentials({ ...credentials, ownerId });
+        } catch (error) {
+          attempt.rotation?.finish("save-failed");
+          throw error;
+        }
+        attempt.rotation?.finish("saved");
+      } finally {
+        attempt.rotation?.finish("request-failed");
+      }
+      if (phase !== "running") return;
+      await stopAgent();
+    }
     try {
       await startAgent(credentials);
     } catch (error) {
@@ -348,7 +510,76 @@ async function provision(session: Session): Promise<void> {
   })().finally(() => {
     provisioning = null;
   });
-  return provisioning;
+  provisioning = outcome;
+  if ((await outcome) === "login-required" && phase === "running") {
+    logLine("agent-reconnect-login-required");
+    await showBox({ type: "info", message: "请先登录白泽，再在这台 Mac 上连接" });
+  }
+}
+
+function requestConnection(session: Session, intent: ProvisionIntent = SILENT): void {
+  void provision(session, intent).catch((error: unknown) => {
+    if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
+  });
+}
+
+async function handleDisplaced(child: ChildProcess): Promise<void> {
+  // 确认配对会先关旧连接；等存盘结果才能区分本机换 token 与另一台 Mac 顶号。
+  const rotation = localRotation?.child === child ? await localRotation.result : null;
+  if (rotation === "saved") {
+    if (isCurrentAgent(agentState, child)) await stopAgent();
+    return;
+  }
+  if (rotation !== null) credentialsInvalidated = true;
+  const invalidation = (async () => {
+    try {
+      await unlink(credentialsPath()).catch(async (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        logLine(`电脑凭据删除失败 ${errorText(error)}`);
+        await writeFile(credentialsPath(), `${JSON.stringify({ invalidated: true })}\n`, { mode: 0o600 }).catch(
+          (writeError: unknown) => {
+            logLine(`电脑凭据失效标记保存失败 ${errorText(writeError)}`);
+          },
+        );
+      });
+    } finally {
+      if (isCurrentAgent(agentState, child)) await stopAgent();
+    }
+  })();
+  invalidatingCredentials = invalidation;
+  try {
+    await invalidation;
+  } finally {
+    if (invalidatingCredentials === invalidation) invalidatingCredentials = null;
+  }
+  if (phase !== "running") return;
+  const message =
+    rotation === "save-failed"
+      ? "凭据保存失败，请重新登录"
+      : rotation === "request-failed"
+        ? "这台 Mac 重新连接时出错，本机已停止，请再点一次「在这台 Mac 上重新连接」"
+        : "这个账号已在另一台 Mac 上连接，本机已停止";
+  const { response } = await showBox({
+    type: "info",
+    message,
+    buttons: ["在这台 Mac 上重新连接", "知道了"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response === 0) requestConnection(electronSession.defaultSession, DISPLACE_RECONNECT);
+}
+
+// 控制面以 4003 拒绝这一版代理，代理自己停机；凭据仍然有效，装好新版后照常复用。
+async function showUpgradeRequired(): Promise<void> {
+  if (phase !== "running") return;
+  const { response } = await showBox({
+    type: "warning",
+    message: "这台 Mac 上的白泽版本太旧，控制面不再接受它连接，请更新白泽",
+    buttons: updater === null ? ["知道了"] : ["检查更新", "知道了"],
+    defaultId: 0,
+    cancelId: updater === null ? 0 : 1,
+  });
+  if (updater !== null && response === 0) updater.checkNow();
 }
 
 async function refreshPending(session: Session): Promise<void> {
@@ -377,7 +608,7 @@ export function connectPush(session: Session, origin = uiOrigin): void {
   pushSocket = null;
   previous?.close();
   void session.cookies.get({ url: origin }).then((cookies) => {
-    if (quitting || generation !== pushGeneration) return;
+    if (phase !== "running" || generation !== pushGeneration) return;
     const url = new URL("/api/ws", origin);
     url.protocol = "ws:";
     const socket = new WebSocket(url, {
@@ -391,7 +622,7 @@ export function connectPush(session: Session, origin = uiOrigin): void {
       });
     });
     socket.on("close", () => {
-      if (!shouldRetryPush(quitting, pushSocket, socket)) return;
+      if (!shouldRetryPush(phase !== "running", pushSocket, socket)) return;
       pushSocket = null;
       pushRetry = setTimeout(() => connectPush(session, origin), 1_000);
     });
@@ -437,15 +668,15 @@ function showMenubar(): void {
   menubarWindow.focus();
 }
 
+const closeHidesMenubar = (): boolean => phase === "running" || phase === "preparing-install";
+
 async function createWindows(session: Session): Promise<void> {
   // 登录页一加载完就能提交，钩子晚于 loadURL 装上会漏掉这次登录，代理就永远不启动。
   if (!authHookInstalled) {
     authHookInstalled = true;
     session.webRequest.onCompleted({ urls: [`${uiOrigin}/api/auth/login`, `${uiOrigin}/api/register`] }, (details) => {
       if (details.statusCode >= 200 && details.statusCode < 300) {
-        void provision(session).catch((error: unknown) => {
-          if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
-        });
+        requestConnection(session);
       }
     });
   }
@@ -487,14 +718,17 @@ async function createWindows(session: Session): Promise<void> {
     menubarWindow = window;
     window.on("blur", () => {
       setTimeout(() => {
-        if (!quitting && !window.isFocused()) window.hide();
+        if (!window.isDestroyed() && closeHidesMenubar() && !window.isFocused()) window.hide();
       }, 0);
     });
     window.on("close", (event) => {
-      if (!quitting) {
+      if (closeHidesMenubar()) {
         event.preventDefault();
         window.hide();
       }
+    });
+    window.on("closed", () => {
+      if (menubarWindow === window) menubarWindow = null;
     });
     await window.loadURL(`${uiOrigin}/menubar`);
   }
@@ -525,7 +759,7 @@ function openSettings(): void {
     event.preventDefault();
     void (async () => {
       const next = normalizedOrigin(new URL(target).searchParams.get("origin") ?? "");
-      await saveSettings({ controlOrigin: next });
+      await saveSettings({ ...settings, controlOrigin: next });
       await unlink(credentialsPath()).catch((error: unknown) => {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       });
@@ -541,33 +775,108 @@ function openSettings(): void {
   void settingsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(settingsHtml(controlOrigin))}`);
 }
 
-function installMenu(): void {
+function installMenu(checkForUpdates: () => void): void {
   Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      {
-        label: "白泽",
-        submenu: [
-          { label: "控制面设置…", click: openSettings },
-          { type: "separator" },
-          { role: "quit", label: "退出白泽" },
-        ],
-      },
-      { role: "editMenu" },
-      { role: "windowMenu" },
-    ]),
+    Menu.buildFromTemplate(
+      menuTemplate({
+        packaged: app.isPackaged,
+        version: app.getVersion(),
+        openAtLogin: () => app.getLoginItemSettings().openAtLogin,
+        setOpenAtLogin: (openAtLogin) => app.setLoginItemSettings({ openAtLogin }),
+        checkForUpdates,
+        openSettings,
+        agentStatus: agentState.status,
+        reconnect: () => requestConnection(electronSession.defaultSession, MENU_CONNECT),
+      }),
+    ),
   );
+}
+
+function showBox(options: MessageBoxOptions): Promise<MessageBoxReturnValue> {
+  return mainWindow !== null && !mainWindow.isDestroyed()
+    ? dialog.showMessageBox(mainWindow, options)
+    : dialog.showMessageBox(options);
+}
+
+function stopPush(): void {
+  if (pushRetry !== null) clearTimeout(pushRetry);
+  pushGeneration += 1;
+  pushSocket?.close();
+}
+
+// quitAndInstall 先关全部窗口，这条路径不经过 before-quit，所以相位要在交给 Squirrel 前切走。
+// 停代理期间只是 preparing-install，外部退出仍走普通退出的停机等待。
+async function prepareInstall(): Promise<void> {
+  if (phase !== "running") throw new Error("应用正在退出或已在安装，不再开始新一轮安装");
+  phase = "preparing-install";
+  stopPush();
+  await stopAgent();
+}
+
+function commitInstall(): void {
+  if (phase === "preparing-install") phase = "installing";
+}
+
+// Squirrel 失败时窗口可能已被关掉，恢复要把窗口补回来，托盘和 Dock 才有可用的对象。
+function resumeAfterFailedInstall(): void {
+  if (phase === "quitting") return;
+  phase = "running";
+  const session = electronSession.defaultSession;
+  void createWindows(session).catch((error: unknown) => logLine(`窗口恢复失败 ${errorText(error)}`));
+  void loadCredentials()
+    .then((credentials) => (credentials === null ? undefined : launchSavedAgent(session, credentials)))
+    .catch((error: unknown) => void dialog.showErrorBox("电脑代理不可用", errorText(error)));
+}
+
+function launchSavedAgent(
+  session: Session,
+  credentials: { readonly computerId: ComputerId; readonly token: string },
+): void {
+  void startAgent(credentials).catch((error: unknown) => {
+    if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
+  });
+  void refreshPending(session);
+  connectPush(session);
+}
+
+function createAppUpdater(): Updater {
+  return createUpdater({
+    packaged: app.isPackaged,
+    feedUrl: resolveUpdateFeed(settings, controlOrigin, process.arch),
+    source: autoUpdater,
+    askRestart: async ({ message, detail }) => {
+      const { response } = await showBox({
+        type: "info",
+        message,
+        detail,
+        buttons: ["现在重启", "稍后"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      return response === 0;
+    },
+    inform: (level, text) => void showBox({ type: level, message: text }),
+    prepareInstall,
+    commitInstall,
+    resumeAfterFailedInstall,
+    log: logLine,
+  });
 }
 
 async function main(): Promise<void> {
   await app.whenReady();
-  ({ controlOrigin } = await loadSettings());
+  settings = await loadSettings();
+  ({ controlOrigin } = settings);
   const uiServer = await startUiServer(desktopPaths().web, controlOrigin);
   uiOrigin = uiServer.origin;
   const session = electronSession.defaultSession;
   tray = new Tray(trayImage());
   tray.setToolTip("白泽");
   tray.on("click", () => (menubarWindow?.isVisible() ? menubarWindow.hide() : showMenubar()));
-  installMenu();
+  const appUpdater = createAppUpdater();
+  updater = appUpdater;
+  app.setAboutPanelOptions({ applicationName: "白泽", applicationVersion: app.getVersion() });
+  installMenu(appUpdater.checkNow);
   await createWindows(session);
   let credentials: { readonly computerId: ComputerId; readonly token: string } | null = null;
   try {
@@ -576,11 +885,7 @@ async function main(): Promise<void> {
     void dialog.showErrorBox("电脑代理不可用", errorText(error));
   }
   if (credentials !== null) {
-    void startAgent(credentials).catch((error: unknown) => {
-      if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
-    });
-    void refreshPending(session);
-    connectPush(session);
+    launchSavedAgent(session, credentials);
   } else {
     void session
       .fetch(`${uiOrigin}/api/me`)
@@ -594,16 +899,24 @@ async function main(): Promise<void> {
     if (mainWindow === null) void createWindows(session);
     else mainWindow.show();
   });
+  appUpdater.start();
 }
 
 app.on("before-quit", (event) => {
+  // 更新安装时代理已停，退出交给 Squirrel，不拦也不 app.exit。
+  if (phase === "installing") return;
   event.preventDefault();
-  if (quitting) return;
-  quitting = true;
-  if (pushRetry !== null) clearTimeout(pushRetry);
-  pushGeneration += 1;
-  pushSocket?.close();
+  if (phase === "quitting") return;
+  phase = "quitting";
+  updater?.stop();
+  stopPush();
   void stopAgent().finally(() => app.exit(0));
+});
+
+// 应用没注册这个事件时 Electron 在窗口全关后默认 app.quit()。quitAndInstall 关完窗口，成功由 Squirrel 的
+// [NSApp terminate:] 结束进程，失败的 error 事件在窗口全关之后才到，默认退出会抢在它前面把恢复出来的窗口关掉。
+app.on("window-all-closed", () => {
+  if (phase !== "installing") app.quit();
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => app.quit());

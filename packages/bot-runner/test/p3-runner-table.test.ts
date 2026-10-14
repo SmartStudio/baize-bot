@@ -20,6 +20,7 @@ import { createRunner, type PromptMessage, type Runner, type RunnerConfig } from
 import { composeTablePrompt, createPokerResults } from "../src/table.js";
 import { tablePersona } from "../src/persona.js";
 import { startGateway, type Gateway } from "./fixtures/gateway.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 import { scriptedUpstream, type ChatCompletionRequest, type ScriptedTurn } from "./fixtures/openai-sse.js";
 
 const view = (): PokerSeatView =>
@@ -57,6 +58,7 @@ const prompt = (role: TablePrompt["role"] = "player", overrides: Partial<PromptM
   runId: RunId.parse("run-table"),
   botId: BotId.parse("bot-table"),
   groupId: GroupId.parse("group-table"),
+  lane: { epoch: 1, heads: {} },
   messageId: MessageId.parse("message-table"),
   text: "不该进入牌桌的当前群消息",
   origin: { kind: "table" },
@@ -150,6 +152,8 @@ async function harness(
     preferences: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-table-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
+    mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
+    hub: { baseUrl: "http://127.0.0.1:9/hub/v1" },
     dataDir,
     ...overrides,
     send: (message) => {
@@ -158,10 +162,15 @@ async function harness(
     },
   });
   resources.push({ runner, gateway, dataDir });
-  return { runner, requests, sent, dataDir };
+  return { runner, requests, sent, dataDir, gateway };
 }
 
 describe("p3-runner-table 验收", () => {
+  it("牌桌模型请求带本次 run 的租约头", async () => {
+    const h = await harness();
+    await h.runner.prompt(prompt("advisor", { lane: { epoch: 6, heads: {} } }));
+    expect(h.gateway.laneHeaders).toEqual(["bot-table/group-table/6"]);
+  });
   it("player 的 prompt 里有自己的底牌和合法动作，没有任务卡、成员名单和群历史", () => {
     const text = composeTablePrompt(prompt());
     for (const value of [
@@ -262,6 +271,7 @@ describe("p3-runner-table 验收", () => {
         connection: async () => {
           throw new Error("牌桌不应连接浏览器");
         },
+        present: NO_PRESENT,
       },
       tools: [
         {
@@ -270,6 +280,7 @@ describe("p3-runner-table 验收", () => {
           name: "秘密 MCP",
           url: "http://127.0.0.1:9/mcp",
           authorization: null,
+          localOnly: true,
           status: "ready",
           assignedBotIds: [BotId.parse("bot-table")],
           operations: [{ name: "secret_mcp", description: "", inputSchema: {}, needsApproval: false }],
