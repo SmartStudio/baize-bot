@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { McpHttpUrl } from "./mcp-discovery.js";
+import { LiveId } from "./live-id.js";
+import { LiveSession } from "./live.js";
 import { PokerTableView } from "./poker.js";
 import {
   Account,
@@ -237,7 +239,7 @@ export const ReturnPlanResponse = z.object({ plan: ContentPlan });
 
 // GET /api/accounts
 export const AccountListResponse = z.object({ accounts: z.array(Account) });
-// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行，200。浏览器平台只能挂本机电脑。
+// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行并挂到这次选的电脑上，200。
 export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
 export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
@@ -729,5 +731,12 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("preference_deleted"), preferenceId: PreferenceId, botId: BotId }),
   // 手册每次写入（用户改、草稿批准追加改动）都推整本。
   z.object({ type: z.literal("brand_updated"), brand: BrandBook }),
+  // 远程画面接管：会话登记或变了推整份，结束推 live_closed。画面本身不走这里，走二进制 socket。
+  z.object({ type: z.literal("live_session"), session: LiveSession }),
+  z.object({ type: z.literal("live_closed"), liveId: LiveId }),
 ]);
 export type ServerPush = z.infer<typeof ServerPush>;
+
+// GET /api/live：当前用户电脑上正在等人的画面，网页刷新后靠它找回。
+export const LiveSessionsResponse = z.object({ sessions: z.array(LiveSession) });
+export type LiveSessionsResponse = z.infer<typeof LiveSessionsResponse>;

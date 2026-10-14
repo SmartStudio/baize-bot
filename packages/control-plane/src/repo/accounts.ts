@@ -162,13 +162,11 @@ function loginChangedAt(login: Account["login"]): SQL {
 }
 
 export type CreatePlaceholderResult =
-  | { readonly kind: "created" | "existing"; readonly account: Account }
-  | { readonly kind: "no_computer" }
-  | { readonly kind: "remote_computer" };
+  { readonly kind: "created" | "existing"; readonly account: Account } | { readonly kind: "no_computer" };
 
 /**
- * 账号页点「加小红书」：建一个没登录、没名字的占位，扫码回来才有名字。一个人每个平台最多一个占位，
- * 靠部分唯一索引收敛：已经有了就回那一行。
+ * 账号页点「加小红书」：建一个没登录、没名字的占位，登录回来才有名字。一个人每个平台最多一个占位，
+ * 靠部分唯一索引收敛：已经有了就回那一行，挂到这次选的电脑上。
  */
 export async function createPlaceholder(
   db: Db,
@@ -176,13 +174,11 @@ export async function createPlaceholder(
   request: CreateAccountRequest,
 ): Promise<CreatePlaceholderResult> {
   const [computer] = await db
-    .select({ kind: computers.kind })
+    .select({ id: computers.id })
     .from(computers)
     .where(and(eq(computers.id, request.computerId), eq(computers.ownerId, ownerId)))
     .limit(1);
   if (computer === undefined) return { kind: "no_computer" };
-  // 请求只收浏览器平台。远程电脑没有助理浏览器，挂上去登不了也发不了。
-  if (computer.kind === "remote") return { kind: "remote_computer" };
   const id = newId();
   const [row] = await db
     .insert(accounts)
@@ -190,8 +186,8 @@ export async function createPlaceholder(
     .onConflictDoUpdate({
       target: [accounts.ownerId, accounts.platform],
       targetWhere: sql`${accounts.login} = 'none'`,
-      // 什么都不改，只为让 RETURNING 带回已有那行。每人只有一台本机，占位不会在别的电脑上。
-      set: { computerId: sql`${accounts.computerId}` },
+      // 占位还没登录，哪台电脑上都没有它的登录态：用户在另一台电脑上又加一次，就是要在那台上登。
+      set: { computerId: request.computerId },
     })
     .returning();
   if (row === undefined) throw new Error("建账号占位没有返回行");

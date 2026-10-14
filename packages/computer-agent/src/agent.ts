@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { WebSocket } from "ws";
+import { type RawData, WebSocket } from "ws";
 import {
   AGENT_PROTOCOL,
   classifyMcpDiscoveryFailure,
@@ -24,7 +24,9 @@ import {
   type RunnerConfig,
 } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
-import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
+import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome } from "./chrome.js";
+import { createLiveScreen } from "./live-screen.js";
+import { createLogins, defaultLoginPages } from "./login.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
 import { loadInstallId } from "./install-id.js";
 import { WorkAppendChannel } from "./work-append.js";
@@ -52,7 +54,7 @@ export interface AgentOptions {
   readonly runnerStopTimeoutMs?: number;
   /** 换掉真 Chrome 守护。测试用它避免启动图形应用。 */
   readonly makeChrome?: AssistantChromeFactory;
-  /** 一次 browser_login 从收到到回 login_state 的上限，排队和等 Chrome 起来都算在内。 */
+  /** 一次 browser_login 从收到算起多久没登上就回 timed_out，等 Chrome 起来、人在画面上操作都算在内。 */
   readonly loginTimeoutMs?: number;
   /** 测试用断线注入点：持久化完成后、可靠帧发送前调用。 */
   readonly beforeReliableSend?: (frame: UplinkFrame) => void;
@@ -70,6 +72,9 @@ type Link =
   | { readonly phase: "waiting"; readonly timer: NodeJS.Timeout }
   | { readonly phase: "stopped" };
 
+const bytesOf = (data: RawData): Uint8Array =>
+  Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+
 export function startAgent(options: AgentOptions): AgentHandle {
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const backoff = options.backoff ?? defaultBackoff;
@@ -77,12 +82,9 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const dataDir = options.dataDir ?? join(homedir(), ".baize", "bots");
   const makeRunner: RunnerFactory = options.makeRunner ?? ((config) => createRunner(config));
   const runnerStopTimeoutMs = options.runnerStopTimeoutMs ?? 3_000;
-  const loginTimeoutMs = options.loginTimeoutMs ?? 120_000;
+  // 远程登录要等人看到提示、拿出手机扫码或收验证码，2 分钟不够。
+  const loginTimeoutMs = options.loginTimeoutMs ?? 15 * 60_000;
   const chrome = (options.makeChrome ?? startAssistantChrome)({ dataDir, log });
-  const browserConfig: AgentRunnerConfig["browser"] = {
-    profileDir: chrome.profileDir,
-    connection: () => chrome.connection(),
-  };
 
   let link: Link = { phase: "stopped" };
   let stopping = false;
@@ -102,7 +104,21 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const discoveries = new Map<AbortController, Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
-  let loginQueue: Promise<void> = Promise.resolve();
+  const screen = createLiveScreen({
+    chrome,
+    uplink: (bytes, sent) => {
+      if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN || conn === null) return false;
+      link.socket.send(bytes, { binary: true }, () => sent());
+      return true;
+    },
+    log,
+  });
+  const login = createLogins({ chrome, present: screen.present, pages: defaultLoginPages, log }, loginTimeoutMs);
+  const browserConfig: AgentRunnerConfig["browser"] = {
+    profileDir: chrome.profileDir,
+    connection: () => chrome.connection(),
+    present: screen.present,
+  };
   const sendBare = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
       log(`连接不在，丢弃 ${message.type}`);
@@ -367,6 +383,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         stopHeartbeat();
         heartbeat = setInterval(() => sendBare({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
         heartbeat.unref();
+        screen.reconnected();
         return;
       case "config": {
         attachmentConfig = { hub: message.hub, modelGateway: message.modelGateway };
@@ -443,31 +460,21 @@ export function startAgent(options: AgentOptions): AgentHandle {
         runner.pokerResult(message.runId, message.callId, message.result);
         return;
       }
-      case "browser_login": {
-        const deadline = AbortSignal.timeout(loginTimeoutMs);
-        // 到点就不再等这次登录，队列接着走。login 自己也收 deadline，会收起窗口。
-        loginQueue = loginQueue
-          .then(() => {
-            deadline.throwIfAborted();
-            return untilAborted(chrome.login(message.platform, deadline), deadline);
-          })
-          .then((state) => {
-            report({
-              type: "login_state",
-              accountId: message.accountId,
-              state: state.login === "failed" ? { ...state, attempt: message.attempt } : state,
-            });
-          })
+      case "browser_login":
+        void login(message)
           .catch((error: unknown) => {
-            log(`登录 ${message.platform} 失败：${String(error)}`);
+            log(`登录 ${message.platform} 出错：${String(error)}`);
+            return { login: "failed", reason: "window_failed" } as const;
+          })
+          .then((result) => {
+            if (result.login === "abandoned") return;
             report({
               type: "login_state",
               accountId: message.accountId,
-              state: { login: "failed", reason: "window_failed", attempt: message.attempt },
+              state: result.login === "failed" ? { ...result, attempt: message.attempt } : result,
             });
           });
         return;
-      }
       case "pause":
         await runner?.pause(message.botId);
         return;
@@ -477,7 +484,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "publish_draft":
         void publishDraft(message, {
           dataDir,
-          browser: chrome.kind === "local" ? browserConfig : null,
+          browser: browserConfig,
           liveHub: () => {
             if (attachmentConfig === null) throw new Error("附件配置尚未下发");
             return { hub: attachmentConfig.hub, gateway: attachmentConfig.modelGateway };
@@ -537,8 +544,18 @@ export function startAgent(options: AgentOptions): AgentHandle {
         });
     });
 
-    socket.on("message", (data) => {
+    socket.on("message", (data, isBinary) => {
       if (stopping) return;
+      // 画面面：不进 inbox，不进 handle，出错也不记原文，里面可能是人敲的密码。
+      if (isBinary) {
+        if (link.phase !== "open" || link.socket !== socket) return;
+        try {
+          screen.receive(bytesOf(data));
+        } catch {
+          log("画面帧处理出错");
+        }
+        return;
+      }
       const raw = data.toString();
       inbox = inbox.then(() => handle(raw, socket)).catch((error: unknown) => log(`处理报文出错：${String(error)}`));
     });

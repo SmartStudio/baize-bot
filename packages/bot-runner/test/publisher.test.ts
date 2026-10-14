@@ -20,6 +20,7 @@ import {
   settledPages,
   type TestChrome,
 } from "./helpers/chrome.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 
 type SiteMode = "normal" | "logged-out" | "no-button" | "hang" | "no-notes" | "no-token";
 
@@ -270,21 +271,6 @@ describe("发布器先验草稿，不碰浏览器", () => {
     dataDir = mkdtempSync(join(tmpdir(), "baize-publisher-check-"));
   });
   afterAll(() => rmSync(dataDir, { recursive: true, force: true }));
-
-  it("没有浏览器配置的电脑回 error", async () => {
-    const image = draftCopy(dataDir, "远程");
-    const result = await publishDraft(draftMessage("draft-remote", { title: "t", text: "正文", images: [image] }), {
-      dataDir,
-      browser: null,
-    });
-
-    expect(result, "认领标识原样带回").toEqual({
-      type: "publish_result",
-      draftId: "draft-remote",
-      attempt: ATTEMPT,
-      result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
-    });
-  });
 
   it("Bot 暂停时发布回 paused，不连接浏览器", async () => {
     const image = draftCopy(dataDir, "暂停");
@@ -655,7 +641,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve));
     const address = slow.address();
     if (address === null || typeof address === "string") throw new Error("慢页没有端口");
-    const bot = createBotBrowser({ profileDir, connection: async () => chrome.connection });
+    const bot = createBotBrowser({ profileDir, connection: async () => chrome.connection, present: NO_PRESENT });
     const open = bot.tools.find((tool) => tool.name === "browser_open");
     const snapshot = bot.tools.find((tool) => tool.name === "browser_snapshot");
     if (open === undefined || snapshot === undefined) throw new Error("没有浏览器工具");

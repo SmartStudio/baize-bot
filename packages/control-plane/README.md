@@ -33,6 +33,39 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 用户消息插入复用群行 `KEY SHARE` 与插入同一事务的写法。查群之后若删号或删群已提交，插入入口返回 404「没有这个对象」，与群不存在的路由口径一致；若插入先锁住群行，删除等这条消息提交。删号会话级联失效，后续请求返回 401。
 
+## 画面面
+
+`/agent` 上的文本帧是报文，二进制帧是画面面。帧格式是 4 字节大端头长、UTF-8 JSON 头、可选负载，头的 schema 和 `encodeLive`、`decodeLive` 在 shared 的 `live.ts`。电脑上行 `LiveUp`：`session`（整份 upsert）、`frame`（负载是 JPEG）、`closed`。下行 `LiveDown`：`viewer`（attached、detached）、`input`、`end`、`reveal`。网页看画面连 `/api/live/<liveId>`，帧格式相同，收 `LiveToViewer`（`session`、`frame`），发 `LiveFromViewer`（`input`、`end`、`reveal`）。
+
+画面帧和人的输入（含密码）不走可靠信封，不进库、不进发件箱、不进日志。理由有三条：
+
+- 一台电脑的文本报文排在一条串行链上，可靠上行各开一个库事务。帧要是走这条链，就得排在库事务后面。
+- 电脑代理 `computer-agent/src/agent.ts` 处理文本报文出错时会把 zod 的错误原文和 `String(error)` 写进日志。输入要是走文本报文，密码就可能进日志。
+- 帧丢了，下一帧会补上。人的输入是看着当下画面做的，过时重放反而有害。可靠投递对它们没有意义。
+
+所以 hub 在进链之前按 `isBinary` 分流，二进制帧同步交给 `live/relay.ts` 的 `LiveRelay`。中继的构造参数里没有 Db，结构上碰不到库。解不开的帧一律静默丢，不说原因，因为原因里可能夹着用户打的字。`test/live-relay.test.ts` 的最后一条用例跑完一整轮，再逐表比对 public 下的行数，并 spy console 确认输入不进日志。
+
+会话按 `${ownerId}:${liveId}` 记，`computerId` 取自连接，不信帧里的。同一个号已经挂在这个人的另一台电脑上时，后报的忽略。`frame` 和 `closed` 只认报这个会话的那条连接。连接断了，这条连接上的会话全部结束。电脑重连后重报的会话换到新连接上，观看者留着，中继给新连接补发一条 attached。
+
+hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#connections` 里的当前连接。不用 message 回调闭包里的 `conn`，因为它要等 `#onHello` 把 config、发件箱重放和对账全部做完才赋值。这期间电脑已经在报 session 和发帧，按 `conn` 判断会把它们丢掉。入表之前到的二进制帧直接丢。
+
+一台电脑同一时刻最多一个观看者。新观看者进来时，不论看的是同一会话还是这台电脑的另一个会话，旧的都以 4101 关，电脑先收旧会话的 detached，再收新会话的 attached。所以电脑上每个会话的 attached 和 detached 严格交替。观看者的关闭码：
+
+| 码 | 含义 |
+| --- | --- |
+| 4100（`LiveViewerClose.gone`） | 会话结束，电脑报了 closed 或连接断了 |
+| 4101（`LiveViewerClose.replaced`） | 被新观看者顶掉 |
+| 4104（`LiveViewerClose.notFound`） | 号不合法、会话不存在或不是你的，不区分 |
+| 1012 | 控制面停机 |
+
+升级时先查 Origin：带了 Origin 而它的 host 不等于 Host 头，回 403。之后用 cookie 认人，认不出回 401。这条 socket 能往用户登录着的网站里打字，被跨站劫持的后果比 `/api/ws` 大，所以多这一道。观看者 WebSocket 的 `maxPayload` 是 64KB，电脑来的单帧超过 2MB 丢。
+
+人的输入每个观看者每秒最多转 120 条，用令牌桶，多的丢，`end` 和 `reveal` 不计数。`startServer` 的 `live.inputPerSecond`、`live.now` 可注入。发给观看者的帧走 `latestWins`：上一帧还没发完时只留最新的一帧。
+
+`GET /api/live` 列当前用户的会话（`LiveSessionsResponse`），`/api/ws` 推 `live_session`（整份）和 `live_closed`。推送在断线期间会丢，所以网页启动和 `/api/ws` 重连时各拉一次列表。同一个号收到 `live_closed` 之后，电脑重连重报时还会再来一条 `live_session`。
+
+中继的会话表和观看者表都在进程内存里，前提是看画面的人和这台电脑连在同一个控制面进程上。控制面跑多实例时，`/api/live/<liveId>` 必须按电脑粘性路由到持有这台电脑 `/agent` 连接的实例，否则观看者只会拿到 4104。
+
 ## 租约
 
 `lane_leases` 用 `(bot_id, group_id)` 作主键，一条道只有一台持有电脑，并固定它的安装标识和正整数代际。`agent/place-run.ts` 的 `placeRun` 是唯一建 run 的入口，用户消息、Bot 之间的 @、例行、交接和牌桌隐藏 run 都走它。认领租约、必要时接管、建 run、可靠 prompt 入队在调用方的同一事务里提交；`test/place-run-guard.test.ts` 扫源码禁止其他入口直接建 run。
@@ -594,11 +627,11 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### 加小红书账号
 
-`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404。小红书要在助理浏览器里扫码，远程电脑没有助理浏览器，挂到 `kind='remote'` 的电脑回 400。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，不改任何列，只为回已有那行（200，新建是 201），不先查后写。每人每种电脑只有一台，占位只能挂本机，所以已有的占位就在这台电脑上。建完推 `account_updated`，再给这个用户重发 `config`。
+`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
 
 ### 打开登录窗口
 
-`POST /api/accounts/:id/login` 带 `{ attempt }`。`attempt` 是页面为这一次点击取的号（`LoginAttemptId`，1 到 64 位安全字符），卡片一点就带着它，不等 202。依次判：账号不是本人的回 404，平台不走浏览器登录回 400，请求体不合 `{ attempt }` 回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login { accountId, platform, attempt }`，接口立刻回 202 和 `{ account, attempt }`，`account` 是账号当前的样子，`attempt` 原样带回。扫码结果由电脑代理的 `login_state` 报回来：登上随 `account_updated` 推给页面，没成推 `login_failed` 带同一个 `attempt`。
+`POST /api/accounts/:id/login` 带 `{ attempt }`。`attempt` 是页面为这一次点击取的号（`LoginAttemptId`，1 到 64 位安全字符），卡片一点就带着它，不等 202。依次判：账号不是本人的回 404，平台不走浏览器登录回 400，请求体不合 `{ attempt }` 回 400，账号所在电脑此刻没有连接回 409。放行时只给账号所在那台电脑发 `browser_login { accountId, platform, attempt }`，接口立刻回 202 和 `{ account, attempt }`，`account` 是账号当前的样子，`attempt` 原样带回。电脑在助理 Chrome 后台开平台的登录页，交给电脑上的屏，经上面「画面面」报一个 `purpose: login` 的会话，网页按 `attempt` 认领这个会话、打开画面，人在画面上扫码或输账号密码、验证码，本机和远程电脑一样。电脑自己每 250ms 查一次页面上出没出现已登录的标志，查到就撤回画面、关掉登录页，报 `login_state valid`。人在画面上点放弃、或者同一个账号又点了一次登录把这次顶掉，电脑不报，画面的 `closed` 就是结论。登录页没了或画面没展示出来报 `failed window_failed`；从收到 `browser_login` 起 15 分钟还没登上报 `failed timed_out`，等 Chrome 起来、人在画面上操作都算在这 15 分钟里。登上随 `account_updated` 推给页面，没成推 `login_failed` 带同一个 `attempt`。
 
 `attempt` 只做页面上的关联，不是权限：控制面不存、不签发、不查重，只在边界校验格式，原样转给电脑、原样推回页面。页面按 `accountId` 和 `attempt` 一起结算那张卡，所以再点一次之后，上一次点击的失败晚到也不会把新的一次记成没成。账号归属在 HTTP 这边按会话用户查，在上行那边按电脑主人和账号所在电脑查，乱填别人的号进不来。
 
@@ -854,7 +887,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 - `confirm`：新来一张审批卡。
 - `result`：例行任务派出的 run 收尾时留下了可见 Bot 回复。用户自己在群里发消息触发的 run 他当场就看得到，不推。
-- `failed`：这件事没办成，要用户处理。有三种来源：草稿发布失败，账号登录过期（见「账号」一节，和草稿失败同时发生时只推草稿那条），电脑代理报 `login_state` 的 `failed`。最后这种文案按原因写一句中文：`window_failed` 是登录窗口出错或到点没登上，`remote_refused` 是远程电脑不许登录、请到本机登录。登录没成不等于账号过期，`accounts.login` 不动。账号不属于哪个群，没有群消息可落，所以只走通知，`groupId` 为 null；用户关了通知就看不到这一句，免打扰期间它和别的通知一样只进汇总的件数。它不走 `stuck` 的去重和暂存，那两样是给电脑掉线的，登录接连失败几次每次都推。账号必须是这台电脑主人、登在这台电脑上的，同一个用户的另一台电脑报也不认，否则整条丢掉。
+- `failed`：这件事没办成，要用户处理。有三种来源：草稿发布失败，账号登录过期（见「账号」一节，和草稿失败同时发生时只推草稿那条），电脑代理报 `login_state` 的 `failed`。最后这种文案按原因写一句中文：`window_failed` 是登录窗口出错或被关掉了，`timed_out` 是开了很久还没登上、已经收起。两句都说账号状态没变、可以再点一次登录。登录没成不等于账号过期，`accounts.login` 不动。账号不属于哪个群，没有群消息可落，所以只走通知，`groupId` 为 null；用户关了通知就看不到这一句，免打扰期间它和别的通知一样只进汇总的件数。它不走 `stuck` 的去重和暂存，那两样是给电脑掉线的，登录接连失败几次每次都推。账号必须是这台电脑主人、登在这台电脑上的，同一个用户的另一台电脑报也不认，否则整条丢掉。
 - `stuck`：例行任务到点时选不到电脑派不出去（原因和群里那句同源），或者跑到一半电脑断线被收尾。文案写明是哪条例行、为什么没跑。用户自己的消息派不出去时群里已经落了一条 system 消息，不再推。同一个用户一段离线期只推一次，他任一台电脑代理 hello 成功后清掉，下次再卡住再推。去重记在内存里。推 stuck 时用户没有推送连接，这条就留在内存里，连上推送时补发，`at` 仍是卡住的时刻。最常见的是本机 Mac 睡着，代理和 App 一起断开，醒来连上就收到。每段离线期至多留一条。代理 hello 只清去重，不清已经留下的。
 
 用户关闭通知后不推。完整设置免打扰起止时间时，Asia/Shanghai 区间内只在内存累计数量，区间结束后由每 30 秒一次的扫描推一条汇总，所以汇总最多晚 30 秒。扫描每次按当前设置判断区间是否结束，缩短免打扰在下一次扫描就生效。跨午夜区间按次日结束计算。扫描时用户没有推送连接就留着计数，他下次连上推送时立刻汇总。留下的 stuck 和汇总一起补发时先推 stuck、后推汇总，连上时还在免打扰里就一起等到区间结束。设置改成不在免打扰里之后来的第一条通知，先推攒下的汇总再推它本身。单个用户汇总出错只清掉他的计数，不挡后面的用户。控制面重启会丢掉尚未汇总的内存计数、留着没发的 stuck 和 stuck 去重。

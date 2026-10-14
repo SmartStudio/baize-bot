@@ -9,6 +9,7 @@ import { contentRoutes } from "./routes/content.js";
 import { goalRoutes } from "./routes/goals.js";
 import { groupRoutes } from "./routes/groups.js";
 import { grantRoutes } from "./routes/grants.js";
+import { attachLiveViewer, liveRoutes, liveTestRoutes } from "./routes/live.js";
 import { pokerRoutes } from "./routes/poker.js";
 import { preferenceRoutes } from "./routes/preferences.js";
 import { routineOfferRoutes } from "./routes/routine-offers.js";
@@ -43,7 +44,7 @@ const socketRoutes: Route = async ({ res, path, method }) => {
   return true;
 };
 
-const publicRoutes: Route[] = [socketRoutes, testRoutes, authRoutes, hookRoutes];
+const publicRoutes: Route[] = [socketRoutes, liveTestRoutes, testRoutes, authRoutes, hookRoutes];
 const protectedRoutes: Route[] = [
   // 第 2 期的接缝路由排在前面，免得被同前缀的老路由先截住。第 3 期的牌局路由同理。
   pokerRoutes,
@@ -63,6 +64,7 @@ const protectedRoutes: Route[] = [
   contentRoutes,
   groupRoutes,
   grantRoutes,
+  liveRoutes,
 ];
 
 const handle = async (context: RouteContext): Promise<void> => {
@@ -85,10 +87,18 @@ const server = createServer((req, res) => {
 
 const wss = new WebSocketServer({ noServer: true });
 
+// 看画面的 socket 和推送一样靠 cookie 认人，路径上带 liveId。
+const LIVE_PATH = /^\/api\/live\/([^/]+)$/;
+
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://localhost");
-  if (url.pathname !== "/api/ws" || !authed(req)) {
+  const live = LIVE_PATH.exec(url.pathname);
+  if ((url.pathname !== "/api/ws" && live === null) || !authed(req)) {
     socket.destroy();
+    return;
+  }
+  if (live !== null) {
+    wss.handleUpgrade(req, socket, head, (ws) => attachLiveViewer(ws, live[1] ?? "", push));
     return;
   }
   wss.handleUpgrade(req, socket, head, (ws) => {

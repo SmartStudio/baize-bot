@@ -65,6 +65,7 @@ import type { CdpConnection } from "../src/cdp.js";
 import { PI_BUILT_IN_TOOLS } from "../src/mcp-tools.js";
 import { simpleToolView } from "../src/reporter.js";
 import { type Gateway, startGateway } from "./fixtures/gateway.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 import {
   captureIn,
   chromeBinary,
@@ -466,7 +467,7 @@ async function startHarness(options: {
   readonly role?: BotRole;
   /** 复用上一台的数据目录，用来模拟同一台电脑上又来一条 config。 */
   readonly dataDir?: string;
-  /** 助理 Chrome。不给就和远程电脑一样没有浏览器工具。 */
+  /** 助理 Chrome。不给就没有浏览器工具。 */
   readonly browser?: RunnerConfig["browser"];
   /** 不给就指到一个连不上的地址。 */
   readonly accountsProxy?: RunnerConfig["accountsProxy"];
@@ -7091,7 +7092,7 @@ describe("运行器的草稿", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       dataDir,
-      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")) },
+      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")), present: NO_PRESENT },
       accounts: ACCOUNTS,
       extensionTools: [],
       script: scriptRecording(seen, [
@@ -7668,7 +7669,7 @@ describe("助理浏览器的禁区和看图", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")) },
+      browser: { profileDir, connection: () => Promise.reject(new Error("这条用例不开浏览器")), present: NO_PRESENT },
       script: scriptRecording(seen, [["看看 cookie", callTool("bash", { command: `cat ${cookies}` })]]),
     });
 
@@ -7680,7 +7681,7 @@ describe("助理浏览器的禁区和看图", () => {
     expect(seen.toolResults.join("")).not.toContain("cookie-secret-p1-5");
   });
 
-  it("给了 browser 才有五件浏览器工具，没给就一件都没有", async () => {
+  it("给了 browser 才有五件浏览器工具和 browser_ask_user，没给就一件都没有", async () => {
     const toolsOf = async (browser: RunnerConfig["browser"] | undefined): Promise<string[]> => {
       const requests: ChatCompletionRequest[] = [];
       const h = await startHarness({
@@ -7698,16 +7699,18 @@ describe("助理浏览器的禁区和看图", () => {
     const browser = {
       profileDir: join(tmpdir(), "baize-no-such-profile"),
       connection: () => Promise.reject(new Error("不开")),
+      present: NO_PRESENT,
     };
 
     expect((await toolsOf(browser)).toSorted()).toEqual([
+      "browser_ask_user",
       "browser_click",
       "browser_open",
       "browser_screenshot",
       "browser_snapshot",
       "browser_type",
     ]);
-    expect(await toolsOf(undefined), "远程电脑没有助理 Chrome").toEqual([]);
+    expect(await toolsOf(undefined), "没给助理 Chrome 就一件浏览器工具都不注册").toEqual([]);
   });
 
   it("建 Bot 的 bash、跑不联网和批了联网的命令，都不去拉起助理 Chrome", async () => {
@@ -7721,7 +7724,7 @@ describe("助理浏览器的禁区和看图", () => {
       bots: ["bot-1"],
       extensionTools: [],
       approve: true,
-      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse, present: NO_PRESENT },
       script: scriptPlans(requests, {
         跑命令: [
           ["bash", { command: "echo 本地命令跑了" }],
@@ -7995,6 +7998,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
   const browser = (): NonNullable<RunnerConfig["browser"]> => ({
     profileDir,
     connection: async () => chrome.connection,
+    present: NO_PRESENT,
   });
   const botTarget = async (path: string, exclude: readonly string[] = []): Promise<PageTarget> => {
     const found = (await pageTargets(chrome.connection)).find(
@@ -8161,7 +8165,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: chromeStart.connection },
+      browser: { profileDir, connection: chromeStart.connection, present: NO_PRESENT },
       script: scriptPlans(requests, { 等Chrome: [["browser_open", { url: `${site.url}/chrome-starting` }]] }),
     });
     try {
@@ -8228,7 +8232,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: async () => hanging.connection },
+      browser: { profileDir, connection: async () => hanging.connection, present: NO_PRESENT },
       script: scriptPlans(requests, plans),
     });
     try {
@@ -8249,7 +8253,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: async () => hanging.connection },
+      browser: { profileDir, connection: async () => hanging.connection, present: NO_PRESENT },
       script: scriptPlans(requests, { 开迟到的页: [["browser_open", { url: `${site.url}/late-tab` }]] }),
     });
     try {
@@ -8279,7 +8283,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: async () => hanging.connection },
+      browser: { profileDir, connection: async () => hanging.connection, present: NO_PRESENT },
       script: scriptPlans(requests, { 建页半路停: [["browser_open", { url: `${site.url}/attach-hangs` }]] }),
     });
     try {
@@ -8303,7 +8307,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir, connection: async () => hanging.connection },
+      browser: { profileDir, connection: async () => hanging.connection, present: NO_PRESENT },
       script: scriptPlans(requests, { 开好再关: [["browser_open", { url: `${site.url}/close-hangs` }]] }),
     });
     try {
@@ -8454,7 +8458,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器（真 Chrome）", () => 
       const h = await startHarness({
         bots: ["bot-1"],
         extensionTools: [],
-        browser: { profileDir: firstProfile, connection: async () => current.connection },
+        browser: { profileDir: firstProfile, connection: async () => current.connection, present: NO_PRESENT },
         script: scriptPlans(requests, {
           "开 a": [["browser_open", { url: `${site.url}/restart-a` }]],
           再看: [["browser_snapshot", {}]],
@@ -9488,7 +9492,7 @@ describe("运行器的例行边界", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse, present: NO_PRESENT },
       script: scriptPlans(requests, { 每周五复盘: [["browser_open", { url: "https://example.com/stats" }]] }),
     });
 
@@ -9513,7 +9517,7 @@ describe("运行器的例行边界", () => {
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse },
+      browser: { profileDir: join(tmpdir(), "baize-no-such-profile"), connection: refuse, present: NO_PRESENT },
       script: scriptPlans(requests, { 每周五复盘: [["browser_click", { ref: 3 }]] }),
     });
 

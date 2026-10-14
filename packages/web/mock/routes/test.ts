@@ -23,6 +23,7 @@ import {
   appendMessage,
   computerStatus,
   computersOf,
+  removedComputers,
   LoginState,
   messageFetchFaults,
   reportLoginState,
@@ -46,6 +47,7 @@ import {
   settleUnseenHandoff,
 } from "../state.js";
 import { resetRegisteredEmails } from "./auth.js";
+import { resetLive } from "./live.js";
 import { readBody, send, type Route } from "./http.js";
 
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
@@ -103,6 +105,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     reseed();
     resetToday();
     resetRegisteredEmails();
+    resetLive();
     activeTurns.clear();
     turnEpochs.clear();
     send(res, 204);
@@ -330,6 +333,17 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
       }
       send(res, 204);
     }
+    return true;
+  }
+
+  // 摘掉一台电脑，造「只有一台」的场景。不推送：控制面也没有删电脑的推送，网页进账号页时重拉电脑表才看到。
+  const computerMatch = /^\/api\/test\/computers\/([^/]+)$/.exec(path);
+  if (computerMatch !== null && method === "DELETE") {
+    const id = decodeURIComponent(computerMatch[1] ?? "");
+    if (computersOf().computers.some((item) => item.id === id)) {
+      removedComputers.add(id);
+      send(res, 204);
+    } else send(res, 404, { error: "没有这台电脑" });
     return true;
   }
 

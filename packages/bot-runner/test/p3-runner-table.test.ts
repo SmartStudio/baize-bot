@@ -20,6 +20,7 @@ import { createRunner, type PromptMessage, type Runner, type RunnerConfig } from
 import { composeTablePrompt, createPokerResults } from "../src/table.js";
 import { tablePersona } from "../src/persona.js";
 import { startGateway, type Gateway } from "./fixtures/gateway.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 import { scriptedUpstream, type ChatCompletionRequest, type ScriptedTurn } from "./fixtures/openai-sse.js";
 
 const view = (): PokerSeatView =>
@@ -270,6 +271,7 @@ describe("p3-runner-table 验收", () => {
         connection: async () => {
           throw new Error("牌桌不应连接浏览器");
         },
+        present: NO_PRESENT,
       },
       tools: [
         {

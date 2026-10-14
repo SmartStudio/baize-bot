@@ -34,7 +34,7 @@ GitHub 要建 GitHub App，勾上「过期的用户令牌」，把 client id、c
 
 令牌加密进控制面的 `account_credentials`，密钥是 `CREDENTIALS_KEY`（32 字节 base64，`openssl rand -base64 32`），缺了控制面起不来，换了已存的令牌全部解不开。令牌不下发到任何电脑，远程电脑上的 Bot 读 GitHub、X 走控制面的 `/accounts-proxy`。
 
-GitHub、X 账号不用在哪台电脑上登录，也就没有「远程电脑上不能登录」这回事。要在电脑上扫码登录的只有小红书，它只能挂在本机。
+GitHub、X 账号不用在哪台电脑上登录。要在电脑上登录的只有小红书，本机和远程电脑都行。在账号页「接入小红书」选这台远程电脑，登录页就开在容器里的 Chromium 上，画面经控制面送到网页，用户在网页里扫码或输手机号和验证码，按键直接发到那一页，不经过 Bot。小红书仍建议放本机，走用户家里的网络出口，放远程电脑时平台看到的是这台服务器的 IP。
 
 `CREDENTIALS_KEY` 和 `WEB_BASE_URL` 是必填，compose 缺了直接报错不起。四个 OAuth 变量可以不填，不填的那家连不了。
 

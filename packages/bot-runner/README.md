@@ -133,7 +133,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `sessionFor` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `sessionFor` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具和 `src/takeover.ts` 的 `browser_ask_user`（只给主会话，帮手没有），紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 偏好和品牌手册
 
@@ -233,7 +233,7 @@ run 的正常收尾、异常、取消和停机都会清空结果。HTTP 请求�
 
 只在本机的连接仍各用一个 MCP `Client`（Streamable HTTP，`authorization` 不为 `null` 时放 `Authorization` 头）。惰性连接：第一次调用该连接的工具时才 `connect`，同一 Bot 的所有群共用。连不上不抛：工具结果是一句「工具连接「X」连不上：<原因>」，Bot 转述给用户，这次 run 照常收尾；下一次调用会再试一次连接。两条执行路径都把结果里的 `text` 块和 `image` 块按原顺序作为工具结果（图片块只收 png、jpeg、gif、webp 且不超过 5 MiB，变成 Pi 的 `ImageContent`，一样过「助理浏览器」一节的看图裁剪；不合格的换成一行中文说明），两种都没有时回「（工具没有返回文字）」，`isError` 为真当工具报错处理（终态 `failed`，错误文本就是 MCP 给的那句）。
 
-撞名先到先得：Pi 自带工具的名字（`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`，`src/mcp-tools.ts` 的 `PI_BUILT_IN_TOOLS` 从 Pi 导出的工厂取，`test/runner.test.ts` 拿它和 Pi 的 `allToolNames` 对账）整组保留，不管会话实际装了哪几个；运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。被跳过的操作不再给顶掉它的工具定审批，审批只看 `mcp.resolve` 认到的那个操作。
+撞名先到先得：Pi 自带工具的名字（`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`，`src/mcp-tools.ts` 的 `PI_BUILT_IN_TOOLS` 从 Pi 导出的工厂取，`test/runner.test.ts` 拿它和 Pi 的 `allToolNames` 对账）整组保留，不管会话实际装了哪几个；运行器自己的工具（沙箱 bash、`extensionTools`、主题任务、skill、起草）先占名字，主助理那两件工具、五个浏览器工具、`browser_ask_user` 和 `account_read` 的名字不论角色、给没给 `config.browser` 都先占上，然后按 `config.tools` 的顺序，靠前的连接赢，后面的同名操作跳过并 `console.warn` 一次。被跳过的操作不再给顶掉它的工具定审批，审批只看 `mcp.resolve` 认到的那个操作。
 
 `stop()` 时把这个 Bot 每个群的会话逐个 abort、dispose，再把这份 client 关一次。abort 不等在途的工具：Pi 的 bash 按进程组杀掉子进程；代理 MCP 工具把 Pi 给的 `signal` 传进 `fetch`，本机 MCP 工具传进 `callTool`，本机服务端收到 cancelled 通知，这边当场返回；第一次调用还在等 `client.connect` 的 initialize 时，signal 一响就撤掉这次共享的连接（几条调用一起等同一个 initialize，谁先中止都撤），下次调用重新连，`close()` 也先撤还没回的 initialize 再关；浏览器工具排队中的调用一收到 signal 就以「这次浏览器操作被中止了」结束，正在跑的那次在下一条 CDP 命令处停下，工具步骤不等 30 秒的命令超时。被中止的只是这边的后续步骤：已经进管道的命令 Chrome 照样做完，它的回包和后面关闭路径发的命令在底层是交叠的。回包一般丢掉，只有 `Target.createTarget` 的迟到回包要接住，把建出来的页关掉，不然停机后留一个没人管的后台标签页。关页是清理，不走 signal，所以预算钉在 `closeTarget` 这一个函数上：每次 `Target.closeTarget` 最多等 `CLOSE_BUDGET_MS`（2 秒），Chrome 不回也不等 CDP 的 30 秒超时，命令已经发出，Chrome 自己会关。停机、换标签页、建页失败的收尾都走同一条，没有哪条关页路径能无界地挡住 serial 队列后面的 `close()`；关旧页之前标签页已经记成关闭，一次停机只会落在其中一条关页上，最多等一个预算。正在 `Page.navigate` 的还会发 `Page.stopLoading` 让 Chrome 放弃加载，`settle` 的轮询也跟着停。`test/runner.test.ts` 的几条「停机时…」用例分别对着不回应的网址、卡住的 `Runtime.evaluate` 和 `Page.captureScreenshot`、迟到的 `Target.createTarget`、不回的 `Target.closeTarget`、建页半路中止后清理关页也不回、不回 initialize 的 HTTP 服务和挂着不回的假 MCP 量停机耗时。config 变化时保留在飞 run 的资源，空闲道和后续 run 按新代际懒建会话，同一个群的 JSONL 用 `continueRecent` 续上。
 
@@ -385,7 +385,7 @@ prompt 的任务卡段和 `read_task` 的返回共用同一个 `renderTaskCard`�
 
 ## 助理浏览器
 
-`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, connection() }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`。
+`RunnerConfig.browser` 是电脑代理给的 `{ profileDir, connection(), present }`，本机和远程电脑都给，大部分测试不给，不给就没有这组工具，别的照常。运行器只认 `createRunner` 时的那一份。代码在 `src/browser.ts`，CDP 客户端在 `src/cdp.ts`。`present` 是「把一页摆到用户眼前」的端口（`src/live-port.ts` 的 `PresentPage`），由电脑代理的屏实现，只有 `browser_ask_user` 用它；测试给 `test/fixtures/present.ts` 的 `NO_PRESENT`，一调就回 `broken`。
 
 助理 Chrome 用 `--remote-debugging-pipe` 起，不开任何 TCP 端口：Chrome 从 fd 3 读命令、往 fd 4 写回复和事件，一条消息一段 JSON，以 NUL 结尾。一台电脑只有这一条管道，由电脑代理起 Chrome 时建好，`connectPipe` 包成 `CdpConnection`，`connection()` 回的就是它。所有 Bot 的浏览器工具、发布器和登录窗口都挂在这条管道上，各自 `Target.attachToTarget({ flatten: true })` 自己的标签页，命令带 `sessionId`，事件按 `sessionId` 分给各自的标签页，挂上的监听在关页时摘掉。
 
@@ -398,6 +398,7 @@ Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起�
 | `browser_screenshot` | `read`，放行     | 截当前这一屏，PNG 作为图片进模型                                |
 | `browser_click`      | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent`                         |
 | `browser_type`       | `engage`，默认问 | 按编号填字，替换原内容，可选按回车                              |
+| `browser_ask_user`   | `read`，放行     | 把当前页摆到用户眼前请用户亲自操作，交还后回网址，见「请用户接手」 |
 
 没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标是浏览器当前页的主机名（`BotBrowser.host()`，随 `GateCall.browserHost` 进闸门），不看模型的入参，模型在 `browser_click` 的参数里塞 `hostname` 也冒领不了；域名两边都按 URL 解析出的主机名比较：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。批过的域名（`once`、`project`、`forever` 三种范围）再点不问，`browser_open` 到别的域名或页面自己跳到别的域名之后再点重新问。还没开页或停在空白页时目标为空，每次都问。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（当前页的主机名，页面自己跳走也跟着变）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
 
@@ -420,6 +421,14 @@ snapshot 的形状：
 
 **标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。等 `connection()`（Chrome 可能正在起）也跟这次调用的 signal 走：停机或中止时当场以「这次浏览器操作被中止了」结束，不等 Chrome 起完；连接归电脑代理共享，晚到的连接这次调用不再拿，也不用替它收尾。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 
+**请用户接手。** `browser_ask_user`（`src/takeover.ts`）让 Bot 把自己后台标签页里当前这一页摆到用户眼前，请用户亲自过登录墙、验证码、付款确认，操作完交还。参数只有一句 `reason`（1 到 200 字），进 `LivePurpose` 的 `takeover`。工具先 `BotBrowser.lend()` 借页：排进这个 Bot 的串行队列并取一次浏览器锁，等正在跑的浏览器调用做完就把标签页换成 `lent` 状态，锁随即放开，借出期间不持锁。然后调 `present({ liveId, targetId, purpose }, signal)`，`liveId` 由 `takeoverLiveId(runId, callId)` 从 runId 和 callId 算出（sha256 截成 UUID 形状，带版本位和变体位），同一次调用重投算出同一个，不生出第二块画面；`bot_tool_call` 运行中卡的 `view` 是 `ToolView` 的 `takeover` 形状，带同一个 `liveId`，Web 按它开画面，`src/reporter.ts` 只对这件工具这样拼卡。`finally` 里 `giveBack()`：标签页换回 `open`，隔离世界作废，接手前的编号作废，点和填先报「用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手」。还没打开页就调它直接抛「你还没打开要接手的那一页，先 browser_open」，不替用户建页。
+
+借出期间这个 Bot 的别的会话（别的群）碰任何浏览器工具，`ensureTab` 立刻抛「这一页正交给用户操作，等用户交还之后再用浏览器。」，不排队、不等用户、不建新页；发布器有自己的后台标签页，锁又没被占着，照常发布。闸门把它归 `read`（在页上动手的是用户自己，Bot 只把页摆到用户眼前），它不在 `BROWSER_TOOL_ACTIONS` 里，会话闸门不为它持锁。只挂给主会话，帮手没有。
+
+结束的几种情况：用户点交还，结果是「用户交还了这一页。地址：<origin 加 path>」，query 和 fragment 不给模型（里面常有一次性 token）；用户点不弄了抛「用户说不弄了，这一页收回来了。」；页在接手时被关掉抛「这一页在接手时被关掉了，要接着弄先 browser_open。」；屏根本没展示出来（Chrome 起不来、attach 失败）抛「助理浏览器出了问题，这次没法请用户接手。」。给 `present` 的 signal 是四路合一：这次调用的 signal（run 被取消、停机）、30 分钟时限（`BrowserConfig.takeoverLimitMs` 只给测试缩短，句子固定写 30 分钟）、作废、这个 Bot 的浏览器要关（Bot 从 config 里移走）。屏只看到 `caller`，是哪一路撤的由工具自己分：run 中止照常是「这次浏览器操作被中止了」，浏览器要关是「助理浏览器关掉了，这次接手没做完。」，作废是「用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。」，剩下就是「等了 30 分钟用户没有接手，这一页收回来了。」。
+
+作废：每个 lane 记着正挂着的接手（`Lane.takeover`），`Runner.prompt` 在排队之前看一眼，`origin.kind === "user"` 且 runId 不同就撤，新消息照常排在这轮之后跑。队友 @ 来的、例行触发的、牌桌的 prompt 不作废，同一个 runId 重投也不作废。用例在 `test/takeover.test.ts`，走真 Pi 会话加假上游、假 CDP、假屏。
+
 **没有调试端口。** 原来的 `--remote-debugging-port=0` 会在本机开一个 CDP 端口，能列出、关掉、接管所有标签页，所以当时挡了三层：`browser_open` 按端口拒、每个标签页开 `Fetch.enable` 拦跳到这个端口的请求、seatbelt 拒批了联网的 bash 连它。换成管道之后本机没有这个端口，这三层一起删了。管道的两个 fd 只在电脑代理进程和 Chrome 之间，Bot 的 bash 是另起的沙箱进程，拿不到。Chrome 的 SingletonSocket 还在，连上它能让助理 Chrome 带着登录态打开任意网址，但拿不到调试端口。它原本建在系统临时目录里，批了联网的 bash 能列出、连上。电脑代理起 Chrome 时把临时目录指到 `<profileDir>/tmp`（Linux 的 chromium 认 `TMPDIR`，macOS 的 Chrome 只认 `MAC_CHROMIUM_TMPDIR`），socket 就跟 profile 一起落在禁区里：seatbelt 拒读和拒连，bwrap 整个盖住，批准联网、批准写 `/tmp` 都不放开它。
 
 **禁区。** `profileDir` 整个目录进 `hidden` 禁区，闸门、seatbelt 和 bwrap 都挡，bash、读、搜索、写都碰不到 Cookies 和登录数据。
@@ -440,9 +449,9 @@ snapshot 的形状：
 
 ## 小红书发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
 
-- **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
+- **浏览器和数据目录从依赖参数来。** `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，本机和远程电脑都给，必填。账号在这个 profile 里登录（远程电脑经画面扫码），发布也只能在这里发。每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。
 - **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。旧的 `kind: "path"` 配图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
 - **附件配图在本机补齐。** 新草稿的 `kind: "attachment"` 配图按 MIME 对应的扩展名查找 `<dataDir>/<botId>/drafts/<sha256>.png|jpg|webp|gif`。缓存字节的 SHA-256 一致就直接用；缺失或字节不符时从 `${hub.baseUrl}/attachments/<attachmentId>` 下载，重新校验 SHA-256，再以 `.tmp` 加 rename 原子写入、权限 0444。哈希不符时失败，不连接浏览器。下载最多读 20 MiB，超时 60 秒，不跟重定向。`liveHub()` 每次请求读取最新 `config.hub` 和 `modelGateway.apiKey`，不保留 hello 轮换前的 key。旧库里没有 `kind` 的配图由 shared 的 parse 边界补成 `path`，继续走原有本地检查。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。

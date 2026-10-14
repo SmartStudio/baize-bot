@@ -4,8 +4,9 @@ import { type Static, Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
 import type { CdpConnection } from "./cdp.js";
 import { BrowserMutex } from "./browser-mutex.js";
+import type { PresentPage } from "./live-port.js";
 
-// 助理浏览器：每个 Bot 在助理 Chrome 里有一个自己的后台标签页。只有本机电脑代理给 browser，远程电脑和测试不给就没有这组工具。
+// 助理浏览器：每个 Bot 在助理 Chrome 里有一个自己的后台标签页。电脑代理给了 browser 才有这组工具，测试大多不给。
 // 标签页各用各的，但 Chrome 和 profile 是所有 Bot 共用的：cookie 和登录态互通，谁都能打开别人登录过的网站。
 // 助理 Chrome 不开调试端口，只有电脑代理手里的那条管道能列出、关掉、接管标签页，页面和 bash 都够不着。
 
@@ -14,6 +15,10 @@ export interface BrowserConfig {
   readonly profileDir: string;
   /** 每次用都重新取。Chrome 退了会按需重起，缓存的连接已经断了。 */
   connection(): Promise<CdpConnection>;
+  /** 把 Bot 的页摆到用户眼前，`browser_ask_user` 用。由电脑代理的屏实现，见 `src/live-port.ts`。 */
+  readonly present: PresentPage;
+  /** `browser_ask_user` 等用户的时限，省略是 30 分钟。只有测试缩短它。 */
+  readonly takeoverLimitMs?: number;
 }
 
 // 读页面归 read。点和填会替归属人在网站上留下动作，归 engage，默认问。没有发布工具，发帖只走草稿加发布器。
@@ -39,16 +44,28 @@ const ELEMENTS_MAX = 200;
 const APPROVAL_TEXT_MAX = 80;
 const APPROVAL_SERVER = "助理浏览器";
 
-type Tab =
-  | { readonly kind: "closed" }
-  | {
-      readonly kind: "open";
-      readonly connection: CdpConnection;
-      readonly sessionId: string;
-      readonly targetId: string;
-      readonly unsubscribe: () => void;
-    };
-type OpenTab = Extract<Tab, { kind: "open" }>;
+type OpenTab = {
+  readonly kind: "open";
+  readonly connection: CdpConnection;
+  readonly sessionId: string;
+  readonly targetId: string;
+  readonly unsubscribe: () => void;
+};
+/** lent：这一页正借给用户操作（`browser_ask_user`），Bot 的工具碰它一律立刻报错，交还后换回 open。 */
+type Tab = { readonly kind: "closed" } | OpenTab | { readonly kind: "lent"; readonly page: OpenTab };
+
+/** 不管是 Bot 自己在用还是借给了用户，底下那一页；没开页是 null。 */
+const pageOf = (tab: Tab): OpenTab | null => (tab.kind === "open" ? tab : tab.kind === "lent" ? tab.page : null);
+
+export const LENT_ERROR = "这一页正交给用户操作，等用户交还之后再用浏览器。";
+const NO_PAGE_ERROR = "你还没打开要接手的那一页，先 browser_open";
+const REFS_AFTER_LOAN = "用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手";
+
+/** 借出去的一页。`giveBack` 可以重复调；页在借出期间被关掉了也照样清掉编号和隔离世界。 */
+export interface PageLoan {
+  readonly targetId: string;
+  giveBack(): void;
+}
 
 /** Bot 最近一次看到的页面：审批卡按它写域名和元素，标签页重开后告诉模型上次在哪。 */
 interface Seen {
@@ -156,7 +173,7 @@ const hostnameOf = (url: string | null): string | null => {
 
 const hostOf = (url: string | null): string => (url === null ? "（空白页）" : (hostnameOf(url) ?? url));
 
-const abortedError = (): Error => new Error("这次浏览器操作被中止了");
+export const abortedError = (): Error => new Error("这次浏览器操作被中止了");
 
 const throwIfAborted = (signal: AbortSignal | undefined): void => {
   if (signal?.aborted === true) throw abortedError();
@@ -223,6 +240,11 @@ export interface BotBrowser {
   host(): string | null;
   /** 点和填的审批卡：当前页的域名和 snapshot 里那个元素，别的工具给 null。 */
   approvalView(toolName: string, input: unknown): ToolView | null;
+  /**
+   * 把当前页借给用户。排进串行队列并取一次锁，等正在跑的浏览器调用做完就借出，锁随即放开：
+   * 借出期间这个 Bot 的浏览器工具不等，碰到就报 LENT_ERROR。没有打开的页抛错，不替用户开页。
+   */
+  lend(signal: AbortSignal | undefined): Promise<PageLoan>;
   close(): Promise<void>;
 }
 
@@ -231,6 +253,8 @@ const withNotice = (notice: string | null, text: string): string => (notice === 
 export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex()): BotBrowser {
   let tab: Tab = { kind: "closed" };
   let seen: Seen = NOTHING_SEEN;
+  /** 用户接手过之后编号表对不上页面了，点和填先要一次 snapshot；snapshot 和重建标签页都清掉它。 */
+  let refsStale = false;
   let lastConnection: CdpConnection | null = null;
   /** 当前标签页里的隔离世界，换了文档就作废。 */
   let world: { readonly open: OpenTab; readonly contextId: number } | null = null;
@@ -294,7 +318,7 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
   };
 
   const retire = async (open: OpenTab): Promise<void> => {
-    if (tab === open) tab = { kind: "closed" };
+    if (pageOf(tab) === open) tab = { kind: "closed" };
     open.unsubscribe();
     await closeTarget(open.connection, open.targetId);
   };
@@ -370,8 +394,9 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
       // 管道上是所有 Bot、发布器和登录窗口的事件，只认自己这一页的 session。
       unsubscribe = connection.onEvent((event) => {
         if (event.sessionId !== sessionId && event.params.sessionId !== sessionId) return;
-        if (event.method === "Target.detachedFromTarget" && tab.kind === "open" && tab.sessionId === sessionId) {
-          tab.unsubscribe();
+        const current = pageOf(tab);
+        if (event.method === "Target.detachedFromTarget" && current?.sessionId === sessionId) {
+          current.unsubscribe();
           tab = { kind: "closed" };
         }
         if (event.method === "Page.loadEventFired") {
@@ -403,6 +428,8 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
    * 上次的网址可能是一次提交或一次性链接，替 Bot 再 GET 一遍会重复动作，只在结果里告诉模型上次在哪。
    */
   const ensureTab = async (): Promise<{ readonly open: OpenTab; readonly notice: string | null }> => {
+    // 借出去的页连 connection() 都不碰：不等 Chrome 起，也不给它重建一页。
+    if (tab.kind === "lent") throw new Error(LENT_ERROR);
     const connection = await connect();
     if (tab.kind === "open" && tab.connection === connection && connection.isOpen()) return { open: tab, notice: null };
     if (tab.kind === "open") await retire(tab);
@@ -415,15 +442,35 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
           "现在是空白页，之前的编号都作废了，要接着看先 browser_open 这个网址。";
     lastConnection = connection;
     seen = NOTHING_SEEN;
+    refsStale = false;
     return { open: opened, notice };
   };
 
-  /** 点和填照着编号动手，标签页重开过就不能接着点。 */
+  /** 点和填照着编号动手，标签页重开过或用户接手过就不能接着点。 */
   const tabForRef = async (): Promise<OpenTab> => {
     const { open, notice } = await ensureTab();
     if (notice !== null) throw new Error(notice);
+    if (refsStale) throw new Error(REFS_AFTER_LOAN);
     return open;
   };
+
+  const lend = (signal: AbortSignal | undefined): Promise<PageLoan> =>
+    serial(signal, async () => {
+      if (tab.kind === "lent") throw new Error(LENT_ERROR);
+      // Chrome 退过的页和空白页都不算「打开了要接手的那一页」，重建标签页是 browser_open 的事。
+      if (tab.kind !== "open" || !tab.connection.isOpen() || seen.url === null) throw new Error(NO_PAGE_ERROR);
+      const page = tab;
+      tab = { kind: "lent", page };
+      return {
+        targetId: page.targetId,
+        giveBack: () => {
+          if (tab.kind === "lent" && tab.page === page) tab = page;
+          world = null;
+          refsStale = true;
+          seen = { url: seen.url, elements: [] };
+        },
+      };
+    });
 
   const settle = async (open: OpenTab, signal: AbortSignal | undefined): Promise<void> => {
     await sleep(300, signal);
@@ -488,6 +535,7 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
               elements: string[];
             };
             remember(snapshot.url, snapshot.elements);
+            refsStale = false;
             const body = [
               `标题：${snapshot.title}`,
               `地址：${snapshot.url}`,
@@ -612,11 +660,13 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
         raw: args as ToolView["raw"],
       };
     },
+    lend,
     close: () =>
       serial(
         undefined,
         async () => {
-          if (tab.kind === "open") await retire(tab);
+          const page = pageOf(tab);
+          if (page !== null) await retire(page);
         },
         false,
       ),

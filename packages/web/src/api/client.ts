@@ -3,6 +3,7 @@ import {
   AccountListResponse,
   AccountResponse,
   LoginAccountResponse,
+  LiveSessionsResponse,
   type LoginAccountRequest,
   type LoginAttemptId,
   ApiError,
@@ -213,6 +214,7 @@ export const createApi = (signal?: AbortSignal) => {
       return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
     },
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
+    live: async () => json(LiveSessionsResponse, await send("GET", "/live")),
     createRemoteComputer: async () => json(ComputerTokenResponse, await send("POST", "/computers/remote")),
     deleteAccount: async (email: string) => {
       const body: DeleteAccountRequest = { email };

@@ -90,7 +90,9 @@ async function fixture(discoverMcp: NonNullable<AgentOptions["discoverMcp"]>) {
       connection: async () => {
         throw new Error("探测不应该用 Chrome");
       },
-      login: async () => ({ login: "valid", handle: "测试" }),
+      onExit: () => () => {},
+      reveal: async () => {},
+      conceal: async () => {},
       pid: () => null,
       stop: async () => {},
     }),

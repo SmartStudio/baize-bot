@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LiveId } from "./live-id.js";
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 export const JsonValue: z.ZodType<JsonValue> = z.lazy(() =>
@@ -43,6 +44,8 @@ export const ToolView = z.discriminatedUnion("kind", [
       raw: JsonValue.optional(),
     })
     .strict(),
+  // Bot 请用户接手浏览器里的一页（登录墙、验证码）。liveId 对得上 live_session 推送里的那块画面。
+  z.object({ kind: z.literal("takeover"), liveId: LiveId, reason: z.string(), raw: JsonValue.optional() }).strict(),
 ]);
 export type ToolView = z.infer<typeof ToolView>;
 
@@ -72,5 +75,7 @@ export function toolViewText(view: ToolView): string {
     }
     case "helper":
       return view.task.length === 0 ? `拉临时帮手：${view.name}` : `拉临时帮手：${view.name}，${view.task}`;
+    case "takeover":
+      return `请你接手这一页：${view.reason}`;
   }
 }

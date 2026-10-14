@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
@@ -15,7 +15,11 @@ import {
   type ApprovalOutcome,
   BotId,
   ComputerId,
+  decodeLive,
+  encodeLive,
   GroupId,
+  type LiveAnnounce,
+  LiveUp,
   MessageId,
   RunId,
   Skill,
@@ -25,7 +29,7 @@ import {
   type UplinkRejection,
   type WorkAppend,
 } from "@baize/shared";
-import { CURRENT_SESSION_VERSION, type CdpConnection, type RunnerConfig } from "@baize/bot-runner";
+import { CURRENT_SESSION_VERSION, type CdpConnection, type CdpEvent, type RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
   type AgentHandle,
@@ -33,7 +37,7 @@ import {
   type AgentRunnerConfig,
   type RunnerFactory,
 } from "../src/agent.js";
-import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } from "../src/chrome.js";
+import { startAssistantChrome, type AssistantChrome } from "../src/chrome.js";
 import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 import type { CdpPipe } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions } from "../src/backoff.js";
@@ -49,13 +53,81 @@ const fakeChrome = (): AssistantChrome => ({
   kind: "local",
   profileDir: "/tmp/baize-test/chrome-profile",
   connection: async () => fakeConnection,
-  login: async () => ({ login: "valid", handle: "白泽工厂日记" }),
+  onExit: () => () => {},
+  reveal: async () => {},
+  conceal: async () => {},
   pid: () => null,
   stop: async () => {},
 });
+
+/**
+ * 能登录的假 Chrome：每次 createTarget 开一个 tab，按开的顺序叫 tab-1、tab-2……。登录页上查到的账号名由 signIn
+ * 给，destroy 让这一页没了。
+ */
+function loginChrome(kind: AssistantChrome["kind"] = "local") {
+  const tabs: string[] = [];
+  const handles = new Map<string, string>();
+  const sessions = new Map<string, string>();
+  const listeners = new Set<(event: CdpEvent) => void>();
+  const closed: string[] = [];
+  const connection: CdpConnection = {
+    send: async (method, params = {}, sessionId) => {
+      switch (method) {
+        case "Target.createTarget": {
+          const targetId = `tab-${tabs.length + 1}`;
+          tabs.push(targetId);
+          return { targetId };
+        }
+        case "Target.attachToTarget": {
+          const session = `session-${sessions.size + 1}`;
+          sessions.set(session, String(params.targetId));
+          return { sessionId: session };
+        }
+        case "Target.closeTarget":
+          closed.push(String(params.targetId));
+          return {};
+        case "Runtime.evaluate":
+          return { result: { type: "object", value: handles.get(sessions.get(sessionId ?? "") ?? "") ?? null } };
+        default:
+          return {};
+      }
+    },
+    onEvent: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    isOpen: () => true,
+  };
+  return {
+    tabs: () => [...tabs],
+    closed: () => [...closed],
+    signIn: (tab: string, handle: string): void => {
+      handles.set(tab, handle);
+    },
+    destroy: (tab: string): void => {
+      for (const listener of listeners)
+        listener({ method: "Target.targetDestroyed", params: { targetId: tab }, sessionId: undefined });
+    },
+    factory: (): AssistantChrome => ({ ...fakeChrome(), kind, connection: async () => connection }),
+  };
+}
+
+/** 等发件箱日志恰好写到 n 行。 */
+const journalLines =
+  (path: string) =>
+  (n: number): Promise<true> =>
+    poll(
+      () =>
+        existsSync(path) && readFileSync(path, "utf8").split("\n").filter(Boolean).length === n ? true : undefined,
+      3000,
+      `发件箱写到第 ${n} 行`,
+    );
 const initialRunnerConfigs: AgentRunnerConfig[] = [];
 
 // 只挑 config 里第 2 期新加的两项，断言时不带其余字段。
+const attemptIs = (attempt: string) => (session: LiveAnnounce) =>
+  session.purpose.kind === "login" && session.purpose.attempt === attempt;
+
 const carried = (config: RunnerConfig) => ({ brand: config.brand, preferences: config.preferences });
 
 function startAgent(options: AgentOptions): AgentHandle {
@@ -232,6 +304,7 @@ function startControlPlane(
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const sockets: WebSocketType[] = [];
   const messages: AgentToControl[] = [];
+  const live: LiveUp[] = [];
   const parseErrors: string[] = [];
   let nextDownlink = 1;
   const streams = new Map<string, number>();
@@ -288,7 +361,13 @@ function startControlPlane(
       return originalSend(data, options ?? {}, callback);
     }) as WebSocketType["send"];
     onConnection?.(socket);
-    socket.on("message", (data) => {
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        const decoded = decodeLive(LiveUp, new Uint8Array(data as Buffer));
+        if (decoded === null) parseErrors.push("画面上行解不开");
+        else live.push(decoded.header);
+        return;
+      }
       let json: unknown;
       try {
         json = JSON.parse(data.toString());
@@ -349,6 +428,16 @@ function startControlPlane(
     },
     sockets,
     messages,
+    live,
+    /** 第 nth 次报上来的、满足条件的画面会话，断线重连后的重报也算一次。 */
+    waitForLiveSession(match: (session: LiveAnnounce) => boolean, nth = 1, timeoutMs = 3000): Promise<LiveAnnounce> {
+      return poll(
+        () =>
+          live.flatMap((header) => (header.t === "session" && match(header.session) ? [header.session] : []))[nth - 1],
+        timeoutMs,
+        `第 ${nth} 个画面会话`,
+      );
+    },
     onConnection(hook: (socket: WebSocketType) => void) {
       onConnection = hook;
     },
@@ -1361,20 +1450,36 @@ describe("电脑代理连控制面", () => {
     expect(runnerCalls().pokerResults).toEqual([{ runId: "run-1", callId: "act-waiting", result: { ok: true } }]);
   });
 
-  it("收 browser_login 后回一条 login_state", async () => {
-    const server = await startPair();
-    const socket = await server.waitForSocket(1);
+  it.each(["local", "remote"] as const)(
+    "%s 电脑收 browser_login：登录页上屏，登上后先撤回画面再回一条 login_state",
+    async (kind) => {
+      const server = startControlPlane();
+      servers.push(server);
+      const chrome = loginChrome(kind);
+      spawnAgent(await server.url(), { makeChrome: chrome.factory });
+      const socket = await server.waitForSocket(1);
 
-    socket.send(
-      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
-    );
+      socket.send(
+        JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+      );
+      const shown = await server.waitForLiveSession((session) => session.purpose.kind === "login");
+      chrome.signIn("tab-1", "白泽工厂日记");
 
-    await expect(server.waitForMessage("login_state", 1, 500)).resolves.toEqual({
-      type: "login_state",
-      accountId: "account-1",
-      state: { login: "valid", handle: "白泽工厂日记" },
-    });
-  });
+      await expect(server.waitForMessage("login_state")).resolves.toEqual({
+        type: "login_state",
+        accountId: "account-1",
+        state: { login: "valid", handle: "白泽工厂日记" },
+      });
+      expect(shown.purpose).toEqual({
+        kind: "login",
+        accountId: "account-1",
+        platform: "xiaohongshu",
+        attempt: "try-1",
+      });
+      expect(server.live, "画面的 closed 先于 login_state 到").toContainEqual({ t: "closed", liveId: shown.liveId });
+      expect(chrome.closed(), "登录页关掉").toEqual(["tab-1"]);
+    },
+  );
 
   it("第二份 config 的 hub 和 key 交给运行器，排队发布在下载时才读取最新配置", async () => {
     const bytes = Buffer.from(
@@ -1557,7 +1662,7 @@ describe("电脑代理连控制面", () => {
     expect(connectionCalls, "发布器拿到的是代理的助理浏览器，配图也在代理的数据目录里认过了").toBe(1);
   });
 
-  it("远程电脑收到 publish_draft 回 error 并写明没有助理浏览器，Bot 的助理浏览器照旧", async () => {
+  it("远程电脑的发布器和 Bot 用同一个助理 Chrome：开发布页撞上登录页回 login_expired", async () => {
     const server = startControlPlane();
     servers.push(server);
     const wall = startLoginWallPipe();
@@ -1604,29 +1709,35 @@ describe("电脑代理连控制面", () => {
 
     await expect(
       server.waitForMessage("publish_result", 1, 10_000),
-      "远程上扫码登录会被拒，不能回 login_expired 引用户去扫码",
+      "远程电脑上的登录态就在这个 profile 里，过期了引用户去画面上重新扫码；以前这里回 error「这台电脑没有助理浏览器」",
     ).resolves.toEqual({
       type: "publish_result",
       draftId: "draft-1",
       attempt: "2026-09-26T08:00:00.000Z",
-      result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
+      result: { status: "failed", reason: "login_expired", detail: "小红书登录过期了，到账号页重新扫码登录后再发" },
     });
-    expect(launches, "发布器没去起这台电脑上的 Chrome").toBe(0);
-    expect(wall.commands(), "管道上一条命令都没有").toEqual([]);
+    expect(launches, "发布器起了这台电脑上的助理 Chrome").toBe(1);
+    expect(wall.commands(), "发布器开自己的后台标签页去发布页，看到登录页就关掉这一页").toEqual([
+      "Browser.getVersion",
+      "Target.createTarget",
+      "Target.attachToTarget",
+      "Emulation.setFocusEmulationEnabled",
+      "Page.navigate",
+      "Runtime.evaluate",
+      "Target.closeTarget",
+    ]);
     const botBrowser = (await poll(() => initialRunnerConfigs.at(-1), 3000, "运行器收到 config")).browser;
     expect(botBrowser.profileDir).toBe(chromeProfileDir(dataDir));
     const connection = await botBrowser.connection();
     await connection.send("Target.createTarget", { url: "about:blank", background: true });
-    expect(wall.commands(), "Bot 的助理浏览器工具在远程照样拿得到浏览器").toEqual([
-      "Browser.getVersion",
-      "Target.createTarget",
-    ]);
+    expect(launches, "Bot 的浏览器工具接着用发布器起的那个 Chrome，不另起").toBe(1);
+    expect(wall.commands().at(-1)).toBe("Target.createTarget");
   });
 
   it.each([
-    ["启动就失败", async (): Promise<never> => Promise.reject(new Error("没装 Chrome"))],
-    ["一直起不来", (): Promise<never> => new Promise<never>(() => {})],
-  ])("Chrome %s时 browser_login 回 failed window_failed，不说账号过期", async (_label, launchChrome) => {
+    ["启动就失败", "window_failed", async (): Promise<never> => Promise.reject(new Error("没装 Chrome"))],
+    ["一直起不来", "timed_out", (): Promise<never> => new Promise<never>(() => {})],
+  ] as const)("Chrome %s时 browser_login 回 failed %s，不说账号过期", async (_label, reason, launchChrome) => {
     const server = startControlPlane();
     servers.push(server);
     spawnAgent(await server.url(), {
@@ -1649,119 +1760,85 @@ describe("电脑代理连控制面", () => {
     await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
       type: "login_state",
       accountId: "account-1",
-      state: { login: "failed", reason: "window_failed", attempt: "try-1" },
+      state: { login: "failed", reason, attempt: "try-1" },
     });
   });
 
-  it("Linux 上登录请求回失败并带说明，不为此起 Chrome", async () => {
+  it("两个账号的登录互不等：先登上的先报，另一个到点回 timed_out", async () => {
     const server = startControlPlane();
     servers.push(server);
-    const lines: string[] = [];
-    let launches = 0;
-    spawnAgent(await server.url(), {
-      dataDir: await tempDataDir(),
-      log: (line) => lines.push(line),
-      makeChrome: (options) =>
-        startAssistantChrome({
-          ...options,
-          platform: "linux",
-          launchChrome: async () => {
-            launches += 1;
-            throw new Error("不该起 Chrome");
-          },
-        }),
-    });
+    const chrome = loginChrome();
+    spawnAgent(await server.url(), { loginTimeoutMs: 2000, makeChrome: chrome.factory });
     const socket = await server.waitForSocket(1);
 
-    socket.send(
-      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
-    );
-
-    await expect(server.waitForMessage("login_state", 1, 3000)).resolves.toEqual({
-      type: "login_state",
-      accountId: "account-1",
-      state: { login: "failed", reason: "remote_refused", attempt: "try-1" },
-    });
-    expect(lines.join("\n")).toContain("远程电脑上不能登录，请在本机登录这个账号");
-    expect(launches).toBe(0);
-  });
-
-  it("前一个登录卡住不堵后一个", async () => {
-    const server = startControlPlane();
-    servers.push(server);
-    const outcomes: Promise<BrowserLoginState>[] = [
-      new Promise<never>(() => {}),
-      Promise.resolve({ login: "valid", handle: "白泽工厂日记" }),
-    ];
-    let logins = 0;
-    spawnAgent(await server.url(), {
-      loginTimeoutMs: 300,
-      makeChrome: () => ({
-        ...fakeChrome(),
-        login: () => {
-          logins += 1;
-          return outcomes.shift() ?? Promise.reject(new Error("多登了一次"));
-        },
-      }),
-    });
-    const socket = await server.waitForSocket(1);
-
-    socket.send(
-      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
-    );
-    // 上限从收到报文算起。第二条等第一条真的卡在登录里再发，它的上限才晚于第一条到点。
-    await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
-    socket.send(
-      JSON.stringify({ type: "browser_login", accountId: "account-2", platform: "xiaohongshu", attempt: "try-2" }),
-    );
-    await server.waitForMessage("login_state", 2, 3000);
+    for (const [accountId, attempt] of [
+      ["account-1", "try-1"],
+      ["account-2", "try-2"],
+    ])
+      socket.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
+    await server.waitForLiveSession((session) => session.purpose.kind === "login", 2);
+    chrome.signIn("tab-2", "白泽二号");
+    await server.waitForMessage("login_state", 2, 5000);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽二号" } },
       {
         type: "login_state",
         accountId: "account-1",
-        state: { login: "failed", reason: "window_failed", attempt: "try-1" },
+        state: { login: "failed", reason: "timed_out", attempt: "try-1" },
       },
-      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
     ]);
+  });
+
+  it("画面上点了放弃的、被同一账号新登录顶掉的，都不回 login_state", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const chrome = loginChrome();
+    spawnAgent(await server.url(), { makeChrome: chrome.factory });
+    const socket = await server.waitForSocket(1);
+    const login = (accountId: string, attempt: string): void =>
+      socket.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
+
+    login("account-1", "try-1");
+    const superseded = await server.waitForLiveSession(attemptIs("try-1"));
+    login("account-1", "try-2");
+    const abandoned = await server.waitForLiveSession(attemptIs("try-2"));
+    socket.send(Buffer.from(encodeLive({ t: "end", liveId: abandoned.liveId, action: "abandon" })));
+    await poll(() => (chrome.closed().length === 2 ? true : undefined), 3000, "两张登录页都关了");
+    login("account-2", "try-3");
+    await server.waitForLiveSession(attemptIs("try-3"));
+    chrome.signIn("tab-3", "白泽二号");
+    await server.waitForMessage("login_state");
+
+    expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽二号" } },
+    ]);
+    expect(server.live).toContainEqual({ t: "closed", liveId: superseded.liveId });
+    expect(server.live).toContainEqual({ t: "closed", liveId: abandoned.liveId });
+    expect(chrome.closed()).toEqual(["tab-1", "tab-2", "tab-3"]);
   });
 
   it("断线期间完成的登录结果全部落盘，重连后按序补发", async () => {
     const server = startControlPlane({ holdWelcomeAfter: 1 });
     servers.push(server);
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const outcomes: BrowserLoginState[] = [
-      { login: "failed", reason: "window_failed" },
-      { login: "valid", handle: "白泽工厂日记" },
-      { login: "valid", handle: "白泽二号" },
-    ];
+    const chrome = loginChrome();
     const logs: string[] = [];
-    let logins = 0;
+    const directory = await tempDataDir();
     spawnAgent(await server.url(), {
+      dataDir: directory,
       backoff: { initialMs: 200, maxMs: 200, factor: 1 },
       log: (line) => logs.push(line),
-      makeChrome: () => ({
-        ...fakeChrome(),
-        login: async () => {
-          logins += 1;
-          const outcome = outcomes.shift();
-          await gate;
-          return outcome ?? Promise.reject(new Error("多登了一次"));
-        },
-      }),
+      makeChrome: chrome.factory,
     });
     const first = await server.waitForSocket(1);
-    await server.waitForMessage("hello", 1);
+    const hello = await server.waitForMessage("hello", 1);
     for (const [accountId, attempt] of [
       ["account-1", "try-1"],
-      ["account-1", "try-2"],
-      ["account-2", "try-3"],
+      ["account-2", "try-2"],
+      ["account-3", "try-3"],
     ])
       first.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
-    await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
+    await server.waitForLiveSession((session) => session.purpose.kind === "login", 3);
     await poll(
       () =>
         server.messages.filter((message) => message.type === "downlink_ack").at(-1)?.upTo === 3 ? true : undefined,
@@ -1771,9 +1848,13 @@ describe("电脑代理连控制面", () => {
 
     first.terminate();
     await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
-    release?.();
-    await poll(() => (logins === 3 ? true : undefined), 3000, "三次登录都完成");
-    expect(logins, "前提：三次登录都在断线期间做完").toBe(3);
+    const journaled = journalLines(join(directory, ".agent", "outbox", hello.uplinkStream, "frames.jsonl"));
+    chrome.destroy("tab-1");
+    await journaled(1);
+    chrome.signIn("tab-2", "白泽工厂日记");
+    await journaled(2);
+    chrome.signIn("tab-3", "白泽二号");
+    await journaled(3);
 
     const second = await server.waitForSocket(2);
     await server.waitForMessage("hello", 2);
@@ -1790,39 +1871,31 @@ describe("电脑代理连控制面", () => {
         accountId: "account-1",
         state: { login: "failed", reason: "window_failed", attempt: "try-1" },
       },
-      { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
-      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽二号" } },
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
+      { type: "login_state", accountId: "account-3", state: { login: "valid", handle: "白泽二号" } },
     ]);
   });
 
   it("断线期间的登录结果会补发，连接恢复后完成的新结果接在后面", async () => {
     const server = startControlPlane({ holdWelcomeAfter: 1 });
     servers.push(server);
-    const gates: Array<() => void> = [];
-    const outcomes: BrowserLoginState[] = [
-      { login: "failed", reason: "window_failed" },
-      { login: "valid", handle: "白泽工厂日记" },
-    ];
+    const chrome = loginChrome();
     const logs: string[] = [];
     const directory = await tempDataDir();
     spawnAgent(await server.url(), {
       dataDir: directory,
       backoff: { initialMs: 200, maxMs: 200, factor: 1 },
       log: (line) => logs.push(line),
-      makeChrome: () => ({
-        ...fakeChrome(),
-        login: async () => {
-          const outcome = outcomes.shift();
-          await new Promise<void>((resolve) => gates.push(resolve));
-          return outcome ?? Promise.reject(new Error("多登了一次"));
-        },
-      }),
+      makeChrome: chrome.factory,
     });
     const first = await server.waitForSocket(1);
     await server.waitForMessage("hello", 1);
-    for (const attempt of ["try-1", "try-2"])
-      first.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt }));
-    await poll(() => gates[0], 3000, "第一次登录开始");
+    for (const [accountId, attempt] of [
+      ["account-1", "try-1"],
+      ["account-2", "try-2"],
+    ])
+      first.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
+    await server.waitForLiveSession((session) => session.purpose.kind === "login", 2);
     await poll(
       () =>
         server.messages.filter((message) => message.type === "downlink_ack").at(-1)?.upTo === 2 ? true : undefined,
@@ -1832,20 +1905,13 @@ describe("电脑代理连控制面", () => {
 
     first.terminate();
     await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
-    gates[0]?.();
     const second = await server.waitForSocket(2);
     const hello = await server.waitForMessage("hello", 2);
-    gates[0]?.();
-    await poll(() => gates[1], 3000, "第二次登录开始");
-    const journalPath = join(directory, ".agent", "outbox", hello.uplinkStream, "frames.jsonl");
-    await poll(
-      () => (readFileSync(journalPath, "utf8").split("\n").filter(Boolean).length === 1 ? true : undefined),
-      3000,
-      "第一条登录结果落盘",
-    );
+    chrome.destroy("tab-1");
+    await journalLines(join(directory, ".agent", "outbox", hello.uplinkStream, "frames.jsonl"))(1);
     second.send(welcomeFrame());
     await server.waitForMessage("login_state", 1);
-    gates[1]?.();
+    chrome.signIn("tab-2", "白泽工厂日记");
     await server.waitForMessage("login_state", 2);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
@@ -1854,7 +1920,7 @@ describe("电脑代理连控制面", () => {
         accountId: "account-1",
         state: { login: "failed", reason: "window_failed", attempt: "try-1" },
       },
-      { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
+      { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽工厂日记" } },
     ]);
   });
 

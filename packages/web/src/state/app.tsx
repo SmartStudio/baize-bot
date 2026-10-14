@@ -24,6 +24,7 @@ import {
   type DecideApprovalRequest,
   type GrantId,
   type GroupId,
+  type LiveId,
   type Message,
   type MessageId,
   type Preference,
@@ -59,8 +60,9 @@ import { reconnectDelay } from "./reconnect.js";
 import { createSessions, type Attempt, type Flight, type Session } from "./session.js";
 import { createClock, type Seq } from "./stamped.js";
 
-// 电脑代理给一次登录最多等 120 秒（computer-agent 的 loginTimeoutMs），这里再宽 30 秒给两跳报文和推送。
-// 过了这个点还没结果，就当电脑那边的结果丢了：重拉一遍账号，还在等的卡改成没等到。
+// 点了登录之后多久画面还没出来就算没等到：重拉一遍账号，还在等的卡改成没等到。电脑开页上屏通常几秒，Chrome
+// 冷启动最多等 15 秒，这里留足余量。画面开着时不结（见 content.ts 的 login_flow）：人还在登，时限归电脑
+// （computer-agent 的 loginTimeoutMs，15 分钟）；画面收起时卡改成 closed，电脑随后报的结果会盖掉它。
 const LOGIN_TIMEOUT_MS = 150_000;
 // 单拉漏档失败后隔一会儿再报失败计数，免得服务端一时不可用时几趟重试挤在同一瞬间用完。
 const MESSAGE_GAP_RETRY_MS = 1_000;
@@ -109,6 +111,13 @@ export type AppActions = {
   deleteAccount: (email: string) => Promise<void>;
   updateAccountTier: (accountId: AccountId, tier: AccountTier) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
+  // 画面上点了「不登了」：只复位这次点击的按钮，不记失败。告诉电脑的那一句由画面面板自己发。
+  dismissLogin: (accountId: AccountId, attempt: LoginAttemptId) => Promise<void>;
+  // 电脑上正开着的画面。启动和推送重连时各拉一次，平时靠 live_session、live_closed 两种推送。
+  loadLive: () => Promise<void>;
+  // 接手画面只在用户点了「打开画面」后才摆；收起面板时清掉，提示和卡上的按钮还在。
+  openTakeover: (liveId: LiveId) => Promise<void>;
+  hideTakeover: (liveId: LiveId) => Promise<void>;
   // 建这个平台的未登录占位，已经有就回那一行。登录窗口由调用方接着在它上面开。登录过期时是 undefined。
   addAccount: (platform: BrowserPlatform, computerId: ComputerId) => Promise<AccountId | undefined>;
   loadGrants: () => Promise<void>;
@@ -615,6 +624,19 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }, LOGIN_TIMEOUT_MS);
         session.signal.addEventListener("abort", () => clearTimeout(timer));
       }),
+      dismissLogin: signedIn(async ({ put }, accountId: AccountId, attempt: LoginAttemptId) => {
+        put({ type: "login_dismissed", accountId, attempt });
+      }),
+      loadLive: signedIn(async ({ api, put }) => {
+        const seq = nextSeq();
+        put({ type: "live_loaded", sessions: (await api.live()).sessions, seq });
+      }),
+      openTakeover: signedIn(async ({ put }, liveId: LiveId) => {
+        put({ type: "takeover_opened", liveId, openedAt: nextSeq() });
+      }),
+      hideTakeover: signedIn(async ({ put }, liveId: LiveId) => {
+        put({ type: "takeover_hidden", liveId });
+      }),
       loadGrants: signedIn(async ({ api, put }) => {
         put({ type: "grants_loaded", grants: (await api.grants()).grants });
       }),
@@ -884,7 +906,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   const session = state.status === "ready" ? state.session : null;
   // 卡片上的「从哪台电脑发」和账号页都读这两张表。拉不到只是少写一句电脑名，不该拖住整个入口。
   useEffect(() => {
-    if (session !== null) actions.loadAccounts().catch(() => undefined);
+    if (session === null) return;
+    actions.loadAccounts().catch(() => undefined);
+    actions.loadLive().catch(() => undefined);
   }, [session, actions]);
 
   useEffect(() => {
@@ -913,20 +937,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }, 200);
     };
     // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
+    // 画面一起重拉：断线期间开关过的画面也收不到推送，还开着的那次登录不算没等到，见 logins_settled。
     // 重拉失败也结，卡不能一直停在「等你扫码」；重拉期间新点的登录 startedAt 更大，不受影响。
     const recoverLogins = (computerId: ComputerId | null, flow: "offline" | "lapsed") => {
       const before = nextSeq();
       const seq = nextSeq();
-      void Promise.all([scoped.api.accounts(), scoped.api.computers()])
-        .then(([{ accounts }, { computers }]) => {
+      void Promise.allSettled([
+        Promise.all([scoped.api.accounts(), scoped.api.computers()]).then(([{ accounts }, { computers }]) => {
           if (live()) put({ type: "accounts_loaded", accounts, computers, seq });
-        })
-        .catch((cause: unknown) => {
-          if (live() && isUnauthorized(cause)) expire();
-        })
-        .then(() => {
-          if (live()) put({ type: "logins_settled", before, computerId, flow: { status: flow } });
-        });
+        }),
+        scoped.api.live().then(({ sessions }) => {
+          if (live()) put({ type: "live_loaded", sessions, seq });
+        }),
+      ]).then((results) => {
+        if (!live()) return;
+        if (results.some((result) => result.status === "rejected" && isUnauthorized(result.reason))) expire();
+        else put({ type: "logins_settled", before, computerId, flow: { status: flow } });
+      });
     };
     const pushHandlers = createPushHandlers({
       session,

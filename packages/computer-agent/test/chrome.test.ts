@@ -1,21 +1,28 @@
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { basename, dirname, join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BotId } from "@baize/shared";
+import type { CdpConnection } from "@baize/bot-runner";
+import { AccountId, BotId, LoginAttemptId } from "@baize/shared";
 import { botDirs, forbiddenZones } from "../../bot-runner/src/paths.js";
 import { createSandboxedBash } from "../../bot-runner/src/sandbox.js";
 import { startAssistantChrome, type AssistantChrome, type ChromeProcess } from "../src/chrome.js";
 import { chromeProfileDir, isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
+import { createLiveScreen } from "../src/live-screen.js";
+import { runLogin } from "../src/login.js";
 
 const chromes: AssistantChrome[] = [];
 const dataDirs: string[] = [];
+// 把冻住的 Date 拨过崩溃窗口，免得重起退避挡住后面的连接。
+const pastCrashWindow = (): void => {
+  vi.setSystemTime(Date.now() + 60_000);
+};
 
 async function poll<T>(
   get: () => T | undefined | Promise<T | undefined>,
@@ -215,126 +222,98 @@ describe("助理 Chrome 连接失效和重起退避", () => {
   });
 });
 
-// 假时钟只接管 setTimeout，这里靠 setImmediate 让管道和微任务走完，不碰假时钟。
-async function settle(ready: () => boolean, label: string): Promise<void> {
-  for (let turn = 0; turn < 10_000; turn += 1) {
-    if (ready()) return;
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  throw new Error(`管道走完了还没等到${label}`);
-}
-
-describe("登录窗口的轮询出口", () => {
-  const WINDOW_FAILED = { login: "failed", reason: "window_failed" };
-
-  async function startLogin(evaluate: (count: number) => Reply) {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    let evaluations = 0;
-    const { launched, launchChrome } = fakeChromes((method) => {
-      if (method === "Target.createTarget") return { targetId: "login-tab" };
-      if (method === "Target.attachToTarget") return { sessionId: "login-session" };
-      if (method !== "Runtime.evaluate") return {};
-      evaluations += 1;
-      return evaluate(evaluations);
-    });
-    const backgrounded: number[] = [];
+describe("助理 Chrome 的单例锁", () => {
+  it("profile 里留着别的主机写下的单例锁（远程电脑的容器重建过），起 Chrome 之前已经清掉", async () => {
+    const directory = await dataDir();
+    const profileDir = chromeProfileDir(directory);
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    await symlink("7ec7de76ada7-80", join(profileDir, "SingletonLock"));
+    await symlink("17585210604407249254", join(profileDir, "SingletonCookie"));
+    await symlink(
+      join(profileDir, "tmp", "org.chromium.Chromium.gone", "SingletonSocket"),
+      join(profileDir, "SingletonSocket"),
+    );
+    const { launchChrome } = fakeChromes();
+    let seen: string[] = [];
     const chrome = startAssistantChrome({
-      dataDir: await dataDir(),
+      dataDir: directory,
       log: () => {},
-      platform: "darwin",
-      launchChrome,
-      activateProcess: async () => {},
-      backgroundProcess: async (pid) => {
-        backgrounded.push(pid);
+      launchChrome: async (launchedProfile) => {
+        seen = (await readdir(launchedProfile)).toSorted();
+        return launchChrome();
       },
     });
     chromes.push(chrome);
-    const controller = new AbortController();
-    const outcome = chrome.login("xiaohongshu", controller.signal);
-    const settled = { value: undefined as unknown, rejected: undefined as unknown, done: false };
-    outcome.then(
-      (value) => Object.assign(settled, { value, done: true }),
-      (error: unknown) => Object.assign(settled, { rejected: error, done: true }),
-    );
-    return {
-      chrome,
-      controller,
-      settled,
-      evaluations: () => evaluations,
-      commands: () => launched.flatMap((fake) => fake.commands),
-      backgrounded,
-    };
-  }
 
-  it("登录元素第三次才出现：每 250ms 查一次，查到回 valid，关掉登录页并退回后台", async () => {
-    const login = await startLogin((count) =>
-      count < 3 ? { result: { type: "object", value: null } } : { result: { type: "string", value: "白泽工厂日记" } },
-    );
-    await settle(() => login.evaluations() === 1, "第一次查登录元素");
+    await chrome.connection();
 
-    await vi.advanceTimersByTimeAsync(249);
-    expect(login.evaluations(), "没到 250ms 不查第二次").toBe(1);
-    await vi.advanceTimersByTimeAsync(1);
-    await settle(() => login.evaluations() === 2, "第二次查登录元素");
-    await vi.advanceTimersByTimeAsync(250);
-    await settle(() => login.settled.done, "登录结束");
-
-    expect(login.settled.value).toEqual({ login: "valid", handle: "白泽工厂日记" });
-    expect(login.evaluations()).toBe(3);
-    expect(login.commands()).toContain("Target.closeTarget");
-    expect(login.backgrounded).toHaveLength(1);
-  });
-
-  it("两次轮询之间到点：不再查，回 failed window_failed，登录页照样关", async () => {
-    const login = await startLogin(() => ({ result: { type: "object", value: null } }));
-    await settle(() => login.evaluations() === 1, "第一次查登录元素");
-
-    login.controller.abort();
-    await vi.advanceTimersByTimeAsync(250);
-    await settle(() => login.settled.done, "登录结束");
-    // 登录先结束、多发的那条命令晚一轮才被假 Chrome 读到，排空一轮管道再数。
-    await new Promise((resolve) => setImmediate(resolve));
-
-    expect(login.settled.value).toEqual(WINDOW_FAILED);
-    expect(login.evaluations(), "到点后不再查").toBe(1);
-    expect(login.commands()).toContain("Target.closeTarget");
-    expect(login.backgrounded).toHaveLength(1);
-  });
-
-  it("查登录元素的命令挂着时到点：不等它回，当场回 failed window_failed", async () => {
-    const login = await startLogin(() => "hold");
-    await settle(() => login.evaluations() === 1, "第一次查登录元素");
-
-    login.controller.abort();
-    await settle(() => login.settled.done, "登录结束");
-
-    expect(login.settled.value).toEqual(WINDOW_FAILED);
-    expect(login.commands()).toContain("Target.closeTarget");
-  });
-
-  it("轮询中助理 Chrome 停了：回 failed window_failed", async () => {
-    const login = await startLogin(() => ({ result: { type: "object", value: null } }));
-    await settle(() => login.evaluations() === 1, "第一次查登录元素");
-
-    await login.chrome.stop();
-    await vi.advanceTimersByTimeAsync(250);
-    await settle(() => login.settled.done, "登录结束");
-
-    expect(login.settled.value).toEqual(WINDOW_FAILED);
-    expect(login.evaluations(), "停了之后不再查").toBe(1);
-  });
-
-  it("登录页脚本抛异常：登录以错误结束，不当成没登上", async () => {
-    const login = await startLogin(() => ({ result: {}, exceptionDetails: { text: "Uncaught" } }));
-    await settle(() => login.settled.done, "登录结束");
-
-    expect(String(login.settled.rejected)).toContain("登录页脚本执行失败");
-    expect(login.commands()).toContain("Target.closeTarget");
+    expect(seen, "Chrome 起的那一刻 profile 里只剩临时目录").toEqual(["tmp"]);
   });
 });
 
-describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
-  it("本地静态页按钮加出登录后元素后返回账号", async () => {
+describe("助理 Chrome 退出通知", () => {
+  it("Chrome 退了：订阅的人拿到退出的那条连接；之后重起的是新连接，再退再通知；退订后不再收到", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const { launched, launchChrome } = fakeChromes();
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {}, launchChrome });
+    chromes.push(chrome);
+    const exits: CdpConnection[] = [];
+    const unsubscribe = chrome.onExit((connection) => exits.push(connection));
+    const first = await chrome.connection();
+
+    pastCrashWindow();
+    launched[0]?.exit();
+    await poll(() => (exits.length === 1 ? true : undefined), 3_000, "第一次退出通知");
+    expect(exits[0]).toBe(first);
+
+    const second = await chrome.connection();
+    expect(second).not.toBe(first);
+    pastCrashWindow();
+    launched[1]?.exit();
+    await poll(() => (exits.length === 2 ? true : undefined), 3_000, "第二次退出通知");
+    expect(exits[1]).toBe(second);
+
+    unsubscribe();
+    await chrome.connection();
+    pastCrashWindow();
+    launched[2]?.exit();
+    await poll(() => (chrome.pid() === null ? true : undefined), 3_000, "Chrome 退出被看到");
+    expect(exits, "退订后不再收到").toHaveLength(2);
+  });
+
+  it("代理停机时 Chrome 被收掉，也通知一次", async () => {
+    const { launchChrome } = fakeChromes();
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {}, launchChrome });
+    chromes.push(chrome);
+    const exits: CdpConnection[] = [];
+    chrome.onExit((connection) => exits.push(connection));
+    const connection = await chrome.connection();
+
+    await chrome.stop();
+
+    await poll(() => (exits.length === 1 ? true : undefined), 3_000, "停机的退出通知");
+    expect(exits[0]).toBe(connection);
+  });
+});
+
+/** 真 Chrome 上跑登录：屏照常登记会话，上行丢掉，没人看。 */
+function loginOn(chrome: AssistantChrome, url: string) {
+  const screen = createLiveScreen({ chrome, uplink: () => true, log: () => {} });
+  const page = { url, successSelector: ".user-info .user_avatar", handleSelector: ".user-info span" };
+  return (signal: AbortSignal) =>
+    runLogin(
+      {
+        platform: "xiaohongshu",
+        accountId: AccountId.parse("account-1"),
+        attempt: LoginAttemptId.parse("try-1"),
+      },
+      { chrome, present: screen.present, pages: { xiaohongshu: page }, log: () => {} },
+      signal,
+    );
+}
+
+describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", () => {
+  it("本地静态页按钮加出登录后元素后返回账号，登录页关掉", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><meta charset="utf-8">
@@ -350,23 +329,14 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
     const chrome = startAssistantChrome({
       dataDir: await dataDir(),
       log: () => {},
-      platformPages: {
-        xiaohongshu: {
-          url: `http://127.0.0.1:${address.port}/`,
-          successSelector: ".user-info .user_avatar",
-          handleSelector: ".user-info span",
-        },
-      },
       activateProcess: async () => {},
       backgroundProcess: async () => {},
     });
     chromes.push(chrome);
 
     try {
-      await expect(chrome.login("xiaohongshu", AbortSignal.timeout(5_000))).resolves.toEqual({
-        login: "valid",
-        handle: "白泽工厂日记",
-      });
+      const login = loginOn(chrome, `http://127.0.0.1:${address.port}/`);
+      await expect(login(AbortSignal.timeout(5_000))).resolves.toEqual({ login: "valid", handle: "白泽工厂日记" });
       const connection = await chrome.connection();
       const loginPages = async (): Promise<string[]> => {
         const { targetInfos } = (await connection.send("Target.getTargets")) as { targetInfos: { url: string }[] };
@@ -386,7 +356,7 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
     }
   }, 20_000);
 
-  it("登录元素在上限内没出现就返回 failed window_failed", async () => {
+  it("登录元素在上限内没出现就返回 failed timed_out", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end("<!doctype html><button id=login>登录</button>");
@@ -400,22 +370,17 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome", () => {
     const chrome = startAssistantChrome({
       dataDir: await dataDir(),
       log: () => {},
-      platformPages: {
-        xiaohongshu: {
-          url: `http://127.0.0.1:${address.port}/`,
-          successSelector: ".user-info .user_avatar",
-          handleSelector: ".user-info span",
-        },
-      },
       activateProcess: async () => {},
       backgroundProcess: async () => {},
     });
     chromes.push(chrome);
+    // 先把 Chrome 起好，上限只算登录页上的时间。
+    await chrome.connection();
 
     try {
-      await expect(chrome.login("xiaohongshu", AbortSignal.timeout(300))).resolves.toEqual({
+      await expect(loginOn(chrome, `http://127.0.0.1:${address.port}/`)(AbortSignal.timeout(1_000))).resolves.toEqual({
         login: "failed",
-        reason: "window_failed",
+        reason: "timed_out",
       });
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));

@@ -11,6 +11,7 @@ import type {
   PublishFailureReason,
   DraftId,
   DraftStatus,
+  LiveId,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
 import { BrandBookOpener } from "../BrandBookDialog.js";
@@ -21,6 +22,7 @@ export type ContentActions = {
   approvePlan: (planId: ContentPlanId, request: ApprovePlanRequest) => Promise<void>;
   returnPlan: (planId: ContentPlanId) => Promise<void>;
   loginAccount: (accountId: AccountId) => Promise<void>;
+  openTakeover: (liveId: LiveId) => Promise<void>;
 };
 
 type Deciding = "approve" | "return" | null;

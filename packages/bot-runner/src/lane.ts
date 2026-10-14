@@ -4,6 +4,7 @@ import type { BotGeneration } from "./index.js";
 import type { RememberingRun } from "./memory.js";
 import type { Recalls } from "./recall.js";
 import { SerialQueue } from "./serial-queue.js";
+import type { TakeoverSlot } from "./takeover.js";
 import type { WorkMirror } from "./work-mirror.js";
 
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -24,6 +25,8 @@ export interface Lane {
   readonly recalls: Recalls;
   readonly mirrors: Map<"chat" | "table", WorkMirror>;
   active: LaneActive | null;
+  /** 这个群里正挂着的 `browser_ask_user`，用户发新消息时按它作废。 */
+  readonly takeover: TakeoverSlot;
   phase: "ready" | "stopped";
   stopping: Promise<void> | null;
 }
@@ -36,6 +39,7 @@ export function createLane(groupId: GroupId): Lane {
     recalls: new Map(),
     mirrors: new Map(),
     active: null,
+    takeover: { current: null },
     phase: "ready",
     stopping: null,
   };

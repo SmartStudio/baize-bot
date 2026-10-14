@@ -233,8 +233,8 @@ type LoginState = Extract<AgentToControl, { type: "login_state" }>;
 
 const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> = {
-  window_failed: (platform) => `${platform}的登录窗口出错或到时间还没登上，账号状态没变，可以再点一次登录`,
-  remote_refused: (platform) => `远程电脑上不能登录${platform}，请在本机登录这个账号`,
+  window_failed: (platform) => `${platform}的登录窗口出错或被关掉了，账号状态没变，可以再点一次登录`,
+  timed_out: (platform) => `${platform}的登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次登录`,
 };
 
 /**
