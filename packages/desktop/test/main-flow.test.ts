@@ -653,6 +653,125 @@ describe("桌面主进程代理流程", () => {
       children[1]?.emit("exit", 0, null);
     });
 
+    it("会话过期时点重新连接，不发配对请求并提示先登录", async () => {
+      saveLocalCredentials();
+      const answer = deferred<{ response: number }>();
+      showMessageBox.mockReturnValueOnce(answer.promise);
+      await boot();
+      await emitOnline();
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      const log = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+      try {
+        answer.resolve({ response: 0 });
+        await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+        expect(showMessageBox.mock.calls[1]?.[1]).toMatchObject({ message: "请先登录白泽，再在这台 Mac 上连接" });
+        expect(fetchState.localRequests).toEqual([]);
+        expect(children).toHaveLength(1);
+        expect(log).toHaveBeenCalledWith("agent-reconnect-login-required\n");
+        expect(log.mock.calls.map(([line]) => String(line)).join("")).not.toContain(credentials.token);
+        expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+      } finally {
+        log.mockRestore();
+      }
+    });
+
+    it("登录钩子遇到会话过期，保持不配对、不提示", async () => {
+      await boot();
+      const call = authCompleted.mock.calls[0];
+      if (call === undefined) throw new Error("没有安装登录钩子");
+      (call[1] as (details: { statusCode: number }) => void)({ statusCode: 200 });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(fetchState.localRequests).toEqual([]);
+      expect(showMessageBox).not.toHaveBeenCalled();
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+    });
+
+    it("第一次配对回 500，期间两次登录排队后重发 POST 并上线，只显示一次错误", async () => {
+      const first = deferred<unknown>();
+      fetchState.localResponses.push(first.promise, success());
+      await boot();
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(1));
+      await login();
+      await login();
+      first.resolve({ ok: false, status: 500 });
+      await emitOnline();
+      await vi.waitFor(() => expect(fetchState.urls.filter((url) => url.endsWith("/api/me"))).toHaveLength(4));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(fetchState.localRequests).toHaveLength(2);
+      expect(fsState.credentials).not.toBeNull();
+      expect(children).toHaveLength(1);
+      const { dialog } = await import("electron");
+      expect(dialog.showErrorBox).toHaveBeenCalledTimes(1);
+      expect(dialog.showErrorBox).toHaveBeenCalledWith("电脑代理启动失败", "申请电脑 token 失败（500）");
+      children[0]?.emit("exit", 0, null);
+    });
+
+    it.each(["token", "computerId"])("盘上 %s 与在线代理不同，旧提示重新连接必须配对", async (field) => {
+      saveLocalCredentials();
+      const answer = deferred<{ response: number }>();
+      showMessageBox.mockReturnValueOnce(answer.promise);
+      await boot();
+      await emitOnline();
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      fetchState.localResponses.push(success());
+      await login();
+      await emitOnline(1);
+      const disk = JSON.parse(fsState.credentials ?? "null");
+      fsState.credentials = JSON.stringify({
+        ...disk,
+        ...(field === "token"
+          ? { encryptedToken: Buffer.from("token-on-disk").toString("base64") }
+          : { computerId: "computer-on-disk" }),
+      });
+      fetchState.localResponses.push(success());
+      answer.resolve({ response: 0 });
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      expect(JSON.parse(String(fetchState.localRequests[1]?.body))).toEqual({ confirmDisplace: true });
+      await vi.waitFor(() => expect(children[1]?.stdin.writableEnded).toBe(true));
+      children[1]?.emit("exit", 0, null);
+      await emitOnline(2);
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
+      children[2]?.emit("exit", 0, null);
+    });
+
+    it("代理 child 已换但凭据登记仍指向旧 child，重新连接必须配对", async () => {
+      saveLocalCredentials();
+      const answer = deferred<{ response: number }>();
+      showMessageBox.mockReturnValueOnce(answer.promise);
+      await boot();
+      await emitOnline();
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      fetchState.localResponses.push(success());
+      await login();
+      await emitOnline(1);
+      const agent = await import("../src/agent-state.js");
+      const current = vi.spyOn(agent, "isCurrentAgent");
+      children[1]?.stdout.write('{"type":"online"}\n');
+      const state = current.mock.calls.at(-1)?.[0];
+      current.mockRestore();
+      if (state?.status !== "online") throw new Error("没有拿到在线代理状态");
+      const replacement = new FakeChild(FAKE_PID_BASE + children.length);
+      // 正常启动同步登记新 child；先注入旧登记，再触发重新连接，查询函数保持真实实现。
+      Object.assign(state, { child: replacement });
+      fetchState.localResponses.push(success());
+      answer.resolve({ response: 0 });
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      expect(JSON.parse(String(fetchState.localRequests[1]?.body))).toEqual({ confirmDisplace: true });
+      await vi.waitFor(() => expect(replacement.stdin.writableEnded).toBe(true));
+      replacement.emit("exit", 0, null);
+      children[1]?.emit("exit", 0, null);
+      await emitOnline(3);
+      expect(kill).toHaveBeenCalledWith(-replacement.pid, "SIGINT");
+      children[3]?.emit("exit", 0, null);
+    });
+
     it("配对在途时重新连接保留确认意图，取消后再按确认配对", async () => {
       saveLocalCredentials();
       const displaced = deferred<{ response: number }>();
@@ -720,6 +839,102 @@ describe("桌面主进程代理流程", () => {
         expect(showMessageBox.mock.calls[1]?.[1]).toMatchObject({ message: "凭据保存失败，请重新登录" });
         expect(children).toHaveLength(1);
       }
+    });
+
+    it("本机换 token 完成后新 child 被另一台 Mac 顶号，删除凭据并显示另一台 Mac", async () => {
+      const main = await boot();
+      const started = main.startAgent(credentials);
+      await emitOnline();
+      await started;
+      const token = deferred<unknown>();
+      fetchState.localResponses.push(conflict(), token.promise);
+      showMessageBox.mockResolvedValueOnce({ response: 0 });
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      token.resolve(success());
+      await emitOnline(1);
+      expect(fsState.credentials).not.toBeNull();
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
+      children[1]?.stdout.write('{"type":"displaced"}\n');
+      children[1]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+      expect(fsState.credentials).toBeNull();
+      expect(showMessageBox.mock.calls[1]?.[1]).toMatchObject({ message: "这个账号已在另一台 Mac 上连接，本机已停止" });
+      expect(fetchState.localRequests).toHaveLength(2);
+      expect(children).toHaveLength(2);
+    });
+
+    it("displaced 先到、确认响应随后 500，删除凭据并提示本机重新连接出错，错误框保留", async () => {
+      const main = await boot();
+      const started = main.startAgent(credentials);
+      await emitOnline();
+      await started;
+      const token = deferred<unknown>();
+      fetchState.localResponses.push(conflict(), token.promise);
+      showMessageBox.mockResolvedValueOnce({ response: 0 });
+      const answer = deferred<{ response: number }>();
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      saveLocalCredentials();
+      showMessageBox.mockReturnValueOnce(answer.promise);
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
+      expect(fsState.credentials).not.toBeNull();
+      token.resolve({ ok: false, status: 500 });
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+      expect(fsState.credentials).toBeNull();
+      expect(showMessageBox.mock.calls[1]?.[1]).toMatchObject({
+        message: "这台 Mac 重新连接时出错，本机已停止，请再点一次「在这台 Mac 上重新连接」",
+      });
+      const { dialog } = await import("electron");
+      await vi.waitFor(() => expect(dialog.showErrorBox).toHaveBeenCalledTimes(1));
+      expect(dialog.showErrorBox).toHaveBeenCalledWith("电脑代理启动失败", "申请电脑 token 失败（500）");
+      answer.resolve({ response: 1 });
+    });
+
+    it("本机换 token 保存失败且删除覆盖都失败，当前进程重新登录不能复用旧凭据", async () => {
+      const main = await boot();
+      const started = main.startAgent(credentials);
+      await emitOnline();
+      await started;
+      const token = deferred<unknown>();
+      fetchState.localResponses.push(conflict(), token.promise);
+      showMessageBox.mockResolvedValueOnce({ response: 0 });
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(2));
+      saveLocalCredentials();
+      const stale = fsState.credentials;
+      const fs = await import("node:fs/promises");
+      vi.mocked(fs.unlink).mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+      fsState.writeError = new Error("EROFS");
+      children[0]?.stdout.write('{"type":"displaced"}\n');
+      children[0]?.emit("exit", 0, null);
+      token.resolve(success());
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(2));
+      const { dialog } = await import("electron");
+      await vi.waitFor(() => expect(dialog.showErrorBox).toHaveBeenCalledTimes(1));
+      expect(showMessageBox.mock.calls[1]?.[1]).toMatchObject({ message: "凭据保存失败，请重新登录" });
+      expect(fsState.credentials).toBe(stale);
+      expect(fsWrites.filter((path) => path.endsWith("computer-credentials.json"))).toHaveLength(2);
+      fsState.writeError = null;
+      fetchState.localResponses.push({
+        ok: true,
+        status: 200,
+        json: async () => ({ ...credentials, token: "token-2" }),
+      });
+      await login();
+      await emitOnline(1);
+      expect(fetchState.localRequests).toHaveLength(3);
+      expect(fetchState.localRequests[2]?.body).toBeUndefined();
+      expect(JSON.parse(fsState.credentials ?? "null")).toMatchObject({
+        encryptedToken: Buffer.from("token-2").toString("base64"),
+      });
+      expect(children[1]?.stdin.read()?.toString()).toContain('"token":"token-2"');
+      children[1]?.emit("exit", 0, null);
     });
 
     it("displaced 后重新配对成功，代理退出再登录复用新 token", async () => {

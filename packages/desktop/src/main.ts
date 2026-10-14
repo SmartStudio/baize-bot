@@ -444,7 +444,13 @@ async function provision(session: Session, confirmDisplace = false): Promise<voi
   }
   provisioning = (async () => {
     const me = await session.fetch(`${uiOrigin}/api/me`);
-    if (!me.ok) return;
+    if (!me.ok) {
+      if (confirmDisplace && phase === "running") {
+        logLine("agent-reconnect-login-required");
+        await showBox({ type: "info", message: "请先登录白泽，再在这台 Mac 上连接" });
+      }
+      return;
+    }
     const ownerId = MeResponse.parse(await me.json()).user.id;
     await invalidatingCredentials;
     let credentials = await loadCredentials();
@@ -539,9 +545,15 @@ async function handleDisplaced(child: ChildProcess): Promise<void> {
     if (invalidatingCredentials === invalidation) invalidatingCredentials = null;
   }
   if (phase !== "running") return;
+  const message =
+    rotation === "save-failed"
+      ? "凭据保存失败，请重新登录"
+      : rotation === "request-failed"
+        ? "这台 Mac 重新连接时出错，本机已停止，请再点一次「在这台 Mac 上重新连接」"
+        : "这个账号已在另一台 Mac 上连接，本机已停止";
   const { response } = await showBox({
     type: "info",
-    message: rotation === "save-failed" ? "凭据保存失败，请重新登录" : "这个账号已在另一台 Mac 上连接，本机已停止",
+    message,
     buttons: ["在这台 Mac 上重新连接", "知道了"],
     defaultId: 1,
     cancelId: 1,
