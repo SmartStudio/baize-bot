@@ -242,6 +242,32 @@ describe("Hub 分页读取的快照", () => {
   });
 });
 
+describe("Hub 快路径的提交上界", () => {
+  it("seq 不小于 nextSeq 的尾行不会进本页，nextSeq 和 head 保持提交时的值", async () => {
+    const who = await rig();
+    await connectTool(who);
+    const prompt = await start(who);
+    const committed = [line("safe")];
+    const body = await frame(who, committed, { prompt });
+    await append(who.agent, body);
+    await database.sql`INSERT INTO work_entries
+      (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id, parent_id, pi_type, retention, line, search_text)
+      SELECT bot_id, group_id, stream, 1, epoch, owner_id, run_id, 'beyond-cursor', parent_id, pi_type, retention,
+        ${line("beyond-cursor")}, search_text
+      FROM work_entries
+      WHERE bot_id = ${who.botId} AND group_id = ${who.groupId} AND stream = 'chat' AND seq = 0`;
+    expect((await stored(who, "chat")).lines).toHaveLength(2);
+
+    const page = await readLane(who, prompt.lane.epoch);
+    expect(page).not.toContain("beyond-cursor");
+    expect(HubLaneSnapshot.parse(JSON.parse(page))).toMatchObject({
+      entries: [{ seq: 0, line: committed[0] }],
+      nextSeq: 1,
+      head: body.head,
+    });
+  });
+});
+
 describe("名单变更的即时截断覆盖全部流", () => {
   it("牌桌的 table 流和同一户的 chat 流在 PATCH 返回时一起被截，不等下一次追加", async () => {
     const who = await rig();
@@ -262,18 +288,26 @@ describe("名单变更的即时截断覆盖全部流", () => {
       expect(HubLaneSnapshot.parse(JSON.parse(await readLane(who, prompt.lane.epoch, stream))).nextSeq).toBe(2);
     }
 
-    await makeLocalOnly(who, tool.id);
+    expect((await who.client.patch(`/api/tools/${tool.id}`, { localOnly: true })).status).toBe(200);
 
     for (const [stream, lines] of [
       ["chat", chat],
       ["table", table],
     ] as const) {
       const prefixHead = await advanceWorkHead(EMPTY_WORK_HEAD, lines.slice(0, 1));
-      expect(await stored(who, stream), `${stream} 流库里的行`).toEqual({
+      expect(await stored(who, stream), `PATCH 一返回，${stream} 流库里的行`).toEqual({
         nextSeq: 1,
         head: prefixHead,
         lines: lines.slice(0, 1),
       });
+    }
+    await who.agent.expect("config");
+
+    for (const [stream, lines] of [
+      ["chat", chat],
+      ["table", table],
+    ] as const) {
+      const prefixHead = await advanceWorkHead(EMPTY_WORK_HEAD, lines.slice(0, 1));
       const page = await readLane(who, prompt.lane.epoch, stream);
       expect(page).not.toContain("本机业务原文");
       expect(HubLaneSnapshot.parse(JSON.parse(page)), `${stream} 流 Hub 读到的页`).toMatchObject({
