@@ -620,6 +620,16 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 推送不按版本排队：两次写各自提交后各推一条 `brand_updated`，晚提交的可能先到。页面按 `version` 只收比手上新的那本，控制面不按 owner 串行广播。运行器那边靠 config 的代际，不受影响。
 
+## 附件
+
+`attachments` 把草稿配图的原始字节存为 Postgres `bytea`，记录归属人、Bot、群、sha256、MIME 和大小。`(owner_id, bot_id, group_id, sha256)` 唯一；重复上传用一条 `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING id` 返回同一个附件 id，不先查后写。
+
+`PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。服务器重算哈希，声明不符回 400。Bot 必须属于当前归属人且在指定群内，否则回 404。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
+
+`/hub/v1` 挂在 cookie 登录中间件之前，只接受当前电脑网关 key 的 Bearer。config 恒带 `hub.baseUrl`；hello 轮换 key 后旧 key 立即失效。`http/hub-auth.ts` 将归属人和电脑 id 写入请求上下文，P3-10 的租约头校验接在 `http/hub.ts` 的认证之后、附件路由之前；本单不校验租约头。
+
+附件的归属人、Bot、群三个外键都设 `ON DELETE CASCADE`，删账号、删 Bot 或删群时连带删除。附件不引用草稿 id，删除草稿不会清理附件；上传成功后草稿创建失败也会留下附件，直到所属 Bot、群或账号删除。
+
 ## 数据导出与删号
 
 `GET /api/export` 回一个 JSON 附件，文件名 `baize-export-YYYY-MM-DD.json`（`http/routes/privacy.ts:19-25`）。内容是账号、设置、品牌手册、每个 Bot 连同它的 skill 和偏好（私人的也在）、例行、项目任务卡、草稿，`format` 为 1（`repo/export.ts:36-46`）。每一段都按白名单从领域对象拼，工具连接、平台账号、电脑三类带凭据的对象整段不进（第 32-35 行）。不按表整行导出，是为了让以后往领域对象里加字段的人不会顺手把凭据带进来。webhook 的 token 本身就是触发凭据，导出只留 `{ kind: "webhook" }`（第 27-29、48-49 行）。`test/privacy.test.ts` 的「导出里有偏好和品牌手册，grep 不到 token 和 authorization」钉着它。各段查询并行跑，不在一个事务里（第 52-61 行），导出不保证是同一时刻的快照。

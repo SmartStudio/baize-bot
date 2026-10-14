@@ -3,6 +3,8 @@ import { McpHttpUrl } from "./mcp-discovery.js";
 import { PokerTableView } from "./poker.js";
 import {
   Account,
+  AttachmentId,
+  AttachmentSha256,
   Viewer,
   AccountId,
   AccountTier,
@@ -443,6 +445,12 @@ export const McpProxyCallResponse = z.object({
   isError: z.boolean(),
 });
 export type McpProxyCallResponse = z.infer<typeof McpProxyCallResponse>;
+
+// PUT ${hub.baseUrl}/attachments?botId=&groupId=，请求体是图片字节，Bearer 用当前 modelGateway.apiKey。
+export const AttachmentUploadQuery = z.object({ botId: BotId, groupId: GroupId }).strict();
+export type AttachmentUploadQuery = z.infer<typeof AttachmentUploadQuery>;
+export const AttachmentUploadResponse = z.object({ attachmentId: AttachmentId, sha256: AttachmentSha256 }).strict();
+export type AttachmentUploadResponse = z.infer<typeof AttachmentUploadResponse>;
 
 // GET /api/usage  设置的用量页。本月从 1 号 00:00（Asia/Shanghai）起算，monthStartsAt 告诉客户端这一刻。
 // 每个自己的 Bot 一行，本月没干活的也在，amount 是 0；删掉的 Bot 留下的 run 只进 total。recent 只列本月的。

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { DiscoveryError, DISCOVERY_FAILURE_MESSAGES } from "../mcp/discover.js";
 import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
 import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
+import { HUB_PATH } from "../http/hub.js";
 import {
   McpDiscoveryResult,
   McpHttpUrl,
@@ -818,6 +819,7 @@ export class AgentHub {
       })),
       tools,
       mcpProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${MCP_PROXY_PATH}` },
+      hub: { baseUrl: `${this.#deps.gatewayBaseUrl()}${HUB_PATH}` },
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,

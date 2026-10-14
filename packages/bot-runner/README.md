@@ -406,10 +406,11 @@ snapshot 的形状：
 
 ## 小红书发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过任何 Bot 的串行队列，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。本机发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
 
 - **浏览器和数据目录从依赖参数来。** 本机电脑的 `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。远程电脑上没人扫码登录，电脑代理给发布器的 `browser` 是 `null`，Bot 的浏览器工具照用那份。`browser` 为 `null` 时回 `failed`、`reason: "error"`，detail 是「这台电脑没有助理浏览器」。
-- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。每张图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
+- **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。旧的 `kind: "path"` 配图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
+- **附件配图在本机补齐。** 新草稿的 `kind: "attachment"` 配图按 MIME 对应的扩展名查找 `<dataDir>/<botId>/drafts/<sha256>.png|jpg|webp|gif`。缓存字节的 SHA-256 一致就直接用；缺失或字节不符时从 `${hub.baseUrl}/attachments/<attachmentId>` 下载，重新校验 SHA-256，再以 `.tmp` 加 rename 原子写入、权限 0444。哈希不符时失败，不连接浏览器。下载最多读 20 MiB，超时 60 秒，不跟重定向。`liveHub()` 每次请求读取最新 `config.hub` 和 `modelGateway.apiKey`，不保留 hello 轮换前的 key。旧库里没有 `kind` 的配图由 shared 的 parse 边界补成 `path`，继续走原有本地检查。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。
 - **一台电脑一次只发一条。** 小红书同一个号只能登一处，同时发会互相挤。进程内一条 promise 队列，第二条等第一条连同读链接整个做完。验配图也在队里做，入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。每条的总时限是 `PUBLISH_LIMITS.totalMs`（3 分钟），出队验完配图、开始连 Chrome 时起算，到了回 `error`、关标签页。等某一个元素的时限是 `stepMs`（1 分钟）。
 - **不重试，失败分三种。** 每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
@@ -451,12 +452,12 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
 - **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，在读图之前判。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
-- **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。`DraftSpec` 记的是这份拷贝的路径和 sha256，之后工作目录里的原图怎么改都不影响草稿，发布器读到的就是起草时的字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
+- **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。MIME 按 PNG、JPEG、WebP、GIF 的文件头识别，不信扩展名，拷贝扩展名按 MIME 固定。拷贝后把同一份字节 PUT 到 `${config.hub.baseUrl}/attachments?botId=&groupId=`，声明 `x-baize-sha256`，Bearer 每次现取当前网关 key。`DraftSpec` 只记 `{kind: "attachment", attachmentId, sha256, mime}`。上传失败时抛「配图传到白泽失败，过一会儿再起草」，草稿、改稿或计划不上行；服务器正文和网络异常不拼进工具错误，避免泄露 Bearer 或 URL 查询串。之后工作目录里的原图怎么改都不影响草稿，另一台电脑的发布器能下载同一份字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 
 `src/publisher.ts` 的 `publishDraft` 收控制面下行的 `publish_draft`，回一条 `publish_result`，见「小红书发布器」。
 
-`test/runner.test.ts` 的「运行器的草稿」一节钉住这些，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。
+`test/attachments.test.ts` 覆盖附件上传、MIME、key 轮换、跨目录下载、只读缓存、哈希篡改与旧稿兼容；不接真浏览器或真实平台。`test/runner.test.ts` 的「运行器的草稿」一节钉住本地安全检查，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。
 
 ## skill
 

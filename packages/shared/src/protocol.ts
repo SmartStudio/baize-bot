@@ -412,6 +412,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 本机连接只发给本机电脑，其他连接不带凭据。
     tools: z.array(ToolConnectionConfig),
     mcpProxy: z.object({ baseUrl: z.string().url() }),
+    hub: z.object({ baseUrl: z.string().url() }),
     // 该用户全部 Bot 的 skill，运行器按 botId 分开落成 SKILL.md。M10 控制面接上前可省。
     skills: z.array(Skill).optional(),
     // 品牌手册由控制面拼成一段文字下发，version 变了运行器才重送给模型；没写过手册是 null。

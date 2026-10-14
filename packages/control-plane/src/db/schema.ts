@@ -3,6 +3,7 @@ import type {
   AccountTier as AccountTierSchema,
   ActionKind as ActionKindSchema,
   ApprovalStatus as ApprovalStatusSchema,
+  AttachmentMime,
   BotHue,
   BotRole as BotRoleSchema,
   BotRunState as BotRunStateSchema,
@@ -49,6 +50,7 @@ import {
   bigserial,
   boolean,
   check,
+  customType,
   date,
   index,
   integer,
@@ -99,6 +101,7 @@ export type PokerActResult = Extract<ControlToAgent, { type: "poker_result" }>["
 export type StoredPokerHandStatus = "playing" | "complete" | "abandoned";
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({ dataType: () => "bytea" });
 
 export const users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -236,6 +239,28 @@ export const groupMembers = pgTable(
     position: integer("position").notNull(),
   },
   (t) => [primaryKey({ columns: [t.groupId, t.botId] }), index("group_members_bot_id_idx").on(t.botId)],
+);
+
+export const attachments = pgTable(
+  "attachments",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    sha256: text("sha256").notNull(),
+    mime: text("mime").$type<AttachmentMime>().notNull(),
+    size: integer("size").notNull(),
+    bytes: bytea("bytes").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [uniqueIndex("attachments_owner_bot_group_sha256_idx").on(t.ownerId, t.botId, t.groupId, t.sha256)],
 );
 
 // 清单项在库里多存一个勾选时刻，只供项目页数本周勾掉几项，toTask 不往外带。

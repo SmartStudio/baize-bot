@@ -152,6 +152,7 @@ import type { AccountTokens, CredentialCrypto } from "../credentials.js";
 import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
+import { HUB_PATH, createHub } from "./hub.js";
 import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
 import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
@@ -216,6 +217,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
+  app.route(HUB_PATH, createHub({ db }));
   app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(

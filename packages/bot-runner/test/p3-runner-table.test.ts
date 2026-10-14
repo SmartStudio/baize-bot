@@ -151,6 +151,7 @@ async function harness(
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-table-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
+    hub: { baseUrl: "http://127.0.0.1:9/hub/v1" },
     dataDir,
     ...overrides,
     send: (message) => {

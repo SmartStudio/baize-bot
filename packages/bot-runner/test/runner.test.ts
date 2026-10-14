@@ -49,6 +49,7 @@ import {
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { startAttachmentHub, type AttachmentHub } from "./helpers/attachments.js";
 import {
   botDirs,
   type BotConfig,
@@ -388,6 +389,7 @@ interface Harness {
   readonly sent: AgentToControl[];
   readonly sideEffects: string[];
   readonly gateway: Gateway;
+  readonly attachmentHub: AttachmentHub;
   readonly dataDir: string;
   config(overrides?: {
     readonly accounts?: readonly AccountConfig[];
@@ -400,6 +402,7 @@ interface Harness {
     readonly modelGateway?: RunnerConfig["modelGateway"];
     readonly accountsProxy?: RunnerConfig["accountsProxy"];
     readonly mcpProxy?: RunnerConfig["mcpProxy"];
+    readonly hub?: RunnerConfig["hub"];
   }): RunnerConfig;
   close(): Promise<void>;
 }
@@ -466,6 +469,7 @@ async function startHarness(options: {
   /** 不给就指到一个连不上的地址。 */
   readonly accountsProxy?: RunnerConfig["accountsProxy"];
   readonly mcpProxy?: RunnerConfig["mcpProxy"];
+  readonly hub?: RunnerConfig["hub"];
 }): Promise<Harness> {
   const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-runner-"));
   usedDataDirs.push(dataDir);
@@ -478,6 +482,7 @@ async function startHarness(options: {
   });
 
   const sent: AgentToControl[] = [];
+  const attachmentHub = await startAttachmentHub();
   const sideEffects: string[] = [];
   let runner: Runner | null = null;
   const bots = options.bots.map((id) => ({
@@ -508,6 +513,7 @@ async function startHarness(options: {
       readonly modelGateway?: RunnerConfig["modelGateway"];
       readonly accountsProxy?: RunnerConfig["accountsProxy"];
       readonly mcpProxy?: RunnerConfig["mcpProxy"];
+      readonly hub?: RunnerConfig["hub"];
     } = {},
   ): RunnerConfig => ({
     accounts: [...(overrides.accounts ?? options.accounts ?? [])],
@@ -518,6 +524,7 @@ async function startHarness(options: {
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     accountsProxy: overrides.accountsProxy ?? options.accountsProxy ?? { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
     mcpProxy: overrides.mcpProxy ?? options.mcpProxy ?? { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
+    hub: overrides.hub ?? options.hub ?? { baseUrl: attachmentHub.baseUrl },
     brand: overrides.brand !== undefined ? overrides.brand : (options.brand ?? null),
     preferences: [...(overrides.preferences ?? options.preferences ?? [])],
     dataDir,
@@ -539,11 +546,13 @@ async function startHarness(options: {
     sent,
     sideEffects,
     gateway,
+    attachmentHub,
     dataDir,
     config,
     async close() {
       await runner?.stop();
       await gateway.close();
+      await attachmentHub.close();
     },
   };
   open.push(harness);
@@ -6664,7 +6673,10 @@ describe("运行器的草稿", () => {
     github: { repo: "baize/bot", as: "issue" },
   };
   const IMAGE = { path: "cover.png" };
-  const COVER_BYTES = Buffer.from("不是真的 PNG，只要字节确定就行");
+  const COVER_BYTES = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
 
   it("create_draft 不弹允许吗，返回草稿已建", async () => {
     const seen = recorder();
@@ -6802,7 +6814,7 @@ describe("运行器的草稿", () => {
     expect(drafted(h)).toMatchObject([
       {
         accountId: "acc-xhs",
-        content: { images: [{ path: draftCopyOf(dataDir, COVER_BYTES) }] },
+        content: { images: [{ kind: "attachment", mime: "image/png", attachmentId: expect.any(String) }] },
         scheduledAt: null,
       },
       { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
@@ -6895,7 +6907,9 @@ describe("运行器的草稿", () => {
     ).toEqual([
       [
         {
-          path: draftCopyOf(dataDir, COVER_BYTES),
+          kind: "attachment",
+          mime: "image/png",
+          attachmentId: `attachment-${createHash("sha256").update(COVER_BYTES).digest("hex")}`,
           sha256: createHash("sha256").update(COVER_BYTES).digest("hex"),
         },
       ],
@@ -6920,10 +6934,10 @@ describe("运行器的草稿", () => {
     writeFileSync(original, "起草之后被换掉的图");
 
     const [image] = drafted(h)[0]?.content.images ?? [];
-    expect(image?.path, "草稿不能指向工作目录里还能被改的原图").not.toBe(realpathSync(original));
+    expect(image?.kind, "草稿引用服务器附件").toBe("attachment");
     expect(
       createHash("sha256")
-        .update(readFileSync(image?.path ?? ""))
+        .update(readFileSync(draftCopyOf(dataDir, COVER_BYTES)))
         .digest("hex"),
       "发布器读到的还是用户批的那份字节",
     ).toBe(image?.sha256);

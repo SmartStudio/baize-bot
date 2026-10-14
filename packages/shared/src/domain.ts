@@ -26,6 +26,7 @@ export const RoutineId = id("RoutineId");
 export const RunId = id("RunId");
 export const GrantId = id("GrantId");
 export const DraftId = id("DraftId");
+export const AttachmentId = id("AttachmentId");
 export const ContentPlanId = id("ContentPlanId");
 export const PublicationId = id("PublicationId");
 export const AccountId = id("AccountId");
@@ -46,6 +47,7 @@ export type RoutineId = z.infer<typeof RoutineId>;
 export type RunId = z.infer<typeof RunId>;
 export type GrantId = z.infer<typeof GrantId>;
 export type DraftId = z.infer<typeof DraftId>;
+export type AttachmentId = z.infer<typeof AttachmentId>;
 export type ContentPlanId = z.infer<typeof ContentPlanId>;
 export type PublicationId = z.infer<typeof PublicationId>;
 export type AccountId = z.infer<typeof AccountId>;
@@ -595,12 +597,25 @@ export type DraftStatus = z.infer<typeof DraftStatus>;
 export const DraftKind = z.enum(["post", "reply"]);
 export type DraftKind = z.infer<typeof DraftKind>;
 
-export const DraftImage = z
-  .object({
-    path: z.string().min(1),
-    sha256: z.string().regex(/^[0-9a-f]{64}$/),
-  })
-  .strict();
+export const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024;
+export const AttachmentMime = z.enum(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+export type AttachmentMime = z.infer<typeof AttachmentMime>;
+export const AttachmentSha256 = z.string().regex(/^[0-9a-f]{64}$/);
+
+export const DraftImage = z.preprocess(
+  (value) => (value !== null && typeof value === "object" && !("kind" in value) ? { ...value, kind: "path" } : value),
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("path"), path: z.string().min(1), sha256: AttachmentSha256 }).strict(),
+    z
+      .object({
+        kind: z.literal("attachment"),
+        attachmentId: AttachmentId,
+        sha256: AttachmentSha256,
+        mime: AttachmentMime,
+      })
+      .strict(),
+  ]),
+);
 export type DraftImage = z.infer<typeof DraftImage>;
 
 export const GithubTarget = z

@@ -64,6 +64,7 @@ export interface RunnerConfig {
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
   readonly mcpProxy: ConfigMessage["mcpProxy"];
+  readonly hub: ConfigMessage["hub"];
   readonly modelGateway: ConfigMessage["modelGateway"];
   /** 读 GitHub、X 的 account_read 打这里，见 `src/account-read.ts`。 */
   readonly accountsProxy: ConfigMessage["accountsProxy"];
@@ -115,6 +116,7 @@ interface BotDesired {
   readonly gateway: RunnerConfig["modelGateway"];
   readonly accountsProxy: RunnerConfig["accountsProxy"];
   readonly mcpProxy: ConfigMessage["mcpProxy"];
+  readonly hub: ConfigMessage["hub"];
   readonly computerId: ComputerId;
   readonly accounts: ConfigMessage["accounts"];
   readonly grants: ConfigMessage["grants"];
@@ -222,6 +224,7 @@ const desiredFor = (
   gateway: RunnerConfig["modelGateway"],
   accountsProxy: RunnerConfig["accountsProxy"],
   mcpProxy: ConfigMessage["mcpProxy"],
+  hub: ConfigMessage["hub"],
   computerId: ComputerId,
   accounts: ConfigMessage["accounts"],
   grants: ConfigMessage["grants"],
@@ -235,6 +238,7 @@ const desiredFor = (
   gateway,
   accountsProxy,
   mcpProxy,
+  hub,
   computerId,
   accounts,
   grants,
@@ -374,6 +378,7 @@ export function createRunner(config: RunnerConfig): Runner {
         config.modelGateway,
         config.accountsProxy,
         config.mcpProxy,
+        config.hub,
         config.computerId,
         initialAccounts,
         initialGrants,
@@ -670,6 +675,7 @@ export function createRunner(config: RunnerConfig): Runner {
         send: config.send,
         accounts: () => desiredConfig(bot)!.accounts,
         images: { workDir: dirs.workDir, draftsDir: realpathSync(dirs.draftsDir), hidden: zones.hidden },
+        liveHub: () => ({ hub: desiredConfig(bot)!.hub, gateway: desiredConfig(bot)!.gateway }),
       }),
       ...(definition.config.role === "assistant"
         ? [
@@ -888,6 +894,7 @@ export function createRunner(config: RunnerConfig): Runner {
             next.modelGateway,
             next.accountsProxy,
             next.mcpProxy,
+            next.hub,
             next.computerId,
             nextAccounts,
             nextGrants,
