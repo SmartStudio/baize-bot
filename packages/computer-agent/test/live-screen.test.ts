@@ -90,6 +90,7 @@ function screenWith(options: { respond?: typeof defaultReply; connection?: () =>
   const logs: string[] = [];
   let reveals = 0;
   let conceals = 0;
+  const exitListeners = new Set<(connection: CdpConnection) => void>();
   const screen = createLiveScreen({
     chrome: {
       connection: options.connection ?? (async () => cdp.connection),
@@ -99,11 +100,18 @@ function screenWith(options: { respond?: typeof defaultReply; connection?: () =>
       conceal: async () => {
         conceals += 1;
       },
+      onExit: (listener) => {
+        exitListeners.add(listener);
+        return () => exitListeners.delete(listener);
+      },
     },
     uplink: up.uplink,
     log: (line) => logs.push(line),
   });
-  return { cdp, up, logs, screen, reveals: () => reveals, conceals: () => conceals };
+  const exit = (connection: CdpConnection): void => {
+    for (const listener of exitListeners) listener(connection);
+  };
+  return { cdp, up, logs, screen, exit, reveals: () => reveals, conceals: () => conceals };
 }
 type Harness = ReturnType<typeof screenWith>;
 
@@ -476,6 +484,31 @@ describe("屏：结束", () => {
     h.cdp.emit({ method: "Target.detachedFromTarget", params: { sessionId: "session-tab-a" }, sessionId: undefined });
     await vi.waitFor(() => expect(pa.done()).toBe(true));
     expect(pa.outcome()?.end).toEqual({ kind: "page_gone" });
+  });
+
+  it("Chrome 退出通知来了：没人看的和正在看的会话都以 page_gone 结束，上行各收到自己的 closed；新起的 Chrome 上的会话不受影响", async () => {
+    const old = fakeCdp();
+    const fresh = fakeCdp();
+    let current = old;
+    const h = screenWith({ connection: async () => current.connection });
+    const idle = request("tab-a", takeover());
+    const seen = request("tab-b", login());
+    const pIdle = await presented(h, idle);
+    const pSeen = await presented(h, seen);
+    h.screen.receive(down({ t: "viewer", liveId: seen.liveId, state: "attached" }));
+    await vi.waitFor(() => expect(old.methods("session-tab-b")).toContain("Page.startScreencast"));
+    current = fresh;
+    const later = request("tab-c", takeover());
+    const pLater = await presented(h, later);
+
+    h.exit(old.connection);
+    await vi.waitFor(() => expect(pIdle.done() && pSeen.done()).toBe(true));
+    expect(pIdle.outcome()?.end).toEqual({ kind: "page_gone" });
+    expect(pSeen.outcome()?.end).toEqual({ kind: "page_gone" });
+    expect(h.up.closed().toSorted()).toEqual([idle.liveId, seen.liveId].toSorted());
+    expect(old.listeners(), "退出的连接上不再挂监听").toBe(0);
+    expect(pLater.done(), "新 Chrome 上的会话还在").toBe(false);
+    expect(fresh.listeners()).toBe(1);
   });
 
   it("signal 在 present 之前就响了：直接 caller，不 attach", async () => {

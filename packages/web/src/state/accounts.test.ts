@@ -149,8 +149,8 @@ describe("一次登录尝试的结算", () => {
       startedAt: second,
       attempt: TRY_2,
     });
-    put({ type: "login_failed", accountId: ACC, attempt: TRY_2, reason: "remote_refused" });
-    expect(get().logins[ACC], "这次自己的失败写的是自己的原因").toEqual({ status: "failed", reason: "remote_refused" });
+    put({ type: "login_failed", accountId: ACC, attempt: TRY_2, reason: "timed_out" });
+    expect(get().logins[ACC], "这次自己的失败写的是自己的原因").toEqual({ status: "failed", reason: "timed_out" });
   });
 
   it("login_flow 只落在同一次点击还在等的卡上", () => {

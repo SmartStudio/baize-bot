@@ -106,10 +106,10 @@ test("202 之后电脑离线，卡写电脑不在线；再点一次后旧尝试�
   expect(fresh).not.toBe(stale);
   await reportLogin(request, LOGIN_ID, { login: "failed", reason: "window_failed", attempt: stale });
   await expect(card, "旧尝试的失败不算").toHaveAttribute("data-state", "opening");
-  await reportLogin(request, LOGIN_ID, { login: "failed", reason: "remote_refused", attempt: fresh });
+  await reportLogin(request, LOGIN_ID, { login: "failed", reason: "timed_out", attempt: fresh });
   await expect(card).toHaveAttribute("data-state", "failed");
   await expect(card.getByTestId("login-card-note")).toHaveText(
-    "登录没成。远程电脑上不能登录这个平台，请在本机登录这个账号。",
+    "登录没成。登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次。",
   );
 });
 
@@ -158,10 +158,10 @@ test("旧尝试的失败在再点一次之后、新 202 之前到达，不结算
   const { attempt: fresh } = LoginAccountResponse.parse(await (await responded).json());
   expect(fresh).not.toBe(stale);
   await expect(card).toHaveAttribute("data-state", "opening");
-  await reportLogin(request, LOGIN_ID, { login: "failed", reason: "remote_refused", attempt: fresh });
+  await reportLogin(request, LOGIN_ID, { login: "failed", reason: "timed_out", attempt: fresh });
   await expect(card).toHaveAttribute("data-state", "failed");
   await expect(card.getByTestId("login-card-note")).toHaveText(
-    "登录没成。远程电脑上不能登录这个平台，请在本机登录这个账号。",
+    "登录没成。登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次。",
   );
 });
 

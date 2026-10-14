@@ -40,7 +40,7 @@ it("同一 dataDir 先后连两台电脑记录，第二台最前面的下行全�
           kind: "local",
           profileDir: join(stack!.dataDir, "fake-chrome"),
           connection: () => Promise.reject(new Error("验收不启动浏览器")),
-          login: async () => ({ login: "failed", reason: "window_failed" }),
+          onExit: () => () => {},
           reveal: async () => {},
           conceal: async () => {},
           pid: () => null,
