@@ -193,7 +193,7 @@ test("草稿没发出去时卡上写原因", async ({ page }) => {
   await openBot(page, "小采");
   const failed = page.getByTestId("message-list").getByTestId("draft-card").filter({ hasText: "X3 交期答疑" });
   await expect(failed).toHaveAttribute("data-status", "failed");
-  await expect(failed.getByTestId("draft-failure")).toHaveText("账号登录过期了，重新登录后再发");
+  await expect(failed.getByTestId("draft-failure")).toHaveText("账号登录过期了，重新登录后让 Bot 再起一稿");
 });
 
 test("Bot 暂停导致草稿没发出去时说明恢复后让 Bot 再起一稿", async ({ page }) => {
