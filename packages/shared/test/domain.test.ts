@@ -681,13 +681,18 @@ describe("C0 工具视图与审批报文", () => {
 describe("登录失败、发布失败和网关别名", () => {
   it("login_state 的 failed 只收两种原因，并且要带回这一次的尝试号", () => {
     const base = { type: "login_state", accountId: "a1" };
-    for (const reason of ["window_failed", "remote_refused"]) {
+    for (const reason of ["window_failed", "timed_out"]) {
       expect(AgentToControl.safeParse({ ...base, state: { login: "failed", reason, attempt: "try_1" } }).success).toBe(
         true,
       );
     }
     expect(
       AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "timeout", attempt: "try_1" } }).success,
+    ).toBe(false);
+    expect(
+      AgentToControl.safeParse({ ...base, state: { login: "failed", reason: "remote_refused", attempt: "try_1" } })
+        .success,
+      "远程电脑也能登录，没有这种原因了",
     ).toBe(false);
     expect(
       AgentToControl.safeParse({ ...base, state: { login: "failed", attempt: "try_1" } }).success,

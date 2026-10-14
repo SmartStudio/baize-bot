@@ -74,7 +74,7 @@ test("登录没成在账号页留一句，刷新后还在，登上之后消失",
 
   await reportLogin(request, EXPIRED_ID, { login: "failed", reason: "window_failed" });
   await expect(row.getByTestId("account-login-failure"), "不刷新，推送到了就写在登录状态下面").toHaveText(
-    /^上次登录没成（今天 \d\d:\d\d）：登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。$/,
+    /^上次登录没成（今天 \d\d:\d\d）：登录窗口出错或被关掉了，账号状态没变，可以再点一次。$/,
   );
   await expect(row.getByTestId("account-login"), "登录状态不变").toContainText("登录已过期");
 
@@ -117,8 +117,8 @@ test("电脑不在线时点登录，卡上写电脑不在线", async ({ page, re
 });
 
 for (const [reason, copy] of [
-  ["window_failed", "登录没成。登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。"],
-  ["remote_refused", "登录没成。远程电脑上不能登录这个平台，请在本机登录这个账号。"],
+  ["window_failed", "登录没成。登录窗口出错或被关掉了，账号状态没变，可以再点一次。"],
+  ["timed_out", "登录没成。登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次。"],
 ] as const) {
   test(`登录没成（${reason}）按原因写文案`, async ({ page, request }) => {
     const card = await openLoginCard(page, request);

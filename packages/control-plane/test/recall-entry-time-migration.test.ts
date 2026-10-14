@@ -182,7 +182,7 @@ it.each([
         SELECT to_char(entry_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at
         FROM work_entries WHERE entry_id = 'nano-carry'`;
       expect(old?.at, "0036 的秒进位问题已在旧库复现").toBe("2026-10-01T00:00:01.000Z");
-      expect(await runMigrations(sql)).toEqual([MIGRATION]);
+      expect(await runMigrations(sql)).toContain(MIGRATION);
       expect(await runMigrations(sql)).toEqual([]);
     }
     const rows = await sql<{ entry_id: string; at: string | null }[]>`

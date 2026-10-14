@@ -420,9 +420,6 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const ownerId = c.get("user").id;
     const result = await createPlaceholder(db, ownerId, body.value);
     if (result.kind === "no_computer") return c.json({ error: "没有这台电脑" }, 404);
-    if (result.kind === "remote_computer") {
-      return c.json({ error: "小红书要扫码登录，只能挂在你自己的电脑上，远程电脑没有助理浏览器" }, 400);
-    }
     hub.push(ownerId, { type: "account_updated", account: result.account });
     await agents.sendConfig(ownerId);
     return c.json(AccountResponse.parse({ account: result.account }), result.kind === "created" ? 201 : 200);

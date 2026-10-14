@@ -18,7 +18,7 @@ import { toCdpInput, type Viewport } from "./live-input.js";
 // 画面和按键只过内存：下行帧解不开不记原文，输入送不进去只记一句固定文案。
 
 export interface LiveScreenDeps {
-  readonly chrome: Pick<AssistantChrome, "connection" | "reveal" | "conceal">;
+  readonly chrome: Pick<AssistantChrome, "connection" | "reveal" | "conceal" | "onExit">;
   /** 发一帧二进制上行。连接不在就回 false；sent 在 ws 把字节交出去之后回调。 */
   readonly uplink: (bytes: Uint8Array, sent: () => void) => boolean;
   readonly log: (line: string) => void;
@@ -287,6 +287,10 @@ export function createLiveScreen(deps: LiveScreenDeps): LiveScreen {
       }
     }
   };
+
+  chrome.onExit((connection) => {
+    for (const entry of entries.values()) if (entry.connection === connection) settle(entry, { kind: "page_gone" });
+  });
 
   const reconnected = (): void => {
     if (shown !== null) hide(shown);

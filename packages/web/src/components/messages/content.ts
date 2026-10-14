@@ -47,8 +47,8 @@ export const LOGIN_TEXT: Record<AccountLogin, string> = {
 };
 
 export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {
-  window_failed: "登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。",
-  remote_refused: "远程电脑上不能登录这个平台，请在本机登录这个账号。",
+  window_failed: "登录窗口出错或被关掉了，账号状态没变，可以再点一次。",
+  timed_out: "登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次。",
 };
 
 // 画面面板。摆哪几个按钮由 liveEndActions 定：登录只有放弃，交还只出现在接手上。

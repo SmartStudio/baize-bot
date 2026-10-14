@@ -124,15 +124,16 @@ export const setAccountTier = (id: string, tier: AccountTier): Outcome<Account> 
   return { ok: true, value: next };
 };
 
-// 照控制面：一个人每个平台最多一个未登录占位，重复加原样回已有那行。
+// 照控制面：一个人每个平台最多一个未登录占位，重复加回已有那行，挂到这次选的电脑上。
 export const createAccount = (request: CreateAccountRequest): Outcome<{ account: Account; created: boolean }> => {
   const computer = computersOf().computers.find((c) => c.id === request.computerId);
   if (computer === undefined) return { ok: false, status: 404, error: "没有这台电脑" };
-  if (computer.kind === "remote") {
-    return { ok: false, status: 400, error: "小红书要扫码登录，只能挂在你自己的电脑上，远程电脑没有助理浏览器" };
-  }
   const existing = [...accounts.values()].find((a) => a.platform === request.platform && a.login === "none");
-  if (existing !== undefined) return { ok: true, value: { account: existing, created: false } };
+  if (existing !== undefined) {
+    const moved = Account.parse({ ...existing, computerId: request.computerId });
+    accounts.set(moved.id, moved);
+    return { ok: true, value: { account: moved, created: false } };
+  }
   const stamp = now();
   const next = Account.parse({
     id: `acc_${nextSuffix()}`,
@@ -206,8 +207,8 @@ export const LoginState = z.discriminatedUnion("login", [
 export type LoginState = z.infer<typeof LoginState>;
 
 const LOGIN_FAILURE_NOTICE: Record<LoginFailure, string> = {
-  window_failed: "小红书的登录窗口出错或到时间还没登上，账号状态没变，可以再点一次登录",
-  remote_refused: "远程电脑上不能登录小红书，请在本机登录这个账号",
+  window_failed: "小红书的登录窗口出错或被关掉了，账号状态没变，可以再点一次登录",
+  timed_out: "小红书的登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次登录",
 };
 
 export const reportLoginState = (

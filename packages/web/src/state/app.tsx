@@ -60,9 +60,9 @@ import { reconnectDelay } from "./reconnect.js";
 import { createSessions, type Attempt, type Flight, type Session } from "./session.js";
 import { createClock, type Seq } from "./stamped.js";
 
-// 电脑代理给一次登录最多等 120 秒（computer-agent 的 loginTimeoutMs），这里再宽 30 秒给两跳报文和推送。
-// 过了这个点还没结果，就当电脑那边的结果丢了：重拉一遍账号，还在等的卡改成没等到。
-// 到点时这次尝试的画面还开着就不结（见 content.ts 的 login_flow）：电脑还在等人登，时限归电脑；画面收起时卡改成 closed。
+// 点了登录之后多久画面还没出来就算没等到：重拉一遍账号，还在等的卡改成没等到。电脑开页上屏通常几秒，Chrome
+// 冷启动最多等 15 秒，这里留足余量。画面开着时不结（见 content.ts 的 login_flow）：人还在登，时限归电脑
+// （computer-agent 的 loginTimeoutMs，15 分钟）；画面收起时卡改成 closed，电脑随后报的结果会盖掉它。
 const LOGIN_TIMEOUT_MS = 150_000;
 // 单拉漏档失败后隔一会儿再报失败计数，免得服务端一时不可用时几趟重试挤在同一瞬间用完。
 const MESSAGE_GAP_RETRY_MS = 1_000;

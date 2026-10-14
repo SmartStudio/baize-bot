@@ -239,7 +239,7 @@ export const ReturnPlanResponse = z.object({ plan: ContentPlan });
 
 // GET /api/accounts
 export const AccountListResponse = z.object({ accounts: z.array(Account) });
-// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行，200。浏览器平台只能挂本机电脑。
+// POST /api/accounts  建未登录的占位，回 201；这个平台已经有占位就回那一行并挂到这次选的电脑上，200。
 export const CreateAccountRequest = z.object({ platform: BrowserPlatform, computerId: ComputerId }).strict();
 export type CreateAccountRequest = z.infer<typeof CreateAccountRequest>;
 export const AccountResponse = z.object({ account: Account });
