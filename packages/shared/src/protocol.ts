@@ -523,7 +523,7 @@ export const UPLINK_DELIVERY = {
   project_offer: "reliable",
   team_offer: "reliable",
   routine_offer: "reliable",
-  preference_add: "reliable",
+  preference_offer: "reliable",
   metric_report: "reliable",
   review_submit: "reliable",
   poker_act: "reliable",
