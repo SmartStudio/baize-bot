@@ -116,6 +116,9 @@ export type ContentBook = {
   logins: Partial<Record<AccountId, LoginFlow>>;
   // 电脑上正开着的画面。会话本体在电脑内存里，这里是它的镜像：GET /api/live 加 live_session、live_closed 两种推送。
   live: Record<LiveId, LiveEntry>;
+  // 用户点开的那个接手画面。和 logins 一样是这一页的状态，不是电脑上的事实；openedAt 和 startedAt 同一个钟，
+  // 两种画面都在时比它们决定摆哪块。会话没了跟着清，晚到的同号会话不会自己弹出来。
+  takeover: { liveId: LiveId; openedAt: Seq } | null;
   stamps: Stamps;
 };
 
@@ -257,6 +260,8 @@ export type Action =
   | { type: "live_loaded"; sessions: LiveSession[]; seq: Seq }
   | { type: "live_upserted"; session: LiveSession; seq: Seq }
   | { type: "live_removed"; liveId: LiveId; seq: Seq }
+  | { type: "takeover_opened"; liveId: LiveId; openedAt: Seq }
+  | { type: "takeover_hidden"; liveId: LiveId }
   | {
       type: "logins_settled";
       before: Seq;

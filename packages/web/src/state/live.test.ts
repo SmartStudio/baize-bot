@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountId, ComputerId, LiveId, LiveSession, LoginAttemptId } from "@baize/shared";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
-import { shownLogin } from "./live.js";
+import { shownLive, shownLogin } from "./live.js";
 import { createClock } from "./stamped.js";
 import type { Action, ReadyState } from "./types.js";
 
@@ -171,5 +171,80 @@ describe("登录按 attempt 认领画面", () => {
     expect(get().logins[ACC]?.status).toBe("closed");
     put({ type: "logins_settled", before: next(), computerId: null, flow: { status: "offline" } });
     expect(get().logins[ACC]).toEqual({ status: "offline" });
+  });
+});
+
+describe("整页只摆一块画面：登录自动摆，接手点开才摆，两者都在摆最后动作指向的那块", () => {
+  it("只有在等的登录：摆登录", () => {
+    const { next, put, get } = setup();
+    put({ type: "login_opened", accountId: ACC, startedAt: next(), attempt: TRY_1 });
+    put({ type: "live_upserted", session: login(LIVE_A, TRY_1), seq: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "login", accountId: ACC, session: { liveId: LIVE_A } });
+  });
+
+  it("接手会话来了不自动摆，点开之后才摆它", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    expect(shownLive(get())).toBeNull();
+    put({ type: "takeover_opened", liveId: LIVE_B, openedAt: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "takeover", session: { liveId: LIVE_B } });
+  });
+
+  it("登录摆着时来了接手，登录不被替换；点开接手摆接手，再点一次登录又摆登录", () => {
+    const { next, put, get } = setup();
+    put({ type: "login_opened", accountId: ACC, startedAt: next(), attempt: TRY_1 });
+    put({ type: "live_upserted", session: login(LIVE_A, TRY_1), seq: next() });
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    expect(shownLive(get())?.kind).toBe("login");
+    put({ type: "takeover_opened", liveId: LIVE_B, openedAt: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "takeover", session: { liveId: LIVE_B } });
+    put({ type: "login_opened", accountId: OTHER, startedAt: next(), attempt: TRY_2 });
+    put({ type: "live_upserted", session: login(LIVE_C, TRY_2, OTHER), seq: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "login", accountId: OTHER, session: { liveId: LIVE_C } });
+  });
+
+  it("接手面板收起后回到还在等的登录", () => {
+    const { next, put, get } = setup();
+    put({ type: "login_opened", accountId: ACC, startedAt: next(), attempt: TRY_1 });
+    put({ type: "live_upserted", session: login(LIVE_A, TRY_1), seq: next() });
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    put({ type: "takeover_opened", liveId: LIVE_B, openedAt: next() });
+    put({ type: "takeover_hidden", liveId: LIVE_B });
+    expect(get().takeover).toBeNull();
+    expect(shownLive(get())).toMatchObject({ kind: "login", session: { liveId: LIVE_A } });
+  });
+
+  it("点开的接手会话没了：有在等的登录就回到登录，没有就什么都不摆", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    put({ type: "takeover_opened", liveId: LIVE_B, openedAt: next() });
+    put({ type: "live_removed", liveId: LIVE_B, seq: next() });
+    expect(shownLive(get())).toBeNull();
+
+    put({ type: "login_opened", accountId: ACC, startedAt: next(), attempt: TRY_1 });
+    put({ type: "live_upserted", session: login(LIVE_A, TRY_1), seq: next() });
+    put({ type: "live_upserted", session: takeover(LIVE_C), seq: next() });
+    put({ type: "takeover_opened", liveId: LIVE_C, openedAt: next() });
+    put({ type: "live_loaded", sessions: [login(LIVE_A, TRY_1)], seq: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "login", session: { liveId: LIVE_A } });
+  });
+
+  it("会话没了就清掉点开的记录，晚到的同号会话不会自己弹出来", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    put({ type: "takeover_opened", liveId: LIVE_B, openedAt: next() });
+    put({ type: "live_removed", liveId: LIVE_B, seq: next() });
+    expect(get().takeover).toBeNull();
+    put({ type: "live_loaded", sessions: [takeover(LIVE_B)], seq: next() });
+    expect(shownLive(get())).toBeNull();
+  });
+
+  it("收起旧接手不清掉新点开的那个", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_B), seq: next() });
+    put({ type: "live_upserted", session: takeover(LIVE_C), seq: next() });
+    put({ type: "takeover_opened", liveId: LIVE_C, openedAt: next() });
+    put({ type: "takeover_hidden", liveId: LIVE_B });
+    expect(shownLive(get())).toMatchObject({ kind: "takeover", session: { liveId: LIVE_C } });
   });
 });

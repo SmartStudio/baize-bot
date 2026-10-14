@@ -8,6 +8,7 @@ import type {
   LiveUserEnd,
   LoginFailure,
   Platform,
+  ToolCallStatus,
 } from "@baize/shared";
 
 export const PLATFORM: Record<Platform, string> = {
@@ -55,7 +56,10 @@ export const liveEndText = (kind: LivePurpose["kind"], action: LiveUserEnd): str
   action === "finish" ? "交还给 Bot" : kind === "login" ? "不登了" : "不弄了";
 
 export const LIVE_TEXT = {
-  takeover: "替 Bot 操作",
+  // Bot 表里查不到（刚删、还没拉到）就说 Bot。
+  takeover: (botName: string | undefined) => `${botName ?? "Bot"}请你接手这一页`,
+  open: "打开画面",
+  later: "稍后",
   connecting: "正在连上电脑上的画面…",
   reconnecting: "画面断了，正在重连…",
   replaced: "画面在别的窗口打开了",
@@ -65,6 +69,14 @@ export const LIVE_TEXT = {
   reveal: "到本机窗口操作",
   noOrigin: "页面还在打开",
 } as const;
+
+// 接手卡在画面没了之后按工具调用的终态说结论。running 而画面不在，是电脑还没把画面报上来，或者已经收起、结果还在路上。
+export const TAKEOVER_RESULT: Record<ToolCallStatus, string> = {
+  running: "画面还没出来",
+  ok: "已交还",
+  failed: "没接手",
+  blocked: "没接手",
+};
 
 export const TIER: Record<AccountTier, { title: string; note: string }> = {
   read_only: { title: "只读", note: "只看数据和评论，不写任何东西。" },

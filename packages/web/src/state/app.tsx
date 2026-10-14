@@ -24,6 +24,7 @@ import {
   type DecideApprovalRequest,
   type GrantId,
   type GroupId,
+  type LiveId,
   type Message,
   type MessageId,
   type Preference,
@@ -114,6 +115,9 @@ export type AppActions = {
   dismissLogin: (accountId: AccountId, attempt: LoginAttemptId) => Promise<void>;
   // 电脑上正开着的画面。启动和推送重连时各拉一次，平时靠 live_session、live_closed 两种推送。
   loadLive: () => Promise<void>;
+  // 接手画面只在用户点了「打开画面」后才摆；收起面板时清掉，提示和卡上的按钮还在。
+  openTakeover: (liveId: LiveId) => Promise<void>;
+  hideTakeover: (liveId: LiveId) => Promise<void>;
   // 建这个平台的未登录占位，已经有就回那一行。登录窗口由调用方接着在它上面开。登录过期时是 undefined。
   addAccount: (platform: BrowserPlatform, computerId: ComputerId) => Promise<AccountId | undefined>;
   loadGrants: () => Promise<void>;
@@ -626,6 +630,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       loadLive: signedIn(async ({ api, put }) => {
         const seq = nextSeq();
         put({ type: "live_loaded", sessions: (await api.live()).sessions, seq });
+      }),
+      openTakeover: signedIn(async ({ put }, liveId: LiveId) => {
+        put({ type: "takeover_opened", liveId, openedAt: nextSeq() });
+      }),
+      hideTakeover: signedIn(async ({ put }, liveId: LiveId) => {
+        put({ type: "takeover_hidden", liveId });
       }),
       loadGrants: signedIn(async ({ api, put }) => {
         put({ type: "grants_loaded", grants: (await api.grants()).grants });
