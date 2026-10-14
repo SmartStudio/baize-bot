@@ -13,9 +13,11 @@ import {
   type GrantTarget,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { BROWSER_TOOL_NAMES } from "../src/browser.js";
 import { DRAFT_TOOL_NAMES } from "../src/drafts.js";
 import { decide, INTERNAL_TOOLS, verdictFor, type GateCall, type GateContext } from "../src/gate.js";
 import { botDirs, forbiddenZones, logicalResolve, PathError } from "../src/paths.js";
+import { TAKEOVER_TOOL } from "../src/takeover.js";
 
 const computerId = ComputerId.parse("computer-1");
 const groupId = GroupId.parse("group-1");
@@ -934,6 +936,23 @@ describe("浏览器工具", () => {
     ["browser_type", { ref: 3, text: "你好" }],
   ] as const)("%s 归 engage，默认问", (toolName, input) => {
     expect(decide(call(toolName, input), [], [])).toMatchObject({ verdict: "ask", action: "engage" });
+  });
+
+  it("browser_ask_user 归 read 直接放行，动手的是用户自己；它不在 BROWSER_TOOL_NAMES 里，会话闸门不为它持锁", () => {
+    expect(TAKEOVER_TOOL).toBe("browser_ask_user");
+    expect(decide(call(TAKEOVER_TOOL, { reason: "请你登录一下" }), [], [])).toMatchObject({
+      verdict: "allow",
+      action: "read",
+      target: null,
+    });
+    expect(BROWSER_TOOL_NAMES).not.toContain(TAKEOVER_TOOL);
+    expect(BROWSER_TOOL_NAMES).toEqual([
+      "browser_open",
+      "browser_snapshot",
+      "browser_screenshot",
+      "browser_click",
+      "browser_type",
+    ]);
   });
 
   it("点和填的授权目标是浏览器当前页的主机名，命中 engage 的域名授权就不问", () => {

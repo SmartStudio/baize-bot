@@ -40,6 +40,7 @@ import { startAttachmentHub } from "./helpers/attachments.js";
 import { startWorkHub } from "./helpers/work-hub.js";
 import { acquireBotBrowserMutex, BrowserMutex } from "../src/browser-mutex.js";
 import { startGateway } from "./fixtures/gateway.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 import { isFollowUpTurn, scriptedUpstream, type ScriptedTurn, type Upstream } from "./fixtures/openai-sse.js";
 import { startFakeMcp } from "./helpers/mcp.js";
 
@@ -587,7 +588,13 @@ describe("P3-9 群道", () => {
           url: body.includes("browser-a") ? "https://example.com/a" : "https://example.com/b",
         });
       }),
-      { browser: { profileDir: join(tmpdir(), "baize-lane-browser-profile"), connection: async () => cdp } },
+      {
+        browser: {
+          profileDir: join(tmpdir(), "baize-lane-browser-profile"),
+          connection: async () => cdp,
+          present: NO_PRESENT,
+        },
+      },
     );
     const a = h.runner.prompt(prompt("browser-a"));
     try {
@@ -707,7 +714,11 @@ describe("P3-9 群道", () => {
         });
       }),
       {
-        browser: { profileDir: join(tmpdir(), "baize-lane-host-profile"), connection: async () => cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-lane-host-profile"),
+          connection: async () => cdp,
+          present: NO_PRESENT,
+        },
         grants: [
           {
             id: GrantId.parse("grant-old-host"),
@@ -753,7 +764,13 @@ describe("P3-9 群道", () => {
             url: body.includes("approval-warm") || page === "same" ? "https://old.example/" : "https://new.example/",
           });
         }),
-        { browser: { profileDir: join(tmpdir(), "baize-approval-profile"), connection: async () => browser.cdp } },
+        {
+          browser: {
+            profileDir: join(tmpdir(), "baize-approval-profile"),
+            connection: async () => browser.cdp,
+            present: NO_PRESENT,
+          },
+        },
       );
       await h.runner.prompt(prompt("approval-warm", "group-warm"));
       const a = h.runner.prompt(prompt("approval-click"));
@@ -804,7 +821,11 @@ describe("P3-9 群道", () => {
       const h = await harness(
         scriptedUpstream(() => finish),
         {
-          browser: { profileDir: join(tmpdir(), "baize-publish-pause"), connection: async () => browser.cdp },
+          browser: {
+            profileDir: join(tmpdir(), "baize-publish-pause"),
+            connection: async () => browser.cdp,
+            present: NO_PRESENT,
+          },
         },
       );
       if (phase === "已建会话") await h.runner.prompt(prompt("publisher-warm"));
@@ -839,7 +860,11 @@ describe("P3-9 群道", () => {
     const h = await harness(
       scriptedUpstream(() => finish),
       {
-        browser: { profileDir: join(tmpdir(), "baize-publish-running"), connection: async () => browser.cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-publish-running"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
       },
     );
     const publishing = fakePublishing(h.config.dataDir);
@@ -858,7 +883,13 @@ describe("P3-9 群道", () => {
       scriptedUpstream((request) =>
         isFollowUpTurn(request) ? finish : call("browser_open", { url: "https://restored.example" }),
       ),
-      { browser: { profileDir: join(tmpdir(), "baize-browser-restored"), connection: async () => browser.cdp } },
+      {
+        browser: {
+          profileDir: join(tmpdir(), "baize-browser-restored"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
+      },
     );
     await h.runner.prompt(prompt("restored-warm"));
     const deleting = h.runner.applyConfig({ ...h.config, bots: [] });
@@ -878,7 +909,11 @@ describe("P3-9 群道", () => {
       const h = await harness(
         scriptedUpstream(() => finish),
         {
-          browser: { profileDir: join(tmpdir(), "baize-publish-queued"), connection: async () => browser.cdp },
+          browser: {
+            profileDir: join(tmpdir(), "baize-publish-queued"),
+            connection: async () => browser.cdp,
+            present: NO_PRESENT,
+          },
         },
       );
       const started = deferred();
@@ -1121,7 +1156,11 @@ describe("P3-9 群道", () => {
     const h = await harness(
       scriptedUpstream(() => finish),
       {
-        browser: { profileDir: join(tmpdir(), "baize-publish-paused-entry"), connection: async () => browser.cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-publish-paused-entry"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
       },
     );
     const lease = acquireBotBrowserMutex(h.config.dataDir, BotId.parse("bot-lanes"));
@@ -1156,7 +1195,11 @@ describe("P3-9 群道", () => {
     const h = await harness(
       scriptedUpstream(() => finish),
       {
-        browser: { profileDir: join(tmpdir(), "baize-publish-stop-after-lock"), connection: async () => browser.cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-publish-stop-after-lock"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
       },
     );
     const lease = acquireBotBrowserMutex(h.config.dataDir, BotId.parse("bot-lanes"));
@@ -1203,7 +1246,11 @@ describe("P3-9 群道", () => {
     const h = await harness(
       scriptedUpstream(() => finish),
       {
-        browser: { profileDir: join(tmpdir(), "baize-publish-release-on-pause"), connection: async () => browser.cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-publish-release-on-pause"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
       },
     );
     const lease = acquireBotBrowserMutex(h.config.dataDir, BotId.parse("bot-lanes"));
@@ -1697,7 +1744,13 @@ describe("分道与租约合并", () => {
         {
           tools: kind === "非浏览器" ? [connection(mcp.url)] : [],
           ...(kind === "浏览器"
-            ? { browser: { profileDir: join(tmpdir(), "baize-pause-window"), connection: async () => browser.cdp } }
+            ? {
+                browser: {
+                  profileDir: join(tmpdir(), "baize-pause-window"),
+                  connection: async () => browser.cdp,
+                  present: NO_PRESENT,
+                },
+              }
             : {}),
           workAppend: async (frame) => {
             if (frame.cause !== "before_effect") return { kind: "ok" };
@@ -1766,7 +1819,11 @@ describe("分道与租约合并", () => {
     const h = await harness(
       scriptedUpstream((request) => (isFollowUpTurn(request) ? finish : call("browser_click", { ref: 1 }))),
       {
-        browser: { profileDir: join(tmpdir(), "baize-probe-lock"), connection: async () => browser.cdp },
+        browser: {
+          profileDir: join(tmpdir(), "baize-probe-lock"),
+          connection: async () => browser.cdp,
+          present: NO_PRESENT,
+        },
         workAppend: async (frame) => {
           if (frame.cause !== "before_effect") return { kind: "ok" };
           probes.push(takenOver);
