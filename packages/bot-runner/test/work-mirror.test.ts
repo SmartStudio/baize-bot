@@ -600,4 +600,64 @@ describe("WorkMirror", () => {
         .join("\n"),
     ).toContain("table history survives");
   });
+
+  it("快路径只在本地链头等于 prompt 带来的服务器链头时采用内存会话，分叉则按 Hub 重建", async () => {
+    const lineOf = (text: string): string => {
+      const source = SessionManager.inMemory("/tmp/work-mirror-source");
+      appendUser(source, text);
+      return JSON.stringify(source.getEntries()[0]);
+    };
+    const shared = await snapshot([lineOf("本地与服务器曾经一致")]);
+    stubHub(shared);
+    const h = setup(async () => ({ kind: "ok" }));
+    const open = vi.spyOn(SessionManager, "open").mockImplementation(() => {
+      throw new Error("模拟文件打开失败");
+    });
+    const local = await h.mirror.prepare(3, { seq: 1, head: shared.head }, RunId.parse("run-fork-1"));
+    open.mockRestore();
+    expect(local.getSessionFile()).toBeUndefined();
+
+    const forked = await snapshot([lineOf("服务器上换成了另一条")]);
+    let served = shared;
+    const hub = vi.fn(async () => new Response(JSON.stringify(served), { status: 200 }));
+    vi.stubGlobal("fetch", hub);
+
+    const same = await h.mirror.prepare(3, { seq: 1, head: shared.head }, RunId.parse("run-fork-2"), local);
+    expect(same).toBe(local);
+    expect(hub).not.toHaveBeenCalled();
+
+    served = forked;
+    const rebuilt = await h.mirror.prepare(3, { seq: 1, head: forked.head }, RunId.parse("run-fork-3"), local);
+    expect(rebuilt).not.toBe(local);
+    expect(hub).toHaveBeenCalledTimes(1);
+    const text = JSON.stringify(rebuilt.getEntries());
+    expect(text).toContain("服务器上换成了另一条");
+    expect(text).not.toContain("本地与服务器曾经一致");
+  });
+
+  it("tool_list_changed 后 Hub 前缀与本地按新名单重滤的前缀不一致时停流并报 head_mismatch，不继续上传", async () => {
+    const source = SessionManager.inMemory("/tmp/work-mirror-source");
+    appendUser(source, "服务器上另一条分叉的前缀");
+    const hubSnapshot = await snapshot([JSON.stringify(source.getEntries()[0])]);
+    let rejected = false;
+    const h = setup(async (frame) => {
+      if (!rejected && frame.cause === "turn_end" && frame.fromSeq > 0) {
+        rejected = true;
+        stubHub(hubSnapshot);
+        return { kind: "invalid", reason: "tool_list_changed", nextSeq: hubSnapshot.nextSeq, head: hubSnapshot.head };
+      }
+      return { kind: "ok" };
+    });
+    const manager = await h.mirror.prepare(2, { seq: 0, head: EMPTY_WORK_HEAD }, RunId.parse("run-tlc-fork"));
+    appendUser(manager, "本地已确认的前缀");
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-tlc-fork"))).resolves.toEqual({ kind: "ok" });
+    appendUser(manager, "不该传出去的尾巴");
+
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-tlc-fork"))).resolves.toEqual({ kind: "head_mismatch" });
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-tlc-fork"))).resolves.toEqual({ kind: "head_mismatch" });
+
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent.at(-1)?.fromSeq).toBe(1);
+    expect(h.logs.some((line) => line.includes("head_mismatch"))).toBe(true);
+  });
 });

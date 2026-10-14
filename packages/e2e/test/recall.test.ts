@@ -1,13 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  BotListResponse,
-  CreateGroupResponse,
-  EMPTY_WORK_HEAD,
-  advanceWorkHead,
-  recallPlaceholder,
-  type WorkAppend,
-} from "@baize/shared";
+import { BotListResponse, CreateGroupResponse, recallPlaceholder, type WorkAppend } from "@baize/shared";
 import { type PromptMessage } from "@baize/bot-runner";
 import { describe, expect, it } from "vitest";
 import { startStack, type Stack } from "../src/stack.js";
@@ -53,21 +46,6 @@ async function sessionLines(stack: Stack, prompt: PromptMessage): Promise<string
     .filter((line) => (JSON.parse(line) as { type: string }).type !== "session");
 }
 
-async function appendSession(stack: Stack, prompt: PromptMessage): Promise<WorkAppend> {
-  const lines = await sessionLines(stack, prompt);
-  const frame: WorkAppend = {
-    type: "work_append",
-    lane: { ...prompt.lane, botId: prompt.botId, groupId: prompt.groupId, stream: "chat" },
-    runId: prompt.runId,
-    fromSeq: 0,
-    lines,
-    head: await advanceWorkHead(EMPTY_WORK_HEAD, lines),
-    cause: "settled",
-  };
-  expect(await stack.appendWork(frame)).toEqual({ kind: "ok" });
-  return frame;
-}
-
 describe("端到端：跨群 recall", () => {
   it("A群的真实会话经可靠工作记录通道落库，B群召回带A群标题且下一run不带摘录", async () => {
     const upstream = await startUpstream(script);
@@ -89,12 +67,12 @@ describe("端到端：跨群 recall", () => {
         await stack.post("/api/groups", { title: "飞书采购备忘", botIds: [first.bot.id, peer.bot.id] }),
       );
       const sourcePrompt = await sendAndSettle(stack, group.id, `@小服 ${SOURCE}`);
-      const sourceFrame = await appendSession(stack, sourcePrompt);
-      expect(sourceFrame.lines.join("\n")).toContain(SOURCE);
+      const sourceLines = await sessionLines(stack, sourcePrompt);
+      expect(sourceLines.join("\n")).toContain(SOURCE);
       const storedSource = await stack.sql<
         { line: string }[]
-      >`SELECT line FROM work_entries WHERE bot_id = ${first.bot.id} AND group_id = ${group.id}`;
-      expect(storedSource.map((row) => row.line)).toEqual(sourceFrame.lines);
+      >`SELECT line FROM work_entries WHERE bot_id = ${first.bot.id} AND group_id = ${group.id} ORDER BY seq`;
+      expect(storedSource.map((row) => row.line)).toEqual(sourceLines);
 
       const beforeRecall = upstream.requests().length;
       const recalled = await sendAndSettle(stack, first.groupId, RECALL_PROMPT);
@@ -104,21 +82,16 @@ describe("端到端：跨群 recall", () => {
       expect(textOf(recalledTool?.content)).toContain(SOURCE);
       expect(textOf(recalledTool?.content)).toContain("飞书采购备忘");
       expect(textOf(recalledTool?.content)).toContain(group.id);
-      const recallFrame = await appendSession(stack, recalled);
-      expect(recallFrame.lines.join("\n")).toContain(recallPlaceholder(1));
-      expect(recallFrame.lines.join("\n")).not.toContain(SOURCE);
-      expect(
-        frames.some((frame) => frame.runId === recalled.runId && frame.lines.includes(recallFrame.lines[0]!)),
-      ).toBe(true);
-      expect(
-        frames
-          .filter((frame) => frame.runId === recalled.runId)
-          .flatMap((frame) => frame.lines)
-          .join("\n"),
-      ).not.toContain(SOURCE);
+      const recallLines = await sessionLines(stack, recalled);
+      expect(recallLines.join("\n")).toContain(recallPlaceholder(1));
+      expect(recallLines.join("\n")).not.toContain(SOURCE);
+      const recallUploaded = frames.filter((frame) => frame.runId === recalled.runId).flatMap((frame) => frame.lines);
+      expect(recallUploaded).toEqual(recallLines);
+      expect(recallUploaded.join("\n")).not.toContain(SOURCE);
       const storedRecall = await stack.sql<
         { line: string; search_text: string }[]
-      >`SELECT line, search_text FROM work_entries WHERE bot_id = ${first.bot.id} AND group_id = ${first.groupId}`;
+      >`SELECT line, search_text FROM work_entries WHERE bot_id = ${first.bot.id} AND group_id = ${first.groupId} ORDER BY seq`;
+      expect(storedRecall.map((row) => row.line)).toEqual(recallLines);
       expect(storedRecall.map((row) => row.line).join("\n")).toContain(recallPlaceholder(1));
       expect(JSON.stringify(storedRecall)).not.toContain(SOURCE);
 
