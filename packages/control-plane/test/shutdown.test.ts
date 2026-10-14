@@ -17,7 +17,7 @@ import { gatedDb } from "./helpers/gated-db.js";
  */
 
 const SERVICE_RESTART = 1012;
-const BATCH_SLEEP = /"computers"\."id" in \(/;
+const BATCH_SLEEP = /^update "computers" set "status".*"computers"\."id" in \(/;
 const HEARTBEAT = /"last_seen_at"/;
 
 async function stack() {
@@ -100,28 +100,42 @@ it("停机期间认身份才回来的 hello：被关掉，没有 welcome，库�
     await released;
     return result;
   });
+  const markSleeping = computersRepo.markComputersSleeping;
+  let slept!: () => void;
+  let releaseSleep!: () => void;
+  const sleepReached = new Promise<void>((resolve) => (slept = resolve));
+  const sleepReleased = new Promise<void>((resolve) => (releaseSleep = resolve));
+  const sleepSpy = vi.spyOn(computersRepo, "markComputersSleeping").mockImplementation(async (...args) => {
+    await markSleeping(...args);
+    slept();
+    await sleepReleased;
+  });
   const second = await openAgent(s.port);
+  let close: ReturnType<typeof s.closing> | undefined;
   try {
     sendHello(second, s.computer.computerId, s.computer.token);
     await authenticatedDone;
 
-    const sleep = s.gated.arm(BATCH_SLEEP, "after");
-    const close = s.closing();
+    close = s.closing();
     // 认身份那一步挂在 B 的 inbox 尾上，停机等它回来；回来之后它自己看到停机，关 socket 不入链。
     release();
     expect(await second.closed(), "停机期间认完身份的 hello 当场被关").toBe(SERVICE_RESTART);
     expect(second.received(), "没有 welcome，也没有 config").toEqual([]);
 
-    await sleep.reached;
+    await sleepReached;
     expect(await first.agent.closed(), "已有连接在批量休眠前就被关掉").toBe(SERVICE_RESTART);
     expect(await s.status(), "批量休眠已经落库，B 没有把电脑写回在线").toBe("sleeping");
     expect(close.done(), "批量休眠的返回还扣着，server.close 没返回").toBe(false);
 
-    sleep.release();
+    releaseSleep();
     await close.promise;
     expect(await s.status(), "停机结束后电脑仍是休眠").toBe("sleeping");
   } finally {
+    release();
+    releaseSleep();
+    await close?.promise;
     spy.mockRestore();
+    sleepSpy.mockRestore();
     await finish(s.database, first.agent, second);
   }
 });
@@ -141,6 +155,8 @@ it("停机开始后才到的 socket 直接被关，hello 发了也没有回应",
     await close.promise;
     expect(await s.status(), "停机结束后电脑是休眠").toBe("sleeping");
   } finally {
+    sleep.release();
+    await close.promise;
     await finish(s.database, first.agent, late);
   }
 });

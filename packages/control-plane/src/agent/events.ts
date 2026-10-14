@@ -53,7 +53,7 @@ import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
   claimCharge,
   finishRun,
-  latestOpenRun,
+  uniqueOpenRun,
   lockRuns,
   lockSettlement,
   lockSettlementOfRun,
@@ -833,16 +833,16 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
       );
     return;
   }
-  // 报文带了群号就落在那个群，它是外部输入，照样按归属人过滤。不带才退回到最近一次还没结束的活。
+  // 运行器也会发不属于某次 run 的错误。群号明确时只查该群，不带群号时必须能唯一确定进行中的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
-  const open = await latestOpenRun(deps.db, conn.computerId);
+  if (event.groupId !== undefined && named === null) return;
+  const open = await uniqueOpenRun(deps.db, conn.computerId, event.groupId);
   const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
-    console.error(`电脑 ${conn.computerId} 报错但没有进行中的活：${event.code} ${event.detail}`);
     return;
   }
   await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });
-  // 报文不带 run 号，只能拿最近一个没结束的活顶上，它得落在同一个群里，不然记错的是别人的运行记录。
+  // 指定群里有多条 open run 时仍可留群级提示，但不能替其中某一条例行任务记失败。
   if (open !== null && open.groupId === groupId) {
     await failRoutineRunOf(deps, open.runId, reason);
   }

@@ -96,10 +96,13 @@ async function orphanRuns(): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-async function lockWaiters(): Promise<number> {
+async function lockWaiters(ownerId: UserId, mode: "shared" | "exclusive"): Promise<number> {
   const rows = await database.sql<{ waiting: number }[]>`
-    SELECT count(*)::int AS waiting FROM pg_stat_activity
-    WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'`;
+    SELECT count(*)::int AS waiting FROM pg_stat_activity a JOIN pg_locks l ON l.pid = a.pid
+    WHERE a.datname = ${database.databaseName} AND a.wait_event_type = 'Lock'
+      AND NOT l.granted AND l.locktype = 'advisory'
+      AND l.classid = 1652191095::oid AND l.objid = hashtext(${ownerId})::oid
+      AND a.query LIKE ${mode === "shared" ? "SELECT pg_advisory_xact_lock_shared(%" : "SELECT pg_advisory_xact_lock(%"}`;
   return rows[0]?.waiting ?? 0;
 }
 
@@ -308,7 +311,10 @@ it("删号删完 runs、还没删用户时派活：派活等删号提交，不�
     const posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "删号交错时的新活" });
     const prompted = () => job.agent.received().some((frame) => frame.type === "prompt");
     // 不拿 Bot 锁的删号挡不住派活，它会建完 run 发出 prompt；拿了锁的话派活停在共享锁上。两种都等到再放行删号。
-    await waitFor(async () => prompted() || (await lockWaiters()) > 0, "派活发出 prompt 或停在 Bot 锁上");
+    await waitFor(
+      async () => prompted() || (await lockWaiters(job.user.id, "shared")) > 0,
+      "派活发出 prompt 或停在 Bot 锁上",
+    );
     deleteHeld.release();
 
     expect((await deleting).status).toBe(204);
@@ -340,7 +346,10 @@ it("派活拿着 Bot 锁建 run 时删号：删号等 run 提交再一并删掉�
     });
     inserting.release();
     await recording.reached;
-    await waitFor(async () => deleted || (await lockWaiters()) > 0, "删号停在派活事务的 Bot 锁上");
+    await waitFor(
+      async () => deleted || (await lockWaiters(job.user.id, "exclusive")) > 0,
+      "删号停在派活事务的 Bot 锁上",
+    );
     expect(deleted, "上下文和 outbox 提交前删号不能越过派活事务").toBe(false);
     recording.release();
 
@@ -437,7 +446,7 @@ it("删号拿完 Bot 快照后建 Bot：建 Bot 停在账号锁上等删号提�
       created = true;
       return response;
     });
-    await waitFor(async () => created || (await lockWaiters()) > 0, "建 Bot 回了或停在账号锁上");
+    await waitFor(async () => created || (await lockWaiters(job.user.id, "shared")) > 0, "建 Bot 回了或停在账号锁上");
     expect(created, "删号没提交前建不出 Bot").toBe(false);
     deleteHeld.release();
 
@@ -474,7 +483,7 @@ it("删号拿完 Bot 快照后从分享包导入：导入停在账号锁上等�
       imported = true;
       return response;
     });
-    await waitFor(async () => imported || (await lockWaiters()) > 0, "导入回了或停在账号锁上");
+    await waitFor(async () => imported || (await lockWaiters(job.user.id, "shared")) > 0, "导入回了或停在账号锁上");
     expect(imported, "删号没提交前导入建不出 Bot").toBe(false);
     deleteHeld.release();
 
@@ -504,7 +513,10 @@ it("没经过建 Bot 那道锁就进库的 Bot：删号期间给它派活，建 
     const late = await database.db.transaction((tx) => botsRepo.insertMemberBot(tx, job.user.id, { name: "晚来的" }));
     posting = job.client.post(`/api/groups/${late.group.id}/messages`, { text: "给晚来的 Bot 派活" });
     const prompted = () => job.agent.received().some((frame) => frame.type === "prompt" && frame.botId === late.bot.id);
-    await waitFor(async () => prompted() || (await lockWaiters()) > 0, "新 Bot 收到 prompt 或建 run 停在账号锁上");
+    await waitFor(
+      async () => prompted() || (await lockWaiters(job.user.id, "shared")) > 0,
+      "新 Bot 收到 prompt 或建 run 停在账号锁上",
+    );
     deleteHeld.release();
 
     expect((await deleting).status).toBe(204);
@@ -533,7 +545,7 @@ it("建群锁着成员 Bot 的行时删号：删号等建群提交，两边都�
       deleted = true;
       return response;
     });
-    await waitFor(async () => deleted || (await lockWaiters()) > 0, "删号停在锁上");
+    await waitFor(async () => deleted || (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在锁上");
     inserting.release();
 
     const [groupResponse, deleteResponse] = await Promise.all([creating, deleting]);
@@ -689,7 +701,7 @@ it("开项目拿着账号锁时删号：删号等项目提交再一并删掉，�
     starting = job.client.post(`/api/messages/${offerId}/project-offer`, { decision: "start" });
     await locked.reached;
     deleting = deleteAccount(job.client, job.user.email);
-    await waitFor(async () => (await lockWaiters()) > 0, "删号停在账号锁上");
+    await waitFor(async () => (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在账号锁上");
     locked.release();
 
     const [started, removed] = await Promise.all([starting, deleting]);
@@ -719,7 +731,7 @@ it("建 run 拿着账号锁、还没拿 Bot 锁时删号：账号锁在 Bot 锁�
       deleted = true;
       return response;
     });
-    await waitFor(async () => (await lockWaiters()) > 0, "删号停在账号锁上");
+    await waitFor(async () => (await lockWaiters(job.user.id, "exclusive")) > 0, "删号停在账号锁上");
     locked.release();
     await recording.reached;
 

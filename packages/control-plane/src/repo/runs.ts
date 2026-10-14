@@ -1,5 +1,5 @@
 import { BotId, ComputerId, GroupId, RunId, type PokerTableRole, type UsageRecord, UserId } from "@baize/shared";
-import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentOutbox, bots, groups, runs } from "../db/schema.js";
 import { type Tx } from "./messages.js";
@@ -258,16 +258,22 @@ export async function unchargedRunsForComputer(db: Db, computerId: ComputerId): 
   }));
 }
 
-/** 该电脑最近一条还没结束的 run。agent_error 报文里没有群号，只能落到它上面。 */
-export async function latestOpenRun(db: Db, computerId: ComputerId): Promise<OpenRun | null> {
-  const [row] = await db
+/** 分道之后不能按时间猜归属；无 runId 的错误只在范围内恰好一条 open run 时关联运行记录。 */
+export async function uniqueOpenRun(db: Db, computerId: ComputerId, groupId?: GroupId): Promise<OpenRun | null> {
+  const rows = await db
     .select({ runId: runs.id, groupId: runs.groupId, botId: runs.botId })
     .from(runs)
     .innerJoin(bots, eq(bots.id, runs.botId))
-    .where(and(eq(runs.computerId, computerId), isNull(runs.endedAt)))
-    .orderBy(desc(runs.startedAt))
-    .limit(1);
-  if (row === undefined) return null;
+    .where(
+      and(
+        eq(runs.computerId, computerId),
+        isNull(runs.endedAt),
+        groupId === undefined ? undefined : eq(runs.groupId, groupId),
+      ),
+    )
+    .limit(2);
+  const [row] = rows;
+  if (rows.length !== 1 || row === undefined) return null;
   return {
     runId: RunId.parse(row.runId),
     groupId: GroupId.parse(row.groupId),

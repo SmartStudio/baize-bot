@@ -102,7 +102,7 @@ import { ensureComputer, listComputers, resetComputerToken } from "../repo/compu
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { findLiveGroupId } from "../repo/live-groups.js";
-import { appendMessage, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
+import { appendMessageIfGroupAlive, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import {
   createRoutine,
@@ -942,7 +942,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
         : ({ kind: "user", text: body.value.text, mentions } as const);
     deps.groupTurns.cancel(groupId.data);
 
-    const message = await appendMessage(db, owned, sent);
+    const message = await appendMessageIfGroupAlive(db, owned, sent);
+    if (message === null) return c.json(NOT_FOUND, 404);
     hub.push(c.get("user").id, { type: "message", message });
 
     // `/名` 只加一次用量，正文一个字都不改：运行器收到的和用户手打的一模一样，Pi 自己按名字找那份 SKILL.md。

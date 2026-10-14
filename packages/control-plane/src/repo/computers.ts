@@ -1,10 +1,11 @@
-import { ComputerId, type Computer, type ComputerKind, type UserId } from "@baize/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { ComputerId, UserId, type Computer, type ComputerKind } from "@baize/shared";
+import { and, asc, eq, inArray, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
 import { computers } from "../db/schema.js";
 import { hashSecret, newId, newSecret, secretMatches } from "../ids.js";
 import { toComputer } from "./rows.js";
+import { lockOwner } from "./runs.js";
 
 /** 建电脑时才拿得到 token 明文，已经有电脑时是 null。 */
 export type EnsureResult = { readonly computer: Computer; readonly token: string | null };
@@ -126,15 +127,43 @@ function ofConnection(computerId: ComputerId, gatewayKey: string) {
 /** 关服务时一次写完。socket 的 close 回调排在事件循环后面，进程退出之前跑不完。 */
 export async function markComputersSleeping(db: Db, computerIds: readonly ComputerId[]): Promise<void> {
   if (computerIds.length === 0) return;
-  await db
-    .update(computers)
-    .set({ status: "sleeping", idleSince: new Date() })
-    .where(inArray(computers.id, [...computerIds]));
+  await markSleeping(db, inArray(computers.id, [...computerIds]));
 }
 
 /** 进程刚起不可能有活着的连接，库里剩下的在线必然是上次没关干净留下的。 */
 export async function markOnlineComputersSleeping(db: Db): Promise<void> {
-  await db.update(computers).set({ status: "sleeping", idleSince: new Date() }).where(eq(computers.status, "online"));
+  await markSleeping(db, eq(computers.status, "online"));
+}
+
+// 启停可能和另一实例的删号重叠。快照只选目标，owner 锁全部拿齐之后才能锁电脑行。
+async function markSleeping(db: Db, where: SQL): Promise<void> {
+  await db.transaction(async (tx) => {
+    const targets = await tx.select({ id: computers.id, ownerId: computers.ownerId }).from(computers).where(where);
+    if (targets.length === 0) return;
+    for (const ownerId of [...new Set(targets.map((row) => row.ownerId))].toSorted()) {
+      await lockOwner(tx, UserId.parse(ownerId), "shared");
+    }
+    const ids = targets.map((row) => row.id);
+    const locked = await tx
+      .select({ id: computers.id })
+      .from(computers)
+      .where(and(inArray(computers.id, ids), where))
+      .orderBy(asc(computers.id))
+      .for("no key update");
+    if (locked.length === 0) return;
+    await tx
+      .update(computers)
+      .set({ status: "sleeping", idleSince: new Date() })
+      .where(
+        and(
+          inArray(
+            computers.id,
+            locked.map((row) => row.id),
+          ),
+          where,
+        ),
+      );
+  });
 }
 
 export type TokenReset = { readonly computerId: ComputerId; readonly token: string };
