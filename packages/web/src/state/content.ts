@@ -1,6 +1,7 @@
 import { loadTable, removeFromTable, writeTable } from "./stamped.js";
-import type { Account, AccountId } from "@baize/shared";
-import type { Action, ContentBook, LoginFlow, ReadyState } from "./types.js";
+import type { Account, AccountId, LiveSession, LoginAttemptId } from "@baize/shared";
+import { closeScreens, loginScreen } from "./live.js";
+import type { Action, ContentBook, LiveEntry, LoginFlow, ReadyState } from "./types.js";
 
 export const EMPTY_CONTENT: ContentBook = {
   drafts: {},
@@ -9,8 +10,11 @@ export const EMPTY_CONTENT: ContentBook = {
   computers: {},
   publications: {},
   logins: {},
+  live: {},
   stamps: {},
 };
+
+const entryOf = (session: LiveSession): LiveEntry => ({ ...session, id: session.liveId });
 
 const withContent = (state: ReadyState, content: ContentBook): ReadyState => ({ ...state, content });
 
@@ -23,6 +27,9 @@ const signedIn = (logins: ContentBook["logins"], accounts: Record<AccountId, Acc
   }
   return next;
 };
+
+const sameAttempt = (flow: LoginFlow | undefined, attempt: LoginAttemptId): boolean =>
+  (flow?.status === "opening" || flow?.status === "closed") && flow.attempt === attempt;
 
 export const reduceContent = (state: ReadyState, action: Action): ReadyState => {
   const content = state.content;
@@ -69,23 +76,57 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
     case "login_flow": {
       const flow = content.logins[action.accountId];
       if (flow?.status !== "opening" || flow.startedAt !== action.startedAt) return state;
+      // 网页这边的计时到点时画面还开着，就是电脑还在等人登，不算没等到。不用再计一轮：画面收起时卡会改成 closed。
+      if (action.flow.status === "lapsed" && loginScreen(content.live, flow.attempt) !== null) return state;
       return withContent(state, { ...content, logins: { ...content.logins, [action.accountId]: action.flow } });
     }
     case "login_failed": {
       // 卡一开就带着这次的号，失败要对上号才算，旧尝试的失败不盖新尝试。
       const flow = content.logins[action.accountId];
-      if (flow?.status !== "opening" || flow.attempt !== action.attempt) return state;
+      if (!sameAttempt(flow, action.attempt)) return state;
       const failed: LoginFlow = { status: "failed", reason: action.reason };
       return withContent(state, { ...content, logins: { ...content.logins, [action.accountId]: failed } });
+    }
+    case "login_dismissed": {
+      // 用户在画面上点了「不登了」：复位按钮，不记失败。
+      if (!sameAttempt(content.logins[action.accountId], action.attempt)) return state;
+      const { [action.accountId]: _flow, ...logins } = content.logins;
+      return withContent(state, { ...content, logins });
     }
     case "logins_settled": {
       const logins = { ...content.logins };
       for (const [id, flow] of Object.entries(content.logins) as [AccountId, LoginFlow | undefined][]) {
-        if (flow?.status !== "opening" || flow.startedAt >= action.before) continue;
+        // 画面收起后结果还会晚到，不算没等到；电脑离线了结果就不会再来，收起的也结成 offline。
+        if (flow?.status !== "opening" && !(flow?.status === "closed" && action.flow.status === "offline")) continue;
+        if (flow.startedAt >= action.before) continue;
         if (action.computerId !== null && content.accounts[id]?.computerId !== action.computerId) continue;
+        // 画面还开着就是还在登，不算没等到；电脑离线时画面跟着没了，照样结成 offline。
+        if (action.flow.status === "lapsed" && loginScreen(content.live, flow.attempt) !== null) continue;
         logins[id] = action.flow;
       }
       return withContent(state, { ...content, logins });
+    }
+    case "live_loaded": {
+      const live = loadTable(content.live, content.stamps, action.seq, action.sessions.map(entryOf));
+      return withContent(state, {
+        ...content,
+        live: live.rows,
+        logins: closeScreens(content.logins, content.live, live.rows),
+        stamps: live.stamps,
+      });
+    }
+    case "live_upserted": {
+      const live = writeTable(content.live, content.stamps, action.seq, [entryOf(action.session)]);
+      return withContent(state, { ...content, live: live.rows, stamps: live.stamps });
+    }
+    case "live_removed": {
+      const live = removeFromTable(content.live, content.stamps, action.seq, action.liveId);
+      return withContent(state, {
+        ...content,
+        live: live.rows,
+        logins: closeScreens(content.logins, content.live, live.rows),
+        stamps: live.stamps,
+      });
     }
     case "computers_loaded": {
       const computers = loadTable(content.computers, content.stamps, action.seq, action.computers);

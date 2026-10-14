@@ -27,6 +27,7 @@ const content: ContentBook = {
   computers: {},
   publications: {},
   logins: {},
+  live: {},
   stamps: {},
 };
 
