@@ -8,7 +8,7 @@ import {
 } from "@baize/shared";
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
-import { helloAgent, type AgentClient } from "./helpers/agent.js";
+import { expectHello, helloAgent, openAgent, sendHello, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
@@ -151,6 +151,86 @@ it("config_rejected 的 warn 里 detail 也按码点截到 80", async () => {
   });
   await waitFor(async () => (await errorsIn(who.client, first.groupId)).length > 0, "后一条带真群号的报错落地");
   expect(warn.mock.calls.map((call) => String(call[0]).split("config：")[1])).toEqual([`用户内容${"😀".repeat(76)}…`]);
+});
+
+it("双实例旧握手在信封校验后结束 run：runId error 日志只留 80 个码点，第 80、81 个 emoji 不留孤立代理项", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const oldQueries = gatedDb(database.sql);
+  const oldServer = await startTestServer(oldQueries.db);
+  const openRuns = /^select "id", "group_id" from "runs" where/;
+  let oldRead: ReturnType<typeof oldQueries.arm> | undefined;
+  let currentRead: ReturnType<typeof gate.arm> | undefined;
+  try {
+    const who = await rig();
+    const [first, second] = who.bots;
+    const busy = await say(who, first, "跨实例收尾窗口");
+    // 这条可靠上行排在 prompt 的下行确认后，落地证明旧 hello 不会把 R 当成尚未投递的 prompt 跳过。
+    who.agent.send({
+      type: "agent_error",
+      code: "runner_failed",
+      detail: "下行签收后屏障",
+      groupId: second.groupId,
+    });
+    await waitFor(async () => (await errorsIn(who.client, second.groupId)).length > 0, "下行确认之后的报错落地");
+
+    oldRead = oldQueries.arm(openRuns, "after", who.computer.computerId);
+    const oldAgent = await openAgent(oldServer.server.port);
+    agents.push(oldAgent);
+    sendHello(oldAgent, who.computer.computerId, who.computer.token);
+    await oldRead.reached;
+
+    const current = await helloAgent(server.server.port, who.computer.computerId, who.computer.token, [busy.runId]);
+    agents.push(current.agent);
+    expect(await who.agent.closed(), "新实例接受更新的 hello，替换它自己的旧连接").toBe(4000);
+    currentRead = gate.arm(openRuns, "before", who.computer.computerId);
+    const detail = `${"a".repeat(79)}😀🧪后续用户内容`;
+    current.agent.send({
+      type: "agent_error",
+      code: "runner_failed",
+      runId: busy.runId,
+      groupId: first.groupId,
+      detail,
+    });
+    await currentRead.reached;
+
+    // 此时信封已认领电脑行并通过 run 校验。旧实例拿的是收尾锁，仍能在这条查询发出前结束 R。
+    oldRead.release();
+    await expectHello(oldAgent);
+    expect(await errorsIn(who.client, first.groupId), "旧 hello 的收尾通知已提交，随后才放行新实例的查询").toEqual([
+      "电脑断过线，这次活没做完",
+    ]);
+    currentRead.release();
+    current.agent.send({
+      type: "agent_error",
+      code: "runner_failed",
+      detail: "runId 报错之后的落地屏障",
+      groupId: second.groupId,
+    });
+    await waitFor(async () => (await errorsIn(who.client, second.groupId)).length === 2, "runId 报错之后的报错落地");
+    await waitFor(
+      async () => current.agent.uplinkAcks().some((ack) => ack.upTo >= current.welcome.upAcked + 2),
+      "两条可靠上行累计确认",
+    );
+    expect(
+      current.agent.uplinkAcks().flatMap((ack) => ack.rejected),
+      "runId 校验当时通过，不能在信封层被 run_closed 拒收",
+    ).toEqual([]);
+    const lines = error.mock.calls.map((call) => String(call[0]));
+    const prefix = `电脑 ${who.computer.computerId} 报错带的 run ${busy.runId} 不是它还开着的活，不收尾：runner_failed `;
+    const logged = lines.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+    expect(logged, "这条真实可达的 runId error 日志准确按 80 个码点截断").toEqual([`${"a".repeat(79)}😀…`]);
+    expect(Array.from(logged[0] ?? "")).toHaveLength(81);
+    expect(logged.join(""), "第 80 个 emoji 完整保留，第 81 个完整截掉，不新造孤立代理项").not.toMatch(
+      /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+    );
+    expect(await errorsIn(who.client, first.groupId), "runId 错误仅记日志，不能再次收尾或落群").toEqual([
+      "电脑断过线，这次活没做完",
+    ]);
+  } finally {
+    oldRead?.release();
+    currentRead?.release();
+    await oldServer.close();
+  }
 });
 
 it("指定的群号属于别人：即使这台电脑有一条 run 记在那个群名下，报错也不落进别人的群", async () => {

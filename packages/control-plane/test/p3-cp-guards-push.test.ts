@@ -1,11 +1,13 @@
 import { CreateBotResponse, ServerPush } from "@baize/shared";
-import { drizzle } from "drizzle-orm/postgres-js";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, expect, it, vi } from "vitest";
+import { WebSocket } from "ws";
 import type { Sql } from "../src/db/client.js";
-import * as schema from "../src/db/schema.js";
+import { WS_PATH } from "../src/server.js";
+import { helloAgent } from "./helpers/agent.js";
 import { startTestServer, type ApiClient, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
+import { gatedDb } from "./helpers/gated-db.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 /** 删号之后浏览器的推送连接要关掉，删号前已经提交、还没来得及推送的消息不能晚到旧页面。 */
@@ -79,13 +81,17 @@ function holdingMessageCommit(sql: Sql): { readonly sql: Sql; arm(): CommitHold 
 
 let database: TestDb;
 let commits: ReturnType<typeof holdingMessageCommit>;
+let queries: ReturnType<typeof gatedDb>;
 let server: TestServer;
 
 beforeAll(async () => {
   database = await createTestDb();
   commits = holdingMessageCommit(database.sql);
-  server = await startTestServer(drizzle(commits.sql, { schema }));
+  queries = gatedDb(commits.sql);
+  server = await startTestServer(queries.db);
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 afterAll(async () => {
   await server.close();
@@ -106,6 +112,116 @@ function watch(push: PushClient): { readonly closed: Promise<number>; readonly r
   const closed = new Promise<number>((resolve) => push.socket.once("close", (code) => resolve(code)));
   return { closed, received };
 }
+
+type SocketEvent =
+  | { readonly kind: "message"; readonly push: ServerPush }
+  | { readonly kind: "close"; readonly code: number; readonly reason: string };
+
+function observeSocket(socket: WebSocket): {
+  readonly first: Promise<SocketEvent>;
+  readonly closed: Promise<SocketEvent>;
+  readonly received: ServerPush[];
+} {
+  const received: ServerPush[] = [];
+  let first!: (event: SocketEvent) => void;
+  const firstEvent = new Promise<SocketEvent>((resolve) => (first = resolve));
+  socket.on("message", (raw) => {
+    const push = ServerPush.parse(JSON.parse(raw.toString()));
+    received.push(push);
+    first({ kind: "message", push });
+  });
+  const closed = new Promise<SocketEvent>((resolve) => {
+    socket.once("close", (code, reason) => {
+      const event = { kind: "close" as const, code, reason: reason.toString() };
+      first(event);
+      resolve(event);
+    });
+  });
+  return { first: firstEvent, closed, received };
+}
+
+it("浏览器握手已认身份、入推送中心前删号：先收到 1008 账号已删除，快照和之后的推送都收不到", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const client = server.client();
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const active = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "握手快照" })).json());
+  const late = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "晚推送" })).json());
+  const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+  expect((await client.post(`/api/groups/${active.group.id}/messages`, { text: "保持这一轮进行中" })).status).toBe(201);
+  const prompt = await agent.expect("prompt");
+  expect(prompt.groupId).toBe(active.group.id);
+  const ready = await connectPush(server.server.port, client.cookie ?? "");
+  expect(await ready.nextRaw(), "同一用户在正常握手之后确实有快照可发").toMatchObject({
+    type: "group_turn",
+    groupId: active.group.id,
+    current: active.bot.id,
+  });
+
+  const bystander = await signedIn();
+  const bystanderTab = await connectPush(server.server.port, bystander.client.cookie ?? "");
+  // 另一群的事务不会取消上面那一轮；提交后的晚推送也必须落在同一个已删用户身上。
+  const committed = commits.arm();
+  const posting = client.post(`/api/groups/${late.group.id}/messages`, { text: "握手删号之后才推" });
+  await committed.reached;
+  const authenticated = queries.arm(/from "sessions" inner join "users"/, "after");
+  const socket = new WebSocket(`ws://localhost:${server.server.port}${WS_PATH}`, {
+    headers: { cookie: client.cookie ?? "" },
+  });
+  const watched = observeSocket(socket);
+  try {
+    await authenticated.reached;
+    expect((await client.request("DELETE", "/api/me", { email: user.email })).status).toBe(204);
+    authenticated.release();
+    expect(await watched.first, "握手后先到的必须是关闭，不能先到群回合快照消息").toEqual({
+      kind: "close",
+      code: ACCOUNT_DELETED,
+      reason: "账号已删除",
+    });
+    committed.release();
+    await posting;
+    expect(
+      (await bystander.client.post(`/api/groups/${bystander.groupId}/messages`, { text: "推送屏障" })).status,
+    ).toBe(201);
+    expect(await bystanderTab.next()).toMatchObject({
+      type: "message",
+      message: { body: { kind: "user", text: "推送屏障" } },
+    });
+    expect(watched.received, "关闭后的旧连接收不到快照，也收不到已经提交但延后发送的消息").toEqual([]);
+  } finally {
+    authenticated.release();
+    committed.release();
+    await posting;
+    socket.terminate();
+    ready.close();
+    bystanderTab.close();
+    agent.close();
+    await agent.closed();
+  }
+});
+
+it("删号事务被外键阻止而回滚：DELETE 500、账号仍在，原浏览器连接不关闭且继续收到推送", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const me = await signedIn();
+  await database.sql`CREATE TABLE deletion_guard (user_id text REFERENCES users(id))`;
+  await database.sql`INSERT INTO deletion_guard (user_id) VALUES (${me.userId})`;
+  const tab = await connectPush(server.server.port, me.client.cookie ?? "");
+  const watched = observeSocket(tab.socket);
+  try {
+    expect((await me.client.request("DELETE", "/api/me", { email: me.email })).status).toBe(500);
+    expect((await me.client.get("/api/me")).status, "回滚保留账号和会话").toBe(200);
+    expect((await me.client.post(`/api/groups/${me.groupId}/messages`, { text: "回滚后仍然推送" })).status).toBe(201);
+    expect(await watched.first, "回滚后原连接收到的是新消息，不能先收到账号已删除的关闭").toMatchObject({
+      kind: "message",
+      push: { type: "message", message: { body: { kind: "user", text: "回滚后仍然推送" } } },
+    });
+    expect(tab.socket.readyState, "消息送达时原浏览器连接仍然打开").toBe(WebSocket.OPEN);
+  } finally {
+    tab.close();
+    await watched.closed;
+  }
+});
 
 it("删号返回 204 时，这个人在推送中心登记的每条浏览器连接都被关掉", async () => {
   const me = await signedIn();
