@@ -38,6 +38,7 @@ const fsState = vi.hoisted(() => ({ credentials: null as string | null, writeErr
 const fsWrites = vi.hoisted((): string[] => []);
 const fetchState = vi.hoisted(() => ({
   meOk: false,
+  meGate: null as Promise<void> | null,
   ownerId: "user-1",
   localComputer: null as Promise<unknown> | null,
   urls: [] as string[],
@@ -128,7 +129,8 @@ vi.mock("electron", () => {
         cookies: { get: vi.fn(async () => []) },
         fetch: vi.fn(async (url: string, init?: RequestInit) => {
           fetchState.urls.push(url);
-          if (url.endsWith("/api/me"))
+          if (url.endsWith("/api/me")) {
+            await fetchState.meGate;
             return {
               ok: fetchState.meOk,
               json: async () => ({
@@ -140,6 +142,7 @@ vi.mock("electron", () => {
                 },
               }),
             };
+          }
           if (url.endsWith("/api/computers/local")) {
             fetchState.localRequests.push(init);
             if (fetchState.localResponses.length > 0) return fetchState.localResponses.shift();
@@ -251,6 +254,7 @@ describe("桌面主进程代理流程", () => {
     fsState.writeError = null;
     reapGate.current = null;
     fetchState.meOk = false;
+    fetchState.meGate = null;
     fetchState.ownerId = "user-1";
     fetchState.localComputer = null;
     fetchState.localResponses.length = 0;
@@ -675,6 +679,49 @@ describe("桌面主进程代理流程", () => {
       } finally {
         log.mockRestore();
       }
+    });
+
+    it("菜单「在这台 Mac 上连接…」遇到会话过期，提示一次先登录且不发配对请求", async () => {
+      await boot();
+      await reconnectFromMenu();
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(showMessageBox.mock.calls[0]?.[1]).toMatchObject({ message: "请先登录白泽，再在这台 Mac 上连接" });
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
+      expect(fetchState.localRequests).toEqual([]);
+      expect(children).toHaveLength(0);
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+    });
+
+    it("会话检查在途时应用开始退出，菜单连接不再弹登录提示", async () => {
+      const gate = deferred<void>();
+      await boot();
+      fetchState.meGate = gate.promise;
+      await reconnectFromMenu();
+      await vi.waitFor(() =>
+        expect(fetchState.urls.filter((url) => url.endsWith("/api/me")).length).toBeGreaterThan(0),
+      );
+      const beforeQuit = appOn.mock.calls.find(([name]) => name === "before-quit")?.[1] as (event: unknown) => void;
+      beforeQuit(fakeEvent());
+      gate.resolve();
+      for (let turn = 0; turn < 5; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(showMessageBox).not.toHaveBeenCalled();
+      expect(fetchState.localRequests).toEqual([]);
+    });
+
+    it("登录提示框没关时，随后的登录照常配对，不排在提示框后面", async () => {
+      const notice = deferred<{ response: number }>();
+      showMessageBox.mockReturnValueOnce(notice.promise);
+      fetchState.localResponses.push(success());
+      await boot();
+      await reconnectFromMenu();
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      await login();
+      await vi.waitFor(() => expect(fetchState.localRequests).toHaveLength(1));
+      await emitOnline();
+      expect(children).toHaveLength(1);
+      notice.resolve({ response: 0 });
+      children[0]?.emit("exit", 0, null);
     });
 
     it("登录钩子遇到会话过期，保持不配对、不提示", async () => {

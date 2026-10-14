@@ -69,7 +69,7 @@ let pushSocket: WebSocket | null = null;
 let pushRetry: NodeJS.Timeout | null = null;
 let pushGeneration = 0;
 let phase: AppPhase = "running";
-let provisioning: Promise<void> | null = null;
+let provisioning: Promise<"login-required" | undefined> | null = null;
 let controlOrigin = DEFAULT_CONTROL_ORIGIN;
 let uiOrigin = "";
 let authHookInstalled = false;
@@ -434,23 +434,27 @@ async function postLocalComputer(
   return ComputerTokenResponse.parse(await response.json());
 }
 
-async function provision(session: Session, confirmDisplace = false): Promise<void> {
+interface ProvisionIntent {
+  readonly confirmDisplace: boolean;
+  readonly interactive: boolean;
+}
+
+const SILENT: ProvisionIntent = { confirmDisplace: false, interactive: false };
+const MENU_CONNECT: ProvisionIntent = { confirmDisplace: false, interactive: true };
+const DISPLACE_RECONNECT: ProvisionIntent = { confirmDisplace: true, interactive: true };
+
+async function provision(session: Session, intent: ProvisionIntent = SILENT): Promise<void> {
   if (phase !== "running") return;
   if (provisioning !== null) {
     return provisioning.then(
-      () => provision(session, confirmDisplace),
-      () => provision(session, confirmDisplace),
+      () => provision(session, intent),
+      () => provision(session, intent),
     );
   }
-  provisioning = (async () => {
+  const { confirmDisplace } = intent;
+  const outcome = (async (): Promise<"login-required" | undefined> => {
     const me = await session.fetch(`${uiOrigin}/api/me`);
-    if (!me.ok) {
-      if (confirmDisplace && phase === "running") {
-        logLine("agent-reconnect-login-required");
-        await showBox({ type: "info", message: "请先登录白泽，再在这台 Mac 上连接" });
-      }
-      return;
-    }
+    if (!me.ok) return intent.interactive ? "login-required" : undefined;
     const ownerId = MeResponse.parse(await me.json()).user.id;
     await invalidatingCredentials;
     let credentials = await loadCredentials();
@@ -506,11 +510,15 @@ async function provision(session: Session, confirmDisplace = false): Promise<voi
   })().finally(() => {
     provisioning = null;
   });
-  return provisioning;
+  provisioning = outcome;
+  if ((await outcome) === "login-required" && phase === "running") {
+    logLine("agent-reconnect-login-required");
+    await showBox({ type: "info", message: "请先登录白泽，再在这台 Mac 上连接" });
+  }
 }
 
-function requestConnection(session: Session, confirmDisplace = false): void {
-  void provision(session, confirmDisplace).catch((error: unknown) => {
+function requestConnection(session: Session, intent: ProvisionIntent = SILENT): void {
+  void provision(session, intent).catch((error: unknown) => {
     if (!(error instanceof AgentReplacedError)) void dialog.showErrorBox("电脑代理启动失败", errorText(error));
   });
 }
@@ -558,7 +566,7 @@ async function handleDisplaced(child: ChildProcess): Promise<void> {
     defaultId: 1,
     cancelId: 1,
   });
-  if (response === 0) requestConnection(electronSession.defaultSession, true);
+  if (response === 0) requestConnection(electronSession.defaultSession, DISPLACE_RECONNECT);
 }
 
 // 控制面以 4003 拒绝这一版代理，代理自己停机；凭据仍然有效，装好新版后照常复用。
@@ -778,7 +786,7 @@ function installMenu(checkForUpdates: () => void): void {
         checkForUpdates,
         openSettings,
         agentStatus: agentState.status,
-        reconnect: () => requestConnection(electronSession.defaultSession),
+        reconnect: () => requestConnection(electronSession.defaultSession, MENU_CONNECT),
       }),
     ),
   );
