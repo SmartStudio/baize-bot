@@ -37,6 +37,7 @@ const STATUS: Record<DraftStatus, { label: string; tone: string }> = {
 const FAILURE: Record<PublishFailureReason, string> = {
   login_expired: "账号登录过期了，重新登录后再发",
   page_changed: "平台页面变了，没发出去",
+  paused: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
   error: "没发出去",
 };
 

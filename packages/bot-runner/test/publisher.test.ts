@@ -4,9 +4,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { AccountId, ControlToAgent, DraftId } from "@baize/shared";
+import { AccountId, BotId, ControlToAgent, DraftId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createBotBrowser } from "../src/browser.js";
+import { acquireBotBrowserMutex } from "../src/browser-mutex.js";
 import type { CdpConnection } from "../src/cdp.js";
 import { type PublishDraftMessage, publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "../src/publisher.js";
 import {
@@ -283,6 +284,70 @@ describe("发布器先验草稿，不碰浏览器", () => {
       attempt: ATTEMPT,
       result: { status: "failed", reason: "error", detail: "这台电脑没有助理浏览器" },
     });
+  });
+
+  it("Bot 暂停时发布回 paused，不连接浏览器", async () => {
+    const image = draftCopy(dataDir, "暂停");
+    const probe = noBrowserCalls();
+    const lifecycle = { signal: new AbortController().signal, isRunning: () => false };
+    const lease = acquireBotBrowserMutex(dataDir, BotId.parse("bot-1"), lifecycle);
+    try {
+      const result = await publishDraft(
+        draftMessage("draft-paused", { title: "t", text: "正文", images: [image] }),
+        probe.deps(dataDir),
+      );
+
+      expect(result.result).toEqual({
+        status: "failed",
+        reason: "paused",
+        detail: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。",
+      });
+      expect(probe.calls()).toBe(0);
+    } finally {
+      lease.release();
+    }
+  });
+
+  it("等待浏览器锁期间 Bot 暂停时发布回 paused，不连接浏览器", async () => {
+    const image = draftCopy(dataDir, "等待锁时暂停");
+    const probe = noBrowserCalls();
+    let running = true;
+    let releaseLock: (() => void) | undefined;
+    let markLockStarted: (() => void) | undefined;
+    const lockStarted = new Promise<void>((resolve) => {
+      markLockStarted = resolve;
+    });
+    const lockHeld = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const lifecycle = { signal: new AbortController().signal, isRunning: () => running };
+    const lease = acquireBotBrowserMutex(dataDir, BotId.parse("bot-1"), lifecycle);
+    const holder = lease.run(async () => {
+      markLockStarted?.();
+      await lockHeld;
+    });
+    try {
+      await lockStarted;
+      const publishing = publishDraft(
+        draftMessage("draft-paused-waiting", { title: "t", text: "正文", images: [image] }),
+        probe.deps(dataDir),
+      );
+      running = false;
+      releaseLock?.();
+      await holder;
+
+      const result = await publishing;
+      expect(result.result).toEqual({
+        status: "failed",
+        reason: "paused",
+        detail: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。",
+      });
+      expect(probe.calls()).toBe(0);
+    } finally {
+      releaseLock?.();
+      await holder;
+      lease.release();
+    }
   });
 
   it("别的 Bot 目录下的配图不上传，回 error", async () => {

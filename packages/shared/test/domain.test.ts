@@ -720,7 +720,7 @@ describe("登录失败、发布失败和网关别名", () => {
       createdAt: now,
       decidedAt: now,
     };
-    for (const reason of ["login_expired", "page_changed", "error"]) {
+    for (const reason of ["login_expired", "page_changed", "paused", "error"]) {
       expect(AgentToControl.safeParse({ ...failed, result: { ...failed.result, reason } }).success).toBe(true);
       expect(Draft.safeParse({ ...draft, failure: reason }).success, reason).toBe(true);
     }

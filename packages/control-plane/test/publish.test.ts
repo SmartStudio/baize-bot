@@ -679,6 +679,53 @@ describe("各平台的发法", () => {
 });
 
 describe("小红书走电脑", () => {
+  it("认领后暂停，电脑上报 paused，草稿和通知保留暂停原因；恢复后失败草稿仍不能直接重批", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [XHS]);
+    const xhs = accountOf(job, "xiaohongshu");
+    const spec = specOf(xhs, {
+      kind: "post",
+      title: "暂停没发出去",
+      text: "这条要等恢复",
+      images: [IMAGE],
+      github: null,
+    });
+    await createApproved(job, spec);
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    const claim = await job.agent.expect("publish_draft");
+    expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+    expect(await job.agent.expect("pause")).toEqual({ type: "pause", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot.runState).toBe("paused");
+
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "failed", reason: "paused", detail: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。" },
+    });
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({
+      id: spec.draftId,
+      status: "failed",
+      failure: "paused",
+    });
+    expect((await nextOf(job.push, "notify")).notice).toMatchObject({
+      kind: "failed",
+      text: "小红书上的「暂停没发出去」没发出去：Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
+      groupId: job.groupId,
+    });
+    expect((await draftOnPage(job, spec.draftId)).draft).toMatchObject({ status: "failed", failure: "paused" });
+    const accounts = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json());
+    expect(accounts.accounts.find((account) => account.id === xhs.id)?.login).toBe("valid");
+
+    expect((await job.client.post(`/api/bots/${job.botId}/resume`)).status).toBe(200);
+    expect(await job.agent.expect("resume")).toEqual({ type: "resume", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot.runState).toBe("running");
+    expect((await job.client.post(`/api/drafts/${spec.draftId}`, { decision: "approve" })).status).toBe(409);
+    expect((await draftOnPage(job, spec.draftId)).draft).toMatchObject({ status: "failed", failure: "paused" });
+  });
+
   it("Bot 暂停期间到点的已批草稿不认领，恢复后下一轮才下发", async () => {
     const s = await stack();
     let now = new Date("2026-10-14T01:00:00.000Z");

@@ -818,8 +818,8 @@ describe("P3-9 群道", () => {
         const result = await Promise.race([pending, nextTurn().then(() => null)]);
         expect(result?.result).toEqual({
           status: "failed",
-          reason: "error",
-          detail: "Bot 已暂停，这条没发出去，请让 Bot 再起一稿。",
+          reason: "paused",
+          detail: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。",
         });
         expect(connect).toHaveBeenCalledTimes(0);
         expect(send).toHaveBeenCalledTimes(0);
@@ -923,8 +923,8 @@ describe("P3-9 群道", () => {
         const result = await Promise.race([b, nextTurn().then(() => null)]);
         expect(result?.result).toEqual({
           status: "failed",
-          reason: "error",
-          detail: action === "pause" ? "Bot 已暂停，这条没发出去，请让 Bot 再起一稿。" : "这次浏览器操作被中止了",
+          reason: action === "pause" ? "paused" : "error",
+          detail: action === "pause" ? "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。" : "这次浏览器操作被中止了",
         });
         if (action !== "pause") expect(firstSettled).toBe(false);
         expect(secondConnect).toHaveBeenCalledTimes(0);
@@ -1140,7 +1140,7 @@ describe("P3-9 群道", () => {
       await h.runner.pause(BotId.parse("bot-lanes"));
       b = lease.run(work).catch((error: unknown) => error);
       const result = await Promise.race([b, nextTurn().then(() => null)]);
-      expect(result).toEqual(new Error("Bot 已暂停，这条没发出去，请让 Bot 再起一稿。"));
+      expect(result).toEqual(new Error("Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。"));
       expect(aSettled).toBe(false);
       expect(work).not.toHaveBeenCalled();
     } finally {
@@ -1236,7 +1236,7 @@ describe("P3-9 群道", () => {
       await queued.promise;
       await h.runner.pause(BotId.parse("bot-lanes"));
       release.resolve();
-      expect(await b).toEqual(new Error("Bot 已暂停，这条没发出去，请让 Bot 再起一稿。"));
+      expect(await b).toEqual(new Error("Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。"));
       expect(rejectedWork).not.toHaveBeenCalled();
       await h.runner.resume(BotId.parse("bot-lanes"));
       resumed = lease.run(resumedWork);

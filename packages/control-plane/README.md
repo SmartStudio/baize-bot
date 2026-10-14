@@ -383,7 +383,7 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 `POST /api/bots/:id/pause` 和 `resume` 只改 `bots.run_state`，给这个用户在线的每台电脑发 `pause` 或 `resume`，推 `bot_updated`，回 `BotResponse`。运行器那头怎么停在闸门上见 `packages/bot-runner/README.md`。
 
-暂停状态住在控制面，电脑那头只是照着执行。发布循环不认领暂停 Bot 的到点已批草稿，保留已批状态，恢复后的下一轮照常认领发布；Bot 已删、草稿的 `bot_id` 为 null 时照旧认领。认领后才暂停的窄窗口由运行器兜底返回失败，用户需要让 Bot 再起一稿。
+暂停状态住在控制面，电脑那头只是照着执行。发布循环不认领暂停 Bot 的到点已批草稿，保留已批状态，恢复后的下一轮照常认领发布；Bot 已删、草稿的 `bot_id` 为 null 时照旧认领。认领后才暂停的窄窗口由运行器兜底上报 `reason: "paused"`，草稿记成 `failed`、`failure: "paused"`，通知和草稿卡显示「Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿」。失败草稿不能直接重新批准，Bot 改稿后草稿回到 `pending` 才能再批；恢复本身不重发，也不改账号登录状态。
 
 **hello 按状态补发。** 电脑 hello 成功后照发 `welcome` 加 `config`，紧跟着给 `config` 里的每个 Bot 各补一条：`run_state` 是 `paused` 的补 `pause`，其余的补 `resume`。新起的代理进程在收到 `config` 之前收到的 `pause`、`resume` 会被丢掉（那时还没有运行器），同一个进程重连时运行器还在，早到的会立刻生效；补发要对两种进程都成立，所以排在 `config` 后面。补发和 `config` 用的是同一次 `listBots` 的结果。
 

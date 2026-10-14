@@ -34,7 +34,7 @@ Bot 从 config 消失时停止它的所有道，再关闭浏览器和 MCP、按�
 
 `BotRuntime.lanes` 按 groupId 保存道。每条道有自己的队列、当前 run、记忆注入和两份会话：`chat` 与 `table`。它们共用该道的队列，同一时刻只跑一份；牌桌角色变化只重建 `table` 会话。工具、bash 沙箱、主题任务、牌桌工具、skill 提议和例行边界都从所属道读取运行上下文。审批和 blocked 标记用 `(runId, callId)` 作键，相同 callId 不会串道。
 
-工作目录仍为 `<dataDir>/<botId>/work`，各道共享，目录隔离规则不变。同一个 Bot 在不同群同时改同一文件会互相覆盖，本期接受。浏览器标签页也按 Bot 共享；浏览器工具、帮手的浏览器工具和发布器按数据根与 Bot ID 共用一把互斥锁，判断与执行分别持锁，等待审批时释放锁；批准后重新取锁并比较当前动作和审批视图，页面改变时拒绝执行。暂停期间到点的已批草稿由控制面保留，恢复后的下一轮认领发布。发布器入场和取得锁后检查 Bot 暂停状态，兜住认领之后才暂停的窗口；此时立刻返回失败「Bot 已暂停，这条没发出去，请让 Bot 再起一稿。」，不等待恢复、不操作浏览器；停机或删除 Bot 会取消取锁等待，已开始的操作不因暂停中断。其他群的模型请求仍能并行。清理自己的标签页不等发布器完成。
+工作目录仍为 `<dataDir>/<botId>/work`，各道共享，目录隔离规则不变。同一个 Bot 在不同群同时改同一文件会互相覆盖，本期接受。浏览器标签页也按 Bot 共享；浏览器工具、帮手的浏览器工具和发布器按数据根与 Bot ID 共用一把互斥锁，判断与执行分别持锁，等待审批时释放锁；批准后重新取锁并比较当前动作和审批视图，页面改变时拒绝执行。暂停期间到点的已批草稿由控制面保留，恢复后的下一轮认领发布。发布器入场和取得锁后检查 Bot 暂停状态，兜住认领之后才暂停的窗口；此时立刻返回 `reason: "paused"`，detail 为「Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。」，不等待恢复、不操作浏览器；停机或删除 Bot 会取消取锁等待，已开始的操作不因暂停中断。其他群的模型请求仍能并行。清理自己的标签页不等发布器完成。
 
 `cancel(runId)` 通过 `findRun` 定位道和阶段：排队项定向丢弃，正在跑的只中止该 run，不停道，不影响其他群或同道后续 prompt。取消挂起审批时本地结算为 `expired`，先让 Pi 写下中文错误再中止，不发 `approval_abandoned` 或 `run_done`，最后释放代际引用。
 
@@ -447,7 +447,7 @@ snapshot 的形状：
 - **附件配图在本机补齐。** 新草稿的 `kind: "attachment"` 配图按 MIME 对应的扩展名查找 `<dataDir>/<botId>/drafts/<sha256>.png|jpg|webp|gif`。缓存字节的 SHA-256 一致就直接用；缺失或字节不符时从 `${hub.baseUrl}/attachments/<attachmentId>` 下载，重新校验 SHA-256，再以 `.tmp` 加 rename 原子写入、权限 0444。哈希不符时失败，不连接浏览器。下载最多读 20 MiB，超时 60 秒，不跟重定向。`liveHub()` 每次请求读取最新 `config.hub` 和 `modelGateway.apiKey`，不保留 hello 轮换前的 key。旧库里没有 `kind` 的配图由 shared 的 parse 边界补成 `path`，继续走原有本地检查。
 - **自己开标签页，发完关掉。** `Target.createTarget({ background: true })`，接着 `Emulation.setFocusEmulationEnabled`，和 Bot 的标签页一个套路，但不借任何 Bot 的页。成功、失败、超时、中途抛错都在 `finally` 里 `Target.closeTarget`。页面里的上传走 `DOM.setFileInputFiles`，点击走 `Input.dispatchMouseEvent`，填字先选中原有内容再 `Input.insertText`。正文按 `\n` 拆开逐行插，行与行之间发一次回车键（`Input.dispatchKeyEvent`），空行就是连按两下。这是推断，待实机核：正文编辑器是 tiptap，OpenCLI `clis/xiaohongshu/publish.js` 的 `fillCard` 注释说一次 `insertText` 里的换行会被吞掉，但那段填的是文字配图卡片，OpenCLI 自己填正文是整段一次插入。标题是单行输入框，不拆。
 - **一台电脑一次只发一条。** 小红书同一个号只能登一处，同时发会互相挤。进程内一条 promise 队列，第二条等第一条连同读链接整个做完。验配图也在队里做，入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。每条的总时限是 `PUBLISH_LIMITS.totalMs`（3 分钟），出队验完配图、开始连 Chrome 时起算，到了回 `error`、关标签页。等某一个元素的时限是 `stepMs`（1 分钟）。
-- **不重试，失败分三种。** 每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
+- **不重试，失败按原因上报。** 暂停时为 `paused`，恢复 Bot 后让它再起一稿；每轮等待都先看地址，落在登录页就是 `login_expired`。某一步的元素等不到是 `page_changed`，detail 写「卡在「点发布」这一步」这样的步名。其他都是 `error`。detail 是我们写的中文说明加步名，没预料到的异常带上它自己的错误信息（CDP 和 Chrome 的报错），不读 cookie，不拼网址和页面文字，截到 200 字。点过发布之后再失败，detail 前面加一句「已经点过发布，先去笔记管理看一眼再决定要不要重发」。
 - **成功带笔记链接。** 离开发布页算发出去了。之后打开笔记管理页，在卡片里找文字含标题的那张（草稿没标题就取最新一张），从 `data-impression` 里抠出 24 位的笔记 id，`externalId` 就是这个 id。链接优先用卡片里带 `xsec_token`、网址又含这个 id 的原链接，OpenCLI 的 `note-helpers` 说笔记详情页要带签名链接才能稳定打开，光有 id 不一定打得开；卡片上读不到才拼 `https://www.xiaohongshu.com/explore/<id>` 兜底。读不到链接时回 `ok`，`url` 是笔记管理页，`externalId` 是 null。链接是从页面上读的，控制面不原样信：不是 https、主机不是 `xiaohongshu.com` 或它的子域，就按 `ok` 落账，链接换成笔记管理页。回 `failed` 会让用户以为没发出去再发一遍，重复发帖比链接不准的代价大。
 
 页面结构全在 `XIAOHONGSHU_PAGES` 一张常量表里，改版只改这一处。测试通过 `deps.xiaohongshu` 把两个网址换成本地假页，选择器照用，不走环境变量。`deps.connect` 也只给测试换，用来把关标签页拖慢，看超时之后还有没有命令发给标签页。

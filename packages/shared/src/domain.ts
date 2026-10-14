@@ -589,7 +589,7 @@ export const Account = z.object({
 });
 export type Account = z.infer<typeof Account>;
 
-export const PublishFailureReason = z.enum(["login_expired", "page_changed", "error"]);
+export const PublishFailureReason = z.enum(["login_expired", "page_changed", "paused", "error"]);
 export type PublishFailureReason = z.infer<typeof PublishFailureReason>;
 
 export const DraftStatus = z.enum(["pending", "approved", "publishing", "published", "returned", "failed"]);

@@ -3,7 +3,11 @@ import { resolve as resolvePath } from "node:path";
 import type { BotId } from "@baize/shared";
 
 const aborted = (): Error => new Error("这次浏览器操作被中止了");
-const paused = (): Error => new Error("Bot 已暂停，这条没发出去，请让 Bot 再起一稿。");
+export class BotPausedError extends Error {
+  constructor() {
+    super("Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿。");
+  }
+}
 
 export class BrowserMutex {
   private tail: Promise<void> = Promise.resolve();
@@ -82,11 +86,11 @@ export function acquireBotBrowserMutex(dataDir: string, botId: BotId, lifecycle?
     run: async (work) => {
       const gate = held.lifecycle;
       if (gate?.signal.aborted) throw aborted();
-      if (gate !== undefined && !gate.isRunning()) throw paused();
+      if (gate !== undefined && !gate.isRunning()) throw new BotPausedError();
       const release = await held.mutex.acquire(gate?.signal);
       try {
         if (gate?.signal.aborted) throw aborted();
-        if (gate !== undefined && !gate.isRunning()) throw paused();
+        if (gate !== undefined && !gate.isRunning()) throw new BotPausedError();
         return await work();
       } finally {
         release();

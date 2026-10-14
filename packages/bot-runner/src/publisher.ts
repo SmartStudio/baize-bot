@@ -11,7 +11,7 @@ import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promis
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserConfig } from "./browser.js";
-import { acquireBotBrowserMutex } from "./browser-mutex.js";
+import { acquireBotBrowserMutex, BotPausedError } from "./browser-mutex.js";
 import { draftCopyName } from "./drafts.js";
 import { botDirs } from "./paths.js";
 import { attachmentCopyName, downloadAttachment, type AttachmentLive } from "./attachments.js";
@@ -437,7 +437,10 @@ export async function publishDraft(message: PublishDraftMessage, deps: Publisher
             ? PUBLISHERS[message.platform](message, { ...deps, browser })
             : lease.run(() => PUBLISHERS[message.platform](message, { ...deps, browser })));
   } catch (error) {
-    result = failed("error", error instanceof Error ? error.message : String(error));
+    result =
+      error instanceof BotPausedError
+        ? failed("paused", error.message)
+        : failed("error", error instanceof Error ? error.message : String(error));
   } finally {
     lease?.release();
   }
