@@ -62,6 +62,8 @@ CONTROL_PLANE_PORT=3201
 
 ## 起服务
 
+国内网络拉 `deb.debian.org` 慢，可以在 `.env` 里加一行 `APT_MIRROR=http://mirrors.tuna.tsinghua.edu.cn`，构建远程电脑镜像时 apt 改走这个镜像。只填到主机名，不带 `/debian`，用 `http://`（镜像里装 `ca-certificates` 之前没法验 HTTPS 证书）。不设就走官方源。
+
 ```
 cd deploy/remote
 docker compose build
