@@ -71,7 +71,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 `work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目、不触发旧行复查。
 
-非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。首帧 `fromSeq: 0` 只在无租约，或当前电脑同安装持有且目标流仍为空时，以代际 1 条件认领；目标流已有条目时拒收。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
+非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。首帧 `fromSeq: 0` 的帧代际必须是 1；无租约时以代际 1 条件认领，当前电脑同安装持有且目标流仍为空时只刷新租约时间，不降低已有代际。已有代际高于 1 时，首帧在追加 CAS 处回 `seq_mismatch`（`nextSeq: 0`），保留空流元数据而不写条目；目标流已有条目时拒收。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
 
 `GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据，空流回 0、零链头和 null Pi 版本。
 

@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  CHAIN_GENESIS,
   PRUNED_IMAGE_TEXT,
   RETAIN_TEXT_LIMIT_BYTES,
   RetainSnapshot,
   SEARCH_TEXT_LIMIT,
-  chainHead,
   assertRawJsonSupport,
   checkFrame,
   createRetainer,
@@ -425,37 +423,6 @@ describe("searchTextOf", () => {
   it("过滤后的长文字抽到的是头尾加省略行", () => {
     const out = retainEntry(userText("a".repeat(20000)), ctx);
     expect(searchTextOf(out.line)).toBe(textOf(out.line));
-  });
-});
-
-describe("chainHead", () => {
-  it("初始头是 64 个 0", () => {
-    expect(CHAIN_GENESIS).toBe("0".repeat(64));
-  });
-
-  it("三行固定输入滚出字面量期望值（外部 sha256 算得）", () => {
-    const lines = ['{"type":"message","id":"a1"}', '{"type":"message","id":"a2"}', '{"type":"custom","id":"a3"}'];
-    const heads: string[] = [];
-    let head = CHAIN_GENESIS;
-    for (const line of lines) {
-      head = chainHead(head, line);
-      heads.push(head);
-    }
-    expect(heads).toEqual([
-      "baae23408c37b08b41872e1ccc364eb840eeb818f696ab8cf82600a2aea88c3d",
-      "6b395f68df9226621ec7c86191f45e6c7d25157bce426f07d689dcc0ad3a3bb1",
-      "79c0e041bf3ef9a698ca2e9547a1c89bade7b46338af3187418a2d9f86b93714",
-    ]);
-  });
-
-  it("顺序和内容都进头：换序、改一个字节结果都不同", () => {
-    const a = chainHead(chainHead(CHAIN_GENESIS, "x"), "y");
-    expect(chainHead(chainHead(CHAIN_GENESIS, "y"), "x")).not.toBe(a);
-    expect(chainHead(chainHead(CHAIN_GENESIS, "x"), "y ")).not.toBe(a);
-  });
-
-  it("空行也能滚，按 UTF-8 字节算", () => {
-    expect(chainHead(CHAIN_GENESIS, "")).toBe("a52a21f725cb0dd2daf7c11bd583b94248c564712c1daa5b86d30cb17847aa11");
   });
 });
 

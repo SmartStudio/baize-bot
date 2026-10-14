@@ -133,7 +133,7 @@ export async function appendWorkRecords(
       .values({ botId, groupId, holderComputerId: conn.computerId, holderInstallId: conn.installId, epoch: 1 })
       .onConflictDoUpdate({
         target: [laneLeases.botId, laneLeases.groupId],
-        set: { epoch: 1, updatedAt: sql`clock_timestamp()` },
+        set: { updatedAt: sql`clock_timestamp()` },
         setWhere: and(
           eq(laneLeases.holderComputerId, conn.computerId),
           eq(laneLeases.holderInstallId, conn.installId),

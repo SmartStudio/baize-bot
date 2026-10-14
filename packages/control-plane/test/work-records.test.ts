@@ -388,10 +388,51 @@ describe("旧会话导入", () => {
     }
   });
 
-  it("同安装持有者的空流可重置epoch1，其他持有者不可夺取", async () => {
+  it("同安装持有者经接管到epoch3后导入新stream不降低代际", async () => {
+    const who = await rig();
+    expect((await start(who)).lane.epoch).toBe(1);
+    const remote = ComputerTokenResponse.parse(await (await who.client.post("/api/computers/remote")).json());
+    const { agent } = await helloAgent(server.port, remote.computerId, remote.token);
+    agents.push(agent);
+    await database.sql`UPDATE computers SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ${who.computer.computerId}`;
+    expect((await who.client.post(`/api/groups/${who.groupId}/messages`, { text: "远程接管" })).status).toBe(201);
+    expect((await agent.expect("prompt")).lane.epoch).toBe(2);
+    expect(await who.agent.expect("cancel")).toEqual({
+      type: "cancel",
+      lane: { botId: who.botId, groupId: who.groupId },
+      epoch: 2,
+    });
+    await database.sql`UPDATE computers SET lease_until = clock_timestamp() - interval '1 second' WHERE id = ${remote.computerId}`;
+    await database.sql`UPDATE computers SET lease_until = clock_timestamp() + interval '2 minutes' WHERE id = ${who.computer.computerId}`;
+    expect((await start(who)).lane.epoch).toBe(3);
+    const before = await lease(who);
+    expect(before).toMatchObject({
+      holder_computer_id: who.computer.computerId,
+      holder_install_id: who.computer.computerId,
+      epoch: 3,
+    });
+    expect((await state(who, "table")).metadata).toBeUndefined();
+
+    const result = await send(who.agent, await frame(who, [line("a")], { stream: "table" }));
+    expect(await lease(who)).toMatchObject({
+      holder_computer_id: before?.holder_computer_id,
+      holder_install_id: before?.holder_install_id,
+      epoch: 3,
+    });
+    expect(result).toEqual({ code: "seq_mismatch", nextSeq: 0 });
+    expect(await state(who, "table")).toEqual({
+      metadata: { next_seq: 0, head: EMPTY_WORK_HEAD, tail_entry_id: null, pi_session_version: 3 },
+      entries: [],
+    });
+    expect(await send(who.agent, await frame(who, [line("b")], { stream: "table", epoch: 3 }))).toEqual({
+      code: "invalid",
+    });
+    expect((await lease(who))?.epoch).toBe(3);
+  });
+
+  it("同安装持有者在epoch1导入空流，其他持有者不可夺取", async () => {
     const who = await rig();
     await start(who);
-    await database.sql`UPDATE lane_leases SET epoch = 3 WHERE bot_id = ${who.botId} AND group_id = ${who.groupId}`;
     expect(await send(who.agent, await frame(who, [line("a")]))).toBeNull();
     expect((await lease(who))?.epoch).toBe(1);
     const remote = ComputerTokenResponse.parse(await (await who.client.post("/api/computers/remote")).json());

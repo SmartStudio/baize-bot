@@ -17,7 +17,7 @@ import { startServer, type RunningServer } from "../src/server.js";
 import { expectHello, openAgent, sendHello, type AgentClient, type HelloOverrides } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { makeComputer, makeUser, PASSWORD, type TestComputer } from "./helpers/fixtures.js";
+import { makeComputer, makeUser, PASSWORD, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -329,6 +329,84 @@ describe("道租约派活", () => {
       { type: "cancel", lane: { botId: who.botId, groupId: who.groupId }, epoch: 4 },
     ]);
     expect(await lease(who.botId, who.groupId)).toMatchObject({ holder_computer_id: who.remote.computerId, epoch: 4 });
+  });
+
+  it("持有者在派活等电脑锁期间租约过期，未收尾的run不阻止新电脑接管", async () => {
+    const who = await owner();
+    const local = await online(who.local);
+    const remote = await online(who.remote);
+    await post(who.client, who.groupId, "持有者仍在跑");
+    const first = await prompt(local, "持有者仍在跑");
+    expect(first.lane.epoch).toBe(1);
+
+    const originalOnline = AgentHub.prototype.isOnline;
+    const selection = vi.spyOn(AgentHub.prototype, "isOnline").mockImplementation(function (this: AgentHub, id) {
+      return id === who.local.computerId ? false : originalOnline.call(this, id);
+    });
+    let release!: () => void;
+    let held!: () => void;
+    let blockerPid = 0;
+    let leaseUntil = 0;
+    const locked = new Promise<void>((resolve) => (held = resolve));
+    const unlock = new Promise<void>((resolve) => (release = resolve));
+    const blocker = database.sql.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      if (backend === undefined) throw new Error("持锁连接不存在");
+      blockerPid = backend.pid;
+      await tx`SELECT id FROM computers WHERE id = ${who.local.computerId} FOR NO KEY UPDATE`;
+      const [deadline] = await tx<{ lease_until_ms: string }[]>`
+        UPDATE computers SET lease_until = clock_timestamp() + interval '1 second'
+        WHERE id = ${who.local.computerId}
+        RETURNING extract(epoch FROM lease_until) * 1000 AS lease_until_ms
+      `;
+      if (deadline === undefined) throw new Error("持有电脑不存在");
+      leaseUntil = Number(deadline.lease_until_ms);
+      held();
+      await unlock;
+    });
+    let running: Promise<Response> | undefined;
+    try {
+      await locked;
+      running = post(who.client, who.groupId, "等锁后由远程接管");
+      let transactionStartedAt = Number.POSITIVE_INFINITY;
+      await waitFor(async () => {
+        const [waiting] = await database.sql<{ xact_start_ms: string }[]>`
+          SELECT extract(epoch FROM xact_start) * 1000 AS xact_start_ms FROM pg_stat_activity
+          WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'
+            AND query ILIKE '%computers%' AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+        `;
+        if (waiting === undefined) return false;
+        transactionStartedAt = Number(waiting.xact_start_ms);
+        return true;
+      }, "接管派活排在持有者的电脑锁后面");
+      selection.mockRestore();
+      expect(transactionStartedAt, "冻结的事务时间仍在持有者租约有效期内").toBeLessThan(leaseUntil);
+      await waitFor(async () => {
+        const [clock] = await database.sql<{ now_ms: string }[]>`
+          SELECT extract(epoch FROM clock_timestamp()) * 1000 AS now_ms
+        `;
+        return Number(clock?.now_ms) > leaseUntil;
+      }, "数据库时钟越过持有者的租约到期点");
+      const [busy] = await database.sql<{ ended_at: string | null }[]>`
+        SELECT ended_at FROM runs WHERE id = ${first.runId}
+      `;
+      expect(busy?.ended_at, "接管必须靠持有者已过期，不能靠道已闲置").toBeNull();
+      release();
+      await blocker;
+      await running;
+
+      expect(await lease(who.botId, who.groupId)).toMatchObject({
+        holder_computer_id: who.remote.computerId,
+        holder_install_id: who.remote.computerId,
+        epoch: 2,
+      });
+      expect((await prompt(remote, "等锁后由远程接管")).lane.epoch).toBe(2);
+      await laneCancel(local, who.botId, who.groupId, 2);
+      expect(await runComputers(who.groupId)).toEqual([who.local.computerId, who.remote.computerId]);
+    } finally {
+      release();
+      await Promise.allSettled([blocker, running]);
+    }
   });
 
   it("同一 computerId 换 installId 后下一条活接管并加代际", async () => {

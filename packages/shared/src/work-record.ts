@@ -13,9 +13,6 @@ const KEPT_EDGE_BYTES = 2 * 1024;
 // 实测全部文字块 p99 约 4.2 KB，过滤后的长块约 4.3 KB，都整段装得下；更长的只留开头，给 trigram 索引的行体积封顶。
 export const SEARCH_TEXT_LIMIT = 8192;
 
-// 64 个 0 和 sha256 十六进制同长，拼接时前后两段边界固定。
-export const CHAIN_GENESIS = "0".repeat(64);
-
 export interface RetainContext {
   readonly localOnlyToolNames: ReadonlySet<string>;
 }
@@ -451,9 +448,4 @@ function searchTextOfEntry(entry: Json | undefined): string {
     if (isRecord(block) && block.type === "text" && typeof block.text === "string") texts.push(block.text);
   }
   return capSearchText(texts.join("\n"));
-}
-
-/** head_n = sha256(head_{n-1} ‖ sha256(line_n))，‖ 是两段十六进制文字直接相连。 */
-export function chainHead(prev: string, line: string): string {
-  return sha256(prev + sha256(line));
 }
