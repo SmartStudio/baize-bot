@@ -43,6 +43,7 @@ type Rig = {
   readonly client: ApiClient;
   readonly computer: TestComputer;
   readonly agent: AgentClient;
+  readonly generation: number;
   readonly bots: readonly [Bot, Bot];
 };
 
@@ -57,9 +58,9 @@ async function rig(): Promise<Rig> {
     return { botId: created.bot.id, groupId: created.group.id };
   };
   const bots: [Bot, Bot] = [await create("甲"), await create("乙")];
-  const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+  const { agent, config } = await helloAgent(server.server.port, computer.computerId, computer.token);
   agents.push(agent);
-  return { client, computer, agent, bots };
+  return { client, computer, agent, generation: config.generation, bots };
 }
 
 async function say(who: Rig, bot: Bot, text: string): Promise<Prompt> {
@@ -89,13 +90,25 @@ async function errorsIn(client: ApiClient, groupId: GroupId): Promise<string[]> 
 
 const reportedAs = (detail: string) => `电脑那边没干成这件事，跑活的进程出错了。原话是：${detail}`;
 
-it("指定的群号已不存在：错误不落到这台电脑别的群，日志只带截断的 detail", async () => {
+it("指定的群号已不存在：错误不落到这台电脑别的群，日志里 detail 满 80 个码点才截", async () => {
   const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
   const who = await rig();
   const [first] = who.bots;
   const busy = await say(who, first, "开工");
-  const longDetail = `用户内容${"很长".repeat(100)}`;
-  who.agent.send({ type: "agent_error", code: "runner_failed", detail: longDetail, groupId: randomUUID() as GroupId });
+  const cases: readonly (readonly [detail: string, logged: string])[] = [
+    ["短", "短"],
+    ["a".repeat(80), "a".repeat(80)],
+    ["a".repeat(81), `${"a".repeat(80)}…`],
+    [`用户内容${"很长".repeat(100)}`, `用户内容${"很长".repeat(38)}…`],
+    ["😀".repeat(80), "😀".repeat(80)],
+    ["😀".repeat(81), `${"😀".repeat(80)}…`],
+    [`${"a".repeat(79)}😀z`, `${"a".repeat(79)}😀…`],
+    [`${"a".repeat(80)}😀`, `${"a".repeat(80)}…`],
+    [`${"a".repeat(79)}😀😀`, `${"a".repeat(79)}😀…`],
+  ];
+  for (const [detail] of cases) {
+    who.agent.send({ type: "agent_error", code: "runner_failed", detail, groupId: randomUUID() as GroupId });
+  }
   who.agent.send({
     type: "agent_error",
     code: "runner_failed",
@@ -103,16 +116,41 @@ it("指定的群号已不存在：错误不落到这台电脑别的群，日志�
     groupId: first.groupId,
   });
   await waitFor(async () => (await errorsIn(who.client, first.groupId)).length > 0, "后一条带真群号的报错落地");
-  expect(await errorsIn(who.client, first.groupId), "不存在的群号那条不能顺手落进有活在跑的群").toEqual([
+  expect(await errorsIn(who.client, first.groupId), "不存在的群号那几条不能顺手落进有活在跑的群").toEqual([
     reportedAs("排在后面、确定会落地的报错"),
   ]);
   const logged = warn.mock.calls.map((call) => String(call[0]));
-  expect(logged).toHaveLength(1);
-  expect(logged[0]).toContain(who.computer.computerId);
-  expect(logged[0]).toContain("runner_failed");
-  expect(logged[0]).toContain(longDetail.slice(0, 20));
-  expect(logged[0], "detail 要截断，不把整段用户内容打进日志").not.toContain(longDetail);
+  expect(logged).toHaveLength(cases.length);
+  for (const line of logged) {
+    expect(line).toContain(who.computer.computerId);
+    expect(line).toContain("runner_failed");
+  }
+  const tails = logged.map((line) => line.slice(line.indexOf("runner_failed ") + "runner_failed ".length));
+  expect(tails).toEqual(cases.map(([, expected]) => expected));
+  expect(tails.join(""), "截断不留孤立的代理项").not.toMatch(
+    /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
+  );
   await finish(who, first, busy);
+});
+
+it("config_rejected 的 warn 里 detail 也按码点截到 80", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const who = await rig();
+  const [first] = who.bots;
+  who.agent.send({
+    type: "agent_error",
+    code: "config_rejected",
+    generation: who.generation,
+    detail: `用户内容${"😀".repeat(200)}`,
+  });
+  who.agent.send({
+    type: "agent_error",
+    code: "runner_failed",
+    detail: "排在后面、确定会落地的报错",
+    groupId: first.groupId,
+  });
+  await waitFor(async () => (await errorsIn(who.client, first.groupId)).length > 0, "后一条带真群号的报错落地");
+  expect(warn.mock.calls.map((call) => String(call[0]).split("config：")[1])).toEqual([`用户内容${"😀".repeat(76)}…`]);
 });
 
 it("指定的群号属于别人：即使这台电脑有一条 run 记在那个群名下，报错也不落进别人的群", async () => {

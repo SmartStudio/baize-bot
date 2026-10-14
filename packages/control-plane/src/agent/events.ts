@@ -804,15 +804,23 @@ function modelFailureMessage(detail: string): string {
 
 const LOGGED_DETAIL_CHARS = 80;
 
+/** detail 是运行器原样带来的用户内容，没有长度上限。按码点截，不把一个 emoji 的两半劈开。 */
 function clipDetail(detail: string): string {
-  return detail.length <= LOGGED_DETAIL_CHARS ? detail : `${detail.slice(0, LOGGED_DETAIL_CHARS)}…`;
+  let end = 0;
+  let kept = 0;
+  for (const point of detail) {
+    if (kept === LOGGED_DETAIL_CHARS) return `${detail.slice(0, end)}…`;
+    end += point.length;
+    kept += 1;
+  }
+  return detail;
 }
 
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
     if (!deps.agents.markConfigRejected(conn, event.generation)) return;
-    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${event.detail}`);
+    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${clipDetail(event.detail)}`);
     await deps.notifications.publish(conn.ownerId, {
       kind: "stuck",
       text: `电脑上的活派不出去：${CONFIG_MISMATCH}。把电脑代理和控制面升到同一个版本再连。`,
@@ -835,7 +843,7 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason });
     else
       console.error(
-        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${event.detail}`,
+        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${clipDetail(event.detail)}`,
       );
     return;
   }

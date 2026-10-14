@@ -1,6 +1,9 @@
 import type { ComputerId, UserId } from "@baize/shared";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import { expect, it } from "vitest";
-import { connect, type Sql } from "../src/db/client.js";
+import { connect, type Db, type Sql } from "../src/db/client.js";
+import * as schema from "../src/db/schema.js";
 import { databaseUrl } from "../src/env.js";
 import { ensureComputer, markComputersSleeping, markOnlineComputersSleeping } from "../src/repo/computers.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -115,18 +118,61 @@ it("两个批量休眠以相反次序碰到同两个归属人：owner 锁按升�
   }
 });
 
+type ScanPin = "index" | "seq";
+
+/**
+ * 单连接池，扫描方式写在启动参数里钉死：连接断了重连也带着，不依赖表的统计信息，也不受 ANALYZE 影响。
+ * index 把全表扫描和位图扫描关掉，只剩按主键的索引扫描，次序是 id 升序；
+ * seq 把索引和位图扫描都关掉，只剩全表扫描，次序是堆里的物理次序。
+ */
+function pinnedClient(database: TestDb, pin: ScanPin): { readonly sql: Sql; readonly db: Db } {
+  const url = new URL(databaseUrl());
+  url.pathname = `/${database.databaseName}`;
+  const sql = postgres(url.toString(), {
+    max: 1,
+    connection:
+      pin === "index"
+        ? { enable_seqscan: "off", enable_bitmapscan: "off" }
+        : { enable_indexscan: "off", enable_indexonlyscan: "off", enable_bitmapscan: "off" },
+  });
+  return { sql, db: drizzle(sql, { schema }) };
+}
+
+async function visited(sql: Sql, query: string): Promise<string[]> {
+  return (await sql.unsafe<{ id: string }[]>(query)).map((row) => row.id);
+}
+
+async function planNodes(sql: Sql, query: string): Promise<string> {
+  const rows = await sql.unsafe(`EXPLAIN (FORMAT JSON) ${query}`);
+  return JSON.stringify(rows);
+}
+
 it("同一归属人的两台电脑被两个批量休眠以相反次序扫到：电脑行按 id 升序锁，两边排队而不互等", async () => {
   const database = await createTestDb();
   const side = sideClient(database, 2);
   const blocker = sideClient(database, 1);
+  const byIndex = pinnedClient(database, "index");
+  const bySeq = pinnedClient(database, "seq");
   try {
     const owner = await makeOnlineOwner(database, ["local", "remote"]);
-    const [small, big] = owner.computerIds.toSorted();
-    if (small === undefined || big === undefined) throw new Error("没建出两台电脑");
-    // 按 id 命中的批量读索引，次序是 small, big；按 status 命中的批量全表扫描，次序是堆里的物理次序，这里排成 big, small。
+    const ordered = await side<{ id: ComputerId }[]>`SELECT id FROM computers ORDER BY id`;
+    const [small, big] = ordered.map((row) => row.id);
+    if (small === undefined || big === undefined || ordered.length !== 2) throw new Error("没建出两台电脑");
+    expect(owner.computerIds.toSorted(), "两台电脑都是这个归属人的").toEqual([small, big].toSorted());
+    // 先改大的再改小的：新版本行按这个次序追加到堆里，全表扫描读到的次序是 big, small，和索引次序相反。
     await setOnline(database, big);
     await setOnline(database, small);
 
+    // 前提：不带排序的同形查询，两条连接读到这两行的次序确实相反。前提不成立，下面的用例就什么都没证明。
+    const byIdShape = `SELECT id FROM computers WHERE id IN ('${small}', '${big}') AND id IN ('${small}', '${big}')`;
+    const byStatusShape = `SELECT id FROM computers WHERE id IN ('${small}', '${big}') AND status = 'online'`;
+    expect(await visited(byIndex.sql, byIdShape), "按 id 的批量在索引扫描下先读到小的").toEqual([small, big]);
+    expect(await visited(bySeq.sql, byStatusShape), "按 status 的批量在全表扫描下先读到大的").toEqual([big, small]);
+    expect(await planNodes(byIndex.sql, `${byIdShape} FOR NO KEY UPDATE`)).toContain('"Node Type":"Index Scan"');
+    expect(await planNodes(bySeq.sql, `${byStatusShape} FOR NO KEY UPDATE`)).toContain('"Node Type":"Seq Scan"');
+
+    // 只占住 id 最小的那行。按 id 的批量先读到它，卡住时手里什么都没有，排在锁队列最前；
+    // 按 status 的批量先读到大的，锁上它再去要小的，卡住时手里已经有一行。没有排序时放行后前者拿到小的、去要后者手里的大的，成环。
     let releaseBlocker!: () => void;
     const holdBlocker = new Promise<void>((resolve) => (releaseBlocker = resolve));
     let blockerHolds!: () => void;
@@ -144,10 +190,10 @@ it("同一归属人的两台电脑被两个批量休眠以相反次序扫到：�
         WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock' AND query ILIKE '%for no key update%'`;
       return row?.n ?? 0;
     };
-    const byId = markComputersSleeping(database.db, [big, small]);
+    const byId = markComputersSleeping(byIndex.db, [big, small]);
     await waitFor(async () => (await waitingOnRows()) === 1, "按 id 的批量卡在被占住的最小 id 上");
-    const byStatus = markOnlineComputersSleeping(database.db);
-    await waitFor(async () => (await waitingOnRows()) === 2, "按 status 的批量也卡在行锁上");
+    const byStatus = markOnlineComputersSleeping(bySeq.db);
+    await waitFor(async () => (await waitingOnRows()) === 2, "按 status 的批量也卡在行锁上，排在它后面");
 
     releaseBlocker();
     const outcomes = await Promise.allSettled([blocking, byId, byStatus]);
@@ -159,6 +205,8 @@ it("同一归属人的两台电脑被两个批量休眠以相反次序扫到：�
   } finally {
     await side.end();
     await blocker.end();
+    await byIndex.sql.end();
+    await bySeq.sql.end();
     await database.close();
   }
 });

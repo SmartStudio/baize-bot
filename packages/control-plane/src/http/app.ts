@@ -248,7 +248,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   app.route("/api", createTeamOfferRoutes({ db, hub, agents }));
   app.route("/api", createRoutineOfferRoutes({ db, push: hub }));
   app.route("/api", createSeenRoutes({ db, push: hub }));
-  app.route("/api", createPrivacyRoutes({ db, agents }));
+  app.route("/api", createPrivacyRoutes({ db, push: hub, agents }));
   app.route("/api", createTemplateRoutes({ db, agents }));
   // 第 3 期牌桌的路由，同样在登录中间件之后。
   app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));

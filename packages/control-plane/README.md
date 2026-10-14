@@ -25,7 +25,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 下行确认事务先用连接上的 owner id 拿归属人共享 advisory 锁，再条件更新电脑游标，最后删除已确认的发件箱行。删号拿同一把归属人排他锁，先删 runs 级联到发件箱，再删用户级联到电脑；确认若先锁电脑，两边会各持一行互等。共享锁让两条路径在碰行之前排队，每次确认多一条锁查询，不额外查归属人；更新非键游标本身拿电脑的 `FOR NO KEY UPDATE` 行锁。`test/privacy.test.ts` 用实际锁等待和查询闸门钉住这个交错。
 
-无 `runId` 的 `agent_error` 不能按最近开始时间猜归属。运行器的会话关闭、配置对账和已进入 prompt 的失败路径仍会省略 `runId`：带群号时先校验群属于归属人，只在该群范围内查 open run；不带群号时电脑上恰好一条 open run 才落到它的群，零条或多条不落群，只打一行 `console.warn`（带 computerId、code 和截到 80 字的 detail），指定的群已删或不属于归属人时同样打一行。指定群号可以留群级错误提示，但只有该群恰好一条 open run 时才关联例行任务失败。其他带 runId 的上行仍按原有归属校验处理，报文形状和协议号不变。
+无 `runId` 的 `agent_error` 不能按最近开始时间猜归属。运行器的会话关闭、配置对账和已进入 prompt 的失败路径仍会省略 `runId`：带群号时先校验群属于归属人，只在该群范围内查 open run；不带群号时电脑上恰好一条 open run 才落到它的群，零条或多条不落群，只打一行 `console.warn`（带 computerId、code 和截到 80 个字符的 detail），指定的群已删或不属于归属人时同样打一行。detail 是运行器原样带来的用户内容，没有长度上限，`agent_error` 的所有日志行（含 `config_rejected` 的 warn 和带无效或已结束 runId 的 error）都走同一个 `clipDetail`：按 Unicode 码点数，满 80 个才截，后面加「…」，不会把一个 emoji 的两半劈开。指定群号可以留群级错误提示，但只有该群恰好一条 open run 时才关联例行任务失败。其他带 runId 的上行仍按原有归属校验处理，报文形状和协议号不变。
 
 已知限制：不带群号的错误仍按电脑归属，不按 Bot 或会话归属。同一台电脑上同时有两个以上开着的 run 时，这类错误宁可不落群也不猜；行为没改，要彻底解决得让运行器在这些路径上补带群号（`test/p3-cp-guards-uplink.test.ts` 钉着现在的取舍）。
 
@@ -708,7 +708,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `GET /api/export` 回一个 JSON 附件，文件名 `baize-export-YYYY-MM-DD.json`（`http/routes/privacy.ts:19-25`）。内容是账号、设置、品牌手册、每个 Bot 连同它的 skill 和偏好（私人的也在）、例行、项目任务卡、草稿，`format` 为 1（`repo/export.ts:36-46`）。每一段都按白名单从领域对象拼，工具连接、平台账号、电脑三类带凭据的对象整段不进（第 32-35 行）。不按表整行导出，是为了让以后往领域对象里加字段的人不会顺手把凭据带进来。webhook 的 token 本身就是触发凭据，导出只留 `{ kind: "webhook" }`（第 27-29、48-49 行）。`test/privacy.test.ts` 的「导出里有偏好和品牌手册，grep 不到 token 和 authorization」钉着它。各段查询并行跑，不在一个事务里（第 52-61 行），导出不保证是同一时刻的快照。
 
-`DELETE /api/me` 要请求体里的邮箱等于当前账号，不对回 400（`http/routes/privacy.ts:27-31`）。删完关掉这个人连着的电脑代理（`disconnectOwner`）、删 cookie、回 204（第 32-36 行）。`deleteAccount`（`repo/export.ts:80-107`）的锁序：
+`DELETE /api/me` 要请求体里的邮箱等于当前账号，不对回 400（`http/routes/privacy.ts:27-31`）。删完关掉这个人连着的电脑代理（`disconnectOwner`）和浏览器推送连接（`PushHub.disconnectUser`，用 1008 关闭，并记下这个用户，握手到一半才入表的连接也会被关）、删 cookie、回 204。消息事务已提交、`hub.push` 还没跑时删号完成，那条推送找不到任何连接，旧页面收不到。`deleteAccount`（`repo/export.ts:80-107`）的锁序：
 
 1. 账号排他 advisory 锁（`lockOwner`）。
 2. 按 Bot id 升序对每个 Bot 调 `lockRunsOfBot`。

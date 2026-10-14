@@ -5,11 +5,13 @@ import type { AgentHub } from "../../agent/hub.js";
 import type { Db } from "../../db/client.js";
 import { deleteAccount, exportUserData } from "../../repo/export.js";
 import { SESSION_COOKIE } from "../../repo/sessions.js";
+import type { PushHub } from "../../ws/hub.js";
 import type { Env } from "../app.js";
 
 export type PrivacyRouteDeps = {
   readonly db: Db;
   readonly agents: Pick<AgentHub, "disconnectOwner">;
+  readonly push: Pick<PushHub, "disconnectUser">;
 };
 
 /** 挂在 /api 下、登录中间件之后。导出和删账号都只碰登录的这个人。 */
@@ -32,6 +34,8 @@ export function createPrivacyRoutes(deps: PrivacyRouteDeps): Hono<Env> {
     const finalFrames = await deleteAccount(deps.db, user.id);
     // 库里的电脑行已经没了，代理再连会卡在握手；这里关掉的是删之前就连着的那几条。
     deps.agents.disconnectOwner(user.id, finalFrames);
+    // 删号前已提交、还没推送的消息会在这之后才推，浏览器连接不关掉，它们会晚到旧页面。
+    deps.push.disconnectUser(user.id);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.body(null, 204);
   });
