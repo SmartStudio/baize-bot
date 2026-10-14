@@ -10,7 +10,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import { eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { CONTEXT_MESSAGES, dispatchUserMessage } from "../src/agent/dispatch.js";
 import { AgentHub } from "../src/agent/hub.js";
 import { agentOutbox } from "../src/db/schema.js";
@@ -130,34 +130,44 @@ describe("派活", () => {
 
   it("选中电脑之后连接断开，run 和 prompt 仍入箱等重连", async () => {
     const owner = await ownerWithBot();
-    class DropsRightAfterSelection extends AgentHub {
-      #looks = 0;
-      override isOnline(): boolean {
-        this.#looks += 1;
-        return this.#looks === 1;
+    const agent = await online(owner);
+    const original = AgentHub.prototype.isOnline;
+    let selected = false;
+    const selecting = vi.spyOn(AgentHub.prototype, "isOnline").mockImplementation(function (this: AgentHub, id) {
+      const available = original.call(this, id);
+      if (id === owner.computer.computerId && available && !selected) {
+        selected = true;
+        agent.socket.terminate();
       }
-      override async flushOutbox(): Promise<void> {}
-    }
-    const message = await appendMessage(database.db, owner.groupId, { kind: "user", text: "排一下本周" });
-
-    expect(
-      await dispatchUserMessage(dispatchDeps(DropsRightAfterSelection), owner.ownerId, owner.groupId, message),
-    ).toEqual({
-      kind: "sent",
+      return available;
     });
-    const runs = await database.sql<{ id: string; computer_id: string; ended_at: Date | null }[]>`
-      SELECT id, computer_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
-    `;
-    expect(runs, "报了 sent 就要有一行没收尾的 run，断线收尾才找得到它，例行才不会一直停在运行中").toEqual([
-      { id: expect.any(String), computer_id: owner.computer.computerId, ended_at: null },
-    ]);
-    const run = runs[0];
-    if (run === undefined) throw new Error("断线后 run 不存在");
-    const queued = await database.db
-      .select({ body: agentOutbox.body })
-      .from(agentOutbox)
-      .where(eq(agentOutbox.runId, RunId.parse(run.id)));
-    expect(queued.map(({ body }) => body.type)).toEqual(["prompt"]);
+    let back: AgentClient | undefined;
+    try {
+      expect((await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "排一下本周" })).status).toBe(
+        201,
+      );
+      selecting.mockRestore();
+      await agent.closed();
+      const runs = await database.sql<{ id: string; computer_id: string; ended_at: string | null }[]>`
+        SELECT id, computer_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
+      `;
+      expect(runs, "HTTP 派活结束后 run 已入箱，断线收尾能找到它").toEqual([
+        { id: expect.any(String), computer_id: owner.computer.computerId, ended_at: null },
+      ]);
+      const run = runs[0];
+      if (run === undefined) throw new Error("断线后 run 不存在");
+      const queued = await database.db
+        .select({ body: agentOutbox.body })
+        .from(agentOutbox)
+        .where(eq(agentOutbox.runId, RunId.parse(run.id)));
+      expect(queued.map(({ body }) => body.type)).toEqual(["prompt"]);
+      back = await online(owner);
+      expect(await back.expect("prompt")).toMatchObject({ runId: run.id, text: "排一下本周" });
+    } finally {
+      selecting.mockRestore();
+      agent.close();
+      back?.close();
+    }
   });
 
   it("电脑在线时收到 prompt，runs 多一行", async () => {

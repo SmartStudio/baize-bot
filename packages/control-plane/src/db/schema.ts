@@ -370,6 +370,8 @@ export const computers = pgTable(
     downSeq: integer("down_seq").notNull().default(0),
     downApplied: integer("down_applied").notNull().default(0),
     connGen: integer("conn_gen").notNull().default(0),
+    leaseUntil: timestamp("lease_until", { withTimezone: true }),
+    installId: text("install_id"),
     host: text("host"),
     idleSince: timestamp("idle_since", { withTimezone: true }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -565,6 +567,83 @@ export const runs = pgTable(
     index("runs_owner_id_started_at_idx").on(t.ownerId, t.startedAt),
     index("runs_routine_run_id_idx").on(t.routineRunId),
     index("runs_computer_id_idx").on(t.computerId),
+  ],
+);
+
+export const laneLeases = pgTable(
+  "lane_leases",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    holderComputerId: text("holder_computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "cascade" }),
+    holderInstallId: text("holder_install_id").notNull(),
+    epoch: integer("epoch").notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.botId, t.groupId] }), check("lane_leases_epoch_check", sql`${t.epoch} > 0`)],
+);
+
+export const workStreams = pgTable(
+  "work_streams",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    stream: text("stream").$type<"chat" | "table">().notNull(),
+    nextSeq: integer("next_seq").notNull().default(0),
+    head: text("head").notNull().default("0".repeat(64)),
+    tailEntryId: text("tail_entry_id"),
+    piSessionVersion: integer("pi_session_version").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.botId, t.groupId, t.stream] }),
+    check("work_streams_stream_check", sql`${t.stream} IN ('chat', 'table')`),
+    check("work_streams_next_seq_check", sql`${t.nextSeq} >= 0`),
+  ],
+);
+
+export const workEntries = pgTable(
+  "work_entries",
+  {
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+    groupId: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    stream: text("stream").$type<"chat" | "table">().notNull(),
+    seq: integer("seq").notNull(),
+    epoch: integer("epoch").notNull(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    runId: text("run_id").references(() => runs.id, { onDelete: "set null" }),
+    entryId: text("entry_id").notNull(),
+    parentId: text("parent_id"),
+    piType: text("pi_type").notNull(),
+    retention: text("retention").$type<"verbatim" | "redacted">().notNull(),
+    line: text("line").notNull(),
+    searchText: text("search_text").notNull(),
+    visibleTo: jsonb("visible_to").$type<Viewer[]>(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.botId, t.groupId, t.stream, t.seq] }),
+    check("work_entries_stream_check", sql`${t.stream} IN ('chat', 'table')`),
+    check("work_entries_retention_check", sql`${t.retention} IN ('verbatim', 'redacted')`),
+    check("work_entries_seq_check", sql`${t.seq} >= 0`),
+    check(
+      "work_entries_visible_to_check",
+      sql`${t.visibleTo} IS NULL OR (jsonb_typeof(${t.visibleTo}) = 'array' AND jsonb_array_length(${t.visibleTo}) > 0)`,
+    ),
   ],
 );
 

@@ -26,6 +26,7 @@ import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrows
 import { createDraftTools, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createHelperTools } from "./helper.js";
+import { LaneFence, type LaneCancel, type WorkAppender } from "./lane-fence.js";
 import { connectionsFor, createMcpTools, unusableReason, type McpToolSet } from "./mcp-tools.js";
 import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
 import { createMetricTools } from "./metric.js";
@@ -51,6 +52,7 @@ export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type BotConfig = ConfigMessage["bots"][number];
 
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
+export { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 export { type CdpConnection, type CdpPipe, connectPipe } from "./cdp.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export { discoverMcpTools } from "./mcp-discover.js";
@@ -76,6 +78,7 @@ export interface RunnerConfig {
   readonly brand: ConfigMessage["brand"];
   readonly preferences: ConfigMessage["preferences"];
   readonly send: (message: AgentToControl) => void;
+  readonly workAppend?: WorkAppender;
   /** 每个 Bot 的 Pi 目录建在这下面。Pi 的四个落盘点全部显式钉死，不碰 ~/.pi。 */
   readonly dataDir: string;
   /** 扩展工具的注册点。`src/topic.ts` 那组主题任务工具由运行器自己挂，排在这些之后。 */
@@ -94,7 +97,7 @@ export interface Runner {
   applyConfig(config: RunnerConfig): Promise<void>;
   prompt(message: PromptMessage): Promise<void>;
   /** 取消当前或排队中的 run；取消的 run 不会发送 run_done。 */
-  cancel(runId: RunId): void;
+  cancel(target: RunId | LaneCancel): void;
   /** 当前仍在运行的 run。只读快照，供电脑代理在重连 hello 时上报。 */
   activeRuns(): readonly RunId[];
   /** 控制面的审批结论。runId 对不上的结论不作数。 */
@@ -352,6 +355,8 @@ export function createRunner(config: RunnerConfig): Runner {
   const extensionTools = config.extensionTools ?? [];
   const extensionNames: ReadonlySet<string> = new Set(extensionTools.map((tool) => tool.name));
   const liveRuns = new Set<RunId>();
+  let workAppend = config.workAppend;
+  const laneFence = new LaneFence(() => workAppend);
   const runnerAbortedRuns = new Set<RunId>();
   const cancelledRuns = new Set<RunId>();
   let nextConfigVersion = 1;
@@ -422,6 +427,7 @@ export function createRunner(config: RunnerConfig): Runner {
 
   const finishRun = (done: Extract<AgentToControl, { type: "run_done" }>): void => {
     if (!liveRuns.delete(done.runId)) return;
+    laneFence.remove(done.runId);
     config.send(done);
   };
 
@@ -641,6 +647,7 @@ export function createRunner(config: RunnerConfig): Runner {
         tools: createTableTools({ role: tableRole, activeRun, table, send: config.send, results: pokerResults }),
         waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
         table,
+        laneHeaders: () => laneFence.headers(activeRun()?.run.runId),
         settings: config.settings,
       });
       bot.sessions.set(groupId, { ...created, tableRole });
@@ -663,6 +670,7 @@ export function createRunner(config: RunnerConfig): Runner {
       waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
       approvals,
       activeRun,
+      laneFence,
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
@@ -713,6 +721,7 @@ export function createRunner(config: RunnerConfig): Runner {
         ]),
         latest: () => connectionsFor(bot.botId, desiredConfig(bot)?.tools ?? []),
         liveProxy: () => ({ proxy: desiredConfig(bot)!.mcpProxy, gateway: desiredConfig(bot)!.gateway }),
+        laneHeaders: () => laneFence.headers(activeRun()?.run.runId),
       });
     bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
@@ -878,6 +887,7 @@ export function createRunner(config: RunnerConfig): Runner {
   const runner: Runner = {
     async applyConfig(next) {
       if (state === "stopped") return;
+      workAppend = next.workAppend;
       nextConfigVersion += 1;
       const version = nextConfigVersion;
       const nextSkills = next.skills ?? [];
@@ -936,6 +946,7 @@ export function createRunner(config: RunnerConfig): Runner {
 
     async prompt(message) {
       liveRuns.add(message.runId);
+      laneFence.register(message);
       if (state === "stopped") {
         finishWithoutRun(message);
         return;
@@ -949,14 +960,20 @@ export function createRunner(config: RunnerConfig): Runner {
       await schedulePrompt(bot, message);
     },
 
-    cancel(runId) {
+    cancel(target) {
+      if (typeof target !== "string") {
+        for (const runId of laneFence.olderThan(target)) runner.cancel(runId);
+        return;
+      }
+      const runId = target;
       if (!liveRuns.delete(runId)) return;
+      laneFence.remove(runId);
       const activeBot = [...bots.values()].find((bot) => bot.active?.run.runId === runId);
       if (activeBot !== undefined && activeBot.active !== null) {
         runnerAbortedRuns.add(runId);
         settlePauseWaiters(activeBot, false);
         const groupId = activeBot.active.run.groupId;
-        const callIds = approvals.expire(runId);
+        const callIds = [...approvals.expire(runId), ...laneFence.pendingCalls(runId)];
         const session = activeBot.sessions.get(groupId)?.session;
         if (callIds.length === 0 || session === undefined) {
           void abortSession(activeBot, groupId).catch(() => undefined);
@@ -1024,6 +1041,7 @@ export function createRunner(config: RunnerConfig): Runner {
 
     async stop() {
       state = "stopped";
+      laneFence.interruptAll();
       approvals.abandon("stopped");
       pokerResults.cancel();
       const stoppingBots = [...bots.values()];

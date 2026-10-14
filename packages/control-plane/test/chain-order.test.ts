@@ -1,4 +1,4 @@
-import { AccountId, AccountListResponse, LoginAttemptId, type ServerPush } from "@baize/shared";
+import { AccountId, AccountListResponse, CreateBotResponse, LoginAttemptId, type ServerPush } from "@baize/shared";
 import { expect, it, vi } from "vitest";
 import { accounts, computers } from "../src/db/schema.js";
 import { hashSecret, newId } from "../src/ids.js";
@@ -144,6 +144,7 @@ it("高 2：旧 hello 的 key 轮换已落库、返回晚到，新 hello 排在�
   const computer = await makeComputer(database.db, user.id);
   const client = server.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小轮" })).json());
   const stale = await openAgent(server.server.port);
   const gate = gated.arm(/update "computers" set "gateway_key_hash"/, "after");
   let fresh: AgentClient | null = null;
@@ -158,8 +159,15 @@ it("高 2：旧 hello 的 key 轮换已落库、返回晚到，新 hello 排在�
     const current = await expectHello(fresh);
     const [row] = await database.db.select({ keyHash: computers.gatewayKeyHash }).from(computers);
     expect(row?.keyHash, "库里的 key 是新连接那把").toBe(hashSecret(current.config.modelGateway.apiKey));
+    expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "轮换后派活" })).status).toBe(201);
+    const prompt = await fresh.expect("prompt");
     const gateway = (key: string) =>
-      fetch(`${client.origin}/gateway/v1/models`, { headers: { Authorization: `Bearer ${key}` } });
+      fetch(`${client.origin}/gateway/v1/models`, {
+        headers: {
+          Authorization: `Bearer ${key}`,
+          "x-baize-lane": `${created.bot.id}/${created.group.id}/${prompt.lane.epoch}`,
+        },
+      });
     expect((await gateway(current.config.modelGateway.apiKey)).status, "新连接的 key 能过网关").toBe(200);
     expect((await gateway(old.config.modelGateway.apiKey)).status, "旧连接的 key 已作废").toBe(401);
   } finally {

@@ -22,8 +22,10 @@ import {
   DOWNLINK_DELIVERY,
   BareUplinkFrame,
   UplinkFrame,
+  type UplinkRejection,
+  type WorkAppend,
 } from "@baize/shared";
-import type { CdpConnection, RunnerConfig } from "@baize/bot-runner";
+import { CURRENT_SESSION_VERSION, type CdpConnection, type RunnerConfig } from "@baize/bot-runner";
 import {
   startAgent as startProductAgent,
   type AgentHandle,
@@ -70,6 +72,8 @@ interface RunnerCalls {
   readonly paused: BotId[];
   readonly resumed: BotId[];
   readonly prompts: RunId[];
+  readonly cancellations: Array<Parameters<ReturnType<RunnerFactory>["cancel"]>[0]>;
+  readonly promptLanes: Array<Parameters<ReturnType<RunnerFactory>["prompt"]>[0]["lane"]>;
   /** 运行器拿到的每条 prompt 的 context，parse 之后的样子。 */
   readonly promptContexts: Array<Parameters<ReturnType<RunnerFactory>["prompt"]>[0]["context"]>;
   /** 每次建运行器时拿到的 config.skills，原样记下，undefined 也记。 */
@@ -100,6 +104,7 @@ function runnerOf(
     async prompt(message) {
       calls.prompts.push(message.runId);
       calls.promptContexts.push(message.context);
+      calls.promptLanes.push(message.lane);
       config.send({
         type: "bot_text",
         runId: message.runId,
@@ -118,7 +123,7 @@ function runnerOf(
         text: "假运行器的回复。",
       });
     },
-    cancel: () => {},
+    cancel: (target) => calls.cancellations.push(target),
     approve: (runId, callId, outcome) => {
       calls.approvals.push({ runId, callId, outcome });
     },
@@ -158,6 +163,7 @@ const promptMessage = {
   runId: "run-1",
   botId: "bot-1",
   groupId: "group-1",
+  lane: { epoch: 1, heads: {} },
   messageId: "message-1",
   text: "查一下昨天的订单",
   origin: { kind: "user" },
@@ -216,7 +222,13 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
   return { pipe: { toChrome, fromChrome }, commands: () => [...commands] };
 }
 
-function startControlPlane(tuning: { holdWelcomeAfter?: number; welcomeAck?: number } = {}) {
+function startControlPlane(
+  tuning: {
+    holdWelcomeAfter?: number;
+    welcomeAck?: number;
+    workAppendAck?: (frame: UplinkFrame) => readonly UplinkRejection[] | null;
+  } = {},
+) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const sockets: WebSocketType[] = [];
   const messages: AgentToControl[] = [];
@@ -306,9 +318,12 @@ function startControlPlane(tuning: { holdWelcomeAfter?: number; welcomeAck?: num
             streams.set(parsed.data.stream, parsed.data.seq);
             messages.push(parsed.data.body);
           }
-          originalSend(
-            JSON.stringify({ type: "uplink_ack", upTo: streams.get(parsed.data.stream) ?? 0, rejected: [] }),
-          );
+          const rejected =
+            parsed.data.body.type === "work_append" && tuning.workAppendAck !== undefined
+              ? tuning.workAppendAck(parsed.data)
+              : [];
+          if (parsed.data.body.type !== "work_append" || tuning.workAppendAck === undefined || rejected !== null)
+            originalSend(JSON.stringify({ type: "uplink_ack", upTo: streams.get(parsed.data.stream) ?? 0, rejected }));
         } else parseErrors.push(`${data.toString()} -> ${parsed.error.message}`);
         return;
       }
@@ -399,6 +414,8 @@ function spawnAgent(
     paused: [],
     resumed: [],
     prompts: [],
+    cancellations: [],
+    promptLanes: [],
     promptContexts: [],
     configSkills: [],
     appliedConfigs: [],
@@ -459,6 +476,8 @@ describe("电脑代理连控制面", () => {
         token: "dev-token",
         version: "0.1.0",
         protocol: 3,
+        installId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        piSessionVersion: CURRENT_SESSION_VERSION,
         uplinkStream: expect.any(String),
         downApplied: 0,
         activeRuns: [],
@@ -643,6 +662,135 @@ describe("电脑代理连控制面", () => {
       badJournal,
     );
     expect(quarantineLog).not.toContain(badJournal);
+  });
+
+  it("重启代理复用落盘的 installId，另一份 dataDir 使用新的安装标识", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const directory = await tempDataDir();
+    const firstAgent = spawnAgent(await server.url(), { dataDir: directory });
+    const first = await server.waitForMessage("hello", 1);
+    expect(readFileSync(join(directory, ".agent", "install-id"), "utf8").trim()).toBe(first.installId);
+    await firstAgent.stop();
+
+    spawnAgent(await server.url(), { dataDir: directory });
+    const second = await server.waitForMessage("hello", 2);
+    expect(second.installId).toBe(first.installId);
+    spawnAgent(await server.url(), { dataDir: await tempDataDir() });
+    const third = await server.waitForMessage("hello", 3);
+    expect(third.installId).not.toBe(first.installId);
+  });
+
+  it("prompt 的 lane 原样交给运行器，两种 cancel 分别按 run 和道转发", async () => {
+    const server = await startPair();
+    const socket = await server.waitForSocket(1);
+    const lane = { epoch: 7, heads: { chat: { seq: 5, head: "a".repeat(64) } } };
+    socket.send(JSON.stringify(configMessage));
+    socket.send(JSON.stringify({ type: "cancel", runId: "run-closed" }));
+    socket.send(JSON.stringify({ type: "cancel", lane: { botId: "bot-1", groupId: "group-1" }, epoch: 7 }));
+    socket.send(JSON.stringify({ ...promptMessage, lane }));
+    await server.waitForMessage("bot_text");
+    expect(runnerCalls().cancellations).toEqual([
+      "run-closed",
+      { lane: { botId: "bot-1", groupId: "group-1" }, epoch: 7 },
+    ]);
+    expect(runnerCalls().promptLanes).toEqual([lane]);
+  });
+
+  it.each(["ok", "stale_epoch", "not_holder", "seq_mismatch", "head_mismatch", "invalid"] as const)(
+    "工作记录探针落盘后等待累计 ACK，按 seq 返回 %s",
+    async (kind) => {
+      const server = startControlPlane({
+        workAppendAck: (frame) =>
+          kind === "ok"
+            ? []
+            : [
+                {
+                  seq: frame.seq,
+                  code: kind,
+                  ...(frame.body.type === "work_append" ? { lane: frame.body.lane } : {}),
+                  ...(kind === "seq_mismatch" ? { nextSeq: 17 } : {}),
+                },
+              ],
+      });
+      servers.push(server);
+      const directory = await tempDataDir();
+      spawnAgent(await server.url(), { dataDir: directory });
+      const socket = await server.waitForSocket(1);
+      socket.send(JSON.stringify(configMessage));
+      await server.waitForMessage("config_applied");
+      const config = initialRunnerConfigs.at(-1)!;
+      const frame: WorkAppend = {
+        type: "work_append",
+        lane: { botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1"), stream: "chat", epoch: 7 },
+        runId: RunId.parse("run-1"),
+        fromSeq: 0,
+        lines: [],
+        head: "0".repeat(64),
+        cause: "before_effect",
+      };
+      const result = await config.workAppend!(frame);
+      expect(result).toEqual(kind === "seq_mismatch" ? { kind, nextSeq: 17 } : { kind });
+      await server.waitForMessage("work_append");
+      expect(runnerCalls().cancellations).toEqual(
+        kind === "stale_epoch" || kind === "not_holder"
+          ? [{ lane: { botId: "bot-1", groupId: "group-1" }, epoch: 8 }]
+          : [],
+      );
+      const hello = await server.waitForMessage("hello");
+      const state = JSON.parse(readFileSync(join(directory, ".agent", "outbox", "state.json"), "utf8")) as {
+        acked: number;
+      };
+      expect(state.acked).toBe(1);
+      expect(readFileSync(join(directory, ".agent", "outbox", hello.uplinkStream, "frames.jsonl"), "utf8")).toBe("");
+    },
+  );
+
+  it("多个探针等 ACK 时断线，全部当场回 disconnected；离线新探针也不等待", async () => {
+    const server = startControlPlane({ workAppendAck: () => null });
+    servers.push(server);
+    spawnAgent(await server.url());
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied");
+    const append = initialRunnerConfigs.at(-1)!.workAppend!;
+    const frame: WorkAppend = {
+      type: "work_append",
+      lane: { botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1"), stream: "chat", epoch: 7 },
+      runId: RunId.parse("run-1"),
+      fromSeq: 0,
+      lines: [],
+      head: "0".repeat(64),
+      cause: "before_effect",
+    };
+    const first = append(frame);
+    const second = append(frame);
+    await server.waitForMessage("work_append", 2);
+    socket.close();
+    expect(await Promise.all([first, second])).toEqual([{ kind: "disconnected" }, { kind: "disconnected" }]);
+    expect(await append(frame)).toEqual({ kind: "disconnected" });
+  });
+
+  it("探针尚在等待 fsync 时停机也立即回 disconnected，不留等待者", async () => {
+    const server = startControlPlane({ workAppendAck: () => null });
+    servers.push(server);
+    const agent = spawnAgent(await server.url());
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied");
+    const append = initialRunnerConfigs.at(-1)!.workAppend!;
+    const pending = append({
+      type: "work_append",
+      lane: { botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1"), stream: "chat", epoch: 7 },
+      runId: RunId.parse("run-1"),
+      fromSeq: 0,
+      lines: [],
+      head: "0".repeat(64),
+      cause: "before_effect",
+    });
+    const stopping = agent.stop();
+    expect(await pending).toEqual({ kind: "disconnected" });
+    await stopping;
   });
 
   it("重连 hello 报告运行器仍活着的 run", async () => {
@@ -2056,6 +2204,8 @@ describe("电脑代理连控制面", () => {
             paused: [],
             resumed: [],
             prompts: [],
+            cancellations: [],
+            promptLanes: [],
             promptContexts: [],
             configSkills: [],
             appliedConfigs: [],

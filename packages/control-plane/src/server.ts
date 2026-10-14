@@ -67,6 +67,7 @@ export type StartOptions = {
   /** 电脑多久不发任何帧就判掉线，测试调短用。 */
   readonly silenceTimeoutMs?: number;
   readonly mcpDiscoveryTimeoutMs?: number;
+  readonly leaseRenewalIntervalMs?: number;
   readonly toolSecretKey?: string;
   /** 不给就读 CREDENTIALS_KEY，缺了或不对启动失败。 */
   readonly credentialsKey?: string;
@@ -115,6 +116,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     disconnectGraceMs: options.disconnectGraceMs,
     silenceTimeoutMs: options.silenceTimeoutMs,
     mcpDiscoveryTimeoutMs: options.mcpDiscoveryTimeoutMs,
+    leaseRenewalIntervalMs: options.leaseRenewalIntervalMs,
     toolCrypto,
     notifications,
   });

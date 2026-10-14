@@ -127,7 +127,15 @@ async function tickAt(iso: string): Promise<void> {
 }
 
 async function finishRoutine(agent: AgentClient, owner: Owner): Promise<void> {
-  const prompt = await agent.expect("prompt");
+  let prompt: Awaited<ReturnType<AgentClient["next"]>>;
+  for (;;) {
+    prompt = await agent.next();
+    if (prompt.type === "prompt") break;
+    expect(prompt, "重连时先收已经换手的道取消").toMatchObject({
+      type: "cancel",
+      lane: { botId: owner.botId, groupId: owner.groupId },
+    });
+  }
   expect(prompt.origin).toEqual({ kind: "routine" });
   agent.send({
     type: "run_done",
@@ -165,7 +173,18 @@ describe("派到哪台电脑", () => {
       // 发消息的请求在派活之后才回，这时 run 记在哪台、群里有没有派不出去的那句都已经定了。
       expect(await errorNotices(owner), "两台都在线，不该说派不出去").toEqual([]);
       expect(await runComputers(owner.groupId), "两台都在线时本机优先").toEqual([owner.local.computerId]);
-      expect((await local.expect("prompt")).text, "两台都在线时本机优先").toBe("第一件事");
+      const first = await local.expect("prompt");
+      expect(first.text, "两台都在线时本机优先").toBe("第一件事");
+      local.send({
+        type: "run_done",
+        runId: first.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        steps: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+      });
+      await local.ack(first.runId);
 
       local.close();
       await waitFor(async () => (await statusOf(owner.local.computerId)) === "sleeping", "本机变休眠");

@@ -57,7 +57,7 @@ describe("迁移", () => {
     }
   });
 
-  it("建出三十七张业务表加一张迁移记账表", async () => {
+  it("建出四十张业务表加一张迁移记账表", async () => {
     const rows = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
@@ -80,6 +80,7 @@ describe("迁移", () => {
       "group_members",
       "groups",
       "handoffs",
+      "lane_leases",
       "messages",
       "metric_samples",
       "oauth_states",
@@ -102,6 +103,8 @@ describe("迁移", () => {
       "tool_connections",
       "user_counters",
       "users",
+      "work_entries",
+      "work_streams",
     ]);
   });
 });

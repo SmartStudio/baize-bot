@@ -27,7 +27,7 @@ import {
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { and, eq, inArray, lte, type SQL } from "drizzle-orm";
+import { and, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
 import { approvals as approvalRows, computers as computerRows, groups, runs } from "../db/schema.js";
 import {
   decideApproval,
@@ -51,12 +51,13 @@ import {
 } from "../repo/messages.js";
 import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
-import { lockOwner, lockRuns, shareBotRunsLock, startRun } from "../repo/runs.js";
+import { lockOwner, lockRuns, shareBotRunsLock } from "../repo/runs.js";
 import { pendingLines, recordContext } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
+import { lockLaneComputers, placeRun } from "./place-run.js";
 import type { AgentHub } from "./hub.js";
 import {
   selectComputer,
@@ -83,7 +84,7 @@ export type DispatchDeps = {
 };
 
 export type DispatchOptions = {
-  /** 例行任务到点或试跑派的活带着它，往下一路传到 `startRun`。普通的用户消息不带。 */
+  /** 例行任务到点或试跑派的活带着它，往下一路传到 `placeRun`。普通的用户消息不带。 */
   readonly routineRunId?: string | undefined;
   /** 例行任务按保存的用途选模型；普通消息不带，固定走 plan。 */
   readonly purpose?: ModelPurpose | undefined;
@@ -112,14 +113,20 @@ export async function computerFor(
   ownerId: UserId,
 ): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
+  const liveRows = await db
+    .select({ id: computerRows.id })
+    .from(computerRows)
+    .where(and(eq(computerRows.ownerId, ownerId), sql`${computerRows.leaseUntil} > clock_timestamp()`));
+  const live = new Set(liveRows.map((row) => row.id));
   const selectedOnline = selectComputer(
     [],
     computers.map((computer) => ({
-      computer: agents.isOnline(computer.id)
-        ? { ...computer, status: "online" }
-        : computer.status === "online"
-          ? { ...computer, status: "sleeping" }
-          : computer,
+      computer:
+        agents.isOnline(computer.id) && live.has(computer.id)
+          ? { ...computer, status: "online" }
+          : computer.status === "online"
+            ? { ...computer, status: "sleeping" }
+            : computer,
       accounts: [],
     })),
   );
@@ -130,7 +137,8 @@ export async function computerFor(
           computers.map((computer) => ({
             computer: {
               ...computer,
-              status: agents.canDeliver!(computer.id) ? ("online" as const) : ("sleeping" as const),
+              status:
+                agents.canDeliver!(computer.id) && live.has(computer.id) ? ("online" as const) : ("sleeping" as const),
             },
             accounts: [],
           })),
@@ -219,6 +227,7 @@ export async function dispatchUserMessage(
           : currentBotId !== null
             ? "current"
             : "everyone";
+    const placementFailure: { reason: SelectionFailure | null } = { reason: null };
     const started = await deps.groupTurns.start({
       groupId,
       ownerId,
@@ -239,11 +248,13 @@ export async function dispatchUserMessage(
           voidTargets,
         );
         voidTargets = [];
+        if (outcome.unplacedReason !== undefined) placementFailure.reason = outcome.unplacedReason;
         return outcome;
       },
     });
     if (started === "gone") return { kind: "no_target" };
     if (started === "failed") return { kind: "failed" };
+    if (placementFailure.reason !== null) return { kind: "unplaced", reason: placementFailure.reason };
     if (started !== "nobody") return { kind: "sent" };
   }
   return noTarget();
@@ -266,7 +277,7 @@ async function sendSpeaker(
   options: DispatchOptions,
   placed: Computer | null,
   voidTargets: readonly BotId[],
-): Promise<SendOutcome> {
+): Promise<SendOutcome & { readonly unplacedReason?: SelectionFailure }> {
   const selected: ComputerSelection =
     placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
   if (selected.kind === "failed") {
@@ -275,7 +286,7 @@ async function sendSpeaker(
       tone: "error",
       text: selectionNotice(selected.reason),
     });
-    return written ? { kind: "stopped" } : { kind: "gone" };
+    return written ? { kind: "stopped", unplacedReason: selected.reason } : { kind: "gone" };
   }
 
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
@@ -310,15 +321,7 @@ async function sendSpeaker(
     await lockOwner(tx, ownerId, "shared");
     for (const botId of [...new Set([speaker.botId, ...voidTargets])].toSorted()) await shareBotRunsLock(tx, botId);
     // 待批范围只能在电脑锁之后读；旧 run 在别的电脑上时也必须按同一顺序锁齐。
-    const ownerComputers = await tx
-      .select({ id: computerRows.id })
-      .from(computerRows)
-      .where(eq(computerRows.ownerId, ownerId));
-    await lockApprovalDeliveries(
-      tx,
-      [],
-      ownerComputers.map(({ id }) => ComputerId.parse(id)),
-    );
+    await lockLaneComputers(tx, ownerId);
     const scopes =
       voidTargets.length === 0
         ? []
@@ -326,84 +329,87 @@ async function sendSpeaker(
             tx,
             and(inArray(approvalRows.botId, [...voidTargets]), eq(approvalRows.groupId, groupId)),
           );
-    const runId = await startRun(tx as unknown as Db, {
-      ownerId,
-      computerId: selected.computer.id,
-      botId: speaker.botId,
-      groupId,
-      triggerMessageId: speaker.trigger.id,
-      routineRunId: options.routineRunId,
-    });
-    // Bot 在派活途中被删了，只跳过它，不留 system，多 Bot 群里页面已收到 bot_deleted。
-    // 单聊群已随 Bot 级联删掉，连「没人接」都写不进去，把「群没了」和「跳过」分开报给回合和调用方。
-    await lockRuns(
-      tx,
-      scopes.map((scope) => scope.runId),
-    );
     const voided: AutomaticApproval[] = [];
-    for (const botId of voidTargets) {
-      voided.push(
-        ...(await voidPendingApprovals(
-          tx,
-          botId,
-          groupId,
-          new Date(),
-          scopes.map((scope) => scope.id),
-        )),
+    const voidApprovals = async (): Promise<void> => {
+      await lockRuns(
+        tx,
+        scopes.map((scope) => scope.runId),
       );
-    }
-    await enqueueAutomaticApprovals(tx, voided, "voided");
-    if (runId === null) return { kind: "skipped", voided } as const;
-    // 保留派活前读到的窗口，主助理读取项目清单期间的新消息不能把它挤掉；只在本次作废后刷新卡片结论。
-    const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
-    await recordContext(
-      tx as unknown as Db,
-      runId,
-      { kind: "bot", botId: speaker.botId },
-      {
-        unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
-        settled: context.filter((line) => line.settled).map((line) => line.messageId),
-      },
-    );
-    const sent = await enqueueDownlink(
+      for (const botId of voidTargets) {
+        voided.push(
+          ...(await voidPendingApprovals(
+            tx,
+            botId,
+            groupId,
+            new Date(),
+            scopes.map((scope) => scope.id),
+          )),
+        );
+      }
+      await enqueueAutomaticApprovals(tx, voided, "voided");
+    };
+    const result = await placeRun(
       tx,
-      selected.computer.id,
       {
-        type: "prompt",
-        runId,
+        ownerId,
         botId: speaker.botId,
         groupId,
-        messageId: speaker.trigger.id,
-        text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
-        origin,
-        reason: speaker.reason,
-        group,
-        context,
-        purpose: options.purpose ?? "plan",
-        routine: options.routine ?? null,
-        // 群消息派出去的活不是牌桌 prompt。牌桌那条由 poker/converge.ts 自己拼，不走这里。
-        table: null,
-        task: solo ? null : task,
-        members: roster,
-        ...(projects === undefined ? {} : { projects }),
-        ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+        triggerMessageId: speaker.trigger.id,
+        routineRunId: options.routineRunId,
+        prompt: async (runId) => {
+          await voidApprovals();
+          // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。
+          const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
+          await recordContext(
+            tx as unknown as Db,
+            runId,
+            { kind: "bot", botId: speaker.botId },
+            {
+              unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+              settled: context.filter((line) => line.settled).map((line) => line.messageId),
+            },
+          );
+          return {
+            type: "prompt",
+            botId: speaker.botId,
+            groupId,
+            messageId: speaker.trigger.id,
+            text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
+            origin,
+            reason: speaker.reason,
+            group,
+            context,
+            purpose: options.purpose ?? "plan",
+            routine: options.routine ?? null,
+            table: null,
+            task: solo ? null : task,
+            members: roster,
+            ...(projects === undefined ? {} : { projects }),
+            ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+          };
+        },
       },
-      runId,
+      async () => selected,
     );
-    return sent ? ({ kind: "queued", runId, voided } as const) : ({ kind: "unavailable", voided } as const);
+    if (result.kind !== "queued") await voidApprovals();
+    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。
+    if (result.kind === "not_member") return { kind: "skipped", voided } as const;
+    if (result.kind === "unplaced") return { kind: "unavailable", reason: result.reason, voided } as const;
+    return { ...result, voided };
   });
   await publishAutomaticApprovals(deps, placedRun.voided);
   if (placedRun.kind === "skipped")
     return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
-  if (placedRun.kind === "queued") await deps.agents.flushOutbox(selected.computer.id);
+  if (placedRun.kind === "queued")
+    for (const computerId of placedRun.flushComputerIds) await deps.agents.flushOutbox(computerId);
   if (placedRun.kind === "unavailable") {
-    // run 建好之后账号被删：删号提交后才断开代理，发不出去时群已随账号没了，和上面一样报「群没了」，不往里写提示。
+    // 等电脑锁期间租约可能过期，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
     const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
-      text: selectionNotice("no_computer_online"),
+      text: selectionNotice(placedRun.reason),
     });
-    return written ? { kind: "stopped" } : { kind: "gone" };
+    return written ? { kind: "stopped", unplacedReason: placedRun.reason } : { kind: "gone" };
   }
   return { kind: "sent", runId: placedRun.runId };
 }

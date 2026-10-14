@@ -280,10 +280,18 @@ it("老白运行失败后可以重试", async () => {
   expect((await read(f)).hint).toEqual({ seq: f.state.events.length, status: "done", messageId });
 });
 
-it("电脑离线时提示失败，上线后同一决策点可以重试", async () => {
+it("电脑离线时不建问牌 run，上线后同一决策点可以重试", async () => {
   const f = await fixture(1, false);
-  expect((await ask(f)).hint).toEqual({ seq: f.state.events.length, status: "failed", messageId: null });
-  expect((await read(f)).hint?.status).toBe("failed");
+  const before = await read(f);
+  const response = await f.client.post(`/api/poker/hands/${f.handId}/hint`, { seq: f.state.events.length });
+  expect(response.status).toBe(409);
+  expect(await response.json()).toEqual({ error: "电脑不在线，这次没有问牌，电脑回来后再问一次" });
+  expect((await read(f)).hint).toEqual(before.hint);
+  expect(await hintRows(f)).toEqual([]);
+  const [runs] = await database.sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM runs WHERE group_id = ${f.groupId}
+  `;
+  expect(runs?.count).toBe(0);
   const { agent } = await helloAgent(server.port, f.computer.computerId, f.computer.token);
   f.agent = agent;
   expect((await ask(f)).hint?.status).toBe("waiting");

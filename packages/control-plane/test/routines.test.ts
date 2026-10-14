@@ -1769,7 +1769,7 @@ describe("修复四轮：多条待结账 run 的锁序、同刻两个 cron 的�
       runDone(agent, current);
       await gate.reached;
       deletion = owner.client.delete(`/api/bots/${owner.botId}`);
-      await waitUntil(() => lockWaiterOn('from "runs"'), "删除在 runs 预锁处排队");
+      await waitUntil(() => lockWaiterOn("SELECT pg_advisory_xact_lock("), "删除在 Bot 排他锁处等结账提交");
       gate.release();
       expect((await deletion).status, "删除和多行结账都要成功，不报 40P01").toBe(204);
       await agent.ack(current.runId);
@@ -1804,8 +1804,8 @@ describe("修复四轮：多条待结账 run 的锁序、同刻两个 cron 的�
       gate.release();
       await waitUntil(() => lockWaiterOn('"runs"."id" in'), "结账在当前这条 run 上排队");
       deletion = owner.client.delete(`/api/bots/${owner.botId}`);
-      await waitUntil(() => lockWaiterOn('"charged_at" is null'), "删除排在结账后面");
-      // 两边都该排在当前这条上，先记着的那条此刻没人持有；删除若按物理顺序扫，就已经锁着它，放行后两边互等。
+      await waitUntil(() => lockWaiterOn("SELECT pg_advisory_xact_lock("), "删除在 Bot 排他锁处排在结账后面");
+      // 结账停在当前 run，删除更早停在 Bot 锁；删除尚未锁住另一条待结账的行。
       const free = await database.sql`SELECT id FROM runs WHERE id = ${held.runId} FOR UPDATE SKIP LOCKED`;
       expect(free.length, "删除排队时还没持有先记着的那条").toBe(1);
       await hold.release();

@@ -422,6 +422,8 @@ async function reconnect(who: Owner, activeRuns: readonly RunId[]): Promise<Agen
     token: who.computer.token,
     version: "test",
     protocol: 3,
+    installId: who.computer.computerId,
+    piSessionVersion: 3,
     uplinkStream: who.computer.computerId,
     downApplied: 0,
     activeRuns: [...activeRuns],
@@ -595,9 +597,12 @@ describe("删 Bot", () => {
         status: "expired",
       });
       expect((await who.push.next()).type).toBe("bot_deleted");
-      expect((await who.agent.next()).type, "删 Bot 只重发 config，不再给那个挂着的调用发 approval_result").toBe(
-        "config",
-      );
+      expect(await who.agent.next(), "删 Bot 先取消它持有的道").toMatchObject({
+        type: "cancel",
+        lane: { botId: job.botId, groupId: job.groupId },
+        epoch: 2,
+      });
+      expect((await who.agent.next()).type, "重发 config，不给已经作废的调用发 approval_result").toBe("config");
     } finally {
       who.close();
     }

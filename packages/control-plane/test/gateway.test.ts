@@ -1,11 +1,11 @@
-import type { ComputerId } from "@baize/shared";
+import { CreateBotResponse, type ComputerId } from "@baize/shared";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_PATH } from "../src/http/gateway.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { makeComputer, makeUser } from "./helpers/fixtures.js";
+import { makeComputer, makeUser, PASSWORD } from "./helpers/fixtures.js";
 import { helloAgent } from "./helpers/agent.js";
 import { scriptedUpstream, type ChatCompletionRequest, type Upstream } from "./helpers/openai-sse.js";
 import { deadUpstreamUrl, startUpstream, type FakeUpstream } from "./helpers/upstream.js";
@@ -22,13 +22,16 @@ type Rig = {
   readonly token: string;
   /** 电脑握手时下发给它的网关 key 明文。 */
   readonly key: string;
+  readonly laneHeader: string;
   call(path: string, init?: RequestInit): Promise<Response>;
 };
 
 const cleanups: (() => Promise<void>)[] = [];
+const laneHeaders = new Map<string, string>();
 
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
+  laneHeaders.clear();
 });
 
 async function rig(
@@ -46,8 +49,25 @@ async function rig(
 
   const user = await makeUser(database.db);
   const computer = await makeComputer(database.db, user.id);
+  const client = server.client();
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "网关测试" })).json());
   const { agent, config } = await helloAgent(server.server.port, computer.computerId, computer.token);
   cleanups.push(async () => agent.close());
+  expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "建立网关调用道" })).status).toBe(201);
+  const prompt = await agent.expect("prompt");
+  const laneHeader = `${prompt.botId}/${prompt.groupId}/${prompt.lane.epoch}`;
+  laneHeaders.set(config.modelGateway.apiKey, laneHeader);
+  agent.send({
+    type: "run_done",
+    runId: prompt.runId,
+    botId: prompt.botId,
+    groupId: prompt.groupId,
+    steps: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  });
+  await agent.ack(prompt.runId);
 
   return {
     server,
@@ -56,6 +76,7 @@ async function rig(
     computerId: computer.computerId,
     token: computer.token,
     key: config.modelGateway.apiKey,
+    laneHeader,
     call: (path, init) => fetch(`http://localhost:${server.server.port}${GATEWAY_PATH}${path}`, init),
   };
 }
@@ -69,7 +90,11 @@ function chatBody(extra: Record<string, unknown> = {}): RequestInit {
 }
 
 function authed(key: string, init: RequestInit): RequestInit {
-  return { ...init, headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${key}` } };
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${key}`);
+  const lane = laneHeaders.get(key);
+  if (lane !== undefined) headers.set("x-baize-lane", lane);
+  return { ...init, headers };
 }
 
 async function startSplitSseUpstream(): Promise<FakeUpstream> {
@@ -199,6 +224,7 @@ describe("网关认证", () => {
 
     const again = await helloAgent(r.server.server.port, r.computerId, r.token);
     cleanups.push(async () => again.agent.close());
+    laneHeaders.set(again.config.modelGateway.apiKey, r.laneHeader);
 
     expect((await r.call("/models", authed(r.key, {}))).status, "上一条连接那把 key 该作废了").toBe(401);
     expect((await r.call("/models", authed(again.config.modelGateway.apiKey, {}))).status).toBe(200);

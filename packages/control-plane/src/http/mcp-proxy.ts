@@ -5,6 +5,8 @@ import {
   ToolConnectionId,
   describeMcpFailure,
   redactCredential,
+  type BotId,
+  type GroupId,
   type UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
@@ -20,16 +22,20 @@ import { findBot } from "../repo/bots.js";
 import { findComputerByGatewayKey } from "../repo/computers.js";
 import { findOwnedTool, toolAuthorization } from "../repo/tools.js";
 import { bearerToken } from "./gateway.js";
+import { LANE_FENCE_ERRORS, validateLaneFence } from "./lane-fence.js";
 
 export const MCP_PROXY_PATH = "/mcp-proxy";
 
 export function createMcpProxy(deps: { readonly db: Db; readonly crypto: ToolCrypto; readonly clients: McpClients }) {
-  const app = new Hono<{ Variables: { ownerId: UserId } }>();
+  const app = new Hono<{ Variables: { ownerId: UserId; lane: { botId: BotId; groupId: GroupId; epoch: number } } }>();
   app.use("*", async (c, next) => {
     const key = bearerToken(c.req.header("authorization"));
     const computer = key === null ? null : await findComputerByGatewayKey(deps.db, key);
     if (computer === null) return c.json({ error: "网关 key 不对，换一把再来" }, 401);
+    const fence = await validateLaneFence(deps.db, computer, c.req.header("x-baize-lane"));
+    if (fence.kind !== "ok") return c.json({ error: LANE_FENCE_ERRORS[fence.kind] }, 409);
     c.set("ownerId", computer.ownerId);
+    c.set("lane", fence.lane);
     await next();
   });
   app.post(
@@ -48,7 +54,11 @@ export function createMcpProxy(deps: { readonly db: Db; readonly crypto: ToolCry
       const parsed = McpProxyCallRequest.safeParse(await c.req.json().catch(() => null));
       if (!parsed.success) return c.json({ error: "工具调用参数格式不对" }, 400);
       const body = parsed.data;
-      if (!connection.assignedBotIds.includes(body.botId) || (await findBot(deps.db, ownerId, body.botId)) === null) {
+      if (
+        body.botId !== c.get("lane").botId ||
+        !connection.assignedBotIds.includes(body.botId) ||
+        (await findBot(deps.db, ownerId, body.botId)) === null
+      ) {
         return c.json({ error: "没有分配给这个 Bot 的插件" }, 404);
       }
       if (!connection.operations.some((operation) => operation.name === body.tool)) {

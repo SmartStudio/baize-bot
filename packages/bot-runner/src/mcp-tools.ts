@@ -87,13 +87,14 @@ async function callProxy(
   request: McpProxyCallRequest,
   live: McpProxyLive,
   signal: AbortSignal | undefined,
+  laneHeaders: Readonly<Record<string, string>>,
 ): Promise<McpProxyCallResponse> {
   const url = `${live.proxy.baseUrl.replace(/\/+$/, "")}/${encodeURIComponent(connection.id)}/call`;
   let response: Response;
   try {
     response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${live.gateway.apiKey}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${live.gateway.apiKey}`, ...laneHeaders },
       body: JSON.stringify(request),
       redirect: "manual",
       signal:
@@ -239,6 +240,7 @@ export function createMcpTools(options: {
   /** 最新下发的 config 里分配给这个 Bot 的连接。 */
   readonly latest: () => readonly ToolConnectionConfig[];
   readonly liveProxy: () => McpProxyLive;
+  readonly laneHeaders: () => Readonly<Record<string, string>>;
 }): McpToolSet {
   const taken = new Set([...PI_BUILT_IN_TOOLS, ...options.reserved]);
   const links: Link[] = [];
@@ -285,6 +287,7 @@ export function createMcpTools(options: {
               { botId: options.botId, tool: op.name, arguments: params as Record<string, unknown> },
               options.liveProxy(),
               signal,
+              options.laneHeaders(),
             );
           } else {
             if (link === null) {

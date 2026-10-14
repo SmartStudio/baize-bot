@@ -15,7 +15,7 @@ import {
 } from "@baize/shared";
 import { and, asc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agentOutbox, computers, groupMembers, routineRuns, routines, runs } from "../db/schema.js";
+import { agentOutbox, bots, computers, groupMembers, routineRuns, routines, runs } from "../db/schema.js";
 import type { Tx } from "../repo/messages.js";
 import { lockOwner, shareBotRunsLock } from "../repo/runs.js";
 
@@ -38,8 +38,9 @@ export async function lockEnvelopeComputer(
   await tx.select({ id: computers.id }).from(computers).where(eq(computers.id, computerId)).for("no key update");
 }
 
-export async function beginHandshake(db: Db, computerId: ComputerId, hello: Hello) {
+export async function beginHandshake(db: Db, computerId: ComputerId, hello: Hello, leaseMs = 60_000) {
   return db.transaction(async (tx) => {
+    await lockEnvelopeComputer(tx, computerId);
     const [row] = await tx
       .update(computers)
       .set({
@@ -47,6 +48,8 @@ export async function beginHandshake(db: Db, computerId: ComputerId, hello: Hell
         upStream: hello.uplinkStream,
         upAcked: sql`CASE WHEN ${computers.upStream} = ${hello.uplinkStream} THEN ${computers.upAcked} ELSE 0 END`,
         downApplied: sql`greatest(${computers.downApplied}, least(${hello.downApplied}, ${computers.downSeq}))`,
+        installId: hello.installId,
+        leaseUntil: sql`clock_timestamp() + ${leaseMs} * interval '1 millisecond'`,
       })
       .where(eq(computers.id, computerId))
       .returning();
@@ -80,6 +83,32 @@ export async function enqueueDownlink(
     .where(eq(computers.id, computerId))
     .returning({ seq: computers.downSeq });
   if (computer === undefined) return false;
+  if (parsed.type === "cancel" && "lane" in parsed && parsed.lane !== undefined && parsed.epoch !== undefined) {
+    const epoch = parsed.epoch;
+    const pending = await tx
+      .select()
+      .from(agentOutbox)
+      .where(
+        and(
+          eq(agentOutbox.computerId, computerId),
+          sql`${agentOutbox.body}->>'type' = 'cancel'`,
+          sql`${agentOutbox.body}->'lane'->>'botId' = ${parsed.lane.botId}`,
+          sql`${agentOutbox.body}->'lane'->>'groupId' = ${parsed.lane.groupId}`,
+        ),
+      );
+    if (
+      pending.some(
+        ({ body: queuedBody }) =>
+          queuedBody.type === "cancel" &&
+          "epoch" in queuedBody &&
+          queuedBody.epoch !== undefined &&
+          queuedBody.epoch >= epoch,
+      )
+    )
+      return true;
+    for (const row of pending)
+      await tx.delete(agentOutbox).where(and(eq(agentOutbox.computerId, computerId), eq(agentOutbox.seq, row.seq)));
+  }
   // 和上行处理同样先锁电脑再锁 run，避免并发审批决定与 run 收尾互等。
   if (runId !== undefined) {
     const [run] = await tx
@@ -168,7 +197,7 @@ export async function acceptUplinkFrame(
     body: AgentToControl,
     afterCommit: (() => Promise<void> | void)[],
     afterRollback: (() => void)[],
-  ) => Promise<void>,
+  ) => Promise<void | Omit<UplinkRejection, "seq">>,
 ): Promise<Accepted> {
   const header = UplinkHeader.safeParse(raw);
   if (!header.success || header.data.conn !== conn) return { kind: "stale" };
@@ -181,7 +210,33 @@ export async function acceptUplinkFrame(
     try {
       result = await db.transaction(async (tx): Promise<Accepted> => {
         const botIds: BotId[] = [];
-        if (process && parsed.success && "runId" in parsed.data.body && parsed.data.body.runId !== undefined) {
+        if (process && parsed.success && parsed.data.body.type === "work_append") {
+          const lane = parsed.data.body.lane;
+          const [scope] = await tx
+            .select({ ownerId: computers.ownerId })
+            .from(computers)
+            .innerJoin(bots, and(eq(bots.id, lane.botId), eq(bots.ownerId, computers.ownerId)))
+            .where(eq(computers.id, computerId));
+          if (scope !== undefined) {
+            await lockOwner(tx, UserId.parse(scope.ownerId), "shared");
+            await shareBotRunsLock(tx, lane.botId);
+            botIds.push(lane.botId);
+            await tx
+              .select({ id: computers.id })
+              .from(computers)
+              .where(eq(computers.ownerId, scope.ownerId))
+              .orderBy(asc(computers.id))
+              .for("no key update");
+          }
+        }
+        if (
+          process &&
+          parsed.success &&
+          parsed.data.body.type !== "work_append" &&
+          "runId" in parsed.data.body &&
+          parsed.data.body.runId !== undefined &&
+          parsed.data.body.runId !== null
+        ) {
           const [run] = await tx
             .select({
               botId: runs.botId,
@@ -192,8 +247,7 @@ export async function acceptUplinkFrame(
             })
             .from(runs)
             .where(and(eq(runs.id, parsed.data.body.runId), eq(runs.computerId, computerId)));
-          if (run !== undefined && run.botId !== null && (run.routineRunId !== null || run.tableRole !== null))
-            botIds.push(BotId.parse(run.botId));
+          if (run !== undefined && run.botId !== null) botIds.push(BotId.parse(run.botId));
           if (run !== undefined && run.tableRole !== null && run.groupId !== null && run.ownerId !== null) {
             const members = await tx
               .select({ botId: groupMembers.botId })
@@ -249,7 +303,7 @@ export async function acceptUplinkFrame(
           }
         } else {
           const body = parsed.data.body;
-          if ("runId" in body && body.runId !== undefined) {
+          if (body.type !== "work_append" && "runId" in body && body.runId !== undefined) {
             const [run] = await tx.select().from(runs).where(eq(runs.id, body.runId));
             if (
               run === undefined ||
@@ -262,14 +316,15 @@ export async function acceptUplinkFrame(
               rejection = { seq: frame.seq, code: "run_closed", runId: body.runId };
           }
           if (rejection === undefined) {
-            if ("runId" in body && body.runId !== undefined) {
+            if (body.type !== "work_append" && "runId" in body && body.runId !== undefined) {
               // 删除例行先锁例行再锁 run；信封内的结账、审批停跑也必须遵守这个顺序。
               await tx.execute(sql`SELECT ${routines.id} FROM ${routines}
               JOIN ${routineRuns} ON ${routineRuns.routineId} = ${routines.id}
               JOIN ${runs} ON ${runs.routineRunId} = ${routineRuns.id}
               WHERE ${runs.id} = ${body.runId} FOR UPDATE OF ${routines}`);
             }
-            await handle(tx, body, effects, rollbacks);
+            const handled = await handle(tx, body, effects, rollbacks);
+            if (handled !== undefined) rejection = { seq: frame.seq, ...handled };
           }
         }
         return { kind: "ack", upTo: frame.seq, rejected: rejection === undefined ? [] : [rejection] };

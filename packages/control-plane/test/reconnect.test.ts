@@ -99,6 +99,8 @@ it("重连握手里 config 还没发出时来的活不派给这条连接，confi
       token: owner.computer.token,
       version: "test",
       protocol: 3,
+      installId: owner.computer.computerId,
+      piSessionVersion: 3,
       uplinkStream: owner.computer.computerId,
       downApplied: 0,
       activeRuns: [],

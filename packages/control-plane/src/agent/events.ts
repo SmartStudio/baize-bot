@@ -312,7 +312,7 @@ const textPrefixes = new Map<string, TextPrefix>();
 const resultRuns = new Set<RunId>();
 
 export function eventMemoryRollback(body: AgentToControl): () => void {
-  if (!("runId" in body) || body.runId === undefined) return () => undefined;
+  if (!("runId" in body) || body.runId === undefined || body.runId === null) return () => undefined;
   const runId = body.runId;
   const prefixes = new Map([...textPrefixes].filter(([, prefix]) => prefix.runId === runId));
   const result = resultRuns.has(runId);

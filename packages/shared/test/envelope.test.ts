@@ -23,7 +23,9 @@ describe("协议 3 信封登记", () => {
       AgentToControl.options.map((option) => option.shape.type.value).toSorted(),
     );
     expect(Object.keys(DOWNLINK_DELIVERY).toSorted()).toEqual(
-      ControlToAgent.options.map((option) => option.shape.type.value).toSorted(),
+      ControlToAgent.innerType()
+        .options.map((option) => option.shape.type.value)
+        .toSorted(),
     );
   });
   it("bare 报文不能伪装成可靠帧占用序号", () => {
@@ -46,5 +48,30 @@ describe("协议 3 信封登记", () => {
       activeRuns: [],
     });
     expect(hello.type === "hello" && hello.protocol).toBe(1);
+    expect(hello.type === "hello" && hello.installId).toBe("00000000-0000-0000-0000-000000000000");
+    expect(hello.type === "hello" && hello.piSessionVersion).toBe(1);
+  });
+  it("work_append 最多携带 64 行", () => {
+    const append = {
+      type: "work_append",
+      lane: { botId: "b1", groupId: "g1", stream: "chat", epoch: 1 },
+      runId: null,
+      fromSeq: 0,
+      lines: Array.from({ length: 64 }, () => "line"),
+      head: "0".repeat(64),
+      cause: "import",
+    };
+    expect(AgentToControl.safeParse(append).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...append, lines: [...append.lines, "65"] }).success).toBe(false);
+  });
+  it("cancel 接受 runId 或 lane 代际，拒绝两者兼有和不完整 lane", () => {
+    expect(ControlToAgent.safeParse({ type: "cancel", runId: "r1" }).success).toBe(true);
+    expect(ControlToAgent.safeParse({ type: "cancel", lane: { botId: "b1", groupId: "g1" }, epoch: 1 }).success).toBe(
+      true,
+    );
+    expect(
+      ControlToAgent.safeParse({ type: "cancel", runId: "r1", lane: { botId: "b1", groupId: "g1" }, epoch: 1 }).success,
+    ).toBe(false);
+    expect(ControlToAgent.safeParse({ type: "cancel", lane: { botId: "b1", groupId: "g1" } }).success).toBe(false);
   });
 });

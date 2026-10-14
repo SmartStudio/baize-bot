@@ -44,7 +44,7 @@ type LegacyBotText = {
   done: boolean;
 };
 
-export async function openAgent(port: number): Promise<AgentClient> {
+export async function openAgent(port: number, options: { readonly ackDownlink?: boolean } = {}): Promise<AgentClient> {
   const socket = new WebSocket(`ws://localhost:${port}${AGENT_PATH}`);
   const inbox: ControlToAgent[] = [];
   const waiters: ((message: ControlToAgent) => void)[] = [];
@@ -95,7 +95,7 @@ export async function openAgent(port: number): Promise<AgentClient> {
     if (typeof value === "object" && value !== null && "type" in value && value.type === "downlink") {
       const frame = DownlinkFrame.parse(value);
       downApplied = Math.max(downApplied, frame.seq);
-      sendBody({ type: "downlink_ack", upTo: downApplied });
+      if (options.ackDownlink !== false) sendBody({ type: "downlink_ack", upTo: downApplied });
       const message = frame.body;
       const waiter = waiters.shift();
       if (waiter === undefined) inbox.push(message);
@@ -219,14 +219,21 @@ export type HelloResult = {
   readonly runStates: readonly Extract<ControlToAgent, { type: "pause" | "resume" }>[];
 };
 
+export type HelloOverrides = {
+  readonly installId?: string;
+  readonly piSessionVersion?: number;
+  readonly protocol?: number;
+};
+
 export async function helloAgent(
   port: number,
   computerId: ComputerId,
   token: string,
   activeRuns: readonly RunId[] = [],
+  overrides: HelloOverrides = {},
 ): Promise<HelloResult> {
   const agent = await openAgent(port);
-  sendHello(agent, computerId, token, activeRuns);
+  sendHello(agent, computerId, token, activeRuns, overrides);
   return { agent, ...(await expectHello(agent)) };
 }
 
@@ -235,13 +242,16 @@ export function sendHello(
   computerId: ComputerId,
   token: string,
   activeRuns: readonly RunId[] = [],
+  overrides: HelloOverrides = {},
 ): void {
   agent.send({
     type: "hello",
     computerId,
     token,
     version: "test",
-    protocol: 3,
+    protocol: overrides.protocol ?? 3,
+    installId: overrides.installId ?? computerId,
+    piSessionVersion: overrides.piSessionVersion ?? 3,
     uplinkStream: computerId,
     downApplied: 0,
     activeRuns: [...activeRuns],

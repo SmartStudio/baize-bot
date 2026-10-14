@@ -93,6 +93,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     token: z.string(),
     version: z.string(),
     protocol: z.number().int().nonnegative().default(1),
+    installId: z.string().uuid().default("00000000-0000-0000-0000-000000000000"),
+    piSessionVersion: z.number().int().positive().default(1),
     uplinkStream: z.string().min(1).max(128).default("legacy"),
     downApplied: z.number().int().nonnegative().default(0),
     activeRuns: z.array(RunId),
@@ -374,11 +376,36 @@ export const AgentToControl = z.discriminatedUnion("type", [
     groupId: GroupId,
     targetBotId: BotId.nullable(),
   }),
+  z.object({
+    type: z.literal("work_append"),
+    lane: z.object({
+      botId: BotId,
+      groupId: GroupId,
+      stream: z.enum(["chat", "table"]),
+      epoch: z.number().int().positive(),
+    }),
+    runId: RunId.nullable(),
+    fromSeq: z.number().int().nonnegative(),
+    lines: z.array(z.string()).max(64),
+    head: z.string().regex(/^[0-9a-f]{64}$/),
+    cause: z.enum(["turn_end", "before_approval", "before_effect", "compact", "settled", "import"]),
+  }),
 ]);
 export type AgentToControl = z.infer<typeof AgentToControl>;
+export type WorkAppend = Extract<AgentToControl, { type: "work_append" }>;
 
 // 控制面收下 hello 后必须回 welcome。电脑代理只在收到 welcome 时把重连退避清零。
-export const ControlToAgent = z.discriminatedUnion("type", [
+const CancelControlMessage = z
+  .object({
+    type: z.literal("cancel"),
+    runId: RunId.optional(),
+    lane: z.object({ botId: BotId, groupId: GroupId }).optional(),
+    epoch: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
+  CancelControlMessage,
   z.object({
     type: z.literal("mcp_discover"),
     requestId: z.string().uuid(),
@@ -430,6 +457,13 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
+    lane: z.object({
+      epoch: z.number().int().positive(),
+      heads: z.object({
+        chat: z.object({ seq: z.number().int().nonnegative(), head: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+        table: z.object({ seq: z.number().int().nonnegative(), head: z.string().regex(/^[0-9a-f]{64}$/) }).optional(),
+      }),
+    }),
     // 触发这次 prompt 的那条群消息：用户发的、队友 @ 的、交接卡或例行写进群里的那条。
     messageId: MessageId,
     text: z.string(),
@@ -471,7 +505,6 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),
-  z.object({ type: z.literal("cancel"), runId: RunId }),
   z.object({
     type: z.literal("approval_result"),
     runId: RunId,
@@ -508,6 +541,13 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     attempt: Timestamp,
   }),
 ]);
+export const ControlToAgent = ControlToAgentDiscriminatedUnion.refine(
+  (message) =>
+    message.type !== "cancel" ||
+    (message.runId !== undefined && message.lane === undefined && message.epoch === undefined) ||
+    (message.runId === undefined && message.lane !== undefined && message.epoch !== undefined),
+  { message: "cancel 必须指定一个 run 或带代际的道" },
+);
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
 
 export const AGENT_PROTOCOL = 3;
@@ -544,6 +584,7 @@ export const UPLINK_DELIVERY = {
   task_checklist: "reliable",
   mention: "reliable",
   skill_offer: "reliable",
+  work_append: "reliable",
   handoff: "reliable",
   handoff_accept: "reliable",
   set_chief: "reliable",
@@ -568,13 +609,25 @@ export const RUN_CLOSED_ACCEPTS: ReadonlySet<AgentToControl["type"]> = new Set([
   "run_done",
   "bot_text_done",
   "bot_tool_call",
+  "work_append",
 ]);
-export const UplinkRejectionCode = z.enum(["stale_epoch", "not_holder", "run_closed", "invalid"]);
+export const UplinkRejectionCode = z.enum([
+  "stale_epoch",
+  "not_holder",
+  "run_closed",
+  "seq_mismatch",
+  "head_mismatch",
+  "invalid",
+]);
 export type UplinkRejectionCode = z.infer<typeof UplinkRejectionCode>;
 export const UplinkRejection = z.object({
   seq: z.number().int().positive(),
   code: UplinkRejectionCode,
   runId: RunId.optional(),
+  nextSeq: z.number().int().nonnegative().optional(),
+  lane: z
+    .object({ botId: BotId, groupId: GroupId, stream: z.enum(["chat", "table"]), epoch: z.number().int().positive() })
+    .optional(),
 });
 export type UplinkRejection = z.infer<typeof UplinkRejection>;
 

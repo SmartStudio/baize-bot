@@ -9,8 +9,9 @@ import type {
   Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { ownerOfGroup, startTableRun } from "../repo/runs.js";
-import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
+import { ownerOfGroup } from "../repo/runs.js";
+import { placeRun } from "./place-run.js";
+import { TransactionRollbackError } from "drizzle-orm";
 import type { AgentHub } from "./hub.js";
 import type { SelectionFailure } from "./computer-selection.js";
 import { computerFor } from "./dispatch.js";
@@ -55,43 +56,43 @@ export async function sendHiddenRun(deps: HiddenRunDeps, input: HiddenRunInput):
   const selected = await computerFor(deps.db, deps.agents, ownerId);
   if (selected.kind === "failed") return { kind: "unplaced", reason: selected.reason };
 
-  const started = await deps.db.transaction(async (tx) => {
-    await lockEnvelopeComputer(tx, selected.computer.id, input.botId);
-    const run = await startTableRun(tx as unknown as Db, {
-      ownerId,
-      computerId: selected.computer.id,
-      botId: input.botId,
-      groupId: input.groupId,
-      role: input.role,
-      visibleTo: input.visibleTo,
-    });
-    if (run.kind !== "started") return run;
-    const queued = await enqueueDownlink(
-      tx,
-      selected.computer.id,
-      {
-        type: "prompt",
-        runId: run.runId,
-        botId: input.botId,
-        groupId: input.groupId,
-        messageId: run.messageId,
-        text: "",
-        origin: { kind: "table" },
-        reason: "mentioned",
-        group: { id: input.groupId, number: "", title: "", kind: "team" },
-        context: [],
-        purpose: PURPOSE_OF_ROLE[input.role],
-        routine: null,
-        table: { ...input.table, role: input.role },
-        task: null,
-        members: [],
-      },
-      run.runId,
+  let started;
+  try {
+    started = await deps.db.transaction((tx) =>
+      placeRun(
+        tx,
+        {
+          ownerId,
+          botId: input.botId,
+          groupId: input.groupId,
+          table: { role: input.role, visibleTo: input.visibleTo },
+          prompt: async (_runId, messageId) => ({
+            type: "prompt",
+            botId: input.botId,
+            groupId: input.groupId,
+            messageId,
+            text: "",
+            origin: { kind: "table" },
+            reason: "mentioned",
+            group: { id: input.groupId, number: "", title: "", kind: "team" },
+            context: [],
+            purpose: PURPOSE_OF_ROLE[input.role],
+            routine: null,
+            table: { ...input.table, role: input.role },
+            task: null,
+            members: [],
+          }),
+        },
+        () => computerFor(tx as unknown as Db, deps.agents, ownerId),
+      ),
     );
-    return queued ? run : tx.rollback();
-  });
-  if (started.kind === "busy") return { kind: "busy" };
+  } catch (error) {
+    if (error instanceof TransactionRollbackError) return { kind: "busy" };
+    throw error;
+  }
   if (started.kind === "not_member") return { kind: "skipped" };
-  if (deps.agents.flushOutbox) await deps.agents.flushOutbox(selected.computer.id);
+  if (started.kind === "unplaced") return { kind: "unplaced", reason: started.reason };
+  if (deps.agents.flushOutbox)
+    for (const computerId of started.flushComputerIds) await deps.agents.flushOutbox(computerId);
   return { kind: "sent", runId: started.runId, messageId: started.messageId };
 }

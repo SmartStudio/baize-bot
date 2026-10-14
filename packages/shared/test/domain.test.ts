@@ -232,6 +232,7 @@ describe("M7 群与主题任务的共享形状", () => {
       runId: "r1",
       botId: "b1",
       groupId: "g1",
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "hi",
       origin: { kind: "user" },
@@ -254,6 +255,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "x",
       origin: { kind: "user" },
@@ -276,6 +278,7 @@ describe("M7 群与主题任务的共享形状", () => {
     const prompt = {
       type: "prompt",
       ...run,
+      lane: { epoch: 1, heads: {} },
       messageId: "m1",
       text: "x",
       origin: { kind: "user" },

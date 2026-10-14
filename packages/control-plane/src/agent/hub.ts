@@ -62,6 +62,7 @@ import {
   replayOutbox,
 } from "./envelope.js";
 import { handleEnvelopedEvent } from "./envelope-events.js";
+import { setComputerLease } from "./lease-clock.js";
 import type { GroupTurns } from "./group-turn.js";
 
 export const AGENT_PATH = "/agent";
@@ -102,6 +103,9 @@ export type AgentConnection = {
   /** 这条连接下发给电脑的网关 key 明文。hello 时现生成，只活在这条连接上。 */
   readonly gatewayKey: string;
   readonly conn: number;
+  readonly installId: string;
+  readonly piSessionVersion: number;
+  leaseRenewedAt: number;
   readonly acknowledgements: AckBatch;
   downSent: number;
   /** 当前连接的工具调用缓存；跨重连的消息身份由 runId、callId 的数据库主键固定。 */
@@ -119,6 +123,7 @@ export type AgentHubDeps = {
   readonly disconnectGraceMs?: number | undefined;
   readonly silenceTimeoutMs?: number | undefined;
   readonly mcpDiscoveryTimeoutMs?: number | undefined;
+  readonly leaseRenewalIntervalMs?: number | undefined;
   readonly toolCrypto: ToolCrypto;
   readonly notifications: NoticePublisher;
 };
@@ -489,6 +494,19 @@ export class AgentHub {
   async #onFrame(conn: AgentConnection, raw: string, receivedAt: Date): Promise<void> {
     // 被新连接顶掉之后这条连接还排着的帧是旧代理的旧话，整条丢掉。从这里到 handler 返回，这台电脑不会换连接。
     if (this.#connections.get(conn.computerId) !== conn) return;
+    if (receivedAt.getTime() - conn.leaseRenewedAt >= (this.#deps.leaseRenewalIntervalMs ?? 5_000)) {
+      await setComputerLease(
+        this.#deps.db,
+        conn.computerId,
+        conn.conn,
+        new Date(
+          receivedAt.getTime() +
+            (this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS) +
+            (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS),
+        ),
+      );
+      conn.leaseRenewedAt = receivedAt.getTime();
+    }
     let json: unknown;
     try {
       json = JSON.parse(raw);
@@ -569,7 +587,13 @@ export class AgentHub {
   ): Promise<AgentConnection | null> {
     let accepted: AgentConnection | null = null;
     try {
-      const handshakeCursor = await beginHandshake(this.#deps.db, computer.id, hello);
+      const handshakeCursor = await beginHandshake(
+        this.#deps.db,
+        computer.id,
+        hello,
+        (this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS) +
+          (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS),
+      );
       const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
       // 判删号和入表之间没有 await：删号在前，这里看得见；在后，disconnectOwner 在表里找得到它。
       if (this.#deletedOwners.has(computer.ownerId)) {
@@ -583,6 +607,9 @@ export class AgentHub {
         socket,
         gatewayKey,
         conn: handshakeCursor.conn,
+        installId: hello.installId,
+        piSessionVersion: hello.piSessionVersion,
+        leaseRenewedAt: Date.now(),
         downSent: 0,
         acknowledgements: new AckBatch((ack) => {
           if (accepted !== null && this.#connections.get(computer.id) === accepted && socket.readyState === socket.OPEN)
@@ -662,14 +689,22 @@ export class AgentHub {
     if (this.#connections.get(closed.computerId) !== closed) return;
     this.#connections.delete(closed.computerId);
     closed.acknowledgements.stop();
-    const timer = setTimeout(() => {
-      this.#graceTimers.delete(closed.computerId);
-      this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
-        (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
+    const leaseUntil = new Date(Date.now() + (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS));
+    await setComputerLease(this.#deps.db, closed.computerId, closed.conn, leaseUntil);
+    // 缩租等待期间可能已经停机，不能在 closeAll 清理之后补建宽限计时器。
+    if (this.#lifecycle === "serving") {
+      const timer = setTimeout(
+        () => {
+          this.#graceTimers.delete(closed.computerId);
+          this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
+            (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
+          );
+        },
+        Math.max(0, leaseUntil.getTime() - Date.now()),
       );
-    }, this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS);
-    timer.unref();
-    this.#graceTimers.set(closed.computerId, timer);
+      timer.unref();
+      this.#graceTimers.set(closed.computerId, timer);
+    }
     const computer = await markComputerSleeping(this.#deps.db, closed.computerId, closed.gatewayKey);
     // 新连接的上线排在这个任务后面，这条休眠一定推在它的上线之前。
     if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });

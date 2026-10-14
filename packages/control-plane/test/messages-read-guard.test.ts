@@ -1,12 +1,11 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { scanMessagesTable, type MessagesSite } from "./helpers/messages-reads.js";
+import { scanMessagesTable, scanWorkEntriesTable, type MessagesSite } from "./helpers/messages-reads.js";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 
-/** 读 messages 的唯一出口，表怎么读、可见范围怎么拼都在这里；schema.ts 只是表定义。 */
-const HOME = new Set(["repo/messages.ts", "db/schema.ts"]);
+const HOME = new Set(["db/schema.ts"]);
 
 type Exception = {
   readonly file: string;
@@ -21,6 +20,12 @@ type Exception = {
  * 能带 viewer 的读已经带了，这里剩下的是读控制面自己写下的隐藏行，或者按 id 探一下存在。
  */
 const EXCEPTIONS: readonly Exception[] = [
+  {
+    file: "repo/work-records.ts",
+    fn: "readWorkLane",
+    sites: 1,
+    reason: "持有者拉快照，HTTP同快照租约授权，重建需原样条目",
+  },
   {
     file: "poker/hint.ts",
     fn: "refreshHintForRun",
@@ -55,23 +60,33 @@ function sourceFiles(): string[] {
 }
 
 const label = (file: string, site: MessagesSite) => `src/${file}:${site.line} ${site.fn} (${site.kind})`;
+const allowsException = (file: string, fn: string, table: "messages" | "workEntries") =>
+  (table === "messages" || file === "repo/work-records.ts") &&
+  EXCEPTIONS.some((entry) => entry.file === file && entry.fn === fn);
+const scanWorkReadsProbe = (body: string, header = `import { workEntries } from "../db/schema.js";\n`) =>
+  scanWorkEntriesTable("repo/probe.ts", header + body).filter((site) => !site.ok);
 
-describe("读 messages 必须带 viewer", () => {
-  it("repo/messages.ts 之外的读，要么同一条查询里拼了 messageVisibleTo，要么在白名单里", () => {
+describe("消息与工作记录的读取出口", () => {
+  it("messages 必须带 viewer 或登记理由，work_entries 的读只能走登记的持有者快照", () => {
     const unexplained: string[] = [];
     const seen = new Map<string, number>();
     for (const file of sourceFiles()) {
-      for (const site of scanMessagesTable(file, readFileSync(SRC + file, "utf8"))) {
-        if (site.ok) continue;
-        const key = `${file}#${site.fn}`;
-        seen.set(key, (seen.get(key) ?? 0) + 1);
-        if (!EXCEPTIONS.some((entry) => entry.file === file && entry.fn === site.fn))
-          unexplained.push(label(file, site));
-      }
+      const source = readFileSync(SRC + file, "utf8");
+      const tables: readonly ["messages" | "workEntries", MessagesSite[]][] = [
+        ["messages", file === "repo/messages.ts" ? [] : scanMessagesTable(file, source)],
+        ["workEntries", scanWorkEntriesTable(file, source)],
+      ];
+      for (const [table, sites] of tables)
+        for (const site of sites) {
+          if (site.ok) continue;
+          const key = `${file}#${site.fn}`;
+          seen.set(key, (seen.get(key) ?? 0) + 1);
+          if (!allowsException(file, site.fn, table)) unexplained.push(label(file, site));
+        }
     }
     expect(
       unexplained,
-      "这些地方直接读了 messages 却没带 viewer：查询里拼 messageVisibleTo(viewer)，或者改走 repo/messages.ts，实在不行才进 EXCEPTIONS 并写理由",
+      "这些地方绕过读取出口：messages 要带 viewer 或登记理由，work_entries 只能由 repo/work-records.ts 中登记的快照函数读",
     ).toEqual([]);
 
     const counts = EXCEPTIONS.map((entry) => ({
@@ -85,6 +100,75 @@ describe("读 messages 必须带 viewer", () => {
 
   it("每条白名单都写了理由", () => {
     expect(EXCEPTIONS.filter((entry) => entry.reason.trim() === "")).toEqual([]);
+  });
+});
+
+describe("工作记录守卫自己能分辨的写法", () => {
+  it("workEntries不能借messages白名单，repo/messages.ts也照常扫描工作记录", () => {
+    expect(allowsException("poker/hint.ts", "refreshHintForRun", "messages")).toBe(true);
+    expect(allowsException("poker/hint.ts", "refreshHintForRun", "workEntries")).toBe(false);
+    expect(allowsException("repo/work-records.ts", "readWorkLane", "workEntries")).toBe(true);
+    expect(HOME.has("repo/messages.ts")).toBe(false);
+  });
+  it("读 workEntries 即使带 viewer 也不能绕过唯一出口", () => {
+    expect(
+      scanWorkReadsProbe(
+        `export const f = (db: Db, v: Viewer) => db.select().from(workEntries).where(messageVisibleTo(v));`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      scanWorkReadsProbe(
+        `export const f = (db: Db) => db.select().from(runs).leftJoin(workEntries, eq(workEntries.runId, runs.id));`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("改名、命名空间和 query API 都拦下", () => {
+    expect(
+      scanWorkReadsProbe(
+        `export const f = (db: Db) => db.select().from(stored);`,
+        `import { workEntries as stored } from "../db/schema.js";\n`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      scanWorkReadsProbe(
+        `export const f = (db: Db) => db.select().from(schema.workEntries);`,
+        `import * as schema from "../db/schema.js";\n`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      scanWorkReadsProbe(`export const f = (db: Db) => db.query.workEntries.findMany();`).map((site) => site.kind),
+    ).toEqual(["query_api"]);
+  });
+
+  it("原始SQL与未知表转交都拦下", () => {
+    expect(
+      scanWorkReadsProbe("export const f = (db: Db) => db.execute(sql`select line from work_entries`);").map(
+        (site) => site.kind,
+      ),
+    ).toEqual(["raw_sql"]);
+    expect(
+      scanWorkReadsProbe(`export const f = () => sql.raw('select line from public."work_entries"');`).map(
+        (site) => site.kind,
+      ),
+    ).toEqual(["raw_sql"]);
+    expect(
+      scanWorkReadsProbe(`const alias = workEntries; export const f = (db: Db) => db.select().from(alias);`).map(
+        (site) => site.kind,
+      ),
+    ).toEqual(["unclassified"]);
+    expect(scanWorkReadsProbe(`export const f = () => helper(workEntries);`).map((site) => site.kind)).toEqual([
+      "unclassified",
+    ]);
+  });
+
+  it("写入、列和类型引用不算读", () => {
+    expect(scanWorkReadsProbe(`export const f = (db: Db) => db.insert(workEntries).values({ seq: 0 });`)).toEqual([]);
+    expect(scanWorkReadsProbe(`export const f = (db: Db) => db.update(workEntries).set({ line: 'x' });`)).toEqual([]);
+    expect(
+      scanWorkReadsProbe(`export const f = (db: Db) => db.delete(workEntries).where(eq(workEntries.seq, 0));`),
+    ).toEqual([]);
+    expect(scanWorkReadsProbe(`export type Row = typeof workEntries.$inferSelect;`)).toEqual([]);
   });
 });
 

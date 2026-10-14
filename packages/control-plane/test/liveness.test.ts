@@ -37,6 +37,7 @@ beforeAll(async () => {
     publisher: { intervalMs: 24 * HOUR_MS },
     silenceTimeoutMs: SILENCE_MS,
     disconnectGraceMs: 200,
+    leaseRenewalIntervalMs: HEARTBEAT_MS,
   });
 });
 
@@ -239,10 +240,18 @@ it("判死走的是正常离线处理：离线推送、断线收尾和 stuck 照
 it("一直在发心跳的电脑不会被误判", async () => {
   const o = await owner();
   const local = await live(o.local);
+  const [initial] = await database.sql<{ lease_until: string }[]>`
+    SELECT lease_until FROM computers WHERE id = ${o.local.computerId}`;
   // 远程比本机晚连上、一帧不发。它被判死的时候，本机从连上算起已经过了不止一个阈值。
   const { agent: silent } = await helloAgent(server.port, o.remote.computerId, o.remote.token);
 
   const changes = await untilStatus(o.push, o.remote.computerId, "sleeping");
+  const [renewed] = await database.sql<{ lease_until: string; live: boolean }[]>`
+    SELECT lease_until, lease_until > clock_timestamp() AS live FROM computers WHERE id = ${o.local.computerId}`;
+  expect(new Date(renewed?.lease_until ?? "").getTime(), "落地心跳已推进租约时钟").toBeGreaterThan(
+    new Date(initial?.lease_until ?? "").getTime(),
+  );
+  expect(renewed?.live, "静默判死其他电脑时，本机数据库租约仍有效").toBe(true);
   expect(
     changes.filter((change) => change.computerId === o.local.computerId && change.status === "sleeping"),
     "发着心跳的本机没被判死",

@@ -107,6 +107,16 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 `bot_text` 是 bare 流式片段，始终带 `done: false`；每个文字块结束时 reporter 汇总该块全文，发送 reliable 的 `bot_text_done`（带相同 `messageId` 和 `text`）。取消当前 run 会先把该 run 挂着的审批在本地结算为 expired，等工具结果写入会话后再沿用 `abortSession` 中止；取消排队中的 run 会在轮到它时跳过。两种取消都会立刻从 `activeRuns()` 移除该 run，且不发送 `run_done`。过期审批不发 `approval_abandoned`。
 
+每条 prompt 的租约道记录在 `src/lane-fence.ts`，按 runId 固定 Bot、群、代际和 chat/table 流。`cancel{lane, epoch}` 只选同一道上代际小于目标的在跑和排队 run，随后复用单 run 的取消路径；等于或高于目标代际的 run 保持运行。
+
+## 租约头和 before_effect
+
+主会话、牌桌会话和临时帮手都在 Pi `before_provider_headers` 钩子附加 `x-baize-lane: <botId>/<groupId>/<epoch>`。租约信息按本次 runId 取，帮手固定使用父 run，MCP 代执行的 POST 也带同一头。
+
+`tool_call` 先过原有闸门和审批。审批放行后，动作属于 `read` 或 `write_workspace` 就直接继续；其余动作调用 `RunnerConfig.workAppend`，发送空 `lines`、`fromSeq: 0`、`head: EMPTY_WORK_HEAD`、`cause: before_effect` 的可靠探针，并等待累计 ACK。只有 `ok` 可以执行。`stale_epoch` 和 `not_holder` 记 blocked，原因是「这个群已经换到另一台电脑上了」；缺回调、连接不在或等待时断线，原因是「和白泽断开了，这一步先不做」。其他拒收也阻止执行，原因是「工作记录没有确认，这一步先不做」。
+
+被拒的探针留在本地等待表，直到 Pi 写下工具结果；道取消在这个结果之后再中止会话，保留准确的 blocked 原因。运行器停机先解除所有探针等待，继续沿用唯一一条 `run_done` 的收尾。当前仅发送空探针，不上传 Pi 条目，不做镜像或重建；后续哈希链使用 shared `advanceWorkHead`。
+
 ## 扩展工具
 
 `RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `src/index.ts:600-630` 的顺序注册 `extensionTools`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具，紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。

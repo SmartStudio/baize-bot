@@ -586,6 +586,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const deleted = await deleteBot(db, c.get("user").id, botId.data);
     if (deleted.kind === "not_found") return c.json(NOT_FOUND, 404);
     if (deleted.kind === "assistant") return c.json({ error: "主助理不能删，你在首页说的话都由它来接" }, 409);
+    for (const computerId of deleted.cancelComputers) await agents.flushOutbox(computerId);
     await agents.sendConfig(c.get("user").id);
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
     for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });

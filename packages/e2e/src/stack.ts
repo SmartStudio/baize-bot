@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { connect as connectTcp, createServer as createTcpServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -9,6 +9,7 @@ import postgres from "postgres";
 import { WebSocket } from "ws";
 import {
   AgentToControl,
+  AGENT_PROTOCOL,
   ComputerListResponse,
   ComputerTokenResponse,
   ControlToAgent,
@@ -20,7 +21,7 @@ import {
   type ComputerId,
   type Platform,
 } from "@baize/shared";
-import { createRunner, type PromptMessage } from "@baize/bot-runner";
+import { createRunner, CURRENT_SESSION_VERSION, type PromptMessage } from "@baize/bot-runner";
 import { type AgentOptions, startAgent } from "@baize/computer-agent";
 import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
 import {
@@ -52,6 +53,8 @@ export type StackOptions = {
   readonly bootstrap?: "seed" | "register" | SignUp;
   readonly startComputer?: boolean;
   readonly disconnectGraceMs?: number;
+  readonly silenceTimeoutMs?: number;
+  readonly leaseRenewalIntervalMs?: number;
   /** 电脑代理用子进程跑真入口 main.ts。进程内 import 走不到 main.ts 里对环境变量的处理。 */
   readonly agentProcess?: boolean;
   /** 进程内电脑代理经一个 TCP 转发连 /agent，用例可以掐断再接上这一段，模型网关仍直连控制面。 */
@@ -162,6 +165,10 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       ...(options.routinesNow === undefined ? {} : { scheduler: { now: options.routinesNow, intervalMs: DAY_MS } }),
       ...(options.pokerSeed === undefined ? {} : { poker: { seed: options.pokerSeed } }),
       ...(options.disconnectGraceMs === undefined ? {} : { disconnectGraceMs: options.disconnectGraceMs }),
+      ...(options.silenceTimeoutMs === undefined ? {} : { silenceTimeoutMs: options.silenceTimeoutMs }),
+      ...(options.leaseRenewalIntervalMs === undefined
+        ? {}
+        : { leaseRenewalIntervalMs: options.leaseRenewalIntervalMs }),
     });
     closers.push(() => server.close());
     const baseUrl = `http://127.0.0.1:${server.port}`;
@@ -469,7 +476,9 @@ async function connectComputer(options: {
       AgentToControl.parse({
         type: "hello",
         ...options,
-        protocol: 3,
+        protocol: AGENT_PROTOCOL,
+        installId: randomUUID(),
+        piSessionVersion: CURRENT_SESSION_VERSION,
         uplinkStream: `probe-${randomBytes(8).toString("hex")}`,
         downApplied: 0,
         activeRuns: [],

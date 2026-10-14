@@ -278,12 +278,13 @@ describe("review_submit", () => {
   it("先收到但被拖住的旧稿不会顶掉后收到的新稿", async () => {
     const owner = await ownerWithProject();
     const remote = ComputerTokenResponse.parse(await (await owner.client.post("/api/computers/remote")).json());
-    // 例行派给在线的电脑：先只连远程电脑派出旧的一次，再连本机派出新的一次，两份复盘走两条电脑链，能并行处理。
+    // 旧电脑租约到期后本机接管，保留旧 run，让两份复盘沿不同电脑链并行处理。
     const far = (await helloAgent(server.server.port, remote.computerId, remote.token)).agent;
     let near: AgentClient | null = null;
     try {
       const older = await routinePrompt(owner, far, owner.projectId);
       near = (await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token)).agent;
+      await database.sql`UPDATE computers SET lease_until = now() - interval '1 second' WHERE id = ${remote.computerId}`;
       const newer = await routinePrompt(owner, near, owner.projectId);
       const hold = await holdRun(older);
       try {

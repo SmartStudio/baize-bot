@@ -351,7 +351,7 @@ describe("收尾时收掉还在流的文字", () => {
         await stream(old, oldSaying, "旧电脑上说到一半的话", false);
         const token = ComputerTokenResponse.parse(await (await old.client.post("/api/computers/remote")).json());
         remote = (await helloAgent(serverA.server.port, token.computerId, token.token)).agent;
-        // 本机掉线，下一条派到远程电脑：同一个 Bot、同一个群，旧 run 还开着，新 run 起来了。
+        // 安排租约先到期、断线收尾尚未发生，保留旧 run 验证两条 run 的收尾互斥。
         old.agent.close();
         await old.agent.closed();
         for (;;) {
@@ -363,6 +363,9 @@ describe("收尾时收掉还在流的文字", () => {
           )
             break;
         }
+        await database.sql`
+          UPDATE computers SET lease_until = now() - interval '1 second' WHERE id = ${old.computer.computerId}
+        `;
         expect((await old.client.post(`/api/groups/${old.groupId}/messages`, { text: "接着做下一件" })).status).toBe(
           201,
         );
@@ -832,6 +835,9 @@ describe("同 Bot 同群的收尾、建 run、删 Bot 排队", () => {
       )
         break;
     }
+    await database.sql`
+      UPDATE computers SET lease_until = now() - interval '1 second' WHERE id = ${old.computer.computerId}
+    `;
     expect((await old.client.post(`/api/groups/${old.groupId}/messages`, { text: "接着做下一件" })).status).toBe(201);
     const prompt = await remote.expect("prompt");
     expect(prompt.botId).toBe(old.botId);
@@ -950,31 +956,26 @@ describe("同 Bot 同群的收尾、建 run、删 Bot 排队", () => {
     }
   });
 
-  it("帧已过 resolveRun 时它的 Bot 被删、外键把 run 的 bot_id 置空：放行后一行不写、不推", async () => {
+  it("Bot 已删除且 run 的 bot_id 被外键置空：迟到的可靠清单帧一行不写、不推", async () => {
     const { live, sales, service } = await teamRun();
     expect((await live.client.delete(`/api/bots/${service.id}`)).status).toBe(204);
     const before = (await groupOf(live)).task.checklist;
     const checklist = [{ text: "Bot 删了之后的清单", done: false, ownerBotId: null }];
-    const held = gates.a.arm(LOCK_OPEN_RUN);
     try {
-      send(live, { type: "task_checklist", checklist });
-      await held.reached;
       expect((await live.client.delete(`/api/bots/${sales.id}`)).status).toBe(204);
       expect((await live.client.get(`/api/groups/${live.groupId}`)).status).toBe(404);
-      held.release();
-      await held.finished;
+      const [run] = await database.sql<{ bot_id: string | null }[]>`SELECT bot_id FROM runs WHERE id = ${live.runId}`;
+      expect(run?.bot_id).toBeNull();
+      send(live, { type: "task_checklist", checklist });
       const pushed = await barrier(live.agent, live.push, live.groupId, "删空之后的清单");
       // 删 Bot 自己会推经手清空的 task_updated，这里只看清单帧的产物。
       const checklists = pushed.flatMap((push) => (push.type === "task_updated" ? [push.task.checklist] : []));
       expect(checklists).not.toContainEqual(checklist);
       expect(pushedKinds(pushed)).not.toContain("message:system");
-      const [run] = await database.sql<{ bot_id: string | null }[]>`SELECT bot_id FROM runs WHERE id = ${live.runId}`;
-      expect(run?.bot_id).toBeNull();
       const [task] = await database.sql<{ checklist: unknown }[]>`
         SELECT checklist FROM tasks WHERE group_id = ${live.groupId}`;
       expect(task?.checklist).toEqual(before);
     } finally {
-      held.release();
       live.close();
     }
   });
@@ -1014,7 +1015,7 @@ describe("同 Bot 同群的收尾、建 run、删 Bot 排队", () => {
     }
   });
 
-  it("删 Bot 已锁住它的 run 之后才建的群里派给它：建 run 等删除提交，Bot 已不在群里就不建，删除回 204 不死锁", async () => {
+  it("删 Bot 已锁住它的 run 之后才建的群里派给它：建 run 等删除提交，Bot 已不在群里就不再给它建，删除回 204 不死锁", async () => {
     const live = await soloRun();
     const other = CreateBotResponse.parse(await (await live.client.post("/api/bots", { name: "小新" })).json()).bot;
     await live.agent.expect("config");
@@ -1056,7 +1057,17 @@ describe("同 Bot 同群的收尾、建 run、删 Bot 排队", () => {
       expect(response.status, await response.clone().text()).toBe(204);
       expect((await posting).status).toBe(201);
       expect(prompt, "删除提交之后不再给它派活").toBeUndefined();
-      expect(await database.sql`SELECT id FROM runs WHERE group_id = ${group.id}`).toEqual([]);
+      const placed = await database.sql<
+        { bot_id: string | null }[]
+      >`SELECT bot_id FROM runs WHERE group_id = ${group.id}`;
+      expect(
+        placed.filter((run) => run.bot_id === live.botId),
+        "不再给被删除的 Bot 建 run",
+      ).toEqual([]);
+      expect(
+        placed.every((run) => run.bot_id === other.id),
+        "重新路由只允许派给还在群里的 Bot",
+      ).toBe(true);
       expect((await groupOf(live, group.id)).group.botIds).toEqual([other.id]);
     } finally {
       deletion.release();

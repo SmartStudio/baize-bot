@@ -14,14 +14,28 @@ export type MessagesSite = {
 const READ_METHODS = new Set(["from", "innerJoin", "leftJoin", "rightJoin", "fullJoin", "crossJoin"]);
 const WRITE_METHODS = new Set(["insert", "update", "delete"]);
 const COLUMN_MAP_METHODS = new Set(["select", "selectDistinct", "returning"]);
-const RAW_TABLE = /\b(?:from|join)\s+(?:"?public"?\.)?"?messages\b/i;
 
 /**
  * 找出一个源文件里所有碰 messages 表的地方。只看语法：从 db/schema 导进来的 `messages`（含 `as` 改名和
  * 命名空间导入）每出现一次都要归类，认不出来的归 unclassified，所以把表赋给别的变量、传给别的函数都躲不过去。
  */
 export function scanMessagesTable(fileName: string, text: string): MessagesSite[] {
+  return scanTable(fileName, text, "messages", "messages", true);
+}
+
+export function scanWorkEntriesTable(fileName: string, text: string): MessagesSite[] {
+  return scanTable(fileName, text, "workEntries", "work_entries", false);
+}
+
+function scanTable(
+  fileName: string,
+  text: string,
+  table: string,
+  sqlTable: string,
+  allowViewer: boolean,
+): MessagesSite[] {
   const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const rawTable = new RegExp(`\\b(?:from|join)\\s+(?:"?public"?\\.)?"?${sqlTable}\\b`, "i");
   const tableNames = new Set<string>();
   const schemaNamespaces = new Set<string>();
   for (const statement of source.statements) {
@@ -32,7 +46,7 @@ export function scanMessagesTable(fileName: string, text: string): MessagesSite[
     if (ts.isNamespaceImport(bindings)) schemaNamespaces.add(bindings.name.text);
     else
       for (const element of bindings.elements)
-        if ((element.propertyName ?? element.name).text === "messages") tableNames.add(element.name.text);
+        if ((element.propertyName ?? element.name).text === table) tableNames.add(element.name.text);
   }
 
   const sites: MessagesSite[] = [];
@@ -46,26 +60,31 @@ export function scanMessagesTable(fileName: string, text: string): MessagesSite[
 
   const visit = (node: ts.Node): void => {
     if (ts.isTypeQueryNode(node) || ts.isImportDeclaration(node)) return;
-    if (isTableReference(node, tableNames, schemaNamespaces)) classifyReference(node, add);
+    if (isTableReference(node, tableNames, schemaNamespaces, table)) classifyReference(node, add, allowViewer);
     else if (
       ts.isPropertyAccessExpression(node) &&
-      node.name.text === "messages" &&
+      node.name.text === table &&
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === "query"
     )
       add(node, "query_api", false);
-    else if (isStringPart(node) && RAW_TABLE.test(node.text)) add(node, "raw_sql", false);
+    else if (isStringPart(node) && rawTable.test(node.text)) add(node, "raw_sql", false);
     ts.forEachChild(node, visit);
   };
   visit(source);
   return sites;
 }
 
-function isTableReference(node: ts.Node, tableNames: ReadonlySet<string>, namespaces: ReadonlySet<string>): boolean {
+function isTableReference(
+  node: ts.Node,
+  tableNames: ReadonlySet<string>,
+  namespaces: ReadonlySet<string>,
+  table: string,
+): boolean {
   if (ts.isIdentifier(node)) return tableNames.has(node.text) && !isNamePosition(node);
   return (
     ts.isPropertyAccessExpression(node) &&
-    node.name.text === "messages" &&
+    node.name.text === table &&
     ts.isIdentifier(node.expression) &&
     namespaces.has(node.expression.text)
   );
@@ -98,13 +117,17 @@ function calleeName(call: ts.CallExpression): string | null {
   return ts.isPropertyAccessExpression(call.expression) ? call.expression.name.text : null;
 }
 
-function classifyReference(ref: ts.Node, add: (node: ts.Node, kind: MessagesSiteKind, ok: boolean) => void): void {
+function classifyReference(
+  ref: ts.Node,
+  add: (node: ts.Node, kind: MessagesSiteKind, ok: boolean) => void,
+  allowViewer: boolean,
+): void {
   const parent = ref.parent;
   if (ts.isPropertyAccessExpression(parent) && parent.expression === ref) return;
   if (ts.isCallExpression(parent) && parent.arguments[0] === ref) {
     const method = calleeName(parent);
     if (method !== null && READ_METHODS.has(method)) {
-      add(ref, "read", callsMessageVisibleTo(queryChain(parent)));
+      add(ref, "read", allowViewer && callsMessageVisibleTo(queryChain(parent)));
       return;
     }
     if (method !== null && WRITE_METHODS.has(method)) {

@@ -15,10 +15,19 @@ import {
   UPLINK_DELIVERY,
   UplinkAck,
 } from "@baize/shared";
-import { createRunner, discoverMcpTools, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
+import {
+  createRunner,
+  CURRENT_SESSION_VERSION,
+  discoverMcpTools,
+  publishDraft,
+  type Runner,
+  type RunnerConfig,
+} from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
+import { loadInstallId } from "./install-id.js";
+import { WorkAppendChannel } from "./work-append.js";
 
 export interface AgentRunnerConfig extends RunnerConfig {
   readonly browser: NonNullable<RunnerConfig["browser"]>;
@@ -88,6 +97,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let downlinkCursor: DownlinkCursor | null = null;
   let resettingTransport = false;
   const resetReports: AgentToControl[] = [];
+  let installId: string | null = null;
   const reliableSends = new Set<Promise<void>>();
   const discoveries = new Map<AbortController, Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
@@ -158,6 +168,25 @@ export function startAgent(options: AgentOptions): AgentHandle {
     reliableSends.add(pending);
   };
 
+  const workAppends = new WorkAppendChannel({
+    connected: () =>
+      !stopping &&
+      link.phase === "open" &&
+      link.socket.readyState === WebSocket.OPEN &&
+      conn !== null &&
+      outbox !== null,
+    append: async (frame) => {
+      const stored = await outbox!.append(frame);
+      return { seq: stored.seq, body: frame };
+    },
+    send: sendStored,
+    cancel: (lane, epoch) => runner?.cancel({ lane: { botId: lane.botId, groupId: lane.groupId }, epoch }),
+    failed: (error) => {
+      log(`工作记录探针落盘失败：${String(error)}`);
+      void stop().catch((stopError: unknown) => log(`代理停机失败：${String(stopError)}`));
+    },
+  });
+
   const stopHeartbeat = (): void => {
     if (heartbeat === null) return;
     clearInterval(heartbeat);
@@ -186,6 +215,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         return;
       }
       await outbox.acknowledge(ack.data.upTo);
+      workAppends.acknowledge(ack.data);
       for (const rejected of ack.data.rejected) {
         if (rejected.code === "run_closed" && rejected.runId !== undefined) runner?.cancel(rejected.runId);
         else log(`可靠上行 ${rejected.seq} 被拒收：${rejected.code}`);
@@ -344,6 +374,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           preferences: message.preferences,
           dataDir,
           send: report,
+          workAppend: (appendFrame) => workAppends.append(appendFrame),
           browser: browserConfig,
         };
         if (runner === null) {
@@ -388,7 +419,9 @@ export function startAgent(options: AgentOptions): AgentHandle {
         return;
       }
       case "cancel":
-        runner?.cancel(message.runId);
+        if (message.runId !== undefined) runner?.cancel(message.runId);
+        else if (message.lane !== undefined && message.epoch !== undefined)
+          runner?.cancel({ lane: message.lane, epoch: message.epoch });
         return;
       case "poker_result": {
         if (runner === null) {
@@ -467,7 +500,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         .then(() => {
           if (stopping || link.phase !== "open" || link.socket !== socket) return;
           const pendingRuns = (outbox?.pending() ?? []).flatMap(({ body }) =>
-            "runId" in body && body.runId !== undefined ? [body.runId] : [],
+            "runId" in body && body.runId !== undefined && body.runId !== null ? [body.runId] : [],
           );
           const activeRuns = new Set([...(runner?.activeRuns() ?? []), ...pendingRuns]);
           socket.send(
@@ -477,6 +510,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
               token: options.token,
               version: options.version,
               protocol: AGENT_PROTOCOL,
+              installId,
+              piSessionVersion: CURRENT_SESSION_VERSION,
               uplinkStream: outbox?.stream,
               downApplied: downlinkCursor?.applied,
               activeRuns: [...activeRuns],
@@ -503,6 +538,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
     socket.on("close", (code) => {
       if ((link.phase !== "open" && link.phase !== "connecting") || link.socket !== socket) return;
+      workAppends.disconnect();
       stopHeartbeat();
       for (const control of discoveries.keys()) control.abort();
       if (code === AgentCloseCode.displaced) {
@@ -523,10 +559,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
   }
 
-  void ReliableOutbox.openForComputer(dataDir, options.computerId, options.log)
-    .then(({ outbox: openedOutbox, downlinkCursor: openedCursor }) => {
+  void Promise.all([ReliableOutbox.openForComputer(dataDir, options.computerId, options.log), loadInstallId(dataDir)])
+    .then(([{ outbox: openedOutbox, downlinkCursor: openedCursor }, openedInstallId]) => {
       outbox = openedOutbox;
       downlinkCursor = openedCursor;
+      installId = openedInstallId;
       if (!stopping) connect();
     })
     .catch((error: unknown) => {
@@ -538,6 +575,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
     if (stopPromise !== null) return stopPromise;
     stopping = true;
     for (const control of discoveries.keys()) control.abort();
+    workAppends.disconnect();
     stopHeartbeat();
     if (link.phase === "waiting") clearTimeout(link.timer);
 

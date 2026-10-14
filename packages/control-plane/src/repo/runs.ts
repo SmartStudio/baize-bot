@@ -1,30 +1,9 @@
-import {
-  BotId,
-  ComputerId,
-  GroupId,
-  RunId,
-  type MessageId,
-  type PokerTableRole,
-  type UsageRecord,
-  UserId,
-  type Viewer,
-} from "@baize/shared";
-import { TransactionRollbackError, and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { BotId, ComputerId, GroupId, RunId, type PokerTableRole, type UsageRecord, UserId } from "@baize/shared";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { agentOutbox, bots, groupMembers, groups, runs } from "../db/schema.js";
-import { newId } from "../ids.js";
-import { appendMessage, type Tx } from "./messages.js";
+import { agentOutbox, bots, groups, runs } from "../db/schema.js";
+import { type Tx } from "./messages.js";
 import { toUsageRecord } from "./rows.js";
-
-export type StartRunInput = {
-  readonly ownerId: UserId;
-  readonly computerId: ComputerId;
-  readonly botId: BotId;
-  readonly groupId: GroupId;
-  readonly triggerMessageId: MessageId;
-  /** 例行任务派出来的活带着它。run 行一生出来就认领了那条运行记录，收尾报文因此不会扑空。 */
-  readonly routineRunId?: string | undefined;
-};
 
 /**
  * 收尾和建 run 共用的 advisory 锁，键是 (群, Bot)。两参数形式，第一参数是这块的命名空间；
@@ -122,104 +101,6 @@ export async function exclusiveBotRunsLock(tx: Tx, botId: BotId): Promise<void> 
  */
 export async function shareBotRunsLock(tx: Tx, botId: BotId): Promise<void> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(${BOT_RUNS_LOCK}::int4, hashtext(${botId}::text))`);
-}
-
-/**
- * 建 run 先拿归属人的共享锁，再拿 Bot 的共享锁，再拿收尾锁：同一个 Bot 在同一个群里正在收尾时，新 run 等它提交再出生，不会让定稿的判断失真。
- * 等到的若是删 Bot 或删号的提交，Bot 已经不在这个群里，锁之后这条查成员的新语句看得见，回 null，不建 run。
- * 归属人的锁管的是 Bot 锁管不到的 Bot：删号枚举 Bot 之后才进库的（hello 补建的主助理、项目群的助理），它的 Bot 锁不在删号手里。
- */
-export async function startRun(db: Db, input: StartRunInput): Promise<RunId | null> {
-  return db.transaction(async (tx) => {
-    if (!(await enterRunLocks(tx, input))) return null;
-    const [row] = await tx
-      .insert(runs)
-      .values({
-        id: newId(),
-        ownerId: input.ownerId,
-        computerId: input.computerId,
-        botId: input.botId,
-        groupId: input.groupId,
-        triggerMessageId: input.triggerMessageId,
-        routineRunId: input.routineRunId ?? null,
-        isRoutine: input.routineRunId !== undefined,
-        startedAt: new Date(),
-      })
-      .returning({ id: runs.id });
-    if (row === undefined) throw new Error("建 run 没有返回行");
-    return RunId.parse(row.id);
-  });
-}
-
-/** 建 run 的前半：三把锁按固定次序拿，再确认 Bot 还是这个群的成员。不是了回 false，调用方不建。 */
-async function enterRunLocks(
-  tx: Tx,
-  input: { readonly ownerId: UserId; readonly botId: BotId; readonly groupId: GroupId },
-): Promise<boolean> {
-  await lockOwner(tx, input.ownerId, "shared");
-  await shareBotRunsLock(tx, input.botId);
-  await lockSettlement(tx, input.groupId, input.botId);
-  const [member] = await tx
-    .select({ botId: groupMembers.botId })
-    .from(groupMembers)
-    .where(and(eq(groupMembers.groupId, input.groupId), eq(groupMembers.botId, input.botId)));
-  return member !== undefined;
-}
-
-export type StartTableRunInput = {
-  readonly ownerId: UserId;
-  readonly computerId: ComputerId;
-  readonly botId: BotId;
-  readonly groupId: GroupId;
-  readonly role: PokerTableRole;
-  /** 触发消息和 run 行共用：只有这些人看得到这次派活。 */
-  readonly visibleTo: readonly [Viewer, ...Viewer[]];
-};
-
-/**
- * busy：这个 Bot 在这个群已有未收尾的表桌 run，或这个群已有未收尾的 advisor、reviewer。
- * 判定是 runs 上两条部分唯一索引，不先查后写；撞了整个事务回滚，触发消息也不留。
- */
-export type StartTableRunResult =
-  | { readonly kind: "started"; readonly runId: RunId; readonly messageId: MessageId }
-  | { readonly kind: "busy" }
-  | { readonly kind: "not_member" };
-
-const TABLE_TURN_TEXT = "牌桌回合";
-
-/**
- * 隐藏派活的 run：同一个事务里写一条不含内容的系统触发消息（可见范围同 run）加 runs 行。
- * 锁和 startRun 同序，消息在锁之后才写，不和删 Bot、删号的级联反序。
- */
-export async function startTableRun(db: Db, input: StartTableRunInput): Promise<StartTableRunResult> {
-  try {
-    return await db.transaction(async (tx) => {
-      if (!(await enterRunLocks(tx, input))) return { kind: "not_member" };
-      const trigger = await appendMessage(tx, input.groupId, { kind: "system", text: TABLE_TURN_TEXT }, [
-        ...input.visibleTo,
-      ]);
-      const [row] = await tx
-        .insert(runs)
-        .values({
-          id: newId(),
-          ownerId: input.ownerId,
-          computerId: input.computerId,
-          botId: input.botId,
-          groupId: input.groupId,
-          triggerMessageId: trigger.id,
-          startedAt: new Date(),
-          visibleTo: [...input.visibleTo],
-          tableRole: input.role,
-        })
-        .onConflictDoNothing()
-        .returning({ id: runs.id });
-      if (row === undefined) return tx.rollback();
-      return { kind: "started", runId: RunId.parse(row.id), messageId: trigger.id };
-    });
-  } catch (error) {
-    if (error instanceof TransactionRollbackError) return { kind: "busy" };
-    throw error;
-  }
 }
 
 /** missing：run 行不存在。plain：普通 run。 */

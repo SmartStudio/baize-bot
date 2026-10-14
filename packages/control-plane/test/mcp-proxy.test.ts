@@ -1,20 +1,23 @@
 import {
+  BotListResponse,
   CreateBotResponse,
+  CreateGroupResponse,
   McpProxyCallResponse,
   ToolListResponse,
   ToolResponse,
   type BotId,
   type ControlToAgent,
+  type GroupId,
 } from "@baize/shared";
 import { Server as HttpServer } from "node:http";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { ensureComputer } from "../src/repo/computers.js";
 import { McpClients } from "../src/mcp/call.js";
 import { ToolCrypto } from "../src/crypto.js";
-import { helloAgent } from "./helpers/agent.js";
+import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { startTestMcp, type TestMcp } from "./helpers/mcp.js";
 
 type Config = Extract<ControlToAgent, { type: "config" }>;
@@ -22,6 +25,8 @@ let database: TestDb;
 let server: TestServer;
 let mcp: TestMcp;
 const SECRET = "Bearer proxy-private-token";
+const laneHeaders = new Map<string, string>();
+const botLaneHeaders = new Map<string, Map<BotId, string>>();
 
 beforeAll(async () => {
   database = await createTestDb();
@@ -40,8 +45,70 @@ async function owner(testServer = server) {
   const computer = await makeComputer(database.db, user.id);
   const client = testServer.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
-  const botId = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "代理测试" })).json()).bot.id;
-  return { user, computer, client, botId };
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "代理测试" })).json());
+  return { user, computer, client, botId: created.bot.id, groupId: created.group.id };
+}
+
+async function recordLane(
+  who: Awaited<ReturnType<typeof owner>>,
+  agent: AgentClient,
+  config: Config,
+  groupId: GroupId,
+  botId: BotId,
+  text: string,
+  primary = false,
+): Promise<void> {
+  expect((await who.client.post(`/api/groups/${groupId}/messages`, { text })).status).toBe(201);
+  const prompt = await agent.expect("prompt");
+  expect(prompt.botId).toBe(botId);
+  const header = `${prompt.botId}/${prompt.groupId}/${prompt.lane.epoch}`;
+  const key = config.modelGateway.apiKey;
+  const scopes = botLaneHeaders.get(key) ?? new Map<BotId, string>();
+  scopes.set(botId, header);
+  botLaneHeaders.set(key, scopes);
+  if (primary) laneHeaders.set(key, header);
+  agent.send({
+    type: "run_done",
+    runId: prompt.runId,
+    botId: prompt.botId,
+    groupId: prompt.groupId,
+    steps: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+  });
+  await agent.ack(prompt.runId);
+}
+
+async function leasedHello(
+  who: Awaited<ReturnType<typeof owner>>,
+  testServer = server,
+  options: { readonly computer?: TestComputer; readonly groupId?: GroupId } = {},
+) {
+  const computer = options.computer ?? who.computer;
+  const connected = await helloAgent(testServer.server.port, computer.computerId, computer.token);
+  const heartbeat = setInterval(() => {
+    if (connected.agent.socket.readyState === connected.agent.socket.OPEN)
+      connected.agent.send({ type: "heartbeat", at: new Date().toISOString() });
+  }, 15_000);
+  heartbeat.unref();
+  connected.agent.socket.once("close", () => clearInterval(heartbeat));
+  await recordLane(
+    who,
+    connected.agent,
+    connected.config,
+    options.groupId ?? who.groupId,
+    who.botId,
+    "@代理测试 建立插件调用道",
+    true,
+  );
+  return connected;
+}
+
+function proxyHeaders(key: string, botId?: BotId): Record<string, string> {
+  const headers: Record<string, string> = { authorization: `Bearer ${key}`, "content-type": "application/json" };
+  const lane = (botId === undefined ? undefined : botLaneHeaders.get(key)?.get(botId)) ?? laneHeaders.get(key);
+  if (lane !== undefined) headers["x-baize-lane"] = lane;
+  return headers;
 }
 
 async function connect(who: Awaited<ReturnType<typeof owner>>, localOnly = false, name = "公司插件", url = mcp.url) {
@@ -64,7 +131,7 @@ function call(
 ) {
   return fetch(`${config.mcpProxy.baseUrl}/${id}/call`, {
     method: "POST",
-    headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+    headers: proxyHeaders(key, botId),
     body: JSON.stringify({ botId, tool, arguments: { sku } }),
     ...(signal === undefined ? {} : { signal }),
   });
@@ -77,7 +144,7 @@ describe("MCP 控制面代执行", () => {
       const persistent = await startTestMcp({ stateful: true });
       const who = await owner();
       const tool = await connect(who, false, "续传", persistent.url);
-      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      const { agent, config } = await leasedHello(who);
       try {
         const started = Date.now();
         const result = await call(
@@ -109,7 +176,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "字节边界", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const exact = await call(config, tool.id, who.botId, "lookup_stock", `boundary:${format}:20971520:ascii`);
       expect(exact.status, "恰好 20 MiB 不超限").toBe(200);
@@ -129,7 +196,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "UTF-8 字节边界", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const result = await call(config, tool.id, who.botId, "lookup_stock", "boundary:sse:20971521:utf8");
       expect(result.status).toBe(502);
@@ -147,7 +214,7 @@ describe("MCP 控制面代执行", () => {
       const persistent = await startTestMcp({ stateful: true, getContentType });
       const who = await owner();
       const tool = await connect(who, false, "GET 事件边界", persistent.url);
-      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      const { agent, config } = await leasedHello(who);
       try {
         expect((await call(config, tool.id, who.botId)).status).toBe(200);
         await persistent.waitForStreams(1);
@@ -178,7 +245,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "并发断流隔离", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = persistent.holdNextCall();
     try {
       const pending = call(config, tool.id, who.botId);
@@ -220,7 +287,7 @@ describe("MCP 控制面代执行", () => {
       const persistent = await startTestMcp({ stateful: true });
       const who = await owner();
       const tool = await connect(who, false, "断流", persistent.url);
-      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      const { agent, config } = await leasedHello(who);
       const hold = persistent.holdNextCall();
       try {
         const pending = call(config, tool.id, who.botId);
@@ -268,7 +335,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "GET 限长", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = persistent.holdNextCall();
     try {
       const pending = call(config, tool.id, who.botId);
@@ -299,7 +366,7 @@ describe("MCP 控制面代执行", () => {
       const persistent = await startTestMcp({ stateful: true });
       const who = await owner();
       const tool = await connect(who, false, "流式限长", persistent.url);
-      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      const { agent, config } = await leasedHello(who);
       try {
         expect((await call(config, tool.id, who.botId)).status).toBe(200);
         await persistent.waitForStreams(1);
@@ -326,7 +393,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "指纹", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = persistent.holdNextCall();
     try {
       const old = call(config, tool.id, who.botId);
@@ -364,7 +431,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "取消计数", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const controller = new AbortController();
     const hold = persistent.holdNextCall();
     try {
@@ -402,7 +469,7 @@ describe("MCP 控制面代执行", () => {
   it("挂着的调用不受另一个调用的 isError 影响，按自己的结果返回", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = mcp.holdNextCall();
     try {
       const pending = call(config, tool.id, who.botId);
@@ -426,7 +493,7 @@ describe("MCP 控制面代执行", () => {
   it("连接阶段第一个调用被断开，第二个调用仍使用连好的 Client", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = mcp.holdNextInitialization();
     const controller = new AbortController();
     const original = McpClients.prototype.call;
@@ -474,7 +541,7 @@ describe("MCP 控制面代执行", () => {
   it("单个在途调用被取消，不关闭共享 Client，也不影响另一个调用", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = mcp.holdNextCall();
     const controller = new AbortController();
     let otherHold: ReturnType<TestMcp["holdNextCall"]> | undefined;
@@ -516,7 +583,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "在途缓存", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const hold = persistent.holdNextCall();
     try {
       await persistent.waitForStreams(0);
@@ -568,7 +635,7 @@ describe("MCP 控制面代执行", () => {
   it("initialize 失败只回固定分类，下次调用重新建立连接", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const errorLog = vi.spyOn(console, "error");
     const warningLog = vi.spyOn(console, "warn");
     try {
@@ -590,7 +657,7 @@ describe("MCP 控制面代执行", () => {
   it.each([false, true])("请求体超过 20 MiB 回 413，不触达上游（分块：%s）", async (chunked) => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const before = mcp.initializations();
       const calls = mcp.calls().length;
@@ -605,7 +672,7 @@ describe("MCP 控制面代执行", () => {
         : oversized;
       const init: RequestInit & { duplex?: "half" } = {
         method: "POST",
-        headers: { authorization: `Bearer ${config.modelGateway.apiKey}`, "content-type": "application/json" },
+        headers: proxyHeaders(config.modelGateway.apiKey),
         body,
         ...(chunked ? { duplex: "half" as const } : {}),
       };
@@ -622,7 +689,7 @@ describe("MCP 控制面代执行", () => {
   it.each(["large", "large-error"])("上游 %s 结果超过 20 MiB 回固定中文错误，缓存仍可使用", async (sku) => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const errorLog = vi.spyOn(console, "error");
     const warningLog = vi.spyOn(console, "warn");
     try {
@@ -645,7 +712,7 @@ describe("MCP 控制面代执行", () => {
     const lifecycle = await startTestServer(database.db);
     const who = await owner(lifecycle);
     const tool = await connect(who, false, "关闭失败", persistent.url);
-    const { agent, config } = await helloAgent(lifecycle.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who, lifecycle);
     try {
       expect((await call(config, tool.id, who.botId)).status).toBe(200);
       await persistent.waitForStreams(1);
@@ -686,8 +753,20 @@ describe("MCP 控制面代执行", () => {
     const local = ToolResponse.parse(await localResponse.json()).tool;
     const remote = await ensureComputer(database.db, who.user.id, "remote");
     if (remote.token === null) throw new Error("远程电脑应新建");
-    const first = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
-    const second = await helloAgent(server.server.port, remote.computer.id, remote.token);
+    const assistant = BotListResponse.parse(await (await who.client.get("/api/bots")).json()).items.find(
+      (entry) => entry.bot.role === "assistant",
+    );
+    if (assistant === undefined) throw new Error("登录后应有主助理");
+    const remoteGroup = CreateGroupResponse.parse(
+      await (
+        await who.client.post("/api/groups", { title: "远程插件道", botIds: [who.botId, assistant.bot.id] })
+      ).json(),
+    );
+    const second = await leasedHello(who, server, {
+      computer: { computerId: remote.computer.id, token: remote.token },
+      groupId: remoteGroup.group.id,
+    });
+    const first = await leasedHello(who);
     try {
       expect(first.config.tools).toEqual([proxy, { ...local, authorization: SECRET }]);
       expect(second.config.tools).toEqual([proxy]);
@@ -719,7 +798,7 @@ describe("MCP 控制面代执行", () => {
   it("真实 SDK callTool 使用服务器凭据，复用连接；修改和删除立即废弃缓存", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const before = mcp.initializations();
       const result = await call(config, tool.id, who.botId);
@@ -760,16 +839,16 @@ describe("MCP 控制面代执行", () => {
     const first = await owner();
     const second = await owner();
     const tool = await connect(first);
-    const unassigned = CreateBotResponse.parse(await (await first.client.post("/api/bots", { name: "未分配" })).json())
-      .bot.id;
-    const { agent, config } = await helloAgent(server.server.port, first.computer.computerId, first.computer.token);
-    const other = await helloAgent(server.server.port, second.computer.computerId, second.computer.token);
+    const unassigned = CreateBotResponse.parse(await (await first.client.post("/api/bots", { name: "未分配" })).json());
+    const { agent, config } = await leasedHello(first);
+    const other = await leasedHello(second);
     try {
+      await recordLane(first, agent, config, unassigned.group.id, unassigned.bot.id, "建立未分配 Bot 的调用道");
       const before = mcp.calls().length;
       expect((await call(config, tool.id, first.botId, "lookup_stock", "X3", "bad-key")).status).toBe(401);
       expect((await call(other.config, tool.id, second.botId)).status).toBe(404);
       expect((await call(config, tool.id, second.botId)).status).toBe(404);
-      expect((await call(config, tool.id, unassigned)).status).toBe(404);
+      expect((await call(config, tool.id, unassigned.bot.id)).status).toBe(404);
       expect((await call(config, tool.id, first.botId, "unknown_tool")).status).toBe(404);
       expect(mcp.calls().length).toBe(before);
     } finally {
@@ -781,7 +860,7 @@ describe("MCP 控制面代执行", () => {
   it("成功和 isError 正文都脱敏，抛错回中文分类，响应和日志没有凭据；调用错误下次重连", async () => {
     const who = await owner();
     const tool = await connect(who);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     const errorLog = vi.spyOn(console, "error");
     const warningLog = vi.spyOn(console, "warn");
     try {
@@ -835,7 +914,7 @@ describe("MCP 控制面代执行", () => {
     const pending = listed.items.find((entry) => entry.assignedBotIds.includes(botId));
     if (pending === undefined) throw new Error("导入插件未创建");
     expect(pending.localOnly).toBe(false);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const before = mcp.calls().length;
       const blocked = await call(config, pending.id, botId);
@@ -843,7 +922,7 @@ describe("MCP 控制面代执行", () => {
       expect(await blocked.json()).toEqual({ error: "这个插件还没补授权" });
       const bad = await fetch(`${config.mcpProxy.baseUrl}/${tool.id}/call`, {
         method: "POST",
-        headers: { authorization: `Bearer ${config.modelGateway.apiKey}`, "content-type": "application/json" },
+        headers: proxyHeaders(config.modelGateway.apiKey),
         body: "[]",
       });
       expect(bad.status).toBe(400);
@@ -857,7 +936,7 @@ describe("MCP 控制面代执行", () => {
     const persistent = await startTestMcp({ stateful: true });
     const who = await owner();
     const tool = await connect(who, false, "超时计数", persistent.url);
-    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const { agent, config } = await leasedHello(who);
     try {
       const cancelled = persistent.nextCancellation();
       const closed = persistent.nextCallClosed();
@@ -887,8 +966,8 @@ describe("MCP 控制面代执行", () => {
     const who = await owner(lifecycle);
     const other = await owner();
     let stopped = false;
-    const first = await helloAgent(lifecycle.server.port, who.computer.computerId, who.computer.token);
-    const second = await helloAgent(server.server.port, other.computer.computerId, other.computer.token);
+    const first = await leasedHello(who, lifecycle);
+    const second = await leasedHello(other);
     try {
       const tool = await connect(who, false, "停机缓存", persistent.url);
       const otherTool = await connect(other, false, "另一实例", persistent.url);

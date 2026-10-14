@@ -1,9 +1,10 @@
-import { DOWNLINK_DELIVERY, type AgentToControl } from "@baize/shared";
+import { DOWNLINK_DELIVERY, type AgentToControl, type UplinkRejection } from "@baize/shared";
 import type { Db } from "../db/client.js";
 import type { Tx } from "../repo/messages.js";
 import type { AgentConnection } from "./hub.js";
 import { eventMemoryRollback, handleAgentEvent, type AgentEventDeps } from "./events.js";
 import { enqueueDownlink } from "./envelope.js";
+import { appendWorkRecords } from "../repo/work-records.js";
 
 /** 数据库写留在信封事务里，网络和会派下一轮活的内存调度等提交后再做。 */
 export async function handleEnvelopedEvent(
@@ -14,7 +15,17 @@ export async function handleEnvelopedEvent(
   tx: Tx,
   afterCommit: (() => Promise<void> | void)[],
   afterRollback: (() => void)[],
-): Promise<void> {
+): Promise<void | Omit<UplinkRejection, "seq">> {
+  if (body.type === "work_append") {
+    const result = await appendWorkRecords(tx, conn, body);
+    if (result.kind === "ok") return;
+    return {
+      code: result.kind,
+      lane: body.lane,
+      ...(body.runId === null ? {} : { runId: body.runId }),
+      ...(result.kind === "seq_mismatch" ? { nextSeq: result.nextSeq } : {}),
+    };
+  }
   const pending: (() => Promise<unknown>)[] = [];
   const deferred = <T extends object>(target: T, names?: ReadonlySet<PropertyKey>): T =>
     new Proxy(target, {

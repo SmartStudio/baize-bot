@@ -14,7 +14,6 @@ import { sendHiddenRun } from "../agent/hidden-run.js";
 import type { AgentHub } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
 import { messages, pokerEvents, pokerHands, pokerHints, pokerTables, runs } from "../db/schema.js";
-import { newId } from "../ids.js";
 import { messageVisibleTo } from "../repo/messages.js";
 import type { PushHub } from "../ws/hub.js";
 import { narrate, seatNamer } from "./narrate.js";
@@ -160,24 +159,8 @@ export async function askHint(
     );
     if (sent.kind === "busy") throw new PokerError(409, "老白还在回答上一条，等它说完再问");
     if (sent.kind === "skipped") throw new PokerError(404, "没有这手牌");
-    let runId: RunId;
-    if (sent.kind === "sent") runId = sent.runId;
-    else {
-      // hint.run_id 必填；离线失败记成未派到电脑、零费用的已结束尝试，重连后仍能读到 failed。
-      runId = RunId.parse(newId());
-      const now = new Date();
-      await db.insert(runs).values({
-        id: runId,
-        ownerId,
-        botId: state.host.botId,
-        groupId: table.groupId,
-        tableRole: "advisor",
-        visibleTo,
-        startedAt: now,
-        endedAt: now,
-        chargedAt: now,
-      });
-    }
+    if (sent.kind === "unplaced") throw new PokerError(409, "电脑不在线，这次没有问牌，电脑回来后再问一次");
+    const runId = sent.runId;
     await db
       .insert(pokerHints)
       .values({ handId, seq, runId })

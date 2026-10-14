@@ -21,7 +21,7 @@ import { connectPush, type PushClient } from "./helpers/ws.js";
 let database: TestDb;
 let server: TestServer;
 let clock = new Date("2030-01-01T02:00:00.000Z");
-const DISCONNECT_GRACE_MS = 200;
+const DISCONNECT_GRACE_MS = 5_000;
 
 beforeAll(async () => {
   database = await createTestDb();
@@ -61,10 +61,10 @@ type Owner = {
   readonly botId: BotId;
 };
 
-async function ownerWithBot(): Promise<Owner> {
+async function ownerWithBot(port = server.server.port): Promise<Owner> {
   const user = await makeUser(database.db);
   const computer = await makeComputer(database.db, user.id);
-  const client = server.client();
+  const client = new ApiClient(port);
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
   return { userId: user.id, client, computer, groupId: created.group.id, botId: created.bot.id };
@@ -196,6 +196,23 @@ async function computerStatus(owner: Owner): Promise<string> {
   return rows[0]?.status ?? "";
 }
 
+async function graceState(owner: Owner): Promise<{
+  now_ms: number;
+  lease_until_ms: number;
+  open_runs: number;
+  prompts: number;
+}> {
+  const [row] = await database.sql<{ now_ms: string; lease_until_ms: string; open_runs: number; prompts: number }[]>`
+    SELECT extract(epoch FROM clock_timestamp()) * 1000 AS now_ms,
+      extract(epoch FROM c.lease_until) * 1000 AS lease_until_ms,
+      (SELECT count(*)::int FROM runs WHERE group_id = ${owner.groupId} AND ended_at IS NULL) AS open_runs,
+      (SELECT count(*)::int FROM agent_outbox WHERE computer_id = c.id AND body->>'type' = 'prompt') AS prompts
+    FROM computers c WHERE c.id = ${owner.computer.computerId}
+  `;
+  if (row === undefined) throw new Error("电脑租约状态不存在");
+  return { ...row, now_ms: Number(row.now_ms), lease_until_ms: Number(row.lease_until_ms) };
+}
+
 describe("confirm 和 result", () => {
   it("新审批请求推一条 confirm", async () => {
     const owner = await ownerWithBot();
@@ -294,9 +311,16 @@ describe("stuck", () => {
       agent.close();
       await waitFor(async () => (await computerStatus(owner)) === "sleeping", "电脑变休眠");
 
+      const sleeping = await graceState(owner);
       await runRoutineNow(owner, routine);
+      const placed = await graceState(owner);
+      expect(placed.now_ms, "例行派活完成必须仍在已捕获的断线宽限内").toBeLessThan(sleeping.lease_until_ms);
+      expect(placed).toMatchObject({ open_runs: 1, prompts: 1 });
       const reconnected = await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token);
       try {
+        expect((await graceState(owner)).now_ms, "重连握手完成仍在同一次断线宽限内").toBeLessThan(
+          sleeping.lease_until_ms,
+        );
         const prompt = await reconnected.agent.expect("prompt");
         expect(prompt.origin).toEqual({ kind: "routine" });
         reconnected.agent.send({
@@ -315,6 +339,83 @@ describe("stuck", () => {
       expect(await noticesBeforeBotMarker(owner, push), "宽限期内已派出的例行不应记成 stuck").toEqual([]);
     } finally {
       push.close();
+    }
+  });
+
+  it("派活等电脑锁跨过租约到期时不建 run、不留 prompt，例行推真实离线的 stuck", async () => {
+    const short = await startServer({
+      db: database.db,
+      port: 0,
+      config: DEFAULT_RUNTIME_CONFIG,
+      credentialsKey: TEST_CREDENTIALS_KEY,
+      toolSecretKey: "a".repeat(64),
+      disconnectGraceMs: 200,
+      notificationScheduler: { now: () => clock, intervalMs: 60 * 60_000 },
+      publisher: { intervalMs: 24 * 60 * 60_000 },
+    });
+    let agent: AgentClient | undefined;
+    let push: PushClient | undefined;
+    let release: (() => void) | undefined;
+    let blocker: Promise<unknown> | undefined;
+    let running: Promise<void> | undefined;
+    try {
+      const owner = await ownerWithBot(short.port);
+      const routine = await makeRoutine(owner);
+      agent = (await helloAgent(short.port, owner.computer.computerId, owner.computer.token)).agent;
+      push = await connectPush(short.port, owner.client.cookie ?? "");
+      agent.close();
+      await noticesBefore(push, (item) => item.type === "computer_updated" && item.computer.status === "sleeping");
+      const sleeping = await graceState(owner);
+      let held!: () => void;
+      let blockerPid = 0;
+      const locked = new Promise<void>((resolve) => (held = resolve));
+      const unlock = new Promise<void>((resolve) => (release = resolve));
+      blocker = database.sql.begin(async (tx) => {
+        const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+        if (backend === undefined) throw new Error("持锁连接不存在");
+        blockerPid = backend.pid;
+        await tx`SELECT id FROM computers WHERE id = ${owner.computer.computerId} FOR NO KEY UPDATE`;
+        held();
+        await unlock;
+      });
+      await locked;
+      running = runRoutineNow(owner, routine);
+      let transactionStartedAt = Number.POSITIVE_INFINITY;
+      await waitFor(async () => {
+        const [waiting] = await database.sql<{ xact_start_ms: string }[]>`
+          SELECT extract(epoch FROM xact_start) * 1000 AS xact_start_ms FROM pg_stat_activity
+          WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock'
+            AND query ILIKE '%computers%' AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+        `;
+        if (waiting === undefined) return false;
+        transactionStartedAt = Number(waiting.xact_start_ms);
+        return true;
+      }, "例行派活排在测试持有的电脑锁后面");
+      expect(transactionStartedAt, "事务在宽限内开始，不能拿冻结的事务时间通过放锁后的过期校验").toBeLessThan(
+        sleeping.lease_until_ms,
+      );
+      await waitFor(async () => (await graceState(owner)).now_ms > sleeping.lease_until_ms, "数据库时钟越过租约到期");
+      release?.();
+      await blocker;
+      await running;
+      const after = await graceState(owner);
+      expect(after.now_ms).toBeGreaterThan(sleeping.lease_until_ms);
+      expect(after).toMatchObject({ open_runs: 0, prompts: 0 });
+      const records = await database.sql<{ status: string; note: string }[]>`
+        SELECT status, note FROM routine_runs WHERE routine_id = ${routine.id}
+      `;
+      expect(records, "没有派出 run 的例行必须按真实离线原因收尾").toEqual([
+        { status: "failed", note: "电脑不在线，没跑起来" },
+      ]);
+      expect(
+        (await noticesBeforeBotMarker(owner, push)).map((notice) => [notice.kind, notice.text, notice.groupId]),
+      ).toEqual([["stuck", OFFLINE_STUCK, owner.groupId]]);
+    } finally {
+      release?.();
+      await Promise.allSettled([blocker, running]);
+      agent?.close();
+      push?.close();
+      await short.close();
     }
   });
 

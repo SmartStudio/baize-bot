@@ -24,6 +24,7 @@ import { type Static, Type } from "typebox";
 import { GATEWAY_PROVIDER_ID, type BotSession, type PiSettings, type RunnerTool } from "./bot-session.js";
 import type { BotDirs } from "./paths.js";
 import { tablePersona } from "./persona.js";
+import { installLaneHeaders } from "./lane-fence.js";
 import type { ActiveRun } from "./topic.js";
 
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -303,6 +304,7 @@ export async function createTableSession(options: {
   readonly tools: readonly RunnerTool[];
   readonly waitUntilRunning: (signal: AbortSignal | undefined) => Promise<boolean>;
   readonly table: () => TablePrompt | null;
+  readonly laneHeaders: () => Readonly<Record<string, string>>;
   readonly settings: PiSettings | undefined;
 }): Promise<BotSession> {
   const { dirs } = options;
@@ -350,6 +352,7 @@ export async function createTableSession(options: {
     noThemes: true,
     extensionFactories: [
       (pi) => {
+        installLaneHeaders(pi, options.laneHeaders);
         for (const tool of tools) pi.registerTool(tool);
         pi.on("tool_call", async (event, ctx) => {
           if (options.table()?.role !== options.role || !names.includes(event.toolName))

@@ -225,6 +225,13 @@
       "when": 1791937722474,
       "tag": "0031_lonely_expediter",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1791944658450,
+      "tag": "0032_sticky_sir_ram",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,7 @@ import type { ApprovalGate } from "./approvals.js";
 import { ASSISTANT_RULE } from "./assistant.js";
 import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
+import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } from "./lane-fence.js";
 import type { BotDirs } from "./paths.js";
 import { injectMemory } from "./memory.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
@@ -49,6 +50,7 @@ export interface SessionGate {
   readonly approvals: Pick<ApprovalGate, "ask" | "block">;
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
+  readonly laneFence: LaneSessionFence;
 }
 
 export interface BotSessionOptions extends SessionGate {
@@ -170,6 +172,11 @@ function gateToolCalls(
       gate.approvals.block(event.toolCallId);
       return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
     }
+    const blocked = await gate.laneFence.beforeEffect(active.run.runId, event.toolCallId, decision.action);
+    if (blocked !== null) {
+      gate.approvals.block(event.toolCallId);
+      return { block: true, reason: blocked };
+    }
     allowed(active.run.runId, event.toolCallId, event.toolName, decision);
     return undefined;
   });
@@ -177,6 +184,8 @@ function gateToolCalls(
 
 function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
   return (pi) => {
+    installLaneHeaders(pi, () => options.laneFence.headers(options.activeRun()?.run.runId));
+    installLaneToolSettled(pi, () => options.activeRun()?.run.runId, options.laneFence);
     pi.registerTool(options.bashTool);
     for (const tool of options.tools) pi.registerTool(tool);
 
@@ -339,6 +348,8 @@ export async function createEphemeralSession(options: EphemeralSessionOptions): 
     sessionManager: SessionManager.inMemory(options.workDir),
     toolNames: [...options.builtIns, ...options.tools.map((tool) => tool.name)],
     extension: (pi) => {
+      installLaneHeaders(pi, () => options.gate.laneFence.headers(options.gate.activeRun()?.run.runId));
+      installLaneToolSettled(pi, () => options.gate.activeRun()?.run.runId, options.gate.laneFence);
       for (const tool of options.tools) pi.registerTool(tool);
       pi.on("context", (event) => ({ messages: pruneImages(event.messages) }));
       gateToolCalls(pi, options.gate, () => undefined);

@@ -1,6 +1,6 @@
 # @baize/control-plane
 
-控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。四个对外的面在同一个 3001 端口上：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
+控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
 
 ## 电脑配对
 
@@ -10,18 +10,51 @@
 
 ## 电脑代理握手
 
-hello 的协议号和下限都是 3，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
+hello 的协议号和下限都是 3，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。hello 带持久化的安装 UUID `installId` 和运行器的 `piSessionVersion`，握手事务写安装标识并续租；Pi 版本留在连接内存，追加时写入流元数据。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
 
 电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，收到 4003 后输出一次 `{"type":"upgrade_required"}`；4002、4003、4004 都停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码按退避重连。
 
 
 ## 可靠信封
 
-shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 reliable 用 `{ type: "uplink", conn, stream, seq, body }`，bare 用 `{ conn, body }`；流式 `bot_text` 只发 `done: false`，每块全文由 reliable 的 `bot_text_done` 定稿。控制面在同一事务里条件推进 `computers.up_acked` 和处理业务，重复帧只回确认，毒帧重试一次后回 `invalid` 并越过。已收尾的 run 只放行 `run_done`、`bot_text_done`、`bot_tool_call`，其他动作回 `run_closed`。旧连接代际不处理、不确认。
+shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 reliable 用 `{ type: "uplink", conn, stream, seq, body }`，bare 用 `{ conn, body }`；流式 `bot_text` 只发 `done: false`，每块全文由 reliable 的 `bot_text_done` 定稿。控制面在同一事务里条件推进 `computers.up_acked` 和处理业务，重复帧只回确认，毒帧重试一次后回 `invalid` 并越过。已收尾的 run 允许 `run_done`、`bot_text_done`、`bot_tool_call`、`work_append`，其他动作回 `run_closed`。工作记录有独立的道、持有者和 run 校验，导入或空探针可不带 run。旧连接代际不处理、不确认。
 
 电脑代理上行先写 `<dataDir>/.agent/outbox/<stream>/frames.jsonl`，同一 100ms 窗口共用 fsync，落盘后才发送。控制面以 20ms 合批累计 `uplink_ack`；代理持久化确认再清理旧帧，重启后沿用 stream、序号和未确认帧。
 
 可靠下行在调用方事务里进入 `agent_outbox`，带 `{ type: "downlink", seq, body }` 按序发送；结束或放弃 run 的事务删除它绑定的行，4004 顶号清空该电脑发件箱，删电脑级联删除。在线或断线宽限内可以入队，宽限外沿用派发失败分支。hello 先更新连接代际和游标，再依次发 welcome、config、pause/resume、重放发件箱，随后补历史欠账。代理先持久化 `.agent/downlink.json` 再入运行器队列，重复帧只确认，崩溃窗口内丢失的 prompt 由 hello 的 activeRuns 对账收尾。对账发现已结束的 active run 时现场发 `cancel{runId}`，不入发件箱。
+
+## 租约
+
+`lane_leases` 用 `(bot_id, group_id)` 作主键，一条道只有一台持有电脑，并固定它的安装标识和正整数代际。`agent/place-run.ts` 的 `placeRun` 是唯一建 run 的入口，用户消息、Bot 之间的 @、例行、交接和牌桌隐藏 run 都走它。认领租约、必要时接管、建 run、可靠 prompt 入队在调用方的同一事务里提交；`test/place-run-guard.test.ts` 扫源码禁止其他入口直接建 run。
+
+持有电脑的 `lease_until` 未过期且安装标识相等，道上又有未收尾的 run 时继续派给它。道闲着时按选机偏好迁回在线本机；持有者失效或闲道迁机时，代际加一，给旧持有者入队 `cancel{lane: {botId, groupId}, epoch: 新代际}`。同电脑、同道的取消只保留最大代际。选不到在线或宽限内的电脑时不建 run、不改租约，沿用群里的派发失败提示。删 Bot 时先给它各道的持有者发下一代取消，再删除；单聊群随 Bot 删除。
+
+`placeRun` 依次拿归属人共享锁、Bot 共享锁、该归属人电脑行、道行和原有结账锁。电脑行按 id 升序锁齐，避免两个群从 A 到 B、从 B 到 A 同时接管时反序。prompt 的 `lane` 带 `{epoch, heads}`，`heads.chat`、`heads.table` 是已存在流的 `{seq: next_seq, head}`，未创建的流省略。
+
+租约时钟和静默计时器共用续期点：默认 45 秒静默加 15 秒宽限，数据库续期同连接每 5 秒至多写一次。断线启动宽限计时器时把截止时间收到此刻加宽限，旧连接的续期或关闭用连接代际条件写，不能缩短新连接的租约。`startServer` 可注入 `silenceTimeoutMs`、`disconnectGraceMs`、`leaseRenewalIntervalMs`；短时长测试也要把合并窗口缩到租约寿命以内。持有者与派发时的期限判断用 `clock_timestamp()`，事务等锁后按当前时间核验。断线收尾继续走原来的 `abandonRun`。
+
+网关、MCP 代执行和 Hub 都以网关 key Bearer 认电脑，再调用同一个 `validateLaneFence` 检查 `x-baize-lane: <botId>/<groupId>/<epoch>`。道必须属于该归属人，Bot 仍在群中，电脑、当前安装标识和代际须匹配，电脑租约须未过期。网关所有请求都要带头；MCP 请求体的 Bot 还须匹配头里的 Bot。key 不对回 401，租约失败回 409 和固定分类：
+
+| 分类 | 正文的 `error` |
+| --- | --- |
+| `stale_epoch` | 代际过时 |
+| `not_holder` | 不是持有者 |
+| `expired` | 租约已过期 |
+| `invalid` | 缺少或格式不对 |
+
+## 工作记录
+
+可靠上行 `work_append` 带 `{lane: {botId, groupId, stream, epoch}, runId, fromSeq, lines, head, cause}`。`stream` 是 `chat` 或 `table`，每帧至多 64 行。服务器先查持有者与代际，再逐行解析 Pi 条目的 `type`、`id`、`parentId`，拒绝 SessionHeader；原始 JSONL 字符串保存在 `work_entries.line`，本单的 `retention` 全为 `verbatim`。搜索文本只抽 user、assistant 和 toolResult 的文字，图片和 thinking 不入索引。
+
+`work_streams` 保存 `next_seq`、链头、末条 id 和连接报告的 Pi 版本。追加的条件 UPDATE 同时要求起始序号相等及租约的电脑、安装标识、代际匹配，条目 INSERT 与信封游标在一个事务里。序号从 0 开始，链头按 `sha256(上一个32字节摘要 || sha256(原样行))` 重算；空流的摘要是 32 个零字节。共享函数是 `@baize/shared` 的 `advanceWorkHead`，不使用旧 `work-record` 子路径的十六进制文字拼接算法。
+
+结果经 `uplink_ack.rejected` 按可靠帧序号返回：无拒收项是 `ok`，其余为 `stale_epoch`、`not_holder`、`seq_mismatch`（含服务器 `nextSeq`）、`head_mismatch`、`invalid`。`work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目。
+
+非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。首帧 `fromSeq: 0` 只在无租约，或当前电脑同安装持有且目标流仍为空时，以代际 1 条件认领；目标流已有条目时拒收。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
+
+`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据，空流回 0、零链头和 null Pi 版本。
+
+租约授权的原样读取只在 `repo/work-records.ts` 的 `readWorkLane`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。三张道表按 Bot、群级联删除，工作条目按归属人级联，run 删除只把 `run_id` 置空。本单未接服务器留存复查，接入点在逐行条目校验通过后、认领和所有写入前；运行器上传、镜像、重建与导入由 P3-11 接入。
 
 ## 工具连接
 
@@ -59,7 +92,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 例行任务写进群里的那条 user 消息不走这张表，只派给例行所属的 Bot，原因是 `prompt.reason` 记 `mentioned`，见「例行任务」。
 
-同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。回合里「这一位」有三种状态：`idle` 空档，`sending` 已从队列里取出、派活报文还没回来，`running` 带 runId 在跑。带 runId 的上行报文只对 `running` 核，`sending` 这段里没有 runId 能对上。轮到的那位在这之前被删了（比如「@A @B @C」里 B 在 A 跑的时候被删），`sendSpeaker` 回 `skipped`，回合跳过它接着派 C，不关轮；选不到电脑或发不出去回 `stopped`，群里已经留了一句，后面的人同样派不出去，关轮。派活抛了错（比如建 run 的事务失败），回合收掉，群里留一句「派给 X 的活没发出去，@ 它再试一次」，`run_done` 照常确认；不靠代理补发 `run_done` 来重推，回合已经收掉，补发会继续结账并尝试推进，但不会重建已收掉的回合。`DELETE /api/bots/:id` 提交后调 `groupTurns.botDeleted`：正在说话的那位被删了，它的 `run_done` 过不了 `resolveRun`，当它说完，轮下一位，没人了就收轮；正在派活途中的只打标记，派活回来按跳过处理，不把已删的它设成这一位（它的 prompt 可能已经发出去，运行器那边随 config 换掉它）；排在后面的从队列里清掉，连同它交出去的交接，卡已随它级联删掉，派出去接手方也接不了。`start` 回 `nobody` 表示被 @ 的人全在派活途中被删、一个都没派出去，`dispatchUserMessage` 就用新鲜名单不认 @ 再路由一次，只退到首席或经手，不替用户扩到全员（刚建的群里 @ 的那位被删了，剩下的人不该平白接到活），仍没人就在群里留一句「@ 一个 Bot 派活」，POST 仍回 201。群本身没了是另一回事：单聊随 Bot 级联删掉后，`startRun` 查不到成员，`sendSpeaker` 看群行还在不在，在就是 `skipped`，不在就是 `gone`，回合收掉、`start` 回 `gone`，`dispatchUserMessage` 不再往消失的群里写任何提示，POST 仍回 201；名单读出来是空的也按同一条分：多 Bot 群被删空、群行还在才留话。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
+同一条用户消息只让一个 Bot 运行。当前 Bot 的 `run_done` 到达后才派下一位；一轮里 Bot @ 了人，就按正文顺序进入下一轮。回合里「这一位」有三种状态：`idle` 空档，`sending` 已从队列里取出、派活报文还没回来，`running` 带 runId 在跑。带 runId 的上行报文只对 `running` 核，`sending` 这段里没有 runId 能对上。轮到的那位在这之前被删了（比如「@A @B @C」里 B 在 A 跑的时候被删），`sendSpeaker` 回 `skipped`，回合跳过它接着派 C，不关轮；选不到电脑或发不出去回 `stopped`，群里已经留了一句，后面的人同样派不出去，关轮。派活抛了错（比如建 run 的事务失败），回合收掉，群里留一句「派给 X 的活没发出去，@ 它再试一次」，`run_done` 照常确认；不靠代理补发 `run_done` 来重推，回合已经收掉，补发会继续结账并尝试推进，但不会重建已收掉的回合。`DELETE /api/bots/:id` 提交后调 `groupTurns.botDeleted`：正在说话的那位被删了，它的 `run_done` 过不了 `resolveRun`，当它说完，轮下一位，没人了就收轮；正在派活途中的只打标记，派活回来按跳过处理，不把已删的它设成这一位（它的 prompt 可能已经发出去，运行器那边随 config 换掉它）；排在后面的从队列里清掉，连同它交出去的交接，卡已随它级联删掉，派出去接手方也接不了。`start` 回 `nobody` 表示被 @ 的人全在派活途中被删、一个都没派出去，`dispatchUserMessage` 就用新鲜名单不认 @ 再路由一次，只退到首席或经手，不替用户扩到全员（刚建的群里 @ 的那位被删了，剩下的人不该平白接到活），仍没人就在群里留一句「@ 一个 Bot 派活」，POST 仍回 201。群本身没了是另一回事：单聊随 Bot 级联删掉后，`placeRun` 查不到成员，`sendSpeaker` 看群行还在不在，在就是 `skipped`，不在就是 `gone`，回合收掉、`start` 回 `gone`，`dispatchUserMessage` 不再往消失的群里写任何提示，POST 仍回 201；名单读出来是空的也按同一条分：多 Bot 群被删空、群行还在才留话。Bot 消息累计到 10 条时停止，并在群里留一句提示。运行器每个文字块报一条消息，一个 run 的正文不管分成几块只算一条；`mention` 工具每 @ 一次算一条，交接也算一条，回路守卫靠这两样。
 
 ### `@名` 在写入前解析
 
@@ -741,7 +774,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 - 每个决策点一条，主键保证重复点返回同一条视图。`failed` 的可以再问，`onConflictDoUpdate` 换掉 run 重来。
 - `hintOf` 只取当前手、`seq` 等于当前事件数的那一条，所以上一街的建议不会带到下一次行动上。
 - 状态是推出来的。回答消息非空且不在流式中是 `done`。run 已结束而 prompt 没确认进会话，或没有回答，是 `failed`。其余是 `waiting`。对账收尾和报错收尾不确认 prompt，半截正文被通用收尾收成定稿也不算成功回答。
-- 电脑离线时也要有结果。这时插一条已结束、零费用的 run，让 `failed` 在重连后还能读到。
+- 电脑离线时回 409「电脑不在线，这次没有问牌，电脑回来后再问一次」，不建 run 和问牌提示行；在线后用户可在同一决策点重试。
 - 老白同时只答一个问题。`runs_table_role_open_idx` 是 `(group_id, table_role)` 上的部分唯一索引，每张桌未结束的 advisor run 和 reviewer run 各至多一个。`runs_table_bot_open_idx` 另外限制同一个 Bot 在同一张桌至多一个未结束的牌桌 run。上一条没答完再问回 409「老白还在回答上一条，等它说完再问」。
 
 老白的 prompt 用 4 号座的视图，所以他只知道用户知道的。答案落库后 `refreshHintForRun` 在桌锁里更新，它在 `bot_text` 和收尾事务提交之后才调用，避免 run 锁和桌锁反序。它只认 `visibleTo` 恰好是 `[user]` 的消息，并且比对手和决策点，旧 run 的回调盖不掉重试后的行。

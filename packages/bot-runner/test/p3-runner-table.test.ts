@@ -57,6 +57,7 @@ const prompt = (role: TablePrompt["role"] = "player", overrides: Partial<PromptM
   runId: RunId.parse("run-table"),
   botId: BotId.parse("bot-table"),
   groupId: GroupId.parse("group-table"),
+  lane: { epoch: 1, heads: {} },
   messageId: MessageId.parse("message-table"),
   text: "不该进入牌桌的当前群消息",
   origin: { kind: "table" },
@@ -160,10 +161,15 @@ async function harness(
     },
   });
   resources.push({ runner, gateway, dataDir });
-  return { runner, requests, sent, dataDir };
+  return { runner, requests, sent, dataDir, gateway };
 }
 
 describe("p3-runner-table 验收", () => {
+  it("牌桌模型请求带本次 run 的租约头", async () => {
+    const h = await harness();
+    await h.runner.prompt(prompt("advisor", { lane: { epoch: 6, heads: {} } }));
+    expect(h.gateway.laneHeaders).toEqual(["bot-table/group-table/6"]);
+  });
   it("player 的 prompt 里有自己的底牌和合法动作，没有任务卡、成员名单和群历史", () => {
     const text = composeTablePrompt(prompt());
     for (const value of [
