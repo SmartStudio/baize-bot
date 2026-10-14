@@ -86,6 +86,8 @@ const chromeArgs = (profileDir: string): string[] => [
 // macOS 的 Chrome 不看 TMPDIR，只认 MAC_CHROMIUM_TMPDIR；Linux 的 chromium 看 TMPDIR。
 const chromeTempDir = (profileDir: string): string => join(profileDir, "tmp");
 
+const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
+
 // 单独成进程组，代理收到终端的 Ctrl-C 时不跟着挨信号，由代理自己收尾。管道的两头只有代理拿着：
 // libuv 建的 fd 都带 CLOEXEC，Bot 的 bash 继承不到。代理被强杀时管道断开，Chrome 自己退出。
 async function spawnChrome(binary: string, profileDir: string, args: readonly string[]): Promise<ChromeProcess> {
@@ -202,6 +204,9 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     // 上面都收掉了，整个清空再建。
     await rm(chromeTempDir(profileDir), { recursive: true, force: true });
     await mkdir(chromeTempDir(profileDir), { mode: 0o700 });
+    // 单例锁里记着主机名。远程电脑的容器每次重建主机名都变，Linux 的 chromium 看到别的主机名就认定 profile
+    // 被另一台电脑占着，弹 xmessage 等人点，管道一直不回。用这个 profile 的 Chrome 已经收掉，这几个都是过期的。
+    await Promise.all(SINGLETON_FILES.map((name) => rm(join(profileDir, name), { force: true })));
     const pending = launcher(profileDir);
     const launched = await untilAborted(pending, stopped.signal).catch((error: unknown) => {
       void pending.then((late) => late.stop()).catch(() => {});

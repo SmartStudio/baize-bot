@@ -1,7 +1,7 @@
 import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import { basename, dirname, join } from "node:path";
@@ -219,6 +219,35 @@ describe("助理 Chrome 连接失效和重起退避", () => {
     await crashNext();
     await chrome.connection();
     expect(launched, "撑过 30 秒才退的不算崩，计数清零，之后第一次崩照样立刻重起").toHaveLength(6);
+  });
+});
+
+describe("助理 Chrome 的单例锁", () => {
+  it("profile 里留着别的主机写下的单例锁（远程电脑的容器重建过），起 Chrome 之前已经清掉", async () => {
+    const directory = await dataDir();
+    const profileDir = chromeProfileDir(directory);
+    await mkdir(profileDir, { recursive: true, mode: 0o700 });
+    await symlink("7ec7de76ada7-80", join(profileDir, "SingletonLock"));
+    await symlink("17585210604407249254", join(profileDir, "SingletonCookie"));
+    await symlink(
+      join(profileDir, "tmp", "org.chromium.Chromium.gone", "SingletonSocket"),
+      join(profileDir, "SingletonSocket"),
+    );
+    const { launchChrome } = fakeChromes();
+    let seen: string[] = [];
+    const chrome = startAssistantChrome({
+      dataDir: directory,
+      log: () => {},
+      launchChrome: async (launchedProfile) => {
+        seen = (await readdir(launchedProfile)).toSorted();
+        return launchChrome();
+      },
+    });
+    chromes.push(chrome);
+
+    await chrome.connection();
+
+    expect(seen, "Chrome 起的那一刻 profile 里只剩临时目录").toEqual(["tmp"]);
   });
 });
 
