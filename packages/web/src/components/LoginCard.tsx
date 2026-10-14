@@ -10,7 +10,7 @@ type Props = {
   onLogin: (accountId: AccountId) => Promise<void>;
 };
 
-type State = "signed_in" | "opening" | "offline" | "refused" | "failed" | "lapsed" | "needed";
+type State = "signed_in" | "opening" | "closed" | "offline" | "refused" | "failed" | "lapsed" | "needed";
 
 const stateOf = (account: Account, flow: LoginFlow | undefined): State => {
   if (account.login === "valid") return "signed_in";
@@ -23,6 +23,8 @@ export const loginFlowNote = (flow: LoginFlow | undefined, where: string): { tex
   switch (flow?.status) {
     case "opening":
       return { text: `登录窗口已在${where}打开，扫码后这里会变成已登录。`, alert: false };
+    case "closed":
+      return { text: "登录页已收起，要登再点一次。", alert: false };
     case "offline":
       return { text: `${where}不在线，打开电脑上的白泽后再点登录。`, alert: true };
     case "refused":

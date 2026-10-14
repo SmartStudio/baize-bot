@@ -1,4 +1,14 @@
-import type { Account, AccountLogin, AccountTier, Computer, Draft, LoginFailure, Platform } from "@baize/shared";
+import type {
+  Account,
+  AccountLogin,
+  AccountTier,
+  Computer,
+  Draft,
+  LivePurpose,
+  LiveUserEnd,
+  LoginFailure,
+  Platform,
+} from "@baize/shared";
 
 export const PLATFORM: Record<Platform, string> = {
   github: "GitHub",
@@ -39,6 +49,22 @@ export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {
   window_failed: "登录窗口出错或到时间还没登上，账号状态没变，可以再点一次。",
   remote_refused: "远程电脑上不能登录这个平台，请在本机登录这个账号。",
 };
+
+// 画面面板。摆哪几个按钮由 liveEndActions 定：登录只有放弃，交还只出现在接手上。
+export const liveEndText = (kind: LivePurpose["kind"], action: LiveUserEnd): string =>
+  action === "finish" ? "交还给 Bot" : kind === "login" ? "不登了" : "不弄了";
+
+export const LIVE_TEXT = {
+  takeover: "替 Bot 操作",
+  connecting: "正在连上电脑上的画面…",
+  reconnecting: "画面断了，正在重连…",
+  replaced: "画面在别的窗口打开了",
+  reclaim: "在这里看",
+  ended: "画面已经结束了",
+  hide: "收起",
+  reveal: "到本机窗口操作",
+  noOrigin: "页面还在打开",
+} as const;
 
 export const TIER: Record<AccountTier, { title: string; note: string }> = {
   read_only: { title: "只读", note: "只看数据和评论，不写任何东西。" },

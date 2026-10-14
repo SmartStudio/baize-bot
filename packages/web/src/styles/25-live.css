@@ -1,0 +1,84 @@
+/* 电脑上一页的实时画面。盖在设置窗口之上：账号页点登录时设置窗口还开着。 */
+.live-scrim {
+  z-index: 6;
+}
+
+.live-panel {
+  width: min(var(--content-max-w), 92vw);
+  gap: var(--space-5);
+}
+
+.live-origin {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  min-width: 0;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+  border-radius: var(--radius-full);
+  background: var(--bg-inset);
+  color: var(--fg-3);
+  font: var(--type-mono);
+}
+
+.live-origin span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-screen {
+  position: relative;
+  display: grid;
+  min-height: 160px;
+  overflow: hidden;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-inset);
+  place-items: center;
+}
+
+/* 按帧的原始尺寸摆，只缩不放：坐标按显示出来的框折比例，框和画面必须是同一个比例。 */
+.live-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: calc(88vh - 240px);
+  cursor: default;
+  touch-action: none;
+}
+
+.live-canvas.is-blank {
+  visibility: hidden;
+}
+
+/* 断了、被顶掉、结束了：留着最后一帧但压暗，免得人以为还能点。 */
+.live-canvas.is-stale {
+  opacity: 0.4;
+}
+
+.live-notice {
+  position: absolute;
+  inset: auto var(--space-5) var(--space-5);
+  margin: 0;
+  padding: var(--space-3) var(--space-5);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm);
+  color: var(--fg-2);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+/* 接键盘、输入法和粘贴的框，看不见但要能拿焦点；放在画面左上角，输入法候选框跟着出在这里。 */
+.live-keys {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  pointer-events: none;
+}

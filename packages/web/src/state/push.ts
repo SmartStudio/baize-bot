@@ -99,8 +99,8 @@ export const createPushHandlers = ({
     preference_deleted: (push, seq) =>
       dispatch({ type: "preference_removed", botId: push.botId, preferenceId: push.preferenceId, seq }),
     brand_updated: (push) => dispatch({ type: "brand_set", brand: push.brand }),
-    live_session: () => {},
-    live_closed: () => {},
+    live_session: (push, seq) => dispatch({ type: "live_upserted", session: push.session, seq }),
+    live_closed: (push, seq) => dispatch({ type: "live_removed", liveId: push.liveId, seq }),
     poker_table_updated: (push) => dispatch({ type: "poker_table_set", table: push.table }),
     draft_updated: (push, seq) => {
       dispatch({ type: "content_loaded", drafts: [push.draft], plans: [], seq });

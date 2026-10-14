@@ -19,6 +19,8 @@ import {
   type GrantId,
   type Handoff,
   type HandoffId,
+  type LiveId,
+  type LiveSession,
   type LoginAttemptId,
   type LoginFailure,
   type Message,
@@ -93,8 +95,10 @@ export const memberIdsOf = (conversation: Conversation): BotId[] =>
 // opening 记着这次点击取的号和为它取的尝试号：结算只落在同一次点击上，别的点击、别的尝试的结果碰不到它。
 // offline 是控制面回 409 或电脑中途离线，refused 是别的错；failed 是电脑报回来的登录没成，账号本身的 login 不变；
 // lapsed 是等到超时或重连都没等到结果。signed_in 是等到了 login 为 valid 的账号，之后再过期，卡片从头要你登录。
+// closed 是这次尝试的画面在网页上出现过、又没了，结果还没到：按钮放开，尝试号留着，晚到的结果照样落上来。
 export type LoginFlow =
   | { status: "opening"; startedAt: Seq; attempt: LoginAttemptId }
+  | { status: "closed"; startedAt: Seq; attempt: LoginAttemptId }
   | { status: "signed_in" }
   | { status: "offline" }
   | { status: "refused"; message: string }
@@ -110,8 +114,13 @@ export type ContentBook = {
   computers: Record<ComputerId, Computer>;
   publications: Record<DraftId, Publication>;
   logins: Partial<Record<AccountId, LoginFlow>>;
+  // 电脑上正开着的画面。会话本体在电脑内存里，这里是它的镜像：GET /api/live 加 live_session、live_closed 两种推送。
+  live: Record<LiveId, LiveEntry>;
   stamps: Stamps;
 };
+
+// 表按 id 比号，会话的 id 就是 liveId。
+export type LiveEntry = LiveSession & { readonly id: LiveId };
 
 export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
@@ -244,6 +253,10 @@ export type Action =
   | { type: "login_opened"; accountId: AccountId; startedAt: Seq; attempt: LoginAttemptId }
   | { type: "login_flow"; accountId: AccountId; startedAt: Seq; flow: LoginFlow }
   | { type: "login_failed"; accountId: AccountId; attempt: LoginAttemptId; reason: LoginFailure }
+  | { type: "login_dismissed"; accountId: AccountId; attempt: LoginAttemptId }
+  | { type: "live_loaded"; sessions: LiveSession[]; seq: Seq }
+  | { type: "live_upserted"; session: LiveSession; seq: Seq }
+  | { type: "live_removed"; liveId: LiveId; seq: Seq }
   | {
       type: "logins_settled";
       before: Seq;

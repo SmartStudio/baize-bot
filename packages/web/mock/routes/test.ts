@@ -46,6 +46,7 @@ import {
   settleUnseenHandoff,
 } from "../state.js";
 import { resetRegisteredEmails } from "./auth.js";
+import { resetLive } from "./live.js";
 import { readBody, send, type Route } from "./http.js";
 
 const GroupUpdateTrigger = z.object({ groupId: GroupId, chiefBotId: BotId.nullable() });
@@ -103,6 +104,7 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     reseed();
     resetToday();
     resetRegisteredEmails();
+    resetLive();
     activeTurns.clear();
     turnEpochs.clear();
     send(res, 204);
