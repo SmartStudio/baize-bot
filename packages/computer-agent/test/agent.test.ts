@@ -50,7 +50,6 @@ const fakeConnection: CdpConnection = {
 };
 
 const fakeChrome = (): AssistantChrome => ({
-  kind: "local",
   profileDir: "/tmp/baize-test/chrome-profile",
   connection: async () => fakeConnection,
   onExit: () => () => {},
@@ -64,7 +63,7 @@ const fakeChrome = (): AssistantChrome => ({
  * 能登录的假 Chrome：每次 createTarget 开一个 tab，按开的顺序叫 tab-1、tab-2……。登录页上查到的账号名由 signIn
  * 给，destroy 让这一页没了。
  */
-function loginChrome(kind: AssistantChrome["kind"] = "local") {
+function loginChrome() {
   const tabs: string[] = [];
   const handles = new Map<string, string>();
   const sessions = new Map<string, string>();
@@ -108,7 +107,7 @@ function loginChrome(kind: AssistantChrome["kind"] = "local") {
       for (const listener of listeners)
         listener({ method: "Target.targetDestroyed", params: { targetId: tab }, sessionId: undefined });
     },
-    factory: (): AssistantChrome => ({ ...fakeChrome(), kind, connection: async () => connection }),
+    factory: (): AssistantChrome => ({ ...fakeChrome(), connection: async () => connection }),
   };
 }
 
@@ -1450,36 +1449,33 @@ describe("电脑代理连控制面", () => {
     expect(runnerCalls().pokerResults).toEqual([{ runId: "run-1", callId: "act-waiting", result: { ok: true } }]);
   });
 
-  it.each(["local", "remote"] as const)(
-    "%s 电脑收 browser_login：登录页上屏，登上后先撤回画面再回一条 login_state",
-    async (kind) => {
-      const server = startControlPlane();
-      servers.push(server);
-      const chrome = loginChrome(kind);
-      spawnAgent(await server.url(), { makeChrome: chrome.factory });
-      const socket = await server.waitForSocket(1);
+  it("电脑收 browser_login：登录页上屏，登上后先撤回画面再回一条 login_state", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const chrome = loginChrome();
+    spawnAgent(await server.url(), { makeChrome: chrome.factory });
+    const socket = await server.waitForSocket(1);
 
-      socket.send(
-        JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
-      );
-      const shown = await server.waitForLiveSession((session) => session.purpose.kind === "login");
-      chrome.signIn("tab-1", "白泽工厂日记");
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
+    const shown = await server.waitForLiveSession((session) => session.purpose.kind === "login");
+    chrome.signIn("tab-1", "白泽工厂日记");
 
-      await expect(server.waitForMessage("login_state")).resolves.toEqual({
-        type: "login_state",
-        accountId: "account-1",
-        state: { login: "valid", handle: "白泽工厂日记" },
-      });
-      expect(shown.purpose).toEqual({
-        kind: "login",
-        accountId: "account-1",
-        platform: "xiaohongshu",
-        attempt: "try-1",
-      });
-      expect(server.live, "画面的 closed 先于 login_state 到").toContainEqual({ t: "closed", liveId: shown.liveId });
-      expect(chrome.closed(), "登录页关掉").toEqual(["tab-1"]);
-    },
-  );
+    await expect(server.waitForMessage("login_state")).resolves.toEqual({
+      type: "login_state",
+      accountId: "account-1",
+      state: { login: "valid", handle: "白泽工厂日记" },
+    });
+    expect(shown.purpose).toEqual({
+      kind: "login",
+      accountId: "account-1",
+      platform: "xiaohongshu",
+      attempt: "try-1",
+    });
+    expect(server.live, "画面的 closed 先于 login_state 到").toContainEqual({ t: "closed", liveId: shown.liveId });
+    expect(chrome.closed(), "登录页关掉").toEqual(["tab-1"]);
+  });
 
   it("第二份 config 的 hub 和 key 交给运行器，排队发布在下载时才读取最新配置", async () => {
     const bytes = Buffer.from(

@@ -33,7 +33,7 @@ it("远程电脑上走画面登录：哨兵密码逐键、整段各输一次，�
   }
   // 电脑代理的状态行绕过 console 直接写 stdout，照样要扫。
   const streams = [vi.spyOn(process.stdout, "write"), vi.spyOn(process.stderr, "write")];
-  const chrome = fakeChrome({ kind: "remote" });
+  const chrome = fakeChrome();
   let stack: Stack | undefined;
   let agent: AgentHandle | undefined;
   let agentLog = "";
