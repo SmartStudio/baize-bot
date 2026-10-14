@@ -59,6 +59,11 @@ describe("LivePanel 的按钮来自 liveEndActions", () => {
     expect(local).toContain("到本机窗口操作");
   });
 
+  it("登录的副标题写页面在哪台电脑上，主机名和后面的汉字隔一个空格", () => {
+    const html = renderToStaticMarkup(<LivePanel session={login} onDismiss={() => undefined} />);
+    expect(html).toContain("扫码或输入都直接发到远程电脑 remote.baize.dev 上的这一页，密码不经过 Bot。");
+  });
+
   it("页面还没导航完时地址栏不空着，连上之前说在连", () => {
     const html = renderToStaticMarkup(<LivePanel session={login} onDismiss={() => undefined} />);
     expect(html).toContain("页面还在打开");

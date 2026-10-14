@@ -28,7 +28,7 @@ test("账号按电脑分组，每个号只显示当前那一档", async ({ page 
     await expect(row.getByTestId("account-tier"), "每个号一枚档位标").toHaveCount(1);
     await expect(row.getByTestId("account-tier-option"), "没点开不列其他档").toHaveCount(0);
   }
-  await expect(page.getByTestId("computer-row")).toHaveText(["本机在线", "远程在线"]);
+  await expect(page.getByTestId("computer-row")).toHaveText(["本机在线", "远程电脑在线"]);
   await expect(page.getByTestId("always-ask")).toContainText(
     "花钱，改密码或绑定手机，授权第三方应用，删除你电脑上的文件",
   );

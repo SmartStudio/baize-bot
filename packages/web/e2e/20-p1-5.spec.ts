@@ -98,7 +98,7 @@ test("登录卡从未登录到点打开登录窗口，推送登上后变成已�
 
   await card.getByTestId("login-open").click();
   await expect(card).toHaveAttribute("data-state", "opening");
-  await expect(card.getByTestId("login-open")).toHaveText("等你扫码…");
+  await expect(card.getByTestId("login-open")).toHaveText("等你登录…");
   await expect(card.getByTestId("login-open")).toBeDisabled();
 
   await reportLogin(request, LOGIN_ID, { login: "valid", handle: "车间主任小王" });

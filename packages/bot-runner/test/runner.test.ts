@@ -2640,7 +2640,9 @@ describe("运行器的 skill", () => {
       "bot_tool_call:running",
       "bot_tool_call:ok",
     ]);
-    expect(seen.toolResults.join(""), "返回值要说清还在等用户点").toContain("已经在群里问用户存不存「Globex 报价」了");
+    expect(seen.toolResults.join(""), "返回值要说清还在等用户点").toContain(
+      "已经在群里问用户存不存「Globex 报价」了，等用户点。",
+    );
   });
 
   it("同一次运行里第二次 propose_skill：不上报，终态 failed，错误文本说已经问过了", async () => {
@@ -6232,7 +6234,9 @@ ${join(h.dataDir, "bot-1", "work")}
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("方案卡没发出去，改好再调：队员「小图」的 description 是空的");
+    expect(seen.toolResults.join("")).toContain(
+      "方案卡没发出去，改好再调：队员「小图」的 description 是空的，写一句它干什么、不干什么。",
+    );
   });
 
   it("模型不变不再调 setModel：连发两条 plan，会话里只有建会话时那一条 model_change", async () => {
@@ -6508,7 +6512,9 @@ ${join(h.dataDir, "bot-1", "work")}
 
       expect(teamOffers(h)).toEqual([]);
       failedOnce(h);
-      expect(seen.toolResults.join("")).toContain("建队卡没发出去，改好再调：新人「小空」的 description 是空的");
+      expect(seen.toolResults.join("")).toContain(
+        "建队卡没发出去，改好再调：新人「小空」的 description 是空的，写一句它干什么、不干什么。",
+      );
     });
 
     it("新人名字或理由超长：长度交给协议校验，错误文本是中文", async () => {
@@ -6946,7 +6952,9 @@ describe("运行器的草稿", () => {
     ]);
     const result = seen.toolResults.join("");
     expect(result).toContain("草稿已建");
-    expect(result, "别让模型以为已经发出去了").toContain("等用户在卡上批");
+    expect(result, "别让模型以为已经发出去了").toContain(
+      "等用户在卡上批。批之前什么都没发出去，回复用户时说草稿在等用户批，别说已经发了。",
+    );
     expect(result, "带上 draftId，模型之后才能 edit_draft").toContain(
       created[0]?.type === "draft_create" ? created[0].draft.draftId : "没有 draft_create",
     );

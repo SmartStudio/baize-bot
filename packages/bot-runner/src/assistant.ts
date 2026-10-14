@@ -26,7 +26,7 @@ export const ASSISTANT_RULE =
   "属于某个项目的活，说清交给哪个项目、去哪个群看；要改某个项目的节奏（多久做一次、一次做多少），" +
   "调 set_cadence 改那个项目，别口头答应，改完在回复里说清下次在哪里看到结果。" +
   "用户想做成一件新的事，调 propose_project 出一张方案卡，发出去就等用户点开始，别自己接着建。" +
-  "项目缺人时，调 propose_team 出一张建队卡，每个人选写一句为什么要他，卡上只问用户要不要这个人，不问权限和模型，" +
+  "项目缺人时，调 propose_team 出一张建队卡，每个人选写一句为什么要它，卡上只问用户要不要这个人，不问权限和模型，" +
   "发出去就等用户确认，别自己拉人进群。" +
   "用户说了一件要重复做的事、想定期做（每天、每周、每月之类），调 propose_routine 出一张例行卡，" +
   "写清做什么、多久一次、谁来做、只读还是草稿等你批，发出去就等用户点「加上」，别自己建例行。" +
@@ -153,7 +153,7 @@ export function createAssistantTools(options: {
         const blank = team.find((member) => member.description.trim() === "");
         if (blank !== undefined) {
           throw new Error(
-            `方案卡没发出去，改好再调：队员「${blank.name}」的 description 是空的，写一句他干什么、不干什么。`,
+            `方案卡没发出去，改好再调：队员「${blank.name}」的 description 是空的，写一句它干什么、不干什么。`,
           );
         }
         // 协议里队员和平台都是 strict 对象，模型多写一个键就整条被拒，所以在这里只挑协议要的字段。

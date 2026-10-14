@@ -3,7 +3,7 @@ import { ChevronDown, Laptop, Server } from "lucide-react";
 import { BrowserPlatform, type AccountId, type Computer, type ComputerId, type OAuthPlatform } from "@baize/shared";
 import { oauthStartUrl } from "../api/client.js";
 import { useApp } from "../state/app.js";
-import { COMPUTER_KIND_TEXT, PLATFORM, computerName } from "./messages/content.js";
+import { COMPUTER_KIND_TEXT, PLATFORM, beforeChinese, computerName } from "./messages/content.js";
 
 // 电脑不在线就开不了登录窗口，原因写在选项上。
 const BLOCKED: Record<Computer["status"], string | null> = {
@@ -32,9 +32,7 @@ export const connectTarget = (computers: readonly Computer[]): ConnectTarget => 
 export const connectNote = (target: ConnectTarget): string | null => {
   if (target.kind === "none") return "先在下面的「电脑」里加一台电脑，才能接入";
   if (target.kind !== "one" || target.choice.blocked === null) return null;
-  const name = computerName(target.choice.computer);
-  // 主机名是英文，和后面的中文隔一个空格。
-  return `${name}${/[a-z0-9]$/i.test(name) ? " " : ""}${target.choice.blocked}，开不了登录窗口`;
+  return `${beforeChinese(computerName(target.choice.computer))}${target.choice.blocked}，开不了登录窗口`;
 };
 
 const ComputerMenu = ({

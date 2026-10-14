@@ -68,8 +68,8 @@ export function createTeamTools(options: {
       description:
         "项目缺人时，出一张建队卡给用户看：往哪个项目群加谁。projectGroupId 照「你管的项目」里写的抄。" +
         `members 是人选，最多 ${MAX_TEAM_OFFER_MEMBERS} 个：kind 写 existing 是已有的 Bot（给 botId），` +
-        "写 new 是要新请的（给 name、tags、description，description 写一句他干什么、不干什么）。" +
-        "每个人选的 note 写一句为什么要他；suggested 写 true 是可有可无的建议人选，卡上默认不勾，用户点「加上」才算，" +
+        "写 new 是要新请的（给 name、tags、description，description 写一句它干什么、不干什么）。" +
+        "每个人选的 note 写一句为什么要它；suggested 写 true 是可有可无的建议人选，卡上默认不勾，用户点「加上」才算，" +
         "不写或写 false 是你认为该有的。卡上只问用户要不要这个人，不问权限和模型。" +
         "发出去之后等用户确认，别自己拉人。只能在你和用户的单聊里用，项目群里调会报错。",
       parameters: PROPOSE_TEAM_PARAMS,
@@ -100,7 +100,7 @@ export function createTeamTools(options: {
         const blank = members.find((candidate) => candidate.kind === "new" && candidate.description.trim() === "");
         if (blank?.kind === "new") {
           throw new Error(
-            `建队卡没发出去，改好再调：新人「${blank.name}」的 description 是空的，写一句他干什么、不干什么。`,
+            `建队卡没发出去，改好再调：新人「${blank.name}」的 description 是空的，写一句它干什么、不干什么。`,
           );
         }
         options.send(
