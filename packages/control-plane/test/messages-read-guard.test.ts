@@ -22,6 +22,12 @@ type Exception = {
 const EXCEPTIONS: readonly Exception[] = [
   {
     file: "repo/work-records.ts",
+    fn: "recheckCommitted",
+    sites: 1,
+    reason: "已验证归属人和道持有者的追加事务内部重放，旧行只供留存复查和截断，不向调用方返回正文",
+  },
+  {
+    file: "repo/work-records.ts",
     fn: "readWorkLane",
     sites: 1,
     reason: "持有者拉快照，HTTP同快照租约授权，重建需原样条目",
@@ -67,7 +73,7 @@ const scanWorkReadsProbe = (body: string, header = `import { workEntries } from 
   scanWorkEntriesTable("repo/probe.ts", header + body).filter((site) => !site.ok);
 
 describe("消息与工作记录的读取出口", () => {
-  it("messages 必须带 viewer 或登记理由，work_entries 的读只能走登记的持有者快照", () => {
+  it("messages 必须带 viewer 或登记理由，work_entries 的读只能走登记的授权快照和留存复查", () => {
     const unexplained: string[] = [];
     const seen = new Map<string, number>();
     for (const file of sourceFiles()) {
@@ -86,7 +92,7 @@ describe("消息与工作记录的读取出口", () => {
     }
     expect(
       unexplained,
-      "这些地方绕过读取出口：messages 要带 viewer 或登记理由，work_entries 只能由 repo/work-records.ts 中登记的快照函数读",
+      "这些地方绕过读取出口：messages 要带 viewer 或登记理由，work_entries 只能由 repo/work-records.ts 中登记的授权读取函数读",
     ).toEqual([]);
 
     const counts = EXCEPTIONS.map((entry) => ({
@@ -108,6 +114,7 @@ describe("工作记录守卫自己能分辨的写法", () => {
     expect(allowsException("poker/hint.ts", "refreshHintForRun", "messages")).toBe(true);
     expect(allowsException("poker/hint.ts", "refreshHintForRun", "workEntries")).toBe(false);
     expect(allowsException("repo/work-records.ts", "readWorkLane", "workEntries")).toBe(true);
+    expect(allowsException("repo/work-records.ts", "recheckCommitted", "workEntries")).toBe(true);
     expect(HOME.has("repo/messages.ts")).toBe(false);
   });
   it("读 workEntries 即使带 viewer 也不能绕过唯一出口", () => {

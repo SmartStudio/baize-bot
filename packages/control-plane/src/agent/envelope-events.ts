@@ -24,6 +24,15 @@ export async function handleEnvelopedEvent(
       lane: body.lane,
       ...(body.runId === null ? {} : { runId: body.runId }),
       ...(result.kind === "seq_mismatch" ? { nextSeq: result.nextSeq } : {}),
+      ...(result.kind === "invalid"
+        ? {
+            ...(result.reason === undefined ? {} : { reason: result.reason }),
+            ...(result.lineIndex === undefined ? {} : { lineIndex: result.lineIndex }),
+            ...(result.replayReason === undefined ? {} : { replayReason: result.replayReason }),
+            ...(result.nextSeq === undefined ? {} : { nextSeq: result.nextSeq }),
+            ...(result.head === undefined ? {} : { head: result.head }),
+          }
+        : {}),
     };
   }
   const pending: (() => Promise<unknown>)[] = [];

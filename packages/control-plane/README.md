@@ -46,17 +46,38 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 ## 工作记录
 
-可靠上行 `work_append` 带 `{lane: {botId, groupId, stream, epoch}, runId, fromSeq, lines, head, cause}`。`stream` 是 `chat` 或 `table`，每帧至多 64 行。服务器先查持有者与代际，再逐行解析 Pi 条目的 `type`、`id`、`parentId`，拒绝 SessionHeader；原始 JSONL 字符串保存在 `work_entries.line`，本单的 `retention` 全为 `verbatim`。搜索文本只抽 user、assistant 和 toolResult 的文字，图片和 thinking 不入索引。
+可靠上行 `work_append` 带 `{lane: {botId, groupId, stream, epoch}, runId, fromSeq, lines, head, cause}`。`stream` 是 `chat` 或 `table`，每帧至多 64 行。服务器先查持有者与代际，再逐行解析 Pi 条目的 `type`、`id`、`parentId`，拒绝 SessionHeader。保存的是留存过滤之后的原样 JSONL 字符串；服务器接受的行已经是过滤器的不动点，所以 `work_entries.retention` 为 `verbatim`，不能据此推断本机原文是否被过滤过。搜索文本只抽 user、assistant 和 toolResult 的文字，图片和 thinking 不入索引。
 
-`work_streams` 保存 `next_seq`、链头、末条 id 和连接报告的 Pi 版本。追加的条件 UPDATE 同时要求起始序号相等及租约的电脑、安装标识、代际匹配，条目 INSERT 与信封游标在一个事务里。序号从 0 开始，链头按 `sha256(上一个32字节摘要 || sha256(原样行))` 重算；空流的摘要是 32 个零字节。共享函数是 `@baize/shared` 的 `advanceWorkHead`，不使用旧 `work-record` 子路径的十六进制文字拼接算法。
+服务器从该归属人的 `tool_connections` 里取所有 `localOnly: true` 连接的操作名，包含目前未分配给这个 Bot 的操作；帧自报的名单不起作用。`@baize/shared/work-record` 的 `checkFrame` 逐帧复查图片块、超过 16 KiB 的文字、本机工具结果原文、重复 id、畸形已知条目，以及针对本机结果或未知目标的上下文编辑。有一行失败就整帧拒收，不保存合规前缀、不认领导入道。`work_streams.retain_snapshot` 保存 `RetainSnapshot`；读取 jsonb 时先按其 schema parse，成功追加时新快照和条目、信封游标在同一事务提交。旧流没有快照时从 `emptySnapshot` 开始重放已有行，避免遗失历史 id 和本机结果状态。
 
-结果经 `uplink_ack.rejected` 按可靠帧序号返回：无拒收项是 `ok`，其余为 `stale_epoch`、`not_holder`、`seq_mismatch`（含服务器 `nextSeq`）、`head_mismatch`、`invalid`。`work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目。
+`work_streams` 还保存 `next_seq`、链头、末条 id 和连接报告的 Pi 版本。追加的条件 UPDATE 同时要求起始序号相等及租约的电脑、安装标识、代际匹配。序号从 0 开始，链头按 `sha256(上一个32字节摘要 || sha256(原样行))` 重算；空流的摘要是 32 个零字节。共享函数是 `@baize/shared` 的 `advanceWorkHead`。
+
+工具连接改成本机、改名、删掉或操作名变化后，下一条**非空**上传先用新名单从头复查这条流。连接修改与追加按归属人锁互斥；改名、删除即使没有改变操作名集合，也会使该归属人各流的快照指纹失效。从第一条不合规旧行起删除后缀，重算前缀的链头，同时回退 `next_seq`、`tail_entry_id` 和快照。若旧行全部合规就只更新快照。更新带旧序号、旧链头、旧快照的条件，删除后缀与更新在同一事务；并发帧只会有一次重放生效。那一帧的新行不写入，返回截断后的位置，运行器随后重新过滤和上传。
+
+结果经 `uplink_ack.rejected` 按可靠帧序号返回，无拒收项是 `ok`。运行器上传与重传由 P3-11 接入：
+
+| 结果 | 字段与原因 | 运行器动作 |
+| --- | --- | --- |
+| `ok` | 无拒收项 | 推进已确认游标 |
+| `stale_epoch`、`not_holder` | `lane` | 停掉这条道；下一次 prompt 按服务器记录重建 |
+| `seq_mismatch` | `nextSeq` | 对齐服务器游标；结合 Hub 快照核对链头，不盲目重发同帧 |
+| `head_mismatch` | 链头不符 | 拉 Hub 快照重建镜像 |
+| `invalid`，`reason: "tool_list_changed"` | `nextSeq`、`head`；截掉旧行时还有 `replayReason` 和 `lineIndex`（旧流中从 0 开始的行号） | 用最新 config 的本机工具名单从头过滤本地记录；核对服务器前缀后从 `nextSeq` 重传后缀，重新计算链头 |
+| `invalid`，`reason: "unfiltered"` | `lineIndex`（当前帧从 0 开始的行号） | 先过滤这行和后缀，再组成新帧；原帧不再重传 |
+| `invalid`，`reason: "duplicate_id"` 或 `"malformed_entry"` | `lineIndex` | 停止上传坏流，修复或按服务器快照重建 |
+| 其他 `invalid` | 帧、Pi 条目或 run 不合法 | 修正结构或重建，不能当成成功 |
+
+`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。现有电脑代理的 `WorkAppendChannel` 只透传旧码和 `seq_mismatch.nextSeq`，会丢掉新增原因字段；P3-11 必须把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 一起透传给运行器。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
+
+`work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目、不触发旧行复查。
 
 非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。首帧 `fromSeq: 0` 只在无租约，或当前电脑同安装持有且目标流仍为空时，以代际 1 条件认领；目标流已有条目时拒收。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
 
 `GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据，空流回 0、零链头和 null Pi 版本。
 
-租约授权的原样读取只在 `repo/work-records.ts` 的 `readWorkLane`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。三张道表按 Bot、群级联删除，工作条目按归属人级联，run 删除只把 `run_id` 置空。本单未接服务器留存复查，接入点在逐行条目校验通过后、认领和所有写入前；运行器上传、镜像、重建与导入由 P3-11 接入。
+租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。守卫禁止其他文件直接读 `work_entries`。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
+
+删号按归属人、Bot、电脑、道、run 的顺序取锁，在同一事务里入队所有道取消、删除用户和相关记录，电脑与 `agent_outbox` 随外键清空。事务只返回已入队的道取消副本，未发出的 prompt、审批决定等报文随发件箱清空；提交成功后，仅向连接代际仍匹配的在线电脑按序投递，随后以 4002 关闭连接。副本不再落盘，断线电脑不会重放删号取消，旧 token 也不能重新握手。账号已删除时不存在可以持久保留的发件箱，这个最后投递窗口只服务于仍在线的电脑。
 
 ## 工具连接
 

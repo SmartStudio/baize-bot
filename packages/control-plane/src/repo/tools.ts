@@ -9,12 +9,13 @@ import {
   type UpdateToolRequest,
   type UserId,
 } from "@baize/shared";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import type { ToolCrypto } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { bots, toolConnectionBots, toolConnections } from "../db/schema.js";
+import { bots, toolConnectionBots, toolConnections, workStreams } from "../db/schema.js";
 import { newId } from "../ids.js";
 import type { Tx } from "./messages.js";
+import { lockOwner } from "./runs.js";
 
 type ToolRow = typeof toolConnections.$inferSelect;
 
@@ -119,20 +120,23 @@ export async function createTool(
   operations: ToolOperation[],
   crypto: ToolCrypto,
 ): Promise<ToolConnection | null> {
-  const [row] = await db
-    .insert(toolConnections)
-    .values({
-      id: ToolConnectionId.parse(newId()),
-      ownerId,
-      name: input.name,
-      url: input.url,
-      localOnly: input.localOnly ?? false,
-      authorizationEnc: input.authorization === undefined ? null : crypto.encrypt(input.authorization),
-      operations,
-    })
-    .onConflictDoNothing({ target: [toolConnections.ownerId, toolConnections.name] })
-    .returning();
-  return row === undefined ? null : toTool(row, []);
+  return db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    const [row] = await tx
+      .insert(toolConnections)
+      .values({
+        id: ToolConnectionId.parse(newId()),
+        ownerId,
+        name: input.name,
+        url: input.url,
+        localOnly: input.localOnly ?? false,
+        authorizationEnc: input.authorization === undefined ? null : crypto.encrypt(input.authorization),
+        operations,
+      })
+      .onConflictDoNothing({ target: [toolConnections.ownerId, toolConnections.name] })
+      .returning();
+    return row === undefined ? null : toTool(row, []);
+  });
 }
 
 const isNameTaken = (error: unknown): boolean => error instanceof Error && "code" in error && error.code === "23505";
@@ -195,6 +199,9 @@ export async function updateTool(
 
   try {
     return await db.transaction(async (tx): Promise<UpdateToolResult> => {
+      const changesRetainPolicy =
+        patch.name !== undefined || patch.localOnly !== undefined || reauthorized !== undefined;
+      await lockOwner(tx, ownerId, changesRetainPolicy ? "exclusive" : "shared");
       // 补授权要等 MCP 回列表，这期间别的请求可能已经改了操作表。锁住行、按落库的最新一版合并，不拿进来时那份旧的。
       const [locked] = await tx
         .select()
@@ -219,6 +226,14 @@ export async function updateTool(
           ? [locked]
           : await tx.update(toolConnections).set(changes).where(eq(toolConnections.id, locked.id)).returning();
       if (row === undefined) return { kind: "gone" };
+      if (
+        row.name !== locked.name ||
+        row.localOnly !== locked.localOnly ||
+        JSON.stringify(row.operations.map((op) => op.name).toSorted()) !==
+          JSON.stringify(locked.operations.map((op) => op.name).toSorted())
+      ) {
+        await invalidateRetainSnapshots(tx, ownerId);
+      }
       if (assigned !== undefined) {
         await tx.delete(toolConnectionBots).where(eq(toolConnectionBots.toolConnectionId, current.id));
         if (assigned.length > 0) {
@@ -237,10 +252,26 @@ export async function updateTool(
   }
 }
 
+// 改连接名、删连接时操作名集合可能不变，仍须让历史行按最新名单重放。
+async function invalidateRetainSnapshots(tx: Tx, ownerId: UserId): Promise<void> {
+  await tx
+    .update(workStreams)
+    .set({
+      retainSnapshot: sql`jsonb_set(coalesce(${workStreams.retainSnapshot},
+      '{"version":1,"toolFingerprint":"","knownIds":[],"localIds":[]}'::jsonb), '{toolFingerprint}', '""'::jsonb)`,
+    })
+    .where(inArray(workStreams.botId, tx.select({ id: bots.id }).from(bots).where(eq(bots.ownerId, ownerId))));
+}
+
 export async function deleteTool(db: Db, ownerId: UserId, id: ToolConnectionId): Promise<boolean> {
-  const deleted = await db
-    .delete(toolConnections)
-    .where(and(eq(toolConnections.id, id), eq(toolConnections.ownerId, ownerId)))
-    .returning({ id: toolConnections.id });
-  return deleted.length > 0;
+  return db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    const deleted = await tx
+      .delete(toolConnections)
+      .where(and(eq(toolConnections.id, id), eq(toolConnections.ownerId, ownerId)))
+      .returning({ id: toolConnections.id });
+    if (deleted.length === 0) return false;
+    await invalidateRetainSnapshots(tx, ownerId);
+    return true;
+  });
 }

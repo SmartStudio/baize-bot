@@ -17,6 +17,7 @@ import {
   UplinkHeader,
   ControlToAgent,
   DOWNLINK_DELIVERY,
+  DownlinkFrame,
   type Computer,
   type ComputerKind,
   type ComputerId,
@@ -29,6 +30,7 @@ import { TransactionRollbackError } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { ToolCrypto } from "../crypto.js";
 import type { NoticePublisher } from "../notifications.js";
+import type { AccountDeletionFrame } from "../repo/export.js";
 import { listAccountConfigs } from "../repo/accounts.js";
 import { listBrandForConfig } from "../repo/brand.js";
 import { ensureAssistant, listBots } from "../repo/bots.js";
@@ -450,9 +452,22 @@ export class AgentHub {
    * 账号删了，关掉这个人的每条代理连接。先出表再关：关闭回调看到连接不在表里就什么都不写，
    * 不标休眠、不起宽限收尾，这几台电脑的行已经随账号删掉了。
    */
-  disconnectOwner(ownerId: UserId): void {
+  disconnectOwner(ownerId: UserId, finalFrames: readonly AccountDeletionFrame[] = []): void {
     this.#deletedOwners.add(ownerId);
     for (const connection of this.#ownerConnections(ownerId)) {
+      for (const frame of finalFrames) {
+        if (
+          frame.computerId !== connection.computerId ||
+          frame.conn !== connection.conn ||
+          frame.seq <= connection.downSent
+        )
+          continue;
+        if (connection.socket.readyState !== connection.socket.OPEN) break;
+        connection.socket.send(
+          JSON.stringify(DownlinkFrame.parse({ type: "downlink", seq: frame.seq, body: frame.body })),
+        );
+        connection.downSent = frame.seq;
+      }
       this.#disconnectDiscoveries(connection);
       this.#connections.delete(connection.computerId);
       connection.acknowledgements.stop();

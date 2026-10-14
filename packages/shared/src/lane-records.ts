@@ -64,13 +64,25 @@ export const LaneIdentity = z.object({
 });
 export type LaneIdentity = z.infer<typeof LaneIdentity>;
 
+export const WorkRetainReason = z.enum(["duplicate_id", "malformed_entry", "unfiltered", "tool_list_changed"]);
+
 export const WorkAppendResult = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("ok") }),
   z.object({ kind: z.literal("stale_epoch") }),
   z.object({ kind: z.literal("not_holder") }),
   z.object({ kind: z.literal("seq_mismatch"), nextSeq: z.number().int().nonnegative() }),
   z.object({ kind: z.literal("head_mismatch") }),
-  z.object({ kind: z.literal("invalid") }),
+  z.object({
+    kind: z.literal("invalid"),
+    reason: WorkRetainReason.optional(),
+    lineIndex: z.number().int().nonnegative().optional(),
+    replayReason: WorkRetainReason.exclude(["tool_list_changed"]).optional(),
+    nextSeq: z.number().int().nonnegative().optional(),
+    head: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
+  }),
 ]);
 export type WorkAppendResult = z.infer<typeof WorkAppendResult>;
 

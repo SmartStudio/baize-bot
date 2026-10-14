@@ -11,10 +11,21 @@ import {
   type WorkAppendResult,
   type WorkStream,
 } from "@baize/shared";
-import { and, asc, eq, gt, lt, sql } from "drizzle-orm";
+import { RetainSnapshot, checkFrame, emptySnapshot, type RetainContext } from "@baize/shared/work-record";
+import { and, asc, eq, gte, gt, lt, sql } from "drizzle-orm";
 import type { AgentConnection } from "../agent/hub.js";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, laneLeases, pokerTables, runs, workEntries, workStreams } from "../db/schema.js";
+import {
+  bots,
+  groupMembers,
+  groups,
+  laneLeases,
+  pokerTables,
+  runs,
+  toolConnections,
+  workEntries,
+  workStreams,
+} from "../db/schema.js";
 import type { Tx } from "./messages.js";
 
 export async function appendWorkRecords(
@@ -73,7 +84,24 @@ export async function appendWorkRecords(
   const [metadata] = await tx
     .select()
     .from(workStreams)
-    .where(and(eq(workStreams.botId, botId), eq(workStreams.groupId, groupId), eq(workStreams.stream, stream)));
+    .where(and(eq(workStreams.botId, botId), eq(workStreams.groupId, groupId), eq(workStreams.stream, stream)))
+    .for("update");
+  const localTools = await tx
+    .select({ operations: toolConnections.operations })
+    .from(toolConnections)
+    .where(and(eq(toolConnections.ownerId, conn.ownerId), eq(toolConnections.localOnly, true)));
+  const ctx: RetainContext = {
+    localOnlyToolNames: new Set(localTools.flatMap((tool) => tool.operations.map((op) => op.name))),
+  };
+  let committed =
+    metadata === undefined || metadata.retainSnapshot === null
+      ? emptySnapshot(ctx)
+      : RetainSnapshot.parse(metadata.retainSnapshot);
+  if (metadata !== undefined && (metadata.retainSnapshot === null || !checkFrame(ctx, committed, []).ok)) {
+    const replay = await recheckCommitted(tx, metadata, ctx);
+    if (replay.kind === "invalid") return replay;
+    committed = replay.snapshot;
+  }
   const nextSeq = metadata?.nextSeq ?? 0;
   if (firstImport && nextSeq > 0) return { kind: "invalid" };
   if (frame.fromSeq !== nextSeq) return { kind: "seq_mismatch", nextSeq };
@@ -89,6 +117,12 @@ export async function appendWorkRecords(
     const parsed = PiWorkEntry.safeParse(value);
     if (!parsed.success) return { kind: "invalid" };
     entries.push({ line, entry: parsed.data });
+  }
+  const checked = checkFrame(ctx, committed, frame.lines);
+  if (!checked.ok) {
+    return checked.reason === "tool_list_changed"
+      ? { kind: "invalid", reason: checked.reason }
+      : { kind: "invalid", reason: checked.reason, lineIndex: checked.lineIndex };
   }
   const head = await advanceWorkHead(metadata?.head ?? EMPTY_WORK_HEAD, frame.lines);
   if (head !== frame.head) return { kind: "head_mismatch" };
@@ -121,6 +155,7 @@ export async function appendWorkRecords(
       nextSeq: frame.fromSeq + entries.length,
       head,
       tailEntryId: entries.at(-1)!.entry.id,
+      retainSnapshot: checked.snapshot,
       piSessionVersion: conn.piSessionVersion,
     })
     .where(
@@ -155,6 +190,94 @@ export async function appendWorkRecords(
     })),
   );
   return { kind: "ok" };
+}
+
+// 旧名单放行的内容必须撤回；只拒收新帧会让旧原文继续留在服务器。
+async function recheckCommitted(
+  tx: Tx,
+  metadata: typeof workStreams.$inferSelect,
+  ctx: RetainContext,
+): Promise<{ kind: "ok"; snapshot: RetainSnapshot } | Extract<WorkAppendResult, { kind: "invalid" }>> {
+  const scope = and(
+    eq(workStreams.botId, metadata.botId),
+    eq(workStreams.groupId, metadata.groupId),
+    eq(workStreams.stream, metadata.stream),
+  );
+  const stored = await tx
+    .select({ seq: workEntries.seq, entryId: workEntries.entryId, line: workEntries.line })
+    .from(workEntries)
+    .where(
+      and(
+        eq(workEntries.botId, metadata.botId),
+        eq(workEntries.groupId, metadata.groupId),
+        eq(workEntries.stream, metadata.stream),
+        lt(workEntries.seq, metadata.nextSeq),
+      ),
+    )
+    .orderBy(asc(workEntries.seq));
+  const lines = stored.map((row) => row.line);
+  const replayed = checkFrame(ctx, emptySnapshot(ctx), lines);
+  const prefix = replayed.ok ? stored : stored.slice(0, "lineIndex" in replayed ? replayed.lineIndex : 0);
+  const accepted = replayed.ok
+    ? replayed
+    : checkFrame(
+        ctx,
+        emptySnapshot(ctx),
+        prefix.map((row) => row.line),
+      );
+  if (!accepted.ok) throw new Error("留存重放前缀复查失败");
+  const nextSeq = prefix.length;
+  const head = await advanceWorkHead(
+    EMPTY_WORK_HEAD,
+    prefix.map((row) => row.line),
+  );
+  const [updated] = await tx
+    .update(workStreams)
+    .set({ nextSeq, head, tailEntryId: prefix.at(-1)?.entryId ?? null, retainSnapshot: accepted.snapshot })
+    .where(
+      and(
+        scope,
+        eq(workStreams.nextSeq, metadata.nextSeq),
+        eq(workStreams.head, metadata.head),
+        metadata.retainSnapshot === null
+          ? sql`${workStreams.retainSnapshot} IS NULL`
+          : sql`${workStreams.retainSnapshot} = ${JSON.stringify(metadata.retainSnapshot)}::jsonb`,
+      ),
+    )
+    .returning();
+  if (updated === undefined) {
+    const [latest] = await tx.select().from(workStreams).where(scope);
+    return {
+      kind: "invalid",
+      reason: "tool_list_changed",
+      nextSeq: latest?.nextSeq ?? 0,
+      head: latest?.head ?? EMPTY_WORK_HEAD,
+    };
+  }
+  if (!replayed.ok) {
+    await tx
+      .delete(workEntries)
+      .where(
+        and(
+          eq(workEntries.botId, metadata.botId),
+          eq(workEntries.groupId, metadata.groupId),
+          eq(workEntries.stream, metadata.stream),
+          gte(workEntries.seq, nextSeq),
+        ),
+      );
+  }
+  if (metadata.retainSnapshot !== null || !replayed.ok) {
+    return {
+      kind: "invalid",
+      reason: "tool_list_changed",
+      nextSeq,
+      head,
+      ...(!replayed.ok && "lineIndex" in replayed
+        ? { replayReason: replayed.reason, lineIndex: replayed.lineIndex }
+        : {}),
+    };
+  }
+  return { kind: "ok", snapshot: accepted.snapshot };
 }
 
 export async function readWorkLane(

@@ -57,6 +57,17 @@ describe("lane 工作记录", () => {
       nextSeq: 12,
     });
     expect(WorkAppendResult.safeParse({ kind: "seq_mismatch" }).success).toBe(false);
+    const changed = {
+      kind: "invalid",
+      reason: "tool_list_changed",
+      replayReason: "unfiltered",
+      lineIndex: 2,
+      nextSeq: 2,
+      head: EMPTY_WORK_HEAD,
+    };
+    expect(WorkAppendResult.parse(changed)).toEqual(changed);
+    expect(WorkAppendResult.safeParse({ ...changed, reason: "未知原因" }).success).toBe(false);
+    expect(WorkAppendResult.safeParse({ ...changed, lineIndex: -1 }).success).toBe(false);
   });
 
   it("Hub 快照支持空流与原样行，拒绝负序号和缺失版本", () => {

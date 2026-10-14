@@ -40,6 +40,7 @@ import {
   TopicTask,
   UserId,
 } from "./domain.js";
+import { WorkRetainReason } from "./lane-records.js";
 import { ToolView } from "./tool-view.js";
 import { McpDiscoveryResult, McpHttpUrl } from "./mcp-discovery.js";
 
@@ -623,6 +624,13 @@ export type UplinkRejectionCode = z.infer<typeof UplinkRejectionCode>;
 export const UplinkRejection = z.object({
   seq: z.number().int().positive(),
   code: UplinkRejectionCode,
+  reason: WorkRetainReason.optional(),
+  lineIndex: z.number().int().nonnegative().optional(),
+  replayReason: WorkRetainReason.exclude(["tool_list_changed"]).optional(),
+  head: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
   runId: RunId.optional(),
   nextSeq: z.number().int().nonnegative().optional(),
   lane: z

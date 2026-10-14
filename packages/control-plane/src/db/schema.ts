@@ -44,6 +44,7 @@ import type {
   TaskStatus as TaskStatusSchema,
   Viewer,
 } from "@baize/shared";
+import type { RetainSnapshot } from "@baize/shared/work-record";
 import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
@@ -602,6 +603,7 @@ export const workStreams = pgTable(
     nextSeq: integer("next_seq").notNull().default(0),
     head: text("head").notNull().default("0".repeat(64)),
     tailEntryId: text("tail_entry_id"),
+    retainSnapshot: jsonb("retain_snapshot").$type<RetainSnapshot>(),
     piSessionVersion: integer("pi_session_version").notNull(),
   },
   (t) => [

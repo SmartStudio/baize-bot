@@ -29,9 +29,9 @@ export function createPrivacyRoutes(deps: PrivacyRouteDeps): Hono<Env> {
     if (!body.success) return c.json({ error: "请输入邮箱确认" }, 400);
     const user = c.get("user");
     if (body.data.email !== user.email) return c.json({ error: "邮箱和当前账号不符" }, 400);
-    await deleteAccount(deps.db, user.id);
+    const finalFrames = await deleteAccount(deps.db, user.id);
     // 库里的电脑行已经没了，代理再连会卡在握手；这里关掉的是删之前就连着的那几条。
-    deps.agents.disconnectOwner(user.id);
+    deps.agents.disconnectOwner(user.id, finalFrames);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.body(null, 204);
   });
