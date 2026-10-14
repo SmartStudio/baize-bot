@@ -27,6 +27,39 @@ describe("lane 工作记录", () => {
     expect(PiWorkEntry.safeParse({ type: "session", id: "header", parentId: null }).success).toBe(false);
   });
 
+  it.each(["type", "id", "parentId"])("Pi 条目的 %s 拒绝真 NUL", (field) => {
+    const entry = { type: "message", id: "entry-1", parentId: "parent-1", [field]: "前\u0000后" };
+    expect(PiWorkEntry.safeParse(entry).success).toBe(false);
+  });
+
+  it("Pi 条目的非列字段保留 NUL，合法标识与 null 父节点保持原样", () => {
+    const entry = { type: "custom", id: "entry-1", parentId: null, data: "前\u0000后" };
+    expect(PiWorkEntry.parse(entry)).toEqual(entry);
+    expect(PiWorkEntry.parse({ ...entry, parentId: "" }).parentId).toBe("");
+  });
+
+  it.each(["user", "assistant", "toolResult"])("%s 字符串 content 只剔除真 NUL，跨 NUL 的词保持连续", (role) => {
+    expect(
+      extractWorkSearchText({ message: { role, content: "\u0000前\u0000\u0000后\u0000\n保留\\u0000\t\u0001🙂" } }),
+    ).toBe("前后\n保留\\u0000\t\u0001🙂");
+  });
+
+  it.each(["user", "assistant", "toolResult"])("%s 数组 content 只剔除文本块中的真 NUL", (role) => {
+    expect(
+      extractWorkSearchText({
+        message: {
+          role,
+          content: [
+            { type: "text", text: "\u0000前\u0000\u0000" },
+            { type: "thinking", thinking: "不索引\u0000" },
+            { type: "image", data: "不索引\u0000" },
+            { type: "text", text: "后\u0000\n保留\\u0000\t\u0001🙂" },
+          ],
+        },
+      }),
+    ).toBe("前后\n保留\\u0000\t\u0001🙂");
+  });
+
   it("只提取用户、助手和工具结果里的文本块", () => {
     expect(extractWorkSearchText({ message: { role: "user", content: "用户内容" } })).toBe("用户内容");
     expect(

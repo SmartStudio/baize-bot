@@ -30,7 +30,20 @@ export const advanceWorkHead = async (head: string, lines: readonly string[]): P
 };
 
 export const PiWorkEntry = z
-  .object({ type: z.string().min(1), id: z.string().min(1), parentId: z.string().nullable() })
+  .object({
+    type: z
+      .string()
+      .min(1)
+      .refine((value) => !value.includes("\u0000"), "Pi 条目类型不能包含 NUL"),
+    id: z
+      .string()
+      .min(1)
+      .refine((value) => !value.includes("\u0000"), "Pi 条目 id 不能包含 NUL"),
+    parentId: z
+      .string()
+      .refine((value) => !value.includes("\u0000"), "Pi 条目 parentId 不能包含 NUL")
+      .nullable(),
+  })
   .passthrough()
   .refine((entry) => entry.type !== "session", { message: "Pi session header 不能作为工作记录" });
 export type PiWorkEntry = z.infer<typeof PiWorkEntry>;
@@ -41,7 +54,7 @@ export const extractWorkSearchText = (entry: unknown): string => {
   if (typeof message !== "object" || message === null || !("role" in message) || !("content" in message)) return "";
   const { role, content } = message;
   if (role !== "user" && role !== "assistant" && role !== "toolResult") return "";
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return content.replaceAll("\u0000", "");
   if (!Array.isArray(content)) return "";
   return content
     .filter(
@@ -54,7 +67,8 @@ export const extractWorkSearchText = (entry: unknown): string => {
         typeof part.text === "string",
     )
     .map((part) => part.text)
-    .join("");
+    .join("")
+    .replaceAll("\u0000", "");
 };
 
 export const LaneIdentity = z.object({

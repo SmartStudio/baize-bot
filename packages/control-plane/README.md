@@ -89,6 +89,8 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 ## recall
 
+写入 `search_text` 和召回复核、摘录时直接删除文字中的 U+0000，跨 NUL 的关键词可连续命中，原始 JSONL 行及哈希链保持不变；Pi 条目的 `id`、`parentId`、`type` 若含 NUL，在解析时整帧回 `invalid`。
+
 `POST /hub/v1/recall` 使用当前电脑网关 key 的 Bearer 和 `x-baize-lane` 租约头。鉴权后的电脑行、道栅栏和召回查询共用只读可重复读事务。Bot、归属人和当前群都从鉴权或租约头取得，请求只接受 `{query: string}`；关键词去掉首尾空白后须为 1 到 100 个字符且不能含 NUL，非法请求回 400「召回参数格式不对」。缺头、旧代际、非持有者和过期租约按租约节回 409，cookie 不能代替 Bearer。
 
 `repo/work-records.ts` 的 `recallWorkRecords` 必填被查 Bot 的 viewer，只查它本人、同归属人、全群可见的 `chat` 流，排除当前群。`workEntryVisibleTo(viewer)` 之外还固定要求 `visible_to IS NULL`，对本人私密的记录也不召回；牌桌流、隐藏 run 和别的 Bot 的记录不进入结果。来源群必须仍属当前归属人且 Bot 仍是成员，群标题取该群主题任务的当前标题。工具名单查询与候选读取也在同一可重复读快照内；候选原行按当前名单再过滤，摘录只从过滤后的文字提取，陈旧 `search_text` 不会带回原文。排序键全部在 SQL 里：相似度降序、条目时间降序、群号（`COLLATE "C"`）升序、seq 降序，条目时间是 `work_entries.entry_at`，缺失时回退到 run 开始时间和群创建时间。候选按这个次序分批取（首批 32 条，之后每批翻倍），每批在 Node 里按当前名单再过滤，凑够 8 条或候选取完就停，不合规命中不会挤掉正常结果，也不把所有 `ILIKE` 命中整行拉进 Node。`entry_at` 由 0036 迁移加的 `BEFORE INSERT` 触发器从 `chat` 流 `message` 行的 `timestamp` 写入（只认带时区的 ISO 8601，截到毫秒，与共享的 `ISO_TIME` 一致；非法或缺失为 NULL），旧行由迁移回填；触发器放在库里是因为所有插入口（含测试和手工写入）都要覆盖，不依赖应用层记得写。删群后同一查询回空；删 Bot 后原道的请求被栅栏拒绝，工作记录随外键级联删除。
