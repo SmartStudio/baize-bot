@@ -140,6 +140,8 @@ describe("端到端：新电脑代理连旧控制面", () => {
           profileDir: join(dataDir, "chrome"),
           connection: () => Promise.reject(new Error("这条用例不该起 Chrome")),
           login: async () => ({ login: "failed", reason: "window_failed" }),
+          reveal: async () => {},
+          conceal: async () => {},
           pid: () => null,
           stop: async () => {},
         }),

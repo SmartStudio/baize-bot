@@ -48,6 +48,8 @@ export function fakeChrome(): FakeChrome {
         waiting.push(settle);
         signal.addEventListener("abort", () => settle({ login: "failed", reason: "window_failed" }), { once: true });
       }),
+    reveal: async () => {},
+    conceal: async () => {},
     pid: () => null,
     stop: async () => undefined,
   });

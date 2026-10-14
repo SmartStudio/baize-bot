@@ -61,8 +61,9 @@ export type BotConfig = ConfigMessage["bots"][number];
 
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
 export { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
-export { type CdpConnection, type CdpPipe, connectPipe } from "./cdp.js";
+export { type CdpConnection, type CdpEvent, type CdpPipe, connectPipe } from "./cdp.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
+export type { LiveEnd, LiveOutcome, LiveRequest, PresentPage } from "./live-port.js";
 export { discoverMcpTools } from "./mcp-discover.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";

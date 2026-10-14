@@ -30,6 +30,8 @@ function startComputer(
       profileDir: join(dataDir, "chrome"),
       connection: () => Promise.reject(new Error("工作记录恢复用例不使用 Chrome")),
       login: async () => ({ login: "failed", reason: "window_failed" }),
+      reveal: async () => {},
+      conceal: async () => {},
       pid: () => null,
       stop: async () => {},
     }),

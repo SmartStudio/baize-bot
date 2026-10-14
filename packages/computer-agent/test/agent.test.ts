@@ -50,6 +50,8 @@ const fakeChrome = (): AssistantChrome => ({
   profileDir: "/tmp/baize-test/chrome-profile",
   connection: async () => fakeConnection,
   login: async () => ({ login: "valid", handle: "白泽工厂日记" }),
+  reveal: async () => {},
+  conceal: async () => {},
   pid: () => null,
   stop: async () => {},
 });
