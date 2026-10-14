@@ -124,15 +124,25 @@ export async function enqueueDownlink(
 
 export async function acknowledgeDownlink(
   db: Db | Tx,
+  ownerId: UserId,
   computerId: ComputerId,
   conn: number,
   upTo: number,
 ): Promise<void> {
   await db.transaction(async (tx) => {
+    // 删号先删 run 级联的发件箱、再删电脑；确认必须先过归属人锁，不能各持一行互等。
+    await lockOwner(tx, ownerId, "shared");
     const [row] = await tx
       .update(computers)
       .set({ downApplied: sql`greatest(${computers.downApplied}, ${upTo})` })
-      .where(and(eq(computers.id, computerId), eq(computers.connGen, conn), lte(sql`${upTo}`, computers.downSeq)))
+      .where(
+        and(
+          eq(computers.id, computerId),
+          eq(computers.ownerId, ownerId),
+          eq(computers.connGen, conn),
+          lte(sql`${upTo}`, computers.downSeq),
+        ),
+      )
       .returning();
     if (row === undefined) return;
     await tx

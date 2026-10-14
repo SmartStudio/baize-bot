@@ -257,7 +257,13 @@ describe("删 Bot 和别的写并发", () => {
     let starting: ReturnType<typeof gate.arm> | undefined;
     try {
       expect((await live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小销 先干" })).status).toBe(201);
-      expect((await live.agent.expect("prompt")).botId).toBe(sales.id);
+      const first = await live.agent.expect("prompt");
+      expect(first.botId).toBe(sales.id);
+      // 首条 prompt 的确认也拿 owner 共享锁，必须等它提交，闸门才能只拦第二次派活。
+      await waitFor(async () => {
+        const pending = await database.sql`SELECT 1 FROM agent_outbox WHERE run_id = ${first.runId}`;
+        return pending.length === 0;
+      }, "首条 prompt 的下行确认提交");
 
       starting = gate.arm(START_RUN, "before");
       const posting = live.client.post(`/api/groups/${live.groupId}/messages`, { text: "@小服 回客户" });

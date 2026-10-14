@@ -23,6 +23,8 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 可靠下行在调用方事务里进入 `agent_outbox`，带 `{ type: "downlink", seq, body }` 按序发送；结束或放弃 run 的事务删除它绑定的行，4004 顶号清空该电脑发件箱，删电脑级联删除。在线或断线宽限内可以入队，宽限外沿用派发失败分支。hello 先更新连接代际和游标，再依次发 welcome、config、pause/resume、重放发件箱，随后补历史欠账。代理先持久化 `.agent/downlink.json` 再入运行器队列，重复帧只确认，崩溃窗口内丢失的 prompt 由 hello 的 activeRuns 对账收尾。对账发现已结束的 active run 时现场发 `cancel{runId}`，不入发件箱。
 
+下行确认事务先用连接上的 owner id 拿归属人共享 advisory 锁，再条件更新电脑游标，最后删除已确认的发件箱行。删号拿同一把归属人排他锁，先删 runs 级联到发件箱，再删用户级联到电脑；确认若先锁电脑，两边会各持一行互等。共享锁让两条路径在碰行之前排队，每次确认多一条锁查询，不额外查归属人；更新非键游标本身拿电脑的 `FOR NO KEY UPDATE` 行锁。`test/privacy.test.ts` 用实际锁等待和查询闸门钉住这个交错。
+
 ## 租约
 
 `lane_leases` 用 `(bot_id, group_id)` 作主键，一条道只有一台持有电脑，并固定它的安装标识和正整数代际。`agent/place-run.ts` 的 `placeRun` 是唯一建 run 的入口，用户消息、Bot 之间的 @、例行、交接和牌桌隐藏 run 都走它。认领租约、必要时接管、建 run、可靠 prompt 入队在调用方的同一事务里提交；`test/place-run-guard.test.ts` 扫源码禁止其他入口直接建 run。

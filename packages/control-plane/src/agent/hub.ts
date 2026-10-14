@@ -570,7 +570,7 @@ export class AgentHub {
     )
       return;
     if (bare.data.body.type === "downlink_ack") {
-      await acknowledgeDownlink(this.#deps.db, conn.computerId, conn.conn, bare.data.body.upTo);
+      await acknowledgeDownlink(this.#deps.db, conn.ownerId, conn.computerId, conn.conn, bare.data.body.upTo);
       return;
     }
     await handleAgentEvent(deps, conn, bare.data.body, receivedAt);
