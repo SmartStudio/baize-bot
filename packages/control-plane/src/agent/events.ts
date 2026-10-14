@@ -802,6 +802,12 @@ function modelFailureMessage(detail: string): string {
   return `模型没回话${modelFailureStatus(detail)}。检查控制面的上游地址、key 和模型映射（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODELS）。`;
 }
 
+const LOGGED_DETAIL_CHARS = 80;
+
+function clipDetail(detail: string): string {
+  return detail.length <= LOGGED_DETAIL_CHARS ? detail : `${detail.slice(0, LOGGED_DETAIL_CHARS)}…`;
+}
+
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
@@ -835,10 +841,18 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   }
   // 运行器也会发不属于某次 run 的错误。群号明确时只查该群，不带群号时必须能唯一确定进行中的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
-  if (event.groupId !== undefined && named === null) return;
+  if (event.groupId !== undefined && named === null) {
+    console.warn(
+      `电脑 ${conn.computerId} 报错指定的群已不存在或不属于归属人，不落群：${event.code} ${clipDetail(event.detail)}`,
+    );
+    return;
+  }
   const open = await uniqueOpenRun(deps.db, conn.computerId, event.groupId);
   const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
+    console.warn(
+      `电脑 ${conn.computerId} 报错没带群号，也确定不了唯一一个还开着的活，不落群：${event.code} ${clipDetail(event.detail)}`,
+    );
     return;
   }
   await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });

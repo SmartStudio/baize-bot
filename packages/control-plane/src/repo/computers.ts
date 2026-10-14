@@ -124,46 +124,58 @@ function ofConnection(computerId: ComputerId, gatewayKey: string) {
   return and(eq(computers.id, computerId), eq(computers.gatewayKeyHash, hashSecret(gatewayKey)));
 }
 
+/** 一个事务最多同时持有的归属人 advisory 共享锁数。每把占共享锁表一个槽，几千个归属人一起在线时一个事务装不下。 */
+export const SLEEP_OWNERS_PER_BATCH = 500;
+
 /** 关服务时一次写完。socket 的 close 回调排在事件循环后面，进程退出之前跑不完。 */
-export async function markComputersSleeping(db: Db, computerIds: readonly ComputerId[]): Promise<void> {
+export async function markComputersSleeping(
+  db: Db,
+  computerIds: readonly ComputerId[],
+  ownersPerBatch = SLEEP_OWNERS_PER_BATCH,
+): Promise<void> {
   if (computerIds.length === 0) return;
-  await markSleeping(db, inArray(computers.id, [...computerIds]));
+  await markSleeping(db, inArray(computers.id, [...computerIds]), ownersPerBatch);
 }
 
 /** 进程刚起不可能有活着的连接，库里剩下的在线必然是上次没关干净留下的。 */
-export async function markOnlineComputersSleeping(db: Db): Promise<void> {
-  await markSleeping(db, eq(computers.status, "online"));
+export async function markOnlineComputersSleeping(db: Db, ownersPerBatch = SLEEP_OWNERS_PER_BATCH): Promise<void> {
+  await markSleeping(db, eq(computers.status, "online"), ownersPerBatch);
 }
 
-// 启停可能和另一实例的删号重叠。快照只选目标，owner 锁全部拿齐之后才能锁电脑行。
-async function markSleeping(db: Db, where: SQL): Promise<void> {
-  await db.transaction(async (tx) => {
-    const targets = await tx.select({ id: computers.id, ownerId: computers.ownerId }).from(computers).where(where);
-    if (targets.length === 0) return;
-    for (const ownerId of [...new Set(targets.map((row) => row.ownerId))].toSorted()) {
-      await lockOwner(tx, UserId.parse(ownerId), "shared");
-    }
-    const ids = targets.map((row) => row.id);
-    const locked = await tx
-      .select({ id: computers.id })
-      .from(computers)
-      .where(and(inArray(computers.id, ids), where))
-      .orderBy(asc(computers.id))
-      .for("no key update");
-    if (locked.length === 0) return;
-    await tx
-      .update(computers)
-      .set({ status: "sleeping", idleSince: new Date() })
-      .where(
-        and(
-          inArray(
-            computers.id,
-            locked.map((row) => row.id),
+// 启停可能和另一实例的删号重叠。快照只选目标，按归属人升序分批，每批一个事务：
+// 批内 owner 锁全部拿齐之后才能锁电脑行，批与批之间不持有任何锁。
+async function markSleeping(db: Db, where: SQL, ownersPerBatch: number): Promise<void> {
+  if (!Number.isInteger(ownersPerBatch) || ownersPerBatch < 1) throw new Error(`批大小要是正整数：${ownersPerBatch}`);
+  const targets = await db.select({ id: computers.id, ownerId: computers.ownerId }).from(computers).where(where);
+  const idsByOwner = new Map<string, string[]>();
+  for (const row of targets) idsByOwner.set(row.ownerId, [...(idsByOwner.get(row.ownerId) ?? []), row.id]);
+  const owners = [...idsByOwner.keys()].toSorted();
+  for (let from = 0; from < owners.length; from += ownersPerBatch) {
+    const batch = owners.slice(from, from + ownersPerBatch);
+    await db.transaction(async (tx) => {
+      for (const ownerId of batch) await lockOwner(tx, UserId.parse(ownerId), "shared");
+      const ids = batch.flatMap((ownerId) => idsByOwner.get(ownerId) ?? []);
+      const locked = await tx
+        .select({ id: computers.id })
+        .from(computers)
+        .where(and(inArray(computers.id, ids), where))
+        .orderBy(asc(computers.id))
+        .for("no key update");
+      if (locked.length === 0) return;
+      await tx
+        .update(computers)
+        .set({ status: "sleeping", idleSince: new Date() })
+        .where(
+          and(
+            inArray(
+              computers.id,
+              locked.map((row) => row.id),
+            ),
+            where,
           ),
-          where,
-        ),
-      );
-  });
+        );
+    });
+  }
 }
 
 export type TokenReset = { readonly computerId: ComputerId; readonly token: string };
