@@ -261,6 +261,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     const startComputer = async (): Promise<void> => {
       if (agent !== undefined || agentChild !== undefined) throw new Error("电脑代理已经启动");
       let earlyExitError: Error | undefined;
+      const appliedBefore = configsApplied;
       if (options.agentProcess) {
         const agentDir = fileURLToPath(new URL("../../computer-agent", import.meta.url));
         const mainPath = join(agentDir, "src", "main.ts");
@@ -320,13 +321,18 @@ export async function startStack(options: StackOptions): Promise<Stack> {
           },
         });
       }
-      await waitFor(async () => {
-        if (earlyExitError !== undefined) throw earlyExitError;
-        return ComputerListResponse.parse(await api.get("/api/computers")).computers[0]?.status === "online";
-      }, "电脑上线");
+      await waitFor(
+        async () => {
+          if (earlyExitError !== undefined) throw earlyExitError;
+          const online = ComputerListResponse.parse(await api.get("/api/computers")).computers[0]?.status === "online";
+          // 子进程的 config 数不到，只能等 online。
+          return online && (options.agentProcess === true || configsApplied > appliedBefore);
+        },
+        options.agentProcess === true ? "电脑上线" : "电脑上线并收下 config",
+      );
     };
 
-    // 电脑上线之后控制面才会派活，不等的话 dispatch 会走「电脑不在线」那一支。
+    // 只看库里 online 会落进「电脑不在线」那一支，控制面要 config 发出后才认这台电脑能派活，所以还要等进程内代理收下 hello 的 config。
     if (options.startComputer !== false) await startComputer();
 
     return {

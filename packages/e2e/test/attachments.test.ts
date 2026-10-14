@@ -186,7 +186,6 @@ it("同一账号远程起草带图小红书草稿，本机发布前按附件下�
     expect(remoteBrowserConnections).toBe(0);
 
     await stack.startComputer();
-    await expect.poll(() => stack!.configsApplied(), POLL).toBeGreaterThan(0);
     const computers = ComputerListResponse.parse(await stack.get("/api/computers")).computers;
     expect(
       computers.map((computer) => computer.ownerId),
