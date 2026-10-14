@@ -467,7 +467,7 @@ async function startHarness(options: {
   readonly role?: BotRole;
   /** 复用上一台的数据目录，用来模拟同一台电脑上又来一条 config。 */
   readonly dataDir?: string;
-  /** 助理 Chrome。不给就和远程电脑一样没有浏览器工具。 */
+  /** 助理 Chrome。不给就没有浏览器工具。 */
   readonly browser?: RunnerConfig["browser"];
   /** 不给就指到一个连不上的地址。 */
   readonly accountsProxy?: RunnerConfig["accountsProxy"];
@@ -7710,7 +7710,7 @@ describe("助理浏览器的禁区和看图", () => {
       "browser_snapshot",
       "browser_type",
     ]);
-    expect(await toolsOf(undefined), "远程电脑没有助理 Chrome").toEqual([]);
+    expect(await toolsOf(undefined), "没给助理 Chrome 就一件浏览器工具都不注册").toEqual([]);
   });
 
   it("建 Bot 的 bash、跑不联网和批了联网的命令，都不去拉起助理 Chrome", async () => {

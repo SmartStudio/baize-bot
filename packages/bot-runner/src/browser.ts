@@ -6,7 +6,7 @@ import type { CdpConnection } from "./cdp.js";
 import { BrowserMutex } from "./browser-mutex.js";
 import type { PresentPage } from "./live-port.js";
 
-// 助理浏览器：每个 Bot 在助理 Chrome 里有一个自己的后台标签页。只有本机电脑代理给 browser，远程电脑和测试不给就没有这组工具。
+// 助理浏览器：每个 Bot 在助理 Chrome 里有一个自己的后台标签页。电脑代理给了 browser 才有这组工具，测试大多不给。
 // 标签页各用各的，但 Chrome 和 profile 是所有 Bot 共用的：cookie 和登录态互通，谁都能打开别人登录过的网站。
 // 助理 Chrome 不开调试端口，只有电脑代理手里的那条管道能列出、关掉、接管标签页，页面和 bash 都够不着。
 

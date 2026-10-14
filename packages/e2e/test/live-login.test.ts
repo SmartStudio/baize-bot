@@ -3,24 +3,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { format } from "node:util";
 import { expect, it, vi } from "vitest";
-import { type RawData, WebSocket } from "ws";
-import { createRunner } from "@baize/bot-runner";
-import { type AgentHandle, startAgent } from "@baize/computer-agent";
-import { DEV_EMAIL, DEV_PASSWORD } from "@baize/control-plane";
-import {
-  AccountResponse,
-  ComputerListResponse,
-  ComputerTokenResponse,
-  decodeLive,
-  encodeLive,
-  type LiveId,
-  type LiveInput,
-  LiveToViewer,
-  LoginAccountResponse,
-  LoginAttemptId,
-  type ServerPush,
-} from "@baize/shared";
+import type { AgentHandle } from "@baize/computer-agent";
+import { AccountResponse, LoginAccountResponse, LoginAttemptId } from "@baize/shared";
 import { FAKE_FRAME_JPEG, fakeChrome } from "../acceptance/fake-chrome.js";
+import { cookieFor, pushUntil, startRemoteComputer, watchLive } from "../src/live.js";
 import { startStack, type Stack } from "../src/stack.js";
 
 // 用户在画面上打的字只过内存：送进页面之后，库、电脑的数据目录、两边的日志里都不能有它。
@@ -31,46 +17,6 @@ const HANDLE = "白泽工厂日记";
 const POLL = { timeout: 30_000 } as const;
 
 const leaks = (text: string): boolean => NEEDLES.some((needle) => text.includes(needle));
-
-async function pushUntil<T>(stack: Stack, pick: (push: ServerPush) => T | undefined): Promise<T> {
-  for (;;) {
-    const found = pick(await stack.nextPush());
-    if (found !== undefined) return found;
-  }
-}
-
-async function cookieFor(port: number): Promise<string> {
-  const response = await fetch(`http://127.0.0.1:${port}/api/auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: DEV_EMAIL, password: DEV_PASSWORD }),
-  });
-  const cookie = response.headers.getSetCookie()[0]?.split(";")[0];
-  if (!response.ok || cookie === undefined) throw new Error(`看画面的人登录失败 ${response.status}`);
-  return cookie;
-}
-
-const bytesOf = (data: RawData): Uint8Array =>
-  Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-
-async function watchLive(port: number, cookie: string, liveId: LiveId) {
-  const socket = new WebSocket(`ws://127.0.0.1:${port}/api/live/${liveId}`, { headers: { cookie } });
-  const frames: Uint8Array[] = [];
-  socket.on("message", (data, isBinary) => {
-    if (!isBinary) return;
-    const decoded = decodeLive(LiveToViewer, bytesOf(data));
-    if (decoded?.header.t === "frame") frames.push(Uint8Array.from(decoded.payload));
-  });
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", () => resolve());
-    socket.once("error", reject);
-  });
-  return {
-    frames: () => frames,
-    input: (input: LiveInput) => socket.send(encodeLive({ t: "input", input })),
-    close: () => socket.close(),
-  };
-}
 
 function filesUnder(root: string): string[] {
   return readdirSync(root, { recursive: true, withFileTypes: true })
@@ -99,30 +45,13 @@ it("远程电脑上走画面登录：哨兵密码逐键、整段各输一次，�
       priceOutputPerM: 15,
       startComputer: false,
     });
-    const remote = ComputerTokenResponse.parse(await stack.post("/api/computers/remote", {}));
-    let configured = 0;
-    agent = startAgent({
-      url: `ws://127.0.0.1:${stack.port}/agent`,
-      computerId: remote.computerId,
-      token: remote.token,
-      version: "live-login-e2e",
-      dataDir: stack.dataDir,
+    const remote = await startRemoteComputer(stack, {
+      makeChrome: chrome.factory,
       log: (line) => {
         agentLog += `${line}\n`;
       },
-      makeChrome: chrome.factory,
-      makeRunner: (config) => {
-        configured += 1;
-        return createRunner(config);
-      },
     });
-    const live = stack;
-    await expect
-      .poll(async () => {
-        const { computers } = ComputerListResponse.parse(await live.get("/api/computers"));
-        return configured > 0 && computers.find((computer) => computer.id === remote.computerId)?.status;
-      }, POLL)
-      .toBe("online");
+    agent = remote.agent;
 
     const { account } = AccountResponse.parse(
       await stack.post("/api/accounts", { platform: "xiaohongshu", computerId: remote.computerId }),

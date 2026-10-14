@@ -484,7 +484,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       case "publish_draft":
         void publishDraft(message, {
           dataDir,
-          browser: chrome.kind === "local" ? browserConfig : null,
+          browser: browserConfig,
           liveHub: () => {
             if (attachmentConfig === null) throw new Error("附件配置尚未下发");
             return { hub: attachmentConfig.hub, gateway: attachmentConfig.modelGateway };

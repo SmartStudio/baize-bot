@@ -1,13 +1,22 @@
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import type { AgentHandle } from "@baize/computer-agent";
 import {
+  AccountResponse,
   BotListResponse,
   DecideDraftResponse,
+  LoginAccountResponse,
+  LoginAttemptId,
   MessageListResponse,
   TodayResponse,
   type AccountId,
   type Draft,
 } from "@baize/shared";
 import { startFakePlatforms } from "@baize/control-plane/testing";
+import { fakeChrome } from "../acceptance/fake-chrome.js";
+import { pushUntil, startRemoteComputer } from "../src/live.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { isFollowUpTurn, startUpstream, type ChatRequest, type ScriptedTurn } from "../src/upstream.js";
 
@@ -105,6 +114,130 @@ describe("端到端：草稿批准后发到假 GitHub", () => {
       ]);
       expect(stack.agentLog()).not.toContain(TOKEN);
     } finally {
+      await stack?.close();
+      await upstream.close();
+      await fake.close();
+    }
+  });
+});
+
+describe("端到端：远程电脑上的小红书草稿", () => {
+  it("批准后远程电脑认领草稿，发布器在这台电脑的助理 Chrome 里开发布页，撞上登录页记登录过期，账号跟着过期", async () => {
+    const XHS_ASK = "起一条小红书笔记";
+    // 1x1 的 PNG。发布器在打开发布页那一步就因登录过期停下，图的内容不重要，只要是工作目录里的真文件。
+    const COVER = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    let accountId: AccountId | null = null;
+    const script = (request: ChatRequest): ScriptedTurn => {
+      const asked = request.messages.some(
+        (message) => message.role === "user" && JSON.stringify(message.content).includes(XHS_ASK),
+      );
+      if (!asked || accountId === null) return { textChunks: ["收到"], usage: USAGE };
+      if (isFollowUpTurn(request)) return { textChunks: ["草稿在等你批"], usage: USAGE };
+      return {
+        textChunks: [],
+        toolCall: {
+          id: "draft-xhs",
+          name: "create_draft",
+          args: {
+            accountId,
+            content: {
+              kind: "post",
+              title: "我用 5 个 AI 做推广",
+              text: "它们各管一摊：写稿、回评论、排计划。",
+              images: [{ path: "cover.png" }],
+            },
+          },
+        },
+        usage: USAGE,
+      };
+    };
+
+    const chrome = fakeChrome({ kind: "remote" });
+    const fake = await startFakePlatforms();
+    const upstream = await startUpstream(script);
+    let stack: Stack | undefined;
+    let agent: AgentHandle | undefined;
+    let agentLog = "";
+    try {
+      stack = await startStack({
+        upstreamBaseUrl: upstream.baseUrl,
+        priceInputPerM: 3,
+        priceOutputPerM: 15,
+        githubApiBaseUrl: fake.githubBaseUrl,
+        xApiBaseUrl: fake.xBaseUrl,
+        startComputer: false,
+      });
+      const remote = await startRemoteComputer(stack, {
+        makeChrome: chrome.factory,
+        log: (line) => {
+          agentLog += `${line}\n`;
+        },
+      });
+      agent = remote.agent;
+      const trace = () => `远程电脑代理日志：\n${agentLog}`;
+
+      const { account } = AccountResponse.parse(
+        await stack.post("/api/accounts", { platform: "xiaohongshu", computerId: remote.computerId }),
+      );
+      accountId = account.id;
+      const attempt = LoginAttemptId.parse(randomUUID());
+      LoginAccountResponse.parse(await stack.post(`/api/accounts/${account.id}/login`, { attempt }));
+      await pushUntil(stack, (push) =>
+        push.type === "live_session" && push.session.purpose.kind === "login" ? push.session : undefined,
+      );
+      chrome.scan("白泽工厂日记");
+      await pushUntil(stack, (push) =>
+        push.type === "account_updated" && push.account.id === account.id && push.account.login === "valid"
+          ? push.account
+          : undefined,
+      );
+
+      const bot = BotListResponse.parse(await stack.get("/api/bots")).items[0];
+      if (bot === undefined) throw new Error("seed 没建出 Bot");
+      const work = join(stack.dataDir, bot.bot.id, "work");
+      mkdirSync(work, { recursive: true });
+      writeFileSync(join(work, "cover.png"), COVER);
+      await stack.post(`/api/groups/${bot.groupId}/messages`, { text: XHS_ASK });
+
+      const created = await draftPushed(stack);
+      expect(created, trace()).toMatchObject({ accountId, status: "pending", platform: "xiaohongshu" });
+      const decided = DecideDraftResponse.parse(await stack.post(`/api/drafts/${created.id}`, { decision: "approve" }));
+      expect(decided.draft.status).toBe("approved");
+
+      const before = chrome.cdpCalls().length;
+      await stack.publishTick();
+      const live = stack;
+      const updates = (status: Draft["status"]) =>
+        pushUntil(live, (push) =>
+          push.type === "draft_updated" && push.draft.id === created.id && push.draft.status !== status
+            ? push.draft
+            : undefined,
+        );
+      const claimed = await updates("approved");
+      expect(claimed.status, `远程电脑在线、账号登录有效，这条草稿被认领去发。${trace()}`).toBe("publishing");
+      const settled = await updates("publishing");
+      expect(
+        { status: settled.status, failure: settled.failure },
+        `改之前远程电脑的发布器拿不到浏览器，回 error「这台电脑没有助理浏览器」，草稿记 error，账号不动。${trace()}`,
+      ).toEqual({ status: "failed", failure: "login_expired" });
+      const expired = await pushUntil(live, (push) =>
+        push.type === "account_updated" && push.account.id === account.id ? push.account : undefined,
+      );
+      expect(expired.login, "登录过期了，账号页和首页引用户去画面上重新扫码").toBe("expired");
+      expect(chrome.cdpCalls().slice(before), "发布器开自己的后台标签页去发布页，看到登录页就关掉这一页").toEqual([
+        "Target.createTarget",
+        "Target.attachToTarget",
+        "Emulation.setFocusEmulationEnabled",
+        "Page.navigate",
+        "Runtime.evaluate",
+        "Target.closeTarget",
+      ]);
+      expect(fake.requests(), "小红书不走平台接口，假 GitHub、假 X 什么都没收到").toEqual([]);
+    } finally {
+      await agent?.stop();
       await stack?.close();
       await upstream.close();
       await fake.close();
