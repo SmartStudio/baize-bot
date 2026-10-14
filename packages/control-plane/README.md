@@ -33,6 +33,39 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 用户消息插入复用群行 `KEY SHARE` 与插入同一事务的写法。查群之后若删号或删群已提交，插入入口返回 404「没有这个对象」，与群不存在的路由口径一致；若插入先锁住群行，删除等这条消息提交。删号会话级联失效，后续请求返回 401。
 
+## 画面面
+
+`/agent` 上的文本帧是报文，二进制帧是画面面。帧格式是 4 字节大端头长、UTF-8 JSON 头、可选负载，头的 schema 和 `encodeLive`、`decodeLive` 在 shared 的 `live.ts`。电脑上行 `LiveUp`：`session`（整份 upsert）、`frame`（负载是 JPEG）、`closed`。下行 `LiveDown`：`viewer`（attached、detached）、`input`、`end`、`reveal`。网页看画面连 `/api/live/<liveId>`，帧格式相同，收 `LiveToViewer`（`session`、`frame`），发 `LiveFromViewer`（`input`、`end`、`reveal`）。
+
+画面帧和人的输入（含密码）不走可靠信封，不进库、不进发件箱、不进日志。理由有三条：
+
+- 一台电脑的文本报文排在一条串行链上，可靠上行各开一个库事务。帧要是走这条链，就得排在库事务后面。
+- 电脑代理 `computer-agent/src/agent.ts` 处理文本报文出错时会把 zod 的错误原文和 `String(error)` 写进日志。输入要是走文本报文，密码就可能进日志。
+- 帧丢了，下一帧会补上。人的输入是看着当下画面做的，过时重放反而有害。可靠投递对它们没有意义。
+
+所以 hub 在进链之前按 `isBinary` 分流，二进制帧同步交给 `live/relay.ts` 的 `LiveRelay`。中继的构造参数里没有 Db，结构上碰不到库。解不开的帧一律静默丢，不说原因，因为原因里可能夹着用户打的字。`test/live-relay.test.ts` 的最后一条用例跑完一整轮，再逐表比对 public 下的行数，并 spy console 确认输入不进日志。
+
+会话按 `${ownerId}:${liveId}` 记，`computerId` 取自连接，不信帧里的。同一个号已经挂在这个人的另一台电脑上时，后报的忽略。`frame` 和 `closed` 只认报这个会话的那条连接。连接断了，这条连接上的会话全部结束。电脑重连后重报的会话换到新连接上，观看者留着，中继给新连接补发一条 attached。
+
+hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#connections` 里的当前连接。不用 message 回调闭包里的 `conn`，因为它要等 `#onHello` 把 config、发件箱重放和对账全部做完才赋值。这期间电脑已经在报 session 和发帧，按 `conn` 判断会把它们丢掉。入表之前到的二进制帧直接丢。
+
+一台电脑同一时刻最多一个观看者。新观看者进来时，不论看的是同一会话还是这台电脑的另一个会话，旧的都以 4101 关，电脑先收旧会话的 detached，再收新会话的 attached。所以电脑上每个会话的 attached 和 detached 严格交替。观看者的关闭码：
+
+| 码 | 含义 |
+| --- | --- |
+| 4100（`LiveViewerClose.gone`） | 会话结束，电脑报了 closed 或连接断了 |
+| 4101（`LiveViewerClose.replaced`） | 被新观看者顶掉 |
+| 4104（`LiveViewerClose.notFound`） | 号不合法、会话不存在或不是你的，不区分 |
+| 1012 | 控制面停机 |
+
+升级时先查 Origin：带了 Origin 而它的 host 不等于 Host 头，回 403。之后用 cookie 认人，认不出回 401。这条 socket 能往用户登录着的网站里打字，被跨站劫持的后果比 `/api/ws` 大，所以多这一道。观看者 WebSocket 的 `maxPayload` 是 64KB，电脑来的单帧超过 2MB 丢。
+
+人的输入每个观看者每秒最多转 120 条，用令牌桶，多的丢，`end` 和 `reveal` 不计数。`startServer` 的 `live.inputPerSecond`、`live.now` 可注入。发给观看者的帧走 `latestWins`：上一帧还没发完时只留最新的一帧。
+
+`GET /api/live` 列当前用户的会话（`LiveSessionsResponse`），`/api/ws` 推 `live_session`（整份）和 `live_closed`。推送在断线期间会丢，所以网页启动和 `/api/ws` 重连时各拉一次列表。同一个号收到 `live_closed` 之后，电脑重连重报时还会再来一条 `live_session`。
+
+中继的会话表和观看者表都在进程内存里，前提是看画面的人和这台电脑连在同一个控制面进程上。控制面跑多实例时，`/api/live/<liveId>` 必须按电脑粘性路由到持有这台电脑 `/agent` 连接的实例，否则观看者只会拿到 4104。
+
 ## 租约
 
 `lane_leases` 用 `(bot_id, group_id)` 作主键，一条道只有一台持有电脑，并固定它的安装标识和正整数代际。`agent/place-run.ts` 的 `placeRun` 是唯一建 run 的入口，用户消息、Bot 之间的 @、例行、交接和牌桌隐藏 run 都走它。认领租约、必要时接管、建 run、可靠 prompt 入队在调用方的同一事务里提交；`test/place-run-guard.test.ts` 扫源码禁止其他入口直接建 run。

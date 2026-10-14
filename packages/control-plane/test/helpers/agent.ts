@@ -1,7 +1,9 @@
 import {
   BareUplinkFrame,
   ControlToAgent,
+  decodeLive,
   DownlinkFrame,
+  LiveDown,
   UPLINK_DELIVERY,
   UplinkAck,
   type AgentToControl,
@@ -10,6 +12,7 @@ import {
 } from "@baize/shared";
 import { WebSocket } from "ws";
 import { AGENT_PATH } from "../../src/agent/hub.js";
+import { bytesOf } from "../../src/live/relay.js";
 
 /** 扮演电脑代理。测试只通过这条 WebSocket 碰 /agent。 */
 export type AgentClient = {
@@ -31,6 +34,10 @@ export type AgentClient = {
   closed(timeoutMs?: number): Promise<number>;
   /** 收到还没取走的报文。关闭帧之后不会再来，所以 closed 兑现之后这就是这条连接收到的全部。 */
   received(): readonly ControlToAgent[];
+  /** 画面面：原样发一条二进制帧。 */
+  sendLive(bytes: Uint8Array): void;
+  /** 画面面：下一条二进制下行，按 LiveDown 解头。和 next 各排各的队。 */
+  nextLive(timeoutMs?: number): Promise<LiveDown>;
   close(): void;
 };
 
@@ -59,6 +66,8 @@ export async function openAgent(port: number, options: { readonly ackDownlink?: 
   let uplinkStream = "";
   let nextSeq = 1;
   let downApplied = 0;
+  const liveInbox: LiveDown[] = [];
+  const liveWaiters: ((message: LiveDown) => void)[] = [];
 
   const sendBody = (message: AgentToControl): void => {
     if (message.type === "hello") {
@@ -77,7 +86,15 @@ export async function openAgent(port: number, options: { readonly ackDownlink?: 
     if (message.type === "run_done") doneSeqs.set(seq, message.runId);
   };
 
-  socket.on("message", (raw) => {
+  socket.on("message", (raw, isBinary) => {
+    if (isBinary) {
+      const decoded = decodeLive(LiveDown, bytesOf(raw));
+      if (decoded === null) throw new Error("控制面发来的二进制帧不合 LiveDown");
+      const waiter = liveWaiters.shift();
+      if (waiter === undefined) liveInbox.push(decoded.header);
+      else waiter(decoded.header);
+      return;
+    }
     const value: unknown = JSON.parse(raw.toString());
     if (typeof value === "object" && value !== null && "type" in value && value.type === "uplink_ack") {
       const ack = UplinkAck.parse(value);
@@ -207,6 +224,25 @@ export async function openAgent(port: number, options: { readonly ackDownlink?: 
       return seq;
     },
     received: () => [...inbox],
+    sendLive: (bytes) => socket.send(bytes),
+    nextLive: (timeoutMs = 5000) =>
+      new Promise((resolve, reject) => {
+        const buffered = liveInbox.shift();
+        if (buffered !== undefined) {
+          resolve(buffered);
+          return;
+        }
+        const waiter = (message: LiveDown) => {
+          clearTimeout(timer);
+          resolve(message);
+        };
+        const timer = setTimeout(() => {
+          const at = liveWaiters.indexOf(waiter);
+          if (at !== -1) liveWaiters.splice(at, 1);
+          reject(new Error("等控制面下发画面帧超时"));
+        }, timeoutMs);
+        liveWaiters.push(waiter);
+      }),
     close: () => socket.close(),
   };
 }

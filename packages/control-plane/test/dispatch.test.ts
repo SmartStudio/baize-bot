@@ -16,6 +16,7 @@ import { AgentHub } from "../src/agent/hub.js";
 import { agentOutbox } from "../src/db/schema.js";
 import { GroupTurns } from "../src/agent/group-turn.js";
 import { ToolCrypto } from "../src/crypto.js";
+import { LiveRelay } from "../src/live/relay.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -67,6 +68,7 @@ function dispatchDeps(Hub: typeof AgentHub = AgentHub) {
       gatewayBaseUrl: () => "",
       toolCrypto: new ToolCrypto("a".repeat(64)),
       notifications: server.server.notifications,
+      live: new LiveRelay({ push: server.server.hub }),
     }),
   };
 }

@@ -37,6 +37,7 @@ import {
   GroupId,
   GroupListResponse,
   GroupResponse,
+  LiveSessionsResponse,
   LoginAccountRequest,
   LoginAccountResponse,
   LoginRequest,
@@ -85,6 +86,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
+import type { LiveRelay } from "../live/relay.js";
 import { enqueueDownlink } from "../agent/envelope.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { parseMentions } from "../agent/routing.js";
@@ -173,6 +175,7 @@ export type AppDeps = {
   readonly db: Db;
   readonly hub: PushHub;
   readonly agents: AgentHub;
+  readonly live: Pick<LiveRelay, "list">;
   readonly toolCrypto: ToolCrypto;
   readonly groupTurns: GroupTurns;
   readonly notifications: NoticePublisher;
@@ -510,6 +513,9 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     for (const draft of decided.value.drafts) hub.push(ownerId, { type: "draft_updated", draft });
     return c.json(ReturnPlanResponse.parse({ plan: decided.value.plan }));
   });
+
+  // 网页启动和 /api/ws 重连时各拉一次：断线期间的 live_session、live_closed 推送丢了。
+  app.get("/api/live", (c) => c.json(LiveSessionsResponse.parse({ sessions: deps.live.list(c.get("user").id) })));
 
   app.get("/api/computers", async (c) =>
     c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),

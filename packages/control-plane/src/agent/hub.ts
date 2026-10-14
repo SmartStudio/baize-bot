@@ -66,6 +66,7 @@ import {
 import { handleEnvelopedEvent } from "./envelope-events.js";
 import { setComputerLease } from "./lease-clock.js";
 import type { GroupTurns } from "./group-turn.js";
+import { bytesOf, type LiveRelay } from "../live/relay.js";
 
 export const AGENT_PATH = "/agent";
 
@@ -128,6 +129,7 @@ export type AgentHubDeps = {
   readonly leaseRenewalIntervalMs?: number | undefined;
   readonly toolCrypto: ToolCrypto;
   readonly notifications: NoticePublisher;
+  readonly live: Pick<LiveRelay, "fromAgent" | "dropAgent">;
 };
 
 /** 电脑代理的连接表。同一个用户可以同时有本机和远程两条连接，连接只按电脑号互相替换。 */
@@ -176,6 +178,11 @@ export class AgentHub {
    * #onHello 入表前看这里。用户 id 不复用，只进不出，一个进程里删号的次数就是它的大小。
    */
   readonly #deletedOwners = new Set<UserId>();
+  /**
+   * 画面帧认的连接。入表那一刻（welcome 之前）就登记，不等闭包里的 conn：conn 要等 config、补发、补结账都做完才赋值，
+   * 电脑收到 welcome 就会重报画面会话，这段时间到的帧要认得出是谁的。
+   */
+  readonly #liveLinks = new WeakMap<WebSocket, AgentConnection>();
 
   constructor(deps: AgentHubDeps) {
     this.#deps = deps;
@@ -206,10 +213,17 @@ export class AgentHub {
       void tail.then(() => this.#inboxTails.delete(tail));
     };
 
-    socket.on("message", (raw) => {
+    socket.on("message", (raw, isBinary) => {
       // 停机后收到的帧同步丢掉：socket 马上就关，等它做完只会让停机等不到头。
       if (this.#lifecycle === "closing") return;
       silence.refresh();
+      // 画面面：不排链、不进 #onFrame、不碰库、不记日志。握手前到的、被顶掉的连接到的，直接丢。
+      if (isBinary) {
+        const link = this.#liveLinks.get(socket);
+        if (link !== undefined && this.#connections.get(link.computerId) === link)
+          this.#deps.live.fromAgent(link, bytesOf(raw));
+        return;
+      }
       const text = raw.toString();
       // 收帧时刻在排队、等锁之前取：周复盘的周界和同一周谁覆盖谁都按它算。
       const receivedAt = new Date();
@@ -275,6 +289,8 @@ export class AgentHub {
     socket.on("close", () => {
       clearTimeout(deadline);
       clearTimeout(silence);
+      const link = this.#liveLinks.get(socket);
+      if (link !== undefined) this.#deps.live.dropAgent(link);
       if (this.#lifecycle === "closing") return;
       queue(
         async () => {
@@ -632,6 +648,7 @@ export class AgentHub {
 
       const previous = this.#connections.get(computer.id);
       this.#connections.set(computer.id, accepted);
+      this.#liveLinks.set(socket, accepted);
       const timer = this.#graceTimers.get(computer.id);
       if (timer !== undefined) {
         clearTimeout(timer);
