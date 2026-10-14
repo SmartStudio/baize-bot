@@ -39,6 +39,19 @@ import {
 } from "../db/schema.js";
 import type { Tx } from "./messages.js";
 
+const ISO_ENTRY_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function workEntryTime(entry: PiWorkEntry): Date | null {
+  const { timestamp } = entry;
+  if (typeof timestamp !== "string" || !ISO_ENTRY_TIME.test(timestamp)) return null;
+  const milliseconds = Date.parse(timestamp);
+  if (!Number.isFinite(milliseconds)) return null;
+  const date = new Date(milliseconds);
+  // drizzle 把 Date 序列化为 ISO；PostgreSQL 不收 year 0000 或带符号的扩展年，时区偏移也可能跨入这些年份。
+  if (date.getUTCFullYear() < 1 || date.getUTCFullYear() > 9999) return null;
+  return date;
+}
+
 async function currentRetainContext(tx: Tx, ownerId: string): Promise<RetainContext> {
   const localTools = await tx
     .select({ operations: toolConnections.operations })
@@ -206,6 +219,7 @@ export async function appendWorkRecords(
       line,
       searchText: extractWorkSearchText(entry),
       visibleTo,
+      entryAt: stream === "chat" && entry.type === "message" ? workEntryTime(entry) : null,
     })),
   );
   return { kind: "ok" };
@@ -385,7 +399,7 @@ export async function recallWorkRecords(
 ): Promise<RecallEntry[]> {
   const ctx = await currentRetainContext(db, ownerId);
   const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
-  // 条目时间在写入时由触发器从行里取出（迁移 0036），排序键全在 SQL 里，Node 端过滤后按原序取前 8 条。
+  // 条目时间在写入时由 Node 从已解析条目计算，排序键全在 SQL 里，Node 端过滤后按原序取前 8 条。
   // 候选分批拉取，每批翻倍：被当前名单滤掉的候选很少，通常第一批就够；全被滤掉时批数也只是对数级。
   const score = sql`similarity(${workEntries.searchText}, ${query})`;
   const entryTime = sql`date_trunc('milliseconds', coalesce(${workEntries.entryAt}, ${runs.startedAt}, ${groups.createdAt}))`;

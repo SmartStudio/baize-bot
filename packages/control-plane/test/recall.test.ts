@@ -120,29 +120,40 @@ async function record(
     piType?: string;
     timestamp?: string | null;
     runId?: string;
+    searchText?: string;
   } = {},
 ): Promise<string> {
   const entryId = randomUUID();
   const groupId = options.groupId ?? who.sourceGroupId;
   const botId = options.botId ?? who.botId;
   const stream = options.stream ?? "chat";
+  const piType = options.piType ?? "message";
+  const timestamp = options.timestamp === null ? null : (options.timestamp ?? "2026-10-01T00:00:00.000Z");
+  const entryAt =
+    stream === "chat" &&
+    piType === "message" &&
+    timestamp !== null &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(timestamp) &&
+    Number.isFinite(Date.parse(timestamp))
+      ? new Date(Date.parse(timestamp)).toISOString()
+      : null;
   const [next] = await database.sql<{ seq: number }[]>`
     SELECT coalesce(max(seq) + 1, 0) AS seq FROM work_entries
     WHERE bot_id = ${botId} AND group_id = ${groupId} AND stream = ${stream}
   `;
   const line = JSON.stringify({
-    type: options.piType ?? "message",
+    type: piType,
     id: entryId,
     parentId: null,
-    ...(options.timestamp === null ? {} : { timestamp: options.timestamp ?? "2026-10-01T00:00:00.000Z" }),
+    ...(timestamp === null ? {} : { timestamp }),
     message: { role: options.role ?? "assistant", content: [{ type: "text", text }] },
   });
   await database.sql`
     INSERT INTO work_entries
-      (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id, parent_id, pi_type, retention, line, search_text, visible_to)
+      (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id, parent_id, pi_type, retention, line, search_text, visible_to, entry_at)
     VALUES (${botId}, ${groupId}, ${stream}, ${next!.seq}, 1, ${options.ownerId ?? who.ownerId},
-      ${options.runId ?? null}, ${entryId}, null, ${options.piType ?? "message"}, 'verbatim', ${line}, ${text},
-      ${options.visibleTo === undefined ? null : JSON.stringify(options.visibleTo)}::jsonb)
+      ${options.runId ?? null}, ${entryId}, null, ${piType}, 'verbatim', ${line}, ${options.searchText ?? text},
+      ${options.visibleTo === undefined ? null : JSON.stringify(options.visibleTo)}::jsonb, ${entryAt})
   `;
   return entryId;
 }
@@ -294,15 +305,36 @@ describe("现查现用的 recall", () => {
     const who = await rig();
     for (let day = 1; day <= 12; day += 1)
       await record(who, "续取预算", { timestamp: `2026-09-${String(day).padStart(2, "0")}T00:00:00.000Z` });
-    // 比正常条目都新的 70 条非法 role：超过首批（32）和第二批（64）的容量。
+    // 70 条有效时间的非法角色会跨过 32 条首批并进入 64 条第二批，之后仍能取到正常条目。
     for (let index = 0; index < 70; index += 1)
       await record(who, "续取预算", {
         role: "system",
-        timestamp: `2026-10-01T00:${String(index).padStart(2, "0")}:00.000Z`,
+        timestamp: new Date(Date.UTC(2026, 9, 1) + index * 60_000).toISOString(),
       });
     const entries = await recall(who, "续取预算");
     expect(entries.map((entry) => entry.at)).toEqual(
       Array.from({ length: 8 }, (_, offset) => `2026-09-${String(12 - offset).padStart(2, "0")}T00:00:00.000Z`),
+    );
+  });
+
+  it("前两批96条陈旧角色命中全部过滤后，第三批返回最新8条合法命中", async () => {
+    const who = await rig();
+    const query = "分页预算";
+    for (let index = 0; index < 12; index += 1)
+      await record(who, query, {
+        timestamp: new Date(Date.UTC(2026, 9, 1) + index * 60_000).toISOString(),
+      });
+    for (let index = 0; index < 96; index += 1)
+      await record(who, "历史陈旧条目", {
+        role: "system",
+        timestamp: new Date(Date.UTC(2026, 9, 2) + index * 60_000).toISOString(),
+        searchText: query,
+      });
+
+    const entries = await recall(who, query);
+    expect(entries).toHaveLength(8);
+    expect(entries.map((entry) => entry.at)).toEqual(
+      Array.from({ length: 8 }, (_, offset) => new Date(Date.UTC(2026, 9, 1) + (11 - offset) * 60_000).toISOString()),
     );
   });
 
