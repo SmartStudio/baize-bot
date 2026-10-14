@@ -95,6 +95,8 @@ it("同一账号远程起草带图小红书草稿，本机发布前按附件下�
           throw new Error(BROWSER_DISABLED);
         },
         login: async () => ({ login: "failed", reason: "window_failed" }),
+        reveal: async () => {},
+        conceal: async () => {},
         pid: () => null,
         stop: async () => {},
       }),
@@ -144,6 +146,8 @@ it("同一账号远程起草带图小红书草稿，本机发布前按附件下�
           throw new Error("远程起草不该连接浏览器");
         },
         login: async () => ({ login: "failed", reason: "remote_refused" }),
+        reveal: async () => {},
+        conceal: async () => {},
         pid: () => null,
         stop: async () => {},
       }),

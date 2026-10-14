@@ -150,6 +150,8 @@ it("断线发生在 publish_result fsync 后：重连后失败发布结果只结
         profileDir: "/tmp/baize-envelope-no-chrome",
         connection: () => Promise.reject(new Error("验收禁止连接真实平台或 Chrome")),
         login: async () => ({ login: "failed", reason: "window_failed" }),
+        reveal: async () => {},
+        conceal: async () => {},
         pid: () => null,
         stop: async () => {},
       }),

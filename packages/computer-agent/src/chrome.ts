@@ -38,6 +38,9 @@ export interface AssistantChrome {
   connection(): Promise<CdpConnection>;
   /** signal 到点就收起登录窗口、回 failed window_failed，等 Chrome 起来的时间也算在内。 */
   login(platform: BrowserPlatform, signal: AbortSignal): Promise<BrowserLoginState>;
+  /** 把助理 Chrome 的窗口拉到前台、再收回去。本机是 macOS 的进程激活和隐藏；远程壳画在 Xvfb 上没人看，是空操作。 */
+  reveal(): Promise<void>;
+  conceal(): Promise<void>;
   pid(): number | null;
   stop(): Promise<void>;
 }
@@ -305,10 +308,22 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
     }
   };
 
+  // Chrome 已经退了就没有窗口可拉可收，直接算做完。
+  const reveal = async (): Promise<void> => {
+    const pid = shell.kind === "local" ? running?.process.pid : undefined;
+    if (pid !== undefined) await bringForward(pid);
+  };
+  const conceal = async (): Promise<void> => {
+    const pid = shell.kind === "local" ? running?.process.pid : undefined;
+    if (pid !== undefined) await sendBackward(pid);
+  };
+
   return {
     kind: shell.kind,
     profileDir,
     connection: () => ready().then((up) => up.connection),
+    reveal,
+    conceal,
     pid: () => running?.process.pid ?? null,
     async login(platform, signal) {
       // 远程电脑上没有人看屏幕，扫码或输验证码都没人接。
@@ -337,7 +352,7 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
         await page("Emulation.setFocusEmulationEnabled", { enabled: true });
         await page("Page.bringToFront");
         activated = true;
-        await bringForward(up.process.pid);
+        await reveal();
 
         const successSelector = JSON.stringify(pageConfig.successSelector);
         const handleSelector = JSON.stringify(pageConfig.handleSelector);
@@ -362,8 +377,7 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
           await up.connection
             .send("Target.closeTarget", { targetId })
             .catch((error: unknown) => log(`关闭登录页失败：${String(error)}`));
-        if (up !== null && activated)
-          await sendBackward(up.process.pid).catch((error: unknown) => log(`登录窗口退回后台失败：${String(error)}`));
+        if (activated) await conceal().catch((error: unknown) => log(`登录窗口退回后台失败：${String(error)}`));
       }
     },
     stop() {
