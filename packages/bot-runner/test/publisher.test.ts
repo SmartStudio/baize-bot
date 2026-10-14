@@ -20,6 +20,7 @@ import {
   settledPages,
   type TestChrome,
 } from "./helpers/chrome.js";
+import { NO_PRESENT } from "./fixtures/present.js";
 
 type SiteMode = "normal" | "logged-out" | "no-button" | "hang" | "no-notes" | "no-token";
 
@@ -655,7 +656,7 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
     await new Promise<void>((resolve) => slow.listen(0, "127.0.0.1", resolve));
     const address = slow.address();
     if (address === null || typeof address === "string") throw new Error("慢页没有端口");
-    const bot = createBotBrowser({ profileDir, connection: async () => chrome.connection });
+    const bot = createBotBrowser({ profileDir, connection: async () => chrome.connection, present: NO_PRESENT });
     const open = bot.tools.find((tool) => tool.name === "browser_open");
     const snapshot = bot.tools.find((tool) => tool.name === "browser_snapshot");
     if (open === undefined || snapshot === undefined) throw new Error("没有浏览器工具");

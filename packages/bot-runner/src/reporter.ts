@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AgentToControl, type BotId, type GroupId, MessageId, type RunId, type ToolView } from "@baize/shared";
 import type { AgentSession, SessionStats } from "@earendil-works/pi-coding-agent";
 import { HELPER_TOOL, helperToolView } from "./helper.js";
+import { TAKEOVER_TOOL, takeoverToolView } from "./takeover.js";
 
 // 一次 prompt 的会话事件翻成上行报文。出边界前一律过 AgentToControl.parse，schema 不过就抛。
 
@@ -129,7 +130,11 @@ export function reportRun(
     }
     if (event.type === "tool_execution_start") {
       startedAt.set(event.toolCallId, Date.now());
-      const view = simpleToolView(event.toolName, event.args, serverForTool(event.toolName));
+      // 接手卡的 liveId 由 runId 和 callId 算出，simpleToolView 拿不到这两样。
+      const view =
+        event.toolName === TAKEOVER_TOOL
+          ? takeoverToolView(event.args, identity.runId, event.toolCallId)
+          : simpleToolView(event.toolName, event.args, serverForTool(event.toolName));
       views.set(event.toolCallId, view);
       push({
         type: "bot_tool_call",

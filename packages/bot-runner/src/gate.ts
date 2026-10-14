@@ -15,6 +15,7 @@ import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
+import { TAKEOVER_TOOL } from "./takeover.js";
 import {
   type ForbiddenZones,
   isInsideRoot,
@@ -583,6 +584,8 @@ const classifyOwnTool = (call: GateCall): readonly ClassifiedAction[] | null => 
   }
   // 只发 GET，账号越权在工具里、令牌在控制面，这里归 read 不问。
   if (call.toolName === ACCOUNT_READ_TOOL) return [plainAction("read", targetFromInput(call.input, call))];
+  // 请用户接手：在页上动手的是用户自己，Bot 只把页摆到他眼前，归 read 不问。
+  if (call.toolName === TAKEOVER_TOOL) return [plainAction("read")];
   const browserAction = BROWSER_TOOL_ACTIONS.get(call.toolName);
   // 点和填的目标只认浏览器自己报的当前页主机名：入参是模型写的，写个 hostname 就能冒领别的域名的授权。
   if (browserAction === "engage") return [plainAction(browserAction, browserTarget(call.browserHost ?? null))];

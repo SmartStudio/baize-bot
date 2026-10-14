@@ -82,6 +82,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const browserConfig: AgentRunnerConfig["browser"] = {
     profileDir: chrome.profileDir,
     connection: () => chrome.connection(),
+    present: async () => ({ end: { kind: "broken" }, url: null }),
   };
 
   let link: Link = { phase: "stopped" };

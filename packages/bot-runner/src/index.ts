@@ -50,6 +50,7 @@ import {
   createTableTools,
   type PokerResult,
 } from "./table.js";
+import { createTakeoverTool, TAKEOVER_LIMIT_MS, TAKEOVER_TOOL } from "./takeover.js";
 import { createTeamTools } from "./team.js";
 import { createTopicTools, renderTaskCard } from "./topic.js";
 import { contextSince, readMemoryShown, readWatermark, recordMemoryShown, recordWatermark } from "./watermark.js";
@@ -95,7 +96,7 @@ export interface RunnerConfig {
   /** 覆盖 Pi 的会话设置。测试用它关掉供应商 SDK 那层重试，好让上游错误冒到 Pi 的重试逻辑。 */
   readonly settings?: PiSettings;
   /**
-   * 助理 Chrome。给了才注册五件浏览器工具，profile 目录进禁区。远程电脑也给，但那份 profile 没有登录态，发布只走本机。
+   * 助理 Chrome。给了才注册五件浏览器工具和 `browser_ask_user`，profile 目录进禁区。远程电脑也给，但那份 profile 没有登录态，发布只走本机。
    * 只认 createRunner 时的这一份，applyConfig 里带的不换。
    */
   readonly browser?: BrowserConfig;
@@ -425,6 +426,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...INTERNAL_TOOLS,
       ...ASSISTANT_TOOL_NAMES,
       ...BROWSER_TOOL_NAMES,
+      TAKEOVER_TOOL,
       ...DRAFT_TOOL_NAMES,
       ACCOUNT_READ_TOOL,
     ]);
@@ -891,6 +893,22 @@ export function createRunner(config: RunnerConfig): Runner {
           ]
         : []),
       ...(bot.browser?.toolsWithHeldMutex ?? []),
+      ...(config.browser === undefined
+        ? []
+        : [
+            createTakeoverTool({
+              activeRun,
+              lend: (signal) => {
+                const browser = bot.browser;
+                if (browser === null) throw new Error("助理浏览器已经关掉了，这次没法请用户接手。");
+                return browser.lend(signal);
+              },
+              present: config.browser.present,
+              closed: () => bot.lifetime.signal,
+              slot: lane.takeover,
+              limitMs: config.browser.takeoverLimitMs ?? TAKEOVER_LIMIT_MS,
+            }),
+          ]),
       accountRead,
     ];
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
@@ -1230,6 +1248,9 @@ export function createRunner(config: RunnerConfig): Runner {
         await bot.resources.idle();
         return;
       }
+      // 用户在群里又说话了，挂着的接手作废，新消息排在后面照常跑。Bot、例行、牌桌来的不作废，同一个 runId 重投也不作废。
+      const takeover = bot.lanes.get(message.groupId)?.takeover.current ?? null;
+      if (message.origin.kind === "user" && takeover !== null && takeover.runId !== message.runId) takeover.abort();
       await schedulePrompt(bot, message);
     },
 
