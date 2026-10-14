@@ -3,6 +3,7 @@ import {
   CHAIN_GENESIS,
   PRUNED_IMAGE_TEXT,
   RETAIN_TEXT_LIMIT_BYTES,
+  RetainSnapshot,
   SEARCH_TEXT_LIMIT,
   chainHead,
   assertRawJsonSupport,
@@ -14,7 +15,6 @@ import {
   type FrameCheck,
   type RetainContext,
   type RetainResult,
-  type RetainSnapshot,
 } from "../src/work-record.js";
 
 const ctx = { localOnlyToolNames: new Set<string>() };
@@ -1043,12 +1043,13 @@ describe("第三轮 R2-4：缺原文保值能力时启动就抛，不退回丢�
     ["JSON.isRawJSON 不存在", { isRawJSON: undefined }, /JSON\.isRawJSON/],
     ["reviver 的 context 里没有 source", { parse: reviverWith(() => [{}]) }, /context\.source/],
     ["reviver 不传第三个参数", { parse: reviverWith(() => []) }, /context\.source/],
-  ] as const)("%s：createRetainer 和 checkFrame 都抛说清楚的错", (_name, patch, message) => {
+  ] as const)("%s：三个入口都抛说清楚的错", (_name, patch, message) => {
     const snapshot = emptySnapshot(localCtx);
     const imageLine = entry({ role: "user", content: [{ type: "image", data: "IMG" }], timestamp: 1 });
     withJson(patch, () => {
       expect(() => createRetainer(localCtx)).toThrow(message);
       expect(() => checkFrame(localCtx, snapshot, [imageLine])).toThrow(message);
+      expect(() => searchTextOf(imageLine)).toThrow(message);
       expect(() => assertRawJsonSupport()).toThrow(/不退回丢精度或整行放行/);
     });
   });
@@ -1109,6 +1110,105 @@ describe("第三轮 R2-5：本机工具名单的指纹随快照走，名单变�
     expect(retainer.retain(plainUser("a"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
     expect(retainer.retain(plainUser("b"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
     expect(createRetainer(localCtx, snapshot).retain(plainUser("a")).status).toBe("retained");
+  });
+});
+
+describe("第四轮：快照边界与名单变更后的重建", () => {
+  it("F1：旧名单提交原文，停住后拿快照起新 Retainer，仍拒收指向旧结果的编辑", () => {
+    const raw = secretResult({}, { id: "l" });
+    expect(raw).toContain(SECRET);
+    const committed = checkFrame(ctx, emptySnapshot(ctx), [raw]);
+    expect(committed.ok).toBe(true);
+    if (!committed.ok) throw new Error("旧名单的原文帧应能提交");
+    const old = committed.snapshot;
+    expect(old.knownIds).toEqual(["l"]);
+    expect(old.localIds).toEqual([]);
+
+    const stopped = createRetainer(localCtx, frozen(old));
+    expect(stopped.retain(plainUser("u"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
+    const saved = stopped.snapshot();
+    expect(saved).toEqual(old);
+    expect(saved.toolFingerprint).not.toBe(toolListFingerprint(localCtx.localOnlyToolNames));
+    const resumed = createRetainer(localCtx, saved);
+    expect(resumed.retain(plainEdit("e", "l", [{ type: "text", text: SECRET }]))).toEqual({
+      status: "rejected",
+      reason: "tool_list_changed",
+    });
+    expect(resumed.retain(plainUser("next"))).toEqual({ status: "rejected", reason: "tool_list_changed" });
+  });
+
+  it("F1：起点和每次返回的旧快照都是深拷贝，调用方改数组或指纹不会改后续快照", () => {
+    const source = { ...emptySnapshot(localCtx), knownIds: ["l"], localIds: ["l"] };
+    const expected = structuredClone(source);
+    const stopped = createRetainer(ctx, source);
+    source.knownIds.push("caller-added");
+    source.localIds.length = 0;
+    source.toolFingerprint = toolListFingerprint(ctx.localOnlyToolNames);
+    const first = stopped.snapshot();
+    expect(first).toEqual(expected);
+    expect(first.knownIds).not.toBe(source.knownIds);
+    expect(first.localIds).not.toBe(source.localIds);
+    Object.assign(first, { toolFingerprint: source.toolFingerprint });
+    Object.defineProperty(first.knownIds, "0", { value: "changed" });
+    Object.defineProperty(first.localIds, "0", { value: "changed" });
+    const second = stopped.snapshot();
+    expect(second).toEqual(expected);
+    expect(second.knownIds).not.toBe(first.knownIds);
+    expect(second.localIds).not.toBe(first.localIds);
+    expect(createRetainer(ctx, second).retain(plainUser("u"))).toEqual({
+      status: "rejected",
+      reason: "tool_list_changed",
+    });
+  });
+
+  it("F3：存库快照在边界 parse 后能恢复运行器和服务器", () => {
+    const snapshot = RetainSnapshot.parse(JSON.parse(JSON.stringify(emptySnapshot(localCtx))));
+    expect(snapshot).toEqual(emptySnapshot(localCtx));
+    const result = createRetainer(localCtx, snapshot).retain(plainUser("u"));
+    expect(result.status).toBe("retained");
+    expect(checkFrame(localCtx, snapshot, [plainUser("u")]).ok).toBe(true);
+  });
+
+  it.each([
+    ["version 是 2", { version: 2 }],
+    ["knownIds 是 null", { knownIds: null }],
+    ["knownIds 是数字", { knownIds: 42 }],
+    ["knownIds 含数字", { knownIds: [42] }],
+    ["localIds 含数字", { localIds: [42] }],
+    ["指纹不是字符串", { toolFingerprint: 42 }],
+  ])("F3：%s 在快照边界 parse 失败", (_name, patch) => {
+    const value = { ...emptySnapshot(localCtx), ...patch };
+    expect(() => RetainSnapshot.parse(value)).toThrow();
+  });
+
+  it("F4：新名单从头重放，旧原文行必须重新过滤后才能通过复查", () => {
+    const raw = secretResult({}, { id: "l" });
+    expect(checkFrame(ctx, emptySnapshot(ctx), [raw]).ok).toBe(true);
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), [raw])).toEqual({
+      ok: false,
+      reason: "unfiltered",
+      lineIndex: 0,
+    });
+    const rebuilt = createRetainer(localCtx);
+    const filtered = retained(rebuilt.retain(raw));
+    expect(filtered.retention).toBe("redacted");
+    expect(filtered.line).not.toContain(SECRET);
+    expect(checkFrame(localCtx, emptySnapshot(localCtx), [filtered.line])).toEqual({
+      ok: true,
+      snapshot: rebuilt.snapshot(),
+    });
+  });
+
+  it("F5：缺 isRawJSON 时检索入口与留存、复查抛同一个明确错误，恢复后能正常检索", () => {
+    const line = userText("能检索到的原文");
+    const snapshot = emptySnapshot(ctx);
+    const error = new Error("工作记录留存需要 JSON.isRawJSON（Node 22+），当前运行时没有，不退回丢精度或整行放行");
+    withJson({ isRawJSON: undefined }, () => {
+      expect(() => searchTextOf(line)).toThrow(error);
+      expect(() => createRetainer(ctx)).toThrow(error);
+      expect(() => checkFrame(ctx, snapshot, [line])).toThrow(error);
+    });
+    expect(searchTextOf(line)).toBe("能检索到的原文");
   });
 });
 

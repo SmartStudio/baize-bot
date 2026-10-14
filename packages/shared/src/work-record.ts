@@ -1,6 +1,7 @@
 // 工作记录上服务器之前的纯函数，只认 Pi 会话 JSONL 的一行字符串。
 // 单开子路径 @baize/shared/work-record 导出：用了 node:crypto，不能进被 Web 引用的根导出。
 import { createHash } from "node:crypto";
+import { z } from "zod";
 
 // 运行时裁旧截图和留存过滤共用这一句，重建之后模型看到的才和今天看旧截图时一样。
 export const PRUNED_IMAGE_TEXT = "（之前的截图已省略）";
@@ -43,7 +44,7 @@ const sha256 = (data: string): string => createHash("sha256").update(data, "utf8
 
 /**
  * 数字原文保值靠 JSON.rawJSON、JSON.isRawJSON 和 reviver 的 context.source。缺任何一个都不能退回丢精度或整行放行，
- * 所以创建 Retainer 和复查一帧时先探一次，缺了就抛，让环境问题和「这行不是 JSON」分开。
+ * 所以创建 Retainer、复查一帧和抽检索文字时先探一次，缺了就抛，让环境问题和「这行不是 JSON」分开。
  */
 export function assertRawJsonSupport(): void {
   const api = JSON as unknown as Partial<JsonWithSource>;
@@ -280,14 +281,18 @@ function redactEntry(entry: Json, ctx: RetainContext, seen: SeenIds): Json | und
  * 数据形状：
  * - 运行器 Retainer 在内存里持有一份，一行行 retain，只有被接受的行才推进它。
  * - 服务器在数据库里存 RetainSnapshot（已提交部分的状态），每帧用 checkFrame 纯函数复查，不持有可变状态。
+ * 名单变了须按新名单从头重放已提交的行；得到 unfiltered 的行须从服务器删除再重传，不能只拒收新帧。
+ * 带 reviver 的解析约两千层嵌套会失败（受调用栈影响），这种行按 malformed_entry 拒收。
  */
-export interface RetainSnapshot {
-  readonly version: 1;
-  /** 本机工具名单的指纹。名单变了，已存的 localIds 就不再可信，checkFrame 拒收并要求调用方重建。 */
-  readonly toolFingerprint: string;
-  readonly knownIds: readonly string[];
-  readonly localIds: readonly string[];
-}
+export const RetainSnapshot = z
+  .object({
+    version: z.literal(1),
+    toolFingerprint: z.string(),
+    knownIds: z.array(z.string()).readonly(),
+    localIds: z.array(z.string()).readonly(),
+  })
+  .readonly();
+export type RetainSnapshot = z.infer<typeof RetainSnapshot>;
 
 /** 这一行本身的毛病。 */
 export type LineRejectReason =
@@ -387,7 +392,7 @@ export interface Retainer {
    * 拒收之后这个 Retainer 停住，之后每次都返回同一个拒收原因：运行器不传这一条也不传它后面的内容。
    */
   retain(line: string): RetainResult;
-  /** 到目前为止被接受的行的状态，运行器重连或重建之后用它起新的 Retainer。 */
+  /** 已接受行的状态；因 tool_list_changed 停住时返回起点的深拷贝，保留旧指纹，仍须从头重放。 */
   snapshot(): RetainSnapshot;
 }
 
@@ -398,11 +403,10 @@ export interface Retainer {
  */
 export function createRetainer(ctx: RetainContext, resume?: RetainSnapshot): Retainer {
   assertRawJsonSupport();
-  const seen = idsOf(resume ?? emptySnapshot(ctx));
+  const initial = structuredClone(resume ?? emptySnapshot(ctx));
+  const seen = idsOf(initial);
   let halted: StreamRejectReason | undefined =
-    resume !== undefined && resume.toolFingerprint !== toolListFingerprint(ctx.localOnlyToolNames)
-      ? "tool_list_changed"
-      : undefined;
+    initial.toolFingerprint !== toolListFingerprint(ctx.localOnlyToolNames) ? "tool_list_changed" : undefined;
   return {
     retain(line) {
       if (halted !== undefined) return { status: "rejected", reason: halted };
@@ -413,7 +417,7 @@ export function createRetainer(ctx: RetainContext, resume?: RetainSnapshot): Ret
       }
       return { status: "retained", line: result.line, retention: result.retention };
     },
-    snapshot: () => snapshotOf(ctx, seen),
+    snapshot: () => (halted === "tool_list_changed" ? structuredClone(initial) : snapshotOf(ctx, seen)),
   };
 }
 
@@ -428,6 +432,7 @@ function capSearchText(text: string): string {
 
 /** 给 trigram 检索的文字：用户和助手的文字块、工具结果的文字。图片、思考、工具参数、usage 都不进。 */
 export function searchTextOf(line: string): string {
+  assertRawJsonSupport();
   try {
     return searchTextOfEntry(parseObject(line));
   } catch {
