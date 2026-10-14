@@ -57,7 +57,7 @@ type Tab = { readonly kind: "closed" } | OpenTab | { readonly kind: "lent"; read
 /** 不管是 Bot 自己在用还是借给了用户，底下那一页；没开页是 null。 */
 const pageOf = (tab: Tab): OpenTab | null => (tab.kind === "open" ? tab : tab.kind === "lent" ? tab.page : null);
 
-export const LENT_ERROR = "这一页正交给用户操作，等他交还之后再用浏览器。";
+export const LENT_ERROR = "这一页正交给用户操作，等用户交还之后再用浏览器。";
 const NO_PAGE_ERROR = "你还没打开要接手的那一页，先 browser_open";
 const REFS_AFTER_LOAN = "用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手";
 

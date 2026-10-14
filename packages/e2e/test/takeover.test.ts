@@ -315,7 +315,7 @@ describe("端到端：Bot 在远程电脑上请用户接手", () => {
       const voidedAt = requests.findIndex((req) => toolResult(req, "call-ask") !== undefined);
       expect(voidedAt, "作废也是一个工具结果，模型拿得到").toBeGreaterThanOrEqual(0);
       expect(toolResult(requests[voidedAt]!, "call-ask")).toBe(
-        "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请他接手。",
+        "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。",
       );
       const laterAt = requests.findIndex((req) => lastUserSays(req, LATER));
       expect(laterAt, "新消息排在作废的那一轮之后送到 Bot").toBeGreaterThan(voidedAt);

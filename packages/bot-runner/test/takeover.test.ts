@@ -392,7 +392,7 @@ describe("browser_ask_user：Bot 请用户接手自己的那一页", () => {
 
     await h.runner.prompt(prompt("run-2", "看一眼网页", { groupId: "group-2" }));
 
-    expect(resultsSeenBy(requests, "看一眼网页")).toContain("这一页正交给用户操作，等他交还之后再用浏览器。");
+    expect(resultsSeenBy(requests, "看一眼网页")).toContain("这一页正交给用户操作，等用户交还之后再用浏览器。");
     expect(methods(h, lentAt), "借出期间不建新页，也不在借出的页上跑脚本").toEqual([]);
     expect(shown.signal.aborted, "别的群碰浏览器不作废接手").toBe(false);
     expect(runDones(h), "别的群那次照常跑完").toEqual(["run-2"]);
@@ -469,7 +469,7 @@ describe("browser_ask_user：Bot 请用户接手自己的那一页", () => {
     expect(shown.signal.aborted, "prompt 一进来就撤，不等排队").toBe(true);
     await Promise.all([running, next]);
     expect(resultsSeenBy(requests, "登录小红书")).toContain(
-      "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请他接手。",
+      "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。",
     );
     expect(runDones(h)).toEqual(["run-1", "run-2"]);
   });

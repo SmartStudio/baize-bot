@@ -13,7 +13,7 @@ import type { RunIdentity } from "./reporter.js";
 export const TAKEOVER_TOOL = "browser_ask_user";
 export const TAKEOVER_LIMIT_MS = 30 * 60_000;
 
-export const TAKEOVER_VOIDED = "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请他接手。";
+export const TAKEOVER_VOIDED = "用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。";
 const TAKEOVER_TIMED_OUT = "等了 30 分钟用户没有接手，这一页收回来了。";
 const TAKEOVER_ABANDONED = "用户说不弄了，这一页收回来了。";
 const TAKEOVER_PAGE_GONE = "这一页在接手时被关掉了，要接着弄先 browser_open。";
@@ -27,7 +27,7 @@ const PARAMS = Type.Object(
     reason: Type.String({
       minLength: 1,
       maxLength: REASON_MAX,
-      description: "一句话告诉用户为什么要他接手、做到哪一步交还给你，最多 200 字",
+      description: "一句话告诉用户为什么要用户接手、做到哪一步交还给你，最多 200 字",
     }),
   },
   { additionalProperties: false },
@@ -98,8 +98,8 @@ export function createTakeoverTool(deps: TakeoverDeps): RunnerTool {
     name: TAKEOVER_TOOL,
     label: "请用户接手",
     description:
-      "把你后台标签页里当前这一页摆到用户眼前，请他亲自操作（登录、验证码、付款确认），操作完他会交还给你。" +
-      "先 browser_open 到要他接手的那一页再调。等的时候别的浏览器工具都用不了；用户交还后之前的编号作废，先 browser_snapshot。" +
+      "把你后台标签页里当前这一页摆到用户眼前，请用户亲自操作（登录、验证码、付款确认），用户操作完会交还给你。" +
+      "先 browser_open 到要用户接手的那一页再调。等的时候别的浏览器工具都用不了；用户交还后之前的编号作废，先 browser_snapshot。" +
       "最多等 30 分钟；用户在群里发了新消息这次接手就作废。",
     parameters: PARAMS,
     execute: async (callId, raw, signal) => {

@@ -398,7 +398,7 @@ Chrome 按需起：电脑代理启动、建 Bot、建 bash、跑命令都不起�
 | `browser_screenshot` | `read`，放行     | 截当前这一屏，PNG 作为图片进模型                                |
 | `browser_click`      | `engage`，默认问 | 按编号点，走 `Input.dispatchMouseEvent`                         |
 | `browser_type`       | `engage`，默认问 | 按编号填字，替换原内容，可选按回车                              |
-| `browser_ask_user`   | `read`，放行     | 把当前页摆到用户眼前请他亲自操作，交还后回网址，见「请用户接手」 |
+| `browser_ask_user`   | `read`，放行     | 把当前页摆到用户眼前请用户亲自操作，交还后回网址，见「请用户接手」 |
 
 没有发布工具，发帖只走草稿加发布器。`engage` 的授权目标是浏览器当前页的主机名（`BotBrowser.host()`，随 `GateCall.browserHost` 进闸门），不看模型的入参，模型在 `browser_click` 的参数里塞 `hostname` 也冒领不了；域名两边都按 URL 解析出的主机名比较：小写、IDN 转 punycode、去掉末尾的根点，`localhost.` 和 `localhost` 是同一个。批过的域名（`once`、`project`、`forever` 三种范围）再点不问，`browser_open` 到别的域名或页面自己跳到别的域名之后再点重新问。还没开页或停在空白页时目标为空，每次都问。点和填的审批卡是 `ToolView` 的 `mcp` 形状，`server` 是「助理浏览器」，`params` 依次是「域名」（当前页的主机名，页面自己跳走也跟着变）、「元素」（最近一次 snapshot 里那一行，去掉编号，截到 80 字）和填的「文字」；编号不在最近一次 snapshot 里时「元素」写明找不到。
 
@@ -421,11 +421,11 @@ snapshot 的形状：
 
 **标签页归属。** 每个 Bot 一个标签页，这个 Bot 所有群共用，Bot 之间不共用标签页；但 Chrome 和 profile 是所有 Bot 共用的，cookie 和登录态互通，一个 Bot 能打开另一个 Bot 登录过的网站。第一次用时 `Target.createTarget({ background: true })` 建，建完开 `Emulation.setFocusEmulationEnabled`：用户正在看的那页留在前面，Bot 的页以为自己有焦点，桌面焦点不动。每次调用都重新调 `connection()`；拿到的不是上次那条连接或上次那条已经断了（Chrome 退出后重起），就在新 Chrome 里重建一个空白标签页，不自动重开上次的网址（重开等于替模型再发一次 GET），工具结果开头告诉模型「Chrome 重启过，上次在 X」，之前的编号作废。一个 Bot 的浏览器调用串行。等 `connection()`（Chrome 可能正在起）也跟这次调用的 signal 走：停机或中止时当场以「这次浏览器操作被中止了」结束，不等 Chrome 起完；连接归电脑代理共享，晚到的连接这次调用不再拿，也不用替它收尾。Bot 的资源关闭或 Bot 从 config 里移走时 `Target.closeTarget` 关掉它的标签页；建标签页中途失败也关掉已经建好的那页。关页失败就算了：连接断了说明那个 Chrome 已经不在，页也跟着没了。标签页自己被关掉时（`Target.detachedFromTarget`），下次调用重开一个空白页，结果开头写「标签页断开后重开过」。
 
-**请用户接手。** `browser_ask_user`（`src/takeover.ts`）让 Bot 把自己后台标签页里当前这一页摆到用户眼前，请他亲自过登录墙、验证码、付款确认，操作完交还。参数只有一句 `reason`（1 到 200 字），进 `LivePurpose` 的 `takeover`。工具先 `BotBrowser.lend()` 借页：排进这个 Bot 的串行队列并取一次浏览器锁，等正在跑的浏览器调用做完就把标签页换成 `lent` 状态，锁随即放开，借出期间不持锁。然后调 `present({ liveId, targetId, purpose }, signal)`，`liveId` 由 `takeoverLiveId(runId, callId)` 从 runId 和 callId 算出（sha256 截成 UUID 形状，带版本位和变体位），同一次调用重投算出同一个，不生出第二块画面；`bot_tool_call` 运行中卡的 `view` 是 `ToolView` 的 `takeover` 形状，带同一个 `liveId`，Web 按它开画面，`src/reporter.ts` 只对这件工具这样拼卡。`finally` 里 `giveBack()`：标签页换回 `open`，隔离世界作废，接手前的编号作废，点和填先报「用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手」。还没打开页就调它直接抛「你还没打开要接手的那一页，先 browser_open」，不替用户建页。
+**请用户接手。** `browser_ask_user`（`src/takeover.ts`）让 Bot 把自己后台标签页里当前这一页摆到用户眼前，请用户亲自过登录墙、验证码、付款确认，操作完交还。参数只有一句 `reason`（1 到 200 字），进 `LivePurpose` 的 `takeover`。工具先 `BotBrowser.lend()` 借页：排进这个 Bot 的串行队列并取一次浏览器锁，等正在跑的浏览器调用做完就把标签页换成 `lent` 状态，锁随即放开，借出期间不持锁。然后调 `present({ liveId, targetId, purpose }, signal)`，`liveId` 由 `takeoverLiveId(runId, callId)` 从 runId 和 callId 算出（sha256 截成 UUID 形状，带版本位和变体位），同一次调用重投算出同一个，不生出第二块画面；`bot_tool_call` 运行中卡的 `view` 是 `ToolView` 的 `takeover` 形状，带同一个 `liveId`，Web 按它开画面，`src/reporter.ts` 只对这件工具这样拼卡。`finally` 里 `giveBack()`：标签页换回 `open`，隔离世界作废，接手前的编号作废，点和填先报「用户接手过这一页，之前的编号都作废了，先 browser_snapshot 看一眼再动手」。还没打开页就调它直接抛「你还没打开要接手的那一页，先 browser_open」，不替用户建页。
 
-借出期间这个 Bot 的别的会话（别的群）碰任何浏览器工具，`ensureTab` 立刻抛「这一页正交给用户操作，等他交还之后再用浏览器。」，不排队、不等用户、不建新页；发布器有自己的后台标签页，锁又没被占着，照常发布。闸门把它归 `read`（在页上动手的是用户自己，Bot 只把页摆到他眼前），它不在 `BROWSER_TOOL_ACTIONS` 里，会话闸门不为它持锁。只挂给主会话，帮手没有。
+借出期间这个 Bot 的别的会话（别的群）碰任何浏览器工具，`ensureTab` 立刻抛「这一页正交给用户操作，等用户交还之后再用浏览器。」，不排队、不等用户、不建新页；发布器有自己的后台标签页，锁又没被占着，照常发布。闸门把它归 `read`（在页上动手的是用户自己，Bot 只把页摆到用户眼前），它不在 `BROWSER_TOOL_ACTIONS` 里，会话闸门不为它持锁。只挂给主会话，帮手没有。
 
-结束的几种情况：用户点交还，结果是「用户交还了这一页。地址：<origin 加 path>」，query 和 fragment 不给模型（里面常有一次性 token）；用户点不弄了抛「用户说不弄了，这一页收回来了。」；页在接手时被关掉抛「这一页在接手时被关掉了，要接着弄先 browser_open。」；屏根本没展示出来（Chrome 起不来、attach 失败）抛「助理浏览器出了问题，这次没法请用户接手。」。给 `present` 的 signal 是四路合一：这次调用的 signal（run 被取消、停机）、30 分钟时限（`BrowserConfig.takeoverLimitMs` 只给测试缩短，句子固定写 30 分钟）、作废、这个 Bot 的浏览器要关（Bot 从 config 里移走）。屏只看到 `caller`，是哪一路撤的由工具自己分：run 中止照常是「这次浏览器操作被中止了」，浏览器要关是「助理浏览器关掉了，这次接手没做完。」，作废是「用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请他接手。」，剩下就是「等了 30 分钟用户没有接手，这一页收回来了。」。
+结束的几种情况：用户点交还，结果是「用户交还了这一页。地址：<origin 加 path>」，query 和 fragment 不给模型（里面常有一次性 token）；用户点不弄了抛「用户说不弄了，这一页收回来了。」；页在接手时被关掉抛「这一页在接手时被关掉了，要接着弄先 browser_open。」；屏根本没展示出来（Chrome 起不来、attach 失败）抛「助理浏览器出了问题，这次没法请用户接手。」。给 `present` 的 signal 是四路合一：这次调用的 signal（run 被取消、停机）、30 分钟时限（`BrowserConfig.takeoverLimitMs` 只给测试缩短，句子固定写 30 分钟）、作废、这个 Bot 的浏览器要关（Bot 从 config 里移走）。屏只看到 `caller`，是哪一路撤的由工具自己分：run 中止照常是「这次浏览器操作被中止了」，浏览器要关是「助理浏览器关掉了，这次接手没做完。」，作废是「用户在群里发了新消息，这次接手作废了。新消息会在这轮结束后送到你这里，别再请用户接手。」，剩下就是「等了 30 分钟用户没有接手，这一页收回来了。」。
 
 作废：每个 lane 记着正挂着的接手（`Lane.takeover`），`Runner.prompt` 在排队之前看一眼，`origin.kind === "user"` 且 runId 不同就撤，新消息照常排在这轮之后跑。队友 @ 来的、例行触发的、牌桌的 prompt 不作废，同一个 runId 重投也不作废。用例在 `test/takeover.test.ts`，走真 Pi 会话加假上游、假 CDP、假屏。
 
