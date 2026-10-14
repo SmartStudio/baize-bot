@@ -12,6 +12,7 @@ interface CallStream {
   id?: RequestId;
   completed: boolean;
   viaGet: boolean;
+  resumable: boolean;
 }
 
 /** SDK 不把 POST SSE 的断流交给请求 Promise；在 fetch 边界关联请求、限长和取消。 */
@@ -47,6 +48,7 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
       signal: AbortSignal.any([signal, controller.signal]),
       completed: false,
       viaGet: false,
+      resumable: false,
     };
     try {
       return await this.#calling.run(call, () => invoke(call.signal));
@@ -71,11 +73,24 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
       call.id = message.id;
       this.#pending.set(message.id, call);
     }
-    await this.#calling.run(call, () => super.send(message, options));
+    const sendOptions =
+      call === undefined
+        ? options
+        : {
+            ...options,
+            onresumptiontoken: (token: string) => {
+              call.resumable = true;
+              options?.onresumptiontoken?.(token);
+            },
+          };
+    await this.#calling.run(call, () => super.send(message, sendOptions));
   }
 
   async #fetch(input: string | URL, init?: RequestInit): Promise<Response> {
     const call = this.#calling.getStore();
+    const post = init?.method === "POST";
+    // token 只授权下一次续传；续传流没有新 token 时仍需快速判定断流。
+    if (!post && call !== undefined) call.resumable = false;
     let response: Response;
     try {
       response = await fetch(input, {
@@ -87,7 +102,16 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
     } catch (error) {
       // 单次取消已由 Protocol 拒绝；不要再经 transport.onerror 作废共享 Client。
       if (call?.signal.aborted) return new Response(null, { status: 202 });
+      if (!post && call !== undefined) {
+        call.controller.abort(new McpResponseEndedError());
+        return new Response(null, { status: 202 });
+      }
       throw error;
+    }
+    if (!post && call !== undefined && !response.ok) {
+      await response.body?.cancel();
+      call.controller.abort(new McpResponseEndedError());
+      return new Response(null, { status: 202 });
     }
     if (response.status === 202 && call !== undefined) {
       call.viaGet = true;
@@ -99,9 +123,8 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
     }
     if (response.body === null || response.status === 202) return response;
     const reader = response.body.getReader();
-    const post = init?.method === "POST";
-    const sse = response.headers.get("content-type")?.split(";", 1)[0]?.trim() === "text/event-stream";
-    if (!post && sse) this.#getState = "open";
+    const sse = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === "text/event-stream";
+    if (!post && sse && call === undefined) this.#getState = "open";
     let bytes = 0;
     let lineBytes = 0;
     let previousCr = false;
@@ -113,7 +136,10 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
     const finish = () => call?.signal.removeEventListener("abort", cancel);
     const fail = (error: Error) => {
       if (call !== undefined) call.controller.abort(error);
-      else for (const pending of this.#pending.values()) pending.controller.abort(error);
+      else
+        for (const pending of this.#pending.values()) {
+          pending.controller.abort(pending.viaGet ? error : new McpResponseEndedError());
+        }
       cancel();
     };
     const failGetWaiters = () => {
@@ -128,12 +154,12 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
           if (chunk.done) {
             finish();
             controller.close();
-            if (post && response.ok && call !== undefined && !call.signal.aborted) {
+            if (response.ok && call !== undefined && !call.signal.aborted) {
               // 最后一块还要经过 SDK 的解码和解析管线；下一轮事件循环才能确认没有回包。
               setImmediate(() => {
-                if (!call.completed) fail(new McpResponseEndedError());
+                if (!call.completed && !call.resumable) fail(new McpResponseEndedError());
               });
-            } else if (!post && sse) {
+            } else if (!post && sse && call === undefined) {
               this.#getState = "ended";
               setImmediate(failGetWaiters);
             }
@@ -170,7 +196,7 @@ export class McpHttpTransport extends StreamableHTTPClientTransport {
         } catch (error) {
           finish();
           if (call !== undefined) {
-            if (!call.signal.aborted && !call.completed) fail(new McpResponseEndedError());
+            if (!call.signal.aborted && !call.completed && !call.resumable) fail(new McpResponseEndedError());
             controller.close();
           } else {
             if (sse) {

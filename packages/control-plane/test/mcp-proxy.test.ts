@@ -71,6 +71,149 @@ function call(
 }
 
 describe("MCP 控制面代执行", () => {
+  it.each(["prime-ok", "prime-end", "prime-fail"])(
+    "%s：priming 后断开，Last-Event-ID 续传恰好一次；无新 token 的 EOF 或 HTTP 失败在 5 秒内固定分类失败",
+    async (sku) => {
+      const persistent = await startTestMcp({ stateful: true });
+      const who = await owner();
+      const tool = await connect(who, false, "续传", persistent.url);
+      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      try {
+        const started = Date.now();
+        const result = await call(
+          config,
+          tool.id,
+          who.botId,
+          "lookup_stock",
+          sku,
+          config.modelGateway.apiKey,
+          AbortSignal.timeout(4_000),
+        );
+        expect(result.status).toBe(sku === "prime-ok" ? 200 : 502);
+        expect(await result.json()).toEqual(
+          sku === "prime-ok"
+            ? { content: [{ type: "text", text: "resumed-ok" }], isError: false }
+            : { error: "插件调用失败：这个地址连不上" },
+        );
+        expect(Date.now() - started, "续传不等 60 秒调用超时").toBeLessThan(5_000);
+        expect(persistent.resumptions()).toHaveLength(1);
+      } finally {
+        await who.client.delete(`/api/tools/${tool.id}`);
+        agent.close();
+        await persistent.close();
+      }
+    },
+  );
+
+  it.each(["json", "sse"])("%s 原始响应恰好 20 MiB 通过，加 1 字节失败", async (format) => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "字节边界", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    try {
+      const exact = await call(config, tool.id, who.botId, "lookup_stock", `boundary:${format}:20971520:ascii`);
+      expect(exact.status, "恰好 20 MiB 不超限").toBe(200);
+      expect(McpProxyCallResponse.parse(await exact.json()).content[0]?.type).toBe("text");
+      expect(persistent.streamedBytes()).toBe(20971520);
+      const over = await call(config, tool.id, who.botId, "lookup_stock", `boundary:${format}:20971521:ascii`);
+      expect(over.status, "20 MiB 加 1 字节已超限").toBe(502);
+      expect(await over.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
+    } finally {
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
+  it("UTF-8 三字节字符跨块，原始字节 20 MiB 加 1 而字符不足 20 MiB 时失败", async () => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "UTF-8 字节边界", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    try {
+      const result = await call(config, tool.id, who.botId, "lookup_stock", "boundary:sse:20971521:utf8");
+      expect(result.status).toBe(502);
+      expect(await result.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
+    } finally {
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
+  it.each(["text/event-stream", "Text/Event-Stream; charset=utf-8"])(
+    "GET %s 多个小事件累计超过 20 MiB，读取屏障成功且 Client 不作废",
+    async (getContentType) => {
+      const persistent = await startTestMcp({ stateful: true, getContentType });
+      const who = await owner();
+      const tool = await connect(who, false, "GET 事件边界", persistent.url);
+      const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+      try {
+        expect((await call(config, tool.id, who.botId)).status).toBe(200);
+        await persistent.waitForStreams(1);
+        const before = persistent.initializations();
+        const result = await call(
+          config,
+          tool.id,
+          who.botId,
+          "lookup_stock",
+          "get-many",
+          config.modelGateway.apiKey,
+          AbortSignal.timeout(4_000),
+        );
+        expect(result.status).toBe(200);
+        expect(await result.json()).toEqual({ content: [{ type: "text", text: "many-ok" }], isError: false });
+        expect((await call(config, tool.id, who.botId)).status).toBe(200);
+        expect(persistent.initializations()).toBe(before);
+        expect(persistent.activeStreams()).toBe(1);
+      } finally {
+        await who.client.delete(`/api/tools/${tool.id}`);
+        agent.close();
+        await persistent.close();
+      }
+    },
+  );
+
+  it("同一 Client 两个并发调用：断流调用发送取消通知，成功调用独立收尾且结果不串", async () => {
+    const persistent = await startTestMcp({ stateful: true });
+    const who = await owner();
+    const tool = await connect(who, false, "并发断流隔离", persistent.url);
+    const { agent, config } = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);
+    const hold = persistent.holdNextCall();
+    try {
+      const pending = call(config, tool.id, who.botId);
+      await hold.arrived;
+      await persistent.waitForStreams(1);
+      const before = persistent.initializations();
+      const cancelled = persistent.nextCancellation(AbortSignal.timeout(3_000));
+      const failed = await call(
+        config,
+        tool.id,
+        who.botId,
+        "lookup_stock",
+        "sse-end",
+        config.modelGateway.apiKey,
+        AbortSignal.timeout(4_000),
+      );
+      expect(failed.status).toBe(502);
+      expect(await failed.json()).toEqual({ error: "插件调用失败：这个地址连不上" });
+      await expect(
+        cancelled,
+        "send 清除非 tools/call 的调用上下文，取消通知不继承已取消的 POST 信号",
+      ).resolves.toBeUndefined();
+      hold.release();
+      const result = await pending;
+      expect(result.status).toBe(200);
+      expect(await result.json()).toEqual({ content: [{ type: "text", text: "160" }], isError: false });
+      expect(persistent.initializations()).toBe(before);
+    } finally {
+      hold.release();
+      await who.client.delete(`/api/tools/${tool.id}`);
+      agent.close();
+      await persistent.close();
+    }
+  });
+
   it.each(["sse-end", "sse-drop", "drop-all", "get-end", "get-drop"])(
     "响应流 %s 没有回包，5 秒内固定分类失败，健康 POST 调用照常返回",
     async (sku) => {
@@ -134,10 +277,10 @@ describe("MCP 控制面代执行", () => {
       const before = persistent.initializations();
       const result = await call(config, tool.id, who.botId, "lookup_stock", "stream-get");
       const other = await pending;
-      for (const response of [result, other]) {
-        expect(response.status).toBe(502);
-        expect(await response.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
-      }
+      expect(result.status).toBe(502);
+      expect(await result.json()).toEqual({ error: "插件结果超过 20 MiB 上限" });
+      expect(other.status).toBe(502);
+      expect(await other.json()).toEqual({ error: "插件调用失败：这个地址连不上" });
       await expect(persistent.waitForStreams(0, AbortSignal.timeout(2_000))).resolves.toBeUndefined();
       expect(persistent.completedLargeResponses()).toBe(0);
       expect((await call(config, tool.id, who.botId)).status).toBe(200);

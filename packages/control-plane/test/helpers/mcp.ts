@@ -28,10 +28,11 @@ export type TestMcp = {
   holdNextList(): HeldList;
   holdNextInitialization(): HeldList;
   holdNextCall(): HeldList;
-  nextCancellation(): Promise<void>;
+  nextCancellation(signal?: AbortSignal): Promise<void>;
   nextCallClosed(): Promise<void>;
   streamedBytes(): number;
   completedLargeResponses(): number;
+  resumptions(): readonly string[];
   failNextInitialization(): void;
   close(): Promise<void>;
 };
@@ -55,7 +56,9 @@ const holdNext = (queue: { arrive(): void; released: Promise<void> }[]): HeldLis
   return { arrived, release };
 };
 
-export async function startTestMcp(options: { readonly stateful?: boolean } = {}): Promise<TestMcp> {
+export async function startTestMcp(
+  options: { readonly stateful?: boolean; readonly getContentType?: string } = {},
+): Promise<TestMcp> {
   const authorizations: (string | null)[] = [];
   let initializations = 0;
   const calls: { name: string; arguments: unknown; authorization: string | null }[] = [];
@@ -71,6 +74,8 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
   let failInitialization = false;
   const sessions = new Map<string, { mcp: McpServer; transport: StreamableHTTPServerTransport }>();
   const getResponses = new Map<string, ServerResponse>();
+  const resumptions: string[] = [];
+  const resumableCalls = new Map<string, { id: unknown; sku: unknown }>();
   const sockets = new Set<Socket>();
   let streams = 0;
   const notifyStreams = () => {
@@ -91,6 +96,19 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
     authorizations.push(authorization);
     void (async () => {
       const body = await readBody(req);
+      const lastEventId = req.headers["last-event-id"];
+      if (req.method === "GET" && typeof lastEventId === "string") {
+        resumptions.push(lastEventId);
+        const pending = resumableCalls.get(lastEventId);
+        resumableCalls.delete(lastEventId);
+        res.writeHead(pending?.sku === "prime-fail" ? 500 : 200, { "content-type": "text/event-stream" });
+        if (pending?.sku === "prime-ok") {
+          res.end(
+            `data: ${JSON.stringify({ jsonrpc: "2.0", id: pending.id, result: { content: [{ type: "text", text: "resumed-ok" }] } })}\n\n`,
+          );
+        } else res.end();
+        return;
+      }
       if (isRpc(body, "notifications/cancelled")) cancellations.shift()?.();
       if (isRpc(body, "initialize")) {
         initializations += 1;
@@ -120,6 +138,52 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
           typeof params.arguments === "object" && params.arguments !== null && "sku" in params.arguments
             ? params.arguments.sku
             : undefined;
+        if (sku === "prime-ok" || sku === "prime-end" || sku === "prime-fail") {
+          const token = randomUUID();
+          resumableCalls.set(token, { id: body.id, sku });
+          res.writeHead(200, { "content-type": "Text/Event-Stream; charset=utf-8" });
+          res.end(`id: ${token}\nretry: 50\ndata:\n\n`);
+          return;
+        }
+        if (typeof sku === "string" && sku.startsWith("boundary:")) {
+          const [, format, total, fill] = sku.split(":");
+          const sse = format === "sse";
+          const prefix = `${sse ? "data: " : ""}{"jsonrpc":"2.0","id":${JSON.stringify(body.id)},"result":{"content":[{"type":"text","text":"`;
+          const tail = `"}]}}${sse ? "\n\n" : ""}`;
+          const length = Number(total) - Buffer.byteLength(prefix + tail);
+          const text =
+            fill === "utf8" ? "库".repeat(Math.floor(length / 3)) + "a".repeat(length % 3) : "a".repeat(length);
+          const raw = Buffer.from(prefix + text + tail);
+          res.writeHead(200, {
+            "content-type": sse ? "Text/Event-Stream; charset=utf-8" : "Application/Json; charset=utf-8",
+          });
+          streamedBytes = 0;
+          // 65537 与 UTF-8 的三字节长度互质；逐块让出事件循环，字符确实跨读取块。
+          for (let offset = 0; offset < raw.length && !res.destroyed; offset += 65537) {
+            const chunk = raw.subarray(offset, offset + 65537);
+            streamedBytes += chunk.byteLength;
+            await new Promise<void>((resolve) => res.write(chunk, () => resolve()));
+            await new Promise<void>((resolve) => setImmediate(resolve));
+          }
+          if (!res.destroyed) res.end();
+          return;
+        }
+        if (sku === "get-many") {
+          const target = getResponses.get(String(req.headers["mcp-session-id"]));
+          if (target === undefined) throw new Error("没有 GET 流");
+          res.writeHead(202).end();
+          // 每条通知约 64 KiB，总计超过 20 MiB，最后的结果是读取屏障。
+          const event = `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/message", params: { level: "info", data: "a".repeat(65536) } })}\r\n\r\n`;
+          for (let i = 0; i < 336 && !target.destroyed; i += 1) {
+            await new Promise<void>((resolve) => target.write(event, () => resolve()));
+          }
+          if (!target.destroyed) {
+            target.write(
+              `data: ${JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "many-ok" }] } })}\n\n`,
+            );
+          }
+          return;
+        }
         if (sku === "sse-end" || sku === "sse-drop") {
           res.writeHead(200, { "content-type": "text/event-stream" });
           res.write(`: ${authorization}\n\n`, () => {
@@ -238,6 +302,11 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
             streams -= 1;
             notifyStreams();
           });
+          if (options.getContentType !== undefined) {
+            res.writeHead(200, { "content-type": options.getContentType });
+            res.write(": open\n\n");
+            return;
+          }
         }
         await session.transport.handleRequest(req, res, body);
         return;
@@ -324,10 +393,25 @@ export async function startTestMcp(options: { readonly stateful?: boolean } = {}
     holdNextList: () => holdNext(held),
     holdNextInitialization: () => holdNext(heldInitializations),
     holdNextCall: () => holdNext(heldCalls),
-    nextCancellation: () => new Promise<void>((resolve) => cancellations.push(resolve)),
+    nextCancellation: (signal) =>
+      new Promise<void>((resolve, reject) => {
+        const done = () => {
+          signal?.removeEventListener("abort", abort);
+          resolve();
+        };
+        const abort = () => {
+          const index = cancellations.indexOf(done);
+          if (index !== -1) cancellations.splice(index, 1);
+          reject(new Error("没有收到断流调用的取消通知"));
+        };
+        cancellations.push(done);
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      }),
     nextCallClosed: () => new Promise<void>((resolve) => callClosures.push(resolve)),
     streamedBytes: () => streamedBytes,
     completedLargeResponses: () => completedLargeResponses,
+    resumptions: () => resumptions,
     failNextInitialization: () => (failInitialization = true),
     close: async () => {
       http.closeAllConnections();
