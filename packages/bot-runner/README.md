@@ -467,7 +467,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 
 `src/publisher.ts` 的 `publishDraft` 收控制面下行的 `publish_draft`，回一条 `publish_result`，见「小红书发布器」。
 
-`test/attachments.test.ts` 覆盖附件上传、MIME、key 轮换、跨目录下载、只读缓存、哈希篡改与旧稿兼容；不接真浏览器或真实平台。`test/runner.test.ts` 的「运行器的草稿」一节钉住本地安全检查，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。
+`test/attachments.test.ts` 覆盖附件上传、MIME、key 轮换、跨目录下载、只读缓存、错误缓存替换、部分写入失败后的原子性与重试、哈希篡改及旧稿兼容；不接真浏览器或真实平台。图片魔数由 shared 的 `imageMime` 判定，控制面上传入口也使用同一函数。`test/runner.test.ts` 的「运行器的草稿」一节钉住本地安全检查及现有会话在 `applyConfig` 换 key 后使用新 key 上传，`test/gate.test.ts` 的「起草工具」一节钉住闸门分支。发布附件时配置尚未下发会返回「发布出错：附件配置尚未下发」，实际下载失败仍返回「发布出错：配图从白泽下载失败，请稍后重试」。
 
 ## skill
 

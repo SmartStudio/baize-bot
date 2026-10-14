@@ -6,10 +6,11 @@ import {
   AttachmentSha256,
   AttachmentUploadQuery,
   AttachmentUploadResponse,
+  imageMime,
 } from "@baize/shared";
 import { Hono } from "hono";
 import type { Db } from "../../db/client.js";
-import { findOwnedAttachment, storeAttachment } from "../../repo/attachments.js";
+import { canUploadAttachment, findOwnedAttachment, storeAttachment } from "../../repo/attachments.js";
 import type { HubEnv } from "../hub-auth.js";
 
 export function createAttachmentRoutes(deps: { readonly db: Db }): Hono<HubEnv> {
@@ -22,9 +23,16 @@ export function createAttachmentRoutes(deps: { readonly db: Db }): Hono<HubEnv> 
     if (!mime.success) return c.json({ error: "附件只支持 PNG、JPEG、WebP 和 GIF" }, 415);
     const declaredHash = AttachmentSha256.safeParse(c.req.header("x-baize-sha256"));
     if (!declaredHash.success) return c.json({ error: "附件 sha256 格式不对" }, 400);
+    // 先核归属再读体，不替别人的 Bot 收完 20 MiB；storeAttachment 在事务里还会再核一次。
+    if (!(await canUploadAttachment(deps.db, { ownerId: c.get("ownerId"), ...query.data })))
+      return c.json({ error: "没有这个 Bot 或群" }, 404);
 
     const bytes = await readAttachment(c.req.raw);
     if (bytes === null) return c.json({ error: "附件超过 20 MiB 上限" }, 413);
+    if (bytes.length === 0) return c.json({ error: "附件图片不能为空" }, 400);
+    const actualMime = imageMime(bytes);
+    if (actualMime === null) return c.json({ error: "附件字节不是 PNG、JPEG、WebP 或 GIF 图片" }, 400);
+    if (actualMime !== mime.data) return c.json({ error: "附件图片格式和 Content-Type 不一致" }, 400);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     if (sha256 !== declaredHash.data) return c.json({ error: "附件 sha256 和声明不一致" }, 400);
 

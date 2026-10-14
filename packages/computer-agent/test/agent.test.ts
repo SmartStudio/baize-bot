@@ -1453,7 +1453,7 @@ describe("电脑代理连控制面", () => {
       }),
     );
     await expect(server.waitForMessage("publish_result")).resolves.toMatchObject({
-      result: { status: "failed", reason: "error", detail: "发布出错：配图从白泽下载失败，请稍后重试" },
+      result: { status: "failed", reason: "error", detail: "发布出错：附件配置尚未下发" },
     });
     expect(connectionCalls).toBe(0);
   });

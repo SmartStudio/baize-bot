@@ -5,6 +5,27 @@ import { attachments, bots, groupMembers, groups } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { lockOwner, shareBotRunsLock } from "./runs.js";
 
+export async function canUploadAttachment(
+  db: Db,
+  input: { readonly ownerId: UserId; readonly botId: BotId; readonly groupId: GroupId },
+): Promise<boolean> {
+  const [scope] = await db
+    .select({ botId: bots.id })
+    .from(groupMembers)
+    .innerJoin(bots, eq(bots.id, groupMembers.botId))
+    .innerJoin(groups, eq(groups.id, groupMembers.groupId))
+    .where(
+      and(
+        eq(bots.id, input.botId),
+        eq(bots.ownerId, input.ownerId),
+        eq(groups.id, input.groupId),
+        eq(groups.ownerId, input.ownerId),
+      ),
+    )
+    .limit(1);
+  return scope !== undefined;
+}
+
 export async function storeAttachment(
   db: Db,
   input: {

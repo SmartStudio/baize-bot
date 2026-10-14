@@ -11,6 +11,7 @@ import {
   DraftId,
   type DraftImage,
   type DraftSpec,
+  imageMime,
   type Platform,
 } from "@baize/shared";
 import { type Static, Type } from "typebox";
@@ -18,7 +19,7 @@ import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
 import { isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 import type { ActiveRun } from "./topic.js";
-import { attachmentCopyName, imageMime, uploadAttachment, type AttachmentLive } from "./attachments.js";
+import { attachmentCopyName, uploadAttachment, type AttachmentLive } from "./attachments.js";
 
 // Bot 往外发东西只有起草这一条路：三件工具都只发上行，群里出草稿卡或计划卡，用户在卡上批了才发。
 // 闸门把它们归 publish，只看账号档，见 gate.ts 的 decideDraft。

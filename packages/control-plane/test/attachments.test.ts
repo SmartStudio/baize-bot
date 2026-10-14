@@ -25,6 +25,12 @@ const IMAGE = Buffer.from(
   "base64",
 );
 const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const IMAGES = {
+  "image/png": IMAGE,
+  "image/jpeg": Buffer.from([255, 216, 255, 217]),
+  "image/webp": Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")]),
+  "image/gif": Buffer.from("GIF89a"),
+} satisfies Record<AttachmentMime, Buffer>;
 
 beforeAll(async () => {
   database = await createTestDb();
@@ -132,7 +138,7 @@ describe("控制面附件", () => {
 
   it.each(AttachmentMime.options)("允许 %s 并按上传时的 MIME 返回", async (mime) => {
     const who = await owner();
-    const response = await upload(who, { mime });
+    const response = await upload(who, { mime, bytes: IMAGES[mime] });
     expect(response.status).toBe(200);
     const { attachmentId } = AttachmentUploadResponse.parse(await response.json());
     expect((await download(who, attachmentId)).headers.get("content-type")).toBe(mime);
@@ -168,6 +174,7 @@ describe("控制面附件", () => {
   it("恰好 20 MiB 可上传，多一个字节回 413，超限内容不落库", async () => {
     const who = await owner();
     const bytes = Buffer.alloc(ATTACHMENT_MAX_BYTES);
+    IMAGE.copy(bytes);
     expect((await upload(who, { bytes })).status).toBe(200);
     expect((await upload(who, { bytes: Buffer.alloc(ATTACHMENT_MAX_BYTES + 1) })).status).toBe(413);
     expect(await attachmentCount(who.user.id)).toBe(1);
@@ -213,6 +220,55 @@ describe("控制面附件", () => {
     const who = await owner();
     expect((await upload(who, { mime: "image/svg+xml" })).status).toBe(415);
     expect(await attachmentCount(who.user.id)).toBe(0);
+  });
+
+  it.each([
+    [Buffer.alloc(0), "image/png", "附件图片不能为空"],
+    [Buffer.from("<script>alert(1)</script>"), "image/png", "附件字节不是 PNG、JPEG、WebP 或 GIF 图片"],
+    [Buffer.from([199, 201, 198, 184, 185, 225]), "image/gif", "附件字节不是 PNG、JPEG、WebP 或 GIF 图片"],
+    [IMAGE, "image/jpeg", "附件图片格式和 Content-Type 不一致"],
+  ] as const)("空体、非图片或 MIME 与魔数不符回 400：%s，%s", async (bytes, mime, error) => {
+    const who = await owner();
+    const response = await upload(who, { bytes, mime });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error });
+    expect(await attachmentCount(who.user.id)).toBe(0);
+  });
+
+  it("别人的 Bot 在 20 MiB 请求体未写完前回 404", async () => {
+    const who = await owner();
+    const other = await owner();
+    const query = new URLSearchParams({ botId: other.bot.id, groupId: other.group.id });
+    let req: ReturnType<typeof request>;
+    const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+      req = request(
+        `${who.config.hub.baseUrl}/attachments?${query}`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${who.config.modelGateway.apiKey}`,
+            "content-type": "image/png",
+            "content-length": String(ATTACHMENT_MAX_BYTES),
+            "x-baize-sha256": digest(IMAGE),
+          },
+        },
+        (res) => {
+          const parts: Buffer[] = [];
+          res.on("data", (part: Buffer) => parts.push(part));
+          res.on("end", () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(parts).toString() }));
+        },
+      );
+      req.on("error", reject);
+      req.setTimeout(2_000, () => req.destroy(new Error("未写完请求体时没有收到拒绝响应")));
+    });
+    try {
+      req!.write(IMAGE);
+      await expect(response).resolves.toEqual({ status: 404, body: '{"error":"没有这个 Bot 或群"}' });
+      expect(req!.writableEnded).toBe(false);
+      expect(await attachmentCount(who.user.id)).toBe(0);
+    } finally {
+      req!.destroy();
+    }
   });
 
   it("别人的 Bot 回 404", async () => {

@@ -15,15 +15,6 @@ export interface AttachmentLive {
   readonly gateway: Config["modelGateway"];
 }
 
-export const imageMime = (bytes: Buffer): AttachmentMime | null => {
-  if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
-  if (bytes.length >= 12 && bytes.toString("latin1", 0, 4) === "RIFF" && bytes.toString("latin1", 8, 12) === "WEBP")
-    return "image/webp";
-  const gif = bytes.toString("latin1", 0, 6);
-  return gif === "GIF87a" || gif === "GIF89a" ? "image/gif" : null;
-};
-
 const IMAGE_EXTENSION: Record<AttachmentMime, string> = {
   "image/png": ".png",
   "image/jpeg": ".jpg",
@@ -76,9 +67,9 @@ export async function uploadAttachment(
 }
 
 export async function downloadAttachment(live: (() => AttachmentLive) | undefined, id: AttachmentId): Promise<Buffer> {
+  if (live === undefined) throw new Error("附件配置尚未下发");
+  const { hub, gateway } = live();
   try {
-    if (live === undefined) throw new Error("附件配置尚未下发");
-    const { hub, gateway } = live();
     const response = await fetch(endpoint(hub.baseUrl, `attachments/${encodeURIComponent(id)}`), {
       headers: { authorization: `Bearer ${gateway.apiKey}` },
       signal: AbortSignal.timeout(60_000),

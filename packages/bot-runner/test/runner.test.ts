@@ -7134,6 +7134,29 @@ describe("运行器的草稿", () => {
     ]);
   });
 
+  it("现有会话起草配图时使用 applyConfig 更新后的附件上传网关 key", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptBy([
+        ["起草配图", callTool("create_draft", { accountId: "acc-xhs", content: { ...POST, images: [IMAGE] } })],
+        ["先建会话", { textChunks: ["会话已建。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "先建会话"));
+    await h.runner.applyConfig(
+      h.config({ modelGateway: { baseUrl: h.gateway.baseUrl, apiKey: "rotated-attachment-key" } }),
+    );
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "起草配图"));
+
+    expect(h.attachmentHub.uploads.map((upload) => upload.authorization)).toEqual(["Bearer rotated-attachment-key"]);
+  });
+
   it("起草后改掉原图，草稿指向的拷贝还是起草时的字节", async () => {
     const { dataDir, workDir } = botWorkDir();
     const original = join(workDir, "cover.png");

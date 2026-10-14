@@ -657,7 +657,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `attachments` 把草稿配图的原始字节存为 Postgres `bytea`，记录归属人、Bot、群、sha256、MIME 和大小。`(owner_id, bot_id, group_id, sha256)` 唯一；重复上传用一条 `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING id` 返回同一个附件 id，不先查后写。
 
-`PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。服务器重算哈希，声明不符回 400。Bot 必须属于当前归属人且在指定群内，否则回 404。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
+`PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。先验证网关 key，无效回 401；读体前再检查 Bot 和群的归属及成员关系，不成立回 404；落库事务内再次复核，避免上传期间删除对象的竞态。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。控制面和运行器共用 shared 的 `imageMime` 按魔数识别图片；空体回 400「附件图片不能为空」，无支持的魔数回 400「附件字节不是 PNG、JPEG、WebP 或 GIF 图片」，魔数与声明不符回 400「附件图片格式和 Content-Type 不一致」。服务器重算哈希，声明不符回 400。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
 
 `/hub/v1` 挂在 cookie 登录中间件之前，只接受当前电脑网关 key 的 Bearer。config 恒带 `hub.baseUrl`；hello 轮换 key 后旧 key 立即失效。`http/hub-auth.ts` 将归属人和电脑 id 写入请求上下文，P3-10 的租约头校验接在 `http/hub.ts` 的认证之后、附件路由之前；本单不校验租约头。
 

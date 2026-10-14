@@ -21,11 +21,29 @@ import {
   type AgentToControl,
   type DraftImage,
 } from "@baize/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { attachmentCopyName, type AttachmentLive } from "../src/attachments.js";
 import { createDraftTools } from "../src/drafts.js";
 import { publishDraft, type PublishDraftMessage } from "../src/publisher.js";
 import { startAttachmentHub } from "./helpers/attachments.js";
+
+const failNextWrite = vi.hoisted(() => ({ armed: false }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      if (failNextWrite.armed) {
+        failNextWrite.armed = false;
+        const [path] = args;
+        await actual.writeFile(path, Buffer.from("partial"), { mode: 0o444 });
+        throw new Error("模拟写入失败");
+      }
+      return actual.writeFile(...args);
+    },
+  };
+});
 
 const PNG = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -228,6 +246,83 @@ describe("发布器在另一台电脑补齐附件", () => {
     await publishDraft(publishMessage(image), { dataDir, browser });
     expect(h.hub.downloads).toHaveLength(1);
     expect(calls).toBe(2);
+  });
+
+  it("同名只读错误缓存会重新下载并原子替换为正确的只读字节", async () => {
+    const h = await setup();
+    await h.draft();
+    const image = h.image();
+    if (image.kind !== "attachment") throw new Error("不是附件支");
+    const dataDir = local();
+    const copy = join(dataDir, "bot-1", "drafts", attachmentCopyName(image.sha256, image.mime));
+    const wrong = Buffer.from("same filename, wrong bytes");
+    mkdirSync(join(dataDir, "bot-1", "drafts"), { recursive: true });
+    writeFileSync(copy, wrong, { mode: 0o444 });
+    expect(readFileSync(copy)).toEqual(wrong);
+    expect(statSync(copy).mode & 0o777).toBe(0o444);
+    let calls = 0;
+    const reply = await publishDraft(publishMessage(image), {
+      dataDir,
+      liveHub: h.live,
+      browser: {
+        connection: async () => {
+          calls += 1;
+          expect(readFileSync(copy)).toEqual(PNG);
+          throw new Error("假浏览器在配图就绪后停下");
+        },
+      },
+    });
+    expect(reply.result).toMatchObject({ status: "failed", detail: "发布出错：假浏览器在配图就绪后停下" });
+    expect(h.hub.downloads).toEqual(["Bearer private-gateway-key-1"]);
+    expect(readFileSync(copy)).toEqual(PNG);
+    expect(statSync(copy).mode & 0o777).toBe(0o444);
+    expect(readdirSync(join(dataDir, "bot-1", "drafts"))).toEqual([`${image.sha256}.png`]);
+    expect(calls).toBe(1);
+  });
+
+  it("部分写入失败会清理临时文件并阻止浏览器，重试重新下载正确的只读字节", async () => {
+    const h = await setup();
+    await h.draft();
+    const image = h.image();
+    if (image.kind !== "attachment") throw new Error("不是附件支");
+    const dataDir = local();
+    const draftsDir = join(dataDir, "bot-1", "drafts");
+    const copy = join(draftsDir, attachmentCopyName(image.sha256, image.mime));
+    let calls = 0;
+    failNextWrite.armed = true;
+    const failed = await publishDraft(publishMessage(image), {
+      dataDir,
+      liveHub: h.live,
+      browser: {
+        connection: async () => {
+          calls += 1;
+          throw new Error("失败写入后不应连接浏览器");
+        },
+      },
+    });
+    expect(failed.result).toEqual({ status: "failed", reason: "error", detail: "发布出错：模拟写入失败" });
+    expect(failNextWrite.armed).toBe(false);
+    expect(readdirSync(draftsDir)).toEqual([]);
+    expect(h.hub.downloads).toEqual(["Bearer private-gateway-key-1"]);
+    expect(calls).toBe(0);
+
+    const retried = await publishDraft(publishMessage(image), {
+      dataDir,
+      liveHub: h.live,
+      browser: {
+        connection: async () => {
+          calls += 1;
+          expect(readFileSync(copy)).toEqual(PNG);
+          throw new Error("重试时配图已就绪");
+        },
+      },
+    });
+    expect(retried.result).toMatchObject({ status: "failed", detail: "发布出错：重试时配图已就绪" });
+    expect(h.hub.downloads).toEqual(["Bearer private-gateway-key-1", "Bearer private-gateway-key-1"]);
+    expect(readFileSync(copy)).toEqual(PNG);
+    expect(statSync(copy).mode & 0o777).toBe(0o444);
+    expect(readdirSync(draftsDir)).toEqual([`${image.sha256}.png`]);
+    expect(calls).toBe(1);
   });
 
   it("下载字节被篡改时失败，不落盘也不接浏览器", async () => {
