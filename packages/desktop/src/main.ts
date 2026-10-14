@@ -284,6 +284,11 @@ export function startAgent(
                 void dialog.showErrorBox("电脑代理不可用", errorText(error));
               });
               break;
+            case "upgrade_required":
+              setAgentState({ status: "stopping", child });
+              fail(new AgentReplacedError());
+              void showUpgradeRequired().catch((error: unknown) => logLine(`upgrade-required-dialog ${String(error)}`));
+              break;
             default: {
               const unhandled: never = status.data;
               throw new Error(`未处理的代理状态：${JSON.stringify(unhandled)}`);
@@ -542,6 +547,19 @@ async function handleDisplaced(child: ChildProcess): Promise<void> {
     cancelId: 1,
   });
   if (response === 0) requestConnection(electronSession.defaultSession, true);
+}
+
+// 控制面以 4003 拒绝这一版代理，代理自己停机；凭据仍然有效，装好新版后照常复用。
+async function showUpgradeRequired(): Promise<void> {
+  if (phase !== "running") return;
+  const { response } = await showBox({
+    type: "warning",
+    message: "这台 Mac 上的白泽版本太旧，控制面不再接受它连接，请更新白泽",
+    buttons: updater === null ? ["知道了"] : ["检查更新", "知道了"],
+    defaultId: 0,
+    cancelId: updater === null ? 0 : 1,
+  });
+  if (updater !== null && response === 0) updater.checkNow();
 }
 
 async function refreshPending(session: Session): Promise<void> {

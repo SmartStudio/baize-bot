@@ -757,6 +757,23 @@ describe("桌面主进程代理流程", () => {
       children[0]?.emit("exit", 0, null);
     });
 
+    it("upgrade_required 提示更新、保留凭据，不自动配对或重启", async () => {
+      saveLocalCredentials();
+      await boot();
+      await emitOnline();
+      children[0]?.stdout.write('{"type":"upgrade_required"}\n');
+      children[0]?.emit("exit", 0, null);
+      await vi.waitFor(() => expect(showMessageBox).toHaveBeenCalledTimes(1));
+      expect(showMessageBox).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ message: "这台 Mac 上的白泽版本太旧，控制面不再接受它连接，请更新白泽" }),
+      );
+      expect(fsState.credentials).not.toBeNull();
+      expect(fetchState.localRequests).toEqual([]);
+      expect(children).toHaveLength(1);
+      expect((await import("electron")).dialog.showErrorBox).not.toHaveBeenCalled();
+    });
+
     it("旧代理的迟到 displaced 和未知状态不影响当前代理或凭据", async () => {
       saveLocalCredentials();
       const main = await boot();
