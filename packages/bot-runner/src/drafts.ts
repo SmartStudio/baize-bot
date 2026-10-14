@@ -274,7 +274,7 @@ export function createDraftTools(options: {
           ),
         );
         return resultText(
-          `草稿已建（draftId：${draft.draftId}），等用户在卡上批。批之前什么都没发出去，回复用户时说草稿在等他批，别说已经发了。`,
+          `草稿已建（draftId：${draft.draftId}），等用户在卡上批。批之前什么都没发出去，回复用户时说草稿在等用户批，别说已经发了。`,
         );
       },
     },

@@ -623,8 +623,8 @@ const run = async (): Promise<void> => {
     await p.locator("[data-testid=account-connect-browser][data-platform=xiaohongshu]").click();
     const xhsRow = p.getByTestId("account-row").filter({ hasText: "小红书" });
     await check(xhsRow).toHaveAttribute("data-login", "none");
-    await check(xhsRow.getByTestId("login-open"), "接入一点就开登录窗口").toHaveText("等你扫码…");
-    await check(xhsRow.getByTestId("login-card-note")).toHaveText("登录窗口已在本机打开，扫码后这里会变成已登录。");
+    await check(xhsRow.getByTestId("login-open"), "接入一点就开登录窗口").toHaveText("等你登录…");
+    await check(xhsRow.getByTestId("login-card-note")).toHaveText("登录窗口已在本机打开，登上后这里会变成已登录。");
     await waitFor("电脑上开出了登录窗口", () => chrome.waitingLogins() === 1);
     const placeholder = AccountListResponse.parse(await s.get("/api/accounts")).accounts.find(
       (account) => account.platform === "xiaohongshu",

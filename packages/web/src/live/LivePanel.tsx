@@ -3,7 +3,7 @@ import { Globe, MonitorUp } from "lucide-react";
 import { liveEndActions, type ComputerKind, type LiveInput, type LiveSession, type LiveUserEnd } from "@baize/shared";
 import { useApp } from "../state/app.js";
 import { reconnectDelay } from "../state/reconnect.js";
-import { LIVE_TEXT, PLATFORM, computerName, liveEndText } from "../components/messages/content.js";
+import { LIVE_TEXT, PLATFORM, beforeChinese, computerName, liveEndText } from "../components/messages/content.js";
 import {
   createClickCounter,
   createMoveCoalescer,
@@ -181,9 +181,11 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
     purpose.kind === "login"
       ? `登录${PLATFORM[purpose.platform]}`
       : LIVE_TEXT.takeover(state.status === "ready" ? state.bots[purpose.botId]?.name : undefined);
-  const where = computer === undefined ? null : computerName(computer);
+  const where = computer === undefined ? "电脑" : computerName(computer);
   const note =
-    purpose.kind === "login" ? `扫码或输入都直接发到${where ?? "电脑"}上的这一页，密码不经过 Bot。` : purpose.reason;
+    purpose.kind === "login"
+      ? `扫码或输入都直接发到${beforeChinese(where)}上的这一页，密码不经过 Bot。`
+      : purpose.reason;
   const notice =
     conn === "replaced"
       ? LIVE_TEXT.replaced

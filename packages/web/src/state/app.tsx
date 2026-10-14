@@ -938,7 +938,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
     // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
     // 画面一起重拉：断线期间开关过的画面也收不到推送，还开着的那次登录不算没等到，见 logins_settled。
-    // 重拉失败也结，卡不能一直停在「等你扫码」；重拉期间新点的登录 startedAt 更大，不受影响。
+    // 重拉失败也结，卡不能一直停在「等你登录」；重拉期间新点的登录 startedAt 更大，不受影响。
     const recoverLogins = (computerId: ComputerId | null, flow: "offline" | "lapsed") => {
       const before = nextSeq();
       const seq = nextSeq();

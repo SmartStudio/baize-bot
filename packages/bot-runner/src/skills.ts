@@ -131,7 +131,7 @@ export function createSkillTools(options: {
         );
         // 报文真发出去了才算问过。parse 挂在这一步的话，模型改好参数还能再问一次。
         offeredRunId = active.run.runId;
-        return { content: [{ type: "text", text: `已经在群里问用户存不存「${name}」了，等他点。` }], details: {} };
+        return { content: [{ type: "text", text: `已经在群里问用户存不存「${name}」了，等用户点。` }], details: {} };
       },
     },
   ];

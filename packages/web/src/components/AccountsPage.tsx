@@ -17,6 +17,7 @@ import { ConnectEntries } from "./ConnectEntries.js";
 import { loginFlowNote } from "./LoginCard.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 import {
+  COMPUTER_KIND_TEXT,
   COMPUTER_STATUS_CLASS,
   COMPUTER_STATUS_TEXT,
   LOGIN_FAILURE_TEXT,
@@ -71,7 +72,7 @@ const LoginAction = ({ account, where, login }: { account: Account; where: strin
         disabled={opening}
         onClick={() => void login.open(account.id).catch(() => undefined)}
       >
-        {opening ? "等你扫码…" : "打开登录窗口"}
+        {opening ? "等你登录…" : "打开登录窗口"}
       </button>
     </div>
   );
@@ -197,11 +198,6 @@ const groupsOf = (accounts: Account[], computers: Record<string, Computer>): Gro
   }
   const rank = (group: Group): number => (group.computer === undefined ? 2 : group.computer.kind === "local" ? 0 : 1);
   return [...groups.values()].sort((left, right) => rank(left) - rank(right));
-};
-
-const COMPUTER_KIND_TEXT: Record<Computer["kind"], string> = {
-  local: "本机",
-  remote: "远程",
 };
 
 type Pairing =

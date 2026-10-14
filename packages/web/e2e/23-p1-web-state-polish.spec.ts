@@ -16,7 +16,7 @@ test("电脑页听 computer_updated 推送：另一台休眠，状态不刷新�
     "data-status",
     "sleeping",
   );
-  await expect(remote).toHaveText("远程休眠");
+  await expect(remote).toHaveText("远程电脑休眠");
 
   const dot = await remote.locator(".status-dot").boundingBox();
   const label = await remote.locator("[data-testid=computer-status] b").boundingBox();
