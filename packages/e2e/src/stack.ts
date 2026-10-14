@@ -463,7 +463,7 @@ async function connectComputer(options: {
       AgentToControl.parse({
         type: "hello",
         ...options,
-        protocol: 2,
+        protocol: 3,
         uplinkStream: `probe-${randomBytes(8).toString("hex")}`,
         downApplied: 0,
         activeRuns: [],

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { McpHttpUrl } from "./mcp-discovery.js";
 import { PokerTableView } from "./poker.js";
 import {
   Account,
@@ -403,11 +404,11 @@ export type UpdateBrandRequest = z.infer<typeof UpdateBrandRequest>;
 // GET /api/tools  设置的工具页。自己的全部工具连接，operations 带 needsApproval 现值；响应里没有 authorization。
 export const ToolListResponse = z.object({ items: z.array(ToolConnection) });
 
-// POST /api/tools  连一个 MCP（Streamable HTTP）。控制面当场 initialize 加 tools/list，连不上或不是 MCP 回 400 并说原因；
+// POST /api/tools 连一个 MCP（Streamable HTTP）。localOnly 在本机电脑探测，其余在控制面探测；失败回固定中文原因。
 // operations 按注解定 needsApproval；assignedBotIds 起始为空。回 201。同名 409。
 export const CreateToolRequest = z.object({
   name: z.string().min(1).max(40),
-  url: z.string().url(),
+  url: McpHttpUrl,
   authorization: z.string().min(1).optional(),
   localOnly: z.boolean().optional(),
 });

@@ -421,7 +421,7 @@ async function reconnect(who: Owner, activeRuns: readonly RunId[]): Promise<Agen
     computerId: who.computer.computerId,
     token: who.computer.token,
     version: "test",
-    protocol: 2,
+    protocol: 3,
     uplinkStream: who.computer.computerId,
     downApplied: 0,
     activeRuns: [...activeRuns],

@@ -53,6 +53,7 @@ export type BotConfig = ConfigMessage["bots"][number];
 export { GATEWAY_PROVIDER_ID, type RunnerTool } from "./bot-session.js";
 export { type CdpConnection, type CdpPipe, connectPipe } from "./cdp.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
+export { discoverMcpTools } from "./mcp-discover.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";

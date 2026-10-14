@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { BotListResponse, MessageListResponse, ToolResponse } from "@baize/shared";
+import { BotListResponse, MessageListResponse, ToolListResponse, ToolResponse } from "@baize/shared";
 import { startTestMcp, type McpCall, type TestMcp } from "../src/mcp.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { isFollowUpTurn, startUpstream, type ScriptedTurn } from "../src/upstream.js";
@@ -91,6 +91,26 @@ function followUp(text: string): ScriptedTurn {
 }
 
 describe("端到端：MCP 工具连接、分配和审批", () => {
+  it("只监听 127.0.0.1 的本机 MCP 由真电脑代理发现，initialize 从不来自控制面", async () => {
+    await withStack(
+      () => followUp("本机连接成功"),
+      async (stack, mcp) => {
+        const tool = ToolResponse.parse(
+          await stack.post("/api/tools", {
+            name: "本机工具",
+            url: mcp.baseUrl,
+            authorization: AUTHORIZATION,
+            localOnly: true,
+          }),
+        ).tool;
+        expect(tool.localOnly).toBe(true);
+        expect(tool.operations.map((operation) => operation.name)).toEqual(["send_email", "lookup_stock"]);
+        expect(ToolListResponse.parse(await stack.get("/api/tools")).items).toEqual([tool]);
+        expect(mcp.clientNames()).toEqual(["baize-bot-runner"]);
+        expect(mcp.clientNames()).not.toContain("baize-control-plane");
+      },
+    );
+  });
   it("连接 MCP 后发现两条操作，并按只读注解决定默认审批", async () => {
     await withStack(
       () => followUp("连接成功"),

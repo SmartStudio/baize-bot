@@ -241,7 +241,7 @@ export function sendHello(
     computerId,
     token,
     version: "test",
-    protocol: 2,
+    protocol: 3,
     uplinkStream: computerId,
     downApplied: 0,
     activeRuns: [...activeRuns],

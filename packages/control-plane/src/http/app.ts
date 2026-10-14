@@ -329,10 +329,13 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (!body.ok) return c.json({ error: body.error }, 400);
     let operations: ToolOperation[];
     try {
-      operations = await discoverTools(body.value);
+      operations =
+        body.value.localOnly === true
+          ? await agents.discoverLocalTools(c.get("user").id, body.value)
+          : await discoverTools(body.value);
     } catch (error) {
       if (!(error instanceof DiscoveryError)) throw error;
-      return c.json({ error: error.message }, 400);
+      return c.json({ error: error.message }, error.status);
     }
     const tool = await createTool(db, c.get("user").id, body.value, operations, deps.toolCrypto);
     if (tool === null) return c.json({ error: "已有同名工具连接" }, 409);
@@ -352,18 +355,22 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (authorization !== undefined) {
       // 换凭据当场重新探测一次：连不上就什么都不改，旧凭据和操作表照旧。null 是不带凭据探测。
       try {
-        const discovered = await discoverTools({
+        const input = {
           name: current.name,
           url: current.url,
           ...(authorization === null ? {} : { authorization }),
-        });
+        };
+        const discovered =
+          (body.value.localOnly ?? current.localOnly)
+            ? await agents.discoverLocalTools(c.get("user").id, input)
+            : await discoverTools(input);
         reauthorized = {
           authorizationEnc: authorization === null ? null : deps.toolCrypto.encrypt(authorization),
           discovered,
         };
       } catch (error) {
         if (!(error instanceof DiscoveryError)) throw error;
-        return c.json({ error: error.message }, 400);
+        return c.json({ error: error.message }, error.status);
       }
     }
     const result = await updateTool(db, c.get("user").id, current, body.value, reauthorized);

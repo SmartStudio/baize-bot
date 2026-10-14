@@ -1,6 +1,14 @@
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { DiscoveryError, DISCOVERY_FAILURE_MESSAGES } from "../mcp/discover.js";
 import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
 import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
 import {
+  McpDiscoveryResult,
+  McpHttpUrl,
+  validateMcpDiscoveryOperations,
+  type CreateToolRequest,
+  type ToolOperation,
   AgentCloseCode,
   AgentToControl,
   BareUplinkFrame,
@@ -65,6 +73,19 @@ const CLOSE_SHUTTING_DOWN = 1012;
 /** RFC 6455 的 Internal Error。握手中途出错，代理按退避重连再握一次。 */
 const CLOSE_HANDSHAKE_FAILED = 1011;
 const DISCONNECT_NOTICE = "电脑断过线，这次活没做完";
+const MCP_DISCOVERY_TIMEOUT_MS = 15_000;
+const DiscoveryReply = z.object({
+  conn: z.number().int().positive(),
+  body: z.object({ type: z.literal("mcp_discovered"), requestId: z.string().uuid(), result: z.unknown() }),
+});
+type PendingDiscovery = {
+  readonly ownerId: UserId;
+  readonly computerId: ComputerId;
+  readonly conn: number;
+  readonly authorization: string | null;
+  readonly resolve: (result: McpDiscoveryResult | "disconnected") => void;
+  readonly timer: NodeJS.Timeout;
+};
 const DEFAULT_DISCONNECT_GRACE_MS = 15_000;
 /**
  * 多久收不到任何上行帧就当连接已死。合盖的 Mac 发不出 FIN，服务端手里的 socket 会一直是 OPEN。
@@ -96,6 +117,7 @@ export type AgentHubDeps = {
   readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
   readonly silenceTimeoutMs?: number | undefined;
+  readonly mcpDiscoveryTimeoutMs?: number | undefined;
   readonly toolCrypto: ToolCrypto;
   readonly notifications: NoticePublisher;
 };
@@ -104,6 +126,7 @@ export type AgentHubDeps = {
 export class AgentHub {
   readonly #deps: AgentHubDeps;
   readonly #connections = new Map<ComputerId, AgentConnection>();
+  readonly #discoveries = new Map<string, PendingDiscovery>();
   /**
    * 连接的 config 走到哪一步。连接一握手就进 #connections，好让断线收尾停手、并发的 sendConfig 送得到；
    * 但在 config 发出之前派 prompt，新起的代理还没有运行器，会把它丢掉，那个 run 就永远不收尾。
@@ -307,6 +330,60 @@ export class AgentHub {
     return this.#send(conn, message);
   }
 
+  async discoverLocalTools(ownerId: UserId, input: CreateToolRequest): Promise<ToolOperation[]> {
+    if (!McpHttpUrl.safeParse(input.url).success) throw new DiscoveryError(DISCOVERY_FAILURE_MESSAGES.not_mcp);
+    const connection = this.#ownerConnections(ownerId).find(
+      (candidate) => candidate.kind === "local" && this.isOnline(candidate.computerId),
+    );
+    if (connection === undefined) {
+      throw new DiscoveryError("这条连接只在本机用，探测要你的电脑开着白泽", 409);
+    }
+    const requestId = randomUUID();
+    const result = await new Promise<McpDiscoveryResult | "disconnected">((resolve) => {
+      const timer = setTimeout(
+        () => this.#settleDiscovery(requestId, { ok: false, reason: "timeout" }),
+        this.#deps.mcpDiscoveryTimeoutMs ?? MCP_DISCOVERY_TIMEOUT_MS,
+      );
+      timer.unref();
+      this.#discoveries.set(requestId, {
+        ownerId,
+        computerId: connection.computerId,
+        conn: connection.conn,
+        authorization: input.authorization ?? null,
+        resolve,
+        timer,
+      });
+      if (
+        !this.#send(connection, {
+          type: "mcp_discover",
+          requestId,
+          url: input.url,
+          ...(input.authorization === undefined ? {} : { authorization: input.authorization }),
+        })
+      )
+        this.#settleDiscovery(requestId, "disconnected");
+    });
+    if (result === "disconnected") throw new DiscoveryError("本机电脑断开了，请打开白泽后重试");
+    if (!result.ok) throw new DiscoveryError(DISCOVERY_FAILURE_MESSAGES[result.reason]);
+    return result.operations;
+  }
+
+  #settleDiscovery(requestId: string, result: McpDiscoveryResult | "disconnected"): void {
+    const pending = this.#discoveries.get(requestId);
+    if (pending === undefined) return;
+    this.#discoveries.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.resolve(result);
+  }
+
+  #disconnectDiscoveries(connection: AgentConnection): void {
+    for (const [requestId, pending] of this.#discoveries) {
+      if (pending.computerId === connection.computerId && pending.conn === connection.conn) {
+        this.#settleDiscovery(requestId, "disconnected");
+      }
+    }
+  }
+
   /** 在线或断线宽限内的电脑可以收可靠下行。 */
   deliverableComputerIds(): ComputerId[] {
     return [...new Set([...this.onlineComputerIds(), ...this.#graceTimers.keys()])];
@@ -370,6 +447,7 @@ export class AgentHub {
   disconnectOwner(ownerId: UserId): void {
     this.#deletedOwners.add(ownerId);
     for (const connection of this.#ownerConnections(ownerId)) {
+      this.#disconnectDiscoveries(connection);
       this.#connections.delete(connection.computerId);
       connection.acknowledgements.stop();
       connection.socket.close(AgentCloseCode.accountDeleted, "账号已删除");
@@ -389,6 +467,7 @@ export class AgentHub {
    */
   async closeAll(): Promise<void> {
     this.#lifecycle = "closing";
+    for (const requestId of this.#discoveries.keys()) this.#settleDiscovery(requestId, "disconnected");
     for (const timer of this.#graceTimers.values()) clearTimeout(timer);
     this.#graceTimers.clear();
     await Promise.allSettled(this.#inboxTails);
@@ -434,6 +513,34 @@ export class AgentHub {
       );
       if (result.kind === "gap") conn.socket.close(1011, "上行序号缺口");
       if (result.kind === "ack") conn.acknowledgements.add(result.upTo, result.rejected);
+      return;
+    }
+    const reply = DiscoveryReply.safeParse(json);
+    if (reply.success) {
+      const { requestId, result } = reply.data.body;
+      const pending = this.#discoveries.get(requestId);
+      if (
+        pending === undefined ||
+        pending.ownerId !== conn.ownerId ||
+        pending.computerId !== conn.computerId ||
+        pending.conn !== conn.conn ||
+        reply.data.conn !== conn.conn ||
+        !(await isCurrentConnection(this.#deps.db, conn.computerId, conn.conn))
+      )
+        return;
+      const success = z
+        .object({ ok: z.literal(true), operations: z.unknown() })
+        .strict()
+        .safeParse(result);
+      if (success.success) {
+        this.#settleDiscovery(
+          requestId,
+          validateMcpDiscoveryOperations(success.data.operations, pending.authorization),
+        );
+      } else {
+        const parsed = McpDiscoveryResult.safeParse(result);
+        this.#settleDiscovery(requestId, parsed.success ? parsed.data : { ok: false, reason: "invalid_operations" });
+      }
       return;
     }
     const bare = BareUplinkFrame.safeParse(json);
@@ -490,6 +597,7 @@ export class AgentHub {
         clearTimeout(timer);
         this.#graceTimers.delete(computer.id);
       }
+      if (previous !== undefined) this.#disconnectDiscoveries(previous);
       previous?.acknowledgements.stop();
       previous?.socket.close(AgentCloseCode.superseded, "同一台电脑有了新连接");
 
@@ -549,6 +657,7 @@ export class AgentHub {
     // 停机时已经把计时器清过一遍，这之后起的没人清，到点时库多半已经关了。
     if (this.#lifecycle === "closing") return;
     // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
+    this.#disconnectDiscoveries(closed);
     if (this.#connections.get(closed.computerId) !== closed) return;
     this.#connections.delete(closed.computerId);
     closed.acknowledgements.stop();

@@ -191,6 +191,8 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 工具连接
 
+`discoverMcpTools`（`src/mcp-discover.ts`）用 SDK 的 Streamable HTTP client 探测 MCP 地址并读取全部分页，不创建 Pi 会话。连接和分页共享 10 秒总时限；操作表按 shared 的数量、大小和凭据回显规则逐页校验，失败只返回固定分类，不带服务端原文。
+
 `config.tools` 是控制面下发的 `ToolConnectionConfig[]`。`localOnly: false` 的连接没有 `authorization`，凭据只留在控制面；`localOnly: true` 的连接带 `authorization`，只发给本机电脑，远程电脑拿不到。按 Bot 取 `assignedBotIds` 含这个 Bot 的连接，每个 `operation` 注册成一个 Pi 工具：`name`、`description` 照抄，`parameters` 是 `inputSchema` 原样经 `Type.Unsafe` 交给 Pi 校验，不再翻译一遍。代码在 `src/mcp-tools.ts`。这一份工具由这个 Bot 的所有群共用。
 
 非本机连接不创建 MCP `Client`，通过 `POST ${config.mcpProxy.baseUrl}/:connectionId/call` 让控制面代执行，请求带 `botId`、`tool` 和 `arguments`。Bearer 每次现取最新的 `modelGateway.apiKey`，key 轮换或代理地址变化只更新调用配置，不重建工具和会话；响应通过 shared 的 `McpProxyCallResponse` 校验。审批闸门照旧在转发前运行，HTTP 失败或响应格式不正确时抛中文异常，Pi 记成 `isError` 工具结果和 `failed` 终态。

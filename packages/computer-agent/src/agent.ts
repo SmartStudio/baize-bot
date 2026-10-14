@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { WebSocket } from "ws";
 import {
   AGENT_PROTOCOL,
+  classifyMcpDiscoveryFailure,
   AgentCloseCode,
   AgentStatusLine,
   type AgentToControl,
@@ -14,7 +15,7 @@ import {
   UPLINK_DELIVERY,
   UplinkAck,
 } from "@baize/shared";
-import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
+import { createRunner, discoverMcpTools, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
@@ -46,6 +47,7 @@ export interface AgentOptions {
   readonly loginTimeoutMs?: number;
   /** 测试用断线注入点：持久化完成后、可靠帧发送前调用。 */
   readonly beforeReliableSend?: (frame: UplinkFrame) => void;
+  readonly discoverMcp?: typeof discoverMcpTools;
 }
 
 export interface AgentHandle {
@@ -86,6 +88,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let resettingTransport = false;
   const resetReports: AgentToControl[] = [];
   const reliableSends = new Set<Promise<void>>();
+  const discoveries = new Map<AbortController, Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
   let loginQueue: Promise<void> = Promise.resolve();
@@ -258,6 +261,28 @@ export function startAgent(options: AgentOptions): AgentHandle {
     }
     const message = parsed.data;
     switch (message.type) {
+      case "mcp_discover": {
+        const control = new AbortController();
+        const discoveryConn = conn;
+        const respond = (result: Awaited<ReturnType<typeof discoverMcpTools>>) => {
+          if (stopping || link.phase !== "open" || link.socket !== from || conn !== discoveryConn) return;
+          sendBare({ type: "mcp_discovered", requestId: message.requestId, result });
+        };
+        const pending = Promise.resolve()
+          .then(() =>
+            (options.discoverMcp ?? discoverMcpTools)(
+              {
+                url: message.url,
+                ...(message.authorization === undefined ? {} : { authorization: message.authorization }),
+              },
+              { signal: control.signal },
+            ),
+          )
+          .then(respond, (error: unknown) => respond({ ok: false, reason: classifyMcpDiscoveryFailure(error) }))
+          .finally(() => discoveries.delete(control));
+        discoveries.set(control, pending);
+        return;
+      }
       // welcome 才说明控制面收下了 hello。只看 TCP 连上就清零退避，会被「连上就踢」的控制面打成密集重连。
       case "welcome":
         if (conn !== null) return;
@@ -472,6 +497,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
     socket.on("close", (code) => {
       if ((link.phase !== "open" && link.phase !== "connecting") || link.socket !== socket) return;
       stopHeartbeat();
+      for (const control of discoveries.keys()) control.abort();
       if (code === AgentCloseCode.displaced) {
         process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "displaced" }))}\n`);
         void stop().catch((error: unknown) => log(`代理停机失败：${String(error)}`));
@@ -504,6 +530,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   function stop(): Promise<void> {
     if (stopPromise !== null) return stopPromise;
     stopping = true;
+    for (const control of discoveries.keys()) control.abort();
     stopHeartbeat();
     if (link.phase === "waiting") clearTimeout(link.timer);
 
@@ -533,6 +560,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       runner = null;
       await outbox?.flush().catch((error: unknown) => log(`停机落盘失败：${String(error)}`));
       await Promise.all(reliableSends);
+      await Promise.allSettled(discoveries.values());
       await chromeStopping;
 
       const current = link;

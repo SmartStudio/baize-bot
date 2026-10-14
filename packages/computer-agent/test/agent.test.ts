@@ -456,7 +456,7 @@ describe("电脑代理连控制面", () => {
         computerId: "computer-1",
         token: "dev-token",
         version: "0.1.0",
-        protocol: 2,
+        protocol: 3,
         uplinkStream: expect.any(String),
         downApplied: 0,
         activeRuns: [],

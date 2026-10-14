@@ -680,7 +680,10 @@ describe("MCP 控制面代执行", () => {
   it("本机只收到本机插件的凭据，远程不收到本机插件；切换 localOnly 后两条连接更新", async () => {
     const who = await owner();
     const proxy = await connect(who);
-    const local = await connect(who, true, "本机插件");
+    const beforeLocal = await connect(who, false, "本机插件");
+    const localResponse = await who.client.patch(`/api/tools/${beforeLocal.id}`, { localOnly: true });
+    expect(localResponse.status).toBe(200);
+    const local = ToolResponse.parse(await localResponse.json()).tool;
     const remote = await ensureComputer(database.db, who.user.id, "remote");
     if (remote.token === null) throw new Error("远程电脑应新建");
     const first = await helloAgent(server.server.port, who.computer.computerId, who.computer.token);

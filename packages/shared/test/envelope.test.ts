@@ -17,7 +17,7 @@ const missingDownlink: Record<Downlink["type"] | "future_downlink", "bare" | "re
 void missingUplink;
 void missingDownlink;
 
-describe("协议 2 信封登记", () => {
+describe("协议 3 信封登记", () => {
   it("两张登记表覆盖两个报文联合的全部成员", () => {
     expect(Object.keys(UPLINK_DELIVERY).toSorted()).toEqual(
       AgentToControl.options.map((option) => option.shape.type.value).toSorted(),

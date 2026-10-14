@@ -41,6 +41,7 @@ import {
   UserId,
 } from "./domain.js";
 import { ToolView } from "./tool-view.js";
+import { McpDiscoveryResult, McpHttpUrl } from "./mcp-discovery.js";
 
 // 控制面和电脑代理之间的 WebSocket 报文。电脑代理出站连接，连上后先发 hello。
 export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_out"]);
@@ -98,6 +99,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("downlink_ack"), upTo: z.number().int().nonnegative() }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
+  z.object({ type: z.literal("mcp_discovered"), requestId: z.string().uuid(), result: McpDiscoveryResult }),
   // 代理收下一条 config 并换好了运行器，generation 是收下的那条 config 的代际。
   // 控制面只拿它从 config_rejected 里恢复，且只认当前待确认的那一代。
   // 不兼容旧代理：它回的 config_applied 不带 generation，parse 不过整条丢掉。控制面和代理同版一起升。
@@ -378,6 +380,12 @@ export type AgentToControl = z.infer<typeof AgentToControl>;
 // 控制面收下 hello 后必须回 welcome。电脑代理只在收到 welcome 时把重连退避清零。
 export const ControlToAgent = z.discriminatedUnion("type", [
   z.object({
+    type: z.literal("mcp_discover"),
+    requestId: z.string().uuid(),
+    url: McpHttpUrl,
+    authorization: z.string().min(1).optional(),
+  }),
+  z.object({
     type: z.literal("welcome"),
     ownerId: UserId,
     kind: ComputerKind,
@@ -501,12 +509,14 @@ export const ControlToAgent = z.discriminatedUnion("type", [
 ]);
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
 
-export const AGENT_PROTOCOL = 2;
-export const MIN_AGENT_PROTOCOL = 2;
+export const AGENT_PROTOCOL = 3;
+export const MIN_AGENT_PROTOCOL = 3;
 
 export const UPLINK_DELIVERY = {
   hello: "bare",
   heartbeat: "bare",
+  // 结果只供正在等待的 HTTP 请求使用；丢失由用户重试，不能进入代理磁盘发件箱。
+  mcp_discovered: "bare",
   config_applied: "bare",
   downlink_ack: "bare",
   bot_text: "bare",
@@ -543,6 +553,8 @@ export const DOWNLINK_DELIVERY = {
   config: "bare",
   pause: "bare",
   resume: "bare",
+  // 带明文凭据，不能进入 agent_outbox 或代理的 .agent/downlink.json；丢失让 HTTP 请求超时。
+  mcp_discover: "bare",
   cancel: "reliable",
   prompt: "reliable",
   approval_result: "reliable",

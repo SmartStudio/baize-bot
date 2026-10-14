@@ -18,9 +18,11 @@ export async function startTestServer(
   scheduler?: StartOptions["scheduler"],
   notificationScheduler?: NotificationOptions,
   publisher?: StartOptions["publisher"],
+  agentOptions: Pick<StartOptions, "mcpDiscoveryTimeoutMs"> = {},
 ): Promise<TestServer> {
   const server = await startServer({
     db,
+    ...agentOptions,
     port: 0,
     toolSecretKey: "a".repeat(64),
     credentialsKey: TEST_CREDENTIALS_KEY,

@@ -10,7 +10,7 @@
 
 ## 电脑代理握手
 
-hello 的协议号和下限都是 2，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
+hello 的协议号和下限都是 3，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
 
 电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，收到 4003 后输出一次 `{"type":"upgrade_required"}`；4002、4003、4004 都停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码按退避重连。
 
@@ -24,6 +24,10 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 可靠下行在调用方事务里进入 `agent_outbox`，带 `{ type: "downlink", seq, body }` 按序发送；结束或放弃 run 的事务删除它绑定的行，4004 顶号清空该电脑发件箱，删电脑级联删除。在线或断线宽限内可以入队，宽限外沿用派发失败分支。hello 先更新连接代际和游标，再依次发 welcome、config、pause/resume、重放发件箱，随后补历史欠账。代理先持久化 `.agent/downlink.json` 再入运行器队列，重复帧只确认，崩溃窗口内丢失的 prompt 由 hello 的 activeRuns 对账收尾。对账发现已结束的 active run 时现场发 `cancel{runId}`，不入发件箱。
 
 ## 工具连接
+
+创建 `localOnly: true` 连接、或按更新后的 `localOnly` 换凭据时，工具发现交给归属人在线的本机电脑；没有在线本机电脑返回 409，远程电脑不会代替它探测。代理独立执行 initialize 和 tools/list 分页，最多 10 秒，client 名为 `baize-bot-runner`；控制面等回报最多 15 秒，断线立即结束等待。非本机连接继续由控制面发现。
+
+`mcp_discover` 和 `mcp_discovered` 在协议 3 登记为 bare。下行带明文凭据，不能进 `agent_outbox`、代理磁盘发件箱或 `.agent/downlink.json`；上行只供当前 HTTP 请求使用，丢失让请求超时、用户重试。待回记录只在内存，绑定用户、电脑和连接代际，未知请求或旧连接回报静默丢弃。控制面按固定枚举映射中文错误，重新校验操作表（最多 256 个操作，JSON UTF-8 最多 1 MiB）和凭据回显，成功后才保存；失败时旧凭据和操作表保持不变。地址仅支持 http 和 https。
 
 工具连接是用户级对象。`tool_connections` 存 MCP 地址、发现的操作及其 `needsApproval` 标记，并把认证信息以 AES-256-GCM 密文存入 `authorization_enc`；`tool_connection_bots` 记录它分配给哪些 Bot，删 Bot 时对应分配由外键级联清除。API 列表和写入响应都不返回认证信息。默认 `localOnly: false`，凭据只留在服务器，`config.tools` 仅下发操作表和 Bot 分配，不含 `authorization`。运行器经 `/mcp-proxy/:connectionId/call` 代执行，本机和远程电脑都能使用。设成「只在本机用」后，本机电脑收到 `localOnly: true` 和解密后的凭据并直连 MCP；远程电脑不收到这条连接。
 

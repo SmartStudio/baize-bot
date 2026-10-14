@@ -99,7 +99,7 @@ async function rawHello(
       computerId,
       token,
       version: "test",
-      protocol: 2,
+      protocol: 3,
       uplinkStream: stream,
       downApplied,
       activeRuns,
@@ -810,9 +810,9 @@ describe("可靠信封", () => {
     expect(after[0]?.count).toBe(0);
   });
 
-  it("缺少 protocol 或 protocol 1 的 hello 都以 4003 拒绝", async () => {
+  it("缺少 protocol 或 protocol 低于 3 的 hello 都以 4003 拒绝", async () => {
     const s = await owner();
-    for (const protocol of [undefined, 1]) {
+    for (const protocol of [undefined, 1, 2]) {
       const agent = await openAgent(server.server.port);
       const hello = {
         type: "hello",

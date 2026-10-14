@@ -98,7 +98,7 @@ it("重连握手里 config 还没发出时来的活不派给这条连接，confi
       computerId: owner.computer.computerId,
       token: owner.computer.token,
       version: "test",
-      protocol: 2,
+      protocol: 3,
       uplinkStream: owner.computer.computerId,
       downApplied: 0,
       activeRuns: [],
