@@ -245,12 +245,12 @@ start_agent() {
   echo $! >"$RUN/entry2/computer-agent.pgid"
   set +m
   echo "起 computer-agent，进程组 $(cat "$RUN/entry2/computer-agent.pgid")，日志 $log"
-  until grep -q "收到 config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
+  until grep -qE "收到(第 [0-9]+ 代 )?config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
     tries=$((tries + 1))
     [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没收到 config："; tail -20 "$RUN/entry2/computer-agent.log"; exit 1; }
     sleep 0.5
   done
-  grep "收到 config" "$RUN/entry2/computer-agent.log" | tail -1
+  grep -E "收到(第 [0-9]+ 代 )?config" "$RUN/entry2/computer-agent.log" | tail -1
 }
 
 entry2() {
@@ -292,7 +292,7 @@ entry2() {
       check_owned entry2 web "$web" || ok=1
       if [[ -f "$RUN/entry2/computer-agent.pgid" ]]; then
         check_owned entry2 computer-agent "" || ok=1
-        grep -E "控制面已接纳|收到 config|重连" "$RUN/entry2/computer-agent.log" | tail -2 || true
+        grep -E "控制面已接纳|收到(第 [0-9]+ 代 )?config|重连" "$RUN/entry2/computer-agent.log" | tail -2 || true
       fi
       echo "控制面 /api/bots → $(http_code "http://127.0.0.1:$cp/api/bots")，经 Web 代理 → $(http_code "http://127.0.0.1:$web/api/bots")（都要 401）"
       return $ok
