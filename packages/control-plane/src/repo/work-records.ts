@@ -54,15 +54,17 @@ export async function appendWorkRecords(
     .for("update");
   const sameHolder = lease?.holderComputerId === conn.computerId && lease.holderInstallId === conn.installId;
   const firstImport = frame.cause === "import" && frame.fromSeq === 0 && frame.lines.length > 0;
-  if (!firstImport || !sameHolder) {
-    if (lease !== undefined && lease.epoch !== epoch) return { kind: "stale_epoch" };
-    if (!sameHolder && !(firstImport && lease === undefined)) return { kind: "not_holder" };
+  if (lease !== undefined) {
+    if (lease.epoch !== epoch) return { kind: "stale_epoch" };
+    if (!sameHolder) return { kind: "not_holder" };
+  } else if (!firstImport && !sameHolder) {
+    return { kind: "not_holder" };
   }
   if (frame.lines.length === 0) return { kind: "ok" };
 
   let visibleTo: Viewer[] | null;
   if (frame.cause === "import") {
-    if (frame.runId !== null || (firstImport && epoch !== 1)) return { kind: "invalid" };
+    if (frame.runId !== null || (firstImport && lease === undefined && epoch !== 1)) return { kind: "invalid" };
     const [table] = await tx
       .select({ groupId: pokerTables.groupId })
       .from(pokerTables)
@@ -132,20 +134,11 @@ export async function appendWorkRecords(
   const head = await advanceWorkHead(metadata?.head ?? EMPTY_WORK_HEAD, frame.lines);
   if (head !== frame.head) return { kind: "head_mismatch" };
 
-  if (firstImport) {
+  if (firstImport && lease === undefined) {
     const [claimed] = await tx
       .insert(laneLeases)
       .values({ botId, groupId, holderComputerId: conn.computerId, holderInstallId: conn.installId, epoch: 1 })
-      .onConflictDoUpdate({
-        target: [laneLeases.botId, laneLeases.groupId],
-        set: { updatedAt: sql`clock_timestamp()` },
-        setWhere: and(
-          eq(laneLeases.holderComputerId, conn.computerId),
-          eq(laneLeases.holderInstallId, conn.installId),
-          sql`NOT EXISTS (SELECT 1 FROM ${workStreams} WHERE ${workStreams.botId} = ${botId}
-            AND ${workStreams.groupId} = ${groupId} AND ${workStreams.stream} = ${stream} AND ${workStreams.nextSeq} > 0)`,
-        )!,
-      })
+      .onConflictDoNothing()
       .returning({ epoch: laneLeases.epoch });
     if (claimed === undefined) return { kind: "not_holder" };
   }
@@ -313,7 +306,12 @@ export async function readWorkLane(
     )
     .orderBy(asc(workEntries.seq))
     .limit(limit);
-  return { entries, nextSeq: metadata.nextSeq, head: metadata.head, piSessionVersion: metadata.piSessionVersion };
+  return {
+    entries,
+    nextSeq: metadata.nextSeq,
+    head: metadata.head,
+    piSessionVersion: metadata.nextSeq === 0 ? null : metadata.piSessionVersion,
+  };
 }
 
 export function workEntryVisibleTo(viewer: Viewer) {

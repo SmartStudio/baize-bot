@@ -26,6 +26,7 @@ import type { BotDirs } from "./paths.js";
 import { tablePersona } from "./persona.js";
 import { installLaneHeaders } from "./lane-fence.js";
 import type { ActiveRun } from "./topic.js";
+import { installWorkFlush } from "./work-mirror.js";
 
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type PokerResult = Extract<ControlToAgent, { type: "poker_result" }>["result"];
@@ -306,6 +307,8 @@ export async function createTableSession(options: {
   readonly table: () => TablePrompt | null;
   readonly laneHeaders: () => Readonly<Record<string, string>>;
   readonly settings: PiSettings | undefined;
+  readonly sessionManager?: SessionManager;
+  readonly flushWork?: import("./work-mirror.js").WorkFlush;
 }): Promise<BotSession> {
   const { dirs } = options;
   const runtime = await ModelRuntime.create({
@@ -353,6 +356,7 @@ export async function createTableSession(options: {
     extensionFactories: [
       (pi) => {
         installLaneHeaders(pi, options.laneHeaders);
+        if (options.flushWork !== undefined) installWorkFlush(pi, options.flushWork);
         for (const tool of tools) pi.registerTool(tool);
         pi.on("tool_call", async (event, ctx) => {
           if (options.table()?.role !== options.role || !names.includes(event.toolName))
@@ -372,7 +376,7 @@ export async function createTableSession(options: {
     modelRuntime: runtime,
     settingsManager: settings,
     resourceLoader: loader,
-    sessionManager: SessionManager.continueRecent(dirs.workDir, dirs.sessionDir),
+    sessionManager: options.sessionManager ?? SessionManager.continueRecent(dirs.workDir, dirs.sessionDir),
     tools: names,
   });
   session.agent.toolExecution = "sequential";

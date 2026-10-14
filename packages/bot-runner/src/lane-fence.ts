@@ -56,11 +56,13 @@ export interface RunLane {
 
 export class LaneFence implements LaneSessionFence {
   #runs = new Map<RunId, RunLane>();
-  #effects = new Map<RunId, Map<string, () => void>>();
+  #effects = new Map<RunId, Map<string, (result?: WorkAppendOutcome) => void>>();
   #append: () => WorkAppender | undefined;
+  #flush: ((runId: RunId) => Promise<WorkAppendOutcome>) | undefined;
 
-  constructor(append: () => WorkAppender | undefined) {
+  constructor(append: () => WorkAppender | undefined, flush?: (runId: RunId) => Promise<WorkAppendOutcome>) {
     this.#append = append;
+    this.#flush = flush;
   }
 
   register(message: Prompt): void {
@@ -85,6 +87,10 @@ export class LaneFence implements LaneSessionFence {
     for (const effects of this.#effects.values()) for (const cancel of effects.values()) cancel();
   }
 
+  supersede(runId: RunId): void {
+    for (const cancel of this.#effects.get(runId)?.values() ?? []) cancel({ kind: "stale_epoch" });
+  }
+
   headers(runId: RunId | undefined): Readonly<Record<string, string>> {
     const run = runId === undefined ? undefined : this.#runs.get(runId);
     return run === undefined ? {} : { "x-baize-lane": `${run.botId}/${run.groupId}/${run.epoch}` };
@@ -105,25 +111,26 @@ export class LaneFence implements LaneSessionFence {
     const lane = this.#runs.get(runId);
     const append = this.#append();
     if (lane === undefined || append === undefined) return DISCONNECTED_REASON;
-    let cancel!: () => void;
+    let cancel!: (result?: WorkAppendOutcome) => void;
     const cancelled = new Promise<WorkAppendOutcome>((resolve) => {
-      cancel = () => resolve({ kind: "disconnected" });
+      cancel = (result) => resolve(result ?? { kind: "disconnected" });
     });
-    const effects = this.#effects.get(runId) ?? new Map<string, () => void>();
+    const effects = this.#effects.get(runId) ?? new Map<string, (result?: WorkAppendOutcome) => void>();
     effects.set(callId, cancel);
     this.#effects.set(runId, effects);
     let result: WorkAppendOutcome;
     try {
       result = await Promise.race([
-        append({
-          type: "work_append",
-          lane,
-          runId,
-          fromSeq: 0,
-          lines: [],
-          head: EMPTY_WORK_HEAD,
-          cause: "before_effect",
-        }),
+        this.#flush?.(runId) ??
+          append({
+            type: "work_append",
+            lane,
+            runId,
+            fromSeq: 0,
+            lines: [],
+            head: EMPTY_WORK_HEAD,
+            cause: "before_effect",
+          }),
         cancelled,
       ]);
     } catch {

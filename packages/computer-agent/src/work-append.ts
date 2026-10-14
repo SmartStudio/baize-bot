@@ -15,7 +15,16 @@ const resultOf = (rejection: UplinkRejection | undefined): WorkAppendResult => {
     case "not_holder":
     case "head_mismatch":
     case "invalid":
-      return { kind: rejection.code };
+      return rejection.code === "invalid"
+        ? {
+            kind: "invalid",
+            ...(rejection.reason === undefined ? {} : { reason: rejection.reason }),
+            ...(rejection.lineIndex === undefined ? {} : { lineIndex: rejection.lineIndex }),
+            ...(rejection.replayReason === undefined ? {} : { replayReason: rejection.replayReason }),
+            ...(rejection.nextSeq === undefined ? {} : { nextSeq: rejection.nextSeq }),
+            ...(rejection.head === undefined ? {} : { head: rejection.head }),
+          }
+        : { kind: rejection.code };
     case "seq_mismatch":
       return rejection.nextSeq === undefined
         ? { kind: "invalid" }

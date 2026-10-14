@@ -30,6 +30,7 @@ import { injectMemory } from "./memory.js";
 import { expandRecalls, type Recalls } from "./recall.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
+import { installWorkFlush, type WorkFlush } from "./work-mirror.js";
 
 // 一个群一个 AgentSession，自带 ModelRuntime、cwd、会话目录，进程里同时跑多个时不共享可变状态。
 
@@ -52,6 +53,7 @@ export interface SessionGate {
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
   readonly laneFence: LaneSessionFence;
+  readonly flushWork?: WorkFlush;
   readonly browserCalls?: {
     acquire(toolName: string, callId: string, signal: AbortSignal | undefined): Promise<void>;
     release(callId?: string): void;
@@ -76,6 +78,7 @@ export interface BotSessionOptions extends SessionGate {
   readonly memory: () => string | null;
   readonly recalls: Recalls;
   readonly settings?: PiSettings;
+  readonly sessionManager?: SessionManager;
 }
 
 export interface BotSession {
@@ -158,6 +161,7 @@ function gateToolCalls(
         return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
       }
       if (decision.verdict === "ask") {
+        await gate.flushWork?.("before_approval");
         const view = gate.approvalView(event.toolName, event.input);
         const approvedView = JSON.stringify({ action: decision.action, target: decision.target, view });
         gate.browserCalls?.release(event.toolCallId);
@@ -236,6 +240,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
   return (pi) => {
     installLaneHeaders(pi, () => options.laneFence.headers(options.activeRun()?.run.runId));
     installLaneToolSettled(pi, () => options.activeRun()?.run.runId, options.laneFence);
+    if (options.flushWork !== undefined) installWorkFlush(pi, options.flushWork);
     pi.registerTool(options.bashTool);
     for (const tool of options.tools) pi.registerTool(tool);
 
@@ -349,7 +354,7 @@ export async function createBotSession(options: BotSessionOptions): Promise<BotS
       PROPOSE_SKILL_RULE,
     ],
     // 旧布局把 JSONL 直接放在 sessions/ 下。那个目录不传给 continueRecent，所以升级后不会被续上，文件留在原地。
-    sessionManager: SessionManager.continueRecent(workDir, sessionDir),
+    sessionManager: options.sessionManager ?? SessionManager.continueRecent(workDir, sessionDir),
     extension: botExtension(options),
   });
 

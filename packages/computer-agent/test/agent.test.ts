@@ -746,6 +746,55 @@ describe("电脑代理连控制面", () => {
     },
   );
 
+  it("同批工作记录与普通可靠上行发送序号连续，工作记录收到 ACK 后完成", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const beforeReliableSend: UplinkFrame[] = [];
+    let runDoneAttempted!: () => void;
+    const attemptedRunDone = new Promise<void>((resolve) => {
+      runDoneAttempted = resolve;
+    });
+    spawnAgent(await server.url(), {
+      beforeReliableSend: (frame) => {
+        beforeReliableSend.push(frame);
+        if (frame.body.type === "run_done") runDoneAttempted();
+      },
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied");
+    beforeReliableSend.splice(0);
+
+    const config = initialRunnerConfigs.at(-1)!;
+    const workAppend: WorkAppend = {
+      type: "work_append",
+      lane: { botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1"), stream: "chat", epoch: 7 },
+      runId: RunId.parse("run-1"),
+      fromSeq: 0,
+      lines: [],
+      head: "0".repeat(64),
+      cause: "before_effect",
+    };
+    const pendingAppend = config.workAppend!(workAppend);
+    config.send({
+      type: "run_done",
+      runId: RunId.parse("run-1"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      steps: 1,
+      inputTokens: 1,
+      outputTokens: 1,
+    });
+
+    await attemptedRunDone;
+    expect(beforeReliableSend.map((frame) => frame.seq)).toEqual([1, 2]);
+    await server.waitForMessage("work_append");
+    await server.waitForMessage("run_done");
+    await expect(pendingAppend).resolves.toEqual({ kind: "ok" });
+    expect(server.sockets).toHaveLength(1);
+    expect(socket.readyState).toBe(WebSocket.OPEN);
+  });
+
   it("多个探针等 ACK 时断线，全部当场回 disconnected；离线新探针也不等待", async () => {
     const server = startControlPlane({ workAppendAck: () => null });
     servers.push(server);

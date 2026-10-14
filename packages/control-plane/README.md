@@ -60,7 +60,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 工具连接改成本机、改名、删掉或操作名变化后，下一条**非空**上传先用新名单从头复查这条流。连接修改与追加按归属人锁互斥；改名、删除即使没有改变操作名集合，也会使该归属人各流的快照指纹失效。从第一条不合规旧行起删除后缀，重算前缀的链头，同时回退 `next_seq`、`tail_entry_id` 和快照。若旧行全部合规就只更新快照。更新带旧序号、旧链头、旧快照的条件，删除后缀与更新在同一事务；并发帧只会有一次重放生效。那一帧的新行不写入，返回截断后的位置，运行器随后重新过滤和上传。
 
-结果经 `uplink_ack.rejected` 按可靠帧序号返回，无拒收项是 `ok`。运行器上传与重传由 P3-11 接入：
+结果经 `uplink_ack.rejected` 按可靠帧序号返回，无拒收项是 `ok`。运行器按下表处理：
 
 | 结果 | 字段与原因 | 运行器动作 |
 | --- | --- | --- |
@@ -73,13 +73,13 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 | `invalid`，`reason: "duplicate_id"` 或 `"malformed_entry"` | `lineIndex` | 停止上传坏流，修复或按服务器快照重建 |
 | 其他 `invalid` | 帧、Pi 条目或 run 不合法 | 修正结构或重建，不能当成成功 |
 
-`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。现有电脑代理的 `WorkAppendChannel` 只透传旧码和 `seq_mismatch.nextSeq`，会丢掉新增原因字段；P3-11 必须把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 一起透传给运行器。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
+`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。电脑代理的 `WorkAppendChannel` 把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 原样透传给运行器，服务器没给的字段不补。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
 
 `work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目、不触发旧行复查。
 
-非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。首帧 `fromSeq: 0` 的帧代际必须是 1；无租约时以代际 1 条件认领，当前电脑同安装持有且目标流仍为空时只刷新租约时间，不降低已有代际。已有代际高于 1 时，首帧在追加 CAS 处回 `seq_mismatch`（`nextSeq: 0`），保留空流元数据而不写条目；目标流已有条目时拒收。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
+非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。导入首帧 `fromSeq: 0` 在没有租约行时必须带代际 1，接受后以代际 1 认领；有租约时必须由当前电脑和安装持有，并带租约的当前代际，接受后保持代际不变。其他持有者或过时代际拒收。目标流已有条目时拒收重复首帧。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
 
-`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据，空流回 0、零链头和 null Pi 版本。
+`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据。空流即使因失败留下 `nextSeq: 0` 的流元数据，也返回 `nextSeq: 0`、零链头和 null Pi 版本。
 
 租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
 

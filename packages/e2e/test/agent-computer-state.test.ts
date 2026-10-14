@@ -72,6 +72,18 @@ it("同一 dataDir 先后连两台电脑记录，第二台最前面的下行全�
       .toBeGreaterThan(0);
     const oldStream = frames[0]?.stream;
     expect(oldStream).toBeDefined();
+    // 工作记录也会得到 ACK，不能把第一个上行 ACK 当成 run 已结账。
+    await expect
+      .poll(
+        async () => {
+          const [run] = await stack!.sql<
+            { done: boolean }[]
+          >`SELECT charged_at IS NOT NULL AS done FROM runs WHERE group_id = ${bot.groupId}`;
+          return run?.done;
+        },
+        { timeout: 10_000 },
+      )
+      .toBe(true);
     await agent.stop();
     agent = connect(remote);
     await expect.poll(() => configured, { timeout: 10_000 }).toBe(2);

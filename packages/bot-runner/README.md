@@ -613,6 +613,14 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 - 每手 `text` 最多 120 字（`REVIEW_TEXT_LIMIT`），超了抛「每手正文最多 120 字，请缩短后再提交。」这个常量和控制面 `poker/leave.ts` 的同值，两边各自把关。长度按 JavaScript 字符串的 `length` 算。
 - 校验通过后用 `send` 发走，没有回执。控制面那边不合格就整条丢掉，用户再点一次散场会重派一条复盘 run。
 
+## 工作记录与本地镜像
+
+`work-mirror.ts` 按 (Bot, 群, chat/table) 管已确认前缀。五个 Pi 钩子和最终水位写入之后同步尾部，每帧最多 64 条；`createRetainer` 的试算快照只随成功 ACK 推进。`before_effect` 仍在审批之后、执行之前，带尾部差分；没有尾巴时发空探针。帮手会话沿用父 run 的 chat 栅栏，临时过程不独立入流，返回主会话的工具结果随 chat 上传；牌桌会话进入 table。
+
+每次 prompt 用其代际和流头核对 `sessions/<groupId>/lane.json`、本地内存和文件前缀。失败后从持有者授权的 Hub 分页读取全流并核对原始链头，旧缓存移进 `.stale/`，原子写文件后打开；文件打开失败转内存，版本过新或两种打开都失败才冷启动并发送中文说明。悬空工具调用补合成结果，在新 prompt 入模型之前上传。
+
+第一条 prompt 的串行任务先检查旧群目录；没有 `lane.json` 时复制 `continueRecent` 对应的最新文件并导入，原文件保留。代际来自 prompt。导入任何非 ok 拒收都停止该道；断线不在原地循环。`seq_mismatch` 和 `tool_list_changed` 拉 Hub 核对前缀再恢复，`unfiltered` 仅在重新过滤改变了帧时重试。一次 flush 每种恢复最多一次，重复拒收停止上传，下一次 prompt 按服务器重建。
+
 ## 跑测试
 
 ```

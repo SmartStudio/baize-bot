@@ -1571,6 +1571,7 @@ describe("分道与租约合并", () => {
       {
         tools: [connection(mcp.url)],
         workAppend: async (frame) => {
+          if (frame.cause !== "before_effect") return { kind: "ok" };
           probes.push(frame.runId ?? "no-run");
           const lane = frame.runId === "epoch-a" ? "a" : "b";
           probeArrived[lane].resolve();
@@ -1609,7 +1610,7 @@ describe("分道与租约合并", () => {
       expect(h.sent).toContainEqual(
         expect.objectContaining({ type: "bot_tool_call", runId: "epoch-a", status: "blocked" }),
       );
-      expect(JSON.stringify(sessionResults(h.dataDir, "group-a"))).toContain("和白泽断开了，这一步先不做");
+      expect(JSON.stringify(sessionResults(h.dataDir, "group-a"))).toContain("这个群已经换到另一台电脑上了");
       expect(JSON.stringify(sessionResults(h.dataDir, "group-a"))).not.toContain("Operation aborted");
       expect(h.runner.activeRuns()).toEqual([]);
     } finally {
@@ -1753,7 +1754,8 @@ describe("分道与租约合并", () => {
       scriptedUpstream((request) => (isFollowUpTurn(request) ? finish : call("browser_click", { ref: 1 }))),
       {
         browser: { profileDir: join(tmpdir(), "baize-probe-lock"), connection: async () => browser.cdp },
-        workAppend: async () => {
+        workAppend: async (frame) => {
+          if (frame.cause !== "before_effect") return { kind: "ok" };
           probes.push(takenOver);
           return { kind: takenOver ? "stale_epoch" : "ok" };
         },

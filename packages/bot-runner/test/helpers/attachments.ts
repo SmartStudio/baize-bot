@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { advanceWorkHead, EMPTY_WORK_HEAD, type WorkAppend } from "@baize/shared";
 
 export async function startAttachmentHub() {
   const uploads: Array<{
@@ -13,6 +14,7 @@ export async function startAttachmentHub() {
   const downloads: string[] = [];
   const laneHeaders: Array<string | undefined> = [];
   const stored = new Map<string, Buffer>();
+  const streams = new Map<string, string[]>();
   let failUpload = false;
   let downloadBytes: Buffer | null = null;
   const server = createServer(async (request, response) => {
@@ -20,6 +22,23 @@ export async function startAttachmentHub() {
     const authorization = request.headers.authorization ?? "";
     const laneHeader = request.headers["x-baize-lane"];
     laneHeaders.push(Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader);
+    if (request.method === "GET" && url.pathname.startsWith("/hub/v1/lanes/")) {
+      const lines = streams.get(url.pathname.slice("/hub/v1/lanes/".length)) ?? [];
+      const after = Number(url.searchParams.get("after") ?? -1);
+      const limit = Number(url.searchParams.get("limit") ?? 200);
+      response.writeHead(200, { "content-type": "application/json" }).end(
+        JSON.stringify({
+          entries: lines
+            .map((line, seq) => ({ seq, line }))
+            .filter((entry) => entry.seq > after)
+            .slice(0, limit),
+          nextSeq: lines.length,
+          head: await advanceWorkHead(EMPTY_WORK_HEAD, lines),
+          piSessionVersion: lines.length > 0 ? 3 : null,
+        }),
+      );
+      return;
+    }
     if (request.method === "PUT" && url.pathname === "/hub/v1/attachments") {
       const parts: Buffer[] = [];
       for await (const part of request) parts.push(Buffer.from(part as Uint8Array));
@@ -65,6 +84,11 @@ export async function startAttachmentHub() {
     downloads,
     laneHeaders,
     stored,
+    recordWork: (frame: WorkAppend) => {
+      if (frame.lines.length === 0) return;
+      const key = `${frame.lane.botId}/${frame.lane.groupId}/${frame.lane.stream}`;
+      streams.set(key, [...(streams.get(key) ?? []).slice(0, frame.fromSeq), ...frame.lines]);
+    },
     failUploads: () => {
       failUpload = true;
     },

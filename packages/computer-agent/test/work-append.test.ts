@@ -63,4 +63,54 @@ describe("工作记录探针的确认通路", () => {
     channel.disconnect();
     expect(await third).toEqual({ kind: "disconnected" });
   });
+
+  it("invalid 将服务端提供的全部复查字段传给运行器", async () => {
+    const channel = new WorkAppendChannel({
+      connected: () => true,
+      append: async (body) => ({ seq: 1, body }),
+      send: () => {},
+      cancel: () => {},
+      failed: () => {},
+    });
+    const pending = channel.append(probe());
+    await Promise.resolve();
+    const rejection: UplinkRejection = {
+      seq: 1,
+      code: "invalid",
+      reason: "tool_list_changed",
+      lineIndex: 3,
+      replayReason: "unfiltered",
+      nextSeq: 2,
+      head: "a".repeat(64),
+    };
+    channel.acknowledge({ type: "uplink_ack", upTo: 1, rejected: [rejection] });
+    expect(await pending).toEqual({
+      kind: "invalid",
+      reason: "tool_list_changed",
+      lineIndex: 3,
+      replayReason: "unfiltered",
+      nextSeq: 2,
+      head: "a".repeat(64),
+    });
+  });
+
+  it("普通 invalid 不添加未提供的可选字段", async () => {
+    const channel = new WorkAppendChannel({
+      connected: () => true,
+      append: async (body) => ({ seq: 1, body }),
+      send: () => {},
+      cancel: () => {},
+      failed: () => {},
+    });
+    const pending = channel.append(probe());
+    await Promise.resolve();
+    channel.acknowledge({ type: "uplink_ack", upTo: 1, rejected: [{ seq: 1, code: "invalid" }] });
+    const result = await pending;
+    expect(result).toEqual({ kind: "invalid" });
+    expect(Object.hasOwn(result, "reason")).toBe(false);
+    expect(Object.hasOwn(result, "lineIndex")).toBe(false);
+    expect(Object.hasOwn(result, "replayReason")).toBe(false);
+    expect(Object.hasOwn(result, "nextSeq")).toBe(false);
+    expect(Object.hasOwn(result, "head")).toBe(false);
+  });
 });

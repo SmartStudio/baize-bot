@@ -540,7 +540,13 @@ async function startHarness(options: {
     send,
     ...(options.workAppend === null
       ? {}
-      : { workAppend: options.workAppend ?? (async () => ({ kind: "ok" as const })) }),
+      : {
+          workAppend: async (frame) => {
+            const result = await (options.workAppend?.(frame) ?? Promise.resolve({ kind: "ok" as const }));
+            if (result.kind === "ok") attachmentHub.recordWork(frame);
+            return result;
+          },
+        }),
     ...(options.settings === undefined ? {} : { settings: options.settings }),
     ...(options.browser === undefined ? {} : { browser: options.browser }),
   });
@@ -1071,6 +1077,12 @@ describe("租约头和 before_effect 探针", () => {
       extensionTools: [],
       tools: [toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url })],
       ...options,
+      ...(options.workAppend === undefined || options.workAppend === null
+        ? {}
+        : {
+            workAppend: (frame) =>
+              frame.cause === "before_effect" ? options.workAppend!(frame) : Promise.resolve({ kind: "ok" as const }),
+          }),
     });
     return { ...h, effectCalls: mcp.calls };
   };
@@ -1091,7 +1103,7 @@ describe("租约头和 before_effect 探针", () => {
     ["stale_epoch", "这个群已经换到另一台电脑上了"],
     ["not_holder", "这个群已经换到另一台电脑上了"],
     ["disconnected", "和白泽断开了，这一步先不做"],
-  ] as const)("审批之后发空探针，%s 只在 ok 时执行", async (kind, reason) => {
+  ] as const)("审批之前同步记录，审批之后发空探针，%s 只在 ok 时执行", async (kind, reason) => {
     const seen = recorder();
     const probes: Parameters<NonNullable<RunnerConfig["workAppend"]>>[0][] = [];
     const h = await effectHarness({
@@ -1109,15 +1121,15 @@ describe("租约头和 before_effect 探针", () => {
     h.runner.approve(approval.runId, approval.callId, "approved");
     await running;
     expect(probes).toEqual([
-      {
+      expect.objectContaining({
         type: "work_append",
         lane: { botId: "bot-1", groupId: "group-1", stream: "chat", epoch: 7 },
         runId: "run-1",
-        fromSeq: 0,
+        fromSeq: expect.any(Number),
         lines: [],
-        head: "0".repeat(64),
+        head: expect.stringMatching(/^[0-9a-f]{64}$/),
         cause: "before_effect",
-      },
+      }),
     ]);
     expect(h.effectCalls.map((call) => call.name)).toEqual(kind === "ok" ? ["send_email"] : []);
     expect(h.sent.filter((message) => message.type === "bot_tool_call").map((message) => message.status)).toEqual([
@@ -1204,7 +1216,7 @@ describe("租约头和 before_effect 探针", () => {
       bots: ["bot-1"],
       extensionTools: [],
       workAppend: async (frame) => {
-        probes.push(frame);
+        if (frame.cause === "before_effect") probes.push(frame);
         return { kind: "disconnected" };
       },
       script: scriptBy([

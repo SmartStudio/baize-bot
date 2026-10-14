@@ -1,5 +1,6 @@
 import { realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   type AccountConfig,
   type AgentToControl,
@@ -11,6 +12,8 @@ import {
   type RoutineBoundary,
   type RunId,
   type ToolConnectionConfig,
+  EMPTY_WORK_HEAD,
+  MessageId,
 } from "@baize/shared";
 import { ACCOUNT_READ_TOOL, createAccountReadTool, readableAccounts } from "./account-read.js";
 import { type ApprovalGate, createApprovalGate } from "./approvals.js";
@@ -50,6 +53,7 @@ import {
 import { createTeamTools } from "./team.js";
 import { createTopicTools, renderTaskCard } from "./topic.js";
 import { contextSince, readMemoryShown, readWatermark, recordMemoryShown, recordWatermark } from "./watermark.js";
+import { WorkMirror } from "./work-mirror.js";
 
 export type ConfigMessage = Extract<ControlToAgent, { type: "config" }>;
 export type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
@@ -392,7 +396,15 @@ export function createRunner(config: RunnerConfig): Runner {
   const pokerResults = createPokerResults(config.send);
   const liveRuns = new Set<RunId>();
   let workAppend = config.workAppend;
-  const laneFence = new LaneFence(() => workAppend);
+  const laneFence: LaneFence = new LaneFence(
+    () => workAppend,
+    async (runId) => {
+      const run = laneFence.get(runId);
+      const mirror =
+        run === undefined ? undefined : bots.get(run.botId)?.lanes.get(run.groupId)?.mirrors.get(run.stream);
+      return mirror === undefined ? { kind: "disconnected" } : mirror.flush("before_effect", runId);
+    },
+  );
   const runnerAbortedRuns = new Set<RunId>();
   let nextConfigVersion = 1;
 
@@ -607,6 +619,7 @@ export function createRunner(config: RunnerConfig): Runner {
     if (lane.stopping !== null) return lane.stopping;
     lane.phase = "stopped";
     lane.stopping = (async () => {
+      for (const mirror of lane.mirrors.values()) mirror.invalidate();
       const runId = lane.active?.run.runId;
       if (runId !== undefined) approvals.abandon("stopped", bot.botId, runId);
       try {
@@ -734,6 +747,7 @@ export function createRunner(config: RunnerConfig): Runner {
     bot: BotRuntime,
     lane: Lane,
     groupKind: PromptMessage["group"]["kind"],
+    sessionManager?: SessionManager,
   ): Promise<BotSession> => {
     const groupId = lane.groupId;
     bot.lastGroupId = groupId;
@@ -742,7 +756,11 @@ export function createRunner(config: RunnerConfig): Runner {
     const existing = lane.sessions.get(stream);
     const tableRole = table()?.role ?? null;
     if (existing !== undefined) {
-      if (existing.tableRole === tableRole && existing.fingerprint === lane.active?.generation?.definition.fingerprint)
+      if (
+        existing.tableRole === tableRole &&
+        existing.fingerprint === lane.active?.generation?.definition.fingerprint &&
+        (sessionManager === undefined || existing.session.sessionManager === sessionManager)
+      )
         return existing;
       await disposeLaneSession(bot, lane, stream);
     }
@@ -767,6 +785,9 @@ export function createRunner(config: RunnerConfig): Runner {
         table,
         laneHeaders: () => laneFence.headers(activeRun()?.run.runId),
         settings: generation.desired.settings,
+        ...(sessionManager === undefined ? {} : { sessionManager }),
+        flushWork: async (cause) =>
+          lane.mirrors.get(stream)?.flush(cause, activeRun()?.run.runId ?? null) ?? { kind: "disconnected" },
       });
       lane.sessions.set(stream, { ...created, tableRole, fingerprint: definition.fingerprint });
       return created;
@@ -819,6 +840,8 @@ export function createRunner(config: RunnerConfig): Runner {
       activeRun,
       laneFence,
       browserCalls,
+      flushWork: async (cause) =>
+        lane.mirrors.get(stream)?.flush(cause, activeRun()?.run.runId ?? null) ?? { kind: "disconnected" },
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
@@ -925,6 +948,7 @@ export function createRunner(config: RunnerConfig): Runner {
       memory: () => lane.active?.memory ?? null,
       recalls: lane.recalls,
       ...(generation.desired.settings === undefined ? {} : { settings: generation.desired.settings }),
+      ...(sessionManager === undefined ? {} : { sessionManager }),
     });
     lane.sessions.set(stream, { ...created, tableRole: null, fingerprint: definition.fingerprint });
     return created;
@@ -963,6 +987,8 @@ export function createRunner(config: RunnerConfig): Runner {
     let report: RunReport | null = null;
     let botSession: BotSession | null = null;
     let prompted = false;
+    let completion: Extract<AgentToControl, { type: "run_done" }> | null = null;
+    let mirror: WorkMirror | undefined;
     try {
       lane.active = active;
       if (!(await waitForLane(bot, lane, undefined)) || !liveRuns.has(message.runId)) return;
@@ -970,7 +996,57 @@ export function createRunner(config: RunnerConfig): Runner {
       if (generation === null) return;
       active.generation = generation;
       bot.generations.get(generation)!.runs += 1;
-      botSession = await sessionFor(bot, lane, message.group.kind);
+      const stream = message.table === null ? "chat" : "table";
+      let sessionManager: SessionManager | undefined;
+      if (workAppend !== undefined) {
+        mirror = lane.mirrors.get(stream);
+        if (mirror === undefined) {
+          const dirs = ensureBotDirs(bot.dirs);
+          const groupDir = groupSessionDir(dirs, lane.groupId);
+          mirror = new WorkMirror({
+            botId: bot.botId,
+            groupId: lane.groupId,
+            stream,
+            groupDir,
+            sessionDir: stream === "chat" ? groupDir : join(groupDir, "table"),
+            workDir: dirs.workDir,
+            append: () => workAppend,
+            live: () => {
+              const desired = desiredConfig(bot) ?? generation.desired;
+              return {
+                hub: desired.hub,
+                gateway: desired.gateway,
+                localOnlyToolNames: new Set(
+                  desired.tools
+                    .filter((tool) => tool.localOnly)
+                    .flatMap((tool) => tool.operations.map((op) => op.name)),
+                ),
+              };
+            },
+            log: (detail) => fail("runner_failed", detail, lane.groupId),
+            cold: () => {
+              const runId = lane.active?.run.runId;
+              if (runId !== undefined)
+                config.send({
+                  type: "bot_text_done",
+                  botId: bot.botId,
+                  groupId: lane.groupId,
+                  runId,
+                  messageId: MessageId.parse(crypto.randomUUID()),
+                  text: "这台电脑读不了之前的记录",
+                });
+            },
+          });
+          lane.mirrors.set(stream, mirror);
+        }
+        sessionManager = await mirror.prepare(
+          message.lane.epoch,
+          message.lane.heads[stream] ?? { seq: 0, head: EMPTY_WORK_HEAD },
+          message.runId,
+          lane.sessions.get(stream)?.session.sessionManager,
+        );
+      }
+      botSession = await sessionFor(bot, lane, message.group.kind, sessionManager);
       if (!(await waitForLane(bot, lane, undefined)) || !liveRuns.has(message.runId)) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
       await botSession.applyGateway(generation.desired.gateway);
@@ -993,7 +1069,7 @@ export function createRunner(config: RunnerConfig): Runner {
         (callId) => approvals.consumeBlocked(message.runId, callId),
         generation.mcp.tools.serverFor,
         (outgoing) => {
-          if (outgoing.type === "run_done") finishRun(outgoing);
+          if (outgoing.type === "run_done") completion = outgoing;
           else if (
             message.table === null ||
             (message.table.role === "advisor" && (outgoing.type === "bot_text" || outgoing.type === "bot_text_done"))
@@ -1009,6 +1085,7 @@ export function createRunner(config: RunnerConfig): Runner {
         recordWatermark(session.sessionManager, message, watermark);
         recordMemoryShown(session.sessionManager, memory.shown, shown);
       }
+      await mirror?.flush("settled", message.runId);
     } catch (error) {
       // 还没调 session.prompt 就失败，带上 runId 让控制面立刻把这个 run 收尾，不等 finally 补的 run_done。
       // 调过 session.prompt 才抛的，进没进会话由 run_done 的 prompt 字段说：reporter 见过触发消息的 message_end
@@ -1020,6 +1097,7 @@ export function createRunner(config: RunnerConfig): Runner {
         prompted ? undefined : message.runId,
       );
     } finally {
+      if (completion !== null) finishRun(completion);
       report?.unsubscribe();
       botSession?.clearBashRun(message.runId);
       lane.recalls.clear();
@@ -1156,7 +1234,10 @@ export function createRunner(config: RunnerConfig): Runner {
 
     cancel(target) {
       if (typeof target !== "string") {
-        for (const runId of laneFence.olderThan(target)) runner.cancel(runId);
+        for (const runId of laneFence.olderThan(target)) {
+          laneFence.supersede(runId);
+          runner.cancel(runId);
+        }
         return;
       }
       const runId = target;
@@ -1171,6 +1252,7 @@ export function createRunner(config: RunnerConfig): Runner {
         return;
       }
       lane.recalls.clear();
+      lane.mirrors.get(lane.active?.table === null ? "chat" : "table")?.cancelPending();
       runnerAbortedRuns.add(runId);
       const stream = lane.active?.table === null ? "chat" : "table";
       const session = lane.sessions.get(stream)?.session;

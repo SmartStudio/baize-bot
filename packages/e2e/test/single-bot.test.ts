@@ -81,19 +81,19 @@ describe("端到端：一句话走完控制面、电脑代理、模型网关", (
       expect(
         messages.map((m) => m.body.kind),
         trace,
-      ).toEqual(["user", "bot", "tool_call", "tool_call", "cost"]);
+      ).toEqual(["user", "tool_call", "tool_call", "bot", "cost"]);
 
       const toolCalls = messages.flatMap((m) => (m.body.kind === "tool_call" ? [m.body] : []));
       expect(toolCalls.map((b) => b.status)).toEqual(["running", "ok"]);
       expect(toolCalls[0]?.tool, "点的是 Pi 自带的 bash").toBe("bash");
       expect(toolCalls[0]?.view).toMatchObject({ kind: "bash", command: expect.stringContaining("ls") });
       // 同一张卡改状态，不是两张卡。
-      expect(messages[2]?.id).toBe(messages[3]?.id);
+      expect(messages[1]?.id).toBe(messages[2]?.id);
 
       const stored = MessageListResponse.parse(await stack.get(`/api/groups/${groupId}/messages`));
       const tail = stored.messages.slice(-4);
-      expect(tail.map((m) => m.body.kind)).toEqual(["user", "bot", "tool_call", "cost"]);
-      const answer = tail[1]?.body;
+      expect(tail.map((m) => m.body.kind)).toEqual(["user", "tool_call", "bot", "cost"]);
+      const answer = tail[2]?.body;
       expect(answer?.kind === "bot" && answer.streaming, "run 结束时 Bot 消息不该还在流").toBe(false);
       expect(answer?.kind === "bot" && answer.text, `ls 的真实输出要一路回到群里。${trace}`).toContain(PLANTED_FILE);
 

@@ -413,19 +413,39 @@ describe("旧会话导入", () => {
     });
     expect((await state(who, "table")).metadata).toBeUndefined();
 
-    const result = await send(who.agent, await frame(who, [line("a")], { stream: "table" }));
+    await database.sql`INSERT INTO work_streams (bot_id, group_id, stream, pi_session_version)
+      VALUES (${who.botId}, ${who.groupId}, 'table', 3)`;
+    expect(await send(who.agent, await frame(who, [line("old")], { stream: "table", epoch: 1 }))).toEqual({
+      code: "stale_epoch",
+    });
+    const rejectedSnapshot = HubLaneSnapshot.parse(
+      await (
+        await hub(who, {
+          path: `${who.botId}/${who.groupId}/table`,
+          header: `${who.botId}/${who.groupId}/3`,
+        })
+      ).json(),
+    );
+    expect(rejectedSnapshot).toEqual({
+      entries: [],
+      nextSeq: 0,
+      head: EMPTY_WORK_HEAD,
+      piSessionVersion: null,
+    });
+
+    const result = await send(who.agent, await frame(who, [line("a")], { stream: "table", epoch: 3 }));
     expect(await lease(who)).toMatchObject({
       holder_computer_id: before?.holder_computer_id,
       holder_install_id: before?.holder_install_id,
       epoch: 3,
     });
-    expect(result).toEqual({ code: "seq_mismatch", nextSeq: 0 });
-    expect(await state(who, "table")).toEqual({
-      metadata: { next_seq: 0, head: EMPTY_WORK_HEAD, tail_entry_id: null, pi_session_version: 3 },
-      entries: [],
+    expect(result).toBeNull();
+    expect(await state(who, "table")).toMatchObject({
+      metadata: { next_seq: 1, tail_entry_id: "a", pi_session_version: 3 },
+      entries: [{ seq: 0, epoch: 3, entry_id: "a" }],
     });
-    expect(await send(who.agent, await frame(who, [line("b")], { stream: "table", epoch: 3 }))).toEqual({
-      code: "invalid",
+    expect(await send(who.agent, await frame(who, [line("b")], { stream: "table", epoch: 1 }))).toEqual({
+      code: "stale_epoch",
     });
     expect((await lease(who))?.epoch).toBe(3);
   });

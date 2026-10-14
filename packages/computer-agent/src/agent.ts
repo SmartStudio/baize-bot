@@ -130,17 +130,29 @@ export function startAgent(options: AgentOptions): AgentHandle {
     )
       return;
     const socket = link.socket;
-    const wireFrame = UplinkFrame.parse({
-      type: "uplink",
-      conn,
-      stream: outbox.stream,
-      seq: frame.seq,
-      body: frame.body,
-    });
-    options.beforeReliableSend?.(wireFrame);
-    if (link.phase !== "open" || link.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
-    socket.send(JSON.stringify(wireFrame));
-    upSent = frame.seq;
+    const sendingConn = conn;
+    // 不同调用方的 Promise 层数不同，后序帧可能先醒；发送顺序只认已落盘的发件箱。
+    for (const pending of outbox.pending()) {
+      if (pending.seq <= upSent) continue;
+      if (pending.seq > frame.seq) break;
+      const wireFrame = UplinkFrame.parse({
+        type: "uplink",
+        conn: sendingConn,
+        stream: outbox.stream,
+        seq: pending.seq,
+        body: pending.body,
+      });
+      options.beforeReliableSend?.(wireFrame);
+      if (
+        link.phase !== "open" ||
+        link.socket !== socket ||
+        conn !== sendingConn ||
+        socket.readyState !== WebSocket.OPEN
+      )
+        return;
+      socket.send(JSON.stringify(wireFrame));
+      upSent = pending.seq;
+    }
   };
 
   const report = (message: AgentToControl): void => {

@@ -4,6 +4,7 @@ import type { BotGeneration } from "./index.js";
 import type { RememberingRun } from "./memory.js";
 import type { Recalls } from "./recall.js";
 import { SerialQueue } from "./serial-queue.js";
+import type { WorkMirror } from "./work-mirror.js";
 
 type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type LaneActive = RememberingRun & {
@@ -21,6 +22,7 @@ export interface Lane {
   readonly queue: SerialQueue<PromptMessage>;
   readonly sessions: Map<"chat" | "table", LaneSession>;
   readonly recalls: Recalls;
+  readonly mirrors: Map<"chat" | "table", WorkMirror>;
   active: LaneActive | null;
   phase: "ready" | "stopped";
   stopping: Promise<void> | null;
@@ -32,6 +34,7 @@ export function createLane(groupId: GroupId): Lane {
     queue: new SerialQueue(),
     sessions: new Map(),
     recalls: new Map(),
+    mirrors: new Map(),
     active: null,
     phase: "ready",
     stopping: null,
