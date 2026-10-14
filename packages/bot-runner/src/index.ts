@@ -1157,7 +1157,6 @@ export function createRunner(config: RunnerConfig): Runner {
       const stream = lane.active?.table === null ? "chat" : "table";
       const session = lane.sessions.get(stream)?.session;
       const callIds = [...approvals.expire(runId), ...pendingEffects];
-      for (const callId of pendingEffects) approvals.block(runId, callId);
       if (callIds.length === 0 || session === undefined) {
         void abortSession(lane).catch(() => undefined);
       } else {

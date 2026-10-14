@@ -1450,6 +1450,112 @@ describe("分道与租约合并", () => {
     }
   }, 5000);
 
+  it("同道复用会话的两条 run，模型和 MCP 代执行各现取自己的代际", async () => {
+    const proxyHeaders: Array<string | string[] | undefined> = [];
+    const proxy = createServer(async (request, response) => {
+      const parts: Buffer[] = [];
+      for await (const part of request) parts.push(Buffer.from(part as Uint8Array));
+      McpProxyCallRequest.parse(JSON.parse(Buffer.concat(parts).toString()));
+      proxyHeaders.push(request.headers["x-baize-lane"]);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ content: [{ type: "text", text: "已读取" }], isError: false }));
+    });
+    await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const address = proxy.address();
+    if (address === null || typeof address === "string") throw new Error("假 MCP 代理未监听");
+    cleanups.push(async () => {
+      proxy.closeAllConnections();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    });
+    const sessions = vi.spyOn(AgentSession.prototype, "prompt");
+    const h = await harness(
+      scriptedUpstream((request) => (request.messages.at(-1)?.role === "tool" ? finish : call("lookup_lane"))),
+      {
+        tools: [{ ...connection("http://unused", "lookup_lane", false), localOnly: false }],
+        mcpProxy: { baseUrl: `http://127.0.0.1:${address.port}/mcp-proxy` },
+      },
+    );
+    await h.runner.prompt({ ...prompt("reuse-old"), lane: { epoch: 3, heads: {} } });
+    await h.runner.prompt({ ...prompt("reuse-new"), lane: { epoch: 8, heads: {} } });
+    expect(sessions).toHaveBeenCalledTimes(2);
+    expect(sessions.mock.contexts[1]).toBe(sessions.mock.contexts[0]);
+    expect(proxyHeaders).toEqual(["bot-lanes/group-a/3", "bot-lanes/group-a/8"]);
+    expect(h.gateway.laneHeaders).toEqual([
+      "bot-lanes/group-a/3",
+      "bot-lanes/group-a/3",
+      "bot-lanes/group-a/8",
+      "bot-lanes/group-a/8",
+    ]);
+    expect(doneIds(h.sent)).toEqual(["reuse-old", "reuse-new"]);
+  });
+
+  it("同群两个 Bot 在跑时 lane cancel 只取消目标 Bot，另一个正常完成", async () => {
+    const probeArrived = { a: deferred(), b: deferred() };
+    const releaseB = deferred();
+    const mcp = await startFakeMcp();
+    cleanups.push(() => mcp.close());
+    const bots: RunnerConfig["bots"] = [
+      { id: BotId.parse("bot-lanes"), name: "助理 A", role: "member", preset: null, tags: [], description: "" },
+      { id: BotId.parse("bot-other"), name: "助理 B", role: "member", preset: null, tags: [], description: "" },
+    ];
+    const h = await harness(
+      scriptedUpstream((request) =>
+        isFollowUpTurn(request)
+          ? finish
+          : call("send_email", {
+              to: JSON.stringify(request.messages).includes("same-group-a") ? "a" : "b",
+              subject: "取消隔离",
+            }),
+      ),
+      {
+        bots,
+        tools: [{ ...connection(mcp.url), assignedBotIds: bots.map((bot) => bot.id) }],
+        workAppend: async (frame) => {
+          const bot = frame.lane.botId === "bot-lanes" ? "a" : "b";
+          probeArrived[bot].resolve();
+          if (bot === "a") return await new Promise(() => {});
+          await releaseB.promise;
+          return { kind: "ok" };
+        },
+      },
+    );
+    const inGroup = (runId: string, botId: BotId): PromptMessage => ({
+      ...prompt(runId),
+      botId,
+      group: { ...prompt(runId).group, kind: "team" },
+      members: bots.map(({ id, name, tags, description }) => ({ id, name, tags, description, seat: "member" })),
+    });
+    const a = h.runner.prompt(inGroup("same-group-a", BotId.parse("bot-lanes")));
+    const b = h.runner.prompt(inGroup("same-group-b", BotId.parse("bot-other")));
+    try {
+      await Promise.all(
+        ["same-group-a", "same-group-b"].map((runId) =>
+          h.waitFor((message) => message.type === "approval_request" && message.runId === runId),
+        ),
+      );
+      h.runner.approve(RunId.parse("same-group-a"), "same-call", "approved");
+      h.runner.approve(RunId.parse("same-group-b"), "same-call", "approved");
+      await Promise.all([probeArrived.a.promise, probeArrived.b.promise]);
+      h.runner.cancel({ lane: { botId: BotId.parse("bot-lanes"), groupId: GroupId.parse("group-a") }, epoch: 2 });
+      expect(h.runner.activeRuns()).toEqual(["same-group-b"]);
+      await a;
+      releaseB.resolve();
+      await b;
+      expect(doneIds(h.sent)).toEqual(["same-group-b"]);
+      expect(mcp.calls.map((one) => one.args["to"])).toEqual(["b"]);
+      expect(h.sent.filter((message) => message.type === "bot_tool_call" && message.status === "blocked")).toEqual([
+        expect.objectContaining({ runId: "same-group-a", botId: "bot-lanes", groupId: "group-a" }),
+      ]);
+      expect(h.sent).toContainEqual(
+        expect.objectContaining({ type: "bot_tool_call", runId: "same-group-b", botId: "bot-other", status: "ok" }),
+      );
+    } finally {
+      releaseB.resolve();
+      await h.runner.stop();
+      await Promise.all([a, b]);
+    }
+  }, 5000);
+
   it("A 道探针被接管取消时只落 A 的 blocked，B 在跑与 A 的同代际、新代际继续完成", async () => {
     const probeArrived = { a: deferred(), b: deferred() };
     const releaseB = deferred();
@@ -1558,6 +1664,78 @@ describe("分道与租约合并", () => {
       await Promise.all([a, b]);
     }
   }, 5000);
+
+  it.each(["非浏览器", "浏览器"] as const)(
+    "%s审批后取锁返回的微任务窗口暂停，探针和副作用等恢复",
+    async (kind) => {
+      const browser = fakeBrowser();
+      const paused = deferred();
+      const probes: string[] = [];
+      const mcp = await startFakeMcp();
+      cleanups.push(() => mcp.close());
+      const h = await harness(
+        scriptedUpstream((request) =>
+          isFollowUpTurn(request)
+            ? finish
+            : kind === "浏览器"
+              ? call("browser_click", { ref: 1 })
+              : call("send_email", { to: "pause-window", subject: "暂停窗口" }),
+        ),
+        {
+          tools: kind === "非浏览器" ? [connection(mcp.url)] : [],
+          ...(kind === "浏览器"
+            ? { browser: { profileDir: join(tmpdir(), "baize-pause-window"), connection: async () => browser.cdp } }
+            : {}),
+          workAppend: async (frame) => {
+            probes.push(frame.runId ?? "no-run");
+            return { kind: "ok" };
+          },
+        },
+      );
+      const pause = () => {
+        void h.runner.pause(BotId.parse("bot-lanes")).then(paused.resolve);
+      };
+      if (kind === "浏览器") {
+        const acquire = BrowserMutex.prototype.acquire;
+        let acquisitions = 0;
+        vi.spyOn(BrowserMutex.prototype, "acquire").mockImplementation(function (this: BrowserMutex, signal) {
+          const pending = acquire.call(this, signal);
+          if (++acquisitions !== 2) return pending;
+          return pending.then((release) => {
+            // 让 acquire 内的暂停复验先通过，再在调用方恢复执行前暂停。
+            queueMicrotask(() => queueMicrotask(pause));
+            return release;
+          });
+        });
+      }
+      const running = h.runner.prompt(prompt("pause-window"));
+      try {
+        await h.waitFor((message) => message.type === "approval_request");
+        h.runner.approve(RunId.parse("pause-window"), "same-call", "approved");
+        if (kind === "非浏览器") {
+          // 审批后暂停闸门先通过，下一次 await 是不取锁的 acquire。
+          queueMicrotask(() => queueMicrotask(pause));
+        }
+        await paused.promise;
+        await nextTurn();
+        expect(probes).toEqual([]);
+        expect(browser.effects).toEqual([]);
+        expect(mcp.calls).toEqual([]);
+        expect(doneIds(h.sent)).toEqual([]);
+        await h.runner.resume(BotId.parse("bot-lanes"));
+        await running;
+        expect(probes).toEqual(["pause-window"]);
+        if (kind === "浏览器") expect(browser.effects).toContain("Input.dispatchMouseEvent");
+        else expect(mcp.calls.map((one) => one.args["to"])).toEqual(["pause-window"]);
+        expect(doneIds(h.sent)).toEqual(["pause-window"]);
+      } finally {
+        await h.runner.resume(BotId.parse("bot-lanes"));
+        await h.runner.stop();
+        await running;
+      }
+    },
+    5000,
+  );
 
   it("浏览器批准后等重新取锁期间接管，取锁后才探针且零点击", async () => {
     const browser = fakeBrowser();
