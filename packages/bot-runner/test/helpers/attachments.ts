@@ -11,12 +11,15 @@ export async function startAttachmentHub() {
     bytes: Buffer;
   }> = [];
   const downloads: string[] = [];
+  const laneHeaders: Array<string | undefined> = [];
   const stored = new Map<string, Buffer>();
   let failUpload = false;
   let downloadBytes: Buffer | null = null;
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const authorization = request.headers.authorization ?? "";
+    const laneHeader = request.headers["x-baize-lane"];
+    laneHeaders.push(Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader);
     if (request.method === "PUT" && url.pathname === "/hub/v1/attachments") {
       const parts: Buffer[] = [];
       for await (const part of request) parts.push(Buffer.from(part as Uint8Array));
@@ -60,6 +63,7 @@ export async function startAttachmentHub() {
     baseUrl: `http://127.0.0.1:${address.port}/hub/v1`,
     uploads,
     downloads,
+    laneHeaders,
     stored,
     failUploads: () => {
       failUpload = true;

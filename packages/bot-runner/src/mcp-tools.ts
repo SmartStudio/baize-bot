@@ -31,8 +31,7 @@ import type { RunnerTool } from "./bot-session.js";
 // 百分号编码和 JSON 转义三种写法，别的编码不保证。
 
 /**
- * 会话里注册的 MCP 工具按最新下发的 config 能不能用。工具表在会话建好时就定了，config 中途换了，
- * 旧会话里的工具还在，闸门和执行都要以最新的连接和操作表为准。
+ * 会话工具定义与 Client 属于 run 钉住的代际；连接和操作授权在闸门与执行时按最新 config 判断。
  */
 export type McpCallable =
   | { readonly kind: "ready"; readonly connection: ToolConnectionConfig; readonly operation: ToolOperation }
@@ -40,7 +39,8 @@ export type McpCallable =
   | { readonly kind: "withdrawn"; readonly connectionName: string };
 
 export interface McpToolSet {
-  readonly tools: readonly RunnerTool[];
+  /** 工具执行绑定调用方的道，连接和 Client 仍由各道共用。 */
+  toolsFor(laneHeaders: () => Readonly<Record<string, string>>): readonly RunnerTool[];
   serverFor(toolName: string): string;
   /** 不是这一组注册的 MCP 工具回 null。 */
   resolve(toolName: string): McpCallable | null;
@@ -65,8 +65,8 @@ interface Pending {
 }
 
 interface Link {
-  /** 换了凭据就换成最新的一份，旧的 client 随之作废。 */
-  connection: Extract<ToolConnectionConfig, { localOnly: true }>;
+  /** 凭据随本工具集的代际，运行中不替换 Client。 */
+  readonly connection: Extract<ToolConnectionConfig, { localOnly: true }>;
   /** 正在连或已经连上的 client。连失败或被撤就清回 null，下一次调用再连。 */
   pending: Pending | null;
 }
@@ -237,14 +237,13 @@ export function createMcpTools(options: {
   readonly botId: BotId;
   readonly connections: readonly ToolConnectionConfig[];
   readonly reserved: ReadonlySet<string>;
-  /** 最新下发的 config 里分配给这个 Bot 的连接。 */
+  /** 最新 config 里分配给这个 Bot 的连接，用于实时撤销和审批判断。 */
   readonly latest: () => readonly ToolConnectionConfig[];
   readonly liveProxy: () => McpProxyLive;
-  readonly laneHeaders: () => Readonly<Record<string, string>>;
 }): McpToolSet {
   const taken = new Set([...PI_BUILT_IN_TOOLS, ...options.reserved]);
   const links: Link[] = [];
-  const tools: RunnerTool[] = [];
+  const tools: Array<(laneHeaders: () => Readonly<Record<string, string>>) => RunnerTool> = [];
   const servers = new Map<string, string>();
   const registered = new Map<string, ToolConnectionConfig>();
 
@@ -271,7 +270,7 @@ export function createMcpTools(options: {
       taken.add(op.name);
       servers.set(op.name, connection.name);
       registered.set(op.name, connection);
-      tools.push({
+      tools.push((laneHeaders) => ({
         name: op.name,
         label: op.name,
         description: op.description,
@@ -281,26 +280,18 @@ export function createMcpTools(options: {
           const callable = resolveOn(connection, op.name);
           if (callable.kind !== "ready") throw new Error(unusableReason(callable));
           let result: Awaited<ReturnType<Client["callTool"]>> | McpProxyCallResponse;
-          if (!callable.connection.localOnly) {
+          if (!connection.localOnly) {
             result = await callProxy(
-              callable.connection,
+              connection,
               { botId: options.botId, tool: op.name, arguments: params as Record<string, unknown> },
               options.liveProxy(),
               signal,
-              options.laneHeaders(),
+              laneHeaders(),
             );
           } else {
             if (link === null) {
-              link = { connection: callable.connection, pending: null };
+              link = { connection, pending: null };
               links.push(link);
-            } else if (
-              callable.connection.authorization !== link.connection.authorization ||
-              callable.connection.url !== link.connection.url
-            ) {
-              const stale = link.pending;
-              link.pending = null;
-              link.connection = callable.connection;
-              await dropPending(stale);
             }
             let client: Client;
             try {
@@ -323,8 +314,8 @@ export function createMcpTools(options: {
             }
           }
           const blocks = blocksOf(result.content).map((block) =>
-            block.type === "text" && callable.connection.localOnly
-              ? { type: "text" as const, text: redactCredential(block.text, callable.connection.authorization) }
+            block.type === "text" && connection.localOnly
+              ? { type: "text" as const, text: redactCredential(block.text, connection.authorization) }
               : block,
           );
           const text = textOf(blocks);
@@ -334,12 +325,12 @@ export function createMcpTools(options: {
             details: {},
           };
         },
-      });
+      }));
     }
   }
 
   return {
-    tools,
+    toolsFor: (laneHeaders) => tools.map((create) => create(laneHeaders)),
     serverFor: (toolName) => servers.get(toolName) ?? "",
     resolve,
     close: async () => {

@@ -13,6 +13,7 @@ type Config = Extract<ControlToAgent, { type: "config" }>;
 export interface AttachmentLive {
   readonly hub: Config["hub"];
   readonly gateway: Config["modelGateway"];
+  readonly laneHeaders?: Readonly<Record<string, string>>;
 }
 
 const IMAGE_EXTENSION: Record<AttachmentMime, string> = {
@@ -38,7 +39,7 @@ export async function uploadAttachment(
 ): Promise<AttachmentUploadResponse> {
   try {
     if (live === undefined) throw new Error("附件配置尚未下发");
-    const { hub, gateway } = live();
+    const { hub, gateway, laneHeaders } = live();
     const url = endpoint(hub.baseUrl, "attachments");
     url.searchParams.set("botId", source.botId);
     url.searchParams.set("groupId", source.groupId);
@@ -48,6 +49,7 @@ export async function uploadAttachment(
         authorization: `Bearer ${gateway.apiKey}`,
         "content-type": source.mime,
         "x-baize-sha256": source.sha256,
+        ...laneHeaders,
       },
       body: new Uint8Array(bytes),
       signal: AbortSignal.timeout(60_000),
@@ -68,10 +70,10 @@ export async function uploadAttachment(
 
 export async function downloadAttachment(live: (() => AttachmentLive) | undefined, id: AttachmentId): Promise<Buffer> {
   if (live === undefined) throw new Error("附件配置尚未下发");
-  const { hub, gateway } = live();
+  const { hub, gateway, laneHeaders } = live();
   try {
     const response = await fetch(endpoint(hub.baseUrl, `attachments/${encodeURIComponent(id)}`), {
-      headers: { authorization: `Bearer ${gateway.apiKey}` },
+      headers: { authorization: `Bearer ${gateway.apiKey}`, ...laneHeaders },
       signal: AbortSignal.timeout(60_000),
       redirect: "error",
     });

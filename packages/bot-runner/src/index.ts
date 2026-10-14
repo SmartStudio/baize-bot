@@ -23,8 +23,11 @@ import {
   type SessionGate,
 } from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
-import { createDraftTools, renderAccounts } from "./drafts.js";
+import { acquireBotBrowserMutex, type BrowserMutexLease } from "./browser-mutex.js";
+import { createDraftTools, DRAFT_TOOL_NAMES, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
+import { createLane, findLaneRun, type Lane, type LaneActive } from "./lane.js";
+import { SerialQueue } from "./serial-queue.js";
 import { createHelperTools } from "./helper.js";
 import { LaneFence, type LaneCancel, type WorkAppender } from "./lane-fence.js";
 import { connectionsFor, createMcpTools, unusableReason, type McpToolSet } from "./mcp-tools.js";
@@ -93,7 +96,7 @@ export interface RunnerConfig {
 }
 
 export interface Runner {
-  /** 增量应用控制面最新配置；正在运行的 Bot 在本次 run 收尾后再重建。 */
+  /** 增量应用控制面配置；运行中的道钉住旧代际，后续 run 使用新代际。 */
   applyConfig(config: RunnerConfig): Promise<void>;
   prompt(message: PromptMessage): Promise<void>;
   /** 取消当前或排队中的 run；取消的 run 不会发送 run_done。 */
@@ -113,6 +116,8 @@ type BotSkill = NonNullable<ConfigMessage["skills"]>[number];
 
 interface BotDesired {
   readonly version: number;
+  readonly settings: PiSettings | undefined;
+  readonly extensionTools: readonly RunnerTool[];
   readonly config: BotConfig;
   readonly tools: readonly ToolConnectionConfig[];
   readonly skills: readonly BotSkill[];
@@ -140,11 +145,28 @@ interface BotDefinition {
   readonly fingerprint: string;
 }
 
+interface McpResource {
+  readonly fingerprint: string;
+  readonly tools: McpToolSet;
+  references: number;
+}
+
+export interface BotGeneration {
+  readonly definition: BotDefinition;
+  readonly desired: BotDesired;
+  readonly mcp: McpResource;
+}
+
+interface GenerationUse {
+  runs: number;
+  retired: boolean;
+}
+
 type BotConfigState =
-  | { readonly phase: "active"; readonly current: BotDefinition; readonly desired: BotDesired }
+  | { readonly phase: "active"; readonly current: BotGeneration; readonly desired: BotDesired }
   | {
       readonly phase: "pending";
-      readonly current: BotDefinition | null;
+      readonly current: BotGeneration | null;
       readonly desired: BotDesired | null;
     }
   | { readonly phase: "deleted"; readonly current: null; readonly desired: null };
@@ -153,19 +175,18 @@ interface BotRuntime {
   readonly botId: BotId;
   readonly dirs: BotDirs;
   configState: BotConfigState;
-  appliedGateway: RunnerConfig["modelGateway"];
   lastGroupId: GroupId | null;
-  sessions: Map<GroupId, BotSession & { readonly tableRole: NonNullable<PromptMessage["table"]>["role"] | null }>;
-  /** 这个 Bot 所有群共用。按群各建一份的话，N 个群就是 N 份 MCP 连接。 */
-  mcp: McpToolSet | null;
+  readonly lanes: Map<GroupId, Lane>;
+  readonly generations: Map<BotGeneration, GenerationUse>;
+  readonly mcpResources: Map<string, McpResource>;
   /** 同样所有群共用：一个 Bot 一个后台标签页，不按群分。 */
   browser: BotBrowser | null;
+  lifetime: AbortController;
+  browserMutex: BrowserMutexLease | null;
   /** pause 只让下一次 prompt 入场或工具过闸挂起；已经执行中的工具不被中止。 */
   paused: boolean;
   pauseWaiters: Set<PauseWaiter>;
-  active: (RememberingRun & { readonly table: PromptMessage["table"] }) | null;
-  /** prompt、建会话、配置对账和资源关闭都只从这一条队列进入。 */
-  chain: Promise<void>;
+  readonly resources: SerialQueue<null>;
 }
 
 interface PauseWaiter {
@@ -176,6 +197,17 @@ interface PauseWaiter {
 
 type RunnerState = "ready" | "stopped";
 
+const toolImplementations = new WeakMap<RunnerTool["execute"], number>();
+let nextToolImplementationId = 1;
+const toolImplementationId = (execute: RunnerTool["execute"]): number => {
+  let id = toolImplementations.get(execute);
+  if (id === undefined) {
+    id = nextToolImplementationId++;
+    toolImplementations.set(execute, id);
+  }
+  return id;
+};
+
 function definitionFor(
   bot: BotConfig,
   tools: readonly ToolConnectionConfig[],
@@ -184,6 +216,8 @@ function definitionFor(
   brand: ConfigMessage["brand"],
   preferences: ConfigMessage["preferences"],
   skillsReady = true,
+  settings: PiSettings | undefined = undefined,
+  extensionTools: readonly RunnerTool[] = [],
 ): BotDefinition {
   const connections = connectionsFor(bot.id, tools);
   const readable = readableAccounts(accounts);
@@ -206,18 +240,23 @@ function definitionFor(
       connections: connections.map((connection) => Object.assign({}, connection, { assignedBotIds: [bot.id] })),
       skills: botSkills.map((skill) => ({ id: skill.id, name: skill.name, steps: skill.steps })),
       skillsReady,
+      settings,
+      extensionTools: extensionTools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        implementation: toolImplementationId(tool.execute),
+      })),
       // 登录态和档位不进：它们只影响调用时的判断，那时现取。
       readable: readable.map(({ id, platform, handle }) => ({ id, platform, handle })),
     }),
   };
 }
 
-const currentDefinition = (bot: BotRuntime): BotDefinition | null => bot.configState.current;
+const currentGeneration = (bot: BotRuntime): BotGeneration | null => bot.configState.current;
+const currentDefinition = (bot: BotRuntime): BotDefinition | null => currentGeneration(bot)?.definition ?? null;
 
 const desiredConfig = (bot: BotRuntime): BotDesired | null => bot.configState.desired;
-
-const sameGateway = (left: RunnerConfig["modelGateway"], right: RunnerConfig["modelGateway"]): boolean =>
-  left.baseUrl === right.baseUrl && left.apiKey === right.apiKey;
 
 const desiredFor = (
   version: number,
@@ -233,8 +272,12 @@ const desiredFor = (
   grants: ConfigMessage["grants"],
   brand: ConfigMessage["brand"],
   preferences: ConfigMessage["preferences"],
+  settings: PiSettings | undefined,
+  extensionTools: readonly RunnerTool[],
 ): BotDesired => ({
   version,
+  settings,
+  extensionTools,
   config: bot,
   tools,
   skills,
@@ -248,12 +291,6 @@ const desiredFor = (
   brand,
   preferences,
 });
-
-const append = (bot: BotRuntime, operation: () => Promise<void>): Promise<void> => {
-  const queued = bot.chain.then(operation);
-  bot.chain = queued.catch(() => undefined);
-  return queued;
-};
 
 const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
   for (const waiter of bot.pauseWaiters) {
@@ -352,13 +389,10 @@ export function createRunner(config: RunnerConfig): Runner {
   const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const pokerResults = createPokerResults(config.send);
-  const extensionTools = config.extensionTools ?? [];
-  const extensionNames: ReadonlySet<string> = new Set(extensionTools.map((tool) => tool.name));
   const liveRuns = new Set<RunId>();
   let workAppend = config.workAppend;
   const laneFence = new LaneFence(() => workAppend);
   const runnerAbortedRuns = new Set<RunId>();
-  const cancelledRuns = new Set<RunId>();
   let nextConfigVersion = 1;
 
   const fail = (
@@ -368,6 +402,44 @@ export function createRunner(config: RunnerConfig): Runner {
     runId?: RunId,
   ): void => {
     config.send({ type: "agent_error", code, detail, groupId, ...(runId === undefined ? {} : { runId }) });
+  };
+
+  const createGeneration = (bot: BotRuntime, desired: BotDesired, definition: BotDefinition): BotGeneration => {
+    const reserved = new Set([
+      "bash",
+      ...desired.extensionTools.map((tool) => tool.name),
+      ...INTERNAL_TOOLS,
+      ...ASSISTANT_TOOL_NAMES,
+      ...BROWSER_TOOL_NAMES,
+      ...DRAFT_TOOL_NAMES,
+      ACCOUNT_READ_TOOL,
+    ]);
+    const fingerprint = JSON.stringify({
+      connections: definition.connections.map((connection) => ({ ...connection, assignedBotIds: [bot.botId] })),
+      reserved: [...reserved].toSorted(),
+    });
+    let mcp = bot.mcpResources.get(fingerprint);
+    if (mcp === undefined) {
+      mcp = {
+        fingerprint,
+        references: 0,
+        tools: createMcpTools({
+          botId: bot.botId,
+          connections: definition.connections,
+          reserved,
+          latest: () => connectionsFor(bot.botId, desiredConfig(bot)?.tools ?? []),
+          liveProxy: () => {
+            const latest = desiredConfig(bot) ?? desired;
+            return { proxy: latest.mcpProxy, gateway: latest.gateway };
+          },
+        }),
+      };
+      bot.mcpResources.set(fingerprint, mcp);
+    }
+    mcp.references += 1;
+    const generation = Object.freeze({ definition: Object.freeze(definition), desired: Object.freeze(desired), mcp });
+    bot.generations.set(generation, { runs: 0, retired: false });
+    return generation;
   };
 
   const initialSkills = config.skills ?? [];
@@ -389,6 +461,8 @@ export function createRunner(config: RunnerConfig): Runner {
         initialGrants,
         config.brand,
         config.preferences,
+        config.settings,
+        config.extensionTools ?? [],
       );
       const dirs = botDirs(config.dataDir, botConfig.id);
       reconcileSkillDir(
@@ -404,24 +478,26 @@ export function createRunner(config: RunnerConfig): Runner {
         config.brand,
         config.preferences,
         true,
+        desired.settings,
+        desired.extensionTools,
       );
-      return [
-        botConfig.id,
-        {
-          botId: botConfig.id,
-          dirs,
-          configState: { phase: "active", current, desired },
-          appliedGateway: config.modelGateway,
-          lastGroupId: null,
-          sessions: new Map(),
-          mcp: null,
-          browser: null,
-          paused: false,
-          pauseWaiters: new Set(),
-          active: null,
-          chain: Promise.resolve(),
-        },
-      ];
+      const bot: BotRuntime = {
+        botId: botConfig.id,
+        dirs,
+        configState: { phase: "pending", current: null, desired },
+        lastGroupId: null,
+        lanes: new Map(),
+        generations: new Map(),
+        mcpResources: new Map(),
+        browser: null,
+        lifetime: new AbortController(),
+        browserMutex: null,
+        paused: false,
+        pauseWaiters: new Set(),
+        resources: new SerialQueue(),
+      };
+      bot.configState = { phase: "active", current: createGeneration(bot, desired, current), desired };
+      return [botConfig.id, bot];
     }),
   );
 
@@ -449,8 +525,8 @@ export function createRunner(config: RunnerConfig): Runner {
     if (state !== "ready" || desiredConfig(bot) === null || bot.configState.phase === "deleted") {
       return Promise.resolve(false);
     }
-    if (!bot.paused) return Promise.resolve(true);
     if (signal?.aborted === true) return Promise.resolve(false);
+    if (!bot.paused) return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
       let waiter: PauseWaiter;
       const onAbort = (): void => {
@@ -463,52 +539,103 @@ export function createRunner(config: RunnerConfig): Runner {
     });
   };
 
-  const abortSession = async (bot: BotRuntime, groupId: GroupId): Promise<void> => {
-    const active = bot.active;
-    if (active?.run.groupId === groupId) runnerAbortedRuns.add(active.run.runId);
-    await bot.sessions.get(groupId)?.session.abort();
+  const browserMutexFor = (bot: BotRuntime): BrowserMutexLease => {
+    bot.browserMutex ??= acquireBotBrowserMutex(config.dataDir, bot.botId, {
+      signal: bot.lifetime.signal,
+      isRunning: () => !bot.paused,
+    });
+    return bot.browserMutex;
+  };
+  if (config.browser !== undefined) for (const bot of bots.values()) browserMutexFor(bot);
+
+  const abortSession = async (lane: Lane): Promise<void> => {
+    if (lane.active !== null) {
+      runnerAbortedRuns.add(lane.active.run.runId);
+      lane.active.control.abort();
+    }
+    const stream = lane.active?.table === null ? "chat" : "table";
+    await lane.sessions.get(stream)?.session.abort();
+  };
+
+  const waitForLane = (bot: BotRuntime, lane: Lane, signal: AbortSignal | undefined): Promise<boolean> => {
+    if (lane.phase === "stopped") return Promise.resolve(false);
+    const control = lane.active?.control.signal;
+    return waitUntilRunning(
+      bot,
+      control === undefined ? signal : signal === undefined ? control : AbortSignal.any([control, signal]),
+    );
+  };
+
+  const closeGeneration = async (bot: BotRuntime, generation: BotGeneration): Promise<void> => {
+    const use = bot.generations.get(generation);
+    if (use === undefined || !use.retired || use.runs !== 0) return;
+    bot.generations.delete(generation);
+    const resource = generation.mcp;
+    resource.references -= 1;
+    if (resource.references !== 0) return;
+    bot.mcpResources.delete(resource.fingerprint);
+    try {
+      await resource.tools.close();
+    } catch (error) {
+      if (bot.lastGroupId !== null)
+        fail("runner_failed", `Bot ${bot.botId} 关闭 MCP 失败：${String(error)}`, bot.lastGroupId);
+    }
+  };
+
+  const disposeLaneSession = async (bot: BotRuntime, lane: Lane, stream: "chat" | "table"): Promise<void> => {
+    const session = lane.sessions.get(stream);
+    if (session === undefined) return;
+    lane.sessions.delete(stream);
+    try {
+      await session.dispose();
+    } catch (error) {
+      fail("runner_failed", `Bot ${bot.botId} 关闭会话失败：${String(error)}`, lane.groupId);
+    }
+  };
+
+  const closeStaleSessions = async (bot: BotRuntime, lane: Lane): Promise<void> => {
+    if (lane.active !== null) return;
+    const fingerprint = desiredConfig(bot) === null ? undefined : currentDefinition(bot)?.fingerprint;
+    for (const [stream, session] of lane.sessions) {
+      if (session.fingerprint !== fingerprint) await disposeLaneSession(bot, lane, stream);
+    }
+  };
+
+  const stopLane = (bot: BotRuntime, lane: Lane): Promise<void> => {
+    if (lane.stopping !== null) return lane.stopping;
+    lane.phase = "stopped";
+    lane.stopping = (async () => {
+      const runId = lane.active?.run.runId;
+      if (runId !== undefined) approvals.abandon("stopped", bot.botId, runId);
+      try {
+        await abortSession(lane);
+      } catch (error) {
+        fail("runner_failed", `Bot ${bot.botId} 中止会话失败：${String(error)}`, lane.groupId);
+      }
+      await Promise.allSettled([...lane.sessions.values()].map((session) => session.session.abort()));
+      lane.queue.discard(() => true, finishWithoutRun);
+      await lane.queue.idle();
+      for (const stream of lane.sessions.keys()) await disposeLaneSession(bot, lane, stream);
+    })();
+    return lane.stopping;
   };
 
   const closeBotResources = async (bot: BotRuntime): Promise<void> => {
-    const sessions = [...bot.sessions.entries()];
-    const results = await Promise.allSettled(
-      sessions.map(async ([groupId, botSession]) => {
-        const errors: unknown[] = [];
-        try {
-          await abortSession(bot, groupId);
-        } catch (error) {
-          errors.push(error);
-        }
-        try {
-          await botSession.dispose();
-        } catch (error) {
-          errors.push(error);
-        }
-        bot.sessions.delete(groupId);
-        if (errors.length > 0) throw errors[0];
-      }),
-    );
-    results.forEach((result, index) => {
-      if (result.status !== "rejected") return;
-      const groupId = sessions[index]?.[0] ?? bot.lastGroupId;
-      if (groupId !== null) {
-        fail("runner_failed", `Bot ${bot.botId} 关闭会话失败：${String(result.reason)}`, groupId);
-      }
-    });
-
+    bot.lifetime.abort();
     const browser = bot.browser;
     bot.browser = null;
-    await browser?.close();
-
-    const mcp = bot.mcp;
-    bot.mcp = null;
-    if (mcp === null) return;
     try {
-      await mcp.close();
+      await browser?.close();
     } catch (error) {
-      if (bot.lastGroupId !== null) {
-        fail("runner_failed", `Bot ${bot.botId} 关闭 MCP 失败：${String(error)}`, bot.lastGroupId);
-      }
+      if (bot.lastGroupId !== null)
+        fail("runner_failed", `Bot ${bot.botId} 关闭浏览器失败：${String(error)}`, bot.lastGroupId);
+    } finally {
+      bot.browserMutex?.release();
+      bot.browserMutex = null;
+    }
+    for (const [generation, use] of bot.generations) {
+      use.retired = true;
+      await closeGeneration(bot, generation);
     }
   };
 
@@ -522,12 +649,16 @@ export function createRunner(config: RunnerConfig): Runner {
     for (;;) {
       if (state !== "ready") return;
       const desired = desiredConfig(bot);
-      const current = currentDefinition(bot);
+      const current = currentGeneration(bot);
 
       if (desired === null) {
+        bot.lifetime.abort();
+        await Promise.all([...bot.lanes.values()].map((lane) => stopLane(bot, lane)));
         await closeBotResources(bot);
         const latest = desiredConfig(bot);
         if (latest !== null) {
+          bot.lifetime = new AbortController();
+          if (config.browser !== undefined) browserMutexFor(bot);
           bot.configState = { phase: "pending", current: null, desired: latest };
           continue;
         }
@@ -580,97 +711,112 @@ export function createRunner(config: RunnerConfig): Runner {
         desired.brand,
         desired.preferences,
         skillsReady,
+        desired.settings,
+        desired.extensionTools,
       );
 
-      if (current === null || current.fingerprint !== prepared.fingerprint) {
-        await closeBotResources(bot);
-        const latest = desiredConfig(bot);
-        if (latest?.version !== desired.version) {
-          bot.configState = { phase: "pending", current: null, desired: latest };
-          continue;
-        }
-        bot.appliedGateway = desired.gateway;
-        bot.configState = { phase: "active", current: prepared, desired };
-        return;
+      const generation = createGeneration(bot, desired, prepared);
+      bot.configState = { phase: "active", current: generation, desired };
+      if (current !== null) {
+        const use = bot.generations.get(current);
+        if (use !== undefined) use.retired = true;
+        await closeGeneration(bot, current);
       }
-
-      if (!sameGateway(bot.appliedGateway, desired.gateway)) {
-        const sessions = [...bot.sessions.entries()];
-        const results = await Promise.allSettled(
-          sessions.map(([, botSession]) => botSession.applyGateway(desired.gateway)),
-        );
-        let allApplied = true;
-        results.forEach((result, index) => {
-          if (result.status !== "rejected") return;
-          allApplied = false;
-          const groupId = sessions[index]?.[0] ?? bot.lastGroupId;
-          if (groupId !== null) {
-            fail("runner_failed", `Bot ${bot.botId} 更新网关失败：${String(result.reason)}`, groupId);
-          }
-        });
-        const latest = desiredConfig(bot);
-        if (latest?.version !== desired.version) continue;
-        if (allApplied) bot.appliedGateway = desired.gateway;
-      }
-
-      const latest = desiredConfig(bot);
-      if (latest?.version !== desired.version) continue;
-      bot.configState = { phase: "active", current: prepared, desired };
+      await Promise.all([...bot.lanes.values()].map((lane) => closeStaleSessions(bot, lane)));
+      if (desiredConfig(bot)?.version !== desired.version) continue;
       return;
     }
   };
 
   const sessionFor = async (
     bot: BotRuntime,
-    groupId: GroupId,
+    lane: Lane,
     groupKind: PromptMessage["group"]["kind"],
   ): Promise<BotSession> => {
+    const groupId = lane.groupId;
     bot.lastGroupId = groupId;
-    const existing = bot.sessions.get(groupId);
-    const table = () => bot.active?.table ?? null;
+    const table = () => lane.active?.table ?? null;
+    const stream = table() === null ? "chat" : "table";
+    const existing = lane.sessions.get(stream);
     const tableRole = table()?.role ?? null;
     if (existing !== undefined) {
-      if (existing.tableRole === tableRole) return existing;
-      await existing.dispose();
-      bot.sessions.delete(groupId);
+      if (existing.tableRole === tableRole && existing.fingerprint === lane.active?.generation?.definition.fingerprint)
+        return existing;
+      await disposeLaneSession(bot, lane, stream);
     }
-    const definition = currentDefinition(bot);
-    if (definition === null) throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
-    const activeRun = (): RememberingRun | null => bot.active;
+    const generation = lane.active?.generation;
+    const definition = generation?.definition;
+    if (generation === null || generation === undefined || definition === undefined)
+      throw new Error(`Bot ${bot.botId} 尚未完成配置对账`);
+    const activeRun = (): RememberingRun | null => lane.active;
+    const runConfig = (): BotDesired => lane.active?.generation?.desired ?? generation.desired;
+    const extensionTools = generation.desired.extensionTools;
+    const extensionNames = new Set(extensionTools.map((tool) => tool.name));
+    const mcp = generation.mcp.tools;
     const dirs = ensureBotDirs(bot.dirs);
     if (tableRole !== null) {
       const created = await createTableSession({
         dirs: { ...dirs, sessionDir: join(groupSessionDir(dirs, groupId), "table") },
         preset: definition.config.preset,
-        gateway: bot.appliedGateway,
+        gateway: runConfig().gateway,
         role: tableRole,
         tools: createTableTools({ role: tableRole, activeRun, table, send: config.send, results: pokerResults }),
-        waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+        waitUntilRunning: (signal) => waitForLane(bot, lane, signal),
         table,
         laneHeaders: () => laneFence.headers(activeRun()?.run.runId),
-        settings: config.settings,
+        settings: generation.desired.settings,
       });
-      bot.sessions.set(groupId, { ...created, tableRole });
+      lane.sessions.set(stream, { ...created, tableRole, fingerprint: definition.fingerprint });
       return created;
     }
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
-    const bash = createSandboxedBash(dirs.workDir, zones, () => bot.active?.run.runId ?? null);
-    if (config.browser !== undefined) bot.browser ??= createBotBrowser(config.browser);
+    const bash = createSandboxedBash(dirs.workDir, zones, () => lane.active?.run.runId ?? null);
+    if (config.browser !== undefined && bot.browser === null) {
+      bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);
+    }
     const accountRead = createAccountReadTool({
       described: definition.readable,
       live: () => {
-        const desired = desiredConfig(bot)!;
+        const desired = desiredConfig(bot) ?? runConfig();
         return { accounts: desired.accounts, proxy: desired.accountsProxy, gateway: desired.gateway };
       },
     });
+    const browserReleases = new Map<string, () => void>();
+    const browserCalls: NonNullable<SessionGate["browserCalls"]> = {
+      acquire: async (toolName, callId, signal) => {
+        if (!BROWSER_TOOL_NAMES.includes(toolName) || bot.browserMutex === null) return;
+        let release: () => void;
+        for (;;) {
+          if (!(await waitForLane(bot, lane, signal))) throw new Error("这次浏览器操作被中止了");
+          release = await bot.browserMutex.mutex.acquire(
+            AbortSignal.any([bot.lifetime.signal, ...(signal === undefined ? [] : [signal])]),
+          );
+          if (!bot.paused) break;
+          release();
+        }
+        const done = (): void => {
+          signal?.removeEventListener("abort", done);
+          browserReleases.delete(callId);
+          release();
+        };
+        browserReleases.set(callId, done);
+        if (signal?.aborted === true) done();
+        else signal?.addEventListener("abort", done, { once: true });
+      },
+      release: (callId) => {
+        if (callId === undefined) for (const done of browserReleases.values()) done();
+        else browserReleases.get(callId)?.();
+      },
+    };
     const gate: SessionGate = {
       approvalView: (toolName, input) =>
         bot.browser?.approvalView(toolName, input) ?? simpleToolView(toolName, input, mcp.serverFor(toolName)),
       decideTool: (toolName, input) => decideTool(toolName, input),
-      waitUntilRunning: (signal) => waitUntilRunning(bot, signal),
+      waitUntilRunning: (signal) => waitForLane(bot, lane, signal),
       approvals,
       activeRun,
       laneFence,
+      browserCalls,
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
@@ -681,9 +827,13 @@ export function createRunner(config: RunnerConfig): Runner {
       ...createDraftTools({
         activeRun,
         send: config.send,
-        accounts: () => desiredConfig(bot)!.accounts,
+        accounts: () => (desiredConfig(bot) ?? runConfig()).accounts,
         images: { workDir: dirs.workDir, draftsDir: realpathSync(dirs.draftsDir), hidden: zones.hidden },
-        liveHub: () => ({ hub: desiredConfig(bot)!.hub, gateway: desiredConfig(bot)!.gateway }),
+        liveHub: () => ({
+          hub: desiredConfig(bot)!.hub,
+          gateway: desiredConfig(bot)!.gateway,
+          laneHeaders: laneFence.headers(activeRun()?.run.runId),
+        }),
       }),
       ...(definition.config.role === "assistant"
         ? [
@@ -692,42 +842,21 @@ export function createRunner(config: RunnerConfig): Runner {
             ...createHelperTools({
               agentDir: dirs.agentDir,
               workDir: dirs.workDir,
-              gateway: () => bot.appliedGateway,
-              settings: config.settings,
-              tools: () => [accountRead, ...(bot.browser?.tools ?? [])],
+              gateway: () => runConfig().gateway,
+              settings: generation.desired.settings,
+              tools: () => [accountRead, ...(bot.browser?.toolsWithHeldMutex ?? [])],
               gate,
             }),
             ...createReviewTools({ groupKind, activeRun, send: config.send }),
             ...createRoutineOfferTools({ activeRun, send: config.send }),
           ]
         : []),
-      ...(bot.browser?.tools ?? []),
+      ...(bot.browser?.toolsWithHeldMutex ?? []),
       accountRead,
     ];
-    const mcp =
-      bot.mcp ??
-      createMcpTools({
-        botId: bot.botId,
-        connections: definition.connections,
-        // 内部工具名整组保留，不只保留已经注册的：工厂还是空桩的那几个名字（report_metric、remember_preference）
-        // 闸门也按名字放行，MCP 操作顶着它注册就能免审批执行。
-        reserved: new Set([
-          bash.tool.name,
-          ...builtIn.map((tool) => tool.name),
-          ...INTERNAL_TOOLS,
-          ...ASSISTANT_TOOL_NAMES,
-          ...BROWSER_TOOL_NAMES,
-          ACCOUNT_READ_TOOL,
-        ]),
-        latest: () => connectionsFor(bot.botId, desiredConfig(bot)?.tools ?? []),
-        liveProxy: () => ({ proxy: desiredConfig(bot)!.mcpProxy, gateway: desiredConfig(bot)!.gateway }),
-        laneHeaders: () => laneFence.headers(activeRun()?.run.runId),
-      });
-    bot.mcp = mcp;
     const decideTool = (toolName: string, input: Record<string, unknown>): GateDecision => {
-      const desired = desiredConfig(bot)!;
-      // 会话里的 MCP 工具是建会话时那份 config 定的；按最新下发的连接和操作表判，撤掉的、待授权的在审批之前就拒。
-      // 不是本会话注册的 MCP 工具不按名字去操作表里借审批：同名连接一撤，借来的审批就跟着没了。
+      const desired = desiredConfig(bot) ?? runConfig();
+      // 工具定义和 Client 随代际，授权与操作是否仍提供在调用时现判。
       const callable = mcp.resolve(toolName);
       if (callable !== null && callable.kind !== "ready") {
         return {
@@ -740,7 +869,10 @@ export function createRunner(config: RunnerConfig): Runner {
       }
       const source: ToolSource | null =
         callable !== null
-          ? { kind: "connected", operation: callable.operation }
+          ? {
+              kind: "connected",
+              operation: callable.operation,
+            }
           : extensionNames.has(toolName)
             ? { kind: "extension" }
             : null;
@@ -756,7 +888,7 @@ export function createRunner(config: RunnerConfig): Runner {
           source,
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,
-          routine: bot.active?.routine ?? null,
+          routine: lane.active?.routine ?? null,
         },
         desired.grants,
         desired.accounts,
@@ -769,29 +901,34 @@ export function createRunner(config: RunnerConfig): Runner {
       tags: definition.config.tags,
       description: definition.config.description,
       dirs: { ...dirs, sessionDir: groupSessionDir(dirs, groupId) },
-      gateway: bot.appliedGateway,
+      gateway: runConfig().gateway,
       bashTool: bash.tool,
-      tools: [...builtIn, ...mcp.tools],
+      tools: [...builtIn, ...mcp.toolsFor(() => laneFence.headers(activeRun()?.run.runId))],
       ...gate,
       allowBash: bash.allow,
       clearBashRun: bash.clearRun,
-      memory: () => bot.active?.memory ?? null,
-      ...(config.settings === undefined ? {} : { settings: config.settings }),
+      memory: () => lane.active?.memory ?? null,
+      ...(generation.desired.settings === undefined ? {} : { settings: generation.desired.settings }),
     });
-    bot.sessions.set(groupId, { ...created, tableRole: null });
+    lane.sessions.set(stream, { ...created, tableRole: null, fingerprint: definition.fingerprint });
     return created;
   };
 
-  const runOne = async (bot: BotRuntime, message: PromptMessage): Promise<void> => {
-    if (cancelledRuns.delete(message.runId)) return;
-    if (bot.configState.phase === "pending") await reconcileBot(bot);
-    if (cancelledRuns.delete(message.runId) || !liveRuns.has(message.runId)) return;
-    if (state === "stopped" || bot.configState.phase === "deleted" || currentDefinition(bot) === null) {
+  const runOne = async (bot: BotRuntime, lane: Lane, message: PromptMessage): Promise<void> => {
+    if (!liveRuns.has(message.runId)) return;
+    if (
+      lane.phase === "stopped" ||
+      state === "stopped" ||
+      bot.configState.phase === "deleted" ||
+      currentDefinition(bot) === null
+    ) {
       finishWithoutRun(message);
       return;
     }
 
-    const active: NonNullable<BotRuntime["active"]> = {
+    const active: LaneActive = {
+      generation: null,
+      control: new AbortController(),
       table: message.table,
       messageId: message.messageId,
       memory: null,
@@ -811,20 +948,22 @@ export function createRunner(config: RunnerConfig): Runner {
     let botSession: BotSession | null = null;
     let prompted = false;
     try {
-      bot.active = active;
-      if (!(await waitUntilRunning(bot, undefined))) return;
-      if (!liveRuns.has(message.runId)) return;
-      botSession = await sessionFor(bot, message.groupId, message.group.kind);
-      if (!liveRuns.has(message.runId)) return;
-      if (!(await waitUntilRunning(bot, undefined))) return;
-      if (!liveRuns.has(message.runId)) return;
+      lane.active = active;
+      if (!(await waitForLane(bot, lane, undefined)) || !liveRuns.has(message.runId)) return;
+      const generation = currentGeneration(bot);
+      if (generation === null) return;
+      active.generation = generation;
+      bot.generations.get(generation)!.runs += 1;
+      botSession = await sessionFor(bot, lane, message.group.kind);
+      if (!(await waitForLane(bot, lane, undefined)) || !liveRuns.has(message.runId)) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
+      await botSession.applyGateway(generation.desired.gateway);
       await botSession.usePurpose(message.purpose);
       if (!liveRuns.has(message.runId)) return;
       const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
       const watermark = readWatermark(session.sessionManager);
-      const desired = desiredConfig(bot)!;
+      const desired = generation.desired;
       const shown = readMemoryShown(session.sessionManager);
       const memory = renderMemory(bot.botId, desired.brand, desired.preferences, shown);
       active.memory = memory.text;
@@ -835,8 +974,8 @@ export function createRunner(config: RunnerConfig): Runner {
         active.run,
         text,
         () => runnerAbortedRuns.has(active.run.runId),
-        approvals.consumeBlocked,
-        bot.mcp?.serverFor ?? (() => ""),
+        (callId) => approvals.consumeBlocked(message.runId, callId),
+        generation.mcp.tools.serverFor,
         (outgoing) => {
           if (outgoing.type === "run_done") finishRun(outgoing);
           else if (
@@ -867,22 +1006,51 @@ export function createRunner(config: RunnerConfig): Runner {
     } finally {
       report?.unsubscribe();
       botSession?.clearBashRun(message.runId);
-      bot.active = null;
+      lane.active = null;
       runnerAbortedRuns.delete(message.runId);
-      if (state === "ready" && bot.configState.phase === "pending") await reconcileBot(bot);
+      if (active.generation !== null) {
+        const generation = active.generation;
+        const use = bot.generations.get(generation);
+        if (use !== undefined) use.runs -= 1;
+        if (state === "ready" && desiredConfig(bot) !== null && lane.phase === "ready")
+          await bot.resources.enqueue(null, () => closeGeneration(bot, generation));
+      }
+      if (state === "ready" && lane.phase === "ready" && desiredConfig(bot) !== null)
+        await closeStaleSessions(bot, lane);
       finishWithoutRun(message);
     }
   };
 
-  const schedulePrompt = (bot: BotRuntime, message: PromptMessage): Promise<void> =>
-    append(bot, async () => {
+  const findRun = (runId: RunId) => {
+    for (const bot of bots.values()) {
+      const found = findLaneRun(bot.lanes.values(), runId);
+      if (found !== null) return { bot, ...found };
+    }
+    return null;
+  };
+
+  const schedulePrompt = (bot: BotRuntime, message: PromptMessage): Promise<void> => {
+    const ready = bot.resources.idle();
+    let lane = bot.lanes.get(message.groupId);
+    if (lane === undefined || lane.phase === "stopped") {
+      lane = createLane(message.groupId);
+      bot.lanes.set(message.groupId, lane);
+    }
+    const target = lane;
+    return target.queue.enqueue(message, async () => {
+      await ready;
       try {
-        await runOne(bot, message);
+        await runOne(bot, target, message);
       } catch (error) {
         fail("runner_failed", `run ${message.runId} 跑失败：${String(error)}`, message.groupId);
         finishWithoutRun(message);
       }
     });
+  };
+
+  const scheduleReconcile = (bot: BotRuntime): void => {
+    void bot.resources.enqueue(null, () => reconcileBot(bot)).catch(() => undefined);
+  };
 
   const runner: Runner = {
     async applyConfig(next) {
@@ -910,37 +1078,41 @@ export function createRunner(config: RunnerConfig): Runner {
             nextGrants,
             next.brand,
             next.preferences,
+            next.settings,
+            next.extensionTools ?? [],
           ),
         ]),
       );
       for (const bot of bots.values()) {
         const desired = incoming.get(bot.botId) ?? null;
         incoming.delete(bot.botId);
-        bot.configState = { phase: "pending", current: currentDefinition(bot), desired };
+        bot.configState = { phase: "pending", current: currentGeneration(bot), desired };
         if (desired === null) {
-          approvals.cancel(bot.botId);
+          approvals.abandon("stopped", bot.botId);
           pokerResults.cancel(bot.botId);
           settlePauseWaiters(bot, false);
         }
-        append(bot, () => reconcileBot(bot));
+        scheduleReconcile(bot);
       }
       for (const desired of incoming.values()) {
         const bot: BotRuntime = {
           botId: desired.config.id,
           dirs: botDirs(config.dataDir, desired.config.id),
           configState: { phase: "pending", current: null, desired },
-          appliedGateway: desired.gateway,
           lastGroupId: null,
-          sessions: new Map(),
-          mcp: null,
+          lanes: new Map(),
+          generations: new Map(),
+          mcpResources: new Map(),
           browser: null,
+          lifetime: new AbortController(),
+          browserMutex: null,
           paused: false,
           pauseWaiters: new Set(),
-          active: null,
-          chain: Promise.resolve(),
+          resources: new SerialQueue(),
         };
         bots.set(bot.botId, bot);
-        append(bot, () => reconcileBot(bot));
+        if (config.browser !== undefined) browserMutexFor(bot);
+        scheduleReconcile(bot);
       }
     },
 
@@ -957,6 +1129,11 @@ export function createRunner(config: RunnerConfig): Runner {
         finishWithoutRun(message);
         return;
       }
+      if (desiredConfig(bot) === null) {
+        finishWithoutRun(message);
+        await bot.resources.idle();
+        return;
+      }
       await schedulePrompt(bot, message);
     },
 
@@ -967,32 +1144,33 @@ export function createRunner(config: RunnerConfig): Runner {
       }
       const runId = target;
       if (!liveRuns.delete(runId)) return;
+      const found = findRun(runId);
+      const pendingEffects = laneFence.pendingCalls(runId);
       laneFence.remove(runId);
-      const activeBot = [...bots.values()].find((bot) => bot.active?.run.runId === runId);
-      if (activeBot !== undefined && activeBot.active !== null) {
-        runnerAbortedRuns.add(runId);
-        settlePauseWaiters(activeBot, false);
-        const groupId = activeBot.active.run.groupId;
-        const callIds = [...approvals.expire(runId), ...laneFence.pendingCalls(runId)];
-        const session = activeBot.sessions.get(groupId)?.session;
-        if (callIds.length === 0 || session === undefined) {
-          void abortSession(activeBot, groupId).catch(() => undefined);
-        } else {
-          const pending = new Set(callIds);
-          const unsubscribe = session.subscribe((event) => {
-            if (event.type === "agent_settled") {
-              unsubscribe();
-              return;
-            }
-            if (event.type !== "tool_execution_end" || !pending.delete(event.toolCallId)) return;
-            if (pending.size === 0) {
-              unsubscribe();
-              void abortSession(activeBot, groupId).catch(() => undefined);
-            }
-          });
-        }
+      if (found === null) return;
+      const { lane } = found;
+      if (found.phase === "queued") {
+        lane.queue.discard((message) => message.runId === runId);
+        return;
+      }
+      runnerAbortedRuns.add(runId);
+      const stream = lane.active?.table === null ? "chat" : "table";
+      const session = lane.sessions.get(stream)?.session;
+      const callIds = [...approvals.expire(runId), ...pendingEffects];
+      for (const callId of pendingEffects) approvals.block(runId, callId);
+      if (callIds.length === 0 || session === undefined) {
+        void abortSession(lane).catch(() => undefined);
       } else {
-        cancelledRuns.add(runId);
+        // 先让 Pi 写入中文过期结果，再 abort，避免错误被 Operation aborted 覆盖。
+        const pending = new Set(callIds);
+        const unsubscribe = session.subscribe((event) => {
+          if (event.type === "agent_settled") unsubscribe();
+          if (event.type !== "tool_execution_end" || !pending.delete(event.toolCallId)) return;
+          if (pending.size === 0) {
+            unsubscribe();
+            void abortSession(lane).catch(() => undefined);
+          }
+        });
       }
     },
 
@@ -1001,14 +1179,16 @@ export function createRunner(config: RunnerConfig): Runner {
     },
 
     approve(runId, callId, outcome) {
+      const found = findRun(runId);
+      if (found?.phase !== "running") return;
       if (outcome !== "voided") {
         approvals.settle(runId, callId, outcome);
         return;
       }
-      const bot = [...bots.values()].find((candidate) => candidate.active?.run.runId === runId);
-      const groupId = bot?.active?.run.groupId;
-      const session = groupId === undefined ? undefined : bot?.sessions.get(groupId)?.session;
-      if (bot === undefined || groupId === undefined || session === undefined) {
+      const lane = found.lane;
+      const stream = lane?.active?.table === null ? "chat" : "table";
+      const session = lane?.sessions.get(stream)?.session;
+      if (session === undefined) {
         approvals.settle(runId, callId, outcome);
         return;
       }
@@ -1017,7 +1197,7 @@ export function createRunner(config: RunnerConfig): Runner {
         if (event.type === "agent_settled") unsubscribe();
         if (event.type !== "tool_execution_end" || event.toolCallId !== callId) return;
         unsubscribe();
-        void abortSession(bot, groupId).catch(() => undefined);
+        void abortSession(lane).catch(() => undefined);
       });
       if (!approvals.settle(runId, callId, outcome)) unsubscribe();
     },
@@ -1045,22 +1225,22 @@ export function createRunner(config: RunnerConfig): Runner {
       approvals.abandon("stopped");
       pokerResults.cancel();
       const stoppingBots = [...bots.values()];
-      for (const bot of stoppingBots) settlePauseWaiters(bot, false);
-      const aborting = stoppingBots.map((bot) => {
-        const runningGroupId = bot.active?.run.groupId;
-        if (runningGroupId === undefined) return Promise.resolve();
-        return abortSession(bot, runningGroupId).catch(() => undefined);
-      });
-      const stopping = stoppingBots.map((bot, index) =>
-        append(bot, async () => {
+      for (const bot of stoppingBots) {
+        bot.lifetime.abort();
+        settlePauseWaiters(bot, false);
+      }
+      await Promise.allSettled(
+        stoppingBots.flatMap((bot) => [...bot.lanes.values()].map((lane) => stopLane(bot, lane))),
+      );
+      const stopping = stoppingBots.map((bot) => {
+        return bot.resources.enqueue(null, async () => {
           try {
-            await aborting[index];
             await closeBotResources(bot);
           } finally {
             deleteBot(bot, false);
           }
-        }),
-      );
+        });
+      });
       await Promise.allSettled(stopping);
     },
   };

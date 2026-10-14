@@ -19,30 +19,33 @@ export interface ApprovalGate {
   ask(request: ApprovalRequest, signal: AbortSignal | undefined): Promise<LocalApprovalOutcome>;
   settle(runId: RunId, callId: string, outcome: ApprovalOutcome): boolean;
   expire(runId: RunId): readonly string[];
-  block(callId: string): void;
-  consumeBlocked(callId: string): boolean;
-  abandon(reason: ApprovalAbandonReason, botId?: BotId): void;
+  block(runId: RunId, callId: string): void;
+  consumeBlocked(runId: RunId, callId: string): boolean;
+  abandon(reason: ApprovalAbandonReason, botId?: BotId, runId?: RunId): void;
   cancel(botId?: BotId): void;
 }
 
 interface WaitingApproval {
   readonly runId: RunId;
+  readonly callId: string;
   readonly botId: BotId;
   readonly settle: (outcome: LocalApprovalOutcome) => void;
   readonly signal: AbortSignal | undefined;
   readonly onAbort: () => void;
 }
 
+const approvalKey = (runId: RunId, callId: string): string => JSON.stringify([runId, callId]);
+
 export function createApprovalGate(send: (message: AgentToControl) => void): ApprovalGate {
   const waiting = new Map<string, WaitingApproval>();
   const blockedCallIds = new Set<string>();
 
-  const settleCall = (callId: string, outcome: LocalApprovalOutcome): boolean => {
-    const entry = waiting.get(callId);
+  const settleCall = (runId: RunId, callId: string, outcome: LocalApprovalOutcome): boolean => {
+    const entry = waiting.get(approvalKey(runId, callId));
     if (entry === undefined) return false;
-    waiting.delete(callId);
+    waiting.delete(approvalKey(runId, callId));
     entry.signal?.removeEventListener("abort", entry.onAbort);
-    if (outcome !== "approved") blockedCallIds.add(callId);
+    if (outcome !== "approved") blockedCallIds.add(approvalKey(runId, callId));
     entry.settle(outcome);
     return true;
   };
@@ -50,15 +53,16 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
   return {
     ask: (request, signal) => {
       if (signal?.aborted === true) {
-        blockedCallIds.add(request.callId);
+        blockedCallIds.add(approvalKey(request.runId, request.callId));
         return Promise.resolve("rejected");
       }
       return new Promise<LocalApprovalOutcome>((resolve) => {
         const onAbort = (): void => {
-          settleCall(request.callId, "rejected");
+          settleCall(request.runId, request.callId, "rejected");
         };
-        waiting.set(request.callId, {
+        waiting.set(approvalKey(request.runId, request.callId), {
           runId: request.runId,
+          callId: request.callId,
           botId: request.botId,
           settle: resolve,
           signal,
@@ -79,32 +83,32 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
       });
     },
     settle: (runId, callId, outcome) => {
-      if (waiting.get(callId)?.runId !== runId) return false;
-      return settleCall(callId, outcome);
+      if (waiting.get(approvalKey(runId, callId))?.runId !== runId) return false;
+      return settleCall(runId, callId, outcome);
     },
     expire: (runId) => {
-      const callIds = [...waiting].flatMap(([callId, entry]) => (entry.runId === runId ? [callId] : []));
-      for (const callId of callIds) settleCall(callId, "expired");
+      const callIds = [...waiting.values()].filter((entry) => entry.runId === runId).map((entry) => entry.callId);
+      for (const callId of callIds) settleCall(runId, callId, "expired");
       return callIds;
     },
-    block: (callId) => {
-      blockedCallIds.add(callId);
+    block: (runId, callId) => {
+      blockedCallIds.add(approvalKey(runId, callId));
     },
-    consumeBlocked: (callId) => blockedCallIds.delete(callId),
-    abandon: (reason, botId) => {
+    consumeBlocked: (runId, callId) => blockedCallIds.delete(approvalKey(runId, callId)),
+    abandon: (reason, botId, runId) => {
       const targets: Array<readonly [callId: string, runId: RunId]> = [];
-      for (const [callId, entry] of waiting) {
-        if (botId === undefined || entry.botId === botId) targets.push([callId, entry.runId]);
+      for (const entry of waiting.values()) {
+        if ((botId === undefined || entry.botId === botId) && (runId === undefined || entry.runId === runId))
+          targets.push([entry.callId, entry.runId]);
       }
-      for (const [callId, runId] of targets) {
-        send({ type: "approval_abandoned", runId, callId, reason });
-        settleCall(callId, "rejected");
+      for (const [callId, waitingRunId] of targets) {
+        send({ type: "approval_abandoned", runId: waitingRunId, callId, reason });
+        settleCall(waitingRunId, callId, "rejected");
       }
     },
     cancel: (botId) => {
-      const targets: string[] = [];
-      for (const [callId, entry] of waiting) if (botId === undefined || entry.botId === botId) targets.push(callId);
-      for (const callId of targets) settleCall(callId, "rejected");
+      const targets = [...waiting.values()].filter((entry) => botId === undefined || entry.botId === botId);
+      for (const entry of targets) settleCall(entry.runId, entry.callId, "rejected");
     },
   };
 }

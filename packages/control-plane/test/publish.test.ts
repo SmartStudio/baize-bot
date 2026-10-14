@@ -679,6 +679,47 @@ describe("各平台的发法", () => {
 });
 
 describe("小红书走电脑", () => {
+  it("Bot 暂停期间到点的已批草稿不认领，恢复后下一轮才下发", async () => {
+    const s = await stack();
+    let now = new Date("2026-10-14T01:00:00.000Z");
+    const server = await s.serve(() => now);
+    const job = await jobOn(s, server, [XHS]);
+    const spec = specOf(accountOf(job, "xiaohongshu"), {
+      kind: "post",
+      title: "暂停期间到点",
+      text: "恢复后发布",
+      images: [IMAGE],
+      github: null,
+    });
+    const due = { ...spec, scheduledAt: new Date(now.getTime() + MINUTE).toISOString() };
+    await createApproved(job, due);
+    expect((await job.client.post(`/api/bots/${job.botId}/pause`)).status).toBe(200);
+    expect(await job.agent.expect("pause")).toEqual({ type: "pause", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot).toMatchObject({ id: job.botId, runState: "paused" });
+    now = new Date(due.scheduledAt);
+
+    await server.server.publisher.tick();
+    expect((await draftOnPage(job, due.draftId)).draft.status).toBe("approved");
+    expect(job.agent.received().filter((message) => message.type === "publish_draft")).toEqual([]);
+
+    expect((await job.client.post(`/api/bots/${job.botId}/resume`)).status).toBe(200);
+    // resume 是同一连接上的屏障；此前那轮若下发过发布，下一条就不会是 resume。
+    expect(await job.agent.next()).toEqual({ type: "resume", botId: job.botId });
+    expect((await nextOf(job.push, "bot_updated")).bot).toMatchObject({ id: job.botId, runState: "running" });
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({ id: due.draftId, status: "publishing" });
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim).toMatchObject({ draftId: due.draftId, botId: job.botId, content: due.content });
+    job.agent.send({
+      type: "publish_result",
+      draftId: due.draftId,
+      attempt: claim.attempt,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/resumed", externalId: "resumed" },
+    });
+    await nextOf(job.push, "publication_created");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("published");
+  });
+
   it("电脑在线就下发 publish_draft，等上行 publish_result 落账", async () => {
     const s = await stack();
     const server = await s.serve();

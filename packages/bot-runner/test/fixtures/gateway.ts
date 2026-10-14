@@ -19,6 +19,7 @@ export interface Gateway {
   readonly baseUrl: string;
   readonly usage: readonly UsageRecord[];
   readonly laneHeaders: readonly (string | undefined)[];
+  readonly laneRequests: readonly { readonly body: ChatCompletionRequest; readonly header: string | undefined }[];
   totalsFor(key: string): { inputTokens: number; outputTokens: number };
   /** 到达网关的补全请求数，重试会让它大于会话轮数。 */
   requestCount(): number;
@@ -48,6 +49,7 @@ export async function startGateway(options: {
 }): Promise<Gateway> {
   const usage: UsageRecord[] = [];
   const laneHeaders: (string | undefined)[] = [];
+  const laneRequests: Array<{ body: ChatCompletionRequest; header: string | undefined }> = [];
   let requests = 0;
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
@@ -71,6 +73,7 @@ export async function startGateway(options: {
     const laneHeader = req.headers["x-baize-lane"];
     laneHeaders.push(Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader);
     const body = JSON.parse(await readBody(req)) as ChatCompletionRequest;
+    laneRequests.push({ body, header: Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader });
     requests += 1;
     if (requests <= (options.failFirst ?? 0)) {
       const status = options.failStatus ?? 503;
@@ -118,6 +121,7 @@ export async function startGateway(options: {
     baseUrl: `http://127.0.0.1:${port}/v1`,
     usage,
     laneHeaders,
+    laneRequests,
     totalsFor: (key) =>
       usage
         .filter((u) => u.key === key)

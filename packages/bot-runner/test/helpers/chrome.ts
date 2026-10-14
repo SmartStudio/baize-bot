@@ -9,6 +9,7 @@ const CHROME_BINARIES: Readonly<Partial<Record<NodeJS.Platform, string>>> = {
 };
 
 export const chromeBinary = ((): string | null => {
+  if (process.env.BAIZE_TEST_FAKE_CDP_ONLY === "1") return null;
   const binary = CHROME_BINARIES[process.platform];
   return binary !== undefined && existsSync(binary) ? binary : null;
 })();

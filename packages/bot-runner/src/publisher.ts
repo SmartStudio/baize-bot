@@ -11,12 +11,13 @@ import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promis
 import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserConfig } from "./browser.js";
+import { acquireBotBrowserMutex } from "./browser-mutex.js";
 import { draftCopyName } from "./drafts.js";
 import { botDirs } from "./paths.js";
 import { attachmentCopyName, downloadAttachment, type AttachmentLive } from "./attachments.js";
 
 // 发布器：控制面批准草稿后下行 publish_draft，这里在助理 Chrome 的后台标签页里发出去，回 publish_result。
-// 不挂在 Runner 上，电脑代理收到报文直接调，不经过任何 Bot 的串行队列，也不借 Bot 的标签页。
+// 不挂在 Runner 上，电脑代理收到报文直接调，不经过群道的 prompt 队列；与 Bot 的浏览器工具共用互斥锁，各用各的标签页。
 
 export type PublishDraftMessage = Extract<ControlToAgent, { type: "publish_draft" }>;
 export type PublishResultMessage = Extract<AgentToControl, { type: "publish_result" }>;
@@ -426,9 +427,19 @@ const PUBLISHERS: Record<BrowserPlatform, Publisher> = { xiaohongshu: publishToX
 
 export async function publishDraft(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResultMessage> {
   const { browser } = deps;
-  const result =
-    browser === null
-      ? failed("error", "这台电脑没有助理浏览器")
-      : await PUBLISHERS[message.platform](message, { ...deps, browser });
+  const lease = message.botId === null || browser === null ? null : acquireBotBrowserMutex(deps.dataDir, message.botId);
+  let result: PublishResult;
+  try {
+    result =
+      browser === null
+        ? failed("error", "这台电脑没有助理浏览器")
+        : await (lease === null
+            ? PUBLISHERS[message.platform](message, { ...deps, browser })
+            : lease.run(() => PUBLISHERS[message.platform](message, { ...deps, browser })));
+  } catch (error) {
+    result = failed("error", error instanceof Error ? error.message : String(error));
+  } finally {
+    lease?.release();
+  }
   return { type: "publish_result", draftId: message.draftId, attempt: message.attempt, result };
 }

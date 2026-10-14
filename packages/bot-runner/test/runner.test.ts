@@ -1046,7 +1046,8 @@ describe("运行器跑一次 prompt", () => {
     tool.release();
     await Promise.all([running, queued, same, newer, other]);
 
-    expect(runDoneIds(h)).toEqual(["run-same", "run-newer", "run-other"]);
+    expect(runDoneIds(h).toSorted()).toEqual(["run-same", "run-newer", "run-other"].toSorted());
+    expect(runDoneIds(h).filter((runId) => runId !== "run-other")).toEqual(["run-same", "run-newer"]);
     expect(h.gateway.requestCount()).toBe(4);
   });
 });
@@ -3252,7 +3253,7 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
     expect(JSON.stringify(h.sent), "发给控制面的报文里没有凭据").not.toContain(token);
   });
 
-  it("运行中补授权后操作表里没了 send_email：旧会话里的 send_email 不出审批卡、不带旧凭据执行，当场拒绝", async () => {
+  it("运行中撤下 send_email：下一次调用实时拒绝，不审批也不执行", async () => {
     const mcp = await fakeMcp();
     const model = sequenced([callTool("send_email", { to: "kehu@example.com", subject: "报价" })], 0);
     const h = await startHarness({
@@ -3277,20 +3278,17 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
     model.release();
     await running;
 
-    expect(
-      h.sent.filter((m) => m.type === "approval_request"),
-      "已经撤下的操作不送审批",
-    ).toEqual([]);
-    expect(mcp.calls, "旧凭据一次都没发出去").toEqual([]);
+    expect(h.sent.filter((m) => m.type === "approval_request")).toEqual([]);
+    expect(mcp.calls).toEqual([]);
     expect(model.toolResults[0]).toContain("已经不再提供这个操作");
-    expect(
-      shape(h.sent).filter((s) => s.startsWith("bot_tool_call")),
-      "撤下的操作在闸门处就拒，终态是 blocked，不是放行后执行时失败",
-    ).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
     expect(shape(h.sent).at(-1)).toBe("run_done");
   });
 
-  it("运行中换了凭据、操作还在：下一次调用丢掉旧连接，带新凭据重连", async () => {
+  it("运行中换了本机 MCP 凭据：同一个 run 的后续调用保留旧连接", async () => {
     const mcp = await fakeMcp();
     const model = sequenced(
       [callAs("call-1", "lookup_stock", { sku: "SKU-1" }), callAs("call-2", "lookup_stock", { sku: "SKU-2" })],
@@ -3314,10 +3312,10 @@ describe("运行器按 Bot 加载 MCP 工具", () => {
 
     expect(
       mcp.calls.map((call) => [call.args, call.authorization]),
-      "换凭据之前用旧的，之后用新的",
+      "本机连接跟着 run 的代际，凭据更新不截断旧 run",
     ).toEqual([
       [{ sku: "SKU-1" }, "Bearer sk-old-11"],
-      [{ sku: "SKU-2" }, "Bearer sk-new-11"],
+      [{ sku: "SKU-2" }, "Bearer sk-old-11"],
     ]);
   });
 
@@ -4530,6 +4528,7 @@ describe("config 按 Bot 增量对账", () => {
     await first;
 
     expect(asked).toEqual([]);
+    await until(() => botSessionProbe.disposals.length > 0, "停道在清空 prompt 队列后释放已建会话");
     expect(botSessionProbe.disposals).toHaveLength(1);
     expect(runDoneIds(h)).toEqual(["run-1"]);
     expect(h.runner.activeRuns()).toEqual([]);
@@ -4941,7 +4940,7 @@ describe("config 按 Bot 增量对账", () => {
     }
   });
 
-  it("run 中途删掉 Bot：下一次工具调用直接被闸门拒绝并解开 run", async () => {
+  it("run 中途删掉 Bot：中止模型请求，后续工具不执行并收尾 run", async () => {
     const mcp = await startFakeMcp();
     try {
       const needApproval = toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url });
@@ -4961,10 +4960,7 @@ describe("config 按 Bot 增量对账", () => {
       await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
 
       expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(0);
-      expect(shape(h.sent).filter((item) => item.startsWith("bot_tool_call"))).toEqual([
-        "bot_tool_call:running",
-        "bot_tool_call:blocked",
-      ]);
+      expect(shape(h.sent).filter((item) => item.startsWith("bot_tool_call"))).toEqual([]);
       expect(mcp.calls, "Bot 已删除，被闸门拒绝的调用不该发出去").toEqual([]);
       expect(runDoneIds(h)).toEqual(["run-1"]);
       expect(h.runner.activeRuns()).toEqual([]);
@@ -5169,7 +5165,7 @@ describe("放弃挂起的审批", () => {
     expect(runDoneIds(h)).toEqual(["run-1"]);
   }, 10_000);
 
-  it("删除 Bot 解开挂起审批但不发 approval_abandoned", async () => {
+  it("删除 Bot 先发 approval_abandoned 再解开挂起审批并收尾", async () => {
     const h = await startHarness({ bots: ["bot-1"], tools, extensionTools: [], script });
     const running = h.runner.prompt(promptMessage("bot-1", "run-1", "甲发邮件"));
     await until(() => h.sent.some((message) => message.type === "approval_request"), "审批");
@@ -5177,7 +5173,9 @@ describe("放弃挂起的审批", () => {
     await h.runner.applyConfig(h.config({ bots: [] }));
     await running;
 
-    expect(h.sent.filter((message) => message.type === "approval_abandoned")).toEqual([]);
+    expect(h.sent.filter((message) => message.type === "approval_abandoned")).toEqual([
+      { type: "approval_abandoned", runId: "run-1", callId: "call-1", reason: "stopped" },
+    ]);
     expect(runDoneIds(h)).toEqual(["run-1"]);
   }, 10_000);
 
@@ -9734,9 +9732,7 @@ describe("运行器的例行边界", () => {
     afterEach(async () => {
       await Promise.all(openMcps.splice(0).map((mcp) => mcp.close()));
     });
-    const WITHDRAWN = "工具连接「客服工具」已经不再提供这个操作";
-    // 第二次请求（lookup_stock 的结果回来之后）才撤销连接，这时会话里已经注册好的 send_email 还在，
-    // applyConfig 要等这次 run 结束才重建会话。
+    // 模型仍看得到旧工具定义，调用时应先拒绝已撤销的连接。
     const revokedMidRun = async (requests: ChatCompletionRequest[]) => {
       const mcp = await startFakeMcp();
       openMcps.push(mcp);
@@ -9771,7 +9767,7 @@ describe("运行器的例行边界", () => {
       return { h, mcp };
     };
 
-    it("read_only 例行跑到一半连接被撤销：残留的 send_email 被拒绝，假 MCP 只收到撤销前的 lookup_stock", async () => {
+    it("read_only 例行跑到一半连接被撤销：下一次调用拒绝已撤销操作", async () => {
       const requests: ChatCompletionRequest[] = [];
       const { h, mcp } = await revokedMidRun(requests);
 
@@ -9785,10 +9781,10 @@ describe("运行器的例行边界", () => {
         "bot_tool_call:running",
         "bot_tool_call:blocked",
       ]);
-      expect(toolResultsOf(requests)).toContain(WITHDRAWN);
+      expect(toolResultsOf(requests)).toContain("已经不再提供这个操作");
     });
 
-    it("用户当面派的 run 跑到一半连接被撤销：残留的免审批 send_email 不出审批卡，当场拒绝，假 MCP 没收到它", async () => {
+    it("用户当面派的 run 跑到一半连接被撤销：旧定义不能继续执行免审批操作", async () => {
       const requests: ChatCompletionRequest[] = [];
       const { h, mcp } = await revokedMidRun(requests);
 
@@ -9797,9 +9793,9 @@ describe("运行器的例行边界", () => {
       expect(mcp.calls.map((call) => call.name)).toEqual(["lookup_stock"]);
       expect(
         shape(h.sent).filter((type) => type === "approval_request"),
-        "撤下的操作批了也执行不了，不让人批",
+        "撤销的操作不产生审批",
       ).toEqual([]);
-      expect(toolResultsOf(requests)).toContain(WITHDRAWN);
+      expect(toolResultsOf(requests)).toContain("已经不再提供这个操作");
       expect(toolStatuses(h)).toEqual([
         "bot_tool_call:running",
         "bot_tool_call:ok",

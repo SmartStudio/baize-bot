@@ -51,6 +51,10 @@ export interface SessionGate {
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
   readonly laneFence: LaneSessionFence;
+  readonly browserCalls?: {
+    acquire(toolName: string, callId: string, signal: AbortSignal | undefined): Promise<void>;
+    release(callId?: string): void;
+  };
 }
 
 export interface BotSessionOptions extends SessionGate {
@@ -132,53 +136,97 @@ function gateToolCalls(
   pi.on("tool_call", async (event, ctx) => {
     const active = gate.activeRun();
     if (active === null) {
-      gate.approvals.block(event.toolCallId);
       return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
     }
     if (!(await gate.waitUntilRunning(ctx.signal))) {
-      gate.approvals.block(event.toolCallId);
+      gate.approvals.block(active.run.runId, event.toolCallId);
       return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
     }
-    const decision = gate.decideTool(event.toolName, event.input);
-    if (decision.verdict === "deny") {
-      gate.approvals.block(event.toolCallId);
-      return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
-    }
-    if (decision.verdict === "ask") {
-      const outcome = await gate.approvals.ask(
-        {
-          runId: active.run.runId,
-          botId: active.run.botId,
-          groupId: active.run.groupId,
-          callId: event.toolCallId,
-          tool: event.toolName,
+    let allowedCall = false;
+    try {
+      try {
+        await gate.browserCalls?.acquire(event.toolName, event.toolCallId, ctx.signal);
+      } catch {
+        gate.approvals.block(active.run.runId, event.toolCallId);
+        return { block: true, reason: "这次浏览器操作被中止了，工具调用没有执行。" };
+      }
+      let decision = gate.decideTool(event.toolName, event.input);
+      if (decision.verdict === "deny") {
+        gate.approvals.block(active.run.runId, event.toolCallId);
+        return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
+      }
+      if (decision.verdict === "ask") {
+        const view = gate.approvalView(event.toolName, event.input);
+        const approvedView = JSON.stringify({ action: decision.action, target: decision.target, view });
+        gate.browserCalls?.release(event.toolCallId);
+        const outcome = await gate.approvals.ask(
+          {
+            runId: active.run.runId,
+            botId: active.run.botId,
+            groupId: active.run.groupId,
+            callId: event.toolCallId,
+            tool: event.toolName,
+            action: decision.action,
+            target: decision.target,
+            view,
+          },
+          ctx.signal,
+        );
+        if (outcome !== "approved") {
+          const reasons = {
+            rejected: "归属人拒绝了这个动作。",
+            timed_out: "10 分钟没人批，按拒绝处理。",
+            voided: "用户发了新消息，这一步作废了。",
+            expired: "这次运行已经结束，审批已过期，没执行。",
+          };
+          return { block: true, reason: reasons[outcome] };
+        }
+        if (!(await gate.waitUntilRunning(ctx.signal))) {
+          gate.approvals.block(active.run.runId, event.toolCallId);
+          return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
+        }
+        try {
+          await gate.browserCalls?.acquire(event.toolName, event.toolCallId, ctx.signal);
+        } catch {
+          gate.approvals.block(active.run.runId, event.toolCallId);
+          return { block: true, reason: "这次浏览器操作被中止了，工具调用没有执行。" };
+        }
+        decision = gate.decideTool(event.toolName, event.input);
+        if (decision.verdict === "deny") {
+          gate.approvals.block(active.run.runId, event.toolCallId);
+          return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
+        }
+        const currentView = JSON.stringify({
           action: decision.action,
           target: decision.target,
           view: gate.approvalView(event.toolName, event.input),
-        },
-        ctx.signal,
-      );
-      if (outcome !== "approved") {
-        const reasons = {
-          rejected: "归属人拒绝了这个动作。",
-          timed_out: "10 分钟没人批，按拒绝处理。",
-          voided: "用户发了新消息，这一步作废了。",
-          expired: "这次运行已经结束，审批已过期，没执行。",
-        };
-        return { block: true, reason: reasons[outcome] };
+        });
+        if (currentView !== approvedView) {
+          gate.approvals.block(active.run.runId, event.toolCallId);
+          return { block: true, reason: "页面已经变了，刚才的批准不适用，请重新操作" };
+        }
       }
+      if (!(await gate.waitUntilRunning(ctx.signal))) {
+        gate.approvals.block(active.run.runId, event.toolCallId);
+        return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
+      }
+      const blocked = await gate.laneFence.beforeEffect(active.run.runId, event.toolCallId, decision.action);
+      if (blocked !== null) {
+        gate.approvals.block(active.run.runId, event.toolCallId);
+        return { block: true, reason: blocked };
+      }
+      allowed(active.run.runId, event.toolCallId, event.toolName, decision);
+      allowedCall = true;
+      return undefined;
+    } finally {
+      if (!allowedCall) gate.browserCalls?.release(event.toolCallId);
     }
-    if (!(await gate.waitUntilRunning(ctx.signal))) {
-      gate.approvals.block(event.toolCallId);
-      return { block: true, reason: "运行器已经停止，工具调用没有执行。" };
-    }
-    const blocked = await gate.laneFence.beforeEffect(active.run.runId, event.toolCallId, decision.action);
-    if (blocked !== null) {
-      gate.approvals.block(event.toolCallId);
-      return { block: true, reason: blocked };
-    }
-    allowed(active.run.runId, event.toolCallId, event.toolName, decision);
-    return undefined;
+  });
+  pi.on("tool_execution_end", (event) => {
+    gate.browserCalls?.release(event.toolCallId);
+  });
+  pi.on("agent_settled", () => {
+    gate.browserCalls?.release();
   });
 }
 

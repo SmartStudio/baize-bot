@@ -21,9 +21,23 @@ import {
   type PublishFailureReason,
   type RunId,
 } from "@baize/shared";
-import { and, asc, eq, inArray, isNotNull, isNull, lt, lte, notInArray, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  notExists,
+  notInArray,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { accounts, agentOutbox, contentPlans, drafts, publications } from "../db/schema.js";
+import { accounts, agentOutbox, bots, contentPlans, drafts, publications } from "../db/schema.js";
 import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
 import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
@@ -498,6 +512,13 @@ export async function claimDueDrafts(
           inArray(accounts.tier, [...PUBLISHING_TIERS]),
           // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
           eq(accounts.login, "valid"),
+          // 暂停是挂起，不把到点的稿子抢成终态失败；恢复后下一轮照抢。
+          notExists(
+            tx
+              .select({ id: bots.id })
+              .from(bots)
+              .where(and(eq(bots.id, drafts.botId), eq(bots.runState, "paused"))),
+          ),
           or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
           reachable,
         ),

@@ -31,7 +31,7 @@ type PromptMessage = Extract<ControlToAgent, { type: "prompt" }>;
 export type PokerResult = Extract<ControlToAgent, { type: "poker_result" }>["result"];
 
 // 控制面在桌锁里落完动作才回执，正常是毫秒级；它的 60 秒兜底不给运行器发报文，这里不必等过它。
-// 超时只兜回执丢失（控制面对不认的 run 静默丢帧），等的时候同一个 Bot 的串行队列被占着，所以要短，20 秒给桌锁排队留足余量。
+// 超时只兜回执丢失（控制面对不认的 run 静默丢帧），等的时候牌桌道的串行队列被占着，所以要短，20 秒给桌锁排队留足余量。
 const POKER_RESULT_TIMEOUT_MS = 20_000;
 
 const POSITIONS = {

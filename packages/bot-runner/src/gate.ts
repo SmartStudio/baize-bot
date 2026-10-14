@@ -49,8 +49,8 @@ export interface GateCall extends GateContext {
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   /**
-   * 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属是 null。撤销连接后会话里残留的旧 MCP 工具
-   * 到不了这里：运行器按 `mcp.resolve` 认出它已撤下，在闸门之前就拒。
+   * 这个名字是谁登记的。运行器自己的工具按名字认，不看它；查不到归属是 null。MCP 的操作归属取 run 的代际；
+   * 最新的授权和审批偏好由运行器在调用时传入。
    */
   readonly source: ToolSource | null;
   /** 助理浏览器当前页的主机名，点和填按它授权。没有浏览器、还没开页或停在空白页是 null。 */
