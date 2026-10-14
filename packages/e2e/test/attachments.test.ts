@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
@@ -160,6 +160,7 @@ it("同一账号远程起草带图小红书草稿，本机发布前按附件下�
       .toBe("online");
     const first = BotListResponse.parse(await stack.get("/api/bots")).items[0];
     if (first === undefined) throw new Error("seed 没建出 Bot");
+    await mkdir(join(remoteDataDir, first.bot.id, "work"), { recursive: true });
     await writeFile(join(remoteDataDir, first.bot.id, "work", "cover.png"), PNG);
     localCopyPath = join(stack.dataDir, first.bot.id, "drafts", `${sha256}.png`);
     expect(existsSync(localCopyPath), "起草前本机没有远程电脑的配图拷贝").toBe(false);

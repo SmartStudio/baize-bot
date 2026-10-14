@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -149,6 +150,7 @@ const configMessage = {
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },
   accountsProxy: { baseUrl: "http://localhost:3001/accounts-proxy" },
   mcpProxy: { baseUrl: "http://localhost:3001/mcp-proxy" },
+  hub: { baseUrl: "http://localhost:3001/hub/v1" },
 };
 
 const promptMessage = {
@@ -1175,6 +1177,137 @@ describe("电脑代理连控制面", () => {
       accountId: "account-1",
       state: { login: "valid", handle: "白泽工厂日记" },
     });
+  });
+
+  it("第二份 config 的 hub 和 key 交给运行器，排队发布在下载时才读取最新配置", async () => {
+    const bytes = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const downloads: Array<{ path: string; authorization: string | undefined }> = [];
+    const hub = createServer((request, response) => {
+      downloads.push({ path: request.url ?? "", authorization: request.headers.authorization });
+      response.writeHead(200, { "content-type": "image/png" }).end(bytes);
+    });
+    await new Promise<void>((resolve) => hub.listen(0, "127.0.0.1", resolve));
+    const address = hub.address() as AddressInfo;
+    const firstConfig = {
+      ...configMessage,
+      hub: { baseUrl: `http://127.0.0.1:${address.port}/old-hub` },
+    };
+    const secondConfig = {
+      ...firstConfig,
+      generation: 2,
+      hub: { baseUrl: `http://127.0.0.1:${address.port}/new-hub` },
+      modelGateway: { ...firstConfig.modelGateway, apiKey: "rotated-key" },
+    };
+    let releaseFirst: (() => void) | undefined;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let connectionCalls = 0;
+    const server = startControlPlane();
+    servers.push(server);
+    const dataDir = await tempDataDir();
+    spawnAgent(await server.url(), {
+      dataDir,
+      makeChrome: () => ({
+        ...fakeChrome(),
+        connection: async () => {
+          connectionCalls += 1;
+          if (connectionCalls === 1) await firstBlocked;
+          throw new Error("验图完成，测试不连接平台");
+        },
+      }),
+    });
+    const publishMessage = (draftId: string, botId: string) => ({
+      type: "publish_draft",
+      draftId,
+      botId,
+      accountId: "account-1",
+      platform: "xiaohongshu",
+      content: {
+        kind: "post",
+        title: "跨电脑配图",
+        text: "从当前中枢取回配图",
+        images: [{ kind: "attachment", attachmentId: "attachment-1", sha256, mime: "image/png" }],
+        github: null,
+      },
+      attempt: "2026-10-14T00:00:00.000Z",
+    });
+    try {
+      const socket = await server.waitForSocket(1);
+      socket.send(JSON.stringify(firstConfig));
+      await server.waitForMessage("config_applied", 1);
+      expect(initialRunnerConfigs[0]?.hub).toEqual(firstConfig.hub);
+      expect(initialRunnerConfigs[0]?.modelGateway).toEqual(firstConfig.modelGateway);
+      socket.send(JSON.stringify(publishMessage("draft-1", "bot-1")));
+      await poll(() => (connectionCalls === 1 ? true : undefined), 3000, "第一条发布下载完并占住队列");
+
+      socket.send(JSON.stringify(publishMessage("draft-2", "bot-2")));
+      socket.send(JSON.stringify(secondConfig));
+      await server.waitForMessage("config_applied", 2);
+      expect(runnerCalls().appliedConfigs[0]?.hub).toEqual(secondConfig.hub);
+      expect(runnerCalls().appliedConfigs[0]?.modelGateway).toEqual(secondConfig.modelGateway);
+      expect(downloads, "第二条发布还在排队，尚未下载").toEqual([
+        { path: "/old-hub/attachments/attachment-1", authorization: "Bearer dev-key" },
+      ]);
+
+      releaseFirst?.();
+      await server.waitForMessage("publish_result", 1);
+      await expect(server.waitForMessage("publish_result", 2)).resolves.toMatchObject({
+        draftId: "draft-2",
+        result: { status: "failed", reason: "error", detail: "发布出错：验图完成，测试不连接平台" },
+      });
+      expect(downloads).toEqual([
+        { path: "/old-hub/attachments/attachment-1", authorization: "Bearer dev-key" },
+        { path: "/new-hub/attachments/attachment-1", authorization: "Bearer rotated-key" },
+      ]);
+      expect(readFileSync(join(dataDir, "bot-2", "drafts", `${sha256}.png`))).toEqual(bytes);
+      expect(connectionCalls).toBe(2);
+    } finally {
+      releaseFirst?.();
+      hub.closeAllConnections();
+      await new Promise<void>((resolve, reject) => hub.close((error) => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("config 尚未下发时发布附件返回固定中文错误，不连接浏览器", async () => {
+    let connectionCalls = 0;
+    const server = startControlPlane();
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      makeChrome: () => ({
+        ...fakeChrome(),
+        connection: async () => {
+          connectionCalls += 1;
+          return fakeConnection;
+        },
+      }),
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(
+      JSON.stringify({
+        type: "publish_draft",
+        draftId: "draft-1",
+        botId: "bot-1",
+        accountId: "account-1",
+        platform: "xiaohongshu",
+        content: {
+          kind: "post",
+          title: "等待附件配置",
+          text: "配置没到不能下载",
+          images: [{ kind: "attachment", attachmentId: "attachment-1", sha256: "a".repeat(64), mime: "image/png" }],
+          github: null,
+        },
+        attempt: "2026-10-14T00:00:00.000Z",
+      }),
+    );
+    await expect(server.waitForMessage("publish_result")).resolves.toMatchObject({
+      result: { status: "failed", reason: "error", detail: "发布出错：配图从白泽下载失败，请稍后重试" },
+    });
+    expect(connectionCalls).toBe(0);
   });
 
   it("publish_draft 交给发布器时带上助理浏览器和数据目录", async () => {

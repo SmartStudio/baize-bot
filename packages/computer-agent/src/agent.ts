@@ -81,6 +81,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let heartbeat: NodeJS.Timeout | null = null;
   let attempt = 0;
   let runner: Runner | null = null;
+  let attachmentConfig: Pick<AgentRunnerConfig, "hub" | "modelGateway"> | null = null;
   let conn: number | null = null;
   let upSent = 0;
   let outbox: ReliableOutbox | null = null;
@@ -326,6 +327,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         heartbeat.unref();
         return;
       case "config": {
+        attachmentConfig = { hub: message.hub, modelGateway: message.modelGateway };
         const config: AgentRunnerConfig = {
           computerId: options.computerId,
           bots: message.bots,
@@ -335,6 +337,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           modelGateway: message.modelGateway,
           accountsProxy: message.accountsProxy,
           mcpProxy: message.mcpProxy,
+          hub: message.hub,
           // 不透传的话运行器按空数组对账，每来一条 config 就把所有 Bot 盘上的 skill 清空。
           skills: message.skills,
           brand: message.brand,
@@ -427,10 +430,14 @@ export function startAgent(options: AgentOptions): AgentHandle {
         void runner?.resume(message.botId).catch((error: unknown) => log(`恢复 Bot 失败：${String(error)}`));
         return;
       case "publish_draft":
-        void publishDraft(message, { dataDir, browser: chrome.kind === "local" ? browserConfig : null }).then(
-          report,
-          (error: unknown) => log(`发布草稿 ${message.draftId} 出错：${String(error)}`),
-        );
+        void publishDraft(message, {
+          dataDir,
+          browser: chrome.kind === "local" ? browserConfig : null,
+          liveHub: () => {
+            if (attachmentConfig === null) throw new Error("附件配置尚未下发");
+            return { hub: attachmentConfig.hub, gateway: attachmentConfig.modelGateway };
+          },
+        }).then(report, (error: unknown) => log(`发布草稿 ${message.draftId} 出错：${String(error)}`));
         return;
     }
   };
