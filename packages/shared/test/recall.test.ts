@@ -6,6 +6,7 @@ describe("recall 的边界契约", () => {
     expect(RecallRequest.parse({ query: "  小红书  " })).toEqual({ query: "小红书" });
     expect(RecallRequest.safeParse({ query: "  " }).success).toBe(false);
     expect(RecallRequest.safeParse({ query: "字".repeat(101) }).success).toBe(false);
+    expect(RecallRequest.safeParse({ query: "预算\u0000" }).success).toBe(false);
     expect(RecallRequest.safeParse({ query: "底牌", botId: "别人的 Bot" }).success).toBe(false);
   });
 

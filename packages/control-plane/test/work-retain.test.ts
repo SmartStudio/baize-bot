@@ -1,6 +1,9 @@
 import {
   CreateBotResponse,
+  CreateGroupResponse,
   EMPTY_WORK_HEAD,
+  HubLaneSnapshot,
+  RecallResponse,
   UplinkAck,
   ToolResponse,
   advanceWorkHead,
@@ -18,7 +21,7 @@ import { startServer, type RunningServer } from "../src/server.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 
 let database: TestDb;
 let server: RunningServer;
@@ -239,7 +242,210 @@ async function changed(who: Rig, toolId: string, patch: unknown) {
   await who.agent.expect("config");
 }
 
+async function recallLane(who: Rig): Promise<Prompt> {
+  const peer = CreateBotResponse.parse(await (await who.client.post("/api/bots", { name: "同事" })).json());
+  await who.agent.expect("config");
+  const { group } = CreateGroupResponse.parse(
+    await (await who.client.post("/api/groups", { title: "召回入口", botIds: [who.botId, peer.bot.id] })).json(),
+  );
+  expect((await who.client.post(`/api/groups/${group.id}/messages`, { text: "@小录 查以前的记录" })).status).toBe(201);
+  return who.agent.expect("prompt");
+}
+
+async function recall(who: Rig, prompt: Prompt, query: string) {
+  const response = await fetch(`${who.client.origin}/hub/v1/recall`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${who.key}`,
+      "x-baize-lane": `${who.botId}/${prompt.groupId}/${prompt.lane.epoch}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ query }),
+  });
+  expect(response.status).toBe(200);
+  return RecallResponse.parse(await response.json());
+}
+
+async function snapshot(who: Rig, prompt: Prompt) {
+  const response = await fetch(`${who.client.origin}/hub/v1/lanes/${who.botId}/${who.groupId}/chat`, {
+    headers: {
+      authorization: `Bearer ${who.key}`,
+      "x-baize-lane": `${who.botId}/${who.groupId}/${prompt.lane.epoch}`,
+    },
+  });
+  expect(response.status).toBe(200);
+  return HubLaneSnapshot.parse(await response.json());
+}
+
 describe("服务器工作记录留存复查", () => {
+  it("PATCH 返回时旧原文和检索文字立即消失，不等下一条上传，跨群 recall 也立即失效", async () => {
+    const who = await rig();
+    const tool = await connectTool(who, false);
+    const prompt = await start(who);
+    const body = await frame(who, [line("safe"), toolLine("private", "send_email", "safe")], { prompt });
+    expect(await send(who.agent, body)).toBeNull();
+    const reader = await recallLane(who);
+    expect((await recall(who, reader, "本机业务原文"))[0]?.excerpt).toBe("本机业务原文");
+
+    expect((await who.client.patch(`/api/tools/${tool.id}`, { localOnly: true })).status).toBe(200);
+    const stored = await state(who);
+    expect(stored.entries.map((row) => row.line)).toEqual([line("safe")]);
+    expect(JSON.stringify(stored.entries)).not.toContain("本机业务原文");
+    expect(stored.metadata?.next_seq).toBe(1);
+    expect(await recall(who, reader, "本机业务原文")).toEqual([]);
+  });
+
+  it("读取侧按当前名单防住残留旧原文，recall 与分页 Hub 均只返回合规内容", async () => {
+    const who = await rig();
+    const tool = await connectTool(who, false);
+    const prompt = await start(who);
+    const original = [line("safe"), toolLine("private", "send_email", "safe")];
+    const body = await frame(who, original, { prompt });
+    expect(await send(who.agent, body)).toBeNull();
+    const reader = await recallLane(who);
+    expect(await recall(who, reader, "本机业务原文")).toHaveLength(1);
+    expect((await snapshot(who, prompt)).entries.map((entry) => entry.line)).toEqual(original);
+    await changed(who, tool.id, { localOnly: true });
+    // 模拟旧版本或漏复查的历史残留，读取不能依赖写入侧已经修好。
+    await database.sql`DELETE FROM work_entries WHERE bot_id = ${who.botId} AND group_id = ${who.groupId}`;
+    for (const [seq, raw] of original.entries()) {
+      const entry = JSON.parse(raw) as { id: string; parentId: string | null };
+      await database.sql`
+        INSERT INTO work_entries (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id, parent_id,
+          pi_type, retention, line, search_text)
+        VALUES (${who.botId}, ${who.groupId}, 'chat', ${seq}, 1, ${who.ownerId}, ${prompt.runId}, ${entry.id},
+          ${entry.parentId}, 'message', 'verbatim', ${raw}, ${seq === 0 ? "文字safe" : "本机业务原文"})
+      `;
+    }
+    await database.sql`UPDATE work_streams SET next_seq = 2, head = ${body.head}, tail_entry_id = 'private'
+      WHERE bot_id = ${who.botId} AND group_id = ${who.groupId} AND stream = 'chat'`;
+    expect(JSON.stringify((await state(who)).entries)).toContain("本机业务原文");
+    expect(await recall(who, reader, "本机业务原文")).toEqual([]);
+    const page = await snapshot(who, prompt);
+    expect(page.entries.map((entry) => entry.line)).toEqual([original[0]]);
+    expect(page.nextSeq).toBe(1);
+    expect(page.head).toBe(await advanceWorkHead(EMPTY_WORK_HEAD, original.slice(0, 1)));
+  });
+
+  it("非检索元数据含 JSON 转义 NUL 的工作记录照常接收并可召回", async () => {
+    const who = await rig();
+    const prompt = await start(who);
+    const raw = JSON.stringify({
+      type: "message",
+      id: "nul",
+      parentId: null,
+      timestamp: "2026-10-14T00:00:00.000Z",
+      opaque: "before\u0000after",
+      message: { role: "assistant", content: [{ type: "text", text: "NUL元数据预算" }] },
+    });
+    expect(await send(who.agent, await frame(who, [raw], { prompt }))).toBeNull();
+    expect((await state(who)).entries[0]?.line).toBe(raw);
+    const reader = await recallLane(who);
+    expect(await recall(who, reader, "元数据预算")).toEqual([
+      {
+        groupId: who.groupId,
+        groupTitle: "小录",
+        at: "2026-10-14T00:00:00.000Z",
+        kind: "assistant",
+        excerpt: "NUL元数据预算",
+      },
+    ]);
+  });
+
+  it("新建本机连接在提交时复查已有的同名工具原文", async () => {
+    const who = await rig();
+    const prompt = await start(who);
+    expect(await send(who.agent, await frame(who, [toolLine("old")], { prompt }))).toBeNull();
+    expect(JSON.stringify((await state(who)).entries)).toContain("本机业务原文");
+    const creating = who.client.post("/api/tools", { name: "新建本机", url: mcp.url, localOnly: true });
+    const discovery = await who.agent.expect("mcp_discover");
+    who.agent.send({
+      type: "mcp_discovered",
+      requestId: discovery.requestId,
+      result: {
+        ok: true,
+        operations: [{ name: "send_email", description: "本机操作", inputSchema: {}, needsApproval: false }],
+      },
+    });
+    expect((await creating).status).toBe(201);
+    expect((await state(who)).entries).toEqual([]);
+    expect((await state(who)).metadata?.next_seq).toBe(0);
+  });
+
+  it("recall 的名单和记录共用快照，等待读取期间的新名单与新原文不会混读", async () => {
+    const who = await rig();
+    const tool = await connectTool(who, false);
+    const prompt = await start(who);
+    expect(await send(who.agent, await frame(who, [toolLine("old")], { prompt }))).toBeNull();
+    const reader = await recallLane(who);
+    let locked!: () => void;
+    let release!: () => void;
+    let blockerPid = 0;
+    const held = new Promise<void>((resolve) => (locked = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const blocker = database.sql.begin(async (tx) => {
+      const [backend] = await tx<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      blockerPid = backend!.pid;
+      await tx`LOCK TABLE work_entries IN ACCESS EXCLUSIVE MODE`;
+      locked();
+      await released;
+      // 模拟另一个版本在同一事务中改名单并留下新原文；读事务必须保持开始时的快照。
+      await tx`UPDATE tool_connections SET local_only = true WHERE id = ${tool.id}`;
+      const raw = toolLine("new").replace("本机业务原文", "后来插入的本机业务原文");
+      await tx`
+        INSERT INTO work_entries (bot_id, group_id, stream, seq, epoch, owner_id, run_id, entry_id,
+          pi_type, retention, line, search_text)
+        VALUES (${who.botId}, ${who.groupId}, 'chat', 1, 1, ${who.ownerId}, ${prompt.runId}, 'new',
+          'message', 'verbatim', ${raw}, '后来插入的本机业务原文')
+      `;
+    });
+    let reading: Promise<Awaited<ReturnType<typeof recall>>> | undefined;
+    try {
+      await held;
+      reading = recall(who, reader, "本机业务原文");
+      await waitFor(async () => {
+        const rows = await database.sql`
+          SELECT pid FROM pg_stat_activity WHERE datname = ${database.databaseName}
+            AND wait_event_type = 'Lock' AND query ILIKE '%work_entries%'
+            AND ${blockerPid} = ANY(pg_blocking_pids(pid))
+        `;
+        return rows.length > 0;
+      }, "recall 已读取旧名单，候选查询等待表锁");
+      release();
+      await blocker;
+      expect((await reading).map((entry) => entry.excerpt)).toEqual(["本机业务原文"]);
+      expect(await recall(who, reader, "本机业务原文")).toEqual([]);
+    } finally {
+      release();
+      await Promise.allSettled([blocker, reading]);
+    }
+  });
+
+  it("补授权发现新增本机操作后，同一 PATCH 返回前撤回它以前的原文", async () => {
+    const who = await rig();
+    const tool = await connectTool(who, true);
+    const prompt = await start(who);
+    const raw = toolLine("old", "new_private");
+    expect(await send(who.agent, await frame(who, [raw], { prompt }))).toBeNull();
+    expect(JSON.stringify((await state(who)).entries)).toContain("本机业务原文");
+    const updating = who.client.patch(`/api/tools/${tool.id}`, { authorization: "Bearer refreshed-fixture" });
+    const discovery = await who.agent.expect("mcp_discover");
+    who.agent.send({
+      type: "mcp_discovered",
+      requestId: discovery.requestId,
+      result: {
+        ok: true,
+        operations: [
+          ...tool.operations,
+          { name: "new_private", description: "新操作", inputSchema: {}, needsApproval: false },
+        ],
+      },
+    });
+    expect((await updating).status).toBe(200);
+    expect((await state(who)).entries).toEqual([]);
+    expect((await state(who)).metadata?.next_seq).toBe(0);
+  });
+
   it.each([
     [
       "图片块",
@@ -354,12 +560,8 @@ describe("服务器工作记录留存复查", () => {
     const rejected = await frame(who, [line("new", "tail")], { prompt, fromSeq: 3, previousHead: first.head });
     const prefixHead = await advanceWorkHead(EMPTY_WORK_HEAD, original.slice(0, 1));
     expect(await send(who.agent, rejected)).toEqual({
-      code: "invalid",
-      reason: "tool_list_changed",
-      replayReason: "unfiltered",
-      lineIndex: 1,
+      code: "seq_mismatch",
       nextSeq: 1,
-      head: prefixHead,
     });
     const stored = await state(who);
     expect(stored.entries.map((entry) => entry.line)).toEqual(original.slice(0, 1));
@@ -392,12 +594,8 @@ describe("服务器工作记录留存复查", () => {
     const next = await frame(who, [line("new")], { prompt, fromSeq: 2, previousHead: first.head });
     expect(await Promise.all([send(who.agent, next), send(who.agent, next)])).toEqual([
       {
-        code: "invalid",
-        reason: "tool_list_changed",
-        replayReason: "unfiltered",
-        lineIndex: 0,
+        code: "seq_mismatch",
         nextSeq: 0,
-        head: EMPTY_WORK_HEAD,
       },
       { code: "seq_mismatch", nextSeq: 0 },
     ]);
@@ -425,22 +623,11 @@ describe("服务器工作记录留存复查", () => {
       knownIds: ["local"],
       localIds: ["local"],
     });
+    await database.sql`UPDATE work_streams SET retain_snapshot = NULL WHERE bot_id = ${who.botId} AND group_id = ${who.groupId}`;
     await changed(who, tool.id, { name: "连接新名" });
-    expect(await send(who.agent, next)).toEqual({
-      code: "invalid",
-      reason: "tool_list_changed",
-      nextSeq: 1,
-      head: first.head,
-    });
     expect((await state(who)).metadata?.retain_snapshot).toMatchObject({ localIds: ["local"] });
     expect((await who.client.delete(`/api/tools/${tool.id}`)).status).toBe(204);
     await who.agent.expect("config");
-    expect(await send(who.agent, next)).toEqual({
-      code: "invalid",
-      reason: "tool_list_changed",
-      nextSeq: 1,
-      head: first.head,
-    });
     expect((await state(who)).metadata?.retain_snapshot).toMatchObject({
       ...emptySnapshot(emptyCtx),
       knownIds: ["local"],

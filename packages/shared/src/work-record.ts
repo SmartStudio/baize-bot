@@ -9,10 +9,6 @@ export const PRUNED_IMAGE_TEXT = "（之前的截图已省略）";
 export const RETAIN_TEXT_LIMIT_BYTES = 16 * 1024;
 const KEPT_EDGE_BYTES = 2 * 1024;
 
-// 单位是 UTF-16 单元，不是字节：8192 个汉字是 24 KiB，最坏 UTF-8 体积 24576 字节（8192 个 3 字节字符）。
-// 实测全部文字块 p99 约 4.2 KB，过滤后的长块约 4.3 KB，都整段装得下；更长的只留开头，给 trigram 索引的行体积封顶。
-export const SEARCH_TEXT_LIMIT = 8192;
-
 export interface RetainContext {
   readonly localOnlyToolNames: ReadonlySet<string>;
 }
@@ -41,7 +37,7 @@ const sha256 = (data: string): string => createHash("sha256").update(data, "utf8
 
 /**
  * 数字原文保值靠 JSON.rawJSON、JSON.isRawJSON 和 reviver 的 context.source。缺任何一个都不能退回丢精度或整行放行，
- * 所以创建 Retainer、复查一帧和抽检索文字时先探一次，缺了就抛，让环境问题和「这行不是 JSON」分开。
+ * 所以创建 Retainer 和复查一帧时先探一次，缺了就抛，让环境问题和「这行不是 JSON」分开。
  */
 export function assertRawJsonSupport(): void {
   const api = JSON as unknown as Partial<JsonWithSource>;
@@ -416,36 +412,4 @@ export function createRetainer(ctx: RetainContext, resume?: RetainSnapshot): Ret
     },
     snapshot: () => (halted === "tool_list_changed" ? structuredClone(initial) : snapshotOf(ctx, seen)),
   };
-}
-
-const SEARCHABLE_ROLES = new Set(["user", "assistant", "toolResult"]);
-
-function capSearchText(text: string): string {
-  if (text.length <= SEARCH_TEXT_LIMIT) return text;
-  const cut = text.slice(0, SEARCH_TEXT_LIMIT);
-  const last = cut.charCodeAt(cut.length - 1);
-  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
-}
-
-/** 给 trigram 检索的文字：用户和助手的文字块、工具结果的文字。图片、思考、工具参数、usage 都不进。 */
-export function searchTextOf(line: string): string {
-  assertRawJsonSupport();
-  try {
-    return searchTextOfEntry(parseObject(line));
-  } catch {
-    return "";
-  }
-}
-
-function searchTextOfEntry(entry: Json | undefined): string {
-  if (entry === undefined || entry.type !== "message" || !isRecord(entry.message)) return "";
-  const { role, content } = entry.message;
-  if (typeof role !== "string" || !SEARCHABLE_ROLES.has(role)) return "";
-  if (typeof content === "string") return capSearchText(content);
-  if (!Array.isArray(content)) return "";
-  const texts: string[] = [];
-  for (const block of content as unknown[]) {
-    if (isRecord(block) && block.type === "text" && typeof block.text === "string") texts.push(block.text);
-  }
-  return capSearchText(texts.join("\n"));
 }

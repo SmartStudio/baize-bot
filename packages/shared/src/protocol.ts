@@ -121,7 +121,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
     detail: z.string(),
     // config_rejected 时带被拒那条 config 的代际；读不出代际时不带，这时这条连接还没回过带代际的 config_applied 就按当前那一代算，回过之后忽略。
     generation: z.number().int().positive().optional(),
-    // 知道是哪个活出的错就带上群号；不带时控制面退回到这台电脑最近一个未结束的 run。
+    // 知道是哪个活出的错就带上群号；不带时只有这台电脑恰好一个未结束的 run 才归给它，否则丢弃。
     groupId: GroupId.optional(),
     // 带了就是说这个 run 在代理这头不会再跑、也不会有 run_done，控制面替它收尾。
     runId: RunId.optional(),

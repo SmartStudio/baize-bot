@@ -24,7 +24,7 @@ const EXCEPTIONS: readonly Exception[] = [
     file: "repo/work-records.ts",
     fn: "recheckCommitted",
     sites: 1,
-    reason: "已验证归属人和道持有者的追加事务内部重放，旧行只供留存复查和截断，不向调用方返回正文",
+    reason: "归属人排它锁下的名单修改或已授权追加事务内部重放，旧行只供留存复查和截断，不向调用方返回正文",
   },
   {
     file: "repo/work-records.ts",

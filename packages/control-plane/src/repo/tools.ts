@@ -9,13 +9,14 @@ import {
   type UpdateToolRequest,
   type UserId,
 } from "@baize/shared";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import type { ToolCrypto } from "../crypto.js";
 import type { Db } from "../db/client.js";
-import { bots, toolConnectionBots, toolConnections, workStreams } from "../db/schema.js";
+import { bots, toolConnectionBots, toolConnections } from "../db/schema.js";
 import { newId } from "../ids.js";
 import type { Tx } from "./messages.js";
 import { lockOwner } from "./runs.js";
+import { recheckOwnerWorkRecords } from "./work-records.js";
 
 type ToolRow = typeof toolConnections.$inferSelect;
 
@@ -135,7 +136,9 @@ export async function createTool(
       })
       .onConflictDoNothing({ target: [toolConnections.ownerId, toolConnections.name] })
       .returning();
-    return row === undefined ? null : toTool(row, []);
+    if (row === undefined) return null;
+    await recheckOwnerWorkRecords(tx, ownerId);
+    return toTool(row, []);
   });
 }
 
@@ -226,14 +229,7 @@ export async function updateTool(
           ? [locked]
           : await tx.update(toolConnections).set(changes).where(eq(toolConnections.id, locked.id)).returning();
       if (row === undefined) return { kind: "gone" };
-      if (
-        row.name !== locked.name ||
-        row.localOnly !== locked.localOnly ||
-        JSON.stringify(row.operations.map((op) => op.name).toSorted()) !==
-          JSON.stringify(locked.operations.map((op) => op.name).toSorted())
-      ) {
-        await invalidateRetainSnapshots(tx, ownerId);
-      }
+      if (changesRetainPolicy) await recheckOwnerWorkRecords(tx, ownerId);
       if (assigned !== undefined) {
         await tx.delete(toolConnectionBots).where(eq(toolConnectionBots.toolConnectionId, current.id));
         if (assigned.length > 0) {
@@ -252,17 +248,6 @@ export async function updateTool(
   }
 }
 
-// 改连接名、删连接时操作名集合可能不变，仍须让历史行按最新名单重放。
-async function invalidateRetainSnapshots(tx: Tx, ownerId: UserId): Promise<void> {
-  await tx
-    .update(workStreams)
-    .set({
-      retainSnapshot: sql`jsonb_set(coalesce(${workStreams.retainSnapshot},
-      '{"version":1,"toolFingerprint":"","knownIds":[],"localIds":[]}'::jsonb), '{toolFingerprint}', '""'::jsonb)`,
-    })
-    .where(inArray(workStreams.botId, tx.select({ id: bots.id }).from(bots).where(eq(bots.ownerId, ownerId))));
-}
-
 export async function deleteTool(db: Db, ownerId: UserId, id: ToolConnectionId): Promise<boolean> {
   return db.transaction(async (tx) => {
     await lockOwner(tx, ownerId, "exclusive");
@@ -271,7 +256,7 @@ export async function deleteTool(db: Db, ownerId: UserId, id: ToolConnectionId):
       .where(and(eq(toolConnections.id, id), eq(toolConnections.ownerId, ownerId)))
       .returning({ id: toolConnections.id });
     if (deleted.length === 0) return false;
-    await invalidateRetainSnapshots(tx, ownerId);
+    await recheckOwnerWorkRecords(tx, ownerId);
     return true;
   });
 }

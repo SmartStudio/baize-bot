@@ -224,6 +224,47 @@ async function laneCancel(agent: AgentClient, botId: BotId, groupId: GroupId, ep
 }
 
 describe("道租约派活", () => {
+  it("Node 墙钟拨快时，断线宽限仍按数据库时钟写入", async () => {
+    const who = await owner();
+    const local = await online(who.local);
+    const push = await connectPush(server.port, who.client.cookie ?? "");
+    pushes.push(push);
+    const realNow = Date.now;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + 5 * 60_000);
+
+    local.close();
+    await pushedSleeping(push, [who.local.computerId]);
+    const [row] = await database.sql<{ remaining_ms: number }[]>`
+      SELECT floor(extract(epoch FROM (lease_until - clock_timestamp())) * 1000)::int AS remaining_ms
+      FROM computers WHERE id = ${who.local.computerId}
+    `;
+    expect(row?.remaining_ms).toBeGreaterThanOrEqual(59_000);
+    expect(row?.remaining_ms).toBeLessThanOrEqual(60_000);
+  });
+
+  it("墙钟在断线收尾期间跳快时，宽限计时器仍等待完整租约", async () => {
+    const who = await owner();
+    const local = await online(who.local);
+    await post(who.client, who.groupId, "断线时仍在跑");
+    const run = await prompt(local, "断线时仍在跑");
+    const push = await connectPush(server.port, who.client.cookie ?? "");
+    pushes.push(push);
+
+    const realNow = Date.now;
+    let nowCalls = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => realNow() + (nowCalls++ === 0 ? 0 : 120_000));
+    const timerSpy = vi.spyOn(globalThis, "setTimeout");
+    local.close();
+    await pushedSleeping(push, [who.local.computerId]);
+
+    const requestedDelays = timerSpy.mock.calls.map(([, delay]) => Number(delay));
+    expect(requestedDelays.some((delay) => delay >= 59_000 && delay <= 60_000)).toBe(true);
+    const [state] = await database.sql<{ ended_at: string | null }[]>`
+      SELECT ended_at FROM runs WHERE id = ${run.runId}
+    `;
+    expect(state?.ended_at).toBeNull();
+  });
+
   it("hello 按静默与宽限续租，合并窗口内不重写，断线缩到宽限且同安装重连不加代际", async () => {
     const who = await owner();
     const beforeHello = Date.now();

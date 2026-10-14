@@ -514,11 +514,8 @@ export class AgentHub {
         this.#deps.db,
         conn.computerId,
         conn.conn,
-        new Date(
-          receivedAt.getTime() +
-            (this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS) +
-            (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS),
-        ),
+        (this.#deps.silenceTimeoutMs ?? DEFAULT_SILENCE_TIMEOUT_MS) +
+          (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS),
       );
       conn.leaseRenewedAt = receivedAt.getTime();
     }
@@ -704,19 +701,20 @@ export class AgentHub {
     if (this.#connections.get(closed.computerId) !== closed) return;
     this.#connections.delete(closed.computerId);
     closed.acknowledgements.stop();
-    const leaseUntil = new Date(Date.now() + (this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS));
-    await setComputerLease(this.#deps.db, closed.computerId, closed.conn, leaseUntil);
+    const leaseRemainingMs = await setComputerLease(
+      this.#deps.db,
+      closed.computerId,
+      closed.conn,
+      this.#deps.disconnectGraceMs ?? DEFAULT_DISCONNECT_GRACE_MS,
+    );
     // 缩租等待期间可能已经停机，不能在 closeAll 清理之后补建宽限计时器。
-    if (this.#lifecycle === "serving") {
-      const timer = setTimeout(
-        () => {
-          this.#graceTimers.delete(closed.computerId);
-          this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
-            (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
-          );
-        },
-        Math.max(0, leaseUntil.getTime() - Date.now()),
-      );
+    if (this.#lifecycle === "serving" && leaseRemainingMs !== null) {
+      const timer = setTimeout(() => {
+        this.#graceTimers.delete(closed.computerId);
+        this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
+          (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
+        );
+      }, leaseRemainingMs);
       timer.unref();
       this.#graceTimers.set(closed.computerId, timer);
     }

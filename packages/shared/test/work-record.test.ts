@@ -3,12 +3,10 @@ import {
   PRUNED_IMAGE_TEXT,
   RETAIN_TEXT_LIMIT_BYTES,
   RetainSnapshot,
-  SEARCH_TEXT_LIMIT,
   assertRawJsonSupport,
   checkFrame,
   createRetainer,
   emptySnapshot,
-  searchTextOf,
   toolListFingerprint,
   type FrameCheck,
   type RetainContext,
@@ -355,74 +353,6 @@ describe("isRetained", () => {
       wellFormed(out.line);
     }
     expect(redacted).toBeGreaterThan(100);
-  });
-});
-
-describe("searchTextOf", () => {
-  it("用户和助手的文字块、工具结果的文字按顺序用换行连起来，别的都不进", () => {
-    const user = entry({
-      role: "user",
-      content: [
-        { type: "text", text: "帮我查" },
-        { type: "image", data: "AAAA", mimeType: "image/png" },
-        { type: "text", text: "天气" },
-      ],
-      timestamp: 1,
-    });
-    expect(searchTextOf(user)).toBe("帮我查\n天气");
-    const assistant = entry({
-      role: "assistant",
-      content: [
-        { type: "thinking", thinking: "先想想", thinkingSignature: "sig" },
-        { type: "text", text: "好的", textSignature: "ts" },
-        { type: "toolCall", id: "c", name: "weather", arguments: { city: "北京" } },
-      ],
-      model: "m",
-      usage: { input: 1, output: 2 },
-      timestamp: 1,
-    });
-    expect(searchTextOf(assistant)).toBe("好的");
-    const toolResult = entry({
-      role: "toolResult",
-      toolCallId: "c",
-      toolName: "weather",
-      content: [{ type: "text", text: "晴，25 度" }],
-      details: { secret: "不进" },
-      isError: false,
-      timestamp: 1,
-    });
-    expect(searchTextOf(toolResult)).toBe("晴，25 度");
-  });
-
-  it("字符串形式的用户消息也抽", () => {
-    expect(searchTextOf(entry({ role: "user", content: "直接一句话", timestamp: 1 }))).toBe("直接一句话");
-  });
-
-  it.each([
-    ["system 消息", entry({ role: "system", content: "你是助手", timestamp: 1 })],
-    ["非消息条目", JSON.stringify({ type: "model_change", id: "m", provider: "p", modelId: "x" })],
-    [
-      "compaction",
-      JSON.stringify({ type: "compaction", id: "c", summary: "摘要", firstKeptEntryId: "e1", tokensBefore: 1 }),
-    ],
-    ["非 JSON", "oops"],
-    ["空行", ""],
-  ])("%s 抽出空串", (_name, line) => {
-    expect(searchTextOf(line)).toBe("");
-  });
-
-  it("长度上限 8192 个 UTF-16 单元，不切断代理对", () => {
-    expect(SEARCH_TEXT_LIMIT).toBe(8192);
-    expect(searchTextOf(userText("a".repeat(8192)))).toBe("a".repeat(8192));
-    expect(searchTextOf(userText("a".repeat(8193)))).toBe("a".repeat(8192));
-    const cut = searchTextOf(userText(`a${"😀".repeat(5000)}`));
-    wellFormed(cut);
-    expect(cut).toBe(`a${"😀".repeat(4095)}`);
-  });
-
-  it("过滤后的长文字抽到的是头尾加省略行", () => {
-    const out = retainEntry(userText("a".repeat(20000)), ctx);
-    expect(searchTextOf(out.line)).toBe(textOf(out.line));
   });
 });
 
@@ -978,7 +908,6 @@ describe("第三轮 R2-3：已知类型的畸形条目拒收，不抛异常", ()
     expect(() => createRetainer(ctx).retain(line)).not.toThrow();
     expect(createRetainer(ctx).retain(line)).toEqual({ status: "rejected", reason: "malformed_entry" });
     expect(checkFrame(ctx, emptySnapshot(ctx), [line])).toMatchObject({ ok: false, reason: "malformed_entry" });
-    expect(searchTextOf(line)).toBe("");
   });
 
   it("被拒绝的畸形行不推进状态：它的 id 不会变成已知条目", () => {
@@ -1010,13 +939,12 @@ describe("第三轮 R2-4：缺原文保值能力时启动就抛，不退回丢�
     ["JSON.isRawJSON 不存在", { isRawJSON: undefined }, /JSON\.isRawJSON/],
     ["reviver 的 context 里没有 source", { parse: reviverWith(() => [{}]) }, /context\.source/],
     ["reviver 不传第三个参数", { parse: reviverWith(() => []) }, /context\.source/],
-  ] as const)("%s：三个入口都抛说清楚的错", (_name, patch, message) => {
+  ] as const)("%s：留存和复查入口都抛说清楚的错", (_name, patch, message) => {
     const snapshot = emptySnapshot(localCtx);
     const imageLine = entry({ role: "user", content: [{ type: "image", data: "IMG" }], timestamp: 1 });
     withJson(patch, () => {
       expect(() => createRetainer(localCtx)).toThrow(message);
       expect(() => checkFrame(localCtx, snapshot, [imageLine])).toThrow(message);
-      expect(() => searchTextOf(imageLine)).toThrow(message);
       expect(() => assertRawJsonSupport()).toThrow(/不退回丢精度或整行放行/);
     });
   });
@@ -1164,18 +1092,6 @@ describe("第四轮：快照边界与名单变更后的重建", () => {
       ok: true,
       snapshot: rebuilt.snapshot(),
     });
-  });
-
-  it("F5：缺 isRawJSON 时检索入口与留存、复查抛同一个明确错误，恢复后能正常检索", () => {
-    const line = userText("能检索到的原文");
-    const snapshot = emptySnapshot(ctx);
-    const error = new Error("工作记录留存需要 JSON.isRawJSON（Node 22+），当前运行时没有，不退回丢精度或整行放行");
-    withJson({ isRawJSON: undefined }, () => {
-      expect(() => searchTextOf(line)).toThrow(error);
-      expect(() => createRetainer(ctx)).toThrow(error);
-      expect(() => checkFrame(ctx, snapshot, [line])).toThrow(error);
-    });
-    expect(searchTextOf(line)).toBe("能检索到的原文");
   });
 });
 

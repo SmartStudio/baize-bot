@@ -341,6 +341,7 @@ describe("现查现用的 recall", () => {
       { query: "" },
       { query: "  " },
       { query: "字".repeat(101) },
+      { query: "预算\u0000" },
       { query: 1 },
       { query: "预算", botId: who.peerId },
       { query: "预算", groupId: who.sourceGroupId },

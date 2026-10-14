@@ -41,7 +41,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 `placeRun` 依次拿归属人共享锁、Bot 共享锁、该归属人电脑行、道行和原有结账锁。电脑行按 id 升序锁齐，避免两个群从 A 到 B、从 B 到 A 同时接管时反序。prompt 的 `lane` 带 `{epoch, heads}`，`heads.chat`、`heads.table` 是已存在流的 `{seq: next_seq, head}`，未创建的流省略。
 
-租约时钟和静默计时器共用续期点：默认 45 秒静默加 15 秒宽限，数据库续期同连接每 5 秒至多写一次。断线启动宽限计时器时把截止时间收到此刻加宽限，旧连接的续期或关闭用连接代际条件写，不能缩短新连接的租约。`startServer` 可注入 `silenceTimeoutMs`、`disconnectGraceMs`、`leaseRenewalIntervalMs`；短时长测试也要把合并窗口缩到租约寿命以内。持有者与派发时的期限判断用 `clock_timestamp()`，事务等锁后按当前时间核验。断线收尾继续走原来的 `abandonRun`。
+租约时钟和静默计时器共用续期点：默认 45 秒静默加 15 秒宽限，数据库续期同连接每 5 秒至多写一次。续期和断线缩租都在 SQL 中用 `clock_timestamp() + 时长` 写截止；关闭时按数据库返回的剩余毫秒启动宽限计时器，不依赖 Node 墙钟。旧连接的续期或关闭用连接代际条件写，没有更新到该代际就不启动宽限计时器，不能缩短新连接的租约。`startServer` 可注入 `silenceTimeoutMs`、`disconnectGraceMs`、`leaseRenewalIntervalMs`；短时长测试也要把合并窗口缩到租约寿命以内。持有者与派发时的期限判断用 `clock_timestamp()`，事务等锁后按当前时间核验。断线收尾继续走原来的 `abandonRun`。
 
 网关、MCP 代执行和 Hub 都以网关 key Bearer 认电脑，再调用同一个 `validateLaneFence` 检查 `x-baize-lane: <botId>/<groupId>/<epoch>`。道必须属于该归属人，Bot 仍在群中，电脑、当前安装标识和代际须匹配，电脑租约须未过期。网关所有请求都要带头；MCP 请求体的 Bot 还须匹配头里的 Bot。key 不对回 401，租约失败回 409 和固定分类：
 
@@ -60,7 +60,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 `work_streams` 还保存 `next_seq`、链头、末条 id 和连接报告的 Pi 版本。追加的条件 UPDATE 同时要求起始序号相等及租约的电脑、安装标识、代际匹配。序号从 0 开始，链头按 `sha256(上一个32字节摘要 || sha256(原样行))` 重算；空流的摘要是 32 个零字节。共享函数是 `@baize/shared` 的 `advanceWorkHead`。
 
-工具连接改成本机、改名、删掉或操作名变化后，下一条**非空**上传先用新名单从头复查这条流。连接修改与追加按归属人锁互斥；改名、删除即使没有改变操作名集合，也会使该归属人各流的快照指纹失效。从第一条不合规旧行起删除后缀，重算前缀的链头，同时回退 `next_seq`、`tail_entry_id` 和快照。若旧行全部合规就只更新快照。更新带旧序号、旧链头、旧快照的条件，删除后缀与更新在同一事务；并发帧只会有一次重放生效。那一帧的新行不写入，返回截断后的位置，运行器随后重新过滤和上传。
+工具连接新建、改本机范围、改名、补授权和删除时，在修改事务里立即按新名单复查归属人全部 Bot 的两条流。名单是归属人全局操作名集合，因此未分配的 Bot 也受影响。连接修改持归属人排它锁，与追加互斥；即使改名、删除、补授权没有改变操作名集合，也完成复查。从第一条不合规旧行起删除整个后缀（包括 `search_text`），重算合规前缀的链头，同时回退 `next_seq`、`tail_entry_id` 和快照；旧行全部合规就只更新快照。HTTP 返回前已提交撤回，不等新上传。后缀随后由运行器从本地原文按新名单重新过滤补传，本机 JSONL 不动。在途旧帧收到 `seq_mismatch`，按 Hub 的合规前缀对齐；下一轮 prompt 也按新 config 过滤本地前缀核对，保留本地会话。
 
 结果经 `uplink_ack.rejected` 按可靠帧序号返回，无拒收项是 `ok`。运行器按下表处理：
 
@@ -75,13 +75,13 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 | `invalid`，`reason: "duplicate_id"` 或 `"malformed_entry"` | `lineIndex` | 停止上传坏流，修复或按服务器快照重建 |
 | 其他 `invalid` | 帧、Pi 条目或 run 不合法 | 修正结构或重建，不能当成成功 |
 
-`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。电脑代理的 `WorkAppendChannel` 把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 原样透传给运行器，服务器没给的字段不补。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
+兼容旧流的非空追加仍会在快照缺失或名单指纹失效时复查。`replayReason` 为 `unfiltered`、`duplicate_id` 或 `malformed_entry`，对应第一条被截掉的旧行；只有名单失效但全部旧行合规时不带它和 `lineIndex`。电脑代理的 `WorkAppendChannel` 把 `invalid` 的 `reason`、`lineIndex`、`replayReason`、`nextSeq`、`head` 原样透传给运行器，服务器没给的字段不补。本期保留原拒收码集合，以 `invalid.reason` 表达 `tool_list_changed`，兼容其穷尽匹配。
 
 `work_append` 的持有者校验不附加 HTTP 的时钟条件。空 `lines` 是 before_effect 等场景的探针，只看持有者与代际，忽略 run、序号和链头，不创建流或条目、不触发旧行复查。
 
 非空普通追加须带属于此电脑、归属人、Bot、群的 run，已结束的 run 也可追加；可见范围复制 `runs.visible_to`。导入用 `cause: import` 和 `runId: null`。导入首帧 `fromSeq: 0` 在没有租约行时必须带代际 1，接受后以代际 1 认领；有租约时必须由当前电脑和安装持有，并带租约的当前代际，接受后保持代际不变。其他持有者或过时代际拒收。目标流已有条目时拒收重复首帧。后续导入帧继续使用 import/null run，按普通序号 CAS 追加，不再认领。导入牌桌群的条目只对该 Bot 可见，其他群为 null。
 
-`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；`nextSeq` 和 `head` 始终是全流元数据。空流即使因失败留下 `nextSeq: 0` 的流元数据，也返回 `nextSeq: 0`、零链头和 null Pi 版本。
+`GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；名单和记录也在该快照内读取；每次从头复查，不合规的残留旧行及其后缀不会读出，`nextSeq` 和 `head` 对应可安全读取的完整前缀。正常流仍返回全流元数据。空流即使因失败留下 `nextSeq: 0` 的流元数据，也返回 `nextSeq: 0`、零链头和 null Pi 版本。
 
 租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
 
@@ -89,11 +89,11 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 ## recall
 
-`POST /hub/v1/recall` 使用当前电脑网关 key 的 Bearer 和 `x-baize-lane` 租约头。鉴权后的电脑行、道栅栏和召回查询共用只读可重复读事务。Bot、归属人和当前群都从鉴权或租约头取得，请求只接受 `{query: string}`；关键词去掉首尾空白后须为 1 到 100 个字符，非法请求回 400「召回参数格式不对」。缺头、旧代际、非持有者和过期租约按租约节回 409，cookie 不能代替 Bearer。
+`POST /hub/v1/recall` 使用当前电脑网关 key 的 Bearer 和 `x-baize-lane` 租约头。鉴权后的电脑行、道栅栏和召回查询共用只读可重复读事务。Bot、归属人和当前群都从鉴权或租约头取得，请求只接受 `{query: string}`；关键词去掉首尾空白后须为 1 到 100 个字符且不能含 NUL，非法请求回 400「召回参数格式不对」。缺头、旧代际、非持有者和过期租约按租约节回 409，cookie 不能代替 Bearer。
 
-`repo/work-records.ts` 的 `recallWorkRecords` 必填被查 Bot 的 viewer，只查它本人、同归属人、全群可见的 `chat` 流，排除当前群。`workEntryVisibleTo(viewer)` 之外还固定要求 `visible_to IS NULL`，对本人私密的记录也不召回；牌桌流、隐藏 run 和别的 Bot 的记录不进入结果。来源群必须仍属当前归属人且 Bot 仍是成员，群标题取该群主题任务的当前标题。删群后同一查询回空；删 Bot 后原道的请求被栅栏拒绝，工作记录随外键级联删除。
+`repo/work-records.ts` 的 `recallWorkRecords` 必填被查 Bot 的 viewer，只查它本人、同归属人、全群可见的 `chat` 流，排除当前群。`workEntryVisibleTo(viewer)` 之外还固定要求 `visible_to IS NULL`，对本人私密的记录也不召回；牌桌流、隐藏 run 和别的 Bot 的记录不进入结果。来源群必须仍属当前归属人且 Bot 仍是成员，群标题取该群主题任务的当前标题。工具名单查询与候选读取也在同一可重复读快照内；候选原行按当前名单再过滤，摘录只从过滤后的文字提取，陈旧 `search_text` 不会带回原文。过滤后再取前 8 条，避免不合规命中挤掉正常结果。删群后同一查询回空；删 Bot 后原道的请求被栅栏拒绝，工作记录随外键级联删除。
 
-查询用字面量 `ILIKE` 子串匹配，转义 `%`、`_` 和反斜线，再按 `similarity` 降序、记录时间降序排列，最多返回 8 条 `{groupId, groupTitle, at, kind, excerpt}`。`kind` 只接受 Pi `message` 的 `user`、`assistant`、`toolResult`。时间取原行的合法 `timestamp`，缺失或非法时依次回退到 run 开始时间和群创建时间，统一为 ISO。摘录围绕关键词截取，最多 400 个字符。`search_text` 使用 `pg_trgm` GIN 部分索引，条件为 `stream = 'chat' AND visible_to IS NULL`；召回内容在运行器里只用于当前 run，历史和上传记录仅保留占位文字。
+查询用字面量 `ILIKE` 子串匹配，转义 `%`、`_` 和反斜线，再按 `similarity` 降序、记录时间降序排列，最多返回 8 条 `{groupId, groupTitle, at, kind, excerpt}`。`kind` 只接受 Pi `message` 的 `user`、`assistant`、`toolResult`。原行在 Node 用 JSON 解析，角色与时间不再依赖 `line::jsonb`；非检索字段里的 JSON 转义 NUL 照常保留、接收和召回。时间使用 `Date.parse` 可解析的字符串 `timestamp`，缺失或非法时依次回退到 run 开始时间和群创建时间，统一为 ISO。摘录围绕关键词截取，最多 400 个字符。`search_text` 使用 `pg_trgm` GIN 部分索引，条件为 `stream = 'chat' AND visible_to IS NULL`；候选仍由数据库的字面量查询筛选，可使用该索引；相似度由数据库计算；过滤后的候选在 Node 按相似度、时间、群号和序号排序。召回内容在运行器里只用于当前 run，历史和上传记录仅保留占位文字。
 
 `test/recall-search.test.ts` 用 61 条中文语料比较 2 到 4 字关键词：默认相似度阈值漏掉全部命中，子串匹配保留全部命中。两字无边界子串没有内部三元组，实测仍需扫描候选；三字「小红书」在清理批量夹具的 GIN pending list 后，默认计划走 `work_entries_chat_search_idx`。索引存在不代表所有查询都由它执行，召回优先保留短词命中。
 

@@ -15,10 +15,15 @@ import {
   type WorkAppendResult,
   type WorkStream,
 } from "@baize/shared";
-import { RetainSnapshot, checkFrame, emptySnapshot, type RetainContext } from "@baize/shared/work-record";
-import { and, asc, desc, eq, gte, gt, isNull, lt, ne, sql } from "drizzle-orm";
+import {
+  RetainSnapshot,
+  checkFrame,
+  createRetainer,
+  emptySnapshot,
+  type RetainContext,
+} from "@baize/shared/work-record";
+import { and, asc, eq, gte, isNull, lt, ne, sql } from "drizzle-orm";
 import type { AgentConnection } from "../agent/hub.js";
-import type { Db } from "../db/client.js";
 import {
   bots,
   groupMembers,
@@ -32,6 +37,27 @@ import {
   workStreams,
 } from "../db/schema.js";
 import type { Tx } from "./messages.js";
+
+async function currentRetainContext(tx: Tx, ownerId: string): Promise<RetainContext> {
+  const localTools = await tx
+    .select({ operations: toolConnections.operations })
+    .from(toolConnections)
+    .where(and(eq(toolConnections.ownerId, ownerId), eq(toolConnections.localOnly, true)));
+  return { localOnlyToolNames: new Set(localTools.flatMap((tool) => tool.operations.map((op) => op.name))) };
+}
+
+/** 调用方已持有归属人排它锁；名单变更和历史撤回必须一起提交。 */
+export async function recheckOwnerWorkRecords(tx: Tx, ownerId: UserId): Promise<void> {
+  const ctx = await currentRetainContext(tx, ownerId);
+  const streams = await tx
+    .select({ metadata: workStreams })
+    .from(workStreams)
+    .innerJoin(bots, eq(bots.id, workStreams.botId))
+    .where(eq(bots.ownerId, ownerId))
+    .orderBy(asc(workStreams.botId), asc(workStreams.groupId), asc(workStreams.stream))
+    .for("update", { of: workStreams });
+  for (const { metadata } of streams) await recheckCommitted(tx, metadata, ctx);
+}
 
 export async function appendWorkRecords(
   tx: Tx,
@@ -93,13 +119,7 @@ export async function appendWorkRecords(
     .from(workStreams)
     .where(and(eq(workStreams.botId, botId), eq(workStreams.groupId, groupId), eq(workStreams.stream, stream)))
     .for("update");
-  const localTools = await tx
-    .select({ operations: toolConnections.operations })
-    .from(toolConnections)
-    .where(and(eq(toolConnections.ownerId, conn.ownerId), eq(toolConnections.localOnly, true)));
-  const ctx: RetainContext = {
-    localOnlyToolNames: new Set(localTools.flatMap((tool) => tool.operations.map((op) => op.name))),
-  };
+  const ctx = await currentRetainContext(tx, conn.ownerId);
   let committed =
     metadata === undefined || metadata.retainSnapshot === null
       ? emptySnapshot(ctx)
@@ -279,12 +299,15 @@ async function recheckCommitted(
 }
 
 export async function readWorkLane(
-  db: Db | Tx,
+  db: Tx,
   lane: { botId: BotId; groupId: GroupId },
   stream: WorkStream,
   after: number,
   limit: number,
 ): Promise<HubLaneSnapshot> {
+  const [owner] = await db.select({ id: bots.ownerId }).from(bots).where(eq(bots.id, lane.botId));
+  if (owner === undefined) return { entries: [], nextSeq: 0, head: EMPTY_WORK_HEAD, piSessionVersion: null };
+  const ctx = await currentRetainContext(db, owner.id);
   const [metadata] = await db
     .select()
     .from(workStreams)
@@ -300,17 +323,29 @@ export async function readWorkLane(
         eq(workEntries.botId, lane.botId),
         eq(workEntries.groupId, lane.groupId),
         eq(workEntries.stream, stream),
-        gt(workEntries.seq, after),
         lt(workEntries.seq, metadata.nextSeq),
       ),
     )
-    .orderBy(asc(workEntries.seq))
-    .limit(limit);
+    .orderBy(asc(workEntries.seq));
+  // 从头复查才能识别指向本机结果的 context_edit；返回合规前缀，链头仍与原样行一致。
+  const checked = checkFrame(
+    ctx,
+    emptySnapshot(ctx),
+    entries.map((entry) => entry.line),
+  );
+  const prefix = checked.ok ? entries : entries.slice(0, "lineIndex" in checked ? checked.lineIndex : 0);
+  const nextSeq = checked.ok ? metadata.nextSeq : prefix.length;
+  const head = checked.ok
+    ? metadata.head
+    : await advanceWorkHead(
+        EMPTY_WORK_HEAD,
+        prefix.map((entry) => entry.line),
+      );
   return {
-    entries,
-    nextSeq: metadata.nextSeq,
-    head: metadata.head,
-    piSessionVersion: metadata.nextSeq === 0 ? null : metadata.piSessionVersion,
+    entries: prefix.filter((entry) => entry.seq > after).slice(0, limit),
+    nextSeq,
+    head,
+    piSessionVersion: nextSeq === 0 ? null : metadata.piSessionVersion,
   };
 }
 
@@ -319,26 +354,23 @@ export function workEntryVisibleTo(viewer: Viewer) {
 }
 
 export async function recallWorkRecords(
-  db: Db | Tx,
+  db: Tx,
   ownerId: UserId,
   viewer: Extract<Viewer, { kind: "bot" }>,
   excludeGroupId: GroupId,
   query: string,
 ): Promise<RecallEntry[]> {
+  const ctx = await currentRetainContext(db, ownerId);
   const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
-  const kind = sql<RecallEntry["kind"]>`${workEntries.line}::jsonb->'message'->>'role'`;
-  const at = sql`coalesce(
-    CASE WHEN pg_input_is_valid(${workEntries.line}::jsonb->>'timestamp', 'timestamp with time zone')
-      THEN (${workEntries.line}::jsonb->>'timestamp')::timestamptz END,
-    ${runs.startedAt}, ${groups.createdAt}
-  )`;
   const rows = await db
     .select({
       groupId: workEntries.groupId,
       groupTitle: tasks.title,
-      at: at.mapWith(groups.createdAt),
-      kind,
-      text: workEntries.searchText,
+      runAt: runs.startedAt,
+      groupAt: groups.createdAt,
+      line: workEntries.line,
+      seq: workEntries.seq,
+      score: sql<number>`similarity(${workEntries.searchText}, ${query})`,
     })
     .from(workEntries)
     .innerJoin(groups, and(eq(groups.id, workEntries.groupId), eq(groups.ownerId, ownerId)))
@@ -354,24 +386,52 @@ export async function recallWorkRecords(
         isNull(workEntries.visibleTo),
         ne(workEntries.groupId, excludeGroupId),
         eq(workEntries.piType, "message"),
-        sql`${kind} IN ('user', 'assistant', 'toolResult')`,
         sql`${workEntries.searchText} ILIKE ${pattern}`,
       ),
+    );
+  const safe: { entry: RecallEntry; score: number; seq: number }[] = [];
+  for (const row of rows) {
+    const retained = createRetainer(ctx).retain(row.line);
+    if (retained.status !== "retained") continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(retained.line) as unknown;
+    } catch {
+      continue;
+    }
+    const parsed = PiWorkEntry.safeParse(value);
+    if (!parsed.success) continue;
+    const { message, timestamp } = parsed.data;
+    if (typeof message !== "object" || message === null || !("role" in message)) continue;
+    const kind = message.role;
+    if (kind !== "user" && kind !== "assistant" && kind !== "toolResult") continue;
+    const text = extractWorkSearchText(parsed.data);
+    if (!text.toLocaleLowerCase().includes(query.toLocaleLowerCase())) continue;
+    // JSONL 的非检索字段允许转义 NUL，不能再整行转成 PostgreSQL jsonb。
+    const timestampMs = typeof timestamp === "string" ? Date.parse(timestamp) : Number.NaN;
+    const at = Number.isFinite(timestampMs) ? new Date(timestampMs) : (row.runAt ?? row.groupAt);
+    safe.push({
+      entry: {
+        groupId: GroupId.parse(row.groupId),
+        groupTitle: row.groupTitle,
+        at: at.toISOString(),
+        kind,
+        excerpt: recallExcerpt(text, query),
+      },
+      score: row.score,
+      seq: row.seq,
+    });
+  }
+  return safe
+    .toSorted(
+      (left, right) =>
+        right.score - left.score ||
+        right.entry.at.localeCompare(left.entry.at) ||
+        left.entry.groupId.localeCompare(right.entry.groupId) ||
+        right.seq - left.seq,
     )
-    .orderBy(
-      desc(sql`similarity(${workEntries.searchText}, ${query})`),
-      desc(at),
-      asc(workEntries.groupId),
-      desc(workEntries.seq),
-    )
-    .limit(RECALL_LIMIT);
-  return rows.map((row) => ({
-    groupId: GroupId.parse(row.groupId),
-    groupTitle: row.groupTitle,
-    at: row.at.toISOString(),
-    kind: row.kind,
-    excerpt: recallExcerpt(row.text, query),
-  }));
+    .slice(0, RECALL_LIMIT)
+    .map(({ entry }) => entry);
 }
 
 function recallExcerpt(text: string, query: string): string {
