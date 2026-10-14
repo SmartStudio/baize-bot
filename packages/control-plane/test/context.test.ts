@@ -8,8 +8,8 @@ import {
   MessageId,
   MessageListResponse,
   SkillResponse,
+  ControlToAgent,
   type BotId,
-  type ControlToAgent,
   type GroupId,
   type RunId,
   type TeamOfferMember,
@@ -126,7 +126,7 @@ const readsOf = (table: string) =>
   serverQueries.filter((query) => new RegExp(`^select\\b[\\s\\S]*\\bfrom "${table}"`, "i").test(query)).length;
 
 describe("上下文里的卡写结论", () => {
-  it("审批卡按审批行现在的状态写结论，四张审批卡只查一次审批表", async () => {
+  it("审批卡按审批行现在的状态写结论，四张审批卡只做一次摘要查询", async () => {
     const owner = await onlineOwner();
     try {
       await say(owner.client, owner.groupId, "把四笔款付了");
@@ -173,7 +173,9 @@ describe("上下文里的卡写结论", () => {
         { from: "系统", text: "小服要执行 `pay 400`，没批下来，过期了" },
       ]);
       expect(settledOnly(prompt), "新消息已作废剩下的待批卡，四张卡都有终态").toEqual([true, true, true, true, true]);
-      expect(readsOf("approvals"), "四张审批卡一条查询查完，不按卡逐条查").toBe(1);
+      const summaryReads = serverQueries.filter((query) => /^select\b[\s\S]*from "approvals" where /i.test(query));
+      expect(summaryReads, "四张审批卡仍用一条摘要查询查完，不按卡逐条查").toHaveLength(1);
+      expect(readsOf("approvals"), "摘要查询和作废投递范围各一条，不随卡数增长").toBe(2);
     } finally {
       owner.close();
     }
@@ -613,8 +615,14 @@ async function runDone(
   });
   for (;;) {
     const pushed = await owner.push.next();
-    if (pushed.type === "message" && pushed.message.body.kind === "cost" && pushed.message.body.runId === prompt.runId)
+    if (
+      pushed.type === "message" &&
+      pushed.message.body.kind === "cost" &&
+      pushed.message.body.runId === prompt.runId
+    ) {
+      await owner.agent.ack(prompt.runId);
       return;
+    }
   }
 }
 
@@ -939,25 +947,19 @@ describe("名单等送达确认以后才生效", () => {
     const owner = await approvalObserver();
     try {
       const card = await cardSettledOutsideWindow(owner);
-      const attempts: Prompt[] = [];
-      const originalSend = AgentHub.prototype.send;
-      const spy = vi.spyOn(AgentHub.prototype, "send").mockImplementation(function (
-        this: AgentHub,
-        computerId,
-        message,
-      ) {
-        if (message.type !== "prompt" || message.groupId !== owner.groupId)
-          return originalSend.call(this, computerId, message);
-        attempts.push(message);
-        return false;
-      });
+      const spy = vi.spyOn(AgentHub.prototype, "flushOutbox").mockImplementation(async () => undefined);
       try {
         await say(owner.client, owner.groupId, "刚批准了，看看");
       } finally {
         spy.mockRestore();
       }
-      const [attempt] = attempts;
-      if (attempt === undefined) throw new Error("这一次没派出去");
+      const rows = await database.sql<{ body: unknown; run_id: string }[]>`
+        SELECT body, run_id FROM agent_outbox WHERE body->>'type' = 'prompt' ORDER BY seq DESC LIMIT 1
+      `;
+      const row = rows[0];
+      if (row === undefined) throw new Error("这一次 prompt 已入箱");
+      const attempt = ControlToAgent.parse(row.body);
+      if (attempt.type !== "prompt") throw new Error("outbox 末条不是 prompt");
       expect(payCard(attempt), "发不出去的那次带着结论").toEqual(approvedCard(card));
       expect(await listOf(attempt.runId), "名单照记，但没确认").toEqual({
         unsettled_context: [],
@@ -967,11 +969,14 @@ describe("名单等送达确认以后才生效", () => {
       await say(owner.client, owner.groupId, "发送恢复，重新查");
       const retry = await nextPrompt(owner.agent);
       await runDone(owner, retry);
-      await say(owner.client, owner.groupId, "再查一次");
       const later = await nextPrompt(owner.agent);
+      await runDone(owner, later);
+      await say(owner.client, owner.groupId, "再查一次");
+      const after = await nextPrompt(owner.agent);
 
       expect(payCard(retry), "结论没送到过，恢复后补送").toEqual(approvedCard(card));
-      expect(payCard(later), "送到过一次，之后不再送").toBeUndefined();
+      expect(payCard(later), "恢复时已经排入箱的下一条 prompt 仍带这份结论").toEqual(approvedCard(card));
+      expect(payCard(after), "确认后的新派活不再重复送结论").toBeUndefined();
     } finally {
       owner.close();
     }
@@ -1385,7 +1390,7 @@ describe("名单的寿命从确认算起，不从建 run 算起", () => {
       await blocked;
       const [early] = await database.sql`
         SELECT id, unsettled_context FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id}`;
-      expect(early?.unsettled_context, "prompt 还没送出去，名单已经记下了还在等批的卡").toHaveLength(1);
+      expect(early?.unsettled_context ?? null, "上下文仍在读取期间，run、名单和 prompt 还未提交").toBeNull();
       await chatter(groupId, 25);
       for (let n = 1; n <= 20; n += 1) {
         await say(owner.client, groupId, `${mention}晚一步 ${n}`);
@@ -1396,15 +1401,17 @@ describe("名单的寿命从确认算起，不从建 run 算起", () => {
       release();
       expect((await stuck).status).toBe(201);
       const delayed = await nextPrompt(owner.agent);
-      expect(delayed.runId, "扣住的那条放开后送到的就是最早建的 run").toBe(early?.id);
       const card = payCard(delayed);
       expect(card, "它在窗口里直接读到了还在等批的卡").toMatchObject({ settled: false });
+      if (card === undefined) throw new Error("延迟的 prompt 没有付款卡");
+      expect(await listOf(delayed.runId), "gate 放行后，run 和完整未结名单随 prompt 一起提交").toMatchObject({
+        unsettled_context: [card.messageId],
+        context_confirmed_at: null,
+      });
       await runDone(owner, delayed);
-      const [earliest] = await database.sql`
-        SELECT id FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id} ORDER BY started_at ASC LIMIT 1`;
-      expect(earliest?.id, "按建 run 的时刻数它排在 21 个里的最后一位，按 started_at 截 20 份就把它截掉了").toBe(
-        delayed.runId,
-      );
+      const [latest] = await database.sql`
+        SELECT id FROM runs WHERE group_id = ${groupId} AND bot_id = ${assistant.bot.id} ORDER BY started_at DESC LIMIT 1`;
+      expect(latest?.id, "事务 gate 放行后才建立这条 run").toBe(delayed.runId);
       expect((await owner.client.post(`/api/approvals/${approvalId}`, { decision: "approved" })).status).toBe(200);
       await say(owner.client, groupId, `${mention}批完了吗`);
       const retry = await nextPrompt(owner.agent);

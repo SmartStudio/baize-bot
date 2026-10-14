@@ -1,5 +1,4 @@
 import { CreateBotResponse, MessageListResponse, type GroupId, type RunId, type ServerPush } from "@baize/shared";
-import { format } from "node:util";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
 import * as events from "../src/agent/events.js";
@@ -7,7 +6,7 @@ import * as runsRepo from "../src/repo/runs.js";
 import * as skillsRepo from "../src/repo/skills.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
 import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
 import { queueHello } from "./helpers/queued-hello.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
@@ -48,6 +47,13 @@ async function openRuns(groupId: GroupId): Promise<number> {
     SELECT count(*) AS n FROM runs WHERE group_id = ${groupId} AND ended_at IS NULL
   `;
   return Number(rows[0]?.n ?? "0");
+}
+
+async function runAccounting(runId: RunId) {
+  const [run] = await database.sql<{ amount: string; steps: number; input_tokens: number; output_tokens: number }[]>`
+    SELECT amount, steps, input_tokens, output_tokens FROM runs WHERE id = ${runId}
+  `;
+  return run;
 }
 
 async function systemTexts(client: ApiClient, groupId: GroupId): Promise<string[]> {
@@ -92,6 +98,9 @@ it("重连握手里 config 还没发出时来的活不派给这条连接，confi
       computerId: owner.computer.computerId,
       token: owner.computer.token,
       version: "test",
+      protocol: 2,
+      uplinkStream: owner.computer.computerId,
+      downApplied: 0,
       activeRuns: [],
     });
     await second.expect("welcome");
@@ -181,11 +190,6 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
   const victimAgent = (await helloAgent(server.port, victim.computer.computerId, victim.computer.token)).agent;
   const other = await ownerWithBot();
   const otherAgent = (await helloAgent(server.port, other.computer.computerId, other.computer.token)).agent;
-  const push = await connectPush(server.port, other.client.cookie ?? "");
-  const logged: string[] = [];
-  const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-    logged.push(format(...args));
-  });
   try {
     await post(victim.client, victim.groupId, "做这件事");
     const { runId } = await victimAgent.expect("prompt");
@@ -198,26 +202,25 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
       groupId: victim.groupId,
       runId: foreign,
     });
-    otherAgent.send({ type: "agent_error", code: "unsupported", detail: "哨兵", groupId: other.groupId });
-    await nextMatching(
-      push,
-      (event) =>
-        event.type === "message" && event.message.body.kind === "system" && event.message.body.text.includes("哨兵"),
-      "哨兵那句",
+    const probeSeq = otherAgent.sendMalformedReliable({ type: "publish_result" });
+    await waitFor(
+      async () => otherAgent.uplinkAcks().some((ack) => ack.upTo >= probeSeq),
+      "错误 runId 后的下一个 uplink 序号被确认",
     );
+    const rejected = otherAgent.uplinkAcks().flatMap((ack) => ack.rejected);
+    expect(rejected).toContainEqual({ seq: probeSeq - 1, code: "invalid", runId: foreign });
     expect(await openRuns(victim.groupId), "别的电脑报的 runId 是外部输入，不能拿来收尾这台电脑的活").toBe(1);
-    const mismatched = logged.filter((line) => line.includes(foreign) && line.includes("prompt_before_config"));
-    expect(mismatched, "对不上的报错不在群里说，但留一行日志").toHaveLength(1);
-    expect(mismatched[0], "日志点名是哪台电脑报的").toContain(other.computer.computerId);
-    expect(
-      logged.some((line) => line.includes(other.computer.token) || line.includes(victim.computer.token)),
-      "日志不带电脑令牌",
-    ).toBe(false);
+    expect(await runAccounting(foreign), "拒收帧不产生用量").toEqual({
+      amount: "0.000000",
+      steps: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+    });
+    expect(await systemTexts(victim.client, victim.groupId), "拒收外国 runId 不生成群消息").toEqual([]);
+    expect(await openRuns(other.groupId), "probe 不创建或收尾 run").toBe(0);
   } finally {
-    errors.mockRestore();
     victimAgent.close();
     otherAgent.close();
-    push.close();
   }
 });
 
@@ -283,11 +286,10 @@ it("代理拒了 config：这台电脑不再接活，派出去的 run 按版本�
   }
 });
 
-it("agent_error 带的群号和 runId 所在的群不一致：按库里 run 的群收尾，报文里的群号不作数", async () => {
+it("agent_error 带错群号时拒收可靠帧、推进游标，但不收尾 run", async () => {
   const owner = await ownerWithBot();
   const other = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小二" })).json());
   const { agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token);
-  const push = await connectPush(server.port, owner.client.cookie ?? "");
   try {
     await post(owner.client, other.group.id, "在第二个群里做这件事");
     const { runId } = await agent.expect("prompt");
@@ -298,19 +300,21 @@ it("agent_error 带的群号和 runId 所在的群不一致：按库里 run 的�
       groupId: owner.groupId,
       runId,
     });
-    const note = await nextMatching(
-      push,
-      (event) =>
-        event.type === "message" &&
-        event.message.body.kind === "system" &&
-        event.message.body.text.includes("配置还没到就先接到了活"),
-      "收尾那句",
-    );
-    expect(note.type === "message" ? note.message.groupId : null, "收尾那句落在 run 所在的群").toBe(other.group.id);
-    expect(await openRuns(other.group.id), "run 所在的群里那个 run 收了尾").toBe(0);
+    const probeSeq = agent.sendMalformedReliable({ type: "publish_result" });
+    await waitFor(async () => agent.uplinkAcks().some((ack) => ack.upTo >= probeSeq), "错群帧之后的 probe 被确认");
+    const rejected = agent.uplinkAcks().flatMap((ack) => ack.rejected);
+    expect(rejected).toContainEqual({ seq: probeSeq - 1, code: "invalid", runId });
+    expect(await openRuns(other.group.id), "群号不匹配时 handler 不收尾 run").toBe(1);
+    expect(await runAccounting(runId), "拒收帧不产生用量").toEqual({
+      amount: "0.000000",
+      steps: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+    });
+    expect(await systemTexts(owner.client, owner.groupId), "拒收帧不在报文群写系统消息").toEqual([]);
+    expect(await systemTexts(owner.client, other.group.id), "拒收帧不在 run 所属群写系统消息").toEqual([]);
   } finally {
     agent.close();
-    push.close();
   }
 });
 

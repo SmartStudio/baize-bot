@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import {
+  MessageId,
   BotId,
   type BotRole,
   type GroupId,
   type Message,
   type MessageBody,
-  type MessageId,
   type RunId,
   type UserId,
   type Viewer,
@@ -206,6 +207,79 @@ export async function appendBotText(db: Db | Tx, text: BotText, delta: string, d
     .returning();
   if (row === undefined) return { kind: "taken" };
   return { kind: "appended", created: inserted === undefined ? null : toMessage(inserted), message: toMessage(row) };
+}
+
+/** 定稿整段覆盖已收下的片段，片段缺失或重发都不影响最终文字。 */
+export async function finalizeBotText(
+  db: Db | Tx,
+  text: BotText,
+  fullText: string,
+): Promise<BotTextResult & { readonly delta: string; readonly replace: boolean }> {
+  const shell: MessageBody = { kind: "bot", botId: text.botId, text: "", streaming: true };
+  const [inserted] = await db
+    .insert(messages)
+    .values({
+      id: text.messageId,
+      groupId: text.groupId,
+      body: shell,
+      visibleTo: text.visibleTo,
+      createdAt: new Date(),
+    })
+    .onConflictDoNothing({ target: messages.id })
+    .returning();
+  const viewer: Viewer = { kind: "user" };
+  const [previous] = await db
+    .select({ body: messages.body })
+    .from(messages)
+    .where(and(eq(messages.id, text.messageId), eq(messages.groupId, text.groupId), messageVisibleTo(viewer)))
+    .for("update");
+  const priorText = previous?.body.kind === "bot" ? previous.body.text : "";
+  const body: MessageBody = { kind: "bot", botId: text.botId, text: fullText, streaming: false };
+  const [row] = await db
+    .update(messages)
+    .set({ body, revision: nextRevision() })
+    .where(
+      and(
+        eq(messages.id, text.messageId),
+        eq(messages.groupId, text.groupId),
+        sql`${messages.body} ->> 'kind' = 'bot'`,
+        sql`${messages.body} ->> 'botId' = ${text.botId}`,
+      ),
+    )
+    .returning();
+  if (row === undefined) return { kind: "taken", delta: "", replace: false };
+  return {
+    kind: "appended",
+    message: toMessage(row),
+    created: inserted === undefined ? null : toMessage(inserted),
+    delta: fullText.startsWith(priorText) ? fullText.slice(priorText.length) : "",
+    replace: !fullText.startsWith(priorText),
+  };
+}
+
+/** callId 在重连后仍指向同一行，晚到的工具结果不会另起第二张卡。 */
+export async function upsertToolCall(
+  db: Db | Tx,
+  groupId: GroupId,
+  runId: RunId,
+  callId: string,
+  body: Extract<MessageBody, { kind: "tool_call" }>,
+): Promise<Message | null> {
+  const messageId = MessageId.parse(
+    createHash("sha256")
+      .update(JSON.stringify([runId, callId]))
+      .digest("hex"),
+  );
+  const [row] = await db
+    .insert(messages)
+    .values({ id: messageId, groupId, body, createdAt: new Date() })
+    .onConflictDoUpdate({
+      target: messages.id,
+      set: { body, revision: nextRevision() },
+      setWhere: sql`${messages.groupId} = ${groupId} AND ${messages.body}->>'kind' = 'tool_call' AND ${messages.body}->>'runId' = ${runId}`,
+    })
+    .returning();
+  return row === undefined ? null : toMessage(row);
 }
 
 /**

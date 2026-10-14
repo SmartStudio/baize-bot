@@ -7,8 +7,9 @@ Bot 运行器。用 `@earendil-works/pi-coding-agent` 1.1.0 的 SDK，一个 Bot
 | 方法                               | 对应的下行报文    | 干什么                                                                      |
 | ---------------------------------- | ----------------- | --------------------------------------------------------------------------- |
 | `applyConfig(config)`              | `config`          | 按 Bot 增量对账定义、工具、skill 和网关凭据                                 |
-| `prompt(message)`                  | `prompt`          | 跑一次，产出 `bot_text`、`bot_tool_call`、`run_done`                        |
-| `approve(runId, callId, approved)` | `approval_result` | 给挂起的审批一个结论                                                        |
+| `prompt(message)`                  | `prompt`          | 跑一次，产出 `bot_text`、`bot_text_done`、`bot_tool_call`、`run_done`       |
+| `cancel(runId)`                    | `cancel`          | 中止正在运行或跳过排队中的 run，不产出 `run_done`                           |
+| `approve(runId, callId, outcome)` | `approval_result` | 给挂起的审批一个结论                                                        |
 | `pause(botId)`                     | `pause`           | 立起这个 Bot 的暂停闸门；正在执行的工具跑完，下一次工具调用或新 prompt 挂起 |
 | `resume(botId)`                    | `resume`          | 放开暂停闸门，原 run 从等待点继续                                           |
 | `stop()`                           | 连接关闭          | 停掉所有会话                                                                |
@@ -101,6 +102,10 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 ## run_done 挂在 agent_settled 上
 
 不能挂 `agent_end`：自动重试（`willRetry`）和队列续跑时它一次运行会发好几遍。`agent_settled` 在 `_runAgentPrompt` 的 finally 里发，一次 prompt 恰好一次，出错和中止也覆盖。`test/runner.test.ts` 的「上游重试」用例让网关对首个补全请求返 503，断言 Pi 重跑了一轮而 `run_done` 只有一条。
+
+## 最终文字和取消
+
+`bot_text` 是 bare 流式片段，始终带 `done: false`；每个文字块结束时 reporter 汇总该块全文，发送 reliable 的 `bot_text_done`（带相同 `messageId` 和 `text`）。取消当前 run 会先把该 run 挂着的审批在本地结算为 expired，等工具结果写入会话后再沿用 `abortSession` 中止；取消排队中的 run 会在轮到它时跳过。两种取消都会立刻从 `activeRuns()` 移除该 run，且不发送 `run_done`。过期审批不发 `approval_abandoned`。
 
 ## 扩展工具
 

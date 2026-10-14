@@ -340,6 +340,11 @@ export const computers = pgTable(
     status: text("status").$type<ComputerStatus>().notNull().default("creating"),
     tokenHash: text("token_hash").notNull(),
     gatewayKeyHash: text("gateway_key_hash").notNull(),
+    upStream: text("up_stream"),
+    upAcked: integer("up_acked").notNull().default(0),
+    downSeq: integer("down_seq").notNull().default(0),
+    downApplied: integer("down_applied").notNull().default(0),
+    connGen: integer("conn_gen").notNull().default(0),
     host: text("host"),
     idleSince: timestamp("idle_since", { withTimezone: true }),
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
@@ -897,4 +902,17 @@ export const pokerActReceipts = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.runId, t.callId] })],
+);
+
+export const agentOutbox = pgTable(
+  "agent_outbox",
+  {
+    computerId: text("computer_id")
+      .notNull()
+      .references(() => computers.id, { onDelete: "cascade" }),
+    seq: integer("seq").notNull(),
+    body: jsonb("body").$type<ControlToAgent>().notNull(),
+    runId: text("run_id").references(() => runs.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.computerId, t.seq] }), index("agent_outbox_run_id_idx").on(t.runId)],
 );

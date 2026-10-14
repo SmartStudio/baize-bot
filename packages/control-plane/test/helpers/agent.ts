@@ -1,25 +1,47 @@
-import { ControlToAgent, type AgentToControl, type ComputerId, type RunId } from "@baize/shared";
+import {
+  BareUplinkFrame,
+  ControlToAgent,
+  DownlinkFrame,
+  UPLINK_DELIVERY,
+  UplinkAck,
+  type AgentToControl,
+  type ComputerId,
+  type RunId,
+} from "@baize/shared";
 import { WebSocket } from "ws";
 import { AGENT_PATH } from "../../src/agent/hub.js";
 
 /** 扮演电脑代理。测试只通过这条 WebSocket 碰 /agent。 */
 export type AgentClient = {
   readonly socket: WebSocket;
-  send(message: AgentToControl): void;
+  send(message: AgentToControl | LegacyBotText): void;
   next(timeoutMs?: number): Promise<ControlToAgent>;
   expect<T extends ControlToAgent["type"]>(type: T, timeoutMs?: number): Promise<Extract<ControlToAgent, { type: T }>>;
   /**
-   * 等控制面回这个 run 的第 nth 条 run_done_ack。确认帧不进 next、expect、received：每条 run_done 都会回一条，
-   * 混在下行里的话，只关心派活和握手的用例都得跳过它。
+   * 等控制面累计确认这个 run 的第 nth 条 run_done。uplink_ack 不进 next、expect、received。
    */
   ack(runId: RunId, nth?: number, timeoutMs?: number): Promise<void>;
-  /** 到现在为止收到这个 run 的几条 run_done_ack。 */
+  /** 到现在为止累计确认这个 run 的几条 run_done。 */
   ackCount(runId: RunId): number;
+  /** 控制面已接收的累计确认帧，包括被拒帧。 */
+  uplinkAcks(): readonly UplinkAck[];
+  /** 用当前连接和下一个序号发送结构无效的可靠帧。 */
+  sendMalformedReliable(body: unknown): number;
   /** 连接关闭时的 close code。 */
   closed(timeoutMs?: number): Promise<number>;
   /** 收到还没取走的报文。关闭帧之后不会再来，所以 closed 兑现之后这就是这条连接收到的全部。 */
   received(): readonly ControlToAgent[];
   close(): void;
+};
+
+type LegacyBotText = {
+  type: "bot_text";
+  runId: Extract<AgentToControl, { type: "bot_text" }>["runId"];
+  botId: Extract<AgentToControl, { type: "bot_text" }>["botId"];
+  groupId: Extract<AgentToControl, { type: "bot_text" }>["groupId"];
+  messageId: Extract<AgentToControl, { type: "bot_text" }>["messageId"];
+  delta: string;
+  done: boolean;
 };
 
 export async function openAgent(port: number): Promise<AgentClient> {
@@ -28,15 +50,62 @@ export async function openAgent(port: number): Promise<AgentClient> {
   const waiters: ((message: ControlToAgent) => void)[] = [];
   let closeCode: number | null = null;
   const closeWaiters: ((code: number) => void)[] = [];
+  const doneSeqs = new Map<number, RunId>();
   const acks: RunId[] = [];
+  const uplinkAcks: UplinkAck[] = [];
   const ackWaiters: (() => void)[] = [];
+  const textByMessage = new Map<string, string>();
+  let conn: number | null = null;
+  let uplinkStream = "";
+  let nextSeq = 1;
+  let downApplied = 0;
+
+  const sendBody = (message: AgentToControl): void => {
+    if (message.type === "hello") {
+      uplinkStream = message.uplinkStream;
+      downApplied = message.downApplied;
+      socket.send(JSON.stringify(message));
+      return;
+    }
+    if (conn === null) throw new Error("收到 welcome 前不能发上行报文");
+    if (UPLINK_DELIVERY[message.type] === "bare") {
+      socket.send(JSON.stringify(BareUplinkFrame.parse({ conn, body: message })));
+      return;
+    }
+    const seq = nextSeq++;
+    socket.send(JSON.stringify({ type: "uplink", conn, stream: uplinkStream, seq, body: message }));
+    if (message.type === "run_done") doneSeqs.set(seq, message.runId);
+  };
 
   socket.on("message", (raw) => {
-    const message = ControlToAgent.parse(JSON.parse(raw.toString()));
-    if (message.type === "run_done_ack") {
-      acks.push(message.runId);
+    const value: unknown = JSON.parse(raw.toString());
+    if (typeof value === "object" && value !== null && "type" in value && value.type === "uplink_ack") {
+      const ack = UplinkAck.parse(value);
+      uplinkAcks.push(ack);
+      const rejected = new Set(ack.rejected.map((entry) => entry.seq));
+      for (const [seq, runId] of doneSeqs) {
+        if (seq <= ack.upTo) {
+          if (!rejected.has(seq)) acks.push(runId);
+          doneSeqs.delete(seq);
+        }
+      }
       for (const waiter of ackWaiters.splice(0)) waiter();
       return;
+    }
+    if (typeof value === "object" && value !== null && "type" in value && value.type === "downlink") {
+      const frame = DownlinkFrame.parse(value);
+      downApplied = Math.max(downApplied, frame.seq);
+      sendBody({ type: "downlink_ack", upTo: downApplied });
+      const message = frame.body;
+      const waiter = waiters.shift();
+      if (waiter === undefined) inbox.push(message);
+      else waiter(message);
+      return;
+    }
+    const message = ControlToAgent.parse(value);
+    if (message.type === "welcome") {
+      conn = message.conn;
+      nextSeq = message.upAcked + 1;
     }
     const waiter = waiters.shift();
     if (waiter === undefined) inbox.push(message);
@@ -73,7 +142,28 @@ export async function openAgent(port: number): Promise<AgentClient> {
 
   return {
     socket,
-    send: (message) => socket.send(JSON.stringify(message)),
+    send: (message) => {
+      if (message.type === "bot_text") {
+        const key = `${message.runId}:${message.messageId}`;
+        const text = (textByMessage.get(key) ?? "") + message.delta;
+        if (message.done) {
+          textByMessage.delete(key);
+          sendBody({
+            type: "bot_text_done",
+            runId: message.runId,
+            botId: message.botId,
+            groupId: message.groupId,
+            messageId: message.messageId,
+            text,
+          });
+        } else {
+          textByMessage.set(key, text);
+          sendBody({ ...message, done: false });
+        }
+        return;
+      }
+      sendBody(message);
+    },
     next,
     expect: async (type, timeoutMs) => {
       const message = await next(timeoutMs);
@@ -97,7 +187,8 @@ export async function openAgent(port: number): Promise<AgentClient> {
       const deadline = Date.now() + timeoutMs;
       while (acks.filter((acked) => acked === runId).length < nth) {
         const left = deadline - Date.now();
-        if (left <= 0) throw new Error(`等 ${runId} 的第 ${nth} 条 run_done_ack 超时，已收到 ${JSON.stringify(acks)}`);
+        if (left <= 0)
+          throw new Error(`等 ${runId} 的第 ${nth} 条 run_done 累计确认超时，已收到 ${JSON.stringify(acks)}`);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(resolve, left);
           ackWaiters.push(() => {
@@ -108,6 +199,13 @@ export async function openAgent(port: number): Promise<AgentClient> {
       }
     },
     ackCount: (runId) => acks.filter((acked) => acked === runId).length,
+    uplinkAcks: () => [...uplinkAcks],
+    sendMalformedReliable: (body) => {
+      if (conn === null) throw new Error("收到 welcome 前不能发上行报文");
+      const seq = nextSeq++;
+      socket.send(JSON.stringify({ type: "uplink", conn, stream: uplinkStream, seq, body }));
+      return seq;
+    },
     received: () => [...inbox],
     close: () => socket.close(),
   };
@@ -138,7 +236,16 @@ export function sendHello(
   token: string,
   activeRuns: readonly RunId[] = [],
 ): void {
-  agent.send({ type: "hello", computerId, token, version: "test", activeRuns: [...activeRuns] });
+  agent.send({
+    type: "hello",
+    computerId,
+    token,
+    version: "test",
+    protocol: 2,
+    uplinkStream: computerId,
+    downApplied: 0,
+    activeRuns: [...activeRuns],
+  });
 }
 
 /** 收 hello 的回应：welcome、config，再按 config 里的 Bot 顺序各收一条 pause 或 resume。 */

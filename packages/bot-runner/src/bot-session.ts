@@ -161,6 +161,7 @@ function gateToolCalls(
           rejected: "归属人拒绝了这个动作。",
           timed_out: "10 分钟没人批，按拒绝处理。",
           voided: "用户发了新消息，这一步作废了。",
+          expired: "这次运行已经结束，审批已过期，没执行。",
         };
         return { block: true, reason: reasons[outcome] };
       }

@@ -1,12 +1,22 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
-import { AgentCloseCode, AgentStatusLine } from "@baize/shared";
+import {
+  AgentCloseCode,
+  AgentStatusLine,
+  AgentToControl,
+  BareUplinkFrame,
+  BotId,
+  GroupId,
+  RunId,
+  UplinkFrame,
+} from "@baize/shared";
+import { DownlinkCursor, ReliableOutbox } from "../src/reliable-transport.js";
 
 // 断开期间进程里没有别的 handle 撑着事件循环，这个缺陷只有真起进程才看得见：
 // vitest 自己 ref 着事件循环，同样的代码在单元测试里永远是活的。
@@ -90,6 +100,8 @@ async function startWelcomeServer(): Promise<{ readonly url: string; readonly cl
             ownerId: "owner-1",
             kind: "local",
             serverTime: new Date().toISOString(),
+            conn: 1,
+            upAcked: 0,
           }),
         );
       }
@@ -105,6 +117,104 @@ async function startWelcomeServer(): Promise<{ readonly url: string; readonly cl
 }
 
 describe("电脑代理进程", () => {
+  it("未确认帧跨代理进程重启补发，累计确认和下行游标保存到磁盘", async () => {
+    const dataDir = await createDataDir();
+    const outbox = await ReliableOutbox.open(dataDir);
+    const body = {
+      type: "run_done" as const,
+      runId: RunId.parse("run-1"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      steps: 1,
+      inputTokens: 2,
+      outputTokens: 3,
+    };
+    await outbox.append(body);
+    await (await DownlinkCursor.open(dataDir)).persist(4);
+    const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const frames: UplinkFrame[] = [];
+    const hellos: Extract<AgentToControl, { type: "hello" }>[] = [];
+    const replayResolvers: ((frame: UplinkFrame) => void)[] = [];
+    const replayed = [0, 1].map(() => new Promise<UplinkFrame>((resolve) => replayResolvers.push(resolve)));
+    let acknowledgeApplied: (() => void) | undefined;
+    const applied = new Promise<void>((resolve) => {
+      acknowledgeApplied = resolve;
+    });
+    let connections = 0;
+    server.on("connection", (socket) => {
+      const conn = ++connections;
+      socket.on("message", (data) => {
+        const json: unknown = JSON.parse(data.toString());
+        const type = (json as { type?: string }).type;
+        if (type === "hello") {
+          const hello = AgentToControl.parse(json);
+          if (hello.type !== "hello") throw new Error("预期 hello");
+          hellos.push(hello);
+          socket.send(
+            JSON.stringify({
+              type: "welcome",
+              ownerId: "owner-1",
+              kind: "local",
+              serverTime: new Date().toISOString(),
+              conn,
+              upAcked: 0,
+            }),
+          );
+        } else if (type === "uplink") {
+          const frame = UplinkFrame.parse(json);
+          frames.push(frame);
+          replayResolvers[conn - 1]?.(frame);
+          if (conn === 2) {
+            socket.send(JSON.stringify({ type: "uplink_ack", upTo: 1, rejected: [] }));
+            socket.send(JSON.stringify({ type: "downlink", seq: 5, body: { type: "cancel", runId: "run-1" } }));
+          }
+        } else {
+          const bare = BareUplinkFrame.safeParse(json);
+          if (bare.success && bare.data.body.type === "downlink_ack" && bare.data.body.upTo === 5)
+            acknowledgeApplied?.();
+        }
+      });
+    });
+    const children: Child[] = [];
+    const start = (): Child => {
+      const child = spawnAgent({});
+      children.push(child);
+      const address = server.address() as AddressInfo;
+      child.stdin.write(
+        `${JSON.stringify({ url: `ws://127.0.0.1:${address.port}/agent`, computerId: "computer-1", token: "token-1", dataDir })}\n`,
+      );
+      return child;
+    };
+    try {
+      const first = start();
+      await replayed[0];
+      first.process.kill("SIGKILL");
+      await first.waitForExit();
+      const second = start();
+      await replayed[1];
+      await applied;
+      second.stdin.end();
+      await expect(second.waitForExit(5_000)).resolves.toBe("退出 0");
+      expect(frames).toEqual([1, 2].map((conn) => ({ type: "uplink", conn, stream: outbox.stream, seq: 1, body })));
+      expect(hellos.map((hello) => [hello.uplinkStream, hello.downApplied])).toEqual([
+        [outbox.stream, 4],
+        [outbox.stream, 4],
+      ]);
+      const reopened = await ReliableOutbox.open(dataDir);
+      expect(reopened.acknowledged).toBe(1);
+      expect(reopened.pending()).toEqual([]);
+      expect((await DownlinkCursor.open(dataDir)).applied).toBe(5);
+    } finally {
+      for (const child of children) {
+        if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
+      }
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   // 两件事赛跑，没有墙钟阈值：退避定时器 unref 了的话，第一次重连排上之后进程就没 handle 了，
   // 退出会先到；ref 住了就是第二条重连日志先到。机器慢只让整场比赛变慢，不会改变胜负。
   it("控制面连不上时进程不退出，继续按退避重连", async () => {

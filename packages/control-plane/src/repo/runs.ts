@@ -11,7 +11,7 @@ import {
 } from "@baize/shared";
 import { TransactionRollbackError, and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, runs } from "../db/schema.js";
+import { agentOutbox, bots, groupMembers, groups, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toUsageRecord } from "./rows.js";
@@ -257,26 +257,29 @@ export async function finishRun(
   totals: RunTotals,
   ending: "run_done" | "abandoned",
 ): Promise<UsageRecord | null> {
-  const now = new Date();
-  const [row] = await db
-    .update(runs)
-    .set({
-      endedAt: now,
-      chargedAt: ending === "abandoned" ? now : null,
-      steps: totals.steps,
-      inputTokens: totals.inputTokens,
-      outputTokens: totals.outputTokens,
-      amount: totals.amount.toFixed(6),
-    })
-    .where(
-      and(
-        eq(runs.id, runId),
-        groupId === null ? isNull(runs.groupId) : eq(runs.groupId, groupId),
-        isNull(runs.endedAt),
-      ),
-    )
-    .returning();
-  return row === undefined ? null : toUsageRecord(row);
+  return db.transaction(async (tx) => {
+    const now = new Date();
+    const [row] = await tx
+      .update(runs)
+      .set({
+        endedAt: now,
+        chargedAt: ending === "abandoned" ? now : null,
+        steps: totals.steps,
+        inputTokens: totals.inputTokens,
+        outputTokens: totals.outputTokens,
+        amount: totals.amount.toFixed(6),
+      })
+      .where(
+        and(
+          eq(runs.id, runId),
+          groupId === null ? isNull(runs.groupId) : eq(runs.groupId, groupId),
+          isNull(runs.endedAt),
+        ),
+      )
+      .returning();
+    if (row !== undefined) await tx.delete(agentOutbox).where(eq(agentOutbox.runId, runId));
+    return row === undefined ? null : toUsageRecord(row);
+  });
 }
 
 /**

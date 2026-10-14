@@ -10,9 +10,18 @@
 
 ## 电脑代理握手
 
-合法 hello 的电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接仍用 `superseded`（4000），删账号用 `accountDeleted`（4002）；4003 留给第 3 期信封单元的版本握手，1011 和 1012 保留原行为。
+hello 的协议号和下限都是 2，缺少 `protocol` 按 1 处理，以 `upgradeRequired`（4003）关闭。协议满足下限、电脑号存在且 token 正确才回 `welcome` 和 `config`。电脑号存在但 token 不正确用 `AgentCloseCode.displaced`（4004）关闭；电脑号不存在、首条报文不合法、10 秒内没报 hello 用 `badHello`（4001）。同一 token 重连顶旧连接用 `superseded`（4000），删账号用 `accountDeleted`（4002）。序号缺口用 1011 关闭，1012 保留原行为。
 
-电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码仍按退避重连。
+电脑代理 stdout 每行一个 `AgentStatusLine` 状态 JSON，接纳时输出 `{"type":"online"}`。收到 4004 后输出一次 `{"type":"displaced"}`，收到 4003 后输出一次 `{"type":"upgrade_required"}`；4002、4003、4004 都停止重连并清理心跳、运行器和助理 Chrome。库函数不主动退出进程；桌面端保持 stdin 打开时代理进程可能以已停止状态驻留，stdin 结束或收到 SIGINT/SIGTERM 时现有入口正常退出。其他关闭码按退避重连。
+
+
+## 可靠信封
+
+shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 reliable 用 `{ type: "uplink", conn, stream, seq, body }`，bare 用 `{ conn, body }`；流式 `bot_text` 只发 `done: false`，每块全文由 reliable 的 `bot_text_done` 定稿。控制面在同一事务里条件推进 `computers.up_acked` 和处理业务，重复帧只回确认，毒帧重试一次后回 `invalid` 并越过。已收尾的 run 只放行 `run_done`、`bot_text_done`、`bot_tool_call`，其他动作回 `run_closed`。旧连接代际不处理、不确认。
+
+电脑代理上行先写 `<dataDir>/.agent/outbox/<stream>/frames.jsonl`，同一 100ms 窗口共用 fsync，落盘后才发送。控制面以 20ms 合批累计 `uplink_ack`；代理持久化确认再清理旧帧，重启后沿用 stream、序号和未确认帧。
+
+可靠下行在调用方事务里进入 `agent_outbox`，带 `{ type: "downlink", seq, body }` 按序发送；结束或放弃 run 的事务删除它绑定的行，4004 顶号清空该电脑发件箱，删电脑级联删除。在线或断线宽限内可以入队，宽限外沿用派发失败分支。hello 先更新连接代际和游标，再依次发 welcome、config、pause/resume、重放发件箱，随后补历史欠账。代理先持久化 `.agent/downlink.json` 再入运行器队列，重复帧只确认，崩溃窗口内丢失的 prompt 由 hello 的 activeRuns 对账收尾。对账发现已结束的 active run 时现场发 `cancel{runId}`，不入发件箱。
 
 ## 工具连接
 
@@ -120,11 +129,11 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 
 这个条件要在提交前一直成立，靠一把按 (群, Bot) 算键的事务级 advisory 锁：`run_done` 和 `abandonRun` 的事务第一句先拿它（`lockSettlement`、`lockSettlementOfRun`，`pg_advisory_xact_lock` 的两参数形式，第一参数是这块自己的命名空间常量，和仓库里别处单参数的 advisory 锁不在一个键空间），再 `finishRun`；`startRun` 也在自己的事务里先拿同一把再插 run 行。于是同 Bot 同群的两条收尾排队，后来的那条等前一条提交，之后的语句拿新快照，看得见前一条已经结束，把两条的文字一起收掉；收尾进行中也不会冒出新 run。每个收尾事务只收一条 run，只拿一把键。锁序固定是 advisory → runs → messages，run 名下的写帧不拿 advisory。在这把锁之下，`NOT EXISTS` 看见的「别的 run 已经结束」是对的，「收它没错」还依赖一条文字只属于一个 run：正常运行器每个文字块生成新的 UUID 当 messageId，成立。剩下的代价：一条 run 挂在掉线电脑上没收尾时，同 Bot 同群的定稿要等它被对账或宽限收尾，只是晚收，不会收错。没往正文里塞 runId，是因为正文 jsonb 的形状别处直接读（e2e 用例按整条正文比对），shared 和迁移也都不动。早先没收尾就断掉的半截，在这个 Bot 下次在这个群里收尾时一并收掉。
 
-**结账是收尾之后的第二个事务。** `run_done` 的费用卡和例行记账不在结束 run 行的事务里：费用卡要并进多 Bot 回合的汇总或先记着（下一段），这要看回合的内存状态，结束行的事务里不读它。两个事务之间控制面可能抛错或停机，结束了的行不能让补发的 `run_done` 直接回确认，所以 `runs` 表多一列 `charged_at`：`run_done` 结束行时留空，`abandonRun` 没有账要结，结束行的同一句就写上。结账事务（`events.ts` 的 `chargeRun`）第一句 `lockRuns` 按 id 升序锁住要认领的 run（见「删 Bot 也守这个锁序」），接着 `claimCharge`（`UPDATE runs SET charged_at = now() WHERE id = ? AND ended_at IS NOT NULL AND charged_at IS NULL RETURNING *`），拿不到行就是已结过账或已被对账收掉，什么都不写；拿到行就在同一个事务里落费用卡（`appendMessage` 或并进汇总的 `replaceMessageBody`）和例行记账（`chargeRoutineRunIn`），哪一件抛错整个事务回滚，认领一起回滚，下一次补发再认领一次。例行记账的 note 是往后缀的（`¥0.60 · ¥0.30`），自身不幂等，只记一次靠这个事务。费用卡按 `claimCharge` 返回的行上的步骤和金额出，不按补发那条报文算，于是补发带来的数字和第一次一样。结账提交之后才推送费用卡、推送例行任务、推进回合（`groupTurns.runDone` 只认当前回合的 runId，重复调用是空操作）。例行状态推送只管实时视图：丢了这条推送，已加载的例行列表停在旧状态，WebSocket 重连不会补拉它，只有整页刷新或重新进入时的 HTTP 读取拿到库里的正确状态。所以结账提交后这条推送抛错只记日志，不挡确认、回合推进和同一次 hello 里后面的行，也不为它另设补推入口。推送按 id 整条覆盖，补发撞上已结账的行也再推一次，重复无害。
+**收尾、结账和上行游标共用信封事务。** `run_done` 沿用结束行和结账的两个函数，但都在 `acceptUplinkFrame` 的外层事务里；费用卡或例行记账失败时，结束行和游标一起回滚，重试一次仍失败就只推进游标并回 `rejected invalid`。结束行前先按 id 升序锁住当前 run 和可能合账的 held run，例行 run 还先取得共享 Bot 锁和例行行锁，避免与删除、裁剪反序。`charged_at` 仍区分待结账和已结账：`claimCharge` 用 `UPDATE ... WHERE ended_at IS NOT NULL AND charged_at IS NULL RETURNING *` 认领，认领、费用卡和例行记账共用事务，重复报文不会再加金额。先记着的 pass 留到后续汇总结账，放弃的 run 在结束时直接写 `charged_at`。提交后才推送费用卡、例行任务、回合推进和通知；推送故障只记日志，不回滚已提交的业务结果或阻挡累计确认。例行列表的实时推送丢失后仍需刷新或重新进入，通过 HTTP 读取恢复。
 
 费用卡单落、并进汇总还是先记着，看运行器此前的文字块（`(pass)`）和回合的内存状态，这两样只在第一次结账时读，读到的结论记在 `events.ts` 的 `costBookings` 里，结账失败后补发沿用，不再并第二次；控制面重启后这份记忆没了，补发按普通回话单落一张卡。先记着的 pass 不结账：认领在同一个事务里回滚，`charged_at` 留空就是它落库的样子，金额在它自己的 run 行上，确认照回。这个群下一张费用卡在自己的结账事务里逐个 `claimCharge` 这些 pass，认领到的才把步骤和金额加进卡里，所以卡上的数字只来自库里认领成功的行。要认领哪几条在事务外定下来（本进程记着的结论，或此刻这个群先记着的 pass），事务第一句 `lockRuns` 把当前这条和它们按 id 升序 `FOR UPDATE` 锁上，之后才逐条认领，锁序见下面删 Bot 一段。
 
-**欠账在 hello 时补齐。** 结账失败的行要等代理补发，而代理的补发只在重连 hello 之后发，每条最多三次，待发表最多 64 条，放手之后这条 run 就只剩库里的「`ended_at` 有值、`charged_at` 为空」记得。所以 `hub.ts` 的 hello 在发完 config 之后调 `settleUnchargedRuns`：把这台电脑名下这样的行按 `run_done` 的同一条路（`settleCharge`）一条条结掉，推送费用卡和例行状态、推进回合，结果通知只在这个进程里还记得那次结账结论时弹。补发能到的时刻（重连 hello，包括控制面重启后所有电脑的重连）这里都在，而且不受次数和容量上限，所以故障排除后的下一次 hello 就把欠账补齐；故障还在时补结账一样抛错，只记日志，不挡上线，也不为清代理的待发表提前回确认；一条结不成也不挡后面的行，各行的认领互不相干。日志只记错误类别（`name`，pg 错误带 `code`）和电脑、run 的 id，不打印异常原文，原文可能夹着用户正文或凭据。还在回合里先记着的 pass（按回合的 epoch 认，只认得本进程内存里的回合，别的实例的回合它不知道）不动，它等下一张费用卡；回合已经没了的（比如这一轮人人都 pass）、或是控制面重启后谁也不记得它是 pass 的，单落一张卡。重启后的退化就是多一张卡：卡上合计和 run 账本一致，只是本该并成一张的拆成两张。群或 Bot 删掉了的行（`group_id` 或 `bot_id` 已置空）不在 hello 的枚举里，不补；这只管 hello 枚举，删 Bot 之前已经缓存进同群后续结账结论（`costBookings` 的 `heldRuns`）的 pass，照样由那张卡认领并入，金额只算一次，不跨用户。没走定时扫描：欠账只会出在某台电脑的 `run_done` 上，那台电脑不重连时没有新的补发要接，下一次 hello 和补发够得着的时刻是同一个。
+**历史欠账在 hello 时补齐。** 可靠上行不再设三次或 64 条的内存补发上限，未确认帧留在磁盘发件箱。旧版本、历史故障和先记着的 pass 仍可能留下 `ended_at` 有值、`charged_at` 为空的行，所以 hello 在重放之后调用 `settleUnchargedRuns`，沿用 `settleCharge` 认领并补齐费用卡、例行账和回合推进。还属于当前内存回合的 pass 不动，等下一张费用卡；回合已消失或控制面重启后不再记得 pass 的，单落一张卡，合计金额仍与 run 账本一致。一条补结账失败不挡上线和后面的行，日志只记错误类别（`name`，pg 错误带 `code`）以及电脑、run 的 id，不打印可能含正文或凭据的异常原文。
 
 **迁移 0023 和部署顺序。** 迁移把已有的结束行的 `charged_at` 回填成 `ended_at`，不然老 run 的 `run_done` 晚到会再出一张卡。回填只覆盖迁移执行时已经结束的行，旧版控制面不认这一列：迁移之后还在跑的旧实例结束 run 时不写 `charged_at`，补发落到新实例上会再结一次账，多一张卡、例行 note 多缀一次。所以部署顺序固定：先停完所有旧控制面实例，再跑 0023，再起新实例，不和旧实例混跑。没写兼容代码。迁移前旧实现里已结束、费用卡没写成的历史行也会被回填成已结账，迁移不识别也不补它们。
 
@@ -253,9 +262,11 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 用户当面发起的审批 `deadlineAt` 为 null，不按时间过期；Bot 之间 @ 派活也按这个规则。例行 run 的 `routineRunId` 非空，或 run 的触发消息是交接卡时，审批截止为创建后 10 分钟。服务器每 15 秒扫描一次，`UPDATE ... WHERE status = 'pending' AND deadline_at <= now RETURNING` 把到期审批定为 `timed_out`、记录 `decidedAt`，向所属电脑发超时结论并推 `approval_updated`。测试通过 `scanApprovalTimeouts(now)` 指定扫描时刻，间隔可由 `approvalTimeoutIntervalMs` 注入。
 
-按钮和群里答复的条件 UPDATE 同时要求 `deadline_at IS NULL OR deadline_at > now()`。截止已过、扫描器还没跑时，点按钮返回 409，并通过扫描器共用的 `settleApprovalTimeouts` 就地结算这一张卡，给电脑发 `timed_out`、推 `approval_updated`。重复点按钮或后续扫描不再发结论，也不落授权。
+按钮和群里答复的条件 UPDATE 同时要求 `deadline_at IS NULL OR deadline_at > now()`。截止已过、扫描器还没跑时，点按钮返回 409，并在原事务内用扫描器同样的条件 UPDATE 就地结算这一张卡，给电脑发 `timed_out`、推 `approval_updated`。重复点按钮或后续扫描不再发结论，也不落授权。
 
 用户的新消息路由到目标 Bot 后、发 prompt 前，控制面把这个 Bot 在同一个群里的 pending 审批定为 `voided`。每张卡先向旧 run 所在电脑发作废结论，再派新 prompt；其他 Bot 和其他群的审批不受影响。例行消息不作废已有审批。群里回「批准、同意、拒绝、不行」先消费为审批决定，消费成功就不派活，也不触发作废。按钮、作废和到期都用 `WHERE status = 'pending'` 争同一行，作废后再点按钮返回 409。
+
+审批的人工决定、文字答复、作废和超时都在调用方事务内把 `approval_result` 入可靠发件箱；新消息的作废与首个新 prompt 同事务提交，作废序号在前。提交之后才刷发件箱和向 Web 推 `approval_updated`，产生长期授权时先重发 config 再放行。锁序为归属人共享锁、Bot 共享锁、按 id 排的电脑行、run、审批行；自动结算只更新已经锁过投递范围的候选审批，仍由 `WHERE status = 'pending'` 决胜。
 
 `expired` 保持原义：run 收尾或电脑断线后的审批失效。卡片把新消息作废显示为「已作废 · 你发了新消息，这一步不做了」，到期拒绝显示为「已拒绝 · 10 分钟没人批」。
 
@@ -677,7 +688,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | 复盘的触发消息                               | 只有老白       |
 | 老白的旁白（`narrate.ts` 生成，不过模型）、牌友的台词 | 全群           |
 
-隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
+隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text`、`bot_text_done` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
 
 牌桌这边只有一处读 `messages` 不带 viewer：`poker/hint.ts` 按 id 查老白答出来的那一条，读的是代码自己刚写下的行。出牌回执和重派计数都不在 `messages` 里，见下一节。列表类查询的 viewer 规则由 `test/p3-visible-read.test.ts` 钉着。
 

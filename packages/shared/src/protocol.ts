@@ -47,13 +47,19 @@ export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_
 export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
-// 4003 留给第 3 期信封单元的版本握手。
-export const AgentCloseCode = { superseded: 4000, badHello: 4001, accountDeleted: 4002, displaced: 4004 } as const;
+export const AgentCloseCode = {
+  superseded: 4000,
+  badHello: 4001,
+  accountDeleted: 4002,
+  upgradeRequired: 4003,
+  displaced: 4004,
+} as const;
 
 // 电脑代理 stdout 每行一个状态，桌面端读它。
 export const AgentStatusLine = z.discriminatedUnion("type", [
   z.object({ type: z.literal("online") }),
   z.object({ type: z.literal("displaced") }),
+  z.object({ type: z.literal("upgrade_required") }),
 ]);
 export type AgentStatusLine = z.infer<typeof AgentStatusLine>;
 
@@ -85,8 +91,12 @@ export const AgentToControl = z.discriminatedUnion("type", [
     computerId: ComputerId,
     token: z.string(),
     version: z.string(),
+    protocol: z.number().int().nonnegative().default(1),
+    uplinkStream: z.string().min(1).max(128).default("legacy"),
+    downApplied: z.number().int().nonnegative().default(0),
     activeRuns: z.array(RunId),
   }),
+  z.object({ type: z.literal("downlink_ack"), upTo: z.number().int().nonnegative() }),
   z.object({ type: z.literal("heartbeat"), at: z.string().datetime() }),
   // 代理收下一条 config 并换好了运行器，generation 是收下的那条 config 的代际。
   // 控制面只拿它从 config_rejected 里恢复，且只认当前待确认的那一代。
@@ -119,6 +129,14 @@ export const AgentToControl = z.discriminatedUnion("type", [
     messageId: MessageId,
     delta: z.string(),
     done: z.boolean(),
+  }),
+  z.object({
+    type: z.literal("bot_text_done"),
+    runId: RunId,
+    botId: BotId,
+    groupId: GroupId,
+    messageId: MessageId,
+    text: z.string(),
   }),
   z.object({
     type: z.literal("bot_tool_call"),
@@ -358,7 +376,14 @@ export type AgentToControl = z.infer<typeof AgentToControl>;
 
 // 控制面收下 hello 后必须回 welcome。电脑代理只在收到 welcome 时把重连退避清零。
 export const ControlToAgent = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("welcome"), ownerId: UserId, kind: ComputerKind, serverTime: z.string().datetime() }),
+  z.object({
+    type: z.literal("welcome"),
+    ownerId: UserId,
+    kind: ComputerKind,
+    serverTime: z.string().datetime(),
+    conn: z.number().int().positive(),
+    upAcked: z.number().int().nonnegative(),
+  }),
   z.object({
     type: z.literal("config"),
     // 这条连接上第几份 config，从 1 起按开始读快照的先后编号。并发重发时后开始的可能先到，
@@ -436,9 +461,7 @@ export const ControlToAgent = z.discriminatedUnion("type", [
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
   }),
-  // 控制面处理完一条 run_done 就回，重复的、run 已被对账收尾的也回。代理留着每条 run_done 直到收到它：
-  // 没收到就在下次 hello 的 activeRuns 里把这个 run 报成还在跑，welcome 之后补发。
-  z.object({ type: z.literal("run_done_ack"), runId: RunId }),
+  z.object({ type: z.literal("cancel"), runId: RunId }),
   z.object({
     type: z.literal("approval_result"),
     runId: RunId,
@@ -476,3 +499,97 @@ export const ControlToAgent = z.discriminatedUnion("type", [
   }),
 ]);
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
+
+export const AGENT_PROTOCOL = 2;
+export const MIN_AGENT_PROTOCOL = 2;
+
+export const UPLINK_DELIVERY = {
+  hello: "bare",
+  heartbeat: "bare",
+  config_applied: "bare",
+  downlink_ack: "bare",
+  bot_text: "bare",
+  bot_text_done: "reliable",
+  agent_error: "reliable",
+  bot_tool_call: "reliable",
+  run_done: "reliable",
+  approval_request: "reliable",
+  login_state: "reliable",
+  publish_result: "reliable",
+  draft_create: "reliable",
+  draft_edit: "reliable",
+  plan_propose: "reliable",
+  project_offer: "reliable",
+  team_offer: "reliable",
+  routine_offer: "reliable",
+  preference_add: "reliable",
+  metric_report: "reliable",
+  review_submit: "reliable",
+  poker_act: "reliable",
+  poker_review: "reliable",
+  set_cadence: "reliable",
+  approval_abandoned: "reliable",
+  task_checklist: "reliable",
+  mention: "reliable",
+  skill_offer: "reliable",
+  handoff: "reliable",
+  handoff_accept: "reliable",
+  set_chief: "reliable",
+} as const satisfies Record<AgentToControl["type"], "bare" | "reliable">;
+
+export const DOWNLINK_DELIVERY = {
+  welcome: "bare",
+  config: "bare",
+  pause: "bare",
+  resume: "bare",
+  cancel: "reliable",
+  prompt: "reliable",
+  approval_result: "reliable",
+  poker_result: "reliable",
+  browser_login: "reliable",
+  publish_draft: "reliable",
+} as const satisfies Record<ControlToAgent["type"], "bare" | "reliable">;
+
+export const RUN_CLOSED_ACCEPTS: ReadonlySet<AgentToControl["type"]> = new Set([
+  "run_done",
+  "bot_text_done",
+  "bot_tool_call",
+]);
+export const UplinkRejectionCode = z.enum(["stale_epoch", "not_holder", "run_closed", "invalid"]);
+export type UplinkRejectionCode = z.infer<typeof UplinkRejectionCode>;
+export const UplinkRejection = z.object({
+  seq: z.number().int().positive(),
+  code: UplinkRejectionCode,
+  runId: RunId.optional(),
+});
+export type UplinkRejection = z.infer<typeof UplinkRejection>;
+
+export const UplinkFrame = z.object({
+  type: z.literal("uplink"),
+  conn: z.number().int().positive(),
+  stream: z.string().min(1).max(128),
+  seq: z.number().int().positive(),
+  body: AgentToControl.refine((body) => UPLINK_DELIVERY[body.type] === "reliable"),
+});
+export type UplinkFrame = z.infer<typeof UplinkFrame>;
+export const UplinkHeader = UplinkFrame.omit({ body: true }).extend({ body: z.unknown() });
+export const UplinkAck = z.object({
+  type: z.literal("uplink_ack"),
+  upTo: z.number().int().nonnegative(),
+  rejected: z.array(UplinkRejection),
+});
+export type UplinkAck = z.infer<typeof UplinkAck>;
+export const DownlinkFrame = z.object({
+  type: z.literal("downlink"),
+  seq: z.number().int().positive(),
+  body: ControlToAgent.refine((body) => DOWNLINK_DELIVERY[body.type] === "reliable"),
+});
+export type DownlinkFrame = z.infer<typeof DownlinkFrame>;
+export const BareUplinkFrame = z.object({
+  conn: z.number().int().positive(),
+  body: AgentToControl.refine(
+    (body) =>
+      UPLINK_DELIVERY[body.type] === "bare" && body.type !== "hello" && (body.type !== "bot_text" || !body.done),
+  ),
+});
+export type BareUplinkFrame = z.infer<typeof BareUplinkFrame>;

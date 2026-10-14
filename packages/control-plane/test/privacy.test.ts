@@ -22,7 +22,7 @@ const DELETE_RUNS = /^delete from "runs"/;
 /** 建 run 的插入。拦在它前面，派活已经过了成员检查、拿着 Bot 的共享锁。 */
 const INSERT_RUN = /^insert into "runs"/;
 
-/** 派活建完 run、发 prompt 之前写上下文窗口的那条。 */
+/** 派活事务里写上下文窗口的那条；run 和 outbox 都还没提交。 */
 const RECORD_CONTEXT = /^update "runs" set "unsettled_context"/;
 
 /** 认电脑身份的那条。拦在它后面，身份已经认出来、hello 还没排进链。 */
@@ -316,31 +316,33 @@ it("派活拿着 Bot 锁建 run 时删号：删号等 run 提交再一并删掉�
   const inserting = gate.arm(INSERT_RUN, "before");
   let recording: ReturnType<typeof gate.arm> | undefined;
   let posting: Promise<Response> | undefined;
+  let deleting: Promise<Response> | undefined;
+  let deleted = false;
   try {
     posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "已过成员检查、还没建 run" });
     await inserting.reached;
     recording = gate.arm(RECORD_CONTEXT, "before");
-    let deletedFirst = false;
-    const deleting = deleteAccount(job.client, job.user.email).then((response) => {
-      deletedFirst = true;
+    deleting = deleteAccount(job.client, job.user.email).then((response) => {
+      deleted = true;
       return response;
     });
-    await waitFor(async () => deletedFirst || (await lockWaiters()) > 0, "删号停在 Bot 锁上");
     inserting.release();
-    // run 已提交，删号随后拿到锁、删掉它、关掉代理连接；派活这才去发 prompt。
-    expect((await deleting).status).toBe(204);
-    expect(await job.agent.closed()).toBe(4002);
+    await recording.reached;
+    await waitFor(async () => deleted || (await lockWaiters()) > 0, "删号停在派活事务的 Bot 锁上");
+    expect(deleted, "上下文和 outbox 提交前删号不能越过派活事务").toBe(false);
     recording.release();
 
-    const response = await posting;
-    expect(response.status, await response.clone().text()).toBe(201);
+    const [posted, removed] = await Promise.all([posting, deleting]);
+    expect(removed.status).toBe(204);
+    expect(posted.status, await posted.clone().text()).toBe(201);
+    expect(await job.agent.closed()).toBe(4002);
     expect(await orphanRuns(), "建出来的 run 随账号删掉").toBe(0);
     const left = await database.sql`SELECT 1 FROM messages WHERE group_id = ${job.groupId}`;
     expect(left, "已删的群里不留任何消息").toEqual([]);
   } finally {
     inserting.release();
     recording?.release();
-    await posting;
+    await Promise.all([posting, deleting]);
     job.close();
   }
 });
@@ -631,17 +633,23 @@ it("建 run 拿着账号锁、还没拿 Bot 锁时删号：账号锁在 Bot 锁�
   let recording: ReturnType<typeof gate.arm> | undefined;
   let posting: Promise<Response> | undefined;
   let deleting: Promise<Response> | undefined;
+  let deleted = false;
   try {
     posting = job.client.post(`/api/groups/${job.groupId}/messages`, { text: "建 run 的锁序" });
     await locked.reached;
     recording = gate.arm(RECORD_CONTEXT, "before");
-    deleting = deleteAccount(job.client, job.user.email);
+    deleting = deleteAccount(job.client, job.user.email).then((response) => {
+      deleted = true;
+      return response;
+    });
     await waitFor(async () => (await lockWaiters()) > 0, "删号停在账号锁上");
     locked.release();
+    await recording.reached;
 
-    expect((await deleting).status).toBe(204);
+    expect(deleted, "录上下文时派活仍持有账号锁，删号不能提前提交").toBe(false);
     recording.release();
-    const posted = await posting;
+    const [posted, removed] = await Promise.all([posting, deleting]);
+    expect(removed.status).toBe(204);
     expect(posted.status, await posted.clone().text()).toBe(201);
     expect(await orphanRuns(), "建出来的 run 随账号删掉").toBe(0);
     expect(await runExists(job.runId)).toBe(false);

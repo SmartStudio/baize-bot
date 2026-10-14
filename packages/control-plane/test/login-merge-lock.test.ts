@@ -113,11 +113,12 @@ it("同一台电脑换连接时甲、乙反向合并：旧连接的合并先落�
     stale.send({ type: "login_state", accountId: s.firstId, state: { login: "valid", handle: "乙" } });
     await firstGate.reached;
     fresh = await queueHello(server.server.port, s.computer.computerId, s.computer.token);
-    fresh.send({ type: "login_state", accountId: s.secondId, state: { login: "valid", handle: "甲" } });
     firstGate.release();
     expect(await stale.closed(), "旧连接的合并做完才轮到新连接").toBe(4000);
     await expectHello(fresh);
 
+    // 新连接先完成 welcome，再能建立带连接代次的可靠上行；hello 本身仍排在旧连接的合并之后。
+    fresh.send({ type: "login_state", accountId: s.secondId, state: { login: "valid", handle: "甲" } });
     // 新连接的 failed 当哨兵：它排在新连接的合并之后。
     fresh.send({
       type: "login_state",

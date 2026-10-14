@@ -1535,7 +1535,7 @@ async function withRunInsertFailure(botId: BotId, body: () => Promise<void>): Pr
 }
 
 describe("修复三轮：删执行者和结账、派发失败、自停的边界", () => {
-  it("已结束未结账的 run 第二阶段结账和删执行者交错：删除先锁住那行，删除 204，结账照常完成并回 ack", async () => {
+  it("信封结束、结账和游标同事务，删执行者等事务提交后完成且不死锁", async () => {
     const owner = await ownerWithBot();
     const groupId = await projectGroup(owner, [owner.botId, await secondBot(owner)]);
     const routine = await makeRoutine(owner, { groupId, triggers: [] });
@@ -1543,38 +1543,36 @@ describe("修复三轮：删执行者和结账、派发失败、自停的边界"
     const deleting = await gatedServer(owner);
     const { agent } = await helloAgent(charging.live.server.port, owner.computer.computerId, owner.computer.token);
     let claimGate: ReturnType<typeof charging.arm> | undefined;
-    let recordGate: ReturnType<typeof deleting.arm> | undefined;
     let deletion: Promise<Response> | undefined;
+    let deleted = false;
     try {
       expect((await charging.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
       const prompt = await agent.expect("prompt");
-      // 结账事务开头就按 id 序锁 run 行，屏障落在这条锁语句之前，删除才抢得到先手。
       claimGate = charging.arm(/from "runs" where "runs"\."id" in .*for update/i, "before");
       runDone(agent, prompt);
       await claimGate.reached;
-      const [ended] = await database.sql<{ ended_at: Date | null; charged_at: Date | null }[]>`
-        SELECT ended_at, charged_at FROM runs WHERE id = ${prompt.runId}`;
-      expect([ended?.ended_at !== null, ended?.charged_at], "第一阶段已提交，结账还没认领").toEqual([true, null]);
-      recordGate = deleting.arm(/update "routine_runs" set "status"/i, "after");
-      deletion = deleting.client.delete(`/api/bots/${owner.botId}`);
-      await recordGate.reached;
+      const [ended] = await database.sql<
+        { ended_at: Date | null; charged_at: Date | null }[]
+      >`SELECT ended_at, charged_at FROM runs WHERE id = ${prompt.runId}`;
+      expect([ended?.ended_at !== null, ended?.charged_at], "结束和结账都尚未提交").toEqual([false, null]);
+      deletion = deleting.client.delete(`/api/bots/${owner.botId}`).then((response) => {
+        deleted = true;
+        return response;
+      });
+      await waitUntil(async () => deleted || (await lockWaiters()) > 0, "删除等待信封事务持有的例行锁");
+      expect(deleted).toBe(false);
       claimGate.release();
-      await waitUntil(async () => (await lockWaiters()) > 0, "结账认领排在删除持有的锁上");
-      recordGate.release();
-      expect((await deletion).status, "删除不报 40P01").toBe(204);
       await agent.ack(prompt.runId);
-      await waitUntil(async () => {
-        const [row] = await database.sql<
-          { charged_at: Date | null }[]
-        >`SELECT charged_at FROM runs WHERE id = ${prompt.runId}`;
-        return row?.charged_at !== null;
-      }, "结账完成");
+      expect((await deletion).status, "删除不报 40P01").toBe(204);
+      const [run] = await database.sql<
+        { charged_at: Date | null }[]
+      >`SELECT charged_at FROM runs WHERE id = ${prompt.runId}`;
+      expect(run?.charged_at).not.toBeNull();
       const [record] = await runsOf(routine.id);
-      expect(record?.status).toBe("failed");
-      expect(record?.note.startsWith(EXECUTOR_DELETED_NOTE), "删除收的尾不被结账改回去").toBe(true);
+      expect(record?.status, "已完成的记录不因后来的删除改回失败").toBe("ok");
+      expect(record?.note).toContain("¥");
     } finally {
       claimGate?.release();
-      recordGate?.release();
       await Promise.allSettled([deletion].filter((one) => one !== undefined));
       agent.close();
       await charging.live.close();

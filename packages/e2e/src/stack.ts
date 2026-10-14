@@ -12,6 +12,7 @@ import {
   ComputerListResponse,
   ComputerTokenResponse,
   ControlToAgent,
+  DownlinkFrame,
   MeResponse,
   RegisterResponse,
   ServerPush,
@@ -55,6 +56,8 @@ export type StackOptions = {
   readonly agentProcess?: boolean;
   /** 进程内电脑代理经一个 TCP 转发连 /agent，用例可以掐断再接上这一段，模型网关仍直连控制面。 */
   readonly cuttableAgentLink?: boolean;
+  /** 可靠上行落盘后、实际发送前的确定注入点。 */
+  readonly beforeReliableSend?: AgentOptions["beforeReliableSend"];
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
@@ -211,6 +214,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       token: computerToken,
       version: AGENT_VERSION,
       dataDir,
+      ...(options.beforeReliableSend === undefined ? {} : { beforeReliableSend: options.beforeReliableSend }),
       log: (line: string) => {
         log += `${line}\n`;
       },
@@ -343,7 +347,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       prompts: () => prompts,
       configsApplied: () => configsApplied,
       connectComputer: async () => {
-        const probe = await connectComputer(agentOptions);
+        const probe = await connectComputer({ ...agentOptions, url: `ws://127.0.0.1:${server.port}/agent` });
         closers.push(probe.close);
         return probe;
       },
@@ -430,18 +434,42 @@ async function connectComputer(options: {
   const socket = new WebSocket(options.url);
   const frames: ControlToAgent[] = [];
   let closed: ReturnType<ComputerProbe["closed"]> = null;
+  let conn: number | undefined;
   const closing = new Promise<void>((resolve) => {
     socket.once("close", (code, reason) => {
       closed = { code, reason: reason.toString() };
       resolve();
     });
   });
-  socket.on("message", (data) => frames.push(ControlToAgent.parse(JSON.parse(data.toString()))));
+  socket.on("message", (data) => {
+    const raw: unknown = JSON.parse(data.toString());
+    const downlink = DownlinkFrame.safeParse(raw);
+    if (downlink.success) {
+      frames.push(ControlToAgent.parse(downlink.data.body));
+      if (conn !== undefined)
+        socket.send(JSON.stringify({ conn, body: { type: "downlink_ack", upTo: downlink.data.seq } }));
+      return;
+    }
+    const frame = ControlToAgent.parse(raw);
+    frames.push(frame);
+    if (frame.type === "welcome") conn = frame.conn;
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve);
     socket.once("error", reject);
   });
-  socket.send(JSON.stringify(AgentToControl.parse({ type: "hello", ...options, activeRuns: [] })));
+  socket.send(
+    JSON.stringify(
+      AgentToControl.parse({
+        type: "hello",
+        ...options,
+        protocol: 2,
+        uplinkStream: `probe-${randomBytes(8).toString("hex")}`,
+        downApplied: 0,
+        activeRuns: [],
+      }),
+    ),
+  );
   return {
     frames: () => frames,
     closed: () => closed,

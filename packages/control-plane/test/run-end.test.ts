@@ -117,7 +117,14 @@ async function soloRun(): Promise<Live> {
   return startRun(who, created.group.id, "做这件事");
 }
 
-type RunFrame = Extract<AgentToControl, { runId: RunId; botId: BotId; groupId: GroupId }>;
+type RunFrame =
+  | Extract<AgentToControl, { runId: RunId; botId: BotId; groupId: GroupId }>
+  | (Omit<Extract<AgentToControl, { type: "bot_text" }>, "done"> & {
+      done: boolean;
+      runId: RunId;
+      botId: BotId;
+      groupId: GroupId;
+    });
 type Unaddressed<T> = T extends unknown ? Omit<T, "runId" | "botId" | "groupId"> : never;
 
 function send(live: Live, frame: Unaddressed<RunFrame>): void {
@@ -175,6 +182,17 @@ async function barrier(agent: AgentClient, push: PushClient, groupId: GroupId, t
     if (next.type === "message" && next.message.body.kind === "system" && next.message.body.text.endsWith(tag))
       return before;
     before.push(next);
+  }
+}
+
+async function pendingPushes(push: PushClient): Promise<ServerPush[]> {
+  const pending: ServerPush[] = [];
+  for (;;) {
+    try {
+      pending.push(await push.next(100));
+    } catch {
+      return pending;
+    }
   }
 }
 
@@ -389,8 +407,8 @@ describe("收尾时收掉还在流的文字", () => {
   );
 });
 
-describe("收尾之后晚到的帧不落库、不推送", () => {
-  it("收掉的那条，晚到的 delta 不接上也不把它重新打开；新起的文字块不落", async () => {
+describe("收尾后晚到的帧按可靠性处理", () => {
+  it("晚到的 delta 不接上，完整文字仍会定稿", async () => {
     const live = await soloRun();
     try {
       const saying = newMessageId();
@@ -401,9 +419,23 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
       say(live, fresh, "收尾之后才起的一段话", true);
       const pushed = await barrier(live.agent, live.push, live.groupId, "晚到的文字之后");
       expect(pushesAbout(pushed, saying), "只有收尾那一条").toEqual([settledDelta(live, saying)]);
-      expect(pushesAbout(pushed, fresh)).toEqual([]);
+      expect(pushesAbout(pushed, fresh)).toEqual([
+        expect.objectContaining({
+          type: "message",
+          message: expect.objectContaining({
+            id: fresh,
+            body: expect.objectContaining({ kind: "bot", text: "", streaming: true }),
+          }),
+        }),
+        expect.objectContaining({
+          type: "message_delta",
+          messageId: fresh,
+          delta: "收尾之后才起的一段话",
+          done: true,
+        }),
+      ]);
       expect(await botText(live, saying)).toEqual({ text: "说到一半就收尾了", streaming: false });
-      expect(await botText(live, fresh)).toBeNull();
+      expect(await botText(live, fresh)).toEqual({ text: "收尾之后才起的一段话", streaming: false });
     } finally {
       live.close();
     }
@@ -423,7 +455,7 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
     }
   });
 
-  it("工具帧不新建一行，也不把收尾打成 failed 的那行盖回去", async () => {
+  it("晚到的工具结果更新已有行，也保留新的工具行", async () => {
     const live = await soloRun();
     try {
       toolCall(live, "call-running", "running");
@@ -435,13 +467,14 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
       toolCall(live, "call-running", "ok");
       toolCall(live, "call-late", "running");
       const pushed = await barrier(live.agent, live.push, live.groupId, "晚到的工具之后");
-      const tools = pushed.flatMap((push) =>
-        push.type === "message" && push.message.body.kind === "tool_call" ? [push.message.body.status] : [],
-      );
-      expect(tools, "只有收尾打成 failed 的那一条").toEqual(["failed"]);
-      expect((await bodiesOf(live, "tool_call")).map((body) => body.kind === "tool_call" && body.status)).toEqual([
-        "failed",
-      ]);
+      expect(
+        pushed.flatMap((push) =>
+          push.type === "message" && push.message.body.kind === "tool_call" ? [push.message.body.status] : [],
+        ),
+      ).toEqual(["failed", "ok", "running"]);
+      expect(
+        (await bodiesOf(live, "tool_call")).flatMap((body) => (body.kind === "tool_call" ? [body.status] : [])),
+      ).toEqual(["ok", "running"]);
     } finally {
       live.close();
     }
@@ -659,7 +692,7 @@ describe("收尾之后晚到的帧不落库、不推送", () => {
   });
 });
 
-describe("帧已过 resolveRun 卡在写之前，收尾在另一台控制面上先提交", () => {
+describe("写帧与另一台控制面的握手、收尾按可靠性排队", () => {
   async function endElsewhere(live: Live): Promise<AgentClient> {
     // 这台电脑在 B 上重连，hello 不带这个 run：welcome 回来时 B 上的收尾已经提交。
     const { agent } = await helloAgent(serverB.server.port, live.computer.computerId, live.computer.token);
@@ -679,7 +712,7 @@ describe("帧已过 resolveRun 卡在写之前，收尾在另一台控制面上�
       expect(await botText(live, saying), "B 上的收尾已经收掉").toEqual({ text: "说到一半的这句话", streaming: false });
       held.release();
       await held.finished;
-      const pushed = await barrier(live.agent, live.push, live.groupId, "放行 delta 之后");
+      const pushed = await pendingPushes(live.push);
       expect(pushesAbout(pushed, saying)).toEqual([]);
       expect(await botText(live, saying)).toEqual({ text: "说到一半的这句话", streaming: false });
     } finally {
@@ -689,74 +722,79 @@ describe("帧已过 resolveRun 卡在写之前，收尾在另一台控制面上�
     }
   });
 
-  it("放行晚到的审批请求：不出卡、不推", async () => {
+  it("审批事务未提交时，新连接在电脑锁上等它；之后收尾只使已有卡过期", async () => {
     const live = await soloRun();
     const held = gates.a.arm(LOCK_OPEN_RUN);
     let elsewhere: AgentClient | undefined;
+    let reconnecting: Promise<AgentClient> | undefined;
     try {
       requestApproval(live, "call-held");
       await held.reached;
-      elsewhere = await endElsewhere(live);
-      held.release();
-      await held.finished;
-      const pushed = await barrier(live.agent, live.push, live.groupId, "放行审批之后");
-      expect(pushedKinds(pushed)).toEqual([]);
+      reconnecting = endElsewhere(live);
+      await waitFor(async () => (await lockWaiters("any")) > 0, "新 hello 等可靠审批帧提交");
       expect((await page(live)).approvals).toEqual([]);
+      held.release();
+      elsewhere = await reconnecting;
+      expect((await page(live)).approvals).toMatchObject([{ status: "expired" }]);
+      requestApproval({ ...live, agent: elsewhere }, "call-late");
+      await waitFor(
+        async () =>
+          elsewhere
+            ?.uplinkAcks()
+            .some((ack) => ack.rejected.some((item) => item.code === "run_closed" && item.runId === live.runId)) ===
+          true,
+        "晚到审批收到 run_closed",
+      );
+      expect((await page(live)).approvals).toHaveLength(1);
     } finally {
       held.release();
+      if (reconnecting !== undefined) elsewhere ??= await reconnecting;
       elsewhere?.close();
       live.close();
     }
   });
 
-  it("放行晚到的工具行：不落、不推", async () => {
+  it("可靠工具事务先提交，新连接收尾后同 callId 的完整结果仍覆盖同一行", async () => {
     const live = await soloRun();
-    const held = gates.a.arm(LOCK_OPEN_RUN);
+    const held = gates.a.arm(/^insert into "messages"/);
     let elsewhere: AgentClient | undefined;
+    let reconnecting: Promise<AgentClient> | undefined;
     try {
       toolCall(live, "call-held", "running");
       await held.reached;
-      elsewhere = await endElsewhere(live);
-      held.release();
-      await held.finished;
-      const pushed = await barrier(live.agent, live.push, live.groupId, "放行工具之后");
-      expect(pushedKinds(pushed)).toEqual([]);
+      reconnecting = endElsewhere(live);
+      await waitFor(async () => (await lockWaiters("any")) > 0, "新 hello 等工具帧提交");
       expect(await bodiesOf(live, "tool_call")).toEqual([]);
+      held.release();
+      elsewhere = await reconnecting;
+      toolCall({ ...live, agent: elsewhere }, "call-held", "ok");
+      await waitFor(async () => elsewhere?.uplinkAcks().some((ack) => ack.upTo >= 1) === true, "晚到工具结果已提交");
+      expect(await bodiesOf(live, "tool_call")).toMatchObject([{ status: "ok", runId: live.runId }]);
+      expect(await bodiesOf(live, "tool_call")).toHaveLength(1);
     } finally {
       held.release();
+      if (reconnecting !== undefined) elsewhere ??= await reconnecting;
       elsewhere?.close();
       live.close();
     }
   });
 
-  it("收尾已经结束 run 但还没提交时，晚到的工具行等它提交，再看见 run 已结束，一行不写", async () => {
+  it("同连接收尾事务未提交时，工具结果排在其后，提交后落库且只一行", async () => {
     const live = await soloRun();
-    const held = gates.a.arm(LOCK_OPEN_RUN);
-    // 停在 finishRun 之后的下一条语句前：run 行已经被收尾的事务改了、锁着，还没提交。
-    const ending = gates.b.arm(/update "approvals" set "status"/);
-    let other: AgentClient | undefined;
+    const ending = gates.a.arm(SETTLE_SQL, "after");
     try {
-      toolCall(live, "call-racing", "running");
-      await held.reached;
-      const elsewhere = helloAgent(serverB.server.port, live.computer.computerId, live.computer.token);
+      runDone(live);
       await ending.reached;
-      held.release();
-      await waitFor(async () => {
-        const rows = await database.sql<{ waiting: number }[]>`
-          SELECT count(*)::int AS waiting FROM pg_stat_activity
-          WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock' AND query LIKE '%for share%'`;
-        return rows[0]?.waiting === 1;
-      }, "晚到的工具帧在 run 行上等收尾的锁");
-      ending.release();
-      other = (await elsewhere).agent;
-      await held.finished;
-      const pushed = await barrier(live.agent, live.push, live.groupId, "并发收尾之后");
-      expect(pushedKinds(pushed)).toEqual([]);
+      toolCall(live, "call-racing", "ok");
       expect(await bodiesOf(live, "tool_call")).toEqual([]);
-    } finally {
-      held.release();
+      expect((await runsOf(live)).find((run) => run.id === live.runId)?.ended).toBe(false);
       ending.release();
-      other?.close();
+      await live.agent.ack(live.runId);
+      await barrier(live.agent, live.push, live.groupId, "收尾后工具提交");
+      expect(await bodiesOf(live, "tool_call")).toMatchObject([{ status: "ok", runId: live.runId }]);
+      expect(await bodiesOf(live, "tool_call")).toHaveLength(1);
+    } finally {
+      ending.release();
       live.close();
     }
   });
@@ -851,7 +889,7 @@ describe("同 Bot 同群的收尾、建 run、删 Bot 排队", () => {
       const posting = live.client.post(`/api/groups/${live.groupId}/messages`, { text: "再做一件" });
       // 有锁时建 run 在 advisory 锁上等；没锁时第二条 run 直接出生。
       await waitFor(
-        async () => (await lockWaiters("advisory")) === 1 || (await runsOf(live)).length === 2,
+        async () => (await lockWaiters("any")) >= 1 || (await runsOf(live)).length === 2,
         "新消息的派活走到了建 run",
       );
       // 收尾还没提交，从外面看 run 还开着；要紧的是只有这一条。

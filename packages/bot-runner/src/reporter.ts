@@ -95,6 +95,7 @@ export function reportRun(
   // 每个文字块一条群消息。text_end 之后这条不再长，工具之后的正文另起一条，
   // 控制面的 streaming 因此就等于「这条还会长」，别的 Bot 的水位靠它。
   let block: MessageId | null = null;
+  let blockText = "";
 
   const push = (message: AgentToControl): void => {
     send(AgentToControl.parse(message));
@@ -115,13 +116,15 @@ export function reportRun(
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       block ??= MessageId.parse(randomUUID());
+      blockText += event.assistantMessageEvent.delta;
       push({ type: "bot_text", ...ids, messageId: block, delta: event.assistantMessageEvent.delta, done: false });
       return;
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_end") {
       if (block === null) return;
-      push({ type: "bot_text", ...ids, messageId: block, delta: "", done: true });
+      push({ type: "bot_text_done", ...ids, messageId: block, text: blockText });
       block = null;
+      blockText = "";
       return;
     }
     if (event.type === "tool_execution_start") {

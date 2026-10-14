@@ -9,9 +9,11 @@ import {
   type GroupId,
   type UserId,
 } from "@baize/shared";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { CONTEXT_MESSAGES, dispatchUserMessage } from "../src/agent/dispatch.js";
 import { AgentHub } from "../src/agent/hub.js";
+import { agentOutbox } from "../src/db/schema.js";
 import { GroupTurns } from "../src/agent/group-turn.js";
 import { ToolCrypto } from "../src/crypto.js";
 import { appendMessage } from "../src/repo/messages.js";
@@ -126,7 +128,7 @@ describe("派活", () => {
     });
   });
 
-  it("选中电脑之后连接就断了，run 仍记在选中的那台上，交给断线收尾", async () => {
+  it("选中电脑之后连接断开，run 和 prompt 仍入箱等重连", async () => {
     const owner = await ownerWithBot();
     class DropsRightAfterSelection extends AgentHub {
       #looks = 0;
@@ -134,9 +136,7 @@ describe("派活", () => {
         this.#looks += 1;
         return this.#looks === 1;
       }
-      override send(): boolean {
-        return false;
-      }
+      override async flushOutbox(): Promise<void> {}
     }
     const message = await appendMessage(database.db, owner.groupId, { kind: "user", text: "排一下本周" });
 
@@ -145,12 +145,19 @@ describe("派活", () => {
     ).toEqual({
       kind: "sent",
     });
-    const runs = await database.sql<{ computer_id: string; ended_at: Date | null }[]>`
-      SELECT computer_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
+    const runs = await database.sql<{ id: string; computer_id: string; ended_at: Date | null }[]>`
+      SELECT id, computer_id, ended_at FROM runs WHERE group_id = ${owner.groupId}
     `;
     expect(runs, "报了 sent 就要有一行没收尾的 run，断线收尾才找得到它，例行才不会一直停在运行中").toEqual([
-      { computer_id: owner.computer.computerId, ended_at: null },
+      { id: expect.any(String), computer_id: owner.computer.computerId, ended_at: null },
     ]);
+    const run = runs[0];
+    if (run === undefined) throw new Error("断线后 run 不存在");
+    const queued = await database.db
+      .select({ body: agentOutbox.body })
+      .from(agentOutbox)
+      .where(eq(agentOutbox.runId, RunId.parse(run.id)));
+    expect(queued.map(({ body }) => body.type)).toEqual(["prompt"]);
   });
 
   it("电脑在线时收到 prompt，runs 多一行", async () => {
@@ -302,7 +309,7 @@ describe("电脑不在线", () => {
     expect(await runCount(owner.groupId), "没派出去的活不该在用量表里留行").toBe(0);
   });
 
-  it("电脑断开之后再发又回到留话", async () => {
+  it("电脑断开后宽限期内派活入箱，重连前不留失败提示", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);
     await owner.client.post(`/api/groups/${owner.groupId}/messages`, { text: "第一件事" });
@@ -316,12 +323,8 @@ describe("电脑不在线", () => {
     const page = MessageListResponse.parse(
       await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
     );
-    expect(page.messages.map((m) => (m.body.kind === "system" ? m.body.text : m.body.kind))).toEqual([
-      "user",
-      "user",
-      "电脑不在线，这条没派出去，电脑回来后再说一次",
-    ]);
-    expect(await runCount(owner.groupId), "只有在线那次派出去了").toBe(1);
+    expect(page.messages.map((m) => m.body.kind)).toEqual(["user", "user"]);
+    expect(await runCount(owner.groupId), "宽限期内的派活仍有 run").toBe(2);
   });
 });
 

@@ -11,8 +11,9 @@ import {
   type UserId,
 } from "@baize/shared";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_RUNTIME_CONFIG, startServer } from "../src/server.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
-import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
+import { ApiClient, TEST_CREDENTIALS_KEY, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
@@ -20,10 +21,21 @@ import { connectPush, type PushClient } from "./helpers/ws.js";
 let database: TestDb;
 let server: TestServer;
 let clock = new Date("2030-01-01T02:00:00.000Z");
+const DISCONNECT_GRACE_MS = 200;
 
 beforeAll(async () => {
   database = await createTestDb();
-  server = await startTestServer(database.db, {}, undefined, { now: () => clock, intervalMs: 60 * 60_000 });
+  const running = await startServer({
+    db: database.db,
+    port: 0,
+    config: DEFAULT_RUNTIME_CONFIG,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    disconnectGraceMs: DISCONNECT_GRACE_MS,
+    notificationScheduler: { now: () => clock, intervalMs: 60 * 60_000 },
+    publisher: { intervalMs: 24 * 60 * 60_000 },
+  });
+  server = { server: running, client: () => new ApiClient(running.port), close: () => running.close() };
 });
 
 beforeEach(() => {
@@ -267,7 +279,7 @@ describe("stuck", () => {
     }
   });
 
-  it("离线期连跑三次例行只推一次 stuck，代理 hello 之后再派不出去又推一次", async () => {
+  it("离线期例行只推一次 stuck，断线宽限内的例行入箱并在重连后送达", async () => {
     const owner = await ownerWithBot();
     const routine = await makeRoutine(owner);
     const push = await connectPush(server.server.port, owner.client.cookie ?? "");
@@ -283,12 +295,24 @@ describe("stuck", () => {
       await waitFor(async () => (await computerStatus(owner)) === "sleeping", "电脑变休眠");
 
       await runRoutineNow(owner, routine);
-      await runRoutineNow(owner, routine);
-      const second = await noticesBeforeBotMarker(owner, push);
-      expect(
-        second.map((notice) => notice.text),
-        "hello 结束了上一段离线期",
-      ).toEqual([OFFLINE_STUCK]);
+      const reconnected = await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token);
+      try {
+        const prompt = await reconnected.agent.expect("prompt");
+        expect(prompt.origin).toEqual({ kind: "routine" });
+        reconnected.agent.send({
+          type: "run_done",
+          runId: prompt.runId,
+          botId: owner.botId,
+          groupId: owner.groupId,
+          steps: 1,
+          inputTokens: 10,
+          outputTokens: 20,
+        });
+        await reconnected.agent.ack(prompt.runId);
+      } finally {
+        reconnected.agent.close();
+      }
+      expect(await noticesBeforeBotMarker(owner, push), "宽限期内已派出的例行不应记成 stuck").toEqual([]);
     } finally {
       push.close();
     }
@@ -363,7 +387,7 @@ describe("stuck", () => {
     }
   });
 
-  it("连上时先推留下的 stuck，再推免打扰汇总", async () => {
+  it("连上时先推免打扰汇总，再推宽限期内完成的例行结果", async () => {
     const owner = await ownerWithBot();
     await owner.client.patch("/api/settings", { dndFrom: "09:00", dndTo: "11:00" });
     const routine = await makeRoutine(owner);
@@ -377,10 +401,36 @@ describe("stuck", () => {
 
     const push = await connectPush(server.server.port, owner.client.cookie ?? "");
     try {
-      expect((await noticesOnConnect(owner, push, 2)).map((notice) => [notice.kind, notice.text])).toEqual([
-        ["stuck", OFFLINE_STUCK],
-        ["result", SUMMARY_ONE],
-      ]);
+      const reconnected = await helloAgent(server.server.port, owner.computer.computerId, owner.computer.token);
+      try {
+        const prompt = await reconnected.agent.expect("prompt");
+        expect(prompt.origin).toEqual({ kind: "routine" });
+        reconnected.agent.send({
+          type: "bot_text",
+          runId: prompt.runId,
+          botId: owner.botId,
+          groupId: owner.groupId,
+          messageId: MessageId.parse(randomUUID()),
+          delta: "例行结果已整理好",
+          done: true,
+        });
+        reconnected.agent.send({
+          type: "run_done",
+          runId: prompt.runId,
+          botId: owner.botId,
+          groupId: owner.groupId,
+          steps: 1,
+          inputTokens: 10,
+          outputTokens: 20,
+        });
+        await reconnected.agent.ack(prompt.runId);
+        expect((await noticesOnConnect(owner, push, 2)).map((notice) => [notice.kind, notice.text])).toEqual([
+          ["result", SUMMARY_ONE],
+          ["result", `例行任务「${ROUTINE_NAME}」做完了，打开群聊看结果`],
+        ]);
+      } finally {
+        reconnected.agent.close();
+      }
     } finally {
       push.close();
     }

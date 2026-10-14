@@ -469,58 +469,63 @@ export async function claimDueDrafts(
   now: Date,
   computerPlatforms: readonly Platform[],
   onlineComputers: readonly ComputerId[],
+  onClaim?: (tx: Tx, claimed: readonly ClaimedDraft[]) => Promise<void>,
 ): Promise<ClaimedDraft[]> {
-  const reachable =
-    computerPlatforms.length === 0
-      ? sql`true`
-      : onlineComputers.length === 0
-        ? notInArray(drafts.platform, [...computerPlatforms])
-        : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
-  const claimed = await db
-    .update(drafts)
-    // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
-    // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
-    // 登录会话代次也在这条语句里抄：它和 login = 'valid' 是同一行同一刻看到的。
-    .set({
-      status: "publishing",
-      claimedAt: sql`date_trunc('milliseconds', now())`,
-      claimedLoginGeneration: sql`${accounts.loginGeneration}`,
-    })
-    .from(accounts)
-    .where(
-      and(
-        eq(accounts.id, drafts.accountId),
-        eq(drafts.status, "approved"),
-        eq(drafts.approvedHash, drafts.contentHash),
-        inArray(accounts.tier, [...PUBLISHING_TIERS]),
-        // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
-        eq(accounts.login, "valid"),
-        or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
-        reachable,
-      ),
-    )
-    .returning({ id: drafts.id });
-  if (claimed.length === 0) return [];
-  const rows = await db
-    .select({ draft: drafts, handle: accounts.handle, computerId: accounts.computerId })
-    .from(drafts)
-    .innerJoin(accounts, eq(accounts.id, drafts.accountId))
-    .where(
-      inArray(
-        drafts.id,
-        claimed.map((row) => row.id),
-      ),
-    )
-    .orderBy(asc(drafts.createdAt), asc(drafts.id));
-  return rows.map((row) => {
-    if (row.draft.claimedAt === null) throw new Error(`刚认领的草稿 ${row.draft.id} 没有认领时刻`);
-    return {
-      draft: toDraft(row.draft),
-      ownerId: UserId.parse(row.draft.ownerId),
-      handle: row.handle,
-      computerId: ComputerId.parse(row.computerId),
-      claimedAt: row.draft.claimedAt,
-    };
+  return db.transaction(async (tx) => {
+    const reachable =
+      computerPlatforms.length === 0
+        ? sql`true`
+        : onlineComputers.length === 0
+          ? notInArray(drafts.platform, [...computerPlatforms])
+          : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
+    const claimed = await tx
+      .update(drafts)
+      // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
+      // 截到毫秒，返回的 Date 和列里存的一样，结算时 claimed_at = ? 才对得上。
+      // 登录会话代次也在这条语句里抄：它和 login = 'valid' 是同一行同一刻看到的。
+      .set({
+        status: "publishing",
+        claimedAt: sql`date_trunc('milliseconds', now())`,
+        claimedLoginGeneration: sql`${accounts.loginGeneration}`,
+      })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.id, drafts.accountId),
+          eq(drafts.status, "approved"),
+          eq(drafts.approvedHash, drafts.contentHash),
+          inArray(accounts.tier, [...PUBLISHING_TIERS]),
+          // 过期账号的稿子抢了也是再失败一次。留在已批，重新登录后下一轮照抢。
+          eq(accounts.login, "valid"),
+          or(isNull(drafts.scheduledAt), lte(drafts.scheduledAt, now)),
+          reachable,
+        ),
+      )
+      .returning({ id: drafts.id });
+    if (claimed.length === 0) return [];
+    const rows = await tx
+      .select({ draft: drafts, handle: accounts.handle, computerId: accounts.computerId })
+      .from(drafts)
+      .innerJoin(accounts, eq(accounts.id, drafts.accountId))
+      .where(
+        inArray(
+          drafts.id,
+          claimed.map((row) => row.id),
+        ),
+      )
+      .orderBy(asc(drafts.createdAt), asc(drafts.id));
+    const result = rows.map((row) => {
+      if (row.draft.claimedAt === null) throw new Error(`刚认领的草稿 ${row.draft.id} 没有认领时刻`);
+      return {
+        draft: toDraft(row.draft),
+        ownerId: UserId.parse(row.draft.ownerId),
+        handle: row.handle,
+        computerId: ComputerId.parse(row.computerId),
+        claimedAt: row.draft.claimedAt,
+      };
+    });
+    await onClaim?.(tx, result);
+    return result;
   });
 }
 

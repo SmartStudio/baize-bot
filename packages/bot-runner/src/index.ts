@@ -91,6 +91,8 @@ export interface Runner {
   /** 增量应用控制面最新配置；正在运行的 Bot 在本次 run 收尾后再重建。 */
   applyConfig(config: RunnerConfig): Promise<void>;
   prompt(message: PromptMessage): Promise<void>;
+  /** 取消当前或排队中的 run；取消的 run 不会发送 run_done。 */
+  cancel(runId: RunId): void;
   /** 当前仍在运行的 run。只读快照，供电脑代理在重连 hello 时上报。 */
   activeRuns(): readonly RunId[];
   /** 控制面的审批结论。runId 对不上的结论不作数。 */
@@ -346,6 +348,7 @@ export function createRunner(config: RunnerConfig): Runner {
   const extensionNames: ReadonlySet<string> = new Set(extensionTools.map((tool) => tool.name));
   const liveRuns = new Set<RunId>();
   const runnerAbortedRuns = new Set<RunId>();
+  const cancelledRuns = new Set<RunId>();
   let nextConfigVersion = 1;
 
   const fail = (
@@ -764,7 +767,9 @@ export function createRunner(config: RunnerConfig): Runner {
   };
 
   const runOne = async (bot: BotRuntime, message: PromptMessage): Promise<void> => {
+    if (cancelledRuns.delete(message.runId)) return;
     if (bot.configState.phase === "pending") await reconcileBot(bot);
+    if (cancelledRuns.delete(message.runId) || !liveRuns.has(message.runId)) return;
     if (state === "stopped" || bot.configState.phase === "deleted" || currentDefinition(bot) === null) {
       finishWithoutRun(message);
       return;
@@ -792,10 +797,14 @@ export function createRunner(config: RunnerConfig): Runner {
     try {
       bot.active = active;
       if (!(await waitUntilRunning(bot, undefined))) return;
+      if (!liveRuns.has(message.runId)) return;
       botSession = await sessionFor(bot, message.groupId, message.group.kind);
+      if (!liveRuns.has(message.runId)) return;
       if (!(await waitUntilRunning(bot, undefined))) return;
+      if (!liveRuns.has(message.runId)) return;
       if (hasStopped() || currentDefinition(bot) === null) return;
       await botSession.usePurpose(message.purpose);
+      if (!liveRuns.has(message.runId)) return;
       const { session } = botSession;
       const statsBeforeRun = session.getSessionStats();
       const watermark = readWatermark(session.sessionManager);
@@ -814,7 +823,10 @@ export function createRunner(config: RunnerConfig): Runner {
         bot.mcp?.serverFor ?? (() => ""),
         (outgoing) => {
           if (outgoing.type === "run_done") finishRun(outgoing);
-          else if (message.table === null || (message.table.role === "advisor" && outgoing.type === "bot_text"))
+          else if (
+            message.table === null ||
+            (message.table.role === "advisor" && (outgoing.type === "bot_text" || outgoing.type === "bot_text_done"))
+          )
             config.send(outgoing);
         },
       );
@@ -927,6 +939,36 @@ export function createRunner(config: RunnerConfig): Runner {
         return;
       }
       await schedulePrompt(bot, message);
+    },
+
+    cancel(runId) {
+      if (!liveRuns.delete(runId)) return;
+      const activeBot = [...bots.values()].find((bot) => bot.active?.run.runId === runId);
+      if (activeBot !== undefined && activeBot.active !== null) {
+        runnerAbortedRuns.add(runId);
+        settlePauseWaiters(activeBot, false);
+        const groupId = activeBot.active.run.groupId;
+        const callIds = approvals.expire(runId);
+        const session = activeBot.sessions.get(groupId)?.session;
+        if (callIds.length === 0 || session === undefined) {
+          void abortSession(activeBot, groupId).catch(() => undefined);
+        } else {
+          const pending = new Set(callIds);
+          const unsubscribe = session.subscribe((event) => {
+            if (event.type === "agent_settled") {
+              unsubscribe();
+              return;
+            }
+            if (event.type !== "tool_execution_end" || !pending.delete(event.toolCallId)) return;
+            if (pending.size === 0) {
+              unsubscribe();
+              void abortSession(activeBot, groupId).catch(() => undefined);
+            }
+          });
+        }
+      } else {
+        cancelledRuns.add(runId);
+      }
     },
 
     activeRuns() {

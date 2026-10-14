@@ -71,15 +71,23 @@ async function makeTable(options: { readonly online?: boolean } = {}): Promise<T
   const push = await connectPush(server.server.port, client.cookie ?? "");
   const sent: Prompt[] = [];
   const online = options.online ?? true;
+  let flushedThrough = 0;
   const deps: HiddenRunDeps = {
     db: database.db,
     agents: {
       isOnline: () => online,
+      canDeliver: () => online,
       configRejected: () => false,
-      send: (_computerId, message) => {
-        const parsed = ControlToAgent.parse(message);
-        if (parsed.type === "prompt") sent.push(parsed);
-        return true;
+      flushOutbox: async (computerId) => {
+        const rows = await database.sql<{ seq: number; body: unknown }[]>`
+          SELECT seq, body FROM agent_outbox
+          WHERE computer_id = ${computerId} AND seq > ${flushedThrough}
+          ORDER BY seq`;
+        for (const row of rows) {
+          flushedThrough = row.seq;
+          const parsed = ControlToAgent.parse(row.body);
+          if (parsed.type === "prompt") sent.push(parsed);
+        }
       },
     },
   };

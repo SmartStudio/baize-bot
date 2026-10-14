@@ -377,9 +377,9 @@ const interruptedMidStreamUpstream = (): { readonly upstream: Upstream; readonly
 const recorder = (): { firstTurn: string[]; toolResults: string[] } => ({ firstTurn: [], toolResults: [] });
 
 /** 头一轮只点一个工具，不说话。 */
-const callTool = (name: string, args: Record<string, unknown>): ScriptedTurn => ({
+const callTool = (name: string, args: Record<string, unknown>, id = "call-1"): ScriptedTurn => ({
   textChunks: [],
-  toolCall: { id: "call-1", name, args },
+  toolCall: { id, name, args },
   usage: { input: 800, output: 30 },
 });
 
@@ -780,7 +780,7 @@ describe("运行器跑一次 prompt", () => {
     expect(shape(h.sent)).toEqual([
       "bot_text:false",
       "bot_text:false",
-      "bot_text:true",
+      "bot_text_done",
       "bot_tool_call:running",
       "bot_tool_call:ok",
       "run_done",
@@ -805,29 +805,33 @@ describe("运行器跑一次 prompt", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "列目录"));
 
-    const texts = h.sent.flatMap((m) => (m.type === "bot_text" ? [m] : []));
+    const texts = h.sent.flatMap((m) => (m.type === "bot_text" || m.type === "bot_text_done" ? [m] : []));
     const ids = [...new Set(texts.map((m) => m.messageId))];
     expect(
-      ids.map((id) => texts.filter((m) => m.messageId === id).map((m) => (m.done ? "done" : m.delta))),
-      "工具前后各一条，各自以 done 收尾",
+      ids.map((id) =>
+        texts.filter((m) => m.messageId === id).map((m) => (m.type === "bot_text_done" ? m.text : m.delta)),
+      ),
+      "工具前后各一条，流式片段之外带一条最终全文",
     ).toEqual([
-      ["先看看", "目录。", "done"],
-      ["有三个", "文件。", "done"],
+      ["先看看", "目录。", "先看看目录。"],
+      ["有三个", "文件。", "有三个文件。"],
     ]);
-    const firstDone = h.sent.findIndex((m) => m.type === "bot_text" && m.done);
+    const firstDone = h.sent.findIndex((m) => m.type === "bot_text_done");
     expect(
-      h.sent.slice(firstDone + 1).filter((m) => m.type === "bot_text" && m.messageId === ids[0]),
-      "头一条 done 之后再没有它的报文",
+      h.sent
+        .slice(firstDone + 1)
+        .filter((m) => (m.type === "bot_text" || m.type === "bot_text_done") && m.messageId === ids[0]),
+      "头一条最终全文之后再没有它的报文",
     ).toEqual([]);
     expect(shape(h.sent)).toEqual([
       "bot_text:false",
       "bot_text:false",
-      "bot_text:true",
+      "bot_text_done",
       "bot_tool_call:running",
       "bot_tool_call:ok",
       "bot_text:false",
       "bot_text:false",
-      "bot_text:true",
+      "bot_text_done",
       "run_done",
     ]);
   });
@@ -885,7 +889,7 @@ describe("运行器跑一次 prompt", () => {
       "bot_tool_call:ok",
       "bot_text:false",
       "bot_text:false",
-      "bot_text:true",
+      "bot_text_done",
       "run_done",
     ]);
     expect(toolResults.join(""), "ls 的真实输出要回到模型那一轮").toContain("report.md");
@@ -919,6 +923,84 @@ describe("运行器跑一次 prompt", () => {
     expect(toolResults.join(""), "非零退出码要告诉模型").toContain("Command exited with code");
     expect(toolResults.join(""), "命令自己的错误输出要告诉模型").toContain("missing-report.md");
     expect(runDoneIds(h)).toEqual(["run-1"]);
+  });
+
+  it("取消正在跑的 run 后不发 run_done，后续 run 照常运行", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([
+        [
+          "先等等",
+          { textChunks: [], toolCall: { id: "call-1", name: "hold", args: {} }, usage: { input: 100, output: 5 } },
+        ],
+        ["继续", { textChunks: ["完成。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+
+    const running = h.runner.prompt(promptMessage("bot-1", "run-cancelled", "先等等"));
+    await until(tool.started, "正在执行的工具");
+    h.runner.cancel(RunId.parse("run-cancelled"));
+    expect(h.runner.activeRuns()).toEqual([]);
+    tool.release();
+    await running;
+
+    expect(runDoneIds(h)).toEqual([]);
+    await h.runner.prompt(promptMessage("bot-1", "run-next", "继续"));
+    expect(runDoneIds(h)).toEqual(["run-next"]);
+  });
+
+  it("取消暂停闸门里等待的 run 后不调用模型，resume 后下一条照常运行", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptBy([["继续", { textChunks: ["完成。"], usage: { input: 100, output: 5 } }]]),
+    });
+    await h.runner.pause(BotId.parse("bot-1"));
+
+    const cancelled = h.runner.prompt(promptMessage("bot-1", "run-cancelled", "先等等"));
+    await until(() => h.runner.activeRuns().includes(RunId.parse("run-cancelled")), "run 等待暂停闸门");
+    h.runner.cancel(RunId.parse("run-cancelled"));
+    await cancelled;
+
+    expect(h.gateway.requestCount()).toBe(0);
+    expect(runDoneIds(h)).toEqual([]);
+    expect(h.runner.activeRuns()).toEqual([]);
+
+    await h.runner.resume(BotId.parse("bot-1"));
+    await h.runner.prompt(promptMessage("bot-1", "run-next", "继续"));
+    expect(runDoneIds(h)).toEqual(["run-next"]);
+    expect(h.gateway.requestCount()).toBeGreaterThan(0);
+  });
+
+  it("取消排队的 run 后跳过它、不发 run_done，队列下一条照常运行", async () => {
+    const tool = holdTool();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [tool.hold],
+      script: scriptBy([
+        [
+          "先等等",
+          { textChunks: [], toolCall: { id: "call-1", name: "hold", args: {} }, usage: { input: 100, output: 5 } },
+        ],
+        ["不该跑", { textChunks: ["不该执行。"], usage: { input: 100, output: 5 } }],
+        ["继续", { textChunks: ["完成。"], usage: { input: 100, output: 5 } }],
+      ]),
+    });
+
+    const first = h.runner.prompt(promptMessage("bot-1", "run-first", "先等等"));
+    await until(tool.started, "第一条进入工具");
+    const cancelled = h.runner.prompt(promptMessage("bot-1", "run-cancelled", "不该跑"));
+    await until(() => h.runner.activeRuns().includes(RunId.parse("run-cancelled")), "取消目标排队");
+    h.runner.cancel(RunId.parse("run-cancelled"));
+    expect(h.runner.activeRuns()).toEqual([RunId.parse("run-first")]);
+    const next = h.runner.prompt(promptMessage("bot-1", "run-next", "继续"));
+
+    tool.release();
+    await Promise.all([first, cancelled, next]);
+
+    expect(runDoneIds(h)).toEqual(["run-first", "run-next"]);
+    expect(h.gateway.requestCount()).toBe(3);
   });
 });
 
@@ -1007,6 +1089,68 @@ describe("运行器的审批", () => {
     expect(sentTo()).toEqual(["kehu@example.com"]);
   });
 
+  it("取消挂着审批的 run 会保存 expired 工具结果，只结算该 run 且下一条照常运行", async () => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      tools: [
+        toolConnection([{ name: "send_email", needsApproval: true }], {
+          url: mcp.url,
+          assignedBotIds: [BotId.parse("bot-1"), BotId.parse("bot-2")],
+        }),
+      ],
+      extensionTools: [],
+      script: (req) => {
+        if (isFollowUpTurn(req)) return { textChunks: ["完成。"], usage: { input: 100, output: 5 } };
+        const body = JSON.stringify(req.messages);
+        if (body.includes("甲发邮件")) {
+          return callTool("send_email", { to: "jia@example.com", subject: "甲的报价" }, "call-expired");
+        }
+        if (body.includes("乙发邮件")) {
+          return callTool("send_email", { to: "yi@example.com", subject: "乙的报价" }, "call-approved");
+        }
+        return { textChunks: ["继续运行正常。"], usage: { input: 100, output: 5 } };
+      },
+    });
+    const expired = h.runner.prompt(promptMessage("bot-1", "run-expired", "甲发邮件"));
+    const other = h.runner.prompt(promptMessage("bot-2", "run-other", "乙发邮件"));
+    await until(() => h.sent.filter((message) => message.type === "approval_request").length === 2, "两条待批审批");
+    const requests = h.sent.filter((message) => message.type === "approval_request");
+    const otherRequest = requests.find(
+      (message) => message.type === "approval_request" && message.runId === "run-other",
+    );
+    if (otherRequest?.type !== "approval_request") throw new Error("没有找到另一 run 的审批");
+
+    h.runner.cancel(RunId.parse("run-expired"));
+    h.runner.approve(otherRequest.runId, otherRequest.callId, "approved");
+    await Promise.all([expired, other]);
+
+    expect(mcp.calls.map((call) => call.args["to"])).toEqual(["yi@example.com"]);
+    expect(h.sent.filter((message) => message.type === "approval_abandoned")).toEqual([]);
+    expect(runDoneIds(h)).toEqual(["run-other"]);
+    expect(
+      h.sent
+        .filter((message) => message.type === "bot_tool_call" && message.runId === "run-expired")
+        .map((message) => (message.type === "bot_tool_call" ? message.status : null)),
+    ).toEqual(["running", "blocked"]);
+    const expiredEntries = sessionFilesOf(h.dataDir, "bot-1").flatMap((file) =>
+      readFileSync(file, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { message?: { role?: string; isError?: boolean; content?: unknown } }),
+    );
+    const expiredResult = expiredEntries.find(
+      (entry) => entry.message?.role === "toolResult" && entry.message.isError === true,
+    );
+    expect(expiredResult, "Pi 落盘的审批工具结果必须是 isError").toBeDefined();
+    expect(JSON.stringify(expiredResult)).toContain("这次运行已经结束，审批已过期，没执行。");
+    expect(JSON.stringify(expiredResult)).not.toContain("Operation aborted");
+
+    await h.runner.prompt(promptMessage("bot-1", "run-next", "取消之后继续"));
+    expect(runDoneIds(h)).toEqual(["run-other", "run-next"]);
+  });
+
   it("voided 结束挂着的工具并中止旧轮，排队的新 prompt 回答且每轮只有一条 run_done", async () => {
     const { h, sentTo } = await withMcp(undefined, (req) =>
       req.messages.at(-1)?.role === "user" && JSON.stringify(req.messages.at(-1)).includes("先别发了")
@@ -1031,7 +1175,9 @@ describe("运行器的审批", () => {
       h.sent.filter((m) => m.type === "agent_error"),
       "主动中止不往群里报错",
     ).toEqual([]);
-    expect(h.sent.filter((m) => m.type === "bot_text" && m.runId === "run-next" && m.done)).toHaveLength(1);
+    expect(h.sent.filter((m) => m.type === "bot_text_done" && m.runId === "run-next")).toMatchObject([
+      { text: "收到新消息，已经停下发邮件。" },
+    ]);
     expect(h.gateway.requestCount(), "旧轮中止后不再请求模型，只有旧轮首个请求和新消息的请求").toBe(2);
     expect(
       h.sent
@@ -4218,7 +4364,7 @@ describe("config 按 Bot 增量对账", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-3", "群一再说一句"));
     const after = h.sent.slice(before);
 
-    expect(shape(after)).toContain("bot_text:true");
+    expect(shape(after)).toContain("bot_text_done");
     expect(runDoneIds(h)).toEqual(["run-1", "run-2", "run-3"]);
     expect(h.runner.activeRuns()).toEqual([]);
   });

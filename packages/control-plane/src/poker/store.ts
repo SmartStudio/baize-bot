@@ -16,6 +16,7 @@ import type { Db } from "../db/client.js";
 import {
   bots,
   groupMembers,
+  computers,
   pokerEvents,
   pokerHands,
   pokerSessions,
@@ -26,7 +27,7 @@ import {
 } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage } from "../repo/messages.js";
-import { lockOwner } from "../repo/runs.js";
+import { lockOwner, shareBotRunsLock } from "../repo/runs.js";
 import { newHand, replay, type HandState } from "./engine.js";
 import { narrate, seatNamer } from "./narrate.js";
 import { hintOf } from "./hint.js";
@@ -74,6 +75,19 @@ export async function withTableLock<T>(
     const table = await loadTable(tx as unknown as Db, groupId);
     if (!table) return null;
     await lockOwner(tx, UserId.parse(table.ownerId), "shared");
+    const members = await tx
+      .select({ botId: groupMembers.botId })
+      .from(groupMembers)
+      .where(eq(groupMembers.groupId, groupId))
+      .orderBy(asc(groupMembers.botId));
+    for (const member of members) await shareBotRunsLock(tx, BotId.parse(member.botId));
+    // 可靠上行先持有电脑行再进桌锁；扫描和 HTTP 也先锁齐归属人的电脑，不能在桌锁内派活时反序。
+    await tx
+      .select({ id: computers.id })
+      .from(computers)
+      .where(eq(computers.ownerId, table.ownerId))
+      .orderBy(asc(computers.id))
+      .for("no key update");
     await tx.execute(sql`SELECT pg_advisory_xact_lock(1652199536::int4, hashtext(${groupId}::text))`);
     const [locked] = await tx.select().from(pokerTables).where(eq(pokerTables.groupId, groupId)).for("update");
     if (!locked) return null;

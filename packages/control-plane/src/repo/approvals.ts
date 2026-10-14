@@ -150,31 +150,41 @@ function toAutomaticApproval(row: {
   };
 }
 
-export async function timeOutDueApprovals(db: Db, now: Date, approvalId?: ApprovalId): Promise<AutomaticApproval[]> {
+export async function timeOutDueApprovals(
+  db: Db | Tx,
+  now: Date,
+  approvalIds: readonly ApprovalId[],
+): Promise<AutomaticApproval[]> {
+  if (approvalIds.length === 0) return [];
   const rows = await db
     .update(approvals)
     .set({ status: "timed_out", decidedAt: now })
     .where(
-      and(
-        eq(approvals.status, "pending"),
-        lte(approvals.deadlineAt, now),
-        approvalId === undefined ? undefined : eq(approvals.id, approvalId),
-      ),
+      and(eq(approvals.status, "pending"), lte(approvals.deadlineAt, now), inArray(approvals.id, [...approvalIds])),
     )
     .returning(automaticReturning);
   return rows.map(toAutomaticApproval);
 }
 
 export async function voidPendingApprovals(
-  db: Db,
+  db: Db | Tx,
   botId: BotId,
   groupId: GroupId,
   now: Date,
+  approvalIds: readonly ApprovalId[],
 ): Promise<AutomaticApproval[]> {
+  if (approvalIds.length === 0) return [];
   const rows = await db
     .update(approvals)
     .set({ status: "voided", decidedAt: now })
-    .where(and(eq(approvals.botId, botId), eq(approvals.groupId, groupId), eq(approvals.status, "pending")))
+    .where(
+      and(
+        eq(approvals.botId, botId),
+        eq(approvals.groupId, groupId),
+        eq(approvals.status, "pending"),
+        inArray(approvals.id, [...approvalIds]),
+      ),
+    )
     .returning(automaticReturning);
   return rows.map(toAutomaticApproval);
 }

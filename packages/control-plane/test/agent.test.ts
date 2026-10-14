@@ -53,6 +53,9 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: "b".repeat(64),
       version: "test",
+      protocol: 2,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
       activeRuns: [],
     });
 
@@ -66,6 +69,9 @@ describe("握手", () => {
       computerId: ComputerId.parse("没有这台电脑"),
       token: "b".repeat(64),
       version: "test",
+      protocol: 2,
+      uplinkStream: ComputerId.parse("没有这台电脑"),
+      downApplied: 0,
       activeRuns: [],
     });
 
@@ -113,6 +119,9 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
+      protocol: 2,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
       activeRuns: [],
     });
     // 不等 welcome 就关。认身份那一段是异步的，关闭要排在它后面才看得见这条连接。

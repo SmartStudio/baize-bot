@@ -78,12 +78,19 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
     return reply({ ok: true }, messages, true);
   });
   if (!outcome) return;
-  conn.socket.send(
-    JSON.stringify({ type: "poker_result", runId: event.runId, callId: event.callId, result: outcome.result }),
-  );
+  deps.agents.send(conn.computerId, {
+    type: "poker_result",
+    runId: event.runId,
+    callId: event.callId,
+    result: outcome.result,
+  });
   pushMessages(deps, outcome.ownerId, outcome.messages);
   if (outcome.advance) {
-    await converge(deps, event.handId);
-    if (outcome.result.ok) await pushTable(deps, initial.row.groupId);
+    const advance = async (real: AgentEventDeps) => {
+      await converge(real, event.handId);
+      if (outcome.result.ok) await pushTable(real, initial.row.groupId);
+    };
+    if (deps.afterCommit !== undefined) deps.afterCommit(advance);
+    else await advance(deps);
   }
 }

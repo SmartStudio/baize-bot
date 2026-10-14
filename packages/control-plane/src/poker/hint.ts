@@ -6,7 +6,6 @@ import {
   RunId,
   UserId,
   type ComputerId,
-  type ControlToAgent,
   type PokerTableView,
   type Viewer,
 } from "@baize/shared";
@@ -17,7 +16,6 @@ import type { Db } from "../db/client.js";
 import { messages, pokerEvents, pokerHands, pokerHints, pokerTables, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { messageVisibleTo } from "../repo/messages.js";
-import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
 import { narrate, seatNamer } from "./narrate.js";
 import { latestHand, loadHand, loadTable, PokerError, tableState, tableView, withTableLock } from "./store.js";
@@ -113,7 +111,7 @@ export async function askHint(
 ): Promise<PokerTableView> {
   const initial = await loadHand(deps.db, handId);
   if (!initial) throw new PokerError(404, "没有这手牌");
-  const dispatches: { computerId: ComputerId; prompt: Extract<ControlToAgent, { type: "prompt" }> }[] = [];
+  const dispatches: ComputerId[] = [];
   const result = await withTableLock(deps.db, initial.row.groupId, async (db, table) => {
     if (table.ownerId !== ownerId) throw new PokerError(404, "没有这手牌");
     const hand = await loadHand(db, handId);
@@ -137,11 +135,10 @@ export async function askHint(
         agents: {
           isOnline: (id) => deps.agents.isOnline(id),
           configRejected: (id) => deps.agents.configRejected(id),
-          // run 和 hint 在同一事务落地，提交后模型才可能回话。
-          send: (computerId, message) => {
-            if (message.type !== "prompt") throw new Error("隐藏派活只能发送 prompt");
-            dispatches.push({ computerId, prompt: message });
-            return true;
+          canDeliver: (id) => deps.agents.canDeliver(id),
+          // withTableLock 的外层事务提交后再 flush。
+          flushOutbox: async (computerId) => {
+            dispatches.push(computerId);
           },
         },
       },
@@ -195,18 +192,7 @@ export async function askHint(
     return { changed: true, view: (await viewWithHint(db, table.groupId))! };
   });
   if (!result) throw new PokerError(404, "没有这手牌");
-  for (const { computerId, prompt } of dispatches) {
-    if (!deps.agents.isOnline(computerId) || !deps.agents.send(computerId, prompt)) {
-      await finishRun(
-        deps.db,
-        prompt.runId,
-        prompt.groupId,
-        { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 },
-        "abandoned",
-      );
-      await refreshHintForRun(deps, prompt.runId);
-    }
-  }
+  for (const computerId of dispatches) await deps.agents.flushOutbox(computerId);
   // 发送失败或即时回答可能已改变状态，以提交后的快照为准。
   const view = (await viewWithHint(deps.db, initial.row.groupId)) ?? result.view;
   if (result.changed) deps.push.push(ownerId, { type: "poker_table_updated", table: view });

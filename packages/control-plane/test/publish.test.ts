@@ -923,7 +923,7 @@ describe("小红书走电脑", () => {
     }
   });
 
-  it("旧运行器回的 publish_result 不带 attempt，整条丢弃，控制面打一行警告，带 type 和字段路径、不带正文", async () => {
+  it("格式无效的可靠 publish_result 被拒并累计确认，日志只记安全摘要", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [XHS]);
@@ -935,30 +935,24 @@ describe("小红书走电脑", () => {
     expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
 
     const logged = captureConsole();
-    const body = "https://www.xiaohongshu.com/explore/old-runner-secret";
-    job.agent.socket.send(
-      JSON.stringify({
-        type: "publish_result",
-        draftId: spec.draftId,
-        result: { status: "ok", url: body, externalId: "old-runner-note" },
-      }),
-    );
-    const broken = '{"type":"publish_result","draftId":"broken-frame';
-    job.agent.socket.send(broken);
+    const seq = job.agent.sendMalformedReliable({
+      type: "publish_result",
+      draftId: spec.draftId,
+      result: { status: "ok", url: "https://www.xiaohongshu.com/explore/private-url", externalId: "private-id" },
+    });
+    await waitFor(async () => job.agent.uplinkAcks().some((ack) => ack.upTo >= seq), "无效 publish_result 被确认");
+    expect(job.agent.uplinkAcks().flatMap((ack) => ack.rejected)).toContainEqual({ seq, code: "invalid" });
     await agentCaughtUp(job, xhs, { kind: "post", title: "哨兵", text: "哨兵", images: [], github: null });
 
     expect((await draftOnPage(job, spec.draftId)).draft.status, "不合形状的结果不结算").toBe("publishing");
-    const warnings = logged.filter((line) => line.includes("丢弃"));
-    expect(warnings).toEqual([
-      expect.stringMatching(/"publish_result".*attempt/),
-      expect.stringContaining("不是 JSON"),
-    ]);
-    for (const secret of [body, "old-runner-note", spec.draftId, "broken-frame"]) {
+    const warnings = logged.filter((line) => line.includes("invalid") || line.includes("无效"));
+    expect(warnings.length, "拒收日志包含摘要").toBeGreaterThan(0);
+    for (const secret of ["private-url", "private-id", spec.draftId]) {
       expect(logged.join("\n"), "日志不带报文正文").not.toContain(secret);
     }
   });
 
-  it("电脑不在线不抢，草稿留在已批", async () => {
+  it("电脑断线宽限期内仍认领草稿并把 publish_draft 留在 outbox", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [XHS]);
@@ -974,7 +968,11 @@ describe("小红书走电脑", () => {
     expect((await nextOf(job.push, "computer_updated")).computer.status).toBe("sleeping");
 
     await server.server.publisher.tick();
-    expect((await draftOnPage(job, spec.draftId)).draft.status).toBe("approved");
+    expect((await draftOnPage(job, spec.draftId)).draft.status).toBe("publishing");
+    const queued = await s.database.sql<{ type: string }[]>`
+      SELECT body->>'type' AS type FROM agent_outbox WHERE computer_id = ${job.computer.computerId}
+    `;
+    expect(queued).toContainEqual({ type: "publish_draft" });
   });
 });
 

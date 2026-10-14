@@ -1,9 +1,12 @@
 import {
   toolViewText,
   type Approval,
-  type ApprovalId,
+  ApprovalId,
   type AccountId,
-  type BotId,
+  BotId,
+  ComputerId,
+  RunId,
+  UserId,
   type Computer,
   type ContentPlan,
   type ContentPlanId,
@@ -21,29 +24,39 @@ import {
   type RoutineOfferStatus,
   type TeamOfferStatus,
   type ToolCallStatus,
-  type UserId,
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import { and, eq, inArray, lte, type SQL } from "drizzle-orm";
+import { approvals as approvalRows, groups, runs } from "../db/schema.js";
 import {
   decideApproval,
   latestPendingApproval,
   listApprovals,
   timeOutDueApprovals,
   voidPendingApprovals,
+  type AutomaticApproval,
 } from "../repo/approvals.js";
 import { listAccounts } from "../repo/accounts.js";
 import { listBotNames } from "../repo/bots.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
 import { listHandoffs } from "../repo/handoffs.js";
-import { appendMessageIfGroupAlive, listGroupBots, listMessages, messageSeq, type GroupBot } from "../repo/messages.js";
+import {
+  appendMessageIfGroupAlive,
+  listGroupBots,
+  listMessages,
+  messageSeq,
+  type Tx,
+  type GroupBot,
+} from "../repo/messages.js";
 import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
 import { listComputers } from "../repo/computers.js";
-import { startRun } from "../repo/runs.js";
+import { lockOwner, lockRuns, shareBotRunsLock, startRun } from "../repo/runs.js";
 import { pendingLines, recordContext } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
+import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
 import type { AgentHub } from "./hub.js";
 import {
   selectComputer,
@@ -95,11 +108,11 @@ export type DispatchOutcome =
  */
 export async function computerFor(
   db: Db,
-  agents: Pick<AgentHub, "isOnline" | "configRejected">,
+  agents: Pick<AgentHub, "isOnline" | "configRejected"> & Partial<Pick<AgentHub, "canDeliver">>,
   ownerId: UserId,
 ): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
-  const selected = selectComputer(
+  const selectedOnline = selectComputer(
     [],
     computers.map((computer) => ({
       computer: agents.isOnline(computer.id)
@@ -110,6 +123,19 @@ export async function computerFor(
       accounts: [],
     })),
   );
+  const selected =
+    selectedOnline.kind === "failed" && agents.canDeliver !== undefined
+      ? selectComputer(
+          [],
+          computers.map((computer) => ({
+            computer: {
+              ...computer,
+              status: agents.canDeliver!(computer.id) ? ("online" as const) : ("sleeping" as const),
+            },
+            accounts: [],
+          })),
+        )
+      : selectedOnline;
   if (selected.kind === "failed" && computers.some((computer) => agents.configRejected(computer.id))) {
     return { kind: "failed", reason: "config_rejected" };
   }
@@ -183,21 +209,7 @@ export async function dispatchUserMessage(
         ? routeTargets({ members, chiefBotId, currentBotId, mentions: mentioned })
         : members.filter((member) => member.id === owner).map((member) => member.id);
     if (targets.length === 0) break;
-    if (trigger.body.kind === "user" && options.routineRunId === undefined) {
-      for (const botId of targets) {
-        const voided = await voidPendingApprovals(deps.db, botId, groupId, new Date());
-        for (const decided of voided) {
-          if (decided.computerId !== null)
-            deps.agents.send(decided.computerId, {
-              type: "approval_result",
-              runId: decided.approval.runId,
-              callId: decided.callId,
-              outcome: "voided",
-            });
-          deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
-        }
-      }
-    }
+    let voidTargets = trigger.body.kind === "user" && options.routineRunId === undefined ? targets : [];
     const reason = solo
       ? "solo"
       : mentioned.length > 0 || owner !== undefined
@@ -213,10 +225,21 @@ export async function dispatchUserMessage(
       epoch,
       members,
       speakers: targets.map((botId) => ({ botId, trigger, reason })),
-      send: (speaker, includeRecent) => {
+      send: async (speaker, includeRecent) => {
         const computer = placed;
         placed = null;
-        return sendSpeaker(deps, ownerId, groupId, speaker, includeRecent, options, computer);
+        const outcome = await sendSpeaker(
+          deps,
+          ownerId,
+          groupId,
+          speaker,
+          includeRecent,
+          options,
+          computer,
+          voidTargets,
+        );
+        voidTargets = [];
+        return outcome;
       },
     });
     if (started === "gone") return { kind: "no_target" };
@@ -242,6 +265,7 @@ async function sendSpeaker(
   includeRecent: boolean,
   options: DispatchOptions,
   placed: Computer | null,
+  voidTargets: readonly BotId[],
 ): Promise<SendOutcome> {
   const selected: ComputerSelection =
     placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
@@ -256,7 +280,7 @@ async function sendSpeaker(
 
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
   const members = await listGroupBots(deps.db, groupId);
-  const context = await contextFor(deps.db, ownerId, groupId, speaker, includeRecent, members);
+  const contextMessages = await contextMessagesFor(deps.db, groupId, speaker, includeRecent);
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
@@ -273,26 +297,6 @@ async function sendSpeaker(
     title: task?.title ?? "",
     kind: solo ? ("solo" as const) : ("team" as const),
   };
-  const runId = await startRun(deps.db, {
-    ownerId,
-    computerId: selected.computer.id,
-    botId: speaker.botId,
-    groupId,
-    triggerMessageId: speaker.trigger.id,
-    routineRunId: options.routineRunId,
-  });
-  // Bot 在派活途中被删了，只跳过它，不留 system，多 Bot 群里页面已收到 bot_deleted。
-  // 单聊群已随 Bot 级联删掉，连「没人接」都写不进去，把「群没了」和「跳过」分开报给回合和调用方。
-  if (runId === null) return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
-  await recordContext(
-    deps.db,
-    runId,
-    { kind: "bot", botId: speaker.botId },
-    {
-      unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
-      settled: context.filter((line) => line.settled).map((line) => line.messageId),
-    },
-  );
   const origin: PromptOrigin =
     speaker.handoff !== undefined
       ? botOrigin(members, speaker.handoff.fromBotId)
@@ -302,27 +306,88 @@ async function sendSpeaker(
   // 只有主助理拿项目清单，它才能把一句「下周多发点小红书」落到某个项目的节奏上。
   const speakerRole = members.find((member) => member.id === speaker.botId)?.role;
   const projects = speakerRole === "assistant" ? await listProjects(deps.db, ownerId) : undefined;
-  const sent = deps.agents.send(selected.computer.id, {
-    type: "prompt",
-    runId,
-    botId: speaker.botId,
-    groupId,
-    messageId: speaker.trigger.id,
-    text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
-    origin,
-    reason: speaker.reason,
-    group,
-    context,
-    purpose: options.purpose ?? "plan",
-    routine: options.routine ?? null,
-    // 群消息派出去的活不是牌桌 prompt。牌桌那条由 poker/converge.ts 自己拼，不走这里。
-    table: null,
-    task: solo ? null : task,
-    members: roster,
-    ...(projects === undefined ? {} : { projects }),
-    ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+  const placedRun = await deps.db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "shared");
+    for (const botId of [...new Set([speaker.botId, ...voidTargets])].toSorted()) await shareBotRunsLock(tx, botId);
+    const scopes =
+      voidTargets.length === 0
+        ? []
+        : await pendingApprovalDeliveries(
+            tx,
+            and(inArray(approvalRows.botId, [...voidTargets]), eq(approvalRows.groupId, groupId)),
+          );
+    await lockApprovalDeliveries(tx, scopes, [selected.computer.id]);
+    const runId = await startRun(tx as unknown as Db, {
+      ownerId,
+      computerId: selected.computer.id,
+      botId: speaker.botId,
+      groupId,
+      triggerMessageId: speaker.trigger.id,
+      routineRunId: options.routineRunId,
+    });
+    // Bot 在派活途中被删了，只跳过它，不留 system，多 Bot 群里页面已收到 bot_deleted。
+    // 单聊群已随 Bot 级联删掉，连「没人接」都写不进去，把「群没了」和「跳过」分开报给回合和调用方。
+    await lockRuns(
+      tx,
+      scopes.map((scope) => scope.runId),
+    );
+    const voided: AutomaticApproval[] = [];
+    for (const botId of voidTargets) {
+      voided.push(
+        ...(await voidPendingApprovals(
+          tx,
+          botId,
+          groupId,
+          new Date(),
+          scopes.map((scope) => scope.id),
+        )),
+      );
+    }
+    await enqueueAutomaticApprovals(tx, voided, "voided");
+    if (runId === null) return { kind: "skipped", voided } as const;
+    // 保留派活前读到的窗口，主助理读取项目清单期间的新消息不能把它挤掉；只在本次作废后刷新卡片结论。
+    const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
+    await recordContext(
+      tx as unknown as Db,
+      runId,
+      { kind: "bot", botId: speaker.botId },
+      {
+        unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+        settled: context.filter((line) => line.settled).map((line) => line.messageId),
+      },
+    );
+    const sent = await enqueueDownlink(
+      tx,
+      selected.computer.id,
+      {
+        type: "prompt",
+        runId,
+        botId: speaker.botId,
+        groupId,
+        messageId: speaker.trigger.id,
+        text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
+        origin,
+        reason: speaker.reason,
+        group,
+        context,
+        purpose: options.purpose ?? "plan",
+        routine: options.routine ?? null,
+        // 群消息派出去的活不是牌桌 prompt。牌桌那条由 poker/converge.ts 自己拼，不走这里。
+        table: null,
+        task: solo ? null : task,
+        members: roster,
+        ...(projects === undefined ? {} : { projects }),
+        ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+      },
+      runId,
+    );
+    return sent ? ({ kind: "queued", runId, voided } as const) : ({ kind: "unavailable", voided } as const);
   });
-  if (!sent) {
+  await publishAutomaticApprovals(deps, placedRun.voided);
+  if (placedRun.kind === "skipped")
+    return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
+  if (placedRun.kind === "queued") await deps.agents.flushOutbox(selected.computer.id);
+  if (placedRun.kind === "unavailable") {
     // run 建好之后账号被删：删号提交后才断开代理，发不出去时群已随账号没了，和上面一样报「群没了」，不往里写提示。
     const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
@@ -331,7 +396,7 @@ async function sendSpeaker(
     });
     return written ? { kind: "stopped" } : { kind: "gone" };
   }
-  return { kind: "sent", runId };
+  return { kind: "sent", runId: placedRun.runId };
 }
 
 function triggerText(body: MessageBody): string {
@@ -356,21 +421,19 @@ const CONTEXT_CATCHUP = 10;
  * 最近 20 条，前面再接上这个 Bot 最近几次进了会话的派活读到时没定稿、之后也没有哪次读到它定稿、这次滑出窗口的行。
  * 还没定稿的照送，字没变运行器的水位会挡掉，变了就拼；定稿那一轮整句再拼一次，记成读过定稿，之后不再送。
  */
-async function contextFor(
+async function contextMessagesFor(
   db: Db,
-  ownerId: UserId,
   groupId: GroupId,
   speaker: Speaker,
   includeRecent: boolean,
-  members: readonly GroupBot[],
-): Promise<ContextLine[]> {
+): Promise<Message[]> {
   const viewer: Viewer = { kind: "bot", botId: speaker.botId };
   const window = await recentBodies(db, groupId, speaker.trigger, viewer, includeRecent);
   const inWindow = new Set([speaker.trigger.id, ...window.map(({ id }) => id)]);
   const carried = (await pendingLines(db, groupId, speaker.botId, viewer))
     .filter((message) => !inWindow.has(message.id))
     .slice(-CONTEXT_CATCHUP);
-  return summarizeAll(db, ownerId, [...carried, ...window], speaker.botId, members);
+  return [...carried, ...window];
 }
 
 async function recentBodies(
@@ -675,7 +738,11 @@ function sender(botId: BotId | null, recipient: BotId, members: readonly GroupBo
 }
 
 function clip(text: string): string {
-  return text.length <= CONTEXT_TEXT_LIMIT ? text : `${text.slice(0, CONTEXT_TEXT_LIMIT)}…`;
+  if (text.length <= CONTEXT_TEXT_LIMIT) return text;
+  const clipped = text.slice(0, CONTEXT_TEXT_LIMIT);
+  // JSONB 拒收孤立代理项，不能把边界上的 emoji 截成半个字符。
+  const last = clipped.charCodeAt(clipped.length - 1);
+  return `${last >= 0xd800 && last <= 0xdbff ? clipped.slice(0, -1) : clipped}…`;
 }
 
 /** 群还在就留一句提示并推送，回 true；群已删就一个字不写，回 false。 */
@@ -704,45 +771,150 @@ export type SettleResult =
   | { readonly kind: "already_decided" }
   | { readonly kind: "scope_not_allowed"; readonly error: string };
 
-export async function settleApprovalTimeouts(deps: DispatchDeps, now: Date, approvalId?: ApprovalId): Promise<number> {
-  const decided = await timeOutDueApprovals(deps.db, now, approvalId);
+type ApprovalDelivery = {
+  readonly id: ApprovalId;
+  readonly runId: RunId;
+  readonly ownerId: UserId;
+  readonly botId: BotId;
+  readonly computerId: ComputerId | null;
+};
+
+async function pendingApprovalDeliveries(tx: Tx, condition: SQL | undefined): Promise<ApprovalDelivery[]> {
+  const rows = await tx
+    .select({
+      id: approvalRows.id,
+      runId: approvalRows.runId,
+      ownerId: groups.ownerId,
+      botId: approvalRows.botId,
+      computerId: runs.computerId,
+    })
+    .from(approvalRows)
+    .innerJoin(groups, eq(groups.id, approvalRows.groupId))
+    .innerJoin(runs, eq(runs.id, approvalRows.runId))
+    .where(and(eq(approvalRows.status, "pending"), condition));
+  return rows.map((row) => ({
+    id: ApprovalId.parse(row.id),
+    runId: RunId.parse(row.runId),
+    ownerId: UserId.parse(row.ownerId),
+    botId: BotId.parse(row.botId),
+    computerId: row.computerId === null ? null : ComputerId.parse(row.computerId),
+  }));
+}
+
+/** 自动结算也先锁归属人、Bot、电脑，再锁 run 和审批；多台电脑按 id 排，避免切机后反序。 */
+async function lockApprovalDeliveries(
+  tx: Tx,
+  scopes: readonly ApprovalDelivery[],
+  extraComputers: readonly ComputerId[] = [],
+): Promise<void> {
+  for (const ownerId of [...new Set(scopes.map((scope) => scope.ownerId))].toSorted())
+    await lockOwner(tx, ownerId, "shared");
+  for (const botId of [...new Set(scopes.map((scope) => scope.botId))].toSorted()) await shareBotRunsLock(tx, botId);
+  const computers = [
+    ...new Set([
+      ...extraComputers,
+      ...scopes.flatMap((scope) => (scope.computerId === null ? [] : [scope.computerId])),
+    ]),
+  ].toSorted();
+  for (const computerId of computers) await lockEnvelopeComputer(tx, computerId);
+}
+
+async function enqueueAutomaticApprovals(
+  tx: Tx,
+  decided: readonly AutomaticApproval[],
+  outcome: "voided" | "timed_out",
+): Promise<void> {
   for (const item of decided) {
-    if (item.computerId !== null)
-      deps.agents.send(item.computerId, {
+    if (item.computerId === null) continue;
+    await enqueueDownlink(
+      tx,
+      item.computerId,
+      {
         type: "approval_result",
         runId: item.approval.runId,
         callId: item.callId,
-        outcome: "timed_out",
-      });
-    deps.push.push(item.ownerId, { type: "approval_updated", approval: item.approval });
+        outcome,
+      },
+      item.approval.runId,
+    );
   }
+}
+
+async function publishAutomaticApprovals(deps: DispatchDeps, decided: readonly AutomaticApproval[]): Promise<void> {
+  for (const computerId of new Set(decided.flatMap((item) => (item.computerId === null ? [] : [item.computerId])))) {
+    await deps.agents.flushOutbox(computerId);
+  }
+  for (const item of decided) deps.push.push(item.ownerId, { type: "approval_updated", approval: item.approval });
+}
+
+export async function settleApprovalTimeouts(deps: DispatchDeps, now: Date, approvalId?: ApprovalId): Promise<number> {
+  const decided = await deps.db.transaction(async (tx) => {
+    const scopes = await pendingApprovalDeliveries(
+      tx,
+      and(lte(approvalRows.deadlineAt, now), approvalId === undefined ? undefined : eq(approvalRows.id, approvalId)),
+    );
+    await lockApprovalDeliveries(tx, scopes);
+    await lockRuns(
+      tx,
+      scopes.map((scope) => scope.runId),
+    );
+    const timedOut = await timeOutDueApprovals(
+      tx,
+      now,
+      scopes.map((scope) => scope.id),
+    );
+    await enqueueAutomaticApprovals(tx, timedOut, "timed_out");
+    return timedOut;
+  });
+  await publishAutomaticApprovals(deps, decided);
   return decided.length;
 }
 
-/**
- * 给一条审批定结论、告诉电脑、推给客户端。按钮和群里回话共用这一份。
- * 落了授权就先重发 config 再放行：运行器放行之后紧接着的同类调用要看到这条授权，否则还会再问一次。
- * 电脑不在线时 send 返回 false，决定照样落库：运行器那一头本来就已经断了，等它回来是另一件事。
- */
+/** 批准产生授权时，提交后先重发 config 再放行，紧接着的调用才能看到授权。 */
 export async function settleApproval(
   deps: DispatchDeps,
   ownerId: UserId,
   approvalId: ApprovalId,
   request: DecideApprovalRequest,
 ): Promise<SettleResult> {
-  const outcome = await decideApproval(deps.db, ownerId, approvalId, request);
-  if (outcome.kind === "already_decided") await settleApprovalTimeouts(deps, new Date(), approvalId);
+  const { outcome, timedOut } = await deps.db.transaction(async (tx) => {
+    const scopes = await pendingApprovalDeliveries(tx, eq(approvalRows.id, approvalId));
+    await lockApprovalDeliveries(tx, scopes);
+    await lockRuns(
+      tx,
+      scopes.map((scope) => scope.runId),
+    );
+    const result = await decideApproval(tx as unknown as Db, ownerId, approvalId, request);
+    const expired =
+      result.kind === "already_decided"
+        ? await timeOutDueApprovals(
+            tx,
+            new Date(),
+            scopes.map((scope) => scope.id),
+          )
+        : [];
+    await enqueueAutomaticApprovals(tx, expired, "timed_out");
+    if (result.kind === "decided" && result.decided.computerId !== null) {
+      const decided = result.decided;
+      await enqueueDownlink(
+        tx,
+        result.decided.computerId,
+        {
+          type: "approval_result",
+          runId: decided.runId,
+          callId: decided.callId,
+          outcome: request.decision,
+        },
+        decided.runId,
+      );
+    }
+    return { outcome: result, timedOut: expired };
+  });
+  await publishAutomaticApprovals(deps, timedOut);
   if (outcome.kind !== "decided") return outcome;
   const { decided } = outcome;
-
   if (decided.grant !== null) await deps.agents.sendConfig(ownerId);
-  if (decided.computerId !== null)
-    deps.agents.send(decided.computerId, {
-      type: "approval_result",
-      runId: decided.runId,
-      callId: decided.callId,
-      outcome: request.decision,
-    });
+  if (decided.computerId !== null) await deps.agents.flushOutbox(decided.computerId);
   deps.push.push(ownerId, { type: "approval_updated", approval: decided.approval });
   return { kind: "ok", approval: decided.approval, grant: decided.grant };
 }

@@ -3,7 +3,11 @@ import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
 import {
   AgentCloseCode,
   AgentToControl,
+  BareUplinkFrame,
+  MIN_AGENT_PROTOCOL,
+  UplinkHeader,
   ControlToAgent,
+  DOWNLINK_DELIVERY,
   type Computer,
   type ComputerKind,
   type ComputerId,
@@ -34,6 +38,18 @@ import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
+import {
+  acceptUplinkFrame,
+  acknowledgeDownlink,
+  AckBatch,
+  beginHandshake,
+  clearOutbox,
+  closedActiveRuns,
+  isCurrentConnection,
+  pendingPrompts,
+  replayOutbox,
+} from "./envelope.js";
+import { handleEnvelopedEvent } from "./envelope-events.js";
 import type { GroupTurns } from "./group-turn.js";
 
 export const AGENT_PATH = "/agent";
@@ -60,7 +76,10 @@ export type AgentConnection = {
   readonly socket: WebSocket;
   /** 这条连接下发给电脑的网关 key 明文。hello 时现生成，只活在这条连接上。 */
   readonly gatewayKey: string;
-  /** callId 到群里那条工具调用消息。进程重启会丢，重启后同一个 callId 会另起一条消息。 */
+  readonly conn: number;
+  readonly acknowledgements: AckBatch;
+  downSent: number;
+  /** 当前连接的工具调用缓存；跨重连的消息身份由 runId、callId 的数据库主键固定。 */
   readonly toolCallMessages: Map<string, MessageId>;
 };
 
@@ -97,6 +116,7 @@ export class AgentHub {
     AgentConnection,
     { sent: number; acked: number; state: "handshaking" | "ready" | "rejected" }
   >();
+  readonly #flushChains = new Map<ComputerId, Promise<void>>();
   readonly #graceTimers = new Map<ComputerId, NodeJS.Timeout>();
   /**
    * 每台电脑一条链。hello、每一帧、关闭、宽限到点的收尾都排在上面，一个任务从开始到它的推送结束，
@@ -171,6 +191,10 @@ export class AgentHub {
             socket.close(AgentCloseCode.badHello, "首条报文必须是合法 hello");
             return;
           }
+          if (message.protocol < MIN_AGENT_PROTOCOL) {
+            socket.close(AgentCloseCode.upgradeRequired, "电脑代理需要升级");
+            return;
+          }
           clearTimeout(deadline);
           // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
           const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
@@ -203,7 +227,7 @@ export class AgentHub {
               );
               return;
             }
-            conn = await this.#onHello(socket, authenticated, message.activeRuns);
+            conn = await this.#onHello(socket, authenticated, message);
           });
         },
         (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
@@ -274,9 +298,45 @@ export class AgentHub {
   }
 
   send(computerId: ComputerId, message: ControlToAgent): boolean {
+    if (DOWNLINK_DELIVERY[message.type] === "reliable") throw new Error("可靠下行必须在调用方事务入队");
     const conn = this.#connections.get(computerId);
     if (conn === undefined) return false;
     return this.#send(conn, message);
+  }
+
+  /** 在线或断线宽限内的电脑可以收可靠下行。 */
+  deliverableComputerIds(): ComputerId[] {
+    return [...new Set([...this.onlineComputerIds(), ...this.#graceTimers.keys()])];
+  }
+
+  canDeliver(computerId: ComputerId): boolean {
+    return this.isOnline(computerId) || this.#graceTimers.has(computerId);
+  }
+
+  async flushOutbox(computerId: ComputerId): Promise<void> {
+    const previous = this.#flushChains.get(computerId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const conn = this.#connections.get(computerId);
+        if (conn === undefined || !this.isOnline(computerId)) return;
+        conn.downSent = await replayOutbox(
+          this.#deps.db,
+          computerId,
+          (frame) => {
+            if (this.#connections.get(computerId) !== conn || conn.socket.readyState !== conn.socket.OPEN) return false;
+            conn.socket.send(frame);
+            return true;
+          },
+          conn.downSent,
+        );
+      });
+    this.#flushChains.set(computerId, current);
+    try {
+      await current;
+    } finally {
+      if (this.#flushChains.get(computerId) === current) this.#flushChains.delete(computerId);
+    }
   }
 
   /** 这个用户在线的每台电脑各发一条。暂停和继续不知道 Bot 的活在哪台电脑上，所以都发。 */
@@ -292,6 +352,7 @@ export class AgentHub {
   /** 和 hello、上行帧排同一条链，已在握手中的旧连接也会在配对返回之前退出。 */
   async displaceComputer(computerId: ComputerId): Promise<void> {
     await this.#enqueue(computerId, async () => {
+      await clearOutbox(this.#deps.db, computerId);
       const connection = this.#connections.get(computerId);
       if (connection === undefined) return;
       connection.socket.close(AgentCloseCode.displaced, "这个账号已在另一台 Mac 上登录");
@@ -307,6 +368,7 @@ export class AgentHub {
     this.#deletedOwners.add(ownerId);
     for (const connection of this.#ownerConnections(ownerId)) {
       this.#connections.delete(connection.computerId);
+      connection.acknowledgements.stop();
       connection.socket.close(AgentCloseCode.accountDeleted, "账号已删除");
     }
   }
@@ -328,9 +390,13 @@ export class AgentHub {
     this.#graceTimers.clear();
     await Promise.allSettled(this.#inboxTails);
     await Promise.allSettled(this.#chains.values());
+    await Promise.allSettled(this.#flushChains.values());
     const open = [...this.#connections.values()];
     this.#connections.clear();
-    for (const conn of open) conn.socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
+    for (const conn of open) {
+      conn.acknowledgements.stop();
+      conn.socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
+    }
     await markComputersSleeping(
       this.#deps.db,
       open.map((conn) => conn.computerId),
@@ -340,31 +406,59 @@ export class AgentHub {
   async #onFrame(conn: AgentConnection, raw: string, receivedAt: Date): Promise<void> {
     // 被新连接顶掉之后这条连接还排着的帧是旧代理的旧话，整条丢掉。从这里到 handler 返回，这台电脑不会换连接。
     if (this.#connections.get(conn.computerId) !== conn) return;
-    const message = parseFrame(raw, `电脑 ${conn.computerId}`);
-    if (message === null) return;
-    await handleAgentEvent(
-      {
-        db: this.#deps.db,
-        push: this.#deps.push,
-        agents: this,
-        groupTurns: this.#deps.groupTurns,
-        priceInputPerM: this.#deps.priceInputPerM,
-        priceOutputPerM: this.#deps.priceOutputPerM,
-        notifications: this.#deps.notifications,
-      },
-      conn,
-      message,
-      receivedAt,
-    );
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const deps = {
+      db: this.#deps.db,
+      push: this.#deps.push,
+      agents: this,
+      groupTurns: this.#deps.groupTurns,
+      priceInputPerM: this.#deps.priceInputPerM,
+      priceOutputPerM: this.#deps.priceOutputPerM,
+      notifications: this.#deps.notifications,
+    };
+    if (UplinkHeader.safeParse(json).success) {
+      const result = await acceptUplinkFrame(
+        this.#deps.db,
+        conn.computerId,
+        conn.conn,
+        json,
+        (tx, body, effects, rollbacks) => handleEnvelopedEvent(deps, conn, body, receivedAt, tx, effects, rollbacks),
+      );
+      if (result.kind === "gap") conn.socket.close(1011, "上行序号缺口");
+      if (result.kind === "ack") conn.acknowledgements.add(result.upTo, result.rejected);
+      return;
+    }
+    const bare = BareUplinkFrame.safeParse(json);
+    if (
+      !bare.success ||
+      bare.data.conn !== conn.conn ||
+      !(await isCurrentConnection(this.#deps.db, conn.computerId, conn.conn))
+    )
+      return;
+    if (bare.data.body.type === "downlink_ack") {
+      await acknowledgeDownlink(this.#deps.db, conn.computerId, conn.conn, bare.data.body.upTo);
+      return;
+    }
+    await handleAgentEvent(deps, conn, bare.data.body, receivedAt);
   }
 
   /**
    * 认完身份的 hello 轮到它了。排队期间 socket 已经断了也照做：它排在这条 socket 的关闭前面，关闭跟在后面把电脑写成休眠，
    * 电脑来过这件事才记得下来。
    */
-  async #onHello(socket: WebSocket, computer: Computer, activeRuns: readonly RunId[]): Promise<AgentConnection | null> {
+  async #onHello(
+    socket: WebSocket,
+    computer: Computer,
+    hello: Extract<AgentToControl, { type: "hello" }>,
+  ): Promise<AgentConnection | null> {
     let accepted: AgentConnection | null = null;
     try {
+      const handshakeCursor = await beginHandshake(this.#deps.db, computer.id, hello);
       const gatewayKey = await rotateGatewayKey(this.#deps.db, computer.id);
       // 判删号和入表之间没有 await：删号在前，这里看得见；在后，disconnectOwner 在表里找得到它。
       if (this.#deletedOwners.has(computer.ownerId)) {
@@ -377,6 +471,12 @@ export class AgentHub {
         ownerId: computer.ownerId,
         socket,
         gatewayKey,
+        conn: handshakeCursor.conn,
+        downSent: 0,
+        acknowledgements: new AckBatch((ack) => {
+          if (accepted !== null && this.#connections.get(computer.id) === accepted && socket.readyState === socket.OPEN)
+            socket.send(JSON.stringify(ack));
+        }),
         toolCallMessages: new Map(),
       };
 
@@ -387,9 +487,16 @@ export class AgentHub {
         clearTimeout(timer);
         this.#graceTimers.delete(computer.id);
       }
+      previous?.acknowledgements.stop();
       previous?.socket.close(AgentCloseCode.superseded, "同一台电脑有了新连接");
 
-      await this.#finishMissingRuns(computer.id, computer.ownerId, activeRuns);
+      await this.#finishMissingRuns(
+        computer.id,
+        computer.ownerId,
+        hello.activeRuns,
+        undefined,
+        await pendingPrompts(this.#deps.db, computer.id),
+      );
       const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
       if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
       await this.#deps.notifications.computerOnline(computer.ownerId);
@@ -398,6 +505,8 @@ export class AgentHub {
         ownerId: computer.ownerId,
         kind: computer.kind,
         serverTime: new Date().toISOString(),
+        conn: handshakeCursor.conn,
+        upAcked: handshakeCursor.upAcked,
       });
       // 登录时补建管不到会话还有效的老用户，他们下次登录前一直没有主助理。hello 这里再补一次，
       // 撞部分唯一索引的那次什么都不做，所以和并发的登录谁先谁后都只建一个。
@@ -411,6 +520,9 @@ export class AgentHub {
       await this.#sendConfig(accepted, "hello");
       const handshake = this.#configs.get(accepted);
       if (handshake !== undefined) handshake.state = "ready";
+      await this.flushOutbox(computer.id);
+      for (const runId of await closedActiveRuns(this.#deps.db, computer.id, hello.activeRuns))
+        this.#send(accepted, { type: "cancel", runId });
       // 主助理是这次建的：这个用户其他电脑的 hello 再补只会撞索引，不推也不重发，所以要送到它们那里。
       if (assistant !== null) {
         const others = this.#ownerConnections(computer.ownerId).filter((connection) => connection !== accepted);
@@ -436,6 +548,7 @@ export class AgentHub {
     // 被新连接顶掉的那条关闭时，表里挂的已经是新连接，不能把在线的那台写成休眠。
     if (this.#connections.get(closed.computerId) !== closed) return;
     this.#connections.delete(closed.computerId);
+    closed.acknowledgements.stop();
     const timer = setTimeout(() => {
       this.#graceTimers.delete(closed.computerId);
       this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
@@ -467,11 +580,12 @@ export class AgentHub {
     ownerId: UserId,
     activeRuns: readonly RunId[],
     shouldStop: (() => boolean) | undefined = undefined,
+    pending: ReadonlySet<RunId> = new Set(),
   ): Promise<void> {
     const active = new Set(activeRuns);
     for (const run of await openRunsForComputer(this.#deps.db, computerId)) {
       if (shouldStop?.()) return;
-      if (active.has(run.runId)) continue;
+      if (active.has(run.runId) || pending.has(run.runId)) continue;
       if (shouldStop?.()) return;
       const abandoned = await abandonRun(this.#routineDeps(), ownerId, run, {
         text: DISCONNECT_NOTICE,

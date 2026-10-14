@@ -6,7 +6,6 @@ import {
   PokerHandId,
   PokerSessionId,
   type ComputerId,
-  type ControlToAgent,
   type Message,
   type PokerReviewHand,
   type PokerTableView,
@@ -18,7 +17,6 @@ import { sendHiddenRun, type HiddenRunOutcome } from "../agent/hidden-run.js";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, pokerHands, pokerSessions, pokerTables } from "../db/schema.js";
 import { loadPokerTableView } from "../repo/poker-tables.js";
-import { finishRun } from "../repo/runs.js";
 import { pushMessages, type PokerDeps } from "./converge.js";
 import { pickKeyHands } from "./keyhands.js";
 import { engineSeatId } from "./seating.js";
@@ -80,7 +78,6 @@ async function hostBotOf(db: Db, groupId: string) {
   return BotId.parse(host.id);
 }
 
-type Dispatch = { computerId: ComputerId; message: Extract<ControlToAgent, { type: "prompt" }> };
 type SessionRow = typeof pokerSessions.$inferSelect;
 type ReviewOutcome =
   | { readonly kind: "written"; readonly message: Message }
@@ -106,14 +103,14 @@ async function bumpVersion(db: Db, groupId: GroupId): Promise<void> {
 /**
  * 给一场还没有复盘的散场派复盘。一手都没结算的场没有可复盘的，直接写空复盘；否则给老白派一条 reviewer run。
  * 复盘 run 在 run 表上一桌一条开着的，重复派撞唯一索引回 busy，所以同一场只会有一份复盘在路上。
- * prompt 要等外层事务提交后再发，收进 dispatches 由调用方发。
+ * prompt 入外层事务的发件箱，提交后由调用方 flush。
  */
 async function dispatchReview(
   deps: PokerDeps,
   db: Db,
   table: TableRow,
   session: SessionRow,
-  dispatches: Dispatch[],
+  dispatches: ComputerId[],
 ): Promise<ReviewOutcome | null> {
   const picked = await keyHandsOf(db, session.id);
   const last = picked.at(-1);
@@ -133,12 +130,10 @@ async function dispatchReview(
       agents: {
         isOnline: (id) => deps.agents.isOnline(id),
         configRejected: (id) => deps.agents.configRejected(id),
-        // 外层事务提交后才发 prompt，避免重连对账看不到刚创建的 run。
-        send: (computerId, message) => {
-          if (!deps.agents.isOnline(computerId)) return false;
-          if (message.type !== "prompt") throw new Error("隐藏派活只能发送 prompt");
-          dispatches.push({ computerId, message });
-          return true;
+        canDeliver: (id) => deps.agents.canDeliver(id),
+        // withTableLock 的外层事务提交后再 flush。
+        flushOutbox: async (computerId) => {
+          dispatches.push(computerId);
         },
       },
     },
@@ -153,19 +148,9 @@ async function dispatchReview(
   return { kind: "dispatched", sent };
 }
 
-/** 事务提交后发 prompt；电脑刚好掉线就把 run 收掉，状态回到 failed，用户能再重试。 */
-async function sendDispatches(deps: PokerDeps, dispatches: readonly Dispatch[]): Promise<void> {
-  for (const dispatch of dispatches) {
-    if (!deps.agents.send(dispatch.computerId, dispatch.message)) {
-      await finishRun(
-        deps.db,
-        dispatch.message.runId,
-        dispatch.message.groupId,
-        { steps: 0, inputTokens: 0, outputTokens: 0, amount: 0 },
-        "abandoned",
-      );
-    }
-  }
+/** 事务提交后 flush 可靠下行。 */
+async function sendDispatches(deps: PokerDeps, dispatches: readonly ComputerId[]): Promise<void> {
+  for (const computerId of dispatches) await deps.agents.flushOutbox(computerId);
 }
 
 type Outcome = { readonly changed: boolean; readonly messages: readonly Message[] };
@@ -175,7 +160,7 @@ async function finishWithView(
   ownerId: UserId,
   groupId: GroupId,
   outcome: Outcome | null,
-  dispatches: readonly Dispatch[],
+  dispatches: readonly ComputerId[],
 ): Promise<PokerTableView> {
   if (outcome === null) throw new PokerError(404, NO_SUCH_TABLE);
   await sendDispatches(deps, dispatches);
@@ -191,7 +176,7 @@ async function finishWithView(
  * 点了没反应或复盘没交上来的那一场（最近一场已散场但 review 还空）再点会重派；已经有复盘的再点什么都不做。
  */
 export async function leaveTable(deps: PokerDeps, ownerId: UserId, groupId: GroupId): Promise<PokerTableView> {
-  const dispatches: Dispatch[] = [];
+  const dispatches: ComputerId[] = [];
   const outcome = await withTableLock(deps.db, groupId, async (db, table): Promise<Outcome> => {
     if (table.ownerId !== ownerId) throw new PokerError(404, NO_SUCH_TABLE);
     if (table.status === "in_hand") throw new PokerError(409, "这一手还没打完，打完再散场");
@@ -225,7 +210,7 @@ export async function retryReview(
   groupId: GroupId,
   sessionId: PokerSessionId,
 ): Promise<PokerTableView> {
-  const dispatches: Dispatch[] = [];
+  const dispatches: ComputerId[] = [];
   const outcome = await withTableLock(deps.db, groupId, async (db, table): Promise<Outcome> => {
     if (table.ownerId !== ownerId) throw new PokerError(404, NO_SUCH_TABLE);
     const latest = await latestEndedSession(db, groupId);

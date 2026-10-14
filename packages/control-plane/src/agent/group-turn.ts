@@ -168,6 +168,11 @@ export class GroupTurns {
     return true;
   }
 
+  /** 信封事务回滚时撤销本次占用，重试仍能写出提示。 */
+  releaseHandoffLimitNotice(runId: RunId): void {
+    this.#handoffLimitNoted.delete(runId);
+  }
+
   queueHandoff(groupId: GroupId, runId: RunId, speaker: Speaker): void {
     const turn = this.#turns.get(groupId);
     if (isRunning(turn, runId) && turn.botMessages < BOT_MESSAGE_LIMIT && !this.#blockedRuns.has(runId)) {
@@ -189,12 +194,14 @@ export class GroupTurns {
     if (turn.summary === null) {
       return { kind: "held" };
     }
-    turn.summary = {
-      ...turn.summary,
-      steps: turn.summary.steps + extra.steps,
-      amount: turn.summary.amount + extra.amount,
+    return {
+      kind: "merged",
+      cost: {
+        ...turn.summary,
+        steps: turn.summary.steps + extra.steps,
+        amount: turn.summary.amount + extra.amount,
+      },
     };
-    return { kind: "merged", cost: turn.summary };
   }
 
   rememberCost(groupId: GroupId, runId: RunId, cost: TurnCost): void {

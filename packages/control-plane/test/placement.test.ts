@@ -13,7 +13,8 @@ import {
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addAccount } from "../src/repo/accounts.js";
-import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
+import { DEFAULT_RUNTIME_CONFIG, startServer } from "../src/server.js";
+import { ApiClient, TEST_CREDENTIALS_KEY, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
@@ -29,12 +30,19 @@ let clock = new Date(MONDAY_BEFORE_NINE);
 
 beforeAll(async () => {
   database = await createTestDb();
-  server = await startTestServer(
-    database.db,
-    {},
-    { now: () => clock, intervalMs: 60 * 60 * 1000 },
-    { now: () => clock, intervalMs: 60 * 60 * 1000 },
-  );
+  const running = await startServer({
+    db: database.db,
+    port: 0,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+    config: DEFAULT_RUNTIME_CONFIG,
+    // 宽限内投递要跨多次真实 HTTP、数据库和 WebSocket 往返，窗口覆盖整个用例，不能依赖机器刚好够快。
+    disconnectGraceMs: 60_000,
+    scheduler: { now: () => clock, intervalMs: 60 * 60 * 1000 },
+    notificationScheduler: { now: () => clock, intervalMs: 60 * 60 * 1000 },
+    publisher: { intervalMs: 24 * 60 * 60 * 1000 },
+  });
+  server = { server: running, client: () => new ApiClient(running.port), close: () => running.close() };
 });
 
 afterAll(async () => {
@@ -207,7 +215,7 @@ describe("派到哪台电脑", () => {
     }
   });
 
-  it("同一条例行：本机在线走本机，本机断开走远程，两台都不在记失败不补跑，电脑回来后下一周照常", async () => {
+  it("同一条例行：本机断开走远程，两台断线宽限内入箱，重连后执行且下一周照常", async () => {
     const owner = await ownerWithTwoComputers();
     let local = await online(owner.local);
     let remote = await online(owner.remote);
@@ -244,28 +252,47 @@ describe("派到哪台电脑", () => {
 
       await offline(remote, owner.remote.computerId);
       await tickAt("2030-01-21T09:00:00");
-      expect((await routineRuns(routineId))[2], "第三周两台都不在，记失败，看得出不止一台").toEqual({
-        status: "failed",
-        note: "你的电脑都不在线，没跑起来",
+      expect((await routineRuns(routineId))[2], "远程仍在断线宽限内，例行已经入箱").toEqual({
+        status: "running",
+        note: "",
       });
-      expect(await runComputers(owner.groupId), "第三周没有新 run").toHaveLength(2);
-      expect(await errorNotices(owner), "群里恰好一句，看得出不止一台").toEqual([
-        "你的电脑都不在线，这条没派出去，有一台回来后再说一次",
+      const computers = await runComputers(owner.groupId);
+      expect(computers.slice(0, 2), "前两周仍按在线电脑优先派活").toEqual([
+        owner.local.computerId,
+        owner.remote.computerId,
       ]);
-      const stuck = (await noticesBeforeMarker(owner, push)).filter((n) => n.kind === "stuck").map((n) => n.text);
-      expect(stuck, "从头到这里 stuck 恰好一条").toEqual(["例行任务「排本周计划」没跑：你的电脑都不在线"]);
+      expect(computers).toHaveLength(3);
+      const queuedComputer = computers[2];
+      expect(queuedComputer, "两台都在宽限内，本机优先").toBe(owner.local.computerId);
+      const queued = await database.sql<{ computer_id: string }[]>`
+        SELECT o.computer_id FROM agent_outbox o JOIN runs r ON r.id=o.run_id
+        WHERE r.group_id=${owner.groupId} AND o.body->>'type'='prompt'`;
+      expect(queued, "只给本次 run 的电脑留一条可靠 prompt").toEqual([{ computer_id: queuedComputer }]);
+      if (queuedComputer === owner.remote.computerId) {
+        remote = await online(owner.remote);
+        await finishRoutine(remote, owner);
+      } else {
+        local = await online(owner.local);
+        await finishRoutine(local, owner);
+      }
+      await waitFor(async () => (await routineRuns(routineId))[2]?.status === "ok", "第三周记 ok");
+      expect(await errorNotices(owner), "宽限期内入箱不产生失败消息").toEqual([]);
+      expect(
+        (await noticesBeforeMarker(owner, push)).filter((notice) => notice.kind === "stuck"),
+        "宽限期内入箱不推 stuck",
+      ).toEqual([]);
 
       local = await online(owner.local);
-      remote = await online(owner.remote);
       await tickAt("2030-01-21T09:05:00");
       await tickAt("2030-01-21T12:00:00");
       expect(await routineRuns(routineId), "电脑回来后同一周不补跑").toHaveLength(3);
-      expect(await runComputers(owner.groupId), "电脑回来后同一周不补跑").toHaveLength(2);
+      expect(await runComputers(owner.groupId), "电脑回来后同一周不补跑").toHaveLength(3);
 
       await tickAt("2030-01-28T09:00:00");
       expect(await runComputers(owner.groupId), "第四周照常走本机").toEqual([
         owner.local.computerId,
         owner.remote.computerId,
+        queuedComputer,
         owner.local.computerId,
       ]);
       await finishRoutine(local, owner);

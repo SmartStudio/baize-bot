@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -17,6 +18,9 @@ import {
   MessageId,
   RunId,
   Skill,
+  DOWNLINK_DELIVERY,
+  BareUplinkFrame,
+  UplinkFrame,
 } from "@baize/shared";
 import type { CdpConnection, RunnerConfig } from "@baize/bot-runner";
 import {
@@ -25,8 +29,6 @@ import {
   type AgentOptions,
   type AgentRunnerConfig,
   type RunnerFactory,
-  RUN_DONE_REPLAY_LIMIT,
-  UNACKED_RUN_DONE_LIMIT,
 } from "../src/agent.js";
 import { startAssistantChrome, type AssistantChrome, type BrowserLoginState } from "../src/chrome.js";
 import { chromeProfileDir, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
@@ -53,7 +55,9 @@ const initialRunnerConfigs: AgentRunnerConfig[] = [];
 const carried = (config: RunnerConfig) => ({ brand: config.brand, preferences: config.preferences });
 
 function startAgent(options: AgentOptions): AgentHandle {
-  return startProductAgent({ ...options, makeChrome: options.makeChrome ?? fakeChrome });
+  const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "baize-agent-test-"));
+  if (options.dataDir === undefined) dataDirs.push(dataDir);
+  return startProductAgent({ ...options, dataDir, makeChrome: options.makeChrome ?? fakeChrome });
 }
 
 // 假运行器。电脑代理这一层只管把报文派到运行器的接口上，真跑 Pi 在 @baize/bot-runner 的测试里。
@@ -101,9 +105,18 @@ function runnerOf(
         groupId: message.groupId,
         messageId: MessageId.parse(`msg-${message.runId}`),
         delta: "假运行器的回复。",
-        done: true,
+        done: false,
+      });
+      config.send({
+        type: "bot_text_done",
+        runId: message.runId,
+        botId: message.botId,
+        groupId: message.groupId,
+        messageId: MessageId.parse(`msg-${message.runId}`),
+        text: "假运行器的回复。",
       });
     },
+    cancel: () => {},
     approve: (runId, callId, outcome) => {
       calls.approvals.push({ runId, callId, outcome });
     },
@@ -200,19 +213,110 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
   return { pipe: { toChrome, fromChrome }, commands: () => [...commands] };
 }
 
-function startControlPlane() {
+function startControlPlane(tuning: { holdWelcomeAfter?: number } = {}) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const sockets: WebSocket[] = [];
   const messages: AgentToControl[] = [];
   const parseErrors: string[] = [];
+  let nextDownlink = 1;
+  const streams = new Map<string, number>();
 
   let onConnection: ((socket: WebSocket) => void) | null = null;
 
   server.on("connection", (socket) => {
     sockets.push(socket);
+    let welcomed = false;
+    const connection = sockets.length;
+    let stream = "";
+    const originalSend = socket.send.bind(socket);
+    socket.send = ((
+      data: string,
+      options?: Parameters<WebSocket["send"]>[1],
+      callback?: Parameters<WebSocket["send"]>[2],
+    ) => {
+      let parsed: { type?: string };
+      try {
+        parsed = JSON.parse(data.toString()) as { type?: string };
+      } catch {
+        return originalSend(data, options ?? {}, callback);
+      }
+      if (parsed.type === "welcome") {
+        welcomed = true;
+        const body = JSON.parse(data) as Record<string, unknown>;
+        body.conn = connection;
+        body.upAcked = streams.get(stream) ?? 0;
+        return originalSend(JSON.stringify(body), options ?? {}, callback);
+      }
+      if (!welcomed) {
+        welcomed = true;
+        originalSend(
+          JSON.stringify({
+            type: "welcome",
+            ownerId: "owner-1",
+            kind: "local",
+            serverTime: new Date().toISOString(),
+            conn: connection,
+            upAcked: 0,
+          }),
+        );
+      }
+      if (
+        parsed.type !== "welcome" &&
+        DOWNLINK_DELIVERY[parsed.type as keyof typeof DOWNLINK_DELIVERY] === "reliable"
+      ) {
+        return originalSend(
+          JSON.stringify({ type: "downlink", seq: nextDownlink++, body: parsed }),
+          options ?? {},
+          callback,
+        );
+      }
+      return originalSend(data, options ?? {}, callback);
+    }) as WebSocket["send"];
     onConnection?.(socket);
     socket.on("message", (data) => {
-      const parsed = AgentToControl.safeParse(JSON.parse(data.toString()));
+      let json: unknown;
+      try {
+        json = JSON.parse(data.toString());
+      } catch {
+        return;
+      }
+      const raw = json as { type?: unknown } | null;
+      if (raw?.type === "hello") stream = (json as { uplinkStream: string }).uplinkStream;
+      if (raw?.type === "hello" && !welcomed && connection <= (tuning.holdWelcomeAfter ?? Infinity)) {
+        welcomed = true;
+        originalSend(
+          JSON.stringify({
+            type: "welcome",
+            ownerId: "owner-1",
+            kind: "local",
+            serverTime: new Date().toISOString(),
+            conn: connection,
+            upAcked: streams.get(stream) ?? 0,
+          }),
+        );
+      }
+      if (raw?.type === "uplink") {
+        const parsed = UplinkFrame.safeParse(json);
+        if (parsed.success) {
+          const accepted = streams.get(parsed.data.stream) ?? 0;
+          if (parsed.data.seq === accepted + 1) {
+            streams.set(parsed.data.stream, parsed.data.seq);
+            messages.push(parsed.data.body);
+          }
+          originalSend(
+            JSON.stringify({ type: "uplink_ack", upTo: streams.get(parsed.data.stream) ?? 0, rejected: [] }),
+          );
+        } else parseErrors.push(`${data.toString()} -> ${parsed.error.message}`);
+        return;
+      }
+      const wrapped = json as { conn?: unknown; body?: unknown } | null;
+      if (wrapped && Number.isInteger(wrapped.conn) && wrapped.body !== undefined) {
+        const parsed = BareUplinkFrame.safeParse(json);
+        if (parsed.success) messages.push(parsed.data.body);
+        else parseErrors.push(`${data.toString()} -> ${parsed.error.message}`);
+        return;
+      }
+      const parsed = AgentToControl.safeParse(json);
       if (parsed.success) messages.push(parsed.data);
       else parseErrors.push(`${data.toString()} -> ${parsed.error.message}`);
     });
@@ -271,7 +375,17 @@ const runnerCalls = (): RunnerCalls => {
 function spawnAgent(
   url: string,
   tuning: Partial<
-    Pick<AgentOptions, "heartbeatMs" | "backoff" | "makeRunner" | "makeChrome" | "loginTimeoutMs" | "dataDir" | "log">
+    Pick<
+      AgentOptions,
+      | "heartbeatMs"
+      | "backoff"
+      | "makeRunner"
+      | "makeChrome"
+      | "loginTimeoutMs"
+      | "dataDir"
+      | "log"
+      | "beforeReliableSend"
+    >
   > = {},
 ): AgentHandle {
   const calls: RunnerCalls = {
@@ -287,6 +401,8 @@ function spawnAgent(
     stopCount: { value: 0 },
   };
   runnerCallsLog.push(calls);
+  const dataDir = tuning.dataDir ?? mkdtempSync(join(tmpdir(), "baize-agent-test-"));
+  if (tuning.dataDir === undefined) dataDirs.push(dataDir);
   const handle = startAgent({
     url,
     computerId: ComputerId.parse("computer-1"),
@@ -294,6 +410,7 @@ function spawnAgent(
     version: "0.1.0",
     log: () => {},
     makeRunner: fakeRunner(calls),
+    dataDir,
     ...tuning,
   });
   agents.push(handle);
@@ -330,13 +447,18 @@ describe("电脑代理连控制面", () => {
 
     const hello = await server.waitForMessage("hello", 1, 3000);
 
-    expect(hello).toEqual({
-      type: "hello",
-      computerId: "computer-1",
-      token: "dev-token",
-      version: "0.1.0",
-      activeRuns: [],
-    });
+    expect(hello).toEqual(
+      expect.objectContaining({
+        type: "hello",
+        computerId: "computer-1",
+        token: "dev-token",
+        version: "0.1.0",
+        protocol: 2,
+        uplinkStream: expect.any(String),
+        downApplied: 0,
+        activeRuns: [],
+      }),
+    );
   });
 
   it("重连 hello 报告运行器仍活着的 run", async () => {
@@ -353,6 +475,63 @@ describe("电脑代理连控制面", () => {
     const hello = await server.waitForMessage("hello", 2, 5000);
 
     expect(hello.activeRuns).toEqual(["run-1"]);
+  });
+
+  it("可靠上行在落盘后才尝试发送，连接断开后按原序号补发", async () => {
+    const server = await startControlPlane();
+    servers.push(server);
+    const directory = await tempDataDir();
+    let first: WebSocket | undefined;
+    let cut = false;
+    let durableAtSend = false;
+    let hookCalls = 0;
+    const handle = spawnAgent(await server.url(), {
+      dataDir: directory,
+      beforeReliableSend: (frame) => {
+        hookCalls += 1;
+        const journal = join(directory, ".agent", "outbox", frame.stream, "frames.jsonl");
+        durableAtSend ||= readFileSync(journal, "utf8").includes(`"seq":${frame.seq}`);
+        if (!cut) {
+          cut = true;
+          first?.terminate();
+        }
+      },
+      makeRunner: (config) => {
+        const calls = runnerCalls();
+        const base = runnerOf(config, calls);
+        return {
+          ...base,
+          async prompt(message) {
+            config.send({
+              type: "run_done",
+              runId: message.runId,
+              botId: message.botId,
+              groupId: message.groupId,
+              steps: 1,
+              inputTokens: 2,
+              outputTokens: 3,
+            });
+          },
+        };
+      },
+    });
+    agents.push(handle);
+
+    first = await server.waitForSocket(1);
+    const firstHello = await server.waitForMessage("hello", 1);
+    first.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+    first.send(JSON.stringify(promptMessage));
+
+    const second = await server.waitForSocket(2);
+    const secondHello = await server.waitForMessage("hello", 2);
+    expect(secondHello.uplinkStream).toBe(firstHello.uplinkStream);
+    expect(secondHello.activeRuns).toContain("run-1");
+    expect(durableAtSend).toBe(true);
+    second.send(welcomeFrame());
+    const replay = await server.waitForMessage("run_done", 1);
+    expect(replay.runId).toBe("run-1");
+    expect(hookCalls).toBe(2);
   });
 
   it("第二条 config 不重建运行器，改为交给 applyConfig", async () => {
@@ -430,9 +609,8 @@ describe("电脑代理连控制面", () => {
     socket.send(JSON.stringify(configMessage));
     socket.send(JSON.stringify(promptMessage));
 
-    const reply = await server.waitForMessage("bot_text", 1, 3000);
-    expect(reply.done).toBe(true);
-    expect(reply.delta.length).toBeGreaterThan(0);
+    const reply = await server.waitForMessage("bot_text_done", 1, 3000);
+    expect(reply.text.length).toBeGreaterThan(0);
     expect(reply.runId).toBe("run-1");
     expect(reply.botId).toBe("bot-1");
     expect(reply.groupId).toBe("group-1");
@@ -512,6 +690,7 @@ describe("电脑代理连控制面", () => {
     const reply = await server.waitForMessage("bot_text", 1, 3000);
     expect(reply.runId).toBe("run-1");
     expect(server.messages.filter((message) => message.type === "bot_text")).toHaveLength(1);
+    await server.waitForMessage("agent_error", 1, 3000);
     expect(
       server.messages.filter((message) => message.type === "agent_error"),
       "报错带上 runId，控制面才知道替哪个 run 收尾",
@@ -716,7 +895,7 @@ describe("电脑代理连控制面", () => {
     socket.send(JSON.stringify(promptMessage));
 
     const reply = await server.waitForMessage("bot_text", 1, 3000);
-    expect(reply.done).toBe(true);
+    expect(reply.done).toBe(false);
   });
 
   it.each(["approved", "rejected", "voided", "timed_out"] as const)(
@@ -1035,8 +1214,8 @@ describe("电脑代理连控制面", () => {
     ]);
   });
 
-  it("断线期间完成的登录，重连收到 welcome 后补发，同一账号只补最新一条", async () => {
-    const server = startControlPlane();
+  it("断线期间完成的登录结果全部落盘，重连后按序补发", async () => {
+    const server = startControlPlane({ holdWelcomeAfter: 1 });
     servers.push(server);
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {
@@ -1071,12 +1250,17 @@ describe("电脑代理连控制面", () => {
     ])
       first.send(JSON.stringify({ type: "browser_login", accountId, platform: "xiaohongshu", attempt }));
     await poll(() => (logins === 1 ? true : undefined), 3000, "第一次登录开始");
+    await poll(
+      () =>
+        server.messages.filter((message) => message.type === "downlink_ack").at(-1)?.upTo === 3 ? true : undefined,
+      3000,
+      "代理持久化并确认三条登录请求",
+    );
 
     first.terminate();
     await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
     release?.();
-    // 三次登录都只等 gate，结果在微任务里就排完了，等一轮 setImmediate 它们都已经到 send 了，重连定时器还没到。
-    await new Promise((resolve) => setImmediate(resolve));
+    await poll(() => (logins === 3 ? true : undefined), 3000, "三次登录都完成");
     expect(logins, "前提：三次登录都在断线期间做完").toBe(3);
 
     const second = await server.waitForSocket(2);
@@ -1086,15 +1270,21 @@ describe("电脑代理连控制面", () => {
     );
     second.send(JSON.stringify(configMessage));
     await server.waitForMessage("config_applied", 1);
+    await server.waitForMessage("login_state", 3);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      {
+        type: "login_state",
+        accountId: "account-1",
+        state: { login: "failed", reason: "window_failed", attempt: "try-1" },
+      },
       { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
       { type: "login_state", accountId: "account-2", state: { login: "valid", handle: "白泽二号" } },
     ]);
   });
 
-  it("断线期间留下的登录结果，被重连后 welcome 前做完的同一账号新结果顶掉，welcome 时不再补旧的", async () => {
-    const server = startControlPlane();
+  it("断线期间的登录结果会补发，连接恢复后完成的新结果接在后面", async () => {
+    const server = startControlPlane({ holdWelcomeAfter: 1 });
     servers.push(server);
     const gates: Array<() => void> = [];
     const outcomes: BrowserLoginState[] = [
@@ -1102,7 +1292,9 @@ describe("电脑代理连控制面", () => {
       { login: "valid", handle: "白泽工厂日记" },
     ];
     const logs: string[] = [];
+    const directory = await tempDataDir();
     spawnAgent(await server.url(), {
+      dataDir: directory,
       backoff: { initialMs: 200, maxMs: 200, factor: 1 },
       log: (line) => logs.push(line),
       makeChrome: () => ({
@@ -1119,21 +1311,37 @@ describe("电脑代理连控制面", () => {
     for (const attempt of ["try-1", "try-2"])
       first.send(JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt }));
     await poll(() => gates[0], 3000, "第一次登录开始");
+    await poll(
+      () =>
+        server.messages.filter((message) => message.type === "downlink_ack").at(-1)?.upTo === 2 ? true : undefined,
+      3000,
+      "代理确认两条登录请求",
+    );
 
     first.terminate();
     await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
     gates[0]?.();
     const second = await server.waitForSocket(2);
-    await server.waitForMessage("hello", 2);
-    (await poll(() => gates[1], 3000, "第二次登录开始"))();
-    await server.waitForMessage("login_state", 1);
-    second.send(
-      JSON.stringify({ type: "welcome", ownerId: "owner-1", kind: "local", serverTime: new Date().toISOString() }),
+    const hello = await server.waitForMessage("hello", 2);
+    gates[0]?.();
+    await poll(() => gates[1], 3000, "第二次登录开始");
+    const journalPath = join(directory, ".agent", "outbox", hello.uplinkStream, "frames.jsonl");
+    await poll(
+      () => (readFileSync(journalPath, "utf8").split("\n").filter(Boolean).length === 1 ? true : undefined),
+      3000,
+      "第一条登录结果落盘",
     );
-    second.send(JSON.stringify(configMessage));
-    await server.waitForMessage("config_applied", 1);
+    second.send(welcomeFrame());
+    await server.waitForMessage("login_state", 1);
+    gates[1]?.();
+    await server.waitForMessage("login_state", 2);
 
     expect(server.messages.filter((message) => message.type === "login_state")).toEqual([
+      {
+        type: "login_state",
+        accountId: "account-1",
+        state: { login: "failed", reason: "window_failed", attempt: "try-1" },
+      },
       { type: "login_state", accountId: "account-1", state: { login: "valid", handle: "白泽工厂日记" } },
     ]);
   });
@@ -1202,6 +1410,7 @@ describe("电脑代理连控制面", () => {
             if (runId === "run-1" && callId === "call-1" && outcome === "approved") release?.();
           },
           pokerResult: () => {},
+          cancel: () => {},
           pause: async () => {},
           resume: async () => {},
           activeRuns: () => [],
@@ -1250,6 +1459,7 @@ describe("电脑代理连控制面", () => {
             prompt: async () => {},
             approve: (runId, callId, outcome) => approvals.push({ runId, callId, outcome }),
             pokerResult: () => {},
+            cancel: () => {},
             pause: async () => {},
             resume: async () => {
               resumeStarted = true;
@@ -1349,6 +1559,7 @@ describe("电脑代理连控制面", () => {
               approveSecondRun();
             },
             pokerResult: () => {},
+            cancel: () => {},
             pause: async () => {},
             resume: async () => {},
             activeRuns: () => [],
@@ -1420,8 +1631,9 @@ describe("电脑代理连控制面", () => {
     const order: string[] = [];
     server.onConnection((socket) => {
       socket.on("message", (data) => {
-        const parsed = AgentToControl.parse(JSON.parse(data.toString()));
-        if (parsed.type !== "hello") order.push(parsed.type);
+        const frame = JSON.parse(data.toString()) as { type?: string; body?: { type?: string } };
+        const type = frame.type === "uplink" || frame.body !== undefined ? frame.body?.type : frame.type;
+        if (type !== undefined && type !== "hello") order.push(type);
       });
       socket.on("close", () => order.push("closed"));
     });
@@ -1448,6 +1660,7 @@ describe("电脑代理连控制面", () => {
         },
         approve: () => {},
         pokerResult: () => {},
+        cancel: () => {},
         pause: async () => {},
         resume: async () => {},
         activeRuns: () => [RunId.parse("run-1")],
@@ -1496,7 +1709,14 @@ describe("电脑代理连控制面", () => {
         outputTokens: 2,
       },
     ]);
-    expect(order).toEqual(["config_applied", "approval_request", "approval_abandoned", "run_done", "closed"]);
+    expect(order).toEqual([
+      "config_applied",
+      "downlink_ack",
+      "approval_request",
+      "approval_abandoned",
+      "run_done",
+      "closed",
+    ]);
   });
 
   it("运行器停不下来时，停机在上限内返回", async () => {
@@ -1645,8 +1865,8 @@ describe("电脑代理连控制面", () => {
     }
   }, 15_000);
 
-  it.each([4000, 4001, 4002, 4003, 1011, 1012])(
-    "关闭码 %i 仍按退避重连",
+  it.each([4000, 4001, 1011, 1012])(
+    "关闭码 %i 按退避重连",
     async (code) => {
       const server = await startPair({ backoff: { initialMs: 40, maxMs: 40, factor: 1 } });
       const first = await server.waitForSocket(1);
@@ -1660,171 +1880,39 @@ describe("电脑代理连控制面", () => {
     },
     10_000,
   );
+
+  it.each([AgentCloseCode.accountDeleted, AgentCloseCode.upgradeRequired])("关闭码 %i 停止重连", async (code) => {
+    const server = await startPair({ backoff: { initialMs: 40, maxMs: 40, factor: 1 } });
+    const first = await server.waitForSocket(1);
+    await server.waitForMessage("hello", 1);
+    const lines: string[] = [];
+    const originalWrite = process.stdout.write;
+    process.stdout.write = ((chunk: string | Uint8Array) => {
+      lines.push(chunk.toString());
+      return true;
+    }) as typeof process.stdout.write;
+    try {
+      first.close(code);
+      await new Promise((resolve) => setTimeout(resolve, 160));
+      expect(server.sockets).toHaveLength(1);
+      if (code === AgentCloseCode.upgradeRequired) {
+        expect(lines.join("")).toContain('{"type":"upgrade_required"}');
+      }
+    } finally {
+      process.stdout.write = originalWrite;
+    }
+  });
 });
 
 const welcomeFrame = () =>
-  JSON.stringify({ type: "welcome", ownerId: "owner-1", kind: "local", serverTime: new Date().toISOString() });
-const runDoneOf = (runId: string) =>
-  ({
-    type: "run_done",
-    runId: RunId.parse(runId),
-    botId: BotId.parse("bot-1"),
-    groupId: GroupId.parse("group-1"),
-    steps: 3,
-    inputTokens: 120,
-    outputTokens: 40,
-  }) as const;
-const runDonesSeen = (server: ControlPlane) => server.messages.filter((message) => message.type === "run_done");
-
-describe("run_done 补发", () => {
-  /** 运行器在 prompt 里等 finish 放行，然后按 finish 给的 runId 逐条报 run_done。 */
-  function gatedRunner(server: ControlPlane, logs: string[]) {
-    let finish: ((runIds: readonly string[]) => void) | undefined;
-    let started = false;
-    return {
-      spawn: async () =>
-        spawnAgent(await server.url(), {
-          backoff: { initialMs: 200, maxMs: 200, factor: 1 },
-          log: (line) => logs.push(line),
-          makeRunner: (config) => ({
-            ...runnerOf(config, runnerCalls()),
-            async prompt() {
-              started = true;
-              const runIds = await new Promise<readonly string[]>((resolve) => {
-                finish = resolve;
-              });
-              for (const runId of runIds) config.send(runDoneOf(runId));
-            },
-          }),
-        }),
-      started: () => started,
-      finish: (runIds: readonly string[]) => finish?.(runIds),
-    };
-  }
-
-  it("断线期间跑完的 run：hello 把它报成还在跑，welcome 之后才补发，同一个 runId 报两次只补一条", async () => {
-    const server = startControlPlane();
-    servers.push(server);
-    const logs: string[] = [];
-    const runner = gatedRunner(server, logs);
-    await runner.spawn();
-    const first = await server.waitForSocket(1);
-    await server.waitForMessage("hello", 1);
-    first.send(JSON.stringify(configMessage));
-    first.send(JSON.stringify(promptMessage));
-    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
-
-    first.terminate();
-    await poll(() => (logs.some((line) => line.includes("后重连")) ? true : undefined), 3000, "代理发现断线");
-    runner.finish(["run-1", "run-1"]);
-    await poll(
-      () => (logs.some((line) => line.includes("run run-1 的 run_done 留到重连后补发")) ? true : undefined),
-      3000,
-      "run_done 留下",
-    );
-
-    const second = await server.waitForSocket(2);
-    const hello = await server.waitForMessage("hello", 2);
-    expect(hello.activeRuns, "运行器已经不跑它了，但 run_done 还没送到，对账不能按断线收尾").toEqual(["run-1"]);
-    expect(runDonesSeen(server), "welcome 之前控制面不认这条连接的帧，不能先发").toEqual([]);
-
-    second.send(welcomeFrame());
-    second.send(JSON.stringify(configMessage));
-    await server.waitForMessage("config_applied", 2);
-    expect(runDonesSeen(server)).toEqual([runDoneOf("run-1")]);
+  JSON.stringify({
+    type: "welcome",
+    ownerId: "owner-1",
+    kind: "local",
+    serverTime: new Date().toISOString(),
+    conn: 1,
+    upAcked: 0,
   });
-
-  it("连接在时发出去的 run_done 也留到控制面确认：没确认就每次重连补发，确认之后不再报也不再补", async () => {
-    const server = startControlPlane();
-    servers.push(server);
-    const logs: string[] = [];
-    const runner = gatedRunner(server, logs);
-    await runner.spawn();
-    const first = await server.waitForSocket(1);
-    await server.waitForMessage("hello", 1);
-    first.send(JSON.stringify(configMessage));
-    first.send(JSON.stringify(promptMessage));
-    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
-    runner.finish(["run-1", "run-1"]);
-    await server.waitForMessage("run_done", 1);
-    first.send(JSON.stringify({ ...configMessage, generation: 2 }));
-    await server.waitForMessage("config_applied", 2);
-    expect(runDonesSeen(server), "同一个 runId 报两次，连接在时也只发一条").toHaveLength(1);
-
-    first.terminate();
-    const second = await server.waitForSocket(2);
-    expect((await server.waitForMessage("hello", 2)).activeRuns, "发出去了但没确认，仍报成还在跑").toEqual(["run-1"]);
-    second.send(welcomeFrame());
-    await server.waitForMessage("run_done", 2);
-    second.send(JSON.stringify({ type: "run_done_ack", runId: "run-1" }));
-    second.send(JSON.stringify(configMessage));
-    await server.waitForMessage("config_applied", 3);
-
-    second.terminate();
-    const third = await server.waitForSocket(3);
-    expect((await server.waitForMessage("hello", 3)).activeRuns, "确认过的不再报").toEqual([]);
-    third.send(welcomeFrame());
-    third.send(JSON.stringify(configMessage));
-    await server.waitForMessage("config_applied", 4);
-    expect(runDonesSeen(server), "确认之后重连不再补发").toEqual([runDoneOf("run-1"), runDoneOf("run-1")]);
-  });
-
-  it("控制面一直不确认：补发够次数后 hello 不再报它，交给对账按断线收尾，补发也停", async () => {
-    const server = startControlPlane();
-    servers.push(server);
-    const logs: string[] = [];
-    const runner = gatedRunner(server, logs);
-    await runner.spawn();
-    const first = await server.waitForSocket(1);
-    await server.waitForMessage("hello", 1);
-    first.send(JSON.stringify(configMessage));
-    first.send(JSON.stringify(promptMessage));
-    await poll(() => (runner.started() ? true : undefined), 3000, "run-1 开始");
-    runner.finish(["run-1"]);
-    await server.waitForMessage("run_done", 1);
-
-    let current = first;
-    for (let replay = 1; replay <= RUN_DONE_REPLAY_LIMIT; replay += 1) {
-      current.terminate();
-      current = await server.waitForSocket(replay + 1);
-      const hello = await server.waitForMessage("hello", replay + 1);
-      expect(hello.activeRuns, `第 ${replay} 次重连还在补发次数里，仍报它`).toEqual(["run-1"]);
-      current.send(welcomeFrame());
-      await server.waitForMessage("run_done", replay + 1);
-    }
-
-    current.terminate();
-    const last = await server.waitForSocket(RUN_DONE_REPLAY_LIMIT + 2);
-    const hello = await server.waitForMessage("hello", RUN_DONE_REPLAY_LIMIT + 2);
-    expect(hello.activeRuns, "补发够次数没确认，不再报，控制面对账才能按断线收尾").toEqual([]);
-    last.send(welcomeFrame());
-    last.send(JSON.stringify(configMessage));
-    await server.waitForMessage("config_applied", 2);
-    expect(runDonesSeen(server), "放手之后不再补发").toHaveLength(RUN_DONE_REPLAY_LIMIT + 1);
-  });
-
-  it("待确认的 run_done 超过上限时丢最老的，hello 只报留下的", async () => {
-    const server = startControlPlane();
-    servers.push(server);
-    const logs: string[] = [];
-    const runner = gatedRunner(server, logs);
-    await runner.spawn();
-    const first = await server.waitForSocket(1);
-    await server.waitForMessage("hello", 1);
-    first.send(JSON.stringify(configMessage));
-    first.send(JSON.stringify(promptMessage));
-    await poll(() => (runner.started() ? true : undefined), 3000, "run 开始");
-    const runIds = Array.from({ length: UNACKED_RUN_DONE_LIMIT + 1 }, (_, index) => `run-${index}`);
-    runner.finish(runIds);
-    await server.waitForMessage("run_done", runIds.length);
-
-    first.terminate();
-    await server.waitForSocket(2);
-    const hello = await server.waitForMessage("hello", 2);
-    expect(hello.activeRuns, "最老的 run-0 被丢掉，交给对账；其余照报").toEqual(runIds.slice(1));
-    expect(logs.some((line) => line.includes("丢掉最老的 run run-0"))).toBe(true);
-  });
-});
 
 describe("退避", () => {
   const options: BackoffOptions = { initialMs: 500, maxMs: 30_000, factor: 2 };

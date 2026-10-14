@@ -83,6 +83,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
+import { enqueueDownlink } from "../agent/envelope.js";
 import type { GroupTurns } from "../agent/group-turn.js";
 import { parseMentions } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
@@ -422,16 +423,18 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = await readJson(c.req.raw, LoginAccountRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     const { attempt } = body.value;
-    // 电脑刚好在判完在线之后断了，send 返回 false，同样按不在线回。
-    const sent =
-      agents.isOnline(account.computerId) &&
-      agents.send(account.computerId, {
+    if (!agents.canDeliver(account.computerId))
+      return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+    const queued = await db.transaction((tx) =>
+      enqueueDownlink(tx, account.computerId, {
         type: "browser_login",
         accountId: account.id,
         platform: platform.data,
         attempt,
-      });
-    if (!sent) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+      }),
+    );
+    if (!queued) return c.json({ error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" }, 409);
+    await agents.flushOutbox(account.computerId);
     return c.json(LoginAccountResponse.parse({ account, attempt }), 202);
   });
 

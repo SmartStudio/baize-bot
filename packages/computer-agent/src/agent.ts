@@ -2,16 +2,22 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { WebSocket } from "ws";
 import {
+  AGENT_PROTOCOL,
   AgentCloseCode,
   AgentStatusLine,
   type AgentToControl,
+  BareUplinkFrame,
   type ComputerId,
   ControlToAgent,
-  type RunId,
+  DownlinkFrame,
+  UplinkFrame,
+  UPLINK_DELIVERY,
+  UplinkAck,
 } from "@baize/shared";
 import { createRunner, publishDraft, type Runner, type RunnerConfig } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome, untilAborted } from "./chrome.js";
+import { DownlinkCursor, ReliableOutbox } from "./reliable-transport.js";
 
 export interface AgentRunnerConfig extends RunnerConfig {
   readonly browser: NonNullable<RunnerConfig["browser"]>;
@@ -38,17 +44,8 @@ export interface AgentOptions {
   readonly makeChrome?: AssistantChromeFactory;
   /** 一次 browser_login 从收到到回 login_state 的上限，排队和等 Chrome 起来都算在内。 */
   readonly loginTimeoutMs?: number;
-}
-
-/** 一条 run_done 重连补发这么多次都没等到确认，下一次 hello 就不再报它，交给控制面对账按断线收尾。 */
-export const RUN_DONE_REPLAY_LIMIT = 3;
-/** 待确认的 run_done 最多留这么多条，再多就丢最老的。控制面一直不确认时，表和 hello 都不能无限长。 */
-export const UNACKED_RUN_DONE_LIMIT = 64;
-
-interface PendingRunDone {
-  readonly message: Extract<AgentToControl, { type: "run_done" }>;
-  /** welcome 之后补发过几次。连接在时那次直接发送不算。 */
-  replays: number;
+  /** 测试用断线注入点：持久化完成后、可靠帧发送前调用。 */
+  readonly beforeReliableSend?: (frame: UplinkFrame) => void;
 }
 
 export interface AgentHandle {
@@ -82,60 +79,73 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let heartbeat: NodeJS.Timeout | null = null;
   let attempt = 0;
   let runner: Runner | null = null;
+  let conn: number | null = null;
+  let upSent = 0;
+  let outbox: ReliableOutbox | null = null;
+  let downlinkCursor: DownlinkCursor | null = null;
+  const reliableSends = new Set<Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
   let loginQueue: Promise<void> = Promise.resolve();
-  // 断线期间做完的登录，按账号只留最新一条，等下一次 welcome 补发。丢掉的话用户只能等超时再点一次。
-  const unsentLogins = new Map<string, Extract<AgentToControl, { type: "login_state" }>>();
-  // 控制面还没回 run_done_ack 的 run_done，按 runId 留第一条。和登录不同，这里连接在时发出去也留着：
-  // 连接看着开着、帧却没进控制面（停机中丢帧、握手前的帧不认、TCP 半开）只有控制面知道，等它确认才删。
-  // 留着的 run 报进 hello 的 activeRuns，对账就不会按断线收尾它，welcome 后补发的真结果才收得了尾。
-  // 控制面一直不确认（处理一直抛错、老版本不发确认）时，补发够次数或表满就放手，让对账按断线把 run 收掉。
-  const unackedRunDones = new Map<RunId, PendingRunDone>();
-
-  const send = (message: AgentToControl): void => {
+  const sendBare = (message: AgentToControl): void => {
     if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN) {
       log(`连接不在，丢弃 ${message.type}`);
       return;
     }
-    link.socket.send(JSON.stringify(message));
-  };
-
-  const sendLoginState = (message: Extract<AgentToControl, { type: "login_state" }>): void => {
-    if (stopping) return;
-    // 同一账号手里这条总比留着的新。重连后 welcome 前直接发出去的话，留着的旧结果不能在 welcome 时再补上去盖掉它。
-    unsentLogins.delete(message.accountId);
-    if (link.phase === "open" && link.socket.readyState === WebSocket.OPEN) {
-      send(message);
+    if (message.type === "hello") {
+      link.socket.send(JSON.stringify(message));
       return;
     }
-    unsentLogins.set(message.accountId, message);
-    log(`连接不在，${message.accountId} 的 login_state 留到重连后补发`);
+    if (conn === null) {
+      log(`welcome 之前不发送 ${message.type}`);
+      return;
+    }
+    const frame = BareUplinkFrame.parse({ conn, body: message });
+    link.socket.send(JSON.stringify(frame));
   };
 
-  // 运行器的上行都走这里，只有 run_done 要留底。
+  const sendStored = (frame: { readonly seq: number; readonly body: AgentToControl }): void => {
+    if (
+      link.phase !== "open" ||
+      link.socket.readyState !== WebSocket.OPEN ||
+      conn === null ||
+      outbox === null ||
+      frame.seq <= upSent
+    )
+      return;
+    const socket = link.socket;
+    const wireFrame = UplinkFrame.parse({
+      type: "uplink",
+      conn,
+      stream: outbox.stream,
+      seq: frame.seq,
+      body: frame.body,
+    });
+    options.beforeReliableSend?.(wireFrame);
+    if (link.phase !== "open" || link.socket !== socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify(wireFrame));
+    upSent = frame.seq;
+  };
+
   const report = (message: AgentToControl): void => {
-    if (message.type !== "run_done") {
-      send(message);
+    if (UPLINK_DELIVERY[message.type] === "bare") {
+      sendBare(message);
       return;
     }
-    if (unackedRunDones.has(message.runId)) {
-      log(`run ${message.runId} 的 run_done 已经留着，丢弃重复的这条`);
+    if (outbox === null) {
+      log(`可靠发件箱未就绪，暂存不了 ${message.type}`);
       return;
     }
-    unackedRunDones.set(message.runId, { message, replays: 0 });
-    if (unackedRunDones.size > UNACKED_RUN_DONE_LIMIT) {
-      const [oldest] = unackedRunDones.keys();
-      if (oldest !== undefined) {
-        unackedRunDones.delete(oldest);
-        log(`待确认的 run_done 超过 ${UNACKED_RUN_DONE_LIMIT} 条，丢掉最老的 run ${oldest}，交给控制面按断线收尾`);
-      }
-    }
-    if (link.phase === "open" && link.socket.readyState === WebSocket.OPEN) {
-      send(message);
-      return;
-    }
-    log(`连接不在，run ${message.runId} 的 run_done 留到重连后补发`);
+    let pending: Promise<void>;
+    pending = outbox
+      .append(message)
+      .then(sendStored)
+      .catch((error: unknown) => {
+        log(`可靠上行落盘失败：${String(error)}`);
+        void stop().catch((stopError: unknown) => log(`代理停机失败：${String(stopError)}`));
+      })
+      .finally(() => reliableSends.delete(pending));
+    reliableSends.add(pending);
   };
 
   const stopHeartbeat = (): void => {
@@ -147,6 +157,10 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const handle = async (raw: string, from: WebSocket): Promise<void> => {
     // socket.close() 之后 ws 仍会把已经到手的帧派发上来。停了还建 runner 的话就没人再停它。
     if (stopping || link.phase === "stopped") return;
+    if (link.phase !== "open" || link.socket !== from) {
+      log("收到已经换掉的连接报文，丢弃");
+      return;
+    }
     let json: unknown;
     try {
       json = JSON.parse(raw);
@@ -154,7 +168,54 @@ export function startAgent(options: AgentOptions): AgentHandle {
       log("收到非 JSON 报文，丢弃");
       return;
     }
+    const frame = json as { type?: unknown; generation?: unknown; seq?: unknown } | null;
+    if (frame?.type === "uplink_ack") {
+      const ack = UplinkAck.safeParse(json);
+      if (!ack.success || outbox === null) {
+        log(`收到无效 uplink_ack：${ack.success ? "发件箱未就绪" : ack.error.message}`);
+        return;
+      }
+      await outbox.acknowledge(ack.data.upTo);
+      for (const rejected of ack.data.rejected) {
+        if (rejected.code === "run_closed" && rejected.runId !== undefined) runner?.cancel(rejected.runId);
+        else log(`可靠上行 ${rejected.seq} 被拒收：${rejected.code}`);
+      }
+      return;
+    }
+    if (frame?.type === "downlink") {
+      const parsedDownlink = DownlinkFrame.safeParse(json);
+      if (!parsedDownlink.success || downlinkCursor === null || conn === null) {
+        log(`收到无效 downlink：${parsedDownlink.success ? "游标未就绪" : parsedDownlink.error.message}`);
+        return;
+      }
+      const downlink = parsedDownlink.data;
+      if (downlink.seq <= downlinkCursor.applied) {
+        sendBare({ type: "downlink_ack", upTo: downlinkCursor.applied });
+        return;
+      }
+      await downlinkCursor.persist(downlink.seq);
+      sendBare({ type: "downlink_ack", upTo: downlink.seq });
+      await applyMessage(downlink.body, from);
+      return;
+    }
+    const wrapped = json as { conn?: unknown; body?: unknown } | null;
+    if (wrapped && Number.isInteger(wrapped.conn) && wrapped.body !== undefined) {
+      if (conn === null || wrapped.conn !== conn) {
+        log("收到其他连接代际的 bare 报文，丢弃");
+        return;
+      }
+      json = wrapped.body;
+    }
+    await applyMessage(json, from);
+  };
+
+  const applyMessage = async (json: unknown, from: WebSocket): Promise<void> => {
+    if (stopping || link.phase === "stopped") return;
     const frame = json as { type?: unknown; generation?: unknown } | null;
+    if (conn === null && frame?.type !== "welcome") {
+      log("welcome 之前收到控制面报文，丢弃");
+      return;
+    }
     const generation =
       frame?.type === "config" && Number.isInteger(frame.generation) && (frame.generation as number) > 0
         ? (frame.generation as number)
@@ -178,7 +239,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       if (frame?.type === "config") {
         const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
         log(`config 不合这个电脑代理的版本，丢弃。校验不过的字段：${paths}`);
-        send({
+        report({
           type: "agent_error",
           code: "config_rejected",
           ...(generation === undefined ? {} : { generation }),
@@ -193,18 +254,18 @@ export function startAgent(options: AgentOptions): AgentHandle {
     switch (message.type) {
       // welcome 才说明控制面收下了 hello。只看 TCP 连上就清零退避，会被「连上就踢」的控制面打成密集重连。
       case "welcome":
+        if (conn !== null) return;
         attempt = 0;
+        await outbox?.acknowledge(message.upAcked);
+        if (stopping || link.phase !== "open" || link.socket !== from) return;
+        conn = message.conn;
+        upSent = message.upAcked;
         log(`控制面已接纳，owner ${message.ownerId}`);
         process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "online" }))}\n`);
-        for (const pending of unackedRunDones.values()) {
-          pending.replays += 1;
-          send(pending.message);
-        }
-        for (const pending of unsentLogins.values()) send(pending);
-        unsentLogins.clear();
-        return;
-      case "run_done_ack":
-        unackedRunDones.delete(message.runId);
+        for (const pending of outbox?.pending() ?? []) sendStored(pending);
+        stopHeartbeat();
+        heartbeat = setInterval(() => sendBare({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
+        heartbeat.unref();
         return;
       case "config": {
         const config: AgentRunnerConfig = {
@@ -239,13 +300,13 @@ export function startAgent(options: AgentOptions): AgentHandle {
         log(
           `收到第 ${message.generation} 代 config，${message.bots.length} 个 Bot，${message.tools.length} 个工具连接`,
         );
-        send({ type: "config_applied", generation: message.generation });
+        sendBare({ type: "config_applied", generation: message.generation });
         return;
       }
       case "prompt": {
         if (runner === null) {
           log(`还没收到 config，丢弃 run ${message.runId} 的 prompt`);
-          send({
+          report({
             type: "agent_error",
             code: "prompt_before_config",
             detail: `run ${message.runId} 的 prompt 比 config 先到`,
@@ -265,6 +326,9 @@ export function startAgent(options: AgentOptions): AgentHandle {
         runner.approve(message.runId, message.callId, message.outcome);
         return;
       }
+      case "cancel":
+        runner?.cancel(message.runId);
+        return;
       case "poker_result": {
         if (runner === null) {
           log(`还没收到 config，丢弃 run ${message.runId} 的出牌回执`);
@@ -282,7 +346,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
             return untilAborted(chrome.login(message.platform, deadline), deadline);
           })
           .then((state) => {
-            sendLoginState({
+            report({
               type: "login_state",
               accountId: message.accountId,
               state: state.login === "failed" ? { ...state, attempt: message.attempt } : state,
@@ -290,7 +354,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           })
           .catch((error: unknown) => {
             log(`登录 ${message.platform} 失败：${String(error)}`);
-            sendLoginState({
+            report({
               type: "login_state",
               accountId: message.accountId,
               state: { login: "failed", reason: "window_failed", attempt: message.attempt },
@@ -306,7 +370,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         return;
       case "publish_draft":
         void publishDraft(message, { dataDir, browser: chrome.kind === "local" ? browserConfig : null }).then(
-          send,
+          report,
           (error: unknown) => log(`发布草稿 ${message.draftId} 出错：${String(error)}`),
         );
         return;
@@ -330,24 +394,35 @@ export function startAgent(options: AgentOptions): AgentHandle {
 
     socket.on("open", () => {
       if (stopping) return;
+      conn = null;
       link = { phase: "open", socket, applied: 0 };
-      for (const [runId, pending] of unackedRunDones) {
-        if (pending.replays < RUN_DONE_REPLAY_LIMIT) continue;
-        unackedRunDones.delete(runId);
-        log(`run ${runId} 的 run_done 补发 ${pending.replays} 次都没等到确认，不再报它，交给控制面按断线收尾`);
-      }
-      const activeRuns = new Set([...(runner?.activeRuns() ?? []), ...unackedRunDones.keys()]);
-      send({
-        type: "hello",
-        computerId: options.computerId,
-        token: options.token,
-        version: options.version,
-        activeRuns: [...activeRuns],
-      });
-      log(`已发 hello，报告 ${activeRuns.size} 个仍在跑或待补发 run_done 的 run`);
       stopHeartbeat();
-      heartbeat = setInterval(() => send({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
-      heartbeat.unref();
+      void outbox
+        ?.flush()
+        .then(() => {
+          if (stopping || link.phase !== "open" || link.socket !== socket) return;
+          const pendingRuns = (outbox?.pending() ?? []).flatMap(({ body }) =>
+            "runId" in body && body.runId !== undefined ? [body.runId] : [],
+          );
+          const activeRuns = new Set([...(runner?.activeRuns() ?? []), ...pendingRuns]);
+          socket.send(
+            JSON.stringify({
+              type: "hello",
+              computerId: options.computerId,
+              token: options.token,
+              version: options.version,
+              protocol: AGENT_PROTOCOL,
+              uplinkStream: outbox?.stream,
+              downApplied: downlinkCursor?.applied,
+              activeRuns: [...activeRuns],
+            }),
+          );
+          log(`已发 hello，报告 ${activeRuns.size} 个仍在跑或待确认的 run`);
+        })
+        .catch((error: unknown) => {
+          log(`握手前落盘失败：${String(error)}`);
+          void stop().catch((stopError: unknown) => log(`代理停机失败：${String(stopError)}`));
+        });
     });
 
     socket.on("message", (data) => {
@@ -362,9 +437,19 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
 
     socket.on("close", (code) => {
+      if ((link.phase !== "open" && link.phase !== "connecting") || link.socket !== socket) return;
       stopHeartbeat();
       if (code === AgentCloseCode.displaced) {
         process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "displaced" }))}\n`);
+        void stop().catch((error: unknown) => log(`代理停机失败：${String(error)}`));
+        return;
+      }
+      if (code === AgentCloseCode.accountDeleted) {
+        void stop().catch((error: unknown) => log(`代理停机失败：${String(error)}`));
+        return;
+      }
+      if (code === AgentCloseCode.upgradeRequired) {
+        process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "upgrade_required" }))}\n`);
         void stop().catch((error: unknown) => log(`代理停机失败：${String(error)}`));
         return;
       }
@@ -372,7 +457,16 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
   }
 
-  connect();
+  void Promise.all([ReliableOutbox.open(dataDir), DownlinkCursor.open(dataDir)])
+    .then(([openedOutbox, openedCursor]) => {
+      outbox = openedOutbox;
+      downlinkCursor = openedCursor;
+      if (!stopping) connect();
+    })
+    .catch((error: unknown) => {
+      log(`可靠传输状态加载失败：${String(error)}`);
+      void stop();
+    });
 
   function stop(): Promise<void> {
     if (stopPromise !== null) return stopPromise;
@@ -404,6 +498,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
         if (result === "timed-out") log(`运行器停机超过 ${runnerStopTimeoutMs}ms，继续关闭连接`);
       }
       runner = null;
+      await outbox?.flush().catch((error: unknown) => log(`停机落盘失败：${String(error)}`));
+      await Promise.all(reliableSends);
       await chromeStopping;
 
       const current = link;

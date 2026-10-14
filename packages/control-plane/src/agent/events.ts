@@ -33,6 +33,8 @@ import { acceptHandoff, createHandoff } from "../repo/handoffs.js";
 import { findChiefBotId, findGroup, setChiefBotId } from "../repo/groups.js";
 import {
   appendBotText,
+  finalizeBotText,
+  upsertToolCall,
   appendMessage,
   appendSkillOffer,
   failRunningToolCalls,
@@ -90,6 +92,7 @@ export type AgentEventDeps = {
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly notifications: NoticePublisher;
+  readonly afterCommit?: (effect: (deps: AgentEventDeps) => Promise<void>) => void;
 };
 
 /** 电脑代理报上来的事件。每一条都写进 messages 表再推给 Web 客户端，群消息是事实来源。 */
@@ -101,6 +104,7 @@ export async function handleAgentEvent(
 ): Promise<void> {
   switch (message.type) {
     // 握手在 hub 里做完了，重复的 hello 不再认一次身份。
+    case "downlink_ack":
     case "hello":
       return;
     case "heartbeat":
@@ -112,14 +116,15 @@ export async function handleAgentEvent(
     case "bot_text":
       await onBotText(deps, conn, message);
       return;
+    case "bot_text_done":
+      await onBotTextDone(deps, conn, message);
+      return;
     case "bot_tool_call":
       await onToolCall(deps, conn, message);
       return;
     case "run_done":
       await onRunDone(deps, conn, message);
-      // 处理完才回。不认的、重复的也回，不然代理每次重连都要补发它；处理抛错就不回，留给下次补发。
-      // 处理完是指结束行、结账（费用卡和例行记账）、回合推进都做完了；补发撞上结束了没结账的行接着结账。
-      deps.agents.send(conn.computerId, { type: "run_done_ack", runId: message.runId });
+
       return;
     case "agent_error":
       await onAgentError(deps, conn, message);
@@ -305,6 +310,26 @@ type TextPrefix =
 const textPrefixes = new Map<string, TextPrefix>();
 const resultRuns = new Set<RunId>();
 
+export function eventMemoryRollback(body: AgentToControl): () => void {
+  if (!("runId" in body) || body.runId === undefined) return () => undefined;
+  const runId = body.runId;
+  const prefixes = new Map([...textPrefixes].filter(([, prefix]) => prefix.runId === runId));
+  const result = resultRuns.has(runId);
+  const booking = costBookings.get(runId);
+  const groupId = "groupId" in body ? body.groupId : undefined;
+  const held = new Map([...heldPasses].filter(([id, value]) => id === runId || value.groupId === groupId));
+  return () => {
+    for (const [id, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(id);
+    for (const [id, prefix] of prefixes) textPrefixes.set(id, prefix);
+    if (result) resultRuns.add(runId);
+    else resultRuns.delete(runId);
+    if (booking === undefined) costBookings.delete(runId);
+    else costBookings.set(runId, booking);
+    for (const [id, value] of held) if (!heldPasses.has(id)) heldPasses.set(id, value);
+    if (!held.has(runId)) heldPasses.delete(runId);
+  };
+}
+
 function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
   resultRuns.delete(runId);
@@ -426,6 +451,43 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   if (event.done) await deps.groupTurns.recordBotMessage(groupId, event.runId, appended.message, "text");
 }
 
+async function onBotTextDone(
+  deps: AgentEventDeps,
+  conn: AgentConnection,
+  event: Extract<AgentToControl, { type: "bot_text_done" }>,
+): Promise<void> {
+  const groupId = await resolveRun(deps, conn, event);
+  if (groupId === null || deps.groupTurns.isBlocked(event.runId)) return;
+  const passed = event.text.startsWith("(pass)") || event.text.startsWith("（pass）");
+  textPrefixes.set(event.messageId, { kind: passed ? "pass" : "visible", runId: event.runId });
+  if (passed) return;
+  const final = await finalizeBotText(
+    deps.db,
+    {
+      messageId: event.messageId,
+      groupId,
+      botId: event.botId,
+      visibleTo: await botTextVisibility(deps.db, event.runId),
+    },
+    event.text,
+  );
+  if (final.kind === "taken") return;
+  if (event.text.trim() !== "") resultRuns.add(event.runId);
+  if (final.created !== null) deps.push.push(conn.ownerId, { type: "message", message: final.created });
+  if (final.replace) deps.push.push(conn.ownerId, { type: "message", message: final.message });
+  deps.push.push(conn.ownerId, {
+    type: "message_delta",
+    messageId: event.messageId,
+    groupId,
+    delta: final.delta,
+    done: true,
+    revision: final.message.revision,
+    visibleTo: final.message.visibleTo,
+  });
+  await refreshHintForRun(deps, event.runId, final.message.id);
+  await deps.groupTurns.recordBotMessage(groupId, event.runId, final.message, "text");
+}
+
 async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: ToolCall): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
@@ -441,11 +503,7 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
   } as const;
 
   const key = `${event.runId}:${event.callId}`;
-  const known = conn.toolCallMessages.get(key);
-  // run 收尾时已经把还在跑的工具行改成 failed，晚到的这一帧不能再建一行或把它盖回去。
-  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
-    known === undefined ? appendMessage(tx, groupId, body) : replaceMessageBody(tx, known, groupId, body),
-  );
+  const message = await upsertToolCall(deps.db, groupId, event.runId, event.callId, body);
   if (message === null) return;
 
   // 同一个 id 推第二次，客户端按 id 覆盖那张卡。
@@ -455,10 +513,10 @@ async function onToolCall(deps: AgentEventDeps, conn: AgentConnection, event: To
 }
 
 /**
- * run_done 分两个事务。第一个结束 run 行（finishRun 的 WHERE ended_at IS NULL 让重复的什么都不做），
- * 第二个结账（chargeRun）。两个都提交后才推进回合、弹通知，确认帧在这之后回。
+ * 结束 run 和结账沿用各自的函数，在信封路径里共用外层事务；任一步失败，两步和游标一起回滚。
+ * 提交后才推进回合、弹通知，再回累计确认。
  * 费用卡怎么出（单落、并进汇总、先记着）看运行器此前的文字块和回合的内存状态，这两样只在第一次结账时读，
- * 读到的结论记在 costBookings 里，结账事务失败后补发沿用，不再碰回合状态第二次。
+ * 读到的结论记在 costBookings 里；信封事务失败时恢复内存标记，成功后保留结论供后续补结账使用。
  */
 async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: RunDone): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
@@ -468,6 +526,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
     (event.inputTokens / 1_000_000) * deps.priceInputPerM + (event.outputTokens / 1_000_000) * deps.priceOutputPerM;
   const finished = await deps.db.transaction(async (tx) => {
     await lockSettlement(tx, groupId, event.botId);
+    // 信封把结束与结账合成一个事务，第一次改 run 前就按同序锁齐可能合账的行。
+    await lockRuns(tx, [event.runId, ...heldRunsOfGroup(groupId)]);
     const usage = await finishRun(
       tx,
       event.runId,
@@ -496,8 +556,8 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
 
 /**
  * hello 时补结账：这台电脑名下结束了、没结账的 run，按 run_done 的路子一条条结掉。
- * 代理的补发只在重连 hello 之后发，有次数和容量上限，放手的那些账只剩库里 charged_at 为空记得；
- * 补发够得着的时刻这里都在，而且不受上限，所以故障排除后的下一次 hello（包括控制面重启后的重连）就把欠账补齐。
+ * 可靠补发只在重连 hello 之后发；旧版本或历史故障留下的欠账由 charged_at 为空记得，
+ * 故障排除后的下一次 hello（包括控制面重启后的重连）把这些欠账补齐。
  * 还在回合里先记着的 pass 不动，它等这一轮下一张费用卡；回合已经没了的，单落一张卡。
  * 费用卡沿用这个进程里结账失败时记下的结论，没有就单落，结果通知同 run_done 一样只在结账提交的这次弹。
  */
@@ -548,6 +608,14 @@ async function settleCharge(
   }
   if (charge?.kind === "merged" && charge.message !== null) {
     deps.push.push(ownerId, { type: "message", message: charge.message });
+    if (charge.message.body.kind === "cost")
+      deps.groupTurns.rememberCost(run.groupId, run.runId, {
+        messageId: charge.message.id,
+        runId: charge.message.body.runId ?? run.runId,
+        botId: charge.message.body.botId ?? run.botId,
+        steps: charge.message.body.steps,
+        amount: charge.message.body.amount,
+      });
   }
   // 例行状态推送只管实时视图，推送失败只记日志，不挡回合推进和后面的行。丢了这条，已加载的例行列表停在旧状态，
   // WebSocket 重连不补拉它，要整页刷新或重新进入时的 HTTP 读取才拿到库里的状态。

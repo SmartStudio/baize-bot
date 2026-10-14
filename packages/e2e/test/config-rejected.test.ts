@@ -11,7 +11,6 @@ import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream } from "../src/upstream.js";
 
 const MISMATCH = "电脑代理和控制面版本对不上，配置被拒";
-const SENTINEL = "哨兵：控制面已经处理完 config_applied";
 
 type OldControlPlane = {
   readonly url: string;
@@ -19,8 +18,8 @@ type OldControlPlane = {
   readonly upFrames: { readonly type: string; readonly [key: string]: unknown }[];
   /** 控制面往代理发的每一帧的 type。 */
   readonly downTypes: string[];
-  /** 控制面升级了：不再删字段，把最近那条 config 原样补发一遍，等代理回 config_applied，再塞一条哨兵给控制面。 */
-  upgrade(sentinelGroupId: string): Promise<void>;
+  /** 控制面升级了：不再删字段，把最近那条 config 原样补发一遍，等代理回 config_applied。 */
+  upgrade(): Promise<void>;
   close(): Promise<void>;
 };
 
@@ -52,16 +51,23 @@ async function oldControlPlane(target: string): Promise<OldControlPlane> {
     });
     agent.on("message", (raw) => {
       const text = raw.toString();
-      upFrames.push(JSON.parse(text) as OldControlPlane["upFrames"][number]);
+      const parsed = JSON.parse(text) as { readonly body?: unknown };
+      const body = parsed.body ?? parsed;
+      upFrames.push(body as OldControlPlane["upFrames"][number]);
       if (control.readyState === WebSocket.OPEN) control.send(text);
       else early.push(text);
     });
     control.on("message", (raw) => {
-      const frame = JSON.parse(raw.toString()) as { type: string; accountsProxy?: unknown };
-      downTypes.push(frame.type);
-      if (frame.type === "config") {
+      const frame = JSON.parse(raw.toString()) as {
+        type: string;
+        body?: { type: string; accountsProxy?: unknown };
+        accountsProxy?: unknown;
+      };
+      const body = frame.body ?? frame;
+      downTypes.push(body.type);
+      if (body.type === "config") {
         lastConfig = raw.toString();
-        if (strip) delete frame.accountsProxy;
+        if (strip) delete body.accountsProxy;
       }
       agent.send(JSON.stringify(frame));
     });
@@ -73,7 +79,7 @@ async function oldControlPlane(target: string): Promise<OldControlPlane> {
     url: `ws://127.0.0.1:${port}/agent`,
     upFrames,
     downTypes,
-    upgrade: async (sentinelGroupId) => {
+    upgrade: async () => {
       strip = false;
       if (agentSide === null || controlSide === null || lastConfig === null) throw new Error("代理还没连上来");
       const applied = upFrames.filter((frame) => frame.type === "config_applied").length;
@@ -81,9 +87,6 @@ async function oldControlPlane(target: string): Promise<OldControlPlane> {
       await waitUntil(
         () => upFrames.filter((frame) => frame.type === "config_applied").length > applied,
         "代理收下补发的 config",
-      );
-      controlSide.send(
-        JSON.stringify({ type: "agent_error", code: "unsupported", detail: SENTINEL, groupId: sentinelGroupId }),
       );
     },
     close: () =>
@@ -170,8 +173,7 @@ describe("端到端：新电脑代理连旧控制面", () => {
       const [open] = await stack.sql<{ n: string }[]>`SELECT count(*) AS n FROM runs WHERE ended_at IS NULL`;
       expect(Number(open?.n), "没留下 running 的 run").toBe(0);
 
-      await proxy.upgrade(first.groupId);
-      await nextPushWhere(stack, (push) => systemText(push)?.includes(SENTINEL) === true);
+      await proxy.upgrade();
       await stack.post(`/api/groups/${first.groupId}/messages`, { text: "升级之后的活" });
       await nextPushWhere(stack, (push) => push.type === "message" && push.message.body.kind === "cost");
       expect(proxy.downTypes, "收下合格 config 之后照常派活").toContain("prompt");

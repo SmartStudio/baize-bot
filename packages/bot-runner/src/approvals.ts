@@ -1,6 +1,7 @@
 import type { AgentToControl, ApprovalOutcome, BotId, GrantTarget, GroupId, RunId, ToolView } from "@baize/shared";
 
 export type ApprovalAction = Extract<AgentToControl, { type: "approval_request" }>["action"];
+export type LocalApprovalOutcome = ApprovalOutcome | "expired";
 type ApprovalAbandonReason = Exclude<Extract<AgentToControl, { type: "approval_abandoned" }>["reason"], "disconnected">;
 
 export interface ApprovalRequest {
@@ -15,8 +16,9 @@ export interface ApprovalRequest {
 }
 
 export interface ApprovalGate {
-  ask(request: ApprovalRequest, signal: AbortSignal | undefined): Promise<ApprovalOutcome>;
+  ask(request: ApprovalRequest, signal: AbortSignal | undefined): Promise<LocalApprovalOutcome>;
   settle(runId: RunId, callId: string, outcome: ApprovalOutcome): boolean;
+  expire(runId: RunId): readonly string[];
   block(callId: string): void;
   consumeBlocked(callId: string): boolean;
   abandon(reason: ApprovalAbandonReason, botId?: BotId): void;
@@ -26,7 +28,7 @@ export interface ApprovalGate {
 interface WaitingApproval {
   readonly runId: RunId;
   readonly botId: BotId;
-  readonly settle: (outcome: ApprovalOutcome) => void;
+  readonly settle: (outcome: LocalApprovalOutcome) => void;
   readonly signal: AbortSignal | undefined;
   readonly onAbort: () => void;
 }
@@ -35,7 +37,7 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
   const waiting = new Map<string, WaitingApproval>();
   const blockedCallIds = new Set<string>();
 
-  const settleCall = (callId: string, outcome: ApprovalOutcome): boolean => {
+  const settleCall = (callId: string, outcome: LocalApprovalOutcome): boolean => {
     const entry = waiting.get(callId);
     if (entry === undefined) return false;
     waiting.delete(callId);
@@ -51,7 +53,7 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
         blockedCallIds.add(request.callId);
         return Promise.resolve("rejected");
       }
-      return new Promise<ApprovalOutcome>((resolve) => {
+      return new Promise<LocalApprovalOutcome>((resolve) => {
         const onAbort = (): void => {
           settleCall(request.callId, "rejected");
         };
@@ -79,6 +81,11 @@ export function createApprovalGate(send: (message: AgentToControl) => void): App
     settle: (runId, callId, outcome) => {
       if (waiting.get(callId)?.runId !== runId) return false;
       return settleCall(callId, outcome);
+    },
+    expire: (runId) => {
+      const callIds = [...waiting].flatMap(([callId, entry]) => (entry.runId === runId ? [callId] : []));
+      for (const callId of callIds) settleCall(callId, "expired");
+      return callIds;
     },
     block: (callId) => {
       blockedCallIds.add(callId);
