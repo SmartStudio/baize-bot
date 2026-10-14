@@ -156,7 +156,7 @@ baize.example.com {
 
 ## 迁移
 
-**机制。** 每次 `docker compose up -d`，一次性服务 `migrate` 先把没跑过的迁移全跑完，控制面才起（`docker-compose.yml:21-30`、`:38-40`）。所有待跑的迁移在一个事务里执行，并用咨询锁挡住并发（`packages/control-plane/src/db/migrate.ts:18-46`），中途失败整批回滚。已跑过的记在 `_migrations` 表里。迁移文件现在到 `0023`。
+**机制。** 每次 `docker compose up -d`，一次性服务 `migrate` 先把没跑过的迁移全跑完，控制面才起（`docker-compose.yml:21-30`、`:38-40`）。所有待跑的迁移在一个事务里执行，并用咨询锁挡住并发（`packages/control-plane/src/db/migrate.ts:18-46`），中途失败整批回滚。已跑过的记在 `_migrations` 表里。迁移文件现在到 `0038`。
 
 **会删列的迁移。** 这几条跑完数据就回不来，旧库升级前必须先备份：
 
@@ -188,10 +188,15 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 
 ## 升级顺序
 
-握手不比对版本。电脑代理在 `hello` 里带一个写死的 `"0.1.0"`（`packages/computer-agent/src/main.ts:5`、`:55`，字段定义在 `packages/shared/src/protocol.ts:71`），控制面 `src/agent/` 下没有任何代码读它，旧代理照样被接纳。
+控制面挡旧代理有两道关。`hello` 里的 `version`（写死的 `"0.1.0"`，`packages/computer-agent/src/main.ts:5`）没有代码读，起作用的是另外两样：
+
+- **协议号。** `hello` 带 `protocol`，不带按 1 算（`packages/shared/src/protocol.ts:96`）。低于 `MIN_AGENT_PROTOCOL`（现在是 3，`protocol.ts:555`）的连接，控制面直接用 4003 关掉（`packages/control-plane/src/agent/hub.ts:242-243`）。代理在 stdout 写一行 `{"type":"upgrade_required"}` 后停机，桌面端弹窗请用户更新白泽（`packages/desktop/src/main.ts:287-290`、`:573-577`）。
+- **config 校验。** 协议号够、但 config 的形状这个代理认不出来时，代理回一条 `config_rejected`（`packages/computer-agent/src/agent.ts:304-316`）。控制面把这台电脑记成拒收，不再往它派活。群里那句写「电脑上的白泽版本和控制面对不上」（`packages/control-plane/src/agent/computer-selection.ts:23`），同时给用户推一条卡住通知（`packages/control-plane/src/agent/events.ts:820-826`）。代理回了新一代的 `config_applied` 才恢复派活。
+
+所以升级顺序是：
 
 - 远程电脑和控制面出自同一次构建，`docker compose build && docker compose up -d` 让两者一起升。
-- 用户电脑上的桌面端不会跟着升。控制面先升、旧代理还在线时，报文形状对不上的会被 schema 丢掉。todo 第 516 行记了一例：旧形状的 `failed` 没有 `attempt`，被丢弃后要等 150 秒超时才算失败（推断，没实测）。现在没有机制拒绝旧代理，升级控制面时要同时通知用户更新桌面端。
+- 用户电脑上的桌面端不会跟着升。改了报文形状却没抬 `MIN_AGENT_PROTOCOL` 的版本，旧代理还能连上，但会卡在 config 拒收，用户看到的是「派不出去」而不是升级弹窗。改报文形状的版本要同时抬 `AGENT_PROTOCOL` 和 `MIN_AGENT_PROTOCOL`（`protocol.ts:554-555`），升级控制面前先发桌面端新版。
 
 ## 给别人开账号
 

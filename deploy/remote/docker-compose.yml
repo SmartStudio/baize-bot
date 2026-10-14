@@ -78,6 +78,8 @@ services:
       context: ../..
       dockerfile: deploy/remote/Dockerfile
       target: remote-computer
+      args:
+        APT_MIRROR: ${APT_MIRROR:-}
     image: baize-remote-computer:remote
     depends_on:
       - control-plane

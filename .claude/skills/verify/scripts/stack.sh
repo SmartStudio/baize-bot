@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 RUN="$ROOT/.audit/verify-run"
 ENV_FILE="$ROOT/.env"
 SELF="$ROOT/.claude/skills/verify/scripts/stack.sh"
+# 电脑代理收到 welcome 后写在 stdout 的状态行，格式是 shared 里的 AgentStatusLine，桌面端也靠它。日志措辞不是契约，别拿来判就绪。
+AGENT_ONLINE_LINE='{"type":"online"}'
 
 usage() {
   cat <<'EOF'
@@ -245,12 +247,19 @@ start_agent() {
   echo $! >"$RUN/entry2/computer-agent.pgid"
   set +m
   echo "起 computer-agent，进程组 $(cat "$RUN/entry2/computer-agent.pgid")，日志 $log"
-  until grep -qE "收到(第 [0-9]+ 代 )?config" "$RUN/entry2/computer-agent.log" 2>/dev/null; do
+  until grep -qFx "$AGENT_ONLINE_LINE" "$log" 2>/dev/null; do
     tries=$((tries + 1))
-    [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没收到 config："; tail -20 "$RUN/entry2/computer-agent.log"; exit 1; }
+    [[ $tries -le 60 ]] || { echo "电脑代理 30 秒没等到控制面接纳："; tail -20 "$log"; exit 1; }
     sleep 0.5
   done
-  grep -E "收到(第 [0-9]+ 代 )?config" "$RUN/entry2/computer-agent.log" | tail -1
+  echo "电脑代理已被控制面接纳（stdout 状态行 $AGENT_ONLINE_LINE）"
+}
+
+# 库里这台电脑的状态和距上次心跳的秒数，只读。电脑号不是 UUID 或库里没有这行就什么都不输出。
+computer_row() {
+  [[ "$1" =~ ^[0-9a-f-]{36}$ ]] || return 0
+  docker exec baize-postgres psql -U baize -d "$(db_name)" -Atc \
+    "select status || ' ' || coalesce(extract(epoch from now() - last_seen_at)::int::text, '-') from computers where id = '$1'" 2>/dev/null || true
 }
 
 entry2() {
@@ -292,7 +301,15 @@ entry2() {
       check_owned entry2 web "$web" || ok=1
       if [[ -f "$RUN/entry2/computer-agent.pgid" ]]; then
         check_owned entry2 computer-agent "" || ok=1
-        grep -E "控制面已接纳|收到(第 [0-9]+ 代 )?config|重连" "$RUN/entry2/computer-agent.log" | tail -2 || true
+        local id row
+        id="${COMPUTER_ID:-$(env_get COMPUTER_ID)}"
+        row="$(computer_row "$id")"
+        if [[ "${row%% *}" == "online" ]]; then
+          echo "✓ 库里电脑 $id 在线，距上次心跳 ${row#* } 秒"
+        else
+          echo "✗ 库里电脑 ${id:-（COMPUTER_ID 未设）} 状态：${row:-查不到}"
+          ok=1
+        fi
       fi
       echo "控制面 /api/bots → $(http_code "http://127.0.0.1:$cp/api/bots")，经 Web 代理 → $(http_code "http://127.0.0.1:$web/api/bots")（都要 401）"
       return $ok
