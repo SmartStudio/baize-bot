@@ -530,15 +530,20 @@ export class WorkMirror {
   }
 
   #completeTools(): void {
-    const missing = new Map<string, string>();
+    // 只补尾部那一步。更早的悬空调用 Pi 发请求时会在原位补上，中断的一步 Pi 整条跳过；
+    // 补在末尾的结果前面没有对应的调用，上游会拒绝整个请求。
+    let missing = new Map<string, string>();
     for (const entry of this.manager.getBranch()) {
       if (entry.type !== "message") continue;
       const message = entry.message;
-      if (message.role === "assistant")
-        for (const block of message.content) {
-          if (block.type === "toolCall") missing.set(block.id, block.name);
-        }
       if (message.role === "toolResult") missing.delete(message.toolCallId);
+      else if (message.role === "assistant")
+        missing = new Map(
+          message.stopReason === "error" || message.stopReason === "aborted"
+            ? []
+            : message.content.flatMap((block) => (block.type === "toolCall" ? [[block.id, block.name] as const] : [])),
+        );
+      else if (message.role !== "system") missing.clear();
     }
     for (const [toolCallId, toolName] of missing)
       this.manager.appendMessage({
