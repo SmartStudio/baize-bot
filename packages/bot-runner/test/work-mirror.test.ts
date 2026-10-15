@@ -82,6 +82,19 @@ function appendRawMessage(manager: SessionManager, message: Record<string, unkno
   manager.appendMessage(message as Parameters<SessionManager["appendMessage"]>[0]);
 }
 
+function assistant(content: Array<Record<string, unknown>>, stopReason: string): Record<string, unknown> {
+  return {
+    role: "assistant",
+    content,
+    api: "openai-completions",
+    provider: "test",
+    model: "test-model",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+    stopReason,
+    timestamp: 1,
+  };
+}
+
 async function snapshot(lines: readonly string[]): Promise<HubLaneSnapshot> {
   return {
     entries: lines.map((line, seq) => ({ seq, line })),
@@ -328,6 +341,48 @@ describe("WorkMirror", () => {
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]?.cause).toBe("settled");
     expect(h.sent[0]?.lines.join("\n")).toContain("结果未知，上一台电脑在这一步断开了");
+  });
+
+  it("只补服务器尾部那一步的悬空 toolCall，更早被新消息作废的调用不在末尾补结果", async () => {
+    const source = SessionManager.inMemory("/tmp/work-mirror-source");
+    appendRawMessage(
+      source,
+      assistant(
+        [
+          { type: "toolCall", id: "call-done", name: "bash", arguments: {} },
+          { type: "toolCall", id: "call-dropped", name: "bash", arguments: {} },
+        ],
+        "toolUse",
+      ),
+    );
+    appendRawMessage(source, {
+      role: "toolResult",
+      toolCallId: "call-done",
+      toolName: "bash",
+      content: [{ type: "text", text: "用户发了新消息，这一步作废了。" }],
+      isError: true,
+      timestamp: 2,
+    });
+    appendRawMessage(source, assistant([], "aborted"));
+    appendUser(source, "换个问题");
+    appendRawMessage(source, assistant([{ type: "text", text: "好的" }], "stop"));
+    appendUser(source, "再换一个");
+    appendRawMessage(
+      source,
+      assistant([{ type: "toolCall", id: "call-partial", name: "bash", arguments: {} }], "aborted"),
+    );
+    const lines = source.getEntries().map((entry) => JSON.stringify(entry));
+    stubHub(await snapshot(lines));
+    const h = setup(async () => ({ kind: "ok" }));
+
+    const manager = await h.mirror.prepare(
+      3,
+      { seq: lines.length, head: (await snapshot(lines)).head },
+      RunId.parse("run-rebuild"),
+    );
+
+    expect(manager.getEntries()).toHaveLength(lines.length);
+    expect(h.sent.flatMap((frame) => frame.lines).join("\n")).not.toContain("结果未知");
   });
 
   it("服务器记录无法打开文件时降级到内存恢复", async () => {
