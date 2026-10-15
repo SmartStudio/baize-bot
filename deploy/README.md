@@ -169,11 +169,29 @@ baize.example.com {
 
 任务书只点了 0009 和 0011，0010 和 0021 也删列，一并列出。
 
+**会长时间锁表的迁移。** `0036` 和 `0037` 各把 `work_entries` 里 `stream = 'chat' AND pi_type = 'message'` 的行整批 UPDATE 一遍，回填新列 `entry_at`（`0036_p3_recall_entry_time.sql:29`、`0037_p3_recall_node_entry_time.sql:37`）。`0036` 第 1 行的 `ALTER TABLE` 拿 ACCESS EXCLUSIVE 锁，整批事务提交之前，控制面对这张表的读写全部排队，Bot 的工作记录写不进去。时间几乎全花在 `0035` 建的 trigram 索引 `work_entries_chat_search_idx` 上。每条回填的行都要重新写进这个索引，回填函数本身不到一秒。
+
+本机实测，机器是 Apple M5 Pro，Postgres 16 跑在 OrbStack 里、默认配置，合成数据按本地库的行型比例和行长造：
+
+| 全表行数 | 要回填的行数 | 整批耗时，也是读写被挡的时长 | 表大小 |
+| --- | --- | --- | --- |
+| 10 万 | 3.1 万 | 104 到 118 秒，跑了 3 次 | 464 MB 涨到约 700 MB |
+| 100 万 | 31 万 | 73 分钟，跑了 1 次 | 5.15 GB 涨到 6.46 GB |
+
+每行成本随表变大而上升，两档之间不要按比例内插。生产机的磁盘、`shared_buffers`、`max_wal_size` 和本机不同，数也会不同。
+
+`work_entries` 是 `0032` 新建的空表，不从历史消息回填，所以先看库停在哪条。
+
+- 库还没跑到 `0032` 时，这张表和这批迁移一起建出来，`0036`、`0037` 一行都不更新，按下面的步骤直接升级。
+- 库已经跑过 `0032` 时，先数要回填的行，也就是下面步骤里的第二条命令。几千行在一分钟以内，这是按上表每行约 3.6 毫秒推算的。几万行就挑没人用的时段升级，按上表预留时间。磁盘要留出这张表当前大小的一半以上，两遍 UPDATE 留下的死元组要等 autovacuum 回收。
+- 数到十万行以上先别升级，找维护者。本机实测过在同一个事务里先删这个索引、跑完迁移再按 `0035` 的定义重建，3.1 万行时整批从 112 秒降到 38 秒，但这个做法还没写进迁移。
+
 **升级步骤**（未在真机验证）。备份要在 `up -d` 之前做，因为 `up` 会自动迁移：
 
 ```
 cd deploy/remote
 docker compose exec -T postgres psql -U baize -d baize -c 'SELECT name FROM _migrations ORDER BY name'   # 记下当前到哪条
+docker compose exec -T postgres psql -U baize -d baize -c "SELECT count(*) FROM work_entries WHERE stream = 'chat' AND pi_type = 'message'"   # 跑过 0032 才有这张表，见上一段
 docker compose exec -T postgres pg_dump -U baize -d baize -Fc > ~/baize-$(date +%Y%m%d-%H%M).dump
 ls -l ~/baize-*.dump                                                                                    # 确认不是 0 字节
 docker compose build
