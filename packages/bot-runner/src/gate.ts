@@ -14,6 +14,13 @@ import {
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
+import {
+  type ContainedContext,
+  type ContainmentLevel,
+  provablyContained,
+  SYSTEM_PACKAGE_MANAGERS,
+  SYSTEM_PACKAGE_REASON,
+} from "./contained.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { TAKEOVER_TOOL } from "./takeover.js";
 import {
@@ -47,6 +54,8 @@ export type ToolSource =
 
 export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
+  /** 沙箱是否兜得住整条 bash。必填：漏传等于默认放宽，Mac 上一条都不许放宽。 */
+  readonly containment: { readonly level: ContainmentLevel };
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   /**
@@ -342,6 +351,8 @@ interface ParsedShell {
 }
 
 const parseShell = (command: string): ParsedShell | null => {
+  // shell-quote 不认反引号，`rm x` 会被拆成普通的词，命令替换就藏在了参数里。
+  if (command.includes("`")) return null;
   const tokens = shellTokens(command);
   if (tokens === null) return null;
   const commands: string[][] = [];
@@ -479,9 +490,11 @@ const hasUnknownMutationOption = (name: string, words: readonly string[]): boole
   return words.some((word) => word.startsWith("-") && !known.has(word));
 };
 
+const PREFIX_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
+
 const classifyCommand = (words: readonly string[], call: GateContext): readonly ClassifiedAction[] => {
   let nameIndex = 0;
-  while (nameIndex < words.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(words[nameIndex] ?? "")) nameIndex += 1;
+  while (nameIndex < words.length && PREFIX_ASSIGNMENT.test(words[nameIndex] ?? "")) nameIndex += 1;
   const rawName = words[nameIndex];
   if (rawName === undefined) return [plainAction("shell")];
   const name = commandName(rawName);
@@ -923,10 +936,42 @@ function decideDraft(input: Record<string, unknown>, accounts: readonly AccountC
   };
 }
 
+/** 云电脑的沙箱里没有 root，问了用户也只会换来一次失败，直接拒并指路。 */
+function systemPackageDenial(call: GateCall): GateDecision | null {
+  if (call.toolName !== "bash" || call.containment.level === "none") return null;
+  const command = call.input.command;
+  if (typeof command !== "string") return null;
+  const parsed = parseShell(command);
+  if (parsed === null) return null;
+  const hit = parsed.commands.some((words) => {
+    const name = words.find((word) => !PREFIX_ASSIGNMENT.test(word));
+    return name !== undefined && SYSTEM_PACKAGE_MANAGERS.has(commandName(name));
+  });
+  return hit
+    ? { verdict: "deny", action: "install", target: null, reason: SYSTEM_PACKAGE_REASON, access: NO_ACCESS }
+    : null;
+}
+
+/**
+ * 只把 ask 改成 allow，deny 和 allow 原样返回。批了会多拿网络或写权限的不放：那正是沙箱要靠审批才开的口子。
+ * 放行后不开任何口子，命令照原来的沙箱跑。
+ */
+export function relaxIfContained(call: GateCall, decision: GateDecision, ctx: ContainedContext): GateDecision {
+  if (decision.verdict !== "ask" || call.toolName !== "bash" || call.containment.level === "none") return decision;
+  if (decision.access.network || decision.access.writePaths.length > 0) return decision;
+  const command = call.input.command;
+  if (typeof command !== "string" || !provablyContained(command, ctx).contained) return decision;
+  return { ...decision, verdict: "allow", reason: null, access: NO_ACCESS };
+}
+
 /** Pi 的 tool_call 事件不接住处理器抛的错，所以路径解不出来在这里变成拒绝，不往外抛。 */
 export function decide(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
   try {
-    return decideResolved(call, grants, accounts);
+    return relaxIfContained(call, decideResolved(call, grants, accounts), {
+      workDir: call.workDir,
+      sharedDir: call.zones.sharedDir,
+      forbidden: [...call.zones.hidden, ...call.zones.readOnly],
+    });
   } catch (error) {
     if (!(error instanceof PathError)) throw error;
     return {
@@ -945,6 +990,8 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
   const nameDenial = readOnly ? readOnlyNameDenial(call) : null;
   if (nameDenial !== null) return readOnlyDecision(nameDenial);
   if (DRAFT_TOOLS.has(call.toolName)) return decideDraft(call.input, accounts);
+  const systemPackage = systemPackageDenial(call);
+  if (systemPackage !== null) return systemPackage;
   const own = classifyOwnTool(call);
   if (readOnly && own === null) {
     const denial =

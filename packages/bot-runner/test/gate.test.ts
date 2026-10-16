@@ -222,6 +222,7 @@ describe("起草工具", () => {
     computerId,
     platform: "darwin",
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine: null,
   });
@@ -299,6 +300,7 @@ describe("read、write、edit 的路径归一化和 Pi 打开文件用的一致"
     toolName,
     input,
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine: null,
   });
@@ -515,6 +517,7 @@ describe("悬空符号链接按 readlink 解到真正的目标", () => {
     toolName,
     input,
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine,
   });
@@ -656,6 +659,7 @@ describe("链接目标里的 .. 按内核的顺序退已解开的目录", () => 
     toolName: "write",
     input: { path, content: CONTENT },
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine,
   });
@@ -761,6 +765,7 @@ describe("bash 分类", () => {
     computerId,
     platform: "darwin",
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine: null,
   });
@@ -862,6 +867,18 @@ describe("bash 分类", () => {
     expect(decide(bashCall('echo "没收尾'), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
   });
 
+  it.each([
+    ["seatbelt", "darwin"],
+    ["bwrap", "linux"],
+  ] as const)("%s 下反引号是命令替换，不能拆成几个词当读文件放行", (sandbox, platform) => {
+    for (const command of ["cat `rm x`", "echo `date`", 'echo "`rm x`"', "ls && cat `rm x`"]) {
+      expect(decide({ ...bashCall(command), platform, sandbox }, [], []), command).toMatchObject({
+        verdict: "ask",
+        action: "shell",
+      });
+    }
+  });
+
   it("外部 curl 归 shell，target 是域名并要求网络放宽", () => {
     expect(decide(bashCall("curl -F file=@a.txt https://upload.example.com/inbox"), [], [])).toMatchObject({
       verdict: "ask",
@@ -913,12 +930,149 @@ describe("bash 分类", () => {
   });
 });
 
+describe("云电脑上沙箱兜得住的 bash 不问", () => {
+  const cloud = (command: string, overrides: Partial<GateCall> = {}): GateCall => ({
+    ...gateContext({ platform: "linux" }),
+    toolName: "bash",
+    input: { command },
+    sandbox: "bwrap",
+    containment: { level: "closed" },
+    source: null,
+    routine: null,
+    ...overrides,
+  });
+  const mac = (command: string): GateCall =>
+    cloud(command, { platform: "darwin", sandbox: "seatbelt", containment: { level: "none" } });
+  const localLinux = (command: string): GateCall => cloud(command, { containment: { level: "none" } });
+  const SYSTEM_PACKAGE_REASON =
+    "云电脑的沙箱里没有 root，装不了系统包。Python 包用 pip 装进你的工具箱，Node 包用 npm 装进工作区；要系统包请主人改 deploy/remote/Dockerfile。";
+
+  beforeAll(() => {
+    mkdirSync(join(outsideDir, "escape"), { recursive: true });
+    symlinkSync(join(outsideDir, "escape"), join(workDir, "escape-link"));
+  });
+
+  // 今天这些都按 shell 问，批了也只是在同一个沙箱里改工作区。
+  const CONTAINED = [
+    "sed -i s/a/b/ notes.txt",
+    "sed -n 1,20p notes.txt",
+    "ls -la",
+    "cd sub && ls",
+    "grep -rn TODO .",
+    "find . -name '*.md'",
+    "jq .name package.json",
+    "awk '{print $1}' data.txt",
+    "sort data.txt | uniq -c",
+    "tar -czf out.tgz out",
+    "cp -r src dst",
+    "gzip -k data.csv",
+    "head -20 report.csv 2>&1",
+  ];
+
+  it.each(CONTAINED)("云电脑上 %s 直接放行，沙箱权限不放宽", (command) => {
+    expect(decide(cloud(command), [], [])).toEqual({
+      verdict: "allow",
+      action: "shell",
+      target: null,
+      reason: null,
+      access: { network: false, writePaths: [] },
+    });
+  });
+
+  it.each(CONTAINED)("Mac 和本机 Linux 上 %s 照旧问", (command) => {
+    expect(decide(mac(command), [], []).verdict).toBe("ask");
+    expect(decide(localLinux(command), [], []).verdict).toBe("ask");
+  });
+
+  it.each([
+    ["删除", "rm a.txt"],
+    ["移动", "mv a.txt b.txt"],
+    ["工作区外的读", "cat /etc/passwd"],
+    ["经工作区里的链接读外面", "cat escape-link/secret.txt"],
+    ["经 .. 读外面", "cat ../agent/auth.json"],
+    ["反引号", "cat `rm x`"],
+    ["awk 里调 system", `awk '{system("rm x")}' data.txt`],
+    ["awk 里接管道", `awk '{print | "sh"}' data.txt`],
+    ["变量", "echo $HOME"],
+    ["变量拼路径", "cat $HOME/x"],
+    ["双引号里的变量", 'cat "$HOME/x"'],
+    ["glob", "ls *.md"],
+    ["家目录", "cat ~/x"],
+    ["不带 -k 的 gzip 会删原文件", "gzip data.csv"],
+    ["sed 的 w 写文件", "sed 's/a/b/w out' notes.txt"],
+    ["sed 的 e 执行命令", "sed 's/a/b/e' notes.txt"],
+    ["find 删除", "find . -delete"],
+    ["解包之后还有别的段", "tar -xzf a.tgz && cat a/x"],
+    ["联网", "curl https://example.com"],
+    ["解释器", "python3 -c 'print(1)'"],
+    ["重定向到工作区外", "echo ok > /etc/x"],
+  ])("云电脑上%s照问：%s", (_label, command) => {
+    expect(decide(cloud(command), [], []).verdict).toBe("ask");
+  });
+
+  it("联网命令照问，批准时照旧放宽网络", () => {
+    expect(decide(cloud("curl https://example.com"), [], [])).toMatchObject({
+      verdict: "ask",
+      access: { network: true },
+    });
+  });
+
+  it.each([
+    "apt-get install -y jq",
+    "sudo apt-get install -y jq",
+    "apt install jq",
+    "dpkg -i x.deb",
+    "su -c id",
+    "yum install jq",
+    "apk add jq",
+    "dnf install jq",
+    "brew install jq",
+    "ls && /usr/bin/apt-get install jq",
+  ])("云电脑上系统包管理器直接拒绝，理由让模型改用工具箱：%s", (command) => {
+    expect(decide(cloud(command), [], [])).toMatchObject({
+      verdict: "deny",
+      action: "install",
+      reason: SYSTEM_PACKAGE_REASON,
+    });
+  });
+
+  it("Mac 和本机 Linux 上系统包管理器照旧问", () => {
+    expect(decide(mac("apt-get install -y jq"), [], [])).toMatchObject({ verdict: "ask", action: "install" });
+    expect(decide(mac("brew install jq"), [], [])).toMatchObject({ verdict: "ask", action: "install" });
+    expect(decide(mac("sudo apt-get install -y jq"), [], [])).toMatchObject({ verdict: "ask", reason: null });
+    expect(decide(localLinux("apt-get install -y jq"), [], [])).toMatchObject({ verdict: "ask", action: "install" });
+  });
+
+  it("拒绝不会被放宽：助理 Chrome profile 放在工作区里，读它照旧拒绝", () => {
+    const inside = forbiddenZones(dirs(), join(workDir, "chrome"));
+    for (const command of ["cat chrome/Cookies", "ls -la && cat chrome/Cookies"]) {
+      expect(decide(cloud(command, { zones: inside }), [], []), command).toMatchObject({
+        verdict: "deny",
+        action: "read",
+      });
+    }
+  });
+
+  it("助理 Chrome profile 放在工作区里时，分类器看不见路径的命令也不放宽", () => {
+    const inside = forbiddenZones(dirs(), join(workDir, "chrome"));
+    for (const command of ["sed -n 1p chrome/Cookies", "grep -rn token .", "tar -czf out.tgz ."]) {
+      expect(decide(cloud(command, { zones: inside }), [], []).verdict, command).toBe("ask");
+    }
+  });
+
+  it("只有 bash 的询问会被放宽，别的工具照旧", () => {
+    const write = cloud("ls", { toolName: "write", input: { path: join(outsideDir, "a.txt"), content: "x" } });
+    expect(decide(write, [], [])).toMatchObject({ verdict: "ask", action: "write_outside" });
+  });
+});
+
 describe("浏览器工具", () => {
   const call = (toolName: string, input: Record<string, unknown>): GateCall => ({
     ...gateContext(),
     toolName,
     input,
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine: null,
   });
@@ -1043,6 +1197,7 @@ describe("例行边界", () => {
     toolName,
     input,
     sandbox: "seatbelt",
+    containment: { level: "none" },
     source: null,
     routine,
     ...overrides,

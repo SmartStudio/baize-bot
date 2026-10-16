@@ -203,7 +203,14 @@ const existingReal = (zones: ForbiddenZones, paths: readonly string[]): readonly
   ...new Set(paths.map((path) => realZone(zones, path)).filter(existsSync)),
 ];
 
-const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
+/** `masked` 是运行器按电脑额外盖住的目录：云电脑放宽了询问，自己的 Pi 配置和会话记录也不给 bash 看。 */
+export const bwrapCommand = (
+  workDir: string,
+  zones: ForbiddenZones,
+  access: GateAccess,
+  command: string,
+  masked: readonly string[],
+): string => {
   const work = realpathExisting(workDir);
   const shared = realpathExisting(zones.sharedDir);
   const directories = readdirSync(realpathExisting(zones.dataDir), { withFileTypes: true })
@@ -213,6 +220,7 @@ const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess
     ...zones.hidden,
     ...otherBotDirs(realpathExisting(zones.botDir), shared, directories),
     X11_SOCKET_DIR,
+    ...masked,
   ]);
   const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
   const args = bwrapArgs(
@@ -231,12 +239,13 @@ const sandboxedCommand = (
   zones: ForbiddenZones,
   access: GateAccess,
   command: string,
+  masked: readonly string[],
 ): string => {
   switch (kind) {
     case "seatbelt":
       return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones))} /bin/bash -c ${shSingleQuote(command)}`;
     case "bwrap":
-      return bwrapCommand(workDir, zones, access, command);
+      return bwrapCommand(workDir, zones, access, command, masked);
     case "none":
       return command;
     default: {
@@ -247,9 +256,16 @@ const sandboxedCommand = (
 };
 
 const spawnHook =
-  (kind: SandboxKind, workDir: string, zones: ForbiddenZones, tmpDir: string, access: GateAccess): BashSpawnHook =>
+  (
+    kind: SandboxKind,
+    workDir: string,
+    zones: ForbiddenZones,
+    tmpDir: string,
+    access: GateAccess,
+    masked: readonly string[],
+  ): BashSpawnHook =>
   (ctx: BashSpawnContext) => ({
-    command: sandboxedCommand(kind, workDir, zones, access, ctx.command),
+    command: sandboxedCommand(kind, workDir, zones, access, ctx.command, masked),
     cwd: workDir,
     env: whitelistEnv(ctx.env, workDir, tmpDir),
   });
@@ -265,6 +281,7 @@ export function createSandboxedBash(
   workDir: string,
   zones: ForbiddenZones,
   activeRunId: () => string | null = () => null,
+  masked: readonly string[] = [],
 ): BashSandbox {
   const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
@@ -282,7 +299,7 @@ export function createSandboxedBash(
       runAccess?.delete(callId);
       if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, masked),
       });
       return scoped.execute(...args);
     },

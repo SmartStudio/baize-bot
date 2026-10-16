@@ -25,6 +25,7 @@ import {
   AgentToControl,
   BotId,
   type BotRole,
+  type ComputerKind,
   ComputerId,
   type Grant,
   GrantId,
@@ -157,15 +158,22 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
 const sandboxProbe = vi.hoisted(() => ({
   /** 冒充这台电脑没有系统沙箱：运行器拿到的 `sandbox` 是 "none"，其余照真的走。 */
   forceNone: false,
+  /** 冒充这台电脑的沙箱是 bwrap：运行器和闸门看到的都是 "bwrap"，命令照样在本机真有的沙箱里跑。 */
+  forceBwrap: false,
+  /** 每次建 bash 时收到的严格遮罩。 */
+  masked: [] as (readonly string[])[],
 }));
 
 vi.mock("../src/sandbox.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/sandbox.js")>();
   return {
     ...actual,
+    sandboxKind: () => (sandboxProbe.forceBwrap ? ("bwrap" as const) : actual.sandboxKind()),
     createSandboxedBash(...args: Parameters<typeof actual.createSandboxedBash>) {
+      sandboxProbe.masked.push(args[3] ?? []);
       const created = actual.createSandboxedBash(...args);
-      return sandboxProbe.forceNone ? { ...created, sandbox: "none" as const } : created;
+      if (sandboxProbe.forceNone) return { ...created, sandbox: "none" as const };
+      return sandboxProbe.forceBwrap ? { ...created, sandbox: "bwrap" as const } : created;
     },
   };
 });
@@ -444,6 +452,8 @@ async function startHarness(options: {
   readonly accounts?: readonly AccountConfig[];
   readonly bots: readonly string[];
   readonly computerId?: string;
+  /** 不给就是本机电脑。 */
+  readonly computerKind?: ComputerKind;
   readonly grants?: readonly Grant[];
   readonly tools?: readonly ToolConnectionConfig[];
   /** 不给就挂 send_email、list_files 两个假扩展工具。 */
@@ -523,6 +533,7 @@ async function startHarness(options: {
     accounts: [...(overrides.accounts ?? options.accounts ?? [])],
     bots: overrides.bots ?? bots,
     computerId: ComputerId.parse(options.computerId ?? "computer-1"),
+    computerKind: options.computerKind ?? "local",
     grants: [...(overrides.grants ?? options.grants ?? [])],
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
@@ -595,6 +606,8 @@ afterEach(async () => {
   botSessionProbe.promptSwallow = false;
   botSessionProbe.assistantEnds.splice(0);
   sandboxProbe.forceNone = false;
+  sandboxProbe.forceBwrap = false;
+  sandboxProbe.masked.splice(0);
 });
 
 afterAll(() => {
@@ -10046,6 +10059,44 @@ describe("运行器的例行边界", () => {
       expect(shape(h.sent)).not.toContain("approval_request");
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
       expect(toolResultsOf(requests)).toContain("只读例行里读到的内容");
+    });
+  });
+
+  describe("云电脑上沙箱兜得住的 bash", () => {
+    const lsHarness = async (computerKind: ComputerKind, requests: ChatCompletionRequest[]) => {
+      sandboxProbe.forceBwrap = true;
+      const { dataDir } = botWorkDir();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        computerKind,
+        approve: false,
+        script: scriptPlans(requests, { 看看目录: [["bash", { command: "ls -la" }]] }),
+      });
+      return { h, dirs: botDirs(dataDir, BotId.parse("bot-1")) };
+    };
+
+    it("远程电脑上 ls -la 不弹审批直接跑，bash 的沙箱盖住 Pi 的配置和会话目录", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, dirs } = await lsHarness("remote", requests);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "看看目录"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+      expect(sandboxProbe.masked).toEqual([[dirs.agentDir, dirs.sessionDir]]);
+    });
+
+    it("本机电脑上同一条照弹审批，沙箱不加遮罩", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h } = await lsHarness("local", requests);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "看看目录"));
+
+      expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(sandboxProbe.masked).toEqual([[]]);
     });
   });
 

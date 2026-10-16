@@ -153,6 +153,7 @@ async function harness(options: {
   const appends: WorkAppend[] = [];
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-1"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-1"), role: "member", name: "小白", tags: [], description: "", preset: null }],
     tools: [],
     grants: [],

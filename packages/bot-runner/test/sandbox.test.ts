@@ -1,5 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { connect, createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -12,6 +21,7 @@ import { decide, type GateAccess, type GateCall } from "../src/gate.js";
 import { botDirs, ensureBotDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
 import {
   bwrapArgs,
+  bwrapCommand,
   createSandboxedBash,
   otherBotDirs,
   sandboxKind,
@@ -650,6 +660,7 @@ describe("bash 沙箱性能", () => {
           computerId: ComputerId.parse("computer-1"),
           platform: "darwin",
           sandbox: "seatbelt",
+          containment: { level: "none" },
           source: null,
           routine: null,
         });
@@ -766,6 +777,7 @@ describe("bash 沙箱性能", () => {
           computerId: ComputerId.parse("computer-1"),
           platform: process.platform,
           sandbox: sandboxKind(),
+          containment: { level: "none" },
           source: null,
           routine: null,
         },
@@ -971,6 +983,25 @@ describe("bwrap 参数", () => {
     const shared = args.indexOf("/data/shared");
     expect(args.slice(shared - 1, shared + 2)).toEqual(["--bind", "/data/shared", "/data/shared"]);
     expect(args.filter((arg) => arg === "/data/shared")).toHaveLength(2);
+  });
+
+  it("严格遮罩把自己的 agent 和会话目录也盖住，不给就照旧", () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-bwrap-mask-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const ownZones = forbiddenZones(dirs, null);
+      const access: GateAccess = { network: false, writePaths: [] };
+      const masked = [dirs.agentDir, dirs.sessionDir].map((path) => realpathSync(path));
+      const strict = bwrapCommand(dirs.workDir, ownZones, access, "true", [dirs.agentDir, dirs.sessionDir]);
+      for (const path of masked) {
+        expect(strict, path).toContain(`'--tmpfs' '${path}'`);
+        expect(strict, path).toContain(`'--remount-ro' '${path}'`);
+      }
+      const plain = bwrapCommand(dirs.workDir, ownZones, access, "true", []);
+      for (const path of masked) expect(plain, path).not.toContain(path);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
