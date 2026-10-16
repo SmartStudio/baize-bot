@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Pencil, Share2 } from "lucide-react";
 import type { Bot, BotId, Preference } from "@baize/shared";
 import { BotAvatar } from "./BotAvatar.js";
+import { BotComputerPicker, type ComputerChoicesView } from "./ComputerPicker.js";
 import { EditBotDialog } from "./EditBotDialog.js";
 import { ShareDialog } from "./ShareDialog.js";
 import { describeTriggers } from "./routines/cron.js";
@@ -44,7 +45,14 @@ const PreferenceRow = ({ preference, onForget }: { preference: Preference; onFor
   );
 };
 
-export const BotHeader = ({ bot }: { bot: Bot }) => {
+export const BotHeader = ({
+  bot,
+  computerChoices,
+}: {
+  bot: Bot;
+  // 没得选或这个群的选择还没拉回来时为 null，不画选择器。
+  computerChoices: ComputerChoicesView | null;
+}) => {
   const { state, actions } = useApp();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -140,6 +148,7 @@ export const BotHeader = ({ bot }: { bot: Bot }) => {
           </button>
         </div>
       </div>
+      {computerChoices === null ? null : <BotComputerPicker view={computerChoices} botId={bot.id} />}
       {toolsUnsynced ? (
         <p className="dialog-note" data-testid="bot-tools-unsynced" role="status">
           导入时带来的插件还没同步过来，同步后才能分享

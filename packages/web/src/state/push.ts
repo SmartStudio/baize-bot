@@ -1,5 +1,6 @@
 import type { ComputerId, GroupId, ServerPush } from "@baize/shared";
 import type { Action, AppState, ReadyState, SessionId } from "./types.js";
+import { finishingElsewhere } from "./computer-choices.js";
 import { notifyNotice } from "./notify.js";
 import type { Seq } from "./stamped.js";
 
@@ -18,6 +19,8 @@ type PushContext = {
   refreshPendingCounts: () => void;
   // 电脑不在线了，它上面等扫码的登录卡等不到结果：重拉账号，还在等的结成离线。
   recoverLogins: (computerId: ComputerId) => void;
+  // 重拉这个群每个成员选的电脑和正在跑的那台，after 是触发它的推送的号。
+  reloadChoices: (groupId: GroupId, after: Seq) => void;
 };
 
 export const createPushHandlers = ({
@@ -27,6 +30,7 @@ export const createPushHandlers = ({
   stateRef,
   refreshPendingCounts,
   recoverLogins,
+  reloadChoices,
 }: PushContext): PushHandlers => {
   const bumpToday = () => dispatch({ type: "today_version_bumped" });
   const mine = (): ReadyState | null => {
@@ -39,6 +43,10 @@ export const createPushHandlers = ({
     const chat = state?.conversations.find((c) => c.groupId === groupId);
     return chat?.kind === "solo" && state?.bots[chat.botId]?.role === "assistant";
   };
+  // runningOn 没有自己的推送。换了电脑、这一轮还在原来那台上时，这个群接下来的消息和回合推送里有一条是这一轮跑完的那条。
+  const recheckChoices = (groupId: GroupId, seq: Seq) => {
+    if (finishingElsewhere(mine(), groupId)) reloadChoices(groupId, seq);
+  };
   return {
     message: (push, seq) => {
       dispatch({ type: "message_upserted", message: push.message, seq });
@@ -46,6 +54,7 @@ export const createPushHandlers = ({
       if (body.kind === "bot" && !body.streaming && body.text !== "" && inAssistantChat(groupId)) bumpToday();
       // 建队卡和例行确认卡都是首页「等你」里的一行，新卡落地、别的窗口拍了板都得重拉。
       if (body.kind === "team_offer" || body.kind === "routine_offer") bumpToday();
+      recheckChoices(groupId, seq);
     },
     message_delta: (push, seq) => {
       dispatch({
@@ -69,8 +78,14 @@ export const createPushHandlers = ({
       // 电脑 hello 补建主助理时首页的快照里 assistantGroupId 还是 null，输入框禁用着，要重拉才解开。
       bumpToday();
     },
-    group_updated: (push, seq) => dispatch({ type: "group_updated", group: push.group, seq }),
-    group_turn: (push) => dispatch({ type: "group_turn", turn: push }),
+    group_updated: (push, seq) => {
+      dispatch({ type: "group_updated", group: push.group, seq });
+      if (mine()?.computerChoices.rows[push.group.id] !== undefined) reloadChoices(push.group.id, seq);
+    },
+    group_turn: (push, seq) => {
+      dispatch({ type: "group_turn", turn: push });
+      recheckChoices(push.groupId, seq);
+    },
     task_updated: (push) => dispatch({ type: "task_updated", task: push.task }),
     // 审批、交接的推送只改卡，角标等补拉回来的服务端数。
     approval_updated: (push) => {
@@ -126,8 +141,11 @@ export const createPushHandlers = ({
       dispatch({ type: "computer_upserted", computer: push.computer, seq });
       if (push.computer.status !== "online") recoverLogins(push.computer.id);
     },
-    // 网页还没有展示这个选择的地方，收下不做事。
-    computer_choice_updated: () => undefined,
+    // 换过去的那一刻这一轮可能还在原来那台上跑，拉过的群重拉一趟拿 runningOn。
+    computer_choice_updated: (push, seq) => {
+      dispatch({ type: "computer_choice_set", groupId: push.groupId, botId: push.botId, kind: push.kind, seq });
+      if (mine()?.computerChoices.rows[push.groupId] !== undefined) reloadChoices(push.groupId, seq);
+    },
     login_failed: (push) =>
       dispatch({ type: "login_failed", accountId: push.accountId, attempt: push.attempt, reason: push.reason }),
     notify: (push) => {

@@ -8,6 +8,7 @@ import {
   type LoginAttemptId,
   ApiError,
   ApprovePlanResponse,
+  ComputerChoices,
   ComputerListResponse,
   ComputerTokenResponse,
   DecideDraftResponse,
@@ -79,6 +80,7 @@ import {
   type CreatePokerTableRequest,
   type HintRequest,
   type PokerActRequest,
+  type PutComputerChoiceRequest,
   type PokerHandId,
   type PokerSeatNo,
   type PokerTableView,
@@ -214,6 +216,11 @@ export const createApi = (signal?: AbortSignal) => {
       return json(LoginAccountResponse, await send("POST", `/accounts/${encodeURIComponent(id)}/login`, body));
     },
     computers: async () => json(ComputerListResponse, await send("GET", "/computers")),
+    computerChoices: async (groupId: GroupId) =>
+      json(ComputerChoices, await send("GET", `/groups/${encodeURIComponent(groupId)}/computer-choices`)),
+    putComputerChoice: async (groupId: GroupId, botId: BotId, body: PutComputerChoiceRequest): Promise<void> => {
+      await send("PUT", `/groups/${encodeURIComponent(groupId)}/bots/${encodeURIComponent(botId)}/computer`, body);
+    },
     live: async () => json(LiveSessionsResponse, await send("GET", "/live")),
     createRemoteComputer: async () => json(ComputerTokenResponse, await send("POST", "/computers/remote")),
     deleteAccount: async (email: string) => {

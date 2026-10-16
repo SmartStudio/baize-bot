@@ -112,7 +112,7 @@ export async function handleAgentEvent(
       await markComputerOnline(deps.db, conn.computerId, conn.gatewayKey);
       return;
     case "config_applied":
-      deps.agents.markConfigApplied(conn, message.generation);
+      await deps.agents.markConfigApplied(conn, message.generation);
       return;
     case "bot_text":
       await onBotText(deps, conn, message);
@@ -819,7 +819,7 @@ function clipDetail(detail: string): string {
 async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: AgentError): Promise<void> {
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
-    if (!deps.agents.markConfigRejected(conn, event.generation)) return;
+    if (!(await deps.agents.markConfigRejected(conn, event.generation))) return;
     console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${clipDetail(event.detail)}`);
     await deps.notifications.publish(conn.ownerId, {
       kind: "stuck",

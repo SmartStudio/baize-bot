@@ -5,6 +5,7 @@ import {
   ServerPush,
   type AccountId,
   type ComputerId,
+  type ComputerKind,
   type AccountTier,
   type BrowserPlatform,
   type ApprovalId,
@@ -135,6 +136,10 @@ export type AppActions = {
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   loadPreferences: (botId: BotId) => Promise<void>;
   deletePreference: (preference: Preference) => Promise<void>;
+  // 这个群里每个成员选的电脑和正在跑的那台。进群、重连、几种推送之后各拉一次，after 是触发它的那个号。
+  loadComputerChoices: (groupId: GroupId, after: Seq) => Promise<void>;
+  // 409 的中文原文抛给选择器照登。
+  chooseComputer: (groupId: GroupId, botId: BotId, kind: ComputerKind) => Promise<void>;
   // 手册回来的都是整本，走同一个 brand_set，切片只收版本更新的那本。读回的那本也交给弹窗当底稿；保存 409 时抛给弹窗。
   loadBrand: () => Promise<BrandBook | null | undefined>;
   updateBrand: (body: UpdateBrandRequest) => Promise<void>;
@@ -707,6 +712,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         put({ type: "preference_removed", botId: preference.botId, preferenceId: preference.id, seq: nextSeq() });
       }),
+      loadComputerChoices: signedIn((scope, groupId: GroupId, after: Seq) =>
+        loadBucket(
+          scope,
+          `computer-choices:${groupId}`,
+          after,
+          async (seq) => {
+            const choices = await scope.api.computerChoices(groupId);
+            scope.put({ type: "computer_choices_loaded", groupId, choices, seq });
+          },
+          REFRESH_TRIES,
+        ),
+      ),
+      chooseComputer: signedIn(async ({ api, put }, groupId: GroupId, botId: BotId, kind: ComputerKind) => {
+        const seq = nextSeq();
+        await api.putComputerChoice(groupId, botId, { kind });
+        put({ type: "computer_choice_set", groupId, botId, kind, seq });
+      }),
       loadBrand: signedIn(async ({ api, put }) => {
         const brand = await api.brand();
         put({ type: "brand_set", brand });
@@ -965,6 +987,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       stateRef,
       refreshPendingCounts,
       recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
+      reloadChoices: (groupId, after) => void actions.loadComputerChoices(groupId, after).catch(() => undefined),
     });
     const retryLater = () => {
       retry = setTimeout(open, reconnectDelay(failures));

@@ -5,6 +5,7 @@ import { accountRoutes } from "./routes/account.js";
 import { authRoutes, authed, expireSessions } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
 import { brandRoutes } from "./routes/brand.js";
+import { computerChoiceRoutes } from "./routes/computer-choices.js";
 import { contentRoutes } from "./routes/content.js";
 import { goalRoutes } from "./routes/goals.js";
 import { groupRoutes } from "./routes/groups.js";
@@ -48,6 +49,7 @@ const publicRoutes: Route[] = [socketRoutes, liveTestRoutes, testRoutes, authRou
 const protectedRoutes: Route[] = [
   // 第 2 期的接缝路由排在前面，免得被同前缀的老路由先截住。第 3 期的牌局路由同理。
   pokerRoutes,
+  computerChoiceRoutes,
   goalRoutes,
   preferenceRoutes,
   brandRoutes,

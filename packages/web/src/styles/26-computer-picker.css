@@ -1,0 +1,79 @@
+/* 群头的电脑选择器：单聊挂在 Bot 头部最后一行，项目群收在标题行右边的「电脑」里，一个成员一行。 */
+.computer-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.computer-picker-anchor,
+.team-computers {
+  position: relative;
+}
+
+.computer-picker-trigger,
+.team-computers-trigger {
+  gap: var(--space-3);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-5);
+}
+
+.computer-picker-check {
+  margin-left: auto;
+  color: var(--fg-2);
+}
+
+.computer-picker-note {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.computer-picker-note.is-warning {
+  color: var(--warning);
+}
+
+.computer-picker-note.is-error {
+  color: var(--danger);
+}
+
+.team-computers {
+  margin-left: auto;
+}
+
+/* 入口贴着标题行右边，菜单也从右边对齐着往下开，免得出画面。 */
+.team-computer-menu,
+.team-computer-row .computer-picker-menu {
+  right: 0;
+  left: auto;
+}
+
+.team-computer-menu {
+  min-width: 320px;
+}
+
+.team-computer-row {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+  padding: var(--space-3) var(--space-5);
+}
+
+.team-computer-row > .avatar {
+  margin-top: var(--space-2);
+}
+
+.team-computer-name {
+  flex: 1;
+  min-width: 0;
+  padding-top: var(--space-2);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.team-computer-row .computer-picker {
+  align-items: flex-end;
+  max-width: 220px;
+  text-align: right;
+}
