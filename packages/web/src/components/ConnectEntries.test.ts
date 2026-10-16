@@ -11,6 +11,7 @@ const local = (status: ComputerStatus = "online") =>
     host: null,
     idleSince: null,
     lastSeenAt: "2026-10-14T10:00:00.000Z",
+    dispatchable: status === "online",
   });
 
 const remote = (status: ComputerStatus = "online") =>
@@ -22,6 +23,7 @@ const remote = (status: ComputerStatus = "online") =>
     host: "remote.baize.dev",
     idleSince: null,
     lastSeenAt: "2026-10-14T10:00:00.000Z",
+    dispatchable: status === "online",
   });
 
 const options = (computers: Computer[]) => {

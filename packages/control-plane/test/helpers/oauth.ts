@@ -81,7 +81,7 @@ export async function makeOwner(s: OAuthStack, options: { readonly remote: boole
     : null;
   const online = remote ?? local;
   const { agent, config } = await helloAgent(s.server.server.port, online.computerId, online.token);
-  // 电脑上线的那条 computer_updated 在 config 之前就推完了，推送连接放在后面，收到的第一条就是这次要看的。
+  // 电脑上线的那条 computer_updated 紧跟 config 同步推完，推送连接等 config 到了才连，收到的第一条就是这次要看的。
   const push = await connectPush(s.server.server.port, client.cookie ?? "");
   return {
     user,

@@ -11,6 +11,7 @@ const computer = (kind: Computer["kind"], host: string | null) =>
     host,
     idleSince: null,
     lastSeenAt: "2026-10-14T10:00:00.000Z",
+    dispatchable: true,
   });
 
 describe("电脑名后面接汉字", () => {

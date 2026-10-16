@@ -18,6 +18,7 @@ const remote = Computer.parse({
   host: "remote.baize.dev",
   idleSince: null,
   lastSeenAt: "2026-10-14T10:00:00.000Z",
+  dispatchable: true,
 });
 
 const session = LiveSession.parse({

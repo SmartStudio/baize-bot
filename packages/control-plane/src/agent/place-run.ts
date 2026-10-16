@@ -3,6 +3,7 @@ import {
   ComputerId,
   GroupId,
   RunId,
+  type ComputerKind,
   type ControlToAgent,
   type MessageId,
   type PokerTableRole,
@@ -10,11 +11,12 @@ import {
   type Viewer,
 } from "@baize/shared";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import type { Db } from "../db/client.js";
 import { computers, groupMembers, laneLeases, runs, workStreams } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
-import type { ComputerSelection, SelectionFailure } from "./computer-selection.js";
+import { CHOSEN_OFFLINE, type ComputerSelection, type SelectionFailure } from "./computer-selection.js";
 import { enqueueDownlink } from "./envelope.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
@@ -38,6 +40,18 @@ export type PlaceRunResult =
     }
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
   | { readonly kind: "not_member" };
+
+/** 这个 Bot 在这个群里选定的电脑。null 是没选过，走默认策略。 */
+export type ComputerPreference = ComputerKind | null;
+
+/** 派活前先挑一次电脑要用；落库那一次以 placeRun 在锁里读到的为准。 */
+export async function computerPreference(db: Db | Tx, groupId: GroupId, botId: BotId): Promise<ComputerPreference> {
+  const [member] = await db
+    .select({ computerKind: groupMembers.computerKind })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.botId, botId), eq(groupMembers.groupId, groupId)));
+  return member?.computerKind ?? null;
+}
 
 /** 接管可能同时改两台电脑的发件箱，先锁齐再碰道，两个方向都按同一顺序。 */
 export async function lockLaneComputers(tx: Tx, ownerId: UserId): Promise<void> {
@@ -96,18 +110,21 @@ async function takeOverLane(tx: Tx, lease: typeof laneLeases.$inferSelect, compu
 export async function placeRun(
   tx: Tx,
   input: PlaceRunInput,
-  select: () => Promise<ComputerSelection>,
+  select: (preference: ComputerPreference) => Promise<ComputerSelection>,
 ): Promise<PlaceRunResult> {
   await lockOwner(tx, input.ownerId, "shared");
   await shareBotRunsLock(tx, input.botId);
   await lockLaneComputers(tx, input.ownerId);
   const [member] = await tx
-    .select({ botId: groupMembers.botId })
+    .select({ computerKind: groupMembers.computerKind })
     .from(groupMembers)
     .where(and(eq(groupMembers.botId, input.botId), eq(groupMembers.groupId, input.groupId)));
   if (member === undefined) return { kind: "not_member" };
-  const selected = await select();
+  const preference = member.computerKind ?? null;
+  const selected = await select(preference);
   if (selected.kind === "failed") return { kind: "unplaced", reason: selected.reason };
+  // 挑中之后、锁住之前租约过期了：选过电脑的照样说是那台不在线，不笼统说电脑不在线。
+  const lapsed: SelectionFailure = preference === null ? "no_computer_online" : CHOSEN_OFFLINE[preference];
   const [candidate] = await tx
     .select()
     .from(computers)
@@ -118,10 +135,9 @@ export async function placeRun(
         sql`${computers.leaseUntil} > clock_timestamp()`,
       ),
     );
-  if (candidate === undefined || candidate.installId === null)
-    return { kind: "unplaced", reason: "no_computer_online" };
+  if (candidate === undefined || candidate.installId === null) return { kind: "unplaced", reason: lapsed };
   let lease = await claimLane(tx, input, selected.computer.id, candidate.installId);
-  if (lease === undefined) return { kind: "unplaced", reason: "no_computer_online" };
+  if (lease === undefined) return { kind: "unplaced", reason: lapsed };
   const [holder] = await tx
     .select({ id: computers.id })
     .from(computers)

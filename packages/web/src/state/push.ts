@@ -126,6 +126,8 @@ export const createPushHandlers = ({
       dispatch({ type: "computer_upserted", computer: push.computer, seq });
       if (push.computer.status !== "online") recoverLogins(push.computer.id);
     },
+    // 网页还没有展示这个选择的地方，收下不做事。
+    computer_choice_updated: () => undefined,
     login_failed: (push) =>
       dispatch({ type: "login_failed", accountId: push.accountId, attempt: push.attempt, reason: push.reason }),
     notify: (push) => {

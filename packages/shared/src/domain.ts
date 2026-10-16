@@ -77,6 +77,8 @@ export const Computer = z.object({
   host: z.string().nullable(),
   idleSince: Timestamp.nullable(),
   lastSeenAt: Timestamp.nullable(),
+  // 派活现在能不能派过去，和派活用的是同一个判断。status 只管睡眠、离线这些文案，在线圆点读这一列。
+  dispatchable: z.boolean(),
 });
 export type Computer = z.infer<typeof Computer>;
 
