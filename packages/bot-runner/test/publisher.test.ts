@@ -43,11 +43,34 @@ const OLD_NOTE = { id: "5e0000000000000000000abc", title: "去年的旧笔记" }
 const signedNoteUrl = (id: string): string =>
   `https://www.xiaohongshu.com/explore/${id}?xsec_token=AB${id.slice(-6)}xyz%3D&xsec_source=pc_creatormng`;
 
+// 假创作者中心每一页都挂的探针，照平台风控脚本的路子：钩主世界的 querySelector，调用栈里除了钩子自己那一帧都没有本页地址的，就是外来的；
+// 每次按下记 PointerEvent.pressure，真鼠标按着是 0.5。都用同步 XHR 上报，上报落地之前那次求值和点击不会返回。
+const WATCHER = `<script>
+for (const proto of [Document.prototype, Element.prototype]) {
+  for (const name of ["querySelector", "querySelectorAll"]) {
+    const original = proto[name];
+    proto[name] = function (...args) {
+      if (!String(new Error().stack).split("\\n").slice(2).join().includes(location.origin)) {
+        const report = new XMLHttpRequest();
+        report.open("POST", "/trip", false);
+        report.send(name + " " + args[0]);
+      }
+      return original.apply(this, args);
+    };
+  }
+}
+addEventListener("pointerdown", (event) => {
+  const report = new XMLHttpRequest();
+  report.open("POST", "/press", false);
+  report.send(String(event.pressure));
+}, true);
+</script>`;
+
 // 按 XIAOHONGSHU_PAGES 里写的结构搭的假创作者中心：切到上传图文才出上传框，第一张图传完才出标题和正文，
 // 发布按钮把标题、正文和从加载到点发布是否一直有焦点交给服务端，再跳离发布页；笔记管理页最新的在最前，
 // 卡片里有作者主页和笔记两个带 xsec_token 的链接。正文框照 tiptap 的脾气：一次 insertText 里的换行被吞掉，
 // 只有回车键才分段（OpenCLI clis/xiaohongshu/publish.js 的 fillCard 注释）。
-const PUBLISH_PAGE = (mode: SiteMode): string => `<!doctype html><meta charset="utf-8"><title>发布笔记</title>
+const PUBLISH_PAGE = (mode: SiteMode): string => `<!doctype html><meta charset="utf-8"><title>发布笔记</title>${WATCHER}
 <div class="upload-content">
   <div class="creator-tab"><span>上传视频</span></div>
   <div class="creator-tab"><span>上传图文</span></div>
@@ -114,6 +137,8 @@ const readBody = async (request: IncomingMessage): Promise<Buffer> => {
 async function startCreatorSite(mode: SiteMode, publishDelayMs = 0) {
   const events: SiteEvent[] = [];
   const publications: Publication[] = [];
+  const trips: string[] = [];
+  const presses: number[] = [];
   const notes = [OLD_NOTE];
   let uploads: string[] = [];
   let requests = 0;
@@ -142,6 +167,16 @@ async function startCreatorSite(mode: SiteMode, publishDelayMs = 0) {
         html(PUBLISH_PAGE(mode));
         return;
       }
+      if (url.pathname === "/trip" && request.method === "POST") {
+        trips.push((await readBody(request)).toString("utf8"));
+        response.end();
+        return;
+      }
+      if (url.pathname === "/press" && request.method === "POST") {
+        presses.push(Number((await readBody(request)).toString("utf8")));
+        response.end();
+        return;
+      }
       if (url.pathname === "/upload" && request.method === "POST") {
         uploads.push(
           createHash("sha256")
@@ -162,14 +197,14 @@ async function startCreatorSite(mode: SiteMode, publishDelayMs = 0) {
         return;
       }
       if (url.pathname === "/publish/success") {
-        html("<!doctype html><meta charset='utf-8'><title>发布成功</title><p>发布成功</p>");
+        html(`<!doctype html><meta charset='utf-8'><title>发布成功</title>${WATCHER}<p>发布成功</p>`);
         return;
       }
       if (url.pathname === "/new/note-manager") {
         events.push({ kind: "manage", at: Date.now() });
         const cards = mode === "no-notes" ? [] : notes;
         html(
-          `<!doctype html><meta charset="utf-8"><title>笔记管理</title>${cards
+          `<!doctype html><meta charset="utf-8"><title>笔记管理</title>${WATCHER}${cards
             .map(
               (note) =>
                 `<div class="note" data-impression='{"noteTarget":{"type":"normal","noteId":"${note.id}"}}'>` +
@@ -202,6 +237,8 @@ async function startCreatorSite(mode: SiteMode, publishDelayMs = 0) {
     url: `http://127.0.0.1:${address.port}`,
     events,
     publications,
+    trips,
+    presses,
     requests: () => requests,
     close: async () => {
       for (const response of hanging) response.destroy();
@@ -495,6 +532,19 @@ describe.skipIf(chromeBinary === null)("小红书发布器（真 Chrome 加假�
         images: images.map((image) => image.sha256),
       },
     ]);
+  });
+
+  it("页面自己的脚本看不见发布器：主世界钩着的 querySelector 一次没被碰到，点下去的压力和真鼠标一样是 0.5", async () => {
+    const creator = await site("normal");
+
+    const reply = await publishDraft(
+      draftMessage("draft-unseen", { title: "看不见", text: "正文", images: [draftCopy(dataDir, "看不见")] }),
+      depsFor(creator),
+    );
+
+    expect(reply.result.status, "发布页、发布成功页、笔记管理页三页都走完了").toBe("ok");
+    expect(creator.trips, "发布器读写页面不经页面的主世界").toEqual([]);
+    expect(creator.presses, "点上传图文、点发布，两下都带压力").toEqual([0.5, 0.5]);
   });
 
   it("管理页卡片上读不到带 xsec_token 的笔记链接，退回拼 explore/<id>", async () => {

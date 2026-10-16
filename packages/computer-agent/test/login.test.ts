@@ -20,14 +20,19 @@ interface Sent {
 
 const LOGIN_URL = "https://creator.xiaohongshu.com/login";
 
+/** 一次检查脚本落在哪：主世界、当前文档上的隔离世界，还是已经作废的旧世界。 */
+type CheckWorld = "main" | "isolated" | "stale";
+
 /**
  * 假 Chrome：每次 createTarget 开一个新 tab，每次 attach 给一个新 session。登录页上的检查脚本回什么由 signedIn
- * 决定，参数是这个 tab 被查到第几次。
+ * 决定，参数是这个 tab 被查到第几次，作废世界里的那次不算。隔离世界照 Chrome 的脾气：同一 session、同一份文档、
+ * 同一个名字回同一个 contextId；jumpsAt 让第 n 次求值到达前页面先跳到新文档，旧文档上的世界随之作废。
  */
 function fakeChrome(
   options: {
     readonly signedIn?: (targetId: string, poll: number) => string | null;
     readonly attach?: (targetId: string) => Error | null;
+    readonly jumpsAt?: (targetId: string, evaluation: number) => boolean;
   } = {},
 ) {
   const sent: Sent[] = [];
@@ -35,8 +40,24 @@ function fakeChrome(
   const exitListeners = new Set<(connection: CdpConnection) => void>();
   const sessions = new Map<string, string>();
   const polls = new Map<string, number>();
+  const evaluations = new Map<string, number>();
+  const documents = new Map<string, number>();
+  const worlds = new Map<string, number>();
+  const contexts = new Map<
+    number,
+    { readonly sessionId: string; readonly targetId: string; readonly document: number }
+  >();
+  const checks = new Map<string, CheckWorld[]>();
   let tabs = 0;
   let attaches = 0;
+  const documentOf = (targetId: string): number => documents.get(targetId) ?? 1;
+  const worldOf = (sessionId: string, contextId: unknown): CheckWorld => {
+    if (contextId === undefined) return "main";
+    const context = typeof contextId === "number" ? contexts.get(contextId) : undefined;
+    const current =
+      context !== undefined && context.sessionId === sessionId && context.document === documentOf(context.targetId);
+    return current ? "isolated" : "stale";
+  };
   const reply = (method: string, params: Record<string, unknown>, sessionId: string | undefined) => {
     switch (method) {
       case "Target.createTarget":
@@ -53,8 +74,26 @@ function fakeChrome(
       }
       case "Page.getFrameTree":
         return { frameTree: { frame: { id: "main", url: LOGIN_URL } } };
+      case "Page.createIsolatedWorld": {
+        const targetId = sessions.get(sessionId ?? "") ?? "";
+        if (params.frameId !== "main") return new Error("No frame for given id found");
+        const key = `${sessionId}|${targetId}|${documentOf(targetId)}|${String(params.worldName)}`;
+        let contextId = worlds.get(key);
+        if (contextId === undefined) {
+          contextId = 100 + contexts.size;
+          worlds.set(key, contextId);
+          contexts.set(contextId, { sessionId: sessionId ?? "", targetId, document: documentOf(targetId) });
+        }
+        return { executionContextId: contextId };
+      }
       case "Runtime.evaluate": {
         const targetId = sessions.get(sessionId ?? "") ?? "";
+        const evaluation = (evaluations.get(targetId) ?? 0) + 1;
+        evaluations.set(targetId, evaluation);
+        if (options.jumpsAt?.(targetId, evaluation) === true) documents.set(targetId, documentOf(targetId) + 1);
+        const world = worldOf(sessionId ?? "", params.contextId);
+        checks.set(targetId, [...(checks.get(targetId) ?? []), world]);
+        if (world === "stale") return new Error("Cannot find context with specified id");
         const poll = (polls.get(targetId) ?? 0) + 1;
         polls.set(targetId, poll);
         return { result: { type: "object", value: options.signedIn?.(targetId, poll) ?? null } };
@@ -78,6 +117,7 @@ function fakeChrome(
   return {
     sent,
     polls: (targetId: string) => polls.get(targetId) ?? 0,
+    checks: (targetId: string) => checks.get(targetId) ?? [],
     closed: () => sent.filter((c) => c.method === "Target.closeTarget").map((c) => c.params.targetId),
     chrome: {
       connection: async () => connection,
@@ -204,6 +244,30 @@ describe("登录：开页交给屏，自己查登上没有", () => {
     h.cdp.exit();
 
     expect(await pending).toEqual({ login: "failed", reason: "window_failed" });
+  });
+});
+
+describe("登录：查登录在页面看不见的隔离世界里", () => {
+  it("每一次查都落在当前文档上建的隔离世界里，不进页面的主世界", async () => {
+    const h = rig({ signedIn: (_tab, poll) => (poll >= 3 ? "白泽工厂日记" : null) });
+
+    const result = await runLogin(request(), h.deps, new AbortController().signal);
+
+    expect(result).toEqual({ login: "valid", handle: "白泽工厂日记" });
+    expect(h.cdp.checks("tab-1")).toEqual(["isolated", "isolated", "isolated"]);
+  });
+
+  it("登录页跳到新文档，旧世界作废：那一次报找不到 context，下一轮在新文档上重建，照样查到，不算脚本出错", async () => {
+    const h = rig({
+      signedIn: (_tab, poll) => (poll >= 2 ? "白泽工厂日记" : null),
+      jumpsAt: (_tab, evaluation) => evaluation === 2,
+    });
+
+    const result = await runLogin(request(), h.deps, AbortSignal.timeout(3_000));
+
+    expect(result).toEqual({ login: "valid", handle: "白泽工厂日记" });
+    expect(h.cdp.checks("tab-1"), "作废的那一次之后不再往旧世界里求值").toEqual(["isolated", "stale", "isolated"]);
+    expect(h.logs).not.toContain("登录页的检查脚本出错，接着查");
   });
 });
 

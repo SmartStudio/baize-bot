@@ -31,11 +31,13 @@ CMD ["node", "--import", "tsx", "src/main.ts"]
 
 # 远程电脑：看护进程是主进程，Xvfb 给助理 Chrome 一块没人看的屏幕，bubblewrap 留给运行器的 bash 沙箱。
 # git、python3 给 Bot 的 bash 用，运行器的命令分类认这两个命令（bot-runner/src/gate.ts）。
+# chromium-l10n：Linux 的 chromium 不认 --lang，只按 LANG 找语言包，没有它 navigator.languages 和 Accept-Language 是 en-US。
+# fonts-liberation2：补上和 Arial、Helvetica 同宽的字体，只剩 Noto CJK 的字体表一看就是空容器。
 FROM ${NODE_IMAGE} AS remote-computer
 ARG APT_MIRROR=
 RUN if [ -n "$APT_MIRROR" ]; then sed -i "s#http://deb.debian.org#${APT_MIRROR}#g" /etc/apt/sources.list.d/debian.sources; fi \
   && apt-get update \
-  && apt-get install -y --no-install-recommends chromium xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk git python3 \
+  && apt-get install -y --no-install-recommends chromium chromium-l10n fonts-liberation2 xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk git python3 \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 COPY deploy/remote/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh

@@ -232,6 +232,8 @@ describe("端到端：远程电脑上的小红书草稿", () => {
         "Target.attachToTarget",
         "Emulation.setFocusEmulationEnabled",
         "Page.navigate",
+        "Page.getFrameTree",
+        "Page.createIsolatedWorld",
         "Runtime.evaluate",
         "Target.closeTarget",
       ]);

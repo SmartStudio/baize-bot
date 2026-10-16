@@ -85,6 +85,10 @@ function loginChrome() {
         case "Target.closeTarget":
           closed.push(String(params.targetId));
           return {};
+        case "Page.getFrameTree":
+          return { frameTree: { frame: { id: "main" } } };
+        case "Page.createIsolatedWorld":
+          return { executionContextId: 1 };
         case "Runtime.evaluate":
           return { result: { type: "object", value: handles.get(sessions.get(sessionId ?? "") ?? "") ?? null } };
         default:
@@ -282,11 +286,15 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
           ? { targetId: "tab-1" }
           : method === "Target.attachToTarget"
             ? { sessionId: "session-1" }
-            : method === "Runtime.evaluate" && params.expression === "location.href"
-              ? { result: { type: "string", value: "https://creator.xiaohongshu.com/login?redirectReason=401" } }
-              : method === "Runtime.evaluate"
-                ? { result: { type: "object", subtype: "null", value: null } }
-                : {};
+            : method === "Page.getFrameTree"
+              ? { frameTree: { frame: { id: "main" } } }
+              : method === "Page.createIsolatedWorld"
+                ? { executionContextId: 1 }
+                : method === "Runtime.evaluate" && params.expression === "location.href"
+                  ? { result: { type: "string", value: "https://creator.xiaohongshu.com/login?redirectReason=401" } }
+                  : method === "Runtime.evaluate"
+                    ? { result: { type: "object", subtype: "null", value: null } }
+                    : {};
       fromChrome.write(`${JSON.stringify({ id, result })}\0`);
     }
   });
@@ -1725,6 +1733,8 @@ describe("电脑代理连控制面", () => {
       "Target.attachToTarget",
       "Emulation.setFocusEmulationEnabled",
       "Page.navigate",
+      "Page.getFrameTree",
+      "Page.createIsolatedWorld",
       "Runtime.evaluate",
       "Target.closeTarget",
     ]);

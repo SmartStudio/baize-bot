@@ -91,6 +91,10 @@ export function fakeChrome(): FakeChrome {
           }),
         );
         return {};
+      case "Page.getFrameTree":
+        return { frameTree: { frame: { id: `fake-frame-${sessions.get(sessionId ?? "") ?? ""}` } } };
+      case "Page.createIsolatedWorld":
+        return { executionContextId: 1 };
       case "Runtime.evaluate": {
         const tab = tabs.get(sessions.get(sessionId ?? "") ?? "");
         if (tab?.login === true) return { result: { value: tab.handle } };

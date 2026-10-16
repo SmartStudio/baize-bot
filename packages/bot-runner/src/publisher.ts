@@ -13,6 +13,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { BrowserConfig } from "./browser.js";
 import { acquireBotBrowserMutex, BotPausedError } from "./browser-mutex.js";
 import { draftCopyName } from "./drafts.js";
+import { evaluateIsolated } from "./isolated-world.js";
 import { botDirs } from "./paths.js";
 import { attachmentCopyName, downloadAttachment, type AttachmentLive } from "./attachments.js";
 
@@ -270,7 +271,7 @@ async function fillAndPublish(
   progress: Progress,
 ): Promise<PublishResult> {
   const evaluate = async (expression: string, returnByValue = true): Promise<Record<string, unknown>> => {
-    const result = await tab.send("Runtime.evaluate", { expression, returnByValue, awaitPromise: true });
+    const result = await evaluateIsolated(tab.send, { expression, returnByValue, awaitPromise: true });
     if (result.exceptionDetails !== undefined) throw new Error("页面脚本出错");
     return (result.result ?? {}) as Record<string, unknown>;
   };
@@ -315,7 +316,14 @@ async function fillAndPublish(
       return (value ?? null) as { x: number; y: number } | null;
     });
     await tab.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
-    await tab.send("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", clickCount: 1 });
+    // 真鼠标按下时 PointerEvent.pressure 是 0.5，不带 force 页面读到 0。
+    await tab.send("Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      ...point,
+      button: "left",
+      clickCount: 1,
+      force: 0.5,
+    });
     await tab.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
   };
 

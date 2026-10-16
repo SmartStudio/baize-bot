@@ -55,6 +55,11 @@ async function startSite(): Promise<{ readonly url: string; close(): Promise<voi
       response.end(HOSTILE_PAGE);
       return;
     }
+    if (path === "/press") {
+      response.end(`<!doctype html><meta charset="utf-8"><title>按压</title>
+<button onpointerdown="document.getElementById('out').textContent = String(event.pressure)">按我</button><p id="out"></p>`);
+      return;
+    }
     response.end(`<!doctype html><meta charset="utf-8"><title>页 ${path}</title><p>PAGE-TEXT${path}</p>`);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -178,6 +183,18 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
     expect(await evaluateIn(mine, "document.getElementById('out').textContent"), "点 [1] 落在真按钮上").toBe(
       "REAL-CLICKED",
     );
+  });
+
+  it("browser_click 按下去的压力和真鼠标一样是 0.5", async () => {
+    const browser = botBrowser();
+    await call(browser, "browser_open", { url: `${site.url}/press` });
+    await call(browser, "browser_snapshot");
+
+    await call(browser, "browser_click", { ref: 1 });
+
+    const mine = (await pageTargets(chrome.connection)).find((target) => target.url === `${site.url}/press`);
+    if (mine === undefined) throw new Error("找不到 Bot 的标签页");
+    expect(await evaluateIn(mine, "document.getElementById('out').textContent"), "CDP 不带 force 时是 0").toBe("0.5");
   });
 
   it("开标签页半路失败，建好的那页不留下", async () => {
