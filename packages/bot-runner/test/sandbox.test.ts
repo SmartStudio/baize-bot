@@ -26,6 +26,7 @@ import {
   otherBotDirs,
   sandboxKind,
   sandboxProfile,
+  toolboxCommand,
   whitelistEnv,
 } from "../src/sandbox.js";
 
@@ -820,6 +821,57 @@ describe("bash 沙箱性能", () => {
     ).toEqual({ PATH: "/bin", HOME: "/Users/test", PI_SESSION_ID: "session-1", PWD: "/work", TMPDIR: "/work/.tmp" });
   });
 
+  it("云电脑上的环境变量换成沙箱的 PATH，缓存变量都指到工作目录的 .cache", () => {
+    expect(
+      whitelistEnv({ PATH: "/bin", HOME: "/home/node", PI_SESSION_ID: "session-1" }, "/work", "/work/.tmp", {
+        searchPath: "/data/bot-1/toolbox/venv/bin:/usr/bin:/bin",
+      }),
+    ).toEqual({
+      PATH: "/data/bot-1/toolbox/venv/bin:/usr/bin:/bin",
+      HOME: "/home/node",
+      PI_SESSION_ID: "session-1",
+      PWD: "/work",
+      TMPDIR: "/work/.tmp",
+      XDG_CACHE_HOME: "/work/.cache",
+      npm_config_cache: "/work/.cache/npm",
+      PIP_CACHE_DIR: "/work/.cache/pip",
+      YARN_CACHE_FOLDER: "/work/.cache/yarn",
+    });
+  });
+
+  it("云电脑的 bash 把工具箱的 venv/bin 放在 PATH 最前面，闸门拿到的就是这个 PATH", () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-sandbox-cloud-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const ownZones = forbiddenZones(dirs, null);
+      const cloud = createSandboxedBash(dirs.workDir, ownZones, () => null, {
+        masked: [dirs.agentDir, dirs.sessionDir],
+        toolboxDir: dirs.toolboxDir,
+      });
+      expect(cloud.containment).toEqual({
+        level: "closed",
+        searchPath: `${join(dirs.toolboxDir, "venv", "bin")}:${process.env["PATH"]}`,
+        toolboxDir: dirs.toolboxDir,
+      });
+      expect(createSandboxedBash(dirs.workDir, ownZones).containment).toEqual({ level: "none" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("批准写工具箱的那条命令先惰性建 venv，没批准的原样跑", () => {
+    const toolbox = "/data/bot-1/toolbox";
+    expect(toolboxCommand(toolbox, { network: true, writePaths: [toolbox] }, "pip install six")).toBe(
+      "{ [ -x '/data/bot-1/toolbox/venv/bin/pip' ] || python3 -m venv '/data/bot-1/toolbox/venv'; } && pip install six",
+    );
+    expect(toolboxCommand(toolbox, { network: true, writePaths: [] }, "npm install left-pad")).toBe(
+      "npm install left-pad",
+    );
+    expect(toolboxCommand(toolbox, { network: false, writePaths: [] }, "python3 -c 'import six'")).toBe(
+      "python3 -c 'import six'",
+    );
+  });
+
   it.skipIf(process.platform !== "darwin")(
     "放宽按 runId 和 callId 隔离，清理或空 access 不会泄到复用 callId",
     async () => {
@@ -983,6 +1035,28 @@ describe("bwrap 参数", () => {
     const shared = args.indexOf("/data/shared");
     expect(args.slice(shared - 1, shared + 2)).toEqual(["--bind", "/data/shared", "/data/shared"]);
     expect(args.filter((arg) => arg === "/data/shared")).toHaveLength(2);
+  });
+
+  it("工具箱平时只读，批准写它时只把工具箱本身挂成可写", () => {
+    const root = mkdtempSync(join(tmpdir(), "baize-bwrap-toolbox-"));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const ownZones = forbiddenZones(dirs, null);
+      const toolbox = realpathSync(dirs.toolboxDir);
+      const plain = bwrapCommand(dirs.workDir, ownZones, { network: false, writePaths: [] }, "true", []);
+      expect(plain).not.toContain(`'--bind' '${toolbox}'`);
+      const approved = bwrapCommand(
+        dirs.workDir,
+        ownZones,
+        { network: true, writePaths: [dirs.toolboxDir] },
+        "true",
+        [],
+      );
+      expect(approved).toContain(`'--bind' '${toolbox}' '${toolbox}'`);
+      expect(approved).not.toContain(`'--bind' '${realpathSync(join(root, "bot-1"))}' '`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("严格遮罩把自己的 agent 和会话目录也盖住，不给就照旧", () => {

@@ -162,6 +162,8 @@ const sandboxProbe = vi.hoisted(() => ({
   forceBwrap: false,
   /** 每次建 bash 时收到的严格遮罩。 */
   masked: [] as (readonly string[])[],
+  /** 每次建 bash 时收到的工具箱目录，本机电脑没有。 */
+  toolboxes: [] as (string | null)[],
 }));
 
 vi.mock("../src/sandbox.js", async (importOriginal) => {
@@ -170,7 +172,8 @@ vi.mock("../src/sandbox.js", async (importOriginal) => {
     ...actual,
     sandboxKind: () => (sandboxProbe.forceBwrap ? ("bwrap" as const) : actual.sandboxKind()),
     createSandboxedBash(...args: Parameters<typeof actual.createSandboxedBash>) {
-      sandboxProbe.masked.push(args[3] ?? []);
+      sandboxProbe.masked.push(args[3]?.masked ?? []);
+      sandboxProbe.toolboxes.push(args[3]?.toolboxDir ?? null);
       const created = actual.createSandboxedBash(...args);
       if (sandboxProbe.forceNone) return { ...created, sandbox: "none" as const };
       return sandboxProbe.forceBwrap ? { ...created, sandbox: "bwrap" as const } : created;
@@ -609,6 +612,7 @@ afterEach(async () => {
   sandboxProbe.forceNone = false;
   sandboxProbe.forceBwrap = false;
   sandboxProbe.masked.splice(0);
+  sandboxProbe.toolboxes.splice(0);
 });
 
 afterAll(() => {
@@ -10092,6 +10096,7 @@ describe("运行器的例行边界", () => {
       expect(shape(h.sent)).not.toContain("approval_request");
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
       expect(sandboxProbe.masked).toEqual([[dirs.agentDir, dirs.sessionDir]]);
+      expect(sandboxProbe.toolboxes).toEqual([dirs.toolboxDir]);
     });
 
     it("本机电脑上同一条照弹审批，沙箱不加遮罩", async () => {
@@ -10103,6 +10108,7 @@ describe("运行器的例行边界", () => {
       expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
       expect(sandboxProbe.masked).toEqual([[]]);
+      expect(sandboxProbe.toolboxes).toEqual([null]);
     });
   });
 

@@ -1,5 +1,5 @@
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import type { ComputerKind } from "@baize/shared";
 import { checkCommand } from "./contained-commands.js";
 import { Prover } from "./contained-prover.js";
@@ -8,6 +8,13 @@ import type { SandboxKind } from "./gate.js";
 import { realpathExisting } from "./paths.js";
 
 export type ContainmentLevel = "none" | "closed";
+
+/**
+ * closed 时带着沙箱 bash 真正用的 PATH 和这个 Bot 的工具箱。两样都由 createSandboxedBash 给出，闸门和证明器
+ * 从同一个对象拿：证明器按这个 PATH 解析命令名，批 pip 时写路径就是这个工具箱。
+ */
+export type Containment =
+  { readonly level: "none" } | { readonly level: "closed"; readonly searchPath: string; readonly toolboxDir: string };
 
 /** 只有远程电脑上的 bwrap 是 closed。Mac 的 seatbelt 不在拍板范围里，一条都不放宽。 */
 export function containmentFor(computerKind: ComputerKind, sandbox: SandboxKind): { readonly level: ContainmentLevel } {
@@ -34,6 +41,8 @@ export interface ContainedContext {
   readonly sharedDir: string;
   /** 闸门的禁区。助理 Chrome 的 profile 可以配在工作区里面，沙箱会盖住它，但判定本身也不该对它说放行。 */
   readonly forbidden: readonly string[];
+  /** 沙箱 bash 的 PATH。表里的命令按名字认，名字落到哪个文件由它定，工具箱里一个同名的入口脚本就能顶掉系统的。 */
+  readonly searchPath: string;
 }
 
 export interface ContainedVerdict {
@@ -65,32 +74,35 @@ const executable = (path: string): boolean => {
   }
 };
 
-/** 按 bash 找命令的顺序，PATH 里第一个有这个可执行文件的目录必须是系统目录。工作区里的同名程序跑什么都有可能。 */
-const resolvesToSystemBinary = (name: string): boolean => {
-  const entries = (process.env["PATH"] ?? "").split(":");
+/**
+ * 按 bash 找命令的顺序，`searchPath` 里第一个有这个可执行文件的目录里的那个文件，realpath 之后必须在系统目录里。
+ * 工作区或工具箱里的同名程序跑什么都有可能。
+ */
+export const resolvesToSystemBinary = (name: string, searchPath: string): boolean => {
+  const entries = searchPath.split(":");
   // 空项和相对项跟着 cwd 走，cwd 是工作区。
   if (entries.some((entry) => !isAbsolute(entry))) return false;
   const system = new Set(SYSTEM_BIN_DIRS.flatMap((dir) => realOrNull(dir) ?? []));
   const found = entries.find((entry) => executable(join(entry, name)));
   if (found === undefined) return false;
-  const real = realOrNull(found);
-  return real !== null && system.has(real);
+  const real = realOrNull(join(found, name));
+  return real !== null && system.has(dirname(real));
 };
 
 const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
-function checkSegment(segment: Segment, prover: Prover): { readonly makesLinks: boolean } {
+function checkSegment(segment: Segment, prover: Prover, searchPath: string): { readonly makesLinks: boolean } {
   const [name = "", ...args] = segment.words;
   if (!COMMAND_NAME.test(name)) unproven(`命令名 ${name} 不是裸词`);
+  if (!resolvesToSystemBinary(name, searchPath)) unproven(`${name} 不是系统目录里的程序`);
   if (args.length === 1 && PROBE_FLAGS.has(args[0] ?? "")) {
     if (NEVER_PROBED.has(name)) unproven(`${name} 连查版本也问`);
-    if (!resolvesToSystemBinary(name)) unproven(`${name} 不是系统目录里的程序`);
     return { makesLinks: false };
   }
   return checkCommand(name, args, prover);
 }
 
-function proveChain(chain: Chain, prover: Prover): void {
+function proveChain(chain: Chain, prover: Prover, searchPath: string): void {
   let atHead = true;
   chain.segments.forEach((segment, index) => {
     for (const redirect of segment.redirects) {
@@ -109,7 +121,7 @@ function proveChain(chain: Chain, prover: Prover): void {
       return;
     }
     atHead = false;
-    const { makesLinks } = checkSegment(segment, prover);
+    const { makesLinks } = checkSegment(segment, prover, searchPath);
     if (makesLinks && index !== chain.segments.length - 1) unproven(`${name ?? ""} 会建链接，只许放在最后一段`);
   });
 }
@@ -122,7 +134,7 @@ export function provablyContained(command: string, ctx: ContainedContext): Conta
   try {
     if (command.trim() === "") unproven("空命令");
     const prover = new Prover(ctx);
-    proveChain(lex(command), prover);
+    proveChain(lex(command), prover, ctx.searchPath);
     return { contained: true, why: "" };
   } catch (error) {
     // 路径解不出来（成环的链接）或 fs 报错也只是证明不了，照原来的判定问，不往外抛。

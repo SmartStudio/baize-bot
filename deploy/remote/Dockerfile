@@ -33,11 +33,13 @@ CMD ["node", "--import", "tsx", "src/main.ts"]
 # git、python3 给 Bot 的 bash 用，运行器的命令分类认这两个命令（bot-runner/src/gate.ts）。
 # chromium-l10n：Linux 的 chromium 不认 --lang，只按 LANG 找语言包，没有它 navigator.languages 和 Accept-Language 是 en-US。
 # fonts-liberation2：补上和 Arial、Helvetica 同宽的字体，只剩 Noto CJK 的字体表一看就是空容器。
+# python3-venv 给批准后的 pip 用：工具箱第一次装包时 `python3 -m venv` 建环境，Debian 把 ensurepip 的 wheel 拆在这个包里，
+# 没有它 venv 建得出来但里面没有 pip。
 FROM ${NODE_IMAGE} AS remote-computer
 ARG APT_MIRROR=
 RUN if [ -n "$APT_MIRROR" ]; then sed -i "s#http://deb.debian.org#${APT_MIRROR}#g" /etc/apt/sources.list.d/debian.sources; fi \
   && apt-get update \
-  && apt-get install -y --no-install-recommends chromium chromium-l10n fonts-liberation2 xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk git python3 \
+  && apt-get install -y --no-install-recommends chromium chromium-l10n fonts-liberation2 xvfb xauth bubblewrap procps curl ca-certificates fonts-noto-cjk git python3 python3-venv \
   && rm -rf /var/lib/apt/lists/*
 COPY --from=deps /app /app
 COPY deploy/remote/remote-entrypoint.sh /usr/local/bin/remote-entrypoint.sh

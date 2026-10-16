@@ -814,7 +814,7 @@ export function createRunner(config: RunnerConfig): Runner {
       dirs.workDir,
       zones,
       () => lane.active?.run.runId ?? null,
-      containment.level === "closed" ? [dirs.agentDir, dirs.sessionDir] : [],
+      containment.level === "closed" ? { masked: [dirs.agentDir, dirs.sessionDir], toolboxDir: dirs.toolboxDir } : null,
     );
     if (config.browser !== undefined && bot.browser === null) {
       bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);
@@ -961,7 +961,7 @@ export function createRunner(config: RunnerConfig): Runner {
           groupId,
           platform: process.platform,
           sandbox: bash.sandbox,
-          containment,
+          containment: bash.containment,
           source,
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,

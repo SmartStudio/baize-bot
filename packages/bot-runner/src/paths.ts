@@ -22,6 +22,8 @@ export interface BotDirs {
   readonly draftsDir: string;
   /** 所有 Bot 共用的产出目录。 */
   readonly sharedDir: string;
+  /** 云电脑上这个 Bot 自己装的 Python 包：`venv/` 在它下面，沙箱 bash 的 PATH 把 `venv/bin` 放最前。平时只读，批了 pip 才可写。 */
+  readonly toolboxDir: string;
 }
 
 // GroupId 在边界上已经是这段正则。这里再挡一次：拼路径时不改写，对不上就拒绝。
@@ -42,11 +44,21 @@ export function botDirs(dataDir: string, botId: BotId): BotDirs {
     skillsDir: join(root, "skills"),
     draftsDir: join(root, "drafts"),
     sharedDir: resolve(dataDir, "shared"),
+    toolboxDir: join(root, "toolbox"),
   };
 }
 
+// 工具箱也先建出来：bwrap 只能 bind 已存在的路径，批准写一个还不存在的工具箱会退到放开整个 Bot 目录。
 export function ensureBotDirs(dirs: BotDirs): BotDirs {
-  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir, dirs.sharedDir]) {
+  for (const dir of [
+    dirs.agentDir,
+    dirs.sessionDir,
+    dirs.workDir,
+    dirs.skillsDir,
+    dirs.draftsDir,
+    dirs.sharedDir,
+    dirs.toolboxDir,
+  ]) {
     mkdirSync(dir, { recursive: true });
   }
   return dirs;
