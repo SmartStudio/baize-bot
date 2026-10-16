@@ -50,7 +50,10 @@ function parsePort(raw: string | undefined): number {
  * 测试直接构造一份指向假上游，所以 src 里除了这个文件没有第二处读 process.env。
  */
 export type RuntimeConfig = {
-  /** 下发给电脑代理的模型网关地址前缀。null 表示用实际监听的端口拼。 */
+  /**
+   * 只给 webBaseUrl 当回退。null 表示用实际监听的端口拼。
+   * 电脑代理拿到的数据面地址不看它，拼在代理 hello 里自报的 controlOrigin 上。
+   */
   readonly publicBaseUrl: string | null;
   /** 网关两个用途对应的真实上游模型名。 */
   readonly gatewayModels: GatewayModels;
@@ -60,7 +63,7 @@ export type RuntimeConfig = {
   readonly priceOutputPerM: number;
   /**
    * 浏览器打开 Web 的那个地址，`/api` 在它下面转给控制面。OAuth 回调和授权完跳回的页面都拼在它上面。
-   * null 就用 publicBaseUrl：部署时那个常是电脑代理在内网连控制面的地址，浏览器未必到得了，所以分开配。
+   * null 就用 publicBaseUrl，两个都没设就退到实际监听的 localhost 端口，只在本机开发时对。
    */
   readonly webBaseUrl: string | null;
   /** 发布器、账号代理和「我是谁」打的平台接口根地址。测试和实机验证指到假平台。X 的令牌端点也在 xApiBaseUrl 下。 */

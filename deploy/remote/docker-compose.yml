@@ -41,8 +41,6 @@ services:
     environment:
       DATABASE_URL: postgres://baize:${POSTGRES_PASSWORD:-baize}@postgres:5432/baize
       PORT: "3001"
-      # 下发给电脑代理的网关前缀。远程电脑和控制面在同一个 compose 网络里，走服务名。
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://control-plane:3001}
       UPSTREAM_BASE_URL: ${UPSTREAM_BASE_URL:?要设上游地址}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:?要设上游 key}
       GATEWAY_MODELS: ${GATEWAY_MODELS:-plan=baize-default,fast=baize-default}
@@ -51,7 +49,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
       # 平台账号令牌的加密密钥，32 字节 base64。换了它，已存的令牌全部解不开。
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:?缺 CREDENTIALS_KEY}
-      # 浏览器打开 Web 的地址，OAuth 回调拼在它上面。上面的 PUBLIC_BASE_URL 是 compose 内网地址，浏览器到不了。
+      # 浏览器打开 Web 的地址，OAuth 回调拼在它上面。控制面自己推不出浏览器到得了的地址，所以必填。
       WEB_BASE_URL: ${WEB_BASE_URL:?缺 WEB_BASE_URL}
       # 两家 OAuth 应用。不设的那家，账号页点连接回 503。
       GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}

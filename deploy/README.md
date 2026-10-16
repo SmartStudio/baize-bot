@@ -9,7 +9,7 @@
 ```
 浏览器 ──https──▶ Caddy :443 ──┬─ /api、/api/ws ─────────▶ 控制面 127.0.0.1:3201（容器里 3001）
                                ├─ /agent（本机电脑代理）──▶ 同上
-                               ├─ /gateway/v1、/accounts-proxy（可选，见「PUBLIC_BASE_URL」）
+                               ├─ /gateway/v1、/hub/v1、/mcp-proxy、/accounts-proxy（本机电脑代理的数据面）──▶ 同上
                                └─ 其余路径 ──▶ /srv/baize-web 里 Web 的静态文件
 compose 网络：postgres、migrate（一次性）、control-plane、remote-computer
 ```
@@ -66,7 +66,7 @@ docker compose logs remote-computer | grep 'bubblewrap 起不来'   # 应当没�
 
 compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些变量以 `packages/control-plane/src/env.ts` 为准，src 里只有这一个文件读 `process.env`（`env.ts:48-51`）。
 
-控制面容器只拿到 `remote/docker-compose.yml:41-68` 列出的变量，写进 `.env` 但没列在那里的变量到不了控制面。env.ts 读的变量里，只有旧变量 `GATEWAY_MODEL` 没列，原因见最后一张表。
+控制面容器只拿到 `remote/docker-compose.yml:41-68` 列出的变量，写进 `.env` 但没列在那里的变量到不了控制面。env.ts 读的变量里，只有旧变量 `GATEWAY_MODEL` 和 `PUBLIC_BASE_URL` 没列，原因见最后一张表。
 
 **compose 传给控制面的：**
 
@@ -78,7 +78,6 @@ compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些
 | `TOOL_SECRET_KEY` | 是 | 报错不起 | 64 位十六进制（`packages/control-plane/src/crypto.ts:31`），`openssl rand -hex 32`。控制面本身没设时退回一把写在代码里的开发密钥（`env.ts:16-24`），compose 用 `:?` 挡住了这种情况 |
 | `CREDENTIALS_KEY` | 是 | 报错不起 | 32 字节 base64，`openssl rand -base64 32`。没设或格式不对启动失败（`env.ts:27-33`、`packages/control-plane/src/credentials.ts:24`） |
 | `WEB_BASE_URL` | 是 | 报错不起 | 浏览器打开 Web 的地址，如 `https://baize.example.com`，OAuth 回调拼在它上面（`env.ts:100`） |
-| `PUBLIC_BASE_URL` | 否 | `http://control-plane:3001` | 下发给所有电脑的网关和账号代理前缀，见下一节 |
 | `PRICE_INPUT_PER_M`、`PRICE_OUTPUT_PER_M` | 否 | `0` | 每百万 token 价格，折算 run 的花费（`env.ts:96-97`）。不设用量金额恒为 0 |
 | `GITHUB_API_BASE_URL`、`X_API_BASE_URL`、`GITHUB_OAUTH_BASE_URL`、`X_OAUTH_BASE_URL` | 否 | 各家官方地址，和 `env.ts:84-87` 一致 | 只在验证时指到假平台（`env.ts:98-99`、`:122-123`），生产不用设 |
 | `COOKIE_SECURE` | 上了 HTTPS 就设 | `0` | 设成 `1` 会话 cookie 才带 Secure（`env.ts:12-14`） |
@@ -99,14 +98,25 @@ compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `GATEWAY_MODEL` | 无 | 旧变量，只在 `GATEWAY_MODELS` 为空时作为两个用途的模型名（`env.ts:127-144`）。compose 给 `GATEWAY_MODELS` 带了非空默认值，传了它也不会生效，所以不传。todo 第 220 行记着等各环境迁完就删 |
+| `PUBLIC_BASE_URL` | 空，用实际监听的 `http://localhost:<端口>` | 只在没设 `WEB_BASE_URL` 时给 OAuth 回调当前缀。compose 里 `WEB_BASE_URL` 必填，所以不传。电脑拿到的数据面地址不看它，见下一节 |
 
-### `PUBLIC_BASE_URL` 只有一个值
+### 电脑的数据面地址跟着它连控制面的地址走
 
-控制面给每台电脑下发的模型网关地址和账号代理地址，都拼在同一个 `PUBLIC_BASE_URL` 上，不分本机电脑和远程电脑（`packages/control-plane/src/server.ts:95-103`、`packages/control-plane/src/agent/hub.ts:523-526`）。
+电脑代理除了 `/agent` 那条 WebSocket，还要打控制面的四个 HTTP 前缀，统称数据面：
 
-compose 的默认值 `http://control-plane:3001` 只有 compose 网络里的远程电脑连得上。用户自己电脑上的桌面端也连这个控制面时，会收到这个地址，模型请求和账号代理请求都发不出去。代码只能推出这一点，没有实测过。
+| 前缀 | 用途 |
+| --- | --- |
+| `/gateway/v1` | 模型网关 |
+| `/hub/v1` | 中枢，查记忆、读车道 |
+| `/mcp-proxy` | 远程 MCP 工具的代执行 |
+| `/accounts-proxy` | Bot 读 GitHub、X |
 
-只用远程电脑时保持默认即可。本机电脑也要连时，把 `PUBLIC_BASE_URL` 设成 `https://baize.example.com`，Caddy 再放行 `/gateway/v1` 和 `/accounts-proxy`。这样远程电脑也改走公网域名，要求容器里能解析并连上这个域名（未在真机验证）。
+这四个地址随 `config` 下发，控制面一律拼在代理 `hello` 里自报的 `controlOrigin` 上（`packages/control-plane/src/agent/data-plane.ts` 的 `dataPlaneUrls`）。代理自报的就是它连 `/agent` 用的那个地址的源，`ws://` 换成 `http://`，`wss://` 换成 `https://`（`packages/shared/src/agent-launch.ts` 的 `controlOriginFromAgentUrl`）。所以每台电脑拿到的地址各是各的，不用配：
+
+- 远程电脑连 compose 内网的 `ws://control-plane:3001/agent`（`remote/put-launch.sh` 的 `AGENT_URL` 默认值），数据面也走 `http://control-plane:3001`，不经 Caddy。
+- 本机桌面端连 `wss://baize.example.com/agent`，数据面走 `https://baize.example.com`，经 Caddy 转给控制面。所以 Caddy 必须把四个前缀都转过去，漏了的那类请求会落到下面的静态文件块，回的是 `index.html`，Bot 那一侧表现成模型、记忆、工具或账号请求失败。
+
+控制面不读请求的 `Host` 头拼地址。nginx 的 `proxy_pass` 默认把 `Host` 改写成上游地址，换 nginx 做反代也不影响下发的地址。
 
 ## Caddy 托管 Web
 
@@ -133,8 +143,14 @@ baize.example.com {
 	handle /agent {
 		reverse_proxy 127.0.0.1:3201
 	}
-	# 只在 PUBLIC_BASE_URL 设成公网域名时需要。
+	# 本机电脑代理的数据面，四个都要转，见「电脑的数据面地址跟着它连控制面的地址走」。
 	handle /gateway/v1/* {
+		reverse_proxy 127.0.0.1:3201
+	}
+	handle /hub/v1/* {
+		reverse_proxy 127.0.0.1:3201
+	}
+	handle /mcp-proxy/* {
 		reverse_proxy 127.0.0.1:3201
 	}
 	handle /accounts-proxy/* {
@@ -208,13 +224,13 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 
 控制面挡旧代理有两道关。`hello` 里的 `version`（写死的 `"0.1.0"`，`packages/computer-agent/src/main.ts:5`）没有代码读，起作用的是另外两样：
 
-- **协议号。** `hello` 带 `protocol`，不带按 1 算（`packages/shared/src/protocol.ts:96`）。低于 `MIN_AGENT_PROTOCOL`（现在是 3，`protocol.ts:555`）的连接，控制面直接用 4003 关掉（`packages/control-plane/src/agent/hub.ts:242-243`）。代理在 stdout 写一行 `{"type":"upgrade_required"}` 后停机，桌面端弹窗请用户更新白泽（`packages/desktop/src/main.ts:287-290`、`:573-577`）。
+- **协议号。** `hello` 带 `protocol`，不带按 1 算（`packages/shared/src/protocol.ts:96`）。低于 `MIN_AGENT_PROTOCOL`（现在是 4，`protocol.ts` 里的常量）的连接，控制面直接用 4003 关掉（`packages/control-plane/src/agent/hub.ts:242-243`）。协议 4 起 `hello` 还必须带 `controlOrigin`，缺了或格式不对用 4001 关掉，旧代理不带它也先撞上协议号，拿到的仍是 4003。代理在 stdout 写一行 `{"type":"upgrade_required"}` 后停机，桌面端弹窗请用户更新白泽（`packages/desktop/src/main.ts:287-290`、`:573-577`）。
 - **config 校验。** 协议号够、但 config 的形状这个代理认不出来时，代理回一条 `config_rejected`（`packages/computer-agent/src/agent.ts:304-316`）。控制面把这台电脑记成拒收，不再往它派活。群里那句写「电脑上的白泽版本和控制面对不上」（`packages/control-plane/src/agent/computer-selection.ts:23`），同时给用户推一条卡住通知（`packages/control-plane/src/agent/events.ts:820-826`）。代理回了新一代的 `config_applied` 才恢复派活。
 
 所以升级顺序是：
 
 - 远程电脑和控制面出自同一次构建，`docker compose build && docker compose up -d` 让两者一起升。
-- 用户电脑上的桌面端不会跟着升。改了报文形状却没抬 `MIN_AGENT_PROTOCOL` 的版本，旧代理还能连上，但会卡在 config 拒收，用户看到的是「派不出去」而不是升级弹窗。改报文形状的版本要同时抬 `AGENT_PROTOCOL` 和 `MIN_AGENT_PROTOCOL`（`protocol.ts:554-555`），升级控制面前先发桌面端新版。
+- 用户电脑上的桌面端不会跟着升。改了报文形状却没抬 `MIN_AGENT_PROTOCOL` 的版本，旧代理还能连上，但会卡在 config 拒收，用户看到的是「派不出去」而不是升级弹窗。改报文形状的版本要同时抬 `AGENT_PROTOCOL` 和 `MIN_AGENT_PROTOCOL`（`protocol.ts` 里挨着的两个常量），升级控制面前先发桌面端新版。
 
 ## 给别人开账号
 

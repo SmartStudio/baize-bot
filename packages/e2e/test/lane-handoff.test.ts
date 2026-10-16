@@ -1,9 +1,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "vitest";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 import {
   AgentToControl,
   BotListResponse,
@@ -17,6 +16,7 @@ import {
 } from "@baize/shared";
 import { createRunner, type Runner } from "@baize/bot-runner";
 import { startAgent, type AgentHandle } from "@baize/computer-agent";
+import { startRelayEntry } from "../src/relay.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream } from "../src/upstream.js";
 
@@ -34,20 +34,19 @@ type Relay = {
   close(): Promise<void>;
 };
 
-async function relay(target: string): Promise<Relay> {
+async function relay(controlPort: number): Promise<Relay> {
   const up: AgentToControl[] = [];
   const down: ControlToAgent[] = [];
   const reliableDown: DownlinkFrame[] = [];
   const sockets = new Set<WebSocket>();
   let cut = false;
-  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-  await new Promise<void>((resolve) => server.once("listening", resolve));
-  server.on("connection", (agent) => {
+  const entry = await startRelayEntry(controlPort);
+  entry.agents.on("connection", (agent) => {
     if (cut) {
       agent.terminate();
       return;
     }
-    const control = new WebSocket(target);
+    const control = new WebSocket(`ws://127.0.0.1:${controlPort}/agent`);
     const early: string[] = [];
     for (const socket of [agent, control]) {
       sockets.add(socket);
@@ -84,7 +83,7 @@ async function relay(target: string): Promise<Relay> {
     for (const socket of sockets) socket.terminate();
   };
   return {
-    url: `ws://127.0.0.1:${(server.address() as AddressInfo).port}/agent`,
+    url: `ws://127.0.0.1:${entry.port}/agent`,
     up,
     down,
     reliableDown,
@@ -95,11 +94,10 @@ async function relay(target: string): Promise<Relay> {
     restore: () => {
       cut = false;
     },
-    close: () =>
-      new Promise<void>((resolve) => {
-        disconnect();
-        server.close(() => resolve());
-      }),
+    close: async () => {
+      disconnect();
+      await entry.close();
+    },
   };
 }
 
@@ -202,8 +200,8 @@ it("本机断线过宽限后远程接手：run_done 一次，本机重连收到�
     });
     const local = ComputerTokenResponse.parse(await stack.post("/api/computers/local", { confirmDisplace: true }));
     const remote = ComputerTokenResponse.parse(await stack.post("/api/computers/remote", {}));
-    localLink = await relay(`ws://127.0.0.1:${stack.port}/agent`);
-    remoteLink = await relay(`ws://127.0.0.1:${stack.port}/agent`);
+    localLink = await relay(stack.port);
+    remoteLink = await relay(stack.port);
     const localComputer = computer(localLink, local, join(dataDir, "local"));
     const remoteComputer = computer(remoteLink, remote, join(dataDir, "remote"));
     localAgent = localComputer.agent;

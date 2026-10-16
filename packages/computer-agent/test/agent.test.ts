@@ -554,6 +554,7 @@ afterEach(async () => {
 describe("电脑代理连控制面", () => {
   it("连上后 3 秒内发出 hello，且能 parse 通过 AgentToControl", async () => {
     const server = await startPair();
+    const port = new URL(await server.url()).port;
 
     const hello = await server.waitForMessage("hello", 1, 3000);
 
@@ -563,7 +564,8 @@ describe("电脑代理连控制面", () => {
         computerId: "computer-1",
         token: "dev-token",
         version: "0.1.0",
-        protocol: 3,
+        protocol: 4,
+        controlOrigin: `http://127.0.0.1:${port}`,
         installId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         piSessionVersion: CURRENT_SESSION_VERSION,
         uplinkStream: expect.any(String),
@@ -571,6 +573,10 @@ describe("电脑代理连控制面", () => {
         activeRuns: [],
       }),
     );
+  });
+
+  it("连控制面的地址推不出源就启动即失败，不带着错的地址去连", () => {
+    expect(() => spawnAgent("http://127.0.0.1:9/agent")).toThrow("http://127.0.0.1:9/agent");
   });
 
   it("dataDir 中的状态属于另一台电脑时，第一次握手就用新流和游标零", async () => {

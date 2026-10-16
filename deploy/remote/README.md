@@ -11,11 +11,11 @@ deploy/remote/
   put-launch.sh        换一份远程电脑 token，写成启动文件放进容器
 ```
 
-Web 前端不在这份 compose 里，控制面也不托管静态文件。上线要另起一个静态站或反向代理，把 `/api`、`/api/ws` 转给控制面。
+Web 前端不在这份 compose 里，控制面也不托管静态文件。上线要另起一个静态站或反向代理，把 `/api`、`/api/ws` 转给控制面。用户本机的桌面端也连这个控制面时，还要转 `/agent` 和电脑代理的四个数据面前缀 `/gateway/v1`、`/hub/v1`、`/mcp-proxy`、`/accounts-proxy`，见 [`../README.md`](../README.md) 的「电脑的数据面地址跟着它连控制面的地址走」。远程电脑在 compose 网络里直连控制面，不经反向代理。
 
 ## 要准备的东西
 
-**域名和 TLS。** 给控制面一个域名，比如 `baize.example.com`。TLS 在反向代理上终结（Caddy、nginx 都行），反向代理转到本机的 `CONTROL_PLANE_PORT`（默认 3201）。compose 只把这个端口绑在 `127.0.0.1` 上，反向代理要和 compose 在同一台机器。`/api/ws` 和 `/agent` 是 WebSocket，反向代理要放行 Upgrade。上了 HTTPS 以后把 `COOKIE_SECURE=1` 打开。
+**域名和 TLS。** 给控制面一个域名，比如 `baize.example.com`。TLS 在反向代理上终结（Caddy、nginx 都行），反向代理转到本机的 `CONTROL_PLANE_PORT`（默认 3201）。compose 只把这个端口绑在 `127.0.0.1` 上，反向代理要和 compose 在同一台机器。`/api/ws` 和 `/agent` 是 WebSocket，反向代理要放行 Upgrade。nginx 的 `proxy_pass` 默认把 `Host` 改写成上游地址，这不影响电脑拿到的地址：控制面不读 `Host`，数据面地址拼在电脑代理自报的源上。上了 HTTPS 以后把 `COOKIE_SECURE=1` 打开。
 
 **上游 key。** `UPSTREAM_BASE_URL` 是 OpenAI 兼容的上游地址，`UPSTREAM_API_KEY` 是它的 key，必须是 ASCII，否则每次上游请求都是 502。`GATEWAY_MODELS` 写 `plan=<模型>,fast=<模型>`。
 
@@ -28,7 +28,7 @@ Web 前端不在这份 compose 里，控制面也不托管静态文件。上线�
 <WEB_BASE_URL>/api/oauth/x/callback
 ```
 
-`WEB_BASE_URL` 是浏览器打开 Web 的地址，比如 `https://baize.example.com`，回调和授权完跳回的首页都拼在它上面（末尾的 `/` 会去掉），登记的地址要和拼出来的一字不差。这份 compose 里 `PUBLIC_BASE_URL` 是远程电脑在 compose 网络里连控制面的 `http://control-plane:3001`，浏览器到不了，所以回调单独用 `WEB_BASE_URL`，不设才退回 `PUBLIC_BASE_URL`。
+`WEB_BASE_URL` 是浏览器打开 Web 的地址，比如 `https://baize.example.com`，回调和授权完跳回的首页都拼在它上面（末尾的 `/` 会去掉），登记的地址要和拼出来的一字不差。控制面不设 `WEB_BASE_URL` 时退回 `PUBLIC_BASE_URL`，两个都没设就是实际监听的 localhost 端口，浏览器到不了。这份 compose 只认 `WEB_BASE_URL`，要求必填，不传 `PUBLIC_BASE_URL`。
 
 GitHub 要建 GitHub App，勾上「过期的用户令牌」，把 client id、client secret 填进 `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET`，两个要一起设。X 建 OAuth 2.0 应用，权限要带 `offline.access` 才拿得到 refresh 令牌；公共客户端只填 `X_CLIENT_ID`，机密客户端再填 `X_CLIENT_SECRET`。哪家没配，账号页点那家会回 503「管理员还没配…应用」。
 

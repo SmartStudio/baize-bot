@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DiscoveryError, DISCOVERY_FAILURE_MESSAGES } from "../mcp/discover.js";
-import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
-import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
-import { HUB_PATH } from "../http/hub.js";
 import {
   McpDiscoveryResult,
   McpHttpUrl,
@@ -20,6 +17,7 @@ import {
   DownlinkFrame,
   type Computer,
   type ComputerKind,
+  type ControlOrigin,
   type ComputerId,
   type MessageId,
   type RunId,
@@ -63,6 +61,7 @@ import {
   pendingPrompts,
   replayOutbox,
 } from "./envelope.js";
+import { dataPlaneUrls } from "./data-plane.js";
 import { handleEnvelopedEvent } from "./envelope-events.js";
 import { setComputerLease } from "./lease-clock.js";
 import type { GroupTurns } from "./group-turn.js";
@@ -105,6 +104,8 @@ export type AgentConnection = {
   readonly socket: WebSocket;
   /** 这条连接下发给电脑的网关 key 明文。hello 时现生成，只活在这条连接上。 */
   readonly gatewayKey: string;
+  /** 代理在 hello 里自报的控制面源，这条连接收到的 config 地址都拼在它上面。随连接消失，不入库。 */
+  readonly controlOrigin: ControlOrigin;
   readonly conn: number;
   readonly installId: string;
   readonly piSessionVersion: number;
@@ -121,8 +122,6 @@ export type AgentHubDeps = {
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly groupTurns: GroupTurns;
-  /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
-  readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
   readonly silenceTimeoutMs?: number | undefined;
   readonly mcpDiscoveryTimeoutMs?: number | undefined;
@@ -243,6 +242,11 @@ export class AgentHub {
             socket.close(AgentCloseCode.upgradeRequired, "电脑代理需要升级");
             return;
           }
+          const { controlOrigin } = message;
+          if (controlOrigin === undefined) {
+            socket.close(AgentCloseCode.badHello, "hello 缺 controlOrigin");
+            return;
+          }
           clearTimeout(deadline);
           // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
           const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
@@ -275,7 +279,7 @@ export class AgentHub {
               );
               return;
             }
-            conn = await this.#onHello(socket, authenticated, message);
+            conn = await this.#onHello(socket, authenticated, message, controlOrigin);
           });
         },
         (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
@@ -612,6 +616,7 @@ export class AgentHub {
     socket: WebSocket,
     computer: Computer,
     hello: Extract<AgentToControl, { type: "hello" }>,
+    controlOrigin: ControlOrigin,
   ): Promise<AgentConnection | null> {
     let accepted: AgentConnection | null = null;
     try {
@@ -634,6 +639,7 @@ export class AgentHub {
         ownerId: computer.ownerId,
         socket,
         gatewayKey,
+        controlOrigin,
         conn: handshakeCursor.conn,
         installId: hello.installId,
         piSessionVersion: hello.piSessionVersion,
@@ -871,6 +877,7 @@ export class AgentHub {
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
     const entries = await listBots(this.#deps.db, conn.ownerId);
     const bots = entries.map((item) => item.bot);
+    const urls = dataPlaneUrls(conn.controlOrigin);
     this.#send(conn, {
       type: "config",
       generation,
@@ -883,8 +890,8 @@ export class AgentHub {
         preset,
       })),
       tools,
-      mcpProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${MCP_PROXY_PATH}` },
-      hub: { baseUrl: `${this.#deps.gatewayBaseUrl()}${HUB_PATH}` },
+      mcpProxy: { baseUrl: urls.mcpProxy },
+      hub: { baseUrl: urls.hub },
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,
@@ -893,11 +900,8 @@ export class AgentHub {
       // brand 和 preferences 同 skills 一样恒带：运行器靠它们判断要不要重拼系统提示，省掉就分不清「没有」和「没说」。
       brand,
       preferences,
-      modelGateway: {
-        baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
-        apiKey: conn.gatewayKey,
-      },
-      accountsProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${ACCOUNTS_PROXY_PATH}` },
+      modelGateway: { baseUrl: urls.modelGateway, apiKey: conn.gatewayKey },
+      accountsProxy: { baseUrl: urls.accountsProxy },
     });
     if (reason === "hello") {
       for (const bot of bots) this.#send(conn, { type: bot.runState === "paused" ? "pause" : "resume", botId: bot.id });
