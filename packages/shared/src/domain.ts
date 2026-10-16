@@ -69,6 +69,15 @@ export type ComputerStatus = z.infer<typeof ComputerStatus>;
 export const ComputerKind = z.enum(["local", "remote"]);
 export type ComputerKind = z.infer<typeof ComputerKind>;
 
+/** 这个 Bot 这一轮看到的「另一台」和「这个群选的是谁」。choice 为 null 表示没选过。 */
+export const ComputerView = z
+  .object({
+    other: z.object({ kind: ComputerKind, dispatchable: z.boolean() }).strict().nullable(),
+    choice: ComputerKind.nullable(),
+  })
+  .strict();
+export type ComputerView = z.infer<typeof ComputerView>;
+
 export const Computer = z.object({
   id: ComputerId,
   ownerId: UserId,

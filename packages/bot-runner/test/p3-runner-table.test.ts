@@ -55,6 +55,7 @@ const view = (): PokerSeatView =>
 
 const prompt = (role: TablePrompt["role"] = "player", overrides: Partial<PromptMessage> = {}): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse("run-table"),
   botId: BotId.parse("bot-table"),
   groupId: GroupId.parse("group-table"),

@@ -27,8 +27,11 @@ export type PlaceRunInput = {
   readonly triggerMessageId?: MessageId;
   readonly routineRunId?: string | undefined;
   readonly table?: { readonly role: PokerTableRole; readonly visibleTo: readonly [Viewer, ...Viewer[]] };
-  readonly prompt: (runId: RunId, messageId: MessageId) => Promise<Omit<Prompt, "runId" | "lane">>;
+  readonly prompt: (runId: RunId, messageId: MessageId, placed: Placement) => Promise<Omit<Prompt, "runId" | "lane">>;
 };
+
+/** run 实际落在哪台、锁里读到的选定。prompt 的电脑快照按它算，不按锁外挑电脑时的那次。 */
+export type Placement = { readonly computerId: ComputerId; readonly preference: ComputerPreference };
 
 export type PlaceRunResult =
   | {
@@ -173,7 +176,7 @@ export async function placeRun(
     .where(and(eq(workStreams.botId, input.botId), eq(workStreams.groupId, input.groupId)))) {
     heads[stream.stream] = { seq: stream.nextSeq, head: stream.head };
   }
-  const body = await input.prompt(runId, triggerMessageId);
+  const body = await input.prompt(runId, triggerMessageId, { computerId, preference });
   if (!(await enqueueDownlink(tx, computerId, { ...body, runId, lane: { epoch: lease.epoch, heads } }, runId)))
     return tx.rollback();
   return {

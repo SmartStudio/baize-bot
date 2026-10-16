@@ -91,6 +91,7 @@ export type Stack = {
   get(path: string): Promise<unknown>;
   post(path: string, body: unknown): Promise<unknown>;
   patch(path: string, body: unknown): Promise<unknown>;
+  put(path: string, body: unknown): Promise<unknown>;
   /** 按到达顺序取下一条推送，等不到就抛。 */
   nextPush(timeoutMs?: number): Promise<ServerPush>;
   startComputer(): Promise<void>;
@@ -358,6 +359,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       get: api.get,
       post: api.post,
       patch: api.patch,
+      put: api.put,
       nextPush: push.next,
       startComputer,
       stopComputer,
@@ -586,12 +588,14 @@ function makeApi(baseUrl: string, cookie: string) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) throw new Error(`${method} ${path} 回了 ${response.status}：${await response.text()}`);
+    if (response.status === 204) return undefined;
     return await response.json();
   };
   return {
     get: (path: string): Promise<unknown> => send("GET", path),
     post: (path: string, body: unknown): Promise<unknown> => send("POST", path, body),
     patch: (path: string, body: unknown): Promise<unknown> => send("PATCH", path, body),
+    put: (path: string, body: unknown): Promise<unknown> => send("PUT", path, body),
   };
 }
 

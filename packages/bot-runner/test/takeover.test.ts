@@ -265,6 +265,7 @@ const prompt = (
   const groupId = GroupId.parse(extra.groupId ?? GROUP);
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(runId),
     botId: BotId.parse(BOT),
     groupId,

@@ -79,6 +79,8 @@ export async function sendHiddenRun(deps: HiddenRunDeps, input: HiddenRunInput):
             table: { ...input.table, role: input.role },
             task: null,
             members: [],
+            // 牌友和老白只管这一手，不在牌桌上换电脑，用不着知道另一台和群里的选定。
+            computer: null,
           }),
         },
         (preference) => computerFor(tx, deps.agents, ownerId, preference),

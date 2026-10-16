@@ -12,6 +12,7 @@ import {
   ChecklistItem,
   ComputerKind,
   ComputerId,
+  ComputerView,
   ContentPlanId,
   DraftContent,
   DraftId,
@@ -521,6 +522,9 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     ),
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
+    // 落位那一刻的快照。账号下只有一台、这个群也没选过时为 null，牌桌恒为 null。
+    // 升级前压在发件箱里的 prompt 没有这个字段，缺省当 null，不然整条 parse 不过被丢掉，run 一直挂着。
+    computer: ComputerView.nullable().default(null),
   }),
   z.object({
     type: z.literal("approval_result"),
