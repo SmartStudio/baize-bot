@@ -192,8 +192,12 @@ export function toSettings(row: typeof schema.settings.$inferSelect): Settings {
   });
 }
 
-export function toComputer(row: typeof schema.computers.$inferSelect): Computer {
-  return Computer.parse({
+/** 库里那一行。dispatchable 要问 hub，库里没有，出 HTTP 和推送之前由 computer-availability.ts 补上。 */
+export type ComputerRecord = Omit<Computer, "dispatchable">;
+const ComputerRecord = Computer.omit({ dispatchable: true });
+
+export function toComputer(row: typeof schema.computers.$inferSelect): ComputerRecord {
+  return ComputerRecord.parse({
     id: row.id,
     ownerId: row.ownerId,
     kind: row.kind,

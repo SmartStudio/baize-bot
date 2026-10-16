@@ -18,7 +18,6 @@ import {
   ControlToAgent,
   DOWNLINK_DELIVERY,
   DownlinkFrame,
-  type Computer,
   type ComputerKind,
   type ComputerId,
   type MessageId,
@@ -43,6 +42,7 @@ import {
   markComputersSleeping,
   rotateGatewayKey,
 } from "../repo/computers.js";
+import type { ComputerRecord } from "../repo/rows.js";
 import { listGrants } from "../repo/grants.js";
 import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
@@ -65,6 +65,7 @@ import {
 } from "./envelope.js";
 import { handleEnvelopedEvent } from "./envelope-events.js";
 import { setComputerLease } from "./lease-clock.js";
+import { availabilityOf, computerAvailability, computerLeases, withDispatchable } from "./computer-availability.js";
 import type { GroupTurns } from "./group-turn.js";
 import { bytesOf, type LiveRelay } from "../live/relay.js";
 
@@ -610,7 +611,7 @@ export class AgentHub {
    */
   async #onHello(
     socket: WebSocket,
-    computer: Computer,
+    computer: ComputerRecord,
     hello: Extract<AgentToControl, { type: "hello" }>,
   ): Promise<AgentConnection | null> {
     let accepted: AgentConnection | null = null;
@@ -666,7 +667,8 @@ export class AgentHub {
         await pendingPrompts(this.#deps.db, computer.id),
       );
       const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
-      if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
+      // 上线推送等 config 收下才发，那时 dispatchable 才是真的。租约先在这里读好，到那一拍不用再 await。
+      const leases = await computerLeases(this.#deps.db, computer.ownerId);
       await this.#deps.notifications.computerOnline(computer.ownerId);
       this.#send(accepted, {
         type: "welcome",
@@ -688,6 +690,11 @@ export class AgentHub {
       await this.#sendConfig(accepted, "hello");
       const handshake = this.#configs.get(accepted);
       if (handshake !== undefined) handshake.state = "ready";
+      if (online !== null)
+        this.#deps.push.push(computer.ownerId, {
+          type: "computer_updated",
+          computer: withDispatchable(online, availabilityOf(leases, this)),
+        });
       await this.flushOutbox(computer.id);
       for (const runId of await closedActiveRuns(this.#deps.db, computer.id, hello.activeRuns))
         this.#send(accepted, { type: "cancel", runId });
@@ -737,7 +744,13 @@ export class AgentHub {
     }
     const computer = await markComputerSleeping(this.#deps.db, closed.computerId, closed.gatewayKey);
     // 新连接的上线排在这个任务后面，这条休眠一定推在它的上线之前。
-    if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });
+    if (computer !== null) {
+      const availability = await computerAvailability(this.#deps.db, this, closed.ownerId);
+      this.#deps.push.push(closed.ownerId, {
+        type: "computer_updated",
+        computer: withDispatchable(computer, availability),
+      });
+    }
   }
 
   /**

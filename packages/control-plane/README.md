@@ -212,6 +212,18 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 | 不碰账号       | 本机在线派本机，否则远程在线派远程，都不在线就派不出去 |
 | 碰账号         | 账号所在的那台；那台离线就派不出去，不改派到另一台     |
 
+**群里选过电脑就只认那一台。** `group_members.computer_kind` 存每个 (Bot, 群) 选的电脑种类。它为 null 表示没选过，按上表派。选过的话，`selectAvailable` 只看那一种电脑：能派就派过去；派不过去报 `chosen_local_offline` 或 `chosen_remote_offline`，不落到另一台；那台连着但拒了 config，照旧报 `config_rejected`。选择跟着 (Bot, 群) 走，所以同一个 Bot 在别的群里照旧本机优先；牌桌换人时，换上来的牌友不继承前一个的选择。
+
+「能派」只在 `agent/computer-availability.ts` 的 `computerAvailability` 一处定义：连着且 config 已收下，或者刚断开、还在宽限期里，并且库里的租约没过期。`GET /api/computers` 和 `computer_updated` 推送里的 `dispatchable` 也由它算。
+
+选择只有一个写者，`agent/computer-choice.ts` 的 `chooseComputer`：
+
+- 用户经 `PUT /api/groups/:groupId/bots/:botId/computer` 选的时候，目标可以不在线，因为出门前先把 Bot 放到云上是合理的。
+- Bot 自己换的时候，目标必须当下能派。
+- 同一个值再选一次，会被 `IS DISTINCT FROM` 条件挡成空 UPDATE，不推送，也不在群里留话。
+
+`dispatchUserMessage` 那唯一一次选电脑放在路由之后，按头一个 speaker 在这个群里的选择来选。
+
 **这一版派活不要求账号，候选电脑也不带账号。** `dispatch.ts` 的 `computerFor` 给 `selectComputer` 传的要求账号和每台电脑的账号都是空数组，实际走的是上表第一行。没有哪张表把群、例行或 Bot 绑到账号上，能从数据里算出来的只有群里草稿用过的账号。拿它来算不对：起草只要 `config.accounts` 里有这个账号，哪台电脑都能起，真发由发布循环按账号所在的电脑去发，不走派活。按草稿账号算的话，小红书项目的「排本周计划」会被钉在本机，合上 Mac 就不跑；主助理单聊里草稿跨了两台电脑的账号，就再也派不出去。例行任务也不加账号字段：例行只是归属人发的一句话，例行和 Bot 在派出去之前都不知道这一轮会碰哪个账号，填了也只能靠猜。眼下真正碰账号的动作只有发布草稿，它按 `accounts.computer_id` 下发，账号过期的隔离也落在发布上，见「账号」一节。
 
 **要求账号的数据接上时，连同 HTTP 用例一起加。** 那时要做两件事：给候选电脑接上 `accounts.computer_id` 对应的账号，再把这次要碰的账号传进来。只接前一件的话，没有任何 HTTP 用例看得出它断没断；只接后一件而前一件是断的，每次碰账号都会返回 `required_account_not_found`，群里说「要用的账号已经不在账号页里」，账号其实还在。所以接线和一条走 HTTP 的「碰本机账号的活本机离线时不改派」用例同一单加。
@@ -225,6 +237,8 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 | `required_account_not_found`     | 要用的账号已经不在账号页里，这条没派出去，把账号挂上后再说一次                       |
 | `accounts_on_multiple_computers` | 要用的账号分在两台电脑上，这条没派出去，拆成两句，每句只碰一台电脑上的账号           |
 | `required_computer_offline`      | 要用的账号所在的那台电脑不在线，这条没派出去，也不会改派到另一台，那台回来后再说一次 |
+| `chosen_local_offline`           | 这个 Bot 在这个群里选了用你的电脑，你的电脑现在不在线，这条没派出去，也不会改派到云电脑，电脑回来后再说一次，或在群顶部改用云电脑 |
+| `chosen_remote_offline`          | 这个 Bot 在这个群里选了用云电脑，云电脑现在不在线，这条没派出去，也不会改派到你的电脑，云电脑回来后再说一次，或在群顶部改用你的电脑 |
 
 ### 上行 `task_checklist` 和 `mention`
 

@@ -356,7 +356,10 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     else if (computer === undefined) send(res, 404, { error: "没有这台电脑" });
     else {
       computerStatus.set(id, parsed.data.status);
-      push({ type: "computer_updated", computer: { ...computer, status: parsed.data.status } });
+      push({
+        type: "computer_updated",
+        computer: { ...computer, status: parsed.data.status, dispatchable: parsed.data.status === "online" },
+      });
       send(res, 204);
     }
     return true;

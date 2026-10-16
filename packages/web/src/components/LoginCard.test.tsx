@@ -15,6 +15,7 @@ const remote = Computer.parse({
   host: "mac-mini",
   idleSince: null,
   lastSeenAt: at,
+  dispatchable: true,
 });
 
 const account = (login: Account["login"]) =>

@@ -7,7 +7,6 @@ import {
   ComputerId,
   RunId,
   UserId,
-  type Computer,
   type ContentPlan,
   type ContentPlanId,
   type ControlToAgent,
@@ -27,8 +26,8 @@ import {
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { and, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
-import { approvals as approvalRows, computers as computerRows, groups, runs } from "../db/schema.js";
+import { and, eq, inArray, lte, type SQL } from "drizzle-orm";
+import { approvals as approvalRows, groups, runs } from "../db/schema.js";
 import {
   decideApproval,
   latestPendingApproval,
@@ -57,14 +56,16 @@ import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
-import { lockLaneComputers, placeRun } from "./place-run.js";
+import { computerPreference, lockLaneComputers, placeRun, type ComputerPreference } from "./place-run.js";
 import type { AgentHub } from "./hub.js";
+import { computerAvailability, type AvailabilityAgents } from "./computer-availability.js";
 import {
-  selectComputer,
+  selectAvailable,
   selectionNotice,
   type ComputerSelection,
   type SelectionFailure,
 } from "./computer-selection.js";
+import type { ComputerRecord } from "../repo/rows.js";
 import { GroupTurns, type SendOutcome, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 
@@ -103,52 +104,23 @@ export type DispatchOutcome =
   | { readonly kind: "no_target" }
   | { readonly kind: "failed" };
 
-/**
- * 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。
- * 拒了 config 的电脑连着却派不了活，按「不在线」选不中时把真实原因说出来：版本对不上，升级或重启电脑上的白泽就好。
- */
+/** 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。 */
 export async function computerFor(
-  db: Db,
-  agents: Pick<AgentHub, "isOnline" | "configRejected"> & Partial<Pick<AgentHub, "canDeliver">>,
+  db: Db | Tx,
+  agents: AvailabilityAgents,
   ownerId: UserId,
+  preference: ComputerPreference,
 ): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
-  const liveRows = await db
-    .select({ id: computerRows.id })
-    .from(computerRows)
-    .where(and(eq(computerRows.ownerId, ownerId), sql`${computerRows.leaseUntil} > clock_timestamp()`));
-  const live = new Set(liveRows.map((row) => row.id));
-  const selectedOnline = selectComputer(
-    [],
-    computers.map((computer) => ({
-      computer:
-        agents.isOnline(computer.id) && live.has(computer.id)
-          ? { ...computer, status: "online" }
-          : computer.status === "online"
-            ? { ...computer, status: "sleeping" }
-            : computer,
-      accounts: [],
-    })),
-  );
-  const selected =
-    selectedOnline.kind === "failed" && agents.canDeliver !== undefined
-      ? selectComputer(
-          [],
-          computers.map((computer) => ({
-            computer: {
-              ...computer,
-              status:
-                agents.canDeliver!(computer.id) && live.has(computer.id) ? ("online" as const) : ("sleeping" as const),
-            },
-            accounts: [],
-          })),
-        )
-      : selectedOnline;
-  if (selected.kind === "failed" && computers.some((computer) => agents.configRejected(computer.id))) {
-    return { kind: "failed", reason: "config_rejected" };
-  }
-  return selected;
+  return selectAvailable(computers, await computerAvailability(db, agents, ownerId), preference);
 }
+
+/** 派活前替头一位挑中的电脑，连同挑的时候它选的是哪种。 */
+type EarlyPick = {
+  readonly botId: BotId;
+  readonly preference: ComputerPreference;
+  readonly computer: ComputerRecord;
+};
 
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
@@ -183,19 +155,6 @@ export async function dispatchUserMessage(
     return { kind: "no_target" };
   };
 
-  const selected = await computerFor(deps.db, deps.agents, ownerId);
-  if (selected.kind === "failed") {
-    // 选电脑之前账号被删（删号先断代理，这里就选不到电脑），群已随账号没了，提示写不进去也不该写。
-    await noticeIfGroupAlive(deps, ownerId, groupId, {
-      kind: "system",
-      tone: "error",
-      text: selectionNotice(selected.reason),
-    });
-    return { kind: "unplaced", reason: selected.reason };
-  }
-  // 头一个 speaker 就用这次选中的电脑。再选一次的话，两次之间掉线会让它不建 run 就派空，
-  // 这里却已经报了 sent，例行就一直停在运行中。后面的 speaker 要等前一个跑完才派，到时再选。
-  let placed: Computer | null = selected.computer;
   // 设完经手再读名单：被 @ 的那位刚删掉时名单里已经没有它，路由直接落到原经手，不会派给一个不存在的 Bot。
   // 被 @ 的人全在派活途中被删时再路由一次，这回不认 @，只退回组长或经手，不替用户扩到全员；仍没人就留一句，不静默。
   // 例行只派给它自己的 Bot，没有第二次。
@@ -216,7 +175,23 @@ export async function dispatchUserMessage(
       owner === undefined
         ? routeTargets({ members, chiefBotId, currentBotId, mentions: mentioned })
         : members.filter((member) => member.id === owner).map((member) => member.id);
-    if (targets.length === 0) break;
+    const [firstBotId] = targets;
+    if (firstBotId === undefined) break;
+    // 按头一位在这个群里选的电脑先挑一次，挑不到就只留一句，不作废审批、不开回合。
+    // 选电脑之前账号被删（删号先断代理，这里就选不到电脑），群已随账号没了，提示写不进去也不该写。
+    const preference = await computerPreference(deps.db, groupId, firstBotId);
+    const selected = await computerFor(deps.db, deps.agents, ownerId, preference);
+    if (selected.kind === "failed") {
+      await noticeIfGroupAlive(deps, ownerId, groupId, {
+        kind: "system",
+        tone: "error",
+        text: selectionNotice(selected.reason),
+      });
+      return { kind: "unplaced", reason: selected.reason };
+    }
+    // 头一位就用这次挑中的电脑。再挑一次的话，两次之间掉线会让它不建 run 就派空，
+    // 这里却已经报了 sent，例行就一直停在运行中。后面的人要等前一个跑完才派，到时再挑。
+    let early: EarlyPick | null = { botId: firstBotId, preference, computer: selected.computer };
     let voidTargets = trigger.body.kind === "user" && options.routineRunId === undefined ? targets : [];
     const reason = solo
       ? "solo"
@@ -235,18 +210,9 @@ export async function dispatchUserMessage(
       members,
       speakers: targets.map((botId) => ({ botId, trigger, reason })),
       send: async (speaker, includeRecent) => {
-        const computer = placed;
-        placed = null;
-        const outcome = await sendSpeaker(
-          deps,
-          ownerId,
-          groupId,
-          speaker,
-          includeRecent,
-          options,
-          computer,
-          voidTargets,
-        );
+        const pick = early?.botId === speaker.botId ? early : null;
+        early = null;
+        const outcome = await sendSpeaker(deps, ownerId, groupId, speaker, includeRecent, options, pick, voidTargets);
         voidTargets = [];
         if (outcome.unplacedReason !== undefined) placementFailure.reason = outcome.unplacedReason;
         return outcome;
@@ -275,20 +241,9 @@ async function sendSpeaker(
   speaker: Speaker,
   includeRecent: boolean,
   options: DispatchOptions,
-  placed: Computer | null,
+  early: EarlyPick | null,
   voidTargets: readonly BotId[],
 ): Promise<SendOutcome & { readonly unplacedReason?: SelectionFailure }> {
-  const selected: ComputerSelection =
-    placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
-  if (selected.kind === "failed") {
-    const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
-      kind: "system",
-      tone: "error",
-      text: selectionNotice(selected.reason),
-    });
-    return written ? { kind: "stopped", unplacedReason: selected.reason } : { kind: "gone" };
-  }
-
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
   const members = await listGroupBots(deps.db, groupId);
   const contextMessages = await contextMessagesFor(deps.db, groupId, speaker, includeRecent);
@@ -389,7 +344,11 @@ async function sendSpeaker(
           };
         },
       },
-      async () => selected,
+      // 锁里读到的选择和事先挑的时候不一样（中间用户换了），按锁里的重挑。
+      async (preference): Promise<ComputerSelection> =>
+        early !== null && early.preference === preference
+          ? { kind: "selected", computer: early.computer }
+          : computerFor(tx, deps.agents, ownerId, preference),
     );
     if (result.kind !== "queued") await voidApprovals();
     // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。
@@ -403,7 +362,7 @@ async function sendSpeaker(
   if (placedRun.kind === "queued")
     for (const computerId of placedRun.flushComputerIds) await deps.agents.flushOutbox(computerId);
   if (placedRun.kind === "unavailable") {
-    // 等电脑锁期间租约可能过期，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
+    // 等电脑锁期间租约可能过期、后面的人轮到时电脑可能已经不在，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
     const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",

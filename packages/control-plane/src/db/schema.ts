@@ -48,6 +48,7 @@ import type { RetainSnapshot } from "@baize/shared/work-record";
 import { sql } from "drizzle-orm";
 import type { z } from "zod";
 import {
+  type AnyPgColumn,
   bigserial,
   boolean,
   check,
@@ -238,8 +239,17 @@ export const groupMembers = pgTable(
       .notNull()
       .references(() => bots.id, { onDelete: "cascade" }),
     position: integer("position").notNull(),
+    // 这个 Bot 在这个群里选定的电脑。null 是没选过，走默认（本机优先，不在再用云电脑）；选了就只派那台，不在线不改派。
+    computerKind: text("computer_kind").$type<ComputerKind>(),
   },
-  (t) => [primaryKey({ columns: [t.groupId, t.botId] }), index("group_members_bot_id_idx").on(t.botId)],
+  (t) => [
+    primaryKey({ columns: [t.groupId, t.botId] }),
+    index("group_members_bot_id_idx").on(t.botId),
+    check(
+      "group_members_computer_kind_check",
+      sql`${t.computerKind} IS NULL OR ${t.computerKind} IN ('local', 'remote')`,
+    ),
+  ],
 );
 
 export const attachments = pgTable(
@@ -548,6 +558,10 @@ export const runs = pgTable(
     visibleTo: jsonb("visible_to").$type<Viewer[]>(),
     // 这个 run 在牌桌上扮演什么，普通 run 为 null。上行报文按它放行（table-run-policy）。
     tableRole: text("table_role").$type<PokerTableRole>(),
+    // Bot 这一轮请求换到另一台电脑接着做。立起来之后由 run 收尾那一处起接续 run。
+    continueRequested: boolean("continue_requested").notNull().default(false),
+    // 这个 run 是哪个 run 换电脑后的接续。部分唯一索引保证一个 run 至多被接续一次，重复起接续撞索引当已经起过。
+    continuesRunId: text("continues_run_id").references((): AnyPgColumn => runs.id, { onDelete: "set null" }),
   },
   (t) => [
     check("runs_table_role_check", sql`${t.tableRole} IS NULL OR ${t.tableRole} IN ('player', 'advisor', 'reviewer')`),
@@ -568,6 +582,9 @@ export const runs = pgTable(
     index("runs_owner_id_started_at_idx").on(t.ownerId, t.startedAt),
     index("runs_routine_run_id_idx").on(t.routineRunId),
     index("runs_computer_id_idx").on(t.computerId),
+    uniqueIndex("runs_continues_run_idx")
+      .on(t.continuesRunId)
+      .where(sql`${t.continuesRunId} IS NOT NULL`),
   ],
 );
 

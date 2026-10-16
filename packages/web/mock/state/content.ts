@@ -47,6 +47,7 @@ export const computersOf = () =>
         host: null,
         idleSince: null,
         lastSeenAt: at(1),
+        dispatchable: (computerStatus.get("cmp_local") ?? "online") === "online",
       },
       {
         id: "cmp_remote",
@@ -56,6 +57,7 @@ export const computersOf = () =>
         host: "remote.baize.dev",
         idleSince: null,
         lastSeenAt: at(1),
+        dispatchable: (computerStatus.get("cmp_remote") ?? "online") === "online",
       },
     ].filter((computer) => !removedComputers.has(computer.id)),
   });

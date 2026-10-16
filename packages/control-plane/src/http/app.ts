@@ -86,6 +86,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import type { AgentHub } from "../agent/hub.js";
+import { computerAvailability, withDispatchable } from "../agent/computer-availability.js";
 import type { LiveRelay } from "../live/relay.js";
 import { enqueueDownlink } from "../agent/envelope.js";
 import type { GroupTurns } from "../agent/group-turn.js";
@@ -159,6 +160,7 @@ import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
 import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
+import { createComputerChoiceRoutes } from "./routes/computer-choice.js";
 import { createGoalRoutes } from "./routes/goals.js";
 import { createPokerHandRoutes } from "./routes/poker-hands.js";
 import { createPokerHintRoutes } from "./routes/poker-hint.js";
@@ -261,6 +263,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   );
   app.route("/api", createPokerHintRoutes({ db, push: hub, agents }));
   app.route("/api", createPokerReviewRoutes({ db, push: hub, agents }));
+  app.route("/api", createComputerChoiceRoutes({ db, push: hub, agents }));
 
   app.route(
     OAUTH_PATH,
@@ -514,9 +517,14 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   // 网页启动和 /api/ws 重连时各拉一次：断线期间的 live_session、live_closed 推送丢了。
   app.get("/api/live", (c) => c.json(LiveSessionsResponse.parse({ sessions: deps.live.list(c.get("user").id) })));
 
-  app.get("/api/computers", async (c) =>
-    c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),
-  );
+  app.get("/api/computers", async (c) => {
+    const ownerId = c.get("user").id;
+    const records = await listComputers(db, ownerId);
+    const availability = await computerAvailability(db, agents, ownerId);
+    return c.json(
+      ComputerListResponse.parse({ computers: records.map((record) => withDispatchable(record, availability)) }),
+    );
+  });
 
   app.post("/api/computers/local", async (c) => {
     let raw: unknown;
@@ -529,7 +537,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = PairLocalComputerRequest.partial().safeParse(raw);
     if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
     const ownerId = c.get("user").id;
-    const { computer } = await ensureComputer(db, ownerId);
+    const { computer: record } = await ensureComputer(db, ownerId);
+    const computer = withDispatchable(record, await computerAvailability(db, agents, ownerId));
     if ((computer.lastSeenAt !== null || agents.isOnline(computer.id)) && !body.data.confirmDisplace) {
       return c.json(
         PairLocalConflictResponse.parse({ error: "这个账号已经在另一台 Mac 上用过，继续会让那台退出", computer }),
@@ -545,10 +554,13 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
 
   app.post("/api/computers/remote", async (c) => {
     const ownerId = c.get("user").id;
-    const { computer } = await ensureComputer(db, ownerId, "remote");
+    const { computer: record } = await ensureComputer(db, ownerId, "remote");
     const remote = await resetComputerToken(db, ownerId, "remote");
     if (remote === null) throw new Error(`用户 ${ownerId} 的远程电脑既没建成也无法重置 token`);
-    hub.push(ownerId, { type: "computer_updated", computer });
+    hub.push(ownerId, {
+      type: "computer_updated",
+      computer: withDispatchable(record, await computerAvailability(db, agents, ownerId)),
+    });
     return c.json(ComputerTokenResponse.parse(remote));
   });
 

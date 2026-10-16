@@ -7,8 +7,11 @@ import {
   type ControlToAgent,
   type WorkStream,
 } from "@baize/shared";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { expect, it } from "vitest";
-import { runMigrations } from "../src/db/migrate.js";
+import type { Sql } from "../src/db/client.js";
+import { migrationsDir, runMigrations } from "../src/db/migrate.js";
 import { startServer, type RunningServer } from "../src/server.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
@@ -19,6 +22,19 @@ const PREVIOUS_MIGRATION = "0036_p3_recall_entry_time.sql";
 const MIGRATION = "0037_p3_recall_node_entry_time.sql";
 const RUN_AT = "2025-01-01T00:00:00.000Z";
 const GROUP_AT = "2024-01-01T00:00:00.000Z";
+/**
+ * 旧库不能拿 through 造：服务是现在的代码，后来的迁移给它要写的表加了列，旧库上建 Bot、派活都会缺列。
+ * 改成在新库上把 0037 退回去：装回 0036 的两个函数和触发器（加列和回填那两句不重跑），撤掉 0037 的记账。
+ */
+async function rewindToPrevious(sql: Sql): Promise<void> {
+  const statements = (await readFile(join(migrationsDir, PREVIOUS_MIGRATION), "utf8")).split(
+    "--> statement-breakpoint",
+  );
+  for (const statement of statements.map((one) => one.trim()).filter((one) => one.startsWith("CREATE ")))
+    await sql.unsafe(statement);
+  await sql`DELETE FROM _migrations WHERE name = ${MIGRATION}`;
+}
+
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 type Boundary = {
@@ -110,8 +126,9 @@ it.each([
   { path: "0037 回填", cause: "import" },
 ] as const)("$path / $cause：边界条目时间和 HTTP recall 前8条符合 Node 语义或约定回退", async ({ path, cause }) => {
   const backfill = path === "0037 回填";
-  const database = await createTestDb(backfill ? { through: PREVIOUS_MIGRATION } : {});
+  const database = await createTestDb();
   const { sql } = database;
+  if (backfill) await rewindToPrevious(sql);
   let server: RunningServer | undefined;
   let agent: AgentClient | undefined;
   try {

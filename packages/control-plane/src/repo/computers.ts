@@ -1,14 +1,14 @@
-import { ComputerId, UserId, type Computer, type ComputerKind } from "@baize/shared";
+import { ComputerId, UserId, type ComputerKind } from "@baize/shared";
 import { and, asc, eq, inArray, type SQL } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
 import { computers } from "../db/schema.js";
 import { hashSecret, newId, newSecret, secretMatches } from "../ids.js";
-import { toComputer } from "./rows.js";
+import { toComputer, type ComputerRecord } from "./rows.js";
 import { lockOwner } from "./runs.js";
 
 /** 建电脑时才拿得到 token 明文，已经有电脑时是 null。 */
-export type EnsureResult = { readonly computer: Computer; readonly token: string | null };
+export type EnsureResult = { readonly computer: ComputerRecord; readonly token: string | null };
 
 /** 每人每种电脑至多一台，(owner_id, kind) 上的唯一约束兜住并发创建。 */
 export async function ensureComputer(
@@ -41,7 +41,7 @@ export async function findComputerByOwner(
   db: Db | Tx,
   ownerId: UserId,
   kind: ComputerKind = "local",
-): Promise<Computer | null> {
+): Promise<ComputerRecord | null> {
   const [row] = await db
     .select()
     .from(computers)
@@ -50,20 +50,24 @@ export async function findComputerByOwner(
   return row === undefined ? null : toComputer(row);
 }
 
-export async function listComputers(db: Db, ownerId: UserId): Promise<Computer[]> {
+export async function listComputers(db: Db | Tx, ownerId: UserId): Promise<ComputerRecord[]> {
   const rows = await db.select().from(computers).where(eq(computers.ownerId, ownerId));
   return rows
     .map(toComputer)
     .toSorted((left, right) => (left.kind === right.kind ? 0 : left.kind === "local" ? -1 : 1));
 }
 
-export async function findComputerById(db: Db, computerId: ComputerId): Promise<Computer | null> {
+export async function findComputerById(db: Db, computerId: ComputerId): Promise<ComputerRecord | null> {
   const [row] = await db.select().from(computers).where(eq(computers.id, computerId)).limit(1);
   return row === undefined ? null : toComputer(row);
 }
 
 /** token 对得上才认；关闭码由调用方根据电脑号是否仍存在决定。 */
-export async function authenticateComputer(db: Db, computerId: ComputerId, token: string): Promise<Computer | null> {
+export async function authenticateComputer(
+  db: Db,
+  computerId: ComputerId,
+  token: string,
+): Promise<ComputerRecord | null> {
   const [row] = await db.select().from(computers).where(eq(computers.id, computerId)).limit(1);
   if (row === undefined) return null;
   if (!secretMatches(token, row.tokenHash)) return null;
@@ -83,7 +87,7 @@ export async function rotateGatewayKey(db: Db, computerId: ComputerId): Promise<
   return key;
 }
 
-export async function findComputerByGatewayKey(db: Db, key: string): Promise<Computer | null> {
+export async function findComputerByGatewayKey(db: Db, key: string): Promise<ComputerRecord | null> {
   const [row] = await db
     .select()
     .from(computers)
@@ -97,7 +101,11 @@ export async function findComputerByGatewayKey(db: Db, key: string): Promise<Com
  * 什么都写不进去：内存里判「还是当前连接」只能挡 UPDATE 发出之前，发出之后落库之前这段只有数据库自己挡得住。
  * hello 和心跳都走这里，都带自己那条连接的 key；不对应某条连接的进程级写是下面 markComputersSleeping 那两条。
  */
-export async function markComputerOnline(db: Db, computerId: ComputerId, gatewayKey: string): Promise<Computer | null> {
+export async function markComputerOnline(
+  db: Db,
+  computerId: ComputerId,
+  gatewayKey: string,
+): Promise<ComputerRecord | null> {
   const [row] = await db
     .update(computers)
     .set({ status: "online", lastSeenAt: new Date(), idleSince: null })
@@ -111,7 +119,7 @@ export async function markComputerSleeping(
   db: Db,
   computerId: ComputerId,
   gatewayKey: string,
-): Promise<Computer | null> {
+): Promise<ComputerRecord | null> {
   const [row] = await db
     .update(computers)
     .set({ status: "sleeping", idleSince: new Date() })
