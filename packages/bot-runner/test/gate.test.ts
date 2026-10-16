@@ -1,4 +1,5 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -1696,5 +1697,325 @@ describe("例行边界", () => {
     expect(decide(call("create_draft", post, DRAFT), [], [accountOf("account-1", "read_only")]).reason).toContain(
       "只读档",
     );
+  });
+});
+
+describe("读工作区以外的东西必须问，Mac 和云电脑一样", () => {
+  let secretFile = "";
+  let secretDir = "";
+  const cloud = (command: string): GateCall => ({
+    ...gateContext({ platform: "linux" }),
+    toolName: "bash",
+    input: { command },
+    sandbox: "bwrap",
+    containment: { level: "closed" },
+    source: null,
+    routine: null,
+  });
+  const mac = (command: string): GateCall => ({
+    ...cloud(command),
+    platform: "darwin",
+    sandbox: "seatbelt",
+    containment: { level: "none" },
+  });
+  const both = [
+    ["Mac", mac],
+    ["云电脑", cloud],
+  ] as const;
+
+  // 工作区里的裸词 data 和 linked-dir 都是指向外面的链接，和审查者复现的布局一样。
+  beforeAll(() => {
+    secretFile = join(outsideDir, "secret-file.txt");
+    secretDir = join(outsideDir, "secret-dir");
+    mkdirSync(secretDir, { recursive: true });
+    writeFileSync(secretFile, "TOPSECRET\n");
+    writeFileSync(join(secretDir, "x"), "TOPSECRET\n");
+    writeFileSync(join(workDir, "notes.txt"), "TODO\n");
+    symlinkSync(secretFile, join(workDir, "data"));
+    symlinkSync(secretDir, join(workDir, "linked-dir"));
+  });
+
+  describe.each(both)("%s", (_label, call) => {
+    it.each([
+      "cat data",
+      "head data",
+      "tail data",
+      "wc data",
+      "file data",
+      "stat data",
+      "grep foo data",
+      "grep -r foo data",
+      "grep -e foo data",
+      "ls linked-dir",
+      "du linked-dir",
+      "cat -- data",
+      "cat notes.txt data",
+      "head -n 5 data",
+      "ls && cat data",
+    ])("裸词操作数是指向外面的链接，照问：%s", (command) => {
+      expect(decide(call(command), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+    });
+
+    it.each([
+      "cat notes.txt",
+      "grep TODO notes.txt",
+      "grep TODO notes",
+      "grep -e TODO notes.txt",
+      "head -n 5 notes.txt",
+    ])("工作区里的裸词照旧放行：%s", (command) => {
+      expect(decide(call(command), [], []).verdict).toBe("allow");
+    });
+
+    it.each([
+      "cat {a.txt,/etc/passwd}",
+      "cat x{,.bak}",
+      "cat {1..3}",
+      "cat {a,{b,c}}",
+      "cat {a,'b'}",
+      "echo {a,b}",
+      "ls && cat {a.txt,/etc/passwd}",
+    ])("没加引号的花括号展开照问：%s", (command) => {
+      expect(decide(call(command), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+    });
+
+    it.each([
+      "cat '{a,b}'",
+      'cat "{x}"',
+      "cat \\{a,b\\}",
+      "cat {a','b}",
+      "echo {",
+      "echo }",
+      "cat x{}y",
+      "cat {a}",
+      "head {/etc/passwd}",
+    ])("引号里的或不成展开的花括号照旧放行：%s", (command) => {
+      expect(decide(call(command), [], []).verdict).toBe("allow");
+    });
+
+    it.each(["cat ~root/x", "cat ~root", "cat ~+/x", "cat ~nobody/x", "ls && cat ~root/x"])(
+      "~user 照问：%s",
+      (command) => {
+        expect(decide(call(command), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      },
+    );
+
+    it("引号里的 ~root 是工作区里的字面文件名，照旧放行", () => {
+      expect(decide(call("cat '~root/x'"), [], []).verdict).toBe("allow");
+    });
+
+    it.each(["cat *", "grep foo *", "cat *.md", "cat [ab]", "cat data[12]", "grep foo [ab]"])(
+      "glob 操作数照问：%s",
+      (command) => {
+        expect(decide(call(command), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      },
+    );
+
+    it("引号里的方括号是字面文件名，照旧放行", () => {
+      expect(decide(call("cat '[ab]'"), [], []).verdict).toBe("allow");
+    });
+
+    it.each([
+      "grep -R foo .",
+      "grep -R foo",
+      "grep -Rn foo .",
+      "find -L .",
+      "ls -RL",
+      "du -L .",
+      "cp -rL a b",
+      "tar -h -xf a.tgz",
+      "rsync -L a b",
+    ])("跟随链接的递归照问：%s", (command) => {
+      expect(decide(call(command), [], []).verdict).toBe("ask");
+    });
+  });
+
+  it("云电脑上系统包管理器带花括号照旧拒，不降成问", () => {
+    expect(decide(cloud("apt-get install {a,b}"), [], []).verdict).toBe("deny");
+    expect(decide(cloud("sudo cat ~root/x"), [], []).verdict).toBe("deny");
+  });
+
+  it("云电脑上 awk 引号里的花括号照旧放行，Mac 照旧问", () => {
+    expect(decide(cloud("awk '{print $1}' data.txt"), [], []).verdict).toBe("allow");
+    expect(decide(mac("awk '{print $1}' data.txt"), [], []).verdict).toBe("ask");
+  });
+
+  it("云电脑上不跟链接的递归照旧放行，Mac 的 grep -r 也照旧", () => {
+    expect(decide(cloud("grep -rn TODO ."), [], []).verdict).toBe("allow");
+    expect(decide(cloud("ls -R"), [], []).verdict).toBe("allow");
+    expect(decide(mac("grep -r TODO ."), [], []).verdict).toBe("allow");
+  });
+
+  it("云电脑上解包带链接的归档放行之后，读那条链接照问", () => {
+    const stage = mkdtempSync(join(temporaryDir, "stage-"));
+    symlinkSync(secretFile, join(stage, "secrets"));
+    execFileSync("tar", ["-czf", join(workDir, "a.tgz"), "-C", stage, "secrets"]);
+    expect(decide(cloud("tar -xzf a.tgz"), [], []).verdict).toBe("allow");
+    execFileSync("tar", ["-xzf", "a.tgz"], { cwd: workDir });
+    expect(readFileSync(join(workDir, "secrets"), "utf8")).toBe("TOPSECRET\n");
+    expect(decide(cloud("cat secrets"), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+    expect(decide(mac("cat secrets"), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+  });
+
+  describe("-- 之后的操作数、ln 的指向、git 的全局选项和环境变量前缀", () => {
+    // 工作区里叫 -v、-l、-- 的都是指向外面的链接，和复核者的 fixture 一样；leak.txt 和 sub/a.txt 是普通文件。
+    beforeAll(() => {
+      symlinkSync(secretFile, join(workDir, "-v"));
+      symlinkSync(secretDir, join(workDir, "-l"));
+      symlinkSync(secretFile, join(workDir, "--"));
+      writeFileSync(join(workDir, "leak.txt"), "x\n");
+      mkdirSync(join(workDir, "sub"), { recursive: true });
+      writeFileSync(join(workDir, "sub", "a.txt"), "a\n");
+    });
+    afterAll(() => {
+      for (const name of ["-v", "-l", "--"]) rmSync(join(workDir, name));
+    });
+
+    // it.each 的清单在收集阶段就定下来，那时 fixture 还没建，所以区外路径用占位符，跑到用例里再换。
+    const at = (command: string): string => command.replaceAll("$OUT", outsideDir).replaceAll("$WORK", workDir);
+
+    describe.each(both)("%s", (_label, call) => {
+      it.each([
+        "cat -- -v",
+        "head -n 1 -- -v",
+        "tail -- -v",
+        "grep X -- -v",
+        "grep -e X -- -v",
+        "grep -f -- leak.txt",
+        "cat -- --",
+        "ls -- -l",
+        "ls -R -- -l",
+        "grep -r X -- -l",
+      ])("-- 之后指向外面的链接名照问：%s", (command) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+      });
+
+      it.each(["wc -- -v", "du -- -l"])("-v、-l 不在这个命令的选项名单里，照旧归 shell：%s", (command) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      });
+
+      it.each([
+        "ln -s $OUT/secret-file.txt x && cat x",
+        "ln -s / rootlink && head -1 rootlink/etc/passwd",
+        "ln -s /etc/passwd x",
+        "ln -s ../../../outside/secret-file.txt y",
+        "ln -s ../../../../outside/secret-file.txt sub/y",
+        "ln -s ../../../../outside/secret-file.txt sub",
+        "ln -s ../../../outside/secret-file.txt linked-dir/y",
+      ])("ln -s 的源在工作区外照问：%s", (command) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+      });
+
+      it("ln -s 的源在禁区里直接拒", () => {
+        expect(decide(call("ln -s ~/.ssh x && cat x/id_rsa"), [], [])).toMatchObject({
+          verdict: "deny",
+          action: "read",
+        });
+      });
+
+      it.each([
+        "ln $OUT/secret-file.txt h",
+        "ln notes.txt h",
+        "ln -s a b c",
+        "ln -sT a b",
+        "ln -s -t sub a",
+        "ln -s a",
+      ])("硬链接和认不出的 ln 写法归 shell：%s", (command) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      });
+
+      it.each([
+        "ln -s notes.txt n",
+        "ln -s sub/a.txt b",
+        "ln -s ../notes.txt sub",
+        "ln -s ../notes.txt sub/n",
+        "ln -s $WORK/notes.txt n",
+      ])("ln -s 的源在工作区里照旧放行：%s", (command) => {
+        expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+      });
+
+      it.each([
+        "git diff --no-index $OUT/secret-file.txt notes.txt",
+        "git diff $OUT/secret-file.txt notes.txt",
+        "git diff -- $OUT/secret-file.txt notes.txt",
+        "git diff --no-index -- /etc/passwd /dev/null",
+        "git --git-dir=$OUT/repo/.git log -p",
+        "git --git-dir=$OUT/repo/.git show HEAD:secret.txt",
+        "GIT_DIR=$OUT/repo/.git git show HEAD:secret.txt",
+        "git --exec-path=/tmp/evil status",
+        "git -p log",
+        "git log --output=/tmp/x",
+        "git log --output /tmp/x",
+        "git diff --ext-diff",
+        "git diff --ext",
+        "git show --textc",
+        "git log -p -- ../../../outside",
+        "PAGER=cat git log",
+        "GIT_PAGER=cat git log",
+        "GIT_EXTERNAL_DIFF=/tmp/evil git diff",
+      ])("git 的全局选项、环境变量前缀和区外路径照问：%s", (command) => {
+        expect(decide(call(at(command)), [], []).verdict).toBe("ask");
+      });
+
+      it.each([
+        "git status",
+        "git status -s",
+        "git log -p",
+        "git log --oneline -5",
+        "git diff",
+        "git diff HEAD~1",
+        "git diff -- notes.txt",
+        "git show HEAD:notes.txt",
+        "git log -p -- sub",
+        "LANG=C git status",
+        "LC_ALL=C TZ=UTC git log",
+      ])("git 的常规读照旧放行：%s", (command) => {
+        expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+      });
+
+      it.each(["FOO=1 ls", "LD_PRELOAD=/tmp/x cat notes.txt", "PATH=/tmp cat notes.txt"])(
+        "白名单之外的环境变量前缀归 shell：%s",
+        (command) => {
+          expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+        },
+      );
+
+      it.each(["LANG=C ls", "LC_ALL=C cat notes.txt", "NO_COLOR=1 TZ=UTC ls"])(
+        "语言和时区前缀照旧放行：%s",
+        (command) => {
+          expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+        },
+      );
+
+      it.each([
+        "cat linked-dir/../secret-file.txt",
+        "head linked-dir/../secret-file.txt",
+        "ls linked-dir/..",
+        "touch linked-dir/../x",
+      ])("链接目录后面的 .. 退的是真实目录，照问：%s", (command) => {
+        expect(decide(call(at(command)), [], []).verdict).toBe("ask");
+      });
+
+      it.each(["cat sub/../notes.txt", "touch sub/../x", "cat ../work/notes.txt"])(
+        "普通目录后面的 .. 照旧放行：%s",
+        (command) => {
+          expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+        },
+      );
+    });
+  });
+
+  describe("-- 之后的普通文件名照旧放行", () => {
+    beforeAll(() => {
+      writeFileSync(join(workDir, "-v"), "plain\n");
+    });
+    afterAll(() => {
+      rmSync(join(workDir, "-v"));
+    });
+
+    describe.each(both)("%s", (_label, call) => {
+      it.each(["cat -- notes.txt", "cat -- -v", "head -n 1 -- -v", "grep -e X -- -v", "ls -- -l"])("%s", (command) => {
+        expect(decide(call(command), [], []).verdict).toBe("allow");
+      });
+    });
   });
 });

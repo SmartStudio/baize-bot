@@ -5358,15 +5358,20 @@ describe("统一闸门", () => {
 
   it.skipIf(process.platform !== "darwin")("工作目录里的 ssh 符号链接由系统沙箱拦住", async () => {
     const seen = recorder();
+    // 链接由 fixture 造，命令走 bash -c 让闸门只问不拒；批准之后读到 ~/.ssh 的是沙箱在拦。
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      script: scriptRecording(seen, [["试符号链接", callTool("bash", { command: "ln -s ~/.ssh x && cat x/id_rsa" })]]),
+      approve: true,
+      script: scriptRecording(seen, [["试符号链接", callTool("bash", { command: "bash -c 'cat x/id_rsa'" })]]),
     });
+    const workDir = botDirs(h.dataDir, BotId.parse("bot-1")).workDir;
+    mkdirSync(workDir, { recursive: true });
+    symlinkSync(join(homedir(), ".ssh"), join(workDir, "x"));
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "试符号链接"));
 
-    expect(h.sent.some((message) => message.type === "approval_request")).toBe(false);
+    expect(h.sent.some((message) => message.type === "approval_request")).toBe(true);
     expect(shape(h.sent).filter((item) => item.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:failed",

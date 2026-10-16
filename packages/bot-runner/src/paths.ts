@@ -173,6 +173,15 @@ const walkTarget = (base: string, raw: string): string => {
 };
 
 /**
+ * bash 把词原样交给内核，`cat dirlink/../x` 读的是 dirlink 真实目录的上一级；Pi 的文件工具先用 `path.resolve`
+ * 抵消 `..` 再打开，走 logicalResolve。两者打开的不是同一个文件，闸门得按各自的打开方式解。
+ */
+export function resolveLikeKernel(input: string, cwd: string): string {
+  const normalized = normalizeLikePi(input);
+  return walkTarget(isAbsolute(normalized) ? "/" : cwd, normalized);
+}
+
+/**
  * `path` 是符号链接就给出它指向的绝对路径，不是链接或读不到返回 null。相对目标的基准是链接所在目录的字面路径：
  * `..` 在 walkTarget 里先 realpath 再退，其余段由调用方接着 realpath，所以基准不必先解开。
  */
