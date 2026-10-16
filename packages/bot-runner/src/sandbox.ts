@@ -2,10 +2,23 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
+import type { Containment } from "./contained.js";
 import type { GateAccess, SandboxKind } from "./gate.js";
 import { type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
+
+/** 运行器在云电脑上多给的两样：额外盖住的目录，和这个 Bot 的工具箱。本机电脑是 null。 */
+export interface CloudBox {
+  readonly masked: readonly string[];
+  readonly toolboxDir: string;
+}
+
+type ClosedContainment = Extract<Containment, { level: "closed" }>;
+
+/** 沙箱 bash 的 PATH：工具箱的 venv/bin 排最前，后面是运行器进程自己的 PATH。闸门和证明器拿到的就是这一串。 */
+export const cloudSearchPath = (toolboxDir: string): string =>
+  [join(toolboxDir, "venv", "bin"), ...(process.env["PATH"] ?? "").split(":")].join(":");
 const MACH_LOOKUP_NAMES = [
   "com.apple.system.logger",
   "com.apple.system.opendirectoryd",
@@ -23,7 +36,13 @@ const MDNS_RESPONDER_SOCKET = "/private/var/run/mDNSResponder";
 const shSingleQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 const seatbeltString = (value: string): string => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 
-export function whitelistEnv(env: NodeJS.ProcessEnv, cwd: string, tmpDir: string): NodeJS.ProcessEnv {
+// 云电脑的 HOME=/home/node 在只读根上，包管理器写不进默认缓存就装不上；缓存改指到工作目录里。
+export function whitelistEnv(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  tmpDir: string,
+  cloud: Pick<ClosedContainment, "searchPath"> | null = null,
+): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = { PWD: cwd, TMPDIR: tmpDir };
   for (const key of ENV_ALLOW) {
     const value = env[key];
@@ -32,8 +51,23 @@ export function whitelistEnv(env: NodeJS.ProcessEnv, cwd: string, tmpDir: string
   for (const [key, value] of Object.entries(env)) {
     if (key.startsWith("PI_") && value !== undefined) next[key] = value;
   }
+  if (cloud !== null) {
+    const cache = join(cwd, ".cache");
+    next["PATH"] = cloud.searchPath;
+    next["XDG_CACHE_HOME"] = cache;
+    next["npm_config_cache"] = join(cache, "npm");
+    next["PIP_CACHE_DIR"] = join(cache, "pip");
+    next["YARN_CACHE_FOLDER"] = join(cache, "yarn");
+  }
   return next;
 }
+
+/** 批准写工具箱的那条命令先把 venv 建出来。系统 python3 没带 pip，venv 的 ensurepip 会带上；建过一次就跳过。 */
+export const toolboxCommand = (toolboxDir: string, access: GateAccess, command: string): string => {
+  if (!access.writePaths.includes(toolboxDir)) return command;
+  const venv = join(toolboxDir, "venv");
+  return `{ [ -x ${shSingleQuote(join(venv, "bin", "pip"))} ] || python3 -m venv ${shSingleQuote(venv)}; } && ${command}`;
+};
 
 // 禁区来自配置，Bot 改不动它；解不出来就是配置本身的问题，报错点名那一项，让用户知道改哪里。
 const realZone = (zones: ForbiddenZones, prefix: string): string => {
@@ -262,16 +296,23 @@ const spawnHook =
     zones: ForbiddenZones,
     tmpDir: string,
     access: GateAccess,
-    masked: readonly string[],
+    cloud: CloudBox | null,
+    containment: Containment,
   ): BashSpawnHook =>
-  (ctx: BashSpawnContext) => ({
-    command: sandboxedCommand(kind, workDir, zones, access, ctx.command, masked),
-    cwd: workDir,
-    env: whitelistEnv(ctx.env, workDir, tmpDir),
-  });
+  (ctx: BashSpawnContext) => {
+    const closed = containment.level === "closed" ? containment : null;
+    const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, access, ctx.command);
+    return {
+      command: sandboxedCommand(kind, workDir, zones, access, command, cloud?.masked ?? []),
+      cwd: workDir,
+      env: whitelistEnv(ctx.env, workDir, tmpDir, closed),
+    };
+  };
 
 export interface BashSandbox {
   readonly sandbox: SandboxKind;
+  /** 闸门要的 containment 从这里拿，证明器用的 PATH 就是沙箱 bash 的 PATH。 */
+  readonly containment: Containment;
   readonly tool: ReturnType<typeof createBashToolDefinition>;
   allow(runId: string, callId: string, access: GateAccess): void;
   clearRun(runId: string): void;
@@ -281,11 +322,15 @@ export function createSandboxedBash(
   workDir: string,
   zones: ForbiddenZones,
   activeRunId: () => string | null = () => null,
-  masked: readonly string[] = [],
+  cloud: CloudBox | null = null,
 ): BashSandbox {
   const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
   mkdirSync(tmpDir, { recursive: true });
+  const containment: Containment =
+    cloud === null
+      ? { level: "none" }
+      : { level: "closed", searchPath: cloudSearchPath(cloud.toolboxDir), toolboxDir: cloud.toolboxDir };
   const accessByRun = new Map<string, Map<string, GateAccess>>();
   const base = createBashToolDefinition(workDir);
   const tool = {
@@ -299,13 +344,14 @@ export function createSandboxedBash(
       runAccess?.delete(callId);
       if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, masked),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, cloud, containment),
       });
       return scoped.execute(...args);
     },
   } satisfies typeof base;
   return {
     sandbox: kind,
+    containment,
     tool,
     allow: (runId, callId, access) => {
       if (!access.network && access.writePaths.length === 0) {

@@ -22,6 +22,7 @@ import {
   SkillId,
   TopicTask,
   ToolConnection,
+  ToolView,
   toolViewText,
   gatewayAlias,
   TodayResponse,
@@ -651,6 +652,19 @@ describe("C0 工具视图与审批报文", () => {
       }).success,
       "原始参数只能是 JSON 值",
     ).toBe(false);
+  });
+
+  it("bash 卡带闸门的补充说明时文字跟在命令后面", () => {
+    expect(toolViewText({ kind: "bash", command: "pip install six", note: "联网安装到这个 Bot 自己的工具箱" })).toBe(
+      "要执行 `pip install six`，联网安装到这个 Bot 自己的工具箱",
+    );
+    expect(
+      ToolView.parse({ kind: "bash", command: "pip install six", note: "联网安装到这个 Bot 自己的工具箱" }),
+    ).toEqual({
+      kind: "bash",
+      command: "pip install six",
+      note: "联网安装到这个 Bot 自己的工具箱",
+    });
   });
 
   it("toolViewText 五种视图都说人话且没有花括号", () => {

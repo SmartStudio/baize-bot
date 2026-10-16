@@ -15,9 +15,9 @@ import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import {
-  type ContainedContext,
-  type ContainmentLevel,
+  type Containment,
   provablyContained,
+  resolvesToSystemBinary,
   SYSTEM_PACKAGE_MANAGERS,
   SYSTEM_PACKAGE_REASON,
 } from "./contained.js";
@@ -54,8 +54,8 @@ export type ToolSource =
 
 export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
-  /** 沙箱是否兜得住整条 bash。必填：漏传等于默认放宽，Mac 上一条都不许放宽。 */
-  readonly containment: { readonly level: ContainmentLevel };
+  /** 沙箱是否兜得住整条 bash。必填：漏传等于默认放宽，Mac 上一条都不许放宽。closed 时由 createSandboxedBash 给出。 */
+  readonly containment: Containment;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   /**
@@ -73,6 +73,7 @@ export interface GateDecision {
   readonly verdict: Verdict;
   readonly action: ActionKind;
   readonly target: GrantTarget | null;
+  /** deny 时是拦下的理由；ask 时是审批卡上的补充说明，没有就 null。 */
   readonly reason: string | null;
   readonly access: GateAccess;
 }
@@ -82,6 +83,7 @@ interface ClassifiedAction {
   readonly target: GrantTarget | null;
   readonly path: string | null;
   readonly access: GateAccess;
+  readonly reason?: string;
 }
 
 const NO_ACCESS: GateAccess = { network: false, writePaths: [] };
@@ -492,11 +494,52 @@ const hasUnknownMutationOption = (name: string, words: readonly string[]): boole
 
 const PREFIX_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
 
-const classifyCommand = (words: readonly string[], call: GateContext): readonly ClassifiedAction[] => {
+const TOOLBOX_INSTALL_REASON = "联网安装到这个 Bot 自己的工具箱";
+const PYTHON_INSTALLERS = new Set(["pip", "pip3"]);
+const NODE_INSTALLERS = new Set(["npm", "pnpm", "yarn"]);
+const NODE_INSTALL_VERBS = /^(add|install|ci|update|upgrade)$/;
+
+/**
+ * 云电脑上命令名先按沙箱的 PATH 落到文件：不在系统目录里的（工具箱里装出来的入口脚本、工作区里的同名程序）、
+ * 带目录的、带前置赋值的，分类器都不按名字认，归 shell 去问。装包排在这之前，因为 pip 装过一次就落在工具箱里了。
+ * 返回 null 的按通用规则接着分。
+ */
+const classifyCloudCommand = (
+  words: readonly string[],
+  nameIndex: number,
+  containment: Extract<Containment, { level: "closed" }>,
+): ClassifiedAction | null => {
+  const rawName = words[nameIndex] ?? "";
+  const commandArgs = words.slice(nameIndex + 1);
+  const pipArgs = PYTHON_INSTALLERS.has(rawName)
+    ? commandArgs
+    : rawName === "python3" && commandArgs[0] === "-m" && commandArgs[1] === "pip"
+      ? commandArgs.slice(2)
+      : null;
+  if (pipArgs !== null && pipArgs.includes("install")) {
+    return {
+      ...plainAction("install", null, { network: true, writePaths: [containment.toolboxDir] }),
+      reason: TOOLBOX_INSTALL_REASON,
+    };
+  }
+  if (NODE_INSTALLERS.has(rawName) && commandArgs.some((arg) => NODE_INSTALL_VERBS.test(arg))) {
+    return plainAction("install", null, { network: true, writePaths: [] });
+  }
+  if (nameIndex > 0 || rawName.includes("/") || !resolvesToSystemBinary(rawName, containment.searchPath)) {
+    return plainAction("shell");
+  }
+  return null;
+};
+
+const classifyCommand = (words: readonly string[], call: GateCall): readonly ClassifiedAction[] => {
   let nameIndex = 0;
   while (nameIndex < words.length && PREFIX_ASSIGNMENT.test(words[nameIndex] ?? "")) nameIndex += 1;
   const rawName = words[nameIndex];
   if (rawName === undefined) return [plainAction("shell")];
+  if (call.containment.level === "closed") {
+    const cloud = classifyCloudCommand(words, nameIndex, call.containment);
+    if (cloud !== null) return [cloud];
+  }
   const name = commandName(rawName);
   const args = argumentsOf(words.slice(nameIndex));
 
@@ -954,24 +997,27 @@ function systemPackageDenial(call: GateCall): GateDecision | null {
 
 /**
  * 只把 ask 改成 allow，deny 和 allow 原样返回。批了会多拿网络或写权限的不放：那正是沙箱要靠审批才开的口子。
- * 放行后不开任何口子，命令照原来的沙箱跑。
+ * 放行后不开任何口子，命令照原来的沙箱跑。证明器用的 PATH 就是沙箱 bash 的那个，随 closed 的 containment 进来。
  */
-export function relaxIfContained(call: GateCall, decision: GateDecision, ctx: ContainedContext): GateDecision {
+export function relaxIfContained(call: GateCall, decision: GateDecision): GateDecision {
   if (decision.verdict !== "ask" || call.toolName !== "bash" || call.containment.level === "none") return decision;
   if (decision.access.network || decision.access.writePaths.length > 0) return decision;
   const command = call.input.command;
-  if (typeof command !== "string" || !provablyContained(command, ctx).contained) return decision;
+  if (typeof command !== "string") return decision;
+  const verdict = provablyContained(command, {
+    workDir: call.workDir,
+    sharedDir: call.zones.sharedDir,
+    forbidden: [...call.zones.hidden, ...call.zones.readOnly],
+    searchPath: call.containment.searchPath,
+  });
+  if (!verdict.contained) return decision;
   return { ...decision, verdict: "allow", reason: null, access: NO_ACCESS };
 }
 
 /** Pi 的 tool_call 事件不接住处理器抛的错，所以路径解不出来在这里变成拒绝，不往外抛。 */
 export function decide(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
   try {
-    return relaxIfContained(call, decideResolved(call, grants, accounts), {
-      workDir: call.workDir,
-      sharedDir: call.zones.sharedDir,
-      forbidden: [...call.zones.hidden, ...call.zones.readOnly],
-    });
+    return relaxIfContained(call, decideResolved(call, grants, accounts));
   } catch (error) {
     if (!(error instanceof PathError)) throw error;
     return {
@@ -1020,6 +1066,7 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
     target: selected.item.target,
     reason:
       selected.reason ??
+      selected.item.reason ??
       (selected.verdict === "deny" && selected.item.path !== null
         ? ZONE_REASONS[zoneHit(selected.item.action, selected.item.path, call) ?? "hidden"]
         : null),

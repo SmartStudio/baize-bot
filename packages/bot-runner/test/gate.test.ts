@@ -1,4 +1,13 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -931,12 +940,16 @@ describe("bash 分类", () => {
 });
 
 describe("云电脑上沙箱兜得住的 bash 不问", () => {
+  // 云电脑镜像里的 PATH；工具箱的 venv/bin 由 createSandboxedBash 放在它前面。
+  const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/usr/local/bin";
+  const toolboxDir = (): string => join(root, "bot-1", "toolbox");
+  const venvBin = (): string => join(toolboxDir(), "venv", "bin");
   const cloud = (command: string, overrides: Partial<GateCall> = {}): GateCall => ({
     ...gateContext({ platform: "linux" }),
     toolName: "bash",
     input: { command },
     sandbox: "bwrap",
-    containment: { level: "closed" },
+    containment: { level: "closed", searchPath: `${venvBin()}:${SYSTEM_PATH}`, toolboxDir: toolboxDir() },
     source: null,
     routine: null,
     ...overrides,
@@ -1041,6 +1054,108 @@ describe("云电脑上沙箱兜得住的 bash 不问", () => {
     expect(decide(mac("brew install jq"), [], [])).toMatchObject({ verdict: "ask", action: "install" });
     expect(decide(mac("sudo apt-get install -y jq"), [], [])).toMatchObject({ verdict: "ask", reason: null });
     expect(decide(localLinux("apt-get install -y jq"), [], [])).toMatchObject({ verdict: "ask", action: "install" });
+  });
+
+  describe("pip 装进工具箱", () => {
+    const TOOLBOX_REASON = "联网安装到这个 Bot 自己的工具箱";
+
+    it.each(["pip install six", "pip3 install six", "python3 -m pip install six", "pip install --upgrade six"])(
+      "云电脑上 %s 照问，卡上写联网安装到工具箱，批准后放开网络和工具箱",
+      (command) => {
+        expect(decide(cloud(command), [], [])).toEqual({
+          verdict: "ask",
+          action: "install",
+          target: null,
+          reason: TOOLBOX_REASON,
+          access: { network: true, writePaths: [toolboxDir()] },
+        });
+      },
+    );
+
+    it("Mac 和本机 Linux 上 pip 的判定和今天逐字一样", () => {
+      const today = {
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: null,
+        access: { network: false, writePaths: [] },
+      };
+      for (const command of ["pip install six", "pip3 install six"]) {
+        expect(decide(mac(command), [], []), command).toEqual(today);
+        expect(decide(localLinux(command), [], []), command).toEqual(today);
+      }
+      expect(decide(mac("python3 -m pip install six"), [], [])).toEqual({ ...today, action: "shell" });
+    });
+
+    it("云电脑上 npm、pnpm、yarn 的 install、add、ci 照问，批准后放开网络但不开工具箱", () => {
+      for (const command of ["npm install left-pad", "pnpm add left-pad", "yarn add left-pad", "npm ci"]) {
+        expect(decide(cloud(command), [], []), command).toEqual({
+          verdict: "ask",
+          action: "install",
+          target: null,
+          reason: null,
+          access: { network: true, writePaths: [] },
+        });
+      }
+    });
+
+    it("Mac 上 npm install 的判定不变，npm ci 照旧归 shell", () => {
+      expect(decide(mac("npm install left-pad"), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: null,
+        access: { network: false, writePaths: [] },
+      });
+      expect(decide(mac("npm ci"), [], [])).toMatchObject({ verdict: "ask", action: "shell", reason: null });
+    });
+  });
+
+  describe("证明器按沙箱的 PATH 解析命令名", () => {
+    it("工具箱 venv/bin 里放了可执行的 cat，云电脑上 cat a.txt 必须问", () => {
+      mkdirSync(venvBin(), { recursive: true });
+      writeFileSync(join(venvBin(), "cat"), "#!/bin/sh\nrm -rf .\n");
+      chmodSync(join(venvBin(), "cat"), 0o755);
+      try {
+        expect(decide(cloud("cat a.txt"), [], [])).toEqual({
+          verdict: "ask",
+          action: "shell",
+          target: null,
+          reason: null,
+          access: { network: false, writePaths: [] },
+        });
+        expect(decide(cloud("ls -la"), [], []).verdict).toBe("allow");
+      } finally {
+        rmSync(join(venvBin(), "cat"));
+      }
+    });
+
+    it("云电脑上带目录的命令名和前置赋值都问，分类器剥目录的老规矩不在云上放行", () => {
+      expect(decide(cloud("./bin/cat a.txt"), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      expect(decide(cloud("/bin/cat a.txt"), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+      expect(decide(cloud("PATH=./bin cat a.txt"), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
+    });
+
+    it("PATH 里只有系统目录时照常放行，PATH 带相对目录整条问", () => {
+      expect(
+        decide(
+          cloud("cat a.txt", {
+            containment: { level: "closed", searchPath: "/usr/bin:/bin", toolboxDir: toolboxDir() },
+          }),
+          [],
+          [],
+        ).verdict,
+      ).toBe("allow");
+      expect(
+        decide(
+          cloud("cat a.txt", {
+            containment: { level: "closed", searchPath: `.:/usr/bin:/bin`, toolboxDir: toolboxDir() },
+          }),
+          [],
+          [],
+        ).verdict,
+      ).toBe("ask");
+    });
   });
 
   it("拒绝不会被放宽：助理 Chrome profile 放在工作区里，读它照旧拒绝", () => {

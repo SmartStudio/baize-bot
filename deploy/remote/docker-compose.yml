@@ -2,6 +2,12 @@
 # 项目名写死成 baize-remote，和仓库根的 baize 项目（baize-postgres 容器）互不相干。
 name: baize-remote
 
+# 两张网。远程电脑只在 edge 上，够不着 postgres：批准联网的 bash 沙箱和容器共用网络命名空间，
+# 远程电脑能连到谁，批了联网的命令就能连到谁。
+networks:
+  edge:
+  data:
+
 services:
   postgres:
     image: postgres:16
@@ -16,6 +22,8 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    networks:
+      - data
     restart: unless-stopped
 
   # 每次 up 先跑一遍迁移，已应用的跳过。控制面起来时表一定在。
@@ -27,6 +35,8 @@ services:
     environment:
       DATABASE_URL: postgres://baize:${POSTGRES_PASSWORD:-baize}@postgres:5432/baize
     command: ["node", "--import", "tsx", "src/scripts/migrate.ts"]
+    networks:
+      - data
     restart: "no"
 
   control-plane:
@@ -69,6 +79,9 @@ services:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-3201}:3001"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+      - data
     restart: unless-stopped
 
   remote-computer:
@@ -94,6 +107,8 @@ services:
       - /run/baize:uid=1000,gid=1000,mode=0700
     volumes:
       - bots:/home/node/.baize/bots
+    networks:
+      - edge
     restart: unless-stopped
 
 volumes:

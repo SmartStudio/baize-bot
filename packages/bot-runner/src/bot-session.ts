@@ -132,6 +132,16 @@ export function pruneImages<M extends { readonly role: string; readonly content?
   return pruned;
 }
 
+/** 闸门对 ask 给的补充说明写进 bash 的卡：用户点头之前要知道批的是什么（比如装进工具箱要联网）。 */
+const approvalViewWithNote = (
+  gate: SessionGate,
+  event: { readonly toolName: string; readonly input: Record<string, unknown> },
+  decision: GateDecision,
+): ToolView => {
+  const view = gate.approvalView(event.toolName, event.input);
+  return view.kind === "bash" && decision.reason !== null ? { ...view, note: decision.reason } : view;
+};
+
 /** 每次工具调用先过统一闸门：拒的直接拦，要问的送审批，暂停时等恢复。放行后回 decision，bash 要靠它开沙箱。 */
 function gateToolCalls(
   pi: ExtensionAPI,
@@ -162,7 +172,7 @@ function gateToolCalls(
       }
       if (decision.verdict === "ask") {
         await gate.flushWork?.("before_approval");
-        const view = gate.approvalView(event.toolName, event.input);
+        const view = approvalViewWithNote(gate, event, decision);
         const approvedView = JSON.stringify({ action: decision.action, target: decision.target, view });
         gate.browserCalls?.release(event.toolCallId);
         const outcome = await gate.approvals.ask(
@@ -205,7 +215,7 @@ function gateToolCalls(
         const currentView = JSON.stringify({
           action: decision.action,
           target: decision.target,
-          view: gate.approvalView(event.toolName, event.input),
+          view: approvalViewWithNote(gate, event, decision),
         });
         if (currentView !== approvedView) {
           gate.approvals.block(active.run.runId, event.toolCallId);

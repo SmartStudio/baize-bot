@@ -23,6 +23,7 @@ export const ToolViewContent = ({ view, approval = false }: { view: ToolView; ap
         <span className="tool-view-content" data-view-kind={view.kind}>
           <span>{approval ? "要执行" : "执行"}</span>
           <code className="tool-view-code">{view.command}</code>
+          {view.note === undefined ? null : <span className="tool-view-detail">{view.note}</span>}
         </span>
       );
     case "write":
