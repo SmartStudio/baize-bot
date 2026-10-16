@@ -65,7 +65,6 @@ function dispatchDeps(Hub: typeof AgentHub = AgentHub) {
       priceInputPerM: 0,
       priceOutputPerM: 0,
       groupTurns: new GroupTurns(database.db, server.server.hub),
-      gatewayBaseUrl: () => "",
       toolCrypto: new ToolCrypto("a".repeat(64)),
       notifications: server.server.notifications,
       live: new LiveRelay({ push: server.server.hub }),

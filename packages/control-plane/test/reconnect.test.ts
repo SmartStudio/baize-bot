@@ -1,4 +1,11 @@
-import { CreateBotResponse, MessageListResponse, type GroupId, type RunId, type ServerPush } from "@baize/shared";
+import {
+  controlOriginFromAgentUrl,
+  CreateBotResponse,
+  MessageListResponse,
+  type GroupId,
+  type RunId,
+  type ServerPush,
+} from "@baize/shared";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
 import * as events from "../src/agent/events.js";
@@ -98,7 +105,8 @@ it("重连握手里 config 还没发出时来的活不派给这条连接，confi
       computerId: owner.computer.computerId,
       token: owner.computer.token,
       version: "test",
-      protocol: 3,
+      protocol: 4,
+      controlOrigin: controlOriginFromAgentUrl(second.socket.url),
       installId: owner.computer.computerId,
       piSessionVersion: 3,
       uplinkStream: owner.computer.computerId,

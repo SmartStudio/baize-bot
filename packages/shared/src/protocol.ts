@@ -49,6 +49,20 @@ export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_
 export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
 
+/** 代理连控制面用的那个源，config 的数据面地址只拼在它上面。只在这里校验一次，后面谁都不再判断。 */
+export const ControlOrigin = z
+  .string()
+  .max(256)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (url.protocol === "http:" || url.protocol === "https:") && url.origin === value;
+    } catch {
+      return false;
+    }
+  }, "必须是 http(s)://主机[:端口]，不带路径、查询和凭据");
+export type ControlOrigin = z.infer<typeof ControlOrigin>;
+
 export const AgentCloseCode = {
   superseded: 4000,
   badHello: 4001,
@@ -94,6 +108,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     token: z.string(),
     version: z.string(),
     protocol: z.number().int().nonnegative().default(1),
+    // 协议 4 起必填，缺了控制面按坏 hello 关。schema 上可缺是为了让旧代理先撞上协议号检查，拿到要升级的明确关闭码。
+    controlOrigin: ControlOrigin.optional(),
     installId: z.string().uuid().default("00000000-0000-0000-0000-000000000000"),
     piSessionVersion: z.number().int().positive().default(1),
     uplinkStream: z.string().min(1).max(128).default("legacy"),
@@ -551,8 +567,8 @@ export const ControlToAgent = ControlToAgentDiscriminatedUnion.refine(
 );
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
 
-export const AGENT_PROTOCOL = 3;
-export const MIN_AGENT_PROTOCOL = 3;
+export const AGENT_PROTOCOL = 4;
+export const MIN_AGENT_PROTOCOL = 4;
 
 export const UPLINK_DELIVERY = {
   hello: "bare",

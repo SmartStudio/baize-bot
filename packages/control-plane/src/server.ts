@@ -108,7 +108,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const groupTurns = new GroupTurns(options.db, hub);
   const live = new LiveRelay({ push: hub, ...options.live });
 
-  // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
+  // 只剩 OAuth 回调在没配 WEB_BASE_URL 时回退到它。监听端口在 serve() 之后才知道，回调要等授权时才拼，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
   const endpoints = { ...config.oauth, githubApiBaseUrl: config.githubApiBaseUrl, xApiBaseUrl: config.xApiBaseUrl };
   const agents = new AgentHub({
@@ -117,7 +117,6 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     priceInputPerM: config.priceInputPerM,
     priceOutputPerM: config.priceOutputPerM,
     groupTurns,
-    gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
     silenceTimeoutMs: options.silenceTimeoutMs,
     mcpDiscoveryTimeoutMs: options.mcpDiscoveryTimeoutMs,

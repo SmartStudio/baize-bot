@@ -1,6 +1,7 @@
 import {
   ComputerId,
   ComputerListResponse,
+  controlOriginFromAgentUrl,
   ComputerTokenResponse,
   CreateBotResponse,
   MessageListResponse,
@@ -56,7 +57,8 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: "b".repeat(64),
       version: "test",
-      protocol: 3,
+      protocol: 4,
+      controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: computer.computerId,
       piSessionVersion: 3,
       uplinkStream: computer.computerId,
@@ -74,7 +76,8 @@ describe("握手", () => {
       computerId: ComputerId.parse("没有这台电脑"),
       token: "b".repeat(64),
       version: "test",
-      protocol: 3,
+      protocol: 4,
+      controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: "f112ce55-14af-49b1-a419-18b2e213f288",
       piSessionVersion: 3,
       uplinkStream: ComputerId.parse("没有这台电脑"),
@@ -104,6 +107,99 @@ describe("握手", () => {
     }
   });
 
+  it("四个数据面地址都拼在代理自报的 controlOrigin 上，不用控制面自己的地址", async () => {
+    const { computer } = await ownerWithComputer();
+    const origin = "http://computer-box.internal:3101";
+    const { agent, config } = await helloAgent(server.server.port, computer.computerId, computer.token, [], {
+      controlOrigin: origin,
+    });
+
+    try {
+      expect({
+        mcpProxy: config.mcpProxy.baseUrl,
+        hub: config.hub.baseUrl,
+        modelGateway: config.modelGateway.baseUrl,
+        accountsProxy: config.accountsProxy.baseUrl,
+      }).toEqual({
+        mcpProxy: `${origin}/mcp-proxy`,
+        hub: `${origin}/hub/v1`,
+        modelGateway: `${origin}/gateway/v1`,
+        accountsProxy: `${origin}/accounts-proxy`,
+      });
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("本机和远程各报各的 controlOrigin，重发 config 时仍各用各的", async () => {
+    const { client, computer } = await ownerWithComputer();
+    const remoteResponse = await client.post("/api/computers/remote");
+    expect(remoteResponse.status).toBe(200);
+    const remote = ComputerTokenResponse.parse(await remoteResponse.json());
+    const local = await helloAgent(server.server.port, computer.computerId, computer.token, [], {
+      controlOrigin: "http://localhost:3101",
+    });
+    const box = await helloAgent(server.server.port, remote.computerId, remote.token, [], {
+      controlOrigin: "https://baize.example.com",
+    });
+
+    try {
+      await client.post("/api/bots", { name: "小服" });
+      expect((await local.agent.expect("config")).modelGateway.baseUrl).toBe("http://localhost:3101/gateway/v1");
+      expect((await box.agent.expect("config")).modelGateway.baseUrl).toBe("https://baize.example.com/gateway/v1");
+    } finally {
+      local.agent.close();
+      box.agent.close();
+    }
+  });
+
+  it("协议 4 的 hello 缺 controlOrigin 按坏 hello 关连接，不发 welcome", async () => {
+    const { computer } = await ownerWithComputer();
+    const agent = await openAgent(server.server.port);
+    agent.send({
+      type: "hello",
+      computerId: computer.computerId,
+      token: computer.token,
+      version: "test",
+      protocol: 4,
+      installId: computer.computerId,
+      piSessionVersion: 3,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
+      activeRuns: [],
+    });
+
+    expect(await agent.closed()).toBe(4001);
+    expect(agent.received(), "认身份之前就该关掉").toEqual([]);
+  });
+
+  it.each([
+    ["带路径", "http://computer-box.internal:3101/agent"],
+    ["带结尾斜杠", "http://computer-box.internal:3101/"],
+    ["带凭据", "http://user:pass@computer-box.internal:3101"],
+    ["不是 http(s)", "ws://computer-box.internal:3101"],
+    ["不是 URL", "computer-box.internal:3101"],
+  ])("controlOrigin %s 按坏 hello 关连接", async (_label, controlOrigin) => {
+    const { computer } = await ownerWithComputer();
+    const agent = await openAgent(server.server.port);
+    agent.send({
+      type: "hello",
+      computerId: computer.computerId,
+      token: computer.token,
+      version: "test",
+      protocol: 4,
+      controlOrigin,
+      installId: computer.computerId,
+      piSessionVersion: 3,
+      uplinkStream: computer.computerId,
+      downApplied: 0,
+      activeRuns: [],
+    });
+
+    expect(await agent.closed()).toBe(4001);
+    expect(agent.received()).toEqual([]);
+  });
+
   it("握上手就算在线，断开变休眠", async () => {
     const { computer, userId } = await ownerWithComputer();
     const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
@@ -126,7 +222,8 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
-      protocol: 3,
+      protocol: 4,
+      controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: computer.computerId,
       piSessionVersion: 3,
       uplinkStream: computer.computerId,

@@ -1,12 +1,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AddressInfo } from "node:net";
 import { describe, expect, it } from "vitest";
-import { WebSocket, WebSocketServer } from "ws";
+import { WebSocket } from "ws";
 import { BotListResponse, MeResponse, type ServerPush } from "@baize/shared";
 import { startAgent, type AgentHandle } from "@baize/computer-agent";
 import { computers } from "@baize/control-plane/testing";
+import { startRelayEntry } from "../src/relay.js";
 import { startStack, type Stack } from "../src/stack.js";
 import { startUpstream } from "../src/upstream.js";
 
@@ -32,17 +32,16 @@ async function waitUntil(check: () => boolean, what: string): Promise<void> {
 }
 
 /** 夹在电脑代理和真控制面之间，把下行 config 里的 accountsProxy 删掉，扮一个还没有这个字段的旧控制面。 */
-async function oldControlPlane(target: string): Promise<OldControlPlane> {
+async function oldControlPlane(controlPort: number): Promise<OldControlPlane> {
   const upFrames: OldControlPlane["upFrames"] = [];
   const downTypes: string[] = [];
   let strip = true;
   let lastConfig: string | null = null;
   let agentSide: WebSocket | null = null;
   let controlSide: WebSocket | null = null;
-  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
-  await new Promise<void>((resolve) => server.once("listening", resolve));
-  server.on("connection", (agent) => {
-    const control = new WebSocket(target);
+  const entry = await startRelayEntry(controlPort);
+  entry.agents.on("connection", (agent) => {
+    const control = new WebSocket(`ws://127.0.0.1:${controlPort}/agent`);
     agentSide = agent;
     controlSide = control;
     const early: string[] = [];
@@ -74,9 +73,8 @@ async function oldControlPlane(target: string): Promise<OldControlPlane> {
     agent.on("close", () => control.close());
     control.on("close", () => agent.close());
   });
-  const { port } = server.address() as AddressInfo;
   return {
-    url: `ws://127.0.0.1:${port}/agent`,
+    url: `ws://127.0.0.1:${entry.port}/agent`,
     upFrames,
     downTypes,
     upgrade: async () => {
@@ -89,11 +87,7 @@ async function oldControlPlane(target: string): Promise<OldControlPlane> {
         "代理收下补发的 config",
       );
     },
-    close: () =>
-      new Promise<void>((resolve) => {
-        for (const client of server.clients) client.terminate();
-        server.close(() => resolve());
-      }),
+    close: () => entry.close(),
   };
 }
 
@@ -125,7 +119,7 @@ describe("端到端：新电脑代理连旧控制面", () => {
       const { user } = MeResponse.parse(await stack.get("/api/me"));
       const credentials = await computers.resetComputerToken(stack.db, user.id);
       if (credentials === null) throw new Error("seed 没建出本机电脑");
-      proxy = await oldControlPlane(`ws://127.0.0.1:${stack.port}/agent`);
+      proxy = await oldControlPlane(stack.port);
       agent = startAgent({
         url: proxy.url,
         computerId: credentials.computerId,

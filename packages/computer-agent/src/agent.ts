@@ -10,6 +10,7 @@ import {
   BareUplinkFrame,
   type ComputerId,
   ControlToAgent,
+  controlOriginFromAgentUrl,
   DownlinkFrame,
   UplinkFrame,
   UPLINK_DELIVERY,
@@ -76,6 +77,8 @@ const bytesOf = (data: RawData): Uint8Array =>
   Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
 
 export function startAgent(options: AgentOptions): AgentHandle {
+  // 放在起 Chrome 之前算：地址推不出源就当场失败，不等连上之后才发现 config 里的地址全错。
+  const controlOrigin = controlOriginFromAgentUrl(options.url);
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const backoff = options.backoff ?? defaultBackoff;
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
@@ -529,6 +532,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
               token: options.token,
               version: options.version,
               protocol: AGENT_PROTOCOL,
+              controlOrigin,
               installId,
               piSessionVersion: CURRENT_SESSION_VERSION,
               uplinkStream: outbox?.stream,

@@ -19,7 +19,7 @@ import {
 const operation = { name: "lookup", description: "查询", inputSchema: { type: "object" }, needsApproval: false };
 describe("MCP 发现协议", () => {
   it("协议号和下限同步抬到基线加一", () => {
-    expect(AGENT_PROTOCOL).toBe(3);
+    expect(AGENT_PROTOCOL).toBe(4);
     expect(MIN_AGENT_PROTOCOL).toBe(AGENT_PROTOCOL);
   });
   it("带凭据的发现请求和结果仅能走 bare，不能伪装成可靠帧", () => {

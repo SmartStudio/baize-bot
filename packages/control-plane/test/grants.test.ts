@@ -1,6 +1,7 @@
 import {
   BotListResponse,
   BotResponse,
+  controlOriginFromAgentUrl,
   CreateBotResponse,
   DecideApprovalResponse,
   GrantListResponse,
@@ -421,7 +422,8 @@ async function reconnect(who: Owner, activeRuns: readonly RunId[]): Promise<Agen
     computerId: who.computer.computerId,
     token: who.computer.token,
     version: "test",
-    protocol: 3,
+    protocol: 4,
+    controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
     installId: who.computer.computerId,
     piSessionVersion: 3,
     uplinkStream: who.computer.computerId,

@@ -1,6 +1,8 @@
 import {
+  AGENT_PROTOCOL,
   BareUplinkFrame,
   ControlToAgent,
+  controlOriginFromAgentUrl,
   decodeLive,
   DownlinkFrame,
   LiveDown,
@@ -259,6 +261,7 @@ export type HelloOverrides = {
   readonly installId?: string;
   readonly piSessionVersion?: number;
   readonly protocol?: number;
+  readonly controlOrigin?: string;
 };
 
 export async function helloAgent(
@@ -285,7 +288,8 @@ export function sendHello(
     computerId,
     token,
     version: "test",
-    protocol: overrides.protocol ?? 3,
+    protocol: overrides.protocol ?? AGENT_PROTOCOL,
+    controlOrigin: overrides.controlOrigin ?? controlOriginFromAgentUrl(agent.socket.url),
     installId: overrides.installId ?? computerId,
     piSessionVersion: overrides.piSessionVersion ?? 3,
     uplinkStream: computerId,
