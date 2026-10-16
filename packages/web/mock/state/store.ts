@@ -1,5 +1,6 @@
 import {
   Account,
+  type ComputerKind,
   type ComputerStatus,
   Approval,
   Bot,
@@ -63,6 +64,10 @@ export const accounts = new Map<string, Account>();
 export const computerStatus = new Map<string, ComputerStatus>();
 // 测试摘掉的电脑，电脑表里不再列。造「只有一台远程电脑」用，seed 重置时放回来。
 export const removedComputers = new Set<string>();
+// 每个群里每个 Bot 选的电脑，键是「群/Bot」。没有记录就是没选过，走默认。
+export const computerChoices = new Map<string, ComputerKind>();
+// 还没跑完的那几轮各自开跑时在哪台上，键同上。控制面取最近开跑的那条，这里按插入顺序取最后一条。
+export const runsOnComputer = new Map<string, Map<symbol, ComputerKind>>();
 // 每个账号最近一次点「打开登录窗口」发出的尝试号，测试入口报失败时不带号就默认是它。
 export const loginAttempts = new Map<string, string>();
 export const publications = new Map<string, Publication>();

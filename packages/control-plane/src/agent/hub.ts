@@ -327,19 +327,34 @@ export class AgentHub {
    * 这条连接上一旦有过带代际的回执，无代际的拒收就不可能说的是当前这一代，不能盖掉已有的事实。
    * 返回是否采纳：没采纳的拒收不是事实，调用方不能据它告警或通知。
    */
-  markConfigRejected(conn: AgentConnection, generation: number | undefined): boolean {
+  async markConfigRejected(conn: AgentConnection, generation: number | undefined): Promise<boolean> {
     const config = this.#configs.get(conn);
     if (config === undefined) return false;
     if (generation === undefined ? config.acked !== 0 : generation !== config.sent) return false;
+    const was = config.state;
     config.state = "rejected";
+    if (was === "ready" && this.#connections.get(conn.computerId) === conn)
+      await this.#pushReach(conn.computerId, conn.ownerId);
     return true;
   }
 
-  markConfigApplied(conn: AgentConnection, generation: number): void {
+  async markConfigApplied(conn: AgentConnection, generation: number): Promise<void> {
     const config = this.#configs.get(conn);
     if (config === undefined || config.sent !== generation) return;
+    const was = config.state;
     config.acked = generation;
     config.state = "ready";
+    // 握手中变 ready 的那次由 hello 自己推上线，这里只管拒收之后恢复的那一拍。
+    if (was === "rejected" && this.#connections.get(conn.computerId) === conn)
+      await this.#pushReach(conn.computerId, conn.ownerId);
+  }
+
+  /** 库里的 status 没变、能不能派变了：config 拒收与恢复、断线宽限到期。网页的在线圆点只读 dispatchable。 */
+  async #pushReach(computerId: ComputerId, ownerId: UserId): Promise<void> {
+    const record = await findComputerById(this.#deps.db, computerId);
+    if (record === null) return;
+    const availability = await computerAvailability(this.#deps.db, this, ownerId);
+    this.#deps.push.push(ownerId, { type: "computer_updated", computer: withDispatchable(record, availability) });
   }
 
   #countQueuedHello(computerId: ComputerId, delta: 1 | -1): void {
@@ -769,6 +784,8 @@ export class AgentHub {
   async #finishAfterGrace(computerId: ComputerId, ownerId: UserId): Promise<void> {
     const returning = () => this.#connections.has(computerId) || this.#queuedHellos.has(computerId);
     if (returning()) return;
+    // 计时器一到 canDeliver 就是假，断线那一拍推出去的「宽限中能派」从这里起不成立了。
+    await this.#pushReach(computerId, ownerId);
     const afterCommit: (() => Promise<void>)[] = [];
     try {
       await this.#deps.db.transaction(async (tx) => {

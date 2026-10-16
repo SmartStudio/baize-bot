@@ -6,6 +6,7 @@ import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
 import { NewProjectDialog } from "../components/NewProjectDialog.js";
 import { ChatPanel } from "../components/ChatPanel.js";
+import { hasChoice, type ComputerChoicesView } from "../components/ComputerPicker.js";
 import { BotSettingsPanel } from "../components/BotSettingsPanel.js";
 import { AccountMenu } from "../components/AccountMenu.js";
 import { SettingsWindow } from "../components/SettingsWindow.js";
@@ -68,6 +69,14 @@ export const MainWindow = () => {
   useEffect(() => {
     if (focusedId !== null && !loaded) void actions.loadMessages(focusedId, reconnectedAt);
   }, [focusedId, loaded, reconnectedAt, actions]);
+
+  // 两台电脑才有得选。打开的群每次进来、推送重连过都重拉一次：runningOn 只有列表上有，没有推送专门说它变了。
+  const computers = Object.values(ready?.content.computers ?? {});
+  const twoComputers = hasChoice(computers);
+  useEffect(() => {
+    if (groupId !== null && twoComputers)
+      void actions.loadComputerChoices(groupId, reconnectedAt).catch(() => undefined);
+  }, [groupId, reconnectedAt, twoComputers, actions]);
 
   // 打开群页或项目页算看过（D3），首页扫到不算。项目页进同一个项目群还是这个群，不再记一次。
   useEffect(() => {
@@ -164,6 +173,16 @@ export const MainWindow = () => {
   const soloBot: Bot | null = conversation?.kind === "solo" ? (bots[conversation.botId] ?? null) : null;
   const team = conversation?.kind === "team" ? conversation : null;
   const inspected = inspectedTool?.groupId === groupId ? inspectedTool.tool : null;
+  const choices = groupId === null ? undefined : ready.computerChoices.rows[groupId];
+  const computerChoices: ComputerChoicesView | null =
+    groupId === null || !twoComputers || choices === undefined
+      ? null
+      : {
+          groupId,
+          computers,
+          choices,
+          onChoose: (botId, kind) => actions.chooseComputer(groupId, botId, kind),
+        };
   // 检查器临时占用右栏；关掉后回到 Bot 设置或任务详情。没有右栏内容时，对话区把这一栏吃掉。
   const hasPanel = inspected !== null || soloBot !== null || (team !== null && taskOpen);
 
@@ -214,6 +233,7 @@ export const MainWindow = () => {
             if (team !== null) await actions.setChecklist(team.task, checklist);
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
+          computerChoices={computerChoices}
         />
       ) : tableOpen !== null ? (
         <TablePage groupId={tableOpen} table={pokerTableOf(ready, tableOpen) ?? null} />

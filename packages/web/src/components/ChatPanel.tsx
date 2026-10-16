@@ -15,6 +15,7 @@ import {
 import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar } from "./BotAvatar.js";
 import { BotHeader } from "./BotHeader.js";
+import { TeamComputerNotes, TeamComputers, type ComputerChoicesView } from "./ComputerPicker.js";
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 import { prefillOf } from "./routines/prefill.js";
@@ -46,6 +47,7 @@ type Props = {
   onLoadSkills: (botId: BotId) => Promise<void>;
   onToggleChecklist: (checklist: ChecklistItem[]) => Promise<void>;
   onOpenTask: () => void;
+  computerChoices: ComputerChoicesView | null;
 };
 
 // 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让回合组件重画一遍。
@@ -115,6 +117,7 @@ export const ChatPanel = ({
   onLoadSkills,
   onToggleChecklist,
   onOpenTask,
+  computerChoices,
 }: Props) => {
   const [draft, setDraft] = useState("");
   const [pickerOff, setPickerOff] = useState(false);
@@ -216,6 +219,7 @@ export const ChatPanel = ({
                 <span className="chat-sub" data-testid="chat-subtitle">
                   你 + {members.length} 个 Bot
                 </span>
+                {computerChoices === null ? null : <TeamComputers view={computerChoices} members={members} />}
               </div>
               <div className="chat-members" data-testid="chat-members">
                 {members.map((bot) => (
@@ -233,13 +237,14 @@ export const ChatPanel = ({
                   </span>
                 ) : null}
               </div>
+              {computerChoices === null ? null : <TeamComputerNotes view={computerChoices} members={members} />}
             </>
           ) : (
             <b data-testid="chat-title">Bot</b>
           )}
         </header>
       ) : (
-        <BotHeader bot={lead} />
+        <BotHeader bot={lead} computerChoices={computerChoices} />
       )}
       {conversation.kind === "team" ? (
         <TaskCard
