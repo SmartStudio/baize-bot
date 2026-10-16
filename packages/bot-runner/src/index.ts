@@ -36,7 +36,15 @@ import { SerialQueue } from "./serial-queue.js";
 import { createHelperTools } from "./helper.js";
 import { LaneFence, type LaneCancel, type WorkAppender } from "./lane-fence.js";
 import { connectionsFor, createMcpTools, unusableReason, type McpToolSet } from "./mcp-tools.js";
-import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
+import {
+  brandFileOf,
+  createMemoryTools,
+  NO_SECTIONS,
+  type RememberingRun,
+  renderMemory,
+  writeBrandFile,
+} from "./memory.js";
+import { renderComputerSection } from "./computer.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
@@ -976,7 +984,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...gate,
       allowBash: bash.allow,
       clearBashRun: bash.clearRun,
-      memory: () => lane.active?.memory ?? null,
+      sections: () => lane.active?.sections ?? NO_SECTIONS,
       recalls: lane.recalls,
       ...(generation.desired.settings === undefined ? {} : { settings: generation.desired.settings }),
       ...(sessionManager === undefined ? {} : { sessionManager }),
@@ -1002,7 +1010,7 @@ export function createRunner(config: RunnerConfig): Runner {
       control: new AbortController(),
       table: message.table,
       messageId: message.messageId,
-      memory: null,
+      sections: NO_SECTIONS,
       run: {
         runId: message.runId,
         botId: message.botId,
@@ -1089,7 +1097,10 @@ export function createRunner(config: RunnerConfig): Runner {
       const desired = generation.desired;
       const shown = readMemoryShown(session.sessionManager);
       const memory = renderMemory(bot.botId, desired.brand, desired.preferences, shown);
-      active.memory = memory.text;
+      active.sections = {
+        memory: memory.text,
+        computer: renderComputerSection(config.computerKind, message.computer),
+      };
       const text = composePrompt(message, contextSince(message.context, watermark), desired.accounts);
       report = reportRun(
         session,

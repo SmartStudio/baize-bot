@@ -26,7 +26,7 @@ import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
 import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } from "./lane-fence.js";
 import type { BotDirs } from "./paths.js";
-import { injectMemory } from "./memory.js";
+import { injectSections, type SystemSections } from "./memory.js";
 import { expandRecalls, type Recalls } from "./recall.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
@@ -74,8 +74,8 @@ export interface BotSessionOptions extends SessionGate {
   readonly tools: readonly RunnerTool[];
   readonly allowBash: (runId: string, callId: string, access: GateAccess) => void;
   readonly clearBashRun: (runId: string) => void;
-  /** 每次模型请求前读。偏好和手册整段放进系统提示，不进会话历史；null 就不加这一段。 */
-  readonly memory: () => string | null;
+  /** 每次模型请求前读。记忆和电脑各一段放进系统提示，不进会话历史；null 的那段不加。 */
+  readonly sections: () => SystemSections;
   readonly recalls: Recalls;
   readonly settings?: PiSettings;
   readonly sessionManager?: SessionManager;
@@ -247,10 +247,7 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
     pi.on("context", (event) => ({ messages: pruneImages(expandRecalls(event.messages, options.recalls)) }));
 
     // context_with_system 在自动压缩之后、每次发请求之前跑，拿到的是带系统消息的整份副本（extensions/runner.js emitContext）。
-    pi.on("context_with_system", (event) => {
-      const memory = options.memory();
-      return memory === null ? undefined : { messages: injectMemory(event.messages, memory) };
-    });
+    pi.on("context_with_system", (event) => ({ messages: injectSections(event.messages, options.sections()) }));
 
     gateToolCalls(pi, options, (runId, callId, toolName, decision) => {
       if (toolName === "bash") options.allowBash(runId, callId, decision.access);

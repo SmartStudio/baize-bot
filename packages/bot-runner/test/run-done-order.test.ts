@@ -17,6 +17,7 @@ afterEach(async () => {
 
 const prompt: PromptMessage = {
   type: "prompt",
+  computer: null,
   runId: RunId.parse("run-order"),
   botId,
   groupId,

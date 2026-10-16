@@ -56,6 +56,7 @@ const call = (query: string, id = "call-recall"): ScriptedTurn => ({
 });
 const prompt = (runId: string, text: string, groupId = "group-1"): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse(runId),
   botId: BotId.parse("bot-1"),
   groupId: GroupId.parse(groupId),

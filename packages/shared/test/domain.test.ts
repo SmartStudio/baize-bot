@@ -8,6 +8,7 @@ import {
   CreateGroupRequest,
   CreateRoutineRequest,
   DecideSkillOfferRequest,
+  DownlinkFrame,
   Draft,
   Group,
   GroupId,
@@ -243,6 +244,7 @@ describe("M7 群与主题任务的共享形状", () => {
       routine: null,
       members: [],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, task: null }).success).toBe(true);
@@ -267,6 +269,7 @@ describe("M7 群与主题任务的共享形状", () => {
       task: null,
       members: [],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
@@ -290,6 +293,7 @@ describe("M7 群与主题任务的共享形状", () => {
       task: null,
       members: [{ ...member, seat: "chief" }],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     const { reason: _reason, ...withoutReason } = prompt;
@@ -297,6 +301,13 @@ describe("M7 群与主题任务的共享形状", () => {
     const { messageId: _messageId, ...withoutMessageId } = prompt;
     expect(ControlToAgent.safeParse(withoutMessageId).success, "messageId 不可省").toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员座次不可省").toBe(false);
+    const { computer: _computer, ...withoutComputer } = prompt;
+    expect(
+      DownlinkFrame.parse({ type: "downlink", seq: 7, body: withoutComputer }).body,
+      "升级前压在发件箱里、不带电脑快照的 prompt 照样收下，当没有快照",
+    ).toEqual(prompt);
+    const onRemote = { ...prompt, computer: { other: { kind: "local", dispatchable: false }, choice: "remote" } };
+    expect(ControlToAgent.safeParse(onRemote).success, "另一台和选定都带上").toBe(true);
     const legacy = ControlToAgent.parse({ ...prompt, context: [{ messageId: "m1", from: "用户", text: "x" }] });
     expect(legacy.type === "prompt" ? legacy.context : null, "旧控制面不带 settled 的上下文行照样收下，当定稿").toEqual(
       [{ messageId: "m1", from: "用户", text: "x", settled: true }],

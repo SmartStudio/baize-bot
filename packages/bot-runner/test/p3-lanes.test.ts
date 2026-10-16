@@ -61,6 +61,7 @@ const call = (name: string, args: Record<string, unknown> = {}): ScriptedTurn =>
 
 const prompt = (runId: string, groupId = "group-a"): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse(runId),
   botId: BotId.parse("bot-lanes"),
   groupId: GroupId.parse(groupId),

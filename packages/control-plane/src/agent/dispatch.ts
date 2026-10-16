@@ -58,7 +58,7 @@ import type { PushHub } from "../ws/hub.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
 import { computerPreference, lockLaneComputers, placeRun, type ComputerPreference } from "./place-run.js";
 import type { AgentHub } from "./hub.js";
-import { computerAvailability, type AvailabilityAgents } from "./computer-availability.js";
+import { computerAvailability, computerView, type AvailabilityAgents } from "./computer-availability.js";
 import {
   selectAvailable,
   selectionNotice,
@@ -311,7 +311,7 @@ async function sendSpeaker(
         groupId,
         triggerMessageId: speaker.trigger.id,
         routineRunId: options.routineRunId,
-        prompt: async (runId) => {
+        prompt: async (runId, _messageId, placed) => {
           await voidApprovals();
           // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。
           const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
@@ -341,6 +341,11 @@ async function sendSpeaker(
             members: roster,
             ...(projects === undefined ? {} : { projects }),
             ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+            computer: computerView(
+              await computerAvailability(tx, deps.agents, ownerId),
+              placed.computerId,
+              placed.preference,
+            ),
           };
         },
       },

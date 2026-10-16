@@ -226,6 +226,7 @@ const promptMessage = (
   const groupId = GroupId.parse(group?.groupId ?? "group-1");
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(runId),
     botId: BotId.parse(botId),
     groupId,

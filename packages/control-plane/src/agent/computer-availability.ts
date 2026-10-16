@@ -1,4 +1,4 @@
-import { ComputerId, type Computer, type ComputerKind, type UserId } from "@baize/shared";
+import { ComputerId, type Computer, type ComputerKind, type ComputerView, type UserId } from "@baize/shared";
 import { eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { computers } from "../db/schema.js";
@@ -67,4 +67,15 @@ export async function computerAvailability(
 /** 库里那行补上 dispatchable 才出 HTTP 和推送。名单里没有它（刚删掉）就当派不过去。 */
 export function withDispatchable(record: ComputerRecord, availability: readonly ComputerAvailability[]): Computer {
   return { ...record, dispatchable: availability.some((one) => one.id === record.id && one.dispatchable) };
+}
+
+/** 这条 run 落在 computerId 上时 Bot 看到的另一台和选定。账号下只有这一台、也没选过时为 null。 */
+export function computerView(
+  availability: readonly ComputerAvailability[],
+  computerId: ComputerId,
+  choice: ComputerKind | null,
+): ComputerView | null {
+  const found = availability.find((one) => one.id !== computerId);
+  const other = found === undefined ? null : { kind: found.kind, dispatchable: found.dispatchable };
+  return other === null && choice === null ? null : { other, choice };
 }

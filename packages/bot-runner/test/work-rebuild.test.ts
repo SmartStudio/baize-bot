@@ -65,6 +65,7 @@ async function records() {
 function prompt(text: string, snapshot?: HubLaneSnapshot): PromptMessage {
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(`run-${text}`),
     botId,
     groupId,
