@@ -103,6 +103,7 @@ async function harness(upstream: Upstream, overrides: Partial<RunnerConfig> = {}
   const waiters = new Set<{ matches: (message: AgentToControl) => boolean; resolve: () => void }>();
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-lanes"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-lanes"), name: "分道助理", role: "member", preset: null, tags: [], description: "" }],
     tools: [],
     accounts: [],

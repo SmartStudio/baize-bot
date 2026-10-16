@@ -144,6 +144,7 @@ async function harness(
   const dataDir = mkdtempSync(join(tmpdir(), "baize-p3-runner-table-"));
   const runner = createRunner({
     computerId: ComputerId.parse("computer-table"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-table"), role: "player", preset: "old_k", name: "老K", tags: [], description: "" }],
     tools: [],
     accounts: [],

@@ -55,6 +55,7 @@ it("run_done 排在最后一帧 settled 工作记录确认之后：该帧挂住�
   });
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-order"),
+    computerKind: "local",
     bots: [{ id: botId, name: "收尾员", role: "member", preset: null, tags: [], description: "" }],
     tools: [],
     accounts: [],

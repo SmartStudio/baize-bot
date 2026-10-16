@@ -9,6 +9,7 @@ import {
   type AgentToControl,
   BareUplinkFrame,
   type ComputerId,
+  type ComputerKind,
   ControlToAgent,
   DownlinkFrame,
   UplinkFrame,
@@ -94,6 +95,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let runner: Runner | null = null;
   let attachmentConfig: Pick<AgentRunnerConfig, "hub" | "modelGateway"> | null = null;
   let conn: number | null = null;
+  let computerKind: ComputerKind | null = null;
   let upSent = 0;
   let outbox: ReliableOutbox | null = null;
   let downlinkCursor: DownlinkCursor | null = null;
@@ -376,6 +378,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         await outbox?.acknowledge(message.upAcked);
         if (stopping || link.phase !== "open" || link.socket !== from) return;
         conn = message.conn;
+        computerKind = message.kind;
         upSent = message.upAcked;
         log(`控制面已接纳，owner ${message.ownerId}`);
         process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "online" }))}\n`);
@@ -386,9 +389,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
         screen.reconnected();
         return;
       case "config": {
+        // welcome 之前的报文在 applyMessage 里已经丢掉，走到这里 kind 一定存下了。
+        if (computerKind === null) return;
         attachmentConfig = { hub: message.hub, modelGateway: message.modelGateway };
         const config: AgentRunnerConfig = {
           computerId: options.computerId,
+          computerKind,
           bots: message.bots,
           tools: message.tools,
           accounts: message.accounts,

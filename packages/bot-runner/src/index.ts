@@ -7,6 +7,7 @@ import {
   type ApprovalOutcome,
   type BotId,
   type ComputerId,
+  type ComputerKind,
   type ControlToAgent,
   type GroupId,
   type RoutineBoundary,
@@ -27,6 +28,7 @@ import {
 } from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { acquireBotBrowserMutex, type BrowserMutexLease } from "./browser-mutex.js";
+import { containmentFor } from "./contained.js";
 import { createDraftTools, DRAFT_TOOL_NAMES, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createLane, findLaneRun, type Lane, type LaneActive } from "./lane.js";
@@ -41,7 +43,7 @@ import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
 import { createRecallTool } from "./recall.js";
 import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
-import { createSandboxedBash } from "./sandbox.js";
+import { createSandboxedBash, sandboxKind } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import {
   composeTablePrompt,
@@ -72,6 +74,8 @@ export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } fr
 
 export interface RunnerConfig {
   readonly computerId: ComputerId;
+  /** 控制面在 welcome 里报的电脑类型。远程电脑加 bwrap 时沙箱兜得住的 bash 不再问，见 `src/contained.ts`。 */
+  readonly computerKind: ComputerKind;
   readonly bots: readonly BotConfig[];
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
@@ -393,6 +397,7 @@ function composePrompt(
 
 export function createRunner(config: RunnerConfig): Runner {
   let state: RunnerState = "ready";
+  const containment = containmentFor(config.computerKind, sandboxKind());
   const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const pokerResults = createPokerResults(config.send);
@@ -796,7 +801,12 @@ export function createRunner(config: RunnerConfig): Runner {
       return created;
     }
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
-    const bash = createSandboxedBash(dirs.workDir, zones, () => lane.active?.run.runId ?? null);
+    const bash = createSandboxedBash(
+      dirs.workDir,
+      zones,
+      () => lane.active?.run.runId ?? null,
+      containment.level === "closed" ? [dirs.agentDir, dirs.sessionDir] : [],
+    );
     if (config.browser !== undefined && bot.browser === null) {
       bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);
     }
@@ -942,6 +952,7 @@ export function createRunner(config: RunnerConfig): Runner {
           groupId,
           platform: process.platform,
           sandbox: bash.sandbox,
+          containment,
           source,
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,

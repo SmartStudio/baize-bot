@@ -15,6 +15,7 @@ import {
   type ApprovalOutcome,
   BotId,
   ComputerId,
+  type ComputerKind,
   decodeLive,
   encodeLive,
   GroupId,
@@ -298,6 +299,8 @@ function startControlPlane(
     holdWelcomeAfter?: number;
     welcomeAck?: number;
     workAppendAck?: (frame: UplinkFrame) => readonly UplinkRejection[] | null;
+    /** welcome 里报的电脑类型，不给就是本机。 */
+    kind?: ComputerKind;
   } = {},
 ) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
@@ -340,7 +343,7 @@ function startControlPlane(
           JSON.stringify({
             type: "welcome",
             ownerId: "owner-1",
-            kind: "local",
+            kind: tuning.kind ?? "local",
             serverTime: new Date().toISOString(),
             conn: connection,
             upAcked: 0,
@@ -381,7 +384,7 @@ function startControlPlane(
           JSON.stringify({
             type: "welcome",
             ownerId: "owner-1",
-            kind: "local",
+            kind: tuning.kind ?? "local",
             serverTime: new Date().toISOString(),
             conn: connection,
             upAcked: streams.get(stream) ?? 0,
@@ -1001,6 +1004,22 @@ describe("电脑代理连控制面", () => {
     const replay = await server.waitForMessage("run_done", 1);
     expect(replay.runId).toBe("run-1");
     expect(hookCalls).toBe(2);
+  });
+
+  it.each(["remote", "local"] as const)("welcome 报的电脑类型 %s 原样交给运行器", async (kind) => {
+    const receivedConfigs: AgentRunnerConfig[] = [];
+    const server = startControlPlane({ kind });
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      makeRunner: (config) => {
+        receivedConfigs.push(config);
+        return runnerOf(config, runnerCalls());
+      },
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    const config = await poll(() => receivedConfigs[0], 3000, "运行器建好");
+    expect(config.computerKind).toBe(kind);
   });
 
   it("第二条 config 不重建运行器，改为交给 applyConfig", async () => {
