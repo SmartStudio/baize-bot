@@ -586,7 +586,15 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
             const open = await tabForRef();
             const { x, y } = await pointOf(open, ref);
             await send(open, "Input.dispatchMouseEvent", { type: "mouseMoved", x, y });
-            await send(open, "Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+            // 真鼠标按下时 PointerEvent.pressure 是 0.5，不带 force 页面读到 0。
+            await send(open, "Input.dispatchMouseEvent", {
+              type: "mousePressed",
+              x,
+              y,
+              button: "left",
+              clickCount: 1,
+              force: 0.5,
+            });
             await send(open, "Input.dispatchMouseEvent", {
               type: "mouseReleased",
               x,

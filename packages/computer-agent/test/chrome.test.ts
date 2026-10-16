@@ -356,6 +356,64 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", (
     }
   }, 20_000);
 
+  it("登录页主世界钩了 querySelector，查登录的脚本一次都没碰到；登录页中途跳到另一页，照样查到已登录", async () => {
+    // 钩子用同步 XHR 上报：上报落地之前那次求值不会返回，断言时不用等。调用栈里除了钩子自己那一帧都没有本页地址的，就是外来的调用。
+    const hook = `<script>
+      for (const proto of [Document.prototype, Element.prototype]) {
+        for (const name of ["querySelector", "querySelectorAll"]) {
+          const original = proto[name];
+          proto[name] = function (...args) {
+            if (!String(new Error().stack).split("\\n").slice(2).join().includes(location.origin)) {
+              const report = new XMLHttpRequest();
+              report.open("POST", "/trip", false);
+              report.send(name + " " + args[0]);
+            }
+            return original.apply(this, args);
+          };
+        }
+      }
+    </script>`;
+    const trips: string[] = [];
+    const server = createServer((request, response) => {
+      if (request.url === "/trip") {
+        let body = "";
+        request.on("data", (chunk: Buffer) => (body += chunk.toString()));
+        request.on("end", () => {
+          trips.push(body);
+          response.end();
+        });
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        request.url === "/after"
+          ? `<!doctype html><meta charset="utf-8">${hook}<script>setTimeout(() => document.body.insertAdjacentHTML('beforeend', '<div class=user-info><img class=user_avatar><span>白泽工厂日记</span></div>'), 600)</script>`
+          : `<!doctype html><meta charset="utf-8">${hook}<script>setTimeout(() => (location.href = "/after"), 600)</script>`,
+      );
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("本地静态页没有端口");
+    const chrome = startAssistantChrome({
+      dataDir: await dataDir(),
+      log: () => {},
+      activateProcess: async () => {},
+      backgroundProcess: async () => {},
+    });
+    chromes.push(chrome);
+
+    try {
+      const login = loginOn(chrome, `http://127.0.0.1:${address.port}/`);
+      await expect(login(AbortSignal.timeout(8_000))).resolves.toEqual({ login: "valid", handle: "白泽工厂日记" });
+      expect(trips, "页面自己的 querySelector 没被查登录的脚本调过").toEqual([]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
+
   it("登录元素在上限内没出现就返回 failed timed_out", async () => {
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -441,6 +499,89 @@ describe.runIf(realChrome)("助理 Chrome 只有一条管道", () => {
     expect(chrome.pid(), "下次要连接时起的是新 Chrome").not.toBe(firstPid);
     expect(String((await again.send("Browser.getVersion")).product)).toContain("Chrome");
   }, 30_000);
+});
+
+interface PageIdentity {
+  readonly webdriver: boolean;
+  readonly language: string;
+  readonly languages: readonly string[];
+  readonly timeZone: string;
+  readonly locale: string;
+  readonly acceptLanguage: string;
+}
+
+/** 在助理 Chrome 里开一页本地页，读页面能看到的身份：navigator、Intl，和这一页请求带的 Accept-Language。 */
+async function pageIdentity(chrome: AssistantChrome): Promise<PageIdentity> {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    response.end(
+      `<!doctype html><script>window.acceptLanguage = ${JSON.stringify(request.headers["accept-language"] ?? "")}</script>`,
+    );
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("本地页没有端口");
+  const connection = await chrome.connection();
+  const { targetId } = await connection.send("Target.createTarget", {
+    url: `http://127.0.0.1:${address.port}/`,
+    background: true,
+  });
+  try {
+    const { sessionId } = await connection.send("Target.attachToTarget", { targetId, flatten: true });
+    const expression = `typeof window.acceptLanguage !== "string" ? undefined : JSON.stringify({
+      webdriver: navigator.webdriver,
+      language: navigator.language,
+      languages: navigator.languages,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      locale: Intl.DateTimeFormat().resolvedOptions().locale,
+      acceptLanguage: window.acceptLanguage,
+    })`;
+    const read = async (): Promise<PageIdentity | undefined> => {
+      const { result } = await connection.send(
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+        String(sessionId),
+      );
+      const value = (result as { value?: unknown } | undefined)?.value;
+      return typeof value === "string" ? (JSON.parse(value) as PageIdentity) : undefined;
+    };
+    return await poll(read, 10_000, "本地页加载完");
+  } finally {
+    await connection.send("Target.closeTarget", { targetId }).catch(() => null);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+describe.runIf(realChrome)("助理 Chrome 在页面上的身份", () => {
+  it("navigator.webdriver 是 false：管道调试照开，页面看不出是被自动化控制的", async () => {
+    const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {} });
+    chromes.push(chrome);
+
+    expect((await pageIdentity(chrome)).webdriver).toBe(false);
+  }, 20_000);
+
+  // 远程电脑的容器是 UTC 和 en-US，中国的号从一台英文 UTC 机器上登录本身就是风控信号。
+  it.runIf(process.platform === "linux")(
+    "远程电脑上时区是上海，navigator、Intl 和 Accept-Language 都是 zh-CN",
+    async () => {
+      const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {} });
+      chromes.push(chrome);
+
+      const { webdriver: _webdriver, ...locale } = await pageIdentity(chrome);
+
+      expect(locale).toEqual({
+        language: "zh-CN",
+        languages: ["zh-CN", "zh"],
+        timeZone: "Asia/Shanghai",
+        locale: "zh-CN",
+        acceptLanguage: "zh-CN,zh;q=0.9",
+      });
+    },
+    20_000,
+  );
 });
 
 describe.runIf(realChrome)("助理 Chrome 被杀的那一刻", () => {

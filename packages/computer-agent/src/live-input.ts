@@ -22,7 +22,9 @@ const point = (ratio: { readonly x: number; readonly y: number }, viewport: View
 
 export function toCdpInput(input: LiveInput, viewport: Viewport): readonly CdpCommand[] {
   switch (input.kind) {
-    case "mouse":
+    case "mouse": {
+      // buttons 是「此刻按着哪些键」：松开那一下已经不含它。
+      const buttons = input.phase === "up" ? 0 : BUTTON_BIT[input.button];
       return [
         {
           method: "Input.dispatchMouseEvent",
@@ -30,13 +32,15 @@ export function toCdpInput(input: LiveInput, viewport: Viewport): readonly CdpCo
             type: MOUSE_TYPE[input.phase],
             ...point(input, viewport),
             button: input.button,
-            // buttons 是「此刻按着哪些键」：松开那一下已经不含它。
-            buttons: input.phase === "up" ? 0 : BUTTON_BIT[input.button],
+            buttons,
             clickCount: input.clicks,
             modifiers: input.modifiers,
+            // 真鼠标按着键时 PointerEvent.pressure 是 0.5，不带 force 页面读到 0，一看就是脚本点的。
+            ...(buttons === 0 ? {} : { force: 0.5 }),
           },
         },
       ];
+    }
     case "wheel":
       return [
         {

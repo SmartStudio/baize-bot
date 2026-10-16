@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { CdpConnection, LiveEnd, PresentPage } from "@baize/bot-runner";
+import { type CdpConnection, evaluateIsolated, type LiveEnd, type PresentPage } from "@baize/bot-runner";
 import { type AccountId, type BrowserPlatform, LiveId, type LoginAttemptId, type LoginFailure } from "@baize/shared";
 import { type AssistantChrome, untilAborted } from "./chrome.js";
 
@@ -103,9 +103,11 @@ async function watchSignedIn(
   let scriptFailed = false;
   try {
     while (!stop.aborted) {
-      const response = await connection
-        .send("Runtime.evaluate", { expression, returnByValue: true }, sessionId)
-        .catch(() => ({}) as Record<string, unknown>);
+      // 在隔离世界里查，登录页的风控脚本钩了 querySelector 也看不到有人每 250ms 来翻一遍。
+      const response = await evaluateIsolated((method, params) => connection.send(method, params, sessionId), {
+        expression,
+        returnByValue: true,
+      }).catch(() => ({}) as Record<string, unknown>);
       if (stop.aborted) break;
       const result = response.result;
       const handle = typeof result === "object" && result !== null ? (result as { value?: unknown }).value : undefined;

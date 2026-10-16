@@ -204,6 +204,8 @@ function fakePublishing(dataDir: string) {
     send: async (method, params) => {
       if (method === "Target.createTarget") return { targetId: "publisher-target" };
       if (method === "Target.attachToTarget") return { sessionId: "publisher-session" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Page.navigate") url = String(params?.url);
       if (method === "DOM.setFileInputFiles") uploads.push(params?.files);
       if (method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased") {
