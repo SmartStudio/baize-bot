@@ -224,6 +224,10 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 
 `dispatchUserMessage` 那唯一一次选电脑放在路由之后，按头一个 speaker 在这个群里的选择来选。
 
+**Bot 自己换电脑：这一轮到此为止，换好后在另一台接着做。** 运行器的 `switch_computer` 工具打 `POST /hub/v1/lane/computer`，网关 key 认电脑，道头认这条道，body 是 `SwitchComputerRequest`（这一轮的 runId 和目标 kind）。`agent/continuation.ts` 的 `requestSwitch` 在一个事务里核对 run 是这台电脑上、这条道上、还没结束的普通 run（牌桌 run、别人的 run、结束了的都回 `not_current_run`），再经 `chooseComputer` 改选择并把 `runs.continue_requested` 立起来；拒绝的五种原因和文案在 `SWITCH_REFUSED`，原样回给模型当工具错误，目标不在线回 `target_offline`，选择不改，这一轮继续在当前这台上做，绝不默默落回。道的栅栏不过回 409 `LANE_FENCE_ERRORS`。`runs.continue_requested` 和 `runs.continues_run_id` 只有这个文件写。
+
+接续是一条新 run：旧 run 收尾（`run_done`、断线或报错收尾都算）之后，`dispatch.ts` 的 `resumeContinuation` 读 `pendingContinuation`，以 `reason: "continuation"` 的 speaker 进群回合。它的 prompt 只有一句「刚才你请求换电脑，现在已经换到云电脑上了……」（`continuationText`），`context`、`members` 为空，`task` 为 null，`origin` 沿用旧 run 的，因为模型的会话会从工作记录重建，群历史和任务卡都已经在里面。新 run 的 `continues_run_id` 指回旧 run，`runs_continues_run_idx` 唯一，所以旧 run 收尾和 hello 补扫并发也只起一条；已经换过一次的 run 再换回 `already_continued`。多 Bot 群里接续插在回合队首，不计入 `BOT_MESSAGE_LIMIT`。用户在这个群里又说了话、删 Bot 取消道、接续派不出去（目标在这期间掉线，群里那句 `selectionNotice` 改说「刚才换电脑后要接着做的活没派出去」），都清掉标记，不再自动接着做。控制面重启后旧 run 已结束但接续没起的，等目标那种电脑 hello 时由 `resumePendingContinuations` 补起；启动时的那次扫描在还没有任何电脑连上时什么也派不出去，不算失败。接续是一条独立的 run，用量页和项目页上各算各的。
+
 **这一版派活不要求账号，候选电脑也不带账号。** `dispatch.ts` 的 `computerFor` 给 `selectComputer` 传的要求账号和每台电脑的账号都是空数组，实际走的是上表第一行。没有哪张表把群、例行或 Bot 绑到账号上，能从数据里算出来的只有群里草稿用过的账号。拿它来算不对：起草只要 `config.accounts` 里有这个账号，哪台电脑都能起，真发由发布循环按账号所在的电脑去发，不走派活。按草稿账号算的话，小红书项目的「排本周计划」会被钉在本机，合上 Mac 就不跑；主助理单聊里草稿跨了两台电脑的账号，就再也派不出去。例行任务也不加账号字段：例行只是归属人发的一句话，例行和 Bot 在派出去之前都不知道这一轮会碰哪个账号，填了也只能靠猜。眼下真正碰账号的动作只有发布草稿，它按 `accounts.computer_id` 下发，账号过期的隔离也落在发布上，见「账号」一节。
 
 **要求账号的数据接上时，连同 HTTP 用例一起加。** 那时要做两件事：给候选电脑接上 `accounts.computer_id` 对应的账号，再把这次要碰的账号传进来。只接前一件的话，没有任何 HTTP 用例看得出它断没断；只接后一件而前一件是断的，每次碰账号都会返回 `required_account_not_found`，群里说「要用的账号已经不在账号页里」，账号其实还在。所以接线和一条走 HTTP 的「碰本机账号的活本机离线时不改派」用例同一单加。

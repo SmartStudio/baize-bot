@@ -1,5 +1,24 @@
 import { z } from "zod";
-import { BotId, ComputerKind } from "./domain.js";
+import { BotId, ComputerKind, RunId } from "./domain.js";
+
+/**
+ * POST /hub/v1/lane/computer：Bot 在这一轮里请求把这个群换到另一台电脑。网关 key 认电脑，道头认这条道，body 带这一轮的 run。
+ * switching 表示选择已经改了、这一轮结束后会在那台上接着做；refused 的 text 原样给模型当工具错误。
+ */
+export const SwitchComputerRequest = z.object({ runId: RunId, kind: ComputerKind }).strict();
+export type SwitchComputerRequest = z.infer<typeof SwitchComputerRequest>;
+
+export const SwitchComputerResponse = z.discriminatedUnion("result", [
+  z.object({ result: z.literal("switching") }).strict(),
+  z
+    .object({
+      result: z.literal("refused"),
+      reason: z.enum(["not_current_run", "already_continued", "same_computer", "no_such_computer", "target_offline"]),
+      text: z.string(),
+    })
+    .strict(),
+]);
+export type SwitchComputerResponse = z.infer<typeof SwitchComputerResponse>;
 
 // PUT /api/groups/:groupId/bots/:botId/computer。成功 204，账号下没有这种电脑 409，群或成员不是你的 404。
 export const PutComputerChoiceRequest = z.object({ kind: ComputerKind }).strict();

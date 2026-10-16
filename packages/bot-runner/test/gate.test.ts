@@ -1334,6 +1334,7 @@ describe("例行边界", () => {
     ["mention_bot", "叫别的 Bot 干活"],
     ["poker_act", "出牌"],
     ["poker_review", "交复盘"],
+    ["switch_computer", "换电脑"],
   ];
 
   it.each(TOOL_BARS)("read_only：%s 拒绝，理由点名不能%s，不是一句空话", (toolName, bar) => {

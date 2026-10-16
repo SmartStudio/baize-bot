@@ -85,6 +85,7 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
+import { clearGroupContinuations } from "../agent/continuation.js";
 import type { AgentHub } from "../agent/hub.js";
 import { computerAvailability, withDispatchable } from "../agent/computer-availability.js";
 import type { LiveRelay } from "../live/relay.js";
@@ -222,7 +223,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
-  app.route(HUB_PATH, createHub({ db }));
+  app.route(HUB_PATH, createHub({ db, agents, push: hub }));
   app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(
@@ -956,6 +957,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
         ? ({ kind: "user", text: body.value.text } as const)
         : ({ kind: "user", text: body.value.text, mentions } as const);
     deps.groupTurns.cancel(groupId.data);
+    // 用户又说了话，之前请求换电脑后要接着做的那段活作废，不再自动起。
+    await clearGroupContinuations(db, groupId.data);
 
     const message = await appendMessageIfGroupAlive(db, owned, sent);
     if (message === null) return c.json(NOT_FOUND, 404);

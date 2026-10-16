@@ -68,6 +68,13 @@ import {
 import type { ComputerRecord } from "../repo/rows.js";
 import { GroupTurns, type SendOutcome, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
+import {
+  clearContinuation,
+  continuationSpeaker,
+  pendingContinuation,
+  pendingContinuations,
+  type PendingContinuation,
+} from "./continuation.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
 export const CONTEXT_MESSAGES = 20;
@@ -226,6 +233,66 @@ export async function dispatchUserMessage(
   return noTarget();
 }
 
+/**
+ * 换电脑后接着做。旧 run 结账或被放弃之后调，没立标记、已经接过的直接返回。
+ * 回合还在跑别的就插到最前面；没有回合就按旧 run 的触发消息开一轮，只排它一位。
+ */
+export async function resumeContinuation(deps: DispatchDeps & { readonly groupTurns: GroupTurns }, runId: RunId) {
+  const pending = await pendingContinuation(deps.db, runId);
+  if (pending !== null) await startContinuation(deps, pending);
+}
+
+/**
+ * 控制面启动、电脑 hello 时补起欠着的接续：结账提交后进程没了的那种。一个起不来不挡后面的。
+ * 只起选定那台此刻能派的：重启后电脑是一台台回来的，先回来的那台不能替还没回来的那台把活判成派不出去。
+ */
+export async function resumePendingContinuations(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  ownerId?: UserId,
+): Promise<number> {
+  let started = 0;
+  for (const pending of await pendingContinuations(deps.db, ownerId)) {
+    const availability = await computerAvailability(deps.db, deps.agents, pending.ownerId);
+    if (!availability.some((one) => one.kind === pending.choice && one.dispatchable)) continue;
+    started += 1;
+    await startContinuation(deps, pending).catch((error: unknown) =>
+      console.error(`run ${pending.runId} 换电脑后的接续没起来`, error),
+    );
+  }
+  return started;
+}
+
+async function startContinuation(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  pending: PendingContinuation,
+): Promise<void> {
+  const speaker = continuationSpeaker(pending);
+  if (speaker === null) {
+    await clearContinuation(deps.db, pending.runId);
+    return;
+  }
+  const { ownerId, groupId } = pending;
+  if (deps.groupTurns.queueContinuation(groupId, pending.runId, speaker) === "queued") return;
+  const members = await listGroupBots(deps.db, groupId);
+  const epoch = await messageSeq(deps.db, pending.trigger.id, { kind: "bot", botId: pending.botId });
+  if (members.length === 0 || epoch === null) return;
+  const options: DispatchOptions =
+    pending.routine === null
+      ? {}
+      : {
+          purpose: pending.routine.purpose,
+          routine: { routineId: pending.routine.routineId, boundary: pending.routine.boundary },
+        };
+  await deps.groupTurns.start({
+    groupId,
+    ownerId,
+    epoch,
+    members,
+    speakers: [speaker],
+    send: (next, includeRecent) => sendSpeaker(deps, ownerId, groupId, next, includeRecent, options, null, []),
+  });
+}
+
 type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
 
 /** 发信 Bot 已经不在群里时退回 user：报文是它留下的，但没有名字可署。 */
@@ -246,7 +313,10 @@ async function sendSpeaker(
 ): Promise<SendOutcome & { readonly unplacedReason?: SelectionFailure }> {
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
   const members = await listGroupBots(deps.db, groupId);
-  const contextMessages = await contextMessagesFor(deps.db, groupId, speaker, includeRecent);
+  // 接续不带群历史、任务卡和名单：上一轮的对话都在运行器的会话里，整段提示就是 continuation.text。
+  const continuation = speaker.continuation;
+  const contextMessages =
+    continuation === undefined ? await contextMessagesFor(deps.db, groupId, speaker, includeRecent) : [];
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
@@ -268,7 +338,7 @@ async function sendSpeaker(
       ? botOrigin(members, speaker.handoff.fromBotId)
       : speaker.trigger.body.kind === "bot"
         ? botOrigin(members, speaker.trigger.body.botId)
-        : { kind: options.routineRunId === undefined ? "user" : "routine" };
+        : { kind: options.routineRunId === undefined && options.routine === undefined ? "user" : "routine" };
   // 只有主助理拿项目清单，它才能把一句「下周多发点小红书」落到某个项目的节奏上。
   const speakerRole = members.find((member) => member.id === speaker.botId)?.role;
   const projects = speakerRole === "assistant" ? await listProjects(deps.db, ownerId) : undefined;
@@ -311,25 +381,27 @@ async function sendSpeaker(
         groupId,
         triggerMessageId: speaker.trigger.id,
         routineRunId: options.routineRunId,
+        ...(continuation === undefined ? {} : { continuesRunId: continuation.fromRunId }),
         prompt: async (runId, _messageId, placed) => {
           await voidApprovals();
-          // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。
+          // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。接续没读窗口，也不记名单，免得把旧 run 没定稿的行划掉。
           const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
-          await recordContext(
-            tx as unknown as Db,
-            runId,
-            { kind: "bot", botId: speaker.botId },
-            {
-              unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
-              settled: context.filter((line) => line.settled).map((line) => line.messageId),
-            },
-          );
+          if (continuation === undefined)
+            await recordContext(
+              tx as unknown as Db,
+              runId,
+              { kind: "bot", botId: speaker.botId },
+              {
+                unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+                settled: context.filter((line) => line.settled).map((line) => line.messageId),
+              },
+            );
           return {
             type: "prompt",
             botId: speaker.botId,
             groupId,
             messageId: speaker.trigger.id,
-            text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
+            text: continuation?.text ?? speaker.handoff?.text ?? triggerText(speaker.trigger.body),
             origin,
             reason: speaker.reason,
             group,
@@ -337,8 +409,8 @@ async function sendSpeaker(
             purpose: options.purpose ?? "plan",
             routine: options.routine ?? null,
             table: null,
-            task: solo ? null : task,
-            members: roster,
+            task: solo || continuation !== undefined ? null : task,
+            members: continuation === undefined ? roster : [],
             ...(projects === undefined ? {} : { projects }),
             ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
             computer: computerView(
@@ -356,8 +428,8 @@ async function sendSpeaker(
           : computerFor(tx, deps.agents, ownerId, preference),
     );
     if (result.kind !== "queued") await voidApprovals();
-    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。
-    if (result.kind === "not_member") return { kind: "skipped", voided } as const;
+    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。接续已经由别处起过了也只跳过。
+    if (result.kind === "not_member" || result.kind === "continued") return { kind: "skipped", voided } as const;
     if (result.kind === "unplaced") return { kind: "unavailable", reason: result.reason, voided } as const;
     return { ...result, voided };
   });
@@ -368,10 +440,12 @@ async function sendSpeaker(
     for (const computerId of placedRun.flushComputerIds) await deps.agents.flushOutbox(computerId);
   if (placedRun.kind === "unavailable") {
     // 等电脑锁期间租约可能过期、后面的人轮到时电脑可能已经不在，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
+    // 接续派不出去就说明白、把标记清掉，不改派到另一台，也不等电脑回来再补起：用户看到这句自己决定。
+    if (continuation !== undefined) await clearContinuation(deps.db, continuation.fromRunId);
     const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
-      text: selectionNotice(placedRun.reason),
+      text: selectionNotice(placedRun.reason, { continuation: continuation !== undefined }),
     });
     return written ? { kind: "stopped", unplacedReason: placedRun.reason } : { kind: "gone" };
   }

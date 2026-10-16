@@ -74,6 +74,7 @@ import {
 } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns, type PassAbsorption } from "./group-turn.js";
+import { resumeContinuation } from "./dispatch.js";
 import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
 import { handlePokerAct } from "./events/poker-act.js";
@@ -396,6 +397,8 @@ export async function abandonRun(
     clearTextPrefixes(run.runId);
     if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
     for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
+    // Bot 刚请求换电脑、电脑随即掉线，run_done 还在发件箱里：被放弃的这一轮照样在另一台上接着做。
+    if (run.groupId !== null) await resumeContinuation(deps, run.runId);
     for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
     pushSettled(deps.push, ownerId, result.settled);
     if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
@@ -600,7 +603,7 @@ export function errorKind(error: unknown): string {
  * 回合推进只认当前回合的 runId，重复调用是空操作；结账提交后推进抛错的，补发时账已结、回合还在这里，接着推。
  */
 async function settleCharge(
-  deps: RoutineDeps,
+  deps: RoutineDeps & { readonly afterCommit?: AgentEventDeps["afterCommit"] },
   ownerId: UserId,
   run: RunScope,
   book: (usage: UsageRecord, heldRuns: readonly RunId[]) => CostBooking,
@@ -638,6 +641,10 @@ async function settleCharge(
   } catch (error) {
     console.error(`run ${run.runId} 结账后推送例行状态失败：${errorKind(error)}`);
   }
+  // 接续排在回合推进之前：推进会把排着的下一位派出去，接续得先插到它前面。信封里两者都等提交后按这个顺序跑。
+  const resume = (real: RoutineDeps) => resumeContinuation(real, run.runId);
+  if (deps.afterCommit === undefined) await resume(deps);
+  else deps.afterCommit(resume);
   await deps.groupTurns.runDone(run.groupId, run.runId);
   // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
   // 通知只是一条推送，没有落库的地方可以做幂等：结账提交后到这里之前抛错的那次，补发不再弹，最多弹一次。

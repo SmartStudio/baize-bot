@@ -20,6 +20,8 @@ export interface ScriptedToolCall {
 export interface ScriptedTurn {
   readonly textChunks: readonly string[];
   readonly toolCall?: ScriptedToolCall;
+  /** 同一条回复里发几个工具调用。给了就不看 toolCall。 */
+  readonly toolCalls?: readonly ScriptedToolCall[];
   readonly usage: { readonly input: number; readonly output: number };
 }
 
@@ -42,18 +44,16 @@ export function scriptedUpstream(script: (req: ChatCompletionRequest, key: strin
     for (const text of turn.textChunks) {
       yield chunk(req.model, { content: text }, null);
     }
-    if (turn.toolCall) {
-      const serialized = JSON.stringify(turn.toolCall.args);
-      yield chunk(
-        req.model,
-        {
-          tool_calls: [
-            { index: 0, id: turn.toolCall.id, type: "function", function: { name: turn.toolCall.name, arguments: "" } },
-          ],
-        },
-        null,
-      );
-      yield chunk(req.model, { tool_calls: [{ index: 0, function: { arguments: serialized } }] }, null);
+    const calls = turn.toolCalls ?? (turn.toolCall === undefined ? [] : [turn.toolCall]);
+    if (calls.length > 0) {
+      for (const [index, call] of calls.entries()) {
+        yield chunk(
+          req.model,
+          { tool_calls: [{ index, id: call.id, type: "function", function: { name: call.name, arguments: "" } }] },
+          null,
+        );
+        yield chunk(req.model, { tool_calls: [{ index, function: { arguments: JSON.stringify(call.args) } }] }, null);
+      }
       yield chunk(req.model, {}, "tool_calls");
     } else {
       yield chunk(req.model, {}, "stop");

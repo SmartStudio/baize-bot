@@ -27,7 +27,7 @@ import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
 import { Notifications, type NotificationOptions } from "./notifications.js";
 import { PublishLoop, type PublishLoopOptions } from "./publish/loop.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
-import { settleApprovalTimeouts } from "./agent/dispatch.js";
+import { resumePendingContinuations, settleApprovalTimeouts } from "./agent/dispatch.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
@@ -203,6 +203,8 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   });
   await routines.start();
   notifications.start();
+  // 上一次进程在结账提交后、接续起来前没了的，这里补起。
+  await resumePendingContinuations({ db: options.db, push: hub, agents, groupTurns });
 
   const publisher = new PublishLoop({
     db: options.db,

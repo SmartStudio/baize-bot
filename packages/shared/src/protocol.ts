@@ -506,9 +506,10 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     ),
     purpose: ModelPurpose,
     projects: z.array(z.object({ groupId: GroupId, title: z.string(), cadence: z.string() }).strict()).optional(),
-    // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流。
-    // 运行器据此在群标签下写一句，全员轮流那种要告诉它无话可说回 (pass)。
-    reason: z.enum(["solo", "mentioned", "handoff", "chief", "current", "everyone"]),
+    // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流、换电脑后接着上一轮做。
+    // 运行器据此在群标签下写一句，全员轮流那种要告诉它无话可说回 (pass)；continuation 的 text 就是整段提示，
+    // context、task、members 都是空的，上一轮的对话都在会话里。
+    reason: z.enum(["solo", "mentioned", "handoff", "chief", "current", "everyone", "continuation"]),
     // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁、各自会做什么。单 Bot 群 task 为 null，members 只有它自己。
     task: TopicTask.nullable(),
     members: z.array(

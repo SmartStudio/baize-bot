@@ -49,6 +49,7 @@ import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
+import { resumePendingContinuations } from "./dispatch.js";
 import {
   acceptUplinkFrame,
   acknowledgeDownlink,
@@ -727,6 +728,10 @@ export class AgentHub {
       // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
       await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
         console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
+      );
+      // 结账提交后进程没了的那种接续，等目标电脑上线这一刻补起。
+      await resumePendingContinuations(this.#routineDeps(), computer.ownerId).catch((error: unknown) =>
+        console.error(`电脑 ${computer.id} 上线时补起接续出错：${errorKind(error)}`),
       );
       return accepted;
     } catch (error) {

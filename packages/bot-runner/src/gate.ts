@@ -118,6 +118,7 @@ const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm"
 export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
   "recall_memory",
+  "switch_computer",
   "update_checklist",
   "mention_bot",
   "handoff_task",
@@ -740,6 +741,7 @@ const READ_ONLY_TOOL_BARS: ReadonlyMap<string, ToolBar> = new Map<string, ToolBa
   ["propose_project", { action: "write_workspace", bar: "出方案卡" }],
   ["propose_team", { action: "write_workspace", bar: "出建队卡" }],
   ["propose_routine", { action: "write_workspace", bar: "出例行卡" }],
+  ["switch_computer", { action: "write_workspace", bar: "换电脑" }],
   ["propose_skill", { action: "write_workspace", bar: "问用户存不存 skill" }],
   ["set_cadence", { action: "write_workspace", bar: "改项目节奏" }],
   ["update_checklist", { action: "write_workspace", bar: "改任务卡清单" }],

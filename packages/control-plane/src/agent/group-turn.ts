@@ -23,7 +23,11 @@ export type Speaker = {
   readonly trigger: Message;
   readonly reason: Extract<ControlToAgent, { type: "prompt" }>["reason"];
   readonly handoff?: { readonly id: HandoffId; readonly text: string; readonly fromBotId: BotId };
+  /** 换电脑后接着做的那一位：text 就是整段提示，fromRunId 是它接的那一轮，同一轮只排一次。 */
+  readonly continuation?: { readonly fromRunId: RunId; readonly text: string };
 };
+
+export type ContinuationSpeaker = Speaker & { readonly continuation: NonNullable<Speaker["continuation"]> };
 
 /**
  * 派一位的结果。skipped：它在派活途中被删了，只跳过它，同一回合排在后面的照常派。
@@ -96,6 +100,10 @@ function belongsTo(speaker: Speaker, botId: BotId): boolean {
   return speaker.botId === botId || speaker.handoff?.fromBotId === botId;
 }
 
+function purgeContinuations(queue: Speaker[]): void {
+  queue.splice(0, queue.length, ...queue.filter((speaker) => speaker.continuation === undefined));
+}
+
 function purge(queue: Speaker[], botId: BotId): boolean {
   const kept = queue.filter((speaker) => !belongsTo(speaker, botId));
   if (kept.length === queue.length) return false;
@@ -147,7 +155,10 @@ export class GroupTurns {
     return outcome === "exhausted" && turn.dispatched === 0 ? "nobody" : "stopped";
   }
 
+  /** 用户插话。排着的接续随之作废：他已经在群里说了新的，那段活不再自动接着做，标记由调用方同时清掉。 */
   cancel(groupId: GroupId): void {
+    const deferred = this.#deferred.get(groupId);
+    if (deferred !== undefined) purgeContinuations(deferred);
     const turn = this.#turns.get(groupId);
     if (turn === undefined) return;
     this.#close(turn);
@@ -171,6 +182,32 @@ export class GroupTurns {
   /** 信封事务回滚时撤销本次占用，重试仍能写出提示。 */
   releaseHandoffLimitNotice(runId: RunId): void {
     this.#handoffLimitNoted.delete(runId);
+  }
+
+  /**
+   * 换电脑后的接续插到最前面：它接的是刚结束的那一轮，回合里排着的交接和 @ 都该等它。
+   * 不计入 BOT_MESSAGE_LIMIT，回合已经说满、这个 run 被挡下也照排。没有回合时回 idle，由调用方开一轮。
+   * 同一轮的接续只排一次：结账和 hello 补扫可能先后都来。
+   */
+  queueContinuation(groupId: GroupId, runId: RunId, speaker: ContinuationSpeaker): "queued" | "idle" {
+    const { fromRunId } = speaker.continuation;
+    const turn = this.#turns.get(groupId);
+    if (turn === undefined) {
+      return this.#deferred.get(groupId)?.some((queued) => queued.continuation?.fromRunId === fromRunId) === true
+        ? "queued"
+        : "idle";
+    }
+    const stage = turn.stage;
+    const current = stage.kind === "idle" ? null : stage.speaker;
+    if (
+      current?.continuation?.fromRunId === fromRunId ||
+      [...turn.handoffs, ...turn.speakers].some((queued) => queued.continuation?.fromRunId === fromRunId)
+    )
+      return "queued";
+    if (stage.kind === "running" && stage.runId === runId) turn.handoffs.unshift(speaker);
+    else turn.speakers.unshift(speaker);
+    this.#publish(turn);
+    return "queued";
   }
 
   queueHandoff(groupId: GroupId, runId: RunId, speaker: Speaker): void {
@@ -370,8 +407,11 @@ export class GroupTurns {
   #close(turn: Turn, carryHandoffs = true): void {
     if (this.#turns.get(turn.groupId) !== turn) return;
     // 用户插话时，没派出的交接目标不管排在 handoffs 还是 speakers 里都带到下一回合，卡已经建了。
+    // 接续不带：用户已经说了新的，那段活到此为止。
     const pending = carryHandoffs
-      ? [...turn.handoffs, ...turn.speakers.filter((speaker) => speaker.handoff !== undefined)]
+      ? [...turn.handoffs, ...turn.speakers.filter((speaker) => speaker.handoff !== undefined)].filter(
+          (speaker) => speaker.continuation === undefined,
+        )
       : [];
     this.#turns.delete(turn.groupId);
     turn.stage = { kind: "idle" };
