@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   GRANTABLE_SCOPES,
   AccountId,
@@ -30,6 +32,7 @@ import {
   logicalResolve,
   PathError,
   realpathExisting,
+  resolveLikeKernel,
 } from "./paths.js";
 
 export interface GateAccess {
@@ -203,6 +206,16 @@ const pathAction = (action: ActionKind, path: string, call: GateContext): Classi
 
 const readPath = (path: string, call: GateContext): ClassifiedAction => pathAction("read", path, call);
 
+const shellPath = (word: string, call: GateContext): string => resolveLikeKernel(word, call.workDir);
+
+const isDirectory = (path: string): boolean => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
 const writePath = (path: string, call: GateContext): ClassifiedAction => {
   const logical = logicalResolve(path, call.workDir);
   if (["/dev/null", "/dev/stdout", "/dev/stderr"].includes(logical)) {
@@ -322,6 +335,67 @@ const hasUnclosedQuote = (command: string): boolean => {
   return quote !== null || escaped;
 };
 
+const WORD_BREAKS = new Set([" ", "\t", "|", "&", ";", "<", ">", "(", ")"]);
+
+/**
+ * shell-quote 把没加引号的 `{a,b}`、`{1..3}`、`~user`、`[ab]` 原样当成一个词交出来，bash 却会展开它们，
+ * `cat {a.txt,/etc/passwd}` 就读到了工作区外。这里按引号状态扫一遍原文，碰到这几种展开就当认不出。
+ * `~` 和 `~/x` 由路径解析自己处理，单独的 `{`、`}`、`{a}`、`x{}y` 不会展开，照旧放过。
+ */
+const hasUnquotedExpansion = (command: string): boolean => {
+  let quote: "single" | "double" | null = null;
+  let escaped = false;
+  let wordStart = true;
+  let braces: Array<{ expands: boolean }> = [];
+  let bracket = false;
+  const characters = [...command];
+  for (let index = 0; index < characters.length; index += 1) {
+    const char = characters[index] ?? "";
+    const next = characters[index + 1] ?? "";
+    if (escaped) {
+      escaped = false;
+      wordStart = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "single") {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && quote !== "double") {
+      quote = quote === "single" ? null : "single";
+      wordStart = false;
+      continue;
+    }
+    if (char === '"' && quote !== "single") {
+      quote = quote === "double" ? null : "double";
+      wordStart = false;
+      continue;
+    }
+    if (quote !== null) continue;
+    if (WORD_BREAKS.has(char)) {
+      wordStart = true;
+      braces = [];
+      bracket = false;
+      continue;
+    }
+    const previous = characters[index - 1];
+    if (char === "~" && (wordStart || previous === "=" || previous === ":")) {
+      if (next !== "" && next !== "/" && !WORD_BREAKS.has(next)) return true;
+    }
+    if (char === "{") braces.push({ expands: false });
+    else if (char === "}") {
+      if (braces.pop()?.expands) return true;
+    } else if (braces.length > 0 && (char === "," || (char === "." && next === "."))) {
+      const top = braces[braces.length - 1];
+      if (top !== undefined) top.expands = true;
+    }
+    if (char === "[") bracket = true;
+    else if (char === "]" && bracket) return true;
+    wordStart = false;
+  }
+  return false;
+};
+
 const hasUnsafeCommandSeparator = (command: string): boolean =>
   [...command].some((character) => {
     const codePoint = character.codePointAt(0);
@@ -389,15 +463,6 @@ const commandName = (raw: string): string => raw.slice(raw.lastIndexOf("/") + 1)
 const argumentsOf = (words: readonly string[]): readonly string[] =>
   words.slice(1).filter((word) => !word.startsWith("-"));
 
-const likelyPath = (value: string): boolean =>
-  value === "." ||
-  value === ".." ||
-  value.startsWith("/") ||
-  value.startsWith("~") ||
-  value.startsWith("@") ||
-  value.includes("/") ||
-  value.includes(".");
-
 const READ_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   ls: ["-a", "-A", "-l", "-h", "-1", "-R", "--all", "--almost-all", "--human-readable", "--long", "--recursive"],
   cat: [
@@ -425,7 +490,6 @@ const READ_OPTIONS: Readonly<Record<string, readonly string[]>> = {
     "-n",
     "-v",
     "-r",
-    "-R",
     "-E",
     "-F",
     "-w",
@@ -466,13 +530,15 @@ const EXECUTING_OPTIONS = /^(?:-+)(?:exec(?:dir)?|ok(?:dir)?|delete|command|run|
 const hasUnsafeOption = (name: string, words: readonly string[]): boolean => {
   if (words.some((word) => EXECUTING_OPTIONS.test(word))) return true;
   if (name === "date" && words.some((word) => word === "-f" || word === "--file")) return true;
-  if (
-    name === "git" &&
-    words.some((word) => ["-c", "--config-env", "--exec-path", "--ext-diff", "--textconv"].includes(word))
-  ) {
-    return true;
-  }
   return false;
+};
+
+// git 的长选项可以缩写成唯一前缀，`--ext` 就是 `--ext-diff`，所以按前缀比，带 `=值` 的也一样；`--` 和 `--n` 这种
+// 短到在 git 里本来就不唯一的不算，不然分隔符 `--` 也会被当成危险选项。
+const GIT_UNSAFE_OPTIONS = ["--config-env", "--exec-path", "--ext-diff", "--textconv", "--no-index", "--output"];
+const isUnsafeGitOption = (word: string): boolean => {
+  const bare = word.replace(/=.*/, "");
+  return bare === "-c" || (bare.length >= 4 && GIT_UNSAFE_OPTIONS.some((option) => option.startsWith(bare)));
 };
 
 const hasUnknownReadOption = (name: string, words: readonly string[]): boolean => {
@@ -491,14 +557,20 @@ const hasUnknownMutationOption = (name: string, words: readonly string[]): boole
 };
 
 const PREFIX_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
+// 前缀只放语言和时区：PAGER、GIT_DIR、LD_PRELOAD 这类能让一条读命令跑起别的程序或读别的仓库。
+const HARMLESS_PREFIX = /^(?:LANG|LC_[A-Z]+|TZ|NO_COLOR)=/;
 
 const classifyCommand = (words: readonly string[], call: GateContext): readonly ClassifiedAction[] => {
   let nameIndex = 0;
   while (nameIndex < words.length && PREFIX_ASSIGNMENT.test(words[nameIndex] ?? "")) nameIndex += 1;
   const rawName = words[nameIndex];
   if (rawName === undefined) return [plainAction("shell")];
+  if (!words.slice(0, nameIndex).every((word) => HARMLESS_PREFIX.test(word))) return [plainAction("shell")];
   const name = commandName(rawName);
   const args = argumentsOf(words.slice(nameIndex));
+  const read = (word: string): ClassifiedAction => readPath(shellPath(word, call), call);
+  const write = (word: string): ClassifiedAction => writePath(shellPath(word, call), call);
+  const remove = (word: string): ClassifiedAction => deletePath(shellPath(word, call), call);
 
   const commandArgs = words.slice(nameIndex + 1);
   if (SAFE_VALUE_COMMANDS.has(name)) {
@@ -529,39 +601,53 @@ const classifyCommand = (words: readonly string[], call: GateContext): readonly 
     return [plainAction("install")];
   }
   if (DELETE_COMMANDS.has(name)) {
-    return (args.length === 0 ? ["."] : args).map((path) => deletePath(path, call));
+    return (args.length === 0 ? ["."] : args).map(remove);
   }
   if (name === "mv") {
-    return args.length === 0
-      ? [plainAction("shell")]
-      : [...args.slice(0, -1).map((path) => deletePath(path, call)), writePath(args.at(-1) ?? ".", call)];
+    return args.length === 0 ? [plainAction("shell")] : [...args.slice(0, -1).map(remove), write(args.at(-1) ?? ".")];
   }
   if (name === "cp") {
     if (commandArgs.some((word) => word.startsWith("-"))) return [plainAction("shell")];
-    return args.length < 2
-      ? [plainAction("shell")]
-      : [...args.slice(0, -1).map((path) => readPath(path, call)), writePath(args.at(-1) ?? ".", call)];
+    return args.length < 2 ? [plainAction("shell")] : [...args.slice(0, -1).map(read), write(args.at(-1) ?? ".")];
   }
   if (name === "ln") {
-    if (commandArgs.some((word) => word.startsWith("-") && !["-s", "--symbolic"].includes(word))) {
+    const options = commandArgs.filter((word) => word.startsWith("-"));
+    const [source, link] = args;
+    if (
+      source === undefined ||
+      link === undefined ||
+      args.length > 2 ||
+      options.length === 0 ||
+      !options.every((word) => word === "-s" || word === "--symbolic")
+    ) {
       return [plainAction("shell")];
     }
-    const target = args.at(-1);
-    return target === undefined ? [plainAction("shell")] : [writePath(target, call)];
+    // 相对的源按链接所在目录解：link 是已存在的目录时链接落在它里面，否则落在它的上一级。
+    const linkPath = shellPath(link, call);
+    const linkDir = isDirectory(linkPath) ? linkPath : dirname(linkPath);
+    return [readPath(resolveLikeKernel(source, linkDir), call), write(link)];
   }
   if (name === "tee" || WRITE_COMMANDS.has(name)) {
     if (hasUnknownMutationOption(name, commandArgs)) return [plainAction("shell")];
-    return args.length === 0 ? [plainAction("shell")] : args.map((path) => writePath(path, call));
+    return args.length === 0 ? [plainAction("shell")] : args.map(write);
   }
   if (READ_COMMANDS.has(name)) {
     if (hasUnsafeOption(name, commandArgs) || hasUnknownReadOption(name, commandArgs)) return [plainAction("shell")];
-    const paths = args.filter(likelyPath);
-    return paths.length === 0 ? [plainAction("read")] : paths.map((path) => readPath(path, call));
+    // 每个词都做 realpath，以 - 开头的也不例外：`--` 之后它们就是操作数，和选项分不开。grep 的模式、head 的行数
+    // 这类不是文件的词解到工作区里不存在的名字上，照旧放行，只有恰好和一条指向外面的链接同名时才会多问。
+    const operands = [...args, ...commandArgs.filter((word) => word.startsWith("-"))];
+    return operands.length === 0 ? [plainAction("read")] : operands.map(read);
   }
   if (name === "git") {
-    if (hasUnsafeOption(name, commandArgs)) return [plainAction("shell")];
-    const subcommand = args[0];
-    if (["status", "diff", "log", "show"].includes(subcommand ?? "")) return [plainAction("read")];
+    const [subcommand, ...rest] = commandArgs;
+    // 子命令之前的全局选项能换仓库、换 exec 目录、强开分页器，一律归 shell。
+    if (subcommand === undefined || subcommand.startsWith("-")) return [plainAction("shell")];
+    if (hasUnsafeOption(name, rest) || rest.some(isUnsafeGitOption)) return [plainAction("shell")];
+    if (["status", "diff", "log", "show"].includes(subcommand)) {
+      // 不在仓库里或路径在仓库外时 diff 自动变成 --no-index，所以除了分隔符 `--`，每个词都当路径查一遍。
+      const operands = rest.filter((word) => word !== "--");
+      return operands.length === 0 ? [plainAction("read")] : operands.map(read);
+    }
     if (subcommand === "push") return [plainAction("publish")];
   }
   return [plainAction("shell")];
@@ -571,13 +657,16 @@ const classifyBash = (call: GateCall): readonly ClassifiedAction[] => {
   if (call.sandbox === "none") return [plainAction("shell")];
   const command = call.input.command;
   if (typeof command !== "string" || command.trim() === "") return [plainAction("shell")];
-  if (hasUnsafeCommandSeparator(command)) return [plainAction("shell")];
+  // 这一检查放在 parseShell 外面：系统包管理器的拒绝也走 parseShell，`apt-get install {a,b}` 得照旧拒而不是降成问。
+  if (hasUnsafeCommandSeparator(command) || hasUnquotedExpansion(command)) return [plainAction("shell")];
   const parsed = parseShell(command);
   if (parsed === null) return [plainAction("shell")];
   return [
     ...parsed.commands.flatMap((words) => classifyCommand(words, call)),
     ...parsed.redirects.map((redirect) =>
-      redirect.direction === "input" ? readPath(redirect.path, call) : writePath(redirect.path, call),
+      redirect.direction === "input"
+        ? readPath(shellPath(redirect.path, call), call)
+        : writePath(shellPath(redirect.path, call), call),
     ),
   ];
 };
