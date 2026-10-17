@@ -22,6 +22,8 @@ export interface BotDirs {
   readonly draftsDir: string;
   /** 所有 Bot 共用的产出目录。 */
   readonly sharedDir: string;
+  /** 云电脑上这个 Bot 自己装的 Python 包：`venv/` 在它下面，批准的 bash 里 python、python3、pip、pip3 经旁边的 `toolbox-bin/` 落到它，`venv/bin` 排在系统目录后面。平时只读，批了 pip 才可写。 */
+  readonly toolboxDir: string;
 }
 
 // GroupId 在边界上已经是这段正则。这里再挡一次：拼路径时不改写，对不上就拒绝。
@@ -42,11 +44,21 @@ export function botDirs(dataDir: string, botId: BotId): BotDirs {
     skillsDir: join(root, "skills"),
     draftsDir: join(root, "drafts"),
     sharedDir: resolve(dataDir, "shared"),
+    toolboxDir: join(root, "toolbox"),
   };
 }
 
+// 工具箱也先建出来：bwrap 只能 bind 已存在的路径，批准写一个还不存在的工具箱会退到放开整个 Bot 目录。
 export function ensureBotDirs(dirs: BotDirs): BotDirs {
-  for (const dir of [dirs.agentDir, dirs.sessionDir, dirs.workDir, dirs.skillsDir, dirs.draftsDir, dirs.sharedDir]) {
+  for (const dir of [
+    dirs.agentDir,
+    dirs.sessionDir,
+    dirs.workDir,
+    dirs.skillsDir,
+    dirs.draftsDir,
+    dirs.sharedDir,
+    dirs.toolboxDir,
+  ]) {
     mkdirSync(dir, { recursive: true });
   }
   return dirs;
@@ -171,6 +183,15 @@ const walkTarget = (base: string, raw: string): string => {
   }
   return current;
 };
+
+/**
+ * bash 把词原样交给内核，`cat dirlink/../x` 读的是 dirlink 真实目录的上一级；Pi 的文件工具先用 `path.resolve`
+ * 抵消 `..` 再打开，走 logicalResolve。两者打开的不是同一个文件，闸门得按各自的打开方式解。
+ */
+export function resolveLikeKernel(input: string, cwd: string): string {
+  const normalized = normalizeLikePi(input);
+  return walkTarget(isAbsolute(normalized) ? "/" : cwd, normalized);
+}
 
 /**
  * `path` 是符号链接就给出它指向的绝对路径，不是链接或读不到返回 null。相对目标的基准是链接所在目录的字面路径：

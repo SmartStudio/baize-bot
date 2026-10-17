@@ -1,11 +1,15 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { containmentFor, provablyContained, type ContainedContext } from "../src/contained.js";
 
+// 云电脑镜像里的 PATH，也是证明器唯一认的四个系统目录。
+const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/usr/local/bin";
+
 let root = "";
-let ctx: ContainedContext = { workDir: "", sharedDir: "", forbidden: [] };
+let toolboxDir = "";
+let ctx: ContainedContext = { workDir: "", sharedDir: "", forbidden: [], searchPath: SYSTEM_PATH };
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "baize-contained-"));
@@ -18,18 +22,23 @@ beforeAll(() => {
   writeFileSync(join(workDir, "b.txt"), "b\n");
   symlinkSync(join(root, "outside"), join(workDir, "out-link"));
   symlinkSync("loop", join(workDir, "loop"));
-  ctx = { workDir, sharedDir, forbidden: [] };
+  toolboxDir = join(root, "data", "bot-1", "toolbox");
+  mkdirSync(join(toolboxDir, "venv", "bin"), { recursive: true });
+  mkdirSync(join(root, "empty-bin"));
+  ctx = { workDir, sharedDir, forbidden: [], searchPath: SYSTEM_PATH };
 });
 
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
+const contained = (command: string, searchPath: string = SYSTEM_PATH): boolean =>
+  provablyContained(command, { ...ctx, searchPath }).contained;
 
-const contained = (command: string): boolean => provablyContained(command, ctx).contained;
+const installFakeBinary = (dir: string, name: string): void => {
+  writeFileSync(join(dir, name), "#!/bin/sh\nrm -rf .\n");
+  chmodSync(join(dir, name), 0o755);
+};
 
 describe("containmentFor", () => {
   it.each([
@@ -84,6 +93,14 @@ describe("provablyContained", () => {
     ["表里没有的命令", "make"],
     ["表里没有的选项", "ls --dereference"],
     ["find 跟随链接", "find -L ."],
+    ["grep -R 跟随链接", "grep -R foo ."],
+    ["grep -R 不带起点也跟随链接", "grep -R foo"],
+    ["裸词是指向外面的链接", "cat out-link"],
+    ["-- 之后的操作数是指向外面的链接", "cat -- out-link"],
+    ["ln -s 指向外面", "ln -s /etc/passwd x && cat x"],
+    ["git 的 --no-index 比较外面的文件", "git diff --no-index /etc/passwd a.txt"],
+    ["git 的全局选项换仓库", "git --git-dir=/etc/.git log -p"],
+    ["GIT_DIR 前缀换仓库", "GIT_DIR=/etc/.git git show HEAD:a.txt"],
     ["find -exec", "find . -exec cat {} +"],
     ["tar 删源文件", "tar --remove-files -czf out.tgz sub"],
     ["tar 在 c 模式下拿外面的文件", "tar -czf out.tgz -C /etc passwd"],
@@ -120,7 +137,6 @@ describe("provablyContained", () => {
 
   describe("版本探测只认系统目录里的二进制", () => {
     it("PATH 里先找到系统目录的就认", () => {
-      vi.stubEnv("PATH", "/usr/bin:/bin");
       expect(contained("ls --version")).toBe(true);
       expect(contained("bash --version")).toBe(true);
       expect(contained("ls -V")).toBe(true);
@@ -129,28 +145,63 @@ describe("provablyContained", () => {
     it("工作区里同名的程序排在 PATH 前面就不认", () => {
       const bin = join(ctx.workDir, "bin");
       mkdirSync(bin, { recursive: true });
-      writeFileSync(join(bin, "ls"), "#!/bin/sh\ncat /etc/passwd\n");
-      chmodSync(join(bin, "ls"), 0o755);
-      vi.stubEnv("PATH", `${bin}:/usr/bin:/bin`);
-      expect(contained("ls --version")).toBe(false);
+      installFakeBinary(bin, "ls");
+      expect(contained("ls --version", `${bin}:${SYSTEM_PATH}`)).toBe(false);
     });
 
     it("PATH 里有相对目录就不认，那个目录跟着 cwd 走", () => {
-      vi.stubEnv("PATH", "bin:/usr/bin:/bin");
-      expect(contained("ls --version")).toBe(false);
+      expect(contained("ls --version", `bin:${SYSTEM_PATH}`)).toBe(false);
     });
 
     it("删除和移动类命令连 --help 也不认", () => {
-      vi.stubEnv("PATH", "/usr/bin:/bin");
       for (const command of ["rm --help", "mv --version", "ln --help", "rmdir --version"]) {
         expect(contained(command), command).toBe(false);
       }
     });
 
     it("PATH 里找不到的不认，多带参数的不认", () => {
-      vi.stubEnv("PATH", "/usr/bin:/bin");
       expect(contained("definitely-not-a-binary --version")).toBe(false);
       expect(contained("bash --version -c id")).toBe(false);
     });
+  });
+
+  describe("表里的命令名也按沙箱的 PATH 解析", () => {
+    it("工具箱 venv/bin 里放了可执行的 cat，cat a.txt 就不认", () => {
+      const venvBin = join(toolboxDir, "venv", "bin");
+      installFakeBinary(venvBin, "cat");
+      const verdict = provablyContained("cat a.txt", { ...ctx, searchPath: `${venvBin}:${SYSTEM_PATH}` });
+      expect(verdict.contained).toBe(false);
+      expect(verdict.why).toBe("cat 不是系统目录里的程序");
+    });
+
+    it("PATH 前面有非系统目录但里面没有同名程序时照常认", () => {
+      expect(contained("cat a.txt", `${join(root, "empty-bin")}:${SYSTEM_PATH}`)).toBe(true);
+      expect(contained("ls -la", `${join(toolboxDir, "venv", "bin")}:${SYSTEM_PATH}`)).toBe(true);
+    });
+
+    it("管道里每一段都查，后面一段被顶掉也不认", () => {
+      const venvBin = join(toolboxDir, "venv", "bin");
+      installFakeBinary(venvBin, "wc");
+      expect(contained("cat a.txt | wc -l", `${venvBin}:${SYSTEM_PATH}`)).toBe(false);
+      expect(contained("cat a.txt | wc -l")).toBe(true);
+    });
+
+    it("PATH 里找不到的命令不认，PATH 带相对目录整条不认", () => {
+      expect(contained("cat a.txt", join(root, "empty-bin"))).toBe(false);
+      expect(contained("cat a.txt", `.:${SYSTEM_PATH}`)).toBe(false);
+    });
+  });
+});
+
+describe("git 的读子命令不进证明器", () => {
+  it.each([
+    "git status",
+    "git diff",
+    "git log --oneline -5",
+    "git show HEAD",
+    "git -C sub status",
+    "git log -p -- a.txt",
+  ])("%s 不认：工作区里的 git 配置能让它跑程序、读别的仓库", (command) => {
+    expect(contained(command)).toBe(false);
   });
 });
