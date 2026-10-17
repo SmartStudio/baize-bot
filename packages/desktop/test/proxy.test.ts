@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,7 +12,7 @@ import { startUiServer } from "../src/proxy.js";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-function listen(server: ReturnType<typeof createHttpsServer>): Promise<number> {
+function listen(server: Server): Promise<number> {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -118,4 +118,39 @@ describe("本机反代", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it("画面的 /api/live/<liveId> 升级转给控制面，本页发起的 Origin 换成控制面的，外站的原样转", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "baize-desktop-proxy-live-"));
+    const upstream = createHttpServer((_request, response) => response.writeHead(404).end());
+    const upgraded: string[] = [];
+    upstream.on("upgrade", (request, socket) => {
+      upgraded.push(`${String(request.url)} ${String(request.headers.origin)}`);
+      socket.on("end", () => socket.end());
+      const accept = createHash("sha1")
+        .update(`${String(request.headers["sec-websocket-key"])}${WEBSOCKET_GUID}`)
+        .digest("base64");
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+    });
+    const port = await listen(upstream);
+    const ui = await startUiServer(directory, `http://127.0.0.1:${port}`);
+    const sockets: WebSocket[] = [];
+    try {
+      for (const origin of [ui.origin, "https://evil.example"]) {
+        const socket = new WebSocket(`${ui.origin.replace("http:", "ws:")}/api/live/live-1`, { origin });
+        sockets.push(socket);
+        await new Promise<void>((resolve, reject) => {
+          socket.once("open", () => resolve());
+          socket.once("error", reject);
+        });
+      }
+      expect(upgraded).toEqual([`/api/live/live-1 http://127.0.0.1:${port}`, "/api/live/live-1 https://evil.example"]);
+    } finally {
+      for (const socket of sockets) socket.terminate();
+      await ui.close();
+      await new Promise<void>((resolve) => upstream.close(() => resolve()));
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
 });
