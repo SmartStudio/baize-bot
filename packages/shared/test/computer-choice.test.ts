@@ -13,6 +13,9 @@ describe("换电脑的报文", () => {
     expect(
       SwitchComputerResponse.parse({ result: "refused", reason: "target_offline", text: "云电脑现在不在线" }),
     ).toEqual({ result: "refused", reason: "target_offline", text: "云电脑现在不在线" });
+    expect(
+      SwitchComputerResponse.parse({ result: "refused", reason: "routine_failed", text: "这次例行已经记了失败" }),
+    ).toEqual({ result: "refused", reason: "routine_failed", text: "这次例行已经记了失败" });
     expect(SwitchComputerResponse.safeParse({ result: "refused", reason: "busy", text: "x" }).success).toBe(false);
     expect(SwitchComputerResponse.safeParse({ result: "switching", reason: "target_offline" }).success).toBe(false);
   });

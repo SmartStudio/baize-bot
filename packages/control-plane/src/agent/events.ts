@@ -47,7 +47,13 @@ import {
 } from "../repo/messages.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
-import { routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
+import {
+  failRoutineRun,
+  markRoutineRunResult,
+  pushRoutineUpdated,
+  routineRunOfRun,
+  type RoutineRunRef,
+} from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
@@ -69,11 +75,12 @@ import {
   EXPIRED_APPROVAL_NOTE,
   failRoutineRunOf,
   holdRoutineRunOf,
-  pushRoutineUpdated,
+  type ChargedRoutineRun,
   type RoutineDeps,
 } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns, type PassAbsorption } from "./group-turn.js";
+import { continuesAfter } from "./continuation.js";
 import { resumeContinuation } from "./dispatch.js";
 import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
@@ -310,21 +317,17 @@ type TextPrefix =
   | { readonly kind: "pass"; readonly runId: RunId }
   | { readonly kind: "visible"; readonly runId: RunId };
 const textPrefixes = new Map<string, TextPrefix>();
-const resultRuns = new Set<RunId>();
 
 export function eventMemoryRollback(body: AgentToControl): () => void {
   if (!("runId" in body) || body.runId === undefined || body.runId === null) return () => undefined;
   const runId = body.runId;
   const prefixes = new Map([...textPrefixes].filter(([, prefix]) => prefix.runId === runId));
-  const result = resultRuns.has(runId);
   const booking = costBookings.get(runId);
   const groupId = "groupId" in body ? body.groupId : undefined;
   const held = new Map([...heldPasses].filter(([id, value]) => id === runId || value.groupId === groupId));
   return () => {
     for (const [id, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(id);
     for (const [id, prefix] of prefixes) textPrefixes.set(id, prefix);
-    if (result) resultRuns.add(runId);
-    else resultRuns.delete(runId);
     if (booking === undefined) costBookings.delete(runId);
     else costBookings.set(runId, booking);
     for (const [id, value] of held) if (!heldPasses.has(id)) heldPasses.set(id, value);
@@ -334,7 +337,6 @@ export function eventMemoryRollback(body: AgentToControl): () => void {
 
 function clearTextPrefixes(runId: RunId): void {
   for (const [messageId, prefix] of textPrefixes) if (prefix.runId === runId) textPrefixes.delete(messageId);
-  resultRuns.delete(runId);
   costBookings.delete(runId);
 }
 
@@ -355,11 +357,11 @@ function pushSettled(push: PushHub, ownerId: UserId, settled: readonly Message[]
 
 /**
  * 替等不到 run_done 的 run 收尾：run 行结束，挂着的审批过期，还在跑的工具行失败，还在流的 Bot 文字收成定稿，
- * 群里说一句 notice，例行记失败。
+ * 群里说一句 notice，例行记失败；还欠着换电脑接续的不记，运行记录由接续那一轮收尾。
  * 幂等靠 finishRun 的 WHERE ended_at IS NULL，已经收过尾的返回 null，什么都不再做。
  */
 export async function abandonRun(
-  deps: RoutineDeps,
+  deps: RoutineDeps & { readonly afterCommit?: AgentEventDeps["afterCommit"] },
   ownerId: UserId,
   run: { readonly runId: RunId; readonly groupId: GroupId | null },
   notice: { readonly text: string; readonly reason: string },
@@ -389,28 +391,45 @@ export async function abandonRun(
       run.groupId === null
         ? null
         : await appendMessage(tx, run.groupId, { kind: "system", tone: "error", text: notice.text });
-    return { expiredApprovals, failedTools, settled, message };
+    // 记录跟 run 同一个事务收：提交后再记，记的那一下出错时 run 已经收完，记录就永远停在 running。
+    const routine = (await continuesAfter(tx, run.runId)) ? null : await routineRunOfRun(tx, run.runId);
+    const failedRoutineId =
+      routine === null
+        ? null
+        : await failRoutineRun(
+            tx,
+            routine.routineRunId,
+            expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
+          );
+    return { expiredApprovals, failedTools, settled, message, routine, failedRoutineId };
   });
   if (result === null) return null;
-  const publish = async () => {
-    await refreshHintForRun(deps, run.runId);
-    clearTextPrefixes(run.runId);
-    if (run.groupId !== null) deps.groupTurns.abandon(run.groupId, run.runId);
-    for (const approval of result.expiredApprovals) deps.push.push(ownerId, { type: "approval_updated", approval });
-    // Bot 刚请求换电脑、电脑随即掉线，run_done 还在发件箱里：被放弃的这一轮照样在另一台上接着做。
-    if (run.groupId !== null) await resumeContinuation(deps, run.runId);
-    for (const message of result.failedTools) deps.push.push(ownerId, { type: "message", message });
-    pushSettled(deps.push, ownerId, result.settled);
-    if (result.message !== null) deps.push.push(ownerId, { type: "message", message: result.message });
-    const routine = await failRoutineRunOf(
-      deps,
-      run.runId,
-      result.expiredApprovals.length > 0 ? EXPIRED_APPROVAL_NOTE : notice.reason,
-    );
-    return { routine };
+  // 收尾已经提交，下面每一步各自兜错：刷新牌桌提示出错不能让接续不起，接续出错也不能吞掉后面的推送。
+  // 漏掉的接续由定期补扫捡回来，推送丢了只是页面要刷新才看得到。
+  const step = async (name: string, work: () => Promise<void> | void) => {
+    try {
+      await work();
+    } catch (error) {
+      console.error(`run ${run.runId} 收尾后${name}出错：${errorKind(error)}`);
+    }
   };
-  if (transaction === undefined) return publish();
-  transaction.afterCommit(publish);
+  const publish = async (real: RoutineDeps) => {
+    clearTextPrefixes(run.runId);
+    if (run.groupId !== null) real.groupTurns.abandon(run.groupId, run.runId);
+    await step("刷新牌桌提示", () => refreshHintForRun(real, run.runId));
+    for (const approval of result.expiredApprovals) real.push.push(ownerId, { type: "approval_updated", approval });
+    // Bot 刚请求换电脑、电脑随即掉线，run_done 还在发件箱里：被放弃的这一轮照样在另一台上接着做。
+    if (run.groupId !== null) await step("起接续", () => resumeContinuation(real, run.runId));
+    for (const message of result.failedTools) real.push.push(ownerId, { type: "message", message });
+    pushSettled(real.push, ownerId, result.settled);
+    if (result.message !== null) real.push.push(ownerId, { type: "message", message: result.message });
+    await step("推例行状态", () => pushRoutineUpdated(real, result.failedRoutineId));
+    return { routine: result.routine };
+  };
+  if (transaction !== undefined) transaction.afterCommit(() => publish(deps));
+  // 信封里 deps.db 是还没提交的事务，推送要等它提交：在事务里兜住一条查询的错，提交时整个事务会被悄悄回滚。
+  else if (deps.afterCommit !== undefined) deps.afterCommit(async (real) => void (await publish(real)));
+  else return publish(deps);
   return { routine: null };
 }
 
@@ -441,9 +460,11 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     botId: event.botId,
     visibleTo: await botTextVisibility(deps.db, event.runId),
   };
-  const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
-    appendBotText(tx, text, delta, event.done),
-  );
+  const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
+    const written = await appendBotText(tx, text, delta, event.done);
+    if (written.kind !== "taken" && delta.trim() !== "") await markRoutineRunResult(tx, event.runId);
+    return written;
+  });
   // run 已经收尾：这条要么从没落过，要么收尾时已经收成定稿，晚到的这段不接上去，也不推。
   if (appended === null) return;
   if (appended.kind === "taken") {
@@ -451,7 +472,6 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     return;
   }
   if (appended.created !== null) deps.push.push(conn.ownerId, { type: "message", message: appended.created });
-  if (delta.trim() !== "") resultRuns.add(event.runId);
   deps.push.push(conn.ownerId, {
     type: "message_delta",
     messageId: event.messageId,
@@ -486,7 +506,8 @@ async function onBotTextDone(
     event.text,
   );
   if (final.kind === "taken") return;
-  if (event.text.trim() !== "") resultRuns.add(event.runId);
+  // 和定稿同在信封的事务里：流式那几段没记上（比如整段只来了这一条）也在这里记上。
+  if (event.text.trim() !== "") await markRoutineRunResult(deps.db, event.runId);
   if (final.created !== null) deps.push.push(conn.ownerId, { type: "message", message: final.created });
   if (final.replace) deps.push.push(conn.ownerId, { type: "message", message: final.message });
   deps.push.push(conn.ownerId, {
@@ -565,7 +586,9 @@ async function onRunDone(deps: AgentEventDeps, conn: AgentConnection, event: Run
   }
 
   const run = { runId: event.runId, botId: event.botId, groupId };
-  await settleCharge(deps, conn.ownerId, run, (usage, heldRuns) => bookCost(deps, conn.ownerId, run, usage, heldRuns));
+  await settleCharge(deps, conn.ownerId, run, (usage, heldRuns, routine) =>
+    bookCost(deps, conn.ownerId, run, usage, heldRuns, routine),
+  );
 }
 
 /**
@@ -586,8 +609,8 @@ export async function settleUnchargedRuns(deps: RoutineDeps, computerId: Compute
       heldPasses.delete(run.runId);
     }
     // 一条结不成不挡后面的：各行的认领互不相干，账留在库里等下一次 hello。
-    await settleCharge(deps, ownerId, run, () => ({ kind: "card", heldRuns: [], hasResult: false })).catch(
-      (error: unknown) => console.error(`电脑 ${computerId} 上线补结账 run ${run.runId} 失败：${errorKind(error)}`),
+    await settleCharge(deps, ownerId, run, () => ({ kind: "card", heldRuns: [] })).catch((error: unknown) =>
+      console.error(`电脑 ${computerId} 上线补结账 run ${run.runId} 失败：${errorKind(error)}`),
     );
   }
 }
@@ -606,7 +629,7 @@ async function settleCharge(
   deps: RoutineDeps & { readonly afterCommit?: AgentEventDeps["afterCommit"] },
   ownerId: UserId,
   run: RunScope,
-  book: (usage: UsageRecord, heldRuns: readonly RunId[]) => CostBooking,
+  book: BookCost,
 ): Promise<void> {
   const charge = heldPasses.has(run.runId) ? null : await chargeRun(deps, run, book);
   clearTextPrefixes(run.runId);
@@ -648,10 +671,12 @@ async function settleCharge(
   await deps.groupTurns.runDone(run.groupId, run.runId);
   // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
   // 通知只是一条推送，没有落库的地方可以做幂等：结账提交后到这里之前抛错的那次，补发不再弹，最多弹一次。
-  if (charge?.kind === "card" && charge.hasResult && charge.routine !== null) {
+  // 换电脑的链只在链尾结账时按整条链有没有结果弹，记录被别处先收成 failed 的不弹，见 chargeRoutineRun。
+  const routine = charge !== null && charge.kind !== "held" ? charge.routine : null;
+  if (routine !== null && routine.notify) {
     await deps.notifications.publish(ownerId, {
       kind: "result",
-      text: `例行任务「${charge.routine.name}」做完了，打开群聊看结果`,
+      text: `例行任务「${routine.name}」做完了，打开群聊看结果`,
       groupId: run.groupId,
     });
   }
@@ -664,10 +689,9 @@ type Charge =
       readonly message: Message;
       readonly steps: number;
       readonly amount: number;
-      readonly hasResult: boolean;
-      readonly routine: RoutineRunRef | null;
+      readonly routine: ChargedRoutineRun | null;
     }
-  | { readonly kind: "merged"; readonly message: Message | null; readonly routine: RoutineRunRef | null }
+  | { readonly kind: "merged"; readonly message: Message | null; readonly routine: ChargedRoutineRun | null }
   | { readonly kind: "held" };
 
 /**
@@ -678,11 +702,7 @@ type Charge =
  * 事务开头先把这条 run 和它可能一并认领的 pass 按 id 升序锁住，再逐条认领：认领的次序是「当前这条、再按记下的顺序」，
  * 删 Bot 锁它名下的 run 是 id 序，两边各持一行互等就是死锁。要锁哪些在事务外定下来，认领的就是锁过的这几条。
  */
-async function chargeRun(
-  deps: RoutineDeps,
-  run: RunScope,
-  book: (usage: UsageRecord, heldRuns: readonly RunId[]) => CostBooking,
-): Promise<Charge | null> {
+async function chargeRun(deps: RoutineDeps, run: RunScope, book: BookCost): Promise<Charge | null> {
   const retained = costBookings.get(run.runId);
   const heldRuns = retained?.kind === "card" ? retained.heldRuns : heldRunsOfGroup(run.groupId);
   try {
@@ -690,10 +710,10 @@ async function chargeRun(
       await lockRuns(tx, [run.runId, ...heldRuns]);
       const usage = await claimCharge(tx, run.runId);
       if (usage === null) return null;
-      const booking = retained ?? book(usage, heldRuns);
+      const routine = await chargeRoutineRunIn(tx, run.runId, usage.amount);
+      const booking = retained ?? book(usage, heldRuns, routine !== null);
       costBookings.set(run.runId, booking);
       if (booking.kind === "held") return tx.rollback();
-      const routine = await chargeRoutineRunIn(tx, run.runId, usage.amount);
       if (booking.kind === "merged") {
         const message = await replaceMessageBody(tx, booking.cost.messageId, run.groupId, {
           kind: "cost",
@@ -705,7 +725,7 @@ async function chargeRun(
         return { kind: "merged", message, routine } as const;
       }
       let { steps, amount } = usage;
-      // 先记着的 pass 只出在多 Bot 回合里，例行任务只在单 Bot 群，它们没有例行账要记。
+      // 先记着的 pass 不会是例行派起的（见 bookCost），没有例行账要记。
       for (const heldRunId of booking.heldRuns) {
         const held = await claimCharge(tx, heldRunId);
         if (held === null) continue;
@@ -719,7 +739,7 @@ async function chargeRun(
         steps,
         amount,
       });
-      return { kind: "card", message, steps, amount, hasResult: booking.hasResult, routine } as const;
+      return { kind: "card", message, steps, amount, routine } as const;
     });
   } catch (error) {
     if (error instanceof TransactionRollbackError) return { kind: "held" };
@@ -727,8 +747,11 @@ async function chargeRun(
   }
 }
 
+/** 定这次花费怎么落：单落一张卡、并进这一轮的汇总行，还是先记着。routine：这条 run 是例行派起的。 */
+type BookCost = (usage: UsageRecord, heldRuns: readonly RunId[], routine: boolean) => CostBooking;
+
 type CostBooking =
-  | { readonly kind: "card"; readonly heldRuns: readonly RunId[]; readonly hasResult: boolean }
+  | { readonly kind: "card"; readonly heldRuns: readonly RunId[] }
   | { readonly kind: "merged"; readonly cost: Extract<PassAbsorption, { kind: "merged" }>["cost"] }
   | { readonly kind: "held" };
 
@@ -757,9 +780,11 @@ function bookCost(
   { runId, botId, groupId }: RunScope,
   usage: UsageRecord,
   heldRuns: readonly RunId[],
+  routine: boolean,
 ): CostBooking {
   const passed = runPassed(runId);
-  if (passed) {
+  // 例行派起的 run 不先记着：它在那一轮里是第一个说话的，后面多半没有费用卡来认领它，记着就是运行记录一直 running。
+  if (passed && !routine) {
     const absorbed = deps.groupTurns.absorbPassCost(groupId, runId, {
       steps: usage.steps,
       amount: usage.amount,
@@ -773,7 +798,7 @@ function bookCost(
     }
   }
   for (const heldRunId of heldRuns) heldPasses.delete(heldRunId);
-  return { kind: "card", heldRuns, hasResult: !passed && resultRuns.has(runId) };
+  return { kind: "card", heldRuns };
 }
 
 // 一个 run 按文字块分成好几条，先说了可见的话再回 (pass) 的 run 仍是回了话，花费卡要留。

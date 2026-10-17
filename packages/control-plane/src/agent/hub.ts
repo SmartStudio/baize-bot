@@ -516,6 +516,11 @@ export class AgentHub {
     return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
 
+  /** 停机开始后为 true：这之后派不出去可能只是连接被停机收掉了，不能当成确定的结局。 */
+  get closing(): boolean {
+    return this.#lifecycle === "closing";
+  }
+
   /**
    * 先进停机，这一刻起 message、close 回调都不再往 inbox 和链上排，宽限计时器也全清掉、不再新建，
    * 所以要等的就是此刻各 socket 还没做完的那一步，和链上已经排着的任务，两个集合都是有限的，各等一次就够：
@@ -836,7 +841,11 @@ export class AgentHub {
       if (error instanceof TransactionRollbackError) return;
       throw error;
     }
-    for (const effect of afterCommit) await effect();
+    // 每个 run 的收尾已经提交，一个推送出错不能让后面的 run 连接续都不起。
+    for (const effect of afterCommit)
+      await effect().catch((error: unknown) =>
+        console.error(`电脑 ${computerId} 断连收尾后推送出错：${errorKind(error)}`),
+      );
   }
 
   async #finishMissingRuns(

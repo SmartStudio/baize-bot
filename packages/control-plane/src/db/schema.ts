@@ -512,6 +512,9 @@ export const routineRuns = pgTable(
     note: text("note").notNull().default(""),
     // 用户看过这次运行的时刻。首页「例行结果」只列没看过的，POST /api/groups/:id/seen 批量盖章。
     seenAt: timestamp("seen_at", { withTimezone: true }),
+    // 这次触发有没有哪一段说过可见的话。换电脑的链上前一段说话、链尾不说，链尾结账时按它弹「做完了」。
+    // 消息不带 runId，从 messages 推不出是哪一段说的，所以在那一段写下非空文字的同一事务里置位。
+    hasResult: boolean("has_result").notNull().default(false),
   },
   (t) => [index("routine_runs_routine_id_started_at_idx").on(t.routineId, t.startedAt)],
 );
@@ -530,6 +533,7 @@ export const runs = pgTable(
     // 例行任务发起的活在这里认领。边存在这一头，run 行一生出来就带着它，
     // 上行的 run_done 拿到的就是它，中间没有「派完活再回填」的窗口能让收尾报文扑空。
     // 记录只留 20 条、删例行任务时跟着走，所以这一列置空而不是级联，账要留着。
+    // 换电脑的接续沿用旧 run 的这一列，一条记录可以对多条 run。
     routineRunId: text("routine_run_id").references(() => routineRuns.id, { onDelete: "set null" }),
     isRoutine: boolean("is_routine").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
@@ -558,9 +562,9 @@ export const runs = pgTable(
     visibleTo: jsonb("visible_to").$type<Viewer[]>(),
     // 这个 run 在牌桌上扮演什么，普通 run 为 null。上行报文按它放行（table-run-policy）。
     tableRole: text("table_role").$type<PokerTableRole>(),
-    // Bot 这一轮请求换到另一台电脑接着做。立起来之后由 run 收尾那一处起接续 run。
+    // Bot 这一轮请求换到另一台电脑接着做，还欠一条没起的接续。起接续的事务认领成 false，派不出去、主人插话也清掉。
     continueRequested: boolean("continue_requested").notNull().default(false),
-    // 这个 run 是哪个 run 换电脑后的接续。部分唯一索引保证一个 run 至多被接续一次，重复起接续撞索引当已经起过。
+    // 这个 run 是哪个 run 换电脑后的接续。部分唯一索引保证一个 run 至多被接续一次。
     continuesRunId: text("continues_run_id").references((): AnyPgColumn => runs.id, { onDelete: "set null" }),
   },
   (t) => [
@@ -585,6 +589,10 @@ export const runs = pgTable(
     uniqueIndex("runs_continues_run_idx")
       .on(t.continuesRunId)
       .where(sql`${t.continuesRunId} IS NOT NULL`),
+    // 接续补扫每 30 秒按结束时刻捡一遍欠着的接续。立着标记的行任何时候都只有几条，runs 却只增不减。
+    index("runs_continue_requested_idx")
+      .on(t.endedAt, t.id)
+      .where(sql`${t.continueRequested}`),
   ],
 );
 

@@ -9,21 +9,15 @@ export const SWITCH_COMPUTER_TOOL = "switch_computer";
 /** 换电脑的调用和别的工具挤在同一批里时挡下它：别的工具可能正在改东西，换过去那边看不到。 */
 export const SWITCH_BATCH_REASON = "换电脑要单独调用，等这一批工具做完再换";
 
-/** 已经请求换电脑之后这一轮再调任何工具都挡下，模型该停下让这一轮结束。 */
-export function switchedReason(kind: ComputerKind): string {
-  return `已经请求换到${NAME[kind]}，这一轮到此为止，换好后自动接着做。`;
-}
-
 export interface SwitchComputerRun {
   readonly runId: RunId;
   readonly signal: AbortSignal;
   readonly gateway: { readonly baseUrl: string; readonly apiKey: string };
   readonly headers: Readonly<Record<string, string>>;
-  readonly markSwitching: (kind: ComputerKind) => void;
 }
 
 /**
- * Bot 自己把这个群换到另一台电脑。控制面回 switching 就立起这一轮的换机标记并让模型停下；
+ * Bot 自己把这个群换到另一台电脑。控制面回 switching 就带 terminate 让模型停下，这一轮随之结束；
  * refused 的文案原样抛成工具错误。每台电脑都注册，Mac 单机用户调了会得到「没有云电脑」。
  */
 export function switchComputerTool(options: { readonly live: () => SwitchComputerRun | null }): RunnerTool {
@@ -71,7 +65,6 @@ export function switchComputerTool(options: { readonly live: () => SwitchCompute
       const parsed = SwitchComputerResponse.safeParse(await response.json().catch(() => null));
       if (!parsed.success) throw new Error("白泽中枢的回应格式不对，这次没换成电脑。");
       if (parsed.data.result === "refused") throw new Error(parsed.data.text);
-      run.markSwitching(kind.data);
       return {
         content: [
           {

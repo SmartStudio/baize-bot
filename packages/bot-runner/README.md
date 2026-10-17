@@ -135,7 +135,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 换电脑
 
-`src/computer.ts` 的 `switch_computer` 一直注册着，参数只有目标 `kind`（`local` 或 `remote`）。它打控制面的 `POST /hub/v1/lane/computer`，带网关 key 和这条道的租约头，body 是这一轮的 runId 和 kind。回 `refused` 就把文案原样抛成工具错误（目标不在线、没有那台电脑、本来就在那台上、这一轮已经换过、这一轮已经结束），模型接着在当前这台上做；回 `switching` 就记下这个 run 已请求换电脑，工具结果是「已换到云电脑，这一轮到此结束，换好后会在云电脑上接着做，不用再说什么」并带 Pi 的 `terminate: true`，Pi 不再为这批结果问模型，`agent_settled` 照常发一条 `run_done`。万一这一轮之后还有工具调用，`tool_call` 钩子一律挡成「已经请求换到云电脑，这一轮到此为止，换好后自动接着做」。换电脑要单独调用：同一批里还有别的工具时挡成「换电脑要单独调用，等这一批工具做完再换」，别的工具照做。只读例行里它按 `write_workspace` 过闸门，被例行边界拦下。
+`src/computer.ts` 的 `switch_computer` 一直注册着，参数只有目标 `kind`（`local` 或 `remote`）。它打控制面的 `POST /hub/v1/lane/computer`，带网关 key 和这条道的租约头，body 是这一轮的 runId 和 kind。回 `refused` 就把文案原样抛成工具错误（目标不在线、没有那台电脑、本来就在那台上、这一轮已经换过、这一轮已经结束），模型接着在当前这台上做；回 `switching` 时工具结果是「已换到云电脑，这一轮到此结束，换好后会在云电脑上接着做，不用再说什么」并带 Pi 的 `terminate: true`，Pi 不再为这批结果问模型，`agent_settled` 照常发一条 `run_done`。换电脑要单独调用：同一批里还有别的工具时，不论它排在前面还是后面都挡成「换电脑要单独调用，等这一批工具做完再换」，别的工具照做。所以换成的那一下一定是一批里唯一的调用，`terminate` 之后这一轮没有下一批；运行器不用 steer 和 follow-up，没有别的路能让这一轮再调工具。`test/computer.test.ts` 的「中枢回 switching」用例断言 `terminate` 之后不再请求模型、没有再执行工具，Pi 改了 `terminate` 的语义会被它抓到。只读例行里它按 `write_workspace` 过闸门，被例行边界拦下。
 
 接续在另一台上以 `reason: "continuation"` 的 prompt 到来，`composePrompt` 只拼它那一句，不拼群标签、任务卡和群历史：会话已经从工作记录重建，上一轮的工具调用和结果都在，电脑段由每次请求现拼，写的是这一轮所在的那台。
 

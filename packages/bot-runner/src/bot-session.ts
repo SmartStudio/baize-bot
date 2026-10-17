@@ -1,7 +1,6 @@
 import {
   type BotId,
   type BotRole,
-  type ComputerKind,
   type ControlToAgent,
   gatewayAlias,
   ModelPurpose,
@@ -23,7 +22,7 @@ import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
 import { ASSISTANT_RULE } from "./assistant.js";
-import { SWITCH_BATCH_REASON, SWITCH_COMPUTER_TOOL, switchedReason } from "./computer.js";
+import { SWITCH_BATCH_REASON, SWITCH_COMPUTER_TOOL } from "./computer.js";
 import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
 import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } from "./lane-fence.js";
@@ -55,8 +54,6 @@ export interface SessionGate {
   /** 工具调用发生时读。这里只用 active.run 送审批，放宽到整个上下文是为了和主题任务工具共用同一个访问器。 */
   readonly activeRun: () => ActiveRun | null;
   readonly laneFence: LaneSessionFence;
-  /** 这次运行已经请求换到哪台电脑。立了之后这一轮的工具调用一律挡下。 */
-  readonly switched?: (runId: string) => ComputerKind | null;
   readonly flushWork?: WorkFlush;
   readonly browserCalls?: {
     acquire(toolName: string, callId: string, signal: AbortSignal | undefined): Promise<void>;
@@ -142,23 +139,18 @@ function gateToolCalls(
   gate: SessionGate,
   allowed: (runId: string, callId: string, toolName: string, decision: GateDecision) => void,
 ): void {
-  // 模型一条回复里发出的那批工具调用的 id，换电脑必须是这批里唯一的一个。
-  let batch: ReadonlySet<string> = new Set();
+  // 模型一条回复里发出的那批工具调用有几个，换电脑必须是这批里唯一的一个。按个数数不按 id：上游不给 id 时 Pi 记成空串。
+  let batchSize = 0;
   pi.on("message_end", (event) => {
     if (event.message.role !== "assistant") return;
-    batch = new Set(event.message.content.flatMap((block) => (block.type === "toolCall" ? [block.id] : [])));
+    batchSize = event.message.content.filter((block) => block.type === "toolCall").length;
   });
   pi.on("tool_call", async (event, ctx) => {
     const active = gate.activeRun();
     if (active === null) {
       return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
     }
-    const switched = gate.switched?.(active.run.runId) ?? null;
-    if (switched !== null) {
-      gate.approvals.block(active.run.runId, event.toolCallId);
-      return { block: true, reason: switchedReason(switched) };
-    }
-    if (event.toolName === SWITCH_COMPUTER_TOOL && batch.size > 1) {
+    if (event.toolName === SWITCH_COMPUTER_TOOL && batchSize > 1) {
       gate.approvals.block(active.run.runId, event.toolCallId);
       return { block: true, reason: SWITCH_BATCH_REASON };
     }

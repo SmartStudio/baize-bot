@@ -750,7 +750,9 @@ it("控制面重启后重复成功出牌仍回原成功结果且台词只落一�
   table.agent.send(duplicate);
   expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
   const next = await table.agent.expect("prompt");
+  // 等关闭握手走完再停机：握手完成说明代理对这条 prompt 的确认已经被读到，停机之后才到的帧会被丢掉，重连时这条 prompt 会重发。
   table.agent.close();
+  await table.agent.closed();
   table.push.close();
   await server.close();
   server = await startServer({

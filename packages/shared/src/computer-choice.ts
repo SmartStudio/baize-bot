@@ -13,7 +13,14 @@ export const SwitchComputerResponse = z.discriminatedUnion("result", [
   z
     .object({
       result: z.literal("refused"),
-      reason: z.enum(["not_current_run", "already_continued", "same_computer", "no_such_computer", "target_offline"]),
+      reason: z.enum([
+        "not_current_run",
+        "already_continued",
+        "routine_failed",
+        "same_computer",
+        "no_such_computer",
+        "target_offline",
+      ]),
       text: z.string(),
     })
     .strict(),

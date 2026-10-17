@@ -1,0 +1,1 @@
+CREATE INDEX "runs_continue_requested_idx" ON "runs" USING btree ("ended_at","id") WHERE "runs"."continue_requested";

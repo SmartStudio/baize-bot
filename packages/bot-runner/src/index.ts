@@ -425,7 +425,6 @@ export function createRunner(config: RunnerConfig): Runner {
     },
   );
   const runnerAbortedRuns = new Set<RunId>();
-  const switchingRuns = new Map<string, ComputerKind>();
   let nextConfigVersion = 1;
 
   const fail = (
@@ -865,7 +864,6 @@ export function createRunner(config: RunnerConfig): Runner {
       approvals,
       activeRun,
       laneFence,
-      switched: (runId) => switchingRuns.get(runId) ?? null,
       browserCalls,
       flushWork: async (cause) =>
         lane.mirrors.get(stream)?.flush(cause, activeRun()?.run.runId ?? null) ?? { kind: "disconnected" },
@@ -881,7 +879,6 @@ export function createRunner(config: RunnerConfig): Runner {
             signal: active.control.signal,
             gateway: (desiredConfig(bot) ?? runConfig()).gateway,
             headers: laneFence.headers(active.run.runId),
-            markSwitching: (kind) => switchingRuns.set(active.run.runId, kind),
           };
         },
       }),
@@ -1162,7 +1159,6 @@ export function createRunner(config: RunnerConfig): Runner {
       botSession?.clearBashRun(message.runId);
       lane.recalls.clear();
       lane.active = null;
-      switchingRuns.delete(message.runId);
       runnerAbortedRuns.delete(message.runId);
       if (active.generation !== null) {
         const generation = active.generation;

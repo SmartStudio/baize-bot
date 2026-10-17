@@ -58,6 +58,7 @@ function dispatchDeps(Hub: typeof AgentHub = AgentHub) {
   return {
     db: database.db,
     push: server.server.hub,
+    notifications: server.server.notifications,
     groupTurns: new GroupTurns(database.db, server.server.hub),
     agents: new Hub({
       db: database.db,

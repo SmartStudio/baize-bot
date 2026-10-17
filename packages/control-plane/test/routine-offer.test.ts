@@ -4,6 +4,7 @@ import {
   CreateGroupResponse,
   DecideRoutineOfferResponse,
   MessageListResponse,
+  PokerTableResponse,
   RoutineListResponse,
   TodayResponse,
   type AgentToControl,
@@ -13,6 +14,7 @@ import {
   type MessageBody,
   type ServerPush,
 } from "@baize/shared";
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
@@ -255,6 +257,32 @@ it("执行者不在目标项目群里回 400", async () => {
     const response = await decide(s.client, card.id, "add");
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "执行者不在那个项目群里" });
+    expect(await routines(s.client), "不建例行").toEqual([]);
+    const after = await onlyCard(s);
+    expect(after.body.status, "卡留在 offered").toBe("offered");
+    expect(after.revision).toBe(card.revision);
+  } finally {
+    s.close();
+  }
+});
+
+it("主助理提议把例行放进牌桌群：点加上回 400，不建例行，卡留在 offered", async () => {
+  const s = await session();
+  try {
+    const opened = await s.client.post("/api/poker/tables", { requestId: randomUUID() });
+    expect(opened.status).toBe(201);
+    const { table } = PokerTableResponse.parse(await opened.json());
+    const seatBot = table.seats.find((seat) => seat.seat === 3)?.botId;
+    if (seatBot === undefined || seatBot === null) throw new Error("3 号位没有牌友");
+    // 开桌重发一次 config，把牌友带下去。
+    await s.agent.expect("config");
+    await offerFrom(s, s.assistant, weeklyOffer(s, { projectGroupId: table.groupId, executorBotId: seatBot }));
+    const card = await onlyCard(s);
+    expect(card.body.groupId, "牌友在牌桌群里，卡照常落下").toBe(table.groupId);
+
+    const response = await decide(s.client, card.id, "add");
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "牌桌群里不能建例行任务" });
     expect(await routines(s.client), "不建例行").toEqual([]);
     const after = await onlyCard(s);
     expect(after.body.status, "卡留在 offered").toBe("offered");

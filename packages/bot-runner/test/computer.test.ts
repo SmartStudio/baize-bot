@@ -356,20 +356,17 @@ describe("switch_computer", () => {
     expect(session, "换过之后没有再执行任何工具").not.toContain("notes.md 不存在");
   });
 
-  it("和别的工具放在同一批里：换电脑挡下，别的照做", async () => {
+  const readCall = { id: "call-read", name: "read", args: { path: "notes.md" } };
+  it.each([
+    ["排在后面", [readCall, switchCall("call-switch", "remote")]],
+    ["排在前面", [switchCall("call-switch", "remote"), readCall]],
+  ])("和别的工具放在同一批里、换电脑%s：换电脑挡下，别的照做", async (_order, toolCalls) => {
     const h = await harness({
       computerKind: "local",
       script: (req) =>
         isFollowUpTurn(req)
           ? { textChunks: ["好"], usage: { input: 1, output: 1 } }
-          : {
-              textChunks: [],
-              toolCalls: [
-                { id: "call-read", name: "read", args: { path: "notes.md" } },
-                switchCall("call-switch", "remote"),
-              ],
-              usage: { input: 1, output: 1 },
-            },
+          : { textChunks: [], toolCalls, usage: { input: 1, output: 1 } },
       hub: switching,
     });
     await h.runner.prompt(prompt("bot-1", "run-1", "先读笔记再换到云电脑"));
@@ -379,6 +376,24 @@ describe("switch_computer", () => {
     expect(toolResultOf(h.requests[1], "call-read"), "同一批里的 read 照常执行").not.toBe(
       "换电脑要单独调用，等这一批工具做完再换",
     );
+  });
+
+  it("上游没给工具调用 id、同一批两个调用的 id 都是空的：照样算两个，换电脑挡下", async () => {
+    const h = await harness({
+      computerKind: "local",
+      script: (req) =>
+        isFollowUpTurn(req)
+          ? { textChunks: ["好"], usage: { input: 1, output: 1 } }
+          : {
+              textChunks: [],
+              toolCalls: [switchCall("", "remote"), { id: "", name: "write", args: { path: "a.md", content: "a" } }],
+              usage: { input: 1, output: 1 },
+            },
+      hub: switching,
+    });
+    await h.runner.prompt(prompt("bot-1", "run-1", "换到云电脑再写个文件"));
+    expect(h.gateway.hubRequests, "没打到中枢").toEqual([]);
+    expect(sessionTextOf(h.dataDir, "bot-1", "solo-bot-1")).toContain("换电脑要单独调用，等这一批工具做完再换");
   });
 
   it("只读例行里不能换电脑", async () => {

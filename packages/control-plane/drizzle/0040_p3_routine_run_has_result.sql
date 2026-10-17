@@ -1,0 +1,1 @@
+ALTER TABLE "routine_runs" ADD COLUMN "has_result" boolean DEFAULT false NOT NULL;

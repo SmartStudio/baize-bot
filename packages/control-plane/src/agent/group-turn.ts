@@ -5,6 +5,9 @@ import type {
   HandoffId,
   Message,
   MessageId,
+  ModelPurpose,
+  RoutineBoundary,
+  RoutineId,
   RunId,
   ServerPush,
   UserId,
@@ -23,8 +26,21 @@ export type Speaker = {
   readonly trigger: Message;
   readonly reason: Extract<ControlToAgent, { type: "prompt" }>["reason"];
   readonly handoff?: { readonly id: HandoffId; readonly text: string; readonly fromBotId: BotId };
-  /** 换电脑后接着做的那一位：text 就是整段提示，fromRunId 是它接的那一轮，同一轮只排一次。 */
-  readonly continuation?: { readonly fromRunId: RunId; readonly text: string };
+  /**
+   * 换电脑后接着做的那一位：text 就是整段提示，fromRunId 是它接的那一轮，同一轮只排一次。
+   * routine 取自它自己的父链：排进别的回合时也不能沿用那个回合的用途和边界。
+   */
+  readonly continuation?: {
+    readonly fromRunId: RunId;
+    readonly text: string;
+    readonly routine: ContinuationRoutine | null;
+  };
+};
+
+export type ContinuationRoutine = {
+  readonly routineId: RoutineId;
+  readonly boundary: RoutineBoundary;
+  readonly purpose: ModelPurpose;
 };
 
 export type ContinuationSpeaker = Speaker & { readonly continuation: NonNullable<Speaker["continuation"]> };

@@ -7,8 +7,9 @@ import * as computersRepo from "../src/repo/computers.js";
 import { helloAgent, openAgent, sendHello, type AgentClient } from "./helpers/agent.js";
 import { startTestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { makeComputer, makeUser } from "./helpers/fixtures.js";
+import { makeComputer, makeUser, PASSWORD } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
+import { connectPush } from "./helpers/ws.js";
 
 /**
  * 停机的收敛契约：closeAll 返回之后，这台控制面手里的电脑在库里都是休眠，没有一条 socket 还开着，
@@ -39,7 +40,7 @@ async function stack() {
     const promise = server.close().then(() => (done = true));
     return { promise, done: () => done };
   };
-  return { database, gated, port: server.server.port, user, computer, status, closing };
+  return { database, gated, server, port: server.server.port, user, computer, status, closing };
 }
 
 async function finish(database: TestDb, ...rest: { close(): void }[]) {
@@ -137,6 +138,59 @@ it("停机期间认身份才回来的 hello：被关掉，没有 welcome，库�
     spy.mockRestore();
     sleepSpy.mockRestore();
     await finish(s.database, first.agent, second);
+  }
+});
+
+it("网页推送连接迟迟不回关闭帧时，认身份才回来的 hello 照样被关、没有 welcome，已在线电脑新发的帧也丢掉", async () => {
+  const s = await stack();
+  const client = s.server.client();
+  expect((await client.login(s.user.email, PASSWORD)).status).toBe(200);
+  const push = await connectPush(s.port, client.cookie ?? "");
+  const other = await makeUser(s.database.db, "另一个人");
+  const otherComputer = await makeComputer(s.database.db, other.id);
+  const first = await helloAgent(s.port, s.computer.computerId, s.computer.token);
+  const original = computersRepo.authenticateComputer;
+  let authenticated!: () => void;
+  const authenticatedDone = new Promise<void>((resolve) => (authenticated = resolve));
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const spy = vi.spyOn(computersRepo, "authenticateComputer").mockImplementation(async (...args) => {
+    const result = await original(...args);
+    authenticated();
+    await released;
+    return result;
+  });
+  const seen = observe();
+  const second = await openAgent(s.port);
+  let close: ReturnType<typeof s.closing> | undefined;
+  try {
+    sendHello(second, otherComputer.computerId, otherComputer.token);
+    await authenticatedDone;
+
+    // 网页这头暂不读 socket，读不到服务端的关闭帧也就不回，网页那边的关闭握手一直挂着。
+    push.socket.pause();
+    close = s.closing();
+    heartbeat(first.agent);
+    await received(first.agent);
+    release();
+    const outcome = await Promise.race([
+      second.next().then((message) => message.type),
+      second.closed().then((code) => code),
+    ]);
+    expect(outcome, "认完身份回来先看到停机，当场关掉，不是先收到 welcome").toBe(SERVICE_RESTART);
+    expect(second.received(), "没有 welcome，也没有 config").toEqual([]);
+
+    push.socket.resume();
+    await close.promise;
+    expect(seen.handled(s.computer.computerId), "close 之后已在线电脑发的心跳没进业务").toBe(0);
+    expect(await first.agent.closed()).toBe(SERVICE_RESTART);
+  } finally {
+    release();
+    push.socket.resume();
+    await close?.promise;
+    spy.mockRestore();
+    seen.restore();
+    await finish(s.database, first.agent, second, push);
   }
 });
 

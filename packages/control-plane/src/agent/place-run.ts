@@ -17,7 +17,7 @@ import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
 import { CHOSEN_OFFLINE, type ComputerSelection, type SelectionFailure } from "./computer-selection.js";
-import { clearBotContinuations } from "./continuation.js";
+import { clearBotContinuations, takeContinuation } from "./continuation.js";
 import { enqueueDownlink } from "./envelope.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
@@ -28,7 +28,7 @@ export type PlaceRunInput = {
   readonly triggerMessageId?: MessageId;
   readonly routineRunId?: string | undefined;
   readonly table?: { readonly role: PokerTableRole; readonly visibleTo: readonly [Viewer, ...Viewer[]] };
-  /** 换电脑后的接续接的是哪一轮。撞上 runs_continues_run_idx 就是已经起过，不建第二条。 */
+  /** 换电脑后的接续接的是哪一轮。落行时认领那一轮的标记、沿用它的运行记录，认领不到就不建。 */
   readonly continuesRunId?: RunId;
   readonly prompt: (runId: RunId, messageId: MessageId, placed: Placement) => Promise<Omit<Prompt, "runId" | "lane">>;
 };
@@ -199,6 +199,8 @@ async function startRun(
   computerId: ComputerId,
   triggerMessageId: MessageId,
 ): Promise<RunId | null> {
+  const continued = input.continuesRunId === undefined ? null : await takeContinuation(tx, input.continuesRunId);
+  if (input.continuesRunId !== undefined && continued === null) return null;
   const [row] = await tx
     .insert(runs)
     .values({
@@ -208,8 +210,9 @@ async function startRun(
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId,
-      routineRunId: input.routineRunId ?? null,
-      isRoutine: input.routineRunId !== undefined,
+      // 接续只认父链：父链没挂例行就是 null，不回退到这一回合的例行记录。
+      routineRunId: continued === null ? (input.routineRunId ?? null) : continued.routineRunId,
+      isRoutine: continued === null ? input.routineRunId !== undefined : continued.isRoutine,
       startedAt: new Date(),
       visibleTo: input.table === undefined ? null : [...input.table.visibleTo],
       tableRole: input.table?.role ?? null,
@@ -217,7 +220,7 @@ async function startRun(
     })
     .onConflictDoNothing()
     .returning({ id: runs.id });
-  if (row === undefined) return input.continuesRunId === undefined ? tx.rollback() : null;
+  if (row === undefined) return tx.rollback();
   return RunId.parse(row.id);
 }
 
