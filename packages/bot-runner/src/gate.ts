@@ -18,8 +18,7 @@ import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import {
   type Containment,
-  provablyContained,
-  resolvesToSystemBinary,
+  looksLikeDeleteOrMove,
   SYSTEM_PACKAGE_MANAGERS,
   SYSTEM_PACKAGE_REASON,
 } from "./contained.js";
@@ -57,7 +56,7 @@ export type ToolSource =
 
 export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
-  /** 沙箱是否兜得住整条 bash。必填：漏传等于默认放宽，Mac 上一条都不许放宽。closed 时由 createSandboxedBash 给出。 */
+  /** 这台电脑的 bash 是不是跑在云电脑的封闭沙箱里。必填：漏传等于默认放宽，Mac 上一条都不许放宽。closed 时由 createSandboxedBash 给出。 */
   readonly containment: Containment;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
@@ -91,6 +90,7 @@ interface ClassifiedAction {
 
 const NO_ACCESS: GateAccess = { network: false, writePaths: [] };
 const HARD_ACTIONS = new Set<ActionKind>(["spend", "account_security", "delete"]);
+const RELAXABLE_ACTIONS = new Set<ActionKind>(["read", "shell"]);
 const COMMAND_SEPARATORS = new Set(["|", "|&", "&&", "||", ";"]);
 const INPUT_REDIRECTS = new Set(["<", "<<<", "<&"]);
 const OUTPUT_REDIRECTS = new Set([">", ">>", ">&"]);
@@ -609,12 +609,7 @@ const pipInstallsLocalCode = (args: readonly string[]): boolean =>
     return pipLocalSource(arg) || (source !== undefined && (!source.includes("://") || /^file:/i.test(source)));
   });
 
-/**
- * 云电脑上命令名先按自动放行时的 PATH 落到文件：不在系统目录里的（工具箱里装出来的入口脚本、工作区里的同名程序）
- * 分类器不按名字认，归 shell 去问。前置赋值在调用方已经只剩语言和时区，不改命令名落到哪个文件。
- * 装包排在这之前，因为 pip 装过一次就落在工具箱里了。
- * 返回 null 的按通用规则接着分。
- */
+/** 云电脑上的装包按工具箱判，批准时放开的口子写在卡上。返回 null 的按通用规则接着分。 */
 const classifyCloudCommand = (
   words: readonly string[],
   nameIndex: number,
@@ -642,7 +637,7 @@ const classifyCloudCommand = (
   if (NODE_INSTALLERS.has(rawName) && commandArgs.some((arg) => NODE_INSTALL_VERBS.test(arg))) {
     return { ...plainAction("install", null, { network: true, writePaths: [] }), reason: NODE_INSTALL_REASON };
   }
-  return resolvesToSystemBinary(rawName, containment.searchPath) ? null : plainAction("shell");
+  return null;
 };
 
 const classifyCommand = (words: readonly string[], call: GateCall): readonly ClassifiedAction[] => {
@@ -1126,20 +1121,16 @@ function systemPackageDenial(call: GateCall): GateDecision | null {
 
 /**
  * 只把 ask 改成 allow，deny 和 allow 原样返回。批了会多拿网络或写权限的不放：那正是沙箱要靠审批才开的口子。
- * 放行后不开任何口子，命令照原来的沙箱跑。证明器用的 PATH 就是沙箱 bash 的那个，随 closed 的 containment 进来。
+ * 只放读和普通命令两类：它们批下来也是同一个沙箱、同样的权限，问了只多挡一下。删、装、git push 这些动作本身要人拍板，
+ * 普通命令里看得出删、移、丢 git 改动的也照问。
+ * 解释器写的删除（python -c "shutil.rmtree(...)"）扫不出来，沙箱把它限制在这个 Bot 自己的工作区和共享区里。
  */
 export function relaxIfContained(call: GateCall, decision: GateDecision): GateDecision {
   if (decision.verdict !== "ask" || call.toolName !== "bash" || call.containment.level === "none") return decision;
   if (decision.access.network || decision.access.writePaths.length > 0) return decision;
+  if (!RELAXABLE_ACTIONS.has(decision.action)) return decision;
   const command = call.input.command;
-  if (typeof command !== "string") return decision;
-  const verdict = provablyContained(command, {
-    workDir: call.workDir,
-    sharedDir: call.zones.sharedDir,
-    forbidden: [...call.zones.hidden, ...call.zones.readOnly],
-    searchPath: call.containment.searchPath,
-  });
-  if (!verdict.contained) return decision;
+  if (typeof command !== "string" || looksLikeDeleteOrMove(command)) return decision;
   return { ...decision, verdict: "allow", reason: null, access: NO_ACCESS };
 }
 

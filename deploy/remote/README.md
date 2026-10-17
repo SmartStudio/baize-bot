@@ -101,6 +101,12 @@ docker compose logs remote-computer | tail
 
 依次出现「启动文件已读取并删除」「已发 hello」「控制面已接纳」和 `{"type":"online"}`，就是上线了。
 
+## 用户怎么用上它
+
+远程电脑上线后，用户在网页上叫它「云电脑」。用户同时有本机和云电脑时，单 Bot 对话和多 Bot 群的标题栏会多一个电脑按钮。用户也可以在对话里直接说「用云电脑」，Bot 会自己换过去，这一轮在云电脑上接着做。换不过去（比如云电脑不在线）时 Bot 留在原来那台上做。步骤和界面文案见 [docs/上手.md](../../docs/上手.md) 的「让 Bot 换到云电脑上做」。
+
+云电脑上的命令审批比 Mac 少。命令在下面「安全选项」里的 bubblewrap 沙箱里跑，只能写工作目录，默认不联网。批不批都是同一个沙箱，所以只有要联网、写工作目录以外，或者看得出是删、移的才问，`ps`、`ls ~`、改工作目录里的文件、打包都直接跑。装包要联网，照样问。`apt`、`apt-get`、`sudo` 这类直接拒，因为沙箱里没有 root。bubblewrap 起不来时没有这层放宽，每条 bash 都问。完整的清单见 [docs/上手.md](../../docs/上手.md) 的「哪些命令会先问你」。
+
 ## 安全选项
 
 远程电脑容器没有 `--privileged`，没有加任何 capability。放宽只有两项：
@@ -127,6 +133,32 @@ compose 里有两张网。`data` 挂 postgres、migrate 和控制面，`edge` �
 ## 数据
 
 - `pgdata` 卷是 Postgres 的数据。
-- `bots` 卷挂在远程电脑的 `/home/node/.baize/bots`，每个 Bot 一个目录，Pi 的会话和 skill 都在里面。助理 Chrome 的 profile 也在这个目录下。批准 `pip install` 后装的 Python 包在 `<bot>/toolbox/venv`，在这个卷里。装包的下载缓存（pip、npm、pnpm store、yarn）指到沙箱每次新挂的 `/tmp/cache` 下，批准写 `/tmp` 的命令也碰不到它，不落在这个卷里、不跨命令留存，所以装包每次都重新下载，没批准的命令改不了下一次批准装包会信任的缓存。批准的命令里 `python`、`python3`、`pip`、`pip3` 经 `<bot>/toolbox-bin` 落到这个 venv，别的命令名照旧是系统的。批准的装包不认工作区 `.npmrc`、`.yarnrc` 里的 `registry`：运行器环境里设了 `npm_config_registry` 就用它（要走 npmmirror 这类镜像就在远程电脑容器的环境里设），没设就是 `https://registry.npmjs.org/`。镜像里没有 pnpm（远程电脑这一阶段不跑 `corepack enable`），有 npm 和 yarn 1。
+- `bots` 卷挂在远程电脑的 `/home/node/.baize/bots`，每个 Bot 一个目录，Pi 的会话和 skill 都在里面。助理 Chrome 的 profile 也在这个目录下。批准 `pip install` 后装的 Python 包在 `<bot>/toolbox/venv`，在这个卷里。装包的下载缓存（pip、npm、pnpm store、yarn）指到沙箱每次新挂的 `/tmp/cache` 下，批准写 `/tmp` 的命令也碰不到它，不落在这个卷里、不跨命令留存，所以装包每次都重新下载，没批准的命令改不了下一次批准装包会信任的缓存。远程电脑上的命令里 `python`、`python3`、`pip`、`pip3` 经 `<bot>/toolbox-bin` 落到这个 venv，批没批都一样，别的命令名照旧是系统的。批准的装包不认工作区 `.npmrc`、`.yarnrc` 里的 `registry`：运行器环境里设了 `npm_config_registry` 就用它（要走 npmmirror 这类镜像就在远程电脑容器的环境里设），没设就是 `https://registry.npmjs.org/`。镜像里没有 pnpm（远程电脑这一阶段不跑 `corepack enable`），有 npm 和 yarn 1。
 
 `docker compose down` 保留卷，`down -v` 连卷一起删，删了就没了。
+
+### 网站登录态
+
+用户在远程电脑上登录的网站（X、小红书这类），cookie 存在 `bots` 卷的 `chrome-profile/Default/Cookies` 里。助理 Chrome 带 `--password-store=basic` 启动，cookie 用固定密钥加密，不依赖容器里的系统钥匙串，换一个容器实例照样能解开。代码里没有删 profile 的地方，Chrome 起之前只清 `chrome-profile/tmp` 和三个 `Singleton*` 锁文件。
+
+这些操作保留登录态：`docker compose restart`、`docker compose up -d`（含换镜像后重建容器）、`docker compose down` 再 `up -d`、`put-launch.sh`（它第一步就是重启远程电脑）。2026-10-17 实测过一次：重启前后 Cookies 里 `.x.com` 的 `auth_token` 都在，重启后打开 `https://x.com/home` 仍是登录状态。
+
+这些情况会让登录态不见：
+
+- `docker compose down -v`。卷删了，profile 跟着没了。
+- 换 compose 项目名。卷的实际名字是 `<项目名>_bots`，`docker-compose.yml` 写死了 `name: baize-remote`。用 `-p` 指别的名字，或者用另一份项目名不同的 compose 文件起远程电脑，挂上的是另一个空卷，Chrome 拿到的是新 profile。旧卷还在，`docker volume ls | grep _bots` 能看到，换回原来的项目名就回来了。
+- 网站自己让会话过期，或者用户在别处退出了登录。这和部署无关。
+
+查登录态在不在，只看 cookie 名字和条数，不打印值：
+
+```
+docker compose exec remote-computer node -e '
+const { DatabaseSync } = require("node:sqlite");
+const db = new DatabaseSync("/home/node/.baize/bots/chrome-profile/Default/Cookies", { readOnly: true });
+console.table(db.prepare("select host_key, count(*) n, sum(name = ?) auth from cookies group by host_key").all("auth_token"));
+'
+```
+
+`auth` 那一列是该域名下 `auth_token` 的条数，这是 X 的登录 cookie。查别的站，把 `auth_token` 换成那个站的登录 cookie 名。
+
+有一种情况没验证过。Chrome 运行时先把 cookie 攒在内存里，隔一段时间才写盘。如果刚登录完几秒容器就被强杀（`docker kill`、宿主机断电），最新的 cookie 可能来不及落盘，要重新登录一次。正常的 `restart` 和 `down` 先发 SIGTERM，宽限 20 秒（`stop_grace_period`）。

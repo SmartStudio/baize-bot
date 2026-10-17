@@ -160,8 +160,6 @@ const sandboxProbe = vi.hoisted(() => ({
   forceNone: false,
   /** 冒充这台电脑的沙箱是 bwrap：运行器和闸门看到的都是 "bwrap"，命令照样在本机真有的沙箱里跑。 */
   forceBwrap: false,
-  /** 每次建 bash 时收到的严格遮罩。 */
-  masked: [] as (readonly string[])[],
   /** 每次建 bash 时收到的工具箱目录，本机电脑没有。 */
   toolboxes: [] as (string | null)[],
 }));
@@ -172,7 +170,6 @@ vi.mock("../src/sandbox.js", async (importOriginal) => {
     ...actual,
     sandboxKind: () => (sandboxProbe.forceBwrap ? ("bwrap" as const) : actual.sandboxKind()),
     createSandboxedBash(...args: Parameters<typeof actual.createSandboxedBash>) {
-      sandboxProbe.masked.push(args[3]?.masked ?? []);
       sandboxProbe.toolboxes.push(args[3]?.toolboxDir ?? null);
       const created = actual.createSandboxedBash(...args);
       if (sandboxProbe.forceNone) return { ...created, sandbox: "none" as const };
@@ -611,7 +608,6 @@ afterEach(async () => {
   botSessionProbe.assistantEnds.splice(0);
   sandboxProbe.forceNone = false;
   sandboxProbe.forceBwrap = false;
-  sandboxProbe.masked.splice(0);
   sandboxProbe.toolboxes.splice(0);
   vi.unstubAllEnvs();
 });
@@ -10208,7 +10204,7 @@ describe("运行器的例行边界", () => {
     });
   });
 
-  describe("云电脑上沙箱兜得住的 bash", () => {
+  describe("云电脑上的常规 bash 不问", () => {
     const lsHarness = async (computerKind: ComputerKind, requests: ChatCompletionRequest[]) => {
       sandboxProbe.forceBwrap = true;
       const { dataDir } = botWorkDir();
@@ -10223,7 +10219,7 @@ describe("运行器的例行边界", () => {
       return { h, dirs: botDirs(dataDir, BotId.parse("bot-1")) };
     };
 
-    it("远程电脑上 ls -la 不弹审批直接跑，bash 的沙箱盖住 Pi 的配置和会话目录", async () => {
+    it("远程电脑上 ls -la 不弹审批直接跑，bash 拿到这个 Bot 的工具箱", async () => {
       const requests: ChatCompletionRequest[] = [];
       const { h, dirs } = await lsHarness("remote", requests);
 
@@ -10231,11 +10227,10 @@ describe("运行器的例行边界", () => {
 
       expect(shape(h.sent)).not.toContain("approval_request");
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
-      expect(sandboxProbe.masked).toEqual([[dirs.agentDir, dirs.sessionDir]]);
       expect(sandboxProbe.toolboxes).toEqual([dirs.toolboxDir]);
     });
 
-    it("本机电脑上同一条照弹审批，沙箱不加遮罩", async () => {
+    it("本机电脑上同一条照弹审批，bash 没有工具箱", async () => {
       const requests: ChatCompletionRequest[] = [];
       const { h } = await lsHarness("local", requests);
 
@@ -10243,7 +10238,6 @@ describe("运行器的例行边界", () => {
 
       expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
-      expect(sandboxProbe.masked).toEqual([[]]);
       expect(sandboxProbe.toolboxes).toEqual([null]);
     });
   });

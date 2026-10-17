@@ -83,7 +83,7 @@ export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } fr
 
 export interface RunnerConfig {
   readonly computerId: ComputerId;
-  /** 控制面在 welcome 里报的电脑类型。远程电脑加 bwrap 时沙箱兜得住的 bash 不再问，见 `src/contained.ts`。 */
+  /** 控制面在 welcome 里报的电脑类型。远程电脑加 bwrap 时，bash 只有联网、写工作区外、删和移才问，见 `src/gate.ts` 的 `relaxIfContained`。 */
   readonly computerKind: ComputerKind;
   readonly bots: readonly BotConfig[];
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
@@ -817,7 +817,7 @@ export function createRunner(config: RunnerConfig): Runner {
       dirs.workDir,
       zones,
       () => lane.active?.run.runId ?? null,
-      containment.level === "closed" ? { masked: [dirs.agentDir, dirs.sessionDir], toolboxDir: dirs.toolboxDir } : null,
+      containment.level === "closed" ? { toolboxDir: dirs.toolboxDir } : null,
     );
     if (config.browser !== undefined && bot.browser === null) {
       bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);

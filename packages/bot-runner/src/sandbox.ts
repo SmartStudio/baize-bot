@@ -1,50 +1,36 @@
 import { spawnSync } from "node:child_process";
-import {
-  chmodSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { BotId } from "@baize/shared";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
 import type { Containment } from "./contained.js";
 import type { GateAccess, SandboxKind } from "./gate.js";
-import { type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
+import { botDirs, type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
 
-/** 运行器在云电脑上多给的两样：额外盖住的目录，和这个 Bot 的工具箱。本机电脑是 null。 */
+/** 运行器在云电脑上多给的：这个 Bot 的工具箱。本机电脑是 null。 */
 export interface CloudBox {
-  readonly masked: readonly string[];
   readonly toolboxDir: string;
 }
 
 type ClosedContainment = Extract<Containment, { level: "closed" }>;
 
-/** 这次调用是人批准的，还是闸门自动放行的。 */
-export type BashApproval = "approved" | "automatic";
-
-/** 批准的命令里只有这四个名字落到工具箱的 venv，其余名字和自动放行时解析到同一个文件。 */
+/** 云电脑上只有这四个名字落到工具箱的 venv，其余名字落到系统目录。 */
 const TOOLBOX_NAMES = ["pip", "pip3", "python", "python3"] as const;
 
 const toolboxShimDir = (toolboxDir: string): string => join(dirname(toolboxDir), "toolbox-bin");
 
 /**
- * 批准的命令的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 垫底。pip 装进来的 black 这类程序还能用，
- * 但盖不住系统同名程序。
- * 自动放行的命令跑的是 `containment.searchPath`，和证明器判命令名用的同一串。
+ * 云电脑上 bash 的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 垫底。pip 装进来的 black 这类程序还能用，
+ * 但盖不住系统同名程序。自动放行和批准的命令是同一串，批准过的装包之后不问的 python3 也用得上。
  */
 export const toolboxSearchPath = (containment: ClosedContainment): string =>
   `${toolboxShimDir(containment.toolboxDir)}:${containment.searchPath}:${join(containment.toolboxDir, "venv", "bin")}`;
 
 // shim 不能是软链：Python 按可执行文件旁边的 pyvenv.cfg 认 venv，软链过去 sys.prefix 退回系统。
 // shim 目录在 Bot 目录下、工具箱之外，工作区和批准的装包都写不到；但 S-8 下批准的写可能放开整个 Bot 目录，
-// 所以每次在新建的空目录里写好再整个换上去：多放的程序、预先埋的软链都留不下，也不跟着软链写到别处。
+// 所以每条命令起之前在新建的空目录里写好再整个换上去：多放的程序、预先埋的软链都留不下，也不跟着软链写到别处。
 const writeToolboxShims = (containment: ClosedContainment): void => {
   const dir = toolboxShimDir(containment.toolboxDir);
   const botDir = dirname(dir);
@@ -214,15 +200,19 @@ export function sandboxProfile(workDir: string, access: GateAccess, zones: Forbi
   return lines.join("\n");
 }
 
+// 真正跑命令时建的 namespace 探测时一个不少：宿主不许非特权建 user namespace 时探测就失败，回落成每条都问，
+// 不会探测通过、之后每条命令都起不来。
+const NAMESPACES = ["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts"] as const;
+
+export const BWRAP_PROBE_ARGS: readonly string[] = ["--ro-bind", "/", "/", ...NAMESPACES, "--unshare-net", "true"];
+
 const detectSandbox = (): SandboxKind => {
   if (process.platform === "darwin") return "seatbelt";
   if (process.platform !== "linux") {
     console.warn(`这台电脑是 ${process.platform}，没有 bash 沙箱，Bot 的每条 bash 都要问`);
     return "none";
   }
-  const probe = spawnSync("bwrap", ["--ro-bind", "/", "/", "--unshare-net", "--unshare-pid", "true"], {
-    encoding: "utf8",
-  });
+  const probe = spawnSync("bwrap", BWRAP_PROBE_ARGS, { encoding: "utf8" });
   if (probe.status === 0) return "bwrap";
   const why = probe.error?.message ?? (probe.stderr.trim() || `exit ${probe.status ?? probe.signal}`);
   console.warn(`bubblewrap 起不来（${why}），这台电脑没有 bash 沙箱，Bot 的每条 bash 都要问`);
@@ -237,57 +227,61 @@ export function sandboxKind(): SandboxKind {
   return detected;
 }
 
+/** 入参都已是 realpath，都已存在：只读根上建不了挂载点，不存在的路径会让 bwrap 报「Can't mkdir parents ... Read-only file system」。 */
+export interface BwrapMounts {
+  /** 整块用 tmpfs 盖住。之后新建的 Bot 目录也落在被盖住的这一块里，不用按当时的目录列表逐个遮。 */
+  readonly dataDir: string;
+  readonly workDir: string;
+  readonly sharedDir: string;
+  /** 盖住数据目录之后只读挂回的自己的目录。批准写它们（比如装包写工具箱）时可写的那份叠在上面。 */
+  readonly ownReadable: readonly string[];
+  /** 批准写它的祖先也改不动。 */
+  readonly readOnly: readonly string[];
+  readonly forbidden: readonly string[];
+}
+
+const isUnder = (path: string, root: string): boolean => path.startsWith(`${root}/`);
+const bind = (path: string): string[] => ["--bind", path, path];
+const roBind = (path: string): string[] => ["--ro-bind", path, path];
+
 /**
- * 入参都已是 realpath，禁区都已存在：只读根上建不了挂载点，不存在的禁区会让 bwrap 报
- * 「Can't mkdir parents ... Read-only file system」，整条命令起不来。
- * 禁区放在所有 bind 之后：bwrap 按参数顺序叠挂载，后挂的盖住先挂的。禁区落在工作目录或批准的写路径里面时照样被盖住；
- * 工作目录本身落在禁区里时 --chdir 失败，命令起不来。
+ * bwrap 按参数顺序叠挂载，后挂的盖住先挂的。
+ * 批准的写路径在数据目录外（包括数据目录本身和它的祖先）的，挂在盖住数据目录之前，放开再大也看不见别的 Bot；
+ * 在数据目录里的（工具箱、自己的 Bot 目录）挂在挂回的只读目录之后。
  * 包缓存的 /tmp/cache 在写路径之后再新挂一次：批准写 /tmp 时真 /tmp 绑进来，缓存不能借它留到下一条命令。
- * 只读区用 --ro-bind 叠在写路径之后，批准写它的祖先也改不动它。
+ * 禁区放在所有 bind 之后：禁区落在工作目录或批准的写路径里面时照样被盖住；工作目录本身落在禁区里时 --chdir 失败，命令起不来。
  * 空 tmpfs 默认可写，写进去的东西随沙箱消失，命令却报成功，所以再逐个 --remount-ro。先挂完全部 tmpfs 再改只读，
- * 禁区互相嵌套时里层的挂载点还建得出来。
- * 不挂 --proc：docker 遮住了部分 /proc，新挂 proc 会失败，沙箱和容器共用 /proc。
+ * 里层的挂载点还建得出来；--remount-ro 只改这一层，挂在里面的工作目录照样可写。
+ * 不挂 --proc：docker 遮住了部分 /proc，新挂 proc 会失败，沙箱和容器共用 /proc。挡住 /proc/<pid>/root、environ 的是
+ * 沙箱在自己的 user namespace 里，跨 namespace 不许 ptrace 读，所以 --unshare-user 显式写上，不靠 bwrap 隐式建。
  */
-export function bwrapArgs(
-  workDir: string,
-  access: GateAccess,
-  forbidden: readonly string[],
-  readOnly: readonly string[],
-  sharedDir: string,
-): readonly string[] {
+export function bwrapArgs(mounts: BwrapMounts, access: GateAccess): readonly string[] {
   return [
-    "--ro-bind",
-    "/",
-    "/",
+    ...roBind("/"),
     "--dev",
     "/dev",
     "--tmpfs",
     "/tmp",
-    "--bind",
-    workDir,
-    workDir,
-    "--bind",
-    sharedDir,
-    sharedDir,
-    ...access.writePaths.flatMap((path) => ["--bind", path, path]),
+    ...access.writePaths.filter((path) => !isUnder(path, mounts.dataDir)).flatMap(bind),
     "--tmpfs",
     "/tmp/cache",
-    ...readOnly.flatMap((path) => ["--ro-bind", path, path]),
-    ...forbidden.flatMap((path) => ["--tmpfs", path]),
-    ...forbidden.flatMap((path) => ["--remount-ro", path]),
-    "--unshare-pid",
-    "--unshare-ipc",
-    "--unshare-uts",
+    "--tmpfs",
+    mounts.dataDir,
+    ...mounts.ownReadable.flatMap(roBind),
+    ...bind(mounts.workDir),
+    ...bind(mounts.sharedDir),
+    ...access.writePaths.filter((path) => isUnder(path, mounts.dataDir)).flatMap(bind),
+    ...mounts.readOnly.flatMap(roBind),
+    ...mounts.forbidden.flatMap((path) => ["--tmpfs", path]),
+    ...[...mounts.forbidden, mounts.dataDir].flatMap((path) => ["--remount-ro", path]),
+    ...NAMESPACES,
     "--die-with-parent",
     "--new-session",
     ...(access.network ? [] : ["--unshare-net"]),
     "--chdir",
-    workDir,
+    mounts.workDir,
   ];
 }
-
-export const otherBotDirs = (botDir: string, sharedDir: string, directories: readonly string[]): readonly string[] =>
-  directories.filter((path) => path !== botDir && path !== sharedDir);
 
 // bind 的源必须存在。批准写一个还不存在的路径，就放开它最近的已存在祖先；根目录不放，
 // 整个根可写会盖掉 /dev 和 /tmp 的挂载。
@@ -305,32 +299,19 @@ const existingReal = (zones: ForbiddenZones, paths: readonly string[]): readonly
   ...new Set(paths.map((path) => realZone(zones, path)).filter(existsSync)),
 ];
 
-/** `masked` 是运行器按电脑额外盖住的目录：云电脑放宽了询问，自己的 Pi 配置和会话记录也不给 bash 看。 */
-export const bwrapCommand = (
-  workDir: string,
-  zones: ForbiddenZones,
-  access: GateAccess,
-  command: string,
-  masked: readonly string[],
-): string => {
-  const work = realpathExisting(workDir);
-  const shared = realpathExisting(zones.sharedDir);
-  const directories = readdirSync(realpathExisting(zones.dataDir), { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-    .map((entry) => realpathExisting(join(zones.dataDir, entry.name)));
-  const forbidden = existingReal(zones, [
-    ...zones.hidden,
-    ...otherBotDirs(realpathExisting(zones.botDir), shared, directories),
-    X11_SOCKET_DIR,
-    ...masked,
-  ]);
-  const writePaths = access.writePaths.flatMap((path) => writeMountPoint(path) ?? []);
+/** 自己的 Pi 配置和会话记录（agent、sessions）不挂回，bash 看不见。 */
+export const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
+  const own = botDirs(zones.dataDir, BotId.parse(basename(zones.botDir)));
   const args = bwrapArgs(
-    work,
-    { network: access.network, writePaths },
-    forbidden,
-    existingReal(zones, zones.readOnly),
-    shared,
+    {
+      dataDir: zones.dataDir,
+      workDir: realpathExisting(workDir),
+      sharedDir: realpathExisting(zones.sharedDir),
+      ownReadable: existingReal(zones, [own.skillsDir, own.toolboxDir, toolboxShimDir(own.toolboxDir)]),
+      readOnly: existingReal(zones, zones.readOnly),
+      forbidden: existingReal(zones, [...zones.hidden, X11_SOCKET_DIR]),
+    },
+    { network: access.network, writePaths: access.writePaths.flatMap((path) => writeMountPoint(path) ?? []) },
   );
   return ["bwrap", ...args, "/bin/bash", "-c", command].map(shSingleQuote).join(" ");
 };
@@ -341,13 +322,12 @@ const sandboxedCommand = (
   zones: ForbiddenZones,
   access: GateAccess,
   command: string,
-  masked: readonly string[],
 ): string => {
   switch (kind) {
     case "seatbelt":
       return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones))} /bin/bash -c ${shSingleQuote(command)}`;
     case "bwrap":
-      return bwrapCommand(workDir, zones, access, command, masked);
+      return bwrapCommand(workDir, zones, access, command);
     case "none":
       return command;
     default: {
@@ -363,38 +343,29 @@ const spawnHook =
     workDir: string,
     zones: ForbiddenZones,
     tmpDir: string,
-    permit: BashPermit,
-    cloud: CloudBox | null,
+    permit: GateAccess,
     containment: Containment,
   ): BashSpawnHook =>
   (ctx: BashSpawnContext) => {
     const closed = containment.level === "closed" ? containment : null;
-    const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, permit.access, ctx.command);
-    // 按授权自动放行的装包没人点批准，但和批准的装包一样要落到工具箱的 pip。
-    const toolbox =
-      closed !== null && (permit.approval === "approved" || permit.access.writePaths.includes(closed.toolboxDir));
-    if (toolbox) writeToolboxShims(closed);
-    const searchPath = closed === null ? null : toolbox ? toolboxSearchPath(closed) : closed.searchPath;
+    const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, permit, ctx.command);
+    if (closed !== null) writeToolboxShims(closed);
+    const searchPath = closed === null ? null : toolboxSearchPath(closed);
     return {
-      command: sandboxedCommand(kind, workDir, zones, permit.access, command, cloud?.masked ?? []),
+      command: sandboxedCommand(kind, workDir, zones, permit, command),
       cwd: workDir,
       env: whitelistEnv(ctx.env, workDir, tmpDir, searchPath === null ? null : { searchPath }),
     };
   };
 
-interface BashPermit {
-  readonly access: GateAccess;
-  readonly approval: BashApproval;
-}
-
-const AUTOMATIC: BashPermit = { access: { network: false, writePaths: [] }, approval: "automatic" };
+const AUTOMATIC: GateAccess = { network: false, writePaths: [] };
 
 export interface BashSandbox {
   readonly sandbox: SandboxKind;
-  /** 闸门要的 containment 从这里拿，证明器用的 PATH 就是自动放行的命令真正跑的 PATH。 */
+  /** 闸门要的 containment 从这里拿，批 pip 时放开写的工具箱就是这里的 toolboxDir。 */
   readonly containment: Containment;
   readonly tool: ReturnType<typeof createBashToolDefinition>;
-  allow(runId: string, callId: string, access: GateAccess, approval: BashApproval): void;
+  allow(runId: string, callId: string, access: GateAccess): void;
   clearRun(runId: string): void;
 }
 
@@ -412,7 +383,7 @@ export function createSandboxedBash(
       ? { level: "none" }
       : { level: "closed", searchPath: process.env["PATH"] ?? "", toolboxDir: cloud.toolboxDir };
   if (containment.level === "closed") writeToolboxShims(containment);
-  const permitsByRun = new Map<string, Map<string, BashPermit>>();
+  const permitsByRun = new Map<string, Map<string, GateAccess>>();
   const base = createBashToolDefinition(workDir);
   const tool = {
     ...base,
@@ -425,7 +396,7 @@ export function createSandboxedBash(
       permits?.delete(callId);
       if (runId !== null && permits?.size === 0) permitsByRun.delete(runId);
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, permit, cloud, containment),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, permit, containment),
       });
       return scoped.execute(...args);
     },
@@ -434,14 +405,14 @@ export function createSandboxedBash(
     sandbox: kind,
     containment,
     tool,
-    allow: (runId, callId, access, approval) => {
-      if (approval === "automatic" && !access.network && access.writePaths.length === 0) {
+    allow: (runId, callId, access) => {
+      if (!access.network && access.writePaths.length === 0) {
         permitsByRun.get(runId)?.delete(callId);
         if (permitsByRun.get(runId)?.size === 0) permitsByRun.delete(runId);
         return;
       }
-      const permits = permitsByRun.get(runId) ?? new Map<string, BashPermit>();
-      permits.set(callId, { access, approval });
+      const permits = permitsByRun.get(runId) ?? new Map<string, GateAccess>();
+      permits.set(callId, access);
       permitsByRun.set(runId, permits);
     },
     clearRun: (runId) => {

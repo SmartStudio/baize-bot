@@ -1,18 +1,9 @@
-import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
 import type { ComputerKind } from "@baize/shared";
-import { checkCommand } from "./contained-commands.js";
-import { Prover } from "./contained-prover.js";
-import { type Chain, lex, type Segment, unproven } from "./contained-lex.js";
 import type { SandboxKind } from "./gate.js";
-import { realpathExisting } from "./paths.js";
 
 export type ContainmentLevel = "none" | "closed";
 
-/**
- * closed 时带着沙箱 bash 真正用的 PATH 和这个 Bot 的工具箱。两样都由 createSandboxedBash 给出，闸门和证明器
- * 从同一个对象拿：证明器按这个 PATH 解析命令名，批 pip 时写路径就是这个工具箱。
- */
+/** closed 时带着沙箱 bash 的系统 PATH 和这个 Bot 的工具箱。两样都由 createSandboxedBash 给出，批 pip 时写路径就是这个工具箱。 */
 export type Containment =
   { readonly level: "none" } | { readonly level: "closed"; readonly searchPath: string; readonly toolboxDir: string };
 
@@ -36,108 +27,114 @@ export const SYSTEM_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
 export const SYSTEM_PACKAGE_REASON =
   "云电脑的沙箱里没有 root，装不了系统包。Python 包用 pip 装进你的工具箱，Node 包用 npm 装进工作区；要系统包请主人改 deploy/remote/Dockerfile。";
 
-export interface ContainedContext {
-  readonly workDir: string;
-  readonly sharedDir: string;
-  /** 闸门的禁区。助理 Chrome 的 profile 可以配在工作区里面，沙箱会盖住它，但判定本身也不该对它说放行。 */
-  readonly forbidden: readonly string[];
-  /** 沙箱 bash 的 PATH。表里的命令按名字认，名字落到哪个文件由它定，工具箱里一个同名的入口脚本就能顶掉系统的。 */
-  readonly searchPath: string;
-}
+const DELETE_OR_MOVE: ReadonlySet<string> = new Set([
+  "rm",
+  "rmdir",
+  "unlink",
+  "shred",
+  "mv",
+  "truncate",
+  "dd",
+  "rename",
+  "mmv",
+  "trash",
+  "trash-put",
+  "gio",
+  "srm",
+  "wipe",
+  "xz",
+  "bzip2",
+  "gzip",
+  "unxz",
+  "bunzip2",
+  "gunzip",
+  "pigz",
+  "unpigz",
+  "lzma",
+  "unlzma",
+  "rimraf",
+]);
 
-export interface ContainedVerdict {
-  readonly contained: boolean;
-  /** 不证明时的首因，给测试和日志看，不进给用户的文案。 */
-  readonly why: string;
-}
+const DELETING_OPTIONS: ReadonlySet<string> = new Set([
+  "--remove-files",
+  "--remove-source-files",
+  "--remove-destination",
+  "-sdel",
+]);
 
-const PROBE_FLAGS: ReadonlySet<string> = new Set(["--version", "-V", "--help"]);
-// 这几个不靠参数也认得出是删或移，连 --help 都不放，免得「删除照样问」出现例外。
-const NEVER_PROBED: ReadonlySet<string> = new Set(["rm", "rmdir", "unlink", "shred", "mv", "ln"]);
-const SYSTEM_BIN_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/usr/local/bin"] as const;
+const deletingOption = (word: string): boolean =>
+  word === "-delete" || word === "--del" || word.startsWith("--delete") || DELETING_OPTIONS.has(word);
 
-const realOrNull = (path: string): string | null => {
-  try {
-    return realpathSync.native(path);
-  } catch {
-    return null;
-  }
-};
+const removesSource = (args: readonly string[]): boolean => args.includes("--rm");
+const sevenZipDeletes = (args: readonly string[]): boolean => args[0] === "d";
 
-const executable = (path: string): boolean => {
-  try {
-    if (!statSync(path).isFile()) return false;
-    accessSync(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-};
+// 归档工具删源文件、删成员的写法是短选项或子命令，同样的字母在别的命令里意思各不相同（git commit -m、python -m），
+// 只在这些名字后面认。zip 的短选项串里出现 m（移进归档）或 d（删成员）就算，-9m 这类带压缩级别的也认。
+const ARCHIVE_DELETES: ReadonlyMap<string, (args: readonly string[]) => boolean> = new Map([
+  ["zip", (args) => args.some((word) => word === "--move" || /^-[A-Za-z0-9]*[md]/.test(word))],
+  ["7z", sevenZipDeletes],
+  ["7za", sevenZipDeletes],
+  ["7zr", sevenZipDeletes],
+  ["ar", (args) => /^-?[a-z]*d/.test(args[0] ?? "")],
+  ["zstd", removesSource],
+  ["lz4", removesSource],
+]);
 
-/**
- * 按 bash 找命令的顺序，`searchPath` 里第一个有这个可执行文件的目录里的那个文件，realpath 之后必须在系统目录里。
- * 工作区或工具箱里的同名程序跑什么都有可能。
- */
-export const resolvesToSystemBinary = (name: string, searchPath: string): boolean => {
-  const entries = searchPath.split(":");
-  // 空项和相对项跟着 cwd 走，cwd 是工作区。
-  if (entries.some((entry) => !isAbsolute(entry))) return false;
-  const system = new Set(SYSTEM_BIN_DIRS.flatMap((dir) => realOrNull(dir) ?? []));
-  const found = entries.find((entry) => executable(join(entry, name)));
-  if (found === undefined) return false;
-  const real = realOrNull(join(found, name));
-  return real !== null && system.has(dirname(real));
-};
+const archiveDeletes = (names: readonly string[], words: readonly string[]): boolean =>
+  names.some((name, at) => ARCHIVE_DELETES.get(name)?.(words.slice(at + 1)) ?? false);
 
-const COMMAND_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
+const GIT_KEEPS_CHANGES: ReadonlySet<string> = new Set([
+  "status",
+  "log",
+  "diff",
+  "show",
+  "add",
+  "commit",
+  "fetch",
+  "branch",
+  "rev-parse",
+  "ls-files",
+  "blame",
+  "grep",
+]);
 
-function checkSegment(segment: Segment, prover: Prover, searchPath: string): { readonly makesLinks: boolean } {
-  const [name = "", ...args] = segment.words;
-  if (!COMMAND_NAME.test(name)) unproven(`命令名 ${name} 不是裸词`);
-  if (!resolvesToSystemBinary(name, searchPath)) unproven(`${name} 不是系统目录里的程序`);
-  if (args.length === 1 && PROBE_FLAGS.has(args[0] ?? "")) {
-    if (NEVER_PROBED.has(name)) unproven(`${name} 连查版本也问`);
-    return { makesLinks: false };
-  }
-  return checkCommand(name, args, prover);
-}
+const GIT_BRANCH_REWRITES = /^(-[A-Za-z]*[dDmMf][A-Za-z]*|--delete|--move|--force)$/;
+const GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
 
-function proveChain(chain: Chain, prover: Prover, searchPath: string): void {
-  let atHead = true;
-  chain.segments.forEach((segment, index) => {
-    for (const redirect of segment.redirects) {
-      if (redirect.target !== "/dev/null") prover.path(redirect.target);
-    }
-    const [name, ...args] = segment.words;
-    if (name === "cd") {
-      // 只有链头的 cd 后面接 && 才确定后面的段在新目录里跑：cd 失败时 && 不往下走，|| ; | 都会在原目录接着跑。
-      if (!atHead) unproven("cd 只许在 && 链的开头");
-      const after = chain.separators[index];
-      if (after !== undefined && after !== "&&") unproven("cd 后面只能接 &&");
-      const target = args[0];
-      if (args.length !== 1 || target === undefined || target.startsWith("-")) unproven("cd 只认一个目录");
-      prover.path(target ?? "");
-      prover.cwd = realpathExisting(prover.resolve(target ?? ""));
-      return;
-    }
-    atHead = false;
-    const { makesLinks } = checkSegment(segment, prover, searchPath);
-    if (makesLinks && index !== chain.segments.length - 1) unproven(`${name ?? ""} 会建链接，只许放在最后一段`);
+// 引号里的空格、括号、$(...) 留在同一个词里，路径写成 'repo(1)' 或 "$(pwd)" 也切不开 git 和它的子命令。没配对的引号吃到行尾。
+const SHELL_TOKEN = /[;&|\n\r]+|(?:'[^']*(?:'|$)|"(?:[^"\\]|\\.)*(?:"|$)|[^\s'";&|])+/g;
+const SEPARATOR = /^[;&|\n\r]/;
+const bare = (word: string): string => word.replace(/['"\\]/g, "").replace(/^[$(`{]+|[)`}]+$/g, "");
+
+/** 反着判：只认几个不丢改动的子命令，其余一律问。 */
+const gitDiscards = (text: string): boolean => {
+  const tokens = text.match(SHELL_TOKEN) ?? [];
+  return tokens.some((token, index) => {
+    const name = bare(token);
+    if (name.slice(name.lastIndexOf("/") + 1) !== "git") return false;
+    const end = tokens.findIndex((word, at) => at > index && SEPARATOR.test(word));
+    const args = tokens.slice(index + 1, end === -1 ? undefined : end);
+    let at = 0;
+    while ((args[at] ?? "").startsWith("-")) at += GIT_OPTIONS_WITH_VALUE.has(args[at] ?? "") ? 2 : 1;
+    if (at >= args.length) return false;
+    const sub = bare(args[at] ?? "");
+    if (!GIT_KEEPS_CHANGES.has(sub)) return true;
+    return sub === "branch" && args.slice(at + 1).some((word) => GIT_BRANCH_REWRITES.test(word));
   });
-}
+};
 
 /**
- * 只在 decideResolved 已经给出 ask、来源是 bash、level 是 closed 时调。
- * 比分类器更保守：表里没有的命令、选项、写法一律 contained:false。
+ * 沙箱兜住了联网和写工作区外，兜不住的只剩在工作区和共享区里删、移。这里不解析结构：先像 bash 那样合并反斜杠续行，
+ * 再去掉引号和反斜杠按分隔符切词，$(...)、反引号、循环体、xargs、find -exec、sh -c '...' 里的词都扫得到。
+ * 只扫闸门本来就要问的命令，扫到了就照问，宁多问。
  */
-export function provablyContained(command: string, ctx: ContainedContext): ContainedVerdict {
-  try {
-    if (command.trim() === "") unproven("空命令");
-    const prover = new Prover(ctx);
-    proveChain(lex(command), prover, ctx.searchPath);
-    return { contained: true, why: "" };
-  } catch (error) {
-    // 路径解不出来（成环的链接）或 fs 报错也只是证明不了，照原来的判定问，不往外抛。
-    return { contained: false, why: error instanceof Error ? error.message : String(error) };
-  }
+export function looksLikeDeleteOrMove(command: string): boolean {
+  const joined = command.replace(/\\\r?\n/g, "");
+  const flat = joined.replace(/['"\\]/g, "");
+  if (gitDiscards(joined) || gitDiscards(flat)) return true;
+  return flat.split(/[;&|()`{}\n\r]+/).some((segment) => {
+    const words = segment.split(/[\s<>=$,]+/).filter((word) => word !== "");
+    const names = words.map((word) => word.slice(word.lastIndexOf("/") + 1));
+    return names.some((name) => DELETE_OR_MOVE.has(name)) || words.some(deletingOption) || archiveDeletes(names, words);
+  });
 }

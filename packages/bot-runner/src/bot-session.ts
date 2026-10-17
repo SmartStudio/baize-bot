@@ -29,7 +29,6 @@ import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } fro
 import type { BotDirs } from "./paths.js";
 import { injectSections, type SystemSections } from "./memory.js";
 import { expandRecalls, type Recalls } from "./recall.js";
-import type { BashApproval } from "./sandbox.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 import { installWorkFlush, type WorkFlush } from "./work-mirror.js";
@@ -74,7 +73,7 @@ export interface BotSessionOptions extends SessionGate {
   readonly gateway: Gateway;
   readonly bashTool: ReturnType<typeof createBashToolDefinition>;
   readonly tools: readonly RunnerTool[];
-  readonly allowBash: (runId: string, callId: string, access: GateAccess, approval: BashApproval) => void;
+  readonly allowBash: (runId: string, callId: string, access: GateAccess) => void;
   readonly clearBashRun: (runId: string) => void;
   /** 每次模型请求前读。记忆和电脑各一段放进系统提示，不进会话历史；null 的那段不加。 */
   readonly sections: () => SystemSections;
@@ -164,7 +163,7 @@ const approvalKey = (
 function gateToolCalls(
   pi: ExtensionAPI,
   gate: SessionGate,
-  allowed: (runId: string, callId: string, toolName: string, decision: GateDecision, approval: BashApproval) => void,
+  allowed: (runId: string, callId: string, toolName: string, decision: GateDecision) => void,
 ): void {
   // 模型一条回复里发出的那批工具调用有几个，换电脑必须是这批里唯一的一个。按个数数不按 id：上游不给 id 时 Pi 记成空串。
   let batchSize = 0;
@@ -198,8 +197,6 @@ function gateToolCalls(
         gate.approvals.block(active.run.runId, event.toolCallId);
         return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
       }
-      // 批了之后重判，带授权范围的批准会让重判变成 allow，所以批没批单独记。
-      const approval: BashApproval = decision.verdict === "ask" ? "approved" : "automatic";
       if (decision.verdict === "ask") {
         await gate.flushWork?.("before_approval");
         const view = approvalViewWithNote(gate, event, decision);
@@ -256,7 +253,7 @@ function gateToolCalls(
         gate.approvals.block(active.run.runId, event.toolCallId);
         return { block: true, reason: blocked };
       }
-      allowed(active.run.runId, event.toolCallId, event.toolName, decision, approval);
+      allowed(active.run.runId, event.toolCallId, event.toolName, decision);
       allowedCall = true;
       return undefined;
     } finally {
@@ -284,8 +281,8 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
     // context_with_system 在自动压缩之后、每次发请求之前跑，拿到的是带系统消息的整份副本（extensions/runner.js emitContext）。
     pi.on("context_with_system", (event) => ({ messages: injectSections(event.messages, options.sections()) }));
 
-    gateToolCalls(pi, options, (runId, callId, toolName, decision, approval) => {
-      if (toolName === "bash") options.allowBash(runId, callId, decision.access, approval);
+    gateToolCalls(pi, options, (runId, callId, toolName, decision) => {
+      if (toolName === "bash") options.allowBash(runId, callId, decision.access);
     });
   };
 }

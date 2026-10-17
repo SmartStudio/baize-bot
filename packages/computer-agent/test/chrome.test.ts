@@ -636,15 +636,10 @@ describe.runIf(realChrome)("助理 Chrome 的单例 socket", () => {
         forbiddenZones(botDirs(directory, BotId.parse("bot-1")), chrome.profileDir),
         () => "run-singleton",
       );
-      bash.allow(
-        "run-singleton",
-        "call-singleton",
-        {
-          network: true,
-          writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")],
-        },
-        "approved",
-      );
+      bash.allow("run-singleton", "call-singleton", {
+        network: true,
+        writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")],
+      });
       const socketDir = dirname(socket);
       const probe = [
         `ls -d /var/folders/*/*/T/com.google.Chrome.* /tmp/org.chromium.Chromium.* 2>/dev/null`,
