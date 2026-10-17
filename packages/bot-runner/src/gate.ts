@@ -461,9 +461,12 @@ const parseShell = (command: string): ParsedShell | null => {
   return commands.length === 0 ? null : { commands, redirects };
 };
 
-const commandName = (raw: string): string => raw.slice(raw.lastIndexOf("/") + 1);
-const argumentsOf = (words: readonly string[]): readonly string[] =>
-  words.slice(1).filter((word) => !word.startsWith("-"));
+/** 命令的操作数：`--` 之前以 `-` 开头的是选项，`--` 之后的词一律是操作数。 */
+const argumentsOf = (words: readonly string[]): readonly string[] => {
+  const separator = words.indexOf("--", 1);
+  const options = separator === -1 ? words.slice(1) : words.slice(1, separator);
+  return [...options.filter((word) => !word.startsWith("-")), ...(separator === -1 ? [] : words.slice(separator + 1))];
+};
 
 const READ_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   ls: ["-a", "-A", "-l", "-h", "-1", "-R", "--all", "--almost-all", "--human-readable", "--long", "--recursive"],
@@ -535,14 +538,6 @@ const hasUnsafeOption = (name: string, words: readonly string[]): boolean => {
   return false;
 };
 
-// git 的长选项可以缩写成唯一前缀，`--ext` 就是 `--ext-diff`，所以按前缀比，带 `=值` 的也一样；`--` 和 `--n` 这种
-// 短到在 git 里本来就不唯一的不算，不然分隔符 `--` 也会被当成危险选项。
-const GIT_UNSAFE_OPTIONS = ["--config-env", "--exec-path", "--ext-diff", "--textconv", "--no-index", "--output"];
-const isUnsafeGitOption = (word: string): boolean => {
-  const bare = word.replace(/=.*/, "");
-  return bare === "-c" || (bare.length >= 4 && GIT_UNSAFE_OPTIONS.some((option) => option.startsWith(bare)));
-};
-
 const hasUnknownReadOption = (name: string, words: readonly string[]): boolean => {
   const known = new Set(READ_OPTIONS[name] ?? []);
   return words.some((word) => word.startsWith("-") && word !== "--" && !known.has(word));
@@ -553,23 +548,69 @@ const hasUnknownSafeOption = (name: string, words: readonly string[]): boolean =
   return words.some((word) => word.startsWith("-") && !known.has(word));
 };
 
+const MUTATION_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  mkdir: ["-p"],
+  touch: ["-a", "-c", "-m"],
+  mv: ["-f", "-i", "-n", "-v", "--force", "--interactive", "--no-clobber", "--verbose", "--"],
+};
+
 const hasUnknownMutationOption = (name: string, words: readonly string[]): boolean => {
-  const known = name === "mkdir" ? new Set(["-p"]) : name === "touch" ? new Set(["-a", "-c", "-m"]) : new Set<string>();
+  const known = new Set(MUTATION_OPTIONS[name] ?? []);
   return words.some((word) => word.startsWith("-") && !known.has(word));
 };
 
 const PREFIX_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
-// 前缀只放语言和时区：PAGER、GIT_DIR、LD_PRELOAD 这类能让一条读命令跑起别的程序或读别的仓库。
-const HARMLESS_PREFIX = /^(?:LANG|LC_[A-Z]+|TZ|NO_COLOR)=/;
+// 前缀只放语言和时区：PAGER、GIT_DIR、LD_PRELOAD 这类能让一条读命令跑起别的程序或读别的仓库。值也只认名字：
+// glibc 把带 / 的 LANG、LC_* 当成 locale 文件的路径去打开，TZ 的值拼在 /usr/share/zoneinfo 下或者本身就是路径；
+// 赋值词里的 ~ 照样被 bash 展开成家目录。时区名本身带 /（Asia/Shanghai），所以 TZ 按段认，每段只许名字字符。
+const TZ_NAME = /^:?[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)*$/;
+const LOCALE_NAME = /^[A-Za-z0-9_.@-]*$/;
+const harmlessPrefix = (word: string): boolean => {
+  const key = word.slice(0, word.indexOf("="));
+  const value = word.slice(key.length + 1);
+  if (key === "NO_COLOR") return true;
+  if (key === "TZ") return TZ_NAME.test(value);
+  return /^(?:LANG|LC_[A-Z]+)$/.test(key) && LOCALE_NAME.test(value);
+};
 
 const TOOLBOX_INSTALL_REASON = "联网安装到这个 Bot 自己的工具箱";
+const REQUIREMENTS_FILE_REASON = "requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源";
+const LOCAL_SOURCE_REASON = "装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码";
+const NODE_INSTALL_REASON = "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本";
 const PYTHON_INSTALLERS = new Set(["pip", "pip3"]);
 const NODE_INSTALLERS = new Set(["npm", "pnpm", "yarn"]);
 const NODE_INSTALL_VERBS = /^(add|install|ci|update|upgrade)$/;
+// pip 的短选项能合写（-qr req.txt、-rreq.txt），取值的那个字母之后都是值；长选项能写成不含歧义的前缀（--requirem、--cons）。
+const PIP_SHORT_WITH_VALUE = /^-[^-ceifrt]*([ceifrt])/;
+const pipShortOption = (arg: string): string | null => PIP_SHORT_WITH_VALUE.exec(arg)?.[1] ?? null;
+const pipFromFile = (arg: string): boolean =>
+  /^--(?:requirem|cons)/.test(arg) || pipShortOption(arg) === "r" || pipShortOption(arg) === "c";
+const pipLocalSource = (arg: string): boolean =>
+  arg.startsWith("--ed") ||
+  pipShortOption(arg) === "e" ||
+  /(?:^|@)\s*(?:(?:git|hg|svn|bzr)\+|file:)/i.test(arg) ||
+  /\.(?:whl|zip|egg|tar|tar\.(?:gz|bz2|xz|z)|tgz|tbz2?|txz)$/i.test(arg) ||
+  (!arg.startsWith("-") && !arg.includes("://") && /^[.~/]|\//.test(arg));
+// 下载源选项（-f/--find-links、-i/--index-url、--extra-index-url）的值不是网址，就是从本地目录里找包。
+const PIP_LONG_SOURCE = /^--(?:fi|ind|ext)[a-z-]*(?:=(.*))?$/;
+const pipSourceValue = (args: readonly string[], index: number): string | undefined => {
+  const arg = args[index] ?? "";
+  const long = PIP_LONG_SOURCE.exec(arg);
+  if (long !== null) return long[1] ?? args[index + 1];
+  const short = pipShortOption(arg);
+  if (short !== "f" && short !== "i") return undefined;
+  const attached = arg.slice(arg.indexOf(short) + 1);
+  return attached === "" ? args[index + 1] : attached;
+};
+const pipInstallsLocalCode = (args: readonly string[]): boolean =>
+  args.some((arg, index) => {
+    const source = pipSourceValue(args, index);
+    return pipLocalSource(arg) || (source !== undefined && (!source.includes("://") || /^file:/i.test(source)));
+  });
 
 /**
- * 云电脑上命令名先按沙箱的 PATH 落到文件：不在系统目录里的（工具箱里装出来的入口脚本、工作区里的同名程序）、
- * 带目录的，分类器都不按名字认，归 shell 去问。前置赋值在调用方已经只剩语言和时区，不改命令名落到哪个文件。
+ * 云电脑上命令名先按自动放行时的 PATH 落到文件：不在系统目录里的（工具箱里装出来的入口脚本、工作区里的同名程序）
+ * 分类器不按名字认，归 shell 去问。前置赋值在调用方已经只剩语言和时区，不改命令名落到哪个文件。
  * 装包排在这之前，因为 pip 装过一次就落在工具箱里了。
  * 返回 null 的按通用规则接着分。
  */
@@ -586,31 +627,35 @@ const classifyCloudCommand = (
       ? commandArgs.slice(2)
       : null;
   if (pipArgs !== null && pipArgs.includes("install")) {
+    // 文件里的选项排在环境变量和命令行之后生效，钉不住，只能写在卡上。
+    const reasons = [
+      TOOLBOX_INSTALL_REASON,
+      ...(pipArgs.some(pipFromFile) ? [REQUIREMENTS_FILE_REASON] : []),
+      ...(pipInstallsLocalCode(pipArgs) ? [LOCAL_SOURCE_REASON] : []),
+    ];
     return {
       ...plainAction("install", null, { network: true, writePaths: [containment.toolboxDir] }),
-      reason: TOOLBOX_INSTALL_REASON,
+      reason: reasons.join("。"),
     };
   }
   if (NODE_INSTALLERS.has(rawName) && commandArgs.some((arg) => NODE_INSTALL_VERBS.test(arg))) {
-    return plainAction("install", null, { network: true, writePaths: [] });
+    return { ...plainAction("install", null, { network: true, writePaths: [] }), reason: NODE_INSTALL_REASON };
   }
-  if (rawName.includes("/") || !resolvesToSystemBinary(rawName, containment.searchPath)) {
-    return plainAction("shell");
-  }
-  return null;
+  return resolvesToSystemBinary(rawName, containment.searchPath) ? null : plainAction("shell");
 };
 
 const classifyCommand = (words: readonly string[], call: GateCall): readonly ClassifiedAction[] => {
   let nameIndex = 0;
   while (nameIndex < words.length && PREFIX_ASSIGNMENT.test(words[nameIndex] ?? "")) nameIndex += 1;
-  const rawName = words[nameIndex];
-  if (rawName === undefined) return [plainAction("shell")];
-  if (!words.slice(0, nameIndex).every((word) => HARMLESS_PREFIX.test(word))) return [plainAction("shell")];
+  const name = words[nameIndex];
+  if (name === undefined) return [plainAction("shell")];
+  if (!words.slice(0, nameIndex).every(harmlessPrefix)) return [plainAction("shell")];
+  // 带目录的命令名跑的是那个文件，不是同名的系统程序，不按去掉目录的名字认。
+  if (name.includes("/")) return [plainAction("shell")];
   if (call.containment.level === "closed") {
     const cloud = classifyCloudCommand(words, nameIndex, call.containment);
     if (cloud !== null) return [cloud];
   }
-  const name = commandName(rawName);
   const args = argumentsOf(words.slice(nameIndex));
   const read = (word: string): ClassifiedAction => readPath(shellPath(word, call), call);
   const write = (word: string): ClassifiedAction => writePath(shellPath(word, call), call);
@@ -648,7 +693,9 @@ const classifyCommand = (words: readonly string[], call: GateCall): readonly Cla
     return (args.length === 0 ? ["."] : args).map(remove);
   }
   if (name === "mv") {
-    return args.length === 0 ? [plainAction("shell")] : [...args.slice(0, -1).map(remove), write(args.at(-1) ?? ".")];
+    // -t、-T 和它们的长写法（getopt 还认 --target 这样的缩写）改变哪个词是目标，分类器只认「最后一个是目标」这一种。
+    if (hasUnknownMutationOption(name, commandArgs) || args.length < 2) return [plainAction("shell")];
+    return [...args.slice(0, -1).map(remove), write(args.at(-1) ?? ".")];
   }
   if (name === "cp") {
     if (commandArgs.some((word) => word.startsWith("-"))) return [plainAction("shell")];
@@ -677,23 +724,13 @@ const classifyCommand = (words: readonly string[], call: GateCall): readonly Cla
   }
   if (READ_COMMANDS.has(name)) {
     if (hasUnsafeOption(name, commandArgs) || hasUnknownReadOption(name, commandArgs)) return [plainAction("shell")];
-    // 每个词都做 realpath，以 - 开头的也不例外：`--` 之后它们就是操作数，和选项分不开。grep 的模式、head 的行数
+    // 每个词都做 realpath，选项也不例外：`--` 之后它们就是操作数，和选项分不开。grep 的模式、head 的行数
     // 这类不是文件的词解到工作区里不存在的名字上，照旧放行，只有恰好和一条指向外面的链接同名时才会多问。
-    const operands = [...args, ...commandArgs.filter((word) => word.startsWith("-"))];
-    return operands.length === 0 ? [plainAction("read")] : operands.map(read);
+    return commandArgs.length === 0 ? [plainAction("read")] : commandArgs.map(read);
   }
-  if (name === "git") {
-    const [subcommand, ...rest] = commandArgs;
-    // 子命令之前的全局选项能换仓库、换 exec 目录、强开分页器，一律归 shell。
-    if (subcommand === undefined || subcommand.startsWith("-")) return [plainAction("shell")];
-    if (hasUnsafeOption(name, rest) || rest.some(isUnsafeGitOption)) return [plainAction("shell")];
-    if (["status", "diff", "log", "show"].includes(subcommand)) {
-      // 不在仓库里或路径在仓库外时 diff 自动变成 --no-index，所以除了分隔符 `--`，每个词都当路径查一遍。
-      const operands = rest.filter((word) => word !== "--");
-      return operands.length === 0 ? [plainAction("read")] : operands.map(read);
-    }
-    if (subcommand === "push") return [plainAction("publish")];
-  }
+  // git 的 status、diff、log、show 也归 shell：工作区里的 .git/config（core.fsmonitor、diff.external、textconv、
+  // objects/info/alternates）能让它们跑程序、读别的仓库，配置面太大，不逐种中和。
+  if (name === "git" && commandArgs[0] === "push") return [plainAction("publish")];
   return [plainAction("shell")];
 };
 
@@ -1078,7 +1115,7 @@ function systemPackageDenial(call: GateCall): GateDecision | null {
   if (parsed === null) return null;
   const hit = parsed.commands.some((words) => {
     const name = words.find((word) => !PREFIX_ASSIGNMENT.test(word));
-    return name !== undefined && SYSTEM_PACKAGE_MANAGERS.has(commandName(name));
+    return name !== undefined && SYSTEM_PACKAGE_MANAGERS.has(name.slice(name.lastIndexOf("/") + 1));
   });
   return hit
     ? { verdict: "deny", action: "install", target: null, reason: SYSTEM_PACKAGE_REASON, access: NO_ACCESS }
@@ -1144,22 +1181,69 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
       ? { item, verdict: verdictForItem(item, call, grants, accounts), reason: null }
       : { item, verdict: "deny" as const, reason: readOnlyReason(bar) };
   });
+  const access = mergeAccess(items);
   const denied = evaluated.find((entry) => entry.verdict === "deny");
-  const asked = evaluated.find((entry) => entry.verdict === "ask");
-  const selected = denied ?? asked ?? evaluated[0];
-  if (selected === undefined) {
-    return { verdict: "ask", action: "shell", target: null, reason: null, access: NO_ACCESS };
+  if (denied !== undefined) {
+    return {
+      verdict: "deny",
+      action: denied.item.action,
+      target: denied.item.target,
+      reason:
+        denied.reason ??
+        denied.item.reason ??
+        (denied.item.path === null
+          ? null
+          : ZONE_REASONS[zoneHit(denied.item.action, denied.item.path, call) ?? "hidden"]),
+      access,
+    };
   }
+  const asked = evaluated.filter((entry) => entry.verdict === "ask");
+  if (asked.length === 0) {
+    const first = items[0];
+    return first === undefined
+      ? { verdict: "ask", action: "shell", target: null, reason: null, access: NO_ACCESS }
+      : { verdict: "allow", action: first.action, target: first.target, reason: null, access };
+  }
+  const selected = asked.reduce((worst, entry) =>
+    ACTION_SEVERITY[entry.item.action] < ACTION_SEVERITY[worst.item.action] ? entry : worst,
+  ).item;
   return {
-    verdict: selected.verdict,
-    action: selected.item.action,
-    target: selected.item.target,
-    reason:
-      selected.reason ??
-      selected.item.reason ??
-      (selected.verdict === "deny" && selected.item.path !== null
-        ? ZONE_REASONS[zoneHit(selected.item.action, selected.item.path, call) ?? "hidden"]
-        : null),
-    access: mergeAccess(items),
+    verdict: "ask",
+    action: selected.action,
+    target: selected.target,
+    reason: approvalNote(
+      asked.map((entry) => entry.item.reason),
+      access,
+    ),
+    access,
   };
 }
+
+/**
+ * 审批卡标题取要问的段里数最小的动作。先是批了也不许记住的三种，钱、账号和删掉的数据都收不回来；再是出了这台电脑、
+ * 别人看得见的；然后是认不出的命令，它在批下来的权限里什么都能做；最后是写外面、装包、读外面，写工作区排最后。
+ */
+const ACTION_SEVERITY: Record<ActionKind, number> = {
+  spend: 0,
+  account_security: 1,
+  delete: 2,
+  publish: 3,
+  message_person: 4,
+  external_write: 5,
+  engage: 6,
+  shell: 7,
+  write_outside: 8,
+  install: 9,
+  read: 10,
+  write_workspace: 11,
+};
+
+// 卡上的 note：各段的说明按句去重拼起来，再写批准后沙箱真会多开的口子。读不在里面：沙箱本来就看得见禁区以外的东西。
+const approvalNote = (reasons: readonly (string | undefined)[], access: GateAccess): string | null => {
+  const opened = [...(access.network ? ["联网"] : []), ...access.writePaths.map((path) => `写 ${path}`)];
+  const sentences = [
+    ...new Set(reasons.flatMap((reason) => reason?.split("。") ?? [])),
+    ...(opened.length === 0 ? [] : [`批准后放开：${opened.join("、")}`]),
+  ];
+  return sentences.length === 0 ? null : sentences.join("。");
+};

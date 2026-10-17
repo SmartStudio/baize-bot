@@ -127,6 +127,6 @@ compose 里有两张网。`data` 挂 postgres、migrate 和控制面，`edge` �
 ## 数据
 
 - `pgdata` 卷是 Postgres 的数据。
-- `bots` 卷挂在远程电脑的 `/home/node/.baize/bots`，每个 Bot 一个目录，Pi 的会话和 skill 都在里面。助理 Chrome 的 profile 也在这个目录下。批准 `pip install` 后装的 Python 包在 `<bot>/toolbox/venv`，批准 `npm install` 后的下载缓存在 `<bot>/work/.cache`，都在这个卷里。
+- `bots` 卷挂在远程电脑的 `/home/node/.baize/bots`，每个 Bot 一个目录，Pi 的会话和 skill 都在里面。助理 Chrome 的 profile 也在这个目录下。批准 `pip install` 后装的 Python 包在 `<bot>/toolbox/venv`，在这个卷里。装包的下载缓存（pip、npm、pnpm store、yarn）指到沙箱每次新挂的 `/tmp/cache` 下，批准写 `/tmp` 的命令也碰不到它，不落在这个卷里、不跨命令留存，所以装包每次都重新下载，没批准的命令改不了下一次批准装包会信任的缓存。批准的命令里 `python`、`python3`、`pip`、`pip3` 经 `<bot>/toolbox-bin` 落到这个 venv，别的命令名照旧是系统的。批准的装包不认工作区 `.npmrc`、`.yarnrc` 里的 `registry`：运行器环境里设了 `npm_config_registry` 就用它（要走 npmmirror 这类镜像就在远程电脑容器的环境里设），没设就是 `https://registry.npmjs.org/`。镜像里没有 pnpm（远程电脑这一阶段不跑 `corepack enable`），有 npm 和 yarn 1。
 
 `docker compose down` 保留卷，`down -v` 连卷一起删，删了就没了。

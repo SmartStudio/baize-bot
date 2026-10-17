@@ -22,7 +22,7 @@ export interface BotDirs {
   readonly draftsDir: string;
   /** 所有 Bot 共用的产出目录。 */
   readonly sharedDir: string;
-  /** 云电脑上这个 Bot 自己装的 Python 包：`venv/` 在它下面，沙箱 bash 的 PATH 把 `venv/bin` 放最前。平时只读，批了 pip 才可写。 */
+  /** 云电脑上这个 Bot 自己装的 Python 包：`venv/` 在它下面，批准的 bash 里 python、python3、pip、pip3 经旁边的 `toolbox-bin/` 落到它，`venv/bin` 排在系统目录后面。平时只读，批了 pip 才可写。 */
   readonly toolboxDir: string;
 }
 

@@ -28,6 +28,7 @@ import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } fro
 import type { BotDirs } from "./paths.js";
 import { injectSections, type SystemSections } from "./memory.js";
 import { expandRecalls, type Recalls } from "./recall.js";
+import type { BashApproval } from "./sandbox.js";
 import { PROPOSE_SKILL_RULE } from "./skills.js";
 import type { ActiveRun } from "./topic.js";
 import { installWorkFlush, type WorkFlush } from "./work-mirror.js";
@@ -72,7 +73,7 @@ export interface BotSessionOptions extends SessionGate {
   readonly gateway: Gateway;
   readonly bashTool: ReturnType<typeof createBashToolDefinition>;
   readonly tools: readonly RunnerTool[];
-  readonly allowBash: (runId: string, callId: string, access: GateAccess) => void;
+  readonly allowBash: (runId: string, callId: string, access: GateAccess, approval: BashApproval) => void;
   readonly clearBashRun: (runId: string) => void;
   /** 每次模型请求前读。记忆和电脑各一段放进系统提示，不进会话历史；null 的那段不加。 */
   readonly sections: () => SystemSections;
@@ -142,11 +143,27 @@ const approvalViewWithNote = (
   return view.kind === "bash" && decision.reason !== null ? { ...view, note: decision.reason } : view;
 };
 
+/**
+ * 批准前后比这个，看批的还是不是这一步。不带 note：批准途中下发的范围授权让重判变成 allow，note 没了，批的仍是这一步。
+ * 带 access：target 只是最严的那段，别的段写到哪只在 access 里，软链被换了要靠它看出来。授权只改 verdict，不改 access。
+ */
+const approvalKey = (
+  gate: SessionGate,
+  event: { readonly toolName: string; readonly input: Record<string, unknown> },
+  decision: GateDecision,
+): string =>
+  JSON.stringify({
+    action: decision.action,
+    target: decision.target,
+    access: decision.access,
+    view: gate.approvalView(event.toolName, event.input),
+  });
+
 /** 每次工具调用先过统一闸门：拒的直接拦，要问的送审批，暂停时等恢复。放行后回 decision，bash 要靠它开沙箱。 */
 function gateToolCalls(
   pi: ExtensionAPI,
   gate: SessionGate,
-  allowed: (runId: string, callId: string, toolName: string, decision: GateDecision) => void,
+  allowed: (runId: string, callId: string, toolName: string, decision: GateDecision, approval: BashApproval) => void,
 ): void {
   pi.on("tool_call", async (event, ctx) => {
     const active = gate.activeRun();
@@ -170,10 +187,12 @@ function gateToolCalls(
         gate.approvals.block(active.run.runId, event.toolCallId);
         return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
       }
+      // 批了之后重判，带授权范围的批准会让重判变成 allow，所以批没批单独记。
+      const approval: BashApproval = decision.verdict === "ask" ? "approved" : "automatic";
       if (decision.verdict === "ask") {
         await gate.flushWork?.("before_approval");
         const view = approvalViewWithNote(gate, event, decision);
-        const approvedView = JSON.stringify({ action: decision.action, target: decision.target, view });
+        const approvedKey = approvalKey(gate, event, decision);
         gate.browserCalls?.release(event.toolCallId);
         const outcome = await gate.approvals.ask(
           {
@@ -212,12 +231,7 @@ function gateToolCalls(
           gate.approvals.block(active.run.runId, event.toolCallId);
           return { block: true, reason: decision.reason ?? "这个动作被统一闸门拒绝。" };
         }
-        const currentView = JSON.stringify({
-          action: decision.action,
-          target: decision.target,
-          view: approvalViewWithNote(gate, event, decision),
-        });
-        if (currentView !== approvedView) {
+        if (approvalKey(gate, event, decision) !== approvedKey) {
           gate.approvals.block(active.run.runId, event.toolCallId);
           return { block: true, reason: "页面已经变了，刚才的批准不适用，请重新操作" };
         }
@@ -231,7 +245,7 @@ function gateToolCalls(
         gate.approvals.block(active.run.runId, event.toolCallId);
         return { block: true, reason: blocked };
       }
-      allowed(active.run.runId, event.toolCallId, event.toolName, decision);
+      allowed(active.run.runId, event.toolCallId, event.toolName, decision, approval);
       allowedCall = true;
       return undefined;
     } finally {
@@ -259,8 +273,8 @@ function botExtension(options: BotSessionOptions): (pi: ExtensionAPI) => void {
     // context_with_system 在自动压缩之后、每次发请求之前跑，拿到的是带系统消息的整份副本（extensions/runner.js emitContext）。
     pi.on("context_with_system", (event) => ({ messages: injectSections(event.messages, options.sections()) }));
 
-    gateToolCalls(pi, options, (runId, callId, toolName, decision) => {
-      if (toolName === "bash") options.allowBash(runId, callId, decision.access);
+    gateToolCalls(pi, options, (runId, callId, toolName, decision, approval) => {
+      if (toolName === "bash") options.allowBash(runId, callId, decision.access, approval);
     });
   };
 }

@@ -192,3 +192,16 @@ describe("provablyContained", () => {
     });
   });
 });
+
+describe("git 的读子命令不进证明器", () => {
+  it.each([
+    "git status",
+    "git diff",
+    "git log --oneline -5",
+    "git show HEAD",
+    "git -C sub status",
+    "git log -p -- a.txt",
+  ])("%s 不认：工作区里的 git 配置能让它跑程序、读别的仓库", (command) => {
+    expect(contained(command)).toBe(false);
+  });
+});

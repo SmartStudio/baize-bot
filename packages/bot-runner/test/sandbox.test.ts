@@ -1,10 +1,14 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -27,6 +31,7 @@ import {
   sandboxKind,
   sandboxProfile,
   toolboxCommand,
+  toolboxSearchPath,
   whitelistEnv,
 } from "../src/sandbox.js";
 
@@ -60,6 +65,9 @@ const until = async (ready: () => boolean, label: string): Promise<void> => {
 const shellQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
 type BashOutcome = Awaited<ReturnType<ReturnType<typeof createSandboxedBash>["tool"]["execute"]>>;
+
+const outputText = (result: BashOutcome): string =>
+  result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 
 // Pi 1.0 起 bash 非零退出不再抛异常，改成 resolve 一个 isError 的结果；沙箱拦住了就是这个结果，泄露断言也要落在它的文本上。
 const blocked = async (pending: Promise<BashOutcome>, label: string): Promise<string> => {
@@ -375,7 +383,7 @@ describe("bash 沙箱性能", () => {
           forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), profileDir),
           () => "run-sock",
         );
-        sandbox.allow("run-sock", "call-sock", { network: true, writePaths: [join(outside, "new", "x")] });
+        sandbox.allow("run-sock", "call-sock", { network: true, writePaths: [join(outside, "new", "x")] }, "approved");
         const result = await sandbox.tool.execute(
           "call-sock",
           { command: unixSocketProbe(socketDir) },
@@ -408,7 +416,7 @@ describe("bash 沙箱性能", () => {
         const sandbox = createSandboxedBash(workDir, zones, () => runId);
         for (const callId of ["networked", "plain"]) {
           runId = `run-host-sock-${callId}`;
-          if (callId === "networked") sandbox.allow(runId, callId, { network: true, writePaths: [] });
+          if (callId === "networked") sandbox.allow(runId, callId, { network: true, writePaths: [] }, "approved");
           const result = await sandbox.tool.execute(
             callId,
             { command: unixSocketProbe(outside, "docker.sock") },
@@ -439,7 +447,7 @@ describe("bash 沙箱性能", () => {
       const node = shellQuote(process.execPath);
       const connectScript = `const s=require("node:net").connect(process.argv[1]);s.on("connect",()=>{process.stdout.write("CONNECTED\\n");s.destroy()});s.on("error",(e)=>process.stdout.write("REFUSED "+e.code+"\\n"))`;
       const sandbox = createSandboxedBash(workDir, zones, () => "run-var-run");
-      sandbox.allow("run-var-run", "call-var-run", { network: true, writePaths: [] });
+      sandbox.allow("run-var-run", "call-var-run", { network: true, writePaths: [] }, "approved");
       const result = await sandbox.tool.execute(
         "call-var-run",
         { command: `${node} -e ${shellQuote(connectScript)} /private/var/run/syslog` },
@@ -462,7 +470,7 @@ describe("bash 沙箱性能", () => {
       const agentServer = await listenUnix(join(ownAgentDir, "x.sock"));
       try {
         const sandbox = createSandboxedBash(workDir, zones, () => "run-sibling-sock");
-        sandbox.allow("run-sibling-sock", "call-sibling-sock", { network: true, writePaths: [] });
+        sandbox.allow("run-sibling-sock", "call-sibling-sock", { network: true, writePaths: [] }, "approved");
         const result = await sandbox.tool.execute(
           "call-sibling-sock",
           { command: `${unixSocketProbe(otherBotWork, "x.sock")}; ${unixSocketProbe(ownAgentDir, "x.sock")}` },
@@ -494,7 +502,7 @@ describe("bash 沙箱性能", () => {
     const command = `${node} -e ${shellQuote(connectScript)}`;
     let runId = "run-remote-ip";
     const sandbox = createSandboxedBash(workDir, zones, () => runId);
-    sandbox.allow(runId, "networked", { network: true, writePaths: [] });
+    sandbox.allow(runId, "networked", { network: true, writePaths: [] }, "approved");
     const networked = JSON.stringify(
       (await sandbox.tool.execute("networked", { command }, undefined, undefined, undefined as never)).content,
     );
@@ -527,7 +535,7 @@ describe("bash 沙箱性能", () => {
       let runId = "run-net-ok";
       try {
         const sandbox = createSandboxedBash(workDir, zones, () => runId);
-        sandbox.allow(runId, "networked", { network: true, writePaths: [] });
+        sandbox.allow(runId, "networked", { network: true, writePaths: [] }, "approved");
         const networked = JSON.stringify(
           (await sandbox.tool.execute("networked", { command }, undefined, undefined, undefined as never)).content,
         );
@@ -598,7 +606,7 @@ describe("bash 沙箱性能", () => {
         forbiddenZones(botDirs(dataDir, BotId.parse("bot-1")), nestedProfile),
         () => "run-nested",
       );
-      sandbox.allow("run-nested", "call-nested", { network: true, writePaths: [] });
+      sandbox.allow("run-nested", "call-nested", { network: true, writePaths: [] }, "approved");
       const result = await sandbox.tool.execute(
         "call-nested",
         { command: unixSocketProbe(nestedProfile) },
@@ -620,7 +628,7 @@ describe("bash 沙箱性能", () => {
     writeFileSync(join(drafts, "copy.png"), "approved-bytes");
     let runId = "run-drafts";
     const sandbox = createSandboxedBash(workDir, zones, () => runId);
-    sandbox.allow(runId, "widened", { network: false, writePaths: [join(dataDir, "bot-1")] });
+    sandbox.allow(runId, "widened", { network: false, writePaths: [join(dataDir, "bot-1")] }, "approved");
     const swapped = await blocked(
       sandbox.tool.execute(
         "widened",
@@ -821,39 +829,75 @@ describe("bash 沙箱性能", () => {
     ).toEqual({ PATH: "/bin", HOME: "/Users/test", PI_SESSION_ID: "session-1", PWD: "/work", TMPDIR: "/work/.tmp" });
   });
 
-  it("云电脑上的环境变量换成沙箱的 PATH，缓存变量都指到工作目录的 .cache", () => {
+  it("云电脑上的环境变量换成沙箱的 PATH，包缓存都指到沙箱每次新挂的 /tmp，没批准的命令写不出能被下次装包信任的东西", () => {
     expect(
       whitelistEnv({ PATH: "/bin", HOME: "/home/node", PI_SESSION_ID: "session-1" }, "/work", "/work/.tmp", {
-        searchPath: "/data/bot-1/toolbox/venv/bin:/usr/bin:/bin",
+        searchPath: "/usr/bin:/bin",
       }),
     ).toEqual({
-      PATH: "/data/bot-1/toolbox/venv/bin:/usr/bin:/bin",
+      PATH: "/usr/bin:/bin",
       HOME: "/home/node",
       PI_SESSION_ID: "session-1",
       PWD: "/work",
       TMPDIR: "/work/.tmp",
-      XDG_CACHE_HOME: "/work/.cache",
-      npm_config_cache: "/work/.cache/npm",
-      PIP_CACHE_DIR: "/work/.cache/pip",
-      YARN_CACHE_FOLDER: "/work/.cache/yarn",
+      XDG_CACHE_HOME: "/tmp/cache",
+      npm_config_cache: "/tmp/cache/npm",
+      npm_config_store_dir: "/tmp/cache/pnpm-store",
+      PIP_CACHE_DIR: "/tmp/cache/pip",
+      YARN_CACHE_FOLDER: "/tmp/cache/yarn",
+      npm_config_registry: "https://registry.npmjs.org/",
+      npm_config_ignore_pnpmfile: "true",
+      YARN_IGNORE_PATH: "1",
     });
+    expect(
+      whitelistEnv({ PATH: "/bin", npm_config_registry: "https://registry.npmmirror.com/" }, "/work", "/work/.tmp", {
+        searchPath: "/usr/bin:/bin",
+      })["npm_config_registry"],
+      "电脑主人给运行器配的源照用，工作区里的 .npmrc 盖不过它",
+    ).toBe("https://registry.npmmirror.com/");
+    const args = bwrapArgs(workDir, { network: false, writePaths: [] }, [], [], join(dataDir, "shared"));
+    expect(args.slice(args.indexOf("--tmpfs"), args.indexOf("--tmpfs") + 2)).toEqual(["--tmpfs", "/tmp"]);
   });
 
-  it("云电脑的 bash 把工具箱的 venv/bin 放在 PATH 最前面，闸门拿到的就是这个 PATH", () => {
+  it("云电脑上自动放行的命令 PATH 里没有工具箱，闸门和证明器拿到的就是这串；批准过的命令只有 python、pip 四个名字先落到工具箱", async () => {
     const root = mkdtempSync(join(tmpdir(), "baize-sandbox-cloud-"));
     try {
       const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
       const ownZones = forbiddenZones(dirs, null);
-      const cloud = createSandboxedBash(dirs.workDir, ownZones, () => null, {
+      const venvBin = join(dirs.toolboxDir, "venv", "bin");
+      const cloud = createSandboxedBash(dirs.workDir, ownZones, () => "run-1", {
         masked: [dirs.agentDir, dirs.sessionDir],
         toolboxDir: dirs.toolboxDir,
       });
       expect(cloud.containment).toEqual({
         level: "closed",
-        searchPath: `${join(dirs.toolboxDir, "venv", "bin")}:${process.env["PATH"]}`,
+        searchPath: process.env["PATH"],
         toolboxDir: dirs.toolboxDir,
       });
+      if (cloud.containment.level !== "closed") throw new Error("云电脑的 containment 该是 closed");
+      const shimDir = join(root, "bot-1", "toolbox-bin");
+      const approvedPath = `${shimDir}:${process.env["PATH"]}:${venvBin}`;
+      expect(toolboxSearchPath(cloud.containment)).toBe(approvedPath);
+      expect(readdirSync(shimDir).toSorted()).toEqual(["pip", "pip3", "python", "python3"]);
       expect(createSandboxedBash(dirs.workDir, ownZones).containment).toEqual({ level: "none" });
+
+      const pathOf = async (callId: string): Promise<string> => {
+        const result = await cloud.tool.execute(
+          callId,
+          { command: 'printf "%s" "$PATH"' },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+      };
+      cloud.allow("run-1", "automatic", { network: false, writePaths: [] }, "automatic");
+      expect(await pathOf("automatic")).toBe(process.env["PATH"]);
+      cloud.allow("run-1", "approved", { network: false, writePaths: [] }, "approved");
+      expect(await pathOf("approved")).toBe(approvedPath);
+      cloud.allow("run-1", "networked", { network: true, writePaths: [] }, "approved");
+      expect(await pathOf("networked")).toBe(approvedPath);
+      expect(await pathOf("approved"), "批准只管那一次调用").toBe(process.env["PATH"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -862,7 +906,7 @@ describe("bash 沙箱性能", () => {
   it("批准写工具箱的那条命令先惰性建 venv，没批准的原样跑", () => {
     const toolbox = "/data/bot-1/toolbox";
     expect(toolboxCommand(toolbox, { network: true, writePaths: [toolbox] }, "pip install six")).toBe(
-      "{ [ -x '/data/bot-1/toolbox/venv/bin/pip' ] || python3 -m venv '/data/bot-1/toolbox/venv'; } && pip install six",
+      "export PYTHONSAFEPATH=1; { [ -x '/data/bot-1/toolbox/venv/bin/pip' ] || python3 -I -m venv '/data/bot-1/toolbox/venv'; } && pip install six",
     );
     expect(toolboxCommand(toolbox, { network: true, writePaths: [] }, "npm install left-pad")).toBe(
       "npm install left-pad",
@@ -872,6 +916,162 @@ describe("bash 沙箱性能", () => {
     );
   });
 
+  it.skipIf(sandboxKind() === "none")(
+    "批准的命令里工具箱放的同名程序不跑，python3、pip 落到工具箱",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-sandbox-shim-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const venvBin = join(dirs.toolboxDir, "venv", "bin");
+        const marker = join(dirs.workDir, "shim-ran");
+        const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
+          masked: [dirs.agentDir, dirs.sessionDir],
+          toolboxDir: dirs.toolboxDir,
+        });
+        const approved = async (callId: string, command: string, access: GateAccess): Promise<string> => {
+          cloud.allow("run-1", callId, access, "approved");
+          const result = await cloud.tool.execute(callId, { command }, undefined, undefined, undefined as never);
+          return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+        };
+        const NO_WRITE = { network: false, writePaths: [] };
+        // venv 在沙箱外建：Mac 的 seatbelt 把数据目录整个拒写，工具箱只在云电脑上可写，这里只看 PATH 落到哪个文件。
+        const venv = spawnSync("python3", ["-I", "-m", "venv", join(dirs.toolboxDir, "venv")], { encoding: "utf8" });
+        expect(venv.status, venv.stderr).toBe(0);
+        expect(await approved("prefix", "python3 -c 'import sys; print(sys.prefix)'", NO_WRITE)).toBe(
+          `${realpathSync(join(dirs.toolboxDir, "venv"))}\n`,
+        );
+        for (const name of ["tar", "gzip", "touch", "node", "curl"]) {
+          writeFileSync(join(venvBin, name), `#!/bin/sh\necho ${name} >> ${shellQuote(marker)}\n`);
+          chmodSync(join(venvBin, name), 0o755);
+        }
+        mkdirSync(join(dirs.workDir, "sub"));
+        writeFileSync(join(dirs.workDir, "sub", "a.txt"), "a\n");
+        const output = await approved(
+          "tools",
+          "tar -czf out.tgz sub && touch t && gzip -kf t && node -e 'process.stdout.write(\"node ok\\n\")'",
+          { network: true, writePaths: [] },
+        );
+        expect(output).toContain("node ok");
+        expect(existsSync(marker), existsSync(marker) ? readFileSync(marker, "utf8") : "").toBe(false);
+        expect(existsSync(join(dirs.workDir, "out.tgz"))).toBe(true);
+        expect(await approved("pip", "pip --version && python3 -m pip --version", NO_WRITE)).toMatch(
+          /bot-1\/toolbox\/venv\/lib\/python3[^\n]*\n[^\n]*bot-1\/toolbox\/venv\/lib\/python3/,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+
+  describe("shim 目录每次批准的命令起之前只剩四个名字，不跟软链写到别处", () => {
+    const setup = () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-sandbox-shimdir-"));
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const outside = join(root, "outside");
+      mkdirSync(outside);
+      writeFileSync(join(outside, "secret.txt"), "secret\n");
+      const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
+        masked: [dirs.agentDir, dirs.sessionDir],
+        toolboxDir: dirs.toolboxDir,
+      });
+      const approved = async (callId: string, command: string): Promise<BashOutcome> => {
+        cloud.allow("run-1", callId, { network: false, writePaths: [] }, "approved");
+        return cloud.tool.execute(callId, { command }, undefined, undefined, undefined as never);
+      };
+      return { root, dirs, outside, shimDir: join(root, "bot-1", "toolbox-bin"), approved };
+    };
+    it.skipIf(sandboxKind() === "none")("目录里多放的程序和软链在下一条批准的命令前清掉", async () => {
+      const { root, dirs, outside, shimDir, approved } = setup();
+      try {
+        const marker = join(dirs.workDir, "planted-node-ran");
+        writeFileSync(join(shimDir, "node"), `#!/bin/sh\necho planted >> ${shellQuote(marker)}\n`);
+        chmodSync(join(shimDir, "node"), 0o755);
+        symlinkSync(outside, join(shimDir, "outside-link"));
+        symlinkSync(join(outside, "secret.txt"), join(shimDir, `.pip.${process.pid}`));
+
+        expect(outputText(await approved("node", "node -e 'process.stdout.write(\"node ok\")'"))).toBe("node ok");
+        expect(existsSync(marker), "目录里多放的 node 没执行").toBe(false);
+        expect(readdirSync(shimDir).toSorted()).toEqual(["pip", "pip3", "python", "python3"]);
+        expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("secret\n");
+        expect(readdirSync(outside)).toEqual(["secret.txt"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(sandboxKind() === "none")("shim 目录本身换成软链，重写时不跟过去", async () => {
+      const { root, outside, shimDir, approved } = setup();
+      try {
+        rmSync(shimDir, { recursive: true });
+        symlinkSync(outside, shimDir);
+
+        expect(outputText(await approved("true", "printf ok"))).toBe("ok");
+        expect(lstatSync(shimDir).isSymbolicLink()).toBe(false);
+        expect(readdirSync(shimDir).toSorted()).toEqual(["pip", "pip3", "python", "python3"]);
+        expect(readdirSync(outside)).toEqual(["secret.txt"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(sandboxKind() === "none")("Bot 目录换成软链，批准的命令不起，链过去的目录里不多东西", async () => {
+      const { root, dirs, outside, approved } = setup();
+      try {
+        const botDir = join(root, "bot-1");
+        const moved = join(root, "bot-1-moved");
+        renameSync(botDir, moved);
+        symlinkSync(moved, botDir);
+        writeFileSync(join(moved, "toolbox-bin", "node"), "#!/bin/sh\n");
+        const marker = join(dirs.workDir, "ran");
+
+        await expect(approved("blocked", `touch ${shellQuote(marker)}`)).rejects.toThrow(
+          `Bot 目录 ${botDir} 是软链，工具箱入口不往链过去的地方写，这条命令没有执行。`,
+        );
+        expect(existsSync(join(moved, "work", "ran"))).toBe(false);
+        expect(readdirSync(join(moved, "toolbox-bin")).toSorted()).toEqual([
+          "node",
+          "pip",
+          "pip3",
+          "python",
+          "python3",
+        ]);
+        expect(readdirSync(outside)).toEqual(["secret.txt"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it.skipIf(sandboxKind() === "none")(
+    "按授权自动放行、写工具箱的装包也拿到 python、pip 先落到工具箱的 PATH",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "baize-sandbox-granted-"));
+      try {
+        const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+        const venvBin = join(dirs.toolboxDir, "venv", "bin");
+        mkdirSync(venvBin, { recursive: true });
+        writeFileSync(join(venvBin, "pip"), "#!/bin/sh\n");
+        chmodSync(join(venvBin, "pip"), 0o755);
+        const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
+          masked: [dirs.agentDir, dirs.sessionDir],
+          toolboxDir: dirs.toolboxDir,
+        });
+        cloud.allow("run-1", "granted", { network: true, writePaths: [dirs.toolboxDir] }, "automatic");
+        const result = await cloud.tool.execute(
+          "granted",
+          { command: 'printf "%s" "$PATH"' },
+          undefined,
+          undefined,
+          undefined as never,
+        );
+        expect(outputText(result)).toBe(`${join(root, "bot-1", "toolbox-bin")}:${process.env["PATH"]}:${venvBin}`);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform !== "darwin")(
     "放宽按 runId 和 callId 隔离，清理或空 access 不会泄到复用 callId",
     async () => {
@@ -879,7 +1079,7 @@ describe("bash 沙箱性能", () => {
       let runId = "run-1";
       const sandbox = createSandboxedBash(workDir, zones, () => runId);
       try {
-        sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] });
+        sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] }, "approved");
         sandbox.clearRun(runId);
         runId = "run-2";
         const afterClear = join(outside, "after-clear.txt");
@@ -897,8 +1097,8 @@ describe("bash 沙箱性能", () => {
         ).toContain("Operation not permitted");
         expect(existsSync(afterClear)).toBe(false);
 
-        sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] });
-        sandbox.allow(runId, "same-call", { network: false, writePaths: [] });
+        sandbox.allow(runId, "same-call", { network: false, writePaths: [outside] }, "approved");
+        sandbox.allow(runId, "same-call", { network: false, writePaths: [] }, "automatic");
         const afterEmpty = join(outside, "after-empty.txt");
         expect(
           await blocked(
@@ -990,6 +1190,8 @@ describe("bwrap 参数", () => {
       "--bind",
       "/outside",
       "/outside",
+      "--tmpfs",
+      "/tmp/cache",
       "--ro-bind",
       "/data/bot-1/drafts",
       "/data/bot-1/drafts",
@@ -1018,6 +1220,11 @@ describe("bwrap 参数", () => {
       "--chdir",
       work,
     ]);
+    const tmpWrite = bwrapArgs(work, { network: false, writePaths: ["/tmp"] }, [], [], "/data/shared");
+    expect(
+      tmpWrite.slice(tmpWrite.indexOf("/tmp/cache") - 4, tmpWrite.indexOf("/tmp/cache") + 1),
+      "批准写 /tmp 时缓存照旧是新挂的",
+    ).toEqual(["--bind", "/tmp", "/tmp", "--tmpfs", "/tmp/cache"]);
     const networked = bwrapArgs(work, { network: true, writePaths: [] }, forbidden, readOnly, "/data/shared");
     expect(networked, "批准 network 的那一次和容器共用网络").not.toContain("--unshare-net");
     expect(networked, "docker 遮住了部分 /proc，新挂 proc 会失败").not.toContain("--proc");
@@ -1165,13 +1372,13 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
   it("bwrap 下批准的写路径这一次可写，禁区照样盖住", async () => {
     const approved = join(outside, "approved.txt");
     const callId = nextCall();
-    sandbox.allow(runId, callId, { network: false, writePaths: [approved] });
+    sandbox.allow(runId, callId, { network: false, writePaths: [approved] }, "approved");
     expect((await run(`echo ok > ${shellQuote(approved)}`, callId)).isError).not.toBe(true);
     expect(readFileSync(approved, "utf8")).toBe("ok\n");
     await blocked(run(`echo again > ${shellQuote(approved)}`), "放宽只管批准的那一次");
 
     const widened = nextCall();
-    sandbox.allow(runId, widened, { network: false, writePaths: [root] });
+    sandbox.allow(runId, widened, { network: false, writePaths: [root] }, "approved");
     const widenedRead = await blocked(
       run(`cat ${shellQuote(join(otherBot, "secret.txt"))}`, widened),
       "放宽写路径后别的 Bot 目录照样读不到",
@@ -1185,7 +1392,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     writeFileSync(marker, "");
     try {
       const callId = nextCall();
-      sandbox.allow(runId, callId, { network: false, writePaths: [approved] });
+      sandbox.allow(runId, callId, { network: false, writePaths: [approved] }, "approved");
       const result = await run(`echo ok > ${shellQuote(approved)} && ls -A /tmp/.X11-unix`, callId);
       expect(readFileSync(approved, "utf8"), "批准的 /tmp 写路径落到了真 /tmp").toBe("ok\n");
       expect(JSON.stringify(result.content)).not.toContain("p1-6-runner-");
@@ -1201,7 +1408,12 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     const server = await listenUnix(join(socketDir, "SingletonSocket"));
     try {
       const callId = nextCall();
-      sandbox.allow(runId, callId, { network: true, writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")] });
+      sandbox.allow(
+        runId,
+        callId,
+        { network: true, writePaths: [join("/tmp", `p1-5-singleton-${process.pid}`, "x")] },
+        "approved",
+      );
       const result = await run(unixSocketProbe(socketDir), callId);
       const output = JSON.stringify(result.content);
       expect(output, "列不出禁区里的 socket").not.toContain("SingletonSocket");
@@ -1221,7 +1433,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
     const workServer = await listenUnix(join(botWork, "bot.sock"));
     try {
       const callId = nextCall();
-      sandbox.allow(runId, callId, { network: true, writePaths: [] });
+      sandbox.allow(runId, callId, { network: true, writePaths: [] }, "approved");
       const result = await run(
         `${unixSocketProbe(hostDir, "docker.sock")}; ${unixSocketProbe(botWork, "bot.sock")}`,
         callId,
@@ -1248,7 +1460,7 @@ describe.skipIf(!hasBwrap)("bwrap 沙箱", () => {
       const offline = await blocked(run(fetchLoopback), "默认连本机回环也不通");
       expect(offline).not.toContain("pong-p1-6");
       const callId = nextCall();
-      sandbox.allow(runId, callId, { network: true, writePaths: [] });
+      sandbox.allow(runId, callId, { network: true, writePaths: [] }, "approved");
       const result = await run(fetchLoopback, callId);
       expect(JSON.stringify(result.content)).toContain("pong-p1-6");
     } finally {

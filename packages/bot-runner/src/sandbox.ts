@@ -1,5 +1,15 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
 import type { Containment } from "./contained.js";
@@ -16,9 +26,54 @@ export interface CloudBox {
 
 type ClosedContainment = Extract<Containment, { level: "closed" }>;
 
-/** 沙箱 bash 的 PATH：工具箱的 venv/bin 排最前，后面是运行器进程自己的 PATH。闸门和证明器拿到的就是这一串。 */
-export const cloudSearchPath = (toolboxDir: string): string =>
-  [join(toolboxDir, "venv", "bin"), ...(process.env["PATH"] ?? "").split(":")].join(":");
+/** 这次调用是人批准的，还是闸门自动放行的。 */
+export type BashApproval = "approved" | "automatic";
+
+/** 批准的命令里只有这四个名字落到工具箱的 venv，其余名字和自动放行时解析到同一个文件。 */
+const TOOLBOX_NAMES = ["pip", "pip3", "python", "python3"] as const;
+
+const toolboxShimDir = (toolboxDir: string): string => join(dirname(toolboxDir), "toolbox-bin");
+
+/**
+ * 批准的命令的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 垫底。pip 装进来的 black 这类程序还能用，
+ * 但盖不住系统同名程序。
+ * 自动放行的命令跑的是 `containment.searchPath`，和证明器判命令名用的同一串。
+ */
+export const toolboxSearchPath = (containment: ClosedContainment): string =>
+  `${toolboxShimDir(containment.toolboxDir)}:${containment.searchPath}:${join(containment.toolboxDir, "venv", "bin")}`;
+
+// shim 不能是软链：Python 按可执行文件旁边的 pyvenv.cfg 认 venv，软链过去 sys.prefix 退回系统。
+// shim 目录在 Bot 目录下、工具箱之外，工作区和批准的装包都写不到；但 S-8 下批准的写可能放开整个 Bot 目录，
+// 所以每次在新建的空目录里写好再整个换上去：多放的程序、预先埋的软链都留不下，也不跟着软链写到别处。
+const writeToolboxShims = (containment: ClosedContainment): void => {
+  const dir = toolboxShimDir(containment.toolboxDir);
+  const botDir = dirname(dir);
+  if (lstatSync(botDir).isSymbolicLink()) {
+    throw new Error(`Bot 目录 ${botDir} 是软链，工具箱入口不往链过去的地方写，这条命令没有执行。`);
+  }
+  const venvBin = join(containment.toolboxDir, "venv", "bin");
+  const systemDirs = containment.searchPath
+    .split(":")
+    .filter((entry) => entry !== "")
+    .map(shSingleQuote)
+    .join(" ");
+  const fresh = mkdtempSync(join(botDir, ".toolbox-bin-"));
+  for (const name of TOOLBOX_NAMES) {
+    const target = shSingleQuote(join(venvBin, name));
+    const script = [
+      "#!/bin/sh",
+      `[ -x ${target} ] && exec ${target} "$@"`,
+      `for dir in ${systemDirs}; do [ -x "$dir/${name}" ] && exec "$dir/${name}" "$@"; done`,
+      `echo "${name}: command not found" >&2`,
+      "exit 127",
+      "",
+    ].join("\n");
+    writeFileSync(join(fresh, name), script, { flag: "wx" });
+    chmodSync(join(fresh, name), 0o755);
+  }
+  rmSync(dir, { recursive: true, force: true });
+  renameSync(fresh, dir);
+};
 const MACH_LOOKUP_NAMES = [
   "com.apple.system.logger",
   "com.apple.system.opendirectoryd",
@@ -36,7 +91,10 @@ const MDNS_RESPONDER_SOCKET = "/private/var/run/mDNSResponder";
 const shSingleQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 const seatbeltString = (value: string): string => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 
-// 云电脑的 HOME=/home/node 在只读根上，包管理器写不进默认缓存就装不上；缓存改指到工作目录里。
+// 云电脑的 HOME=/home/node 在只读根上，包管理器写不进默认缓存就装不上；缓存改指到沙箱私有的 /tmp 里，每条命令都是新挂的，
+// 没批准的命令改写不了下一次批准的装包会信任的 wheel 和 index，代价是每次装包重新下载。
+// 工作区的 .npmrc、.yarnrc、.pnpmfile.cjs 是 Bot 不问就能写的：env 里的 registry 盖过 .npmrc，yarn-path 和 pnpmfile 关掉，
+// 批准的装包从哪下、跑哪个 yarn、跑哪段钩子就不由工作区定。
 export function whitelistEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
@@ -52,21 +110,28 @@ export function whitelistEnv(
     if (key.startsWith("PI_") && value !== undefined) next[key] = value;
   }
   if (cloud !== null) {
-    const cache = join(cwd, ".cache");
     next["PATH"] = cloud.searchPath;
-    next["XDG_CACHE_HOME"] = cache;
-    next["npm_config_cache"] = join(cache, "npm");
-    next["PIP_CACHE_DIR"] = join(cache, "pip");
-    next["YARN_CACHE_FOLDER"] = join(cache, "yarn");
+    next["XDG_CACHE_HOME"] = "/tmp/cache";
+    next["npm_config_cache"] = "/tmp/cache/npm";
+    next["npm_config_store_dir"] = "/tmp/cache/pnpm-store";
+    next["PIP_CACHE_DIR"] = "/tmp/cache/pip";
+    next["YARN_CACHE_FOLDER"] = "/tmp/cache/yarn";
+    next["npm_config_registry"] = env["npm_config_registry"] ?? "https://registry.npmjs.org/";
+    next["npm_config_ignore_pnpmfile"] = "true";
+    next["YARN_IGNORE_PATH"] = "1";
   }
   return next;
 }
 
-/** 批准写工具箱的那条命令先把 venv 建出来。系统 python3 没带 pip，venv 的 ensurepip 会带上；建过一次就跳过。 */
+/**
+ * 批准写工具箱的那条命令先把 venv 建出来。系统 python3 没带 pip，venv 的 ensurepip 会带上；建过一次就跳过。
+ * cwd 是工作区，`python3 -m` 默认把 cwd 放在 sys.path 头上，工作区里的 venv.py、./pip/ 就顶掉了真模块：
+ * 建 venv 用 -I，装包整条命令带 PYTHONSAFEPATH。
+ */
 export const toolboxCommand = (toolboxDir: string, access: GateAccess, command: string): string => {
   if (!access.writePaths.includes(toolboxDir)) return command;
   const venv = join(toolboxDir, "venv");
-  return `{ [ -x ${shSingleQuote(join(venv, "bin", "pip"))} ] || python3 -m venv ${shSingleQuote(venv)}; } && ${command}`;
+  return `export PYTHONSAFEPATH=1; { [ -x ${shSingleQuote(join(venv, "bin", "pip"))} ] || python3 -I -m venv ${shSingleQuote(venv)}; } && ${command}`;
 };
 
 // 禁区来自配置，Bot 改不动它；解不出来就是配置本身的问题，报错点名那一项，让用户知道改哪里。
@@ -177,6 +242,7 @@ export function sandboxKind(): SandboxKind {
  * 「Can't mkdir parents ... Read-only file system」，整条命令起不来。
  * 禁区放在所有 bind 之后：bwrap 按参数顺序叠挂载，后挂的盖住先挂的。禁区落在工作目录或批准的写路径里面时照样被盖住；
  * 工作目录本身落在禁区里时 --chdir 失败，命令起不来。
+ * 包缓存的 /tmp/cache 在写路径之后再新挂一次：批准写 /tmp 时真 /tmp 绑进来，缓存不能借它留到下一条命令。
  * 只读区用 --ro-bind 叠在写路径之后，批准写它的祖先也改不动它。
  * 空 tmpfs 默认可写，写进去的东西随沙箱消失，命令却报成功，所以再逐个 --remount-ro。先挂完全部 tmpfs 再改只读，
  * 禁区互相嵌套时里层的挂载点还建得出来。
@@ -204,6 +270,8 @@ export function bwrapArgs(
     sharedDir,
     sharedDir,
     ...access.writePaths.flatMap((path) => ["--bind", path, path]),
+    "--tmpfs",
+    "/tmp/cache",
     ...readOnly.flatMap((path) => ["--ro-bind", path, path]),
     ...forbidden.flatMap((path) => ["--tmpfs", path]),
     ...forbidden.flatMap((path) => ["--remount-ro", path]),
@@ -295,26 +363,38 @@ const spawnHook =
     workDir: string,
     zones: ForbiddenZones,
     tmpDir: string,
-    access: GateAccess,
+    permit: BashPermit,
     cloud: CloudBox | null,
     containment: Containment,
   ): BashSpawnHook =>
   (ctx: BashSpawnContext) => {
     const closed = containment.level === "closed" ? containment : null;
-    const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, access, ctx.command);
+    const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, permit.access, ctx.command);
+    // 按授权自动放行的装包没人点批准，但和批准的装包一样要落到工具箱的 pip。
+    const toolbox =
+      closed !== null && (permit.approval === "approved" || permit.access.writePaths.includes(closed.toolboxDir));
+    if (toolbox) writeToolboxShims(closed);
+    const searchPath = closed === null ? null : toolbox ? toolboxSearchPath(closed) : closed.searchPath;
     return {
-      command: sandboxedCommand(kind, workDir, zones, access, command, cloud?.masked ?? []),
+      command: sandboxedCommand(kind, workDir, zones, permit.access, command, cloud?.masked ?? []),
       cwd: workDir,
-      env: whitelistEnv(ctx.env, workDir, tmpDir, closed),
+      env: whitelistEnv(ctx.env, workDir, tmpDir, searchPath === null ? null : { searchPath }),
     };
   };
 
+interface BashPermit {
+  readonly access: GateAccess;
+  readonly approval: BashApproval;
+}
+
+const AUTOMATIC: BashPermit = { access: { network: false, writePaths: [] }, approval: "automatic" };
+
 export interface BashSandbox {
   readonly sandbox: SandboxKind;
-  /** 闸门要的 containment 从这里拿，证明器用的 PATH 就是沙箱 bash 的 PATH。 */
+  /** 闸门要的 containment 从这里拿，证明器用的 PATH 就是自动放行的命令真正跑的 PATH。 */
   readonly containment: Containment;
   readonly tool: ReturnType<typeof createBashToolDefinition>;
-  allow(runId: string, callId: string, access: GateAccess): void;
+  allow(runId: string, callId: string, access: GateAccess, approval: BashApproval): void;
   clearRun(runId: string): void;
 }
 
@@ -330,8 +410,9 @@ export function createSandboxedBash(
   const containment: Containment =
     cloud === null
       ? { level: "none" }
-      : { level: "closed", searchPath: cloudSearchPath(cloud.toolboxDir), toolboxDir: cloud.toolboxDir };
-  const accessByRun = new Map<string, Map<string, GateAccess>>();
+      : { level: "closed", searchPath: process.env["PATH"] ?? "", toolboxDir: cloud.toolboxDir };
+  if (containment.level === "closed") writeToolboxShims(containment);
+  const permitsByRun = new Map<string, Map<string, BashPermit>>();
   const base = createBashToolDefinition(workDir);
   const tool = {
     ...base,
@@ -339,12 +420,12 @@ export function createSandboxedBash(
     execute: async (...args: Parameters<typeof base.execute>) => {
       const [callId] = args;
       const runId = activeRunId();
-      const runAccess = runId === null ? undefined : accessByRun.get(runId);
-      const access = runAccess?.get(callId) ?? { network: false, writePaths: [] };
-      runAccess?.delete(callId);
-      if (runId !== null && runAccess?.size === 0) accessByRun.delete(runId);
+      const permits = runId === null ? undefined : permitsByRun.get(runId);
+      const permit = permits?.get(callId) ?? AUTOMATIC;
+      permits?.delete(callId);
+      if (runId !== null && permits?.size === 0) permitsByRun.delete(runId);
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, access, cloud, containment),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, permit, cloud, containment),
       });
       return scoped.execute(...args);
     },
@@ -353,18 +434,18 @@ export function createSandboxedBash(
     sandbox: kind,
     containment,
     tool,
-    allow: (runId, callId, access) => {
-      if (!access.network && access.writePaths.length === 0) {
-        accessByRun.get(runId)?.delete(callId);
-        if (accessByRun.get(runId)?.size === 0) accessByRun.delete(runId);
+    allow: (runId, callId, access, approval) => {
+      if (approval === "automatic" && !access.network && access.writePaths.length === 0) {
+        permitsByRun.get(runId)?.delete(callId);
+        if (permitsByRun.get(runId)?.size === 0) permitsByRun.delete(runId);
         return;
       }
-      const runAccess = accessByRun.get(runId) ?? new Map<string, GateAccess>();
-      runAccess.set(callId, access);
-      accessByRun.set(runId, runAccess);
+      const permits = permitsByRun.get(runId) ?? new Map<string, BashPermit>();
+      permits.set(callId, { access, approval });
+      permitsByRun.set(runId, permits);
     },
     clearRun: (runId) => {
-      accessByRun.delete(runId);
+      permitsByRun.delete(runId);
     },
   };
 }

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -941,7 +942,7 @@ describe("bash 分类", () => {
 });
 
 describe("云电脑上沙箱兜得住的 bash 不问", () => {
-  // 云电脑镜像里的 PATH；工具箱的 venv/bin 由 createSandboxedBash 放在它前面。
+  // 云电脑镜像里的 PATH，也是自动放行的命令真正跑的 PATH；工具箱的 venv/bin 只进批准过的命令的 PATH。
   const SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/usr/local/bin";
   const toolboxDir = (): string => join(root, "bot-1", "toolbox");
   const venvBin = (): string => join(toolboxDir(), "venv", "bin");
@@ -950,7 +951,7 @@ describe("云电脑上沙箱兜得住的 bash 不问", () => {
     toolName: "bash",
     input: { command },
     sandbox: "bwrap",
-    containment: { level: "closed", searchPath: `${venvBin()}:${SYSTEM_PATH}`, toolboxDir: toolboxDir() },
+    containment: { level: "closed", searchPath: SYSTEM_PATH, toolboxDir: toolboxDir() },
     source: null,
     routine: null,
     ...overrides,
@@ -1067,11 +1068,103 @@ describe("云电脑上沙箱兜得住的 bash 不问", () => {
           verdict: "ask",
           action: "install",
           target: null,
-          reason: TOOLBOX_REASON,
+          reason: `${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}`,
           access: { network: true, writePaths: [toolboxDir()] },
         });
       },
     );
+
+    it.each([
+      "pip install -r requirements.txt",
+      "pip install -rrequirements.txt",
+      "pip install --requirement=requirements.txt",
+      "python3 -m pip install -c constraints.txt six",
+    ])("云电脑上 %s 照问，卡上写明 requirements 文件能换下载源", (command) => {
+      expect(decide(cloud(command), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: `${TOOLBOX_REASON}。requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源。批准后放开：联网、写 ${toolboxDir()}`,
+        access: { network: true, writePaths: [toolboxDir()] },
+      });
+    });
+
+    it.each([
+      "pip install -qr requirements.txt",
+      "pip install -Ur requirements.txt",
+      "pip install -qcconstraints.txt six",
+      "pip install --requirem requirements.txt",
+      "pip install --constr constraints.txt six",
+    ])("云电脑上短选项合写、长选项缩写的 %s 也写明 requirements 文件能换下载源", (command) => {
+      expect(decide(cloud(command), [], []).reason).toBe(
+        `${TOOLBOX_REASON}。requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源。批准后放开：联网、写 ${toolboxDir()}`,
+      );
+    });
+
+    it.each([
+      "pip install .",
+      "pip install -e .",
+      "pip install -qe .",
+      "pip install --editable=./pkg",
+      "pip install ./pkg",
+      "pip install sub/pkg",
+      "pip install ~/pkg",
+      "pip install dist/pkg-1.0-py3-none-any.whl",
+      "pip install pkg-1.0.tar.gz",
+      "pip install git+https://example.invalid/pkg.git",
+      "pip install pkg@git+https://example.invalid/pkg.git",
+      "pip install file:///tmp/pkg",
+      "python3 -m pip install -U .",
+      "pip install pkg-1.0.tar",
+      "pip install pkg-1.0.tar.xz",
+      "pip install pkg-1.0.txz",
+      "pip install pkg-1.0.tbz",
+      "pip install pkg-1.0.tar.Z",
+      "pip install pkg-1.0-py3.8.egg",
+      "pip install PKG-1.0-PY3-NONE-ANY.WHL",
+      "pip install pkg@file:///tmp/pkg",
+      "pip install 'pkg @ file:///tmp/pkg'",
+      "pip install -f wheels six",
+      "pip install -fwheels six",
+      "pip install --find-links=wheels six",
+      "pip install --find-links file:///tmp/wheels six",
+      "pip install --index-url=./x six",
+      "pip install -i./x six",
+      "pip install --extra-index-url ./x six",
+    ])("云电脑上 %s 装的是本地或 git 里的代码，卡上写明会运行它的构建代码", (command) => {
+      expect(decide(cloud(command), [], []).reason).toBe(
+        `${TOOLBOX_REASON}。装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码。批准后放开：联网、写 ${toolboxDir()}`,
+      );
+    });
+
+    it.each([
+      "pip install six",
+      "pip install -q six==1.16.0",
+      "pip install -i https://pypi.tuna.tsinghua.edu.cn/simple six",
+      "pip install --index-url=https://pypi.tuna.tsinghua.edu.cn/simple six",
+      "pip install -tc six",
+      "pip install -f https://example.invalid/links six",
+      "pip install --find-links=https://example.invalid/links six",
+      "pip install --extra-index-url https://example.invalid/simple six",
+    ])("云电脑上 %s 只装索引里的包，卡上不多写", (command) => {
+      expect(decide(cloud(command), [], []).reason).toBe(`${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}`);
+    });
+
+    it("云电脑上 -r 和本地包一起出现，两句都写", () => {
+      expect(decide(cloud("pip install -r requirements.txt -e ."), [], []).reason).toBe(
+        `${TOOLBOX_REASON}。requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源。装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码。批准后放开：联网、写 ${toolboxDir()}`,
+      );
+    });
+
+    it("Mac 上 pip install -r 照旧问、没有说明", () => {
+      expect(decide(mac("pip install -r requirements.txt"), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: null,
+        access: { network: false, writePaths: [] },
+      });
+    });
 
     it("Mac 和本机 Linux 上 pip 的判定和今天逐字一样", () => {
       const today = {
@@ -1094,7 +1187,7 @@ describe("云电脑上沙箱兜得住的 bash 不问", () => {
           verdict: "ask",
           action: "install",
           target: null,
-          reason: null,
+          reason: "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本。批准后放开：联网",
           access: { network: true, writePaths: [] },
         });
       }
@@ -1113,19 +1206,25 @@ describe("云电脑上沙箱兜得住的 bash 不问", () => {
   });
 
   describe("证明器按沙箱的 PATH 解析命令名", () => {
-    it("工具箱 venv/bin 里放了可执行的 cat，云电脑上 cat a.txt 必须问", () => {
+    it("工具箱 venv/bin 里放了可执行的 cat：PATH 里有它时 cat a.txt 必须问，自动放行的 PATH 里没有它时照旧放行", () => {
       mkdirSync(venvBin(), { recursive: true });
       writeFileSync(join(venvBin(), "cat"), "#!/bin/sh\nrm -rf .\n");
       chmodSync(join(venvBin(), "cat"), 0o755);
+      const withToolbox = {
+        level: "closed",
+        searchPath: `${venvBin()}:${SYSTEM_PATH}`,
+        toolboxDir: toolboxDir(),
+      } as const;
       try {
-        expect(decide(cloud("cat a.txt"), [], [])).toEqual({
+        expect(decide(cloud("cat a.txt", { containment: withToolbox }), [], [])).toEqual({
           verdict: "ask",
           action: "shell",
           target: null,
           reason: null,
           access: { network: false, writePaths: [] },
         });
-        expect(decide(cloud("ls -la"), [], []).verdict).toBe("allow");
+        expect(decide(cloud("ls -la", { containment: withToolbox }), [], []).verdict).toBe("allow");
+        expect(decide(cloud("cat a.txt"), [], []).verdict).toBe("allow");
       } finally {
         rmSync(join(venvBin(), "cat"));
       }
@@ -2012,16 +2111,17 @@ describe("读工作区以外的东西必须问，Mac 和云电脑一样", () => 
         expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
       });
 
+      // 卡上的动作取要问的段里最严的：head -1 是认不出的选项归 shell，链接放进 linked-dir 是写到外面。
       it.each([
-        "ln -s $OUT/secret-file.txt x && cat x",
-        "ln -s / rootlink && head -1 rootlink/etc/passwd",
-        "ln -s /etc/passwd x",
-        "ln -s ../../../outside/secret-file.txt y",
-        "ln -s ../../../../outside/secret-file.txt sub/y",
-        "ln -s ../../../../outside/secret-file.txt sub",
-        "ln -s ../../../outside/secret-file.txt linked-dir/y",
-      ])("ln -s 的源在工作区外照问：%s", (command) => {
-        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "read" });
+        ["ln -s $OUT/secret-file.txt x && cat x", "read"],
+        ["ln -s / rootlink && head -1 rootlink/etc/passwd", "shell"],
+        ["ln -s /etc/passwd x", "read"],
+        ["ln -s ../../../outside/secret-file.txt y", "read"],
+        ["ln -s ../../../../outside/secret-file.txt sub/y", "read"],
+        ["ln -s ../../../../outside/secret-file.txt sub", "read"],
+        ["ln -s ../../../outside/secret-file.txt linked-dir/y", "write_outside"],
+      ])("ln -s 的源在工作区外照问：%s", (command, action) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action });
       });
 
       it("ln -s 的源在禁区里直接拒", () => {
@@ -2087,8 +2187,8 @@ describe("读工作区以外的东西必须问，Mac 和云电脑一样", () => 
         "git log -p -- sub",
         "LANG=C git status",
         "LC_ALL=C TZ=UTC git log",
-      ])("git 的常规读照旧放行：%s", (command) => {
-        expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+      ])("git 的常规读也问，工作区里的 git 配置能让它跑程序：%s", (command) => {
+        expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
       });
 
       it.each(["FOO=1 ls", "LD_PRELOAD=/tmp/x cat notes.txt", "PATH=/tmp cat notes.txt"])(
@@ -2135,6 +2235,361 @@ describe("读工作区以外的东西必须问，Mac 和云电脑一样", () => 
       it.each(["cat -- notes.txt", "cat -- -v", "head -n 1 -- -v", "grep -e X -- -v", "ls -- -l"])("%s", (command) => {
         expect(decide(call(command), [], []).verdict).toBe("allow");
       });
+    });
+  });
+});
+
+describe("两路复核确认的漏，Mac 和云电脑一样收紧", () => {
+  const toolboxDir = (): string => join(root, "bot-1", "toolbox");
+  const cloud = (command: string): GateCall => ({
+    ...gateContext({ platform: "linux" }),
+    toolName: "bash",
+    input: { command },
+    sandbox: "bwrap",
+    containment: { level: "closed", searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin", toolboxDir: toolboxDir() },
+    source: null,
+    routine: null,
+  });
+  const mac = (command: string): GateCall => ({
+    ...cloud(command),
+    platform: "darwin",
+    sandbox: "seatbelt",
+    containment: { level: "none" },
+  });
+  const both = [
+    ["Mac", mac],
+    ["云电脑", cloud],
+  ] as const;
+  const NONE = { network: false, writePaths: [] };
+  const shell = { verdict: "ask", action: "shell", target: null, reason: null, access: NONE };
+  const at = (command: string): string => command.replaceAll("$OUT", outsideDir);
+  const deleteOf = (name: string) => ({
+    verdict: "ask",
+    action: "delete",
+    target: pathTarget(join(realpathSync(workDir), name)),
+    reason: null,
+    access: NONE,
+  });
+
+  beforeAll(() => {
+    mkdirSync(join(workDir, "bin"), { recursive: true });
+    mkdirSync(join(workDir, "repo-sub"), { recursive: true });
+    writeFileSync(join(workDir, "bin", "cat"), "#!/bin/sh\necho hijacked\n");
+    chmodSync(join(workDir, "bin", "cat"), 0o755);
+    writeFileSync(join(workDir, "important.txt"), "keep\n");
+    writeFileSync(join(workDir, "-v"), "plain\n");
+    writeFileSync(join(outsideDir, "secret-file.txt"), "TOPSECRET\n");
+  });
+  afterAll(() => {
+    rmSync(join(workDir, "-v"));
+  });
+
+  describe.each(both)("%s", (_label, call) => {
+    it.each([
+      "git status",
+      "git status -s",
+      "git diff",
+      "git diff HEAD~1",
+      "git diff -- notes.txt",
+      "git log --oneline -5",
+      "git log -p",
+      "git show HEAD",
+      "git show HEAD:notes.txt",
+      "git -C repo-sub status",
+      "LANG=C git status",
+    ])("工作区里的 git 配置能让读命令跑程序，status、diff、log、show 归 shell：%s", (command) => {
+      expect(decide(call(command), [], [])).toEqual(shell);
+    });
+
+    it.each(["./bin/cat notes.txt", "bin/cat notes.txt", "/bin/cat notes.txt", "repo-sub/../bin/cat notes.txt"])(
+      "带目录的命令名不按去掉目录的名字判，归 shell：%s",
+      (command) => {
+        expect(decide(call(command), [], [])).toEqual(shell);
+      },
+    );
+
+    it.each([
+      ["mv -- -v renamed", "-v"],
+      ["mv -- important.txt gone", "important.txt"],
+      ["mv -v -- important.txt gone", "important.txt"],
+      ["rm -- important.txt", "important.txt"],
+      ["rm -f -- -v", "-v"],
+    ])("-- 之后的词一律是操作数，照操作数问删除：%s", (command, name) => {
+      expect(decide(call(command), [], [])).toEqual(deleteOf(name));
+    });
+
+    it("mv 只有 -- 没有操作数归 shell", () => {
+      expect(decide(call("mv --"), [], [])).toEqual(shell);
+    });
+
+    it.each([
+      "TZ=:/etc/passwd date",
+      "TZ=/etc/passwd date",
+      "TZ=../../../../etc/passwd date",
+      "TZ=:../../../../etc/passwd date",
+      "LC_ALL=/etc/passwd ls",
+      "LANG=/etc/passwd ls",
+      "LC_CTYPE=$OUT/secret-file.txt ls",
+      "LANG=en_US.UTF-8 LC_ALL=/etc/passwd ls",
+    ])("语言和时区前缀的值是区外路径，归 shell：%s", (command) => {
+      expect(decide(call(at(command)), [], [])).toEqual(shell);
+    });
+
+    it.each(["TZ=Asia/Shanghai date", "TZ=America/Argentina/Buenos_Aires date", "TZ=UTC date", "LANG=C ls"])(
+      "时区名带 / 照旧放行：%s",
+      (command) => {
+        expect(decide(call(command), [], [])).toMatchObject({ verdict: "allow", action: "read" });
+      },
+    );
+  });
+
+  describe("一条命令里要问的段不止一种时，审批卡不只取装包那一段的说明", () => {
+    const TOOLBOX_REASON = "联网安装到这个 Bot 自己的工具箱";
+    const NODE_REASON = "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本";
+
+    it("云电脑上 pip install 接一段放行的命令：说明保留", () => {
+      expect(decide(cloud("pip install six && ls -l"), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: `${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}`,
+        access: { network: true, writePaths: [toolboxDir()] },
+      });
+    });
+
+    it("云电脑上 npm、pnpm、yarn 的装包卡写明会联网、会跑项目和包的安装脚本；Mac 上照旧没有说明", () => {
+      for (const command of ["npm install left-pad", "pnpm add left-pad", "yarn add left-pad", "npm ci"]) {
+        expect(decide(cloud(command), [], []), command).toEqual({
+          verdict: "ask",
+          action: "install",
+          target: null,
+          reason: `${NODE_REASON}。批准后放开：联网`,
+          access: { network: true, writePaths: [] },
+        });
+      }
+      expect(decide(mac("npm install left-pad"), [], []).reason).toBeNull();
+      expect(decide(cloud(at("npm install left-pad && cat $OUT/secret-file.txt")), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: `${NODE_REASON}。批准后放开：联网`,
+        access: { network: true, writePaths: [] },
+      });
+    });
+  });
+});
+
+describe("三路复核确认的漏：mv 的目标选项、语言时区前缀的值、多段命令的卡", () => {
+  const toolboxDir = (): string => join(root, "bot-1", "toolbox");
+  const cloud = (command: string): GateCall => ({
+    ...gateContext({ platform: "linux" }),
+    toolName: "bash",
+    input: { command },
+    sandbox: "bwrap",
+    containment: { level: "closed", searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin", toolboxDir: toolboxDir() },
+    source: null,
+    routine: null,
+  });
+  const mac = (command: string): GateCall => ({
+    ...cloud(command),
+    platform: "darwin",
+    sandbox: "seatbelt",
+    containment: { level: "none" },
+  });
+  const both = [
+    ["Mac", mac],
+    ["云电脑", cloud],
+  ] as const;
+  const NONE = { network: false, writePaths: [] };
+  const shell = { verdict: "ask", action: "shell", target: null, reason: null, access: NONE };
+  const at = (command: string): string => command.replaceAll("$OUT", outsideDir);
+  const outside = (name: string): string => join(realpathSync(outsideDir), name);
+
+  beforeAll(() => {
+    mkdirSync(join(workDir, "sub"), { recursive: true });
+    mkdirSync(join(workDir, "moved"), { recursive: true });
+    writeFileSync(join(workDir, "important.txt"), "keep\n");
+    writeFileSync(join(workDir, "-v"), "plain\n");
+  });
+  afterAll(() => {
+    rmSync(join(workDir, "-v"));
+  });
+
+  describe.each(both)("%s", (_label, call) => {
+    it.each([
+      "mv -- -v",
+      "mv -tsub -- -v",
+      "mv important.txt",
+      "mv -tsub important.txt",
+      "mv -tmoved important.txt",
+      "mv -t/etc important.txt",
+      "mv -t moved important.txt",
+      "mv -vt moved important.txt",
+      "mv --target-directory=moved important.txt",
+      "mv --target-directory moved important.txt",
+      "mv --target=moved important.txt",
+      "mv -T important.txt moved",
+      "mv --no-target-directory important.txt moved",
+      "mv -S x important.txt moved",
+      "cp -t sub important.txt",
+      "cp -tsub important.txt",
+      "cp --target-directory=sub important.txt",
+      "cp -T important.txt sub",
+      "cp -- important.txt",
+      "ln -s -t sub important.txt",
+      "ln -st sub important.txt",
+      "ln -s --target-directory=sub important.txt",
+      "ln -sT important.txt n",
+      "install -t sub important.txt",
+      "install -tsub important.txt",
+      "install --target-directory=sub important.txt",
+      "install -T important.txt n",
+      "install -- important.txt n",
+    ])("目标选项和操作数不够两个的 mv、cp、ln、install 归 shell：%s", (command) => {
+      expect(decide(call(command), [], [])).toEqual(shell);
+    });
+
+    it("mv 的常规选项照旧按操作数问删除", () => {
+      expect(decide(call("mv -f important.txt gone"), [], [])).toEqual({
+        verdict: "ask",
+        action: "delete",
+        target: pathTarget(join(realpathSync(workDir), "important.txt")),
+        reason: null,
+        access: NONE,
+      });
+    });
+
+    it.each([
+      "TZ=:../misc/magic date",
+      "TZ=:.. date",
+      "TZ=.. date",
+      "TZ=~/x date",
+      "TZ=:~/x date",
+      "TZ=Asia/../../x date",
+      "TZ=Asia/ date",
+      "TZ=Asia//Shanghai date",
+      "LANG=~ ls",
+      "LC_ALL=~ ls",
+      "LANG=~/x ls",
+      "LC_MESSAGES=a:b ls",
+    ])("语言和时区前缀的值不在白名单字符里，归 shell：%s", (command) => {
+      expect(decide(call(command), [], [])).toEqual(shell);
+    });
+
+    it.each([
+      "TZ=UTC date",
+      "TZ=:UTC date",
+      "TZ=Asia/Shanghai date",
+      "TZ=Etc/GMT+8 date",
+      "TZ=America/Argentina/Buenos_Aires date",
+      "LANG=C.UTF-8 date",
+      "LC_ALL=en_US.UTF-8 date",
+      "LC_ALL=sr_RS@latin date",
+    ])("常见的语言和时区照旧放行：%s", (command) => {
+      expect(decide(call(command), [], [])).toEqual({
+        verdict: "allow",
+        action: "read",
+        target: null,
+        reason: null,
+        access: NONE,
+      });
+    });
+  });
+
+  describe("多段命令的卡：动作取最严的那段，说明去重拼上，再加一句批准后放开什么", () => {
+    const TOOLBOX_REASON = "联网安装到这个 Bot 自己的工具箱";
+
+    it("云电脑上 pip install 加区外重定向：卡上写外部文件，说明带装包和放开的权限", () => {
+      expect(decide(cloud(at("pip install six > $OUT/cron-x")), [], [])).toEqual({
+        verdict: "ask",
+        action: "write_outside",
+        target: pathTarget(outside("cron-x")),
+        reason: `${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}、写 ${outside("cron-x")}`,
+        access: { network: true, writePaths: [toolboxDir(), outside("cron-x")] },
+      });
+    });
+
+    it("Mac 上 pip install 加区外重定向：卡上写外部文件，只放开那一处写", () => {
+      expect(decide(mac(at("pip install six > $OUT/cron-x")), [], [])).toEqual({
+        verdict: "ask",
+        action: "write_outside",
+        target: pathTarget(outside("cron-x")),
+        reason: `批准后放开：写 ${outside("cron-x")}`,
+        access: { network: false, writePaths: [outside("cron-x")] },
+      });
+    });
+
+    it("区外读接 pip install：卡上写安装，不写读", () => {
+      expect(decide(cloud(at("cat $OUT/secret-file.txt && pip install six")), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: `${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}`,
+        access: { network: true, writePaths: [toolboxDir()] },
+      });
+      expect(decide(mac(at("cat $OUT/secret-file.txt && pip install six")), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: null,
+        access: NONE,
+      });
+    });
+
+    it("npm install 接 npm run build：卡上写运行命令，装包的说明留着", () => {
+      expect(decide(cloud("npm install && npm run build"), [], [])).toEqual({
+        verdict: "ask",
+        action: "shell",
+        target: null,
+        reason: "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本。批准后放开：联网",
+        access: { network: true, writePaths: [] },
+      });
+      expect(decide(mac("npm install && npm run build"), [], [])).toEqual(shell);
+    });
+
+    it("两段装包说明相同只写一次", () => {
+      expect(decide(cloud("pip install six && pip install seven"), [], [])).toEqual({
+        verdict: "ask",
+        action: "install",
+        target: null,
+        reason: `${TOOLBOX_REASON}。批准后放开：联网、写 ${toolboxDir()}`,
+        access: { network: true, writePaths: [toolboxDir()] },
+      });
+    });
+
+    it("两段装包说明里重复的那句只写一次，不同的那句留着", () => {
+      expect(decide(cloud("pip install six && pip install -e ."), [], []).reason).toBe(
+        `${TOOLBOX_REASON}。装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码。批准后放开：联网、写 ${toolboxDir()}`,
+      );
+    });
+
+    it("删除排在区外写前面", () => {
+      expect(decide(cloud(at("echo x > $OUT/a && rm important.txt")), [], [])).toEqual({
+        verdict: "ask",
+        action: "delete",
+        target: pathTarget(join(realpathSync(workDir), "important.txt")),
+        reason: `批准后放开：写 ${outside("a")}`,
+        access: { network: false, writePaths: [outside("a")] },
+      });
+    });
+
+    it("单段命令也带权限摘要，什么都不放开的不带", () => {
+      expect(decide(cloud("curl https://example.com"), [], [])).toMatchObject({
+        verdict: "ask",
+        action: "shell",
+        reason: "批准后放开：联网",
+      });
+      expect(decide(mac("curl https://example.com"), [], [])).toMatchObject({
+        verdict: "ask",
+        action: "shell",
+        reason: "批准后放开：联网",
+      });
+      expect(decide(mac(at("echo x > $OUT/b")), [], [])).toMatchObject({
+        verdict: "ask",
+        action: "write_outside",
+        reason: `批准后放开：写 ${outside("b")}`,
+      });
+      expect(decide(mac("rm important.txt"), [], [])).toMatchObject({ verdict: "ask", reason: null });
     });
   });
 });
