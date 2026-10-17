@@ -1,10 +1,13 @@
 import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
+import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import { runs } from "../db/schema.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
 import { dispatchUserMessage, type DispatchOutcome } from "../agent/dispatch.js";
 import { SELECTION_FAILURE } from "../agent/computer-selection.js";
 import type { GroupTurns } from "../agent/group-turn.js";
+import { continuesAfter } from "../agent/continuation.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { isOverBudget } from "../repo/usage.js";
 import {
@@ -15,6 +18,7 @@ import {
   noteRoutineRun,
   OVER_BUDGET_NOTE,
   openRoutineRun,
+  pushRoutineUpdated,
   recordStoppedRoutineRun,
   routineRunOfRun,
   settleRoutineRun,
@@ -130,28 +134,35 @@ export async function runRoutine(
   return loaded.routine;
 }
 
+/** 结过账的例行 run。notify：这次结账该弹「做完了」。 */
+export type ChargedRoutineRun = RoutineRunRef & { readonly notify: boolean };
+
 /**
- * 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费。
- * 回 null 说明这个 run 不是例行任务派的。
+ * 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费；
+ * 后面还有接续的只缀花费，等接续那一轮收尾。回 null 说明这个 run 不是例行任务派的。
  * 在 run_done 的结账事务里记：note 是往后缀的，自身不幂等，只记一次靠这个事务的 claimCharge。
  * 推送留给调用方在提交之后做（pushRoutineUpdated），事务回滚了页面不能先看到「ok · ¥0.60」。
  */
-export async function chargeRoutineRunIn(tx: Tx, runId: RunId, amount: number): Promise<RoutineRunRef | null> {
+export async function chargeRoutineRunIn(tx: Tx, runId: RunId, amount: number): Promise<ChargedRoutineRun | null> {
   const ref = await routineRunOfRun(tx, runId);
   if (ref === null) return null;
-  await chargeRoutineRun(tx, ref.routineRunId, `¥${amount.toFixed(2)}`);
-  return ref;
+  const continues = await continuesAfter(tx, runId);
+  const charged = await chargeRoutineRun(tx, ref.routineRunId, `¥${amount.toFixed(2)}`, continues);
+  return { ...ref, notify: charged?.notify ?? false };
 }
 
-export async function pushRoutineUpdated(deps: RoutineDeps, routineId: string): Promise<void> {
-  await pushIfChanged(deps, routineId);
-}
-
-export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<RoutineRunRef | null> {
-  const ref = await routineRunOfRun(deps.db, runId);
-  if (ref === null) return null;
-  await pushIfChanged(deps, await failRoutineRun(deps.db, ref.routineRunId, reason));
-  return ref;
+/**
+ * 单条 run 出错（不带 runId 的报错、审批过期）记例行失败。还欠着接续的不记：活换到另一台电脑接着做，
+ * 结局由链尾定，和 abandonRun 一样。先锁 run 行再看标记，和请求换电脑同一把锁，判完不欠之后标记立不起来。
+ */
+export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<void> {
+  const routineId = await deps.db.transaction(async (tx) => {
+    await tx.select({ id: runs.id }).from(runs).where(eq(runs.id, runId)).for("no key update");
+    const ref = await routineRunOfRun(tx, runId);
+    if (ref === null || (await continuesAfter(tx, runId))) return null;
+    return failRoutineRun(tx, ref.routineRunId, reason);
+  });
+  await pushRoutineUpdated(deps, routineId);
 }
 
 /**
@@ -165,17 +176,5 @@ export async function holdRoutineRunOf(deps: RoutineDeps, runId: RunId): Promise
     ref.onFailure === "stop_and_tell"
       ? await settleRoutineRun(deps.db, ref.routineRunId, "stopped", WAITING_APPROVAL_NOTE)
       : await noteRoutineRun(deps.db, ref.routineRunId, RETRY_NEXT_TIME_NOTE);
-  await pushIfChanged(deps, changed);
-}
-
-/**
- * 每次状态或 note 变了就把整条例行任务推一遍，客户端整条替换。没改动就不推。
- * 运行记录变了就可能刚好凑满三次没人看，自己停下的那一下和这次收尾合成一次推送。
- */
-async function pushIfChanged(deps: RoutineDeps, routineId: string | null): Promise<void> {
-  if (routineId === null) return;
-  await autoPauseIfUnseen(deps.db, routineId);
-  const loaded = await loadRoutine(deps.db, RoutineId.parse(routineId));
-  if (loaded === null) return;
-  deps.push.push(loaded.ownerId, { type: "routine_updated", routine: loaded.routine });
+  await pushRoutineUpdated(deps, changed);
 }

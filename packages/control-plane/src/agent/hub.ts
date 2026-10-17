@@ -49,6 +49,7 @@ import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
+import { resumePendingContinuations } from "./dispatch.js";
 import {
   acceptUplinkFrame,
   acknowledgeDownlink,
@@ -515,6 +516,11 @@ export class AgentHub {
     return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
 
+  /** 停机开始后为 true：这之后派不出去可能只是连接被停机收掉了，不能当成确定的结局。 */
+  get closing(): boolean {
+    return this.#lifecycle === "closing";
+  }
+
   /**
    * 先进停机，这一刻起 message、close 回调都不再往 inbox 和链上排，宽限计时器也全清掉、不再新建，
    * 所以要等的就是此刻各 socket 还没做完的那一步，和链上已经排着的任务，两个集合都是有限的，各等一次就够：
@@ -728,6 +734,10 @@ export class AgentHub {
       await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
         console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
       );
+      // 结账提交后进程没了的那种接续，等目标电脑上线这一刻补起。
+      await resumePendingContinuations(this.#routineDeps(), computer.ownerId).catch((error: unknown) =>
+        console.error(`电脑 ${computer.id} 上线时补起接续出错：${errorKind(error)}`),
+      );
       return accepted;
     } catch (error) {
       // 握手没走完，conn 留空，这条 socket 的关闭回调什么都不做。表里还挂着它的话照断线处理一遍：出表、记休眠、起宽限收尾。
@@ -831,7 +841,11 @@ export class AgentHub {
       if (error instanceof TransactionRollbackError) return;
       throw error;
     }
-    for (const effect of afterCommit) await effect();
+    // 每个 run 的收尾已经提交，一个推送出错不能让后面的 run 连接续都不起。
+    for (const effect of afterCommit)
+      await effect().catch((error: unknown) =>
+        console.error(`电脑 ${computerId} 断连收尾后推送出错：${errorKind(error)}`),
+      );
   }
 
   async #finishMissingRuns(

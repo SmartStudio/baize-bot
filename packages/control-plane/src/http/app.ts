@@ -85,6 +85,7 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
+import { clearGroupContinuations } from "../agent/continuation.js";
 import type { AgentHub } from "../agent/hub.js";
 import { computerAvailability, withDispatchable } from "../agent/computer-availability.js";
 import type { LiveRelay } from "../live/relay.js";
@@ -115,11 +116,13 @@ import {
   listOwnerRoutines,
   listRoutines,
   loadRoutine,
+  pushRoutineUpdated,
+  TABLE_GROUP_ERROR,
   updateRoutine,
   type OwnedRoutine,
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
-import { pushRoutineUpdated, runRoutine } from "../routines/run.js";
+import { runRoutine } from "../routines/run.js";
 import { decidePreferenceOffer, findOwnedPreferenceOffer } from "../repo/preferences.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
@@ -222,7 +225,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
-  app.route(HUB_PATH, createHub({ db }));
+  app.route(HUB_PATH, createHub({ db, agents, push: hub }));
   app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(
@@ -659,11 +662,12 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       if (target === null) return c.json(NOT_FOUND, 404);
       if (!target.group.botIds.includes(botId.data)) return c.json({ error: "这个 Bot 不在那个群里" }, 400);
     }
-    const routine = await createRoutine(db, c.get("user").id, botId.data, body.value);
+    const created = await createRoutine(db, c.get("user").id, botId.data, body.value);
     // 预检之后 Bot 被删完了，和一开始就不存在一样回 404。
-    if (routine === null) return c.json(NOT_FOUND, 404);
-    hub.push(c.get("user").id, { type: "routine_updated", routine });
-    return c.json(RoutineResponse.parse({ routine }), 201);
+    if (created.kind === "bot_gone") return c.json(NOT_FOUND, 404);
+    if (created.kind === "table_group") return c.json({ error: TABLE_GROUP_ERROR }, 400);
+    hub.push(c.get("user").id, { type: "routine_updated", routine: created.routine });
+    return c.json(RoutineResponse.parse({ routine: created.routine }), 201);
   });
 
   app.patch("/api/routines/:id", async (c) => {
@@ -956,6 +960,9 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
         ? ({ kind: "user", text: body.value.text } as const)
         : ({ kind: "user", text: body.value.text, mentions } as const);
     deps.groupTurns.cancel(groupId.data);
+    // 用户又说了话，之前请求换电脑后要接着做的那段活作废，不再自动起。
+    for (const routineId of await clearGroupContinuations(db, groupId.data))
+      await pushRoutineUpdated(routineDeps, routineId);
 
     const message = await appendMessageIfGroupAlive(db, owned, sent);
     if (message === null) return c.json(NOT_FOUND, 404);
@@ -967,14 +974,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       hub.push(c.get("user").id, { type: "skill_updated", skill });
     }
 
-    const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
-    if (!settled)
-      await dispatchUserMessage(
-        { db, push: hub, agents, groupTurns: deps.groupTurns },
-        c.get("user").id,
-        groupId.data,
-        message,
-      );
+    const settled = await settleByReply(routineDeps, c.get("user").id, owned, body.value.text);
+    if (!settled) await dispatchUserMessage(routineDeps, c.get("user").id, groupId.data, message);
     return c.json(SendMessageResponse.parse({ message }), 201);
   });
 
@@ -987,7 +988,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = await readJson(c.req.raw, DecideApprovalRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 
-    const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value);
+    const settled = await settleApproval(routineDeps, c.get("user").id, owned, body.value);
     if (settled.kind === "already_decided")
       return c.json({ error: "这条审批已经有结论了", approval: settled.approval }, 409);
     if (settled.kind === "scope_not_allowed") return c.json({ error: settled.error }, 400);

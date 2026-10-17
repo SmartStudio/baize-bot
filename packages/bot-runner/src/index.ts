@@ -44,7 +44,7 @@ import {
   renderMemory,
   writeBrandFile,
 } from "./memory.js";
-import { renderComputerSection } from "./computer.js";
+import { renderComputerSection, switchComputerTool } from "./computer.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
@@ -348,6 +348,9 @@ function composePrompt(
     case "mentioned":
     case "handoff":
       break;
+    // 换电脑后的接续：上一轮的对话都在会话里，整段提示就是控制面给的那句话，群标签、任务卡都不重复。
+    case "continuation":
+      return message.text;
     case "chief":
       sections.push(
         "没人点名，你是这个群的首席，先到你。自己能答就直接答；需要谁补充就 @ 谁；要大家都表态就 @所有人。别为了显得周到把每个人都点一遍。",
@@ -867,6 +870,18 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
+      switchComputerTool({
+        live: () => {
+          const active = lane.active;
+          if (active === null || !liveRuns.has(active.run.runId) || active.control.signal.aborted) return null;
+          return {
+            runId: active.run.runId,
+            signal: active.control.signal,
+            gateway: (desiredConfig(bot) ?? runConfig()).gateway,
+            headers: laneFence.headers(active.run.runId),
+          };
+        },
+      }),
       createRecallTool({
         recalls: lane.recalls,
         live: () => {

@@ -90,7 +90,7 @@ export async function sendHiddenRun(deps: HiddenRunDeps, input: HiddenRunInput):
     if (error instanceof TransactionRollbackError) return { kind: "busy" };
     throw error;
   }
-  if (started.kind === "not_member") return { kind: "skipped" };
+  if (started.kind === "not_member" || started.kind === "continued") return { kind: "skipped" };
   if (started.kind === "unplaced") return { kind: "unplaced", reason: started.reason };
   if (deps.agents.flushOutbox)
     for (const computerId of started.flushComputerIds) await deps.agents.flushOutbox(computerId);

@@ -15,8 +15,17 @@ export interface GatewayModel {
   readonly id: string;
 }
 
+/** 到中枢的一次请求：换电脑这类工具打的是网关同源的 /hub/v1。 */
+export interface HubRequest {
+  readonly path: string;
+  readonly key: string;
+  readonly lane: string | undefined;
+  readonly body: unknown;
+}
+
 export interface Gateway {
   readonly baseUrl: string;
+  readonly hubRequests: readonly HubRequest[];
   readonly usage: readonly UsageRecord[];
   readonly laneHeaders: readonly (string | undefined)[];
   readonly laneRequests: readonly { readonly body: ChatCompletionRequest; readonly header: string | undefined }[];
@@ -47,8 +56,11 @@ export async function startGateway(options: {
   failFirst?: number;
   failStatus?: 401 | 500 | 503;
   failMessage?: string;
+  /** 中枢的假应答。没给就 404。 */
+  hub?: (request: HubRequest) => { readonly status: number; readonly body: unknown };
 }): Promise<Gateway> {
   const usage: UsageRecord[] = [];
+  const hubRequests: HubRequest[] = [];
   const laneHeaders: (string | undefined)[] = [];
   const laneRequests: Array<{ body: ChatCompletionRequest; header: string | undefined }> = [];
   const rawRequests: string[] = [];
@@ -64,6 +76,20 @@ export async function startGateway(options: {
           data: options.models.map((m) => ({ id: m.id, object: "model", owned_by: "baize" })),
         }),
       );
+      return;
+    }
+    if (req.method === "POST" && url.startsWith("/hub/v1/") && options.hub !== undefined) {
+      const laneHeader = req.headers["x-baize-lane"];
+      const request: HubRequest = {
+        path: url,
+        key: bearer(req),
+        lane: Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader,
+        body: JSON.parse(await readBody(req)) as unknown,
+      };
+      hubRequests.push(request);
+      const reply = options.hub(request);
+      res.writeHead(reply.status, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply.body));
       return;
     }
     if (req.method !== "POST" || !url.startsWith("/v1/chat/completions")) {
@@ -123,6 +149,7 @@ export async function startGateway(options: {
 
   return {
     baseUrl: `http://127.0.0.1:${port}/v1`,
+    hubRequests,
     usage,
     laneHeaders,
     laneRequests,

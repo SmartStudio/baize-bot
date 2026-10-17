@@ -17,6 +17,7 @@ import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
 import { CHOSEN_OFFLINE, type ComputerSelection, type SelectionFailure } from "./computer-selection.js";
+import { clearBotContinuations, takeContinuation } from "./continuation.js";
 import { enqueueDownlink } from "./envelope.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
@@ -27,6 +28,8 @@ export type PlaceRunInput = {
   readonly triggerMessageId?: MessageId;
   readonly routineRunId?: string | undefined;
   readonly table?: { readonly role: PokerTableRole; readonly visibleTo: readonly [Viewer, ...Viewer[]] };
+  /** 换电脑后的接续接的是哪一轮。落行时认领那一轮的标记、沿用它的运行记录，认领不到就不建。 */
+  readonly continuesRunId?: RunId;
   readonly prompt: (runId: RunId, messageId: MessageId, placed: Placement) => Promise<Omit<Prompt, "runId" | "lane">>;
 };
 
@@ -42,7 +45,8 @@ export type PlaceRunResult =
       readonly flushComputerIds: readonly ComputerId[];
     }
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
-  | { readonly kind: "not_member" };
+  | { readonly kind: "not_member" }
+  | { readonly kind: "continued" };
 
 /** 这个 Bot 在这个群里选定的电脑。null 是没选过，走默认策略。 */
 export type ComputerPreference = ComputerKind | null;
@@ -169,6 +173,7 @@ export async function placeRun(
       : (await appendMessage(tx, input.groupId, { kind: "system", text: "牌桌回合" }, [...input.table.visibleTo])).id;
   if (triggerMessageId === undefined) throw new Error("派活缺少触发消息");
   const runId = await startRun(tx, input, computerId, triggerMessageId);
+  if (runId === null) return { kind: "continued" };
   const heads: Prompt["lane"]["heads"] = {};
   for (const stream of await tx
     .select()
@@ -193,7 +198,9 @@ async function startRun(
   input: PlaceRunInput,
   computerId: ComputerId,
   triggerMessageId: MessageId,
-): Promise<RunId> {
+): Promise<RunId | null> {
+  const continued = input.continuesRunId === undefined ? null : await takeContinuation(tx, input.continuesRunId);
+  if (input.continuesRunId !== undefined && continued === null) return null;
   const [row] = await tx
     .insert(runs)
     .values({
@@ -203,11 +210,13 @@ async function startRun(
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId,
-      routineRunId: input.routineRunId ?? null,
-      isRoutine: input.routineRunId !== undefined,
+      // 接续只认父链：父链没挂例行就是 null，不回退到这一回合的例行记录。
+      routineRunId: continued === null ? (input.routineRunId ?? null) : continued.routineRunId,
+      isRoutine: continued === null ? input.routineRunId !== undefined : continued.isRoutine,
       startedAt: new Date(),
       visibleTo: input.table === undefined ? null : [...input.table.visibleTo],
       tableRole: input.table?.role ?? null,
+      continuesRunId: input.continuesRunId ?? null,
     })
     .onConflictDoNothing()
     .returning({ id: runs.id });
@@ -236,5 +245,6 @@ export async function cancelLanes(tx: Tx, ownerId: UserId, botId: BotId): Promis
       lane: { botId, groupId: GroupId.parse(lease.groupId) },
       epoch: lease.epoch + 1,
     });
+  await clearBotContinuations(tx, botId);
   return [...new Set(leases.map((lease) => ComputerId.parse(lease.holderComputerId)))];
 }

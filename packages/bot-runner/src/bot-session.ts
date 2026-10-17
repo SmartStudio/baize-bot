@@ -22,6 +22,7 @@ import { join } from "node:path";
 import type { TSchema } from "typebox";
 import type { ApprovalGate } from "./approvals.js";
 import { ASSISTANT_RULE } from "./assistant.js";
+import { SWITCH_BATCH_REASON, SWITCH_COMPUTER_TOOL } from "./computer.js";
 import { DRAFT_RULE } from "./drafts.js";
 import type { GateAccess, GateDecision } from "./gate.js";
 import { installLaneHeaders, installLaneToolSettled, type LaneSessionFence } from "./lane-fence.js";
@@ -165,10 +166,20 @@ function gateToolCalls(
   gate: SessionGate,
   allowed: (runId: string, callId: string, toolName: string, decision: GateDecision, approval: BashApproval) => void,
 ): void {
+  // 模型一条回复里发出的那批工具调用有几个，换电脑必须是这批里唯一的一个。按个数数不按 id：上游不给 id 时 Pi 记成空串。
+  let batchSize = 0;
+  pi.on("message_end", (event) => {
+    if (event.message.role !== "assistant") return;
+    batchSize = event.message.content.filter((block) => block.type === "toolCall").length;
+  });
   pi.on("tool_call", async (event, ctx) => {
     const active = gate.activeRun();
     if (active === null) {
       return { block: true, reason: "这次工具调用不属于任何一次运行，没法送审批。" };
+    }
+    if (event.toolName === SWITCH_COMPUTER_TOOL && batchSize > 1) {
+      gate.approvals.block(active.run.runId, event.toolCallId);
+      return { block: true, reason: SWITCH_BATCH_REASON };
     }
     if (!(await gate.waitUntilRunning(ctx.signal))) {
       gate.approvals.block(active.run.runId, event.toolCallId);
