@@ -5,6 +5,7 @@ import {
   ServerPush,
   type AccountId,
   type ComputerId,
+  type ComputerKind,
   type AccountTier,
   type BrowserPlatform,
   type ApprovalId,
@@ -135,6 +136,10 @@ export type AppActions = {
   copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   loadPreferences: (botId: BotId) => Promise<void>;
   deletePreference: (preference: Preference) => Promise<void>;
+  // 这个群里每个成员选的电脑和正在跑的那台。进群、重连、几种推送之后各拉一次，after 是触发它的那个号。
+  loadComputerChoices: (groupId: GroupId, after: Seq) => Promise<void>;
+  // 409 的中文原文抛给选择器照登。
+  chooseComputer: (groupId: GroupId, botId: BotId, kind: ComputerKind) => Promise<void>;
   // 手册回来的都是整本，走同一个 brand_set，切片只收版本更新的那本。读回的那本也交给弹窗当底稿；保存 409 时抛给弹窗。
   loadBrand: () => Promise<BrandBook | null | undefined>;
   updateBrand: (body: UpdateBrandRequest) => Promise<void>;
@@ -707,6 +712,23 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         }
         put({ type: "preference_removed", botId: preference.botId, preferenceId: preference.id, seq: nextSeq() });
       }),
+      loadComputerChoices: signedIn((scope, groupId: GroupId, after: Seq) =>
+        loadBucket(
+          scope,
+          `computer-choices:${groupId}`,
+          after,
+          async (seq) => {
+            const choices = await scope.api.computerChoices(groupId);
+            scope.put({ type: "computer_choices_loaded", groupId, choices, seq });
+          },
+          REFRESH_TRIES,
+        ),
+      ),
+      chooseComputer: signedIn(async ({ api, put }, groupId: GroupId, botId: BotId, kind: ComputerKind) => {
+        const seq = nextSeq();
+        await api.putComputerChoice(groupId, botId, { kind });
+        put({ type: "computer_choice_set", groupId, botId, kind, seq });
+      }),
       loadBrand: signedIn(async ({ api, put }) => {
         const brand = await api.brand();
         put({ type: "brand_set", brand });
@@ -938,7 +960,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
     };
     // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
     // 画面一起重拉：断线期间开关过的画面也收不到推送，还开着的那次登录不算没等到，见 logins_settled。
-    // 重拉失败也结，卡不能一直停在「等你扫码」；重拉期间新点的登录 startedAt 更大，不受影响。
+    // 重拉失败也结，卡不能一直停在「等你登录」；重拉期间新点的登录 startedAt 更大，不受影响。
     const recoverLogins = (computerId: ComputerId | null, flow: "offline" | "lapsed") => {
       const before = nextSeq();
       const seq = nextSeq();
@@ -965,6 +987,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       stateRef,
       refreshPendingCounts,
       recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
+      reloadChoices: (groupId, after) => void actions.loadComputerChoices(groupId, after).catch(() => undefined),
     });
     const retryLater = () => {
       retry = setTimeout(open, reconnectDelay(failures));

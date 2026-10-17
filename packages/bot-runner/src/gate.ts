@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   GRANTABLE_SCOPES,
   AccountId,
@@ -14,6 +16,12 @@ import {
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
+import {
+  type Containment,
+  looksLikeDeleteOrMove,
+  SYSTEM_PACKAGE_MANAGERS,
+  SYSTEM_PACKAGE_REASON,
+} from "./contained.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { TAKEOVER_TOOL } from "./takeover.js";
 import {
@@ -23,6 +31,7 @@ import {
   logicalResolve,
   PathError,
   realpathExisting,
+  resolveLikeKernel,
 } from "./paths.js";
 
 export interface GateAccess {
@@ -47,6 +56,8 @@ export type ToolSource =
 
 export interface GateCall extends GateContext {
   readonly sandbox: SandboxKind;
+  /** 这台电脑的 bash 是不是跑在云电脑的封闭沙箱里。必填：漏传等于默认放宽，Mac 上一条都不许放宽。closed 时由 createSandboxedBash 给出。 */
+  readonly containment: Containment;
   readonly toolName: string;
   readonly input: Record<string, unknown>;
   /**
@@ -64,6 +75,7 @@ export interface GateDecision {
   readonly verdict: Verdict;
   readonly action: ActionKind;
   readonly target: GrantTarget | null;
+  /** deny 时是拦下的理由；ask 时是审批卡上的补充说明，没有就 null。 */
   readonly reason: string | null;
   readonly access: GateAccess;
 }
@@ -73,10 +85,12 @@ interface ClassifiedAction {
   readonly target: GrantTarget | null;
   readonly path: string | null;
   readonly access: GateAccess;
+  readonly reason?: string;
 }
 
 const NO_ACCESS: GateAccess = { network: false, writePaths: [] };
 const HARD_ACTIONS = new Set<ActionKind>(["spend", "account_security", "delete"]);
+const RELAXABLE_ACTIONS = new Set<ActionKind>(["read", "shell"]);
 const COMMAND_SEPARATORS = new Set(["|", "|&", "&&", "||", ";"]);
 const INPUT_REDIRECTS = new Set(["<", "<<<", "<&"]);
 const OUTPUT_REDIRECTS = new Set([">", ">>", ">&"]);
@@ -109,6 +123,7 @@ const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm"
 export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
   "recall_memory",
+  "switch_computer",
   "update_checklist",
   "mention_bot",
   "handoff_task",
@@ -193,6 +208,16 @@ const pathAction = (action: ActionKind, path: string, call: GateContext): Classi
   resolvedPathAction(action, realpathExisting(logicalResolve(path, call.workDir)), call);
 
 const readPath = (path: string, call: GateContext): ClassifiedAction => pathAction("read", path, call);
+
+const shellPath = (word: string, call: GateContext): string => resolveLikeKernel(word, call.workDir);
+
+const isDirectory = (path: string): boolean => {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+};
 
 const writePath = (path: string, call: GateContext): ClassifiedAction => {
   const logical = logicalResolve(path, call.workDir);
@@ -313,6 +338,67 @@ const hasUnclosedQuote = (command: string): boolean => {
   return quote !== null || escaped;
 };
 
+const WORD_BREAKS = new Set([" ", "\t", "|", "&", ";", "<", ">", "(", ")"]);
+
+/**
+ * shell-quote 把没加引号的 `{a,b}`、`{1..3}`、`~user`、`[ab]` 原样当成一个词交出来，bash 却会展开它们，
+ * `cat {a.txt,/etc/passwd}` 就读到了工作区外。这里按引号状态扫一遍原文，碰到这几种展开就当认不出。
+ * `~` 和 `~/x` 由路径解析自己处理，单独的 `{`、`}`、`{a}`、`x{}y` 不会展开，照旧放过。
+ */
+const hasUnquotedExpansion = (command: string): boolean => {
+  let quote: "single" | "double" | null = null;
+  let escaped = false;
+  let wordStart = true;
+  let braces: Array<{ expands: boolean }> = [];
+  let bracket = false;
+  const characters = [...command];
+  for (let index = 0; index < characters.length; index += 1) {
+    const char = characters[index] ?? "";
+    const next = characters[index + 1] ?? "";
+    if (escaped) {
+      escaped = false;
+      wordStart = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "single") {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && quote !== "double") {
+      quote = quote === "single" ? null : "single";
+      wordStart = false;
+      continue;
+    }
+    if (char === '"' && quote !== "single") {
+      quote = quote === "double" ? null : "double";
+      wordStart = false;
+      continue;
+    }
+    if (quote !== null) continue;
+    if (WORD_BREAKS.has(char)) {
+      wordStart = true;
+      braces = [];
+      bracket = false;
+      continue;
+    }
+    const previous = characters[index - 1];
+    if (char === "~" && (wordStart || previous === "=" || previous === ":")) {
+      if (next !== "" && next !== "/" && !WORD_BREAKS.has(next)) return true;
+    }
+    if (char === "{") braces.push({ expands: false });
+    else if (char === "}") {
+      if (braces.pop()?.expands) return true;
+    } else if (braces.length > 0 && (char === "," || (char === "." && next === "."))) {
+      const top = braces[braces.length - 1];
+      if (top !== undefined) top.expands = true;
+    }
+    if (char === "[") bracket = true;
+    else if (char === "]" && bracket) return true;
+    wordStart = false;
+  }
+  return false;
+};
+
 const hasUnsafeCommandSeparator = (command: string): boolean =>
   [...command].some((character) => {
     const codePoint = character.codePointAt(0);
@@ -342,6 +428,8 @@ interface ParsedShell {
 }
 
 const parseShell = (command: string): ParsedShell | null => {
+  // shell-quote 不认反引号，`rm x` 会被拆成普通的词，命令替换就藏在了参数里。
+  if (command.includes("`")) return null;
   const tokens = shellTokens(command);
   if (tokens === null) return null;
   const commands: string[][] = [];
@@ -374,18 +462,12 @@ const parseShell = (command: string): ParsedShell | null => {
   return commands.length === 0 ? null : { commands, redirects };
 };
 
-const commandName = (raw: string): string => raw.slice(raw.lastIndexOf("/") + 1);
-const argumentsOf = (words: readonly string[]): readonly string[] =>
-  words.slice(1).filter((word) => !word.startsWith("-"));
-
-const likelyPath = (value: string): boolean =>
-  value === "." ||
-  value === ".." ||
-  value.startsWith("/") ||
-  value.startsWith("~") ||
-  value.startsWith("@") ||
-  value.includes("/") ||
-  value.includes(".");
+/** 命令的操作数：`--` 之前以 `-` 开头的是选项，`--` 之后的词一律是操作数。 */
+const argumentsOf = (words: readonly string[]): readonly string[] => {
+  const separator = words.indexOf("--", 1);
+  const options = separator === -1 ? words.slice(1) : words.slice(1, separator);
+  return [...options.filter((word) => !word.startsWith("-")), ...(separator === -1 ? [] : words.slice(separator + 1))];
+};
 
 const READ_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   ls: ["-a", "-A", "-l", "-h", "-1", "-R", "--all", "--almost-all", "--human-readable", "--long", "--recursive"],
@@ -414,7 +496,6 @@ const READ_OPTIONS: Readonly<Record<string, readonly string[]>> = {
     "-n",
     "-v",
     "-r",
-    "-R",
     "-E",
     "-F",
     "-w",
@@ -455,12 +536,6 @@ const EXECUTING_OPTIONS = /^(?:-+)(?:exec(?:dir)?|ok(?:dir)?|delete|command|run|
 const hasUnsafeOption = (name: string, words: readonly string[]): boolean => {
   if (words.some((word) => EXECUTING_OPTIONS.test(word))) return true;
   if (name === "date" && words.some((word) => word === "-f" || word === "--file")) return true;
-  if (
-    name === "git" &&
-    words.some((word) => ["-c", "--config-env", "--exec-path", "--ext-diff", "--textconv"].includes(word))
-  ) {
-    return true;
-  }
   return false;
 };
 
@@ -474,18 +549,113 @@ const hasUnknownSafeOption = (name: string, words: readonly string[]): boolean =
   return words.some((word) => word.startsWith("-") && !known.has(word));
 };
 
+const MUTATION_OPTIONS: Readonly<Record<string, readonly string[]>> = {
+  mkdir: ["-p"],
+  touch: ["-a", "-c", "-m"],
+  mv: ["-f", "-i", "-n", "-v", "--force", "--interactive", "--no-clobber", "--verbose", "--"],
+};
+
 const hasUnknownMutationOption = (name: string, words: readonly string[]): boolean => {
-  const known = name === "mkdir" ? new Set(["-p"]) : name === "touch" ? new Set(["-a", "-c", "-m"]) : new Set<string>();
+  const known = new Set(MUTATION_OPTIONS[name] ?? []);
   return words.some((word) => word.startsWith("-") && !known.has(word));
 };
 
-const classifyCommand = (words: readonly string[], call: GateContext): readonly ClassifiedAction[] => {
+const PREFIX_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
+// 前缀只放语言和时区：PAGER、GIT_DIR、LD_PRELOAD 这类能让一条读命令跑起别的程序或读别的仓库。值也只认名字：
+// glibc 把带 / 的 LANG、LC_* 当成 locale 文件的路径去打开，TZ 的值拼在 /usr/share/zoneinfo 下或者本身就是路径；
+// 赋值词里的 ~ 照样被 bash 展开成家目录。时区名本身带 /（Asia/Shanghai），所以 TZ 按段认，每段只许名字字符。
+const TZ_NAME = /^:?[A-Za-z0-9_+-]+(?:\/[A-Za-z0-9_+-]+)*$/;
+const LOCALE_NAME = /^[A-Za-z0-9_.@-]*$/;
+const harmlessPrefix = (word: string): boolean => {
+  const key = word.slice(0, word.indexOf("="));
+  const value = word.slice(key.length + 1);
+  if (key === "NO_COLOR") return true;
+  if (key === "TZ") return TZ_NAME.test(value);
+  return /^(?:LANG|LC_[A-Z]+)$/.test(key) && LOCALE_NAME.test(value);
+};
+
+const TOOLBOX_INSTALL_REASON = "联网安装到这个 Bot 自己的工具箱";
+const REQUIREMENTS_FILE_REASON = "requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源";
+const LOCAL_SOURCE_REASON = "装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码";
+const NODE_INSTALL_REASON = "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本";
+const PYTHON_INSTALLERS = new Set(["pip", "pip3"]);
+const NODE_INSTALLERS = new Set(["npm", "pnpm", "yarn"]);
+const NODE_INSTALL_VERBS = /^(add|install|ci|update|upgrade)$/;
+// pip 的短选项能合写（-qr req.txt、-rreq.txt），取值的那个字母之后都是值；长选项能写成不含歧义的前缀（--requirem、--cons）。
+const PIP_SHORT_WITH_VALUE = /^-[^-ceifrt]*([ceifrt])/;
+const pipShortOption = (arg: string): string | null => PIP_SHORT_WITH_VALUE.exec(arg)?.[1] ?? null;
+const pipFromFile = (arg: string): boolean =>
+  /^--(?:requirem|cons)/.test(arg) || pipShortOption(arg) === "r" || pipShortOption(arg) === "c";
+const pipLocalSource = (arg: string): boolean =>
+  arg.startsWith("--ed") ||
+  pipShortOption(arg) === "e" ||
+  /(?:^|@)\s*(?:(?:git|hg|svn|bzr)\+|file:)/i.test(arg) ||
+  /\.(?:whl|zip|egg|tar|tar\.(?:gz|bz2|xz|z)|tgz|tbz2?|txz)$/i.test(arg) ||
+  (!arg.startsWith("-") && !arg.includes("://") && /^[.~/]|\//.test(arg));
+// 下载源选项（-f/--find-links、-i/--index-url、--extra-index-url）的值不是网址，就是从本地目录里找包。
+const PIP_LONG_SOURCE = /^--(?:fi|ind|ext)[a-z-]*(?:=(.*))?$/;
+const pipSourceValue = (args: readonly string[], index: number): string | undefined => {
+  const arg = args[index] ?? "";
+  const long = PIP_LONG_SOURCE.exec(arg);
+  if (long !== null) return long[1] ?? args[index + 1];
+  const short = pipShortOption(arg);
+  if (short !== "f" && short !== "i") return undefined;
+  const attached = arg.slice(arg.indexOf(short) + 1);
+  return attached === "" ? args[index + 1] : attached;
+};
+const pipInstallsLocalCode = (args: readonly string[]): boolean =>
+  args.some((arg, index) => {
+    const source = pipSourceValue(args, index);
+    return pipLocalSource(arg) || (source !== undefined && (!source.includes("://") || /^file:/i.test(source)));
+  });
+
+/** 云电脑上的装包按工具箱判，批准时放开的口子写在卡上。返回 null 的按通用规则接着分。 */
+const classifyCloudCommand = (
+  words: readonly string[],
+  nameIndex: number,
+  containment: Extract<Containment, { level: "closed" }>,
+): ClassifiedAction | null => {
+  const rawName = words[nameIndex] ?? "";
+  const commandArgs = words.slice(nameIndex + 1);
+  const pipArgs = PYTHON_INSTALLERS.has(rawName)
+    ? commandArgs
+    : rawName === "python3" && commandArgs[0] === "-m" && commandArgs[1] === "pip"
+      ? commandArgs.slice(2)
+      : null;
+  if (pipArgs !== null && pipArgs.includes("install")) {
+    // 文件里的选项排在环境变量和命令行之后生效，钉不住，只能写在卡上。
+    const reasons = [
+      TOOLBOX_INSTALL_REASON,
+      ...(pipArgs.some(pipFromFile) ? [REQUIREMENTS_FILE_REASON] : []),
+      ...(pipInstallsLocalCode(pipArgs) ? [LOCAL_SOURCE_REASON] : []),
+    ];
+    return {
+      ...plainAction("install", null, { network: true, writePaths: [containment.toolboxDir] }),
+      reason: reasons.join("。"),
+    };
+  }
+  if (NODE_INSTALLERS.has(rawName) && commandArgs.some((arg) => NODE_INSTALL_VERBS.test(arg))) {
+    return { ...plainAction("install", null, { network: true, writePaths: [] }), reason: NODE_INSTALL_REASON };
+  }
+  return null;
+};
+
+const classifyCommand = (words: readonly string[], call: GateCall): readonly ClassifiedAction[] => {
   let nameIndex = 0;
-  while (nameIndex < words.length && /^[A-Za-z_][A-Za-z0-9_]*=.*/.test(words[nameIndex] ?? "")) nameIndex += 1;
-  const rawName = words[nameIndex];
-  if (rawName === undefined) return [plainAction("shell")];
-  const name = commandName(rawName);
+  while (nameIndex < words.length && PREFIX_ASSIGNMENT.test(words[nameIndex] ?? "")) nameIndex += 1;
+  const name = words[nameIndex];
+  if (name === undefined) return [plainAction("shell")];
+  if (!words.slice(0, nameIndex).every(harmlessPrefix)) return [plainAction("shell")];
+  // 带目录的命令名跑的是那个文件，不是同名的系统程序，不按去掉目录的名字认。
+  if (name.includes("/")) return [plainAction("shell")];
+  if (call.containment.level === "closed") {
+    const cloud = classifyCloudCommand(words, nameIndex, call.containment);
+    if (cloud !== null) return [cloud];
+  }
   const args = argumentsOf(words.slice(nameIndex));
+  const read = (word: string): ClassifiedAction => readPath(shellPath(word, call), call);
+  const write = (word: string): ClassifiedAction => writePath(shellPath(word, call), call);
+  const remove = (word: string): ClassifiedAction => deletePath(shellPath(word, call), call);
 
   const commandArgs = words.slice(nameIndex + 1);
   if (SAFE_VALUE_COMMANDS.has(name)) {
@@ -516,41 +686,47 @@ const classifyCommand = (words: readonly string[], call: GateContext): readonly 
     return [plainAction("install")];
   }
   if (DELETE_COMMANDS.has(name)) {
-    return (args.length === 0 ? ["."] : args).map((path) => deletePath(path, call));
+    return (args.length === 0 ? ["."] : args).map(remove);
   }
   if (name === "mv") {
-    return args.length === 0
-      ? [plainAction("shell")]
-      : [...args.slice(0, -1).map((path) => deletePath(path, call)), writePath(args.at(-1) ?? ".", call)];
+    // -t、-T 和它们的长写法（getopt 还认 --target 这样的缩写）改变哪个词是目标，分类器只认「最后一个是目标」这一种。
+    if (hasUnknownMutationOption(name, commandArgs) || args.length < 2) return [plainAction("shell")];
+    return [...args.slice(0, -1).map(remove), write(args.at(-1) ?? ".")];
   }
   if (name === "cp") {
     if (commandArgs.some((word) => word.startsWith("-"))) return [plainAction("shell")];
-    return args.length < 2
-      ? [plainAction("shell")]
-      : [...args.slice(0, -1).map((path) => readPath(path, call)), writePath(args.at(-1) ?? ".", call)];
+    return args.length < 2 ? [plainAction("shell")] : [...args.slice(0, -1).map(read), write(args.at(-1) ?? ".")];
   }
   if (name === "ln") {
-    if (commandArgs.some((word) => word.startsWith("-") && !["-s", "--symbolic"].includes(word))) {
+    const options = commandArgs.filter((word) => word.startsWith("-"));
+    const [source, link] = args;
+    if (
+      source === undefined ||
+      link === undefined ||
+      args.length > 2 ||
+      options.length === 0 ||
+      !options.every((word) => word === "-s" || word === "--symbolic")
+    ) {
       return [plainAction("shell")];
     }
-    const target = args.at(-1);
-    return target === undefined ? [plainAction("shell")] : [writePath(target, call)];
+    // 相对的源按链接所在目录解：link 是已存在的目录时链接落在它里面，否则落在它的上一级。
+    const linkPath = shellPath(link, call);
+    const linkDir = isDirectory(linkPath) ? linkPath : dirname(linkPath);
+    return [readPath(resolveLikeKernel(source, linkDir), call), write(link)];
   }
   if (name === "tee" || WRITE_COMMANDS.has(name)) {
     if (hasUnknownMutationOption(name, commandArgs)) return [plainAction("shell")];
-    return args.length === 0 ? [plainAction("shell")] : args.map((path) => writePath(path, call));
+    return args.length === 0 ? [plainAction("shell")] : args.map(write);
   }
   if (READ_COMMANDS.has(name)) {
     if (hasUnsafeOption(name, commandArgs) || hasUnknownReadOption(name, commandArgs)) return [plainAction("shell")];
-    const paths = args.filter(likelyPath);
-    return paths.length === 0 ? [plainAction("read")] : paths.map((path) => readPath(path, call));
+    // 每个词都做 realpath，选项也不例外：`--` 之后它们就是操作数，和选项分不开。grep 的模式、head 的行数
+    // 这类不是文件的词解到工作区里不存在的名字上，照旧放行，只有恰好和一条指向外面的链接同名时才会多问。
+    return commandArgs.length === 0 ? [plainAction("read")] : commandArgs.map(read);
   }
-  if (name === "git") {
-    if (hasUnsafeOption(name, commandArgs)) return [plainAction("shell")];
-    const subcommand = args[0];
-    if (["status", "diff", "log", "show"].includes(subcommand ?? "")) return [plainAction("read")];
-    if (subcommand === "push") return [plainAction("publish")];
-  }
+  // git 的 status、diff、log、show 也归 shell：工作区里的 .git/config（core.fsmonitor、diff.external、textconv、
+  // objects/info/alternates）能让它们跑程序、读别的仓库，配置面太大，不逐种中和。
+  if (name === "git" && commandArgs[0] === "push") return [plainAction("publish")];
   return [plainAction("shell")];
 };
 
@@ -558,13 +734,16 @@ const classifyBash = (call: GateCall): readonly ClassifiedAction[] => {
   if (call.sandbox === "none") return [plainAction("shell")];
   const command = call.input.command;
   if (typeof command !== "string" || command.trim() === "") return [plainAction("shell")];
-  if (hasUnsafeCommandSeparator(command)) return [plainAction("shell")];
+  // 这一检查放在 parseShell 外面：系统包管理器的拒绝也走 parseShell，`apt-get install {a,b}` 得照旧拒而不是降成问。
+  if (hasUnsafeCommandSeparator(command) || hasUnquotedExpansion(command)) return [plainAction("shell")];
   const parsed = parseShell(command);
   if (parsed === null) return [plainAction("shell")];
   return [
     ...parsed.commands.flatMap((words) => classifyCommand(words, call)),
     ...parsed.redirects.map((redirect) =>
-      redirect.direction === "input" ? readPath(redirect.path, call) : writePath(redirect.path, call),
+      redirect.direction === "input"
+        ? readPath(shellPath(redirect.path, call), call)
+        : writePath(shellPath(redirect.path, call), call),
     ),
   ];
 };
@@ -727,6 +906,7 @@ const READ_ONLY_TOOL_BARS: ReadonlyMap<string, ToolBar> = new Map<string, ToolBa
   ["propose_project", { action: "write_workspace", bar: "出方案卡" }],
   ["propose_team", { action: "write_workspace", bar: "出建队卡" }],
   ["propose_routine", { action: "write_workspace", bar: "出例行卡" }],
+  ["switch_computer", { action: "write_workspace", bar: "换电脑" }],
   ["propose_skill", { action: "write_workspace", bar: "问用户存不存 skill" }],
   ["set_cadence", { action: "write_workspace", bar: "改项目节奏" }],
   ["update_checklist", { action: "write_workspace", bar: "改任务卡清单" }],
@@ -923,10 +1103,41 @@ function decideDraft(input: Record<string, unknown>, accounts: readonly AccountC
   };
 }
 
+/** 云电脑的沙箱里没有 root，问了用户也只会换来一次失败，直接拒并指路。 */
+function systemPackageDenial(call: GateCall): GateDecision | null {
+  if (call.toolName !== "bash" || call.containment.level === "none") return null;
+  const command = call.input.command;
+  if (typeof command !== "string") return null;
+  const parsed = parseShell(command);
+  if (parsed === null) return null;
+  const hit = parsed.commands.some((words) => {
+    const name = words.find((word) => !PREFIX_ASSIGNMENT.test(word));
+    return name !== undefined && SYSTEM_PACKAGE_MANAGERS.has(name.slice(name.lastIndexOf("/") + 1));
+  });
+  return hit
+    ? { verdict: "deny", action: "install", target: null, reason: SYSTEM_PACKAGE_REASON, access: NO_ACCESS }
+    : null;
+}
+
+/**
+ * 只把 ask 改成 allow，deny 和 allow 原样返回。批了会多拿网络或写权限的不放：那正是沙箱要靠审批才开的口子。
+ * 只放读和普通命令两类：它们批下来也是同一个沙箱、同样的权限，问了只多挡一下。删、装、git push 这些动作本身要人拍板，
+ * 普通命令里看得出删、移、丢 git 改动的也照问。
+ * 解释器写的删除（python -c "shutil.rmtree(...)"）扫不出来，沙箱把它限制在这个 Bot 自己的工作区和共享区里。
+ */
+export function relaxIfContained(call: GateCall, decision: GateDecision): GateDecision {
+  if (decision.verdict !== "ask" || call.toolName !== "bash" || call.containment.level === "none") return decision;
+  if (decision.access.network || decision.access.writePaths.length > 0) return decision;
+  if (!RELAXABLE_ACTIONS.has(decision.action)) return decision;
+  const command = call.input.command;
+  if (typeof command !== "string" || looksLikeDeleteOrMove(command)) return decision;
+  return { ...decision, verdict: "allow", reason: null, access: NO_ACCESS };
+}
+
 /** Pi 的 tool_call 事件不接住处理器抛的错，所以路径解不出来在这里变成拒绝，不往外抛。 */
 export function decide(call: GateCall, grants: readonly Grant[], accounts: readonly AccountConfig[]): GateDecision {
   try {
-    return decideResolved(call, grants, accounts);
+    return relaxIfContained(call, decideResolved(call, grants, accounts));
   } catch (error) {
     if (!(error instanceof PathError)) throw error;
     return {
@@ -945,6 +1156,8 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
   const nameDenial = readOnly ? readOnlyNameDenial(call) : null;
   if (nameDenial !== null) return readOnlyDecision(nameDenial);
   if (DRAFT_TOOLS.has(call.toolName)) return decideDraft(call.input, accounts);
+  const systemPackage = systemPackageDenial(call);
+  if (systemPackage !== null) return systemPackage;
   const own = classifyOwnTool(call);
   if (readOnly && own === null) {
     const denial =
@@ -961,21 +1174,69 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
       ? { item, verdict: verdictForItem(item, call, grants, accounts), reason: null }
       : { item, verdict: "deny" as const, reason: readOnlyReason(bar) };
   });
+  const access = mergeAccess(items);
   const denied = evaluated.find((entry) => entry.verdict === "deny");
-  const asked = evaluated.find((entry) => entry.verdict === "ask");
-  const selected = denied ?? asked ?? evaluated[0];
-  if (selected === undefined) {
-    return { verdict: "ask", action: "shell", target: null, reason: null, access: NO_ACCESS };
+  if (denied !== undefined) {
+    return {
+      verdict: "deny",
+      action: denied.item.action,
+      target: denied.item.target,
+      reason:
+        denied.reason ??
+        denied.item.reason ??
+        (denied.item.path === null
+          ? null
+          : ZONE_REASONS[zoneHit(denied.item.action, denied.item.path, call) ?? "hidden"]),
+      access,
+    };
   }
+  const asked = evaluated.filter((entry) => entry.verdict === "ask");
+  if (asked.length === 0) {
+    const first = items[0];
+    return first === undefined
+      ? { verdict: "ask", action: "shell", target: null, reason: null, access: NO_ACCESS }
+      : { verdict: "allow", action: first.action, target: first.target, reason: null, access };
+  }
+  const selected = asked.reduce((worst, entry) =>
+    ACTION_SEVERITY[entry.item.action] < ACTION_SEVERITY[worst.item.action] ? entry : worst,
+  ).item;
   return {
-    verdict: selected.verdict,
-    action: selected.item.action,
-    target: selected.item.target,
-    reason:
-      selected.reason ??
-      (selected.verdict === "deny" && selected.item.path !== null
-        ? ZONE_REASONS[zoneHit(selected.item.action, selected.item.path, call) ?? "hidden"]
-        : null),
-    access: mergeAccess(items),
+    verdict: "ask",
+    action: selected.action,
+    target: selected.target,
+    reason: approvalNote(
+      asked.map((entry) => entry.item.reason),
+      access,
+    ),
+    access,
   };
 }
+
+/**
+ * 审批卡标题取要问的段里数最小的动作。先是批了也不许记住的三种，钱、账号和删掉的数据都收不回来；再是出了这台电脑、
+ * 别人看得见的；然后是认不出的命令，它在批下来的权限里什么都能做；最后是写外面、装包、读外面，写工作区排最后。
+ */
+const ACTION_SEVERITY: Record<ActionKind, number> = {
+  spend: 0,
+  account_security: 1,
+  delete: 2,
+  publish: 3,
+  message_person: 4,
+  external_write: 5,
+  engage: 6,
+  shell: 7,
+  write_outside: 8,
+  install: 9,
+  read: 10,
+  write_workspace: 11,
+};
+
+// 卡上的 note：各段的说明按句去重拼起来，再写批准后沙箱真会多开的口子。读不在里面：沙箱本来就看得见禁区以外的东西。
+const approvalNote = (reasons: readonly (string | undefined)[], access: GateAccess): string | null => {
+  const opened = [...(access.network ? ["联网"] : []), ...access.writePaths.map((path) => `写 ${path}`)];
+  const sentences = [
+    ...new Set(reasons.flatMap((reason) => reason?.split("。") ?? [])),
+    ...(opened.length === 0 ? [] : [`批准后放开：${opened.join("、")}`]),
+  ];
+  return sentences.length === 0 ? null : sentences.join("。");
+};

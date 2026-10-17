@@ -4,6 +4,7 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
+import { errorKind } from "./agent/events.js";
 import { AGENT_PATH, AgentHub } from "./agent/hub.js";
 import { GroupTurns } from "./agent/group-turn.js";
 import { ToolCrypto } from "./crypto.js";
@@ -27,7 +28,7 @@ import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
 import { Notifications, type NotificationOptions } from "./notifications.js";
 import { PublishLoop, type PublishLoopOptions } from "./publish/loop.js";
 import { remindStaleApprovals } from "./repo/approvals.js";
-import { settleApprovalTimeouts } from "./agent/dispatch.js";
+import { resumePendingContinuations, settleApprovalTimeouts } from "./agent/dispatch.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
 import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
@@ -40,6 +41,12 @@ export const WS_PATH = "/api/ws";
 /** 扫一遍放了一天还没有结论的审批和还没人确认的交接。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
 const REMIND_INTERVAL_MS = 60 * 60 * 1000;
 
+/**
+ * 欠着的接续多久补扫一次。推进接续的触发点都在内存里，丢了一次就要等这一轮补扫才接着做，
+ * 和例行调度同一个节奏：例行本来就按分钟跑，接续晚半分钟起不算误事；每轮只走一次部分索引，查不到行就结束。
+ */
+const CONTINUATION_SWEEP_INTERVAL_MS = 30_000;
+
 export type RunningServer = {
   readonly port: number;
   readonly hub: PushHub;
@@ -51,6 +58,8 @@ export type RunningServer = {
   /** 同 routines，测试里手动 tick。 */
   readonly metrics: MetricPoller;
   scanApprovalTimeouts(now: Date): Promise<number>;
+  /** 同 routines，测试里手动扫一轮欠着的接续，回起了几条。 */
+  sweepContinuations(): Promise<number>;
   close(): Promise<void>;
 };
 
@@ -108,7 +117,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   const groupTurns = new GroupTurns(options.db, hub);
   const live = new LiveRelay({ push: hub, ...options.live });
 
-  // 监听的端口在 serve() 之后才知道，而 config 报文要到电脑连上来才发，现取就够了。
+  // 只剩 OAuth 回调在没配 WEB_BASE_URL 时回退到它。监听端口在 serve() 之后才知道，回调要等授权时才拼，现取就够了。
   let publicBaseUrl = config.publicBaseUrl;
   const endpoints = { ...config.oauth, githubApiBaseUrl: config.githubApiBaseUrl, xApiBaseUrl: config.xApiBaseUrl };
   const agents = new AgentHub({
@@ -117,7 +126,6 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     priceInputPerM: config.priceInputPerM,
     priceOutputPerM: config.priceOutputPerM,
     groupTurns,
-    gatewayBaseUrl: () => publicBaseUrl ?? "",
     disconnectGraceMs: options.disconnectGraceMs,
     silenceTimeoutMs: options.silenceTimeoutMs,
     mcpDiscoveryTimeoutMs: options.mcpDiscoveryTimeoutMs,
@@ -204,6 +212,28 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   });
   await routines.start();
   notifications.start();
+  // 上一次进程在结账提交后、接续起来前没了的，启动时先补一轮，之后定期补。一轮没扫完，下一轮等它扫完再开始。
+  let sweeping: Promise<unknown> | null = null;
+  const sweepContinuations = (): Promise<number> => {
+    const previous = sweeping;
+    const sweep = (async () => {
+      await previous;
+      return resumePendingContinuations({ db: options.db, push: hub, agents, groupTurns, notifications });
+    })();
+    const tracked: Promise<unknown> = sweep
+      .catch(() => 0)
+      .finally(() => {
+        if (sweeping === tracked) sweeping = null;
+      });
+    sweeping = tracked;
+    return sweep;
+  };
+  await sweepContinuations();
+  const continuationSweep = setInterval(() => {
+    if (sweeping !== null) return;
+    void sweepContinuations().catch((error: unknown) => console.error(`补扫欠着的接续出错：${errorKind(error)}`));
+  }, CONTINUATION_SWEEP_INTERVAL_MS);
+  continuationSweep.unref();
 
   const publisher = new PublishLoop({
     db: options.db,
@@ -238,7 +268,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   reminders.unref();
 
   const scanApprovalTimeouts = (now: Date): Promise<number> =>
-    settleApprovalTimeouts({ db: options.db, push: hub, agents }, now);
+    settleApprovalTimeouts({ db: options.db, push: hub, agents, notifications }, now);
   const approvalTimeouts = setInterval(() => {
     void scanApprovalTimeouts(new Date()).catch((error: unknown) => console.error("扫到期审批出错", error));
   }, options.approvalTimeoutIntervalMs ?? 15_000);
@@ -252,6 +282,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     publisher,
     metrics,
     scanApprovalTimeouts,
+    sweepContinuations,
     close: async () => {
       const pokerStopped = poker.stop();
       routines.stop();
@@ -259,9 +290,12 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       metrics.stop();
       clearInterval(reminders);
       clearInterval(approvalTimeouts);
+      clearInterval(continuationSweep);
       live.closeAll();
-      await hub.closeAll();
-      await agents.closeAll();
+      // agents.closeAll 在它第一个 await 之前同步立起停机标记，所以要先于 close 里的任何等待调用；
+      // 先等网页的关闭握手或补扫再调它，链外认证中的 hello 在这段等待里回来就看不到停机，照常上线。
+      await Promise.all([agents.closeAll(), hub.closeAll()]);
+      await sweeping;
       await pokerStopped;
       // 断线收尾可能还在推 stuck，等它们排完再关。
       await notifications.close();

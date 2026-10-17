@@ -26,9 +26,9 @@
 
 ## 控制面
 
-四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。
+四个对外的面：`/api` 给 Web 客户端，`/api/ws` 推消息，`/agent` 给电脑上的电脑代理，`/gateway/v1` 是模型网关。四个都在同一个 3001 端口上，WebSocket 由同一个 http server 按路径分流。电脑代理还要打同端口上的 `/hub/v1`、`/mcp-proxy`、`/accounts-proxy`，和 `/gateway/v1` 合称数据面。
 
-每人至多两台电脑，本机（local）和远程（remote）各一台，`computers` 在 `(owner_id, kind)` 上唯一。注册或登录时建出本机那一行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、模型网关地址与 key，不带模型名）。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接用 4000 顶掉旧连接。
+每人至多两台电脑，本机（local）和远程（remote）各一台，`computers` 在 `(owner_id, kind)` 上唯一。注册或登录时建出本机那一行，状态 creating，同时生成电脑 token 和模型网关 key，库里只存 sha256。电脑代理在 `/agent` 上用 `hello` 报 computerId 加 token，对得上才回 `welcome`，紧接着一条 `config`（该用户的全部 Bot、数据面地址与网关 key，不带模型名）。`hello` 里还带 `controlOrigin`，是代理连 `/agent` 那个地址的源（`ws` 换 `http`，`wss` 换 `https`），四个数据面地址只拼在它上面，不看控制面自己的配置，也不读 `Host` 头，所以经反向代理连进来的电脑拿到的是反代的地址。协议号和下限都是 4，低于 4 用 4003 关；协议 4 的 `hello` 缺 `controlOrigin` 或格式不对用 4001 关。Bot 增删改会重发 `config`，每条 `config` 带这条连接内递增的 `generation`，代理丢掉比已应用的旧的，回执 `config_applied` 带同一个数。控制面和电脑代理按同一个版本一起升，不带代际的旧回执会被丢掉。握手就算在线，断开或 45 秒收不到任何报文就变休眠，同一台电脑新连接用 4000 顶掉旧连接。
 
 App 通过 `POST /api/computers/local` 配对本机，无请求体或空对象按未确认处理。已有本机连上过（`lastSeenAt` 非空或此刻在线）时回 409 和 `{ error, computer }`，原 token 和连接继续有效；用户确认后带 `{ "confirmDisplace": true }` 再请求，才轮换 token 并用 4004 关闭旧本机。旧 token 再 hello 也收到 4004，电脑号不存在或 hello 不合法仍是 4001。代理收到 4004 输出一行 `{"type":"displaced"}`，清理资源、停止重连；stdout 的上线行和顶号行统一由 shared 的 `AgentStatusLine` 定义。其他关闭码仍按退避重连。桌面端确认弹框与顶号展示由后续 P3-15b 接入。
 
@@ -44,6 +44,8 @@ pnpm --filter @baize/control-plane computer-token -- remote [邮箱] # 创建或
 
 Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里回「批准」「拒绝」都算数，详见 `packages/control-plane/README.md`。
 
+用户有本机和远程电脑两台时，在对话里说「用云电脑」，Bot 就调 `switch_computer` 把这个群换到远程电脑，这一轮在那边接着做，也可以点标题栏的电脑按钮选。哪些命令会弹审批卡，两台电脑不一样。远程电脑上，命令在 bubblewrap 里跑，只有要联网、写工作区外，或者看得出是删、移的才问，其余直接跑。Mac 上只收紧不放宽。面向用户的说法在 [docs/上手.md](docs/上手.md) 的「让 Bot 换到云电脑上做」和「哪些命令会先问你」，实现在 `packages/control-plane/README.md` 的「派到哪台电脑」和 `packages/bot-runner/README.md` 的「统一闸门和沙箱」「换电脑」。
+
 环境变量：
 
 | 名字 | 默认值 | 作用 |
@@ -51,7 +53,7 @@ Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里�
 | `DATABASE_URL` | `postgres://baize:baize@localhost:5434/baize` | Postgres 连接串 |
 | `PORT` | `3001` | 监听端口 |
 | `COOKIE_SECURE` | 空 | 设成 `1` 时会话 cookie 带 Secure |
-| `PUBLIC_BASE_URL` | 空，用实际监听的地址拼 | 下发给电脑代理的模型网关地址前缀 |
+| `PUBLIC_BASE_URL` | 空，用实际监听的地址拼 | 只在没设 `WEB_BASE_URL` 时给 OAuth 回调当前缀。电脑拿到的数据面地址不看它，看代理自报的 `controlOrigin` |
 | `GATEWAY_MODEL` | `baize-default` | 兼容旧配置；未设置 `GATEWAY_MODELS` 时同时作为 plan 和 fast 的上游模型名 |
 | `GATEWAY_MODELS` | 空，回退 `GATEWAY_MODEL` | 按 `plan=模型,fast=模型` 配置两个用途；设置后必须同时包含 plan 和 fast |
 | `UPSTREAM_BASE_URL` | `https://api.openai.com/v1` | 模型上游 |

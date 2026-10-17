@@ -15,6 +15,14 @@ export type PreferencesConfig = ConfigMessage["preferences"];
 // 送的永远是全量，删掉的那条才能靠「这里没有的已作废」从模型的记忆里抹掉。
 
 export const MEMORY_SECTION = "memory";
+const COMPUTER_SECTION = "computer";
+
+export interface SystemSections {
+  readonly memory: string | null;
+  readonly computer: string | null;
+}
+
+export const NO_SECTIONS: SystemSections = { memory: null, computer: null };
 
 const PREFERENCES_HEADER = "你现在记住的偏好（之前说过、这里没有的已作废）：";
 const NO_PREFERENCES = "（现在一条都没有，之前记的全部作废）";
@@ -58,16 +66,19 @@ export function renderMemory(
 }
 
 /**
- * 把记忆段加到这一轮发给模型的消息副本上。开头那条系统消息是 Pi 拼的，`sections` 按名字渲染在正文之后，
- * 加一段不动别的，也不写进会话 JSONL。
+ * 把这几段加到这一轮发给模型的消息副本上。开头那条系统消息是 Pi 拼的，`sections` 按名字依次渲染在正文之后，
+ * 加段不动别的，也不写进会话 JSONL。
  */
-export function injectMemory<M extends { readonly role: string; readonly sections?: Record<string, string | null> }>(
+export function injectSections<M extends { readonly role: string; readonly sections?: Record<string, string | null> }>(
   messages: readonly M[],
-  text: string,
+  sections: SystemSections,
 ): M[] {
+  const added: Record<string, string> = {};
+  if (sections.memory !== null) added[MEMORY_SECTION] = sections.memory;
+  if (sections.computer !== null) added[COMPUTER_SECTION] = sections.computer;
   const [head, ...rest] = messages;
-  if (head === undefined || head.role !== "system") return [...messages];
-  return [{ ...head, sections: { ...head.sections, [MEMORY_SECTION]: text } }, ...rest];
+  if (head === undefined || head.role !== "system" || Object.keys(added).length === 0) return [...messages];
+  return [{ ...head, sections: { ...head.sections, ...added } }, ...rest];
 }
 
 export const brandFileOf = (dataDir: string, botId: BotId): string => join(dataDir, botId, "brand.md");
@@ -98,8 +109,8 @@ const REMEMBER_PARAMS = Type.Object({ text: Type.String(), private: Type.Boolean
 /** 正在跑的这次 prompt，外加触发它的那条群消息，偏好的来源就记它。 */
 export interface RememberingRun extends ActiveRun {
   readonly messageId: MessageId;
-  /** 这一轮每次模型请求都放进系统提示的记忆段。runOne 读过会话的记号后定下来，跑的中途来了新 config 也不换。 */
-  memory: string | null;
+  /** 这一轮每次模型请求都放进系统提示的记忆段和电脑段。runOne 读过会话的记号后定下来，跑的中途来了新 config 也不换。 */
+  sections: SystemSections;
 }
 
 /** 项目群里说的话是对整队的，不该被某个 Bot 记成它自己的长期偏好，所以 `remember_preference` 只在单聊里给。 */

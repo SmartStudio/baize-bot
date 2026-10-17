@@ -10,8 +10,11 @@ export type QueryGate = {
   release(): void;
 };
 
-/** before：查询停在发出之前。after：查询照常发出并跑完，结果停在交回调用方之前，钉「库里已经成了、回调晚到」。 */
-export type HoldAt = "before" | "after";
+/**
+ * before：查询停在发出之前。after：查询照常发出并跑完，结果停在交回调用方之前，钉「库里已经成了、回调晚到」。
+ * fail：这一条不发出去，当场抛错，只这一次，release 不用调。
+ */
+export type HoldAt = "before" | "after" | "fail";
 
 type Armed = {
   readonly pattern: RegExp;
@@ -47,7 +50,11 @@ export function gatedDb(sql: Sql): {
             let asValues = false;
             const send = () => (asValues ? run().values() : run());
             let held: Promise<unknown>;
-            if (gate.hold === "before") {
+            if (gate.hold === "fail") {
+              gate.hit();
+              gate.done();
+              held = Promise.reject(new Error("注入的查询故障"));
+            } else if (gate.hold === "before") {
               gate.hit();
               held = gate.open.then(send);
               void held.then(gate.done, gate.done);

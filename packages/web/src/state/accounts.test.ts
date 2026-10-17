@@ -32,7 +32,16 @@ const account = (
   });
 
 const computer = (status: Computer["status"]) =>
-  Computer.parse({ id: CMP, ownerId: "usr_1", kind: "local", status, host: "local", idleSince: null, lastSeenAt: at });
+  Computer.parse({
+    id: CMP,
+    ownerId: "usr_1",
+    kind: "local",
+    status,
+    host: "local",
+    idleSince: null,
+    lastSeenAt: at,
+    dispatchable: status === "online",
+  });
 
 const draftFor = (accountId: string, status: Draft["status"] = "pending", id = `draft_${accountId}`) =>
   Draft.parse({

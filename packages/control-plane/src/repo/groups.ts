@@ -227,7 +227,8 @@ export async function joinGroups(tx: Tx, botId: BotId, groupIds: readonly string
 export async function swapGroupMember(tx: Tx, groupId: GroupId, fromBotId: BotId, toBotId: BotId): Promise<boolean> {
   const swapped = await tx
     .update(groupMembers)
-    .set({ botId: toBotId })
+    // 选的电脑跟着 (Bot, 群) 走，换上来的 Bot 不继承前一个的。
+    .set({ botId: toBotId, computerKind: null })
     .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.botId, fromBotId)))
     .returning({ botId: groupMembers.botId });
   return swapped.length > 0;

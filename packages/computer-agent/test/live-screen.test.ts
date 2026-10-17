@@ -329,7 +329,16 @@ describe("屏：帧和输入", () => {
     );
     expect(h.cdp.sent.at(-1)).toEqual({
       method: "Input.dispatchMouseEvent",
-      params: { type: "mousePressed", x: 500, y: 150, button: "left", buttons: 1, clickCount: 1, modifiers: 0 },
+      params: {
+        type: "mousePressed",
+        x: 500,
+        y: 150,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+        modifiers: 0,
+        force: 0.5,
+      },
       sessionId: "session-tab-a",
     });
   });

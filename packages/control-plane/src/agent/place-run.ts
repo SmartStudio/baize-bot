@@ -3,6 +3,7 @@ import {
   ComputerId,
   GroupId,
   RunId,
+  type ComputerKind,
   type ControlToAgent,
   type MessageId,
   type PokerTableRole,
@@ -10,11 +11,13 @@ import {
   type Viewer,
 } from "@baize/shared";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
+import type { Db } from "../db/client.js";
 import { computers, groupMembers, laneLeases, runs, workStreams } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
-import type { ComputerSelection, SelectionFailure } from "./computer-selection.js";
+import { CHOSEN_OFFLINE, type ComputerSelection, type SelectionFailure } from "./computer-selection.js";
+import { clearBotContinuations, takeContinuation } from "./continuation.js";
 import { enqueueDownlink } from "./envelope.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
@@ -25,8 +28,13 @@ export type PlaceRunInput = {
   readonly triggerMessageId?: MessageId;
   readonly routineRunId?: string | undefined;
   readonly table?: { readonly role: PokerTableRole; readonly visibleTo: readonly [Viewer, ...Viewer[]] };
-  readonly prompt: (runId: RunId, messageId: MessageId) => Promise<Omit<Prompt, "runId" | "lane">>;
+  /** 换电脑后的接续接的是哪一轮。落行时认领那一轮的标记、沿用它的运行记录，认领不到就不建。 */
+  readonly continuesRunId?: RunId;
+  readonly prompt: (runId: RunId, messageId: MessageId, placed: Placement) => Promise<Omit<Prompt, "runId" | "lane">>;
 };
+
+/** run 实际落在哪台、锁里读到的选定。prompt 的电脑快照按它算，不按锁外挑电脑时的那次。 */
+export type Placement = { readonly computerId: ComputerId; readonly preference: ComputerPreference };
 
 export type PlaceRunResult =
   | {
@@ -37,7 +45,20 @@ export type PlaceRunResult =
       readonly flushComputerIds: readonly ComputerId[];
     }
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
-  | { readonly kind: "not_member" };
+  | { readonly kind: "not_member" }
+  | { readonly kind: "continued" };
+
+/** 这个 Bot 在这个群里选定的电脑。null 是没选过，走默认策略。 */
+export type ComputerPreference = ComputerKind | null;
+
+/** 派活前先挑一次电脑要用；落库那一次以 placeRun 在锁里读到的为准。 */
+export async function computerPreference(db: Db | Tx, groupId: GroupId, botId: BotId): Promise<ComputerPreference> {
+  const [member] = await db
+    .select({ computerKind: groupMembers.computerKind })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.botId, botId), eq(groupMembers.groupId, groupId)));
+  return member?.computerKind ?? null;
+}
 
 /** 接管可能同时改两台电脑的发件箱，先锁齐再碰道，两个方向都按同一顺序。 */
 export async function lockLaneComputers(tx: Tx, ownerId: UserId): Promise<void> {
@@ -96,18 +117,21 @@ async function takeOverLane(tx: Tx, lease: typeof laneLeases.$inferSelect, compu
 export async function placeRun(
   tx: Tx,
   input: PlaceRunInput,
-  select: () => Promise<ComputerSelection>,
+  select: (preference: ComputerPreference) => Promise<ComputerSelection>,
 ): Promise<PlaceRunResult> {
   await lockOwner(tx, input.ownerId, "shared");
   await shareBotRunsLock(tx, input.botId);
   await lockLaneComputers(tx, input.ownerId);
   const [member] = await tx
-    .select({ botId: groupMembers.botId })
+    .select({ computerKind: groupMembers.computerKind })
     .from(groupMembers)
     .where(and(eq(groupMembers.botId, input.botId), eq(groupMembers.groupId, input.groupId)));
   if (member === undefined) return { kind: "not_member" };
-  const selected = await select();
+  const preference = member.computerKind ?? null;
+  const selected = await select(preference);
   if (selected.kind === "failed") return { kind: "unplaced", reason: selected.reason };
+  // 挑中之后、锁住之前租约过期了：选过电脑的照样说是那台不在线，不笼统说电脑不在线。
+  const lapsed: SelectionFailure = preference === null ? "no_computer_online" : CHOSEN_OFFLINE[preference];
   const [candidate] = await tx
     .select()
     .from(computers)
@@ -118,10 +142,9 @@ export async function placeRun(
         sql`${computers.leaseUntil} > clock_timestamp()`,
       ),
     );
-  if (candidate === undefined || candidate.installId === null)
-    return { kind: "unplaced", reason: "no_computer_online" };
+  if (candidate === undefined || candidate.installId === null) return { kind: "unplaced", reason: lapsed };
   let lease = await claimLane(tx, input, selected.computer.id, candidate.installId);
-  if (lease === undefined) return { kind: "unplaced", reason: "no_computer_online" };
+  if (lease === undefined) return { kind: "unplaced", reason: lapsed };
   const [holder] = await tx
     .select({ id: computers.id })
     .from(computers)
@@ -150,6 +173,7 @@ export async function placeRun(
       : (await appendMessage(tx, input.groupId, { kind: "system", text: "牌桌回合" }, [...input.table.visibleTo])).id;
   if (triggerMessageId === undefined) throw new Error("派活缺少触发消息");
   const runId = await startRun(tx, input, computerId, triggerMessageId);
+  if (runId === null) return { kind: "continued" };
   const heads: Prompt["lane"]["heads"] = {};
   for (const stream of await tx
     .select()
@@ -157,7 +181,7 @@ export async function placeRun(
     .where(and(eq(workStreams.botId, input.botId), eq(workStreams.groupId, input.groupId)))) {
     heads[stream.stream] = { seq: stream.nextSeq, head: stream.head };
   }
-  const body = await input.prompt(runId, triggerMessageId);
+  const body = await input.prompt(runId, triggerMessageId, { computerId, preference });
   if (!(await enqueueDownlink(tx, computerId, { ...body, runId, lane: { epoch: lease.epoch, heads } }, runId)))
     return tx.rollback();
   return {
@@ -174,7 +198,9 @@ async function startRun(
   input: PlaceRunInput,
   computerId: ComputerId,
   triggerMessageId: MessageId,
-): Promise<RunId> {
+): Promise<RunId | null> {
+  const continued = input.continuesRunId === undefined ? null : await takeContinuation(tx, input.continuesRunId);
+  if (input.continuesRunId !== undefined && continued === null) return null;
   const [row] = await tx
     .insert(runs)
     .values({
@@ -184,11 +210,13 @@ async function startRun(
       botId: input.botId,
       groupId: input.groupId,
       triggerMessageId,
-      routineRunId: input.routineRunId ?? null,
-      isRoutine: input.routineRunId !== undefined,
+      // 接续只认父链：父链没挂例行就是 null，不回退到这一回合的例行记录。
+      routineRunId: continued === null ? (input.routineRunId ?? null) : continued.routineRunId,
+      isRoutine: continued === null ? input.routineRunId !== undefined : continued.isRoutine,
       startedAt: new Date(),
       visibleTo: input.table === undefined ? null : [...input.table.visibleTo],
       tableRole: input.table?.role ?? null,
+      continuesRunId: input.continuesRunId ?? null,
     })
     .onConflictDoNothing()
     .returning({ id: runs.id });
@@ -217,5 +245,6 @@ export async function cancelLanes(tx: Tx, ownerId: UserId, botId: BotId): Promis
       lane: { botId, groupId: GroupId.parse(lease.groupId) },
       epoch: lease.epoch + 1,
     });
+  await clearBotContinuations(tx, botId);
   return [...new Set(leases.map((lease) => ComputerId.parse(lease.holderComputerId)))];
 }

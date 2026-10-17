@@ -55,6 +55,7 @@ const view = (): PokerSeatView =>
 
 const prompt = (role: TablePrompt["role"] = "player", overrides: Partial<PromptMessage> = {}): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse("run-table"),
   botId: BotId.parse("bot-table"),
   groupId: GroupId.parse("group-table"),
@@ -144,6 +145,7 @@ async function harness(
   const dataDir = mkdtempSync(join(tmpdir(), "baize-p3-runner-table-"));
   const runner = createRunner({
     computerId: ComputerId.parse("computer-table"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-table"), role: "player", preset: "old_k", name: "老K", tags: [], description: "" }],
     tools: [],
     accounts: [],

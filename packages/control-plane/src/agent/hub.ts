@@ -1,9 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { DiscoveryError, DISCOVERY_FAILURE_MESSAGES } from "../mcp/discover.js";
-import { ACCOUNTS_PROXY_PATH } from "../http/accounts-proxy.js";
-import { MCP_PROXY_PATH } from "../http/mcp-proxy.js";
-import { HUB_PATH } from "../http/hub.js";
 import {
   McpDiscoveryResult,
   McpHttpUrl,
@@ -18,8 +15,8 @@ import {
   ControlToAgent,
   DOWNLINK_DELIVERY,
   DownlinkFrame,
-  type Computer,
   type ComputerKind,
+  type ControlOrigin,
   type ComputerId,
   type MessageId,
   type RunId,
@@ -43,6 +40,7 @@ import {
   markComputersSleeping,
   rotateGatewayKey,
 } from "../repo/computers.js";
+import type { ComputerRecord } from "../repo/rows.js";
 import { listGrants } from "../repo/grants.js";
 import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
@@ -51,6 +49,7 @@ import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
+import { resumePendingContinuations } from "./dispatch.js";
 import {
   acceptUplinkFrame,
   acknowledgeDownlink,
@@ -63,8 +62,10 @@ import {
   pendingPrompts,
   replayOutbox,
 } from "./envelope.js";
+import { dataPlaneUrls } from "./data-plane.js";
 import { handleEnvelopedEvent } from "./envelope-events.js";
 import { setComputerLease } from "./lease-clock.js";
+import { availabilityOf, computerAvailability, computerLeases, withDispatchable } from "./computer-availability.js";
 import type { GroupTurns } from "./group-turn.js";
 import { bytesOf, type LiveRelay } from "../live/relay.js";
 
@@ -105,6 +106,8 @@ export type AgentConnection = {
   readonly socket: WebSocket;
   /** 这条连接下发给电脑的网关 key 明文。hello 时现生成，只活在这条连接上。 */
   readonly gatewayKey: string;
+  /** 代理在 hello 里自报的控制面源，这条连接收到的 config 地址都拼在它上面。随连接消失，不入库。 */
+  readonly controlOrigin: ControlOrigin;
   readonly conn: number;
   readonly installId: string;
   readonly piSessionVersion: number;
@@ -121,8 +124,6 @@ export type AgentHubDeps = {
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   readonly groupTurns: GroupTurns;
-  /** 监听端口在建 hub 之后才知道，所以基址是现取的。 */
-  readonly gatewayBaseUrl: () => string;
   readonly disconnectGraceMs?: number | undefined;
   readonly silenceTimeoutMs?: number | undefined;
   readonly mcpDiscoveryTimeoutMs?: number | undefined;
@@ -243,6 +244,11 @@ export class AgentHub {
             socket.close(AgentCloseCode.upgradeRequired, "电脑代理需要升级");
             return;
           }
+          const { controlOrigin } = message;
+          if (controlOrigin === undefined) {
+            socket.close(AgentCloseCode.badHello, "hello 缺 controlOrigin");
+            return;
+          }
           clearTimeout(deadline);
           // 认身份在链外做，这时还不知道是哪台电脑。认出来之后余下全部作为一个任务排进这台电脑的链。
           const computer = await authenticateComputer(this.#deps.db, message.computerId, message.token);
@@ -275,7 +281,7 @@ export class AgentHub {
               );
               return;
             }
-            conn = await this.#onHello(socket, authenticated, message);
+            conn = await this.#onHello(socket, authenticated, message, controlOrigin);
           });
         },
         (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
@@ -322,19 +328,34 @@ export class AgentHub {
    * 这条连接上一旦有过带代际的回执，无代际的拒收就不可能说的是当前这一代，不能盖掉已有的事实。
    * 返回是否采纳：没采纳的拒收不是事实，调用方不能据它告警或通知。
    */
-  markConfigRejected(conn: AgentConnection, generation: number | undefined): boolean {
+  async markConfigRejected(conn: AgentConnection, generation: number | undefined): Promise<boolean> {
     const config = this.#configs.get(conn);
     if (config === undefined) return false;
     if (generation === undefined ? config.acked !== 0 : generation !== config.sent) return false;
+    const was = config.state;
     config.state = "rejected";
+    if (was === "ready" && this.#connections.get(conn.computerId) === conn)
+      await this.#pushReach(conn.computerId, conn.ownerId);
     return true;
   }
 
-  markConfigApplied(conn: AgentConnection, generation: number): void {
+  async markConfigApplied(conn: AgentConnection, generation: number): Promise<void> {
     const config = this.#configs.get(conn);
     if (config === undefined || config.sent !== generation) return;
+    const was = config.state;
     config.acked = generation;
     config.state = "ready";
+    // 握手中变 ready 的那次由 hello 自己推上线，这里只管拒收之后恢复的那一拍。
+    if (was === "rejected" && this.#connections.get(conn.computerId) === conn)
+      await this.#pushReach(conn.computerId, conn.ownerId);
+  }
+
+  /** 库里的 status 没变、能不能派变了：config 拒收与恢复、断线宽限到期。网页的在线圆点只读 dispatchable。 */
+  async #pushReach(computerId: ComputerId, ownerId: UserId): Promise<void> {
+    const record = await findComputerById(this.#deps.db, computerId);
+    if (record === null) return;
+    const availability = await computerAvailability(this.#deps.db, this, ownerId);
+    this.#deps.push.push(ownerId, { type: "computer_updated", computer: withDispatchable(record, availability) });
   }
 
   #countQueuedHello(computerId: ComputerId, delta: 1 | -1): void {
@@ -495,6 +516,11 @@ export class AgentHub {
     return [...this.#connections.values()].filter((connection) => connection.ownerId === ownerId);
   }
 
+  /** 停机开始后为 true：这之后派不出去可能只是连接被停机收掉了，不能当成确定的结局。 */
+  get closing(): boolean {
+    return this.#lifecycle === "closing";
+  }
+
   /**
    * 先进停机，这一刻起 message、close 回调都不再往 inbox 和链上排，宽限计时器也全清掉、不再新建，
    * 所以要等的就是此刻各 socket 还没做完的那一步，和链上已经排着的任务，两个集合都是有限的，各等一次就够：
@@ -610,8 +636,9 @@ export class AgentHub {
    */
   async #onHello(
     socket: WebSocket,
-    computer: Computer,
+    computer: ComputerRecord,
     hello: Extract<AgentToControl, { type: "hello" }>,
+    controlOrigin: ControlOrigin,
   ): Promise<AgentConnection | null> {
     let accepted: AgentConnection | null = null;
     try {
@@ -634,6 +661,7 @@ export class AgentHub {
         ownerId: computer.ownerId,
         socket,
         gatewayKey,
+        controlOrigin,
         conn: handshakeCursor.conn,
         installId: hello.installId,
         piSessionVersion: hello.piSessionVersion,
@@ -666,7 +694,8 @@ export class AgentHub {
         await pendingPrompts(this.#deps.db, computer.id),
       );
       const online = await markComputerOnline(this.#deps.db, computer.id, gatewayKey);
-      if (online !== null) this.#deps.push.push(computer.ownerId, { type: "computer_updated", computer: online });
+      // 上线推送等 config 收下才发，那时 dispatchable 才是真的。租约先在这里读好，到那一拍不用再 await。
+      const leases = await computerLeases(this.#deps.db, computer.ownerId);
       await this.#deps.notifications.computerOnline(computer.ownerId);
       this.#send(accepted, {
         type: "welcome",
@@ -688,6 +717,11 @@ export class AgentHub {
       await this.#sendConfig(accepted, "hello");
       const handshake = this.#configs.get(accepted);
       if (handshake !== undefined) handshake.state = "ready";
+      if (online !== null)
+        this.#deps.push.push(computer.ownerId, {
+          type: "computer_updated",
+          computer: withDispatchable(online, availabilityOf(leases, this)),
+        });
       await this.flushOutbox(computer.id);
       for (const runId of await closedActiveRuns(this.#deps.db, computer.id, hello.activeRuns))
         this.#send(accepted, { type: "cancel", runId });
@@ -699,6 +733,10 @@ export class AgentHub {
       // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
       await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
         console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
+      );
+      // 结账提交后进程没了的那种接续，等目标电脑上线这一刻补起。
+      await resumePendingContinuations(this.#routineDeps(), computer.ownerId).catch((error: unknown) =>
+        console.error(`电脑 ${computer.id} 上线时补起接续出错：${errorKind(error)}`),
       );
       return accepted;
     } catch (error) {
@@ -737,7 +775,13 @@ export class AgentHub {
     }
     const computer = await markComputerSleeping(this.#deps.db, closed.computerId, closed.gatewayKey);
     // 新连接的上线排在这个任务后面，这条休眠一定推在它的上线之前。
-    if (computer !== null) this.#deps.push.push(closed.ownerId, { type: "computer_updated", computer });
+    if (computer !== null) {
+      const availability = await computerAvailability(this.#deps.db, this, closed.ownerId);
+      this.#deps.push.push(closed.ownerId, {
+        type: "computer_updated",
+        computer: withDispatchable(computer, availability),
+      });
+    }
   }
 
   /**
@@ -750,6 +794,8 @@ export class AgentHub {
   async #finishAfterGrace(computerId: ComputerId, ownerId: UserId): Promise<void> {
     const returning = () => this.#connections.has(computerId) || this.#queuedHellos.has(computerId);
     if (returning()) return;
+    // 计时器一到 canDeliver 就是假，断线那一拍推出去的「宽限中能派」从这里起不成立了。
+    await this.#pushReach(computerId, ownerId);
     const afterCommit: (() => Promise<void>)[] = [];
     try {
       await this.#deps.db.transaction(async (tx) => {
@@ -795,7 +841,11 @@ export class AgentHub {
       if (error instanceof TransactionRollbackError) return;
       throw error;
     }
-    for (const effect of afterCommit) await effect();
+    // 每个 run 的收尾已经提交，一个推送出错不能让后面的 run 连接续都不起。
+    for (const effect of afterCommit)
+      await effect().catch((error: unknown) =>
+        console.error(`电脑 ${computerId} 断连收尾后推送出错：${errorKind(error)}`),
+      );
   }
 
   async #finishMissingRuns(
@@ -871,6 +921,7 @@ export class AgentHub {
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
     const entries = await listBots(this.#deps.db, conn.ownerId);
     const bots = entries.map((item) => item.bot);
+    const urls = dataPlaneUrls(conn.controlOrigin);
     this.#send(conn, {
       type: "config",
       generation,
@@ -883,8 +934,8 @@ export class AgentHub {
         preset,
       })),
       tools,
-      mcpProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${MCP_PROXY_PATH}` },
-      hub: { baseUrl: `${this.#deps.gatewayBaseUrl()}${HUB_PATH}` },
+      mcpProxy: { baseUrl: urls.mcpProxy },
+      hub: { baseUrl: urls.hub },
       // 恒带这个字段，一条都没有也带一个空数组：运行器靠整份名单和 skills 目录对账，
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,
@@ -893,11 +944,8 @@ export class AgentHub {
       // brand 和 preferences 同 skills 一样恒带：运行器靠它们判断要不要重拼系统提示，省掉就分不清「没有」和「没说」。
       brand,
       preferences,
-      modelGateway: {
-        baseUrl: `${this.#deps.gatewayBaseUrl()}/gateway/v1`,
-        apiKey: conn.gatewayKey,
-      },
-      accountsProxy: { baseUrl: `${this.#deps.gatewayBaseUrl()}${ACCOUNTS_PROXY_PATH}` },
+      modelGateway: { baseUrl: urls.modelGateway, apiKey: conn.gatewayKey },
+      accountsProxy: { baseUrl: urls.accountsProxy },
     });
     if (reason === "hello") {
       for (const bot of bots) this.#send(conn, { type: bot.runState === "paused" ? "pause" : "resume", botId: bot.id });

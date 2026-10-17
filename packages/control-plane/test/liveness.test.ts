@@ -5,6 +5,7 @@ import {
   MessageListResponse,
   RoutineResponse,
   type BotId,
+  type Computer,
   type ComputerId,
   type GroupId,
   type ServerPush,
@@ -90,7 +91,11 @@ function freeze(computer: Live): void {
   computer.agent.socket.pause();
 }
 
-type StatusChange = { readonly computerId: ComputerId; readonly status: string };
+type StatusChange = { readonly computerId: ComputerId; readonly status: string; readonly dispatchable: boolean };
+
+function changeOf(computer: Computer): StatusChange {
+  return { computerId: computer.id, status: computer.status, dispatchable: computer.dispatchable };
+}
 
 /** 一直读推送，直到这台电脑变成 status；返回这之前（含这条）看到的全部电脑状态变化。 */
 async function untilStatus(push: PushClient, computerId: ComputerId, status: string): Promise<StatusChange[]> {
@@ -98,7 +103,7 @@ async function untilStatus(push: PushClient, computerId: ComputerId, status: str
   for (;;) {
     const item = await push.next();
     if (item.type !== "computer_updated") continue;
-    seen.push({ computerId: item.computer.id, status: item.computer.status });
+    seen.push(changeOf(item.computer));
     if (item.computer.id === computerId && item.computer.status === status) return seen;
   }
 }
@@ -114,7 +119,7 @@ async function pushesBeforeMarker(o: Owner): Promise<{ changes: StatusChange[]; 
   for (;;) {
     const item = await o.push.next();
     if (item.type === "bot_updated" && item.bot.description === description) return { changes, notices };
-    if (item.type === "computer_updated") changes.push({ computerId: item.computer.id, status: item.computer.status });
+    if (item.type === "computer_updated") changes.push(changeOf(item.computer));
     if (item.type === "notify") notices.push(item.notice);
   }
 }
@@ -192,7 +197,7 @@ it("被判死的电脑重连回来，派活又走本机", async () => {
   o.push.close();
 });
 
-it("判死走的是正常离线处理：离线推送、断线收尾和 stuck 照常，各只一次", async () => {
+it("判死走的是正常离线处理：断线和宽限到期各推一次电脑状态，断线收尾和 stuck 照常，各只一次", async () => {
   const o = await owner();
   const local = await live(o.local);
   clock = new Date("2030-01-07T08:59:00");
@@ -214,7 +219,7 @@ it("判死走的是正常离线处理：离线推送、断线收尾和 stuck 照
   const notices: Notice[] = [];
   for (;;) {
     const item = await o.push.next();
-    if (item.type === "computer_updated") changes.push({ computerId: item.computer.id, status: item.computer.status });
+    if (item.type === "computer_updated") changes.push(changeOf(item.computer));
     if (item.type === "notify") notices.push(item.notice);
     if (item.type === "notify" && item.notice.kind === "stuck") break;
   }
@@ -222,8 +227,11 @@ it("判死走的是正常离线处理：离线推送、断线收尾和 stuck 照
 
   expect(
     [...changes, ...rest.changes].filter((change) => change.status === "sleeping"),
-    "离线推送恰好一条",
-  ).toEqual([{ computerId: o.local.computerId, status: "sleeping" }]);
+    "离线推送两条：断线那一拍还在宽限期里能派，宽限到期才不能派",
+  ).toEqual([
+    { computerId: o.local.computerId, status: "sleeping", dispatchable: true },
+    { computerId: o.local.computerId, status: "sleeping", dispatchable: false },
+  ]);
   expect(
     [...notices, ...rest.notices].filter((notice) => notice.kind === "stuck").map((notice) => notice.text),
     "stuck 恰好一条",

@@ -7,7 +7,6 @@ import {
   ComputerId,
   RunId,
   UserId,
-  type Computer,
   type ContentPlan,
   type ContentPlanId,
   type ControlToAgent,
@@ -27,8 +26,8 @@ import {
   type Viewer,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
-import { and, eq, inArray, lte, sql, type SQL } from "drizzle-orm";
-import { approvals as approvalRows, computers as computerRows, groups, runs } from "../db/schema.js";
+import { and, eq, inArray, lte, type SQL } from "drizzle-orm";
+import { approvals as approvalRows, groups, runs } from "../db/schema.js";
 import {
   decideApproval,
   latestPendingApproval,
@@ -50,23 +49,40 @@ import {
   type GroupBot,
 } from "../repo/messages.js";
 import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
+import { pushRoutineUpdated } from "../repo/routines.js";
 import { listComputers } from "../repo/computers.js";
 import { lockOwner, lockRuns, shareBotRunsLock } from "../repo/runs.js";
 import { pendingLines, recordContext } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
 import type { PushHub } from "../ws/hub.js";
+import type { NoticePublisher } from "../notifications.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
-import { lockLaneComputers, placeRun } from "./place-run.js";
+import { computerPreference, lockLaneComputers, placeRun, type ComputerPreference } from "./place-run.js";
+import { errorKind } from "./events.js";
 import type { AgentHub } from "./hub.js";
+import { computerAvailability, computerView, type AvailabilityAgents } from "./computer-availability.js";
 import {
-  selectComputer,
+  selectAvailable,
   selectionNotice,
   type ComputerSelection,
   type SelectionFailure,
 } from "./computer-selection.js";
-import { GroupTurns, type SendOutcome, type Speaker } from "./group-turn.js";
+import type { ComputerRecord } from "../repo/rows.js";
+import { GroupTurns, type ContinuationRoutine, type SendOutcome, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
+import {
+  breakContinuation,
+  continuationSpeaker,
+  DISPATCH_FAILED_BREAK,
+  MEMBER_GONE_BREAK,
+  pendingContinuation,
+  pendingContinuationIds,
+  TRIGGER_GONE_BREAK,
+  unplacedBreak,
+  type ChainBreak,
+  type PendingContinuation,
+} from "./continuation.js";
 
 /** 送进 prompt 的上下文条数。规格没定，取一屏对话的量。 */
 export const CONTEXT_MESSAGES = 20;
@@ -80,6 +96,7 @@ export type DispatchDeps = {
   readonly db: Db;
   readonly push: PushHub;
   readonly agents: AgentHub;
+  readonly notifications: NoticePublisher;
   readonly groupTurns?: GroupTurns;
 };
 
@@ -103,52 +120,23 @@ export type DispatchOutcome =
   | { readonly kind: "no_target" }
   | { readonly kind: "failed" };
 
-/**
- * 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。
- * 拒了 config 的电脑连着却派不了活，按「不在线」选不中时把真实原因说出来：版本对不上，升级或重启电脑上的白泽就好。
- */
+/** 这一版派活不要求账号，候选电脑也就不带账号，理由见 README「派到哪台电脑」。 */
 export async function computerFor(
-  db: Db,
-  agents: Pick<AgentHub, "isOnline" | "configRejected"> & Partial<Pick<AgentHub, "canDeliver">>,
+  db: Db | Tx,
+  agents: AvailabilityAgents,
   ownerId: UserId,
+  preference: ComputerPreference,
 ): Promise<ComputerSelection> {
   const computers = await listComputers(db, ownerId);
-  const liveRows = await db
-    .select({ id: computerRows.id })
-    .from(computerRows)
-    .where(and(eq(computerRows.ownerId, ownerId), sql`${computerRows.leaseUntil} > clock_timestamp()`));
-  const live = new Set(liveRows.map((row) => row.id));
-  const selectedOnline = selectComputer(
-    [],
-    computers.map((computer) => ({
-      computer:
-        agents.isOnline(computer.id) && live.has(computer.id)
-          ? { ...computer, status: "online" }
-          : computer.status === "online"
-            ? { ...computer, status: "sleeping" }
-            : computer,
-      accounts: [],
-    })),
-  );
-  const selected =
-    selectedOnline.kind === "failed" && agents.canDeliver !== undefined
-      ? selectComputer(
-          [],
-          computers.map((computer) => ({
-            computer: {
-              ...computer,
-              status:
-                agents.canDeliver!(computer.id) && live.has(computer.id) ? ("online" as const) : ("sleeping" as const),
-            },
-            accounts: [],
-          })),
-        )
-      : selectedOnline;
-  if (selected.kind === "failed" && computers.some((computer) => agents.configRejected(computer.id))) {
-    return { kind: "failed", reason: "config_rejected" };
-  }
-  return selected;
+  return selectAvailable(computers, await computerAvailability(db, agents, ownerId), preference);
 }
+
+/** 派活前替头一位挑中的电脑，连同挑的时候它选的是哪种。 */
+type EarlyPick = {
+  readonly botId: BotId;
+  readonly preference: ComputerPreference;
+  readonly computer: ComputerRecord;
+};
 
 /**
  * 用户发完消息就派活。路由规则本身是 routing.ts 的纯函数，这里只负责查料、改经手、发报文。
@@ -183,19 +171,6 @@ export async function dispatchUserMessage(
     return { kind: "no_target" };
   };
 
-  const selected = await computerFor(deps.db, deps.agents, ownerId);
-  if (selected.kind === "failed") {
-    // 选电脑之前账号被删（删号先断代理，这里就选不到电脑），群已随账号没了，提示写不进去也不该写。
-    await noticeIfGroupAlive(deps, ownerId, groupId, {
-      kind: "system",
-      tone: "error",
-      text: selectionNotice(selected.reason),
-    });
-    return { kind: "unplaced", reason: selected.reason };
-  }
-  // 头一个 speaker 就用这次选中的电脑。再选一次的话，两次之间掉线会让它不建 run 就派空，
-  // 这里却已经报了 sent，例行就一直停在运行中。后面的 speaker 要等前一个跑完才派，到时再选。
-  let placed: Computer | null = selected.computer;
   // 设完经手再读名单：被 @ 的那位刚删掉时名单里已经没有它，路由直接落到原经手，不会派给一个不存在的 Bot。
   // 被 @ 的人全在派活途中被删时再路由一次，这回不认 @，只退回组长或经手，不替用户扩到全员；仍没人就留一句，不静默。
   // 例行只派给它自己的 Bot，没有第二次。
@@ -216,7 +191,23 @@ export async function dispatchUserMessage(
       owner === undefined
         ? routeTargets({ members, chiefBotId, currentBotId, mentions: mentioned })
         : members.filter((member) => member.id === owner).map((member) => member.id);
-    if (targets.length === 0) break;
+    const [firstBotId] = targets;
+    if (firstBotId === undefined) break;
+    // 按头一位在这个群里选的电脑先挑一次，挑不到就只留一句，不作废审批、不开回合。
+    // 选电脑之前账号被删（删号先断代理，这里就选不到电脑），群已随账号没了，提示写不进去也不该写。
+    const preference = await computerPreference(deps.db, groupId, firstBotId);
+    const selected = await computerFor(deps.db, deps.agents, ownerId, preference);
+    if (selected.kind === "failed") {
+      await noticeIfGroupAlive(deps, ownerId, groupId, {
+        kind: "system",
+        tone: "error",
+        text: selectionNotice(selected.reason),
+      });
+      return { kind: "unplaced", reason: selected.reason };
+    }
+    // 头一位就用这次挑中的电脑。再挑一次的话，两次之间掉线会让它不建 run 就派空，
+    // 这里却已经报了 sent，例行就一直停在运行中。后面的人要等前一个跑完才派，到时再挑。
+    let early: EarlyPick | null = { botId: firstBotId, preference, computer: selected.computer };
     let voidTargets = trigger.body.kind === "user" && options.routineRunId === undefined ? targets : [];
     const reason = solo
       ? "solo"
@@ -235,18 +226,9 @@ export async function dispatchUserMessage(
       members,
       speakers: targets.map((botId) => ({ botId, trigger, reason })),
       send: async (speaker, includeRecent) => {
-        const computer = placed;
-        placed = null;
-        const outcome = await sendSpeaker(
-          deps,
-          ownerId,
-          groupId,
-          speaker,
-          includeRecent,
-          options,
-          computer,
-          voidTargets,
-        );
+        const pick = early?.botId === speaker.botId ? early : null;
+        early = null;
+        const outcome = await sendSpeaker(deps, ownerId, groupId, speaker, includeRecent, options, pick, voidTargets);
         voidTargets = [];
         if (outcome.unplacedReason !== undefined) placementFailure.reason = outcome.unplacedReason;
         return outcome;
@@ -258,6 +240,133 @@ export async function dispatchUserMessage(
     if (started !== "nobody") return { kind: "sent" };
   }
   return noTarget();
+}
+
+/**
+ * 换电脑后接着做。旧 run 结账或被放弃之后调，没立标记、已经接过的直接返回。
+ * 回合还在跑别的就插到最前面；没有回合就按旧 run 的触发消息开一轮，只排它一位。
+ */
+export async function resumeContinuation(deps: DispatchDeps & { readonly groupTurns: GroupTurns }, runId: RunId) {
+  const pending = await pendingContinuation(deps.db, runId);
+  if (pending !== null) await startContinuation(deps, pending);
+}
+
+/**
+ * 补起欠着的接续：控制面启动、电脑 hello、定期补扫都走这里。结账提交后进程没了、内存里的回合丢了排着的接续、
+ * 结账后读接续出错，留下的都是标记立着、没有接续的已结束 run，这里一条条捡起来，一条出错不挡后面的。
+ * 只起选定那台此刻能派的：重启后电脑是一台台回来的，先回来的那台不能替还没回来的那台把活判成派不出去。
+ * 原来的 Bot 已经不在群里的（choice 为 null）不等任何电脑，当场断链收尾。
+ */
+export async function resumePendingContinuations(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  ownerId?: UserId,
+): Promise<number> {
+  let started = 0;
+  for (const runId of await pendingContinuationIds(deps.db, ownerId)) {
+    try {
+      const pending = await pendingContinuation(deps.db, runId);
+      if (pending === null) continue;
+      if (pending.choice !== null) {
+        const availability = await computerAvailability(deps.db, deps.agents, pending.ownerId);
+        if (!availability.some((one) => one.kind === pending.choice && one.dispatchable)) continue;
+      }
+      started += 1;
+      await startContinuation(deps, pending);
+    } catch (error) {
+      console.error(`run ${runId} 换电脑后的接续没起来：${errorKind(error)}`);
+    }
+  }
+  return started;
+}
+
+async function startContinuation(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  pending: PendingContinuation,
+): Promise<void> {
+  const { ownerId, groupId, trigger } = pending;
+  if (trigger === null) {
+    await endChain(deps, ownerId, groupId, pending.runId, TRIGGER_GONE_BREAK);
+    return;
+  }
+  const speaker = continuationSpeaker(pending, trigger);
+  if (speaker === null) {
+    await endChain(deps, ownerId, groupId, pending.runId, MEMBER_GONE_BREAK);
+    return;
+  }
+  if (deps.groupTurns.queueContinuation(groupId, pending.runId, speaker) === "queued") return;
+  const { members, epoch } = await breakChainOnError(deps, ownerId, groupId, pending.runId, async () => ({
+    members: await listGroupBots(deps.db, groupId),
+    epoch: await messageSeq(deps.db, trigger.id, { kind: "bot", botId: pending.botId }),
+  }));
+  if (members.length === 0) {
+    await endChain(deps, ownerId, groupId, pending.runId, MEMBER_GONE_BREAK);
+    return;
+  }
+  if (epoch === null) {
+    await endChain(deps, ownerId, groupId, pending.runId, TRIGGER_GONE_BREAK);
+    return;
+  }
+  // 上面几次读库期间，同一条接续可能已经由另一个触发点开了回合：补扫和结账、hello 会同时捡到它。
+  // 这里到 start 写进回合表之间没有 await，再排一次就不会开第二个回合把前一个顶掉。
+  if (deps.groupTurns.queueContinuation(groupId, pending.runId, speaker) === "queued") return;
+  await deps.groupTurns.start({
+    groupId,
+    ownerId,
+    epoch,
+    members,
+    speakers: [speaker],
+    send: (next, includeRecent) => sendSpeaker(deps, ownerId, groupId, next, includeRecent, {}, null, []),
+  });
+}
+
+/**
+ * 接续落行提交之前的这一段抛错：接续没建出来，标记还立着，认领得到就断链收成 failed，错照旧抛给原来的接收方。
+ * 提交之后的推送和发件出错不走这里，那时接续已经落了行。
+ */
+async function breakChainOnError<T>(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  fromRunId: RunId,
+  work: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    await endChain(deps, ownerId, groupId, fromRunId, DISPATCH_FAILED_BREAK).catch((ended: unknown) =>
+      console.error(`run ${fromRunId} 接续没起来，收尾也出错：${errorKind(ended)}`),
+    );
+    throw error;
+  }
+}
+
+/**
+ * 链断了：收尾、推例行。收成 failed 的主人多半不在群里，找他一次；stopped 是他自己换下了牌友，不找。
+ * 停机期间一律不收：派不出去、读库出错都可能只是停机关掉了连接，标记留着，重启后的补扫再判。
+ */
+async function endChain(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  fromRunId: RunId,
+  end: ChainBreak,
+): Promise<void> {
+  if (deps.agents.closing) return;
+  const ended = await breakContinuation(deps.db, fromRunId, end);
+  if (ended === null) return;
+  await pushRoutineUpdated(deps, ended.routineId);
+  if (end.status === "failed")
+    await deps.notifications.publish(ownerId, {
+      kind: "stuck",
+      text: `例行任务「${ended.name}」没跑完：${end.note}`,
+      groupId,
+    });
+}
+
+function continuationOptions(routine: ContinuationRoutine | null): DispatchOptions {
+  return routine === null
+    ? {}
+    : { purpose: routine.purpose, routine: { routineId: routine.routineId, boundary: routine.boundary } };
 }
 
 type PromptOrigin = Extract<ControlToAgent, { type: "prompt" }>["origin"];
@@ -275,23 +384,60 @@ async function sendSpeaker(
   speaker: Speaker,
   includeRecent: boolean,
   options: DispatchOptions,
-  placed: Computer | null,
+  early: EarlyPick | null,
   voidTargets: readonly BotId[],
 ): Promise<SendOutcome & { readonly unplacedReason?: SelectionFailure }> {
-  const selected: ComputerSelection =
-    placed === null ? await computerFor(deps.db, deps.agents, ownerId) : { kind: "selected", computer: placed };
-  if (selected.kind === "failed") {
+  const continuation = speaker.continuation;
+  // 接续不管排在谁的回合里，都按自己父链的例行配置发；回合的 options 属于回合的发起者。
+  const own = continuation === undefined ? options : continuationOptions(continuation.routine);
+  const place = () => placeSpeaker(deps, ownerId, groupId, speaker, includeRecent, own, early, voidTargets);
+  const placedRun =
+    continuation === undefined
+      ? await place()
+      : await breakChainOnError(deps, ownerId, groupId, continuation.fromRunId, place);
+  await publishAutomaticApprovals(deps, placedRun.voided);
+  // 跳过的接续要么已经由别处起过（认领不到，收尾是空操作），要么这一位已经不在群里。
+  if (placedRun.kind === "skipped" && continuation !== undefined)
+    await endChain(deps, ownerId, groupId, continuation.fromRunId, MEMBER_GONE_BREAK);
+  if (placedRun.kind === "skipped")
+    return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
+  if (placedRun.kind === "queued")
+    for (const computerId of placedRun.flushComputerIds) await deps.agents.flushOutbox(computerId);
+  // 停机时派不出去不算结局，不说也不收，理由见 endChain。
+  if (placedRun.kind === "unavailable" && continuation !== undefined && deps.agents.closing) return { kind: "stopped" };
+  if (placedRun.kind === "unavailable") {
+    // 等电脑锁期间租约可能过期、后面的人轮到时电脑可能已经不在，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
+    // 接续派不出去就说明白、把标记清掉，例行的运行记录按同一句原因收成失败；不改派到另一台，也不等电脑回来再补起：
+    // 用户看到这句自己决定。
+    if (continuation !== undefined)
+      await endChain(deps, ownerId, groupId, continuation.fromRunId, unplacedBreak(placedRun.reason));
     const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
       kind: "system",
       tone: "error",
-      text: selectionNotice(selected.reason),
+      text: selectionNotice(placedRun.reason, { continuation: continuation !== undefined }),
     });
-    return written ? { kind: "stopped", unplacedReason: selected.reason } : { kind: "gone" };
+    return written ? { kind: "stopped", unplacedReason: placedRun.reason } : { kind: "gone" };
   }
+  return { kind: "sent", runId: placedRun.runId };
+}
 
+/** 读齐派这一位要的东西、在一个事务里落行。抛错时事务回滚，什么都没落。 */
+async function placeSpeaker(
+  deps: DispatchDeps,
+  ownerId: UserId,
+  groupId: GroupId,
+  speaker: Speaker,
+  includeRecent: boolean,
+  options: DispatchOptions,
+  early: EarlyPick | null,
+  voidTargets: readonly BotId[],
+) {
   // 每派一位都重读成员表：同一回合里排在后面的人等到派活时，前面可能有人已经被删了。
   const members = await listGroupBots(deps.db, groupId);
-  const contextMessages = await contextMessagesFor(deps.db, groupId, speaker, includeRecent);
+  // 接续不带群历史、任务卡和名单：上一轮的对话都在运行器的会话里，整段提示就是 continuation.text。
+  const continuation = speaker.continuation;
+  const contextMessages =
+    continuation === undefined ? await contextMessagesFor(deps.db, groupId, speaker, includeRecent) : [];
   const chiefBotId = await findChiefBotId(deps.db, groupId);
   const solo = (await findSoloBotId(deps.db, groupId)) !== null;
   const task = await findTaskByGroup(deps.db, groupId);
@@ -313,11 +459,11 @@ async function sendSpeaker(
       ? botOrigin(members, speaker.handoff.fromBotId)
       : speaker.trigger.body.kind === "bot"
         ? botOrigin(members, speaker.trigger.body.botId)
-        : { kind: options.routineRunId === undefined ? "user" : "routine" };
+        : { kind: options.routineRunId === undefined && options.routine === undefined ? "user" : "routine" };
   // 只有主助理拿项目清单，它才能把一句「下周多发点小红书」落到某个项目的节奏上。
   const speakerRole = members.find((member) => member.id === speaker.botId)?.role;
   const projects = speakerRole === "assistant" ? await listProjects(deps.db, ownerId) : undefined;
-  const placedRun = await deps.db.transaction(async (tx) => {
+  return deps.db.transaction(async (tx) => {
     await lockOwner(tx, ownerId, "shared");
     for (const botId of [...new Set([speaker.botId, ...voidTargets])].toSorted()) await shareBotRunsLock(tx, botId);
     // 待批范围只能在电脑锁之后读；旧 run 在别的电脑上时也必须按同一顺序锁齐。
@@ -356,25 +502,27 @@ async function sendSpeaker(
         groupId,
         triggerMessageId: speaker.trigger.id,
         routineRunId: options.routineRunId,
-        prompt: async (runId) => {
+        ...(continuation === undefined ? {} : { continuesRunId: continuation.fromRunId }),
+        prompt: async (runId, _messageId, placed) => {
           await voidApprovals();
-          // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。
+          // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。接续没读窗口，也不记名单，免得把旧 run 没定稿的行划掉。
           const context = await summarizeAll(tx as unknown as Db, ownerId, contextMessages, speaker.botId, members);
-          await recordContext(
-            tx as unknown as Db,
-            runId,
-            { kind: "bot", botId: speaker.botId },
-            {
-              unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
-              settled: context.filter((line) => line.settled).map((line) => line.messageId),
-            },
-          );
+          if (continuation === undefined)
+            await recordContext(
+              tx as unknown as Db,
+              runId,
+              { kind: "bot", botId: speaker.botId },
+              {
+                unsettled: context.filter((line) => !line.settled).map((line) => line.messageId),
+                settled: context.filter((line) => line.settled).map((line) => line.messageId),
+              },
+            );
           return {
             type: "prompt",
             botId: speaker.botId,
             groupId,
             messageId: speaker.trigger.id,
-            text: speaker.handoff?.text ?? triggerText(speaker.trigger.body),
+            text: continuation?.text ?? speaker.handoff?.text ?? triggerText(speaker.trigger.body),
             origin,
             reason: speaker.reason,
             group,
@@ -382,36 +530,30 @@ async function sendSpeaker(
             purpose: options.purpose ?? "plan",
             routine: options.routine ?? null,
             table: null,
-            task: solo ? null : task,
-            members: roster,
+            task: solo || continuation !== undefined ? null : task,
+            members: continuation === undefined ? roster : [],
             ...(projects === undefined ? {} : { projects }),
             ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
+            computer: computerView(
+              await computerAvailability(tx, deps.agents, ownerId),
+              placed.computerId,
+              placed.preference,
+            ),
           };
         },
       },
-      async () => selected,
+      // 锁里读到的选择和事先挑的时候不一样（中间用户换了），按锁里的重挑。
+      async (preference): Promise<ComputerSelection> =>
+        early !== null && early.preference === preference
+          ? { kind: "selected", computer: early.computer }
+          : computerFor(tx, deps.agents, ownerId, preference),
     );
     if (result.kind !== "queued") await voidApprovals();
-    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。
-    if (result.kind === "not_member") return { kind: "skipped", voided } as const;
+    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。接续已经由别处起过了也只跳过。
+    if (result.kind === "not_member" || result.kind === "continued") return { kind: "skipped", voided } as const;
     if (result.kind === "unplaced") return { kind: "unavailable", reason: result.reason, voided } as const;
     return { ...result, voided };
   });
-  await publishAutomaticApprovals(deps, placedRun.voided);
-  if (placedRun.kind === "skipped")
-    return (await groupExists(deps.db, groupId)) ? { kind: "skipped" } : { kind: "gone" };
-  if (placedRun.kind === "queued")
-    for (const computerId of placedRun.flushComputerIds) await deps.agents.flushOutbox(computerId);
-  if (placedRun.kind === "unavailable") {
-    // 等电脑锁期间租约可能过期，真实选机失败还要传回例行，让它结成 failed 并推 stuck。
-    const written = await noticeIfGroupAlive(deps, ownerId, groupId, {
-      kind: "system",
-      tone: "error",
-      text: selectionNotice(placedRun.reason),
-    });
-    return written ? { kind: "stopped", unplacedReason: placedRun.reason } : { kind: "gone" };
-  }
-  return { kind: "sent", runId: placedRun.runId };
 }
 
 function triggerText(body: MessageBody): string {

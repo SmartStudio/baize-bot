@@ -65,7 +65,7 @@ test("首页点登录，面板自己弹出来画出电脑上那一页；点一�
   await expect(ends).toHaveAttribute("data-action", "abandon");
   await expect(ends).toHaveText("不登了");
   await expect(panel(page).getByTestId("live-reveal"), "本机电脑多一个到本机窗口操作").toHaveText("到本机窗口操作");
-  await expect(card.getByTestId("login-open"), "面板开着时卡上的按钮还是等你扫码").toBeDisabled();
+  await expect(card.getByTestId("login-open"), "面板开着时卡上的按钮还是等你登录").toBeDisabled();
   await page.screenshot({ path: `${SHOT}/p3-live-login-panel.png` });
 
   await page.getByTestId("live-canvas").click();

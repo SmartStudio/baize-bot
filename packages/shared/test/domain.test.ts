@@ -8,6 +8,7 @@ import {
   CreateGroupRequest,
   CreateRoutineRequest,
   DecideSkillOfferRequest,
+  DownlinkFrame,
   Draft,
   Group,
   GroupId,
@@ -22,6 +23,7 @@ import {
   SkillId,
   TopicTask,
   ToolConnection,
+  ToolView,
   toolViewText,
   gatewayAlias,
   TodayResponse,
@@ -243,6 +245,7 @@ describe("M7 群与主题任务的共享形状", () => {
       routine: null,
       members: [],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, task: null }).success).toBe(true);
@@ -267,6 +270,7 @@ describe("M7 群与主题任务的共享形状", () => {
       task: null,
       members: [],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     expect(ControlToAgent.safeParse({ ...prompt, handoffId: "h1" }).success).toBe(true);
@@ -290,6 +294,7 @@ describe("M7 群与主题任务的共享形状", () => {
       task: null,
       members: [{ ...member, seat: "chief" }],
       table: null,
+      computer: null,
     };
     expect(ControlToAgent.safeParse(prompt).success).toBe(true);
     const { reason: _reason, ...withoutReason } = prompt;
@@ -297,6 +302,13 @@ describe("M7 群与主题任务的共享形状", () => {
     const { messageId: _messageId, ...withoutMessageId } = prompt;
     expect(ControlToAgent.safeParse(withoutMessageId).success, "messageId 不可省").toBe(false);
     expect(ControlToAgent.safeParse({ ...prompt, members: [member] }).success, "成员座次不可省").toBe(false);
+    const { computer: _computer, ...withoutComputer } = prompt;
+    expect(
+      DownlinkFrame.parse({ type: "downlink", seq: 7, body: withoutComputer }).body,
+      "升级前压在发件箱里、不带电脑快照的 prompt 照样收下，当没有快照",
+    ).toEqual(prompt);
+    const onRemote = { ...prompt, computer: { other: { kind: "local", dispatchable: false }, choice: "remote" } };
+    expect(ControlToAgent.safeParse(onRemote).success, "另一台和选定都带上").toBe(true);
     const legacy = ControlToAgent.parse({ ...prompt, context: [{ messageId: "m1", from: "用户", text: "x" }] });
     expect(legacy.type === "prompt" ? legacy.context : null, "旧控制面不带 settled 的上下文行照样收下，当定稿").toEqual(
       [{ messageId: "m1", from: "用户", text: "x", settled: true }],
@@ -651,6 +663,19 @@ describe("C0 工具视图与审批报文", () => {
       }).success,
       "原始参数只能是 JSON 值",
     ).toBe(false);
+  });
+
+  it("bash 卡带闸门的补充说明时文字跟在命令后面", () => {
+    expect(toolViewText({ kind: "bash", command: "pip install six", note: "联网安装到这个 Bot 自己的工具箱" })).toBe(
+      "要执行 `pip install six`，联网安装到这个 Bot 自己的工具箱",
+    );
+    expect(
+      ToolView.parse({ kind: "bash", command: "pip install six", note: "联网安装到这个 Bot 自己的工具箱" }),
+    ).toEqual({
+      kind: "bash",
+      command: "pip install six",
+      note: "联网安装到这个 Bot 自己的工具箱",
+    });
   });
 
   it("toolViewText 五种视图都说人话且没有花括号", () => {

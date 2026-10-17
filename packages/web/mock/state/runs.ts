@@ -14,6 +14,7 @@ import {
   type ServerPush,
   type ToolCallStatus,
 } from "@baize/shared";
+import { startRunOn } from "./computer-choices.js";
 import { assignTask, tickFirstUndone } from "./groups.js";
 import { appendMessage, rewriteMessage } from "./messages.js";
 import { projectOfferFor } from "./projects.js";
@@ -296,6 +297,22 @@ export const streamBotReply = async (
   prompt: string,
   push: (event: ServerPush) => void,
 ): Promise<void> => {
+  // 开跑那一刻就定下在哪台上跑，这一轮中途换了选择也跑完再说。
+  const finish = startRunOn(groupId, botId);
+  try {
+    await replyOn(groupId, botId, prompt, push, finish);
+  } finally {
+    finish();
+  }
+};
+
+const replyOn = async (
+  groupId: string,
+  botId: BotId,
+  prompt: string,
+  push: (event: ServerPush) => void,
+  finish: () => void,
+): Promise<void> => {
   const run = currentGeneration();
   const abandoned = () => currentGeneration() !== run;
   const needed = approvalFor(prompt);
@@ -389,6 +406,7 @@ export const streamBotReply = async (
     steps: 4,
     amount: 0.8,
   });
+  finish();
   push({ type: "message", message: cost });
 
   // 被拦下的那次运行没干成事，没什么可交接的。

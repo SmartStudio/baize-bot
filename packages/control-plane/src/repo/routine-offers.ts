@@ -9,10 +9,11 @@ import {
 } from "@baize/shared";
 import { TransactionRollbackError, and, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groupMembers, groups, messages, routines } from "../db/schema.js";
+import { bots, groupMembers, groups, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { messageVisibleTo, nextRevision, type Tx } from "./messages.js";
-import { toMessage, toRoutine } from "./rows.js";
+import { insertRoutine } from "./routines.js";
+import { toMessage } from "./rows.js";
 import { shareBotRunsLock } from "./runs.js";
 
 export type RoutineOfferBody = Extract<MessageBody, { kind: "routine_offer" }>;
@@ -44,7 +45,8 @@ export type DecideRoutineOfferResult =
   | { readonly kind: "ok"; readonly message: Message; readonly routine: Routine | null }
   | { readonly kind: "already_decided" }
   | { readonly kind: "executor_outside" }
-  | { readonly kind: "executor_gone" };
+  | { readonly kind: "executor_gone" }
+  | { readonly kind: "table_group" };
 
 type Failure = Exclude<DecideRoutineOfferResult["kind"], "ok">;
 
@@ -80,24 +82,24 @@ export async function decideRoutineOffer(
         return tx.rollback();
       }
       const { body } = offer;
-      const [row] = await tx
-        .insert(routines)
-        .values({
-          id: routineId,
-          botId: body.executorBotId,
-          name: body.name,
-          instruction: body.instruction,
-          triggers: [{ kind: "cron", expr: body.cron, lastFiredAt: null }],
-          onFailure: "stop_and_tell",
-          groupId: body.groupId,
-          purpose: body.purpose,
-          state: "on",
-          boundary: body.boundary,
-          onToday: body.onToday,
-        })
-        .returning();
-      if (row === undefined) throw new Error("建例行任务没有返回行");
-      return { kind: "ok", message, routine: toRoutine(row, []) };
+      const created = await insertRoutine(tx, {
+        id: routineId,
+        botId: body.executorBotId,
+        name: body.name,
+        instruction: body.instruction,
+        triggers: [{ kind: "cron", expr: body.cron, lastFiredAt: null }],
+        onFailure: "stop_and_tell",
+        groupId: body.groupId,
+        purpose: body.purpose,
+        state: "on",
+        boundary: body.boundary,
+        onToday: body.onToday,
+      });
+      if (created.kind !== "ok") {
+        failure = created.kind;
+        return tx.rollback();
+      }
+      return { kind: "ok", message, routine: created.routine };
     });
   } catch (error) {
     if (error instanceof TransactionRollbackError && failure !== null) return { kind: failure };

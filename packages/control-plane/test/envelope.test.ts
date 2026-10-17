@@ -2,6 +2,7 @@ import {
   AccountId,
   AgentCloseCode,
   ControlToAgent,
+  controlOriginFromAgentUrl,
   CreateBotResponse,
   DownlinkFrame,
   MessageId,
@@ -99,7 +100,8 @@ async function rawHello(
       computerId,
       token,
       version: "test",
-      protocol: 3,
+      protocol: 4,
+      controlOrigin: controlOriginFromAgentUrl(socket.url),
       uplinkStream: stream,
       installId: computerId,
       piSessionVersion: 3,
@@ -812,9 +814,9 @@ describe("可靠信封", () => {
     expect(after[0]?.count).toBe(0);
   });
 
-  it("缺少 protocol 或低于 3 的 hello 都以 4003 拒绝", async () => {
+  it("缺少 protocol 或低于 4 的 hello 都以 4003 拒绝，旧代理不带 controlOrigin 也先拿到要升级", async () => {
     const s = await owner();
-    for (const protocol of [undefined, 1, 2]) {
+    for (const protocol of [undefined, 1, 2, 3]) {
       const agent = await openAgent(server.server.port);
       const hello = {
         type: "hello",

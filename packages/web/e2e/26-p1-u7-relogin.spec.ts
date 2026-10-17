@@ -42,7 +42,7 @@ test("过期的号只剩批过的稿子等着，首页照样出能扫码的登�
   expect(before, "过期号那一件计在等你确认里").toBeGreaterThan(0);
   await card.getByTestId("login-open").click();
   await expect(card).toHaveAttribute("data-state", "opening");
-  await expect(card.getByTestId("login-open")).toHaveText("等你扫码…");
+  await expect(card.getByTestId("login-open")).toHaveText("等你登录…");
 
   await reportLogin(request, EXPIRED_ID, { login: "valid", handle: "要务机械星球" });
   await expect(card, "服务端那行随登上没了，卡片留下当回执").toHaveAttribute("data-state", "signed_in");
@@ -69,9 +69,9 @@ test("账号页上过期的小红书号行上就能打开登录窗口，登上�
   ).toHaveCount(1);
 
   await xhs.getByTestId("login-open").click();
-  await expect(xhs.getByTestId("login-open")).toHaveText("等你扫码…");
+  await expect(xhs.getByTestId("login-open")).toHaveText("等你登录…");
   await expect(xhs.getByTestId("login-open")).toBeDisabled();
-  await expect(xhs.getByTestId("login-card-note")).toHaveText("登录窗口已在本机打开，扫码后这里会变成已登录。");
+  await expect(xhs.getByTestId("login-card-note")).toHaveText("登录窗口已在本机打开，登上后这里会变成已登录。");
 
   await reportLogin(request, EXPIRED_ID, { login: "valid", handle: "要务机械星球" });
   await expect(xhs).toHaveAttribute("data-login", "valid");
@@ -102,7 +102,7 @@ test("账号页主动接入小红书：选本机，在本机建一个号、打�
   const fresh = page.getByTestId("accounts-page").locator("[data-testid=account-row][data-login=none]");
   await expect(fresh).toContainText("小红书 · 未登录");
   await expect(fresh.getByTestId("account-where")).toContainText("在本机");
-  await expect(fresh.getByTestId("login-open"), "建完就开了登录窗口，不用再点一次").toHaveText("等你扫码…");
+  await expect(fresh.getByTestId("login-open"), "建完就开了登录窗口，不用再点一次").toHaveText("等你登录…");
 
   const { accounts } = AccountListResponse.parse(await (await page.request.get("/api/accounts")).json());
   const created = accounts.find((item) => item.platform === "xiaohongshu" && item.login === "none");

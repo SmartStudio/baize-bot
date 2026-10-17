@@ -155,7 +155,7 @@ describe("端到端：远程电脑上的小红书草稿", () => {
       };
     };
 
-    const chrome = fakeChrome({ kind: "remote" });
+    const chrome = fakeChrome();
     const fake = await startFakePlatforms();
     const upstream = await startUpstream(script);
     let stack: Stack | undefined;
@@ -232,6 +232,8 @@ describe("端到端：远程电脑上的小红书草稿", () => {
         "Target.attachToTarget",
         "Emulation.setFocusEmulationEnabled",
         "Page.navigate",
+        "Page.getFrameTree",
+        "Page.createIsolatedWorld",
         "Runtime.evaluate",
         "Target.closeTarget",
       ]);

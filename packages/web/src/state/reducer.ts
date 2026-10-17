@@ -1,6 +1,7 @@
 import type { Bot, BotId } from "@baize/shared";
 import { reduceApprovals } from "./approvals.js";
 import { reduceBrand } from "./brand.js";
+import { reduceComputerChoices } from "./computer-choices.js";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
 import { rearmGaps, reduceGroups, teamOf } from "./groups.js";
 import { reducePoker } from "./poker.js";
@@ -49,6 +50,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     skills: emptyShelf(),
     preferences: emptyShelf(),
     deletedPreferences: {},
+    computerChoices: emptyShelf(),
     brand: null,
     poker: {},
     tools,
@@ -95,7 +97,8 @@ export const reduce = (state: AppState, action: Action): AppState => {
   const routines = reduceRoutines(approvals, action);
   const skills = reduceSkills(routines, action);
   const preferences = reducePreferences(skills, action);
-  const brand = reduceBrand(preferences, action);
+  const choices = reduceComputerChoices(preferences, action);
+  const brand = reduceBrand(choices, action);
   const poker = reducePoker(brand, action);
   return reduceContent(reduceSettings(poker, action), action);
 };

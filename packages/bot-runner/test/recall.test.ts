@@ -56,6 +56,7 @@ const call = (query: string, id = "call-recall"): ScriptedTurn => ({
 });
 const prompt = (runId: string, text: string, groupId = "group-1"): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse(runId),
   botId: BotId.parse("bot-1"),
   groupId: GroupId.parse(groupId),
@@ -153,6 +154,7 @@ async function harness(options: {
   const appends: WorkAppend[] = [];
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-1"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-1"), role: "member", name: "小白", tags: [], description: "", preset: null }],
     tools: [],
     grants: [],

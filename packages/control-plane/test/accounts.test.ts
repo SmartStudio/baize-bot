@@ -476,7 +476,9 @@ describe("login_state valid 和 expired", () => {
 
 describe("迁移 0038", () => {
   it("记着 remote_refused 的行两列一起清成 NULL，别的失败原因不动", async () => {
-    const old = await createTestDb({ through: "0037_p3_recall_node_entry_time.sql" });
+    // 旧库不能拿 through 造：建人建电脑用的是现在的代码，后来的迁移给这些表加了列。
+    // 0038 只改数据，在新库上撤掉它的记账再跑一遍是同一件事。
+    const old = await createTestDb();
     try {
       const user = await makeUser(old.db);
       const { computerId } = await makeComputer(old.db, user.id);
@@ -488,8 +490,9 @@ describe("迁移 0038", () => {
       };
       const refused = await row("@远程", "remote_refused");
       const timedOut = await row("@本机", "timed_out");
+      await old.sql`DELETE FROM _migrations WHERE name = '0038_p3_clear_remote_refused.sql'`;
 
-      expect(await runMigrations(old.sql)).toContain("0038_p3_clear_remote_refused.sql");
+      expect(await runMigrations(old.sql)).toEqual(["0038_p3_clear_remote_refused.sql"]);
 
       const after = await old.sql<{ id: string; login_failure: string | null; failed: boolean }[]>`
         SELECT id, login_failure, login_failed_at IS NOT NULL AS failed FROM accounts ORDER BY login_failure IS NULL`;

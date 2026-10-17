@@ -7,6 +7,7 @@ import {
   type ApprovalOutcome,
   type BotId,
   type ComputerId,
+  type ComputerKind,
   type ControlToAgent,
   type GroupId,
   type RoutineBoundary,
@@ -27,6 +28,7 @@ import {
 } from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { acquireBotBrowserMutex, type BrowserMutexLease } from "./browser-mutex.js";
+import { containmentFor } from "./contained.js";
 import { createDraftTools, DRAFT_TOOL_NAMES, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createLane, findLaneRun, type Lane, type LaneActive } from "./lane.js";
@@ -34,14 +36,22 @@ import { SerialQueue } from "./serial-queue.js";
 import { createHelperTools } from "./helper.js";
 import { LaneFence, type LaneCancel, type WorkAppender } from "./lane-fence.js";
 import { connectionsFor, createMcpTools, unusableReason, type McpToolSet } from "./mcp-tools.js";
-import { brandFileOf, createMemoryTools, type RememberingRun, renderMemory, writeBrandFile } from "./memory.js";
+import {
+  brandFileOf,
+  createMemoryTools,
+  NO_SECTIONS,
+  type RememberingRun,
+  renderMemory,
+  writeBrandFile,
+} from "./memory.js";
+import { renderComputerSection, switchComputerTool } from "./computer.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
 import { reportRun, type RunReport, simpleToolView } from "./reporter.js";
 import { createRecallTool } from "./recall.js";
 import { createReviewTools } from "./review.js";
 import { createRoutineOfferTools } from "./routine-offer.js";
-import { createSandboxedBash } from "./sandbox.js";
+import { createSandboxedBash, sandboxKind } from "./sandbox.js";
 import { createSkillTools, reconcileSkillDir } from "./skills.js";
 import {
   composeTablePrompt,
@@ -65,6 +75,7 @@ export { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 export { type CdpConnection, type CdpEvent, type CdpPipe, connectPipe } from "./cdp.js";
 export { decide, verdictFor, type GateCall, type GateContext, type GateDecision } from "./gate.js";
 export type { LiveEnd, LiveOutcome, LiveRequest, PresentPage } from "./live-port.js";
+export { evaluateIsolated, type SessionSend } from "./isolated-world.js";
 export { discoverMcpTools } from "./mcp-discover.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";
@@ -72,6 +83,8 @@ export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } fr
 
 export interface RunnerConfig {
   readonly computerId: ComputerId;
+  /** 控制面在 welcome 里报的电脑类型。远程电脑加 bwrap 时，bash 只有联网、写工作区外、删和移才问，见 `src/gate.ts` 的 `relaxIfContained`。 */
+  readonly computerKind: ComputerKind;
   readonly bots: readonly BotConfig[];
   /** 工具连接。只给 assignedBotIds 里有的 Bot 加载，每个 operation 一个 Pi 工具，见 `src/mcp-tools.ts`。 */
   readonly tools: readonly ToolConnectionConfig[];
@@ -335,6 +348,9 @@ function composePrompt(
     case "mentioned":
     case "handoff":
       break;
+    // 换电脑后的接续：上一轮的对话都在会话里，整段提示就是控制面给的那句话，群标签、任务卡都不重复。
+    case "continuation":
+      return message.text;
     case "chief":
       sections.push(
         "没人点名，你是这个群的首席，先到你。自己能答就直接答；需要谁补充就 @ 谁；要大家都表态就 @所有人。别为了显得周到把每个人都点一遍。",
@@ -393,6 +409,7 @@ function composePrompt(
 
 export function createRunner(config: RunnerConfig): Runner {
   let state: RunnerState = "ready";
+  const containment = containmentFor(config.computerKind, sandboxKind());
   const hasStopped = (): boolean => state === "stopped";
   const approvals: ApprovalGate = createApprovalGate(config.send);
   const pokerResults = createPokerResults(config.send);
@@ -796,7 +813,12 @@ export function createRunner(config: RunnerConfig): Runner {
       return created;
     }
     const zones = forbiddenZones(dirs, config.browser?.profileDir ?? null);
-    const bash = createSandboxedBash(dirs.workDir, zones, () => lane.active?.run.runId ?? null);
+    const bash = createSandboxedBash(
+      dirs.workDir,
+      zones,
+      () => lane.active?.run.runId ?? null,
+      containment.level === "closed" ? { toolboxDir: dirs.toolboxDir } : null,
+    );
     if (config.browser !== undefined && bot.browser === null) {
       bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);
     }
@@ -848,6 +870,18 @@ export function createRunner(config: RunnerConfig): Runner {
     };
     const builtIn: readonly RunnerTool[] = [
       ...extensionTools,
+      switchComputerTool({
+        live: () => {
+          const active = lane.active;
+          if (active === null || !liveRuns.has(active.run.runId) || active.control.signal.aborted) return null;
+          return {
+            runId: active.run.runId,
+            signal: active.control.signal,
+            gateway: (desiredConfig(bot) ?? runConfig()).gateway,
+            headers: laneFence.headers(active.run.runId),
+          };
+        },
+      }),
       createRecallTool({
         recalls: lane.recalls,
         live: () => {
@@ -942,6 +976,7 @@ export function createRunner(config: RunnerConfig): Runner {
           groupId,
           platform: process.platform,
           sandbox: bash.sandbox,
+          containment: bash.containment,
           source,
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,
@@ -964,7 +999,7 @@ export function createRunner(config: RunnerConfig): Runner {
       ...gate,
       allowBash: bash.allow,
       clearBashRun: bash.clearRun,
-      memory: () => lane.active?.memory ?? null,
+      sections: () => lane.active?.sections ?? NO_SECTIONS,
       recalls: lane.recalls,
       ...(generation.desired.settings === undefined ? {} : { settings: generation.desired.settings }),
       ...(sessionManager === undefined ? {} : { sessionManager }),
@@ -990,7 +1025,7 @@ export function createRunner(config: RunnerConfig): Runner {
       control: new AbortController(),
       table: message.table,
       messageId: message.messageId,
-      memory: null,
+      sections: NO_SECTIONS,
       run: {
         runId: message.runId,
         botId: message.botId,
@@ -1077,7 +1112,10 @@ export function createRunner(config: RunnerConfig): Runner {
       const desired = generation.desired;
       const shown = readMemoryShown(session.sessionManager);
       const memory = renderMemory(bot.botId, desired.brand, desired.preferences, shown);
-      active.memory = memory.text;
+      active.sections = {
+        memory: memory.text,
+        computer: renderComputerSection(config.computerKind, message.computer),
+      };
       const text = composePrompt(message, contextSince(message.context, watermark), desired.accounts);
       report = reportRun(
         session,

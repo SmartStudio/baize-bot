@@ -34,7 +34,7 @@ export async function handleTeamOffer(
     const projectGroupId = await lockOfferTarget(tx, conn.ownerId, event.projectGroupId, existing);
     if (projectGroupId === null) {
       console.warn(
-        `电脑 ${conn.computerId} 报的建队卡指向 ${event.projectGroupId}，不是这个用户的项目群或人选不是他的 Bot，整条丢掉`,
+        `电脑 ${conn.computerId} 报的建队卡指向 ${event.projectGroupId}，不是这个用户的项目群或人选不是这个用户的 Bot，整条丢掉`,
       );
       return null;
     }

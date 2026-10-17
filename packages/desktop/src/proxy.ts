@@ -43,11 +43,13 @@ export function startUiServer(webRoot: string, controlOrigin: string): Promise<U
   });
   server.on("upgrade", (req, socket, head) => {
     const path = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
-    if (path !== "/api/ws") {
+    if (!path.startsWith("/api/")) {
       socket.destroy();
       return;
     }
-    proxyUpgrade(req, socket, head, target);
+    const address = server.address();
+    const ownOrigin = address === null || typeof address === "string" ? "" : `http://127.0.0.1:${address.port}`;
+    proxyUpgrade(req, socket, head, target, ownOrigin);
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -88,13 +90,16 @@ function proxyHttp(req: IncomingMessage, res: ServerResponse, target: URL): void
   req.pipe(upstream);
 }
 
-function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, target: URL): void {
+// 控制面的画面 socket 要求 Origin 与 Host 同源，而 Host 已换成控制面的。本页发起的 Origin 跟着换；外站的原样转，让控制面照旧拒。
+function proxyUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, target: URL, ownOrigin: string): void {
   const port = target.port === "" ? (target.protocol === "https:" ? 443 : 80) : Number(target.port);
   const forwardUpgrade = (): void => {
     const lines = [`${req.method ?? "GET"} ${req.url ?? "/"} HTTP/1.1`, `Host: ${target.host}`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (value === undefined || key.toLowerCase() === "host") continue;
-      for (const item of Array.isArray(value) ? value : [value]) lines.push(`${key}: ${item}`);
+      for (const item of Array.isArray(value) ? value : [value]) {
+        lines.push(`${key}: ${key.toLowerCase() === "origin" && item === ownOrigin ? target.origin : item}`);
+      }
     }
     upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
     if (head.length > 0) upstream.write(head);

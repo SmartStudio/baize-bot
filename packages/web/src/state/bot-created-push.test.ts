@@ -83,6 +83,7 @@ const opened = () => {
     stateRef: ref,
     refreshPendingCounts: () => undefined,
     recoverLogins: () => undefined,
+    reloadChoices: () => undefined,
   });
   let seq = 0;
   return {

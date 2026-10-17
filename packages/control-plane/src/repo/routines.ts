@@ -16,10 +16,20 @@ import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL,
 import type { z } from "zod";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
-import { bots, groupMembers, groups, routineRuns, routines, runs, type StoredTrigger } from "../db/schema.js";
+import {
+  bots,
+  groupMembers,
+  groups,
+  pokerTables,
+  routineRuns,
+  routines,
+  runs,
+  type StoredTrigger,
+} from "../db/schema.js";
 import { newId } from "../ids.js";
 import { toRoutine } from "./rows.js";
 import { exclusiveBotRunsLock, shareBotRunsLock } from "./runs.js";
+import type { PushHub } from "../ws/hub.js";
 
 type OnFailure = z.infer<typeof OnFailureSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
@@ -67,6 +77,21 @@ export async function loadRoutine(db: Db, routineId: RoutineId): Promise<Routine
   if (owned === null) return null;
   const byRoutine = await listRunsByRoutine(db, [routineId]);
   return { routine: toRoutine(owned.row, byRoutine.get(routineId) ?? []), ownerId: owned.ownerId };
+}
+
+/**
+ * 每次状态或 note 变了就把整条例行任务推一遍，客户端整条替换。没改动（null）就不推。
+ * 运行记录变了就可能刚好凑满三次没人看，自己停下的那一下和这次收尾合成一次推送。
+ */
+export async function pushRoutineUpdated(
+  deps: { readonly db: Db; readonly push: PushHub },
+  routineId: string | null,
+): Promise<void> {
+  if (routineId === null) return;
+  await autoPauseIfUnseen(deps.db, routineId);
+  const loaded = await loadRoutine(deps.db, RoutineId.parse(routineId));
+  if (loaded === null) return;
+  deps.push.push(loaded.ownerId, { type: "routine_updated", routine: loaded.routine });
 }
 
 export async function listRoutines(db: Db, botId: BotId): Promise<Routine[]> {
@@ -133,9 +158,13 @@ export type RoutineInput = {
   readonly onToday: boolean;
 };
 
+export type InsertRoutineResult = { readonly kind: "ok"; readonly routine: Routine } | { readonly kind: "table_group" };
+
+export type CreateRoutineResult = InsertRoutineResult | { readonly kind: "bot_gone" };
+
 /**
  * 建例行先拿执行者的共享锁，锁到之后用新语句确认它还在且是本人的，再插。
- * 删 Bot 拿的是同一把锁的排他：删除先赢，这里看见 Bot 没了回 null；建例行先赢，删除的转交扫描一定看得见这一行。
+ * 删 Bot 拿的是同一把锁的排他：删除先赢，这里看见 Bot 没了回 bot_gone；建例行先赢，删除的转交扫描一定看得见这一行。
  * 路由层的归属预检挡不住这个窗口，预检过了之后到插入之间删除可以整个做完。
  */
 export async function createRoutine(
@@ -143,7 +172,7 @@ export async function createRoutine(
   ownerId: UserId,
   botId: BotId,
   input: RoutineInput,
-): Promise<Routine | null> {
+): Promise<CreateRoutineResult> {
   return db.transaction(async (tx) => {
     await shareBotRunsLock(tx, botId);
     const [alive] = await tx
@@ -151,26 +180,41 @@ export async function createRoutine(
       .from(bots)
       .where(and(eq(bots.id, botId), eq(bots.ownerId, ownerId)))
       .limit(1);
-    if (alive === undefined) return null;
-    const [row] = await tx
-      .insert(routines)
-      .values({
-        id: newId(),
-        botId,
-        name: input.name,
-        instruction: input.instruction,
-        triggers: mergeTriggers([], input.triggers),
-        onFailure: input.onFailure,
-        groupId: input.groupId ?? null,
-        purpose: input.purpose ?? "plan",
-        state: input.state,
-        boundary: input.boundary,
-        onToday: input.onToday,
-      })
-      .returning();
-    if (row === undefined) throw new Error("建例行任务没有返回行");
-    return toRoutine(row, []);
+    if (alive === undefined) return { kind: "bot_gone" };
+    return insertRoutine(tx, {
+      id: newId(),
+      botId,
+      name: input.name,
+      instruction: input.instruction,
+      triggers: mergeTriggers([], input.triggers),
+      onFailure: input.onFailure,
+      groupId: input.groupId ?? null,
+      purpose: input.purpose ?? "plan",
+      state: input.state,
+      boundary: input.boundary,
+      onToday: input.onToday,
+    });
   });
+}
+
+export const TABLE_GROUP_ERROR = "牌桌群里不能建例行任务";
+
+/**
+ * 手建和点「加上」确认卡共用的落库。牌桌群只认出牌按钮，例行发进去的那条消息没有人接得住，两条入口都在这里挡。
+ * 牌桌是开桌时新建的群，已有的群不会后来变成牌桌，所以查一次就够，不用锁。
+ */
+export async function insertRoutine(tx: Tx, values: typeof routines.$inferInsert): Promise<InsertRoutineResult> {
+  if (values.groupId !== null && values.groupId !== undefined) {
+    const [table] = await tx
+      .select({ groupId: pokerTables.groupId })
+      .from(pokerTables)
+      .where(eq(pokerTables.groupId, values.groupId))
+      .limit(1);
+    if (table !== undefined) return { kind: "table_group" };
+  }
+  const [row] = await tx.insert(routines).values(values).returning();
+  if (row === undefined) throw new Error("建例行任务没有返回行");
+  return { kind: "ok", routine: toRoutine(row, []) };
 }
 
 /** `UpdateRoutineRequest` 解出来的样子：没给的字段是 undefined，不是缺席。 */
@@ -420,7 +464,7 @@ export async function transferRoutines(tx: Tx, fromBotId: BotId, toBotId: BotId)
     .returning({ id: routines.id, groupId: routines.groupId });
   await tx
     .update(routineRuns)
-    .set({ status: "failed", note: EXECUTOR_DELETED_NOTE })
+    .set({ status: "failed", note: withStatusNote(EXECUTOR_DELETED_NOTE) })
     .where(and(inArray(routineRuns.routineId, ids), eq(routineRuns.status, "running")));
   return moved;
 }
@@ -622,53 +666,96 @@ export async function recordStoppedRoutineRun(db: Db, routineId: string, started
   await db.insert(routineRuns).values({ id: newId(), routineId, startedAt, status: "stopped", note });
 }
 
-/** 收尾。只改还在 running 的那一条，重复的报文和已经停下的记录都不再动。 */
+// 开头那句状态短句：不以 ¥ 开头，自己不带「 · 」。
+const STATUS_NOTE = "^[^¥][^·]*(?: · |$)";
+
+/**
+ * note 是「状态短句 · 各段花费」。换状态只换开头那句，链上前几段缀的花费都留着：
+ * 「1 条等你点头 · ¥0.80」收成失效是「审批已失效 · ¥0.80」，同一句再记一次还是它自己。
+ */
+function withStatusNote(status: string): SQL {
+  const costs = sql`regexp_replace(${routineRuns.note}, ${STATUS_NOTE}, '')`;
+  return sql`CASE WHEN ${costs} = '' THEN ${status} ELSE ${status} || ' · ' || ${costs} END`;
+}
+
+/** 收尾。只改还在 running 的那一条，重复的报文和已经停下的记录都不再动。前几段缀上的花费留在后面。 */
 export async function settleRoutineRun(
-  db: Db,
+  db: Db | Tx,
   routineRunId: string,
   status: Exclude<RoutineRunStatus, "running">,
   note: string,
 ): Promise<string | null> {
   const [row] = await db
     .update(routineRuns)
-    .set({ status, note })
+    .set({ status, note: withStatusNote(note) })
     .where(and(eq(routineRuns.id, routineRunId), eq(routineRuns.status, "running")))
     .returning({ routineId: routineRuns.routineId });
   return row?.routineId ?? null;
 }
 
 /** 审批挂起后运行记可能已是 stopped；失效要把 running 和 stopped 都收成 failed。 */
-export async function failRoutineRun(db: Db, routineRunId: string, note: string): Promise<string | null> {
+export async function failRoutineRun(db: Db | Tx, routineRunId: string, note: string): Promise<string | null> {
   const [row] = await db
     .update(routineRuns)
-    .set({ status: "failed", note })
+    .set({ status: "failed", note: withStatusNote(note) })
     .where(and(eq(routineRuns.id, routineRunId), inArray(routineRuns.status, ["running", "stopped"])))
     .returning({ routineId: routineRuns.routineId });
   return row?.routineId ?? null;
 }
 
 /** 只补 note，状态一个字不改。`retry_next_time` 遇到审批走这里：记一笔，活照样算在跑。 */
-export async function noteRoutineRun(db: Db, routineRunId: string, note: string): Promise<string | null> {
+export async function noteRoutineRun(db: Db | Tx, routineRunId: string, note: string): Promise<string | null> {
   const [row] = await db
     .update(routineRuns)
-    .set({ note })
+    .set({ note: withStatusNote(note) })
     .where(and(eq(routineRuns.id, routineRunId), eq(routineRuns.status, "running")))
     .returning({ routineId: routineRuns.routineId });
   return row?.routineId ?? null;
 }
 
 /**
- * 活跑完了。还在 running 的记成 ok，已经停下的保持原状，两种都在 note 后面缀上这次的花费。
- * 停下等点头的那条因此长成「1 条等你点头 · ¥0.80」。
+ * 活跑完了：note 后面缀上这次的花费。停下等点头的那条因此长成「1 条等你点头 · ¥0.80」。
+ * 后面还有换电脑的接续（continues）时状态不动，由接续那一轮收尾；否则还在 running 的记成 ok，已经停下的保持原状。
+ * notify 是该不该弹「做完了」：链尾、整条链说过话，而且记录是这一次从 running 改成的 ok，或停在等点头。
+ * 别处先收成 failed 的、早就改过状态的都不弹，弹不弹看这一次条件更新改没改到行。
  */
-export async function chargeRoutineRun(db: Db | Tx, routineRunId: string, cost: string): Promise<string | null> {
+export async function chargeRoutineRun(
+  db: Db | Tx,
+  routineRunId: string,
+  cost: string,
+  continues: boolean,
+): Promise<{ readonly routineId: string; readonly notify: boolean } | null> {
+  const finished = continues
+    ? []
+    : await db
+        .update(routineRuns)
+        .set({ status: "ok" })
+        .where(and(eq(routineRuns.id, routineRunId), eq(routineRuns.status, "running")))
+        .returning({ id: routineRuns.id });
   const [row] = await db
     .update(routineRuns)
     .set({
-      status: sql`CASE WHEN ${routineRuns.status} = 'running' THEN 'ok' ELSE ${routineRuns.status} END`,
       note: sql`CASE WHEN ${routineRuns.note} = '' THEN ${cost} ELSE ${routineRuns.note} || ' · ' || ${cost} END`,
     })
     .where(eq(routineRuns.id, routineRunId))
-    .returning({ routineId: routineRuns.routineId });
-  return row?.routineId ?? null;
+    .returning({ routineId: routineRuns.routineId, status: routineRuns.status, hasResult: routineRuns.hasResult });
+  if (row === undefined) return null;
+  const notify = !continues && row.hasResult && (finished.length > 0 || row.status === "stopped");
+  return { routineId: row.routineId, notify };
+}
+
+/**
+ * 这个 run 说了可见的话：和写那段文字同一个事务记进它的运行记录，链尾结账看库里这一位，控制面重启也不丢。
+ * 已经记过的不再写；不是例行派起的 run 子查询是 NULL，什么都不改。
+ */
+export async function markRoutineRunResult(db: Db | Tx, runId: string): Promise<void> {
+  await db
+    .update(routineRuns)
+    .set({ hasResult: true })
+    .where(
+      and(
+        eq(routineRuns.id, sql`(SELECT ${runs.routineRunId} FROM ${runs} WHERE ${runs.id} = ${runId})`),
+        eq(routineRuns.hasResult, false),
+      ),
+    );
 }

@@ -235,18 +235,34 @@ function rawFrame(header: unknown): Uint8Array {
   return out;
 }
 
-async function tableCounts(): Promise<Record<string, number>> {
-  const tables = await database.sql<{ table_name: string }[]>`
+async function publicTables(): Promise<{ table_name: string }[]> {
+  return database.sql<{ table_name: string }[]>`
     SELECT table_name FROM information_schema.tables
     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
     ORDER BY table_name
   `;
+}
+
+async function tableCounts(): Promise<Record<string, number>> {
+  const tables = await publicTables();
   const counts: Record<string, number> = {};
   for (const { table_name: table } of tables) {
     const [row] = await database.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ${database.sql(table)}`;
     counts[table] = row?.n ?? -1;
   }
   return counts;
+}
+
+async function tablesHolding(needle: string): Promise<Record<string, number>> {
+  const tables = await publicTables();
+  const holding: Record<string, number> = {};
+  for (const { table_name: table } of tables) {
+    const [row] = await database.sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ${database.sql(table)} t WHERE t::text LIKE '%' || ${needle} || '%'
+    `;
+    if (row?.n !== 0) holding[table] = row?.n ?? -1;
+  }
+  return holding;
 }
 
 describe("画面面：会话登记和列表", () => {
@@ -581,7 +597,7 @@ describe("画面面：限额和不落库", () => {
     expect(await burst()).toBe(INPUT_PER_SECOND);
   });
 
-  it("一整轮会话、观看、帧、输入、结束前后，public 下每张表的行数不变，输入不进日志", async () => {
+  it("一整轮会话、观看、帧、输入、结束前后，public 下每张表的行数不变、哪张表都搜不到输入的文字，输入也不进日志", async () => {
     const owner = await onlineOwner();
     const secret = `密码-${randomUUID()}`;
     const spies = (["log", "info", "warn", "error"] as const).map((level) => vi.spyOn(console, level));
@@ -611,6 +627,7 @@ describe("画面面：限额和不落库", () => {
       expect(await owner.push.next()).toEqual({ type: "live_closed", liveId: session.liveId });
 
       expect(await tableCounts()).toEqual(before);
+      expect(await tablesHolding(secret), "输入的文字出现在这些表里").toEqual({});
       const logged = spies.flatMap((spy) => spy.mock.calls.flat().map((arg) => String(arg)));
       expect(logged.filter((line) => line.includes(secret))).toEqual([]);
     } finally {

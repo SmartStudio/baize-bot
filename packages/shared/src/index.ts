@@ -9,5 +9,6 @@ export * from "./poker.js";
 export * from "./attachments.js";
 export * from "./lane-records.js";
 export * from "./recall.js";
+export * from "./computer-choice.js";
 export * from "./live-id.js";
 export * from "./live.js";

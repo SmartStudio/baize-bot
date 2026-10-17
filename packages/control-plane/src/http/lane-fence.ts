@@ -1,8 +1,9 @@
-import { BotId, GroupId, LaneIdentity, type Computer } from "@baize/shared";
+import { BotId, GroupId, LaneIdentity } from "@baize/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { bots, computers, groupMembers, groups, laneLeases } from "../db/schema.js";
 import type { Tx } from "../repo/messages.js";
+import type { ComputerRecord } from "../repo/rows.js";
 
 export const LANE_FENCE_ERRORS = {
   stale_epoch: "代际过时",
@@ -16,7 +17,7 @@ export type LaneFenceResult =
 
 export async function validateLaneFence(
   db: Db | Tx,
-  computer: Computer,
+  computer: ComputerRecord,
   header: string | undefined,
 ): Promise<LaneFenceResult> {
   const parts = header === undefined ? null : /^([^\s/]+)\/([^\s/]+)\/([1-9]\d*)$/.exec(header);

@@ -12,6 +12,7 @@ import {
   ChecklistItem,
   ComputerKind,
   ComputerId,
+  ComputerView,
   ContentPlanId,
   DraftContent,
   DraftId,
@@ -48,6 +49,20 @@ import { McpDiscoveryResult, McpHttpUrl } from "./mcp-discovery.js";
 export const ApprovalOutcome = z.enum(["approved", "rejected", "voided", "timed_out"]);
 export type ApprovalOutcome = z.infer<typeof ApprovalOutcome>;
 // 两个方向各一个 discriminatedUnion。加一种报文就在这里加一个分支。
+
+/** 代理连控制面用的那个源，config 的数据面地址只拼在它上面。只在这里校验一次，后面谁都不再判断。 */
+export const ControlOrigin = z
+  .string()
+  .max(256)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (url.protocol === "http:" || url.protocol === "https:") && url.origin === value;
+    } catch {
+      return false;
+    }
+  }, "必须是 http(s)://主机[:端口]，不带路径、查询和凭据");
+export type ControlOrigin = z.infer<typeof ControlOrigin>;
 
 export const AgentCloseCode = {
   superseded: 4000,
@@ -94,6 +109,8 @@ export const AgentToControl = z.discriminatedUnion("type", [
     token: z.string(),
     version: z.string(),
     protocol: z.number().int().nonnegative().default(1),
+    // 协议 4 起必填，缺了控制面按坏 hello 关。schema 上可缺是为了让旧代理先撞上协议号检查，拿到要升级的明确关闭码。
+    controlOrigin: ControlOrigin.optional(),
     installId: z.string().uuid().default("00000000-0000-0000-0000-000000000000"),
     piSessionVersion: z.number().int().positive().default(1),
     uplinkStream: z.string().min(1).max(128).default("legacy"),
@@ -489,9 +506,10 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     ),
     purpose: ModelPurpose,
     projects: z.array(z.object({ groupId: GroupId, title: z.string(), cadence: z.string() }).strict()).optional(),
-    // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流。
-    // 运行器据此在群标签下写一句，全员轮流那种要告诉它无话可说回 (pass)。
-    reason: z.enum(["solo", "mentioned", "handoff", "chief", "current", "everyone"]),
+    // 这条为什么派到你：单聊、被点名、交接目标、你是首席、你是经手、没人点名全员轮流、换电脑后接着上一轮做。
+    // 运行器据此在群标签下写一句，全员轮流那种要告诉它无话可说回 (pass)；continuation 的 text 就是整段提示，
+    // context、task、members 都是空的，上一轮的对话都在会话里。
+    reason: z.enum(["solo", "mentioned", "handoff", "chief", "current", "everyone", "continuation"]),
     // 多 Bot 群带任务卡和成员名单，Bot 靠名单知道能 @ 谁、各自会做什么。单 Bot 群 task 为 null，members 只有它自己。
     task: TopicTask.nullable(),
     members: z.array(
@@ -505,6 +523,9 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     ),
     // 这条 prompt 是为了让它处理一份交接时带上，运行器的 accept_handoff 工具只在带了它时可用。
     handoffId: HandoffId.optional(),
+    // 落位那一刻的快照。账号下只有一台、这个群也没选过时为 null，牌桌恒为 null。
+    // 升级前压在发件箱里的 prompt 没有这个字段，缺省当 null，不然整条 parse 不过被丢掉，run 一直挂着。
+    computer: ComputerView.nullable().default(null),
   }),
   z.object({
     type: z.literal("approval_result"),
@@ -551,8 +572,8 @@ export const ControlToAgent = ControlToAgentDiscriminatedUnion.refine(
 );
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
 
-export const AGENT_PROTOCOL = 3;
-export const MIN_AGENT_PROTOCOL = 3;
+export const AGENT_PROTOCOL = 4;
+export const MIN_AGENT_PROTOCOL = 4;
 
 export const UPLINK_DELIVERY = {
   hello: "bare",

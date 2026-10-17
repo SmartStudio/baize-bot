@@ -212,6 +212,7 @@ async function start(options: {
   };
   const config = (bots: readonly string[]): RunnerConfig => ({
     computerId: ComputerId.parse("computer-1"),
+    computerKind: "local",
     bots: bots.map((id) => ({
       id: BotId.parse(id),
       name: "老白",
@@ -264,6 +265,7 @@ const prompt = (
   const groupId = GroupId.parse(extra.groupId ?? GROUP);
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(runId),
     botId: BotId.parse(BOT),
     groupId,

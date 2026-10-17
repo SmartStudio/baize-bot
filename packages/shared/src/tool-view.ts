@@ -7,7 +7,10 @@ export const JsonValue: z.ZodType<JsonValue> = z.lazy(() =>
 );
 
 export const ToolView = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("bash"), command: z.string(), raw: JsonValue.optional() }).strict(),
+  // note 是闸门给审批卡的补充说明（比如云电脑上 pip 装进工具箱），只在要问的时候带。
+  z
+    .object({ kind: z.literal("bash"), command: z.string(), note: z.string().optional(), raw: JsonValue.optional() })
+    .strict(),
   z
     .object({
       kind: z.literal("write"),
@@ -63,7 +66,7 @@ function valueText(value: JsonValue): string {
 export function toolViewText(view: ToolView): string {
   switch (view.kind) {
     case "bash":
-      return `要执行 \`${view.command}\``;
+      return view.note === undefined ? `要执行 \`${view.command}\`` : `要执行 \`${view.command}\`，${view.note}`;
     case "write":
       return `要写 \`${view.path}\``;
     case "edit":

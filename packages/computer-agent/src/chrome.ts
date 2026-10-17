@@ -14,8 +14,6 @@ const CRASH_WINDOW_MS = 30_000;
 const RESTART_BACKOFF: BackoffOptions = { initialMs: 500, maxMs: 30_000, factor: 2 };
 
 export interface AssistantChrome {
-  /** 本机还是远程。只差在 reveal、conceal 有没有窗口可拉。 */
-  readonly kind: ComputerKind;
   readonly profileDir: string;
   /**
    * 这台电脑唯一的那条管道。第一次要时才起 Chrome，这一轮启动失败就 reject，不会一直挂着。
@@ -70,9 +68,12 @@ function run(file: string, args: readonly string[]): Promise<{ readonly stdout: 
 }
 
 // 不开 TCP 调试端口：Chrome 只认 fd 3 和 fd 4 这条管道，本机别的进程和页面都够不着它。
+// 带着调试管道 navigator.webdriver 就是 true，关掉 AutomationControlled 它才是 false。这个参数在启动窗口上会多出
+// 56px 的「不受支持的命令行标志」警告条，靠 --no-startup-window 不开启动窗口、标签页用 Target.createTarget 开才没有。
 const chromeArgs = (profileDir: string): string[] => [
   `--user-data-dir=${profileDir}`,
   "--remote-debugging-pipe",
+  "--disable-blink-features=AutomationControlled",
   "--no-startup-window",
   "--disable-background-timer-throttling",
   "--disable-backgrounding-occluded-windows",
@@ -90,11 +91,16 @@ const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] 
 
 // 单独成进程组，代理收到终端的 Ctrl-C 时不跟着挨信号，由代理自己收尾。管道的两头只有代理拿着：
 // libuv 建的 fd 都带 CLOEXEC，Bot 的 bash 继承不到。代理被强杀时管道断开，Chrome 自己退出。
-async function spawnChrome(binary: string, profileDir: string, args: readonly string[]): Promise<ChromeProcess> {
+async function spawnChrome(
+  binary: string,
+  profileDir: string,
+  args: readonly string[],
+  env: Readonly<Record<string, string>> = {},
+): Promise<ChromeProcess> {
   const tmp = chromeTempDir(profileDir);
   const child = spawn(binary, args, {
     detached: true,
-    env: { ...process.env, TMPDIR: tmp, MAC_CHROMIUM_TMPDIR: tmp },
+    env: { ...process.env, ...env, TMPDIR: tmp, MAC_CHROMIUM_TMPDIR: tmp },
     stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
   });
   await new Promise<void>((resolve, reject) => {
@@ -115,10 +121,19 @@ async function spawnChrome(binary: string, profileDir: string, args: readonly st
 const launchMacChrome = (profileDir: string): Promise<ChromeProcess> =>
   spawnChrome("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", profileDir, chromeArgs(profileDir));
 
+// 容器默认是 UTC 和 en-US，页面上的时区、navigator.languages、Intl 和 Accept-Language 都跟着 Chrome 进程的 TZ、LANG 走
+// （中文还要镜像里装 chromium-l10n），--lang 在 Linux 上不管用。只给 Chrome，容器里没装 glibc 的 zh_CN locale，
+// 设给代理全局可能让别的程序报 setlocale 警告。时区该和出口 IP 的地区一致，以后按出口地区定。
+const REMOTE_CHROME_TIME_ZONE = "Asia/Shanghai";
+const REMOTE_CHROME_LANG = "zh_CN.UTF-8";
+
 // 远程电脑上没有桌面，Chrome 画在容器里的 Xvfb 上。
 async function launchLinuxChrome(profileDir: string): Promise<ChromeProcess> {
   if (!process.env["DISPLAY"]) throw new Error("没有 DISPLAY，远程电脑的 Xvfb 没起来");
-  return spawnChrome("/usr/bin/chromium", profileDir, [...chromeArgs(profileDir), "--password-store=basic"]);
+  return spawnChrome("/usr/bin/chromium", profileDir, [...chromeArgs(profileDir), "--password-store=basic"], {
+    TZ: REMOTE_CHROME_TIME_ZONE,
+    LANG: REMOTE_CHROME_LANG,
+  });
 }
 
 export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -294,7 +309,6 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
   };
 
   return {
-    kind: shell.kind,
     profileDir,
     connection: () => ready().then((up) => up.connection),
     reveal,

@@ -2,6 +2,7 @@ import { DecideRoutineOfferRequest, DecideRoutineOfferResponse, MessageId } from
 import { Hono } from "hono";
 import type { Db } from "../../db/client.js";
 import { decideRoutineOffer, findOwnedRoutineOffer } from "../../repo/routine-offers.js";
+import { TABLE_GROUP_ERROR } from "../../repo/routines.js";
 import type { PushHub } from "../../ws/hub.js";
 import type { Env } from "../app.js";
 
@@ -26,6 +27,7 @@ export function createRoutineOfferRoutes(deps: RoutineOfferRouteDeps): Hono<Env>
     if (decided.kind === "already_decided") return c.json({ error: "这条卡已经有结论了" }, 409);
     if (decided.kind === "executor_gone") return c.json({ error: "执行这条例行的 Bot 已经不在了" }, 404);
     if (decided.kind === "executor_outside") return c.json({ error: "执行者不在那个项目群里" }, 400);
+    if (decided.kind === "table_group") return c.json({ error: TABLE_GROUP_ERROR }, 400);
 
     deps.push.push(ownerId, { type: "message", message: decided.message });
     if (decided.routine !== null) deps.push.push(ownerId, { type: "routine_updated", routine: decided.routine });

@@ -15,6 +15,7 @@ import {
   type ApprovalOutcome,
   BotId,
   ComputerId,
+  type ComputerKind,
   decodeLive,
   encodeLive,
   GroupId,
@@ -50,7 +51,6 @@ const fakeConnection: CdpConnection = {
 };
 
 const fakeChrome = (): AssistantChrome => ({
-  kind: "local",
   profileDir: "/tmp/baize-test/chrome-profile",
   connection: async () => fakeConnection,
   onExit: () => () => {},
@@ -64,7 +64,7 @@ const fakeChrome = (): AssistantChrome => ({
  * 能登录的假 Chrome：每次 createTarget 开一个 tab，按开的顺序叫 tab-1、tab-2……。登录页上查到的账号名由 signIn
  * 给，destroy 让这一页没了。
  */
-function loginChrome(kind: AssistantChrome["kind"] = "local") {
+function loginChrome() {
   const tabs: string[] = [];
   const handles = new Map<string, string>();
   const sessions = new Map<string, string>();
@@ -86,6 +86,10 @@ function loginChrome(kind: AssistantChrome["kind"] = "local") {
         case "Target.closeTarget":
           closed.push(String(params.targetId));
           return {};
+        case "Page.getFrameTree":
+          return { frameTree: { frame: { id: "main" } } };
+        case "Page.createIsolatedWorld":
+          return { executionContextId: 1 };
         case "Runtime.evaluate":
           return { result: { type: "object", value: handles.get(sessions.get(sessionId ?? "") ?? "") ?? null } };
         default:
@@ -108,7 +112,7 @@ function loginChrome(kind: AssistantChrome["kind"] = "local") {
       for (const listener of listeners)
         listener({ method: "Target.targetDestroyed", params: { targetId: tab }, sessionId: undefined });
     },
-    factory: (): AssistantChrome => ({ ...fakeChrome(), kind, connection: async () => connection }),
+    factory: (): AssistantChrome => ({ ...fakeChrome(), connection: async () => connection }),
   };
 }
 
@@ -283,11 +287,15 @@ function startLoginWallPipe(): { readonly pipe: CdpPipe; commands(): string[] } 
           ? { targetId: "tab-1" }
           : method === "Target.attachToTarget"
             ? { sessionId: "session-1" }
-            : method === "Runtime.evaluate" && params.expression === "location.href"
-              ? { result: { type: "string", value: "https://creator.xiaohongshu.com/login?redirectReason=401" } }
-              : method === "Runtime.evaluate"
-                ? { result: { type: "object", subtype: "null", value: null } }
-                : {};
+            : method === "Page.getFrameTree"
+              ? { frameTree: { frame: { id: "main" } } }
+              : method === "Page.createIsolatedWorld"
+                ? { executionContextId: 1 }
+                : method === "Runtime.evaluate" && params.expression === "location.href"
+                  ? { result: { type: "string", value: "https://creator.xiaohongshu.com/login?redirectReason=401" } }
+                  : method === "Runtime.evaluate"
+                    ? { result: { type: "object", subtype: "null", value: null } }
+                    : {};
       fromChrome.write(`${JSON.stringify({ id, result })}\0`);
     }
   });
@@ -299,6 +307,8 @@ function startControlPlane(
     holdWelcomeAfter?: number;
     welcomeAck?: number;
     workAppendAck?: (frame: UplinkFrame) => readonly UplinkRejection[] | null;
+    /** welcome 里报的电脑类型，不给就是本机。 */
+    kind?: ComputerKind;
   } = {},
 ) {
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
@@ -341,7 +351,7 @@ function startControlPlane(
           JSON.stringify({
             type: "welcome",
             ownerId: "owner-1",
-            kind: "local",
+            kind: tuning.kind ?? "local",
             serverTime: new Date().toISOString(),
             conn: connection,
             upAcked: 0,
@@ -382,7 +392,7 @@ function startControlPlane(
           JSON.stringify({
             type: "welcome",
             ownerId: "owner-1",
-            kind: "local",
+            kind: tuning.kind ?? "local",
             serverTime: new Date().toISOString(),
             conn: connection,
             upAcked: streams.get(stream) ?? 0,
@@ -555,6 +565,7 @@ afterEach(async () => {
 describe("电脑代理连控制面", () => {
   it("连上后 3 秒内发出 hello，且能 parse 通过 AgentToControl", async () => {
     const server = await startPair();
+    const port = new URL(await server.url()).port;
 
     const hello = await server.waitForMessage("hello", 1, 3000);
 
@@ -564,7 +575,8 @@ describe("电脑代理连控制面", () => {
         computerId: "computer-1",
         token: "dev-token",
         version: "0.1.0",
-        protocol: 3,
+        protocol: 4,
+        controlOrigin: `http://127.0.0.1:${port}`,
         installId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         piSessionVersion: CURRENT_SESSION_VERSION,
         uplinkStream: expect.any(String),
@@ -572,6 +584,10 @@ describe("电脑代理连控制面", () => {
         activeRuns: [],
       }),
     );
+  });
+
+  it("连控制面的地址推不出源就启动即失败，不带着错的地址去连", () => {
+    expect(() => spawnAgent("http://127.0.0.1:9/agent")).toThrow("http://127.0.0.1:9/agent");
   });
 
   it("dataDir 中的状态属于另一台电脑时，第一次握手就用新流和游标零", async () => {
@@ -1002,6 +1018,22 @@ describe("电脑代理连控制面", () => {
     const replay = await server.waitForMessage("run_done", 1);
     expect(replay.runId).toBe("run-1");
     expect(hookCalls).toBe(2);
+  });
+
+  it.each(["remote", "local"] as const)("welcome 报的电脑类型 %s 原样交给运行器", async (kind) => {
+    const receivedConfigs: AgentRunnerConfig[] = [];
+    const server = startControlPlane({ kind });
+    servers.push(server);
+    spawnAgent(await server.url(), {
+      makeRunner: (config) => {
+        receivedConfigs.push(config);
+        return runnerOf(config, runnerCalls());
+      },
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    const config = await poll(() => receivedConfigs[0], 3000, "运行器建好");
+    expect(config.computerKind).toBe(kind);
   });
 
   it("第二条 config 不重建运行器，改为交给 applyConfig", async () => {
@@ -1450,36 +1482,33 @@ describe("电脑代理连控制面", () => {
     expect(runnerCalls().pokerResults).toEqual([{ runId: "run-1", callId: "act-waiting", result: { ok: true } }]);
   });
 
-  it.each(["local", "remote"] as const)(
-    "%s 电脑收 browser_login：登录页上屏，登上后先撤回画面再回一条 login_state",
-    async (kind) => {
-      const server = startControlPlane();
-      servers.push(server);
-      const chrome = loginChrome(kind);
-      spawnAgent(await server.url(), { makeChrome: chrome.factory });
-      const socket = await server.waitForSocket(1);
+  it("电脑收 browser_login：登录页上屏，登上后先撤回画面再回一条 login_state", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const chrome = loginChrome();
+    spawnAgent(await server.url(), { makeChrome: chrome.factory });
+    const socket = await server.waitForSocket(1);
 
-      socket.send(
-        JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
-      );
-      const shown = await server.waitForLiveSession((session) => session.purpose.kind === "login");
-      chrome.signIn("tab-1", "白泽工厂日记");
+    socket.send(
+      JSON.stringify({ type: "browser_login", accountId: "account-1", platform: "xiaohongshu", attempt: "try-1" }),
+    );
+    const shown = await server.waitForLiveSession((session) => session.purpose.kind === "login");
+    chrome.signIn("tab-1", "白泽工厂日记");
 
-      await expect(server.waitForMessage("login_state")).resolves.toEqual({
-        type: "login_state",
-        accountId: "account-1",
-        state: { login: "valid", handle: "白泽工厂日记" },
-      });
-      expect(shown.purpose).toEqual({
-        kind: "login",
-        accountId: "account-1",
-        platform: "xiaohongshu",
-        attempt: "try-1",
-      });
-      expect(server.live, "画面的 closed 先于 login_state 到").toContainEqual({ t: "closed", liveId: shown.liveId });
-      expect(chrome.closed(), "登录页关掉").toEqual(["tab-1"]);
-    },
-  );
+    await expect(server.waitForMessage("login_state")).resolves.toEqual({
+      type: "login_state",
+      accountId: "account-1",
+      state: { login: "valid", handle: "白泽工厂日记" },
+    });
+    expect(shown.purpose).toEqual({
+      kind: "login",
+      accountId: "account-1",
+      platform: "xiaohongshu",
+      attempt: "try-1",
+    });
+    expect(server.live, "画面的 closed 先于 login_state 到").toContainEqual({ t: "closed", liveId: shown.liveId });
+    expect(chrome.closed(), "登录页关掉").toEqual(["tab-1"]);
+  });
 
   it("第二份 config 的 hub 和 key 交给运行器，排队发布在下载时才读取最新配置", async () => {
     const bytes = Buffer.from(
@@ -1723,6 +1752,8 @@ describe("电脑代理连控制面", () => {
       "Target.attachToTarget",
       "Emulation.setFocusEmulationEnabled",
       "Page.navigate",
+      "Page.getFrameTree",
+      "Page.createIsolatedWorld",
       "Runtime.evaluate",
       "Target.closeTarget",
     ]);

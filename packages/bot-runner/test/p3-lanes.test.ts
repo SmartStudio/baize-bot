@@ -61,6 +61,7 @@ const call = (name: string, args: Record<string, unknown> = {}): ScriptedTurn =>
 
 const prompt = (runId: string, groupId = "group-a"): PromptMessage => ({
   type: "prompt",
+  computer: null,
   runId: RunId.parse(runId),
   botId: BotId.parse("bot-lanes"),
   groupId: GroupId.parse(groupId),
@@ -103,6 +104,7 @@ async function harness(upstream: Upstream, overrides: Partial<RunnerConfig> = {}
   const waiters = new Set<{ matches: (message: AgentToControl) => boolean; resolve: () => void }>();
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-lanes"),
+    computerKind: "local",
     bots: [{ id: BotId.parse("bot-lanes"), name: "分道助理", role: "member", preset: null, tags: [], description: "" }],
     tools: [],
     accounts: [],
@@ -203,6 +205,8 @@ function fakePublishing(dataDir: string) {
     send: async (method, params) => {
       if (method === "Target.createTarget") return { targetId: "publisher-target" };
       if (method === "Target.attachToTarget") return { sessionId: "publisher-session" };
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "frame" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
       if (method === "Page.navigate") url = String(params?.url);
       if (method === "DOM.setFileInputFiles") uploads.push(params?.files);
       if (method === "Input.dispatchMouseEvent" && params?.type === "mouseReleased") {

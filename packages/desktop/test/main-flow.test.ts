@@ -398,6 +398,7 @@ describe("桌面主进程代理流程", () => {
           status: "online",
           idleSince: null,
           lastSeenAt: "2026-10-14T00:00:00.000Z",
+          dispatchable: true,
         },
       }),
     });

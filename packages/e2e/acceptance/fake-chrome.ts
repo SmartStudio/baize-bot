@@ -1,5 +1,4 @@
 import type { CdpConnection, CdpEvent } from "@baize/bot-runner";
-import type { ComputerKind } from "@baize/shared";
 import { type AgentOptions, defaultLoginPages } from "@baize/computer-agent";
 import { chromeProfileDir } from "@baize/computer-agent/chrome-process";
 
@@ -45,7 +44,7 @@ type Tab = { readonly login: boolean; handle: string | null; closed: boolean };
  * 之后回账号名；屏开 screencast 就给一帧。别的页面一律停在小红书登录页，于是发布器一打开发布页就认成登录过期。
  * 不起任何真浏览器，不碰用户的 Chrome。
  */
-export function fakeChrome(options: { readonly kind?: ComputerKind } = {}): FakeChrome {
+export function fakeChrome(): FakeChrome {
   const calls: string[] = [];
   const inputs: FakeCdpCall[] = [];
   const tabs = new Map<string, Tab>();
@@ -92,6 +91,10 @@ export function fakeChrome(options: { readonly kind?: ComputerKind } = {}): Fake
           }),
         );
         return {};
+      case "Page.getFrameTree":
+        return { frameTree: { frame: { id: `fake-frame-${sessions.get(sessionId ?? "") ?? ""}` } } };
+      case "Page.createIsolatedWorld":
+        return { executionContextId: 1 };
       case "Runtime.evaluate": {
         const tab = tabs.get(sessions.get(sessionId ?? "") ?? "");
         if (tab?.login === true) return { result: { value: tab.handle } };
@@ -117,7 +120,6 @@ export function fakeChrome(options: { readonly kind?: ComputerKind } = {}): Fake
 
   const waiting = (): Tab[] => [...tabs.values()].filter((tab) => tab.login && !tab.closed && tab.handle === null);
   const factory: ChromeFactory = ({ dataDir }) => ({
-    kind: options.kind ?? "local",
     profileDir: chromeProfileDir(dataDir),
     connection: async () => connection,
     onExit: () => () => {},

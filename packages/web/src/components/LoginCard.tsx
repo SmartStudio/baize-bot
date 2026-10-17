@@ -1,7 +1,7 @@
 import { Check, TriangleAlert } from "lucide-react";
 import type { Account, AccountId, Computer } from "@baize/shared";
 import type { LoginFlow } from "../state/types.js";
-import { LOGIN_FAILURE_TEXT, PLATFORM, computerName, timeText } from "./messages/content.js";
+import { LOGIN_FAILURE_TEXT, PLATFORM, beforeChinese, computerName, timeText } from "./messages/content.js";
 
 type Props = {
   account: Account;
@@ -22,11 +22,11 @@ const stateOf = (account: Account, flow: LoginFlow | undefined): State => {
 export const loginFlowNote = (flow: LoginFlow | undefined, where: string): { text: string; alert: boolean } | null => {
   switch (flow?.status) {
     case "opening":
-      return { text: `登录窗口已在${where}打开，扫码后这里会变成已登录。`, alert: false };
+      return { text: `登录窗口已在${beforeChinese(where)}打开，登上后这里会变成已登录。`, alert: false };
     case "closed":
       return { text: "登录页已收起，要登再点一次。", alert: false };
     case "offline":
-      return { text: `${where}不在线，打开电脑上的白泽后再点登录。`, alert: true };
+      return { text: `${beforeChinese(where)}不在线，打开电脑上的白泽后再点登录。`, alert: true };
     case "refused":
       return { text: `登录窗口没打开：${flow.message}`, alert: true };
     case "failed":
@@ -44,7 +44,7 @@ const noteOf = (account: Account, flow: LoginFlow | undefined, where: string): {
     text:
       account.login === "expired"
         ? `${timeText(account.loginChangedAt)} 过期的 · 账号在${where}，稿子先不发。`
-        : `稿子等着发到这个号，在${where}的助理浏览器里扫一次码。密码不经过 Bot。`,
+        : `稿子等着发到这个号，在${beforeChinese(where)}的助理浏览器里登录一次。密码不经过 Bot。`,
     alert: false,
   };
 
@@ -96,7 +96,7 @@ export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
           disabled={state === "opening"}
           onClick={() => void onLogin(account.id).catch(() => undefined)}
         >
-          {state === "opening" ? "等你扫码…" : "打开登录窗口"}
+          {state === "opening" ? "等你登录…" : "打开登录窗口"}
         </button>
       </span>
     </article>

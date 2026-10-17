@@ -22,6 +22,7 @@ import {
   ChecklistItem,
   Computer,
   ComputerId,
+  ComputerKind,
   ContentPlan,
   Draft,
   DraftContent,
@@ -723,6 +724,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("account_deleted"), accountId: AccountId }),
   z.object({ type: z.literal("publication_created"), publication: Publication }),
   z.object({ type: z.literal("computer_updated"), computer: Computer }),
+  // 某个 Bot 在某个群里选的电脑真的变了才推，同一个值再选一次不推。「这一轮还在旧电脑上跑完」不推，看 runningOn。
+  z.object({ type: z.literal("computer_choice_updated"), groupId: GroupId, botId: BotId, kind: ComputerKind }),
   // 一次登录没成。账号的 login 不变，所以没有 account_updated；attempt 是 POST /api/accounts/:id/login 回的那个。
   z.object({ type: z.literal("login_failed"), accountId: AccountId, attempt: LoginAttemptId, reason: LoginFailure }),
   z.object({ type: z.literal("notify"), notice: Notice }),

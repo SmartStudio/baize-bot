@@ -65,6 +65,7 @@ async function records() {
 function prompt(text: string, snapshot?: HubLaneSnapshot): PromptMessage {
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(`run-${text}`),
     botId,
     groupId,
@@ -96,6 +97,7 @@ it("删掉本地会话目录后重建，下一次上游请求体和原会话会�
   });
   const config: RunnerConfig = {
     computerId: ComputerId.parse("computer-rebuild"),
+    computerKind: "local",
     bots: [{ id: botId, name: "记录员", role: "member", preset: null, tags: [], description: "" }],
     tools: [],
     accounts: [],

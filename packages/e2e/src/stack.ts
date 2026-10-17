@@ -13,6 +13,7 @@ import {
   ComputerListResponse,
   ComputerTokenResponse,
   ControlToAgent,
+  controlOriginFromAgentUrl,
   DownlinkFrame,
   MeResponse,
   RegisterResponse,
@@ -90,6 +91,7 @@ export type Stack = {
   get(path: string): Promise<unknown>;
   post(path: string, body: unknown): Promise<unknown>;
   patch(path: string, body: unknown): Promise<unknown>;
+  put(path: string, body: unknown): Promise<unknown>;
   /** 按到达顺序取下一条推送，等不到就抛。 */
   nextPush(timeoutMs?: number): Promise<ServerPush>;
   startComputer(): Promise<void>;
@@ -357,6 +359,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       get: api.get,
       post: api.post,
       patch: api.patch,
+      put: api.put,
       nextPush: push.next,
       startComputer,
       stopComputer,
@@ -398,48 +401,69 @@ export async function startStack(options: StackOptions): Promise<Stack> {
   }
 }
 
+/**
+ * 代理和控制面之间一条能掐断的 TCP 链路。代理把这个端口报成 controlOrigin，数据面的 HTTP 也从这里过，
+ * 所以先看请求行：升级到 /agent 的才算可掐的那条链路，别的原样转发、掐断期间照常放行。
+ * 用例要的是报文丢在半路，不是模型请求失败，这和改动前数据面直连控制面端口时一样。
+ */
 async function startLinkProxy(targetPort: number) {
-  const sockets = new Set<Socket>();
+  const links = new Set<Socket>();
+  const passthrough = new Set<Socket>();
   let cut = false;
   const server = createTcpServer((client) => {
-    if (cut) {
-      client.destroy();
-      return;
-    }
-    const upstream = connectTcp(targetPort, "127.0.0.1");
-    const drop = () => {
-      for (const socket of [client, upstream]) {
-        socket.destroy();
-        sockets.delete(socket);
+    let head = Buffer.alloc(0);
+    const onHead = (chunk: Buffer) => {
+      head = Buffer.concat([head, chunk]);
+      const lineEnd = head.indexOf("\r\n");
+      if (lineEnd === -1) return;
+      client.off("data", onHead);
+      client.pause();
+      const isLink = head.subarray(0, lineEnd).toString("latin1").startsWith("GET /agent ");
+      if (isLink && cut) {
+        client.destroy();
+        return;
       }
+      const tracked = isLink ? links : passthrough;
+      const upstream = connectTcp(targetPort, "127.0.0.1");
+      const drop = () => {
+        for (const socket of [client, upstream]) {
+          socket.destroy();
+          tracked.delete(socket);
+        }
+      };
+      for (const socket of [client, upstream]) {
+        tracked.add(socket);
+        socket.on("error", drop);
+        socket.on("close", drop);
+      }
+      upstream.write(head);
+      client.pipe(upstream);
+      upstream.pipe(client);
     };
-    for (const socket of [client, upstream]) {
-      sockets.add(socket);
-      socket.on("error", drop);
-      socket.on("close", drop);
-    }
-    client.pipe(upstream);
-    upstream.pipe(client);
+    client.on("data", onHead);
+    client.on("error", () => client.destroy());
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const destroyAll = () => {
-    for (const socket of sockets) socket.destroy();
-    sockets.clear();
-  };
   return {
     port: (server.address() as AddressInfo).port,
     cut: () => {
       cut = true;
-      destroyAll();
+      destroySockets(links);
     },
     restore: () => {
       cut = false;
     },
     close: async () => {
-      destroyAll();
+      destroySockets(links);
+      destroySockets(passthrough);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+}
+
+function destroySockets(sockets: Set<Socket>): void {
+  for (const socket of sockets) socket.destroy();
+  sockets.clear();
 }
 
 export type ComputerProbe = {
@@ -487,6 +511,7 @@ async function connectComputer(options: {
         type: "hello",
         ...options,
         protocol: AGENT_PROTOCOL,
+        controlOrigin: controlOriginFromAgentUrl(options.url),
         installId: randomUUID(),
         piSessionVersion: CURRENT_SESSION_VERSION,
         uplinkStream: `probe-${randomBytes(8).toString("hex")}`,
@@ -563,12 +588,14 @@ function makeApi(baseUrl: string, cookie: string) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     if (!response.ok) throw new Error(`${method} ${path} 回了 ${response.status}：${await response.text()}`);
+    if (response.status === 204) return undefined;
     return await response.json();
   };
   return {
     get: (path: string): Promise<unknown> => send("GET", path),
     post: (path: string, body: unknown): Promise<unknown> => send("POST", path, body),
     patch: (path: string, body: unknown): Promise<unknown> => send("PATCH", path, body),
+    put: (path: string, body: unknown): Promise<unknown> => send("PUT", path, body),
   };
 }
 

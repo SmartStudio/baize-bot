@@ -85,7 +85,9 @@ import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
+import { clearGroupContinuations } from "../agent/continuation.js";
 import type { AgentHub } from "../agent/hub.js";
+import { computerAvailability, withDispatchable } from "../agent/computer-availability.js";
 import type { LiveRelay } from "../live/relay.js";
 import { enqueueDownlink } from "../agent/envelope.js";
 import type { GroupTurns } from "../agent/group-turn.js";
@@ -114,11 +116,13 @@ import {
   listOwnerRoutines,
   listRoutines,
   loadRoutine,
+  pushRoutineUpdated,
+  TABLE_GROUP_ERROR,
   updateRoutine,
   type OwnedRoutine,
 } from "../repo/routines.js";
 import { isValidCron } from "../routines/cron.js";
-import { pushRoutineUpdated, runRoutine } from "../routines/run.js";
+import { runRoutine } from "../routines/run.js";
 import { decidePreferenceOffer, findOwnedPreferenceOffer } from "../repo/preferences.js";
 import { decideProjectOffer, findOwnedProjectOffer } from "../repo/projects.js";
 import { listPublicationsForPage } from "../repo/publications.js";
@@ -159,6 +163,7 @@ import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
 import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
+import { createComputerChoiceRoutes } from "./routes/computer-choice.js";
 import { createGoalRoutes } from "./routes/goals.js";
 import { createPokerHandRoutes } from "./routes/poker-hands.js";
 import { createPokerHintRoutes } from "./routes/poker-hint.js";
@@ -220,7 +225,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   };
 
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
-  app.route(HUB_PATH, createHub({ db }));
+  app.route(HUB_PATH, createHub({ db, agents, push: hub }));
   app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
   const { platformAccounts } = deps;
   app.route(
@@ -261,6 +266,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   );
   app.route("/api", createPokerHintRoutes({ db, push: hub, agents }));
   app.route("/api", createPokerReviewRoutes({ db, push: hub, agents }));
+  app.route("/api", createComputerChoiceRoutes({ db, push: hub, agents }));
 
   app.route(
     OAUTH_PATH,
@@ -514,9 +520,14 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   // 网页启动和 /api/ws 重连时各拉一次：断线期间的 live_session、live_closed 推送丢了。
   app.get("/api/live", (c) => c.json(LiveSessionsResponse.parse({ sessions: deps.live.list(c.get("user").id) })));
 
-  app.get("/api/computers", async (c) =>
-    c.json(ComputerListResponse.parse({ computers: await listComputers(db, c.get("user").id) })),
-  );
+  app.get("/api/computers", async (c) => {
+    const ownerId = c.get("user").id;
+    const records = await listComputers(db, ownerId);
+    const availability = await computerAvailability(db, agents, ownerId);
+    return c.json(
+      ComputerListResponse.parse({ computers: records.map((record) => withDispatchable(record, availability)) }),
+    );
+  });
 
   app.post("/api/computers/local", async (c) => {
     let raw: unknown;
@@ -529,7 +540,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = PairLocalComputerRequest.partial().safeParse(raw);
     if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
     const ownerId = c.get("user").id;
-    const { computer } = await ensureComputer(db, ownerId);
+    const { computer: record } = await ensureComputer(db, ownerId);
+    const computer = withDispatchable(record, await computerAvailability(db, agents, ownerId));
     if ((computer.lastSeenAt !== null || agents.isOnline(computer.id)) && !body.data.confirmDisplace) {
       return c.json(
         PairLocalConflictResponse.parse({ error: "这个账号已经在另一台 Mac 上用过，继续会让那台退出", computer }),
@@ -545,10 +557,13 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
 
   app.post("/api/computers/remote", async (c) => {
     const ownerId = c.get("user").id;
-    const { computer } = await ensureComputer(db, ownerId, "remote");
+    const { computer: record } = await ensureComputer(db, ownerId, "remote");
     const remote = await resetComputerToken(db, ownerId, "remote");
     if (remote === null) throw new Error(`用户 ${ownerId} 的远程电脑既没建成也无法重置 token`);
-    hub.push(ownerId, { type: "computer_updated", computer });
+    hub.push(ownerId, {
+      type: "computer_updated",
+      computer: withDispatchable(record, await computerAvailability(db, agents, ownerId)),
+    });
     return c.json(ComputerTokenResponse.parse(remote));
   });
 
@@ -647,11 +662,12 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       if (target === null) return c.json(NOT_FOUND, 404);
       if (!target.group.botIds.includes(botId.data)) return c.json({ error: "这个 Bot 不在那个群里" }, 400);
     }
-    const routine = await createRoutine(db, c.get("user").id, botId.data, body.value);
+    const created = await createRoutine(db, c.get("user").id, botId.data, body.value);
     // 预检之后 Bot 被删完了，和一开始就不存在一样回 404。
-    if (routine === null) return c.json(NOT_FOUND, 404);
-    hub.push(c.get("user").id, { type: "routine_updated", routine });
-    return c.json(RoutineResponse.parse({ routine }), 201);
+    if (created.kind === "bot_gone") return c.json(NOT_FOUND, 404);
+    if (created.kind === "table_group") return c.json({ error: TABLE_GROUP_ERROR }, 400);
+    hub.push(c.get("user").id, { type: "routine_updated", routine: created.routine });
+    return c.json(RoutineResponse.parse({ routine: created.routine }), 201);
   });
 
   app.patch("/api/routines/:id", async (c) => {
@@ -944,6 +960,9 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
         ? ({ kind: "user", text: body.value.text } as const)
         : ({ kind: "user", text: body.value.text, mentions } as const);
     deps.groupTurns.cancel(groupId.data);
+    // 用户又说了话，之前请求换电脑后要接着做的那段活作废，不再自动起。
+    for (const routineId of await clearGroupContinuations(db, groupId.data))
+      await pushRoutineUpdated(routineDeps, routineId);
 
     const message = await appendMessageIfGroupAlive(db, owned, sent);
     if (message === null) return c.json(NOT_FOUND, 404);
@@ -955,14 +974,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       hub.push(c.get("user").id, { type: "skill_updated", skill });
     }
 
-    const settled = await settleByReply({ db, push: hub, agents }, c.get("user").id, owned, body.value.text);
-    if (!settled)
-      await dispatchUserMessage(
-        { db, push: hub, agents, groupTurns: deps.groupTurns },
-        c.get("user").id,
-        groupId.data,
-        message,
-      );
+    const settled = await settleByReply(routineDeps, c.get("user").id, owned, body.value.text);
+    if (!settled) await dispatchUserMessage(routineDeps, c.get("user").id, groupId.data, message);
     return c.json(SendMessageResponse.parse({ message }), 201);
   });
 
@@ -975,7 +988,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = await readJson(c.req.raw, DecideApprovalRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
 
-    const settled = await settleApproval({ db, push: hub, agents }, c.get("user").id, owned, body.value);
+    const settled = await settleApproval(routineDeps, c.get("user").id, owned, body.value);
     if (settled.kind === "already_decided")
       return c.json({ error: "这条审批已经有结论了", approval: settled.approval }, 409);
     if (settled.kind === "scope_not_allowed") return c.json({ error: settled.error }, 400);

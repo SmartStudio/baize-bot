@@ -25,6 +25,7 @@ import {
   AgentToControl,
   BotId,
   type BotRole,
+  type ComputerKind,
   ComputerId,
   type Grant,
   GrantId,
@@ -157,15 +158,22 @@ vi.mock("../src/bot-session.js", async (importOriginal) => {
 const sandboxProbe = vi.hoisted(() => ({
   /** 冒充这台电脑没有系统沙箱：运行器拿到的 `sandbox` 是 "none"，其余照真的走。 */
   forceNone: false,
+  /** 冒充这台电脑的沙箱是 bwrap：运行器和闸门看到的都是 "bwrap"，命令照样在本机真有的沙箱里跑。 */
+  forceBwrap: false,
+  /** 每次建 bash 时收到的工具箱目录，本机电脑没有。 */
+  toolboxes: [] as (string | null)[],
 }));
 
 vi.mock("../src/sandbox.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/sandbox.js")>();
   return {
     ...actual,
+    sandboxKind: () => (sandboxProbe.forceBwrap ? ("bwrap" as const) : actual.sandboxKind()),
     createSandboxedBash(...args: Parameters<typeof actual.createSandboxedBash>) {
+      sandboxProbe.toolboxes.push(args[3]?.toolboxDir ?? null);
       const created = actual.createSandboxedBash(...args);
-      return sandboxProbe.forceNone ? { ...created, sandbox: "none" as const } : created;
+      if (sandboxProbe.forceNone) return { ...created, sandbox: "none" as const };
+      return sandboxProbe.forceBwrap ? { ...created, sandbox: "bwrap" as const } : created;
     },
   };
 });
@@ -218,6 +226,7 @@ const promptMessage = (
   const groupId = GroupId.parse(group?.groupId ?? "group-1");
   return {
     type: "prompt",
+    computer: null,
     runId: RunId.parse(runId),
     botId: BotId.parse(botId),
     groupId,
@@ -444,6 +453,8 @@ async function startHarness(options: {
   readonly accounts?: readonly AccountConfig[];
   readonly bots: readonly string[];
   readonly computerId?: string;
+  /** 不给就是本机电脑。 */
+  readonly computerKind?: ComputerKind;
   readonly grants?: readonly Grant[];
   readonly tools?: readonly ToolConnectionConfig[];
   /** 不给就挂 send_email、list_files 两个假扩展工具。 */
@@ -523,6 +534,7 @@ async function startHarness(options: {
     accounts: [...(overrides.accounts ?? options.accounts ?? [])],
     bots: overrides.bots ?? bots,
     computerId: ComputerId.parse(options.computerId ?? "computer-1"),
+    computerKind: options.computerKind ?? "local",
     grants: [...(overrides.grants ?? options.grants ?? [])],
     tools: overrides.tools ?? tools,
     modelGateway: overrides.modelGateway ?? { baseUrl: gateway.baseUrl, apiKey: "test-key" },
@@ -595,6 +607,9 @@ afterEach(async () => {
   botSessionProbe.promptSwallow = false;
   botSessionProbe.assistantEnds.splice(0);
   sandboxProbe.forceNone = false;
+  sandboxProbe.forceBwrap = false;
+  sandboxProbe.toolboxes.splice(0);
+  vi.unstubAllEnvs();
 });
 
 afterAll(() => {
@@ -2640,7 +2655,9 @@ describe("运行器的 skill", () => {
       "bot_tool_call:running",
       "bot_tool_call:ok",
     ]);
-    expect(seen.toolResults.join(""), "返回值要说清还在等用户点").toContain("已经在群里问用户存不存「Globex 报价」了");
+    expect(seen.toolResults.join(""), "返回值要说清还在等用户点").toContain(
+      "已经在群里问用户存不存「Globex 报价」了，等用户点。",
+    );
   });
 
   it("同一次运行里第二次 propose_skill：不上报，终态 failed，错误文本说已经问过了", async () => {
@@ -5343,15 +5360,20 @@ describe("统一闸门", () => {
 
   it.skipIf(process.platform !== "darwin")("工作目录里的 ssh 符号链接由系统沙箱拦住", async () => {
     const seen = recorder();
+    // 链接由 fixture 造，命令走 bash -c 让闸门只问不拒；批准之后读到 ~/.ssh 的是沙箱在拦。
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      script: scriptRecording(seen, [["试符号链接", callTool("bash", { command: "ln -s ~/.ssh x && cat x/id_rsa" })]]),
+      approve: true,
+      script: scriptRecording(seen, [["试符号链接", callTool("bash", { command: "bash -c 'cat x/id_rsa'" })]]),
     });
+    const workDir = botDirs(h.dataDir, BotId.parse("bot-1")).workDir;
+    mkdirSync(workDir, { recursive: true });
+    symlinkSync(join(homedir(), ".ssh"), join(workDir, "x"));
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "试符号链接"));
 
-    expect(h.sent.some((message) => message.type === "approval_request")).toBe(false);
+    expect(h.sent.some((message) => message.type === "approval_request")).toBe(true);
     expect(shape(h.sent).filter((item) => item.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:failed",
@@ -5443,6 +5465,140 @@ describe("统一闸门", () => {
     expect(h.sent.filter((message) => message.type === "agent_error")).toEqual([]);
     expect(runDoneIds(h)).toEqual(["run-1"]);
   });
+});
+
+const pathGrant = (prefix: string): Grant => ({
+  id: GrantId.parse("grant-path-project"),
+  scope: "project",
+  groupId: GroupId.parse("group-1"),
+  action: "write_outside",
+  target: { kind: "path", computerId: ComputerId.parse("computer-1"), prefix },
+  createdAt: "2026-09-26T00:00:00.000Z",
+});
+
+const outsideDir = (): string => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "baize-grant-in-flight-")));
+  usedDataDirs.push(dir);
+  return dir;
+};
+
+/** 审批请求发出之后、批准之前做一次 change，再看批准后的这一步执行没有。 */
+const approveAfter = async (
+  command: string,
+  change: (h: Awaited<ReturnType<typeof startHarness>>) => unknown,
+  computerKind: ComputerKind = "local",
+) => {
+  const seen = recorder();
+  const h = await startHarness({
+    bots: ["bot-1"],
+    extensionTools: [],
+    computerKind,
+    script: (request) => {
+      if (request.messages.at(-1)?.role === "tool") {
+        seen.toolResults.push(JSON.stringify(request.messages.filter((message) => message.role === "tool")));
+        return { textChunks: [], usage: { input: 1, output: 1 } };
+      }
+      return {
+        textChunks: [],
+        toolCall: { id: "call-1", name: "bash", args: { command } },
+        usage: { input: 1, output: 1 },
+      };
+    },
+  });
+  const running = h.runner.prompt(promptMessage("bot-1", "run-1", "跑一下"));
+  await until(() => h.sent.some((message) => message.type === "approval_request"), "审批请求");
+  const request = h.sent.find((message) => message.type === "approval_request");
+  if (request?.type !== "approval_request") throw new Error("没有审批请求");
+  await change(h);
+  h.runner.approve(request.runId, request.callId, "approved");
+  await running;
+  return { view: request.view, statuses: shape(h.sent).filter((s) => s.startsWith("bot_tool_call")), seen };
+};
+
+describe.skipIf(process.platform !== "darwin")("批准途中下发的范围授权", () => {
+  const domainGrant: Grant = {
+    id: GrantId.parse("grant-domain-project"),
+    scope: "project",
+    groupId: GroupId.parse("group-1"),
+    action: "shell",
+    target: { kind: "domain", domain: "example.invalid" },
+    createdAt: "2026-09-26T00:00:00.000Z",
+  };
+  /** 控制面点「本项目以后都允许」时先 sendConfig 带上新授权，再发 approval_result，运行器这边照这个顺序收。 */
+  const approveWithGrant = (command: string, grant: Grant, computerKind: ComputerKind = "local") =>
+    approveAfter(command, (h) => h.runner.applyConfig(h.config({ grants: [grant] })), computerKind);
+
+  it("Mac 上 curl 批准时带了域名授权，批准后照样执行，不被当成页面变了", async () => {
+    const command = "curl -s https://example.invalid/x";
+    const { view, statuses, seen } = await approveWithGrant(command, domainGrant);
+
+    expect(view).toEqual({ kind: "bash", command, note: "批准后放开：联网", raw: { command } });
+    expect(seen.toolResults.join(""), "批准后没被重判拦下").not.toContain("页面已经变了");
+    expect(seen.toolResults.join(""), "被拦的工具结果只有拦下的理由，没有退出码").toMatch(
+      /Command exited with code [1-9]/,
+    );
+    expect(statuses).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
+  });
+
+  it("Mac 上 touch 区外文件批准时带了路径授权，批准后文件写出来了", async () => {
+    const dir = outsideDir();
+    const target = join(dir, "f");
+    const command = `touch ${target}`;
+    const { view, statuses, seen } = await approveWithGrant(command, pathGrant(dir));
+
+    expect(view).toEqual({ kind: "bash", command, note: `批准后放开：写 ${target}`, raw: { command } });
+    expect(statuses, seen.toolResults.join("\n")).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    expect(existsSync(target)).toBe(true);
+  });
+
+  it("云电脑上多段区外写的卡带权限摘要，批准时带了路径授权，批准后两段都执行", async () => {
+    sandboxProbe.forceBwrap = true;
+    // 云电脑按 PATH 认系统命令，本机 PATH 里排在前面的 Homebrew coreutils 会让 touch 落成认不出的命令。
+    vi.stubEnv("PATH", "/usr/bin:/bin:/usr/sbin:/usr/local/bin");
+    const dir = outsideDir();
+    const first = join(dir, "a.txt");
+    const second = join(dir, "b.txt");
+    const command = `touch ${first} && touch ${second}`;
+    const { view, statuses, seen } = await approveWithGrant(command, pathGrant(dir), "remote");
+
+    expect(view).toEqual({ kind: "bash", command, note: `批准后放开：写 ${first}、写 ${second}`, raw: { command } });
+    expect(statuses, seen.toolResults.join("\n")).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+    expect([existsSync(first), existsSync(second)]).toEqual([true, true]);
+  });
+});
+
+describe.skipIf(process.platform !== "darwin")("批准途中区外写路径经过的软链被换", () => {
+  it.each(["local", "remote"] as const)(
+    "%s：多段命令里非最严那段的软链换了，批准后被拦，换过去的地方没写",
+    async (computerKind) => {
+      if (computerKind === "remote") {
+        sandboxProbe.forceBwrap = true;
+        vi.stubEnv("PATH", "/usr/bin:/bin:/usr/sbin:/usr/local/bin");
+      }
+      const [a, x, y, o] = [outsideDir(), outsideDir(), outsideDir(), outsideDir()];
+      const link = join(o, "link");
+      symlinkSync(x, link);
+      const command = `touch ${join(a, "a")} && touch ${link}/b`;
+      const { view, seen } = await approveAfter(
+        command,
+        () => {
+          rmSync(link);
+          symlinkSync(y, link);
+        },
+        computerKind,
+      );
+
+      expect(view).toEqual({
+        kind: "bash",
+        command,
+        note: `批准后放开：写 ${join(a, "a")}、写 ${join(x, "b")}`,
+        raw: { command },
+      });
+      expect(existsSync(join(y, "b")), "写到了卡上没写的地方").toBe(false);
+      expect([existsSync(join(x, "b")), existsSync(join(a, "a"))], "整条被拦，哪段都没跑").toEqual([false, false]);
+      expect(seen.toolResults.join("")).toContain("页面已经变了，刚才的批准不适用，请重新操作");
+    },
+  );
 });
 
 const toolNamesSent = (requests: readonly ChatCompletionRequest[]): string[] =>
@@ -5815,7 +5971,7 @@ ${join(h.dataDir, "bot-1", "work")}
     ]);
     expect(
       toolNamesSent(requests),
-      "队员的工具包括 recall_memory、三件起草工具、account_read 和项目群里的 report_metric",
+      "队员的工具包括 switch_computer、recall_memory、三件起草工具、account_read 和项目群里的 report_metric",
     ).toEqual([
       "read",
       "bash",
@@ -5823,6 +5979,7 @@ ${join(h.dataDir, "bot-1", "work")}
       "write",
       "send_email",
       "list_files",
+      "switch_computer",
       "recall_memory",
       "read_task",
       "update_checklist",
@@ -6232,7 +6389,9 @@ ${join(h.dataDir, "bot-1", "work")}
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("方案卡没发出去，改好再调：队员「小图」的 description 是空的");
+    expect(seen.toolResults.join("")).toContain(
+      "方案卡没发出去，改好再调：队员「小图」的 description 是空的，写一句它干什么、不干什么。",
+    );
   });
 
   it("模型不变不再调 setModel：连发两条 plan，会话里只有建会话时那一条 model_change", async () => {
@@ -6508,7 +6667,9 @@ ${join(h.dataDir, "bot-1", "work")}
 
       expect(teamOffers(h)).toEqual([]);
       failedOnce(h);
-      expect(seen.toolResults.join("")).toContain("建队卡没发出去，改好再调：新人「小空」的 description 是空的");
+      expect(seen.toolResults.join("")).toContain(
+        "建队卡没发出去，改好再调：新人「小空」的 description 是空的，写一句它干什么、不干什么。",
+      );
     });
 
     it("新人名字或理由超长：长度交给协议校验，错误文本是中文", async () => {
@@ -6946,7 +7107,9 @@ describe("运行器的草稿", () => {
     ]);
     const result = seen.toolResults.join("");
     expect(result).toContain("草稿已建");
-    expect(result, "别让模型以为已经发出去了").toContain("等用户在卡上批");
+    expect(result, "别让模型以为已经发出去了").toContain(
+      "等用户在卡上批。批之前什么都没发出去，回复用户时说草稿在等用户批，别说已经发了。",
+    );
     expect(result, "带上 draftId，模型之后才能 edit_draft").toContain(
       created[0]?.type === "draft_create" ? created[0].draft.draftId : "没有 draft_create",
     );
@@ -10038,6 +10201,44 @@ describe("运行器的例行边界", () => {
       expect(shape(h.sent)).not.toContain("approval_request");
       expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
       expect(toolResultsOf(requests)).toContain("只读例行里读到的内容");
+    });
+  });
+
+  describe("云电脑上的常规 bash 不问", () => {
+    const lsHarness = async (computerKind: ComputerKind, requests: ChatCompletionRequest[]) => {
+      sandboxProbe.forceBwrap = true;
+      const { dataDir } = botWorkDir();
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        computerKind,
+        approve: false,
+        script: scriptPlans(requests, { 看看目录: [["bash", { command: "ls -la" }]] }),
+      });
+      return { h, dirs: botDirs(dataDir, BotId.parse("bot-1")) };
+    };
+
+    it("远程电脑上 ls -la 不弹审批直接跑，bash 拿到这个 Bot 的工具箱", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h, dirs } = await lsHarness("remote", requests);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "看看目录"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:ok"]);
+      expect(sandboxProbe.toolboxes).toEqual([dirs.toolboxDir]);
+    });
+
+    it("本机电脑上同一条照弹审批，bash 没有工具箱", async () => {
+      const requests: ChatCompletionRequest[] = [];
+      const { h } = await lsHarness("local", requests);
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "看看目录"));
+
+      expect(shape(h.sent).filter((type) => type === "approval_request")).toHaveLength(1);
+      expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:blocked"]);
+      expect(sandboxProbe.toolboxes).toEqual([null]);
     });
   });
 

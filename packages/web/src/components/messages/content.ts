@@ -41,6 +41,9 @@ export const COMPUTER_STATUS_CLASS: Record<Computer["status"], string> = {
 export const computerName = (computer: Computer): string =>
   computer.kind === "local" ? "本机" : computer.host === null ? "远程电脑" : `远程电脑 ${computer.host}`;
 
+// 主机名是英文，后面紧跟汉字时隔一个空格。后面是全角标点就不用它，标点前不留空。
+export const beforeChinese = (name: string): string => (/[a-z0-9]$/i.test(name) ? `${name} ` : name);
+
 export const LOGIN_TEXT: Record<AccountLogin, string> = {
   none: "未登录",
   valid: "已登录",

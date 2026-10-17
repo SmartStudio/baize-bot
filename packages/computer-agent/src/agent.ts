@@ -9,7 +9,9 @@ import {
   type AgentToControl,
   BareUplinkFrame,
   type ComputerId,
+  type ComputerKind,
   ControlToAgent,
+  controlOriginFromAgentUrl,
   DownlinkFrame,
   UplinkFrame,
   UPLINK_DELIVERY,
@@ -76,6 +78,8 @@ const bytesOf = (data: RawData): Uint8Array =>
   Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
 
 export function startAgent(options: AgentOptions): AgentHandle {
+  // 放在起 Chrome 之前算：地址推不出源就当场失败，不等连上之后才发现 config 里的地址全错。
+  const controlOrigin = controlOriginFromAgentUrl(options.url);
   const heartbeatMs = options.heartbeatMs ?? 15_000;
   const backoff = options.backoff ?? defaultBackoff;
   const log = options.log ?? ((line: string) => console.log(`[computer-agent] ${line}`));
@@ -94,6 +98,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   let runner: Runner | null = null;
   let attachmentConfig: Pick<AgentRunnerConfig, "hub" | "modelGateway"> | null = null;
   let conn: number | null = null;
+  let computerKind: ComputerKind | null = null;
   let upSent = 0;
   let outbox: ReliableOutbox | null = null;
   let downlinkCursor: DownlinkCursor | null = null;
@@ -376,6 +381,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         await outbox?.acknowledge(message.upAcked);
         if (stopping || link.phase !== "open" || link.socket !== from) return;
         conn = message.conn;
+        computerKind = message.kind;
         upSent = message.upAcked;
         log(`控制面已接纳，owner ${message.ownerId}`);
         process.stdout.write(`${JSON.stringify(AgentStatusLine.parse({ type: "online" }))}\n`);
@@ -386,9 +392,12 @@ export function startAgent(options: AgentOptions): AgentHandle {
         screen.reconnected();
         return;
       case "config": {
+        // welcome 之前的报文在 applyMessage 里已经丢掉，走到这里 kind 一定存下了。
+        if (computerKind === null) return;
         attachmentConfig = { hub: message.hub, modelGateway: message.modelGateway };
         const config: AgentRunnerConfig = {
           computerId: options.computerId,
+          computerKind,
           bots: message.bots,
           tools: message.tools,
           accounts: message.accounts,
@@ -529,6 +538,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
               token: options.token,
               version: options.version,
               protocol: AGENT_PROTOCOL,
+              controlOrigin,
               installId,
               piSessionVersion: CURRENT_SESSION_VERSION,
               uplinkStream: outbox?.stream,

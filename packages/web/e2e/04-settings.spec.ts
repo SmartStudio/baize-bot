@@ -18,7 +18,7 @@ test("设置通用页切到深色，账号与电脑页列出两台在线电脑�
   );
   await expect(page.getByTestId("computer-row")).toHaveCount(2);
   await expect(page.getByTestId("computer-row").nth(0)).toHaveText("本机在线");
-  await expect(page.getByTestId("computer-row").nth(1)).toHaveText("远程在线");
+  await expect(page.getByTestId("computer-row").nth(1)).toHaveText("远程电脑在线");
 
   // 刷新才分得清「存住了」和「服务端把 patch 原样回了一遍」。
   await page.reload();

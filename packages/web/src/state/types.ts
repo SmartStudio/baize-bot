@@ -8,7 +8,9 @@ import {
   type BotId,
   type BrandBook,
   type Computer,
+  type ComputerChoices,
   type ComputerId,
+  type ComputerKind,
   type ContentPlan,
   type ContentPlanId,
   type Draft,
@@ -56,13 +58,17 @@ export type LoadKey =
   | "groups"
   | "counts"
   | `skills:${BotId}`
-  | `preferences:${BotId}`;
+  | `preferences:${BotId}`
+  | `computer-choices:${GroupId}`;
 
 // 某条消息的流式 delta 漏了版本：手上这份到 revision 为止都不可信，要单独把这一条拉回来，见 groups.ts 的 message_delta。
 // seq 是最近一次发现漏档时取的号，比它早发出的那趟拉取不算数。attempts 是单拉连着失败了几次，
 // 到 MESSAGE_GAP_ATTEMPTS 就不再自己拉，等重连或这个群重拉历史再给一轮机会。
 export type MessageGap = { groupId: GroupId; revision: number; seq: Seq; attempts: number };
 export const MESSAGE_GAP_ATTEMPTS = 3;
+
+// 一个群里一个 Bot 选的电脑。货架按行 id 记号，同一个 Bot 在不同群里各是一行，所以 id 拼上群。
+export type ChoiceEntry = ComputerChoices[number] & { readonly id: string };
 
 export type LoginPhase = { kind: "idle" } | { kind: "submitting" } | { kind: "failed"; message: string };
 
@@ -162,6 +168,7 @@ export type AppState =
       preferences: Shelf<BotId, Preference>;
       // 本地已确认删掉的偏好 id。id 不复用，所以删除是终态：之后到的该 id 的更新一律丢，不看序号。
       deletedPreferences: Record<PreferenceId, true>;
+      computerChoices: Shelf<GroupId, ChoiceEntry>;
       // 没写过是 null。
       brand: BrandBook | null;
       // 按群存牌桌视图，只有拉过或推过的桌子在这里。
@@ -242,6 +249,8 @@ export type Action =
   | { type: "preferences_loaded"; botId: BotId; preferences: Preference[]; seq: Seq }
   | { type: "preference_upserted"; preference: Preference; seq: Seq }
   | { type: "preference_removed"; botId: BotId; preferenceId: PreferenceId; seq: Seq }
+  | { type: "computer_choices_loaded"; groupId: GroupId; choices: ComputerChoices; seq: Seq }
+  | { type: "computer_choice_set"; groupId: GroupId; botId: BotId; kind: ComputerKind; seq: Seq }
   | { type: "brand_set"; brand: BrandBook | null }
   | { type: "tool_upserted"; tool: ToolConnection }
   | { type: "tool_removed"; toolId: ToolConnectionId }

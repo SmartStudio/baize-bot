@@ -53,8 +53,6 @@ const PURPOSE_OF_ROLE: Readonly<Record<PokerTableRole, ModelPurpose>> = {
 export async function sendHiddenRun(deps: HiddenRunDeps, input: HiddenRunInput): Promise<HiddenRunOutcome> {
   const ownerId = await ownerOfGroup(deps.db, input.groupId);
   if (ownerId === null) return { kind: "skipped" };
-  const selected = await computerFor(deps.db, deps.agents, ownerId);
-  if (selected.kind === "failed") return { kind: "unplaced", reason: selected.reason };
 
   let started;
   try {
@@ -81,16 +79,18 @@ export async function sendHiddenRun(deps: HiddenRunDeps, input: HiddenRunInput):
             table: { ...input.table, role: input.role },
             task: null,
             members: [],
+            // 牌友和老白只管这一手，不在牌桌上换电脑，用不着知道另一台和群里的选定。
+            computer: null,
           }),
         },
-        () => computerFor(tx as unknown as Db, deps.agents, ownerId),
+        (preference) => computerFor(tx, deps.agents, ownerId, preference),
       ),
     );
   } catch (error) {
     if (error instanceof TransactionRollbackError) return { kind: "busy" };
     throw error;
   }
-  if (started.kind === "not_member") return { kind: "skipped" };
+  if (started.kind === "not_member" || started.kind === "continued") return { kind: "skipped" };
   if (started.kind === "unplaced") return { kind: "unplaced", reason: started.reason };
   if (deps.agents.flushOutbox)
     for (const computerId of started.flushComputerIds) await deps.agents.flushOutbox(computerId);
