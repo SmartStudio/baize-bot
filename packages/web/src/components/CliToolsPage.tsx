@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   CliInstall,
+  installCommand,
   CreateCliToolRequest,
   UpdateCliToolRequest,
   type Bot,
@@ -63,8 +64,7 @@ const botsText = (bots: CliTool["bots"], all: Record<BotId, Bot>): string =>
 // 运行器只在云电脑上对登记过的装包命令免问，本机上装还是要人批，所以只给云电脑上的工具发这句话。
 const installAsk = (tool: CliTool, soloGroups: Record<BotId, GroupId>, all: Record<BotId, Bot>) => {
   if (tool.install === null || !tool.computers.includes("remote")) return null;
-  const line =
-    tool.install.manager === "npm" ? `npm install -g ${tool.install.package}` : `pip install ${tool.install.package}`;
+  const line = installCommand(tool.install);
   const targets = (tool.bots ?? (Object.keys(all) as BotId[])).flatMap((botId) => {
     const groupId = soloGroups[botId];
     return groupId === undefined ? [] : [{ botId, groupId }];

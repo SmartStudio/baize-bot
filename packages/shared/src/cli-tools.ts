@@ -113,6 +113,13 @@ export const CliInstall = z.discriminatedUnion("manager", [
 ]);
 export type CliInstall = z.infer<typeof CliInstall>;
 
+// 运行器在云电脑上对这一条命令免问，Web 的「让 Bot 装上」也发这一条，两边必须同一个写法。
+// 包名带 [extras]、>=、^ 这类 shell 会当通配或重定向的字符时加单引号，门禁拆词后比的是去掉引号的包名。
+export const installCommand = (install: CliInstall): string => {
+  const pkg = /^[A-Za-z0-9@/._-]+$/.test(install.package) ? install.package : `'${install.package}'`;
+  return install.manager === "npm" ? `npm install -g ${pkg}` : `pip install ${pkg}`;
+};
+
 export const CliToolEnvView = z.object({ name: EnvName, last4: z.string().max(4) }).strict();
 export type CliToolEnvView = z.infer<typeof CliToolEnvView>;
 

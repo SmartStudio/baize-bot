@@ -10387,7 +10387,7 @@ describe("运行器的命令行工具", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
     const system = systemOf(requests.at(-1));
     expect(system).toContain("## 命令行工具");
-    expect(system).toContain("- baize-test-cli（装法：npm i -g @vibe-kit/grok-cli）");
+    expect(system).toContain("- baize-test-cli（装法：npm install -g @vibe-kit/grok-cli）");
     expect(system).not.toContain(SECRET);
 
     await h.runner.applyConfig(h.config({ cliTools: [] }));

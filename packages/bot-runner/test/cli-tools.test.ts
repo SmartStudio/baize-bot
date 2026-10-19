@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BotId, type CliInstall, CliToolConfig, CliToolId, ComputerId, GroupId } from "@baize/shared";
+import { BotId, type CliInstall, CliToolConfig, CliToolId, ComputerId, GroupId, installCommand } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { cliToolsFor, renderCliToolsSection } from "../src/cli-tools.js";
 import { decide, type GateAccess, type GateCall } from "../src/gate.js";
@@ -206,6 +206,18 @@ describe("云电脑上装登记工具的包", () => {
   });
 
   it.each([
+    { manager: "npm", package: NPM_PKG },
+    { manager: "npm", package: "@baize-test/cli@^1.2" },
+    { manager: "pip", package: PIP_PKG },
+    { manager: "pip", package: "baize-test-py[all]>=2.0" },
+  ] satisfies CliInstall[])("登记的装法原样执行不问：$package", (install) => {
+    const command = installCommand(install);
+    const decision = decide(cloud(command, { cliTools: [tool("baize-test-cli", install)] }), [], []);
+    expect(decision, command).toMatchObject({ verdict: "allow", action: "install" });
+    expect(decision.access.cliTools).toBeUndefined();
+  });
+
+  it.each([
     [`npm i -g @baize-test/clj`, "包名差一个字符"],
     [`npm i -g @baize-test/cl`, "包名少一个字符"],
     [`npm i -g ${NPM_PKG}@latest`, "多了版本"],
@@ -406,8 +418,8 @@ describe("系统提示和按 Bot 过滤", () => {
 
   it("云电脑上列命令名和装法，不带值；Mac 和空列表不给这一段", () => {
     const section = renderCliToolsSection([OTHER, GROK], true) ?? "";
-    expect(section).toContain("这些命令能联网、自带密钥，直接用；没装就先用 npm i -g / pip install 装");
-    expect(section).toContain("- baize-test-cli（装法：npm i -g @vibe-kit/grok-cli）");
+    expect(section).toContain("这些命令能联网、自带密钥，直接用；没装就照下面的装法原样装");
+    expect(section).toContain("- baize-test-cli（装法：npm install -g @vibe-kit/grok-cli）");
     expect(section).toContain("- other（装法：没有登记装法，没装就告诉主人）");
     expect(section.indexOf("- baize-test-cli")).toBeLessThan(section.indexOf("- other"));
     expect(section).not.toContain(SECRET);
