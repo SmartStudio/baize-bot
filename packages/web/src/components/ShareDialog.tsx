@@ -152,7 +152,7 @@ export const ShareDialog = ({ bot, skills, plugins, preferences, onClose }: Prop
         onKeyDown={trapTab}
       >
         <header className="dialog-head">
-          <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
+          <BotAvatar shape={bot.shape} hue={bot.hue} size="sm" />
           <span>
             <b>分享 {bot.name}</b>
           </span>

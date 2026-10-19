@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { BotHue, BotId, GroupId, MessageId, Timestamp } from "./domain.js";
+import { BotHue, BotId, BotShape, GroupId, MessageId, Timestamp } from "./domain.js";
 
 // 牌局的对外形状。引擎（control-plane/src/poker）是一手牌的纯函数，这里是它的 zod 镜像加上
 // 桌子、会话、复盘这些引擎之外的对象。镜像必须和引擎的 SeatView 一字不差：
@@ -137,16 +137,35 @@ export type PokerPersonaCard = {
   readonly name: string;
   readonly tags: readonly string[];
   readonly hue: BotHue;
+  readonly shape: BotShape;
   readonly line: string;
 };
 
 export const POKER_PERSONAS: Readonly<Record<PokerPersona, PokerPersonaCard>> = {
-  leopard: { name: "阿豹", tags: ["牌友"], hue: "coral", line: "手里有牌就打，话不多，加注很干脆。" },
-  old_k: { name: "老K", tags: ["牌友"], hue: "violet", line: "老江湖，爱算牌，说话慢条斯理，偶尔诈一手。" },
-  jasmine: { name: "茉莉", tags: ["牌友"], hue: "pink", line: "打得稳，不跟没把握的牌，赢了会轻轻说一句。" },
-  dalu: { name: "大刘", tags: ["牌友"], hue: "tangerine", line: "大嗓门，爱跟注，输了也乐呵。" },
-  xiaoqi: { name: "小七", tags: ["牌友"], hue: "mint", line: "新手气盛，常常全下，运气时好时坏。" },
-  laobai: { name: "老白", tags: ["解说"], hue: "sky", line: "不入座，报牌报底池，你问才答。" },
+  leopard: {
+    name: "阿豹",
+    tags: ["牌友"],
+    hue: "coral",
+    shape: "triangle",
+    line: "手里有牌就打，话不多，加注很干脆。",
+  },
+  old_k: {
+    name: "老K",
+    tags: ["牌友"],
+    hue: "violet",
+    shape: "arch",
+    line: "老江湖，爱算牌，说话慢条斯理，偶尔诈一手。",
+  },
+  jasmine: {
+    name: "茉莉",
+    tags: ["牌友"],
+    hue: "pink",
+    shape: "leaf",
+    line: "打得稳，不跟没把握的牌，赢了会轻轻说一句。",
+  },
+  dalu: { name: "大刘", tags: ["牌友"], hue: "tangerine", shape: "pudding", line: "大嗓门，爱跟注，输了也乐呵。" },
+  xiaoqi: { name: "小七", tags: ["牌友"], hue: "mint", shape: "bean", line: "新手气盛，常常全下，运气时好时坏。" },
+  laobai: { name: "老白", tags: ["解说"], hue: "sky", shape: "pillow", line: "不入座，报牌报底池，你问才答。" },
 } as const;
 
 /** 牌桌 prompt 里 Bot 扮演的角色：牌友出牌、老白解答、老白复盘。 */
@@ -175,6 +194,7 @@ export const PokerTableSeat = z.object({
   name: z.string(),
   persona: PokerPersona.nullable(),
   hue: BotHue,
+  shape: BotShape,
   stack: z.number().int(),
 });
 export type PokerTableSeat = z.infer<typeof PokerTableSeat>;
@@ -193,7 +213,7 @@ export const PokerTableView = z.object({
   status: PokerTableStatus,
   version: z.number().int().nonnegative(),
   seats: z.array(PokerTableSeat),
-  host: z.object({ botId: BotId, name: z.string(), hue: BotHue }),
+  host: z.object({ botId: BotId, name: z.string(), hue: BotHue, shape: BotShape }),
   session: z
     .object({ id: PokerSessionId, handCount: z.number().int().nonnegative(), net: z.number().int() })
     .nullable(),

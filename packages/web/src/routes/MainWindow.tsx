@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
-import type { Bot, BotHue, BotId, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
+import type { Bot, BotHue, BotId, BotShape, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
 import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
 import { NewProjectDialog } from "../components/NewProjectDialog.js";
@@ -31,7 +31,21 @@ import { oauthNoticeText, oauthReturnOf, type OAuthReturn } from "./oauth.js";
 
 type Overlay = "none" | "account" | "settings" | "accounts" | "tools" | "usage" | "new-project";
 
-const FALLBACK: { name: string; tags: readonly string[]; hue: BotHue } = { name: "Bot", tags: [], hue: "sky" };
+const FALLBACK: {
+  name: string;
+  tags: readonly string[];
+  hue: BotHue;
+  shape: BotShape;
+  runState: "running";
+  pendingApproval: false;
+} = {
+  name: "Bot",
+  tags: [],
+  hue: "sky",
+  shape: "pillow",
+  runState: "running",
+  pendingApproval: false,
+};
 
 // 历史还没拉回来时也得给 ChatPanel 一个数组。写成字面量的话每次渲染都是新身份，滚到底的 effect 会空转。
 const NO_MESSAGES: Message[] = [];
@@ -161,7 +175,18 @@ export const MainWindow = () => {
   );
   const lookup = (botId: BotId) => {
     const found = bots[botId];
-    return found ? { name: found.name, tags: found.tags, hue: found.hue } : FALLBACK;
+    return found
+      ? {
+          name: found.name,
+          tags: found.tags,
+          hue: found.hue,
+          shape: found.shape,
+          runState: found.runState,
+          pendingApproval: Object.values(ready.approvals).some(
+            (approval) => approval.botId === found.id && approval.status === "pending",
+          ),
+        }
+      : FALLBACK;
   };
   const contentActions = {
     decideDraft: actions.decideDraft,

@@ -1,5 +1,6 @@
 import type {
   BotHue,
+  BotShape,
   GroupId,
   PokerAction,
   PokerActionOption,
@@ -48,6 +49,7 @@ export type FeltSeat = {
   seat: PokerSeatNo;
   name: string;
   hue: BotHue;
+  shape: BotShape;
   persona: PokerPersona | null;
   stack: number;
   committed: number;
@@ -120,6 +122,7 @@ export const feltOf = (table: PokerTableView | null): FeltModel | null => {
       seat: seat.seat,
       name: seat.name,
       hue: seat.hue,
+      shape: seat.shape,
       persona: seat.persona,
       stack: engine?.stack ?? seat.stack,
       committed: engine?.committed ?? 0,

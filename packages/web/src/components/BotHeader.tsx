@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, Pencil, Share2 } from "lucide-react";
 import type { Bot, BotId, Preference } from "@baize/shared";
-import { BotAvatar } from "./BotAvatar.js";
+import { BotAvatar, type BotAvatarState } from "./BotAvatar.js";
 import { BotComputerPicker, type ComputerChoicesView } from "./ComputerPicker.js";
 import { EditBotDialog } from "./EditBotDialog.js";
 import { ShareDialog } from "./ShareDialog.js";
@@ -48,8 +48,10 @@ const PreferenceRow = ({ preference, onForget }: { preference: Preference; onFor
 export const BotHeader = ({
   bot,
   computerChoices,
+  avatarState = "idle",
 }: {
   bot: Bot;
+  avatarState?: BotAvatarState;
   // 没得选或这个群的选择还没拉回来时为 null，不画选择器。
   computerChoices: ComputerChoicesView | null;
 }) => {
@@ -110,7 +112,7 @@ export const BotHeader = ({
   return (
     <header className="bot-header" data-testid="bot-header">
       <div className="bot-header-main">
-        <BotAvatar name={bot.name} hue={bot.hue} size="lg" />
+        <BotAvatar shape={bot.shape} hue={bot.hue} state={avatarState} size="lg" />
         <div className="bot-header-text">
           <h2 data-testid="chat-title">{bot.name}</h2>
           {bot.tags.length > 0 ? (

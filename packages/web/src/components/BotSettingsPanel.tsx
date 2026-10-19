@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { ChevronRight, SlidersHorizontal, Sparkles } from "lucide-react";
-import { BotHue, type Bot, type BotId } from "@baize/shared";
+import { BotHue, BotShape, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
-import { BotAvatar } from "./BotAvatar.js";
+import { BotAvatar, SHAPES } from "./BotAvatar.js";
 import { SkillsTab } from "./skills/SkillsTab.js";
 
 type Props = {
@@ -65,7 +65,7 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
   );
 };
 
-// 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、通知和暂停。
+// 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停。
 export const BotSettingsPanel = ({ bot, onChange, onPause, onResume }: Props) => {
   const [tab, setTab] = useState<Tab>("settings");
 
@@ -74,7 +74,7 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume }: Props) =>
   return (
     <aside className="bot-panel" data-testid="bot-panel">
       <header className="bot-panel-head">
-        <BotAvatar name={bot.name} hue={bot.hue} size="lg" />
+        <BotAvatar shape={bot.shape} hue={bot.hue} size="lg" />
         <div className="hue-row">
           {BotHue.options.map((hue) => (
             <button
@@ -85,6 +85,22 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume }: Props) =>
               aria-label={`换成 ${hue}`}
               onClick={() => commit({ hue })}
             />
+          ))}
+        </div>
+        <div className="bot-shape-options" role="group" aria-label="形状">
+          {BotShape.options.map((shape) => (
+            <button
+              key={shape}
+              type="button"
+              aria-pressed={shape === bot.shape}
+              aria-label={SHAPES[shape].name}
+              className={`bot-shape-option${shape === bot.shape ? " is-selected" : ""}`}
+              data-testid="bot-shape-option"
+              data-shape={shape}
+              onClick={() => commit({ shape })}
+            >
+              <BotAvatar shape={shape} hue={bot.hue} size="sm" />
+            </button>
           ))}
         </div>
       </header>

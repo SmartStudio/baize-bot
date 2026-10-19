@@ -67,7 +67,7 @@ export const TaskPanel = ({ task, memberIds, bots, onClose }: Props) => {
           return (
             <li key={`${record.botId}-${record.from}`}>
               <span>
-                {bot === undefined ? null : <BotAvatar name={bot.name} hue={bot.hue} size="xs" />}
+                {bot === undefined ? null : <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />}
                 {bot?.name ?? "Bot"}
                 {bot !== undefined && bot.tags.length > 0 ? ` · ${bot.tags.join("、")}` : ""}
                 {record.to === null ? <em className="tag">当前</em> : null}
@@ -81,7 +81,7 @@ export const TaskPanel = ({ task, memberIds, bots, onClose }: Props) => {
           return (
             <li key={botId}>
               <span>
-                {bot === undefined ? null : <BotAvatar name={bot.name} hue={bot.hue} size="xs" />}
+                {bot === undefined ? null : <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />}
                 {bot?.name ?? "Bot"}
                 {bot !== undefined && bot.tags.length > 0 ? ` · ${bot.tags.join("、")}` : ""}
               </span>

@@ -94,6 +94,8 @@ export type Computer = z.infer<typeof Computer>;
 // 七个队友色相，来自设计系统 tokens/colors.css 的 --bot-*。
 export const BotHue = z.enum(["coral", "tangerine", "lime", "mint", "sky", "violet", "pink"]);
 export type BotHue = z.infer<typeof BotHue>;
+export const BotShape = z.enum(["pillow", "cloud", "triangle", "bean", "droplet", "arch", "leaf", "pudding"]);
+export type BotShape = z.infer<typeof BotShape>;
 // player 是牌桌上的预置牌友，host 是解说老白，都是建牌桌时自动建出来的，不进队伍页。
 export const BotRole = z.enum(["assistant", "member", "player", "host"]);
 export type BotRole = z.infer<typeof BotRole>;
@@ -135,6 +137,7 @@ export const Bot = z.object({
   tags: BotTags.default([]),
   description: z.string().default(""),
   hue: BotHue,
+  shape: BotShape,
   notify: z.boolean().default(true),
   toolConnectionIds: z.array(ToolConnectionId).default([]),
   runState: BotRunState,

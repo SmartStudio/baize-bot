@@ -34,6 +34,7 @@ export async function ensurePokerPresets(db: Db, ownerId: UserId): Promise<Poker
           tags: [...card.tags],
           description: card.line,
           hue: card.hue,
+          shape: card.shape,
         })
         .onConflictDoNothing({ target: [bots.ownerId, bots.preset], where: sql`${bots.preset} IS NOT NULL` })
         .returning();

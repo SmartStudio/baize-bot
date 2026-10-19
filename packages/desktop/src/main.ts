@@ -865,6 +865,11 @@ function createAppUpdater(): Updater {
 
 async function main(): Promise<void> {
   await app.whenReady();
+  if (!app.isPackaged && process.platform === "darwin" && app.dock !== undefined) {
+    const icon = join(dirname(fileURLToPath(import.meta.url)), "../assets/icon.iconset/icon_512x512@2x.png");
+    const image = nativeImage.createFromPath(icon);
+    if (!image.isEmpty()) app.dock.setIcon(image);
+  }
   settings = await loadSettings();
   ({ controlOrigin } = settings);
   const uiServer = await startUiServer(desktopPaths().web, controlOrigin);

@@ -30,7 +30,7 @@ const Seat = ({ seat, testId }: { seat: FeltSeat; testId: "felt-opponent" | "fel
   >
     <Hand seat={seat} />
     <div className="felt-plate">
-      <BotAvatar name={seat.name} hue={seat.hue} size="sm" />
+      <BotAvatar shape={seat.shape} hue={seat.hue} size="sm" />
       <div className="felt-who">
         <span className="felt-name">{seat.name}</span>
         <span className="felt-stack" data-testid="seat-stack">

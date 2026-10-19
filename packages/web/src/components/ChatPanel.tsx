@@ -13,7 +13,7 @@ import {
   type InspectTool,
 } from "./messages/MessageView.js";
 import { turnsOf, type Turn } from "./messages/turns.js";
-import { BotAvatar } from "./BotAvatar.js";
+import { BotAvatar, resolveBotAvatarState } from "./BotAvatar.js";
 import { BotHeader } from "./BotHeader.js";
 import { TeamComputerNotes, TeamComputers, type ComputerChoicesView } from "./ComputerPicker.js";
 import { TaskCard } from "./TaskCard.js";
@@ -133,6 +133,20 @@ export const ChatPanel = ({
     .map((botId) => bots[botId])
     .filter((bot): bot is Bot => bot !== undefined);
   const lead = members[0];
+  const avatarStateOf = (bot: Bot) =>
+    resolveBotAvatarState({
+      paused: bot.runState === "paused",
+      pendingApproval:
+        (conversation.kind === "solo" && conversation.pendingApprovals > 0) ||
+        Object.values(approvals).some(
+          (approval) => approval.groupId === groupId && approval.botId === bot.id && approval.status === "pending",
+        ),
+      working:
+        turn?.current === bot.id ||
+        messages.some(
+          (message) => message.body.kind === "bot" && message.body.botId === bot.id && message.body.streaming,
+        ),
+    });
   const turns = turnsOf(messages);
 
   useEffect(() => {
@@ -224,7 +238,7 @@ export const ChatPanel = ({
               <div className="chat-members" data-testid="chat-members">
                 {members.map((bot) => (
                   <span className="chat-member" data-testid="chat-member" key={bot.id}>
-                    <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                    <BotAvatar shape={bot.shape} hue={bot.hue} state={avatarStateOf(bot)} size="xs" />
                     {bot.name}
                     {conversation.chiefBotId === bot.id ? <em className="tag">首席</em> : null}
                     {conversation.task.currentBotId === bot.id ? <em className="tag">经手</em> : null}
@@ -244,7 +258,7 @@ export const ChatPanel = ({
           )}
         </header>
       ) : (
-        <BotHeader bot={lead} computerChoices={computerChoices} />
+        <BotHeader bot={lead} computerChoices={computerChoices} avatarState={avatarStateOf(lead)} />
       )}
       {conversation.kind === "team" ? (
         <TaskCard
@@ -337,7 +351,7 @@ export const ChatPanel = ({
                 data-bot-name={bot.name}
                 onClick={() => mention(bot.name)}
               >
-                <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />
                 {bot.name}
                 {bot.tags.length > 0 ? <span className="menu-trail">{bot.tags.join("、")}</span> : null}
               </button>

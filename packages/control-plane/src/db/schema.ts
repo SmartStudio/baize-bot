@@ -5,6 +5,7 @@ import type {
   ApprovalStatus as ApprovalStatusSchema,
   AttachmentMime,
   BotHue,
+  BotShape,
   BotRole as BotRoleSchema,
   BotRunState as BotRunStateSchema,
   BrandEdit,
@@ -162,6 +163,7 @@ export const bots = pgTable(
     tags: text("tags").array().notNull().default([]),
     description: text("description").notNull().default(""),
     hue: text("hue").$type<BotHue>().notNull(),
+    shape: text("shape").$type<BotShape>().notNull(),
     notify: boolean("notify").notNull().default(true),
     // 预置牌友和老白的人设 id。每个用户一套（D36），所以 (owner_id, preset) 唯一。
     preset: text("preset").$type<PokerPersona>(),

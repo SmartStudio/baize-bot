@@ -21,7 +21,7 @@ export const SeatsBlock = ({ table, notice, onSwap }: Props) => {
       <div className="poker-seat-list">
         {friends.map((seat) => (
           <article key={seat.seat} className="poker-seat" data-testid="poker-seat" data-seat-name={seat.name}>
-            <BotAvatar name={seat.name} hue={seat.hue} size="md" />
+            <BotAvatar shape={seat.shape} hue={seat.hue} size="md" />
             <div className="poker-seat-who">
               <b data-testid="poker-seat-name">{seat.name}</b>
               <small data-testid="poker-seat-line">
@@ -41,7 +41,7 @@ export const SeatsBlock = ({ table, notice, onSwap }: Props) => {
           </article>
         ))}
         <article className="poker-seat" data-testid="poker-seat" data-seat-name={table.host.name}>
-          <BotAvatar name={table.host.name} hue={table.host.hue} size="md" />
+          <BotAvatar shape={table.host.shape} hue={table.host.hue} size="md" />
           <div className="poker-seat-who">
             <b data-testid="poker-seat-name">{table.host.name}</b>
             <small data-testid="poker-seat-line">{POKER_PERSONAS.laobai.line}</small>

@@ -297,7 +297,17 @@ export const pokerView = (table: MockPokerTable): PokerTableView => {
     seats: table.seats.map(({ seat, persona, stack }) => {
       const engineSeatId = engineSeatIdOf(seat);
       if (persona === null) {
-        return { seat, engineSeatId, kind: "user", botId: null, name: user.name, persona: null, hue: "lime", stack };
+        return {
+          seat,
+          engineSeatId,
+          kind: "user",
+          botId: null,
+          name: user.name,
+          persona: null,
+          hue: "lime",
+          shape: "pillow",
+          stack,
+        };
       }
       const card = POKER_PERSONAS[persona];
       return {
@@ -308,10 +318,11 @@ export const pokerView = (table: MockPokerTable): PokerTableView => {
         name: card.name,
         persona,
         hue: card.hue,
+        shape: card.shape,
         stack,
       };
     }),
-    host: { botId: botIdOf(HOST_PERSONA), name: host.name, hue: host.hue },
+    host: { botId: botIdOf(HOST_PERSONA), name: host.name, hue: host.hue, shape: host.shape },
     session:
       table.session === null
         ? null
