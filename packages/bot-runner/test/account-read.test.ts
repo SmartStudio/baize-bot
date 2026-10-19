@@ -11,14 +11,23 @@ import {
 const GITHUB = AccountConfig.parse({
   id: "acc-github",
   platform: "github",
+  via: "api",
   handle: "baize-dev",
   tier: "draft",
   login: "valid",
 });
-const X = AccountConfig.parse({ id: "acc-x", platform: "x", handle: "baize_x", tier: "read_only", login: "valid" });
+const X = AccountConfig.parse({
+  id: "acc-x",
+  platform: "x",
+  via: "api",
+  handle: "baize_x",
+  tier: "read_only",
+  login: "valid",
+});
 const XHS = AccountConfig.parse({
   id: "acc-xhs",
   platform: "xiaohongshu",
+  via: "computer",
   handle: "白泽",
   tier: "draft",
   login: "valid",

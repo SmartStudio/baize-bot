@@ -6,6 +6,7 @@ import {
   type AgentToControl,
   type ApprovalOutcome,
   type BotId,
+  type CliToolConfig,
   type ComputerId,
   type ComputerKind,
   type ControlToAgent,
@@ -44,6 +45,7 @@ import {
   renderMemory,
   writeBrandFile,
 } from "./memory.js";
+import { cliToolsFor, renderCliToolsSection } from "./cli-tools.js";
 import { renderComputerSection, switchComputerTool } from "./computer.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
@@ -100,6 +102,8 @@ export interface RunnerConfig {
   /** 品牌手册和该用户全部 Bot 的偏好，和 config 报文一样恒带；每次运行按最新配置注入记忆。 */
   readonly brand: ConfigMessage["brand"];
   readonly preferences: ConfigMessage["preferences"];
+  /** 登记的命令行工具，和 config 报文一样恒带，空也带空数组。每次带来的是整份，没在里面的作废。 */
+  readonly cliTools: ConfigMessage["cliTools"];
   readonly send: (message: AgentToControl) => void;
   readonly workAppend?: WorkAppender;
   /** 每个 Bot 的 Pi 目录建在这下面。Pi 的四个落盘点全部显式钉死，不碰 ~/.pi。 */
@@ -151,6 +155,8 @@ interface BotDesired {
   /** 手册和偏好不进 fingerprint：它们变了不重建会话，每次 prompt 开跑时读最新的一份整段放进系统提示。 */
   readonly brand: ConfigMessage["brand"];
   readonly preferences: ConfigMessage["preferences"];
+  /** 已按 Bot 过滤。不进 fingerprint：门禁、沙箱 env、脱敏和系统提示都在用的时候现取这一份。 */
+  readonly cliTools: readonly CliToolConfig[];
 }
 
 interface BotDefinition {
@@ -294,6 +300,7 @@ const desiredFor = (
   preferences: ConfigMessage["preferences"],
   settings: PiSettings | undefined,
   extensionTools: readonly RunnerTool[],
+  cliTools: readonly CliToolConfig[],
 ): BotDesired => ({
   version,
   settings,
@@ -310,6 +317,7 @@ const desiredFor = (
   grants,
   brand,
   preferences,
+  cliTools: cliToolsFor(bot.id, cliTools),
 });
 
 const settlePauseWaiters = (bot: BotRuntime, running: boolean): void => {
@@ -496,6 +504,7 @@ export function createRunner(config: RunnerConfig): Runner {
         config.preferences,
         config.settings,
         config.extensionTools ?? [],
+        config.cliTools,
       );
       const dirs = botDirs(config.dataDir, botConfig.id);
       reconcileSkillDir(
@@ -818,6 +827,7 @@ export function createRunner(config: RunnerConfig): Runner {
       zones,
       () => lane.active?.run.runId ?? null,
       containment.level === "closed" ? { toolboxDir: dirs.toolboxDir } : null,
+      () => (desiredConfig(bot) ?? runConfig()).cliTools,
     );
     if (config.browser !== undefined && bot.browser === null) {
       bot.browser = createBotBrowser(config.browser, browserMutexFor(bot).mutex);
@@ -981,6 +991,7 @@ export function createRunner(config: RunnerConfig): Runner {
           computerId: desired.computerId,
           browserHost: bot.browser?.host() ?? null,
           routine: lane.active?.routine ?? null,
+          cliTools: desired.cliTools,
         },
         desired.grants,
         desired.accounts,
@@ -1115,6 +1126,7 @@ export function createRunner(config: RunnerConfig): Runner {
       active.sections = {
         memory: memory.text,
         computer: renderComputerSection(config.computerKind, message.computer),
+        cliTools: renderCliToolsSection(desired.cliTools, containment.level === "closed"),
       };
       const text = composePrompt(message, contextSince(message.context, watermark), desired.accounts);
       report = reportRun(
@@ -1232,6 +1244,7 @@ export function createRunner(config: RunnerConfig): Runner {
             next.preferences,
             next.settings,
             next.extensionTools ?? [],
+            next.cliTools,
           ),
         ]),
       );

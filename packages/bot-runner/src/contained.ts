@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import type { ComputerKind } from "@baize/shared";
 import type { SandboxKind } from "./gate.js";
 
@@ -11,6 +12,25 @@ export type Containment =
 export function containmentFor(computerKind: ComputerKind, sandbox: SandboxKind): { readonly level: ContainmentLevel } {
   return { level: computerKind === "remote" && sandbox === "bwrap" ? "closed" : "none" };
 }
+
+export type ClosedContainment = Extract<Containment, { level: "closed" }>;
+
+export const toolboxShimDir = (toolboxDir: string): string => join(dirname(toolboxDir), "toolbox-bin");
+/** `npm i -g` 在云电脑上的 prefix。全局包的命令落在它的 bin 下。 */
+export const toolboxNodeDir = (toolboxDir: string): string => join(toolboxDir, "node");
+
+/**
+ * 云电脑上 bash 的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 和 node/bin 垫底。pip、npm -g 装进来的程序还能用，
+ * 但盖不住系统同名程序。自动放行和批准的命令是同一串，批准过的装包之后不问的 python3 也用得上。
+ * 闸门认命令行工具时按的也是这一串，两边不能各算各的。
+ */
+export const toolboxSearchPath = (containment: ClosedContainment): string =>
+  [
+    toolboxShimDir(containment.toolboxDir),
+    containment.searchPath,
+    join(containment.toolboxDir, "venv", "bin"),
+    join(toolboxNodeDir(containment.toolboxDir), "bin"),
+  ].join(":");
 
 export const SYSTEM_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([
   "apt",
