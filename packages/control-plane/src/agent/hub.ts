@@ -940,6 +940,8 @@ export class AgentHub {
       // 省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
       skills,
       accounts,
+      // 命令行工具由另一条线填，这里先恒带空数组。
+      cliTools: [],
       grants,
       // brand 和 preferences 同 skills 一样恒带：运行器靠它们判断要不要重拼系统提示，省掉就分不清「没有」和「没说」。
       brand,

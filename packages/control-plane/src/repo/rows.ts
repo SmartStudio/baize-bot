@@ -231,6 +231,7 @@ export function toAccount(row: typeof schema.accounts.$inferSelect): Account {
     ownerId: row.ownerId,
     computerId: row.computerId,
     platform: row.platform,
+    via: row.via,
     handle: row.handle,
     tier: row.tier,
     login: row.login,

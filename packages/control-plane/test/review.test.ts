@@ -171,6 +171,7 @@ async function publishedYesterday(owner: Owner, title: string): Promise<void> {
     ownerId: owner.userId,
     computerId: owner.computer.computerId,
     platform: "x",
+    via: "api",
     handle: `@${accountId}`,
     login: "valid",
     tier: "confirm_publish",

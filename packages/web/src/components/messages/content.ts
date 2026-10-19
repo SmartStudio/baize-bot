@@ -8,6 +8,7 @@ import type {
   LiveUserEnd,
   LoginFailure,
   Platform,
+  PublishVia,
   ToolCallStatus,
 } from "@baize/shared";
 import type { TakeoverScreen } from "../../state/live.js";
@@ -97,9 +98,19 @@ export const TIER: Record<AccountTier, { title: string; note: string }> = {
 
 export const TIERS = Object.keys(TIER) as AccountTier[];
 
-// 平台的规矩，不是我们的：档位本身合法，小红书这个号挂在这一档上会被封。控制面同样拒成 400。
-export const blockedTier = (platform: Platform, tier: AccountTier): string | null =>
-  platform === "xiaohongshu" && tier === "direct_publish" ? "平台 2026-03-10 起封 AI 托管账号" : null;
+export const VIA_TEXT: Record<PublishVia, string> = {
+  api: "接口授权",
+  computer: "电脑上的浏览器登录",
+};
+
+// 档位本身合法，但电脑浏览器登录的号不许挂在「可直接发布」，控制面同样拒成 400。
+// 小红书说平台自己的规矩：2026-03-10 起封 AI 托管账号。
+export const blockedTier = (account: Pick<Account, "platform" | "via">, tier: AccountTier): string | null => {
+  if (account.via !== "computer" || tier !== "direct_publish") return null;
+  return account.platform === "xiaohongshu"
+    ? "平台 2026-03-10 起封 AI 托管账号"
+    : "电脑浏览器发帖每条先给你看，不开直接发布";
+};
 
 export const draftText = (draft: Draft): string =>
   draft.content.kind === "post" ? (draft.content.title ?? draft.content.text) : `回复 ${draft.content.replyTo.author}`;

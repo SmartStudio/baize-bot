@@ -5,10 +5,21 @@ import { type AssistantChrome, untilAborted } from "./chrome.js";
 
 // 登录就是把平台的登录页摆到屏上给人操作，本机和远程一样。电脑这边只看页面上出没出现已登录的标志。
 
+/**
+ * 一个站怎么看出登上了。小红书看页面上出没出现头像；X 的登录页登上就跳走，页面上没有稳定的标志，看 cookie。
+ * 两种都要再从页面上读出账号名，读到才算登上。
+ */
+export type SignedInBy =
+  | { readonly kind: "element"; readonly selector: string }
+  /** 只看 url 下有没有这个名字的 cookie，值不读出来比，也不记。 */
+  | { readonly kind: "cookie"; readonly url: string; readonly name: string };
+
 export interface BrowserPage {
   readonly url: string;
-  readonly successSelector: string;
+  readonly signedIn: SignedInBy;
   readonly handleSelector: string;
+  /** 给了就从元素文字里按它抠第一组，没给取整段文字。 */
+  readonly handlePattern?: RegExp;
 }
 
 // 登录页只能看出登上了还是没登上，看不出账号过期，所以没有 expired。
@@ -34,8 +45,15 @@ export interface LoginDeps {
 export const defaultLoginPages: Readonly<Record<BrowserPlatform, BrowserPage>> = {
   xiaohongshu: {
     url: "https://creator.xiaohongshu.com/",
-    successSelector: ".user-info .user_avatar",
+    signedIn: { kind: "element", selector: ".user-info .user_avatar" },
     handleSelector: ".user-info span",
+  },
+  // 待实机核：登上后 X 跳回 /home，左下角账号切换按钮的文字里带「@账号名」。
+  x: {
+    url: "https://x.com/i/flow/login",
+    signedIn: { kind: "cookie", url: "https://x.com/", name: "auth_token" },
+    handleSelector: '[data-testid="SideNav_AccountSwitcher_Button"]',
+    handlePattern: /@([A-Za-z0-9_]{1,15})/,
   },
 };
 
@@ -70,11 +88,30 @@ const fromEnd = (end: LiveEnd): LoginResult => {
 };
 
 function signedInExpression(page: BrowserPage): string {
+  const element = page.signedIn.kind === "element" ? page.signedIn.selector : null;
+  const pattern = page.handlePattern === undefined ? null : page.handlePattern.source;
   return `(() => {
-    if (!document.querySelector(${JSON.stringify(page.successSelector)})) return null;
-    const handle = document.querySelector(${JSON.stringify(page.handleSelector)})?.textContent?.trim();
+    const element = ${JSON.stringify(element)};
+    if (element !== null && !document.querySelector(element)) return null;
+    const text = document.querySelector(${JSON.stringify(page.handleSelector)})?.textContent?.trim() ?? "";
+    const pattern = ${JSON.stringify(pattern)};
+    const handle = pattern === null ? text : (new RegExp(pattern).exec(text)?.[1] ?? "");
     return handle || null;
   })()`;
+}
+
+async function hasCookie(
+  send: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>,
+  by: SignedInBy,
+): Promise<boolean> {
+  if (by.kind !== "cookie") return true;
+  const { cookies } = await send("Network.getCookies", { urls: [by.url] });
+  return (
+    Array.isArray(cookies) &&
+    cookies.some(
+      (cookie: unknown) => typeof cookie === "object" && cookie !== null && "name" in cookie && cookie.name === by.name,
+    )
+  );
 }
 
 /**
@@ -103,11 +140,11 @@ async function watchSignedIn(
   let scriptFailed = false;
   try {
     while (!stop.aborted) {
+      const send = (method: string, params: Record<string, unknown> = {}) => connection.send(method, params, sessionId);
       // 在隔离世界里查，登录页的风控脚本钩了 querySelector 也看不到有人每 250ms 来翻一遍。
-      const response = await evaluateIsolated((method, params) => connection.send(method, params, sessionId), {
-        expression,
-        returnByValue: true,
-      }).catch(() => ({}) as Record<string, unknown>);
+      const response = (await hasCookie(send, page.signedIn).catch(() => false))
+        ? await evaluateIsolated(send, { expression, returnByValue: true }).catch(() => ({}) as Record<string, unknown>)
+        : {};
       if (stop.aborted) break;
       const result = response.result;
       const handle = typeof result === "object" && result !== null ? (result as { value?: unknown }).value : undefined;

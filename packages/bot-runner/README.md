@@ -325,12 +325,12 @@ T-2482 给老客户回一封询价邮件
 - 开源仓库（projectGroupId：group-gh）节奏：未定
 ```
 
-能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、档位和 accountId，平台和账号名沿用 `accountLabel`。prompt 取 run 开始时的账号清单；工具调用仍现取最新清单和权限。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
+能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、连接方式、档位和 accountId，连接方式按 `via` 写「接口授权」或「电脑浏览器登录」，同一个 X 号两种都连上时是两行、两个 accountId，平台和账号名沿用 `accountLabel`。prompt 取 run 开始时的账号清单；工具调用仍现取最新清单和权限。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
 
 ```
 能用的账号：
-- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs
-- X @baize_bot，只读档，不能起草，accountId：acc-x
+- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs
+- X @baize_bot，接口授权，只读档，不能起草，accountId：acc-x
 ```
 
 任务卡成员按 `名字（标签，首席）：描述` 渲染，首席成员追加 `，首席`；没有标签时写 `名字（首席）`。普通成员没有标签时省括号，描述为空时省冒号和描述。队友通讯录来自每次 prompt 的 `members`，不进入系统提示。
@@ -447,7 +447,7 @@ snapshot 的形状：
 
 ## 读 GitHub 和 X
 
-`account_read`（`src/account-read.ts`）让 Bot 以用户连上的 GitHub、X 账号的身份读平台接口。参数是 `accountId` 和平台相对路径（可带查询串），只发 GET，打到 `${config.accountsProxy.baseUrl}/<accountId>/<路径>`，唯一的凭据头是 `Authorization: Bearer <modelGateway.apiKey>`。平台令牌只在控制面的账号代理里换出来用，运行器、会话 JSONL 和模型都见不到，`packages/e2e/test/account-read.test.ts` 扫整个数据目录钉着这件事。
+`account_read`（`src/account-read.ts`）让 Bot 以用户连上的 GitHub、X 账号的身份读平台接口。只列 `via: "api"` 的号：在电脑浏览器里登录的 X 号控制面没有它的令牌，账号代理读不了，起草照样能用它。参数是 `accountId` 和平台相对路径（可带查询串），只发 GET，打到 `${config.accountsProxy.baseUrl}/<accountId>/<路径>`，唯一的凭据头是 `Authorization: Bearer <modelGateway.apiKey>`。平台令牌只在控制面的账号代理里换出来用，运行器、会话 JSONL 和模型都见不到，`packages/e2e/test/account-read.test.ts` 扫整个数据目录钉着这件事。
 
 闸门把它归 `read`，目标是账号，不弹审批。写平台一律走起草，这个工具只读。
 
@@ -457,9 +457,9 @@ snapshot 的形状：
 - 成功回平台原文。正文从 `response.body` 按流读，读到 Pi 自带 read、bash 的上限（`DEFAULT_MAX_BYTES`，50KB）再多 4 个字节就 cancel，不把整个回包读进内存。超过上限时按 UTF-8 起始字节和续字节退到最后一个完整码点截断，不拿 `�` 当边界，结尾注明「已截断：回包超过 50.0KB」，叫模型分页或缩小查询。出错回包只读前 16KB 拼原因。
 - 不跟重定向，60 秒超时，run 被中止时请求跟着断。
 
-## 小红书发布器
+## 电脑上的发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条走电脑（`via: "computer"`）的草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表 `PUBLISHERS`，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。现在两行：小红书和 X。两家共用 `publishInTab`（排队、补齐配图、后台标签页、按进度归因失败）和 `pageDriver`（等元素、点、填字、传图），各自只写自己那几步，站点差别放在 `Site`（文案里的站名、登录过期的说法、点过发布后叫用户去哪看、哪个地址算登录页）。下面先讲小红书，X 和它不同的地方在「X 发布器」一节。
 
 - **浏览器和数据目录从依赖参数来。** `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，本机和远程电脑都给，必填。账号在这个 profile 里登录（远程电脑经画面扫码），发布也只能在这里发。每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。
 - **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。旧的 `kind: "path"` 配图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
@@ -491,6 +491,30 @@ xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwe
 
 `test/publisher.test.ts` 钉住这些：前四条不需要 Chrome，其余用真 Chrome 加一个照这张表搭的假创作者中心，找不到 Chrome 时跳过。
 
+### X 发布器
+
+`publishToX` 发浏览器登录的 X 号的帖子和回复，排队、标签页、失败归因和小红书同一套。不同的地方：
+
+- **先验草稿。** 配图最多 4 张，多了回「X 一条帖子最多带 4 张图」；回复的 `replyTo.url` 必须是 `x.com` 或 `twitter.com` 的 `/<账号>/status/<数字>` 链接，统一换成 `https://x.com/i/status/<id>` 去开，别的回「X 只能回复帖子的链接」。都在碰浏览器之前判。标题不发，和接口那条路一致。
+- **发帖和回复走同一个弹窗。** 发帖开 `composeUrl`；回复开帖子页，点主帖（`tabindex="-1"` 的那条 article，不是上面的祖先帖）的回复按钮，弹出同一个编辑框。正文逐行插，行间回车，和小红书一样。图传完等预览数对上再点发布。
+- **发完看弹窗关没关。** 编辑框消失算发出去了。帖子链接从发完弹的 toast 里读 `/status/<id>`，读到就是 `externalId`；读不到回 `ok`，`url` 是 `https://x.com/home`，`externalId` 为 null。没去时间线上翻，因为 `publish_draft` 不带账号名，翻到的最新一条不一定是这条。
+- **登录过期。** 每轮等待先看地址，落在 `/login` 或 `/i/flow/login` 就是 `login_expired`。
+
+| 表项            | 取值                                                                        | 核实过没有     |
+| --------------- | --------------------------------------------------------------------------- | -------------- |
+| `composeUrl`    | `https://x.com/compose/post`                                                | 没有，待实机核 |
+| `manageUrl`     | `https://x.com/home`                                                        | 没有           |
+| `isLoginPage`   | 路径以 `/login` 或 `/i/flow/login` 开头                                     | 没有           |
+| `statusPage`    | `https://x.com/i/status/<id>`                                               | 没有           |
+| `replyButton`   | `article[data-testid="tweet"][tabindex="-1"] [data-testid="reply"]`         | 没有，待实机核 |
+| `bodyEditor`    | `[role="dialog"] [data-testid="tweetTextarea_0"]`                           | 没有，待实机核 |
+| `imageInput`    | `[role="dialog"] input[data-testid="fileInput"]`                            | 没有，待实机核 |
+| `imagePreview`  | `[role="dialog"] [data-testid="attachments"] img`，每传完一张多一个         | 没有，待实机核 |
+| `publishButton` | `[role="dialog"] [data-testid="tweetButton"]`，排除 `aria-disabled="true"` | 没有，待实机核 |
+| `postedLink`    | `[data-testid="toast"] a[href*="/status/"]`，id 按 `/status/(\d+)` 抠      | 没有，待实机核 |
+
+`data-testid` 一类的名字来自 X 网页版常见的写法，没有对着真页面核过。`test/x-publisher.test.ts` 用真 Chrome 加一个照这张表搭的假 X 钉住：带图分段发帖、回复点中主帖、登录过期、按钮找不到报 `page_changed`、读不到 toast 回主页链接。
+
 ## 草稿和内容计划
 
 Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具挂给所有 Bot，主助理和队员都能起草，三个名字（`DRAFT_TOOL_NAMES`）对工具连接一律保留。三件都不走审批，闸门只看账号档，见「统一闸门和沙箱」。
@@ -504,7 +528,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
-- **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，在读图之前判。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
+- **接口授权的号起草先不带图。** 按账号的 `via` 判：`api` 的号 `images` 非空就抛错，在读图之前判；`computer` 的号（小红书、浏览器登录的 X）能带图，浏览器登录的 X 多于 4 张同样在读图之前抛错，数和控制面发布器表的 `maxImages` 一致，控制面起草和批准时也按它拒。同平台两种号都有、用户没指定时，工具描述叫模型用接口授权的那个。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
 - **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。MIME 按 PNG、JPEG、WebP、GIF 的文件头识别，不信扩展名，拷贝扩展名按 MIME 固定。拷贝后把同一份字节 PUT 到 `${config.hub.baseUrl}/attachments?botId=&groupId=`，声明 `x-baize-sha256`，Bearer 每次现取当前网关 key。`DraftSpec` 只记 `{kind: "attachment", attachmentId, sha256, mime}`。上传失败时抛「配图传到白泽失败，过一会儿再起草」，草稿、改稿或计划不上行；服务器正文和网络异常不拼进工具错误，避免泄露 Bearer 或 URL 查询串。之后工作目录里的原图怎么改都不影响草稿，另一台电脑的发布器能下载同一份字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 

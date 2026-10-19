@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Computer } from "@baize/shared";
-import { beforeChinese, computerName } from "./content.js";
+import { beforeChinese, blockedTier, computerName } from "./content.js";
 
 const computer = (kind: Computer["kind"], host: string | null) =>
   Computer.parse({
@@ -32,5 +32,21 @@ describe("电脑名后面接汉字", () => {
   it("名字以汉字结尾，不加空格", () => {
     expect(beforeChinese(computerName(computer("remote", "办公室")))).toBe("远程电脑 办公室");
     expect(beforeChinese("账号所在的电脑")).toBe("账号所在的电脑");
+  });
+});
+
+describe("哪些号不能挂「可直接发布」", () => {
+  it("按连接方式认：电脑浏览器登录的 X 号不行，接口授权的 X 号可以", () => {
+    expect(blockedTier({ platform: "x", via: "computer" }, "direct_publish")).toBe(
+      "电脑浏览器发帖每条先给你看，不开直接发布",
+    );
+    expect(blockedTier({ platform: "x", via: "api" }, "direct_publish")).toBeNull();
+  });
+
+  it("小红书写平台自己的规矩，别的档位都不拦", () => {
+    expect(blockedTier({ platform: "xiaohongshu", via: "computer" }, "direct_publish")).toBe(
+      "平台 2026-03-10 起封 AI 托管账号",
+    );
+    expect(blockedTier({ platform: "x", via: "computer" }, "confirm_publish")).toBeNull();
   });
 });

@@ -19,6 +19,7 @@ import {
   type Message,
   type Platform,
   type PublishFailureReason,
+  type PublishVia,
   type RunId,
 } from "@baize/shared";
 import {
@@ -40,7 +41,7 @@ import type { Db } from "../db/client.js";
 import { accounts, agentOutbox, bots, contentPlans, drafts, publications } from "../db/schema.js";
 import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
-import { COMPUTER_PLATFORMS } from "../publish/platforms.js";
+import { publisherFor } from "../publish/platforms.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
 import { recordApprovedEdit } from "./brand.js";
 import { appendMessage, type Tx } from "./messages.js";
@@ -72,12 +73,11 @@ export function contentHash(input: {
     .digest("hex");
 }
 
-/** GitHub 和 X 的发布器只会发文字，带图的草稿一律不收，免得人批了一张发出去没图的卡。 */
-const TEXT_ONLY: ReadonlySet<Platform> = new Set(["github", "x"]);
-
-export function contentRefusal(platform: Platform, content: DraftContent): string | null {
-  if (content.images.length > 0 && TEXT_ONLY.has(platform)) return "GitHub 和 X 的草稿不能带图";
-  return null;
+/** 图数超过发布器能带的一律不收，免得人批了一张发不出去或发出去少图的卡。走接口的 GitHub、X 只发文字。 */
+export function contentRefusal(account: { platform: Platform; via: PublishVia }, content: DraftContent): string | null {
+  const { maxImages } = publisherFor(account.platform, account.via);
+  if (content.images.length <= maxImages) return null;
+  return maxImages === 0 ? "走接口授权的 GitHub、X 账号的草稿不能带图" : `这个账号的草稿最多带 ${maxImages} 张图`;
 }
 
 function kindRefusal(before: DraftContent, after: DraftContent): string | null {
@@ -104,7 +104,7 @@ export type DraftSource = {
 async function admit(db: Db | Tx, ownerId: UserId, spec: DraftSpec) {
   const account = await findAccountForDraft(db, ownerId, spec.accountId);
   if (account === null || account.tier === "read_only") return null;
-  if (contentRefusal(account.platform, spec.content) !== null) return null;
+  if (contentRefusal(account, spec.content) !== null) return null;
   return account;
 }
 
@@ -220,15 +220,18 @@ export async function editDraft(
 ): Promise<Draft | null> {
   return db.transaction(async (tx) => {
     if (!(await lockOpenRun(tx, owner))) return null;
-    const [current] = await tx
-      .select()
+    const [locked] = await tx
+      .select({ draft: drafts, via: accounts.via })
       .from(drafts)
+      .innerJoin(accounts, eq(accounts.id, drafts.accountId))
       .where(and(eq(drafts.id, draftId), eq(drafts.ownerId, owner.ownerId), eq(drafts.groupId, owner.groupId)))
       .limit(1)
-      .for("update");
-    if (current === undefined || current.status === "publishing" || current.status === "published") return null;
+      .for("update", { of: drafts });
+    if (locked === undefined) return null;
+    const current = locked.draft;
+    if (current.status === "publishing" || current.status === "published") return null;
     if (kindRefusal(current.content, content) !== null) return null;
-    if (contentRefusal(current.platform, content) !== null) return null;
+    if (contentRefusal({ platform: current.platform, via: locked.via }, content) !== null) return null;
     const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content });
     const reopened =
       hash === current.contentHash
@@ -261,13 +264,15 @@ export async function decideDraft(
   decision: DecideDraftRequest,
 ): Promise<DecideResult<{ draft: Draft; brand: BrandBook | null }>> {
   return db.transaction(async (tx) => {
-    const [current] = await tx
-      .select()
+    const [locked] = await tx
+      .select({ draft: drafts, via: accounts.via })
       .from(drafts)
+      .innerJoin(accounts, eq(accounts.id, drafts.accountId))
       .where(and(eq(drafts.id, draftId), eq(drafts.ownerId, ownerId)))
       .limit(1)
-      .for("update");
-    if (current === undefined) return { kind: "not_found" };
+      .for("update", { of: drafts });
+    if (locked === undefined) return { kind: "not_found" };
+    const current = locked.draft;
     if (current.status !== "pending") return { kind: "already_decided" };
     const now = new Date();
     if (decision.decision === "return") {
@@ -280,7 +285,7 @@ export async function decideDraft(
         ? { kind: "already_decided" }
         : { kind: "ok", value: { draft: toDraft(row), brand: null } };
     }
-    const approved = approval(current, decision.content, now);
+    const approved = approval(current, locked.via, decision.content, now);
     if (approved.kind === "invalid") return approved;
     const [row] = await tx
       .update(drafts)
@@ -293,9 +298,9 @@ export async function decideDraft(
   });
 }
 
-function approval(current: DraftRow, content: DraftContent | undefined, now: Date) {
+function approval(current: DraftRow, via: PublishVia, content: DraftContent | undefined, now: Date) {
   const next = content ?? current.content;
-  const refusal = kindRefusal(current.content, next) ?? contentRefusal(current.platform, next);
+  const refusal = kindRefusal(current.content, next) ?? contentRefusal({ platform: current.platform, via }, next);
   if (refusal !== null) return { kind: "invalid" as const, error: refusal };
   const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content: next });
   const edit = editOf(current.content, next, now);
@@ -359,12 +364,14 @@ export async function approvePlan(
       const now = new Date();
       const claimed = await claimPlan(tx, ownerId, planId, "approved", now);
       if (claimed.kind !== "ok") return claimed;
-      const rows = await tx
-        .select()
+      const locked = await tx
+        .select({ draft: drafts, via: accounts.via })
         .from(drafts)
+        .innerJoin(accounts, eq(accounts.id, drafts.accountId))
         .where(eq(drafts.planId, planId))
         .orderBy(asc(drafts.createdAt), asc(drafts.id))
-        .for("update");
+        .for("update", { of: drafts });
+      const rows = locked.map(({ draft }) => draft);
       const byId = new Map(rows.map((row) => [row.id, row]));
       const contentFor = new Map<string, DraftContent>();
       for (const edit of edits) {
@@ -373,9 +380,9 @@ export async function approvePlan(
       }
       const changed: Draft[] = [];
       let brand: BrandBook | null = null;
-      for (const row of rows) {
+      for (const { draft: row, via } of locked) {
         if (row.status !== "pending") continue;
-        const approved = approval(row, contentFor.get(row.id), now);
+        const approved = approval(row, via, contentFor.get(row.id), now);
         if (approved.kind === "invalid") throw new Refused(approved.error);
         const [updated] = await tx
           .update(drafts)
@@ -470,29 +477,27 @@ export type ClaimedDraft = {
   readonly draft: Draft;
   readonly ownerId: UserId;
   readonly handle: string | null;
+  readonly via: PublishVia;
   readonly computerId: ComputerId;
   readonly claimedAt: Date;
 };
 
 /**
  * 抢这一轮该发的草稿：已批、指纹还是批准时的那个、到点或没定时间、账号档位允许自动发。
- * 走电脑的平台只抢账号所在电脑在线的。一条 UPDATE 带 RETURNING，两个进程同时抢，行锁让后到的那个
+ * 走电脑的账号只抢所在电脑在线的。一条 UPDATE 带 RETURNING，两个进程同时抢，行锁让后到的那个
  * 重新判一次 status，已经是 publishing 就不再命中。
  */
 export async function claimDueDrafts(
   db: Db,
   now: Date,
-  computerPlatforms: readonly Platform[],
   onlineComputers: readonly ComputerId[],
   onClaim?: (tx: Tx, claimed: readonly ClaimedDraft[]) => Promise<void>,
 ): Promise<ClaimedDraft[]> {
   return db.transaction(async (tx) => {
     const reachable =
-      computerPlatforms.length === 0
-        ? sql`true`
-        : onlineComputers.length === 0
-          ? notInArray(drafts.platform, [...computerPlatforms])
-          : or(notInArray(drafts.platform, [...computerPlatforms]), inArray(accounts.computerId, [...onlineComputers]));
+      onlineComputers.length === 0
+        ? eq(accounts.via, "api")
+        : or(eq(accounts.via, "api"), inArray(accounts.computerId, [...onlineComputers]));
     const claimed = await tx
       .update(drafts)
       // 认领时刻由这条语句自己产生：now 是这一轮开始时取的，抢到行的时候可能已经过去不少。
@@ -526,7 +531,7 @@ export async function claimDueDrafts(
       .returning({ id: drafts.id });
     if (claimed.length === 0) return [];
     const rows = await tx
-      .select({ draft: drafts, handle: accounts.handle, computerId: accounts.computerId })
+      .select({ draft: drafts, handle: accounts.handle, via: accounts.via, computerId: accounts.computerId })
       .from(drafts)
       .innerJoin(accounts, eq(accounts.id, drafts.accountId))
       .where(
@@ -542,6 +547,7 @@ export async function claimDueDrafts(
         draft: toDraft(row.draft),
         ownerId: UserId.parse(row.draft.ownerId),
         handle: row.handle,
+        via: row.via,
         computerId: ComputerId.parse(row.computerId),
         claimedAt: row.draft.claimedAt,
       };
@@ -559,7 +565,7 @@ export type SettleScope = {
   readonly draftId: DraftId;
   /** 只结算这一次认领。发布循环用自己抢到时记的时刻，电脑报上来的用 publish_result 带回的 attempt。 */
   readonly claimedAt?: Date;
-  /** 电脑报上来的结果只认走电脑的平台、这台电脑上的账号、这台电脑主人的草稿。走接口的草稿只有发布循环自己能结算。 */
+  /** 电脑报上来的结果只认这台电脑上走电脑的账号、这台电脑主人的草稿。走接口的草稿只有发布循环自己能结算。 */
   readonly computer?: { readonly ownerId: UserId; readonly computerId: ComputerId };
 };
 
@@ -572,10 +578,9 @@ function settleWhere(scope: SettleScope): SQL | undefined {
       ? undefined
       : and(
           eq(drafts.ownerId, scope.computer.ownerId),
-          inArray(drafts.platform, [...COMPUTER_PLATFORMS]),
           inArray(
             drafts.accountId,
-            sql`(select ${accounts.id} from ${accounts} where ${accounts.computerId} = ${scope.computer.computerId})`,
+            sql`(select ${accounts.id} from ${accounts} where ${accounts.computerId} = ${scope.computer.computerId} and ${accounts.via} = 'computer')`,
           ),
         ),
   );

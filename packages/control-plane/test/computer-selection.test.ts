@@ -24,6 +24,7 @@ const computer = (kind: "local" | "remote", status: "online" | "sleeping"): Comp
 const account = AccountConfig.parse({
   id: AccountId.parse("account-local"),
   platform: "xiaohongshu",
+  via: "computer",
   handle: "白泽工厂日记",
   tier: "confirm_publish",
   login: "valid",

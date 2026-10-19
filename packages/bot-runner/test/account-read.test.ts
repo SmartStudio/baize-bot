@@ -11,14 +11,31 @@ import {
 const GITHUB = AccountConfig.parse({
   id: "acc-github",
   platform: "github",
+  via: "api",
   handle: "baize-dev",
   tier: "draft",
   login: "valid",
 });
-const X = AccountConfig.parse({ id: "acc-x", platform: "x", handle: "baize_x", tier: "read_only", login: "valid" });
+const X = AccountConfig.parse({
+  id: "acc-x",
+  platform: "x",
+  via: "api",
+  handle: "baize_x",
+  tier: "read_only",
+  login: "valid",
+});
+const X_WEB = AccountConfig.parse({
+  id: "acc-x-web",
+  platform: "x",
+  via: "computer",
+  handle: "baize_x",
+  tier: "draft",
+  login: "valid",
+});
 const XHS = AccountConfig.parse({
   id: "acc-xhs",
   platform: "xiaohongshu",
+  via: "computer",
   handle: "白泽",
   tier: "draft",
   login: "valid",
@@ -68,14 +85,14 @@ describe("account_read 打账号代理", () => {
     reply = emptyJson;
   });
 
-  const live = (accounts: readonly AccountConfig[] = [GITHUB, X, XHS]): AccountReadLive => ({
+  const live = (accounts: readonly AccountConfig[] = [GITHUB, X, X_WEB, XHS]): AccountReadLive => ({
     accounts,
     proxy: { baseUrl },
     gateway: { baseUrl: "http://127.0.0.1:9/gateway/v1", apiKey: GATEWAY_KEY },
   });
 
   const tool = (current: () => AccountReadLive = () => live()) =>
-    createAccountReadTool({ described: [GITHUB, X, XHS], live: current });
+    createAccountReadTool({ described: [GITHUB, X, X_WEB, XHS], live: current });
 
   const call = async (params: { accountId: string; path: string }, current?: () => AccountReadLive) => {
     const result = await tool(current).execute("call-1", params as never, undefined, undefined, undefined as never);
@@ -88,6 +105,7 @@ describe("account_read 打账号代理", () => {
     expect(description).toContain("GitHub @baize-dev，accountId：acc-github");
     expect(description).toContain("X @baize_x，accountId：acc-x");
     expect(description).not.toContain("acc-xhs");
+    expect(description, "浏览器登录的 X 号没有接口令牌，不列").not.toContain("acc-x-web");
   });
 
   it("GET 到 <baseUrl>/<accountId>/<平台路径>，查询串原样带上，请求头只有网关 key 这一把凭据，回平台原文", async () => {
@@ -156,7 +174,10 @@ describe("account_read 打账号代理", () => {
       "没有 accountId 是「acc-someone-else」的账号。能读的号：GitHub @baize-dev（acc-github）、X @baize_x（acc-x）。",
     );
     expect(await errorOf(call({ accountId: "acc-xhs", path: "user" }))).toContain(
-      "小红书 @白泽 不是 GitHub 或 X 的号，这个工具读不了",
+      "小红书 @白泽 不是接口授权的 GitHub 或 X 的号，这个工具读不了",
+    );
+    expect(await errorOf(call({ accountId: "acc-x-web", path: "2/users/me" }))).toContain(
+      "X @baize_x 不是接口授权的 GitHub 或 X 的号，这个工具读不了",
     );
     expect(await errorOf(call({ accountId: "acc-github", path: "../acc-other/user" }))).toContain(
       "跳出了这个账号的接口范围",
