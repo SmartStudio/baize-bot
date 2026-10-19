@@ -655,3 +655,37 @@
   flex-direction: column;
   gap: var(--space-4);
 }
+
+.cli-install {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-5);
+}
+
+.cli-env-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.cli-env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.cli-env-row input {
+  min-width: 0;
+  min-height: var(--control-h-lg);
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--fg-1);
+  font: var(--type-body);
+}
+
+.cli-env-add {
+  align-self: flex-start;
+}

@@ -381,6 +381,9 @@ export const MainWindow = () => {
           tools={ready.tools}
           grants={ready.grants}
           projectNames={projectNames}
+          soloGroups={Object.fromEntries(
+            ready.conversations.flatMap((item) => (item.kind === "solo" ? [[item.botId, item.groupId]] : [])),
+          )}
           accounts={Object.values(ready.content.accounts)}
           computers={ready.content.computers}
           grantsVersion={ready.todayVersion}
@@ -395,6 +398,11 @@ export const MainWindow = () => {
           onLoadComputers={actions.loadComputers}
           onChangeTier={actions.updateAccountTier}
           onChange={actions.updateSettings}
+          onAskBot={async (target, text) => {
+            await actions.sendMessage(target, text);
+            setOverlay("none");
+            openGroupPage(target);
+          }}
           onLogout={() => void actions.logout()}
           onClose={() => setOverlay("none")}
         />
