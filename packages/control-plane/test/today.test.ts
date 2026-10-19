@@ -6,6 +6,7 @@ import {
   TodayResponse,
   type BotId,
   type GroupId,
+  type PublishVia,
   type UserId,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -83,6 +84,7 @@ async function createAccount(owner: Owner, login: "none" | "valid" | "expired" =
     ownerId: owner.userId,
     computerId: owner.computer.computerId,
     platform: "x",
+    via: "api",
     handle: `@${accountId}`,
     login,
     tier: "confirm_publish",
@@ -98,6 +100,7 @@ async function seedFourColumns(owner: Owner): Promise<{ readonly nestedDraftId: 
     ownerId: owner.userId,
     computerId: owner.computer.computerId,
     platform: "x",
+    via: "api",
     handle: "@today",
     login: "expired",
     tier: "confirm_publish",
@@ -577,13 +580,19 @@ const accountRowsOf = (today: TodayResponse, accountId: string) =>
   today.pending.filter((item) => item.kind === "account" && item.account.id === accountId);
 
 describe("首页的账号行", () => {
-  async function placeholderOf(owner: Owner, platform: "xiaohongshu" | "x", createdAt: Date): Promise<string> {
+  async function placeholderOf(
+    owner: Owner,
+    platform: "xiaohongshu" | "x",
+    createdAt: Date,
+    via: PublishVia = platform === "xiaohongshu" ? "computer" : "api",
+  ): Promise<string> {
     const accountId = newId();
     await database.db.insert(accounts).values({
       id: accountId,
       ownerId: owner.userId,
       computerId: owner.computer.computerId,
       platform,
+      via,
       handle: null,
       login: "none",
       tier: "confirm_publish",
@@ -657,7 +666,17 @@ describe("首页的账号行", () => {
     expect(today.pending).toEqual([]);
   });
 
-  it("OAuth 平台的没登录号即使有待确认的稿子也不出行", async () => {
+  it("在电脑浏览器里登录的 X 占位有待确认的稿子就出行", async () => {
+    const owner = await ownerWithBot();
+    const now = Date.now();
+    const accountId = await placeholderOf(owner, "x", new Date(now - 60_000), "computer");
+    await draftOn(owner, accountId, { platform: "x", createdAt: new Date(now - 5_000) });
+
+    const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
+    expect(accountRowsOf(today, accountId), "X 的浏览器占位和小红书一样等人登录").toHaveLength(1);
+  });
+
+  it("授权连上的没登录号即使有待确认的稿子也不出行", async () => {
     const owner = await ownerWithBot();
     const now = Date.now();
     const accountId = await placeholderOf(owner, "x", new Date(now - 60_000));

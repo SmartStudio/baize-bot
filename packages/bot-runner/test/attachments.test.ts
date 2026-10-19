@@ -92,6 +92,7 @@ async function setup(bytes = PNG, filename = "cover.dat") {
       {
         id: AccountId.parse("acc-xhs"),
         platform: "xiaohongshu",
+        via: "computer",
         handle: "小满",
         login: "valid",
         tier: "confirm_publish",

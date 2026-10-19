@@ -1,4 +1,4 @@
-import type { BrowserPlatform, DraftContent, Platform, PublishFailureReason } from "@baize/shared";
+import type { BrowserPlatform, DraftContent, Platform, PublishFailureReason, PublishVia } from "@baize/shared";
 
 /** externalId 为 null：电脑那边发出去了，但没读到平台上的 id。走接口的一定有。 */
 export type Published = { readonly url: string; readonly externalId: string | null };
@@ -27,24 +27,29 @@ export type ApiPublishInput = {
   readonly baseUrl: string;
 };
 
+export type ApiPublisher = {
+  readonly via: "api";
+  /** 一条最多带几张图，0 是只发文字。 */
+  readonly maxImages: number;
+  readonly baseUrl: (bases: ApiBases) => string;
+  publish(input: ApiPublishInput): Promise<Published>;
+};
+
+export type ComputerPublisher = {
+  readonly via: "computer";
+  readonly maxImages: number;
+  readonly platform: BrowserPlatform;
+  /** 电脑报上来的链接只认这个域名和它的子域。 */
+  readonly host: string;
+  /** 报上来的链接不可信时落账用这个页面，用户去那里找刚发的那条。 */
+  readonly manageUrl: string;
+};
+
 /**
- * 每个平台怎么发。走接口的在控制面里拿令牌直接发；走电脑的下发 publish_draft 给账号所在的电脑，
- * 等电脑报 publish_result 回来。发布循环只按这张表分派，加一个平台就是加一行。
+ * 一个账号怎么发由（平台，连接方式）定。走接口的在控制面里拿令牌直接发；走电脑的下发 publish_draft 给账号所在的电脑，
+ * 等电脑报 publish_result 回来。发布循环只按这张表分派，加一个平台或一种连接方式就是加一格。
  */
-export type PlatformPublisher =
-  | {
-      readonly via: "api";
-      readonly baseUrl: (bases: ApiBases) => string;
-      publish(input: ApiPublishInput): Promise<Published>;
-    }
-  | {
-      readonly via: "computer";
-      readonly platform: BrowserPlatform;
-      /** 电脑报上来的链接只认这个域名和它的子域。 */
-      readonly host: string;
-      /** 报上来的链接不可信时落账用这个页面，用户去那里找刚发的那条。 */
-      readonly manageUrl: string;
-    };
+export type PlatformPublisher = ApiPublisher | ComputerPublisher;
 
 export type ApiBases = { readonly githubApiBaseUrl: string; readonly xApiBaseUrl: string };
 
@@ -191,25 +196,44 @@ async function publishX({ content, handle, token, baseUrl }: ApiPublishInput): P
   return { url: `https://x.com/${handle ?? "i/web"}/status/${id}`, externalId: id };
 }
 
-export const PUBLISHERS: Record<Platform, PlatformPublisher> = {
-  github: { via: "api", baseUrl: (bases) => bases.githubApiBaseUrl, publish: publishGithub },
-  x: { via: "api", baseUrl: (bases) => bases.xApiBaseUrl, publish: publishX },
+type Publishers = {
+  readonly [P in Platform]: { readonly api?: ApiPublisher; readonly computer?: ComputerPublisher & { platform: P } };
+};
+
+const PUBLISHERS: Publishers = {
+  github: { api: { via: "api", maxImages: 0, baseUrl: (bases) => bases.githubApiBaseUrl, publish: publishGithub } },
+  x: {
+    api: { via: "api", maxImages: 0, baseUrl: (bases) => bases.xApiBaseUrl, publish: publishX },
+    // 只认 x.com：发布器开的就是 x.com 的发帖页，发完读的也是这个页面上的链接；twitter.com 早已整站跳到 x.com，
+    // 页面上读到 twitter.com 的链接说明页面不是发布器以为的那一页，按不可信处理落管理页。
+    computer: { via: "computer", maxImages: 4, platform: "x", host: "x.com", manageUrl: "https://x.com/home" },
+  },
   xiaohongshu: {
-    via: "computer",
-    platform: "xiaohongshu",
-    host: "xiaohongshu.com",
-    manageUrl: "https://creator.xiaohongshu.com/new/note-manager",
+    computer: {
+      via: "computer",
+      maxImages: 9,
+      platform: "xiaohongshu",
+      host: "xiaohongshu.com",
+      manageUrl: "https://creator.xiaohongshu.com/new/note-manager",
+    },
   },
 };
+
+/** 库约束（accounts_via_ck、accounts_via_api_ck）保证账号行上的组合在表里有一格；查不到是代码和库对不上。 */
+export function publisherFor<V extends PublishVia>(platform: Platform, via: V): Extract<PlatformPublisher, { via: V }> {
+  const publisher: PlatformPublisher | undefined = PUBLISHERS[platform][via];
+  if (publisher === undefined) throw new Error(`${platform} 没有 ${via} 的发布器`);
+  return publisher as Extract<PlatformPublisher, { via: V }>;
+}
 
 /**
  * 电脑报上来的链接是发布器从页面上读的，页面说什么它就报什么。只认 https、默认端口、平台自己的域名或子域，
  * 别的照样算发出去了，链接换成平台的管理页：结果本身可信（认领标识对得上），只是这个链接不能直接给用户点。
  * 放行的落 WHATWG 规范化后的串：判定用的是这套解析，原串换一个解析器（比如 `\@` 这种写法）可能解析出别的主机。
+ * 电脑报上来的只结算走电脑的账号（SettleScope.computer），所以这里只查电脑那一格。
  */
 export function trustedPageUrl(platform: Platform, reported: string): string {
-  const publisher = PUBLISHERS[platform];
-  if (publisher.via !== "computer") return reported;
+  const publisher = publisherFor(platform, "computer");
   const url = URL.parse(reported);
   const trusted =
     url !== null &&
@@ -218,7 +242,3 @@ export function trustedPageUrl(platform: Platform, reported: string): string {
     (url.hostname === publisher.host || url.hostname.endsWith(`.${publisher.host}`));
   return trusted ? url.href : publisher.manageUrl;
 }
-
-export const COMPUTER_PLATFORMS: readonly Platform[] = (Object.keys(PUBLISHERS) as Platform[]).filter(
-  (platform) => PUBLISHERS[platform].via === "computer",
-);

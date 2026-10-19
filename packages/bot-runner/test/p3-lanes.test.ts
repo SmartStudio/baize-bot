@@ -1382,6 +1382,7 @@ describe("分道与租约合并", () => {
           {
             id: AccountId.parse("account-hub"),
             platform: "xiaohongshu",
+            via: "computer",
             handle: "测试",
             login: "valid",
             tier: "confirm_publish",

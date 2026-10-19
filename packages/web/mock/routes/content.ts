@@ -74,7 +74,7 @@ export const contentRoutes: Route = async ({ req, res, path, method, push }) => 
 
   if (method === "POST" && path === "/api/accounts") {
     const parsed = CreateAccountRequest.safeParse(await readBody(req));
-    if (!parsed.success) send(res, 400, { error: "只能加小红书账号，并选一台电脑" });
+    if (!parsed.success) send(res, 400, { error: "只能加电脑浏览器登录的平台（小红书、X），并选一台电脑" });
     else {
       const outcome = createAccount(parsed.data);
       if (!outcome.ok) send(res, outcome.status, { error: outcome.error });

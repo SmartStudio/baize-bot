@@ -10,6 +10,7 @@ import {
   LoginFailure,
   type CreateAccountRequest,
   type OAuthPlatform,
+  type Platform,
   type DraftContent,
   type Message,
   type Publication,
@@ -35,6 +36,8 @@ type PlanDecision =
 export type Outcome<T> = { ok: true; value: T } | { ok: false; status: 404 | 409 | 400; error: string };
 
 const now = (): string => new Date().toISOString();
+
+const PLATFORM_NAME: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 
 export const computersOf = () =>
   ComputerListResponse.parse({
@@ -129,19 +132,21 @@ export const settlePlan = (id: string, decision: PlanDecision): Outcome<{ plan: 
 export const setAccountTier = (id: string, tier: AccountTier): Outcome<Account> => {
   const account = accounts.get(id);
   if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
-  if (account.platform === "xiaohongshu" && tier === "direct_publish") {
-    return { ok: false, status: 400, error: "小红书账号不能设成可直接发布" };
+  if (account.via === "computer" && tier === "direct_publish") {
+    return { ok: false, status: 400, error: "电脑浏览器登录的账号不能设成可直接发布" };
   }
   const next = Account.parse({ ...account, tier });
   accounts.set(next.id, next);
   return { ok: true, value: next };
 };
 
-// 照控制面：一个人每个平台最多一个未登录占位，重复加回已有那行，挂到这次选的电脑上。
+// 照控制面：建的是电脑浏览器登录的号。一个人每个平台最多一个未登录占位，重复加回已有那行，挂到这次选的电脑上。
 export const createAccount = (request: CreateAccountRequest): Outcome<{ account: Account; created: boolean }> => {
   const computer = computersOf().computers.find((c) => c.id === request.computerId);
   if (computer === undefined) return { ok: false, status: 404, error: "没有这台电脑" };
-  const existing = [...accounts.values()].find((a) => a.platform === request.platform && a.login === "none");
+  const existing = [...accounts.values()].find(
+    (a) => a.platform === request.platform && a.via === "computer" && a.login === "none",
+  );
   if (existing !== undefined) {
     const moved = Account.parse({ ...existing, computerId: request.computerId });
     accounts.set(moved.id, moved);
@@ -153,6 +158,7 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
     ownerId: user.id,
     computerId: request.computerId,
     platform: request.platform,
+    via: "computer",
     handle: null,
     tier: "confirm_publish",
     login: "none",
@@ -164,13 +170,15 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
   return { ok: true, value: { account: next, created: true } };
 };
 
-// 照控制面授权回调：不去平台，当平台认出的是固定的 mock_<平台> 这个号。同一平台同一 handle 已有的行挪到
+// 照控制面授权回调：不去平台，当平台认出的是固定的 mock_<平台> 这个号。同一平台同一 handle 已有的接口授权行挪到
 // 远程电脑、登录记回 valid；没有就在远程电脑新建（有远程挂远程）。
 export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
   const handle = `mock_${platform}`;
   const remote = computersOf().computers.find((c) => c.kind === "remote") ?? computersOf().computers[0];
   if (remote === undefined) throw new Error("mock 里至少有一台电脑");
-  const existing = [...accounts.values()].find((a) => a.platform === platform && a.handle === handle);
+  const existing = [...accounts.values()].find(
+    (a) => a.platform === platform && a.via === "api" && a.handle === handle,
+  );
   const stamp = now();
   const next = Account.parse(
     existing === undefined
@@ -179,6 +187,7 @@ export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
           ownerId: user.id,
           computerId: remote.id,
           platform,
+          via: "api",
           handle,
           tier: "confirm_publish",
           login: "valid",
@@ -202,7 +211,7 @@ export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
 export const loginAccount = (id: string, attempt: string): Outcome<{ account: Account; attempt: string }> => {
   const account = accounts.get(id);
   if (account === undefined) return { ok: false, status: 404, error: "没有这个账号" };
-  if (account.platform !== "xiaohongshu") return { ok: false, status: 400, error: "这个平台不走浏览器登录" };
+  if (account.via !== "computer") return { ok: false, status: 400, error: "这个账号不是在电脑浏览器里登录的" };
   if ((computerStatus.get(account.computerId) ?? "online") !== "online") {
     return { ok: false, status: 409, error: "账号所在的电脑不在线，打开电脑上的白泽后再点登录" };
   }
@@ -219,9 +228,9 @@ export const LoginState = z.discriminatedUnion("login", [
 ]);
 export type LoginState = z.infer<typeof LoginState>;
 
-const LOGIN_FAILURE_NOTICE: Record<LoginFailure, string> = {
-  window_failed: "小红书的登录窗口出错或被关掉了，账号状态没变，可以再点一次登录",
-  timed_out: "小红书的登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次登录",
+const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> = {
+  window_failed: (platform) => `${platform}的登录窗口出错或被关掉了，账号状态没变，可以再点一次登录`,
+  timed_out: (platform) => `${platform}的登录窗口开了很久还没登上，已经收起，账号状态没变，可以再点一次登录`,
 };
 
 export const reportLoginState = (
@@ -240,7 +249,11 @@ export const reportLoginState = (
     accounts.set(traced.id, traced);
     return {
       ok: true,
-      value: { account: traced, notice: LOGIN_FAILURE_NOTICE[state.reason], failed: { attempt, reason: state.reason } },
+      value: {
+        account: traced,
+        notice: LOGIN_FAILURE_NOTICE[state.reason](PLATFORM_NAME[account.platform]),
+        failed: { attempt, reason: state.reason },
+      },
     };
   }
   if (state.login === "expired" && account.login === "expired")
@@ -255,7 +268,7 @@ export const reportLoginState = (
   accounts.set(next.id, next);
   const notice =
     state.login === "expired"
-      ? `小红书账号「${next.handle ?? ""}」登录过期了，这个账号的稿子先不发，到账号页重新登录`
+      ? `${PLATFORM_NAME[next.platform]}账号「${next.handle ?? ""}」登录过期了，这个账号的稿子先不发，到账号页重新登录`
       : null;
   return { ok: true, value: { account: next, notice, failed: null } };
 };

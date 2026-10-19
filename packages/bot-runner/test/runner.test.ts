@@ -5950,7 +5950,7 @@ describe("运行器的主助理", () => {
 没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；
 用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。
 
-往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。
+往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。在电脑浏览器里登录过的平台（小红书、X）也走草稿，批了由电脑上的浏览器发，不用让用户去配接口授权。
 
 存下会做的活：一件活要是用了三次以上工具才做完，收尾时用 propose_skill 把刚才的步骤写成清单，问用户存不存。一次运行最多提一次，用户不答也别再提。
 </addendum>
@@ -7036,7 +7036,8 @@ const accountOf = (
   platform: AccountConfig["platform"],
   handle: string | null,
   tier: AccountConfig["tier"],
-): AccountConfig => ({ id: AccountId.parse(id), platform, handle, tier, login: "valid" });
+  via: AccountConfig["via"] = platform === "xiaohongshu" ? "computer" : "api",
+): AccountConfig => ({ id: AccountId.parse(id), platform, via, handle, tier, login: "valid" });
 
 /** 配图的路径要在建 harness 之前写进脚本，所以先把数据目录和 bot-1 的工作目录建好。 */
 const botWorkDir = (): { readonly dataDir: string; readonly workDir: string } => {
@@ -7184,7 +7185,7 @@ describe("运行器的草稿", () => {
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("GitHub 的草稿先不带图");
+    expect(seen.toolResults.join("")).toContain("GitHub 接口授权的号起草先不带图");
   });
 
   it("小红书草稿可以带图，GitHub 草稿不带图照常建", async () => {
@@ -7212,6 +7213,42 @@ describe("运行器的草稿", () => {
       },
       { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
     ]);
+  });
+
+  it("电脑浏览器登录的 X 号最多带 4 张图：5 张报错不发上行，4 张照常建", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+    const xBrowser = accountOf("acc-x-browser", "x", "baize_bot", "confirm_publish", "computer");
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: [...ACCOUNTS, xBrowser],
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "五张",
+          callTool("create_draft", {
+            accountId: "acc-x-browser",
+            content: { kind: "post", text: "五张图", images: Array.from({ length: 5 }, () => IMAGE) },
+          }),
+        ],
+        [
+          "四张",
+          callTool("create_draft", {
+            accountId: "acc-x-browser",
+            content: { kind: "post", text: "四张图", images: Array.from({ length: 4 }, () => IMAGE) },
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "五张"));
+    expect(drafted(h), "5 张图不发上行").toEqual([]);
+    expect(seen.toolResults.join("")).toContain("X 一条最多带 4 张图");
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "四张", { groupId: "group-b" }));
+    expect(drafted(h).map((draft) => [draft.accountId, draft.content.images.length])).toEqual([["acc-x-browser", 4]]);
   });
 
   it("配图在工作目录外时报错且不发上行", async () => {
@@ -7461,7 +7498,7 @@ describe("运行器的草稿", () => {
 
     const content = requests[0]?.messages.find((message) => message.role === "user")?.content;
     expect((content as ReadonlyArray<{ text: string }>)[0]?.text, "一个账号也要列").toContain(
-      "能用的账号：\n- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
+      "能用的账号：\n- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs",
     );
     expect(drafted(h), "现在的 accountId 是必填，不因为只有一个账号就替模型补上").toEqual([]);
     expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
@@ -7519,9 +7556,9 @@ describe("运行器的草稿", () => {
     };
     const section = [
       "能用的账号：",
-      "- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
-      "- GitHub @baize-tech，可起草档，accountId：acc-gh",
-      "- X @baize_bot，只读档，不能起草，accountId：acc-x",
+      "- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs",
+      "- GitHub @baize-tech，接口授权，可起草档，accountId：acc-gh",
+      "- X @baize_bot，接口授权，只读档，不能起草，accountId：acc-x",
     ].join("\n");
 
     const withAccounts = await userText(ACCOUNTS);

@@ -647,9 +647,17 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 `accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，取库时钟 `clock_timestamp()` 而不是控制面进程时钟，建占位时等于 `created_at`，今天页过期那行的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。`login_generation` 是浏览器登录的会话代次，电脑每报一次登录成功（`markLoginValid`）加一，`valid` 重登到 `valid` 也加，它只用来对发布结果，不进 `Account`。今天页哪些账号出行见「用量、今天与通知」一节。
 
-### 加小红书账号
+### 两种连法：接口授权和电脑浏览器登录
 
-`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
+`accounts.via` 是这个号怎么连上的，`api` 是 OAuth 授权、控制面拿令牌调平台接口，`computer` 是在某台电脑的助理 Chrome 里登录、发布由那台电脑的浏览器做。小红书只有 `computer`，GitHub 只有 `api`，X 两种都有，同一个 X 号两种都连上就是两行，各自一个 accountId，表上的唯一索引和占位索引都带 `via`。库约束钉着：小红书必须是 `computer`，GitHub 必须是 `api`，`computer` 的号不能是 `direct_publish` 档。可直接发布等于不经人看就让 Bot 用这台电脑上的登录态往外发，浏览器发帖又可能被平台当成自动化操作，所以 `PATCH` 改档到 `direct_publish` 回 400，`setAccountTier` 按 `via` 判，不按平台。
+
+建在哪由入口决定，不由平台决定：OAuth 回调和 `account-add` 建 `api`，`POST /api/accounts` 建 `computer`。按电脑登录（`POST /api/accounts/:id/login`）、`login_state`、今天页的登录过期行都只认 `computer` 的号；`api` 的号的 `login` 只跟着凭据代际走。
+
+发布按 `(platform, via)` 查 `publish/platforms.ts` 的 `PUBLISHERS` 一张表，不再按平台散着判。`api` 一格是控制面里调平台接口的函数（GitHub、X），`computer` 一格是 `{ host, manageUrl, maxImages }`（小红书、X），发布循环认领到的草稿带着账号的 `via`，`computer` 的下发 `publish_draft` 给账号所在电脑，`api` 的在控制面直接发。一条最多带几张图也写在这张表上（`maxImages`）：`api` 的是 0，电脑上的 X 是 4，小红书是 9，超了起草和批准都拒，免得人批了一张到电脑上才发不出去的卡。电脑报回来的帖子链接只认 https、默认端口、主机是这一格的 `host` 或它的子域，别的换成 `manageUrl`。X 的 `host` 只写 `x.com`，不认 `twitter.com`：发布器读的是发完 X 自己弹的 toast，现在都是 `x.com` 链接，多认一个域就多一个能被页面塞进来的地方，读错了只是落成主页链接。
+
+### 加浏览器登录的账号
+
+`POST /api/accounts` 带 `{ platform, computerId }`，`platform` 是小红书或 X，建一行 `via='computer'`、`login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台每种连法最多一个占位，靠表上 `(owner_id, platform, via) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
 
 ### 打开登录窗口
 
@@ -659,9 +667,9 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### `login_state` 三个分支
 
-三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。账号还必须是在电脑浏览器里登录的平台（`BrowserPlatform`，现在只有小红书）：GitHub、X 的 `login` 只跟着控制面的凭据代际走，电脑报上来的 `valid`、`expired`、`failed` 一律丢掉，账号状态和代际都不动。不然一台认证过的电脑就能把一个凭据已死的号报回 `valid`，或者在重新授权之后把新一代报成过期，绕过下面的不变式。
+三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。账号还必须是在电脑浏览器里登录的（`via='computer'`）：接口授权的号（GitHub，和授权连上的 X）的 `login` 只跟着控制面的凭据代际走，电脑报上来的 `valid`、`expired`、`failed` 一律丢掉，账号状态和代际都不动。不然一台认证过的电脑就能把一个凭据已死的号报回 `valid`，或者在重新授权之后把新一代报成过期，绕过下面的不变式。
 
-- `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
+- `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, via, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
 - `expired`：`UPDATE ... WHERE login = 'valid'` 记成 `expired`，推 `account_updated` 和一条 `failed` 通知，重发 `config`。已经过期或还没登录的行不命中这条 UPDATE，重复报不再通知。
 - `failed{reason, attempt}`：登录窗口没成，`accounts.login` 不动。原因和库时钟时刻写进 `login_failure`、`login_failed_at`（账号上的 `lastLoginFailure`，只留最近一次，表上 CHECK 保证两列成对），推 `account_updated`，页面刷新、换设备或当时没开着都还看得到；`valid` 落库时两列一起清空。这次写和上面两种一样在账号行锁里带连接代次，连接已经被顶掉就不落库也不推 `account_updated`。然后推 `login_failed { accountId, attempt, reason }`，`attempt` 原样带回 `browser_login` 里的那个，页面靠它结算对应那次点击的卡；再推 `failed` 通知给人看，见下面通知一节。这两条只说那一次尝试，不看连接代次。
 

@@ -120,6 +120,7 @@ async function insertAccount(
     ownerId: owner.userId,
     computerId: input.computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle: input.handle,
     login: "valid",
     ...(input.createdAt === undefined ? {} : { createdAt: input.createdAt, loginChangedAt: input.createdAt }),
@@ -143,7 +144,14 @@ describe("加账号", () => {
     expect(account.loginChangedAt, "占位建出来那一刻就是登录状态的起点").toBe(account.createdAt);
     const config = await agent.expect("config");
     expect(config.accounts, "建完给电脑重发 config，带上这个占位").toEqual([
-      { id: account.id, platform: "xiaohongshu", handle: null, tier: "confirm_publish", login: "none" },
+      {
+        id: account.id,
+        platform: "xiaohongshu",
+        via: "computer",
+        handle: null,
+        tier: "confirm_publish",
+        login: "none",
+      },
     ]);
 
     const again = await addXiaohongshu(owner);
@@ -206,6 +214,52 @@ describe("加账号", () => {
     // 改档会给两台电脑都重发 config：本机下一条收到的是它，说明登录那条没发给本机。
     expect((await owner.client.patch(`/api/accounts/${moved.id}`, { tier: "draft" })).status).toBe(200);
     expect((await local.next()).type, "本机没收到 browser_login").toBe("config");
+  });
+});
+
+describe("X 在电脑浏览器里登录", () => {
+  it("加 X 建出走电脑的占位，点登录下发 browser_login，不能设成可直接发布", async () => {
+    const owner = await makeOwner();
+    const agent = await online(owner.local);
+
+    const response = await owner.client.post("/api/accounts", { platform: "x", computerId: owner.local.computerId });
+    expect(response.status).toBe(201);
+    const { account } = AccountResponse.parse(await response.json());
+    expect(account).toMatchObject({ platform: "x", via: "computer", handle: null, login: "none" });
+    expect(await nextPush(owner.push, "account_updated")).toEqual({ type: "account_updated", account });
+    expect((await agent.expect("config")).accounts).toEqual([
+      { id: account.id, platform: "x", via: "computer", handle: null, tier: "confirm_publish", login: "none" },
+    ]);
+
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await owner.client.post(`/api/accounts/${account.id}/login`, { attempt })).status).toBe(202);
+    expect(await agent.expect("browser_login")).toEqual({
+      type: "browser_login",
+      accountId: account.id,
+      platform: "x",
+      attempt,
+    });
+
+    const direct = await owner.client.patch(`/api/accounts/${account.id}`, { tier: "direct_publish" });
+    expect(direct.status, "走电脑的账号每条都要人批").toBe(400);
+    expect((await listed(owner)).find((one) => one.id === account.id)?.tier).toBe("confirm_publish");
+  });
+
+  it("授权连上的 X 不走登录窗口，可以设成可直接发布", async () => {
+    const owner = await makeOwner();
+    const accountId = AccountId.parse(newId());
+    await database.db.insert(accounts).values({
+      id: accountId,
+      ownerId: owner.userId,
+      computerId: owner.local.computerId,
+      platform: "x",
+      via: "api",
+      handle: "baize_x",
+      login: "valid",
+    });
+    const attempt = LoginAttemptId.parse(newId());
+    expect((await owner.client.post(`/api/accounts/${accountId}/login`, { attempt })).status).toBe(400);
+    expect((await owner.client.patch(`/api/accounts/${accountId}`, { tier: "direct_publish" })).status).toBe(200);
   });
 });
 
@@ -334,7 +388,14 @@ describe("login_state valid 和 expired", () => {
     );
     const config = await agent.expect("config");
     expect(config.accounts).toEqual([
-      { id: account.id, platform: "xiaohongshu", handle: "白泽工厂日记", tier: "confirm_publish", login: "valid" },
+      {
+        id: account.id,
+        platform: "xiaohongshu",
+        via: "computer",
+        handle: "白泽工厂日记",
+        tier: "confirm_publish",
+        login: "valid",
+      },
     ]);
     expect(await listed(owner)).toEqual([updated]);
   });
@@ -484,8 +545,8 @@ describe("迁移 0038", () => {
       const { computerId } = await makeComputer(old.db, user.id);
       const row = async (handle: string, failure: string): Promise<string> => {
         const id = newId();
-        await old.sql`INSERT INTO accounts (id, owner_id, computer_id, platform, handle, login, login_failure, login_failed_at)
-          VALUES (${id}, ${user.id}, ${computerId}, 'xiaohongshu', ${handle}, 'valid', ${failure}, now())`;
+        await old.sql`INSERT INTO accounts (id, owner_id, computer_id, platform, via, handle, login, login_failure, login_failed_at)
+          VALUES (${id}, ${user.id}, ${computerId}, 'xiaohongshu', 'computer', ${handle}, 'valid', ${failure}, now())`;
         return id;
       };
       const refused = await row("@远程", "remote_refused");

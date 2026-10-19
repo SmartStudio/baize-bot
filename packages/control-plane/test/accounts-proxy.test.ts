@@ -57,6 +57,7 @@ async function ownerWithToken(stack: OAuthStack, token: string): Promise<{ owner
       ownerId: owner.user.id,
       computerId: owner.remote?.computerId ?? owner.local.computerId,
       platform: "github",
+      via: "api",
       handle: "baize-dev",
     },
     token,
@@ -101,6 +102,7 @@ describe("账号代理", () => {
       ownerId: owner.user.id,
       computerId: owner.remote?.computerId ?? owner.local.computerId,
       platform: "github",
+      via: "api",
       handle: "old-handle",
       login: "expired",
     });

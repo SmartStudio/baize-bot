@@ -123,6 +123,7 @@ async function publisher() {
     ownerId: user.id,
     computerId: computer.computerId,
     platform: "x",
+    via: "api",
     handle: "@page",
     login: "valid",
     tier: "confirm_publish",

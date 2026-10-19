@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Lock } from "lucide-react";
 import {
-  BrowserPlatform,
   type Account,
   type AccountId,
   type AccountTier,
@@ -25,6 +24,7 @@ import {
   PLATFORM,
   TIER,
   TIERS,
+  VIA_TEXT,
   blockedTier,
   computerName,
   timeText,
@@ -49,7 +49,7 @@ type Change = { status: "idle" } | { status: "busy" } | { status: "failed"; mess
 
 type Login = { flows: Partial<Record<AccountId, LoginFlow>>; open: (accountId: AccountId) => Promise<void> };
 
-// 浏览器平台的号没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
+// 电脑浏览器登录的号没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
 const LoginAction = ({ account, where, login }: { account: Account; where: string; login: Login }) => {
   const flow = login.flows[account.id];
   const note = loginFlowNote(flow, where);
@@ -117,6 +117,9 @@ const AccountRow = ({
           <small data-testid="account-where">
             在{computer === undefined ? "未同步的电脑" : computerName(computer)} · 权限「{TIER[account.tier].title}」
           </small>
+          <small className="account-via" data-testid="account-via" data-via={account.via}>
+            连接方式：{VIA_TEXT[account.via]}
+          </small>
           <small className="account-login" data-testid="account-login">
             {LOGIN_TEXT[account.login]}
             {account.login === "expired" ? ` · ${timeText(account.loginChangedAt)}` : ""}
@@ -133,7 +136,7 @@ const AccountRow = ({
         </span>
         {open ? <ChevronDown size={16} aria-hidden="true" /> : <ChevronRight size={16} aria-hidden="true" />}
       </button>
-      {account.login !== "valid" && BrowserPlatform.safeParse(account.platform).success ? (
+      {account.login !== "valid" && account.via === "computer" ? (
         <LoginAction
           account={account}
           where={computer === undefined ? "账号所在的电脑" : computerName(computer)}
@@ -143,7 +146,7 @@ const AccountRow = ({
       {open ? (
         <fieldset className="account-tiers" aria-label={`${handle} 的档位`} disabled={change.status === "busy"}>
           {TIERS.map((tier) => {
-            const blocked = blockedTier(account.platform, tier);
+            const blocked = blockedTier(account, tier);
             return (
               <label
                 key={tier}

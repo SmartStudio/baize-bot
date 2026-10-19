@@ -437,7 +437,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const account = await findAccount(db, c.get("user").id, id.data);
     if (account === null) return c.json(NO_ACCOUNT, 404);
     const platform = BrowserPlatform.safeParse(account.platform);
-    if (!platform.success) return c.json({ error: "这个平台不用登录窗口，走授权页登录" }, 400);
+    if (account.via !== "computer" || !platform.success)
+      return c.json({ error: "这个账号是授权连上的，不用登录窗口，走授权页登录" }, 400);
     const body = await readJson(c.req.raw, LoginAccountRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     const { attempt } = body.value;
@@ -464,7 +465,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const ownerId = c.get("user").id;
     const result = await setAccountTier(db, ownerId, id.data, body.value.tier);
     if (result.kind === "not_found") return c.json(NO_ACCOUNT, 404);
-    if (result.kind === "not_allowed") return c.json({ error: "小红书账号不能设成可直接发布" }, 400);
+    if (result.kind === "not_allowed")
+      return c.json({ error: "在电脑浏览器里登录的账号不能设成可直接发布，每条都要人批" }, 400);
     hub.push(ownerId, { type: "account_updated", account: result.account });
     // 档位随 config.accounts 下发，运行器按它决定 Bot 能不能起草、能不能直接发。
     await agents.sendConfig(ownerId);

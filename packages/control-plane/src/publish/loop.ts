@@ -5,7 +5,7 @@ import { enqueueDownlink, lockEnvelopeComputer } from "../agent/envelope.js";
 import type { NoticePublisher } from "../notifications.js";
 import { claimDueDrafts, failStaleDrafts, reopenMissedDrafts, type ClaimedDraft } from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
-import { COMPUTER_PLATFORMS, PUBLISHERS, PublishError, TokenRejected, type ApiBases } from "./platforms.js";
+import { publisherFor, PublishError, TokenRejected, type ApiBases } from "./platforms.js";
 import { announceFailure, publishFailed, publishSucceeded, type SettleDeps } from "./settle.js";
 
 export const PUBLISH_INTERVAL_MS = 60_000;
@@ -74,10 +74,10 @@ export class PublishLoop {
     const computerIds = this.#options.computers.deliverableComputerIds();
     const claimed = await this.#options.db.transaction(async (tx) => {
       for (const computerId of computerIds.toSorted()) await lockEnvelopeComputer(tx, computerId);
-      return claimDueDrafts(tx as unknown as Db, now, COMPUTER_PLATFORMS, computerIds, async (claimTx, batch) => {
+      return claimDueDrafts(tx as unknown as Db, now, computerIds, async (claimTx, batch) => {
         for (const one of batch) {
-          const publisher = PUBLISHERS[one.draft.platform];
-          if (publisher.via !== "computer" || !this.#options.computers.canDeliver(one.computerId)) continue;
+          if (one.via !== "computer" || !this.#options.computers.canDeliver(one.computerId)) continue;
+          const publisher = publisherFor(one.draft.platform, "computer");
           await enqueueDownlink(claimTx, one.computerId, {
             type: "publish_draft",
             draftId: one.draft.id,
@@ -106,12 +106,12 @@ export class PublishLoop {
 
   async #publish(claimed: ClaimedDraft): Promise<void> {
     const { draft } = claimed;
-    const publisher = PUBLISHERS[draft.platform];
     const scope = { draftId: draft.id, claimedAt: claimed.claimedAt };
-    if (publisher.via === "computer") {
+    if (claimed.via === "computer") {
       await this.#options.computers.flushOutbox(claimed.computerId);
       return;
     }
+    const publisher = publisherFor(draft.platform, "api");
     try {
       // 和账号代理同一条规则：401 把这次用的令牌交回去，库里还是它就强制刷新，已被别处换过就直接用新的，只重试一次。
       // 401 是平台没接受这次请求，重发这条 POST 不会发出两条；别处刷新之后旧令牌晚到的 401 也就不会把账号记过期。

@@ -4,7 +4,6 @@ import {
   Approval,
   ApprovalId,
   BotId,
-  BrowserPlatform,
   ComputerId,
   ContentPlan,
   ContentPlanId,
@@ -73,6 +72,9 @@ const assistantLatestOf = (): TodayAssistantLine | null => {
   return { text, at: said.createdAt };
 };
 
+// 预置的号：小红书只能在电脑浏览器里登录，GitHub 和 X 默认是接口授权连上的。
+const SEED_VIA: Record<Account["platform"], Account["via"]> = { github: "api", x: "api", xiaohongshu: "computer" };
+
 const accountOf = (
   id: string,
   platform: Account["platform"],
@@ -85,6 +87,7 @@ const accountOf = (
     ownerId: user.id,
     computerId: ComputerId.parse(where.computerId),
     platform,
+    via: SEED_VIA[platform],
     handle,
     tier,
     login: where.login,
@@ -605,7 +608,7 @@ export const pendingOf = (): TodayPendingItem[] => {
       items.push({ kind: "account", since: pendingSince.get(account.id) ?? account.createdAt, account });
     }
     const waiting = waitingSince.get(account.id);
-    if (account.login === "none" && BrowserPlatform.safeParse(account.platform).success && waiting !== undefined) {
+    if (account.login === "none" && account.via === "computer" && waiting !== undefined) {
       items.push({ kind: "account", since: waiting, account });
     }
   }
