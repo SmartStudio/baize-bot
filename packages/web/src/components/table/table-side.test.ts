@@ -148,7 +148,29 @@ describe("handResult", () => {
     expect(handResult(finished(0))).toMatchObject({ tone: "even", headline: "这手不输不赢" });
   });
 
-  it("结算里的座位 id 对回座位名，认不出的写对手", () => {
+  it("摊过牌：写底池归谁和赢家的牌型", () => {
+    const me = mineOf(started);
+    const view = started.hand?.view;
+    if (view === undefined) throw new Error("夹具里应该有一手牌");
+    const result = handResult(
+      withView(started, {
+        street: "complete",
+        board: ["Ks", "9h", "4c", "2d", "7s"],
+        seats: view.seats.map((seat) =>
+          seat.seatId === me
+            ? { ...seat, shown: view.hole }
+            : seat.seatId === "s1"
+              ? { ...seat, shown: ["Kh", "Qc"] }
+              : seat,
+        ),
+        events: [],
+        awards: [{ seatId: me, amount: 800, pot: 0 }],
+      }),
+    );
+    expect(result?.detail).toBe("底池 800 归你（一对 K）");
+  });
+
+  it("结算里的座位 id 对回座位名，认不出的写对手；没摊牌说明别人都弃了", () => {
     const me = mineOf(started);
     const result = handResult(
       withView(started, {
@@ -161,6 +183,6 @@ describe("handResult", () => {
         ],
       }),
     );
-    expect(result?.detail).toBe(`结算：你 50，${bot(started, 1).name} 30，对手 20`);
+    expect(result?.detail).toBe(`底池 50 归你，30 归${bot(started, 1).name}，20 归对手，其他人都弃了牌`);
   });
 });

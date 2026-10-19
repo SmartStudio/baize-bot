@@ -43,6 +43,7 @@ test("项目页显示三个牌友加老白，各有人设一句话", async ({ pa
   await rules.locator("summary").click();
   await expect(rules).toContainText("10/20，每人 2000");
   await expect(rules).toContainText("只有你和发牌引擎");
+  await expect(page.getByTestId("poker-project"), "牌桌项目页没有例行入口").not.toContainText("例行");
 });
 
 test("换人弹窗只列没在桌上的牌友", async ({ page }) => {
@@ -93,15 +94,15 @@ test("手进行中换人按钮不可点", async ({ page }) => {
   await expect(page.getByTestId("poker-seats-note"), "说明为什么不能换").toContainText("这手打完");
 });
 
-test("点开一局进牌桌页，回来写接着打", async ({ page }) => {
+test("点开一场进牌桌页，回来写接着打", async ({ page }) => {
   const table = await openTableProject(page);
   const start = page.getByTestId("poker-start");
-  await expect(start).toHaveText("开一局");
+  await expect(start).toHaveText("开一场");
 
   await start.click();
   await expect(page, "进牌桌页").toHaveURL(new RegExp(`/t/${table.groupId}$`));
   await expect(page.locator(`[data-table="${table.groupId}"]`)).toBeVisible();
-  expect((await tableOf(page, table.groupId)).status, "开一局就发了第一手").toBe("in_hand");
+  expect((await tableOf(page, table.groupId)).status, "开一场就发了第一手").toBe("in_hand");
 
   await page.goto(`/p/${table.groupId}`);
   await expect(page.getByTestId("poker-start"), "没散的桌子写接着打").toHaveText("接着打");

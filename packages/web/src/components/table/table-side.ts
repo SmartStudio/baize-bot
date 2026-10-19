@@ -1,4 +1,5 @@
 import type { BotHue, BotId, BotShape, Message, PokerSeatView, PokerTableView } from "@baize/shared";
+import { formatChips, showdownHands } from "../../state/poker.js";
 
 // 牌桌右栏、老白的建议和一手结束这三块要读的东西。都从整张桌视图和群消息里算，不存状态。
 
@@ -13,8 +14,6 @@ export type LogLine = {
 
 // 换下桌的牌友不在座位表里了，他留在记录里的话只剩 botId，认不出名字。
 const FORMER_PLAYER: Speaker = { name: "已下桌的牌友", hue: "sky", shape: "pillow" };
-
-export const formatChips = (amount: number): string => new Intl.NumberFormat("en-US").format(amount);
 
 // 预置牌友不在 GET /api/bots 里，名字和颜色只能取自座位和主持。
 const speakersOf = (table: PokerTableView): { bots: Map<BotId, Speaker>; user: Speaker } => {
@@ -90,8 +89,14 @@ export const handResult = (table: PokerTableView): HandResult | null => {
   };
   const taken = new Map<string, number>();
   for (const award of view.awards ?? []) taken.set(award.seatId, (taken.get(award.seatId) ?? 0) + award.amount);
-  const detail = [...taken].map(([seatId, amount]) => `${nameOf(seatId)} ${formatChips(amount)}`).join("，");
-  if (net > 0) return { tone: "win", headline: `你赢了 ${formatChips(net)} 筹码`, detail: `结算：${detail}` };
-  if (net < 0) return { tone: "lose", headline: `你输了 ${formatChips(-net)} 筹码`, detail: `结算：${detail}` };
-  return { tone: "even", headline: "这手不输不赢", detail: `结算：${detail}` };
+  // 摊过牌就写赢家的牌型；没摊牌是别人都弃了，没有牌型可写。
+  const hands = showdownHands(view);
+  const shares = [...taken].map(([seatId, amount]) => {
+    const hand = hands.get(seatId);
+    return `${formatChips(amount)} 归${nameOf(seatId)}${hand === undefined ? "" : `（${hand}）`}`;
+  });
+  const detail = `底池 ${shares.join("，")}${hands.size === 0 ? "，其他人都弃了牌" : ""}`;
+  if (net > 0) return { tone: "win", headline: `你赢了 ${formatChips(net)} 筹码`, detail };
+  if (net < 0) return { tone: "lose", headline: `你输了 ${formatChips(-net)} 筹码`, detail };
+  return { tone: "even", headline: "这手不输不赢", detail };
 };

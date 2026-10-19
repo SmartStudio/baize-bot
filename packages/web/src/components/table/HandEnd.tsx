@@ -1,57 +1,38 @@
-import { useState } from "react";
 import { List, RotateCcw } from "lucide-react";
 import type { PokerTableView } from "@baize/shared";
-import { useNavigate } from "react-router-dom";
-import { RequestFailed } from "../../api/client.js";
-import { useApp } from "../../state/app.js";
-import { pathOf } from "../../routes/screen.js";
 import { handResult } from "./table-side.js";
+import { useTableRun } from "./use-table-run.js";
 import "./table-side.css";
 
 const HandEndView = ({ table }: { table: PokerTableView }) => {
-  const navigate = useNavigate();
-  const { actions } = useApp();
-  const [busy, setBusy] = useState<"again" | "leave" | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+  const { busy, failure, run } = useTableRun(table.groupId);
   const result = handResult(table);
   if (result === null) return null;
-
-  const run = async (kind: "again" | "leave") => {
-    setBusy(kind);
-    setFailure(null);
-    try {
-      if (kind === "again") await actions.startPokerHand(table.groupId);
-      else {
-        const left = await actions.leavePokerTable(table.groupId);
-        if (left !== undefined) navigate(pathOf({ kind: "project", groupId: left }));
-      }
-    } catch (cause) {
-      setFailure(cause instanceof RequestFailed ? cause.message : "没成，再试一次");
-    } finally {
-      setBusy(null);
-    }
-  };
 
   return (
     <section className="table-end" data-testid="hand-end" data-tone={result.tone}>
       <p className="table-end-result" data-testid="hand-result">
         {result.headline}
       </p>
-      <p className="table-end-detail">{result.detail}</p>
+      <p className="table-end-detail" data-testid="hand-detail">
+        {result.detail}
+      </p>
       <div className="table-end-actions">
+        {/* 接着打是最常走的路，结束卡一出来焦点就在它上面，回车就开下一手。 */}
         <button
           type="button"
-          className="ghost-button"
+          className="primary-button table-end-button"
           data-testid="hand-again"
           disabled={busy !== null}
-          onClick={() => void run("again")}
+          autoFocus
+          onClick={() => void run("start")}
         >
           <RotateCcw size={16} aria-hidden="true" />
           再来一手
         </button>
         <button
           type="button"
-          className="primary-button table-end-leave"
+          className="ghost-button table-end-button"
           data-testid="hand-leave"
           disabled={busy !== null}
           onClick={() => void run("leave")}

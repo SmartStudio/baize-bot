@@ -12,12 +12,23 @@ type Hand = NonNullable<PokerTableView["hand"]>;
 // 请求已经发出、回包也成功了，但表示「老白在看」的推送还没到：先按等待态画，别让按钮闪回来。
 type Asked = { handId: PokerHandId; seq: number };
 
+// 控制面的建议挂在决策点上，你一出牌它就不算数了。这一街还没完时，上一步的建议照样有参考价值，
+// 页面自己记住最近一条，灰着留到换街或换手。
+type Remembered = { handId: PokerHandId; seq: number; text: string };
+
+const stillThisStreet = (remembered: Remembered | null, hand: Hand): remembered is Remembered =>
+  remembered !== null &&
+  remembered.handId === hand.id &&
+  hand.view.street !== "complete" &&
+  !hand.view.events.slice(remembered.seq).some((event) => event.kind === "street");
+
 const HostHintView = ({ table, hand }: { table: PokerTableView; hand: Hand }) => {
   const { actions } = useApp();
   const { messages, history, retry } = useTableMessages(table.groupId);
   const [asked, setAsked] = useState<Asked | null>(null);
   const [pending, setPending] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+  const [remembered, setRemembered] = useState<Remembered | null>(null);
 
   const seq = hand.view.events.length;
   const staged = hintStage(table);
@@ -38,8 +49,28 @@ const HostHintView = ({ table, hand }: { table: PokerTableView; hand: Hand }) =>
   };
 
   const text = hintText(messages, table);
+  // 渲染时就记下，下一次推送（你出过牌）到来时手上已经有它。
+  if (
+    stage === "done" &&
+    text !== null &&
+    (remembered?.handId !== hand.id || remembered.seq !== seq || remembered.text !== text)
+  ) {
+    setRemembered({ handId: hand.id, seq, text });
+  }
+  const earlier = stage !== "done" && stillThisStreet(remembered, hand) ? remembered : null;
   return (
     <section className="table-hint" data-testid="host-hint" data-stage={stage} data-hand={hand.number}>
+      {earlier === null ? null : (
+        <div className="table-hint-card table-hint-earlier" data-testid="hint-earlier">
+          <Lightbulb size={16} aria-hidden="true" />
+          <div>
+            <p className="table-hint-head">
+              <b>上一步的建议</b>
+            </p>
+            <p className="table-hint-text">{earlier.text}</p>
+          </div>
+        </div>
+      )}
       {stage === "idle" || stage === "failed" ? (
         <div className="table-hint-ask">
           {stage === "failed" ? <p className="table-hint-muted">老白这次没答上来。</p> : null}
