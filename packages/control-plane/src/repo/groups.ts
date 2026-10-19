@@ -148,7 +148,7 @@ export async function openGroup(
 /** 一个群最多几个 Bot，和建群请求的上限一致。 */
 export const GROUP_BOT_LIMIT = 6;
 
-/** 项目群就是这个用户还有成员的多 Bot 群，单聊不算。别人的、不存在的、成员删光的都是 null，和 findGroup 一个口径。 */
+/** 项目群就是这个用户还有成员、没解散的多 Bot 群，单聊不算。别人的、不存在的、成员删光的、解散的都是 null，和 findGroup 一个口径。 */
 export async function findProjectGroupId(db: Db | Tx, ownerId: UserId, groupId: GroupId): Promise<GroupId | null> {
   const [row] = await db
     .select({ id: groups.id })
@@ -158,9 +158,10 @@ export async function findProjectGroupId(db: Db | Tx, ownerId: UserId, groupId: 
   return row === undefined ? null : GroupId.parse(row.id);
 }
 
-/** 群还有成员。成员删光的多 Bot 群行还留着，对外却当作不存在：findProjectGroupId 和首页待办一个口径。 */
+/** 群还有成员、也没解散。成员删光的和解散的多 Bot 群行都还留着，对外却当作不存在：findProjectGroupId 和首页待办一个口径。 */
 export function hasMembers(groupId: SQL | AnyColumn): SQL {
-  return sql`exists (select 1 from ${groupMembers} where ${groupMembers.groupId} = ${groupId})`;
+  return sql`exists (select 1 from ${groupMembers} join ${groups} as live on live.id = ${groupMembers.groupId}
+    where ${groupMembers.groupId} = ${groupId} and live.archived_at is null)`;
 }
 
 /**
@@ -175,7 +176,9 @@ export async function lockProjectMembers(
   const [locked] = await tx
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId)))
+    .where(
+      and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), isNull(groups.archivedAt)),
+    )
     .for("update");
   if (locked === undefined) return null;
   const rows = await tx
@@ -256,7 +259,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
     .from(groups)
     .innerJoin(multiBot, eq(multiBot.groupId, groups.id))
     .innerJoin(tasks, eq(tasks.groupId, groups.id))
-    .where(eq(groups.ownerId, ownerId))
+    .where(and(eq(groups.ownerId, ownerId), isNull(groups.archivedAt)))
     .orderBy(groups.createdAt, groups.id);
   if (rows.length === 0) return [];
 
@@ -288,13 +291,13 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
 
 export type GroupDetail = { readonly group: Group; readonly task: TopicTask; readonly bots: Bot[] };
 
-/** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。单 Bot 群也照常返回，成员删光的团队群当作不存在。 */
+/** 群按归属人过滤。别人的群在这里查不到，路由层因此返回 404 而不是 403。单 Bot 群也照常返回，成员删光的和解散的团队群当作不存在。 */
 export async function findGroup(db: Db | Tx, ownerId: UserId, groupId: GroupId): Promise<GroupDetail | null> {
   const [row] = await db
     .select({ group: groups, task: tasks })
     .from(groups)
     .innerJoin(tasks, eq(tasks.groupId, groups.id))
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.archivedAt)))
     .limit(1);
   if (row === undefined) return null;
 

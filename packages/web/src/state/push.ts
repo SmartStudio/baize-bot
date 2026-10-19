@@ -82,6 +82,11 @@ export const createPushHandlers = ({
       dispatch({ type: "group_updated", group: push.group, seq });
       if (mine()?.computerChoices.rows[push.group.id] !== undefined) reloadChoices(push.group.id, seq);
     },
+    group_archived: (push, seq) => {
+      dispatch({ type: "group_archived", groupId: push.groupId, seq });
+      // 首页的「等你」和项目列表都是服务端快照，解散的群得重拉才从里面消失。
+      bumpToday();
+    },
     group_turn: (push, seq) => {
       dispatch({ type: "group_turn", turn: push });
       recheckChoices(push.groupId, seq);

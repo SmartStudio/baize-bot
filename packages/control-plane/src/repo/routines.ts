@@ -402,7 +402,7 @@ export async function markGroupRoutineRunsSeen(db: Db, ownerId: UserId, groupId:
     const [group] = await tx
       .select({ soloBotId: groups.soloBotId })
       .from(groups)
-      .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId)))
+      .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.archivedAt)))
       .limit(1);
     if (group === undefined) return null;
     const inGroup = await lockRoutines(
@@ -557,9 +557,16 @@ export async function openRoutineRun(
       .limit(1);
     if (sameMoment !== undefined) return null;
   }
-  const groupId =
-    current.row.groupId ??
-    (await tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, current.row.botId)).limit(1))[0]?.id;
+  // 群解散时例行已经停了，恢复或试跑也不往解散的群里落。
+  const target =
+    current.row.groupId === null ? eq(groups.soloBotId, current.row.botId) : eq(groups.id, current.row.groupId);
+  const groupId = (
+    await tx
+      .select({ id: groups.id })
+      .from(groups)
+      .where(and(target, isNull(groups.archivedAt)))
+      .limit(1)
+  )[0]?.id;
   if (groupId === undefined) return null;
 
   const [row] = await tx.insert(routineRuns).values({ id: newId(), routineId, startedAt }).returning({

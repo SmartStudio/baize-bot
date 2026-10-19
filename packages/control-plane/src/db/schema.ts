@@ -274,6 +274,8 @@ export const groups = pgTable(
       .unique()
       .references(() => bots.id, { onDelete: "cascade" }),
     chiefBotId: text("chief_bot_id").references(() => bots.id, { onDelete: "set null" }),
+    // 解散的多 Bot 群只盖这个戳，不删行：删行会级联掉消息、任务卡和牌局，还会把 run 的群号置空成孤儿。
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [index("groups_owner_id_idx").on(t.ownerId)],

@@ -190,6 +190,9 @@ export const UpdateTaskResponse = z.object({ task: TopicTask });
 export const ReportMetricRequest = z.object({ value: z.number().finite() }).strict();
 export type ReportMetricRequest = z.infer<typeof ReportMetricRequest>;
 
+// POST /api/groups/:id/archive  解散多 Bot 群（项目群和牌桌），没有请求体，回 204。只盖 archived_at、不删历史，
+// 之后这个群的所有接口都是 404。在途的活停下、挂着的审批失效、例行停下、打着的那手作废。已经解散的再点一次照样 204。
+// 单聊（含主助理的）409，要删就删 Bot。别人的、不存在的 404。成功推 group_archived。
 // POST /api/groups/:id/seen  用户打开了这个群或它的项目页，群里已结束未看的例行运行全记成看过（D3）。回 204。别人的群 404。
 
 // GET /api/groups/:id/messages?before=<messageId>&limit=50  按时间正序返回。
@@ -698,6 +701,8 @@ export const ServerPush = z.discriminatedUnion("type", [
   z.object({ type: z.literal("group_created"), group: Group, task: TopicTask }),
   // 群本身变了（目前只有首席）推整条，客户端整条替换。
   z.object({ type: z.literal("group_updated"), group: Group }),
+  // 群被解散，客户端把它从侧栏和群列表里拿掉，开着它的页面回首页。
+  z.object({ type: z.literal("group_archived"), groupId: GroupId }),
   // 群回合推进：current 是正在说的，next 是排在后面的。回合结束推 current null、next 空。
   // 没有快照接口：连上 /api/ws 时正在进行的回合各推一条。
   z.object({

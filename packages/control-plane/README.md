@@ -116,7 +116,7 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 
 `GET /hub/v1/lanes/:botId/:groupId/:stream?after=<seq>&limit=<n>` 只接受网关 key Bearer，不接受登录 cookie；头中的道须匹配路径。Hub 认证中间件覆盖所有路由；快照路由在只读可重复读事务内按认证出的电脑号重读电脑行，租约栅栏和记录读取使用同一事务，返回 `{entries: [{seq, line}], nextSeq, head, piSessionVersion}`。默认 `after=-1`、`limit=64`，上限 200，下一页用本页末条 `seq`；名单和记录也在该快照内读取。流的快照指纹等于当前名单指纹时，写入侧不变式保证库里的行都合规，直接按 `seq > after ORDER BY seq LIMIT limit` 读本页，`nextSeq` 和 `head` 取流元数据，读一页只花一页的代价。指纹不等或没有快照（某个写入口漏了复查的流，或旧流）才从头复查，不合规的残留旧行及其后缀不会读出，`nextSeq` 和 `head` 对应可安全读取的完整前缀；这条路径逐页重读前缀，代价随流长增长，只在异常时走。正常流仍返回全流元数据。空流即使因失败留下 `nextSeq: 0` 的流元数据，也返回 `nextSeq: 0`、零链头和 null Pi 版本。
 
-租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。当前没有删群 HTTP 入口。
+租约授权的原样读取和旧行重放只在 `repo/work-records.ts`，不带 viewer，理由登记在读守卫的 EXCEPTIONS。带 viewer 的读同样只在该文件，并须在同一查询链调用 `workEntryVisibleTo(viewer)`；守卫禁止其他文件直接读 `work_entries`，即使带 viewer 或借消息表白名单也不放行。`lane_leases`、`work_streams`、`work_entries`、`attachments` 按 Bot、群级联删除，条目和附件按归属人级联，run 删除只把条目的 `run_id` 置空。删 Bot 在删除事务里给单聊及多 Bot 群每条持有道入队 `cancel{lane, epoch + 1}`，提交后投递；群及队友数据保留，单 Bot 群随 Bot 删除。多 Bot 群没有删除入口，只能解散（软归档，见「群与主题任务」的「解散群」），解散也给这个群的每条道入队下一代取消。
 
 删号按归属人、Bot、电脑、道、run 的顺序取锁，在同一事务里入队所有道取消、删除用户和相关记录，电脑与 `agent_outbox` 随外键清空。事务只返回已入队的道取消副本，未发出的 prompt、审批决定等报文随发件箱清空；提交成功后，仅向连接代际仍匹配的在线电脑按序投递，随后以 4002 关闭连接。副本不再落盘，断线电脑不会重放删号取消，旧 token 也不能重新握手。账号已删除时不存在可以持久保留的发件箱，这个最后投递窗口只服务于仍在线的电脑。
 
@@ -297,6 +297,14 @@ run 在三处结束：`run_done`、断线收尾（重连 hello 的 `activeRuns` 
 过这一道的写：`bot_text`（建空壳和接正文）、`bot_tool_call`（新建工具行，也包括改已有那行，收尾打成 `failed` 的不会被晚到的 `ok` 盖回去）、`approval_request`（`createApproval`）、`mention`、`skill_offer`、`project_offer`、`draft_create`、`plan_propose`、`draft_edit`，以及改任务卡和群状态的 `handoff`（建卡、排进下一轮派活、超限提示）、`handoff_accept`（接卡和换经手在同一个事务里）、`task_checklist`（清单和那条系统消息）、`set_chief`、`set_cadence`。后五种不是这个 run 的产物，但晚到时会盖掉用户此后的选择：结束的 run 晚到的清单盖掉用户刚改的清单，晚到的确认把经手换回一个已经收尾的 Bot，晚到的交接建出一张错卡还真的派活，所以同样整条丢掉。只剩两种不过这一道：`run_done` 自己，它是收尾动作，`finishRun` 以 `ended_at IS NULL` 为条件做 UPDATE，拿的是更新锁，重复收尾返回 null；`approval_abandoned` 是单向的终态清理，只把 pending 改成 expired，重开不了审批，已有结论或重复到达都更新 0 行。`test/run-end.test.ts` 钉着三种收尾都收文字、多 Bot 群里只收收尾那个 Bot 的、同 Bot 在别的电脑上还有 run 开着时旧 run 收尾不收（`run_done` 和对账收尾两条路）、晚到的每种帧都不落，以及两台控制面共库时的两种交错：帧卡在锁之前、收尾先提交；收尾的事务结束了 run 还没提交，帧在锁上等它。还钉着排队的六件事：同 Bot 同群两条 run 在两台控制面上同时收尾，两条文字都收成定稿；收尾持锁时新消息的派活等它提交才建 run；清单帧拿着 run 的共享锁时删 Bot，删除等它、回 204 不死锁；帧已过 `resolveRun` 时它的 Bot 被删，放行后一行不写；删除锁好 run 之后才建群把这个 Bot 拉进去并派活，建 run 等删除提交、查不到成员就不建，删除回 204；别的 Bot 正在确认被删 Bot 交出来的活时删它，删除等确认提交、回 204，经手换成确认的那位。
 
 限制：多台控制面时，收尾推的定稿只到本实例的 Web，另一实例上的 Web 要等重连或重拉才看到定稿。控制面不校验 `bot_text` 的 messageId 有没有被另一条 run 用过（`appendBotText` 只按 messageId、群、kind 接上），电脑代理若跨 run 复用 messageId，那条文字可能在另一条 run 收尾时被提前收成定稿。
+
+### 解散群
+
+`POST /api/groups/:id/archive` 是软归档：只立起 `groups.archived_at`，行和消息、审批、run 都留在库里，不删、不级联。单聊（包括主助理那个群）回 409，不想要就删 Bot；别人的和没有的回 404；解散过的再点一次回 204。归档之后这个群对所有入口都等于不存在：`findGroup`、`listGroups`、`findLiveGroupId`（`repo/live-groups.ts` 的 `groupIsLive` 同时要求有成员、没归档）、项目页、今天、目标记数、牌桌的 `loadTable` 和 `withTableLock` 都过滤 `archived_at IS NULL`，所以读写都回 404；`placeRun` 读成员时连上群并要求没归档，回 `not_member`；`appendMessageIfGroupAlive` 对群行拿 `FOR SHARE` 并要求没归档，派活失败的提示不会写进解散的群；上行帧的 `findGroupId` 认不出它，整条丢掉；例行调度的 `openRoutineRun` 目标群已归档就不开运行记录。
+
+`repo/archive-group.ts` 的 `archiveGroup` 在一个事务里做完，锁序照删 Bot：账号共享锁，按 Bot id 升序拿每个成员的排他 Bot 锁（`lockRunsOfBot` 那一把，`startRun` 拿共享，解散持有期间这个群建不出新 run），再锁这些道所在的电脑行，牌桌拿桌锁，然后按 Bot 顺序锁 `lane_leases` 并给持有者入队 `cancel{lane, epoch + 1}`，收尾锁，最后按 id 升序 `FOR UPDATE` 这个群还没结账的 run。之后：清掉 `continue_requested`，开着的 run 收尾（`ended_at`、`charged_at` 置成现在，删掉它们还在发件箱里的下行），例行运行记录收成 `stopped`；pending 审批改成 `expired`；这个群的例行停掉；任务卡打成 `done`；最后才写 `archived_at`。提交后对取消涉及的电脑 `flushOutbox`，放掉内存里的回合，推每张过期审批的 `approval_updated`、每条停掉的例行的 `routine_updated`，再推 `group_archived`，页面从侧栏移掉这个群，开着它的页面回首页。
+
+不做的事：pending 的交接卡不改，`HandoffStatus` 只有 pending 和 accepted 两态，接卡要求这个群里有开着的 run，解散后接不了，群又不可见，留着不影响任何人。被取消的 run 按零费用结账，已经花掉的那一截不进用量。流式中的文字和跑着的工具行不收成定稿，群已经看不到了。
 
 ## 主助理
 
@@ -904,6 +912,8 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 ### 散场、复盘和战绩
 
 **散场。** `leaveTable` 在手进行中回 409「这一手还没打完，打完再散场」，从没打过牌回 409「还没打过牌，没有要散的场」。否则用 `ended_at IS NULL` 的条件更新结束这一场。最近一场已散场而复盘还空时，再点一次会重派复盘，已经有复盘的再点什么都不做。重复点击撞 reviewer 的唯一索引回 busy，所以同一场只会有一份复盘在路上。
+
+**解散。** 牌桌就是一个多 Bot 群，`POST /api/groups/:id/archive` 照样解散它（见「群与主题任务」的「解散群」）。在桌锁里把 `playing` 的那手改成 `abandoned`、清掉轮到谁和截止，桌回 `idle`、座位筹码回到这一场开场时的样子、版本加一，开着的那一场写上 `ended_at`。不派复盘、不写任何消息、不推牌桌视图，桌连同群一起读不到了。扫描器只扫 `playing` 的手，作废的手不会再被兜底推进。
 
 **复盘状态。** 视图的 `reviewState` 只说最近一场已散场的那一场，全部从现有列推（`store.ts` 的 `reviewStateOf`）。`review` 非空是 `done`；这张桌有开着的 reviewer run 是 `generating`，一桌最多一条，只会是这一场的；其余都是 `failed`，包括散场时没有电脑在线、复盘根本没派出去。项目页的重试按钮打 `POST /poker/tables/:groupId/review`，带场次 id 是为了用户开了新一场之后还能给上一场补派，又不会误派到别的场。
 

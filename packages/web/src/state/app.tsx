@@ -184,6 +184,8 @@ export type AppActions = {
   askPokerHint: (handId: PokerHandId, request: HintRequest) => Promise<void>;
   // 散场成了回牌桌群，由调用方跳去项目页；登录过期时是 undefined。
   leavePokerTable: (groupId: GroupId) => Promise<GroupId | undefined>;
+  // 解散群：成了就把它从侧栏移掉，开着它的页面随之回首页。推送晚到也只是再移一次。
+  archiveGroup: (groupId: GroupId) => Promise<void>;
 };
 
 const AppContext = createContext<{ state: AppState; actions: AppActions } | null>(null);
@@ -916,6 +918,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const table = await api.leaveTable(groupId);
         put({ type: "poker_table_set", table });
         return table.groupId;
+      }),
+      archiveGroup: signedIn(async ({ api, put }, groupId: GroupId) => {
+        const seq = nextSeq();
+        await api.archiveGroup(groupId);
+        put({ type: "group_archived", groupId, seq });
+        put({ type: "today_version_bumped" });
       }),
     };
   }, [nextSeq, sessions, enter, taskPushes]);

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Play, Settings2 } from "lucide-react";
 import { POKER_PERSONAS, type GroupId, type PokerSeatNo, type PokerTableView, type Routine } from "@baize/shared";
+import { ArchiveGroup } from "../components/ArchiveGroup.js";
 import { describeTriggers } from "../components/routines/cron.js";
 import { ReviewCard } from "../components/poker/ReviewCard.js";
 import { SeatsBlock } from "../components/poker/SeatsBlock.js";
@@ -15,6 +16,7 @@ type Props = {
   onOpenTable: (groupId: GroupId) => void;
   onStartHand: (groupId: GroupId) => Promise<unknown>;
   onSwapSeat: (groupId: GroupId, seat: PokerSeatNo, persona: SwapPersona) => Promise<unknown>;
+  onArchive: (groupId: GroupId) => Promise<unknown>;
 };
 
 const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.message : "没成功，再试一次");
@@ -22,7 +24,15 @@ const messageOf = (cause: unknown): string => (cause instanceof Error ? cause.me
 // 盲注和起始筹码是 D21 的默认值，视图里还不带桌子级的设置，所以这里是字面量，标「默认」。
 const BLINDS_AND_STACK = "10/20，每人 2000";
 
-export const PokerProjectPage = ({ table, title, routines, onOpenTable, onStartHand, onSwapSeat }: Props) => {
+export const PokerProjectPage = ({
+  table,
+  title,
+  routines,
+  onOpenTable,
+  onStartHand,
+  onSwapSeat,
+  onArchive,
+}: Props) => {
   const [swapSeat, setSwapSeat] = useState<PokerSeatNo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -67,6 +77,7 @@ export const PokerProjectPage = ({ table, title, routines, onOpenTable, onStartH
             <Play size={16} aria-hidden="true" />
             {resumable ? "接着打" : "开一局"}
           </button>
+          <ArchiveGroup groupId={table.groupId} handInPlay={table.status === "in_hand"} onArchive={onArchive} />
         </header>
         {startError === null ? null : (
           <p className="today-inline-error" role="alert" data-testid="poker-start-error">
