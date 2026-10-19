@@ -163,6 +163,7 @@ import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
 import { McpClients } from "../mcp/call.js";
 import { OAUTH_PATH, createOAuthRoutes } from "./oauth.js";
 import { announceBrand, createBrandRoutes } from "./routes/brand.js";
+import { createCliToolRoutes } from "./routes/cli-tools.js";
 import { createComputerChoiceRoutes } from "./routes/computer-choice.js";
 import { createGoalRoutes } from "./routes/goals.js";
 import { createPokerHandRoutes } from "./routes/poker-hands.js";
@@ -258,6 +259,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   app.route("/api", createSeenRoutes({ db, push: hub }));
   app.route("/api", createPrivacyRoutes({ db, push: hub, agents }));
   app.route("/api", createTemplateRoutes({ db, agents }));
+  app.route("/api", createCliToolRoutes({ db, crypto: deps.toolCrypto, agents }));
   // 第 3 期牌桌的路由，同样在登录中间件之后。
   app.route("/api", createPokerTableRoutes({ db, push: hub, agents }));
   app.route(

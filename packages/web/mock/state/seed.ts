@@ -16,6 +16,7 @@ import {
   type MessageBody,
   type ToolOperation,
 } from "@baize/shared";
+import { resetCliTools } from "./cli-tools.js";
 import {
   TEAM_BOT_IDS,
   TEAM_CHECKLIST,
@@ -293,6 +294,7 @@ export const reseed = (): void => {
   routines.clear();
   skills.clear();
   tools.clear();
+  resetCliTools();
   bots.clear();
   groups.clear();
   tasks.clear();
