@@ -226,6 +226,7 @@ const configMessage = {
   tools: [],
   brand: null,
   preferences: [],
+  cliTools: [],
   accounts: [],
   cliTools: [],
   grants: [],

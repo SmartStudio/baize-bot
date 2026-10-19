@@ -1,10 +1,12 @@
 import { statSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import {
   GRANTABLE_SCOPES,
   AccountId,
   type AccountConfig,
   type ActionKind,
+  type CliToolConfig,
+  type CliToolId,
   type ComputerId,
   type Grant,
   type GrantTarget,
@@ -16,7 +18,15 @@ import {
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
-import { type Containment, stillAsksInSandbox, SYSTEM_PACKAGE_MANAGERS, SYSTEM_PACKAGE_REASON } from "./contained.js";
+import {
+  type ClosedContainment,
+  type Containment,
+  stillAsksInSandbox,
+  SYSTEM_PACKAGE_MANAGERS,
+  SYSTEM_PACKAGE_REASON,
+  toolboxNodeDir,
+  toolboxSearchPath,
+} from "./contained.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { TAKEOVER_TOOL } from "./takeover.js";
 import {
@@ -32,6 +42,8 @@ import {
 export interface GateAccess {
   readonly network: boolean;
   readonly writePaths: readonly string[];
+  /** 这条命令拿哪几个登记工具的 env。只有闸门判成命令行工具的那种 bash 才带，缺省是一个都不给。 */
+  readonly cliTools?: readonly CliToolId[];
 }
 
 export interface GateContext {
@@ -64,6 +76,8 @@ export interface GateCall extends GateContext {
   readonly browserHost?: string | null;
   /** 这次 run 是例行触发的就带它的边界，用户当面派的是 null。必填：漏传会让只读例行悄悄放开。 */
   readonly routine: { readonly boundary: RoutineBoundary } | null;
+  /** 这个 Bot 能用的登记工具，已按 Bot 过滤。没传等于没有，命令一律按原规则判。 */
+  readonly cliTools?: readonly Pick<CliToolConfig, "id" | "command" | "install">[];
 }
 
 export interface GateDecision {
@@ -573,6 +587,8 @@ const TOOLBOX_INSTALL_REASON = "联网安装到这个 Bot 自己的工具箱";
 const REQUIREMENTS_FILE_REASON = "requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源";
 const LOCAL_SOURCE_REASON = "装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码";
 const NODE_INSTALL_REASON = "联网安装，会运行这个项目自己的安装脚本和所装包的安装脚本";
+const NODE_TOOLBOX_REASON = "联网全局安装到这个 Bot 自己的工具箱，会运行所装包的安装脚本";
+const NODE_LOCAL_SOURCE_REASON = "装的是本地目录、包文件或 git 仓库里的代码，会运行它的安装脚本";
 const PYTHON_INSTALLERS = new Set(["pip", "pip3"]);
 const NODE_INSTALLERS = new Set(["npm", "pnpm", "yarn"]);
 const NODE_INSTALL_VERBS = /^(add|install|ci|update|upgrade)$/;
@@ -604,6 +620,49 @@ const pipInstallsLocalCode = (args: readonly string[]): boolean =>
     return pipLocalSource(arg) || (source !== undefined && (!source.includes("://") || /^file:/i.test(source)));
   });
 
+// npm 认的 install 别名。只认第一个不以 - 开头的词：npm 有带值的选项，后面的词可能是值不是子命令。
+const NPM_INSTALL_ALIASES = new Set([
+  "install",
+  "i",
+  "in",
+  "ins",
+  "inst",
+  "insta",
+  "instal",
+  "isnt",
+  "isnta",
+  "isntal",
+  "isntall",
+  "add",
+]);
+// 只认这几种写全局的写法，合写的短选项、别的拼法照通用规则问。
+const npmGlobalFlag = (arg: string): boolean => arg === "-g" || arg === "--global" || arg === "--location=global";
+const npmLocalSource = (arg: string): boolean =>
+  !arg.startsWith("-") &&
+  (/^(?:file:|git[+:]|github:|gitlab:|bitbucket:|gist:)/i.test(arg) ||
+    arg.includes("://") ||
+    /\.(?:tgz|tar|tar\.gz)$/i.test(arg) ||
+    /^[.~/]/.test(arg) ||
+    /^[^@][^/]*\/[^/]+$/.test(arg));
+
+/** `npm i -g <包>`：装进工具箱的 node prefix，命令落在垫底的 node/bin。不是这种写法的返回 null。 */
+const npmGlobalInstall = (
+  rawName: string,
+  commandArgs: readonly string[],
+  containment: ClosedContainment,
+): ClassifiedAction | null => {
+  if (rawName !== "npm") return null;
+  const verb = commandArgs.find((arg) => !arg.startsWith("-"));
+  if (verb === undefined || !NPM_INSTALL_ALIASES.has(verb) || !commandArgs.some(npmGlobalFlag)) return null;
+  const packages = commandArgs.slice(commandArgs.indexOf(verb) + 1).filter((arg) => !arg.startsWith("-"));
+  if (packages.length === 0) return null;
+  const reasons = [NODE_TOOLBOX_REASON, ...(packages.some(npmLocalSource) ? [NODE_LOCAL_SOURCE_REASON] : [])];
+  return {
+    ...plainAction("install", null, { network: true, writePaths: [toolboxNodeDir(containment.toolboxDir)] }),
+    reason: reasons.join("。"),
+  };
+};
+
 /** 云电脑上的装包按工具箱判，批准时放开的口子写在卡上。返回 null 的按通用规则接着分。 */
 const classifyCloudCommand = (
   words: readonly string[],
@@ -629,6 +688,8 @@ const classifyCloudCommand = (
       reason: reasons.join("。"),
     };
   }
+  const nodeGlobal = npmGlobalInstall(rawName, commandArgs, containment);
+  if (nodeGlobal !== null) return nodeGlobal;
   if (NODE_INSTALLERS.has(rawName) && commandArgs.some((arg) => NODE_INSTALL_VERBS.test(arg))) {
     return { ...plainAction("install", null, { network: true, writePaths: [] }), reason: NODE_INSTALL_REASON };
   }
@@ -844,6 +905,7 @@ const verdictForItem = (
   }
 };
 
+// 分类出来的动作不带工具 env，env 只由 cliDecision 整条命令给出，这里不合并它。
 const mergeAccess = (items: readonly ClassifiedAction[]): GateAccess => ({
   network: items.some((item) => item.access.network),
   writePaths: [...new Set(items.flatMap((item) => item.access.writePaths))],
@@ -1098,6 +1160,228 @@ function decideDraft(input: Record<string, unknown>, accounts: readonly AccountC
   };
 }
 
+// bash 先认关键字和内建命令，再查 PATH：登记成这些名字的工具永远跑不到工具箱里的那个文件。
+const BASH_RESERVED_WORDS: ReadonlySet<string> = new Set([
+  "if",
+  "then",
+  "else",
+  "elif",
+  "fi",
+  "case",
+  "esac",
+  "for",
+  "select",
+  "while",
+  "until",
+  "do",
+  "done",
+  "in",
+  "function",
+  "time",
+  "coproc",
+  "alias",
+  "bg",
+  "bind",
+  "break",
+  "builtin",
+  "caller",
+  "cd",
+  "command",
+  "compgen",
+  "complete",
+  "compopt",
+  "continue",
+  "declare",
+  "dirs",
+  "disown",
+  "echo",
+  "enable",
+  "eval",
+  "exec",
+  "exit",
+  "export",
+  "false",
+  "fc",
+  "fg",
+  "getopts",
+  "hash",
+  "help",
+  "history",
+  "jobs",
+  "kill",
+  "let",
+  "local",
+  "logout",
+  "mapfile",
+  "popd",
+  "printf",
+  "pushd",
+  "pwd",
+  "read",
+  "readarray",
+  "readonly",
+  "return",
+  "set",
+  "shift",
+  "shopt",
+  "source",
+  "suspend",
+  "test",
+  "times",
+  "trap",
+  "true",
+  "type",
+  "typeset",
+  "ulimit",
+  "umask",
+  "unalias",
+  "unset",
+  "wait",
+]);
+
+const isExecutableFile = (path: string): boolean => {
+  try {
+    const stat = statSync(path);
+    return stat.isFile() && (stat.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 按沙箱里 bash 真用的那串 PATH 找第一个可执行文件，它得是工具箱 venv/bin 或 node/bin 里的、真实路径也还在工具箱里。
+ * 系统目录排在前面，系统里有同名程序就是它先跑，密钥不能给它。PATH 里有空项或相对项时 bash 按 cwd 找，不认。
+ */
+const toolboxExecutable = (name: string, containment: ClosedContainment): boolean => {
+  const entries = toolboxSearchPath(containment).split(":");
+  if (entries.some((entry) => entry === "" || !isAbsolute(entry))) return false;
+  const toolboxBins = new Set([
+    join(containment.toolboxDir, "venv", "bin"),
+    join(toolboxNodeDir(containment.toolboxDir), "bin"),
+  ]);
+  for (const entry of entries) {
+    const candidate = join(entry, name);
+    if (!isExecutableFile(candidate)) continue;
+    if (!toolboxBins.has(entry)) return false;
+    try {
+      return isInsideRoot(realpathExisting(candidate), containment.toolboxDir);
+    } catch {
+      return false;
+    }
+  }
+  return false;
+};
+
+// 单引号外的 $ 都可能展开（变量、$(...)、$'...'、算术），一律不认；反引号同理。
+const hasDollarOutsideSingleQuotes = (command: string): boolean => {
+  let quote: "single" | "double" | null = null;
+  let escaped = false;
+  for (const char of command) {
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "single") {
+      escaped = true;
+      continue;
+    }
+    if (char === "'" && quote !== "double") quote = quote === "single" ? null : "single";
+    else if (char === '"' && quote !== "single") quote = quote === "double" ? null : "double";
+    else if ((char === "$" || char === "`") && quote !== "single") return true;
+  }
+  return false;
+};
+
+/** 只读过滤段：现有的只读命令表里的，分出来全是不问的读。 */
+const isReadFilter = (words: readonly string[], call: GateCall): boolean => {
+  const name = words[0] ?? "";
+  if (!READ_COMMANDS.has(name)) return false;
+  const items = classifyCommand(words, call);
+  return (
+    items.length > 0 &&
+    items.every((item) => item.action === "read" && !item.access.network && item.access.writePaths.length === 0) &&
+    items.every((item) => verdictForItem(item, call, [], []) === "allow")
+  );
+};
+
+/**
+ * 云电脑上不问的 bash 的词法前提：没有换行、展开、单引号外的 $ 和反引号，shell-quote 拆得开。认不出就 null，按原规则判。
+ * 下面两种放行都只看拆出来的词，这些东西在词里看不见。
+ */
+const plainCloudTokens = (call: GateCall): readonly (ParseEntry | VariableToken)[] | null => {
+  if (call.toolName !== "bash" || call.sandbox === "none") return null;
+  if (call.containment.level !== "closed" || call.routine?.boundary === "read_only") return null;
+  const command = call.input.command;
+  if (typeof command !== "string" || command.trim() === "" || command.includes("`")) return null;
+  if (hasUnsafeCommandSeparator(command) || hasUnquotedExpansion(command) || hasDollarOutsideSingleQuotes(command)) {
+    return null;
+  }
+  return shellTokens(command);
+};
+
+/**
+ * 命令行工具：整条命令只是一个或几个登记工具，最多用 `|` 接只读过滤。
+ * 放行时带网络和这些工具的 env；`;`、`&&`、重定向、展开、前缀赋值都不认，免得别的命令搭着拿到密钥。
+ */
+function cliDecision(call: GateCall, containment: ClosedContainment): GateDecision | null {
+  const tools = call.cliTools ?? [];
+  const tokens = tools.length === 0 ? null : plainCloudTokens(call);
+  if (tokens === null) return null;
+  const segments: string[][] = [[]];
+  for (const token of tokens) {
+    if (typeof token === "string") {
+      segments[segments.length - 1]?.push(token);
+      continue;
+    }
+    if (!isOperator(token) || token.op !== "|") return null;
+    segments.push([]);
+  }
+  const used = new Set<CliToolId>();
+  for (const words of segments) {
+    const name = words[0];
+    if (name === undefined || name === "" || name.includes("/") || PREFIX_ASSIGNMENT.test(name)) return null;
+    const matched = tools.filter((tool) => tool.command === name);
+    if (matched.length > 0) {
+      if (BASH_RESERVED_WORDS.has(name) || !toolboxExecutable(name, containment)) return null;
+      for (const tool of matched) used.add(tool.id);
+      continue;
+    }
+    if (!isReadFilter(words, call)) return null;
+  }
+  if (used.size === 0) return null;
+  return {
+    verdict: "allow",
+    action: "shell",
+    target: null,
+    reason: null,
+    access: { network: true, writePaths: [], cliTools: [...used] },
+  };
+}
+
+const NPM_GLOBAL_FLAGS = new Set(["-g", "--global", "--location=global"]);
+
+/**
+ * 装登记工具自己的包：整条命令逐字是 `npm i|install <全局> <包>` 或 `pip install <包>`，包名和装法都是这个 Bot 能用的
+ * 某个工具登记的那一个。放开的口子和批准后的装包一样，由 classifyCloudCommand 定；不带工具 env，装包脚本拿不到密钥。
+ */
+function toolInstallDecision(call: GateCall): GateDecision | null {
+  const tools = (call.cliTools ?? []).filter((tool) => tool.install !== null);
+  const tokens = tools.length === 0 ? null : plainCloudTokens(call);
+  if (tokens === null || !tokens.every((token) => typeof token === "string")) return null;
+  const words = tokens as readonly string[];
+  const [name, verb, ...rest] = words;
+  const npm =
+    name === "npm" && (verb === "i" || verb === "install") && rest.length === 2 && NPM_GLOBAL_FLAGS.has(rest[0] ?? "");
+  const pip = name === "pip" && verb === "install" && rest.length === 1;
+  if (!npm && !pip) return null;
+  const pkg = rest.at(-1);
+  const manager = npm ? "npm" : "pip";
+  if (!tools.some((tool) => tool.install?.manager === manager && tool.install.package === pkg)) return null;
+  const [item] = classifyCommand(words, call);
+  if (item?.action !== "install") return null;
+  return { verdict: "allow", action: "install", target: null, reason: null, access: item.access };
+}
+
 /** 云电脑的沙箱里没有 root，问了用户也只会换来一次失败，直接拒并指路。 */
 function systemPackageDenial(call: GateCall): GateDecision | null {
   if (call.toolName !== "bash" || call.containment.level === "none") return null;
@@ -1152,6 +1436,10 @@ function decideResolved(call: GateCall, grants: readonly Grant[], accounts: read
   if (DRAFT_TOOLS.has(call.toolName)) return decideDraft(call.input, accounts);
   const systemPackage = systemPackageDenial(call);
   if (systemPackage !== null) return systemPackage;
+  if (call.containment.level === "closed") {
+    const cloud = cliDecision(call, call.containment) ?? toolInstallDecision(call);
+    if (cloud !== null) return cloud;
+  }
   const own = classifyOwnTool(call);
   if (readOnly && own === null) {
     const denial =

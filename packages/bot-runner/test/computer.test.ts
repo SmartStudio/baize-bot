@@ -125,6 +125,7 @@ async function harness(options: {
         createdAt: "2026-10-09T08:00:00.000Z",
       },
     ],
+    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "computer-test-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
