@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CliToolConfig } from "./cli-tools.js";
 import { PokerAction, PokerHandId, PokerPersona, PokerReviewHand, PokerSessionId, TablePrompt } from "./poker.js";
 import {
   AccountId,
@@ -26,6 +27,7 @@ import {
   MessageId,
   ModelPurpose,
   Platform,
+  PublishVia,
   Preference,
   ProjectOfferMember,
   ProjectOfferPlatform,
@@ -88,7 +90,14 @@ export const ToolConnectionConfig = z.discriminatedUnion("localOnly", [
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
 export const AccountConfig = z
-  .object({ id: AccountId, platform: Platform, handle: z.string().nullable(), tier: AccountTier, login: AccountLogin })
+  .object({
+    id: AccountId,
+    platform: Platform,
+    via: PublishVia,
+    handle: z.string().nullable(),
+    tier: AccountTier,
+    login: AccountLogin,
+  })
   .strict();
 export type AccountConfig = z.infer<typeof AccountConfig>;
 
@@ -465,6 +474,8 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     // 该用户全部 Bot 的偏好，恒带：空也带空数组，运行器靠它对账「之前说过、这里没有的已作废」，理由同 skills。
     preferences: z.array(Preference),
     accounts: z.array(AccountConfig),
+    // 这台电脑上能用的命令行工具，恒带，空也带空数组，运行器整份对账，理由同 skills。
+    cliTools: z.array(CliToolConfig),
     grants: z.array(Grant),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
     // 读 GitHub、X 走控制面的账号代理：`${baseUrl}/<accountId>/<平台路径>`，Bearer 用 modelGateway.apiKey，令牌不下发。
