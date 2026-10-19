@@ -97,7 +97,7 @@ bash 实际跑在哪种系统沙箱里是字面量联合 `SandboxKind`，由 `sr
 
 `seatbelt` 和 `bwrap` 走同一套命令分类。获批的当前调用只放宽判出来的写路径或整个网络，沙箱外都把环境裁成基础变量和 `PI_` 前缀，`DISPLAY` 不在里面。两种沙箱都做不到按域名放行，域名授权只决定这次是否询问；一旦批准网络，当前调用可访问全部网络。远程电脑上批准网络的那次调用和容器共用网络命名空间，所以 Xvfb 带 `-nolisten local` 关掉抽象 socket，只留 `/tmp/.X11-unix` 下的文件 socket。沙箱私有的 `/tmp` 里没有这个目录，获批写 `/tmp` 把真 `/tmp` 挂进来时它也按禁区盖住。bwrap 挡文件 unix socket 只靠看不看得见：共不共用网络命名空间都不影响文件 socket，沙箱里看得见的 socket 批不批联网都连得上。沙箱私有的 `/tmp` 盖住了真 `/tmp` 里的 socket；远程电脑镜像里没有 docker.sock、D-Bus 和用户会话的 socket，所以不要把宿主的 docker.sock 挂进远程电脑容器。
 
-**云电脑上的 bash 只有联网、写工作区外、删和移、内联代码才问。** 远程电脑上自动放行的 bash 跑在 bwrap 里，不联网，只有工作区、共享区和私有的 `/tmp` 可写。数据目录整块用 tmpfs 盖住，只挂回这个 Bot 的工作区、共享区、`skills/`、`toolbox/`、`toolbox-bin/` 和 `drafts/`，别的 Bot 的目录（包括沙箱起来之后才建的）、这个 Bot 的 `agent/` 和 `sessions/` 都看不见；禁区和 X 的 socket 再盖一层。沙箱有自己的 user、pid、ipc、uts namespace，但 `/proc` 没有重挂，和容器共用，所以 `ps` 列出的是容器里的全部进程，别的 Bot 正在跑的命令行也看得到。看不到的是它们的环境变量，也进不了它们的文件视图：`/proc/<pid>/environ`、`root`、`cwd`、`fd` 读不到靠的是跨 user namespace 不许读，所以 `--unshare-user` 显式写在参数里。`ps` 里看到的 pid 是容器的，沙箱里的 `kill` 只认沙箱自己的 pid namespace，打不到外面的进程。共享区是所有 Bot 共用的，谁都能改、能删别的 Bot 放进去的文件。`shell` 类的询问批下来 `access` 还是空的，跑的是同一个沙箱，人点一次同意并没有多给能力。所以 `ps`、`ls ~`、`which`、读 `/proc`、`$(...)`、`for` 循环、`python3 analyze.py`、`git status` 都不问。人点同意真正防得住的只剩在工作区和共享区里删、移文件，以及扫描看不进去的内联代码。`RunnerConfig.computerKind` 由电脑代理从 `welcome.kind` 存下传进来。`src/contained.ts` 的 `containmentFor` 只在 `remote` 加 `bwrap` 时给 `closed`，Mac、本机 Linux、没有沙箱都是 `none`，结果经必填的 `GateCall.containment` 交给闸门，漏传编译不过，不会默认放宽。`decide` 在 `decideResolved` 之后接 `src/gate.ts` 的 `relaxIfContained`，它只看 `closed` 下 bash 的 `ask`。判出来要联网或要写路径的不动，批了才开口子，这是审批真正有用的地方。只放 `read` 和 `shell` 两类动作，`delete`、`install`、`publish`（`git push`）这些照问。其余交给 `src/contained.ts` 的 `stillAsksInSandbox` 扫整条文本，扫出删、移或内联代码照问，扫不出就改成 `allow`，`access` 为空，沙箱一点不放宽。`deny` 和 `allow` 原样返回，系统包管理器和只读例行的拒绝都在它之前定了。扫的只有闸门本来就要问的命令，本来就放行的照旧放行。扫法不看结构。先合并反斜杠续行，再去掉引号和反斜杠，按 `;`、`&`、`|`、括号、反引号、花括号和换行切段，段里按空白、重定向、`=`、`$`、逗号切词，每个词去掉路径前缀再比。所以 `$(...)`、反引号、循环体、`xargs rm`、`find -exec rm`、`sh -c 'rm -rf out'`、`/bin/rm` 都扫得到。认的命令名是 `rm`、`rmdir`、`unlink`、`shred`、`mv`、`truncate`、`dd`、`rename`、`mmv`、`trash`、`trash-put`、`gio`、`srm`、`wipe`、`xz`、`bzip2`、`gzip`、`unxz`、`bunzip2`、`gunzip`、`pigz`、`unpigz`、`lzma`、`unlzma`、`rimraf`，参数是 `-delete`、`--del`、`--delete*`、`--remove-files`、`--remove-source-files`、`--remove-destination`、`-sdel`。归档工具删源文件、删成员的写法只在它们自己后面认：`zip` 的短选项串里出现 `m` 或 `d`（`-m`、`-9m`、`-d`）和 `--move`，`7z`、`7za`、`7zr` 的 `d` 子命令，`ar` 的操作串里有 `d`，`zstd`、`lz4` 的 `--rm`。`git` 反着判，另按 shell 的词法切一遍，路径里的括号、引号、`$(...)` 不会把它切散：跳过 `-C`、`-c` 这类全局选项后，子命令只有 `status`、`log`、`diff`、`show`、`add`、`commit`、`fetch`、`branch`、`rev-parse`、`ls-files`、`blame`、`grep` 不算，`branch` 带 `-d`、`-D`、`-m`、`-M`、`-f` 也算。内联代码按主人的拍板一律照问，因为代码里的删除扫不出来。同一段里解释器名后面跟着执行代码的选项就算：`python*`、`pypy*` 和 `sh`、`bash`、`zsh`、`dash`、`ksh`、`mksh`、`ash`、`fish`、`busybox` 的 `-c`（含 `-ec`、`-Ic` 这样合写的），`node`、`nodejs`、`bun` 的 `-e`、`-p`、`--eval`、`--print`，`deno eval`，`perl*` 的 `-e`、`-E`（含 `-pe`、`-ne`），`ruby*` 的 `-e`，`php*` 的 `-r`，`lua`、`luajit` 的 `-e`。从标准输入读代码的也算：解释器后面是 `-`，段里有 heredoc 或 here-string 的 `<<`，或者解释器在段首、后面只有选项（`echo … | python3`、`curl … | sh`、awk 的 `print | "sh"`），`-V`、`--version`、`-h`、`--help` 除外。跑脚本文件（`python3 analyze.py`、`bash run.sh`、`bash -s < job.sh`）、`ps aux | grep python` 这样参数里提到解释器名的都不算。扫描不看词在命令里的位置，参数里出现 `rm` 也算，宁多问。已知会漏的几类。工作区脚本文件里写的删除，比如 `bash clean.sh`，以及 `git commit` 跑的 `.git/hooks`。变量或 `eval` 间接调用，比如 `c=rm; $c x`。`$'\162m'` 这类 ANSI-C 引号。`r{m,} x`、`/bin/r? x` 这样用花括号、通配符拼出来的命令名，`$SHELL -c` 这样借变量写的解释器名，`sed` 的 `e` 命令。这些现在不问就跑，但沙箱把它们限制在这个 Bot 自己的工作区和共享区里。`cp`、`sed -i`、`ln -s`、重定向覆盖也会改掉或换掉工作区里的文件，它们不算删和移，同样不问。同样只在 `closed` 下，`apt`、`apt-get`、`dpkg`、`dnf`、`yum`、`apk`、`brew`、`sudo`、`su` 直接拒绝，理由叫模型改用工具箱，因为沙箱里没有 root，批了也装不上。工具箱（`pip install` 一类装到 `<bot>/toolbox/venv`）在云电脑上进每一条命令的 PATH，批没批都一样，而且只进四个名字。自动放行的 `python3 analyze.py` 因此用得上装过的包。PATH 是 `<bot>/toolbox-bin`、`containment.searchPath`、`venv/bin` 三段。`searchPath` 是运行器起沙箱时的系统 PATH。`toolbox-bin` 里只有 `python`、`python3`、`pip`、`pip3` 四个 shell 脚本，venv 里有就 exec venv 的，没有就按 `searchPath` 找系统的；`venv/bin` 垫在系统目录后面，pip 装进来的 `black` 这类程序不批也能用，但盖不住系统同名程序，`tar -czf` 找 `gzip`、`npm install` 找 `node` 时找到的还是系统的。shim 不用软链，Python 靠可执行文件旁边的 `pyvenv.cfg` 认 venv，软链过去 `sys.prefix` 退回系统。`toolbox-bin` 在 Bot 目录下、工具箱之外，工作区和批准的装包都写不到，运行器起沙箱和每条命令起之前都重写一遍：在 Bot 目录里新建一个空目录写好四个脚本，删掉旧的再整个换上去，所以目录里多放的程序、预先埋的软链留不下，`toolbox-bin` 本身换成软链也不跟过去写；Bot 目录本身是软链时整条命令不起，报错。批准的装包 cwd 仍是工作区，工作区是 Bot 不问就能写的，所以装包工具不读工作区里的代码和配置来决定跑什么、从哪下：首次建 venv 用 `python3 -I -m venv`，写工具箱的那条命令整条带 `PYTHONSAFEPATH=1`，工作区里的 `venv.py`、`./pip/` 顶不掉真模块；环境里钉 `npm_config_registry`（运行器自己的环境里有就沿用，没有就是 `https://registry.npmjs.org/`），盖过工作区 `.npmrc` 和 `.yarnrc` 的 `registry`；`YARN_IGNORE_PATH=1` 关掉 `.yarnrc` 的 `yarn-path`；`npm_config_ignore_pnpmfile=true` 关掉 `.pnpmfile.cjs`。`requirements.txt` 里的 `--index-url`、`--extra-index-url` 盖过环境变量和命令行，env 钉不住，所以 `-r`、`-c`（含 `-qr` 这样合写的短选项和 `--requirem`、`--cons` 这样的长选项缩写）的装包卡上多写一句「requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源」，由人决定。`pip install .`、`-e`、本地路径、本地 wheel 或 sdist、`git+…`、`file:` 装的是 Bot 能改的代码，卡上多写一句「装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码」。项目自己的 `npm install`、`pnpm install`、`yarn install` 要跑项目和所装包的安装脚本，这是用户批的内容，卡上写明，不拦。包缓存（`PIP_CACHE_DIR`、`npm_config_cache`、`npm_config_store_dir`、`YARN_CACHE_FOLDER`、`XDG_CACHE_HOME`）都指到沙箱每次新挂的 `/tmp/cache` 下，批准写 `/tmp` 时真 `/tmp` 绑进来，bwrap 在写绑定之后再新挂一次 `/tmp/cache`，所以缓存照样不跨命令留存，没批准的命令写不进下一次批准装包会信任的 wheel 或 index，代价是每次装包重新下载。
+**云电脑上的 bash 只有联网、写工作区外、删和移、内联代码才问。** 远程电脑上自动放行的 bash 跑在 bwrap 里，不联网，只有工作区、共享区和私有的 `/tmp` 可写。数据目录整块用 tmpfs 盖住，只挂回这个 Bot 的工作区、共享区、`skills/`、`toolbox/`、`toolbox-bin/` 和 `drafts/`，别的 Bot 的目录（包括沙箱起来之后才建的）、这个 Bot 的 `agent/` 和 `sessions/` 都看不见；禁区和 X 的 socket 再盖一层。沙箱有自己的 user、pid、ipc、uts namespace，但 `/proc` 没有重挂，和容器共用，所以 `ps` 列出的是容器里的全部进程，别的 Bot 正在跑的命令行也看得到。看不到的是它们的环境变量，也进不了它们的文件视图：`/proc/<pid>/environ`、`root`、`cwd`、`fd` 读不到靠的是跨 user namespace 不许读，所以 `--unshare-user` 显式写在参数里。`ps` 里看到的 pid 是容器的，沙箱里的 `kill` 只认沙箱自己的 pid namespace，打不到外面的进程。共享区是所有 Bot 共用的，谁都能改、能删别的 Bot 放进去的文件。`shell` 类的询问批下来 `access` 还是空的，跑的是同一个沙箱，人点一次同意并没有多给能力。所以 `ps`、`ls ~`、`which`、读 `/proc`、`$(...)`、`for` 循环、`python3 analyze.py`、`git status` 都不问。人点同意真正防得住的只剩在工作区和共享区里删、移文件，以及扫描看不进去的内联代码。`RunnerConfig.computerKind` 由电脑代理从 `welcome.kind` 存下传进来。`src/contained.ts` 的 `containmentFor` 只在 `remote` 加 `bwrap` 时给 `closed`，Mac、本机 Linux、没有沙箱都是 `none`，结果经必填的 `GateCall.containment` 交给闸门，漏传编译不过，不会默认放宽。`decide` 在 `decideResolved` 之后接 `src/gate.ts` 的 `relaxIfContained`，它只看 `closed` 下 bash 的 `ask`。判出来要联网或要写路径的不动，批了才开口子，这是审批真正有用的地方。只放 `read` 和 `shell` 两类动作，`delete`、`install`、`publish`（`git push`）这些照问。其余交给 `src/contained.ts` 的 `stillAsksInSandbox` 扫整条文本，扫出删、移或内联代码照问，扫不出就改成 `allow`，`access` 为空，沙箱一点不放宽。`deny` 和 `allow` 原样返回，系统包管理器和只读例行的拒绝都在它之前定了。扫的只有闸门本来就要问的命令，本来就放行的照旧放行。扫法不看结构。先合并反斜杠续行，再去掉引号和反斜杠，按 `;`、`&`、`|`、括号、反引号、花括号和换行切段，段里按空白、重定向、`=`、`$`、逗号切词，每个词去掉路径前缀再比。所以 `$(...)`、反引号、循环体、`xargs rm`、`find -exec rm`、`sh -c 'rm -rf out'`、`/bin/rm` 都扫得到。认的命令名是 `rm`、`rmdir`、`unlink`、`shred`、`mv`、`truncate`、`dd`、`rename`、`mmv`、`trash`、`trash-put`、`gio`、`srm`、`wipe`、`xz`、`bzip2`、`gzip`、`unxz`、`bunzip2`、`gunzip`、`pigz`、`unpigz`、`lzma`、`unlzma`、`rimraf`，参数是 `-delete`、`--del`、`--delete*`、`--remove-files`、`--remove-source-files`、`--remove-destination`、`-sdel`。归档工具删源文件、删成员的写法只在它们自己后面认：`zip` 的短选项串里出现 `m` 或 `d`（`-m`、`-9m`、`-d`）和 `--move`，`7z`、`7za`、`7zr` 的 `d` 子命令，`ar` 的操作串里有 `d`，`zstd`、`lz4` 的 `--rm`。`git` 反着判，另按 shell 的词法切一遍，路径里的括号、引号、`$(...)` 不会把它切散：跳过 `-C`、`-c` 这类全局选项后，子命令只有 `status`、`log`、`diff`、`show`、`add`、`commit`、`fetch`、`branch`、`rev-parse`、`ls-files`、`blame`、`grep` 不算，`branch` 带 `-d`、`-D`、`-m`、`-M`、`-f` 也算。内联代码按主人的拍板一律照问，因为代码里的删除扫不出来。同一段里解释器名后面跟着执行代码的选项就算：`python*`、`pypy*` 和 `sh`、`bash`、`zsh`、`dash`、`ksh`、`mksh`、`ash`、`fish`、`busybox` 的 `-c`（含 `-ec`、`-Ic` 这样合写的），`node`、`nodejs`、`bun` 的 `-e`、`-p`、`--eval`、`--print`，`deno eval`，`perl*` 的 `-e`、`-E`（含 `-pe`、`-ne`），`ruby*` 的 `-e`，`php*` 的 `-r`，`lua`、`luajit` 的 `-e`。从标准输入读代码的也算：解释器后面是 `-`，段里有 heredoc 或 here-string 的 `<<`，或者解释器在段首、后面只有选项（`echo … | python3`、`curl … | sh`、awk 的 `print | "sh"`），`-V`、`--version`、`-h`、`--help` 除外。跑脚本文件（`python3 analyze.py`、`bash run.sh`、`bash -s < job.sh`）、`ps aux | grep python` 这样参数里提到解释器名的都不算。扫描不看词在命令里的位置，参数里出现 `rm` 也算，宁多问。已知会漏的几类。工作区脚本文件里写的删除，比如 `bash clean.sh`，以及 `git commit` 跑的 `.git/hooks`。变量或 `eval` 间接调用，比如 `c=rm; $c x`。`$'\162m'` 这类 ANSI-C 引号。`r{m,} x`、`/bin/r? x` 这样用花括号、通配符拼出来的命令名，`$SHELL -c` 这样借变量写的解释器名，`sed` 的 `e` 命令。这些现在不问就跑，但沙箱把它们限制在这个 Bot 自己的工作区和共享区里。`cp`、`sed -i`、`ln -s`、重定向覆盖也会改掉或换掉工作区里的文件，它们不算删和移，同样不问。同样只在 `closed` 下，`apt`、`apt-get`、`dpkg`、`dnf`、`yum`、`apk`、`brew`、`sudo`、`su` 直接拒绝，理由叫模型改用工具箱，因为沙箱里没有 root，批了也装不上。工具箱（`pip install` 一类装到 `<bot>/toolbox/venv`）在云电脑上进每一条命令的 PATH，批没批都一样，而且只进四个名字。自动放行的 `python3 analyze.py` 因此用得上装过的包。PATH 是 `<bot>/toolbox-bin`、`containment.searchPath`、`venv/bin`、`node/bin` 四段，`node/bin` 是 `npm i -g` 装进来的命令，见「命令行工具」。`searchPath` 是运行器起沙箱时的系统 PATH。`toolbox-bin` 里只有 `python`、`python3`、`pip`、`pip3` 四个 shell 脚本，venv 里有就 exec venv 的，没有就按 `searchPath` 找系统的；`venv/bin` 和 `node/bin` 垫在系统目录后面，pip 装进来的 `black` 这类程序不批也能用，但盖不住系统同名程序，`tar -czf` 找 `gzip`、`npm install` 找 `node` 时找到的还是系统的。shim 不用软链，Python 靠可执行文件旁边的 `pyvenv.cfg` 认 venv，软链过去 `sys.prefix` 退回系统。`toolbox-bin` 在 Bot 目录下、工具箱之外，工作区和批准的装包都写不到，运行器起沙箱和每条命令起之前都重写一遍：在 Bot 目录里新建一个空目录写好四个脚本，删掉旧的再整个换上去，所以目录里多放的程序、预先埋的软链留不下，`toolbox-bin` 本身换成软链也不跟过去写；Bot 目录本身是软链时整条命令不起，报错。批准的装包 cwd 仍是工作区，工作区是 Bot 不问就能写的，所以装包工具不读工作区里的代码和配置来决定跑什么、从哪下：首次建 venv 用 `python3 -I -m venv`，写工具箱的那条命令整条带 `PYTHONSAFEPATH=1`，工作区里的 `venv.py`、`./pip/` 顶不掉真模块；环境里钉 `npm_config_registry`（运行器自己的环境里有就沿用，没有就是 `https://registry.npmjs.org/`），盖过工作区 `.npmrc` 和 `.yarnrc` 的 `registry`；`YARN_IGNORE_PATH=1` 关掉 `.yarnrc` 的 `yarn-path`；`npm_config_ignore_pnpmfile=true` 关掉 `.pnpmfile.cjs`。`requirements.txt` 里的 `--index-url`、`--extra-index-url` 盖过环境变量和命令行，env 钉不住，所以 `-r`、`-c`（含 `-qr` 这样合写的短选项和 `--requirem`、`--cons` 这样的长选项缩写）的装包卡上多写一句「requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源」，由人决定。`pip install .`、`-e`、本地路径、本地 wheel 或 sdist、`git+…`、`file:` 装的是 Bot 能改的代码，卡上多写一句「装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码」。项目自己的 `npm install`、`pnpm install`、`yarn install` 要跑项目和所装包的安装脚本，这是用户批的内容，卡上写明，不拦。包缓存（`PIP_CACHE_DIR`、`npm_config_cache`、`npm_config_store_dir`、`YARN_CACHE_FOLDER`、`XDG_CACHE_HOME`）都指到沙箱每次新挂的 `/tmp/cache` 下，批准写 `/tmp` 时真 `/tmp` 绑进来，bwrap 在写绑定之后再新挂一次 `/tmp/cache`，所以缓存照样不跨命令留存，没批准的命令写不进下一次批准装包会信任的 wheel 或 index，代价是每次装包重新下载。
 
 Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里先全部判完再并行执行，路径判定与实际使用之间不留给同批工具改符号链接的窗口。
 
@@ -106,6 +106,30 @@ Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里�
 `ask` 发出的 `approval_request` 带 `action` 和能确定时的 `target`。多段命令（`&&`、`;`、管道、重定向）里要问的段不止一个时，`action` 取要问的段里最严的那个，次序是 `gate.ts` 的 `ACTION_SEVERITY`：批了也不许记住的花钱、账号安全、删除在最前，然后是出了这台电脑的发布、发消息、外部写、互动，然后是认不出的 `shell`，再是区外写、装包、区外读，写工作区最后；`target` 跟着那一段。卡上的 `note` 是各段说明去重拼起来，再加一句「批准后放开：联网、写 …」，按合并后的 `access` 写，只写批下来真会放开的东西，读不在里面，因为沙箱本来就看得见禁区以外的东西；单段命令也带这句。handler 同时监听审批 Promise 和 Pi 的 `ctx.signal`。拒绝或中止返回 `{ block: true, reason }`，工具函数不执行。停机时运行器发送 `approval_abandoned`；删 Bot 时只解开本地等待，不发送该报文，由控制面删除 Bot 的流程收尾审批。暂停不会让审批失效。`bot_tool_call` 的 `blocked` 标记由 `ApprovalGate` 记下，并在 reporter 消费后删除。
 
 `approve(runId, callId, outcome)` 只结算 runId 和 callId 都匹配的等待。`approved` 放行；`rejected` 的工具结果为「归属人拒绝了这个动作。」；`timed_out` 为「10 分钟没人批，按拒绝处理。」；`voided` 为「用户发了新消息，这一步作废了。」。作废结算后复用 `abortSession()` 中止对应群的会话，`runnerAbortedRuns` 标记让 reporter 不追加模型报错行。旧 prompt 从 `agent_settled` 收尾，`finishRun` 保证一个 runId 只发一次 `run_done`，原串行队列随后执行新 prompt。到期拒绝只拦工具，当前轮可继续告诉用户结果。
+
+## 命令行工具
+
+主人在控制面登记的命令行工具（`grok` 这类）随 `config.cliTools` 下发，每项是命令名、装法、几个环境变量和能用的 Bot（`bots` 为 null 是全部）。运行器每次 config 都按 `botId` 整份重算（`src/cli-tools.ts` 的 `cliToolsFor`），不在新 config 里的就没了。它不进 Bot 的会话指纹，换了工具不重建会话，下一条命令和下一轮系统提示就用新的。
+
+**判定。** 闸门在 `systemPackageDenial` 之后、按动作分类之前走 `cliDecision`，认出来就 `allow`，`action` 仍报 `shell`（`ActionKind` 没有加新值，控制面和 Web 不用跟着改），`access` 是 `{ network: true, writePaths: [], cliTools: [...] }`。只在 `closed`（远程电脑加 bwrap）上认，Mac、本机 Linux、没有沙箱、只读例行一律不认，按原规则走，Mac 上的 `grok` 照问。认的条件全要满足：
+
+- 整条命令只用 `|` 连，每一段的第一个词要么是这个 Bot 的登记工具，要么是闸门已有的只读命令表（`ls`、`cat`、`head`、`tail`、`wc`、`stat`、`file`、`du`、`grep`）且这一段按原规则判出来就是不问的读；至少一段是工具。`jq`、`sort` 不在只读表里，`grok | jq` 不算。`jq` 这类带求值能力的过滤不收：管道里每一段都拿到工具的环境，`jq -n env`、`jq -n '$ENV'` 就能把密钥打出来。
+- `;`、`&&`、`||`、`&`、重定向、换行、注释、子 shell、单引号外的 `$`（变量、`$(...)`、`$'...'`）、反引号、没加引号的展开、前缀赋值（`GROK_API_KEY=x grok`）、带 `/` 的命令名都不认。
+- 工具名按沙箱里那串 PATH（`toolbox-bin`、系统 PATH、`venv/bin`、`node/bin`）找第一个可执行文件，它必须在 `venv/bin` 或 `node/bin` 里，真实路径也还在工具箱里。系统目录里有同名程序时先找到的是系统的，不认；没装不认；`node/bin` 里的软链指到工具箱外不认；PATH 里有空项或相对项（bash 会按 cwd 找）整条不认。
+
+不认的命令拿不到工具的变量，`echo $GROK_API_KEY`、`env`、`grok; rm x` 在云电脑上可能照样放行，但跑起来环境里没有那几个值。
+
+**环境变量。** `sandbox.ts` 的 `envForTools` 只在 `closed` 且这次调用的 permit 带着 `cliTools` 时给出这些工具的变量，`whitelistEnv` 把它们并进去，不盖住已有的键（`PATH`、`TMPDIR` 这类）。permit 只由闸门判出 cli 时写下，装包（`npm i -g`、`pip install`）、普通联网命令、没 permit 的命令一个变量都拿不到。
+
+**node 工具箱。** 云电脑上 `npm install -g`、`npm i -g`、`--global`、`--location=global` 归 `install`，照问，`access` 是联网加写 `<toolbox>/node`。批下来那条命令前面加 `export NPM_CONFIG_PREFIX=<toolbox>/node`，全局包的命令落到 `<toolbox>/node/bin`。prefix 只用环境变量给，命令行上的 `--prefix` 由 Bot 写，盖过它也写不出沙箱放开的这一个目录。`<toolbox>/node` 在起沙箱时就建好，bwrap 只能 bind 已存在的路径。装本地目录、包文件或 git 仓库时卡上多写一句会运行它的安装脚本。合写的短选项（`-gD`）和别的写法不认成全局安装，按原规则问。
+
+**装登记工具的包不问。** 云电脑上整条命令逐字是 `npm i -g <包>`、`npm install -g <包>`（`--global`、`--location=global` 同样）或 `pip install <包>`，`<包>` 等于这个 Bot 某个工具登记的 `install.package`，装法也对得上时，`toolInstallDecision` 直接 `allow`，`access` 和批准后的同一条一样（联网加写 `<toolbox>/node` 或 `<toolbox>`），不带 `cliTools`，装包脚本拿不到密钥。多一个参数、多一个包、包名差一个字、接了管道或连接符、前缀赋值、`pip3`、别的 Bot 的工具，都按原规则问。包名是主人登记的，Bot 改不了它；放行的只是主人已经点名要装的那一个。Mac 和本机不变。
+
+**脱敏。** bash 的结果在交回 Pi 之前换一遍：这个 Bot 拿得到的所有工具变量值，加上这次实际注入的值，去重后长的先换，逐个跑 `redactCredential`，短值也照换。换的是整个结果（`content`、`details`、`structuredContent`）、`onUpdate` 推的中间输出和抛出的错误消息。Pi 截断时写在临时目录的 `pi-bash-*.log` 完整输出也读出来换掉再写回，模型 `read` 它也看不到值。模型看到的、会话文件里存的、上行的 `bot_tool_call` 和从会话镜像出去的工作记录都是换过的。挡不住变形：base64、hex、逆序、切成几段、只打印一部分，换不掉。值很短时会把输出里碰巧相同的字串也换掉。
+
+**系统提示。** 云电脑上这个 Bot 有工具时，系统提示多一段 `cli_tools`：命令名、装法（shared 的 `installCommand`，和 Web「让 Bot 装上」发的是同一条；包名带 `[`、`>=`、`^` 这类字符时加单引号，门禁拆词后比的是去掉引号的包名；没登记装法就叫它告诉主人），一句「这些命令能联网、自带密钥，直接用；没装就照下面的装法原样装」，以及什么写法拿不到密钥。不带变量名和值。Mac 和本机不给这一段，那里的 bash 拿不到密钥，列了也用不上。
+
+**剩下的风险。** 工具本身拿着密钥联网，参数能让它做什么就能做什么：工具能跑任意子命令、能被参数改到别的服务器、会读工作区里的配置文件时，这些都在放行范围里。登记什么工具由主人决定。
 
 ## 暂停和继续
 
@@ -325,12 +349,12 @@ T-2482 给老客户回一封询价邮件
 - 开源仓库（projectGroupId：group-gh）节奏：未定
 ```
 
-能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、档位和 accountId，平台和账号名沿用 `accountLabel`。prompt 取 run 开始时的账号清单；工具调用仍现取最新清单和权限。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
+能用的账号是起草工具的 accountId 来源，每个账号一行，写平台、账号名、连接方式、档位和 accountId，连接方式按 `via` 写「接口授权」或「电脑浏览器登录」，同一个 X 号两种都连上时是两行、两个 accountId，平台和账号名沿用 `accountLabel`。登录不是 `valid` 的账号照样列出，档位后面补一句：浏览器登录的号说账号页上还没确认登上、批了先等着、登上了会自动发、账号在哪台电脑上以账号页为准；授权的号说授权过期了。模型据此告诉用户稿子为什么没马上发，不去猜账号登在哪台电脑上。prompt 取 run 开始时的账号清单；工具调用仍现取最新清单和权限。没有账号时整段不出，没账号的 Bot 的 prompt 逐字不变：
 
 ```
 能用的账号：
-- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs
-- X @baize_bot，只读档，不能起草，accountId：acc-x
+- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs
+- X @baize_bot，接口授权，只读档，不能起草，accountId：acc-x
 ```
 
 任务卡成员按 `名字（标签，首席）：描述` 渲染，首席成员追加 `，首席`；没有标签时写 `名字（首席）`。普通成员没有标签时省括号，描述为空时省冒号和描述。队友通讯录来自每次 prompt 的 `members`，不进入系统提示。
@@ -447,7 +471,7 @@ snapshot 的形状：
 
 ## 读 GitHub 和 X
 
-`account_read`（`src/account-read.ts`）让 Bot 以用户连上的 GitHub、X 账号的身份读平台接口。参数是 `accountId` 和平台相对路径（可带查询串），只发 GET，打到 `${config.accountsProxy.baseUrl}/<accountId>/<路径>`，唯一的凭据头是 `Authorization: Bearer <modelGateway.apiKey>`。平台令牌只在控制面的账号代理里换出来用，运行器、会话 JSONL 和模型都见不到，`packages/e2e/test/account-read.test.ts` 扫整个数据目录钉着这件事。
+`account_read`（`src/account-read.ts`）让 Bot 以用户连上的 GitHub、X 账号的身份读平台接口。只列 `via: "api"` 的号：在电脑浏览器里登录的 X 号控制面没有它的令牌，账号代理读不了，起草照样能用它。参数是 `accountId` 和平台相对路径（可带查询串），只发 GET，打到 `${config.accountsProxy.baseUrl}/<accountId>/<路径>`，唯一的凭据头是 `Authorization: Bearer <modelGateway.apiKey>`。平台令牌只在控制面的账号代理里换出来用，运行器、会话 JSONL 和模型都见不到，`packages/e2e/test/account-read.test.ts` 扫整个数据目录钉着这件事。
 
 闸门把它归 `read`，目标是账号，不弹审批。写平台一律走起草，这个工具只读。
 
@@ -457,9 +481,9 @@ snapshot 的形状：
 - 成功回平台原文。正文从 `response.body` 按流读，读到 Pi 自带 read、bash 的上限（`DEFAULT_MAX_BYTES`，50KB）再多 4 个字节就 cancel，不把整个回包读进内存。超过上限时按 UTF-8 起始字节和续字节退到最后一个完整码点截断，不拿 `�` 当边界，结尾注明「已截断：回包超过 50.0KB」，叫模型分页或缩小查询。出错回包只读前 16KB 拼原因。
 - 不跟重定向，60 秒超时，run 被中止时请求跟着断。
 
-## 小红书发布器
+## 电脑上的发布器
 
-控制面批准一条草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。
+控制面批准一条走电脑（`via: "computer"`）的草稿后，把 `publish_draft` 发给账号所在的电脑，报文带起草的 `botId`（Bot 删了是 null）和 `attempt`。`attempt` 是控制面这一次认领的时刻，草稿超时记失败、重批再发时靠它分开新旧两次。电脑代理收到后直接调 `publishDraft(message, { dataDir, browser, liveHub })`，不经过群道的 prompt 队列，与该 Bot 的浏览器工具共用互斥锁，发完回一条 `publish_result`，`attempt` 原样带回。代码在 `src/publisher.ts`。电脑上的发布器按平台登记成一张表 `PUBLISHERS`，类型是 `Record<BrowserPlatform, …>`，shared 加一个平台，这里不补一行就编译不过。现在两行：小红书和 X。两家共用 `publishInTab`（排队、补齐配图、后台标签页、按进度归因失败）和 `pageDriver`（等元素、点、填字、传图），各自只写自己那几步，站点差别放在 `Site`（文案里的站名、登录过期的说法、点过发布后叫用户去哪看、哪个地址算登录页）。下面先讲小红书，X 和它不同的地方在「X 发布器」一节。
 
 - **浏览器和数据目录从依赖参数来。** `browser` 就是电脑代理给运行器的那份 `BrowserConfig`，本机和远程电脑都给，必填。账号在这个 profile 里登录（远程电脑经画面扫码），发布也只能在这里发。每条发布都重新调 `connection()`，和 Bot 的浏览器工具共用那一条管道，各自 attach 自己的标签页，`finally` 里只关自己的页，不断连接。
 - **先验草稿，再碰浏览器。** 只发 `kind: "post"`。没图回「小红书笔记至少要一张图」。旧的 `kind: "path"` 配图先取 realpath，必须正好落在 `publish_draft.botId` 那个 Bot 的 `<dataDir>/<botId>/drafts/` 里，文件名等于起草时的拷贝名 `<sha256>.<扩展名>`，内容的 sha256 也要对得上。别的 Bot 目录下的拷贝不认，`botId` 为 null 时一张都不认。哪一条不对就回 `error`，一张都不传，浏览器也不连。
@@ -491,6 +515,30 @@ xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwe
 
 `test/publisher.test.ts` 钉住这些：前四条不需要 Chrome，其余用真 Chrome 加一个照这张表搭的假创作者中心，找不到 Chrome 时跳过。
 
+### X 发布器
+
+`publishToX` 发浏览器登录的 X 号的帖子和回复，排队、标签页、失败归因和小红书同一套。不同的地方：
+
+- **先验草稿。** 配图最多 4 张，多了回「X 一条帖子最多带 4 张图」；回复的 `replyTo.url` 必须是 `x.com` 或 `twitter.com` 的 `/<账号>/status/<数字>` 链接，统一换成 `https://x.com/i/status/<id>` 去开，别的回「X 只能回复帖子的链接」。都在碰浏览器之前判。标题不发，和接口那条路一致。
+- **发帖和回复走同一个弹窗。** 发帖开 `composeUrl`；回复开帖子页，点主帖（`tabindex="-1"` 的那条 article，不是上面的祖先帖）的回复按钮，弹出同一个编辑框。正文逐行插，行间回车，和小红书一样。图传完等预览数对上再点发布。
+- **发完看弹窗关没关。** 编辑框消失算发出去了。帖子链接从发完弹的 toast 里读 `/status/<id>`，读到就是 `externalId`；读不到回 `ok`，`url` 是 `https://x.com/home`，`externalId` 为 null。没去时间线上翻，因为 `publish_draft` 不带账号名，翻到的最新一条不一定是这条。
+- **登录过期。** 每轮等待先看地址，落在 `/login` 或 `/i/flow/login` 就是 `login_expired`。
+
+| 表项            | 取值                                                                        | 核实过没有     |
+| --------------- | --------------------------------------------------------------------------- | -------------- |
+| `composeUrl`    | `https://x.com/compose/post`                                                | 没有，待实机核 |
+| `manageUrl`     | `https://x.com/home`                                                        | 没有           |
+| `isLoginPage`   | 路径以 `/login` 或 `/i/flow/login` 开头                                     | 没有           |
+| `statusPage`    | `https://x.com/i/status/<id>`                                               | 没有           |
+| `replyButton`   | `article[data-testid="tweet"][tabindex="-1"] [data-testid="reply"]`         | 没有，待实机核 |
+| `bodyEditor`    | `[role="dialog"] [data-testid="tweetTextarea_0"]`                           | 没有，待实机核 |
+| `imageInput`    | `[role="dialog"] input[data-testid="fileInput"]`                            | 没有，待实机核 |
+| `imagePreview`  | `[role="dialog"] [data-testid="attachments"] img`，每传完一张多一个         | 没有，待实机核 |
+| `publishButton` | `[role="dialog"] [data-testid="tweetButton"]`，排除 `aria-disabled="true"` | 没有，待实机核 |
+| `postedLink`    | `[data-testid="toast"] a[href*="/status/"]`，id 按 `/status/(\d+)` 抠      | 没有，待实机核 |
+
+`data-testid` 一类的名字来自 X 网页版常见的写法，没有对着真页面核过。`test/x-publisher.test.ts` 用真 Chrome 加一个照这张表搭的假 X 钉住：带图分段发帖、回复点中主帖、登录过期、按钮找不到报 `page_changed`、读不到 toast 回主页链接。
+
 ## 草稿和内容计划
 
 Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具挂给所有 Bot，主助理和队员都能起草，三个名字（`DRAFT_TOOL_NAMES`）对工具连接一律保留。三件都不走审批，闸门只看账号档，见「统一闸门和沙箱」。
@@ -504,7 +552,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
-- **GitHub 和 X 的草稿先不带图。** `images` 非空就抛错，在读图之前判。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
+- **接口授权的号起草先不带图。** 按账号的 `via` 判：`api` 的号 `images` 非空就抛错，在读图之前判；`computer` 的号（小红书、浏览器登录的 X）能带图，浏览器登录的 X 多于 4 张同样在读图之前抛错，数和控制面发布器表的 `maxImages` 一致，控制面起草和批准时也按它拒。同平台两种号都有、用户没指定时，工具描述叫模型用接口授权的那个。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
 - **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。MIME 按 PNG、JPEG、WebP、GIF 的文件头识别，不信扩展名，拷贝扩展名按 MIME 固定。拷贝后把同一份字节 PUT 到 `${config.hub.baseUrl}/attachments?botId=&groupId=`，声明 `x-baize-sha256`，Bearer 每次现取当前网关 key。`DraftSpec` 只记 `{kind: "attachment", attachmentId, sha256, mime}`。上传失败时抛「配图传到白泽失败，过一会儿再起草」，草稿、改稿或计划不上行；服务器正文和网络异常不拼进工具错误，避免泄露 Bearer 或 URL 查询串。之后工作目录里的原图怎么改都不影响草稿，另一台电脑的发布器能下载同一份字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 

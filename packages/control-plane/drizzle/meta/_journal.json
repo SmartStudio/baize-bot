@@ -302,6 +302,13 @@
       "when": 1792383034681,
       "tag": "0042_skinny_wendell_vaughn",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1792394211518,
+      "tag": "0043_x_browser_and_cli_tools",
+      "breakpoints": true
     }
   ]
 }

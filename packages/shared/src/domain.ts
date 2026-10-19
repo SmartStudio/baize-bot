@@ -104,10 +104,14 @@ export type BotRunState = z.infer<typeof BotRunState>;
 
 export const Platform = z.enum(["github", "x", "xiaohongshu"]);
 export type Platform = z.infer<typeof Platform>;
-export const BrowserPlatform = Platform.extract(["xiaohongshu"]);
+export const BrowserPlatform = Platform.extract(["xiaohongshu", "x"]);
 export type BrowserPlatform = z.infer<typeof BrowserPlatform>;
 export const OAuthPlatform = Platform.extract(["github", "x"]);
 export type OAuthPlatform = z.infer<typeof OAuthPlatform>;
+// 账号怎么连上的就怎么发：OAuth 连上的由控制面调平台接口，按电脑登录的由那台电脑上的助理 Chrome 发。
+// X 两种都能连，各是一个账号。
+export const PublishVia = z.enum(["api", "computer"]);
+export type PublishVia = z.infer<typeof PublishVia>;
 
 export const ModelPurpose = z.enum(["plan", "fast"]);
 export type ModelPurpose = z.infer<typeof ModelPurpose>;
@@ -594,6 +598,7 @@ export const Account = z.object({
   ownerId: UserId,
   computerId: ComputerId,
   platform: Platform,
+  via: PublishVia,
   handle: z.string().min(1).max(100).nullable(),
   tier: AccountTier,
   login: AccountLogin,

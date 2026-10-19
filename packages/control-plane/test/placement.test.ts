@@ -76,12 +76,14 @@ async function ownerWithTwoComputers(): Promise<Owner> {
     ownerId: user.id,
     computerId: local.computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle: "白泽工厂日记",
   });
   await addAccount(database.db, {
     ownerId: user.id,
     computerId: remote.computerId,
     platform: "github",
+    via: "api",
     handle: "baize-tech",
   });
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小运" })).json());

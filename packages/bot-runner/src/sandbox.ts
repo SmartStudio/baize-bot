@@ -1,9 +1,26 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { BotId } from "@baize/shared";
+import { BotId, type CliToolConfig, type CliToolId, redactCredential } from "@baize/shared";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
-import type { Containment } from "./contained.js";
+import {
+  type ClosedContainment,
+  type Containment,
+  toolboxNodeDir,
+  toolboxSearchPath,
+  toolboxShimDir,
+} from "./contained.js";
 import type { GateAccess, SandboxKind } from "./gate.js";
 import { botDirs, type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
 
@@ -14,19 +31,8 @@ export interface CloudBox {
   readonly toolboxDir: string;
 }
 
-type ClosedContainment = Extract<Containment, { level: "closed" }>;
-
 /** 云电脑上只有这四个名字落到工具箱的 venv，其余名字落到系统目录。 */
 const TOOLBOX_NAMES = ["pip", "pip3", "python", "python3"] as const;
-
-const toolboxShimDir = (toolboxDir: string): string => join(dirname(toolboxDir), "toolbox-bin");
-
-/**
- * 云电脑上 bash 的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 垫底。pip 装进来的 black 这类程序还能用，
- * 但盖不住系统同名程序。自动放行和批准的命令是同一串，批准过的装包之后不问的 python3 也用得上。
- */
-export const toolboxSearchPath = (containment: ClosedContainment): string =>
-  `${toolboxShimDir(containment.toolboxDir)}:${containment.searchPath}:${join(containment.toolboxDir, "venv", "bin")}`;
 
 // shim 不能是软链：Python 按可执行文件旁边的 pyvenv.cfg 认 venv，软链过去 sys.prefix 退回系统。
 // shim 目录在 Bot 目录下、工具箱之外，工作区和批准的装包都写不到；但 S-8 下批准的写可能放开整个 Bot 目录，
@@ -81,11 +87,13 @@ const seatbeltString = (value: string): string => `"${value.replaceAll("\\", "\\
 // 没批准的命令改写不了下一次批准的装包会信任的 wheel 和 index，代价是每次装包重新下载。
 // 工作区的 .npmrc、.yarnrc、.pnpmfile.cjs 是 Bot 不问就能写的：env 里的 registry 盖过 .npmrc，yarn-path 和 pnpmfile 关掉，
 // 批准的装包从哪下、跑哪个 yarn、跑哪段钩子就不由工作区定。
+// toolEnv 只在闸门把整条命令判成命令行工具时才有，排在最后、不盖住上面定好的键。
 export function whitelistEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
   tmpDir: string,
   cloud: Pick<ClosedContainment, "searchPath"> | null = null,
+  toolEnv: Readonly<Record<string, string>> = {},
 ): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = { PWD: cwd, TMPDIR: tmpDir };
   for (const key of ENV_ALLOW) {
@@ -106,6 +114,9 @@ export function whitelistEnv(
     next["npm_config_ignore_pnpmfile"] = "true";
     next["YARN_IGNORE_PATH"] = "1";
   }
+  for (const [key, value] of Object.entries(toolEnv)) {
+    if (!(key in next)) next[key] = value;
+  }
   return next;
 }
 
@@ -115,6 +126,9 @@ export function whitelistEnv(
  * 建 venv 用 -I，装包整条命令带 PYTHONSAFEPATH。
  */
 export const toolboxCommand = (toolboxDir: string, access: GateAccess, command: string): string => {
+  // npm 的 prefix 只用环境变量给：命令行上的 --prefix 由 Bot 写，盖过它也写不出沙箱放开的这一个目录。
+  const nodeDir = toolboxNodeDir(toolboxDir);
+  if (access.writePaths.includes(nodeDir)) return `export NPM_CONFIG_PREFIX=${shSingleQuote(nodeDir)}; ${command}`;
   if (!access.writePaths.includes(toolboxDir)) return command;
   const venv = join(toolboxDir, "venv");
   return `export PYTHONSAFEPATH=1; { [ -x ${shSingleQuote(join(venv, "bin", "pip"))} ] || python3 -I -m venv ${shSingleQuote(venv)}; } && ${command}`;
@@ -345,6 +359,7 @@ const spawnHook =
     tmpDir: string,
     permit: GateAccess,
     containment: Containment,
+    toolEnv: Readonly<Record<string, string>>,
   ): BashSpawnHook =>
   (ctx: BashSpawnContext) => {
     const closed = containment.level === "closed" ? containment : null;
@@ -354,9 +369,63 @@ const spawnHook =
     return {
       command: sandboxedCommand(kind, workDir, zones, permit, command),
       cwd: workDir,
-      env: whitelistEnv(ctx.env, workDir, tmpDir, searchPath === null ? null : { searchPath }),
+      env: whitelistEnv(ctx.env, workDir, tmpDir, searchPath === null ? null : { searchPath }, toolEnv),
     };
   };
+
+/** 闸门给的工具 id 换成这一刻配置里的 env。只在云电脑上给：Mac 和本机没有工具箱 PATH，同名的系统程序会拿到值。 */
+const envForTools = (
+  ids: readonly CliToolId[],
+  tools: readonly CliToolConfig[],
+  containment: Containment,
+): Record<string, string> => {
+  if (containment.level !== "closed") return {};
+  const env: Record<string, string> = {};
+  for (const tool of tools) {
+    if (!ids.includes(tool.id)) continue;
+    for (const entry of tool.env) env[entry.name] = entry.value;
+  }
+  return env;
+};
+
+/** 每个值单独换，长的先换：短值是长值的一截时，先换短的会把长值切碎留下尾巴。 */
+export function redactSecrets(text: string, secrets: readonly string[]): string {
+  const ordered = [...new Set(secrets.filter((secret) => secret !== ""))].toSorted((a, b) => b.length - a.length);
+  return ordered.reduce((out, secret) => redactCredential(out, secret), text);
+}
+
+const redactDeep = (value: unknown, secrets: readonly string[]): unknown => {
+  if (typeof value === "string") return redactSecrets(value, secrets);
+  if (Array.isArray(value)) return value.map((item) => redactDeep(item, secrets));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactDeep(item, secrets)]));
+  }
+  return value;
+};
+
+const redactError = (error: unknown, secrets: readonly string[]): unknown => {
+  if (!(error instanceof Error)) return error;
+  const redacted = new Error(redactSecrets(error.message, secrets));
+  redacted.name = error.name;
+  return redacted;
+};
+
+const FULL_OUTPUT_IN_ERROR = /Full output: ([^\]\n]+)\]/g;
+
+/** Pi 截断时把完整输出写进 tmpdir 下的 pi-bash-*.log，模型能 read 它，所以也要换。只认 Pi 自己起的那种文件名。 */
+const redactOutputFile = (path: string | undefined, secrets: readonly string[]): void => {
+  if (path === undefined || dirname(path) !== tmpdir()) return;
+  const name = basename(path);
+  if (!name.startsWith("pi-bash-") || !name.endsWith(".log")) return;
+  try {
+    if (!lstatSync(path).isFile()) return;
+    const text = readFileSync(path, "utf8");
+    const redacted = redactSecrets(text, secrets);
+    if (redacted !== text) writeFileSync(path, redacted);
+  } catch {
+    // 文件已被清掉就没有可换的
+  }
+};
 
 const AUTOMATIC: GateAccess = { network: false, writePaths: [] };
 
@@ -374,6 +443,7 @@ export function createSandboxedBash(
   zones: ForbiddenZones,
   activeRunId: () => string | null = () => null,
   cloud: CloudBox | null = null,
+  cliTools: () => readonly CliToolConfig[] = () => [],
 ): BashSandbox {
   const kind = sandboxKind();
   const tmpDir = join(workDir, ".tmp");
@@ -382,23 +452,43 @@ export function createSandboxedBash(
     cloud === null
       ? { level: "none" }
       : { level: "closed", searchPath: process.env["PATH"] ?? "", toolboxDir: cloud.toolboxDir };
-  if (containment.level === "closed") writeToolboxShims(containment);
+  if (containment.level === "closed") {
+    writeToolboxShims(containment);
+    // bwrap 只能 bind 已存在的路径：批准 npm -g 时不存在就会退到放开整个工具箱。
+    mkdirSync(toolboxNodeDir(containment.toolboxDir), { recursive: true });
+  }
   const permitsByRun = new Map<string, Map<string, GateAccess>>();
   const base = createBashToolDefinition(workDir);
   const tool = {
     ...base,
     executionMode: "sequential",
     execute: async (...args: Parameters<typeof base.execute>) => {
-      const [callId] = args;
+      const [callId, params, signal, onUpdate, ctx] = args;
       const runId = activeRunId();
       const permits = runId === null ? undefined : permitsByRun.get(runId);
       const permit = permits?.get(callId) ?? AUTOMATIC;
       permits?.delete(callId);
       if (runId !== null && permits?.size === 0) permitsByRun.delete(runId);
+      const tools = cliTools();
+      const toolEnv = envForTools(permit.cliTools ?? [], tools, containment);
+      // 结果进模型、进会话记录（工作记录从它镜像）之前换掉：这个 Bot 拿得到的值都换，不只这条命令注入的。
+      const secrets = [...tools.flatMap((one) => one.env.map((entry) => entry.value)), ...Object.values(toolEnv)];
       const scoped = createBashToolDefinition(workDir, {
-        spawnHook: spawnHook(kind, workDir, zones, tmpDir, permit, containment),
+        spawnHook: spawnHook(kind, workDir, zones, tmpDir, permit, containment, toolEnv),
       });
-      return scoped.execute(...args);
+      if (secrets.length === 0) return scoped.execute(...args);
+      const update: typeof onUpdate =
+        onUpdate === undefined ? undefined : (partial) => onUpdate(redactDeep(partial, secrets) as typeof partial);
+      try {
+        const result = await scoped.execute(callId, params, signal, update, ctx);
+        redactOutputFile(result.details?.fullOutputPath, secrets);
+        return redactDeep(result, secrets) as typeof result;
+      } catch (error) {
+        if (error instanceof Error) {
+          for (const match of error.message.matchAll(FULL_OUTPUT_IN_ERROR)) redactOutputFile(match[1], secrets);
+        }
+        throw redactError(error, secrets);
+      }
     },
   } satisfies typeof base;
   return {
@@ -406,7 +496,7 @@ export function createSandboxedBash(
     containment,
     tool,
     allow: (runId, callId, access) => {
-      if (!access.network && access.writePaths.length === 0) {
+      if (!access.network && access.writePaths.length === 0 && (access.cliTools ?? []).length === 0) {
         permitsByRun.get(runId)?.delete(callId);
         if (permitsByRun.get(runId)?.size === 0) permitsByRun.delete(runId);
         return;

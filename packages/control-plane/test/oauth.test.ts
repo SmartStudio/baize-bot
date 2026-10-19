@@ -265,6 +265,34 @@ describe("连平台账号", () => {
     });
   });
 
+  it("同一台电脑上已有浏览器登录的同名 X 号，授权连 X 另起一行接口账号，浏览器那行不动", async () => {
+    const s = await stack();
+    const o = await owner(s, false);
+    const browserId = newId();
+    await s.database.db.insert(accountRows).values({
+      id: browserId,
+      ownerId: o.user.id,
+      computerId: o.local.computerId,
+      platform: "x",
+      via: "computer",
+      handle: s.fake.handles.x,
+      login: "valid",
+    });
+    const [before] = await accountsOf(o);
+
+    await connectPlatform(o.client, "x");
+    const api = await connected(o);
+
+    expect(api).toMatchObject({ platform: "x", via: "api", handle: s.fake.handles.x, computerId: o.local.computerId });
+    expect(api.id).not.toBe(browserId);
+    const after = await accountsOf(o);
+    expect(after).toHaveLength(2);
+    expect(
+      after.find((one) => one.id === browserId),
+      "浏览器登录那行原样留着",
+    ).toEqual(before);
+  });
+
   it("伪造或重放的 state 回调被拒，不建账号", async () => {
     const s = await stack();
     const o = await owner(s, true);
@@ -1470,7 +1498,7 @@ describe("account-add 和第一次授权交错", () => {
     const added = addAccountWithToken(
       s.database.db,
       new CredentialCrypto(TEST_CREDENTIALS_KEY),
-      { ownerId: o.user.id, computerId: o.local.computerId, platform: "github", handle },
+      { ownerId: o.user.id, computerId: o.local.computerId, platform: "github", via: "api", handle },
       "github_access_manual",
     );
     await lockWaiters(s, 1, "account-add 停在写凭据之前");
@@ -1501,7 +1529,7 @@ describe("account-add 和第一次授权交错", () => {
     const added = addAccountWithToken(
       s.database.db,
       new CredentialCrypto(TEST_CREDENTIALS_KEY),
-      { ownerId: o.user.id, computerId: o.local.computerId, platform: "github", handle },
+      { ownerId: o.user.id, computerId: o.local.computerId, platform: "github", via: "api", handle },
       "github_access_manual",
     );
     await lockWaiters(s, 2, "account-add 排在后面");

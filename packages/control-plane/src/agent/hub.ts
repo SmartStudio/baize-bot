@@ -46,6 +46,7 @@ import { listPreferencesForConfig } from "../repo/preferences.js";
 import { listSkillsByOwner } from "../repo/skills.js";
 import { lockOwner, openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
+import { listCliToolConfigs } from "../repo/cli-tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
@@ -462,6 +463,12 @@ export class AgentHub {
     } finally {
       if (this.#flushChains.get(computerId) === current) this.#flushChains.delete(computerId);
     }
+  }
+
+  /** 不进发件箱，只发给现在连着的那条连接；不在线回 false。 */
+  sendToComputer(computerId: ComputerId, message: ControlToAgent): boolean {
+    const conn = this.#connections.get(computerId);
+    return conn !== undefined && this.isOnline(computerId) && this.#send(conn, message);
   }
 
   /** 这个用户在线的每台电脑各发一条。暂停和继续不知道 Bot 的活在哪台电脑上，所以都发。 */
@@ -909,13 +916,14 @@ export class AgentHub {
     this.#configs.set(conn, config);
     config.sent += 1;
     const generation = config.sent;
-    const [tools, skills, grants, accounts, brand, preferences] = await Promise.all([
+    const [tools, skills, grants, accounts, brand, preferences, cliTools] = await Promise.all([
       listToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto, conn.kind),
       listSkillsByOwner(this.#deps.db, conn.ownerId),
       listGrants(this.#deps.db, conn.ownerId),
       listAccountConfigs(this.#deps.db, conn.ownerId),
       listBrandForConfig(this.#deps.db, conn.ownerId),
       listPreferencesForConfig(this.#deps.db, conn.ownerId),
+      listCliToolConfigs(this.#deps.db, conn.ownerId, this.#deps.toolCrypto, conn.kind),
     ]);
     // listBots 是判暂停状态的快照，放在最后一个 await，查完同步发出 config 和补发，
     // 和暂停路由交错的窗口只剩这次查询在途的那一段。
@@ -944,6 +952,8 @@ export class AgentHub {
       // brand 和 preferences 同 skills 一样恒带：运行器靠它们判断要不要重拼系统提示，省掉就分不清「没有」和「没说」。
       brand,
       preferences,
+      // 同 skills 恒带：运行器按整份名单对账登记过的命令和它们的键。
+      cliTools,
       modelGateway: { baseUrl: urls.modelGateway, apiKey: conn.gatewayKey },
       accountsProxy: { baseUrl: urls.accountsProxy },
     });

@@ -1,4 +1,4 @@
-import { type AccountConfig, type ControlToAgent, OAuthPlatform } from "@baize/shared";
+import { type AccountConfig, type ControlToAgent } from "@baize/shared";
 import { DEFAULT_MAX_BYTES, formatSize } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { resultText } from "./assistant.js";
@@ -30,7 +30,7 @@ const ERROR_BODY_MAX = 16 * 1024;
 const UTF8_TAIL = 4;
 
 export const readableAccounts = (accounts: readonly AccountConfig[]): readonly AccountConfig[] =>
-  accounts.filter((account) => OAuthPlatform.safeParse(account.platform).success);
+  accounts.filter((account) => account.via === "api");
 
 const PARAMS = Type.Object({
   accountId: Type.String({ description: "用哪个号的身份读，照工具描述里的 accountId 抄" }),
@@ -43,8 +43,9 @@ const PARAMS = Type.Object({
 const describe = (accounts: readonly AccountConfig[]): string => {
   const head =
     "以用户连上的 GitHub 或 X 账号的身份读平台接口，只读不写，经白泽控制面转发，回平台的原始回包（多半是 JSON）。" +
-    "查 issue、看仓库、搜推文用它；发帖、评论、回复一律走 create_draft。";
-  if (accounts.length === 0) return `${head}\n现在没有连上的 GitHub 或 X 账号，要读就请用户去账号页连一个。`;
+    "查 issue、看仓库、搜推文用它；发帖、评论、回复一律走 create_draft。" +
+    "在电脑浏览器里登录的号读不了接口，但能起草，批了由电脑上的浏览器发。";
+  if (accounts.length === 0) return `${head}\n现在没有接口授权的 GitHub 或 X 账号，要读就请用户去账号页连一个。`;
   return [
     `${head}\n能用的号：`,
     ...accounts.map((account) => `- ${accountLabel(account)}，accountId：${account.id}`),
@@ -53,7 +54,7 @@ const describe = (accounts: readonly AccountConfig[]): string => {
 
 const listOf = (accounts: readonly AccountConfig[]): string =>
   accounts.length === 0
-    ? "现在没有能读的 GitHub 或 X 账号"
+    ? "现在没有能读的接口授权 GitHub 或 X 账号"
     : `能读的号：${accounts.map((account) => `${accountLabel(account)}（${account.id}）`).join("、")}`;
 
 /** 拼完再核对前缀：`..`、`%2e%2e`、反斜杠都由 URL 解析折掉，折完跳出这个账号的那一段就拒。 */
@@ -145,7 +146,7 @@ export function createAccountReadTool(options: {
         const why =
           other === undefined
             ? `没有 accountId 是「${params.accountId}」的账号`
-            : `${accountLabel(other)} 不是 GitHub 或 X 的号，这个工具读不了`;
+            : `${accountLabel(other)} 不是接口授权的 GitHub 或 X 的号，这个工具读不了`;
         throw new Error(`${why}。${listOf(readable)}。`);
       }
       const url = proxyUrl(live.proxy.baseUrl, account.id, params.path);

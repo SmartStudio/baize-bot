@@ -25,6 +25,8 @@ import type {
   MetricSource,
   ModelPurpose as ModelPurposeSchema,
   OAuthPlatform,
+  PublishVia,
+  CliInstall,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
   PokerBlinds,
@@ -197,6 +199,53 @@ export const toolConnections = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],
+);
+
+// 命令行工具：命令名一个用户只登记一次。bot_scope 为 all 时不看 cli_tool_bots，some 时只给表里的 Bot；
+// 不用「没有行就是全部」，免得选中的 Bot 全删光后工具悄悄变成全员可用。
+export const cliTools = pgTable(
+  "cli_tools",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    command: text("command").notNull(),
+    install: jsonb("install").$type<CliInstall>(),
+    computers: jsonb("computers").$type<ComputerKind[]>().notNull(),
+    botScope: text("bot_scope").$type<"all" | "some">().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex("cli_tools_owner_id_command_idx").on(t.ownerId, t.command),
+    check("cli_tools_bot_scope_ck", sql`${t.botScope} IN ('all', 'some')`),
+  ],
+);
+
+export const cliToolEnv = pgTable(
+  "cli_tool_env",
+  {
+    toolId: text("tool_id")
+      .notNull()
+      .references(() => cliTools.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    valueEnc: text("value_enc").notNull(),
+    last4: text("last4").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.toolId, t.name] })],
+);
+
+export const cliToolBots = pgTable(
+  "cli_tool_bots",
+  {
+    toolId: text("tool_id")
+      .notNull()
+      .references(() => cliTools.id, { onDelete: "cascade" }),
+    botId: text("bot_id")
+      .notNull()
+      .references(() => bots.id, { onDelete: "cascade" }),
+  },
+  (t) => [primaryKey({ columns: [t.toolId, t.botId] }), index("cli_tool_bots_bot_id_idx").on(t.botId)],
 );
 
 export const toolConnectionBots = pgTable(
@@ -404,6 +453,7 @@ export const accounts = pgTable(
       .notNull()
       .references(() => computers.id, { onDelete: "restrict" }),
     platform: text("platform").$type<Platform>().notNull(),
+    via: text("via").$type<PublishVia>().notNull(),
     handle: text("handle"),
     tier: text("tier").$type<AccountTier>().notNull().default("confirm_publish"),
     login: text("login").$type<AccountLogin>().notNull().default("none"),
@@ -418,11 +468,14 @@ export const accounts = pgTable(
   },
   (t) => [
     index("accounts_owner_id_idx").on(t.ownerId),
-    uniqueIndex("accounts_computer_platform_handle_idx").on(t.computerId, t.platform, t.handle),
-    uniqueIndex("accounts_owner_platform_none_idx")
-      .on(t.ownerId, t.platform)
+    uniqueIndex("accounts_computer_platform_via_handle_idx").on(t.computerId, t.platform, t.via, t.handle),
+    uniqueIndex("accounts_owner_platform_via_none_idx")
+      .on(t.ownerId, t.platform, t.via)
       .where(sql`${t.login} = 'none'`),
-    check("accounts_xhs_tier_ck", sql`${t.platform} <> 'xiaohongshu' OR ${t.tier} <> 'direct_publish'`),
+    // 浏览器发帖没有平台给的撤回凭据，发之前一定要人批。
+    check("accounts_computer_tier_ck", sql`${t.via} <> 'computer' OR ${t.tier} <> 'direct_publish'`),
+    check("accounts_via_ck", sql`${t.via} = 'computer' OR ${t.platform} <> 'xiaohongshu'`),
+    check("accounts_via_api_ck", sql`${t.via} = 'api' OR ${t.platform} <> 'github'`),
     check("accounts_handle_ck", sql`(${t.login} = 'none') = (${t.handle} IS NULL)`),
     check("accounts_login_failure_ck", sql`(${t.loginFailure} IS NULL) = (${t.loginFailedAt} IS NULL)`),
   ],

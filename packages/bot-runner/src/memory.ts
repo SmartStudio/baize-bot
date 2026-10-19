@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { AgentToControl, type BotId, type ControlToAgent, type MessageId } from "@baize/shared";
 import { type Static, Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
+import { CLI_TOOLS_SECTION } from "./cli-tools.js";
 import type { ActiveRun } from "./topic.js";
 import type { MemoryShown } from "./watermark.js";
 
@@ -20,9 +21,10 @@ const COMPUTER_SECTION = "computer";
 export interface SystemSections {
   readonly memory: string | null;
   readonly computer: string | null;
+  readonly cliTools: string | null;
 }
 
-export const NO_SECTIONS: SystemSections = { memory: null, computer: null };
+export const NO_SECTIONS: SystemSections = { memory: null, computer: null, cliTools: null };
 
 const PREFERENCES_HEADER = "你现在记住的偏好（之前说过、这里没有的已作废）：";
 const NO_PREFERENCES = "（现在一条都没有，之前记的全部作废）";
@@ -76,6 +78,7 @@ export function injectSections<M extends { readonly role: string; readonly secti
   const added: Record<string, string> = {};
   if (sections.memory !== null) added[MEMORY_SECTION] = sections.memory;
   if (sections.computer !== null) added[COMPUTER_SECTION] = sections.computer;
+  if (sections.cliTools !== null) added[CLI_TOOLS_SECTION] = sections.cliTools;
   const [head, ...rest] = messages;
   if (head === undefined || head.role !== "system" || Object.keys(added).length === 0) return [...messages];
   return [{ ...head, sections: { ...head.sections, ...added } }, ...rest];

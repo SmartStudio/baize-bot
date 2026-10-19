@@ -1,5 +1,4 @@
 import {
-  BrowserPlatform,
   GroupId,
   MessageId,
   type AgentToControl,
@@ -247,7 +246,7 @@ const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> =
 
 /**
  * 三种结论都先认电脑：账号必须是这台电脑主人的、登在这台电脑上的，否则整条丢掉。
- * 还得是在电脑浏览器里登录的平台：GitHub、X 的登录状态只跟着控制面的凭据代际走，电脑说什么都不算。
+ * 还得是在电脑浏览器里登录的账号：授权连上的账号登录状态只跟着控制面的凭据代际走，电脑说什么都不算。
  * 账号不属于哪个群，没有群消息可落，要用户处理的都走通知。登录状态随 config.accounts 下发，变了就重发。
  */
 async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: LoginState): Promise<void> {
@@ -256,9 +255,9 @@ async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: 
     console.warn(`电脑 ${conn.computerId} 报的账号 ${event.accountId} 不在它上面，整条丢掉`);
     return;
   }
-  if (!BrowserPlatform.safeParse(found.platform).success) {
+  if (found.via !== "computer") {
     console.warn(
-      `电脑 ${conn.computerId} 报了 ${found.platform} 账号 ${event.accountId} 的登录状态，这个平台不在电脑上登录，整条丢掉`,
+      `电脑 ${conn.computerId} 报了 ${found.platform} 账号 ${event.accountId} 的登录状态，这个账号是授权连上的，整条丢掉`,
     );
     return;
   }

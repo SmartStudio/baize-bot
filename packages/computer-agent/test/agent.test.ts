@@ -226,6 +226,7 @@ const configMessage = {
   tools: [],
   brand: null,
   preferences: [],
+  cliTools: [],
   accounts: [],
   grants: [],
   modelGateway: { baseUrl: "http://localhost:3001/model", apiKey: "dev-key" },

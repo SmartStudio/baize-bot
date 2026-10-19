@@ -8,6 +8,7 @@ import {
   type LoginFailure,
   type OAuthPlatform,
   type Platform,
+  type PublishVia,
   type UserId,
 } from "@baize/shared";
 import { and, asc, desc, eq, lte, ne, sql, type SQL } from "drizzle-orm";
@@ -25,9 +26,9 @@ export async function findAccountOnComputer(
   ownerId: UserId,
   computerId: ComputerId,
   accountId: AccountId,
-): Promise<{ readonly platform: Platform } | null> {
+): Promise<{ readonly platform: Platform; readonly via: PublishVia } | null> {
   const [row] = await db
-    .select({ platform: accounts.platform })
+    .select({ platform: accounts.platform, via: accounts.via })
     .from(accounts)
     .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId), eq(accounts.computerId, computerId)))
     .limit(1);
@@ -38,12 +39,13 @@ export type NewAccount = {
   readonly ownerId: UserId;
   readonly computerId: ComputerId;
   readonly platform: Platform;
+  readonly via: PublishVia;
   readonly handle: string;
   readonly tier?: AccountTier;
 };
 
 /**
- * account-add 脚本挂一个已登录的账号。同一台电脑上同一平台同一个名字再挂一次是同一个账号，
+ * account-add 脚本挂一个已登录的账号。同一台电脑上同一平台同一种连接同一个名字再挂一次是同一个账号，
  * 不另起一行；再挂时给了档位就改档，没给就保持原档。
  * 已有的行 login 不在这里动：过期的账号靠随后 saveAccessToken 写下的新一代回到 valid。
  */
@@ -55,12 +57,13 @@ export async function addAccount(db: Db | Tx, input: NewAccount): Promise<Accoun
       ownerId: input.ownerId,
       computerId: input.computerId,
       platform: input.platform,
+      via: input.via,
       handle: input.handle,
       login: "valid",
       ...(input.tier === undefined ? {} : { tier: input.tier }),
     })
     .onConflictDoUpdate({
-      target: [accounts.computerId, accounts.platform, accounts.handle],
+      target: [accounts.computerId, accounts.platform, accounts.via, accounts.handle],
       set: { computerId: input.computerId, ...(input.tier === undefined ? {} : { tier: input.tier }) },
     })
     .returning();
@@ -69,7 +72,7 @@ export async function addAccount(db: Db | Tx, input: NewAccount): Promise<Accoun
 }
 
 /**
- * account-add 在 advisory lock 里先按这个人、这个平台、这个名字找已有的行：授权回调可能刚把同一个号挂到了远程电脑上，
+ * account-add 在 advisory lock 里先按这个人、这个平台、这种连接、这个名字找已有的行：授权回调可能刚把同一个号挂到了远程电脑上，
  * 唯一索引按电脑建，addAccount 在本机插入不会撞上它。找到就用那一行，电脑不动；给了档位就改档，和 addAccount 再挂时一样。
  * 同名的行不止一行时先挑已经在 input 这台电脑上的，和授权回调挑行的顺序一致。
  */
@@ -81,6 +84,7 @@ export async function findOwnerAccount(tx: Tx, input: NewAccount): Promise<Accou
       and(
         eq(accounts.ownerId, input.ownerId),
         eq(accounts.platform, input.platform),
+        eq(accounts.via, input.via),
         eq(accounts.handle, input.handle),
       ),
     )
@@ -102,7 +106,7 @@ export async function lockOwnerPlatform(tx: Tx, ownerId: UserId, platform: Platf
 }
 
 /**
- * OAuth 授权回来了。这个人在这个平台上已经有同名的行（多半是以前过期的，或者 account-add 挂的）就把那行
+ * OAuth 授权回来了，建的是走接口的账号。这个人在这个平台上已经有同名的接口账号（多半是以前过期的，或者 account-add 挂的）就把那行
  * 挂到这次选的电脑上，不另起一行；同名的行不止一行时先挑已经在这台电脑上的，挪过来不会撞唯一索引。
  * login 不在这里动：调用方随后在 withAccountLock 里写新一代凭据，账号在那一步回到 valid。
  *
@@ -124,6 +128,7 @@ export async function connectOAuthAccount(
       and(
         eq(accounts.ownerId, input.ownerId),
         eq(accounts.platform, input.platform),
+        eq(accounts.via, "api"),
         eq(accounts.handle, input.handle),
       ),
     )
@@ -140,9 +145,9 @@ export async function connectOAuthAccount(
   }
   const [row] = await tx
     .insert(accounts)
-    .values({ id: newId(), ...input, computerId: computer.id, login: "valid" })
+    .values({ id: newId(), ...input, via: "api", computerId: computer.id, login: "valid" })
     .onConflictDoUpdate({
-      target: [accounts.computerId, accounts.platform, accounts.handle],
+      target: [accounts.computerId, accounts.platform, accounts.via, accounts.handle],
       set: { computerId: computer.id },
     })
     .returning();
@@ -165,7 +170,7 @@ export type CreatePlaceholderResult =
   { readonly kind: "created" | "existing"; readonly account: Account } | { readonly kind: "no_computer" };
 
 /**
- * 账号页点「加小红书」：建一个没登录、没名字的占位，登录回来才有名字。一个人每个平台最多一个占位，
+ * 账号页点「加小红书」「用电脑上的浏览器登录 X」：建一个走电脑、没登录、没名字的占位，登录回来才有名字。一个人每个平台最多一个占位，
  * 靠部分唯一索引收敛：已经有了就回那一行，挂到这次选的电脑上。
  */
 export async function createPlaceholder(
@@ -182,9 +187,9 @@ export async function createPlaceholder(
   const id = newId();
   const [row] = await db
     .insert(accounts)
-    .values({ id, ownerId, computerId: request.computerId, platform: request.platform })
+    .values({ id, ownerId, computerId: request.computerId, platform: request.platform, via: "computer" })
     .onConflictDoUpdate({
-      target: [accounts.ownerId, accounts.platform],
+      target: [accounts.ownerId, accounts.platform, accounts.via],
       targetWhere: sql`${accounts.login} = 'none'`,
       // 占位还没登录，哪台电脑上都没有它的登录态：用户在另一台电脑上又加一次，就是要在那台上登。
       set: { computerId: request.computerId },
@@ -262,6 +267,7 @@ export async function markLoginValid(
           and(
             eq(accounts.computerId, computerId),
             eq(accounts.platform, reported.platform),
+            eq(accounts.via, reported.via),
             eq(accounts.handle, handle),
             ne(accounts.id, accountId),
           ),
@@ -398,9 +404,10 @@ export async function listAccounts(db: Db, ownerId: UserId): Promise<Account[]> 
 }
 
 export async function listAccountConfigs(db: Db, ownerId: UserId): Promise<AccountConfig[]> {
-  return (await listAccounts(db, ownerId)).map(({ id, platform, handle, tier, login }) => ({
+  return (await listAccounts(db, ownerId)).map(({ id, platform, via, handle, tier, login }) => ({
     id,
     platform,
+    via,
     handle,
     tier,
     login,
@@ -412,7 +419,7 @@ export type SetTierResult =
   | { readonly kind: "not_found" }
   | { readonly kind: "not_allowed" };
 
-/** 小红书不能设成可直接发布：表上的 CHECK 兜底，这里先挡掉给个人话的 400。 */
+/** 走电脑浏览器发的账号不能设成可直接发布：表上的 CHECK 兜底，这里先挡掉给个人话的 400。 */
 export async function setAccountTier(
   db: Db,
   ownerId: UserId,
@@ -420,12 +427,12 @@ export async function setAccountTier(
   tier: AccountTier,
 ): Promise<SetTierResult> {
   const [current] = await db
-    .select({ platform: accounts.platform })
+    .select({ via: accounts.via })
     .from(accounts)
     .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId)))
     .limit(1);
   if (current === undefined) return { kind: "not_found" };
-  if (current.platform === "xiaohongshu" && tier === "direct_publish") return { kind: "not_allowed" };
+  if (current.via === "computer" && tier === "direct_publish") return { kind: "not_allowed" };
   const [row] = await db
     .update(accounts)
     .set({ tier })
@@ -438,6 +445,7 @@ export async function setAccountTier(
 export type DraftAccount = {
   readonly id: AccountId;
   readonly platform: Platform;
+  readonly via: PublishVia;
   readonly tier: AccountTier;
   readonly computerId: ComputerId;
 };
@@ -449,7 +457,13 @@ export async function findAccountForDraft(
   accountId: AccountId,
 ): Promise<DraftAccount | null> {
   const [row] = await db
-    .select({ id: accounts.id, platform: accounts.platform, tier: accounts.tier, computerId: accounts.computerId })
+    .select({
+      id: accounts.id,
+      platform: accounts.platform,
+      via: accounts.via,
+      tier: accounts.tier,
+      computerId: accounts.computerId,
+    })
     .from(accounts)
     .where(and(eq(accounts.id, accountId), eq(accounts.ownerId, ownerId)))
     .limit(1);

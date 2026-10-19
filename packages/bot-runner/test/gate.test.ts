@@ -205,6 +205,7 @@ describe("统一闸门四层判定", () => {
     const direct: AccountConfig = {
       id: "account-direct" as AccountConfig["id"],
       platform: "x",
+      via: "api",
       handle: "baize",
       tier: "direct_publish",
       login: "valid",
@@ -218,6 +219,7 @@ describe("统一闸门四层判定", () => {
 const accountOf = (id: string, tier: AccountConfig["tier"]): AccountConfig => ({
   id: id as AccountConfig["id"],
   platform: "x",
+  via: "api",
   handle: "baize",
   tier,
   login: "expired",

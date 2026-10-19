@@ -12,6 +12,7 @@ import {
   decodeLive,
   encodeLive,
   type Account,
+  BrowserPlatform,
   type LiveUserEnd,
   type MessageBody,
   type MessageId,
@@ -61,13 +62,20 @@ const closeSession = (liveId: LiveId, push: Push): boolean => {
   return true;
 };
 
+// 照电脑代理 login.ts 的站点表，画面上方显示的是登录页的源。
+const LOGIN_ORIGIN: Record<BrowserPlatform, string> = {
+  xiaohongshu: "https://www.xiaohongshu.com",
+  x: "https://x.com",
+};
+
 // 账号页点登录：画面面开着时，电脑那头「建好了登录页」，按这次的尝试号登记一个 login 会话推出去。
 export const announceLogin = (account: Account, attempt: string, push: Push): void => {
-  if (!screenOn || account.platform !== "xiaohongshu") return;
+  const platform = BrowserPlatform.safeParse(account.platform);
+  if (!screenOn || account.via !== "computer" || !platform.success) return;
   const session = LiveSession.parse({
     liveId: randomUUID(),
-    purpose: { kind: "login", accountId: account.id, platform: account.platform, attempt },
-    origin: "https://www.xiaohongshu.com",
+    purpose: { kind: "login", accountId: account.id, platform: platform.data, attempt },
+    origin: LOGIN_ORIGIN[platform.data],
     computerId: account.computerId,
   });
   sessions.set(session.liveId, session);

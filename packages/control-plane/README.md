@@ -150,6 +150,22 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 
 请求体上限 20 MiB，超限回中文 413。自定义 transport fetch 在 SDK 解析前按原始响应字节限长：POST 按单条响应累计，GET 长连接按每个 SSE 事件累计；超过 20 MiB 就取消读取，上游 POST 关闭，回固定中文 502「插件结果超过 20 MiB 上限」。GET 事件超限时因尚无可用的结果 id，会终止该 Client 的所有在途调用并作废缓存；等待该 GET 回包的调用收到超限文案，被连带取消的 POST 调用收到「插件调用失败：这个地址连不上」。GET 和 POST 的媒体类型比较都忽略大小写和参数。完整结果和脱敏后的响应仍各检查一次 20 MiB，不转发超限结果。连接/协议错误只回 `describeMcpFailure` 的固定中文分类，错误对象及凭据不进日志；成功和业务错误内容都经 `redactCredential` 后才回电脑。网关 key 每次 hello 会轮换，运行器在每次调用现取最新 key，轮换不重建工具。升级 SDK 后整文件跑 `mcp-proxy.test.ts`，断流判定依赖 `onmessage` 和 EOF 之间不跨宏任务。
 
+## 命令行工具
+
+用户登记的是一个第三方命令行工具，不是一组环境变量：命令名（如 `grok`）、可选的装包（`npm` 或 `pip` 加包名）、它要的几个键和值、在哪种电脑上（本机、云电脑）、给哪些 Bot（`bots: null` 是全部）。表是 `cli_tools`、`cli_tool_env`、`cli_tool_bots`，同一用户下命令名唯一，重复登记由唯一索引挡下、回 409；删 Bot 时分配由外键级联清掉。
+
+### 密钥绑命令
+
+键只属于登记它的那个命令。运行器只在整条 bash 就是这个工具（可以接只读过滤）时才把它的键并进进程环境，别的命令拿不到；`echo $GROK_API_KEY` 是空的。装包脚本也不带用户的键。
+
+### 为什么不做全局环境变量
+
+同一个沙箱里，拿到值的进程想读就能读，挡不住；真正的边界是「谁拿得到值」和「谁能联网」。全局环境变量让每条 bash 都拿到值，一句 `echo` 就把密钥打进模型上下文和工作记录。绑在命令上，拿到值的只有用户点名信任的那个工具，而且它要的联网也跟着这个登记走，用户心里想的本来就是「给 grok 配个 key」。
+
+### 值只进不出
+
+值进来就用 `TOOL_SECRET_KEY` 加密成 `value_enc`，和工具连接的 `authorization_enc` 同一把钥匙、同一种格式。HTTP 的任何响应都只给变量名和明文末四位 `last4`，值不足 8 位时 `last4` 是空串，免得四位就露出大半个值。改值走 `PATCH` 的 `set`，空着不发就是不改；`set` 和 `remove` 撞同一个名字回 400，一个工具最多 10 个变量，按合并后的结果算，超了整次改动回滚。解密只发生在拼 `config` 的时候：`config.cliTools` 恒带，空也带空数组，只含登记了这台电脑种类的工具，值是明文，运行器照 skills 整份对账。增删改之后都向该用户在线电脑重发整份 `config`。
+
 ## 群与主题任务
 
 每个群恰好一张主题任务卡。单 Bot 群在建 Bot 时自动建出来，多 Bot 群走 `POST /api/groups`，一次拉 2 到 6 个 Bot。编号是 `T-` 加四位，从 `user_counters.next_task_number` 取一个再把它加一，建 Bot 和建群共用这一个计数器，所以同一个用户的编号不会撞。`GET /api/groups` 只列成员数大于一的群，单 Bot 群在 `/api/bots` 里跟着它的 Bot 走。`Group.kind` 是 `solo` 还是 `team` 只看 `groups.solo_bot_id` 是否非空，`repo/rows.ts` 的 `toGroup` 是唯一出处；团队群删到只剩一个成员仍是 `team`，Web 入列按这个字段，不按成员数和首席猜。
@@ -647,9 +663,17 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 `accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，取库时钟 `clock_timestamp()` 而不是控制面进程时钟，建占位时等于 `created_at`，今天页过期那行的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。`login_generation` 是浏览器登录的会话代次，电脑每报一次登录成功（`markLoginValid`）加一，`valid` 重登到 `valid` 也加，它只用来对发布结果，不进 `Account`。今天页哪些账号出行见「用量、今天与通知」一节。
 
-### 加小红书账号
+### 两种连法：接口授权和电脑浏览器登录
 
-`POST /api/accounts` 带 `{ platform, computerId }`，建一行 `login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台最多一个占位，靠表上 `(owner_id, platform) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
+`accounts.via` 是这个号怎么连上的，`api` 是 OAuth 授权、控制面拿令牌调平台接口，`computer` 是在某台电脑的助理 Chrome 里登录、发布由那台电脑的浏览器做。小红书只有 `computer`，GitHub 只有 `api`，X 两种都有，同一个 X 号两种都连上就是两行，各自一个 accountId，表上的唯一索引和占位索引都带 `via`。库约束钉着：小红书必须是 `computer`，GitHub 必须是 `api`，`computer` 的号不能是 `direct_publish` 档。可直接发布等于不经人看就让 Bot 用这台电脑上的登录态往外发，浏览器发帖又可能被平台当成自动化操作，所以 `PATCH` 改档到 `direct_publish` 回 400，`setAccountTier` 按 `via` 判，不按平台。
+
+建在哪由入口决定，不由平台决定：OAuth 回调和 `account-add` 建 `api`，`POST /api/accounts` 建 `computer`。按电脑登录（`POST /api/accounts/:id/login`）、`login_state`、今天页的登录过期行都只认 `computer` 的号；`api` 的号的 `login` 只跟着凭据代际走。
+
+发布按 `(platform, via)` 查 `publish/platforms.ts` 的 `PUBLISHERS` 一张表，不再按平台散着判。`api` 一格是控制面里调平台接口的函数（GitHub、X），`computer` 一格是 `{ host, manageUrl, maxImages }`（小红书、X），发布循环认领到的草稿带着账号的 `via`，`computer` 的下发 `publish_draft` 给账号所在电脑，`api` 的在控制面直接发。一条最多带几张图也写在这张表上（`maxImages`）：`api` 的是 0，电脑上的 X 是 4，小红书是 9，超了起草和批准都拒，免得人批了一张到电脑上才发不出去的卡。电脑报回来的帖子链接只认 https、默认端口、主机是这一格的 `host` 或它的子域，别的换成 `manageUrl`。X 的 `host` 只写 `x.com`，不认 `twitter.com`：发布器读的是发完 X 自己弹的 toast，现在都是 `x.com` 链接，多认一个域就多一个能被页面塞进来的地方，读错了只是落成主页链接。
+
+### 加浏览器登录的账号
+
+`POST /api/accounts` 带 `{ platform, computerId }`，`platform` 是小红书或 X，建一行 `via='computer'`、`login='none'`、`handle` 为空的占位。电脑必须是本人的，别人的或不存在的回 404，本机和远程电脑都能挂：登录页经画面摆到网页上给人操作，远程电脑上的 Chromium 画在 Xvfb 里也一样能登。一个人每个平台每种连法最多一个占位，靠表上 `(owner_id, platform, via) WHERE login='none'` 的部分唯一索引收敛：重复加走 `ON CONFLICT DO UPDATE`，回已有那行（200，新建是 201），不先查后写。已有的占位可能挂在另一台电脑上（先在本机加了没登，又在远程电脑上加），冲突时把 `computer_id` 改成这次选的电脑：占位还没登录，哪台电脑上都没有它的登录态，用户再加一次就是要在那台上登。之后点登录发到新电脑；旧电脑上还在进行的那次登录报回来时账号已经不在它上面，按下面的规则整条丢掉。建完推 `account_updated`，再给这个用户重发 `config`。
 
 ### 打开登录窗口
 
@@ -659,9 +683,9 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ### `login_state` 三个分支
 
-三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。账号还必须是在电脑浏览器里登录的平台（`BrowserPlatform`，现在只有小红书）：GitHub、X 的 `login` 只跟着控制面的凭据代际走，电脑报上来的 `valid`、`expired`、`failed` 一律丢掉，账号状态和代际都不动。不然一台认证过的电脑就能把一个凭据已死的号报回 `valid`，或者在重新授权之后把新一代报成过期，绕过下面的不变式。
+三个分支都先校验账号属于这台电脑的主人、登在这台电脑上，不成立整条丢掉，同一个用户的另一台电脑报也不认。账号还必须是在电脑浏览器里登录的（`via='computer'`）：接口授权的号（GitHub，和授权连上的 X）的 `login` 只跟着控制面的凭据代际走，电脑报上来的 `valid`、`expired`、`failed` 一律丢掉，账号状态和代际都不动。不然一台认证过的电脑就能把一个凭据已死的号报回 `valid`，或者在重新授权之后把新一代报成过期，绕过下面的不变式。
 
-- `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
+- `valid{handle}`：写 `login='valid'` 和 handle。同一台电脑、同一平台已经有这个 handle 的行（比如以前过期的那行），就在一个事务里把那行改成 `valid`，把占位上的草稿挪到那行，删掉占位，推 `account_deleted` 再推那行的 `account_updated`。表上 `(computer_id, platform, via, handle)` 的唯一索引保证不会多出第二行。收尾给用户重发 `config`，运行器按它放行可直接发布的账号。
 - `expired`：`UPDATE ... WHERE login = 'valid'` 记成 `expired`，推 `account_updated` 和一条 `failed` 通知，重发 `config`。已经过期或还没登录的行不命中这条 UPDATE，重复报不再通知。
 - `failed{reason, attempt}`：登录窗口没成，`accounts.login` 不动。原因和库时钟时刻写进 `login_failure`、`login_failed_at`（账号上的 `lastLoginFailure`，只留最近一次，表上 CHECK 保证两列成对），推 `account_updated`，页面刷新、换设备或当时没开着都还看得到；`valid` 落库时两列一起清空。这次写和上面两种一样在账号行锁里带连接代次，连接已经被顶掉就不落库也不推 `account_updated`。然后推 `login_failed { accountId, attempt, reason }`，`attempt` 原样带回 `browser_login` 里的那个，页面靠它结算对应那次点击的卡；再推 `failed` 通知给人看，见下面通知一节。这两条只说那一次尝试，不看连接代次。
 

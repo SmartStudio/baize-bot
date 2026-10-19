@@ -29,12 +29,15 @@ export const DRAFT_TOOL_NAMES = ["create_draft", "edit_draft", "propose_plan"] a
 
 export const DRAFT_RULE =
   "往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。" +
-  "不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。";
+  "不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。" +
+  "在电脑浏览器里登录过的平台（小红书、X）也走草稿，批了由电脑上的浏览器发，不用让用户去配接口授权。";
 
 const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 
-// 小红书的图随 P1-5 的本机发布器一起接，这两个平台的图要控制面上传，还没做。
-const TEXT_ONLY_PLATFORMS: ReadonlySet<Platform> = new Set(["github", "x"]);
+const VIA_LABEL: Record<AccountConfig["via"], string> = { api: "接口授权", computer: "电脑浏览器登录" };
+
+// 和控制面发布器表的数一致：走接口的图要控制面上传，还没做；走电脑的由浏览器发布器传图，X 一条最多 4 张。
+const maxImages = (account: AccountConfig): number => (account.via === "api" ? 0 : account.platform === "x" ? 4 : 9);
 
 export const accountLabel = (account: AccountConfig): string =>
   `${PLATFORM_LABEL[account.platform]} ${account.handle === null ? "（没有账号名）" : `@${account.handle}`}`;
@@ -46,11 +49,21 @@ const TIER_LABEL: Record<AccountConfig["tier"], string> = {
   direct_publish: "可直接发布档",
 };
 
+// 没登上的号照样能起草，模型要知道批了不会马上发，也别替用户猜账号登在哪台电脑上。
+const loginNote = (account: AccountConfig): string => {
+  if (account.login === "valid") return "";
+  if (account.via === "api") return "，授权过期了，批了也要等用户在账号页重新授权才发";
+  return "，账号页上还没确认登上，批了先等着，电脑浏览器里登上了会自动发；账号在哪台电脑上以账号页为准";
+};
+
 /** prompt 里「能用的账号」一段，模型照这里抄 accountId。没账号时不调，整段不出。 */
 export const renderAccounts = (accounts: readonly AccountConfig[]): string =>
   [
     "能用的账号：",
-    ...accounts.map((account) => `- ${accountLabel(account)}，${TIER_LABEL[account.tier]}，accountId：${account.id}`),
+    ...accounts.map(
+      (account) =>
+        `- ${accountLabel(account)}，${VIA_LABEL[account.via]}，${TIER_LABEL[account.tier]}${loginNote(account)}，accountId：${account.id}`,
+    ),
   ].join("\n");
 
 const IMAGE = Type.Object({ path: Type.String() });
@@ -85,7 +98,8 @@ const EDIT_PARAMS = Type.Object({ draftId: Type.String(), content: CONTENT });
 const PLAN_PARAMS = Type.Object({ title: Type.String(), drafts: Type.Array(DRAFT_INPUT) });
 
 const CONTENT_GUIDE =
-  "各平台的要求：X 正文不超过 280 字符，不带图；GitHub 要写 title，github 里写 repo（owner/name）和 as（issue 或 discussion），不带图；" +
+  "各平台的要求：X 正文不超过 280 字符，接口授权的号不带图，电脑浏览器登录的号最多 4 张图；" +
+  "同一个平台既有接口授权又有电脑浏览器登录的号，没说用哪个就用接口授权那个；GitHub 要写 title，github 里写 repo（owner/name）和 as（issue 或 discussion），不带图；" +
   "小红书要写 title，可以带图（images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
@@ -218,8 +232,13 @@ async function specOf(
   if (account === undefined) {
     throw new Error(`${where}没有 accountId 是「${input.accountId}」的账号。${accountsHint(accounts)}`);
   }
-  if ((input.content.images ?? []).length > 0 && TEXT_ONLY_PLATFORMS.has(account.platform)) {
-    throw new Error(`${where}${PLATFORM_LABEL[account.platform]} 的草稿先不带图，去掉 images 再调。`);
+  const limit = maxImages(account);
+  if ((input.content.images ?? []).length > limit) {
+    throw new Error(
+      limit === 0
+        ? `${where}${PLATFORM_LABEL[account.platform]} 接口授权的号起草先不带图，去掉 images 再调。`
+        : `${where}${PLATFORM_LABEL[account.platform]} 一条最多带 ${limit} 张图，去掉几张再调。`,
+    );
   }
   return {
     draftId: DraftId.parse(randomUUID()),

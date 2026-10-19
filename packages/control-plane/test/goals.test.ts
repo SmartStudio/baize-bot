@@ -504,6 +504,7 @@ async function approvedPlanWithUnsent(s: Session, groupId: string): Promise<void
     ownerId: s.userId,
     computerId: s.computerId,
     platform: "x",
+    via: "api",
     handle: `@${accountId}`,
     login: "valid",
   });

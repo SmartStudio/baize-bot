@@ -58,6 +58,7 @@ async function validAccount(
     ownerId: owner.userId,
     computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle,
     login: "valid",
     tier: "confirm_publish",

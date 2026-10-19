@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ChevronDown, Laptop, Server } from "lucide-react";
-import { BrowserPlatform, type AccountId, type Computer, type ComputerId, type OAuthPlatform } from "@baize/shared";
+import type { AccountId, BrowserPlatform, Computer, ComputerId, OAuthPlatform } from "@baize/shared";
 import { oauthStartUrl } from "../api/client.js";
 import { useApp } from "../state/app.js";
 import { COMPUTER_KIND_TEXT, PLATFORM, beforeChinese, computerName } from "./messages/content.js";
@@ -37,11 +37,13 @@ export const connectNote = (target: ConnectTarget): string | null => {
 
 const ComputerMenu = ({
   platform,
+  label,
   choices,
   busy,
   onChoose,
 }: {
   platform: BrowserPlatform;
+  label: string;
   choices: ComputerChoice[];
   busy: boolean;
   onChoose: (computerId: ComputerId) => void;
@@ -113,7 +115,7 @@ const ComputerMenu = ({
           setOpen(true);
         }}
       >
-        接入 {PLATFORM[platform]}
+        {label}
         <ChevronDown size={14} aria-hidden="true" />
       </button>
       {open ? (
@@ -168,14 +170,24 @@ const ComputerMenu = ({
   );
 };
 
-const OAUTH_PLATFORMS: OAuthPlatform[] = ["github", "x"];
+// 入口按这个顺序排，同一平台的两种连法挨着。X 两种都有：接口授权不碰浏览器，电脑上的浏览器登录不用去 X 开发者后台申请应用。
+type Entry =
+  | { via: "api"; platform: OAuthPlatform }
+  | { via: "computer"; platform: BrowserPlatform; label: string; risk: string | null };
+
+const ENTRIES: readonly Entry[] = [
+  { via: "api", platform: "github" },
+  { via: "api", platform: "x" },
+  { via: "computer", platform: "x", label: "用电脑上的浏览器登录 X", risk: "浏览器发帖可能被 X 识别为自动化操作" },
+  { via: "computer", platform: "xiaohongshu", label: `接入 ${PLATFORM.xiaohongshu}`, risk: null },
+];
 
 type Connect = { status: "idle" } | { status: "busy" } | { status: "failed"; message: string };
 
 type Props = { computers: readonly Computer[]; openLogin: (accountId: AccountId) => Promise<void> };
 
 // OAuth 平台整页跳去平台授权，回来落在首页，结果由主窗口读查询串提示。
-// 浏览器平台先在选中的电脑上建一个未登录的号（已经有就挪过去），再在它上面开登录窗口，登录的进度写在那一行上。
+// 电脑浏览器登录先在选中的电脑上建一个未登录的号（已经有就挪过去），再在它上面开登录窗口，登录的进度写在那一行上。
 export const ConnectEntries = ({ computers, openLogin }: Props) => {
   const { actions } = useApp();
   const [connect, setConnect] = useState<Connect>({ status: "idle" });
@@ -197,43 +209,54 @@ export const ConnectEntries = ({ computers, openLogin }: Props) => {
   };
   return (
     <div className="account-connect" data-testid="account-connect">
-      {OAUTH_PLATFORMS.map((platform) => (
-        <a
-          key={platform}
-          className="ghost-button"
-          href={oauthStartUrl(platform)}
-          data-testid="account-connect-link"
-          data-platform={platform}
-        >
-          接入 {PLATFORM[platform]}
-        </a>
-      ))}
-      {BrowserPlatform.options.map((platform) =>
-        target.kind === "many" ? (
-          <ComputerMenu
-            key={platform}
-            platform={platform}
-            choices={target.choices}
-            busy={busy}
-            onChoose={(computerId) => start(platform, computerId)}
-          />
-        ) : (
-          <button
-            type="button"
-            key={platform}
-            className="ghost-button"
-            data-testid="account-connect-browser"
-            data-platform={platform}
-            disabled={note !== null || busy}
-            title={note ?? undefined}
-            onClick={() => {
-              if (target.kind === "one") start(platform, target.choice.computer.id);
-            }}
-          >
-            接入 {PLATFORM[platform]}
-          </button>
-        ),
-      )}
+      {ENTRIES.map((entry) => {
+        if (entry.via === "api") {
+          return (
+            <a
+              key={`api-${entry.platform}`}
+              className="ghost-button"
+              href={oauthStartUrl(entry.platform)}
+              data-testid="account-connect-link"
+              data-platform={entry.platform}
+            >
+              接入 {PLATFORM[entry.platform]}
+            </a>
+          );
+        }
+        const { platform, label, risk } = entry;
+        return (
+          <span className="account-connect-browser" key={`computer-${platform}`}>
+            {target.kind === "many" ? (
+              <ComputerMenu
+                platform={platform}
+                label={label}
+                choices={target.choices}
+                busy={busy}
+                onChoose={(computerId) => start(platform, computerId)}
+              />
+            ) : (
+              <button
+                type="button"
+                className="ghost-button"
+                data-testid="account-connect-browser"
+                data-platform={platform}
+                disabled={note !== null || busy}
+                title={note ?? undefined}
+                onClick={() => {
+                  if (target.kind === "one") start(platform, target.choice.computer.id);
+                }}
+              >
+                {label}
+              </button>
+            )}
+            {risk === null ? null : (
+              <small className="account-connect-risk" data-testid="account-connect-risk" data-platform={platform}>
+                {risk}
+              </small>
+            )}
+          </span>
+        );
+      })}
       {note === null ? null : (
         <small className="account-connect-note" data-testid="account-connect-note">
           {note}

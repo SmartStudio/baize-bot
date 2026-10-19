@@ -17,12 +17,14 @@ const account = (
   handle: string | null = "要务机械星球",
   platform: Account["platform"] = "xiaohongshu",
   id: AccountId = ACC,
+  via: Account["via"] = platform === "xiaohongshu" ? "computer" : "api",
 ) =>
   Account.parse({
     id,
     ownerId: "usr_1",
     computerId: "cmp_1",
     platform,
+    via,
     handle,
     tier: "confirm_publish",
     login,
@@ -245,13 +247,19 @@ describe("等你确认里的登录卡", () => {
     expect(kinds(withLoginCards(pending, book([account("expired")]), none))).toEqual(["login", "draft", "draft"]);
   });
 
-  it("号已登录、非浏览器平台都不放卡，OAuth 平台的行照原样列", () => {
+  it("号已登录、接口授权的号都不放卡，接口授权的行照原样列", () => {
     expect(kinds(withLoginCards([draftItem()], book([account("valid")]), none))).toEqual(["draft"]);
     const xRow = TodayPendingItem.parse({ kind: "account", account: account("none", null, "x"), since: at });
     expect(kinds(withLoginCards([xRow, draftItem()], book([account("none", null, "x")]), none))).toEqual([
       "account",
       "draft",
     ]);
+  });
+
+  it("按连接方式认，不按平台：电脑浏览器登录的 X 号过期了也换成登录卡", () => {
+    const x = account("expired", "@baize_x3", "x", ACC, "computer");
+    const row = TodayPendingItem.parse({ kind: "account", account: x, since: at });
+    expect(kinds(withLoginCards([row], book([x]), none))).toEqual(["login"]);
   });
 
   it("服务端单列的过期号没有待批的稿子，也换成能当场扫码的登录卡", () => {

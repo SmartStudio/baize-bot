@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { format } from "node:util";
 import {
   AccountListResponse,
+  AccountResponse,
   ComputerTokenResponse,
   DecideDraftResponse,
   LoginAttemptId,
@@ -42,6 +43,9 @@ import { connectPush } from "./helpers/ws.js";
 const GITHUB = { platform: "github", handle: "baize-dev", token: "ghp_publish_secret_1" } as const;
 const X = { platform: "x", handle: "baize_x", token: "x_publish_secret_2" } as const;
 const XHS = { platform: "xiaohongshu", handle: "白泽" } as const;
+/** 同一个 X 号在电脑浏览器里登录出来的那一行，和授权连上的 X 是两条账号。 */
+const X_WEB = { platform: "x", via: "computer", handle: "baize_x" } as const;
+const X_HOME = "https://x.com/home";
 const MINUTE = 60_000;
 /** 电脑报的链接不可信时落账用的笔记管理页，和运行器发布器里读不到链接时回的是同一个页面。 */
 const XHS_MANAGE_URL = "https://creator.xiaohongshu.com/new/note-manager";
@@ -98,8 +102,8 @@ async function jobOn(s: Stack, server: TestServer, specs: readonly AccountSpec[]
   return job;
 }
 
-function accountOf(job: ContentJob, platform: Account["platform"]): Account {
-  const account = job.accounts.find((one) => one.platform === platform);
+function accountOf(job: ContentJob, platform: Account["platform"], via?: Account["via"]): Account {
+  const account = job.accounts.find((one) => one.platform === platform && (via === undefined || one.via === via));
   if (account === undefined) throw new Error(`没挂 ${platform} 账号`);
   return account;
 }
@@ -1073,6 +1077,132 @@ describe("小红书走电脑", () => {
 
 const post = (text: string): DraftContent => ({ kind: "post", title: text, text, images: [], github: null });
 
+describe("X 走电脑", () => {
+  it("电脑浏览器登录的 X 能带图，草稿下发到电脑、不打接口；授权连上的 X 带图仍被拒", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X, X_WEB]);
+    const api = accountOf(job, "x", "api");
+    const web = accountOf(job, "x", "computer");
+    sendDraft(job, specOf(api, { ...tweet("接口带图"), images: [IMAGE] }));
+    const content: DraftContent = { kind: "post", title: null, text: "带图的推", images: [IMAGE], github: null };
+    const spec = specOf(web, content);
+    await createApproved(job, spec);
+    expect(
+      (await messagesOf(job)).drafts.map((one) => one.id),
+      "接口那一行带图的草稿没落",
+    ).toEqual([spec.draftId]);
+
+    await server.server.publisher.tick();
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("publishing");
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim).toMatchObject({ draftId: spec.draftId, accountId: web.id, platform: "x", content });
+    job.agent.send({
+      type: "publish_result",
+      draftId: spec.draftId,
+      attempt: claim.attempt,
+      result: { status: "ok", url: "https://x.com/baize_x/status/1900", externalId: "1900" },
+    });
+    expect((await nextOf(job.push, "publication_created")).publication.url).toBe("https://x.com/baize_x/status/1900");
+    expect((await nextOf(job.push, "draft_updated")).draft.status).toBe("published");
+    expect(s.fake.requests(), "走电脑的 X 不打 X 接口").toEqual([]);
+  });
+
+  it("同一个号两种连法的草稿各走各的：接口那条打接口，电脑那条下发给电脑", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X, X_WEB]);
+    const viaApi = specOf(accountOf(job, "x", "api"), tweet("走接口"));
+    const viaComputer = specOf(accountOf(job, "x", "computer"), tweet("走浏览器"));
+    await createApproved(job, viaApi);
+    await createApproved(job, viaComputer);
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim.draftId).toBe(viaComputer.draftId);
+    await waitFor(async () => (await draftOnPage(job, viaApi.draftId)).draft.status === "published", "接口那条发完");
+    expect(s.fake.requests().map(({ body }) => body)).toEqual([{ text: "走接口" }]);
+  });
+
+  it("电脑报上来的 X 链接只认 https 的 x.com，twitter.com 和别的站都换成首页", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X_WEB]);
+    const web = accountOf(job, "x", "computer");
+    const reported = [
+      ["https://x.com/baize_x/status/1", "https://x.com/baize_x/status/1"],
+      ["https://twitter.com/baize_x/status/2", X_HOME],
+      ["https://evil.example/baize_x/status/3", X_HOME],
+      ["http://x.com/baize_x/status/4", X_HOME],
+      ["https://x.com.evil.example/status/5", X_HOME],
+    ] as const;
+    const cases = reported.map(([url, expected], index) => ({
+      url,
+      expected,
+      spec: specOf(web, tweet(`第 ${index} 条`)),
+    }));
+    for (const { spec } of cases) await createApproved(job, spec);
+    await server.server.publisher.tick();
+    const attempts = new Map<string, string>();
+    for (let received = 0; received < cases.length; received += 1) {
+      const claim = await job.agent.expect("publish_draft");
+      attempts.set(claim.draftId, claim.attempt);
+    }
+    for (const [index, { url, spec }] of cases.entries()) {
+      job.agent.send({
+        type: "publish_result",
+        draftId: spec.draftId,
+        attempt: attempts.get(spec.draftId) ?? "",
+        result: { status: "ok", url, externalId: `${index}` },
+      });
+    }
+    await waitFor(
+      async () => (await messagesOf(job)).drafts.every((draft) => draft.status === "published"),
+      "每条都按 ok 结算",
+    );
+    const urlOf = new Map((await messagesOf(job)).publications.map((one) => [one.draftId, one.url]));
+    expect(cases.map(({ spec }) => urlOf.get(spec.draftId))).toEqual(cases.map(({ expected }) => expected));
+  });
+});
+
+describe("电脑浏览器里已经登上、账号页不知道", () => {
+  it("批了的稿子卡在没确认登上的 X 号上：发布循环让那台电脑静默查一次，报登上了就记成已登录、下一轮发出去；五分钟内不重复查", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, []);
+    const created = await job.client.post("/api/accounts", { platform: "x", computerId: job.computer.computerId });
+    expect(created.status).toBe(201);
+    const placeholder = AccountResponse.parse(await created.json()).account;
+    expect(placeholder.login, "账号页建出来的是占位").toBe("none");
+    await nextOf(job.push, "account_updated");
+    await job.agent.expect("config");
+    const spec = specOf(placeholder, tweet("在 Bot 的浏览器里登过"));
+    await createApproved(job, spec);
+
+    await server.server.publisher.tick();
+    const check = await job.agent.expect("login_check");
+    expect(check).toEqual({ type: "login_check", accountId: placeholder.id, platform: "x" });
+    await server.server.publisher.tick();
+    await job.client.post(`/api/bots/${job.botId}/pause`);
+    await job.agent.expect("pause");
+    expect(
+      job.agent.received().filter((frame) => frame.type === "login_check" || frame.type === "publish_draft"),
+      "第二轮没登上不抢稿，五分钟内也不再查",
+    ).toEqual([]);
+    await job.client.post(`/api/bots/${job.botId}/resume`);
+    await job.agent.expect("resume");
+
+    job.agent.send({ type: "login_state", accountId: placeholder.id, state: { login: "valid", handle: "baize_x" } });
+    const config = await job.agent.expect("config");
+    expect(config.accounts.find((one) => one.id === placeholder.id)).toMatchObject({
+      login: "valid",
+      handle: "baize_x",
+    });
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim.draftId, "登上之后这条已批的稿子照常发").toBe(spec.draftId);
+  });
+});
+
 describe("小红书登录过期", () => {
   it("小红书草稿只下发到账号所在的电脑", async () => {
     const s = await stack();
@@ -1113,6 +1243,9 @@ describe("小红书登录过期", () => {
     expect(claimed.draft, "只抢了没过期那个账号的稿").toMatchObject({ id: other.draftId, status: "publishing" });
     expect((await job.agent.expect("publish_draft")).draftId).toBe(other.draftId);
     expect((await draftOnPage(job, stuck.draftId)).draft.status, "过期账号的稿留在已批，等重新登录").toBe("approved");
+    expect((await job.agent.expect("login_check")).accountId, "卡着的那个号让电脑看一眼浏览器是不是已经登回来了").toBe(
+      main.id,
+    );
 
     job.agent.send({ type: "login_state", accountId: main.id, state: { login: "valid", handle: XHS.handle } });
     expect((await nextOf(job.push, "account_updated")).account).toMatchObject({ id: main.id, login: "valid" });
