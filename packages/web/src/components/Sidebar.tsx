@@ -1,6 +1,7 @@
 import { ArrowRightLeft, Hand, MessageSquare, Plus, Repeat, Settings as SettingsIcon, Sun, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Bot, BotId, GroupId, User } from "@baize/shared";
+import { BotAvatar, resolveBotAvatarState } from "./BotAvatar.js";
 import { activityOf } from "./messages/preview.js";
 import type { Conversation, GroupTurn } from "../state/app.js";
 import { pathOf, type Screen } from "../routes/screen.js";
@@ -99,9 +100,12 @@ export const Sidebar = ({
 }: Props) => {
   // 项目页和项目群是同一个项目，两处都点亮侧栏那一项。
   const openGroup = screen.kind === "group" || screen.kind === "project" ? screen.groupId : null;
-  const assistant = conversations.find((c) => c.kind === "solo" && bots[c.botId]?.role === "assistant");
+  const assistant = conversations.find(
+    (c): c is Extract<Conversation, { kind: "solo" }> => c.kind === "solo" && bots[c.botId]?.role === "assistant",
+  );
   const projects = conversations.filter((c): c is Team => c.kind === "team");
   const openSolo = conversations.find((c) => c.kind === "solo" && c.groupId === openGroup);
+  const assistantBot = assistant === undefined ? undefined : bots[assistant.botId];
   // 和队员单聊是从团队页点进去的，侧栏把它算在「团队」底下，不然这时候侧栏一个亮的都没有。
   const onTeam = screen.kind === "team" || (openSolo !== undefined && openSolo !== assistant);
 
@@ -128,7 +132,22 @@ export const Sidebar = ({
           data-testid="assistant-nav"
           aria-current={currentIf(openGroup === assistant.groupId)}
         >
-          <MessageSquare size={17} aria-hidden="true" />
+          {assistantBot === undefined ? (
+            <MessageSquare size={17} aria-hidden="true" />
+          ) : (
+            <BotAvatar
+              shape={assistantBot.shape}
+              hue={assistantBot.hue}
+              size="xs"
+              state={resolveBotAvatarState({
+                paused: assistantBot.runState === "paused",
+                pendingApproval: assistant.pendingApprovals > 0,
+                working:
+                  groupTurns[assistant.groupId]?.current === assistant.botId ||
+                  activityOf(assistant.lastMessage) === "working",
+              })}
+            />
+          )}
           主助理
         </Link>
       )}

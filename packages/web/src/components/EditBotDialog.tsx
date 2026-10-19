@@ -79,7 +79,7 @@ export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
         onKeyDown={trapTab}
       >
         <header className="dialog-head">
-          <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
+          <BotAvatar shape={bot.shape} hue={bot.hue} size="sm" />
           <span>
             <b>编辑 {bot.name}</b>
             <small>都可以不填，它干活时自己会记</small>

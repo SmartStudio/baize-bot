@@ -3,6 +3,8 @@ import {
   AgentToControl,
   Bot,
   BotId,
+  BotShape,
+  CreateBotRequest,
   GRANTABLE_SCOPES,
   ControlToAgent,
   CreateGroupRequest,
@@ -24,6 +26,7 @@ import {
   TopicTask,
   ToolConnection,
   ToolView,
+  UpdateBotRequest,
   toolViewText,
   gatewayAlias,
   TodayResponse,
@@ -79,10 +82,20 @@ describe("domain schemas reject illegal states", () => {
     expect(TopicTask.safeParse({ ...task, number: "2481" }).success).toBe(false);
   });
 
-  it("a bot hue must be one of the seven design-system hues", () => {
+  it("a bot needs a known hue and shape", () => {
     const bot = { id: "b1", ownerId: "u1", name: "小服", role: "member", runState: "running", createdAt: now };
-    expect(Bot.safeParse({ ...bot, hue: "mint" }).success).toBe(true);
+    expect(Bot.safeParse({ ...bot, hue: "mint", shape: "pillow" }).success).toBe(true);
     expect(Bot.safeParse({ ...bot, hue: "red" }).success).toBe(false);
+    expect(Bot.safeParse({ ...bot, hue: "mint" }).success, "Bot 必须带形状").toBe(false);
+    expect(BotShape.safeParse("triangle").success).toBe(true);
+    expect(BotShape.safeParse("circle").success).toBe(false);
+  });
+
+  it("建 Bot 可选形状，更新请求继承形状字段", () => {
+    expect(CreateBotRequest.parse({}).shape).toBeUndefined();
+    expect(CreateBotRequest.parse({ shape: "cloud" }).shape).toBe("cloud");
+    expect(CreateBotRequest.safeParse({ shape: "circle" }).success).toBe(false);
+    expect(UpdateBotRequest.parse({ shape: "leaf" }).shape).toBe("leaf");
   });
 
   it("标签最多 5 个、每个最多 20 码元，上限和第 1 期的 tag 一样，迁移过来的长标签照样读得出来", () => {
@@ -94,6 +107,7 @@ describe("domain schemas reject illegal states", () => {
       runState: "running",
       createdAt: now,
       hue: "sky",
+      shape: "cloud",
     };
     expect(Bot.safeParse({ ...bot, tags: ["123456789", "12345678901234567890", "😀".repeat(10)] }).success).toBe(true);
     expect(Bot.safeParse({ ...bot, tags: ["123456789012345678901"] }).success).toBe(false);
@@ -124,6 +138,7 @@ describe("domain schemas reject illegal states", () => {
       role: "member",
       name: "小服",
       hue: "mint",
+      shape: "pillow",
       runState: "paused",
       createdAt: now,
     };

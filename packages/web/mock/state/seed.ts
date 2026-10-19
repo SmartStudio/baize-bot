@@ -12,6 +12,7 @@ import {
   TopicTask,
   type BotHue,
   type BotRole,
+  type BotShape,
   type MessageBody,
   type ToolOperation,
 } from "@baize/shared";
@@ -66,6 +67,7 @@ type Seed = {
   tags: string[];
   description: string;
   hue: BotHue;
+  shape: BotShape;
   bodies: MessageBody[];
 };
 
@@ -77,6 +79,7 @@ const seeds: Seed[] = [
     tags: ["客服"],
     description: "接工单、查订单、回答标准问题。改交期、退款、对外发邮件先找我点头。",
     hue: "sky",
+    shape: "cloud",
     bodies: [
       { kind: "user", text: "Globex 的 Lisa 想把交期从 10 月 30 日提前到 10 月 20 日，能不能做到？先别回她。" },
       {
@@ -154,6 +157,7 @@ const seeds: Seed[] = [
     tags: ["销售"],
     description: "跟线索、出报价、写跟进邮件。对外发送前先找我点头。",
     hue: "tangerine",
+    shape: "triangle",
     bodies: [
       { kind: "user", text: "给 Globex 出一份 200 台 X3 的报价，发之前先给我看。" },
       { kind: "bot", botId: BotId.parse("bot_sales"), text: "发出去了。有回复我第一时间告诉你。", streaming: false },
@@ -174,6 +178,7 @@ const seeds: Seed[] = [
     tags: ["采购"],
     description: "比价、询价、盯到货。下单和付钱先找我点头。",
     hue: "mint",
+    shape: "leaf",
     bodies: [
       { kind: "user", text: "X3 终端再找三家供应商询个价，中午前给我。" },
       { kind: "bot", botId: BotId.parse("bot_buy"), text: "在跟 3 家供应商询价，中午前给你对比表。", streaming: false },
@@ -186,6 +191,7 @@ const seeds: Seed[] = [
     tags: ["主助理"],
     description: "拆活、排期、找你拍板。",
     hue: "violet",
+    shape: "pillow",
     // 照控制面 ASSISTANT_GREETING：注册时主助理先在单聊里说这一句。
     bodies: [
       { kind: "bot", botId: BotId.parse("bot_assistant"), text: "想让我帮你做成什么事？说一句就行", streaming: false },
@@ -219,6 +225,7 @@ export const restoreAssistant = () => {
     tags: seed.tags,
     description: seed.description,
     hue: seed.hue,
+    shape: seed.shape,
     notify: true,
     toolConnectionIds: [],
     createdAt: stamp,
@@ -311,6 +318,7 @@ export const reseed = (): void => {
         tags: seed.tags,
         description: seed.description,
         hue: seed.hue,
+        shape: seed.shape,
         notify: true,
         toolConnectionIds: [],
         createdAt: at(seedIndex),

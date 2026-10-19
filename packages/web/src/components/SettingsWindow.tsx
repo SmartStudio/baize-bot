@@ -310,7 +310,7 @@ const UsagePage = ({
             return (
               <div className="usage-run" key={run.runId}>
                 <span className="usage-run-title">
-                  {bot ? <BotAvatar name={bot.name} hue={bot.hue} size="xs" /> : null}
+                  {bot ? <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" /> : null}
                   <span title={run.title}>{run.title}</span>
                 </span>
                 <time dateTime={run.startedAt}>{when.format(new Date(run.startedAt))}</time>

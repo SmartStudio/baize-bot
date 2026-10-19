@@ -39,6 +39,7 @@ export function toBot(row: typeof schema.bots.$inferSelect): Bot {
     tags: row.tags,
     description: row.description,
     hue: row.hue,
+    shape: row.shape,
     notify: row.notify,
     // 工具连接是 M6 的对象，这一版没有表，任何 Bot 都还没分配工具。
     toolConnectionIds: [],

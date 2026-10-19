@@ -1,4 +1,4 @@
-import type { BotHue, ComputerId, User } from "@baize/shared";
+import type { BotHue, BotShape, ComputerId, User } from "@baize/shared";
 import type { Db } from "./db/client.js";
 import { createBot, ensureAssistant, listBots } from "./repo/bots.js";
 import { ensureComputer } from "./repo/computers.js";
@@ -8,10 +8,22 @@ import { createUser, findUserByEmail } from "./repo/users.js";
 export const DEV_EMAIL = "chen@baize.dev";
 export const DEV_PASSWORD = "baize-dev";
 
-const DEV_BOTS: readonly { name: string; tags: readonly string[]; hue: BotHue; firstMessage: string }[] = [
-  { name: "小服", tags: ["客服"], hue: "coral", firstMessage: "帮我看看今天还有哪些工单没回。" },
-  { name: "小销", tags: ["销售"], hue: "tangerine", firstMessage: "把这周新进来的线索整理成一张表。" },
-  { name: "小采", tags: ["采购"], hue: "lime", firstMessage: "比一下这三家供应商的报价。" },
+const DEV_BOTS: readonly {
+  name: string;
+  tags: readonly string[];
+  hue: BotHue;
+  shape: BotShape;
+  firstMessage: string;
+}[] = [
+  { name: "小服", tags: ["客服"], hue: "coral", shape: "cloud", firstMessage: "帮我看看今天还有哪些工单没回。" },
+  {
+    name: "小销",
+    tags: ["销售"],
+    hue: "tangerine",
+    shape: "triangle",
+    firstMessage: "把这周新进来的线索整理成一张表。",
+  },
+  { name: "小采", tags: ["采购"], hue: "lime", shape: "bean", firstMessage: "比一下这三家供应商的报价。" },
 ];
 
 export type SeedResult = {
@@ -43,6 +55,7 @@ export async function seed(db: Db): Promise<SeedResult> {
       name: spec.name,
       tags: spec.tags,
       hue: spec.hue,
+      shape: spec.shape,
       description: `${spec.tags.join("、")}方向的活先找我。`,
     });
     if (created === null) throw new Error("开发账号刚建好就不在了");

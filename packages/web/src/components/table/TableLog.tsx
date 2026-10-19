@@ -34,7 +34,7 @@ const TableLogView = ({ table }: { table: PokerTableView }) => {
       >
         {lines.map((line) => (
           <div key={line.id} className="table-log-line" data-testid="table-log-line">
-            <BotAvatar name={line.name} hue={line.hue} size="sm" />
+            <BotAvatar shape={line.shape} hue={line.hue} size="sm" />
             <span>
               <b className="table-log-name">{line.name}</b>
               <span className="table-log-text">{line.text}</span>

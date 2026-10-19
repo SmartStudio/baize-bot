@@ -87,7 +87,7 @@ const TurnMessage = ({
       <div className="project-turn-bot">
         {continuesBot(message, before) ? null : (
           <span className="project-turn-who" data-testid="project-turn-who">
-            <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+            <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />
             {bot.name}
           </span>
         )}
@@ -411,7 +411,7 @@ export const ProjectPage = ({
           <div className="today-list">
             {members.map((bot) => (
               <article className="today-row" key={bot.id}>
-                <BotAvatar name={bot.name} hue={bot.hue} size="sm" />
+                <BotAvatar shape={bot.shape} hue={bot.hue} size="sm" />
                 <span className="today-row-main">
                   <strong>{bot.name}</strong>
                   <small>{bot.tags.length === 0 ? "队员" : bot.tags.join("、")}</small>

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { ArrowRightLeft, BookOpen, Download, Hand, MessageSquare, Plus } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { Bot, BotId } from "@baize/shared";
-import { BotAvatar } from "../components/BotAvatar.js";
+import { BotAvatar, resolveBotAvatarState } from "../components/BotAvatar.js";
 import { BrandBookOpener } from "../components/BrandBookDialog.js";
 import { ImportDialog } from "../components/ImportDialog.js";
 import { activityOf, previewOf } from "../components/messages/preview.js";
@@ -22,11 +22,16 @@ const BotCard = ({ bot, solo, projects }: { bot: Bot; solo: Solo | undefined; pr
   const working = activityOf(solo?.lastMessage ?? null) === "working";
   const pendingApprovals = solo?.pendingApprovals ?? 0;
   const pendingHandoffs = solo?.pendingHandoffs ?? 0;
+  const avatarState = resolveBotAvatarState({
+    paused: bot.runState === "paused",
+    pendingApproval: pendingApprovals > 0,
+    working: activityOf(solo?.lastMessage ?? null) === "working",
+  });
   const hasBadges = pendingApprovals > 0 || pendingHandoffs > 0 || working;
   return (
     <article className="team-bot" data-testid="team-bot" data-bot-name={bot.name}>
       <div className="team-bot-head">
-        <BotAvatar name={bot.name} hue={bot.hue} />
+        <BotAvatar shape={bot.shape} hue={bot.hue} state={avatarState} />
         <span className="team-bot-who">
           <b>{bot.name}</b>
           <small>{projects.length > 0 ? `在 ${projects.join("、")}` : "还没进项目"}</small>

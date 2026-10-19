@@ -13,7 +13,7 @@ let database: TestDb;
 beforeAll(async () => {
   database = await createTestDb();
   await database.sql`INSERT INTO users (id, name, email, password_hash) VALUES ('recall-bench-owner', '实测', 'recall-bench@baize.dev', 'fixture')`;
-  await database.sql`INSERT INTO bots (id, owner_id, name, hue) VALUES ('recall-bench-bot', 'recall-bench-owner', '实测', 'sky')`;
+  await database.sql`INSERT INTO bots (id, owner_id, name, hue, shape) VALUES ('recall-bench-bot', 'recall-bench-owner', '实测', 'sky', 'pillow')`;
   await database.sql`INSERT INTO groups (id, owner_id) VALUES ('recall-bench-group', 'recall-bench-owner')`;
   await database.sql`INSERT INTO work_entries ${database.sql(
     corpus.map(({ text }, seq) => ({

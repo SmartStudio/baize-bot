@@ -15,6 +15,7 @@ import {
   Bot,
   BotHue,
   BotId,
+  BotShape,
   BotTags,
   BotTemplate,
   BrandBook,
@@ -114,6 +115,7 @@ export const CreateBotRequest = z.object({
   tags: BotTags.optional(),
   description: z.string().max(80).optional(),
   hue: BotHue.optional(),
+  shape: BotShape.optional(),
 });
 export const CreateBotResponse = z.object({ bot: Bot, group: Group });
 

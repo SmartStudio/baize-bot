@@ -1,8 +1,15 @@
-import { ApiError, BotListResponse, CreateBotResponse, UpdateBotResponse, type BotHue } from "@baize/shared";
+import {
+  ApiError,
+  BotListResponse,
+  CreateBotResponse,
+  UpdateBotResponse,
+  type BotHue,
+  type BotShape,
+} from "@baize/shared";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { groupMembers, tasks } from "../src/db/schema.js";
-import { HUE_ROTATION } from "../src/naming.js";
+import { HUE_ROTATION, SHAPE_ROTATION } from "../src/naming.js";
 import { appendMessage } from "../src/repo/messages.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -62,20 +69,40 @@ describe("建 Bot", () => {
     expect(task?.number).toBe("T-1002");
   });
 
-  it("不给名字时系统起「小」加一个字，色相按七个轮流分配", async () => {
+  it("不给名字时系统起「小」加一个字，七色和八形共用轮转，前 56 个组合不重复", async () => {
     const client = await loggedInClient();
 
     const hues: BotHue[] = [];
-    for (let i = 0; i < HUE_ROTATION.length + 1; i += 1) {
+    const shapes: BotShape[] = [];
+    for (let i = 0; i < 56; i += 1) {
       const { bot } = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
       expect(bot.name, "系统起的名字是「小」加一个汉字").toMatch(/^小[一-龥]$/);
       expect(bot.tags).toEqual([]);
       expect(bot.notify).toBe(true);
       hues.push(bot.hue);
+      shapes.push(bot.shape);
     }
 
     expect(hues.slice(0, HUE_ROTATION.length)).toEqual([...HUE_ROTATION]);
     expect(hues[HUE_ROTATION.length], "第八个 Bot 转回第一个色相").toBe(HUE_ROTATION[0]);
+    expect(shapes.slice(0, SHAPE_ROTATION.length)).toEqual([...SHAPE_ROTATION]);
+    expect(shapes[SHAPE_ROTATION.length], "第九个 Bot 转回第一个形状").toBe(SHAPE_ROTATION[0]);
+    expect(new Set(hues.map((hue, i) => `${hue}:${shapes[i]}`)).size).toBe(56);
+  });
+
+  it("只指定一种外观仍推进共同序号，两种都指定才跳过轮转", async () => {
+    const client = await loggedInClient();
+    const create = async (input: object) => {
+      const response = await client.post("/api/bots", input);
+      expect(response.status).toBe(201);
+      return CreateBotResponse.parse(await response.json()).bot;
+    };
+    expect(await create({ hue: "pink", shape: "leaf" })).toMatchObject({ hue: "pink", shape: "leaf" });
+    expect(await create({ hue: "violet" })).toMatchObject({ hue: "violet", shape: "pillow" });
+    expect(await create({ shape: "pudding" })).toMatchObject({ hue: "tangerine", shape: "pudding" });
+    expect(await create({})).toMatchObject({ hue: "lime", shape: "triangle" });
+    const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
+    expect(list.items.find((item) => item.bot.role === "assistant")?.bot.shape).toBe("pillow");
   });
 
   it("给了字段就用给的", async () => {
@@ -85,6 +112,7 @@ describe("建 Bot", () => {
       tags: ["客服"],
       description: "退款先找我点头。",
       hue: "violet",
+      shape: "bean",
     });
     const { bot } = CreateBotResponse.parse(await response.json());
     expect(bot).toMatchObject({
@@ -92,6 +120,7 @@ describe("建 Bot", () => {
       tags: ["客服"],
       description: "退款先找我点头。",
       hue: "violet",
+      shape: "bean",
     });
   });
 
@@ -153,6 +182,19 @@ describe("改 Bot", () => {
     expect(updated.name, "没传的字段不动").toBe("小销");
     expect(updated.tags).toEqual(["销售"]);
     expect(updated.hue).toBe(bot.hue);
+    expect(updated.shape).toBe(bot.shape);
+  });
+
+  it("改形状后列表保留新外观，无效形状回 400", async () => {
+    const client = await loggedInClient();
+    const { bot } = CreateBotResponse.parse(await (await client.post("/api/bots", {})).json());
+    const response = await client.patch(`/api/bots/${bot.id}`, { shape: "droplet" });
+    expect(response.status).toBe(200);
+    expect(UpdateBotResponse.parse(await response.json()).bot).toMatchObject({ shape: "droplet", hue: bot.hue });
+    const list = BotListResponse.parse(await (await client.get("/api/bots")).json());
+    expect(list.items.find((item) => item.bot.id === bot.id)?.bot.shape).toBe("droplet");
+    expect((await client.patch(`/api/bots/${bot.id}`, { shape: "circle" })).status).toBe(400);
+    expect((await client.post("/api/bots", { shape: "circle" })).status).toBe(400);
   });
 
   it("改别人的 Bot 返回 404", async () => {

@@ -1,19 +1,25 @@
-import type { BotHue, BotId, Message, PokerSeatView, PokerTableView } from "@baize/shared";
+import type { BotHue, BotId, BotShape, Message, PokerSeatView, PokerTableView } from "@baize/shared";
 
 // 牌桌右栏、老白的建议和一手结束这三块要读的东西。都从整张桌视图和群消息里算，不存状态。
 
-export type Speaker = { readonly name: string; readonly hue: BotHue };
-export type LogLine = { readonly id: string; readonly name: string; readonly hue: BotHue; readonly text: string };
+export type Speaker = { readonly name: string; readonly hue: BotHue; readonly shape: BotShape };
+export type LogLine = {
+  readonly id: string;
+  readonly name: string;
+  readonly hue: BotHue;
+  readonly shape: BotShape;
+  readonly text: string;
+};
 
 // 换下桌的牌友不在座位表里了，他留在记录里的话只剩 botId，认不出名字。
-const FORMER_PLAYER: Speaker = { name: "已下桌的牌友", hue: "sky" };
+const FORMER_PLAYER: Speaker = { name: "已下桌的牌友", hue: "sky", shape: "pillow" };
 
 export const formatChips = (amount: number): string => new Intl.NumberFormat("en-US").format(amount);
 
 // 预置牌友不在 GET /api/bots 里，名字和颜色只能取自座位和主持。
 const speakersOf = (table: PokerTableView): { bots: Map<BotId, Speaker>; user: Speaker } => {
   const bots = new Map<BotId, Speaker>([[table.host.botId, table.host]]);
-  let user: Speaker = { name: "你", hue: "lime" };
+  let user: Speaker = { name: "你", hue: "lime", shape: "pillow" };
   for (const seat of table.seats) {
     if (seat.kind === "bot" && seat.botId !== null) bots.set(seat.botId, seat);
     else user = seat;
@@ -31,7 +37,13 @@ export const publicLines = (messages: readonly Message[], table: PokerTableView)
         return [];
       }
       const speaker = body.kind === "user" ? user : (bots.get(body.botId) ?? FORMER_PLAYER);
-      const line: LogLine = { id: message.id, name: speaker.name, hue: speaker.hue, text: body.text };
+      const line: LogLine = {
+        id: message.id,
+        name: speaker.name,
+        hue: speaker.hue,
+        shape: speaker.shape,
+        text: body.text,
+      };
       return [{ at: Date.parse(message.createdAt), arrived, line }];
     })
     .toSorted((a, b) => a.at - b.at || a.arrived - b.arrived)

@@ -300,7 +300,7 @@ const RoutineRow = ({
           <RoutineStateChip state={routine.state} />
         </span>
         <span className="routine-row-meta">
-          <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+          <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />
           <span data-testid="routine-bot">{bot.name}</span>
         </span>
         <span className="routine-row-meta">
@@ -440,7 +440,7 @@ export const RoutinesPage = () => {
             />
             <b>{ROUTINE_STATE[routine.state].label}</b>
             <span className="routine-row-meta">
-              <BotAvatar name={editing.bot.name} hue={editing.bot.hue} size="xs" />
+              <BotAvatar shape={editing.bot.shape} hue={editing.bot.hue} size="xs" />
               {editing.bot.name}
             </span>
             <span className="routine-actions-gap" />

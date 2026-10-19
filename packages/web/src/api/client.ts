@@ -58,6 +58,7 @@ import {
   type DraftId,
   type Bot,
   type BotHue,
+  type BotShape,
   type BotId,
   type BrandBook,
   type ExportTemplateRequest,
@@ -153,6 +154,7 @@ export type BotDraft = {
   tags?: string[];
   description?: string;
   hue?: BotHue;
+  shape?: BotShape;
   notify?: boolean;
 };
 

@@ -1,35 +1,93 @@
 /* ---------- 头像 ---------- */
 
 .avatar {
-  display: grid;
+  position: relative;
+  display: inline-grid;
   flex: none;
-  /* 头像有 sm/md/lg 三档，圆角得跟着尺寸走，tokens 里的 --radius-* 都是固定 px，表达不了这个比例。 */
-  border-radius: 32%;
-  color: var(--fg-inverse);
-  font-family: var(--font-sans);
-  font-weight: var(--weight-semibold);
   place-items: center;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.avatar svg {
+  display: block;
+  overflow: visible;
+}
+
+.avatar-xs {
+  width: 20px;
+  height: 20px;
 }
 
 .avatar-sm {
-  width: var(--space-8);
-  height: var(--space-8);
-  font-size: var(--text-xs);
+  width: 28px;
+  height: 28px;
 }
 
 .avatar-md {
-  width: var(--space-9);
-  height: var(--space-9);
-  font-size: var(--text-sm);
+  width: 36px;
+  height: 36px;
 }
 
 .avatar-lg {
-  width: var(--space-12);
-  height: var(--space-12);
-  font-size: var(--text-3xl);
+  width: 56px;
+  height: 56px;
+}
+
+.avatar-confirm {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--bg-surface);
+  border-radius: 50%;
+  background: var(--warning);
+}
+
+.avatar.is-working {
+  animation: avatar-working 850ms ease-in-out infinite;
+  transform-origin: center bottom;
+}
+
+@keyframes avatar-working {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+
+  42% {
+    transform: translateY(-4px);
+  }
+
+  60% {
+    transform: translateY(0) scaleX(1.02);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .avatar.is-working {
+    animation: none;
+  }
 }
 
 .avatar-user {
   background: var(--bg-selected);
   color: var(--fg-2);
+  border-radius: 32%;
+  font-family: var(--font-sans);
+  font-weight: var(--weight-semibold);
+}
+
+.avatar-user.avatar-sm {
+  width: var(--space-8);
+  height: var(--space-8);
+  font-size: var(--text-xs);
+}
+
+.avatar-user.avatar-md {
+  width: var(--space-9);
+  height: var(--space-9);
+  font-size: var(--text-sm);
 }

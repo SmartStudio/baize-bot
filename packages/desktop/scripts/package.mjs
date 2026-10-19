@@ -31,6 +31,7 @@ const apps = await packager({
   overwrite: true,
   asar: false,
   prune: true,
+  icon: join(root, "assets/icon.icns"),
   extraResource: [join(root, "dist/agent.mjs")],
   quiet: false,
 });

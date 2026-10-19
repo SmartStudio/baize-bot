@@ -1,7 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { untakenBotName } from "../src/naming.js";
+import { hueAt, shapeAt, untakenBotName } from "../src/naming.js";
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+it("七色八形的组合 56 次后才循环，各自按七次和八次循环", () => {
+  const appearances = Array.from({ length: 56 }, (_, i) => `${hueAt(i)}:${shapeAt(i)}`);
+  expect(new Set(appearances).size).toBe(56);
+  expect(`${hueAt(56)}:${shapeAt(56)}`).toBe(appearances[0]);
+  expect(hueAt(7)).toBe(hueAt(0));
+  expect(shapeAt(8)).toBe(shapeAt(0));
+});
 
 describe("untakenBotName", () => {
   it("原名空着就用原名，撞了接序号", () => {

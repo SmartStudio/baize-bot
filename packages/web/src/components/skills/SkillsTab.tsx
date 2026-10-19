@@ -232,7 +232,7 @@ export const SkillsTab = ({ botId }: { botId: BotId }) => {
                     setView({ kind: "detail", skillId: current.id, picking: false });
                   }}
                 >
-                  <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+                  <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />
                   {bot.name}
                 </button>
               ))}

@@ -68,7 +68,7 @@ export const ReviewCard = ({ table }: { table: PokerTableView }) => {
   return (
     <section data-testid="review-card" data-review-status={reviewState.status} style={card}>
       <header style={head}>
-        <BotAvatar name={table.host.name} hue={table.host.hue} />
+        <BotAvatar shape={table.host.shape} hue={table.host.hue} />
         <div>
           <div style={title}>{table.host.name} · 复盘</div>
           <div style={sub}>{done ? `这一场挑出 ${review.hands.length} 手关键牌` : "最近一场"}</div>

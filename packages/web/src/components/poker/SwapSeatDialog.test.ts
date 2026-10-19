@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { PokerTableView, type PokerPersona } from "@baize/shared";
+import { POKER_PERSONAS, PokerTableView, type PokerPersona } from "@baize/shared";
 import { swapCandidates } from "./SwapSeatDialog.js";
 
 const tableWith = (personas: readonly PokerPersona[]) =>
@@ -8,7 +8,17 @@ const tableWith = (personas: readonly PokerPersona[]) =>
     status: "idle",
     version: 1,
     seats: [
-      { seat: 4, engineSeatId: "4", kind: "user", botId: null, name: "你", persona: null, hue: "sky", stack: 2000 },
+      {
+        seat: 4,
+        engineSeatId: "4",
+        kind: "user",
+        botId: null,
+        name: "你",
+        persona: null,
+        hue: "sky",
+        shape: "pillow",
+        stack: 2000,
+      },
       ...personas.map((persona, index) => ({
         seat: index + 1,
         engineSeatId: String(index + 1),
@@ -16,11 +26,12 @@ const tableWith = (personas: readonly PokerPersona[]) =>
         botId: `bot_poker_${persona}`,
         name: persona,
         persona,
-        hue: "coral",
+        hue: POKER_PERSONAS[persona].hue,
+        shape: POKER_PERSONAS[persona].shape,
         stack: 2000,
       })),
     ],
-    host: { botId: "bot_laobai", name: "老白", hue: "sky" },
+    host: { botId: "bot_laobai", name: "老白", hue: "sky", shape: "pillow" },
     session: null,
     hand: null,
     hint: null,
