@@ -20,7 +20,9 @@ export interface BrowserPage {
   readonly home: string;
   readonly signedIn: SignedInBy;
   readonly handleSelector: string;
-  /** 给了就从元素文字里按它抠第一组，没给取整段文字。 */
+  /** 给了读元素的这个属性，没给读元素文字。 */
+  readonly handleAttribute?: string;
+  /** 给了就从读到的值里按它抠第一组，没给取整段。 */
   readonly handlePattern?: RegExp;
 }
 
@@ -51,13 +53,15 @@ export const defaultLoginPages: Readonly<Record<BrowserPlatform, BrowserPage>> =
     signedIn: { kind: "element", selector: ".user-info .user_avatar" },
     handleSelector: ".user-info span",
   },
-  // 待实机核：登上后 X 跳回 /home，左下角账号切换按钮的文字里带「@账号名」。
+  // 实机核过：窗口窄于约 1265 宽时 X 把侧栏收成图标，账号按钮里没有「@账号名」的文字，只剩头像，
+  // 头像的 data-testid 宽窄都带账号名。助理 Chrome 起时不开窗口，后台页的宽度说不准，所以读头像。
   x: {
     url: "https://x.com/i/flow/login",
     home: "https://x.com/home",
     signedIn: { kind: "cookie", url: "https://x.com/", name: "auth_token" },
-    handleSelector: '[data-testid="SideNav_AccountSwitcher_Button"]',
-    handlePattern: /@([A-Za-z0-9_]{1,15})/,
+    handleSelector: '[data-testid="SideNav_AccountSwitcher_Button"] [data-testid^="UserAvatar-Container-"]',
+    handleAttribute: "data-testid",
+    handlePattern: /^UserAvatar-Container-([A-Za-z0-9_]{1,15})$/,
   },
 };
 
@@ -97,7 +101,9 @@ function signedInExpression(page: BrowserPage): string {
   return `(() => {
     const element = ${JSON.stringify(element)};
     if (element !== null && !document.querySelector(element)) return null;
-    const text = document.querySelector(${JSON.stringify(page.handleSelector)})?.textContent?.trim() ?? "";
+    const found = document.querySelector(${JSON.stringify(page.handleSelector)});
+    const attribute = ${JSON.stringify(page.handleAttribute ?? null)};
+    const text = (attribute === null ? found?.textContent : found?.getAttribute(attribute))?.trim() ?? "";
     const pattern = ${JSON.stringify(pattern)};
     const handle = pattern === null ? text : (new RegExp(pattern).exec(text)?.[1] ?? "");
     return handle || null;

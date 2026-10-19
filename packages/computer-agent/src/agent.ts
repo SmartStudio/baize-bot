@@ -495,6 +495,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           AbortSignal.timeout(LOGIN_CHECK_MS),
         )
           .then((signedInAs) => {
+            log(`查 ${message.platform} 登录：${signedInAs === null ? "没读到账号名，账号状态不动" : "已登上"}`);
             if (signedInAs !== null)
               report({
                 type: "login_state",

@@ -361,12 +361,12 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", (
     }
   }, 20_000);
 
-  it("X 那一种：账号按钮先出来、auth_token 后种下，种下之前不算登上；之后从按钮文字里抠出 @ 后的账号名", async () => {
+  it("X 那一种：账号按钮先出来、auth_token 后种下，种下之前不算登上；之后从按钮里头像的 data-testid 抠出账号名，侧栏收窄、按钮没有文字也读得到", async () => {
     // 先出按钮再种 cookie：只看页面就会提前算登上。cookie 用本地地址代替 x.com，Network.getCookies 走的是同一条真路。
     const server = createServer((_request, response) => {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end(`<!doctype html><meta charset="utf-8"><body>
-        <button data-testid="SideNav_AccountSwitcher_Button">白泽 Bot @baize_x</button>
+        <button data-testid="SideNav_AccountSwitcher_Button"><div data-testid="UserAvatar-Container-baize_x"></div></button>
         <script>setTimeout(() => { document.cookie = "auth_token=fake; path=/"; }, 800)</script></body>`);
     });
     await new Promise<void>((resolve, reject) => {
@@ -410,7 +410,7 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", (
       response.end(
         request.url === "/in"
           ? `<!doctype html><meta charset="utf-8"><body>
-            <button data-testid="SideNav_AccountSwitcher_Button">白泽 Bot @baize_x</button>
+            <button data-testid="SideNav_AccountSwitcher_Button"><div data-testid="UserAvatar-Container-baize_x"></div></button>
             <script>document.cookie = "auth_token=fake; path=/in"</script></body>`
           : `<!doctype html><meta charset="utf-8"><body>登录</body>`,
       );
