@@ -1,6 +1,14 @@
-import { rankValue, suitOf, type Card } from "./cards.js";
+import { POKER_RANKS, type PokerCard } from "./poker.js";
 
-export const HAND_CATEGORIES = [
+// 牌力：控制面的引擎拿它比牌，Web 拿它在摊牌时给每家写牌型。纯函数，两边同一份。
+
+type Card = PokerCard;
+
+/** 2 到 14，A 是 14。 */
+const rankValue = (card: Card): number => POKER_RANKS.indexOf(card.charAt(0) as (typeof POKER_RANKS)[number]) + 2;
+const suitOf = (card: Card): string => card.charAt(1);
+
+export const POKER_HAND_CATEGORIES = [
   "high_card",
   "pair",
   "two_pair",
@@ -11,29 +19,29 @@ export const HAND_CATEGORIES = [
   "four_of_a_kind",
   "straight_flush",
 ] as const;
-export type HandCategory = (typeof HAND_CATEGORIES)[number];
+export type PokerHandCategory = (typeof POKER_HAND_CATEGORIES)[number];
 
-export interface HandValue {
-  readonly category: HandCategory;
+export interface PokerHandValue {
+  readonly category: PokerHandCategory;
   /** 先比这一串再比下一串：牌型序号，然后按牌型的比较顺序排好的点数，踢脚在最后。 */
   readonly score: readonly number[];
   readonly cards: readonly Card[];
 }
 
 /** 底牌加公共牌里挑最好的五张，至少要凑够五张。 */
-export function evaluate(hole: readonly Card[], board: readonly Card[]): HandValue {
+export function evaluatePokerHand(hole: readonly Card[], board: readonly Card[]): PokerHandValue {
   const cards = [...hole, ...board];
   if (cards.length < 5) throw new Error("凑不够五张牌，没法比牌");
-  let best: HandValue | null = null;
+  let best: PokerHandValue | null = null;
   for (const five of combinations(cards, 5)) {
     const value = evaluateFive(five);
-    if (best === null || compareHands(value, best) > 0) best = value;
+    if (best === null || comparePokerHands(value, best) > 0) best = value;
   }
-  return best as HandValue;
+  return best as PokerHandValue;
 }
 
 /** 正数表示 a 大，负数表示 b 大，0 是一样大。 */
-export function compareHands(a: HandValue, b: HandValue): number {
+export function comparePokerHands(a: PokerHandValue, b: PokerHandValue): number {
   for (let i = 0; i < Math.max(a.score.length, b.score.length); i++) {
     const diff = (a.score[i] ?? 0) - (b.score[i] ?? 0);
     if (diff !== 0) return diff;
@@ -41,7 +49,7 @@ export function compareHands(a: HandValue, b: HandValue): number {
   return 0;
 }
 
-function evaluateFive(cards: readonly Card[]): HandValue {
+function evaluateFive(cards: readonly Card[]): PokerHandValue {
   const counts = new Map<number, number>();
   for (const card of cards) counts.set(rankValue(card), (counts.get(rankValue(card)) ?? 0) + 1);
   // 同点数多的在前，一样多的点数大的在前：葫芦先比三条再比对子，两对先比大对再比小对再比踢脚。
@@ -54,10 +62,10 @@ function evaluateFive(cards: readonly Card[]): HandValue {
 
   const category = categoryOf(shape, flush, straightHigh !== null);
   const tiebreak = straightHigh !== null ? [straightHigh] : ordered;
-  return { category, score: [HAND_CATEGORIES.indexOf(category), ...tiebreak], cards };
+  return { category, score: [POKER_HAND_CATEGORIES.indexOf(category), ...tiebreak], cards };
 }
 
-function categoryOf(shape: string, flush: boolean, straight: boolean): HandCategory {
+function categoryOf(shape: string, flush: boolean, straight: boolean): PokerHandCategory {
   if (straight && flush) return "straight_flush";
   if (shape === "41") return "four_of_a_kind";
   if (shape === "32") return "full_house";
@@ -92,31 +100,31 @@ function* combinations<T>(items: readonly T[], size: number, start = 0, picked: 
 
 const RANK_NAMES: Record<number, string> = { 10: "10", 11: "J", 12: "Q", 13: "K", 14: "A" };
 
-export function rankName(value: number): string {
+export function pokerRankName(value: number): string {
   return RANK_NAMES[value] ?? String(value);
 }
 
 /** 给模型和人看的一句牌力，例如「两对，K 和 7」。 */
-export function describeHand(value: HandValue): string {
+export function describePokerHand(value: PokerHandValue): string {
   const [, a = 0, b = 0] = value.score;
   switch (value.category) {
     case "straight_flush":
-      return a === 14 ? "皇家同花顺" : `同花顺，${rankName(a)} 高`;
+      return a === 14 ? "皇家同花顺" : `同花顺，${pokerRankName(a)} 高`;
     case "four_of_a_kind":
-      return `四条 ${rankName(a)}`;
+      return `四条 ${pokerRankName(a)}`;
     case "full_house":
-      return `葫芦，${rankName(a)} 带 ${rankName(b)}`;
+      return `葫芦，${pokerRankName(a)} 带 ${pokerRankName(b)}`;
     case "flush":
-      return `同花，${rankName(a)} 高`;
+      return `同花，${pokerRankName(a)} 高`;
     case "straight":
-      return `顺子，${rankName(a)} 高`;
+      return `顺子，${pokerRankName(a)} 高`;
     case "three_of_a_kind":
-      return `三条 ${rankName(a)}`;
+      return `三条 ${pokerRankName(a)}`;
     case "two_pair":
-      return `两对，${rankName(a)} 和 ${rankName(b)}`;
+      return `两对，${pokerRankName(a)} 和 ${pokerRankName(b)}`;
     case "pair":
-      return `一对 ${rankName(a)}`;
+      return `一对 ${pokerRankName(a)}`;
     case "high_card":
-      return `高牌 ${rankName(a)}`;
+      return `高牌 ${pokerRankName(a)}`;
   }
 }

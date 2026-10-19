@@ -1,6 +1,6 @@
 import { ArrowRightLeft, Hand, MessageSquare, Plus, Repeat, Settings as SettingsIcon, Sun, Users } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { Bot, BotId, GroupId, User } from "@baize/shared";
+import type { Bot, BotId, GroupId, PokerTableView, User } from "@baize/shared";
 import { BotAvatar, resolveBotAvatarState } from "./BotAvatar.js";
 import { activityOf } from "./messages/preview.js";
 import type { Conversation, GroupTurn } from "../state/app.js";
@@ -13,6 +13,8 @@ type Props = {
   conversations: Conversation[];
   bots: Record<BotId, Bot>;
   groupTurns: Record<GroupId, GroupTurn>;
+  /** 拉过视图的牌桌。牌桌项目没有派活这回事，侧栏写打到第几手。 */
+  poker: Record<GroupId, PokerTableView>;
   user: User;
   pendingCount: number;
   countsStale: boolean;
@@ -25,15 +27,35 @@ type Props = {
 
 const currentIf = (on: boolean) => (on ? ("page" as const) : undefined);
 
+// 牌桌项目的牌友是预置的，不在 Bot 表里，认不出领头的 Bot 时宁可不写，也不写一句不成立的「待派活」。
+const subtitleOf = (
+  table: PokerTableView | undefined,
+  turn: GroupTurn | undefined,
+  bots: Record<BotId, Bot>,
+  handler: Bot | undefined,
+  lead: Bot | undefined,
+): string => {
+  if (table !== undefined) {
+    if (table.status === "in_hand" && table.hand !== null) return `第 ${table.hand.number} 手`;
+    if (table.session !== null) return `这一场打了 ${table.session.handCount} 手`;
+    return "";
+  }
+  if (turn?.current) return `${bots[turn.current]?.name ?? turn.current}正在说`;
+  if (handler) return `${handler.name} 经手`;
+  return lead === undefined ? "" : "待派活";
+};
+
 const ProjectItem = ({
   project,
   bots,
   turn,
+  table,
   current,
 }: {
   project: Team;
   bots: Record<BotId, Bot>;
   turn: GroupTurn | undefined;
+  table: PokerTableView | undefined;
   current: boolean;
 }) => {
   const lead = project.botIds.map((botId) => bots[botId]).find((bot) => bot !== undefined);
@@ -72,13 +94,7 @@ const ProjectItem = ({
             ) : null}
           </span>
         ) : null}
-        <small data-testid="group-handler">
-          {turn?.current
-            ? `${bots[turn.current]?.name ?? turn.current}正在说`
-            : handler
-              ? `${handler.name} 经手`
-              : "待派活"}
-        </small>
+        <small data-testid="group-handler">{subtitleOf(table, turn, bots, handler, lead)}</small>
       </span>
     </Link>
   );
@@ -89,6 +105,7 @@ export const Sidebar = ({
   conversations,
   bots,
   groupTurns,
+  poker,
   user,
   pendingCount,
   countsStale,
@@ -163,6 +180,7 @@ export const Sidebar = ({
           project={project}
           bots={bots}
           turn={groupTurns[project.groupId]}
+          table={poker[project.groupId]}
           current={openGroup === project.groupId}
         />
       ))}

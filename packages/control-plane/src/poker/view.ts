@@ -10,7 +10,7 @@ import {
   type SeatStatus,
   type Street,
 } from "./engine.js";
-import { describeHand, evaluate, rankName } from "./evaluate.js";
+import { describePokerHand, evaluatePokerHand, pokerRankName } from "@baize/shared";
 
 // 某个座位能看到的一手牌。这是可见范围的基础：只拼公开信息加这个座位自己的底牌，
 // 种子和剩余牌堆也不出现，拿到种子就能推出所有人的牌。
@@ -99,8 +99,8 @@ export function positionOf(state: HandState, seatId: SeatId): Position {
 }
 
 function strengthOf(hole: readonly [Card, Card], board: readonly Card[]): string {
-  if (board.length > 0) return describeHand(evaluate(hole, board));
+  if (board.length > 0) return describePokerHand(evaluatePokerHand(hole, board));
   const [a, b] = [rankValue(hole[0]), rankValue(hole[1])].toSorted((x, y) => y - x) as [number, number];
-  if (a === b) return `口袋对 ${rankName(a)}`;
-  return `${rankName(a)} ${rankName(b)} ${suitOf(hole[0]) === suitOf(hole[1]) ? "同花" : "不同花"}`;
+  if (a === b) return `口袋对 ${pokerRankName(a)}`;
+  return `${pokerRankName(a)} ${pokerRankName(b)} ${suitOf(hole[0]) === suitOf(hole[1]) ? "同花" : "不同花"}`;
 }

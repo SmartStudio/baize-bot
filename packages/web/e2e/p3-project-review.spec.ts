@@ -75,7 +75,7 @@ const openProject = async (page: Page, groupId: string): Promise<void> => {
   await expect(page.locator(`[data-poker-project="${groupId}"]`), "牌桌项目页出现").toHaveCount(1);
 };
 
-const signed = (net: number): string => (net > 0 ? `+${net}` : `${net}`);
+const signed = (net: number): string => `${net > 0 ? "+" : ""}${net.toLocaleString("en-US")}`;
 
 test("散场后回项目页顶上是老白的三手复盘", async ({ page }) => {
   await login(page);
@@ -107,7 +107,7 @@ test("没打过时不显示复盘卡", async ({ page }) => {
   await expect(page.getByTestId("stats-sessions")).toHaveText("0");
 });
 
-test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
+test("战绩数字和 mock 一致，按场数，虚拟筹码的说明留在牌桌页", async ({ page }) => {
   await login(page);
   const request = page.request;
   const groupId = await createTable(request);
@@ -121,7 +121,9 @@ test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
   await expect(page.getByTestId("stats-sessions")).toHaveText(String(stats.sessions));
   await expect(page.getByTestId("stats-won")).toHaveText(String(stats.sessionsWon));
   await expect(page.getByTestId("stats-net")).toHaveText(signed(stats.net));
-  await expect(page.getByTestId("stats-note")).toHaveText("虚拟筹码，不涉及真钱");
+  await expect(page.getByTestId("stats-block")).toContainText(`打了 ${stats.sessions} 场`);
+  await expect(page.getByTestId("stats-block")).toContainText(`赢了 ${stats.sessionsWon} 场`);
+  await expect(page.getByTestId("stats-block")).not.toContainText("虚拟筹码");
 });
 
 test("项目页各块之间的段间距一致，战绩块不贴着牌友块", async ({ page }) => {

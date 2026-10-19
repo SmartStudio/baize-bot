@@ -218,6 +218,7 @@ export const MainWindow = () => {
         conversations={ready.conversations}
         bots={bots}
         groupTurns={ready.groupTurns}
+        poker={ready.poker}
         user={ready.user}
         pendingCount={today.data === null ? 0 : today.data.pending.length}
         countsStale={ready.loads.counts === "failed"}
@@ -261,12 +262,15 @@ export const MainWindow = () => {
           computerChoices={computerChoices}
         />
       ) : tableOpen !== null ? (
-        <TablePage groupId={tableOpen} table={pokerTableOf(ready, tableOpen) ?? null} />
+        <TablePage
+          groupId={tableOpen}
+          title={projectNames[tableOpen] ?? null}
+          table={pokerTableOf(ready, tableOpen) ?? null}
+        />
       ) : projectOpen !== null && pokerTable !== undefined ? (
         <PokerProjectPage
           table={pokerTable}
           title={projectOpen.task.title}
-          routines={(routinesLoaded ?? []).filter((routine) => routine.groupId === projectOpen.groupId)}
           onOpenTable={openTablePage}
           onStartHand={actions.startPokerHand}
           onSwapSeat={actions.swapPokerSeat}

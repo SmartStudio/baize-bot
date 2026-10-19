@@ -1,5 +1,5 @@
 import { shuffledDeck, type Card } from "./cards.js";
-import { compareHands, evaluate, type HandValue } from "./evaluate.js";
+import { comparePokerHands, evaluatePokerHand, type PokerHandValue } from "@baize/shared";
 
 // 一手德州从发牌到结算的确定性引擎。纯函数：不读时钟、不读全局随机数，洗牌只看种子，
 // 所以种子加动作日志就能重放出同一个状态。apply 返回新状态，不改传入的那份。
@@ -238,7 +238,9 @@ export function settle(state: HandState): Award[] {
   const live = state.seats.filter((seat) => seat.status !== "folded");
   const levels = [...new Set(live.map((seat) => seat.contributed))].toSorted((a, b) => a - b);
   const total = state.seats.reduce((sum, seat) => sum + seat.contributed, 0);
-  const hands = new Map<SeatId, HandValue>(live.map((seat) => [seat.id, evaluate(seat.hole, state.board)]));
+  const hands = new Map<SeatId, PokerHandValue>(
+    live.map((seat) => [seat.id, evaluatePokerHand(seat.hole, state.board)]),
+  );
 
   const pots: { amount: number; eligible: Seat[] }[] = [];
   let floor = 0;
@@ -261,7 +263,8 @@ export function settle(state: HandState): Award[] {
     const winners = pot.eligible
       .filter((seat) =>
         pot.eligible.every(
-          (other) => compareHands(hands.get(seat.id) as HandValue, hands.get(other.id) as HandValue) >= 0,
+          (other) =>
+            comparePokerHands(hands.get(seat.id) as PokerHandValue, hands.get(other.id) as PokerHandValue) >= 0,
         ),
       )
       .toSorted((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
