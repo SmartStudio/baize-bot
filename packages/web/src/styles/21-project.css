@@ -263,3 +263,12 @@
   color: var(--danger);
   font: var(--type-caption);
 }
+
+.archive-group-confirm {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.archive-group-confirm:hover:not(:disabled) {
+  background: var(--danger-soft);
+}

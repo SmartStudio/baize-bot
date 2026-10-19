@@ -232,6 +232,21 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
             : c,
         ),
       };
+    case "group_archived": {
+      // 解散是终态，不比号就移掉；记下号，比它早发出的名单快照和建群推送不再把它带回来。
+      const groupStamps = newer(state.groupStamps, action.groupId, action.seq)
+        ? { ...state.groupStamps, [action.groupId]: action.seq }
+        : state.groupStamps;
+      const groupTurns = { ...state.groupTurns };
+      delete groupTurns[action.groupId];
+      return {
+        ...state,
+        groupStamps,
+        groupTurns,
+        conversations: state.conversations.filter((c) => c.groupId !== action.groupId),
+        messageGaps: dropGaps(state.messageGaps, (gap) => gap.groupId === action.groupId),
+      };
+    }
     case "group_turn": {
       const { turn } = action;
       if (turn.epoch < (state.turnEpochs[turn.groupId] ?? -1)) return state;

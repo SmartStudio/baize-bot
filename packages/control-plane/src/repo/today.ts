@@ -30,7 +30,7 @@ import {
 import { nextMoment } from "../routines/cron.js";
 import { findAssistant } from "./bots.js";
 import { hasMembers } from "./groups.js";
-import { groupHasMembers } from "./live-groups.js";
+import { groupIsLive } from "./live-groups.js";
 import { messageVisibleTo } from "./messages.js";
 import { metricsOf } from "./metrics.js";
 import { listPendingRoutineOffers } from "./routine-offers.js";
@@ -220,7 +220,7 @@ export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = ne
     .where(
       and(
         eq(groups.ownerId, ownerId),
-        groupHasMembers(db),
+        groupIsLive(db),
         eq(tasks.status, "active"),
         planGroupIds.length === 0 ? hasGoal : or(hasGoal, inArray(groups.id, planGroupIds)),
       ),

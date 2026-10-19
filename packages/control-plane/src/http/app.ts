@@ -105,6 +105,7 @@ import { TABLE_ROLES } from "../repo/poker-presets.js";
 import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
+import { archiveGroup } from "../repo/archive-group.js";
 import { findLiveGroupId } from "../repo/live-groups.js";
 import { appendMessageIfGroupAlive, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
 import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
@@ -901,6 +902,23 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const detail = await findGroup(db, c.get("user").id, groupId.data);
     if (detail === null) return c.json(NOT_FOUND, 404);
     return c.json(GroupResponse.parse(detail));
+  });
+
+  app.post("/api/groups/:id/archive", async (c) => {
+    const groupId = GroupId.safeParse(c.req.param("id"));
+    if (!groupId.success) return c.json(NOT_FOUND, 404);
+    const ownerId = c.get("user").id;
+    const archived = await archiveGroup(db, ownerId, groupId.data);
+    if (archived.kind === "not_found") return c.json(NOT_FOUND, 404);
+    if (archived.kind === "solo") return c.json({ error: "单聊不能解散，不想要这个 Bot 就删掉它" }, 409);
+    if (archived.kind === "already_archived") return c.body(null, 204);
+    for (const computerId of archived.cancelComputers) await agents.flushOutbox(computerId);
+    deps.groupTurns.cancel(groupId.data);
+    for (const runId of archived.endedRunIds) deps.groupTurns.abandon(groupId.data, runId);
+    for (const approval of archived.expired) hub.push(ownerId, { type: "approval_updated", approval });
+    for (const routineId of archived.routineIds) await pushRoutineUpdated(routineDeps, routineId);
+    hub.push(ownerId, { type: "group_archived", groupId: groupId.data });
+    return c.body(null, 204);
   });
 
   app.get("/api/groups/:id/messages", async (c) => {

@@ -34,7 +34,7 @@ async function ownsGroup(db: Db | Tx, ownerId: UserId, groupId: GroupId): Promis
   const [row] = await db
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.archivedAt)))
     .limit(1);
   return row !== undefined;
 }

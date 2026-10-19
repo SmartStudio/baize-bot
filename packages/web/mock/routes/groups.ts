@@ -17,6 +17,7 @@ import {
   messagesByGroupId,
   pendingApprovalsOf,
   pendingHandoffsOf,
+  pokerTables,
   responderOf,
   canGrant,
   contentIn,
@@ -93,6 +94,22 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
       send(res, 503, { error: "单拉消息暂时失败" });
     } else if (message === undefined) send(res, 404, { error: "没有这条消息" });
     else send(res, 200, { message });
+    return true;
+  }
+
+  // 解散群：单聊回 409。mock 直接把群删掉，别的路由自然都 404；真控制面对解散过的群再点一次回 204，这里回 404。
+  const archiveMatch = /^\/api\/groups\/([^/]+)\/archive$/.exec(path);
+  if (archiveMatch !== null && method === "POST") {
+    const groupId = decodeURIComponent(archiveMatch[1] ?? "");
+    const group = groups.get(groupId);
+    if (group === undefined) send(res, 404, { error: "没有这个群" });
+    else if (!isTeamGroup(group)) send(res, 409, { error: "单聊不能解散，不想要这个 Bot 就删掉它" });
+    else {
+      groups.delete(groupId);
+      pokerTables.delete(groupId);
+      push({ type: "group_archived", groupId: group.id });
+      send(res, 204);
+    }
     return true;
   }
 

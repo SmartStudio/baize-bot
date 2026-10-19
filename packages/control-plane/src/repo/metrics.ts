@@ -3,7 +3,7 @@ import { and, eq, exists, gte, inArray, isNull, lt, notExists, sql, type SQL } f
 import type { Db } from "../db/client.js";
 import { accounts, groups, metricSamples, tasks } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { groupHasMembers } from "./live-groups.js";
+import { groupIsLive } from "./live-groups.js";
 import type { Tx } from "./messages.js";
 import { weekStart } from "./usage.js";
 
@@ -104,13 +104,7 @@ async function insertSample(
         })
         .from(groups)
         .where(
-          and(
-            eq(groups.id, groupId),
-            eq(groups.ownerId, ownerId),
-            isNull(groups.soloBotId),
-            groupHasMembers(db),
-            extra,
-          ),
+          and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), groupIsLive(db), extra),
         ),
     )
     .returning({ groupId: metricSamples.groupId });
@@ -198,7 +192,7 @@ export async function dueGithubStarsProjects(db: Db, windowStart: Date): Promise
         sql`${tasks.metricSource}->>'kind' = 'github_stars'`,
         eq(tasks.status, "active"),
         isNull(groups.soloBotId),
-        groupHasMembers(db),
+        groupIsLive(db),
         notExists(sampledSince(db, "github_stars", windowStart)),
       ),
     );

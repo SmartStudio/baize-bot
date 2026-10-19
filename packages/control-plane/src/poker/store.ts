@@ -17,6 +17,7 @@ import {
   bots,
   groupMembers,
   computers,
+  groups,
   pokerEvents,
   pokerHands,
   pokerSessions,
@@ -26,7 +27,7 @@ import {
   type StoredPokerHandStatus,
 } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { appendMessage } from "../repo/messages.js";
+import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, shareBotRunsLock } from "../repo/runs.js";
 import { newHand, replay, type HandState } from "./engine.js";
 import { hostLines, seatNamer, type FallbackReason } from "./narrate.js";
@@ -60,9 +61,21 @@ export class TableGroupError extends Error {
 export async function assertNotTable(db: Db, groupId: GroupId): Promise<void> {
   if (await loadTable(db, groupId)) throw new TableGroupError();
 }
+/** 解散的群当作没有这张桌：扫描、推进、开手、问老白、散场都在这里停下。 */
 export async function loadTable(db: Db, groupId: string): Promise<TableRow | null> {
-  const [row] = await db.select().from(pokerTables).where(eq(pokerTables.groupId, groupId));
-  return row ?? null;
+  const [row] = await db
+    .select({ table: pokerTables })
+    .from(pokerTables)
+    .innerJoin(groups, eq(groups.id, pokerTables.groupId))
+    .where(and(eq(pokerTables.groupId, groupId), isNull(groups.archivedAt)));
+  return row?.table ?? null;
+}
+
+const TABLE_LOCK = 1652199536;
+
+/** 桌锁。调用方之前要按 withTableLock 的次序拿好归属人、成员 Bot 和电脑的锁。 */
+export async function lockTableKey(tx: Db | Tx, groupId: string): Promise<void> {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(${TABLE_LOCK}::int4, hashtext(${groupId}::text))`);
 }
 
 /** 所有动作、开手和扫描走同一把桌锁；事务句柄传给隐藏派活，其内部事务是 savepoint，不另占连接。 */
@@ -88,8 +101,15 @@ export async function withTableLock<T>(
       .where(eq(computers.ownerId, table.ownerId))
       .orderBy(asc(computers.id))
       .for("no key update");
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(1652199536::int4, hashtext(${groupId}::text))`);
-    const [locked] = await tx.select().from(pokerTables).where(eq(pokerTables.groupId, groupId)).for("update");
+    await lockTableKey(tx, groupId);
+    // 等锁期间群可能被解散，锁到之后再认一次。
+    const [row] = await tx
+      .select({ table: pokerTables })
+      .from(pokerTables)
+      .innerJoin(groups, eq(groups.id, pokerTables.groupId))
+      .where(and(eq(pokerTables.groupId, groupId), isNull(groups.archivedAt)))
+      .for("update", { of: pokerTables });
+    const locked = row?.table;
     if (!locked) return null;
     // Drizzle 的事务支持 select/update/transaction；这里复用已有只接受 Db 的派活接口。
     return run(tx as unknown as Db, locked);

@@ -274,6 +274,7 @@ export const MainWindow = () => {
           onOpenTable={openTablePage}
           onStartHand={actions.startPokerHand}
           onSwapSeat={actions.swapPokerSeat}
+          onArchive={actions.archiveGroup}
         />
       ) : probing ? (
         <main className="today-page today-loading" data-testid="project-probing">
@@ -289,6 +290,7 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onOpenGroup={openGroupPage}
+          onArchive={actions.archiveGroup}
         />
       ) : screen.kind === "routines" ? (
         <RoutinesPage />

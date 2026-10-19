@@ -12,7 +12,7 @@ import { and, asc, eq, exists, inArray, isNull, sql, type SQL } from "drizzle-or
 import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 import type { Db } from "../db/client.js";
 import { bots, groups, tasks } from "../db/schema.js";
-import { groupHasMembers } from "./live-groups.js";
+import { groupIsLive } from "./live-groups.js";
 import type { Tx } from "./messages.js";
 import { withMetric } from "./metrics.js";
 import { pauseGroupRoutines } from "./routines.js";
@@ -43,7 +43,7 @@ const ownedLiveGroups = (db: Db, ownerId: UserId) =>
   db
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.ownerId, ownerId), groupHasMembers(db)));
+    .where(and(eq(groups.ownerId, ownerId), groupIsLive(db)));
 
 export type UpdatedTask = { readonly task: TopicTask; readonly pausedRoutineIds: string[] };
 

@@ -12,6 +12,7 @@ import {
   Users,
 } from "lucide-react";
 import type { Bot, BotId, GroupId, Message, ProjectResponse, ProjectTurn } from "@baize/shared";
+import { ArchiveGroup } from "../components/ArchiveGroup.js";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
 import { Markdown } from "../components/messages/markdown.js";
@@ -128,6 +129,7 @@ type Props = {
   onSend: (groupId: GroupId, text: string) => Promise<void>;
   onDecide: PendingProps["onDecide"];
   onOpenGroup: (groupId: GroupId) => void;
+  onArchive: (groupId: GroupId) => Promise<unknown>;
 };
 
 export const ProjectPage = ({
@@ -140,6 +142,7 @@ export const ProjectPage = ({
   onSend,
   onDecide,
   onOpenGroup,
+  onArchive,
 }: Props) => {
   const { status, data, error, refresh } = project;
   const [draft, setDraft] = useState("");
@@ -242,6 +245,7 @@ export const ProjectPage = ({
             <MessagesSquare size={16} aria-hidden="true" />
             进项目群
           </button>
+          <ArchiveGroup groupId={groupId} handInPlay={false} onArchive={onArchive} />
         </header>
         {error === null ? null : (
           <p className="today-refresh-error" role="status">

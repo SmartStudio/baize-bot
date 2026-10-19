@@ -12,7 +12,7 @@ import {
 } from "@baize/shared";
 import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { computers, groupMembers, laneLeases, runs, workStreams } from "../db/schema.js";
+import { computers, groupMembers, groups, laneLeases, runs, workStreams } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
@@ -122,10 +122,14 @@ export async function placeRun(
   await lockOwner(tx, input.ownerId, "shared");
   await shareBotRunsLock(tx, input.botId);
   await lockLaneComputers(tx, input.ownerId);
+  // 解散群持着成员 Bot 的排他锁，等到这里它已经提交：解散的群和不在群里一样不建 run。
   const [member] = await tx
     .select({ computerKind: groupMembers.computerKind })
     .from(groupMembers)
-    .where(and(eq(groupMembers.botId, input.botId), eq(groupMembers.groupId, input.groupId)));
+    .innerJoin(groups, eq(groups.id, groupMembers.groupId))
+    .where(
+      and(eq(groupMembers.botId, input.botId), eq(groupMembers.groupId, input.groupId), isNull(groups.archivedAt)),
+    );
   if (member === undefined) return { kind: "not_member" };
   const preference = member.computerKind ?? null;
   const selected = await select(preference);
@@ -246,5 +250,22 @@ export async function cancelLanes(tx: Tx, ownerId: UserId, botId: BotId): Promis
       epoch: lease.epoch + 1,
     });
   await clearBotContinuations(tx, botId);
+  return [...new Set(leases.map((lease) => ComputerId.parse(lease.holderComputerId)))];
+}
+
+/** 解散群时取消这个群里每个 Bot 的道。调用方持有这些 Bot 的排他锁，并已 lockLaneComputers。 */
+export async function cancelGroupLanes(tx: Tx, groupId: GroupId): Promise<ComputerId[]> {
+  const leases = await tx
+    .select()
+    .from(laneLeases)
+    .where(eq(laneLeases.groupId, groupId))
+    .orderBy(asc(laneLeases.botId))
+    .for("update");
+  for (const lease of leases)
+    await enqueueDownlink(tx, ComputerId.parse(lease.holderComputerId), {
+      type: "cancel",
+      lane: { botId: BotId.parse(lease.botId), groupId },
+      epoch: lease.epoch + 1,
+    });
   return [...new Set(leases.map((lease) => ComputerId.parse(lease.holderComputerId)))];
 }
