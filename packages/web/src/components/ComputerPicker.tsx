@@ -297,7 +297,7 @@ export const TeamComputers = ({ view, members }: { view: ComputerChoicesView; me
           <p className="connect-menu-head">每个 Bot 在这个群里用哪台电脑</p>
           {members.map((bot) => (
             <div className="team-computer-row" data-testid="team-computer-row" data-bot-id={bot.id} key={bot.id}>
-              <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+              <BotAvatar shape={bot.shape} hue={bot.hue} size="xs" />
               <b className="team-computer-name">{bot.name}</b>
               <BotComputerPicker view={view} botId={bot.id} />
             </div>

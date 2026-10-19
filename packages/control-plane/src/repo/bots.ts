@@ -5,6 +5,7 @@ import {
   type Bot,
   type ComputerId,
   type BotHue,
+  type BotShape,
   type BotProfileResponse,
   type Group,
   type Message,
@@ -32,7 +33,7 @@ import { pendingHandoffCounts } from "./handoffs.js";
 import { joinGroups } from "./groups.js";
 import { appendMessage, latestMessagePerGroup, type Tx } from "./messages.js";
 import { transferRoutines } from "./routines.js";
-import { generateBotName, hueAt, taskNumber, untakenBotName } from "../naming.js";
+import { generateBotName, hueAt, shapeAt, taskNumber, untakenBotName } from "../naming.js";
 import { toApproval, toBot, toGroup, toTask } from "./rows.js";
 import { exclusiveBotRunsLock, lockOwner, lockRunsOfBot } from "./runs.js";
 
@@ -43,6 +44,7 @@ export type CreateBotInput = {
   readonly tags?: readonly string[] | undefined;
   readonly description?: string | undefined;
   readonly hue?: BotHue | undefined;
+  readonly shape?: BotShape | undefined;
 };
 
 export type UpdateBotInput = CreateBotInput & { readonly notify?: boolean | undefined };
@@ -66,15 +68,15 @@ const ASSISTANT_HUE: BotHue = "sky";
 type BotRow = typeof bots.$inferSelect;
 
 /**
- * 一次 UPDATE ... RETURNING 同时占住编号和色相，并发建 Bot 不会拿到同一个号。
- * 不推进色相时返回的 nextHueIndex 不用。
+ * 一次 UPDATE ... RETURNING 同时占住编号和外观序号，并发建 Bot 不会拿到同一个号。
+ * 色相和形状共用 nextHueIndex；两者都指定时不推进外观序号。
  */
-export async function claimCounter(tx: Tx, ownerId: UserId, advanceHue: boolean) {
+export async function claimCounter(tx: Tx, ownerId: UserId, advanceAppearance: boolean) {
   const [counter] = await tx
     .update(userCounters)
     .set({
       nextTaskNumber: sql`${userCounters.nextTaskNumber} + 1`,
-      nextHueIndex: sql`${userCounters.nextHueIndex} + ${advanceHue ? 1 : 0}`,
+      nextHueIndex: sql`${userCounters.nextHueIndex} + ${advanceAppearance ? 1 : 0}`,
     })
     .where(eq(userCounters.userId, ownerId))
     .returning({ nextTaskNumber: userCounters.nextTaskNumber, nextHueIndex: userCounters.nextHueIndex });
@@ -138,8 +140,7 @@ export async function insertMemberBot(
   input: CreateBotInput,
   naming: "as_given" | "untaken" = "as_given",
 ): Promise<{ bot: Bot; group: Group }> {
-  // 用户自己挑了色就不推进轮转，免得下一个自动分配的跳色。
-  const counter = await claimCounter(tx, ownerId, input.hue === undefined);
+  const counter = await claimCounter(tx, ownerId, input.hue === undefined || input.shape === undefined);
   const name = input.name ?? generateBotName();
   const [botRow] = await tx
     .insert(bots)
@@ -150,6 +151,7 @@ export async function insertMemberBot(
       tags: [...(input.tags ?? [])],
       description: input.description ?? "",
       hue: input.hue ?? hueAt(counter.nextHueIndex - 1),
+      shape: input.shape ?? shapeAt(counter.nextHueIndex - 1),
     })
     .returning();
   if (botRow === undefined) throw new Error("建 Bot 没有返回行");
@@ -167,7 +169,7 @@ export async function ensureAssistant(
 ): Promise<(SoloOpened & { readonly greeting: Message }) | null> {
   const [botRow] = await tx
     .insert(bots)
-    .values({ id: newId(), ownerId, role: "assistant", name: ASSISTANT_NAME, hue: ASSISTANT_HUE })
+    .values({ id: newId(), ownerId, role: "assistant", name: ASSISTANT_NAME, hue: ASSISTANT_HUE, shape: "pillow" })
     .onConflictDoNothing({ target: bots.ownerId, where: sql`${bots.role} = 'assistant'` })
     .returning();
   if (botRow === undefined) return null;
@@ -242,6 +244,7 @@ export async function updateBot(db: Db, ownerId: UserId, botId: BotId, input: Up
   if (input.tags !== undefined) patch.tags = [...input.tags];
   if (input.description !== undefined) patch.description = input.description;
   if (input.hue !== undefined) patch.hue = input.hue;
+  if (input.shape !== undefined) patch.shape = input.shape;
   if (input.notify !== undefined) patch.notify = input.notify;
   if (Object.keys(patch).length === 0) return findBot(db, ownerId, botId);
 

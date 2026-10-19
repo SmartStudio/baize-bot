@@ -219,7 +219,7 @@ export const TaskCard = ({ task, memberIds, bots, onToggle, onOpenDetail }: Prop
           <span className="task-members" aria-hidden="true">
             {memberIds.map((botId) => {
               const bot = bots[botId];
-              return bot === undefined ? null : <BotAvatar key={botId} name={bot.name} hue={bot.hue} size="xs" />;
+              return bot === undefined ? null : <BotAvatar key={botId} shape={bot.shape} hue={bot.hue} size="xs" />;
             })}
           </span>
           <button type="button" className="ghost-button" data-testid="task-open" onClick={onOpenDetail}>

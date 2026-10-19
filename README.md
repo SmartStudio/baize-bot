@@ -44,7 +44,7 @@ pnpm --filter @baize/control-plane computer-token -- remote [邮箱] # 创建或
 
 Bot 走到要点头的工具时群里出一张审批卡，点按钮或在群里回「批准」「拒绝」都算数，详见 `packages/control-plane/README.md`。
 
-用户有本机和远程电脑两台时，在对话里说「用云电脑」，Bot 就调 `switch_computer` 把这个群换到远程电脑，这一轮在那边接着做，也可以点标题栏的电脑按钮选。哪些命令会弹审批卡，两台电脑不一样。远程电脑上，命令在 bubblewrap 里跑，只有要联网、写工作区外，或者看得出是删、移的才问，其余直接跑。Mac 上只收紧不放宽。面向用户的说法在 [docs/上手.md](docs/上手.md) 的「让 Bot 换到云电脑上做」和「哪些命令会先问你」，实现在 `packages/control-plane/README.md` 的「派到哪台电脑」和 `packages/bot-runner/README.md` 的「统一闸门和沙箱」「换电脑」。
+用户有本机和远程电脑两台时，在对话里说「用云电脑」，Bot 就调 `switch_computer` 把这个群换到远程电脑，这一轮在那边接着做，也可以点标题栏的电脑按钮选。哪些命令会弹审批卡，两台电脑不一样。远程电脑上，命令在 bubblewrap 里跑，只有要联网、写工作区外、看得出是删或移的，或者 `python -c`、`node -e`、`sh -c` 这类内联代码才问，其余直接跑。Mac 上只收紧不放宽。面向用户的说法在 [docs/上手.md](docs/上手.md) 的「让 Bot 换到云电脑上做」和「哪些命令会先问你」，实现在 `packages/control-plane/README.md` 的「派到哪台电脑」和 `packages/bot-runner/README.md` 的「统一闸门和沙箱」「换电脑」。
 
 环境变量：
 

@@ -16,12 +16,7 @@ import {
 import { parse, type ControlOperator, type ParseEntry } from "shell-quote";
 import { ACCOUNT_READ_TOOL } from "./account-read.js";
 import { BROWSER_TOOL_ACTIONS } from "./browser.js";
-import {
-  type Containment,
-  looksLikeDeleteOrMove,
-  SYSTEM_PACKAGE_MANAGERS,
-  SYSTEM_PACKAGE_REASON,
-} from "./contained.js";
+import { type Containment, stillAsksInSandbox, SYSTEM_PACKAGE_MANAGERS, SYSTEM_PACKAGE_REASON } from "./contained.js";
 import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { TAKEOVER_TOOL } from "./takeover.js";
 import {
@@ -1122,15 +1117,14 @@ function systemPackageDenial(call: GateCall): GateDecision | null {
 /**
  * 只把 ask 改成 allow，deny 和 allow 原样返回。批了会多拿网络或写权限的不放：那正是沙箱要靠审批才开的口子。
  * 只放读和普通命令两类：它们批下来也是同一个沙箱、同样的权限，问了只多挡一下。删、装、git push 这些动作本身要人拍板，
- * 普通命令里看得出删、移、丢 git 改动的也照问。
- * 解释器写的删除（python -c "shutil.rmtree(...)"）扫不出来，沙箱把它限制在这个 Bot 自己的工作区和共享区里。
+ * 普通命令里看得出删、移、丢 git 改动的，以及 python -c、node -e、sh -c 这类内联代码也照问。
  */
 export function relaxIfContained(call: GateCall, decision: GateDecision): GateDecision {
   if (decision.verdict !== "ask" || call.toolName !== "bash" || call.containment.level === "none") return decision;
   if (decision.access.network || decision.access.writePaths.length > 0) return decision;
   if (!RELAXABLE_ACTIONS.has(decision.action)) return decision;
   const command = call.input.command;
-  if (typeof command !== "string" || looksLikeDeleteOrMove(command)) return decision;
+  if (typeof command !== "string" || stillAsksInSandbox(command)) return decision;
   return { ...decision, verdict: "allow", reason: null, access: NO_ACCESS };
 }
 

@@ -1,4 +1,4 @@
-import { Bot, BotId, Group, GroupId, TaskId, TopicTask, type ChecklistItem } from "@baize/shared";
+import { Bot, BotId, BotShape, Group, GroupId, TaskId, TopicTask, type ChecklistItem } from "@baize/shared";
 import {
   HUES,
   bots,
@@ -18,6 +18,7 @@ export const createBot = (input: {
   tags?: string[] | undefined;
   description?: string | undefined;
   hue?: (typeof HUES)[number] | undefined;
+  shape?: (typeof BotShape.options)[number] | undefined;
 }) => {
   const suffix = nextSuffix();
   const botId = BotId.parse(`bot_new_${suffix}`);
@@ -31,6 +32,7 @@ export const createBot = (input: {
     tags: input.tags ?? [],
     description: input.description ?? "",
     hue: input.hue ?? HUES[bots.size % HUES.length] ?? "sky",
+    shape: input.shape ?? BotShape.options[bots.size % BotShape.options.length] ?? "pillow",
     notify: true,
     toolConnectionIds: [],
     createdAt: new Date().toISOString(),

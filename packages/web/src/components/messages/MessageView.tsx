@@ -3,8 +3,10 @@ import { ArrowRightLeft, ChevronDown, ChevronRight, ShieldAlert, Sparkles, Trian
 import type {
   Approval,
   ApprovalId,
+  Bot,
   BotHue,
   BotId,
+  BotShape,
   ChecklistItem,
   DecideApprovalRequest,
   DecidePreferenceOfferRequest,
@@ -18,7 +20,7 @@ import type {
   SkillOfferStatus,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
-import { BotAvatar } from "../BotAvatar.js";
+import { BotAvatar, resolveBotAvatarState } from "../BotAvatar.js";
 import { ACTION_TEXT, SCOPE_TEXT, offeredScopes, targetText } from "../grantText.js";
 import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
 import { RoutineOfferCard } from "./RoutineOfferCard.js";
@@ -30,7 +32,14 @@ import { TeamOfferCard } from "./TeamOfferCard.js";
 import { ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
-export type BotLookup = (botId: BotId) => { name: string; tags: readonly string[]; hue: BotHue };
+export type BotLookup = (botId: BotId) => {
+  name: string;
+  tags: readonly string[];
+  hue: BotHue;
+  shape: BotShape;
+  runState: Bot["runState"];
+  pendingApproval: boolean;
+};
 export type ApprovalTable = Record<ApprovalId, Approval>;
 export type HandoffTable = Record<HandoffId, Handoff>;
 export type DecideApproval = (approvalId: ApprovalId, request: DecideApprovalRequest) => Promise<void>;
@@ -59,7 +68,16 @@ const BotBubble = ({
     <div className="bot-block">
       {showSource || (body.mentions?.length ?? 0) > 0 ? (
         <div className="bot-source" data-testid="bot-source" data-bot-name={bot.name}>
-          <BotAvatar name={bot.name} hue={bot.hue} size="xs" />
+          <BotAvatar
+            shape={bot.shape}
+            hue={bot.hue}
+            state={resolveBotAvatarState({
+              paused: bot.runState === "paused",
+              pendingApproval: bot.pendingApproval,
+              working: body.streaming,
+            })}
+            size="xs"
+          />
           {bot.tags.length > 0 ? `${bot.name} · ${bot.tags.join("、")}` : bot.name}
           {body.mentions?.length ? (
             <span className="tag" data-testid="bot-recipient">
@@ -401,7 +419,7 @@ const HandoffCard = ({
     <>
       <div className="bot-source handoff-source">
         已发消息给
-        <BotAvatar name={to.name} hue={to.hue} size="xs" />
+        <BotAvatar shape={to.shape} hue={to.hue} size="xs" />
         {to.name}
       </div>
       <div className="card card-handoff" data-testid="handoff-card" data-status={handoff.status}>
@@ -409,12 +427,12 @@ const HandoffCard = ({
           <ArrowRightLeft size={16} aria-hidden="true" />
           <span className="handoff-label">交接</span>
           <span className="handoff-pair" data-testid="handoff-pair">
-            <BotAvatar name={from.name} hue={from.hue} size="xs" />
+            <BotAvatar shape={from.shape} hue={from.hue} size="xs" />
             {from.name}
             <span className="handoff-arrow" aria-hidden="true">
               →
             </span>
-            <BotAvatar name={to.name} hue={to.hue} size="xs" />
+            <BotAvatar shape={to.shape} hue={to.hue} size="xs" />
             {to.name}
           </span>
           <span className={`badge ${accepted ? "badge-accepted" : "badge-await-bot"}`} data-testid="handoff-status">

@@ -62,7 +62,7 @@ it("messages.visible_to 为空数组的行被数据库拒绝，null 和至少一
   const database = await createTestDb();
   try {
     await database.sql`INSERT INTO users (id, name, email, password_hash) VALUES ('u1', '陈', 'chen@baize.dev', 'x')`;
-    await database.sql`INSERT INTO bots (id, owner_id, name, hue) VALUES ('b1', 'u1', '小服', 'sky')`;
+    await database.sql`INSERT INTO bots (id, owner_id, name, hue, shape) VALUES ('b1', 'u1', '小服', 'sky', 'pillow')`;
     await database.sql`INSERT INTO groups (id, owner_id, solo_bot_id) VALUES ('g1', 'u1', 'b1')`;
     const body = JSON.stringify({ kind: "user", text: "嗨" });
     await database.sql`INSERT INTO messages (id, group_id, body, created_at, visible_to) VALUES ('m-all', 'g1', ${body}::jsonb, now(), NULL)`;
@@ -85,7 +85,7 @@ it("runs.table_role 只收三种角色，同一桌同时至多一个未收尾的
   const database = await createTestDb();
   try {
     await database.sql`INSERT INTO users (id, name, email, password_hash) VALUES ('u1', '陈', 'chen@baize.dev', 'x')`;
-    await database.sql`INSERT INTO bots (id, owner_id, name, hue) VALUES ('b1', 'u1', '老白', 'sky'), ('b2', 'u1', '阿豹', 'coral')`;
+    await database.sql`INSERT INTO bots (id, owner_id, name, hue, shape) VALUES ('b1', 'u1', '老白', 'sky', 'pillow'), ('b2', 'u1', '阿豹', 'coral', 'triangle')`;
     await database.sql`INSERT INTO groups (id, owner_id) VALUES ('g1', 'u1')`;
     const insertRun = (id: string, botId: string, role: string | null, ended: boolean) => database.sql`
       INSERT INTO runs (id, owner_id, bot_id, group_id, started_at, ended_at, table_role)

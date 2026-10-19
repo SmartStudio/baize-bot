@@ -83,6 +83,30 @@ const ARCHIVE_DELETES: ReadonlyMap<string, (args: readonly string[]) => boolean>
 const archiveDeletes = (names: readonly string[], words: readonly string[]): boolean =>
   names.some((name, at) => ARCHIVE_DELETES.get(name)?.(words.slice(at + 1)) ?? false);
 
+// 内联代码里的删除扫不出来，主人拍板照问。认的是跟在解释器名后面的执行代码选项（合写的短选项也算），
+// 以及从标准输入读代码的写法：`-`、heredoc、here-string，或者解释器在段首、后面只有选项（管道喂进去的代码）。
+const INLINE_CODE: readonly (readonly [RegExp, RegExp])[] = [
+  [/^(python|pypy)[0-9.]*$/, /^-[A-Za-z]*c/],
+  [/^(sh|bash|zsh|dash|ksh|mksh|ash|fish|busybox)$/, /^-[A-Za-z]*c/],
+  [/^(node|nodejs|bun)$/, /^(-[A-Za-z]*[ep]|--eval|--print)$/],
+  [/^deno$/, /^eval$/],
+  [/^perl[0-9.]*$/, /^-[A-Za-z]*[eE]/],
+  [/^ruby[0-9.]*$/, /^-[A-Za-z]*e/],
+  [/^php[0-9.]*$/, /^-r$/],
+  [/^lua(jit|[0-9.]*)$/, /^-e$/],
+];
+
+const INFO_OPTIONS: ReadonlySet<string> = new Set(["-V", "-v", "--version", "-h", "--help"]);
+
+const runsInlineCode = (segment: string, names: readonly string[], words: readonly string[]): boolean =>
+  names.some((name, at) => {
+    const flag = INLINE_CODE.find(([interpreter]) => interpreter.test(name))?.[1];
+    if (flag === undefined) return false;
+    const args = words.slice(at + 1);
+    if (args.some((word) => flag.test(word)) || args[0] === "-" || segment.includes("<<")) return true;
+    return at === 0 && args.every((word) => word.startsWith("-") && !INFO_OPTIONS.has(word));
+  });
+
 const GIT_KEEPS_CHANGES: ReadonlySet<string> = new Set([
   "status",
   "log",
@@ -124,17 +148,22 @@ const gitDiscards = (text: string): boolean => {
 };
 
 /**
- * 沙箱兜住了联网和写工作区外，兜不住的只剩在工作区和共享区里删、移。这里不解析结构：先像 bash 那样合并反斜杠续行，
+ * 沙箱兜住了联网和写工作区外，兜不住的只剩在工作区和共享区里删、移，以及内联代码。这里不解析结构：先像 bash 那样合并反斜杠续行，
  * 再去掉引号和反斜杠按分隔符切词，$(...)、反引号、循环体、xargs、find -exec、sh -c '...' 里的词都扫得到。
  * 只扫闸门本来就要问的命令，扫到了就照问，宁多问。
  */
-export function looksLikeDeleteOrMove(command: string): boolean {
+export function stillAsksInSandbox(command: string): boolean {
   const joined = command.replace(/\\\r?\n/g, "");
   const flat = joined.replace(/['"\\]/g, "");
   if (gitDiscards(joined) || gitDiscards(flat)) return true;
   return flat.split(/[;&|()`{}\n\r]+/).some((segment) => {
     const words = segment.split(/[\s<>=$,]+/).filter((word) => word !== "");
     const names = words.map((word) => word.slice(word.lastIndexOf("/") + 1));
-    return names.some((name) => DELETE_OR_MOVE.has(name)) || words.some(deletingOption) || archiveDeletes(names, words);
+    return (
+      names.some((name) => DELETE_OR_MOVE.has(name)) ||
+      words.some(deletingOption) ||
+      archiveDeletes(names, words) ||
+      runsInlineCode(segment, names, words)
+    );
   });
 }

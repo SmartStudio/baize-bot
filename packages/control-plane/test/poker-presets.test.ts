@@ -64,6 +64,11 @@ describe("牌友和老白的预置", () => {
 
     const rows = await presetRows(user.id);
     expect(rows.map((row) => row.preset).toSorted()).toEqual([...PokerPersona.options].toSorted());
+    for (const row of rows) {
+      const card = POKER_PERSONAS[PokerPersona.parse(row.preset)];
+      expect(row.hue).toBe(card.hue);
+      expect(row.shape).toBe(card.shape);
+    }
 
     const solo = await database.db
       .select({ soloBotId: groups.soloBotId })

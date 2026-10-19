@@ -5,12 +5,6 @@
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
 }
 
-.avatar-xs {
-  width: var(--space-6);
-  height: var(--space-6);
-  font-size: var(--text-2xs);
-}
-
 .dialog {
   display: flex;
   flex-direction: column;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { containmentFor, looksLikeDeleteOrMove } from "../src/contained.js";
+import { containmentFor, stillAsksInSandbox } from "../src/contained.js";
 
 describe("containmentFor", () => {
   it.each([
@@ -14,12 +14,12 @@ describe("containmentFor", () => {
   });
 });
 
-describe("looksLikeDeleteOrMove", () => {
+describe("stillAsksInSandbox", () => {
   it("rsync 的 --del 是 --delete-during 的简写，闸门因为联网已经要问，扫描也认出来", () => {
-    expect(looksLikeDeleteOrMove("rsync -a --del src/ dst/")).toBe(true);
+    expect(stillAsksInSandbox("rsync -a --del src/ dst/")).toBe(true);
   });
 
   it("rsync 的 --delay-updates 不删东西", () => {
-    expect(looksLikeDeleteOrMove("rsync -a --delay-updates src/ dst/")).toBe(false);
+    expect(stillAsksInSandbox("rsync -a --delay-updates src/ dst/")).toBe(false);
   });
 });

@@ -52,7 +52,7 @@ export const SwapSeatDialog = ({ table, seat, onPick, onClose }: Props) => {
                 disabled={picking !== null}
                 onClick={() => pick(persona)}
               >
-                <BotAvatar name={card.name} hue={card.hue} size="md" />
+                <BotAvatar shape={card.shape} hue={card.hue} size="md" />
                 <span>
                   <b>{card.name}</b>
                   <small>{card.line}</small>

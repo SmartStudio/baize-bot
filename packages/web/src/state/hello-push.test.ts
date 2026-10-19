@@ -16,6 +16,7 @@ const assistant = Bot.parse({
   tags: [],
   description: "",
   hue: "sky",
+  shape: "pillow",
   notify: true,
   toolConnectionIds: [],
   runState: "running",

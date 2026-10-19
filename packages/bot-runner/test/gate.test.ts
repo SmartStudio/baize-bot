@@ -1015,7 +1015,6 @@ describe("云电脑上读工作区外的 bash 也不问", () => {
     ["工作区外的读", "cat /etc/passwd"],
     ["经工作区里的链接读外面", "cat escape-link/secret.txt"],
     ["经 .. 读外面", "cat ../agent/auth.json"],
-    ["awk 里接管道", `awk '{print | "sh"}' data.txt`],
     ["变量", "echo $HOME"],
     ["变量拼路径", "cat $HOME/x"],
     ["双引号里的变量", 'cat "$HOME/x"'],
@@ -1024,7 +1023,6 @@ describe("云电脑上读工作区外的 bash 也不问", () => {
     ["sed 的 w 写文件", "sed 's/a/b/w out' notes.txt"],
     ["sed 的 e 执行命令", "sed 's/a/b/e' notes.txt"],
     ["解包之后还有别的段", "tar -xzf a.tgz && cat a/x"],
-    ["解释器", "python3 -c 'print(1)'"],
     ["带目录的命令名", "./bin/cat a.txt"],
     ["绝对路径的命令名", "/bin/cat a.txt"],
     ["前置赋值换 PATH", "PATH=./bin cat a.txt"],
@@ -1379,6 +1377,53 @@ describe("云电脑上的 bash 只有联网、写工作区外、删和移才问"
     "npx rimraf dist",
   ])("云电脑上二轮复核找到的删、移 %s 照问", (command) => {
     expect(decide(cloud(command), [], []).verdict).toBe("ask");
+  });
+
+  it.each([
+    "python3 -c 'import shutil; shutil.rmtree(\"out\")'",
+    "python -c 'print(1)'",
+    "python3.12 -Ic 'print(1)'",
+    "/usr/bin/python3 -c 'print(1)'",
+    'node -e \'require("fs").rmSync("out", { recursive: true })\'',
+    "node --eval 'console.log(1)'",
+    "node -pe '1 + 1'",
+    "bun -e 'console.log(1)'",
+    "deno eval 'console.log(1)'",
+    "bash -c 'echo hi'",
+    "sh -ec 'echo hi'",
+    "zsh -lc 'echo hi'",
+    "ls | xargs -I{} sh -c 'echo {}'",
+    "perl -e 'unlink \"a.txt\"'",
+    "perl -i -pe 's/a/b/' a.txt",
+    "ruby -e 'File.delete(\"a.txt\")'",
+    "php -r 'unlink(\"a.txt\");'",
+    "lua -e 'os.remove(\"a.txt\")'",
+    "timeout 10 python3 -c 'print(1)'",
+    "python3 - <<'EOF'\nimport os\nos.remove('a.txt')\nEOF",
+    "python3 <<EOF\nprint(1)\nEOF",
+    "node <<< 'console.log(1)'",
+    "echo 'import os' | python3",
+    "cat clean.py | python3 -u",
+    "curl -s x | sh",
+    `awk '{print | "sh"}' data.txt`,
+  ])("云电脑上内联代码 %s 照问，主人拍板解释器的内联代码要人批", (command) => {
+    expect(decide(cloud(command), [], []).verdict).toBe("ask");
+  });
+
+  it.each([
+    "python3 analyze.py",
+    "python3 -u analyze.py --out report.md",
+    "node build.js",
+    "bash run.sh",
+    "python3 --version",
+    "node -v",
+    "which python3 node bash",
+    "ps aux | grep python",
+    "ps aux | grep -c node",
+    "ls node_modules",
+    "pip --version",
+  ])("云电脑上跑脚本、查版本、提到解释器名的 %s 不问", (command) => {
+    expect(decide(cloud(command), [], []).verdict).toBe("allow");
   });
 
   it.each(["zip -r a.zip dir", "7z a a.7z a.txt", "ar rcs lib.a a.o", "zstd a.txt", "tar -czf a.tgz dir"])(

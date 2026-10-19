@@ -74,6 +74,25 @@ test("编辑弹窗三项全空也能保存", async ({ page }) => {
   await expect(teamCard(page, "小服").locator(".tag"), "刷新后标签仍是空的").toHaveCount(0);
 });
 
+test("在右侧面板改主助理的形状，侧栏头像同步", async ({ page }) => {
+  await login(page);
+  const sidebarAvatar = page.getByTestId("assistant-nav").locator("[data-shape]");
+  await expect(sidebarAvatar).toHaveAttribute("data-shape", "pillow");
+  await page.getByTestId("assistant-nav").click();
+  const panel = page.getByTestId("bot-panel");
+  await expect(panel.getByTestId("bot-shape-option")).toHaveCount(8);
+  const patched = page.waitForRequest(
+    (request) => request.url().includes("/api/bots/") && request.method() === "PATCH",
+  );
+  await panel.locator('[data-testid="bot-shape-option"][data-shape="cloud"]').click();
+  expect((await patched).postDataJSON()).toEqual({ shape: "cloud" });
+  await expect(panel.locator('[data-testid="bot-shape-option"][data-shape="cloud"]')).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(sidebarAvatar).toHaveAttribute("data-shape", "cloud");
+});
+
 test("加第 6 个标签的输入框消失", async ({ page }) => {
   await login(page);
   await openBot(page, "小服");

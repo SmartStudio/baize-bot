@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { POKER_REVIEW_TEXT_LIMIT, POKER_USER_SEAT, PokerTableView, RetryReviewRequest } from "../src/index.js";
+import {
+  POKER_PERSONAS,
+  POKER_REVIEW_TEXT_LIMIT,
+  POKER_USER_SEAT,
+  PokerTableView,
+  RetryReviewRequest,
+} from "../src/index.js";
 
 const seat = (no: number, engineSeatId: string) => ({
   seat: no,
@@ -9,6 +15,7 @@ const seat = (no: number, engineSeatId: string) => ({
   name: `${no} 号`,
   persona: null,
   hue: "sky",
+  shape: "pillow",
   stack: 2000,
 });
 
@@ -17,7 +24,7 @@ const view = (patch: Record<string, unknown>) => ({
   status: "idle",
   version: 1,
   seats: [seat(1, "1"), seat(2, "2"), seat(3, "3"), seat(4, "4")],
-  host: { botId: "bot_host", name: "老白", hue: "sky" },
+  host: { botId: "bot_host", name: "老白", hue: "sky", shape: "pillow" },
   session: null,
   hand: null,
   hint: null,
@@ -28,6 +35,25 @@ const view = (patch: Record<string, unknown>) => ({
 });
 
 describe("牌桌视图", () => {
+  it("座位和解说都必须带形状，预置牌友形状固定", () => {
+    const { shape: _seatShape, ...withoutSeatShape } = seat(1, "1");
+    const baseView = view({});
+    expect(PokerTableView.safeParse(view({ seats: [withoutSeatShape, ...baseView.seats.slice(1)] })).success).toBe(
+      false,
+    );
+    expect(PokerTableView.safeParse(view({ host: { botId: "bot_host", name: "老白", hue: "sky" } })).success).toBe(
+      false,
+    );
+    expect(Object.fromEntries(Object.entries(POKER_PERSONAS).map(([persona, card]) => [persona, card.shape]))).toEqual({
+      leopard: "triangle",
+      old_k: "arch",
+      jasmine: "leaf",
+      dalu: "pudding",
+      xiaoqi: "bean",
+      laobai: "pillow",
+    });
+  });
+
   it("每个座位都带引擎座位 id，控制面和 mock 两种写法都是任意字符串", () => {
     expect(PokerTableView.parse(view({})).seats.map((entry) => entry.engineSeatId)).toEqual(["1", "2", "3", "4"]);
     expect(PokerTableView.parse(view({ seats: [seat(4, "s4")] })).seats[0]?.engineSeatId).toBe("s4");

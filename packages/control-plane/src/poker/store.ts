@@ -211,10 +211,11 @@ export async function tableState(db: Db, table: TableRow): Promise<TableState> {
         name: bot?.name ?? owner.name,
         persona: bot?.preset ?? null,
         hue: bot?.hue ?? USER_HUE,
+        shape: bot?.shape ?? "pillow",
         stack: seat.stack,
       };
     }),
-    host: { botId: BotId.parse(host.id), name: host.name, hue: host.hue },
+    host: { botId: BotId.parse(host.id), name: host.name, hue: host.hue, shape: host.shape },
     session: open
       ? { id: PokerSessionId.parse(open.id), handCount: counts?.value ?? 0, net: netBySession.get(open.id) ?? 0 }
       : null,
