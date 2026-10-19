@@ -15,7 +15,7 @@ import { createSandboxedBash } from "../../bot-runner/src/sandbox.js";
 import { startAssistantChrome, type AssistantChrome, type ChromeProcess } from "../src/chrome.js";
 import { chromeProfileDir, isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
 import { createLiveScreen } from "../src/live-screen.js";
-import { defaultLoginPages, runLogin } from "../src/login.js";
+import { checkLogin, defaultLoginPages, runLogin } from "../src/login.js";
 
 const chromes: AssistantChrome[] = [];
 const dataDirs: string[] = [];
@@ -301,6 +301,7 @@ function loginOn(chrome: AssistantChrome, url: string) {
   const screen = createLiveScreen({ chrome, uplink: () => true, log: () => {} });
   const page = {
     url,
+    home: url,
     signedIn: { kind: "element", selector: ".user-info .user_avatar" } as const,
     handleSelector: ".user-info span",
   };
@@ -398,6 +399,63 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", (
       );
       expect(result).toEqual({ login: "valid", handle: "baize_x" });
       expect(Date.now() - started, "等到 cookie 种下才算登上").toBeGreaterThanOrEqual(800);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it("静默查登录：浏览器里已经登上的 X 不开画面就读出账号名；没登上的到点回 null；两种查完页都关掉", async () => {
+    const server = createServer((request, response) => {
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      response.end(
+        request.url === "/in"
+          ? `<!doctype html><meta charset="utf-8"><body>
+            <button data-testid="SideNav_AccountSwitcher_Button">白泽 Bot @baize_x</button>
+            <script>document.cookie = "auth_token=fake; path=/in"</script></body>`
+          : `<!doctype html><meta charset="utf-8"><body>登录</body>`,
+      );
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("本地静态页没有端口");
+    const origin = `http://127.0.0.1:${address.port}`;
+    const chrome = startAssistantChrome({
+      dataDir: await dataDir(),
+      log: () => {},
+      activateProcess: async () => {},
+      backgroundProcess: async () => {},
+    });
+    chromes.push(chrome);
+    const pagesAt = (path: string) => ({
+      ...defaultLoginPages,
+      x: {
+        ...defaultLoginPages.x,
+        home: `${origin}${path}`,
+        signedIn: { kind: "cookie", url: `${origin}${path}`, name: "auth_token" } as const,
+      },
+    });
+
+    try {
+      await expect(
+        checkLogin("x", { chrome, pages: pagesAt("/in"), log: () => {} }, AbortSignal.timeout(5_000)),
+      ).resolves.toBe("baize_x");
+      await expect(
+        checkLogin("x", { chrome, pages: pagesAt("/out"), log: () => {} }, AbortSignal.timeout(1_500)),
+      ).resolves.toBeNull();
+      const connection = await chrome.connection();
+      const opened = async (): Promise<string[]> => {
+        const { targetInfos } = (await connection.send("Target.getTargets")) as { targetInfos: { url: string }[] };
+        return targetInfos.map((target) => target.url).filter((url) => url.startsWith(origin));
+      };
+      const settled = await poll(
+        async () => ((await opened()).length === 0 ? [] : undefined),
+        3_000,
+        "查登录的页关掉",
+      ).catch(() => opened());
+      expect(settled, "查完不留页").toEqual([]);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

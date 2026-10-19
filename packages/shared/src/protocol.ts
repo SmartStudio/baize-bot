@@ -562,6 +562,13 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     platform: BrowserPlatform,
     attempt: LoginAttemptId,
   }),
+  // 不开画面，只在后台页上看一眼浏览器是不是已经登上了：人可能在 Bot 的浏览器里登过，账号页不知道。
+  // 登上了照 login_state valid 回，没登上什么也不回，账号状态不动。
+  z.object({
+    type: z.literal("login_check"),
+    accountId: AccountId,
+    platform: BrowserPlatform,
+  }),
   // attempt 是控制面这一次认领的时刻，一条草稿超时后重批再发，新旧两次靠它分开。
   // botId 是起草的 Bot，配图只认它目录里的拷贝；Bot 删了是 null，这时哪张配图都不认。
   z.object({
@@ -635,6 +642,8 @@ export const DOWNLINK_DELIVERY = {
   approval_result: "reliable",
   poker_result: "reliable",
   browser_login: "reliable",
+  // 丢了下一轮发布循环再发一次，不值得进发件箱。
+  login_check: "bare",
   publish_draft: "reliable",
 } as const satisfies Record<ControlToAgent["type"], "bare" | "reliable">;
 

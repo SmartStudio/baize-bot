@@ -49,13 +49,20 @@ const TIER_LABEL: Record<AccountConfig["tier"], string> = {
   direct_publish: "可直接发布档",
 };
 
+// 没登上的号照样能起草，模型要知道批了不会马上发，也别替用户猜账号登在哪台电脑上。
+const loginNote = (account: AccountConfig): string => {
+  if (account.login === "valid") return "";
+  if (account.via === "api") return "，授权过期了，批了也要等用户在账号页重新授权才发";
+  return "，账号页上还没确认登上，批了先等着，电脑浏览器里登上了会自动发；账号在哪台电脑上以账号页为准";
+};
+
 /** prompt 里「能用的账号」一段，模型照这里抄 accountId。没账号时不调，整段不出。 */
 export const renderAccounts = (accounts: readonly AccountConfig[]): string =>
   [
     "能用的账号：",
     ...accounts.map(
       (account) =>
-        `- ${accountLabel(account)}，${VIA_LABEL[account.via]}，${TIER_LABEL[account.tier]}，accountId：${account.id}`,
+        `- ${accountLabel(account)}，${VIA_LABEL[account.via]}，${TIER_LABEL[account.tier]}${loginNote(account)}，accountId：${account.id}`,
     ),
   ].join("\n");
 

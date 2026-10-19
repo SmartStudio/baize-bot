@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   AccountId,
+  BrowserPlatform,
   ComputerId,
   Publication,
   UserId,
@@ -31,6 +32,7 @@ import {
   isNull,
   lt,
   lte,
+  ne,
   notExists,
   notInArray,
   or,
@@ -481,6 +483,36 @@ export type ClaimedDraft = {
   readonly computerId: ComputerId;
   readonly claimedAt: Date;
 };
+
+/**
+ * 稿子批了、账号却没登上，卡在电脑浏览器账号上的那几个号。claimDueDrafts 不抢它们，
+ * 发布循环拿这份名单让账号所在的电脑看一眼浏览器是不是其实已经登上了。
+ */
+export async function listAwaitingLogin(
+  db: Db,
+  onlineComputers: readonly ComputerId[],
+): Promise<{ readonly accountId: AccountId; readonly computerId: ComputerId; readonly platform: BrowserPlatform }[]> {
+  if (onlineComputers.length === 0) return [];
+  const rows = await db
+    .selectDistinct({ id: accounts.id, computerId: accounts.computerId, platform: accounts.platform })
+    .from(drafts)
+    .innerJoin(accounts, eq(accounts.id, drafts.accountId))
+    .where(
+      and(
+        eq(drafts.status, "approved"),
+        eq(drafts.approvedHash, drafts.contentHash),
+        eq(accounts.via, "computer"),
+        ne(accounts.login, "valid"),
+        inArray(accounts.computerId, [...onlineComputers]),
+      ),
+    )
+    .orderBy(asc(accounts.id));
+  return rows.map((row) => ({
+    accountId: AccountId.parse(row.id),
+    computerId: ComputerId.parse(row.computerId),
+    platform: BrowserPlatform.parse(row.platform),
+  }));
+}
 
 /**
  * 抢这一轮该发的草稿：已批、指纹还是批准时的那个、到点或没定时间、账号档位允许自动发。

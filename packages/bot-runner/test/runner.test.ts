@@ -7577,6 +7577,20 @@ describe("运行器的草稿", () => {
     expect(withAccounts.text.replace(`${section}\n\n`, ""), "除了这一段，其余字节不变").toBe(withoutAccounts.text);
     expect(withAccounts.description, "不再叫模型先随便写一个 accountId").not.toContain("随便写");
     expect(withAccounts.description).toContain("accountId 从 prompt 里的能用的账号取");
+
+    const unconfirmed = await userText([
+      {
+        id: AccountId.parse("acc-xb"),
+        platform: "x",
+        via: "computer",
+        handle: null,
+        tier: "confirm_publish",
+        login: "none",
+      },
+    ]);
+    expect(unconfirmed.text, "没登上的浏览器号照样列出，说清批了要等登上，不让模型猜在哪台电脑").toContain(
+      "- X （没有账号名），电脑浏览器登录，发布要确认档，账号页上还没确认登上，批了先等着，电脑浏览器里登上了会自动发；账号在哪台电脑上以账号页为准，accountId：acc-xb",
+    );
   });
 
   it("edit_draft 发一条 draft_edit，结果告诉模型改过的稿子要重新等批", async () => {

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { format } from "node:util";
 import {
   AccountListResponse,
+  AccountResponse,
   ComputerTokenResponse,
   DecideDraftResponse,
   LoginAttemptId,
@@ -1163,6 +1164,45 @@ describe("X 走电脑", () => {
   });
 });
 
+describe("电脑浏览器里已经登上、账号页不知道", () => {
+  it("批了的稿子卡在没确认登上的 X 号上：发布循环让那台电脑静默查一次，报登上了就记成已登录、下一轮发出去；五分钟内不重复查", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, []);
+    const created = await job.client.post("/api/accounts", { platform: "x", computerId: job.computer.computerId });
+    expect(created.status).toBe(201);
+    const placeholder = AccountResponse.parse(await created.json()).account;
+    expect(placeholder.login, "账号页建出来的是占位").toBe("none");
+    await nextOf(job.push, "account_updated");
+    await job.agent.expect("config");
+    const spec = specOf(placeholder, tweet("在 Bot 的浏览器里登过"));
+    await createApproved(job, spec);
+
+    await server.server.publisher.tick();
+    const check = await job.agent.expect("login_check");
+    expect(check).toEqual({ type: "login_check", accountId: placeholder.id, platform: "x" });
+    await server.server.publisher.tick();
+    await job.client.post(`/api/bots/${job.botId}/pause`);
+    await job.agent.expect("pause");
+    expect(
+      job.agent.received().filter((frame) => frame.type === "login_check" || frame.type === "publish_draft"),
+      "第二轮没登上不抢稿，五分钟内也不再查",
+    ).toEqual([]);
+    await job.client.post(`/api/bots/${job.botId}/resume`);
+    await job.agent.expect("resume");
+
+    job.agent.send({ type: "login_state", accountId: placeholder.id, state: { login: "valid", handle: "baize_x" } });
+    const config = await job.agent.expect("config");
+    expect(config.accounts.find((one) => one.id === placeholder.id)).toMatchObject({
+      login: "valid",
+      handle: "baize_x",
+    });
+    await server.server.publisher.tick();
+    const claim = await job.agent.expect("publish_draft");
+    expect(claim.draftId, "登上之后这条已批的稿子照常发").toBe(spec.draftId);
+  });
+});
+
 describe("小红书登录过期", () => {
   it("小红书草稿只下发到账号所在的电脑", async () => {
     const s = await stack();
@@ -1203,6 +1243,9 @@ describe("小红书登录过期", () => {
     expect(claimed.draft, "只抢了没过期那个账号的稿").toMatchObject({ id: other.draftId, status: "publishing" });
     expect((await job.agent.expect("publish_draft")).draftId).toBe(other.draftId);
     expect((await draftOnPage(job, stuck.draftId)).draft.status, "过期账号的稿留在已批，等重新登录").toBe("approved");
+    expect((await job.agent.expect("login_check")).accountId, "卡着的那个号让电脑看一眼浏览器是不是已经登回来了").toBe(
+      main.id,
+    );
 
     job.agent.send({ type: "login_state", accountId: main.id, state: { login: "valid", handle: XHS.handle } });
     expect((await nextOf(job.push, "account_updated")).account).toMatchObject({ id: main.id, login: "valid" });

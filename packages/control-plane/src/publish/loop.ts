@@ -1,14 +1,23 @@
+import type { AccountId, ComputerId } from "@baize/shared";
 import type { AgentHub } from "../agent/hub.js";
 import type { AccountTokens } from "../credentials.js";
 import type { Db } from "../db/client.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "../agent/envelope.js";
 import type { NoticePublisher } from "../notifications.js";
-import { claimDueDrafts, failStaleDrafts, reopenMissedDrafts, type ClaimedDraft } from "../repo/drafts.js";
+import {
+  claimDueDrafts,
+  failStaleDrafts,
+  listAwaitingLogin,
+  reopenMissedDrafts,
+  type ClaimedDraft,
+} from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
 import { publisherFor, PublishError, TokenRejected, type ApiBases } from "./platforms.js";
 import { announceFailure, publishFailed, publishSucceeded, type SettleDeps } from "./settle.js";
 
 export const PUBLISH_INTERVAL_MS = 60_000;
+/** 同一个号隔这么久才再让电脑看一次浏览器登没登上，没登上的号不至于每轮都开一页。 */
+const LOGIN_CHECK_EVERY_MS = 5 * 60_000;
 /** 抢到之后这么久还没结论就当发的那一方没了。 */
 const STALE_AFTER_MS = 10 * 60_000;
 
@@ -18,7 +27,10 @@ export type PublishLoopOptions = {
   readonly notifications: NoticePublisher;
   readonly tokens: AccountTokens;
   readonly bases: ApiBases;
-  readonly computers: Pick<AgentHub, "deliverableComputerIds" | "canDeliver" | "flushOutbox" | "sendConfig">;
+  readonly computers: Pick<
+    AgentHub,
+    "deliverableComputerIds" | "canDeliver" | "flushOutbox" | "sendConfig" | "sendToComputer"
+  >;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;
@@ -33,6 +45,7 @@ export class PublishLoop {
   readonly #now: () => Date;
   readonly #deps: SettleDeps;
   #timer: NodeJS.Timeout | null = null;
+  readonly #loginCheckedAt = new Map<AccountId, number>();
 
   constructor(options: PublishLoopOptions) {
     this.#options = options;
@@ -96,6 +109,17 @@ export class PublishLoop {
         await this.#publish(one);
       }),
     );
+    await this.#checkLogins(now, computerIds);
+  }
+
+  /** 登上了电脑回 login_state valid，账号变已登录、重发 config，下一轮就抢得到；没登上什么都不变。 */
+  async #checkLogins(now: Date, computerIds: readonly ComputerId[]): Promise<void> {
+    for (const { accountId, computerId, platform } of await listAwaitingLogin(this.#options.db, computerIds)) {
+      const last = this.#loginCheckedAt.get(accountId);
+      if (last !== undefined && now.getTime() - last < LOGIN_CHECK_EVERY_MS) continue;
+      if (this.#options.computers.sendToComputer(computerId, { type: "login_check", accountId, platform }))
+        this.#loginCheckedAt.set(accountId, now.getTime());
+    }
   }
 
   async #failStale(now: Date): Promise<void> {

@@ -16,6 +16,8 @@ export type SignedInBy =
 
 export interface BrowserPage {
   readonly url: string;
+  /** 静默查登录开的页：登上了才有账号名可读，没登上会被平台带去登录页。 */
+  readonly home: string;
   readonly signedIn: SignedInBy;
   readonly handleSelector: string;
   /** 给了就从元素文字里按它抠第一组，没给取整段文字。 */
@@ -45,12 +47,14 @@ export interface LoginDeps {
 export const defaultLoginPages: Readonly<Record<BrowserPlatform, BrowserPage>> = {
   xiaohongshu: {
     url: "https://creator.xiaohongshu.com/",
+    home: "https://creator.xiaohongshu.com/",
     signedIn: { kind: "element", selector: ".user-info .user_avatar" },
     handleSelector: ".user-info span",
   },
   // 待实机核：登上后 X 跳回 /home，左下角账号切换按钮的文字里带「@账号名」。
   x: {
     url: "https://x.com/i/flow/login",
+    home: "https://x.com/home",
     signedIn: { kind: "cookie", url: "https://x.com/", name: "auth_token" },
     handleSelector: '[data-testid="SideNav_AccountSwitcher_Button"]',
     handlePattern: /@([A-Za-z0-9_]{1,15})/,
@@ -210,6 +214,41 @@ export async function runLogin(request: LoginRequest, deps: LoginDeps, signal: A
       handle === null ? WINDOW_FAILED : { login: "valid", handle },
     );
     return await Promise.race([shown, signedIn]);
+  } finally {
+    done.abort();
+    await closeTarget(connection, targetId, deps.log);
+  }
+}
+
+/**
+ * 不上屏，在后台页上看浏览器是不是已经登上了，登上回账号名，到点或出错回 null。
+ * 人在 Bot 的浏览器里登过的，账号页不知道，靠这个补上，不用再点一次登录。
+ */
+export async function checkLogin(
+  platform: BrowserPlatform,
+  deps: Pick<LoginDeps, "chrome" | "pages" | "log">,
+  signal: AbortSignal,
+): Promise<string | null> {
+  const page = deps.pages[platform];
+  let connection: CdpConnection;
+  let targetId: string;
+  try {
+    connection = await untilAborted(deps.chrome.connection(), signal);
+    const created = await untilAborted(
+      connection.send("Target.createTarget", { url: page.home, background: true }),
+      signal,
+    );
+    if (typeof created.targetId !== "string") throw new Error("CDP 没有返回 targetId");
+    targetId = created.targetId;
+  } catch (error) {
+    if (!signal.aborted) deps.log(`查 ${platform} 登录的页没打开：${reason(error)}`);
+    return null;
+  }
+  const done = new AbortController();
+  const stop = AbortSignal.any([signal, done.signal]);
+  try {
+    const stopped = new Promise<null>((resolve) => stop.addEventListener("abort", () => resolve(null), { once: true }));
+    return await Promise.race([watchSignedIn(connection, targetId, page, stop, deps.log), stopped]);
   } finally {
     done.abort();
     await closeTarget(connection, targetId, deps.log);

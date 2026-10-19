@@ -465,6 +465,12 @@ export class AgentHub {
     }
   }
 
+  /** 不进发件箱，只发给现在连着的那条连接；不在线回 false。 */
+  sendToComputer(computerId: ComputerId, message: ControlToAgent): boolean {
+    const conn = this.#connections.get(computerId);
+    return conn !== undefined && this.isOnline(computerId) && this.#send(conn, message);
+  }
+
   /** 这个用户在线的每台电脑各发一条。暂停和继续不知道 Bot 的活在哪台电脑上，所以都发。 */
   sendToOwner(ownerId: UserId, message: ControlToAgent): void {
     for (const connection of this.#ownerConnections(ownerId)) this.#send(connection, message);
