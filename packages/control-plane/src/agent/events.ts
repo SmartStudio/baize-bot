@@ -44,15 +44,10 @@ import {
   settleStreamingText,
   type Tx,
 } from "../repo/messages.js";
+import { skillOfferRedundant } from "../repo/skills.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
-import {
-  failRoutineRun,
-  markRoutineRunResult,
-  pushRoutineUpdated,
-  routineRunOfRun,
-  type RoutineRunRef,
-} from "../repo/routines.js";
+import { failRoutineRun, pushRoutineUpdated, routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
@@ -74,7 +69,6 @@ import {
   EXPIRED_APPROVAL_NOTE,
   failRoutineRunOf,
   holdRoutineRunOf,
-  type ChargedRoutineRun,
   type RoutineDeps,
 } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
@@ -459,11 +453,9 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
     botId: event.botId,
     visibleTo: await botTextVisibility(deps.db, event.runId),
   };
-  const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
-    const written = await appendBotText(tx, text, delta, event.done);
-    if (written.kind !== "taken" && delta.trim() !== "") await markRoutineRunResult(tx, event.runId);
-    return written;
-  });
+  const appended = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    appendBotText(tx, text, delta, event.done),
+  );
   // run 已经收尾：这条要么从没落过，要么收尾时已经收成定稿，晚到的这段不接上去，也不推。
   if (appended === null) return;
   if (appended.kind === "taken") {
@@ -505,8 +497,6 @@ async function onBotTextDone(
     event.text,
   );
   if (final.kind === "taken") return;
-  // 和定稿同在信封的事务里：流式那几段没记上（比如整段只来了这一条）也在这里记上。
-  if (event.text.trim() !== "") await markRoutineRunResult(deps.db, event.runId);
   if (final.created !== null) deps.push.push(conn.ownerId, { type: "message", message: final.created });
   if (final.replace) deps.push.push(conn.ownerId, { type: "message", message: final.message });
   deps.push.push(conn.ownerId, {
@@ -668,17 +658,7 @@ async function settleCharge(
   if (deps.afterCommit === undefined) await resume(deps);
   else deps.afterCommit(resume);
   await deps.groupTurns.runDone(run.groupId, run.runId);
-  // 用户当场发起的对话他就在群里看着，只有他不在场时派出去的活才值得弹一条。
-  // 通知只是一条推送，没有落库的地方可以做幂等：结账提交后到这里之前抛错的那次，补发不再弹，最多弹一次。
-  // 换电脑的链只在链尾结账时按整条链有没有结果弹，记录被别处先收成 failed 的不弹，见 chargeRoutineRun。
-  const routine = charge !== null && charge.kind !== "held" ? charge.routine : null;
-  if (routine !== null && routine.notify) {
-    await deps.notifications.publish(ownerId, {
-      kind: "result",
-      text: `例行任务「${routine.name}」做完了，打开群聊看结果`,
-      groupId: run.groupId,
-    });
-  }
+  // 例行任务做完不弹「做完了」：按点跑的活天天有，每次都弹就成了噪音。没跑成、卡住的才找人，见 failRoutineRunOf。
   if (charge !== null) await deps.notifications.usageCharged(ownerId);
 }
 
@@ -688,9 +668,9 @@ type Charge =
       readonly message: Message;
       readonly steps: number;
       readonly amount: number;
-      readonly routine: ChargedRoutineRun | null;
+      readonly routine: RoutineRunRef | null;
     }
-  | { readonly kind: "merged"; readonly message: Message | null; readonly routine: ChargedRoutineRun | null }
+  | { readonly kind: "merged"; readonly message: Message | null; readonly routine: RoutineRunRef | null }
   | { readonly kind: "held" };
 
 /**
@@ -988,20 +968,12 @@ async function onTaskChecklist(deps: AgentEventDeps, conn: AgentConnection, even
     return;
   }
 
-  const botName = members.find((member) => member.id === event.botId)?.name ?? "Bot";
-  const done = event.checklist.filter((item) => item.done).length;
-  const written = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
-    const task = await replaceChecklist(tx, groupId, event.checklist);
-    if (task === null) return null;
-    const message = await appendMessage(tx, groupId, {
-      kind: "system",
-      text: `${botName}更新了清单，${done}/${event.checklist.length} 完成`,
-    });
-    return { task, message };
-  });
-  if (written === null) return;
-  deps.push.push(conn.ownerId, { type: "task_updated", task: written.task });
-  deps.push.push(conn.ownerId, { type: "message", message: written.message });
+  // 群里不留「更新了清单」那句：进度在任务卡上，task_updated 已经推新了，每勾一项落一句会把 Bot 的一轮回答切碎。
+  const task = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
+    replaceChecklist(tx, groupId, event.checklist),
+  );
+  if (task === null) return;
+  deps.push.push(conn.ownerId, { type: "task_updated", task });
 }
 
 /**
@@ -1037,29 +1009,30 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
  * Bot 干完一件多步的活，问用户存不存。这一步只落一张卡，不建 skill 行：
  * 存不存由用户在群里点，`config.skills` 因此一个字都没变，不用重发 config。
  *
- * 来源按「这个 run 属不属于一次例行任务运行」判，只有此刻查得到：用户点存时手上只有那张卡，
- * 卡的正文里没有 runId，而例行任务的运行记录只留最近 20 条，早的那次到时候连行都不在了。
- * 所以现在就判出来记在这一行的 `skill_offer_source` 列上。
+ * 三种整条静默丢掉：例行任务派的 run（例行本身就是存下来的做法，没人在场点卡）、这个 Bot 已有同名 skill、
+ * 这个群里同名的卡还没点。提示词让 Bot 少提，这里兜住它还是提了的那几次。
  */
 async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: SkillOffer): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
+  if ((await routineRunOfRun(deps.db, event.runId)) !== null) return;
 
-  const source = (await routineRunOfRun(deps.db, event.runId)) !== null ? "routine" : "chat";
-  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, (tx) =>
-    appendSkillOffer(
-      tx,
-      groupId,
-      {
-        kind: "skill_offer",
-        botId: event.botId,
-        name: event.name,
-        steps: event.steps,
-        status: "offered",
-        skillId: null,
-      },
-      source,
-    ),
+  const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) =>
+    (await skillOfferRedundant(tx, groupId, event.botId, event.name))
+      ? null
+      : appendSkillOffer(
+          tx,
+          groupId,
+          {
+            kind: "skill_offer",
+            botId: event.botId,
+            name: event.name,
+            steps: event.steps,
+            status: "offered",
+            skillId: null,
+          },
+          "chat",
+        ),
   );
   if (message === null) return;
   deps.push.push(conn.ownerId, { type: "message", message });

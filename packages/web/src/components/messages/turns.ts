@@ -35,7 +35,9 @@ export const turnsOf = (messages: Message[]): Turn[] => {
         else turns.push({ kind: "system", message });
         break;
       case "system":
-        turns.push({ kind: "system", message });
+        // 普通说明跟着前面那段 Bot 回答，不把一轮回答切成两截；出错的那条要醒目，单独成一行。
+        if (body.tone !== "error" && previous?.kind === "bot") previous.items.push(message);
+        else turns.push({ kind: "system", message });
         break;
       case "cost":
         break;

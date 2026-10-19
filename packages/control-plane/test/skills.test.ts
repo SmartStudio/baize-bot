@@ -446,7 +446,7 @@ describe("群里那张卡", () => {
     expect(response.status, "正文不是这张卡的消息，和不存在的消息是同一件事").toBe(404);
   });
 
-  it("例行任务那次运行里报上来的记 routine，普通对话里的记 chat", async () => {
+  it("例行任务那次运行里报上来的不落卡：例行本来就是重复的活，再问存不存是打扰", async () => {
     const owner = await ownerWithBot();
     const agent = await online(owner);
     const push = await watch(owner);
@@ -462,15 +462,65 @@ describe("群里那张卡", () => {
       const routine = RoutineResponse.parse(await made.json()).routine;
       expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
       const dispatched = await agentUntil(agent, "prompt");
+      agent.send({
+        type: "skill_offer",
+        runId: dispatched.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        name: "工单早报",
+        steps: ["拉今天的工单", "按状态分组"],
+      });
 
-      const steps = ["拉今天的工单", "按状态分组"];
-      const fromRoutine = await offerSkill(owner, agent, push, "工单早报", steps, dispatched.runId);
-      expect((await decide(owner, fromRoutine, "save")).skill?.source, "例行任务派的那次运行里攒出来的").toBe(
-        "routine",
-      );
-
+      // 上行报文按到达顺序处理，后发的这张先落了，前面那张就是被丢了，不靠等超时。
       const fromChat = await offerSkill(owner, agent, push, "Globex 报价", STEPS);
-      expect((await decide(owner, fromChat, "save")).skill?.source, "同一个 Bot，普通对话里攒出来的").toBe("chat");
+      expect(
+        (await messagesOf(owner)).filter((one) => one.body.kind === "skill_offer").map((one) => one.id),
+        "群里只有普通对话里问的那一张",
+      ).toEqual([fromChat.id]);
+      expect((await decide(owner, fromChat, "save")).skill?.source, "普通对话里攒出来的记 chat").toBe("chat");
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("已经存过同名的活，或者同名的卡还没点，再报上来都不落卡", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      await teach(owner, owner.botId, "Globex 报价", STEPS);
+      const pending = await offerSkill(owner, agent, push, "工单早报", ["拉今天的工单", "按状态分组"]);
+
+      const runId = await startRun(owner, agent);
+      agent.send({
+        type: "skill_offer",
+        runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        name: "Globex 报价",
+        steps: STEPS,
+      });
+      agent.send({
+        type: "skill_offer",
+        runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        name: "工单早报",
+        steps: ["再拉一遍", "再分一遍"],
+      });
+      const barrier = await offerSkill(owner, agent, push, "周报", ["汇总本周", "发给我"], runId);
+
+      expect(
+        (await messagesOf(owner)).filter((one) => one.body.kind === "skill_offer").map((one) => one.id),
+        "重名的两张都没落，只剩先前那张和最后那张",
+      ).toEqual([pending.id, barrier.id]);
+
+      await decide(owner, pending, "dismiss");
+      await pushUntil(push, "message", (one) => one.message.id === pending.id);
+      const again = await offerSkill(owner, agent, push, "工单早报", ["拉今天的工单", "按状态分组"], runId);
+      expect(offerBody(again).status, "上一张已经有了结论，同名的可以再问").toBe("offered");
     } finally {
       push.close();
       agent.close();

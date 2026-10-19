@@ -567,8 +567,7 @@ export const routineRuns = pgTable(
     note: text("note").notNull().default(""),
     // 用户看过这次运行的时刻。首页「例行结果」只列没看过的，POST /api/groups/:id/seen 批量盖章。
     seenAt: timestamp("seen_at", { withTimezone: true }),
-    // 这次触发有没有哪一段说过可见的话。换电脑的链上前一段说话、链尾不说，链尾结账时按它弹「做完了」。
-    // 消息不带 runId，从 messages 推不出是哪一段说的，所以在那一段写下非空文字的同一事务里置位。
+    // 早先链尾结账按它弹「做完了」。例行做完不再弹，这一列已经没人读写，等下一次迁移删掉。
     hasResult: boolean("has_result").notNull().default(false),
   },
   (t) => [index("routine_runs_routine_id_started_at_idx").on(t.routineId, t.startedAt)],

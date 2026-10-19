@@ -4,7 +4,6 @@ import {
   ComputerTokenResponse,
   CreateBotResponse,
   CreateGroupResponse,
-  DecideSkillOfferResponse,
   GroupId,
   MessageId,
   MessageListResponse,
@@ -631,7 +630,6 @@ describe("Bot 自己换电脑", () => {
 });
 
 const ROUTINE_NAME = "每日工单早报";
-const DONE_NOTICE = `例行任务「${ROUTINE_NAME}」做完了，打开群聊看结果`;
 const SPEND_VIEW: ToolView = { kind: "mcp", server: "", tool: "shop.refund", params: [], raw: "给这单退 120 块" };
 
 /** 建一条例行再试跑一次。cron 定在周一 9 点，测试的时钟停在 8:59，只有试跑会起 run。 */
@@ -742,7 +740,7 @@ async function lockWaiters(count: number): Promise<void> {
 }
 
 describe("例行任务里换电脑", () => {
-  it("旧 run 说过话再结账：运行记录还在 running、不弹做完了；接续结账后记成 ok，两段花费都在，做完了只弹一次", async () => {
+  it("旧 run 说过话再结账：运行记录还在 running、不弹通知；接续结账后记成 ok，两段花费都在", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -761,16 +759,14 @@ describe("例行任务里换电脑", () => {
       expect(firstRecord).not.toBeNull();
       expect(await routineRunIdOf(next.runId), "接续属于同一次例行触发").toBe(firstRecord);
 
-      expect(notices(await barrier(local, me)), "活还没做完，不弹做完了").toEqual([]);
+      expect(notices(await barrier(local, me)), "活还没做完，不弹通知").toEqual([]);
       expect(await recordsOf(me, routineId), "旧 run 的花费记上，状态等接续").toEqual([
         { status: "running", note: "¥0.80" },
       ]);
 
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "接续做完才弹，只弹一次").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知，接续做完也一样").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -811,7 +807,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("旧段说话后本机掉线、接续静默结束：做完了照样弹，只弹一次", async () => {
+  it("旧段说话后本机掉线、接续静默结束：记成 ok，不弹通知", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -829,9 +825,7 @@ describe("例行任务里换电脑", () => {
       expect(notices(await barrier(back, me))).toEqual([]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "被放弃的旧段说过话，链尾照样弹").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥1.60" }]);
     } finally {
       back?.agent.close();
@@ -885,7 +879,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("本机掉线后起的接续里攒出的 skill：存下来的来源记 routine", async () => {
+  it("本机掉线后起的接续里报上来的 skill 卡照样不落：接续还是那次例行在做", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -905,15 +899,10 @@ describe("例行任务里换电脑", () => {
         name: "工单早报",
         steps: ["拉今天的工单", "按状态分组"],
       });
-      const card = (await barrier(remote, me)).flatMap((event) =>
+      const cards = (await barrier(remote, me)).flatMap((event) =>
         event.type === "message" && event.message.body.kind === "skill_offer" ? [event.message] : [],
-      )[0];
-      if (card === undefined) throw new Error("接续这一轮没推 skill 卡");
-      const decided = await me.client.post(`/api/messages/${card.id}/skill-offer`, { decision: "save" });
-      expect(decided.status).toBe(200);
-      expect(DecideSkillOfferResponse.parse(await decided.json()).skill?.source, "接续还是那次例行在做").toBe(
-        "routine",
       );
+      expect(cards, "例行派的活不问存不存，换了电脑接着做也一样").toEqual([]);
     } finally {
       local.agent.close();
       remote.agent.close();
@@ -1079,14 +1068,14 @@ describe("例行任务里换电脑", () => {
       [local, remote] = await Promise.all([localBack, remoteBack]);
       const next = await remote.agent.expect("prompt");
       expectContinuation(next, first, CONTINUE_ON_REMOTE);
-      expect(notices(await barrier(local, me)), "接续已经起了，旧 run 结账不弹做完了").toEqual([]);
+      expect(notices(await barrier(local, me)), "接续已经起了，旧 run 结账不弹通知").toEqual([]);
       expect(await recordsOf(me, routineId), "旧 run 的花费记上，状态等接续").toEqual([
         { status: "running", note: "¥0.80" },
       ]);
 
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([{ kind: "result", text: DONE_NOTICE, groupId: me.groupId }]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       await hold?.release();
@@ -1095,7 +1084,7 @@ describe("例行任务里换电脑", () => {
       me.push.close();
     }
   });
-  it("只有旧段说话、接续静默结束：做完了照样弹，只弹一次", async () => {
+  it("只有旧段说话、接续静默结束：记成 ok，不弹通知", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -1111,9 +1100,7 @@ describe("例行任务里换电脑", () => {
       expect(notices(await barrier(local, me))).toEqual([]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "结果在旧段里，链尾收尾时照样弹").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1122,7 +1109,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("旧段说话、结账后控制面重启，接续静默结束：做完了照样弹，只弹一次", async () => {
+  it("旧段说话、结账后控制面重启，接续静默结束：记成 ok，不弹通知", async () => {
     let me = await owner({ remote: true });
     let local = await online(me.local);
     let remote = await online(remoteOf(me));
@@ -1147,9 +1134,7 @@ describe("例行任务里换电脑", () => {
       remote = await online(remoteOf(me), [next.runId]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "旧段说过话记在库里，重启后链尾照样弹").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知，重启前后都一样").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1158,7 +1143,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("旧段只流式说过话、结账后控制面重启，接续静默结束：做完了照样弹，只弹一次", async () => {
+  it("旧段只流式说过话、结账后控制面重启，接续静默结束：记成 ok，不弹通知", async () => {
     let me = await owner({ remote: true });
     let local = await online(me.local);
     let remote = await online(remoteOf(me));
@@ -1192,9 +1177,7 @@ describe("例行任务里换电脑", () => {
       remote = await online(remoteOf(me), [next.runId]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "流式落字时就记在库里，重启后链尾照样弹").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知，重启前后都一样").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1203,7 +1186,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("接续里的审批被放弃、记录已收成 failed，接续再静默结账：记录停在 failed，不弹做完了", async () => {
+  it("接续里的审批被放弃、记录已收成 failed，接续再静默结账：记录停在 failed", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -1236,7 +1219,7 @@ describe("例行任务里换电脑", () => {
       ]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "记录已经是 failed，接续结账不改它，也不弹做完了").toEqual([]);
+      expect(notices(await barrier(remote, me)), "记录已经是 failed，接续结账不改它，也不再弹").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "failed", note: "审批已失效 · ¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1342,7 +1325,7 @@ describe("例行任务里换电脑", () => {
     }
   });
 
-  it("旧段说话、结账前控制面重启，重放 run_done 后接续静默结束：做完了照样弹，只弹一次", async () => {
+  it("旧段说话、结账前控制面重启，重放 run_done 后接续静默结束：记成 ok，不弹通知", async () => {
     let me = await owner({ remote: true });
     let local = await online(me.local);
     let remote = await online(remoteOf(me));
@@ -1370,9 +1353,7 @@ describe("例行任务里换电脑", () => {
       expect(notices(await barrier(local, me))).toEqual([]);
 
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me)), "旧段说过话在写文字时就记进了库，重启后链尾照样弹").toEqual([
-        { kind: "result", text: DONE_NOTICE, groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me)), "例行做完不弹通知，重启前后都一样").toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1678,7 +1659,7 @@ async function withContinuationInsertFailure(body: () => Promise<void>): Promise
   }
 }
 
-/** 建一条例行再试跑一次，名字自定：同一个人的两条例行要分得清是谁的「做完了」。 */
+/** 建一条例行再试跑一次，名字自定：同一个人的两条例行要分得清是谁的记录。 */
 async function trialNamedRoutine(
   o: Owner,
   name: string,
@@ -1723,7 +1704,7 @@ describe("接续的定期补扫", () => {
       expectContinuation(next, first, CONTINUE_ON_REMOTE);
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([{ kind: "result", text: DONE_NOTICE, groupId: me.groupId }]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1764,9 +1745,7 @@ describe("接续的定期补扫", () => {
       expectContinuation(next, first, CONTINUE_ON_REMOTE);
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([
-        { kind: "result", text: "例行任务「早报 A」做完了，打开群聊看结果", groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineA)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
       expect(await recordsOf(me, routineB)).toEqual([{ status: "failed", note: "跑活的进程出错了" }]);
     } finally {
@@ -1778,7 +1757,7 @@ describe("接续的定期补扫", () => {
 });
 
 describe("不带 runId 的报错落在欠接续的旧 run 上", () => {
-  it("请求换电脑 → 不带 runId 的报错 → 旧 run_done → 接续做完：运行记录记 ok，做完了弹一次", async () => {
+  it("请求换电脑 → 不带 runId 的报错 → 旧 run_done → 接续做完：运行记录记 ok，不弹通知", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -1795,7 +1774,7 @@ describe("不带 runId 的报错落在欠接续的旧 run 上", () => {
       expect(await recordsOf(me, routineId), "欠着接续，结局留给链尾").toEqual([{ status: "running", note: "¥0.80" }]);
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([{ kind: "result", text: DONE_NOTICE, groupId: me.groupId }]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1917,7 +1896,7 @@ describe("停机撞上在途的补扫", () => {
       expectContinuation(next, first, CONTINUE_ON_REMOTE);
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([{ kind: "result", text: DONE_NOTICE, groupId: me.groupId }]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
     } finally {
       local.agent.close();
@@ -1956,9 +1935,7 @@ describe("排进别的回合的接续按自己的链取配置", () => {
       expect(await routineRunIdOf(next.runId)).toBe(await routineRunIdOf(first.runId));
       speak(remote, next, "工单早报整理好了");
       await finish(remote, next, 1, 2000);
-      expect(notices(await barrier(remote, me))).toEqual([
-        { kind: "result", text: "例行任务「早报 A」做完了，打开群聊看结果", groupId: me.groupId },
-      ]);
+      expect(notices(await barrier(remote, me))).toEqual([]);
       expect(await recordsOf(me, routineA)).toEqual([{ status: "ok", note: "¥0.80 · ¥1.60" }]);
       expect(await recordsOf(me, routineB)).toEqual([{ status: "ok", note: "¥0.40" }]);
     } finally {
@@ -2002,7 +1979,7 @@ describe("排进别的回合的接续按自己的链取配置", () => {
 });
 
 describe("报错先于换电脑", () => {
-  it("不带 runId 的报错先把例行记成失败，之后请求换电脑被拒、不起接续：记录停在 failed，不弹做完了", async () => {
+  it("不带 runId 的报错先把例行记成失败，之后请求换电脑被拒、不起接续：记录停在 failed", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
     const remote = await online(remoteOf(me));
@@ -2023,7 +2000,7 @@ describe("报错先于换电脑", () => {
       });
       speak(local, first, "工单早报整理好了");
       await finish(local, first, 1, 1000);
-      expect(notices(await barrier(local, me)), "记成失败的不弹做完了").toEqual([]);
+      expect(notices(await barrier(local, me)), "记成失败那一下之后不再弹").toEqual([]);
       expect(await continuationsOf(first.runId)).toEqual([]);
       expect(remote.agent.received().filter((message) => message.type === "prompt")).toEqual([]);
       expect(await recordsOf(me, routineId)).toEqual([{ status: "failed", note: "跑活的进程出错了 · ¥0.80" }]);

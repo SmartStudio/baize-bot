@@ -158,12 +158,10 @@ describe("例行任务到点触发", () => {
         await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
       );
       const bodies = page.messages.map((message) => message.body);
-      expect(bodies[0]).toEqual({ kind: "system", text: "例行任务「每日工单早报」自动运行" });
-      expect(bodies[1], "第二条是用户消息，运行器看到的和手打的一模一样").toMatchObject({
-        kind: "user",
-        text: "把今天的工单汇总一下",
-      });
-      expect(prompt.messageId, "例行的 prompt 指回它写进群里的那条用户消息，不是系统提示").toBe(page.messages[1]?.id);
+      expect(bodies, "群里只落一条用户消息，正文和手打的一样，另带上是哪个例行任务").toEqual([
+        expect.objectContaining({ kind: "user", text: "把今天的工单汇总一下", routine: { name: "每日工单早报" } }),
+      ]);
+      expect(prompt.messageId, "例行的 prompt 指回它写进群里的那条用户消息").toBe(page.messages[0]?.id);
 
       const rows = await runsOf(routine.id);
       expect(rows).toHaveLength(1);
@@ -415,7 +413,7 @@ describe("试跑", () => {
       const page = MessageListResponse.parse(
         await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
       );
-      expect(page.messages[0]?.body).toEqual({ kind: "system", text: "例行任务「每日工单早报」自动运行" });
+      expect(page.messages[0]?.body).toMatchObject({ kind: "user", routine: { name: "每日工单早报" } });
     } finally {
       agent.close();
     }
@@ -706,10 +704,9 @@ describe("例行聚合与项目群里的例行", () => {
     const inProject = MessageListResponse.parse(
       await (await owner.client.get(`/api/groups/${groupId}/messages`)).json(),
     ).messages.map((message) => message.body);
-    expect(inProject, "例行发进项目群，不是 Bot 的单聊").toContainEqual({
-      kind: "system",
-      text: "例行任务「项目周报」自动运行",
-    });
+    expect(inProject, "例行发进项目群，不是 Bot 的单聊").toContainEqual(
+      expect.objectContaining({ kind: "user", routine: { name: "项目周报" } }),
+    );
     const inSolo = MessageListResponse.parse(
       await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
     ).messages;
@@ -1043,7 +1040,9 @@ describe("例行三态", () => {
       const messages = MessageListResponse.parse(
         await (await owner.client.get(`/api/groups/${solo?.groupId}/messages`)).json(),
       ).messages.map((message) => message.body);
-      expect(messages, "试跑落进主助理的单聊").toContainEqual({ kind: "system", text: "例行任务「日常早报」自动运行" });
+      expect(messages, "试跑落进主助理的单聊").toContainEqual(
+        expect.objectContaining({ kind: "user", routine: { name: "日常早报" } }),
+      );
     } finally {
       push.close();
     }
@@ -1400,10 +1399,9 @@ describe("修复二轮：删执行者和建例行、触发、归档、看过的�
       const bodies = MessageListResponse.parse(
         await (await owner.client.get(`/api/groups/${solo}/messages`)).json(),
       ).messages.map((message) => message.body);
-      expect(bodies, "那次运行落进主助理的单聊").toContainEqual({
-        kind: "system",
-        text: "例行任务「每日工单早报」自动运行",
-      });
+      expect(bodies, "那次运行落进主助理的单聊").toContainEqual(
+        expect.objectContaining({ kind: "user", routine: { name: "每日工单早报" } }),
+      );
     } finally {
       gate.release();
       await Promise.allSettled([hooking].filter((one) => one !== undefined));

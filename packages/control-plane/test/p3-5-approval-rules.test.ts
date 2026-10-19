@@ -104,7 +104,8 @@ async function promptFor(who: Owner, text: string): Promise<Job> {
 
 const TOOL_VIEW: ToolView = { kind: "mcp", server: "", tool: "shop.refund", params: [], raw: "给这单退 120 块" };
 
-async function raise(who: Owner, job: Job, callId: string): Promise<Approval> {
+/** 同一个群五分钟内只弹第一张卡的提醒，同群的后几张传 `quiet`，读到卡就回。 */
+async function raise(who: Owner, job: Job, callId: string, notice: "confirm" | "quiet" = "confirm"): Promise<Approval> {
   who.agent.send({
     type: "approval_request",
     runId: job.runId,
@@ -124,9 +125,10 @@ async function raise(who: Owner, job: Job, callId: string): Promise<Approval> {
       kind: "approval",
       approvalId: update.approval.id,
     });
+    if (notice === "quiet") return update.approval;
     for (;;) {
-      const notice = await who.push.next();
-      if (notice.type === "notify" && notice.notice.kind === "confirm") return update.approval;
+      const pushed = await who.push.next();
+      if (pushed.type === "notify" && pushed.notice.kind === "confirm") return update.approval;
     }
   }
 }
@@ -369,7 +371,7 @@ describe("P3-5 审批期限与作废规则", () => {
       const handoff = await handoffPrompt(who);
       const current = await promptFor(who, "@小销 等我确认另一个动作");
       const waiting = await raise(who, current, "call-reply-void");
-      const overdue = await raise(who, handoff, "call-reply-overdue");
+      const overdue = await raise(who, handoff, "call-reply-overdue", "quiet");
       if (overdue.deadlineAt === null) throw new Error("交接审批必须有截止时间");
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(overdue.deadlineAt));
@@ -483,7 +485,7 @@ describe("P3-5 审批期限与作废规则", () => {
       const job = await promptFor(who, "等我确认");
       for (const [index, word] of ["批准", "同意", "拒绝", "不行"].entries()) {
         const callId = `call-word-${index}`;
-        const approval = await raise(who, job, callId);
+        const approval = await raise(who, job, callId, index === 0 ? "confirm" : "quiet");
         expect((await who.client.post(`/api/groups/${who.groupId}/messages`, { text: word })).status).toBe(201);
         const outcome = index < 2 ? "approved" : "rejected";
         expect(await who.agent.expect("approval_result")).toMatchObject({ callId, outcome });
@@ -513,7 +515,7 @@ describe("P3-5 审批期限与作废规则", () => {
       const firstApproval = await raise(who, firstJob, "call-targeted");
       const secondJob = await promptFor(who, `@${second.name} 再看库存`);
       expect((await page(who)).approvals.find((item) => item.id === firstApproval.id)?.status).toBe("pending");
-      const secondApproval = await raise(who, secondJob, "call-other");
+      const secondApproval = await raise(who, secondJob, "call-other", "quiet");
       await who.client.post(`/api/groups/${who.groupId}/messages`, { text: `@${first.name} 换个问题` });
       expect(await who.agent.expect("approval_result")).toMatchObject({ callId: "call-targeted", outcome: "voided" });
       expect((await who.agent.expect("prompt")).text).toBe(`@${first.name} 换个问题`);
@@ -541,7 +543,7 @@ describe("P3-5 审批期限与作废规则", () => {
       const otherApproval = await raise(other, otherJob, "call-other-group");
       const job = await promptFor(who, "@小销 在这里等批");
       const first = await raise(who, job, "call-first");
-      const second = await raise(who, job, "call-second");
+      const second = await raise(who, job, "call-second", "quiet");
       await who.client.post(`/api/groups/${who.groupId}/messages`, { text: "@小销 换个任务" });
       const outcomes = [await who.agent.expect("approval_result"), await who.agent.expect("approval_result")];
       expect(outcomes.map((result) => result.callId).toSorted()).toEqual(["call-first", "call-second"]);
