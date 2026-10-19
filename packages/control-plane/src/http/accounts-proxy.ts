@@ -42,7 +42,7 @@ export function createAccountsProxy(deps: AccountsProxyDeps): Hono {
     const accountId = AccountId.safeParse(c.req.param("accountId"));
     const account = accountId.success ? await findAccount(deps.db, computer.ownerId, accountId.data) : null;
     const platform = OAuthPlatform.safeParse(account?.platform);
-    if (account === null || !platform.success) return c.json(NO_ACCOUNT, 404);
+    if (account === null || account.via !== "api" || !platform.success) return c.json(NO_ACCOUNT, 404);
     if (account.login !== "valid") return c.json(LOGIN_EXPIRED, 409);
 
     // 拼完再核对 origin 和根路径前缀，Bot 用 .. 跳不出平台根地址。路径用原样的，%2F 留在一段里原样交给平台。

@@ -95,6 +95,58 @@ export const XIAOHONGSHU_PAGES: XiaohongshuPages = {
   noteUrl: (noteId) => `https://www.xiaohongshu.com/explore/${noteId}`,
 };
 
+/**
+ * X 发帖弹窗的页面结构。改版时只改这一张表，哪几条没实机核过见 README「X 发布器」。
+ * 发帖页和回复都是弹窗，选择器都框在 dialog 里：帖子详情页底下还常驻一个内嵌回复框，不框住会填到它上面。
+ */
+export interface XPages {
+  readonly composeUrl: string;
+  /** 发出去了但读不到帖子链接时回这一页，控制面也只认 x.com 的链接。 */
+  readonly manageUrl: string;
+  isLoginPage(url: URL): boolean;
+  /** 回复要先打开原帖。不是 X 帖子链接的返回 null。 */
+  statusPage(replyTo: string): string | null;
+  /** 原帖详情页上那条主帖的回复按钮，点了弹出回复框。 */
+  readonly replyButton: PageElement;
+  readonly bodyEditor: PageElement;
+  /** 不要求可见，X 的上传框是藏起来的。 */
+  readonly imageInput: PageElement;
+  /** 每传完一张多一个。 */
+  readonly imagePreview: PageElement;
+  /** 图片没传完时按钮是 aria-disabled，选择器排除掉它，等到能点为止。 */
+  readonly publishButton: PageElement;
+  /** 发出后弹的提示里「View」那条链接，帖子 id 从 href 里按 idPattern 抠。 */
+  readonly postedLink: PageElement & { readonly idPattern: RegExp };
+}
+
+const X_STATUS = /^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/[^/?#]+\/status\/(\d+)/;
+
+export const X_PAGES: XPages = {
+  composeUrl: "https://x.com/compose/post",
+  manageUrl: "https://x.com/home",
+  isLoginPage: (url) => url.pathname.startsWith("/login") || url.pathname.startsWith("/i/flow/login"),
+  // twitter.com 整站跳到 x.com，只按 id 拼 x.com 的地址，不跟着去别的主机。
+  statusPage: (replyTo) => {
+    const id = X_STATUS.exec(replyTo)?.[1];
+    return id === undefined ? null : `https://x.com/i/status/${id}`;
+  },
+  // 待实机核：详情页的主帖 article 带 tabindex="-1"，上面的祖先帖不带。出处是社区脚本的经验，没有官方说法。
+  replyButton: { step: "点回复", selector: 'article[data-testid="tweet"][tabindex="-1"] [data-testid="reply"]' },
+  bodyEditor: { step: "填正文", selector: '[role="dialog"] [data-testid="tweetTextarea_0"]' },
+  imageInput: { step: "上传图片", selector: '[role="dialog"] input[data-testid="fileInput"]' },
+  // 待实机核：预览缩略图在 attachments 里每张一个 img。
+  imagePreview: { step: "等图片传完", selector: '[role="dialog"] [data-testid="attachments"] img' },
+  publishButton: {
+    step: "点发布",
+    selector: '[role="dialog"] [data-testid="tweetButton"]:not([aria-disabled="true"])',
+  },
+  postedLink: {
+    step: "读帖子链接",
+    selector: '[data-testid="toast"] a[href*="/status/"]',
+    idPattern: /\/status\/(\d+)/,
+  },
+};
+
 export interface PublishLimits {
   /** 一整条发布从连上 Chrome 到读完笔记链接的总时限，到了就停，记 error。 */
   readonly totalMs: number;
@@ -112,6 +164,7 @@ export interface PublisherDeps {
   /** 就是电脑代理给 Bot 浏览器工具的那份助理 Chrome：账号在这个 profile 里登录，发布也只能在这里发。 */
   readonly browser: Pick<BrowserConfig, "connection">;
   readonly xiaohongshu?: XiaohongshuPages;
+  readonly x?: XPages;
   readonly limits?: PublishLimits;
 }
 
@@ -191,7 +244,7 @@ async function draftFiles(
   return files;
 }
 
-// 小红书同一个号只能登一处，两条同时发会互相挤，所以一台电脑一次只发一条。
+// 小红书同一个号只能登一处，两条同时发会互相挤，所以一台电脑一次只发一条，X 也排在同一条队里。
 let queue: Promise<unknown> = Promise.resolve();
 function oneAtATime<T>(work: () => Promise<T>): Promise<T> {
   const run = queue.then(work);
@@ -262,14 +315,17 @@ interface Progress {
   step: string;
 }
 
-async function fillAndPublish(
-  tab: PublishTab,
-  pages: XiaohongshuPages,
-  stepMs: number,
-  post: { readonly title: string | null; readonly text: string },
-  files: readonly string[],
-  progress: Progress,
-): Promise<PublishResult> {
+/** 一个站的说法：报错文案里用的站名（拉丁字母的站名自带空格）、登录过期怎么说、点过发布出错让人去哪看一眼。 */
+interface Site {
+  readonly name: string;
+  readonly expired: string;
+  readonly checkAt: string;
+  readonly manageUrl: string;
+  isLoginPage(url: URL): boolean;
+}
+
+/** 在发布标签页上按表里的元素找、点、填、传图。每一步都先看是不是被踢到登录页。 */
+function pageDriver(tab: PublishTab, site: Site, stepMs: number, progress: Progress) {
   const evaluate = async (expression: string, returnByValue = true): Promise<Record<string, unknown>> => {
     const result = await evaluateIsolated(tab.send, { expression, returnByValue, awaitPromise: true });
     if (result.exceptionDetails !== undefined) throw new Error("页面脚本出错");
@@ -284,8 +340,8 @@ async function fillAndPublish(
     const deadline = Date.now() + stepMs;
     for (;;) {
       try {
-        if (pages.isLoginPage(await currentUrl())) {
-          throw new PublishFailure("login_expired", "小红书登录过期了，到账号页重新扫码登录后再发");
+        if (site.isLoginPage(await currentUrl())) {
+          throw new PublishFailure("login_expired", site.expired);
         }
         const found = await attempt();
         if (found !== null) return found;
@@ -293,7 +349,7 @@ async function fillAndPublish(
         if (error instanceof PublishFailure || !tab.isOpen()) throw error;
       }
       if (Date.now() > deadline) {
-        throw new PublishFailure("page_changed", `小红书页面认不出了，卡在「${step}」这一步，可能改版了`);
+        throw new PublishFailure("page_changed", `${site.name}页面认不出了，卡在「${step}」这一步，可能改版了`);
       }
       await delay(POLL_MS);
     }
@@ -301,7 +357,8 @@ async function fillAndPublish(
 
   const navigate = async (url: string): Promise<void> => {
     const result = await tab.send("Page.navigate", { url });
-    if (typeof result.errorText === "string") throw new PublishFailure("error", `打不开小红书：${result.errorText}`);
+    if (typeof result.errorText === "string")
+      throw new PublishFailure("error", `打不开${site.name.trimEnd()}：${result.errorText}`);
   };
 
   const click = async (element: PageElement, fraction = 0.5): Promise<void> => {
@@ -334,8 +391,8 @@ async function fillAndPublish(
   };
 
   // 选中原有内容再插字，等于替换；输入框用 select()，富文本编辑器用选区。
-  // 待实机核：正文编辑器是 tiptap，推断一次 insertText 里带的换行会被吞掉，所以按行插，行与行之间按回车键分段，
-  // 空行就是连按两下回车。OpenCLI 的 fillCard 这样填的是文字配图卡片，不是正文。标题是单行输入框，只给一行。
+  // 待实机核：小红书正文是 tiptap、X 正文是 Draft.js，推断一次 insertText 里带的换行会被吞掉，所以按行插，
+  // 行与行之间按回车键分段，空行就是连按两下回车。OpenCLI 的 fillCard 这样填的是文字配图卡片，不是正文。
   const typeInto = async (element: PageElement, lines: readonly string[]): Promise<void> => {
     await waitFor(element.step, async () => {
       const focused = await valueOf(`(() => {
@@ -360,30 +417,49 @@ async function fillAndPublish(
     }
   };
 
-  await navigate(pages.publishUrl);
-  await click(pages.imageTab);
-  for (const [index, file] of files.entries()) {
-    const objectId = await waitFor(pages.imageInput.step, async () => {
-      const found = await evaluate(pick(pages.imageInput), false);
-      return typeof found.objectId === "string" ? found.objectId : null;
-    });
-    await tab.send("DOM.setFileInputFiles", { files: [file], objectId });
-    const selector = JSON.stringify(pages.imagePreview.selector);
-    await waitFor(pages.imagePreview.step, async () =>
-      Number(await valueOf(`document.querySelectorAll(${selector}).length`)) > index ? true : null,
-    );
-  }
-  if (post.title !== null) await typeInto(pages.titleInput, [post.title]);
-  await typeInto(pages.bodyEditor, post.text.split("\n"));
-  await click(pages.publishButton, pages.publishButton.clickX);
+  const upload = async (input: PageElement, preview: PageElement, files: readonly string[]): Promise<void> => {
+    const selector = JSON.stringify(preview.selector);
+    for (const [index, file] of files.entries()) {
+      const objectId = await waitFor(input.step, async () => {
+        const found = await evaluate(pick(input), false);
+        return typeof found.objectId === "string" ? found.objectId : null;
+      });
+      await tab.send("DOM.setFileInputFiles", { files: [file], objectId });
+      await waitFor(preview.step, async () =>
+        Number(await valueOf(`document.querySelectorAll(${selector}).length`)) > index ? true : null,
+      );
+    }
+  };
+
+  const absent = async (element: PageElement): Promise<true | null> =>
+    (await valueOf(`${pick(element)} === null`)) === true ? true : null;
+
+  return { valueOf, currentUrl, waitFor, navigate, click, typeInto, upload, absent };
+}
+
+type PageDriver = ReturnType<typeof pageDriver>;
+
+async function fillXiaohongshu(
+  page: PageDriver,
+  pages: XiaohongshuPages,
+  post: { readonly title: string | null; readonly text: string },
+  files: readonly string[],
+  progress: Progress,
+): Promise<PublishResult> {
+  await page.navigate(pages.publishUrl);
+  await page.click(pages.imageTab);
+  await page.upload(pages.imageInput, pages.imagePreview, files);
+  if (post.title !== null) await page.typeInto(pages.titleInput, [post.title]);
+  await page.typeInto(pages.bodyEditor, post.text.split("\n"));
+  await page.click(pages.publishButton, pages.publishButton.clickX);
   progress.phase = "submitted";
-  await waitFor("等发布完成", async () => (pages.isPublished(await currentUrl()) ? true : null));
+  await page.waitFor("等发布完成", async () => (pages.isPublished(await page.currentUrl()) ? true : null));
   progress.phase = "published";
 
-  await navigate(pages.manageUrl);
+  await page.navigate(pages.manageUrl);
   const { selector, idAttribute, idPattern, signedLink } = pages.noteCard;
-  const note = await waitFor(pages.noteCard.step, async () => {
-    const cards = (await valueOf(
+  const note = await page.waitFor(pages.noteCard.step, async () => {
+    const cards = (await page.valueOf(
       `[...document.querySelectorAll(${JSON.stringify(selector)})].map((el) => ({ text: el.innerText, attribute: el.getAttribute(${JSON.stringify(idAttribute)}) ?? "", links: [...el.querySelectorAll(${JSON.stringify(signedLink)})].map((a) => a.href) }))`,
     )) as Array<{ text: string; attribute: string; links: string[] }> | undefined;
     // 有标题就按标题认，免得新笔记还没进列表时把上一条当成它；没标题只能取最新一条。
@@ -394,6 +470,75 @@ async function fillAndPublish(
   return { status: "ok", url: note.link ?? pages.noteUrl(note.id), externalId: note.id };
 }
 
+async function fillX(
+  page: PageDriver,
+  pages: XPages,
+  statusPage: string | null,
+  text: string,
+  files: readonly string[],
+  progress: Progress,
+): Promise<PublishResult> {
+  if (statusPage === null) await page.navigate(pages.composeUrl);
+  else {
+    await page.navigate(statusPage);
+    await page.click(pages.replyButton);
+  }
+  await page.typeInto(pages.bodyEditor, text.split("\n"));
+  await page.upload(pages.imageInput, pages.imagePreview, files);
+  await page.click(pages.publishButton);
+  progress.phase = "submitted";
+  // 发出去弹窗就收起，正文框跟着没了。
+  await page.waitFor("等发布完成", () => page.absent(pages.bodyEditor));
+  progress.phase = "published";
+
+  // 提示条几秒就消失，读不到就落到 catch 里按已发出回主页。
+  const href = JSON.stringify(pages.postedLink.selector);
+  const link = await page.waitFor(pages.postedLink.step, async () => {
+    const value = await page.valueOf(`document.querySelector(${href})?.href ?? null`);
+    return typeof value === "string" ? value : null;
+  });
+  const id = pages.postedLink.idPattern.exec(link)?.[1];
+  return id === undefined
+    ? { status: "ok", url: pages.manageUrl, externalId: null }
+    : { status: "ok", url: link, externalId: id };
+}
+
+/** 排队、开后台标签页、到点停，把异常按走到哪一步翻成结果。各平台只给出怎么填。 */
+async function publishInTab(
+  deps: PublisherDeps,
+  site: Site,
+  images: readonly DraftImage[],
+  botId: BotId | null,
+  fill: (page: PageDriver, files: readonly string[], progress: Progress) => Promise<PublishResult>,
+): Promise<PublishResult> {
+  const limits = deps.limits ?? PUBLISH_LIMITS;
+  const progress: Progress = { phase: "filling", step: "连助理 Chrome" };
+  try {
+    // 验配图也排在队里：入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。
+    return await oneAtATime(async () => {
+      const files = await draftFiles(deps.dataDir, botId, images, deps.liveHub);
+      return inBackgroundTab(
+        deps,
+        limits.totalMs,
+        () => new PublishFailure("error", `发布超时：${limits.totalMs / 1000} 秒没发完，停在「${progress.step}」`),
+        (tab) => fill(pageDriver(tab, site, limits.stepMs, progress), files, progress),
+      );
+    });
+  } catch (error) {
+    // 已经离开发布页就是发出去了，只是没读到链接。回 failed 会让用户以为没发、再发一遍，所以回 ok 指向管理页。
+    if (progress.phase === "published") return { status: "ok", url: site.manageUrl, externalId: null };
+    const failure =
+      error instanceof PublishFailure
+        ? error
+        : new PublishFailure("error", `发布出错：${error instanceof Error ? error.message : String(error)}`);
+    const detail =
+      progress.phase === "submitted"
+        ? `已经点过发布，先去${site.checkAt}看一眼再决定要不要重发。${failure.message}`
+        : failure.message;
+    return failed(failure.reason, detail);
+  }
+}
+
 type Publisher = (message: PublishDraftMessage, deps: PublisherDeps) => Promise<PublishResult>;
 
 async function publishToXiaohongshu(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResult> {
@@ -401,35 +546,40 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: Publishe
   if (content.kind !== "post") return failed("error", "小红书发布器只发笔记，回复还没接上");
   if (content.images.length === 0) return failed("error", "小红书笔记至少要一张图");
   const pages = deps.xiaohongshu ?? XIAOHONGSHU_PAGES;
-  const limits = deps.limits ?? PUBLISH_LIMITS;
-  const progress: Progress = { phase: "filling", step: "连助理 Chrome" };
-  try {
-    // 验配图也排在队里：入队顺序就是到达顺序，先到的先发，不看谁的文件先读完。
-    return await oneAtATime(async () => {
-      const files = await draftFiles(deps.dataDir, message.botId, content.images, deps.liveHub);
-      return inBackgroundTab(
-        deps,
-        limits.totalMs,
-        () => new PublishFailure("error", `发布超时：${limits.totalMs / 1000} 秒没发完，停在「${progress.step}」`),
-        (tab) => fillAndPublish(tab, pages, limits.stepMs, content, files, progress),
-      );
-    });
-  } catch (error) {
-    // 已经离开发布页就是发出去了，只是没读到笔记链接。回 failed 会让用户以为没发、再发一遍，所以回 ok 指向笔记管理页。
-    if (progress.phase === "published") return { status: "ok", url: pages.manageUrl, externalId: null };
-    const failure =
-      error instanceof PublishFailure
-        ? error
-        : new PublishFailure("error", `发布出错：${error instanceof Error ? error.message : String(error)}`);
-    const detail =
-      progress.phase === "submitted"
-        ? `已经点过发布，先去笔记管理看一眼再决定要不要重发。${failure.message}`
-        : failure.message;
-    return failed(failure.reason, detail);
-  }
+  const site: Site = {
+    name: "小红书",
+    expired: "小红书登录过期了，到账号页重新扫码登录后再发",
+    checkAt: "笔记管理",
+    manageUrl: pages.manageUrl,
+    isLoginPage: pages.isLoginPage,
+  };
+  return publishInTab(deps, site, content.images, message.botId, (page, files, progress) =>
+    fillXiaohongshu(page, pages, content, files, progress),
+  );
 }
 
-const PUBLISHERS: Record<BrowserPlatform, Publisher> = { xiaohongshu: publishToXiaohongshu };
+const X_MAX_IMAGES = 4;
+
+async function publishToX(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResult> {
+  const { content } = message;
+  const pages = deps.x ?? X_PAGES;
+  if (content.images.length > X_MAX_IMAGES) return failed("error", `X 一条帖子最多带 ${X_MAX_IMAGES} 张图`);
+  const statusPage = content.kind === "reply" ? pages.statusPage(content.replyTo.url) : null;
+  if (content.kind === "reply" && statusPage === null) return failed("error", "X 只能回复帖子的链接");
+  const site: Site = {
+    name: "X ",
+    expired: "X 登录过期了，到账号页用电脑上的浏览器重新登录后再发",
+    checkAt: "X 主页",
+    manageUrl: pages.manageUrl,
+    isLoginPage: pages.isLoginPage,
+  };
+  // 标题不发：走接口那一格也只发正文，同一条草稿两种连法发出去得一样。
+  return publishInTab(deps, site, content.images, message.botId, (page, files, progress) =>
+    fillX(page, pages, statusPage, content.text, files, progress),
+  );
+}
+
+const PUBLISHERS: Record<BrowserPlatform, Publisher> = { xiaohongshu: publishToXiaohongshu, x: publishToX };
 
 export async function publishDraft(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResultMessage> {
   const lease = message.botId === null ? null : acquireBotBrowserMutex(deps.dataDir, message.botId);

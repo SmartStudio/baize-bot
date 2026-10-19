@@ -511,6 +511,7 @@ describe("今日页的共享形状", () => {
       ownerId: "u1",
       computerId: "c1",
       platform: "x",
+      via: "api",
       handle: "@baize",
       tier: "confirm_publish",
       login: "valid",

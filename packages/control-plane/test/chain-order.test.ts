@@ -62,12 +62,21 @@ async function setup(secondAccount = false) {
   // 哨兵报在这个号上：登录失败会记到它身上并推它的快照，collect 只收被测账号的快照，哨兵到了不会被当成晚到的写。
   const beacon = AccountId.parse(newId());
   await database.db.insert(accounts).values([
-    { id: a, ownerId: user.id, computerId: computer.computerId, platform: "xiaohongshu", handle: "@A", login: "valid" },
+    {
+      id: a,
+      ownerId: user.id,
+      computerId: computer.computerId,
+      platform: "xiaohongshu",
+      via: "computer",
+      handle: "@A",
+      login: "valid",
+    },
     {
       id: beacon,
       ownerId: user.id,
       computerId: computer.computerId,
       platform: "xiaohongshu",
+      via: "computer",
       handle: "@哨兵",
       login: "valid",
     },
@@ -78,6 +87,7 @@ async function setup(secondAccount = false) {
             ownerId: user.id,
             computerId: computer.computerId,
             platform: "xiaohongshu" as const,
+            via: "computer" as const,
             handle: "@B",
             login: "valid" as const,
           },
@@ -262,7 +272,7 @@ it("中 1：旧 expired 已提交、返回晚到，新连接报 valid：过期�
 
 it("中 2：旧连接的登录失败已进 handler，新连接报 valid：失败推在 valid 前面，之后不再有它的失败通知", async () => {
   const s = await setup();
-  const gate = s.gated.arm(/select "platform" from "accounts"/);
+  const gate = s.gated.arm(/select "platform", "via" from "accounts"/);
   try {
     s.stale.send(failed(s.a, "old-failed"));
     await gate.reached;

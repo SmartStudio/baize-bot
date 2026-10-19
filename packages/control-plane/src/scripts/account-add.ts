@@ -11,7 +11,7 @@ import { findUserByEmail } from "../repo/users.js";
 // 没有 refresh 令牌，过期了控制面刷不了，只能再跑一次。用户连账号走账号页的 OAuth（/api/oauth/:platform/start）。
 const USAGE =
   "用法：pnpm --filter @baize/control-plane account-add -- --owner <邮箱> --platform github|x --handle <名> --token <令牌> [--tier draft|confirm_publish|direct_publish|read_only]";
-// 小红书走电脑上的浏览器登录，没有令牌可挂。
+// 挂的是走接口的账号；小红书只能走电脑上的浏览器登录，没有令牌可挂。
 const API_PLATFORMS = Platform.extract(["github", "x"]);
 
 const { values } = parseArgs({
@@ -66,6 +66,7 @@ try {
         ownerId: user.id,
         computerId: computer.id,
         platform: platform.data,
+        via: "api",
         handle: values.handle,
         ...(tier?.success === true ? { tier: tier.data } : {}),
       },

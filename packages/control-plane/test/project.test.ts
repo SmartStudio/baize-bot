@@ -72,6 +72,7 @@ async function accountOf(owner: Owner, platform: "x" | "xiaohongshu" | "github")
     ownerId: owner.userId,
     computerId: owner.computer.computerId,
     platform,
+    via: platform === "xiaohongshu" ? "computer" : "api",
     handle: `@${id}`,
     login: "valid",
     tier: "confirm_publish",

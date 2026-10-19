@@ -69,6 +69,7 @@ it("被新连接顶掉的旧连接，inbox 里排着的 expired 不盖新连接�
       ownerId: user.id,
       computerId: computer.computerId,
       platform: "xiaohongshu",
+      via: "computer",
       handle: "@卡",
       login: "valid",
     },
@@ -77,6 +78,7 @@ it("被新连接顶掉的旧连接，inbox 里排着的 expired 不盖新连接�
       ownerId: user.id,
       computerId: computer.computerId,
       platform: "xiaohongshu",
+      via: "computer",
       handle: "@old",
       login: "valid",
     },
@@ -86,7 +88,7 @@ it("被新连接顶掉的旧连接，inbox 里排着的 expired 不盖新连接�
   const push = await connectPush(server.server.port, client.cookie ?? "");
   const stale = (await helloAgent(server.server.port, computer.computerId, computer.token)).agent;
   let fresh: AgentClient | null = null;
-  const gate = gated.arm(/select "platform" from "accounts"/);
+  const gate = gated.arm(/select "platform", "via" from "accounts"/);
 
   try {
     stale.send({
@@ -221,6 +223,7 @@ it("旧 hello 的上线写已经落库、回调晚到：旧连接握手完再轮
     ownerId: user.id,
     computerId: computer.computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle: "@屏障",
     login: "valid",
   });
@@ -337,6 +340,7 @@ async function staleLoginStateInHandler(
     ownerId: user.id,
     computerId: computer.computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle: "@old",
     login: "valid",
   });
@@ -344,7 +348,7 @@ async function staleLoginStateInHandler(
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const push = await connectPush(server.server.port, client.cookie ?? "");
   const stale = (await helloAgent(server.server.port, computer.computerId, computer.token)).agent;
-  const gate = gated.arm(/select "platform" from "accounts"/);
+  const gate = gated.arm(/select "platform", "via" from "accounts"/);
   stale.send({ type: "login_state", accountId: targetId, state: sent });
   await gate.reached;
 
@@ -413,6 +417,7 @@ it("被新连接顶掉的旧连接，inbox 里排着的登录失败不再推给�
     ownerId: user.id,
     computerId: computer.computerId,
     platform: "xiaohongshu",
+    via: "computer",
     handle: "@old",
     login: "valid",
   });
@@ -426,7 +431,7 @@ it("被新连接顶掉的旧连接，inbox 里排着的登录失败不再推给�
     accountId: targetId,
     state: { login: "failed", reason: "window_failed", attempt: LoginAttemptId.parse(attempt) },
   });
-  const gate = gated.arm(/select "platform" from "accounts"/);
+  const gate = gated.arm(/select "platform", "via" from "accounts"/);
 
   try {
     stale.send(failed("blocker"));
@@ -474,6 +479,7 @@ it("两个控制面共库：旧连接在新 connGen 之后发来的登录失败�
       ownerId: user.id,
       computerId: computer.computerId,
       platform: "xiaohongshu",
+      via: "computer",
       handle: "@old",
       login: "expired",
     },
@@ -482,6 +488,7 @@ it("两个控制面共库：旧连接在新 connGen 之后发来的登录失败�
       ownerId: user.id,
       computerId: computer.computerId,
       platform: "xiaohongshu",
+      via: "computer",
       handle: "@barrier",
       login: "valid",
     },

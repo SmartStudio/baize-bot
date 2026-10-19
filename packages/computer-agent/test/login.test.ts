@@ -33,6 +33,8 @@ function fakeChrome(
     readonly signedIn?: (targetId: string, poll: number) => string | null;
     readonly attach?: (targetId: string) => Error | null;
     readonly jumpsAt?: (targetId: string, evaluation: number) => boolean;
+    /** 第 n 次问 cookie 时浏览器里有哪些 cookie 名字，值一律是同一个占位。 */
+    readonly cookies?: (targetId: string, call: number) => readonly string[];
   } = {},
 ) {
   const sent: Sent[] = [];
@@ -48,6 +50,7 @@ function fakeChrome(
     { readonly sessionId: string; readonly targetId: string; readonly document: number }
   >();
   const checks = new Map<string, CheckWorld[]>();
+  const cookieCalls = new Map<string, number>();
   let tabs = 0;
   let attaches = 0;
   const documentOf = (targetId: string): number => documents.get(targetId) ?? 1;
@@ -86,6 +89,13 @@ function fakeChrome(
         }
         return { executionContextId: contextId };
       }
+      case "Network.getCookies": {
+        const targetId = sessions.get(sessionId ?? "") ?? "";
+        const call = (cookieCalls.get(targetId) ?? 0) + 1;
+        cookieCalls.set(targetId, call);
+        const names = options.cookies?.(targetId, call) ?? [];
+        return { cookies: names.map((name) => ({ name, value: "placeholder", domain: ".x.com" })) };
+      }
       case "Runtime.evaluate": {
         const targetId = sessions.get(sessionId ?? "") ?? "";
         const evaluation = (evaluations.get(targetId) ?? 0) + 1;
@@ -117,6 +127,7 @@ function fakeChrome(
   return {
     sent,
     polls: (targetId: string) => polls.get(targetId) ?? 0,
+    cookieCalls: (targetId: string) => cookieCalls.get(targetId) ?? 0,
     checks: (targetId: string) => checks.get(targetId) ?? [],
     closed: () => sent.filter((c) => c.method === "Target.closeTarget").map((c) => c.params.targetId),
     chrome: {
@@ -169,8 +180,12 @@ function rig(options: Parameters<typeof fakeChrome>[0] = {}) {
   return { cdp, screen, deps, logs, sessions, closedLive, shownFor, viewer };
 }
 
-const request = (account = "account-1", attempt = "try-1"): LoginRequest => ({
-  platform: "xiaohongshu",
+const request = (
+  account = "account-1",
+  attempt = "try-1",
+  platform: LoginRequest["platform"] = "xiaohongshu",
+): LoginRequest => ({
+  platform,
   accountId: AccountId.parse(account),
   attempt: LoginAttemptId.parse(attempt),
 });
@@ -305,5 +320,49 @@ describe("登录：一个账号同时只有一次", () => {
 
     expect(await login(request())).toEqual({ login: "failed", reason: "timed_out" });
     expect(h.cdp.closed()).toEqual(["tab-1"]);
+  });
+});
+
+describe("登录：X 看 auth_token 这个 cookie 名", () => {
+  it("cookie 第 3 次才出现：之前不去页面上读账号名，出现后读到账号名回 valid，日志里没有 cookie 值", async () => {
+    const h = rig({
+      cookies: (_tab, call) => (call >= 3 ? ["guest_id", "auth_token"] : ["guest_id"]),
+      signedIn: () => "baize_x",
+    });
+
+    const result = await runLogin(request("account-x", "try-x", "x"), h.deps, new AbortController().signal);
+
+    expect(result).toEqual({ login: "valid", handle: "baize_x" });
+    expect(h.cdp.sent[0]?.params, "开的是 X 的登录页").toEqual({ url: "https://x.com/i/flow/login", background: true });
+    expect(h.cdp.cookieCalls("tab-1")).toBe(3);
+    expect(h.cdp.polls("tab-1"), "没有 auth_token 时不在页面上求值").toBe(1);
+    const asked = h.cdp.sent.filter((c) => c.method === "Network.getCookies").map((c) => c.params);
+    expect(new Set(asked.map((p) => JSON.stringify(p)))).toEqual(
+      new Set([JSON.stringify({ urls: ["https://x.com/"] })]),
+    );
+    expect(h.logs.join("\n")).not.toContain("placeholder");
+    expect(h.cdp.closed()).toEqual(["tab-1"]);
+  });
+
+  it("只有名字相近的 cookie 不算登上：一直不求值，到点回 timed_out", async () => {
+    const h = rig({ cookies: () => ["auth_token_old", "x_auth_token", "guest_id"], signedIn: () => "baize_x" });
+    const deadline = new AbortController();
+    const pending = runLogin(request("account-x", "try-x", "x"), h.deps, deadline.signal);
+    await h.shownFor("account-x");
+    await vi.waitFor(() => expect(h.cdp.cookieCalls("tab-1")).toBeGreaterThanOrEqual(2));
+
+    deadline.abort();
+
+    expect(await pending).toEqual({ login: "failed", reason: "timed_out" });
+    expect(h.cdp.polls("tab-1")).toBe(0);
+  });
+
+  it("有 auth_token 但页面上还读不出账号名：不算登上，接着查", async () => {
+    const h = rig({ cookies: () => ["auth_token"], signedIn: (_tab, poll) => (poll >= 2 ? "baize_x" : null) });
+
+    const result = await runLogin(request("account-x", "try-x", "x"), h.deps, new AbortController().signal);
+
+    expect(result).toEqual({ login: "valid", handle: "baize_x" });
+    expect(h.cdp.polls("tab-1")).toBe(2);
   });
 });

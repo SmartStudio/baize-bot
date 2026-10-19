@@ -11,6 +11,7 @@ import {
   type DraftSpec,
   type GroupId,
   type Platform,
+  type PublishVia,
   type RunId,
   type ServerPush,
   type User,
@@ -24,7 +25,13 @@ import { TEST_CREDENTIALS_KEY, type ApiClient, type TestServer } from "./client.
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./fixtures.js";
 import { connectPush, type PushClient } from "./ws.js";
 
-export type AccountSpec = { readonly platform: Platform; readonly handle: string; readonly token?: string };
+/** via 不给就按平台唯一能走的那种：小红书走电脑，GitHub、X 走接口。 */
+export type AccountSpec = {
+  readonly platform: Platform;
+  readonly via?: PublishVia;
+  readonly handle: string;
+  readonly token?: string;
+};
 
 export type ContentJob = {
   readonly user: User;
@@ -49,7 +56,13 @@ export async function contentJob(server: TestServer, db: Db, specs: readonly Acc
   const crypto = new CredentialCrypto(TEST_CREDENTIALS_KEY);
   const accounts: Account[] = [];
   for (const spec of specs) {
-    const input = { ownerId: user.id, computerId: computer.computerId, platform: spec.platform, handle: spec.handle };
+    const input = {
+      ownerId: user.id,
+      computerId: computer.computerId,
+      platform: spec.platform,
+      via: spec.via ?? (spec.platform === "xiaohongshu" ? "computer" : "api"),
+      handle: spec.handle,
+    } as const;
     const account =
       spec.token === undefined ? await addAccount(db, input) : await addAccountWithToken(db, crypto, input, spec.token);
     accounts.push(account);

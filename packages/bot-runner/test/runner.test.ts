@@ -25,6 +25,7 @@ import {
   AgentToControl,
   BotId,
   type BotRole,
+  CliToolConfig,
   type ComputerKind,
   ComputerId,
   type Grant,
@@ -411,6 +412,7 @@ interface Harness {
     readonly skills?: readonly Skill[];
     readonly brand?: RunnerConfig["brand"];
     readonly preferences?: RunnerConfig["preferences"];
+    readonly cliTools?: RunnerConfig["cliTools"];
     readonly modelGateway?: RunnerConfig["modelGateway"];
     readonly accountsProxy?: RunnerConfig["accountsProxy"];
     readonly mcpProxy?: RunnerConfig["mcpProxy"];
@@ -470,6 +472,7 @@ async function startHarness(options: {
   readonly skills?: readonly Skill[];
   readonly brand?: RunnerConfig["brand"];
   readonly preferences?: RunnerConfig["preferences"];
+  readonly cliTools?: RunnerConfig["cliTools"];
   /** 每个 Bot 的描述，进系统提示。 */
   readonly description?: string;
   readonly name?: string;
@@ -525,6 +528,7 @@ async function startHarness(options: {
       readonly skills?: readonly Skill[];
       readonly brand?: RunnerConfig["brand"];
       readonly preferences?: RunnerConfig["preferences"];
+      readonly cliTools?: RunnerConfig["cliTools"];
       readonly modelGateway?: RunnerConfig["modelGateway"];
       readonly accountsProxy?: RunnerConfig["accountsProxy"];
       readonly mcpProxy?: RunnerConfig["mcpProxy"];
@@ -543,6 +547,7 @@ async function startHarness(options: {
     hub: overrides.hub ?? options.hub ?? { baseUrl: attachmentHub.baseUrl },
     brand: overrides.brand !== undefined ? overrides.brand : (options.brand ?? null),
     preferences: [...(overrides.preferences ?? options.preferences ?? [])],
+    cliTools: [...(overrides.cliTools ?? options.cliTools ?? [])],
     dataDir,
     ...(overrides.skills !== undefined
       ? { skills: [...overrides.skills] }
@@ -5950,7 +5955,7 @@ describe("运行器的主助理", () => {
 没人点名轮到你而你无话可说时，只回 (pass)，一个字都别多；
 用户让谁当首席或让首席卸任时，调 set_chief，别口头答应。
 
-往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。
+往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。在电脑浏览器里登录过的平台（小红书、X）也走草稿，批了由电脑上的浏览器发，不用让用户去配接口授权。
 
 存下会做的活：一件活要是用了三次以上工具才做完，收尾时用 propose_skill 把刚才的步骤写成清单，问用户存不存。一次运行最多提一次，用户不答也别再提。
 </addendum>
@@ -7036,7 +7041,8 @@ const accountOf = (
   platform: AccountConfig["platform"],
   handle: string | null,
   tier: AccountConfig["tier"],
-): AccountConfig => ({ id: AccountId.parse(id), platform, handle, tier, login: "valid" });
+  via: AccountConfig["via"] = platform === "xiaohongshu" ? "computer" : "api",
+): AccountConfig => ({ id: AccountId.parse(id), platform, via, handle, tier, login: "valid" });
 
 /** 配图的路径要在建 harness 之前写进脚本，所以先把数据目录和 bot-1 的工作目录建好。 */
 const botWorkDir = (): { readonly dataDir: string; readonly workDir: string } => {
@@ -7184,7 +7190,7 @@ describe("运行器的草稿", () => {
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("GitHub 的草稿先不带图");
+    expect(seen.toolResults.join("")).toContain("GitHub 接口授权的号起草先不带图");
   });
 
   it("小红书草稿可以带图，GitHub 草稿不带图照常建", async () => {
@@ -7212,6 +7218,42 @@ describe("运行器的草稿", () => {
       },
       { accountId: "acc-gh", content: { github: { repo: "baize/bot", as: "issue" }, images: [] } },
     ]);
+  });
+
+  it("电脑浏览器登录的 X 号最多带 4 张图：5 张报错不发上行，4 张照常建", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+    const xBrowser = accountOf("acc-x-browser", "x", "baize_bot", "confirm_publish", "computer");
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: [...ACCOUNTS, xBrowser],
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        [
+          "五张",
+          callTool("create_draft", {
+            accountId: "acc-x-browser",
+            content: { kind: "post", text: "五张图", images: Array.from({ length: 5 }, () => IMAGE) },
+          }),
+        ],
+        [
+          "四张",
+          callTool("create_draft", {
+            accountId: "acc-x-browser",
+            content: { kind: "post", text: "四张图", images: Array.from({ length: 4 }, () => IMAGE) },
+          }),
+        ],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "五张"));
+    expect(drafted(h), "5 张图不发上行").toEqual([]);
+    expect(seen.toolResults.join("")).toContain("X 一条最多带 4 张图");
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "四张", { groupId: "group-b" }));
+    expect(drafted(h).map((draft) => [draft.accountId, draft.content.images.length])).toEqual([["acc-x-browser", 4]]);
   });
 
   it("配图在工作目录外时报错且不发上行", async () => {
@@ -7461,7 +7503,7 @@ describe("运行器的草稿", () => {
 
     const content = requests[0]?.messages.find((message) => message.role === "user")?.content;
     expect((content as ReadonlyArray<{ text: string }>)[0]?.text, "一个账号也要列").toContain(
-      "能用的账号：\n- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
+      "能用的账号：\n- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs",
     );
     expect(drafted(h), "现在的 accountId 是必填，不因为只有一个账号就替模型补上").toEqual([]);
     expect(toolStatuses(h)).toEqual(["bot_tool_call:running", "bot_tool_call:failed"]);
@@ -7519,9 +7561,9 @@ describe("运行器的草稿", () => {
     };
     const section = [
       "能用的账号：",
-      "- 小红书 @小满的日常，发布要确认档，accountId：acc-xhs",
-      "- GitHub @baize-tech，可起草档，accountId：acc-gh",
-      "- X @baize_bot，只读档，不能起草，accountId：acc-x",
+      "- 小红书 @小满的日常，电脑浏览器登录，发布要确认档，accountId：acc-xhs",
+      "- GitHub @baize-tech，接口授权，可起草档，accountId：acc-gh",
+      "- X @baize_bot，接口授权，只读档，不能起草，accountId：acc-x",
     ].join("\n");
 
     const withAccounts = await userText(ACCOUNTS);
@@ -7535,6 +7577,20 @@ describe("运行器的草稿", () => {
     expect(withAccounts.text.replace(`${section}\n\n`, ""), "除了这一段，其余字节不变").toBe(withoutAccounts.text);
     expect(withAccounts.description, "不再叫模型先随便写一个 accountId").not.toContain("随便写");
     expect(withAccounts.description).toContain("accountId 从 prompt 里的能用的账号取");
+
+    const unconfirmed = await userText([
+      {
+        id: AccountId.parse("acc-xb"),
+        platform: "x",
+        via: "computer",
+        handle: null,
+        tier: "confirm_publish",
+        login: "none",
+      },
+    ]);
+    expect(unconfirmed.text, "没登上的浏览器号照样列出，说清批了要等登上，不让模型猜在哪台电脑").toContain(
+      "- X （没有账号名），电脑浏览器登录，发布要确认档，账号页上还没确认登上，批了先等着，电脑浏览器里登上了会自动发；账号在哪台电脑上以账号页为准，accountId：acc-xb",
+    );
   });
 
   it("edit_draft 发一条 draft_edit，结果告诉模型改过的稿子要重新等批", async () => {
@@ -10301,6 +10357,139 @@ describe("运行器的例行边界", () => {
       "bot_tool_call:blocked",
     ]);
     expect(drafted(h), "只有用户当面派的那一条起草了").toHaveLength(1);
+  });
+});
+
+// 沙箱 bash 按 runner 进程的 PATH 找；测试机 PATH 里有 ./node_modules/.bin 这种相对项，cli 判定会整条不认。
+const absolutePath = (): string =>
+  (process.env["PATH"] ?? "")
+    .split(":")
+    .filter((entry) => entry.startsWith("/"))
+    .join(":");
+
+describe("运行器的命令行工具", () => {
+  const SECRET = "xai-runner-secret-0123456789";
+  const grokFor = (bots: readonly string[] | null) =>
+    CliToolConfig.parse({
+      id: "tool-grok",
+      // 不用真名 grok：测试机上可能真装着它，系统里的同名程序不该被跑起来。
+      command: "baize-test-cli",
+      install: { manager: "npm", package: "@vibe-kit/grok-cli" },
+      env: [{ name: "GROK_API_KEY", value: SECRET }],
+      bots,
+    });
+  const systemOf = (request: ChatCompletionRequest | undefined): string =>
+    textOf(request?.messages.find((message) => message.role === "system")?.content);
+
+  it("云电脑上系统提示列出这个 Bot 的工具和装法，不带值；config 换了跟着换，不属于它的不列", async () => {
+    sandboxProbe.forceBwrap = true;
+    const requests: ChatCompletionRequest[] = [];
+    const { dataDir } = botWorkDir();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      dataDir,
+      computerKind: "remote",
+      cliTools: [grokFor(["bot-2"])],
+      script: scriptPlans(requests, { 第一次: [], 第二次: [], 第三次: [] }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一次"));
+    expect(systemOf(requests.at(-1))).not.toContain("## 命令行工具");
+
+    await h.runner.applyConfig(h.config({ cliTools: [grokFor(null)] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
+    const system = systemOf(requests.at(-1));
+    expect(system).toContain("## 命令行工具");
+    expect(system).toContain("- baize-test-cli（装法：npm install -g @vibe-kit/grok-cli）");
+    expect(system).not.toContain(SECRET);
+
+    await h.runner.applyConfig(h.config({ cliTools: [] }));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三次"));
+    expect(systemOf(requests.at(-1)), "整份对账，旧的作废").not.toContain("## 命令行工具");
+  });
+
+  it("本机电脑的系统提示不列工具", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      cliTools: [grokFor(null)],
+      script: scriptPlans(requests, { 看看: [] }),
+    });
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "看看"));
+    expect(systemOf(requests.at(-1))).not.toContain("## 命令行工具");
+  });
+
+  it.skipIf(process.platform !== "darwin")(
+    "云电脑上登记的工具不弹审批、拿得到密钥，模型、上行和工作记录里看到的都是 [已隐藏]",
+    async () => {
+      sandboxProbe.forceBwrap = true;
+      vi.stubEnv("PATH", absolutePath());
+      const requests: ChatCompletionRequest[] = [];
+      const frames: unknown[] = [];
+      const { dataDir } = botWorkDir();
+      const nodeBin = join(botDirs(dataDir, BotId.parse("bot-1")).toolboxDir, "node", "bin");
+      mkdirSync(nodeBin, { recursive: true });
+      writeFileSync(join(nodeBin, "baize-test-cli"), '#!/bin/sh\nprintf "grok key=%s\\n" "$GROK_API_KEY"\n');
+      chmodSync(join(nodeBin, "baize-test-cli"), 0o755);
+      const h = await startHarness({
+        bots: ["bot-1"],
+        extensionTools: [],
+        dataDir,
+        computerKind: "remote",
+        approve: false,
+        cliTools: [grokFor(null)],
+        workAppend: async (frame) => {
+          frames.push(frame);
+          return { kind: "ok" };
+        },
+        script: scriptPlans(requests, {
+          问问: [
+            ["bash", { command: 'baize-test-cli -p "hi" | head -n 5' }],
+            ["bash", { command: "echo key=$GROK_API_KEY" }],
+          ],
+        }),
+      });
+
+      await h.runner.prompt(promptMessage("bot-1", "run-1", "问问"));
+
+      expect(shape(h.sent)).not.toContain("approval_request");
+      const results = toolResultsOf(requests);
+      expect(results).toContain("grok key=[已隐藏]");
+      expect(results, "别的命令拿不到值").toContain("key=\\n");
+      expect(results).not.toContain(SECRET);
+      expect(JSON.stringify(h.sent)).not.toContain(SECRET);
+      expect(frames.length).toBeGreaterThan(0);
+      expect(JSON.stringify(frames)).toContain("[已隐藏]");
+      expect(JSON.stringify(frames)).not.toContain(SECRET);
+      for (const file of sessionFilesOf(dataDir, "bot-1")) expect(readFileSync(file, "utf8")).not.toContain(SECRET);
+    },
+  );
+
+  it("本机电脑上普通命令读出密钥，模型和工作记录里也换掉", async () => {
+    const requests: ChatCompletionRequest[] = [];
+    const frames: unknown[] = [];
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "leak.txt"), `key=${SECRET}\n`);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      extensionTools: [],
+      dataDir,
+      cliTools: [grokFor(null)],
+      workAppend: async (frame) => {
+        frames.push(frame);
+        return { kind: "ok" };
+      },
+      script: scriptPlans(requests, { 读读: [["bash", { command: "cat leak.txt" }]] }),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "读读"));
+
+    expect(toolResultsOf(requests)).toContain("key=[已隐藏]");
+    expect(toolResultsOf(requests)).not.toContain(SECRET);
+    expect(JSON.stringify(frames)).not.toContain(SECRET);
+    expect(JSON.stringify(h.sent)).not.toContain(SECRET);
   });
 });
 

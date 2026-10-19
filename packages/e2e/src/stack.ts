@@ -385,7 +385,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
         return addAccountWithToken(
           db,
           new CredentialCrypto(credentialsKey),
-          { ownerId: user.id, computerId, platform, handle },
+          // 带令牌挂的号是接口授权的；小红书库约束只许走电脑，这里只是借它的行测附件和信封，不发出去。
+          { ownerId: user.id, computerId, platform, via: platform === "xiaohongshu" ? "computer" : "api", handle },
           token,
         );
       },

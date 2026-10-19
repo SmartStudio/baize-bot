@@ -111,6 +111,7 @@ async function harness(upstream: Upstream, overrides: Partial<RunnerConfig> = {}
     grants: [],
     brand: null,
     preferences: [],
+    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-lanes-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
@@ -1382,6 +1383,7 @@ describe("分道与租约合并", () => {
           {
             id: AccountId.parse("account-hub"),
             platform: "xiaohongshu",
+            via: "computer",
             handle: "测试",
             login: "valid",
             tier: "confirm_publish",

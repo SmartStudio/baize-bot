@@ -88,6 +88,7 @@ describe("账号", () => {
         ownerId: job.user.id,
         computerId: job.computer.computerId,
         platform: "xiaohongshu",
+        via: "computer",
         handle: "白泽",
       });
       const refused = await job.client.patch(`/api/accounts/${xhs.id}`, { tier: "direct_publish" });
@@ -171,6 +172,32 @@ describe("起草", () => {
       expect(withImage.status).toBe(400);
       expect((await draftOnPage(job, accepted.draftId)).draft.status).toBe("pending");
     });
+  });
+
+  it("电脑浏览器登录的 X 号最多带 4 张图：5 张的不落，批的时候加到 5 张回 400", async () => {
+    const job = await contentJob(server, database.db, [{ platform: "x", via: "computer", handle: "baize_x" }]);
+    try {
+      const [x] = job.accounts;
+      if (x === undefined) throw new Error("没挂上账号");
+      sendDraft(job, specOf(x, { ...tweet("五张图"), images: Array.from({ length: 5 }, () => IMAGE) }));
+      const accepted = specOf(x, { ...tweet("四张图"), images: Array.from({ length: 4 }, () => IMAGE) });
+      await createDraft(job, accepted);
+
+      expect(
+        (await messagesOf(job)).drafts.map((one) => one.id),
+        "5 张的没落",
+      ).toEqual([accepted.draftId]);
+
+      const tooMany = await job.client.post(`/api/drafts/${accepted.draftId}`, {
+        decision: "approve",
+        content: { ...tweet("批的时候加到五张"), images: Array.from({ length: 5 }, () => IMAGE) },
+      });
+      expect(tooMany.status).toBe(400);
+      expect(((await tooMany.json()) as { error: string }).error).toContain("最多带 4 张图");
+      expect((await draftOnPage(job, accepted.draftId)).draft.status).toBe("pending");
+    } finally {
+      job.close();
+    }
   });
 
   it("别人的账号不能用来起草，重复的 draftId 不再出卡", async () => {

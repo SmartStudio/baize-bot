@@ -1,7 +1,6 @@
 import {
   Approval,
   BotId,
-  BrowserPlatform,
   GroupId,
   RoutineId,
   TodayResponse,
@@ -97,13 +96,7 @@ export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = ne
     db
       .select()
       .from(accounts)
-      .where(
-        and(
-          eq(accounts.ownerId, ownerId),
-          eq(accounts.login, "none"),
-          inArray(accounts.platform, BrowserPlatform.options),
-        ),
-      ),
+      .where(and(eq(accounts.ownerId, ownerId), eq(accounts.login, "none"), eq(accounts.via, "computer"))),
     db
       .select({ publication: publications, draft: drafts })
       .from(publications)

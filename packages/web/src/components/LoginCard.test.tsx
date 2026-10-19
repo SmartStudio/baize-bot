@@ -24,6 +24,7 @@ const account = (login: Account["login"]) =>
     ownerId: "usr_1",
     computerId: "cmp_remote",
     platform: "xiaohongshu",
+    via: "computer",
     handle: "要务机械星球",
     tier: "confirm_publish",
     login,

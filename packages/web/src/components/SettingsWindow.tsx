@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { AtSign, Gauge, Puzzle, Settings as SettingsIcon, Shield, X } from "lucide-react";
+import { AtSign, Gauge, Puzzle, Settings as SettingsIcon, Shield, SquareTerminal, X } from "lucide-react";
 import {
   Settings,
   type Account,
@@ -22,13 +22,15 @@ import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
 import { AccountsPage } from "./AccountsPage.js";
 import { PrivacyPage } from "./PrivacyPage.js";
+import { CliToolsPage } from "./CliToolsPage.js";
 
-export type PageId = "general" | "accounts" | "tools" | "usage" | "privacy";
+export type PageId = "general" | "accounts" | "tools" | "cli" | "usage" | "privacy";
 
 const PAGES: Record<PageId, { title: string; icon: React.ReactNode }> = {
   general: { title: "通用", icon: <SettingsIcon size={16} aria-hidden="true" /> },
   accounts: { title: "账号与电脑", icon: <AtSign size={16} aria-hidden="true" /> },
   tools: { title: "插件", icon: <Puzzle size={16} aria-hidden="true" /> },
+  cli: { title: "命令行工具", icon: <SquareTerminal size={16} aria-hidden="true" /> },
   usage: { title: "用量", icon: <Gauge size={16} aria-hidden="true" /> },
   privacy: { title: "数据与隐私", icon: <Shield size={16} aria-hidden="true" /> },
 };
@@ -43,6 +45,8 @@ type Props = {
   tools: ToolConnection[];
   grants: Grant[];
   projectNames: Record<GroupId, string>;
+  // 每个 Bot 自己的单 Bot 群，命令行工具页「让 Bot 装上」往这里发话。
+  soloGroups: Record<BotId, GroupId>;
   accounts: Account[];
   computers: Record<string, Computer>;
   // 首页版本号，重连和审批变化都会让它加一。账号与电脑页开着就照它重拉授权，补上断线期间别处撤掉的和别处新批的。
@@ -58,6 +62,7 @@ type Props = {
   onLoadComputers: () => Promise<void>;
   onChangeTier: (id: AccountId, tier: AccountTier) => Promise<void>;
   onChange: (patch: Partial<Settings>) => Promise<void>;
+  onAskBot: (groupId: GroupId, text: string) => Promise<void>;
   onLogout: () => void;
   onClose: () => void;
 };
@@ -332,6 +337,7 @@ export const SettingsWindow = ({
   tools,
   grants,
   projectNames,
+  soloGroups,
   accounts,
   computers,
   grantsVersion,
@@ -345,6 +351,7 @@ export const SettingsWindow = ({
   onLoadAccounts,
   onChangeTier,
   onChange,
+  onAskBot,
   onLogout,
   onClose,
 }: Props) => {
@@ -408,6 +415,8 @@ export const SettingsWindow = ({
               onUpdate={onUpdateTool}
               onDelete={onDeleteTool}
             />
+          ) : page === "cli" ? (
+            <CliToolsPage bots={bots} soloGroups={soloGroups} onAskBot={onAskBot} />
           ) : page === "usage" ? (
             <UsagePage usage={usage} bots={bots} budget={settings.budget} onChange={onChange} />
           ) : (

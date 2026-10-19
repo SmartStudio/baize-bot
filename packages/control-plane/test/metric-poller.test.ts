@@ -165,7 +165,13 @@ async function githubAccount(owner: Owner, token: string): Promise<AccountId> {
   const account = await addAccountWithToken(
     database.db,
     new CredentialCrypto(TEST_CREDENTIALS_KEY),
-    { ownerId: owner.userId, computerId: owner.computer.computerId, platform: "github", handle: "baize-dev" },
+    {
+      ownerId: owner.userId,
+      computerId: owner.computer.computerId,
+      platform: "github",
+      via: "api",
+      handle: "baize-dev",
+    },
     token,
   );
   return account.id;

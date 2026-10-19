@@ -21,6 +21,7 @@ import { performance } from "node:perf_hooks";
 import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { BotId, ComputerId, GroupId } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { toolboxSearchPath } from "../src/contained.js";
 import { decide, type GateAccess, type GateCall } from "../src/gate.js";
 import { botDirs, ensureBotDirs, forbiddenZones, type ForbiddenZones } from "../src/paths.js";
 import {
@@ -31,7 +32,6 @@ import {
   sandboxKind,
   sandboxProfile,
   toolboxCommand,
-  toolboxSearchPath,
   whitelistEnv,
 } from "../src/sandbox.js";
 
@@ -878,7 +878,8 @@ describe("bash 沙箱性能", () => {
       });
       if (cloud.containment.level !== "closed") throw new Error("云电脑的 containment 该是 closed");
       const shimDir = join(root, "bot-1", "toolbox-bin");
-      const approvedPath = `${shimDir}:${process.env["PATH"]}:${venvBin}`;
+      const nodeBin = join(dirs.toolboxDir, "node", "bin");
+      const approvedPath = `${shimDir}:${process.env["PATH"]}:${venvBin}:${nodeBin}`;
       expect(toolboxSearchPath(cloud.containment)).toBe(approvedPath);
       expect(readdirSync(shimDir).toSorted()).toEqual(["pip", "pip3", "python", "python3"]);
       expect(createSandboxedBash(dirs.workDir, ownZones).containment).toEqual({ level: "none" });
@@ -1060,7 +1061,9 @@ describe("bash 沙箱性能", () => {
         undefined,
         undefined as never,
       );
-      expect(outputText(result)).toBe(`${join(root, "bot-1", "toolbox-bin")}:${process.env["PATH"]}:${venvBin}`);
+      expect(outputText(result)).toBe(
+        `${join(root, "bot-1", "toolbox-bin")}:${process.env["PATH"]}:${venvBin}:${join(dirs.toolboxDir, "node", "bin")}`,
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

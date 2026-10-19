@@ -28,7 +28,7 @@ import {
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome } from "./chrome.js";
 import { createLiveScreen } from "./live-screen.js";
-import { createLogins, defaultLoginPages } from "./login.js";
+import { checkLogin, createLogins, defaultLoginPages } from "./login.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
 import { loadInstallId } from "./install-id.js";
 import { WorkAppendChannel } from "./work-append.js";
@@ -73,6 +73,9 @@ type Link =
   | { readonly phase: "open"; readonly socket: WebSocket; applied: number }
   | { readonly phase: "waiting"; readonly timer: NodeJS.Timeout }
   | { readonly phase: "stopped" };
+
+// 页要加载完、X 的侧栏要渲染出来才读得到账号名，慢网也够；到点没读到就当没登上。
+const LOGIN_CHECK_MS = 30_000;
 
 const bytesOf = (data: RawData): Uint8Array =>
   Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
@@ -410,6 +413,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           skills: message.skills,
           brand: message.brand,
           preferences: message.preferences,
+          cliTools: message.cliTools,
           dataDir,
           send: report,
           workAppend: (appendFrame) => workAppends.append(appendFrame),
@@ -483,6 +487,23 @@ export function startAgent(options: AgentOptions): AgentHandle {
               state: result.login === "failed" ? { ...result, attempt: message.attempt } : result,
             });
           });
+        return;
+      case "login_check":
+        void checkLogin(
+          message.platform,
+          { chrome, pages: defaultLoginPages, log },
+          AbortSignal.timeout(LOGIN_CHECK_MS),
+        )
+          .then((signedInAs) => {
+            log(`查 ${message.platform} 登录：${signedInAs === null ? "没读到账号名，账号状态不动" : "已登上"}`);
+            if (signedInAs !== null)
+              report({
+                type: "login_state",
+                accountId: message.accountId,
+                state: { login: "valid", handle: signedInAs },
+              });
+          })
+          .catch((error: unknown) => log(`查 ${message.platform} 登录出错：${String(error)}`));
         return;
       case "pause":
         await runner?.pause(message.botId);

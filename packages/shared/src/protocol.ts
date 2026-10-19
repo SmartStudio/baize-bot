@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CliToolConfig } from "./cli-tools.js";
 import { PokerAction, PokerHandId, PokerPersona, PokerReviewHand, PokerSessionId, TablePrompt } from "./poker.js";
 import {
   AccountId,
@@ -26,6 +27,7 @@ import {
   MessageId,
   ModelPurpose,
   Platform,
+  PublishVia,
   Preference,
   ProjectOfferMember,
   ProjectOfferPlatform,
@@ -88,7 +90,14 @@ export const ToolConnectionConfig = z.discriminatedUnion("localOnly", [
 export type ToolConnectionConfig = z.infer<typeof ToolConnectionConfig>;
 
 export const AccountConfig = z
-  .object({ id: AccountId, platform: Platform, handle: z.string().nullable(), tier: AccountTier, login: AccountLogin })
+  .object({
+    id: AccountId,
+    platform: Platform,
+    via: PublishVia,
+    handle: z.string().nullable(),
+    tier: AccountTier,
+    login: AccountLogin,
+  })
   .strict();
 export type AccountConfig = z.infer<typeof AccountConfig>;
 
@@ -465,6 +474,8 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     // 该用户全部 Bot 的偏好，恒带：空也带空数组，运行器靠它对账「之前说过、这里没有的已作废」，理由同 skills。
     preferences: z.array(Preference),
     accounts: z.array(AccountConfig),
+    // 这台电脑上能用的命令行工具，恒带，空也带空数组，运行器整份对账，理由同 skills。
+    cliTools: z.array(CliToolConfig),
     grants: z.array(Grant),
     modelGateway: z.object({ baseUrl: z.string().url(), apiKey: z.string() }),
     // 读 GitHub、X 走控制面的账号代理：`${baseUrl}/<accountId>/<平台路径>`，Bearer 用 modelGateway.apiKey，令牌不下发。
@@ -551,6 +562,13 @@ const ControlToAgentDiscriminatedUnion = z.discriminatedUnion("type", [
     platform: BrowserPlatform,
     attempt: LoginAttemptId,
   }),
+  // 不开画面，只在后台页上看一眼浏览器是不是已经登上了：人可能在 Bot 的浏览器里登过，账号页不知道。
+  // 登上了照 login_state valid 回，没登上什么也不回，账号状态不动。
+  z.object({
+    type: z.literal("login_check"),
+    accountId: AccountId,
+    platform: BrowserPlatform,
+  }),
   // attempt 是控制面这一次认领的时刻，一条草稿超时后重批再发，新旧两次靠它分开。
   // botId 是起草的 Bot，配图只认它目录里的拷贝；Bot 删了是 null，这时哪张配图都不认。
   z.object({
@@ -624,6 +642,8 @@ export const DOWNLINK_DELIVERY = {
   approval_result: "reliable",
   poker_result: "reliable",
   browser_login: "reliable",
+  // 丢了下一轮发布循环再发一次，不值得进发件箱。
+  login_check: "bare",
   publish_draft: "reliable",
 } as const satisfies Record<ControlToAgent["type"], "bare" | "reliable">;
 

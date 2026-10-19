@@ -1,7 +1,7 @@
-import { BrowserPlatform, type Account, type AccountId, type TodayPendingItem } from "@baize/shared";
+import type { Account, AccountId, TodayPendingItem } from "@baize/shared";
 import type { ContentBook } from "./types.js";
 
-const isBrowser = (account: Account): boolean => BrowserPlatform.safeParse(account.platform).success;
+const isBrowser = (account: Account): boolean => account.via === "computer";
 
 export type PendingEntry = TodayPendingItem | { kind: "login"; account: Account };
 
@@ -47,8 +47,8 @@ export const entryKey = (entry: PendingEntry): string => {
 };
 
 // 哪个号要登录只有一处说了算：控制面 pendingItems 列的账号行，过期的号恒列，没登录的占位有待批的活才列。
-// 这里只管怎么摆：浏览器平台的那行换成能当场扫码的登录卡，挪到第一张要用它的卡前面，没有就留在原位，
-// 行数和服务端 pending 一样。OAuth 平台的行照原样列，去账号页重新授权。
+// 这里只管怎么摆：电脑浏览器登录的号那行换成能当场扫码的登录卡，挪到第一张要用它的卡前面，没有就留在原位，
+// 行数和服务端 pending 一样。接口授权的号照原样列，去账号页重新授权。
 // watched 是这一页上出过登录卡的号，记着卡上屏时排在它前面的那些条目的 key。
 // 号登上后服务端那行随之没了，卡片留着说「已登录」，是回执不是待办：有待办等它就放在那件前面，
 // 没有就跟在原先前面那些里还在的最后一条后面，一条都不在了才排最前，不让回执在列表里跳位。
