@@ -1,6 +1,6 @@
 import type { Action, Event, HandState, SeatId } from "./engine.js";
 import type { Card } from "./cards.js";
-import { describeHand, evaluate } from "./evaluate.js";
+import { describePokerHand, evaluatePokerHand } from "@baize/shared";
 
 // 老白的代码播报（D29），不调模型。narrate 把引擎事件一对一变成一句中文，给牌友和老白看的公开日志用；
 // hostLines 是群里那几句。事件日志里只有公开的事，所以只有摊牌会写出底牌，其余句子拿不到别人的牌。
@@ -110,7 +110,7 @@ function settlementLine(state: HandState, nameOf: (seatId: SeatId) => string): s
   return `摊牌：${shown
     .map((event) => {
       const amount = won.get(event.seatId);
-      const hand = describeHand(evaluate(event.hole, state.board));
+      const hand = describePokerHand(evaluatePokerHand(event.hole, state.board));
       return `${nameOf(event.seatId)} ${event.hole.map(cardText).join(" ")}（${hand}）${amount === undefined ? "" : `赢 ${amount}`}`;
     })
     .join("；")}`;
