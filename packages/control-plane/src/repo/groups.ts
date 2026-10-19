@@ -160,8 +160,9 @@ export async function findProjectGroupId(db: Db | Tx, ownerId: UserId, groupId: 
 
 /** 群还有成员、也没解散。成员删光的和解散的多 Bot 群行都还留着，对外却当作不存在：findProjectGroupId 和首页待办一个口径。 */
 export function hasMembers(groupId: SQL | AnyColumn): SQL {
-  return sql`exists (select 1 from ${groupMembers} join ${groups} as live on live.id = ${groupMembers.groupId}
-    where ${groupMembers.groupId} = ${groupId} and live.archived_at is null)`;
+  // 写成一行：SQL 文本按行匹配的测试屏障（gated-db）要能认出这条查询。
+  const live = sql`join ${groups} as live on live.id = ${groupMembers.groupId}`;
+  return sql`exists (select 1 from ${groupMembers} ${live} where ${groupMembers.groupId} = ${groupId} and live.archived_at is null)`;
 }
 
 /**

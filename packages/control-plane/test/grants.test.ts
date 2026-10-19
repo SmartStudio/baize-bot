@@ -108,6 +108,7 @@ async function raise(
   callId: string,
   action: ActionKind,
   target: GrantTarget | null,
+  notified = true,
 ): Promise<Approval> {
   who.agent.send({
     type: "approval_request",
@@ -123,7 +124,8 @@ async function raise(
   const updated = await who.push.next();
   if (updated.type !== "approval_updated") throw new Error(`本应先推 approval_updated，实际是 ${updated.type}`);
   expect((await who.push.next()).type).toBe("message");
-  expect((await who.push.next()).type).toBe("notify");
+  // 同一个群五分钟内只弹第一条「等你确认」，后面的不再推 notify。
+  if (notified) expect((await who.push.next()).type).toBe("notify");
   return updated.approval;
 }
 
@@ -223,7 +225,7 @@ describe("批准时选的范围落成授权", () => {
     try {
       const target = pathTarget(who, "/Users/chen/Downloads");
       const first = await raise(who, job, "call-a", "read", target);
-      const second = await raise(who, job, "call-b", "read", target);
+      const second = await raise(who, job, "call-b", "read", target, false);
 
       const one = DecideApprovalResponse.parse(
         await (await who.client.post(`/api/approvals/${first.id}`, { decision: "approved", scope: "project" })).json(),

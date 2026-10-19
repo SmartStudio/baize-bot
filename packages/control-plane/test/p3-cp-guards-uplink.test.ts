@@ -313,7 +313,11 @@ it("消息已查到群、插入前删号：删号等这条消息提交，回 201
   const client = server.client();
   expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "群行锁" })).json());
-  const keyShare = gate.arm(/^select "id" from "groups" where "groups"\."id" = \$1/, "after", created.group.id);
+  const keyShare = gate.arm(
+    /^select "id" from "groups" where \("groups"\."id" = \$1 .* for share$/,
+    "after",
+    created.group.id,
+  );
   const posting = client.post(`/api/groups/${created.group.id}/messages`, { text: "查到群之后、插入之前" });
   let deleting: Promise<Response> | undefined;
   let deleted = false;
@@ -328,7 +332,7 @@ it("消息已查到群、插入前删号：删号等这条消息提交，回 201
         WHERE datname = ${database.databaseName} AND wait_event_type = 'Lock' AND query ILIKE 'delete from%'`;
       return blocked.length > 0;
     }, "删号卡在群行锁上或已经提交");
-    expect(deleted, "群行持有 KEY SHARE 时删号必须等，不能抢先提交").toBe(false);
+    expect(deleted, "群行持有 SHARE 时删号必须等，不能抢先提交").toBe(false);
     keyShare.release();
     const posted = await posting;
     expect(posted.status, await posted.clone().text()).toBe(201);
