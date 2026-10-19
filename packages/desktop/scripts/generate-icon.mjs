@@ -32,9 +32,9 @@ try {
   for (const [name, size] of variants) {
     await page.setViewportSize({ width: size, height: size });
     await page.setContent(
-      `<style>html,body{margin:0;width:100%;height:100%}svg{display:block;width:${size}px;height:${size}px}</style>${svg}`,
+      `<style>html,body{margin:0;width:100%;height:100%;background:transparent}svg{display:block;width:${size}px;height:${size}px}</style>${svg}`,
     );
-    await page.locator("svg").screenshot({ path: join(iconset, name), animations: "disabled" });
+    await page.locator("svg").screenshot({ path: join(iconset, name), animations: "disabled", omitBackground: true });
   }
 } finally {
   await browser.close();
