@@ -1412,8 +1412,10 @@ const run = async (): Promise<void> => {
         "每手结算后虚拟筹码守恒",
       ).toBe(8_000);
     }
-    await check(p.getByTestId("table-log")).toContainText("大刘在3号位出牌。");
-    await check(p.getByTestId("table-log")).not.toContainText("茉莉在3号位出牌。");
+    // 牌友只过牌跟注不说话，群里只剩老白的关键处播报；结算句点到 3 号位的名字。
+    await check(p.getByTestId("table-log")).toContainText("摊牌：");
+    await check(p.getByTestId("table-log")).toContainText("大刘");
+    await check(p.getByTestId("table-log")).not.toContainText("茉莉");
     await p.getByTestId("hand-leave").click();
     await check(p.getByTestId("poker-project")).toBeVisible();
     await shot(p, "U15-08-left");

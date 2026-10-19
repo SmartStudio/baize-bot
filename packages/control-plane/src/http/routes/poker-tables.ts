@@ -96,7 +96,6 @@ export function createPokerTableRoutes({ db, push, agents }: PokerTableRouteDeps
     if (table === null) return c.json(NOT_FOUND, 404);
     const detail = await findGroup(db, ownerId, groupId.data);
     if (detail !== null) push.push(ownerId, { type: "group_updated", group: detail.group });
-    push.push(ownerId, { type: "message", message: swapped.message });
     pushTable(ownerId, table);
     return c.json(PokerTableResponse.parse({ table }));
   });

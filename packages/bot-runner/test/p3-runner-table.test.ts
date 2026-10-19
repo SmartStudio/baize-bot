@@ -174,6 +174,12 @@ describe("p3-runner-table 验收", () => {
     await h.runner.prompt(prompt("advisor", { lane: { epoch: 6, heads: {} } }));
     expect(h.gateway.laneHeaders).toEqual(["bot-table/group-table/6"]);
   });
+  it("player 的 prompt 让牌友默认不说话，只在加注、全下、摊牌或被点名时说，每手最多两句", () => {
+    const text = composeTablePrompt(prompt());
+    expect(text).toContain("默认不填 say");
+    for (const moment of ["加注", "全下", "摊牌", "点名"]) expect(text).toContain(moment);
+    expect(text).toContain("每手最多两句");
+  });
   it("player 的 prompt 里有自己的底牌和合法动作，没有任务卡、成员名单和群历史", () => {
     const text = composeTablePrompt(prompt());
     for (const value of [

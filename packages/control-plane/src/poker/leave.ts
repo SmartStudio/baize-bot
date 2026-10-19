@@ -6,7 +6,6 @@ import {
   PokerHandId,
   PokerSessionId,
   type ComputerId,
-  type Message,
   type PokerReviewHand,
   type PokerTableView,
   type TablePrompt,
@@ -17,22 +16,13 @@ import { sendHiddenRun, type HiddenRunOutcome } from "../agent/hidden-run.js";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, pokerHands, pokerSessions, pokerTables } from "../db/schema.js";
 import { loadPokerTableView } from "../repo/poker-tables.js";
-import { pushMessages, type PokerDeps } from "./converge.js";
+import type { PokerDeps } from "./converge.js";
 import { pickKeyHands } from "./keyhands.js";
 import { engineSeatId } from "./seating.js";
-import {
-  hostMessage,
-  loadHand,
-  PokerError,
-  userDeltaOf,
-  withTableLock,
-  type StoredHand,
-  type TableRow,
-} from "./store.js";
+import { loadHand, PokerError, userDeltaOf, withTableLock, type StoredHand, type TableRow } from "./store.js";
 import { viewFor } from "./view.js";
 import { toWire } from "./wire.js";
 
-export const REVIEW_DONE_LINE = "散场了，复盘在项目页";
 export const NO_SUCH_TABLE = "没有这张牌桌";
 
 export type KeyHand = StoredHand & { readonly number: number; readonly delta: number };
@@ -79,9 +69,7 @@ async function hostBotOf(db: Db, groupId: string) {
 }
 
 type SessionRow = typeof pokerSessions.$inferSelect;
-type ReviewOutcome =
-  | { readonly kind: "written"; readonly message: Message }
-  | { readonly kind: "dispatched"; readonly sent: HiddenRunOutcome };
+type ReviewOutcome = { readonly kind: "written" } | { readonly kind: "dispatched"; readonly sent: HiddenRunOutcome };
 
 async function latestEndedSession(db: Db, groupId: GroupId): Promise<SessionRow | undefined> {
   const [latest] = await db
@@ -120,7 +108,7 @@ async function dispatchReview(
       .set({ review: { sessionId: PokerSessionId.parse(session.id), hands: [] } })
       .where(and(eq(pokerSessions.id, session.id), isNull(pokerSessions.review)))
       .returning({ id: pokerSessions.id });
-    return written ? { kind: "written", message: await hostMessage(db, table, REVIEW_DONE_LINE) } : null;
+    return written ? { kind: "written" } : null;
   }
   const groupId = GroupId.parse(table.groupId);
   const hostId = await hostBotOf(db, groupId);
@@ -153,7 +141,8 @@ async function sendDispatches(deps: PokerDeps, dispatches: readonly ComputerId[]
   for (const computerId of dispatches) await deps.agents.flushOutbox(computerId);
 }
 
-type Outcome = { readonly changed: boolean; readonly messages: readonly Message[] };
+// 复盘落了不在群里说话：散场后用户被带到项目页，复盘卡就在那里。
+type Outcome = { readonly changed: boolean };
 
 async function finishWithView(
   deps: PokerDeps,
@@ -166,7 +155,6 @@ async function finishWithView(
   await sendDispatches(deps, dispatches);
   const view = await loadPokerTableView(deps.db, ownerId, groupId);
   if (view === null) throw new PokerError(404, NO_SUCH_TABLE);
-  pushMessages(deps, ownerId, [...outcome.messages]);
   if (outcome.changed) deps.push.push(ownerId, { type: "poker_table_updated", table: view });
   return view;
 }
@@ -190,11 +178,10 @@ export async function leaveTable(deps: PokerDeps, ownerId: UserId, groupId: Grou
     const latest = closed ?? (await latestEndedSession(db, groupId));
     if (!latest) throw new PokerError(409, "还没打过牌，没有要散的场");
     const changed = closed !== undefined;
-    if (latest.review !== null) return { changed, messages: [] };
+    if (latest.review !== null) return { changed };
 
     const review = await dispatchReview(deps, db, table, latest, dispatches);
-    if (review?.kind === "written") return { changed: true, messages: [review.message] };
-    return { changed, messages: [] };
+    return { changed: changed || review?.kind === "written" };
   });
   return finishWithView(deps, ownerId, groupId, outcome, dispatches);
 }
@@ -215,16 +202,16 @@ export async function retryReview(
     if (table.ownerId !== ownerId) throw new PokerError(404, NO_SUCH_TABLE);
     const latest = await latestEndedSession(db, groupId);
     if (!latest || latest.id !== sessionId) throw new PokerError(409, "只能重试最近一场的复盘");
-    if (latest.review !== null) return { changed: false, messages: [] };
+    if (latest.review !== null) return { changed: false };
 
     const review = await dispatchReview(deps, db, table, latest, dispatches);
-    if (review?.kind === "written") return { changed: true, messages: [review.message] };
-    if (review?.kind !== "dispatched") return { changed: false, messages: [] };
+    if (review?.kind === "written") return { changed: true };
+    if (review?.kind !== "dispatched") return { changed: false };
     if (review.sent.kind === "unplaced" || review.sent.kind === "skipped")
       throw new PokerError(409, "没有电脑在线，复盘派不出去");
     const changed = review.sent.kind === "sent";
     if (changed) await bumpVersion(db, groupId);
-    return { changed, messages: [] };
+    return { changed };
   });
   return finishWithView(deps, ownerId, groupId, outcome, dispatches);
 }

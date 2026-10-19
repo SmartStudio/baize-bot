@@ -7,7 +7,7 @@ import type { Db } from "../db/client.js";
 import { pokerHands, pokerTables, runs } from "../db/schema.js";
 import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
-import { BOT_TURN_TIMEOUT_MS, nextStep, type PlanTurn, type Step } from "./converge-plan.js";
+import { BOT_TURN_TIMEOUT_MS, MAX_REJECTED_ACTIONS, nextStep, type PlanTurn, type Step } from "./converge-plan.js";
 import { apply } from "./engine.js";
 import { narrate, seatNamer } from "./narrate.js";
 import { engineSeatId } from "./seating.js";
@@ -178,7 +178,6 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
           };
         }
         case "timeout_action": {
-          const state = await tableState(db, table);
           if (hand.row.turnRunId !== null)
             await finishRun(
               db,
@@ -188,14 +187,13 @@ export async function converge(deps: PokerDeps, handId: string): Promise<void> {
               "abandoned",
             );
           messages.push(
-            await hostMessage(
+            ...(await appendEvents(
               db,
               table,
-              `${state.seats.find((seat) => seat.seat === step.seat)?.name ?? step.seat}${hand.row.turnAttempts >= 3 ? "连续三次出牌无效" : "没有及时出牌"}，按兜底处理`,
-            ),
-          );
-          messages.push(
-            ...(await appendEvents(db, table, hand, apply(hand.state, engineSeatId(step.seat), step.action))),
+              hand,
+              apply(hand.state, engineSeatId(step.seat), step.action),
+              hand.row.turnAttempts >= MAX_REJECTED_ACTIONS ? "三次无效" : "超时",
+            )),
           );
           changed = true;
           break;

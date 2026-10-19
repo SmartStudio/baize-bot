@@ -824,7 +824,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | `POST /poker/tables`                  | `{ requestId }`  | 新建回 201，同一个 `requestId` 重发回 200。先补建缺的预设牌友，有新建的就向电脑代理重发一次 `config`，因为代理要认得这些 Bot                          |
 | `GET /poker/tables`                   |                  | 当前用户所有牌桌的视图                                                                                                                              |
 | `GET /poker/tables/:groupId`          |                  | 一张桌的视图，视角是 4 号                                                                                                                           |
-| `POST /poker/tables/:groupId/seats/:seat` | `{ persona }` | 把 1 到 3 号座换成另一位牌友，不能换成老白。非牌友座位或已在桌上回 400，手进行中回 409。筹码留在座位上，不跟人走。推 `group_updated`、一条 `message` 和 `poker_table_updated` |
+| `POST /poker/tables/:groupId/seats/:seat` | `{ persona }` | 把 1 到 3 号座换成另一位牌友，不能换成老白。非牌友座位或已在桌上回 400，手进行中回 409。筹码留在座位上，不跟人走。群里不留话，谁下谁上由网页自己提示。推 `group_updated` 和 `poker_table_updated` |
 | `POST /poker/tables/:groupId/hands`   | 空               | 开一手，201。桌上已有一手回 409                                                                                                                     |
 | `POST /poker/hands/:id/act`           | `{ seq, action }` | 用户出牌。没轮到 4 号回 409「还没轮到你出牌」，`seq` 不等于已落事件数回 409「出牌序号已过期」，引擎不收回 400                                      |
 | `POST /poker/hands/:id/hint`          | `{ seq }`        | 问老白，见「问老白为什么挂在决策点上」                                                                                                              |
@@ -857,7 +857,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | 问牌的触发消息                               | 老白和用户     |
 | 老白回答问牌的文字                           | 只有用户       |
 | 复盘的触发消息                               | 只有老白       |
-| 老白的旁白（`narrate.ts` 生成，不过模型）、牌友的台词 | 全群           |
+| 老白的关键处播报（`narrate.ts` 的 `hostLines` 生成，不过模型）、牌友的台词 | 全群           |
 
 隐藏 run 的上行也是默认拒绝。`table-run-policy.ts` 按角色列出放行的报文，牌友只能发 `poker_act` 和 `run_done`，老白问牌只能发 `bot_text`、`bot_text_done` 和 `run_done`，复盘只能发 `poker_review` 和 `run_done`。普通 run 全放行，run 行不存在不放行。判断在 `events.ts` 校验完 run 归属之后，不成立整条丢掉并记警告。所以牌友不能插卡、@ 人或派活，牌友的 `bot_text` 也不会上桌，公开台词只走 `poker_act.say`。老白的 `bot_text` 落库时由 `botTextVisibility` 写成只有用户可见，牌友以自己为 viewer 读群消息时读不到它。
 
@@ -872,13 +872,13 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 | `await_user`     | 轮到 4 号，用户不限时。如果手上还记着牌友的回合就清掉，然后返回                                                                                                                                |
 | `wait_bot`       | 牌友的回合在路上且没超时，返回                                                                                                                                                                 |
 | `dispatch_bot`   | 轮到牌友而手上没有这个座位的回合。发一条隐藏 player run，在 `poker_hands` 记下 `turn_seat`、`turn_run_id`、`turn_deadline`，截止时间是现在加 60 秒（`BOT_TURN_TIMEOUT_MS`），同座位重派沿用原来的截止时间 |
-| `timeout_action` | 超时，或同一个决策点被引擎拒绝满三次（`MAX_REJECTED_ACTIONS`）。收掉那条 run，老白说一句「没有及时出牌」或「连续三次出牌无效」，再落兜底动作，然后接着循环                                      |
+| `timeout_action` | 超时，或同一个决策点被引擎拒绝满三次（`MAX_REJECTED_ACTIONS`）。收掉那条 run，落兜底动作，然后接着循环。兜底不单独播，这次落下的事件里有新一街或结算，就并进那一句的开头，写成「阿豹（超时）过牌，翻牌：…」或「（三次无效）」，没有就不提                                      |
 | `settle`         | 引擎已走完而手还没标完成。`UPDATE ... WHERE status = 'playing'` 标成 `complete`，把各座位最终筹码写回桌子，桌子回 `idle`                                                                        |
 | `hand_over`      | 已经结算过，返回                                                                                                                                                                               |
 
 **兜底动作。** `fallbackAction` 能过牌就过牌，否则弃牌，从不往里投筹码。超时的牌友因此最多输掉已经投进去的，不会因为掉线被迫跟注。
 
-**牌友的 `poker_act`。** `events/poker-act.ts` 在桌锁里先校验 run 属于这台电脑、角色是 `player`、这个 Bot 在这手牌里有座位，然后才碰牌局。幂等靠专表 `poker_act_receipts`，主键 `(run_id, call_id)`，`ON CONFLICT DO NOTHING` 认领，结果和动作同事务写进 `result`，重复的帧读回已存的结果，不再碰牌局。回执以前是 `messages` 里 id 以 `poker-result:` 开头的隐藏行，迁移 0028 把它们搬进专表后删掉了原行。没有轮到它、`seq` 过期、手已结束都回 `ok: false` 和中文原因，不推进。引擎拒绝时 `turn_attempts` 加一，回 `ok: false` 让牌友在同一次 run 里改，同时重新 `converge`。成功就落事件，台词非空就以牌友的名义发一条全群可见的消息。每次落动作都清掉手上的回合记录，下一个决策点重新派。
+**牌友的 `poker_act`。** `events/poker-act.ts` 在桌锁里先校验 run 属于这台电脑、角色是 `player`、这个 Bot 在这手牌里有座位，然后才碰牌局。幂等靠专表 `poker_act_receipts`，主键 `(run_id, call_id)`，`ON CONFLICT DO NOTHING` 认领，结果和动作同事务写进 `result`，重复的帧读回已存的结果，不再碰牌局。回执以前是 `messages` 里 id 以 `poker-result:` 开头的隐藏行，迁移 0028 把它们搬进专表后删掉了原行。没有轮到它、`seq` 过期、手已结束都回 `ok: false` 和中文原因，不推进。引擎拒绝时 `turn_attempts` 加一，回 `ok: false` 让牌友在同一次 run 里改，同时重新 `converge`。成功就落事件，台词非空、这个 Bot 这一手在群里公开说过的话还不到两句（`BOT_LINES_PER_HAND`，从开手时刻算）时，以牌友的名义发一条全群可见的消息，排在这次老白播报之前，满了就只落动作不说话。台词只随被接受的动作上行，手结算之后的 `poker_act` 一律回 `ok: false`，所以结算后的台词不会进群。每次落动作都清掉手上的回合记录，下一个决策点重新派。
 
 **派出去的 prompt 在提交后才发。** `converge` 把 prompt 收进列表，事务提交后再发。发送失败就把 run 收成 `abandoned`，下一轮扫描会重派。
 
@@ -909,15 +909,17 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 **关键手。** `keyHandsOf` 从这一场已结算的手里挑用户（4 号）筹码变化绝对值最大的几手，最多 3 手（`KEY_HAND_LIMIT`），变化相同时先打的优先，按手序返回。挑手的是控制面，不是模型。老白只写话。
 
-**复盘 prompt。** 每手带序号、标题（「你赢了 N」「你输了 N」「不输不赢」）、用户筹码变化和 4 号座的视图，没有种子，也没有别人没亮的牌。一手都没结算的场没有可复盘的，直接写一份空复盘，老白说「散场了，复盘在项目页」，不派 run。
+**复盘 prompt。** 每手带序号、标题（「你赢了 N」「你输了 N」「不输不赢」）、用户筹码变化和 4 号座的视图，没有种子，也没有别人没亮的牌。一手都没结算的场没有可复盘的，直接写一份空复盘，不派 run。散场和复盘都不在群里说话，复盘只落在项目页。
 
-**交复盘。** `events/poker-review.ts` 要求 run 是这台电脑上还没结束的 reviewer run，session 是这张桌已散场的一场，提交的手和控制面自己挑的关键手一一对上（不重复、不遗漏、不多出，每手正文不超过 120 字，`REVIEW_TEXT_LIMIT`），任一不成立整条丢掉，没有回执，用户再点一次散场就重派。落库用 `UPDATE ... WHERE review IS NULL`，同一场重复交只有第一份生效，老白的收尾话也只说一次。运行器那边有同一道长度检查，各自把关。
+**交复盘。** `events/poker-review.ts` 要求 run 是这台电脑上还没结束的 reviewer run，session 是这张桌已散场的一场，提交的手和控制面自己挑的关键手一一对上（不重复、不遗漏、不多出，每手正文不超过 120 字，`REVIEW_TEXT_LIMIT`），任一不成立整条丢掉，没有回执，用户再点一次散场就重派。落库用 `UPDATE ... WHERE review IS NULL`，同一场重复交只有第一份生效。运行器那边有同一道长度检查，各自把关。
 
 **战绩。** 没有单独的战绩表，每次读 `tableState` 现算。每手已结算的牌，用户净输赢是 4 号座最终筹码减 `seats_start` 里的起始筹码，按场累加。开着的那场给 `session.net` 和 `handCount`。`stats.sessions` 是已散场的场数，`sessionsWon` 是净值大于 0 的场数，`net` 是已散场各场之和。`lastReview` 是最近一场有复盘的已散场。
 
-**群里怎么称呼用户。** 视图里 4 号位的名字是主人名。老白的播报、牌友和老白看的公开记录里，4 号位一律叫「你」，名字由 `narrate.ts` 的 `seatNamer` 统一换，`store.ts`、`hint.ts`、`converge.ts` 三处调 `narrate` 都经过它。
+**群里怎么称呼用户。** 视图里 4 号位的名字是主人名。老白的播报、牌友和老白看的公开记录里，4 号位一律叫「你」，名字由 `narrate.ts` 的 `seatNamer` 统一换，`store.ts` 调 `hostLines`、`hint.ts` 和 `converge.ts` 调 `narrate` 都经过它。
 
-**开下一手。** `startHand` 用 `UPDATE ... WHERE status = 'idle'` 认领桌子，抢不到回 409「桌上已有一手牌在进行」。没有开着的场就新建一场。庄位从上一手的庄位往后，按座位号找下一个有筹码的座位，第一手从 1 号找起。筹码不为正的座位按 `startingStack` 补码，老白在群里说「N 号位补码 X」。
+**开下一手。** `startHand` 用 `UPDATE ... WHERE status = 'idle'` 认领桌子，抢不到回 409「桌上已有一手牌在进行」。没有开着的场就新建一场。庄位从上一手的庄位往后，按座位号找下一个有筹码的座位，第一手从 1 号找起。筹码不为正的座位按 `startingStack` 补码，补码不在群里说，桌面上的筹码自己会变。
+
+**老白在群里说什么。** 群里只播关键处，单个动作不成消息，用户自己出牌也不成消息。一手最多五句：开手一句带庄位和盲注（「新一手，阿豹坐庄，老K小盲 10，茉莉大盲 20」），翻牌、转牌、河牌各一句带公共牌和此前的底池，结算一句写谁赢多少，摊牌时连同亮出的底牌和牌型。`store.ts` 每次落事件只拿这次新落的那段交给 `hostLines`，所以同一句不会说两遍。网页上座位状态、每一步动作和输赢都从视图的 `events` 画，不解析群消息。`narrate` 仍是逐条事件一句，只给牌友和老白 prompt 里的公开日志用。
 
 ## 用量、今天与通知
 

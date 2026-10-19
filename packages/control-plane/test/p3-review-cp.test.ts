@@ -24,7 +24,6 @@ import { makeComputer, makeUser, PASSWORD, type TestComputer } from "./helpers/f
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
-const HOST_LINE = "散场了，复盘在项目页";
 
 let database: TestDb;
 let server: RunningServer;
@@ -255,11 +254,12 @@ const reviewerRuns = () =>
       { n: number }[]
     >`SELECT count(*)::int AS n FROM runs WHERE group_id = ${table.groupId} AND table_role = 'reviewer'`,
   );
+/** 老白在群里公开说的话，哨兵不算。散场和复盘都不该让它变。 */
 const hostLines = () =>
   count(
     database.sql<
       { n: number }[]
-    >`SELECT count(*)::int AS n FROM messages WHERE group_id = ${table.groupId} AND body ->> 'text' = ${HOST_LINE}`,
+    >`SELECT count(*)::int AS n FROM messages WHERE group_id = ${table.groupId} AND visible_to IS NULL AND body ->> 'botId' = ${table.hostId} AND body ->> 'text' <> '确定落地的哨兵'`,
   );
 const userDeltaOf = (state: HandState): number => state.seats.find((seat) => seat.id === "4")!.stack - 2000;
 function cardsIn(text: string, cards: readonly string[]): string[] {
@@ -307,12 +307,7 @@ it("散场后接口里有三手关键牌的复盘", async () => {
     })),
   });
   expect(pushed.lastReview).toEqual(after.lastReview);
-  const [line] = await database.sql<
-    { body: { kind: string; botId: string }; visible_to: unknown }[]
-  >`SELECT body, visible_to FROM messages WHERE group_id = ${table.groupId} AND body ->> 'text' = ${HOST_LINE}`;
-  expect(line!.body).toMatchObject({ kind: "bot", botId: table.hostId });
-  expect(line!.visible_to).toBeNull();
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines(), "复盘落在项目页，群里不说话").toBe(0);
 });
 
 it("复盘的 prompt 里只有用户视角，找不到未摊牌座位的底牌", async () => {
@@ -374,7 +369,7 @@ it("同一场点两次散场只出一份复盘", async () => {
   expect(await leave()).toMatchObject({ lastReview: done.lastReview });
   await barrier(table.hostId);
   expect(await reviewerRuns()).toBe(1);
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
   expect(
     agentOf()
       .received()
@@ -436,7 +431,7 @@ it("复盘运行失败后再点散场可重试", async () => {
   await submit(second);
   const done = await tablePush((view) => view.lastReview !== null);
   expect(done.lastReview!.sessionId).toBe(session.sessionId);
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
 });
 
 it("模型没交复盘就收尾，再点散场可重试", async () => {
@@ -493,7 +488,7 @@ it.each<[string, (hands: ReturnType<typeof reviewHands>) => ReturnType<typeof re
   await submit(second);
   const done = await tablePush((view) => view.lastReview !== null);
   expect(done.lastReview!.hands.map((hand) => hand.number)).toEqual([2, 4, 5]);
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
 });
 
 it("poker_review 不是 reviewer 的 run 发的，或者那一场还没散，都不收", async () => {
@@ -545,7 +540,7 @@ it("同一个 run 连交两份复盘只认第一份，老白的收尾话只说�
     "第一份：第 5 手",
   ]);
   expect((await getTable()).lastReview).toEqual(done.lastReview);
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
 });
 
 it("战绩的场数、你赢的场数、筹码净值按已散场的会话算", async () => {
@@ -569,9 +564,9 @@ it("一手都没结算的一场散场，直接出空复盘，不派老白", asyn
   expect(left.session).toBeNull();
   expect(left.lastReview).toEqual({ sessionId: empty.sessionId, hands: [] });
   expect(await reviewerRuns()).toBe(0);
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
   expect(await leave()).toMatchObject({ lastReview: left.lastReview });
-  expect(await hostLines()).toBe(1);
+  expect(await hostLines()).toBe(0);
   await barrier(table.hostId);
   expect(agentOf().received()).toEqual([]);
 });
