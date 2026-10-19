@@ -95,7 +95,8 @@ export function pokerScript() {
       toolCall: {
         id: callId,
         name: "poker_act",
-        args: { action, say: `${POKER_PERSONAS[persona].name}在${seat}号位出牌。` },
+        // 只过牌和跟注，照新的规矩不说话。
+        args: { action },
       },
     };
   };

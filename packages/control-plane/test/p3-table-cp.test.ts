@@ -222,6 +222,15 @@ async function advanceUser(view: PokerTableView, action: PokerAction): Promise<R
   if (!view.hand) throw new Error("没有手牌");
   return table.client.post(`/api/poker/hands/${view.hand.id}/act`, { seq: view.hand.view.events.length, action });
 }
+/** 用户在群里看到的老白的话，按时间排。 */
+async function hostTexts(): Promise<string[]> {
+  const history = MessageListResponse.parse(
+    await (await table.client.get(`/api/groups/${table.groupId}/messages`)).json(),
+  ).messages;
+  return history.flatMap((message) =>
+    message.body.kind === "bot" && message.body.botId === table.botIds[3] ? [message.body.text] : [],
+  );
+}
 
 it("开一手后用户的响应里找不到别的座位的牌和种子", async () => {
   await fixture();
@@ -286,6 +295,7 @@ it("所有人弃牌只剩一人时不摊牌直接收池，桌子回 idle", async
   expect(state.phase.kind).toBe("complete");
   expect(state.events.some((event) => event.kind === "showdown")).toBe(false);
   expect(view.seats.reduce((sum, seat) => sum + seat.stack, 0)).toBe(8000);
+  expect(await hostTexts(), "弃牌收池只说一句结算").toEqual([expect.stringMatching(/^其他人都弃牌，.+收下底池 30$/)]);
 });
 it("摊牌结算后各座位筹码之和不变", async () => {
   await fixture();
@@ -299,6 +309,11 @@ it("摊牌结算后各座位筹码之和不变", async () => {
   const view = await tablePush((candidate) => candidate.status === "idle");
   expect(view.seats.reduce((sum, seat) => sum + seat.stack, 0)).toBe(160);
   expect((await stored(handId)).events.filter((event) => event.kind === "showdown")).toHaveLength(4);
+  const lines = await hostTexts();
+  expect(lines, "一手里老白只在翻牌、转牌、河牌和结算各说一句").toHaveLength(4);
+  expect(lines.slice(0, 3).map((line) => line.slice(0, 3))).toEqual(["翻牌：", "转牌：", "河牌："]);
+  expect(lines[3], "结算一句带亮出的牌、牌型和赢的数").toMatch(/^摊牌：.+ \S+ \S+（.+）赢 \d+/);
+  expect(lines.join("\n"), "全下这类动作不单播").not.toMatch(/全下/);
   const response = await table.client.get(`/api/poker/tables/${table.groupId}`);
   expect(response.status).toBe(200);
   const reloaded = PokerTableResponse.parse(await response.json()).table;
@@ -322,7 +337,8 @@ it("再来一手庄位轮转、破产座位补码", async () => {
   ).toBe(2000);
   const rebuy =
     await database.sql`SELECT * FROM messages WHERE group_id=${table.groupId} AND body ->> 'text' LIKE '%补码%'`;
-  expect(rebuy).toHaveLength(1);
+  expect(rebuy, "补码不在群里说").toHaveLength(0);
+  expect(await hostTexts(), "开一手老白只说一句开场").toHaveLength(1);
 });
 it("牌友出非法动作得到失败结果和中文原因，手牌不变", async () => {
   await fixture();
@@ -352,6 +368,7 @@ it("同一回合第三次非法动作按兜底处理", async () => {
   ]);
   const [row] = await database.sql<{ turn_attempts: number }[]>`SELECT turn_attempts FROM poker_hands WHERE id=${id}`;
   expect(row!.turn_attempts).toBe(0);
+  expect(await hostTexts(), "兜底弃牌后没进新的一街，这一下不单独播").toEqual([]);
 });
 it("牌友超时没出牌，扫描后自动过牌；不能过牌时弃牌", async () => {
   await fixture();
@@ -363,6 +380,9 @@ it("牌友超时没出牌，扫描后自动过牌；不能过牌时弃牌", asyn
       (event) => event.kind === "action" && event.seatId === "3" && event.action.kind === "check",
     ),
   );
+  const flop = await hostTexts();
+  expect(flop, "超时并进翻牌那一句，不单独播").toHaveLength(1);
+  expect(flop[0]).toMatch(/^.+（超时）过牌，翻牌：\S+ \S+ \S+，底池 80$/);
   const p = await table.agent.expect("prompt");
   expect(p.botId).toBe(table.botIds[1]);
   act(p, { kind: "raise", amount: 40 });
@@ -380,16 +400,35 @@ it("牌友超时没出牌，扫描后自动过牌；不能过牌时弃牌", asyn
       .map((event) => (event.kind === "action" ? event.action.kind : "")),
   ).toEqual(["check", "fold"]);
 });
-it("群里的播报把用户座位叫「你」，不写主人名", async () => {
+it("用户自己出牌不变成群消息；开场一句带庄位和盲注，用户座位叫「你」", async () => {
   await fixture();
   const view = await start();
+  const opening = await hostTexts();
+  expect(opening).toHaveLength(1);
+  expect(opening[0]).toMatch(/^新一手，.+坐庄，.+小盲 10，.+大盲 20$/);
   expect((await advanceUser(view, { kind: "call" })).status).toBe(200);
   const [owner] = await database.sql<{ name: string }[]>`SELECT name FROM users WHERE id = ${table.ownerId}`;
+  expect(await hostTexts(), "用户的跟注不播").toEqual(opening);
   const history = JSON.stringify(
     MessageListResponse.parse(await (await table.client.get(`/api/groups/${table.groupId}/messages`)).json()),
   );
-  expect(history, "用户的跟注播报成「你 跟注」").toMatch(/你 跟注/);
-  expect(history, "播报里没有主人名").not.toContain(`${owner!.name} `);
+  expect(history).not.toMatch(/跟注/);
+  expect(history, "播报里没有主人名").not.toContain(`${owner!.name}坐庄`);
+  expect(opening[0], "用户座位叫「你」").not.toContain(owner!.name);
+});
+it("每个牌友一手最多在群里说两句，第三句丢掉、动作照落", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  await barrier(p);
+  await barrier(p);
+  act(p, { kind: "call" }, { say: "第三句不该出现" });
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  await barrier(p);
+  const dropped =
+    await database.sql`SELECT * FROM messages WHERE group_id=${table.groupId} AND body ->> 'text' = '第三句不该出现'`;
+  expect(dropped).toHaveLength(0);
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
 });
 it("用户加注不足最小额回 400 和中文原因", async () => {
   await fixture();

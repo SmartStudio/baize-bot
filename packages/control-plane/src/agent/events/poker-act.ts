@@ -1,12 +1,33 @@
 import { BotId, type AgentToControl, type Message } from "@baize/shared";
-import { and, eq, sql } from "drizzle-orm";
-import { pokerActReceipts, pokerHands, runs, type PokerActResult } from "../../db/schema.js";
+import { and, count, eq, gte, sql } from "drizzle-orm";
+import type { Db } from "../../db/client.js";
+import { messages, pokerActReceipts, pokerHands, runs, type PokerActResult } from "../../db/schema.js";
 import { apply } from "../../poker/engine.js";
 import { converge, pushMessages, pushTable } from "../../poker/converge.js";
 import { appendEvents, loadHand, withTableLock } from "../../poker/store.js";
-import { appendMessage } from "../../repo/messages.js";
+import { appendMessage, messageVisibleTo } from "../../repo/messages.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
+
+/** 每个牌友一手牌最多在群里说这么多句，超出的台词丢掉，动作照常落。 */
+export const BOT_LINES_PER_HAND = 2;
+
+/** 这个牌友从开手到现在在群里说过几句。读的是用户能看到的那些。 */
+async function linesThisHand(db: Db, groupId: string, botId: BotId, handStartedAt: Date): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.groupId, groupId),
+        sql`${messages.body} ->> 'kind' = 'bot'`,
+        sql`${messages.body} ->> 'botId' = ${botId}`,
+        gte(messages.createdAt, handStartedAt),
+        messageVisibleTo({ kind: "user" }),
+      ),
+    );
+  return row?.n ?? 0;
+}
 
 export type PokerActEvent = Extract<AgentToControl, { type: "poker_act" }>;
 export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection, event: PokerActEvent): Promise<void> {
@@ -38,9 +59,9 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
       if (!saved?.result) throw new Error("出牌回执记录不完整");
       return { ownerId: table.ownerId, messages: [] as Message[], result: saved.result, advance: false };
     }
-    const reply = async (result: PokerActResult, messages: Message[] = [], advance = false) => {
+    const reply = async (result: PokerActResult, posted: Message[] = [], advance = false) => {
       await db.update(pokerActReceipts).set({ result }).where(receipt);
-      return { ownerId: table.ownerId, messages, result, advance };
+      return { ownerId: table.ownerId, messages: posted, result, advance };
     };
     if (
       hand.row.status !== "playing" ||
@@ -65,17 +86,13 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
         .where(eq(pokerHands.id, event.handId));
       return reply({ ok: false, error: error instanceof Error ? error.message : "出牌无效" }, [], true);
     }
-    const messages = await appendEvents(db, table, hand, state);
-    if (event.say?.trim())
-      messages.push(
-        await appendMessage(db, table.groupId, {
-          kind: "bot",
-          botId: BotId.parse(seat.botId),
-          text: event.say,
-          streaming: false,
-        }),
-      );
-    return reply({ ok: true }, messages, true);
+    // 台词排在这一下引起的老白播报前面；只有被接受的动作带的台词才上桌，所以一手结算之后不会再有牌友说话。
+    const botId = BotId.parse(seat.botId);
+    const said: Message[] = [];
+    if (event.say?.trim() && (await linesThisHand(db, table.groupId, botId, hand.row.createdAt)) < BOT_LINES_PER_HAND)
+      said.push(await appendMessage(db, table.groupId, { kind: "bot", botId, text: event.say, streaming: false }));
+    said.push(...(await appendEvents(db, table, hand, state)));
+    return reply({ ok: true }, said, true);
   });
   if (!outcome) return;
   deps.agents.send(conn.computerId, {

@@ -314,19 +314,18 @@ describe("赛前换人", () => {
     expect(swapped.seats.map((seat) => seat.stack)).toEqual([2000, 2000, 1350, 2650]);
   });
 
-  it("换人写一条老白的说明，署名老白、全群可见、不带 runId", async () => {
+  it("换人不在群里留话", async () => {
     const { client } = await owner();
     const { table } = await createTable(client, "swap-message");
+    const before = MessageListResponse.parse(await (await client.get(`/api/groups/${table.groupId}/messages`)).json());
 
-    await client.post(`/api/poker/tables/${table.groupId}/seats/3`, { persona: "dalu" });
+    expect((await client.post(`/api/poker/tables/${table.groupId}/seats/3`, { persona: "dalu" })).status).toBe(200);
 
-    const page = MessageListResponse.parse(await (await client.get(`/api/groups/${table.groupId}/messages`)).json());
-    const last = page.messages.at(-1);
-    expect(last?.body).toEqual({ kind: "bot", botId: table.host.botId, text: "茉莉下桌，大刘上桌", streaming: false });
-    expect(last?.visibleTo).toBeNull();
+    const after = MessageListResponse.parse(await (await client.get(`/api/groups/${table.groupId}/messages`)).json());
+    expect(after.messages).toEqual(before.messages);
   });
 
-  it("换人给自己推 group_updated、message 和 poker_table_updated", async () => {
+  it("换人给自己推 group_updated 和 poker_table_updated", async () => {
     const { client } = await owner();
     const { table } = await createTable(client, "swap-push");
     const push = await connectPush(server.server.port, client.cookie ?? "");
@@ -334,7 +333,7 @@ describe("赛前换人", () => {
       await client.post(`/api/poker/tables/${table.groupId}/seats/1`, { persona: "xiaoqi" });
       const types = new Set<string>();
       let updated: PokerTableView | null = null;
-      while (!(types.has("group_updated") && types.has("message") && updated !== null)) {
+      while (!(types.has("group_updated") && updated !== null)) {
         const next = await push.next();
         types.add(next.type);
         if (next.type === "poker_table_updated") updated = next.table;
