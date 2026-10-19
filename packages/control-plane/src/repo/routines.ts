@@ -723,46 +723,23 @@ export async function noteRoutineRun(db: Db | Tx, routineRunId: string, note: st
 /**
  * 活跑完了：note 后面缀上这次的花费。停下等点头的那条因此长成「1 条等你点头 · ¥0.80」。
  * 后面还有换电脑的接续（continues）时状态不动，由接续那一轮收尾；否则还在 running 的记成 ok，已经停下的保持原状。
- * notify 是该不该弹「做完了」：链尾、整条链说过话，而且记录是这一次从 running 改成的 ok，或停在等点头。
- * 别处先收成 failed 的、早就改过状态的都不弹，弹不弹看这一次条件更新改没改到行。
  */
 export async function chargeRoutineRun(
   db: Db | Tx,
   routineRunId: string,
   cost: string,
   continues: boolean,
-): Promise<{ readonly routineId: string; readonly notify: boolean } | null> {
-  const finished = continues
-    ? []
-    : await db
-        .update(routineRuns)
-        .set({ status: "ok" })
-        .where(and(eq(routineRuns.id, routineRunId), eq(routineRuns.status, "running")))
-        .returning({ id: routineRuns.id });
-  const [row] = await db
+): Promise<void> {
+  if (!continues) {
+    await db
+      .update(routineRuns)
+      .set({ status: "ok" })
+      .where(and(eq(routineRuns.id, routineRunId), eq(routineRuns.status, "running")));
+  }
+  await db
     .update(routineRuns)
     .set({
       note: sql`CASE WHEN ${routineRuns.note} = '' THEN ${cost} ELSE ${routineRuns.note} || ' · ' || ${cost} END`,
     })
-    .where(eq(routineRuns.id, routineRunId))
-    .returning({ routineId: routineRuns.routineId, status: routineRuns.status, hasResult: routineRuns.hasResult });
-  if (row === undefined) return null;
-  const notify = !continues && row.hasResult && (finished.length > 0 || row.status === "stopped");
-  return { routineId: row.routineId, notify };
-}
-
-/**
- * 这个 run 说了可见的话：和写那段文字同一个事务记进它的运行记录，链尾结账看库里这一位，控制面重启也不丢。
- * 已经记过的不再写；不是例行派起的 run 子查询是 NULL，什么都不改。
- */
-export async function markRoutineRunResult(db: Db | Tx, runId: string): Promise<void> {
-  await db
-    .update(routineRuns)
-    .set({ hasResult: true })
-    .where(
-      and(
-        eq(routineRuns.id, sql`(SELECT ${runs.routineRunId} FROM ${runs} WHERE ${runs.id} = ${runId})`),
-        eq(routineRuns.hasResult, false),
-      ),
-    );
+    .where(eq(routineRuns.id, routineRunId));
 }

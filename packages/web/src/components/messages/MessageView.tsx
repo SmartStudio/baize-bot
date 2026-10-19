@@ -52,7 +52,17 @@ type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 export type InspectedTool = { messageId: MessageId; body: ToolCall };
 export type InspectTool = (tool: InspectedTool) => void;
 
-const UserBubble = ({ text }: { text: string }) => <p className="bubble bubble-user">{text}</p>;
+// 例行任务替你发的那句标个小签，说明这句是到点自动发的，不用再另起一行 system。
+const UserBubble = ({ body }: { body: Extract<MessageBody, { kind: "user" }> }) => (
+  <>
+    {body.routine === undefined ? null : (
+      <span className="routine-label" data-testid="routine-label">
+        例行任务「{body.routine.name}」
+      </span>
+    )}
+    <p className="bubble bubble-user">{body.text}</p>
+  </>
+);
 
 const BotBubble = ({
   body,
@@ -515,7 +525,7 @@ const MessageView = ({
       {(() => {
         switch (body.kind) {
           case "user":
-            return <UserBubble text={body.text} />;
+            return <UserBubble body={body} />;
           case "bot":
             return <BotBubble body={body} lookup={lookup} showSource={showSource} />;
           case "system":

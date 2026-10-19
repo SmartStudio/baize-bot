@@ -148,6 +148,12 @@
   white-space: pre-wrap;
 }
 
+.routine-label {
+  margin-bottom: var(--space-2);
+  color: var(--fg-4);
+  font: var(--type-caption);
+}
+
 .bubble-bot {
   width: fit-content;
   border: 1px solid var(--border-2);
@@ -223,6 +229,10 @@
   color: var(--fg-4);
   font: var(--type-caption);
   text-align: center;
+}
+
+.turn-bot .system-note {
+  text-align: left;
 }
 
 .notice {

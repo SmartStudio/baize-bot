@@ -1,4 +1,4 @@
-import { BotId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
+import { BotId, GroupId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { runs } from "../db/schema.js";
@@ -60,11 +60,11 @@ export const DISPATCH_FAILED_NOTE = "派活出错，没跑起来";
  * 跑一次例行任务。到点触发、webhook、试跑走的都是这一条路。
  *
  * 一次运行等同于归属人发了一条消息：带群号的发进那个群（项目的例行），不带的发进这个 Bot 的单 Bot 群。
- * 先落一条 system 说是例行任务自动跑的，再落一条正文是 `instruction` 的 user 消息，
+ * 只落一条正文是 `instruction` 的 user 消息，带上例行的名字让界面标出是例行发的，
  * 然后走现有的 `dispatchUserMessage`，只派给例行所属的 Bot：项目群换了首席，主助理的周一计划也还是主助理排。
  * 运行器和电脑代理因此不用认识例行任务，没有新报文。
  *
- * 运行记录和两条消息在一个事务里落，事务开头 openRoutineRun 锁住执行者并重读：调用方手里的 `row` 是扫到时的样子，
+ * 运行记录和这条消息在一个事务里落，事务开头 openRoutineRun 锁住执行者并重读：调用方手里的 `row` 是扫到时的样子，
  * 派发按重读到的执行者和群，自动触发还按重读到的状态决定跑不跑。记录落了之后派发抛错也要收尾，不能留 running，
  * 收尾和别的收尾一样要过三次没人看的判断、推一次快照，再把错往外抛。
  * 回 null 是例行没了，或者自动触发撞上它刚停下。
@@ -89,16 +89,15 @@ export async function runRoutine(
   const opened = await deps.db.transaction(async (tx) => {
     const run = await openRoutineRun(tx, row.id, at, origin);
     if (run === null) return null;
-    const notice = await appendMessage(tx, run.groupId, {
-      kind: "system",
-      text: `例行任务「${run.row.name}」自动运行`,
+    const instruction = await appendMessage(tx, run.groupId, {
+      kind: "user",
+      text: run.row.instruction,
+      routine: { name: run.row.name },
     });
-    const instruction = await appendMessage(tx, run.groupId, { kind: "user", text: run.row.instruction });
-    return { ...run, notice, instruction };
+    return { ...run, instruction };
   });
   if (opened === null) return null;
   const { groupId, row: current } = opened;
-  deps.push.push(ownerId, { type: "message", message: opened.notice });
   deps.push.push(ownerId, { type: "message", message: opened.instruction });
 
   const outcome = await dispatchUserMessage(deps, ownerId, groupId, opened.instruction, {
@@ -134,35 +133,41 @@ export async function runRoutine(
   return loaded.routine;
 }
 
-/** 结过账的例行 run。notify：这次结账该弹「做完了」。 */
-export type ChargedRoutineRun = RoutineRunRef & { readonly notify: boolean };
-
 /**
  * 活跑完了。还在跑的记成 ok，已经停下等点头的保持 stopped，两种都在 note 后面缀上这次花费；
  * 后面还有接续的只缀花费，等接续那一轮收尾。回 null 说明这个 run 不是例行任务派的。
  * 在 run_done 的结账事务里记：note 是往后缀的，自身不幂等，只记一次靠这个事务的 claimCharge。
  * 推送留给调用方在提交之后做（pushRoutineUpdated），事务回滚了页面不能先看到「ok · ¥0.60」。
  */
-export async function chargeRoutineRunIn(tx: Tx, runId: RunId, amount: number): Promise<ChargedRoutineRun | null> {
+export async function chargeRoutineRunIn(tx: Tx, runId: RunId, amount: number): Promise<RoutineRunRef | null> {
   const ref = await routineRunOfRun(tx, runId);
   if (ref === null) return null;
-  const continues = await continuesAfter(tx, runId);
-  const charged = await chargeRoutineRun(tx, ref.routineRunId, `¥${amount.toFixed(2)}`, continues);
-  return { ...ref, notify: charged?.notify ?? false };
+  await chargeRoutineRun(tx, ref.routineRunId, `¥${amount.toFixed(2)}`, await continuesAfter(tx, runId));
+  return ref;
 }
 
 /**
  * 单条 run 出错（不带 runId 的报错、审批过期）记例行失败。还欠着接续的不记：活换到另一台电脑接着做，
  * 结局由链尾定，和 abandonRun 一样。先锁 run 行再看标记，和请求换电脑同一把锁，判完不欠之后标记立不起来。
+ * 这一次真把记录改成 failed 的才弹一条：例行做完不弹，没做成的得让人知道。
  */
 export async function failRoutineRunOf(deps: RoutineDeps, runId: RunId, reason: string): Promise<void> {
-  const routineId = await deps.db.transaction(async (tx) => {
-    await tx.select({ id: runs.id }).from(runs).where(eq(runs.id, runId)).for("no key update");
+  const failed = await deps.db.transaction(async (tx) => {
+    const [run] = await tx.select({ groupId: runs.groupId }).from(runs).where(eq(runs.id, runId)).for("no key update");
     const ref = await routineRunOfRun(tx, runId);
     if (ref === null || (await continuesAfter(tx, runId))) return null;
-    return failRoutineRun(tx, ref.routineRunId, reason);
+    const routineId = await failRoutineRun(tx, ref.routineRunId, reason);
+    return routineId === null ? null : { routineId, name: ref.name, groupId: run?.groupId ?? null };
   });
-  await pushRoutineUpdated(deps, routineId);
+  await pushRoutineUpdated(deps, failed?.routineId ?? null);
+  if (failed === null) return;
+  const loaded = await loadRoutine(deps.db, RoutineId.parse(failed.routineId));
+  if (loaded === null) return;
+  await deps.notifications.publish(loaded.ownerId, {
+    kind: "failed",
+    text: `例行任务「${failed.name}」没做成：${reason}`,
+    groupId: failed.groupId === null ? null : GroupId.parse(failed.groupId),
+  });
 }
 
 /**

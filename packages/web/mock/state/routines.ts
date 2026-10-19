@@ -66,8 +66,7 @@ export const runRoutine = (id: string): { routine: Routine; messages: Message[] 
   const groupId = groupIdByBotId.get(routine.botId);
   if (groupId === undefined) return null;
   const messages = [
-    appendMessage(groupId, { kind: "system", text: `例行任务「${routine.name}」自动运行` }),
-    appendMessage(groupId, { kind: "user", text: routine.instruction }),
+    appendMessage(groupId, { kind: "user", text: routine.instruction, routine: { name: routine.name } }),
   ];
   const runs = [
     { startedAt: new Date().toISOString(), status: "running", note: "", seenAt: null },

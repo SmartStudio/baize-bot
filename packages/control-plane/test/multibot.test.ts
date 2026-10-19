@@ -814,7 +814,7 @@ describe("上行 set_chief", () => {
 });
 
 describe("上行 task_checklist", () => {
-  it("整份替换，推 task_updated 并在群里留一句", async () => {
+  it("整份替换，推 task_updated，群里不另落一句", async () => {
     const team = await makeTeam();
 
     try {
@@ -830,11 +830,16 @@ describe("上行 task_checklist", () => {
         checklist,
       );
 
-      const card = await team.push.next();
-      expect(card.type === "message" ? card.message.body : null).toEqual({
-        kind: "system",
-        text: "小销更新了清单，1/2 完成",
+      // 清单之后紧跟一句 Bot 回复，它先到就说明中间没有夹一条「更新了清单」。
+      reply(team, runId, team.sales.id, "记好了");
+      const next = await team.push.next();
+      expect(
+        next.type === "message" ? next.message.body : null,
+        "进度只在任务卡上，群里下一条就是 Bot 的话",
+      ).toMatchObject({
+        kind: "bot",
       });
+      expect((await messagesIn(team, team.group.id)).filter((message) => message.body.kind === "system")).toEqual([]);
       const project = ProjectResponse.parse(await (await team.client.get(`/api/projects/${team.group.id}`)).json());
       expect(project.weekChecked, "Bot 报上来的清单也按控制面的时刻记勾选，项目页本周勾掉一项").toBe(1);
     } finally {

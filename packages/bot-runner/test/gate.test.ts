@@ -854,6 +854,7 @@ describe("bash 分类", () => {
     ["whoami", "whoami --definitely-unknown"],
     ["id", "id --definitely-unknown"],
     ["uname", "uname --definitely-unknown"],
+    ["which", "which --definitely-unknown git"],
     ["env", "env rm -f a.txt"],
     ["true", "true --definitely-unknown"],
     ["false", "false --definitely-unknown"],
@@ -2394,6 +2395,9 @@ describe("Mac 上读工作区以外的东西必须问", () => {
         "PAGER=cat git log",
         "GIT_PAGER=cat git log",
         "GIT_EXTERNAL_DIFF=/tmp/evil git diff",
+        "git -c core.pager=less log",
+        "git -c core.fsmonitor=/tmp/evil status",
+        "git --config-env=core.pager=EVIL log",
       ])("git 的全局选项、环境变量前缀和区外路径照问：%s", (command) => {
         expect(decide(call(at(command)), [], []).verdict).toBe("ask");
       });
@@ -2413,6 +2417,13 @@ describe("Mac 上读工作区以外的东西必须问", () => {
       ])("git 的常规读也问，工作区里的 git 配置能让它跑程序：%s", (command) => {
         expect(decide(call(at(command)), [], [])).toMatchObject({ verdict: "ask", action: "shell" });
       });
+
+      it.each(["pwd", "echo 好了", "date", "date -u", "which git", "which -a node", "uname -a", "whoami"])(
+        "只报环境、不碰文件的命令直接放行：%s",
+        (command) => {
+          expect(decide(call(at(command)), [], []).verdict).toBe("allow");
+        },
+      );
 
       it.each(["FOO=1 ls", "LD_PRELOAD=/tmp/x cat notes.txt", "PATH=/tmp cat notes.txt"])(
         "白名单之外的环境变量前缀归 shell：%s",

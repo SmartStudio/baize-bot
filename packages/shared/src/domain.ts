@@ -441,7 +441,13 @@ export const RoutineOfferSpec = {
 // 群里的一条记录。kind 决定其余字段。
 export const MessageBody = z.discriminatedUnion("kind", [
   // mentions 在写入时从正文里解析出来存下，派活路由只看它，不重新解析正文。可省，省了等于没 @ 人。
-  z.object({ kind: z.literal("user"), text: z.string(), mentions: z.array(BotId).optional() }),
+  // routine 是例行任务替归属人发的这一句：界面在气泡上标一个小签，不再另落一条 system。名字是那一刻的。
+  z.object({
+    kind: z.literal("user"),
+    text: z.string(),
+    mentions: z.array(BotId).optional(),
+    routine: z.object({ name: z.string() }).optional(),
+  }),
   z.object({
     kind: z.literal("bot"),
     botId: BotId,

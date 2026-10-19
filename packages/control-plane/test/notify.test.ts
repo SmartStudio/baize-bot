@@ -254,32 +254,86 @@ describe("confirm 和 result", () => {
     }
   });
 
-  it("例行 run 有可见回复推一条 result", async () => {
+  it("例行 run 做完不推 result，有没有可见回复都一样", async () => {
+    for (const reply of ["工单早报已经整理好", null]) {
+      const owner = await ownerWithBot();
+      const job = await routineJob(owner);
+      try {
+        if (reply !== null) sendText(owner, job, reply);
+        sendRunDone(owner, job);
+        expect(await noticesBeforeErrorMarker(owner, job), "例行天天跑，做完了去「今天」看，不弹").toEqual([]);
+      } finally {
+        job.close();
+      }
+    }
+  });
+
+  it("例行 run 中途报错记失败，推一条 failed，再报错不重复推", async () => {
     const owner = await ownerWithBot();
     const job = await routineJob(owner);
     try {
-      sendText(owner, job, "工单早报已经整理好");
-      sendRunDone(owner, job);
+      job.agent.send({ type: "agent_error", code: "runner_failed", detail: "模型挂了", groupId: owner.groupId });
       const notices = await noticesBeforeErrorMarker(owner, job);
-      expect(notices).toHaveLength(1);
-      expect(notices[0]).toMatchObject({
-        kind: "result",
-        text: `例行任务「${ROUTINE_NAME}」做完了，打开群聊看结果`,
-        groupId: owner.groupId,
-      });
+      expect(notices, "没做成的要找人，第二条报错时记录已经是 failed，不再弹").toHaveLength(1);
+      expect(notices[0]).toMatchObject({ kind: "failed", groupId: owner.groupId });
+      expect(notices[0]?.text).toContain(`例行任务「${ROUTINE_NAME}」没做成`);
+    } finally {
+      job.close();
+    }
+  });
+});
+
+function askApproval(owner: Owner, job: Job, callId: string): void {
+  job.agent.send({
+    type: "approval_request",
+    runId: job.runId,
+    botId: owner.botId,
+    groupId: owner.groupId,
+    callId,
+    tool: "shop.refund",
+    action: "spend",
+    target: null,
+    view: { kind: "mcp", server: "shop", tool: "refund", params: [], raw: callId },
+  });
+}
+
+describe("confirm 合并", () => {
+  it("同一个群五分钟内连问几件只弹一条，过了五分钟再问照弹", async () => {
+    const owner = await ownerWithBot();
+    const job = await userJob(owner);
+    try {
+      const kinds = async () => (await noticesBeforeErrorMarker(owner, job)).map((notice) => notice.kind);
+      askApproval(owner, job, "refund-1");
+      askApproval(owner, job, "refund-2");
+      expect(await kinds(), "两张卡都落了，等你确认只叫一次").toEqual(["confirm"]);
+
+      clock = new Date(clock.getTime() + 4 * 60_000);
+      askApproval(owner, job, "refund-3");
+      expect(await kinds(), "离第一条四分钟，还压着").toEqual([]);
+
+      clock = new Date(clock.getTime() + 60_000);
+      askApproval(owner, job, "refund-4");
+      expect(await kinds(), "离第一条满五分钟").toEqual(["confirm"]);
     } finally {
       job.close();
     }
   });
 
-  it("例行 run 没有可见回复不推 result", async () => {
+  it("别的群的确认不被这个群压住", async () => {
     const owner = await ownerWithBot();
-    const job = await routineJob(owner);
+    const job = await userJob(owner);
+    const other = await ownerWithBot();
+    const otherJob = await userJob(other);
     try {
-      sendRunDone(owner, job);
-      expect(await noticesBeforeErrorMarker(owner, job)).toEqual([]);
+      askApproval(owner, job, "refund-1");
+      askApproval(other, otherJob, "refund-1");
+      expect((await noticesBeforeErrorMarker(owner, job)).map((notice) => notice.groupId)).toEqual([owner.groupId]);
+      expect((await noticesBeforeErrorMarker(other, otherJob)).map((notice) => notice.groupId)).toEqual([
+        other.groupId,
+      ]);
     } finally {
       job.close();
+      otherJob.close();
     }
   });
 });
@@ -488,7 +542,7 @@ describe("stuck", () => {
     }
   });
 
-  it("连上时先推免打扰汇总，再推宽限期内完成的例行结果", async () => {
+  it("连上时推免打扰汇总，宽限期内做完的例行不另弹", async () => {
     const owner = await ownerWithBot();
     await owner.client.patch("/api/settings", { dndFrom: "09:00", dndTo: "11:00" });
     const routine = await makeRoutine(owner);
@@ -525,9 +579,8 @@ describe("stuck", () => {
           outputTokens: 20,
         });
         await reconnected.agent.ack(prompt.runId);
-        expect((await noticesOnConnect(owner, push, 2)).map((notice) => [notice.kind, notice.text])).toEqual([
+        expect((await noticesOnConnect(owner, push, 1)).map((notice) => [notice.kind, notice.text])).toEqual([
           ["result", SUMMARY_ONE],
-          ["result", `例行任务「${ROUTINE_NAME}」做完了，打开群聊看结果`],
         ]);
       } finally {
         reconnected.agent.close();

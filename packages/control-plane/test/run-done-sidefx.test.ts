@@ -279,9 +279,7 @@ it("例行毒帧回滚结束、费用卡和例行账，新帧只结一次", asyn
     ]);
     expect(pushedCards(replayed, runId)).toEqual([card]);
     expect(okUpdates(replayed, routine.id), "两次补发各推一次 ok，按 id 整条覆盖，重复无害").toHaveLength(2);
-    expect(notices(replayed), "结果通知随补发弹出，只弹一次").toMatchObject([
-      { kind: "result", text: `例行任务「${ROUTINE_NAME}」做完了，打开群聊看结果`, groupId: owner.groupId },
-    ]);
+    expect(notices(replayed), "例行做完不弹通知，补发也不会补出一条").toEqual([]);
   } finally {
     await restore();
     owner.close();
