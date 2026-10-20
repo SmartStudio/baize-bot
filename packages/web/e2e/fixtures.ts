@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { expect, test as base, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
 import { Message, MessageListResponse, ServerPush, SkillResponse, UsageResponse } from "@baize/shared";
 
@@ -7,7 +8,7 @@ export type { APIRequestContext, Page };
 export const EMAIL = "chen@baize.dev";
 export const PASSWORD = "baize-dev";
 export const SHOT = "e2e/screenshots";
-export const AUDIT_SHOT = "/Users/zouyanjian/other-try/prepare/baize/baize-bot/.audit/v1/p0-5";
+export const AUDIT_SHOT = fileURLToPath(new URL("../../../.audit/v1/p0-5", import.meta.url));
 
 // 产品的 fonts.css 用 @import 引 Google Fonts，load 要等那份 CSS 下完，外网慢时 goto 能被拖过 30 秒。
 // 字体文件是这份 CSS 里的 @font-face 才引出来的，CSS 换成空的，fonts.gstatic.com 就不会被请求。

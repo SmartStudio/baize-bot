@@ -37,6 +37,29 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # Ubuntu 24.04 的 AppArmor 不许普通进程建 user namespace，云电脑的 bash 沙箱（bwrap）和助理 Chrome 都靠它。
+      # 按 Chromium 的 apparmor-userns-restrictions 文档只给这两个程序放开，不整机关 apparmor_restrict_unprivileged_userns。
+      # AppArmor 按真实路径匹配，/usr/bin/chromium 是软链，先解析。末尾真起一次，没放开就停在这一步。
+      - name: 给 bwrap 和 Chrome 放开 user namespace
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
+          for entry in "baize-bwrap $(readlink -f /usr/bin/bwrap)" "baize-chrome $(readlink -f /usr/bin/chromium)"; do
+            set -- $entry
+            printf 'abi <abi/4.0>,\ninclude <tunables/global>\nprofile %s %s flags=(unconfined) {\n  userns,\n}\n' "$1" "$2" |
+              sudo tee "/etc/apparmor.d/$1" >/dev/null
+            sudo apparmor_parser -r "/etc/apparmor.d/$1"
+          done
+          bwrap --ro-bind / / --dev /dev --unshare-all true
+          timeout 30 /usr/bin/chromium --headless=new --no-first-run --user-data-dir="$(mktemp -d)" --dump-dom about:blank >/dev/null
+
+      # Linux 上助理 Chrome 按远程电脑的方式起，要一块 Xvfb 屏（computer-agent/src/chrome.ts 认 DISPLAY）。
+      - name: 起 Xvfb
+        run: |
+          sudo apt-get install -y -q xvfb
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm format:check && pnpm check
