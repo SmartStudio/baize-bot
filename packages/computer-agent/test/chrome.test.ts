@@ -553,6 +553,8 @@ describe.runIf(process.platform === "darwin")("助理专用 Chrome 上登录", (
 
 // 真起浏览器的用例。macOS 起 Google Chrome，Linux 起 Debian 的 chromium，远程电脑镜像里就是这一种。
 const realChrome = process.platform === "darwin" || (process.platform === "linux" && existsSync("/usr/bin/chromium"));
+// 认进程表和中文语言包的用例只对 Debian 包成立：CI runner 自带的 chromium 是另一份构建，真身路径不同，也没有 chromium-l10n。
+const debianChromium = process.platform === "linux" && existsSync("/usr/lib/chromium/chromium");
 
 /** 这个进程在听的 TCP 端口，lsof 查不到就是空数组。 */
 function listeningPorts(pid: number): Promise<string[]> {
@@ -669,7 +671,7 @@ describe.runIf(realChrome)("助理 Chrome 在页面上的身份", () => {
   }, 20_000);
 
   // 远程电脑的容器是 UTC 和 en-US，中国的号从一台英文 UTC 机器上登录本身就是风控信号。
-  it.runIf(process.platform === "linux")(
+  it.runIf(debianChromium)(
     "远程电脑上时区是上海，navigator、Intl 和 Accept-Language 都是 zh-CN",
     async () => {
       const chrome = startAssistantChrome({ dataDir: await dataDir(), log: () => {} });
@@ -796,24 +798,28 @@ describe.runIf(realChrome)("助理 Chrome 进程", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   }, 20_000);
 
-  it("代理进程被 SIGKILL 后它的 Chrome 跟着退，再起时这个 profile 只剩新守护的一个 Chrome，管道连得上", async () => {
-    const directory = await dataDir();
-    const profileDir = chromeProfileDir(directory);
-    const first = await startHost(directory);
+  it.runIf(process.platform === "darwin" || debianChromium)(
+    "代理进程被 SIGKILL 后它的 Chrome 跟着退，再起时这个 profile 只剩新守护的一个 Chrome，管道连得上",
+    async () => {
+      const directory = await dataDir();
+      const profileDir = chromeProfileDir(directory);
+      const first = await startHost(directory);
 
-    first.child.kill("SIGKILL");
-    await exited(first.child);
-    await poll(() => (isAlive(first.ready.pid) ? undefined : true), 10_000, "管道断开后旧 Chrome 自己退出");
+      first.child.kill("SIGKILL");
+      await exited(first.child);
+      await poll(() => (isAlive(first.ready.pid) ? undefined : true), 10_000, "管道断开后旧 Chrome 自己退出");
 
-    const second = await startHost(directory);
+      const second = await startHost(directory);
 
-    expect(await profileChromePids(profileDir), "进程表里这个 profile 只剩一个 Chrome，就是新守护报的那个").toEqual([
-      second.ready.pid,
-    ]);
-    expect(second.ready.product, `新守护经管道拿到了版本：${second.log()}`).toContain("Chrome");
+      expect(await profileChromePids(profileDir), "进程表里这个 profile 只剩一个 Chrome，就是新守护报的那个").toEqual([
+        second.ready.pid,
+      ]);
+      expect(second.ready.product, `新守护经管道拿到了版本：${second.log()}`).toContain("Chrome");
 
-    second.child.kill("SIGTERM");
-    await exited(second.child);
-    expect(await profileChromePids(profileDir), "新守护正常停机后不留 Chrome").toEqual([]);
-  }, 60_000);
+      second.child.kill("SIGTERM");
+      await exited(second.child);
+      expect(await profileChromePids(profileDir), "新守护正常停机后不留 Chrome").toEqual([]);
+    },
+    60_000,
+  );
 });
