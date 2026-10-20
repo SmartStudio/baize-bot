@@ -53,6 +53,13 @@ jobs:
           bwrap --ro-bind / / --dev /dev --unshare-all true
           timeout 30 /usr/bin/chromium --headless=new --no-first-run --user-data-dir="$(mktemp -d)" --dump-dom about:blank >/dev/null
 
+      # Linux 上助理 Chrome 按远程电脑的方式起，要一块 Xvfb 屏（computer-agent/src/chrome.ts 认 DISPLAY）。
+      - name: 起 Xvfb
+        run: |
+          sudo apt-get install -y -q xvfb
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          echo "DISPLAY=:99" >> "$GITHUB_ENV"
+
       - run: pnpm install --frozen-lockfile
 
       - run: pnpm format:check && pnpm check
