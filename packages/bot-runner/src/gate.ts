@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import {
   GRANTABLE_SCOPES,
@@ -21,6 +22,8 @@ import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import {
   type ClosedContainment,
   type Containment,
+  homeBinDir,
+  homeLockedPaths,
   NETWORK_COMMANDS,
   reachesNetwork,
   stillAsksInSandbox,
@@ -33,6 +36,7 @@ import { accountLabel, DRAFT_TOOL_NAMES } from "./drafts.js";
 import { TAKEOVER_TOOL } from "./takeover.js";
 import {
   type ForbiddenZones,
+  hostHidden,
   isInsideRoot,
   LinkLoopError,
   logicalResolve,
@@ -165,21 +169,34 @@ export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "poker_review",
 ]);
 
-type ZoneHit = "hidden" | "read_only" | "other_bot" | "own_private" | "protected_root" | null;
+type ZoneHit = "hidden" | "read_only" | "other_bot" | "own_private" | "protected_root" | "home_locked" | null;
 
 const MUTATIONS = new Set<ActionKind>(["write_workspace", "write_outside", "delete"]);
 
 // 改动落在禁区的祖先上（放宽写整个数据目录、删掉上一级）也算碰禁区。
-const zoneHit = (action: ActionKind, path: string, call: GateContext & { readonly toolName?: string }): ZoneHit => {
+// 云电脑共用的 HOME 在数据目录里，但它不是别的 Bot 的私有区：沙箱只读挂回给 bash，批了能写（锁定的那几处除外）。
+// 主人在终端里建的 ~/.ssh 这类照旧是禁区，按这份 HOME 再算一遍。
+// Pi 的 read、write 在运行器进程里跑，不过沙箱，碰它照旧按数据目录的私有区拦。
+const bashSharedHome = (call: { readonly toolName?: string; readonly containment?: Containment }): string | null =>
+  call.toolName === "bash" && call.containment?.level === "closed" ? call.containment.homeDir : null;
+
+const zoneHit = (
+  action: ActionKind,
+  path: string,
+  call: GateContext & { readonly toolName?: string; readonly containment?: Containment },
+): ZoneHit => {
   const real = realpathExisting(path);
+  const home = bashSharedHome(call);
   const inside = (zone: readonly string[]): boolean => zone.some((prefix) => isInsideRoot(real, prefix, call.platform));
   const covers = (zone: readonly string[]): boolean =>
     MUTATIONS.has(action) &&
     action !== "write_workspace" &&
     zone.some((prefix) => isInsideRoot(prefix, path, call.platform));
   if (covers([call.zones.dataDir])) return "other_bot";
-  if (inside(call.zones.hidden) || covers(call.zones.hidden)) return "hidden";
+  const hidden = home === null ? call.zones.hidden : [...call.zones.hidden, ...hostHidden(home)];
+  if (inside(hidden) || covers(hidden)) return "hidden";
   if (MUTATIONS.has(action) && (inside(call.zones.readOnly) || covers(call.zones.readOnly))) return "read_only";
+  if (home !== null && MUTATIONS.has(action) && inside(homeLockedPaths(home))) return "home_locked";
   if (
     call.toolName !== "bash" &&
     MUTATIONS.has(action) &&
@@ -191,7 +208,8 @@ const zoneHit = (action: ActionKind, path: string, call: GateContext & { readonl
   if (
     isInsideRoot(real, call.zones.dataDir, call.platform) &&
     !isInsideRoot(real, call.zones.botDir, call.platform) &&
-    !isInsideRoot(real, call.zones.sharedDir, call.platform)
+    !isInsideRoot(real, call.zones.sharedDir, call.platform) &&
+    (home === null || !isInsideRoot(real, home, call.platform))
   )
     return "other_bot";
   // Bot 目录里 work 以外是 Pi 和运行器自己的配置与会话。Pi 的 write、edit 在进程内执行，不过沙箱，批了真会写进去；bash 的沙箱只给 work 写权限，批了也写不进。共享区在数据根下，不在 Bot 目录里。
@@ -210,6 +228,7 @@ const ZONE_REASONS: Readonly<Record<Exclude<ZoneHit, null>, string>> = {
   other_bot: "这个路径属于其他 Bot 或数据目录的私有区域，不能读取或修改。请使用共享区交换文件。",
   own_private: "这个路径是 Bot 自己的配置和会话目录，不能修改。请把文件写到工作目录或共享区。",
   protected_root: "工作目录和共享区的根不能删除或替换，请只修改目录里的文件。",
+  home_locked: "这是云电脑共用 HOME 里的命令目录或 shell 启动文件，Bot 改不动，只有主人在网页终端里能改。",
 };
 
 const targetForPath = (path: string, computerId: ComputerId): GrantTarget => ({
@@ -232,7 +251,11 @@ const pathAction = (action: ActionKind, path: string, call: GateContext): Classi
 
 const readPath = (path: string, call: GateContext): ClassifiedAction => pathAction("read", path, call);
 
-const shellPath = (word: string, call: GateContext): string => resolveLikeKernel(word, call.workDir);
+// 沙箱里 bash 的 HOME：云电脑换成共用的那份（whitelistEnv），别处照旧是运行器进程的。
+const shellHome = (call: GateCall): string =>
+  call.containment.level === "closed" ? call.containment.homeDir : homedir();
+
+const shellPath = (word: string, call: GateCall): string => resolveLikeKernel(word, call.workDir, shellHome(call));
 
 const isDirectory = (path: string): boolean => {
   try {
@@ -810,7 +833,7 @@ const classifyCommand = (words: readonly string[], call: GateCall): readonly Cla
     // 相对的源按链接所在目录解：link 是已存在的目录时链接落在它里面，否则落在它的上一级。
     const linkPath = shellPath(link, call);
     const linkDir = isDirectory(linkPath) ? linkPath : dirname(linkPath);
-    return [readPath(resolveLikeKernel(source, linkDir), call), write(link)];
+    return [readPath(resolveLikeKernel(source, linkDir, shellHome(call)), call), write(link)];
   }
   if (name === "tee" || WRITE_COMMANDS.has(name)) {
     if (hasUnknownMutationOption(name, commandArgs)) return [plainAction("shell")];
@@ -1301,22 +1324,25 @@ const isExecutableFile = (path: string): boolean => {
 };
 
 /**
- * 按沙箱里 bash 真用的那串 PATH 找第一个可执行文件，它得是工具箱 venv/bin 或 node/bin 里的、真实路径也还在工具箱里。
- * 系统目录排在前面，系统里有同名程序就是它先跑，密钥不能给它。PATH 里有空项或相对项时 bash 按 cwd 找，不认。
+ * 按沙箱里 bash 真用的那串 PATH 找第一个可执行文件，它得是工具箱 venv/bin、node/bin 或 HOME 的 .local/bin 里的，
+ * 真实路径也还在它所属的那个根里（工具箱或 HOME）。系统目录排在前面，系统里有同名程序就是它先跑，密钥不能给它。
+ * PATH 里有空项或相对项时 bash 按 cwd 找，不认。
  */
 const toolboxExecutable = (name: string, containment: ClosedContainment): boolean => {
   const entries = toolboxSearchPath(containment).split(":");
   if (entries.some((entry) => entry === "" || !isAbsolute(entry))) return false;
-  const toolboxBins = new Set([
-    join(containment.toolboxDir, "venv", "bin"),
-    join(toolboxNodeDir(containment.toolboxDir), "bin"),
+  const rootOf = new Map([
+    [join(containment.toolboxDir, "venv", "bin"), containment.toolboxDir],
+    [join(toolboxNodeDir(containment.toolboxDir), "bin"), containment.toolboxDir],
+    [homeBinDir(containment.homeDir), containment.homeDir],
   ]);
   for (const entry of entries) {
     const candidate = join(entry, name);
     if (!isExecutableFile(candidate)) continue;
-    if (!toolboxBins.has(entry)) return false;
+    const root = rootOf.get(entry);
+    if (root === undefined) return false;
     try {
-      return isInsideRoot(realpathExisting(candidate), containment.toolboxDir);
+      return isInsideRoot(realpathExisting(candidate), root);
     } catch {
       return false;
     }
@@ -1373,7 +1399,7 @@ const plainCloudTokens = (call: GateCall): readonly (ParseEntry | VariableToken)
 
 /**
  * 命令行工具：整条命令只是一个或几个登记工具，最多用 `|` 接只读过滤。
- * 放行时带网络和这些工具的 env；`;`、`&&`、重定向、展开、前缀赋值都不认，免得别的命令搭着拿到密钥。
+ * 放行时带网络、可写的 HOME（工具自己续期、写 ~/.grok 这类登录态）和这些工具的 env；`;`、`&&`、重定向、展开、前缀赋值都不认，免得别的命令搭着拿到密钥。
  */
 function cliDecision(call: GateCall, containment: ClosedContainment): GateDecision | null {
   const tools = call.cliTools ?? [];
@@ -1406,7 +1432,7 @@ function cliDecision(call: GateCall, containment: ClosedContainment): GateDecisi
     action: "shell",
     target: null,
     reason: null,
-    access: { network: true, writePaths: [], cliTools: [...used] },
+    access: { network: true, writePaths: [containment.homeDir], cliTools: [...used] },
   };
 }
 

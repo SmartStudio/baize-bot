@@ -35,7 +35,7 @@ shared 的 `UPLINK_DELIVERY`、`DOWNLINK_DELIVERY` 穷举报文送法。上行 r
 
 ## 画面面
 
-`/agent` 上的文本帧是报文，二进制帧是画面面。帧格式是 4 字节大端头长、UTF-8 JSON 头、可选负载，头的 schema 和 `encodeLive`、`decodeLive` 在 shared 的 `live.ts`。电脑上行 `LiveUp`：`session`（整份 upsert）、`frame`（负载是 JPEG）、`closed`。下行 `LiveDown`：`viewer`（attached、detached）、`input`、`end`、`reveal`。网页看画面连 `/api/live/<liveId>`，帧格式相同，收 `LiveToViewer`（`session`、`frame`），发 `LiveFromViewer`（`input`、`end`、`reveal`）。
+`/agent` 上的文本帧是报文，二进制帧是画面面。帧格式是 4 字节大端头长、UTF-8 JSON 头、可选负载，头的 schema 和 `encodeLive`、`decodeLive` 在 shared 的 `live.ts`。电脑上行 `LiveUp`：`session`（整份 upsert）、`frame`（负载是 JPEG）、`term`（负载是终端输出）、`closed`。下行 `LiveDown`：`viewer`（attached、detached）、`input`、`end`、`reveal`、`terminal_open`。网页看画面连 `/api/live/<liveId>`，帧格式相同，收 `LiveToViewer`（`session`、`frame`、`term`），发 `LiveFromViewer`（`input`、`end`、`reveal`）。
 
 画面帧和人的输入（含密码）不走可靠信封，不进库、不进发件箱、不进日志。理由有三条：
 
@@ -53,14 +53,23 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 
 | 码 | 含义 |
 | --- | --- |
-| 4100（`LiveViewerClose.gone`） | 会话结束，电脑报了 closed 或连接断了 |
+| 4100（`LiveViewerClose.gone`） | 会话结束，电脑报了 closed、连接断了，或终端的断线宽限到点 |
 | 4101（`LiveViewerClose.replaced`） | 被新观看者顶掉 |
 | 4104（`LiveViewerClose.notFound`） | 号不合法、会话不存在或不是你的，不区分 |
-| 1012 | 控制面停机 |
+| 1012 | 控制面停机，或终端所在的电脑断线（宽限期内） |
+| 1013 | 终端输出积压超过 8MB |
+| 1008 | 终端输入超过每秒 1MB |
 
 升级时先查 Origin：带了 Origin 而它的 host 不等于 Host 头，回 403。之后用 cookie 认人，认不出回 401。这条 socket 能往用户登录着的网站里打字，被跨站劫持的后果比 `/api/ws` 大，所以多这一道。观看者 WebSocket 的 `maxPayload` 是 64KB，电脑来的单帧超过 2MB 丢。
 
 人的输入每个观看者每秒最多转 120 条，用令牌桶，多的丢，`end` 和 `reveal` 不计数。`startServer` 的 `live.inputPerSecond`、`live.now` 可注入。发给观看者的帧走 `latestWins`：上一帧还没发完时只留最新的一帧。
+
+终端（`purpose: terminal`）有几处不同：
+
+- 电脑的 `term` 帧按到达顺序原样转，不走 `latestWins`，头里的 `replay` 跟着帧一起到观看者。观看者积压超过 8MB 就以 1013 关，让它重连。
+- 终端输入（`term`、`resize`）不吃条数桶，按整帧字节数限，每秒 1MB、突发 2MB。超额不丢，因为丢一段就是一条错的命令。中继以 1008 关掉这个观看者，记一条只带电脑号和会话号的日志。
+- 电脑报了 `closed` 而中继里没有这个号，是终端被拒开了（不是云电脑、开满、起不来）。中继照样给这台电脑的主人推 `live_closed`，网页不用干等。
+- 电脑断线时，终端会话不立刻结束，电脑上的 shell 还活着。观看者以 1012 关，网页当断网退避重连。宽限期内（默认 15 秒，`live.terminalGraceMs` 可注入）这台电脑重连并重报同一个号，会话换到新连接上，中继给新连接补发 attached，电脑再补一帧 replay。到点没重报才结束会话、推 `live_closed`。宽限期里观看者照样能连上，只是要等电脑回来才有输出。画面会话照旧在断线时立即结束。
 
 `GET /api/live` 列当前用户的会话（`LiveSessionsResponse`），`/api/ws` 推 `live_session`（整份）和 `live_closed`。推送在断线期间会丢，所以网页启动和 `/api/ws` 重连时各拉一次列表。同一个号收到 `live_closed` 之后，电脑重连重报时还会再来一条 `live_session`。
 

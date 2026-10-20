@@ -58,7 +58,30 @@ export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {
 
 // 画面面板。摆哪几个按钮由 liveEndActions 定：登录只有放弃，交还只出现在接手上。
 export const liveEndText = (kind: LivePurpose["kind"], action: LiveUserEnd): string =>
-  action === "finish" ? "交还给 Bot" : kind === "login" ? "不登了" : "不弄了";
+  action === "finish"
+    ? kind === "terminal"
+      ? TERMINAL_TEXT.close
+      : "交还给 Bot"
+    : kind === "login"
+      ? "不登了"
+      : "不弄了";
+
+// 网页终端。面板和电脑页上的按钮共用这几句。
+export const TERMINAL_TEXT = {
+  title: "云电脑终端",
+  note: "这里打的字直接进云电脑上的终端，不经过 Bot。",
+  open: "打开终端",
+  opening: "正在开终端…",
+  back: "回到终端",
+  explain:
+    "在云电脑上开一个终端，用来装命令行工具、登录 grok、codex 这类要你操作一次的账号。登录态存在云电脑上，所有 Bot 共用。",
+  notOpened: "终端没开起来，可以再点一次。",
+  close: "关掉终端",
+  connecting: "正在连上云电脑上的终端…",
+  reconnecting: "终端断了，正在重连…",
+  replaced: "终端在别的窗口打开了",
+  ended: "终端已经关了",
+} as const;
 
 export const LIVE_TEXT = {
   // Bot 表里查不到（刚删、还没拉到）就说 Bot。

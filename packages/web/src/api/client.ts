@@ -6,11 +6,13 @@ import {
   LiveSessionsResponse,
   type LoginAccountRequest,
   type LoginAttemptId,
+  type ComputerId,
   ApiError,
   ApprovePlanResponse,
   ComputerChoices,
   ComputerListResponse,
   ComputerTokenResponse,
+  OpenTerminalResponse,
   DecideDraftResponse,
   ReturnPlanResponse,
   BotResponse,
@@ -242,6 +244,8 @@ export const createApi = (signal?: AbortSignal) => {
     },
     live: async () => json(LiveSessionsResponse, await send("GET", "/live")),
     createRemoteComputer: async () => json(ComputerTokenResponse, await send("POST", "/computers/remote")),
+    openTerminal: async (id: ComputerId) =>
+      json(OpenTerminalResponse, await send("POST", `/computers/${encodeURIComponent(id)}/terminal`)),
     deleteAccount: async (email: string) => {
       const body: DeleteAccountRequest = { email };
       await send("DELETE", "/me", body);

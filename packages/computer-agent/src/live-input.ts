@@ -76,6 +76,10 @@ export function toCdpInput(input: LiveInput, viewport: Viewport): readonly CdpCo
     }
     case "text":
       return [{ method: "Input.insertText", params: { text: input.text } }];
+    // 终端的输入，屏不收。
+    case "term":
+    case "resize":
+      return [];
     default: {
       const exhaustive: never = input;
       return exhaustive;

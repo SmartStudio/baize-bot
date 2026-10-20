@@ -6,6 +6,7 @@ import {
   type AccountId,
   type ComputerId,
   type ComputerKind,
+  type LiveSession,
   type AccountTier,
   type BrowserPlatform,
   type ApprovalId,
@@ -123,6 +124,11 @@ export type AppActions = {
   // 接手画面只在用户点了「打开画面」后才摆；收起面板时清掉，提示和卡上的按钮还在。
   openTakeover: (liveId: LiveId) => Promise<void>;
   hideTakeover: (liveId: LiveId) => Promise<void>;
+  // 在云电脑上开一个终端。回包只有号，面板等 live_session 推到再摆；没开成照常抛给电脑页。
+  openTerminal: (computerId: ComputerId) => Promise<void>;
+  // 回到还开着的终端，或者只收起面板：终端在电脑上接着跑，电脑页上能再点回来。
+  showTerminal: (session: LiveSession) => Promise<void>;
+  hideTerminal: (liveId: LiveId) => Promise<void>;
   // 建这个平台的未登录占位，已经有就回那一行。登录窗口由调用方接着在它上面开。登录过期时是 undefined。
   addAccount: (platform: BrowserPlatform, computerId: ComputerId) => Promise<AccountId | undefined>;
   loadGrants: () => Promise<void>;
@@ -658,6 +664,17 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       }),
       hideTakeover: signedIn(async ({ put }, liveId: LiveId) => {
         put({ type: "takeover_hidden", liveId });
+      }),
+      openTerminal: signedIn(async ({ api, put }, computerId: ComputerId) => {
+        const openedAt = nextSeq();
+        const { liveId } = await api.openTerminal(computerId);
+        put({ type: "terminal_opened", liveId, computerId, openedAt });
+      }),
+      showTerminal: signedIn(async ({ put }, { liveId, computerId }: LiveSession) => {
+        put({ type: "terminal_opened", liveId, computerId, openedAt: nextSeq() });
+      }),
+      hideTerminal: signedIn(async ({ put }, liveId: LiveId) => {
+        put({ type: "terminal_hidden", liveId });
       }),
       loadGrants: signedIn(async ({ api, put }) => {
         put({ type: "grants_loaded", grants: (await api.grants()).grants });

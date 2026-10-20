@@ -5,8 +5,9 @@ import { useApp } from "../state/app.js";
 import { shownLive } from "../state/live.js";
 import { LIVE_TEXT } from "../components/messages/content.js";
 import { LivePanel } from "./LivePanel.js";
+import { TerminalPanel } from "./TerminalPanel.js";
 
-// 画面面板整页只挂这一处。一台电脑同一时刻只有一个观看者，首页的登录卡、设置里的账号页、群里的接手卡各挂一块，
+// 画面面板整页只挂这一处，终端面板也在这里。一台电脑同一时刻只有一个观看者，首页的登录卡、设置里的账号页、群里的接手卡、电脑页的终端各挂一块，
 // 就是几条 socket 在同一台电脑上互相顶掉。摆哪块由 shownLive 定；没摆着的接手在右下角给提示，哪一页都看得到。
 export const LiveHost = () => {
   const { state, actions } = useApp();
@@ -24,7 +25,13 @@ export const LiveHost = () => {
 
   return (
     <>
-      {shown === null ? null : (
+      {shown === null ? null : shown.kind === "terminal" ? (
+        <TerminalPanel
+          key={shown.session.liveId}
+          session={shown.session}
+          onDismiss={() => void actions.hideTerminal(shown.session.liveId).catch(() => undefined)}
+        />
+      ) : (
         <LivePanel
           key={shown.session.liveId}
           session={shown.session}

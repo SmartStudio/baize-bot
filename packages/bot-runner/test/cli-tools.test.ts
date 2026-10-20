@@ -29,6 +29,8 @@ let sysBin = "";
 const bot1 = BotId.parse("bot-1");
 const dirs = () => botDirs(root, bot1);
 const nodeBin = () => join(dirs().toolboxDir, "node", "bin");
+const homeDir = () => join(root, "home");
+const homeBin = () => join(homeDir(), ".local", "bin");
 
 const executable = (path: string, body = "#!/bin/sh\necho ran\n"): void => {
   writeFileSync(path, body);
@@ -53,6 +55,14 @@ beforeAll(() => {
   // 系统目录里有同名程序时，PATH 先找到系统的那个。
   executable(join(sysBin, "shadow"));
   executable(join(nodeBin(), "shadow"));
+  // 主人在终端里 npm i -g 装的：prefix 是 ~/.local，bin 下同样是指向 lib/node_modules 的软链。
+  const homePkg = join(homeDir(), ".local", "lib", "node_modules", "@xai-official", "grok", "bin");
+  mkdirSync(homePkg, { recursive: true });
+  executable(join(homePkg, "grok.js"));
+  mkdirSync(homeBin(), { recursive: true });
+  symlinkSync(join(homePkg, "grok.js"), join(homeBin(), "home-cli"));
+  // HOME 的 bin 里指到 HOME 外（这里是工具箱里）的软链，真实路径不在 HOME 里就不认。
+  symlinkSync(join(pkg, "index.js"), join(homeBin(), "home-escape"));
 });
 
 afterAll(() => {
@@ -72,6 +82,8 @@ const TOOLS = [
   tool("missing"),
   tool("escape"),
   tool("shadow"),
+  tool("home-cli"),
+  tool("home-escape"),
 ];
 
 const cloud = (command: string, overrides: Partial<GateCall> = {}): GateCall => ({
@@ -83,7 +95,7 @@ const cloud = (command: string, overrides: Partial<GateCall> = {}): GateCall => 
   toolName: "bash",
   input: { command },
   sandbox: "bwrap",
-  containment: { level: "closed", searchPath: sysBin, toolboxDir: dirs().toolboxDir },
+  containment: { level: "closed", searchPath: sysBin, toolboxDir: dirs().toolboxDir, homeDir: homeDir() },
   source: null,
   routine: null,
   cliTools: TOOLS,
@@ -91,11 +103,11 @@ const cloud = (command: string, overrides: Partial<GateCall> = {}): GateCall => 
 });
 
 describe("命令行工具的门禁判定", () => {
-  const CLI = {
+  const cliAllowed = () => ({
     verdict: "allow",
     action: "shell",
-    access: { network: true, writePaths: [], cliTools: ["tool-baize-test-cli"] },
-  };
+    access: { network: true, writePaths: [homeDir()], cliTools: ["tool-baize-test-cli"] },
+  });
 
   it.each([
     'baize-test-cli -p "hi"',
@@ -104,7 +116,7 @@ describe("命令行工具的门禁判定", () => {
     "baize-test-cli -p 'x' | grep -i x",
     "baize-test-cli | tail -n 1 | wc -l",
   ])("%s：云电脑上判 cli，不问、带网络和工具", (command) => {
-    expect(decide(cloud(command), [], [])).toMatchObject(CLI);
+    expect(decide(cloud(command), [], [])).toMatchObject(cliAllowed());
   });
 
   it.each([
@@ -155,9 +167,25 @@ describe("命令行工具的门禁判定", () => {
     ["missing", "登记了但没装"],
     ["escape", "bin 软链指到工具箱外"],
     ["shadow", "系统目录里有同名程序"],
+    ["home-escape", "HOME 的 bin 软链指到 HOME 外"],
   ])("%s（%s）：不算 cli", (command) => {
     expect(decide(cloud(command), [], []).access.cliTools ?? []).toEqual([]);
   });
+
+  it("主人在终端里装进 ~/.local/bin 的登记工具也认，放行时 HOME 可写，登录态写得回去", () => {
+    expect(decide(cloud("home-cli -p hi"), [], [])).toMatchObject({
+      verdict: "allow",
+      action: "shell",
+      access: { network: true, writePaths: [homeDir()], cliTools: ["tool-home-cli"] },
+    });
+  });
+
+  it.each(["ls -la", "cat README.md", "python3 script.py", "home-cli; ls"])(
+    "%s：不是登记工具的命令 HOME 不放开写",
+    (command) => {
+      expect(decide(cloud(command), [], []).access.writePaths, command).not.toContain(homeDir());
+    },
+  );
 
   it("工具不属于这个 Bot（没传进来）就不认", () => {
     expect(decide(cloud("baize-test-cli", { cliTools: [tool("other")] }), [], []).access.cliTools ?? []).toEqual([]);
@@ -165,7 +193,12 @@ describe("命令行工具的门禁判定", () => {
   });
 
   it("PATH 里有相对项时 bash 按 cwd 找，不认", () => {
-    const containment = { level: "closed", searchPath: `./node_modules/.bin:${sysBin}`, toolboxDir: dirs().toolboxDir };
+    const containment = {
+      level: "closed",
+      searchPath: `./node_modules/.bin:${sysBin}`,
+      toolboxDir: dirs().toolboxDir,
+      homeDir: homeDir(),
+    };
     expect(decide(cloud("baize-test-cli", { containment } as Partial<GateCall>), [], []).access.cliTools ?? []).toEqual(
       [],
     );
@@ -263,7 +296,7 @@ describe("命令行工具的 env 和 node 工具箱", () => {
       { HOME: "/home/x", PATH: "/bin" },
       "/w",
       "/t",
-      { searchPath: "/bin" },
+      { searchPath: "/bin", homeDir: "/data/home" },
       {
         GROK_API_KEY: SECRET,
         PATH: "/evil",
@@ -301,7 +334,7 @@ describe.skipIf(sandboxKind() === "none")("沙箱 bash 里的工具 env 和脱�
       dirs().workDir,
       forbiddenZones(dirs(), null),
       () => "run-1",
-      cloudBox ? { toolboxDir: dirs().toolboxDir } : null,
+      cloudBox ? { toolboxDir: dirs().toolboxDir, homeDir: homeDir() } : null,
       () => tools,
     );
   const PRINT = 'printf "[%s]" "${GROK_API_KEY:-none}"';

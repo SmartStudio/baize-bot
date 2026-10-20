@@ -13,8 +13,18 @@ export type LiveCloseReason = "gone" | "replaced" | "not_found" | "network";
 export interface LiveSink {
   session(session: LiveSession): void;
   frame(jpeg: Blob): void;
+  // 终端输出的原始字节，按到达顺序原样交给 xterm。replay 是每次连上补发的整份回滚缓冲，空的也来。
+  term(bytes: Uint8Array, replay: boolean): void;
   closed(why: LiveCloseReason): void;
 }
+
+// 只为发一句结束临时连的那条，收到什么都不管。
+export const IGNORE: LiveSink = {
+  session: () => undefined,
+  frame: () => undefined,
+  term: () => undefined,
+  closed: () => undefined,
+};
 
 export interface LiveViewer {
   send(message: LiveFromViewer): void;
@@ -48,6 +58,7 @@ export const openLiveViewer = (liveId: LiveId, sink: LiveSink): LiveViewer => {
     const decoded = decodeLive(LiveToViewer, new Uint8Array(event.data));
     if (decoded === null) return;
     if (decoded.header.t === "session") sink.session(decoded.header.session);
+    else if (decoded.header.t === "term") sink.term(decoded.payload.slice(), decoded.header.replay === true);
     else sink.frame(new Blob([decoded.payload.slice()], { type: "image/jpeg" }));
   });
   socket.addEventListener("close", (event) => {

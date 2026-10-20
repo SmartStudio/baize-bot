@@ -10,25 +10,30 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { BotId, type CliToolConfig, type CliToolId, redactCredential } from "@baize/shared";
 import { createBashToolDefinition, type BashSpawnContext, type BashSpawnHook } from "@earendil-works/pi-coding-agent";
 import {
   type ClosedContainment,
   type Containment,
+  HOME_LOCKED_DIRS,
+  HOME_LOCKED_FILES,
+  homeBinDir,
+  homeLockedPaths,
   toolboxNodeDir,
   toolboxSearchPath,
   toolboxShimDir,
 } from "./contained.js";
 import type { GateAccess, SandboxKind } from "./gate.js";
-import { botDirs, type ForbiddenZones, PathError, realpathExisting } from "./paths.js";
+import { botDirs, type ForbiddenZones, hostHidden, PathError, realpathExisting } from "./paths.js";
 
 const ENV_ALLOW = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "LOGNAME", "SHELL"] as const;
 
-/** 运行器在云电脑上多给的：这个 Bot 的工具箱。本机电脑是 null。 */
+/** 运行器在云电脑上多给的：这个 Bot 的工具箱和整台电脑共用的 HOME。本机电脑是 null。 */
 export interface CloudBox {
   readonly toolboxDir: string;
+  readonly homeDir: string;
 }
 
 /** 云电脑上只有这四个名字落到工具箱的 venv，其余名字落到系统目录。 */
@@ -83,7 +88,8 @@ const MDNS_RESPONDER_SOCKET = "/private/var/run/mDNSResponder";
 const shSingleQuote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 const seatbeltString = (value: string): string => `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 
-// 云电脑的 HOME=/home/node 在只读根上，包管理器写不进默认缓存就装不上；缓存改指到沙箱私有的 /tmp 里，每条命令都是新挂的，
+// 云电脑的 HOME 换成数据目录下共用的那份，主人在终端里登录的 CLI 读得到登录态；它平时只读，只有登记的命令行工具写得进。
+// 包管理器写不进 HOME 下的默认缓存就装不上；缓存改指到沙箱私有的 /tmp 里，每条命令都是新挂的，
 // 没批准的命令改写不了下一次批准的装包会信任的 wheel 和 index，代价是每次装包重新下载。
 // 工作区的 .npmrc、.yarnrc、.pnpmfile.cjs 是 Bot 不问就能写的：env 里的 registry 盖过 .npmrc，yarn-path 和 pnpmfile 关掉，
 // 批准的装包从哪下、跑哪个 yarn、跑哪段钩子就不由工作区定。
@@ -92,7 +98,7 @@ export function whitelistEnv(
   env: NodeJS.ProcessEnv,
   cwd: string,
   tmpDir: string,
-  cloud: Pick<ClosedContainment, "searchPath"> | null = null,
+  cloud: Pick<ClosedContainment, "searchPath" | "homeDir"> | null = null,
   toolEnv: Readonly<Record<string, string>> = {},
 ): NodeJS.ProcessEnv {
   const next: NodeJS.ProcessEnv = { PWD: cwd, TMPDIR: tmpDir };
@@ -105,6 +111,7 @@ export function whitelistEnv(
   }
   if (cloud !== null) {
     next["PATH"] = cloud.searchPath;
+    next["HOME"] = cloud.homeDir;
     next["XDG_CACHE_HOME"] = "/tmp/cache";
     next["npm_config_cache"] = "/tmp/cache/npm";
     next["npm_config_store_dir"] = "/tmp/cache/pnpm-store";
@@ -268,8 +275,15 @@ const roBind = (path: string): string[] => ["--ro-bind", path, path];
  * 里层的挂载点还建得出来；--remount-ro 只改这一层，挂在里面的工作目录照样可写。
  * 不挂 --proc：docker 遮住了部分 /proc，新挂 proc 会失败，沙箱和容器共用 /proc。挡住 /proc/<pid>/root、environ 的是
  * 沙箱在自己的 user namespace 里，跨 namespace 不许 ptrace 读，所以 --unshare-user 显式写上，不靠 bwrap 隐式建。
+ *
+ * session 默认 "new"：Bot 的命令脱离控制终端，TIOCSTI 塞不回运行器。网页终端传 "inherit"，不然 bash 没有控制终端，
+ * 作业控制和 Ctrl-C 都失效。
  */
-export function bwrapArgs(mounts: BwrapMounts, access: GateAccess): readonly string[] {
+export function bwrapArgs(
+  mounts: BwrapMounts,
+  access: GateAccess,
+  session: "new" | "inherit" = "new",
+): readonly string[] {
   return [
     ...roBind("/"),
     "--dev",
@@ -290,7 +304,7 @@ export function bwrapArgs(mounts: BwrapMounts, access: GateAccess): readonly str
     ...[...mounts.forbidden, mounts.dataDir].flatMap((path) => ["--remount-ro", path]),
     ...NAMESPACES,
     "--die-with-parent",
-    "--new-session",
+    ...(session === "new" ? ["--new-session"] : []),
     ...(access.network ? [] : ["--unshare-net"]),
     "--chdir",
     mounts.workDir,
@@ -313,17 +327,48 @@ const existingReal = (zones: ForbiddenZones, paths: readonly string[]): readonly
   ...new Set(paths.map((path) => realZone(zones, path)).filter(existsSync)),
 ];
 
-/** 自己的 Pi 配置和会话记录（agent、sessions）不挂回，bash 看不见。 */
-export const bwrapCommand = (workDir: string, zones: ForbiddenZones, access: GateAccess, command: string): string => {
+/** 只读挂回要求源存在：不存在的锁定路径事先建成空的，不然工具命令能新建一个 .bashrc。已有的不动。 */
+const ensureHomeLocked = (homeDir: string): void => {
+  for (const name of HOME_LOCKED_DIRS) mkdirSync(join(homeDir, name), { recursive: true });
+  for (const name of HOME_LOCKED_FILES) {
+    try {
+      // ~/.inputrc 存在 readline 就不读 /etc/inputrc，空文件会让主人终端里的 Home、End 这类键失灵。
+      writeFileSync(join(homeDir, name), name === ".inputrc" ? "$include /etc/inputrc\n" : "", { flag: "wx" });
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+    }
+  }
+};
+
+/**
+ * 自己的 Pi 配置和会话记录（agent、sessions）不挂回，bash 看不见。云电脑的 HOME 只读挂回，批准写它时可写的那份叠在上面，
+ * 再在可写的那份之上只读挂回 .local 和 shell 启动文件。
+ */
+export const bwrapCommand = (
+  workDir: string,
+  zones: ForbiddenZones,
+  access: GateAccess,
+  command: string,
+  homeDir: string | null = null,
+): string => {
   const own = botDirs(zones.dataDir, BotId.parse(basename(zones.botDir)));
   const args = bwrapArgs(
     {
       dataDir: zones.dataDir,
       workDir: realpathExisting(workDir),
       sharedDir: realpathExisting(zones.sharedDir),
-      ownReadable: existingReal(zones, [own.skillsDir, own.toolboxDir, toolboxShimDir(own.toolboxDir)]),
-      readOnly: existingReal(zones, zones.readOnly),
-      forbidden: existingReal(zones, [...zones.hidden, X11_SOCKET_DIR]),
+      ownReadable: existingReal(zones, [
+        own.skillsDir,
+        own.toolboxDir,
+        toolboxShimDir(own.toolboxDir),
+        ...(homeDir === null ? [] : [homeDir]),
+      ]),
+      readOnly: existingReal(zones, [...zones.readOnly, ...(homeDir === null ? [] : homeLockedPaths(homeDir))]),
+      forbidden: existingReal(zones, [
+        ...zones.hidden,
+        ...(homeDir === null ? [] : hostHidden(homeDir)),
+        X11_SOCKET_DIR,
+      ]),
     },
     { network: access.network, writePaths: access.writePaths.flatMap((path) => writeMountPoint(path) ?? []) },
   );
@@ -336,12 +381,13 @@ const sandboxedCommand = (
   zones: ForbiddenZones,
   access: GateAccess,
   command: string,
+  homeDir: string | null,
 ): string => {
   switch (kind) {
     case "seatbelt":
       return `/usr/bin/sandbox-exec -p ${shSingleQuote(sandboxProfile(workDir, access, zones))} /bin/bash -c ${shSingleQuote(command)}`;
     case "bwrap":
-      return bwrapCommand(workDir, zones, access, command);
+      return bwrapCommand(workDir, zones, access, command, homeDir);
     case "none":
       return command;
     default: {
@@ -365,11 +411,16 @@ const spawnHook =
     const closed = containment.level === "closed" ? containment : null;
     const command = closed === null ? ctx.command : toolboxCommand(closed.toolboxDir, permit, ctx.command);
     if (closed !== null) writeToolboxShims(closed);
-    const searchPath = closed === null ? null : toolboxSearchPath(closed);
     return {
-      command: sandboxedCommand(kind, workDir, zones, permit, command),
+      command: sandboxedCommand(kind, workDir, zones, permit, command, closed?.homeDir ?? null),
       cwd: workDir,
-      env: whitelistEnv(ctx.env, workDir, tmpDir, searchPath === null ? null : { searchPath }, toolEnv),
+      env: whitelistEnv(
+        ctx.env,
+        workDir,
+        tmpDir,
+        closed === null ? null : { searchPath: toolboxSearchPath(closed), homeDir: closed.homeDir },
+        toolEnv,
+      ),
     };
   };
 
@@ -451,11 +502,18 @@ export function createSandboxedBash(
   const containment: Containment =
     cloud === null
       ? { level: "none" }
-      : { level: "closed", searchPath: process.env["PATH"] ?? "", toolboxDir: cloud.toolboxDir };
+      : {
+          level: "closed",
+          searchPath: process.env["PATH"] ?? "",
+          toolboxDir: cloud.toolboxDir,
+          homeDir: cloud.homeDir,
+        };
   if (containment.level === "closed") {
     writeToolboxShims(containment);
-    // bwrap 只能 bind 已存在的路径：批准 npm -g 时不存在就会退到放开整个工具箱。
+    // bwrap 只能 bind 已存在的路径：批准 npm -g 时不存在就会退到放开整个工具箱；HOME 不存在就挂不回来。
     mkdirSync(toolboxNodeDir(containment.toolboxDir), { recursive: true });
+    mkdirSync(containment.homeDir, { recursive: true });
+    ensureHomeLocked(containment.homeDir);
   }
   const permitsByRun = new Map<string, Map<string, GateAccess>>();
   const base = createBashToolDefinition(workDir);
@@ -507,6 +565,53 @@ export function createSandboxedBash(
     },
     clearRun: (runId) => {
       permitsByRun.delete(runId);
+    },
+  };
+}
+
+export interface TerminalSpawn {
+  readonly file: string;
+  readonly args: readonly string[];
+  readonly env: Record<string, string>;
+}
+
+/**
+ * 云电脑上网页终端的那个 bash。挂载和 Bot 的命令同一套，工作目录换成共用的 HOME：数据目录整块盖住，只有 HOME 和共享区可写，
+ * 网络开着。不另起会话，bash 才有控制终端，作业控制和 Ctrl-C 才管用。不带 -l：Debian 的 /etc/profile 会把 PATH 重设回去，
+ * HOME 的 .local/bin 就没了。三个入参都必须已经存在。
+ */
+export function terminalSpawn(dataDir: string, homeDir: string, sharedDir: string): TerminalSpawn {
+  const home = realpathExisting(homeDir);
+  const data = realpathExisting(dataDir);
+  // 数据目录整块盖住了，里面的助理 Chrome profile 不用再列；外面的禁区和 Bot 的命令同一份。
+  const hidden = [...new Set(hostHidden().map(realpathExisting))].filter(
+    (path) => existsSync(path) && path !== data && !isUnder(path, data),
+  );
+  const args = bwrapArgs(
+    {
+      dataDir: data,
+      workDir: home,
+      sharedDir: realpathExisting(sharedDir),
+      ownReadable: [],
+      readOnly: [],
+      forbidden: [...hidden, X11_SOCKET_DIR],
+    },
+    { network: true, writePaths: [] },
+    "inherit",
+  );
+  const user = process.env["USER"] ?? userInfo().username;
+  return {
+    file: "bwrap",
+    args: [...args, "/bin/bash", "-i"],
+    env: {
+      HOME: home,
+      PATH: `${homeBinDir(home)}:${process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin"}`,
+      TERM: "xterm-256color",
+      LANG: "C.UTF-8",
+      NPM_CONFIG_PREFIX: join(home, ".local"),
+      USER: user,
+      LOGNAME: user,
+      SHELL: "/bin/bash",
     },
   };
 }

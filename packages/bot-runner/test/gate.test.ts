@@ -952,7 +952,7 @@ describe("云电脑上读工作区外的 bash 也不问", () => {
     toolName: "bash",
     input: { command },
     sandbox: "bwrap",
-    containment: { level: "closed", searchPath: SYSTEM_PATH, toolboxDir: toolboxDir() },
+    containment: { level: "closed", searchPath: SYSTEM_PATH, toolboxDir: toolboxDir(), homeDir: join(root, "home") },
     source: null,
     routine: null,
     ...overrides,
@@ -992,6 +992,34 @@ describe("云电脑上读工作区外的 bash 也不问", () => {
       reason: null,
       access: { network: false, writePaths: [] },
     });
+  });
+
+  it("云电脑上 bash 命令里的 ~ 按共用的 HOME 解，审批目标落在数据目录下的 home 里", () => {
+    const expected = join(realpathSync(root), "home", ".grok", "x");
+    const decision = decide(cloud("touch ~/.grok/x"), [], []);
+    expect(decision.verdict).toBe("ask");
+    expect(decision.action).toBe("write_outside");
+    expect(decision.access.writePaths, "批的就是沙箱里 bash 真要写的那个文件").toEqual([expected]);
+    expect(decide(cloud("cat > ~/.grok/x"), [], []).access.writePaths, "重定向的 ~ 也一样").toEqual([expected]);
+    expect(
+      decide(localLinux("touch ~/.grok/x"), [], []).access.writePaths,
+      "不在云电脑上照旧是运行器进程的 HOME",
+    ).toEqual([join(realpathSync(homedir()), ".grok", "x")]);
+  });
+
+  it("云电脑共用的 HOME 不算别的 Bot 的私有区：bash 读得到，.local 和 shell 启动文件不开审批，Pi 的工具照旧拦", () => {
+    expect(decide(cloud("cat ~/.grok/auth.json"), [], []).verdict, "登录态普通命令就读得到").toBe("allow");
+    for (const command of ["echo x >> ~/.bashrc", "touch ~/.local/bin/codex", "rm ~/.profile"]) {
+      const decision = decide(cloud(command), [], []);
+      expect(decision.verdict, command).toBe("deny");
+      expect(decision.reason, command).toContain("只有主人在网页终端里能改");
+    }
+    const piWrite = decide(
+      cloud("", { toolName: "write", input: { path: join(root, "home", ".grok", "x"), content: "x" } }),
+      [],
+      [],
+    );
+    expect(piWrite.verdict, "Pi 的 write 不过沙箱，碰 HOME 照旧拦").toBe("deny");
   });
 
   it.each(CONTAINED)("Mac 和本机 Linux 上 %s 照旧问", (command) => {
@@ -1281,6 +1309,7 @@ describe("云电脑上的 bash 只有联网、写工作区外、删和移才问"
       level: "closed",
       searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin",
       toolboxDir: join(root, "bot-1", "toolbox"),
+      homeDir: join(root, "home"),
     },
     source: null,
     routine: null,
@@ -2182,6 +2211,7 @@ describe("Mac 上读工作区以外的东西必须问", () => {
       level: "closed",
       searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin",
       toolboxDir: join(root, "bot-1", "toolbox"),
+      homeDir: join(root, "home"),
     },
     source: null,
     routine: null,
@@ -2510,7 +2540,12 @@ describe("两路复核确认的漏，Mac 上收紧", () => {
     toolName: "bash",
     input: { command },
     sandbox: "bwrap",
-    containment: { level: "closed", searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin", toolboxDir: toolboxDir() },
+    containment: {
+      level: "closed",
+      searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin",
+      toolboxDir: toolboxDir(),
+      homeDir: join(root, "home"),
+    },
     source: null,
     routine: null,
   });
@@ -2648,7 +2683,12 @@ describe("三路复核确认的漏：mv 的目标选项、语言时区前缀的�
     toolName: "bash",
     input: { command },
     sandbox: "bwrap",
-    containment: { level: "closed", searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin", toolboxDir: toolboxDir() },
+    containment: {
+      level: "closed",
+      searchPath: "/usr/bin:/bin:/usr/sbin:/usr/local/bin",
+      toolboxDir: toolboxDir(),
+      homeDir: join(root, "home"),
+    },
     source: null,
     routine: null,
   });

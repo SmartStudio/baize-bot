@@ -75,12 +75,25 @@ export interface ForbiddenZones {
   readonly browserProfileDir: string | null;
 }
 
+/** 本机上不论哪个 Bot 都读写不了的那几处：SSH 钥匙、钥匙串、几家浏览器的 profile。网页终端也盖住它们。 */
+export const hostHidden = (home: string = homedir()): readonly string[] => [
+  join(home, ".ssh"),
+  join(home, "Library", "Keychains"),
+  "/Library/Keychains",
+  join(home, "Library", "Application Support", "Google", "Chrome"),
+  join(home, "Library", "Application Support", "Chromium"),
+  join(home, "Library", "Application Support", "Microsoft Edge"),
+  join(home, "Library", "Application Support", "Firefox", "Profiles"),
+  join(home, ".config", "google-chrome"),
+  join(home, ".config", "chromium"),
+  join(home, ".mozilla", "firefox"),
+];
+
 // 助理 Chrome 的 profile 只认 config 给的路径，不按数据目录的布局去猜：猜错了等于没禁。
 export function forbiddenZones(
   dirs: Pick<BotDirs, "draftsDir" | "workDir" | "sharedDir">,
   browserProfileDir: string | null,
 ): ForbiddenZones {
-  const home = homedir();
   const botDir = dirname(dirs.workDir);
   const dataDir = realpathExisting(dirname(botDir));
   const realBotDir = realpathExisting(botDir);
@@ -96,19 +109,7 @@ export function forbiddenZones(
     dataDir,
     botDir: realBotDir,
     sharedDir,
-    hidden: [
-      join(home, ".ssh"),
-      join(home, "Library", "Keychains"),
-      "/Library/Keychains",
-      join(home, "Library", "Application Support", "Google", "Chrome"),
-      join(home, "Library", "Application Support", "Chromium"),
-      join(home, "Library", "Application Support", "Microsoft Edge"),
-      join(home, "Library", "Application Support", "Firefox", "Profiles"),
-      join(home, ".config", "google-chrome"),
-      join(home, ".config", "chromium"),
-      join(home, ".mozilla", "firefox"),
-      ...(browserProfileDir === null ? [] : [browserProfileDir]),
-    ],
+    hidden: [...hostHidden(), ...(browserProfileDir === null ? [] : [browserProfileDir])],
     readOnly: [dirs.draftsDir],
     browserProfileDir,
   };
@@ -133,11 +134,10 @@ const normalizeWindowsShellPath = (filePath: string): string => {
   return `${match[1].toUpperCase()}:\\${suffix ?? ""}`;
 };
 
-const normalizeLikePi = (input: string): string => {
+const normalizeLikePi = (input: string, home: string = homedir()): string => {
   let normalized = input.replace(UNICODE_SPACES, " ");
   if (normalized.startsWith("@")) normalized = normalized.slice(1);
   if (process.platform === "win32") normalized = normalizeWindowsShellPath(normalized);
-  const home = homedir();
   if (normalized === "~") return home;
   if (normalized.startsWith("~/") || (process.platform === "win32" && normalized.startsWith("~\\"))) {
     return join(home, normalized.slice(2));
@@ -187,9 +187,10 @@ const walkTarget = (base: string, raw: string): string => {
 /**
  * bash 把词原样交给内核，`cat dirlink/../x` 读的是 dirlink 真实目录的上一级；Pi 的文件工具先用 `path.resolve`
  * 抵消 `..` 再打开，走 logicalResolve。两者打开的不是同一个文件，闸门得按各自的打开方式解。
+ * `~` 按 bash 那一刻的 HOME 展开：云电脑上它是共用的 HOME，不是运行器进程的。
  */
-export function resolveLikeKernel(input: string, cwd: string): string {
-  const normalized = normalizeLikePi(input);
+export function resolveLikeKernel(input: string, cwd: string, home: string = homedir()): string {
+  const normalized = normalizeLikePi(input, home);
   return walkTarget(isAbsolute(normalized) ? "/" : cwd, normalized);
 }
 

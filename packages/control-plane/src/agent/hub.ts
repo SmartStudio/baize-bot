@@ -15,7 +15,9 @@ import {
   ControlToAgent,
   DOWNLINK_DELIVERY,
   DownlinkFrame,
+  encodeLive,
   type ComputerKind,
+  type LiveDown,
   type ControlOrigin,
   type ComputerId,
   type MessageId,
@@ -469,6 +471,14 @@ export class AgentHub {
   sendToComputer(computerId: ComputerId, message: ControlToAgent): boolean {
     const conn = this.#connections.get(computerId);
     return conn !== undefined && this.isOnline(computerId) && this.#send(conn, message);
+  }
+
+  /** 画面面的下行：二进制帧，不进发件箱、不进库。连接不在回 false。 */
+  sendLive(computerId: ComputerId, header: LiveDown): boolean {
+    const conn = this.#connections.get(computerId);
+    if (conn === undefined || conn.socket.readyState !== conn.socket.OPEN) return false;
+    conn.socket.send(encodeLive(header));
+    return true;
   }
 
   /** 这个用户在线的每台电脑各发一条。暂停和继续不知道 Bot 的活在哪台电脑上，所以都发。 */

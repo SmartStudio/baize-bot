@@ -29,7 +29,7 @@ import {
 } from "./bot-session.js";
 import { BROWSER_TOOL_NAMES, type BotBrowser, type BrowserConfig, createBotBrowser } from "./browser.js";
 import { acquireBotBrowserMutex, type BrowserMutexLease } from "./browser-mutex.js";
-import { containmentFor } from "./contained.js";
+import { cliHomeDir, containmentFor } from "./contained.js";
 import { createDraftTools, DRAFT_TOOL_NAMES, renderAccounts } from "./drafts.js";
 import { decide, type GateDecision, INTERNAL_TOOLS, type ToolSource } from "./gate.js";
 import { createLane, findLaneRun, type Lane, type LaneActive } from "./lane.js";
@@ -81,6 +81,8 @@ export { evaluateIsolated, type SessionSend } from "./isolated-world.js";
 export { discoverMcpTools } from "./mcp-discover.js";
 export { botDirs, type BotDirs, groupSessionDir } from "./paths.js";
 export { publishDraft, type PublisherDeps, XIAOHONGSHU_PAGES } from "./publisher.js";
+export { cliHomeDir } from "./contained.js";
+export { sandboxKind, terminalSpawn, type TerminalSpawn } from "./sandbox.js";
 export { type ActiveRun, createTopicTools, type GroupMember, renderTaskCard } from "./topic.js";
 
 export interface RunnerConfig {
@@ -826,7 +828,7 @@ export function createRunner(config: RunnerConfig): Runner {
       dirs.workDir,
       zones,
       () => lane.active?.run.runId ?? null,
-      containment.level === "closed" ? { toolboxDir: dirs.toolboxDir } : null,
+      containment.level === "closed" ? { toolboxDir: dirs.toolboxDir, homeDir: cliHomeDir(config.dataDir) } : null,
       () => (desiredConfig(bot) ?? runConfig()).cliTools,
     );
     if (config.browser !== undefined && bot.browser === null) {

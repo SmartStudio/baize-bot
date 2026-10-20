@@ -29,6 +29,7 @@ const content: ContentBook = {
   logins: {},
   live: {},
   takeover: null,
+  terminal: null,
   stamps: {},
 };
 

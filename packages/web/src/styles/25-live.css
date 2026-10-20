@@ -208,3 +208,24 @@
   gap: var(--space-4);
   justify-content: flex-end;
 }
+
+/* 网页终端。底色和字色跟代码块同一套令牌，xterm 自己的主题也从这两个令牌取。 */
+.terminal-screen {
+  position: relative;
+  height: min(60vh, 520px);
+  padding: var(--space-4);
+  overflow: hidden;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--code-bg);
+}
+
+.terminal-host {
+  width: 100%;
+  height: 100%;
+}
+
+/* 被顶掉或已经关了：留着屏上的字但压暗，键盘也不再收。 */
+.terminal-screen.is-stale .terminal-host {
+  opacity: 0.4;
+}

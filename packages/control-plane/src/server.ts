@@ -86,7 +86,7 @@ export type StartOptions = {
   readonly metrics?: Pick<MetricPollerOptions, "now" | "intervalMs">;
   readonly approvalTimeoutIntervalMs?: number;
   /** 画面面的输入限额和它的时钟，测试数限额用。 */
-  readonly live?: Pick<LiveRelayDeps, "inputPerSecond" | "now">;
+  readonly live?: Pick<LiveRelayDeps, "inputPerSecond" | "now" | "terminalGraceMs">;
 };
 
 /** 测试和 main.ts 都从这里取默认值，src 里只有 env.ts 读 process.env。 */

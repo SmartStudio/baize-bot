@@ -1,4 +1,4 @@
-import { loadTable, removeFromTable, writeTable } from "./stamped.js";
+import { loadTable, removeFromTable, writeTable, type Stamped } from "./stamped.js";
 import type { Account, AccountId, LiveSession, LoginAttemptId } from "@baize/shared";
 import { closeScreens, loginScreen } from "./live.js";
 import type { Action, ContentBook, LiveEntry, LoginFlow, ReadyState } from "./types.js";
@@ -12,6 +12,7 @@ export const EMPTY_CONTENT: ContentBook = {
   logins: {},
   live: {},
   takeover: null,
+  terminal: null,
   stamps: {},
 };
 
@@ -21,6 +22,18 @@ const withContent = (state: ReadyState, content: ContentBook): ReadyState => ({ 
 
 const openedIn = (takeover: ContentBook["takeover"], live: ContentBook["live"]): ContentBook["takeover"] =>
   takeover !== null && live[takeover.liveId] !== undefined ? takeover : null;
+
+// 终端点开时会话还在路上：画面表里没号也没墓碑就接着等。见过又没了是关了，清掉；没见过就有了墓碑，是电脑拒开了。
+const terminalIn = (
+  terminal: ContentBook["terminal"],
+  before: ContentBook["live"],
+  after: Stamped<ContentBook["live"]>,
+): ContentBook["terminal"] => {
+  if (terminal?.status !== "open") return terminal;
+  const { liveId, computerId } = terminal;
+  if (after.rows[liveId] !== undefined || after.stamps[liveId] === undefined) return terminal;
+  return before[liveId] === undefined ? { status: "refused", liveId, computerId } : null;
+};
 
 // 登上是账号的事实，不看是哪次点击等来的：点过登录的号只要读到 valid，卡就说已登录。
 const signedIn = (logins: ContentBook["logins"], accounts: Record<AccountId, Account>): ContentBook["logins"] => {
@@ -117,6 +130,7 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
         live: live.rows,
         logins: closeScreens(content.logins, content.live, live.rows),
         takeover: openedIn(content.takeover, live.rows),
+        terminal: terminalIn(content.terminal, content.live, live),
         stamps: live.stamps,
       });
     }
@@ -131,6 +145,7 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
         live: live.rows,
         logins: closeScreens(content.logins, content.live, live.rows),
         takeover: openedIn(content.takeover, live.rows),
+        terminal: terminalIn(content.terminal, content.live, live),
         stamps: live.stamps,
       });
     }
@@ -140,6 +155,18 @@ export const reduceContent = (state: ReadyState, action: Action): ReadyState => 
     case "takeover_hidden":
       if (content.takeover?.liveId !== action.liveId) return state;
       return withContent(state, { ...content, takeover: null });
+    case "terminal_opened":
+      return withContent(state, {
+        ...content,
+        terminal: terminalIn(
+          { status: "open", liveId: action.liveId, computerId: action.computerId, openedAt: action.openedAt },
+          content.live,
+          { rows: content.live, stamps: content.stamps },
+        ),
+      });
+    case "terminal_hidden":
+      if (content.terminal?.liveId !== action.liveId) return state;
+      return withContent(state, { ...content, terminal: null });
     case "computers_loaded": {
       const computers = loadTable(content.computers, content.stamps, action.seq, action.computers);
       return withContent(state, { ...content, computers: computers.rows, stamps: computers.stamps });

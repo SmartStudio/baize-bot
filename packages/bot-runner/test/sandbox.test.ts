@@ -31,6 +31,7 @@ import {
   createSandboxedBash,
   sandboxKind,
   sandboxProfile,
+  terminalSpawn,
   toolboxCommand,
   whitelistEnv,
 } from "../src/sandbox.js";
@@ -75,6 +76,8 @@ const blocked = async (pending: Promise<BashOutcome>, label: string): Promise<st
   expect(result.isError, label).toBe(true);
   return result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
 };
+
+const quotedArgs = (command: string): string[] => [...command.matchAll(/'([^']*)'/g)].map((match) => match[1] ?? "");
 
 const availablePort = (): Promise<number> =>
   new Promise((resolve, reject) => {
@@ -833,10 +836,12 @@ describe("bash 沙箱性能", () => {
     expect(
       whitelistEnv({ PATH: "/bin", HOME: "/home/node", PI_SESSION_ID: "session-1" }, "/work", "/work/.tmp", {
         searchPath: "/usr/bin:/bin",
+        homeDir: "/data/home",
       }),
+      "HOME 换成数据目录下所有 Bot 共用的那份，主人在终端里登录的 CLI 的登录态在这里",
     ).toEqual({
       PATH: "/usr/bin:/bin",
-      HOME: "/home/node",
+      HOME: "/data/home",
       PI_SESSION_ID: "session-1",
       PWD: "/work",
       TMPDIR: "/work/.tmp",
@@ -852,6 +857,7 @@ describe("bash 沙箱性能", () => {
     expect(
       whitelistEnv({ PATH: "/bin", npm_config_registry: "https://registry.npmmirror.com/" }, "/work", "/work/.tmp", {
         searchPath: "/usr/bin:/bin",
+        homeDir: "/data/home",
       })["npm_config_registry"],
       "电脑主人给运行器配的源照用，工作区里的 .npmrc 盖不过它",
     ).toBe("https://registry.npmmirror.com/");
@@ -868,18 +874,22 @@ describe("bash 沙箱性能", () => {
       const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
       const ownZones = forbiddenZones(dirs, null);
       const venvBin = join(dirs.toolboxDir, "venv", "bin");
+      const homeDir = join(root, "home");
       const cloud = createSandboxedBash(dirs.workDir, ownZones, () => "run-1", {
         toolboxDir: dirs.toolboxDir,
+        homeDir,
       });
       expect(cloud.containment).toEqual({
         level: "closed",
         searchPath: process.env["PATH"],
         toolboxDir: dirs.toolboxDir,
+        homeDir,
       });
+      expect(existsSync(homeDir), "bwrap 只挂得回已存在的 HOME，建沙箱时先建出来").toBe(true);
       if (cloud.containment.level !== "closed") throw new Error("云电脑的 containment 该是 closed");
       const shimDir = join(root, "bot-1", "toolbox-bin");
       const nodeBin = join(dirs.toolboxDir, "node", "bin");
-      const approvedPath = `${shimDir}:${process.env["PATH"]}:${venvBin}:${nodeBin}`;
+      const approvedPath = `${shimDir}:${process.env["PATH"]}:${venvBin}:${nodeBin}:${join(homeDir, ".local", "bin")}`;
       expect(toolboxSearchPath(cloud.containment)).toBe(approvedPath);
       expect(readdirSync(shimDir).toSorted()).toEqual(["pip", "pip3", "python", "python3"]);
       expect(createSandboxedBash(dirs.workDir, ownZones).containment).toEqual({ level: "none" });
@@ -899,6 +909,14 @@ describe("bash 沙箱性能", () => {
       cloud.allow("run-1", "networked", { network: true, writePaths: [] });
       expect(await pathOf("networked")).toBe(approvedPath);
       expect(await pathOf("unlisted"), "没登记过的调用照样是这串").toBe(approvedPath);
+      const home = await cloud.tool.execute(
+        "home",
+        { command: 'printf "%s" "$HOME"' },
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      expect(home.content.map((part) => (part.type === "text" ? part.text : "")).join("")).toBe(homeDir);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -927,6 +945,7 @@ describe("bash 沙箱性能", () => {
         const marker = join(dirs.workDir, "shim-ran");
         const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
           toolboxDir: dirs.toolboxDir,
+          homeDir: join(root, "home"),
         });
         const approved = async (callId: string, command: string, access: GateAccess): Promise<string> => {
           cloud.allow("run-1", callId, access);
@@ -973,6 +992,7 @@ describe("bash 沙箱性能", () => {
       writeFileSync(join(outside, "secret.txt"), "secret\n");
       const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
         toolboxDir: dirs.toolboxDir,
+        homeDir: join(root, "home"),
       });
       const approved = async (callId: string, command: string): Promise<BashOutcome> => {
         cloud.allow("run-1", callId, { network: false, writePaths: [] });
@@ -1052,6 +1072,7 @@ describe("bash 沙箱性能", () => {
       chmodSync(join(venvBin, "pip"), 0o755);
       const cloud = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-1", {
         toolboxDir: dirs.toolboxDir,
+        homeDir: join(root, "home"),
       });
       cloud.allow("run-1", "granted", { network: true, writePaths: [dirs.toolboxDir] });
       const result = await cloud.tool.execute(
@@ -1062,7 +1083,7 @@ describe("bash 沙箱性能", () => {
         undefined as never,
       );
       expect(outputText(result)).toBe(
-        `${join(root, "bot-1", "toolbox-bin")}:${process.env["PATH"]}:${venvBin}:${join(dirs.toolboxDir, "node", "bin")}`,
+        `${join(root, "bot-1", "toolbox-bin")}:${process.env["PATH"]}:${venvBin}:${join(dirs.toolboxDir, "node", "bin")}:${join(root, "home", ".local", "bin")}`,
       );
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1324,6 +1345,59 @@ describe("bwrap 参数", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("云电脑的 HOME 盖住数据目录后只读挂回，批准写它（登记工具）时可写的那份叠在只读那份之上", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "baize-bwrap-home-")));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const ownZones = forbiddenZones(dirs, null);
+      const home = join(root, "home");
+      expect(
+        bwrapCommand(dirs.workDir, ownZones, { network: false, writePaths: [] }, "true", home),
+        "HOME 还没建出来就不挂",
+      ).not.toContain(home);
+      mkdirSync(home);
+      const plain = quotedArgs(bwrapCommand(dirs.workDir, ownZones, { network: false, writePaths: [] }, "true", home));
+      const roAt = plain.findIndex((arg, at) => arg === "--ro-bind" && plain[at + 1] === home);
+      expect(roAt, "普通命令看得到 HOME").toBeGreaterThan(plain.indexOf(root));
+      expect(
+        plain.some((arg, at) => arg === "--bind" && plain[at + 1] === home),
+        "普通命令的 HOME 只读",
+      ).toBe(false);
+      const cli = quotedArgs(bwrapCommand(dirs.workDir, ownZones, { network: true, writePaths: [home] }, "true", home));
+      const rwAt = cli.findIndex((arg, at) => arg === "--bind" && cli[at + 1] === home);
+      expect(rwAt, "可写的那份挂在只读那份之后").toBeGreaterThan(
+        cli.findIndex((arg, at) => arg === "--ro-bind" && cli[at + 1] === home),
+      );
+      expect(
+        bwrapCommand(dirs.workDir, ownZones, { network: false, writePaths: [] }, "true"),
+        "本机电脑不给 HOME",
+      ).not.toContain(home);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("网页终端的 bwrap 参数不带 --new-session（bash 要有控制终端），批了网络就不断网；默认照旧脱离控制终端", () => {
+    const mounts = {
+      dataDir: "/data",
+      workDir: "/data/home",
+      sharedDir: "/data/shared",
+      ownReadable: [],
+      readOnly: [],
+      forbidden: ["/tmp/.X11-unix"],
+    };
+    const access = { network: true, writePaths: ["/data/home"] };
+    const terminal = bwrapArgs(mounts, access, "inherit");
+    expect(terminal).not.toContain("--new-session");
+    expect(terminal).not.toContain("--unshare-net");
+    expect(terminal).toContain("--die-with-parent");
+    expect(bwrapArgs(mounts, access, "new"), "传 new 和不传一样").toEqual(bwrapArgs(mounts, access));
+    expect(bwrapArgs(mounts, access)).toContain("--new-session");
+    expect(terminal, "除了 --new-session，挂载序列和 Bot 的命令是同一份").toEqual(
+      bwrapArgs(mounts, access).filter((arg) => arg !== "--new-session"),
+    );
+  });
 });
 
 const hasBwrap = sandboxKind() === "bwrap";
@@ -1514,6 +1588,155 @@ const loopProfile = (): { root: string; work: string; zones: ForbiddenZones } =>
   symlinkSync(profile, join(root, "loop-profile-2"));
   return { root, work, zones: forbiddenZones(botDirs(root, BotId.parse("bot-1")), profile) };
 };
+
+describe("云电脑共用 HOME 里锁定的命令目录和 shell 启动文件", () => {
+  const LOCKED = [
+    ".local",
+    ".bashrc",
+    ".bash_aliases",
+    ".profile",
+    ".bash_profile",
+    ".bash_login",
+    ".bash_logout",
+    ".inputrc",
+    ".npmrc",
+  ];
+
+  it("建沙箱时没有的先建成空的，已有的原样不动，再建一次也不出错", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "baize-home-locked-")));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const home = join(root, "home");
+      mkdirSync(home);
+      writeFileSync(join(home, ".bashrc"), "export OWNER=1\n");
+      const box = { toolboxDir: dirs.toolboxDir, homeDir: home };
+      createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => null, box);
+      createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => null, box);
+      for (const name of LOCKED) expect(existsSync(join(home, name)), name).toBe(true);
+      expect(lstatSync(join(home, ".local")).isDirectory()).toBe(true);
+      expect(readFileSync(join(home, ".bashrc"), "utf8"), "主人写过的 .bashrc 不被清空").toBe("export OWNER=1\n");
+      expect(readFileSync(join(home, ".profile"), "utf8")).toBe("");
+      expect(readFileSync(join(home, ".inputrc"), "utf8"), "空的 ~/.inputrc 会让 readline 不读系统那份").toBe(
+        "$include /etc/inputrc\n",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("批准写 HOME 的 bwrap 命令里，锁定的路径在可写的 HOME 之后只读挂回", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "baize-home-locked-")));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const home = join(root, "home");
+      createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => null, {
+        toolboxDir: dirs.toolboxDir,
+        homeDir: home,
+      });
+      const command = bwrapCommand(
+        dirs.workDir,
+        forbiddenZones(dirs, null),
+        { network: true, writePaths: [home] },
+        "true",
+        home,
+      );
+      const writable = command.indexOf(`'--bind' ${shellQuote(home)} ${shellQuote(home)}`);
+      expect(writable, "HOME 是批准写的那份").toBeGreaterThan(-1);
+      for (const name of LOCKED) {
+        const path = shellQuote(join(home, name));
+        expect(command.indexOf(`'--ro-bind' ${path} ${path}`), name).toBeGreaterThan(writable);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("网页终端的 bwrap", () => {
+  it("除了 X11，Bot 那套数据目录外的禁区也盖住，数据目录本身整块盖住", () => {
+    const realHome = process.env["HOME"];
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "baize-terminal-")));
+    try {
+      const fakeHome = join(root, "user");
+      mkdirSync(join(fakeHome, ".ssh"), { recursive: true });
+      process.env["HOME"] = fakeHome;
+      const data = join(root, "data");
+      for (const dir of [join(data, "home"), join(data, "shared")]) mkdirSync(dir, { recursive: true });
+      const { args } = terminalSpawn(data, join(data, "home"), join(data, "shared"));
+      const tmpfs = args.flatMap((arg, index) => (arg === "--tmpfs" ? [args[index + 1]] : []));
+      expect(tmpfs).toContain(join(fakeHome, ".ssh"));
+      expect(tmpfs).toContain("/tmp/.X11-unix");
+      expect(tmpfs).toContain(data);
+      expect(
+        tmpfs.filter((path) => path !== undefined && path.startsWith(join(fakeHome, ".config"))),
+        "不存在的禁区不挂，bwrap 在只读根上建不出挂载点",
+      ).toEqual([]);
+    } finally {
+      if (realHome === undefined) delete process.env["HOME"];
+      else process.env["HOME"] = realHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(!hasBwrap)("bwrap 下云电脑共用的 HOME", () => {
+  it("普通命令写不进 HOME，批准写 HOME 的那一次写得进，下一条照样只读", async () => {
+    const root = realpathSync(mkdtempSync(join(homedir(), ".baize-bwrap-home-")));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const home = join(root, "home");
+      const sandbox = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-home", {
+        toolboxDir: dirs.toolboxDir,
+        homeDir: home,
+      });
+      const run = (callId: string, command: string) =>
+        sandbox.tool.execute(callId, { command }, undefined, undefined, undefined as never).then(
+          (result) => ((result as { isError?: boolean }).isError === true ? "failed" : "ok"),
+          () => "failed",
+        );
+      expect(await run("plain", 'echo leak > "$HOME/leak.txt"')).toBe("failed");
+      expect(existsSync(join(home, "leak.txt"))).toBe(false);
+      sandbox.allow("run-home", "cli", { network: false, writePaths: [home] });
+      expect(await run("cli", 'mkdir -p "$HOME/.grok" && echo token > "$HOME/.grok/auth.json"')).toBe("ok");
+      expect(readFileSync(join(home, ".grok", "auth.json"), "utf8")).toBe("token\n");
+      expect(await run("again", 'echo again > "$HOME/.grok/auth.json"')).toBe("failed");
+      expect(readFileSync(join(home, ".grok", "auth.json"), "utf8"), "读得到，改不动").toBe("token\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("登记工具的命令能写 ~/.grok，写不了 ~/.local/bin 和 ~/.bashrc", async () => {
+    const root = realpathSync(mkdtempSync(join(homedir(), ".baize-bwrap-home-")));
+    try {
+      const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
+      const home = join(root, "home");
+      const sandbox = createSandboxedBash(dirs.workDir, forbiddenZones(dirs, null), () => "run-cli", {
+        toolboxDir: dirs.toolboxDir,
+        homeDir: home,
+      });
+      const cli = (callId: string, command: string) => {
+        sandbox.allow("run-cli", callId, { network: true, writePaths: [home] });
+        return sandbox.tool.execute(callId, { command }, undefined, undefined, undefined as never).then(
+          (result) => ((result as { isError?: boolean }).isError === true ? "failed" : "ok"),
+          () => "failed",
+        );
+      };
+      expect(await cli("grok", 'mkdir -p "$HOME/.grok" && echo token > "$HOME/.grok/x"')).toBe("ok");
+      expect(readFileSync(join(home, ".grok", "x"), "utf8")).toBe("token\n");
+      expect(await cli("codex", 'mkdir -p "$HOME/.local/bin" && echo evil > "$HOME/.local/bin/codex"')).toBe("failed");
+      expect(existsSync(join(home, ".local", "bin", "codex"))).toBe(false);
+      expect(await cli("bashrc", 'echo evil >> "$HOME/.bashrc"')).toBe("failed");
+      expect(await cli("swap", 'mv "$HOME/.bashrc" "$HOME/old" ; echo evil > "$HOME/.bashrc"')).toBe("failed");
+      expect(readFileSync(join(home, ".bashrc"), "utf8")).toBe("");
+      mkdirSync(join(home, ".ssh"));
+      writeFileSync(join(home, ".ssh", "id_ed25519"), "owner-key");
+      expect(await cli("ssh", 'cat "$HOME/.ssh/id_ed25519"'), "主人在终端里建的 ~/.ssh 照旧是禁区").toBe("failed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("禁区配置指向成环的符号链接", () => {
   it("browserProfileDir 成环：seatbelt profile 生成失败，报错点名 config.browser.profileDir", () => {

@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type RawData, WebSocket } from "ws";
@@ -18,17 +19,21 @@ import {
   UplinkAck,
 } from "@baize/shared";
 import {
+  cliHomeDir,
   createRunner,
   CURRENT_SESSION_VERSION,
   discoverMcpTools,
   publishDraft,
   type Runner,
   type RunnerConfig,
+  sandboxKind,
+  terminalSpawn,
 } from "@baize/bot-runner";
 import { backoffDelay, type BackoffOptions, defaultBackoff } from "./backoff.js";
 import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome } from "./chrome.js";
 import { createLiveScreen } from "./live-screen.js";
 import { checkLogin, createLogins, defaultLoginPages } from "./login.js";
+import { createTerminals, ptySpawner } from "./terminal.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
 import { loadInstallId } from "./install-id.js";
 import { WorkAppendChannel } from "./work-append.js";
@@ -112,15 +117,26 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const discoveries = new Map<AbortController, Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
-  const screen = createLiveScreen({
-    chrome,
-    uplink: (bytes, sent) => {
-      if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN || conn === null) return false;
-      link.socket.send(bytes, { binary: true }, () => sent());
-      return true;
-    },
+  const liveUplink = (bytes: Uint8Array, sent: () => void): boolean => {
+    if (link.phase !== "open" || link.socket.readyState !== WebSocket.OPEN || conn === null) return false;
+    link.socket.send(bytes, { binary: true }, () => sent());
+    return true;
+  };
+  const terminals = createTerminals({
+    uplink: liveUplink,
+    uplinkBacklog: () => (link.phase === "open" ? link.socket.bufferedAmount : 0),
     log,
+    available: () => computerKind === "remote" && sandboxKind() === "bwrap",
+    spawn: ptySpawner(() => {
+      const home = cliHomeDir(dataDir);
+      const shared = join(dataDir, "shared");
+      // bwrap 只挂得上已经存在的目录。
+      mkdirSync(home, { recursive: true });
+      mkdirSync(shared, { recursive: true });
+      return terminalSpawn(dataDir, home, shared);
+    }),
   });
+  const screen = createLiveScreen({ chrome, uplink: liveUplink, log, terminals });
   const login = createLogins({ chrome, present: screen.present, pages: defaultLoginPages, log }, loginTimeoutMs);
   const browserConfig: AgentRunnerConfig["browser"] = {
     profileDir: chrome.profileDir,
@@ -393,6 +409,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
         heartbeat = setInterval(() => sendBare({ type: "heartbeat", at: new Date().toISOString() }), heartbeatMs);
         heartbeat.unref();
         screen.reconnected();
+        terminals.reconnected();
         return;
       case "config": {
         // welcome 之前的报文在 applyMessage 里已经丢掉，走到这里 kind 一定存下了。
@@ -634,6 +651,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   function stop(): Promise<void> {
     if (stopPromise !== null) return stopPromise;
     stopping = true;
+    terminals.stop();
     for (const control of discoveries.keys()) control.abort();
     workAppends.disconnect();
     stopHeartbeat();

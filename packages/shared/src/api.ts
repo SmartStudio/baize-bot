@@ -751,3 +751,7 @@ export type ServerPush = z.infer<typeof ServerPush>;
 // GET /api/live：当前用户电脑上正在等人的画面，网页刷新后靠它找回。
 export const LiveSessionsResponse = z.object({ sessions: z.array(LiveSession) });
 export type LiveSessionsResponse = z.infer<typeof LiveSessionsResponse>;
+
+// POST /api/computers/:id/terminal：202，电脑起好终端后照常推 live_session，网页按这个号等它。
+export const OpenTerminalResponse = z.object({ liveId: LiveId });
+export type OpenTerminalResponse = z.infer<typeof OpenTerminalResponse>;

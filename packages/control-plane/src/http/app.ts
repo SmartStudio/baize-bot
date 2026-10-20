@@ -10,6 +10,7 @@ import {
   BotListResponse,
   BotResponse,
   CreateAccountRequest,
+  ComputerId,
   ComputerListResponse,
   ComputerTokenResponse,
   ContentPlanId,
@@ -37,11 +38,13 @@ import {
   GroupId,
   GroupListResponse,
   GroupResponse,
+  LiveId,
   LiveSessionsResponse,
   LoginAccountRequest,
   LoginAccountResponse,
   LoginRequest,
   LoginResponse,
+  OpenTerminalResponse,
   MeResponse,
   MessageId,
   MessageListResponse,
@@ -81,6 +84,7 @@ import {
   type User,
   type UserId,
 } from "@baize/shared";
+import { randomUUID } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
@@ -102,7 +106,7 @@ import { approvePlan, decideDraft, listDraftsForPage, listPlansForPage, returnPl
 import { listHandoffs } from "../repo/handoffs.js";
 import { createBot, deleteBot, ensureAssistant, findBot, listBots, setRunState, updateBot } from "../repo/bots.js";
 import { TABLE_ROLES } from "../repo/poker-presets.js";
-import { ensureComputer, listComputers, resetComputerToken } from "../repo/computers.js";
+import { ensureComputer, findComputerById, listComputers, resetComputerToken } from "../repo/computers.js";
 import { deleteGrant, listGrants } from "../repo/grants.js";
 import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { archiveGroup } from "../repo/archive-group.js";
@@ -207,6 +211,7 @@ const NOT_FOUND = { error: "没有这个对象" } as const;
 const UNAUTHORIZED = { error: "请先登录" } as const;
 // 和 Web mock 的 404 文案一致，卡片上直接显示它。
 const NO_ACCOUNT = { error: "没有这个账号" } as const;
+const NO_COMPUTER = { error: "没有这台电脑" } as const;
 const NO_DRAFT = { error: "没有这条草稿" } as const;
 const NO_PLAN = { error: "没有这份计划" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
@@ -428,7 +433,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (!body.ok) return c.json({ error: body.error }, 400);
     const ownerId = c.get("user").id;
     const result = await createPlaceholder(db, ownerId, body.value);
-    if (result.kind === "no_computer") return c.json({ error: "没有这台电脑" }, 404);
+    if (result.kind === "no_computer") return c.json(NO_COMPUTER, 404);
     hub.push(ownerId, { type: "account_updated", account: result.account });
     await agents.sendConfig(ownerId);
     return c.json(AccountResponse.parse({ account: result.account }), result.kind === "created" ? 201 : 200);
@@ -570,6 +575,18 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
       computer: withDispatchable(record, await computerAvailability(db, agents, ownerId)),
     });
     return c.json(ComputerTokenResponse.parse(remote));
+  });
+
+  app.post("/api/computers/:id/terminal", async (c) => {
+    const id = ComputerId.safeParse(c.req.param("id"));
+    if (!id.success) return c.json(NO_COMPUTER, 404);
+    const computer = await findComputerById(db, id.data);
+    if (computer === null || computer.ownerId !== c.get("user").id) return c.json(NO_COMPUTER, 404);
+    if (computer.kind !== "remote") return c.json({ error: "只有云电脑能开终端" }, 400);
+    const liveId = LiveId.parse(randomUUID());
+    if (!agents.sendLive(computer.id, { t: "terminal_open", liveId }))
+      return c.json({ error: "云电脑不在线，等它连上白泽后再开终端" }, 409);
+    return c.json(OpenTerminalResponse.parse({ liveId }), 202);
   });
 
   app.get("/api/bots", async (c) => {

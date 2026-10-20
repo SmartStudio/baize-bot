@@ -18,6 +18,8 @@ export const LivePurpose = z.discriminatedUnion("kind", [
   z
     .object({ kind: z.literal("takeover"), botId: BotId, groupId: GroupId, reason: z.string().min(1).max(200) })
     .strict(),
+  // 云电脑上的网页终端，由人在电脑页上点开，给 grok login、codex login 这类要人操作一次的命令用。
+  z.object({ kind: z.literal("terminal") }).strict(),
 ]);
 export type LivePurpose = z.infer<typeof LivePurpose>;
 
@@ -38,9 +40,16 @@ export type LiveSession = z.infer<typeof LiveSession>;
 export const LiveUserEnd = z.enum(["finish", "abandon"]);
 export type LiveUserEnd = z.infer<typeof LiveUserEnd>;
 
-/** 人能怎么结束：登录只能放弃（登上由电脑轮询判定），接手可以交还或放弃。Web 按它摆按钮，电脑按它收。 */
+/** 人能怎么结束：登录只能放弃（登上由电脑轮询判定），接手可以交还或放弃，终端只有关掉。Web 按它摆按钮，电脑按它收。 */
 export function liveEndActions(purpose: LivePurpose): readonly LiveUserEnd[] {
-  return purpose.kind === "login" ? ["abandon"] : ["finish", "abandon"];
+  switch (purpose.kind) {
+    case "login":
+      return ["abandon"];
+    case "takeover":
+      return ["finish", "abandon"];
+    case "terminal":
+      return ["finish"];
+  }
 }
 
 // 坐标用比例，换算成 CSS 像素是电脑的事：只有它手里有最新一帧的 deviceWidth / deviceHeight。
@@ -84,13 +93,27 @@ export const LiveInput = z.discriminatedUnion("kind", [
     .strict(),
   /** 整段上屏：输入法 compositionend 和粘贴，对应 Input.insertText。 */
   z.object({ kind: z.literal("text"), text: z.string().min(1).max(2000) }).strict(),
+  /** 终端：xterm 的 onData 原样送进伪终端，控制键就是它们的转义序列。 */
+  z.object({ kind: z.literal("term"), data: z.string().min(1).max(8192) }).strict(),
+  z
+    .object({
+      kind: z.literal("resize"),
+      cols: z.number().int().min(2).max(500),
+      rows: z.number().int().min(2).max(200),
+    })
+    .strict(),
 ]);
 export type LiveInput = z.infer<typeof LiveInput>;
 
-/** 电脑 → 控制面。session 是整份 upsert，重发同一份结果不变；closed 也幂等。frame 的负载是 JPEG。 */
+/**
+ * 电脑 → 控制面。session 是整份 upsert，重发同一份结果不变；closed 也幂等。frame 的负载是 JPEG，新帧可以顶掉旧帧。
+ * term 的负载是终端输出的原始字节，一个字节都不能丢，中继按到达顺序原样转发。
+ */
 export const LiveUp = z.discriminatedUnion("t", [
   z.object({ t: z.literal("session"), session: LiveAnnounce }).strict(),
   z.object({ t: z.literal("frame"), liveId: LiveId }).strict(),
+  /** replay 标记这一帧是整份回滚缓冲，每次有人 attached 都补发一份，空的也发。网页在这一帧上清屏，不在 session 头上清。 */
+  z.object({ t: z.literal("term"), liveId: LiveId, replay: z.literal(true).optional() }).strict(),
   z.object({ t: z.literal("closed"), liveId: LiveId }).strict(),
 ]);
 export type LiveUp = z.infer<typeof LiveUp>;
@@ -101,6 +124,8 @@ export const LiveDown = z.discriminatedUnion("t", [
   z.object({ t: z.literal("input"), liveId: LiveId, input: LiveInput }).strict(),
   z.object({ t: z.literal("end"), liveId: LiveId, action: LiveUserEnd }).strict(),
   z.object({ t: z.literal("reveal"), liveId: LiveId }).strict(),
+  /** 开一个终端，号由控制面给，电脑起好了照常报 session。只有云电脑认它。 */
+  z.object({ t: z.literal("terminal_open"), liveId: LiveId }).strict(),
 ]);
 export type LiveDown = z.infer<typeof LiveDown>;
 
@@ -108,6 +133,7 @@ export type LiveDown = z.infer<typeof LiveDown>;
 export const LiveToViewer = z.discriminatedUnion("t", [
   z.object({ t: z.literal("session"), session: LiveSession }).strict(),
   z.object({ t: z.literal("frame"), liveId: LiveId }).strict(),
+  z.object({ t: z.literal("term"), liveId: LiveId, replay: z.literal(true).optional() }).strict(),
 ]);
 export type LiveToViewer = z.infer<typeof LiveToViewer>;
 

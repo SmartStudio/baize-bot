@@ -107,6 +107,8 @@ Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里�
 
 `approve(runId, callId, outcome)` 只结算 runId 和 callId 都匹配的等待。`approved` 放行；`rejected` 的工具结果为「归属人拒绝了这个动作。」；`timed_out` 为「10 分钟没人批，按拒绝处理。」；`voided` 为「用户发了新消息，这一步作废了。」。作废结算后复用 `abortSession()` 中止对应群的会话，`runnerAbortedRuns` 标记让 reporter 不追加模型报错行。旧 prompt 从 `agent_settled` 收尾，`finishRun` 保证一个 runId 只发一次 `run_done`，原串行队列随后执行新 prompt。到期拒绝只拦工具，当前轮可继续告诉用户结果。
 
+**云电脑的 HOME 全 Bot 共用。** 它是 `<dataDir>/home`，沙箱里的 `HOME` 指向它，普通命令只读挂回，所以谁都看得见。主人在网页终端里登录的订阅型 CLI 把登录态留在这里，任何 Bot 不经审批就能读，这是有意的。bash 命令里的 `~` 闸门按这份 HOME 解，不按运行器进程的；Pi 的 read、write 在运行器进程里跑，`~` 照旧，碰这份 HOME 按数据目录的私有区拒。HOME 里的 `.ssh` 这类禁区按这份 HOME 再算一遍，照旧看不见。登记工具的命令批下来能写 HOME，用来续期登录态。但 `.local` 和 shell 启动文件（`.bashrc`、`.bash_aliases`、`.profile`、`.bash_profile`、`.bash_login`、`.bash_logout`、`.inputrc`、`.npmrc`）在可写的 HOME 之上再只读挂回，闸门对它们也不开审批，直接拒。不存在的建沙箱时先建成空的，`.inputrc` 写一行 `$include /etc/inputrc`。`.local/bin` 在每个 Bot 的 PATH 上，启动文件在主人的终端里跑，所以只有主人的网页终端能装命令、改启动文件。终端那个 bash 的 HOME 整个可写，数据目录外的禁区和 X 的 socket 照样盖住。
+
 ## 命令行工具
 
 主人在控制面登记的命令行工具（`grok` 这类）随 `config.cliTools` 下发，每项是命令名、装法、几个环境变量和能用的 Bot（`bots` 为 null 是全部）。运行器每次 config 都按 `botId` 整份重算（`src/cli-tools.ts` 的 `cliToolsFor`），不在新 config 里的就没了。它不进 Bot 的会话指纹，换了工具不重建会话，下一条命令和下一轮系统提示就用新的。

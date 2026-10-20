@@ -150,6 +150,11 @@
   color: var(--danger);
 }
 
+.computer-terminal > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .row-card > .computer-status {
   flex-direction: row;
   gap: var(--space-3);

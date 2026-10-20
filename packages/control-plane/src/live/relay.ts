@@ -29,28 +29,42 @@ export type LiveRelayDeps = {
   readonly inputPerSecond?: number;
   /** 输入限额的时钟，毫秒。测试冻住它来数限额。 */
   readonly now?: () => number;
+  /** 电脑断线后终端会话留多久等它重连重报，毫秒。 */
+  readonly terminalGraceMs?: number;
 };
 
 const MAX_AGENT_FRAME = 2 * 1024 * 1024;
 const DEFAULT_INPUT_PER_SECOND = 120;
+/** 终端输入按字节限：粘贴一大段是正常操作，按条数会把它截成半截命令。突发是两秒的量。 */
+const TERM_BYTES_PER_SECOND = 1024 * 1024;
+const TERM_BYTES_BURST = 2 * TERM_BYTES_PER_SECOND;
+const DEFAULT_TERMINAL_GRACE_MS = 15_000;
+/** RFC 6455 的 Policy Violation。终端输入丢一段就是一条错的命令，超额不丢，直接关掉。 */
+const CLOSE_INPUT_FLOOD = 1008;
 /** RFC 6455 的 Service Restart，和 /agent、/api/ws 停机时一样。 */
 const CLOSE_SHUTTING_DOWN = 1012;
+/** RFC 6455 的 Try Again Later。网页把它当断网，退避重连，电脑在重新 attached 时补发回滚缓冲。 */
+const CLOSE_TOO_SLOW = 1013;
+/** 终端输出不能丢也不能被顶掉，观看者积压超过这么多就当作跟不上，断开让它重连。 */
+const MAX_VIEWER_BACKLOG = 8 * 1024 * 1024;
 
 type SessionKey = `${UserId}:${LiveId}`;
-type Entry = { readonly link: AgentLink; readonly session: LiveSession };
+/** grace 只在终端会话的电脑断线后、重连重报前有：到点才结束。 */
+type Entry = { readonly link: AgentLink; readonly session: LiveSession; readonly grace?: NodeJS.Timeout };
 type Viewer = {
   readonly key: SessionKey;
   readonly liveId: LiveId;
   readonly socket: WebSocket;
   readonly frames: LatestWins;
   readonly admitInput: () => boolean;
+  readonly admitTermBytes: (bytes: number) => boolean;
 };
 
 /**
  * 画面面的中继。构造参数里没有 Db：它在结构上碰不到库。
  * 会话按 `${ownerId}:${liveId}` 作键：liveId 是电脑报的，别人的电脑报同一个号也撞不进来。
  * 观看者按电脑记，一台电脑同一时刻最多一个人在看：电脑上同时只有一个能被人操作的窗口。
- * 只解帧头，负载（JPEG）原样转发；输入原样转给电脑，不解释、不记日志。
+ * 只解帧头，负载（JPEG 或终端输出）原样转发；输入原样转给电脑，不解释、不记日志。
  */
 export class LiveRelay {
   readonly #deps: LiveRelayDeps;
@@ -73,14 +87,36 @@ export class LiveRelay {
       return;
     }
     const entry = this.#sessions.get(sessionKey(link.ownerId, header.liveId));
-    if (entry === undefined || entry.link !== link) return;
+    if (entry === undefined) {
+      // 电脑拒开终端时这个号从没登记过，网页还在等它的 session，推一条 live_closed 让它别干等。
+      if (header.t === "closed") this.#deps.push.push(link.ownerId, { type: "live_closed", liveId: header.liveId });
+      return;
+    }
+    if (entry.link !== link) return;
     if (header.t === "frame") this.#viewerOf(entry)?.frames.offer(bytes);
+    else if (header.t === "term") this.#term(entry, bytes);
     else this.#end(entry);
   }
 
-  /** 连接断了：这条连接上的会话全部结束，看画面的人收 gone，推 live_closed。按对象身份认连接，顶号的新连接不受影响。 */
+  /**
+   * 连接断了：这条连接上的画面会话全部结束，看画面的人收 gone，推 live_closed。按对象身份认连接，顶号的新连接不受影响。
+   * 终端会话不立刻结束：电脑上的 shell 还活着，观看者以 1012 关（网页当断网重连），宽限内这台电脑重连重报同一个号就接着用。
+   */
   dropAgent(link: AgentLink): void {
-    for (const entry of this.#sessions.values()) if (entry.link === link) this.#end(entry);
+    for (const [key, entry] of this.#sessions) {
+      if (entry.link !== link) continue;
+      if (entry.session.purpose.kind !== "terminal") {
+        this.#end(entry);
+        continue;
+      }
+      const viewer = this.#viewerOf(entry);
+      if (viewer !== null) this.#detach(entry.session.computerId, viewer, CLOSE_SHUTTING_DOWN, "云电脑断线，等它重连");
+      const grace = setTimeout(() => {
+        const current = this.#sessions.get(key);
+        if (current?.grace === grace) this.#end(current);
+      }, this.#deps.terminalGraceMs ?? DEFAULT_TERMINAL_GRACE_MS);
+      this.#sessions.set(key, { ...entry, grace });
+    }
   }
 
   /**
@@ -102,6 +138,7 @@ export class LiveRelay {
     const previous = this.#viewers.get(computerId);
     if (previous !== undefined) this.#detach(computerId, previous, LiveViewerClose.replaced, "在别的窗口打开了");
 
+    const inputPerSecond = this.#deps.inputPerSecond ?? DEFAULT_INPUT_PER_SECOND;
     const viewer: Viewer = {
       key,
       liveId,
@@ -111,7 +148,8 @@ export class LiveRelay {
         socket.send(bytes, () => sent());
         return true;
       }),
-      admitInput: inputBudget(this.#deps.inputPerSecond ?? DEFAULT_INPUT_PER_SECOND, this.#deps.now ?? Date.now),
+      admitInput: tokenBucket(inputPerSecond, inputPerSecond, this.#deps.now ?? Date.now),
+      admitTermBytes: tokenBucket(TERM_BYTES_PER_SECOND, TERM_BYTES_BURST, this.#deps.now ?? Date.now),
     };
     this.#viewers.set(computerId, viewer);
     socket.on("message", (raw, isBinary) => {
@@ -135,6 +173,7 @@ export class LiveRelay {
       viewer.frames.reset();
       viewer.socket.close(CLOSE_SHUTTING_DOWN, "控制面正在停机");
     }
+    for (const entry of this.#sessions.values()) clearTimeout(entry.grace);
     this.#viewers.clear();
     this.#sessions.clear();
   }
@@ -144,6 +183,7 @@ export class LiveRelay {
     const key = sessionKey(link.ownerId, announce.liveId);
     const existing = this.#sessions.get(key);
     if (existing !== undefined && existing.session.computerId !== link.computerId) return;
+    clearTimeout(existing?.grace);
     const session: LiveSession = { ...announce, computerId: link.computerId };
     const entry: Entry = { link, session };
     this.#sessions.set(key, entry);
@@ -156,7 +196,17 @@ export class LiveRelay {
       toAgent(link, { t: "viewer", liveId: announce.liveId, state: "attached" });
   }
 
+  /** 终端输出按到达顺序原样转，不走 latestWins。没人看就丢：电脑那边留着回滚缓冲，下次 attached 时补。 */
+  #term(entry: Entry, bytes: Uint8Array): void {
+    const viewer = this.#viewerOf(entry);
+    if (viewer === null) return;
+    if (viewer.socket.bufferedAmount > MAX_VIEWER_BACKLOG)
+      this.#detach(entry.session.computerId, viewer, CLOSE_TOO_SLOW, "终端输出跟不上，稍后重连");
+    else sendTo(viewer.socket, bytes);
+  }
+
   #end(entry: Entry): void {
+    clearTimeout(entry.grace);
     const { liveId, computerId } = entry.session;
     this.#sessions.delete(sessionKey(entry.link.ownerId, liveId));
     const viewer = this.#viewerOf(entry);
@@ -191,7 +241,14 @@ export class LiveRelay {
     const { header } = decoded;
     const { liveId } = viewer;
     if (header.t === "input") {
-      if (viewer.admitInput()) toAgent(entry.link, { t: "input", liveId, input: header.input });
+      const { kind } = header.input;
+      if (kind === "term" || kind === "resize") {
+        if (viewer.admitTermBytes(bytes.length)) toAgent(entry.link, { t: "input", liveId, input: header.input });
+        else {
+          console.warn(`电脑 ${entry.session.computerId} 的终端 ${liveId} 输入超过每秒 1MB，关掉这个观看者`);
+          this.#detach(entry.session.computerId, viewer, CLOSE_INPUT_FLOOD, "终端输入太快");
+        }
+      } else if (viewer.admitInput()) toAgent(entry.link, { t: "input", liveId, input: header.input });
     } else if (header.t === "end") toAgent(entry.link, { t: "end", liveId, action: header.action });
     else toAgent(entry.link, { t: "reveal", liveId });
   }
@@ -215,16 +272,16 @@ function sendTo(socket: WebSocket, bytes: Uint8Array): void {
   if (socket.readyState === socket.OPEN) socket.send(bytes);
 }
 
-/** 令牌桶：满桶是一秒的量，按流逝时间连续回填。 */
-function inputBudget(perSecond: number, now: () => number): () => boolean {
-  let tokens = perSecond;
+/** 令牌桶：满桶是 burst，按流逝时间连续回填。 */
+function tokenBucket(perSecond: number, burst: number, now: () => number): (cost?: number) => boolean {
+  let tokens = burst;
   let last = now();
-  return () => {
+  return (cost = 1) => {
     const at = now();
-    tokens = Math.min(perSecond, tokens + ((at - last) * perSecond) / 1000);
+    tokens = Math.min(burst, tokens + ((at - last) * perSecond) / 1000);
     last = at;
-    if (tokens < 1) return false;
-    tokens -= 1;
+    if (tokens < cost) return false;
+    tokens -= cost;
     return true;
   };
 }

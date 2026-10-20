@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { LiveSession } from "@baize/shared";
+import type { ScreenSession } from "../state/live.js";
 import { LivePanel } from "./LivePanel.js";
 
 const computers = vi.hoisted(() => ({
@@ -15,8 +16,16 @@ vi.mock("../state/app.js", () => ({
 }));
 
 // purpose 走 parse 打上品牌，测试里直接写字面量。
-const session = (purpose: unknown, computerId = "cmp_remote") =>
-  LiveSession.parse({ liveId: "00000000-0000-4000-8000-00000000000a", purpose, origin: null, computerId });
+const session = (purpose: unknown, computerId = "cmp_remote"): ScreenSession => {
+  const parsed = LiveSession.parse({
+    liveId: "00000000-0000-4000-8000-00000000000a",
+    purpose,
+    origin: null,
+    computerId,
+  });
+  if (parsed.purpose.kind === "terminal") throw new Error("画面面板不摆终端");
+  return { ...parsed, purpose: parsed.purpose };
+};
 
 const login = session({ kind: "login", accountId: "acc_1", platform: "xiaohongshu", attempt: "try_1" });
 const takeover = session({ kind: "takeover", botId: "bot_1", groupId: "grp_1", reason: "知乎要登录，请扫码" });

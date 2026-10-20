@@ -12,6 +12,7 @@ import {
 } from "@baize/shared";
 import type { AssistantChrome } from "./chrome.js";
 import { toCdpInput, type Viewport } from "./live-input.js";
+import type { Terminals } from "./terminal.js";
 
 // 电脑上的屏：把助理 Chrome 的某一页摆给 Web 上的人看，替人把点击和按键送进去。
 // 屏不排队，谁在看谁上屏：同时登记的会话随便几个，前台标签页只给当前有观看者的那一个。
@@ -22,6 +23,8 @@ export interface LiveScreenDeps {
   /** 发一帧二进制上行。连接不在就回 false；sent 在 ws 把字节交出去之后回调。 */
   readonly uplink: (bytes: Uint8Array, sent: () => void) => boolean;
   readonly log: (line: string) => void;
+  /** 终端的帧分给它：开终端，和属于开着的终端的 liveId。没有它的屏不认终端。 */
+  readonly terminals?: Pick<Terminals, "owns" | "receive">;
 }
 
 export interface LiveScreen {
@@ -261,6 +264,10 @@ export function createLiveScreen(deps: LiveScreenDeps): LiveScreen {
       return;
     }
     const { header } = decoded;
+    if (header.t === "terminal_open" || deps.terminals?.owns(header.liveId) === true) {
+      deps.terminals?.receive(header);
+      return;
+    }
     const entry = entries.get(header.liveId);
     if (entry === undefined) return;
     switch (header.t) {

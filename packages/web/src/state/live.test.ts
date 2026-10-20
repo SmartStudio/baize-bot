@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AccountId, ComputerId, LiveId, LiveSession, LoginAttemptId } from "@baize/shared";
 import { EMPTY_CONTENT, reduceContent } from "./content.js";
-import { shownLive, shownLogin, takeoverScreen } from "./live.js";
+import { openTerminal, shownLive, shownLogin, takeoverScreen } from "./live.js";
 import { createClock } from "./stamped.js";
 import type { Action, ReadyState } from "./types.js";
 
@@ -29,6 +29,9 @@ const takeover = (liveId: LiveId) =>
     origin: "https://www.zhihu.com",
     computerId: CMP,
   });
+
+const terminal = (liveId: LiveId, computerId = CMP) =>
+  LiveSession.parse({ liveId, purpose: { kind: "terminal" }, origin: null, computerId });
 
 const setup = () => {
   let state = { content: EMPTY_CONTENT } as unknown as ReadyState;
@@ -246,6 +249,96 @@ describe("整页只摆一块画面：登录自动摆，接手点开才摆，两�
     put({ type: "takeover_opened", liveId: LIVE_C, openedAt: next() });
     put({ type: "takeover_hidden", liveId: LIVE_B });
     expect(shownLive(get())).toMatchObject({ kind: "takeover", session: { liveId: LIVE_C } });
+  });
+});
+
+describe("终端点开时会话还在路上，报上来才摆", () => {
+  it("点开在先、live_session 在后：先不摆，会话一到就摆终端", () => {
+    const { next, put, get } = setup();
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    expect(shownLive(get())).toBeNull();
+    expect(get().terminal?.liveId).toBe(LIVE_A);
+    put({ type: "live_upserted", session: terminal(LIVE_A), seq: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "terminal", session: { liveId: LIVE_A } });
+  });
+
+  it("等会话时重拉的列表里还没有它，接着等，不算关了", () => {
+    const { next, put, get } = setup();
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "live_loaded", sessions: [], seq: next() });
+    expect(get().terminal?.liveId).toBe(LIVE_A);
+  });
+
+  it("会话出现过又关了：清掉点开的记录；再点这个号也不复活", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: terminal(LIVE_A), seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "live_removed", liveId: LIVE_A, seq: next() });
+    expect(get().terminal).toBeNull();
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    expect(shownLive(get())).toBeNull();
+  });
+
+  it("从没报上来就收到 live_closed：电脑拒开了，记成 refused 留给那台电脑，不摆面板", () => {
+    const { next, put, get } = setup();
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "live_removed", liveId: LIVE_A, seq: next() });
+    expect(get().terminal).toEqual({ status: "refused", liveId: LIVE_A, computerId: CMP });
+    expect(shownLive(get())).toBeNull();
+  });
+
+  it("live_closed 比开终端的回包先到，也算拒开", () => {
+    const { next, put, get } = setup();
+    const openedAt = next();
+    put({ type: "live_removed", liveId: LIVE_A, seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt });
+    expect(get().terminal).toEqual({ status: "refused", liveId: LIVE_A, computerId: CMP });
+  });
+
+  it("拒开之后再点一次，新号接着等", () => {
+    const { next, put, get } = setup();
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "live_removed", liveId: LIVE_A, seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_B, computerId: CMP, openedAt: next() });
+    expect(get().terminal).toMatchObject({ status: "open", liveId: LIVE_B });
+    put({ type: "live_upserted", session: terminal(LIVE_B), seq: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "terminal", session: { liveId: LIVE_B } });
+  });
+
+  it("断线重拉发现终端没了，也清掉", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: terminal(LIVE_A), seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "live_loaded", sessions: [], seq: next() });
+    expect(get().terminal).toBeNull();
+  });
+
+  it("终端开着时点登录摆登录，再点「回到终端」又摆终端", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: terminal(LIVE_A), seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "login_opened", accountId: ACC, startedAt: next(), attempt: TRY_1 });
+    put({ type: "live_upserted", session: login(LIVE_B, TRY_1), seq: next() });
+    expect(shownLive(get())?.kind).toBe("login");
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    expect(shownLive(get())).toMatchObject({ kind: "terminal", session: { liveId: LIVE_A } });
+  });
+
+  it("收起终端只清这一页的记录，会话还在，电脑页靠它给「回到终端」", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: terminal(LIVE_A), seq: next() });
+    put({ type: "terminal_opened", liveId: LIVE_A, computerId: CMP, openedAt: next() });
+    put({ type: "terminal_hidden", liveId: LIVE_A });
+    expect(shownLive(get())).toBeNull();
+    expect(openTerminal(get().live, CMP)?.liveId).toBe(LIVE_A);
+    expect(openTerminal(get().live, ComputerId.parse("cmp_other")), "别的电脑上没有终端").toBeNull();
+  });
+
+  it("登录和接手会话不算终端", () => {
+    const { next, put, get } = setup();
+    put({ type: "live_upserted", session: takeover(LIVE_A), seq: next() });
+    put({ type: "live_upserted", session: login(LIVE_B, TRY_1), seq: next() });
+    expect(openTerminal(get().live, CMP)).toBeNull();
   });
 });
 

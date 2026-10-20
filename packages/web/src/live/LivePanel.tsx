@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Globe, MonitorUp } from "lucide-react";
-import { liveEndActions, type ComputerKind, type LiveInput, type LiveSession, type LiveUserEnd } from "@baize/shared";
+import { liveEndActions, type ComputerKind, type LiveInput, type LiveUserEnd } from "@baize/shared";
 import { useApp } from "../state/app.js";
+import type { ScreenSession } from "../state/live.js";
 import { reconnectDelay } from "../state/reconnect.js";
 import { LIVE_TEXT, PLATFORM, beforeChinese, computerName, liveEndText } from "../components/messages/content.js";
 import {
@@ -13,13 +14,11 @@ import {
   wheelInput,
   type MoveCoalescer,
 } from "./input.js";
-import { openLiveViewer, type LiveSink, type LiveViewer } from "./viewer.js";
-
-const IGNORE: LiveSink = { session: () => undefined, frame: () => undefined, closed: () => undefined };
+import { IGNORE, openLiveViewer, type LiveViewer } from "./viewer.js";
 
 // 宿主按 liveId 给 key：换了画面就是另一块面板，连接、帧、地址栏都从头来。
 type Props = {
-  session: LiveSession;
+  session: ScreenSession;
   // 面板该收起了：点了结束按钮，或者用户在「别处打开了」「结束了」之后点收起。结束那一句由面板自己发。
   onDismiss: () => void;
 };
@@ -95,6 +94,7 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
           setConn("live");
           setOrigin(next.origin);
         },
+        term: () => undefined,
         frame: (jpeg) => {
           failures = 0;
           setConn("live");

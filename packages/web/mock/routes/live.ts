@@ -8,6 +8,7 @@ import {
   LiveId,
   LiveSession,
   LiveViewerClose,
+  OpenTerminalResponse,
   RunId,
   decodeLive,
   encodeLive,
@@ -19,6 +20,7 @@ import {
 } from "@baize/shared";
 import { z } from "zod";
 import { LIVE_FRAME_JPEG } from "../state/live-frame.js";
+import { computersOf } from "../state/content.js";
 import { appendMessage, rewriteMessage } from "../state/messages.js";
 import { readBody, send, type Push, type Route } from "./http.js";
 
@@ -38,6 +40,11 @@ type ToolCall = Extract<MessageBody, { kind: "tool_call" }>;
 // hold 的卡收到 end 只关画面，用户怎么结的记在 held 里，等测试点 settle 再改卡，好看清两步之间卡上写什么。
 const takeoverCards = new Map<LiveId, { groupId: GroupId; messageId: MessageId; body: ToolCall; hold: boolean }>();
 const held = new Map<LiveId, LiveUserEnd>();
+// 假终端：每个会话一份回滚缓冲，收到的字原样回显进去，观看者每次连上整份补发，和电脑代理的终端一个样。
+const terminals = new Map<LiveId, string>();
+const textEncoder = new TextEncoder();
+// 下一次开终端电脑拒开：不报会话，直接 closed，控制面替它推 live_closed。
+let refuseTerminal = false;
 
 export const resetLive = (): void => {
   for (const { socket } of viewers.values()) socket.close(LiveViewerClose.gone);
@@ -45,14 +52,17 @@ export const resetLive = (): void => {
   sessions.clear();
   takeoverCards.clear();
   held.clear();
+  terminals.clear();
   received.length = 0;
   screenOn = false;
+  refuseTerminal = false;
 };
 
 const closeSession = (liveId: LiveId, push: Push): boolean => {
   const session = sessions.get(liveId);
   if (session === undefined) return false;
   sessions.delete(liveId);
+  terminals.delete(liveId);
   push({ type: "live_closed", liveId });
   const viewer = viewers.get(session.computerId);
   if (viewer?.liveId === liveId) {
@@ -102,24 +112,62 @@ export const attachLiveViewer = (socket: WebSocket, rawId: string, push: Push): 
   if (previous !== undefined) previous.socket.close(LiveViewerClose.replaced);
   viewers.set(session.computerId, { liveId, socket });
   socket.send(encodeLive({ t: "session", session }));
-  socket.send(encodeLive({ t: "frame", liveId }, LIVE_FRAME_JPEG));
+  const scrollback = terminals.get(liveId);
+  if (scrollback === undefined) socket.send(encodeLive({ t: "frame", liveId }, LIVE_FRAME_JPEG));
+  else socket.send(encodeLive({ t: "term", liveId, replay: true }, textEncoder.encode(scrollback)));
   socket.on("message", (data, isBinary) => {
     if (!isBinary || !(data instanceof Buffer)) return;
     const decoded = decodeLive(LiveFromViewer, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
     if (decoded === null) return;
     received.push({ liveId, message: decoded.header });
-    if (decoded.header.t !== "end") return;
+    const header = decoded.header;
+    if (header.t === "input" && header.input.kind === "term" && terminals.has(liveId)) {
+      // 回车回成换行，屏上才一行一行地走。
+      const echo = header.input.data.replace(/\r/g, "\r\n");
+      terminals.set(liveId, (terminals.get(liveId) ?? "") + echo);
+      socket.send(encodeLive({ t: "term", liveId }, textEncoder.encode(echo)));
+    }
+    if (header.t !== "end") return;
     // 先推 live_closed 再改卡：真栈上画面由电脑的屏收起，卡的终态要等工具结果经运行器回来，一般晚一步。
     closeSession(liveId, push);
-    if (takeoverCards.get(liveId)?.hold === true) held.set(liveId, decoded.header.action);
-    else settleTakeover(liveId, decoded.header.action, push);
+    if (takeoverCards.get(liveId)?.hold === true) held.set(liveId, header.action);
+    else settleTakeover(liveId, header.action, push);
   });
   socket.on("close", () => {
     if (viewers.get(session.computerId)?.socket === socket) viewers.delete(session.computerId);
   });
 };
 
-export const liveRoutes: Route = async ({ res, path, method }) => {
+const TERMINAL_PATH = /^\/api\/computers\/([^/]+)\/terminal$/;
+const TERMINAL_GREETING = "baize@cloud:~$ ";
+
+// 照控制面：回 202 只给号，「电脑」稍后才报上会话，网页得等 live_session 推到再摆面板。
+const openTerminal = (computerId: string, res: Parameters<Route>[0]["res"], push: Push): void => {
+  const computer = computersOf().computers.find((row) => row.id === computerId);
+  if (computer === undefined) return send(res, 404, { error: "没有这台电脑" });
+  if (computer.kind !== "remote") return send(res, 400, { error: "只有云电脑能开终端" });
+  if (computer.status !== "online") return send(res, 409, { error: "云电脑不在线，等它连上白泽后再开终端" });
+  const liveId = LiveId.parse(randomUUID());
+  send(res, 202, OpenTerminalResponse.parse({ liveId }));
+  if (refuseTerminal) {
+    refuseTerminal = false;
+    setTimeout(() => push({ type: "live_closed", liveId }), 50);
+    return;
+  }
+  setTimeout(() => {
+    const session = LiveSession.parse({ liveId, purpose: { kind: "terminal" }, origin: null, computerId: computer.id });
+    sessions.set(liveId, session);
+    terminals.set(liveId, TERMINAL_GREETING);
+    push({ type: "live_session", session });
+  }, 50);
+};
+
+export const liveRoutes: Route = async ({ res, path, method, push }) => {
+  const terminal = method === "POST" ? TERMINAL_PATH.exec(path) : null;
+  if (terminal !== null) {
+    openTerminal(decodeURIComponent(terminal[1] ?? ""), res, push);
+    return true;
+  }
   if (method !== "GET" || path !== "/api/live") return false;
   send(res, 200, { sessions: [...sessions.values()] });
   return true;
@@ -165,7 +213,8 @@ const announceTakeover = (request: z.infer<typeof TakeoverRequest>, push: Push) 
 
 // Playwright 造场景用：开关画面面、读收到的输入、直接登记一个会话、造一次 Bot 请人接手、从电脑那头收起
 // （只关会话不改卡）、被别处顶掉、断网（drop：不带关闭码直接掐掉，网页按网络断处理去重连）、
-// 替运行器把 hold 住的接手卡改成终态（settle）。
+// 电脑断线进了宽限（restart：观看者以 1012 关，会话留着）、替运行器把 hold 住的接手卡改成终态（settle）、
+// 让下一次开终端被电脑拒开（refuse-terminal）。
 export const liveTestRoutes: Route = async ({ req, res, path, method, push }) => {
   if (!path.startsWith("/api/test/live")) return false;
   if (method === "POST" && path === "/api/test/live/screen") {
@@ -197,7 +246,12 @@ export const liveTestRoutes: Route = async ({ req, res, path, method, push }) =>
     }
     return true;
   }
-  const match = /^\/api\/test\/live\/([^/]+)\/(close|replace|drop|settle)$/.exec(path);
+  if (method === "POST" && path === "/api/test/live/refuse-terminal") {
+    refuseTerminal = true;
+    send(res, 204);
+    return true;
+  }
+  const match = /^\/api\/test\/live\/([^/]+)\/(close|replace|drop|restart|settle)$/.exec(path);
   if (method !== "POST" || match === null) return false;
   const liveId = LiveId.safeParse(match[1]);
   if (!liveId.success) {
@@ -224,6 +278,7 @@ export const liveTestRoutes: Route = async ({ req, res, path, method, push }) =>
   else {
     viewers.delete(session.computerId);
     if (match[2] === "drop") viewer.socket.terminate();
+    else if (match[2] === "restart") viewer.socket.close(1012);
     else viewer.socket.close(LiveViewerClose.replaced);
     send(res, 204);
   }

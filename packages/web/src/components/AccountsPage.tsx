@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Lock } from "lucide-react";
 import {
   type Account,
@@ -11,6 +11,7 @@ import {
   type GroupId,
 } from "@baize/shared";
 import { useApp, type RemotePairing } from "../state/app.js";
+import { openTerminal } from "../state/live.js";
 import type { LoginFlow } from "../state/types.js";
 import { ConnectEntries } from "./ConnectEntries.js";
 import { loginFlowNote } from "./LoginCard.js";
@@ -23,6 +24,7 @@ import {
   LOGIN_TEXT,
   PLATFORM,
   TIER,
+  TERMINAL_TEXT,
   TIERS,
   VIA_TEXT,
   blockedTier,
@@ -203,6 +205,64 @@ const groupsOf = (accounts: Account[], computers: Record<string, Computer>): Gro
   return [...groups.values()].sort((left, right) => rank(left) - rank(right));
 };
 
+// 终端开出去到会话报上来之间等多久。电脑拒开会报 closed、控制面推 live_closed，记录变成 refused；这个超时只兜推送丢了的底。
+const TERMINAL_WAIT_MS = 20_000;
+
+type Opening = { status: "idle" } | { status: "busy" } | { status: "failed"; message: string };
+
+// 云电脑那一行下面的终端入口。还开着终端（刷新之后也算）就给「回到终端」，面板本身由 LiveHost 摆。
+const TerminalAction = ({ computer }: { computer: Computer }) => {
+  const { state, actions } = useApp();
+  const [opening, setOpening] = useState<Opening>({ status: "idle" });
+  const content = state.status === "ready" ? state.content : null;
+  const existing = content === null ? null : openTerminal(content.live, computer.id);
+  const record = content?.terminal?.computerId === computer.id ? content.terminal : null;
+  const waiting = record?.status === "open" && content?.live[record.liveId] === undefined ? record.liveId : null;
+  const failed =
+    opening.status === "failed" ? opening.message : record?.status === "refused" ? TERMINAL_TEXT.notOpened : null;
+
+  useEffect(() => {
+    if (waiting === null) return;
+    const timer = setTimeout(() => {
+      setOpening({ status: "failed", message: TERMINAL_TEXT.notOpened });
+      void actions.hideTerminal(waiting).catch(() => undefined);
+    }, TERMINAL_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [waiting, actions]);
+
+  const open = () => {
+    if (existing !== null) {
+      void actions.showTerminal(existing).catch(() => undefined);
+      return;
+    }
+    setOpening({ status: "busy" });
+    actions
+      .openTerminal(computer.id)
+      .then(() => setOpening({ status: "idle" }))
+      .catch((cause: unknown) =>
+        setOpening({ status: "failed", message: cause instanceof Error ? cause.message : "请重试" }),
+      );
+  };
+
+  const busy = existing === null && (opening.status === "busy" || waiting !== null);
+  return (
+    <div className="row-card computer-terminal" data-testid="computer-terminal">
+      <span>
+        <b>终端</b>
+        <small>{TERMINAL_TEXT.explain}</small>
+        {failed !== null ? (
+          <small className="grant-error" role="alert" data-testid="terminal-open-error">
+            {failed}
+          </small>
+        ) : null}
+      </span>
+      <button type="button" className="ghost-button" data-testid="terminal-open" disabled={busy} onClick={open}>
+        {existing !== null ? TERMINAL_TEXT.back : busy ? TERMINAL_TEXT.opening : TERMINAL_TEXT.open}
+      </button>
+    </div>
+  );
+};
+
 type Pairing =
   | { status: "idle" }
   | { status: "busy" }
@@ -229,20 +289,18 @@ const ComputersSection = ({ computers, ready }: { computers: Record<string, Comp
     <section className="computers-page" data-testid="computer-list">
       <p className="group-label">电脑</p>
       {rows.map((computer) => (
-        <div
-          className="row-card computer-row"
-          data-testid="computer-row"
-          data-computer-id={computer.id}
-          key={computer.id}
-        >
-          <span>
-            <b>{COMPUTER_KIND_TEXT[computer.kind]}</b>
-          </span>
-          <span className="computer-status" data-testid="computer-status" data-status={computer.status}>
-            <i className={`status-dot ${COMPUTER_STATUS_CLASS[computer.status]}`} aria-hidden="true" />
-            <b>{COMPUTER_STATUS_TEXT[computer.status]}</b>
-          </span>
-        </div>
+        <Fragment key={computer.id}>
+          <div className="row-card computer-row" data-testid="computer-row" data-computer-id={computer.id}>
+            <span>
+              <b>{COMPUTER_KIND_TEXT[computer.kind]}</b>
+            </span>
+            <span className="computer-status" data-testid="computer-status" data-status={computer.status}>
+              <i className={`status-dot ${COMPUTER_STATUS_CLASS[computer.status]}`} aria-hidden="true" />
+              <b>{COMPUTER_STATUS_TEXT[computer.status]}</b>
+            </span>
+          </div>
+          {computer.kind === "remote" ? <TerminalAction computer={computer} /> : null}
+        </Fragment>
       ))}
       {pairing.status === "shown" ? (
         <div className="row-card computer-pairing" data-testid="computer-pairing" role="status">

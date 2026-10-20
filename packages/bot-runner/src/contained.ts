@@ -4,9 +4,13 @@ import type { SandboxKind } from "./gate.js";
 
 export type ContainmentLevel = "none" | "closed";
 
-/** closed 时带着沙箱 bash 的系统 PATH 和这个 Bot 的工具箱。两样都由 createSandboxedBash 给出，批 pip 时写路径就是这个工具箱。 */
+/**
+ * closed 时带着沙箱 bash 的系统 PATH、这个 Bot 的工具箱和这台云电脑所有 Bot 共用的 HOME。都由 createSandboxedBash 给出，
+ * 批 pip 时写路径就是这个工具箱。
+ */
 export type Containment =
-  { readonly level: "none" } | { readonly level: "closed"; readonly searchPath: string; readonly toolboxDir: string };
+  | { readonly level: "none" }
+  | { readonly level: "closed"; readonly searchPath: string; readonly toolboxDir: string; readonly homeDir: string };
 
 /** 只有远程电脑上的 bwrap 是 closed。Mac 的 seatbelt 不在拍板范围里，一条都不放宽。 */
 export function containmentFor(computerKind: ComputerKind, sandbox: SandboxKind): { readonly level: ContainmentLevel } {
@@ -16,12 +20,34 @@ export function containmentFor(computerKind: ComputerKind, sandbox: SandboxKind)
 export type ClosedContainment = Extract<Containment, { level: "closed" }>;
 
 export const toolboxShimDir = (toolboxDir: string): string => join(dirname(toolboxDir), "toolbox-bin");
+/** 云电脑的 HOME。主人在网页终端里登录的 CLI 把登录态留在这里，所有 Bot 共用一份。 */
+export const cliHomeDir = (dataDir: string): string => join(dataDir, "home");
+/** 主人在终端里 `npm i -g` 装的命令落在这里（终端的 NPM_CONFIG_PREFIX 是 `<homeDir>/.local`）。 */
+export const homeBinDir = (homeDir: string): string => join(homeDir, ".local", "bin");
+
+// 登记工具的命令批了就能写 HOME（续期登录态），但改不动别的命令和 shell 启动文件：.local/bin 在所有 Bot 的 PATH 上，
+// 启动文件在主人的终端里跑。Debian 默认的 .bashrc 会 source .bash_aliases，一并锁上。
+export const HOME_LOCKED_DIRS = [".local"] as const;
+export const HOME_LOCKED_FILES = [
+  ".bashrc",
+  ".bash_aliases",
+  ".profile",
+  ".bash_profile",
+  ".bash_login",
+  ".bash_logout",
+  ".inputrc",
+  ".npmrc",
+] as const;
+
+/** 沙箱在可写的 HOME 之上只读挂回它们，闸门也不为它们开审批。只有主人的网页终端改得动。 */
+export const homeLockedPaths = (homeDir: string): readonly string[] =>
+  [...HOME_LOCKED_DIRS, ...HOME_LOCKED_FILES].map((name) => join(homeDir, name));
 /** `npm i -g` 在云电脑上的 prefix。全局包的命令落在它的 bin 下。 */
 export const toolboxNodeDir = (toolboxDir: string): string => join(toolboxDir, "node");
 
 /**
- * 云电脑上 bash 的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin 和 node/bin 垫底。pip、npm -g 装进来的程序还能用，
- * 但盖不住系统同名程序。自动放行和批准的命令是同一串，批准过的装包之后不问的 python3 也用得上。
+ * 云电脑上 bash 的 PATH：四个名字的 shim 在最前，系统目录居中，venv/bin、node/bin 和 HOME 的 .local/bin 垫底。
+ * pip、npm -g 和主人在终端里装的程序还能用，但盖不住系统和工具箱里的同名程序。自动放行和批准的命令是同一串，批准过的装包之后不问的 python3 也用得上。
  * 闸门认命令行工具时按的也是这一串，两边不能各算各的。
  */
 export const toolboxSearchPath = (containment: ClosedContainment): string =>
@@ -30,6 +56,7 @@ export const toolboxSearchPath = (containment: ClosedContainment): string =>
     containment.searchPath,
     join(containment.toolboxDir, "venv", "bin"),
     join(toolboxNodeDir(containment.toolboxDir), "bin"),
+    homeBinDir(containment.homeDir),
   ].join(":");
 
 export const SYSTEM_PACKAGE_MANAGERS: ReadonlySet<string> = new Set([

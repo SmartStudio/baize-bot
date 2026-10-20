@@ -126,8 +126,15 @@ export type ContentBook = {
   // 用户点开的那个接手画面。和 logins 一样是这一页的状态，不是电脑上的事实；openedAt 和 startedAt 同一个钟，
   // 两种画面都在时比它们决定摆哪块。会话没了跟着清，晚到的同号会话不会自己弹出来。
   takeover: { liveId: LiveId; openedAt: Seq } | null;
+  // 用户在电脑页上点开的终端。点下去时会话还没报上来，先记号等 live_session；会话出现过又没了才清，openedAt 同上一个钟。
+  // 从没报上来就收到 live_closed 是电脑拒开了，记成 refused 留给那台电脑的行说一句，再点一次就换掉。
+  terminal: TerminalRecord | null;
   stamps: Stamps;
 };
+
+export type TerminalRecord =
+  | { status: "open"; liveId: LiveId; computerId: ComputerId; openedAt: Seq }
+  | { status: "refused"; liveId: LiveId; computerId: ComputerId };
 
 // 表按 id 比号，会话的 id 就是 liveId。
 export type LiveEntry = LiveSession & { readonly id: LiveId };
@@ -273,6 +280,8 @@ export type Action =
   | { type: "live_removed"; liveId: LiveId; seq: Seq }
   | { type: "takeover_opened"; liveId: LiveId; openedAt: Seq }
   | { type: "takeover_hidden"; liveId: LiveId }
+  | { type: "terminal_opened"; liveId: LiveId; computerId: ComputerId; openedAt: Seq }
+  | { type: "terminal_hidden"; liveId: LiveId }
   | {
       type: "logins_settled";
       before: Seq;
