@@ -4366,9 +4366,9 @@ describe("config 按 Bot 增量对账", () => {
     await h.runner.stop();
 
     const { spawnSync } = await import("node:child_process");
-    const scan = spawnSync("grep", ["-rl", "-e", secret, "-e", "test-key", h.dataDir, join(homedir(), ".pi")], {
-      encoding: "utf8",
-    });
+    // 没装过 Pi 的电脑没有 ~/.pi，grep 遇到不存在的路径退出码是 2。
+    const scanned = [h.dataDir, join(homedir(), ".pi")].filter((path) => existsSync(path));
+    const scan = spawnSync("grep", ["-rl", "-e", secret, "-e", "test-key", ...scanned], { encoding: "utf8" });
     expect(h.gateway.usage.map((record) => record.key)).toEqual(["test-key", secret, secret]);
     expect(scan.status).toBe(1);
     expect(scan.stdout).toBe("");
