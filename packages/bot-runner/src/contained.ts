@@ -167,6 +167,57 @@ const gitDiscards = (text: string): boolean => {
   });
 };
 
+export const NETWORK_COMMANDS: ReadonlySet<string> = new Set([
+  "curl",
+  "wget",
+  "ssh",
+  "scp",
+  "sftp",
+  "rsync",
+  "nc",
+  "ncat",
+  "socat",
+  "ftp",
+]);
+const NETWORK_PROBES = new Set(["ping", "dig", "nslookup", "getent", "npx"]);
+const NETWORK_VERBS: Readonly<Record<string, ReadonlySet<string>>> = {
+  npm: new Set(["i", "install", "add", "ci", "update", "up", "upgrade", "view", "v", "info", "show", "exec", "x"]),
+  pnpm: new Set(["i", "install", "add", "update", "up", "dlx"]),
+  yarn: new Set(["add", "install", "upgrade", "dlx"]),
+  pip: new Set(["install", "download"]),
+  pip3: new Set(["install", "download"]),
+  uv: new Set(["pip", "add", "sync", "tool"]),
+  git: new Set(["clone", "fetch", "pull", "ls-remote"]),
+};
+
+// 段首这些词后面才是真正跑的命令：套壳、shell 关键字、变量赋值、选项和时长。
+const COMMAND_PREFIXES = new Set(["timeout", "nohup", "nice", "env", "xargs", "exec", "time", "command"]);
+const SHELL_KEYWORDS = new Set(["if", "then", "else", "elif", "do", "while", "until", "!"]);
+const skippedPrefix = (word: string): boolean =>
+  COMMAND_PREFIXES.has(word) ||
+  SHELL_KEYWORDS.has(word) ||
+  /^\w+=/.test(word) ||
+  word.startsWith("-") ||
+  /^\d/.test(word);
+
+/**
+ * 命令里有没有要联网的程序。和 stillAsksInSandbox 一样不解析结构，按分隔符切段，只看每段的命令头，
+ * `for c in node npx` 里当参数的名字不算。闸门解析不了、只能当普通命令的那些（套了 timeout、放到后台、带变量）靠它补上联网：
+ * 不补的话云电脑上直接断网放行，批了也照样没网。
+ */
+export function reachesNetwork(command: string): boolean {
+  const flat = command.replace(/\\\r?\n/g, "").replace(/['"\\]/g, "");
+  return flat.split(/[;&|()`{}\n\r]+/).some((segment) => {
+    const words = segment.split(/\s+/).filter((word) => word !== "");
+    const head = words.findIndex((word) => !skippedPrefix(word));
+    if (head === -1) return false;
+    const name = (words[head] ?? "").slice((words[head] ?? "").lastIndexOf("/") + 1);
+    if (NETWORK_COMMANDS.has(name) || NETWORK_PROBES.has(name)) return true;
+    const verb = words.slice(head + 1).find((word) => !word.startsWith("-"));
+    return verb !== undefined && (NETWORK_VERBS[name]?.has(verb) ?? false);
+  });
+}
+
 /**
  * 沙箱兜住了联网和写工作区外，兜不住的只剩在工作区和共享区里删、移，以及内联代码。这里不解析结构：先像 bash 那样合并反斜杠续行，
  * 再去掉引号和反斜杠按分隔符切词，$(...)、反引号、循环体、xargs、find -exec、sh -c '...' 里的词都扫得到。

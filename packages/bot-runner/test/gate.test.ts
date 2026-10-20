@@ -1009,8 +1009,38 @@ describe("云电脑上读工作区外的 bash 也不问", () => {
     ["gzip 带 -k 也宁多问", "gzip -k data.csv"],
     ["联网", "curl https://example.com"],
     ["重定向到工作区外", "echo ok > /etc/x"],
+    ["timeout 套着联网", "timeout 12 curl -s https://registry.npmjs.org/"],
+    ["timeout 带选项套着联网", "timeout -k 5 --signal=KILL 30 curl https://example.com"],
+    ["nohup 套着装包", "nohup npm i -g @xai-official/grok-linux-arm64 &"],
+    ["nice 套着联网", "nice -n 5 wget https://example.com/a"],
+    ["套法认不出", "timeout --bogus 5 curl https://example.com"],
+    ["放到后台联网", "curl https://example.com &"],
+    ["后台装包", "nohup npm i -g @xai-official/grok-linux-arm64 > install.log 2>&1 &"],
+    ["变量里联网", "curl $URL"],
+    ["查包信息", "npm view @xai-official/grok version"],
+    ["查域名", "getent hosts registry.npmjs.org"],
   ])("云电脑上%s照问：%s", (_label, command) => {
     expect(decide(cloud(command), [], []).verdict).toBe("ask");
+  });
+
+  it.each([
+    "timeout 12 curl -s https://registry.npmjs.org/",
+    "curl https://example.com &",
+    "getent hosts registry.npmjs.org",
+    "echo a; npm view @xai-official/grok version",
+  ])("云电脑上认不全的联网命令批了放开联网：%s", (command) => {
+    expect(decide(cloud(command), [], []).access.network).toBe(true);
+  });
+
+  it("循环里当参数的命令名不算联网：for c in node npx", () => {
+    expect(decide(cloud("for c in node npm npx; do which $c; done"), [], [])).toMatchObject({ verdict: "allow" });
+  });
+
+  it("timeout、nohup 套着的装包和不套一样，批了放开联网和工具箱", () => {
+    const bare = decide(cloud("npm i -g @xai-official/grok"), [], []);
+    expect(bare.access.network).toBe(true);
+    expect(decide(cloud("timeout 100 npm i -g @xai-official/grok"), [], [])).toEqual(bare);
+    expect(decide(cloud("nohup npm i -g @xai-official/grok"), [], [])).toEqual(bare);
   });
 
   // 批了也是同一个沙箱、同样的权限，问了只多挡一下。禁区、别的 Bot 和自己的 Pi 配置由 bwrap 盖住。

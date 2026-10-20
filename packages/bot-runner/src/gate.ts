@@ -21,6 +21,8 @@ import { BROWSER_TOOL_ACTIONS } from "./browser.js";
 import {
   type ClosedContainment,
   type Containment,
+  NETWORK_COMMANDS,
+  reachesNetwork,
   stillAsksInSandbox,
   SYSTEM_PACKAGE_MANAGERS,
   SYSTEM_PACKAGE_REASON,
@@ -138,8 +140,8 @@ const OPAQUE_COMMANDS = new Set([
   "less",
   "more",
 ]);
-const NETWORK_COMMANDS = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "socat", "ftp"]);
 const INSTALL_COMMANDS = new Set(["apt", "apt-get", "brew", "dnf", "npm", "pnpm", "pip", "pip3", "yarn"]);
+const WRAPPER_COMMANDS = new Set(["timeout", "nohup", "nice"]);
 /** 闸门按名字直接放行的内部工具。运行器把这里的名字全部保留，工具连接里同名的操作不注册：工厂还是空桩时名字也占着，不然同名的 MCP 操作会顶着这个名字免审批执行。 */
 export const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   "read_task",
@@ -596,6 +598,27 @@ const harmlessPrefix = (word: string): boolean => {
   return /^(?:LANG|LC_[A-Z]+)$/.test(key) && LOCALE_NAME.test(value);
 };
 
+// timeout、nohup、nice 只给后面那条命令套一层，按里面那条判。不剥开的话 `timeout 60 npm i -g x` 会当普通命令，
+// 云电脑上直接放行且不给网，Bot 拿到的只有 EAI_AGAIN，也没有卡可批。
+const TIMEOUT_OPTION_WITH_VALUE = new Set(["-s", "-k", "--signal", "--kill-after"]);
+const TIMEOUT_FLAG = /^(?:--preserve-status|--foreground|-v|--verbose|--signal=.+|--kill-after=.+|-[sk].+)$/;
+const wrappedCommandIndex = (words: readonly string[], index: number): number | null => {
+  const name = words[index];
+  let next = index + 1;
+  if (name === "nohup") return next;
+  if (name === "nice") {
+    if (words[next] === "-n") return next + 2;
+    return /^(?:-n)?-?\d+$/.test(words[next] ?? "") ? next + 1 : next;
+  }
+  if (name !== "timeout") return null;
+  for (let word = words[next]; word?.startsWith("-"); word = words[next]) {
+    if (TIMEOUT_OPTION_WITH_VALUE.has(word)) next += 2;
+    else if (TIMEOUT_FLAG.test(word)) next += 1;
+    else return null;
+  }
+  return next + 1;
+};
+
 const TOOLBOX_INSTALL_REASON = "联网安装到这个 Bot 自己的工具箱";
 const REQUIREMENTS_FILE_REASON = "requirements 文件 Bot 自己能改，里面的 --index-url、--extra-index-url 会换掉下载源";
 const LOCAL_SOURCE_REASON = "装的是工作区、本地包文件或 git 仓库里的代码，会运行它的构建代码";
@@ -717,6 +740,12 @@ const classifyCommand = (words: readonly string[], call: GateCall): readonly Cla
   if (!words.slice(0, nameIndex).every(harmlessPrefix)) return [plainAction("shell")];
   // 带目录的命令名跑的是那个文件，不是同名的系统程序，不按去掉目录的名字认。
   if (name.includes("/")) return [plainAction("shell")];
+  if (WRAPPER_COMMANDS.has(name)) {
+    const inner = wrappedCommandIndex(words, nameIndex);
+    // 套法认不全时不知道里面跑什么，按要联网问，免得在云电脑上被当普通命令放行。
+    if (inner === null || inner >= words.length) return [plainAction("shell", null, { network: true, writePaths: [] })];
+    return classifyCommand(words.slice(inner), call);
+  }
   if (call.containment.level === "closed") {
     const cloud = classifyCloudCommand(words, nameIndex, call.containment);
     if (cloud !== null) return [cloud];
@@ -799,7 +828,17 @@ const classifyCommand = (words: readonly string[], call: GateCall): readonly Cla
   return [plainAction("shell")];
 };
 
+// 云电脑上认不全的命令只能判成普通命令，会被断网放行，里面有联网的程序就让它带上联网，批了才有网。Mac 只收紧，不在这里加。
 const classifyBash = (call: GateCall): readonly ClassifiedAction[] => {
+  const actions = classifyBashCommand(call);
+  const command = call.input.command;
+  if (call.containment.level !== "closed" || typeof command !== "string" || !reachesNetwork(command)) return actions;
+  return actions.map((item) =>
+    item.action === "shell" && !item.access.network ? { ...item, access: { ...item.access, network: true } } : item,
+  );
+};
+
+const classifyBashCommand = (call: GateCall): readonly ClassifiedAction[] => {
   if (call.sandbox === "none") return [plainAction("shell")];
   const command = call.input.command;
   if (typeof command !== "string" || command.trim() === "") return [plainAction("shell")];
