@@ -29,10 +29,6 @@
   font: inherit;
 }
 
-.activity-toggle:disabled {
-  cursor: default;
-}
-
 .activity-lines {
   display: flex;
   flex-direction: column;

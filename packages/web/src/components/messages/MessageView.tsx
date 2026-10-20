@@ -627,10 +627,8 @@ const Activity = ({
   selectedToolId: MessageId | null;
   onInspect: InspectTool;
 }) => {
-  const [expanded, setExpanded] = useState(false);
-  const running = tools.find((message) => message.body.kind === "tool_call" && message.body.status === "running");
-  const open = running !== undefined || expanded;
-  const runningName = running?.body.kind === "tool_call" ? running.body.tool : "";
+  const [open, setOpen] = useState(false);
+  const running = tools.some((message) => message.body.kind === "tool_call" && message.body.status === "running");
 
   return (
     <div className="activity" data-testid="activity">
@@ -640,10 +638,9 @@ const Activity = ({
           type="button"
           data-testid="activity-toggle"
           aria-expanded={open}
-          disabled={running !== undefined}
-          onClick={() => setExpanded((value) => !value)}
+          onClick={() => setOpen((value) => !value)}
         >
-          {running === undefined ? `做了 ${tools.length} 步` : `正在用 ${runningName}…`}
+          {running ? `干活中，做了 ${tools.length} 步…` : `做了 ${tools.length} 步`}
           {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
         </button>
       </div>
@@ -667,7 +664,7 @@ const Activity = ({
 
 type TurnProps = Omit<MessageProps, "message"> & { turn: Turn };
 
-// 工具调用收进「做了几步」，跑完就折起来。接手卡是要人动手的，交还之后也得看得见结论，不进折叠区。
+// 工具调用收进「做了几步」，跑的过程中也折着，人只看结果，要查再点开。接手卡是要人动手的，交还之后也得看得见结论，不进折叠区。
 const folded = (message: Message) => message.body.kind === "tool_call" && message.body.view.kind !== "takeover";
 
 export const TurnView = ({ turn, ...props }: TurnProps) => {
