@@ -338,13 +338,20 @@ export type Handoff = z.infer<typeof Handoff>;
 export const ToolCallStatus = z.enum(["running", "ok", "failed", "blocked"]);
 export type ToolCallStatus = z.infer<typeof ToolCallStatus>;
 
-// 来源：对话里 Bot 提议存下的记 chat，例行任务运行里提议的记 routine，用户在 Web 教的记 taught，从分享链接导入的记 template。
-// 复制给别的 Bot 保留原来源。
-export const SkillSource = z.enum(["chat", "routine", "taught", "template"]);
+// 来源：对话里 Bot 提议存下的记 chat，例行任务运行里提议的记 routine，Bot 从公开仓库找来、用户点了装的记 installed，
+// 从分享链接导入的记 template。taught 是早先在 Web 上「教它一个」的旧数据，界面已经不再有这个入口。复制给别的 Bot 保留原来源。
+export const SkillSource = z.enum(["chat", "routine", "installed", "taught", "template"]);
 export type SkillSource = z.infer<typeof SkillSource>;
 
 export const SkillName = z.string().min(1).max(40);
 export const SkillSteps = z.array(z.string().min(1).max(500)).min(1).max(20);
+// 装来的 skill 记下原页面，界面上点得开。只收 http(s)，别的协议在界面上就是一条可点的危险链接。
+export const SkillOrigin = z
+  .string()
+  .url()
+  .max(500)
+  .refine((url) => /^https?:\/\//i.test(url), { message: "来源只支持 http 和 https 链接" });
+export type SkillOrigin = z.infer<typeof SkillOrigin>;
 
 // 真相源是控制面的 skills 表。运行器只按 config 落文件，不往回同步。同一 Bot 下名字不重复，Pi 按名字找文件。
 export const Skill = z.object({
@@ -353,6 +360,7 @@ export const Skill = z.object({
   name: SkillName,
   source: SkillSource,
   steps: SkillSteps,
+  origin: SkillOrigin.nullable(),
   useCount: z.number().int().nonnegative(),
   createdAt: Timestamp,
 });
@@ -384,9 +392,19 @@ export const BotTemplate = z
   .strict();
 export type BotTemplate = z.infer<typeof BotTemplate>;
 
-// Bot 问「存不存」的那张卡。offered 是还没点，saved 之后 skillId 指向存下的那条，dismissed 是用户说不存。
+// Bot 问「存不存」的那张卡。offered 是还没点，saved 是用户点了生效（存了、改了、删了），dismissed 是用户说不要。
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
+
+// 卡上提议的那一个变更。add 带 origin 就是从公开仓库装的；edit 和 remove 的 targetId 指这个 Bot 的一条 skill，
+// name 是 edit 之后的名字、remove 时的名字，卡上照着显示，被改被删之后也还读得出是哪条。
+export const SkillChange = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("add"), name: SkillName, steps: SkillSteps.min(2), origin: SkillOrigin.nullable() }),
+  z.object({ op: z.literal("edit"), targetId: SkillId, name: SkillName, steps: SkillSteps.min(2) }),
+  z.object({ op: z.literal("remove"), targetId: SkillId, name: SkillName }),
+]);
+export type SkillChange = z.infer<typeof SkillChange>;
+export type SkillChangeOp = SkillChange["op"];
 
 // Bot 想记一条偏好，问用户记不记的那张卡。saved 之后 preferenceId 指向写下的那条，dismissed 是用户说不用。
 export const PreferenceOfferStatus = z.enum(["offered", "saved", "dismissed"]);
@@ -476,13 +494,13 @@ export const MessageBody = z.discriminatedUnion("kind", [
     steps: z.number().int(),
     amount: z.number(),
   }),
-  // 审批和交接的正文只放 id，状态在别的对象上；这张卡不同，name 和 steps 就在正文里，用户没点存之前它们
-  // 不在任何表里。所以状态也随正文走，点了存或不存就改这条消息再重推。存了之后 skillId 指向那条 skill。
+  // 审批和交接的正文只放 id，状态在别的对象上；这张卡不同，要变的内容就在正文里，用户没点之前它们
+  // 不在任何表里。所以状态也随正文走，点了就改这条消息再重推。saved 之后 skillId 指向存下或改了的那条；
+  // remove 的 skillId 始终是 null，被删的 id 在 change.targetId 上。
   z.object({
     kind: z.literal("skill_offer"),
     botId: BotId,
-    name: SkillName,
-    steps: SkillSteps.min(2),
+    change: SkillChange,
     status: SkillOfferStatus,
     skillId: SkillId.nullable(),
   }),

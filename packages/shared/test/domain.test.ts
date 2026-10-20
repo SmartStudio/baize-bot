@@ -22,6 +22,7 @@ import {
   RoutineRun,
   ServerPush,
   Skill,
+  SkillChange,
   SkillId,
   TopicTask,
   ToolConnection,
@@ -391,11 +392,36 @@ describe("M9 例行任务的共享形状", () => {
 });
 
 describe("M10 skill 的共享形状", () => {
-  it("skill_offer 至少两步，name 非空", () => {
-    const offer = { type: "skill_offer", runId: "r1", botId: "b1", groupId: "g1", name: "Globex 报价" };
-    expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单", "生成 PDF"] }).success).toBe(true);
-    expect(AgentToControl.safeParse({ ...offer, steps: ["建报价单"] }).success).toBe(false);
-    expect(AgentToControl.safeParse({ ...offer, name: "", steps: ["a", "b"] }).success).toBe(false);
+  it("skill_offer 上行带一个变更：存和装至少两步，改要两步，删只要目标和名字", () => {
+    const offer = { type: "skill_offer", runId: "r1", botId: "b1", groupId: "g1" };
+    const add = { op: "add", name: "Globex 报价", steps: ["建报价单", "生成 PDF"], origin: null };
+    expect(AgentToControl.safeParse({ ...offer, change: add }).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...offer, change: { ...add, steps: ["建报价单"] } }).success).toBe(false);
+    expect(AgentToControl.safeParse({ ...offer, change: { ...add, name: "" } }).success).toBe(false);
+    expect(AgentToControl.safeParse({ ...offer, name: "Globex 报价", steps: ["a", "b"] }).success).toBe(false);
+    const edit = { op: "edit", targetId: "s1", name: "周报", steps: ["a", "b"] };
+    expect(AgentToControl.safeParse({ ...offer, change: edit }).success).toBe(true);
+    expect(AgentToControl.safeParse({ ...offer, change: { ...edit, targetId: "../x" } }).success).toBe(false);
+    expect(AgentToControl.safeParse({ ...offer, change: { op: "remove", targetId: "s1", name: "周报" } }).success).toBe(
+      true,
+    );
+    expect(AgentToControl.safeParse({ ...offer, change: { op: "remove", name: "周报" } }).success).toBe(false);
+  });
+
+  it("装来的 skill 来源只收 http 和 https 链接", () => {
+    const add = { op: "add", name: "周报", steps: ["a", "b"] };
+    for (const ok of ["https://github.com/anthropics/skills/blob/main/pdf/SKILL.md", "http://example.com/x"]) {
+      expect(SkillChange.safeParse({ ...add, origin: ok }).success, ok).toBe(true);
+    }
+    for (const bad of [
+      "javascript:alert(1)",
+      "file:///etc/passwd",
+      "ftp://x.com/a",
+      "github.com/a",
+      `https://x.com/${"a".repeat(500)}`,
+    ]) {
+      expect(SkillChange.safeParse({ ...add, origin: bad }).success, bad).toBe(false);
+    }
   });
 
   it("SkillId 只收能当目录名的一段，带分隔符或点点的不收", () => {
@@ -414,21 +440,24 @@ describe("M10 skill 的共享形状", () => {
     }
   });
 
-  it("skill_offer 消息正文自带步骤和结论，存了之后 skillId 才有值", () => {
+  it("skill_offer 消息正文自带变更和结论，旧的平铺 name、steps 不再收", () => {
     const msg = { id: "m1", groupId: "g1", createdAt: now, revision: 0, visibleTo: null };
-    const offer = { kind: "skill_offer", botId: "b1", name: "Globex 报价", steps: ["建报价单", "生成 PDF"] };
+    const offer = {
+      kind: "skill_offer",
+      botId: "b1",
+      change: { op: "add", name: "Globex 报价", steps: ["建报价单", "生成 PDF"], origin: null },
+    };
     expect(Message.safeParse({ ...msg, body: { ...offer, status: "offered", skillId: null } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { ...offer, status: "saved", skillId: "s1" } }).success).toBe(true);
     expect(Message.safeParse({ ...msg, body: { ...offer, status: "offered" } }).success).toBe(false);
-    expect(
-      Message.safeParse({ ...msg, body: { ...offer, steps: ["只有一步"], status: "offered", skillId: null } }).success,
-    ).toBe(false);
+    const legacy = { kind: "skill_offer", botId: "b1", name: "Globex 报价", steps: ["建报价单", "生成 PDF"] };
+    expect(Message.safeParse({ ...msg, body: { ...legacy, status: "offered", skillId: null } }).success).toBe(false);
     expect(DecideSkillOfferRequest.safeParse({ decision: "save" }).success).toBe(true);
     expect(DecideSkillOfferRequest.safeParse({ decision: "approved" }).success).toBe(false);
   });
 
   it("skill 名最多 40 字，步骤 1 到 20 条且每条非空", () => {
-    const skill = { id: "s1", botId: "b1", source: "taught", useCount: 0, createdAt: now };
+    const skill = { id: "s1", botId: "b1", source: "installed", origin: null, useCount: 0, createdAt: now };
     expect(Skill.safeParse({ ...skill, name: "周报", steps: ["翻一遍群消息"] }).success).toBe(true);
     expect(Skill.safeParse({ ...skill, name: "x".repeat(41), steps: ["a"] }).success).toBe(false);
     expect(Skill.safeParse({ ...skill, name: "周报", steps: [] }).success).toBe(false);

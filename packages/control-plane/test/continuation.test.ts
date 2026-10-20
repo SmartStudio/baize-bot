@@ -896,8 +896,7 @@ describe("例行任务里换电脑", () => {
         runId: next.runId,
         botId: next.botId,
         groupId: next.groupId,
-        name: "工单早报",
-        steps: ["拉今天的工单", "按状态分组"],
+        change: { op: "add", name: "工单早报", steps: ["拉今天的工单", "按状态分组"], origin: null },
       });
       const cards = (await barrier(remote, me)).flatMap((event) =>
         event.type === "message" && event.message.body.kind === "skill_offer" ? [event.message] : [],

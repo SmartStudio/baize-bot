@@ -734,7 +734,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     const body = await readJson(c.req.raw, CreateSkillRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
     // 用户在 Web 上「教它一个」，来源恒为 taught。
-    const skill = await createSkill(db, botId.data, { ...body.value, source: "taught" });
+    const skill = await createSkill(db, botId.data, { ...body.value, source: "taught", origin: null });
     if (skill === null) return c.json(NAME_TAKEN, 409);
     await agents.sendConfig(c.get("user").id);
     hub.push(c.get("user").id, { type: "skill_updated", skill });
@@ -803,15 +803,19 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (decided.kind === "bot_gone") return c.json(NOT_FOUND, 404);
     if (decided.kind === "already_decided") return c.json({ error: "这条卡已经有结论了" }, 409);
     if (decided.kind === "name_taken") return c.json(NAME_TAKEN, 409);
+    if (decided.kind === "target_gone") return c.json({ error: "这个技能已经不在了" }, 409);
 
     // 卡的状态住在正文里，所以点完要重推那条 message，客户端按 id 覆盖它。
-    hub.push(c.get("user").id, { type: "message", message: decided.message });
-    if (decided.skill !== null) {
-      hub.push(c.get("user").id, { type: "skill_updated", skill: decided.skill });
-      // 不存什么都没变，`config.skills` 也就不用重发。
-      await agents.sendConfig(c.get("user").id);
-    }
-    return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill: decided.skill }));
+    const ownerId = c.get("user").id;
+    hub.push(ownerId, { type: "message", message: decided.message });
+    const effect = decided.effect;
+    if (effect.kind === "updated") hub.push(ownerId, { type: "skill_updated", skill: effect.skill });
+    if (effect.kind === "deleted")
+      hub.push(ownerId, { type: "skill_deleted", skillId: effect.skillId, botId: effect.botId });
+    // 不要什么都没变，`config.skills` 也就不用重发。
+    if (effect.kind !== "none") await agents.sendConfig(ownerId);
+    const skill = effect.kind === "updated" ? effect.skill : null;
+    return c.json(DecideSkillOfferResponse.parse({ message: decided.message, skill }));
   });
 
   app.post("/api/messages/:id/preference-offer", async (c) => {

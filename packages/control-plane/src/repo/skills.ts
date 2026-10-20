@@ -1,5 +1,14 @@
-import { SkillId, UserId, type BotId, type Message, type MessageId, type Skill, type Viewer } from "@baize/shared";
-import { TransactionRollbackError, and, asc, eq, inArray, sql } from "drizzle-orm";
+import {
+  SkillId,
+  UserId,
+  type BotId,
+  type Message,
+  type MessageId,
+  type Skill,
+  type SkillChange,
+  type Viewer,
+} from "@baize/shared";
+import { TransactionRollbackError, and, asc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { parseSkillRefs } from "../agent/routing.js";
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, skills } from "../db/schema.js";
@@ -54,13 +63,21 @@ export type SkillInput = {
   readonly name: string;
   readonly steps: readonly string[];
   readonly source: SkillSource;
+  readonly origin: string | null;
 };
 
 /** 撞名返回 null。靠唯一索引判，不先查后写：先查后写挡不住并发的两个同名请求。 */
 export async function createSkill(db: Db, botId: BotId, input: SkillInput): Promise<Skill | null> {
   const [row] = await db
     .insert(skills)
-    .values({ id: SkillId.parse(newId()), botId, name: input.name, steps: [...input.steps], source: input.source })
+    .values({
+      id: SkillId.parse(newId()),
+      botId,
+      name: input.name,
+      steps: [...input.steps],
+      source: input.source,
+      origin: input.origin,
+    })
     .onConflictDoNothing({ target: [skills.botId, skills.name] })
     .returning();
   return row === undefined ? null : toSkill(row);
@@ -102,11 +119,16 @@ export async function deleteSkill(db: Db, skillId: SkillId): Promise<boolean> {
 }
 
 /**
- * 复制给同一个用户的另一个 Bot。来源保留：这件活当初是教的还是对话里攒的，换个 Bot 做不改变它的出身。
+ * 复制给同一个用户的另一个 Bot。来源保留：这件活当初是装的还是对话里攒的，换个 Bot 做不改变它的出身。
  * 用量归零，那是这一条自己的账。目标已有同名返回 null，和建一条撞名走同一道唯一索引。
  */
 export async function copySkill(db: Db, source: SkillRow, targetBotId: BotId): Promise<Skill | null> {
-  return createSkill(db, targetBotId, { name: source.name, steps: source.steps, source: source.source });
+  return createSkill(db, targetBotId, {
+    name: source.name,
+    steps: source.steps,
+    source: source.source,
+    origin: source.origin,
+  });
 }
 
 /**
@@ -150,16 +172,44 @@ export type SkillOfferMessage = {
 };
 
 /**
- * 这个 Bot 已经会这件活（同名 skill 在），或者这个群里同名的卡还没点。两种再落一张卡都只是多问一遍。
- * 不是幂等的那道闸：漏判只是多一张卡，所以先查后写够用。
+ * 这张卡要不要落。add：这个 Bot 已经会这件活（同名 skill 在），或者这个群里同名的存装卡还没点，再落一张都只是多问一遍。
+ * edit、remove：targetId 不是这个 Bot 的 skill（外部输入，可能是别的 Bot 的），或者这个群里同一条 skill 已有卡没点。
+ * 不是幂等的那道闸：漏判只是多一张卡，点的时候还会再判一次，所以先查后写够用。
  */
-export async function skillOfferRedundant(db: Db | Tx, groupId: string, botId: BotId, name: string): Promise<boolean> {
-  const [known] = await db
+export async function skillOfferUnwanted(
+  db: Db | Tx,
+  groupId: string,
+  botId: BotId,
+  change: SkillChange,
+): Promise<boolean> {
+  if (change.op === "add") {
+    const [known] = await db
+      .select({ id: skills.id })
+      .from(skills)
+      .where(and(eq(skills.botId, botId), eq(skills.name, change.name)))
+      .limit(1);
+    return (
+      known !== undefined ||
+      (await pendingOffer(
+        db,
+        groupId,
+        botId,
+        sql`${messages.body}#>>'{change,op}' = 'add' AND ${messages.body}#>>'{change,name}' = ${change.name}`,
+      ))
+    );
+  }
+  const [target] = await db
     .select({ id: skills.id })
     .from(skills)
-    .where(and(eq(skills.botId, botId), eq(skills.name, name)))
+    .where(and(eq(skills.id, change.targetId), eq(skills.botId, botId)))
     .limit(1);
-  if (known !== undefined) return true;
+  return (
+    target === undefined ||
+    (await pendingOffer(db, groupId, botId, sql`${messages.body}#>>'{change,targetId}' = ${change.targetId}`))
+  );
+}
+
+async function pendingOffer(db: Db | Tx, groupId: string, botId: BotId, matches: SQL): Promise<boolean> {
   const [pending] = await db
     .select({ id: messages.id })
     .from(messages)
@@ -168,7 +218,7 @@ export async function skillOfferRedundant(db: Db | Tx, groupId: string, botId: B
         eq(messages.groupId, groupId),
         sql`${messages.body}->>'kind' = 'skill_offer'`,
         sql`${messages.body}->>'status' = 'offered'`,
-        sql`${messages.body}->>'name' = ${name}`,
+        matches,
         messageVisibleTo({ kind: "bot", botId }),
       ),
     )
@@ -201,17 +251,29 @@ export async function findOwnedSkillOfferMessage(
   };
 }
 
+/** 点了之后 skills 表变成什么样，路由照它推 `skill_updated` 或 `skill_deleted`。 */
+export type SkillEffect =
+  | { readonly kind: "none" }
+  | { readonly kind: "updated"; readonly skill: Skill }
+  | { readonly kind: "deleted"; readonly skillId: SkillId; readonly botId: BotId };
+
 export type DecideSkillOfferResult =
-  | { readonly kind: "ok"; readonly message: Message; readonly skill: Skill | null }
+  | { readonly kind: "ok"; readonly message: Message; readonly effect: SkillEffect }
   | { readonly kind: "already_decided" }
   | { readonly kind: "name_taken" }
+  | { readonly kind: "target_gone" }
   | { readonly kind: "bot_gone" };
 
+type ApplyFailure = "name_taken" | "target_gone";
+type Applied =
+  | { readonly kind: "ok"; readonly effect: SkillEffect; readonly skillId: SkillId | null }
+  | { readonly kind: ApplyFailure };
+
 /**
- * 用户在群里点了「存」或「不存」。
+ * 用户在群里点了卡上的「存、改、删」或者「不要」。
  *
  * 两边都靠同一条带 `body->>'status' = 'offered'` 的条件 UPDATE 做幂等，不先查后写：
- * 两个并发的点存只有一个改得动那条消息，另一个看到 0 行。
+ * 两个并发的点击只有一个改得动那条消息，另一个看到 0 行。改 skills 表和收卡在同一个事务里，一起成或一起回滚。
  */
 export async function decideSkillOffer(
   db: Db,
@@ -221,7 +283,7 @@ export async function decideSkillOffer(
 ): Promise<DecideSkillOfferResult> {
   if (decision === "dismiss") {
     const message = await settleOffer(db, offer, { ...offer.body, status: "dismissed" });
-    return message === null ? { kind: "already_decided" } : { kind: "ok", message, skill: null };
+    return message === null ? { kind: "already_decided" } : { kind: "ok", message, effect: { kind: "none" } };
   }
 
   // 卡上那个 Bot 可能已经被删了，正文里的 botId 是当初落卡时的。插 skills 行会撞外键，所以先看它还在不在。
@@ -232,38 +294,70 @@ export async function decideSkillOffer(
     .limit(1);
   if (bot === undefined) return { kind: "bot_gone" };
 
-  const skillId = SkillId.parse(newId());
-  // 两处失败都要整条回滚（撞名时卡必须留在 offered 让用户先改名），而 `tx.rollback()` 抛的是同一种错，
-  // 所以把是谁回滚的记在这里，外层照着它翻状态码。
-  let failure: "name_taken" | "already_decided" | null = null;
+  // 几处失败都要整条回滚（撞名时卡必须留在 offered 让用户先改名），而 `tx.rollback()` 抛的是同一种错，
+  // 所以把是谁回滚的记在这里，外层照着它翻结果。
+  let failure: ApplyFailure | "already_decided" | null = null;
   try {
     return await db.transaction(async (tx): Promise<DecideSkillOfferResult> => {
-      const [row] = await tx
-        .insert(skills)
-        .values({
-          id: skillId,
-          botId: offer.body.botId,
-          name: offer.body.name,
-          steps: [...offer.body.steps],
-          source: offer.source ?? "chat",
-        })
-        .onConflictDoNothing({ target: [skills.botId, skills.name] })
-        .returning();
-      if (row === undefined) {
-        failure = "name_taken";
+      const applied = await applyChange(tx, offer);
+      if (applied.kind !== "ok") {
+        failure = applied.kind;
         return tx.rollback();
       }
-
-      const message = await settleOffer(tx, offer, { ...offer.body, status: "saved", skillId });
+      const message = await settleOffer(tx, offer, { ...offer.body, status: "saved", skillId: applied.skillId });
       if (message === null) {
         failure = "already_decided";
         return tx.rollback();
       }
-      return { kind: "ok", message, skill: toSkill(row) };
+      return { kind: "ok", message, effect: applied.effect };
     });
   } catch (error) {
     if (error instanceof TransactionRollbackError && failure !== null) return { kind: failure };
     throw error;
+  }
+}
+
+async function applyChange(tx: Tx, offer: SkillOfferMessage): Promise<Applied> {
+  const botId = offer.body.botId;
+  const change = offer.body.change;
+  switch (change.op) {
+    case "add": {
+      const [row] = await tx
+        .insert(skills)
+        .values({
+          id: SkillId.parse(newId()),
+          botId,
+          name: change.name,
+          steps: [...change.steps],
+          origin: change.origin,
+          source: change.origin === null ? (offer.source ?? "chat") : "installed",
+        })
+        .onConflictDoNothing({ target: [skills.botId, skills.name] })
+        .returning();
+      if (row === undefined) return { kind: "name_taken" };
+      const skill = toSkill(row);
+      return { kind: "ok", effect: { kind: "updated", skill }, skillId: skill.id };
+    }
+    case "edit": {
+      let row: SkillRow | undefined;
+      try {
+        [row] = await tx
+          .update(skills)
+          .set({ name: change.name, steps: [...change.steps] })
+          .where(and(eq(skills.id, change.targetId), eq(skills.botId, botId)))
+          .returning();
+      } catch (error) {
+        if (isNameTaken(error)) return { kind: "name_taken" };
+        throw error;
+      }
+      if (row === undefined) return { kind: "target_gone" };
+      const skill = toSkill(row);
+      return { kind: "ok", effect: { kind: "updated", skill }, skillId: skill.id };
+    }
+    case "remove":
+      // 目标已经没了也照样收成 saved：用户要的就是它不在，终态一致。
+      await tx.delete(skills).where(and(eq(skills.id, change.targetId), eq(skills.botId, botId)));
+      return { kind: "ok", effect: { kind: "deleted", skillId: change.targetId, botId }, skillId: null };
   }
 }
 

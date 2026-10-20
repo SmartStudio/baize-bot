@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   CreateBotResponse,
   DecideSkillOfferResponse,
@@ -13,6 +14,7 @@ import {
   type RunId,
   type ServerPush,
   type Skill,
+  type SkillChange,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
@@ -133,9 +135,30 @@ async function startRun(owner: Owner, agent: AgentClient): Promise<RunId> {
 }
 
 /**
- * Bot 干完活问存不存，回群里那张卡。
- * 认卡认到名字和 offered 为止：点存会把同一张卡重推一遍，只按 kind 认会认回上一张已经有结论的。
+ * Bot 上行一张卡，回群里落下的那张。
+ * 认卡认到同一个变更和 offered 为止：点存会把同一张卡重推一遍，只按 kind 认会认回上一张已经有结论的。
  */
+async function propose(
+  owner: Owner,
+  agent: AgentClient,
+  push: PushClient,
+  change: SkillChange,
+  runId?: RunId,
+): Promise<Message> {
+  const on = runId ?? (await startRun(owner, agent));
+  agent.send({ type: "skill_offer", runId: on, botId: owner.botId, groupId: owner.groupId, change });
+  const pushed = await pushUntil(
+    push,
+    "message",
+    (one) =>
+      one.message.body.kind === "skill_offer" &&
+      one.message.body.status === "offered" &&
+      isDeepStrictEqual(one.message.body.change, change),
+  );
+  return pushed.message;
+}
+
+/** Bot 干完活问存不存。 */
 async function offerSkill(
   owner: Owner,
   agent: AgentClient,
@@ -144,15 +167,7 @@ async function offerSkill(
   steps: string[],
   runId?: RunId,
 ): Promise<Message> {
-  const on = runId ?? (await startRun(owner, agent));
-  agent.send({ type: "skill_offer", runId: on, botId: owner.botId, groupId: owner.groupId, name, steps });
-  const pushed = await pushUntil(
-    push,
-    "message",
-    (one) => one.message.body.kind === "skill_offer" && one.message.body.name === name,
-  );
-  expect(offerBody(pushed.message).status, "刚推上来的卡还没点过").toBe("offered");
-  return pushed.message;
+  return propose(owner, agent, push, { op: "add", name, steps, origin: null }, runId);
 }
 
 async function decide(owner: Owner, card: Message, decision: "save" | "dismiss"): Promise<Decided> {
@@ -345,8 +360,7 @@ describe("群里那张卡", () => {
       expect(offerBody(card), "推上来的就是还没点的样子").toEqual({
         kind: "skill_offer",
         botId: owner.botId,
-        name: "Globex 报价",
-        steps: STEPS,
+        change: { op: "add", name: "Globex 报价", steps: STEPS, origin: null },
         status: "offered",
         skillId: null,
       });
@@ -467,8 +481,7 @@ describe("群里那张卡", () => {
         runId: dispatched.runId,
         botId: owner.botId,
         groupId: owner.groupId,
-        name: "工单早报",
-        steps: ["拉今天的工单", "按状态分组"],
+        change: { op: "add", name: "工单早报", steps: ["拉今天的工单", "按状态分组"], origin: null },
       });
 
       // 上行报文按到达顺序处理，后发的这张先落了，前面那张就是被丢了，不靠等超时。
@@ -499,16 +512,14 @@ describe("群里那张卡", () => {
         runId,
         botId: owner.botId,
         groupId: owner.groupId,
-        name: "Globex 报价",
-        steps: STEPS,
+        change: { op: "add", name: "Globex 报价", steps: STEPS, origin: null },
       });
       agent.send({
         type: "skill_offer",
         runId,
         botId: owner.botId,
         groupId: owner.groupId,
-        name: "工单早报",
-        steps: ["再拉一遍", "再分一遍"],
+        change: { op: "add", name: "工单早报", steps: ["再拉一遍", "再分一遍"], origin: null },
       });
       const barrier = await offerSkill(owner, agent, push, "周报", ["汇总本周", "发给我"], runId);
 
@@ -521,6 +532,201 @@ describe("群里那张卡", () => {
       await pushUntil(push, "message", (one) => one.message.id === pending.id);
       const again = await offerSkill(owner, agent, push, "工单早报", ["拉今天的工单", "按状态分组"], runId);
       expect(offerBody(again).status, "上一张已经有了结论，同名的可以再问").toBe("offered");
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+});
+
+describe("对话里装、改、删", () => {
+  const ORIGIN = "https://github.com/anthropics/skills/blob/main/skills/pdf/SKILL.md";
+
+  it("装的卡带着来源落下，点存后 skill 记 installed 和原链接，电脑收到的 config 里也有", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const card = await propose(owner, agent, push, { op: "add", name: "读 PDF", steps: STEPS, origin: ORIGIN });
+      expect(offerBody(card).change, "卡上能看到全部步骤和从哪来的").toEqual({
+        op: "add",
+        name: "读 PDF",
+        steps: STEPS,
+        origin: ORIGIN,
+      });
+      expect(await skillsOf(owner, owner.botId), "没点之前外面的东西一步都没进来").toEqual([]);
+
+      const decided = await decide(owner, card, "save");
+      expect(decided.skill, "装下来的就是卡上那份").toMatchObject({
+        name: "读 PDF",
+        steps: STEPS,
+        source: "installed",
+        origin: ORIGIN,
+      });
+      expect(await skillsOf(owner, owner.botId)).toEqual([decided.skill]);
+      const config = await agentUntil(agent, "config");
+      expect(config.skills, "运行器落盘要知道来源").toEqual([decided.skill]);
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("改的卡点了之后同一条 skill 换了名字和步骤，id、来源、用量都不变", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const before = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      await say(owner, "/周报 跑一下");
+      const card = await propose(owner, agent, push, {
+        op: "edit",
+        targetId: before.id,
+        name: "周报（精简版）",
+        steps: ["翻一遍群消息", "只写一段"],
+      });
+      const decided = await decide(owner, card, "save");
+
+      expect(decided.skill, "改的是原来那条，不是新建一条").toMatchObject({
+        id: before.id,
+        name: "周报（精简版）",
+        steps: ["翻一遍群消息", "只写一段"],
+        source: "taught",
+        useCount: 1,
+      });
+      expect(offerBody(decided.message)).toMatchObject({ status: "saved", skillId: before.id });
+      expect(await skillsOf(owner, owner.botId)).toEqual([decided.skill]);
+      expect((await pushUntil(push, "skill_updated", (one) => one.skill.name === "周报（精简版）")).skill).toEqual(
+        decided.skill,
+      );
+      expect((await agentUntil(agent, "config")).skills, "改完要重发 config").toEqual([decided.skill]);
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("改成这个 Bot 已有的名字回 409，卡留在没点，两条都没动", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const report = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      const other = await teach(owner, owner.botId, "月报", ["拉一个月的数据", "写总结"]);
+      const card = await propose(owner, agent, push, {
+        op: "edit",
+        targetId: other.id,
+        name: "周报",
+        steps: ["拉一周的数据", "写总结"],
+      });
+
+      const response = await owner.client.post(`/api/messages/${card.id}/skill-offer`, { decision: "save" });
+      expect(response.status).toBe(409);
+      expect(await skillsOf(owner, owner.botId), "撞名整条回滚").toEqual([report, other]);
+      expect(offerBody((await messagesOf(owner)).find((one) => one.id === card.id)).status).toBe("offered");
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("要改的那条已经不在了回 409，卡留在没点", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const report = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      const card = await propose(owner, agent, push, {
+        op: "edit",
+        targetId: report.id,
+        name: "周报",
+        steps: ["翻一遍群消息", "只写一段"],
+      });
+      expect((await owner.client.delete(`/api/skills/${report.id}`)).status).toBe(204);
+
+      const response = await owner.client.post(`/api/messages/${card.id}/skill-offer`, { decision: "save" });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({ error: "这个技能已经不在了" });
+      expect(await skillsOf(owner, owner.botId), "改不了的不会变成新建一条").toEqual([]);
+      expect(offerBody((await messagesOf(owner)).find((one) => one.id === card.id)).status).toBe("offered");
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("删的卡点了之后那条 skill 没了，推 skill_deleted，电脑收到的 config 里也没了", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const report = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      const kept = await teach(owner, owner.botId, "月报", ["拉一个月的数据", "写总结"]);
+      const card = await propose(owner, agent, push, { op: "remove", targetId: report.id, name: "周报" });
+      const decided = await decide(owner, card, "save");
+
+      expect(decided.skill, "删掉的没有 skill 可回").toBeNull();
+      expect(offerBody(decided.message)).toMatchObject({ status: "saved", skillId: null });
+      expect(await pushUntil(push, "skill_deleted")).toEqual({
+        type: "skill_deleted",
+        skillId: report.id,
+        botId: owner.botId,
+      });
+      expect(await skillsOf(owner, owner.botId)).toEqual([kept]);
+      expect((await agentUntil(agent, "config")).skills, "运行器靠整份名单把这条的目录删掉").toEqual([kept]);
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("要删的那条已经不在了，点删照样收成删了", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const report = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      const card = await propose(owner, agent, push, { op: "remove", targetId: report.id, name: "周报" });
+      expect((await owner.client.delete(`/api/skills/${report.id}`)).status).toBe(204);
+
+      const decided = await decide(owner, card, "save");
+      expect(offerBody(decided.message).status, "用户要的就是它不在，已经不在了也是这个结局").toBe("saved");
+      expect(await skillsOf(owner, owner.botId)).toEqual([]);
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("改、删指到别的 Bot 的 skill，或者同一条已有卡没点，上行都不落卡", async () => {
+    const owner = await ownerWithBot();
+    const agent = await online(owner);
+    const push = await watch(owner);
+
+    try {
+      const otherBot = await secondBot(owner);
+      const theirs = await teach(owner, otherBot, "对账", ["拉流水", "对一遍"]);
+      const mine = await teach(owner, owner.botId, "周报", ["翻一遍群消息", "写三段"]);
+      const pending = await propose(owner, agent, push, { op: "remove", targetId: mine.id, name: "周报" });
+
+      const runId = await startRun(owner, agent);
+      const base = { type: "skill_offer", runId, botId: owner.botId, groupId: owner.groupId } as const;
+      agent.send({ ...base, change: { op: "remove", targetId: theirs.id, name: "对账" } });
+      agent.send({ ...base, change: { op: "edit", targetId: theirs.id, name: "对账", steps: ["改掉", "它的"] } });
+      agent.send({ ...base, change: { op: "edit", targetId: mine.id, name: "周报", steps: ["再改", "一遍"] } });
+      const barrier = await offerSkill(owner, agent, push, "月报", ["拉一个月的数据", "写总结"], runId);
+
+      expect(
+        (await messagesOf(owner)).filter((one) => one.body.kind === "skill_offer").map((one) => one.id),
+        "别的 Bot 的两张和同一条的第二张都没落",
+      ).toEqual([pending.id, barrier.id]);
+      expect(await skillsOf(owner, otherBot), "别的 Bot 那条一个字没动").toEqual([theirs]);
     } finally {
       push.close();
       agent.close();

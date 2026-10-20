@@ -21,6 +21,8 @@ import {
   type MessageBody,
   type ModelPurpose,
   type RoutineOfferStatus,
+  type SkillChange,
+  type SkillOfferStatus,
   type TeamOfferStatus,
   type ToolCallStatus,
   type Viewer,
@@ -710,11 +712,20 @@ const PLAN_OUTCOME: Record<ContentPlan["status"], string> = {
   returned: "你退回了",
 };
 
-const SKILL_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "skill_offer" }>["status"], string> = {
-  offered: "还在等你定",
-  saved: "你存了",
-  dismissed: "你没存",
-};
+// 卡上提议的那一句和点了之后的结论。装的卡带上从哪装，edit 的 name 是改完的名字。
+function skillOfferSentence(change: SkillChange, status: SkillOfferStatus): string {
+  const outcome = (saved: string, dismissed: string): string => ({ offered: "还在等你定", saved, dismissed })[status];
+  switch (change.op) {
+    case "add":
+      return change.origin === null
+        ? `提议存成 skill「${change.name}」，${outcome("你存了", "你没存")}`
+        : `提议从 ${new URL(change.origin).host} 装 skill「${change.name}」，${outcome("你装了", "你没装")}`;
+    case "edit":
+      return `提议改 skill「${change.name}」，${outcome("你改了", "你没改")}`;
+    case "remove":
+      return `提议删掉 skill「${change.name}」，${outcome("你删了", "你没删")}`;
+  }
+}
 
 const PREFERENCE_OFFER_OUTCOME: Record<Extract<MessageBody, { kind: "preference_offer" }>["status"], string> = {
   offered: "还在等你定",
@@ -868,11 +879,7 @@ function summarize(
       );
     }
     case "skill_offer":
-      return line(
-        "系统",
-        `问过要不要存成 skill「${body.name}」，${SKILL_OFFER_OUTCOME[body.status]}`,
-        SKILL_OFFER_SETTLED[body.status],
-      );
+      return line("系统", skillOfferSentence(body.change, body.status), SKILL_OFFER_SETTLED[body.status]);
     case "preference_offer":
       return line(
         "系统",

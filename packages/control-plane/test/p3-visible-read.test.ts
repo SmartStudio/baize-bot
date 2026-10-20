@@ -363,8 +363,7 @@ describe("P3 消息可见范围", () => {
         {
           kind: "skill_offer",
           botId: o.a.bot.id,
-          name: "秘密",
-          steps: ["秘密一", "秘密二"],
+          change: { op: "add", name: "秘密", steps: ["秘密一", "秘密二"], origin: null },
           status: "offered",
           skillId: null,
         },

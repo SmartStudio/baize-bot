@@ -295,8 +295,7 @@ describe("上下文里的卡写结论", () => {
       await appendMessage(database.db, job.groupId, {
         kind: "skill_offer",
         botId: job.botId,
-        name: "周报",
-        steps: ["拉数据", "写周报"],
+        change: { op: "add", name: "周报", steps: ["拉数据", "写周报"], origin: null },
         status: "dismissed",
         skillId: null,
       });
@@ -336,7 +335,7 @@ describe("上下文里的卡写结论", () => {
         { from: "系统", text: "小内起草的草稿「月度复盘」（GitHub），你批准了，留着没发" },
         { from: "系统", text: "小内排的内容计划「下周计划」共 2 篇，你批准了" },
         { from: "系统", text: "小内排的内容计划「下下周计划」共 1 篇，还在等你看" },
-        { from: "系统", text: "问过要不要存成 skill「周报」，你没存" },
+        { from: "系统", text: "提议存成 skill「周报」，你没存" },
         { from: "系统", text: "提议记住「标题不超过 15 个字」，你让记住了" },
         { from: "系统", text: "小内出的方案卡「小红书起号」，还在等你点开始" },
       ]);
