@@ -158,6 +158,7 @@ describe("建桌", () => {
     const listed = GroupListResponse.parse(await (await client.get("/api/groups")).json());
 
     expect(listed.items.map((entry) => entry.group.id)).toEqual([table.groupId]);
+    expect(listed.items[0]?.poker, "列表上标着它是牌桌").toBe(true);
     const presetSolo = await database.db
       .select({ id: groups.id })
       .from(groups)

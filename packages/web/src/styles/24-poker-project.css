@@ -88,6 +88,12 @@
   font: var(--type-heading);
 }
 
+.poker-stats-open {
+  margin: var(--space-5) 0 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
 .poker-rules {
   padding: var(--space-5) var(--space-6);
   border-radius: var(--radius-lg);

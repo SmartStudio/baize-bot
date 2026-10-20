@@ -296,6 +296,7 @@ describe("群列表", () => {
     const item = list.items.find((entry) => entry.group.id === created.group.id);
     expect(item?.lastMessage?.body, "最近一条应当是后发的那条").toEqual({ kind: "user", text: "再看交期" });
     expect(item?.pendingApprovals).toBe(0);
+    expect(item?.poker, "普通群不是牌桌，Web 不去拉牌桌视图").toBe(false);
   });
 
   it("没发过消息的群的 lastMessage 是 null", async () => {

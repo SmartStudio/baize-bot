@@ -168,7 +168,7 @@ hub 认连接用 `#onHello` 入表时登记的 WeakMap，再校验它还是 `#co
 
 ## 群与主题任务
 
-每个群恰好一张主题任务卡。单 Bot 群在建 Bot 时自动建出来，多 Bot 群走 `POST /api/groups`，一次拉 2 到 6 个 Bot。编号是 `T-` 加四位，从 `user_counters.next_task_number` 取一个再把它加一，建 Bot 和建群共用这一个计数器，所以同一个用户的编号不会撞。`GET /api/groups` 只列成员数大于一的群，单 Bot 群在 `/api/bots` 里跟着它的 Bot 走。`Group.kind` 是 `solo` 还是 `team` 只看 `groups.solo_bot_id` 是否非空，`repo/rows.ts` 的 `toGroup` 是唯一出处；团队群删到只剩一个成员仍是 `team`，Web 入列按这个字段，不按成员数和首席猜。
+每个群恰好一张主题任务卡。单 Bot 群在建 Bot 时自动建出来，多 Bot 群走 `POST /api/groups`，一次拉 2 到 6 个 Bot。编号是 `T-` 加四位，从 `user_counters.next_task_number` 取一个再把它加一，建 Bot 和建群共用这一个计数器，所以同一个用户的编号不会撞。`GET /api/groups` 只列成员数大于一的群，单 Bot 群在 `/api/bots` 里跟着它的 Bot 走。每一项带 `poker`，说这个群有没有 `poker_tables` 行，Web 只对它为真的群去拉牌桌视图，普通项目页不再靠打一次牌桌接口吃 404 来认。`Group.kind` 是 `solo` 还是 `team` 只看 `groups.solo_bot_id` 是否非空，`repo/rows.ts` 的 `toGroup` 是唯一出处；团队群删到只剩一个成员仍是 `team`，Web 入列按这个字段，不按成员数和首席猜。
 
 ### 路由规则
 

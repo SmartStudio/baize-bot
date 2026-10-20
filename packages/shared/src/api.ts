@@ -156,13 +156,14 @@ export const CreateGroupRequest = z.object({
 });
 export const CreateGroupResponse = z.object({ group: Group, task: TopicTask });
 
-// GET /api/groups  只列多 Bot 群。单 Bot 群在 /api/bots 里。
+// GET /api/groups  只列多 Bot 群。单 Bot 群在 /api/bots 里。poker 说这个群是不是牌桌，项目页凭它决定要不要拉牌桌视图。
 export const GroupListItem = z.object({
   group: Group,
   task: TopicTask,
   lastMessage: Message.nullable(),
   pendingApprovals: z.number().int().nonnegative(),
   pendingHandoffs: z.number().int().nonnegative(),
+  poker: z.boolean(),
 });
 export type GroupListItem = z.infer<typeof GroupListItem>;
 export const GroupListResponse = z.object({ items: z.array(GroupListItem) });

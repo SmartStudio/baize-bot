@@ -105,7 +105,10 @@ test("推 task_updated 改了节奏，项目页节奏行跟着变，不重拉", 
   const taskId = groups.items.find((item) => item.group.id === "grp_order")?.task.id;
   if (taskId === undefined) throw new Error("mock 里没有订单群的任务卡");
 
-  // 项目页重拉有 100ms 防抖。停住页面时钟，节奏行变了之后再把时钟往前拨，挂着的重拉在这时一定发出去。
+  // 项目页重拉有 100ms 防抖。群历史晚于项目页到，条数一变排下的那次重拉先放掉，再开始数。
+  await page.clock.runFor(1_000);
+  await page.evaluate(() => fetch("/api/health").then(() => undefined));
+  // 停住页面时钟，节奏行变了之后再把时钟往前拨，挂着的重拉在这时一定发出去。
   await page.clock.pauseAt(Date.now() + 60_000);
   const refetched: string[] = [];
   page.on("request", (req) => {

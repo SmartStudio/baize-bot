@@ -48,6 +48,7 @@ const groupListItems = () =>
       lastMessage: lastMessageOf(group.id),
       pendingApprovals: pendingApprovalsOf(group.id),
       pendingHandoffs: pendingHandoffsOf(group.id),
+      poker: pokerTables.has(group.id),
     };
   });
 

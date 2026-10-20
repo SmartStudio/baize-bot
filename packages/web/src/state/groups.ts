@@ -95,6 +95,7 @@ export const teamOf = (item: GroupListItem): Conversation => ({
   lastMessage: item.lastMessage,
   pendingApprovals: item.pendingApprovals,
   pendingHandoffs: item.pendingHandoffs,
+  poker: item.poker,
 });
 
 // 建队卡的终态只往前走，不会退回 offered 或 deferred。回包、推送、历史哪个先带来都记下，不比号。
@@ -127,7 +128,9 @@ const reconciled = (state: ReadyState, items: readonly GroupListItem[], seq: Seq
       if (newer(state.countStamps, c.groupId, seq)) countStamps[c.groupId] = seq;
       return [];
     }
-    let next = fresh ? { ...c, botIds: item.group.botIds, chiefBotId: item.group.chiefBotId } : c;
+    // 是不是牌桌建群时就定了、不会变，所以不看号，名单说是就是。建桌的推送比名单先到时这里补上。
+    let next = c.poker === item.poker ? c : { ...c, poker: item.poker };
+    if (fresh) next = { ...next, botIds: item.group.botIds, chiefBotId: item.group.chiefBotId };
     if (newer(state.countStamps, c.groupId, seq)) {
       countStamps[c.groupId] = seq;
       next = { ...next, pendingApprovals: item.pendingApprovals, pendingHandoffs: item.pendingHandoffs };
@@ -162,7 +165,7 @@ const admitted = (state: ReadyState, conversation: Conversation): ReadyState => 
 const conversationOf = (group: Group, task: TopicTask): Conversation => {
   const base = { groupId: group.id, lastMessage: null, pendingApprovals: 0, pendingHandoffs: 0 };
   if (group.kind === "solo") return { kind: "solo", botId: group.botIds[0], ...base };
-  return { kind: "team", botIds: group.botIds, chiefBotId: group.chiefBotId, task, ...base };
+  return { kind: "team", botIds: group.botIds, chiefBotId: group.chiefBotId, task, poker: false, ...base };
 };
 
 export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {

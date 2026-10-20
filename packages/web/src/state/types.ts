@@ -92,6 +92,7 @@ export type Conversation =
       lastMessage: Message | null;
       pendingApprovals: number;
       pendingHandoffs: number;
+      poker: boolean;
     };
 
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
