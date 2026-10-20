@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PokerTableView, type PokerEvent } from "@baize/shared";
-import { actionBarOf, feltOf, raiseCheck } from "./poker.js";
+import { actionBarOf, feltOf, quickAction, raiseCheck } from "./poker.js";
 
 type SeatSpec = {
   id: string;
@@ -135,10 +135,10 @@ describe("牌桌上的牌", () => {
         events: [{ kind: "action", seatId: "seat-3", action: { kind: "raise", amount: 60 }, put: 60 }],
       }),
     );
-    expect(felt?.opponents.map((seat) => [seat.seat, seat.stack, seat.committed, seat.status, seat.label])).toEqual([
+    expect(felt?.opponents.map((seat) => [seat.seat, seat.stack, seat.bet, seat.status, seat.label])).toEqual([
       [1, 2000, 0, "active", ""],
       [2, 1500, 0, "folded", "弃牌"],
-      [3, 1940, 60, "active", "加到 60"],
+      [3, 1940, 60, "active", "加注到 60"],
     ]);
   });
 
@@ -158,29 +158,73 @@ describe("牌桌上的牌", () => {
     expect(folded).toMatchObject({ hasCards: false, status: "folded", label: "弃牌" });
   });
 
-  it("摊牌亮出的对手牌面翻开", () => {
+  it("摊牌亮出的牌面翻开，标签写各家牌型，赢家标赢了多少，桌上不再画下注", () => {
     const felt = feltOf(
       handTable({
         street: "complete",
-        seats: { 1: { shown: ["Kh", "Qc"] } },
+        board: ["Ks", "9h", "4c", "2d", "7s"],
+        seats: { 1: { shown: ["Kh", "Qc"], committed: 200 }, 4: { shown: ["As", "Kd"], committed: 200 } },
         toAct: null,
         legal: { kind: "complete" },
+        awards: [{ seatId: "4", amount: 800, pot: 0 }],
       }),
     );
-    expect(felt?.opponents.find((seat) => seat.seat === 1)?.cards).toEqual(["Kh", "Qc"]);
-    expect(felt?.opponents.find((seat) => seat.seat === 1)?.label).toBe("亮牌 K♥ Q♣");
+    const leopard = felt?.opponents.find((seat) => seat.seat === 1);
+    expect(leopard).toMatchObject({ cards: ["Kh", "Qc"], label: "一对 K", won: 0, bet: 0 });
+    expect(felt?.me).toMatchObject({ label: "一对 K", won: 800, bet: 0 });
   });
 
-  it("动作标签取本街最后一个动作，换街就清", () => {
+  it("庄位和大小盲在座位上标出来", () => {
+    const table = handTable();
+    const view = table.hand?.view;
+    if (view === undefined) throw new Error("应该有一手");
+    const positions = ["small_blind", "big_blind", "middle", "button"] as const;
+    const marked = PokerTableView.parse({
+      ...table,
+      hand: {
+        ...table.hand,
+        view: { ...view, seats: view.seats.map((seat, index) => ({ ...seat, position: positions[index] })) },
+      },
+    });
+    const felt = feltOf(marked);
+    expect(felt?.opponents.map((seat) => seat.marker)).toEqual(["小盲", "大盲", null]);
+    expect(felt?.me?.marker).toBe("庄");
+  });
+
+  it("动作标签取本街最后一个动作，写推完后本街一共多少，换街就清", () => {
     const preflop: PokerEvent[] = [
-      { kind: "action", seatId: "1", action: { kind: "raise", amount: 60 }, put: 50 },
-      { kind: "action", seatId: "3", action: { kind: "call" }, put: 60 },
+      { kind: "blind", seatId: "1", amount: 10 },
+      { kind: "blind", seatId: "2", amount: 20 },
+      { kind: "action", seatId: "3", action: { kind: "raise", amount: 60 }, put: 60 },
+      { kind: "action", seatId: "1", action: { kind: "call" }, put: 50 },
+      { kind: "action", seatId: "2", action: { kind: "fold" }, put: 0 },
     ];
     const before = feltOf(handTable({ events: preflop, toAct: 4 }));
-    expect(before?.opponents.map((seat) => seat.label)).toEqual(["加到 60", "", "跟 60"]);
+    expect(before?.opponents.map((seat) => seat.label)).toEqual(["跟 60", "弃牌", "加注到 60"]);
     const flop: PokerEvent[] = [...preflop, { kind: "street", street: "flop", cards: ["Ks", "9h", "4c"] }];
     const after = feltOf(handTable({ events: flop, street: "flop", board: ["Ks", "9h", "4c"] }));
     expect(after?.opponents.map((seat) => seat.label)).toEqual(["", "", ""]);
+  });
+
+  it("翻牌后本街第一个往里推的叫下注，再往上加叫加注到，全下写总额", () => {
+    const events: PokerEvent[] = [
+      { kind: "street", street: "flop", cards: ["Ks", "9h", "4c"] },
+      { kind: "action", seatId: "1", action: { kind: "check" }, put: 0 },
+      { kind: "action", seatId: "2", action: { kind: "raise", amount: 40 }, put: 40 },
+      { kind: "action", seatId: "3", action: { kind: "raise", amount: 120 }, put: 120 },
+      { kind: "action", seatId: "1", action: { kind: "all_in" }, put: 1500 },
+    ];
+    const felt = feltOf(handTable({ events, street: "flop", board: ["Ks", "9h", "4c"] }));
+    expect(felt?.opponents.map((seat) => seat.label)).toEqual(["全下 1,500", "下注 40", "加注到 120"]);
+  });
+
+  it("轮到牌友时带上他的出牌期限，轮到你时没有", () => {
+    const table = handTable({ toAct: 2, legal: { kind: "waiting", toAct: "2" } });
+    const deadline = "2026-10-20T00:01:00.000Z";
+    const waiting = PokerTableView.parse({ ...table, hand: { ...table.hand, deadline } });
+    expect(feltOf(waiting)?.deadline).toBe(deadline);
+    const mine = handTable({ toAct: 4 });
+    expect(feltOf(PokerTableView.parse({ ...mine, hand: { ...mine.hand, deadline } }))?.deadline).toBeNull();
   });
 
   it("轮到谁谁高亮", () => {
@@ -214,7 +258,7 @@ describe("按钮条", () => {
       handId: "hand_1",
       canFold: true,
       pass: { kind: "call", amount: 60 },
-      raise: { kind: "raise", min: 100, max: 2000 },
+      raise: { kind: "raise", verb: "加注到", min: 100, max: 2000 },
     });
   });
 
@@ -230,7 +274,7 @@ describe("按钮条", () => {
         },
       }),
     );
-    expect(bar).toMatchObject({ mine: true, pass: { kind: "check" }, raise: { kind: "raise", min: 20 } });
+    expect(bar).toMatchObject({ mine: true, pass: { kind: "check" }, raise: { kind: "raise", verb: "下注", min: 20 } });
   });
 
   it("seq 就是已落库的事件数", () => {
@@ -254,12 +298,14 @@ describe("按钮条", () => {
     const bar = actionBarOf(handTable({ seats: { 3: { committed: 60 } } }));
     if (bar?.raise?.kind !== "raise") throw new Error("应该能加注");
     // 底池 150，跟 60 后 210，当前注 60：半池 60 + 105 = 165，满池 60 + 210 = 270。
-    expect(bar.raise.quick.map((pick) => [pick.id, pick.amount])).toEqual([
-      ["min", 100],
-      ["half", 165],
-      ["pot", 270],
-      ["all", 2000],
+    expect(bar.raise.quick.map((pick) => [pick.id, pick.label, pick.amount])).toEqual([
+      ["min", "最小 100", 100],
+      ["half", "半池 165", 165],
+      ["pot", "满池 270", 270],
+      ["all", "全下 2,000", 2000],
     ]);
+    expect(quickAction(bar.raise, bar.raise.quick[1]!), "半池直接按这个数加注").toEqual({ kind: "raise", amount: 165 });
+    expect(quickAction(bar.raise, bar.raise.quick[3]!), "顶到上限就是全下").toEqual({ kind: "all_in" });
     expect(bar.raise.step).toBe(20);
   });
 
@@ -299,7 +345,7 @@ describe("按钮条", () => {
 });
 
 describe("加注额校验", () => {
-  const spec = { kind: "raise", min: 100, max: 500, step: 20, quick: [] } as const;
+  const spec = { kind: "raise", verb: "加注到", min: 100, max: 500, step: 20, quick: [] } as const;
 
   it("范围内的整数通过", () => {
     expect(raiseCheck(spec, "100")).toEqual({ ok: true, amount: 100 });
@@ -307,11 +353,12 @@ describe("加注额校验", () => {
   });
 
   it("低于最小额说清最少要加到多少", () => {
-    expect(raiseCheck(spec, "80")).toEqual({ ok: false, reason: "最少要加到 100" });
+    expect(raiseCheck(spec, "80")).toEqual({ ok: false, reason: "最少要加注到 100", fix: 100 });
+    expect(raiseCheck({ ...spec, verb: "下注" }, "10")).toEqual({ ok: false, reason: "最少要下注 100", fix: 100 });
   });
 
   it("高于筹码说清最多加到多少", () => {
-    expect(raiseCheck(spec, "900")).toEqual({ ok: false, reason: "筹码不够，最多只能加到 500" });
+    expect(raiseCheck(spec, "900")).toEqual({ ok: false, reason: "筹码不够，最多只能加注到 500", fix: 500 });
   });
 
   it("空、小数、不是数字都不通过", () => {

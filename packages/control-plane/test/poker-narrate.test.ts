@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { apply, newHand, type Action, type Event, type HandState, type SeatId } from "../src/poker/engine.js";
-import { narrate } from "../src/poker/narrate.js";
+import { hostLines, narrate } from "../src/poker/narrate.js";
 
 const names: Record<string, string> = { "1": "阿豹", "2": "老K", "3": "茉莉", "4": "你" };
 const nameOf = (seatId: SeatId): string => names[seatId] ?? seatId;
@@ -79,5 +79,45 @@ describe("narrate", () => {
     const line = narrate(showdown, nameOf);
     expect(line).toContain(nameOf(showdown.seatId));
     expect(line).toMatch(/[♠♥♦♣]/);
+  });
+});
+
+describe("hostLines", () => {
+  it("一手打到摊牌，老白只说开场、三街和结算五句，不说任何单个动作", () => {
+    const hand = play("老白摊牌", "4", checkOrCall);
+    const lines = hostLines(hand, 0, nameOf);
+    expect(lines).toHaveLength(5);
+    expect(lines[0]).toBe("新一手，你坐庄，阿豹小盲 5，老K大盲 10");
+    expect(lines.slice(1, 4)).toEqual([
+      expect.stringMatching(/^翻牌：\S+ \S+ \S+，底池 40$/),
+      expect.stringMatching(/^转牌：\S+，底池 40$/),
+      expect.stringMatching(/^河牌：\S+，底池 40$/),
+    ]);
+    expect(lines[4]).toMatch(/^摊牌：/);
+    for (const name of ["阿豹", "老K", "茉莉", "你"]) expect(lines[4]).toContain(name);
+    expect(lines[4], "赢家带赢的数").toMatch(/赢 \d+/);
+    expect(lines.join("\n")).not.toMatch(/过牌|跟注|弃牌|加注/);
+  });
+
+  it("从中间落的事件只说这次新出的关键处，没到新一街就一句不说", () => {
+    const hand = play("老白分段", "4", checkOrCall);
+    const flop = hand.events.findIndex((event) => event.kind === "street");
+    expect(hostLines(hand, 2, nameOf).slice(0, 1)).toEqual([expect.stringMatching(/^翻牌：/)]);
+    const beforeFlop = { ...hand, events: hand.events.slice(0, flop) };
+    expect(hostLines(beforeFlop, 2, nameOf)).toEqual([]);
+  });
+
+  it("弃牌收场只说一句谁收下底池", () => {
+    const hand = play("老白弃牌", "4", foldPreflop);
+    expect(hostLines(hand, 2, nameOf)).toEqual(["其他人都弃牌，老K收下底池 15"]);
+  });
+
+  it("兜底动作并进这次的第一句；这次没有要说的就不提", () => {
+    const hand = play("老白兜底", "4", checkOrCall);
+    const flop = hand.events.findIndex((event) => event.kind === "street");
+    const closing = flop - 1;
+    const [first] = hostLines({ ...hand, events: hand.events.slice(0, flop + 1) }, closing, nameOf, "超时");
+    expect(first).toMatch(/^老K（超时）过牌，翻牌：/);
+    expect(hostLines({ ...hand, events: hand.events.slice(0, closing + 1) }, closing, nameOf, "超时")).toEqual([]);
   });
 });

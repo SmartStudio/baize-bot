@@ -103,7 +103,19 @@ const RELAXABLE_ACTIONS = new Set<ActionKind>(["read", "shell"]);
 const COMMAND_SEPARATORS = new Set(["|", "|&", "&&", "||", ";"]);
 const INPUT_REDIRECTS = new Set(["<", "<<<", "<&"]);
 const OUTPUT_REDIRECTS = new Set([">", ">>", ">&"]);
-const SAFE_VALUE_COMMANDS = new Set(["echo", "printf", "pwd", "date", "whoami", "id", "uname", "true", "false"]);
+// which 只在 PATH 里找名字，不跑找到的程序。
+const SAFE_VALUE_COMMANDS = new Set([
+  "echo",
+  "printf",
+  "pwd",
+  "date",
+  "whoami",
+  "id",
+  "uname",
+  "which",
+  "true",
+  "false",
+]);
 const READ_COMMANDS = new Set(["ls", "cat", "head", "tail", "wc", "stat", "file", "du", "grep"]);
 const WRITE_COMMANDS = new Set(["touch", "mkdir", "install"]);
 const DELETE_COMMANDS = new Set(["rm", "rmdir", "unlink", "shred"]);
@@ -536,6 +548,7 @@ const SAFE_OPTIONS: Readonly<Record<string, readonly string[]>> = {
   whoami: [],
   id: ["-u", "-g", "-G", "-n", "-r"],
   uname: ["-a", "-m", "-n", "-p", "-r", "-s", "-v"],
+  which: ["-a", "-s"],
   true: [],
   false: [],
 };

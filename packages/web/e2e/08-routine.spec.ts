@@ -25,7 +25,7 @@ test("在例行详情里加一个每分钟的触发器，存下来列表就跟�
   await expect(row.getByTestId("routine-row-note")).toHaveText("工作日 09:00 · 每分钟");
 });
 
-test("试跑一次后群里出现「自动运行」那条 system，运行记录多一条", async ({ page }) => {
+test("试跑一次后群里落一条标着例行任务的 user 消息，运行记录多一条", async ({ page }) => {
   await login(page);
   await openRoutines(page, "小服");
   await page.getByTestId("routine-open").click();
@@ -49,8 +49,11 @@ test("试跑一次后群里出现「自动运行」那条 system，运行记录�
   // 例行页不带对话，这次运行在群里说的话要回小服的单 Bot 群看。
   await openSeededBot(page, "小服");
   const thread = page.getByTestId("message-list");
-  await expect(thread.getByText("例行任务「每日工单早报」自动运行"), "一次运行先在群里说一声").toBeVisible();
-  await expect(thread.getByText("按紧急度排序"), "再落一条 user 消息，正文就是每次运行做什么").toBeVisible();
+  await expect(thread.getByTestId("routine-label"), "一次运行只落一条消息，上面标着是哪个例行任务").toHaveText(
+    "例行任务「每日工单早报」",
+  );
+  await expect(thread.getByText("按紧急度排序"), "正文就是每次运行做什么").toBeVisible();
+  await expect(thread.getByText("例行任务「每日工单早报」自动运行"), "不再另落一条 system").toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/2c.png` });
 });
 
@@ -131,7 +134,7 @@ test("给 webhook 地址打一下，群里照样跑起来，运行记录靠推�
   await expect(page.getByTestId("run-row").first().locator("small")).toHaveText("运行中");
   await openSeededBot(page, "小服");
   await expect(
-    page.getByTestId("message-list").getByText("例行任务「每日工单早报」自动运行"),
-    "从哪儿触发的，群里都是同样两条消息",
-  ).toBeVisible();
+    page.getByTestId("message-list").getByTestId("routine-label"),
+    "从哪儿触发的，群里都是同样一条标着例行任务的消息",
+  ).toHaveText("例行任务「每日工单早报」");
 });

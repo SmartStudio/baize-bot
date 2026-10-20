@@ -38,6 +38,8 @@ const skillOffer = (botId: string) =>
   });
 const approval = () => message({ kind: "approval", approvalId: "approval-1" });
 const handoff = () => message({ kind: "handoff", handoffId: "handoff-1" });
+const system = (text: string, tone?: "info" | "error") =>
+  message(tone === undefined ? { kind: "system", text } : { kind: "system", text, tone });
 const cost = () => message({ kind: "cost", runId: "run-1", steps: 1, amount: 0.8 });
 
 const botTurnAt = (turns: Turn[], index: number) => {
@@ -114,6 +116,36 @@ describe("turnsOf", () => {
     expect(turnsOf([approvalMessage, handoffMessage])).toEqual([
       { kind: "system", message: approvalMessage },
       { kind: "system", message: handoffMessage },
+    ]);
+  });
+
+  it("普通说明跟着前面的 Bot 回合，同一个 Bot 接着说不另起一轮", () => {
+    const before = bot("bot-a", "先查一下");
+    const note = system("小销成为首席");
+    const info = system("之后在这个群里用云电脑", "info");
+    const after = bot("bot-a", "查完了");
+    expect(turnsOf([before, note, info, after])).toEqual([
+      { kind: "bot", botId: "bot-a", items: [before, note, info, after] },
+    ]);
+  });
+
+  it("出错的说明单独成一行，后面的回答另起一轮", () => {
+    const before = bot("bot-a");
+    const failure = system("电脑中途断线，这条没做完", "error");
+    const after = bot("bot-a", "重来");
+    expect(turnsOf([before, failure, after])).toEqual([
+      { kind: "bot", botId: "bot-a", items: [before] },
+      { kind: "system", message: failure },
+      { kind: "bot", botId: "bot-a", items: [after] },
+    ]);
+  });
+
+  it("前面不是 Bot 回合时说明自成一行", () => {
+    const said = user();
+    const note = system("小服之后在这个群里用云电脑");
+    expect(turnsOf([said, note])).toEqual([
+      { kind: "user", message: said },
+      { kind: "system", message: note },
     ]);
   });
 

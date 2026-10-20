@@ -1,8 +1,9 @@
-import type { Action, Event, SeatId } from "./engine.js";
+import type { Action, Event, HandState, SeatId } from "./engine.js";
 import type { Card } from "./cards.js";
+import { describePokerHand, evaluatePokerHand } from "@baize/shared";
 
-// 老白的代码播报（D29）：引擎事件一对一变成一句中文，不调模型。事件日志里只有公开的事，
-// 所以这里只有 showdown 一种事件会写出底牌，其余句子拿不到别人的牌。
+// 老白的代码播报（D29），不调模型。narrate 把引擎事件一对一变成一句中文，给牌友和老白看的公开日志用；
+// hostLines 是群里那几句。事件日志里只有公开的事，所以只有摊牌会写出底牌，其余句子拿不到别人的牌。
 
 const SUIT_MARK = { s: "♠", h: "♥", d: "♦", c: "♣" } as const;
 const STREET_NAME = { flop: "翻牌", turn: "转牌", river: "河牌" } as const;
@@ -49,4 +50,68 @@ export function narrate(event: Event, nameOf: (seatId: SeatId) => string): strin
     case "award":
       return `${nameOf(event.seatId)} 赢下${event.pot === 0 ? "主池" : `边池 ${event.pot}`} ${event.amount}`;
   }
+}
+
+/** 兜底动作的来由，写进老白下一句话里。 */
+export type FallbackReason = "超时" | "三次无效";
+
+/**
+ * 老白在群里说的话。一手只在关键处开口：开手一句（庄位和盲注）、每发一街一句（公共牌和底池）、结算一句
+ * （谁赢、赢多少，摊牌时连同亮出的牌和牌型）。单个动作不播，座位上的状态桌面自己画。
+ * from 是这次新落的第一条事件的序号；fallback 不为 null 时 events[from] 是兜底动作，它并进这次的第一句，
+ * 这次没有要说的就不提。
+ */
+export function hostLines(
+  state: HandState,
+  from: number,
+  nameOf: (seatId: SeatId) => string,
+  fallback: FallbackReason | null = null,
+): string[] {
+  const { events } = state;
+  const lines: string[] = [];
+  let pot = events.slice(0, from).reduce((sum, event) => sum + putOf(event), 0);
+  for (let index = from; index < events.length; index++) {
+    const event = events[index] as Event;
+    if (index === 0) lines.push(openingLine(state, nameOf));
+    if (event.kind === "street")
+      lines.push(`${STREET_NAME[event.street]}：${event.cards.map(cardText).join(" ")}，底池 ${pot}`);
+    if (event.kind === "award") {
+      lines.push(settlementLine(state, nameOf));
+      break;
+    }
+    pot += putOf(event);
+  }
+  const forced = events[from];
+  if (fallback !== null && forced?.kind === "action" && lines[0] !== undefined)
+    lines[0] = `${nameOf(forced.seatId)}（${fallback}）${actionText(forced.action, forced.put)}，${lines[0]}`;
+  return lines;
+}
+
+function putOf(event: Event): number {
+  if (event.kind === "blind") return event.amount;
+  if (event.kind === "action") return event.put;
+  return 0;
+}
+
+function openingLine(state: HandState, nameOf: (seatId: SeatId) => string): string {
+  const [small, big] = state.events.filter((event) => event.kind === "blind");
+  const blind = (event: Event | undefined, label: string) =>
+    event?.kind === "blind" ? `，${nameOf(event.seatId)}${label} ${event.amount}` : "";
+  return `新一手，${nameOf(state.button)}坐庄${blind(small, "小盲")}${blind(big, "大盲")}`;
+}
+
+function settlementLine(state: HandState, nameOf: (seatId: SeatId) => string): string {
+  const won = new Map<SeatId, number>();
+  for (const event of state.events)
+    if (event.kind === "award") won.set(event.seatId, (won.get(event.seatId) ?? 0) + event.amount);
+  const shown = state.events.filter((event) => event.kind === "showdown");
+  if (shown.length === 0)
+    return [...won].map(([seatId, amount]) => `其他人都弃牌，${nameOf(seatId)}收下底池 ${amount}`).join("；");
+  return `摊牌：${shown
+    .map((event) => {
+      const amount = won.get(event.seatId);
+      const hand = describePokerHand(evaluatePokerHand(event.hole, state.board));
+      return `${nameOf(event.seatId)} ${event.hole.map(cardText).join(" ")}（${hand}）${amount === undefined ? "" : `赢 ${amount}`}`;
+    })
+    .join("；")}`;
 }

@@ -428,7 +428,6 @@ const finishHand = (table: MockPokerTable, hand: MockHand, ending: "fold" | "sho
 
   const delta = handSeat(hand, USER_SEAT).stack - hand.startStacks[USER_SEAT];
   if (table.session !== null) {
-    table.session.handCount += 1;
     table.session.net += delta;
     table.session.records.push({
       number: hand.number,
@@ -615,6 +614,8 @@ export const pokerStartHand = (table: MockPokerTable, emit: Emit): void => {
   if (inHand(table)) throw new PokerMockError(409, "这桌正在打一手");
   for (const seat of table.seats) if (seat.stack <= 0) seat.stack = POKER_START_STACK;
   table.session ??= { id: PokerSessionId.parse(`ses_poker_${nextSuffix()}`), handCount: 0, net: 0, records: [] };
+  // 和控制面一样，打着的这手也算进这一场的手数。
+  table.session.handCount += 1;
   table.handCount += 1;
   table.hint = null;
   const seats: HandSeat[] = table.seats.map((seat) => ({

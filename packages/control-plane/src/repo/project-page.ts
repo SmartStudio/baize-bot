@@ -26,7 +26,7 @@ import {
   tasks,
 } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { groupHasMembers } from "./live-groups.js";
+import { groupIsLive } from "./live-groups.js";
 import { messageVisibleTo, type Tx } from "./messages.js";
 import { toDraft, toMessage, toPlan } from "./rows.js";
 import { draftTitle, draftsByPlanOf, nextItems, nextRoutineAt, pendingItems } from "./today.js";
@@ -87,7 +87,7 @@ async function readProject(
   const [group] = await db
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), groupHasMembers(db)))
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), groupIsLive(db)))
     .limit(1);
   if (group === undefined) return null;
 

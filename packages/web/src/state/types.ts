@@ -92,6 +92,7 @@ export type Conversation =
       lastMessage: Message | null;
       pendingApprovals: number;
       pendingHandoffs: number;
+      poker: boolean;
     };
 
 export const memberIdsOf = (conversation: Conversation): BotId[] =>
@@ -219,6 +220,7 @@ export type Action =
   | { type: "bot_removed"; botId: BotId }
   | { type: "group_created"; group: Group; task: TopicTask; seq: Seq }
   | { type: "group_updated"; group: Group; seq: Seq }
+  | { type: "group_archived"; groupId: GroupId; seq: Seq }
   | { type: "group_turn"; turn: GroupTurn }
   | { type: "turns_cleared" }
   | { type: "task_updated"; task: TopicTask }

@@ -143,7 +143,7 @@ export function composeTablePrompt(message: PromptMessage): string {
     ...(table.publicLog.length === 0 ? ["暂无"] : table.publicLog),
     table.role === "advisor"
       ? `用户问：${table.question ?? "这手怎么打"}\n请在 120 字内给出建议和理由，只用给定视图。`
-      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额，台词最多 40 字，可以不说。其他文字不会公开。",
+      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额。默认不填 say：只有你加注、全下、这一下会摊牌，或者有人点名问你时才说一句，最多 40 字，每手最多两句。其他文字不会公开。",
   ].join("\n");
 }
 
@@ -230,7 +230,7 @@ export function createTableTools(options: {
         name: "poker_act",
         label: "出牌",
         description:
-          "根据给定合法动作出牌，等待引擎确认。失败后按中文原因在本次运行里重试。加注 amount 是本街总额，say 最多 40 字。",
+          "根据给定合法动作出牌，等待引擎确认。失败后按中文原因在本次运行里重试。加注 amount 是本街总额。say 默认不填，只在加注、全下、摊牌或被点名时说，最多 40 字。",
         parameters: ACT_PARAMS,
         async execute(callId, input, signal) {
           const params = input as Static<typeof ACT_PARAMS>;

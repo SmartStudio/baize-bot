@@ -10,8 +10,9 @@ import type { ActiveRun } from "./topic.js";
 
 /** 系统提示里那句提议存 skill 的规则。放在 Bot 描述之后，`appendSystemPrompt` 的最后一段。 */
 export const PROPOSE_SKILL_RULE =
-  "存下会做的活：一件活要是用了三次以上工具才做完，收尾时用 propose_skill 把刚才的步骤写成清单，问用户存不存。" +
-  "一次运行最多提一次，用户不答也别再提。";
+  "存下会做的活：只有两种时候用 propose_skill 把刚才的步骤写成清单问用户存不存，" +
+  "一是群里看得到用户以前就让你做过同一类活，这次又要；二是用户明说了「以后也这样做」。" +
+  "只做一次的活不问，用了多少工具都不问。一次运行最多提一次，用户不答也别再提。";
 
 // 和 protocol.ts 里 `skill_offer` 的 schema 对齐：这里挡不住的会在 AgentToControl.parse 变成一坨英文 ZodError。
 const NAME_MAX = 40;
@@ -98,7 +99,7 @@ export function createSkillTools(options: {
       name: "propose_skill",
       label: "问要不要存",
       description:
-        "把刚做完的这件活的步骤写成清单，问用户存不存成会做的活。名字写这件活叫什么，步骤按先后写，至少两步。一次运行只能问一次。",
+        "把刚做完的这件活的步骤写成清单，问用户存不存成会做的活。只在用户要过同一类活、或明说以后也这样做时用。名字写这件活叫什么，步骤按先后写，至少两步。一次运行只能问一次。",
       parameters: PROPOSE_PARAMS,
       execute: async (_callId, params) => {
         const active = options.activeRun();

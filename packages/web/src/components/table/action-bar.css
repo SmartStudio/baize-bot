@@ -39,7 +39,10 @@
 }
 
 .raise-hint {
-  min-width: 160px;
+  display: flex;
+  gap: var(--space-4);
+  align-items: baseline;
+  margin: 0;
   color: var(--danger);
   font: var(--type-caption);
 }

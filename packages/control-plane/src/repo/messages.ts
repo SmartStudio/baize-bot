@@ -14,7 +14,7 @@ import { and, asc, desc, eq, inArray, isNull, lt, max, ne, notExists, sql } from
 import type { Db } from "../db/client.js";
 import { bots, groupMembers, groups, messages, runs } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { groupHasMembers } from "./live-groups.js";
+import { groupIsLive } from "./live-groups.js";
 import { toMessage } from "./rows.js";
 
 export const DEFAULT_MESSAGE_LIMIT = 50;
@@ -34,7 +34,7 @@ export async function findGroupId(db: Db, ownerId: UserId, groupId: GroupId): Pr
   const [row] = await db
     .select({ id: groups.id })
     .from(groups)
-    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId)))
+    .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.archivedAt)))
     .limit(1);
   return row?.id ?? null;
 }
@@ -89,7 +89,7 @@ export async function findOwnedMessage(
     .select({ row: messages })
     .from(messages)
     .innerJoin(groups, eq(groups.id, messages.groupId))
-    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), groupHasMembers(db), messageVisibleTo(viewer)))
+    .where(and(eq(messages.id, messageId), eq(groups.ownerId, ownerId), groupIsLive(db), messageVisibleTo(viewer)))
     .limit(1);
   return found === undefined ? null : toMessage(found.row);
 }
@@ -110,12 +110,16 @@ export async function appendMessage(
 }
 
 /**
- * 派活失败时往群里留提示用。群可能刚随 Bot 或账号级联删掉，先查后写在两个事务里拦不住中间的删除，
- * 所以在同一个事务里先对群行拿 KEY SHARE：删除等这条写完，或者先提交、这里查不到行就回 null，一个字都不写。
+ * 派活失败时往群里留提示用。群可能刚随 Bot 或账号级联删掉、或刚被解散，先查后写在两个事务里拦不住中间的删除，
+ * 所以在同一个事务里先对群行拿 SHARE：删除和解散等这条写完，或者先提交、这里查不到行就回 null，一个字都不写。
  */
 export async function appendMessageIfGroupAlive(db: Db, groupId: string, body: MessageBody): Promise<Message | null> {
   return db.transaction(async (tx) => {
-    const [row] = await tx.select({ id: groups.id }).from(groups).where(eq(groups.id, groupId)).for("key share");
+    const [row] = await tx
+      .select({ id: groups.id })
+      .from(groups)
+      .where(and(eq(groups.id, groupId), isNull(groups.archivedAt)))
+      .for("share");
     return row === undefined ? null : appendMessage(tx, groupId, body);
   });
 }

@@ -1,4 +1,4 @@
-/* ---------- 牌桌项目页：牌友、战绩、规则和例行、新项目里的牌桌入口 ---------- */
+/* ---------- 牌桌项目页：牌友、战绩、规则、新项目里的牌桌入口 ---------- */
 
 /* 块之间的段间距由后一块往上留，新加一块要进这个选择器。复盘卡紧跟页头，不在里面。 */
 .poker-seats,
@@ -79,6 +79,17 @@
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-9);
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.poker-stats-figures b {
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.poker-stats-open {
+  margin: var(--space-5) 0 0;
   color: var(--fg-3);
   font: var(--type-caption);
 }

@@ -208,6 +208,9 @@ export const createApi = (signal?: AbortSignal) => {
       patch: { checklist: ChecklistItem[] } | { goal: ProjectGoal | null },
     ): Promise<TopicTask> =>
       (await json(UpdateTaskResponse, await send("PATCH", `/tasks/${encodeURIComponent(id)}`, patch))).task,
+    archiveGroup: async (groupId: GroupId): Promise<void> => {
+      await send("POST", `/groups/${encodeURIComponent(groupId)}/archive`);
+    },
     messages: async (groupId: GroupId) =>
       json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
     message: async (id: MessageId) =>

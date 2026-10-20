@@ -133,20 +133,14 @@ export const MainWindow = () => {
 
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
-  // 项目页进来时还不知道这个群是不是牌桌。问过一次记下结果，问的这段时间不画普通项目页，免得先闪一下再换。
+  // 牌桌的项目页要整份牌桌视图，还没拉到的这段时间不画普通项目页，免得先闪一下再换。
   const projectGroupId = projectOpen?.groupId ?? null;
   const pokerTable = ready === null || projectGroupId === null ? undefined : pokerTableOf(ready, projectGroupId);
-  const [ordinary, setOrdinary] = useState<ReadonlySet<GroupId>>(new Set());
-  const probing = projectGroupId !== null && pokerTable === undefined && !ordinary.has(projectGroupId);
+  const awaitingTable = projectOpen?.poker === true && pokerTable === undefined;
   useEffect(() => {
-    if (!probing || projectGroupId === null) return;
-    void actions
-      .loadPokerTable(projectGroupId)
-      .catch(() => false)
-      .then((isTable) => {
-        if (isTable === false) setOrdinary((known) => new Set(known).add(projectGroupId));
-      });
-  }, [actions, probing, projectGroupId]);
+    if (!awaitingTable || projectGroupId === null) return;
+    void actions.loadPokerTable(projectGroupId).catch(() => undefined);
+  }, [actions, awaitingTable, projectGroupId]);
 
   if (!ready) return null;
   if (
@@ -218,6 +212,7 @@ export const MainWindow = () => {
         conversations={ready.conversations}
         bots={bots}
         groupTurns={ready.groupTurns}
+        poker={ready.poker}
         user={ready.user}
         pendingCount={today.data === null ? 0 : today.data.pending.length}
         countsStale={ready.loads.counts === "failed"}
@@ -261,18 +256,22 @@ export const MainWindow = () => {
           computerChoices={computerChoices}
         />
       ) : tableOpen !== null ? (
-        <TablePage groupId={tableOpen} table={pokerTableOf(ready, tableOpen) ?? null} />
+        <TablePage
+          groupId={tableOpen}
+          title={projectNames[tableOpen] ?? null}
+          table={pokerTableOf(ready, tableOpen) ?? null}
+        />
       ) : projectOpen !== null && pokerTable !== undefined ? (
         <PokerProjectPage
           table={pokerTable}
           title={projectOpen.task.title}
-          routines={(routinesLoaded ?? []).filter((routine) => routine.groupId === projectOpen.groupId)}
           onOpenTable={openTablePage}
           onStartHand={actions.startPokerHand}
           onSwapSeat={actions.swapPokerSeat}
+          onArchive={actions.archiveGroup}
         />
-      ) : probing ? (
-        <main className="today-page today-loading" data-testid="project-probing">
+      ) : awaitingTable ? (
+        <main className="today-page today-loading" data-testid="poker-project-loading">
           正在整理这个项目
         </main>
       ) : projectOpen !== null ? (
@@ -285,6 +284,7 @@ export const MainWindow = () => {
           onSend={actions.sendMessage}
           onDecide={actions.decideApproval}
           onOpenGroup={openGroupPage}
+          onArchive={actions.archiveGroup}
         />
       ) : screen.kind === "routines" ? (
         <RoutinesPage />

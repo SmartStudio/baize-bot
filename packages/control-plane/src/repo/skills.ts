@@ -150,6 +150,33 @@ export type SkillOfferMessage = {
 };
 
 /**
+ * 这个 Bot 已经会这件活（同名 skill 在），或者这个群里同名的卡还没点。两种再落一张卡都只是多问一遍。
+ * 不是幂等的那道闸：漏判只是多一张卡，所以先查后写够用。
+ */
+export async function skillOfferRedundant(db: Db | Tx, groupId: string, botId: BotId, name: string): Promise<boolean> {
+  const [known] = await db
+    .select({ id: skills.id })
+    .from(skills)
+    .where(and(eq(skills.botId, botId), eq(skills.name, name)))
+    .limit(1);
+  if (known !== undefined) return true;
+  const [pending] = await db
+    .select({ id: messages.id })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.groupId, groupId),
+        sql`${messages.body}->>'kind' = 'skill_offer'`,
+        sql`${messages.body}->>'status' = 'offered'`,
+        sql`${messages.body}->>'name' = ${name}`,
+        messageVisibleTo({ kind: "bot", botId }),
+      ),
+    )
+    .limit(1);
+  return pending !== undefined;
+}
+
+/**
  * 群里那张 skill_offer 卡，按归属人过滤。别人的、不存在的、正文不是这张卡的，都返回 null，
  * 路由层一律 404：不是这张卡的消息和不存在的消息，对调用方来说是同一件事。
  */

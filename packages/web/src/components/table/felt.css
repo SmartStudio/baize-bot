@@ -1,6 +1,7 @@
 .table-page {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--panel-w);
+  align-content: start;
   align-items: start;
   gap: var(--space-6);
   width: 100%;
@@ -23,6 +24,68 @@
   .table-page {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+.table-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  align-items: center;
+}
+
+.table-back {
+  display: inline-flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--fg-3);
+  font: var(--type-ui);
+  text-decoration: none;
+}
+
+.table-back:hover {
+  color: var(--fg-1);
+}
+
+.table-title {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.table-hand-no {
+  color: var(--fg-2);
+  font: var(--type-ui);
+}
+
+.table-head-leave {
+  margin-left: auto;
+}
+
+.table-head-error {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.table-empty {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
+.table-empty-text {
+  margin: 0;
+  color: var(--fg-2);
+  font: var(--type-body);
+}
+
+.table-empty-start {
+  padding: 0 var(--space-7);
 }
 
 .table-page-note {
@@ -55,6 +118,12 @@
   padding: var(--space-5);
   border: 2px solid transparent;
   border-radius: var(--radius-lg);
+}
+
+/* 你的座位单独占一行，只包住自己的牌和名牌，不撑满整张桌。 */
+.felt > .felt-seat {
+  align-self: center;
+  min-width: 240px;
 }
 
 .felt-seat[data-acting="true"] {
@@ -93,8 +162,17 @@
   opacity: 0.8;
 }
 
-.felt-label {
+.felt-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  justify-content: center;
   min-height: var(--space-6);
+}
+
+.felt-label,
+.felt-turn,
+.felt-won {
   padding: 0 var(--space-4);
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--gray-0) 35%, transparent);
@@ -102,6 +180,39 @@
 }
 
 .felt-label:empty {
+  display: none;
+}
+
+.felt-turn {
+  background: var(--white);
+  color: var(--gray-1);
+}
+
+.felt-won {
+  background: var(--yellow-5);
+  color: var(--gray-1);
+}
+
+.felt-marker {
+  margin-left: var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--white) 70%, transparent);
+  border-radius: var(--radius-full);
+  font: var(--type-caption);
+}
+
+/* 本街推到桌上的筹码，空的时候也占住一行，下注一来座位不跳。 */
+.felt-bet {
+  min-height: var(--space-6);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-full);
+  background: color-mix(in srgb, var(--yellow-5) 85%, transparent);
+  color: var(--gray-1);
+  font: var(--type-caption);
+  font-weight: 600;
+}
+
+.felt-bet:empty {
   visibility: hidden;
 }
 

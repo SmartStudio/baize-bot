@@ -120,6 +120,31 @@ test("点问老白后出现老白的建议，刷新后还在", async ({ page }) 
   await expect(page.getByTestId("hint-ask"), "同一个决策点不再给问的按钮").toHaveCount(0);
 });
 
+test("出过牌后上一步的建议灰着留到这一街结束", async ({ page }) => {
+  const groupId = await openTable(page);
+  await toMyTurn(page, groupId);
+  await page.getByTestId("hint-ask").click();
+  await tick(page, groupId);
+  await expect(page.getByTestId("hint-card")).toContainText("A♠ K♦ 是最好的起手牌之一");
+
+  await act(page, groupId, { kind: "call" });
+  const earlier = page.getByTestId("hint-earlier");
+  await expect(earlier, "出了牌，建议换成灰的上一步建议").toContainText("上一步的建议");
+  await expect(earlier).toContainText("A♠ K♦ 是最好的起手牌之一");
+  await expect(page.getByTestId("hint-card")).toHaveCount(0);
+
+  await expect
+    .poll(
+      async () => {
+        await tick(page, groupId);
+        return (await tableOf(page, groupId)).hand?.view.street;
+      },
+      { message: "牌友走到翻牌" },
+    )
+    .toBe("flop");
+  await expect(earlier, "换街就收起").toHaveCount(0);
+});
+
 test("牌桌上的话按时间排，新话不把按钮顶走", async ({ page }) => {
   const groupId = await openTable(page);
   await toMyTurn(page, groupId);
@@ -173,6 +198,7 @@ test("一手结束出现再来一手和散场看复盘", async ({ page }) => {
   await expect(end).toBeVisible();
   await expect(end.getByTestId("hand-again")).toHaveText(/再来一手/);
   await expect(end.getByTestId("hand-leave")).toHaveText(/散场看复盘/);
+  await expect(end.getByTestId("hand-again"), "再来一手是默认动作，焦点在它上面").toBeFocused();
   await expect(page.getByTestId("hint-ask"), "一手打完不再问老白").toHaveCount(0);
 
   const table = await tableOf(page, groupId);

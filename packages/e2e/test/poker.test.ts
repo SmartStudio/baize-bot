@@ -406,11 +406,9 @@ describe("端到端：U15 牌局", () => {
         });
         const messages = MessageListResponse.parse(await stack.get(`/api/groups/${table.groupId}/messages`)).messages;
         expect(
-          messages.some(
-            (message) => message.body.kind === "bot" && message.body.text === "阿豹没有及时出牌，按兜底处理",
-          ),
-          CASES[3],
-        ).toBe(true);
+          messages.some((message) => message.body.kind === "bot" && /没有及时出牌|兜底/.test(message.body.text)),
+          `${CASES[3]}：超时不单独播一条`,
+        ).toBe(false);
         expect(
           script.actions.some((action) => action.persona === "leopard"),
           CASES[3],

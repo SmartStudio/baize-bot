@@ -13,3 +13,4 @@ export * from "./computer-choice.js";
 export * from "./live-id.js";
 export * from "./live.js";
 export * from "./cli-tools.js";
+export * from "./poker-hand.js";

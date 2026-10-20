@@ -2,14 +2,22 @@ import { useState } from "react";
 import type { PokerAction, PokerTableView } from "@baize/shared";
 import { RequestFailed } from "../../api/client.js";
 import { useApp } from "../../state/app.js";
-import { actionBarOf, raiseCheck, type ActionBarModel, type RaiseRange } from "../../state/poker.js";
+import {
+  actionBarOf,
+  formatChips,
+  quickAction,
+  raiseCheck,
+  type ActionBarModel,
+  type RaiseRange,
+} from "../../state/poker.js";
 import "./action-bar.css";
 
 type Props = {
   table: PokerTableView | null;
 };
 
-const passText = (pass: ActionBarModel["pass"]): string => (pass.kind === "check" ? "过牌" : `跟 ${pass.amount}`);
+const passText = (pass: ActionBarModel["pass"]): string =>
+  pass.kind === "check" ? "过牌" : `跟 ${formatChips(pass.amount)}`;
 
 const clamp = (range: RaiseRange, amount: number): number => Math.min(range.max, Math.max(range.min, amount));
 
@@ -55,10 +63,12 @@ export const ActionBar = ({ table }: Props) => {
 
   const raiseLabel =
     model.raise?.kind === "all_in"
-      ? `全下 ${model.raise.amount}`
-      : check?.ok === true
-        ? `加注到 ${check.amount}`
-        : "加注";
+      ? `全下 ${formatChips(model.raise.amount)}`
+      : range !== null && check?.ok === true
+        ? `${range.verb} ${formatChips(check.amount)}`
+        : range?.verb === "下注"
+          ? "下注"
+          : "加注";
   const raiseDisabled = !enabled || model.raise === null || (range !== null && check?.ok !== true);
   const raiseAction = (): PokerAction | null => {
     if (model.raise?.kind === "all_in") return { kind: "all_in" };
@@ -121,7 +131,7 @@ export const ActionBar = ({ table }: Props) => {
             className="raise-amount"
             data-testid="raise-amount"
             inputMode="numeric"
-            aria-label="加注到多少"
+            aria-label={`${range.verb}多少`}
             value={text}
             disabled={!enabled}
             onChange={(event) => setText(event.target.value)}
@@ -143,15 +153,28 @@ export const ActionBar = ({ table }: Props) => {
               data-testid={`raise-quick-${pick.id}`}
               key={pick.id}
               disabled={!enabled}
-              onClick={() => setText(String(pick.amount))}
+              onClick={() => void submit(quickAction(range, pick))}
             >
               {pick.label}
             </button>
           ))}
-          <span className="raise-hint" data-testid="raise-hint" role="status">
-            {check?.ok === false ? check.reason : ""}
-          </span>
         </div>
+      )}
+      {range === null || !model.mine || check?.ok !== false ? null : (
+        <p className="raise-hint" data-testid="raise-hint" role="status">
+          {check.reason}
+          {check.fix === null ? null : (
+            <button
+              type="button"
+              className="link-button"
+              data-testid="raise-fix"
+              disabled={!enabled}
+              onClick={() => setText(String(check.fix))}
+            >
+              改成{check.fix === range.min ? "最小" : "最多"} {formatChips(check.fix)}
+            </button>
+          )}
+        </p>
       )}
       {error === null ? null : (
         <p className="action-error" data-testid="action-error" role="alert">

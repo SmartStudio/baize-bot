@@ -6,6 +6,8 @@ import type { PushHub } from "./ws/hub.js";
 const SHANGHAI_OFFSET_MS = 8 * 60 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
 const SWEEP_INTERVAL_MS = 30_000;
+// 一个群里 Bot 连着问几件事，五分钟内只弹第一条：点进「今天」看得到全部，后面几条只是再叫一遍。
+export const CONFIRM_QUIET_MS = 5 * 60_000;
 
 export type NoticeInput = {
   readonly kind: NotifyKind;
@@ -36,6 +38,8 @@ export class Notifications implements NoticePublisher {
   readonly #intervalMs: number;
   readonly #held = new Map<UserId, Held>();
   readonly #stuckSent = new Set<UserId>();
+  /** 每个群上一次弹「等你确认」的时刻，键是群号，群号全局唯一。 */
+  readonly #confirmSent = new Map<GroupId, Date>();
   #timer: NodeJS.Timeout | null = null;
   #chain: Promise<void> = Promise.resolve();
 
@@ -94,6 +98,9 @@ export class Notifications implements NoticePublisher {
   tick(): Promise<void> {
     return this.#enqueue(async () => {
       const now = this.#now();
+      for (const [groupId, at] of this.#confirmSent) {
+        if (now.getTime() - at.getTime() >= CONFIRM_QUIET_MS) this.#confirmSent.delete(groupId);
+      }
       for (const userId of this.#held.keys()) {
         try {
           await this.#flush(userId, now);
@@ -116,6 +123,12 @@ export class Notifications implements NoticePublisher {
     if (notice.kind === "stuck") {
       if (this.#stuckSent.has(userId)) return;
       this.#stuckSent.add(userId);
+    }
+    if (notice.kind === "confirm" && notice.groupId !== null) {
+      const now = this.#now();
+      const last = this.#confirmSent.get(notice.groupId);
+      if (last !== undefined && now.getTime() - last.getTime() < CONFIRM_QUIET_MS) return;
+      this.#confirmSent.set(notice.groupId, now);
     }
     await this.#deliver(userId, notice);
   }

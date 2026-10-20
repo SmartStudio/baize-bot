@@ -1,5 +1,5 @@
-import { PokerTableResponse, type PokerTableView } from "@baize/shared";
-import { expect, login, test, type APIRequestContext, type Page } from "./fixtures";
+import { GroupListResponse, PokerTableResponse, type PokerTableView } from "@baize/shared";
+import { expect, login, teamItem, test, type APIRequestContext, type Page } from "./fixtures";
 
 const REQUEST_ID = "p3-project-review";
 const USER_SEAT = 4;
@@ -75,7 +75,7 @@ const openProject = async (page: Page, groupId: string): Promise<void> => {
   await expect(page.locator(`[data-poker-project="${groupId}"]`), "牌桌项目页出现").toHaveCount(1);
 };
 
-const signed = (net: number): string => (net > 0 ? `+${net}` : `${net}`);
+const signed = (net: number): string => `${net > 0 ? "+" : ""}${net.toLocaleString("en-US")}`;
 
 test("散场后回项目页顶上是老白的三手复盘", async ({ page }) => {
   await login(page);
@@ -105,9 +105,10 @@ test("没打过时不显示复盘卡", async ({ page }) => {
   await openProject(page, groupId);
   await expect(page.getByTestId("review-card")).toHaveCount(0);
   await expect(page.getByTestId("stats-sessions")).toHaveText("0");
+  await expect(page.getByTestId("stats-open-session"), "没开过场就没有进行中的那一行").toHaveCount(0);
 });
 
-test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
+test("战绩数字和 mock 一致，按场数，虚拟筹码的说明留在牌桌页", async ({ page }) => {
   await login(page);
   const request = page.request;
   const groupId = await createTable(request);
@@ -121,7 +122,9 @@ test("战绩数字和 mock 一致并写明虚拟筹码", async ({ page }) => {
   await expect(page.getByTestId("stats-sessions")).toHaveText(String(stats.sessions));
   await expect(page.getByTestId("stats-won")).toHaveText(String(stats.sessionsWon));
   await expect(page.getByTestId("stats-net")).toHaveText(signed(stats.net));
-  await expect(page.getByTestId("stats-note")).toHaveText("虚拟筹码，不涉及真钱");
+  await expect(page.getByTestId("stats-block")).toContainText(`打了 ${stats.sessions} 场`);
+  await expect(page.getByTestId("stats-block")).toContainText(`赢了 ${stats.sessionsWon} 场`);
+  await expect(page.getByTestId("stats-block")).not.toContainText("虚拟筹码");
 });
 
 test("项目页各块之间的段间距一致，战绩块不贴着牌友块", async ({ page }) => {
@@ -205,4 +208,25 @@ test("开了新一场还没散，复盘卡仍是上一场", async ({ page }) => 
   await openProject(page, groupId);
   await expect(page.getByTestId("review-card").getByTestId("review-hand")).toHaveCount(3);
   await expect(page.getByTestId("stats-sessions")).toHaveText("1");
+  await expect(page.getByTestId("stats-open-session"), "没散的那一场单列，不混进场数").toContainText(
+    "正在打的这一场 1 手",
+  );
+});
+
+test("群列表标出哪个群是牌桌，普通项目页不去拉牌桌视图", async ({ page }) => {
+  await login(page);
+  const groupId = await createTable(page.request);
+  const { items } = GroupListResponse.parse(await (await page.request.get("/api/groups")).json());
+  expect(
+    items.filter((item) => item.poker).map((item) => item.group.id),
+    "只有建出来的那张桌标成牌桌",
+  ).toEqual([groupId]);
+
+  const tableRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/poker/tables/")) tableRequests.push(request.url());
+  });
+  await teamItem(page).click();
+  await expect(page.getByTestId("project-page")).toBeVisible();
+  expect(tableRequests, "普通项目页一次牌桌接口都不打，控制台不留 404").toEqual([]);
 });

@@ -81,25 +81,77 @@ test("没人下注时按钮写过牌，有人下注时写跟注和数额", async
   await expect(page.getByTestId("action-pass"), "转牌圈 1 号过牌，没人下注").toHaveText("过牌");
 });
 
-test("加注低于最小额时按钮不可点并说明", async ({ page }) => {
+test("加注低于最小额时按钮不可点，说明之外一键改成最小", async ({ page }) => {
   const groupId = await openTable(page, "web-core-raise");
   await drain(page, groupId);
   const input = page.getByTestId("raise-amount");
   await expect(input, "输入框默认填最小加注").toHaveValue("100");
-  await expect(page.getByTestId("action-raise")).toBeEnabled();
+  await expect(page.getByTestId("action-raise")).toHaveText("加注到 100");
+  await expect(page.getByTestId("raise-hint"), "合法时不占地方").toHaveCount(0);
 
   await input.fill("50");
   await expect(page.getByTestId("action-raise")).toBeDisabled();
-  await expect(page.getByTestId("raise-hint")).toHaveText("最少要加到 100");
+  await expect(page.getByTestId("raise-hint")).toContainText("最少要加注到 100");
+  await page.getByTestId("raise-fix").click();
+  await expect(input, "一键改成最小").toHaveValue("100");
+  await expect(page.getByTestId("action-raise")).toBeEnabled();
 
   await input.fill("5000");
   await expect(page.getByTestId("action-raise")).toBeDisabled();
-  await expect(page.getByTestId("raise-hint")).toHaveText("筹码不够，最多只能加到 2000");
+  await expect(page.getByTestId("raise-hint")).toContainText("筹码不够，最多只能加注到 2,000");
+  await expect(page.getByTestId("raise-fix")).toHaveText("改成最多 2,000");
+});
 
-  await page.getByTestId("raise-quick-half").click();
-  await expect(input, "半池：跟 60 后底池 150，当前注 60，加到 60 + 75").toHaveValue("135");
-  await expect(page.getByTestId("action-raise")).toBeEnabled();
-  await expect(page.getByTestId("raise-hint")).toHaveText("");
+test("半池直接出牌：按钮上写着数，点了就是加注到这个数", async ({ page }) => {
+  const groupId = await openTable(page, "web-core-half");
+  await drain(page, groupId);
+  // 跟 60 后底池 150，当前注 60，半池加到 60 + 75。
+  const half = page.getByTestId("raise-quick-half");
+  await expect(half).toHaveText("半池 135");
+  const sent = page.waitForRequest((request) => /\/api\/poker\/hands\/[^/]+\/act$/.test(request.url()));
+  await half.click();
+  expect((await sent).postDataJSON().action, "不用再点加注").toEqual({ kind: "raise", amount: 135 });
+  await expect(page.getByTestId("felt-me").getByTestId("seat-label")).toHaveText("加注到 135");
+  await expect(page.getByTestId("felt-me").getByTestId("seat-bet"), "桌上推出去的筹码").toHaveText("135");
+});
+
+test("座位上标庄位和大小盲、本街动作，轮到谁写在谁身上", async ({ page }) => {
+  const groupId = await openTable(page, "web-core-seats");
+  await expect(page.getByTestId("felt-me").getByTestId("seat-marker"), "你坐庄").toHaveText("庄");
+  const seat = (no: number) => page.locator(`[data-testid=felt-opponent][data-seat="${no}"]`);
+  await expect(seat(1).getByTestId("seat-marker")).toHaveText("小盲");
+  await expect(seat(2).getByTestId("seat-marker")).toHaveText("大盲");
+  await expect(seat(2).getByTestId("seat-bet"), "大盲垫的 20").toHaveText("20");
+
+  await drain(page, groupId);
+  await expect(seat(3).getByTestId("seat-label")).toHaveText("加注到 60");
+  await expect(page.getByTestId("felt-me").getByTestId("seat-turn")).toHaveText("轮到你");
+  await pressPass(page);
+  await expect(page.getByTestId("felt-me").getByTestId("seat-label")).toHaveText("跟 60");
+  await expect(page.getByTestId("felt").getByTestId("seat-turn"), "轮到牌友时他身上写着倒数").toContainText("秒");
+});
+
+test("页头写桌名和第几手，一手没打完散场灰着并说明，能回项目页", async ({ page }) => {
+  const groupId = await openTable(page, "web-core-head");
+  await expect(page.getByTestId("table-hand-no")).toHaveText("第 1 手");
+  await expect(page.getByTestId("table-chips-note"), "虚拟筹码只在牌桌页说一次").toHaveCount(1);
+  const leave = page.getByTestId("table-leave");
+  await expect(leave).toBeDisabled();
+  await expect(leave).toHaveAttribute("title", "这一手还没打完，打完再散场");
+  await page.getByTestId("table-back").click();
+  await expect(page).toHaveURL(new RegExp(`/p/${groupId}$`));
+});
+
+test("桌上还没发牌时有开一手", async ({ page }) => {
+  await login(page);
+  const created = (await (
+    await page.request.post("/api/poker/tables", { data: { requestId: "web-core-empty" } })
+  ).json()) as TableBody;
+  await page.goto(`/t/${created.table.groupId}`);
+  await expect(page.getByTestId("table-leave"), "没开打没有可散的").toBeDisabled();
+  await page.getByTestId("table-start").click();
+  await expect(page.getByTestId("felt-me").getByTestId("card-face"), "发了牌").toHaveCount(2);
+  await expect(page.getByTestId("table-empty")).toHaveCount(0);
 });
 
 test("点跟注后按钮立刻禁用直到下一次推送", async ({ page }) => {

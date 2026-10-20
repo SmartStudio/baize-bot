@@ -5,7 +5,6 @@ import {
   POKER_USER_SEAT,
   PokerPersona,
   type Group,
-  type Message,
   type PokerSeatNo,
   type PokerTableView,
   type TopicTask,
@@ -13,11 +12,10 @@ import {
 } from "@baize/shared";
 import { and, asc, eq, isNotNull } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, groups, pokerTables, type StoredPokerSeat } from "../db/schema.js";
+import { bots, pokerTables, type StoredPokerSeat } from "../db/schema.js";
 import { newId } from "../ids.js";
 import { loadTable, snapshot } from "../poker/store.js";
 import { openGroup, swapGroupMember } from "./groups.js";
-import { appendMessage } from "./messages.js";
 import { lockOwner } from "./runs.js";
 
 export const DEFAULT_TABLE_TITLE = "周末德州";
@@ -108,11 +106,11 @@ export type SwapResult =
   | { readonly kind: "not_a_bot_seat" }
   | { readonly kind: "in_hand" }
   | { readonly kind: "already_seated" }
-  | { readonly kind: "ok"; readonly message: Message };
+  | { readonly kind: "ok" };
 
 /**
  * 手之间换一个座位上的牌友（D27，筹码跟座位走）：群成员里同位置那行改人，poker_tables.seats 改 botId，
- * version 加一，老白留一句话。整件事锁在桌子这一行上，和开一手那条 UPDATE ... WHERE status = 'idle' 互斥。
+ * version 加一。群里不留话，项目页自己有换人提示。整件事锁在桌子这一行上，和开一手那条 UPDATE ... WHERE status = 'idle' 互斥。
  */
 export async function swapPokerSeat(
   db: Db,
@@ -134,20 +132,12 @@ export async function swapPokerSeat(
     if (current === undefined || current.botId === null) return { kind: "not_a_bot_seat" };
     if (table.status === "in_hand") return { kind: "in_hand" };
 
-    const [group] = await tx.select({ chiefBotId: groups.chiefBotId }).from(groups).where(eq(groups.id, groupId));
     const [incoming] = await tx
       .select()
       .from(bots)
       .where(and(eq(bots.ownerId, ownerId), eq(bots.preset, persona)));
     const [outgoing] = await tx.select().from(bots).where(eq(bots.id, current.botId));
-    if (
-      group?.chiefBotId === undefined ||
-      group.chiefBotId === null ||
-      incoming === undefined ||
-      outgoing === undefined
-    ) {
-      throw new Error(`牌桌 ${groupId} 缺老白或缺要换的牌友`);
-    }
+    if (incoming === undefined || outgoing === undefined) throw new Error(`牌桌 ${groupId} 缺要换的牌友`);
     if (table.seats.some((entry) => entry.botId === incoming.id)) return { kind: "already_seated" };
 
     if (!(await swapGroupMember(tx, groupId, BotId.parse(outgoing.id), BotId.parse(incoming.id)))) {
@@ -160,13 +150,7 @@ export async function swapPokerSeat(
         version: table.version + 1,
       })
       .where(eq(pokerTables.groupId, groupId));
-    const message = await appendMessage(tx, groupId, {
-      kind: "bot",
-      botId: BotId.parse(group.chiefBotId),
-      text: `${outgoing.name}下桌，${incoming.name}上桌`,
-      streaming: false,
-    });
-    return { kind: "ok", message };
+    return { kind: "ok" };
   });
 }
 
