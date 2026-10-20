@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronDown, ChevronRight, Pencil, Share2 } from "lucide-react";
+import { ChevronDown, ChevronRight, PanelRight, Pencil, Share2 } from "lucide-react";
 import type { Bot, BotId, Preference } from "@baize/shared";
 import { BotAvatar, type BotAvatarState } from "./BotAvatar.js";
 import { BotComputerPicker, type ComputerChoicesView } from "./ComputerPicker.js";
@@ -49,9 +49,13 @@ export const BotHeader = ({
   bot,
   computerChoices,
   avatarState = "idle",
+  panelOpen,
+  onTogglePanel,
 }: {
   bot: Bot;
   avatarState?: BotAvatarState;
+  panelOpen: boolean;
+  onTogglePanel: () => void;
   // 没得选或这个群的选择还没拉回来时为 null，不画选择器。
   computerChoices: ComputerChoicesView | null;
 }) => {
@@ -147,6 +151,17 @@ export const BotHeader = ({
           >
             <Share2 size={14} aria-hidden="true" />
             分享
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            data-testid="bot-panel-toggle"
+            aria-pressed={panelOpen}
+            aria-label={panelOpen ? "收起 Bot 设置" : "打开 Bot 设置"}
+            onClick={onTogglePanel}
+          >
+            <PanelRight size={14} aria-hidden="true" />
+            设置
           </button>
         </div>
       </div>

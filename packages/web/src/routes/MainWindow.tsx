@@ -56,6 +56,23 @@ const ProjectView = (props: Omit<React.ComponentProps<typeof ProjectPage>, "proj
   return <ProjectPage project={project} {...props} />;
 };
 
+// 收起右侧 Bot 设置是这台浏览器的偏好，换 Bot、刷新都不该又弹出来。存不了（隐私窗口、禁了站点数据）就退回默认展开。
+const BOT_PANEL_KEY = "baize.botPanel";
+const readBotPanelOpen = (): boolean => {
+  try {
+    return localStorage.getItem(BOT_PANEL_KEY) !== "closed";
+  } catch {
+    return true;
+  }
+};
+const writeBotPanelOpen = (open: boolean) => {
+  try {
+    localStorage.setItem(BOT_PANEL_KEY, open ? "open" : "closed");
+  } catch {
+    // 只影响下次打开时的默认值。
+  }
+};
+
 export const MainWindow = () => {
   const { state, actions } = useApp();
   const navigate = useNavigate();
@@ -66,6 +83,11 @@ export const MainWindow = () => {
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
   const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; tool: InspectedTool } | null>(null);
+  const [botPanelOpen, setBotPanelOpen] = useState(readBotPanelOpen);
+  const changeBotPanel = (open: boolean) => {
+    setBotPanelOpen(open);
+    writeBotPanelOpen(open);
+  };
 
   const ready = state.status === "ready" ? state : null;
   // 项目页和项目群看的是同一个群：项目页要拿最近一轮，也得把这个群的历史拉回来。
@@ -202,8 +224,8 @@ export const MainWindow = () => {
           choices,
           onChoose: (botId, kind) => actions.chooseComputer(groupId, botId, kind),
         };
-  // 检查器临时占用右栏；关掉后回到 Bot 设置或任务详情。没有右栏内容时，对话区把这一栏吃掉。
-  const hasPanel = inspected !== null || soloBot !== null || (team !== null && taskOpen);
+  // 检查器临时占用右栏；关掉后回到 Bot 设置（没收起的话）或任务详情。没有右栏内容时，对话区把这一栏吃掉。
+  const hasPanel = inspected !== null || (soloBot !== null && botPanelOpen) || (team !== null && taskOpen);
 
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
@@ -254,6 +276,12 @@ export const MainWindow = () => {
           }}
           onOpenTask={() => setTaskOpenFor(groupId)}
           computerChoices={computerChoices}
+          botPanelOpen={botPanelOpen}
+          onToggleBotPanel={() => {
+            // 主动要看设置，就把占着右栏的检查器让出来。
+            if (!botPanelOpen) setInspectedTool(null);
+            changeBotPanel(!botPanelOpen);
+          }}
         />
       ) : tableOpen !== null ? (
         <TablePage
@@ -307,12 +335,13 @@ export const MainWindow = () => {
       )}
       {inspected !== null ? (
         <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
-      ) : soloBot !== null ? (
+      ) : soloBot !== null && botPanelOpen ? (
         <BotSettingsPanel
           bot={soloBot}
           onChange={actions.updateBot}
           onPause={actions.pauseBot}
           onResume={actions.resumeBot}
+          onClose={() => changeBotPanel(false)}
         />
       ) : null}
       {oauth !== null ? (
