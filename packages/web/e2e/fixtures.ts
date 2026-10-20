@@ -227,8 +227,12 @@ export const openRoutines = async (page: Page, botName: string) => {
   await expect(routineRows(page, botName)).not.toHaveCount(0);
 };
 
+// 技能只在 Bot 头部「它知道的」里看。展开后等「正在拉…」退场，不然数到的是还没到的空列表。
 export const openSkills = async (page: Page, botName: string) => {
   await openBot(page, botName);
-  await page.getByTestId("bot-tab-skills").click();
-  await expect(page.getByTestId("skill-list")).toBeVisible();
+  await page.getByTestId("bot-know-toggle").click();
+  await expect(page.getByTestId("bot-know-skills")).not.toContainText("正在拉");
 };
+
+export const skillRow = (page: Page, name: string) =>
+  page.locator(`[data-testid=bot-skill][data-skill-name="${name}"]`);

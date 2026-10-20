@@ -117,23 +117,20 @@ test("加第 6 个标签的输入框消失", async ({ page }) => {
   await expect(input, "点叉删掉一个，输入框回来").toBeVisible();
 });
 
-test("Bot 页上没有技能来源、插件勾选、模型", async ({ page }) => {
+test("Bot 页上技能只在「它知道的」里看，设置栏没有技能入口、插件勾选、模型", async ({ page }) => {
   await login(page);
   await openBot(page, "小销");
   await openKnow(page);
-  await expect(page.getByTestId("bot-know-skills"), "会做的事只列名字").toContainText("Globex 报价");
+  await expect(page.getByTestId("bot-know-skills")).toContainText("Globex 报价");
 
-  await page.getByTestId("bot-tab-skills").click();
-  await expect(page.getByTestId("skill-row")).toHaveCount(3);
-  const window = page.getByTestId("main-window");
-  for (const word of ["来自对话", "来自例行任务", "你教的", "可用工具", "模型"]) {
-    await expect(window, `Bot 页上不出现「${word}」`).not.toContainText(word);
-  }
-  await page.getByTestId("bot-tab-settings").click();
-  await expect(page.getByTestId("bot-panel").locator("input[type=checkbox]")).toHaveCount(0);
+  const panel = page.getByTestId("bot-panel");
+  await expect(panel.getByRole("tab"), "设置栏只剩一页，不要标签导航").toHaveCount(0);
+  await expect(panel, "设置栏没有技能入口").not.toContainText("会做的活");
+  await expect(panel.locator("input[type=checkbox]")).toHaveCount(0);
   await expect(page.getByTestId("bot-available-tools")).toHaveCount(0);
+  const window = page.getByTestId("main-window");
   for (const word of ["可用工具", "模型"]) {
-    await expect(window, `设置页签上不出现「${word}」`).not.toContainText(word);
+    await expect(window, `Bot 页上不出现「${word}」`).not.toContainText(word);
   }
 });
 

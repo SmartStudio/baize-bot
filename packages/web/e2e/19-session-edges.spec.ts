@@ -176,7 +176,7 @@ test("例行首次拉取 500，界面说没拉下来，点重试后例行出现"
   expect(errors, "500 不变成未处理的 Promise").toEqual([]);
 });
 
-test("会做的活首次拉取 500，界面说没拉下来，点重试后列表出现", async ({ page }) => {
+test("会做的事首次拉取 500，「它知道的」说没拉下来，点重试后列表出现", async ({ page }) => {
   const errors = pageErrors(page);
   let failing = true;
   await page.route("**/api/bots/*/skills", (route) =>
@@ -187,11 +187,11 @@ test("会做的活首次拉取 500，界面说没拉下来，点重试后列表�
 
   await login(page);
   await openBot(page, "小销");
-  await page.getByTestId("bot-tab-skills").click();
-  await expect(page.getByTestId("skills-failed"), "会做的活没拉下来要说出来").toBeVisible();
+  await page.getByTestId("bot-know-toggle").click();
+  await expect(page.getByTestId("skills-failed"), "会做的事没拉下来要说出来").toBeVisible();
   failing = false;
   await page.getByTestId("skills-retry").click();
-  await expect(page.getByTestId("skill-row"), "重试后会做的活到了").not.toHaveCount(0);
+  await expect(page.getByTestId("bot-skill"), "重试后会做的事到了").not.toHaveCount(0);
   expect(errors, "500 不变成未处理的 Promise").toEqual([]);
 });
 

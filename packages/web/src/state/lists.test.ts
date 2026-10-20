@@ -31,6 +31,7 @@ const skill = (id: string) =>
     name: `做法 ${id}`,
     source: "chat",
     steps: ["先查库存"],
+    origin: null,
     useCount: 0,
     createdAt: at,
   });

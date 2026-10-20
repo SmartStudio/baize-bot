@@ -25,6 +25,19 @@
   color: var(--fg-4);
 }
 
+/* 原链接往往很长，不断开会把卡撑出对话栏。 */
+.skill-offer-source {
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+  overflow-wrap: anywhere;
+}
+
+.skill-offer-source a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .card-handoff {
   overflow: hidden;
 }

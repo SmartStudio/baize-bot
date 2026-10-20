@@ -31,8 +31,7 @@ const skillOffer = (botId: string) =>
   message({
     kind: "skill_offer",
     botId,
-    name: "周报",
-    steps: ["读取消息", "生成摘要"],
+    change: { op: "add", name: "周报", steps: ["读取消息", "生成摘要"], origin: null },
     status: "offered",
     skillId: null,
   });
