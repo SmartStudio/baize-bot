@@ -178,6 +178,7 @@ export function toSkill(row: typeof schema.skills.$inferSelect): Skill {
     name: row.name,
     source: row.source,
     steps: row.steps,
+    origin: row.origin,
     useCount: row.useCount,
     createdAt: row.createdAt.toISOString(),
   });

@@ -906,7 +906,11 @@ export function createRunner(config: RunnerConfig): Runner {
         },
       }),
       ...createTopicTools({ activeRun, send: config.send }),
-      ...createSkillTools({ activeRun, send: config.send }),
+      ...createSkillTools({
+        activeRun,
+        skills: () => (desiredConfig(bot) ?? runConfig()).skills.filter((skill) => skill.botId === bot.botId),
+        send: config.send,
+      }),
       ...createMetricTools({ activeRun, send: config.send }),
       ...createMemoryTools({ groupKind, activeRun, send: config.send }),
       ...createDraftTools({

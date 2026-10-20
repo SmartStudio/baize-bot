@@ -926,6 +926,8 @@ export const skills = pgTable(
     name: text("name").notNull(),
     source: text("source").$type<SkillSource>().notNull(),
     steps: jsonb("steps").$type<string[]>().notNull().default([]),
+    // 从公开仓库装来的那一页，只有 source = 'installed' 的行有。
+    origin: text("origin"),
     useCount: integer("use_count").notNull().default(0),
     createdAt: createdAt(),
   },

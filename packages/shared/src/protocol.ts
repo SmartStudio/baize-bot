@@ -37,6 +37,7 @@ import {
   RoutineOfferSpec,
   RunId,
   Skill,
+  SkillChange,
   TeamOfferMember,
   Timestamp,
   ToolConnection,
@@ -366,14 +367,13 @@ export const AgentToControl = z.discriminatedUnion("type", [
     targetBotId: BotId,
     text: z.string().min(1).max(2000),
   }),
-  // Bot 干完一件多步的活，问用户存不存成 skill。控制面落一条 skill_offer 消息，存不存由用户在群里点。
+  // Bot 提议存、装、改或删一条 skill。控制面落一条 skill_offer 消息，生不生效由用户在群里点。
   z.object({
     type: z.literal("skill_offer"),
     runId: RunId,
     botId: BotId,
     groupId: GroupId,
-    name: z.string().min(1).max(40),
-    steps: z.array(z.string().min(1).max(500)).min(2).max(20),
+    change: SkillChange,
   }),
   // 当前经手把活交给同群另一个 Bot。控制面落一条交接报文，给目标派一条带 handoffId 的 prompt。
   z.object({

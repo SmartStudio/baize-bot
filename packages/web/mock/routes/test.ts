@@ -14,6 +14,7 @@ import {
   Timestamp,
   ServerPush,
   RunId,
+  SkillChange,
 } from "@baize/shared";
 import { z } from "zod";
 import {
@@ -77,6 +78,7 @@ const TestMessageRequest = z
 const PreferenceOfferRequest = z
   .object({ groupId: GroupId, botId: BotId, text: z.string().min(1).max(200), private: z.boolean() })
   .strict();
+const SkillOfferRequest = z.object({ groupId: GroupId, botId: BotId, change: SkillChange }).strict();
 const MessageFetchFaultRequest = z.object({ messageId: MessageId, count: z.number().int().min(0).max(10) }).strict();
 const TestDeltaRequest = z
   .object({
@@ -269,6 +271,25 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
         sourceMessageId: null,
         status: "offered",
         preferenceId: null,
+      });
+      push({ type: "message", message });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  // 真运行器里是 Bot 自己调 propose_skill、propose_skill_edit、propose_skill_removal 出卡；mock 直接造这三种。
+  if (method === "POST" && path === "/api/test/skill-offer") {
+    const parsed = SkillOfferRequest.safeParse(await readBody(req));
+    if (!parsed.success || !groups.has(parsed.data.groupId) || !bots.has(parsed.data.botId)) {
+      send(res, 400, { error: "技能卡参数不对" });
+    } else {
+      const message = appendMessage(parsed.data.groupId, {
+        kind: "skill_offer",
+        botId: parsed.data.botId,
+        change: parsed.data.change,
+        status: "offered",
+        skillId: null,
       });
       push({ type: "message", message });
       send(res, 204);

@@ -487,7 +487,10 @@ describe("收尾后晚到的帧按可靠性处理", () => {
     const live = await soloRun();
     try {
       runDone(live);
-      send(live, { type: "skill_offer", name: "周报", steps: ["拉数据", "写周报"] });
+      send(live, {
+        type: "skill_offer",
+        change: { op: "add", name: "周报", steps: ["拉数据", "写周报"], origin: null },
+      });
       const pushed = await barrier(live.agent, live.push, live.groupId, "晚到的 skill 之后");
       expect(pushedKinds(pushed)).not.toContain("message:skill_offer");
       expect(await bodiesOf(live, "skill_offer")).toEqual([]);

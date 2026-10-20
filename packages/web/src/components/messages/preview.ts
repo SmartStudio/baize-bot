@@ -1,5 +1,20 @@
 import { toolViewText } from "@baize/shared";
-import type { Message, MessageBody } from "@baize/shared";
+import type { Message, MessageBody, SkillChange } from "@baize/shared";
+
+export const skillOfferTitle = (change: SkillChange): string => {
+  switch (change.op) {
+    case "add":
+      return change.origin === null
+        ? `存成技能「${change.name}」？`
+        : `从 ${new URL(change.origin).host} 装技能「${change.name}」？`;
+    case "edit":
+      return change.fromName === change.name
+        ? `改技能「${change.name}」？`
+        : `改技能「${change.fromName}」→「${change.name}」？`;
+    case "remove":
+      return `删掉技能「${change.name}」？`;
+  }
+};
 
 export const previewOf = (body: MessageBody): string => {
   switch (body.kind) {
@@ -14,7 +29,7 @@ export const previewOf = (body: MessageBody): string => {
     case "handoff":
       return "交接给别的 Bot";
     case "skill_offer":
-      return `存成 skill「${body.name}」？`;
+      return skillOfferTitle(body.change);
     case "preference_offer":
       return `记住「${body.text}」？`;
     case "project_offer":

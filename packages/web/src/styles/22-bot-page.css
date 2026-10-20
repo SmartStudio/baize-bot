@@ -114,6 +114,42 @@
   font: var(--type-caption);
 }
 
+.bot-skill-toggle {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-1);
+  font: var(--type-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bot-skill-toggle svg {
+  flex-shrink: 0;
+  color: var(--fg-3);
+}
+
+.bot-skill-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3) 0 var(--space-2) var(--space-6);
+}
+
+.bot-skill-detail small {
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.bot-skill-detail a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .bot-know-error,
 .edit-bot-error {
   margin: 0;

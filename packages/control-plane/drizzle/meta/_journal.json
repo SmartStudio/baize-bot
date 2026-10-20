@@ -316,6 +316,20 @@
       "when": 1792428427435,
       "tag": "0044_group_archive",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1792494592797,
+      "tag": "0045_skill_origin",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1792494593274,
+      "tag": "0046_skill_offer_change",
+      "breakpoints": true
     }
   ]
 }

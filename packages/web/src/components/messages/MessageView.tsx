@@ -17,6 +17,7 @@ import type {
   MessageBody,
   MessageId,
   PreferenceOfferStatus,
+  SkillChangeOp,
   SkillOfferStatus,
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
@@ -26,7 +27,7 @@ import { DraftCard, PlanCard, type ContentActions } from "./DraftCards.js";
 import { RoutineOfferCard } from "./RoutineOfferCard.js";
 import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.js";
 import { Markdown } from "./markdown.js";
-import { timeOf } from "./preview.js";
+import { skillOfferTitle, timeOf } from "./preview.js";
 import { TakeoverCard } from "./TakeoverCard.js";
 import { TeamOfferCard } from "./TeamOfferCard.js";
 import { ToolViewContent } from "./ToolViewContent.js";
@@ -114,9 +115,17 @@ const SystemNote = ({ body }: { body: Extract<MessageBody, { kind: "system" }> }
     <p className="system-note">{body.text}</p>
   );
 
-const OFFER_DECIDED_TEXT: Record<Exclude<SkillOfferStatus, "offered">, string> = {
-  saved: "已存",
-  dismissed: "没存",
+type OfferCopy = {
+  dismiss: string;
+  save: string;
+  decided: Record<Exclude<SkillOfferStatus, "offered">, string>;
+  failed: string;
+};
+
+const OFFER_COPY: Record<SkillChangeOp, OfferCopy> = {
+  add: { dismiss: "不存", save: "存", decided: { saved: "已存", dismissed: "没存" }, failed: "没存上" },
+  edit: { dismiss: "不改", save: "改", decided: { saved: "已改", dismissed: "没改" }, failed: "没改成" },
+  remove: { dismiss: "留着", save: "删掉", decided: { saved: "已删", dismissed: "留着" }, failed: "没删掉" },
 };
 
 // 这张卡的状态就在消息正文里，不像审批和交接另有一张表。点完什么都不改，等服务端把改过的那条消息推回来。
@@ -130,23 +139,47 @@ const SkillOfferCard = ({
   onDecide: DecideSkillOffer;
 }) => {
   const [sent, setSent] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
+  const { change } = body;
+  const copy = OFFER_COPY[change.op];
   const decide = (decision: DecideSkillOfferRequest["decision"]) => {
     setSent(true);
-    void onDecide(messageId, decision).catch(() => setSent(false));
+    setFailure(null);
+    void onDecide(messageId, decision).catch((cause: unknown) => {
+      setFailure(
+        `${decision === "save" ? copy.failed : "没点上"}：${cause instanceof Error ? cause.message : "请求失败"}`,
+      );
+      setSent(false);
+    });
   };
   return (
-    <div className="card card-skill-offer" data-testid="skill-offer" data-status={body.status}>
-      <div className="card-title">
+    <div className="card card-skill-offer" data-testid="skill-offer" data-op={change.op} data-status={body.status}>
+      <div className="card-title" data-testid="skill-offer-title">
         <Sparkles size={16} aria-hidden="true" />
-        存成 skill「{body.name}」？
+        {skillOfferTitle(change)}
       </div>
-      <ol className="skill-steps">
-        {body.steps.map((step, at) => (
-          <li key={`${at}-${step}`} data-testid="skill-offer-step">
-            {step}
-          </li>
-        ))}
-      </ol>
+      {change.op === "add" && change.origin !== null ? (
+        <p className="skill-offer-source">
+          来源{" "}
+          <a href={change.origin} rel="noreferrer" target="_blank" data-testid="skill-offer-source">
+            {change.origin}
+          </a>
+        </p>
+      ) : null}
+      {change.op === "remove" ? null : (
+        <ol className="skill-steps">
+          {change.steps.map((step, at) => (
+            <li key={`${at}-${step}`} data-testid="skill-offer-step">
+              {step}
+            </li>
+          ))}
+        </ol>
+      )}
+      {failure === null || body.status !== "offered" ? null : (
+        <p className="team-offer-error" role="alert" data-testid="skill-offer-error">
+          {failure}
+        </p>
+      )}
       {body.status === "offered" ? (
         <div className="approval-actions">
           <button
@@ -156,7 +189,7 @@ const SkillOfferCard = ({
             disabled={sent}
             onClick={() => decide("dismiss")}
           >
-            不存
+            {copy.dismiss}
           </button>
           <button
             type="button"
@@ -165,12 +198,12 @@ const SkillOfferCard = ({
             disabled={sent}
             onClick={() => decide("save")}
           >
-            存
+            {copy.save}
           </button>
         </div>
       ) : (
         <p className="approval-decided" data-testid="skill-offer-decided">
-          {OFFER_DECIDED_TEXT[body.status]}
+          {copy.decided[body.status]}
         </p>
       )}
     </div>

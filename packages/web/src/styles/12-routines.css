@@ -1,60 +1,28 @@
-/* ---------- 2c Bot 设置栏的分页与例行任务 ---------- */
+/* ---------- 2c 例行任务，技能卡和「它知道的」共用的步骤清单 ---------- */
 
-.panel-tabs {
-  display: flex;
-  gap: var(--space-1);
-  padding: var(--space-1);
-  border-radius: var(--radius-md);
-  background: var(--bg-inset);
-  box-shadow: var(--inset-hairline);
-}
-
-.panel-tab {
-  display: flex;
-  flex: 1;
-  gap: var(--space-3);
-  align-items: center;
-  justify-content: center;
-  height: var(--control-h-sm);
-  border-radius: var(--radius-sm);
-  color: var(--fg-3);
-  font: var(--type-ui);
-}
-
-.panel-tab.is-selected {
-  background: var(--bg-surface);
-  box-shadow: var(--shadow-sm);
-  color: var(--fg-1);
-}
-
-.routines,
-.skills {
+.routines {
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
 }
 
-.routines-head,
-.skills-head {
+.routines-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
 }
 
-.routines-head .group-label,
-.skills-head .group-label {
+.routines-head .group-label {
   margin: 0;
 }
 
-.routines-empty,
-.skills-empty {
+.routines-empty {
   margin: 0;
   color: var(--fg-4);
   font: var(--type-caption);
 }
 
-.routine-open,
-.skill-open {
+.routine-open {
   display: flex;
   flex: 1;
   flex-direction: column;
@@ -64,20 +32,17 @@
   text-align: left;
 }
 
-.routine-open b,
-.skill-open b {
+.routine-open b {
   color: var(--fg-1);
   font: var(--type-ui);
 }
 
-.routine-open small,
-.skill-open small {
+.routine-open small {
   color: var(--fg-3);
   font: var(--type-caption);
 }
 
-.routine-crumb,
-.skill-crumb {
+.routine-crumb {
   display: flex;
   gap: var(--space-2);
   align-items: center;
@@ -86,21 +51,15 @@
   font: var(--type-ui);
 }
 
-.routine-crumb b,
-.skill-crumb b {
+.routine-crumb b {
   color: var(--fg-1);
   font: var(--type-ui);
 }
 
-.routine-actions,
-.skill-actions {
+.routine-actions {
   display: flex;
   gap: var(--space-4);
   align-items: center;
-}
-
-.skill-actions {
-  justify-content: flex-end;
 }
 
 .routine-actions b {
@@ -113,10 +72,7 @@
 }
 
 .routine-actions .ghost-button,
-.routines-head .ghost-button,
-.skills-head .ghost-button,
-.skill-actions .ghost-button,
-.skill-detail-head .ghost-button {
+.routines-head .ghost-button {
   height: var(--control-h-sm);
   padding: 0 var(--space-5);
 }
@@ -159,52 +115,6 @@
   content: counter(step);
   font: var(--weight-semibold) var(--text-2xs) / 20px var(--font-mono);
   text-align: center;
-}
-
-.skill-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  padding: var(--space-5) var(--space-6);
-  border-radius: var(--radius-lg);
-  background: var(--bg-surface);
-  box-shadow: var(--inset-hairline);
-}
-
-.skill-detail-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-4);
-  align-items: center;
-}
-
-.skill-detail-head b {
-  flex: 1 1 100%;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--fg-1);
-  font: var(--type-ui);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.skill-note {
-  margin: 0;
-  color: var(--fg-4);
-  font: var(--type-caption);
-}
-
-/* 挑复制给谁是详情里的一小段名单，不像 @ 菜单那样浮在输入框上面。 */
-.skill-copy-menu {
-  display: flex;
-  position: static;
-  flex-direction: column;
-  gap: var(--space-1);
-  padding: var(--space-4);
-  border: 1px solid var(--border-1);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-lg);
 }
 
 .trigger-box {

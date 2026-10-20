@@ -1,7 +1,6 @@
-import { CopySkillRequest, CreateSkillRequest, DecideSkillOfferRequest, UpdateSkillRequest } from "@baize/shared";
+import { CreateSkillRequest, DecideSkillOfferRequest, type MessageBody, type Skill } from "@baize/shared";
 import {
   bots,
-  copySkillTo,
   createSkill,
   findMessage,
   skillNameTaken,
@@ -10,7 +9,41 @@ import {
   writeMessageBody,
   writeSkill,
 } from "../state.js";
-import { defined, readBody, send, type Route } from "./http.js";
+import { readBody, send, type Route } from "./http.js";
+
+type SkillOffer = Extract<MessageBody, { kind: "skill_offer" }>;
+type Applied =
+  | { kind: "ok"; skillId: Skill["id"] | null; updated: Skill | null; deleted: Skill | null }
+  | { kind: "refused"; error: string };
+
+// 和控制面 decideSkillOffer 同样的分派：撞名、改的那条已经不在了回 409，卡留着；删的那条已经不在了照样收成已删。
+const applyChange = (offer: SkillOffer): Applied => {
+  const { change, botId } = offer;
+  switch (change.op) {
+    case "add": {
+      if (skillNameTaken(botId, change.name)) return { kind: "refused", error: "这个 Bot 已经有同名的 skill 了" };
+      const skill = createSkill(botId, change, change.origin === null ? "chat" : "installed", change.origin);
+      return { kind: "ok", skillId: skill.id, updated: skill, deleted: null };
+    }
+    case "edit": {
+      const target = skills.get(change.targetId);
+      if (target === undefined || target.botId !== botId) return { kind: "refused", error: "这个技能已经不在了" };
+      if (skillNameTaken(botId, change.name, target.id)) {
+        return { kind: "refused", error: "这个 Bot 已经有同名的 skill 了" };
+      }
+      const skill = writeSkill(target.id, { name: change.name, steps: change.steps });
+      return skill === null
+        ? { kind: "refused", error: "这个技能已经不在了" }
+        : { kind: "ok", skillId: skill.id, updated: skill, deleted: null };
+    }
+    case "remove": {
+      const target = skills.get(change.targetId);
+      const deleted = target !== undefined && target.botId === botId ? target : null;
+      if (deleted !== null) skills.delete(deleted.id);
+      return { kind: "ok", skillId: null, updated: null, deleted };
+    }
+  }
+};
 
 export const skillRoutes: Route = async ({ req, res, path, method, push }) => {
   const botSkillsMatch = /^\/api\/bots\/([^/]+)\/skills$/.exec(path);
@@ -32,51 +65,13 @@ export const skillRoutes: Route = async ({ req, res, path, method, push }) => {
     return true;
   }
 
-  const copyMatch = /^\/api\/skills\/([^/]+)\/copy$/.exec(path);
-  if (copyMatch !== null && method === "POST") {
-    const rawSkillId = copyMatch[1];
-    const skillId = rawSkillId === undefined ? "" : decodeURIComponent(rawSkillId);
-    const parsed = CopySkillRequest.safeParse(await readBody(req));
-    const skill = skills.get(skillId);
-    if (skill === undefined) send(res, 404, { error: "没有这条 skill" });
-    else if (!parsed.success) send(res, 400, { error: "skill 字段不对" });
-    else if (!bots.has(parsed.data.botId)) send(res, 404, { error: "没有这个 Bot" });
-    else if (skillNameTaken(parsed.data.botId, skill.name)) {
-      send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
-    } else {
-      const copy = copySkillTo(skillId, parsed.data.botId);
-      if (copy === null) send(res, 404, { error: "没有这条 skill" });
-      else {
-        push({ type: "skill_updated", skill: copy });
-        send(res, 201, { skill: copy });
-      }
-    }
-    return true;
-  }
-
   const skillMatch = /^\/api\/skills\/([^/]+)$/.exec(path);
   if (skillMatch !== null) {
     const rawSkillId = skillMatch[1];
     const skillId = rawSkillId === undefined ? "" : decodeURIComponent(rawSkillId);
     const skill = skills.get(skillId);
     if (skill === undefined) send(res, 404, { error: "没有这条 skill" });
-    else if (method === "PATCH") {
-      const parsed = UpdateSkillRequest.safeParse(await readBody(req));
-      if (!parsed.success) send(res, 400, { error: "skill 字段不对" });
-      else {
-        const patch = defined(parsed.data);
-        if (patch.name !== undefined && skillNameTaken(skill.botId, patch.name, skill.id)) {
-          send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
-        } else {
-          const next = writeSkill(skillId, patch);
-          if (next === null) send(res, 404, { error: "没有这条 skill" });
-          else {
-            push({ type: "skill_updated", skill: next });
-            send(res, 200, { skill: next });
-          }
-        }
-      }
-    } else if (method === "DELETE") {
+    else if (method === "DELETE") {
       skills.delete(skillId);
       push({ type: "skill_deleted", skillId: skill.id, botId: skill.botId });
       send(res, 204);
@@ -95,19 +90,23 @@ export const skillRoutes: Route = async ({ req, res, path, method, push }) => {
   else if (!parsed.success) send(res, 400, { error: "结论只能是存或不存" });
   else if (body.status !== "offered") send(res, 409, { error: "这张卡已经有结论了" });
   else {
-    const saving = parsed.data.decision === "save";
-    if (saving && skillNameTaken(body.botId, body.name)) send(res, 409, { error: "这个 Bot 已经有同名的 skill 了" });
+    const applied: Applied =
+      parsed.data.decision === "save" ? applyChange(body) : { kind: "ok", skillId: null, updated: null, deleted: null };
+    if (applied.kind === "refused") send(res, 409, { error: applied.error });
     else {
-      const skill = saving ? createSkill(body.botId, { name: body.name, steps: body.steps }, "chat") : null;
-      const message = writeMessageBody(
-        messageId,
-        skill === null ? { ...body, status: "dismissed" } : { ...body, status: "saved", skillId: skill.id },
-      );
+      const message = writeMessageBody(messageId, {
+        ...body,
+        status: parsed.data.decision === "save" ? "saved" : "dismissed",
+        skillId: applied.skillId,
+      });
       if (message === null) send(res, 404, { error: "这条消息不是一张存 skill 的卡" });
       else {
         push({ type: "message", message });
-        if (skill !== null) push({ type: "skill_updated", skill });
-        send(res, 200, { message, skill });
+        if (applied.updated !== null) push({ type: "skill_updated", skill: applied.updated });
+        if (applied.deleted !== null) {
+          push({ type: "skill_deleted", skillId: applied.deleted.id, botId: applied.deleted.botId });
+        }
+        send(res, 200, { message, skill: applied.updated });
       }
     }
   }

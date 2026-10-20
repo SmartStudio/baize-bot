@@ -139,9 +139,7 @@ test("团队页点单聊进单 Bot 群，右栏是 Bot 设置且没有例行页�
   await expect(page.getByTestId("chat-title")).toHaveText("小销");
   await expect(page.getByTestId("team-nav"), "单聊算在团队底下").toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("bot-panel")).toBeVisible();
-  await expect(page.getByTestId("bot-tab-settings")).toBeVisible();
-  await expect(page.getByTestId("bot-tab-skills")).toBeVisible();
-  await expect(page.getByTestId("bot-tab-routines"), "例行挪去了例行页").toHaveCount(0);
+  await expect(page.getByTestId("bot-panel").getByRole("tab"), "设置栏只剩一页，不要标签导航").toHaveCount(0);
 });
 
 test("例行页列出两个 Bot 的例行，行上写着各自的 Bot 名，试跑后这一行多一条运行记录", async ({ page }) => {

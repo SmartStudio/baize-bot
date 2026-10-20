@@ -630,25 +630,33 @@ webhook 的 token 存在 triggers jsonb 里，`/api/hooks/:token` 用 `@>` 配 G
 
 Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有一条：随 `config` 下发，运行器落成 `<botDir>/skills/<skillId>/SKILL.md`，不往回同步。** 两个方向都能写的文件没有真相源：运行器改了一笔、Web 上同时改了一笔，谁覆盖谁只取决于哪条消息先到。`config.skills` 是该用户**全部** Bot 的 skill，运行器按 botId 分开落盘；这个字段恒带，一条都没有也带一个空数组，运行器靠整份名单和 skills 目录对账，省掉它它就分不清「这个用户没有 skill」和「这条 config 没说 skill 的事」，剩下的目录就删不干净。
 
+**网页上只能看，不能配。** 加、改、删都由 Bot 在对话里出一张 `skill_offer` 卡，用户点了才动表；Bot 页头「它知道的」列出每条的步骤、来源和用过几次。`POST /api/bots/:id/skills`、`PATCH`、`DELETE`、`copy` 这几条 HTTP 路由还在，测试和验收脚本用它们造数据，Web 不再调。从公开仓库装的 skill 在 `skills.origin` 记下原链接（只收 http 和 https），界面上点得开；导出带它，分享模板不带。
+
 ### 同一 Bot 下名字不重复
 
-唯一索引 `(bot_id, name)` 是这件事的唯一真相源。建一条、改名、复制给别的 Bot、点存，四条路都靠**插入撞它**来判 409，不先查后写：先查后写挡不住并发的两个同名请求，两边都查到没有，两边都插进去。重名必须在库这一级挡死，因为 Pi 按 name 去重，同名的第二条根本不会进系统提示，库里留着它只会让用户看见一条永远跑不起来的活。
+唯一索引 `(bot_id, name)` 是这件事的唯一真相源。建一条、改名、复制给别的 Bot、点存、点改，几条路都靠**写入撞它**来判 409，不先查后写：先查后写挡不住并发的两个同名请求，两边都查到没有，两边都插进去。重名必须在库这一级挡死，因为 Pi 按 name 去重，同名的第二条根本不会进系统提示，库里留着它只会让用户看见一条永远跑不起来的活。
 
 点存撞名时**卡留在 offered**，让用户先改名再点。所以那个事务只能整条回滚，不能只插一半：卡和 skill 行要么一起成，要么一个都不动。撞名和「已经点过了」都走 `tx.rollback()`，而它抛的是同一种错，所以是谁回滚的记在事务外的一个变量上，路由层照它翻 409 的文案。
 
 ### 那张卡的状态住在正文里
 
-和审批、交接**相反**。审批和交接的卡正文里只有一个 id，状态在 `approvals` / `handoffs` 自己那一行上，所以重推那条 message 一个字都不会变。skill_offer 不是这样：`name` 和 `steps` 在用户点存之前**不在任何表里**，只在正文里，状态没有别的地方可住。点完存或不存要**重推那条 message**，客户端按 id 覆盖那张卡。
+和审批、交接**相反**。审批和交接的卡正文里只有一个 id，状态在 `approvals` / `handoffs` 自己那一行上，所以重推那条 message 一个字都不会变。skill_offer 不是这样：卡上的 `change` 在用户点之前**不在任何表里**，只在正文里，状态没有别的地方可住。点完要**重推那条 message**，客户端按 id 覆盖那张卡。
+
+`change` 是按 `op` 分的判别联合，一张卡只做一件事：`add` 带 `name`、`steps`、`origin`（有原链接就是装的，没有就是存刚才的做法）；`edit` 带 `targetId`、出卡时那条的名字 `fromName` 和改成什么（`name` 和 `steps`），卡上照正文写「旧」→「新」，那条改完、删掉之后历史卡也读得出改的是哪条；`remove` 带 `targetId` 和当时的名字。`status` 三种 op 共用（offered / saved / dismissed），saved 对 edit 是改了、对 remove 是删了，界面文案按 op 查表。`skillId` 对 add 指新插的那行，对 edit 指被改的那行，对 remove 恒为 null：删掉的行不在了，指着它的 id 没人能用。
+
+`decideSkillOffer`（`repo/skills.ts`）按 op 穷尽分派，改 skills 表和收卡在同一个事务里：add 插行，撞名 409、卡留 offered；edit `UPDATE ... WHERE id = targetId AND bot_id = botId`，撞名 409，目标已经没了 409「这个技能已经不在了」，卡都留着；remove 直接 `DELETE`，目标已经没了照样收成 saved，用户要的就是它不在，终态一致。edit 不动 `use_count`、`source`、`origin`，改的是同一件活的做法。
+
+旧卡正文只有 `{name, steps}`，迁移 `0046_skill_offer_change.sql` 把它们包成 `change: {op: "add", name, steps, origin: null}`。
 
 幂等同样不靠先查后写，靠那条 UPDATE 自己：`WHERE id = ? AND group_id = ? AND body->>'status' = 'offered'`。两个并发的点存只有一个改得动，另一个看到 0 行就是 409。
 
 ### 哪些 `skill_offer` 不落卡
 
-三种整条丢掉，不报错：例行 run 报上来的（例行本身就是重复做的活，再问存不存是打扰）；这个 Bot 已经有同名 skill 的；这个群里还有一张同名、还没点的卡的（不管是哪个 Bot 问的）。后两种在 `whileRunOpen` 的同一个事务里查（`repo/skills.ts` 的 `skillOfferRedundant`），读卡带上被派 Bot 的 viewer。查和插不是原子的，并发的两张同名卡可能都落下，用户点了一张、另一张存时撞唯一索引回 409，不会多出一条 skill。什么时候该问由运行器的系统提示管：只在用户要过同一类活、或明说以后也这样做时问，见 `packages/bot-runner/README.md`。
+这几种整条丢掉，不报错：例行 run 报上来的，三种 op 都丢（例行本身就是重复做的活，没人在场点卡）；add 里这个 Bot 已经有同名 skill 的，或者这个群里还有一张同名、还没点的 add 卡的（不管是哪个 Bot 问的）；edit 和 remove 里 `targetId` 不是这个 Bot 的 skill 的（外部输入，可能指到别的 Bot 头上），或者这个群里同一个 `targetId` 已经有卡没点的。除例行外都在 `whileRunOpen` 的同一个事务里查（`repo/skills.ts` 的 `skillOfferUnwanted`），读卡带上被派 Bot 的 viewer。查和插不是原子的，并发的两张同名卡可能都落下，用户点了一张、另一张存时撞唯一索引回 409，不会多出一条 skill。什么时候该问由运行器的系统提示管：只在用户要过同一类活、或明说以后也这样做时问，见 `packages/bot-runner/README.md`。
 
 ### `skill_offer_source` 为什么在 `messages` 上
 
-来源有三种。`taught` 是 Web 上「教它一个」那条路写死的，另外两种只有**上行那一刻**判得出来：这个 `runId` 能不能找到一条 `routine_runs`，找得到就是 `routine`，找不到就是 `chat`。现在例行 run 报上来的卡整条丢掉（见下一节），新卡只会是 `chat`，`routine` 留给旧数据。用户点存时手上只有那张卡，卡的正文里没有 runId，例行任务的运行记录又只留最近 20 条，早的那次连行都不在了。shared 的 `skill_offer` 正文里没有 source 字段，形状是冻的，塞不进去。所以单开 `messages.skill_offer_source` 一列存着它，点存时写进 skill 行。这一列只对 `kind = 'skill_offer'` 的行有意义，不出边界，`toMessage` 不读它。M10 之前落的卡读不到这一列，按对话算。
+来源有五种。`template` 是从分享模板建 Bot 时带来的；`taught` 是 `POST /api/bots/:id/skills` 写死的，Web 上「教它一个」那条路拆掉以后只剩旧数据和测试造的数据；剩下三种只有**上行那一刻**判得出来：`change.origin` 不为空就是 `installed`，否则看这个 `runId` 能不能找到一条 `routine_runs`，找得到就是 `routine`，找不到就是 `chat`。现在例行 run 报上来的卡整条丢掉（见上一节），新卡只会是 `chat` 或 `installed`，`routine` 留给旧数据。这一列只对 add 卡有意义，edit 和 remove 不改来源。用户点存时手上只有那张卡，卡的正文里没有 runId，例行任务的运行记录又只留最近 20 条，早的那次连行都不在了。shared 的 `skill_offer` 正文里没有 source 字段，形状是冻的，塞不进去。所以单开 `messages.skill_offer_source` 一列存着它，点存时写进 skill 行。这一列只对 `kind = 'skill_offer'` 的行有意义，不出边界，`toMessage` 不读它。M10 之前落的卡读不到这一列，按对话算。
 
 ### `/名` 引用
 
@@ -666,9 +674,11 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 | `PATCH /api/skills/:id`     | `skill_updated`              | 是                                         |
 | `DELETE /api/skills/:id`    | `skill_deleted`              | 是                                         |
 | `POST /api/skills/:id/copy` | `skill_updated`（新那条）    | 是                                         |
-| 上行 `skill_offer`          | `message`                    | 否，还没建 skill 行                        |
-| 点「存」                    | `message`、`skill_updated`   | 是                                         |
-| 点「不存」                  | `message`                    | 否，什么都没变                             |
+| 上行 `skill_offer`          | `message`                    | 否，还没动 skill 行                        |
+| add 卡点「存」              | `message`、`skill_updated`   | 是                                         |
+| edit 卡点「改」             | `message`、`skill_updated`   | 是                                         |
+| remove 卡点「删掉」         | `message`、`skill_deleted`   | 是                                         |
+| 三种卡点不要                | `message`                    | 否，什么都没变                             |
 | 正文里 `/名`                | 每条命中一条 `skill_updated` | 否，只有 `use_count` 变了，它不进 SKILL.md |
 
 ## 账号
