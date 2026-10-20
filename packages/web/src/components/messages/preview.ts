@@ -1,17 +1,16 @@
 import { toolViewText } from "@baize/shared";
 import type { Message, MessageBody, SkillChange } from "@baize/shared";
 
-// 卡上只存改成什么，改之前叫什么要从这个 Bot 现在的技能里查。查不到（没拉下来、已经改完或删了）就只写新名。
-export const skillOfferTitle = (change: SkillChange, currentName?: string): string => {
+export const skillOfferTitle = (change: SkillChange): string => {
   switch (change.op) {
     case "add":
       return change.origin === null
         ? `存成技能「${change.name}」？`
         : `从 ${new URL(change.origin).host} 装技能「${change.name}」？`;
     case "edit":
-      return currentName === undefined || currentName === change.name
+      return change.fromName === change.name
         ? `改技能「${change.name}」？`
-        : `改技能「${currentName}」→「${change.name}」？`;
+        : `改技能「${change.fromName}」→「${change.name}」？`;
     case "remove":
       return `删掉技能「${change.name}」？`;
   }

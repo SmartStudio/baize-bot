@@ -642,7 +642,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 和审批、交接**相反**。审批和交接的卡正文里只有一个 id，状态在 `approvals` / `handoffs` 自己那一行上，所以重推那条 message 一个字都不会变。skill_offer 不是这样：卡上的 `change` 在用户点之前**不在任何表里**，只在正文里，状态没有别的地方可住。点完要**重推那条 message**，客户端按 id 覆盖那张卡。
 
-`change` 是按 `op` 分的判别联合，一张卡只做一件事：`add` 带 `name`、`steps`、`origin`（有原链接就是装的，没有就是存刚才的做法）；`edit` 带 `targetId` 和改成什么（名字和步骤）；`remove` 带 `targetId` 和当时的名字。`status` 三种 op 共用（offered / saved / dismissed），saved 对 edit 是改了、对 remove 是删了，界面文案按 op 查表。`skillId` 对 add 指新插的那行，对 edit 指被改的那行，对 remove 恒为 null：删掉的行不在了，指着它的 id 没人能用。
+`change` 是按 `op` 分的判别联合，一张卡只做一件事：`add` 带 `name`、`steps`、`origin`（有原链接就是装的，没有就是存刚才的做法）；`edit` 带 `targetId`、出卡时那条的名字 `fromName` 和改成什么（`name` 和 `steps`），卡上照正文写「旧」→「新」，那条改完、删掉之后历史卡也读得出改的是哪条；`remove` 带 `targetId` 和当时的名字。`status` 三种 op 共用（offered / saved / dismissed），saved 对 edit 是改了、对 remove 是删了，界面文案按 op 查表。`skillId` 对 add 指新插的那行，对 edit 指被改的那行，对 remove 恒为 null：删掉的行不在了，指着它的 id 没人能用。
 
 `decideSkillOffer`（`repo/skills.ts`）按 op 穷尽分派，改 skills 表和收卡在同一个事务里：add 插行，撞名 409、卡留 offered；edit `UPDATE ... WHERE id = targetId AND bot_id = botId`，撞名 409，目标已经没了 409「这个技能已经不在了」，卡都留着；remove 直接 `DELETE`，目标已经没了照样收成 saved，用户要的就是它不在，终态一致。edit 不动 `use_count`、`source`、`origin`，改的是同一件活的做法。
 

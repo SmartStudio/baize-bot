@@ -17,7 +17,6 @@ import type {
   MessageBody,
   MessageId,
   PreferenceOfferStatus,
-  Skill,
   SkillChangeOp,
   SkillOfferStatus,
 } from "@baize/shared";
@@ -133,19 +132,16 @@ const OFFER_COPY: Record<SkillChangeOp, OfferCopy> = {
 const SkillOfferCard = ({
   body,
   messageId,
-  skills,
   onDecide,
 }: {
   body: Extract<MessageBody, { kind: "skill_offer" }>;
   messageId: MessageId;
-  skills: readonly Skill[] | undefined;
   onDecide: DecideSkillOffer;
 }) => {
   const [sent, setSent] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const { change } = body;
   const copy = OFFER_COPY[change.op];
-  const currentName = change.op === "add" ? undefined : skills?.find((skill) => skill.id === change.targetId)?.name;
   const decide = (decision: DecideSkillOfferRequest["decision"]) => {
     setSent(true);
     setFailure(null);
@@ -160,7 +156,7 @@ const SkillOfferCard = ({
     <div className="card card-skill-offer" data-testid="skill-offer" data-op={change.op} data-status={body.status}>
       <div className="card-title" data-testid="skill-offer-title">
         <Sparkles size={16} aria-hidden="true" />
-        {skillOfferTitle(change, currentName)}
+        {skillOfferTitle(change)}
       </div>
       {change.op === "add" && change.origin !== null ? (
         <p className="skill-offer-source">
@@ -534,8 +530,6 @@ type MessageProps = {
   onDecidePreferenceOffer: DecidePreferenceOffer;
   onInspectTool: InspectTool;
   selectedToolId: MessageId | null;
-  /** 群里各 Bot 现在的技能，改技能的卡拿它查改之前的名字。 */
-  skills: Record<BotId, Skill[]>;
   showSource: boolean;
   content: ContentBook;
   contentActions: ContentActions;
@@ -553,7 +547,6 @@ const MessageView = ({
   onDecidePreferenceOffer,
   onInspectTool,
   selectedToolId,
-  skills,
   showSource,
   content,
   contentActions,
@@ -601,14 +594,7 @@ const MessageView = ({
             );
           }
           case "skill_offer":
-            return (
-              <SkillOfferCard
-                body={body}
-                messageId={message.id}
-                skills={skills[body.botId]}
-                onDecide={onDecideSkillOffer}
-              />
-            );
+            return <SkillOfferCard body={body} messageId={message.id} onDecide={onDecideSkillOffer} />;
           case "preference_offer":
             return <PreferenceOfferCard body={body} messageId={message.id} onDecide={onDecidePreferenceOffer} />;
           case "handoff": {

@@ -326,7 +326,6 @@ export const ChatPanel = ({
                 projectOfferActions={projectOfferActions}
                 onInspectTool={onInspectTool}
                 selectedToolId={inspectedToolId}
-                skills={skills}
                 showSource={team}
               />
             </div>

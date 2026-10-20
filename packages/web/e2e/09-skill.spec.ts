@@ -131,6 +131,7 @@ test("改技能的卡写出改名前后，点改后「它知道的」里名字�
   const card = await offerCard(page, {
     op: "edit",
     targetId: "skl_quote",
+    fromName: "Globex 报价",
     name: "Globex 报价单",
     steps: ["确认客户与数量", "按最新口径计算折扣", "生成 PDF 等我检查"],
   });
@@ -154,12 +155,37 @@ test("改技能的卡写出改名前后，点改后「它知道的」里名字�
   await expect(edited.getByTestId("bot-skill-meta")).toHaveText("对话里存的 · 用过 3 次");
 });
 
+test("改完以后历史卡仍显示旧名到新名，刷新后也一样", async ({ page }) => {
+  await login(page);
+  await openSeededBot(page, "小销");
+  const card = await offerCard(page, {
+    op: "edit",
+    targetId: "skl_quote",
+    fromName: "Globex 报价",
+    name: "Globex 报价单",
+    steps: ["确认客户与数量", "生成 PDF 等我检查"],
+  });
+  await card.getByTestId("skill-offer-save").click();
+  await expect(card).toHaveAttribute("data-status", "saved");
+  await expect(card.getByTestId("skill-offer-title"), "技能已经改名，卡上照旧写改之前的名字").toHaveText(
+    "改技能「Globex 报价」→「Globex 报价单」？",
+  );
+
+  await page.reload();
+  const history = page.locator("[data-testid=skill-offer][data-op=edit]").last();
+  await expect(history).toHaveAttribute("data-status", "saved");
+  await expect(history.getByTestId("skill-offer-title"), "刷新后历史卡仍读得出改的是哪条").toHaveText(
+    "改技能「Globex 报价」→「Globex 报价单」？",
+  );
+});
+
 test("改技能的卡点不改，技能原样", async ({ page }) => {
   await login(page);
   await openSeededBot(page, "小销");
   const card = await offerCard(page, {
     op: "edit",
     targetId: "skl_quote",
+    fromName: "Globex 报价",
     name: "Globex 报价",
     steps: ["确认客户与数量", "生成 PDF 等我检查"],
   });
@@ -210,6 +236,7 @@ test("要改的技能已经被删了，点改说技能不在了，卡留着", as
   const card = await offerCard(page, {
     op: "edit",
     targetId: "skl_lead_digest",
+    fromName: "线索跟进早报",
     name: "线索早报",
     steps: ["拉昨天的线索", "汇总发我"],
   });

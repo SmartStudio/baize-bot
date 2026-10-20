@@ -392,15 +392,17 @@ describe("M9 例行任务的共享形状", () => {
 });
 
 describe("M10 skill 的共享形状", () => {
-  it("skill_offer 上行带一个变更：存和装至少两步，改要两步，删只要目标和名字", () => {
+  it("skill_offer 上行带一个变更：存和装至少两步，改要两步和改前改后两个名字，删只要目标和名字", () => {
     const offer = { type: "skill_offer", runId: "r1", botId: "b1", groupId: "g1" };
     const add = { op: "add", name: "Globex 报价", steps: ["建报价单", "生成 PDF"], origin: null };
     expect(AgentToControl.safeParse({ ...offer, change: add }).success).toBe(true);
     expect(AgentToControl.safeParse({ ...offer, change: { ...add, steps: ["建报价单"] } }).success).toBe(false);
     expect(AgentToControl.safeParse({ ...offer, change: { ...add, name: "" } }).success).toBe(false);
     expect(AgentToControl.safeParse({ ...offer, name: "Globex 报价", steps: ["a", "b"] }).success).toBe(false);
-    const edit = { op: "edit", targetId: "s1", name: "周报", steps: ["a", "b"] };
+    const edit = { op: "edit", targetId: "s1", fromName: "周报", name: "周报（精简版）", steps: ["a", "b"] };
     expect(AgentToControl.safeParse({ ...offer, change: edit }).success).toBe(true);
+    const { fromName: _dropped, ...withoutFromName } = edit;
+    expect(AgentToControl.safeParse({ ...offer, change: withoutFromName }).success, "改要带出卡时的名字").toBe(false);
     expect(AgentToControl.safeParse({ ...offer, change: { ...edit, targetId: "../x" } }).success).toBe(false);
     expect(AgentToControl.safeParse({ ...offer, change: { op: "remove", targetId: "s1", name: "周报" } }).success).toBe(
       true,

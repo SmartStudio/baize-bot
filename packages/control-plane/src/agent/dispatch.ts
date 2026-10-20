@@ -712,7 +712,7 @@ const PLAN_OUTCOME: Record<ContentPlan["status"], string> = {
   returned: "你退回了",
 };
 
-// 卡上提议的那一句和点了之后的结论。装的卡带上从哪装，edit 的 name 是改完的名字。
+// 卡上提议的那一句和点了之后的结论。装的卡带上从哪装，改名的写出前后两个名字。
 function skillOfferSentence(change: SkillChange, status: SkillOfferStatus): string {
   const outcome = (saved: string, dismissed: string): string => ({ offered: "还在等你定", saved, dismissed })[status];
   switch (change.op) {
@@ -721,7 +721,9 @@ function skillOfferSentence(change: SkillChange, status: SkillOfferStatus): stri
         ? `提议存成 skill「${change.name}」，${outcome("你存了", "你没存")}`
         : `提议从 ${new URL(change.origin).host} 装 skill「${change.name}」，${outcome("你装了", "你没装")}`;
     case "edit":
-      return `提议改 skill「${change.name}」，${outcome("你改了", "你没改")}`;
+      return change.fromName === change.name
+        ? `提议改 skill「${change.name}」，${outcome("你改了", "你没改")}`
+        : `提议把 skill「${change.fromName}」改成「${change.name}」，${outcome("你改了", "你没改")}`;
     case "remove":
       return `提议删掉 skill「${change.name}」，${outcome("你删了", "你没删")}`;
   }

@@ -396,11 +396,18 @@ export type BotTemplate = z.infer<typeof BotTemplate>;
 export const SkillOfferStatus = z.enum(["offered", "saved", "dismissed"]);
 export type SkillOfferStatus = z.infer<typeof SkillOfferStatus>;
 
-// 卡上提议的那一个变更。add 带 origin 就是从公开仓库装的；edit 和 remove 的 targetId 指这个 Bot 的一条 skill，
-// name 是 edit 之后的名字、remove 时的名字，卡上照着显示，被改被删之后也还读得出是哪条。
+// 卡上提议的那一个变更。add 带 origin 就是从公开仓库装的；edit 和 remove 的 targetId 指这个 Bot 的一条 skill。
+// 名字都是出卡时写死的：edit 的 fromName 是出卡时那条的名字、name 是改完的名字，remove 的 name 是出卡时的名字。
+// 卡上只照正文显示，那条被改被删之后也还读得出是哪条。
 export const SkillChange = z.discriminatedUnion("op", [
   z.object({ op: z.literal("add"), name: SkillName, steps: SkillSteps.min(2), origin: SkillOrigin.nullable() }),
-  z.object({ op: z.literal("edit"), targetId: SkillId, name: SkillName, steps: SkillSteps.min(2) }),
+  z.object({
+    op: z.literal("edit"),
+    targetId: SkillId,
+    fromName: SkillName,
+    name: SkillName,
+    steps: SkillSteps.min(2),
+  }),
   z.object({ op: z.literal("remove"), targetId: SkillId, name: SkillName }),
 ]);
 export type SkillChange = z.infer<typeof SkillChange>;

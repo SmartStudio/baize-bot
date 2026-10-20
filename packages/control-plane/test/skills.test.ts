@@ -584,6 +584,7 @@ describe("对话里装、改、删", () => {
       const card = await propose(owner, agent, push, {
         op: "edit",
         targetId: before.id,
+        fromName: "周报",
         name: "周报（精简版）",
         steps: ["翻一遍群消息", "只写一段"],
       });
@@ -619,6 +620,7 @@ describe("对话里装、改、删", () => {
       const card = await propose(owner, agent, push, {
         op: "edit",
         targetId: other.id,
+        fromName: "月报",
         name: "周报",
         steps: ["拉一周的数据", "写总结"],
       });
@@ -643,6 +645,7 @@ describe("对话里装、改、删", () => {
       const card = await propose(owner, agent, push, {
         op: "edit",
         targetId: report.id,
+        fromName: "周报",
         name: "周报",
         steps: ["翻一遍群消息", "只写一段"],
       });
@@ -718,8 +721,14 @@ describe("对话里装、改、删", () => {
       const runId = await startRun(owner, agent);
       const base = { type: "skill_offer", runId, botId: owner.botId, groupId: owner.groupId } as const;
       agent.send({ ...base, change: { op: "remove", targetId: theirs.id, name: "对账" } });
-      agent.send({ ...base, change: { op: "edit", targetId: theirs.id, name: "对账", steps: ["改掉", "它的"] } });
-      agent.send({ ...base, change: { op: "edit", targetId: mine.id, name: "周报", steps: ["再改", "一遍"] } });
+      agent.send({
+        ...base,
+        change: { op: "edit", targetId: theirs.id, fromName: "对账", name: "对账", steps: ["改掉", "它的"] },
+      });
+      agent.send({
+        ...base,
+        change: { op: "edit", targetId: mine.id, fromName: "周报", name: "周报", steps: ["再改", "一遍"] },
+      });
       const barrier = await offerSkill(owner, agent, push, "月报", ["拉一个月的数据", "写总结"], runId);
 
       expect(

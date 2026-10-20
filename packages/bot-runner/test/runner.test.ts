@@ -2801,7 +2801,7 @@ describe("运行器的 skill", () => {
     expect(seen.toolResults.join("")).toContain("source 要填那份 SKILL.md 的 http 或 https 原链接");
   });
 
-  it("propose_skill_edit 按现名找到这个 Bot 的 skill，上报 edit 带它的 id、新名和整份新步骤", async () => {
+  it("propose_skill_edit 按现名找到这个 Bot 的 skill，上报 edit 带它的 id、出卡时的名字、新名和整份新步骤", async () => {
     const seen = recorder();
     const steps = ["打开 CRM 找到 Globex 的联系人", "按本季度的价目表算一版报价"];
     const h = await startHarness({
@@ -2815,7 +2815,7 @@ describe("运行器的 skill", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-1", "第二步改一下"));
 
     expect(offers(h).map((m) => m.change)).toEqual([
-      { op: "edit", targetId: "skill-globex", name: "Globex 季度报价", steps },
+      { op: "edit", targetId: "skill-globex", fromName: "Globex 报价", name: "Globex 季度报价", steps },
     ]);
     expect(seen.toolResults.join("")).toContain("已经在群里问用户改不改「Globex 报价」了，等用户点。");
   });
@@ -2831,7 +2831,7 @@ describe("运行器的 skill", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-1", "第二步改一下"));
 
     expect(offers(h).map((m) => m.change)).toEqual([
-      { op: "edit", targetId: "skill-globex", name: "Globex 报价", steps },
+      { op: "edit", targetId: "skill-globex", fromName: "Globex 报价", name: "Globex 报价", steps },
     ]);
   });
 

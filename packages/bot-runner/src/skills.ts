@@ -202,7 +202,7 @@ export function createSkillTools(options: {
           checkSteps(steps);
           return {
             key: target.name,
-            change: { op: "edit", targetId: target.id, name: next, steps },
+            change: { op: "edit", targetId: target.id, fromName: target.name, name: next, steps },
             reply: `已经在群里问用户改不改「${target.name}」了，等用户点。`,
           };
         }),
