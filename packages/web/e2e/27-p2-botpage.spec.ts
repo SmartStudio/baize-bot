@@ -435,3 +435,29 @@ test("收到删除推送后，晚到的旧更新帧不把偏好加回来", async
   await releasePreferencePush(page, "preference_updated");
   await expectStaleUpdateIgnored(page);
 });
+
+test("右侧设置栏能收起、能再打开，换 Bot 和刷新后都记着", async ({ page }) => {
+  await login(page);
+  await openBot(page, "小服");
+  const panel = page.getByTestId("bot-panel");
+  const toggle = page.getByTestId("bot-panel-toggle");
+  await expect(panel, "第一次进来默认展开").toBeVisible();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+
+  await panel.getByTestId("bot-panel-close").click();
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByTestId("main-window"), "收起后对话区吃满右栏").toHaveClass(/is-wide/);
+  await expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+  await page.getByTestId("assistant-nav").click();
+  await expect(page.getByTestId("bot-panel"), "换个 Bot 不会又弹出来").toHaveCount(0);
+  await page.reload();
+  await page.getByTestId("assistant-nav").click();
+  await expect(page.getByTestId("bot-panel"), "刷新后仍收着").toHaveCount(0);
+
+  await page.getByTestId("bot-panel-toggle").click();
+  await expect(page.getByTestId("bot-panel")).toBeVisible();
+  await expect(page.getByTestId("main-window")).not.toHaveClass(/is-wide/);
+  await page.getByTestId("bot-panel-toggle").click();
+  await expect(page.getByTestId("bot-panel"), "头部按钮也能收起").toHaveCount(0);
+});

@@ -47,6 +47,11 @@
   padding-inline: var(--space-4);
 }
 
+.bot-header-actions .ghost-button[aria-pressed="true"] {
+  background: var(--bg-sidebar);
+  color: var(--fg-1);
+}
+
 .bot-know-toggle {
   display: flex;
   gap: var(--space-3);

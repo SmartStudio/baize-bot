@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, SlidersHorizontal, Sparkles } from "lucide-react";
+import { ChevronRight, SlidersHorizontal, Sparkles, X } from "lucide-react";
 import { BotHue, BotShape, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar, SHAPES } from "./BotAvatar.js";
@@ -10,6 +10,7 @@ type Props = {
   onChange: (botId: BotId, draft: BotDraft) => Promise<void>;
   onPause: (botId: BotId) => Promise<void>;
   onResume: (botId: BotId) => Promise<void>;
+  onClose: () => void;
 };
 
 type Tab = "settings" | "skills";
@@ -66,13 +67,22 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
 };
 
 // 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停。
-export const BotSettingsPanel = ({ bot, onChange, onPause, onResume }: Props) => {
+export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: Props) => {
   const [tab, setTab] = useState<Tab>("settings");
 
   const commit = (draft: BotDraft) => void onChange(bot.id, draft);
 
   return (
     <aside className="bot-panel" data-testid="bot-panel">
+      <button
+        type="button"
+        className="icon-button bot-panel-close"
+        data-testid="bot-panel-close"
+        aria-label="收起 Bot 设置"
+        onClick={onClose}
+      >
+        <X size={16} aria-hidden="true" />
+      </button>
       <header className="bot-panel-head">
         <BotAvatar shape={bot.shape} hue={bot.hue} size="lg" />
         <div className="hue-row">

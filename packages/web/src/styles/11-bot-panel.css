@@ -1,6 +1,7 @@
 /* ---------- 2a/2b 右侧 Bot 设置栏 ---------- */
 
 .bot-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-6);
@@ -9,6 +10,12 @@
   border-left: 1px solid var(--border-1);
   background: var(--bg-sidebar);
   overflow-y: auto;
+}
+
+.bot-panel-close {
+  position: absolute;
+  top: var(--space-5);
+  right: var(--space-5);
 }
 
 .bot-panel-head {

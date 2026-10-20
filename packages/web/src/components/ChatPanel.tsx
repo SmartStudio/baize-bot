@@ -48,6 +48,8 @@ type Props = {
   onToggleChecklist: (checklist: ChecklistItem[]) => Promise<void>;
   onOpenTask: () => void;
   computerChoices: ComputerChoicesView | null;
+  botPanelOpen: boolean;
+  onToggleBotPanel: () => void;
 };
 
 // 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让回合组件重画一遍。
@@ -118,6 +120,8 @@ export const ChatPanel = ({
   onToggleChecklist,
   onOpenTask,
   computerChoices,
+  botPanelOpen,
+  onToggleBotPanel,
 }: Props) => {
   const [draft, setDraft] = useState("");
   const [pickerOff, setPickerOff] = useState(false);
@@ -258,7 +262,13 @@ export const ChatPanel = ({
           )}
         </header>
       ) : (
-        <BotHeader bot={lead} computerChoices={computerChoices} avatarState={avatarStateOf(lead)} />
+        <BotHeader
+          bot={lead}
+          computerChoices={computerChoices}
+          avatarState={avatarStateOf(lead)}
+          panelOpen={botPanelOpen}
+          onTogglePanel={onToggleBotPanel}
+        />
       )}
       {conversation.kind === "team" ? (
         <TaskCard
