@@ -658,6 +658,8 @@ async function pageIdentity(chrome: AssistantChrome): Promise<PageIdentity> {
     return await poll(read, 10_000, "本地页加载完");
   } finally {
     await connection.send("Target.closeTarget", { targetId }).catch(() => null);
+    // Chrome 留着的连接不会自己断，只调 server.close 在 CI 上偶发要等近 20 秒。
+    server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 }
