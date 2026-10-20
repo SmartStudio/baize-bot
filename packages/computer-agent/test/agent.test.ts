@@ -1144,6 +1144,7 @@ describe("电脑代理连控制面", () => {
       name: "Globex 报价",
       steps: ["建报价单", "生成 PDF"],
       source: "chat",
+      origin: null,
       useCount: 0,
       createdAt: "2026-09-19T00:00:00.000Z",
     });
