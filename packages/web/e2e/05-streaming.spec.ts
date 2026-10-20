@@ -51,7 +51,7 @@ test("工具调用卡在同一张卡上从运行中变完成", async ({ page }) 
   await expect(card, "同一个 id 重推是改这张卡，不是再添一张").toHaveCount(1);
   const trace = await page.evaluate(() => window.__runTrace);
   expect(trace?.tool, "这张卡先运行中后完成").toEqual(["running", "ok"]);
-  expect(trace?.activity, "运行中的工具活动保持展开").toContain(true);
+  expect(trace?.activity, "跑的过程中也不自动展开，逐条命令不摊给人看").not.toContain(true);
   await expect(list.getByTestId("activity-toggle"), "工具默认收起").toHaveAttribute("aria-expanded", "false");
   await list.getByTestId("activity-toggle").click();
   await expect(card, "展开后显示工具名、参数摘要、耗时和状态").toBeVisible();
