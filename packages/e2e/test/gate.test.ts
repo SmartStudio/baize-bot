@@ -12,12 +12,14 @@ const SECRET = "BEGIN-FAKE-PRIVATE-KEY-p1-3";
 const DOWNLOADED = "下载目录里的报价单";
 
 // 闸门的禁区和 `~` 都按 homedir() 算，它读 HOME。电脑代理跑在本进程里，所以换 HOME 就换了它眼里的家目录。
+// Linux 的 bwrap 沙箱把 /tmp 换成私有的空 tmpfs，家目录放在 /tmp 下 bash 整个看不见，禁区也就没测到，所以放 /var/tmp。
+const HOME_PARENT = process.platform === "linux" ? "/var/tmp" : tmpdir();
 let home: string;
 let realHome: string | undefined;
 
 beforeAll(() => {
   realHome = process.env["HOME"];
-  home = realpathSync(mkdtempSync(join(tmpdir(), "p1-3-cp-home-")));
+  home = realpathSync(mkdtempSync(join(HOME_PARENT, "p1-3-cp-home-")));
   mkdirSync(join(home, ".ssh"));
   writeFileSync(join(home, ".ssh", "id_rsa"), SECRET);
   mkdirSync(join(home, "Downloads"));
