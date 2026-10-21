@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight, PanelRight, Pencil, Share2 } from "lucide-react";
-import type { Bot, BotId, Preference } from "@baize/shared";
+import type { Bot, BotId, Preference, Skill, SkillSource } from "@baize/shared";
 import { BotAvatar, type BotAvatarState } from "./BotAvatar.js";
 import { BotComputerPicker, type ComputerChoicesView } from "./ComputerPicker.js";
 import { EditBotDialog } from "./EditBotDialog.js";
@@ -12,6 +12,60 @@ import { MY_ROUTINES } from "../state/routines.js";
 import { pathOf } from "../routes/screen.js";
 
 const NONE: never[] = [];
+
+// 装来的那条另带一个可点的原页面，其余来源一句话说完。taught 只剩界面教技能那条路拆掉之前存下的旧数据。
+const SKILL_SOURCE: Record<Exclude<SkillSource, "installed">, string> = {
+  chat: "对话里存的",
+  routine: "例行里存的",
+  taught: "你教的",
+  template: "模板带来的",
+};
+
+const SkillSourceText = ({ skill }: { skill: Skill }) => {
+  if (skill.source !== "installed") return <>{SKILL_SOURCE[skill.source]}</>;
+  if (skill.origin === null) return <>装的</>;
+  return (
+    <>
+      从{" "}
+      <a href={skill.origin} rel="noreferrer" target="_blank" data-testid="bot-skill-origin">
+        {new URL(skill.origin).host}
+      </a>{" "}
+      装的
+    </>
+  );
+};
+
+const SkillRow = ({ skill }: { skill: Skill }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <li className="bot-skill" data-testid="bot-skill" data-skill-name={skill.name}>
+      <button
+        type="button"
+        className="bot-skill-toggle"
+        aria-expanded={open}
+        data-testid="bot-skill-toggle"
+        onClick={() => setOpen((was) => !was)}
+      >
+        {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+        <span>{skill.name}</span>
+      </button>
+      {open ? (
+        <div className="bot-skill-detail">
+          <ol className="skill-steps">
+            {skill.steps.map((step, at) => (
+              <li key={`${at}-${step}`} data-testid="bot-skill-step">
+                {step}
+              </li>
+            ))}
+          </ol>
+          <small data-testid="bot-skill-meta">
+            <SkillSourceText skill={skill} /> · 用过 {skill.useCount} 次
+          </small>
+        </div>
+      ) : null}
+    </li>
+  );
+};
 
 const PreferenceRow = ({ preference, onForget }: { preference: Preference; onForget: () => Promise<void> }) => {
   const [request, setRequest] = useState<"idle" | "busy" | "failed">("idle");
@@ -224,16 +278,37 @@ export const BotHeader = ({
           </section>
           <section data-testid="bot-know-skills">
             <h3>会做的事</h3>
-            {skills === undefined || skills.length === 0 ? (
-              <p className="bot-know-empty">{skills === undefined ? "正在拉…" : "还没存会做的事"}</p>
+            {skills === undefined ? (
+              skillStatus === "failed" ? (
+                <p className="bot-know-empty" role="alert" data-testid="skills-failed">
+                  没拉下来。{" "}
+                  <button
+                    type="button"
+                    className="link-button"
+                    data-testid="skills-retry"
+                    onClick={() => void actions.loadSkills(bot.id)}
+                  >
+                    重试
+                  </button>
+                </p>
+              ) : (
+                <p className="bot-know-empty">正在拉…</p>
+              )
+            ) : skills.length === 0 ? (
+              <p className="bot-know-empty" data-testid="bot-skills-empty">
+                还没存会做的事。跟它说「把刚才的做法存成技能」，或「去找个做周报的技能装上」
+              </p>
             ) : (
-              <ul>
-                {skills.map((skill) => (
-                  <li className="bot-know-row" key={skill.id}>
-                    {skill.name}
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul>
+                  {skills.map((skill) => (
+                    <SkillRow key={skill.id} skill={skill} />
+                  ))}
+                </ul>
+                <p className="bot-know-empty" data-testid="bot-skills-hint">
+                  想加、想改、想删，直接跟它说
+                </p>
+              </>
             )}
           </section>
           <section data-testid="bot-know-projects">

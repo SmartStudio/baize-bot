@@ -44,7 +44,7 @@ import {
   settleStreamingText,
   type Tx,
 } from "../repo/messages.js";
-import { skillOfferRedundant } from "../repo/skills.js";
+import { skillOfferUnwanted } from "../repo/skills.js";
 import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
 import { failRoutineRun, pushRoutineUpdated, routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
@@ -1006,32 +1006,28 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
 }
 
 /**
- * Bot 干完一件多步的活，问用户存不存。这一步只落一张卡，不建 skill 行：
- * 存不存由用户在群里点，`config.skills` 因此一个字都没变，不用重发 config。
+ * Bot 提议存、装、改或删一条 skill。这一步只落一张卡，不动 skills 表：
+ * 生不生效由用户在群里点，`config.skills` 因此一个字都没变，不用重发 config。
  *
- * 三种整条静默丢掉：例行任务派的 run（例行本身就是存下来的做法，没人在场点卡）、这个 Bot 已有同名 skill、
- * 这个群里同名的卡还没点。提示词让 Bot 少提，这里兜住它还是提了的那几次。
+ * 例行任务派的 run 整条静默丢掉（例行本身就是存下来的做法，没人在场点卡）。别的丢法见 `skillOfferUnwanted`：
+ * 提示词让 Bot 少提，这里兜住它还是提了的那几次，也挡住 targetId 指到别的 Bot 的 skill。
  */
 async function onSkillOffer(deps: AgentEventDeps, conn: AgentConnection, event: SkillOffer): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
   if ((await routineRunOfRun(deps.db, event.runId)) !== null) return;
 
+  const change = event.change;
+  // 来源只对 add 有意义，点存时才写进 skill 行。装的卡上行时就知道是 installed。
+  const source = change.op === "add" && change.origin !== null ? "installed" : "chat";
   const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) =>
-    (await skillOfferRedundant(tx, groupId, event.botId, event.name))
+    (await skillOfferUnwanted(tx, groupId, event.botId, change))
       ? null
       : appendSkillOffer(
           tx,
           groupId,
-          {
-            kind: "skill_offer",
-            botId: event.botId,
-            name: event.name,
-            steps: event.steps,
-            status: "offered",
-            skillId: null,
-          },
-          "chat",
+          { kind: "skill_offer", botId: event.botId, change, status: "offered", skillId: null },
+          source,
         ),
   );
   if (message === null) return;

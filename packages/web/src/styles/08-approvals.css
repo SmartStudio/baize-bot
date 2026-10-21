@@ -56,8 +56,7 @@
 }
 
 /* .primary-button 是给整宽表单按钮做的，没有左右内边距。放进一行得自己撑开，高度也跟旁边的 ghost 对齐。 */
-.approval-actions .primary-button,
-.skill-actions .primary-button {
+.approval-actions .primary-button {
   height: var(--control-h-md);
   padding: 0 var(--space-6);
 }

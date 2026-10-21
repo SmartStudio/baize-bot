@@ -167,7 +167,7 @@ Pi 没有原生 pause。本实现不再用 `abort()` 模拟暂停，而是在 pr
 
 ## 扩展工具
 
-`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `sessionFor` 的顺序注册 `extensionTools`、`src/computer.ts` 的 `switch_computer`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具和 `src/takeover.ts` 的 `browser_ask_user`（只给主会话，帮手没有），紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
+`RunnerConfig.extensionTools` 是注册点，元素就是 Pi 的 `ToolDefinition`，参数 schema 用 `typebox`（包名 `typebox`，不是 `@sinclair/typebox`）。运行器先注册覆盖内置实现的沙箱 bash，再按 `sessionFor` 的顺序注册 `extensionTools`、`src/computer.ts` 的 `switch_computer`、`src/topic.ts` 的主题任务工具、`src/skills.ts` 的 `propose_skill`、`propose_skill_edit`、`propose_skill_removal`、`src/metric.ts` 的 `report_metric`（只在项目群）、`src/memory.ts` 的 `remember_preference`（只在单聊）、`src/drafts.ts` 的三件起草工具，主助理再加 `src/assistant.ts` 的 `set_cadence` 和 `propose_project`、`src/team.ts` 的 `propose_team`、`src/helper.ts` 的 `call_helper`、`src/review.ts` 的 `submit_review`（只在项目群）和 `src/routine-offer.ts` 的 `propose_routine`，给了 `config.browser` 再加 `src/browser.ts` 的五件浏览器工具和 `src/takeover.ts` 的 `browser_ask_user`（只给主会话，帮手没有），紧跟着是 `src/account-read.ts` 的 `account_read`（不论给没给浏览器都有）；工具连接的 MCP 工具排在最后，见「工具连接」一节。桌面操作还没做。测试用这个注册点塞两个假工具。
 
 ## 偏好和品牌手册
 
@@ -199,6 +199,7 @@ run 的正常收尾、异常、取消和停机都会清空结果。HTTP 请求�
    | --------------------------------------------------------------------- | -------------------------------------------------------------- |
    | `create_draft`、`edit_draft`、`propose_plan`                          | 起草                                                           |
    | `propose_project`、`propose_team`、`propose_routine`、`propose_skill` | 出方案卡、出建队卡、出例行卡、问用户存不存 skill               |
+   | `propose_skill_edit`、`propose_skill_removal`                         | 问用户改不改 skill、问用户删不删 skill                         |
    | `set_cadence`                                                         | 改项目节奏                                                     |
    | `update_checklist`                                                    | 改任务卡清单                                                   |
    | `set_chief`                                                           | 换首席                                                         |
@@ -564,7 +565,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 
 ## skill
 
-**方向只有一个：控制面下发，运行器落盘。** skill 的真相源是控制面的 `skills` 表，运行器不往回同步文件。两个方向都能写的文件没有真相源，用户在 Web 上改的步骤和 Bot 刚存的文件谁覆盖谁说不清。改步骤、删除、复制给别的 Bot，都是改表再重发一条 `config`。
+**方向只有一个：控制面下发，运行器落盘。** skill 的真相源是控制面的 `skills` 表，运行器不往回同步文件。两个方向都能写的文件没有真相源，用户在卡上点定的步骤和 Bot 自己写的文件谁覆盖谁说不清。存、装、改、删都是 Bot 出卡、用户点了以后改表，再重发一条 `config`；Bot 自己往 skills 目录写文件被闸门拒。
 
 ### 落盘和对账
 
@@ -588,6 +589,8 @@ description: "打开 CRM 找到 Globex 的联系人"
 2. 按上季度的价目表算一版报价
 3. 把报价贴进邮件草稿
 ```
+
+从公开仓库装来的 skill（`origin` 不为空）正文末尾多一行 `来源：<原链接>`，模型读步骤时知道这份做法是从哪改写来的。
 
 `description` 不能为空：Pi 的 `loadSkillFromFile` 把没有 description 的文件整条丢掉，所以步骤为空的 skill 回落到用名字当 description。两个字段都过 `JSON.stringify` 写成 YAML 的双引号标量，名字里的冒号和引号才不会把 frontmatter 撑破（Pi 用的是真 `yaml` 解析器）。
 
@@ -613,19 +616,25 @@ Pi 把 `getSkills()` 的结果经 `formatSkillsForPrompt` 拼进系统提示，�
 
 ### propose_skill
 
-存不存由 Bot 发起。`src/skills.ts` 的 `createSkillTools` 挂一个工具：
+存、装、改、删都由 Bot 发起，用户在卡上点了才生效。`src/skills.ts` 的 `createSkillTools` 挂三个工具，上行的都是 `skill_offer`，报文里的 `change` 按 op 分：
 
-| 工具            | 参数                                                                     | 返回                                           | 上行报文      |
-| --------------- | ------------------------------------------------------------------------ | ---------------------------------------------- | ------------- |
-| `propose_skill` | `name`（1 到 40 字）、`steps`（2 到 20 条，每条非空、每条不超过 500 字） | `已经在群里问用户存不存「<名字>」了，等用户点。` | `skill_offer` |
+| 工具                    | 参数                                                                                                      | 上行 `change`                       | 返回                                                                         |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------- |
+| `propose_skill`         | `name`（1 到 40 字）、`steps`（2 到 20 条，每条非空、不超过 500 字）、可选 `source`（SKILL.md 的原链接） | `add`，`origin` 是 `source` 或 null | `已经在群里问用户存不存「<名字>」了，等用户点。`，带 source 时说从哪装       |
+| `propose_skill_edit`    | `skill`（现在的名字）、可选 `name`（新名字，不填就不改名）、`steps`（同上）                               | `edit`，`targetId` 是解析出的 id，`fromName` 是它的现名 | `已经在群里问用户改不改「<现名>」了，等用户点。`                             |
+| `propose_skill_removal` | `skill`（现在的名字）                                                                                     | `remove`，带 `targetId` 和现名      | `已经在群里问用户删不删「<现名>」了，等用户点。`                             |
 
-控制面收到 `skill_offer` 落一条消息，Web 画成一张带「存」「不存」的卡，用户点存才有 skill 行，再随新的 `config` 发回来。例行 run 报上来的、已经有同名 skill 的、群里同名卡还没点的，控制面整条丢掉，不回错。
+控制面收到 `skill_offer` 落一张卡，Web 按 op 画成存、装、改、删四种说法，用户点了才动 skills 表，再随新的 `config` 发回来。哪些卡控制面整条丢掉、不回错，见控制面 README 的「哪些 `skill_offer` 不落卡」。
 
-**什么时候问。** `PROPOSE_SKILL_RULE` 只许两种时候问：群里看得到用户以前就让它做过同一类活、这次又要；或者用户明说了「以后也这样做」。只做一次的活不问，用了多少工具都不问。早先按「用了三次以上工具」问，一次性的多步活也弹卡，用户多半点不存。
+**名字在运行器里解析。** 模型只认得名字，`targetId` 由工具按这个 Bot 当前 config 里的 skill 现查：找不到就抛「没有叫「X」的 skill。你现在会的：「A」、「B」。」，一条都没有就说还没存下任何 skill，模型照着名单重试。只查这个 Bot 自己的，别的 Bot 同名的 skill 不会被改到。
 
-**一次运行最多问一次。** 第二次调用抛「这次已经问过了。」。工具按道的会话建立，同一道串行且手里最多一次运行，所以各工具实例只需记住刚问过的 `runId`。
+**`source` 只收 http 和 https。** 卡上会把它画成一条可点的链接，别的协议在界面上就是危险链接，所以和 shared 的 `SkillOrigin` 同一个检查，不合格抛中文错误让模型换成原链接。
 
-这几个范围和 `protocol.ts` 里 `skill_offer` 的 schema 一一对齐：本地挡不住的会在 `AgentToControl.parse` 那里变成一坨英文 ZodError 扔给模型。范围和主题任务工具一个路子，**故意不写进 typebox 的 schema**：被 schema 挡下的模型只看得到一条英文 Validation 报错，看不出该写几条；交给工具里的检查统一报，给的是能照着改的中文。错误一律抛，理由见上面「主题任务工具」那节。
+**什么时候问。** `PROPOSE_SKILL_RULE` 只许两种时候提议存：群里看得到用户以前就让它做过同一类活、这次又要；或者用户明说了「以后也这样做」。只做一次的活不问，用了多少工具都不问。早先按「用了三次以上工具」问，一次性的多步活也弹卡，用户多半点不存。用户要它学会某类活或去装 skill 时，先找现成公开的 SKILL.md（比如 GitHub 上的 anthropics/skills），读完改写成中文步骤再用 `propose_skill` 带上 source；卡上列出全部步骤，外部仓库里的指令不会不经人看就进 Bot。用户要改、删时用另两个工具。
+
+**一次运行里同一个 skill 只问一次。** 三个工具共用一份记录，按 skill 现在的名字记（改和删按目标的现名，存和装按新名），同一个名字第二次调用抛「「X」这次已经问过了。」，不同的 skill 各问各的。工具按道的会话建立，同一道串行且手里最多一次运行，所以只需记住当前 `runId` 和这次问过的名字，换了 run 就清空。
+
+这几个范围和 `protocol.ts` 里 `skill_offer` 的 schema 一一对齐：本地挡不住的会在 `AgentToControl.parse` 那里变成一坨英文 ZodError 扔给模型。范围和主题任务工具一个路子，**故意不写进 typebox 的 schema**：被 schema 挡下的模型只看得到一条英文 Validation 报错，看不出该写几条；交给工具里的检查统一报，给的是能照着改的中文。错误一律抛，理由见上面「主题任务工具」那节。三个工具都在闸门的 `INTERNAL_TOOLS` 里，只读档下各有一句拦截说明。
 
 ### Pi 集成与系统提示
 

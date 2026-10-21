@@ -315,6 +315,7 @@ function startControlPlane(
   const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   const sockets: WebSocketType[] = [];
   const messages: AgentToControl[] = [];
+  const uplinks: { stream: string; seq: number; type: AgentToControl["type"] }[] = [];
   const live: LiveUp[] = [];
   const parseErrors: string[] = [];
   let nextDownlink = 1;
@@ -406,6 +407,7 @@ function startControlPlane(
           const accepted = streams.get(parsed.data.stream) ?? 0;
           if (parsed.data.seq === accepted + 1) {
             streams.set(parsed.data.stream, parsed.data.seq);
+            uplinks.push({ stream: parsed.data.stream, seq: parsed.data.seq, type: parsed.data.body.type });
             messages.push(parsed.data.body);
           }
           const rejected =
@@ -439,6 +441,7 @@ function startControlPlane(
     },
     sockets,
     messages,
+    uplinks,
     live,
     /** 第 nth 次报上来的、满足条件的画面会话，断线重连后的重报也算一次。 */
     waitForLiveSession(match: (session: LiveAnnounce) => boolean, nth = 1, timeoutMs = 3000): Promise<LiveAnnounce> {
@@ -665,15 +668,14 @@ describe("电脑代理连控制面", () => {
     const secondSocket = await server.waitForSocket(2, 5000);
     secondSocket.send(JSON.stringify(configMessage));
     await server.waitForMessage("run_done", 1);
-    const newJournal = await readFile(
-      join(directory, ".agent", "outbox", secondHello.uplinkStream, "frames.jsonl"),
-      "utf8",
-    );
 
     expect(firstHello.uplinkStream).toBe(oldStream);
     expect(secondHello.uplinkStream).not.toBe(oldStream);
-    expect(newJournal).toContain('"seq":1');
-    expect(newJournal).not.toContain('"seq":6');
+    expect(server.uplinks.find((frame) => frame.type === "run_done")).toEqual({
+      stream: secondHello.uplinkStream,
+      seq: 1,
+      type: "run_done",
+    });
     expect(logs.some((line) => line.includes("服务器确认序号回退") && line.includes("已隔离到 "))).toBe(true);
   });
 
@@ -1144,6 +1146,7 @@ describe("电脑代理连控制面", () => {
       name: "Globex 报价",
       steps: ["建报价单", "生成 PDF"],
       source: "chat",
+      origin: null,
       useCount: 0,
       createdAt: "2026-09-19T00:00:00.000Z",
     });

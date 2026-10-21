@@ -50,7 +50,6 @@ import {
   SendMessageResponse,
   Settings,
   SkillListResponse,
-  SkillResponse,
   ProjectResponse,
   TodayResponse,
   UpdateBotResponse,
@@ -74,7 +73,6 @@ import {
   type ProjectGoal,
   type CreateRoutineRequest,
   type CreateToolRequest,
-  type CreateSkillRequest,
   type DeleteAccountRequest,
   type DecideApprovalRequest,
   type DecidePreferenceOfferRequest,
@@ -99,8 +97,6 @@ import {
   type PreferenceId,
   type Routine,
   type RoutineId,
-  type Skill,
-  type SkillId,
   type TaskId,
   type ToolConnection,
   type ToolConnectionId,
@@ -108,7 +104,6 @@ import {
   type UpdateToolRequest,
   type UpdateBrandRequest,
   type UpdateRoutineRequest,
-  type UpdateSkillRequest,
 } from "@baize/shared";
 
 // 授权要整页跳去平台再跳回来，fetch 跟不了，给的是地址，界面拿它当链接。
@@ -270,15 +265,6 @@ export const createApi = (signal?: AbortSignal) => {
       (await json(RoutineResponse, await send("POST", `/routines/${encodeURIComponent(id)}/run`))).routine,
     skills: async (botId: BotId) =>
       json(SkillListResponse, await send("GET", `/bots/${encodeURIComponent(botId)}/skills`)),
-    createSkill: async (botId: BotId, body: CreateSkillRequest): Promise<Skill> =>
-      (await json(SkillResponse, await send("POST", `/bots/${encodeURIComponent(botId)}/skills`, body))).skill,
-    updateSkill: async (id: SkillId, patch: UpdateSkillRequest): Promise<Skill> =>
-      (await json(SkillResponse, await send("PATCH", `/skills/${encodeURIComponent(id)}`, patch))).skill,
-    deleteSkill: async (id: SkillId) => {
-      await send("DELETE", `/skills/${encodeURIComponent(id)}`);
-    },
-    copySkill: async (id: SkillId, botId: BotId): Promise<Skill> =>
-      (await json(SkillResponse, await send("POST", `/skills/${encodeURIComponent(id)}/copy`, { botId }))).skill,
     decideSkillOffer: async (messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) =>
       json(
         DecideSkillOfferResponse,

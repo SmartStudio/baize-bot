@@ -299,6 +299,7 @@ const skillOf = (id: string, botId: string, name: string, steps: readonly string
   name,
   source: "chat",
   steps: [...steps],
+  origin: null,
   useCount: 0,
   createdAt: "2026-09-13T08:00:00.000Z",
 });
@@ -321,6 +322,19 @@ const PROPOSE_ARGS = {
   name: "Globex 报价",
   steps: ["打开 CRM 找到 Globex 的联系人", "按上季度的价目表算一版报价", "把报价贴进邮件草稿"],
 };
+
+/** 头一轮起按顺序点 calls 里的工具，一轮一个，点完收尾。工具结果顺手记下。 */
+const callsInOrder = (seen: ReturnType<typeof recorder>, calls: ReadonlyArray<readonly [string, object]>) => {
+  return (req: ChatCompletionRequest): ScriptedTurn => {
+    const answered = req.messages.filter((m) => m.role === "tool").length;
+    if (answered > 0) seen.toolResults.push(JSON.stringify(req.messages.filter((m) => m.role === "tool")));
+    const next = calls[answered];
+    if (next === undefined) return { textChunks: [], usage: { input: 1000, output: 8 } };
+    return callTool(next[0], { ...next[1] }, `call-${answered + 1}`);
+  };
+};
+const SKILL_SOURCE = "https://github.com/anthropics/skills/blob/main/weekly-report/SKILL.md";
+const offers = (h: Harness) => h.sent.filter((m) => m.type === "skill_offer");
 
 /** 假上游按请求里出现过的字眼分派脚本，一次 prompt 的第二轮一律空着收尾。 */
 const scriptBy = (turns: ReadonlyArray<readonly [marker: string, turn: ScriptedTurn]>) => {
@@ -2611,6 +2625,17 @@ describe("运行器的 skill", () => {
     expect(skillFileOn(h.dataDir, "bot-1", "skill-globex"), "对账要能从盘上任何一种状态收敛过来").toBe(GLOBEX_FILE);
   });
 
+  it("装来的 skill 在 SKILL.md 末尾写一行来源", async () => {
+    const origin = "https://github.com/anthropics/skills/blob/main/globex/SKILL.md";
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [{ ...GLOBEX_SKILL, source: "installed", origin }],
+      script: scriptBy([]),
+    });
+
+    expect(skillFileOn(h.dataDir, "bot-1", "skill-globex")).toBe(GLOBEX_FILE.replace(/\n$/, `\n\n来源：${origin}\n`));
+  });
+
   it("别的 Bot 的 skill 不落到自己目录里", async () => {
     const h = await startHarness({
       bots: ["bot-1", "bot-2"],
@@ -2652,8 +2677,7 @@ describe("运行器的 skill", () => {
         runId: "run-1",
         botId: "bot-1",
         groupId: "group-1",
-        name: PROPOSE_ARGS.name,
-        steps: PROPOSE_ARGS.steps,
+        change: { op: "add", name: PROPOSE_ARGS.name, steps: PROPOSE_ARGS.steps, origin: null },
       },
     ]);
     expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
@@ -2690,14 +2714,17 @@ describe("运行器的 skill", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "这件活干完了"));
 
-    expect(h.sent.filter((m) => m.type === "skill_offer").length, "一次运行最多问一次，第二次拦在发报文之前").toBe(1);
+    expect(
+      h.sent.filter((m) => m.type === "skill_offer").length,
+      "同一个 skill 一次运行最多问一次，第二次拦在发报文之前",
+    ).toBe(1);
     expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
       "bot_tool_call:running",
       "bot_tool_call:ok",
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("这次已经问过了");
+    expect(seen.toolResults.join("")).toContain("「Globex 报价」这次已经问过了");
   });
 
   it("propose_skill 只给一条步骤：不上报，终态 failed，错误文本给出该写几条", async () => {
@@ -2740,6 +2767,154 @@ describe("运行器的 skill", () => {
     expect(seen.toolResults.join(""), "拦在 AgentToControl.parse 之前，模型才不会收到一坨英文 ZodError").toContain(
       "第 2 步有 501 个字，每步最多 500 个",
     );
+  });
+
+  it("propose_skill 带 source：上报的是装技能，结果里点出从哪个站装", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["装个周报技能", callTool("propose_skill", { ...PROPOSE_ARGS, source: SKILL_SOURCE })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "装个周报技能"));
+
+    expect(offers(h).map((m) => m.change)).toEqual([
+      { op: "add", name: PROPOSE_ARGS.name, steps: PROPOSE_ARGS.steps, origin: SKILL_SOURCE },
+    ]);
+    expect(seen.toolResults.join("")).toContain("已经在群里问用户要不要从 github.com 装「Globex 报价」了，等用户点。");
+  });
+
+  it("propose_skill 的 source 不是 http(s) 链接：不上报，错误文本说要原链接", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [
+        ["装个周报技能", callTool("propose_skill", { ...PROPOSE_ARGS, source: "file:///Users/me/SKILL.md" })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "装个周报技能"));
+
+    expect(offers(h), "本机文件不是公开来源，卡上点不开").toEqual([]);
+    expect(seen.toolResults.join("")).toContain("source 要填那份 SKILL.md 的 http 或 https 原链接");
+  });
+
+  it("propose_skill_edit 按现名找到这个 Bot 的 skill，上报 edit 带它的 id、出卡时的名字、新名和整份新步骤", async () => {
+    const seen = recorder();
+    const steps = ["打开 CRM 找到 Globex 的联系人", "按本季度的价目表算一版报价"];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL],
+      script: scriptRecording(seen, [
+        ["第二步改一下", callTool("propose_skill_edit", { skill: "Globex 报价", name: "Globex 季度报价", steps })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第二步改一下"));
+
+    expect(offers(h).map((m) => m.change)).toEqual([
+      { op: "edit", targetId: "skill-globex", fromName: "Globex 报价", name: "Globex 季度报价", steps },
+    ]);
+    expect(seen.toolResults.join("")).toContain("已经在群里问用户改不改「Globex 报价」了，等用户点。");
+  });
+
+  it("propose_skill_edit 不给新名：沿用现名", async () => {
+    const steps = ["打开 CRM", "算报价"];
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL],
+      script: scriptBy([["第二步改一下", callTool("propose_skill_edit", { skill: "Globex 报价", steps })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第二步改一下"));
+
+    expect(offers(h).map((m) => m.change)).toEqual([
+      { op: "edit", targetId: "skill-globex", fromName: "Globex 报价", name: "Globex 报价", steps },
+    ]);
+  });
+
+  it("propose_skill_edit 名字对不上：不上报，错误文本列出它现有的 skill，别的 Bot 的不算", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1", "bot-2"],
+      skills: [GLOBEX_SKILL, skillOf("skill-duiqi", "bot-2", "对账", ["拉流水", "和账单核一遍"])],
+      script: scriptRecording(seen, [
+        ["改一下对账", callTool("propose_skill_edit", { skill: "对账", steps: ["拉流水", "核账单"] })],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "改一下对账"));
+
+    expect(offers(h), "对账是 bot-2 的，bot-1 改不了").toEqual([]);
+    expect(seen.toolResults.join(""), "模型照着现有的名字重试").toContain(
+      "没有叫「对账」的 skill。你现在会的：「Globex 报价」。",
+    );
+  });
+
+  it("propose_skill_removal 一个 skill 都没有时：错误文本说还没存下任何 skill", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["周报不要了", callTool("propose_skill_removal", { skill: "周报" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "周报不要了"));
+
+    expect(offers(h)).toEqual([]);
+    expect(seen.toolResults.join("")).toContain("没有叫「周报」的 skill，你现在还没有存下任何 skill。");
+  });
+
+  it("propose_skill_removal 上报 remove 带 id 和现名", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL],
+      script: scriptRecording(seen, [["报价那个不要了", callTool("propose_skill_removal", { skill: "Globex 报价" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "报价那个不要了"));
+
+    expect(offers(h).map((m) => m.change)).toEqual([{ op: "remove", targetId: "skill-globex", name: "Globex 报价" }]);
+    expect(seen.toolResults.join("")).toContain("已经在群里问用户删不删「Globex 报价」了，等用户点。");
+  });
+
+  it("一次运行里不同的 skill 各问一次，同一个 skill 换个动作再问也拦", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      skills: [GLOBEX_SKILL],
+      script: callsInOrder(seen, [
+        ["propose_skill_edit", { skill: "Globex 报价", steps: ["打开 CRM", "算报价"] }],
+        ["propose_skill", { name: "周报", steps: ["拉数", "写结论"] }],
+        ["propose_skill_removal", { skill: "Globex 报价" }],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "整理一下会做的活"));
+
+    expect(
+      offers(h).map((m) => m.change.op),
+      "节流按 skill 名，不按工具：改过「Globex 报价」就不再问删它",
+    ).toEqual(["edit", "add"]);
+    expect(seen.toolResults.join("")).toContain("「Globex 报价」这次已经问过了");
+  });
+
+  it("下一次运行可以再问同一个 skill", async () => {
+    const h = await startHarness({
+      bots: ["bot-1"],
+      // 同一个群的会话接着往下记，第二次的请求里带着第一次的工具结果，只看最后一条是不是工具结果。
+      script: (req) =>
+        req.messages.at(-1)?.role === "tool"
+          ? { textChunks: [], usage: { input: 900, output: 8 } }
+          : callTool("propose_skill", PROPOSE_ARGS),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "第一次"));
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
+
+    expect(offers(h).map((m) => m.runId)).toEqual(["run-1", "run-2"]);
   });
 
   it("系统提示里有提议存 skill 的规则，排在 Bot 描述之后", async () => {
@@ -4366,9 +4541,9 @@ describe("config 按 Bot 增量对账", () => {
     await h.runner.stop();
 
     const { spawnSync } = await import("node:child_process");
-    const scan = spawnSync("grep", ["-rl", "-e", secret, "-e", "test-key", h.dataDir, join(homedir(), ".pi")], {
-      encoding: "utf8",
-    });
+    // 没装过 Pi 的电脑没有 ~/.pi，grep 遇到不存在的路径退出码是 2。
+    const scanned = [h.dataDir, join(homedir(), ".pi")].filter((path) => existsSync(path));
+    const scan = spawnSync("grep", ["-rl", "-e", secret, "-e", "test-key", ...scanned], { encoding: "utf8" });
     expect(h.gateway.usage.map((record) => record.key)).toEqual(["test-key", secret, secret]);
     expect(scan.status).toBe(1);
     expect(scan.stdout).toBe("");
@@ -5957,7 +6132,7 @@ describe("运行器的主助理", () => {
 
 往外发东西只能起草：调 create_draft 或 propose_plan，群里出一张卡等用户批，批了才发。不要用 bash、浏览器或工具连接里的操作自己去发帖、回复或提 issue。在电脑浏览器里登录过的平台（小红书、X）也走草稿，批了由电脑上的浏览器发，不用让用户去配接口授权。
 
-存下会做的活：只有两种时候用 propose_skill 把刚才的步骤写成清单问用户存不存，一是群里看得到用户以前就让你做过同一类活，这次又要；二是用户明说了「以后也这样做」。只做一次的活不问，用了多少工具都不问。一次运行最多提一次，用户不答也别再提。
+会做的活：只有两种时候用 propose_skill 把刚才的步骤写成清单问用户存不存，一是群里看得到用户以前就让你做过同一类活，这次又要；二是用户明说了「以后也这样做」。只做一次的活不问，用了多少工具都不问。用户要你学会某类活或去装个 skill 时，先找现成公开的 SKILL.md（比如 GitHub 上的 anthropics/skills），读完改写成中文步骤，用 propose_skill 带上 source 原链接。用户要改或删已有的 skill 时，用 propose_skill_edit 或 propose_skill_removal。同一个 skill 一次运行只问一次，用户不答也别再提。skill 只有用户在卡上点了才生效，不要自己往 skills 目录写文件。
 </addendum>
 
 <cwd>
@@ -5993,6 +6168,8 @@ ${join(h.dataDir, "bot-1", "work")}
       "handoff_task",
       "accept_handoff",
       "propose_skill",
+      "propose_skill_edit",
+      "propose_skill_removal",
       "report_metric",
       "create_draft",
       "edit_draft",

@@ -1008,11 +1008,10 @@ describe("过期和刷新成功交错", () => {
     expect(await loginOf(o, account.id), "第三代凭据可用，账号不能停在 expired").toBe("valid");
     expect((await proxyFetch(o, `/${account.id}/user`)).status, "后续请求照常").toBe(200);
     expect(await pushedLogins(o.push, 2), "P1 记过期先推，P2 刷新成功把账号推回 valid").toEqual(["expired", "valid"]);
-    await o.agent.expect("config");
-    const config = await o.agent.expect("config");
-    expect(config.accounts.find((one) => one.id === account.id)?.login, "电脑收到的最后一份 config 是 valid").toBe(
-      "valid",
-    );
+    // 两份 config 各自查库，到达顺序不定；代理只应用代数最高的那份，旧代丢弃。
+    const configs = [await o.agent.expect("config"), await o.agent.expect("config")];
+    const latest = configs.reduce((one, other) => (other.generation > one.generation ? other : one));
+    expect(latest.accounts.find((one) => one.id === account.id)?.login, "代数最高的 config 是 valid").toBe("valid");
   });
 });
 

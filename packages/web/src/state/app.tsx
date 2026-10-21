@@ -35,7 +35,6 @@ import {
   type PokerHandId,
   type PokerSeatNo,
   type SwapSeatRequest,
-  type CreateSkillRequest,
   type CreateToolRequest,
   type CliTool,
   type CliToolId,
@@ -46,13 +45,10 @@ import {
   type DecideSkillOfferRequest,
   type RoutineId,
   type Settings,
-  type Skill,
-  type SkillId,
   type ToolConnectionId,
   type BrandBook,
   type UpdateBrandRequest,
   type UpdateRoutineRequest,
-  type UpdateSkillRequest,
   type UpdateToolRequest,
   type TaskId,
   type TopicTask,
@@ -140,10 +136,6 @@ export type AppActions = {
   deleteRoutine: (routineId: RoutineId) => Promise<void>;
   runRoutine: (routineId: RoutineId) => Promise<void>;
   loadSkills: (botId: BotId) => Promise<void>;
-  createSkill: (botId: BotId, draft: CreateSkillRequest) => Promise<void>;
-  updateSkill: (skillId: SkillId, patch: UpdateSkillRequest) => Promise<void>;
-  deleteSkill: (skill: Skill) => Promise<void>;
-  copySkill: (skillId: SkillId, botId: BotId) => Promise<void>;
   loadPreferences: (botId: BotId) => Promise<void>;
   deletePreference: (preference: Preference) => Promise<void>;
   // 这个群里每个成员选的电脑和正在跑的那台。进群、重连、几种推送之后各拉一次，after 是触发它的那个号。
@@ -712,30 +704,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
           scope.put({ type: "skills_loaded", botId, skills: (await scope.api.skills(botId)).items, seq });
         }),
       ),
-      createSkill: signedIn(async ({ api, put }, botId: BotId, draft: CreateSkillRequest) => {
-        const seq = nextSeq();
-        put({ type: "skill_upserted", skill: await api.createSkill(botId, draft), seq });
-      }),
-      updateSkill: signedIn(async ({ api, put }, skillId: SkillId, patch: UpdateSkillRequest) => {
-        const seq = nextSeq();
-        put({ type: "skill_upserted", skill: await api.updateSkill(skillId, patch), seq });
-      }),
-      // DELETE 回 204，响应里没有 botId，而少了它就不知道该从哪个桶里删。所以整条传进来。
-      deleteSkill: signedIn(async ({ api, put }, skill: Skill) => {
-        const seq = nextSeq();
-        await api.deleteSkill(skill.id);
-        put({ type: "skill_removed", botId: skill.botId, skillId: skill.id, seq });
-      }),
-      copySkill: signedIn(async ({ api, put }, skillId: SkillId, botId: BotId) => {
-        const seq = nextSeq();
-        put({ type: "skill_upserted", skill: await api.copySkill(skillId, botId), seq });
-      }),
       loadPreferences: signedIn((scope, botId: BotId) =>
         loadBucket(scope, `preferences:${botId}`, ANY_FLIGHT, async (seq) => {
           scope.put({ type: "preferences_loaded", botId, preferences: await scope.api.preferences(botId), seq });
         }),
       ),
-      // 和 deleteSkill 一样整条传进来：DELETE 回 204，少了 botId 不知道从哪个桶里删。
+      // DELETE 回 204，响应里没有 botId，少了它就不知道该从哪个桶里删，所以整条传进来。
       // 204 和 404 都是服务端说这条已经没了，是定论，所以号在回包之后才取：
       // 删除在途时先到的更新推送拿着更大的号，回包前取号会被它挡住；404 是错过了删除推送，同样就地去掉。
       deletePreference: signedIn(async ({ api, put }, preference: Preference) => {
@@ -771,13 +745,18 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       updateBrand: signedIn(async ({ api, put }, body: UpdateBrandRequest) =>
         put({ type: "brand_set", brand: await api.updateBrand(body) }),
       ),
-      // 结论随这条消息的正文走，所以先落那条消息。存下来的那条 skill 是顺带回来的，dismiss 时没有。
+      // 结论随这条消息的正文走，所以先落那条消息。存下或改过的那条 skill 是顺带回来的；删掉的回包里没有，
+      // 按卡上的 targetId 就地去掉，不等推送。
       decideSkillOffer: signedIn(
         async ({ api, put }, messageId: MessageId, decision: DecideSkillOfferRequest["decision"]) => {
           const seq = nextSeq();
           const res = await api.decideSkillOffer(messageId, decision);
           put({ type: "message_upserted", message: res.message, seq });
           if (res.skill !== null) put({ type: "skill_upserted", skill: res.skill, seq });
+          const card = res.message.body;
+          if (card.kind === "skill_offer" && card.status === "saved" && card.change.op === "remove") {
+            put({ type: "skill_removed", botId: card.botId, skillId: card.change.targetId, seq });
+          }
         },
       ),
       // 点「记住」之前这句话不在偏好表里，所以只有 save 才顺带回来那条偏好。

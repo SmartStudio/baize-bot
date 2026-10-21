@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { ChevronRight, SlidersHorizontal, Sparkles, X } from "lucide-react";
+import { ChevronRight, X } from "lucide-react";
 import { BotHue, BotShape, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar, SHAPES } from "./BotAvatar.js";
-import { SkillsTab } from "./skills/SkillsTab.js";
 
 type Props = {
   bot: Bot;
@@ -12,13 +11,6 @@ type Props = {
   onResume: (botId: BotId) => Promise<void>;
   onClose: () => void;
 };
-
-type Tab = "settings" | "skills";
-
-const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: "settings", label: "设置", icon: <SlidersHorizontal size={14} aria-hidden="true" /> },
-  { id: "skills", label: "会做的活", icon: <Sparkles size={14} aria-hidden="true" /> },
-];
 
 const LATER_ROWS = [{ title: "已登录站点", note: "在电脑里登录一次，所有 Bot 共用 · 后续" }];
 
@@ -67,9 +59,8 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
 };
 
 // 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停。
+// 技能不在这里配：头部「它知道的」里能看，加、改、删跟它在对话里说。
 export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: Props) => {
-  const [tab, setTab] = useState<Tab>("settings");
-
   const commit = (draft: BotDraft) => void onChange(bot.id, draft);
 
   return (
@@ -114,52 +105,31 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
           ))}
         </div>
       </header>
-      <nav className="panel-tabs" role="tablist" aria-label="Bot 设置分页">
-        {TABS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.id}
-            className={`panel-tab${tab === item.id ? " is-selected" : ""}`}
-            data-testid={`bot-tab-${item.id}`}
-            onClick={() => setTab(item.id)}
-          >
-            {item.icon}
-            {item.label}
-          </button>
-        ))}
-      </nav>
-      {tab === "skills" ? <SkillsTab botId={bot.id} key={bot.id} /> : null}
-      {tab === "settings" ? (
-        <>
-          <div className="row-card">
-            <span>
-              <b>通知</b>
-              <small>干完活或需要你回应时通知你</small>
-            </span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={bot.notify}
-              aria-label="通知"
-              className={`switch${bot.notify ? " is-on" : ""}`}
-              data-testid="bot-notify-switch"
-              onClick={() => commit({ notify: !bot.notify })}
-            />
-          </div>
-          <RunStateRow bot={bot} onPause={onPause} onResume={onResume} key={bot.id} />
-          {LATER_ROWS.map((row) => (
-            <div className="row-card is-later" key={row.title}>
-              <span>
-                <b>{row.title}</b>
-                <small>{row.note}</small>
-              </span>
-              <ChevronRight size={16} aria-hidden="true" />
-            </div>
-          ))}
-        </>
-      ) : null}
+      <div className="row-card">
+        <span>
+          <b>通知</b>
+          <small>干完活或需要你回应时通知你</small>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={bot.notify}
+          aria-label="通知"
+          className={`switch${bot.notify ? " is-on" : ""}`}
+          data-testid="bot-notify-switch"
+          onClick={() => commit({ notify: !bot.notify })}
+        />
+      </div>
+      <RunStateRow bot={bot} onPause={onPause} onResume={onResume} key={bot.id} />
+      {LATER_ROWS.map((row) => (
+        <div className="row-card is-later" key={row.title}>
+          <span>
+            <b>{row.title}</b>
+            <small>{row.note}</small>
+          </span>
+          <ChevronRight size={16} aria-hidden="true" />
+        </div>
+      ))}
     </aside>
   );
 };
