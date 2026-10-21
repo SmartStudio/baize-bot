@@ -25,6 +25,39 @@
   align-items: center;
 }
 
+.bot-look-toggle {
+  position: relative;
+  display: block;
+  padding: 0;
+  border-radius: var(--radius-lg);
+}
+
+.bot-look-toggle:focus-visible {
+  box-shadow: var(--ring-focus);
+}
+
+.bot-look-badge {
+  position: absolute;
+  right: calc(-1 * var(--space-2));
+  bottom: calc(-1 * var(--space-2));
+  display: grid;
+  place-items: center;
+  width: var(--space-6);
+  height: var(--space-6);
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-full);
+  background: var(--bg-elevated);
+  color: var(--fg-2);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.bot-look-toggle:hover .bot-look-badge,
+.bot-look-toggle:focus-visible .bot-look-badge,
+.bot-look-toggle[aria-expanded="true"] .bot-look-badge {
+  opacity: 1;
+}
+
 .hue-row {
   display: flex;
   gap: var(--space-4);

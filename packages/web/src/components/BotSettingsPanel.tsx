@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronRight, X } from "lucide-react";
+import { ChevronRight, Pencil, X } from "lucide-react";
 import { BotHue, BotShape, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar, SHAPES } from "./BotAvatar.js";
@@ -58,7 +58,62 @@ const RunStateRow = ({ bot, onPause, onResume }: Pick<Props, "bot" | "onPause" |
   );
 };
 
-// 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停。
+// 颜色和形状建好之后很少再改，默认收着，点头像才摊开，免得每次打开设置都先看到一排选项。
+const BotLookPicker = ({ bot, commit }: { bot: Bot; commit: (draft: BotDraft) => void }) => {
+  const [open, setOpen] = useState(false);
+  return (
+    <header className="bot-panel-head">
+      <button
+        type="button"
+        className="bot-look-toggle"
+        data-testid="bot-look-toggle"
+        aria-expanded={open}
+        aria-label={open ? "收起颜色和形状" : "换颜色和形状"}
+        title={open ? "收起" : "换颜色和形状"}
+        onClick={() => setOpen(!open)}
+      >
+        <BotAvatar shape={bot.shape} hue={bot.hue} size="lg" />
+        <span className="bot-look-badge" aria-hidden="true">
+          <Pencil size={12} />
+        </span>
+      </button>
+      {open ? (
+        <>
+          <div className="hue-row">
+            {BotHue.options.map((hue) => (
+              <button
+                key={hue}
+                type="button"
+                className={`hue-swatch${hue === bot.hue ? " is-selected" : ""}`}
+                style={{ background: `var(--bot-${hue})` }}
+                aria-label={`换成 ${hue}`}
+                onClick={() => commit({ hue })}
+              />
+            ))}
+          </div>
+          <div className="bot-shape-options" role="group" aria-label="形状">
+            {BotShape.options.map((shape) => (
+              <button
+                key={shape}
+                type="button"
+                aria-pressed={shape === bot.shape}
+                aria-label={SHAPES[shape].name}
+                className={`bot-shape-option${shape === bot.shape ? " is-selected" : ""}`}
+                data-testid="bot-shape-option"
+                data-shape={shape}
+                onClick={() => commit({ shape })}
+              >
+                <BotAvatar shape={shape} hue={bot.hue} size="sm" />
+              </button>
+            ))}
+          </div>
+        </>
+      ) : null}
+    </header>
+  );
+};
+
+// 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停，颜色和形状收在头像后面。
 // 技能不在这里配：头部「它知道的」里能看，加、改、删跟它在对话里说。
 export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: Props) => {
   const commit = (draft: BotDraft) => void onChange(bot.id, draft);
@@ -74,37 +129,7 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
       >
         <X size={16} aria-hidden="true" />
       </button>
-      <header className="bot-panel-head">
-        <BotAvatar shape={bot.shape} hue={bot.hue} size="lg" />
-        <div className="hue-row">
-          {BotHue.options.map((hue) => (
-            <button
-              key={hue}
-              type="button"
-              className={`hue-swatch${hue === bot.hue ? " is-selected" : ""}`}
-              style={{ background: `var(--bot-${hue})` }}
-              aria-label={`换成 ${hue}`}
-              onClick={() => commit({ hue })}
-            />
-          ))}
-        </div>
-        <div className="bot-shape-options" role="group" aria-label="形状">
-          {BotShape.options.map((shape) => (
-            <button
-              key={shape}
-              type="button"
-              aria-pressed={shape === bot.shape}
-              aria-label={SHAPES[shape].name}
-              className={`bot-shape-option${shape === bot.shape ? " is-selected" : ""}`}
-              data-testid="bot-shape-option"
-              data-shape={shape}
-              onClick={() => commit({ shape })}
-            >
-              <BotAvatar shape={shape} hue={bot.hue} size="sm" />
-            </button>
-          ))}
-        </div>
-      </header>
+      <BotLookPicker bot={bot} commit={commit} key={bot.id} />
       <div className="row-card">
         <span>
           <b>通知</b>
