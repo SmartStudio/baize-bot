@@ -26,7 +26,6 @@ import type {
   ModelPurpose as ModelPurposeSchema,
   OAuthPlatform,
   PublishVia,
-  CliInstall,
   OnFailure as OnFailureSchema,
   Platform as PlatformSchema,
   PokerBlinds,
@@ -199,53 +198,6 @@ export const toolConnections = pgTable(
     createdAt: createdAt(),
   },
   (t) => [uniqueIndex("tool_connections_owner_id_name_idx").on(t.ownerId, t.name)],
-);
-
-// 命令行工具：命令名一个用户只登记一次。bot_scope 为 all 时不看 cli_tool_bots，some 时只给表里的 Bot；
-// 不用「没有行就是全部」，免得选中的 Bot 全删光后工具悄悄变成全员可用。
-export const cliTools = pgTable(
-  "cli_tools",
-  {
-    id: text("id").primaryKey(),
-    ownerId: text("owner_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    command: text("command").notNull(),
-    install: jsonb("install").$type<CliInstall>(),
-    computers: jsonb("computers").$type<ComputerKind[]>().notNull(),
-    botScope: text("bot_scope").$type<"all" | "some">().notNull(),
-    createdAt: createdAt(),
-  },
-  (t) => [
-    uniqueIndex("cli_tools_owner_id_command_idx").on(t.ownerId, t.command),
-    check("cli_tools_bot_scope_ck", sql`${t.botScope} IN ('all', 'some')`),
-  ],
-);
-
-export const cliToolEnv = pgTable(
-  "cli_tool_env",
-  {
-    toolId: text("tool_id")
-      .notNull()
-      .references(() => cliTools.id, { onDelete: "cascade" }),
-    name: text("name").notNull(),
-    valueEnc: text("value_enc").notNull(),
-    last4: text("last4").notNull(),
-  },
-  (t) => [primaryKey({ columns: [t.toolId, t.name] })],
-);
-
-export const cliToolBots = pgTable(
-  "cli_tool_bots",
-  {
-    toolId: text("tool_id")
-      .notNull()
-      .references(() => cliTools.id, { onDelete: "cascade" }),
-    botId: text("bot_id")
-      .notNull()
-      .references(() => bots.id, { onDelete: "cascade" }),
-  },
-  (t) => [primaryKey({ columns: [t.toolId, t.botId] }), index("cli_tool_bots_bot_id_idx").on(t.botId)],
 );
 
 export const toolConnectionBots = pgTable(

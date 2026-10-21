@@ -330,6 +330,13 @@
       "when": 1792494593274,
       "tag": "0046_skill_offer_change",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792557724084,
+      "tag": "0047_drop_cli_tools",
+      "breakpoints": true
     }
   ]
 }

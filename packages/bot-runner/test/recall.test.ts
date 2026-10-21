@@ -161,7 +161,6 @@ async function harness(options: {
     accounts: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: `${base}/gateway/v1`, apiKey: "recall-test-key" },
     accountsProxy: { baseUrl: `${base}/accounts-proxy` },
     mcpProxy: { baseUrl: `${base}/mcp-proxy` },

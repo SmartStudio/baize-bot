@@ -25,7 +25,7 @@ export const cliHomeDir = (dataDir: string): string => join(dataDir, "home");
 /** 主人在终端里 `npm i -g` 装的命令落在这里（终端的 NPM_CONFIG_PREFIX 是 `<homeDir>/.local`）。 */
 export const homeBinDir = (homeDir: string): string => join(homeDir, ".local", "bin");
 
-// 登记工具的命令批了就能写 HOME（续期登录态），但改不动别的命令和 shell 启动文件：.local/bin 在所有 Bot 的 PATH 上，
+// .local/bin 里的命令放行时能写 HOME（续期登录态），但改不动别的命令和 shell 启动文件：.local/bin 在所有 Bot 的 PATH 上，
 // 启动文件在主人的终端里跑。Debian 默认的 .bashrc 会 source .bash_aliases，一并锁上。
 export const HOME_LOCKED_DIRS = [".local"] as const;
 export const HOME_LOCKED_FILES = [

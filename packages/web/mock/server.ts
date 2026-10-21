@@ -5,7 +5,6 @@ import { accountRoutes } from "./routes/account.js";
 import { authRoutes, authed, expireSessions } from "./routes/auth.js";
 import { botRoutes } from "./routes/bots.js";
 import { brandRoutes } from "./routes/brand.js";
-import { cliToolRoutes } from "./routes/cli-tools.js";
 import { computerChoiceRoutes } from "./routes/computer-choices.js";
 import { contentRoutes } from "./routes/content.js";
 import { goalRoutes } from "./routes/goals.js";
@@ -60,7 +59,6 @@ const protectedRoutes: Route[] = [
   accountRoutes,
   botRoutes,
   toolRoutes,
-  cliToolRoutes,
   routineRoutes,
   skillRoutes,
   projectRoutes,

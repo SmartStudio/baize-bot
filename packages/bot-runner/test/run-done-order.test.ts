@@ -63,7 +63,6 @@ it("run_done 排在最后一帧 settled 工作记录确认之后：该帧挂住�
     grants: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },

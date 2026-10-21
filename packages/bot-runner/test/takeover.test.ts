@@ -226,7 +226,6 @@ async function start(options: {
     grants: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "test-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9/accounts-proxy" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },

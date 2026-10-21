@@ -104,7 +104,6 @@ it("删掉本地会话目录后重建，下一次上游请求体和原会话会�
     grants: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-key" },
     mcpProxy: { baseUrl: hub.baseUrl },
     hub: { baseUrl: hub.baseUrl },

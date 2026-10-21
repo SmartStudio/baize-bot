@@ -111,7 +111,6 @@ async function harness(upstream: Upstream, overrides: Partial<RunnerConfig> = {}
     grants: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-lanes-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },

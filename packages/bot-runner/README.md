@@ -107,31 +107,23 @@ Pi 会话使用串行工具执行。文件工具和 bash 不会在同一批里�
 
 `approve(runId, callId, outcome)` 只结算 runId 和 callId 都匹配的等待。`approved` 放行；`rejected` 的工具结果为「归属人拒绝了这个动作。」；`timed_out` 为「10 分钟没人批，按拒绝处理。」；`voided` 为「用户发了新消息，这一步作废了。」。作废结算后复用 `abortSession()` 中止对应群的会话，`runnerAbortedRuns` 标记让 reporter 不追加模型报错行。旧 prompt 从 `agent_settled` 收尾，`finishRun` 保证一个 runId 只发一次 `run_done`，原串行队列随后执行新 prompt。到期拒绝只拦工具，当前轮可继续告诉用户结果。
 
-**云电脑的 HOME 全 Bot 共用。** 它是 `<dataDir>/home`，沙箱里的 `HOME` 指向它，普通命令只读挂回，所以谁都看得见。主人在网页终端里登录的订阅型 CLI 把登录态留在这里，任何 Bot 不经审批就能读，这是有意的。bash 命令里的 `~` 闸门按这份 HOME 解，不按运行器进程的；Pi 的 read、write 在运行器进程里跑，`~` 照旧，碰这份 HOME 按数据目录的私有区拒。HOME 里的 `.ssh` 这类禁区按这份 HOME 再算一遍，照旧看不见。工具的命令（登记的，或 `.local/bin` 里主人装的）放行时能写 HOME，用来续期登录态。但 `.local` 和 shell 启动文件（`.bashrc`、`.bash_aliases`、`.profile`、`.bash_profile`、`.bash_login`、`.bash_logout`、`.inputrc`、`.npmrc`）在可写的 HOME 之上再只读挂回，闸门对它们也不开审批，直接拒。不存在的建沙箱时先建成空的，`.inputrc` 写一行 `$include /etc/inputrc`。`.local/bin` 在每个 Bot 的 PATH 上，启动文件在主人的终端里跑，所以只有主人的网页终端能装命令、改启动文件。终端那个 bash 的 HOME 整个可写，数据目录外的禁区和 X 的 socket 照样盖住。
+**云电脑的 HOME 全 Bot 共用。** 它是 `<dataDir>/home`，沙箱里的 `HOME` 指向它，普通命令只读挂回，所以谁都看得见。主人在网页终端里登录的订阅型 CLI 把登录态留在这里，任何 Bot 不经审批就能读，这是有意的。bash 命令里的 `~` 闸门按这份 HOME 解，不按运行器进程的；Pi 的 read、write 在运行器进程里跑，`~` 照旧，碰这份 HOME 按数据目录的私有区拒。HOME 里的 `.ssh` 这类禁区按这份 HOME 再算一遍，照旧看不见。`.local/bin` 里主人装的命令放行时能写 HOME，用来续期登录态。但 `.local` 和 shell 启动文件（`.bashrc`、`.bash_aliases`、`.profile`、`.bash_profile`、`.bash_login`、`.bash_logout`、`.inputrc`、`.npmrc`）在可写的 HOME 之上再只读挂回，闸门对它们也不开审批，直接拒。不存在的建沙箱时先建成空的，`.inputrc` 写一行 `$include /etc/inputrc`。`.local/bin` 在每个 Bot 的 PATH 上，启动文件在主人的终端里跑，所以只有主人的网页终端能装命令、改启动文件。终端那个 bash 的 HOME 整个可写，数据目录外的禁区和 X 的 socket 照样盖住。
 
 ## 命令行工具
 
-云电脑上的命令行工具有两种。用订阅登录的（`grok`、`codex` 这类）不用登记：主人在网页终端里装进共用 HOME 的 `.local/bin`、登录一次，所有 Bot 直接用。要 API 密钥的在控制面登记，随 `config.cliTools` 下发，每项是命令名、装法、几个环境变量和能用的 Bot（`bots` 为 null 是全部）。运行器每次 config 都按 `botId` 整份重算（`src/cli-tools.ts` 的 `cliToolsFor`），不在新 config 里的就没了。它不进 Bot 的会话指纹，换了工具不重建会话，下一条命令和下一轮系统提示就用新的。
+云电脑上的命令行工具由主人在网页终端里装进共用 HOME 的 `.local/bin`、登录一次，所有 Bot 直接用。要 API 密钥的也在终端里配好（写进工具自己的配置文件或登录态），运行器不经手密钥。
 
-**判定。** 闸门在 `systemPackageDenial` 之后、按动作分类之前走 `cliDecision`，认出来就 `allow`，`action` 仍报 `shell`（`ActionKind` 没有加新值，控制面和 Web 不用跟着改），`access` 是 `{ network: true, writePaths: [<HOME>], cliTools: [...] }`，`cliTools` 只列这条命令用到的登记工具，`.local/bin` 里的命令不带变量。只在 `closed`（远程电脑加 bwrap）上认，Mac、本机 Linux、没有沙箱、只读例行一律不认，按原规则走，Mac 上的 `grok` 照问。认的条件全要满足：
+**判定。** 闸门在 `systemPackageDenial` 之后、按动作分类之前走 `cliDecision`，认出来就 `allow`，`action` 仍报 `shell`（`ActionKind` 没有加新值，控制面和 Web 不用跟着改），`access` 是 `{ network: true, writePaths: [<HOME>] }`。只在 `closed`（远程电脑加 bwrap）上认，Mac、本机 Linux、没有沙箱、只读例行一律不认，按原规则走，Mac 上的 `grok` 照问。认的条件全要满足：
 
-- 整条命令只用 `|` 连，每一段的第一个词要么是这个 Bot 的登记工具，要么是 `.local/bin` 里的命令，要么是闸门已有的只读命令表（`ls`、`cat`、`head`、`tail`、`wc`、`stat`、`file`、`du`、`grep`）且这一段按原规则判出来就是不问的读；至少一段是工具。`jq`、`sort` 不在只读表里，`grok | jq` 不算。`jq` 这类带求值能力的过滤不收：管道里每一段都拿到工具的环境，`jq -n env`、`jq -n '$ENV'` 就能把密钥打出来。
-- `;`、`&&`、`||`、`&`、重定向、换行、注释、子 shell、单引号外的 `$`（变量、`$(...)`、`$'...'`）、反引号、没加引号的展开、前缀赋值（`GROK_API_KEY=x grok`）、带 `/` 的命令名都不认。
-- 工具名按沙箱里那串 PATH（`toolbox-bin`、系统 PATH、`venv/bin`、`node/bin`、HOME 的 `.local/bin`）找第一个可执行文件。登记工具必须落在这三个 bin 之一，没登记的必须落在 `.local/bin`，真实路径也还在它所属的根里（工具箱或 HOME）。`venv/bin`、`node/bin` 里没登记的命令不认，那里是 Bot 批过的装包写的。系统目录里有同名程序时先找到的是系统的，不认；没装不认；`node/bin` 里的软链指到工具箱外不认；PATH 里有空项或相对项（bash 会按 cwd 找）整条不认。
-
-不认的命令拿不到工具的变量，`echo $GROK_API_KEY`、`env`、`grok; rm x` 在云电脑上可能照样放行，但跑起来环境里没有那几个值。
-
-**环境变量。** `sandbox.ts` 的 `envForTools` 只在 `closed` 且这次调用的 permit 带着 `cliTools` 时给出这些工具的变量，`whitelistEnv` 把它们并进去，不盖住已有的键（`PATH`、`TMPDIR` 这类）。permit 只由闸门判出 cli 时写下，装包（`npm i -g`、`pip install`）、普通联网命令、没 permit 的命令一个变量都拿不到。
+- 整条命令只用 `|` 连，每一段的第一个词要么是 `.local/bin` 里的命令，要么是闸门已有的只读命令表（`ls`、`cat`、`head`、`tail`、`wc`、`stat`、`file`、`du`、`grep`）且这一段按原规则判出来就是不问的读；至少一段是工具。`jq`、`sort` 不在只读表里，`grok | jq` 不算。
+- `;`、`&&`、`||`、`&`、重定向、换行、注释、子 shell、单引号外的 `$`（变量、`$(...)`、`$'...'`）、反引号、没加引号的展开、前缀赋值、带 `/` 的命令名都不认。
+- 工具名按沙箱里那串 PATH（`toolbox-bin`、系统 PATH、`venv/bin`、`node/bin`、HOME 的 `.local/bin`）找第一个可执行文件，它必须落在 `.local/bin`，真实路径也还在 HOME 里。`venv/bin`、`node/bin` 里的命令不认，那里是 Bot 批过的装包写的。系统目录里有同名程序时先找到的是系统的，不认；没装不认；`.local/bin` 里的软链指到 HOME 外不认；PATH 里有空项或相对项（bash 会按 cwd 找）整条不认。
 
 **node 工具箱。** 云电脑上 `npm install -g`、`npm i -g`、`--global`、`--location=global` 归 `install`，照问，`access` 是联网加写 `<toolbox>/node`。批下来那条命令前面加 `export NPM_CONFIG_PREFIX=<toolbox>/node`，全局包的命令落到 `<toolbox>/node/bin`。prefix 只用环境变量给，命令行上的 `--prefix` 由 Bot 写，盖过它也写不出沙箱放开的这一个目录。`<toolbox>/node` 在起沙箱时就建好，bwrap 只能 bind 已存在的路径。装本地目录、包文件或 git 仓库时卡上多写一句会运行它的安装脚本。合写的短选项（`-gD`）和别的写法不认成全局安装，按原规则问。
 
-**装登记工具的包不问。** 云电脑上整条命令逐字是 `npm i -g <包>`、`npm install -g <包>`（`--global`、`--location=global` 同样）或 `pip install <包>`，`<包>` 等于这个 Bot 某个工具登记的 `install.package`，装法也对得上时，`toolInstallDecision` 直接 `allow`，`access` 和批准后的同一条一样（联网加写 `<toolbox>/node` 或 `<toolbox>`），不带 `cliTools`，装包脚本拿不到密钥。多一个参数、多一个包、包名差一个字、接了管道或连接符、前缀赋值、`pip3`、别的 Bot 的工具，都按原规则问。包名是主人登记的，Bot 改不了它；放行的只是主人已经点名要装的那一个。Mac 和本机不变。
+**系统提示。** 云电脑上 `.local/bin` 里有可执行文件时，系统提示多一段 `cli_tools`，列出命令名，一句它们能联网、登录态在 HOME 里，以及什么写法拿不到网络、没装没登录就叫主人去终端里装。`.local/bin` 每次派活现读（`homeCommands`），主人刚装的下一轮就列上。Mac 和本机不给这一段，那里的 bash 不给这些命令网络，列了也用不上。
 
-**脱敏。** bash 的结果在交回 Pi 之前换一遍：这个 Bot 拿得到的所有工具变量值，加上这次实际注入的值，去重后长的先换，逐个跑 `redactCredential`，短值也照换。换的是整个结果（`content`、`details`、`structuredContent`）、`onUpdate` 推的中间输出和抛出的错误消息。Pi 截断时写在临时目录的 `pi-bash-*.log` 完整输出也读出来换掉再写回，模型 `read` 它也看不到值。模型看到的、会话文件里存的、上行的 `bot_tool_call` 和从会话镜像出去的工作记录都是换过的。挡不住变形：base64、hex、逆序、切成几段、只打印一部分，换不掉。值很短时会把输出里碰巧相同的字串也换掉。
-
-**系统提示。** 云电脑上这个 Bot 有登记工具，或者 `.local/bin` 里有可执行文件时，系统提示多一段 `cli_tools`。`.local/bin` 每次派活现读（`homeCommands`），主人刚装的下一轮就列上，和登记工具重名的只按登记工具列。登记工具这半段是命令名、装法（shared 的 `installCommand`，和 Web「让 Bot 装上」发的是同一条；包名带 `[`、`>=`、`^` 这类字符时加单引号，门禁拆词后比的是去掉引号的包名；没登记装法就叫它告诉主人），一句「这些命令能联网、自带密钥，直接用；没装就照下面的装法原样装」，以及什么写法拿不到密钥和网络、没装没登录就叫主人去终端里装。不带变量名和值。Mac 和本机不给这一段，那里的 bash 拿不到密钥，列了也用不上。
-
-**剩下的风险。** 工具本身拿着密钥联网，参数能让它做什么就能做什么：工具能跑任意子命令、能被参数改到别的服务器、会读工作区里的配置文件时，这些都在放行范围里。登记什么工具由主人决定。
+**剩下的风险。** 工具本身联网，参数能让它做什么就能做什么：工具能跑任意子命令、能被参数改到别的服务器、会读工作区里的配置文件时，这些都在放行范围里。`.local/bin` 只有主人的网页终端写得进，装什么工具由主人决定。
 
 ## 暂停和继续
 

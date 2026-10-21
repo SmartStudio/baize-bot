@@ -36,10 +36,6 @@ import {
   type PokerSeatNo,
   type SwapSeatRequest,
   type CreateToolRequest,
-  type CliTool,
-  type CliToolId,
-  type CreateCliToolRequest,
-  type UpdateCliToolRequest,
   type DecideRoutineOfferRequest,
   type DecidePreferenceOfferRequest,
   type DecideSkillOfferRequest,
@@ -162,11 +158,6 @@ export type AppActions = {
   createTool: (draft: CreateToolRequest) => Promise<void>;
   updateTool: (toolId: ToolConnectionId, patch: UpdateToolRequest) => Promise<void>;
   deleteTool: (toolId: ToolConnectionId) => Promise<void>;
-  // 命令行工具只在设置页那一页用，列表留在页面里，不进 store；值只写不读，回来的只有末四位。
-  loadCliTools: () => Promise<CliTool[] | undefined>;
-  createCliTool: (draft: CreateCliToolRequest) => Promise<CliTool | undefined>;
-  updateCliTool: (toolId: CliToolId, patch: UpdateCliToolRequest) => Promise<CliTool | undefined>;
-  deleteCliTool: (toolId: CliToolId) => Promise<void>;
   updateSettings: (patch: Partial<Settings>) => Promise<void>;
   loadUsage: () => Promise<void>;
   // 牌桌视图只有 store 里一份，项目页和牌桌页都用它拉：true 是牌桌，视图已入列，和推送一样只认更大的版本；
@@ -594,12 +585,6 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         put({ type: "computers_loaded", computers: (await api.computers()).computers, seq });
         return pairing;
       }),
-      loadCliTools: signedIn(async ({ api }) => api.cliTools()),
-      createCliTool: signedIn(async ({ api }, draft: CreateCliToolRequest) => api.createCliTool(draft)),
-      updateCliTool: signedIn(async ({ api }, toolId: CliToolId, patch: UpdateCliToolRequest) =>
-        api.updateCliTool(toolId, patch),
-      ),
-      deleteCliTool: signedIn(async ({ api }, toolId: CliToolId) => api.deleteCliTool(toolId)),
       deleteAccount: signedIn(async ({ api, put, session }, email: string) => {
         await api.deleteAccount(email);
         sessions.end(session.id);

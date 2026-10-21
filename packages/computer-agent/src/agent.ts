@@ -430,7 +430,6 @@ export function startAgent(options: AgentOptions): AgentHandle {
           skills: message.skills,
           brand: message.brand,
           preferences: message.preferences,
-          cliTools: message.cliTools,
           dataDir,
           send: report,
           workAppend: (appendFrame) => workAppends.append(appendFrame),

@@ -1346,7 +1346,7 @@ describe("bwrap 参数", () => {
     }
   });
 
-  it("云电脑的 HOME 盖住数据目录后只读挂回，批准写它（登记工具）时可写的那份叠在只读那份之上", () => {
+  it("云电脑的 HOME 盖住数据目录后只读挂回，批准写它（.local/bin 里的命令）时可写的那份叠在只读那份之上", () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "baize-bwrap-home-")));
     try {
       const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));
@@ -1706,7 +1706,7 @@ describe.skipIf(!hasBwrap)("bwrap 下云电脑共用的 HOME", () => {
     }
   });
 
-  it("登记工具的命令能写 ~/.grok，写不了 ~/.local/bin 和 ~/.bashrc", async () => {
+  it(".local/bin 里的命令能写 ~/.grok，写不了 ~/.local/bin 和 ~/.bashrc", async () => {
     const root = realpathSync(mkdtempSync(join(homedir(), ".baize-bwrap-home-")));
     try {
       const dirs = ensureBotDirs(botDirs(root, BotId.parse("bot-1")));

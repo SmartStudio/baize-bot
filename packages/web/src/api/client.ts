@@ -23,12 +23,6 @@ import {
   CreateBotResponse,
   ToolListResponse,
   ToolResponse,
-  CliToolListResponse,
-  CliToolResponse,
-  type CliTool,
-  type CliToolId,
-  type CreateCliToolRequest,
-  type UpdateCliToolRequest,
   DecideApprovalResponse,
   DecidePreferenceOfferResponse,
   DecideProjectOfferResponse,
@@ -191,14 +185,6 @@ export const createApi = (signal?: AbortSignal) => {
       (await json(ToolResponse, await send("PATCH", `/tools/${encodeURIComponent(id)}`, patch))).tool,
     deleteTool: async (id: ToolConnectionId): Promise<void> => {
       await send("DELETE", `/tools/${encodeURIComponent(id)}`);
-    },
-    cliTools: async (): Promise<CliTool[]> => (await json(CliToolListResponse, await send("GET", "/cli-tools"))).items,
-    createCliTool: async (draft: CreateCliToolRequest): Promise<CliTool> =>
-      (await json(CliToolResponse, await send("POST", "/cli-tools", draft))).tool,
-    updateCliTool: async (id: CliToolId, patch: UpdateCliToolRequest): Promise<CliTool> =>
-      (await json(CliToolResponse, await send("PATCH", `/cli-tools/${encodeURIComponent(id)}`, patch))).tool,
-    deleteCliTool: async (id: CliToolId): Promise<void> => {
-      await send("DELETE", `/cli-tools/${encodeURIComponent(id)}`);
     },
     updateTask: async (
       id: TaskId,

@@ -2,14 +2,13 @@ import { readFile } from "node:fs/promises";
 import { ComputerListResponse } from "@baize/shared";
 import { expect, login, openSettings, test, SHOT } from "./fixtures";
 
-test("设置有六个导航项", async ({ page }) => {
+test("设置有五个导航项", async ({ page }) => {
   await login(page);
   await openSettings(page);
   await expect(page.locator("[data-testid^=settings-nav-]")).toHaveText([
     "通用",
     "账号与电脑",
     "插件",
-    "命令行工具",
     "用量",
     "数据与隐私",
   ]);

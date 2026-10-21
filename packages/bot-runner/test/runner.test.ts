@@ -25,7 +25,6 @@ import {
   AgentToControl,
   BotId,
   type BotRole,
-  CliToolConfig,
   type ComputerKind,
   ComputerId,
   type Grant,
@@ -426,7 +425,6 @@ interface Harness {
     readonly skills?: readonly Skill[];
     readonly brand?: RunnerConfig["brand"];
     readonly preferences?: RunnerConfig["preferences"];
-    readonly cliTools?: RunnerConfig["cliTools"];
     readonly modelGateway?: RunnerConfig["modelGateway"];
     readonly accountsProxy?: RunnerConfig["accountsProxy"];
     readonly mcpProxy?: RunnerConfig["mcpProxy"];
@@ -486,7 +484,6 @@ async function startHarness(options: {
   readonly skills?: readonly Skill[];
   readonly brand?: RunnerConfig["brand"];
   readonly preferences?: RunnerConfig["preferences"];
-  readonly cliTools?: RunnerConfig["cliTools"];
   /** 每个 Bot 的描述，进系统提示。 */
   readonly description?: string;
   readonly name?: string;
@@ -542,7 +539,6 @@ async function startHarness(options: {
       readonly skills?: readonly Skill[];
       readonly brand?: RunnerConfig["brand"];
       readonly preferences?: RunnerConfig["preferences"];
-      readonly cliTools?: RunnerConfig["cliTools"];
       readonly modelGateway?: RunnerConfig["modelGateway"];
       readonly accountsProxy?: RunnerConfig["accountsProxy"];
       readonly mcpProxy?: RunnerConfig["mcpProxy"];
@@ -561,7 +557,6 @@ async function startHarness(options: {
     hub: overrides.hub ?? options.hub ?? { baseUrl: attachmentHub.baseUrl },
     brand: overrides.brand !== undefined ? overrides.brand : (options.brand ?? null),
     preferences: [...(overrides.preferences ?? options.preferences ?? [])],
-    cliTools: [...(overrides.cliTools ?? options.cliTools ?? [])],
     dataDir,
     ...(overrides.skills !== undefined
       ? { skills: [...overrides.skills] }
@@ -10537,28 +10532,26 @@ describe("运行器的例行边界", () => {
   });
 });
 
-// 沙箱 bash 按 runner 进程的 PATH 找；测试机 PATH 里有 ./node_modules/.bin 这种相对项，cli 判定会整条不认。
+// 沙箱 bash 按 runner 进程的 PATH 找；测试机 PATH 里有 ./node_modules/.bin 这种相对项，.local/bin 的命令会整条不认。
 const absolutePath = (): string =>
   (process.env["PATH"] ?? "")
     .split(":")
     .filter((entry) => entry.startsWith("/"))
     .join(":");
 
+// 不用真名 grok：测试机上可能真装着它，系统里的同名程序不该被跑起来。
+const installHomeCli = (dataDir: string): void => {
+  const bin = join(dataDir, "home", ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(bin, "baize-test-cli"), "#!/bin/sh\n");
+  chmodSync(join(bin, "baize-test-cli"), 0o755);
+};
+
 describe("运行器的命令行工具", () => {
-  const SECRET = "xai-runner-secret-0123456789";
-  const grokFor = (bots: readonly string[] | null) =>
-    CliToolConfig.parse({
-      id: "tool-grok",
-      // 不用真名 grok：测试机上可能真装着它，系统里的同名程序不该被跑起来。
-      command: "baize-test-cli",
-      install: { manager: "npm", package: "@vibe-kit/grok-cli" },
-      env: [{ name: "GROK_API_KEY", value: SECRET }],
-      bots,
-    });
   const systemOf = (request: ChatCompletionRequest | undefined): string =>
     textOf(request?.messages.find((message) => message.role === "system")?.content);
 
-  it("云电脑上系统提示列出这个 Bot 的工具和装法，不带值；config 换了跟着换，不属于它的不列", async () => {
+  it("云电脑上系统提示列出 HOME 的 .local/bin 里的命令，现读现列", async () => {
     sandboxProbe.forceBwrap = true;
     const requests: ChatCompletionRequest[] = [];
     const { dataDir } = botWorkDir();
@@ -10567,106 +10560,53 @@ describe("运行器的命令行工具", () => {
       extensionTools: [],
       dataDir,
       computerKind: "remote",
-      cliTools: [grokFor(["bot-2"])],
-      script: scriptPlans(requests, { 第一次: [], 第二次: [], 第三次: [] }),
+      script: scriptPlans(requests, { 第一次: [], 第二次: [] }),
     });
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "第一次"));
     expect(systemOf(requests.at(-1))).not.toContain("## 命令行工具");
 
-    await h.runner.applyConfig(h.config({ cliTools: [grokFor(null)] }));
+    installHomeCli(dataDir);
     await h.runner.prompt(promptMessage("bot-1", "run-2", "第二次"));
     const system = systemOf(requests.at(-1));
     expect(system).toContain("## 命令行工具");
-    expect(system).toContain("- baize-test-cli（装法：npm install -g @vibe-kit/grok-cli）");
-    expect(system).not.toContain(SECRET);
-
-    await h.runner.applyConfig(h.config({ cliTools: [] }));
-    await h.runner.prompt(promptMessage("bot-1", "run-3", "第三次"));
-    expect(systemOf(requests.at(-1)), "整份对账，旧的作废").not.toContain("## 命令行工具");
+    expect(system).toContain("- baize-test-cli");
   });
 
   it("本机电脑的系统提示不列工具", async () => {
     const requests: ChatCompletionRequest[] = [];
+    const { dataDir } = botWorkDir();
+    installHomeCli(dataDir);
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
-      cliTools: [grokFor(null)],
+      dataDir,
       script: scriptPlans(requests, { 看看: [] }),
     });
     await h.runner.prompt(promptMessage("bot-1", "run-1", "看看"));
     expect(systemOf(requests.at(-1))).not.toContain("## 命令行工具");
   });
 
-  it.skipIf(process.platform !== "darwin")(
-    "云电脑上登记的工具不弹审批、拿得到密钥，模型、上行和工作记录里看到的都是 [已隐藏]",
-    async () => {
-      sandboxProbe.forceBwrap = true;
-      vi.stubEnv("PATH", absolutePath());
-      const requests: ChatCompletionRequest[] = [];
-      const frames: unknown[] = [];
-      const { dataDir } = botWorkDir();
-      const nodeBin = join(botDirs(dataDir, BotId.parse("bot-1")).toolboxDir, "node", "bin");
-      mkdirSync(nodeBin, { recursive: true });
-      writeFileSync(join(nodeBin, "baize-test-cli"), '#!/bin/sh\nprintf "grok key=%s\\n" "$GROK_API_KEY"\n');
-      chmodSync(join(nodeBin, "baize-test-cli"), 0o755);
-      const h = await startHarness({
-        bots: ["bot-1"],
-        extensionTools: [],
-        dataDir,
-        computerKind: "remote",
-        approve: false,
-        cliTools: [grokFor(null)],
-        workAppend: async (frame) => {
-          frames.push(frame);
-          return { kind: "ok" };
-        },
-        script: scriptPlans(requests, {
-          问问: [
-            ["bash", { command: 'baize-test-cli -p "hi" | head -n 5' }],
-            ["bash", { command: "echo key=$GROK_API_KEY" }],
-          ],
-        }),
-      });
-
-      await h.runner.prompt(promptMessage("bot-1", "run-1", "问问"));
-
-      expect(shape(h.sent)).not.toContain("approval_request");
-      const results = toolResultsOf(requests);
-      expect(results).toContain("grok key=[已隐藏]");
-      expect(results, "别的命令拿不到值").toContain("key=\\n");
-      expect(results).not.toContain(SECRET);
-      expect(JSON.stringify(h.sent)).not.toContain(SECRET);
-      expect(frames.length).toBeGreaterThan(0);
-      expect(JSON.stringify(frames)).toContain("[已隐藏]");
-      expect(JSON.stringify(frames)).not.toContain(SECRET);
-      for (const file of sessionFilesOf(dataDir, "bot-1")) expect(readFileSync(file, "utf8")).not.toContain(SECRET);
-    },
-  );
-
-  it("本机电脑上普通命令读出密钥，模型和工作记录里也换掉", async () => {
+  it.skipIf(process.platform !== "darwin")("云电脑上 .local/bin 里的命令不弹审批", async () => {
+    sandboxProbe.forceBwrap = true;
+    vi.stubEnv("PATH", absolutePath());
     const requests: ChatCompletionRequest[] = [];
-    const frames: unknown[] = [];
-    const { dataDir, workDir } = botWorkDir();
-    writeFileSync(join(workDir, "leak.txt"), `key=${SECRET}\n`);
+    const { dataDir } = botWorkDir();
+    installHomeCli(dataDir);
     const h = await startHarness({
       bots: ["bot-1"],
       extensionTools: [],
       dataDir,
-      cliTools: [grokFor(null)],
-      workAppend: async (frame) => {
-        frames.push(frame);
-        return { kind: "ok" };
-      },
-      script: scriptPlans(requests, { 读读: [["bash", { command: "cat leak.txt" }]] }),
+      computerKind: "remote",
+      approve: false,
+      script: scriptPlans(requests, { 问问: [["bash", { command: 'baize-test-cli -p "hi" | head -n 5' }]] }),
     });
 
-    await h.runner.prompt(promptMessage("bot-1", "run-1", "读读"));
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "问问"));
 
-    expect(toolResultsOf(requests)).toContain("key=[已隐藏]");
-    expect(toolResultsOf(requests)).not.toContain(SECRET);
-    expect(JSON.stringify(frames)).not.toContain(SECRET);
-    expect(JSON.stringify(h.sent)).not.toContain(SECRET);
+    expect(shape(h.sent)).not.toContain("approval_request");
+    // Mac 的 seatbelt 把数据目录下的 HOME 整个藏起来，命令跑起来找不到；真在 bwrap 里跑出结果由 sandbox.test.ts 钉着。
+    expect(toolResultsOf(requests)).toContain('"role":"tool"');
   });
 });
 

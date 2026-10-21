@@ -152,7 +152,6 @@ async function harness(
     grants: [],
     brand: null,
     preferences: [],
-    cliTools: [],
     modelGateway: { baseUrl: gateway.baseUrl, apiKey: "fake-table-key" },
     accountsProxy: { baseUrl: "http://127.0.0.1:9" },
     mcpProxy: { baseUrl: "http://127.0.0.1:9/mcp-proxy" },
