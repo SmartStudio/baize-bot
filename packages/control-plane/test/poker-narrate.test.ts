@@ -124,15 +124,24 @@ describe("hostLines", () => {
 
 describe("talkRevealsCards", () => {
   it("只说牌力和态度的台词、金额和牌友名字都能上桌", () => {
-    for (const text of ["这把我稳了", "加到 80，你敢跟吗", "老K 别装了", "跟 120"])
-      expect(talkRevealsCards(text, []), text).toBe(false);
+    for (const text of [
+      "这把我稳了",
+      "加到 80，你敢跟吗",
+      "老K 别装了",
+      "阿Q 你先说",
+      "跟 120",
+      "我在3号位",
+      "加 2 倍",
+      "第 23 号",
+    ])
+      expect(talkRevealsCards(text, [], ["老K", "阿Q"]), text).toBe(false);
   });
   it("点名公共牌上已有的牌和点数可以说", () => {
-    expect(talkRevealsCards("Q♣ 这张吓人", ["Qc", "Jc", "3h"])).toBe(false);
-    expect(talkRevealsCards("中了J", ["Qc", "Jc", "3h"])).toBe(false);
+    expect(talkRevealsCards("Q♣ 这张吓人", ["Qc", "Jc", "3h"], [])).toBe(false);
+    expect(talkRevealsCards("中了J", ["Qc", "Jc", "3h"], [])).toBe(false);
   });
   it("点名公共牌以外的牌或点数一律不公开", () => {
     for (const text of ["我有 A♠", "方块J", "Jd 在手", "中了K", "口袋 10", "AK 同花"])
-      expect(talkRevealsCards(text, ["Qc", "Jc", "3h"]), text).toBe(true);
+      expect(talkRevealsCards(text, ["Qc", "Jc", "3h"], ["老K"]), text).toBe(true);
   });
 });

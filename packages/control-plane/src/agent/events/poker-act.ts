@@ -5,7 +5,7 @@ import { messages, pokerActReceipts, pokerHands, runs, type PokerActResult } fro
 import { apply } from "../../poker/engine.js";
 import { talkRevealsCards } from "../../poker/narrate.js";
 import { converge, pushMessages, pushTable } from "../../poker/converge.js";
-import { appendEvents, loadHand, withTableLock } from "../../poker/store.js";
+import { appendEvents, loadHand, tableState, withTableLock, type TableRow } from "../../poker/store.js";
 import { appendMessage, messageVisibleTo } from "../../repo/messages.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
@@ -28,6 +28,11 @@ async function linesThisHand(db: Db, groupId: string, botId: BotId, handStartedA
       ),
     );
   return row?.n ?? 0;
+}
+
+async function namesAtTable(db: Db, table: TableRow): Promise<string[]> {
+  const state = await tableState(db, table);
+  return [...state.seats.map((seat) => seat.name), state.host.name];
 }
 
 export type PokerActEvent = Extract<AgentToControl, { type: "poker_act" }>;
@@ -92,7 +97,7 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
     const said: Message[] = [];
     if (
       event.say?.trim() &&
-      !talkRevealsCards(event.say, hand.state.board) &&
+      !talkRevealsCards(event.say, hand.state.board, await namesAtTable(db, table)) &&
       (await linesThisHand(db, table.groupId, botId, hand.row.createdAt)) < BOT_LINES_PER_HAND
     )
       said.push(await appendMessage(db, table.groupId, { kind: "bot", botId, text: event.say, streaming: false }));

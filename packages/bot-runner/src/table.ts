@@ -8,7 +8,6 @@ import {
   ModelPurpose,
   type PokerAction,
   type PokerEvent,
-  type PokerPersona,
   type PokerSeatView,
   type RunId,
   type TablePrompt,
@@ -299,7 +298,7 @@ export function createTableTools(options: {
 /** 普通会话默认开放电脑工具；牌桌单独注册工具，不加载 skill 和群协作提示。 */
 export async function createTableSession(options: {
   readonly dirs: BotDirs;
-  readonly preset: PokerPersona | null;
+  readonly persona: Parameters<typeof tablePersona>[0];
   readonly gateway: Extract<ControlToAgent, { type: "config" }>["modelGateway"];
   readonly role: TablePrompt["role"];
   readonly tools: readonly RunnerTool[];
@@ -347,7 +346,7 @@ export async function createTableSession(options: {
     cwd: dirs.workDir,
     agentDir: dirs.agentDir,
     settingsManager: settings,
-    systemPrompt: tablePersona(options.preset),
+    systemPrompt: tablePersona(options.persona),
     noSkills: true,
     noExtensions: true,
     noContextFiles: true,

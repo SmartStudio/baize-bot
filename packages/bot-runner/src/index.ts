@@ -800,7 +800,7 @@ export function createRunner(config: RunnerConfig): Runner {
     if (tableRole !== null) {
       const created = await createTableSession({
         dirs: { ...dirs, sessionDir: join(groupSessionDir(dirs, groupId), "table") },
-        preset: definition.config.preset,
+        persona: definition.config,
         gateway: runConfig().gateway,
         role: tableRole,
         tools: createTableTools({ role: tableRole, activeRun, table, send: config.send, results: pokerResults }),

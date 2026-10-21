@@ -1,6 +1,6 @@
 import type { Action, Event, HandState, SeatId } from "./engine.js";
 import { RANKS, SUITS, type Card } from "./cards.js";
-import { describePokerHand, evaluatePokerHand, POKER_PERSONAS } from "@baize/shared";
+import { describePokerHand, evaluatePokerHand } from "@baize/shared";
 
 // 老白的代码播报（D29），不调模型。narrate 把引擎事件一对一变成一句中文，给牌友和老白看的公开日志用；
 // hostLines 是群里那几句。事件日志里只有公开的事，所以只有摊牌会写出底牌，其余句子拿不到别人的牌。
@@ -22,12 +22,10 @@ const SUIT_WORDS = {
 
 /**
  * 牌友台词能不能上桌。台词可以虚张声势，但点名公共牌以外的具体牌或点数一律不公开，
- * 判断只看台词和公共牌、不看底牌，否则「哪些话活下来」本身就泄露底牌。
+ * 在座和老白的名字先剥掉（「老K」不算点数），带量词的数字（「3号位」「2倍」）也不算。判断只看台词和公共牌、不看底牌，否则「哪些话活下来」本身就泄露底牌。
  */
-export function talkRevealsCards(text: string, board: readonly Card[]): boolean {
-  const flat = Object.values(POKER_PERSONAS)
-    .reduce((rest, persona) => rest.replaceAll(persona.name, ""), text)
-    .replace(/\s+/g, "");
+export function talkRevealsCards(text: string, board: readonly Card[], names: readonly string[]): boolean {
+  const flat = names.reduce((rest, name) => (name === "" ? rest : rest.replaceAll(name, "")), text).replace(/\s+/g, "");
   const boardRanks = new Set(board.map((card) => card.charAt(0)));
   const lower = flat.toLowerCase();
   const namesHidden = RANKS.some((rank) =>
@@ -39,7 +37,7 @@ export function talkRevealsCards(text: string, board: readonly Card[]): boolean 
     }),
   );
   if (namesHidden) return true;
-  const digitRanks = [...flat.matchAll(/\d+/g)].flatMap(([digits]) =>
+  const digitRanks = [...flat.matchAll(/\d+(?![\d号倍个手次成轮块%])/g)].flatMap(([digits]) =>
     digits === "10" ? ["T"] : /^[2-9]$/.test(digits) ? [digits] : [],
   );
   const letterRanks = [...flat.matchAll(/[A-Za-z]+/g)].flatMap(([word]) => (/^[AKQJT]+$/.test(word) ? [...word] : []));
