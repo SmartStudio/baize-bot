@@ -80,6 +80,9 @@ test("在右侧面板改主助理的形状，侧栏头像同步", async ({ page 
   await expect(sidebarAvatar).toHaveAttribute("data-shape", "pillow");
   await page.getByTestId("assistant-nav").click();
   const panel = page.getByTestId("bot-panel");
+  await expect(panel.getByTestId("bot-shape-option"), "打开面板时颜色和形状收着").toHaveCount(0);
+  await expect(panel.getByTestId("bot-look-toggle")).toHaveAttribute("aria-expanded", "false");
+  await panel.getByTestId("bot-look-toggle").click();
   await expect(panel.getByTestId("bot-shape-option")).toHaveCount(8);
   const patched = page.waitForRequest(
     (request) => request.url().includes("/api/bots/") && request.method() === "PATCH",
@@ -91,6 +94,8 @@ test("在右侧面板改主助理的形状，侧栏头像同步", async ({ page 
     "true",
   );
   await expect(sidebarAvatar).toHaveAttribute("data-shape", "cloud");
+  await panel.getByTestId("bot-look-toggle").click();
+  await expect(panel.getByTestId("bot-shape-option"), "再点头像收起").toHaveCount(0);
 });
 
 test("加第 6 个标签的输入框消失", async ({ page }) => {
