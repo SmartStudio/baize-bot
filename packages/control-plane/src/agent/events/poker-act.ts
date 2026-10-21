@@ -3,8 +3,9 @@ import { and, count, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { messages, pokerActReceipts, pokerHands, runs, type PokerActResult } from "../../db/schema.js";
 import { apply } from "../../poker/engine.js";
+import { talkRevealsCards } from "../../poker/narrate.js";
 import { converge, pushMessages, pushTable } from "../../poker/converge.js";
-import { appendEvents, loadHand, withTableLock } from "../../poker/store.js";
+import { appendEvents, loadHand, tableState, withTableLock, type TableRow } from "../../poker/store.js";
 import { appendMessage, messageVisibleTo } from "../../repo/messages.js";
 import type { AgentEventDeps } from "../events.js";
 import type { AgentConnection } from "../hub.js";
@@ -27,6 +28,11 @@ async function linesThisHand(db: Db, groupId: string, botId: BotId, handStartedA
       ),
     );
   return row?.n ?? 0;
+}
+
+async function namesAtTable(db: Db, table: TableRow): Promise<string[]> {
+  const state = await tableState(db, table);
+  return [...state.seats.map((seat) => seat.name), state.host.name];
 }
 
 export type PokerActEvent = Extract<AgentToControl, { type: "poker_act" }>;
@@ -86,10 +92,14 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
         .where(eq(pokerHands.id, event.handId));
       return reply({ ok: false, error: error instanceof Error ? error.message : "出牌无效" }, [], true);
     }
-    // 台词排在这一下引起的老白播报前面；只有被接受的动作带的台词才上桌，所以一手结算之后不会再有牌友说话。
+    // 点名牌的台词整句丢掉，真话假话一样处理。台词排在这一下引起的老白播报前面；只有被接受的动作带的台词才上桌，所以一手结算之后不会再有牌友说话。
     const botId = BotId.parse(seat.botId);
     const said: Message[] = [];
-    if (event.say?.trim() && (await linesThisHand(db, table.groupId, botId, hand.row.createdAt)) < BOT_LINES_PER_HAND)
+    if (
+      event.say?.trim() &&
+      !talkRevealsCards(event.say, hand.state.board, await namesAtTable(db, table)) &&
+      (await linesThisHand(db, table.groupId, botId, hand.row.createdAt)) < BOT_LINES_PER_HAND
+    )
       said.push(await appendMessage(db, table.groupId, { kind: "bot", botId, text: event.say, streaming: false }));
     said.push(...(await appendEvents(db, table, hand, state)));
     return reply({ ok: true }, said, true);

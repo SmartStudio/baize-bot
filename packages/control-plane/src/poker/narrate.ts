@@ -1,5 +1,5 @@
 import type { Action, Event, HandState, SeatId } from "./engine.js";
-import type { Card } from "./cards.js";
+import { RANKS, SUITS, type Card } from "./cards.js";
 import { describePokerHand, evaluatePokerHand } from "@baize/shared";
 
 // 老白的代码播报（D29），不调模型。narrate 把引擎事件一对一变成一句中文，给牌友和老白看的公开日志用；
@@ -11,6 +11,37 @@ const STREET_NAME = { flop: "翻牌", turn: "转牌", river: "河牌" } as const
 export function cardText(card: Card): string {
   const rank = card.charAt(0);
   return `${rank === "T" ? "10" : rank}${SUIT_MARK[card.charAt(1) as keyof typeof SUIT_MARK]}`;
+}
+
+const SUIT_WORDS = {
+  s: ["♠", "♤", "黑桃"],
+  h: ["♥", "♡", "红桃", "红心"],
+  d: ["♦", "♢", "方块", "方片"],
+  c: ["♣", "♧", "梅花", "草花"],
+} as const;
+
+/**
+ * 牌友台词能不能上桌。台词可以虚张声势，但点名公共牌以外的具体牌或点数一律不公开，
+ * 在座和老白的名字先剥掉（「老K」不算点数），带量词的数字（「3号位」「2倍」）也不算。判断只看台词和公共牌、不看底牌，否则「哪些话活下来」本身就泄露底牌。
+ */
+export function talkRevealsCards(text: string, board: readonly Card[], names: readonly string[]): boolean {
+  const flat = names.reduce((rest, name) => (name === "" ? rest : rest.replaceAll(name, "")), text).replace(/\s+/g, "");
+  const boardRanks = new Set(board.map((card) => card.charAt(0)));
+  const lower = flat.toLowerCase();
+  const namesHidden = RANKS.some((rank) =>
+    SUITS.some((suit) => {
+      if (board.includes(`${rank}${suit}`)) return false;
+      const ranks = rank === "T" ? ["10", "t"] : [rank.toLowerCase()];
+      const suits = [suit, ...SUIT_WORDS[suit]];
+      return ranks.some((r) => suits.some((w) => lower.includes(r + w) || (w.length > 1 && lower.includes(w + r))));
+    }),
+  );
+  if (namesHidden) return true;
+  const digitRanks = [...flat.matchAll(/\d+(?![\d号倍个手次成轮块%])/g)].flatMap(([digits]) =>
+    digits === "10" ? ["T"] : /^[2-9]$/.test(digits) ? [digits] : [],
+  );
+  const letterRanks = [...flat.matchAll(/[A-Za-z]+/g)].flatMap(([word]) => (/^[AKQJT]+$/.test(word) ? [...word] : []));
+  return [...digitRanks, ...letterRanks].some((rank) => !boardRanks.has(rank));
 }
 
 function actionText(action: Action, put: number): string {

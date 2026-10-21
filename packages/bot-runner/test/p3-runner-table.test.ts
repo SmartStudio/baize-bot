@@ -466,10 +466,17 @@ describe("p3-runner-table 验收", () => {
     ["xiaoqi", "新手"],
     ["laobai", "解说"],
   ])("%s 人设只影响风格，牌力来自给定视图", (preset, style) => {
-    const text = tablePersona(preset);
+    const text = tablePersona({ preset, name: "", description: "" });
     expect(text).toContain(style);
     expect(text).toContain("不自行计算牌力");
     expect(text).not.toMatch(/\b[2-9TJQKA][shdc]\b/);
+  });
+
+  it("普通 Bot 入座用自己的名字和描述定牌风，同样不点名牌", () => {
+    const text = tablePersona({ preset: null, name: "小雨", description: "温柔的写作助理。" });
+    expect(text).toContain("你是小雨。温柔的写作助理。");
+    expect(text).toContain("自己定下来并保持一致");
+    expect(text).toContain("不点名具体的牌或点数");
   });
 
   it("回执忽略错 run、错 call，并区分跨 run 重复的 callId", async () => {

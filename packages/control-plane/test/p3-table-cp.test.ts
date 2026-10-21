@@ -430,6 +430,25 @@ it("每个牌友一手最多在群里说两句，第三句丢掉、动作照落"
   expect(dropped).toHaveLength(0);
   expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(1);
 });
+it("牌友台词点名公共牌以外的牌就不上桌，真假一样处理，动作照落", async () => {
+  await fixture();
+  const id = await seeded();
+  const p = await table.agent.expect("prompt");
+  const held = (await stored(id)).seats.find((seat) => seat.id === "1")!.hole;
+  const bluff = ["A♠", "K♥", "Q♦"].find((text) => !held.some((card) => card.startsWith(text.charAt(0))))!;
+  act(p, { kind: "call" }, { say: `我手里有${bluff}，跟` });
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  const q = await table.agent.expect("prompt");
+  act(q, { kind: "call" }, { say: "中了J，来跟" });
+  expect((await table.agent.expect("poker_result")).result).toEqual({ ok: true });
+  await barrier(q);
+  const history = JSON.stringify(
+    MessageListResponse.parse(await (await table.client.get(`/api/groups/${table.groupId}/messages`)).json()),
+  );
+  expect(history, "点名没拿着的牌也不公开，否则活下来的台词都是假话").not.toContain("我手里有");
+  expect(history, "翻牌前点名点数不公开").not.toContain("中了J");
+  expect((await stored(id)).events.filter((event) => event.kind === "action")).toHaveLength(2);
+});
 it("用户加注不足最小额回 400 和中文原因", async () => {
   await fixture();
   const view = await start();
