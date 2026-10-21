@@ -13,6 +13,25 @@ export function cardText(card: Card): string {
   return `${rank === "T" ? "10" : rank}${SUIT_MARK[card.charAt(1) as keyof typeof SUIT_MARK]}`;
 }
 
+const SUIT_WORDS = {
+  s: ["♠", "♤", "黑桃"],
+  h: ["♥", "♡", "红桃", "红心"],
+  d: ["♦", "♢", "方块", "方片"],
+  c: ["♣", "♧", "梅花", "草花"],
+} as const;
+
+/** 牌友的台词有没有点出这几张牌。认符号、字母和中文花色，花色写在点数前后都算。 */
+export function namesCard(text: string, cards: readonly Card[]): boolean {
+  const flat = text.replace(/\s+/g, "").toLowerCase();
+  return cards.some((card) => {
+    const rank = card.charAt(0).toLowerCase();
+    const ranks = rank === "t" ? ["10", "t"] : [rank];
+    const suit = card.charAt(1) as keyof typeof SUIT_WORDS;
+    const suits = [suit, ...SUIT_WORDS[suit]];
+    return ranks.some((r) => suits.some((s) => flat.includes(r + s) || (s.length > 1 && flat.includes(s + r))));
+  });
+}
+
 function actionText(action: Action, put: number): string {
   switch (action.kind) {
     case "fold":

@@ -143,7 +143,7 @@ export function composeTablePrompt(message: PromptMessage): string {
     ...(table.publicLog.length === 0 ? ["暂无"] : table.publicLog),
     table.role === "advisor"
       ? `用户问：${table.question ?? "这手怎么打"}\n请在 120 字内给出建议和理由，只用给定视图。`
-      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额。默认不填 say：只有你加注、全下、这一下会摊牌，或者有人点名问你时才说一句，最多 40 字，每手最多两句。其他文字不会公开。",
+      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额。默认不填 say：只有你加注、全下、这一下会摊牌，或者有人点名问你时才说一句，最多 40 字，每手最多两句。台词不许透露你的底牌、点数或你中了什么，点出自己底牌的台词不会公开。其他文字不会公开。",
   ].join("\n");
 }
 
