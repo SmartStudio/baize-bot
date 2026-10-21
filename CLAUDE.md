@@ -88,7 +88,7 @@ computer-agent（电脑上的常驻进程，出站连接，第一条 config 建 
 
 ### 文档在哪
 
-- `README.md` 跑起来、环境变量、控制面握手。
+- `README.md`、`README.en.md` 对外介绍，中英各一份。`docs/开发.md` 跑起来、环境变量、控制面握手。
 - `packages/control-plane/README.md` 路由、审批、交接、例行、skill、牌桌、用量的设计理由，改这些前先读对应一节。
 - `packages/bot-runner/README.md` Pi 集成、目录布局、审批拦截、主题任务工具、prompt 拼法、牌桌工具。
 - `spec/规格.md` 产品规格 v0.2，方向已转成个人助理，每个对象写了目标和「现在」的差距。`spec/用户故事.md` 按天讲用户怎么用，每期的验收就是走通对应的故事。`spec/原型/个人助理-v4.html` 是可点的交互原型，一次性的，不照着抄代码，prettier 忽略它。
