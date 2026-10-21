@@ -1,6 +1,6 @@
 # @baize/control-plane
 
-控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库根 README.md 的「控制面」一节。
+控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库 docs/开发.md 的「控制面」一节。
 
 ## 电脑配对
 
