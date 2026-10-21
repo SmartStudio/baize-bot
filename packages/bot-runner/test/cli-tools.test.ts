@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BotId, type CliInstall, CliToolConfig, CliToolId, ComputerId, GroupId, installCommand } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { cliToolsFor, renderCliToolsSection } from "../src/cli-tools.js";
+import { cliToolsFor, homeCommands, renderCliToolsSection } from "../src/cli-tools.js";
 import { decide, type GateAccess, type GateCall } from "../src/gate.js";
 import { botDirs, ensureBotDirs, forbiddenZones } from "../src/paths.js";
 import { createSandboxedBash, redactSecrets, sandboxKind, toolboxCommand, whitelistEnv } from "../src/sandbox.js";
@@ -186,6 +186,38 @@ describe("命令行工具的门禁判定", () => {
       expect(decide(cloud(command), [], []).access.writePaths, command).not.toContain(homeDir());
     },
   );
+
+  it("没登记的 ~/.local/bin 命令当主人装的工具：不问、联网、HOME 可写，不带任何登记工具的 env", () => {
+    for (const command of ["home-cli -p hi", "home-cli | head -n 3"]) {
+      expect(decide(cloud(command, { cliTools: [] }), [], []), command).toMatchObject({
+        verdict: "allow",
+        action: "shell",
+        access: { network: true, writePaths: [homeDir()], cliTools: [] },
+      });
+    }
+    expect(decide(cloud("home-cli | baize-test-cli", { cliTools: [TOOLS[0]!] }), [], [])).toMatchObject({
+      verdict: "allow",
+      access: { network: true, cliTools: ["tool-baize-test-cli"] },
+    });
+  });
+
+  it.each([
+    ["home-escape", "软链指到 HOME 外"],
+    ["baize-test-cli", "在工具箱的 node/bin 里，没登记"],
+    ["home-cli; ls", "带连接符"],
+    ["home-cli > out.txt", "带重定向"],
+  ])("%s（%s）：没登记就不当工具，不给网", (command) => {
+    const decision = decide(cloud(command, { cliTools: [] }), [], []);
+    expect(decision.access.network, decision.verdict).toBe(false);
+    expect(decision.access.writePaths).not.toContain(homeDir());
+  });
+
+  it("~/.local/bin 的命令只在云电脑上认，没沙箱和只读例行照旧", () => {
+    expect(decide(cloud("home-cli", { cliTools: [], sandbox: "none" }), [], []).access.network).toBe(false);
+    expect(decide(cloud("home-cli", { cliTools: [], routine: { boundary: "read_only" } }), [], []).access.network).toBe(
+      false,
+    );
+  });
 
   it("工具不属于这个 Bot（没传进来）就不认", () => {
     expect(decide(cloud("baize-test-cli", { cliTools: [tool("other")] }), [], []).access.cliTools ?? []).toEqual([]);
@@ -449,15 +481,38 @@ describe("系统提示和按 Bot 过滤", () => {
     ]);
   });
 
-  it("云电脑上列命令名和装法，不带值；Mac 和空列表不给这一段", () => {
-    const section = renderCliToolsSection([OTHER, GROK], true) ?? "";
+  it("云电脑上列命令名和装法，不带值；Mac 和什么都没有时不给这一段", () => {
+    const section = renderCliToolsSection([OTHER, GROK], []) ?? "";
     expect(section).toContain("这些命令能联网、自带密钥，直接用；没装就照下面的装法原样装");
     expect(section).toContain("- baize-test-cli（装法：npm install -g @vibe-kit/grok-cli）");
     expect(section).toContain("- other（装法：没有登记装法，没装就告诉主人）");
     expect(section.indexOf("- baize-test-cli")).toBeLessThan(section.indexOf("- other"));
+    expect(section).not.toContain("主人在云电脑终端里装好");
     expect(section).not.toContain(SECRET);
     expect(section).not.toContain("GROK_API_KEY");
-    expect(renderCliToolsSection([GROK], false)).toBeNull();
-    expect(renderCliToolsSection([], true)).toBeNull();
+    expect(renderCliToolsSection([GROK], null)).toBeNull();
+    expect(renderCliToolsSection([], [])).toBeNull();
+  });
+
+  it("~/.local/bin 里的可执行文件现读现列，和登记工具重名的只按登记工具列", () => {
+    writeFileSync(join(homeBin(), "notes.txt"), "not a command");
+    writeFileSync(join(homeBin(), ".hidden"), "");
+    chmodSync(join(homeBin(), ".hidden"), 0o755);
+    const home = homeCommands(homeDir());
+    expect(home).toEqual(["home-cli", "home-escape"]);
+    expect(homeCommands(join(root, "no-such-home"))).toEqual([]);
+
+    const section = renderCliToolsSection([], home) ?? "";
+    expect(section).toContain(
+      "主人在云电脑终端里装好、登录过的命令，能联网，登录态在 HOME 里，直接用：\n- home-cli\n- home-escape",
+    );
+    expect(section).not.toContain("自带密钥");
+    expect(section).toContain("告诉主人去「设置 › 账号与电脑」的终端里装好、登录");
+
+    const both = renderCliToolsSection([CliToolConfig.parse({ ...GROK, command: "home-cli" })], home) ?? "";
+    expect(both).toContain("- home-cli（装法：");
+    expect(both).toContain("直接用：\n- home-escape");
+    expect(renderCliToolsSection([], ["grok"])).not.toBeNull();
+    expect(renderCliToolsSection([], null)).toBeNull();
   });
 });

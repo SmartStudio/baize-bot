@@ -1329,12 +1329,12 @@ const isExecutableFile = (path: string): boolean => {
 
 /**
  * 按沙箱里 bash 真用的那串 PATH 找第一个可执行文件，它得是工具箱 venv/bin、node/bin 或 HOME 的 .local/bin 里的，
- * 真实路径也还在它所属的那个根里（工具箱或 HOME）。系统目录排在前面，系统里有同名程序就是它先跑，密钥不能给它。
- * PATH 里有空项或相对项时 bash 按 cwd 找，不认。
+ * 真实路径也还在它所属的那个根里（工具箱或 HOME），返回它所在的 bin 目录，不是就 null。
+ * 系统目录排在前面，系统里有同名程序就是它先跑，密钥和网络不能给它。PATH 里有空项或相对项时 bash 按 cwd 找，不认。
  */
-const toolboxExecutable = (name: string, containment: ClosedContainment): boolean => {
+const toolboxExecutableDir = (name: string, containment: ClosedContainment): string | null => {
   const entries = toolboxSearchPath(containment).split(":");
-  if (entries.some((entry) => entry === "" || !isAbsolute(entry))) return false;
+  if (entries.some((entry) => entry === "" || !isAbsolute(entry))) return null;
   const rootOf = new Map([
     [join(containment.toolboxDir, "venv", "bin"), containment.toolboxDir],
     [join(toolboxNodeDir(containment.toolboxDir), "bin"), containment.toolboxDir],
@@ -1344,14 +1344,14 @@ const toolboxExecutable = (name: string, containment: ClosedContainment): boolea
     const candidate = join(entry, name);
     if (!isExecutableFile(candidate)) continue;
     const root = rootOf.get(entry);
-    if (root === undefined) return false;
+    if (root === undefined) return null;
     try {
-      return isInsideRoot(realpathExisting(candidate), root);
+      return isInsideRoot(realpathExisting(candidate), root) ? entry : null;
     } catch {
-      return false;
+      return null;
     }
   }
-  return false;
+  return null;
 };
 
 // 单引号外的 $ 都可能展开（变量、$(...)、$'...'、算术），一律不认；反引号同理。
@@ -1402,13 +1402,14 @@ const plainCloudTokens = (call: GateCall): readonly (ParseEntry | VariableToken)
 };
 
 /**
- * 命令行工具：整条命令只是一个或几个登记工具，最多用 `|` 接只读过滤。
- * 放行时带网络、可写的 HOME（工具自己续期、写 ~/.grok 这类登录态）和这些工具的 env；`;`、`&&`、重定向、展开、前缀赋值都不认，免得别的命令搭着拿到密钥。
+ * 命令行工具：整条命令只是一个或几个工具，最多用 `|` 接只读过滤。工具是登记的命令，或者共用 HOME 的 .local/bin 里的命令：
+ * 那里只有主人的网页终端写得动，放着的就是主人装的。
+ * 放行时带网络、可写的 HOME（工具自己续期、写 ~/.grok 这类登录态）和用到的登记工具的 env；`;`、`&&`、重定向、展开、前缀赋值都不认，免得别的命令搭着拿到密钥和网络。
  */
 function cliDecision(call: GateCall, containment: ClosedContainment): GateDecision | null {
-  const tools = call.cliTools ?? [];
-  const tokens = tools.length === 0 ? null : plainCloudTokens(call);
+  const tokens = plainCloudTokens(call);
   if (tokens === null) return null;
+  const tools = call.cliTools ?? [];
   const segments: string[][] = [[]];
   for (const token of tokens) {
     if (typeof token === "string") {
@@ -1419,18 +1420,25 @@ function cliDecision(call: GateCall, containment: ClosedContainment): GateDecisi
     segments.push([]);
   }
   const used = new Set<CliToolId>();
+  let anyTool = false;
   for (const words of segments) {
     const name = words[0];
     if (name === undefined || name === "" || name.includes("/") || PREFIX_ASSIGNMENT.test(name)) return null;
     const matched = tools.filter((tool) => tool.command === name);
+    const dir = BASH_RESERVED_WORDS.has(name) ? null : toolboxExecutableDir(name, containment);
     if (matched.length > 0) {
-      if (BASH_RESERVED_WORDS.has(name) || !toolboxExecutable(name, containment)) return null;
+      if (dir === null) return null;
       for (const tool of matched) used.add(tool.id);
+      anyTool = true;
+      continue;
+    }
+    if (dir === homeBinDir(containment.homeDir)) {
+      anyTool = true;
       continue;
     }
     if (!isReadFilter(words, call)) return null;
   }
-  if (used.size === 0) return null;
+  if (!anyTool) return null;
   return {
     verdict: "allow",
     action: "shell",

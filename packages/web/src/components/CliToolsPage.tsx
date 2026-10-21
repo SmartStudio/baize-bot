@@ -413,7 +413,9 @@ export const CliToolsPage = ({
   return (
     <div className="tools-page" data-testid="cli-tools-page">
       <p className="tools-intro">
-        给 Bot 用的第三方命令行工具，比如 grok。密钥绑在命令上：只有跑这个命令时才带上，别的命令拿不到。
+        要 API
+        密钥的命令行工具登记在这里。密钥绑在命令上，只有跑这个命令时才带上，别的命令拿不到。用订阅登录的工具（比如
+        grok、codex）不用登记，在「账号与电脑」的云电脑终端里装好、登录，Bot 就能直接用。
       </p>
       {load.status === "loading" ? <p className="tools-intro">正在拉…</p> : null}
       {load.status === "failed" ? (

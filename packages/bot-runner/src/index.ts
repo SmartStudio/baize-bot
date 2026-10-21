@@ -45,7 +45,7 @@ import {
   renderMemory,
   writeBrandFile,
 } from "./memory.js";
-import { cliToolsFor, renderCliToolsSection } from "./cli-tools.js";
+import { cliToolsFor, homeCommands, renderCliToolsSection } from "./cli-tools.js";
 import { renderComputerSection, switchComputerTool } from "./computer.js";
 import { createMetricTools } from "./metric.js";
 import { type BotDirs, botDirs, ensureBotDirs, forbiddenZones, groupSessionDir } from "./paths.js";
@@ -1132,7 +1132,10 @@ export function createRunner(config: RunnerConfig): Runner {
       active.sections = {
         memory: memory.text,
         computer: renderComputerSection(config.computerKind, message.computer),
-        cliTools: renderCliToolsSection(desired.cliTools, containment.level === "closed"),
+        cliTools: renderCliToolsSection(
+          desired.cliTools,
+          containment.level === "closed" ? homeCommands(cliHomeDir(config.dataDir)) : null,
+        ),
       };
       const text = composePrompt(message, contextSince(message.context, watermark), desired.accounts);
       report = reportRun(
