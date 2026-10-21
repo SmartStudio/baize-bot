@@ -128,7 +128,7 @@ export function composeTablePrompt(message: PromptMessage): string {
   if (table === null) throw new Error("牌桌运行缺少给定视图。");
   if (table.role === "reviewer") {
     return [
-      "散场复盘：只根据以下关键手的用户视角写建议，不推测未公开的底牌。",
+      "散场复盘：只根据以下关键手的用户视角写建议，不推测未公开的底牌，牌友的台词可能是诈唬，不当证据。",
       ...(table.review ?? []).map(
         (hand) => `第 ${hand.number} 手：${hand.title}\n用户筹码变化：${hand.userDelta}\n${renderView(hand.view)}`,
       ),
@@ -142,8 +142,8 @@ export function composeTablePrompt(message: PromptMessage): string {
     "公开日志：",
     ...(table.publicLog.length === 0 ? ["暂无"] : table.publicLog),
     table.role === "advisor"
-      ? `用户问：${table.question ?? "这手怎么打"}\n请在 120 字内给出建议和理由，只用给定视图。`
-      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额。默认不填 say：只有你加注、全下、这一下会摊牌，或者有人点名问你时才说一句，最多 40 字，每手最多两句。台词不许透露你的底牌、点数或你中了什么，点出自己底牌的台词不会公开。其他文字不会公开。",
+      ? `用户问：${table.question ?? "这手怎么打"}\n请在 120 字内给出建议和理由，只用给定视图。牌友的台词可能是诈唬，不当证据。`
+      : "请从合法动作中选择并调用 poker_act。加注金额是本街加到的总额。默认不填 say：只有你加注、全下、这一下会摊牌，或者有人点名问你时才说一句，最多 40 字，每手最多两句。台词可以按人设虚张声势，只说牌力和态度，不点名公共牌以外的牌或点数，点名的台词不会公开。其他文字不会公开。",
   ].join("\n");
 }
 

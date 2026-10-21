@@ -1,6 +1,6 @@
 import type { Action, Event, HandState, SeatId } from "./engine.js";
-import type { Card } from "./cards.js";
-import { describePokerHand, evaluatePokerHand } from "@baize/shared";
+import { RANKS, SUITS, type Card } from "./cards.js";
+import { describePokerHand, evaluatePokerHand, POKER_PERSONAS } from "@baize/shared";
 
 // 老白的代码播报（D29），不调模型。narrate 把引擎事件一对一变成一句中文，给牌友和老白看的公开日志用；
 // hostLines 是群里那几句。事件日志里只有公开的事，所以只有摊牌会写出底牌，其余句子拿不到别人的牌。
@@ -20,16 +20,30 @@ const SUIT_WORDS = {
   c: ["♣", "♧", "梅花", "草花"],
 } as const;
 
-/** 牌友的台词有没有点出这几张牌。认符号、字母和中文花色，花色写在点数前后都算。 */
-export function namesCard(text: string, cards: readonly Card[]): boolean {
-  const flat = text.replace(/\s+/g, "").toLowerCase();
-  return cards.some((card) => {
-    const rank = card.charAt(0).toLowerCase();
-    const ranks = rank === "t" ? ["10", "t"] : [rank];
-    const suit = card.charAt(1) as keyof typeof SUIT_WORDS;
-    const suits = [suit, ...SUIT_WORDS[suit]];
-    return ranks.some((r) => suits.some((s) => flat.includes(r + s) || (s.length > 1 && flat.includes(s + r))));
-  });
+/**
+ * 牌友台词能不能上桌。台词可以虚张声势，但点名公共牌以外的具体牌或点数一律不公开，
+ * 判断只看台词和公共牌、不看底牌，否则「哪些话活下来」本身就泄露底牌。
+ */
+export function talkRevealsCards(text: string, board: readonly Card[]): boolean {
+  const flat = Object.values(POKER_PERSONAS)
+    .reduce((rest, persona) => rest.replaceAll(persona.name, ""), text)
+    .replace(/\s+/g, "");
+  const boardRanks = new Set(board.map((card) => card.charAt(0)));
+  const lower = flat.toLowerCase();
+  const namesHidden = RANKS.some((rank) =>
+    SUITS.some((suit) => {
+      if (board.includes(`${rank}${suit}`)) return false;
+      const ranks = rank === "T" ? ["10", "t"] : [rank.toLowerCase()];
+      const suits = [suit, ...SUIT_WORDS[suit]];
+      return ranks.some((r) => suits.some((w) => lower.includes(r + w) || (w.length > 1 && lower.includes(w + r))));
+    }),
+  );
+  if (namesHidden) return true;
+  const digitRanks = [...flat.matchAll(/\d+/g)].flatMap(([digits]) =>
+    digits === "10" ? ["T"] : /^[2-9]$/.test(digits) ? [digits] : [],
+  );
+  const letterRanks = [...flat.matchAll(/[A-Za-z]+/g)].flatMap(([word]) => (/^[AKQJT]+$/.test(word) ? [...word] : []));
+  return [...digitRanks, ...letterRanks].some((rank) => !boardRanks.has(rank));
 }
 
 function actionText(action: Action, put: number): string {

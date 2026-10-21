@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { apply, newHand, type Action, type Event, type HandState, type SeatId } from "../src/poker/engine.js";
-import { hostLines, narrate } from "../src/poker/narrate.js";
+import { hostLines, narrate, talkRevealsCards } from "../src/poker/narrate.js";
 
 const names: Record<string, string> = { "1": "阿豹", "2": "老K", "3": "茉莉", "4": "你" };
 const nameOf = (seatId: SeatId): string => names[seatId] ?? seatId;
@@ -119,5 +119,20 @@ describe("hostLines", () => {
     const [first] = hostLines({ ...hand, events: hand.events.slice(0, flop + 1) }, closing, nameOf, "超时");
     expect(first).toMatch(/^老K（超时）过牌，翻牌：/);
     expect(hostLines({ ...hand, events: hand.events.slice(0, closing + 1) }, closing, nameOf, "超时")).toEqual([]);
+  });
+});
+
+describe("talkRevealsCards", () => {
+  it("只说牌力和态度的台词、金额和牌友名字都能上桌", () => {
+    for (const text of ["这把我稳了", "加到 80，你敢跟吗", "老K 别装了", "跟 120"])
+      expect(talkRevealsCards(text, []), text).toBe(false);
+  });
+  it("点名公共牌上已有的牌和点数可以说", () => {
+    expect(talkRevealsCards("Q♣ 这张吓人", ["Qc", "Jc", "3h"])).toBe(false);
+    expect(talkRevealsCards("中了J", ["Qc", "Jc", "3h"])).toBe(false);
+  });
+  it("点名公共牌以外的牌或点数一律不公开", () => {
+    for (const text of ["我有 A♠", "方块J", "Jd 在手", "中了K", "口袋 10", "AK 同花"])
+      expect(talkRevealsCards(text, ["Qc", "Jc", "3h"]), text).toBe(true);
   });
 });

@@ -3,7 +3,7 @@ import { and, count, eq, gte, sql } from "drizzle-orm";
 import type { Db } from "../../db/client.js";
 import { messages, pokerActReceipts, pokerHands, runs, type PokerActResult } from "../../db/schema.js";
 import { apply } from "../../poker/engine.js";
-import { namesCard } from "../../poker/narrate.js";
+import { talkRevealsCards } from "../../poker/narrate.js";
 import { converge, pushMessages, pushTable } from "../../poker/converge.js";
 import { appendEvents, loadHand, withTableLock } from "../../poker/store.js";
 import { appendMessage, messageVisibleTo } from "../../repo/messages.js";
@@ -87,12 +87,12 @@ export async function handlePokerAct(deps: AgentEventDeps, conn: AgentConnection
         .where(eq(pokerHands.id, event.handId));
       return reply({ ok: false, error: error instanceof Error ? error.message : "出牌无效" }, [], true);
     }
-    // 点出自己底牌的台词整句丢掉，模型说漏嘴不能变成明牌。台词排在这一下引起的老白播报前面；只有被接受的动作带的台词才上桌，所以一手结算之后不会再有牌友说话。
+    // 点名牌的台词整句丢掉，真话假话一样处理。台词排在这一下引起的老白播报前面；只有被接受的动作带的台词才上桌，所以一手结算之后不会再有牌友说话。
     const botId = BotId.parse(seat.botId);
     const said: Message[] = [];
     if (
       event.say?.trim() &&
-      !namesCard(event.say, hand.state.seats.find((candidate) => candidate.id === actor)!.hole) &&
+      !talkRevealsCards(event.say, hand.state.board) &&
       (await linesThisHand(db, table.groupId, botId, hand.row.createdAt)) < BOT_LINES_PER_HAND
     )
       said.push(await appendMessage(db, table.groupId, { kind: "bot", botId, text: event.say, streaming: false }));
