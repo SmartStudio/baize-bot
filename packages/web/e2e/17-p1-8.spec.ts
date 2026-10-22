@@ -25,12 +25,19 @@ const bottomOf = async (page: Page, selector: string): Promise<number> => {
   return box.y + box.height;
 };
 
-test("在项目页连说两句，最新一轮贴着输入框，等你和成果的位置不变", async ({ page, request }) => {
+test("在项目页连说两句，最新一轮贴着输入框，等你和成果紧跟在对话区下面", async ({ page, request }) => {
   await seedProject(request);
   await login(page);
   await openProject(page);
-  const pendingTop = await topOf(page, "project-pending");
-  const achievementsTop = await topOf(page, "project-achievements");
+  // 对话区随内容伸缩，下面两块跟着挪，但和对话区的间距不变。
+  const below = async () => {
+    const threadBottom = await bottomOf(page, "[data-testid=project-thread]");
+    return {
+      pending: (await topOf(page, "project-pending")) - threadBottom,
+      achievements: (await topOf(page, "project-achievements")) - threadBottom,
+    };
+  };
+  const gaps = await below();
 
   const said = ["这周多写两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上上线"];
   for (const [index, text] of said.entries()) {
@@ -61,8 +68,7 @@ test("在项目页连说两句，最新一轮贴着输入框，等你和成果�
     const latestTop = await topOf(page, "project-latest-turn");
     expect(latestTop - composerBottom, "最新一轮紧贴输入框").toBeGreaterThanOrEqual(0);
     expect(latestTop - composerBottom, "最新一轮紧贴输入框").toBeLessThanOrEqual(16);
-    expect(await topOf(page, "project-pending"), `说完第 ${index + 1} 句，等你的位置不动`).toBe(pendingTop);
-    expect(await topOf(page, "project-achievements"), `说完第 ${index + 1} 句，成果的位置不动`).toBe(achievementsTop);
+    expect(await below(), `说完第 ${index + 1} 句，等你和成果还紧跟着对话区`).toEqual(gaps);
   }
 
   const older = page.getByTestId("project-older");
@@ -72,6 +78,21 @@ test("在项目页连说两句，最新一轮贴着输入框，等你和成果�
   for (const text of said) {
     await expect(page.getByTestId("message-list").getByText(text), "项目页说的话落在项目群里").toBeVisible();
   }
+});
+
+test("对话区按内容收缩，最新一轮下面不留一大块空白", async ({ page, request }) => {
+  await seedProject(request);
+  await login(page);
+  await openProject(page);
+
+  const gap = await page.getByTestId("project-thread").evaluate((thread) => {
+    const latest = thread.querySelector("[data-testid=project-latest-turn]");
+    const older = thread.querySelector("[data-testid=project-older]");
+    const last = latest?.lastElementChild;
+    if (!last || !older) throw new Error("最新一轮或折叠行没渲染出来");
+    return older.getBoundingClientRect().top - last.getBoundingClientRect().bottom;
+  });
+  expect(gap, "最后一行话到折叠行之间只隔内边距").toBeLessThanOrEqual(16);
 });
 
 test("成果每一条都有链接", async ({ page, request }) => {

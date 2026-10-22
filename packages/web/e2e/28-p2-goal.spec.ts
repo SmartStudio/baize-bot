@@ -104,7 +104,7 @@ test("改目标后进度条跟着变", async ({ page, request }) => {
   await expect(page.getByTestId("project-progress").locator("progress"), "目标去掉了，进度条也撤掉").toHaveCount(0);
 });
 
-test("成果里复盘一行能展开，位置不随对话下移", async ({ page, request }) => {
+test("成果里复盘一行能展开，在成果里的位置不随对话变", async ({ page, request }) => {
   await seedProject(request);
   await seedGoal(request);
   await login(page);
@@ -116,8 +116,9 @@ test("成果里复盘一行能展开，位置不随对话下移", async ({ page,
   await expect(page.getByTestId("project-achievement"), "发布记录照旧列着").toHaveCount(3);
   const body = page.getByTestId("project-review-body");
   await expect(body, "复盘正文先收着").toBeHidden();
-  await review.scrollIntoViewIfNeeded();
-  const reviewTop = await topOf(page, "project-review");
+  const inAchievements = async () =>
+    (await topOf(page, "project-review")) - (await topOf(page, "project-achievements"));
+  const offset = await inAchievements();
 
   for (const text of ["这周多写两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上上线"]) {
     const settled = page.waitForResponse(async (response) => {
@@ -130,8 +131,11 @@ test("成果里复盘一行能展开，位置不随对话下移", async ({ page,
     await settled;
     await expect(page.getByTestId("project-latest-turn")).toContainText(text);
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    expect(await topOf(page, "project-review"), `说了「${text}」，复盘那行不往下挪`).toBe(reviewTop);
+    expect(await inAchievements(), `说了「${text}」，复盘还在成果的同一行`).toBe(offset);
   }
+
+  await review.scrollIntoViewIfNeeded();
+  const reviewTop = await topOf(page, "project-review");
 
   await review.locator("summary").click();
   await expect(body, "点开就是正文").toBeVisible();

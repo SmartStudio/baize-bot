@@ -63,11 +63,11 @@
   padding: 0 var(--space-6);
 }
 
-/* 对话区钉死一轮的高度，说多少话都在里面滚，下面的等你和成果不跟着挪。 */
+/* 对话区随内容收缩，话长了封顶在里面滚，不会把等你和成果顶到屏幕外。 */
 .project-thread {
   display: flex;
   flex-direction: column;
-  height: calc(var(--space-12) * 3);
+  max-height: calc(var(--space-12) * 3);
   margin: var(--space-4) 0 var(--space-8);
 }
 
