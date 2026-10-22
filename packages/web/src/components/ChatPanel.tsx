@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, Plus, SendHorizontal, Sparkles, Users } from "lucide-react";
+import { ArrowDown, SendHorizontal, Sparkles, Users } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
 import {
@@ -387,9 +387,6 @@ export const ChatPanel = ({
           </div>
         ) : null}
         <div className="composer">
-          <span className="icon-button" aria-hidden="true">
-            <Plus size={16} />
-          </span>
           <input
             ref={input}
             data-testid="composer-input"

@@ -177,3 +177,11 @@ test("发一条消息后它出现在列表里，Bot 的回复从 WebSocket 推�
   await expect(card).toContainText("已完成");
   await expect(card).not.toContainText("本次花费");
 });
+
+test("输入框一行只有输入框和发送，没有点不动的装饰按钮", async ({ page }) => {
+  await login(page);
+  await openBot(page, "小服");
+  const composer = page.locator(".composer");
+  await expect(composer.locator(":scope > *"), "附件能力上线前不摆看着能点的「+」").toHaveCount(2);
+  await expect(composer.locator(":scope > *").first()).toHaveAttribute("data-testid", "composer-input");
+});
