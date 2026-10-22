@@ -59,6 +59,19 @@ test("write_outside 审批卡不显示一直", async ({ page }) => {
   if (AUDIT_DIR !== undefined) await card.screenshot({ path: `${AUDIT_DIR}/card-write-outside.png` });
 });
 
+test("每个范围的按钮都叫「批准」，范围写成副文案，批完结论是「已批准」", async ({ page }) => {
+  await login(page);
+  await openTeamGroup(page, "Globex X3 × 200 订单");
+  const card = await addApproval(page, "write_workspace");
+
+  await expect(card.getByTestId("approval-scope-once").getByRole("button")).toHaveText("批准仅这一次");
+  await expect(card.getByTestId("approval-scope-project").getByRole("button")).toHaveText("批准这个项目里");
+  await expect(card.getByTestId("approval-scope-forever").getByRole("button")).toHaveText("批准一直");
+
+  await card.getByTestId("approval-approve").click();
+  await expect(card.getByTestId("approval-decided"), "结论和按钮用同一个动词").toHaveText("已批准");
+});
+
 test("普通写操作显示三种授权范围", async ({ page }) => {
   await login(page);
   await openTeamGroup(page, "Globex X3 × 200 订单");

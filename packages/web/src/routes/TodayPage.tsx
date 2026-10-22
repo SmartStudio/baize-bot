@@ -30,6 +30,7 @@ import { rememberLoginCards, withLoginCards } from "../state/accounts.js";
 import { goalBarValue, goalProgressOf, goalText } from "../state/project.js";
 import type { Today } from "../state/today.js";
 import { LoginCard } from "../components/LoginCard.js";
+import { SCOPE_TEXT } from "../components/grantText.js";
 import { RoutineOfferCard } from "../components/messages/RoutineOfferCard.js";
 
 const greeting = (name: string): string => {
@@ -102,6 +103,7 @@ const ApprovalRow = ({
           onClick={() => void decide({ decision: "approved", scope: "once" })}
         >
           {deciding === "approved" ? "批准中" : "批准"}
+          <small>{SCOPE_TEXT.once}</small>
         </button>
       </span>
     </article>

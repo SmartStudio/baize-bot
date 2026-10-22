@@ -16,7 +16,7 @@ export const ACTION_TEXT: Record<ActionKind, string> = {
 };
 
 export const SCOPE_TEXT: Record<ApprovalScope, string> = {
-  once: "这一次",
+  once: "仅这一次",
   project: "这个项目里",
   forever: "一直",
 };

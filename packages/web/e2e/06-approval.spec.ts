@@ -52,7 +52,7 @@ test("点拒绝后卡片留下结论、角标归零、这一步被拦下", async
   await card.getByTestId("approval-reject").click();
 
   await expect(card, "结论落在卡上，状态从服务端推回来").toHaveAttribute("data-status", "rejected");
-  await expect(card.getByTestId("approval-decided"), "有结论的卡只剩一行记录").toHaveText("不同意");
+  await expect(card.getByTestId("approval-decided"), "有结论的卡只剩一行记录").toHaveText("已拒绝");
   await expect(card.getByTestId("approval-reject"), "有结论就不该还留着按钮").toHaveCount(0);
 
   await expect(page.getByTestId("cost-card"), "拒绝之后也不露单轮花费").toHaveCount(0);
@@ -76,7 +76,7 @@ test("在群里回一句「批准」和点批准按钮是同一件事", async ({
   await sendText(page, "批准");
 
   await expect(card, "群里回的一句话也作用到那条 pending 审批上").toHaveAttribute("data-status", "approved");
-  await expect(card.getByTestId("approval-decided")).toHaveText("同意");
+  await expect(card.getByTestId("approval-decided")).toHaveText("已批准");
 
   await expect(page.getByTestId("tool-call-card"), "批准让这一步真的跑完").toHaveAttribute("data-status", "ok");
   await expect(page.getByTestId("cost-card"), "批准之后也不露单轮花费").toHaveCount(0);
