@@ -199,3 +199,24 @@ test("交接是 Bot 等 Bot：不占「等你点头」那个角标，也不弹�
     "这件事不用你动手，不该拿系统通知把你从别的事上拽回来",
   ).toHaveLength(0);
 });
+
+test("成员删空的群里说话，「没人接」排在这句话下面", async ({ page }) => {
+  await login(page);
+  const created = await page.request.post("/api/groups", {
+    data: { title: "删空成员的群", botIds: ["bot_sales", "bot_service"] },
+  });
+  expect(created.status(), "建一个两人群").toBe(200);
+  for (const botId of ["bot_sales", "bot_service"])
+    expect((await page.request.delete(`/api/bots/${botId}`)).status(), `删掉 ${botId}`).toBe(204);
+
+  await page.locator('[data-testid=group-item][data-group-title="删空成员的群"]').click();
+  await expect(page.getByTestId("project-page")).toBeVisible();
+  await page.getByTestId("project-open-group").click();
+  await page.getByTestId("composer-input").fill("有人在吗");
+  await page.getByTestId("composer-send").click();
+
+  const list = page.getByTestId("message-list");
+  await expect(list).toContainText("没人接");
+  const text = await list.innerText();
+  expect(text.indexOf("有人在吗"), "用户的话在前，系统对它的回应在后").toBeLessThan(text.indexOf("没人接"));
+});

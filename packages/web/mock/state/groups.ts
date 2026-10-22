@@ -135,8 +135,14 @@ export const respondersOf = (groupId: string, mentions: BotId[]): BotId[] => {
   const group = groups.get(groupId);
   if (group === undefined) return [];
   if (group.kind === "solo") return [group.botIds[0]];
-  const first = mentions[0] ?? group.chiefBotId ?? tasks.get(group.taskId)?.currentBotId ?? null;
-  return first === null ? [...group.botIds] : [first];
+  // 删掉的 Bot 不从群名单里摘，这里只认还在的，删空了就没人接。
+  const members = group.botIds.filter((botId) => bots.has(botId));
+  const present = (botId: BotId | null | undefined): botId is BotId =>
+    botId !== null && botId !== undefined && members.includes(botId);
+  const first = mentions.find(present) ?? [group.chiefBotId, tasks.get(group.taskId)?.currentBotId].find(present);
+  if (first !== undefined) return [first];
+  // @ 的人都删了只退回首席或经手，不替用户扩到全员。
+  return mentions.length > 0 ? [] : members;
 };
 
 export const assignTask = (groupId: string, botId: BotId): TopicTask | null => {
