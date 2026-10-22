@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+<title id="title">白泽 Bot · App A · 胖方团</title>
+<desc id="desc">一枚奶油色胖方团，窝在珊瑚底里；宽肚子、轻轻凹下的头顶和向内看的眼睛，让可靠显得亲近。</desc>
+<rect id="tile" x="100" y="100" width="824" height="824" rx="185" fill="#ef6b68"/>
+<g id="mascot" transform="translate(169 169) scale(6.86)">
+<path id="body" d="M29 15 C38 14 43 18 50 18 C57 18 62 14 71 15 C86 16 91 26 91 43 L91 62 C91 79 83 86 67 87 L33 87 C17 86 9 79 9 62 L9 43 C9 26 14 16 29 15 Z" fill="#fff1dc"/>
+<g id="face" transform="translate(0 0)">
+<ellipse cx="39" cy="51" rx="8" ry="9" fill="#fffaf0"/>
+<ellipse cx="39.8" cy="52.4" rx="4.8" ry="5.8" fill="#18243b"/>
+<ellipse cx="61" cy="51" rx="8" ry="9" fill="#fffaf0"/>
+<ellipse cx="60.2" cy="52.4" rx="4.8" ry="5.8" fill="#18243b"/>
+<path d="M46 68 Q50 72 54 68" fill="none" stroke="#18243b" stroke-width="2" stroke-linecap="round"/>
+</g>
+</g>
+</svg>
