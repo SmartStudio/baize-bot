@@ -1,44 +1,73 @@
-# 白泽 Bot
+<p align="center"><img src="docs/images/logo.svg" width="120" alt="Baize Bot"></p>
 
-[English](README.en.md) | 中文
+<h1 align="center">Baize Bot</h1>
 
-**一个人的助理，带一支 Bot 小队替你干活。**
+<p align="center"><b>English</b> · <a href="README.zh-CN.md">中文</a></p>
 
-你只跟主助理说一句话。它把活分给内容、社区、增长各自的 Bot，在你自己的电脑上跑，只碰你开给它的账号。它只在三种时候找你：要你拍板、做完有成果、卡住了。
+<div align="center">
 
-> 项目还在早期开发中，没有发布版本，也还没有下载地址。下面写的都是主干里已经能跑的东西。
+[![CI](https://github.com/SmartStudio/baize-bot/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SmartStudio/baize-bot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js&logoColor=white)
+![pnpm](https://img.shields.io/badge/pnpm-workspace-F69220?logo=pnpm&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 
-## 它能做什么
+</div>
 
-- **说一句话就开工。** 在首页告诉主助理你想做成什么事，比如「推广这个开源仓库」。它开一个项目，拉上合适的 Bot，写好计划。
-- **一支 Bot 小队。** 主助理之外，每个队员 Bot 有自己的名字、描述、偏好和会做的事。多个 Bot 在同一个群里协作，@ 谁谁接活，没 @ 就由当前经手的 Bot 接着做。Bot 之间交接要写清做了什么、下一步是什么，对方确认了才换人。
-- **项目有目标、有进度。** 每个项目顶部钉着一张任务卡，有清单、截止、目标数值和定时读回的指标，比如 GitHub 星数。
-- **对外发布先给你看。** Bot 要发的帖子先成可编辑草稿。你可以一次批完一整份内容计划，之后按计划发出的每一条不再逐条问。草稿改过就回到待批。
-- **敏感操作都要你点头。** Bot 走到要确认的工具时，群里出一张审批卡，点按钮或回一句「批准」都算数。
-- **跑在你自己的电脑上。** 每人两台：本机 Mac 和一台远程云服务器。国内平台的账号放本机，GitHub、X 和资料搜集放远程，合上盖子活也照样跑。在对话里说一句「用云电脑」，Bot 就把这个群换过去接着做。云电脑上的命令跑在沙箱里。
-- **连上你的账号。** GitHub 和 X 走 OAuth，凭据只存在控制面，Bot 拿不到。小红书在助理专用的浏览器里登录，登录页的实时画面送到网页上由你亲手操作。
-- **越用越会。** Bot 干完一趟同类的活，会问要不要存成技能。也可以让它去 GitHub 上找公开的 SKILL.md 装进来。
-- **例行任务。** 每天、工作日、每小时，或者由一个 webhook 触发，比如每晚的简报。
-- **也能陪你玩。** 内置一张德州扑克牌桌，三个牌友 Bot 陪你打，打不准可以问解说。
+**A personal assistant that leads a squad of bots to get work done for you.**
 
-## 怎么工作
+You talk only to the main assistant. It hands the work to bots for content, community and growth. They run on your own computers and touch only the accounts you open to them. The assistant comes to you in three cases. It needs your decision, it has a result, or it is stuck.
+
+> Baize is in early development. There is no release and no download yet. Everything below already runs on the main branch.
+
+## What it does
+
+- **Start with one sentence.** Tell the main assistant what you want done, for example "promote this open-source repo". It opens a project, brings in the right bots and writes a plan.
+- **A squad of bots.** Each bot has its own name, description, preferences and skills. Several bots work together in one group chat. Whoever you @ takes the task, otherwise the bot currently in charge carries on. When bots hand work to each other, they write down what is done and what comes next, and the handoff completes only after the receiver accepts.
+- **Projects with goals and progress.** Every project has a pinned task card with a checklist, a deadline, a target number and metrics read back on a schedule, such as GitHub stars.
+- **You see it before it goes public.** Anything a bot wants to post starts as an editable draft. Approve a whole content plan at once, and posts that follow the plan go out without asking again. An edited draft goes back to pending.
+- **Sensitive actions need your approval.** When a bot reaches a tool that needs confirmation, an approval card appears in the chat. Click the button or reply "approve".
+- **Runs on your own machines.** You get two computers, your Mac and a remote cloud server. Accounts for Chinese platforms stay on your Mac. GitHub, X and research run on the server and keep going when your laptop is closed. Say "use the cloud computer" and the bot moves the group there. Commands on the cloud computer run in a sandbox.
+- **Connects your accounts.** GitHub and X use OAuth. Credentials stay in the control plane and bots never see them. Xiaohongshu logs in through a dedicated assistant browser, and you operate the login page yourself from a live view in the web app.
+- **Learns as it goes.** After a bot finishes a kind of task, it offers to save it as a skill. You can also ask it to find a public SKILL.md on GitHub and install it.
+- **Routines.** Daily, weekdays, hourly, or triggered by a webhook, such as an evening briefing.
+- **Plays, too.** A built-in Texas Hold'em table where three bot players deal you in, with a commentator to ask when you're unsure.
+
+## Screenshots
+
+Approve a whole week's content plan from the home page. Edit any draft inline before it goes out.
+
+![Content plan waiting for approval](docs/images/content-plan.png)
+
+A project tracks its goal, here 1,000 GitHub stars by year end, along with this week's plan.
+
+![Project page with goal and weekly plan](docs/images/project.png)
+
+The Texas Hold'em table with three bot players.
+
+![Texas Hold'em table](docs/images/poker.png)
+
+The UI is in Chinese for now.
+
+
+## How it works
 
 ```
-Web / 桌面 App
+Web / desktop app
    │
    ▼
-控制面（账号、群、审批、草稿、模型网关）
+Control plane (accounts, groups, approvals, drafts, model gateway)
    │  WebSocket
    ▼
-你的电脑（本机 Mac / 远程云服务器）
-   └─ 电脑代理 → 每个 Bot 每个群一份运行会话
+Your computers (local Mac / remote cloud server)
+   └─ Computer agent → one runtime session per bot per group
 ```
 
-控制面管状态和授权，活在你的电脑上跑。电脑主动连控制面，不需要开放入站端口。模型请求都经过控制面的网关转发。
+The control plane holds state and authorization. The work runs on your computers. Each computer connects out to the control plane, so no inbound ports are needed. All model requests go through the control plane's gateway.
 
-## 快速开始
+## Quick start
 
-需要 Node 22 以上、pnpm 和 Docker。
+You need Node 22+, pnpm and Docker.
 
 ```
 pnpm install
@@ -48,13 +77,19 @@ pnpm --filter @baize/control-plane seed
 pnpm dev
 ```
 
-打开 http://localhost:5173，用开发账号 `chen@baize.dev` / `baize-dev` 登录。
+Open http://localhost:5173 and sign in with the dev account `chen@baize.dev` / `baize-dev`.
 
-- 第一次使用：[docs/上手.md](docs/上手.md)
-- 开发与环境变量：[docs/开发.md](docs/开发.md)
-- 部署远程电脑：[deploy/README.md](deploy/README.md)
-- 产品规格：[spec/规格.md](spec/规格.md)
+The detailed docs are in Chinese.
 
-## 技术栈
+- First steps: [docs/上手.md](docs/上手.md)
+- Development and environment variables: [docs/开发.md](docs/开发.md)
+- Deploying the remote computer: [deploy/README.md](deploy/README.md)
+- Product spec: [spec/规格.md](spec/规格.md)
 
-TypeScript pnpm monorepo。控制面用 Hono 和 PostgreSQL，Web 用 React 和 Vite，桌面端用 Electron，Bot 运行时基于 Pi coding agent。
+## Tech stack
+
+A TypeScript pnpm monorepo. The control plane uses Hono and PostgreSQL, the web app React and Vite, the desktop app Electron. The bot runtime is built on the Pi coding agent.
+
+## License
+
+[MIT](LICENSE)
