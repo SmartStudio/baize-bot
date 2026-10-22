@@ -337,6 +337,7 @@ export const MainWindow = () => {
         <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
       ) : soloBot !== null && botPanelOpen ? (
         <BotSettingsPanel
+          key={soloBot.id}
           bot={soloBot}
           onChange={actions.updateBot}
           onPause={actions.pauseBot}

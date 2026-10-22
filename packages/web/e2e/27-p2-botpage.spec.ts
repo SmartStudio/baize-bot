@@ -98,6 +98,16 @@ test("在右侧面板改主助理的形状，侧栏头像同步", async ({ page 
   await expect(panel.getByTestId("bot-shape-option"), "再点头像收起").toHaveCount(0);
 });
 
+test("从小销切到主助理，设置面板只有一个头像，是主助理的", async ({ page }) => {
+  await login(page);
+  await openBot(page, "小销");
+  const panel = page.getByTestId("bot-panel");
+  await expect(panel.getByTestId("bot-look-toggle")).toHaveCount(1);
+  await page.getByTestId("assistant-nav").click();
+  await expect(panel.getByTestId("bot-look-toggle"), "不能叠出前一个 Bot 的头像").toHaveCount(1);
+  await expect(panel.getByTestId("bot-look-toggle").locator("[data-shape]")).toHaveAttribute("data-shape", "pillow");
+});
+
 test("加第 6 个标签的输入框消失", async ({ page }) => {
   await login(page);
   await openBot(page, "小服");
