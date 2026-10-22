@@ -18,9 +18,10 @@ import {
   pendingApprovalsOf,
   pendingHandoffsOf,
   pokerTables,
-  responderOf,
+  respondersOf,
   canGrant,
   contentIn,
+  currentGeneration,
   settleApproval,
   settleLatestPending,
   streamBotReply,
@@ -151,19 +152,28 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
             push({ type: "approval_updated", approval: settled });
             send(res, 200, { message });
           } else {
-            const responder = responderOf(groupId, mentions);
-            if (responder !== null) {
-              const voided = voidLatestPendingForBot(groupId, responder);
+            const responders = respondersOf(groupId, mentions);
+            for (const botId of responders) {
+              const voided = voidLatestPendingForBot(groupId, botId);
               if (voided !== null) push({ type: "approval_updated", approval: voided });
             }
-            if (responder === null) {
+            const [responder] = responders;
+            if (responder === undefined) {
               const note = appendMessage(groupId, { kind: "system", text: "没人接这句话。@ 一个 Bot 派活。" });
               push({ type: "message", message: note });
               send(res, 200, { message });
             } else {
-              const assigned = assignTask(groupId, responder);
+              // 只有 @ 才换经手，和控制面 dispatch 一样；全员轮流答时一个说完下一个才开口。
+              const assigned = mentions[0] === responder ? assignTask(groupId, responder) : null;
               if (assigned !== null) push({ type: "task_updated", task: assigned });
-              streamBotReply(groupId, responder, text, push).catch((cause: unknown) => {
+              const run = currentGeneration();
+              (async () => {
+                for (const botId of responders) {
+                  // 重置之后上一轮还没轮到的 Bot 不再开口，不然话会落进下一个用例的群里。
+                  if (currentGeneration() !== run) return;
+                  await streamBotReply(groupId, botId, text, push);
+                }
+              })().catch((cause: unknown) => {
                 process.stderr.write(`mock 回复跑挂了：${String(cause)}\n`);
               });
               const group = groups.get(groupId);
