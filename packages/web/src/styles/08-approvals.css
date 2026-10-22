@@ -61,6 +61,13 @@
   padding: 0 var(--space-6);
 }
 
+.approval-actions .primary-button small,
+.today-row-action small {
+  margin-left: var(--space-2);
+  font: var(--type-caption);
+  opacity: 0.8;
+}
+
 .approval-compact {
   flex-direction: row;
   gap: var(--space-4);

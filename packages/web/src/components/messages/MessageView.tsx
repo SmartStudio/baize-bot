@@ -321,8 +321,8 @@ const ToolCallCard = ({
 );
 
 const DECIDED_TEXT: Record<Exclude<Approval["status"], "pending">, string> = {
-  approved: "同意",
-  rejected: "不同意",
+  approved: "已批准",
+  rejected: "已拒绝",
   expired: "已失效",
   voided: "已作废 · 你发了新消息，这一步不做了",
   timed_out: "已拒绝 · 10 分钟没人批",
@@ -419,7 +419,7 @@ const ApprovalCard = ({
               disabled={sent}
               onClick={() => decide({ decision: "approved", scope })}
             >
-              {SCOPE_TEXT[scope]}
+              批准<small>{SCOPE_TEXT[scope]}</small>
             </button>
           </span>
         ))}
