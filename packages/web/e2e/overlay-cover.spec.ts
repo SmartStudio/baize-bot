@@ -74,3 +74,14 @@ for (const { dialog, open } of openers) {
     expect(corners, "视口四个角点到的都是这层遮罩，没被别的层盖住").toEqual([true, true, true, true]);
   });
 }
+
+for (const { dialog, open } of openers) {
+  test(`${dialog} 按 Esc 关掉`, async ({ page }) => {
+    await login(page);
+    await open(page);
+    await expect(page.getByTestId(dialog)).toBeVisible();
+
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId(dialog), "Esc 和点取消一样把弹窗收起").toHaveCount(0);
+  });
+}

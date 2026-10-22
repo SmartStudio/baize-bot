@@ -10,6 +10,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import { UpdateBrandRequest, type BrandBook, type BrandEdit } from "@baize/shared";
 import { RequestFailed } from "../api/client.js";
 import { useApp } from "../state/app.js";
@@ -151,13 +152,7 @@ export const BrandBookDialog = ({ onClose }: { onClose: () => void }) => {
     (phase.kind === "ready" ? firstField : closeButton).current?.focus();
   }, [phase.kind]);
 
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  useEscapeToClose(onClose);
 
   const length = lengthOf(texts);
   const tooLong = length > BRAND_MAX_CHARS;

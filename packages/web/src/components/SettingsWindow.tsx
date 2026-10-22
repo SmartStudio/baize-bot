@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { AtSign, Gauge, Puzzle, Settings as SettingsIcon, Shield, X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import {
   Settings,
   type Account,
@@ -350,6 +351,7 @@ export const SettingsWindow = ({
 }: Props) => {
   const [page, setPage] = useState<PageId>(initialPage);
   const current = PAGES[page];
+  useEscapeToClose(onClose);
 
   useEffect(() => {
     if (page === "usage") void onLoadUsage();

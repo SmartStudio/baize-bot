@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, Link2, Lock, X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import {
   BotTemplate,
   type Bot,
@@ -74,13 +75,7 @@ export const ShareDialog = ({ bot, skills, plugins, preferences, onClose }: Prop
     },
     [],
   );
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  useEscapeToClose(onClose);
 
   const summary = shareSummary({
     botName: bot.name,

@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { Spade, Sparkles } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 
 type Props = {
   // 主助理单聊还没拉回来时是 null，这时不能发。
@@ -17,6 +18,7 @@ export const NewProjectDialog = ({ canSend, onSend, onCreateTable, onClose }: Pr
   const [tableError, setTableError] = useState<string | null>(null);
   const tableRequestId = useRef(crypto.randomUUID());
   const ready = canSend && text.trim().length > 0 && !sending;
+  useEscapeToClose(onClose);
 
   const createTable = () => {
     setSending(true);

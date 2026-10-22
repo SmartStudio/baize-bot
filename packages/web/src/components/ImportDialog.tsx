@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import type { BotId } from "@baize/shared";
 import { useApp } from "../state/app.js";
 import { templateFromLink } from "./shareLink.js";
@@ -31,13 +32,7 @@ export const ImportDialog = ({ onClose }: { onClose: () => void }) => {
       alive.current = false;
     };
   }, []);
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  useEscapeToClose(onClose);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();

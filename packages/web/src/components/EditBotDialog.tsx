@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import { BotTags, UpdateBotRequest, type Bot } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar } from "./BotAvatar.js";
@@ -40,13 +41,7 @@ export const EditBotDialog = ({ bot, onSave, onClose }: Props) => {
 
   useEffect(() => nameInput.current?.focus(), []);
 
-  useEffect(() => {
-    const close = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", close);
-    return () => window.removeEventListener("keydown", close);
-  }, [onClose]);
+  useEscapeToClose(onClose);
 
   const addTag = () => {
     const tag = tagDraft.trim();
