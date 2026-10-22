@@ -1,5 +1,5 @@
-import { useEffect } from "react";
 import { X } from "lucide-react";
+import { useEscapeToClose } from "./useEscapeToClose.js";
 import type { InspectedTool } from "./messages/MessageView.js";
 import { ToolViewContent } from "./messages/ToolViewContent.js";
 
@@ -7,13 +7,7 @@ const rawText = (tool: InspectedTool): string =>
   tool.body.view.raw === undefined ? "没有原始参数" : JSON.stringify(tool.body.view.raw, null, 2);
 
 export const ToolInspector = ({ tool, onClose }: { tool: InspectedTool; onClose: () => void }) => {
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
+  useEscapeToClose(onClose);
 
   return (
     <aside className="tool-inspector" data-testid="tool-inspector" aria-label="工具检查器">

@@ -159,3 +159,17 @@ test("一台电脑都没有：入口灰掉，旁边让人先加一台电脑，�
   await expect(page.getByTestId("account-connect-link"), "OAuth 平台不经电脑").toHaveText(["接入 GitHub", "接入 X"]);
   await page.getByTestId("account-connect").screenshot({ path: `${SHOT}/p3-connect-no-computer.png` });
 });
+
+test("设置里挑电脑的菜单开着时按 Esc 只收菜单，再按一下才关设置", async ({ page }) => {
+  await login(page);
+  await openAccounts(page);
+  await entry(page).click();
+  await expect(menu(page)).toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(menu(page), "第一下 Esc 收菜单").toHaveCount(0);
+  await expect(page.getByTestId("settings-window"), "菜单吃掉了这一下，设置还开着").toBeVisible();
+
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("settings-window")).toHaveCount(0);
+});

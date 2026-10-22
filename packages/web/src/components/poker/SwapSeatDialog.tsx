@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { POKER_PERSONAS, SwapSeatRequest, type PokerSeatNo, type PokerTableView } from "@baize/shared";
 import { BotAvatar } from "../BotAvatar.js";
+import { useEscapeToClose } from "../useEscapeToClose.js";
 
 export type SwapPersona = SwapSeatRequest["persona"];
 
@@ -21,6 +22,7 @@ export const SwapSeatDialog = ({ table, seat, onPick, onClose }: Props) => {
   const [picking, setPicking] = useState<SwapPersona | null>(null);
   const [error, setError] = useState<string | null>(null);
   const current = table.seats.find((item) => item.seat === seat);
+  useEscapeToClose(onClose);
 
   const pick = (persona: SwapPersona) => {
     setPicking(persona);
