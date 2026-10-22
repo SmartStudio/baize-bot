@@ -129,7 +129,7 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
       >
         <X size={16} aria-hidden="true" />
       </button>
-      <BotLookPicker bot={bot} commit={commit} key={bot.id} />
+      <BotLookPicker bot={bot} commit={commit} />
       <div className="row-card">
         <span>
           <b>通知</b>
@@ -145,7 +145,7 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
           onClick={() => commit({ notify: !bot.notify })}
         />
       </div>
-      <RunStateRow bot={bot} onPause={onPause} onResume={onResume} key={bot.id} />
+      <RunStateRow bot={bot} onPause={onPause} onResume={onResume} />
       {LATER_ROWS.map((row) => (
         <div className="row-card is-later" key={row.title}>
           <span>
