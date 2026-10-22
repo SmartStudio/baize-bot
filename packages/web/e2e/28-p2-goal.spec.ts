@@ -119,7 +119,7 @@ test("成果里复盘一行能展开，位置不随对话下移", async ({ page,
   await review.scrollIntoViewIfNeeded();
   const reviewTop = await topOf(page, "project-review");
 
-  for (const text of ["这周多发两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上发"]) {
+  for (const text of ["这周多写两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上上线"]) {
     const settled = page.waitForResponse(async (response) => {
       if (!response.url().endsWith("/api/projects/grp_order")) return false;
       const turn = ProjectResponse.parse(await response.json()).latestTurn;

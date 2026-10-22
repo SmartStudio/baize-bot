@@ -60,6 +60,23 @@ test("群里 @ 一个 Bot，只有它回话，清单第一项跟着勾上", asyn
   await page.screenshot({ path: `${SHOT}/05.png` });
 });
 
+test("群里没 @、也没人经手时，三个 Bot 轮流答，不回「没人接」", async ({ page }) => {
+  await login(page);
+  await openTeamGroup(page, TEAM_TITLE);
+  await expect(page.getByTestId("task-current")).toHaveText("当前 还没人接手");
+  await page.getByTestId("composer-input").fill("大家看一下 X3 的交期");
+  await page.getByTestId("composer-send").click();
+
+  const list = page.getByTestId("message-list");
+  for (const name of ["小销", "小服", "小采"]) {
+    await expect(
+      list.locator(`[data-testid=bot-source][data-bot-name="${name}"]`).first(),
+      `和控制面的路由一致，${name}也轮到了`,
+    ).toBeVisible({ timeout: 15_000 });
+  }
+  await expect(list, "空态说的是大家轮流答，就不能回没人接").not.toContainText("没人接");
+});
+
 test("在任务卡上勾掉第二项，卡片和任务详情一起跟着变，刷新还在", async ({ page }) => {
   await login(page);
   await openTeamGroup(page, TEAM_TITLE);

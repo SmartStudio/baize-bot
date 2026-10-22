@@ -32,7 +32,7 @@ test("在项目页连说两句，最新一轮贴着输入框，等你和成果�
   const pendingTop = await topOf(page, "project-pending");
   const achievementsTop = await topOf(page, "project-achievements");
 
-  const said = ["这周多发两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上发"];
+  const said = ["这周多写两条小红书，第一条讲交期", "第二条讲排产看板，周四晚上上线"];
   for (const [index, text] of said.entries()) {
     // 说完之后项目页会防抖重拉，重拉回来的数据可能再改版面。等到带着这句和它的回应的那次返回落了地，页面才算定下来。
     const settled = page.waitForResponse(async (response) => {
@@ -41,7 +41,7 @@ test("在项目页连说两句，最新一轮贴着输入框，等你和成果�
       return (
         turn?.said.body.kind === "user" &&
         turn.said.body.text === text &&
-        turn.replies.some((reply) => reply.body.kind === "system" && reply.body.text.includes("@ 一个 Bot 派活"))
+        turn.replies.some((reply) => reply.body.kind === "bot" && !reply.body.streaming)
       );
     });
     await page.getByTestId("project-composer-input").fill(text);
@@ -49,7 +49,7 @@ test("在项目页连说两句，最新一轮贴着输入框，等你和成果�
     await settled;
     const latest = page.getByTestId("project-latest-turn");
     await expect(latest, "刚说的这句就是最新一轮").toContainText(text);
-    await expect(latest.getByText("@ 一个 Bot 派活"), "群里对这句的回应也在这一轮里").toBeVisible();
+    await expect(latest, "群里对这句的回应也在这一轮里").toContainText("我这就去办");
     if (index > 0) await expect(latest, "上一句折进更早的轮次").not.toContainText(said[0] ?? "");
     await expect(page.getByTestId("project-composer-input")).toHaveValue("");
     await expect(page.getByTestId("project-older"), "更早的轮数到位").toHaveText(

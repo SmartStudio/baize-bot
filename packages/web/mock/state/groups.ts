@@ -130,11 +130,13 @@ export const mentionsIn = (groupId: string, text: string): BotId[] => {
   });
 };
 
-export const responderOf = (groupId: string, mentions: BotId[]): BotId | null => {
+// 和控制面 routing.ts 的 routeTargets 同一个口径：@ 的、首席、经手依次往下找，都没有就全员轮流答。
+export const respondersOf = (groupId: string, mentions: BotId[]): BotId[] => {
   const group = groups.get(groupId);
-  if (group === undefined) return null;
-  if (group.kind === "solo") return group.botIds[0];
-  return mentions[0] ?? tasks.get(group.taskId)?.currentBotId ?? null;
+  if (group === undefined) return [];
+  if (group.kind === "solo") return [group.botIds[0]];
+  const first = mentions[0] ?? group.chiefBotId ?? tasks.get(group.taskId)?.currentBotId ?? null;
+  return first === null ? [...group.botIds] : [first];
 };
 
 export const assignTask = (groupId: string, botId: BotId): TopicTask | null => {

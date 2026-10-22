@@ -376,7 +376,11 @@ const replyOn = async (
   if (ticked !== null) push({ type: "task_updated", task: ticked });
 
   // 这条回复只靠 delta 长出来，整条的 message 一次都不推，逼着前端走「没见过就先占个位」那条路。
+  // 占位按经手猜是谁在说，全员轮流答时轮到的不是经手，就像真控制面一样先推空壳，不然话会记到经手头上。
   const draft = appendMessage(groupId, { kind: "bot", botId, text: "", streaming: true });
+  const group = groups.get(groupId);
+  const guessed = group === undefined || group.kind === "solo" ? botId : tasks.get(group.taskId)?.currentBotId;
+  if (guessed !== botId) push({ type: "message", message: draft });
   const parts = chunked(reply, DELTA_COUNT);
   let text = "";
   for (const [index, delta] of parts.entries()) {
