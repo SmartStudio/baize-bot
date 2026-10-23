@@ -31,7 +31,7 @@ import { remindStaleApprovals } from "./repo/approvals.js";
 import { resumePendingContinuations, settleApprovalTimeouts } from "./agent/dispatch.js";
 import { remindStaleHandoffs } from "./repo/handoffs.js";
 import { markOnlineComputersSleeping } from "./repo/computers.js";
-import { SESSION_COOKIE, userForSession } from "./repo/sessions.js";
+import { SESSION_COOKIE, deleteExpiredSessions, userForSession } from "./repo/sessions.js";
 import { RoutineScheduler, type SchedulerOptions } from "./routines/scheduler.js";
 import { PushHub } from "./ws/hub.js";
 import { PokerSweeper, type PokerSweeperOptions } from "./poker/sweeper.js";
@@ -47,6 +47,9 @@ const REMIND_INTERVAL_MS = 60 * 60 * 1000;
  */
 const CONTINUATION_SWEEP_INTERVAL_MS = 30_000;
 
+/** 过期会话读时已经认不出来，清理只是不让表一直涨，一小时一轮足够。 */
+const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
 export type RunningServer = {
   readonly port: number;
   readonly hub: PushHub;
@@ -60,6 +63,8 @@ export type RunningServer = {
   scanApprovalTimeouts(now: Date): Promise<number>;
   /** 同 routines，测试里手动扫一轮欠着的接续，回起了几条。 */
   sweepContinuations(): Promise<number>;
+  /** 同 routines，测试里手动清一轮过期会话，回删了几行。 */
+  sweepExpiredSessions(now: Date): Promise<number>;
   close(): Promise<void>;
 };
 
@@ -274,6 +279,12 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   }, options.approvalTimeoutIntervalMs ?? 15_000);
   approvalTimeouts.unref();
 
+  const sweepExpiredSessions = (now: Date): Promise<number> => deleteExpiredSessions(options.db, now);
+  const sessionSweep = setInterval(() => {
+    void sweepExpiredSessions(new Date()).catch((error: unknown) => console.error("清理过期会话出错", error));
+  }, SESSION_SWEEP_INTERVAL_MS);
+  sessionSweep.unref();
+
   return {
     port,
     hub,
@@ -283,6 +294,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     metrics,
     scanApprovalTimeouts,
     sweepContinuations,
+    sweepExpiredSessions,
     close: async () => {
       const pokerStopped = poker.stop();
       routines.stop();
@@ -291,6 +303,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       clearInterval(reminders);
       clearInterval(approvalTimeouts);
       clearInterval(continuationSweep);
+      clearInterval(sessionSweep);
       live.closeAll();
       // agents.closeAll 在它第一个 await 之前同步立起停机标记，所以要先于 close 里的任何等待调用；
       // 先等网页的关闭握手或补扫再调它，链外认证中的 hello 在这段等待里回来就看不到停机，照常上线。

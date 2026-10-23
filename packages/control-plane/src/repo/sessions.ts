@@ -1,5 +1,5 @@
 import type { User } from "@baize/shared";
-import { and, eq, gt } from "drizzle-orm";
+import { and, eq, gt, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { sessions, users } from "../db/schema.js";
 import { newSessionToken } from "../ids.js";
@@ -30,4 +30,9 @@ export async function userForSession(db: Db, token: string): Promise<User | null
 
 export async function deleteSession(db: Db, token: string): Promise<void> {
   await db.delete(sessions).where(eq(sessions.id, token));
+}
+
+export async function deleteExpiredSessions(db: Db, now: Date): Promise<number> {
+  const deleted = await db.delete(sessions).where(lte(sessions.expiresAt, now)).returning({ id: sessions.id });
+  return deleted.length;
 }
