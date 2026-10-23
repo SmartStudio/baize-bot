@@ -173,6 +173,9 @@ export const createApi = (signal?: AbortSignal) => {
     usage: async () => json(UsageResponse, await send("GET", "/usage")),
     bots: async () => json(BotListResponse, await send("GET", "/bots")),
     createBot: async (draft: Omit<BotDraft, "notify">) => json(CreateBotResponse, await send("POST", "/bots", draft)),
+    deleteBot: async (id: BotId): Promise<void> => {
+      await send("DELETE", `/bots/${encodeURIComponent(id)}`);
+    },
     updateBot: async (id: BotId, draft: BotDraft): Promise<Bot> =>
       (await json(UpdateBotResponse, await send("PATCH", `/bots/${encodeURIComponent(id)}`, draft))).bot,
     // 任务卡补读带 for=task，服务端不看它，只让名单快照、补计数、补读三类请求在网络层分得开。

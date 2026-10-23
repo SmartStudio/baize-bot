@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import type { Bot, BotHue, BotId, BotShape, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
@@ -12,6 +12,7 @@ import { AccountMenu } from "../components/AccountMenu.js";
 import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
+import { BotCreatedNotice } from "../components/BotCreatedNotice.js";
 import { LiveHost } from "../live/LiveHost.js";
 import { TodayPage } from "./TodayPage.js";
 import { PokerProjectPage } from "./PokerProjectPage.js";
@@ -152,6 +153,9 @@ export const MainWindow = () => {
     const rest = params.toString();
     navigate({ pathname: location.pathname, search: rest === "" ? "" : `?${rest}` }, { replace: true });
   }, [location.pathname, location.search, navigate]);
+
+  const [created, setCreated] = useState<Bot | null>(null);
+  const closeCreated = useCallback(() => setCreated(null), [setCreated]);
 
   const taskOpen = groupId !== null && taskOpenFor === groupId;
 
@@ -320,7 +324,13 @@ export const MainWindow = () => {
         <TeamPage
           bots={bots}
           conversations={ready.conversations}
-          onCreateBot={() => void actions.createBot().then(openGroupPage)}
+          onCreateBot={() =>
+            void actions.createBot().then((made) => {
+              if (made === undefined) return;
+              setCreated(made.bot);
+              openGroupPage(made.groupId);
+            })
+          }
         />
       ) : (
         <TodayPage
@@ -372,6 +382,18 @@ export const MainWindow = () => {
             <X size={14} aria-hidden="true" />
           </button>
         </div>
+      ) : null}
+      {created !== null ? (
+        <BotCreatedNotice
+          key={`created-${created.id}`}
+          bot={created}
+          onUndo={async () => {
+            navigate(pathOf({ kind: "team" }));
+            await actions.deleteBot(created.id);
+            setCreated(null);
+          }}
+          onClose={closeCreated}
+        />
       ) : null}
       {inspected === null && team !== null && taskOpen ? (
         <TaskPanel task={team.task} memberIds={team.botIds} bots={bots} onClose={() => setTaskOpenFor(null)} />
