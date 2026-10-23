@@ -1,23 +1,22 @@
-import { useCallback, useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import type { GroupId } from "@baize/shared";
 
-type Drafts = Partial<Record<GroupId, string>>;
+const draftsUntilReload = new Map<GroupId, string>();
+const listeners = new Set<() => void>();
 
-let draftsUntilReload: Drafts = {};
-
-const withDraft = (drafts: Drafts, groupId: GroupId, text: string): Drafts => {
-  const { [groupId]: _old, ...rest } = drafts;
-  return text === "" ? rest : { ...rest, [groupId]: text };
+const subscribe = (listener: () => void) => {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 };
 
-export const useComposerDraft = (groupId: GroupId): [string, (groupId: GroupId, text: string) => void] => {
-  const [drafts, setDrafts] = useState(() => draftsUntilReload);
-  useEffect(() => {
-    draftsUntilReload = drafts;
-  }, [drafts]);
-  const setDraft = useCallback(
-    (target: GroupId, text: string) => setDrafts((current) => withDraft(current, target, text)),
-    [],
-  );
-  return [drafts[groupId] ?? "", setDraft];
+// 发送的结果可能在输入框卸载之后才回来，清空或写回都得照样落到那个群上。
+export const setDraft = (groupId: GroupId, text: string) => {
+  if (text === "") draftsUntilReload.delete(groupId);
+  else draftsUntilReload.set(groupId, text);
+  for (const listener of listeners) listener();
 };
+
+export const useComposerDraft = (groupId: GroupId): string =>
+  useSyncExternalStore(subscribe, () => draftsUntilReload.get(groupId) ?? "");

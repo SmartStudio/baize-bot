@@ -17,7 +17,7 @@
   box-shadow: var(--shadow-sm);
 }
 
-.composer textarea {
+.composer-textarea {
   flex: 1;
   min-width: 0;
   min-height: var(--control-h-md);
@@ -25,12 +25,15 @@
   padding: calc((var(--control-h-md) - 1lh) / 2) 0;
   border: 0;
   background: none;
-  font: var(--type-body);
   resize: none;
 }
 
-.composer textarea:focus-visible {
+.composer-textarea:focus-visible {
   box-shadow: none;
+}
+
+.composer .composer-textarea {
+  font: var(--type-body);
 }
 
 .composer:focus-within {

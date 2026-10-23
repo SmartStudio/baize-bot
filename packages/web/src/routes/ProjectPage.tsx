@@ -21,7 +21,8 @@ import { previewOf } from "../components/messages/preview.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import type { Conversation } from "../state/types.js";
 import { byCreatedAt } from "../state/order.js";
-import { useComposerDraft } from "../state/composer-drafts.js";
+import { setDraft, useComposerDraft } from "../state/composer-drafts.js";
+import { ComposerTextarea } from "../components/ComposerTextarea.js";
 import { dueTextOf } from "../components/TaskCard.js";
 import { goalBarValue, goalProgressOf, goalText, numberText, weekDeltaText, type Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
@@ -148,10 +149,10 @@ export const ProjectPage = ({
   const { status, data, error, refresh } = project;
   const task = conversation.task;
   const groupId = conversation.groupId;
-  const [draft, setDraft] = useComposerDraft(groupId);
+  const draft = useComposerDraft(groupId);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
-  const input = useRef<HTMLInputElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
   const members = conversation.botIds.flatMap((botId) => {
     const bot = bots[botId];
     return bot === undefined ? [] : [bot];
@@ -254,8 +255,8 @@ export const ProjectPage = ({
           </p>
         )}
         <form className="today-composer project-composer" onSubmit={submit}>
-          <input
-            ref={input}
+          <ComposerTextarea
+            inputRef={input}
             data-testid="project-composer-input"
             value={draft}
             aria-label="对这个项目说一句"

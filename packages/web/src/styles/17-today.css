@@ -78,6 +78,15 @@
   flex: none;
 }
 
+.project-composer {
+  align-items: flex-end;
+  padding: calc((var(--control-h-lg) - var(--control-h-md)) / 2) var(--space-5);
+}
+
+.project-composer .composer-textarea {
+  color: var(--fg-1);
+}
+
 .today-templates {
   display: flex;
   flex-wrap: wrap;

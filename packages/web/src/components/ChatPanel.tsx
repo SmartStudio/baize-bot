@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowDown, SendHorizontal, Sparkles, Users } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
@@ -19,7 +19,8 @@ import { TeamComputerNotes, TeamComputers, type ComputerChoicesView } from "./Co
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 import { prefillOf } from "./routines/prefill.js";
-import { useComposerDraft } from "../state/composer-drafts.js";
+import { setDraft, useComposerDraft } from "../state/composer-drafts.js";
+import { ComposerTextarea } from "./ComposerTextarea.js";
 import type { ContentBook, LoadStatus } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
@@ -125,7 +126,7 @@ export const ChatPanel = ({
   onToggleBotPanel,
 }: Props) => {
   const groupId = conversation.groupId;
-  const [draft, setDraft] = useComposerDraft(groupId);
+  const draft = useComposerDraft(groupId);
   const [pickerOff, setPickerOff] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -169,14 +170,7 @@ export const ChatPanel = ({
     setDraft(groupId, prefill);
     input.current?.focus();
     navigate(location.pathname, { replace: true, state: null });
-  }, [prefill, groupId, location.pathname, navigate, setDraft]);
-
-  useLayoutEffect(() => {
-    const box = input.current;
-    if (box === null) return;
-    box.style.height = "auto";
-    box.style.height = `${box.scrollHeight}px`;
-  }, [draft]);
+  }, [prefill, groupId, location.pathname, navigate]);
 
   // 流式回复只让最后一条变长，条数不变；用户向上读历史时不能抢走滚动位置。
   useEffect(() => {
@@ -398,10 +392,9 @@ export const ChatPanel = ({
           </div>
         ) : null}
         <div className="composer">
-          <textarea
-            ref={input}
+          <ComposerTextarea
+            inputRef={input}
             data-testid="composer-input"
-            rows={1}
             value={draft}
             placeholder={team ? `给 ${conversation.task.title} 发消息` : `给 ${lead?.name ?? "Bot"} 发消息`}
             aria-label="发消息"
@@ -411,10 +404,6 @@ export const ChatPanel = ({
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") setPickerOff(true);
-              // 输入法组字时的回车是上屏。Safari 组字刚结束的那下回车 isComposing 已经是 false，只剩 keyCode 229 认得出。
-              if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
-              e.preventDefault();
-              e.currentTarget.form?.requestSubmit();
             }}
           />
           <button type="submit" className="send-button" data-testid="composer-send" aria-label="发送">

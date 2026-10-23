@@ -2,6 +2,20 @@ import { TEAM_TITLE, expect, login, openBot, test, type Page } from "./fixtures"
 
 const userTexts = (page: Page) => page.getByTestId("message-list").locator("[data-kind=user]");
 
+const holdNextSend = async (page: Page) => {
+  let arrive = () => undefined as void;
+  const arrived = new Promise<void>((resolve) => (arrive = resolve));
+  let release = (_outcome: "pass" | "fail") => undefined as void;
+  const released = new Promise<"pass" | "fail">((resolve) => (release = resolve));
+  await page.route("**/api/groups/*/messages*", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    arrive();
+    if ((await released) === "pass") return route.continue();
+    return route.fulfill({ status: 500, json: { error: "上游挂了" } });
+  });
+  return { arrived, release };
+};
+
 const openAssistant = async (page: Page) => {
   await page.getByTestId("assistant-nav").click();
   await expect(page.getByTestId("assistant-nav")).toHaveAttribute("aria-current", "page");
@@ -121,4 +135,65 @@ test("输入法组字时按回车只是上屏，不发送", async ({ page }) => 
   await expect(input).toHaveValue("");
   await expect(userTexts(page), "只发出了上屏后真按回车的那一条").toHaveCount(before + 1);
   await expect(userTexts(page).last()).toHaveText("你好");
+});
+
+test("项目页发出去还没回音就进项目群，回音到了两边输入框都是空的", async ({ page }) => {
+  await login(page);
+  const send = await holdNextSend(page);
+  const project = page.locator("[data-testid=group-item]").first();
+  await project.click();
+  const projectInput = page.getByTestId("project-composer-input");
+  await projectInput.fill("这周多发两条小红书");
+  await page.getByTestId("project-composer-send").click();
+  await send.arrived;
+
+  await page.getByTestId("project-open-group").click();
+  const chatInput = page.getByTestId("composer-input");
+  await expect(chatInput).toBeVisible();
+  send.release("pass");
+  await expect(page.getByTestId("message-list"), "那句话落进了项目群").toContainText("这周多发两条小红书");
+  await expect(chatInput, "已经发出去的话不留成项目群的草稿").toHaveValue("");
+
+  await project.click();
+  await expect(projectInput, "项目页的输入框也是空的").toHaveValue("");
+});
+
+test("聊天里发出去还没回音就去团队页，发失败了回到原群草稿还在", async ({ page }) => {
+  await login(page);
+  const send = await holdNextSend(page);
+  await openBot(page, "小销");
+  const input = page.getByTestId("composer-input");
+  await input.fill("把 Globex 的报价发出去");
+  await input.press("Enter");
+  await send.arrived;
+  await expect(input).toHaveValue("");
+
+  await page.getByTestId("team-nav").click();
+  await expect(page.getByTestId("team-page")).toBeVisible();
+  const failed = page.waitForResponse(
+    (response) => response.request().method() === "POST" && response.status() === 500,
+  );
+  send.release("fail");
+  await failed;
+
+  await openBot(page, "小销");
+  await expect(input, "没发出去的话还回原群").toHaveValue("把 Globex 的报价发出去");
+});
+
+test("项目页的输入框也是多行的：Shift+Enter 换行，换行到项目群里还在，Enter 发送", async ({ page }) => {
+  await login(page);
+  await page.locator("[data-testid=group-item]").first().click();
+  const input = page.getByTestId("project-composer-input");
+  await input.fill("第一行");
+  await input.press("Shift+Enter");
+  await input.pressSequentially("第二行");
+  await expect(input, "Shift+Enter 只换行不发送").toHaveValue("第一行\n第二行");
+
+  await page.getByTestId("project-open-group").click();
+  await expect(page.getByTestId("composer-input"), "项目群里看到的草稿换行还在").toHaveValue("第一行\n第二行");
+  await page.locator("[data-testid=group-item]").first().click();
+
+  await input.press("Enter");
+  await expect(input, "Enter 发送后清空").toHaveValue("");
+  await expect(page.getByTestId("project-latest-turn"), "发出去的是整段两行").toContainText("第一行\n第二行");
 });
