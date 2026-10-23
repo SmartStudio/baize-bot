@@ -75,8 +75,8 @@ compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些
 | `UPSTREAM_BASE_URL` | 是 | 报错不起 | OpenAI 兼容的上游地址（`env.ts:94`） |
 | `UPSTREAM_API_KEY` | 是 | 报错不起 | 只能是可打印 ASCII，否则控制面启动时抛错（`env.ts:170-176`） |
 | `GATEWAY_MODELS` | 否 | `plan=baize-default,fast=baize-default` | 格式 `plan=模型,fast=模型`，两个用途都要有，写错启动时抛错（`env.ts:146-167`） |
-| `TOOL_SECRET_KEY` | 是 | 报错不起 | 64 位十六进制（`packages/control-plane/src/crypto.ts:31`），`openssl rand -hex 32`。控制面本身没设时退回一把写在代码里的开发密钥（`env.ts:16-24`），compose 用 `:?` 挡住了这种情况 |
-| `CREDENTIALS_KEY` | 是 | 报错不起 | 32 字节 base64，`openssl rand -base64 32`。没设或格式不对启动失败（`env.ts:27-33`、`packages/control-plane/src/credentials.ts:24`） |
+| `TOOL_SECRET_KEY` | 是 | 报错不起 | 64 位十六进制，`openssl rand -hex 32`。没设或格式不对启动失败（`env.ts:15-19`、`packages/control-plane/src/crypto.ts:31`） |
+| `CREDENTIALS_KEY` | 是 | 报错不起 | 32 字节 base64，`openssl rand -base64 32`。没设或格式不对启动失败（`env.ts:21-27`、`packages/control-plane/src/credentials.ts:24`） |
 | `WEB_BASE_URL` | 是 | 报错不起 | 浏览器打开 Web 的地址，如 `https://baize.example.com`，OAuth 回调拼在它上面（`env.ts:100`） |
 | `PRICE_INPUT_PER_M`、`PRICE_OUTPUT_PER_M` | 否 | `0` | 每百万 token 价格，折算 run 的花费（`env.ts:96-97`）。不设用量金额恒为 0 |
 | `GITHUB_API_BASE_URL`、`X_API_BASE_URL`、`GITHUB_OAUTH_BASE_URL`、`X_OAUTH_BASE_URL` | 否 | 各家官方地址，和 `env.ts:84-87` 一致 | 只在验证时指到假平台（`env.ts:98-99`、`:122-123`），生产不用设 |

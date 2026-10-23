@@ -157,6 +157,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     process.env["X_API_BASE_URL"] = options.xApiBaseUrl ?? `${UNREACHABLE}/x`;
     const credentialsKey = randomBytes(32).toString("base64");
     process.env["CREDENTIALS_KEY"] = credentialsKey;
+    process.env["TOOL_SECRET_KEY"] = randomBytes(32).toString("hex");
 
     // 端口交给系统分配，同一台机器上别的进程占着 3001 也不影响。
     const server = await startServer({

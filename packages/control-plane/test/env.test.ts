@@ -9,7 +9,6 @@ import {
   DEFAULT_X_OAUTH_BASE_URL,
   credentialsKey,
   runtimeConfig,
-  toolSecretKey,
   trustedProxyHops,
 } from "../src/env.js";
 
@@ -166,7 +165,7 @@ it("没配 OAuth 变量时两个平台都是 null，WEB_BASE_URL 留空就是 nu
   expect([config.oauth.github, config.oauth.x]).toEqual([null, null]);
 });
 
-it(".env 里留空的地址和工具密钥按没设处理，不把空串下发成网关地址", () => {
+it(".env 里留空的地址按没设处理，不把空串下发成网关地址", () => {
   for (const name of [
     "PUBLIC_BASE_URL",
     "UPSTREAM_BASE_URL",
@@ -174,11 +173,9 @@ it(".env 里留空的地址和工具密钥按没设处理，不把空串下发�
     "X_API_BASE_URL",
     "GITHUB_OAUTH_BASE_URL",
     "X_OAUTH_BASE_URL",
-    "TOOL_SECRET_KEY",
   ]) {
     vi.stubEnv(name, "");
   }
-  vi.spyOn(console, "warn").mockImplementation(() => {});
 
   const config = runtimeConfig();
   expect(config.publicBaseUrl).toBeNull();
@@ -187,7 +184,6 @@ it(".env 里留空的地址和工具密钥按没设处理，不把空串下发�
   expect(config.xApiBaseUrl).toBe(DEFAULT_X_API_BASE_URL);
   expect(config.oauth.githubOauthBaseUrl).toBe(DEFAULT_GITHUB_OAUTH_BASE_URL);
   expect(config.oauth.xOauthBaseUrl).toBe(DEFAULT_X_OAUTH_BASE_URL);
-  expect(toolSecretKey()).not.toBe("");
 });
 
 it("TRUSTED_PROXY_HOPS 留空是 0，只收非负整数", () => {

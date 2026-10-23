@@ -68,6 +68,17 @@ ensure_credentials_key() {
   export CREDENTIALS_KEY
 }
 
+ensure_tool_secret_key() {
+  [[ -n "${TOOL_SECRET_KEY-}" ]] && return
+  local file="$RUN/tool-secret.key"
+  if [[ ! -s "$file" ]]; then
+    mkdir -p "$RUN"
+    (umask 077 && openssl rand -hex 32 >"$file")
+  fi
+  TOOL_SECRET_KEY="$(cat "$file")"
+  export TOOL_SECRET_KEY
+}
+
 listener_pid() {
   lsof -nP -t -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | head -1 || true
 }
@@ -330,6 +341,7 @@ entry2() {
 exec_control_plane() {
   export_env_file
   ensure_credentials_key
+  ensure_tool_secret_key
   exec pnpm --filter @baize/control-plane start
 }
 

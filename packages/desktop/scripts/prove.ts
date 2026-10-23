@@ -486,6 +486,7 @@ async function main(): Promise<void> {
       PORT: String(controlPort),
       COOKIE_SECURE: "false",
       CREDENTIALS_KEY: randomBytes(32).toString("base64"),
+      TOOL_SECRET_KEY: randomBytes(32).toString("hex"),
     };
     run("pnpm", ["--filter", "@baize/control-plane", "migrate"], baseEnv);
     control = spawn("pnpm", ["--filter", "@baize/control-plane", "start"], {

@@ -5,12 +5,12 @@ import { expect, it } from "vitest";
 
 const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
 const TSX = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+const UNREACHABLE_DATABASE_URL = "postgres://baize:baize@127.0.0.1:1/none";
 
-/** 库指向连不上的端口、端口交给系统分配：钥匙齐了也起不来，只看钥匙缺了时报的是什么。 */
 function start(drop: "TOOL_SECRET_KEY" | "CREDENTIALS_KEY" | null, toolSecretKey: string) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    DATABASE_URL: "postgres://baize:baize@127.0.0.1:1/none",
+    DATABASE_URL: UNREACHABLE_DATABASE_URL,
     PORT: "0",
     TOOL_SECRET_KEY: toolSecretKey,
     CREDENTIALS_KEY: randomBytes(32).toString("base64"),

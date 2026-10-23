@@ -2,8 +2,6 @@ import type { GatewayModels } from "@baize/shared";
 
 const DEFAULT_DATABASE_URL = "postgres://baize:baize@localhost:5434/baize";
 const DEFAULT_PORT = 3001;
-const DEV_TOOL_SECRET_KEY = "8f8d7b86df250e27ea4f1bb66c7f4dc57b75ad623154f343890a258d68d03c90";
-let warnedToolSecret = false;
 
 export function databaseUrl(): string {
   return nonEmpty("DATABASE_URL") ?? DEFAULT_DATABASE_URL;
@@ -24,12 +22,8 @@ export function trustedProxyHops(): number {
 
 export function toolSecretKey(): string {
   const key = nonEmpty("TOOL_SECRET_KEY");
-  if (key !== null) return key;
-  if (!warnedToolSecret) {
-    console.warn("TOOL_SECRET_KEY 没设，工具认证信息用开发密钥加密");
-    warnedToolSecret = true;
-  }
-  return DEV_TOOL_SECRET_KEY;
+  if (key === null) throw new Error("TOOL_SECRET_KEY 没设，用 openssl rand -hex 32 生成一个");
+  return key;
 }
 
 /** 账号凭据的钥匙没有开发默认值：令牌是真平台的，用一把人人知道的钥匙加密等于没加密。 */

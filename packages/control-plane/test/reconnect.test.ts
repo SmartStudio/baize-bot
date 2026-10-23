@@ -28,6 +28,7 @@ beforeAll(async () => {
     port: 0,
     config: DEFAULT_RUNTIME_CONFIG,
     credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
   });
 });
 
