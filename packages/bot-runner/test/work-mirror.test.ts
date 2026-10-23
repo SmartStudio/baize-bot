@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENT_FRAME_MAX_BYTES,
   BotId,
   EMPTY_WORK_HEAD,
   GroupId,
@@ -15,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkAppendOutcome } from "../src/lane-fence.js";
 import { WorkMirror } from "../src/work-mirror.js";
 
+const MiB = 1024 * 1024;
 const roots: string[] = [];
 
 afterEach(() => {
@@ -714,5 +716,45 @@ describe("WorkMirror", () => {
     expect(h.sent).toHaveLength(2);
     expect(h.sent.at(-1)?.fromSeq).toBe(1);
     expect(h.logs.some((line) => line.includes("head_mismatch"))).toBe(true);
+  });
+
+  it("一批条目加起来超过上行帧上限时按字节分批，每帧都在上限以内，条目一条不落", async () => {
+    const accepted: string[] = [];
+    const h = setup(async (frame) => {
+      accepted.push(...frame.lines);
+      return { kind: "ok" };
+    });
+    const manager = await h.mirror.prepare(1, { seq: 0, head: EMPTY_WORK_HEAD }, RunId.parse("run-big"));
+    for (let index = 0; index < 24; index += 1)
+      appendRawMessage(manager, assistant([{ type: "thinking", thinking: `${index}`.padEnd(MiB, "x") }], "stop"));
+
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-big"))).resolves.toEqual({ kind: "ok" });
+
+    expect(h.sent.length, "24 条装不进一帧，要分成几帧").toBeGreaterThan(1);
+    for (const frame of h.sent)
+      expect(Buffer.byteLength(JSON.stringify(frame)), "每帧都要能过 /agent 的帧上限").toBeLessThan(
+        AGENT_FRAME_MAX_BYTES,
+      );
+    expect(accepted).toHaveLength(24);
+    expect(h.sent.map((frame) => frame.fromSeq)).toEqual(
+      h.sent.map((_, index) => h.sent.slice(0, index).reduce((sum, frame) => sum + frame.lines.length, 0)),
+    );
+  });
+
+  it("单条就超过上行帧上限时停流，前面的照传，超限的那条不发出去", async () => {
+    const h = setup(async () => ({ kind: "ok" }));
+    const manager = await h.mirror.prepare(1, { seq: 0, head: EMPTY_WORK_HEAD }, RunId.parse("run-huge"));
+    appendUser(manager, "超限之前的一条");
+    appendRawMessage(
+      manager,
+      assistant([{ type: "thinking", thinking: "x".repeat(AGENT_FRAME_MAX_BYTES + 1) }], "stop"),
+    );
+
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-huge"))).resolves.toEqual({ kind: "invalid" });
+    await expect(h.mirror.flush("turn_end", RunId.parse("run-huge"))).resolves.toEqual({ kind: "invalid" });
+
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0]?.lines).toHaveLength(1);
+    expect(h.logs.some((line) => line.includes("超过上行帧上限"))).toBe(true);
   });
 });
