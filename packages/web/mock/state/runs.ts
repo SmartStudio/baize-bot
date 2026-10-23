@@ -321,11 +321,12 @@ const replyOn = async (
   const tool = needed?.tool ?? "erp.query";
   const operation = tool.includes(".") ? tool.slice(tool.lastIndexOf(".") + 1) : tool;
   const runId = RunId.parse(`run_${nextSuffix()}`);
+  // server 是这个操作所在工具连接的名字，和运行器 mcp.serverFor 一样。send_email 登记在种子里的「邮箱」下。
   const view = {
     kind: "mcp" as const,
-    server: "ERP",
+    server: operation === "send_email" ? "邮箱" : "ERP",
     tool: operation,
-    params: [{ key: "请求", value: prompt.slice(0, 12) }],
+    params: [{ key: operation === "send_email" ? "subject" : "请求", value: prompt.slice(0, 12) }],
   };
 
   await sleep(REPLY_DELAY_MS);

@@ -100,3 +100,22 @@
   background: var(--bg-surface);
   color: var(--fg-3);
 }
+
+.approval-details {
+  color: var(--fg-2);
+  font: var(--type-caption);
+}
+
+.approval-details summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.approval-details[open] summary {
+  margin-bottom: var(--space-2);
+}
+
+.approval-details .tool-view-detail {
+  margin-left: var(--space-3);
+  white-space: normal;
+}

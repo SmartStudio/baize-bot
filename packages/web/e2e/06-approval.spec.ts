@@ -13,6 +13,18 @@ import {
   stubNotifications,
 } from "./fixtures";
 
+test("审批卡用人话写要做什么，工具名和原始参数折在详情里", async ({ page }) => {
+  await login(page);
+  const card = await sendForApproval(page, "小销");
+
+  await expect(card.getByTestId("approval-summary"), "操作说明取工具连接里登记的那句").toHaveText("要用邮箱发送邮件");
+  await expect(card.getByText("send_email"), "内部工具名不直接上屏").toBeHidden();
+  const details = card.getByTestId("approval-details");
+  await details.getByText("详情").click();
+  await expect(details.getByText("send_email"), "展开详情看得到工具名").toBeVisible();
+  await expect(details, "也看得到这次的原始参数").toContainText(`subject=${NEEDS_APPROVAL}`);
+});
+
 test("要点头的工具让群里出一张审批卡，侧栏记一笔「等你点头 1」", async ({ page }) => {
   await login(page);
   const card = await sendForApproval(page, "小销");

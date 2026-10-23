@@ -30,7 +30,8 @@ import { Markdown } from "./markdown.js";
 import { skillOfferTitle, timeOf } from "./preview.js";
 import { TakeoverCard } from "./TakeoverCard.js";
 import { TeamOfferCard } from "./TeamOfferCard.js";
-import { ToolViewContent } from "./ToolViewContent.js";
+import { useApp } from "../../state/app.js";
+import { ApprovalDetails, ToolViewContent } from "./ToolViewContent.js";
 import type { Turn } from "./turns.js";
 
 export type BotLookup = (botId: BotId) => {
@@ -341,6 +342,8 @@ const ApprovalCard = ({
   message: Message;
   onDecide: DecideApproval;
 }) => {
+  const { state } = useApp();
+  const tools = state.status === "ready" ? state.tools : [];
   const [sent, setSent] = useState(false);
   // 结论以服务端推回来的那条为准，这里只锁住按钮，免得一次点两下发两个决定。
   const decide = (request: DecideApprovalRequest) => {
@@ -354,9 +357,10 @@ const ApprovalCard = ({
           <ShieldAlert size={16} aria-hidden="true" />
           已失效 · {ACTION_TEXT[approval.action]}
         </div>
-        <p className="approval-summary">
-          <ToolViewContent view={approval.view} approval />
+        <p className="approval-summary" data-testid="approval-summary">
+          <ToolViewContent view={approval.view} approval tools={tools} />
         </p>
+        <ApprovalDetails view={approval.view} />
         <div className="approval-actions">
           <p className="approval-expired-text">这一步已经不用了</p>
         </div>
@@ -367,7 +371,7 @@ const ApprovalCard = ({
     return (
       <div className="card card-approval approval-compact" data-testid="approval-card" data-status={approval.status}>
         <span className="approval-compact-text">
-          <ToolViewContent view={approval.view} approval />
+          <ToolViewContent view={approval.view} approval tools={tools} />
         </span>
         <span
           className="approval-pill"
@@ -385,9 +389,10 @@ const ApprovalCard = ({
         <ShieldAlert size={16} aria-hidden="true" />
         需要你点头 · {ACTION_TEXT[approval.action]}
       </div>
-      <p className="approval-summary">
-        <ToolViewContent view={approval.view} approval />
+      <p className="approval-summary" data-testid="approval-summary">
+        <ToolViewContent view={approval.view} approval tools={tools} />
       </p>
+      <ApprovalDetails view={approval.view} />
       {approval.target === null ? null : <p className="approval-target">目标：{targetText(approval.target)}</p>}
       {approval.deadlineAt === null ? null : (
         <p className="approval-target" data-testid="approval-deadline">
