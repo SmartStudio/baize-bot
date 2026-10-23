@@ -26,7 +26,13 @@ let hasty: RunningServer;
 
 beforeAll(async () => {
   database = await createTestDb();
-  const base = { db: database.db, port: 0, config, credentialsKey: TEST_CREDENTIALS_KEY } as const;
+  const base = {
+    db: database.db,
+    port: 0,
+    config,
+    credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
+  } as const;
   // 宽限设长，断开到重连之间只有 hello 对账会收尾。
   patient = await startServer({ ...base, disconnectGraceMs: 60_000 });
   hasty = await startServer({ ...base, disconnectGraceMs: 50 });

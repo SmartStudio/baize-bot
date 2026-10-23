@@ -34,6 +34,7 @@ beforeAll(async () => {
     port: 0,
     config: DEFAULT_RUNTIME_CONFIG,
     credentialsKey: TEST_CREDENTIALS_KEY,
+    toolSecretKey: "a".repeat(64),
     scheduler: { now: () => clock, intervalMs: HOUR_MS },
     publisher: { intervalMs: 24 * HOUR_MS },
     silenceTimeoutMs: SILENCE_MS,
