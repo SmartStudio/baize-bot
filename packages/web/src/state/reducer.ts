@@ -58,6 +58,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     usage,
     content: EMPTY_CONTENT,
     todayVersion: 0,
+    pushLink: "connecting",
     reconnectedAt: 0 as Seq,
     messagesLoadedAt: {},
     messageGaps: {},
@@ -91,6 +92,7 @@ export const reduce = (state: AppState, action: Action): AppState => {
       reconnectedAt: action.seq,
       messageGaps: rearmGaps(state.messageGaps),
     };
+  if (action.type === "push_link") return { ...state, pushLink: action.link };
   if (action.type === "load_status") return { ...state, loads: { ...state.loads, [action.key]: action.status } };
   const groups = reduceGroups(state, action);
   const approvals = reduceApprovals(groups, action);
