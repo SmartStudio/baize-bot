@@ -5,7 +5,7 @@ import type { Context } from "hono";
 export const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 export const LOGIN_FAILURES_PER_EMAIL = 5;
 /** 一个办公室常常共用一个出口 IP，这一维放得比邮箱宽得多，只挡换着邮箱撞库。 */
-export const LOGIN_FAILURES_PER_IP = 50;
+export const LOGIN_FAILURES_PER_IP = 200;
 export const REGISTER_WINDOW_MS = 60 * 60 * 1000;
 export const REGISTRATIONS_PER_IP = 20;
 /** 每个计数器最多记这么多个键，随机邮箱刷不爆内存。 */
