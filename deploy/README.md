@@ -232,6 +232,33 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 - 远程电脑和控制面出自同一次构建，`docker compose build && docker compose up -d` 让两者一起升。
 - 用户电脑上的桌面端不会跟着升。改了报文形状却没抬 `MIN_AGENT_PROTOCOL` 的版本，旧代理还能连上，但会卡在 config 拒收，用户看到的是「派不出去」而不是升级弹窗。改报文形状的版本要同时抬 `AGENT_PROTOCOL` 和 `MIN_AGENT_PROTOCOL`（`protocol.ts` 里挨着的两个常量），升级控制面前先发桌面端新版。
 
+## 单实例、停机和探活
+
+**控制面只能跑一个。** 群回合和它的计数、电脑连接表、画面中继、接续补扫和各个轮询都在进程内存里（`packages/control-plane/src/agent/group-turn.ts`、`agent/hub.ts`、`live/relay.ts`、`server.ts`）。起第二个副本后 WebSocket 落到不同进程，推送和派活会丢。
+
+- 控制面启动时先在库上拿一把会话级 advisory lock（`packages/control-plane/src/instance-lock.ts`），拿不到就打印「同一个库上已经有一个控制面在跑」，以 1 退出。这时它还没开始监听，也没碰库里的电脑状态。
+- 不要 `docker compose up --scale control-plane=2`，也不要用先起新副本、再停旧副本的滚动升级。`docker compose up -d` 重建容器是先停旧的再起新的，正好合适。
+- 锁跟着一条专用的库连接走。这条连接断了（库重启、连接被掐），锁就放了，控制面按停机流程以 1 退出，由 `restart: unless-stopped` 拉起来重新拿锁。库没回来之前它会反复起不来，库回来就好。
+
+**停机。** SIGTERM 和 SIGINT 都走 `server.close()`。在线电脑收到 1012 后按退避重连，欠着的接续标记留给下次启动的补扫，走完以 0 退出。8 秒没走完，或者停机中又收到一次信号，以 1 强退。8 秒短于 docker 默认的 10 秒宽限，compose 里的控制面不用另设 `stop_grace_period`。未处理的 Promise 拒绝和未捕获的异常先记日志，再走同一套停机，以 1 退出。
+
+**探活。** `GET /api/health` 不用登录，Caddy 按 `/api` 转进来，外面也能打。
+
+| 情况 | 状态码 | 响应 |
+| --- | --- | --- |
+| 库连得上 | 200 | `{"ok":true}` |
+| 库连不上 | 503 | `{"ok":false,"error":"连不上数据库"}` |
+| 停机已经开始 | 503 | `{"ok":false,"error":"控制面正在停机"}` |
+
+控制面镜像里没有 curl。compose 要加 healthcheck，就用 node 发请求（未在真机验证）：
+
+```
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+```
+
 ## 给别人开账号
 
 这是代码的现状，开放注册还是邀请制还没定（todo 第 37 行）。
