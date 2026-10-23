@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   CalendarClock,
@@ -427,13 +427,25 @@ type Props = {
   onDecide: PendingProps["onDecide"];
   onOpenGroup: (groupId: GroupId) => void;
   onOpenAccounts: () => void;
+  onCreateTable: (requestId: string) => Promise<void>;
 };
 
-export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGroup, onOpenAccounts }: Props) => {
+export const TodayPage = ({
+  today,
+  userName,
+  cards,
+  onSend,
+  onDecide,
+  onOpenGroup,
+  onOpenAccounts,
+  onCreateTable,
+}: Props) => {
   const { status, data, error, refresh } = today;
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  // 和新建项目弹窗一样，一次进页内 requestId 不变，建桌失败再点不会建出第二张。
+  const tableRequestId = useRef(crypto.randomUUID());
 
   if (status === "loading") {
     return (
@@ -513,7 +525,7 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
             {sendError}
           </p>
         )}
-        <div className="today-templates" aria-label="常用模板">
+        <div className="today-templates" aria-label="常用模板" data-testid="today-templates">
           {[
             ["推广一个产品", "这周推广一下我们的新版本，X 和小红书都发"],
             ["运营一个号", "把小红书账号做起来，年底做到 1000 粉"],
@@ -528,6 +540,21 @@ export const TodayPage = ({ today, userName, cards, onSend, onDecide, onOpenGrou
               {label}
             </button>
           ))}
+          <button
+            type="button"
+            className="today-template"
+            disabled={sending}
+            onClick={() => {
+              setSending(true);
+              setSendError(null);
+              onCreateTable(tableRequestId.current).catch((cause: unknown) => {
+                setSending(false);
+                setSendError(cause instanceof Error ? cause.message : "建桌没成功，再试一次");
+              });
+            }}
+          >
+            和 AI 打一局
+          </button>
         </div>
         <div className="today-columns">
           <div className="today-column">
