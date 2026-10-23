@@ -276,10 +276,24 @@
   font: var(--type-caption);
 }
 
+/* 整行是一张卡，标题按钮、登录按钮和展开的档位都在卡里。 */
+.account-row {
+  overflow: hidden;
+  border: 1px solid var(--border-1);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+}
+
 .account-row-head {
   width: 100%;
+  border: 0;
+  border-radius: 0;
   text-align: left;
   cursor: pointer;
+}
+
+.account-row-head > span:first-child {
+  flex: 1;
 }
 
 .account-tier {
@@ -292,8 +306,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  margin: var(--space-3) 0 0;
-  padding: 0;
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-4);
   border: 0;
 }
 
@@ -349,8 +363,8 @@
   gap: var(--space-4);
   align-items: center;
   justify-content: flex-end;
-  margin: var(--space-3) 0 0;
-  padding: 0 var(--space-2);
+  margin: 0;
+  padding: 0 var(--space-6) var(--space-5);
 }
 
 .account-login-note {
@@ -400,6 +414,7 @@
 
 .account-connect-note,
 .account-connect-risk {
+  flex-basis: 100%;
   color: var(--fg-3);
   font: var(--type-caption);
 }

@@ -44,11 +44,12 @@ test("账号页按电脑分组，小红书没有可直接发布", async ({ page,
   await expect(groups.nth(1).getByTestId("account-row")).toHaveCount(2);
 
   const xhs = groups.nth(0).getByTestId("account-row").filter({ hasText: "要务机械星球" });
-  await expect(xhs.getByTestId("account-where")).toHaveText("在本机 · 权限「可起草」");
+  await expect(xhs.getByTestId("account-where")).toHaveText("在本机");
+  await expect(xhs.getByTestId("account-tier"), "权限只写在右边的档位标上").toHaveText("可起草");
   await expect(xhs.getByTestId("account-login"), "过期的号写登录状态").toContainText("登录已过期");
   await expect(xhs.getByTestId("account-tier-option"), "没点开只显示当前一档").toHaveCount(0);
   const diary = groups.nth(1).getByTestId("account-row").filter({ hasText: "白泽工厂日记" });
-  await expect(diary.getByTestId("account-where")).toHaveText("在远程电脑 remote.baize.dev · 权限「发布要确认」");
+  await expect(diary.getByTestId("account-where")).toHaveText("在远程电脑 remote.baize.dev");
   await expect(diary.getByTestId("account-login")).toHaveText("已登录");
 
   await xhs.getByTestId("account-tier-toggle").click();
@@ -56,8 +57,31 @@ test("账号页按电脑分组，小红书没有可直接发布", async ({ page,
   await expect(xhs.locator("[data-testid=account-tier-option][data-tier=direct_publish] input")).toBeDisabled();
   await expect(xhs.getByTestId("account-tier-reason")).toHaveText("平台 2026-03-10 起封 AI 托管账号");
   await xhs.locator("[data-testid=account-tier-option][data-tier=confirm_publish] input").click();
-  await expect(xhs.getByTestId("account-where"), "改档走 PATCH，说明行跟着换").toHaveText(
-    "在本机 · 权限「发布要确认」",
+  await expect(xhs.getByTestId("account-tier"), "改档走 PATCH，档位标跟着换").toHaveText("发布要确认");
+});
+
+test("没登录的号，登录按钮在它自己的卡里；X 的风险提示单独一行在入口下面", async ({ page }) => {
+  await login(page);
+  await openSettings(page);
+  await page.getByTestId("settings-nav-accounts").click();
+
+  const box = async (locator: ReturnType<Page["getByTestId"]>) => {
+    const found = await locator.boundingBox();
+    if (found === null) throw new Error("没渲染出来");
+    return found;
+  };
+  const xhs = page.getByTestId("account-row").filter({ hasText: "要务机械星球" });
+  const card = await box(xhs);
+  const open = await box(xhs.getByTestId("login-open"));
+  expect(await xhs.evaluate((row) => getComputedStyle(row).borderTopWidth), "整行就是一张有边框的卡").not.toBe("0px");
+  expect(open.y + open.height, "登录按钮落在卡的下边框之内").toBeLessThanOrEqual(card.y + card.height);
+  expect(open.x + open.width, "登录按钮落在卡的右边框之内").toBeLessThanOrEqual(card.x + card.width);
+
+  const entry = await box(page.locator("[data-testid=account-connect-browser][data-platform=x]"));
+  const risk = await box(page.locator("[data-testid=account-connect-risk][data-platform=x]"));
+  const xhsEntry = await box(page.locator("[data-testid=account-connect-browser][data-platform=xiaohongshu]"));
+  expect(risk.y, "风险提示在按钮那一行下面").toBeGreaterThanOrEqual(
+    Math.max(entry.y + entry.height, xhsEntry.y + xhsEntry.height),
   );
 });
 

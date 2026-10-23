@@ -223,7 +223,7 @@ export const ConnectEntries = ({ computers, openLogin }: Props) => {
             </a>
           );
         }
-        const { platform, label, risk } = entry;
+        const { platform, label } = entry;
         return (
           <span className="account-connect-browser" key={`computer-${platform}`}>
             {target.kind === "many" ? (
@@ -249,14 +249,21 @@ export const ConnectEntries = ({ computers, openLogin }: Props) => {
                 {label}
               </button>
             )}
-            {risk === null ? null : (
-              <small className="account-connect-risk" data-testid="account-connect-risk" data-platform={platform}>
-                {risk}
-              </small>
-            )}
           </span>
         );
       })}
+      {ENTRIES.map((entry) =>
+        entry.via === "computer" && entry.risk !== null ? (
+          <small
+            className="account-connect-risk"
+            key={`risk-${entry.platform}`}
+            data-testid="account-connect-risk"
+            data-platform={entry.platform}
+          >
+            {entry.risk}
+          </small>
+        ) : null,
+      )}
       {note === null ? null : (
         <small className="account-connect-note" data-testid="account-connect-note">
           {note}

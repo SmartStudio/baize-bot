@@ -117,7 +117,7 @@ const AccountRow = ({
             {PLATFORM[account.platform]} · {handle}
           </b>
           <small data-testid="account-where">
-            在{computer === undefined ? "未同步的电脑" : computerName(computer)} · 权限「{TIER[account.tier].title}」
+            在{computer === undefined ? "未同步的电脑" : computerName(computer)}
           </small>
           <small className="account-via" data-testid="account-via" data-via={account.via}>
             连接方式：{VIA_TEXT[account.via]}
