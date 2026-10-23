@@ -331,6 +331,7 @@ export const MainWindow = () => {
           onDecide={actions.decideApproval}
           onOpenGroup={openGroupPage}
           onOpenAccounts={() => setOverlay("accounts")}
+          onCreateTable={async (requestId) => openProjectPage(await actions.createPokerTable(requestId))}
         />
       )}
       {inspected !== null ? (

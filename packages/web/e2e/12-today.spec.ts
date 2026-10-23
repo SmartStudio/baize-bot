@@ -199,3 +199,18 @@ test("记录首页 50 条数据的渲染中位数", async ({ page, request }) =>
   console.log(`TODAY_MEDIAN_MS=${median.toFixed(1)}`);
   expect(Number.isFinite(median)).toBe(true);
 });
+
+test("今天页第三个模板「和 AI 打一局」直接开一桌，进牌桌的项目页", async ({ page }) => {
+  await login(page);
+  await expect(page.getByTestId("today-page")).toBeVisible();
+  await expect(page.getByTestId("today-templates").getByRole("button")).toHaveText([
+    "推广一个产品",
+    "运营一个号",
+    "和 AI 打一局",
+  ]);
+
+  await page.getByRole("button", { name: "和 AI 打一局" }).click();
+  await expect(page, "进新桌的项目页").toHaveURL(/\/p\/grp_poker_/);
+  await expect(page.getByTestId("poker-project")).toBeVisible();
+  await expect(page.getByTestId("poker-seat-name")).toHaveText(["阿豹", "茉莉", "大刘", "老白"]);
+});
