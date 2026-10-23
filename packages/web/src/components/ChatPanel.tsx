@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, SendHorizontal, Sparkles, Users } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
@@ -19,6 +19,7 @@ import { TeamComputerNotes, TeamComputers, type ComputerChoicesView } from "./Co
 import { TaskCard } from "./TaskCard.js";
 import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js";
 import { prefillOf } from "./routines/prefill.js";
+import { useComposerDraft } from "../state/composer-drafts.js";
 import type { ContentBook, LoadStatus } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
@@ -123,13 +124,13 @@ export const ChatPanel = ({
   botPanelOpen,
   onToggleBotPanel,
 }: Props) => {
-  const [draft, setDraft] = useState("");
+  const groupId = conversation.groupId;
+  const [draft, setDraft] = useComposerDraft(groupId);
   const [pickerOff, setPickerOff] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
   const [showScroll, setShowScroll] = useState(false);
-  const input = useRef<HTMLInputElement>(null);
-  const groupId = conversation.groupId;
+  const input = useRef<HTMLTextAreaElement>(null);
   const team = conversation.kind === "team";
   // 交接卡上的清单指针要指出那一项的正文。单 Bot 群没有任务卡，也就没有清单可指。
   const checklist = conversation.kind === "team" ? conversation.task.checklist : NO_CHECKLIST;
@@ -165,10 +166,17 @@ export const ChatPanel = ({
   const prefill = prefillOf(location.state);
   useEffect(() => {
     if (prefill === null) return;
-    setDraft(prefill);
+    setDraft(groupId, prefill);
     input.current?.focus();
     navigate(location.pathname, { replace: true, state: null });
-  }, [prefill, location.pathname, navigate]);
+  }, [prefill, groupId, location.pathname, navigate, setDraft]);
+
+  useLayoutEffect(() => {
+    const box = input.current;
+    if (box === null) return;
+    box.style.height = "auto";
+    box.style.height = `${box.scrollHeight}px`;
+  }, [draft]);
 
   // 流式回复只让最后一条变长，条数不变；用户向上读历史时不能抢走滚动位置。
   useEffect(() => {
@@ -198,19 +206,22 @@ export const ChatPanel = ({
       : [];
 
   const mention = (name: string) => {
-    setDraft(draft.replace(MENTION, `@${name} `));
+    setDraft(groupId, draft.replace(MENTION, `@${name} `));
     input.current?.focus();
   };
 
   const insertSkill = (name: string) => {
-    setDraft(draft.replace(SLASH, (_full, head: string) => `${head}/${name} `));
+    setDraft(
+      groupId,
+      draft.replace(SLASH, (_full, head: string) => `${head}/${name} `),
+    );
     input.current?.focus();
   };
 
   const projectOfferActions: ProjectOfferActions = {
     decide: onDecideProjectOffer,
     revise: () => {
-      setDraft("改一下：");
+      setDraft(groupId, "改一下：");
       input.current?.focus();
     },
     open: onOpenProject,
@@ -220,9 +231,9 @@ export const ChatPanel = ({
     event.preventDefault();
     const text = draft.trim();
     if (text.length === 0) return;
-    setDraft("");
+    setDraft(groupId, "");
     // 发失败了把字还回去，别让用户重打一遍。
-    void onSend(groupId, text).catch(() => setDraft(text));
+    void onSend(groupId, text).catch(() => setDraft(groupId, text));
   };
 
   return (
@@ -387,18 +398,23 @@ export const ChatPanel = ({
           </div>
         ) : null}
         <div className="composer">
-          <input
+          <textarea
             ref={input}
             data-testid="composer-input"
+            rows={1}
             value={draft}
             placeholder={team ? `给 ${conversation.task.title} 发消息` : `给 ${lead?.name ?? "Bot"} 发消息`}
             aria-label="发消息"
             onChange={(e) => {
               setPickerOff(false);
-              setDraft(e.target.value);
+              setDraft(groupId, e.target.value);
             }}
             onKeyDown={(e) => {
               if (e.key === "Escape") setPickerOff(true);
+              // 输入法组字时的回车是上屏。Safari 组字刚结束的那下回车 isComposing 已经是 false，只剩 keyCode 229 认得出。
+              if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing || e.keyCode === 229) return;
+              e.preventDefault();
+              e.currentTarget.form?.requestSubmit();
             }}
           />
           <button type="submit" className="send-button" data-testid="composer-send" aria-label="发送">

@@ -21,6 +21,7 @@ import { previewOf } from "../components/messages/preview.js";
 import type { BotLookup } from "../components/messages/MessageView.js";
 import type { Conversation } from "../state/types.js";
 import { byCreatedAt } from "../state/order.js";
+import { useComposerDraft } from "../state/composer-drafts.js";
 import { dueTextOf } from "../components/TaskCard.js";
 import { goalBarValue, goalProgressOf, goalText, numberText, weekDeltaText, type Project } from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
@@ -145,12 +146,12 @@ export const ProjectPage = ({
   onArchive,
 }: Props) => {
   const { status, data, error, refresh } = project;
-  const [draft, setDraft] = useState("");
+  const task = conversation.task;
+  const groupId = conversation.groupId;
+  const [draft, setDraft] = useComposerDraft(groupId);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
-  const task = conversation.task;
-  const groupId = conversation.groupId;
   const members = conversation.botIds.flatMap((botId) => {
     const bot = bots[botId];
     return bot === undefined ? [] : [bot];
@@ -181,7 +182,7 @@ export const ProjectPage = ({
   const working = data.working[0];
   // 调整队伍就是跟主助理说一句：预填开头把话头递过去，已经打了字的不覆盖。
   const adjustTeam = () => {
-    setDraft((current) => (current.trim() === "" ? ADJUST_TEAM_DRAFT : current));
+    if (draft.trim() === "") setDraft(groupId, ADJUST_TEAM_DRAFT);
     input.current?.focus();
   };
   const submit = (event: React.FormEvent) => {
@@ -191,7 +192,7 @@ export const ProjectPage = ({
     setSending(true);
     setSendError(null);
     void onSend(groupId, text)
-      .then(() => setDraft(""))
+      .then(() => setDraft(groupId, ""))
       .catch(() => setSendError("没发出去，请重试"))
       .finally(() => setSending(false));
   };
@@ -259,7 +260,7 @@ export const ProjectPage = ({
             value={draft}
             aria-label="对这个项目说一句"
             placeholder="对这个项目说一句，比如「这周多发两条小红书」"
-            onChange={(event) => setDraft(event.target.value)}
+            onChange={(event) => setDraft(groupId, event.target.value)}
           />
           <button
             type="submit"
