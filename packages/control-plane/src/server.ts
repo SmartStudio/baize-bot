@@ -41,10 +41,7 @@ export const WS_PATH = "/api/ws";
 /** 网页在 /api/ws 上不发数据帧，来了超过 1 KiB 的就不是我们的网页。 */
 const PUSH_MAX_PAYLOAD = 1024;
 
-/**
- * 上行最大的是至多 64 行会话的 work_append（本机会话实测单行不到 25 KB）和至多 1 MiB 的 mcp_discovered，
- * 留到 16 MiB 是因为超限的可靠帧重连后照样重发，卡紧了这台电脑就再也连不上。
- */
+/** work_append 只限 64 行不限字节，超限的可靠帧重连后照样重发，卡紧了这台电脑就再也连不上，所以远高于 1 MiB 的 mcp_discovered。 */
 const AGENT_MAX_PAYLOAD = 16 * 1024 * 1024;
 
 /** 扫一遍放了一天还没有结论的审批和还没人确认的交接。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
