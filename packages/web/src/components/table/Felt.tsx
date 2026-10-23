@@ -77,7 +77,7 @@ const Seat = ({
       </span>
       {seat.won > 0 ? (
         <span className="felt-won" data-testid="seat-won">
-          赢 {formatChips(seat.won)}
+          收回 {formatChips(seat.won)}
         </span>
       ) : null}
     </div>

@@ -208,6 +208,13 @@ test("一手结束出现再来一手和散场看复盘", async ({ page }) => {
   await expect(end.getByTestId("hand-result"), "结果写你赢了多少").toContainText(
     `你赢了 ${net.toLocaleString("en-US")} 筹码`,
   );
+  await expect(end.getByTestId("hand-detail"), "底池里扣掉自己全下的那 2,000 才是净赢").toContainText(
+    "扣掉你自己下的 2,000",
+  );
+  await expect(
+    page.getByTestId("felt-me").getByTestId("seat-won"),
+    "座位徽标是收回的底池总额，不写成「赢」，免得和标题的净赢对不上",
+  ).toHaveText(`收回 ${(net + 2000).toLocaleString("en-US")}`);
 });
 
 test("再来一手后手牌换新、庄位转", async ({ page }) => {

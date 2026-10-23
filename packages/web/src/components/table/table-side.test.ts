@@ -170,6 +170,22 @@ describe("handResult", () => {
     expect(result?.detail).toBe("底池 800 归你（一对 K）");
   });
 
+  it("你分到底池时写出自己下了多少，底池减去它就是标题里的净赢", () => {
+    const me = mineOf(started);
+    const result = handResult(
+      withView(started, {
+        street: "complete",
+        events: [
+          { kind: "blind", seatId: me, amount: 100 },
+          { kind: "action", seatId: me, action: { kind: "raise", amount: 360 }, put: 260 },
+        ],
+        awards: [{ seatId: me, amount: 800, pot: 0 }],
+      }),
+    );
+    expect(result?.headline).toBe("你赢了 440 筹码");
+    expect(result?.detail).toBe("底池 800 归你，其他人都弃了牌。扣掉你自己下的 360");
+  });
+
   it("结算里的座位 id 对回座位名，认不出的写对手；没摊牌说明别人都弃了", () => {
     const me = mineOf(started);
     const result = handResult(
