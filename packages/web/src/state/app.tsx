@@ -18,6 +18,7 @@ import {
   type DraftId,
   type ProjectResponse,
   type TodayResponse,
+  type Bot,
   type BotId,
   type BotTemplate,
   type ExportTemplateRequest,
@@ -76,8 +77,9 @@ export type AppActions = {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
-  // 建完返回新群，由调用方跳过去。登录过期时是 undefined。
-  createBot: () => Promise<GroupId | undefined>;
+  // 建完返回新 Bot 和它的单聊，由调用方跳过去。登录过期时是 undefined。
+  createBot: () => Promise<{ bot: Bot; groupId: GroupId } | undefined>;
+  deleteBot: (botId: BotId) => Promise<void>;
   // 分享包建出的新 Bot 只进团队，不跳走。登录过期时是 undefined。
   importBot: (template: BotTemplate) => Promise<BotId | undefined>;
   // 导入在服务端新建了插件连接，不补进本地工具表，马上再分享时说明会漏数插件。和导入分开，失败了只重试这一步。
@@ -474,7 +476,11 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       createBot: signedIn(async ({ api, put }) => {
         const { bot, group } = await api.createBot({});
         put({ type: "bot_created", bot, groupId: group.id });
-        return group.id;
+        return { bot, groupId: group.id };
+      }),
+      deleteBot: signedIn(async ({ api, put }, botId: BotId) => {
+        await api.deleteBot(botId);
+        put({ type: "bot_removed", botId });
       }),
       importBot: signedIn(async ({ api, put }, template: BotTemplate) => {
         const { bot, group } = await api.importTemplate(template);
