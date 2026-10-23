@@ -1,4 +1,4 @@
-import { TEAM_TITLE, expect, login, openBot, test, type Page } from "./fixtures";
+import { TEAM_TITLE, expect, login, openBot, openSeededBot, test, type Page } from "./fixtures";
 
 const userTexts = (page: Page) => page.getByTestId("message-list").locator("[data-kind=user]");
 
@@ -19,6 +19,7 @@ const holdNextSend = async (page: Page) => {
 const openAssistant = async (page: Page) => {
   await page.getByTestId("assistant-nav").click();
   await expect(page.getByTestId("assistant-nav")).toHaveAttribute("aria-current", "page");
+  await expect(page.getByTestId("message-list").getByTestId("message"), "主助理的开场白到了").not.toHaveCount(0);
 };
 
 test("输入框草稿按群分存：切到别的群是空的，回车不会把上一个群的草稿发过去，切回来草稿还在", async ({ page }) => {
@@ -81,7 +82,7 @@ test("项目页的输入框也按群分存，换到别的项目不带过去", as
 
 test("输入框是多行的：Shift+Enter 换行，Enter 发送，越写越高", async ({ page }) => {
   await login(page);
-  await openBot(page, "小销");
+  await openSeededBot(page, "小销");
   const input = page.getByTestId("composer-input");
   await input.fill("第一行");
   const oneLine = (await input.boundingBox())?.height ?? 0;
@@ -103,7 +104,7 @@ test("输入框是多行的：Shift+Enter 换行，Enter 发送，越写越高",
 
 test("输入法组字时按回车只是上屏，不发送", async ({ page }) => {
   await login(page);
-  await openBot(page, "小销");
+  await openSeededBot(page, "小销");
   const input = page.getByTestId("composer-input");
   await input.focus();
   const before = await userTexts(page).count();
