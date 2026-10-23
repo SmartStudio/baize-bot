@@ -1,5 +1,13 @@
 import { connect } from "./db/client.js";
-import { databaseUrl, port, runtimeConfig, secureCookie, trustedProxyHops } from "./env.js";
+import {
+  credentialsKey,
+  databaseUrl,
+  port,
+  runtimeConfig,
+  secureCookie,
+  toolSecretKey,
+  trustedProxyHops,
+} from "./env.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { startServer, type RunningServer } from "./server.js";
 
@@ -47,6 +55,8 @@ process.on("uncaughtException", (error) => {
 });
 
 try {
+  // 钥匙先验：缺了直接拒绝启动，不去连库，也不占单实例锁。
+  const keys = { toolSecretKey: toolSecretKey(), credentialsKey: credentialsKey() };
   await acquireInstanceLock(databaseUrl(), () => {
     console.error("持有单实例锁的库连接断了，别的实例可能已经拿走了锁，按停机流程退出");
     stop(1);
@@ -58,6 +68,7 @@ try {
     secureCookie: secureCookie(),
     trustedProxyHops: trustedProxyHops(),
     config: runtimeConfig(),
+    ...keys,
   });
 } catch (error) {
   console.error("控制面没起来", error);
