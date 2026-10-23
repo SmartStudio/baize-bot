@@ -1009,6 +1009,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       socket = new WebSocket(`${scheme}://${window.location.host}/api/ws`);
       socket.addEventListener("open", () => {
         failures = 0;
+        put({ type: "push_link", link: "open" });
         if (hasConnected) {
           put({ type: "push_reconnected", seq: nextSeq() });
           refreshPendingCounts();
@@ -1031,6 +1032,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       // 分不出是登录过期还是断网，拿这次会话打一下 /api/me 问清楚：401 回登录页，别的按退避再连。
       socket.addEventListener("close", () => {
         if (!live()) return;
+        put({ type: "push_link", link: "connecting" });
         scoped.api.me().then(
           () => {
             if (live()) retryLater();

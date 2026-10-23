@@ -13,6 +13,7 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
 import { BotCreatedNotice } from "../components/BotCreatedNotice.js";
+import { PushBanner } from "../components/PushBanner.js";
 import { LiveHost } from "../live/LiveHost.js";
 import { TodayPage } from "./TodayPage.js";
 import { PokerProjectPage } from "./PokerProjectPage.js";
@@ -233,6 +234,7 @@ export const MainWindow = () => {
 
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
+      <PushBanner link={ready.pushLink} />
       <Sidebar
         screen={screen}
         conversations={ready.conversations}
