@@ -150,3 +150,33 @@ describe("登录态", () => {
     expect(response.status, "退出后原来那个 cookie 不应当还能用").toBe(401);
   });
 });
+
+describe("过期会话", () => {
+  it("过期的 cookie 访问受保护接口是 401，清理一轮后那一行没了，没过期的照常可用", async () => {
+    const expiring = server.client();
+    const fresh = server.client();
+    await expiring.login(email, PASSWORD);
+    await fresh.login(email, PASSWORD);
+    const expiringToken = sessionToken(expiring.cookie);
+    const freshToken = sessionToken(fresh.cookie);
+
+    await database.sql`UPDATE sessions SET expires_at = now() - interval '1 second' WHERE id = ${expiringToken}`;
+
+    expect((await expiring.get("/api/me")).status, "过期的会话不应当还能用").toBe(401);
+    expect(await server.server.sweepExpiredSessions(new Date()), "这一轮应当恰好清掉那一条过期会话").toBe(1);
+    expect(await sessionRows(expiringToken), "过期的会话行应当被删掉").toBe(0);
+    expect(await sessionRows(freshToken), "没过期的会话行不应当被删").toBe(1);
+    expect((await fresh.get("/api/me")).status, "没过期的会话清理后照常可用").toBe(200);
+  });
+});
+
+function sessionToken(cookie: string | null): string {
+  const token = cookie?.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`))?.[1];
+  if (token === undefined) throw new Error("登录后应当拿到会话 cookie");
+  return token;
+}
+
+async function sessionRows(token: string): Promise<number> {
+  const [row] = await database.sql<{ n: string }[]>`SELECT count(*) AS n FROM sessions WHERE id = ${token}`;
+  return Number(row?.n);
+}
