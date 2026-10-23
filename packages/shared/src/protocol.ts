@@ -677,6 +677,9 @@ export const UplinkRejection = z.object({
 });
 export type UplinkRejection = z.infer<typeof UplinkRejection>;
 
+/** 控制面 /agent 收的单帧上限。超限的可靠帧被关后重连照样重发，所以发送方要先按它切，不能等控制面拒。 */
+export const AGENT_FRAME_MAX_BYTES = 16 * 1024 * 1024;
+
 export const UplinkFrame = z.object({
   type: z.literal("uplink"),
   conn: z.number().int().positive(),

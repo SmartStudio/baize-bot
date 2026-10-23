@@ -1,4 +1,5 @@
 import { serve } from "@hono/node-server";
+import { AGENT_FRAME_MAX_BYTES } from "@baize/shared";
 import { parse as parseCookie } from "hono/utils/cookie";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
@@ -40,9 +41,6 @@ export const WS_PATH = "/api/ws";
 
 /** 网页在 /api/ws 上不发数据帧，来了超过 1 KiB 的就不是我们的网页。 */
 const PUSH_MAX_PAYLOAD = 1024;
-
-/** work_append 只限 64 行不限字节，超限的可靠帧重连后照样重发，卡紧了这台电脑就再也连不上，所以远高于 1 MiB 的 mcp_discovered。 */
-const AGENT_MAX_PAYLOAD = 16 * 1024 * 1024;
 
 /** 扫一遍放了一天还没有结论的审批和还没人确认的交接。提醒本身只发一次，扫得勤一点只是让它准时一点。 */
 const REMIND_INTERVAL_MS = 60 * 60 * 1000;
@@ -188,7 +186,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
   });
   const clients = new WebSocketServer({ noServer: true, maxPayload: PUSH_MAX_PAYLOAD });
-  const agentSockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_MAX_PAYLOAD });
+  const agentSockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_FRAME_MAX_BYTES });
   // 网页往上只发输入、结束和看密码，最大的是 2000 字的整段上屏，64KB 绰绰有余。
   const viewers = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
 
