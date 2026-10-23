@@ -272,15 +272,24 @@ const RoutineRow = ({
   onOpen,
   onEdit,
   onSwitch,
+  onResult,
 }: {
   routine: Routine;
   bot: Bot;
   onOpen: () => void;
   onEdit: () => void;
   onSwitch: (state: SwitchTo) => void;
+  onResult: (() => void) | null;
 }) => {
   const { actions } = useApp();
   const last = routine.runs[0];
+  // 回包前那一下运行记录还没多出来，靠本地这一笔挡住连点。
+  const [starting, setStarting] = useState(false);
+  const running = starting || last?.status === "running";
+  const trial = () => {
+    setStarting(true);
+    void actions.runRoutine(routine.id).finally(() => setStarting(false));
+  };
   return (
     <div
       className="routine-row"
@@ -312,19 +321,19 @@ const RoutineRow = ({
           <span data-testid="routine-run-count">
             {routine.runs.length === 0 ? "还没跑过" : `跑过 ${routine.runs.length} 次`}
           </span>
+          {last === undefined || running || onResult === null ? null : (
+            <button type="button" className="link-button" data-testid="routine-result" onClick={onResult}>
+              看结果
+            </button>
+          )}
         </span>
       </div>
       <div className="routine-row-actions">
         {routine.state === "on" ? (
           <>
-            <button
-              type="button"
-              className="ghost-button"
-              data-testid="routine-run"
-              onClick={() => void actions.runRoutine(routine.id)}
-            >
+            <button type="button" className="ghost-button" data-testid="routine-run" disabled={running} onClick={trial}>
               <Play size={14} aria-hidden="true" />
-              试跑
+              {running ? "试跑中…" : "试跑"}
             </button>
             <button
               type="button"
@@ -395,6 +404,14 @@ export const RoutinesPage = () => {
   const talk = (text: string) => {
     if (assistantGroupId !== null)
       navigate(pathOf({ kind: "group", groupId: assistantGroupId }), { state: prefillState(text) });
+  };
+  // 例行跑出来的话在它发进的那个群里：挂了项目的是项目群，不挂的是这个 Bot 的单 Bot 群。
+  const resultOf = (routine: Routine) => {
+    const groupId =
+      routine.groupId ??
+      ready.conversations.find((c) => c.kind === "solo" && c.botId === routine.botId)?.groupId ??
+      null;
+    return groupId === null ? null : () => navigate(pathOf({ kind: "group", groupId }));
   };
   const toList = () => {
     setDeleteRoutineId(null);
@@ -565,6 +582,7 @@ export const RoutinesPage = () => {
                   onOpen={() => setView({ kind: "editing", routineId: routine.id })}
                   onEdit={() => talk(editPrefill(routine.name))}
                   onSwitch={(to) => switchRoutine(routine, to)}
+                  onResult={resultOf(routine)}
                 />
               );
             })}

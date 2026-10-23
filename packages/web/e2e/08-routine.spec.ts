@@ -138,3 +138,26 @@ test("给 webhook 地址打一下，群里照样跑起来，运行记录靠推�
     "从哪儿触发的，群里都是同样一条标着例行任务的消息",
   ).toHaveText("例行任务「每日工单早报」");
 });
+
+test("列表上点试跑，跑的时候按钮写试跑中不能连点，停下后给一个看结果的链接", async ({ page }) => {
+  await login(page);
+  await openRoutines(page, "小服");
+  const row = page.locator('[data-testid=routine-row][data-routine-name="每日工单早报"]');
+  const trial = row.getByTestId("routine-run");
+  await expect(row.getByTestId("routine-run-count")).toHaveText("跑过 3 次");
+
+  await trial.click();
+  await expect(trial, "跑的时候按钮说在跑").toHaveText("试跑中…");
+  await expect(trial, "跑的时候不能连点").toBeDisabled();
+  await expect(row.getByTestId("routine-result"), "还没跑完不给看结果").toHaveCount(0);
+  await expect(row.getByTestId("routine-run-count"), "只多跑了一次").toHaveText("跑过 4 次");
+
+  await expect(row.getByTestId("routine-last"), "指令里要发摘要，碰上审批就地停下").toContainText("1 条等你点头");
+  await expect(trial, "跑完按钮复原").toHaveText("试跑");
+  await expect(trial).toBeEnabled();
+  await row.getByTestId("routine-result").click();
+  await expect(page, "结果在小服的单聊里").toHaveURL(/\/g\/grp_service$/);
+  const thread = page.getByTestId("message-list");
+  await expect(thread.getByTestId("routine-label").last()).toHaveText("例行任务「每日工单早报」");
+  await expect(thread.getByTestId("approval-card").last(), "等你点头的那张卡就在这里").toBeVisible();
+});

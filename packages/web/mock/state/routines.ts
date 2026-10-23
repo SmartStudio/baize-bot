@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import {
   Routine,
   RoutineId,
+  type RoutineRun,
   type CreateRoutineRequest,
   type Message,
   type TriggerInput,
@@ -60,10 +61,11 @@ export const writeRoutine = (id: string, patch: UpdateRoutineRequest): Routine |
   return next;
 };
 
-export const runRoutine = (id: string): { routine: Routine; messages: Message[] } | null => {
+export const runRoutine = (id: string): { routine: Routine; groupId: string; messages: Message[] } | null => {
   const routine = routines.get(id);
   if (routine === undefined) return null;
-  const groupId = groupIdByBotId.get(routine.botId);
+  // 和控制面一样：挂了项目群的发进项目群，不挂的发进这个 Bot 的单 Bot 群。
+  const groupId = routine.groupId ?? groupIdByBotId.get(routine.botId);
   if (groupId === undefined) return null;
   const messages = [
     appendMessage(groupId, { kind: "user", text: routine.instruction, routine: { name: routine.name } }),
@@ -74,5 +76,23 @@ export const runRoutine = (id: string): { routine: Routine; messages: Message[] 
   ].slice(0, RUN_CAP);
   const next = Routine.parse({ ...routine, runs });
   routines.set(next.id, next);
-  return { routine: next, messages };
+  return { routine: next, groupId, messages };
+};
+
+// 照控制面收尾：跑完记完成；中途出审批时 stop_and_tell 就地停下，retry_next_time 只补一句话接着挂。
+// 按开跑时刻认是哪一次，已经收过尾或者重置之后对不上就不动。
+export const settleRoutineRun = (id: string, startedAt: string, outcome: "done" | "held"): Routine | null => {
+  const routine = routines.get(id);
+  if (routine === undefined || !routine.runs.some((run) => run.startedAt === startedAt && run.status === "running"))
+    return null;
+  const settled = (run: RoutineRun): RoutineRun => {
+    if (outcome === "done") return { ...run, status: "ok" };
+    return routine.onFailure === "stop_and_tell"
+      ? { ...run, status: "stopped", note: "1 条等你点头" }
+      : { ...run, note: "等你点头，下次照常跑" };
+  };
+  const runs = routine.runs.map((run) => (run.startedAt === startedAt ? settled(run) : run));
+  const next = Routine.parse({ ...routine, runs });
+  routines.set(next.id, next);
+  return next;
 };

@@ -1,5 +1,15 @@
 import { CreateRoutineRequest, UpdateRoutineRequest, type Routine } from "@baize/shared";
-import { bots, createRoutine, routineByToken, routines, routinesOf, runRoutine, writeRoutine } from "../state.js";
+import {
+  bots,
+  createRoutine,
+  routineByToken,
+  routines,
+  routinesOf,
+  runRoutine,
+  settleRoutineRun,
+  streamBotReply,
+  writeRoutine,
+} from "../state.js";
 import { defined, readBody, send, type Push, type Route } from "./http.js";
 
 export const fireRoutine = (routineId: string, push: Push): Routine | null => {
@@ -7,6 +17,17 @@ export const fireRoutine = (routineId: string, push: Push): Routine | null => {
   if (ran === null) return null;
   push({ type: "routine_updated", routine: ran.routine });
   for (const message of ran.messages) push({ type: "message", message });
+  const { botId, id, instruction, runs } = ran.routine;
+  const startedAt = runs[0]?.startedAt;
+  const settle = (outcome: "done" | "held") => {
+    const settled = startedAt === undefined ? null : settleRoutineRun(id, startedAt, outcome);
+    if (settled !== null) push({ type: "routine_updated", routine: settled });
+  };
+  void streamBotReply(ran.groupId, botId, instruction, push, () => settle("held"))
+    .then(() => settle("done"))
+    .catch((cause: unknown) => {
+      process.stderr.write(`mock 例行回复跑挂了：${String(cause)}\n`);
+    });
   return ran.routine;
 };
 
