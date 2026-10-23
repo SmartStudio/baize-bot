@@ -191,6 +191,7 @@ export type AppDeps = {
   readonly groupTurns: GroupTurns;
   readonly notifications: NoticePublisher;
   readonly secureCookie: boolean;
+  readonly trustedProxyHops: number;
   readonly pokerSeed?: () => string;
   readonly gateway: Omit<GatewayDeps, "db">;
   readonly platformAccounts: {

@@ -76,6 +76,8 @@ export type StartOptions = {
   /** 不给就监听通配地址。测试给 127.0.0.1：macOS 分临时端口时不避开别的进程占在 127.0.0.1 上的同号端口，客户端连 127.0.0.1 会连到别人那里。 */
   readonly hostname?: string;
   readonly secureCookie?: boolean;
+  /** 不给就是 0：只认 socket 地址，不读 X-Forwarded-For。 */
+  readonly trustedProxyHops?: number;
   readonly config?: RuntimeConfig;
   readonly scheduler?: Pick<SchedulerOptions, "now" | "intervalMs">;
   readonly notificationScheduler?: NotificationOptions;
@@ -157,6 +159,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     groupTurns,
     notifications,
     secureCookie: options.secureCookie ?? false,
+    trustedProxyHops: options.trustedProxyHops ?? 0,
     ...(options.poker?.seed === undefined ? {} : { pokerSeed: options.poker.seed }),
     gateway: {
       models: config.gatewayModels,

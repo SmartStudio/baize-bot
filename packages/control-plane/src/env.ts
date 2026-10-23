@@ -13,6 +13,15 @@ export function secureCookie(): boolean {
   return (process.env["COOKIE_SECURE"] ?? "") === "1";
 }
 
+/** 控制面前面有几层自己的反向代理。0 只认 socket 地址，见 http/auth-limits.ts 的 clientIp。 */
+export function trustedProxyHops(): number {
+  const raw = nonEmpty("TRUSTED_PROXY_HOPS");
+  if (raw === null) return 0;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`TRUSTED_PROXY_HOPS 不是非负整数: ${raw}`);
+  return parsed;
+}
+
 export function toolSecretKey(): string {
   const key = nonEmpty("TOOL_SECRET_KEY");
   if (key !== null) return key;

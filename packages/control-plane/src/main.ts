@@ -1,5 +1,5 @@
 import { connect } from "./db/client.js";
-import { databaseUrl, port, runtimeConfig, secureCookie } from "./env.js";
+import { databaseUrl, port, runtimeConfig, secureCookie, trustedProxyHops } from "./env.js";
 import { acquireInstanceLock } from "./instance-lock.js";
 import { startServer, type RunningServer } from "./server.js";
 
@@ -56,6 +56,7 @@ try {
     db,
     port: port(),
     secureCookie: secureCookie(),
+    trustedProxyHops: trustedProxyHops(),
     config: runtimeConfig(),
   });
 } catch (error) {
