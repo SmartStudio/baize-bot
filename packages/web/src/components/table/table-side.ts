@@ -95,7 +95,12 @@ export const handResult = (table: PokerTableView): HandResult | null => {
     const hand = hands.get(seatId);
     return `${formatChips(amount)} 归${nameOf(seatId)}${hand === undefined ? "" : `（${hand}）`}`;
   });
-  const detail = `底池 ${shares.join("，")}${hands.size === 0 ? "，其他人都弃了牌" : ""}`;
+  // 标题是净输赢，底池是你收回的总数，里面有你自己下的注。不写出来，「赢了 440」和「800 归你」对不上。
+  const mine = taken.get(view.seatId);
+  const paid = mine === undefined ? 0 : mine - net;
+  const folded = hands.size === 0 ? "，其他人都弃了牌" : "";
+  const own = paid > 0 ? `。扣掉你自己下的 ${formatChips(paid)}` : "";
+  const detail = `底池 ${shares.join("，")}${folded}${own}`;
   if (net > 0) return { tone: "win", headline: `你赢了 ${formatChips(net)} 筹码`, detail };
   if (net < 0) return { tone: "lose", headline: `你输了 ${formatChips(-net)} 筹码`, detail };
   return { tone: "even", headline: "这手不输不赢", detail };
