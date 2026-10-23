@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "computers_gateway_key_hash_idx" ON "computers" USING btree ("gateway_key_hash");

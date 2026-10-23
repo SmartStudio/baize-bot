@@ -393,7 +393,10 @@ export const computers = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
-  (t) => [uniqueIndex("computers_owner_id_kind_idx").on(t.ownerId, t.kind)],
+  (t) => [
+    uniqueIndex("computers_owner_id_kind_idx").on(t.ownerId, t.kind),
+    uniqueIndex("computers_gateway_key_hash_idx").on(t.gatewayKeyHash),
+  ],
 );
 
 export const accounts = pgTable(
