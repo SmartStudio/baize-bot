@@ -143,7 +143,7 @@ export type GroupTurn = Extract<ServerPush, { type: "group_turn" }>;
 
 export type TeamOfferOutcome = "confirmed" | "dismissed";
 
-export type PushLink = "connecting" | "open";
+export type PushLink = "down" | "open";
 
 export type AppState =
   | { status: "loading" }
@@ -190,7 +190,6 @@ export type AppState =
       usage: UsageResponse;
       content: ContentBook;
       todayVersion: number;
-      // 推送连接没开着时都在连：首次握手、断线后的退避等待和重连握手。
       pushLink: PushLink;
       // 推送最近一次重连时取的号，messagesLoadedAt 是每个群的历史请求发出时取的号。比重连早的历史可能漏了断线时的推送。
       reconnectedAt: Seq;

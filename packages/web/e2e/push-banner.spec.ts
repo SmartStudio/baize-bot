@@ -1,3 +1,4 @@
+import { PUSH_GRACE_MS as GRACE_MS } from "../src/state/reconnect.js";
 import { expect, login, openBot, test, type Page } from "./fixtures";
 
 declare global {
@@ -5,8 +6,6 @@ declare global {
     __pushBannerSeen?: boolean;
   }
 }
-
-const GRACE_MS = 2_000;
 
 const refusePush = async (page: Page, refused: boolean) => {
   expect((await page.request.post("/api/test/sockets/refuse", { data: { refused } })).status()).toBe(204);
