@@ -8,7 +8,6 @@ import {
   ComputerTokenResponse,
   CreateBotResponse,
   CreateGroupResponse,
-  RegisterResponse,
   type BotId,
   type GroupId,
 } from "@baize/shared";
@@ -16,6 +15,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
+import { PASSWORD, makeUser } from "./helpers/fixtures.js";
 
 let database: TestDb;
 let server: TestServer;
@@ -48,13 +48,9 @@ afterAll(async () => {
 
 async function owner() {
   const client = server.client();
-  const registered = await client.post("/api/register", {
-    name: "附件测试",
-    email: `${randomUUID()}@baize.dev`,
-    password: "baize-dev",
-  });
-  expect(registered.status).toBe(201);
-  const { user } = RegisterResponse.parse(await registered.json());
+  // 一个文件建二十几个人，走注册会撞上按 IP 的注册限频。
+  const user = await makeUser(database.db, "附件测试");
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
   const paired = await client.post("/api/computers/local");
   expect(paired.status).toBe(200);
   const computer = ComputerTokenResponse.parse(await paired.json());
