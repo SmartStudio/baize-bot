@@ -10,6 +10,7 @@ import {
   credentialsKey,
   runtimeConfig,
   toolSecretKey,
+  trustedProxyHops,
 } from "../src/env.js";
 
 afterEach(() => {
@@ -187,4 +188,15 @@ it(".env 里留空的地址和工具密钥按没设处理，不把空串下发�
   expect(config.oauth.githubOauthBaseUrl).toBe(DEFAULT_GITHUB_OAUTH_BASE_URL);
   expect(config.oauth.xOauthBaseUrl).toBe(DEFAULT_X_OAUTH_BASE_URL);
   expect(toolSecretKey()).not.toBe("");
+});
+
+it("TRUSTED_PROXY_HOPS 留空是 0，只收非负整数", () => {
+  vi.stubEnv("TRUSTED_PROXY_HOPS", "");
+  expect(trustedProxyHops()).toBe(0);
+  vi.stubEnv("TRUSTED_PROXY_HOPS", "1");
+  expect(trustedProxyHops()).toBe(1);
+  vi.stubEnv("TRUSTED_PROXY_HOPS", "-1");
+  expect(trustedProxyHops).toThrowError("TRUSTED_PROXY_HOPS 不是非负整数: -1");
+  vi.stubEnv("TRUSTED_PROXY_HOPS", "yes");
+  expect(trustedProxyHops).toThrowError("TRUSTED_PROXY_HOPS 不是非负整数: yes");
 });

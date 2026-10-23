@@ -81,6 +81,7 @@ compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些
 | `PRICE_INPUT_PER_M`、`PRICE_OUTPUT_PER_M` | 否 | `0` | 每百万 token 价格，折算 run 的花费（`env.ts:96-97`）。不设用量金额恒为 0 |
 | `GITHUB_API_BASE_URL`、`X_API_BASE_URL`、`GITHUB_OAUTH_BASE_URL`、`X_OAUTH_BASE_URL` | 否 | 各家官方地址，和 `env.ts:84-87` 一致 | 只在验证时指到假平台（`env.ts:98-99`、`:122-123`），生产不用设 |
 | `COOKIE_SECURE` | 上了 HTTPS 就设 | `0` | 设成 `1` 会话 cookie 才带 Secure（`env.ts:12-14`） |
+| `TRUSTED_PROXY_HOPS` | 否 | `1` | 控制面前面有几层反向代理，登录注册按来源 IP 限频时从 `X-Forwarded-For` 右数第几项取来源（`packages/control-plane/src/http/auth-limits.ts` 的 `clientIp`）。compose 默认 `1` 对应同机一层 Caddy；设成 `0` 所有请求都算成 docker 网关一个来源，几十次失败就锁住全站登录。控制面本身不设时是 `0` |
 | `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET` | 否 | 空 | 要一起设，只设一个启动时抛错（`env.ts:113-115`） |
 | `X_CLIENT_ID`、`X_CLIENT_SECRET` | 否 | 空 | 设了 secret 就要设 id（`env.ts:118`） |
 

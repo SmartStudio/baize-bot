@@ -163,6 +163,16 @@ import type { PushHub } from "../ws/hub.js";
 import type { AccountTokens, CredentialCrypto } from "../credentials.js";
 import type { OAuthEndpoints } from "../oauth-providers.js";
 import { ACCOUNTS_PROXY_PATH, createAccountsProxy } from "./accounts-proxy.js";
+import {
+  AttemptCounter,
+  LOGIN_FAILURES_PER_EMAIL,
+  LOGIN_FAILURES_PER_IP,
+  LOGIN_WINDOW_MS,
+  REGISTER_WINDOW_MS,
+  REGISTRATIONS_PER_IP,
+  clientIp,
+  retryAfterSeconds,
+} from "./auth-limits.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
 import { HUB_PATH, createHub } from "./hub.js";
 import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
@@ -288,9 +298,16 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     }),
   );
 
+  const loginFailuresByEmail = new AttemptCounter(LOGIN_FAILURES_PER_EMAIL, LOGIN_WINDOW_MS);
+  const loginFailuresByIp = new AttemptCounter(LOGIN_FAILURES_PER_IP, LOGIN_WINDOW_MS);
+  const registrationsByIp = new AttemptCounter(REGISTRATIONS_PER_IP, REGISTER_WINDOW_MS);
   app.post("/api/register", async (c) => {
     const body = await readJson(c.req.raw, RegisterRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
+    const ip = clientIp(c, deps.trustedProxyHops);
+    const wait = registrationsByIp.blockedFor(ip);
+    if (wait !== null) return tooManyAttempts(c, wait);
+    registrationsByIp.hit(ip);
     let user: User;
     try {
       user = await createUser(db, body.value);
@@ -313,8 +330,18 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
   app.post("/api/auth/login", async (c) => {
     const body = await readJson(c.req.raw, LoginRequest);
     if (!body.ok) return c.json({ error: body.error }, 400);
-    const user = await authenticate(db, body.value.email, body.value.password);
+    const { email, password } = body.value;
+    const ip = clientIp(c, deps.trustedProxyHops);
+    const byEmail = loginFailuresByEmail.blockedFor(email);
+    const byIp = loginFailuresByIp.blockedFor(ip);
+    if (byEmail !== null || byIp !== null) return tooManyAttempts(c, Math.max(byEmail ?? 0, byIp ?? 0));
+    // 验密码要等 scrypt，先按失败记上，并发涌进来的请求在这期间就能看到计数。
+    loginFailuresByEmail.hit(email);
+    loginFailuresByIp.hit(ip);
+    const user = await authenticate(db, email, password);
     if (user === null) return c.json({ error: "邮箱或密码不对" }, 401);
+    loginFailuresByEmail.clear(email);
+    loginFailuresByIp.unhit(ip);
     const token = await createSession(db, user.id);
     // 首次登录时给他登记一台电脑，状态先是创建中，代理第一次握手才转在线。
     await ensureComputer(db, user.id);
@@ -1122,6 +1149,12 @@ const MessageQuery = z.object({
 });
 
 type ReadResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+function tooManyAttempts(c: Context, waitMs: number) {
+  const seconds = retryAfterSeconds(waitMs);
+  c.header("Retry-After", String(seconds));
+  return c.json({ error: `尝试太多次了，请 ${Math.ceil(seconds / 60)} 分钟后再试` }, 429);
+}
 
 // 泛型收在 schema 上而不是 z.ZodType<T>：后者的输入类型会把 BotId 这类品牌化 ID 磨回 string。
 async function readJson<S extends z.ZodTypeAny>(request: Request, schema: S): Promise<ReadResult<z.infer<S>>> {
