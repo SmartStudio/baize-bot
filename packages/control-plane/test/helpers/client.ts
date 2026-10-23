@@ -18,7 +18,7 @@ export async function startTestServer(
   scheduler?: StartOptions["scheduler"],
   notificationScheduler?: NotificationOptions,
   publisher?: StartOptions["publisher"],
-  agentOptions: Pick<StartOptions, "mcpDiscoveryTimeoutMs" | "live"> = {},
+  agentOptions: Pick<StartOptions, "mcpDiscoveryTimeoutMs" | "live" | "trustedProxyHops"> = {},
 ): Promise<TestServer> {
   const server = await startServer({
     db,
