@@ -20,7 +20,7 @@ import { hookRoutes, routineRoutes } from "./routes/routines.js";
 import { skillRoutes } from "./routes/skills.js";
 import { teamOfferRoutes } from "./routes/team-offers.js";
 import { templateRoutes } from "./routes/templates.js";
-import { currentTurns, testRoutes } from "./routes/test.js";
+import { currentTurns, refusingPush, testRoutes } from "./routes/test.js";
 import { todayRoutes } from "./routes/today.js";
 import { toolRoutes } from "./routes/tools.js";
 
@@ -96,6 +96,10 @@ server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "/", "http://localhost");
   const live = LIVE_PATH.exec(url.pathname);
   if ((url.pathname !== "/api/ws" && live === null) || !authed(req)) {
+    socket.destroy();
+    return;
+  }
+  if (live === null && refusingPush()) {
     socket.destroy();
     return;
   }

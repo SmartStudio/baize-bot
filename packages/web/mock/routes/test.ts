@@ -92,10 +92,14 @@ const TestDeltaRequest = z
 const LegacyDescriptionRequest = z.object({ botId: BotId, description: z.string() }).strict();
 const ManyPreferencesRequest = z.object({ botId: BotId, count: z.number().int().min(1).max(100) }).strict();
 const ComputerStatusRequest = z.object({ status: ComputerStatus }).strict();
+const PushRefusalRequest = z.object({ refused: z.boolean() }).strict();
 const activeTurns = new Map<GroupId, Extract<ServerPush, { type: "group_turn" }>>();
 const turnEpochs = new Map<GroupId, number>();
 
+let pushRefused = false;
+
 export const currentTurns = (): Iterable<Extract<ServerPush, { type: "group_turn" }>> => activeTurns.values();
+export const refusingPush = (): boolean => pushRefused;
 
 export const testRoutes: Route = async ({ req, res, path, method, push }) => {
   if (method === "GET" && path === "/api/health") {
@@ -109,8 +113,20 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     resetRegisteredEmails();
     resetLive();
     activeTurns.clear();
+    pushRefused = false;
     turnEpochs.clear();
     send(res, 204);
+    return true;
+  }
+
+  // 掐断推送之后客户端一秒内就重连上了，要让断线持续下去，得先让后面的握手都被拒掉。
+  if (method === "POST" && path === "/api/test/sockets/refuse") {
+    const parsed = PushRefusalRequest.safeParse(await readBody(req));
+    if (!parsed.success) send(res, 400, { error: "要写明拒不拒推送连接" });
+    else {
+      pushRefused = parsed.data.refused;
+      send(res, 204);
+    }
     return true;
   }
 
