@@ -85,6 +85,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
@@ -202,7 +203,7 @@ export type AppDeps = {
 
 export type Env = { Variables: { user: User } };
 
-const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout", "/api/register"]);
+const PUBLIC_PATHS = new Set(["/api/auth/login", "/api/auth/logout", "/api/register", "/api/health"]);
 /** webhook 的 token 本身就是凭据，打这条的人手上没有会话。只豁免这一条路由，多一段路径都不算。 */
 const PUBLIC_HOOK = /^\/api\/hooks\/[^/]+$/;
 
@@ -333,6 +334,16 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (token !== undefined) await deleteSession(db, token);
     deleteCookie(c, SESSION_COOKIE, { path: "/" });
     return c.body(null, 204);
+  });
+
+  app.get("/api/health", async (c) => {
+    if (agents.closing) return c.json({ ok: false, error: "控制面正在停机" }, 503);
+    try {
+      await db.execute(sql`SELECT 1`);
+    } catch {
+      return c.json({ ok: false, error: "连不上数据库" }, 503);
+    }
+    return c.json({ ok: true });
   });
 
   app.get("/api/me", (c) => c.json(MeResponse.parse({ user: c.get("user") })));
