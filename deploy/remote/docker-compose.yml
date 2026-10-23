@@ -57,6 +57,8 @@ services:
       # 工具认证信息的加密密钥，64 位十六进制。换了它，已存的凭据全部解不开。
       TOOL_SECRET_KEY: ${TOOL_SECRET_KEY:?要设工具凭据的加密密钥}
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      # 控制面只绑 127.0.0.1，前面必有一层 Caddy 或 nginx。登录注册按来源 IP 限频，要从 X-Forwarded-For 取真实来源。
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
       # 平台账号令牌的加密密钥，32 字节 base64。换了它，已存的令牌全部解不开。
       CREDENTIALS_KEY: ${CREDENTIALS_KEY:?缺 CREDENTIALS_KEY}
       # 浏览器打开 Web 的地址，OAuth 回调拼在它上面。控制面自己推不出浏览器到得了的地址，所以必填。
