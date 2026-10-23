@@ -296,11 +296,12 @@ export const streamBotReply = async (
   botId: BotId,
   prompt: string,
   push: (event: ServerPush) => void,
+  onHold?: () => void,
 ): Promise<void> => {
   // 开跑那一刻就定下在哪台上跑，这一轮中途换了选择也跑完再说。
   const finish = startRunOn(groupId, botId);
   try {
-    await replyOn(groupId, botId, prompt, push, finish);
+    await replyOn(groupId, botId, prompt, push, finish, onHold);
   } finally {
     finish();
   }
@@ -312,6 +313,7 @@ const replyOn = async (
   prompt: string,
   push: (event: ServerPush) => void,
   finish: () => void,
+  onHold: (() => void) | undefined,
 ): Promise<void> => {
   const run = currentGeneration();
   const abandoned = () => currentGeneration() !== run;
@@ -351,6 +353,7 @@ const replyOn = async (
     // 先推 approval_updated 再推那条消息：卡的状态只在 Approval 上，消息先到的话前端只能先画一张查不到状态的占位。
     push({ type: "approval_updated", approval });
     push({ type: "message", message: card });
+    onHold?.();
     const decision = await waitForDecision(approval.id);
     if (abandoned()) return;
     outcome = approvals.get(approval.id)?.status ?? decision;
