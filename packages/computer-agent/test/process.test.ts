@@ -258,6 +258,8 @@ describe("电脑代理进程", () => {
     60_000,
   );
 
+  // 没有墙钟阈值：从起到退的大头是 tsx 冷编译整棵模块树，CI 并行跑满 CPU 时单这段就要四五秒，量不出停机本身。
+  // 没认 stdin 关闭的话代理会一直连 NOWHERE，第二条重连日志先到。
   it("stdin 关闭后代理自己停机", async () => {
     const child = spawnAgent({});
     const dataDir = await createDataDir();
@@ -272,11 +274,12 @@ describe("电脑代理进程", () => {
 
     try {
       child.stdin.end();
-      await expect(child.waitForExit(5_000)).resolves.toBe("退出 0");
+      const winner = await Promise.race([child.waitForExit(), child.waitForOutput("后重连，第 2 次")]);
+      expect(winner, `输出：${child.output()}`).toBe("退出 0");
     } finally {
       if (child.process.exitCode === null) child.process.kill("SIGKILL");
     }
-  }, 15_000);
+  }, 60_000);
 
   it("welcome 后 stdout 输出固定 online JSON 标记", async () => {
     const server = await startWelcomeServer();
