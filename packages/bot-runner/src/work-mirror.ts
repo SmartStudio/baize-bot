@@ -13,6 +13,7 @@ import {
 import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import {
+  AGENT_FRAME_MAX_BYTES,
   EMPTY_WORK_HEAD,
   HubLaneSnapshot,
   advanceWorkHead,
@@ -31,6 +32,9 @@ import {
   type FileEntry,
 } from "@earendil-works/pi-coding-agent";
 import type { WorkAppender, WorkAppendOutcome } from "./lane-fence.js";
+
+/** 留给 work_append 其余字段和可靠上行信封。 */
+const WORK_APPEND_LINES_MAX_BYTES = AGENT_FRAME_MAX_BYTES - 64 * 1024;
 
 const MirrorStream = z.object({
   sessionFile: z.string().nullable(),
@@ -291,13 +295,26 @@ export class WorkMirror {
         this.#snapshot !== undefined && this.#snapshot.toolFingerprint !== toolListFingerprint(localOnlyToolNames)
           ? this.#filter(entries.slice(0, this.#uploaded).map((entry) => JSON.stringify(entry))).snapshot
           : this.#snapshot;
-      const retainer = createRetainer({ localOnlyToolNames }, start);
+      let retainer = createRetainer({ localOnlyToolNames }, start);
       const lines: string[] = [];
+      let bytes = 0;
       for (const entry of pending) {
         const retained = retainer.retain(JSON.stringify(entry));
         if (retained.status === "rejected") return this.#stop({ kind: "invalid", reason: retained.reason });
+        bytes += Buffer.byteLength(JSON.stringify(retained.line)) + 1;
+        if (bytes > WORK_APPEND_LINES_MAX_BYTES) {
+          if (lines.length === 0) {
+            this.#options.log(`工作记录第 ${this.#seq} 条超过上行帧上限`);
+            return this.#stop({ kind: "invalid" });
+          }
+          // 超限的那条已经记进了 retainer 见过的 id，不重来的话下一帧再送它会被判成重复。
+          retainer = createRetainer({ localOnlyToolNames }, start);
+          for (const kept of pending.slice(0, lines.length)) retainer.retain(JSON.stringify(kept));
+          break;
+        }
         lines.push(retained.line);
       }
+      const batch = pending.slice(0, lines.length);
       const head = await advanceWorkHead(this.#head, lines);
       if (revision !== this.#revision || this.#control.signal.aborted) return { kind: "disconnected" };
       let result: WorkAppendOutcome;
@@ -379,7 +396,7 @@ export class WorkMirror {
           filtered.snapshot,
         );
         const replacement: string[] = [];
-        for (const entry of pending) {
+        for (const entry of batch) {
           const retained = refreshed.retain(JSON.stringify(entry));
           if (retained.status === "rejected") return this.#stop({ kind: "invalid", reason: retained.reason });
           replacement.push(retained.line);
