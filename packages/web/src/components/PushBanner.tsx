@@ -1,16 +1,14 @@
 import { useEffect, useState } from "react";
 import { WifiOff } from "lucide-react";
+import { PUSH_GRACE_MS } from "../state/reconnect.js";
 import type { PushLink } from "../state/types.js";
-
-// 掐断后第一次重连在 1 秒后，顺利的话这之内就连回来了，不值得打扰人。
-const GRACE_MS = 2_000;
 
 // 播报区域一直挂着，读屏要先认识这块区域，后来塞进去的字才会念。
 export const PushBanner = ({ link }: { link: PushLink }) => {
   const [lagging, setLagging] = useState(false);
   useEffect(() => {
     if (link === "open") return;
-    const timer = setTimeout(() => setLagging(true), GRACE_MS);
+    const timer = setTimeout(() => setLagging(true), PUSH_GRACE_MS);
     return () => {
       clearTimeout(timer);
       setLagging(false);

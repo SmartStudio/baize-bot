@@ -119,7 +119,6 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
     return true;
   }
 
-  // 掐断推送之后客户端一秒内就重连上了，要让断线持续下去，得先让后面的握手都被拒掉。
   if (method === "POST" && path === "/api/test/sockets/refuse") {
     const parsed = PushRefusalRequest.safeParse(await readBody(req));
     if (!parsed.success) send(res, 400, { error: "要写明拒不拒推送连接" });

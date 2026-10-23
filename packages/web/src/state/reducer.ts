@@ -58,7 +58,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     usage,
     content: EMPTY_CONTENT,
     todayVersion: 0,
-    pushLink: "connecting",
+    pushLink: "down",
     reconnectedAt: 0 as Seq,
     messagesLoadedAt: {},
     messageGaps: {},
