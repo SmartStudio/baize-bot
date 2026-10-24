@@ -2,7 +2,15 @@ import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AGENT_FRAME_MAX_BYTES, type AgentToControl, BotId, GroupId, MessageId, RunId } from "@baize/shared";
+import {
+  AGENT_FRAME_MAX_BYTES,
+  type AgentToControl,
+  BotId,
+  GroupId,
+  MessageId,
+  RunId,
+  type ToolView,
+} from "@baize/shared";
 import { DownlinkCursor, ReliableOutbox } from "../src/reliable-transport.js";
 
 const directories: string[] = [];
@@ -248,17 +256,17 @@ describe("发件箱入口的单帧上限", () => {
     });
   });
 
-  it("工具视图里的命令、路径、预览、参数本身超限时一并截短注明，审批卡和工具卡都收进上限", async () => {
+  it("工具卡只是展示，命令、路径、预览、参数本身超限时一并截短注明，收进上限", async () => {
     const outbox = await ReliableOutbox.open(await dataDir());
     const huge = oversized("令a");
-    const approval = await outbox.append({
-      type: "approval_request",
+    const bash = await outbox.append({
+      type: "bot_tool_call",
       ...lane,
       callId: "call-1",
       tool: "bash",
-      action: "write_workspace",
-      target: null,
       view: { kind: "bash", command: huge, note: huge, raw: { command: huge } },
+      status: "running",
+      durationMs: null,
     });
     const write = await outbox.append({
       type: "bot_tool_call",
@@ -270,15 +278,15 @@ describe("发件箱入口的单帧上限", () => {
       durationMs: 1,
     });
     const mcp = await outbox.append({
-      type: "approval_request",
+      type: "bot_tool_call",
       ...lane,
       callId: "call-3",
       tool: "search",
-      action: "write_workspace",
-      target: null,
       view: { kind: "mcp", server: "搜索", tool: "search", params: [{ key: "q", value: [huge] }] },
+      status: "ok",
+      durationMs: 1,
     });
-    for (const stored of [approval, write, mcp])
+    for (const stored of [bash, write, mcp])
       expect(wireBytes(outbox, stored)).toBeLessThanOrEqual(AGENT_FRAME_MAX_BYTES);
     const clipped = (text: unknown): void => {
       if (typeof text !== "string") throw new Error(`不是字符串：${typeof text}`);
@@ -288,19 +296,105 @@ describe("发件箱入口的单帧上限", () => {
       expect(huge.startsWith(kept) || JSON.stringify([huge]).startsWith(kept)).toBe(true);
       expect(kept).not.toContain("\uFFFD");
     };
-    if (approval.body.type !== "approval_request" || approval.body.view.kind !== "bash")
-      throw new Error("审批卡变了形");
-    clipped(approval.body.view.command);
-    clipped(approval.body.view.note);
-    expect(approval.body.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    if (bash.body.type !== "bot_tool_call" || bash.body.view.kind !== "bash") throw new Error("工具卡变了形");
+    clipped(bash.body.view.command);
+    clipped(bash.body.view.note);
+    expect(bash.body.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
     if (write.body.type !== "bot_tool_call" || write.body.view.kind !== "write") throw new Error("工具卡变了形");
     clipped(write.body.view.path);
     clipped(write.body.view.preview[0]);
     expect(write.body.view.preview[1]).toBe("第二行");
     expect(write.body.view).not.toHaveProperty("raw");
-    if (mcp.body.type !== "approval_request" || mcp.body.view.kind !== "mcp") throw new Error("审批卡变了形");
+    if (mcp.body.type !== "bot_tool_call" || mcp.body.view.kind !== "mcp") throw new Error("工具卡变了形");
     expect(mcp.body.view.params[0]?.key).toBe("q");
     clipped(mcp.body.view.params[0]?.value);
+  });
+
+  it("审批卡上露出来的命令、说明、路径、工具和参数一个字不截，只把原始参数换成说明、写入预览截短", async () => {
+    const outbox = await ReliableOutbox.open(await dataDir());
+    const content = oversized("x");
+    const command = `printf '${"令".repeat(10 * 1024)}' > a.txt`;
+    const path = `${"深/".repeat(5 * 1024)}a.txt`;
+    const value = "参".repeat(10 * 1024);
+    const ask = (callId: string, view: ToolView): AgentToControl => ({
+      type: "approval_request",
+      ...lane,
+      callId,
+      tool: view.kind,
+      action: "write_workspace",
+      target: null,
+      view,
+    });
+    const bash = await outbox.append(
+      ask("call-1", { kind: "bash", command, note: "要装进工具箱", raw: { command, content } }),
+    );
+    const write = await outbox.append(
+      ask("call-2", { kind: "write", path, preview: [content, "第二行"], raw: { content } }),
+    );
+    const mcp = await outbox.append(
+      ask("call-3", {
+        kind: "mcp",
+        server: "邮箱",
+        tool: "send_email",
+        params: [{ key: "body", value }],
+        raw: { content },
+      }),
+    );
+    const rawText = `原始参数有 ${Buffer.byteLength(JSON.stringify({ content }))} 字节，太大没有上传`;
+    for (const stored of [bash, write, mcp])
+      expect(wireBytes(outbox, stored)).toBeLessThanOrEqual(AGENT_FRAME_MAX_BYTES);
+    expect(bash.body).toEqual(
+      ask("call-1", {
+        kind: "bash",
+        command,
+        note: "要装进工具箱",
+        raw: `原始参数有 ${Buffer.byteLength(JSON.stringify({ command, content }))} 字节，太大没有上传`,
+      }),
+    );
+    expect(mcp.body).toEqual(
+      ask("call-3", {
+        kind: "mcp",
+        server: "邮箱",
+        tool: "send_email",
+        params: [{ key: "body", value }],
+        raw: rawText,
+      }),
+    );
+    if (write.body.type !== "approval_request" || write.body.view.kind !== "write") throw new Error("审批卡变了形");
+    expect(write.body.view.path).toBe(path);
+    expect(write.body.view.raw).toBe(rawText);
+    expect(write.body.view.preview[0]?.endsWith(CLIPPED)).toBe(true);
+    expect(Buffer.byteLength(write.body.view.preview[0] ?? "")).toBeLessThanOrEqual(4096);
+    expect(write.body.view.preview[1]).toBe("第二行");
+  });
+
+  it("审批卡上要看的内容本身就超过上限时不出卡，换成同一 runId 的报错说这一步没执行，并告诉代理停掉这个 run", async () => {
+    const dropped: string[] = [];
+    const outbox = await ReliableOutbox.open(await dataDir(), { dropped: (runId) => dropped.push(runId) });
+    const huge = oversized("令a");
+    const ask = (callId: string, view: ToolView): AgentToControl => ({
+      type: "approval_request",
+      ...lane,
+      callId,
+      tool: view.kind,
+      action: "write_workspace",
+      target: null,
+      view,
+    });
+    const bash = await outbox.append(ask("call-1", { kind: "bash", command: huge }));
+    const mcp = await outbox.append(
+      ask("call-2", { kind: "mcp", server: "邮箱", tool: "send_email", params: [{ key: "body", value: [huge] }] }),
+    );
+    const notice = {
+      type: "agent_error",
+      code: "runner_failed",
+      runId: lane.runId,
+      detail: expect.stringMatching(/^审批请求过长，没法完整给你看，这一步没有执行/),
+    };
+    expect(bash.body).toEqual(notice);
+    expect(mcp.body).toEqual(notice);
+    expect(outbox.pending().map((frame) => frame.body.type)).toEqual(["agent_error", "agent_error"]);
+    expect(dropped).toEqual(["run-1", "run-1"]);
   });
 
   it("带 runId 的帧截不下时原位换成同一 runId 的 agent_error 说明，序号照常连续，并告诉代理停掉这个 run", async () => {

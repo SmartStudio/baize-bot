@@ -480,6 +480,8 @@ async function startHarness(options: {
   readonly failMessage?: string;
   /** 收到 approval_request 就按这个结论回，undefined 表示不给结论。 */
   readonly approve?: boolean;
+  /** 学电脑代理把过长的审批请求换成报错：在发出它的同一拍之后取消这个 run。 */
+  readonly cancelOnApproval?: boolean;
   readonly settings?: RunnerConfig["settings"];
   readonly skills?: readonly Skill[];
   readonly brand?: RunnerConfig["brand"];
@@ -528,6 +530,10 @@ async function startHarness(options: {
     sent.push(AgentToControl.parse(message));
     if (message.type === "approval_request" && options.approve !== undefined) {
       runner?.approve(message.runId, message.callId, options.approve ? "approved" : "rejected");
+    }
+    if (message.type === "approval_request" && options.cancelOnApproval === true) {
+      const runId = message.runId;
+      queueMicrotask(() => runner?.cancel(runId));
     }
   };
   const config = (
@@ -1354,6 +1360,29 @@ describe("运行器的审批", () => {
       "bot_tool_call:ok",
     ]);
     expect(sentTo()).toEqual(["kehu@example.com"]);
+  });
+
+  it("审批请求刚发出就被代理换成报错取消时，审批闸门当场结算，工具不执行、prompt 不悬挂", async () => {
+    const mcp = await startFakeMcp();
+    openMcps.push(mcp);
+    const h = await startHarness({
+      bots: ["bot-1"],
+      tools: [toolConnection([{ name: "send_email", needsApproval: true }], { url: mcp.url })],
+      extensionTools: [],
+      script: approvalScript,
+      cancelOnApproval: true,
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "发邮件"));
+
+    expect(h.sent.filter((message) => message.type === "approval_request")).toHaveLength(1);
+    expect(mcp.calls).toEqual([]);
+    expect(runDoneIds(h)).toEqual([]);
+    expect(h.runner.activeRuns()).toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:blocked",
+    ]);
   });
 
   it("取消挂着审批的 run 会保存 expired 工具结果，只结算该 run 且下一条照常运行", async () => {
