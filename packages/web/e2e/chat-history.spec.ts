@@ -13,17 +13,25 @@ const GROUP = "grp_sales";
 const HISTORY = `**/api/groups/${GROUP}/messages*`;
 const label = (n: number) => `第 ${String(n).padStart(3, "0")} 条`;
 
-const seedHistory = async (request: APIRequestContext, count: number) => {
+type Seeding = { botSays?: (n: number) => boolean; approvalAt?: number };
+
+const seedHistory = async (
+  request: APIRequestContext,
+  count: number,
+  { botSays = (n) => n % 2 === 0, approvalAt }: Seeding = {},
+) => {
   const start = Date.now() - (count + 5) * 60_000;
   for (let n = 1; n <= count; n += 1) {
+    const createdAt = new Date(start + n * 60_000).toISOString();
+    if (n === approvalAt) {
+      const approval = await request.post("/api/test/approval", {
+        data: { groupId: GROUP, action: "shell", createdAt },
+      });
+      expect(approval.status(), `第 ${n} 条造成审批卡`).toBe(201);
+      continue;
+    }
     const response = await request.post("/api/test/messages", {
-      data: {
-        groupId: GROUP,
-        text: label(n),
-        createdAt: new Date(start + n * 60_000).toISOString(),
-        silent: true,
-        ...(n % 2 === 0 ? { botId: "bot_sales" } : {}),
-      },
+      data: { groupId: GROUP, text: label(n), createdAt, silent: true, ...(botSays(n) ? { botId: "bot_sales" } : {}) },
     });
     expect(response.status(), `造第 ${n} 条历史`).toBe(204);
   }
@@ -42,17 +50,17 @@ const olderRequests = (page: Page) => {
 const shown = (page: Page, n: number) => page.getByTestId("message-list").getByText(label(n), { exact: true });
 
 // 这一条离列表可见区顶边多远。滚动条位置一设就同步量，赶在滚动事件触发拉取之前。
-const offsetOf = (page: Page, n: number, scrollTop?: number) =>
+const offsetOf = (page: Page, target: number | "approval", scrollTop?: number) =>
   page.getByTestId("message-list").evaluate(
     (list, [text, top]) => {
       if (top !== null) list.scrollTop = top;
-      const target = [...list.querySelectorAll<HTMLElement>("[data-testid=message]")].find(
-        (element) => element.textContent?.trim() === text,
+      const found = [...list.querySelectorAll<HTMLElement>("[data-testid=message]")].find((element) =>
+        text === null ? element.dataset.kind === "approval" : element.textContent?.trim() === text,
       );
-      if (target === undefined) throw new Error(`${text} 不在列表里`);
-      return target.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      if (found === undefined) throw new Error(`${text ?? "审批卡"} 不在列表里`);
+      return found.getBoundingClientRect().top - list.getBoundingClientRect().top;
     },
-    [label(n), scrollTop ?? null] as const,
+    [target === "approval" ? null : label(target), scrollTop ?? null] as const,
   );
 
 const distanceToBottom = (page: Page) =>
@@ -97,6 +105,68 @@ test("打开群只有最近一页，滚到顶往上翻，正看着的那条不�
   await expect(shown(page, 120)).toBeInViewport();
   await expect.poll(() => distanceToBottom(page), "滚到底就停在底，不往回弹").toBeLessThan(24);
   await page.getByTestId("chat").screenshot({ path: "test-results/chat-history-bottom.png" });
+});
+
+test("更早的一页以同一个 Bot 的话结尾，并进最近一页打头的那段回答，正看着的那条不跳", async ({ page }) => {
+  await seedHistory(page.request, 120, { botSays: (n) => (n >= 60 && n <= 85) || n % 2 === 0 });
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 120)).toBeVisible();
+  await expect(shown(page, 70)).toHaveCount(0);
+
+  const before = await offsetOf(page, 75, 0);
+  await expect(shown(page, 60), "接出了更早的一页").toBeAttached();
+  await expect(page.getByTestId("older-loading")).toHaveCount(0);
+  await expect(page.getByTestId("bot-turn").filter({ hasText: label(60) }), "第 60 到 85 条并成一个回合").toContainText(
+    label(85),
+  );
+  expect(Math.abs((await offsetOf(page, 75)) - before), "第 75 条离可见区顶的距离没变").toBeLessThan(2);
+});
+
+test("最近一页以审批卡打头、更早的一页以 Bot 的话结尾，卡并进回答之后正看着的那条不跳", async ({ page }) => {
+  await seedHistory(page.request, 120, { approvalAt: 71 });
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 120)).toBeVisible();
+  await expect(page.getByTestId("message-list").getByTestId("approval-card")).toHaveCount(1);
+  await expect(shown(page, 70)).toHaveCount(0);
+
+  const before = await offsetOf(page, "approval", 0);
+  await expect(shown(page, 70), "接出了更早的一页").toBeAttached();
+  await expect(page.getByTestId("older-loading")).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("bot-turn")
+      .filter({ hasText: label(70) })
+      .getByTestId("approval-card"),
+    "审批卡并进了第 70 条那段回答",
+  ).toHaveCount(1);
+  expect(Math.abs((await offsetOf(page, "approval")) - before), "顶上那张审批卡离可见区顶的距离没变").toBeLessThan(2);
+});
+
+test("往上读的时候，可见区上方的审批卡改了高度，正看着的那条不跳", async ({ page }) => {
+  await seedHistory(page.request, 120, { approvalAt: 100 });
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 120)).toBeVisible();
+  const card = page.getByTestId("message-list").getByTestId("approval-card");
+  await expect(card).toHaveAttribute("data-status", "pending");
+
+  await page.getByTestId("message-list").evaluate((list) => {
+    const approval = list.querySelector<HTMLElement>("[data-testid=message][data-kind=approval]");
+    if (approval === null) throw new Error("审批卡不在列表里");
+    list.scrollTop += approval.getBoundingClientRect().bottom - list.getBoundingClientRect().top + 40;
+  });
+  await expect(card, "审批卡在可见区上方").not.toBeInViewport();
+  const before = await offsetOf(page, 103);
+  const height = await card.evaluate((element) => element.getBoundingClientRect().height);
+
+  expect((await page.request.post("/api/test/approval/timeout")).status()).toBe(204);
+  await expect(card).not.toHaveAttribute("data-status", "pending");
+  expect(await card.evaluate((element) => element.getBoundingClientRect().height), "审批卡确实变了高度").not.toBe(
+    height,
+  );
+  expect(Math.abs((await offsetOf(page, 103)) - before), "第 103 条离可见区顶的距离没变").toBeLessThan(2);
 });
 
 test("往上读历史时来了新消息，照常追加但不把视图拽到底；回到底部后新消息跟着走", async ({ page }) => {

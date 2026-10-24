@@ -180,7 +180,6 @@ export const shelfLoad = <K extends string, T extends Row>(
 };
 
 // 往上翻出来的更早一页，插在 before 那条前面。本地已有的同 id 行挪到页里的位置，号比它新的留本地那份。
-// 这一桶还没拉过最近一页就不写：翻页只从最近一页的头往上接。
 export const shelfPrepend = <K extends string, T extends Row>(
   shelf: Shelf<K, T>,
   key: K,
@@ -188,8 +187,7 @@ export const shelfPrepend = <K extends string, T extends Row>(
   page: readonly T[],
   before: string,
 ): Shelf<K, T> => {
-  const list = shelf.rows[key];
-  if (list === undefined) return shelf;
+  const list = shelf.rows[key] ?? [];
   const local = new Map(list.map((item) => [item.id, item]));
   const nextStamps: Record<string, Seq> = { ...shelf.stamps };
   const paged = new Set<string>();

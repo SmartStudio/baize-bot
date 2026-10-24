@@ -62,6 +62,7 @@ const TestApprovalRequest = z
     groupId: GroupId.default("grp_sales"),
     target: GrantTarget.nullable().optional(),
     deadlineAt: Timestamp.nullable().optional(),
+    createdAt: Timestamp.optional(),
   })
   .strict();
 const TestMessageRequest = z
@@ -248,7 +249,11 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
         deadlineAt: parsed.data.deadlineAt ?? null,
         view: { kind: "bash", command: "示例调用", raw: { command: "示例调用" } },
       });
-      const message = appendMessage(approval.groupId, { kind: "approval", approvalId: approval.id });
+      const message = appendMessage(
+        approval.groupId,
+        { kind: "approval", approvalId: approval.id },
+        { createdAt: parsed.data.createdAt },
+      );
       push({ type: "approval_updated", approval });
       push({ type: "message", message });
       send(res, 201, { approval });

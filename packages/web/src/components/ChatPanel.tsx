@@ -34,7 +34,7 @@ type Props = {
   onRetryHistory: () => void;
   edge: MessageEdge | undefined;
   older: LoadStatus;
-  onLoadOlder: () => void;
+  onLoadOlder: (groupId: GroupId, before: MessageId) => Promise<void>;
   lookup: BotLookup;
   approvals: ApprovalTable;
   handoffs: HandoffTable;
@@ -79,32 +79,35 @@ const pickerOf = (draft: string): Picker => {
 
 const LOAD_OLDER_PX = 200;
 
-// 用户正看着的那一段：可见区最上面那个回合，和它离列表顶的距离。回合用最后一条的 id 认，
-// 往前接更早的消息只会并进第一个回合的开头，最后一条不变。量的是回合正文、不含时间分隔线：
-// 原来打头的回合接上更早的一页后，分隔线可能就不画了。
+// 用户正看着的那一条：可见区最上面那条消息，和它离列表顶的距离。锚到单条消息而不是回合：更早的一页
+// 以同一个 Bot 的话结尾时会并进打头的回合，打头的审批、交接卡也会并进去，回合的边界和 id 都会变，
+// 单条消息的 id 和它自己的框不会。
 type Anchor = { id: string; offset: number };
 
-const turnsIn = (list: HTMLElement) => list.querySelectorAll<HTMLElement>(":scope > [data-anchor]");
+const SHOWN = "[data-message-id]:not([hidden])";
 
-const boxOf = (turn: HTMLElement) => (turn.lastElementChild ?? turn).getBoundingClientRect();
-
+// 消息在列表里从上往下排，底边随文档顺序递增，二分找第一条底边过了可见区顶的。每次渲染都要找一遍，长会话里不逐条量。
 const topVisible = (list: HTMLElement): Anchor | null => {
   const top = list.getBoundingClientRect().top;
-  for (const turn of turnsIn(list)) {
-    const box = boxOf(turn);
-    if (box.bottom > top) return { id: turn.dataset.anchor ?? "", offset: box.top - top };
+  const shown = list.querySelectorAll<HTMLElement>(SHOWN);
+  let low = 0;
+  let high = shown.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if ((shown[mid]?.getBoundingClientRect().bottom ?? top) > top) high = mid;
+    else low = mid + 1;
   }
-  return null;
+  const message = shown[low];
+  return message === undefined
+    ? null
+    : { id: message.dataset.messageId ?? "", offset: message.getBoundingClientRect().top - top };
 };
 
 const keepInPlace = (list: HTMLElement, anchor: Anchor) => {
-  const turn = [...turnsIn(list)].find((candidate) => candidate.dataset.anchor === anchor.id);
-  if (turn === undefined) return;
-  list.scrollTop += boxOf(turn).top - list.getBoundingClientRect().top - anchor.offset;
+  const message = list.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(anchor.id)}"]:not([hidden])`);
+  if (message === null) return;
+  list.scrollTop += message.getBoundingClientRect().top - list.getBoundingClientRect().top - anchor.offset;
 };
-
-const lastIdOf = (turn: Turn): string =>
-  turn.kind === "bot" ? (turn.items.at(-1)?.id ?? turn.botId) : turn.message.id;
 
 const firstAt = (turn: Turn): string =>
   turn.kind === "bot" ? (turn.items[0]?.createdAt ?? "") : turn.message.createdAt;
@@ -191,7 +194,11 @@ export const ChatPanel = ({
   const turns = turnsOf(messages);
 
   const anchor = useRef<Anchor | null>(null);
-  const canLoadOlder = edge?.hasMore === true && older === "idle";
+  const oldest = edge?.oldest ?? null;
+  const canLoadOlder = edge?.hasMore === true && older === "idle" && oldest !== null;
+  const loadOlder = () => {
+    if (oldest !== null) void onLoadOlder(groupId, oldest);
+  };
 
   useLayoutEffect(() => {
     atBottom.current = true;
@@ -210,18 +217,19 @@ export const ChatPanel = ({
     navigate(location.pathname, { replace: true, state: null });
   }, [prefill, groupId, location.pathname, navigate]);
 
+  // 不列依赖、每次渲染都钉一遍：审批、交接推回来改的是卡片的高度，消息列表没变。
   useLayoutEffect(() => {
     const list = thread.current;
     if (list === null) return;
     if (atBottom.current) list.scrollTop = list.scrollHeight;
     else if (anchor.current !== null) keepInPlace(list, anchor.current);
     anchor.current = topVisible(list);
-  }, [messages, groupId, older, edge?.hasMore]);
+  });
 
   useEffect(() => {
     const list = thread.current;
-    if (list !== null && canLoadOlder && list.scrollHeight <= list.clientHeight) onLoadOlder();
-  }, [messages, canLoadOlder, onLoadOlder]);
+    if (list !== null && canLoadOlder && list.scrollHeight <= list.clientHeight) void onLoadOlder(groupId, oldest);
+  }, [messages, canLoadOlder, onLoadOlder, groupId, oldest]);
 
   // 群里每来一条消息 conversation 就换一次身份，这个 effect 也就跟着再跑一遍。不记一笔的话，拉取还在
   // 飞的那会儿同一个 Bot 会被问上好几遍。
@@ -343,7 +351,7 @@ export const ChatPanel = ({
             atBottom.current = distance < 24;
             setShowScroll(distance > list.clientHeight);
             anchor.current = topVisible(list);
-            if (canLoadOlder && list.scrollTop < LOAD_OLDER_PX) onLoadOlder();
+            if (canLoadOlder && list.scrollTop < LOAD_OLDER_PX) loadOlder();
           }}
         >
           {edge === undefined || messages.length === 0 ? null : older === "loading" ? (
@@ -353,7 +361,7 @@ export const ChatPanel = ({
           ) : older === "failed" ? (
             <p className="history-edge" role="alert" data-testid="older-failed">
               更早的消息没拉下来。{" "}
-              <button type="button" className="ghost-button" data-testid="older-retry" onClick={onLoadOlder}>
+              <button type="button" className="ghost-button" data-testid="older-retry" onClick={loadOlder}>
                 重试
               </button>
             </p>
@@ -375,11 +383,7 @@ export const ChatPanel = ({
             </p>
           ) : null}
           {turns.map((turn, at) => (
-            <div
-              className="turn-group"
-              key={turn.kind === "bot" ? (turn.items[0]?.id ?? turn.botId) : turn.message.id}
-              data-anchor={lastIdOf(turn)}
-            >
+            <div className="turn-group" key={turn.kind === "bot" ? (turn.items[0]?.id ?? turn.botId) : turn.message.id}>
               {needsTimeDivider(turn, turns[at - 1]) ? (
                 <div className="time-divider" data-testid="time-divider">
                   {timeLabel(firstAt(turn))}
