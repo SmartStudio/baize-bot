@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { AgentToControl, UPLINK_DELIVERY, type AgentToControl as AgentMessage } from "@baize/shared";
-import { fitUplink, OversizedUplink } from "./frame-limit.js";
+import { AgentToControl, UPLINK_DELIVERY, type AgentToControl as AgentMessage, type RunId } from "@baize/shared";
+import { fitUplink, OversizedUplink, type FittedUplink } from "./frame-limit.js";
 
 interface StoredUplink {
   readonly seq: number;
@@ -18,6 +18,23 @@ interface PendingWrite {
   readonly entry: StoredUplink;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
+}
+
+export interface OutboxHooks {
+  readonly log?: (line: string) => void;
+  /** 截不下换成报错的那个 run，控制面会替它收尾，代理这头也得停掉它。 */
+  readonly dropped?: (runId: RunId) => void;
+}
+
+/** 按线上帧的最大可能长度量：conn 和 seq 取最长的数字。 */
+function fitForStream(stream: string, body: AgentMessage): FittedUplink {
+  return fitUplink(body, (candidate) => ({
+    type: "uplink",
+    conn: Number.MAX_SAFE_INTEGER,
+    stream,
+    seq: Number.MAX_SAFE_INTEGER,
+    body: candidate,
+  }));
 }
 
 export interface ReliableTransport {
@@ -97,8 +114,10 @@ export class ReliableOutbox {
   #writes: PendingWrite[] = [];
   #timer: NodeJS.Timeout | null = null;
   #operation: Promise<void> = Promise.resolve();
+  #hooks: OutboxHooks;
 
-  private constructor(directory: string, state: OutboxState, frames: StoredUplink[]) {
+  private constructor(directory: string, state: OutboxState, frames: StoredUplink[], hooks: OutboxHooks) {
+    this.#hooks = hooks;
     this.#directory = join(directory, state.stream);
     this.#statePath = join(directory, "state.json");
     this.stream = state.stream;
@@ -109,7 +128,7 @@ export class ReliableOutbox {
     this.#journal = join(this.#directory, "frames.jsonl");
   }
 
-  static async open(dataDir: string): Promise<ReliableOutbox> {
+  static async open(dataDir: string, hooks: OutboxHooks = {}): Promise<ReliableOutbox> {
     const directory = join(dataDir, ".agent", "outbox");
     await mkdir(directory, { recursive: true });
     await syncDirectory(dataDir);
@@ -193,14 +212,32 @@ export class ReliableOutbox {
       if (sortedFrames[index]?.seq !== state.acked + index + 1)
         throw new TransportStateCorruption("outbox journal has a sequence gap");
     }
-    return new ReliableOutbox(directory, state, sortedFrames);
+    // 旧版代理入队时不查单帧上限。超限帧不能删，控制面只认连续的序号，删了后面的帧全成缺号；
+    // 原位换掉不碍去重：已处理过的序号控制面照样只回确认，没处理过的就处理换上去的这一条。
+    let refitted = false;
+    const fittedFrames = sortedFrames.map((frame): StoredUplink => {
+      const fitted = fitForStream(state.stream, frame.body);
+      if (fitted.kind === "fit" && fitted.body === frame.body) return frame;
+      refitted = true;
+      hooks.log?.(
+        fitted.kind === "fit"
+          ? `发件箱第 ${frame.seq} 帧 ${frame.body.type} 超过单帧上限，已截短`
+          : `发件箱第 ${frame.seq} 帧 ${frame.body.type} 截短后仍超过单帧上限，换成一条报错`,
+      );
+      return { seq: frame.seq, body: fitted.kind === "fit" ? fitted.body : fitted.notice };
+    });
+    const outbox = new ReliableOutbox(directory, state, fittedFrames, hooks);
+    if (refitted) await outbox.#compact();
+    return outbox;
   }
 
   static async openForComputer(
     dataDir: string,
     computerId: string,
     log?: (line: string) => void,
+    dropped?: (runId: RunId) => void,
   ): Promise<ReliableTransport> {
+    const hooks: OutboxHooks = { ...(log === undefined ? {} : { log }), ...(dropped === undefined ? {} : { dropped }) };
     const agentDirectory = join(dataDir, ".agent");
     await mkdir(agentDirectory, { recursive: true });
     const identityPath = join(agentDirectory, "computer.json");
@@ -235,12 +272,12 @@ export class ReliableOutbox {
     let outbox: ReliableOutbox;
     let downlinkCursor: DownlinkCursor;
     try {
-      outbox = await ReliableOutbox.open(dataDir);
+      outbox = await ReliableOutbox.open(dataDir, hooks);
       downlinkCursor = await DownlinkCursor.open(dataDir);
     } catch (error) {
       if (!(error instanceof TransportStateCorruption)) throw error;
       await quarantineTransportState(dataDir, "文件损坏", log);
-      outbox = await ReliableOutbox.open(dataDir);
+      outbox = await ReliableOutbox.open(dataDir, hooks);
       downlinkCursor = await DownlinkCursor.open(dataDir);
     }
     await atomicWrite(identityPath, JSON.stringify({ computerId }));
@@ -258,15 +295,16 @@ export class ReliableOutbox {
   append(body: AgentMessage): Promise<StoredUplink> {
     if (this.#failed) return Promise.reject(this.#failure);
     if (UPLINK_DELIVERY[body.type] !== "reliable") return Promise.reject(new Error(`${body.type} is not reliable`));
-    const fitted = fitUplink(body, (candidate) => ({
-      type: "uplink",
-      conn: Number.MAX_SAFE_INTEGER,
-      stream: this.stream,
-      seq: Number.MAX_SAFE_INTEGER,
-      body: candidate,
-    }));
-    if (fitted === null) return Promise.reject(new OversizedUplink(`${body.type} 截短后仍超过单帧上限，不进发件箱`));
-    const entry: StoredUplink = { seq: this.#next++, body: fitted };
+    const fitted = fitForStream(this.stream, body);
+    const stored = fitted.kind === "fit" ? fitted.body : fitted.notice;
+    if (fitted.kind === "dropped") {
+      // 工作记录不拖累 run：探针回 invalid，镜像自己停流。
+      if (body.type === "work_append")
+        return Promise.reject(new OversizedUplink(`${body.type} 截短后仍超过单帧上限，不进发件箱`));
+      this.#hooks.log?.(`${body.type} 截短后仍超过单帧上限，换成一条报错发给控制面`);
+      if (fitted.notice.runId !== undefined) this.#hooks.dropped?.(fitted.notice.runId);
+    }
+    const entry: StoredUplink = { seq: this.#next++, body: stored };
     this.#frames.push(entry);
     const persisted = new Promise<void>((resolve, reject) => this.#writes.push({ entry, resolve, reject }));
     if (this.#timer === null) {
