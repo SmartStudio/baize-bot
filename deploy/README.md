@@ -1,6 +1,6 @@
 # 部署到 Ubuntu 服务器
 
-这份说明给要把控制面和远程电脑跑到一台 Ubuntu 服务器上的工程师。compose 怎么起、启动文件怎么放、seccomp 和 AppArmor 两项放宽、数据卷在哪，都写在 [`remote/README.md`](remote/README.md)，这里不重复，只补那份没写或没定的事：镜像缺的包、Node 版本、AppArmor 和 bwrap 的探测、`.env` 全清单、Caddy 托管 Web、迁移前备份、升级顺序、给别人开账号。
+这份说明给要把控制面和远程电脑跑到一台 Ubuntu 服务器上的工程师。compose 怎么起、启动文件怎么放、seccomp 和 AppArmor 两项放宽、数据卷在哪，都写在 [`remote/README.md`](remote/README.md)，这里不重复，只补那份没写或没定的事：镜像缺的包、Node 版本、AppArmor 和 bwrap 的探测、`.env` 全清单、Caddy 托管 Web、迁移前备份、升级顺序、给别人开账号。升级、回滚、备份恢复的完整步骤在 [`docs/部署.md`](../docs/部署.md)。
 
 **验证状态。** 整份说明没有一步在 Ubuntu 真机上跑过。下文凡是要在服务器上执行的命令都是「未在真机验证」，事实部分都标了代码出处，出处里的行号以提交 `8f0955d` 为准。
 
@@ -173,7 +173,7 @@ baize.example.com {
 
 ## 迁移
 
-**机制。** 每次 `docker compose up -d`，一次性服务 `migrate` 先把没跑过的迁移全跑完，控制面才起（`docker-compose.yml:21-30`、`:38-40`）。所有待跑的迁移在一个事务里执行，并用咨询锁挡住并发（`packages/control-plane/src/db/migrate.ts:18-46`），中途失败整批回滚。已跑过的记在 `_migrations` 表里。迁移文件现在到 `0038`。
+**机制。** 每次 `docker compose up -d`，一次性服务 `migrate` 先把没跑过的迁移全跑完，控制面才起（`docker-compose.yml:21-30`、`:38-40`）。所有待跑的迁移在一个事务里执行，并用咨询锁挡住并发（`packages/control-plane/src/db/migrate.ts:18-46`），中途失败整批回滚。已跑过的记在 `_migrations` 表里。
 
 **会删列的迁移。** 这几条跑完数据就回不来，旧库升级前必须先备份：
 
@@ -209,15 +209,15 @@ baize.example.com {
 cd deploy/remote
 docker compose exec -T postgres psql -U baize -d baize -c 'SELECT name FROM _migrations ORDER BY name'   # 记下当前到哪条
 docker compose exec -T postgres psql -U baize -d baize -c "SELECT count(*) FROM work_entries WHERE stream = 'chat' AND pi_type = 'message'"   # 跑过 0032 才有这张表，见上一段
-docker compose exec -T postgres pg_dump -U baize -d baize -Fc > ~/baize-$(date +%Y%m%d-%H%M).dump
-ls -l ~/baize-*.dump                                                                                    # 确认不是 0 字节
+./backup-db.sh                     # 导到 ~/baize-backups，导完核一遍能读，见 docs/部署.md「备份和恢复」
 docker compose build
+docker compose stop control-plane  # 旧控制面先停，不让它跑在迁移后的表上，见 docs/部署.md「迁移」
 docker compose up -d
 docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或「迁移已是最新，没有要跑的」
 ./put-launch.sh                    # 镜像升级后远程电脑要重新放启动文件
 ```
 
-要退回时先停控制面，再用 `pg_restore --clean -U baize -d baize` 把 dump 灌回去，并换回旧版本的镜像。新代码不能跑在回滚后的旧库上。
+要退回时先停控制面，用 `./restore-db.sh --replace <备份文件> baize` 整库换回去，再换回旧版本的镜像，步骤见 `docs/部署.md`「回滚」。新代码不能跑在回滚后的旧库上。不用 `pg_restore --clean`，它留下备份之后的迁移建的表。
 
 全新的空库不用备份，第一次 `up -d` 从 `0000` 跑到最后一条。
 
