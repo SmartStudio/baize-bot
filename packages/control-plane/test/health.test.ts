@@ -39,7 +39,12 @@ it("健康检查不用登录，库连得上回 200，库断了回 503，库回�
     expect(healthy.status, "没登录也能探活").toBe(200);
     expect(await healthy.json()).toEqual({ ok: true });
 
+    const cutMidQuery = database.sql`SELECT pg_sleep(30)`.then(
+      () => "查完了",
+      () => "被掐断",
+    );
     await cutDatabase(database.databaseName);
+    expect(await cutMidQuery, "断库时正在跑的查询跟着断").toBe("被掐断");
     const down = await client.get("/api/health");
     expect(down.status, "库断了就不健康").toBe(503);
     expect(await down.json()).toEqual({ ok: false, error: "连不上数据库" });
