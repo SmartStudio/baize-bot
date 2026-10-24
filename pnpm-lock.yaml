@@ -4,6 +4,11 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  postgres@3.4.9:
+    hash: gl5gur5fqis5ydanjfk7c3fbva
+    path: patches/postgres@3.4.9.patch
+
 importers:
 
   .:
@@ -93,13 +98,13 @@ importers:
         version: 10.0.1
       drizzle-orm:
         specifier: ^0.38.3
-        version: 0.38.4(@types/react@18.3.31)(postgres@3.4.9)(react@18.3.1)
+        version: 0.38.4(@types/react@18.3.31)(postgres@3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva))(react@18.3.1)
       hono:
         specifier: ^4.6.14
         version: 4.13.8
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva)
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -188,7 +193,7 @@ importers:
         version: link:../shared
       postgres:
         specifier: ^3.4.5
-        version: 3.4.9
+        version: 3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva)
       ws:
         specifier: ^8.21.3
         version: 8.21.3
@@ -4282,10 +4287,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.38.4(@types/react@18.3.31)(postgres@3.4.9)(react@18.3.1):
+  drizzle-orm@0.38.4(@types/react@18.3.31)(postgres@3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva))(react@18.3.1):
     optionalDependencies:
       '@types/react': 18.3.31
-      postgres: 3.4.9
+      postgres: 3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva)
       react: 18.3.1
 
   dunder-proto@1.0.1:
@@ -4899,7 +4904,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postgres@3.4.9: {}
+  postgres@3.4.9(patch_hash=gl5gur5fqis5ydanjfk7c3fbva): {}
 
   postject@1.0.0-alpha.6:
     dependencies:
