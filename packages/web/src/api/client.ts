@@ -106,22 +106,23 @@ export const oauthStartUrl = (platform: OAuthPlatform): string => `/api/oauth/${
 // 导出是一个带 content-disposition 的附件，交给浏览器自己下载，界面拿它当链接。
 export const exportDataUrl = "/api/export";
 
+// reason 是服务端按 ApiError 给的中文原因；没给（非 JSON、网关错页）就是 null，界面自己按动作说。
 export class RequestFailed extends Error {
   constructor(
     readonly status: number,
-    message: string,
+    readonly reason: string | null,
   ) {
-    super(message);
+    super(reason ?? `请求失败（${status}）`);
     this.name = "RequestFailed";
   }
 }
 
 type Method = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
-const messageFor = async (res: Response): Promise<string> => {
+const reasonOf = async (res: Response): Promise<string | null> => {
   const body: unknown = await res.json().catch(() => null);
   const parsed = ApiError.safeParse(body);
-  return parsed.success ? parsed.data.error : `请求失败（${res.status}）`;
+  return parsed.success ? parsed.data.error : null;
 };
 
 const sendWith = async (
@@ -137,7 +138,7 @@ const sendWith = async (
     init.headers = { "content-type": "application/json" };
   }
   const res = await fetch(`/api${path}`, init);
-  if (!res.ok) throw new RequestFailed(res.status, await messageFor(res));
+  if (!res.ok) throw new RequestFailed(res.status, await reasonOf(res));
   return res;
 };
 

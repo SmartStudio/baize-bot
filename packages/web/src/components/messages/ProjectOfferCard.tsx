@@ -10,6 +10,7 @@ import type {
   ProjectOfferPlatform,
 } from "@baize/shared";
 import { PLATFORM } from "./content.js";
+import { useFailureToast } from "../Toasts.js";
 
 export type ProjectOfferActions = {
   decide: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<void>;
@@ -82,6 +83,7 @@ export const ProjectOfferCard = ({
   const [sent, setSent] = useState(false);
   // 同一个事件循环里连点两下时 sent 还没来得及渲染成 disabled，靠这个同步的闩挡住第二下。
   const latch = useRef(false);
+  const failed = useFailureToast();
 
   if (body.status === "started") {
     const groupId = body.groupId;
@@ -115,9 +117,10 @@ export const ProjectOfferCard = ({
     latch.current = true;
     setSent(true);
     const request: DecideProjectOfferRequest = name === body.name ? { decision: "start" } : { decision: "start", name };
-    void actions.decide(messageId, request).catch(() => {
+    void actions.decide(messageId, request).catch((cause: unknown) => {
       latch.current = false;
       setSent(false);
+      failed("项目没开始，再试一次")(cause);
     });
   };
 

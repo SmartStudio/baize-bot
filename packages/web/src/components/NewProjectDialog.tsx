@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { Spade, Sparkles } from "lucide-react";
 import { useEscapeToClose } from "./useEscapeToClose.js";
+import { useFailureToast } from "./Toasts.js";
 
 type Props = {
   // 主助理单聊还没拉回来时是 null，这时不能发。
@@ -17,6 +18,7 @@ export const NewProjectDialog = ({ canSend, onSend, onCreateTable, onClose }: Pr
   const [sending, setSending] = useState(false);
   const [tableError, setTableError] = useState<string | null>(null);
   const tableRequestId = useRef(crypto.randomUUID());
+  const failed = useFailureToast();
   const ready = canSend && text.trim().length > 0 && !sending;
   useEscapeToClose(onClose);
 
@@ -33,7 +35,10 @@ export const NewProjectDialog = ({ canSend, onSend, onCreateTable, onClose }: Pr
     event.preventDefault();
     if (!ready) return;
     setSending(true);
-    void onSend(text.trim()).catch(() => setSending(false));
+    void onSend(text.trim()).catch((cause: unknown) => {
+      setSending(false);
+      failed("没发给主助理，再试一次")(cause);
+    });
   };
 
   return (

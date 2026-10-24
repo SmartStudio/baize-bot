@@ -22,6 +22,7 @@ import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js"
 import { prefillOf } from "./routines/prefill.js";
 import { setDraft, useComposerDraft } from "../state/composer-drafts.js";
 import { ComposerTextarea } from "./ComposerTextarea.js";
+import { useFailureToast } from "./Toasts.js";
 import type { ContentBook, LoadStatus, MessageEdge } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
@@ -186,6 +187,7 @@ export const ChatPanel = ({
 }: Props) => {
   const groupId = conversation.groupId;
   const draft = useComposerDraft(groupId);
+  const failed = useFailureToast();
   const [pickerOff, setPickerOff] = useState(false);
   const thread = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
@@ -320,7 +322,10 @@ export const ChatPanel = ({
     if (text.length === 0) return;
     setDraft(groupId, "");
     // 发失败了把字还回去，别让用户重打一遍。
-    void onSend(groupId, text).catch(() => setDraft(groupId, text));
+    void onSend(groupId, text).catch((cause: unknown) => {
+      setDraft(groupId, text);
+      failed("消息没发出去，再试一次")(cause);
+    });
   };
 
   return (

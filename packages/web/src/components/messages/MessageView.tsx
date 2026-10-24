@@ -29,6 +29,7 @@ import { ProjectOfferCard, type ProjectOfferActions } from "./ProjectOfferCard.j
 import { Markdown } from "./markdown.js";
 import { skillOfferTitle, timeOf } from "./preview.js";
 import { TakeoverCard } from "./TakeoverCard.js";
+import { useFailureToast } from "../Toasts.js";
 import { TeamOfferCard } from "./TeamOfferCard.js";
 import { useApp } from "../../state/app.js";
 import { ApprovalDetails, ToolViewContent } from "./ToolViewContent.js";
@@ -345,10 +346,14 @@ const ApprovalCard = ({
   const { state } = useApp();
   const tools = state.status === "ready" ? state.tools : [];
   const [sent, setSent] = useState(false);
+  const failed = useFailureToast();
   // 结论以服务端推回来的那条为准，这里只锁住按钮，免得一次点两下发两个决定。
   const decide = (request: DecideApprovalRequest) => {
     setSent(true);
-    void onDecide(approval.id, request).catch(() => setSent(false));
+    void onDecide(approval.id, request).catch((cause: unknown) => {
+      setSent(false);
+      failed("这一步没记下，再点一次")(cause);
+    });
   };
   if (approval.status === "expired") {
     return (
