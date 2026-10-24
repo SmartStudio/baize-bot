@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { Keyboard, X } from "lucide-react";
 import { shortcutSections } from "./shortcuts.js";
 import { useRestoreFocus } from "./QuickSwitch.js";
+import { trapTab } from "./trapTab.js";
 
 type Props = { onClose: () => void };
 
@@ -22,6 +23,7 @@ export const ShortcutSheet = ({ onClose }: Props) => {
         tabIndex={-1}
         onMouseDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
+          trapTab(event);
           if (event.key !== "Escape") return;
           event.preventDefault();
           onClose();

@@ -139,6 +139,28 @@ test("快速切换开着时 Esc 只关它，后面的检查器、设置窗口都
   await expect(page.getByTestId("settings-window"), "跳走了，挡在前面的设置窗口收起").toHaveCount(0);
 });
 
+test("Tab、Shift+Tab 走不出快速切换和快捷键表，Esc 仍然只关最上面这层", async ({ page }) => {
+  await login(page);
+  await openInspector(page);
+  await openSwitch(page);
+  for (const key of ["Shift+Tab", "Tab", "Tab"]) {
+    await page.keyboard.press(key);
+    await expect(page.getByTestId("quick-switch-input"), `${key} 之后焦点还在快速切换里`).toBeFocused();
+  }
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("quick-switch")).toHaveCount(0);
+  await expect(page.getByTestId("tool-inspector"), "检查器还开着").toBeVisible();
+
+  await page.keyboard.press(SHEET);
+  for (const key of ["Tab", "Shift+Tab", "Tab"]) {
+    await page.keyboard.press(key);
+    await expect(page.getByTestId("shortcut-sheet-close"), `${key} 之后焦点还在快捷键表里`).toBeFocused();
+  }
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("shortcut-sheet")).toHaveCount(0);
+  await expect(page.getByTestId("tool-inspector"), "关快捷键表也不连带检查器").toBeVisible();
+});
+
 test("在输入框里打着字按 ⌘K 照样打开，关掉后接着打；单按 K、/ 不抢输入", async ({ page }) => {
   await login(page);
   await openSeededBot(page, "小服");

@@ -42,6 +42,12 @@ describe("shortcutOf", () => {
     expect(shortcutOf(press("л", "KeyK", { metaKey: true }), "mac"), "俄文布局").toBe("switch");
   });
 
+  it("「/」也认打出来的字，⌘- 缩小页面、⌘. 不被当成 ⌘/", () => {
+    expect(shortcutOf(press("-", "Slash", { metaKey: true }), "mac"), "德语布局").toBeNull();
+    expect(shortcutOf(press(".", "Slash", { metaKey: true }), "mac"), "俄文布局打的是句点").toBeNull();
+    expect(shortcutOf(press("Dead", "Slash", { metaKey: true }), "mac"), "打不出可见字时才认键位").toBe("shortcuts");
+  });
+
   it("要按 Shift 才打得出「/」的布局照样认得 ⌘/", () => {
     expect(shortcutOf(press("/", "Digit7", { metaKey: true, shiftKey: true }), "mac")).toBe("shortcuts");
   });
