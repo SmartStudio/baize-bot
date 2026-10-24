@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { X } from "lucide-react";
 import type { Bot, BotHue, BotId, BotShape, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
@@ -15,6 +15,7 @@ import { ToolInspector } from "../components/ToolInspector.js";
 import { BotCreatedNotice } from "../components/BotCreatedNotice.js";
 import { ErrorBoundary } from "../components/ErrorBoundary.js";
 import { useFailureToast } from "../components/Toasts.js";
+import { useEscapeToClose } from "../components/useEscapeToClose.js";
 import { PushBanner } from "../components/PushBanner.js";
 import { LiveHost } from "../live/LiveHost.js";
 import { TodayPage } from "./TodayPage.js";
@@ -78,6 +79,24 @@ const writeBotPanelOpen = (open: boolean) => {
   }
 };
 
+const SIDEBAR_WIDTH = 272;
+const CHAT_MIN_WIDTH = 480;
+const PANEL_WIDTH = 400;
+const DRAWER_QUERY = `(max-width: ${SIDEBAR_WIDTH + CHAT_MIN_WIDTH + PANEL_WIDTH - 1}px)`;
+const watchDrawer = (onChange: () => void) => {
+  const query = window.matchMedia(DRAWER_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+};
+const drawerNow = () => window.matchMedia(DRAWER_QUERY).matches;
+
+const ignoreEscape = () => {};
+
+const PanelScrim = ({ onClose, underOverlay }: { onClose: () => void; underOverlay: boolean }) => {
+  useEscapeToClose(underOverlay ? ignoreEscape : onClose);
+  return <div className="panel-scrim" data-testid="panel-scrim" aria-hidden="true" onClick={onClose} />;
+};
+
 export const MainWindow = () => {
   const { state, actions } = useApp();
   const navigate = useNavigate();
@@ -94,6 +113,8 @@ export const MainWindow = () => {
     setBotPanelOpen(open);
     writeBotPanelOpen(open);
   };
+  const drawer = useSyncExternalStore(watchDrawer, drawerNow);
+  const [botDrawerFor, setBotDrawerFor] = useState<GroupId | null>(null);
 
   const ready = state.status === "ready" ? state : null;
   // 项目页和项目群看的是同一个群：项目页要拿最近一轮，也得把这个群的历史拉回来。
@@ -257,10 +278,20 @@ export const MainWindow = () => {
           onChoose: (botId, kind) => actions.chooseComputer(groupId, botId, kind),
         };
   // 检查器临时占用右栏；关掉后回到 Bot 设置（没收起的话）或任务详情。没有右栏内容时，对话区把这一栏吃掉。
-  const hasPanel = inspected !== null || (soloBot !== null && botPanelOpen) || (team !== null && taskOpen);
+  const botPanelShown = drawer ? groupId !== null && botDrawerFor === groupId : botPanelOpen;
+  const setBotPanel = (open: boolean) => {
+    if (drawer) setBotDrawerFor(open ? groupId : null);
+    else changeBotPanel(open);
+  };
+  const hasPanel = inspected !== null || (soloBot !== null && botPanelShown) || (team !== null && taskOpen);
+  const closePanel = () => {
+    if (inspected !== null) setInspectedTool(null);
+    else if (soloBot !== null && botPanelShown) setBotPanel(false);
+    else setTaskOpenFor(null);
+  };
 
   return (
-    <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
+    <div className={`window${hasPanel ? "" : " is-wide"}${drawer ? " is-drawer" : ""}`} data-testid="main-window">
       <div className="window-top">
         <PushBanner link={ready.pushLink} />
         {oauth !== null ? (
@@ -354,11 +385,11 @@ export const MainWindow = () => {
             }}
             onOpenTask={() => setTaskOpenFor(groupId)}
             computerChoices={computerChoices}
-            botPanelOpen={botPanelOpen}
+            botPanelOpen={botPanelShown}
             onToggleBotPanel={() => {
               // 主动要看设置，就把占着右栏的检查器让出来。
-              if (!botPanelOpen) setInspectedTool(null);
-              changeBotPanel(!botPanelOpen);
+              if (!botPanelShown) setInspectedTool(null);
+              setBotPanel(!botPanelShown);
             }}
           />
         ) : tableOpen !== null ? (
@@ -441,16 +472,17 @@ export const MainWindow = () => {
           />
         )}
       </ErrorBoundary>
+      {drawer && hasPanel ? <PanelScrim onClose={closePanel} underOverlay={overlay !== "none"} /> : null}
       {inspected !== null ? (
         <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
-      ) : soloBot !== null && botPanelOpen ? (
+      ) : soloBot !== null && botPanelShown ? (
         <BotSettingsPanel
           key={soloBot.id}
           bot={soloBot}
           onChange={actions.updateBot}
           onPause={actions.pauseBot}
           onResume={actions.resumeBot}
-          onClose={() => changeBotPanel(false)}
+          onClose={() => setBotPanel(false)}
         />
       ) : null}
       {inspected === null && team !== null && taskOpen ? (

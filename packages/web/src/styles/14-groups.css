@@ -1,8 +1,26 @@
 /* ---------- 08 建项目 · 05 主题任务 ---------- */
 
 /* 任务详情没开的多 Bot 群没有第三栏，对话区把它吃掉，而不是留一条空栏。 */
-.window.is-wide {
+.window.is-wide,
+.window.is-drawer {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+}
+
+.panel-scrim {
+  position: fixed;
+  inset: 0 0 0 var(--sidebar-w);
+  z-index: 2;
+  background: var(--overlay);
+}
+
+.window.is-drawer > :is(.bot-panel, .task-panel, .tool-inspector) {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: var(--panel-w);
+  box-shadow: var(--shadow-lg);
 }
 
 .dialog {
