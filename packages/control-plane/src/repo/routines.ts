@@ -12,21 +12,7 @@ import {
   type TriggerInput,
 } from "@baize/shared";
 import { randomBytes } from "node:crypto";
-import {
-  and,
-  asc,
-  desc,
-  eq,
-  inArray,
-  isNotNull,
-  isNull,
-  ne,
-  notInArray,
-  or,
-  sql,
-  type SQL,
-  type SQLWrapper,
-} from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL, type SQLWrapper } from "drizzle-orm";
 import type { z } from "zod";
 import type { Db } from "../db/client.js";
 import type { Tx } from "./messages.js";
@@ -63,8 +49,9 @@ export type OwnedRoutine = { readonly row: RoutineRow; readonly ownerId: UserId 
  * 例行级的 advisory 锁，键是例行 id。和 runs.ts 的收尾锁、Bot 锁、账号锁同为两参数形式，命名空间不同。
  * 为什么要它：lockRoutineWriters 按 Bot id 升序拿排他锁，前提是锁完重读名单不会多出新面孔，
  * 否则它持着几把 Bot 锁再去拿一把 id 可能更小的，和按升序拿共享锁的派活、信封、牌桌就成环。
- * 换执行者能让单聊例行的名单多出一位，所以换人和 lockRoutineWriters 都先拿它的排他；
- * 触发（openRoutineRun）拿共享：它先读执行者再锁，读和锁之间换人提交了，它就持着旧执行者的共享锁再去拿新执行者的，同样反序。
+ * 换执行者能让单聊例行的名单多出一位，所以换人和 lockRoutineWriters 都先拿它的排他。
+ * 触发（openRoutineRun）拿共享，为两件事：它先读执行者再锁，读和锁之间换人提交了，它就持着旧执行者的共享锁再去拿新执行者的，同样反序；
+ * 它落的运行记录上记着这次的执行者，名单靠这一列数到换人之后的旧执行者，拿到排他时没有还没提交的触发，这一列都看得见。
  * 三处都在事务第一句、任何 Bot 锁之前拿，等这把锁的事务手里没有别的锁，不会反序。
  */
 const ROUTINE_LOCK = 0x627a7274;
@@ -376,11 +363,13 @@ export async function deleteRoutine(db: Db, routineId: RoutineId): Promise<boole
 /**
  * 锁住所有能以这条例行的名义建 run 的 Bot，按 id 升序拿排他锁，拿到之后到提交前没有人能建出指着它的运行记录的 run。
  * 能建的是它所在群的成员（startRun 查成员表，不是成员建不出），单聊就是执行者自己，
- * 再加上还在跑的记录名下 run 的 Bot：单聊例行换人之后，旧执行者手上那次还能经换电脑接续出带同一条记录的 run。
- * 第一句先拿例行锁的排他，换人和触发都进不来。之后名单只在删 Bot 里变：成员被删（它拿着自己的排他锁，和这里互斥）、
- * 例行转给主助理、主助理补进项目群。删 Bot 里能加进来的只有主助理，所以主助理从一开始就在名单里；
- * 接续的 run 和父 run 同一个 Bot，父 run 第一轮就数进来了。所以第一轮锁完再重读，名单只会少不会多，
- * 不会出现「已持几把锁再去拿一把 id 更小的」。建队确认往项目群加成员不拿这些锁，是 README 里的已知项。例行没了回 null。
+ * 再加上还能建 run 的记录（running 和等点头的 stopped）上记着的执行者：单聊例行换人之后，旧执行者手上那次的派活可能还没提交，
+ * 之后还能经换电脑接续出带同一条记录的 run。这一位从记录的 bot_id 读，不从 runs 推：触发提交之后、派活建 run 之前，runs 里还没有它。
+ * 第一句先拿例行锁的排他，换人和触发都进不来，名单的四个来源这时都已提交。之后执行者和成员只在删 Bot 里变：
+ * 成员被删（它拿着自己的排他锁，和这里互斥）、例行转给主助理、主助理补进项目群，能加进来的只有主助理，它从一开始就在名单里；
+ * 记录上的执行者只会被删 Bot 置空，记录只会跑完，新记录只有触发能落。接续的 run 和父 run 同一个 Bot，群里被 @ 的是成员。
+ * 所以第一轮锁完再重读，名单只会少不会多，不会出现「已持几把锁再去拿一把 id 更小的」。
+ * 建队确认往项目群加成员不拿这些锁，是 README 里的已知项。例行没了回 null。
  */
 async function lockRoutineWriters(tx: Tx, routineId: string): Promise<OwnedRoutine | null> {
   await lockRoutineKey(tx, routineId, "exclusive");
@@ -409,17 +398,16 @@ async function writersOf(tx: Tx, routine: OwnedRoutine): Promise<string[]> {
     .select({ id: bots.id })
     .from(bots)
     .where(and(eq(bots.ownerId, routine.ownerId), eq(bots.role, "assistant")));
-  const running = await tx
-    .selectDistinct({ id: runs.botId })
-    .from(runs)
-    .innerJoin(routineRuns, eq(routineRuns.id, runs.routineRunId))
-    .where(and(eq(routineRuns.routineId, routine.row.id), eq(routineRuns.status, "running"), isNotNull(runs.botId)));
+  const live = await tx
+    .selectDistinct({ id: routineRuns.botId })
+    .from(routineRuns)
+    .where(and(eq(routineRuns.routineId, routine.row.id), inArray(routineRuns.status, ["running", "stopped"])));
   return [
     ...new Set([
       routine.row.botId,
       ...members.map((one) => one.id),
       ...assistants.map((one) => one.id),
-      ...running.flatMap((one) => (one.id === null ? [] : [one.id])),
+      ...live.flatMap((one) => (one.id === null ? [] : [one.id])),
     ]),
   ].toSorted();
 }
@@ -680,9 +668,12 @@ export async function openRoutineRun(
   )[0]?.id;
   if (groupId === undefined) return null;
 
-  const [row] = await tx.insert(routineRuns).values({ id: newId(), routineId, startedAt }).returning({
-    id: routineRuns.id,
-  });
+  const [row] = await tx
+    .insert(routineRuns)
+    .values({ id: newId(), routineId, startedAt, botId: current.row.botId })
+    .returning({
+      id: routineRuns.id,
+    });
   if (row === undefined) throw new Error("建运行记录没有返回行");
   return { id: row.id, row: current.row, groupId: GroupId.parse(groupId) };
 }
