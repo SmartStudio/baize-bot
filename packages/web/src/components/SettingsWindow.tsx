@@ -123,7 +123,8 @@ const OpenAtLoginRow = () => {
         if (live) setItem((current) => ({ ...current, error: "读不到开机启动的设置，重开设置再试" }));
       },
     );
-    const unsubscribe = bridge.openAtLogin.subscribe(setValue);
+    // 菜单那边改成了，就是读到了实际的值，之前的错误不再成立
+    const unsubscribe = bridge.openAtLogin.subscribe((value) => setItem({ value, error: null }));
     return () => {
       live = false;
       unsubscribe();

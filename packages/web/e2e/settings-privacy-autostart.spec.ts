@@ -1,10 +1,4 @@
-import {
-  KEPT_EDGE_BYTES,
-  MAX_ROUTINE_RUNS,
-  RETAIN_TEXT_LIMIT_BYTES,
-  SESSION_TTL_MS,
-  type OpenAtLogin,
-} from "@baize/shared";
+import { KEPT_EDGE_BYTES, RETAIN_TEXT_LIMIT_BYTES, SESSION_TTL_MS, type OpenAtLogin } from "@baize/shared";
 import { expect, login, openSettings, test, type Page } from "./fixtures";
 
 type MockBridgeWindow = Window & {
@@ -13,35 +7,41 @@ type MockBridgeWindow = Window & {
   __failSet: boolean;
 };
 
-const installDesktopBridge = (page: Page, initial: OpenAtLogin) =>
-  page.addInitScript((initial) => {
-    let openAtLogin = initial;
-    const listeners = new Set<(value: OpenAtLogin) => void>();
-    const target = window as unknown as MockBridgeWindow;
-    target.__bridgeSets = [];
-    target.__failSet = false;
-    target.__loginItemChanged = (value) => {
-      openAtLogin = value;
-      for (const listener of listeners) listener(value);
-    };
-    Object.assign(window, {
-      baizeDesktop: {
-        openAtLogin: {
-          get: async () => openAtLogin,
-          set: async (value: OpenAtLogin) => {
-            target.__bridgeSets.push(value);
-            if (target.__failSet) throw new Error("Error invoking remote method 'baize:open-at-login:set': boom");
-            target.__loginItemChanged(value);
-            return openAtLogin;
-          },
-          subscribe: (listener: (value: OpenAtLogin) => void) => {
-            listeners.add(listener);
-            return () => listeners.delete(listener);
+const installDesktopBridge = (page: Page, initial: OpenAtLogin, { failGet = false } = {}) =>
+  page.addInitScript(
+    ({ initial, failGet }) => {
+      let openAtLogin = initial;
+      const listeners = new Set<(value: OpenAtLogin) => void>();
+      const target = window as unknown as MockBridgeWindow;
+      target.__bridgeSets = [];
+      target.__failSet = false;
+      target.__loginItemChanged = (value) => {
+        openAtLogin = value;
+        for (const listener of listeners) listener(value);
+      };
+      Object.assign(window, {
+        baizeDesktop: {
+          openAtLogin: {
+            get: async () => {
+              if (failGet) throw new Error("Error invoking remote method 'baize:open-at-login:get': boom");
+              return openAtLogin;
+            },
+            set: async (value: OpenAtLogin) => {
+              target.__bridgeSets.push(value);
+              if (target.__failSet) throw new Error("Error invoking remote method 'baize:open-at-login:set': boom");
+              target.__loginItemChanged(value);
+              return openAtLogin;
+            },
+            subscribe: (listener: (value: OpenAtLogin) => void) => {
+              listeners.add(listener);
+              return () => listeners.delete(listener);
+            },
           },
         },
-      },
-    });
-  }, initial);
+      });
+    },
+    { initial, failGet },
+  );
 
 test("网页里没有桌面桥，通用页不出开机启动开关", async ({ page }) => {
   await login(page);
@@ -92,6 +92,22 @@ test("主进程改开机启动失败，开关行内说没改成，开关留在�
   expect(unhandled, "失败不留未处理的 rejection").toEqual([]);
 });
 
+test("读不到开机启动设置，开关行内说读不到且点不动，菜单推来实际值后恢复", async ({ page }) => {
+  await installDesktopBridge(page, "on", { failGet: true });
+  await login(page);
+  await openSettings(page);
+
+  const toggle = page.getByTestId("open-at-login-switch");
+  await expect(page.getByTestId("open-at-login-error")).toHaveText("读不到开机启动的设置，重开设置再试");
+  await expect(toggle, "不知道实际值就不显示成开").toHaveAttribute("aria-checked", "false");
+  await expect(toggle, "不知道实际值就不让点").toBeDisabled();
+
+  await page.evaluate(() => (window as unknown as MockBridgeWindow).__loginItemChanged("on"));
+  await expect(toggle, "菜单推来的就是实际值").toHaveAttribute("aria-checked", "true");
+  await expect(toggle).toBeEnabled();
+  await expect(page.getByTestId("open-at-login-error"), "有了实际值，读不到的错误收起").toHaveCount(0);
+});
+
 test("开发版 App 的桥报不支持，不出开机启动开关", async ({ page }) => {
   await installDesktopBridge(page, "unsupported");
   await login(page);
@@ -111,7 +127,7 @@ test("数据与隐私页写明每类数据存在哪、留多久，删账号要�
     `超过 ${RETAIN_TEXT_LIMIT_BYTES / 1024} KB 的输出只留头尾各 ${KEPT_EDGE_BYTES / 1024} KB`,
   );
   await expect(storage.getByTestId("privacy-storage-item").filter({ hasText: "网页登录" })).toContainText(
-    `${SESSION_TTL_MS / (24 * 60 * 60 * 1000)} 天过期`,
+    `${SESSION_TTL_MS / (24 * 60 * 60 * 1000)} 天过期，过期的每小时清一次。`,
   );
   await expect(storage.getByTestId("privacy-storage-item").locator("b")).toHaveText([
     "对话和工作记录",
@@ -131,7 +147,7 @@ test("数据与隐私页写明每类数据存在哪、留多久，删账号要�
     "截图原图和完整输出都在",
   );
   await expect(storage.getByTestId("privacy-storage-item").filter({ hasText: "用量和例行记录" })).toContainText(
-    `每个例行大约只留最近 ${MAX_ROUTINE_RUNS} 次运行记录，正在跑的那次`,
+    "每个例行大约只留最近 20 次运行记录，正在跑的那次和每个定时触发器最近到点的那次也留着，所以有时会多出几条。",
   );
   const deletion = page.getByTestId("privacy-delete-note");
   await expect(deletion).toContainText("电脑上的数据目录和 App 存的连接凭据不会跟着删");

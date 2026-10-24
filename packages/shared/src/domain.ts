@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_ROUTINE_RUNS } from "./retention.js";
 import { ToolView } from "./tool-view.js";
 
 // 对象模型。依据 spec/规格.md 第二节，这里是各对象「现在」的形状。每个对象一个 zod schema，类型从 schema 推导。
@@ -788,7 +789,7 @@ export const Routine = z.object({
   boundary: RoutineBoundary,
   // 要不要在首页「接下来」里露出。
   onToday: z.boolean(),
-  runs: z.array(RoutineRun).max(20),
+  runs: z.array(RoutineRun).max(MAX_ROUTINE_RUNS),
 });
 export type Routine = z.infer<typeof Routine>;
 
