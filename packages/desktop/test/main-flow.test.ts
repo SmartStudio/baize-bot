@@ -21,6 +21,11 @@ const appQuit = vi.hoisted(() => vi.fn());
 const authCompleted = vi.hoisted(() => vi.fn());
 const reapGate = vi.hoisted(() => ({ current: null as Promise<void> | null }));
 const showMessageBox = vi.hoisted(() => vi.fn());
+const dockBadges = vi.hoisted((): string[] => []);
+const notifications = vi.hoisted(() => ({
+  supported: false,
+  shown: [] as Array<{ title: string; body: string; clicks: Array<() => void> }>,
+}));
 type FakeWindow = Record<string, unknown> & {
   destroyed: boolean;
   on: MockInstance;
@@ -33,7 +38,7 @@ function liveCall<T = undefined>(window: { destroyed: boolean }, value?: T): T {
   return value as T;
 }
 const windows = vi.hoisted((): FakeWindow[] => []);
-const trays = vi.hoisted((): Array<{ on: MockInstance }> => []);
+const trays = vi.hoisted((): Array<{ on: MockInstance; setTitle: MockInstance }> => []);
 const fsState = vi.hoisted(() => ({ credentials: null as string | null, writeError: null as Error | null }));
 const fsWrites = vi.hoisted((): string[] => []);
 const fetchState = vi.hoisted(() => ({
@@ -42,6 +47,7 @@ const fetchState = vi.hoisted(() => ({
   ownerId: "user-1",
   localComputer: null as Promise<unknown> | null,
   urls: [] as string[],
+  pendingByBot: [] as number[],
   localResponses: [] as unknown[],
   localRequests: [] as Array<RequestInit | undefined>,
 }));
@@ -88,6 +94,8 @@ const fakeWindow = (): object => {
     focus: vi.fn(() => liveCall(window)),
     isVisible: vi.fn(() => liveCall(window, false)),
     isFocused: vi.fn(() => liveCall(window, true)),
+    isMinimized: vi.fn(() => liveCall(window, false)),
+    restore: vi.fn(() => liveCall(window)),
     getSize: vi.fn(() => liveCall(window, [390, 560])),
     setPosition: vi.fn(() => liveCall(window)),
   };
@@ -111,13 +119,31 @@ vi.mock("electron", () => {
       setAboutPanelOptions: vi.fn(),
       exit: appExit,
       quit: appQuit,
+      dock: {
+        setIcon: vi.fn(),
+        setBadge: (text: string) => dockBadges.push(text),
+      },
     },
     autoUpdater,
     BrowserWindow: vi.fn(fakeWindow),
     dialog: { showErrorBox: vi.fn(), showMessageBox },
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
-    nativeImage: { createFromDataURL: vi.fn(() => ({ setTemplateImage: vi.fn() })) },
-    Notification: Object.assign(vi.fn(), { isSupported: () => false }),
+    nativeImage: {
+      createFromDataURL: vi.fn(() => ({ setTemplateImage: vi.fn() })),
+      createFromPath: vi.fn(() => ({ isEmpty: () => true })),
+    },
+    Notification: Object.assign(
+      vi.fn((options: { title: string; body: string }) => {
+        const notice = { ...options, clicks: [] as Array<() => void> };
+        return {
+          on: (event: string, listener: () => void) => {
+            if (event === "click") notice.clicks.push(listener);
+          },
+          show: () => notifications.shown.push(notice),
+        };
+      }),
+      { isSupported: () => notifications.supported },
+    ),
     safeStorage: {
       isEncryptionAvailable: () => true,
       encryptString: (text: string) => Buffer.from(text),
@@ -143,6 +169,30 @@ vi.mock("electron", () => {
               }),
             };
           }
+          if (url.endsWith("/api/bots")) {
+            return {
+              ok: true,
+              json: async () => ({
+                items: fetchState.pendingByBot.map((pendingApprovals, index) => ({
+                  bot: {
+                    id: `bot-${index}`,
+                    ownerId: fetchState.ownerId,
+                    role: "member",
+                    name: `小服${index}`,
+                    hue: "sky",
+                    shape: "cloud",
+                    runState: "running",
+                    createdAt: "2026-10-14T00:00:00.000Z",
+                  },
+                  groupId: `group-${index}`,
+                  lastMessage: null,
+                  pendingApprovals,
+                  pendingHandoffs: 0,
+                })),
+              }),
+            };
+          }
+          if (url.endsWith("/api/groups")) return { ok: true, json: async () => ({ items: [] }) };
           if (url.endsWith("/api/computers/local")) {
             fetchState.localRequests.push(init);
             if (fetchState.localResponses.length > 0) return fetchState.localResponses.shift();
@@ -217,6 +267,8 @@ async function loadMain(): Promise<typeof import("../src/main.js")> {
   trays.length = 0;
   fsWrites.length = 0;
   fetchState.urls.length = 0;
+  dockBadges.length = 0;
+  notifications.shown.length = 0;
   return import("../src/main.js");
 }
 
@@ -233,6 +285,11 @@ function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value
 }
 
 const fakeEvent = (): { preventDefault: MockInstance } => ({ preventDefault: vi.fn() });
+
+const confirmNotice = (groupId: string | null) => ({
+  type: "notify",
+  notice: { kind: "confirm", text: "批准小服发送邮件", groupId, at: "2026-10-14T00:00:00.000Z" },
+});
 
 async function reconnectFromMenu(): Promise<void> {
   const { Menu } = await import("electron");
@@ -259,6 +316,8 @@ describe("桌面主进程代理流程", () => {
     fetchState.localComputer = null;
     fetchState.localResponses.length = 0;
     fetchState.localRequests.length = 0;
+    fetchState.pendingByBot = [];
+    notifications.supported = false;
     showMessageBox.mockReset().mockResolvedValue({ response: 1 });
     kill = vi.spyOn(process, "kill").mockImplementation(() => true);
   });
@@ -1070,6 +1129,127 @@ describe("桌面主进程代理流程", () => {
       await new Promise((resolve) => setImmediate(resolve));
       expect(fetchState.localRequests).toHaveLength(1);
       expect(children).toHaveLength(0);
+    });
+  });
+
+  describe("角标与通知", () => {
+    let signalListeners: ReadonlyMap<"SIGINT" | "SIGTERM", readonly NodeJS.SignalsListener[]>;
+    beforeEach(() => {
+      signalListeners = new Map((["SIGINT", "SIGTERM"] as const).map((signal) => [signal, process.listeners(signal)]));
+      fsState.credentials = JSON.stringify({
+        ownerId: "user-1",
+        computerId: credentials.computerId,
+        encryptedToken: Buffer.from(credentials.token).toString("base64"),
+      });
+    });
+    afterEach(() => {
+      electronState.ready = false;
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        for (const listener of process.listeners(signal)) {
+          if (!signalListeners.get(signal)?.includes(listener)) process.removeListener(signal, listener);
+        }
+      }
+    });
+    const boot = async (): Promise<void> => {
+      electronState.ready = true;
+      await loadMain();
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    };
+    const push = (message: unknown): void => {
+      sockets.at(-1)?.emit("message", JSON.stringify(message));
+    };
+    const approvalUpdated = {
+      type: "approval_updated",
+      approval: {
+        id: "approval-1",
+        runId: "run-1",
+        botId: "bot-0",
+        groupId: "group-0",
+        action: "shell",
+        target: null,
+        view: { kind: "bash", command: "pwd" },
+        status: "approved",
+        decidedAt: "2026-10-14T00:00:00.000Z",
+        deadlineAt: null,
+        grantId: null,
+      },
+    };
+    const clickNotice = async (groupId: string | null): Promise<void> => {
+      notifications.supported = true;
+      push(confirmNotice(groupId));
+      expect(notifications.shown.map((notice) => notice.title)).toEqual(["白泽要你确认"]);
+      for (const click of notifications.shown[0]?.clicks ?? []) click();
+      await new Promise((resolve) => setImmediate(resolve));
+    };
+    const mainWindowAt = (index: number) => windows[index]!;
+    const trayTitle = () => trays[0]?.setTitle.mock.calls.at(-1)?.[0];
+
+    it("Dock 角标和托盘数字一起跟着等你确认的数走，清零时角标清空", async () => {
+      fetchState.pendingByBot = [2, 1];
+      await boot();
+      await vi.waitFor(() => expect(dockBadges).toEqual(["3"]));
+      expect(trayTitle()).toBe("3");
+
+      fetchState.pendingByBot = [0, 0];
+      push(approvalUpdated);
+      await vi.waitFor(() => expect(dockBadges).toEqual(["3", ""]));
+      expect(trayTitle()).toBe("");
+    });
+
+    it("不是 macOS 时不碰 Dock 角标，托盘照常显示数字", async () => {
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      try {
+        fetchState.pendingByBot = [2];
+        await boot();
+        await vi.waitFor(() => expect(trayTitle()).toBe("2"));
+        expect(dockBadges).toEqual([]);
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
+    });
+
+    it("点通知把主窗口叫到前台并打开通知所在的群", async () => {
+      await boot();
+      const window = mainWindowAt(0);
+      await clickNotice("group-7");
+
+      expect(window.loadURL).toHaveBeenLastCalledWith("http://127.0.0.1:1/g/group-7");
+      expect(window.show).toHaveBeenCalled();
+      expect(window.focus).toHaveBeenCalled();
+      expect(windows[1]?.show, "通知不再只弹菜单栏").not.toHaveBeenCalled();
+    });
+
+    it("主窗口最小化时点通知先还原", async () => {
+      await boot();
+      const window = mainWindowAt(0);
+      vi.mocked(window["isMinimized"] as MockInstance).mockReturnValue(true);
+      await clickNotice("group-7");
+
+      expect(window["restore"]).toHaveBeenCalled();
+      expect(window.focus).toHaveBeenCalled();
+    });
+
+    it("主窗口已经关了，点通知新建主窗口直接打开那个群", async () => {
+      await boot();
+      const closed = mainWindowAt(0);
+      const onClosed = closed.on.mock.calls.find((args) => args[0] === "closed")?.[1] as () => void;
+      closed.destroyed = true;
+      onClosed();
+      await clickNotice("group-7");
+
+      expect(windows).toHaveLength(3);
+      expect(mainWindowAt(2).loadURL).toHaveBeenCalledWith("http://127.0.0.1:1/g/group-7");
+    });
+
+    it("不属于哪个群的通知只把主窗口叫到前台，不换页", async () => {
+      await boot();
+      const window = mainWindowAt(0);
+      await clickNotice(null);
+
+      expect(window.loadURL).toHaveBeenCalledTimes(1);
+      expect(window.show).toHaveBeenCalled();
+      expect(window.focus).toHaveBeenCalled();
     });
   });
 

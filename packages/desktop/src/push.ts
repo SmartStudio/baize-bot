@@ -1,7 +1,9 @@
-import { ServerPush, type NotifyKind } from "@baize/shared";
+import { ServerPush, type GroupId, type NotifyKind } from "@baize/shared";
+
+export type DesktopNotice = { readonly kind: NotifyKind; readonly text: string; readonly groupId: GroupId | null };
 
 export type DesktopPush = {
-  notify(input: { readonly kind: NotifyKind; readonly text: string }): void;
+  notify(input: DesktopNotice): void;
   refreshPending(): void;
 };
 
@@ -18,6 +20,7 @@ export function receiveServerPush(raw: string, target: DesktopPush): boolean {
     target.notify({
       kind: parsed.data.notice.kind,
       text: parsed.data.notice.text,
+      groupId: parsed.data.notice.groupId,
     });
   } else if (parsed.data.type === "approval_updated") {
     target.refreshPending();

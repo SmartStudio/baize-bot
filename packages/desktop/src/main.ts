@@ -29,6 +29,7 @@ import {
   PairLocalConflictResponse,
   UserId,
   type ComputerId,
+  type GroupId,
   type NotifyKind,
 } from "@baize/shared";
 import WebSocket from "ws";
@@ -42,7 +43,7 @@ import {
 } from "./agent-state.js";
 import { menuTemplate } from "./menu.js";
 import { normalizedOrigin } from "./origin.js";
-import { receiveServerPush } from "./push.js";
+import { receiveServerPush, type DesktopNotice } from "./push.js";
 import { startUiServer } from "./proxy.js";
 import { createUpdater, parseUpdateFeed, resolveUpdateFeed, type Updater } from "./updater.js";
 
@@ -592,8 +593,10 @@ async function refreshPending(session: Session): Promise<void> {
     const bots = BotListResponse.parse(await botsResponse.json());
     const groups = GroupListResponse.parse(await groupsResponse.json());
     const count = [...bots.items, ...groups.items].reduce((sum, item) => sum + item.pendingApprovals, 0);
-    tray?.setTitle(count === 0 ? "" : String(count));
+    const label = count === 0 ? "" : String(count);
+    tray?.setTitle(label);
     tray?.setToolTip(count === 0 ? "白泽" : `白泽 · ${count} 件等你确认`);
+    if (process.platform === "darwin") app.dock?.setBadge(label);
     logLine(`pending-count ${count}`);
   } catch (error) {
     logLine(`pending-refresh-failed ${errorText(error)}`);
@@ -630,7 +633,7 @@ export function connectPush(session: Session, origin = uiOrigin): void {
   });
 }
 
-function showNotice(notice: { readonly kind: NotifyKind; readonly text: string }): void {
+function showNotice(notice: DesktopNotice): void {
   if (!Notification.isSupported()) return;
   const titles: Record<NotifyKind, string> = {
     confirm: "白泽要你确认",
@@ -642,10 +645,26 @@ function showNotice(notice: { readonly kind: NotifyKind; readonly text: string }
     title: titles[notice.kind],
     body: notice.text,
   });
-  const open = (): void => showMenubar();
-  notification.on("click", open);
+  notification.on("click", () => openMainWindow(notice.groupId));
   notification.show();
   logLine(`native-notify ${notice.kind} ${notice.text}`);
+}
+
+function openMainWindow(groupId: GroupId | null): void {
+  if (phase !== "running") return;
+  const path = groupId === null ? null : `/g/${encodeURIComponent(groupId)}`;
+  const window = mainWindow;
+  if (window === null || window.isDestroyed()) {
+    void createWindows(electronSession.defaultSession, path ?? "").catch((error: unknown) =>
+      logLine(`主窗口打开失败 ${errorText(error)}`),
+    );
+    return;
+  }
+  if (path !== null)
+    void window.loadURL(`${uiOrigin}${path}`).catch((error: unknown) => logLine(`主窗口跳转失败 ${errorText(error)}`));
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
 }
 
 function trayImage() {
@@ -670,7 +689,7 @@ function showMenubar(): void {
 
 const closeHidesMenubar = (): boolean => phase === "running" || phase === "preparing-install";
 
-async function createWindows(session: Session): Promise<void> {
+async function createWindows(session: Session, mainPath = ""): Promise<void> {
   // 登录页一加载完就能提交，钩子晚于 loadURL 装上会漏掉这次登录，代理就永远不启动。
   if (!authHookInstalled) {
     authHookInstalled = true;
@@ -701,7 +720,7 @@ async function createWindows(session: Session): Promise<void> {
     window.on("closed", () => {
       if (mainWindow === window) mainWindow = null;
     });
-    await window.loadURL(uiOrigin);
+    await window.loadURL(`${uiOrigin}${mainPath}`);
   }
 
   if (menubarWindow === null) {
