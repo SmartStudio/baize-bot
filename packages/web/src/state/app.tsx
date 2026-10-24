@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   LoginAttemptId,
   ServerPush,
@@ -54,7 +54,7 @@ import {
 } from "@baize/shared";
 import { RequestFailed, type Api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
-import { noticeState } from "./notify.js";
+import { noticeTarget } from "./notify.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
 import { reconnectDelay } from "./reconnect.js";
@@ -390,9 +390,12 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // 换一次路径 navigate 就换一个身份，推送连接不能跟着它重建，点通知时读最新的那个。
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
+  const { pathname } = useLocation();
+  const pathnameRef = useRef(pathname);
   useEffect(() => {
     navigateRef.current = navigate;
-  }, [navigate]);
+    pathnameRef.current = pathname;
+  }, [navigate, pathname]);
   useEffect(() => {
     stateRef.current = state;
     // 开发构建把当前状态挂到 window 上，端到端测试等确定的状态再断言，不靠请求之间的时间先后。
@@ -1010,7 +1013,9 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       reloadChoices: (groupId, after) => void actions.loadComputerChoices(groupId, after).catch(() => undefined),
       openNotice: (notice) => {
         put({ type: "notices_read" });
-        navigateRef.current("/", { state: noticeState(notice) });
+        const { path, state } = noticeTarget(notice);
+        // 已经在那一页上就原地换掉这一条历史，后退不会退回同一页。
+        navigateRef.current(path, { state, replace: pathnameRef.current === path });
       },
     });
     const retryLater = () => {

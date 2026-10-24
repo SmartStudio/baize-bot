@@ -65,7 +65,7 @@ type Props = {
 };
 
 const PERMISSION_TEXT: Record<NotifyPermission, string> = {
-  default: "浏览器还没允许白泽发通知，允许之后上面这些才弹得出来。",
+  default: "浏览器还没允许白泽发通知。允许之后，上面那个开关开着才弹得出系统通知。",
   granted: "已开启，Bot 找你时浏览器会弹系统通知。",
   denied: "浏览器拒绝了白泽的通知。要收通知，到地址栏左边的网站设置里把「通知」改成允许。",
   unsupported: "这个浏览器发不了系统通知。",

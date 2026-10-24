@@ -27,7 +27,7 @@ import { pokerTableOf } from "../state/poker.js";
 import { MY_ROUTINES } from "../state/routines.js";
 import { MESSAGE_GAP_ATTEMPTS } from "../state/types.js";
 import { useToday } from "../state/today.js";
-import { useUnreadTitle } from "../state/notify.js";
+import { openedFromNotice, useUnreadTitle } from "../state/notify.js";
 import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 import { oauthNoticeText, oauthReturnOf, type OAuthReturn } from "./oauth.js";
@@ -118,6 +118,14 @@ export const MainWindow = () => {
   }, [groupId, reconnectedAt, twoComputers, actions]);
 
   useUnreadTitle(ready?.unreadNotices ?? 0, actions.markNoticesRead);
+  // 点通知跳过来时浮层还盖着，人就看不到跳到了哪。每次跳转的 key 都不同，同一页连点两条也各收一次。
+  // 在渲染时比对，不放进 effect 里多渲染一轮。
+  const noticeKey = openedFromNotice(location.state) ? location.key : null;
+  const [seenNoticeKey, setSeenNoticeKey] = useState(noticeKey);
+  if (noticeKey !== seenNoticeKey) {
+    setSeenNoticeKey(noticeKey);
+    if (noticeKey !== null) setOverlay("none");
+  }
 
   // 打开群页或项目页算看过（D3），首页扫到不算。项目页进同一个项目群还是这个群，不再记一次。
   useEffect(() => {
