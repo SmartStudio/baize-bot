@@ -2,6 +2,7 @@ import { MonitorUp } from "lucide-react";
 import type { MessageBody, MessageId, ToolView } from "@baize/shared";
 import { takeoverScreen } from "../../state/live.js";
 import type { ContentBook } from "../../state/types.js";
+import { useFailureToast } from "../Toasts.js";
 import type { ContentActions } from "./DraftCards.js";
 import type { InspectTool } from "./MessageView.js";
 import { LIVE_TEXT, computerName, takeoverResult } from "./content.js";
@@ -29,6 +30,7 @@ export const TakeoverCard = ({
   selected: boolean;
   onInspect: InspectTool;
 }) => {
+  const failed = useFailureToast();
   const screen = takeoverScreen(content, view.liveId);
   const computer = screen.kind === "open" ? content.computers[screen.session.computerId] : undefined;
   return (
@@ -59,7 +61,7 @@ export const TakeoverCard = ({
           type="button"
           className="primary-button takeover-open"
           data-testid="takeover-open"
-          onClick={() => void actions.openTakeover(view.liveId).catch(() => undefined)}
+          onClick={() => void actions.openTakeover(view.liveId).catch(failed("画面没打开，再试一次"))}
         >
           {LIVE_TEXT.open}
         </button>

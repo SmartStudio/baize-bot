@@ -15,6 +15,7 @@ import { openTerminal } from "../state/live.js";
 import type { LoginFlow } from "../state/types.js";
 import { ConnectEntries } from "./ConnectEntries.js";
 import { loginFlowNote } from "./LoginCard.js";
+import { useFailureToast } from "./Toasts.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
 import {
   COMPUTER_KIND_TEXT,
@@ -53,6 +54,7 @@ type Login = { flows: Partial<Record<AccountId, LoginFlow>>; open: (accountId: A
 
 // 电脑浏览器登录的号没登上时，行上就能开登录窗口，不用回首页找卡。点了之后怎么样了跟首页的卡同一套说法。
 const LoginAction = ({ account, where, login }: { account: Account; where: string; login: Login }) => {
+  const failed = useFailureToast();
   const flow = login.flows[account.id];
   const note = loginFlowNote(flow, where);
   const opening = flow?.status === "opening";
@@ -72,7 +74,7 @@ const LoginAction = ({ account, where, login }: { account: Account; where: strin
         className="primary-button"
         data-testid="login-open"
         disabled={opening}
-        onClick={() => void login.open(account.id).catch(() => undefined)}
+        onClick={() => void login.open(account.id).catch(failed("登录窗口没打开，再试一次"))}
       >
         {opening ? "等你登录…" : "打开登录窗口"}
       </button>
@@ -213,6 +215,7 @@ type Opening = { status: "idle" } | { status: "busy" } | { status: "failed"; mes
 // 云电脑那一行下面的终端入口。还开着终端（刷新之后也算）就给「回到终端」，面板本身由 LiveHost 摆。
 const TerminalAction = ({ computer }: { computer: Computer }) => {
   const { state, actions } = useApp();
+  const failedToast = useFailureToast();
   const [opening, setOpening] = useState<Opening>({ status: "idle" });
   const content = state.status === "ready" ? state.content : null;
   const existing = content === null ? null : openTerminal(content.live, computer.id);
@@ -225,14 +228,14 @@ const TerminalAction = ({ computer }: { computer: Computer }) => {
     if (waiting === null) return;
     const timer = setTimeout(() => {
       setOpening({ status: "failed", message: TERMINAL_TEXT.notOpened });
-      void actions.hideTerminal(waiting).catch(() => undefined);
+      void actions.hideTerminal(waiting).catch((cause: unknown) => console.warn("收起没开成的终端没成", cause));
     }, TERMINAL_WAIT_MS);
     return () => clearTimeout(timer);
   }, [waiting, actions]);
 
   const open = () => {
     if (existing !== null) {
-      void actions.showTerminal(existing).catch(() => undefined);
+      void actions.showTerminal(existing).catch(failedToast("没回到终端，再试一次"));
       return;
     }
     setOpening({ status: "busy" });

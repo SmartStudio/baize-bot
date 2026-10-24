@@ -1,0 +1,48 @@
+.crash-page {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+  height: 100%;
+  padding: var(--space-9);
+  background: var(--bg-app);
+  color: var(--fg-2);
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+
+.crash-title {
+  margin: 0;
+  color: var(--fg-1);
+  font: var(--type-heading);
+}
+
+.crash-text {
+  margin: 0;
+  font: var(--type-body);
+}
+
+.toasts {
+  position: fixed;
+  top: var(--space-6);
+  left: 50%;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  align-items: center;
+  width: min(480px, calc(100vw - 2 * var(--space-6)));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.toast {
+  margin: 0;
+  padding: var(--space-4) var(--space-6);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  color: var(--danger);
+  font: var(--type-ui);
+}

@@ -49,7 +49,9 @@ export const ActionBar = ({ table }: Props) => {
       setError(cause instanceof RequestFailed ? cause.message : "出牌没成功，稍后再试");
       // 409 是你看的牌桌已经过时了，补拉一份最新的。
       if (cause instanceof RequestFailed && cause.status === 409) {
-        void actions.loadPokerTable(table.groupId).catch(() => undefined);
+        void actions
+          .loadPokerTable(table.groupId)
+          .catch((error: unknown) => console.warn("出牌撞上过时的牌桌，补拉没成", error));
       }
     }
   };

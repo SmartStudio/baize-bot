@@ -13,6 +13,8 @@ import { SettingsWindow } from "../components/SettingsWindow.js";
 import { TaskPanel } from "../components/TaskPanel.js";
 import { ToolInspector } from "../components/ToolInspector.js";
 import { BotCreatedNotice } from "../components/BotCreatedNotice.js";
+import { ErrorBoundary } from "../components/ErrorBoundary.js";
+import { useFailureToast } from "../components/Toasts.js";
 import { PushBanner } from "../components/PushBanner.js";
 import { LiveHost } from "../live/LiveHost.js";
 import { TodayPage } from "./TodayPage.js";
@@ -82,6 +84,7 @@ export const MainWindow = () => {
   const location = useLocation();
   const screen = screenOf(location.pathname);
   const today = useToday();
+  const failed = useFailureToast();
   const [overlay, setOverlay] = useState<Overlay>("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
@@ -114,7 +117,9 @@ export const MainWindow = () => {
   const twoComputers = hasChoice(computers);
   useEffect(() => {
     if (groupId !== null && twoComputers)
-      void actions.loadComputerChoices(groupId, reconnectedAt).catch(() => undefined);
+      void actions
+        .loadComputerChoices(groupId, reconnectedAt)
+        .catch((cause: unknown) => console.warn("群里各成员选的电脑没拉到", cause));
   }, [groupId, reconnectedAt, twoComputers, actions]);
 
   useUnreadTitle(ready?.unreadNotices ?? 0, actions.markNoticesRead);
@@ -129,7 +134,8 @@ export const MainWindow = () => {
 
   // 打开群页或项目页算看过（D3），首页扫到不算。项目页进同一个项目群还是这个群，不再记一次。
   useEffect(() => {
-    if (focusedId !== null) void actions.markSeen(focusedId).catch(() => undefined);
+    if (focusedId !== null)
+      void actions.markSeen(focusedId).catch((cause: unknown) => console.warn("没记上看过这个群", cause));
   }, [focusedId, actions]);
 
   // 侧栏要知道有没有例行自己停了，例行不等进例行页才拉。在途和拉失败的不自动再要，失败等例行页上点重试。
@@ -175,10 +181,14 @@ export const MainWindow = () => {
   const projectGroupId = projectOpen?.groupId ?? null;
   const pokerTable = ready === null || projectGroupId === null ? undefined : pokerTableOf(ready, projectGroupId);
   const awaitingTable = projectOpen?.poker === true && pokerTable === undefined;
+  const [tableFailed, setTableFailed] = useState<GroupId | null>(null);
+  const loadAwaitedTable = useCallback(
+    (target: GroupId) => actions.loadPokerTable(target).catch(() => setTableFailed(target)),
+    [actions],
+  );
   useEffect(() => {
-    if (!awaitingTable || projectGroupId === null) return;
-    void actions.loadPokerTable(projectGroupId).catch(() => undefined);
-  }, [actions, awaitingTable, projectGroupId]);
+    if (awaitingTable && projectGroupId !== null) void loadAwaitedTable(projectGroupId);
+  }, [loadAwaitedTable, awaitingTable, projectGroupId]);
 
   if (!ready) return null;
   if (
@@ -296,111 +306,131 @@ export const MainWindow = () => {
         user={ready.user}
         pendingCount={today.data === null ? 0 : today.data.pending.length}
         countsStale={ready.loads.counts === "failed"}
-        onRetryCounts={() => void actions.loadPendingCounts().catch(() => undefined)}
+        onRetryCounts={() => void actions.loadPendingCounts().catch(failed("待办数还是没刷新上"))}
         routinesStopped={(routinesLoaded ?? []).some((routine) => routine.state === "auto_paused")}
         onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
         onOpenSettings={() => setOverlay("settings")}
       />
-      {conversation !== null ? (
-        <ChatPanel
-          conversation={conversation}
-          bots={bots}
-          turn={ready.groupTurns[conversation.groupId]}
-          messages={ready.messages.rows[conversation.groupId] ?? NO_MESSAGES}
-          history={ready.loads[`messages:${conversation.groupId}`] ?? "idle"}
-          onRetryHistory={() => void actions.loadMessages(conversation.groupId, reconnectedAt)}
-          edge={ready.messageEdges[conversation.groupId]}
-          older={ready.loads[`older:${conversation.groupId}`] ?? "idle"}
-          onLoadOlder={actions.loadOlderMessages}
-          lookup={lookup}
-          approvals={ready.approvals}
-          handoffs={ready.handoffs}
-          skills={ready.skills.rows}
-          content={ready.content}
-          contentActions={contentActions}
-          onSend={actions.sendMessage}
-          onDecide={actions.decideApproval}
-          onDecideSkillOffer={actions.decideSkillOffer}
-          onDecidePreferenceOffer={actions.decidePreferenceOffer}
-          onDecideProjectOffer={(messageId, request) =>
-            actions.decideProjectOffer(messageId, request).then(openProjectPage)
-          }
-          onOpenProject={openProjectPage}
-          onInspectTool={(view) => {
-            if (groupId !== null) setInspectedTool({ groupId, tool: view });
-          }}
-          inspectedToolId={inspected?.messageId ?? null}
-          onLoadSkills={actions.loadSkills}
-          onToggleChecklist={async (checklist: ChecklistItem[]) => {
-            if (team !== null) await actions.setChecklist(team.task, checklist);
-          }}
-          onOpenTask={() => setTaskOpenFor(groupId)}
-          computerChoices={computerChoices}
-          botPanelOpen={botPanelOpen}
-          onToggleBotPanel={() => {
-            // 主动要看设置，就把占着右栏的检查器让出来。
-            if (!botPanelOpen) setInspectedTool(null);
-            changeBotPanel(!botPanelOpen);
-          }}
-        />
-      ) : tableOpen !== null ? (
-        <TablePage
-          groupId={tableOpen}
-          title={projectNames[tableOpen] ?? null}
-          table={pokerTableOf(ready, tableOpen) ?? null}
-        />
-      ) : projectOpen !== null && pokerTable !== undefined ? (
-        <PokerProjectPage
-          table={pokerTable}
-          title={projectOpen.task.title}
-          onOpenTable={openTablePage}
-          onStartHand={actions.startPokerHand}
-          onSwapSeat={actions.swapPokerSeat}
-          onArchive={actions.archiveGroup}
-        />
-      ) : awaitingTable ? (
-        <main className="today-page today-loading" data-testid="poker-project-loading">
-          正在整理这个项目
-        </main>
-      ) : projectOpen !== null ? (
-        <ProjectView
-          conversation={projectOpen}
-          bots={bots}
-          messages={ready.messages.rows[projectOpen.groupId] ?? NO_MESSAGES}
-          lookup={lookup}
-          cards={{ content: ready.content, actions: contentActions, lookup }}
-          onSend={actions.sendMessage}
-          onDecide={actions.decideApproval}
-          onOpenGroup={openGroupPage}
-          onArchive={actions.archiveGroup}
-        />
-      ) : screen.kind === "routines" ? (
-        <RoutinesPage />
-      ) : screen.kind === "team" ? (
-        <TeamPage
-          bots={bots}
-          conversations={ready.conversations}
-          onCreateBot={() =>
-            void actions.createBot().then((made) => {
-              if (made === undefined) return;
-              setCreated(made.bot);
-              openGroupPage(made.groupId);
-            })
-          }
-        />
-      ) : (
-        <TodayPage
-          today={today}
-          userName={ready.user.name}
-          cards={{ content: ready.content, actions: contentActions, lookup }}
-          onSend={actions.sendMessage}
-          onDecide={actions.decideApproval}
-          onOpenGroup={openGroupPage}
-          onOpenAccounts={() => setOverlay("accounts")}
-          onCreateTable={async (requestId) => openProjectPage(await actions.createPokerTable(requestId))}
-        />
-      )}
+      <ErrorBoundary resetKey={location.pathname} testId="page-crash">
+        {conversation !== null ? (
+          <ChatPanel
+            conversation={conversation}
+            bots={bots}
+            turn={ready.groupTurns[conversation.groupId]}
+            messages={ready.messages.rows[conversation.groupId] ?? NO_MESSAGES}
+            history={ready.loads[`messages:${conversation.groupId}`] ?? "idle"}
+            onRetryHistory={() => void actions.loadMessages(conversation.groupId, reconnectedAt)}
+            edge={ready.messageEdges[conversation.groupId]}
+            older={ready.loads[`older:${conversation.groupId}`] ?? "idle"}
+            onLoadOlder={actions.loadOlderMessages}
+            lookup={lookup}
+            approvals={ready.approvals}
+            handoffs={ready.handoffs}
+            skills={ready.skills.rows}
+            content={ready.content}
+            contentActions={contentActions}
+            onSend={actions.sendMessage}
+            onDecide={actions.decideApproval}
+            onDecideSkillOffer={actions.decideSkillOffer}
+            onDecidePreferenceOffer={actions.decidePreferenceOffer}
+            onDecideProjectOffer={(messageId, request) =>
+              actions.decideProjectOffer(messageId, request).then(openProjectPage)
+            }
+            onOpenProject={openProjectPage}
+            onInspectTool={(view) => {
+              if (groupId !== null) setInspectedTool({ groupId, tool: view });
+            }}
+            inspectedToolId={inspected?.messageId ?? null}
+            onLoadSkills={actions.loadSkills}
+            onToggleChecklist={async (checklist: ChecklistItem[]) => {
+              if (team !== null) await actions.setChecklist(team.task, checklist);
+            }}
+            onOpenTask={() => setTaskOpenFor(groupId)}
+            computerChoices={computerChoices}
+            botPanelOpen={botPanelOpen}
+            onToggleBotPanel={() => {
+              // 主动要看设置，就把占着右栏的检查器让出来。
+              if (!botPanelOpen) setInspectedTool(null);
+              changeBotPanel(!botPanelOpen);
+            }}
+          />
+        ) : tableOpen !== null ? (
+          <TablePage
+            groupId={tableOpen}
+            title={projectNames[tableOpen] ?? null}
+            table={pokerTableOf(ready, tableOpen) ?? null}
+          />
+        ) : projectOpen !== null && pokerTable !== undefined ? (
+          <PokerProjectPage
+            table={pokerTable}
+            title={projectOpen.task.title}
+            onOpenTable={openTablePage}
+            onStartHand={actions.startPokerHand}
+            onSwapSeat={actions.swapPokerSeat}
+            onArchive={actions.archiveGroup}
+          />
+        ) : awaitingTable && tableFailed !== null && tableFailed === projectGroupId ? (
+          <main className="today-page today-loading" data-testid="poker-project-failed">
+            <p>牌桌没取到。</p>
+            <button
+              type="button"
+              className="ghost-button"
+              data-testid="poker-project-retry"
+              onClick={() => {
+                setTableFailed(null);
+                void loadAwaitedTable(tableFailed);
+              }}
+            >
+              重试
+            </button>
+          </main>
+        ) : awaitingTable ? (
+          <main className="today-page today-loading" data-testid="poker-project-loading">
+            正在整理这个项目
+          </main>
+        ) : projectOpen !== null ? (
+          <ProjectView
+            conversation={projectOpen}
+            bots={bots}
+            messages={ready.messages.rows[projectOpen.groupId] ?? NO_MESSAGES}
+            lookup={lookup}
+            cards={{ content: ready.content, actions: contentActions, lookup }}
+            onSend={actions.sendMessage}
+            onDecide={actions.decideApproval}
+            onOpenGroup={openGroupPage}
+            onArchive={actions.archiveGroup}
+          />
+        ) : screen.kind === "routines" ? (
+          <RoutinesPage />
+        ) : screen.kind === "team" ? (
+          <TeamPage
+            bots={bots}
+            conversations={ready.conversations}
+            onCreateBot={() =>
+              void actions
+                .createBot()
+                .then((made) => {
+                  if (made === undefined) return;
+                  setCreated(made.bot);
+                  openGroupPage(made.groupId);
+                })
+                .catch(failed("没建成，再试一次"))
+            }
+          />
+        ) : (
+          <TodayPage
+            today={today}
+            userName={ready.user.name}
+            cards={{ content: ready.content, actions: contentActions, lookup }}
+            onSend={actions.sendMessage}
+            onDecide={actions.decideApproval}
+            onOpenGroup={openGroupPage}
+            onOpenAccounts={() => setOverlay("accounts")}
+            onCreateTable={async (requestId) => openProjectPage(await actions.createPokerTable(requestId))}
+          />
+        )}
+      </ErrorBoundary>
       {inspected !== null ? (
         <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
       ) : soloBot !== null && botPanelOpen ? (
@@ -422,7 +452,7 @@ export const MainWindow = () => {
           usageTotal={ready.usage.total}
           onOpenUsage={() => setOverlay("usage")}
           onOpenSettings={() => setOverlay("settings")}
-          onLogout={() => void actions.logout()}
+          onLogout={() => void actions.logout().catch(failed("没退出登录，再试一次"))}
           onClose={() => setOverlay("none")}
         />
       ) : null}
@@ -466,7 +496,7 @@ export const MainWindow = () => {
           onLoadComputers={actions.loadComputers}
           onChangeTier={actions.updateAccountTier}
           onChange={actions.updateSettings}
-          onLogout={() => void actions.logout()}
+          onLogout={() => void actions.logout().catch(failed("没退出登录，再试一次"))}
           onClose={() => setOverlay("none")}
         />
       ) : null}
