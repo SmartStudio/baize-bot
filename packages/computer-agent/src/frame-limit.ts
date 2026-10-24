@@ -31,10 +31,12 @@ function shortJson(value: JsonValue): JsonValue {
   return utf8Bytes(text) <= VIEW_TEXT_MAX_BYTES ? value : short(text);
 }
 
-/** 审批卡和工具卡用的是同一份视图，哪个字段都可能装着模型给的大参数，所以整份收短。 */
+const rawNotice = (view: ToolView): { raw?: string } =>
+  view.raw === undefined ? {} : { raw: `原始参数有 ${utf8Bytes(JSON.stringify(view.raw))} 字节，太大没有上传` };
+
+/** 工具卡只是展示，哪个字段都可能装着模型给的大参数，所以整份收短。 */
 function compactView(view: ToolView): ToolView {
-  const raw =
-    view.raw === undefined ? {} : { raw: `原始参数有 ${utf8Bytes(JSON.stringify(view.raw))} 字节，太大没有上传` };
+  const raw = rawNotice(view);
   switch (view.kind) {
     case "bash":
       return {
@@ -62,6 +64,15 @@ function compactView(view: ToolView): ToolView {
   }
 }
 
+/**
+ * 用户是看着审批卡决定批不批的，截掉的尾巴照样会执行，所以卡上露出来的字段一个都不截。
+ * 只收卡上本来就不显示的原始参数，和写入预览：预览本来就只是内容的前几行，全文从来不上卡。
+ */
+function approvalView(view: ToolView): ToolView {
+  const raw = rawNotice(view);
+  return view.kind === "write" ? { ...view, preview: view.preview.map(short), ...raw } : { ...view, ...raw };
+}
+
 function shrink(body: AgentToControl, over: number): AgentToControl | null {
   // JSON 转义只会让字节变多，按原文字节砍掉 over 就一定够。
   const clip = (text: string): string => `${utf8Prefix(text, utf8Bytes(text) - over - utf8Bytes(CLIPPED))}${CLIPPED}`;
@@ -71,8 +82,9 @@ function shrink(body: AgentToControl, over: number): AgentToControl | null {
     case "agent_error":
       return { ...body, detail: clip(body.detail) };
     case "bot_tool_call":
-    case "approval_request":
       return { ...body, view: compactView(body.view) };
+    case "approval_request":
+      return { ...body, view: approvalView(body.view) };
     default:
       return null;
   }
@@ -87,7 +99,10 @@ function droppedNotice(body: AgentToControl, bytes: number): FittedUplink {
     notice: {
       type: "agent_error",
       code: "runner_failed",
-      detail: `${body.type} 报文过长被丢弃：有 ${mib(bytes)}，截短后仍超过单帧上限 ${mib(AGENT_FRAME_MAX_BYTES)}`,
+      detail:
+        body.type === "approval_request"
+          ? `审批请求过长，没法完整给你看，这一步没有执行：要你看的内容超过单帧上限 ${mib(AGENT_FRAME_MAX_BYTES)}`
+          : `${body.type} 报文过长被丢弃：有 ${mib(bytes)}，截短后仍超过单帧上限 ${mib(AGENT_FRAME_MAX_BYTES)}`,
       ...(runId !== undefined ? { runId } : groupId !== undefined ? { groupId } : {}),
     },
   };

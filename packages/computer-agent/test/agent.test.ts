@@ -1152,6 +1152,53 @@ describe("电脑代理连控制面", () => {
     ]);
   });
 
+  it("审批卡原始参数超限、命令 10 KiB 时命令原样送达；命令本身超限就不出卡，换成同一 run 的报错并停掉它", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const huge = "令".repeat(Math.ceil(AGENT_FRAME_MAX_BYTES / 3) + 1024);
+    const command = `printf '${"令".repeat(10 * 1024)}' > a.txt`;
+    spawnAgent(await server.url(), {
+      makeRunner: (config) => ({
+        ...runnerOf(config, runnerCalls()),
+        async prompt(message) {
+          const lane = { runId: message.runId, botId: message.botId, groupId: message.groupId };
+          const ask = { type: "approval_request" as const, ...lane, tool: "bash", action: "write_workspace" as const };
+          config.send({ ...ask, callId: "call-1", target: null, view: { kind: "bash", command, raw: { huge } } });
+          config.send({ ...ask, callId: "call-2", target: null, view: { kind: "bash", command: huge } });
+          config.send({ type: "run_done", ...lane, steps: 1, inputTokens: 2, outputTokens: 3 });
+        },
+      }),
+    });
+    const calls = runnerCalls();
+    const socket = await server.waitForSocket(1);
+    const closes: number[] = [];
+    socket.on("close", (code) => closes.push(code));
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+    socket.send(JSON.stringify(promptMessage));
+
+    await server.waitForMessage("run_done", 1, 15_000);
+    expect(server.uplinks.map((uplink) => [uplink.seq, uplink.type])).toEqual([
+      [1, "approval_request"],
+      [2, "agent_error"],
+      [3, "run_done"],
+    ]);
+    const approval = await server.waitForMessage("approval_request", 1);
+    expect(approval.view).toEqual({
+      kind: "bash",
+      command,
+      raw: `原始参数有 ${Buffer.byteLength(JSON.stringify({ huge }))} 字节，太大没有上传`,
+    });
+    expect(await server.waitForMessage("agent_error", 1)).toEqual({
+      type: "agent_error",
+      code: "runner_failed",
+      runId: "run-1",
+      detail: expect.stringMatching(/^审批请求过长，没法完整给你看，这一步没有执行/),
+    });
+    expect(calls.cancellations).toEqual(["run-1"]);
+    expect(closes).toEqual([]);
+  });
+
   it("升级前落在发件箱里的超限帧，重启补发前截短，同一序号送达、连接不被 1009 关掉", async () => {
     const server = startControlPlane();
     servers.push(server);
