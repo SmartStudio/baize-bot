@@ -2914,7 +2914,7 @@ describe("更换执行 Bot 的锁序", () => {
     }
   });
 
-  it("单聊例行旧执行者那次停下等点头时换人：删例行也要等旧执行者的锁，点头之后它的活还会接着跑", async () => {
+  it("单聊例行旧执行者那次停下等点头时换人：删例行也要等旧执行者的锁", async () => {
     const owner = await ownerWithBot();
     const other = await secondBot(owner);
     const routine = await routineOf(owner, owner.botId);
