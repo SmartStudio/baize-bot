@@ -248,7 +248,7 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 | 情况 | 状态码 | 响应 |
 | --- | --- | --- |
 | 库连得上 | 200 | `{"ok":true}` |
-| 库连不上 | 503 | `{"ok":false,"error":"连不上数据库"}` |
+| 库连不上，或查库 2 秒没回 | 503 | `{"ok":false,"error":"连不上数据库"}` |
 | 停机已经开始 | 503 | `{"ok":false,"error":"控制面正在停机"}` |
 
 控制面镜像里没有 curl。compose 要加 healthcheck，就用 node 发请求（未在真机验证）：
