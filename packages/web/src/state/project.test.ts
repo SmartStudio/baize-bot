@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { goalProgressOf } from "./project.js";
 
 describe("项目目标进度", () => {
-  const goal = { target: 1000, unit: "星", dueAt: null };
+  const goal = { target: 1000, unit: "星", dueAt: null, metric: null };
   // 上海周日 23:00 的样本，服务端那时算出本周 +37。
   const metric = { current: 412, weekDelta: 37, sampledAt: "2026-10-11T15:00:00.000Z" };
 

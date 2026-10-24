@@ -38,8 +38,9 @@ const registerProject = (table: MockPokerTable): void => {
       status: "active",
       cadence: "",
       goal: null,
-      metricSource: null,
+      metricSources: [],
       metric: null,
+      metrics: [],
     }),
   );
 };

@@ -20,9 +20,13 @@ export function createGoalRoutes({ db, push }: GoalRouteDeps): Hono<Env> {
     if (!body.success) return c.json({ error: body.error.issues[0]?.message ?? "请求体不合法" }, 400);
 
     const ownerId = c.get("user").id;
-    const recorded = await recordSample(db, ownerId, groupId.data, body.data.value, "manual");
-    if (recorded === null) return c.json(NOT_FOUND, 404);
-    const task = await findTaskByGroup(db, recorded);
+    const { value, metric } = body.data;
+    const recorded = await recordSample(db, ownerId, groupId.data, value, "manual", ({ keys, goal }) =>
+      metric === undefined ? goal : keys.includes(metric) ? metric : undefined,
+    );
+    if (recorded.kind === "not_found") return c.json(NOT_FOUND, 404);
+    if (recorded.kind === "unknown_metric") return c.json({ error: "这个项目没挂这个指标" }, 400);
+    const task = await findTaskByGroup(db, recorded.groupId);
     if (task === null) return c.json(NOT_FOUND, 404);
     push.push(ownerId, { type: "task_updated", task });
     return c.json(UpdateTaskResponse.parse({ task }));

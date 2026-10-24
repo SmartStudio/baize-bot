@@ -301,14 +301,14 @@ export const tasks = pgTable("tasks", {
   status: text("status").$type<TaskStatus>().notNull().default("active"),
   cadence: text("cadence").notNull().default(""),
   // 项目目标（D1、D2）拆成三列而不是一个 jsonb：目标数和截止要参与「本周该到哪」的算术，
-  // 三列要么全空要么全有，由 UpdateTaskRequest.goal 整个替换。指标来源是闭合联合，jsonb 存。
+  // 三列要么全空要么全有，由 UpdateTaskRequest.goal 整个替换。
   goalTarget: integer("goal_target"),
   goalUnit: text("goal_unit"),
   goalDueAt: timestamp("goal_due_at", { withTimezone: true }),
-  metricSource: jsonb("metric_source").$type<MetricSource>(),
+  goalMetric: text("goal_metric"),
+  metricSources: jsonb("metric_sources").$type<MetricSource[]>().notNull().default([]),
 });
 
-// 指标采样。每个项目群一条时间序列，source 记这次数是谁报的（github 轮询还是 Bot 的 report_metric）。
 // 「本周涨了多少」是读的时候按 sampled_at 回看一周算的，不另存。
 export const metricSamples = pgTable(
   "metric_samples",
@@ -317,6 +317,7 @@ export const metricSamples = pgTable(
     groupId: text("group_id")
       .notNull()
       .references(() => groups.id, { onDelete: "cascade" }),
+    metric: text("metric"),
     value: numeric("value").notNull(),
     source: text("source").notNull(),
     sampledAt: timestamp("sampled_at", { withTimezone: true }).notNull(),

@@ -16,7 +16,7 @@ import { taskNumber } from "../naming.js";
 import { pendingApprovalCounts } from "./approvals.js";
 import { pendingHandoffCounts } from "./handoffs.js";
 import { latestMessagePerGroup, type Tx } from "./messages.js";
-import { metricsOf, withMetric } from "./metrics.js";
+import { withMetric, withMetrics } from "./metrics.js";
 import { toBot, toGroup, toTask } from "./rows.js";
 import { lockOwner } from "./runs.js";
 import { stampedChecklist } from "./tasks.js";
@@ -290,7 +290,14 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
   const lastMessages = await latestMessagePerGroup(db, groupIds, { kind: "user" });
   const pending = await pendingApprovalCounts(db, groupIds);
   const handedOff = await pendingHandoffCounts(db, groupIds);
-  const metrics = await metricsOf(db, groupIds, new Date());
+  const tasksWithMetrics = new Map<string, TopicTask>(
+    (
+      await withMetrics(
+        db,
+        rows.map((row) => toTask(row.task)),
+      )
+    ).map((task) => [task.groupId, task]),
+  );
   const tables = await db
     .select({ groupId: pokerTables.groupId })
     .from(pokerTables)
@@ -298,7 +305,7 @@ export async function listGroups(db: Db, ownerId: UserId): Promise<GroupListEntr
   const poker = new Set(tables.map((table) => table.groupId));
   return rows.map((row) => ({
     group: toGroup(row.group, membersOf.get(row.group.id) ?? [], row.task.id),
-    task: { ...toTask(row.task), metric: metrics.get(row.group.id) ?? null },
+    task: tasksWithMetrics.get(row.group.id) ?? toTask(row.task),
     lastMessage: lastMessages.get(row.group.id) ?? null,
     pendingApprovals: pending.get(row.group.id) ?? 0,
     pendingHandoffs: handedOff.get(row.group.id) ?? 0,

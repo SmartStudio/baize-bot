@@ -54,6 +54,44 @@
   color: var(--success);
 }
 
+.project-metrics {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: var(--space-5) 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
+.project-metrics li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: baseline;
+}
+
+.project-metrics b {
+  color: var(--fg-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.project-metric-name {
+  display: inline-flex;
+  gap: var(--space-3);
+  align-items: baseline;
+  min-width: calc(var(--space-12) * 2);
+  color: var(--fg-2);
+}
+
+.project-metric-goal {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  color: var(--fg-3);
+}
+
 .project-open-group {
   display: inline-flex;
   flex: none;

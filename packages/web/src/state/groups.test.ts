@@ -642,8 +642,9 @@ describe("群入列按 kind，不按成员数和首席猜", () => {
     handled: [],
     status: "active",
     goal: null,
-    metricSource: null,
+    metricSources: [],
     metric: null,
+    metrics: [],
   };
   const created = (group: Record<string, unknown>) => {
     const state = reduceGroups({ ...initial, conversations: [], groupStamps: {} }, {

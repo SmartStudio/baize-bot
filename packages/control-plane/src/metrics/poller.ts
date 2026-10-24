@@ -1,4 +1,3 @@
-import { z } from "zod";
 import { log } from "../log.js";
 import { expireLogin } from "../account-expiry.js";
 import type { AgentHub } from "../agent/hub.js";
@@ -6,17 +5,16 @@ import type { AccessToken, AccountTokens } from "../credentials.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import { apiHeaders } from "../oauth-providers.js";
-import { dueGithubStarsProjects, recordPolledSample, type GithubStarsProject } from "../repo/metrics.js";
+import type { ApiBases } from "../publish/platforms.js";
+import { duePolledMetrics, recordPolledSample, type DueMetric, type PollSlot } from "../repo/metrics.js";
 import { findTaskByGroup } from "../repo/tasks.js";
 import type { PushHub } from "../ws/hub.js";
+import { readerOf } from "./readers.js";
 
-/** GitHub 星数每 6 小时读一次（D1）。格子按 UTC 对齐，取没取过看库里这一格有没有样本，重启不会重取。 */
 export const METRIC_WINDOW_MS = 6 * 60 * 60 * 1000;
 /** 扫得勤一点只是让新项目和新的一格早点有数，读不读平台由格子定。 */
 export const METRIC_SCAN_INTERVAL_MS = 10 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 30_000;
-
-const RepoStars = z.object({ stargazers_count: z.number().int().nonnegative() });
 
 export type MetricPollerOptions = {
   readonly db: Db;
@@ -24,15 +22,14 @@ export type MetricPollerOptions = {
   readonly notifications: NoticePublisher;
   readonly agents: Pick<AgentHub, "sendConfig">;
   readonly tokens: AccountTokens;
-  readonly githubApiBaseUrl: string;
+  readonly bases: ApiBases;
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;
 };
 
-/** 读一个仓库的结论。登录过期交给 expireLogin，其余读不到的这一格稍后再试。 */
-type StarsRead =
-  | { readonly kind: "stars"; readonly value: number }
+type MetricRead =
+  | { readonly kind: "value"; readonly value: number }
   | { readonly kind: "login_expired"; readonly generation: number | null }
   | { readonly kind: "unavailable"; readonly reason: string };
 
@@ -71,51 +68,50 @@ export class MetricPoller {
   async #scan(): Promise<void> {
     const now = this.#now();
     const windowStart = new Date(Math.floor(now.getTime() / METRIC_WINDOW_MS) * METRIC_WINDOW_MS);
-    for (const project of await dueGithubStarsProjects(this.#options.db, windowStart)) {
+    for (const due of await duePolledMetrics(this.#options.db, windowStart)) {
       try {
-        await this.#sample(project, { sampledAt: now, windowStart });
+        await this.#sample(due, { sampledAt: now, windowStart });
       } catch (error) {
-        log.error("读 GitHub 星数出错", { groupId: project.groupId, err: error });
+        log.error(`读 ${readerOf(due.source).what(due.source)} 出错`, { groupId: due.groupId, err: error });
       }
     }
   }
 
-  async #sample(project: GithubStarsProject, slot: { sampledAt: Date; windowStart: Date }): Promise<void> {
+  async #sample(due: DueMetric, slot: PollSlot): Promise<void> {
     const { db, push } = this.#options;
-    const read = await this.#readStars(project);
+    const read = await this.#read(due);
     if (read.kind === "login_expired") {
-      await expireLogin(this.#options, project.ownerId, project.accountId, { generation: read.generation });
+      await expireLogin(this.#options, due.ownerId, due.source.accountId, { generation: read.generation });
       return;
     }
     if (read.kind === "unavailable") {
-      log.warn(`这一格没读到星数：${read.reason}`, { groupId: project.groupId, repo: project.repo });
+      log.warn(`这一格没读到 ${readerOf(due.source).what(due.source)}：${read.reason}`, { groupId: due.groupId });
       return;
     }
-    const recorded = await recordPolledSample(db, project.ownerId, project.groupId, read.value, "github_stars", slot);
+    const recorded = await recordPolledSample(db, due.ownerId, due.groupId, due.source, read.value, slot);
     if (recorded === null) return;
     const task = await findTaskByGroup(db, recorded);
-    if (task !== null) push.push(project.ownerId, { type: "task_updated", task });
+    if (task !== null) push.push(due.ownerId, { type: "task_updated", task });
   }
 
   /** 和账号代理同一条取令牌的路：401 把这把令牌交回去强制刷新，只重试一次，还不认才算过期。 */
-  async #readStars(project: GithubStarsProject): Promise<StarsRead> {
-    // 仓库名的格式在 MetricSource 上校过，但 . 和 .. 也合格式，拼进路径会跳出 /repos。
-    if (project.repo.split("/").some((part) => part === "." || part === "..")) {
-      return { kind: "unavailable", reason: "仓库名不对" };
-    }
-    const url = `${this.#options.githubApiBaseUrl.replace(/\/$/, "")}/repos/${project.repo}`;
+  async #read({ source }: DueMetric): Promise<MetricRead> {
+    const reader = readerOf(source);
+    const path = reader.path(source);
+    if (typeof path !== "string") return { kind: "unavailable", reason: path.invalid };
+    const url = `${reader.baseUrl(this.#options.bases).replace(/\/$/, "")}${path}`;
     let rejected: string | null = null;
     for (;;) {
-      const token: AccessToken = await this.#options.tokens.accessToken(project.accountId, rejected);
+      const token: AccessToken = await this.#options.tokens.accessToken(source.accountId, rejected);
       if (token.kind === "login_expired") return { kind: "login_expired", generation: token.generation };
       let response: Response;
       try {
         response = await fetch(url, {
-          headers: { ...apiHeaders("github"), authorization: `Bearer ${token.token}` },
+          headers: { ...apiHeaders(reader.platform), authorization: `Bearer ${token.token}` },
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
       } catch (error) {
-        return { kind: "unavailable", reason: `连不上 GitHub，${String(error)}` };
+        return { kind: "unavailable", reason: `连不上 ${reader.site}，${String(error)}` };
       }
       if (response.status === 401) {
         await response.body?.cancel();
@@ -125,11 +121,11 @@ export class MetricPoller {
       }
       if (!response.ok) {
         await response.body?.cancel();
-        return { kind: "unavailable", reason: `GitHub 回 ${response.status}` };
+        return { kind: "unavailable", reason: `${reader.site} 回 ${response.status}` };
       }
-      const parsed = RepoStars.safeParse(await response.json().catch(() => undefined));
-      if (!parsed.success) return { kind: "unavailable", reason: "回包里没有 stargazers_count" };
-      return { kind: "stars", value: parsed.data.stargazers_count };
+      const value = reader.value(await response.json().catch(() => undefined));
+      if (value === null) return { kind: "unavailable", reason: reader.missing };
+      return { kind: "value", value };
     }
   }
 }

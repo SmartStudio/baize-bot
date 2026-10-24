@@ -55,8 +55,9 @@ const taskOf = (group: Group) =>
     handled: [],
     status: "active",
     goal: null,
-    metricSource: null,
+    metricSources: [],
     metric: null,
+    metrics: [],
   });
 
 const created = { type: "bot_created", bot: member, groupId: memberChat.id } as const;

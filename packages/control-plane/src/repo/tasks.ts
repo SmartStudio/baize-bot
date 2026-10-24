@@ -1,5 +1,6 @@
 import {
   GroupId,
+  metricKeyOf,
   type BotId,
   type ChecklistItem,
   type MetricSource,
@@ -30,7 +31,7 @@ export type UpdateTaskInput = {
   readonly status?: TaskStatus | undefined;
   readonly cadence?: string | undefined;
   readonly goal?: ProjectGoal | null | undefined;
-  readonly metricSource?: MetricSource | null | undefined;
+  readonly metricSources?: readonly MetricSource[] | undefined;
 };
 
 /** 任务卡从这里出去都带上指标，行上没有那一份。 */
@@ -45,7 +46,11 @@ const ownedLiveGroups = (db: Db, ownerId: UserId) =>
     .from(groups)
     .where(and(eq(groups.ownerId, ownerId), groupIsLive(db)));
 
-export type UpdatedTask = { readonly task: TopicTask; readonly pausedRoutineIds: string[] };
+export type UpdatedTask =
+  | { readonly kind: "updated"; readonly task: TopicTask; readonly pausedRoutineIds: string[] }
+  | { readonly kind: "goal_metric_missing" };
+
+class GoalMetricMissing extends Error {}
 
 /**
  * 按归属人过滤。别人的任务在这里更新不到，路由层因此 404。
@@ -71,26 +76,36 @@ export async function updateTask(
     patch.goalTarget = goal === null ? null : goal.target;
     patch.goalUnit = goal === null ? null : goal.unit;
     patch.goalDueAt = goal === null || goal.dueAt === null ? null : new Date(goal.dueAt);
+    patch.goalMetric = goal === null ? null : goal.metric;
   }
-  if (input.metricSource !== undefined) patch.metricSource = input.metricSource;
+  if (input.metricSources !== undefined) patch.metricSources = [...input.metricSources];
   if (Object.keys(patch).length === 0) {
     const task = await findTask(db, ownerId, taskId);
-    return task === null ? null : { task, pausedRoutineIds: [] };
+    return task === null ? null : { kind: "updated", task, pausedRoutineIds: [] };
   }
 
   // drizzle 的 update 不能 join，归属只能靠这个子查询过滤。
   const owned = and(eq(tasks.id, taskId), inArray(tasks.groupId, ownedLiveGroups(db, ownerId)));
-  return db.transaction(async (tx) => {
-    // 先停例行再改任务卡：删 Bot 是先改例行、再级联碰任务卡，两边同序才不会互等。
-    const pausedRoutineIds =
-      input.status === "done"
-        ? await pauseGroupRoutines(tx, tx.select({ groupId: tasks.groupId }).from(tasks).where(owned))
-        : [];
-    const [row] = await tx.update(tasks).set(patch).where(owned).returning();
-    if (row === undefined) return null;
-    const task = await taskOut(tx, row);
-    return task === null ? null : { task, pausedRoutineIds };
-  });
+  try {
+    return await db.transaction(async (tx) => {
+      // 先停例行再改任务卡：删 Bot 是先改例行、再级联碰任务卡，两边同序才不会互等。
+      const pausedRoutineIds =
+        input.status === "done"
+          ? await pauseGroupRoutines(tx, tx.select({ groupId: tasks.groupId }).from(tasks).where(owned))
+          : [];
+      const [row] = await tx.update(tasks).set(patch).where(owned).returning();
+      if (row === undefined) return null;
+      // 目标和指标可以分两次改，拿改完的整行判，行锁在手里，并发的另一半要等这里提交。
+      if (row.goalMetric !== null && !row.metricSources.map(metricKeyOf).includes(row.goalMetric)) {
+        throw new GoalMetricMissing();
+      }
+      const task = await taskOut(tx, row);
+      return task === null ? null : { kind: "updated" as const, task, pausedRoutineIds };
+    });
+  } catch (error) {
+    if (error instanceof GoalMetricMissing) return { kind: "goal_metric_missing" };
+    throw error;
+  }
 }
 
 /** 群和主题任务一一对应，派活拿它取当前经手和要送进 prompt 的那张卡。 */

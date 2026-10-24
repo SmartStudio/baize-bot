@@ -4,15 +4,17 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   GroupResponse,
-  type AccountId,
+  AccountId,
   type Bot,
   type GroupId,
+  type MetricSource,
   type ServerPush,
   type TopicTask,
   type UserId,
 } from "@baize/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addAccountWithToken, CredentialCrypto } from "../src/credentials.js";
+import { newId } from "../src/ids.js";
 import { METRIC_WINDOW_MS } from "../src/metrics/poller.js";
 import type { Db } from "../src/db/client.js";
 import { DEFAULT_RUNTIME_CONFIG, startServer, type RunningServer } from "../src/server.js";
@@ -84,18 +86,60 @@ async function startFakeGithub(): Promise<FakeGithub> {
   };
 }
 
+type XRequest = { readonly url: string; readonly authorization: string | null };
+
+type FakeX = {
+  readonly baseUrl: string;
+  readonly followers: Map<string, number>;
+  failWith: number | null;
+  requestsWith(token: string): readonly XRequest[];
+  close(): Promise<void>;
+};
+
+async function startFakeX(): Promise<FakeX> {
+  const followers = new Map<string, number>();
+  const requests: XRequest[] = [];
+  const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+    const authorization = req.headers.authorization ?? null;
+    requests.push({ url: req.url ?? "/", authorization });
+    const count = followers.get(authorization?.replace(/^Bearer /, "") ?? "");
+    const status = fake.failWith ?? (count === undefined ? 401 : 200);
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify(
+        status === 200
+          ? { data: { id: "1", username: "baize", public_metrics: { followers_count: count, following_count: 3 } } }
+          : { title: "Unavailable", status },
+      ),
+    );
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const fake: FakeX = {
+    baseUrl: `http://127.0.0.1:${port}`,
+    followers,
+    failWith: null,
+    requestsWith: (token) => requests.filter((request) => request.authorization === `Bearer ${token}`),
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  };
+  return fake;
+}
+
 let database: TestDb;
 let github: FakeGithub;
+let x: FakeX;
 const open: RunningServer[] = [];
 
 beforeAll(async () => {
   database = await createTestDb();
   github = await startFakeGithub();
+  x = await startFakeX();
 });
 
 afterAll(async () => {
   for (const server of open) await server.close();
   await github.close();
+  await x.close();
   await database.close();
 });
 
@@ -114,7 +158,7 @@ async function boot(clock: Clock, db: Db = database.db): Promise<RunningServer> 
     hostname: "127.0.0.1",
     toolSecretKey: "a".repeat(64),
     credentialsKey: TEST_CREDENTIALS_KEY,
-    config: { ...DEFAULT_RUNTIME_CONFIG, githubApiBaseUrl: github.baseUrl, xApiBaseUrl: "http://127.0.0.1:9/x" },
+    config: { ...DEFAULT_RUNTIME_CONFIG, githubApiBaseUrl: github.baseUrl, xApiBaseUrl: x.baseUrl },
     publisher: { intervalMs: DAY_MS },
     // 只在用例手动 tick 时取样。
     metrics: { now: () => clock.now, intervalMs: DAY_MS },
@@ -161,14 +205,14 @@ async function makeProject(owner: Owner, title: string): Promise<{ groupId: Grou
   return { groupId: created.group.id, task: created.task };
 }
 
-async function githubAccount(owner: Owner, token: string): Promise<AccountId> {
+async function apiAccount(owner: Owner, platform: "github" | "x", token: string): Promise<AccountId> {
   const account = await addAccountWithToken(
     database.db,
     new CredentialCrypto(TEST_CREDENTIALS_KEY),
     {
       ownerId: owner.userId,
       computerId: owner.computer.computerId,
-      platform: "github",
+      platform,
       via: "api",
       handle: "baize-dev",
     },
@@ -177,20 +221,28 @@ async function githubAccount(owner: Owner, token: string): Promise<AccountId> {
   return account.id;
 }
 
-/** 建一个读 GitHub 星数的项目。PATCH 的那条 task_updated 在这里吃掉。 */
+async function attachMetrics(
+  owner: Owner,
+  task: TopicTask,
+  metricSources: readonly MetricSource[],
+  goalMetric: string,
+): Promise<void> {
+  const patched = await owner.client.patch(`/api/tasks/${task.id}`, {
+    goal: { target: 1000, unit: "星", dueAt: null, metric: goalMetric },
+    metricSources,
+  });
+  expect(patched.status).toBe(200);
+  await nextOfType(owner.push, "task_updated");
+}
+
 async function starsProject(
   owner: Owner,
   repo: string,
   token: string,
 ): Promise<{ groupId: GroupId; accountId: AccountId }> {
-  const accountId = await githubAccount(owner, token);
+  const accountId = await apiAccount(owner, "github", token);
   const { groupId, task } = await makeProject(owner, `推广 ${repo}`);
-  const patched = await owner.client.patch(`/api/tasks/${task.id}`, {
-    goal: { target: 1000, unit: "星", dueAt: null },
-    metricSource: { kind: "github_stars", accountId, repo },
-  });
-  expect(patched.status).toBe(200);
-  await nextOfType(owner.push, "task_updated");
+  await attachMetrics(owner, task, [{ kind: "github_stars", accountId, repo }], `github_stars:${repo}`);
   return { groupId, accountId };
 }
 
@@ -260,7 +312,12 @@ describe("GitHub 星数轮询", () => {
       const pushed = await nextOfType(owner.push, "task_updated");
       expect(pushed.task.groupId).toBe(groupId);
       expect(pushed.task.metric?.current, "推出去的任务卡带读回的星数").toBe(412);
-      expect(pushed.task.goal, "取样不动目标").toEqual({ target: 1000, unit: "星", dueAt: null });
+      expect(pushed.task.goal, "取样不动目标").toEqual({
+        target: 1000,
+        unit: "星",
+        dueAt: null,
+        metric: `github_stars:${repo}`,
+      });
       expect(await samplesOf(groupId), "落一条 github_stars 样本").toEqual([{ value: "412", source: "github_stars" }]);
       expect(github.requestsFor(repo), "带着账号的令牌读仓库").toEqual([
         { path: `/repos/${repo}`, authorization: "Bearer ghu_on_time" },
@@ -445,6 +502,124 @@ describe("GitHub 星数轮询", () => {
   });
 });
 
+describe("X 粉丝数", () => {
+  const FOLLOWERS_URL = "/2/users/me?user.fields=public_metrics";
+
+  it("走接口授权的 X 账号读 followers_count，和星数挂在同一个项目里各落各的", async () => {
+    const clock = windowClock();
+    const server = await boot(clock);
+    const owner = await makeOwner(server);
+    try {
+      const repo = "baize/stars-and-followers";
+      const githubId = await apiAccount(owner, "github", "ghu_both");
+      const xId = await apiAccount(owner, "x", "x_both");
+      const { groupId, task } = await makeProject(owner, "推广白泽和 X");
+      await attachMetrics(
+        owner,
+        task,
+        [
+          { kind: "github_stars", accountId: githubId, repo },
+          { kind: "x_followers", accountId: xId },
+        ],
+        `github_stars:${repo}`,
+      );
+      github.stars.set(repo, 88);
+      x.followers.set("x_both", 3400);
+
+      await server.metrics.tick();
+      expect(x.requestsWith("x_both"), "带着 X 账号的令牌读自己的公开数据").toEqual([
+        { url: FOLLOWERS_URL, authorization: "Bearer x_both" },
+      ]);
+      const read = await taskOf(owner.client, groupId);
+      expect(read.metric?.current, "目标进度还是按星数").toBe(88);
+      expect(read.metrics.map(({ key, metric, account }) => [key, metric?.current, account])).toEqual([
+        [`github_stars:${repo}`, 88, "connected"],
+        [`x_followers:${xId}`, 3400, "connected"],
+      ]);
+      expect(
+        await database.sql`SELECT metric, value::text AS value, source FROM metric_samples WHERE group_id = ${groupId} ORDER BY source`,
+      ).toEqual([
+        { metric: `github_stars:${repo}`, value: "88", source: "github_stars" },
+        { metric: `x_followers:${xId}`, value: "3400", source: "x_followers" },
+      ]);
+
+      await server.metrics.tick();
+      expect(x.requestsWith("x_both"), "同一格不再读").toHaveLength(1);
+    } finally {
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("X 读不到时不清上次的数，读数停在上次读到的时间；令牌不认就记账号过期、提示去连", async () => {
+    const clock = windowClock();
+    const server = await boot(clock);
+    const owner = await makeOwner(server);
+    try {
+      const xId = await apiAccount(owner, "x", "x_flaky");
+      const { groupId, task } = await makeProject(owner, "推广 X");
+      const key = `x_followers:${xId}`;
+      await attachMetrics(owner, task, [{ kind: "x_followers", accountId: xId }], key);
+      x.followers.set("x_flaky", 500);
+      await server.metrics.tick();
+      const first = (await taskOf(owner.client, groupId)).metrics;
+      expect(first).toEqual([
+        { key, metric: { current: 500, weekDelta: 0, sampledAt: clock.now.toISOString() }, account: "connected" },
+      ]);
+
+      x.failWith = 503;
+      clock.now = new Date(Math.ceil(clock.now.getTime() / METRIC_WINDOW_MS) * METRIC_WINDOW_MS);
+      await server.metrics.tick();
+      expect(x.requestsWith("x_flaky"), "下一格照常去读了").toHaveLength(2);
+      expect((await taskOf(owner.client, groupId)).metrics, "X 回 503，读数原样留着").toEqual(first);
+
+      x.failWith = 401;
+      clock.now = new Date(clock.now.getTime() + METRIC_WINDOW_MS);
+      await server.metrics.tick();
+      const [row] = await database.sql<{ login: string }[]>`SELECT login FROM accounts WHERE id = ${xId}`;
+      expect(row?.login, "令牌不认、又没有刷新令牌，账号记过期").toBe("expired");
+      expect((await taskOf(owner.client, groupId)).metrics, "上次的数还在，提示去连接").toEqual([
+        { ...first[0], account: "disconnected" },
+      ]);
+
+      x.failWith = null;
+      clock.now = new Date(clock.now.getTime() + METRIC_WINDOW_MS);
+      await server.metrics.tick();
+      expect(x.requestsWith("x_flaky"), "过期的账号不再拿去读").toHaveLength(3);
+      expect(await samplesOf(groupId)).toEqual([{ value: "500", source: "x_followers" }]);
+    } finally {
+      x.failWith = null;
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("X 只在电脑浏览器上登着、没连接口的，不读，提示去连", async () => {
+    const clock = windowClock();
+    const server = await boot(clock);
+    const owner = await makeOwner(server);
+    try {
+      const accountId = AccountId.parse(newId());
+      await database.sql`
+        INSERT INTO accounts (id, owner_id, computer_id, platform, via, handle, login)
+        VALUES (${accountId}, ${owner.userId}, ${owner.computer.computerId}, 'x', 'computer', '@browser', 'valid')`;
+      const { groupId, task } = await makeProject(owner, "推广 X 浏览器");
+      await attachMetrics(owner, task, [{ kind: "x_followers", accountId }], `x_followers:${accountId}`);
+
+      await server.metrics.tick();
+      expect(await pushesBefore(owner, groupId, 9), "没读也就不推").toEqual([]);
+      const read = await taskOf(owner.client, groupId);
+      expect(read.metrics, "没连接口的 X 账号显示未连接，手记的数照样挂在这个指标上").toEqual([
+        { key: `x_followers:${accountId}`, metric: expect.objectContaining({ current: 9 }), account: "disconnected" },
+      ]);
+      expect(await samplesOf(groupId), "没有读数器的样本").toEqual([{ value: "9", source: "manual" }]);
+    } finally {
+      owner.close();
+      await shutdown(server);
+    }
+  });
+});
+
 /** resolveRun 里 runBelongsTo 那条：带 computer_id。停在它交回结果之前，就是「归属已校验、还没写」。 */
 const RUN_BELONGS_TO = /^select "id" from "runs" where .*"computer_id"/;
 
@@ -479,6 +654,45 @@ describe("Bot 报数", () => {
       expect(await samplesOf(a.groupId)).toEqual([{ value: "412", source: "reported" }]);
       expect(await samplesOf(b.groupId), "别的群一条样本都没有").toEqual([]);
       expect((await taskOf(owner.client, b.groupId)).metric).toBeNull();
+    } finally {
+      agent?.close();
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("label 对得上挂着的「Bot 报的数」就进那个指标，对不上进目标那个", async () => {
+    const server = await boot(windowClock());
+    const owner = await makeOwner(server);
+    let agent: AgentClient | null = null;
+    try {
+      const { groupId, task } = await makeProject(owner, "推广小红书");
+      await attachMetrics(
+        owner,
+        task,
+        [
+          { kind: "reported", platform: "xiaohongshu", label: "粉丝" },
+          { kind: "reported", platform: "xiaohongshu", label: "互动率" },
+        ],
+        "reported:粉丝",
+      );
+      ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
+      const prompt = await agent.expect("prompt");
+      const report = { type: "metric_report", runId: prompt.runId, botId: prompt.botId, groupId } as const;
+
+      agent.send({ ...report, label: "互动率", value: 3.5 });
+      agent.send({ ...report, label: "粉丝数", value: 1200 });
+      let updated = await nextOfType(owner.push, "task_updated");
+      while (updated.task.metric === null) updated = await nextOfType(owner.push, "task_updated");
+
+      expect(
+        (await taskOf(owner.client, groupId)).metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
+        "「粉丝数」不是挂着的名字，记到目标对的「粉丝」上",
+      ).toEqual([
+        ["reported:粉丝", 1200],
+        ["reported:互动率", 3.5],
+      ]);
     } finally {
       agent?.close();
       owner.close();

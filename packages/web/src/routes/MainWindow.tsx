@@ -529,6 +529,7 @@ export const MainWindow = () => {
             onDecide={actions.decideApproval}
             onOpenGroup={openGroupPage}
             onArchive={actions.archiveGroup}
+            onOpenAccounts={() => setOverlay("accounts")}
           />
         ) : screen.kind === "routines" ? (
           <RoutinesPage />

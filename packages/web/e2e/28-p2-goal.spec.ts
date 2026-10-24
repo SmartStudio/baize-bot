@@ -56,6 +56,52 @@ test("项目页头部显示 412 / 1000 和本周 +37", async ({ page, request })
   await expect(head, "有目标就不再按清单画").not.toContainText("项");
 });
 
+test("项目挂了几个指标就列几行：读到的数、读到的时间，账号断了提示去连；目标对其中一个", async ({ page, request }) => {
+  expect(
+    (await request.post("/api/test/project-metrics")).status(),
+    "订单群挂 GitHub 星数、X 粉丝数（账号过期）和 Bot 报的互动率，目标对星数",
+  ).toBe(204);
+  await login(page);
+  await openProject(page);
+
+  await expect(page.getByTestId("project-progress"), "目标进度按星数画").toContainText("412 / 1000 星");
+  const rows = page.getByTestId("project-metric");
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0), "星数是目标对的那个，本周 +37").toContainText(
+    /GitHub 星数 · baize\/order-board目标412本周 \+37读于 \d\d-\d\d \d\d:\d\d/,
+  );
+  await expect(rows.nth(1), "X 读不到了，留着上次读到的数和时间").toContainText(/X 粉丝数2100读于 \d\d-\d\d \d\d:\d\d/);
+  await expect(rows.nth(2), "Bot 报的小数照原样写").toContainText(/互动率3\.5读于/);
+  await expect(page.getByTestId("project-metric-connect"), "只有 X 那行要去连账号").toHaveCount(1);
+  await expect(rows.nth(1).getByTestId("project-metric-connect")).toHaveText("账号没连上，去连接");
+
+  await page.getByTestId("project-open-group").click();
+  await page.getByTestId("task-goal").click();
+  const form = page.getByTestId("task-goal-form");
+  const metric = form.getByTestId("task-goal-metric");
+  await expect(metric, "表单带着目标现在对的指标").toHaveValue("github_stars:baize/order-board");
+  await expect(metric.locator("option")).toHaveText([
+    "GitHub 星数 · baize/order-board",
+    "X 粉丝数",
+    "互动率",
+    "手记的数",
+  ]);
+  await metric.selectOption({ label: "X 粉丝数" });
+  await form.getByTestId("task-goal-target").fill("5000");
+  await form.getByTestId("task-goal-unit").fill("粉丝");
+  await form.getByTestId("task-goal-save").click();
+  await expect(form).toHaveCount(0);
+  await expect(page.getByTestId("task-goal"), "目标改对 X 粉丝数，进度用它上次读到的 2100").toHaveText(
+    "目标 2100 / 5000 粉丝",
+  );
+
+  await openProject(page);
+  await expect(page.getByTestId("project-progress")).toContainText("2100 / 5000 粉丝");
+  await expect(rows.nth(1), "目标标签挪到 X 粉丝数那行").toContainText("X 粉丝数目标");
+  await rows.nth(1).getByTestId("project-metric-connect").click();
+  await expect(page.getByTestId("accounts-page"), "点去连接打开账号页").toBeVisible();
+});
+
 test("没有目标的项目头部不画进度条", async ({ page, request }) => {
   await seedProject(request);
   await login(page);
@@ -507,7 +553,12 @@ test("只改目标数，含秒和毫秒的截止原样存回", async ({ page, re
   await page.getByTestId("task-goal-target").fill("500");
   await page.getByTestId("task-goal-save").click();
   await expect(page.getByTestId("task-goal-form")).toHaveCount(0);
-  expect((await orderTask(request)).goal, "没碰截止，截止不被截到分钟").toEqual({ target: 500, unit: "星", dueAt });
+  expect((await orderTask(request)).goal, "没碰截止，截止不被截到分钟").toEqual({
+    target: 500,
+    unit: "星",
+    dueAt,
+    metric: null,
+  });
 });
 
 test.describe("纽约时区", () => {
@@ -531,6 +582,7 @@ test.describe("纽约时区", () => {
       target: 500,
       unit: "星",
       dueAt,
+      metric: null,
     });
   });
 });

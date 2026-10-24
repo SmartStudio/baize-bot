@@ -15,6 +15,7 @@ import {
   TopicTask,
   UsageRecord,
   User,
+  metricKeyOf,
 } from "@baize/shared";
 import type * as schema from "../db/schema.js";
 
@@ -77,10 +78,15 @@ export function toTask(row: typeof schema.tasks.$inferSelect): TopicTask {
     goal:
       row.goalTarget === null || row.goalUnit === null
         ? null
-        : { target: row.goalTarget, unit: row.goalUnit, dueAt: row.goalDueAt?.toISOString() ?? null },
-    metricSource: row.metricSource,
-    // 第 2 期形状：当前值和周涨幅要从 metric_samples 算，由 U-指标 接上，这里先恒为 null。
+        : {
+            target: row.goalTarget,
+            unit: row.goalUnit,
+            dueAt: row.goalDueAt?.toISOString() ?? null,
+            metric: row.goalMetric,
+          },
+    metricSources: row.metricSources,
     metric: null,
+    metrics: row.metricSources.map((source) => ({ key: metricKeyOf(source), metric: null, account: null })),
   });
 }
 

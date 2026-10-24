@@ -36,7 +36,8 @@ import {
   Handoff,
   Message,
   MessageId,
-  MetricSource,
+  MetricKey,
+  MetricSources,
   OnFailure,
   Platform,
   Preference,
@@ -171,7 +172,8 @@ export const GroupListResponse = z.object({ items: z.array(GroupListItem) });
 // GET /api/groups/:id  群顶部的任务卡和成员。
 export const GroupResponse = z.object({ group: Group, task: TopicTask, bots: z.array(Bot) });
 
-// PATCH /api/tasks/:id  用户改任务卡。清单整份替换。goal 和 metricSource 给 null 就是去掉。
+// PATCH /api/tasks/:id  用户改任务卡。清单和指标都整份替换，goal 给 null 就是去掉。
+// goal.metric 必须是改完之后挂着的某个指标的键，否则 400；只改指标、摘掉了目标对的那个也一样 400。
 export const UpdateTaskRequest = z
   .object({
     title: z.string().min(1).max(60),
@@ -181,14 +183,14 @@ export const UpdateTaskRequest = z
     status: TaskStatus,
     cadence: z.string().max(200),
     goal: ProjectGoal.nullable(),
-    metricSource: MetricSource.nullable(),
+    metricSources: MetricSources,
   })
   .partial();
 export const UpdateTaskResponse = z.object({ task: TopicTask });
 
-// POST /api/projects/:groupId/metric  手动记一个数，落一条样本，回 UpdateTaskResponse，task.metric 已是最新。
-// 别人的群、单 Bot 群 404。
-export const ReportMetricRequest = z.object({ value: z.number().finite() }).strict();
+// POST /api/projects/:groupId/metric  手动记一个数，落一条样本，回 UpdateTaskResponse，读数已是最新。
+// metric 省略记到目标对的那条数上，给了就必须是这个项目挂着的指标，否则 400。别人的群、单 Bot 群 404。
+export const ReportMetricRequest = z.object({ value: z.number().finite(), metric: MetricKey.optional() }).strict();
 export type ReportMetricRequest = z.infer<typeof ReportMetricRequest>;
 
 // POST /api/groups/:id/archive  解散多 Bot 群（项目群和牌桌），没有请求体，回 204。只盖 archived_at、不删历史，

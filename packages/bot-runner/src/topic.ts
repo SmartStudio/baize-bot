@@ -75,6 +75,11 @@ function renderGoal(goal: ProjectGoal | null, metric: TaskMetric | null): string
   return [head, `进度：${plain(metric.current)} / ${target} ${unit}，${remaining}，本周 ${signed(metric.weekDelta)}`];
 }
 
+function renderReported(task: TopicTask): string[] {
+  const labels = task.metricSources.flatMap((source) => (source.kind === "reported" ? [source.label] : []));
+  return labels.length === 0 ? [] : [`要报的数：${labels.join("、")}（report_metric 的 label 照这个名字写）`];
+}
+
 /**
  * 任务卡的文本形式。全函数：每个字段都出现一行，空值走固定占位词，不按字段有无分支。
  * 模型看到的行数因此是固定的，「这行没出现」和「这个字段是空的」不会混起来。
@@ -107,6 +112,7 @@ export function renderTaskCard(task: TopicTask, members: readonly GroupMember[])
     // 节奏只有例行派来的主题才有，空着不出这一行，队员的 prompt 字节不变。
     ...(task.cadence === "" ? [] : [`节奏：${task.cadence}`]),
     ...renderGoal(task.goal, task.metric),
+    ...renderReported(task),
     `当前经手：${task.currentBotId === null ? NO_OWNER : nameOf(members, task.currentBotId)}`,
     "群成员：",
     ...roster,

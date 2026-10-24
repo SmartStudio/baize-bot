@@ -45,8 +45,9 @@ const taskOf = (group: Group) =>
     handled: [],
     status: "active",
     goal: null,
-    metricSource: null,
+    metricSources: [],
     metric: null,
+    metrics: [],
   });
 const greeting = Message.parse({
   id: "message_greeting",

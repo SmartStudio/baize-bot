@@ -694,7 +694,13 @@ export const todayOf = (): TodayResponse => {
           {
             at: plan?.decidedAt ?? group.createdAt,
             id: plan?.id ?? task.id,
-            item: { groupId: group.id, title: task.title, ...counts, goal: task.goal, metric: metricOf(group.id, now) },
+            item: {
+              groupId: group.id,
+              title: task.title,
+              ...counts,
+              goal: task.goal,
+              metric: metricOf(group.id, now, task.goal?.metric ?? null),
+            },
           },
         ];
       }
