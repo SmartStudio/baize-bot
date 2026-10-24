@@ -45,6 +45,25 @@ export function newWebhookToken(): string {
 
 export type OwnedRoutine = { readonly row: RoutineRow; readonly ownerId: UserId };
 
+/**
+ * 例行级的 advisory 锁，键是例行 id。和 runs.ts 的收尾锁、Bot 锁、账号锁同为两参数形式，命名空间不同。
+ * 为什么要它：lockRoutineWriters 按 Bot id 升序拿排他锁，前提是锁完重读名单不会多出新面孔，
+ * 否则它持着几把 Bot 锁再去拿一把 id 可能更小的，和按升序拿共享锁的派活、信封、牌桌就成环。
+ * 换执行者能让单聊例行的名单多出一位，所以换人和 lockRoutineWriters 都先拿它的排他。
+ * 触发（openRoutineRun）拿共享，为两件事：它先读执行者再锁，读和锁之间换人提交了，它就持着旧执行者的共享锁再去拿新执行者的，同样反序；
+ * 它落的运行记录上记着这次的执行者，名单靠这一列数到换人之后的旧执行者，拿到排他时没有还没提交的触发，这一列都看得见。
+ * 三处都在事务第一句、任何 Bot 锁之前拿，等这把锁的事务手里没有别的锁，不会反序。
+ */
+const ROUTINE_LOCK = 0x627a7274;
+
+async function lockRoutineKey(tx: Tx, routineId: string, mode: "exclusive" | "shared"): Promise<void> {
+  await tx.execute(
+    mode === "exclusive"
+      ? sql`SELECT pg_advisory_xact_lock(${ROUTINE_LOCK}::int4, hashtext(${routineId}::text))`
+      : sql`SELECT pg_advisory_xact_lock_shared(${ROUTINE_LOCK}::int4, hashtext(${routineId}::text))`,
+  );
+}
+
 async function selectRoutine(db: Db | Tx, where: SQL | undefined): Promise<OwnedRoutine | null> {
   const [found] = await db
     .select({ row: routines, ownerId: bots.ownerId })
@@ -218,15 +237,36 @@ export async function insertRoutine(tx: Tx, values: typeof routines.$inferInsert
 }
 
 /** `UpdateRoutineRequest` 解出来的样子：没给的字段是 undefined，不是缺席。 */
-export type RoutineUpdate = { readonly [K in keyof RoutineInput]?: RoutineInput[K] | undefined };
+export type RoutineUpdate = { readonly [K in keyof RoutineInput]?: RoutineInput[K] | undefined } & {
+  readonly executorBotId?: BotId | undefined;
+};
+
+export type UpdateRoutineResult =
+  | { readonly kind: "ok"; readonly routine: Routine }
+  | { readonly kind: "gone" }
+  | { readonly kind: "executor_missing" }
+  | { readonly kind: "executor_not_member" }
+  | { readonly kind: "executor_changed" };
+
+type ExecutorSwitch = Exclude<UpdateRoutineResult, { kind: "ok" } | { kind: "gone" }>;
 
 /**
  * 给到的字段整份替换，triggers 给了就是整份替换。没给的字段一个字都不动。
  *
  * triggers 整列覆盖，而调度游标就住在这一列里，所以归并前先把这一行锁住再读一遍：
  * 拿路由层那份快照去归并的话，读到写之间调度器推过的游标会被整列写回时按旧值盖掉，同一个 cron 时刻就会派两次活。
+ *
+ * 换执行者第一句先拿例行锁的排他（理由见 ROUTINE_LOCK），锁到之后再读当前执行者。
+ * 然后在锁例行行之前按 Bot id 升序拿两把锁：新执行者共享，和建例行同一个理由，删它的事务先转交再级联，
+ * 不拿锁时这里在转交扫描之后改过去的例行会被级联删掉；旧执行者排他，因为自动触发锁住执行者之后才锁例行行再重读，
+ * 重读到的执行者换了它不会回头再拿锁（持着例行行再拿 Bot 锁就和删 Bot 反序），只有让换人等它提交，派给谁才总持着谁的锁。
  */
-export async function updateRoutine(db: Db, routineId: RoutineId, input: RoutineUpdate): Promise<Routine | null> {
+export async function updateRoutine(
+  db: Db,
+  ownerId: UserId,
+  routineId: RoutineId,
+  input: RoutineUpdate,
+): Promise<UpdateRoutineResult> {
   const patch: Partial<typeof routines.$inferInsert> = {};
   if (input.name !== undefined) patch.name = input.name;
   if (input.instruction !== undefined) patch.instruction = input.instruction;
@@ -236,22 +276,65 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
   if (input.boundary !== undefined) patch.boundary = input.boundary;
   if (input.onToday !== undefined) patch.onToday = input.onToday;
 
-  const ok = await db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx): Promise<ExecutorSwitch | "ok" | "gone"> => {
+    if (input.executorBotId !== undefined) await lockRoutineKey(tx, routineId, "exclusive");
+    const before = await selectRoutine(tx, eq(routines.id, routineId));
+    if (before === null) return "gone";
+    const executor = input.executorBotId;
+    const switching = executor !== undefined && executor !== before.row.botId;
+    if (switching) {
+      const locks = [
+        { botId: BotId.parse(before.row.botId), take: exclusiveBotRunsLock },
+        { botId: executor, take: shareBotRunsLock },
+      ].toSorted((a, b) => (a.botId < b.botId ? -1 : 1));
+      for (const one of locks) await one.take(tx, one.botId);
+    }
     const [locked] = await tx.select().from(routines).where(eq(routines.id, routineId)).limit(1).for("update");
-    if (locked === undefined) return false;
+    if (locked === undefined) return "gone";
+    if (switching) {
+      if (locked.botId !== before.row.botId) return { kind: "executor_changed" };
+      const placed = await executorPlacement(tx, ownerId, executor, locked.groupId);
+      if (placed.kind !== "ok") return placed;
+      patch.botId = executor;
+      patch.groupId = placed.groupId;
+    }
     if (input.triggers !== undefined) patch.triggers = mergeTriggers(locked.triggers, input.triggers);
-    if (Object.keys(patch).length === 0) return true;
+    if (Object.keys(patch).length === 0) return "ok";
     const updated = await tx
       .update(routines)
       .set(patch)
       .where(eq(routines.id, routineId))
       .returning({ id: routines.id });
-    return updated.length > 0;
+    return updated.length > 0 ? "ok" : "gone";
   });
-  if (!ok) return null;
+  if (outcome === "gone") return { kind: "gone" };
+  if (outcome !== "ok") return outcome;
 
   const loaded = await loadRoutine(db, routineId);
-  return loaded?.routine ?? null;
+  return loaded === null ? { kind: "gone" } : { kind: "ok", routine: loaded.routine };
+}
+
+async function executorPlacement(
+  tx: Tx,
+  ownerId: UserId,
+  executor: BotId,
+  groupId: string | null,
+): Promise<ExecutorSwitch | { readonly kind: "ok"; readonly groupId: string | null }> {
+  const [bot] = await tx
+    .select({ id: bots.id })
+    .from(bots)
+    .where(and(eq(bots.id, executor), eq(bots.ownerId, ownerId)))
+    .limit(1);
+  if (bot === undefined) return { kind: "executor_missing" };
+  if (groupId === null) return { kind: "ok", groupId: null };
+  const [group] = await tx.select({ soloBotId: groups.soloBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  if (group === undefined || group.soloBotId !== null) return { kind: "ok", groupId: null };
+  const [member] = await tx
+    .select({ botId: groupMembers.botId })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.botId, executor)))
+    .limit(1);
+  return member === undefined ? { kind: "executor_not_member" } : { kind: "ok", groupId };
 }
 
 /**
@@ -279,12 +362,17 @@ export async function deleteRoutine(db: Db, routineId: RoutineId): Promise<boole
 
 /**
  * 锁住所有能以这条例行的名义建 run 的 Bot，按 id 升序拿排他锁，拿到之后到提交前没有人能建出指着它的运行记录的 run。
- * 能建的是它所在群的成员（startRun 查成员表，不是成员建不出），单聊就是执行者自己。
- * 这份名单只在删 Bot 里变：成员被删（它拿着自己的排他锁，和这里互斥）、例行转给主助理、主助理补进项目群。
- * 删 Bot 里能加进来的只有主助理，所以主助理从一开始就在名单里，第一轮锁完再重读，名单只会少不会多，
- * 不会出现「已持几把锁再去拿一把 id 更小的」。建队确认往项目群加成员不拿这些锁，是 README 里的已知项。例行没了回 null。
+ * 能建的是它所在群的成员（startRun 查成员表，不是成员建不出），单聊就是执行者自己，
+ * 再加上还能建 run 的记录（running 和等点头的 stopped）上记着的执行者：单聊例行换人之后，旧执行者手上那次的派活可能还没提交，
+ * 之后还能经换电脑接续出带同一条记录的 run。这一位从记录的 bot_id 读，不从 runs 推：触发提交之后、派活建 run 之前，runs 里还没有它。
+ * 第一句先拿例行锁的排他，换人和触发都进不来，名单的四个来源这时都已提交。之后执行者和成员只在删 Bot 里变：
+ * 成员被删（它拿着自己的排他锁，和这里互斥）、例行转给主助理、主助理补进项目群，能加进来的只有主助理，它从一开始就在名单里；
+ * 记录上的执行者只会被删 Bot 置空，记录只会跑完，新记录只有触发能落。接续的 run 和父 run 同一个 Bot，群里被 @ 的是成员。
+ * 所以第一轮锁完再重读，名单只会少不会多，不会出现「已持几把锁再去拿一把 id 更小的」。
+ * 建队确认往项目群加成员不拿这些锁，是 README 里的已知项。例行没了回 null。
  */
 async function lockRoutineWriters(tx: Tx, routineId: string): Promise<OwnedRoutine | null> {
+  await lockRoutineKey(tx, routineId, "exclusive");
   const locked = new Set<string>();
   for (;;) {
     const current = await selectRoutine(tx, eq(routines.id, routineId));
@@ -310,8 +398,17 @@ async function writersOf(tx: Tx, routine: OwnedRoutine): Promise<string[]> {
     .select({ id: bots.id })
     .from(bots)
     .where(and(eq(bots.ownerId, routine.ownerId), eq(bots.role, "assistant")));
+  const live = await tx
+    .selectDistinct({ id: routineRuns.botId })
+    .from(routineRuns)
+    .where(and(eq(routineRuns.routineId, routine.row.id), inArray(routineRuns.status, ["running", "stopped"])));
   return [
-    ...new Set([routine.row.botId, ...members.map((one) => one.id), ...assistants.map((one) => one.id)]),
+    ...new Set([
+      routine.row.botId,
+      ...members.map((one) => one.id),
+      ...assistants.map((one) => one.id),
+      ...live.flatMap((one) => (one.id === null ? [] : [one.id])),
+    ]),
   ].toSorted();
 }
 
@@ -535,6 +632,7 @@ export type OpenedRoutineRun = {
  * 这一个就不能再跑。两个调度器各认领同一刻的一个 cron 时，先到的锁着例行行直到提交，后到的推游标那条 UPDATE 就排在它后面，
  * 轮到它时看见同一刻已经有记录就不再落第二条；记录在库里，控制面重启或两个进程各自认领都挡得住。
  * 试跑是用户点的，停着也照跑，也不锁例行行：它和 seen、自停谁先谁后无所谓。
+ * 最先拿例行锁的共享，换人提交不会落在读执行者和锁执行者之间（见 ROUTINE_LOCK）；之后执行者只会被删 Bot 转给主助理。
  */
 export async function openRoutineRun(
   tx: Tx,
@@ -542,6 +640,7 @@ export async function openRoutineRun(
   startedAt: Date,
   origin: RunOrigin,
 ): Promise<OpenedRoutineRun | null> {
+  await lockRoutineKey(tx, routineId, "shared");
   let current = await lockExecutor(tx, routineId, shareBotRunsLock);
   if (current === null) return null;
   if (origin !== "trial") {
@@ -569,9 +668,12 @@ export async function openRoutineRun(
   )[0]?.id;
   if (groupId === undefined) return null;
 
-  const [row] = await tx.insert(routineRuns).values({ id: newId(), routineId, startedAt }).returning({
-    id: routineRuns.id,
-  });
+  const [row] = await tx
+    .insert(routineRuns)
+    .values({ id: newId(), routineId, startedAt, botId: current.row.botId })
+    .returning({
+      id: routineRuns.id,
+    });
   if (row === undefined) throw new Error("建运行记录没有返回行");
   return { id: row.id, row: current.row, groupId: GroupId.parse(groupId) };
 }
@@ -604,7 +706,7 @@ async function lockExecutor(
  * 删记录经外键把 run 的 routine_run_id 置空，先按 id 升序锁住这些 run 再删：结账是先锁 run 再改记录，同序只会排队。
  * 锁 run 之前先把能建出这种 run 的 Bot 全锁成排他（lockRoutineWriters）：项目群里执行者 @ 了同群的另一位，
  * 那位的 run 指着被裁的记录，在预锁和 DELETE 之间出生就和它的结账互等。触发事务持着执行者的共享锁，升不成排他，所以裁剪不在它里面做。
- * 锁序和删例行一样：Bot 排他 → 例行行 → run → 运行记录。锁到例行行之后重读触发器，游标是这一刻的样子。
+ * 锁序和删例行一样：例行锁 → Bot 排他 → 例行行 → run → 运行记录。锁到例行行之后重读触发器，游标是这一刻的样子。
  */
 export async function trimRoutineRuns(db: Db, routineId: string): Promise<void> {
   await db.transaction(async (tx) => {

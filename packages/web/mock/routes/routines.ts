@@ -2,6 +2,7 @@ import { CreateRoutineRequest, UpdateRoutineRequest, type Routine } from "@baize
 import {
   bots,
   createRoutine,
+  groups,
   routineByToken,
   routines,
   routinesOf,
@@ -82,7 +83,15 @@ export const routineRoutes: Route = async ({ req, res, path, method, push }) => 
   if (routine === undefined) send(res, 404, { error: "没有这条例行任务" });
   else if (method === "PATCH") {
     const parsed = UpdateRoutineRequest.safeParse(await readBody(req));
+    const executor = parsed.success ? parsed.data.executorBotId : undefined;
+    const bot = executor === undefined ? undefined : bots.get(executor);
+    const project = routine.groupId === null ? undefined : groups.get(routine.groupId);
     if (!parsed.success) send(res, 400, { error: "例行任务字段不对" });
+    else if (executor !== undefined && bot === undefined) send(res, 404, { error: "没有这个 Bot" });
+    else if (bot !== undefined && (bot.role === "player" || bot.role === "host"))
+      send(res, 400, { error: "牌友和老白不能执行例行任务" });
+    else if (executor !== undefined && project?.kind === "team" && !project.botIds.includes(executor))
+      send(res, 400, { error: "这个 Bot 不在例行任务的项目群里" });
     else {
       const next = writeRoutine(routineId, defined(parsed.data));
       if (next === null) send(res, 404, { error: "没有这条例行任务" });

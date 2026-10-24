@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChevronLeft, Clock, Copy, Globe, Pause, Pencil, Play, Plus, ShieldCheck, X } from "lucide-react";
-import { OnFailure, type Bot, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
+import { BotId, OnFailure, type Bot, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { useApp } from "../state/app.js";
+import type { Conversation } from "../state/types.js";
 import { MY_ROUTINES } from "../state/routines.js";
 import { CRON_PRESETS, DEFAULT_TIME, cronExprOf, cronPresetOf, describeTriggers } from "../components/routines/cron.js";
 import { ROUTINE_STATE, RoutineStateChip } from "../components/routines/RoutineStateChip.js";
@@ -22,6 +23,15 @@ type Form = {
   instruction: string;
   triggers: TriggerInput[];
   onFailure: Routine["onFailure"];
+};
+
+const executorsOf = (routine: Routine, bots: Record<BotId, Bot>, conversations: readonly Conversation[]): Bot[] => {
+  const project = conversations.find((c) => c.kind === "team" && c.groupId === routine.groupId);
+  const ids = project?.kind === "team" ? project.botIds : Object.keys(bots);
+  return ids.flatMap((id) => {
+    const bot = bots[BotId.parse(id)];
+    return bot !== undefined && (bot.role === "assistant" || bot.role === "member") ? [bot] : [];
+  });
 };
 
 const formOf = (routine: Routine): Form => ({
@@ -428,6 +438,16 @@ export const RoutinesPage = () => {
         ),
       );
   };
+  const switchExecutor = (routine: Routine, executorBotId: BotId) => {
+    setSwitchFailure(null);
+    void actions
+      .updateRoutine(routine.id, { executorBotId })
+      .catch((cause: unknown) =>
+        setSwitchFailure(
+          `「${routine.name}」没换成执行的 Bot：${cause instanceof Error ? cause.message : "请求失败"}。`,
+        ),
+      );
+  };
   const switchError =
     switchFailure === null ? null : (
       <p className="routines-empty" role="alert" data-testid="routine-state-error">
@@ -440,6 +460,7 @@ export const RoutinesPage = () => {
 
   if (editing !== null) {
     const { routine } = editing;
+    const executors = executorsOf(routine, ready.bots, ready.conversations);
     return (
       <main className="page routines-page" data-testid="routines-page">
         <div className="routines" data-testid="routine-editor">
@@ -458,7 +479,22 @@ export const RoutinesPage = () => {
             <b>{ROUTINE_STATE[routine.state].label}</b>
             <span className="routine-row-meta">
               <BotAvatar shape={editing.bot.shape} hue={editing.bot.hue} size="xs" />
-              {editing.bot.name}
+              {executors.length > 1 ? (
+                <select
+                  data-testid="routine-executor"
+                  aria-label="执行的 Bot"
+                  value={routine.botId}
+                  onChange={(e) => switchExecutor(routine, BotId.parse(e.target.value))}
+                >
+                  {executors.map((bot) => (
+                    <option key={bot.id} value={bot.id}>
+                      {bot.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                editing.bot.name
+              )}
             </span>
             <span className="routine-actions-gap" />
             {deleteRoutineId === routine.id ? (

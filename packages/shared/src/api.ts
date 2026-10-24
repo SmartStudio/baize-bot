@@ -294,7 +294,10 @@ export type CreateRoutineRequest = z.infer<typeof CreateRoutineRequest>;
 export const RoutineResponse = z.object({ routine: Routine });
 
 // PATCH /api/routines/:id  给到的字段整份替换，triggers 给了就是整份替换。别人的 404。
-export const UpdateRoutineRequest = CreateRoutineRequest.partial();
+// executorBotId 换执行者，运行记录和调度游标都不动。项目群的例行只能换给那个群的成员，否则 400；
+// 发进单聊的例行跟着执行者走，换完发进新执行者的单聊，groupId 回 null。Bot 不是自己的 404，牌友和老白 400，
+// 执行者在这期间被别处换过（删 Bot 转给了主助理）409。
+export const UpdateRoutineRequest = CreateRoutineRequest.partial().extend({ executorBotId: BotId.optional() });
 export type UpdateRoutineRequest = z.infer<typeof UpdateRoutineRequest>;
 
 // DELETE /api/routines/:id  回 204，运行记录跟着删。

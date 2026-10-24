@@ -6,6 +6,7 @@ import {
   MessageListResponse,
   RoutineListResponse,
   RoutineResponse,
+  UserId,
   type BotId,
   type ControlToAgent,
   type CreateRoutineRequest,
@@ -20,6 +21,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "../src/db/schema.js";
 import type { StoredTrigger } from "../src/db/schema.js";
 import { EXECUTOR_DELETED_NOTE, MAX_ROUTINE_RUNS, advanceCronTrigger } from "../src/repo/routines.js";
+import { lockOwner, shareBotRunsLock } from "../src/repo/runs.js";
+import { connect, type Db, type Sql } from "../src/db/client.js";
+import { databaseUrl } from "../src/env.js";
 import { DISPATCH_FAILED_NOTE, WAITING_APPROVAL_NOTE } from "../src/routines/run.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
@@ -804,12 +808,15 @@ async function assistantOf(owner: Owner): Promise<BotId> {
 }
 
 /** 用测试库的一个连接开事务跑一条锁语句，锁着不放，直到 release。 */
-async function holdLock(lock: (tx: TransactionSql) => Promise<unknown>): Promise<{ release: () => Promise<void> }> {
+async function holdLock(
+  lock: (tx: TransactionSql) => Promise<unknown>,
+  client: Sql = database.sql,
+): Promise<{ release: () => Promise<void> }> {
   let release!: () => void;
   const released = new Promise<void>((resolve) => (release = resolve));
   let locked!: () => void;
   const holding = new Promise<void>((resolve) => (locked = resolve));
-  const done = database.sql.begin(async (tx) => {
+  const done = client.begin(async (tx) => {
     await lock(tx);
     locked();
     await released;
@@ -2520,3 +2527,444 @@ describe("修复七轮：裁剪失败不连累派发，写者名单的重读、�
     }
   });
 });
+
+async function switchExecutor(owner: Owner, routineId: string, executorBotId: BotId): Promise<Response> {
+  return owner.client.patch(`/api/routines/${routineId}`, { executorBotId });
+}
+
+async function errorOf(response: Response): Promise<string> {
+  return ((await response.json()) as { error: string }).error;
+}
+
+describe("更换执行 Bot", () => {
+  it("项目群的例行换给同群的另一位：运行记录留着，游标不动不补跑，下一次到点派给新 Bot", async () => {
+    const owner = await ownerWithBot();
+    const member = await secondBot(owner);
+    const groupId = await projectGroup(owner, [owner.botId, member]);
+    const routine = await makeRoutine(owner, { name: "项目周报", groupId });
+    await failedTrial(owner, routine.id);
+    await server.server.routines.tick();
+    const cursor = await storedTriggers(routine.id);
+    expect(cursor[0]?.kind === "cron" ? cursor[0].lastFiredAt : null, "扫过一遍，游标对齐到了现在").not.toBeNull();
+
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      const response = await switchExecutor(owner, routine.id, member);
+      expect(response.status).toBe(200);
+      const switched = RoutineResponse.parse(await response.json()).routine;
+      expect(switched.botId).toBe(member);
+      expect(switched.groupId, "还发进原来的项目群").toBe(groupId);
+      expect(
+        switched.runs.map((run) => run.status),
+        "换人前的运行记录照旧在",
+      ).toEqual(["failed"]);
+      const pushed = await untilPush(
+        push,
+        (one): one is Extract<ServerPush, { type: "routine_updated" }> =>
+          one.type === "routine_updated" && one.routine.id === routine.id,
+        "换人后的 routine_updated",
+      );
+      expect(pushed.routine.botId).toBe(member);
+    } finally {
+      push.close();
+    }
+    expect(await storedTriggers(routine.id), "换人不碰调度游标").toEqual(cursor);
+    expect((await allRoutines(owner.client)).find((one) => one.id === routine.id)?.botId).toBe(member);
+
+    const agent = await online(owner);
+    try {
+      await server.server.routines.tick();
+      expect(await runsOf(routine.id), "游标没被重置，同一分钟里不会再跑").toHaveLength(1);
+      advanceOneMinute();
+      await server.server.routines.tick();
+      const prompt = await agent.expect("prompt");
+      expect(prompt.botId, "下一次到点由新执行者做").toBe(member);
+      expect(prompt.groupId).toBe(groupId);
+      expect(prompt.origin).toEqual({ kind: "routine" });
+      expect(
+        (await runsOf(routine.id)).map((row) => row.status),
+        "新的一次接在旧记录后面",
+      ).toEqual(["failed", "running"]);
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("发进单聊的例行跟着执行者走：换人后发进新 Bot 自己的单聊", async () => {
+    const owner = await ownerWithBot();
+    const other = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小内" })).json());
+    const plain = await makeRoutine(owner, { name: "早报", triggers: [] });
+    const pinned = await makeRoutine(owner, { name: "晚报", groupId: owner.groupId, triggers: [] });
+    for (const routine of [plain, pinned]) {
+      const response = await switchExecutor(owner, routine.id, other.bot.id);
+      expect(response.status).toBe(200);
+      expect(
+        RoutineResponse.parse(await response.json()).routine,
+        `「${routine.name}」不再挂着旧 Bot 的单聊`,
+      ).toMatchObject({
+        botId: other.bot.id,
+        groupId: null,
+      });
+    }
+
+    const agent = await online(owner);
+    try {
+      expect((await owner.client.post(`/api/routines/${pinned.id}/run`, {})).status).toBe(202);
+      const prompt = await agent.expect("prompt");
+      expect(prompt.botId).toBe(other.bot.id);
+      expect(prompt.groupId, "发进新 Bot 的单聊").toBe(other.group.id);
+    } finally {
+      agent.close();
+    }
+    const inOldSolo = MessageListResponse.parse(
+      await (await owner.client.get(`/api/groups/${owner.groupId}/messages`)).json(),
+    ).messages;
+    expect(inOldSolo, "旧 Bot 的单聊里不再落例行的消息").toEqual([]);
+  });
+
+  it("换给不在项目群里的 Bot 回 400，执行者不变", async () => {
+    const owner = await ownerWithBot();
+    const member = await secondBot(owner);
+    const outsider = await secondBot(owner);
+    const groupId = await projectGroup(owner, [owner.botId, member]);
+    const routine = await makeRoutine(owner, { groupId, triggers: [] });
+
+    const response = await switchExecutor(owner, routine.id, outsider);
+    expect(response.status).toBe(400);
+    expect(await errorOf(response)).toBe("这个 Bot 不在例行任务的项目群里");
+    expect((await allRoutines(owner.client)).map((one) => one.botId)).toEqual([owner.botId]);
+  });
+
+  it("换给别人的 Bot 和不存在的一样回 404，执行者不变", async () => {
+    const owner = await ownerWithBot();
+    const stranger = await ownerWithBot();
+    const routine = await makeRoutine(owner, { triggers: [] });
+
+    const response = await switchExecutor(owner, routine.id, stranger.botId);
+    expect(response.status).toBe(404);
+    expect(await errorOf(response)).toBe("没有这个 Bot");
+    expect((await allRoutines(owner.client)).map((one) => [one.botId, one.groupId])).toEqual([[owner.botId, null]]);
+  });
+
+  it("换给牌友回 400，执行者不变", async () => {
+    const owner = await ownerWithBot();
+    const routine = await makeRoutine(owner, { triggers: [] });
+    expect((await owner.client.post("/api/poker/tables", { requestId: "routine-executor" })).status).toBe(201);
+    const players = await database.sql<{ id: BotId }[]>`
+      SELECT b.id FROM bots b JOIN users u ON u.id = b.owner_id
+      WHERE u.email = ${owner.email} AND b.role = 'player' LIMIT 1`;
+    const player = players[0]?.id;
+    if (player === undefined) throw new Error("开桌后应当有牌友");
+
+    const response = await switchExecutor(owner, routine.id, player);
+    expect(response.status).toBe(400);
+    expect(await errorOf(response)).toBe("牌友和老白不能执行例行任务");
+    expect((await allRoutines(owner.client)).map((one) => one.botId)).toEqual([owner.botId]);
+  });
+
+  it("webhook 已锁住旧执行者、还没锁例行行时换人：换人等它提交，这一次落进旧执行者的单聊，之后才换", async () => {
+    const owner = await ownerWithBot();
+    const other = CreateBotResponse.parse(await (await owner.client.post("/api/bots", { name: "小内" })).json());
+    const routine = await makeRoutine(owner, { triggers: [{ kind: "webhook" }] });
+    const gated = await gatedServer(owner);
+    const gate = gated.arm(/from "routines" .*for update/i, "before", routine.id);
+    let hooking: Promise<Response> | undefined;
+    let switching: Promise<Response> | undefined;
+    try {
+      hooking = gated.client.post(`/api/hooks/${webhookToken(routine)}`);
+      await gate.reached;
+      switching = switchExecutor(owner, routine.id, other.bot.id);
+      await blockedOrDone(switching);
+      gate.release();
+      expect((await hooking).status).toBe(202);
+      expect((await switching).status).toBe(200);
+      const bodies = (groupId: GroupId) =>
+        owner.client
+          .get(`/api/groups/${groupId}/messages`)
+          .then(async (response) => MessageListResponse.parse(await response.json()).messages.map((one) => one.body));
+      expect(await bodies(owner.groupId), "触发先锁到的是旧执行者，这一次就由它做").toContainEqual(
+        expect.objectContaining({ kind: "user", routine: { name: "每日工单早报" } }),
+      );
+      expect(await bodies(other.group.id), "派给谁就得持着谁的锁，不能锁着旧的派给新的").toEqual([]);
+      expect((await allRoutines(owner.client)).map((one) => one.botId)).toEqual([other.bot.id]);
+    } finally {
+      gate.release();
+      await Promise.allSettled([hooking, switching].filter((one) => one !== undefined));
+      await gated.live.close();
+    }
+  });
+
+  it("删旧执行者已经把例行转给主助理、还没提交时换人：换人等它提交，回 409，例行留在主助理名下", async () => {
+    const owner = await ownerWithBot();
+    const assistant = await assistantOf(owner);
+    const other = await secondBot(owner);
+    const routine = await makeRoutine(owner, { triggers: [] });
+    const gated = await gatedServer(owner);
+    const gate = gated.arm(/update "routines" set "bot_id"/i, "after");
+    let deleting: Promise<Response> | undefined;
+    let switching: Promise<Response> | undefined;
+    try {
+      deleting = gated.client.delete(`/api/bots/${owner.botId}`);
+      await gate.reached;
+      switching = switchExecutor(owner, routine.id, other);
+      await blockedOrDone(switching);
+      gate.release();
+      expect((await deleting).status).toBe(204);
+      const switched = await switching;
+      expect(switched.status, "锁到时执行者已经不是读到的那位，不追着再换").toBe(409);
+      expect(await errorOf(switched)).toBe("这条例行任务的执行者刚变过，刷新后再换");
+      expect((await allRoutines(owner.client)).map((one) => one.botId)).toEqual([assistant]);
+    } finally {
+      gate.release();
+      await Promise.allSettled([deleting, switching].filter((one) => one !== undefined));
+      await gated.live.close();
+    }
+  });
+});
+
+/** 有没有连接正排在这个 Bot 的 advisory 锁上没拿到。两参数形式的 advisory 锁在 pg_locks 里第二个键落在 objid，按无符号存。 */
+async function waitingOnBotLock(botId: BotId): Promise<boolean> {
+  return (await botLockWaiters(botId)) > 0;
+}
+
+async function botLockWaiters(botId: BotId): Promise<number> {
+  const rows = await database.sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE a.datname = ${database.databaseName} AND l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 2
+      AND l.objid::bigint = (hashtext(${botId}::text)::bigint & 4294967295)`;
+  return rows[0]?.n ?? 0;
+}
+
+/**
+ * 测试库上开一个事务，先拿 first 的 Bot 共享锁，等 proceed 之后再拿 second 的，然后提交。
+ * 多 Bot 群派活、信封、牌桌就是这样按 Bot id 升序一把一把拿共享锁的。
+ */
+function sharedLocksInOrder(
+  db: Db,
+  first: BotId,
+  second: BotId,
+): { readonly holdingFirst: Promise<void>; readonly proceed: () => void; readonly done: Promise<void> } {
+  let proceed!: () => void;
+  const go = new Promise<void>((resolve) => (proceed = resolve));
+  let holding!: () => void;
+  const holdingFirst = new Promise<void>((resolve) => (holding = resolve));
+  const done = db.transaction(async (tx) => {
+    await shareBotRunsLock(tx, first);
+    holding();
+    await go;
+    await shareBotRunsLock(tx, second);
+  });
+  return { holdingFirst, proceed, done };
+}
+
+/** 测试库上开一个事务拿着这个 Bot 的共享锁不放，直到 release。 */
+async function holdBotShared(db: Db, botId: BotId): Promise<{ release: () => Promise<void> }> {
+  const locks = sharedLocksInOrder(db, botId, botId);
+  await locks.holdingFirst;
+  return {
+    release: async () => {
+      locks.proceed();
+      await locks.done;
+    },
+  };
+}
+
+async function routineOf(owner: Owner, botId: BotId, input: Partial<CreateRoutineRequest> = {}): Promise<Routine> {
+  const response = await owner.client.post(`/api/bots/${botId}/routines`, {
+    name: "每日工单早报",
+    instruction: "把今天的工单汇总一下",
+    triggers: [],
+    onFailure: "stop_and_tell",
+    ...input,
+  });
+  expect(response.status).toBe(201);
+  return RoutineResponse.parse(await response.json()).routine;
+}
+
+describe("更换执行 Bot 的锁序", () => {
+  // 扣锁的事务走另一个连接池：测试库的池只有 4 条，和服务端共用，换人、删例行、扣行锁、扣 Bot 锁各占一条，查 pg_locks 的就排不上了。
+  let side: { readonly db: Db; readonly sql: Sql };
+  beforeAll(() => {
+    const url = new URL(databaseUrl());
+    url.pathname = `/${database.databaseName}`;
+    side = connect(url.toString(), { max: 4 });
+  });
+  afterAll(async () => {
+    await side.sql.end();
+  });
+
+  it("单聊例行换给名单外的 Bot 时删例行在排队：删除等换人提交后才按新名单拿锁，和按升序拿共享锁的派活不成环", async () => {
+    const owner = await ownerWithBot();
+    const second = await secondBot(owner);
+    // 新执行者 id 更小：删除要是持着旧执行者的锁再去拿它，就和先拿它、再拿旧执行者的派活反序。
+    const [low, high] = [owner.botId, second].toSorted() as [BotId, BotId];
+    const routine = await routineOf(owner, high);
+    const row = await holdLock(
+      (tx) => tx`SELECT id FROM routines WHERE id = ${routine.id} FOR NO KEY UPDATE`,
+      side.sql,
+    );
+    let released = false;
+    const dispatch = sharedLocksInOrder(side.db, low, high);
+    let switching: Promise<Response> | undefined;
+    let deleting: Promise<Response> | undefined;
+    try {
+      switching = switchExecutor(owner, routine.id, low);
+      await waitUntil(() => lockWaiterOn('from "routines"'), "换人拿完 Bot 锁、排到例行行上");
+      deleting = owner.client.delete(`/api/routines/${routine.id}`);
+      await waitUntil(async () => (await lockWaiters()) >= 2, "删例行也排到锁上");
+      await dispatch.holdingFirst;
+      await row.release();
+      released = true;
+      expect((await switching).status).toBe(200);
+      await waitUntil(() => waitingOnBotLock(low), "删例行按换人后的名单排到新执行者的锁上");
+      dispatch.proceed();
+      await expect(dispatch.done, "派活拿旧执行者的共享锁不该等删例行").resolves.toBeUndefined();
+      expect((await deleting).status, "删例行不该被当成死锁回滚").toBe(204);
+      expect(await allRoutines(owner.client)).toEqual([]);
+    } finally {
+      if (!released) await row.release();
+      dispatch.proceed();
+      await Promise.allSettled([switching, deleting, dispatch.done].filter((one) => one !== undefined));
+    }
+  });
+
+  it("单聊例行换人后旧执行者那次还在跑：删例行也要等旧执行者的锁，它接续出来的 run 不会在删之前带着这条记录出生", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const routine = await routineOf(owner, owner.botId);
+    const agent = await online(owner);
+    try {
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+      expect((await agent.expect("prompt")).botId).toBe(owner.botId);
+      expect((await switchExecutor(owner, routine.id, other)).status).toBe(200);
+      expect((await runsOf(routine.id)).map((one) => one.status)).toEqual(["running"]);
+
+      // 旧执行者换电脑接续时，placeRun 拿的就是它的共享锁。
+      const held = await holdBotShared(side.db, owner.botId);
+      let done = false;
+      const deleting = owner.client.delete(`/api/routines/${routine.id}`);
+      deleting.then(
+        () => (done = true),
+        () => (done = true),
+      );
+      try {
+        await waitUntil(async () => done || (await waitingOnBotLock(owner.botId)), "删例行回掉或排到旧执行者的锁上");
+        expect(done, "删例行得等旧执行者手上的接续").toBe(false);
+      } finally {
+        await held.release();
+      }
+      expect((await deleting).status).toBe(204);
+      expect(await allRoutines(owner.client)).toEqual([]);
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("换人时新执行者正被删：换人等删除提交，回 404「没有这个 Bot」，例行留在原执行者名下", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const routine = await routineOf(owner, owner.botId);
+    const gated = await gatedServer(owner);
+    const gate = gated.arm(/delete from "bots"/i, "after");
+    let deleting: Promise<Response> | undefined;
+    let switching: Promise<Response> | undefined;
+    try {
+      deleting = gated.client.delete(`/api/bots/${other}`);
+      await gate.reached;
+      switching = switchExecutor(owner, routine.id, other);
+      await blockedOrDone(switching);
+      gate.release();
+      expect((await deleting).status).toBe(204);
+      const switched = await switching;
+      expect(switched.status, "路由预检时 Bot 还在，锁到之后它已经删了").toBe(404);
+      expect(await errorOf(switched)).toBe("没有这个 Bot");
+      expect((await allRoutines(owner.client)).map((one) => [one.botId, one.groupId])).toEqual([[owner.botId, null]]);
+    } finally {
+      gate.release();
+      await Promise.allSettled([deleting, switching].filter((one) => one !== undefined));
+      await gated.live.close();
+    }
+  });
+
+  it("单聊例行触发已提交、旧执行者的 run 还没建时换人：删例行照运行记录先锁住旧执行者，run 落地不会让名单变长、逆序拿锁", async () => {
+    const owner = await ownerWithBot();
+    const second = await secondBot(owner);
+    const [low, high] = [owner.botId, second].toSorted() as [BotId, BotId];
+    const routine = await routineOf(owner, low);
+    const [ownerRow] = await database.sql<{ owner_id: string }[]>`SELECT owner_id FROM bots WHERE id = ${low}`;
+    const ownerId = UserId.parse(ownerRow?.owner_id);
+    const agent = await online(owner);
+    // 触发事务提交到 placeRun 建 run 是同一个请求里的两步，HTTP 停不在中间。
+    // placeRun 第一句拿账号的共享锁，触发事务不拿，所以从旁路扣住账号的排他锁，试跑就停在这个窗口里。
+    const account = await holdOwnerExclusive(side.db, ownerId);
+    let accountHeld = true;
+    let holder: Awaited<ReturnType<typeof holdBotShared>> | undefined;
+    let dispatch: ReturnType<typeof sharedLocksInOrder> | undefined;
+    let trial: Promise<Response> | undefined;
+    let deleting: Promise<Response> | undefined;
+    try {
+      trial = owner.client.post(`/api/routines/${routine.id}/run`);
+      await waitUntil(
+        async () => (await runsOf(routine.id)).length === 1 && (await lockWaiters()) > 0,
+        "触发事务提交、派活排到账号锁上",
+      );
+      expect((await switchExecutor(owner, routine.id, high)).status).toBe(200);
+
+      holder = await holdBotShared(side.db, high);
+      deleting = owner.client.delete(`/api/routines/${routine.id}`);
+      await waitUntil(() => waitingOnBotLock(high), "删例行排到新执行者的锁上");
+
+      await account.release();
+      accountHeld = false;
+      await waitUntil(
+        async () => (await committedRunsOf(routine.id)) > 0 || (await waitingOnBotLock(low)),
+        "旧执行者的 run 落地，或者派活排到删例行持着的旧执行者锁上",
+      );
+
+      dispatch = sharedLocksInOrder(side.db, low, high);
+      dispatch.proceed();
+      await waitUntil(
+        async () => (await botLockWaiters(low)) >= 2 || (await botLockWaiters(high)) >= 2,
+        "按升序拿共享锁的派活排上锁",
+      );
+      await holder.release();
+      holder = undefined;
+
+      await expect(dispatch.done, "按升序拿共享锁的派活不该被当成死锁回滚").resolves.toBeUndefined();
+      expect((await deleting).status, "删例行不该被当成死锁回滚").toBe(204);
+      expect(await allRoutines(owner.client)).toEqual([]);
+    } finally {
+      if (accountHeld) await account.release();
+      dispatch?.proceed();
+      await holder?.release();
+      await Promise.allSettled([trial, deleting, dispatch?.done].filter((one) => one !== undefined));
+      agent.close();
+    }
+  });
+});
+
+async function committedRunsOf(routineId: string): Promise<number> {
+  const rows = await database.sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM runs JOIN routine_runs ON routine_runs.id = runs.routine_run_id
+    WHERE routine_runs.routine_id = ${routineId}`;
+  return rows[0]?.n ?? 0;
+}
+
+async function holdOwnerExclusive(db: Db, ownerId: UserId): Promise<{ release: () => Promise<void> }> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let locked!: () => void;
+  const holding = new Promise<void>((resolve) => (locked = resolve));
+  const done = db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    locked();
+    await released;
+  });
+  await holding;
+  return {
+    release: async () => {
+      release();
+      await done;
+    },
+  };
+}

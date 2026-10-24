@@ -521,6 +521,8 @@ export const routineRuns = pgTable(
       .notNull()
       .references(() => routines.id, { onDelete: "cascade" }),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    // 触发那一刻锁住的执行者。换人之后裁剪和删例行的写者名单靠它数到旧执行者：派活建 run 之前从 runs 推不出来。
+    botId: text("bot_id").references(() => bots.id, { onDelete: "set null" }),
     status: text("status").$type<RoutineRunStatus>().notNull().default("running"),
     note: text("note").notNull().default(""),
     // 用户看过这次运行的时刻。首页「例行结果」只列没看过的，POST /api/groups/:id/seen 批量盖章。
