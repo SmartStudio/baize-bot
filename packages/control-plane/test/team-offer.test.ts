@@ -1060,18 +1060,15 @@ describe("建队卡", () => {
     try {
       const cardA = await offerCard(s, [RESEARCHER]);
       const cardB = await offerCard(s, [DESIGNER]);
-      const transaction = sqlGate.db.transaction.bind(sqlGate.db);
       let committedA!: () => void;
       const reachedA = new Promise<void>((resolve) => (committedA = resolve));
       // A 的事务已经提交、群锁已放，结果扣着不交回路由。
-      delayed = vi
-        .spyOn(sqlGate.db, "transaction")
-        .mockImplementationOnce(async (...args: Parameters<typeof transaction>) => {
-          const result = await transaction(...args);
+      delayed = afterConfirmCommits({
+        [cardA.id]: async () => {
           committedA();
           await receiptA;
-          return result;
-        });
+        },
+      });
       const confirmingA = decide(s.client, cardA.id, { decision: "confirm", picked: [0] });
       await within(reachedA, "A 的确认已提交");
       const confirmedB = await confirm(s.client, cardB.id, [0]);
@@ -1096,25 +1093,18 @@ describe("建队卡", () => {
     try {
       const cardA = await offerCard(s, [RESEARCHER]);
       const cardB = await offerCard(s, [DESIGNER]);
-      const transaction = sqlGate.db.transaction.bind(sqlGate.db);
       let committedA!: () => void;
       const reachedA = new Promise<void>((resolve) => (committedA = resolve));
       let committedB!: () => void;
       const reachedB = new Promise<void>((resolve) => (committedB = resolve));
-      delayed = vi
-        .spyOn(sqlGate.db, "transaction")
-        .mockImplementationOnce(async (...args: Parameters<typeof transaction>) => {
-          const result = await transaction(...args);
+      delayed = afterConfirmCommits({
+        [cardA.id]: () => {
           // A 提交之后下一条读群成员停住：读到的是 3 人，结果扣着不交回。
           held.gate = sqlGate.arm(READ_GROUP_BOTS, "after");
           committedA();
-          return result;
-        })
-        .mockImplementationOnce(async (...args: Parameters<typeof transaction>) => {
-          const result = await transaction(...args);
-          committedB();
-          return result;
-        });
+        },
+        [cardB.id]: () => committedB(),
+      });
       const confirmingA = decide(s.client, cardA.id, { decision: "confirm", picked: [0] });
       await within(reachedA, "A 的确认已提交");
       const gate = held.gate;
@@ -1136,6 +1126,18 @@ describe("建队卡", () => {
     }
   });
 });
+
+/** 按回包里的卡认事务，不按次数：审批到期扫描的后台事务会插队吃掉按次数排的钩子。 */
+function afterConfirmCommits(hooks: Record<string, () => Promise<void> | void>): { mockRestore(): void } {
+  const transaction = sqlGate.db.transaction.bind(sqlGate.db);
+  return vi.spyOn(sqlGate.db, "transaction").mockImplementation(async (...args: Parameters<typeof transaction>) => {
+    const result = await transaction(...args);
+    const cardId = (result as { message?: { id?: unknown } } | null)?.message?.id;
+    const hook = typeof cardId === "string" ? hooks[cardId] : undefined;
+    if (hook !== undefined) await hook();
+    return result;
+  });
+}
 
 /** 屏障没在 5 秒内到达就是交错没按预期走，报出来而不是等 vitest 超时。 */
 async function within(reached: Promise<void>, what: string): Promise<void> {
