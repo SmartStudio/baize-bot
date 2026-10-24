@@ -250,7 +250,7 @@ test("暂停失败时面板写一句，按钮解锁，状态不变", async ({ pa
   await expect(page.getByTestId("bot-run-state-error"), "换了 Bot 不带上一个的报错").toHaveCount(0);
 });
 
-test("Bot 设置存不上时面板写一句，再存成了就收掉", async ({ page }) => {
+test("Bot 设置存不上时弹提示、开关不变，再点能存上", async ({ page }) => {
   await login(page);
   await openBot(page, "小服");
   const notify = page.getByTestId("bot-notify-switch");
@@ -259,11 +259,10 @@ test("Bot 设置存不上时面板写一句，再存成了就收掉", async ({ p
     route.request().method() === "PATCH" ? route.fulfill({ status: 500, body: "{}" }) : route.fallback(),
   );
   await notify.click();
-  await expect(page.getByTestId("bot-settings-error")).toHaveText("没存上，再试一次");
+  await expect(page.getByTestId("toast"), "没存上要告诉人").toHaveText("Bot 设置没存上，再试一次");
   await expect(notify, "没存上就不改开关").toHaveAttribute("aria-checked", before ?? "");
 
   await page.unroute("**/api/bots/*");
   await notify.click();
-  await expect(notify).not.toHaveAttribute("aria-checked", before ?? "");
-  await expect(page.getByTestId("bot-settings-error"), "存成了收掉报错").toHaveCount(0);
+  await expect(notify, "再点一次存上了").not.toHaveAttribute("aria-checked", before ?? "");
 });
