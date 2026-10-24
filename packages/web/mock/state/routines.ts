@@ -9,7 +9,7 @@ import {
   type UpdateRoutineRequest,
 } from "@baize/shared";
 import { appendMessage } from "./messages.js";
-import { groupIdByBotId, nextSuffix, routines } from "./store.js";
+import { groupIdByBotId, groups, nextSuffix, routines } from "./store.js";
 
 export const routinesOf = (botId: string): Routine[] =>
   [...routines.values()].filter((routine) => routine.botId === botId);
@@ -55,8 +55,16 @@ export const createRoutine = (botId: string, input: CreateRoutineRequest): Routi
 export const writeRoutine = (id: string, patch: UpdateRoutineRequest): Routine | null => {
   const routine = routines.get(id);
   if (routine === undefined) return null;
+  const { executorBotId, ...fields } = patch;
   const triggers = patch.triggers === undefined ? routine.triggers : tokensFrom(routine.triggers, patch.triggers);
-  const next = Routine.parse({ ...routine, ...patch, triggers });
+  const moved =
+    executorBotId === undefined || executorBotId === routine.botId
+      ? {}
+      : {
+          botId: executorBotId,
+          groupId: routine.groupId !== null && groups.get(routine.groupId)?.kind === "team" ? routine.groupId : null,
+        };
+  const next = Routine.parse({ ...routine, ...fields, ...moved, triggers });
   routines.set(next.id, next);
   return next;
 };
