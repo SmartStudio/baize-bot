@@ -102,8 +102,8 @@ export function runtimeConfig(): RuntimeConfig {
     upstreamBaseUrl: nonEmpty("UPSTREAM_BASE_URL") ?? DEFAULT_UPSTREAM_BASE_URL,
     upstreamApiKey: upstreamApiKey(),
     gatewayLimits: {
-      firstByteTimeoutMs: positiveInteger("GATEWAY_FIRST_BYTE_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.firstByteTimeoutMs),
-      totalTimeoutMs: positiveInteger("GATEWAY_TOTAL_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.totalTimeoutMs),
+      firstByteTimeoutMs: timeoutMs("GATEWAY_FIRST_BYTE_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.firstByteTimeoutMs),
+      totalTimeoutMs: timeoutMs("GATEWAY_TOTAL_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.totalTimeoutMs),
       requestsPerMinute: positiveInteger("GATEWAY_REQUESTS_PER_MINUTE", DEFAULT_GATEWAY_LIMITS.requestsPerMinute),
       burst: positiveInteger("GATEWAY_BURST", DEFAULT_GATEWAY_LIMITS.burst),
     },
@@ -195,6 +195,15 @@ function positiveInteger(name: string, fallback: number): number {
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} 不是正整数: ${raw}`);
   return parsed;
+}
+
+// setTimeout 放不下超过 2^31-1 毫秒的值，Node 会把它当成 1 毫秒，每个请求立刻 504
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function timeoutMs(name: string, fallback: number): number {
+  const value = positiveInteger(name, fallback);
+  if (value > MAX_TIMEOUT_MS) throw new Error(`${name} 超过 ${MAX_TIMEOUT_MS} 毫秒（约 24.8 天）: ${value}`);
+  return value;
 }
 
 function price(name: string): number {

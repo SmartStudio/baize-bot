@@ -198,7 +198,7 @@ it("TRUSTED_PROXY_HOPS 留空是 0，只收非负整数", () => {
   expect(trustedProxyHops).toThrowError("TRUSTED_PROXY_HOPS 不是非负整数: yes");
 });
 
-it("网关超时和限速取环境变量，没设用默认值，只收正整数", () => {
+it("网关超时和限速取环境变量，没设用默认值，只收正整数，超时不超过 setTimeout 的上限", () => {
   for (const name of [
     "GATEWAY_FIRST_BYTE_TIMEOUT_MS",
     "GATEWAY_TOTAL_TIMEOUT_MS",
@@ -224,4 +224,11 @@ it("网关超时和限速取环境变量，没设用默认值，只收正整数"
   vi.stubEnv("GATEWAY_BURST", "10");
   vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "10m");
   expect(runtimeConfig).toThrowError("GATEWAY_TOTAL_TIMEOUT_MS 不是正整数: 10m");
+  vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "2147483647");
+  expect(runtimeConfig().gatewayLimits.totalTimeoutMs).toBe(2_147_483_647);
+  vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "3000000000");
+  expect(runtimeConfig).toThrowError("GATEWAY_TOTAL_TIMEOUT_MS 超过 2147483647 毫秒（约 24.8 天）: 3000000000");
+  vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "900000");
+  vi.stubEnv("GATEWAY_FIRST_BYTE_TIMEOUT_MS", "2147483648");
+  expect(runtimeConfig).toThrowError("GATEWAY_FIRST_BYTE_TIMEOUT_MS 超过 2147483647 毫秒（约 24.8 天）: 2147483648");
 });
