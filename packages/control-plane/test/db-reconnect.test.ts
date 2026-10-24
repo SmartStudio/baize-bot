@@ -9,8 +9,18 @@ const SETTLE_LIMIT_MS = 5_000;
 
 const cleanups: (() => Promise<void>)[] = [];
 
+// 每个收尾各自兜住：前一个抛了，后面的照样跑，不留下 ALLOW_CONNECTIONS false 的库。
 afterEach(async () => {
-  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
+  const errors: unknown[] = [];
+  for (const cleanup of cleanups.splice(0).toReversed()) {
+    try {
+      await cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, "db-reconnect 收尾有多处失败");
 });
 
 async function withAdmin<T>(run: (admin: postgres.Sql) => Promise<T>): Promise<T> {
