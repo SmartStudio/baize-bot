@@ -2860,6 +2860,50 @@ describe("更换执行 Bot 的锁序", () => {
     }
   });
 
+  it("单聊例行旧执行者那次停下等点头时换人：删例行也要等旧执行者的锁，点头之后它的活还会接着跑", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const routine = await routineOf(owner, owner.botId);
+    const agent = await online(owner);
+    try {
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+      const prompt = await agent.expect("prompt");
+      expect(prompt.botId).toBe(owner.botId);
+      agent.send({
+        type: "approval_request",
+        runId: prompt.runId,
+        botId: owner.botId,
+        groupId: owner.groupId,
+        callId: "call-1",
+        tool: "send_email",
+        action: "message_person",
+        target: null,
+        view: { kind: "mcp", server: "", tool: "send_email", params: [], raw: "给客户发一封邮件" },
+      });
+      await settled(routine.id);
+      expect((await runsOf(routine.id)).map((one) => one.status)).toEqual(["stopped"]);
+      expect((await switchExecutor(owner, routine.id, other)).status).toBe(200);
+
+      const held = await holdBotShared(side.db, owner.botId);
+      let done = false;
+      const deleting = owner.client.delete(`/api/routines/${routine.id}`);
+      deleting.then(
+        () => (done = true),
+        () => (done = true),
+      );
+      try {
+        await waitUntil(async () => done || (await waitingOnBotLock(owner.botId)), "删例行回掉或排到旧执行者的锁上");
+        expect(done, "stopped 的记录也得让删例行等旧执行者").toBe(false);
+      } finally {
+        await held.release();
+      }
+      expect((await deleting).status).toBe(204);
+      expect(await allRoutines(owner.client)).toEqual([]);
+    } finally {
+      agent.close();
+    }
+  });
+
   it("换人时新执行者正被删：换人等删除提交，回 404「没有这个 Bot」，例行留在原执行者名下", async () => {
     const owner = await ownerWithBot();
     const other = await secondBot(owner);
