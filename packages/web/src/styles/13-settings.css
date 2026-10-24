@@ -632,3 +632,17 @@
   flex-direction: column;
   gap: var(--space-4);
 }
+
+.privacy-storage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.privacy-storage .group-label {
+  margin-bottom: 0;
+}
+
+.privacy-page .row-card > .ghost-button {
+  flex: none;
+}

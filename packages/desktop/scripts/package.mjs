@@ -19,6 +19,7 @@ await writeFile(
   `${JSON.stringify({ name: "baize", productName: "白泽", version, private: true, type: "module", main: "main.mjs" }, null, 2)}\n`,
 );
 await cp(join(root, "dist/main.mjs"), join(stage, "main.mjs"));
+await cp(join(root, "dist/preload.cjs"), join(stage, "preload.cjs"));
 await cp(join(root, "dist/web"), join(stage, "web"), { recursive: true });
 
 const apps = await packager({

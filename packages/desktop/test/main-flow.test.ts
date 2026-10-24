@@ -8,7 +8,8 @@ process.setMaxListeners(30);
 const sockets: FakeSocket[] = [];
 const children: FakeChild[] = [];
 const reapedProfiles = vi.hoisted((): string[] => []);
-const electronState = vi.hoisted(() => ({ packaged: false, ready: false }));
+const electronState = vi.hoisted(() => ({ packaged: false, ready: false, openAtLogin: false }));
+const ipcHandlers = vi.hoisted(() => new Map<string, (event: unknown, ...args: unknown[]) => unknown>());
 const autoUpdater = vi.hoisted(() => ({
   on: vi.fn(),
   setFeedURL: vi.fn(),
@@ -85,7 +86,11 @@ const fakeWindow = (): object => {
   let url = "";
   const window: FakeWindow = {
     destroyed: false,
-    webContents: { setWindowOpenHandler: vi.fn(), getURL: vi.fn(() => liveCall(window, url)) },
+    webContents: {
+      setWindowOpenHandler: vi.fn(),
+      getURL: vi.fn(() => liveCall(window, url)),
+      send: vi.fn(() => liveCall(window)),
+    },
     once: vi.fn(),
     on: vi.fn(),
     isDestroyed: () => window.destroyed,
@@ -117,8 +122,10 @@ vi.mock("electron", () => {
       getPath: () => "/tmp/baize-desktop-test",
       getVersion: () => "0.1.0",
       getAppPath: () => "/tmp/baize-desktop-test/app",
-      getLoginItemSettings: () => ({ openAtLogin: false }),
-      setLoginItemSettings: vi.fn(),
+      getLoginItemSettings: () => ({ openAtLogin: electronState.openAtLogin }),
+      setLoginItemSettings: vi.fn(({ openAtLogin }: { openAtLogin: boolean }) => {
+        electronState.openAtLogin = openAtLogin;
+      }),
       setAboutPanelOptions: vi.fn(),
       exit: appExit,
       quit: appQuit,
@@ -130,6 +137,10 @@ vi.mock("electron", () => {
     autoUpdater,
     BrowserWindow: vi.fn(fakeWindow),
     dialog: { showErrorBox: vi.fn(), showMessageBox },
+    ipcMain: {
+      handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) =>
+        ipcHandlers.set(channel, handler),
+    },
     Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
     nativeImage: {
       createFromDataURL: vi.fn(() => ({ setTemplateImage: vi.fn() })),
@@ -272,6 +283,7 @@ async function loadMain(): Promise<typeof import("../src/main.js")> {
   fetchState.urls.length = 0;
   dockBadges.length = 0;
   notifications.shown.length = 0;
+  ipcHandlers.clear();
   return import("../src/main.js");
 }
 
@@ -302,6 +314,13 @@ async function reconnectFromMenu(): Promise<void> {
   expect(submenu.find((entry) => entry.label === "这台 Mac 没有连上")?.enabled).toBe(false);
   expect(item?.enabled).toBe(true);
   item?.click?.({} as never, undefined, {} as never);
+}
+
+async function openAtLoginMenuItem(): Promise<import("electron").MenuItemConstructorOptions | undefined> {
+  const { Menu } = await import("electron");
+  const template = vi.mocked(Menu.buildFromTemplate).mock.calls.at(-1)?.[0];
+  const submenu = template?.[0]?.submenu as import("electron").MenuItemConstructorOptions[];
+  return submenu.find((entry) => entry.label === "开机时启动白泽");
 }
 
 describe("桌面主进程代理流程", () => {
@@ -1272,6 +1291,74 @@ describe("桌面主进程代理流程", () => {
       expect(window.loadURL).toHaveBeenCalledTimes(1);
       expect(window.show).toHaveBeenCalled();
       expect(window.focus).toHaveBeenCalled();
+    });
+  });
+
+  describe("开机启动的桥", () => {
+    const fromPage = { senderFrame: { url: "http://127.0.0.1:1/settings" } };
+    const boot = async (packaged: boolean): Promise<void> => {
+      electronState.packaged = packaged;
+      electronState.ready = true;
+      Object.defineProperty(process, "resourcesPath", {
+        value: "/tmp/baize-desktop-test/resources",
+        configurable: true,
+      });
+      await loadMain();
+      await vi.waitFor(() => expect(appOn).toHaveBeenCalledWith("activate", expect.any(Function)));
+    };
+    const invoke = (channel: string, event: unknown, ...args: unknown[]) => {
+      const handler = ipcHandlers.get(channel);
+      if (handler === undefined) throw new Error(`没有注册 ${channel}`);
+      return handler(event, ...args);
+    };
+    const sentToMainWindow = () => (windows[0]!.webContents as { send: MockInstance }).send.mock.calls;
+
+    afterEach(() => {
+      Reflect.deleteProperty(process, "resourcesPath");
+      electronState.packaged = false;
+      electronState.ready = false;
+      electronState.openAtLogin = false;
+    });
+
+    it("设置页打开开机启动，写进系统、菜单勾上，主窗口收到新值", async () => {
+      await boot(true);
+      expect(invoke("baize:open-at-login:get", fromPage)).toBe("off");
+
+      expect(invoke("baize:open-at-login:set", fromPage, "on")).toBe("on");
+      const { app } = await import("electron");
+      expect(app.setLoginItemSettings).toHaveBeenCalledWith({ openAtLogin: true });
+      expect((await openAtLoginMenuItem())?.checked).toBe(true);
+      expect(sentToMainWindow()).toEqual([["baize:open-at-login:changed", "on"]]);
+    });
+
+    it("菜单里取消勾选，主窗口收到关掉的值", async () => {
+      electronState.openAtLogin = true;
+      await boot(true);
+      const item = await openAtLoginMenuItem();
+      expect(item?.checked).toBe(true);
+
+      item?.click?.({ checked: false } as never, undefined, {} as never);
+      expect(invoke("baize:open-at-login:get", fromPage)).toBe("off");
+      expect((await openAtLoginMenuItem())?.checked).toBe(false);
+      expect(sentToMainWindow()).toEqual([["baize:open-at-login:changed", "off"]]);
+    });
+
+    it("没打包的开发版报不支持，设置页写不进系统", async () => {
+      await boot(false);
+      expect(invoke("baize:open-at-login:get", fromPage)).toBe("unsupported");
+      expect(invoke("baize:open-at-login:set", fromPage, "on")).toBe("unsupported");
+      const { app } = await import("electron");
+      expect(app.setLoginItemSettings).not.toHaveBeenCalled();
+    });
+
+    it("别的源上的页面和不是开关的值都被拒绝", async () => {
+      await boot(true);
+      const foreign = { senderFrame: { url: "https://example.com/" } };
+      expect(() => invoke("baize:open-at-login:get", foreign)).toThrow("只接受白泽页面的请求");
+      expect(() => invoke("baize:open-at-login:set", foreign, "on")).toThrow("只接受白泽页面的请求");
+      expect(() => invoke("baize:open-at-login:set", fromPage, true)).toThrow("开机启动只能开或关");
+      const { app } = await import("electron");
+      expect(app.setLoginItemSettings).not.toHaveBeenCalled();
     });
   });
 
