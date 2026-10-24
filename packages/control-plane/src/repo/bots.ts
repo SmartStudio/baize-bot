@@ -276,7 +276,8 @@ export type DeleteBotResult =
   | {
       readonly kind: "deleted";
       readonly expired: Approval[];
-      readonly movedRoutineIds: string[];
+      /** 转给主助理的例行，加上有运行记录因这次删除收成失败的例行，调用方提交后逐条推 routine_updated。 */
+      readonly changedRoutineIds: string[];
       /** 成员或首席因这次删除变了的项目群，调用方提交后按它推 group_updated。 */
       readonly changedGroupIds: string[];
       readonly cancelComputers: ComputerId[];
@@ -287,7 +288,7 @@ export type DeleteBotResult =
 /**
  * 删 Bot。单 Bot 群、主题任务、消息由外键级联一起走，重复删或删别人的是 not_found。主助理删不掉，每个用户恰好一个。
  * 它挂着的审批先在同一个事务里收成 expired 再删，回给调用方推终态：运行器删 Bot 时不再报 approval_abandoned。
- * 它执行的例行不跟着删，转给主助理，转走的 id 回给调用方推 routine_updated。项目群里的例行照旧发进原群，主助理不在那个群就补进去。
+ * 它执行的例行不跟着删，转给主助理；转走的和有运行记录因此收成失败的例行 id 回给调用方推 routine_updated。项目群里的例行照旧发进原群，主助理不在那个群就补进去。
  * 用 UPDATE ... WHERE status = 'pending' 而不是先查，和同时点下的批准抢行锁，谁先落谁算。
  * UPDATE 自己带归属和角色条件，别人的 Bot 和主助理连审批行锁都不碰。
  * 它当首席的群级联把首席置空，补进主助理的群多了一位，这两种群的号回给调用方，提交后推整份群快照。
@@ -318,7 +319,8 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
       await tx.update(runs).set({ botId: null }).where(eq(runs.botId, botId));
     }
     const assistant = target === undefined ? null : await findAssistant(tx, ownerId);
-    const moved = assistant === null ? [] : await transferRoutines(tx, botId, assistant.bot.id);
+    const transferred =
+      assistant === null ? { moved: [], failedRoutineIds: [] } : await transferRoutines(tx, botId, assistant.bot.id);
     const expired = await tx
       .update(approvals)
       .set({ status: "expired" })
@@ -335,13 +337,13 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
           : await joinGroups(
               tx,
               assistant.bot.id,
-              moved.flatMap((one) => one.groupId ?? []),
+              transferred.moved.flatMap((one) => one.groupId ?? []),
             );
       return {
         kind: "deleted",
         cancelComputers,
         expired: expired.map(toApproval),
-        movedRoutineIds: moved.map((one) => one.id),
+        changedRoutineIds: [...new Set([...transferred.moved.map((one) => one.id), ...transferred.failedRoutineIds])],
         changedGroupIds: [...new Set([...chaired.map((one) => one.id), ...joined])],
       };
     }

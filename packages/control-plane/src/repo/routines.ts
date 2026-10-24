@@ -537,6 +537,12 @@ export async function pauseGroupRoutines(tx: Tx, group: SQLWrapper): Promise<str
 
 export type MovedRoutine = { readonly id: string; readonly groupId: string | null };
 
+export type TransferredRoutines = {
+  readonly moved: MovedRoutine[];
+  /** 有运行记录被收成失败的例行。换过执行者的那条已不在它名下，不在 moved 里。 */
+  readonly failedRoutineIds: string[];
+};
+
 /** 执行者被删时，它还在跑的例行运行记录收成失败用的 note。 */
 export const EXECUTOR_DELETED_NOTE = "执行者已删除，这次没跑完";
 
@@ -544,26 +550,31 @@ export const EXECUTOR_DELETED_NOTE = "执行者已删除，这次没跑完";
  * 执行者要被删了，它的例行转给主助理，回转走的例行和它们留着的群号。
  * 指着它单聊群的例行改成不带群号：单聊随 Bot 级联删掉，留着群号就会跟着被删，不带群号的发进主助理的单聊。
  * 项目群的群号保留，主助理进不进那个群由调用方在删掉 Bot 行之后补（joinGroups）。
- * 先按 id 升序锁行再改，和归档、seen 同序。它还在跑的运行记录一并收成失败：
- * 删除把 run 的 bot_id 置空，旧执行者的收尾报文过不了归属校验，不在这里收就永远停在 running。
+ * 先按 id 升序锁行再改，和归档、seen 同序。
+ * 记录上的执行者是它、还在跑的运行记录一并收成失败：删除把 run 的 bot_id 置空，它的收尾报文过不了归属校验，不在这里收就永远停在 running。
+ * 按记录的 bot_id 认，不按例行现在的执行者：换过人的例行，旧执行者那次记在旧的名下，新执行者被删时它照旧跑完。
+ * 必须在删 Bot 行之前做，外键会把这一列置空。stopped 不收：里面有超预算、插话这种已经结束的，改成失败就改了历史。
  */
-export async function transferRoutines(tx: Tx, fromBotId: BotId, toBotId: BotId): Promise<MovedRoutine[]> {
+export async function transferRoutines(tx: Tx, fromBotId: BotId, toBotId: BotId): Promise<TransferredRoutines> {
   const ids = await lockRoutines(tx, eq(routines.botId, fromBotId));
-  if (ids.length === 0) return [];
   const soloGroup = tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, fromBotId));
-  const moved = await tx
-    .update(routines)
-    .set({
-      botId: toBotId,
-      groupId: sql`CASE WHEN ${routines.groupId} IN (${soloGroup}) THEN NULL ELSE ${routines.groupId} END`,
-    })
-    .where(inArray(routines.id, ids))
-    .returning({ id: routines.id, groupId: routines.groupId });
-  await tx
+  const moved =
+    ids.length === 0
+      ? []
+      : await tx
+          .update(routines)
+          .set({
+            botId: toBotId,
+            groupId: sql`CASE WHEN ${routines.groupId} IN (${soloGroup}) THEN NULL ELSE ${routines.groupId} END`,
+          })
+          .where(inArray(routines.id, ids))
+          .returning({ id: routines.id, groupId: routines.groupId });
+  const failed = await tx
     .update(routineRuns)
     .set({ status: "failed", note: withStatusNote(EXECUTOR_DELETED_NOTE) })
-    .where(and(inArray(routineRuns.routineId, ids), eq(routineRuns.status, "running")));
-  return moved;
+    .where(and(eq(routineRuns.botId, fromBotId), eq(routineRuns.status, "running")))
+    .returning({ routineId: routineRuns.routineId });
+  return { moved, failedRoutineIds: failed.map((one) => one.routineId) };
 }
 
 /** 带 cron 触发器的例行任务，停用的也在里面：停用的不跑，但游标照推，重新启用时不会补跑攒下的那些时刻。 */

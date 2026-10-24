@@ -677,8 +677,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     // 多 Bot 群里那张卡还在，先把它推成终态，客户端才不会留一张点了没反应的卡。
     for (const approval of deleted.expired) hub.push(c.get("user").id, { type: "approval_updated", approval });
     hub.push(c.get("user").id, { type: "bot_deleted", botId: botId.data });
-    // 转走的例行里刚被收成 failed 的记录也算一次没人看的收尾，和别的收尾一样过三次自停再推快照。
-    for (const routineId of deleted.movedRoutineIds) await pushRoutineUpdated(routineDeps, routineId);
+    // 刚被收成 failed 的记录也算一次没人看的收尾，和别的收尾一样过三次自停再推快照。
+    for (const routineId of deleted.changedRoutineIds) await pushRoutineUpdated(routineDeps, routineId);
     // 补进主助理、卸了首席的项目群推整份快照，在线的项目页才换得掉成员名单。
     for (const groupId of deleted.changedGroupIds) {
       const detail = await findGroup(db, c.get("user").id, GroupId.parse(groupId));
