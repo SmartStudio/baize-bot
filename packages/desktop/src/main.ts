@@ -6,6 +6,7 @@ import {
   app,
   BrowserWindow,
   dialog,
+  ipcMain,
   Menu,
   nativeImage,
   Notification,
@@ -13,6 +14,7 @@ import {
   session as electronSession,
   Tray,
   autoUpdater,
+  type IpcMainInvokeEvent,
   type MessageBoxOptions,
   type MessageBoxReturnValue,
   type Rectangle,
@@ -28,9 +30,13 @@ import {
   PairLocalComputerRequest,
   PairLocalConflictResponse,
   UserId,
+  OPEN_AT_LOGIN_CHANGED,
+  OPEN_AT_LOGIN_GET,
+  OPEN_AT_LOGIN_SET,
   type ComputerId,
   type GroupId,
   type NotifyKind,
+  type OpenAtLogin,
 } from "@baize/shared";
 import WebSocket from "ws";
 import { chromeProfileDir, reapProfileChromes } from "@baize/computer-agent/chrome-process";
@@ -95,10 +101,15 @@ const logLine = (line: string): void => {
 };
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-function desktopPaths(): { readonly agent: string; readonly web: string } {
-  if (app.isPackaged) return { agent: join(process.resourcesPath, "agent.mjs"), web: join(app.getAppPath(), "web") };
+function desktopPaths(): { readonly agent: string; readonly web: string; readonly preload: string } {
+  if (app.isPackaged)
+    return {
+      agent: join(process.resourcesPath, "agent.mjs"),
+      web: join(app.getAppPath(), "web"),
+      preload: join(app.getAppPath(), "preload.cjs"),
+    };
   const here = dirname(fileURLToPath(import.meta.url));
-  return { agent: join(here, "agent.mjs"), web: join(here, "web") };
+  return { agent: join(here, "agent.mjs"), web: join(here, "web"), preload: join(here, "preload.cjs") };
 }
 
 const settingsPath = (): string => join(app.getPath("userData"), "desktop-settings.json");
@@ -722,7 +733,13 @@ async function createWindows(session: Session, mainPath = ""): Promise<void> {
       show: false,
       title: "白泽",
       titleBarStyle: "default",
-      webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: false },
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        backgroundThrottling: false,
+        preload: desktopPaths().preload,
+      },
     });
     mainWindow = window;
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -807,14 +824,45 @@ function openSettings(): void {
   void settingsWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(settingsHtml(controlOrigin))}`);
 }
 
+// 没打包时开机项登记的是 Electron 本体。
+const openAtLogin = (): OpenAtLogin =>
+  !app.isPackaged ? "unsupported" : app.getLoginItemSettings().openAtLogin ? "on" : "off";
+
+function setOpenAtLogin(value: boolean): OpenAtLogin {
+  if (!app.isPackaged) return "unsupported";
+  app.setLoginItemSettings({ openAtLogin: value });
+  if (updater !== null) installMenu(updater.checkNow);
+  const next = openAtLogin();
+  if (mainWindow !== null && !mainWindow.isDestroyed()) mainWindow.webContents.send(OPEN_AT_LOGIN_CHANGED, next);
+  return next;
+}
+
+// 主窗口跳到别的源上 preload 照样会注入，只认白泽自己页面发来的调用。
+function fromUi(event: IpcMainInvokeEvent): void {
+  const url = event.senderFrame?.url;
+  if (url === undefined || new URL(url).origin !== uiOrigin) throw new Error("只接受白泽页面的请求");
+}
+
+function installBridge(): void {
+  ipcMain.handle(OPEN_AT_LOGIN_GET, (event) => {
+    fromUi(event);
+    return openAtLogin();
+  });
+  ipcMain.handle(OPEN_AT_LOGIN_SET, (event, value: unknown) => {
+    fromUi(event);
+    if (value !== "on" && value !== "off") throw new Error("开机启动只能开或关");
+    return setOpenAtLogin(value === "on");
+  });
+}
+
 function installMenu(checkForUpdates: () => void): void {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate(
       menuTemplate({
         packaged: app.isPackaged,
         version: app.getVersion(),
-        openAtLogin: () => app.getLoginItemSettings().openAtLogin,
-        setOpenAtLogin: (openAtLogin) => app.setLoginItemSettings({ openAtLogin }),
+        openAtLogin: () => openAtLogin() === "on",
+        setOpenAtLogin: (value) => void setOpenAtLogin(value),
         checkForUpdates,
         openSettings,
         agentStatus: agentState.status,
@@ -914,6 +962,7 @@ async function main(): Promise<void> {
   updater = appUpdater;
   app.setAboutPanelOptions({ applicationName: "白泽", applicationVersion: app.getVersion() });
   installMenu(appUpdater.checkNow);
+  installBridge();
   await createWindows(session);
   let credentials: { readonly computerId: ComputerId; readonly token: string } | null = null;
   try {

@@ -81,3 +81,15 @@ await esbuild.build({
   },
   logLevel: "info",
 });
+
+// 沙箱里的 preload 只能是 CommonJS，require 只认 electron。
+await esbuild.build({
+  entryPoints: [join(root, "src/preload.ts")],
+  bundle: true,
+  platform: "node",
+  format: "cjs",
+  outfile: join(root, "dist/preload.cjs"),
+  target: "node22",
+  external: ["electron"],
+  logLevel: "info",
+});

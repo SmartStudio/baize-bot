@@ -13,6 +13,7 @@ import {
   type Grant,
   type GrantId,
   type GroupId,
+  type OpenAtLogin,
   type ToolConnection,
   type ToolConnectionId,
   type UpdateToolRequest,
@@ -24,6 +25,7 @@ import { ToolsPage } from "./ToolsPage.js";
 import { AccountsPage } from "./AccountsPage.js";
 import { PrivacyPage } from "./PrivacyPage.js";
 import { inDesktopShell, notifyPermission, type NotifyPermission } from "../state/notify.js";
+import { desktopBridge } from "../state/desktop.js";
 
 export type PageId = "general" | "accounts" | "tools" | "usage" | "privacy";
 
@@ -103,6 +105,45 @@ const NotifyPermissionRow = () => {
   );
 };
 
+const OpenAtLoginRow = () => {
+  const [openAtLogin, setOpenAtLogin] = useState<OpenAtLogin>("unsupported");
+  useEffect(() => {
+    const bridge = desktopBridge();
+    if (bridge === null) return;
+    let live = true;
+    void bridge.openAtLogin.get().then((value) => {
+      if (live) setOpenAtLogin(value);
+    });
+    const unsubscribe = bridge.openAtLogin.subscribe(setOpenAtLogin);
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, []);
+  const bridge = desktopBridge();
+  if (bridge === null || openAtLogin === "unsupported") return null;
+  return (
+    <>
+      <p className="group-label">桌面 App</p>
+      <div className="row-card">
+        <span>
+          <b>开机时启动白泽</b>
+          <small>登录这台 Mac 后自动打开白泽，连上这台电脑，Bot 不用等你开 App。</small>
+        </span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={openAtLogin === "on"}
+          aria-label="开机时启动白泽"
+          className={`switch${openAtLogin === "on" ? " is-on" : ""}`}
+          data-testid="open-at-login-switch"
+          onClick={() => void bridge.openAtLogin.set(openAtLogin === "on" ? "off" : "on").then(setOpenAtLogin)}
+        />
+      </div>
+    </>
+  );
+};
+
 const GeneralPage = ({
   user,
   settings,
@@ -137,6 +178,8 @@ const GeneralPage = ({
         <option value="dark">深色</option>
       </select>
     </div>
+
+    <OpenAtLoginRow />
 
     <p className="group-label">Bot 找你的方式</p>
     <div className="row-card">
