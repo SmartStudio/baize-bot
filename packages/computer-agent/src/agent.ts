@@ -35,6 +35,7 @@ import { createLiveScreen } from "./live-screen.js";
 import { checkLogin, createLogins, defaultLoginPages } from "./login.js";
 import { createTerminals, ptySpawner } from "./terminal.js";
 import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
+import { OversizedUplink } from "./frame-limit.js";
 import { loadInstallId } from "./install-id.js";
 import { WorkAppendChannel } from "./work-append.js";
 
@@ -213,6 +214,10 @@ export function startAgent(options: AgentOptions): AgentHandle {
       .append(message)
       .then(sendStored)
       .catch((error: unknown) => {
+        if (error instanceof OversizedUplink) {
+          log(error.message);
+          return;
+        }
         log(`可靠上行落盘失败：${String(error)}`);
         void stop().catch((stopError: unknown) => log(`代理停机失败：${String(stopError)}`));
       })

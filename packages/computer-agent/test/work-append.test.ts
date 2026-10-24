@@ -1,5 +1,9 @@
-import { BotId, GroupId, RunId, type WorkAppend, type UplinkRejection } from "@baize/shared";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AGENT_FRAME_MAX_BYTES, BotId, GroupId, RunId, type WorkAppend, type UplinkRejection } from "@baize/shared";
 import { describe, expect, it } from "vitest";
+import { ReliableOutbox } from "../src/reliable-transport.js";
 import { WorkAppendChannel } from "../src/work-append.js";
 
 const probe = (): WorkAppend => ({
@@ -112,5 +116,32 @@ describe("工作记录探针的确认通路", () => {
     expect(Object.hasOwn(result, "replayReason")).toBe(false);
     expect(Object.hasOwn(result, "nextSeq")).toBe(false);
     expect(Object.hasOwn(result, "head")).toBe(false);
+  });
+
+  it("整批超过单帧上限时发件箱拒收，探针回 invalid 让镜像停流，不发送也不让代理停机", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "baize-work-append-"));
+    try {
+      const outbox = await ReliableOutbox.open(directory);
+      const sent: number[] = [];
+      const failures: unknown[] = [];
+      const channel = new WorkAppendChannel({
+        connected: () => true,
+        append: async (body) => ({ seq: (await outbox.append(body)).seq, body }),
+        send: (stored) => {
+          sent.push(stored.seq);
+        },
+        cancel: () => {},
+        failed: (error) => {
+          failures.push(error);
+        },
+      });
+      const result = await channel.append({ ...probe(), lines: ["x".repeat(AGENT_FRAME_MAX_BYTES)] });
+      expect(result).toEqual({ kind: "invalid" });
+      expect(sent).toEqual([]);
+      expect(failures).toEqual([]);
+      expect(outbox.pending()).toEqual([]);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

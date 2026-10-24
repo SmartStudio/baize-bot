@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AgentToControl, UPLINK_DELIVERY, type AgentToControl as AgentMessage } from "@baize/shared";
+import { fitUplink, OversizedUplink } from "./frame-limit.js";
 
 interface StoredUplink {
   readonly seq: number;
@@ -257,7 +258,15 @@ export class ReliableOutbox {
   append(body: AgentMessage): Promise<StoredUplink> {
     if (this.#failed) return Promise.reject(this.#failure);
     if (UPLINK_DELIVERY[body.type] !== "reliable") return Promise.reject(new Error(`${body.type} is not reliable`));
-    const entry: StoredUplink = { seq: this.#next++, body };
+    const fitted = fitUplink(body, (candidate) => ({
+      type: "uplink",
+      conn: Number.MAX_SAFE_INTEGER,
+      stream: this.stream,
+      seq: Number.MAX_SAFE_INTEGER,
+      body: candidate,
+    }));
+    if (fitted === null) return Promise.reject(new OversizedUplink(`${body.type} 截短后仍超过单帧上限，不进发件箱`));
+    const entry: StoredUplink = { seq: this.#next++, body: fitted };
     this.#frames.push(entry);
     const persisted = new Promise<void>((resolve, reject) => this.#writes.push({ entry, resolve, reject }));
     if (this.#timer === null) {

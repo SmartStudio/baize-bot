@@ -2,6 +2,8 @@
 
 电脑代理以协议 3 完成握手。首次启动生成 UUID，完整落盘到 `<dataDir>/.agent/install-id` 后才发 hello；重连和进程重启复用它。hello 同时携带运行器导出的 Pi `CURRENT_SESSION_VERSION`。每条可靠上行先写入 `<dataDir>/.agent/outbox/` 并 fsync，再通过当前连接发送；welcome 的累计确认和后续 `uplink_ack` 会清理已确认帧。重连或进程重启会按原 stream 和序号补发未确认帧。
 
+可靠上行进发件箱之前按整帧序列化后的字节数对 `AGENT_FRAME_MAX_BYTES` 检查（`src/frame-limit.ts`）。控制面收到超限帧以 1009 关连接，代理重连重发同一帧又被关，整台电脑的发件箱就卡死了，所以超限只能在入队前处理：`bot_text_done.text` 和 `agent_error.detail` 按 UTF-8 字节截尾并注明「内容过长」，不切开多字节字符；`bot_tool_call.view.raw` 换成一句说明字节数的话。截完仍超限的帧不进发件箱、不占序号，只记本地日志。`work_append` 由运行器先按字节切批，到这里还超限就回 `invalid` 让镜像停流。`mcp_discovered` 是 bare 报文，schema 已把结果限在 1 MiB，不经这道检查。
+
 `.agent/computer.json` 记录传输状态所属的 `computerId`；换电脑、旧版无归属状态或状态文件损坏时，代理把旧 outbox、下行游标和归属信息移入 `.agent/transport-quarantine-<uuid>/`，并从新流和游标 0 开始。隔离不移动 `.agent/install-id`，安装标识属于这份 dataDir，不随换电脑重置。服务器 welcome 的确认序号低于本地记录时，也会隔离旧状态并主动重连新流。
 
 prompt 的 `lane` 原样交给运行器。`cancel{runId}` 停单条运行；`cancel{lane, epoch}` 只停该道上本地代际小于目标代际的在跑和排队运行，不发送 `run_done`。
