@@ -29,7 +29,8 @@ export async function createTestDb(options: { readonly through?: string } = {}):
     sql,
     databaseName,
     close: async () => {
-      await sql.end();
+      // postgres.js 3.4.9 的连接在查询途中被断开后，不带 timeout 的 end() 永远不 resolve（同类问题 porsager/postgres#1242）。
+      await sql.end({ timeout: 5 });
       await withAdmin((admin) => admin`DROP DATABASE ${admin(databaseName)} WITH (FORCE)`);
     },
   };

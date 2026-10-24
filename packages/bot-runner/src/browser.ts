@@ -2,7 +2,7 @@ import type { ActionKind, ToolView } from "@baize/shared";
 import { setTimeout as delay } from "node:timers/promises";
 import { type Static, Type } from "typebox";
 import type { RunnerTool } from "./bot-session.js";
-import type { CdpConnection } from "./cdp.js";
+import { type CdpConnection, CdpTimeoutError } from "./cdp.js";
 import { BrowserMutex } from "./browser-mutex.js";
 import type { PresentPage } from "./live-port.js";
 
@@ -39,6 +39,8 @@ const LOAD_TIMEOUT_MS = 15_000;
  * 其余时间留给 abort、dispose 这些收尾，不能等 CDP 的 30 秒命令超时。
  */
 const CLOSE_BUDGET_MS = 2_000;
+const LIFECYCLE_KEPT = 8;
+const PROBE_TIMEOUT_MS = 2_000;
 const PAGE_TEXT_MAX = 8_000;
 const ELEMENTS_MAX = 200;
 const APPROVAL_TEXT_MAX = 80;
@@ -50,6 +52,7 @@ type OpenTab = {
   readonly sessionId: string;
   readonly targetId: string;
   readonly unsubscribe: () => void;
+  readonly mainFrameLifecycle: string[];
 };
 /** lent：这一页正借给用户操作（`browser_ask_user`），Bot 的工具碰它一律立刻报错，交还后换回 open。 */
 type Tab = { readonly kind: "closed" } | OpenTab | { readonly kind: "lent"; readonly page: OpenTab };
@@ -135,6 +138,15 @@ const RESTORE_PASSWORDS = `(() => {
   for (const [el, value] of window[${PASSWORDS_KEY}] || []) el.value = value;
   delete window[${PASSWORDS_KEY}];
 })()`;
+
+const PAGE_STATE = `[
+  "visibilityState=" + document.visibilityState,
+  "hidden=" + document.hidden,
+  "readyState=" + document.readyState,
+  "hasFocus=" + document.hasFocus(),
+  "wasDiscarded=" + document.wasDiscarded,
+  innerWidth + "x" + innerHeight,
+].join(" ")`;
 
 const OPEN_PARAMS = Type.Object({ url: Type.String({ description: "要打开的网址，只认 http 和 https" }) });
 const EMPTY_PARAMS = Type.Object({});
@@ -391,6 +403,7 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
       targetId = String(created.targetId);
       const attached = await command(connection, "Target.attachToTarget", { targetId, flatten: true });
       const sessionId = String(attached.sessionId);
+      const mainFrameLifecycle: string[] = [];
       // 管道上是所有 Bot、发布器和登录窗口的事件，只认自己这一页的 session。
       unsubscribe = connection.onEvent((event) => {
         if (event.sessionId !== sessionId && event.params.sessionId !== sessionId) return;
@@ -402,6 +415,11 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
         if (event.method === "Page.loadEventFired") {
           for (const waiter of loadWaiters) waiter();
         }
+        // 主框架的 frameId 就是 targetId。
+        if (event.method === "Page.lifecycleEvent" && event.params.frameId === targetId) {
+          mainFrameLifecycle.push(String(event.params.name));
+          if (mainFrameLifecycle.length > LIFECYCLE_KEPT) mainFrameLifecycle.shift();
+        }
         // 主框架换了文档：隔离世界作废；页面自己跳走的也记下来，点和填按跳过去的域名授权。
         if (event.method === "Page.frameNavigated") {
           const frame = event.params.frame as { parentId?: string; url?: string } | undefined;
@@ -411,16 +429,47 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
           }
         }
       });
-      const opened: OpenTab = { kind: "open", connection, sessionId, targetId, unsubscribe };
+      const opened: OpenTab = { kind: "open", connection, sessionId, targetId, unsubscribe, mainFrameLifecycle };
       // 后台标签页里 document.hasFocus() 是 false，不少页面据此不响应输入。焦点模拟只骗这一页，不碰桌面焦点。
       await send(opened, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await send(opened, "Page.enable");
+      await send(opened, "Page.setLifecycleEventsEnabled", { enabled: true });
       return opened;
     } catch (error) {
       unsubscribe?.();
       if (targetId !== null) await closeTarget(connection, targetId);
       throw error;
     }
+  };
+
+  const pageState = async (open: OpenTab): Promise<string> => {
+    const probe = (label: string, work: () => Promise<string>): Promise<string> =>
+      Promise.race([
+        work().then(
+          (found) => `${label}：${found}`,
+          (error: unknown) => `${label}查不到：${String(error)}`,
+        ),
+        delay(PROBE_TIMEOUT_MS, `${label}：${PROBE_TIMEOUT_MS / 1000}s 没回`, { ref: false }),
+      ]);
+    const targets = async (): Promise<string> => {
+      const { targetInfos } = (await command(open.connection, "Target.getTargets")) as {
+        targetInfos?: ReadonlyArray<{ targetId?: string; type?: string; attached?: boolean; url?: string }>;
+      };
+      const all = targetInfos ?? [];
+      const own = all.find((info) => info.targetId === open.targetId);
+      const otherCountsByType = new Map<string, number>();
+      for (const info of all) {
+        if (info !== own) otherCountsByType.set(String(info.type), (otherCountsByType.get(String(info.type)) ?? 0) + 1);
+      }
+      const rest = [...otherCountsByType].map(([type, count]) => `${type} ${count} 个`).join("、");
+      return `${own === undefined ? "本页不在了" : `本页 ${own.type} attached=${own.attached} ${own.url}`}，另有 ${rest || "（没有）"}`;
+    };
+    const states = await Promise.all([
+      probe("页面", async () => String(await evaluate(open, PAGE_STATE))),
+      `生命周期：${open.mainFrameLifecycle.length === 0 ? "（没有）" : open.mainFrameLifecycle.join(" → ")}`,
+      probe("Target.getTargets", targets),
+    ]);
+    return states.join("；");
   };
 
   /**
@@ -560,6 +609,10 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
             let data: unknown;
             try {
               data = (await send(open, "Page.captureScreenshot", { format: "png" })).data;
+            } catch (error) {
+              if (error instanceof CdpTimeoutError)
+                throw new Error(`${error.message}。${await pageState(open)}`, { cause: error });
+              throw error;
             } finally {
               await evaluate(open, RESTORE_PASSWORDS);
             }

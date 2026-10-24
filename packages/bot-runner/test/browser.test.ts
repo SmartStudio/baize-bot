@@ -3,9 +3,9 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { type BotBrowser, createBotBrowser } from "../src/browser.js";
-import { type CdpConnection, type CdpEvent, connectPipe } from "../src/cdp.js";
+import { type CdpConnection, type CdpEvent, CdpTimeoutError, connectPipe } from "../src/cdp.js";
 import {
   chromeBinary,
   evaluateIn,
@@ -216,6 +216,29 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
     await browser.close();
     expect(await settled(before), "关 Bot 的浏览器后一页不剩").toBe(before);
   });
+
+  it("截图 30 秒没回，报错里带上这一页当时的可见性、生命周期和标签页状态", async () => {
+    const stuck = wrap(chrome.connection, (method) =>
+      method === "Page.captureScreenshot"
+        ? new CdpTimeoutError("助理 Chrome 等了 30s 没回 Page.captureScreenshot")
+        : null,
+    );
+    const neighbour = botBrowser();
+    await call(neighbour, "browser_open", { url: `${site.url}/neighbour` });
+    const browser = botBrowser(async () => stuck);
+    await call(browser, "browser_open", { url: `${site.url}/shot` });
+
+    const error = await errorOf(call(browser, "browser_screenshot"));
+
+    expect(error).toContain("没回 Page.captureScreenshot");
+    expect(error).toMatch(
+      /页面：visibilityState=\w+ hidden=\w+ readyState=complete hasFocus=true wasDiscarded=false \d+x\d+/,
+    );
+    expect(error).toMatch(/生命周期：[^；]*\bload\b/);
+    expect(error).toContain(`本页 page attached=true ${site.url}/shot`);
+    expect(error, "别的 Bot 的标签页只报个数，网址不进这个 Bot 的模型上下文").not.toContain("/neighbour");
+    await Promise.all([browser.close(), neighbour.close()]);
+  });
 });
 
 function fakePipe() {
@@ -270,6 +293,23 @@ describe("管道上的 CDP 客户端", () => {
     expect(await inFlight).toContain("助理 Chrome 退出了");
     expect(connection.isOpen()).toBe(false);
     expect(await errorOf(connection.send("Browser.getVersion"))).toContain("下次用时会重新起");
+  });
+
+  it("命令 30 秒没回，报的是超时，连接照常能用", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = fakePipe();
+      const connection = connectPipe(fake.pipe);
+      const stuck = connection.send("Page.captureScreenshot", {}, "S1").catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const error = await stuck;
+      expect(error).toBeInstanceOf(CdpTimeoutError);
+      expect(String(error)).toContain("等了 30s 没回 Page.captureScreenshot");
+      expect(connection.isOpen()).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("写端报 EPIPE 不会把进程带崩，在途命令报错", async () => {

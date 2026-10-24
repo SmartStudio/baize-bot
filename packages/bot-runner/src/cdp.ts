@@ -19,6 +19,8 @@ export interface CdpConnection {
   isOpen(): boolean;
 }
 
+export class CdpTimeoutError extends Error {}
+
 export interface CdpPipe {
   /** Chrome 的 fd 3。 */
   readonly toChrome: Writable;
@@ -104,7 +106,7 @@ export function connectPipe(pipe: CdpPipe): CdpConnection {
       return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(id);
-          reject(new Error(`助理 Chrome 等了 ${COMMAND_TIMEOUT_MS / 1000}s 没回 ${method}`));
+          reject(new CdpTimeoutError(`助理 Chrome 等了 ${COMMAND_TIMEOUT_MS / 1000}s 没回 ${method}`));
         }, COMMAND_TIMEOUT_MS);
         pending.set(id, { resolve, reject, timer });
         pipe.toChrome.write(
