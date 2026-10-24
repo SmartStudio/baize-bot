@@ -2720,6 +2720,60 @@ describe("更换执行 Bot", () => {
       await gated.live.close();
     }
   });
+
+  it("换人后再删旧执行者：它手上那次当场收成失败、写明执行者已删，并推 routine_updated", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const routine = await makeRoutine(owner, { triggers: [] });
+    const agent = await online(owner);
+    const push = await connectPush(server.server.port, owner.client.cookie ?? "");
+    try {
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+      expect((await agent.expect("prompt")).botId).toBe(owner.botId);
+      expect((await switchExecutor(owner, routine.id, other)).status).toBe(200);
+      expect((await owner.client.delete(`/api/bots/${owner.botId}`)).status).toBe(204);
+
+      const listed = (await allRoutines(owner.client)).find((one) => one.id === routine.id);
+      expect(listed?.botId, "例行留在新执行者名下").toBe(other);
+      expect(
+        listed?.runs.map((run) => [run.status, run.note]),
+        "旧执行者那次不再永远停在正在跑",
+      ).toEqual([["failed", EXECUTOR_DELETED_NOTE]]);
+      await untilPush(
+        push,
+        (one): one is RoutineUpdated =>
+          one.type === "routine_updated" && one.routine.id === routine.id && one.routine.runs[0]?.status === "failed",
+        "旧执行者那次收成失败的例行",
+      );
+    } finally {
+      push.close();
+      agent.close();
+    }
+  });
+
+  it("换人后删的是新执行者：旧执行者手上那次照旧在跑，跑完记成 ok", async () => {
+    const owner = await ownerWithBot();
+    const other = await secondBot(owner);
+    const routine = await makeRoutine(owner, { triggers: [] });
+    const agent = await online(owner);
+    try {
+      expect((await owner.client.post(`/api/routines/${routine.id}/run`)).status).toBe(202);
+      const prompt = await agent.expect("prompt");
+      expect(prompt.botId).toBe(owner.botId);
+      expect((await switchExecutor(owner, routine.id, other)).status).toBe(200);
+      expect((await owner.client.delete(`/api/bots/${other}`)).status).toBe(204);
+      expect(
+        (await allRoutines(owner.client)).find((one) => one.id === routine.id)?.runs.map((run) => run.status),
+        "删的不是这次的执行者，记录不该收成失败",
+      ).toEqual(["running"]);
+
+      runDone(agent, prompt);
+      await settled(routine.id);
+      expect((await runsOf(routine.id)).map((one) => one.status)).toEqual(["ok"]);
+    } finally {
+      agent.close();
+    }
+  });
 });
 
 /** 有没有连接正排在这个 Bot 的 advisory 锁上没拿到。两参数形式的 advisory 锁在 pg_locks 里第二个键落在 objid，按无符号存。 */
