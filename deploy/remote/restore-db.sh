@@ -71,10 +71,16 @@ if exists "$staging"; then
 fi
 if exists "$target"; then assert_idle "$target"; fi
 
+drop_staging() {
+  pg dropdb -U baize --if-exists "$staging" || true
+  echo "恢复没完成，临时库 $staging 已删，$target 没动" >&2
+}
+
 pg createdb -U baize "$staging"
+# 原库改名之前哪一步失败都删掉临时库，不然下次恢复会被「临时库已经存在」拦住。
+trap 'if [ $? != 0 ]; then drop_staging; fi' EXIT
 if ! pg pg_restore -U baize -d "$staging" --no-owner --single-transaction --exit-on-error <"$dump"; then
-  pg dropdb -U baize "$staging"
-  echo "pg_restore 失败，临时库已删，$target 没动" >&2
+  echo "pg_restore 失败" >&2
   exit 1
 fi
 
@@ -84,6 +90,8 @@ if exists "$target"; then
   query "ALTER DATABASE $target RENAME TO $before" >/dev/null
   echo "原来的 $target 改名成了 ${before}，确认恢复无误后删掉：docker compose exec postgres dropdb -U baize $before"
 fi
+# 原库已经让开，临时库就是恢复好的那一份，之后再失败也不能删它。
+trap - EXIT
 query "ALTER DATABASE $staging RENAME TO $target" >/dev/null
 
 counts=$(pg psql -U baize -d "$target" -v ON_ERROR_STOP=1 -tA -F ' ' -c "
