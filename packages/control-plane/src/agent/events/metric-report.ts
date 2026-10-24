@@ -1,4 +1,4 @@
-import { reportedMetricKey, type AgentToControl } from "@baize/shared";
+import { landReported, type AgentToControl } from "@baize/shared";
 import { log } from "../../log.js";
 import { recordSample } from "../../repo/metrics.js";
 import { findGroupId } from "../../repo/messages.js";
@@ -12,6 +12,7 @@ export type MetricReportEvent = Extract<AgentToControl, { type: "metric_report" 
 /**
  * Bot 在项目群里读到一个数报上来（D1）。群要是这台电脑主人的，run 要是这台电脑上这个 Bot 在这个群里的活，
  * 群还得是项目群（recordSample 只认多 Bot 群）；任一不成立整条静默丢弃，不然一个 run 能往别的项目里记数。
+ * 落到哪个指标按 landReported，落不到就丢。运行器发之前按任务卡判过一遍，但卡可能已经过时，这里才算数。
  * 和其他 run 名下的写一样过 whileRunOpen：收尾之后晚到的数作废，不然旧 run 的旧数会顶成当前值。
  */
 export async function handleMetricReport(
@@ -25,12 +26,18 @@ export async function handleMetricReport(
     log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", { computerId: conn.computerId, runId, groupId });
     return;
   }
-  const reported = reportedMetricKey(event.label);
   const recorded = await whileRunOpen(deps.db, { runId, botId, groupId }, (tx) =>
-    recordSample(tx, conn.ownerId, groupId, event.value, "reported", ({ keys, goal }) =>
-      keys.includes(reported) ? reported : goal,
-    ),
+    recordSample(tx, conn.ownerId, groupId, event.value, "reported", (task) => landReported(task, event.label)),
   );
+  if (recorded?.kind === "refused") {
+    log.warn("报的数落不到项目的指标上，整条丢掉", {
+      runId,
+      groupId,
+      botId,
+      label: event.label,
+      reason: recorded.reason.kind,
+    });
+  }
   if (recorded?.kind !== "recorded") return;
   const task = await findTaskByGroup(deps.db, recorded.groupId);
   if (task !== null) deps.push.push(conn.ownerId, { type: "task_updated", task });

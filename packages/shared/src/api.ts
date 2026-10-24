@@ -174,6 +174,7 @@ export const GroupResponse = z.object({ group: Group, task: TopicTask, bots: z.a
 
 // PATCH /api/tasks/:id  用户改任务卡。清单和指标都整份替换，goal 给 null 就是去掉。
 // goal.metric 必须是改完之后挂着的某个指标的键，否则 400；只改指标、摘掉了目标对的那个也一样 400。
+// goal 不带 metric 保留原来对的那个，给 null 才改对手记那条。
 export const UpdateTaskRequest = z
   .object({
     title: z.string().min(1).max(60),
@@ -182,7 +183,7 @@ export const UpdateTaskRequest = z
     checklist: z.array(ChecklistItem).max(50),
     status: TaskStatus,
     cadence: z.string().max(200),
-    goal: ProjectGoal.nullable(),
+    goal: ProjectGoal.extend({ metric: MetricKey.nullable().optional() }).nullable(),
     metricSources: MetricSources,
   })
   .partial();

@@ -102,6 +102,24 @@ test("项目挂了几个指标就列几行：读到的数、读到的时间，�
   await expect(page.getByTestId("accounts-page"), "点去连接打开账号页").toBeVisible();
 });
 
+test("390px 群页打开目标表单，「对哪个数」和输入框都收在聊天栏里", async ({ page, request }) => {
+  expect((await request.post("/api/test/project-metrics")).status()).toBe(204);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  await openProject(page);
+  await page.getByTestId("project-open-group").click();
+  await page.getByTestId("task-goal").click();
+  const form = page.getByTestId("task-goal-form");
+  await expect(form.getByTestId("task-goal-metric")).toHaveValue("github_stars:baize/order-board");
+
+  const overflow = await form.evaluate((el) => {
+    const chat = el.closest("section.chat")?.getBoundingClientRect().right ?? 0;
+    return [...el.querySelectorAll(".field")].map((field) => Math.round(field.getBoundingClientRect().right - chat));
+  });
+  expect(overflow, "目标数、单位、期限、对哪个数四格都在").toHaveLength(4);
+  expect(Math.max(...overflow), "表单里每一格的右边都不超出聊天栏").toBeLessThanOrEqual(0);
+});
+
 test("没有目标的项目头部不画进度条", async ({ page, request }) => {
   await seedProject(request);
   await login(page);

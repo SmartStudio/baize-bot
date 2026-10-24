@@ -3,6 +3,8 @@ import {
   MetricSource,
   UserId,
   metricKeyOf,
+  type MetricKey,
+  type MetricLanding,
   type MetricReading,
   type TaskMetric,
   type TopicTask,
@@ -195,29 +197,27 @@ async function insertSample(
   return row === undefined ? null : GroupId.parse(row.groupId);
 }
 
-type PickMetric = (task: {
-  readonly keys: readonly string[];
-  readonly goal: string | null;
-}) => string | null | undefined;
-
-export type RecordedSample =
+export type RecordedSample<Refusal> =
   | { readonly kind: "recorded"; readonly groupId: GroupId }
   | { readonly kind: "not_found" }
-  | { readonly kind: "unknown_metric" };
+  | { readonly kind: "refused"; readonly reason: Refusal };
 
 /**
  * 读任务卡时拿行的 share 锁，改指标的 PATCH 要等这一笔落完，
  * 不会记到一个刚摘掉的指标上。采样时间取库里的 clock_timestamp()，微秒精度，
  * 同一毫秒里先后两次记数也分得出先后；id 是随机的，只在时间完全相同时兜底。
  */
-export function recordSample(
+export function recordSample<Refusal>(
   db: Db | Tx,
   ownerId: UserId,
   groupId: GroupId,
   value: number,
   source: "manual" | "reported",
-  pick: PickMetric,
-): Promise<RecordedSample> {
+  land: (task: {
+    readonly sources: readonly MetricSource[];
+    readonly goalMetric: MetricKey | null;
+  }) => MetricLanding<Refusal>,
+): Promise<RecordedSample<Refusal>> {
   return db.transaction(async (tx) => {
     const [task] = await tx
       .select({ sources: tasks.metricSources, goal: tasks.goalMetric })
@@ -226,9 +226,9 @@ export function recordSample(
       .where(and(eq(groups.id, groupId), eq(groups.ownerId, ownerId), isNull(groups.soloBotId), groupIsLive(tx)))
       .for("share", { of: tasks });
     if (task === undefined) return { kind: "not_found" };
-    const metric = pick({ keys: task.sources.map(metricKeyOf), goal: task.goal });
-    if (metric === undefined) return { kind: "unknown_metric" };
-    const recorded = await insertSample(tx, ownerId, groupId, metric, value, source, sql`clock_timestamp()`);
+    const landing = land({ sources: task.sources, goalMetric: task.goal });
+    if (landing.kind === "refused") return landing;
+    const recorded = await insertSample(tx, ownerId, groupId, landing.metric, value, source, sql`clock_timestamp()`);
     return recorded === null ? { kind: "not_found" } : { kind: "recorded", groupId: recorded };
   });
 }
