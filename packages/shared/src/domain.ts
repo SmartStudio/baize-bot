@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_DRAFT_IMAGES } from "./draft-images.js";
 import { MAX_ROUTINE_RUNS } from "./retention.js";
 import { ToolView } from "./tool-view.js";
 
@@ -686,7 +687,7 @@ export const DraftContent = z.discriminatedUnion("kind", [
       kind: z.literal("post"),
       title: z.string().min(1).max(100).nullable(),
       text: z.string().min(1).max(10_000),
-      images: z.array(DraftImage).max(9),
+      images: z.array(DraftImage).max(MAX_DRAFT_IMAGES),
       github: GithubTarget.nullable(),
     })
     .strict(),
@@ -694,7 +695,7 @@ export const DraftContent = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("reply"),
       text: z.string().min(1).max(10_000),
-      images: z.array(DraftImage).max(9),
+      images: z.array(DraftImage).max(MAX_DRAFT_IMAGES),
       replyTo: ReplyTarget,
     })
     .strict(),

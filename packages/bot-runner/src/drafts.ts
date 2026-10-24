@@ -16,6 +16,7 @@ import {
   draftImageCountRefusal,
   draftImageRefusal,
   draftImageRules,
+  formatImageBytes,
   draftImagesRefusal,
   imageMime,
   type Platform,
@@ -101,9 +102,10 @@ const EDIT_PARAMS = Type.Object({ draftId: Type.String(), content: CONTENT });
 const PLAN_PARAMS = Type.Object({ title: Type.String(), drafts: Type.Array(DRAFT_INPUT) });
 
 const CONTENT_GUIDE =
-  "各平台的要求：X 正文不超过 280 字符，最多 4 张图，接口授权的号每张不超过 5 MB、GIF 只能单独一张；" +
+  `各平台的要求：X 正文不超过 280 字符，最多 ${draftImageRules("x", "computer").maxImages} 张图，` +
+  `接口授权的号每张不超过 ${formatImageBytes(draftImageRules("x", "api").maxBytes ?? ATTACHMENT_MAX_BYTES)}、GIF 只能单独一张；` +
   "同一个平台既有接口授权又有电脑浏览器登录的号，没说用哪个就用接口授权那个；GitHub 要写 title，github 里写 repo（owner/name）和 as（issue 或 discussion），不带图；" +
-  "小红书要写 title，最多 9 张图。images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
+  `小红书要写 title，最多 ${draftImageRules("xiaohongshu", "computer").maxImages} 张图。images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。` +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
 const MAX_IMAGE_BYTES = ATTACHMENT_MAX_BYTES;
