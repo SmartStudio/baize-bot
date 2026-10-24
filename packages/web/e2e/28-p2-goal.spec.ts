@@ -106,6 +106,7 @@ test("390px 群页打开目标表单，「对哪个数」和输入框都收在�
   expect((await request.post("/api/test/project-metrics")).status()).toBe(204);
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);
+  await page.getByTestId("nav-open").click();
   await openProject(page);
   await page.getByTestId("project-open-group").click();
   await page.getByTestId("task-goal").click();
@@ -118,6 +119,11 @@ test("390px 群页打开目标表单，「对哪个数」和输入框都收在�
   });
   expect(overflow, "目标数、单位、期限、对哪个数四格都在").toHaveLength(4);
   expect(Math.max(...overflow), "表单里每一格的右边都不超出聊天栏").toBeLessThanOrEqual(0);
+  const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+  expect(scrollWidth, "打开目标表单后整页没有横向滚动").toBeLessThanOrEqual(clientWidth);
 });
 
 test("没有目标的项目头部不画进度条", async ({ page, request }) => {
