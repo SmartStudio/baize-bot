@@ -3,6 +3,7 @@ import { ChevronRight, Pencil, X } from "lucide-react";
 import { BotHue, BotShape, type Bot, type BotId } from "@baize/shared";
 import type { BotDraft } from "../api/client.js";
 import { BotAvatar, SHAPES } from "./BotAvatar.js";
+import { useFailureToast } from "./Toasts.js";
 
 type Props = {
   bot: Bot;
@@ -116,10 +117,9 @@ const BotLookPicker = ({ bot, commit }: { bot: Bot; commit: (draft: BotDraft) =>
 // 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停，颜色和形状收在头像后面。
 // 技能不在这里配：头部「它知道的」里能看，加、改、删跟它在对话里说。
 export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: Props) => {
-  const [save, setSave] = useState<"idle" | "failed">("idle");
+  const failed = useFailureToast();
   const commit = (draft: BotDraft) => {
-    setSave("idle");
-    onChange(bot.id, draft).catch(() => setSave("failed"));
+    onChange(bot.id, draft).catch(failed("Bot 设置没存上，再试一次"));
   };
 
   return (
@@ -134,11 +134,6 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
         <X size={16} aria-hidden="true" />
       </button>
       <BotLookPicker bot={bot} commit={commit} />
-      {save === "failed" ? (
-        <p className="bot-settings-error" data-testid="bot-settings-error" role="alert">
-          没存上，再试一次
-        </p>
-      ) : null}
       <div className="row-card">
         <span>
           <b>通知</b>
