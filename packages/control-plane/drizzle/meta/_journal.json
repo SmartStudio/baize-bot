@@ -351,6 +351,13 @@
       "when": 1792833454501,
       "tag": "0049_turn_persist",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1792844063847,
+      "tag": "0050_furry_typhoid_mary",
+      "breakpoints": true
     }
   ]
 }

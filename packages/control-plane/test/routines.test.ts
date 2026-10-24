@@ -2889,7 +2889,6 @@ describe("更换执行 Bot 的锁序", () => {
   it("单聊例行触发已提交、旧执行者的 run 还没建时换人：删例行照运行记录先锁住旧执行者，run 落地不会让名单变长、逆序拿锁", async () => {
     const owner = await ownerWithBot();
     const second = await secondBot(owner);
-    // 旧执行者 id 更小：删除要是持着新执行者的锁再去拿它，就和先拿它、再拿新执行者的派活反序。
     const [low, high] = [owner.botId, second].toSorted() as [BotId, BotId];
     const routine = await routineOf(owner, low);
     const [ownerRow] = await database.sql<{ owner_id: string }[]>`SELECT owner_id FROM bots WHERE id = ${low}`;
@@ -2911,7 +2910,6 @@ describe("更换执行 Bot 的锁序", () => {
       );
       expect((await switchExecutor(owner, routine.id, high)).status).toBe(200);
 
-      // 有人短暂持着新执行者的共享锁（比如它自己的派活），删例行会在它上面等一下。
       holder = await holdBotShared(side.db, high);
       deleting = owner.client.delete(`/api/routines/${routine.id}`);
       await waitUntil(() => waitingOnBotLock(high), "删例行排到新执行者的锁上");
@@ -2945,7 +2943,6 @@ describe("更换执行 Bot 的锁序", () => {
   });
 });
 
-/** 这条例行的运行记录名下已经提交的 run 有几条。 */
 async function committedRunsOf(routineId: string): Promise<number> {
   const rows = await database.sql<{ n: number }[]>`
     SELECT count(*)::int AS n FROM runs JOIN routine_runs ON routine_runs.id = runs.routine_run_id
@@ -2953,7 +2950,6 @@ async function committedRunsOf(routineId: string): Promise<number> {
   return rows[0]?.n ?? 0;
 }
 
-/** 测试库上开一个事务拿着这个账号的排他锁不放，直到 release。 */
 async function holdOwnerExclusive(db: Db, ownerId: UserId): Promise<{ release: () => Promise<void> }> {
   let release!: () => void;
   const released = new Promise<void>((resolve) => (release = resolve));
