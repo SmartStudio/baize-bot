@@ -1,8 +1,13 @@
 import { expect, login, openBot, openSettings, stubNotifications, test, type Page } from "./fixtures";
 
-const notify = async (page: Page, kind: "confirm" | "result" | "stuck" | "failed", text: string) => {
+const notify = async (
+  page: Page,
+  kind: "confirm" | "result" | "stuck" | "failed",
+  text: string,
+  groupId: string | null = "grp_sales",
+) => {
   const posted = await page.request.post("/api/test/notify", {
-    data: { kind, text, groupId: "grp_sales", at: new Date().toISOString() },
+    data: { kind, text, groupId, at: new Date().toISOString() },
   });
   expect(posted.status()).toBe(204);
 };
@@ -75,9 +80,11 @@ test("通知开关关着时，离开页面到的通知既不弹也不记数", as
 });
 
 test("点「等你确认」类通知：回到「今天」页滚到等你确认，通知收起，标题的数清掉", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 420 });
+  await page.setViewportSize({ width: 1440, height: 240 });
   await stubNotifications(page);
   await loginWithPush(page);
+  await expect(page.getByTestId("today-page")).toBeVisible();
+  await expect(page.getByTestId("today-pending"), "窗口矮，等你确认一开始在视口外").not.toBeInViewport();
   await openBot(page, "小销");
   await expect(page).toHaveURL(/\/g\//);
 
@@ -103,10 +110,48 @@ test("点「做完了」类通知：滚到刚做完那一节", async ({ page }) 
 
   await notify(page, "result", "周报已经完成");
   await expect.poll(() => sent(page)).toHaveLength(1);
+  const before = await page.evaluate(() => history.length);
   await page.evaluate(() => window.__notifications?.click(0));
 
   await expect(page.getByTestId("today-done")).toBeInViewport();
   expect(await page.evaluate(() => window.__notifications?.closed)).toBe(1);
+  expect(await page.evaluate(() => history.length), "已经在「今天」页上，点通知不多压一条历史").toBe(before);
+});
+
+test("设置开着时点通知：设置收起，「今天」页露出来", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 420 });
+  await stubNotifications(page);
+  await loginWithPush(page);
+  await openBot(page, "小销");
+  await openSettings(page);
+
+  await notify(page, "result", "周报已经完成");
+  await expect.poll(() => sent(page)).toHaveLength(1);
+  await page.evaluate(() => window.__notifications?.click(0));
+
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByTestId("settings-window"), "设置不能还盖在「今天」上面").toHaveCount(0);
+  await expect(page.getByTestId("today-done")).toBeInViewport();
+});
+
+test("点「没办成」类通知：带群的进那个群，不带群的回「今天」页顶部", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 420 });
+  await stubNotifications(page);
+  await loginWithPush(page);
+  await expect(page.getByTestId("today-page")).toBeVisible();
+
+  await notify(page, "failed", "例行任务「周报」没做成：电脑不在线");
+  await expect.poll(() => sent(page)).toHaveLength(1);
+  await page.evaluate(() => window.__notifications?.click(0));
+  await expect(page, "例行失败在「今天」里没有对应的一行，进出事的那个群").toHaveURL(/\/g\/grp_sales$/);
+  await expect(page.getByTestId("chat-title")).toHaveText("小销");
+
+  await notify(page, "failed", "小红书账号登录过期了", null);
+  await expect.poll(() => sent(page)).toHaveLength(2);
+  await page.evaluate(() => window.__notifications?.click(1));
+  await expect(page, "不带群的回「今天」页").toHaveURL(/\/$/);
+  await expect(page.getByTestId("today-pending")).toBeVisible();
+  expect(await page.getByTestId("today-page").evaluate((el) => el.scrollTop), "停在顶部，不滚到哪一节").toBe(0);
 });
 
 test("设置里还没问过授权：点「允许通知」请求一次，允许后显示已开启", async ({ page }) => {

@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import type { Notice, Settings } from "@baize/shared";
+import { pathOf } from "../routes/screen.js";
 
 const TITLE: Record<Notice["kind"], string> = {
   confirm: "等你确认",
@@ -39,14 +40,23 @@ export const notifyNotice = (notice: Notice, settings: Settings, onClick: () => 
   showNativeNotification(TITLE[notice.kind], notice.text, onClick);
 };
 
-// 用户故事 U7：点通知打开「今天」页。要你点头的、卡住的、没办成的都落在「等你确认」，做完的在「刚做完」。
+// 用户故事 U7：点通知打开「今天」页。要你点头的落在「等你确认」，做完的在「刚做完」，卡住的没有单独一节，也落在「等你确认」。
+// 「没办成」不往节里落：例行失败的记录既不进「刚做完」（today 只列 ok 的），也不进「等你确认」。
+// 带群的进那个群看来龙去脉，不带群的只回「今天」页顶部，不滚。
 // 落到哪一节跟着这一次跳转的 location state 走，刷新、后退回来都不再滚一遍。
 export type NoticeSection = "pending" | "done";
-export type NoticeState = { noticeSection: NoticeSection };
+export type NoticeState = { fromNotice: true; noticeSection: NoticeSection | null };
 
-export const noticeState = (notice: Notice): NoticeState => ({
-  noticeSection: notice.kind === "result" ? "done" : "pending",
-});
+export const noticeTarget = (notice: Notice): { path: string; state: NoticeState } => {
+  if (notice.kind === "failed") {
+    const path = notice.groupId === null ? "/" : pathOf({ kind: "group", groupId: notice.groupId });
+    return { path, state: { fromNotice: true, noticeSection: null } };
+  }
+  return { path: "/", state: { fromNotice: true, noticeSection: notice.kind === "result" ? "done" : "pending" } };
+};
+
+export const openedFromNotice = (state: unknown): boolean =>
+  typeof state === "object" && state !== null && "fromNotice" in state && state.fromNotice === true;
 
 export const noticeSectionOf = (state: unknown): NoticeSection | null =>
   typeof state === "object" &&
