@@ -23,6 +23,7 @@ import {
   type RuntimeConfig,
 } from "./env.js";
 import { createApp } from "./http/app.js";
+import { DEFAULT_GATEWAY_LIMITS } from "./http/gateway-limits.js";
 import { acceptLiveViewer, LIVE_PATH } from "./live/accept.js";
 import { LiveRelay, type LiveRelayDeps } from "./live/relay.js";
 import { MetricPoller, type MetricPollerOptions } from "./metrics/poller.js";
@@ -106,6 +107,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   gatewayModels: { plan: DEFAULT_GATEWAY_MODEL, fast: DEFAULT_GATEWAY_MODEL },
   upstreamBaseUrl: DEFAULT_UPSTREAM_BASE_URL,
   upstreamApiKey: "",
+  gatewayLimits: DEFAULT_GATEWAY_LIMITS,
   priceInputPerM: 0,
   priceOutputPerM: 0,
   githubApiBaseUrl: DEFAULT_GITHUB_API_BASE_URL,
@@ -169,6 +171,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       models: config.gatewayModels,
       upstreamBaseUrl: config.upstreamBaseUrl,
       upstreamApiKey: config.upstreamApiKey,
+      limits: config.gatewayLimits,
     },
     platformAccounts: {
       crypto: credentialCrypto,

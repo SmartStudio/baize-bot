@@ -1,4 +1,5 @@
 import type { GatewayModels } from "@baize/shared";
+import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "./http/gateway-limits.js";
 
 const DEFAULT_DATABASE_URL = "postgres://baize:baize@localhost:5434/baize";
 const DEFAULT_PORT = 3001;
@@ -62,6 +63,7 @@ export type RuntimeConfig = {
   readonly gatewayModels: GatewayModels;
   readonly upstreamBaseUrl: string;
   readonly upstreamApiKey: string;
+  readonly gatewayLimits: GatewayLimits;
   readonly priceInputPerM: number;
   readonly priceOutputPerM: number;
   /**
@@ -99,6 +101,12 @@ export function runtimeConfig(): RuntimeConfig {
     gatewayModels,
     upstreamBaseUrl: nonEmpty("UPSTREAM_BASE_URL") ?? DEFAULT_UPSTREAM_BASE_URL,
     upstreamApiKey: upstreamApiKey(),
+    gatewayLimits: {
+      firstByteTimeoutMs: positiveInteger("GATEWAY_FIRST_BYTE_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.firstByteTimeoutMs),
+      totalTimeoutMs: positiveInteger("GATEWAY_TOTAL_TIMEOUT_MS", DEFAULT_GATEWAY_LIMITS.totalTimeoutMs),
+      requestsPerMinute: positiveInteger("GATEWAY_REQUESTS_PER_MINUTE", DEFAULT_GATEWAY_LIMITS.requestsPerMinute),
+      burst: positiveInteger("GATEWAY_BURST", DEFAULT_GATEWAY_LIMITS.burst),
+    },
     priceInputPerM: price("PRICE_INPUT_PER_M"),
     priceOutputPerM: price("PRICE_OUTPUT_PER_M"),
     githubApiBaseUrl: nonEmpty("GITHUB_API_BASE_URL") ?? DEFAULT_GITHUB_API_BASE_URL,
@@ -179,6 +187,14 @@ function upstreamApiKey(): string {
     throw new Error("UPSTREAM_API_KEY 只能包含可打印 ASCII 字符，因为它会写入 HTTP Authorization 请求头");
   }
   return value;
+}
+
+function positiveInteger(name: string, fallback: number): number {
+  const raw = nonEmpty(name);
+  if (raw === null) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${name} 不是正整数: ${raw}`);
+  return parsed;
 }
 
 function price(name: string): number {

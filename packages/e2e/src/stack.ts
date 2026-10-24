@@ -74,6 +74,7 @@ export type StackOptions = {
   readonly pokerSeed?: () => string;
   /** 换掉进程内电脑代理的助理 Chrome。不给就是真 Chrome，只在 Bot 要用浏览器时才起。 */
   readonly makeChrome?: AgentOptions["makeChrome"];
+  readonly gatewayTimeouts?: { readonly firstByteMs?: number; readonly totalMs?: number };
 };
 
 /** 拿到控制面端口后由调用方完成注册，回 `name=value` 形式的登录 cookie。 */
@@ -121,6 +122,11 @@ export type Stack = {
 };
 
 const UNREACHABLE = "http://127.0.0.1:9";
+
+function setOrDelete(name: string, value: number | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = String(value);
+}
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -158,6 +164,8 @@ export async function startStack(options: StackOptions): Promise<Stack> {
     const credentialsKey = randomBytes(32).toString("base64");
     process.env["CREDENTIALS_KEY"] = credentialsKey;
     process.env["TOOL_SECRET_KEY"] = randomBytes(32).toString("hex");
+    setOrDelete("GATEWAY_FIRST_BYTE_TIMEOUT_MS", options.gatewayTimeouts?.firstByteMs);
+    setOrDelete("GATEWAY_TOTAL_TIMEOUT_MS", options.gatewayTimeouts?.totalMs);
 
     // 端口交给系统分配，同一台机器上别的进程占着 3001 也不影响。
     const server = await startServer({

@@ -49,6 +49,7 @@ import { createDraft, editDraft, proposePlan } from "../repo/drafts.js";
 import { confirmContext } from "../repo/context-window.js";
 import { failRoutineRun, pushRoutineUpdated, routineRunOfRun, type RoutineRunRef } from "../repo/routines.js";
 import { trustedPageUrl } from "../publish/platforms.js";
+import { GATEWAY_TIMEOUT_MARK } from "../http/gateway-limits.js";
 import { publishFailed, publishSucceeded } from "../publish/settle.js";
 import {
   claimCharge,
@@ -809,14 +810,19 @@ const ERROR_REASONS: Record<AgentError["code"], string> = {
   config_rejected: CONFIG_MISMATCH,
 };
 
+const GATEWAY_TIMEOUT_TEXT = "模型上游太久没回话或者一次说得太久，网关先断开了，稍后再试。";
+
 function modelFailureStatus(detail: string): string {
   const status = /(?:^|\D)([45]\d{2})(?:\D|$)/.exec(detail)?.[1];
   return status === undefined ? "" : `，上游状态码 ${status}`;
 }
 
 function modelFailureMessage(detail: string): string {
+  if (detail.includes(GATEWAY_TIMEOUT_MARK)) return GATEWAY_TIMEOUT_TEXT;
   const status = /(?:^|\D)([45]\d{2})(?:\D|$)/.exec(detail)?.[1];
   if (status === "413") return "这次带的内容太大（超过 20 MiB）";
+  if (status === "429") return "模型请求太频繁，被限速了，稍后再试。";
+  if (status === "504") return GATEWAY_TIMEOUT_TEXT;
   return `模型没回话${modelFailureStatus(detail)}。检查控制面的上游地址、key 和模型映射（.env 里的 UPSTREAM_BASE_URL、UPSTREAM_API_KEY、GATEWAY_MODELS）。`;
 }
 
