@@ -23,6 +23,55 @@
   box-shadow: var(--shadow-lg);
 }
 
+.window.is-narrow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.window.is-narrow > .window-top {
+  grid-column: 1;
+}
+
+.window.is-narrow > .panel-scrim {
+  inset: 0;
+}
+
+.window.is-narrow > :is(.bot-panel, .task-panel, .tool-inspector) {
+  width: min(var(--panel-w), 100vw);
+}
+
+.window.is-narrow > .sidebar {
+  display: none;
+}
+
+.window.is-narrow.is-nav-open > .sidebar {
+  display: flex;
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  width: min(var(--sidebar-w), calc(100vw - var(--space-11)));
+  box-shadow: var(--shadow-lg);
+}
+
+.window.is-narrow .sidebar :is(.nav, .account-button) {
+  min-height: var(--space-10);
+}
+
+.narrow-bar {
+  display: flex;
+  align-items: center;
+  height: var(--control-h-lg);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-1);
+  background: var(--bg-sidebar);
+}
+
+.narrow-bar .icon-button {
+  width: var(--space-10);
+  height: var(--space-10);
+}
+
 .dialog {
   display: flex;
   flex-direction: column;

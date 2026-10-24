@@ -494,8 +494,14 @@
   .settings {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
-    width: calc(100vw - var(--space-6) * 2);
-    height: calc(100vh - var(--space-6) * 2);
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+  }
+
+  .settings-page-head .icon-button {
+    width: var(--space-10);
+    height: var(--space-10);
   }
 
   .settings-nav {

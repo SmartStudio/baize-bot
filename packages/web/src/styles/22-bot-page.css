@@ -52,6 +52,19 @@
   color: var(--fg-1);
 }
 
+/* 手机宽度下三个按钮和名片抢一行，描述会被挤成一字一行，按钮换到名片下面。 */
+.window.is-narrow .bot-header-main {
+  flex-wrap: wrap;
+}
+
+.window.is-narrow .bot-header-actions {
+  width: 100%;
+}
+
+.window.is-narrow .bot-header-actions .ghost-button {
+  min-height: var(--space-10);
+}
+
 .bot-know-toggle {
   display: flex;
   gap: var(--space-3);

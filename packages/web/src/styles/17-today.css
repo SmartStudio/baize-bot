@@ -419,3 +419,8 @@ button.today-assistant:hover {
   flex: none;
   color: var(--fg-4);
 }
+
+/* 手机上靠拇指点，今天页和审批卡上的按钮不矮于 40px。 */
+.window.is-narrow :is(.today-row-action, .today-template, .approval-actions button) {
+  min-height: var(--space-10);
+}

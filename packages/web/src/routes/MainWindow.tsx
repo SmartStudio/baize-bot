@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { X } from "lucide-react";
+import { Menu, X } from "lucide-react";
 import type { Bot, BotHue, BotId, BotShape, ChecklistItem, GroupId, Message, MessageId } from "@baize/shared";
 import type { Seq } from "../state/stamped.js";
 import { Sidebar } from "../components/Sidebar.js";
@@ -86,32 +86,50 @@ const writeBotPanelOpen = (open: boolean) => {
 
 const CHAT_MIN_WIDTH = 480;
 // 侧栏和右栏多宽只认 spacing.css 的 token。样式表还没生效时读到的是 NaN，那次不缓存，下次再读。
-let drawerQuery: MediaQueryList | null = null;
-const drawerMedia = () => {
-  if (drawerQuery !== null) return drawerQuery;
-  const tokens = getComputedStyle(document.documentElement);
-  const px = (token: string) => Number.parseFloat(tokens.getPropertyValue(token));
-  const breakpoint = px("--sidebar-w") + CHAT_MIN_WIDTH + px("--panel-w");
-  if (Number.isNaN(breakpoint)) return null;
-  drawerQuery = window.matchMedia(`(width < ${breakpoint}px)`);
-  return drawerQuery;
+const narrowerThanChatPlus = (tokens: readonly string[]) => {
+  let query: MediaQueryList | null = null;
+  const media = () => {
+    if (query !== null) return query;
+    const style = getComputedStyle(document.documentElement);
+    const breakpoint = tokens.reduce(
+      (sum, token) => sum + Number.parseFloat(style.getPropertyValue(token)),
+      CHAT_MIN_WIDTH,
+    );
+    if (Number.isNaN(breakpoint)) return null;
+    query = window.matchMedia(`(width < ${breakpoint}px)`);
+    return query;
+  };
+  return {
+    watch: (onChange: () => void) => {
+      const found = media();
+      found?.addEventListener("change", onChange);
+      return () => found?.removeEventListener("change", onChange);
+    },
+    now: () => media()?.matches ?? false,
+  };
 };
-const watchDrawer = (onChange: () => void) => {
-  const query = drawerMedia();
-  query?.addEventListener("change", onChange);
-  return () => query?.removeEventListener("change", onChange);
-};
-const drawerNow = () => drawerMedia()?.matches ?? false;
+const panelDrawer = narrowerThanChatPlus(["--sidebar-w", "--panel-w"]);
+const navDrawer = narrowerThanChatPlus(["--sidebar-w"]);
 
-const PanelScrim = ({ onClose, underOverlay }: { onClose: () => void; underOverlay: boolean }) => {
+const Scrim = ({
+  testId,
+  covers,
+  onClose,
+  underOverlay,
+}: {
+  testId: string;
+  covers: string;
+  onClose: () => void;
+  underOverlay: boolean;
+}) => {
   useEscapeToClose(underOverlay ? null : onClose);
-  // 被盖住的对话区 Tab 也走不进去。@types/react 18 没有 inert，只能直接写 DOM。
+  // 被盖住的部分 Tab 也走不进去。@types/react 18 没有 inert，只能直接写 DOM。
   useEffect(() => {
-    const chat = document.querySelector(".window > .chat");
-    chat?.setAttribute("inert", "");
-    return () => chat?.removeAttribute("inert");
-  }, []);
-  return <div className="panel-scrim" data-testid="panel-scrim" aria-hidden="true" onClick={onClose} />;
+    const covered = document.querySelectorAll(covers);
+    covered.forEach((element) => element.setAttribute("inert", ""));
+    return () => covered.forEach((element) => element.removeAttribute("inert"));
+  }, [covers]);
+  return <div className="panel-scrim" data-testid={testId} aria-hidden="true" onClick={onClose} />;
 };
 
 export const MainWindow = () => {
@@ -131,8 +149,14 @@ export const MainWindow = () => {
     setBotPanelOpen(open);
     writeBotPanelOpen(open);
   };
-  const drawer = useSyncExternalStore(watchDrawer, drawerNow);
+  const drawer = useSyncExternalStore(panelDrawer.watch, panelDrawer.now);
   const [botDrawerFor, setBotDrawerFor] = useState<GroupId | null>(null);
+  const narrow = useSyncExternalStore(navDrawer.watch, navDrawer.now);
+  // 记的是在哪一次跳转上拉开的侧栏：选了群、换了页，location.key 一变它自己就收起。
+  const [navOpenAt, setNavOpenAt] = useState<string | null>(null);
+  // 跨过断点就收起，拉宽到侧栏常驻再缩回来不该又盖上来。
+  useEffect(() => navDrawer.watch(() => setNavOpenAt(null)), []);
+  const navOpen = narrow && navOpenAt === location.key;
 
   const ready = state.status === "ready" ? state : null;
   // 项目页和项目群看的是同一个群：项目页要拿最近一轮，也得把这个群的历史拉回来。
@@ -264,6 +288,10 @@ export const MainWindow = () => {
     if (target !== undefined) navigate(pathOf({ kind: "project", groupId: target }));
   };
   const openTablePage = (target: GroupId) => navigate(pathOf({ kind: "table", groupId: target }));
+  const openFromNav = (next: Overlay) => {
+    setNavOpenAt(null);
+    setOverlay(next);
+  };
 
   const bots = ready.bots;
   const assistantGroupId = today.data?.assistantGroupId ?? null;
@@ -326,8 +354,25 @@ export const MainWindow = () => {
   };
 
   return (
-    <div className={`window${hasPanel ? "" : " is-wide"}${drawer ? " is-drawer" : ""}`} data-testid="main-window">
+    <div
+      className={`window${hasPanel ? "" : " is-wide"}${drawer ? " is-drawer" : ""}${narrow ? " is-narrow" : ""}${navOpen ? " is-nav-open" : ""}`}
+      data-testid="main-window"
+    >
       <div className="window-top">
+        {narrow ? (
+          <div className="narrow-bar">
+            <button
+              type="button"
+              className="icon-button"
+              data-testid="nav-open"
+              aria-label="打开侧栏"
+              aria-expanded={navOpen}
+              onClick={() => setNavOpenAt(location.key)}
+            >
+              <Menu size={20} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
         <PushBanner link={ready.pushLink} />
         {oauth !== null ? (
           <div className="oauth-notice" role="status" data-testid="oauth-notice" data-result={oauth.result}>
@@ -380,10 +425,18 @@ export const MainWindow = () => {
         countsStale={ready.loads.counts === "failed"}
         onRetryCounts={() => void actions.loadPendingCounts()}
         routinesStopped={(routinesLoaded ?? []).some((routine) => routine.state === "auto_paused")}
-        onNewProject={() => setOverlay("new-project")}
-        onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
-        onOpenSettings={() => setOverlay("settings")}
+        onNewProject={() => openFromNav("new-project")}
+        onOpenAccount={() => openFromNav(overlay === "account" ? "none" : "account")}
+        onOpenSettings={() => openFromNav("settings")}
       />
+      {navOpen ? (
+        <Scrim
+          testId="nav-scrim"
+          covers=".window > :not(.sidebar, .panel-scrim)"
+          onClose={() => setNavOpenAt(null)}
+          underOverlay={overlay !== "none"}
+        />
+      ) : null}
       <ErrorBoundary resetKey={location.pathname} testId="page-crash">
         {conversation !== null ? (
           <ChatPanel
@@ -507,7 +560,14 @@ export const MainWindow = () => {
           />
         )}
       </ErrorBoundary>
-      {drawer && hasPanel ? <PanelScrim onClose={closePanel} underOverlay={overlay !== "none"} /> : null}
+      {drawer && hasPanel ? (
+        <Scrim
+          testId="panel-scrim"
+          covers=".window > :is(.window-top, .chat)"
+          onClose={closePanel}
+          underOverlay={overlay !== "none"}
+        />
+      ) : null}
       {inspected !== null ? (
         <ToolInspector
           tool={inspected}
