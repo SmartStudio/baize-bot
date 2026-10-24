@@ -2,6 +2,8 @@
 
 控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库 docs/开发.md 的「控制面」一节。
 
+postgres.js 3.4.9 带一个补丁 `patches/postgres@3.4.9.patch`。上游的 `closed()` 断开时不清在途查询和收到的错误，带着在途查询被掐的连接，如果库在握手阶段拒连（`ALLOW_CONNECTIONS false`、连接数打满、重启恢复中），新查询会一直挂着并以 0 延迟空转重连；库恢复后还会收到旧错误。`test/db-reconnect.test.ts` 钉着这个场景（#100）。上游修了之后升级时去掉补丁。
+
 ## 电脑配对
 
 一个用户本机和远程各至多一台。`POST /api/computers/local` 无请求体或空对象时按 `confirmDisplace: false` 处理；本机从未握手过就直接返回 `ComputerTokenResponse`。本机的 `lastSeenAt` 非空或此刻在线时，未确认回 409 和 `PairLocalConflictResponse`：`error` 是「这个账号已经在另一台 Mac 上用过，继续会让那台退出」，`computer` 是已有电脑的公开对象。409 不重置 token，也不关闭旧连接；已休眠的电脑同样需要确认。

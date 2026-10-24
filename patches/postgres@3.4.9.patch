@@ -1,0 +1,57 @@
+diff --git a/cf/src/connection.js b/cf/src/connection.js
+index 8e79170aeb13efe8c3c77ccede0cd3a115b5e1b5..615d224a9141872eda83701f87f39cbb13efe6d8 100644
+--- a/cf/src/connection.js
++++ b/cf/src/connection.js
+@@ -449,10 +449,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
++    if (initial) {
++      query = errorResponse = null
+       return reconnect()
++    }
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    query = errorResponse = null
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+diff --git a/cjs/src/connection.js b/cjs/src/connection.js
+index 07f6716702ac888215c86ad6e0071aaf55ae519c..b9f8fe4774c1da66495ead319e550211e29ef1f0 100644
+--- a/cjs/src/connection.js
++++ b/cjs/src/connection.js
+@@ -447,10 +447,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
++    if (initial) {
++      query = errorResponse = null
+       return reconnect()
++    }
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    query = errorResponse = null
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000
+diff --git a/src/connection.js b/src/connection.js
+index 1b1cccde43b4570d5d071d6ffaab2669b3c2065a..19e42fb78bb83e3791ccf19f1665ce2c8744e60b 100644
+--- a/src/connection.js
++++ b/src/connection.js
+@@ -447,10 +447,13 @@ function Connection(options, queues = {}, { onopen = noop, onend = noop, onclose
+     socket.removeAllListeners()
+     socket = null
+ 
+-    if (initial)
++    if (initial) {
++      query = errorResponse = null
+       return reconnect()
++    }
+ 
+     !hadError && (query || sent.length) && error(Errors.connection('CONNECTION_CLOSED', options, socket))
++    query = errorResponse = null
+     closedTime = performance.now()
+     hadError && options.shared.retries++
+     delay = (typeof backoff === 'function' ? backoff(options.shared.retries) : backoff) * 1000

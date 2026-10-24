@@ -20,5 +20,10 @@
   },
   "engines": {
     "node": ">=22.19.0"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "postgres@3.4.9": "patches/postgres@3.4.9.patch"
+    }
   }
 }
