@@ -72,8 +72,9 @@
   }
 }
 
-/* 断线提示可能一直挂着，占住内容区顶上一行，不浮在聊天头的按钮上。定高不换行，浮动提示才知道该让多少。 */
-.push-status {
+.window-top {
+  display: flex;
+  flex-direction: column;
   grid-column: 2 / -1;
   grid-row: 1;
 }
@@ -103,6 +104,25 @@
   color: var(--warning);
 }
 
-.window:has(.push-banner) > .oauth-notice {
-  top: calc(var(--control-h-md) + var(--space-6));
+.oauth-notice {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-h-md);
+  padding: var(--space-1) var(--space-6);
+  border-bottom: 1px solid var(--border-1);
+  background: var(--info-soft);
+  color: var(--fg-1);
+  font: var(--type-ui);
+}
+
+.oauth-notice[data-result="connected"] {
+  background: var(--success-soft);
+}
+
+.oauth-notice[data-result="denied"],
+.oauth-notice[data-result="invalid_state"],
+.oauth-notice[data-result="failed"] {
+  background: var(--danger-soft);
 }

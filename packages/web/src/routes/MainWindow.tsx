@@ -234,7 +234,48 @@ export const MainWindow = () => {
 
   return (
     <div className={`window${hasPanel ? "" : " is-wide"}`} data-testid="main-window">
-      <PushBanner link={ready.pushLink} />
+      <div className="window-top">
+        <PushBanner link={ready.pushLink} />
+        {oauth !== null ? (
+          <div className="oauth-notice" role="status" data-testid="oauth-notice" data-result={oauth.result}>
+            <span>{oauthNoticeText(oauth)}</span>
+            {oauth.result === "connected" ? (
+              <button
+                type="button"
+                className="link-button"
+                data-testid="oauth-notice-accounts"
+                onClick={() => {
+                  setOauth(null);
+                  setOverlay("accounts");
+                }}
+              >
+                看账号
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="关掉提示"
+              data-testid="oauth-notice-close"
+              onClick={() => setOauth(null)}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
+        {created !== null ? (
+          <BotCreatedNotice
+            key={`created-${created.id}`}
+            bot={created}
+            onUndo={async () => {
+              navigate(pathOf({ kind: "team" }));
+              await actions.deleteBot(created.id);
+              setCreated(null);
+            }}
+            onClose={closeCreated}
+          />
+        ) : null}
+      </div>
       <Sidebar
         screen={screen}
         conversations={ready.conversations}
@@ -356,45 +397,6 @@ export const MainWindow = () => {
           onPause={actions.pauseBot}
           onResume={actions.resumeBot}
           onClose={() => changeBotPanel(false)}
-        />
-      ) : null}
-      {oauth !== null ? (
-        <div className="oauth-notice" role="status" data-testid="oauth-notice" data-result={oauth.result}>
-          <span>{oauthNoticeText(oauth)}</span>
-          {oauth.result === "connected" ? (
-            <button
-              type="button"
-              className="link-button"
-              data-testid="oauth-notice-accounts"
-              onClick={() => {
-                setOauth(null);
-                setOverlay("accounts");
-              }}
-            >
-              看账号
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="关掉提示"
-            data-testid="oauth-notice-close"
-            onClick={() => setOauth(null)}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
-        </div>
-      ) : null}
-      {created !== null ? (
-        <BotCreatedNotice
-          key={`created-${created.id}`}
-          bot={created}
-          onUndo={async () => {
-            navigate(pathOf({ kind: "team" }));
-            await actions.deleteBot(created.id);
-            setCreated(null);
-          }}
-          onClose={closeCreated}
         />
       ) : null}
       {inspected === null && team !== null && taskOpen ? (
