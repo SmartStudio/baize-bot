@@ -84,7 +84,7 @@ export type RunTrace = { tool: string[]; activity: boolean[]; streaming: boolean
 declare global {
   interface Window {
     __runTrace?: RunTrace;
-    __notifications?: { sent: string[]; asked: number };
+    __notifications?: { sent: string[]; asked: number; closed: number; click: (index: number) => void };
   }
 }
 
@@ -174,23 +174,45 @@ export const sendForApproval = async (page: Page, name: string) => {
 };
 
 // 测试浏览器里 Notification.permission 是 default，真代码会安静跳过，什么都断言不到。换成一个记账的桩，
-// 既数得出弹了几条，也数得出权限弹窗被请求过几次——一次都不该有。
-export const stubNotifications = (page: Page) =>
-  page.addInitScript(() => {
-    const log = { sent: [] as string[], asked: 0 };
-    window.__notifications = log;
-    class Stub {
-      static permission = "granted";
-      static requestPermission() {
-        log.asked += 1;
-        return Promise.resolve("granted");
+// 既数得出弹了几条，也数得出权限弹窗被请求过几次——除了用户在设置里点「允许通知」，一次都不该有。
+// permission 是一开始的授权状态，answer 是权限弹窗里用户选的；click 模拟用户点第几条通知。
+export const stubNotifications = (
+  page: Page,
+  {
+    permission = "granted",
+    answer = "granted",
+  }: { permission?: NotificationPermission; answer?: NotificationPermission } = {},
+) =>
+  page.addInitScript(
+    ([initial, reply]) => {
+      const shown: { onclick: (() => void) | null }[] = [];
+      const log = {
+        sent: [] as string[],
+        asked: 0,
+        closed: 0,
+        click: (index: number) => shown[index]?.onclick?.(),
+      };
+      window.__notifications = log;
+      class Stub {
+        static permission = initial;
+        static requestPermission() {
+          log.asked += 1;
+          Stub.permission = reply;
+          return Promise.resolve(reply);
+        }
+        onclick: (() => void) | null = null;
+        constructor(title: string, options?: { body?: string }) {
+          log.sent.push(`${title} · ${options?.body ?? ""}`);
+          shown.push(this);
+        }
+        close() {
+          log.closed += 1;
+        }
       }
-      constructor(title: string, options?: { body?: string }) {
-        log.sent.push(`${title} · ${options?.body ?? ""}`);
-      }
-    }
-    Object.defineProperty(window, "Notification", { value: Stub, configurable: true, writable: true });
-  });
+      Object.defineProperty(window, "Notification", { value: Stub, configurable: true, writable: true });
+    },
+    [permission, answer] as const,
+  );
 
 // 免打扰按浏览器当下的钟算，测试没法挑时辰，所以区间用「现在」推算出来。两段区间都特意让「同一天」和
 // 「跨午夜」两种读法在当下这一刻结论相反：判错的那版会把该弹的压掉、把该压的弹出来。

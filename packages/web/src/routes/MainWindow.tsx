@@ -27,6 +27,7 @@ import { pokerTableOf } from "../state/poker.js";
 import { MY_ROUTINES } from "../state/routines.js";
 import { MESSAGE_GAP_ATTEMPTS } from "../state/types.js";
 import { useToday } from "../state/today.js";
+import { useUnreadTitle } from "../state/notify.js";
 import { useProject } from "../state/project.js";
 import type { InspectedTool } from "../components/messages/MessageView.js";
 import { oauthNoticeText, oauthReturnOf, type OAuthReturn } from "./oauth.js";
@@ -115,6 +116,8 @@ export const MainWindow = () => {
     if (groupId !== null && twoComputers)
       void actions.loadComputerChoices(groupId, reconnectedAt).catch(() => undefined);
   }, [groupId, reconnectedAt, twoComputers, actions]);
+
+  useUnreadTitle(ready?.unreadNotices ?? 0, actions.markNoticesRead);
 
   // 打开群页或项目页算看过（D3），首页扫到不算。项目页进同一个项目群还是这个群，不再记一次。
   useEffect(() => {

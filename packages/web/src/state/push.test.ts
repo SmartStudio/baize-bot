@@ -24,6 +24,7 @@ const sentFor = (handlerSession: SessionId, stateSession: SessionId, live: boole
   vi.stubGlobal("Notification", notification);
   vi.stubGlobal("window", { location: { pathname: "/" } });
   vi.stubGlobal("navigator", { userAgent: "Mozilla/5.0" });
+  vi.stubGlobal("document", { visibilityState: "visible", hasFocus: () => true });
   const state = { status: "ready", session: stateSession, settings } as unknown as AppState;
   const handlers = createPushHandlers({
     session: handlerSession,
@@ -33,6 +34,7 @@ const sentFor = (handlerSession: SessionId, stateSession: SessionId, live: boole
     refreshPendingCounts: () => undefined,
     recoverLogins: () => undefined,
     reloadChoices: () => undefined,
+    openNotice: () => undefined,
   });
   dispatchServerPush(handlers, { type: "notify", notice }, 1 as Seq);
   return notification.mock.calls.length;
@@ -81,6 +83,7 @@ describe("建队卡落地要让首页和项目页的等你重拉", () => {
       refreshPendingCounts: () => undefined,
       recoverLogins: () => undefined,
       reloadChoices: () => undefined,
+      openNotice: () => undefined,
     });
     dispatchServerPush(handlers, { type: "message", message }, 1 as Seq);
     return actions.map((action) => action.type);
@@ -126,6 +129,7 @@ describe("群头的电脑选择跟着推送重拉", () => {
       refreshPendingCounts: () => undefined,
       recoverLogins: () => undefined,
       reloadChoices: (groupId, after) => reloads.push([groupId, after]),
+      openNotice: () => undefined,
     });
     return {
       push: (push: ServerPush, seq: number) => dispatchServerPush(handlers, push, seq as Seq),
