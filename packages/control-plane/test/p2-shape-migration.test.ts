@@ -43,7 +43,9 @@ it("空库从头跑通：Bot 只有 tags 列，例行只有 state 三列，第 2
     ).toEqual(["bots.tags", "routines.boundary", "routines.on_today", "routines.state"]);
     expect(columns.has("routine_runs.seen_at")).toBe(true);
     expect(
-      ["goal_target", "goal_unit", "goal_due_at", "metric_source"].every((column) => columns.has(`tasks.${column}`)),
+      ["goal_target", "goal_unit", "goal_due_at", "goal_metric", "metric_sources"].every((column) =>
+        columns.has(`tasks.${column}`),
+      ),
     ).toBe(true);
     const tables = await database.sql<{ table_name: string }[]>`
       SELECT table_name FROM information_schema.tables

@@ -32,7 +32,7 @@ import { findAssistant } from "./bots.js";
 import { hasMembers } from "./groups.js";
 import { groupIsLive } from "./live-groups.js";
 import { messageVisibleTo } from "./messages.js";
-import { metricsOf } from "./metrics.js";
+import { goalMetricOf, metricsOf } from "./metrics.js";
 import { listPendingRoutineOffers } from "./routine-offers.js";
 import { toAccount, toDraft, toMessage, toPlan, toTask } from "./rows.js";
 
@@ -249,7 +249,7 @@ export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = ne
             title: goalTask.task.title,
             ...counts,
             goal: goalTask.task.goal,
-            metric: metrics.get(groupId) ?? null,
+            metric: goalMetricOf(goalTask.task, metrics.get(groupId)),
           },
         };
       }

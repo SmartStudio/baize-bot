@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChecklistItem, GroupId, ProjectGoal, ProjectResponse, TaskMetric } from "@baize/shared";
+import type { ChecklistItem, GroupId, MetricSource, ProjectGoal, ProjectResponse, TaskMetric } from "@baize/shared";
 import { useApp } from "./app.js";
 
 type ProjectLoad =
@@ -73,7 +73,6 @@ export const useProject = (groupId: GroupId, checklist: readonly ChecklistItem[]
 
 export type Project = ReturnType<typeof useProject>;
 
-// 有目标就按「当前值 / 目标」画进度，一个项目只有一个主指标（D2）。还没有样本当前值算 0，本周变化是 null。
 export type GoalProgress = {
   readonly current: number;
   readonly target: number;
@@ -90,10 +89,24 @@ const weekStartOf = (now: Date): number => {
 };
 
 // 会话里的卡可能是上周推来的，跨过周界又没有新样本，服务端此刻算的本周变化就是 0。
+export const weekDeltaOf = (metric: TaskMetric, now: Date): number =>
+  Date.parse(metric.sampledAt) < weekStartOf(now) ? 0 : metric.weekDelta;
+
 export const goalProgressOf = (goal: ProjectGoal | null, metric: TaskMetric | null, now: Date): GoalProgress | null => {
   if (goal === null) return null;
-  const weekDelta = metric === null ? null : Date.parse(metric.sampledAt) < weekStartOf(now) ? 0 : metric.weekDelta;
+  const weekDelta = metric === null ? null : weekDeltaOf(metric, now);
   return { current: metric?.current ?? 0, target: goal.target, unit: goal.unit, weekDelta };
+};
+
+export const metricNameOf = (source: MetricSource): string => {
+  switch (source.kind) {
+    case "github_stars":
+      return `GitHub 星数 · ${source.repo}`;
+    case "x_followers":
+      return "X 粉丝数";
+    case "reported":
+      return source.label;
+  }
 };
 
 // 样本可以是小数，减出来的变化会带浮点尾巴；目标数常到四位，不加千分位，和原型的「412 / 1000」一致。

@@ -1,4 +1,13 @@
-import { BotId, CreateGroupRequest, DecideApprovalRequest, SendMessageRequest, UpdateTaskRequest } from "@baize/shared";
+import { z } from "zod";
+import {
+  BotId,
+  CreateGroupRequest,
+  DecideApprovalRequest,
+  metricKeyOf,
+  SendMessageRequest,
+  UpdateTaskRequest,
+  type TopicTask,
+} from "@baize/shared";
 import {
   appendMessage,
   approvals,
@@ -12,7 +21,7 @@ import {
   learnFrom,
   lastMessageOf,
   mentionsIn,
-  metricOf,
+  withMetrics,
   messageFetchFaults,
   messagesByGroupId,
   pendingApprovalsOf,
@@ -39,13 +48,20 @@ const DECISION_WORDS = new Map<string, ApprovalDecision>([
   ["不行", "rejected"],
 ]);
 
+const goalMetricAttached = (task: TopicTask, patch: z.infer<typeof UpdateTaskRequest>): boolean => {
+  const metric = (patch.goal === undefined ? task.goal : patch.goal)?.metric ?? null;
+  return (
+    metric === null || (patch.metricSources ?? task.metricSources).some((source) => metricKeyOf(source) === metric)
+  );
+};
+
 const groupListItems = () =>
   [...groups.values()].filter(isTeamGroup).map((group) => {
     const task = tasks.get(group.taskId);
     if (task === undefined) throw new Error(`群 ${group.id} 没有主题任务，mock 状态坏了`);
     return {
       group,
-      task: { ...task, metric: metricOf(group.id, new Date()) },
+      task: withMetrics(task, new Date()),
       lastMessage: lastMessageOf(group.id),
       pendingApprovals: pendingApprovalsOf(group.id),
       pendingHandoffs: pendingHandoffsOf(group.id),
@@ -73,9 +89,12 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
     const rawTaskId = taskMatch[1];
     const taskId = rawTaskId === undefined ? "" : decodeURIComponent(rawTaskId);
     const parsed = UpdateTaskRequest.safeParse(await readBody(req));
-    if (!tasks.has(taskId)) send(res, 404, { error: "没有这个任务" });
+    const current = tasks.get(taskId);
+    if (current === undefined) send(res, 404, { error: "没有这个任务" });
     else if (!parsed.success) send(res, 400, { error: "任务字段不对" });
-    else {
+    else if (!goalMetricAttached(current, parsed.data)) {
+      send(res, 400, { error: "目标对的指标不在这个项目的指标里" });
+    } else {
       const next = writeTask(taskId, defined(parsed.data));
       if (next === null) send(res, 404, { error: "没有这个任务" });
       else {

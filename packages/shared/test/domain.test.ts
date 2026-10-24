@@ -17,6 +17,7 @@ import {
   Handoff,
   Message,
   MessageBody,
+  MetricSources,
   ProjectGoal,
   ProjectOfferPlatform,
   RoutineRun,
@@ -76,8 +77,9 @@ describe("domain schemas reject illegal states", () => {
       cadence: "",
       status: "active",
       goal: null,
-      metricSource: null,
+      metricSources: [],
       metric: null,
+      metrics: [],
     };
     expect(TopicTask.safeParse({ ...task, number: "T-2481" }).success).toBe(true);
     expect(TopicTask.safeParse({ ...task, number: "2481" }).success).toBe(false);
@@ -195,6 +197,17 @@ describe("domain schemas reject illegal states", () => {
     const event = { type: "project_offer", runId: "run-1", groupId: "g-solo", ...fields };
     expect(AgentToControl.safeParse(event).success).toBe(true);
     expect(AgentToControl.safeParse({ ...event, goalTarget: limit + 1 }).success).toBe(false);
+  });
+
+  it("一个项目最多挂 8 个指标，同一个指标不能挂两次，旧的目标不带 metric 读成 null", () => {
+    const stars = { kind: "github_stars", accountId: "a1", repo: "acme/web" };
+    const followers = { kind: "x_followers", accountId: "a2" };
+    expect(MetricSources.safeParse([stars, followers]).success).toBe(true);
+    const twice = MetricSources.safeParse([stars, followers, { ...stars }]);
+    expect(twice.success ? [] : twice.error.issues.map((issue) => issue.message)).toEqual(["同一个指标挂了两次"]);
+    const many = Array.from({ length: 9 }, (_, i) => ({ kind: "reported", platform: "xiaohongshu", label: `赞${i}` }));
+    expect(MetricSources.safeParse(many).success).toBe(false);
+    expect(ProjectGoal.parse({ target: 10, unit: "星", dueAt: null }).metric).toBeNull();
   });
 
   it("建队卡最多请 5 个人：项目群上限 6 个 Bot，主助理自己占一个；卡正文和上行报文同一条线", () => {

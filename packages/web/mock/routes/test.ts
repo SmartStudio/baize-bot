@@ -41,6 +41,7 @@ import {
   restoreAssistant,
   resetToday,
   seedProjectGoal,
+  seedProjectMetrics,
   seedProjectPage,
   reviseDraft,
   seedUnseenHandoff,
@@ -201,6 +202,16 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
 
   if (method === "POST" && path === "/api/test/project-goal") {
     const task = seedProjectGoal();
+    if (task === null) send(res, 404, { error: "没有订单群" });
+    else {
+      push({ type: "task_updated", task });
+      send(res, 204);
+    }
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/project-metrics") {
+    const task = seedProjectMetrics();
     if (task === null) send(res, 404, { error: "没有订单群" });
     else {
       push({ type: "task_updated", task });

@@ -256,8 +256,9 @@ export const restoreAssistant = () => {
     handled: [],
     status: "active",
     goal: null,
-    metricSource: null,
+    metricSources: [],
     metric: null,
+    metrics: [],
   });
   const greeting = Message.parse({
     id: `msg_${nextSuffix()}`,
@@ -374,8 +375,9 @@ export const reseed = (): void => {
       status: "active",
       cadence: "",
       goal: null,
-      metricSource: null,
+      metricSources: [],
       metric: null,
+      metrics: [],
     }),
   );
   // 群里先只有一条系统消息。谁开口都是被 @ 出来的，用例才数得清「只有被 @ 的那个回了」。

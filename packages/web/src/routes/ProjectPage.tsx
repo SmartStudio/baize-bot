@@ -24,7 +24,16 @@ import { byCreatedAt } from "../state/order.js";
 import { setDraft, useComposerDraft } from "../state/composer-drafts.js";
 import { ComposerTextarea } from "../components/ComposerTextarea.js";
 import { dueTextOf } from "../components/TaskCard.js";
-import { goalBarValue, goalProgressOf, goalText, numberText, weekDeltaText, type Project } from "../state/project.js";
+import {
+  goalBarValue,
+  goalProgressOf,
+  goalText,
+  metricNameOf,
+  numberText,
+  weekDeltaOf,
+  weekDeltaText,
+  type Project,
+} from "../state/project.js";
 import { TodayPending, type Cards, type PendingProps } from "./TodayPage.js";
 
 type Team = Extract<Conversation, { kind: "team" }>;
@@ -132,6 +141,7 @@ type Props = {
   onDecide: PendingProps["onDecide"];
   onOpenGroup: (groupId: GroupId) => void;
   onArchive: (groupId: GroupId) => Promise<unknown>;
+  onOpenAccounts: () => void;
 };
 
 export const ProjectPage = ({
@@ -145,6 +155,7 @@ export const ProjectPage = ({
   onDecide,
   onOpenGroup,
   onArchive,
+  onOpenAccounts,
 }: Props) => {
   const { status, data, error, refresh } = project;
   const task = conversation.task;
@@ -177,7 +188,8 @@ export const ProjectPage = ({
   }
 
   const done = task.checklist.filter((item) => item.done).length;
-  const goal = goalProgressOf(task.goal, task.metric, new Date());
+  const now = new Date();
+  const goal = goalProgressOf(task.goal, task.metric, now);
   const goalWeek = goal === null ? null : weekDeltaText(goal.weekDelta);
   const { turn, older } = latestTurnOf(data.latestTurn, data.olderTurns, messages);
   const working = data.working[0];
@@ -237,6 +249,44 @@ export const ProjectPage = ({
                 </span>
               ))}
             </div>
+            {task.metricSources.length === 0 ? null : (
+              <ul className="project-metrics" data-testid="project-metrics">
+                {task.metricSources.map((source, index) => {
+                  const reading = task.metrics[index];
+                  const metric = reading?.metric ?? null;
+                  const week = metric === null ? null : weekDeltaText(weekDeltaOf(metric, now));
+                  return (
+                    <li key={reading?.key ?? index} data-testid="project-metric">
+                      <span className="project-metric-name">
+                        {metricNameOf(source)}
+                        {reading !== undefined && reading.key === task.goal?.metric ? (
+                          <span className="project-metric-goal">目标</span>
+                        ) : null}
+                      </span>
+                      {metric === null ? (
+                        <span>还没读到</span>
+                      ) : (
+                        <>
+                          <b>{numberText(metric.current)}</b>
+                          {week === null ? null : <span className="project-up">{week}</span>}
+                          <span>读于 {dueTextOf(metric.sampledAt)}</span>
+                        </>
+                      )}
+                      {reading?.account === "disconnected" ? (
+                        <button
+                          type="button"
+                          className="link-button"
+                          data-testid="project-metric-connect"
+                          onClick={onOpenAccounts}
+                        >
+                          账号没连上，去连接
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
           </div>
           <button
             type="button"

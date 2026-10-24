@@ -1,4 +1,4 @@
-import type { AgentToControl } from "@baize/shared";
+import { reportedMetricKey, type AgentToControl } from "@baize/shared";
 import { log } from "../../log.js";
 import { recordSample } from "../../repo/metrics.js";
 import { findGroupId } from "../../repo/messages.js";
@@ -25,10 +25,13 @@ export async function handleMetricReport(
     log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", { computerId: conn.computerId, runId, groupId });
     return;
   }
+  const reported = reportedMetricKey(event.label);
   const recorded = await whileRunOpen(deps.db, { runId, botId, groupId }, (tx) =>
-    recordSample(tx, conn.ownerId, groupId, event.value, "reported"),
+    recordSample(tx, conn.ownerId, groupId, event.value, "reported", ({ keys, goal }) =>
+      keys.includes(reported) ? reported : goal,
+    ),
   );
-  if (recorded === null) return;
-  const task = await findTaskByGroup(deps.db, recorded);
+  if (recorded?.kind !== "recorded") return;
+  const task = await findTaskByGroup(deps.db, recorded.groupId);
   if (task !== null) deps.push.push(conn.ownerId, { type: "task_updated", task });
 }

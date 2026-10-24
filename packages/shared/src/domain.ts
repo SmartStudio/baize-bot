@@ -168,13 +168,22 @@ export const TaskStatus = z.enum(["active", "done"]);
 
 // 目标数落在 tasks.goal_target 这列 integer 上，超过上限不能让落库入口 500，在边界就拒掉。
 export const GoalTarget = z.number().int().positive().max(2147483647, "目标数最多 2147483647");
-// 一个项目只有一个主指标（D2）：目标是「到 dueAt 之前做到 target 个 unit」，进度条按它画；没有目标就退回清单进度。
+
+export const MetricKey = z.string().min(1).max(200);
+export type MetricKey = z.infer<typeof MetricKey>;
+
+// 一个项目只有一个目标（D2）：「到 dueAt 之前做到 target 个 unit」，进度条按它画；没有目标就退回清单进度。
+// 项目可以挂好几个指标，metric 是目标对的那一个的键；null 对的是手记的那条数，它不挂在任何来源上。
 export const ProjectGoal = z
-  .object({ target: GoalTarget, unit: z.string().min(1).max(8), dueAt: Timestamp.nullable() })
+  .object({
+    target: GoalTarget,
+    unit: z.string().min(1).max(8),
+    dueAt: Timestamp.nullable(),
+    metric: MetricKey.nullable().default(null),
+  })
   .strict();
 export type ProjectGoal = z.infer<typeof ProjectGoal>;
 
-// 指标从哪来：GitHub 星数由控制面每 6 小时直读；只能走浏览器的平台由 Bot 在例行里读完调 report_metric 报上来（D1）。
 export const MetricSource = z.discriminatedUnion("kind", [
   z
     .object({
@@ -183,15 +192,44 @@ export const MetricSource = z.discriminatedUnion("kind", [
       repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     })
     .strict(),
+  z.object({ kind: z.literal("x_followers"), accountId: AccountId }).strict(),
   z.object({ kind: z.literal("reported"), platform: Platform, label: z.string().min(1).max(40) }).strict(),
 ]);
 export type MetricSource = z.infer<typeof MetricSource>;
+
+export const reportedMetricKey = (label: string): MetricKey => `reported:${label}`;
+
+export const metricKeyOf = (source: MetricSource): MetricKey => {
+  switch (source.kind) {
+    case "github_stars":
+      return `github_stars:${source.repo}`;
+    case "x_followers":
+      return `x_followers:${source.accountId}`;
+    case "reported":
+      return reportedMetricKey(source.label);
+  }
+};
+
+export const MAX_METRIC_SOURCES = 8;
+export const MetricSources = z
+  .array(MetricSource)
+  .max(MAX_METRIC_SOURCES, `一个项目最多挂 ${MAX_METRIC_SOURCES} 个指标`)
+  .refine((sources) => new Set(sources.map(metricKeyOf)).size === sources.length, "同一个指标挂了两次");
 
 // 最新一个样本和本周变化。weekDelta 是周一 00:00 上海时区之后的最新样本减之前的最后一个样本（D18）。
 export const TaskMetric = z
   .object({ current: z.number().finite(), weekDelta: z.number().finite(), sampledAt: Timestamp })
   .strict();
 export type TaskMetric = z.infer<typeof TaskMetric>;
+
+export const MetricReading = z
+  .object({
+    key: MetricKey,
+    metric: TaskMetric.nullable(),
+    account: z.enum(["connected", "disconnected"]).nullable(),
+  })
+  .strict();
+export type MetricReading = z.infer<typeof MetricReading>;
 
 export const TopicTask = z.object({
   id: TaskId,
@@ -206,9 +244,11 @@ export const TopicTask = z.object({
   handled: z.array(HandledRecord),
   status: TaskStatus,
   goal: ProjectGoal.nullable(),
-  metricSource: MetricSource.nullable(),
-  // 没有样本就是 null，哪怕 metricSource 已经设了。
+  metricSources: MetricSources,
+  // 目标对的那条数的读数。没有样本就是 null，哪怕指标已经挂上了。
   metric: TaskMetric.nullable(),
+  // 和 metricSources 一一对应、同序。
+  metrics: z.array(MetricReading),
 });
 export type TopicTask = z.infer<typeof TopicTask>;
 

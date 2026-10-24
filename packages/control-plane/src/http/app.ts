@@ -1126,6 +1126,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (!body.ok) return c.json({ error: body.error }, 400);
     const updated = await updateTask(db, c.get("user").id, taskId.data, body.value);
     if (updated === null) return c.json(NOT_FOUND, 404);
+    if (updated.kind === "goal_metric_missing") return c.json({ error: "目标对的指标不在这个项目的指标里" }, 400);
     hub.push(c.get("user").id, { type: "task_updated", task: updated.task });
     await pushRoutines(c.get("user").id, updated.pausedRoutineIds);
     return c.json(UpdateTaskResponse.parse({ task: updated.task }));

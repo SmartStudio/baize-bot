@@ -1,16 +1,21 @@
 import {
+  Account,
+  metricKeyOf,
   ProjectResponse,
   ProjectReviewId,
   type Group,
   type GroupId,
   type Message,
   type ProjectAchievement,
+  type MetricReading,
+  type MetricSource,
   type TaskMetric,
   type TopicTask,
 } from "@baize/shared";
 import { writeTask } from "./groups.js";
 import { pendingOf } from "./today.js";
 import {
+  accounts,
   bots,
   checkedAt,
   currentGeneration,
@@ -21,6 +26,8 @@ import {
   plans,
   publications,
   routines,
+  tasks,
+  user,
 } from "./store.js";
 
 type Review = Extract<ProjectAchievement, { kind: "review" }>;
@@ -44,9 +51,11 @@ export const weekStartOf = (now: Date): Date => {
   return new Date(day - sinceMonday * 86_400_000 - SHANGHAI_OFFSET_MS);
 };
 
+const seriesOf = (groupId: string, metric: string | null) => `${groupId}\n${metric ?? ""}`;
+
 // 和控制面 metrics.ts#metricsOf 同一套口径：最新值减周一之前最后一个；周一之前没有就减本周第一个；最新的本身在周一之前就记 0。
-export const metricOf = (groupId: string, now: Date): TaskMetric | null => {
-  const samples = goalStateNow().samples.get(groupId) ?? [];
+export const metricOf = (groupId: string, now: Date, metric: string | null): TaskMetric | null => {
+  const samples = goalStateNow().samples.get(seriesOf(groupId, metric)) ?? [];
   const latest = samples.at(-1);
   if (latest === undefined) return null;
   const start = weekStartOf(now).getTime();
@@ -61,20 +70,49 @@ export const metricOf = (groupId: string, now: Date): TaskMetric | null => {
   };
 };
 
+const accountOf = (source: MetricSource): MetricReading["account"] => {
+  if (source.kind === "reported") return null;
+  const account = accounts.get(source.accountId);
+  const platform = source.kind === "github_stars" ? "github" : "x";
+  return account?.via === "api" && account.login === "valid" && account.platform === platform
+    ? "connected"
+    : "disconnected";
+};
+
+export const withMetrics = (task: TopicTask, now: Date): TopicTask => ({
+  ...task,
+  metric: metricOf(task.groupId, now, task.goal?.metric ?? null),
+  metrics: task.metricSources.map((source) => {
+    const key = metricKeyOf(source);
+    return { key, metric: metricOf(task.groupId, now, key), account: accountOf(source) };
+  }),
+});
+
 // mock 删 Bot 不改群的 botIds，成员还在不在要看 Bot 本身还在不在。控制面的 groupHasMembers 是同一个意思。
 export const hasMembers = (group: Group): boolean => group.botIds.some((botId) => bots.has(botId));
 
-/** 记一个样本，回带着最新指标的任务卡。只认还有成员的多 Bot 群，别的回 null 让路由回 404。 */
-export const recordSample = (groupId: string, value: number, at = Date.now()): TopicTask | null => {
+export const recordSample = (
+  groupId: string,
+  value: number,
+  at = Date.now(),
+  metric?: string,
+): TopicTask | null | "unknown_metric" => {
   const group = groups.get(groupId);
-  if (group === undefined || !isTeamGroup(group) || !hasMembers(group)) return null;
+  const task = group === undefined ? undefined : tasks.get(group.taskId);
+  if (group === undefined || task === undefined || !isTeamGroup(group) || !hasMembers(group)) return null;
+  if (metric !== undefined && !task.metricSources.some((source) => metricKeyOf(source) === metric)) {
+    return "unknown_metric";
+  }
+  const series = seriesOf(groupId, metric ?? task.goal?.metric ?? null);
   const samples = goalStateNow().samples;
   samples.set(
-    groupId,
-    [...(samples.get(groupId) ?? []), { value, at }].toSorted((left, right) => left.at - right.at),
+    series,
+    [...(samples.get(series) ?? []), { value, at }].toSorted((left, right) => left.at - right.at),
   );
   return writeTask(group.taskId, {});
 };
+
+const recorded = (task: ReturnType<typeof recordSample>): TopicTask | null => (typeof task === "string" ? null : task);
 
 // 项目目标用例的数据：订单群定下年底 1000 星，上周末记过 375，刚才 412，本周 +37；再交一份周复盘。
 export const seedProjectGoal = (): TopicTask | null => {
@@ -83,7 +121,7 @@ export const seedProjectGoal = (): TopicTask | null => {
   writeTask(group.taskId, { goal: { target: 1000, unit: "星", dueAt: null } });
   const now = Date.now();
   const monday = weekStartOf(new Date(now));
-  recordSample(group.id, 375, monday.getTime() - 86_400_000);
+  recorded(recordSample(group.id, 375, monday.getTime() - 86_400_000));
   goalStateNow().reviews.set(group.id, [
     {
       kind: "review",
@@ -94,7 +132,47 @@ export const seedProjectGoal = (): TopicTask | null => {
       body: "## 这周\n\n星数这周涨了 37，最好的一条是讲交期的小红书。\n\n## 下周\n\n多发两条讲排产看板的。",
     },
   ]);
-  return recordSample(group.id, 412, now);
+  return recorded(recordSample(group.id, 412, now));
+};
+
+const metricAccount = (id: string, platform: "github" | "x", login: "valid" | "expired"): Account => {
+  const stamp = new Date(0).toISOString();
+  const account = Account.parse({
+    id,
+    ownerId: user.id,
+    computerId: "cmp_local",
+    platform,
+    via: "api",
+    handle: `mock_${platform}`,
+    tier: "confirm_publish",
+    login,
+    loginChangedAt: stamp,
+    lastLoginFailure: null,
+    createdAt: stamp,
+  });
+  accounts.set(account.id, account);
+  return account;
+};
+
+export const seedProjectMetrics = (): TopicTask | null => {
+  if (seedProjectGoal() === null) return null;
+  const group = groups.get("grp_order");
+  if (group === undefined) return null;
+  const github = metricAccount("acc_metric_github", "github", "valid");
+  const x = metricAccount("acc_metric_x", "x", "expired");
+  const stars: MetricSource = { kind: "github_stars", accountId: github.id, repo: "baize/order-board" };
+  const followers: MetricSource = { kind: "x_followers", accountId: x.id };
+  const engagement: MetricSource = { kind: "reported", platform: "xiaohongshu", label: "互动率" };
+  writeTask(group.taskId, {
+    goal: { target: 1000, unit: "星", dueAt: null, metric: metricKeyOf(stars) },
+    metricSources: [stars, followers, engagement],
+  });
+  const now = Date.now();
+  const monday = weekStartOf(new Date(now)).getTime();
+  recordSample(group.id, 375, monday - 86_400_000, metricKeyOf(stars));
+  recordSample(group.id, 412, now, metricKeyOf(stars));
+  recordSample(group.id, 2100, now - 2 * 86_400_000, metricKeyOf(followers));
+  return recorded(recordSample(group.id, 3.5, now - 3_600_000, metricKeyOf(engagement)));
 };
 
 const titleOf = (draftId: string | null): string => {

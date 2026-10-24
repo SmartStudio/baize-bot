@@ -3,6 +3,7 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   DecideProjectOfferResponse,
+  GroupListResponse,
   GroupResponse,
   TodayResponse,
   UpdateTaskResponse,
@@ -146,8 +147,8 @@ describe("项目目标", () => {
     try {
       const { card, group, task } = await startProject(s, { ...OFFER, goalTarget: 1000, goalUnit: "星" });
       expect(card.body, "卡正文留着目标两项").toMatchObject({ goalTarget: 1000, goalUnit: "星", status: "started" });
-      const goal = { target: 1000, unit: "星", dueAt: null };
-      expect(task.goal, "开始时回的任务卡就带目标").toEqual(goal);
+      const goal = { target: 1000, unit: "星", dueAt: null, metric: null };
+      expect(task.goal, "开始时回的任务卡就带目标，对的是手记的那条数").toEqual(goal);
       expect(task.metric, "还没有样本").toBeNull();
       expect((await taskOf(s.client, group.id)).goal, "重新读群也是这个目标").toEqual(goal);
     } finally {
@@ -187,7 +188,7 @@ describe("项目目标", () => {
     const s = await session();
     try {
       const { group, task } = await startProject(s, OFFER);
-      const goal = { target: 500, unit: "篇", dueAt: "2030-12-31T16:00:00.000Z" };
+      const goal = { target: 500, unit: "篇", dueAt: "2030-12-31T16:00:00.000Z", metric: null };
       const set = await s.client.patch(`/api/tasks/${task.id}`, { goal });
       expect(set.status).toBe(200);
       expect(UpdateTaskResponse.parse(await set.json()).task.goal).toEqual(goal);
@@ -201,15 +202,104 @@ describe("项目目标", () => {
       const [columns] = await database.sql`select goal_target, goal_unit, goal_due_at from tasks where id = ${task.id}`;
       expect(columns, "三列一起清空，不留半个目标").toEqual({ goal_target: null, goal_unit: null, goal_due_at: null });
 
-      const metricSource = { kind: "reported", platform: "xiaohongshu", label: "粉丝数" } as const;
-      const sourced = await s.client.patch(`/api/tasks/${task.id}`, { metricSource });
-      expect(UpdateTaskResponse.parse(await sourced.json()).task.metricSource).toEqual(metricSource);
-      expect((await taskOf(s.client, group.id)).metricSource).toEqual(metricSource);
-      await s.client.patch(`/api/tasks/${task.id}`, { metricSource: null });
-      expect((await taskOf(s.client, group.id)).metricSource, "给 null 就是去掉").toBeNull();
+      const metricSources = [{ kind: "reported", platform: "xiaohongshu", label: "粉丝数" }] as const;
+      const sourced = await s.client.patch(`/api/tasks/${task.id}`, { metricSources });
+      expect(UpdateTaskResponse.parse(await sourced.json()).task.metricSources).toEqual(metricSources);
+      expect((await taskOf(s.client, group.id)).metricSources).toEqual(metricSources);
+      await s.client.patch(`/api/tasks/${task.id}`, { metricSources: [] });
+      expect((await taskOf(s.client, group.id)).metricSources, "给空数组就是都摘掉").toEqual([]);
 
       const bad = await s.client.patch(`/api/tasks/${task.id}`, { goal: { target: 0, unit: "星", dueAt: null } });
       expect(bad.status, "目标数要是正整数").toBe(400);
+    } finally {
+      s.close();
+    }
+  });
+});
+
+describe("一个项目挂多个指标", () => {
+  const addAccount = async (s: Session, platform: "github" | "x", login: "valid" | "expired" = "valid") => {
+    const accountId = newId();
+    await database.db.insert(accounts).values({
+      id: accountId,
+      ownerId: s.userId,
+      computerId: s.computerId,
+      platform,
+      via: "api",
+      handle: `@${accountId}`,
+      login,
+    });
+    return accountId;
+  };
+
+  it("能挂星数、粉丝和 Bot 报的数，读出来每个指标一份读数，目标对其中一个", async () => {
+    const s = await session();
+    try {
+      const { group, task } = await startProject(s, OFFER);
+      const github = await addAccount(s, "github");
+      const x = await addAccount(s, "x", "expired");
+      const metricSources = [
+        { kind: "github_stars", accountId: github, repo: "acme/baize" },
+        { kind: "x_followers", accountId: x },
+        { kind: "reported", platform: "xiaohongshu", label: "小红书粉丝" },
+      ] as const;
+      const goal = { target: 1000, unit: "星", dueAt: null, metric: "github_stars:acme/baize" };
+      const set = await s.client.patch(`/api/tasks/${task.id}`, { metricSources, goal });
+      expect(set.status).toBe(200);
+      const updated = UpdateTaskResponse.parse(await set.json()).task;
+      expect(updated.metricSources).toEqual(metricSources);
+      expect(updated.goal).toEqual(goal);
+      expect(updated.metrics, "同序，一个样本都没有，X 账号过期了要提示去连").toEqual([
+        { key: "github_stars:acme/baize", metric: null, account: "connected" },
+        { key: `x_followers:${x}`, metric: null, account: "disconnected" },
+        { key: "reported:小红书粉丝", metric: null, account: null },
+      ]);
+      expect((await nextOfType(s.push, "task_updated")).task.metrics).toEqual(updated.metrics);
+
+      const recordTo = async (value: number, metric?: string) =>
+        s.client.post(`/api/projects/${group.id}/metric`, metric === undefined ? { value } : { value, metric });
+      expect((await recordTo(120)).status, "不说记哪个就记到目标对的星数上").toBe(200);
+      expect((await recordTo(3400, `x_followers:${x}`)).status).toBe(200);
+      const last = await recordTo(56, "reported:小红书粉丝");
+      const read = UpdateTaskResponse.parse(await last.json()).task;
+      expect(read.metric?.current, "目标进度按星数").toBe(120);
+      expect(read.metrics.map((reading) => reading.metric?.current)).toEqual([120, 3400, 56]);
+      expect((await taskOf(s.client, group.id)).metrics, "重新读群也是这三份").toEqual(read.metrics);
+
+      const unknown = await recordTo(1, "reported:抖音粉丝");
+      expect(unknown.status, "没挂的指标记不进去").toBe(400);
+      expect(await unknown.json()).toEqual({ error: "这个项目没挂这个指标" });
+
+      const list = GroupListResponse.parse(await (await s.client.get("/api/groups")).json());
+      const listed = list.items.find((item) => item.task.groupId === group.id);
+      expect(listed?.task.metrics, "群列表也带每个指标的读数").toEqual(read.metrics);
+    } finally {
+      s.close();
+    }
+  });
+
+  it("目标对的指标必须挂着：直接对一个没挂的、或者摘掉目标对的那个，都 400 且什么都不改", async () => {
+    const s = await session();
+    try {
+      const { group, task } = await startProject(s, OFFER);
+      const github = await addAccount(s, "github");
+      const stars = { kind: "github_stars", accountId: github, repo: "acme/baize" } as const;
+      const goal = { target: 1000, unit: "星", dueAt: null, metric: "github_stars:acme/baize" };
+
+      const orphan = await s.client.patch(`/api/tasks/${task.id}`, { goal });
+      expect(orphan.status).toBe(400);
+      expect(await orphan.json()).toEqual({ error: "目标对的指标不在这个项目的指标里" });
+      expect((await taskOf(s.client, group.id)).goal, "整个事务回滚").toBeNull();
+
+      expect((await s.client.patch(`/api/tasks/${task.id}`, { metricSources: [stars], goal })).status).toBe(200);
+      const dropped = await s.client.patch(`/api/tasks/${task.id}`, { metricSources: [], title: "改了名" });
+      expect(dropped.status, "摘掉目标对的那个指标").toBe(400);
+      const kept = await taskOf(s.client, group.id);
+      expect([kept.metricSources, kept.goal, kept.title]).toEqual([[stars], goal, task.title]);
+
+      const twice = await s.client.patch(`/api/tasks/${task.id}`, { metricSources: [stars, { ...stars }] });
+      expect(twice.status, "同一个指标挂两次").toBe(400);
+      expect((await s.client.patch(`/api/tasks/${task.id}`, { goal: null, metricSources: [] })).status).toBe(200);
     } finally {
       s.close();
     }
@@ -226,7 +316,7 @@ describe("手动记数", () => {
       const pushed = await nextOfType(s.push, "task_updated");
       expect(pushed.task.groupId).toBe(group.id);
       expect(pushed.task.metric?.current, "推出去的任务卡带最新的数").toBe(412);
-      expect(pushed.task.goal, "记数不动目标").toEqual({ target: 1000, unit: "星", dueAt: null });
+      expect(pushed.task.goal, "记数不动目标").toEqual({ target: 1000, unit: "星", dueAt: null, metric: null });
       expect((await taskOf(s.client, group.id)).metric?.current, "重新读群也是最新的数").toBe(412);
 
       const again = await reportMetric(s.client, group.id, 420);
@@ -554,11 +644,11 @@ describe("首页在进行", () => {
         title: stars.task.title,
         published: 0,
         planned: 0,
-        goal: { target: 1000, unit: "星", dueAt: null },
+        goal: { target: 1000, unit: "星", dueAt: null, metric: null },
         metric: expect.objectContaining({ current: 412 }),
       });
       expect(byGroup.get(fresh.group.id), "有目标还没样本也出一行，metric 是 null").toMatchObject({
-        goal: { target: 1000, unit: "粉丝", dueAt: null },
+        goal: { target: 1000, unit: "粉丝", dueAt: null, metric: null },
         metric: null,
       });
       expect(byGroup.has(plain.group.id), "没目标也没计划的项目不出行").toBe(false);

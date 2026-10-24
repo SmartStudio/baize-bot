@@ -283,7 +283,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     notifications,
     agents,
     tokens,
-    githubApiBaseUrl: config.githubApiBaseUrl,
+    bases: { githubApiBaseUrl: config.githubApiBaseUrl, xApiBaseUrl: config.xApiBaseUrl },
     ...options.metrics,
   });
   metrics.start();

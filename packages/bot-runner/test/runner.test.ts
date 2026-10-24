@@ -281,8 +281,9 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   status: "active",
   cadence: "",
   goal: null,
-  metricSource: null,
+  metricSources: [],
   metric: null,
+  metrics: [],
   ...overrides,
 });
 
@@ -1962,7 +1963,7 @@ describe("运行器的主题任务工具", () => {
   });
 
   describe("任务卡上的目标和进度", () => {
-    const GOAL = { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z" } as const;
+    const GOAL = { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z", metric: null } as const;
     const goalLinesOf = (task: TopicTask): string[] =>
       renderTaskCard(task, TWO_MEMBERS)
         .split("\n")
@@ -2012,6 +2013,22 @@ describe("运行器的主题任务工具", () => {
         "目标：1000 星，期限：2026-12-31T00:00:00.000Z",
         "进度：还没有数据",
       ]);
+    });
+
+    it("挂了 Bot 报的数就在目标之后列出名字，读数器读的不列", () => {
+      const task = topicTask({
+        goal: GOAL,
+        metric: metricOf(412, 37),
+        metricSources: [
+          { kind: "github_stars", accountId: AccountId.parse("acc-1"), repo: "baize/bot" },
+          { kind: "reported", platform: "xiaohongshu", label: "粉丝" },
+          { kind: "reported", platform: "xiaohongshu", label: "互动率" },
+        ],
+      });
+      const lines = renderTaskCard(task, TWO_MEMBERS).split("\n");
+      expect(lines[lines.findIndex((line) => line.startsWith("进度：")) + 1]).toBe(
+        "要报的数：粉丝、互动率（report_metric 的 label 照这个名字写）",
+      );
     });
 
     it("目标没定期限时期限写不限", () => {
@@ -5919,7 +5936,7 @@ describe("运行器的指标上报", () => {
       script: scriptRecording(seen, [["排本周计划", { textChunks: ["好"], usage: { input: 800, output: 2 } }]]),
     });
     const task = topicTask({
-      goal: { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z" },
+      goal: { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z", metric: null },
       metric: { current: 412, weekDelta: 37, sampledAt: "2026-10-09T08:00:00.000Z" },
     });
 

@@ -37,8 +37,8 @@ describe("端到端：GitHub 星数自动取样", () => {
         await stack.post("/api/groups", { title: "星数自动取样", botIds: bots.map((item) => item.bot.id) }),
       );
       await stack.patch(`/api/tasks/${task.id}`, {
-        goal: { target: 1000, unit: "星", dueAt: null },
-        metricSource: { kind: "github_stars", accountId: account.id, repo: "baize/demo" },
+        goal: { target: 1000, unit: "星", dueAt: null, metric: "github_stars:baize/demo" },
+        metricSources: [{ kind: "github_stars", accountId: account.id, repo: "baize/demo" }],
       });
       expect((await nextTask(stack, group.id)).metric).toBeNull();
       const currentTask = async () => GroupResponse.parse(await stack!.get(`/api/groups/${group.id}`)).task;

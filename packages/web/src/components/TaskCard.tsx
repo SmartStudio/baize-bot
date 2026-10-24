@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { Pin, Target } from "lucide-react";
-import { ProjectGoal, type Bot, type BotId, type ChecklistItem, type TopicTask } from "@baize/shared";
+import { metricKeyOf, ProjectGoal, type Bot, type BotId, type ChecklistItem, type TopicTask } from "@baize/shared";
 import { TaskRefreshFailed, useApp } from "../state/app.js";
-import { goalProgressOf, goalText } from "../state/project.js";
+import { goalProgressOf, goalText, metricNameOf } from "../state/project.js";
 import { BotAvatar } from "./BotAvatar.js";
 
 // 原型 05 的卡上写的是「截止 09-14 12:00」，月日加时分，不带年。
@@ -22,12 +22,13 @@ const localInputOf = (iso: string): string => {
 
 // 本地分钟串存不下秒、毫秒和夏令时回拨时的偏移，截止没动过就原样存回服务端给的那份。
 type DueDraft = { kind: "kept"; dueAt: string | null } | { kind: "edited"; input: string };
-type GoalDraft = { target: string; unit: string; due: DueDraft };
+type GoalDraft = { target: string; unit: string; due: DueDraft; metric: string | null };
 
-const draftOf = (goal: ProjectGoal | null): GoalDraft => ({
-  target: goal === null ? "" : String(goal.target),
-  unit: goal?.unit ?? "",
-  due: { kind: "kept", dueAt: goal?.dueAt ?? null },
+const draftOf = (task: TopicTask): GoalDraft => ({
+  target: task.goal === null ? "" : String(task.goal.target),
+  unit: task.goal?.unit ?? "",
+  due: { kind: "kept", dueAt: task.goal?.dueAt ?? null },
+  metric: task.goal === null ? (task.metrics[0]?.key ?? null) : task.goal.metric,
 });
 
 const dueInputOf = (due: DueDraft): string =>
@@ -47,6 +48,7 @@ const parseGoal = (draft: GoalDraft): { goal: ProjectGoal } | { error: string } 
     target: Number(draft.target),
     unit: draft.unit.trim(),
     dueAt: due.dueAt,
+    metric: draft.metric,
   });
   if (parsed.success) return { goal: parsed.data };
   const field = parsed.error.issues[0]?.path[0];
@@ -69,7 +71,7 @@ type GoalEditorProps = {
 
 const GoalEditor = ({ task, saving, onEditing, onRefreshFailed }: GoalEditorProps) => {
   const { actions } = useApp();
-  const [draft, setDraft] = useState(() => draftOf(task.goal));
+  const [draft, setDraft] = useState(() => draftOf(task));
   const [error, setError] = useState<string | null>(null);
   const save = async (goal: ProjectGoal | null) => {
     onEditing("saving");
@@ -129,6 +131,24 @@ const GoalEditor = ({ task, saving, onEditing, onRefreshFailed }: GoalEditorProp
           onChange={(event) => setDraft({ ...draft, due: { kind: "edited", input: event.target.value } })}
         />
       </label>
+      {task.metricSources.length === 0 ? null : (
+        <label className="field">
+          <span>对哪个数</span>
+          <select
+            data-testid="task-goal-metric"
+            disabled={saving}
+            value={draft.metric ?? ""}
+            onChange={(event) => setDraft({ ...draft, metric: event.target.value === "" ? null : event.target.value })}
+          >
+            {task.metricSources.map((source) => (
+              <option key={metricKeyOf(source)} value={metricKeyOf(source)}>
+                {metricNameOf(source)}
+              </option>
+            ))}
+            <option value="">手记的数</option>
+          </select>
+        </label>
+      )}
       <span className="task-goal-actions">
         <button type="submit" className="primary-button" data-testid="task-goal-save" disabled={saving}>
           存目标

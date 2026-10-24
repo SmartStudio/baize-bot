@@ -915,16 +915,17 @@ const run = async (): Promise<void> => {
 
     begin("U9 自动取样：GitHub 500 星，同格不重取，下一格更新为 520，两屏收到推送");
     await progress.scrollIntoViewIfNeeded();
-    // 页面没有指标来源设置入口，走任务卡 PATCH 接口；目标仍由前面的界面步骤设置。
     const metricTask = GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task;
+    if (metricTask.goal === null) throw new Error("前面的界面步骤没定下目标");
     await s.patch(`/api/tasks/${metricTask.id}`, {
-      metricSource: { kind: "github_stars", accountId: accountOf("github"), repo: "baize/baize-bot" },
+      goal: { ...metricTask.goal, metric: "github_stars:baize/baize-bot" },
+      metricSources: [{ kind: "github_stars", accountId: accountOf("github"), repo: "baize/baize-bot" }],
     });
     const automaticHome = await ctx.newPage();
     try {
       await openHome(automaticHome, home);
       const running = automaticHome.getByTestId("today-running").getByTestId("today-row").filter({ hasText: PROJECT });
-      await check(running).toContainText("412 / 1000 星");
+      await check(running).toContainText("0 / 1000 星");
       const reads = () =>
         fake.requests().filter((request) => request.method === "GET" && request.path === "/repos/baize/baize-bot");
       const initialReads = reads().length;
