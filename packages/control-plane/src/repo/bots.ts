@@ -22,6 +22,7 @@ import {
   groupMembers,
   groups,
   handoffs,
+  runs,
   skills,
   tasks,
   userCounters,
@@ -310,6 +311,11 @@ export async function deleteBot(db: Db, ownerId: UserId, botId: BotId): Promise<
         .from(handoffs)
         .where(or(eq(handoffs.fromBotId, botId), eq(handoffs.toBotId, botId)))
         .for("update");
+      // 留给级联的话，几条置空会先后改同一行 run。PostgreSQL 对本事务改过的行再改时重查全部非空外键，
+      // 引用的行已删、它的置空还没轮到就是 23503；轮到谁先由触发器名字里的 OID 定，随库变。
+      const soloGroup = tx.select({ id: groups.id }).from(groups).where(eq(groups.soloBotId, botId));
+      await tx.update(runs).set({ groupId: null, triggerMessageId: null }).where(inArray(runs.groupId, soloGroup));
+      await tx.update(runs).set({ botId: null }).where(eq(runs.botId, botId));
     }
     const assistant = target === undefined ? null : await findAssistant(tx, ownerId);
     const moved = assistant === null ? [] : await transferRoutines(tx, botId, assistant.bot.id);
