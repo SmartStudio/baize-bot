@@ -1,4 +1,4 @@
-import type { User } from "@baize/shared";
+import { SESSION_TTL_MS, type User } from "@baize/shared";
 import { and, eq, gt, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { sessions, users } from "../db/schema.js";
@@ -6,7 +6,6 @@ import { newSessionToken } from "../ids.js";
 import { toUser } from "./rows.js";
 
 export const SESSION_COOKIE = "baize_session";
-export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export async function createSession(db: Db, userId: string): Promise<string> {
   const token = newSessionToken();

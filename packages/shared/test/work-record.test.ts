@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   PRUNED_IMAGE_TEXT,
-  RETAIN_TEXT_LIMIT_BYTES,
   RetainSnapshot,
   assertRawJsonSupport,
   checkFrame,
@@ -12,6 +11,7 @@ import {
   type RetainContext,
   type RetainResult,
 } from "../src/work-record.js";
+import { RETAIN_TEXT_LIMIT_BYTES } from "../src/retention.js";
 
 const ctx = { localOnlyToolNames: new Set<string>() };
 const localCtx = { localOnlyToolNames: new Set(["mail_read"]) };

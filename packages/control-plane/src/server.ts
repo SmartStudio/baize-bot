@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { AGENT_FRAME_MAX_BYTES } from "@baize/shared";
+import { AGENT_FRAME_MAX_BYTES, SESSION_SWEEP_INTERVAL_MS } from "@baize/shared";
 import { parse as parseCookie } from "hono/utils/cookie";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
@@ -51,9 +51,6 @@ const REMIND_INTERVAL_MS = 60 * 60 * 1000;
  * 和例行调度同一个节奏：例行本来就按分钟跑，接续晚半分钟起不算误事；每轮只走一次部分索引，查不到行就结束。
  */
 const CONTINUATION_SWEEP_INTERVAL_MS = 30_000;
-
-/** 过期会话读时已经认不出来，清理只是不让表一直涨，一小时一轮足够。 */
-const SESSION_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 export type RunningServer = {
   readonly port: number;

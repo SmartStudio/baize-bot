@@ -105,23 +105,41 @@ const NotifyPermissionRow = () => {
   );
 };
 
+// 读之前和读不到都是 unknown：读之前不出这一行，读不到要出这一行把错误说出来。
+type LoginItem = { readonly value: OpenAtLogin | "unknown"; readonly error: string | null };
+
 const OpenAtLoginRow = () => {
-  const [openAtLogin, setOpenAtLogin] = useState<OpenAtLogin>("unsupported");
+  const [item, setItem] = useState<LoginItem>({ value: "unknown", error: null });
+  const setValue = (value: OpenAtLogin) => setItem((current) => ({ ...current, value }));
   useEffect(() => {
     const bridge = desktopBridge();
     if (bridge === null) return;
     let live = true;
-    void bridge.openAtLogin.get().then((value) => {
-      if (live) setOpenAtLogin(value);
-    });
-    const unsubscribe = bridge.openAtLogin.subscribe(setOpenAtLogin);
+    bridge.openAtLogin.get().then(
+      (value) => {
+        if (live) setValue(value);
+      },
+      () => {
+        if (live) setItem((current) => ({ ...current, error: "读不到开机启动的设置，重开设置再试" }));
+      },
+    );
+    const unsubscribe = bridge.openAtLogin.subscribe(setValue);
     return () => {
       live = false;
       unsubscribe();
     };
   }, []);
   const bridge = desktopBridge();
-  if (bridge === null || openAtLogin === "unsupported") return null;
+  if (bridge === null || item.value === "unsupported" || (item.value === "unknown" && item.error === null)) return null;
+  const toggle = () => {
+    bridge.openAtLogin.set(item.value === "on" ? "off" : "on").then(
+      (value) => setItem({ value, error: null }),
+      () => {
+        setItem((current) => ({ ...current, error: "没改成开机启动，请再试一次" }));
+        bridge.openAtLogin.get().then(setValue, () => undefined);
+      },
+    );
+  };
   return (
     <>
       <p className="group-label">桌面 App</p>
@@ -129,15 +147,21 @@ const OpenAtLoginRow = () => {
         <span>
           <b>开机时启动白泽</b>
           <small>登录这台 Mac 后自动打开白泽，连上这台电脑，Bot 不用等你开 App。</small>
+          {item.error === null ? null : (
+            <small className="grant-error" role="alert" data-testid="open-at-login-error">
+              {item.error}
+            </small>
+          )}
         </span>
         <button
           type="button"
           role="switch"
-          aria-checked={openAtLogin === "on"}
+          aria-checked={item.value === "on"}
           aria-label="开机时启动白泽"
-          className={`switch${openAtLogin === "on" ? " is-on" : ""}`}
+          className={`switch${item.value === "on" ? " is-on" : ""}`}
           data-testid="open-at-login-switch"
-          onClick={() => void bridge.openAtLogin.set(openAtLogin === "on" ? "off" : "on").then(setOpenAtLogin)}
+          disabled={item.value === "unknown"}
+          onClick={toggle}
         />
       </div>
     </>
