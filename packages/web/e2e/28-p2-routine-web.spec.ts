@@ -362,3 +362,64 @@ for (const race of SAME_CARD_RACES) {
     expect(message.body.status, "卡的结论是赢家的决定").toBe(race.final);
   });
 }
+
+const patchOf = (page: Page) =>
+  page.waitForResponse(
+    (res) => res.request().method() === "PATCH" && /\/api\/routines\/[^/]+$/.test(new URL(res.url()).pathname),
+  );
+
+test("项目例行在编辑界面换执行 Bot：只列项目群里的 Bot，存下来列表跟着换", async ({ page }) => {
+  await login(page);
+  await createRoutine(page, { name: "订单周报", groupId: TEAM_GROUP_ID });
+  await page.getByTestId("routines-nav").click();
+  await row(page, "订单周报").getByTestId("routine-open").click();
+
+  const picker = page.getByTestId("routine-executor");
+  await expect(picker, "当前是建它的那位").toHaveValue("bot_service");
+  await expect(picker.locator("option"), "主助理不在这个项目群里，不列").toHaveText(["小服", "小销", "小采"]);
+
+  const saved = patchOf(page);
+  await picker.selectOption({ label: "小销" });
+  const response = await saved;
+  expect(response.request().postDataJSON(), "只送执行者，别的字段不动").toEqual({ executorBotId: "bot_sales" });
+  expect(response.status()).toBe(200);
+  await expect(picker).toHaveValue("bot_sales");
+
+  await page.getByTestId("routine-back").click();
+  await expect(row(page, "订单周报").getByTestId("routine-bot"), "列表上换成了新执行者").toHaveText("小销");
+  await expect(section(page, TEAM_TITLE).getByTestId("routine-row"), "还挂在原来的项目上").toHaveText(/订单周报/);
+
+  await page.reload();
+  await page.getByTestId("routines-nav").click();
+  await expect(row(page, "订单周报").getByTestId("routine-bot"), "刷新后还是新执行者").toHaveText("小销");
+});
+
+test("日常例行能换给名下任何 Bot；控制面不让换时编辑器说出原因，选择回到原来那位", async ({ page }) => {
+  await login(page);
+  await page.getByTestId("routines-nav").click();
+  await row(page, "每日工单早报").getByTestId("routine-open").click();
+
+  const picker = page.getByTestId("routine-executor");
+  await expect(picker.locator("option"), "单聊的例行跟着执行者走，名下的 Bot 都能接").toHaveCount(4);
+  await expect(picker.locator("option", { hasText: "主助理" })).toHaveCount(1);
+
+  await page.route(/\/api\/routines\/[^/]+$/, (route) =>
+    route.request().method() === "PATCH"
+      ? route.fulfill({ status: 409, json: { error: "这条例行任务的执行者刚变过，刷新后再换" } })
+      : route.fallback(),
+  );
+  await picker.selectOption({ label: "小采" });
+  await expect(page.getByTestId("routine-state-error")).toHaveText(
+    "「每日工单早报」没换成执行的 Bot：这条例行任务的执行者刚变过，刷新后再换。",
+  );
+  await expect(picker, "没换成就还是原来那位").toHaveValue("bot_service");
+  await page.unroute(/\/api\/routines\/[^/]+$/);
+
+  const saved = patchOf(page);
+  await picker.selectOption({ label: "主助理" });
+  expect((await saved).status()).toBe(200);
+  await expect(page.getByTestId("routine-state-error"), "换成了就收起上一次的报错").toHaveCount(0);
+  await page.getByTestId("routine-back").click();
+  await expect(row(page, "每日工单早报").getByTestId("routine-bot")).toHaveText("主助理");
+  await expect(section(page, "日常").getByTestId("routine-row"), "还在日常里").toHaveText(/每日工单早报/);
+});
