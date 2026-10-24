@@ -217,6 +217,15 @@ export async function runBelongsTo(
   return row !== undefined;
 }
 
+export async function groupHasOpenRun(db: Db, groupId: GroupId): Promise<boolean> {
+  const [row] = await db
+    .select({ id: runs.id })
+    .from(runs)
+    .where(and(eq(runs.groupId, groupId), isNull(runs.endedAt)))
+    .limit(1);
+  return row !== undefined;
+}
+
 export type OpenRun = { readonly runId: RunId; readonly groupId: GroupId; readonly botId: BotId };
 
 export async function openRunsForComputer(

@@ -4,6 +4,7 @@ import {
   GroupId,
   RunId,
   type ComputerKind,
+  type HandoffId,
   type ControlToAgent,
   type MessageId,
   type PokerTableRole,
@@ -14,6 +15,7 @@ import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { computers, groupMembers, groups, laneLeases, runs, workStreams } from "../db/schema.js";
 import { newId } from "../ids.js";
+import { claimQueuedHandoff } from "../repo/handoffs.js";
 import { appendMessage, type Tx } from "../repo/messages.js";
 import { lockOwner, lockSettlement, shareBotRunsLock } from "../repo/runs.js";
 import { CHOSEN_OFFLINE, type ComputerSelection, type SelectionFailure } from "./computer-selection.js";
@@ -30,6 +32,7 @@ export type PlaceRunInput = {
   readonly table?: { readonly role: PokerTableRole; readonly visibleTo: readonly [Viewer, ...Viewer[]] };
   /** 换电脑后的接续接的是哪一轮。落行时认领那一轮的标记、沿用它的运行记录，认领不到就不建。 */
   readonly continuesRunId?: RunId;
+  readonly handoffId?: HandoffId;
   readonly prompt: (runId: RunId, messageId: MessageId, placed: Placement) => Promise<Omit<Prompt, "runId" | "lane">>;
 };
 
@@ -46,7 +49,7 @@ export type PlaceRunResult =
     }
   | { readonly kind: "unplaced"; readonly reason: SelectionFailure }
   | { readonly kind: "not_member" }
-  | { readonly kind: "continued" };
+  | { readonly kind: "taken" };
 
 /** 这个 Bot 在这个群里选定的电脑。null 是没选过，走默认策略。 */
 export type ComputerPreference = ComputerKind | null;
@@ -177,7 +180,7 @@ export async function placeRun(
       : (await appendMessage(tx, input.groupId, { kind: "system", text: "牌桌回合" }, [...input.table.visibleTo])).id;
   if (triggerMessageId === undefined) throw new Error("派活缺少触发消息");
   const runId = await startRun(tx, input, computerId, triggerMessageId);
-  if (runId === null) return { kind: "continued" };
+  if (runId === null) return { kind: "taken" };
   const heads: Prompt["lane"]["heads"] = {};
   for (const stream of await tx
     .select()
@@ -205,6 +208,7 @@ async function startRun(
 ): Promise<RunId | null> {
   const continued = input.continuesRunId === undefined ? null : await takeContinuation(tx, input.continuesRunId);
   if (input.continuesRunId !== undefined && continued === null) return null;
+  if (input.handoffId !== undefined && !(await claimQueuedHandoff(tx, input.handoffId))) return null;
   const [row] = await tx
     .insert(runs)
     .values({

@@ -228,6 +228,7 @@ export const groups = pgTable(
     chiefBotId: text("chief_bot_id").references(() => bots.id, { onDelete: "set null" }),
     // 解散的多 Bot 群只盖这个戳，不删行：删行会级联掉消息、任务卡和牌局，还会把 run 的群号置空成孤儿。
     archivedAt: timestamp("archived_at", { withTimezone: true }),
+    turnBotMessages: integer("turn_bot_messages").notNull().default(0),
     createdAt: createdAt(),
   },
   (t) => [index("groups_owner_id_idx").on(t.ownerId)],
@@ -859,8 +860,14 @@ export const handoffs = pgTable(
     createdAt: createdAt(),
     acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     remindedAt: timestamp("reminded_at", { withTimezone: true }),
+    queued: boolean("queued").notNull().default(false),
   },
-  (t) => [index("handoffs_group_id_status_idx").on(t.groupId, t.status)],
+  (t) => [
+    index("handoffs_group_id_status_idx").on(t.groupId, t.status),
+    index("handoffs_queued_group_id_idx")
+      .on(t.groupId)
+      .where(sql`${t.queued}`),
+  ],
 );
 
 // Bot 会做的一件活，属于一个 Bot，删 Bot 跟着走。步骤整份存 jsonb：它就是一份有序的文本，

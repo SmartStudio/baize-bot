@@ -18,7 +18,7 @@ import { STALE_HANDOFF_MS, remindStaleHandoffs } from "../src/repo/handoffs.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
-import { PASSWORD, makeComputer, makeUser } from "./helpers/fixtures.js";
+import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 let database: TestDb;
@@ -39,6 +39,8 @@ const NOT_DONE = "还没跟仓库对过库存";
 const NEXT = "找仓库确认双十一的备货量";
 
 type Team = {
+  readonly email: string;
+  readonly computer: TestComputer;
   readonly client: ApiClient;
   readonly agent: AgentClient;
   readonly push: PushClient;
@@ -72,6 +74,8 @@ async function makeTeam(): Promise<Team> {
   const push = await connectPush(server.server.port, client.cookie ?? "");
 
   return {
+    email: user.email,
+    computer,
     client,
     agent,
     push,
@@ -84,6 +88,30 @@ async function makeTeam(): Promise<Team> {
       push.close();
     },
   };
+}
+
+async function rejoin(team: Team, activeRuns: readonly RunId[]): Promise<Team> {
+  const client = server.client();
+  expect((await client.login(team.email, PASSWORD)).status).toBe(200);
+  const { agent } = await helloAgent(server.server.port, team.computer.computerId, team.computer.token, activeRuns);
+  const push = await connectPush(server.server.port, client.cookie ?? "");
+  return {
+    ...team,
+    client,
+    agent,
+    push,
+    close: () => {
+      agent.close();
+      push.close();
+    },
+  };
+}
+
+async function crash(team: Team, activeRuns: readonly RunId[]): Promise<Team> {
+  await server.close();
+  team.close();
+  server = await startTestServer(database.db);
+  return rejoin(team, activeRuns);
 }
 
 /** 派一次活，拿回这个目标这一次的 runId。上行报文的归属校验要求 runId 真是它的活。 */
@@ -453,6 +481,53 @@ describe("上行 handoff", () => {
       const prompt = await team.agent.expect("prompt");
       expect(prompt.botId).toBe(team.service.id);
       expect((await page(team)).handoffs, "群外的和交给自己的都不该落").toHaveLength(1);
+    } finally {
+      team.close();
+    }
+  });
+});
+
+describe("控制面重启", () => {
+  it("交接卡建好、交出去的那一轮还没收尾控制面就重启：那一轮收尾后目标照样收到这份交接，用户什么都没说", async () => {
+    let team = await makeTeam();
+    try {
+      const runId = await runFor(team, "@小销 开个头");
+      sendHandoff(team, { runId, botId: team.sales.id, toBotId: team.service.id });
+      const handoff = await waitForHandoffUpdated(team);
+      team = await crash(team, [runId]);
+      finish(team, runId, team.sales.id);
+      const prompt = await team.agent.expect("prompt");
+      expect(prompt.reason, "重启丢了内存里的回合，卡已经建了，目标不能等用户再说话").toBe("handoff");
+      expect(prompt.botId).toBe(team.service.id);
+      expect(prompt.handoffId).toBe(handoff.id);
+    } finally {
+      team.close();
+    }
+  });
+
+  it("交出去的那一轮结账提交后控制面就没了：重启后电脑一 hello 就派给目标，再 hello 一次不重派", async () => {
+    let team = await makeTeam();
+    try {
+      const runId = await runFor(team, "@小销 开个头");
+      sendHandoff(team, { runId, botId: team.sales.id, toBotId: team.service.id });
+      const handoff = await waitForHandoffUpdated(team);
+      await database.sql`UPDATE runs SET ended_at = now(), charged_at = now() WHERE id = ${runId}`;
+      team = await crash(team, []);
+      const prompt = await team.agent.expect("prompt");
+      expect(prompt.reason).toBe("handoff");
+      expect(prompt.botId).toBe(team.service.id);
+      expect(prompt.handoffId).toBe(handoff.id);
+
+      team.close();
+      team = await rejoin(team, [prompt.runId]);
+      finish(team, prompt.runId, team.service.id);
+      for (;;) {
+        const push = await team.push.next();
+        if (push.type === "message" && push.message.body.kind === "cost" && push.message.body.runId === prompt.runId)
+          break;
+      }
+      expect(await runCount(team.group.id), "第二次 hello 和目标收尾都不再派这份交接").toBe(2);
+      expect(team.agent.received().filter((message) => message.type === "prompt")).toEqual([]);
     } finally {
       team.close();
     }

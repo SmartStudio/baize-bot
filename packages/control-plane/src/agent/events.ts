@@ -74,7 +74,7 @@ import {
 import type { PushHub } from "../ws/hub.js";
 import { HANDOFF_LIMIT_NOTICE, type GroupTurns, type PassAbsorption } from "./group-turn.js";
 import { continuesAfter } from "./continuation.js";
-import { resumeContinuation } from "./dispatch.js";
+import { resumeContinuation, resumeQueuedHandoffs } from "./dispatch.js";
 import { renderHandoffReport } from "./handoff.js";
 import { handleMetricReport } from "./events/metric-report.js";
 import { handlePokerAct } from "./events/poker-act.js";
@@ -408,7 +408,8 @@ export async function abandonRun(
   };
   const publish = async (real: RoutineDeps) => {
     clearTextPrefixes(run.runId);
-    if (run.groupId !== null) real.groupTurns.abandon(run.groupId, run.runId);
+    const groupId = run.groupId;
+    if (groupId !== null) await step("放下回合", () => real.groupTurns.abandon(groupId, run.runId));
     await step("刷新牌桌提示", () => refreshHintForRun(real, run.runId));
     for (const approval of result.expiredApprovals) real.push.push(ownerId, { type: "approval_updated", approval });
     // Bot 刚请求换电脑、电脑随即掉线，run_done 还在发件箱里：被放弃的这一轮照样在另一台上接着做。
@@ -658,6 +659,12 @@ async function settleCharge(
   if (deps.afterCommit === undefined) await resume(deps);
   else deps.afterCommit(resume);
   await deps.groupTurns.runDone(run.groupId, run.runId);
+  const handoffs = (real: RoutineDeps) =>
+    resumeQueuedHandoffs(real, { groupId: run.groupId }).catch((error: unknown) =>
+      console.error(`run ${run.runId} 结账后补派交接出错：${errorKind(error)}`),
+    );
+  if (deps.afterCommit === undefined) await handoffs(deps);
+  else deps.afterCommit(handoffs);
   // 例行任务做完不弹「做完了」：按点跑的活天天有，每次都弹就成了噪音。没跑成、卡住的才找人，见 failRoutineRunOf。
   if (charge !== null) await deps.notifications.usageCharged(ownerId);
 }

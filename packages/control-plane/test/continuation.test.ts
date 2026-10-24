@@ -556,6 +556,67 @@ describe("Bot 自己换电脑", () => {
     }
   });
 
+  it("回合里 Bot 已说 9 句、结账后控制面重启：接续接着这一回合的数，再 @ 一次就停下", async () => {
+    let me = await owner({ remote: true });
+    const second = CreateBotResponse.parse(await (await me.client.post("/api/bots", { name: "小服" })).json());
+    const team = CreateGroupResponse.parse(
+      await (await me.client.post("/api/groups", { title: "两人群", botIds: [me.botId, second.bot.id] })).json(),
+    ).group.id;
+    let local = await online(me.local);
+    let remote = await online(remoteOf(me));
+    const mention = (on: Online, prompt: Prompt, text: string): void =>
+      on.agent.send({
+        type: "mention",
+        runId: prompt.runId,
+        botId: me.botId,
+        groupId: team,
+        targetBotId: second.bot.id,
+        text,
+      });
+
+    try {
+      await say(me, "@小运 开始", team);
+      const first = await local.agent.expect("prompt");
+      for (let i = 0; i < 9; i += 1) mention(local, first, `@小服 第 ${i + 1} 件`);
+      await barrier(local, me);
+      expect(await switchComputer(local, first, "remote")).toEqual({ status: 200, body: { result: "switching" } });
+      await choicePush(me, me.botId, "remote");
+      await database.sql`UPDATE runs SET ended_at = now(), charged_at = now() WHERE id = ${first.runId}`;
+      local.agent.close();
+      remote.agent.close();
+      me.push.close();
+      await server.close();
+      server = await boot();
+      me = await reconnect(me);
+
+      remote = await online(remoteOf(me));
+      const next = await remote.agent.expect("prompt");
+      expectContinuation(next, first, CONTINUE_ON_REMOTE);
+      local = await online(me.local);
+      mention(remote, next, "@小服 第 10 件");
+      expect(
+        (await barrier(remote, me)).some(
+          (event) =>
+            event.type === "message" &&
+            event.message.body.kind === "system" &&
+            event.message.body.text === MENTION_LOOP_NOTICE,
+        ),
+        "重启前说的 9 句还算在这一回合里，第 10 句就停下",
+      ).toBe(true);
+      mention(remote, next, "@小服 第 11 件");
+      await finish(remote, next);
+      await barrier(remote, me);
+      expect(
+        local.agent.received().filter((message) => message.type === "prompt"),
+        "说满之后小服不再被派",
+      ).toEqual([]);
+    } finally {
+      local.agent.close();
+      remote.agent.close();
+      me.push.close();
+    }
+  });
+
   it("接续派不出去：群里原话说明，不回退到本机，标记清掉", async () => {
     const me = await owner({ remote: true });
     const local = await online(me.local);
