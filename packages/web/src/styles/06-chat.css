@@ -63,7 +63,7 @@
   min-height: 0;
   padding: var(--space-7);
   overflow-y: auto;
-  /* 往上接更早的一页时由 ChatPanel 自己把正看着的回合钉住，浏览器再锚一次就会多挪一截。 */
+  /* ChatPanel 每次渲染自己把正看着的那条消息钉住，浏览器再锚一次就会多挪一截。 */
   overflow-anchor: none;
 }
 

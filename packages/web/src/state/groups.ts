@@ -317,6 +317,7 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
       );
     }
     case "older_messages_loaded": {
+      // 翻页只从最近一页的头往上接，这个群还没拉过最近一页就整页不落。
       if (state.messages.rows[action.groupId] === undefined) return state;
       const messages = shelfPrepend(state.messages, action.groupId, messageStamp, action.messages, action.before);
       // 在途时最近一页重拉过、从别处重新起翻，这一页照样落进列表，翻到哪以重新起翻的为准。

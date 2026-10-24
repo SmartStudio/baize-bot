@@ -559,7 +559,7 @@ const MessageView = ({
 }: MessageProps) => {
   const body = message.body;
   return (
-    <div className="message" data-testid="message" data-kind={body.kind}>
+    <div className="message" data-testid="message" data-kind={body.kind} data-message-id={message.id}>
       {(() => {
         switch (body.kind) {
           case "user":
@@ -684,7 +684,14 @@ const Activity = ({
       </div>
       <div className="activity-lines">
         {tools.map((message) => (
-          <div className="message" data-testid="message" data-kind="tool_call" key={message.id} hidden={!open}>
+          <div
+            className="message"
+            data-testid="message"
+            data-kind="tool_call"
+            data-message-id={message.id}
+            key={message.id}
+            hidden={!open}
+          >
             {message.body.kind === "tool_call" ? (
               <ToolCallCard
                 messageId={message.id}
@@ -709,7 +716,7 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
   if (turn.kind === "system" && turn.message.body.kind === "system" && turn.message.body.tone === "error") {
     return (
       <div className="turn turn-system">
-        <div className="message" data-testid="message" data-kind="system">
+        <div className="message" data-testid="message" data-kind="system" data-message-id={turn.message.id}>
           <div className="notice notice-error" data-testid="notice" data-tone="error">
             <TriangleAlert size={16} aria-hidden="true" />
             <div className="notice-body">
