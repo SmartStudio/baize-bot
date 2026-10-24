@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { FolderOpen, MessagesSquare, Search } from "lucide-react";
 import { BotAvatar } from "./BotAvatar.js";
 import { matchItems, SWITCH_KIND_LABEL, SWITCH_KINDS, type SwitchItem } from "./switchItems.js";
+import { trapTab } from "./trapTab.js";
 
 type Props = {
   items: readonly SwitchItem[];
@@ -46,8 +47,9 @@ export const QuickSwitch = ({ items, onPick, onClose }: Props) => {
     listRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
   }, [at, query]);
 
-  const onKeyDown = (event: React.KeyboardEvent) => {
+  const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    trapTab(event);
     if (event.key === "Escape") {
       event.preventDefault();
       onClose();

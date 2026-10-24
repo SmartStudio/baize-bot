@@ -9,14 +9,15 @@ type KeyPress = Pick<
   "key" | "code" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey" | "isComposing" | "keyCode" | "defaultPrevented"
 >;
 
-// 「/」在部分键盘布局上要按 Shift 才打得出，所以不看 Shift。K 以 key 为准，只在俄文这类布局下 key 不是拉丁字母时才认物理键位。
+// 「/」在部分键盘布局上要按 Shift 才打得出，所以不看 Shift。K 和「/」都以 key 为准，只在俄文这类布局下打出来的不是 ASCII 时才认物理键位：
+// 德语布局那个键位打的是「-」，⌘- 是缩小页面，不能被吞掉。
 export const shortcutOf = (event: KeyPress, client: ClientPlatform = clientPlatform()): Shortcut | null => {
   if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return null;
   const primary = client === "mac" ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
   if (!primary || event.altKey) return null;
   if (!event.shiftKey && (event.key.toLowerCase() === "k" || (event.code === "KeyK" && !/^[a-z]$/i.test(event.key))))
     return "switch";
-  if (event.key === "/" || event.code === "Slash") return "shortcuts";
+  if (event.key === "/" || (event.code === "Slash" && !/^[\x21-\x7e]$/.test(event.key))) return "shortcuts";
   return null;
 };
 
