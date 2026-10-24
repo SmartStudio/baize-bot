@@ -102,8 +102,13 @@ http_code() {
 }
 
 wait_code() {
-  local url="$1" want="$2" name="$3" log="$4" tries=0
+  local url="$1" want="$2" name="$3" log="$4" pgid="$5" tries=0
   until [[ "$(http_code "$url")" == "$want" ]]; do
+    if ! group_alive "$pgid"; then
+      echo "$name 的进程组 $pgid 已经退出，$url 等不到 ${want}，日志尾巴："
+      tail -30 "$log"
+      exit 1
+    fi
     tries=$((tries + 1))
     if [[ $tries -gt 120 ]]; then
       echo "等了 60 秒 $url 还不是 ${want}，$name 的日志尾巴："
@@ -178,9 +183,9 @@ entry1() {
       require_free "$web"
       start entry1 mock env API_PORT="$api" pnpm --filter @baize/web mock
       start entry1 web env API_PORT="$api" WEB_PORT="$web" pnpm --filter @baize/web dev
-      wait_code "http://127.0.0.1:$api/api/health" 200 mock "$RUN/entry1/mock.log"
-      wait_code "http://127.0.0.1:$web/" 200 web "$RUN/entry1/web.log"
-      wait_code "http://127.0.0.1:$web/api/health" 200 "web→mock 代理" "$RUN/entry1/web.log"
+      wait_code "http://127.0.0.1:$api/api/health" 200 mock "$RUN/entry1/mock.log" "$(cat "$RUN/entry1/mock.pgid")"
+      wait_code "http://127.0.0.1:$web/" 200 web "$RUN/entry1/web.log" "$(cat "$RUN/entry1/web.pgid")"
+      wait_code "http://127.0.0.1:$web/api/health" 200 "web→mock 代理" "$RUN/entry1/web.log" "$(cat "$RUN/entry1/web.pgid")"
       echo "打开 http://localhost:$web"
       ;;
     doctor)
@@ -288,8 +293,8 @@ entry2() {
       report_migrations
       start entry2 control-plane "$SELF" _exec-control-plane
       start entry2 web env API_PORT="$api" WEB_PORT="$web" pnpm --filter @baize/web dev
-      wait_code "http://127.0.0.1:$cp/api/bots" 401 control-plane "$RUN/entry2/control-plane.log"
-      wait_code "http://127.0.0.1:$web/api/bots" 401 "web→控制面 代理" "$RUN/entry2/web.log"
+      wait_code "http://127.0.0.1:$cp/api/bots" 401 control-plane "$RUN/entry2/control-plane.log" "$(cat "$RUN/entry2/control-plane.pgid")"
+      wait_code "http://127.0.0.1:$web/api/bots" 401 "web→控制面 代理" "$RUN/entry2/web.log" "$(cat "$RUN/entry2/web.pgid")"
       if [[ $with_agent -eq 1 ]]; then start_agent "$cp"; fi
       echo "打开 http://localhost:$web"
       ;;
