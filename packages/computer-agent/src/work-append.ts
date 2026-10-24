@@ -1,4 +1,5 @@
 import type { UplinkAck, UplinkRejection, WorkAppend, WorkAppendResult } from "@baize/shared";
+import { OversizedUplink } from "./frame-limit.js";
 
 type Result = WorkAppendResult | { readonly kind: "disconnected" };
 type Stored = { readonly seq: number; readonly body: WorkAppend };
@@ -68,6 +69,11 @@ export class WorkAppendChannel {
           this.#options.send(stored);
         })
         .catch((error: unknown) => {
+          // 运行器已按字节切批，到这里还超限就让镜像停流；回 disconnected 它会拿同一批反复重试。
+          if (error instanceof OversizedUplink) {
+            this.#settle(waiting, { kind: "invalid" });
+            return;
+          }
           this.#settle(waiting, { kind: "disconnected" });
           this.#options.failed(error);
         });

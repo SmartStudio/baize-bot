@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type WebSocket as WebSocketType } from "ws";
 import {
+  AGENT_FRAME_MAX_BYTES,
   AgentCloseCode,
   AgentStatusLine,
   AgentToControl,
@@ -311,7 +312,7 @@ function startControlPlane(
     kind?: ComputerKind;
   } = {},
 ) {
-  const server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+  const server = new WebSocketServer({ port: 0, host: "127.0.0.1", maxPayload: AGENT_FRAME_MAX_BYTES });
   const sockets: WebSocketType[] = [];
   const messages: AgentToControl[] = [];
   const uplinks: { stream: string; seq: number; type: AgentToControl["type"] }[] = [];
@@ -1020,6 +1021,68 @@ describe("电脑代理连控制面", () => {
     const replay = await server.waitForMessage("run_done", 1);
     expect(replay.runId).toBe("run-1");
     expect(hookCalls).toBe(2);
+  });
+
+  it("超过单帧上限的可靠上行截短后送达，截不下的丢掉记日志，后面的帧照常到、连接不被 1009 关掉", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const huge = "长".repeat(Math.ceil(AGENT_FRAME_MAX_BYTES / 3) + 1024);
+    const logs: string[] = [];
+    spawnAgent(await server.url(), {
+      log: (line) => logs.push(line),
+      makeRunner: (config) => ({
+        ...runnerOf(config, runnerCalls()),
+        async prompt(message) {
+          const lane = { runId: message.runId, botId: message.botId, groupId: message.groupId };
+          config.send({ type: "bot_text_done", ...lane, messageId: MessageId.parse("msg-1"), text: huge });
+          config.send({
+            type: "bot_tool_call",
+            ...lane,
+            callId: "call-1",
+            tool: "write",
+            view: { kind: "write", path: "a.txt", preview: [], raw: { content: huge } },
+            status: "ok",
+            durationMs: 1,
+          });
+          config.send({
+            type: "bot_tool_call",
+            ...lane,
+            callId: "call-2",
+            tool: "bash",
+            view: { kind: "bash", command: huge },
+            status: "running",
+            durationMs: null,
+          });
+          config.send({ type: "agent_error", code: "runner_failed", detail: huge, ...lane });
+          config.send({ type: "run_done", ...lane, steps: 1, inputTokens: 2, outputTokens: 3 });
+        },
+      }),
+    });
+    const socket = await server.waitForSocket(1);
+    const closes: number[] = [];
+    socket.on("close", (code) => closes.push(code));
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied", 1);
+    socket.send(JSON.stringify(promptMessage));
+
+    const done = await server.waitForMessage("run_done", 1, 15_000);
+    expect(done.runId).toBe("run-1");
+    expect(closes).toEqual([]);
+    expect(server.sockets).toHaveLength(1);
+    expect(server.uplinks.map((uplink) => [uplink.seq, uplink.type])).toEqual([
+      [1, "bot_text_done"],
+      [2, "bot_tool_call"],
+      [3, "agent_error"],
+      [4, "run_done"],
+    ]);
+    const text = await server.waitForMessage("bot_text_done", 1);
+    expect(text.text.endsWith("…（内容过长，后面的已截掉）")).toBe(true);
+    const tool = await server.waitForMessage("bot_tool_call", 1);
+    expect(tool.callId).toBe("call-1");
+    expect(tool.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    const error = await server.waitForMessage("agent_error", 1);
+    expect(error.detail.endsWith("…（内容过长，后面的已截掉）")).toBe(true);
+    expect(logs).toContain("bot_tool_call 截短后仍超过单帧上限，不进发件箱");
   });
 
   it.each(["remote", "local"] as const)("welcome 报的电脑类型 %s 原样交给运行器", async (kind) => {
