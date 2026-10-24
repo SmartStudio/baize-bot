@@ -661,7 +661,7 @@ describe("Bot 报数", () => {
     }
   });
 
-  it("label 对得上挂着的「Bot 报的数」就进那个指标，对不上进目标那个", async () => {
+  it("label 对得上挂着的「Bot 报的数」就进那个指标，不管目标对的是哪个", async () => {
     const server = await boot(windowClock());
     const owner = await makeOwner(server);
     let agent: AgentClient | null = null;
@@ -679,20 +679,131 @@ describe("Bot 报数", () => {
       ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
       expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
       const prompt = await agent.expect("prompt");
-      const report = { type: "metric_report", runId: prompt.runId, botId: prompt.botId, groupId } as const;
+      const run = { runId: prompt.runId, botId: prompt.botId, groupId } as const;
 
-      agent.send({ ...report, label: "互动率", value: 3.5 });
-      agent.send({ ...report, label: "粉丝数", value: 1200 });
-      let updated = await nextOfType(owner.push, "task_updated");
-      while (updated.task.metric === null) updated = await nextOfType(owner.push, "task_updated");
+      agent.send({ type: "metric_report", ...run, label: "互动率", value: 3.5 });
+      agent.send({ type: "metric_report", ...run, label: "粉丝", value: 1200 });
+      agent.send({ type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 });
+      await agent.ack(prompt.runId, 1);
 
+      const after = await taskOf(owner.client, groupId);
       expect(
-        (await taskOf(owner.client, groupId)).metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
-        "「粉丝数」不是挂着的名字，记到目标对的「粉丝」上",
+        after.metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
+        "各落各的名字",
       ).toEqual([
         ["reported:粉丝", 1200],
         ["reported:互动率", 3.5],
       ]);
+      expect(after.metric?.current, "目标对的粉丝").toBe(1200);
+    } finally {
+      agent?.close();
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("挂了「Bot 报的数」而 label 一个都对不上，整条丢掉，不落进目标对的那个", async () => {
+    const server = await boot(windowClock());
+    const owner = await makeOwner(server);
+    let agent: AgentClient | null = null;
+    try {
+      const { groupId, task } = await makeProject(owner, "推广小红书");
+      await attachMetrics(
+        owner,
+        task,
+        [
+          { kind: "reported", platform: "xiaohongshu", label: "粉丝" },
+          { kind: "reported", platform: "xiaohongshu", label: "互动率" },
+        ],
+        "reported:互动率",
+      );
+      ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
+      const prompt = await agent.expect("prompt");
+      const run = { runId: prompt.runId, botId: prompt.botId, groupId } as const;
+
+      agent.send({ type: "metric_report", ...run, label: "互动率", value: 3.5 });
+      agent.send({ type: "metric_report", ...run, label: "粉丝数", value: 1200 });
+      agent.send({ type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 });
+      await agent.ack(prompt.runId, 1);
+
+      const after = await taskOf(owner.client, groupId);
+      expect(
+        after.metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
+        "「粉丝数」不是挂着的名字，哪个指标都不动",
+      ).toEqual([
+        ["reported:粉丝", null],
+        ["reported:互动率", 3.5],
+      ]);
+      expect(after.metric?.current, "目标进度还是互动率自己的数").toBe(3.5);
+      expect(await samplesOf(groupId), "只落了对得上的那一条").toEqual([{ value: "3.5", source: "reported" }]);
+    } finally {
+      agent?.close();
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("目标对的是读数器读的星数、又没挂「Bot 报的数」，Bot 报的数整条丢掉，星数不被顶掉", async () => {
+    const clock = windowClock();
+    const server = await boot(clock);
+    const owner = await makeOwner(server);
+    let agent: AgentClient | null = null;
+    try {
+      const repo = "baize/report-on-polled";
+      const { groupId } = await starsProject(owner, repo, "ghu_report_on_polled");
+      github.stars.set(repo, 500);
+      await server.metrics.tick();
+      expect((await nextOfType(owner.push, "task_updated")).task.metric?.current).toBe(500);
+      ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
+      const prompt = await agent.expect("prompt");
+      const run = { runId: prompt.runId, botId: prompt.botId, groupId } as const;
+
+      agent.send({ type: "metric_report", ...run, label: "小红书粉丝", value: 9999 });
+      agent.send({ type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 });
+      await agent.ack(prompt.runId, 1);
+
+      const after = await taskOf(owner.client, groupId);
+      expect(after.metrics.map(({ key, metric }) => [key, metric?.current ?? null])).toEqual([
+        [`github_stars:${repo}`, 500],
+      ]);
+      expect(after.metric?.current, "目标进度还是读到的星数").toBe(500);
+      expect(await samplesOf(groupId), "没多出 reported 样本").toEqual([{ value: "500", source: "github_stars" }]);
+    } finally {
+      agent?.close();
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("没挂「Bot 报的数」、目标对手记那条时，报的数照旧进手记那条，挂着的星数不动", async () => {
+    const server = await boot(windowClock());
+    const owner = await makeOwner(server);
+    let agent: AgentClient | null = null;
+    try {
+      const repo = "baize/report-to-manual";
+      const accountId = await apiAccount(owner, "github", "ghu_report_to_manual");
+      const { groupId, task } = await makeProject(owner, "推广白泽");
+      const patched = await owner.client.patch(`/api/tasks/${task.id}`, {
+        goal: { target: 1000, unit: "篇", dueAt: null, metric: null },
+        metricSources: [{ kind: "github_stars", accountId, repo }],
+      });
+      expect(patched.status).toBe(200);
+      await nextOfType(owner.push, "task_updated");
+      ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 数一下" })).status).toBe(201);
+      const prompt = await agent.expect("prompt");
+
+      agent.send({ type: "metric_report", runId: prompt.runId, botId: prompt.botId, groupId, label: "篇数", value: 7 });
+      let updated = await nextOfType(owner.push, "task_updated");
+      while (updated.task.metric === null) updated = await nextOfType(owner.push, "task_updated");
+
+      expect(updated.task.metric?.current, "目标对的手记那条").toBe(7);
+      expect(updated.task.metrics.map(({ key, metric }) => [key, metric?.current ?? null])).toEqual([
+        [`github_stars:${repo}`, null],
+      ]);
+      expect(await samplesOf(groupId)).toEqual([{ value: "7", source: "reported" }]);
     } finally {
       agent?.close();
       owner.close();

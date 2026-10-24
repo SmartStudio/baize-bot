@@ -304,6 +304,41 @@ describe("一个项目挂多个指标", () => {
       s.close();
     }
   });
+
+  it("PATCH 目标不带 metric 就保留原来对的那个，显式给 null 才改对手记那条", async () => {
+    const s = await session();
+    try {
+      const { group, task } = await startProject(s, OFFER);
+      const github = await addAccount(s, "github");
+      const metricSources = [{ kind: "github_stars", accountId: github, repo: "acme/keep" }] as const;
+      const onStars = { target: 1000, unit: "星", dueAt: null, metric: "github_stars:acme/keep" };
+      expect((await s.client.patch(`/api/tasks/${task.id}`, { metricSources, goal: onStars })).status).toBe(200);
+      expect((await s.client.post(`/api/projects/${group.id}/metric`, { value: 321 })).status).toBe(200);
+
+      const retarget = await s.client.patch(`/api/tasks/${task.id}`, {
+        goal: { target: 2000, unit: "星", dueAt: "2030-12-31T16:00:00.000Z" },
+      });
+      expect(retarget.status).toBe(200);
+      const kept = await taskOf(s.client, group.id);
+      expect(kept.goal, "只改目标数和期限，目标还对着星数").toEqual({
+        target: 2000,
+        unit: "星",
+        dueAt: "2030-12-31T16:00:00.000Z",
+        metric: "github_stars:acme/keep",
+      });
+      expect(kept.metric?.current, "进度还按星数").toBe(321);
+
+      const toManual = await s.client.patch(`/api/tasks/${task.id}`, {
+        goal: { target: 2000, unit: "星", dueAt: null, metric: null },
+      });
+      expect(toManual.status).toBe(200);
+      const manual = await taskOf(s.client, group.id);
+      expect(manual.goal?.metric, "显式给 null 改对手记那条").toBeNull();
+      expect(manual.metric, "手记那条还没有数").toBeNull();
+    } finally {
+      s.close();
+    }
+  });
 });
 
 describe("手动记数", () => {

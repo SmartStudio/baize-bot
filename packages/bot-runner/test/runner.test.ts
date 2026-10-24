@@ -5929,6 +5929,43 @@ describe("运行器的指标上报", () => {
     expect(seen.toolResults.join("")).toContain(expected);
   });
 
+  it.each([
+    [
+      "挂了要报的数而 label 对不上",
+      topicTask({
+        goal: { target: 1000, unit: "个", dueAt: null, metric: "reported:互动率" },
+        metricSources: [
+          { kind: "reported", platform: "xiaohongshu", label: "粉丝" },
+          { kind: "reported", platform: "xiaohongshu", label: "互动率" },
+        ],
+      }),
+      ["「粉丝」「互动率」", "label 照这个名字写"],
+    ],
+    [
+      "目标对的是读数器读的星数",
+      topicTask({
+        goal: { target: 1000, unit: "星", dueAt: null, metric: "github_stars:baize/bot" },
+        metricSources: [{ kind: "github_stars", accountId: AccountId.parse("acc-1"), repo: "baize/bot" }],
+      }),
+      ["由读数器读", "不用报"],
+    ],
+  ] as const)("%s：不上报，终态 failed，告诉 Bot 怎么改", async (_name, task, expected) => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      script: scriptRecording(seen, [["报一下粉丝数", callTool("report_metric", { value: 1200, label: "粉丝数" })]]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "报一下粉丝数", { task, members: TWO_MEMBERS }));
+
+    expect(metricReports(h.sent), "落不到任何指标的数不发").toEqual([]);
+    expect(shape(h.sent).filter((s) => s.startsWith("bot_tool_call"))).toEqual([
+      "bot_tool_call:running",
+      "bot_tool_call:failed",
+    ]);
+    for (const text of expected) expect(seen.toolResults.join("")).toContain(text);
+  });
+
   it("任务卡带目标时 prompt 里有「412 / 1000 星」这一行，Bot 排计划时看得到差多少", async () => {
     const seen = recorder();
     const h = await startHarness({
