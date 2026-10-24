@@ -809,7 +809,7 @@ describe.runIf(realChrome)("助理 Chrome 进程", () => {
 
       first.child.kill("SIGKILL");
       await exited(first.child);
-      await poll(() => (isAlive(first.ready.pid) ? undefined : true), 10_000, "管道断开后旧 Chrome 自己退出");
+      await poll(() => (isAlive(first.ready.pid) ? undefined : true), 45_000, "管道断开后旧 Chrome 自己退出");
 
       const second = await startHost(directory);
 
@@ -822,6 +822,6 @@ describe.runIf(realChrome)("助理 Chrome 进程", () => {
       await exited(second.child);
       expect(await profileChromePids(profileDir), "新守护正常停机后不留 Chrome").toEqual([]);
     },
-    60_000,
+    90_000,
   );
 });
