@@ -8,6 +8,8 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+# 根 package.json 的 pnpm.patchedDependencies 指向 patches/，install 前要在。
+COPY patches patches
 COPY packages/shared/package.json packages/shared/
 COPY packages/control-plane/package.json packages/control-plane/
 COPY packages/bot-runner/package.json packages/bot-runner/
