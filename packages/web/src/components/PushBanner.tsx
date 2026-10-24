@@ -16,7 +16,7 @@ export const PushBanner = ({ link }: { link: PushLink }) => {
   }, [link]);
 
   return (
-    <div className="push-status" aria-live="polite">
+    <div aria-live="polite">
       {lagging ? (
         <div className="push-banner" data-testid="push-banner">
           <WifiOff size={14} aria-hidden="true" />
