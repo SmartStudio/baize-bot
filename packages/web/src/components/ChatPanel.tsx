@@ -416,6 +416,10 @@ export const ChatPanel = ({
                 重试
               </button>
             </p>
+          ) : messages.length === 0 && edge === undefined ? (
+            <p className="empty" data-testid="history-loading">
+              正在加载消息…
+            </p>
           ) : messages.length === 0 ? (
             <p className="empty">
               {team ? "群建好了。直接说话大家轮流答，@ 谁就只派给谁。" : "建好了。今天把什么活交出去？"}

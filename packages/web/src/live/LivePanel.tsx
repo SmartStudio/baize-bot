@@ -81,7 +81,7 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
           bitmap.close();
           setHasFrame(true);
         })
-        .catch(() => undefined)
+        .catch((cause: unknown) => console.warn("画面这一帧没解出来", cause))
         .finally(() => {
           drawing = false;
           pump();

@@ -470,7 +470,7 @@ export const TodayPage = ({
     return (
       <main className="today-page today-loading" data-testid="today-page">
         <p>今天的清单没取到。</p>
-        <button type="button" className="ghost-button" onClick={() => void refresh()}>
+        <button type="button" className="ghost-button" data-testid="today-retry" onClick={() => void refresh()}>
           重试
         </button>
       </main>

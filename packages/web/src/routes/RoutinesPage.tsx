@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ChevronLeft, Clock, Copy, Globe, Pause, Pencil, Play, Plus, ShieldCheck, X } from "lucide-react";
 import { BotId, OnFailure, type Bot, type Routine, type RoutineId, type TriggerInput } from "@baize/shared";
 import { BotAvatar } from "../components/BotAvatar.js";
+import { useFailureToast } from "../components/Toasts.js";
 import { useApp } from "../state/app.js";
 import type { Conversation } from "../state/types.js";
 import { MY_ROUTINES } from "../state/routines.js";
@@ -75,6 +76,7 @@ const TriggerChip = ({
   onChange: (next: TriggerInput) => void;
   onRemove: () => void;
 }) => {
+  const failed = useFailureToast();
   const preset = trigger.kind === "cron" ? cronPresetOf(trigger.expr) : null;
   const label = CRON_PRESETS.find((item) => item.id === preset?.id)?.label;
   return (
@@ -115,7 +117,11 @@ const TriggerChip = ({
             className="icon-button"
             aria-label="复制 webhook 地址"
             data-testid="webhook-copy"
-            onClick={() => void navigator.clipboard.writeText(hookUrlOf(trigger.token ?? "")).catch(() => undefined)}
+            onClick={() =>
+              void navigator.clipboard
+                .writeText(hookUrlOf(trigger.token ?? ""))
+                .catch(failed("没复制上，选中地址手动复制"))
+            }
           >
             <Copy size={12} aria-hidden="true" />
           </button>
@@ -292,13 +298,17 @@ const RoutineRow = ({
   onResult: (() => void) | null;
 }) => {
   const { actions } = useApp();
+  const failed = useFailureToast();
   const last = routine.runs[0];
   // 回包前那一下运行记录还没多出来，靠本地这一笔挡住连点。
   const [starting, setStarting] = useState(false);
   const running = starting || last?.status === "running";
   const trial = () => {
     setStarting(true);
-    void actions.runRoutine(routine.id).finally(() => setStarting(false));
+    void actions
+      .runRoutine(routine.id)
+      .catch(failed("没开始试跑，再试一次"))
+      .finally(() => setStarting(false));
   };
   return (
     <div
@@ -382,6 +392,7 @@ const RoutineRow = ({
 
 export const RoutinesPage = () => {
   const { state, actions } = useApp();
+  const failed = useFailureToast();
   const navigate = useNavigate();
   const [view, setView] = useState<View>({ kind: "list" });
   const [deleteRoutineId, setDeleteRoutineId] = useState<RoutineId | null>(null);
@@ -505,10 +516,7 @@ export const RoutinesPage = () => {
                   data-testid="routine-delete-confirm"
                   onClick={() => {
                     setDeleteRoutineId(null);
-                    void actions
-                      .deleteRoutine(routine.id)
-                      .then(toList)
-                      .catch(() => undefined);
+                    void actions.deleteRoutine(routine.id).then(toList).catch(failed("没删掉，再试一次"));
                   }}
                 >
                   确认删除
@@ -536,13 +544,16 @@ export const RoutinesPage = () => {
               type="button"
               className="ghost-button"
               data-testid="routine-run-now"
-              onClick={() => void actions.runRoutine(routine.id)}
+              onClick={() => void actions.runRoutine(routine.id).catch(failed("没开始试跑，再试一次"))}
             >
               <Play size={14} aria-hidden="true" />
               试跑一次
             </button>
           </div>
-          <RoutineFields value={formOf(routine)} onPatch={(patch) => void actions.updateRoutine(routine.id, patch)} />
+          <RoutineFields
+            value={formOf(routine)}
+            onPatch={(patch) => void actions.updateRoutine(routine.id, patch).catch(failed("改动没存上，再试一次"))}
+          />
           <RunList runs={routine.runs} />
         </div>
       </main>

@@ -4,6 +4,7 @@ import type { LiveId } from "@baize/shared";
 import { useApp } from "../state/app.js";
 import { shownLive } from "../state/live.js";
 import { LIVE_TEXT } from "../components/messages/content.js";
+import { useFailureToast } from "../components/Toasts.js";
 import { LivePanel } from "./LivePanel.js";
 import { TerminalPanel } from "./TerminalPanel.js";
 
@@ -11,6 +12,7 @@ import { TerminalPanel } from "./TerminalPanel.js";
 // 就是几条 socket 在同一台电脑上互相顶掉。摆哪块由 shownLive 定；没摆着的接手在右下角给提示，哪一页都看得到。
 export const LiveHost = () => {
   const { state, actions } = useApp();
+  const failed = useFailureToast();
   // 「稍后」只收起提示，卡片还在群里。收起接手面板也算：结束按钮发出去到 live_closed 回来之间，提示不该闪一下。
   const [later, setLater] = useState<ReadonlySet<LiveId>>(() => new Set());
   if (state.status !== "ready") return null;
@@ -29,7 +31,7 @@ export const LiveHost = () => {
         <TerminalPanel
           key={shown.session.liveId}
           session={shown.session}
-          onDismiss={() => void actions.hideTerminal(shown.session.liveId).catch(() => undefined)}
+          onDismiss={() => void actions.hideTerminal(shown.session.liveId).catch(failed("终端没收起，再试一次"))}
         />
       ) : (
         <LivePanel
@@ -37,10 +39,11 @@ export const LiveHost = () => {
           session={shown.session}
           onDismiss={
             shown.kind === "login"
-              ? () => void actions.dismissLogin(shown.accountId, shown.attempt).catch(() => undefined)
+              ? () =>
+                  void actions.dismissLogin(shown.accountId, shown.attempt).catch(failed("登录画面没收起，再试一次"))
               : () => {
                   putAside(shown.session.liveId);
-                  void actions.hideTakeover(shown.session.liveId).catch(() => undefined);
+                  void actions.hideTakeover(shown.session.liveId).catch(failed("画面没收起，再试一次"));
                 }
           }
         />
@@ -73,7 +76,7 @@ export const LiveHost = () => {
                   type="button"
                   className="primary-button"
                   data-testid="takeover-hint-open"
-                  onClick={() => void actions.openTakeover(liveId).catch(() => undefined)}
+                  onClick={() => void actions.openTakeover(liveId).catch(failed("画面没打开，再试一次"))}
                 >
                   {LIVE_TEXT.open}
                 </button>

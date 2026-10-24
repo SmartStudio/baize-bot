@@ -1,6 +1,7 @@
 import { Check, TriangleAlert } from "lucide-react";
 import type { Account, AccountId, Computer } from "@baize/shared";
 import type { LoginFlow } from "../state/types.js";
+import { useFailureToast } from "./Toasts.js";
 import { LOGIN_FAILURE_TEXT, PLATFORM, beforeChinese, computerName, timeText } from "./messages/content.js";
 
 type Props = {
@@ -49,6 +50,7 @@ const noteOf = (account: Account, flow: LoginFlow | undefined, where: string): {
   };
 
 export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
+  const failed = useFailureToast();
   const where = computer === undefined ? "账号所在的电脑" : computerName(computer);
   const state = stateOf(account, flow);
   const common = {
@@ -94,7 +96,7 @@ export const LoginCard = ({ account, computer, flow, onLogin }: Props) => {
           className="primary-button today-row-action"
           data-testid="login-open"
           disabled={state === "opening"}
-          onClick={() => void onLogin(account.id).catch(() => undefined)}
+          onClick={() => void onLogin(account.id).catch(failed("登录窗口没打开，再试一次"))}
         >
           {state === "opening" ? "等你登录…" : "打开登录窗口"}
         </button>

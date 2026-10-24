@@ -659,7 +659,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
         const timer = setTimeout(() => {
           if (session.signal.aborted) return;
           void loadAccounts()
-            .catch(() => undefined)
+            .catch((cause: unknown) => console.warn("登录超时后重拉账号没成", cause))
             .then(() => settle({ status: "lapsed" }));
         }, LOGIN_TIMEOUT_MS);
         session.signal.addEventListener("abort", () => clearTimeout(timer));
@@ -792,7 +792,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
             // 卡和计数一起收敛；错还照抛，让卡上说一句。补读本身失败就只剩这句话，404 和网络错也一样。
             if (cause instanceof RequestFailed && cause.status === 409) {
               const fetched = nextSeq();
-              const message = await api.message(messageId).catch(() => undefined);
+              const message = await api.message(messageId).catch((error: unknown) => {
+                console.warn("偏好卡已被别处结掉，取回结论没成", error);
+                return undefined;
+              });
               if (message !== undefined) {
                 put({ type: "message_upserted", message, seq: fetched });
                 if (message.body.kind === "preference_offer" && message.body.status === "saved") {
@@ -800,7 +803,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
                   const listed = nextSeq();
                   await api.preferences(botId).then(
                     (preferences) => put({ type: "preferences_loaded", botId, preferences, seq: listed }),
-                    () => undefined,
+                    (error: unknown) => console.warn("偏好卡已被别处存下，重拉偏好列表没成", error),
                   );
                 }
               }
@@ -822,7 +825,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
               const fetched = nextSeq();
               await api.message(messageId).then(
                 (message) => put({ type: "message_upserted", message, seq: fetched }),
-                () => undefined,
+                (error: unknown) => console.warn("例行卡已被别处结掉，取回结论没成", error),
               );
             }
             throw cause;
@@ -969,8 +972,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
   // 卡片上的「从哪台电脑发」和账号页都读这两张表。拉不到只是少写一句电脑名，不该拖住整个入口。
   useEffect(() => {
     if (session === null) return;
-    actions.loadAccounts().catch(() => undefined);
-    actions.loadLive().catch(() => undefined);
+    actions.loadAccounts().catch((cause: unknown) => console.warn("账号和电脑没拉到", cause));
+    actions.loadLive().catch((cause: unknown) => console.warn("电脑上开着的画面没拉到", cause));
   }, [session, actions]);
 
   useEffect(() => {
@@ -995,7 +998,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       if (countsTimer !== null) return;
       countsTimer = setTimeout(() => {
         countsTimer = null;
-        if (!cancelled) actions.loadPendingCounts().catch(() => undefined);
+        if (!cancelled) actions.loadPendingCounts().catch((cause: unknown) => console.warn("待办角标没刷新上", cause));
       }, 200);
     };
     // 断线期间的登录结果收不到，重拉账号把登上的认回来，然后把重拉之前就在等的卡结掉。
@@ -1027,7 +1030,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       stateRef,
       refreshPendingCounts,
       recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
-      reloadChoices: (groupId, after) => void actions.loadComputerChoices(groupId, after).catch(() => undefined),
+      reloadChoices: (groupId, after) =>
+        void actions
+          .loadComputerChoices(groupId, after)
+          .catch((cause: unknown) => console.warn("群里各成员选的电脑没拉到", cause)),
       openNotice: (notice) => {
         put({ type: "notices_read" });
         const { path, state } = noticeTarget(notice);
@@ -1092,7 +1098,8 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
 
   const groupsVersion = state.status === "ready" ? state.groupsVersion : 0;
   useEffect(() => {
-    if (session !== null && groupsVersion > 0) actions.loadGroups().catch(() => undefined);
+    if (session !== null && groupsVersion > 0)
+      actions.loadGroups().catch((cause: unknown) => console.warn("群列表没刷新上", cause));
   }, [session, groupsVersion, actions]);
 
   const theme = state.status === "ready" ? state.settings.theme : "system";
