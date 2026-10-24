@@ -1,8 +1,16 @@
-import { AttachmentId, type AttachmentMime, type BotId, type GroupId, type UserId } from "@baize/shared";
-import { and, eq } from "drizzle-orm";
+import {
+  AttachmentId,
+  type AttachmentMime,
+  type BotId,
+  type DraftImage,
+  type GroupId,
+  type UserId,
+} from "@baize/shared";
+import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { attachments, bots, groupMembers, groups } from "../db/schema.js";
 import { newId } from "../ids.js";
+import type { Tx } from "./messages.js";
 import { lockOwner, shareBotRunsLock } from "./runs.js";
 
 export async function canUploadAttachment(
@@ -68,6 +76,46 @@ export async function storeAttachment(
     return AttachmentId.parse(stored.id);
   });
 }
+
+const FACTS = { id: attachments.id, sha256: attachments.sha256, mime: attachments.mime, size: attachments.size };
+
+export async function findOwnedAttachmentFacts(db: Db | Tx, ownerId: UserId, ids: readonly AttachmentId[]) {
+  if (ids.length === 0) return [];
+  return db
+    .select(FACTS)
+    .from(attachments)
+    .where(and(eq(attachments.ownerId, ownerId), inArray(attachments.id, [...ids])));
+}
+
+export async function findOwnedAttachmentBytes(db: Db, ownerId: UserId, ids: readonly AttachmentId[]) {
+  if (ids.length === 0) return [];
+  return db
+    .select({ ...FACTS, bytes: attachments.bytes })
+    .from(attachments)
+    .where(and(eq(attachments.ownerId, ownerId), inArray(attachments.id, [...ids])));
+}
+
+export type DraftImageMatch<R> =
+  { readonly kind: "matched"; readonly rows: readonly R[] } | { readonly kind: "missing"; readonly position: number };
+
+export function matchDraftImages<R extends { readonly id: string; readonly sha256: string; readonly mime: string }>(
+  images: readonly DraftImage[],
+  rows: readonly R[],
+): DraftImageMatch<R> {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  const matched: R[] = [];
+  for (const [index, image] of images.entries()) {
+    const row = image.kind === "attachment" ? byId.get(image.attachmentId) : undefined;
+    if (image.kind !== "attachment" || row === undefined || row.sha256 !== image.sha256 || row.mime !== image.mime) {
+      return { kind: "missing", position: index + 1 };
+    }
+    matched.push(row);
+  }
+  return { kind: "matched", rows: matched };
+}
+
+export const draftAttachmentIds = (images: readonly DraftImage[]): AttachmentId[] =>
+  images.flatMap((image) => (image.kind === "attachment" ? [image.attachmentId] : []));
 
 export async function findOwnedAttachment(db: Db, ownerId: UserId, id: AttachmentId) {
   const [row] = await db

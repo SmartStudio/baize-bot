@@ -1,4 +1,11 @@
-import type { BrowserPlatform, DraftContent, Platform, PublishFailureReason, PublishVia } from "@baize/shared";
+import type {
+  AttachmentMime,
+  BrowserPlatform,
+  DraftContent,
+  Platform,
+  PublishFailureReason,
+  PublishVia,
+} from "@baize/shared";
 
 /** externalId 为 null：电脑那边发出去了，但没读到平台上的 id。走接口的一定有。 */
 export type Published = { readonly url: string; readonly externalId: string | null };
@@ -20,8 +27,11 @@ export class TokenRejected extends PublishError {
   }
 }
 
+export type PublishImage = { readonly bytes: Buffer; readonly mime: AttachmentMime };
+
 export type ApiPublishInput = {
   readonly content: DraftContent;
+  readonly images: readonly PublishImage[];
   readonly handle: string | null;
   readonly token: string;
   readonly baseUrl: string;
@@ -29,15 +39,12 @@ export type ApiPublishInput = {
 
 export type ApiPublisher = {
   readonly via: "api";
-  /** 一条最多带几张图，0 是只发文字。 */
-  readonly maxImages: number;
   readonly baseUrl: (bases: ApiBases) => string;
   publish(input: ApiPublishInput): Promise<Published>;
 };
 
 export type ComputerPublisher = {
   readonly via: "computer";
-  readonly maxImages: number;
   readonly platform: BrowserPlatform;
   /** 电脑报上来的链接只认这个域名和它的子域。 */
   readonly host: string;
@@ -180,18 +187,29 @@ function categoriesOf(json: unknown): { id: string; name: string }[] {
 
 const TWEET = /^https:\/\/(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/;
 
-async function publishX({ content, handle, token, baseUrl }: ApiPublishInput): Promise<Published> {
+// 一次性上传，正文 JSON 里 media 放 base64：https://docs.x.com/x-api/media/upload-media 。
+async function uploadXMedia(baseUrl: string, token: string, image: PublishImage): Promise<string> {
+  const json = await call(`${baseUrl}/2/media/upload`, token, {
+    media: image.bytes.toString("base64"),
+    media_category: image.mime === "image/gif" ? "tweet_gif" : "tweet_image",
+  });
+  return stringAt(json, "data", "id");
+}
+
+async function publishX({ content, images, handle, token, baseUrl }: ApiPublishInput): Promise<Published> {
   let reply: { in_reply_to_tweet_id: string } | undefined;
   if (content.kind === "reply") {
     const target = TWEET.exec(content.replyTo.url);
     if (target?.[1] === undefined) throw new PublishError("error", "X 只能回复帖子的链接");
     reply = { in_reply_to_tweet_id: target[1] };
   }
-  const json = await call(
-    `${baseUrl}/2/tweets`,
-    token,
-    reply === undefined ? { text: content.text } : { text: content.text, reply },
-  );
+  const mediaIds: string[] = [];
+  for (const image of images) mediaIds.push(await uploadXMedia(baseUrl, token, image));
+  const json = await call(`${baseUrl}/2/tweets`, token, {
+    text: content.text,
+    ...(reply === undefined ? {} : { reply }),
+    ...(mediaIds.length === 0 ? {} : { media: { media_ids: mediaIds } }),
+  });
   const id = stringAt(json, "data", "id");
   return { url: `https://x.com/${handle ?? "i/web"}/status/${id}`, externalId: id };
 }
@@ -201,17 +219,16 @@ type Publishers = {
 };
 
 const PUBLISHERS: Publishers = {
-  github: { api: { via: "api", maxImages: 0, baseUrl: (bases) => bases.githubApiBaseUrl, publish: publishGithub } },
+  github: { api: { via: "api", baseUrl: (bases) => bases.githubApiBaseUrl, publish: publishGithub } },
   x: {
-    api: { via: "api", maxImages: 0, baseUrl: (bases) => bases.xApiBaseUrl, publish: publishX },
+    api: { via: "api", baseUrl: (bases) => bases.xApiBaseUrl, publish: publishX },
     // 只认 x.com：发布器开的就是 x.com 的发帖页，发完读的也是这个页面上的链接；twitter.com 早已整站跳到 x.com，
     // 页面上读到 twitter.com 的链接说明页面不是发布器以为的那一页，按不可信处理落管理页。
-    computer: { via: "computer", maxImages: 4, platform: "x", host: "x.com", manageUrl: "https://x.com/home" },
+    computer: { via: "computer", platform: "x", host: "x.com", manageUrl: "https://x.com/home" },
   },
   xiaohongshu: {
     computer: {
       via: "computer",
-      maxImages: 9,
       platform: "xiaohongshu",
       host: "xiaohongshu.com",
       manageUrl: "https://creator.xiaohongshu.com/new/note-manager",

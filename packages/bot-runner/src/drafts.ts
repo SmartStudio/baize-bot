@@ -10,7 +10,13 @@ import {
   type DraftContent,
   DraftId,
   type DraftImage,
+  type DraftImageFacts,
+  type DraftImageRules,
   type DraftSpec,
+  draftImageCountRefusal,
+  draftImageRefusal,
+  draftImageRules,
+  draftImagesRefusal,
   imageMime,
   type Platform,
 } from "@baize/shared";
@@ -35,9 +41,6 @@ export const DRAFT_RULE =
 const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
 
 const VIA_LABEL: Record<AccountConfig["via"], string> = { api: "接口授权", computer: "电脑浏览器登录" };
-
-// 和控制面发布器表的数一致：走接口的图要控制面上传，还没做；走电脑的由浏览器发布器传图，X 一条最多 4 张。
-const maxImages = (account: AccountConfig): number => (account.via === "api" ? 0 : account.platform === "x" ? 4 : 9);
 
 export const accountLabel = (account: AccountConfig): string =>
   `${PLATFORM_LABEL[account.platform]} ${account.handle === null ? "（没有账号名）" : `@${account.handle}`}`;
@@ -98,9 +101,9 @@ const EDIT_PARAMS = Type.Object({ draftId: Type.String(), content: CONTENT });
 const PLAN_PARAMS = Type.Object({ title: Type.String(), drafts: Type.Array(DRAFT_INPUT) });
 
 const CONTENT_GUIDE =
-  "各平台的要求：X 正文不超过 280 字符，接口授权的号不带图，电脑浏览器登录的号最多 4 张图；" +
+  "各平台的要求：X 正文不超过 280 字符，最多 4 张图，接口授权的号每张不超过 5 MB、GIF 只能单独一张；" +
   "同一个平台既有接口授权又有电脑浏览器登录的号，没说用哪个就用接口授权那个；GitHub 要写 title，github 里写 repo（owner/name）和 as（issue 或 discussion），不带图；" +
-  "小红书要写 title，可以带图（images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算）。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
+  "小红书要写 title，最多 9 张图。images 每张给一个 path，图要先放进你的工作目录，相对路径按工作目录算。回复别人的帖子 kind 写 reply，replyTo 带原帖链接、作者和原话。" +
   "scheduledAt 是想发出的时间，写成 2026-09-28T09:00:00+08:00 这样，不写就等用户定。";
 
 const MAX_IMAGE_BYTES = ATTACHMENT_MAX_BYTES;
@@ -125,7 +128,13 @@ interface ImageUpload {
   readonly live: (() => AttachmentLive) | undefined;
 }
 
-async function imageOf(path: string, dirs: ImageDirs, where: string, upload: ImageUpload): Promise<DraftImage> {
+async function imageOf(
+  path: string,
+  dirs: ImageDirs,
+  where: string,
+  upload: ImageUpload,
+  rules: DraftImageRules | null,
+): Promise<{ readonly image: DraftImage; readonly facts: DraftImageFacts }> {
   const label = `${where}配图「${path}」`;
   const loop = `${label}是符号链接绕成了环，换成真正的图片文件。`;
   const logical = logicalResolve(path, dirs.workDir);
@@ -165,6 +174,9 @@ async function imageOf(path: string, dirs: ImageDirs, where: string, upload: Ima
     if (bytes.length > MAX_IMAGE_BYTES) throw new Error(`${label}超过 20 MiB，压小一点再起草。`);
     const mime = imageMime(bytes);
     if (mime === null) throw new Error(`${label}不是 PNG、JPEG、WebP 或 GIF 图片，换一张图。`);
+    const facts = { mime, size: bytes.length };
+    const refusal = rules === null ? null : draftImageRefusal(rules, facts);
+    if (refusal !== null) throw new Error(`${label}${refusal}，这个账号发不了，压小一点再起草。`);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const copy = join(dirs.draftsDir, attachmentCopyName(sha256, mime));
     const temporary = `${copy}.${randomUUID()}.tmp`;
@@ -175,21 +187,30 @@ async function imageOf(path: string, dirs: ImageDirs, where: string, upload: Ima
       { botId: upload.run.botId, groupId: upload.run.groupId, sha256, mime },
       bytes,
     );
-    return { kind: "attachment", attachmentId: uploaded.attachmentId, sha256, mime };
+    return { image: { kind: "attachment", attachmentId: uploaded.attachmentId, sha256, mime }, facts };
   } finally {
     await file.close();
   }
 }
 
 // 协议里的对象都是 strict，模型多写一个键就整条被拒，所以只挑协议要的字段。
+// rules 是 null 的只有改稿：edit_draft 不知道草稿属于哪个号，配图合不合由控制面挡。
 const contentOf = async (
   content: Static<typeof CONTENT>,
   dirs: ImageDirs,
   where: string,
   upload: ImageUpload,
+  rules: DraftImageRules | null,
 ): Promise<DraftContent> => {
   const images: DraftImage[] = [];
-  for (const image of content.images ?? []) images.push(await imageOf(image.path, dirs, where, upload));
+  const facts: DraftImageFacts[] = [];
+  for (const path of (content.images ?? []).map((image) => image.path)) {
+    const read = await imageOf(path, dirs, where, upload, rules);
+    images.push(read.image);
+    facts.push(read.facts);
+  }
+  const refusal = rules === null ? null : draftImagesRefusal(rules, facts);
+  if (refusal !== null) throw new Error(`${where}${refusal}，改好再调。`);
   return content.kind === "post"
     ? {
         kind: "post",
@@ -232,18 +253,18 @@ async function specOf(
   if (account === undefined) {
     throw new Error(`${where}没有 accountId 是「${input.accountId}」的账号。${accountsHint(accounts)}`);
   }
-  const limit = maxImages(account);
-  if ((input.content.images ?? []).length > limit) {
+  const rules = draftImageRules(account.platform, account.via);
+  const counted = draftImageCountRefusal(rules, (input.content.images ?? []).length);
+  if (counted !== null) {
     throw new Error(
-      limit === 0
-        ? `${where}${PLATFORM_LABEL[account.platform]} 接口授权的号起草先不带图，去掉 images 再调。`
-        : `${where}${PLATFORM_LABEL[account.platform]} 一条最多带 ${limit} 张图，去掉几张再调。`,
+      `${where}${PLATFORM_LABEL[account.platform]} ${VIA_LABEL[account.via]}的号${counted}，` +
+        `${rules.maxImages === 0 ? "去掉 images 再调" : "去掉几张再调"}。`,
     );
   }
   return {
     draftId: DraftId.parse(randomUUID()),
     accountId: account.id,
-    content: await contentOf(input.content, dirs, where, upload),
+    content: await contentOf(input.content, dirs, where, upload, rules),
     scheduledAt: scheduledAtOf(input.scheduledAt, where),
   };
 }
@@ -315,10 +336,13 @@ export function createDraftTools(options: {
               botId: active.run.botId,
               groupId: active.run.groupId,
               draftId: parsedId.data,
-              content: await contentOf(content, options.images, "草稿没改，改好再调：", {
-                run: active.run,
-                live: options.liveHub,
-              }),
+              content: await contentOf(
+                content,
+                options.images,
+                "草稿没改，改好再调：",
+                { run: active.run, live: options.liveHub },
+                null,
+              ),
             },
             "改动",
           ),

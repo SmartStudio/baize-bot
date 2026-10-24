@@ -694,7 +694,26 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 建在哪由入口决定，不由平台决定：OAuth 回调和 `account-add` 建 `api`，`POST /api/accounts` 建 `computer`。按电脑登录（`POST /api/accounts/:id/login`）、`login_state`、今天页的登录过期行都只认 `computer` 的号；`api` 的号的 `login` 只跟着凭据代际走。
 
-发布按 `(platform, via)` 查 `publish/platforms.ts` 的 `PUBLISHERS` 一张表，不再按平台散着判。`api` 一格是控制面里调平台接口的函数（GitHub、X），`computer` 一格是 `{ host, manageUrl, maxImages }`（小红书、X），发布循环认领到的草稿带着账号的 `via`，`computer` 的下发 `publish_draft` 给账号所在电脑，`api` 的在控制面直接发。一条最多带几张图也写在这张表上（`maxImages`）：`api` 的是 0，电脑上的 X 是 4，小红书是 9，超了起草和批准都拒，免得人批了一张到电脑上才发不出去的卡。电脑报回来的帖子链接只认 https、默认端口、主机是这一格的 `host` 或它的子域，别的换成 `manageUrl`。X 的 `host` 只写 `x.com`，不认 `twitter.com`：发布器读的是发完 X 自己弹的 toast，现在都是 `x.com` 链接，多认一个域就多一个能被页面塞进来的地方，读错了只是落成主页链接。
+发布按 `(platform, via)` 查 `publish/platforms.ts` 的 `PUBLISHERS` 一张表，不再按平台散着判。`api` 一格是控制面里调平台接口的函数（GitHub、X），`computer` 一格是 `{ host, manageUrl }`（小红书、X），发布循环认领到的草稿带着账号的 `via`，`computer` 的下发 `publish_draft` 给账号所在电脑，`api` 的在控制面直接发。配图限制不在这张表上，在 shared 的 `DRAFT_IMAGE_RULES`，见下一节。电脑报回来的帖子链接只认 https、默认端口、主机是这一格的 `host` 或它的子域，别的换成 `manageUrl`。X 的 `host` 只写 `x.com`，不认 `twitter.com`：发布器读的是发完 X 自己弹的 toast，现在都是 `x.com` 链接，多认一个域就多一个能被页面塞进来的地方，读错了只是落成主页链接。
+
+### 草稿配图
+
+一条草稿能带几张图、单张多大、GIF 能不能和别的图放一起，按 `(platform, via)` 查 shared `draft-images.ts` 的 `DRAFT_IMAGE_RULES`。运行器起草、控制面落草稿（`createDraft`、`proposePlan`）、改稿、批准（`decideDraft`、`approvePlan`）、电脑上的 X 发布器都查这一张，数不各抄一份。超了起草不落、改稿不落、批准回 400，免得人批了一张发不出去或发出去少图的卡。
+
+| 平台 | 连法 | 最多几张 | 单张上限 | GIF |
+| --- | --- | --- | --- | --- |
+| X | `api` | 4 | 5 MB（5,000,000 字节） | 只能单独一张 |
+| X | `computer` | 4 | 附件本身的 20 MiB | 不限 |
+| 小红书 | `computer` | 9 | 附件本身的 20 MiB | 不限 |
+| GitHub | `api` | 0 | | |
+
+走接口的 X 照 X 的媒体限制：一条最多 4 张图或 1 张 GIF，图 5 MB（[媒体最佳实践](https://docs.x.com/x-api/media/quickstart/best-practices)）。文档没说 MB 是不是 1000 进位，按小的 5,000,000 字节算；GIF X 收到 15 MB，但一次性上传这里统一按 5 MB 卡，不做分块上传。走接口的图由控制面传，所以每张必须是这个归属人的附件（`kind: "attachment"`），id 取得到、`sha256` 和 `mime` 都和附件表上的一样，大小按附件表的 `size` 算；电脑上的路径图（`kind: "path"`）对接口号一律不收。走电脑的图由电脑上的发布器自己取，控制面只数张数。
+
+发的时候 `PublishLoop` 在拿令牌之前按草稿顺序从附件表取字节，有一张取不到或对不上就整条记 `error`。拿到令牌后逐张 `POST /2/media/upload`（[上传媒体](https://docs.x.com/x-api/media/upload-media)，JSON 体，`media` 放 base64，`media_category` 按 MIME 写 `tweet_image` 或 `tweet_gif`），回来的 `data.id` 依次放进 `POST /2/tweets` 的 `media.media_ids`。任何一张传不上去都抛 `PublishError`，帖子不发、不落 `publications`，草稿和通知走原来发布失败的那条路；401 换令牌重试时图从头再传一遍，没发出去的上传不算发了。
+
+传图要 `media.write` 权限，X 授权页的 scope 加了它。这之前授权的令牌没有这项，只发文字照常，带图的那条传图时会被 X 拒，401、403 都按原规则记登录过期、账号变过期，用户在账号页重新授权一次就带上了。
+
+GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文传图的公开接口，网页上拖图走的是没公开的上传通道（[社区讨论](https://github.com/orgs/community/discussions/46951)），不用未公开接口也不模拟网页上传，所以这一格是 0，带图起草不落。
 
 ### 加浏览器登录的账号
 

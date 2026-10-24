@@ -22,6 +22,9 @@ import {
   type PublishFailureReason,
   type PublishVia,
   type RunId,
+  draftImageCountRefusal,
+  draftImageRules,
+  draftImagesRefusal,
 } from "@baize/shared";
 import {
   and,
@@ -43,7 +46,7 @@ import type { Db } from "../db/client.js";
 import { accounts, agentOutbox, bots, contentPlans, drafts, publications } from "../db/schema.js";
 import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
-import { publisherFor } from "../publish/platforms.js";
+import { draftAttachmentIds, findOwnedAttachmentFacts, matchDraftImages } from "./attachments.js";
 import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
 import { recordApprovedEdit } from "./brand.js";
 import { appendMessage, type Tx } from "./messages.js";
@@ -75,11 +78,25 @@ export function contentHash(input: {
     .digest("hex");
 }
 
-/** 图数超过发布器能带的一律不收，免得人批了一张发不出去或发出去少图的卡。走接口的 GitHub、X 只发文字。 */
-export function contentRefusal(account: { platform: Platform; via: PublishVia }, content: DraftContent): string | null {
-  const { maxImages } = publisherFor(account.platform, account.via);
-  if (content.images.length <= maxImages) return null;
-  return maxImages === 0 ? "走接口授权的 GitHub、X 账号的草稿不能带图" : `这个账号的草稿最多带 ${maxImages} 张图`;
+/**
+ * 免得人批了一张发不出去或发出去少图的卡。走接口的图由控制面从附件表取字节去传，大小按附件表上记的算；
+ * 走电脑的图由电脑上的发布器自己取，这里只数张数。
+ */
+export async function contentRefusal(
+  db: Db | Tx,
+  ownerId: string,
+  account: { platform: Platform; via: PublishVia },
+  content: DraftContent,
+): Promise<string | null> {
+  const rules = draftImageRules(account.platform, account.via);
+  const counted = draftImageCountRefusal(rules, content.images.length);
+  if (counted !== null) return `草稿配图不合这个账号：${counted}`;
+  if (account.via === "computer" || content.images.length === 0) return null;
+  const rows = await findOwnedAttachmentFacts(db, UserId.parse(ownerId), draftAttachmentIds(content.images));
+  const matched = matchDraftImages(content.images, rows);
+  if (matched.kind === "missing") return `草稿第 ${matched.position} 张图在控制面上找不到，接口授权的号发不了`;
+  const refusal = draftImagesRefusal(rules, matched.rows);
+  return refusal === null ? null : `草稿配图不合这个账号：${refusal}`;
 }
 
 function kindRefusal(before: DraftContent, after: DraftContent): string | null {
@@ -106,7 +123,7 @@ export type DraftSource = {
 async function admit(db: Db | Tx, ownerId: UserId, spec: DraftSpec) {
   const account = await findAccountForDraft(db, ownerId, spec.accountId);
   if (account === null || account.tier === "read_only") return null;
-  if (contentRefusal(account, spec.content) !== null) return null;
+  if ((await contentRefusal(db, ownerId, account, spec.content)) !== null) return null;
   return account;
 }
 
@@ -233,7 +250,8 @@ export async function editDraft(
     const current = locked.draft;
     if (current.status === "publishing" || current.status === "published") return null;
     if (kindRefusal(current.content, content) !== null) return null;
-    if (contentRefusal({ platform: current.platform, via: locked.via }, content) !== null) return null;
+    if ((await contentRefusal(tx, owner.ownerId, { platform: current.platform, via: locked.via }, content)) !== null)
+      return null;
     const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content });
     const reopened =
       hash === current.contentHash
@@ -287,7 +305,7 @@ export async function decideDraft(
         ? { kind: "already_decided" }
         : { kind: "ok", value: { draft: toDraft(row), brand: null } };
     }
-    const approved = approval(current, locked.via, decision.content, now);
+    const approved = await approval(tx, current, locked.via, decision.content, now);
     if (approved.kind === "invalid") return approved;
     const [row] = await tx
       .update(drafts)
@@ -300,9 +318,11 @@ export async function decideDraft(
   });
 }
 
-function approval(current: DraftRow, via: PublishVia, content: DraftContent | undefined, now: Date) {
+async function approval(tx: Tx, current: DraftRow, via: PublishVia, content: DraftContent | undefined, now: Date) {
   const next = content ?? current.content;
-  const refusal = kindRefusal(current.content, next) ?? contentRefusal({ platform: current.platform, via }, next);
+  const refusal =
+    kindRefusal(current.content, next) ??
+    (await contentRefusal(tx, current.ownerId, { platform: current.platform, via }, next));
   if (refusal !== null) return { kind: "invalid" as const, error: refusal };
   const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content: next });
   const edit = editOf(current.content, next, now);
@@ -384,7 +404,7 @@ export async function approvePlan(
       let brand: BrandBook | null = null;
       for (const { draft: row, via } of locked) {
         if (row.status !== "pending") continue;
-        const approved = approval(row, via, contentFor.get(row.id), now);
+        const approved = await approval(tx, row, via, contentFor.get(row.id), now);
         if (approved.kind === "invalid") throw new Refused(approved.error);
         const [updated] = await tx
           .update(drafts)

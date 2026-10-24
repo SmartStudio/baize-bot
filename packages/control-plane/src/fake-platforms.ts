@@ -115,7 +115,7 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
           access_token: access,
           expires_in: expiresIn,
           refresh_token: refresh,
-          scope: "tweet.read users.read tweet.write offline.access",
+          scope: "tweet.read users.read tweet.write media.write offline.access",
           token_type: "bearer",
         };
   };
@@ -268,6 +268,15 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
   };
 
   const x = (path: string, body: unknown, res: ServerResponse): void => {
+    if (path === "/2/media/upload") {
+      if (typeof field(body, "media") !== "string" || typeof field(body, "media_category") !== "string") {
+        reply(res, 400, { title: "Invalid Request", detail: "media and media_category are required" });
+        return;
+      }
+      counter += 1;
+      reply(res, 200, { data: { id: `17${counter}`, media_key: `3_17${counter}` } });
+      return;
+    }
     if (path === "/2/tweets") {
       counter += 1;
       reply(res, 201, { data: { id: `18${counter}`, text: String(field(body, "text") ?? "") } });

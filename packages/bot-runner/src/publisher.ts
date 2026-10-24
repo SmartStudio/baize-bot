@@ -4,6 +4,7 @@ import {
   type BrowserPlatform,
   type ControlToAgent,
   type DraftImage,
+  draftImageRules,
   type PublishFailureReason,
 } from "@baize/shared";
 import { createHash, randomUUID } from "node:crypto";
@@ -558,7 +559,7 @@ async function publishToXiaohongshu(message: PublishDraftMessage, deps: Publishe
   );
 }
 
-const X_MAX_IMAGES = 4;
+const X_MAX_IMAGES = draftImageRules("x", "computer").maxImages;
 
 async function publishToX(message: PublishDraftMessage, deps: PublisherDeps): Promise<PublishResult> {
   const { content } = message;

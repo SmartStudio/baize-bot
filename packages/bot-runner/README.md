@@ -514,7 +514,7 @@ xiaohongshu-mcp 指 GitHub 上的 xpzouying/xiaohongshu-mcp，OpenCLI 指 jackwe
 
 `publishToX` 发浏览器登录的 X 号的帖子和回复，排队、标签页、失败归因和小红书同一套。不同的地方：
 
-- **先验草稿。** 配图最多 4 张，多了回「X 一条帖子最多带 4 张图」；回复的 `replyTo.url` 必须是 `x.com` 或 `twitter.com` 的 `/<账号>/status/<数字>` 链接，统一换成 `https://x.com/i/status/<id>` 去开，别的回「X 只能回复帖子的链接」。都在碰浏览器之前判。标题不发，和接口那条路一致。
+- **先验草稿。** 配图最多 4 张（`DRAFT_IMAGE_RULES` 里电脑上的 X 那一格），多了回「X 一条帖子最多带 4 张图」；回复的 `replyTo.url` 必须是 `x.com` 或 `twitter.com` 的 `/<账号>/status/<数字>` 链接，统一换成 `https://x.com/i/status/<id>` 去开，别的回「X 只能回复帖子的链接」。都在碰浏览器之前判。标题不发，和接口那条路一致。
 - **发帖和回复走同一个弹窗。** 发帖开 `composeUrl`；回复开帖子页，点主帖（`tabindex="-1"` 的那条 article，不是上面的祖先帖）的回复按钮，弹出同一个编辑框。正文逐行插，行间回车，和小红书一样。图传完等预览数对上再点发布。
 - **发完看弹窗关没关。** 编辑框消失算发出去了。帖子链接从发完弹的 toast 里读 `/status/<id>`，读到就是 `externalId`；读不到回 `ok`，`url` 是 `https://x.com/home`，`externalId` 为 null。没去时间线上翻，因为 `publish_draft` 不带账号名，翻到的最新一条不一定是这条。
 - **登录过期。** 每轮等待先看地址，落在 `/login` 或 `/i/flow/login` 就是 `login_expired`。
@@ -547,7 +547,7 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 - **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。
-- **接口授权的号起草先不带图。** 按账号的 `via` 判：`api` 的号 `images` 非空就抛错，在读图之前判；`computer` 的号（小红书、浏览器登录的 X）能带图，浏览器登录的 X 多于 4 张同样在读图之前抛错，数和控制面发布器表的 `maxImages` 一致，控制面起草和批准时也按它拒。同平台两种号都有、用户没指定时，工具描述叫模型用接口授权的那个。`edit_draft` 这边不知道草稿属于哪个平台，挡不住改稿时加的图，得控制面挡。
+- **配图按账号那一格的限制判。** 限制查 shared 的 `DRAFT_IMAGE_RULES`，和控制面落草稿、批准时查的是同一张：GitHub 接口号不带图，X 两种号最多 4 张，接口授权的 X 单张不超过 5 MB（5,000,000 字节）、GIF 只能单独一张，小红书最多 9 张。张数在读图之前判；单张大小读完、上传之前判，超了不传；GIF 混图在整组读完之后判。图都是传成附件再起草的，接口授权的 X 号由控制面拿附件字节传到 X。同平台两种号都有、用户没指定时，工具描述叫模型用接口授权的那个。`edit_draft` 这边不知道草稿属于哪个号，挡不住改稿时加的图，得控制面挡。
 - **配图由运行器认，起草时就拷走。** 工具入参里每张图只有 `path`，相对路径按工作目录算。运行器先取 realpath，成环的符号链接在这一步就报「符号链接绕成了环」；再看是否落在 `hidden` 禁区里，在就拒，哪怕是工作目录里的符号链接指过去的；再看是否落在这个 Bot 的工作目录里，不在就叫模型先把图放进工作目录。通过后用 `O_NOFOLLOW` 打开拿 fd，fstat 校验是普通文件、不超过 20 MiB，再核一次 realpath 和 inode 没被换；内容从 fd 异步读，算 sha256，写进 `drafts/<sha256>.<扩展名>`（先写临时文件再 rename，权限 0444）。MIME 按 PNG、JPEG、WebP、GIF 的文件头识别，不信扩展名，拷贝扩展名按 MIME 固定。拷贝后把同一份字节 PUT 到 `${config.hub.baseUrl}/attachments?botId=&groupId=`，声明 `x-baize-sha256`，Bearer 每次现取当前网关 key。`DraftSpec` 只记 `{kind: "attachment", attachmentId, sha256, mime}`。上传失败时抛「配图传到白泽失败，过一会儿再起草」，草稿、改稿或计划不上行；服务器正文和网络异常不拼进工具错误，避免泄露 Bearer 或 URL 查询串。之后工作目录里的原图怎么改都不影响草稿，另一台电脑的发布器能下载同一份字节。不存在、没权限读、成环、不是普通文件、超大、读的时候被换掉，各报一句中文。三件工具都这样判，错了只回工具错误，不发上行。
 - **平台限制只写在工具描述里。** X 正文不超过 280 字符、GitHub 要标题和 `github.repo`/`as`，运行器不强制。
 

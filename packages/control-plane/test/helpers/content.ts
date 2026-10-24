@@ -1,13 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AccountResponse,
+  AttachmentUploadResponse,
   CreateBotResponse,
   DraftId,
   MessageListResponse,
   type Account,
   type AccountTier,
+  type AttachmentMime,
   type BotId,
   type DraftContent,
+  type DraftImage,
   type DraftSpec,
   type GroupId,
   type Platform,
@@ -20,7 +23,7 @@ import { expect } from "vitest";
 import { addAccountWithToken, CredentialCrypto } from "../../src/credentials.js";
 import type { Db } from "../../src/db/client.js";
 import { addAccount } from "../../src/repo/accounts.js";
-import { helloAgent, type AgentClient } from "./agent.js";
+import { helloAgent, type AgentClient, type HelloResult } from "./agent.js";
 import { TEST_CREDENTIALS_KEY, type ApiClient, type TestServer } from "./client.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./fixtures.js";
 import { connectPush, type PushClient } from "./ws.js";
@@ -37,6 +40,7 @@ export type ContentJob = {
   readonly user: User;
   readonly client: ApiClient;
   readonly agent: AgentClient;
+  readonly config: HelloResult["config"];
   readonly push: PushClient;
   readonly computer: TestComputer;
   readonly groupId: GroupId;
@@ -89,6 +93,7 @@ export async function contentJob(server: TestServer, db: Db, specs: readonly Acc
     user,
     client,
     agent,
+    config,
     push,
     computer,
     groupId: created.group.id,
@@ -127,6 +132,22 @@ export const issuePost = (text: string, title = "周报"): DraftContent => ({
 export const tweet = (text: string): DraftContent => ({ kind: "post", title: null, text, images: [], github: null });
 
 export const IMAGE = { kind: "path", path: "/tmp/a.png", sha256: "a".repeat(64) } as const;
+
+export async function uploadImage(job: ContentJob, bytes: Buffer, mime: AttachmentMime): Promise<DraftImage> {
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const response = await fetch(`${job.config.hub.baseUrl}/attachments?botId=${job.botId}&groupId=${job.groupId}`, {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${job.config.modelGateway.apiKey}`,
+      "content-type": mime,
+      "x-baize-sha256": sha256,
+    },
+    body: new Uint8Array(bytes),
+  });
+  expect(response.status).toBe(200);
+  const { attachmentId } = AttachmentUploadResponse.parse(await response.json());
+  return { kind: "attachment", attachmentId, sha256, mime };
+}
 
 export function specOf(account: Account, content: DraftContent, scheduledAt: string | null = null): DraftSpec {
   return { draftId: newDraftId(), accountId: account.id, content, scheduledAt };

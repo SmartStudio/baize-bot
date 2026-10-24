@@ -73,7 +73,7 @@ const PROVIDERS: Record<OAuthPlatform, Provider> = {
     client: (endpoints) => endpoints.x,
     authorizeUrl: (endpoints) => `${endpoints.xOauthBaseUrl}/i/oauth2/authorize`,
     // offline.access 才给刷新令牌。
-    authorizeParams: { scope: "tweet.read users.read tweet.write offline.access" },
+    authorizeParams: { scope: "tweet.read users.read tweet.write media.write offline.access" },
     tokenUrl: (endpoints) => `${endpoints.xApiBaseUrl}/2/oauth2/token`,
     apiBaseUrl: (endpoints) => endpoints.xApiBaseUrl,
     apiHeaders: { "user-agent": "baize-bot" },
