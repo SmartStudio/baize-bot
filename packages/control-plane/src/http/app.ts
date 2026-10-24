@@ -225,6 +225,7 @@ const NO_ACCOUNT = { error: "没有这个账号" } as const;
 const NO_COMPUTER = { error: "没有这台电脑" } as const;
 const NO_DRAFT = { error: "没有这条草稿" } as const;
 const NO_PLAN = { error: "没有这份计划" } as const;
+const NO_BOT = { error: "没有这个 Bot" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
 const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
 const HEALTH_DB_TIMEOUT_MS = 2_000;
@@ -744,10 +745,26 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (!body.ok) return c.json({ error: body.error }, 400);
     const bad = badCron(body.value.triggers ?? []);
     if (bad !== null) return c.json({ error: bad }, 400);
-    const routine = await updateRoutine(db, RoutineId.parse(owned.row.id), body.value);
-    if (routine === null) return c.json(NOT_FOUND, 404);
-    hub.push(c.get("user").id, { type: "routine_updated", routine });
-    return c.json(RoutineResponse.parse({ routine }));
+    const executorBotId = body.value.executorBotId;
+    if (executorBotId !== undefined) {
+      const executor = await findBot(db, c.get("user").id, executorBotId);
+      if (executor === null) return c.json(NO_BOT, 404);
+      if (TABLE_ROLES.includes(executor.role)) return c.json({ error: "牌友和老白不能执行例行任务" }, 400);
+    }
+    const updated = await updateRoutine(db, c.get("user").id, RoutineId.parse(owned.row.id), body.value);
+    switch (updated.kind) {
+      case "gone":
+        return c.json(NOT_FOUND, 404);
+      case "executor_missing":
+        return c.json(NO_BOT, 404);
+      case "executor_not_member":
+        return c.json({ error: "这个 Bot 不在例行任务的项目群里" }, 400);
+      case "executor_changed":
+        return c.json({ error: "这条例行任务的执行者刚变过，刷新后再换" }, 409);
+      case "ok":
+        hub.push(c.get("user").id, { type: "routine_updated", routine: updated.routine });
+        return c.json(RoutineResponse.parse({ routine: updated.routine }));
+    }
   });
 
   app.delete("/api/routines/:id", async (c) => {

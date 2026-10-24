@@ -218,15 +218,35 @@ export async function insertRoutine(tx: Tx, values: typeof routines.$inferInsert
 }
 
 /** `UpdateRoutineRequest` 解出来的样子：没给的字段是 undefined，不是缺席。 */
-export type RoutineUpdate = { readonly [K in keyof RoutineInput]?: RoutineInput[K] | undefined };
+export type RoutineUpdate = { readonly [K in keyof RoutineInput]?: RoutineInput[K] | undefined } & {
+  readonly executorBotId?: BotId | undefined;
+};
+
+export type UpdateRoutineResult =
+  | { readonly kind: "ok"; readonly routine: Routine }
+  | { readonly kind: "gone" }
+  | { readonly kind: "executor_missing" }
+  | { readonly kind: "executor_not_member" }
+  | { readonly kind: "executor_changed" };
+
+type ExecutorSwitch = Exclude<UpdateRoutineResult, { kind: "ok" } | { kind: "gone" }>;
 
 /**
  * 给到的字段整份替换，triggers 给了就是整份替换。没给的字段一个字都不动。
  *
  * triggers 整列覆盖，而调度游标就住在这一列里，所以归并前先把这一行锁住再读一遍：
  * 拿路由层那份快照去归并的话，读到写之间调度器推过的游标会被整列写回时按旧值盖掉，同一个 cron 时刻就会派两次活。
+ *
+ * 换执行者在锁例行行之前按 Bot id 升序拿两把锁：新执行者共享，和建例行同一个理由，删它的事务先转交再级联，
+ * 不拿锁时这里在转交扫描之后改过去的例行会被级联删掉；旧执行者排他，因为自动触发锁住执行者之后才锁例行行再重读，
+ * 重读到的执行者换了它不会回头再拿锁（持着例行行再拿 Bot 锁就和删 Bot 反序），只有让换人等它提交，派给谁才总持着谁的锁。
  */
-export async function updateRoutine(db: Db, routineId: RoutineId, input: RoutineUpdate): Promise<Routine | null> {
+export async function updateRoutine(
+  db: Db,
+  ownerId: UserId,
+  routineId: RoutineId,
+  input: RoutineUpdate,
+): Promise<UpdateRoutineResult> {
   const patch: Partial<typeof routines.$inferInsert> = {};
   if (input.name !== undefined) patch.name = input.name;
   if (input.instruction !== undefined) patch.instruction = input.instruction;
@@ -236,22 +256,64 @@ export async function updateRoutine(db: Db, routineId: RoutineId, input: Routine
   if (input.boundary !== undefined) patch.boundary = input.boundary;
   if (input.onToday !== undefined) patch.onToday = input.onToday;
 
-  const ok = await db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx): Promise<ExecutorSwitch | "ok" | "gone"> => {
+    const before = await selectRoutine(tx, eq(routines.id, routineId));
+    if (before === null) return "gone";
+    const executor = input.executorBotId;
+    const switching = executor !== undefined && executor !== before.row.botId;
+    if (switching) {
+      const locks = [
+        { botId: BotId.parse(before.row.botId), take: exclusiveBotRunsLock },
+        { botId: executor, take: shareBotRunsLock },
+      ].toSorted((a, b) => (a.botId < b.botId ? -1 : 1));
+      for (const one of locks) await one.take(tx, one.botId);
+    }
     const [locked] = await tx.select().from(routines).where(eq(routines.id, routineId)).limit(1).for("update");
-    if (locked === undefined) return false;
+    if (locked === undefined) return "gone";
+    if (switching) {
+      if (locked.botId !== before.row.botId) return { kind: "executor_changed" };
+      const placed = await executorPlacement(tx, ownerId, executor, locked.groupId);
+      if (placed.kind !== "ok") return placed;
+      patch.botId = executor;
+      patch.groupId = placed.groupId;
+    }
     if (input.triggers !== undefined) patch.triggers = mergeTriggers(locked.triggers, input.triggers);
-    if (Object.keys(patch).length === 0) return true;
+    if (Object.keys(patch).length === 0) return "ok";
     const updated = await tx
       .update(routines)
       .set(patch)
       .where(eq(routines.id, routineId))
       .returning({ id: routines.id });
-    return updated.length > 0;
+    return updated.length > 0 ? "ok" : "gone";
   });
-  if (!ok) return null;
+  if (outcome === "gone") return { kind: "gone" };
+  if (outcome !== "ok") return outcome;
 
   const loaded = await loadRoutine(db, routineId);
-  return loaded?.routine ?? null;
+  return loaded === null ? { kind: "gone" } : { kind: "ok", routine: loaded.routine };
+}
+
+async function executorPlacement(
+  tx: Tx,
+  ownerId: UserId,
+  executor: BotId,
+  groupId: string | null,
+): Promise<ExecutorSwitch | { readonly kind: "ok"; readonly groupId: string | null }> {
+  const [bot] = await tx
+    .select({ id: bots.id })
+    .from(bots)
+    .where(and(eq(bots.id, executor), eq(bots.ownerId, ownerId)))
+    .limit(1);
+  if (bot === undefined) return { kind: "executor_missing" };
+  if (groupId === null) return { kind: "ok", groupId: null };
+  const [group] = await tx.select({ soloBotId: groups.soloBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  if (group === undefined || group.soloBotId !== null) return { kind: "ok", groupId: null };
+  const [member] = await tx
+    .select({ botId: groupMembers.botId })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.groupId, groupId), eq(groupMembers.botId, executor)))
+    .limit(1);
+  return member === undefined ? { kind: "executor_not_member" } : { kind: "ok", groupId };
 }
 
 /**
