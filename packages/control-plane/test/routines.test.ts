@@ -18,7 +18,7 @@ import {
 import { randomUUID } from "node:crypto";
 import type { TransactionSql } from "postgres";
 import { drizzle } from "drizzle-orm/postgres-js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import * as schema from "../src/db/schema.js";
 import type { StoredTrigger } from "../src/db/schema.js";
 import { EXECUTOR_DELETED_NOTE, advanceCronTrigger } from "../src/repo/routines.js";
@@ -30,6 +30,7 @@ import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, type TestComputer } from "./helpers/fixtures.js";
 import { gatedDb, type QueryGate } from "./helpers/gated-db.js";
+import { logLines } from "./helpers/log.js";
 import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
@@ -360,6 +361,25 @@ describe("webhook 触发", () => {
     expect((await owner.client.patch(`/api/routines/${routine.id}`, { state: "paused" })).status).toBe(200);
     expect((await stranger.post(`/api/hooks/${token}`)).status).toBe(409);
     expect(await runsOf(routine.id), "409 就是没跑，运行记录里不该多一条").toHaveLength(0);
+  });
+
+  it("webhook 处理出错时日志只记路由模式，不记带 token 的路径", async () => {
+    const owner = await ownerWithBot();
+    const routine = await makeRoutine(owner, { triggers: [{ kind: "webhook" }] });
+    const token = webhookToken(routine);
+    // 让开运行记录那一步必然失败，onError 就会接手；NOT VALID 不检查存量行，别的用例造的数据不受影响。
+    await database.sql.unsafe(`ALTER TABLE routine_runs ADD CONSTRAINT log_probe CHECK (false) NOT VALID`);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect((await server.client().post(`/api/hooks/${token}`)).status).toBe(500);
+      expect(JSON.stringify(logLines(error)), "token 是凭据，任何一行日志里都不能出现").not.toContain(token);
+      const lines = logLines(error).filter((line) => line.msg === "请求处理出错");
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({ level: "error", method: "POST", route: "/api/hooks/:token" });
+    } finally {
+      error.mockRestore();
+      await database.sql.unsafe(`ALTER TABLE routine_runs DROP CONSTRAINT log_probe`);
+    }
   });
 
   it("改名重发整份触发器时 token 保留", async () => {
