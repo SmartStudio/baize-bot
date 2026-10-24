@@ -121,7 +121,7 @@ async function pushNeverAnsweringClose(port: number, database: TestDb): Promise<
   return push;
 }
 
-it("停机卡住时再来一次信号：不再等，当场以 1 退出", async () => {
+it("停机中 1 秒内又到一遍同一信号：当作 tsx、pnpm 转发来的同一次，照常走完优雅停机", async () => {
   const { database, url } = await testDatabase();
   const controlPlane = startControlPlane(url);
   const port = await controlPlane.listening();
@@ -129,6 +129,25 @@ it("停机卡住时再来一次信号：不再等，当场以 1 退出", async (
   try {
     controlPlane.process.kill("SIGTERM");
     await expect.poll(() => controlPlane.output(), { timeout: 10_000 }).toContain("开始停机");
+    controlPlane.process.kill("SIGTERM");
+    await expect.poll(() => controlPlane.output(), { timeout: 5_000 }).toContain("1 秒内又收到 SIGTERM，当作同一次");
+    push.socket.resume();
+    expect(await controlPlane.exited(10_000), "重复的信号不截断停机").toBe(0);
+    expect(controlPlane.output()).not.toContain("强制退出");
+  } finally {
+    push.close();
+  }
+});
+
+it("停机卡住时过了 1 秒再来一次信号：不再等，当场以 1 退出", async () => {
+  const { database, url } = await testDatabase();
+  const controlPlane = startControlPlane(url);
+  const port = await controlPlane.listening();
+  const push = await pushNeverAnsweringClose(port, database);
+  try {
+    controlPlane.process.kill("SIGTERM");
+    await expect.poll(() => controlPlane.output(), { timeout: 10_000 }).toContain("开始停机");
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     controlPlane.process.kill("SIGTERM");
     expect(await controlPlane.exited(5_000), "第二次信号强退").toBe(1);
     expect(controlPlane.output()).toContain("停机中又收到 SIGTERM，强制退出");

@@ -13,6 +13,11 @@ import { startServer, type RunningServer } from "./server.js";
 
 /** 要短于编排器的宽限：docker 默认 10 秒后 SIGKILL。 */
 const SHUTDOWN_TIMEOUT_MS = 8_000;
+/**
+ * 同一次停机，同一个信号可能到两遍：tsx 父进程等子进程回报只等 30ms，等不到会再转发一次；
+ * pnpm dev 下 Ctrl+C 既直接送到进程组，又经 dev.mjs、pnpm 一层层转发。
+ */
+const DUPLICATE_SIGNAL_MS = 1_000;
 
 let server: RunningServer | null = null;
 let stopping = false;
@@ -36,7 +41,14 @@ function stop(exitCode: number): void {
 }
 
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  let receivedAt: number | undefined;
   process.on(signal, () => {
+    const now = performance.now();
+    if (receivedAt !== undefined && now - receivedAt < DUPLICATE_SIGNAL_MS) {
+      console.log(`1 秒内又收到 ${signal}，当作同一次`);
+      return;
+    }
+    receivedAt ??= now;
     if (stopping) {
       console.error(`停机中又收到 ${signal}，强制退出`);
       process.exit(1);

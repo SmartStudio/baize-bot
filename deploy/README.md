@@ -241,7 +241,7 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 - 不要 `docker compose up --scale control-plane=2`，也不要用先起新副本、再停旧副本的滚动升级。`docker compose up -d` 重建容器是先停旧的再起新的，正好合适。
 - 锁跟着一条专用的库连接走。这条连接断了（库重启、连接被掐），锁就放了，控制面按停机流程以 1 退出，由 `restart: unless-stopped` 拉起来重新拿锁。库没回来之前它会反复起不来，库回来就好。
 
-**停机。** SIGTERM 和 SIGINT 都走 `server.close()`。在线电脑收到 1012 后按退避重连，欠着的接续标记留给下次启动的补扫，走完以 0 退出。8 秒没走完，或者停机中又收到一次信号，以 1 强退。8 秒短于 docker 默认的 10 秒宽限，compose 里的控制面不用另设 `stop_grace_period`。未处理的 Promise 拒绝和未捕获的异常先记日志，再走同一套停机，以 1 退出。
+**停机。** SIGTERM 和 SIGINT 都走 `server.close()`。在线电脑收到 1012 后按退避重连，欠着的接续标记留给下次启动的补扫，走完以 0 退出。8 秒没走完，或者停机中又收到一次信号，以 1 强退。同一个信号 1 秒内到第二遍算同一次，tsx 父进程和 `pnpm dev` 会把一次 Ctrl+C 或 SIGTERM 转发出好几遍。8 秒短于 docker 默认的 10 秒宽限，compose 里的控制面不用另设 `stop_grace_period`。未处理的 Promise 拒绝和未捕获的异常先记日志，再走同一套停机，以 1 退出。
 
 **探活。** `GET /api/health` 不用登录，Caddy 按 `/api` 转进来，外面也能打。
 
