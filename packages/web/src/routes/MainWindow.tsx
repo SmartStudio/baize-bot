@@ -79,21 +79,33 @@ const writeBotPanelOpen = (open: boolean) => {
   }
 };
 
-const SIDEBAR_WIDTH = 272;
 const CHAT_MIN_WIDTH = 480;
-const PANEL_WIDTH = 400;
-const DRAWER_QUERY = `(max-width: ${SIDEBAR_WIDTH + CHAT_MIN_WIDTH + PANEL_WIDTH - 1}px)`;
-const watchDrawer = (onChange: () => void) => {
-  const query = window.matchMedia(DRAWER_QUERY);
-  query.addEventListener("change", onChange);
-  return () => query.removeEventListener("change", onChange);
+// 侧栏和右栏多宽只认 spacing.css 的 token。样式表还没生效时读到的是 NaN，那次不缓存，下次再读。
+let drawerQuery: MediaQueryList | null = null;
+const drawerMedia = () => {
+  if (drawerQuery !== null) return drawerQuery;
+  const tokens = getComputedStyle(document.documentElement);
+  const px = (token: string) => Number.parseFloat(tokens.getPropertyValue(token));
+  const breakpoint = px("--sidebar-w") + CHAT_MIN_WIDTH + px("--panel-w");
+  if (Number.isNaN(breakpoint)) return null;
+  drawerQuery = window.matchMedia(`(width < ${breakpoint}px)`);
+  return drawerQuery;
 };
-const drawerNow = () => window.matchMedia(DRAWER_QUERY).matches;
-
-const ignoreEscape = () => {};
+const watchDrawer = (onChange: () => void) => {
+  const query = drawerMedia();
+  query?.addEventListener("change", onChange);
+  return () => query?.removeEventListener("change", onChange);
+};
+const drawerNow = () => drawerMedia()?.matches ?? false;
 
 const PanelScrim = ({ onClose, underOverlay }: { onClose: () => void; underOverlay: boolean }) => {
-  useEscapeToClose(underOverlay ? ignoreEscape : onClose);
+  useEscapeToClose(underOverlay ? null : onClose);
+  // 被盖住的对话区 Tab 也走不进去。@types/react 18 没有 inert，只能直接写 DOM。
+  useEffect(() => {
+    const chat = document.querySelector(".window > .chat");
+    chat?.setAttribute("inert", "");
+    return () => chat?.removeAttribute("inert");
+  }, []);
   return <div className="panel-scrim" data-testid="panel-scrim" aria-hidden="true" onClick={onClose} />;
 };
 
@@ -281,7 +293,10 @@ export const MainWindow = () => {
   const botPanelShown = drawer ? groupId !== null && botDrawerFor === groupId : botPanelOpen;
   const setBotPanel = (open: boolean) => {
     if (drawer) setBotDrawerFor(open ? groupId : null);
-    else changeBotPanel(open);
+    else {
+      setBotDrawerFor(null);
+      changeBotPanel(open);
+    }
   };
   const hasPanel = inspected !== null || (soloBot !== null && botPanelShown) || (team !== null && taskOpen);
   const closePanel = () => {
@@ -474,7 +489,12 @@ export const MainWindow = () => {
       </ErrorBoundary>
       {drawer && hasPanel ? <PanelScrim onClose={closePanel} underOverlay={overlay !== "none"} /> : null}
       {inspected !== null ? (
-        <ToolInspector tool={inspected} onClose={() => setInspectedTool(null)} />
+        <ToolInspector
+          tool={inspected}
+          onClose={() => setInspectedTool(null)}
+          // 抽屉模式下 Esc 归遮罩管；浮层开着时 Esc 只给浮层。
+          onEscape={drawer || overlay !== "none" ? null : () => setInspectedTool(null)}
+        />
       ) : soloBot !== null && botPanelShown ? (
         <BotSettingsPanel
           key={soloBot.id}

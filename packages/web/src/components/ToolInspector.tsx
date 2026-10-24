@@ -6,8 +6,10 @@ import { ToolViewContent } from "./messages/ToolViewContent.js";
 const rawText = (tool: InspectedTool): string =>
   tool.body.view.raw === undefined ? "没有原始参数" : JSON.stringify(tool.body.view.raw, null, 2);
 
-export const ToolInspector = ({ tool, onClose }: { tool: InspectedTool; onClose: () => void }) => {
-  useEscapeToClose(onClose);
+type Props = { tool: InspectedTool; onClose: () => void; onEscape: (() => void) | null };
+
+export const ToolInspector = ({ tool, onClose, onEscape }: Props) => {
+  useEscapeToClose(onEscape);
 
   return (
     <aside className="tool-inspector" data-testid="tool-inspector" aria-label="工具检查器">

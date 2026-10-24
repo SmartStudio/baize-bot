@@ -105,6 +105,12 @@
   color: var(--danger);
 }
 
+.bot-settings-error {
+  margin: 0;
+  color: var(--danger);
+  font: var(--type-caption);
+}
+
 .row-card.is-later {
   color: var(--fg-4);
 }
