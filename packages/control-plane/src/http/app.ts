@@ -89,6 +89,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { routePath } from "hono/route";
 import { z } from "zod";
 import { dispatchUserMessage, settleApproval, settleByReply } from "../agent/dispatch.js";
 import { clearGroupContinuations } from "../agent/continuation.js";
@@ -1144,7 +1145,8 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
 
   app.notFound((c) => c.json(NOT_FOUND, 404));
   app.onError((err, c) => {
-    log.error("请求处理出错", { method: c.req.method, path: c.req.path, err });
+    // 记路由模式不记实际路径：webhook 的 token 就在路径里，是凭据。取最后一条匹配，中间件里抛的也落到具体路由上。
+    log.error("请求处理出错", { method: c.req.method, route: routePath(c, -1), err });
     return c.json({ error: "服务端出错" }, 500);
   });
 
