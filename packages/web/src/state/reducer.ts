@@ -58,6 +58,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     usage,
     content: EMPTY_CONTENT,
     todayVersion: 0,
+    unreadNotices: 0,
     pushLink: "down",
     reconnectedAt: 0 as Seq,
     messagesLoadedAt: {},
@@ -84,6 +85,8 @@ export const reduce = (state: AppState, action: Action): AppState => {
   }
   if (state.status !== "ready") return state;
   if (action.type === "today_version_bumped") return { ...state, todayVersion: state.todayVersion + 1 };
+  if (action.type === "notice_unread") return { ...state, unreadNotices: state.unreadNotices + 1 };
+  if (action.type === "notices_read") return state.unreadNotices === 0 ? state : { ...state, unreadNotices: 0 };
   if (action.type === "push_reconnected")
     return {
       ...state,

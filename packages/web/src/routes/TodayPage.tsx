@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   ArrowRight,
   CalendarClock,
@@ -32,6 +33,7 @@ import type { Today } from "../state/today.js";
 import { LoginCard } from "../components/LoginCard.js";
 import { SCOPE_TEXT } from "../components/grantText.js";
 import { RoutineOfferCard } from "../components/messages/RoutineOfferCard.js";
+import { noticeSectionOf } from "../state/notify.js";
 
 const greeting = (name: string): string => {
   const hour = new Date().getHours();
@@ -384,7 +386,7 @@ const TodaySection = ({
   count: number;
   children: React.ReactNode;
 }) => (
-  <section className="today-section" data-testid={`today-${id}`}>
+  <section className="today-section" id={`today-${id}`} data-testid={`today-${id}`}>
     <header className="today-section-head">
       <h2>{title}</h2>
       {count > 0 ? (
@@ -446,6 +448,16 @@ export const TodayPage = ({
   const [sendError, setSendError] = useState<string | null>(null);
   // 和新建项目弹窗一样，一次进页内 requestId 不变，建桌失败再点不会建出第二张。
   const tableRequestId = useRef(crypto.randomUUID());
+
+  const location = useLocation();
+  const navigate = useNavigate();
+  const noticeSection = noticeSectionOf(location.state);
+  const loaded = status === "ready";
+  useEffect(() => {
+    if (noticeSection === null || !loaded) return;
+    document.getElementById(`today-${noticeSection}`)?.scrollIntoView({ block: "start" });
+    navigate(location.pathname, { replace: true, state: null });
+  }, [noticeSection, loaded, location.pathname, navigate]);
 
   if (status === "loading") {
     return (

@@ -1,7 +1,7 @@
-import type { ComputerId, GroupId, ServerPush } from "@baize/shared";
+import type { ComputerId, GroupId, Notice, ServerPush } from "@baize/shared";
 import type { Action, AppState, ReadyState, SessionId } from "./types.js";
 import { finishingElsewhere } from "./computer-choices.js";
-import { notifyNotice } from "./notify.js";
+import { lookingAtPage, notifyNotice } from "./notify.js";
 import type { Seq } from "./stamped.js";
 
 // seq 是这条推送到达时取的号。
@@ -21,6 +21,7 @@ type PushContext = {
   recoverLogins: (computerId: ComputerId) => void;
   // 重拉这个群每个成员选的电脑和正在跑的那台，after 是触发它的推送的号。
   reloadChoices: (groupId: GroupId, after: Seq) => void;
+  openNotice: (notice: Notice) => void;
 };
 
 export const createPushHandlers = ({
@@ -31,6 +32,7 @@ export const createPushHandlers = ({
   refreshPendingCounts,
   recoverLogins,
   reloadChoices,
+  openNotice,
 }: PushContext): PushHandlers => {
   const bumpToday = () => dispatch({ type: "today_version_bumped" });
   const mine = (): ReadyState | null => {
@@ -156,7 +158,9 @@ export const createPushHandlers = ({
     notify: (push) => {
       bumpToday();
       const state = mine();
-      if (state !== null) notifyNotice(push.notice, state.settings);
+      if (state === null) return;
+      if (state.settings.notify && !lookingAtPage()) dispatch({ type: "notice_unread" });
+      notifyNotice(push.notice, state.settings, () => openNotice(push.notice));
     },
   };
 };

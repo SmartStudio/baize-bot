@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   LoginAttemptId,
   ServerPush,
@@ -53,6 +54,7 @@ import {
 } from "@baize/shared";
 import { RequestFailed, type Api, type BotDraft } from "../api/client.js";
 import { applyTheme } from "./theme.js";
+import { noticeState } from "./notify.js";
 import { createPushHandlers, dispatchServerPush } from "./push.js";
 import { reduce } from "./reducer.js";
 import { reconnectDelay } from "./reconnect.js";
@@ -148,6 +150,7 @@ export type AppActions = {
   decideRoutineOffer: (messageId: MessageId, decision: DecideRoutineOfferRequest["decision"]) => Promise<void>;
   // 打开群页或项目页算看过这个群里例行的结果（D3），连续三次没看例行自己停。
   markSeen: (groupId: GroupId) => Promise<void>;
+  markNoticesRead: () => Promise<void>;
   // 开始了就返回项目群，由调用方跳过去；不要或登录过期时是 undefined。
   decideProjectOffer: (messageId: MessageId, request: DecideProjectOfferRequest) => Promise<GroupId | undefined>;
   // 确认后新请的人和变大的团队由推送带来；这里只落那条卡和团队的新名单。
@@ -384,6 +387,12 @@ const createTaskPushes = () => {
 export const AppProvider = ({ children }: { children: ReactNode }) => {
   const [state, dispatch] = useReducer(reduce, { status: "loading" } satisfies AppState);
   const stateRef = useRef<AppState>(state);
+  // 换一次路径 navigate 就换一个身份，推送连接不能跟着它重建，点通知时读最新的那个。
+  const navigate = useNavigate();
+  const navigateRef = useRef(navigate);
+  useEffect(() => {
+    navigateRef.current = navigate;
+  }, [navigate]);
   useEffect(() => {
     stateRef.current = state;
     // 开发构建把当前状态挂到 window 上，端到端测试等确定的状态再断言，不靠请求之间的时间先后。
@@ -806,6 +815,7 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       markSeen: signedIn(async ({ api }, groupId: GroupId) => {
         await api.markSeen(groupId);
       }),
+      markNoticesRead: signedIn(async ({ put }) => put({ type: "notices_read" })),
       decideProjectOffer: signedIn(async ({ api, put }, messageId: MessageId, request: DecideProjectOfferRequest) => {
         const seq = nextSeq();
         const { message, group, task } = await api.decideProjectOffer(messageId, request);
@@ -998,6 +1008,10 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       refreshPendingCounts,
       recoverLogins: (computerId) => recoverLogins(computerId, "offline"),
       reloadChoices: (groupId, after) => void actions.loadComputerChoices(groupId, after).catch(() => undefined),
+      openNotice: (notice) => {
+        put({ type: "notices_read" });
+        navigateRef.current("/", { state: noticeState(notice) });
+      },
     });
     const retryLater = () => {
       retry = setTimeout(open, reconnectDelay(failures));

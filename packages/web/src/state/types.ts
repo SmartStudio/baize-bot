@@ -190,6 +190,8 @@ export type AppState =
       usage: UsageResponse;
       content: ContentBook;
       todayVersion: number;
+      // 人不在页面上时到的通知条数，回到页面就清零，标题栏上显示它。
+      unreadNotices: number;
       pushLink: PushLink;
       // 推送最近一次重连时取的号，messagesLoadedAt 是每个群的历史请求发出时取的号。比重连早的历史可能漏了断线时的推送。
       reconnectedAt: Seq;
@@ -295,6 +297,8 @@ export type Action =
   | { type: "computer_upserted"; computer: Computer; seq: Seq }
   | { type: "publications_loaded"; publications: Publication[] }
   | { type: "today_version_bumped" }
+  | { type: "notice_unread" }
+  | { type: "notices_read" }
   | { type: "push_reconnected"; seq: Seq }
   | { type: "push_link"; link: PushLink }
   | { type: "load_status"; key: LoadKey; status: LoadStatus }

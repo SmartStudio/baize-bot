@@ -81,6 +81,7 @@ const opened = () => {
     refreshPendingCounts: () => undefined,
     recoverLogins: () => undefined,
     reloadChoices: () => undefined,
+    openNotice: () => undefined,
   });
   let seq = 0;
   return {

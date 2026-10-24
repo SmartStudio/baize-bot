@@ -23,6 +23,7 @@ import { BotAvatar } from "./BotAvatar.js";
 import { ToolsPage } from "./ToolsPage.js";
 import { AccountsPage } from "./AccountsPage.js";
 import { PrivacyPage } from "./PrivacyPage.js";
+import { inDesktopShell, notifyPermission, type NotifyPermission } from "../state/notify.js";
 
 export type PageId = "general" | "accounts" | "tools" | "usage" | "privacy";
 
@@ -61,6 +62,45 @@ type Props = {
   onChange: (patch: Partial<Settings>) => Promise<void>;
   onLogout: () => void;
   onClose: () => void;
+};
+
+const PERMISSION_TEXT: Record<NotifyPermission, string> = {
+  default: "浏览器还没允许白泽发通知，允许之后上面这些才弹得出来。",
+  granted: "已开启，Bot 找你时浏览器会弹系统通知。",
+  denied: "浏览器拒绝了白泽的通知。要收通知，到地址栏左边的网站设置里把「通知」改成允许。",
+  unsupported: "这个浏览器发不了系统通知。",
+};
+
+// 桌面 App 的通知由壳自己弹，不经过浏览器授权，这一行只在浏览器里出现。
+const NotifyPermissionRow = () => {
+  const [permission, setPermission] = useState(notifyPermission);
+  const [asking, setAsking] = useState(false);
+  if (inDesktopShell()) return null;
+  const ask = () => {
+    setAsking(true);
+    void Notification.requestPermission()
+      .then(setPermission)
+      .finally(() => setAsking(false));
+  };
+  return (
+    <div className="row-card" data-testid="notify-permission" data-state={permission}>
+      <span>
+        <b>浏览器通知</b>
+        <small>{PERMISSION_TEXT[permission]}</small>
+      </span>
+      {permission === "default" ? (
+        <button
+          type="button"
+          className="ghost-button"
+          data-testid="notify-permission-request"
+          disabled={asking}
+          onClick={ask}
+        >
+          允许通知
+        </button>
+      ) : null}
+    </div>
+  );
 };
 
 const GeneralPage = ({
@@ -114,6 +154,7 @@ const GeneralPage = ({
         onClick={() => void onChange({ notify: !settings.notify })}
       />
     </div>
+    <NotifyPermissionRow />
     <div className="row-card">
       <span>
         <b>免打扰</b>
