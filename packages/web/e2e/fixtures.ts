@@ -141,6 +141,8 @@ export const recordDeltas = (page: Page): DeltaFrame[] => {
 };
 
 export const openSettings = async (page: Page) => {
+  // 手机宽度下侧栏收在抽屉里，账号按钮要先拉开抽屉才点得到。
+  if (await page.getByTestId("nav-open").isVisible()) await page.getByTestId("nav-open").click();
   await page.getByTestId("account-button").click();
   await expect(page.getByTestId("account-menu")).toBeVisible();
   await page.getByTestId("open-settings").click();

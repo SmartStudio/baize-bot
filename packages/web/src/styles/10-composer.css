@@ -49,3 +49,8 @@
   color: var(--btn-primary-fg);
   place-items: center;
 }
+
+.window.is-narrow .send-button {
+  width: var(--space-10);
+  height: var(--space-10);
+}
