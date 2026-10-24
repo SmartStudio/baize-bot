@@ -1,5 +1,12 @@
 import { fileURLToPath } from "node:url";
-import { expect, test as base, type APIRequestContext, type BrowserContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test as base,
+  type APIRequestContext,
+  type BrowserContext,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 import { Message, MessageListResponse, ServerPush, SkillResponse, UsageResponse } from "@baize/shared";
 
 export { expect, Message, MessageListResponse, ServerPush, SkillResponse, UsageResponse };
@@ -42,6 +49,17 @@ export const login = async (page: Page) => {
 };
 
 export const teamCard = (page: Page, name: string) => page.locator(`[data-testid=team-bot][data-bot-name="${name}"]`);
+
+const boxOf = async (locator: Locator) => {
+  const box = await locator.boundingBox();
+  if (box === null) throw new Error("元素没有渲染出来");
+  return box;
+};
+
+export const overlaps = async (a: Locator, b: Locator) => {
+  const [x, y] = [await boxOf(a), await boxOf(b)];
+  return x.x < y.x + y.width && y.x < x.x + x.width && x.y < y.y + y.height && y.y < x.y + x.height;
+};
 
 // 侧栏不再单列 Bot，和队员单聊从团队页的卡片点进去。
 export const openBot = async (page: Page, name: string) => {

@@ -1,6 +1,5 @@
 import { PUSH_GRACE_MS as GRACE_MS } from "../src/state/reconnect.js";
-import type { Locator } from "@playwright/test";
-import { expect, login, openBot, test, type Page } from "./fixtures";
+import { expect, login, openBot, overlaps, test, type Page } from "./fixtures";
 
 declare global {
   interface Window {
@@ -14,17 +13,6 @@ const refusePush = async (page: Page, refused: boolean) => {
 
 const dropPush = async (page: Page) => {
   expect((await page.request.post("/api/test/sockets/drop")).status()).toBe(204);
-};
-
-const boxOf = async (locator: Locator) => {
-  const box = await locator.boundingBox();
-  if (box === null) throw new Error("元素没有渲染出来");
-  return box;
-};
-
-const overlaps = async (a: Locator, b: Locator) => {
-  const [x, y] = [await boxOf(a), await boxOf(b)];
-  return x.x < y.x + y.width && y.x < x.x + x.width && x.y < y.y + y.height && y.y < x.y + x.height;
 };
 
 const postMissed = async (page: Page, text: string) => {
@@ -92,7 +80,7 @@ test("推送断一下马上连回来，提示不闪出来", async ({ page }) => 
   expect(await page.evaluate(() => window.__pushBannerSeen), "宽限期内连回来，提示一次都没出现过").toBe(false);
 });
 
-test("断线提示和顶上的浮动提示同时出现时各占各的位置，不叠在一起", async ({ page }) => {
+test("断线提示和授权结果的提示同时出现时各占各的位置，不叠在一起", async ({ page }) => {
   await login(page);
   await page.goto("/?oauth=x&result=failed");
   const notice = page.getByTestId("oauth-notice");
