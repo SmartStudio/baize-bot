@@ -248,7 +248,7 @@ describe("上下文里的卡写结论", () => {
         { from: "系统", text: "小服把活交给阿文，下一步是「跟进回款」，交接还在等阿文接" },
       ]);
       expect(settledOnly(prompt), "接了的不会再变，没接的标没定稿").toEqual([true, false]);
-      expect(readsOf("handoffs"), "两张交接卡一条查询查完，不按卡逐条查").toBe(1);
+      expect(readsOf("handoffs"), "两张交接卡摘要一条查询查完，开回合接排着的交接一条，不按卡逐条查").toBe(2);
     } finally {
       owner.close();
     }

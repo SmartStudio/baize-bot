@@ -980,7 +980,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     if (archived.kind === "already_archived") return c.body(null, 204);
     for (const computerId of archived.cancelComputers) await agents.flushOutbox(computerId);
     deps.groupTurns.cancel(groupId.data);
-    for (const runId of archived.endedRunIds) deps.groupTurns.abandon(groupId.data, runId);
+    for (const runId of archived.endedRunIds) await deps.groupTurns.abandon(groupId.data, runId);
     for (const approval of archived.expired) hub.push(ownerId, { type: "approval_updated", approval });
     for (const routineId of archived.routineIds) await pushRoutineUpdated(routineDeps, routineId);
     hub.push(ownerId, { type: "group_archived", groupId: groupId.data });

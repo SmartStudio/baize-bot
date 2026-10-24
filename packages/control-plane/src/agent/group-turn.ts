@@ -13,13 +13,18 @@ import type {
   UserId,
 } from "@baize/shared";
 import type { Db } from "../db/client.js";
+import { saveTurnBotMessages } from "../repo/groups.js";
+import { dropQueuedHandoffs, listQueuedHandoffs } from "../repo/handoffs.js";
 import { appendMessage } from "../repo/messages.js";
 import type { PushHub } from "../ws/hub.js";
+import { renderHandoffReport } from "./handoff.js";
 import { parseMentions, type RoutingMember } from "./routing.js";
 
 export const BOT_MESSAGE_LIMIT = 10;
 export const MENTION_LOOP_NOTICE = "Bot 之间 @ 太多次，停下等你";
 export const HANDOFF_LIMIT_NOTICE = `这一轮 Bot 已经说满 ${BOT_MESSAGE_LIMIT} 句，这份交接没有交出去`;
+
+export const limitReached = (botMessages: number): boolean => botMessages >= BOT_MESSAGE_LIMIT;
 
 export type Speaker = {
   readonly botId: BotId;
@@ -116,10 +121,6 @@ function belongsTo(speaker: Speaker, botId: BotId): boolean {
   return speaker.botId === botId || speaker.handoff?.fromBotId === botId;
 }
 
-function purgeContinuations(queue: Speaker[]): void {
-  queue.splice(0, queue.length, ...queue.filter((speaker) => speaker.continuation === undefined));
-}
-
 function purge(queue: Speaker[], botId: BotId): boolean {
   const kept = queue.filter((speaker) => !belongsTo(speaker, botId));
   if (kept.length === queue.length) return false;
@@ -134,8 +135,7 @@ export class GroupTurns {
   readonly #turns = new Map<string, Turn>();
   readonly #blockedRuns = new Set<RunId>();
   readonly #handoffLimitNoted = new Set<RunId>();
-  // 卡已经建了、但当时的回合收不了的交接。下一个 start 把它们接到用户新消息的目标后面。
-  readonly #deferred = new Map<string, Speaker[]>();
+  readonly #saveChains = new Map<string, Promise<void>>();
 
   constructor(
     readonly db: Db,
@@ -148,24 +148,29 @@ export class GroupTurns {
     readonly epoch: number;
     readonly members: readonly RoutingMember[];
     readonly speakers: readonly Speaker[];
+    readonly botMessages: number;
     readonly send: Turn["send"];
   }): Promise<StartOutcome> {
-    const carried = this.#deferred.get(input.groupId) ?? [];
-    this.#deferred.delete(input.groupId);
     const turn: Turn = {
       ...input,
-      speakers: [...input.speakers, ...carried],
+      speakers: [...input.speakers],
       seen: new Set(),
       talked: new Set(),
       handoffs: [],
       mentions: [],
       round: 0,
       stage: { kind: "idle" },
-      botMessages: 0,
       dispatched: 0,
       summary: null,
     };
     this.#turns.set(input.groupId, turn);
+    try {
+      await this.#appendQueuedHandoffs(turn);
+    } catch (error) {
+      this.#close(turn);
+      throw error;
+    }
+    await this.#save(turn);
     const outcome = await this.#advance(turn);
     if (outcome === "dispatched" || outcome === "failed" || outcome === "gone") return outcome;
     return outcome === "exhausted" && turn.dispatched === 0 ? "nobody" : "stopped";
@@ -173,8 +178,6 @@ export class GroupTurns {
 
   /** 用户插话。排着的接续随之作废：他已经在群里说了新的，那段活不再自动接着做，标记由调用方同时清掉。 */
   cancel(groupId: GroupId): void {
-    const deferred = this.#deferred.get(groupId);
-    if (deferred !== undefined) purgeContinuations(deferred);
     const turn = this.#turns.get(groupId);
     if (turn === undefined) return;
     this.#close(turn);
@@ -208,11 +211,7 @@ export class GroupTurns {
   queueContinuation(groupId: GroupId, runId: RunId, speaker: ContinuationSpeaker): "queued" | "idle" {
     const { fromRunId } = speaker.continuation;
     const turn = this.#turns.get(groupId);
-    if (turn === undefined) {
-      return this.#deferred.get(groupId)?.some((queued) => queued.continuation?.fromRunId === fromRunId) === true
-        ? "queued"
-        : "idle";
-    }
+    if (turn === undefined) return "idle";
     const stage = turn.stage;
     const current = stage.kind === "idle" ? null : stage.speaker;
     if (
@@ -228,13 +227,18 @@ export class GroupTurns {
 
   queueHandoff(groupId: GroupId, runId: RunId, speaker: Speaker): void {
     const turn = this.#turns.get(groupId);
-    if (isRunning(turn, runId) && turn.botMessages < BOT_MESSAGE_LIMIT && !this.#blockedRuns.has(runId)) {
+    if (isRunning(turn, runId) && !limitReached(turn.botMessages) && !this.#blockedRuns.has(runId)) {
       turn.handoffs.push(speaker);
       this.#publish(turn);
       return;
     }
-    // 卡已经建了，目标不能丢。这个回合收不了就排到用户新消息的目标后面。
-    this.#enqueueAfterSpeakers(groupId, speaker);
+    if (turn === undefined) return;
+    turn.speakers.push(speaker);
+    this.#publish(turn);
+  }
+
+  has(groupId: GroupId): boolean {
+    return this.#turns.has(groupId);
   }
 
   /**
@@ -299,7 +303,6 @@ export class GroupTurns {
    * 排在后面的从队列里清掉，连同它交出去的交接：卡已随它级联删掉，派出去接手方也接不了。
    */
   async botDeleted(ownerId: UserId, botId: BotId): Promise<void> {
-    for (const queued of this.#deferred.values()) purge(queued, botId);
     const finishing: Promise<void>[] = [];
     for (const turn of this.#turns.values()) {
       if (turn.ownerId !== ownerId) continue;
@@ -315,17 +318,40 @@ export class GroupTurns {
     await Promise.all(finishing);
   }
 
-  abandon(groupId: GroupId, runId: RunId): void {
+  async abandon(groupId: GroupId, runId: RunId): Promise<void> {
     this.#blockedRuns.delete(runId);
     this.#handoffLimitNoted.delete(runId);
-    this.#deferred.delete(groupId);
     const turn = this.#turns.get(groupId);
-    if (isRunning(turn, runId)) this.#close(turn, false);
+    if (turn !== undefined && !isRunning(turn, runId)) return;
+    if (turn !== undefined) this.#close(turn);
+    await dropQueuedHandoffs(this.db, groupId);
+  }
+
+  async #appendQueuedHandoffs(turn: Turn): Promise<void> {
+    for (const { handoff, fromName, message } of await listQueuedHandoffs(this.db, turn.groupId)) {
+      if (turn.speakers.some((speaker) => speaker.handoff?.id === handoff.id)) continue;
+      turn.speakers.push({
+        botId: handoff.toBotId,
+        trigger: message,
+        reason: "handoff",
+        handoff: { id: handoff.id, fromBotId: handoff.fromBotId, text: renderHandoffReport({ fromName, ...handoff }) },
+      });
+    }
+  }
+
+  #save(turn: Turn): Promise<void> {
+    const { groupId, botMessages } = turn;
+    const saved = (this.#saveChains.get(groupId) ?? Promise.resolve())
+      .then(() => saveTurnBotMessages(this.db, groupId, botMessages))
+      .catch((error: unknown) => console.error(`群 ${groupId} 回合计数没写进库`, error));
+    this.#saveChains.set(groupId, saved);
+    return saved;
   }
 
   async #count(turn: Turn, runId: RunId): Promise<void> {
     turn.botMessages += 1;
-    if (turn.botMessages < BOT_MESSAGE_LIMIT) return;
+    await this.#save(turn);
+    if (!limitReached(turn.botMessages)) return;
     this.#blockedRuns.add(runId);
     const notice = await appendMessage(this.db, turn.groupId, {
       kind: "system",
@@ -408,32 +434,12 @@ export class GroupTurns {
     this.push.push(turn.ownerId, this.#snapshot(turn));
   }
 
-  #enqueueAfterSpeakers(groupId: GroupId, speaker: Speaker): void {
-    const turn = this.#turns.get(groupId);
-    if (turn !== undefined) {
-      turn.speakers.push(speaker);
-      this.#publish(turn);
-      return;
-    }
-    const queued = this.#deferred.get(groupId) ?? [];
-    queued.push(speaker);
-    this.#deferred.set(groupId, queued);
-  }
-
-  #close(turn: Turn, carryHandoffs = true): void {
+  #close(turn: Turn): void {
     if (this.#turns.get(turn.groupId) !== turn) return;
-    // 用户插话时，没派出的交接目标不管排在 handoffs 还是 speakers 里都带到下一回合，卡已经建了。
-    // 接续不带：用户已经说了新的，那段活到此为止。
-    const pending = carryHandoffs
-      ? [...turn.handoffs, ...turn.speakers.filter((speaker) => speaker.handoff !== undefined)].filter(
-          (speaker) => speaker.continuation === undefined,
-        )
-      : [];
     this.#turns.delete(turn.groupId);
     turn.stage = { kind: "idle" };
     turn.handoffs.length = 0;
     turn.speakers = [];
     this.#publish(turn);
-    if (pending.length > 0) this.#deferred.set(turn.groupId, [...(this.#deferred.get(turn.groupId) ?? []), ...pending]);
   }
 }

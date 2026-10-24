@@ -344,6 +344,13 @@
       "when": 1792756743833,
       "tag": "0048_computers_gateway_key_hash_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1792833454501,
+      "tag": "0049_turn_persist",
+      "breakpoints": true
     }
   ]
 }

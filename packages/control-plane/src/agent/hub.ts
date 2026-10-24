@@ -51,7 +51,7 @@ import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
 import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
-import { resumePendingContinuations } from "./dispatch.js";
+import { resumePendingContinuations, resumeQueuedHandoffs } from "./dispatch.js";
 import {
   acceptUplinkFrame,
   acknowledgeDownlink,
@@ -753,6 +753,9 @@ export class AgentHub {
       // 结账提交后进程没了的那种接续，等目标电脑上线这一刻补起。
       await resumePendingContinuations(this.#routineDeps(), computer.ownerId).catch((error: unknown) =>
         console.error(`电脑 ${computer.id} 上线时补起接续出错：${errorKind(error)}`),
+      );
+      await resumeQueuedHandoffs(this.#routineDeps(), { ownerId: computer.ownerId }).catch((error: unknown) =>
+        console.error(`电脑 ${computer.id} 上线时补派交接出错：${errorKind(error)}`),
       );
       return accepted;
     } catch (error) {

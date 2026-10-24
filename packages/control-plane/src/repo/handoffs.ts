@@ -1,11 +1,11 @@
-import { HandoffId, type BotId, type Handoff, type Message } from "@baize/shared";
-import { and, count, eq, inArray, isNull, lte } from "drizzle-orm";
+import { GroupId, HandoffId, UserId, type BotId, type Handoff, type Message } from "@baize/shared";
+import { and, asc, count, eq, inArray, isNull, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import { bots, handoffs } from "../db/schema.js";
+import { bots, groups, handoffs, messages } from "../db/schema.js";
 import { newId } from "../ids.js";
-import { appendMessage, type Tx } from "./messages.js";
+import { appendMessage, messageVisibleTo, type Tx } from "./messages.js";
 import { appendReminders } from "./reminders.js";
-import { toHandoff } from "./rows.js";
+import { toHandoff, toMessage } from "./rows.js";
 import type { PushHub } from "../ws/hub.js";
 
 /** 过了这么久还没人确认就提醒一次。和审批同一个口径。 */
@@ -31,7 +31,7 @@ export async function createHandoff(db: Db | Tx, input: CreateHandoffInput): Pro
     const message = await appendMessage(tx, input.groupId, { kind: "handoff", handoffId });
     const [row] = await tx
       .insert(handoffs)
-      .values({ id: handoffId, ...input, messageId: message.id })
+      .values({ id: handoffId, ...input, messageId: message.id, queued: true })
       .returning();
     if (row === undefined) throw new Error("写交接报文没有返回行");
     return { handoff: toHandoff(row), message };
@@ -65,6 +65,66 @@ export async function acceptHandoff(
     )
     .returning();
   return row === undefined ? null : toHandoff(row);
+}
+
+export async function claimQueuedHandoff(tx: Tx, handoffId: HandoffId): Promise<boolean> {
+  const [row] = await tx
+    .update(handoffs)
+    .set({ queued: false })
+    .where(and(eq(handoffs.id, handoffId), eq(handoffs.queued, true), eq(handoffs.status, "pending")))
+    .returning({ id: handoffs.id });
+  return row !== undefined;
+}
+
+export async function dropQueuedHandoffs(db: Db, groupId: GroupId): Promise<void> {
+  await db
+    .update(handoffs)
+    .set({ queued: false })
+    .where(and(eq(handoffs.groupId, groupId), eq(handoffs.queued, true)));
+}
+
+export type QueuedHandoff = { readonly handoff: Handoff; readonly fromName: string; readonly message: Message };
+
+export async function listQueuedHandoffs(db: Db, groupId: GroupId): Promise<QueuedHandoff[]> {
+  const rows = await db
+    .select({ handoff: handoffs, message: messages, fromName: bots.name })
+    .from(handoffs)
+    .innerJoin(messages, eq(messages.id, handoffs.messageId))
+    .innerJoin(bots, eq(bots.id, handoffs.fromBotId))
+    .where(
+      and(
+        eq(handoffs.groupId, groupId),
+        eq(handoffs.queued, true),
+        eq(handoffs.status, "pending"),
+        messageVisibleTo({ kind: "user" }),
+      ),
+    )
+    .orderBy(asc(messages.seq));
+  return rows.map((row) => ({
+    handoff: toHandoff(row.handoff),
+    fromName: row.fromName,
+    message: toMessage(row.message),
+  }));
+}
+
+export async function groupsWithQueuedHandoffs(
+  db: Db,
+  scope: { readonly ownerId?: UserId; readonly groupId?: GroupId },
+): Promise<{ readonly groupId: GroupId; readonly ownerId: UserId }[]> {
+  const rows = await db
+    .selectDistinct({ groupId: handoffs.groupId, ownerId: groups.ownerId })
+    .from(handoffs)
+    .innerJoin(groups, eq(groups.id, handoffs.groupId))
+    .where(
+      and(
+        eq(handoffs.queued, true),
+        eq(handoffs.status, "pending"),
+        isNull(groups.archivedAt),
+        scope.ownerId === undefined ? undefined : eq(groups.ownerId, scope.ownerId),
+        scope.groupId === undefined ? undefined : eq(handoffs.groupId, scope.groupId),
+      ),
+    );
+  return rows.map((row) => ({ groupId: GroupId.parse(row.groupId), ownerId: UserId.parse(row.ownerId) }));
 }
 
 /** 一页消息引用到的交接报文。客户端画卡要的状态跟着这一页一起回，不用再发一次请求。 */

@@ -41,7 +41,7 @@ import {
 import { listAccounts } from "../repo/accounts.js";
 import { listBotNames } from "../repo/bots.js";
 import { PUBLISHING_TIERS, listDraftsForPage, listPlansForPage } from "../repo/drafts.js";
-import { listHandoffs } from "../repo/handoffs.js";
+import { groupsWithQueuedHandoffs, listHandoffs, listQueuedHandoffs } from "../repo/handoffs.js";
 import {
   appendMessageIfGroupAlive,
   listGroupBots,
@@ -50,10 +50,10 @@ import {
   type Tx,
   type GroupBot,
 } from "../repo/messages.js";
-import { findChiefBotId, findSoloBotId, groupExists } from "../repo/groups.js";
+import { findChiefBotId, findSoloBotId, groupExists, turnBotMessages } from "../repo/groups.js";
 import { pushRoutineUpdated } from "../repo/routines.js";
 import { listComputers } from "../repo/computers.js";
-import { lockOwner, lockRuns, shareBotRunsLock } from "../repo/runs.js";
+import { groupHasOpenRun, lockOwner, lockRuns, shareBotRunsLock } from "../repo/runs.js";
 import { pendingLines, recordContext } from "../repo/context-window.js";
 import { findTaskByGroup, listProjects, setCurrentBot } from "../repo/tasks.js";
 import { PLATFORM_LABEL, titleOf } from "../publish/settle.js";
@@ -71,7 +71,7 @@ import {
   type SelectionFailure,
 } from "./computer-selection.js";
 import type { ComputerRecord } from "../repo/rows.js";
-import { GroupTurns, type ContinuationRoutine, type SendOutcome, type Speaker } from "./group-turn.js";
+import { GroupTurns, limitReached, type ContinuationRoutine, type SendOutcome, type Speaker } from "./group-turn.js";
 import { routeTargets } from "./routing.js";
 import {
   breakContinuation,
@@ -227,6 +227,7 @@ export async function dispatchUserMessage(
       epoch,
       members,
       speakers: targets.map((botId) => ({ botId, trigger, reason })),
+      botMessages: 0,
       send: async (speaker, includeRecent) => {
         const pick = early?.botId === speaker.botId ? early : null;
         early = null;
@@ -296,9 +297,10 @@ async function startContinuation(
     return;
   }
   if (deps.groupTurns.queueContinuation(groupId, pending.runId, speaker) === "queued") return;
-  const { members, epoch } = await breakChainOnError(deps, ownerId, groupId, pending.runId, async () => ({
+  const { members, epoch, said } = await breakChainOnError(deps, ownerId, groupId, pending.runId, async () => ({
     members: await listGroupBots(deps.db, groupId),
     epoch: await messageSeq(deps.db, trigger.id, { kind: "bot", botId: pending.botId }),
+    said: await turnBotMessages(deps.db, groupId),
   }));
   if (members.length === 0) {
     await endChain(deps, ownerId, groupId, pending.runId, MEMBER_GONE_BREAK);
@@ -317,6 +319,47 @@ async function startContinuation(
     epoch,
     members,
     speakers: [speaker],
+    botMessages: limitReached(said) ? 0 : said,
+    send: (next, includeRecent) => sendSpeaker(deps, ownerId, groupId, next, includeRecent, {}, null, []),
+  });
+}
+
+export async function resumeQueuedHandoffs(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  scope: { readonly ownerId?: UserId; readonly groupId?: GroupId },
+): Promise<void> {
+  for (const { groupId, ownerId } of await groupsWithQueuedHandoffs(deps.db, scope)) {
+    try {
+      await startQueuedHandoffs(deps, ownerId, groupId);
+    } catch (error) {
+      console.error(`群 ${groupId} 排着的交接没派出去：${errorKind(error)}`);
+    }
+  }
+}
+
+async function startQueuedHandoffs(
+  deps: DispatchDeps & { readonly groupTurns: GroupTurns },
+  ownerId: UserId,
+  groupId: GroupId,
+): Promise<void> {
+  if (deps.groupTurns.has(groupId) || (await groupHasOpenRun(deps.db, groupId))) return;
+  const botMessages = await turnBotMessages(deps.db, groupId);
+  if (limitReached(botMessages)) return;
+  const [first] = await listQueuedHandoffs(deps.db, groupId);
+  if (first === undefined) return;
+  const preference = await computerPreference(deps.db, groupId, first.handoff.toBotId);
+  if ((await computerFor(deps.db, deps.agents, ownerId, preference)).kind === "failed") return;
+  const members = await listGroupBots(deps.db, groupId);
+  const epoch = await messageSeq(deps.db, first.message.id, { kind: "user" });
+  if (members.length === 0 || epoch === null) return;
+  if (deps.groupTurns.has(groupId)) return;
+  await deps.groupTurns.start({
+    groupId,
+    ownerId,
+    epoch,
+    members,
+    speakers: [],
+    botMessages,
     send: (next, includeRecent) => sendSpeaker(deps, ownerId, groupId, next, includeRecent, {}, null, []),
   });
 }
@@ -505,6 +548,7 @@ async function placeSpeaker(
         triggerMessageId: speaker.trigger.id,
         routineRunId: options.routineRunId,
         ...(continuation === undefined ? {} : { continuesRunId: continuation.fromRunId }),
+        ...(speaker.handoff === undefined ? {} : { handoffId: speaker.handoff.id }),
         prompt: async (runId, _messageId, placed) => {
           await voidApprovals();
           // 窗口保留派活前读到的消息，只刷新本次作废后的卡片结论。接续没读窗口，也不记名单，免得把旧 run 没定稿的行划掉。
@@ -551,8 +595,8 @@ async function placeSpeaker(
           : computerFor(tx, deps.agents, ownerId, preference),
     );
     if (result.kind !== "queued") await voidApprovals();
-    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。接续已经由别处起过了也只跳过。
-    if (result.kind === "not_member" || result.kind === "continued") return { kind: "skipped", voided } as const;
+    // Bot 在派活途中被删了只跳过它；单聊群已级联删掉时另报群没了。接续或交接已经由别处起过了也只跳过。
+    if (result.kind === "not_member" || result.kind === "taken") return { kind: "skipped", voided } as const;
     if (result.kind === "unplaced") return { kind: "unavailable", reason: result.reason, voided } as const;
     return { ...result, voided };
   });

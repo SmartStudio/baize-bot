@@ -55,6 +55,15 @@ export async function groupExists(db: Db, groupId: GroupId): Promise<boolean> {
   return row !== undefined;
 }
 
+export async function turnBotMessages(db: Db, groupId: GroupId): Promise<number> {
+  const [row] = await db.select({ count: groups.turnBotMessages }).from(groups).where(eq(groups.id, groupId)).limit(1);
+  return row?.count ?? 0;
+}
+
+export async function saveTurnBotMessages(db: Db, groupId: GroupId, said: number): Promise<void> {
+  await db.update(groups).set({ turnBotMessages: said }).where(eq(groups.id, groupId));
+}
+
 /** 单聊群里的那个 Bot；多 Bot 群是 null。群是不是单聊只看这一列，不看此刻剩几个成员。 */
 export async function findSoloBotId(db: Db, groupId: GroupId): Promise<BotId | null> {
   const [row] = await db.select({ soloBotId: groups.soloBotId }).from(groups).where(eq(groups.id, groupId)).limit(1);
