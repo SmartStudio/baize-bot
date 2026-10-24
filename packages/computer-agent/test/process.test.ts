@@ -66,7 +66,7 @@ function spawnAgent(env: NodeJS.ProcessEnv): Child {
         listeners.push(check);
         check();
       }),
-    waitForExit: (timeoutMs = 60_000) =>
+    waitForExit: (timeoutMs = 45_000) =>
       new Promise((resolve, reject) => {
         if (child.exitCode !== null) {
           resolve(`退出 ${String(child.exitCode)}`);
@@ -190,7 +190,7 @@ describe("电脑代理进程", () => {
       const first = start();
       await replayed[0];
       first.process.kill("SIGKILL");
-      await first.waitForExit();
+      await first.waitForExit(10_000);
       const second = start();
       await replayed[1];
       await applied;
@@ -229,10 +229,12 @@ describe("电脑代理进程", () => {
       })}\n`,
     );
 
-    const winner = await Promise.race([child.waitForOutput("后重连，第 2 次"), child.waitForExit()]);
-    child.process.kill("SIGKILL");
-
-    expect(winner, `输出：${child.output()}`).toBe("输出");
+    try {
+      const winner = await Promise.race([child.waitForOutput("后重连，第 2 次"), child.waitForExit()]);
+      expect(winner, `输出：${child.output()}`).toBe("输出");
+    } finally {
+      if (child.process.exitCode === null) child.process.kill("SIGKILL");
+    }
   }, 60_000);
 
   it.each(["token-in-env", ""])(
@@ -249,11 +251,13 @@ describe("电脑代理进程", () => {
         })}\n`,
       );
 
-      const exit = await child.waitForExit();
-
-      expect(exit).toBe("退出 1");
-      expect(child.output()).toContain("AGENT_TOKEN");
-      expect(child.output(), "连都不该连，更不该排重连").not.toContain("后重连");
+      try {
+        expect(await child.waitForExit()).toBe("退出 1");
+        expect(child.output()).toContain("AGENT_TOKEN");
+        expect(child.output(), "连都不该连，更不该排重连").not.toContain("后重连");
+      } finally {
+        if (child.process.exitCode === null) child.process.kill("SIGKILL");
+      }
     },
     60_000,
   );
@@ -274,6 +278,19 @@ describe("电脑代理进程", () => {
 
     try {
       child.stdin.end();
+      const winner = await Promise.race([child.waitForExit(), child.waitForOutput("后重连，第 2 次")]);
+      expect(winner, `输出：${child.output()}`).toBe("退出 0");
+    } finally {
+      if (child.process.exitCode === null) child.process.kill("SIGKILL");
+    }
+  }, 60_000);
+
+  it("启动配置末尾没换行、写完就关 stdin，代理读到配置照样自己停机", async () => {
+    const child = spawnAgent({});
+    const dataDir = await createDataDir();
+
+    try {
+      child.stdin.end(JSON.stringify({ url: NOWHERE, computerId: "computer-1", token: "token-1", dataDir }));
       const winner = await Promise.race([child.waitForExit(), child.waitForOutput("后重连，第 2 次")]);
       expect(winner, `输出：${child.output()}`).toBe("退出 0");
     } finally {
