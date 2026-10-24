@@ -1,4 +1,4 @@
-import { GroupId, ReportMetricRequest, UpdateTaskResponse } from "@baize/shared";
+import { GroupId, ReportMetricRequest, UpdateTaskResponse, metricKeyOf } from "@baize/shared";
 import { Hono } from "hono";
 import type { Db } from "../../db/client.js";
 import { recordSample } from "../../repo/metrics.js";
@@ -21,11 +21,15 @@ export function createGoalRoutes({ db, push }: GoalRouteDeps): Hono<Env> {
 
     const ownerId = c.get("user").id;
     const { value, metric } = body.data;
-    const recorded = await recordSample(db, ownerId, groupId.data, value, "manual", ({ keys, goal }) =>
-      metric === undefined ? goal : keys.includes(metric) ? metric : undefined,
+    const recorded = await recordSample(db, ownerId, groupId.data, value, "manual", ({ sources, goalMetric }) =>
+      metric === undefined
+        ? { kind: "land", metric: goalMetric }
+        : sources.some((source) => metricKeyOf(source) === metric)
+          ? { kind: "land", metric }
+          : { kind: "refused", reason: "unknown_metric" },
     );
     if (recorded.kind === "not_found") return c.json(NOT_FOUND, 404);
-    if (recorded.kind === "unknown_metric") return c.json({ error: "这个项目没挂这个指标" }, 400);
+    if (recorded.kind === "refused") return c.json({ error: "这个项目没挂这个指标" }, 400);
     const task = await findTaskByGroup(db, recorded.groupId);
     if (task === null) return c.json(NOT_FOUND, 404);
     push.push(ownerId, { type: "task_updated", task });

@@ -1,4 +1,4 @@
-import type { AgentToControl } from "@baize/shared";
+import { landReported, type AgentToControl, type ReportRefusal } from "@baize/shared";
 import { type Static, Type } from "typebox";
 import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
@@ -25,8 +25,9 @@ export function createMetricTools(options: {
       name: "report_metric",
       label: "报指标",
       description:
-        "项目群里，你自己读到了项目目标对应的那个数（比如在浏览器里看到的小红书粉丝数），用它把这个数报给项目。" +
-        "value 是读到的当前值，label 是这个数的名字，比如「小红书粉丝」。报完任务卡上的进度和本周变化会跟着更新。只报你亲眼读到的数，读不到就别报。",
+        "项目群里，你自己读到了项目要的那个数（比如在浏览器里看到的小红书粉丝数），用它把这个数报给项目。" +
+        "value 是读到的当前值，label 是这个数的名字：任务卡上有「要报的数」就照那里的名字写，没有就写一个好认的名字，比如「小红书粉丝」。" +
+        "报完任务卡上的进度和本周变化会跟着更新。只报你亲眼读到的数，读不到就别报。",
       parameters: REPORT_METRIC_PARAMS,
       execute: async (_callId, params) => {
         const active = options.activeRun();
@@ -35,6 +36,13 @@ export function createMetricTools(options: {
         const named = label.trim();
         if (named === "") {
           throw new Error("指标没发出去，改好再调：label 是这个数的名字，比如「小红书粉丝」，不能空。");
+        }
+        if (active.task !== null) {
+          const landing = landReported(
+            { sources: active.task.metricSources, goalMetric: active.task.goal?.metric ?? null },
+            named,
+          );
+          if (landing.kind === "refused") throw new Error(refusalText(landing.reason));
         }
         options.send(
           parseOrThrow(
@@ -53,4 +61,13 @@ export function createMetricTools(options: {
       },
     },
   ];
+}
+
+function refusalText(reason: ReportRefusal): string {
+  switch (reason.kind) {
+    case "unknown_label":
+      return `指标没发出去：这个项目要报的数是${reason.labels.map((label) => `「${label}」`).join("")}，label 照这个名字写，改好再调。`;
+    case "polled_goal":
+      return "指标没发出去：这个项目的目标对的是读数器读的数（GitHub 星数、X 粉丝数这类），这个数由读数器读，不用报。";
+  }
 }

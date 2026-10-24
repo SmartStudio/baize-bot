@@ -279,8 +279,18 @@
   align-items: flex-end;
 }
 
+.task-goal-form .field {
+  min-width: 0;
+}
+
 .task-goal-form .field input {
   width: 9rem;
+  max-width: 100%;
+}
+
+.task-goal-form select {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .task-goal-actions {

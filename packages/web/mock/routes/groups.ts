@@ -6,6 +6,7 @@ import {
   metricKeyOf,
   SendMessageRequest,
   UpdateTaskRequest,
+  type ProjectGoal,
   type TopicTask,
 } from "@baize/shared";
 import {
@@ -48,7 +49,21 @@ const DECISION_WORDS = new Map<string, ApprovalDecision>([
   ["不行", "rejected"],
 ]);
 
-const goalMetricAttached = (task: TopicTask, patch: z.infer<typeof UpdateTaskRequest>): boolean => {
+type TaskPatch = Omit<z.infer<typeof UpdateTaskRequest>, "goal"> & { goal?: ProjectGoal | null };
+
+// goal 不带 metric 保留原来对的那个，和控制面一样。
+const patchOf = (task: TopicTask, { goal, ...rest }: z.infer<typeof UpdateTaskRequest>): TaskPatch =>
+  goal === undefined
+    ? rest
+    : {
+        ...rest,
+        goal:
+          goal === null
+            ? null
+            : { ...goal, metric: goal.metric === undefined ? (task.goal?.metric ?? null) : goal.metric },
+      };
+
+const goalMetricAttached = (task: TopicTask, patch: TaskPatch): boolean => {
   const metric = (patch.goal === undefined ? task.goal : patch.goal)?.metric ?? null;
   return (
     metric === null || (patch.metricSources ?? task.metricSources).some((source) => metricKeyOf(source) === metric)
@@ -92,11 +107,11 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
     const current = tasks.get(taskId);
     if (current === undefined) send(res, 404, { error: "没有这个任务" });
     else if (!parsed.success) send(res, 400, { error: "任务字段不对" });
-    else if (!goalMetricAttached(current, parsed.data)) {
-      send(res, 400, { error: "目标对的指标不在这个项目的指标里" });
-    } else {
-      const next = writeTask(taskId, defined(parsed.data));
-      if (next === null) send(res, 404, { error: "没有这个任务" });
+    else {
+      const patch = patchOf(current, parsed.data);
+      const next = goalMetricAttached(current, patch) ? writeTask(taskId, defined(patch)) : "goal_metric_missing";
+      if (next === "goal_metric_missing") send(res, 400, { error: "目标对的指标不在这个项目的指标里" });
+      else if (next === null) send(res, 404, { error: "没有这个任务" });
       else {
         push({ type: "task_updated", task: next });
         send(res, 200, { task: next });

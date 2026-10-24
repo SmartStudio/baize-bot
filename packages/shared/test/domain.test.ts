@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AccountId,
   AgentToControl,
   Bot,
   BotId,
@@ -29,6 +30,8 @@ import {
   ToolConnection,
   ToolView,
   UpdateBotRequest,
+  UpdateTaskRequest,
+  landReported,
   toolViewText,
   gatewayAlias,
   TodayResponse,
@@ -208,6 +211,41 @@ describe("domain schemas reject illegal states", () => {
     const many = Array.from({ length: 9 }, (_, i) => ({ kind: "reported", platform: "xiaohongshu", label: `赞${i}` }));
     expect(MetricSources.safeParse(many).success).toBe(false);
     expect(ProjectGoal.parse({ target: 10, unit: "星", dueAt: null }).metric).toBeNull();
+  });
+
+  it("Bot 报的数：对上挂着的名字落那个，没挂又对手记那条落手记那条，其余不收", () => {
+    const stars = { kind: "github_stars", accountId: AccountId.parse("a1"), repo: "acme/web" } as const;
+    const fans = { kind: "reported", platform: "xiaohongshu", label: "粉丝" } as const;
+    const likes = { kind: "reported", platform: "xiaohongshu", label: "互动率" } as const;
+    const cases = [
+      ["对上挂着的名字，目标对别的", { sources: [fans, likes], goalMetric: "reported:粉丝" }, "互动率"],
+      ["对上挂着的名字，目标对星数", { sources: [stars, fans], goalMetric: "github_stars:acme/web" }, "粉丝"],
+      ["什么都没挂、没有目标", { sources: [], goalMetric: null }, "粉丝数"],
+      ["只挂了星数、目标对手记那条", { sources: [stars], goalMetric: null }, "粉丝数"],
+      ["挂了要报的数而名字对不上", { sources: [stars, fans, likes], goalMetric: "reported:互动率" }, "粉丝数"],
+      ["挂了要报的数、目标对手记那条，名字对不上", { sources: [fans], goalMetric: null }, "粉 丝"],
+      ["没挂要报的数、目标对星数", { sources: [stars], goalMetric: "github_stars:acme/web" }, "小红书粉丝"],
+    ] as const;
+    expect(cases.map(([name, task, label]) => [name, landReported(task, label)])).toEqual([
+      ["对上挂着的名字，目标对别的", { kind: "land", metric: "reported:互动率" }],
+      ["对上挂着的名字，目标对星数", { kind: "land", metric: "reported:粉丝" }],
+      ["什么都没挂、没有目标", { kind: "land", metric: null }],
+      ["只挂了星数、目标对手记那条", { kind: "land", metric: null }],
+      ["挂了要报的数而名字对不上", { kind: "refused", reason: { kind: "unknown_label", labels: ["粉丝", "互动率"] } }],
+      [
+        "挂了要报的数、目标对手记那条，名字对不上",
+        { kind: "refused", reason: { kind: "unknown_label", labels: ["粉丝"] } },
+      ],
+      ["没挂要报的数、目标对星数", { kind: "refused", reason: { kind: "polled_goal" } }],
+    ]);
+  });
+
+  it("PATCH 的目标可以不带 metric，读出来的目标照旧补 null", () => {
+    const goal = { target: 10, unit: "星", dueAt: null };
+    const patched = UpdateTaskRequest.parse({ goal });
+    expect(patched.goal, "不带就是不带，不补 null，控制面据此保留原来对的那个").toEqual(goal);
+    expect(UpdateTaskRequest.parse({ goal: { ...goal, metric: null } }).goal?.metric).toBeNull();
+    expect(UpdateTaskRequest.safeParse({ goal: { ...goal, extra: 1 } }).success, "还是严格的").toBe(false);
   });
 
   it("建队卡最多请 5 个人：项目群上限 6 个 Bot，主助理自己占一个；卡正文和上行报文同一条线", () => {

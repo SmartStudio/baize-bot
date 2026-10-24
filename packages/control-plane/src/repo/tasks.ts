@@ -4,6 +4,7 @@ import {
   type BotId,
   type ChecklistItem,
   type MetricSource,
+  type MetricKey,
   type ProjectGoal,
   type TaskId,
   type TopicTask,
@@ -30,7 +31,7 @@ export type UpdateTaskInput = {
   readonly checklist?: readonly ChecklistItem[] | undefined;
   readonly status?: TaskStatus | undefined;
   readonly cadence?: string | undefined;
-  readonly goal?: ProjectGoal | null | undefined;
+  readonly goal?: (Omit<ProjectGoal, "metric"> & { readonly metric?: MetricKey | null | undefined }) | null | undefined;
   readonly metricSources?: readonly MetricSource[] | undefined;
 };
 
@@ -70,13 +71,14 @@ export async function updateTask(
   if (input.checklist !== undefined) patch.checklist = stampedChecklist(input.checklist, tasks.checklist);
   if (input.status !== undefined) patch.status = input.status;
   if (input.cadence !== undefined) patch.cadence = input.cadence;
-  // 目标三列整个替换，给 null 三列一起清空，不会剩下半个目标。
+  // 目标几列整个替换，给 null 一起清空，不会剩下半个目标。只有 metric 可省，省了保留原来对的那个。
   const { goal } = input;
   if (goal !== undefined) {
     patch.goalTarget = goal === null ? null : goal.target;
     patch.goalUnit = goal === null ? null : goal.unit;
     patch.goalDueAt = goal === null || goal.dueAt === null ? null : new Date(goal.dueAt);
-    patch.goalMetric = goal === null ? null : goal.metric;
+    if (goal === null) patch.goalMetric = null;
+    else if (goal.metric !== undefined) patch.goalMetric = goal.metric;
   }
   if (input.metricSources !== undefined) patch.metricSources = [...input.metricSources];
   if (Object.keys(patch).length === 0) {

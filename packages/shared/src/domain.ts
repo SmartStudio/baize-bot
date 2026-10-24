@@ -210,6 +210,29 @@ export const metricKeyOf = (source: MetricSource): MetricKey => {
   }
 };
 
+// 一个数落到哪条序列：land 带序列的键，null 是手记那条，和 ProjectGoal.metric 同一个约定；refused 带不收的原因。
+export type MetricLanding<Refusal> =
+  { readonly kind: "land"; readonly metric: MetricKey | null } | { readonly kind: "refused"; readonly reason: Refusal };
+
+export type ReportRefusal =
+  { readonly kind: "unknown_label"; readonly labels: readonly string[] } | { readonly kind: "polled_goal" };
+
+/**
+ * Bot 报的数落到哪个指标，控制面落样本和运行器发之前都按它判。label 对上挂着的「Bot 报的数」就落那个；
+ * 一个都没挂、目标又对手记那条，落手记那条，单指标的老项目照旧。其余不收：落进目标对的那个，
+ * 会拿一个名字对不上的数顶掉另一个指标，或者顶掉读数器读的数。
+ */
+export function landReported(
+  task: { readonly sources: readonly MetricSource[]; readonly goalMetric: MetricKey | null },
+  label: string,
+): MetricLanding<ReportRefusal> {
+  const labels = task.sources.flatMap((source) => (source.kind === "reported" ? [source.label] : []));
+  if (labels.includes(label)) return { kind: "land", metric: reportedMetricKey(label) };
+  if (labels.length > 0) return { kind: "refused", reason: { kind: "unknown_label", labels } };
+  if (task.goalMetric === null) return { kind: "land", metric: null };
+  return { kind: "refused", reason: { kind: "polled_goal" } };
+}
+
 export const MAX_METRIC_SOURCES = 8;
 export const MetricSources = z
   .array(MetricSource)
