@@ -492,7 +492,7 @@ export const MainWindow = () => {
         <ToolInspector
           tool={inspected}
           onClose={() => setInspectedTool(null)}
-          // 抽屉模式下 Esc 归遮罩管；浮层开着时 Esc 只给浮层。
+          // 抽屉模式下 Esc 归遮罩管；两个 Esc 监听不能同时挂，真按键时一个回调里的 React 提交会摘掉重挂另一个，那一下谁都收不到。
           onEscape={drawer || overlay !== "none" ? null : () => setInspectedTool(null)}
         />
       ) : soloBot !== null && botPanelShown ? (
