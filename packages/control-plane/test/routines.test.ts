@@ -6,6 +6,7 @@ import {
   MessageListResponse,
   RoutineListResponse,
   RoutineResponse,
+  UserId,
   type BotId,
   type ControlToAgent,
   type CreateRoutineRequest,
@@ -20,7 +21,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "../src/db/schema.js";
 import type { StoredTrigger } from "../src/db/schema.js";
 import { EXECUTOR_DELETED_NOTE, MAX_ROUTINE_RUNS, advanceCronTrigger } from "../src/repo/routines.js";
-import { shareBotRunsLock } from "../src/repo/runs.js";
+import { lockOwner, shareBotRunsLock } from "../src/repo/runs.js";
 import { connect, type Db, type Sql } from "../src/db/client.js";
 import { databaseUrl } from "../src/env.js";
 import { DISPATCH_FAILED_NOTE, WAITING_APPROVAL_NOTE } from "../src/routines/run.js";
@@ -2723,11 +2724,15 @@ describe("更换执行 Bot", () => {
 
 /** 有没有连接正排在这个 Bot 的 advisory 锁上没拿到。两参数形式的 advisory 锁在 pg_locks 里第二个键落在 objid，按无符号存。 */
 async function waitingOnBotLock(botId: BotId): Promise<boolean> {
+  return (await botLockWaiters(botId)) > 0;
+}
+
+async function botLockWaiters(botId: BotId): Promise<number> {
   const rows = await database.sql<{ n: number }[]>`
     SELECT count(*)::int AS n FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
     WHERE a.datname = ${database.databaseName} AND l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 2
       AND l.objid::bigint = (hashtext(${botId}::text)::bigint & 4294967295)`;
-  return (rows[0]?.n ?? 0) > 0;
+  return rows[0]?.n ?? 0;
 }
 
 /**
@@ -2880,4 +2885,90 @@ describe("更换执行 Bot 的锁序", () => {
       await gated.live.close();
     }
   });
+
+  it("单聊例行触发已提交、旧执行者的 run 还没建时换人：删例行照运行记录先锁住旧执行者，run 落地不会让名单变长、逆序拿锁", async () => {
+    const owner = await ownerWithBot();
+    const second = await secondBot(owner);
+    // 旧执行者 id 更小：删除要是持着新执行者的锁再去拿它，就和先拿它、再拿新执行者的派活反序。
+    const [low, high] = [owner.botId, second].toSorted() as [BotId, BotId];
+    const routine = await routineOf(owner, low);
+    const [ownerRow] = await database.sql<{ owner_id: string }[]>`SELECT owner_id FROM bots WHERE id = ${low}`;
+    const ownerId = UserId.parse(ownerRow?.owner_id);
+    const agent = await online(owner);
+    // 触发事务提交到 placeRun 建 run 是同一个请求里的两步，HTTP 停不在中间。
+    // placeRun 第一句拿账号的共享锁，触发事务不拿，所以从旁路扣住账号的排他锁，试跑就停在这个窗口里。
+    const account = await holdOwnerExclusive(side.db, ownerId);
+    let accountHeld = true;
+    let holder: Awaited<ReturnType<typeof holdBotShared>> | undefined;
+    let dispatch: ReturnType<typeof sharedLocksInOrder> | undefined;
+    let trial: Promise<Response> | undefined;
+    let deleting: Promise<Response> | undefined;
+    try {
+      trial = owner.client.post(`/api/routines/${routine.id}/run`);
+      await waitUntil(
+        async () => (await runsOf(routine.id)).length === 1 && (await lockWaiters()) > 0,
+        "触发事务提交、派活排到账号锁上",
+      );
+      expect((await switchExecutor(owner, routine.id, high)).status).toBe(200);
+
+      // 有人短暂持着新执行者的共享锁（比如它自己的派活），删例行会在它上面等一下。
+      holder = await holdBotShared(side.db, high);
+      deleting = owner.client.delete(`/api/routines/${routine.id}`);
+      await waitUntil(() => waitingOnBotLock(high), "删例行排到新执行者的锁上");
+
+      await account.release();
+      accountHeld = false;
+      await waitUntil(
+        async () => (await committedRunsOf(routine.id)) > 0 || (await waitingOnBotLock(low)),
+        "旧执行者的 run 落地，或者派活排到删例行持着的旧执行者锁上",
+      );
+
+      dispatch = sharedLocksInOrder(side.db, low, high);
+      dispatch.proceed();
+      await waitUntil(
+        async () => (await botLockWaiters(low)) >= 2 || (await botLockWaiters(high)) >= 2,
+        "按升序拿共享锁的派活排上锁",
+      );
+      await holder.release();
+      holder = undefined;
+
+      await expect(dispatch.done, "按升序拿共享锁的派活不该被当成死锁回滚").resolves.toBeUndefined();
+      expect((await deleting).status, "删例行不该被当成死锁回滚").toBe(204);
+      expect(await allRoutines(owner.client)).toEqual([]);
+    } finally {
+      if (accountHeld) await account.release();
+      dispatch?.proceed();
+      await holder?.release();
+      await Promise.allSettled([trial, deleting, dispatch?.done].filter((one) => one !== undefined));
+      agent.close();
+    }
+  });
 });
+
+/** 这条例行的运行记录名下已经提交的 run 有几条。 */
+async function committedRunsOf(routineId: string): Promise<number> {
+  const rows = await database.sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM runs JOIN routine_runs ON routine_runs.id = runs.routine_run_id
+    WHERE routine_runs.routine_id = ${routineId}`;
+  return rows[0]?.n ?? 0;
+}
+
+/** 测试库上开一个事务拿着这个账号的排他锁不放，直到 release。 */
+async function holdOwnerExclusive(db: Db, ownerId: UserId): Promise<{ release: () => Promise<void> }> {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  let locked!: () => void;
+  const holding = new Promise<void>((resolve) => (locked = resolve));
+  const done = db.transaction(async (tx) => {
+    await lockOwner(tx, ownerId, "exclusive");
+    locked();
+    await released;
+  });
+  await holding;
+  return {
+    release: async () => {
+      release();
+      await done;
+    },
+  };
+}
