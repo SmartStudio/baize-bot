@@ -5,6 +5,8 @@ services:
   postgres:
     image: postgres:16
     container_name: baize-postgres
+    # 几个工作树的控制面测试同时跑，每个测试文件一个库，默认的 100 个连接会被打满。
+    command: ["postgres", "-c", "max_connections=300"]
     environment:
       POSTGRES_USER: baize
       POSTGRES_PASSWORD: baize
