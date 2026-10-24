@@ -178,24 +178,124 @@ test.describe("390 宽", () => {
   });
 });
 
-test.describe("768 宽", () => {
-  test.use({ viewport: { width: 768, height: 1024 } });
+const TABLET_PORTRAIT = [744, 768, 810, 820, 834];
 
-  test("侧栏常驻，对话区不窄于 480，右栏照旧是抽屉", async ({ page }) => {
+test.describe("平板竖屏", () => {
+  test("744 到 834 宽侧栏都收成抽屉，1024 横屏仍是三栏", async ({ page }) => {
+    await page.setViewportSize({ width: 1024, height: 768 });
     await login(page);
-    await expect(page.getByTestId("sidebar")).toBeVisible();
-    await expect(page.getByTestId("nav-open"), "侧栏常驻时没有打开侧栏的按钮").toHaveCount(0);
-    await expectNoSideScroll(page, "今天页");
-    await page.locator(`[data-testid=group-item][data-group-title="${TEAM_TITLE}"]`).click();
-    await page.getByTestId("project-open-group").click();
+    for (const width of TABLET_PORTRAIT) {
+      await page.setViewportSize({ width: 1024, height: 768 });
+      await expect(page.getByTestId("nav-open"), "1024 宽侧栏常驻，没有打开侧栏的按钮").toHaveCount(0);
+      await page.setViewportSize({ width, height: 1024 });
+      await expect(page.getByTestId("sidebar"), `${width} 宽侧栏默认收着`).toBeHidden();
+      await openNav(page);
+      expect((await boxOf(page, "sidebar")).x, `${width} 宽抽屉贴着屏幕左边`).toBe(0);
+      await page.keyboard.press("Escape");
+      await expectNavClosed(page, `${width} 宽 Esc 收起`);
+      await expectNoSideScroll(page, `${width} 宽今天页`);
+    }
+    await page.setViewportSize({ width: 1024, height: 768 });
+    await expect(page.getByTestId("nav-open"), "1024 宽没有打开侧栏的按钮").toHaveCount(0);
+    await expect(page.getByTestId("sidebar"), "1024 宽侧栏常驻").toBeVisible();
+    const sidebar = await boxOf(page, "sidebar");
+    await page.getByTestId("assistant-nav").click();
     const chat = await boxOf(page, "chat");
-    expect(chat.width, "对话区不窄于 480px").toBeGreaterThanOrEqual(480);
-    await page.getByTestId("task-open").click();
-    await expect(page.getByTestId("panel-scrim")).toBeVisible();
-    const panel = await boxOf(page, "task-panel");
-    expect(panel.x + panel.width, "任务详情贴着窗口右边").toBe(768);
-    await expectNoSideScroll(page, "任务详情开着");
-    await page.screenshot({ path: `${SHOT}/mobile-768-task.png` });
+    expect(chat.x, "1024 宽对话区排在侧栏右边").toBeGreaterThanOrEqual(sidebar.x + sidebar.width);
+  });
+});
+
+for (const width of [768, 820]) {
+  test.describe(`${width} 宽`, () => {
+    test.use({ viewport: { width, height: 1024 } });
+
+    test("侧栏是抽屉，对话区占满宽度，右栏照旧是抽屉", async ({ page }) => {
+      await login(page);
+      await expect(page.getByTestId("sidebar"), "平板竖屏侧栏默认收着").toBeHidden();
+      await expectNoSideScroll(page, "今天页");
+      await openNav(page);
+      await page.screenshot({ path: `${SHOT}/mobile-${width}-nav.png` });
+      await page.locator(`[data-testid=group-item][data-group-title="${TEAM_TITLE}"]`).click();
+      await expectNavClosed(page, "点项目抽屉收起");
+      await page.getByTestId("project-open-group").click();
+      const chat = await boxOf(page, "chat");
+      expect(chat, "对话区占满宽度").toMatchObject({ x: 0, width });
+      await page.getByTestId("task-open").click();
+      await expect(page.getByTestId("panel-scrim")).toBeVisible();
+      const panel = await boxOf(page, "task-panel");
+      expect(panel.x + panel.width, "任务详情贴着窗口右边").toBe(width);
+      await expectNoSideScroll(page, "任务详情开着");
+      await page.screenshot({ path: `${SHOT}/mobile-${width}-task.png` });
+    });
+  });
+}
+
+test.describe("720 宽", () => {
+  test.use({ viewport: { width: 720, height: 900 } });
+
+  test("设置窗口铺满屏幕，关闭按钮不小于 40px", async ({ page }) => {
+    await login(page);
+    await openNav(page);
+    await page.getByTestId("sidebar-settings").click();
+    await expect(page.getByTestId("settings-window")).toBeVisible();
+    const settings = await page.locator(".settings").boundingBox();
+    expect(settings, "设置窗口铺满屏幕").toEqual({ x: 0, y: 0, width: 720, height: 900 });
+    const close = await boxOf(page, "settings-close");
+    expect(close.width, "关闭设置不窄于 40px").toBeGreaterThanOrEqual(TOUCH_MIN);
+    expect(close.height, "关闭设置不矮于 40px").toBeGreaterThanOrEqual(TOUCH_MIN);
+  });
+});
+
+const expectFocusOn = async (page: Page, testId: string, why: string) => {
+  const at = await page.evaluate(() => ({
+    body: document.activeElement === null || document.activeElement === document.body,
+    testId: document.activeElement?.getAttribute("data-testid") ?? null,
+  }));
+  expect(at.body, `${why}：焦点没掉到 body`).toBe(false);
+  expect(at.testId, why).toBe(testId);
+};
+
+test.describe("390 宽焦点", () => {
+  test.use({ viewport: PHONE });
+
+  test("抽屉拉开焦点进侧栏，Esc、点遮罩、选群收起后焦点回到菜单按钮", async ({ page }) => {
+    await login(page);
+    await openNav(page);
+    expect(
+      await page.evaluate(() => document.activeElement?.closest("[data-testid=sidebar]") !== null),
+      "拉开抽屉焦点在侧栏里",
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await expectNavClosed(page, "Esc 收起");
+    await expectFocusOn(page, "nav-open", "Esc 收起后焦点回到菜单按钮");
+
+    await openNav(page);
+    await page.getByTestId("nav-scrim").click({ position: { x: PHONE.width - 24, y: 400 } });
+    await expectNavClosed(page, "点遮罩收起");
+    await expectFocusOn(page, "nav-open", "点遮罩收起后焦点回到菜单按钮");
+
+    await openNav(page);
+    await page.getByTestId("assistant-nav").click();
+    await expectNavClosed(page, "选了群收起");
+    await expectFocusOn(page, "nav-open", "选群收起后焦点回到菜单按钮");
+  });
+
+  test("从菜单按钮拉开抽屉再开快速切换，Esc 退出后焦点回到侧栏，再收起回到菜单按钮", async ({ page }) => {
+    await login(page);
+    await page.getByTestId("nav-open").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("sidebar")).toBeVisible();
+    await page.keyboard.press("ControlOrMeta+k");
+    await expect(page.getByTestId("quick-switch-input")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(page.getByTestId("quick-switch")).toHaveCount(0);
+    expect(
+      await page.evaluate(() => document.activeElement?.closest("[data-testid=sidebar]") !== null),
+      "退出快速切换焦点回到侧栏里",
+    ).toBe(true);
+    await page.keyboard.press("Escape");
+    await expectNavClosed(page, "再按 Esc 收起抽屉");
+    await expectFocusOn(page, "nav-open", "收起后焦点回到菜单按钮");
   });
 });
 
