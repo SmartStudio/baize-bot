@@ -11,6 +11,7 @@ import {
   BareUplinkFrame,
   type ComputerId,
   type ComputerKind,
+  type RunId,
   ControlToAgent,
   controlOriginFromAgentUrl,
   DownlinkFrame,
@@ -115,6 +116,8 @@ export function startAgent(options: AgentOptions): AgentHandle {
   const resetReports: AgentToControl[] = [];
   let installId: string | null = null;
   const reliableSends = new Set<Promise<void>>();
+  // 发件箱是在运行器 send 的调用栈里换掉帧的，停 run 挪到这一拍之后。
+  const dropRun = (runId: RunId): void => queueMicrotask(() => runner?.cancel(runId));
   const discoveries = new Map<AbortController, Promise<void>>();
   // 报文按到达顺序串行处理。handle 是 async，并发跑会让 config 后面紧跟的 prompt 先看到还没建好的 runner。
   let inbox: Promise<void> = Promise.resolve();
@@ -384,7 +387,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
           if (stopping) return;
           try {
             await quarantineTransportState(dataDir, "服务器确认序号回退", options.log);
-            const fresh = await ReliableOutbox.openForComputer(dataDir, options.computerId, options.log);
+            const fresh = await ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun);
             outbox = fresh.outbox;
             downlinkCursor = fresh.downlinkCursor;
             resettingTransport = false;
@@ -640,7 +643,10 @@ export function startAgent(options: AgentOptions): AgentHandle {
     });
   }
 
-  void Promise.all([ReliableOutbox.openForComputer(dataDir, options.computerId, options.log), loadInstallId(dataDir)])
+  void Promise.all([
+    ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun),
+    loadInstallId(dataDir),
+  ])
     .then(([{ outbox: openedOutbox, downlinkCursor: openedCursor }, openedInstallId]) => {
       outbox = openedOutbox;
       downlinkCursor = openedCursor;

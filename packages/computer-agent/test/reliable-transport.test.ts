@@ -161,6 +161,7 @@ describe("电脑代理可靠传输落盘", () => {
 });
 
 const lane = { runId: RunId.parse("run-1"), botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1") };
+const CLIPPED = "…（内容过长，后面的已截掉）";
 const oversized = (unit: string): string =>
   unit.repeat(Math.ceil((AGENT_FRAME_MAX_BYTES + 1024) / Buffer.byteLength(unit)));
 const wireBytes = (outbox: ReliableOutbox, frame: { seq: number; body: AgentToControl }): number =>
@@ -222,25 +223,177 @@ describe("发件箱入口的单帧上限", () => {
     });
   });
 
-  it("截完仍超限的帧拒收，不占序号、不落盘，发件箱照常接后面的帧", async () => {
+  it("approval_request 的原始参数超限时和 bot_tool_call 一样换成说明，其余字段不动", async () => {
+    const outbox = await ReliableOutbox.open(await dataDir());
+    const content = oversized("x");
+    const request = {
+      type: "approval_request" as const,
+      ...lane,
+      callId: "call-1",
+      tool: "write",
+      action: "write_workspace" as const,
+      target: null,
+      view: { kind: "write" as const, path: "a.txt", preview: ["xxx"], raw: { path: "a.txt", content } },
+    };
+    const stored = await outbox.append(request);
+    expect(wireBytes(outbox, stored)).toBeLessThanOrEqual(AGENT_FRAME_MAX_BYTES);
+    expect(stored.body).toEqual({
+      ...request,
+      view: {
+        kind: "write",
+        path: "a.txt",
+        preview: ["xxx"],
+        raw: `原始参数有 ${Buffer.byteLength(JSON.stringify({ path: "a.txt", content }))} 字节，太大没有上传`,
+      },
+    });
+  });
+
+  it("工具视图里的命令、路径、预览、参数本身超限时一并截短注明，审批卡和工具卡都收进上限", async () => {
+    const outbox = await ReliableOutbox.open(await dataDir());
+    const huge = oversized("令a");
+    const approval = await outbox.append({
+      type: "approval_request",
+      ...lane,
+      callId: "call-1",
+      tool: "bash",
+      action: "write_workspace",
+      target: null,
+      view: { kind: "bash", command: huge, note: huge, raw: { command: huge } },
+    });
+    const write = await outbox.append({
+      type: "bot_tool_call",
+      ...lane,
+      callId: "call-2",
+      tool: "write",
+      view: { kind: "write", path: huge, preview: [huge, "第二行"] },
+      status: "ok",
+      durationMs: 1,
+    });
+    const mcp = await outbox.append({
+      type: "approval_request",
+      ...lane,
+      callId: "call-3",
+      tool: "search",
+      action: "write_workspace",
+      target: null,
+      view: { kind: "mcp", server: "搜索", tool: "search", params: [{ key: "q", value: [huge] }] },
+    });
+    for (const stored of [approval, write, mcp])
+      expect(wireBytes(outbox, stored)).toBeLessThanOrEqual(AGENT_FRAME_MAX_BYTES);
+    const clipped = (text: unknown): void => {
+      if (typeof text !== "string") throw new Error(`不是字符串：${typeof text}`);
+      expect(text.endsWith(CLIPPED)).toBe(true);
+      const kept = text.slice(0, -CLIPPED.length);
+      expect(kept.length).toBeGreaterThan(0);
+      expect(huge.startsWith(kept) || JSON.stringify([huge]).startsWith(kept)).toBe(true);
+      expect(kept).not.toContain("\uFFFD");
+    };
+    if (approval.body.type !== "approval_request" || approval.body.view.kind !== "bash")
+      throw new Error("审批卡变了形");
+    clipped(approval.body.view.command);
+    clipped(approval.body.view.note);
+    expect(approval.body.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    if (write.body.type !== "bot_tool_call" || write.body.view.kind !== "write") throw new Error("工具卡变了形");
+    clipped(write.body.view.path);
+    clipped(write.body.view.preview[0]);
+    expect(write.body.view.preview[1]).toBe("第二行");
+    expect(write.body.view).not.toHaveProperty("raw");
+    if (mcp.body.type !== "approval_request" || mcp.body.view.kind !== "mcp") throw new Error("审批卡变了形");
+    expect(mcp.body.view.params[0]?.key).toBe("q");
+    clipped(mcp.body.view.params[0]?.value);
+  });
+
+  it("带 runId 的帧截不下时原位换成同一 runId 的 agent_error 说明，序号照常连续，并告诉代理停掉这个 run", async () => {
     const directory = await dataDir();
-    const outbox = await ReliableOutbox.open(directory);
-    await expect(
-      outbox.append({
-        type: "bot_tool_call",
+    const dropped: string[] = [];
+    const logs: string[] = [];
+    const outbox = await ReliableOutbox.open(directory, {
+      log: (line) => logs.push(line),
+      dropped: (runId) => dropped.push(runId),
+    });
+    const notice = await outbox.append({
+      type: "approval_abandoned",
+      runId: lane.runId,
+      callId: oversized("y"),
+      reason: "stopped",
+    });
+    expect(notice.seq).toBe(1);
+    expect(notice.body).toEqual({
+      type: "agent_error",
+      code: "runner_failed",
+      runId: lane.runId,
+      detail: expect.stringMatching(/^approval_abandoned 报文过长被丢弃/),
+    });
+    expect(dropped).toEqual(["run-1"]);
+    expect(logs).toEqual([expect.stringContaining("approval_abandoned 截短后仍超过单帧上限")]);
+    const next = await outbox.append(runDone("run-2"));
+    expect(next.seq).toBe(2);
+    expect(outbox.pending().map((frame) => [frame.seq, frame.body.type])).toEqual([
+      [1, "agent_error"],
+      [2, "run_done"],
+    ]);
+  });
+
+  it("升级前已落在发件箱里的超限帧，重开时按同样规则截短或换成说明，序号不变，盘上也改掉", async () => {
+    const directory = await dataDir();
+    const first = await ReliableOutbox.open(directory);
+    await first.append(runDone("run-0"));
+    const journalPath = join(directory, ".agent", "outbox", first.stream, "frames.jsonl");
+    const legacy: AgentToControl[] = [
+      { type: "bot_text_done", ...lane, messageId: MessageId.parse("m-1"), text: oversized("白") },
+      {
+        type: "approval_request",
         ...lane,
         callId: "call-1",
-        tool: "bash",
-        view: { kind: "bash", command: oversized("y"), raw: { command: "y" } },
-        status: "running",
-        durationMs: null,
-      }),
-    ).rejects.toThrow("bot_tool_call 截短后仍超过单帧上限，不进发件箱");
-    const next = await outbox.append(runDone("run-2"));
-    expect(next.seq).toBe(1);
-    expect(outbox.pending()).toEqual([{ seq: 1, body: runDone("run-2") }]);
-    expect(await readFile(join(directory, ".agent", "outbox", outbox.stream, "frames.jsonl"), "utf8")).toBe(
-      `${JSON.stringify({ seq: 1, body: runDone("run-2") })}\n`,
-    );
+        tool: "write",
+        action: "write_workspace",
+        target: null,
+        view: { kind: "write", path: "a.txt", preview: [], raw: { content: oversized("x") } },
+      },
+      {
+        type: "work_append",
+        lane: { botId: lane.botId, groupId: lane.groupId, stream: "chat", epoch: 1 },
+        runId: lane.runId,
+        fromSeq: 0,
+        lines: [oversized("z")],
+        head: "0".repeat(64),
+        cause: "turn_end",
+      },
+    ];
+    for (const [index, body] of legacy.entries())
+      await appendFile(journalPath, `${JSON.stringify({ seq: index + 2, body })}\n`);
+    const logs: string[] = [];
+
+    const restarted = await ReliableOutbox.open(directory, { log: (line) => logs.push(line) });
+
+    const pending = restarted.pending();
+    expect(pending.map((frame) => [frame.seq, frame.body.type])).toEqual([
+      [1, "run_done"],
+      [2, "bot_text_done"],
+      [3, "approval_request"],
+      [4, "agent_error"],
+    ]);
+    for (const frame of pending) expect(wireBytes(restarted, frame)).toBeLessThanOrEqual(AGENT_FRAME_MAX_BYTES);
+    const [, text, approval, notice] = pending;
+    if (text?.body.type !== "bot_text_done") throw new Error("正文帧变了形");
+    expect(text.body.text.endsWith(CLIPPED)).toBe(true);
+    if (approval?.body.type !== "approval_request") throw new Error("审批帧变了形");
+    expect(approval.body.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    expect(notice?.body).toEqual({
+      type: "agent_error",
+      code: "runner_failed",
+      runId: lane.runId,
+      detail: expect.stringMatching(/^work_append 报文过长被丢弃/),
+    });
+    expect(logs).toEqual([
+      expect.stringContaining("发件箱第 2 帧 bot_text_done 超过单帧上限，已截短"),
+      expect.stringContaining("发件箱第 3 帧 approval_request 超过单帧上限，已截短"),
+      expect.stringContaining("发件箱第 4 帧 work_append 截短后仍超过单帧上限，换成一条报错"),
+    ]);
+    const onDisk = (await readFile(journalPath, "utf8")).split("\n").filter((line) => line.length > 0);
+    expect(onDisk.map((line) => (JSON.parse(line) as { seq: number }).seq)).toEqual([1, 2, 3, 4]);
+    for (const line of onDisk) expect(Buffer.byteLength(line)).toBeLessThan(AGENT_FRAME_MAX_BYTES);
+    expect((await restarted.append(runDone("run-5"))).seq).toBe(5);
+    expect((await ReliableOutbox.open(directory)).pending()).toEqual([...pending, { seq: 5, body: runDone("run-5") }]);
   });
 });
