@@ -9,6 +9,7 @@
     "format:check": "prettier --check .",
     "test": "pnpm -r test",
     "dev": "node scripts/dev.mjs",
+    "db:own": "node scripts/db-own.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm test"
   },
   "devDependencies": {
