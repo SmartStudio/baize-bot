@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_PATH } from "../src/http/gateway.js";
+import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "../src/http/gateway-limits.js";
 import { startTestServer, type TestServer } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { makeComputer, makeUser, PASSWORD } from "./helpers/fixtures.js";
@@ -34,9 +35,14 @@ afterEach(async () => {
   laneHeaders.clear();
 });
 
-async function rig(
-  options: { upstream?: FakeUpstream; upstreamBaseUrl?: string; gatewayModels?: { plan: string; fast: string } } = {},
-): Promise<Rig> {
+type GatewayRigOptions = {
+  upstream?: FakeUpstream;
+  upstreamBaseUrl?: string;
+  gatewayModels?: { plan: string; fast: string };
+  gatewayLimits?: Partial<GatewayLimits>;
+};
+
+async function rig(options: GatewayRigOptions = {}): Promise<Rig> {
   const database = await createTestDb();
   cleanups.push(() => database.close());
 
@@ -44,9 +50,24 @@ async function rig(
     gatewayModels: options.gatewayModels ?? { plan: GATEWAY_MODEL, fast: FAST_GATEWAY_MODEL },
     upstreamApiKey: UPSTREAM_API_KEY,
     upstreamBaseUrl: options.upstream?.baseUrl ?? options.upstreamBaseUrl ?? "http://127.0.0.1:1/v1",
+    gatewayLimits: { ...DEFAULT_GATEWAY_LIMITS, ...options.gatewayLimits },
   });
   cleanups.push(() => server.close());
+  const seated = await seatComputer(server, database);
 
+  return {
+    server,
+    database,
+    upstream: options.upstream ?? null,
+    ...seated,
+    call: (path, init) => fetch(`http://localhost:${server.server.port}${GATEWAY_PATH}${path}`, init),
+  };
+}
+
+async function seatComputer(
+  server: TestServer,
+  database: TestDb,
+): Promise<Pick<Rig, "computerId" | "token" | "key" | "laneHeader">> {
   const user = await makeUser(database.db);
   const computer = await makeComputer(database.db, user.id);
   const client = server.client();
@@ -68,17 +89,7 @@ async function rig(
     outputTokens: 0,
   });
   await agent.ack(prompt.runId);
-
-  return {
-    server,
-    database,
-    upstream: options.upstream ?? null,
-    computerId: computer.computerId,
-    token: computer.token,
-    key: config.modelGateway.apiKey,
-    laneHeader,
-    call: (path, init) => fetch(`http://localhost:${server.server.port}${GATEWAY_PATH}${path}`, init),
-  };
+  return { computerId: computer.computerId, token: computer.token, key: config.modelGateway.apiKey, laneHeader };
 }
 
 function chatBody(extra: Record<string, unknown> = {}): RequestInit {
@@ -189,6 +200,53 @@ async function startSilentUpstream(): Promise<{
     received,
     disconnected,
     connected: () => live,
+    close: () =>
+      new Promise<void>((resolve, reject) => {
+        server.closeAllConnections();
+        server.close((e) => (e ? reject(e) : resolve()));
+      }),
+  };
+}
+
+async function startDripUpstream(options: { kind: "sse" | "json"; intervalMs: number; pieces?: number }): Promise<{
+  readonly baseUrl: string;
+  readonly disconnected: Promise<void>;
+  close(): Promise<void>;
+}> {
+  let sawDisconnect!: () => void;
+  const disconnected = new Promise<void>((resolve) => {
+    sawDisconnect = resolve;
+  });
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": options.kind === "sse" ? "text/event-stream" : "application/json" });
+      if (options.kind === "json") res.write("{");
+      let sent = 0;
+      const timer = setInterval(() => {
+        if (options.pieces !== undefined && sent === options.pieces) {
+          clearInterval(timer);
+          res.end(options.kind === "sse" ? "data: [DONE]\n\n" : "}");
+          return;
+        }
+        res.write(
+          options.kind === "sse"
+            ? `data: ${JSON.stringify({ model: GATEWAY_MODEL, choices: [{ index: 0, delta: { content: `片${sent}` } }] })}\n\n`
+            : " ",
+        );
+        sent += 1;
+      }, options.intervalMs);
+      res.on("close", () => {
+        clearInterval(timer);
+        if (!res.writableFinished) sawDisconnect();
+      });
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    disconnected,
     close: () =>
       new Promise<void>((resolve, reject) => {
         server.closeAllConnections();
@@ -527,5 +585,110 @@ describe("转发", () => {
 
     expect(response.status).toBe(400);
     expect(upstream.calls, "认不出的请求体不该转出去").toHaveLength(0);
+  });
+});
+
+describe("上游超时", () => {
+  it("上游迟迟不回首字节，到首字节时限回中文 504，并断开上游", async () => {
+    const upstream = await startSilentUpstream();
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl, gatewayLimits: { firstByteTimeoutMs: 400 } });
+
+    const started = performance.now();
+    const response = await r.call("/chat/completions", authed(r.key, chatBody({ stream: true })));
+    const elapsed = performance.now() - started;
+
+    expect(response.status).toBe(504);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("模型上游 0.4 秒还没开始回话");
+    expect(elapsed, "首字节时限到了才断").toBeGreaterThanOrEqual(400);
+    expect(elapsed, "是首字节那道表断的，不是总时长").toBeLessThan(DEFAULT_GATEWAY_LIMITS.totalTimeoutMs);
+    await Promise.race([upstream.disconnected, rejectAfter(2000, "超时回了 504，上游那条连接还挂着")]);
+  });
+
+  it("上游慢慢吐，吐的时间超过首字节时限也照常转完", async () => {
+    const upstream = await startDripUpstream({ kind: "sse", intervalMs: 150, pieces: 5 });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl, gatewayLimits: { firstByteTimeoutMs: 300 } });
+
+    const started = performance.now();
+    const response = await r.call("/chat/completions", authed(r.key, chatBody({ stream: true })));
+    const text = await response.text();
+
+    expect(performance.now() - started, "整段比首字节时限长，才说明首字节那道表在回头时撤了").toBeGreaterThan(300);
+    expect(response.status).toBe(200);
+    expect(text).toContain("片4");
+    expect(text).toContain("data: [DONE]");
+    expect(text).not.toContain('"error"');
+  });
+
+  it("上游流式一直吐，总时长到了在流尾补一条中文 error 事件，并断开上游", async () => {
+    const upstream = await startDripUpstream({ kind: "sse", intervalMs: 50 });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl, gatewayLimits: { totalTimeoutMs: 1000 } });
+
+    const started = performance.now();
+    const response = await r.call("/chat/completions", authed(r.key, chatBody({ stream: true })));
+    expect(response.status, "流式开头已经照常转出去了").toBe(200);
+    const text = await response.text();
+    const elapsed = performance.now() - started;
+
+    expect(elapsed, "总时长到了才断").toBeGreaterThanOrEqual(1000);
+    expect(elapsed, "到点就断，不等上游自己停").toBeLessThan(3000);
+    expect(text, "到点之前吐的照转").toContain("片0");
+    const events = text.split("\n\n").filter((event) => event.trim() !== "");
+    const last = events.at(-1)?.trim() ?? "";
+    expect(last.startsWith("data: "), `最后一个事件是一条单独的 data 行：${last}`).toBe(true);
+    const error = (JSON.parse(last.slice("data: ".length)) as { error: { message: string; type: string } }).error;
+    expect(error.type).toBe("timeout");
+    expect(error.message).toContain("超过 1 秒还没说完");
+    await Promise.race([upstream.disconnected, rejectAfter(2000, "流到点收尾了，上游那条连接还挂着")]);
+  });
+
+  it("非流式正文一直读不完，总时长到了回中文 504", async () => {
+    const upstream = await startDripUpstream({ kind: "json", intervalMs: 50 });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstreamBaseUrl: upstream.baseUrl, gatewayLimits: { totalTimeoutMs: 800 } });
+
+    const started = performance.now();
+    const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+    const elapsed = performance.now() - started;
+
+    expect(response.status).toBe(504);
+    const body = (await response.json()) as { error: string };
+    expect(body.error).toContain("超过 0.8 秒还没说完");
+    expect(elapsed).toBeGreaterThanOrEqual(800);
+    await Promise.race([upstream.disconnected, rejectAfter(2000, "超时回了 504，上游那条连接还挂着")]);
+  });
+});
+
+describe("限速", () => {
+  it("同一台电脑连发打满令牌桶回中文 429 带 Retry-After，不打上游，别的电脑不受影响", async () => {
+    const upstream = await startUpstream({ json: { id: "chatcmpl-1", choices: [] } });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream, gatewayLimits: { burst: 3, requestsPerMinute: 1 } });
+
+    for (let index = 0; index < 3; index += 1) {
+      expect((await r.call("/chat/completions", authed(r.key, chatBody()))).status, `桶里第 ${index + 1} 次`).toBe(200);
+    }
+    const limited = await r.call("/chat/completions", authed(r.key, chatBody()));
+
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after"), "每分钟补一次，下一次要等满一分钟").toBe("60");
+    const body = (await limited.json()) as { error: string };
+    expect(body.error).toContain("这台电脑请求模型太频繁");
+    expect(upstream.calls, "挡下的那次不该转给上游").toHaveLength(3);
+
+    const other = await seatComputer(r.server, r.database);
+    expect((await r.call("/chat/completions", authed(other.key, chatBody()))).status, "桶按电脑分").toBe(200);
+  });
+
+  it("认证没过的请求不扣令牌", async () => {
+    const upstream = await startUpstream({ json: { id: "chatcmpl-1", choices: [] } });
+    cleanups.push(() => upstream.close());
+    const r = await rig({ upstream, gatewayLimits: { burst: 1, requestsPerMinute: 1 } });
+
+    expect((await r.call("/chat/completions", authed("made-up-key", chatBody()))).status).toBe(401);
+    expect((await r.call("/chat/completions", authed(r.key, chatBody()))).status).toBe(200);
   });
 });

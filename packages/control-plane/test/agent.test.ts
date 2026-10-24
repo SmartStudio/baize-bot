@@ -344,6 +344,44 @@ describe("agent_error", () => {
       agent.close();
     }
   });
+  it.each([
+    ["网关限速的 429", "429 这台电脑请求模型太频繁，网关先挡一下，稍后再试", "模型请求太频繁，被限速了，稍后再试。"],
+    [
+      "网关首字节超时的 504",
+      "504 模型上游 120 秒还没开始回话，网关等不及先断开了。",
+      "模型上游太久没回话或者一次说得太久，网关先断开了，稍后再试。",
+    ],
+    [
+      "流到一半网关补的超时事件，秒数不当状态码",
+      "模型上游这次回话超过 450 秒还没说完，网关等不及先断开了。稍后再试，或者把要做的事拆小一点。",
+      "模型上游太久没回话或者一次说得太久，网关先断开了，稍后再试。",
+    ],
+  ])("%s，在群里说人话", async (_name, detail, expected) => {
+    const { client, computer } = await ownerWithComputer();
+    const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小服" })).json());
+    const { agent } = await helloAgent(server.server.port, computer.computerId, computer.token);
+
+    try {
+      expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "发起一次请求" })).status).toBe(
+        201,
+      );
+      await agent.expect("prompt");
+      agent.send({ type: "agent_error", code: "model_failed", detail, groupId: created.group.id });
+
+      let text = "";
+      await waitFor(async () => {
+        const page = MessageListResponse.parse(
+          await (await client.get(`/api/groups/${created.group.id}/messages`)).json(),
+        );
+        const message = page.messages.at(-1);
+        text = message?.body.kind === "system" ? message.body.text : "";
+        return text !== "";
+      }, "模型失败的群消息");
+      expect(text).toBe(expected);
+    } finally {
+      agent.close();
+    }
+  });
 });
 
 describe("Bot 变动重发 config", () => {

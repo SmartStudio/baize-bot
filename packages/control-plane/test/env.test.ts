@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { CredentialCrypto } from "../src/credentials.js";
+import { DEFAULT_GATEWAY_LIMITS } from "../src/http/gateway-limits.js";
 import {
   DEFAULT_GATEWAY_MODEL,
   DEFAULT_GITHUB_API_BASE_URL,
@@ -195,4 +196,32 @@ it("TRUSTED_PROXY_HOPS 留空是 0，只收非负整数", () => {
   expect(trustedProxyHops).toThrowError("TRUSTED_PROXY_HOPS 不是非负整数: -1");
   vi.stubEnv("TRUSTED_PROXY_HOPS", "yes");
   expect(trustedProxyHops).toThrowError("TRUSTED_PROXY_HOPS 不是非负整数: yes");
+});
+
+it("网关超时和限速取环境变量，没设用默认值，只收正整数", () => {
+  for (const name of [
+    "GATEWAY_FIRST_BYTE_TIMEOUT_MS",
+    "GATEWAY_TOTAL_TIMEOUT_MS",
+    "GATEWAY_REQUESTS_PER_MINUTE",
+    "GATEWAY_BURST",
+  ])
+    vi.stubEnv(name, "");
+  expect(runtimeConfig().gatewayLimits).toEqual(DEFAULT_GATEWAY_LIMITS);
+
+  vi.stubEnv("GATEWAY_FIRST_BYTE_TIMEOUT_MS", "30000");
+  vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "900000");
+  vi.stubEnv("GATEWAY_REQUESTS_PER_MINUTE", "60");
+  vi.stubEnv("GATEWAY_BURST", "10");
+  expect(runtimeConfig().gatewayLimits).toEqual({
+    firstByteTimeoutMs: 30_000,
+    totalTimeoutMs: 900_000,
+    requestsPerMinute: 60,
+    burst: 10,
+  });
+
+  vi.stubEnv("GATEWAY_BURST", "0");
+  expect(runtimeConfig).toThrowError("GATEWAY_BURST 不是正整数: 0");
+  vi.stubEnv("GATEWAY_BURST", "10");
+  vi.stubEnv("GATEWAY_TOTAL_TIMEOUT_MS", "10m");
+  expect(runtimeConfig).toThrowError("GATEWAY_TOTAL_TIMEOUT_MS 不是正整数: 10m");
 });
