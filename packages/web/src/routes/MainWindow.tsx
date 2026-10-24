@@ -310,6 +310,12 @@ export const MainWindow = () => {
           messages={ready.messages.rows[conversation.groupId] ?? NO_MESSAGES}
           history={ready.loads[`messages:${conversation.groupId}`] ?? "idle"}
           onRetryHistory={() => void actions.loadMessages(conversation.groupId, reconnectedAt)}
+          edge={ready.messageEdges[conversation.groupId]}
+          older={ready.loads[`older:${conversation.groupId}`] ?? "idle"}
+          onLoadOlder={() => {
+            const oldest = ready.messageEdges[conversation.groupId]?.oldest;
+            if (oldest !== undefined && oldest !== null) void actions.loadOlderMessages(conversation.groupId, oldest);
+          }}
           lookup={lookup}
           approvals={ready.approvals}
           handoffs={ready.handoffs}

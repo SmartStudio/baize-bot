@@ -26,6 +26,7 @@ const initial = {
   ],
   messages: emptyShelf(),
   messagesLoadedAt: {},
+  messageEdges: {},
   messageGaps: {},
   deletedBotIds: [],
   unlistedCounts: {},
@@ -58,11 +59,18 @@ const user = (id: string, text: string) =>
 describe("群历史和流式推送的先后", () => {
   it("断线前只收到半句，重连后重拉的历史换成服务端的完整正文", () => {
     const next = createClock();
-    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [], seq: next() });
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [],
+      seq: next(),
+    });
     const partial = reduceGroups(loaded, delta(next(), "收到。", false, 1));
     const history = next();
     const resynced = reduceGroups(partial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。我这就去办。", false, 3)],
       seq: history,
@@ -72,12 +80,19 @@ describe("群历史和流式推送的先后", () => {
 
   it("历史请求发出之后才到的 delta，不被晚到的历史盖回去", () => {
     const next = createClock();
-    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [], seq: next() });
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [],
+      seq: next(),
+    });
     const partial = reduceGroups(loaded, delta(next(), "收到。", false, 1));
     const history = next();
     const grown = reduceGroups(partial, delta(next(), "我这就", false, 2));
     const late = reduceGroups(grown, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。", true, 1)],
       seq: history,
@@ -95,6 +110,7 @@ describe("群历史还在路上时到的推送", () => {
     expect(pushed.messagesLoadedAt[GROUP_ID], "推送不能把这个群算成拉过历史").toBeUndefined();
     const loaded = reduceGroups(pushed, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_old", "旧消息")],
       seq: history,
@@ -112,6 +128,7 @@ describe("群历史还在路上时到的推送", () => {
     );
     const loaded = reduceGroups(grown, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。", true, 1)],
       seq: history,
@@ -126,6 +143,7 @@ describe("群历史还在路上时到的推送", () => {
     expect(tail.messageGaps[MESSAGE_ID]?.revision, "缺了第 1 版，记下这条要单独拉").toBe(2);
     const loaded = reduceGroups(tail, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。我这就", true, 2)],
       seq: history,
@@ -141,6 +159,7 @@ describe("群历史还在路上时到的推送", () => {
     expect(streamed.conversations[0]?.lastMessage?.body).toEqual(bot("甲", false, 1).body);
     const loaded = reduceGroups(streamed, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("", true, 0)],
       seq: history,
@@ -153,7 +172,13 @@ describe("群历史还在路上时到的推送", () => {
 describe("同一条消息的旧版本晚到", () => {
   const loadedWith = (messages: Message[]) => {
     const next = createClock();
-    const state = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages, seq: next() });
+    const state = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages,
+      seq: next(),
+    });
     return { next, state };
   };
 
@@ -195,6 +220,7 @@ describe("同一条消息的旧版本晚到", () => {
     const streamed = reduceGroups(shell, delta(next(), "收到。", false, 1));
     const loaded = reduceGroups(streamed, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。我这就去办。", false, 3)],
       seq: history,
@@ -220,6 +246,7 @@ describe("同一条消息的旧版本晚到", () => {
     const gapped = reduceGroups(state, delta(next(), "去办。", true, 3));
     const window = reduceGroups(gapped, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_newer", "后来的话")],
       seq: next(),
@@ -237,7 +264,13 @@ describe("同一条消息的旧版本晚到", () => {
 
   it("同版本的非空 delta 是重复帧，正文和侧栏摘要都不变", () => {
     const next = createClock();
-    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [], seq: next() });
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [],
+      seq: next(),
+    });
     const first = reduceGroups(loaded, delta(next(), "甲", false, 1));
     const again = reduceGroups(first, delta(next(), "乙", false, 1));
     expect(replyIn(again)).toEqual(bot("甲", true, 1).body);
@@ -267,6 +300,7 @@ describe("漏档单拉的失败和失效", () => {
     const next = createClock();
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [bot("收到。", true, 1)],
       seq: next(),
@@ -308,6 +342,7 @@ describe("漏档单拉的失败和失效", () => {
     expect(exhausted.messageGaps[MESSAGE_ID]?.attempts).toBe(3);
     const reloaded = reduceGroups(exhausted, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_newer", "后来的话")],
       seq: next(),
@@ -404,7 +439,13 @@ describe("没有空壳的 delta 和 lastMessage", () => {
   it("没有空壳的 delta 取群里已知最新一条的时间，不用本地时钟，排在已知消息之后", () => {
     const next = createClock();
     const said = timed(user("msg_said", "开干"), "2026-09-26T08:00:05.000Z");
-    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [said], seq: next() });
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [said],
+      seq: next(),
+    });
     const streamed = reduceGroups(loaded, delta(next(), "收到", false, 1));
     const row = streamed.messages.rows[GROUP_ID]?.find((m) => m.id === MESSAGE_ID);
     expect(row?.createdAt, "本地时钟现在远晚于 2026-09-26，取到它就说明用了本地时间").toBe(said.createdAt);
@@ -414,7 +455,13 @@ describe("没有空壳的 delta 和 lastMessage", () => {
   it("同 id 的完整消息到了，时间以服务端为准", () => {
     const next = createClock();
     const said = timed(user("msg_said", "开干"), "2026-09-26T08:00:05.000Z");
-    const loaded = reduceGroups(initial, { type: "messages_set", groupId: GROUP_ID, messages: [said], seq: next() });
+    const loaded = reduceGroups(initial, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [said],
+      seq: next(),
+    });
     const streamed = reduceGroups(loaded, delta(next(), "收到", false, 1));
     const settled = reduceGroups(streamed, {
       type: "message_upserted",
@@ -432,11 +479,18 @@ describe("没有空壳的 delta 和 lastMessage", () => {
     const pushed = reduceGroups(initial, { type: "message_upserted", message: shell, seq: next() });
     expect(lastOf(pushed)).toEqual(shell);
     const settled = timed(bot("收到。", false, 2), "2026-09-26T08:00:01.000Z");
-    const loaded = reduceGroups(pushed, { type: "messages_set", groupId: GROUP_ID, messages: [settled], seq: next() });
+    const loaded = reduceGroups(pushed, {
+      type: "messages_set",
+      hasMore: false,
+      groupId: GROUP_ID,
+      messages: [settled],
+      seq: next(),
+    });
     expect(lastOf(loaded), "同一条的更新版本").toEqual(settled);
     const newer = timed(user("msg_newer", "再说一句"), "2026-09-26T08:00:05.000Z");
     const reloaded = reduceGroups(loaded, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [settled, newer],
       seq: next(),
@@ -450,6 +504,7 @@ describe("没有空壳的 delta 和 lastMessage", () => {
     const later = user("msg_later", "同一毫秒的下一句");
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [replied, later],
       seq: next(),
@@ -496,12 +551,14 @@ describe("重拉只回最近一窗历史", () => {
     const laterAt = { ...later, createdAt: "2026-09-26T08:00:09.000Z" };
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [outside, first, laterAt],
       seq: next(),
     });
     const resynced = reduceGroups(loaded, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [first, laterAt],
       seq: next(),
@@ -517,12 +574,14 @@ describe("重拉只回最近一窗历史", () => {
     const next = createClock();
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_b", "B"), user("msg_a", "A"), user("msg_c", "C")],
       seq: next(),
     });
     const resynced = reduceGroups(loaded, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_b", "B"), user("msg_c", "C")],
       seq: next(),
@@ -534,12 +593,14 @@ describe("重拉只回最近一窗历史", () => {
     const next = createClock();
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_a", "A"), user("msg_b", "B"), user("msg_c", "C")],
       seq: next(),
     });
     const resynced = reduceGroups(loaded, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_b", "B"), user("msg_c", "C")],
       seq: next(),
@@ -551,12 +612,14 @@ describe("重拉只回最近一窗历史", () => {
     const next = createClock();
     const loaded = reduceGroups(initial, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_one", "一"), user("msg_two", "二")],
       seq: next(),
     });
     const resynced = reduceGroups(loaded, {
       type: "messages_set",
+      hasMore: false,
       groupId: GROUP_ID,
       messages: [user("msg_one", "一")],
       seq: next(),
@@ -762,5 +825,72 @@ describe("删 Bot 和插件分配", () => {
     const removed = reduceGroups(state, { type: "bot_removed", botId: gone });
     expect(removed.tools.map((tool) => tool.assignedBotIds)).toEqual([[kept], [kept]]);
     expect(removed.tools[1], "没分给它的插件不换对象").toBe(other);
+  });
+});
+
+describe("往上翻群历史", () => {
+  const page = (...ids: string[]) => ids.map((id) => user(id, id));
+  const latest = (state: ReadyState, messages: Message[], hasMore: boolean, seq: Seq) =>
+    reduceGroups(state, { type: "messages_set", groupId: GROUP_ID, messages, hasMore, seq });
+  const older = (state: ReadyState, before: string, messages: Message[], hasMore: boolean) =>
+    reduceGroups(state, {
+      type: "older_messages_loaded",
+      groupId: GROUP_ID,
+      before: MessageId.parse(before),
+      messages,
+      hasMore,
+    });
+
+  it("更早的一页接在最前面，翻到哪跟着往前挪，到头了 hasMore 变 false", () => {
+    const next = createClock();
+    const loaded = latest(initial, page("m4", "m5"), true, next());
+    expect(loaded.messageEdges[GROUP_ID], "最近一页的头就是下一页的 before").toEqual({ oldest: "m4", hasMore: true });
+
+    const second = older(loaded, "m4", page("m2", "m3"), true);
+    expect(idsIn(second)).toEqual(["m2", "m3", "m4", "m5"]);
+    expect(second.messageEdges[GROUP_ID]).toEqual({ oldest: "m2", hasMore: true });
+
+    const top = older(second, "m2", page("m1"), false);
+    expect(idsIn(top)).toEqual(["m1", "m2", "m3", "m4", "m5"]);
+    expect(top.messageEdges[GROUP_ID], "到头了").toEqual({ oldest: "m1", hasMore: false });
+  });
+
+  it("翻出来的页和本地已有的重叠，同 id 只留一条，留 revision 大的那份", () => {
+    const next = createClock();
+    const loaded = latest(initial, page("m3", "m4"), true, next());
+    const edited = Message.parse({ ...user("m3", "改过的"), revision: 2 });
+    const pushed = reduceGroups(loaded, { type: "message_upserted", message: edited, seq: next() });
+    const paged = older(pushed, "m3", page("m1", "m2", "m3"), false);
+    expect(idsIn(paged)).toEqual(["m1", "m2", "m3", "m4"]);
+    expect(paged.messages.rows[GROUP_ID]?.find((m) => m.id === "m3")?.body, "推送来的新版本不被旧页盖掉").toEqual({
+      kind: "user",
+      text: "改过的",
+    });
+  });
+
+  it("重拉的最近一页接得上翻过的几页，翻到哪不变；接不上就从新的一页重新往上翻", () => {
+    const next = createClock();
+    const paged = older(latest(initial, page("m3", "m4"), true, next()), "m3", page("m1", "m2"), true);
+
+    const joined = latest(paged, page("m4", "m5"), true, next());
+    expect(joined.messageEdges[GROUP_ID], "m4 本地就有，中间没缺").toEqual({ oldest: "m1", hasMore: true });
+
+    const gapped = latest(paged, page("m8", "m9"), true, next());
+    expect(gapped.messageEdges[GROUP_ID], "m5 到 m7 没拉过，从 m8 往上重翻").toEqual({ oldest: "m8", hasMore: true });
+
+    const late = older(gapped, "m1", page("m0"), false);
+    expect(late.messageEdges[GROUP_ID], "重新起翻之前发出的那页晚到，不改翻到哪").toEqual({
+      oldest: "m8",
+      hasMore: true,
+    });
+    expect(idsIn(late), "那一页的消息照样落进列表").toContain("m0");
+
+    const refill = older(late, "m8", page("m6", "m7"), true);
+    const ids: string[] = idsIn(refill) ?? [];
+    expect(ids.slice(ids.indexOf("m6"), ids.indexOf("m8") + 1), "补出来的一段紧贴在 m8 前面").toEqual([
+      "m6",
+      "m7",
+      "m8",
+    ]);
   });
 });

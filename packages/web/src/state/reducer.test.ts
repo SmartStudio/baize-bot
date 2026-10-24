@@ -46,7 +46,13 @@ describe("会话号", () => {
       reduce(second, {
         type: "from_session",
         session: 1 as SessionId,
-        action: { type: "messages_set", groupId: GROUP_ID, messages: history("旧会话的历史"), seq: oldRequest },
+        action: {
+          type: "messages_set",
+          hasMore: false,
+          groupId: GROUP_ID,
+          messages: history("旧会话的历史"),
+          seq: oldRequest,
+        },
       }),
     );
     expect(late.messages.rows[GROUP_ID], "旧会话的历史不能写进新会话").toBeUndefined();
@@ -56,7 +62,13 @@ describe("会话号", () => {
       reduce(late, {
         type: "from_session",
         session: 2 as SessionId,
-        action: { type: "messages_set", groupId: GROUP_ID, messages: history("新会话的历史"), seq: next() },
+        action: {
+          type: "messages_set",
+          hasMore: false,
+          groupId: GROUP_ID,
+          messages: history("新会话的历史"),
+          seq: next(),
+        },
       }),
     );
     expect(fresh.messages.rows[GROUP_ID]?.map((m) => m.body)).toEqual([{ kind: "user", text: "新会话的历史" }]);

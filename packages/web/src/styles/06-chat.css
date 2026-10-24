@@ -63,6 +63,8 @@
   min-height: 0;
   padding: var(--space-7);
   overflow-y: auto;
+  /* 往上接更早的一页时由 ChatPanel 自己把正看着的回合钉住，浏览器再锚一次就会多挪一截。 */
+  overflow-anchor: none;
 }
 
 /* 让消息像 messenger 一样贴底，条数少时不吊在顶上。 */
@@ -116,6 +118,13 @@
 }
 
 .time-divider {
+  color: var(--fg-4);
+  font: var(--type-caption);
+  text-align: center;
+}
+
+.history-edge {
+  margin: 0;
   color: var(--fg-4);
   font: var(--type-caption);
   text-align: center;

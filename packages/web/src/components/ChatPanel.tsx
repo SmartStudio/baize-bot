@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ArrowDown, SendHorizontal, Sparkles, Users } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { Bot, BotId, ChecklistItem, GroupId, Message, MessageId, Skill } from "@baize/shared";
@@ -21,7 +21,7 @@ import { memberIdsOf, type Conversation, type GroupTurn } from "../state/app.js"
 import { prefillOf } from "./routines/prefill.js";
 import { setDraft, useComposerDraft } from "../state/composer-drafts.js";
 import { ComposerTextarea } from "./ComposerTextarea.js";
-import type { ContentBook, LoadStatus } from "../state/types.js";
+import type { ContentBook, LoadStatus, MessageEdge } from "../state/types.js";
 import type { ContentActions } from "./messages/DraftCards.js";
 import type { ProjectOfferActions } from "./messages/ProjectOfferCard.js";
 
@@ -32,6 +32,9 @@ type Props = {
   messages: Message[];
   history: LoadStatus;
   onRetryHistory: () => void;
+  edge: MessageEdge | undefined;
+  older: LoadStatus;
+  onLoadOlder: () => void;
   lookup: BotLookup;
   approvals: ApprovalTable;
   handoffs: HandoffTable;
@@ -74,6 +77,35 @@ const pickerOf = (draft: string): Picker => {
   return mention === null ? null : { kind: "mention", typing: mention[1] ?? "" };
 };
 
+const LOAD_OLDER_PX = 200;
+
+// 用户正看着的那一段：可见区最上面那个回合，和它离列表顶的距离。回合用最后一条的 id 认，
+// 往前接更早的消息只会并进第一个回合的开头，最后一条不变。量的是回合正文、不含时间分隔线：
+// 原来打头的回合接上更早的一页后，分隔线可能就不画了。
+type Anchor = { id: string; offset: number };
+
+const turnsIn = (list: HTMLElement) => list.querySelectorAll<HTMLElement>(":scope > [data-anchor]");
+
+const boxOf = (turn: HTMLElement) => (turn.lastElementChild ?? turn).getBoundingClientRect();
+
+const topVisible = (list: HTMLElement): Anchor | null => {
+  const top = list.getBoundingClientRect().top;
+  for (const turn of turnsIn(list)) {
+    const box = boxOf(turn);
+    if (box.bottom > top) return { id: turn.dataset.anchor ?? "", offset: box.top - top };
+  }
+  return null;
+};
+
+const keepInPlace = (list: HTMLElement, anchor: Anchor) => {
+  const turn = [...turnsIn(list)].find((candidate) => candidate.dataset.anchor === anchor.id);
+  if (turn === undefined) return;
+  list.scrollTop += boxOf(turn).top - list.getBoundingClientRect().top - anchor.offset;
+};
+
+const lastIdOf = (turn: Turn): string =>
+  turn.kind === "bot" ? (turn.items.at(-1)?.id ?? turn.botId) : turn.message.id;
+
 const firstAt = (turn: Turn): string =>
   turn.kind === "bot" ? (turn.items[0]?.createdAt ?? "") : turn.message.createdAt;
 const lastAt = (turn: Turn): string =>
@@ -104,6 +136,9 @@ export const ChatPanel = ({
   messages,
   history,
   onRetryHistory,
+  edge,
+  older,
+  onLoadOlder,
   lookup,
   approvals,
   handoffs,
@@ -155,7 +190,10 @@ export const ChatPanel = ({
     });
   const turns = turnsOf(messages);
 
-  useEffect(() => {
+  const anchor = useRef<Anchor | null>(null);
+  const canLoadOlder = edge?.hasMore === true && older === "idle";
+
+  useLayoutEffect(() => {
     atBottom.current = true;
     setShowScroll(false);
     if (thread.current) thread.current.scrollTop = thread.current.scrollHeight;
@@ -172,10 +210,18 @@ export const ChatPanel = ({
     navigate(location.pathname, { replace: true, state: null });
   }, [prefill, groupId, location.pathname, navigate]);
 
-  // 流式回复只让最后一条变长，条数不变；用户向上读历史时不能抢走滚动位置。
+  useLayoutEffect(() => {
+    const list = thread.current;
+    if (list === null) return;
+    if (atBottom.current) list.scrollTop = list.scrollHeight;
+    else if (anchor.current !== null) keepInPlace(list, anchor.current);
+    anchor.current = topVisible(list);
+  }, [messages, groupId, older, edge?.hasMore]);
+
   useEffect(() => {
-    if (thread.current && atBottom.current) thread.current.scrollTop = thread.current.scrollHeight;
-  }, [messages, groupId]);
+    const list = thread.current;
+    if (list !== null && canLoadOlder && list.scrollHeight <= list.clientHeight) onLoadOlder();
+  }, [messages, canLoadOlder, onLoadOlder]);
 
   // 群里每来一条消息 conversation 就换一次身份，这个 effect 也就跟着再跑一遍。不记一笔的话，拉取还在
   // 飞的那会儿同一个 Bot 会被问上好几遍。
@@ -296,8 +342,26 @@ export const ChatPanel = ({
             const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
             atBottom.current = distance < 24;
             setShowScroll(distance > list.clientHeight);
+            anchor.current = topVisible(list);
+            if (canLoadOlder && list.scrollTop < LOAD_OLDER_PX) onLoadOlder();
           }}
         >
+          {edge === undefined || messages.length === 0 ? null : older === "loading" ? (
+            <p className="history-edge" data-testid="older-loading">
+              正在加载更早的消息…
+            </p>
+          ) : older === "failed" ? (
+            <p className="history-edge" role="alert" data-testid="older-failed">
+              更早的消息没拉下来。{" "}
+              <button type="button" className="ghost-button" data-testid="older-retry" onClick={onLoadOlder}>
+                重试
+              </button>
+            </p>
+          ) : edge.hasMore ? null : (
+            <p className="history-edge" data-testid="history-start">
+              已经是最早的消息了
+            </p>
+          )}
           {history === "failed" ? (
             <p className="empty" role="alert" data-testid="history-failed">
               历史消息没拉下来。{" "}
@@ -311,7 +375,11 @@ export const ChatPanel = ({
             </p>
           ) : null}
           {turns.map((turn, at) => (
-            <div className="turn-group" key={turn.kind === "bot" ? (turn.items[0]?.id ?? turn.botId) : turn.message.id}>
+            <div
+              className="turn-group"
+              key={turn.kind === "bot" ? (turn.items[0]?.id ?? turn.botId) : turn.message.id}
+              data-anchor={lastIdOf(turn)}
+            >
               {needsTimeDivider(turn, turns[at - 1]) ? (
                 <div className="time-divider" data-testid="time-divider">
                   {timeLabel(firstAt(turn))}

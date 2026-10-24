@@ -197,8 +197,14 @@ export const createApi = (signal?: AbortSignal) => {
     archiveGroup: async (groupId: GroupId): Promise<void> => {
       await send("POST", `/groups/${encodeURIComponent(groupId)}/archive`);
     },
-    messages: async (groupId: GroupId) =>
-      json(MessageListResponse, await send("GET", `/groups/${encodeURIComponent(groupId)}/messages`)),
+    messages: async (groupId: GroupId, before?: MessageId) =>
+      json(
+        MessageListResponse,
+        await send(
+          "GET",
+          `/groups/${encodeURIComponent(groupId)}/messages${before === undefined ? "" : `?before=${encodeURIComponent(before)}`}`,
+        ),
+      ),
     message: async (id: MessageId) =>
       (await json(MessageResponse, await send("GET", `/messages/${encodeURIComponent(id)}`))).message,
     sendMessage: async (groupId: GroupId, text: string) =>
