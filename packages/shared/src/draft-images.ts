@@ -24,6 +24,14 @@ export const DRAFT_IMAGE_RULES: { readonly [P in Platform]: Partial<Record<Publi
   xiaohongshu: { computer: { maxImages: 9, maxBytes: null, gifAlone: false } },
 };
 
+/** 协议上一条草稿最多几张图，取各格里最大的那个。 */
+export const MAX_DRAFT_IMAGES = Math.max(
+  ...Object.values(DRAFT_IMAGE_RULES).flatMap((byVia) => Object.values(byVia).map((rules) => rules.maxImages)),
+);
+
+/** 写给模型看的上限，例如「5 MB」。 */
+export const formatImageBytes = (bytes: number): string => `${bytes / MB} MB`;
+
 export function draftImageRules(platform: Platform, via: PublishVia): DraftImageRules {
   const rules = DRAFT_IMAGE_RULES[platform][via];
   if (rules === undefined) throw new Error(`${platform} 没有 ${via} 的配图规则`);
@@ -34,7 +42,7 @@ export type DraftImageFacts = { readonly mime: AttachmentMime; readonly size: nu
 
 export function draftImageRefusal(rules: DraftImageRules, image: DraftImageFacts): string | null {
   if (rules.maxBytes === null || image.size <= rules.maxBytes) return null;
-  return `超过 ${rules.maxBytes / MB} MB`;
+  return `超过 ${formatImageBytes(rules.maxBytes)}`;
 }
 
 export function draftImageCountRefusal(rules: DraftImageRules, count: number): string | null {
