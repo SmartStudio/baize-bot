@@ -161,7 +161,9 @@ it("同一个库起第二个控制面：第二个报单实例后退出，第一�
 
   const second = startControlPlane(url);
   expect(await second.exited(), "第二个实例拿不到锁就退出").toBe(1);
-  expect(second.output()).toContain("同一个库上已经有一个控制面在跑");
+  expect(second.output()).toContain(
+    "同一个库上已经有一个控制面在跑。控制面只能单实例运行：先停掉那一个，或者在 .env 里把 DATABASE_URL 指到别的库（工作树里跑 pnpm db:own 建一个自己的）",
+  );
   expect(second.output(), "第二个没有开始监听").not.toMatch(LISTENING);
 
   const health = await fetch(`http://127.0.0.1:${port}/api/health`);
@@ -201,4 +203,31 @@ it("持锁的那条库连接被掐断：控制面按停机流程退出，不带�
   }
   expect(await controlPlane.exited(10_000), "丢了锁以非 0 退出，交给编排器重启").toBe(1);
   expect(controlPlane.output()).toContain("单实例锁");
+});
+
+it("库地址里带 idle_timeout：持锁连接空闲过了那个时长也不被关，控制面照常服务", async () => {
+  const { database, url } = await testDatabase();
+  const idle = new URL(url);
+  idle.searchParams.set("idle_timeout", "1");
+  const controlPlane = startControlPlane(idle.toString());
+  const port = await controlPlane.listening();
+  const admin = postgres(databaseUrl(), { max: 1 });
+  try {
+    const lockHolder = async (): Promise<"fresh" | "idle_past_timeout" | "gone"> => {
+      const [row] = await admin<{ idlePastTimeout: boolean }[]>`
+        SELECT now() - activity.state_change > interval '1.5 seconds' AS "idlePastTimeout"
+        FROM pg_locks locks
+        JOIN pg_database db ON db.oid = locks.database
+        JOIN pg_stat_activity activity ON activity.pid = locks.pid
+        WHERE locks.locktype = 'advisory' AND locks.granted AND db.datname = ${database.databaseName}`;
+      if (row === undefined) return "gone";
+      return row.idlePastTimeout ? "idle_past_timeout" : "fresh";
+    };
+    await expect.poll(lockHolder, { timeout: 10_000 }).not.toBe("fresh");
+    expect(await lockHolder(), "空闲超过 1 秒锁还在原来那条连接上").toBe("idle_past_timeout");
+    expect(controlPlane.process.exitCode, "没有因为丢锁退出").toBeNull();
+    expect((await fetch(`http://127.0.0.1:${port}/api/health`)).status).toBe(200);
+  } finally {
+    await admin.end();
+  }
 });
