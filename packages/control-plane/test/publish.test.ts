@@ -33,6 +33,7 @@ import {
   setTier,
   specOf,
   tweet,
+  uploadImage,
   type AccountSpec,
   type ContentJob,
 } from "./helpers/content.js";
@@ -682,6 +683,116 @@ describe("各平台的发法", () => {
   });
 });
 
+describe("X 接口带图", () => {
+  const PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const JPEG = Buffer.from([255, 216, 255, 224, 0, 16]);
+  const GIF = Buffer.from("GIF89a\x01\x00\x01\x00", "latin1");
+  const BIG = Buffer.concat([PNG, Buffer.alloc(5 * 1000 * 1000)]);
+
+  it("先把每张图传到 X 拿 media_id，再带着 media_id 发帖；GIF 单独一张按 tweet_gif 传", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    const images = [await uploadImage(job, PNG, "image/png"), await uploadImage(job, JPEG, "image/jpeg")];
+    await createApproved(job, specOf(x, { ...tweet("带两张图"), images }));
+    await server.server.publisher.tick();
+    const photos = await publishedPushes(job);
+    await createApproved(job, specOf(x, { ...tweet("一张动图"), images: [await uploadImage(job, GIF, "image/gif")] }));
+    await server.server.publisher.tick();
+    const animated = await publishedPushes(job);
+
+    const bearer = `Bearer ${X.token}`;
+    expect(s.fake.requests().map(({ path, authorization, body }) => ({ path, authorization, body }))).toEqual([
+      {
+        path: "/2/media/upload",
+        authorization: bearer,
+        body: { media: PNG.toString("base64"), media_category: "tweet_image" },
+      },
+      {
+        path: "/2/media/upload",
+        authorization: bearer,
+        body: { media: JPEG.toString("base64"), media_category: "tweet_image" },
+      },
+      {
+        path: "/2/tweets",
+        authorization: bearer,
+        body: { text: "带两张图", media: { media_ids: ["17101", "17102"] } },
+      },
+      {
+        path: "/2/media/upload",
+        authorization: bearer,
+        body: { media: GIF.toString("base64"), media_category: "tweet_gif" },
+      },
+      { path: "/2/tweets", authorization: bearer, body: { text: "一张动图", media: { media_ids: ["17104"] } } },
+    ]);
+    expect(photos.publication.url).toBe("https://x.com/baize_x/status/18103");
+    expect(animated.publication.url).toBe("https://x.com/baize_x/status/18105");
+  });
+
+  it("第二张图传不上去整条不发帖，草稿记出错，不落发布记录", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    const images = [await uploadImage(job, PNG, "image/png"), await uploadImage(job, JPEG, "image/jpeg")];
+    await createApproved(job, specOf(x, { ...tweet("第二张会传失败"), images }));
+    let uploads = 0;
+    s.fake.failNext(500, (request) => request.path === "/2/media/upload" && ++uploads === 2);
+    await server.server.publisher.tick();
+    const { draft, account } = await failedPushes(job);
+
+    expect(draft.failure).toBe("error");
+    expect(account, "传图出错不动账号").toBeNull();
+    expect(
+      s.fake.requests().map((request) => request.path),
+      "缺图的帖子不发",
+    ).toEqual(["/2/media/upload", "/2/media/upload"]);
+    expect((await messagesOf(job)).publications).toEqual([]);
+  });
+
+  it("超过 4 张、单张超过 5 MB、GIF 和别的图放一起、附件对不上，起草不落，批的时候换成这些回 400", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    const png = await uploadImage(job, PNG, "image/png");
+    const big = await uploadImage(job, BIG, "image/png");
+    const gif = await uploadImage(job, GIF, "image/gif");
+    const tooMany = Array.from({ length: 5 }, () => png);
+    sendDraft(job, specOf(x, { ...tweet("五张"), images: tooMany }));
+    sendDraft(job, specOf(x, { ...tweet("大图"), images: [big] }));
+    sendDraft(job, specOf(x, { ...tweet("动图配图"), images: [gif, png] }));
+    sendDraft(job, specOf(x, { ...tweet("指纹对不上"), images: [{ ...png, sha256: "b".repeat(64) }] }));
+    const accepted = specOf(x, { ...tweet("一张图"), images: [png] });
+    await createDraft(job, accepted);
+    expect(
+      (await messagesOf(job)).drafts.map((one) => one.id),
+      "过不了 X 限制的都没落",
+    ).toEqual([accepted.draftId]);
+
+    const refusals: [DraftContent["images"], string][] = [
+      [tooMany, "草稿配图不合这个账号：一条最多带 4 张图"],
+      [[big], "草稿配图不合这个账号：第 1 张图超过 5 MB"],
+      [[png, gif], "草稿配图不合这个账号：GIF 只能单独发一张，不能和别的图放在一条里"],
+      [[png, IMAGE], "草稿第 2 张图在控制面上找不到，接口授权的号发不了"],
+    ];
+    for (const [images, error] of refusals) {
+      const response = await job.client.post(`/api/drafts/${accepted.draftId}`, {
+        decision: "approve",
+        content: { ...tweet("批的时候换图"), images },
+      });
+      expect(response.status).toBe(400);
+      expect(((await response.json()) as { error: string }).error).toBe(error);
+    }
+    expect((await draftOnPage(job, accepted.draftId)).draft.status).toBe("pending");
+    expect(s.fake.requests(), "批之前拒的不打 X").toEqual([]);
+  });
+});
+
 describe("小红书走电脑", () => {
   it("认领后暂停，电脑上报 paused，草稿和通知保留暂停原因；恢复后失败草稿仍不能直接重批", async () => {
     const s = await stack();
@@ -1078,7 +1189,7 @@ describe("小红书走电脑", () => {
 const post = (text: string): DraftContent => ({ kind: "post", title: text, text, images: [], github: null });
 
 describe("X 走电脑", () => {
-  it("电脑浏览器登录的 X 能带图，草稿下发到电脑、不打接口；授权连上的 X 带图仍被拒", async () => {
+  it("电脑浏览器登录的 X 能带图，草稿下发到电脑、不打接口；授权连上的 X 带电脑上的路径图被拒", async () => {
     const s = await stack();
     const server = await s.serve();
     const job = await jobOn(s, server, [X, X_WEB]);

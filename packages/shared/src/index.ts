@@ -15,3 +15,4 @@ export * from "./live.js";
 export * from "./poker-hand.js";
 export * from "./desktop-bridge.js";
 export * from "./retention.js";
+export * from "./draft-images.js";

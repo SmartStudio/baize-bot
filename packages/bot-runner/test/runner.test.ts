@@ -7391,7 +7391,7 @@ describe("运行器的草稿", () => {
       "bot_tool_call:running",
       "bot_tool_call:failed",
     ]);
-    expect(seen.toolResults.join("")).toContain("GitHub 接口授权的号起草先不带图");
+    expect(seen.toolResults.join("")).toContain("GitHub 接口授权的号不能带图，去掉 images 再调");
   });
 
   it("小红书草稿可以带图，GitHub 草稿不带图照常建", async () => {
@@ -7451,10 +7451,55 @@ describe("运行器的草稿", () => {
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "五张"));
     expect(drafted(h), "5 张图不发上行").toEqual([]);
-    expect(seen.toolResults.join("")).toContain("X 一条最多带 4 张图");
+    expect(seen.toolResults.join("")).toContain("X 电脑浏览器登录的号一条最多带 4 张图");
 
     await h.runner.prompt(promptMessage("bot-1", "run-2", "四张", { groupId: "group-b" }));
     expect(drafted(h).map((draft) => [draft.accountId, draft.content.images.length])).toEqual([["acc-x-browser", 4]]);
+  });
+
+  it("接口授权的 X 号能带图：传成附件建草稿，超过 5 MB 或 GIF 和别的图放一起报错不发上行", async () => {
+    const { dataDir, workDir } = botWorkDir();
+    writeFileSync(join(workDir, "cover.png"), COVER_BYTES);
+    writeFileSync(join(workDir, "big.png"), Buffer.concat([COVER_BYTES, Buffer.alloc(5 * 1000 * 1000)]));
+    writeFileSync(join(workDir, "moving.gif"), Buffer.from("GIF89a\x01\x00\x01\x00", "latin1"));
+    const xApi = accountOf("acc-x-api", "x", "baize_bot", "draft", "api");
+    const seen = recorder();
+    const draftWith = (images: readonly string[]) =>
+      callTool("create_draft", {
+        accountId: "acc-x-api",
+        content: { kind: "post", text: "带图的帖子", images: images.map((path) => ({ path })) },
+      });
+    const h = await startHarness({
+      bots: ["bot-1"],
+      dataDir,
+      accounts: [...ACCOUNTS, xApi],
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["两张", draftWith(["cover.png", "cover.png"])],
+        ["大图", draftWith(["big.png"])],
+        ["动图配图", draftWith(["moving.gif", "cover.png"])],
+      ]),
+    });
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "两张"));
+    expect(drafted(h)).toMatchObject([
+      {
+        accountId: "acc-x-api",
+        content: {
+          images: [
+            { kind: "attachment", mime: "image/png", attachmentId: expect.any(String) },
+            { kind: "attachment", mime: "image/png", attachmentId: expect.any(String) },
+          ],
+        },
+      },
+    ]);
+
+    await h.runner.prompt(promptMessage("bot-1", "run-2", "大图", { groupId: "group-b" }));
+    await h.runner.prompt(promptMessage("bot-1", "run-3", "动图配图", { groupId: "group-c" }));
+    expect(drafted(h), "超大和 GIF 混图都不发上行").toHaveLength(1);
+    const errors = seen.toolResults.join("");
+    expect(errors).toContain("配图「big.png」超过 5 MB，这个账号发不了");
+    expect(errors).toContain("GIF 只能单独发一张，不能和别的图放在一条里");
   });
 
   it("配图在工作目录外时报错且不发上行", async () => {
