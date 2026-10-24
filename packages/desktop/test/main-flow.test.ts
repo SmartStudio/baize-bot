@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, type MockInstance, vi } from "vitest";
 import type { ComputerId } from "@baize/shared";
 
 process.setMaxListeners(30);
@@ -82,13 +82,16 @@ class FakeChild extends EventEmitter {
 }
 
 const fakeWindow = (): object => {
+  let url = "";
   const window: FakeWindow = {
     destroyed: false,
-    webContents: { setWindowOpenHandler: vi.fn() },
+    webContents: { setWindowOpenHandler: vi.fn(), getURL: vi.fn(() => liveCall(window, url)) },
     once: vi.fn(),
     on: vi.fn(),
     isDestroyed: () => window.destroyed,
-    loadURL: vi.fn(async () => undefined),
+    loadURL: vi.fn(async (next: string) => {
+      url = next;
+    }),
     show: vi.fn(() => liveCall(window)),
     hide: vi.fn(() => liveCall(window)),
     focus: vi.fn(() => liveCall(window)),
@@ -1185,15 +1188,21 @@ describe("桌面主进程代理流程", () => {
     const trayTitle = () => trays[0]?.setTitle.mock.calls.at(-1)?.[0];
 
     it("Dock 角标和托盘数字一起跟着等你确认的数走，清零时角标清空", async () => {
-      fetchState.pendingByBot = [2, 1];
-      await boot();
-      await vi.waitFor(() => expect(dockBadges).toEqual(["3"]));
-      expect(trayTitle()).toBe("3");
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+      try {
+        fetchState.pendingByBot = [2, 1];
+        await boot();
+        await vi.waitFor(() => expect(dockBadges).toEqual(["3"]));
+        expect(trayTitle()).toBe("3");
 
-      fetchState.pendingByBot = [0, 0];
-      push(approvalUpdated);
-      await vi.waitFor(() => expect(dockBadges).toEqual(["3", ""]));
-      expect(trayTitle()).toBe("");
+        fetchState.pendingByBot = [0, 0];
+        push(approvalUpdated);
+        await vi.waitFor(() => expect(dockBadges).toEqual(["3", ""]));
+        expect(trayTitle()).toBe("");
+      } finally {
+        Object.defineProperty(process, "platform", platform);
+      }
     });
 
     it("不是 macOS 时不碰 Dock 角标，托盘照常显示数字", async () => {
@@ -1218,6 +1227,19 @@ describe("桌面主进程代理流程", () => {
       expect(window.show).toHaveBeenCalled();
       expect(window.focus).toHaveBeenCalled();
       expect(windows[1]?.show, "通知不再只弹菜单栏").not.toHaveBeenCalled();
+    });
+
+    it("主窗口已经停在通知所在的群，点通知只叫到前台，不重载丢草稿", async () => {
+      await boot();
+      const window = mainWindowAt(0);
+      const loadURL = window["loadURL"] as Mock<(url: string) => Promise<void>>;
+      await loadURL("http://127.0.0.1:1/g/group-7/");
+      loadURL.mockClear();
+      await clickNotice("group-7");
+
+      expect(loadURL, "同一个群不整页重载").not.toHaveBeenCalled();
+      expect(window.show).toHaveBeenCalled();
+      expect(window.focus).toHaveBeenCalled();
     });
 
     it("主窗口最小化时点通知先还原", async () => {
