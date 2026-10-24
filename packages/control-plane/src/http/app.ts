@@ -227,6 +227,7 @@ const NO_DRAFT = { error: "没有这条草稿" } as const;
 const NO_PLAN = { error: "没有这份计划" } as const;
 /** 建、改名、复制、点存四条路撞的是同一个唯一索引，所以回的也是同一句话。 */
 const NAME_TAKEN = { error: "这个 Bot 已经有同名的活了" } as const;
+const HEALTH_DB_TIMEOUT_MS = 2_000;
 
 export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promise<void> } {
   const { agents, db, hub } = deps;
@@ -366,10 +367,17 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
 
   app.get("/api/health", async (c) => {
     if (agents.closing) return c.json({ ok: false, error: "控制面正在停机" }, 503);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // postgres.js 没有查询级超时：库被隔开时，在途查询被掐断过的连接再接到查询会一直挂着，新连接也要等 connect_timeout 的 30 秒。
+    const stalled = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("健康检查查库超时")), HEALTH_DB_TIMEOUT_MS);
+    });
     try {
-      await db.execute(sql`SELECT 1`);
+      await Promise.race([db.execute(sql`SELECT 1`), stalled]);
     } catch {
       return c.json({ ok: false, error: "连不上数据库" }, 503);
+    } finally {
+      clearTimeout(timer);
     }
     return c.json({ ok: true });
   });
