@@ -1,4 +1,5 @@
 import type { AgentToControl } from "@baize/shared";
+import { log } from "../../log.js";
 import { findAssistant } from "../../repo/bots.js";
 import { appendMessage } from "../../repo/messages.js";
 import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
@@ -20,12 +21,22 @@ export async function handleTeamOffer(
 ): Promise<void> {
   const assistant = await findAssistant(deps.db, conn.ownerId);
   if (assistant === null || assistant.bot.id !== event.botId || assistant.groupId !== event.groupId) {
-    console.warn(`电脑 ${conn.computerId} 报的建队卡来自 ${event.botId}，不是主助理在它单聊里发的，整条丢掉`);
+    log.warn("电脑报的建队卡不是主助理在它单聊里发的，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+    });
     return;
   }
   const groupId = assistant.groupId;
   if (!(await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId))) {
-    console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是主助理在单聊里的活，建队卡整条丢掉`);
+    log.warn("电脑报的 run 不是主助理在单聊里的活，建队卡整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId,
+      botId: event.botId,
+    });
     return;
   }
   const existing = event.members.flatMap((member) => (member.kind === "existing" ? [member.botId] : []));
@@ -33,9 +44,11 @@ export async function handleTeamOffer(
   const message = await whileRunOpen(deps.db, { runId: event.runId, botId: event.botId, groupId }, async (tx) => {
     const projectGroupId = await lockOfferTarget(tx, conn.ownerId, event.projectGroupId, existing);
     if (projectGroupId === null) {
-      console.warn(
-        `电脑 ${conn.computerId} 报的建队卡指向 ${event.projectGroupId}，不是这个用户的项目群或人选不是这个用户的 Bot，整条丢掉`,
-      );
+      log.warn("电脑报的建队卡指向的不是这个用户的项目群，或人选不是这个用户的 Bot，整条丢掉", {
+        computerId: conn.computerId,
+        runId: event.runId,
+        projectGroupId: event.projectGroupId,
+      });
       return null;
     }
     return appendMessage(tx, groupId, {

@@ -16,6 +16,7 @@ import type { Db } from "../db/client.js";
 import { saveTurnBotMessages } from "../repo/groups.js";
 import { dropQueuedHandoffs, listQueuedHandoffs } from "../repo/handoffs.js";
 import { appendMessage } from "../repo/messages.js";
+import { log } from "../log.js";
 import type { PushHub } from "../ws/hub.js";
 import { renderHandoffReport } from "./handoff.js";
 import { parseMentions, type RoutingMember } from "./routing.js";
@@ -343,7 +344,7 @@ export class GroupTurns {
     const { groupId, botMessages } = turn;
     const saved = (this.#saveChains.get(groupId) ?? Promise.resolve())
       .then(() => saveTurnBotMessages(this.db, groupId, botMessages))
-      .catch((error: unknown) => console.error(`群 ${groupId} 回合计数没写进库`, error));
+      .catch((error: unknown) => log.error("回合计数没写进库", { groupId, err: error }));
     this.#saveChains.set(groupId, saved);
     return saved;
   }
@@ -409,7 +410,7 @@ export class GroupTurns {
    * 先收轮再写提示，提示写不进去时回合状态也已经干净。
    */
   async #failDispatch(turn: Turn, speaker: Speaker, error: unknown): Promise<void> {
-    console.error(`群 ${turn.groupId} 派活给 ${speaker.botId} 失败`, error);
+    log.error("派活失败", { groupId: turn.groupId, botId: speaker.botId, err: error });
     this.#close(turn);
     const name = turn.members.find((member) => member.id === speaker.botId)?.name ?? "它";
     const notice = await appendMessage(this.db, turn.groupId, {

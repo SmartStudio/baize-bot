@@ -1,4 +1,5 @@
 import { GroupId, type AgentToControl } from "@baize/shared";
+import { log } from "../../log.js";
 import { findAssistant, findBot } from "../../repo/bots.js";
 import { appendMessage, findGroupId } from "../../repo/messages.js";
 import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
@@ -17,7 +18,8 @@ export async function handleRoutineOffer(
   conn: AgentConnection,
   event: RoutineOfferEvent,
 ): Promise<void> {
-  const drop = (why: string) => console.warn(`电脑 ${conn.computerId} 报的例行卡 run ${event.runId} ${why}，整条丢掉`);
+  const drop = (why: string) =>
+    log.warn(`电脑报的例行卡整条丢掉：${why}`, { computerId: conn.computerId, runId: event.runId, botId: event.botId });
 
   const assistant = await findAssistant(deps.db, conn.ownerId);
   if (assistant === null) return drop("这个人没有主助理");

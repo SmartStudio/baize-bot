@@ -1,5 +1,6 @@
 import { GroupId, LeaveTableRequest, PokerTableResponse, RetryReviewRequest } from "@baize/shared";
 import { Hono } from "hono";
+import { concealed, log } from "../../log.js";
 import type { AgentHub } from "../../agent/hub.js";
 import type { Db } from "../../db/client.js";
 import { leaveTable, NO_SUCH_TABLE, retryReview } from "../../poker/leave.js";
@@ -29,7 +30,7 @@ export function createPokerReviewRoutes(deps: PokerReviewRouteDeps): Hono<Env> {
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
       // 数据库错误可能带整行（含种子），不把原异常交给公共日志。
-      console.error("牌桌散场失败");
+      log.error("牌桌散场失败", { groupId: groupId.data, err: concealed(error) });
       return c.json({ error: "服务端出错" }, 500);
     }
   });
@@ -43,7 +44,7 @@ export function createPokerReviewRoutes(deps: PokerReviewRouteDeps): Hono<Env> {
       return c.json(PokerTableResponse.parse({ table }));
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
-      console.error("牌桌复盘重试失败");
+      log.error("牌桌复盘重试失败", { groupId: groupId.data, err: concealed(error) });
       return c.json({ error: "服务端出错" }, 500);
     }
   });

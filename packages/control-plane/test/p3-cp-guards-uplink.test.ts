@@ -13,6 +13,7 @@ import { ApiClient, startTestServer, type TestServer } from "./helpers/client.js
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor, type TestComputer } from "./helpers/fixtures.js";
 import { gatedDb } from "./helpers/gated-db.js";
+import { logLines } from "./helpers/log.js";
 
 let database: TestDb;
 let gate: ReturnType<typeof gatedDb>;
@@ -119,13 +120,12 @@ it("指定的群号已不存在：错误不落到这台电脑别的群，日志�
   expect(await errorsIn(who.client, first.groupId), "不存在的群号那几条不能顺手落进有活在跑的群").toEqual([
     reportedAs("排在后面、确定会落地的报错"),
   ]);
-  const logged = warn.mock.calls.map((call) => String(call[0]));
+  const logged = logLines(warn);
   expect(logged).toHaveLength(cases.length);
   for (const line of logged) {
-    expect(line).toContain(who.computer.computerId);
-    expect(line).toContain("runner_failed");
+    expect(line).toMatchObject({ computerId: who.computer.computerId, code: "runner_failed" });
   }
-  const tails = logged.map((line) => line.slice(line.indexOf("runner_failed ") + "runner_failed ".length));
+  const tails = logged.map((line) => line["detail"]);
   expect(tails).toEqual(cases.map(([, expected]) => expected));
   expect(tails.join(""), "截断不留孤立的代理项").not.toMatch(
     /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/,
@@ -150,7 +150,9 @@ it("config_rejected 的 warn 里 detail 也按码点截到 80", async () => {
     groupId: first.groupId,
   });
   await waitFor(async () => (await errorsIn(who.client, first.groupId)).length > 0, "后一条带真群号的报错落地");
-  expect(warn.mock.calls.map((call) => String(call[0]).split("config：")[1])).toEqual([`用户内容${"😀".repeat(76)}…`]);
+  expect(logLines(warn)).toEqual([
+    expect.objectContaining({ msg: "电脑拒了 config", detail: `用户内容${"😀".repeat(76)}…` }),
+  ]);
 });
 
 it("双实例旧握手在信封校验后结束 run：runId error 日志只留 80 个码点，第 80、81 个 emoji 不留孤立代理项", async () => {
@@ -215,9 +217,15 @@ it("双实例旧握手在信封校验后结束 run：runId error 日志只留 80
       current.agent.uplinkAcks().flatMap((ack) => ack.rejected),
       "runId 校验当时通过，不能在信封层被 run_closed 拒收",
     ).toEqual([]);
-    const lines = error.mock.calls.map((call) => String(call[0]));
-    const prefix = `电脑 ${who.computer.computerId} 报错带的 run ${busy.runId} 不是它还开着的活，不收尾：runner_failed `;
-    const logged = lines.filter((line) => line.startsWith(prefix)).map((line) => line.slice(prefix.length));
+    const logged = logLines(error)
+      .filter(
+        (line) =>
+          line.msg === "电脑报错带的 run 不是它还开着的活，不收尾" &&
+          line["computerId"] === who.computer.computerId &&
+          line["runId"] === busy.runId &&
+          line["code"] === "runner_failed",
+      )
+      .map((line) => String(line["detail"]));
     expect(logged, "这条真实可达的 runId error 日志准确按 80 个码点截断").toEqual([`${"a".repeat(79)}😀…`]);
     expect(Array.from(logged[0] ?? "")).toHaveLength(81);
     expect(logged.join(""), "第 80 个 emoji 完整保留，第 81 个完整截掉，不新造孤立代理项").not.toMatch(

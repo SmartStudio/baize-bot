@@ -1,5 +1,6 @@
 import { BotId, GroupId, RoutineId, type Routine, type RunId, type UserId } from "@baize/shared";
 import { eq } from "drizzle-orm";
+import { log } from "../log.js";
 import type { Db } from "../db/client.js";
 import { runs } from "../db/schema.js";
 import type { NoticePublisher } from "../notifications.js";
@@ -125,7 +126,7 @@ export async function runRoutine(
 
   // 活已经派出去了，裁剪失败往外抛的话试跑和 webhook 回 500，平台一重试就重复派活。只是多留几条，下次裁剪收回。
   await trimRoutineRuns(deps.db, row.id).catch((error: unknown) => {
-    console.error(`例行任务 ${row.id} 裁剪运行记录出错`, error);
+    log.error("例行任务裁剪运行记录出错", { routineId: row.id, err: error });
   });
   const loaded = await loadRoutine(deps.db, RoutineId.parse(row.id));
   if (loaded === null) return null;

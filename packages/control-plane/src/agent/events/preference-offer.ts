@@ -1,4 +1,5 @@
 import type { AgentToControl } from "@baize/shared";
+import { log } from "../../log.js";
 import { findSoloBotId } from "../../repo/groups.js";
 import { appendMessage, findGroupId } from "../../repo/messages.js";
 import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
@@ -19,11 +20,11 @@ export async function handlePreferenceOffer(
   const { runId, botId, groupId } = event;
   if ((await findGroupId(deps.db, conn.ownerId, groupId)) === null) return;
   if ((await findSoloBotId(deps.db, groupId)) !== botId) {
-    console.warn(`电脑 ${conn.computerId} 报的偏好来自群 ${groupId}，不是 ${botId} 的单聊，整条丢掉`);
+    log.warn("电脑报的偏好不是这个 Bot 的单聊里发的，整条丢掉", { computerId: conn.computerId, runId, groupId, botId });
     return;
   }
   if (!(await runBelongsTo(deps.db, runId, botId, groupId, conn.computerId))) {
-    console.warn(`电脑 ${conn.computerId} 报的 run ${runId} 不是它在群 ${groupId} 里的活，整条丢掉`);
+    log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", { computerId: conn.computerId, runId, groupId });
     return;
   }
 

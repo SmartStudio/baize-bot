@@ -227,6 +227,14 @@ export async function pendingContinuationIds(db: Db, ownerId?: UserId): Promise<
   return rows.map((row) => RunId.parse(row.id));
 }
 
+export async function countPendingContinuations(db: Db): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(runs)
+    .where(pendingWhere(undefined));
+  return row?.count ?? 0;
+}
+
 /** 触发消息按这个 Bot 的视角读：它这一轮就是被这条消息派起来的。 */
 export async function pendingContinuation(db: Db, runId: RunId): Promise<PendingContinuation | null> {
   const [row] = await db

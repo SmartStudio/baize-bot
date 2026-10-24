@@ -1,5 +1,6 @@
 import { OAuthPlatform, type Account, type OAuthResult, type User } from "@baize/shared";
 import { Hono, type Context } from "hono";
+import { log } from "../log.js";
 import type { AgentHub } from "../agent/hub.js";
 import { saveGrant, type CredentialCrypto } from "../credentials.js";
 import type { Db } from "../db/client.js";
@@ -78,7 +79,7 @@ export function createOAuthRoutes(deps: OAuthRouteDeps): Hono<Env> {
         return saved.restored ?? connected;
       });
     } catch (error) {
-      console.error(`连 ${platform} 账号出错`, error);
+      log.error("连账号出错", { platform, userId: ownerId, err: error });
       return land(c, platform, "failed");
     }
     // 凭据已经提交，账号就是连上了。之后的推送和 config 只是通知，出错只记日志，不改页面上的结论。
@@ -86,7 +87,7 @@ export function createOAuthRoutes(deps: OAuthRouteDeps): Hono<Env> {
     try {
       await deps.agents.sendConfig(ownerId);
     } catch (error) {
-      console.error(`${platform} 账号已连上，重发 config 出错`, error);
+      log.error("账号已连上，重发 config 出错", { platform, userId: ownerId, err: error });
     }
     return land(c, platform, "connected");
   });

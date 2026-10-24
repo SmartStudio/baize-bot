@@ -26,6 +26,7 @@ import { helloAgent, type AgentClient } from "./helpers/agent.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { makeComputer, makeUser, PASSWORD, type TestComputer } from "./helpers/fixtures.js";
+import { logLine, logLines } from "./helpers/log.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
 
 type Prompt = Extract<ControlToAgent, { type: "prompt" }>;
@@ -844,7 +845,7 @@ it("扫描器一手失败仍推进后面的桌且日志不含原异常", async (
     await table.agent.expect("prompt");
     expect(logged.mock.calls.length).toBeGreaterThan(0);
     expect(JSON.stringify(logged.mock.calls)).not.toContain("种子不得出现在日志");
-    expect(logged.mock.calls.some((args) => args.includes(brokenId))).toBe(true);
+    expect(logLines(logged).some((line) => line["handId"] === brokenId)).toBe(true);
     expect(logged.mock.calls.every((args) => args.every((arg) => typeof arg === "string"))).toBe(true);
   } finally {
     await database.sql`DELETE FROM users WHERE id=${broken.ownerId}`;
@@ -863,7 +864,8 @@ it("扫描器对同一手连续失败到上限就作废它，桌子回 idle、�
     const push = await broken.push.next(10_000);
     if (push.type === "message" && JSON.stringify(push.message.body).includes("这一手作废")) break;
   }
-  const failures = () => logged.mock.calls.filter((args) => args[0] === "扫描牌桌手失败" && args[1] === brokenId);
+  const failures = () =>
+    logLines(logged).filter((line) => line.msg === "扫描牌桌手失败" && line["handId"] === brokenId);
   expect(failures()).toHaveLength(SWEEP_FAILURE_LIMIT);
   const [hand] = await database.sql<
     { status: string; turn_run_id: string | null }[]
@@ -908,22 +910,23 @@ it("同一手失败到差一次上限时成功一次，计数清零，再失败�
   await fixture();
   const id = await seeded();
   await table.agent.expect("prompt");
-  const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-    if (args[1] !== id) return;
-    if (args[0] === "扫描牌桌手失败" && args[2] === `${SWEEP_FAILURE_LIMIT - 1}/${SWEEP_FAILURE_LIMIT}`)
+  const logged = vi.spyOn(console, "error").mockImplementation((raw: unknown) => {
+    const line = logLine(raw);
+    if (line["handId"] !== id) return;
+    if (line.msg === "扫描牌桌手失败" && line["failures"] === `${SWEEP_FAILURE_LIMIT - 1}/${SWEEP_FAILURE_LIMIT}`)
       clock = clock === "fail" ? "pass_once" : "pass";
-    if (args[0] !== "扫描牌桌手失败") reached();
+    if (line.msg !== "扫描牌桌手失败") reached();
   });
   clock = "fail";
   await done;
   const round = Array.from({ length: SWEEP_FAILURE_LIMIT - 1 }, (_, i) => `${i + 1}/${SWEEP_FAILURE_LIMIT}`);
-  const calls = logged.mock.calls.filter((args) => args[1] === id);
+  const calls = logLines(logged).filter((line) => line["handId"] === id);
   expect(
-    calls.map((args) => args[2]),
+    calls.map((line) => line["failures"]),
     "成功一次之后从 1 重新数，两轮都没碰到上限",
   ).toEqual([...round, ...round]);
   expect(
-    calls.every((args) => args[0] === "扫描牌桌手失败"),
+    calls.every((line) => line.msg === "扫描牌桌手失败"),
     "没有试过作废",
   ).toBe(true);
   const [hand] = await database.sql<{ status: string }[]>`SELECT status FROM poker_hands WHERE id = ${id}`;
@@ -948,22 +951,33 @@ it("作废本身失败时之后的扫描不再每次记日志，满一轮才再�
   const done = new Promise<void>((resolve) => {
     abandoned = resolve;
   });
-  const logged = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
-    if (args[1] !== id) return;
-    if (args[0] === "作废牌桌手失败" && ++abandonFailures === 2) down = false;
-    if (args[0] === "牌桌手连续推进失败，已作废") abandoned();
+  const logged = vi.spyOn(console, "error").mockImplementation((raw: unknown) => {
+    const line = logLine(raw);
+    if (line["handId"] !== id) return;
+    if (line.msg === "作废牌桌手失败" && ++abandonFailures === 2) down = false;
+    if (line.msg === "牌桌手连续推进失败，已作废") abandoned();
   });
   down = true;
   await corrupt(id);
   await done;
-  const scan = (n: number) => ["扫描牌桌手失败", id, `${n}/${SWEEP_FAILURE_LIMIT}`, expect.any(String)];
-  expect(logged.mock.calls.filter((args) => args[1] === id)).toEqual([
+  const scan = (n: number) => ({
+    msg: "扫描牌桌手失败",
+    handId: id,
+    failures: `${n}/${SWEEP_FAILURE_LIMIT}`,
+    err: expect.objectContaining({ name: expect.any(String) }),
+  });
+  const abandonFailed = { msg: "作废牌桌手失败", handId: id, err: expect.objectContaining({ name: "Error" }) };
+  expect(
+    logLines(logged)
+      .filter((line) => line["handId"] === id)
+      .map(({ time: _time, level: _level, ...line }) => line),
+  ).toEqual([
     ...Array.from({ length: SWEEP_FAILURE_LIMIT }, (_, i) => scan(i + 1)),
-    ["作废牌桌手失败", id, "Error"],
+    abandonFailed,
     scan(2 * SWEEP_FAILURE_LIMIT),
-    ["作废牌桌手失败", id, "Error"],
+    abandonFailed,
     scan(3 * SWEEP_FAILURE_LIMIT),
-    ["牌桌手连续推进失败，已作废", id],
+    { msg: "牌桌手连续推进失败，已作废", handId: id },
   ]);
   expect(JSON.stringify(logged.mock.calls)).not.toContain("库断开");
   const [hand] = await database.sql<{ status: string }[]>`SELECT status FROM poker_hands WHERE id = ${id}`;
@@ -983,7 +997,14 @@ for (const failure of ["message_push", "converge", "table_push", "snapshot"] as 
     expect(view.status).toBe("in_hand");
     expect(view.hand).not.toBeNull();
     expect((await stored(view.hand!.id)).events).toEqual(view.hand!.view.events);
-    expect(logged.mock.calls).toContainEqual(["牌桌提交后这一步失败", view.hand!.id, failure, "Error"]);
+    expect(logLines(logged)).toContainEqual(
+      expect.objectContaining({
+        msg: "牌桌提交后这一步失败",
+        handId: view.hand!.id,
+        step: failure,
+        err: expect.objectContaining({ name: "Error" }),
+      }),
+    );
   });
   it(`用户动作提交后 ${failure} 失败仍返回 200 和已落库视图`, async () => {
     let armed = false;
@@ -1007,7 +1028,14 @@ for (const failure of ["message_push", "converge", "table_push", "snapshot"] as 
     expect(
       (await stored(view.hand!.id)).events.filter((event) => event.kind === "action" && event.seatId === "4"),
     ).toHaveLength(1);
-    expect(logged.mock.calls).toContainEqual(["牌桌提交后这一步失败", view.hand!.id, failure, "Error"]);
+    expect(logLines(logged)).toContainEqual(
+      expect.objectContaining({
+        msg: "牌桌提交后这一步失败",
+        handId: view.hand!.id,
+        step: failure,
+        err: expect.objectContaining({ name: "Error" }),
+      }),
+    );
   });
 }
 it("dropped run 在同一决策点最多重派三次，重启后仍受限并等截止兜底", async () => {

@@ -17,6 +17,7 @@ import { and, asc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentOutbox, bots, computers, groupMembers, routineRuns, routines, runs } from "../db/schema.js";
 import type { Tx } from "../repo/messages.js";
+import { concealed, log } from "../log.js";
 import { lockOwner, shareBotRunsLock } from "../repo/runs.js";
 
 export type Hello = Extract<AgentToControl, { type: "hello" }>;
@@ -309,7 +310,7 @@ export async function acceptUplinkFrame(
                 ? rawBody.type
                 : "unknown";
             const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
-            console.warn(`电脑 ${computerId} 上行 ${frame.seq} 的 ${type} 被拒收 invalid，出错的字段：${paths}`);
+            log.warn(`上行 ${type} 被拒收 invalid`, { computerId, seq: frame.seq, fields: paths });
           }
         } else {
           const body = parsed.data.body;
@@ -348,7 +349,7 @@ export async function acceptUplinkFrame(
       try {
         await effect();
       } catch (error) {
-        console.error(`信封提交后的推送失败：${error instanceof Error ? error.name : typeof error}`);
+        log.error("信封提交后的推送失败", { computerId, err: concealed(error) });
       }
     }
     return result;
@@ -357,14 +358,8 @@ export async function acceptUplinkFrame(
     try {
       return await advance(true);
     } catch (error) {
-      const kind =
-        error instanceof Error
-          ? `${error.name}${"code" in error && typeof error.code === "string" ? ` ${error.code}` : ""}`
-          : typeof error;
       const runId = parsed.success && "runId" in parsed.data.body ? parsed.data.body.runId : undefined;
-      console.error(
-        `电脑 ${computerId} 上行 ${frame.seq}${runId === undefined ? "" : ` run ${runId}`} 处理失败，第 ${attempt + 1} 次：${kind}`,
-      );
+      log.error(`上行处理失败，第 ${attempt + 1} 次`, { computerId, runId, seq: frame.seq, err: concealed(error) });
     }
   }
   return advance(false);

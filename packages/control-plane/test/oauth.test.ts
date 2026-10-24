@@ -21,6 +21,7 @@ import { pruneOverflow } from "../src/repo/oauth-states.js";
 import { TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { contentJob, createDraft, issuePost, nextOf, specOf } from "./helpers/content.js";
 import { makeUser, waitFor } from "./helpers/fixtures.js";
+import { logLine } from "./helpers/log.js";
 import {
   LONG_LIFETIME_S,
   SHORT_LIFETIME_S,
@@ -707,7 +708,14 @@ describe("令牌刷新", () => {
       await expectQuietUntilPlaceholder(o);
       expect((await accountsOf(o)).find((one) => one.id === account.id)?.login).toBe("valid");
       expect(
-        logged.some((line) => line.includes(`${platform} 刷新令牌没换到`) && line.includes(`错误码 ${code}`)),
+        logged
+          .map(logLine)
+          .some(
+            (line) =>
+              line.platform === platform &&
+              line.msg.startsWith("刷新令牌没换到") &&
+              line.msg.includes(`错误码 ${code}`),
+          ),
         "运维日志写平台和错误码",
       ).toBe(true);
       expect(logged.join("\n"), "日志里没有令牌").not.toMatch(/_(access|refresh)_\d/);
@@ -1483,7 +1491,9 @@ describe("凭据落库之后", () => {
     expect((await nextOf(o.push, "account_updated")).account).toMatchObject({ id: account.id, login: "valid" });
     expect(await loginOf(o, account.id)).toBe("valid");
     expect((await credentialsOf(s, account.id))?.generation).toBe(2);
-    expect(logged.join("\n"), "重发 config 的错误记下来").toContain(`账号 ${account.id} 刷新后重发 config 出错`);
+    expect(logged.map(logLine), "重发 config 的错误记下来").toContainEqual(
+      expect.objectContaining({ msg: "账号刷新后重发 config 出错", accountId: account.id }),
+    );
   });
 });
 

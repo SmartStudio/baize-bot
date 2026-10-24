@@ -1,7 +1,7 @@
 import { PokerActRequest, StartHandRequest, type Message, type PokerTableView } from "@baize/shared";
 import { Hono } from "hono";
+import { concealed, log } from "../../log.js";
 import { apply } from "../../poker/engine.js";
-import { errorKind } from "../../agent/events.js";
 import {
   converge,
   pokerOptions,
@@ -37,7 +37,7 @@ async function afterCommit(
       probe?.(step);
       return await run();
     } catch (error) {
-      console.error("牌桌提交后这一步失败", handId, step, errorKind(error));
+      log.error("牌桌提交后这一步失败", { groupId, handId, step, err: concealed(error) });
       return undefined;
     }
   };
@@ -67,7 +67,7 @@ export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
       // 数据库插入错误可能带整行（含种子），日志只记错误类别。
-      console.error("牌桌开手失败", errorKind(error));
+      log.error("牌桌开手失败", { groupId: c.req.param("groupId"), err: concealed(error) });
       return c.json({ error: "服务端出错" }, 500);
     }
   });
@@ -105,7 +105,7 @@ export function createPokerHandRoutes(deps: PokerHandRouteDeps): Hono<Env> {
       return c.json({ table: await afterCommit(deps, initial.row.groupId, initial.row.id, result) }, 200);
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
-      console.error("牌桌出牌失败", errorKind(error));
+      log.error("牌桌出牌失败", { handId: c.req.param("id"), err: concealed(error) });
       return c.json({ error: "服务端出错" }, 500);
     }
   });

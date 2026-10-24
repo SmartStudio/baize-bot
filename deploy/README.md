@@ -84,6 +84,8 @@ compose 读 `deploy/remote/.env`（`remote/README.md:41`）。控制面读哪些
 | `TRUSTED_PROXY_HOPS` | 否 | `1` | 控制面前面有几层反向代理，登录注册按来源 IP 限频时从 `X-Forwarded-For` 右数第几项取来源（`packages/control-plane/src/http/auth-limits.ts` 的 `clientIp`）。compose 默认 `1` 对应同机一层 Caddy；设成 `0` 所有请求都算成 docker 网关一个来源，两百次失败就锁住全站登录。控制面本身不设时是 `0` |
 | `GITHUB_APP_CLIENT_ID`、`GITHUB_APP_CLIENT_SECRET` | 否 | 空 | 要一起设，只设一个启动时抛错（`env.ts:113-115`） |
 | `X_CLIENT_ID`、`X_CLIENT_SECRET` | 否 | 空 | 设了 secret 就要设 id（`env.ts:118`） |
+| `LOG_FORMAT` | 否 | `json` | `json` 每行一条 JSON，`pretty` 人读的一行，别的值启动失败（`env.ts` 的 `logFormat`）。接 Loki 用 `json`，见 `docs/部署.md` 的「日志和指标」 |
+| `METRICS_TOKEN` | 否 | 空 | 设了才开 `GET /metrics`，抓取带 `Authorization: Bearer <它>`；不设那条路由回 404 |
 
 `DATABASE_URL` 和 `PORT` 由 compose 写死（`docker-compose.yml:42-43`），不从 `.env` 读。
 

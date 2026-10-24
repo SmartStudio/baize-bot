@@ -1,5 +1,6 @@
 import type { GatewayModels } from "@baize/shared";
 import { DEFAULT_GATEWAY_LIMITS, type GatewayLimits } from "./http/gateway-limits.js";
+import { log, type LogFormat } from "./log.js";
 
 const DEFAULT_DATABASE_URL = "postgres://baize:baize@localhost:5434/baize";
 const DEFAULT_PORT = 3001;
@@ -34,6 +35,13 @@ export function credentialsKey(): string {
     throw new Error("CREDENTIALS_KEY 没设，用 openssl rand -base64 32 生成一个");
   }
   return key;
+}
+
+export function logFormat(): LogFormat {
+  const raw = nonEmpty("LOG_FORMAT");
+  if (raw === null) return "json";
+  if (raw !== "json" && raw !== "pretty") throw new Error(`LOG_FORMAT 只能是 json 或 pretty: ${raw}`);
+  return raw;
 }
 
 export function port(): number {
@@ -75,6 +83,8 @@ export type RuntimeConfig = {
   readonly githubApiBaseUrl: string;
   readonly xApiBaseUrl: string;
   readonly oauth: OAuthConfig;
+  /** 设了才开 GET /metrics，抓取要带 Bearer 这个值。null 时那条路由回 404。 */
+  readonly metricsToken: string | null;
 };
 
 /** GitHub App 换令牌必须带 secret。X 的公共客户端只靠 PKCE，没有 secret 也能跑。 */
@@ -113,6 +123,7 @@ export function runtimeConfig(): RuntimeConfig {
     xApiBaseUrl: nonEmpty("X_API_BASE_URL") ?? DEFAULT_X_API_BASE_URL,
     webBaseUrl: nonEmpty("WEB_BASE_URL"),
     oauth: oauthConfig(),
+    metricsToken: nonEmpty("METRICS_TOKEN"),
   };
 }
 
@@ -147,7 +158,7 @@ function configuredGatewayModels(): GatewayModels {
     configuredLegacy !== undefined &&
     configuredLegacy.trim() !== ""
   ) {
-    console.warn("GATEWAY_MODELS 和 GATEWAY_MODEL 同时设置，优先使用 GATEWAY_MODELS");
+    log.warn("GATEWAY_MODELS 和 GATEWAY_MODEL 同时设置，优先使用 GATEWAY_MODELS");
   }
   if (configured === undefined || configured.trim() === "") {
     const legacy =

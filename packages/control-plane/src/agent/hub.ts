@@ -50,7 +50,7 @@ import { lockOwner, openRunsForComputer } from "../repo/runs.js";
 import { listToolConfigs } from "../repo/tools.js";
 import type { RoutineDeps } from "../routines/run.js";
 import type { PushHub } from "../ws/hub.js";
-import { abandonRun, errorKind, handleAgentEvent, settleUnchargedRuns } from "./events.js";
+import { abandonRun, handleAgentEvent, settleUnchargedRuns } from "./events.js";
 import { resumePendingContinuations, resumeQueuedHandoffs } from "./dispatch.js";
 import {
   acceptUplinkFrame,
@@ -70,6 +70,7 @@ import { setComputerLease } from "./lease-clock.js";
 import { availabilityOf, computerAvailability, computerLeases, withDispatchable } from "./computer-availability.js";
 import type { GroupTurns } from "./group-turn.js";
 import { bytesOf, type LiveRelay } from "../live/relay.js";
+import { concealed, log, type LogFields } from "../log.js";
 
 export const AGENT_PATH = "/agent";
 
@@ -209,8 +210,8 @@ export class AgentHub {
     // 两帧之间可能插进这台电脑另一条连接的 hello，插进来之后这条连接剩下的帧在任务开头整条丢掉。
     let inbox: Promise<void> = Promise.resolve();
     // 日志只记错误类别和 id，异常原文可能夹着用户正文或凭据。
-    const queue = (step: () => Promise<void>, failure: (error: unknown) => string) => {
-      const tail = inbox.then(step).catch((error: unknown) => console.error(failure(error)));
+    const queue = (step: () => Promise<void>, msg: string, fields: () => LogFields) => {
+      const tail = inbox.then(step).catch((error: unknown) => log.error(msg, { ...fields(), err: concealed(error) }));
       inbox = tail;
       this.#inboxTails.add(tail);
       void tail.then(() => this.#inboxTails.delete(tail));
@@ -286,7 +287,8 @@ export class AgentHub {
             conn = await this.#onHello(socket, authenticated, message, controlOrigin);
           });
         },
-        (error) => `处理电脑 ${conn?.computerId ?? "（未握手）"}${frameRunId(text)} 的报文出错：${errorKind(error)}`,
+        "处理电脑报文出错",
+        () => ({ computerId: conn?.computerId, runId: frameRunId(text) }),
       );
     });
 
@@ -306,7 +308,8 @@ export class AgentHub {
           if (closed === null) return;
           await this.#enqueue(closed.computerId, () => this.#onClose(closed));
         },
-        (error) => `把电脑 ${conn?.computerId ?? "（未握手）"} 标记为休眠出错：${errorKind(error)}`,
+        "把电脑标记为休眠出错",
+        () => ({ computerId: conn?.computerId }),
       );
     });
   }
@@ -748,14 +751,14 @@ export class AgentHub {
       }
       // 排在 config 之后：补结账会推进回合，下一位可能派到这台电脑上。抛错不挡上线，账留到下一次 hello。
       await settleUnchargedRuns(this.#routineDeps(), computer.id, computer.ownerId).catch((error: unknown) =>
-        console.error(`电脑 ${computer.id} 上线时补结账出错：${errorKind(error)}`),
+        log.error("电脑上线时补结账出错", { computerId: computer.id, err: concealed(error) }),
       );
       // 结账提交后进程没了的那种接续，等目标电脑上线这一刻补起。
       await resumePendingContinuations(this.#routineDeps(), computer.ownerId).catch((error: unknown) =>
-        console.error(`电脑 ${computer.id} 上线时补起接续出错：${errorKind(error)}`),
+        log.error("电脑上线时补起接续出错", { computerId: computer.id, err: concealed(error) }),
       );
       await resumeQueuedHandoffs(this.#routineDeps(), { ownerId: computer.ownerId }).catch((error: unknown) =>
-        console.error(`电脑 ${computer.id} 上线时补派交接出错：${errorKind(error)}`),
+        log.error("电脑上线时补派交接出错", { computerId: computer.id, err: concealed(error) }),
       );
       return accepted;
     } catch (error) {
@@ -786,7 +789,8 @@ export class AgentHub {
       const timer = setTimeout(() => {
         this.#graceTimers.delete(closed.computerId);
         this.#enqueue(closed.computerId, () => this.#finishAfterGrace(closed.computerId, closed.ownerId)).catch(
-          (error: unknown) => console.error(`电脑 ${closed.computerId} 断连后收尾 run 出错：${errorKind(error)}`),
+          (error: unknown) =>
+            log.error("电脑断连后收尾 run 出错", { computerId: closed.computerId, err: concealed(error) }),
         );
       }, leaseRemainingMs);
       timer.unref();
@@ -863,7 +867,7 @@ export class AgentHub {
     // 每个 run 的收尾已经提交，一个推送出错不能让后面的 run 连接续都不起。
     for (const effect of afterCommit)
       await effect().catch((error: unknown) =>
-        console.error(`电脑 ${computerId} 断连收尾后推送出错：${errorKind(error)}`),
+        log.error("电脑断连收尾后推送出错", { computerId, err: concealed(error) }),
       );
   }
 
@@ -983,14 +987,12 @@ export class AgentHub {
  * 新旧版本混跑时形状对不上就走到这里，不留痕的话已经发出去的帖子会在十分钟后被记成没发出去，查不到原因。
  */
 /** 出错日志里带上报文的 runId，只认校验过的报文。 */
-function frameRunId(raw: string): string {
+function frameRunId(raw: string): string | null | undefined {
   try {
     const parsed = AgentToControl.safeParse(JSON.parse(raw));
-    return parsed.success && "runId" in parsed.data && parsed.data.runId !== undefined
-      ? ` run ${parsed.data.runId}`
-      : "";
+    return parsed.success && "runId" in parsed.data ? parsed.data.runId : undefined;
   } catch {
-    return "";
+    return undefined;
   }
 }
 
@@ -999,7 +1001,7 @@ function parseFrame(raw: string, from: string): AgentToControl | null {
   try {
     json = JSON.parse(raw);
   } catch {
-    console.warn(`${from} 报的不是 JSON，丢弃`);
+    log.warn(`${from} 报的不是 JSON，丢弃`);
     return null;
   }
   const parsed = AgentToControl.safeParse(json);
@@ -1007,6 +1009,6 @@ function parseFrame(raw: string, from: string): AgentToControl | null {
   const type = (json as { type?: unknown } | null)?.type;
   const label = typeof type === "string" ? JSON.stringify(type.slice(0, 64)) : "没有 type 的报文";
   const paths = [...new Set(parsed.error.issues.map((issue) => issue.path.join(".") || "(整条)"))].join("、");
-  console.warn(`${from} 报的 ${label} 不合 AgentToControl，丢弃。出错的字段：${paths}`);
+  log.warn(`${from} 报的 ${label} 不合 AgentToControl，丢弃`, { fields: paths });
   return null;
 }

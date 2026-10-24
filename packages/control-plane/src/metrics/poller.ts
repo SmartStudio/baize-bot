@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { log } from "../log.js";
 import { expireLogin } from "../account-expiry.js";
 import type { AgentHub } from "../agent/hub.js";
 import type { AccessToken, AccountTokens } from "../credentials.js";
@@ -48,7 +49,7 @@ export class MetricPoller {
 
   start(): void {
     const timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => console.error("读指标出错", error));
+      void this.tick().catch((error: unknown) => log.error("读指标出错", { err: error }));
     }, this.#options.intervalMs ?? METRIC_SCAN_INTERVAL_MS);
     timer.unref();
     this.#timer = timer;
@@ -74,7 +75,7 @@ export class MetricPoller {
       try {
         await this.#sample(project, { sampledAt: now, windowStart });
       } catch (error) {
-        console.error(`项目群 ${project.groupId} 读 GitHub 星数出错`, error);
+        log.error("读 GitHub 星数出错", { groupId: project.groupId, err: error });
       }
     }
   }
@@ -87,7 +88,7 @@ export class MetricPoller {
       return;
     }
     if (read.kind === "unavailable") {
-      console.warn(`项目群 ${project.groupId} 这一格没读到 ${project.repo} 的星数：${read.reason}`);
+      log.warn(`这一格没读到星数：${read.reason}`, { groupId: project.groupId, repo: project.repo });
       return;
     }
     const recorded = await recordPolledSample(db, project.ownerId, project.groupId, read.value, "github_stars", slot);

@@ -1,3 +1,4 @@
+import { log } from "../log.js";
 import type { Db } from "../db/client.js";
 import type { NoticePublisher } from "../notifications.js";
 import type { AgentHub } from "../agent/hub.js";
@@ -43,7 +44,7 @@ export class RoutineScheduler {
   async start(): Promise<void> {
     await this.#baseline();
     const timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => console.error("扫例行任务出错", error));
+      void this.tick().catch((error: unknown) => log.error("扫例行任务出错", { err: error }));
     }, this.#options.intervalMs ?? SCAN_INTERVAL_MS);
     timer.unref();
     this.#timer = timer;
@@ -61,7 +62,7 @@ export class RoutineScheduler {
       try {
         await this.#fireDue(owned, now);
       } catch (error) {
-        console.error(`例行任务 ${owned.row.id} 触发出错`, error);
+        log.error("例行任务触发出错", { routineId: owned.row.id, err: error });
       }
     }
   }

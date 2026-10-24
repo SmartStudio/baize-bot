@@ -1,10 +1,10 @@
 import { type ComputerId, GroupId, PokerHandId, PokerSessionId, RunId, UserId, type Message } from "@baize/shared";
 import { and, eq, sql } from "drizzle-orm";
-import { errorKind } from "../agent/events.js";
 import type { AgentHub } from "../agent/hub.js";
 import { sendHiddenRun } from "../agent/hidden-run.js";
 import type { Db } from "../db/client.js";
 import { pokerHands, pokerTables, runs } from "../db/schema.js";
+import { concealed, log } from "../log.js";
 import { finishRun } from "../repo/runs.js";
 import type { PushHub } from "../ws/hub.js";
 import { BOT_TURN_TIMEOUT_MS, MAX_REJECTED_ACTIONS, nextStep, type PlanTurn, type Step } from "./converge-plan.js";
@@ -279,7 +279,7 @@ export async function abandonHand(deps: PokerDeps, handId: string): Promise<bool
   if (!outcome) return false;
   pushMessages(deps, outcome.ownerId, [outcome.said]);
   await pushTable(deps, initial.groupId).catch((error: unknown) =>
-    console.error("作废牌局后推送视图失败", handId, errorKind(error)),
+    log.error("作废牌局后推送视图失败", { handId, groupId: initial.groupId, err: concealed(error) }),
   );
   return true;
 }

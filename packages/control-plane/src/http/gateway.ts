@@ -1,4 +1,11 @@
-import { ModelPurpose, gatewayAlias, type ComputerId, type GatewayModels } from "@baize/shared";
+import {
+  ModelPurpose,
+  gatewayAlias,
+  type BotId,
+  type ComputerId,
+  type GatewayModels,
+  type GroupId,
+} from "@baize/shared";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -7,6 +14,8 @@ import { findComputerByGatewayKey } from "../repo/computers.js";
 import { retryAfterSeconds } from "./auth-limits.js";
 import { GATEWAY_TIMEOUT_MARK, RequestBuckets, type GatewayLimits } from "./gateway-limits.js";
 import { LANE_FENCE_ERRORS, validateLaneFence } from "./lane-fence.js";
+import { log } from "../log.js";
+import type { StatusCounts } from "./ops-metrics.js";
 
 export const GATEWAY_PATH = "/gateway/v1";
 const MAX_REQUEST_BODY_BYTES = 20 * 1024 * 1024;
@@ -22,9 +31,10 @@ export type GatewayDeps = {
   readonly upstreamBaseUrl: string;
   readonly upstreamApiKey: string;
   readonly limits: GatewayLimits;
+  readonly responses: StatusCounts;
 };
 
-type GatewayEnv = { Variables: { computerId: ComputerId } };
+type GatewayEnv = { Variables: { computerId: ComputerId; lane: { botId: BotId; groupId: GroupId } } };
 
 // 白名单而不是黑名单：上游的组织标识、Set-Cookie 这类头不该漏给电脑，
 // 而黑名单挡不住上游以后新加的头。压缩、长度、分块也顺带落在名单外，那几项由我们这边重新定。
@@ -45,6 +55,11 @@ export function createGateway(deps: GatewayDeps): Hono<GatewayEnv> {
   const app = new Hono<GatewayEnv>();
   const buckets = new RequestBuckets(deps.limits);
 
+  app.use("/chat/completions", async (c, next) => {
+    await next();
+    deps.responses.add(c.res.status);
+  });
+
   app.use("*", async (c, next) => {
     const key = bearerToken(c.req.header("authorization"));
     const computer = key === null ? null : await findComputerByGatewayKey(deps.db, key);
@@ -52,6 +67,7 @@ export function createGateway(deps: GatewayDeps): Hono<GatewayEnv> {
     const fence = await validateLaneFence(deps.db, computer, c.req.header("x-baize-lane"));
     if (fence.kind !== "ok") return c.json({ error: LANE_FENCE_ERRORS[fence.kind] }, 409);
     c.set("computerId", computer.id);
+    c.set("lane", fence.lane);
     await next();
   });
 
@@ -118,7 +134,13 @@ export function createGateway(deps: GatewayDeps): Hono<GatewayEnv> {
           return timedOut(error);
         }
         deadline.clear();
-        console.error(`模型上游返回 ${upstream.status}，正文前 200 字：${errorBody.slice(0, 200)}`);
+        log.error("模型上游返回错误", {
+          computerId: c.get("computerId"),
+          botId: c.get("lane").botId,
+          groupId: c.get("lane").groupId,
+          status: upstream.status,
+          body: errorBody.slice(0, 200),
+        });
         return new Response(JSON.stringify({ error: `模型上游返回 ${upstream.status}，请稍后再试或检查上游配置。` }), {
           status: upstream.status,
           headers: { "content-type": "application/json; charset=UTF-8" },

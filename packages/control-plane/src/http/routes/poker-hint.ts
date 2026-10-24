@@ -1,5 +1,6 @@
 import { HintRequest, PokerTableResponse } from "@baize/shared";
 import { Hono } from "hono";
+import { concealed, log } from "../../log.js";
 import type { AgentHub } from "../../agent/hub.js";
 import type { Db } from "../../db/client.js";
 import { askHint } from "../../poker/hint.js";
@@ -23,7 +24,7 @@ export function createPokerHintRoutes(deps: PokerHintRouteDeps): Hono<Env> {
       return c.json(PokerTableResponse.parse({ table }));
     } catch (error) {
       if (error instanceof PokerError) return c.json({ error: error.message }, error.status);
-      console.error("问老白失败", "hint_failed");
+      log.error("问老白失败", { handId: c.req.param("id"), err: concealed(error) });
       return c.json({ error: "服务端出错" }, 500);
     }
   });

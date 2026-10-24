@@ -1,4 +1,5 @@
 import type { GroupId, NotifyKind, UserId } from "@baize/shared";
+import { log } from "./log.js";
 import type { Db } from "./db/client.js";
 import { claimBudgetAlert, getSettings } from "./repo/settings.js";
 import type { PushHub } from "./ws/hub.js";
@@ -52,7 +53,7 @@ export class Notifications implements NoticePublisher {
 
   start(): void {
     const timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => console.error("汇总免打扰通知出错", error));
+      void this.tick().catch((error: unknown) => log.error("汇总免打扰通知出错", { err: error }));
     }, this.#intervalMs);
     timer.unref();
     this.#timer = timer;
@@ -107,7 +108,7 @@ export class Notifications implements NoticePublisher {
         } catch (error) {
           // 不清的话它每一轮都在同一处抛，排在后面的用户也永远轮不到。
           this.#held.delete(userId);
-          console.error("汇总免打扰通知出错", error);
+          log.error("汇总免打扰通知出错", { userId, err: error });
         }
       }
     });

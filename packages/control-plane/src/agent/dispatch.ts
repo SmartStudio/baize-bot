@@ -61,7 +61,6 @@ import type { PushHub } from "../ws/hub.js";
 import type { NoticePublisher } from "../notifications.js";
 import { enqueueDownlink, lockEnvelopeComputer } from "./envelope.js";
 import { computerPreference, lockLaneComputers, placeRun, type ComputerPreference } from "./place-run.js";
-import { errorKind } from "./events.js";
 import type { AgentHub } from "./hub.js";
 import { computerAvailability, computerView, type AvailabilityAgents } from "./computer-availability.js";
 import {
@@ -72,6 +71,7 @@ import {
 } from "./computer-selection.js";
 import type { ComputerRecord } from "../repo/rows.js";
 import { GroupTurns, limitReached, type ContinuationRoutine, type SendOutcome, type Speaker } from "./group-turn.js";
+import { concealed, log } from "../log.js";
 import { routeTargets } from "./routing.js";
 import {
   breakContinuation,
@@ -276,7 +276,7 @@ export async function resumePendingContinuations(
       started += 1;
       await startContinuation(deps, pending);
     } catch (error) {
-      console.error(`run ${runId} 换电脑后的接续没起来：${errorKind(error)}`);
+      log.error("换电脑后的接续没起来", { runId, err: concealed(error) });
     }
   }
   return started;
@@ -332,7 +332,7 @@ export async function resumeQueuedHandoffs(
     try {
       await startQueuedHandoffs(deps, ownerId, groupId);
     } catch (error) {
-      console.error(`群 ${groupId} 排着的交接没派出去：${errorKind(error)}`);
+      log.error("排着的交接没派出去", { groupId, err: concealed(error) });
     }
   }
 }
@@ -379,7 +379,7 @@ async function breakChainOnError<T>(
     return await work();
   } catch (error) {
     await endChain(deps, ownerId, groupId, fromRunId, DISPATCH_FAILED_BREAK).catch((ended: unknown) =>
-      console.error(`run ${fromRunId} 接续没起来，收尾也出错：${errorKind(ended)}`),
+      log.error("接续没起来，收尾也出错", { runId: fromRunId, groupId, err: concealed(ended) }),
     );
     throw error;
   }
