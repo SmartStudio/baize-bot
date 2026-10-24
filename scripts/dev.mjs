@@ -108,7 +108,9 @@ for (const service of services) {
     continue;
   }
   const isAgent = service.pkg === "@baize/computer-agent";
-  const env = isAgent ? agentEnvOf(fileEnv) : { ...fileEnv, ...process.env };
+  const env = isAgent
+    ? agentEnvOf(fileEnv)
+    : { ...(service.pkg === "@baize/control-plane" ? { LOG_FORMAT: "pretty" } : {}), ...fileEnv, ...process.env };
   // 启动报文必须直接交给代理入口；代理的 dev 脚本也不热重载。
   const args = isAgent ? ["--filter", service.pkg, "exec", "tsx", "src/main.ts"] : ["--filter", service.pkg, "dev"];
   const child = spawn("pnpm", args, {

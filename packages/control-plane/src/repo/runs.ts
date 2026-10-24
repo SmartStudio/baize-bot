@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import { agentOutbox, bots, groups, runs } from "../db/schema.js";
 import { type Tx } from "./messages.js";
+import type { RunStateCounts } from "../http/ops-metrics.js";
 import { toUsageRecord } from "./rows.js";
 
 /**
@@ -288,4 +289,16 @@ export async function uniqueOpenRun(db: Db, computerId: ComputerId, groupId?: Gr
     groupId: GroupId.parse(row.groupId),
     botId: BotId.parse(row.botId),
   };
+}
+
+/** 给 /metrics 用，整表数一遍：runs 只增不减，抓取间隔别调得太密。 */
+export async function countRunsByState(db: Db): Promise<RunStateCounts> {
+  const [row] = await db
+    .select({
+      running: sql<number>`count(*) FILTER (WHERE ${runs.endedAt} IS NULL)::int`,
+      unsettled: sql<number>`count(*) FILTER (WHERE ${runs.endedAt} IS NOT NULL AND ${runs.chargedAt} IS NULL)::int`,
+      settled: sql<number>`count(*) FILTER (WHERE ${runs.chargedAt} IS NOT NULL)::int`,
+    })
+    .from(runs);
+  return row ?? { running: 0, unsettled: 0, settled: 0 };
 }

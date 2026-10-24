@@ -1,4 +1,5 @@
 import type { AgentToControl } from "@baize/shared";
+import { log } from "../../log.js";
 import { recordSample } from "../../repo/metrics.js";
 import { findGroupId } from "../../repo/messages.js";
 import { runBelongsTo, whileRunOpen } from "../../repo/runs.js";
@@ -21,7 +22,7 @@ export async function handleMetricReport(
   const { runId, botId, groupId } = event;
   if ((await findGroupId(deps.db, conn.ownerId, groupId)) === null) return;
   if (!(await runBelongsTo(deps.db, runId, botId, groupId, conn.computerId))) {
-    console.warn(`电脑 ${conn.computerId} 报的 run ${runId} 不是它在群 ${groupId} 里的活，整条丢掉`);
+    log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", { computerId: conn.computerId, runId, groupId });
     return;
   }
   const recorded = await whileRunOpen(deps.db, { runId, botId, groupId }, (tx) =>

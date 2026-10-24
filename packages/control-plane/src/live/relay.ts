@@ -14,6 +14,7 @@ import {
   type UserId,
 } from "@baize/shared";
 import type { RawData, WebSocket } from "ws";
+import { log } from "../log.js";
 import type { PushHub } from "../ws/hub.js";
 
 /** 中继认的电脑连接。AgentConnection 结构上就满足它，中继只按对象身份比较，不读别的字段。 */
@@ -245,7 +246,7 @@ export class LiveRelay {
       if (kind === "term" || kind === "resize") {
         if (viewer.admitTermBytes(bytes.length)) toAgent(entry.link, { t: "input", liveId, input: header.input });
         else {
-          console.warn(`电脑 ${entry.session.computerId} 的终端 ${liveId} 输入超过每秒 1MB，关掉这个观看者`);
+          log.warn("终端输入超过每秒 1MB，关掉这个观看者", { computerId: entry.session.computerId, liveId });
           this.#detach(entry.session.computerId, viewer, CLOSE_INPUT_FLOOD, "终端输入太快");
         }
       } else if (viewer.admitInput()) toAgent(entry.link, { t: "input", liveId, input: header.input });

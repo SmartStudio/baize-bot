@@ -1,4 +1,5 @@
 import type { AccountId, ComputerId } from "@baize/shared";
+import { log } from "../log.js";
 import type { AgentHub } from "../agent/hub.js";
 import type { AccountTokens } from "../credentials.js";
 import type { Db } from "../db/client.js";
@@ -70,7 +71,7 @@ export class PublishLoop {
       this.#options.push.push(reopened.ownerId, { type: "draft_updated", draft: reopened.draft });
     }
     const timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => console.error("发布循环出错", error));
+      void this.tick().catch((error: unknown) => log.error("发布循环出错", { err: error }));
     }, this.#options.intervalMs ?? PUBLISH_INTERVAL_MS);
     timer.unref();
     this.#timer = timer;
@@ -165,13 +166,13 @@ export class PublishLoop {
             continue;
           }
           if (!(error instanceof PublishError) || error.reason !== "login_expired") throw error;
-          console.warn(`草稿 ${draft.id} 没发出去`, error.message);
+          log.warn("草稿没发出去", { draftId: draft.id, err: error });
           await publishFailed(this.#deps, scope, "login_expired", { generation: token.generation });
           return;
         }
       }
     } catch (error) {
-      console.warn(`草稿 ${draft.id} 没发出去`, error instanceof PublishError ? error.message : error);
+      log.warn("草稿没发出去", { draftId: draft.id, err: error });
       await publishFailed(this.#deps, scope, error instanceof PublishError ? error.reason : "error");
     }
   }

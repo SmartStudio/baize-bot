@@ -86,6 +86,7 @@ import { botTextVisibility, isUplinkAllowed } from "./table-run-policy.js";
 import { handleRoutineOffer } from "./events/routine-offer.js";
 import { handleTeamOffer } from "./events/team-offer.js";
 import type { AgentHub, AgentConnection } from "./hub.js";
+import { concealed, log } from "../log.js";
 
 export type AgentEventDeps = {
   readonly db: Db;
@@ -220,12 +221,23 @@ async function resolveRun(
   if (groupId === null) return null;
   // 外键只保证 runId 存在，管不了它指到哪个群：不校的话一个被入侵的电脑代理能拿自己的 runId 往自己另一个群插卡。
   if (!(await runBelongsTo(deps.db, event.runId, event.botId, groupId, conn.computerId))) {
-    console.warn(`电脑 ${conn.computerId} 报的 run ${event.runId} 不是它在群 ${event.groupId} 里的活，整条丢掉`);
+    log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      type: event.type,
+    });
     return null;
   }
   const run = { runId: event.runId, botId: event.botId, groupId: GroupId.parse(groupId) };
   if (!(await isUplinkAllowed(deps.db, run, event.type))) {
-    console.warn(`电脑 ${conn.computerId} 的牌桌 run ${event.runId} 发了它不能发的 ${event.type}，整条丢掉`);
+    log.warn("电脑的牌桌 run 发了它不能发的报文，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: run.groupId,
+      botId: event.botId,
+      type: event.type,
+    });
     return null;
   }
   return run.groupId;
@@ -247,13 +259,15 @@ const LOGIN_FAILURE_NOTICE: Record<LoginFailure, (platform: string) => string> =
 async function onLoginState(deps: AgentEventDeps, conn: AgentConnection, event: LoginState): Promise<void> {
   const found = await findAccountOnComputer(deps.db, conn.ownerId, conn.computerId, event.accountId);
   if (found === null) {
-    console.warn(`电脑 ${conn.computerId} 报的账号 ${event.accountId} 不在它上面，整条丢掉`);
+    log.warn("电脑报的账号不在它上面，整条丢掉", { computerId: conn.computerId, accountId: event.accountId });
     return;
   }
   if (found.via !== "computer") {
-    console.warn(
-      `电脑 ${conn.computerId} 报了 ${found.platform} 账号 ${event.accountId} 的登录状态，这个账号是授权连上的，整条丢掉`,
-    );
+    log.warn("电脑报了授权连上的账号的登录状态，整条丢掉", {
+      computerId: conn.computerId,
+      accountId: event.accountId,
+      platform: found.platform,
+    });
     return;
   }
   // 三种写都带这条连接：落库那一刻连接已经被顶掉的话一行都不改，新连接刚写下的事实不会被在途的旧帧盖掉。
@@ -404,7 +418,7 @@ export async function abandonRun(
     try {
       await work();
     } catch (error) {
-      console.error(`run ${run.runId} 收尾后${name}出错：${errorKind(error)}`);
+      log.error(`run 收尾后${name}出错`, { runId: run.runId, groupId: run.groupId, err: concealed(error) });
     }
   };
   const publish = async (real: RoutineDeps) => {
@@ -461,7 +475,12 @@ async function onBotText(deps: AgentEventDeps, conn: AgentConnection, event: Bot
   // run 已经收尾：这条要么从没落过，要么收尾时已经收成定稿，晚到的这段不接上去，也不推。
   if (appended === null) return;
   if (appended.kind === "taken") {
-    console.warn(`电脑 ${conn.computerId} 报的消息编号 ${event.messageId} 已经被别的群占了，整条丢掉`);
+    log.warn("电脑报的消息编号已经被别的群占了，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId,
+      messageId: event.messageId,
+    });
     return;
   }
   if (appended.created !== null) deps.push.push(conn.ownerId, { type: "message", message: appended.created });
@@ -601,15 +620,15 @@ export async function settleUnchargedRuns(deps: RoutineDeps, computerId: Compute
     }
     // 一条结不成不挡后面的：各行的认领互不相干，账留在库里等下一次 hello。
     await settleCharge(deps, ownerId, run, () => ({ kind: "card", heldRuns: [] })).catch((error: unknown) =>
-      console.error(`电脑 ${computerId} 上线补结账 run ${run.runId} 失败：${errorKind(error)}`),
+      log.error("电脑上线补结账失败", {
+        computerId,
+        runId: run.runId,
+        groupId: run.groupId,
+        botId: run.botId,
+        err: concealed(error),
+      }),
     );
   }
-}
-
-/** 日志只记错误类别（name，pg 错误带 code）。异常原文可能夹着用户正文或凭据，不进日志。 */
-export function errorKind(error: unknown): string {
-  if (!(error instanceof Error)) return typeof error;
-  return "code" in error && typeof error.code === "string" ? `${error.name} ${error.code}` : error.name;
 }
 
 /**
@@ -653,7 +672,7 @@ async function settleCharge(
       charge !== null && charge.kind !== "held" ? charge.routine : await routineRunOfRun(deps.db, run.runId);
     if (routine !== null) await pushRoutineUpdated(deps, routine.routineId);
   } catch (error) {
-    console.error(`run ${run.runId} 结账后推送例行状态失败：${errorKind(error)}`);
+    log.error("run 结账后推送例行状态失败", { runId: run.runId, groupId: run.groupId, err: concealed(error) });
   }
   // 接续排在回合推进之前：推进会把排着的下一位派出去，接续得先插到它前面。信封里两者都等提交后按这个顺序跑。
   const resume = (real: RoutineDeps) => resumeContinuation(real, run.runId);
@@ -662,7 +681,7 @@ async function settleCharge(
   await deps.groupTurns.runDone(run.groupId, run.runId);
   const handoffs = (real: RoutineDeps) =>
     resumeQueuedHandoffs(real, { groupId: run.groupId }).catch((error: unknown) =>
-      console.error(`run ${run.runId} 结账后补派交接出错：${errorKind(error)}`),
+      log.error("run 结账后补派交接出错", { runId: run.runId, groupId: run.groupId, err: concealed(error) }),
     );
   if (deps.afterCommit === undefined) await handoffs(deps);
   else deps.afterCommit(handoffs);
@@ -844,7 +863,11 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
   if (event.code === "config_rejected") {
     // 不认这台电脑上的任何 config，派过去的活都会被它回成 prompt_before_config，先停派，再告诉用户为什么。
     if (!(await deps.agents.markConfigRejected(conn, event.generation))) return;
-    console.warn(`电脑 ${conn.computerId} 拒了第 ${event.generation ?? "?"} 代 config：${clipDetail(event.detail)}`);
+    log.warn("电脑拒了 config", {
+      computerId: conn.computerId,
+      generation: event.generation ?? null,
+      detail: clipDetail(event.detail),
+    });
     await deps.notifications.publish(conn.ownerId, {
       kind: "stuck",
       text: `电脑上的活派不出去：${CONFIG_MISMATCH}。把电脑代理和控制面升到同一个版本再连。`,
@@ -866,25 +889,33 @@ async function onAgentError(deps: AgentEventDeps, conn: AgentConnection, event: 
     const run = (await openRunsForComputer(deps.db, conn.computerId)).find((open) => open.runId === event.runId);
     if (run !== undefined) await abandonRun(deps, conn.ownerId, run, { text, reason });
     else
-      console.error(
-        `电脑 ${conn.computerId} 报错带的 run ${event.runId} 不是它还开着的活，不收尾：${event.code} ${clipDetail(event.detail)}`,
-      );
+      log.error("电脑报错带的 run 不是它还开着的活，不收尾", {
+        computerId: conn.computerId,
+        runId: event.runId,
+        code: event.code,
+        detail: clipDetail(event.detail),
+      });
     return;
   }
   // 运行器也会发不属于某次 run 的错误。群号明确时只查该群，不带群号时必须能唯一确定进行中的活。
   const named = event.groupId === undefined ? null : await findGroupId(deps.db, conn.ownerId, event.groupId);
   if (event.groupId !== undefined && named === null) {
-    console.warn(
-      `电脑 ${conn.computerId} 报错指定的群已不存在或不属于归属人，不落群：${event.code} ${clipDetail(event.detail)}`,
-    );
+    log.warn("电脑报错指定的群已不存在或不属于归属人，不落群", {
+      computerId: conn.computerId,
+      groupId: event.groupId,
+      code: event.code,
+      detail: clipDetail(event.detail),
+    });
     return;
   }
   const open = await uniqueOpenRun(deps.db, conn.computerId, event.groupId);
   const groupId = named ?? open?.groupId ?? null;
   if (groupId === null) {
-    console.warn(
-      `电脑 ${conn.computerId} 报错没带群号，也确定不了唯一一个还开着的活，不落群：${event.code} ${clipDetail(event.detail)}`,
-    );
+    log.warn("电脑报错没带群号，也确定不了唯一一个还开着的活，不落群", {
+      computerId: conn.computerId,
+      code: event.code,
+      detail: clipDetail(event.detail),
+    });
     return;
   }
   await appendAndPush(deps, conn.ownerId, groupId, { kind: "system", tone: "error", text });
@@ -977,7 +1008,13 @@ async function onTaskChecklist(deps: AgentEventDeps, conn: AgentConnection, even
   const memberIds = new Set<string>(members.map((member) => member.id));
   const stranger = event.checklist.find((item) => item.ownerBotId !== null && !memberIds.has(item.ownerBotId));
   if (stranger !== undefined) {
-    console.warn(`电脑 ${conn.computerId} 报的清单里 ${stranger.ownerBotId} 不是群 ${event.groupId} 的成员，整条丢掉`);
+    log.warn("电脑报的清单里有不是群成员的 Bot，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+      ownerBotId: stranger.ownerBotId,
+    });
     return;
   }
 
@@ -1000,7 +1037,13 @@ async function onMention(deps: AgentEventDeps, conn: AgentConnection, event: Men
   const members = await listGroupBots(deps.db, groupId);
   const known = members.some((member) => member.id === event.targetBotId);
   if (!known || event.targetBotId === event.botId) {
-    console.warn(`电脑 ${conn.computerId} 报的 @ 目标 ${event.targetBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
+    log.warn("电脑报的 @ 目标不是群里的别人，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+      targetBotId: event.targetBotId,
+    });
     return;
   }
 
@@ -1058,14 +1101,25 @@ async function onHandoff(deps: AgentEventDeps, conn: AgentConnection, event: Han
 
   const task = await findTaskByGroup(deps.db, groupId);
   if (task === null || task.currentBotId !== event.botId) {
-    console.warn(`电脑 ${conn.computerId} 报的交接来自 ${event.botId}，它不是群 ${event.groupId} 的当前经手，整条丢掉`);
+    log.warn("电脑报的交接来自不是当前经手的 Bot，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+    });
     return;
   }
 
   const members = await listGroupBots(deps.db, groupId);
   const known = members.some((member) => member.id === event.toBotId);
   if (!known || event.toBotId === event.botId) {
-    console.warn(`电脑 ${conn.computerId} 报的交接目标 ${event.toBotId} 不是群 ${event.groupId} 里的别人，整条丢掉`);
+    log.warn("电脑报的交接目标不是群里的别人，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+      toBotId: event.toBotId,
+    });
     return;
   }
 
@@ -1151,9 +1205,12 @@ async function onSetCadence(deps: AgentEventDeps, conn: AgentConnection, event: 
   if (set === null) return;
   const { task } = set;
   if (task === null) {
-    console.warn(
-      `电脑 ${conn.computerId} 报的节奏改动指向 ${event.projectGroupId}，它不是这个用户的项目群或 ${event.botId} 不是主助理，整条丢掉`,
-    );
+    log.warn("电脑报的节奏改动指向的不是这个用户的项目群，或者报的 Bot 不是主助理，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      botId: event.botId,
+      projectGroupId: event.projectGroupId,
+    });
     return;
   }
   deps.push.push(conn.ownerId, { type: "task_updated", task });
@@ -1168,7 +1225,12 @@ async function onProjectOffer(deps: AgentEventDeps, conn: AgentConnection, event
   if (groupId === null) return;
   const assistant = await findAssistant(deps.db, conn.ownerId);
   if (assistant === null || assistant.bot.id !== event.botId || assistant.groupId !== groupId) {
-    console.warn(`电脑 ${conn.computerId} 报的方案卡来自 ${event.botId}，不是主助理在它单聊里发的，整条丢掉`);
+    log.warn("电脑报的方案卡不是主助理在它单聊里发的，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+    });
     return;
   }
   const { name, goal, team, platforms, cadence, firstStep, goalTarget, goalUnit } = event;
@@ -1212,9 +1274,13 @@ async function onHandoffAccept(deps: AgentEventDeps, conn: AgentConnection, even
   if (result === null) return;
   const { accepted, task } = result;
   if (accepted === null) {
-    console.warn(
-      `电脑 ${conn.computerId} 报的确认 ${event.handoffId} 不是群 ${event.groupId} 里等 ${event.botId} 接手的交接，整条丢掉`,
-    );
+    log.warn("电脑报的确认不是群里等这个 Bot 接手的交接，整条丢掉", {
+      computerId: conn.computerId,
+      runId: event.runId,
+      groupId: event.groupId,
+      botId: event.botId,
+      handoffId: event.handoffId,
+    });
     return;
   }
   deps.push.push(conn.ownerId, { type: "handoff_updated", handoff: accepted });

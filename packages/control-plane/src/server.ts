@@ -5,7 +5,6 @@ import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
-import { errorKind } from "./agent/events.js";
 import { AGENT_PATH, AgentHub } from "./agent/hub.js";
 import { GroupTurns } from "./agent/group-turn.js";
 import { ToolCrypto } from "./crypto.js";
@@ -23,6 +22,10 @@ import {
   type RuntimeConfig,
 } from "./env.js";
 import { createApp } from "./http/app.js";
+import { StatusCounts } from "./http/ops-metrics.js";
+import { concealed, log, redactInLog } from "./log.js";
+import { countRunsByState } from "./repo/runs.js";
+import { countPendingContinuations } from "./agent/continuation.js";
 import { DEFAULT_GATEWAY_LIMITS } from "./http/gateway-limits.js";
 import { acceptLiveViewer, LIVE_PATH } from "./live/accept.js";
 import { LiveRelay, type LiveRelayDeps } from "./live/relay.js";
@@ -110,6 +113,7 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
   githubApiBaseUrl: DEFAULT_GITHUB_API_BASE_URL,
   xApiBaseUrl: DEFAULT_X_API_BASE_URL,
   webBaseUrl: null,
+  metricsToken: null,
   oauth: {
     github: null,
     x: null,
@@ -120,8 +124,11 @@ export const DEFAULT_RUNTIME_CONFIG: RuntimeConfig = {
 
 export async function startServer(options: StartOptions): Promise<RunningServer> {
   const config = options.config ?? DEFAULT_RUNTIME_CONFIG;
-  const toolCrypto = new ToolCrypto(options.toolSecretKey ?? toolSecretKey());
-  const credentialCrypto = new CredentialCrypto(options.credentialsKey ?? credentialsKey());
+  const toolKey = options.toolSecretKey ?? toolSecretKey();
+  const credentialKey = options.credentialsKey ?? credentialsKey();
+  for (const secret of [config.upstreamApiKey, config.metricsToken ?? ""]) redactInLog(secret);
+  const toolCrypto = new ToolCrypto(toolKey);
+  const credentialCrypto = new CredentialCrypto(credentialKey);
   const hub = new PushHub();
   const notifications = new Notifications(options.db, hub, options.notificationScheduler);
   const groupTurns = new GroupTurns(options.db, hub);
@@ -149,9 +156,15 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     hub.push(account.ownerId, { type: "account_updated", account });
     // 新令牌已经落库，这一趟请求用它照常走；重发 config 出错只影响电脑那边晚点知道，不能把请求变成 502。
     await agents.sendConfig(account.ownerId).catch((error: unknown) => {
-      console.error(`账号 ${account.id} 刷新后重发 config 出错`, error);
+      log.error("账号刷新后重发 config 出错", { accountId: account.id, err: error });
     });
   });
+
+  const clients = new WebSocketServer({ noServer: true, maxPayload: PUSH_MAX_PAYLOAD });
+  const agentSockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_FRAME_MAX_BYTES });
+  // 网页往上只发输入、结束和看密码，最大的是 2000 字的整段上屏，64KB 绰绰有余。
+  const viewers = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const gatewayResponses = new StatusCounts();
 
   const app = createApp({
     db: options.db,
@@ -169,6 +182,17 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
       upstreamBaseUrl: config.upstreamBaseUrl,
       upstreamApiKey: config.upstreamApiKey,
       limits: config.gatewayLimits,
+      responses: gatewayResponses,
+    },
+    opsMetrics: {
+      token: config.metricsToken,
+      read: async () => ({
+        computersOnline: agents.onlineComputerIds().length,
+        runs: await countRunsByState(options.db),
+        gatewayResponses: gatewayResponses.snapshot(),
+        continuationBacklog: await countPendingContinuations(options.db),
+        websockets: { agent: agentSockets.clients.size, push: clients.clients.size, live: viewers.clients.size },
+      }),
     },
     platformAccounts: {
       crypto: credentialCrypto,
@@ -185,11 +209,6 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     port: options.port,
     ...(options.hostname === undefined ? {} : { hostname: options.hostname }),
   });
-  const clients = new WebSocketServer({ noServer: true, maxPayload: PUSH_MAX_PAYLOAD });
-  const agentSockets = new WebSocketServer({ noServer: true, maxPayload: AGENT_FRAME_MAX_BYTES });
-  // 网页往上只发输入、结束和看密码，最大的是 2000 字的整段上屏，64KB 绰绰有余。
-  const viewers = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
-
   server.on("upgrade", (request, socket, head) => {
     const path = new URL(request.url ?? "/", "http://localhost").pathname;
     // http 模块在 emit upgrade 时已摘掉自己的 error 监听，认身份这段时间断连会变成未捕获异常。
@@ -243,7 +262,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
   await sweepContinuations();
   const continuationSweep = setInterval(() => {
     if (sweeping !== null) return;
-    void sweepContinuations().catch((error: unknown) => console.error(`补扫欠着的接续出错：${errorKind(error)}`));
+    void sweepContinuations().catch((error: unknown) => log.error("补扫欠着的接续出错", { err: concealed(error) }));
   }, CONTINUATION_SWEEP_INTERVAL_MS);
   continuationSweep.unref();
 
@@ -274,21 +293,25 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
 
   const reminders = setInterval(() => {
     const now = new Date();
-    void remindStaleApprovals(options.db, hub, now).catch((error: unknown) => console.error("扫超时审批出错", error));
-    void remindStaleHandoffs(options.db, hub, now).catch((error: unknown) => console.error("扫超时交接出错", error));
+    void remindStaleApprovals(options.db, hub, now).catch((error: unknown) =>
+      log.error("扫超时审批出错", { err: error }),
+    );
+    void remindStaleHandoffs(options.db, hub, now).catch((error: unknown) =>
+      log.error("扫超时交接出错", { err: error }),
+    );
   }, REMIND_INTERVAL_MS);
   reminders.unref();
 
   const scanApprovalTimeouts = (now: Date): Promise<number> =>
     settleApprovalTimeouts({ db: options.db, push: hub, agents, notifications }, now);
   const approvalTimeouts = setInterval(() => {
-    void scanApprovalTimeouts(new Date()).catch((error: unknown) => console.error("扫到期审批出错", error));
+    void scanApprovalTimeouts(new Date()).catch((error: unknown) => log.error("扫到期审批出错", { err: error }));
   }, options.approvalTimeoutIntervalMs ?? 15_000);
   approvalTimeouts.unref();
 
   const sweepExpiredSessions = (now: Date): Promise<number> => deleteExpiredSessions(options.db, now);
   const sessionSweep = setInterval(() => {
-    void sweepExpiredSessions(new Date()).catch((error: unknown) => console.error("清理过期会话出错", error));
+    void sweepExpiredSessions(new Date()).catch((error: unknown) => log.error("清理过期会话出错", { err: error }));
   }, SESSION_SWEEP_INTERVAL_MS);
   sessionSweep.unref();
 
@@ -357,7 +380,9 @@ function acceptClient(
         ws.on("error", () => ws.close());
         hub.add(user.id, ws);
         for (const snapshot of groupTurns.snapshots(user.id)) ws.send(JSON.stringify(snapshot));
-        void notifications.connected(user.id).catch((error: unknown) => console.error("补发免打扰汇总出错", error));
+        void notifications
+          .connected(user.id)
+          .catch((error: unknown) => log.error("补发免打扰汇总出错", { userId: user.id, err: error }));
       });
     })
     .catch(() => socket.destroy());

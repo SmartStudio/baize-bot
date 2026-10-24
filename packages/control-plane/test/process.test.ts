@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
+import { CreateBotResponse } from "@baize/shared";
 import { eq } from "drizzle-orm";
 import postgres from "postgres";
 import { afterEach, expect, it, vi } from "vitest";
@@ -19,6 +20,7 @@ const LISTENING = /控制面在 http:\/\/localhost:(\d+)/;
 type ControlPlane = {
   readonly process: ChildProcessByStdio<null, Readable, Readable>;
   output(): string;
+  printed(text: string): Promise<void>;
   listening(): Promise<number>;
   exited(timeoutMs?: number): Promise<number | NodeJS.Signals>;
 };
@@ -42,7 +44,7 @@ async function testDatabase(): Promise<{ database: TestDb; url: string }> {
   return { database, url: url.toString() };
 }
 
-function startControlPlane(url: string): ControlPlane {
+function startControlPlane(url: string, env: Readonly<Record<string, string>> = {}): ControlPlane {
   const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     env: {
       PATH: process.env["PATH"] ?? "",
@@ -50,6 +52,7 @@ function startControlPlane(url: string): ControlPlane {
       PORT: "0",
       TOOL_SECRET_KEY: "a".repeat(64),
       CREDENTIALS_KEY: TEST_CREDENTIALS_KEY,
+      ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -67,6 +70,14 @@ function startControlPlane(url: string): ControlPlane {
   const controlPlane: ControlPlane = {
     process: child,
     output: () => output,
+    printed: (text) =>
+      new Promise<void>((resolve) => {
+        const check = (): void => {
+          if (output.includes(text)) resolve();
+        };
+        listeners.push(check);
+        check();
+      }),
     listening: () =>
       Promise.race([
         new Promise<number>((resolve) => {
@@ -249,4 +260,63 @@ it("库地址里带 idle_timeout：持锁连接空闲过了那个时长也不被
   } finally {
     await admin.end();
   }
+});
+
+it("不设 LOG_FORMAT：每行一条 JSON，单聊里交上来的复盘被丢掉，那行带 runId、computerId、botId 和群号", async () => {
+  const { database, url } = await testDatabase();
+  const user = await makeUser(database.db);
+  const computer = await makeComputer(database.db, user.id);
+  const controlPlane = startControlPlane(url);
+  const port = await controlPlane.listening();
+  const client = new ApiClient(port);
+  expect((await client.login(user.email, PASSWORD)).status).toBe(200);
+  const created = CreateBotResponse.parse(await (await client.post("/api/bots", { name: "小复" })).json());
+  const { agent } = await helloAgent(port, computer.computerId, computer.token);
+  expect((await client.post(`/api/groups/${created.group.id}/messages`, { text: "开工" })).status).toBe(201);
+  const prompt = await agent.expect("prompt");
+
+  const body = "这周的复盘正文不该进日志";
+  agent.send({ type: "review_submit", runId: prompt.runId, botId: prompt.botId, groupId: prompt.groupId, body });
+  await controlPlane.printed(prompt.runId);
+  agent.close();
+
+  const lines = controlPlane
+    .output()
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  for (const line of lines) {
+    expect(typeof line["time"] === "string" && !Number.isNaN(Date.parse(line["time"])), "time 是 ISO 时间").toBe(true);
+    expect(["info", "warn", "error"]).toContain(line["level"]);
+    expect(typeof line["msg"]).toBe("string");
+  }
+  expect(lines.find((line) => line["runId"] === prompt.runId)).toEqual({
+    time: expect.any(String),
+    level: "warn",
+    msg: "电脑报的复盘来自单聊，单聊没有项目页，整条丢掉",
+    computerId: computer.computerId,
+    runId: prompt.runId,
+    groupId: created.group.id,
+    botId: created.bot.id,
+  });
+  expect(controlPlane.output()).not.toContain(body);
+});
+
+it("LOG_FORMAT=pretty：输出人读的一行，不是 JSON", async () => {
+  const { url } = await testDatabase();
+  const controlPlane = startControlPlane(url, { LOG_FORMAT: "pretty" });
+  const port = await controlPlane.listening();
+
+  expect(controlPlane.output()).toMatch(
+    new RegExp(`^\\d{2}:\\d{2}:\\d{2}\\.\\d{3} INFO  控制面在 http://localhost:${port}$`, "mu"),
+  );
+  expect(() => JSON.parse(controlPlane.output().split("\n")[0] ?? "")).toThrow();
+});
+
+it("LOG_FORMAT 写了别的值：说清楚只认哪两个，以 1 退出", async () => {
+  const { url } = await testDatabase();
+  const controlPlane = startControlPlane(url, { LOG_FORMAT: "xml" });
+
+  expect(await controlPlane.exited()).toBe(1);
+  expect(controlPlane.output()).toContain("LOG_FORMAT 只能是 json 或 pretty: xml");
 });

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { OAuthPlatform } from "@baize/shared";
+import { log } from "./log.js";
 import type { OAuthConfig } from "./env.js";
 
 /** 授权、换令牌、刷新、「我是谁」和账号代理要的全部地址和客户端。 */
@@ -198,7 +199,7 @@ export async function requestToken(
   const accessToken = at(json, "access_token");
   if (typeof accessToken !== "string" || accessToken === "") throw new Error("令牌端点的回应里没有 access_token");
   if (unsafeAccessToken(accessToken)) {
-    console.error(`${platform} 令牌端点发来的访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收`);
+    log.error("令牌端点发来的访问令牌含反斜杠、百分号、控制字符或非 ASCII 字符，不收", { platform });
     // 授权码和刷新令牌都只能用一次，平台发出这把令牌时已经把它们用掉了，再试也换不到，只能让用户重新授权。
     return { kind: "rejected" };
   }
@@ -252,7 +253,7 @@ const DEAD_REFRESH_TOKEN: Record<OAuthPlatform, (refusal: RefreshRefusal) => boo
 function refreshRefused(platform: OAuthPlatform, refusal: RefreshRefusal): TokenOutcome {
   if (refusal.status < 500 && DEAD_REFRESH_TOKEN[platform](refusal)) return { kind: "rejected" };
   const what = `令牌端点回 ${refusal.status}，错误码 ${refusal.code ?? "无"}`;
-  console.error(`${platform} 刷新令牌没换到，${what}`);
+  log.error(`刷新令牌没换到，${what}`, { platform });
   throw new Error(`${platform} ${what}`);
 }
 

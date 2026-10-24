@@ -12,6 +12,7 @@ import {
   runtimeConfig,
   trustedProxyHops,
 } from "../src/env.js";
+import { logLines } from "./helpers/log.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -46,7 +47,12 @@ it("GATEWAY_MODELS 和旧变量同时设置时告警并优先使用新变量", (
   const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 
   expect(runtimeConfig().gatewayModels).toEqual({ plan: "gpt-plan", fast: "gpt-fast" });
-  expect(warning).toHaveBeenCalledWith("GATEWAY_MODELS 和 GATEWAY_MODEL 同时设置，优先使用 GATEWAY_MODELS");
+  expect(logLines(warning)).toEqual([
+    expect.objectContaining({
+      level: "warn",
+      msg: "GATEWAY_MODELS 和 GATEWAY_MODEL 同时设置，优先使用 GATEWAY_MODELS",
+    }),
+  ]);
 });
 
 it("GATEWAY_MODELS 只有空白时回退到 trim 后的旧变量", () => {

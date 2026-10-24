@@ -175,6 +175,7 @@ import {
   retryAfterSeconds,
 } from "./auth-limits.js";
 import { GATEWAY_PATH, createGateway, type GatewayDeps } from "./gateway.js";
+import { createOpsMetrics, type OpsMetricsDeps } from "./ops-metrics.js";
 import { HUB_PATH, createHub } from "./hub.js";
 import { MCP_PROXY_PATH, createMcpProxy } from "./mcp-proxy.js";
 import { McpClients } from "../mcp/call.js";
@@ -192,6 +193,7 @@ import { createRoutineOfferRoutes } from "./routes/routine-offers.js";
 import { createSeenRoutes } from "./routes/seen.js";
 import { createTemplateRoutes } from "./routes/templates.js";
 import { createTeamOfferRoutes } from "./routes/team-offers.js";
+import { log } from "../log.js";
 
 export type AppDeps = {
   readonly db: Db;
@@ -205,6 +207,7 @@ export type AppDeps = {
   readonly trustedProxyHops: number;
   readonly pokerSeed?: () => string;
   readonly gateway: Omit<GatewayDeps, "db">;
+  readonly opsMetrics: OpsMetricsDeps;
   readonly platformAccounts: {
     readonly crypto: CredentialCrypto;
     readonly tokens: AccountTokens;
@@ -245,6 +248,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
     }
   };
 
+  app.route("/", createOpsMetrics(deps.opsMetrics));
   app.route(GATEWAY_PATH, createGateway({ db, ...deps.gateway }));
   app.route(HUB_PATH, createHub({ db, agents, push: hub }));
   app.route(MCP_PROXY_PATH, createMcpProxy({ db, crypto: deps.toolCrypto, clients: mcpClients }));
@@ -1140,7 +1144,7 @@ export function createApp(deps: AppDeps): Hono<Env> & { closeMcpClients(): Promi
 
   app.notFound((c) => c.json(NOT_FOUND, 404));
   app.onError((err, c) => {
-    console.error(err);
+    log.error("请求处理出错", { method: c.req.method, path: c.req.path, err });
     return c.json({ error: "服务端出错" }, 500);
   });
 

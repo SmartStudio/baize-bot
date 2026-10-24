@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
-import { errorKind } from "../agent/events.js";
 import { pokerHands } from "../db/schema.js";
+import { concealed, log } from "../log.js";
 import { abandonHand, configurePoker, converge, type PokerDeps, type PokerOptions } from "./converge.js";
 
 export type PokerSweeperOptions = PokerOptions & { readonly intervalMs?: number };
@@ -28,7 +28,7 @@ export class PokerSweeper {
   }
   start(): void {
     this.#timer = setInterval(() => {
-      void this.tick().catch((error: unknown) => console.error("扫描牌桌失败", errorKind(error)));
+      void this.tick().catch((error: unknown) => log.error("扫描牌桌失败", { err: concealed(error) }));
     }, this.options.intervalMs ?? 1000);
     this.#timer.unref();
   }
@@ -60,17 +60,21 @@ export class PokerSweeper {
         this.#failures.set(hand.id, failures);
         const retry = failures % SWEEP_FAILURE_LIMIT === 0;
         if (failures <= SWEEP_FAILURE_LIMIT || retry)
-          console.error("扫描牌桌手失败", hand.id, `${failures}/${SWEEP_FAILURE_LIMIT}`, errorKind(error));
+          log.error("扫描牌桌手失败", {
+            handId: hand.id,
+            failures: `${failures}/${SWEEP_FAILURE_LIMIT}`,
+            err: concealed(error),
+          });
         if (retry) await this.#abandon(hand.id);
       }
     }
   }
   async #abandon(handId: string): Promise<void> {
     try {
-      if (await abandonHand(this.deps, handId)) console.error("牌桌手连续推进失败，已作废", handId);
+      if (await abandonHand(this.deps, handId)) log.error("牌桌手连续推进失败，已作废", { handId });
       this.#failures.delete(handId);
     } catch (error) {
-      console.error("作废牌桌手失败", handId, errorKind(error));
+      log.error("作废牌桌手失败", { handId, err: concealed(error) });
     }
   }
   async stop(): Promise<void> {

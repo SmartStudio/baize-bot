@@ -1,4 +1,5 @@
 import type { AgentToControl } from "@baize/shared";
+import { log } from "../../log.js";
 import { findSoloBotId } from "../../repo/groups.js";
 import { findGroupId } from "../../repo/messages.js";
 import { saveReview } from "../../repo/project-page.js";
@@ -23,15 +24,15 @@ export async function handleReviewSubmit(
   const { runId, botId, groupId } = event;
   if ((await findGroupId(deps.db, conn.ownerId, groupId)) === null) return;
   if ((await findSoloBotId(deps.db, groupId)) !== null) {
-    console.warn(`电脑 ${conn.computerId} 报的复盘来自单聊 ${groupId}，单聊没有项目页，整条丢掉`);
+    log.warn("电脑报的复盘来自单聊，单聊没有项目页，整条丢掉", { computerId: conn.computerId, runId, groupId, botId });
     return;
   }
   if (!(await runBelongsTo(deps.db, runId, botId, groupId, conn.computerId))) {
-    console.warn(`电脑 ${conn.computerId} 报的 run ${runId} 不是它在群 ${groupId} 里的活，整条丢掉`);
+    log.warn("电脑报的 run 不是它在这个群里的活，整条丢掉", { computerId: conn.computerId, runId, groupId });
     return;
   }
   if ((await routineRunOfRun(deps.db, runId)) === null) {
-    console.warn(`电脑 ${conn.computerId} 报的复盘出自 run ${runId}，不是例行派的活，整条丢掉`);
+    log.warn("电脑报的复盘不是例行派的活，整条丢掉", { computerId: conn.computerId, runId, groupId, botId });
     return;
   }
 

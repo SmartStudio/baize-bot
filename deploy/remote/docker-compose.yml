@@ -76,6 +76,10 @@ services:
       X_API_BASE_URL: ${X_API_BASE_URL:-https://api.x.com}
       GITHUB_OAUTH_BASE_URL: ${GITHUB_OAUTH_BASE_URL:-https://github.com}
       X_OAUTH_BASE_URL: ${X_OAUTH_BASE_URL:-https://x.com}
+      # 每行一条 JSON，docker logs 直接喂给 Loki。
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      # 设了才开 /metrics，Prometheus 带 Bearer 它来抓。不设那条路由回 404。
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
     # 只绑本机回环，对外由宿主机上的反向代理终结 TLS 再转进来。docker 发布到 0.0.0.0 的端口会绕过 ufw。
     ports:
       - "127.0.0.1:${CONTROL_PLANE_PORT:-3201}:3001"

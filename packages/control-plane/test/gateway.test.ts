@@ -9,6 +9,7 @@ import { createTestDb, type TestDb } from "./helpers/db.js";
 import { makeComputer, makeUser, PASSWORD } from "./helpers/fixtures.js";
 import { helloAgent } from "./helpers/agent.js";
 import { scriptedUpstream, type ChatCompletionRequest, type Upstream } from "./helpers/openai-sse.js";
+import { scrapeMetrics } from "./helpers/metrics.js";
 import { deadUpstreamUrl, startUpstream, type FakeUpstream } from "./helpers/upstream.js";
 
 const GATEWAY_MODEL = "gpt-plan-real";
@@ -40,6 +41,7 @@ type GatewayRigOptions = {
   upstreamBaseUrl?: string;
   gatewayModels?: { plan: string; fast: string };
   gatewayLimits?: Partial<GatewayLimits>;
+  metricsToken?: string;
 };
 
 async function rig(options: GatewayRigOptions = {}): Promise<Rig> {
@@ -51,6 +53,7 @@ async function rig(options: GatewayRigOptions = {}): Promise<Rig> {
     upstreamApiKey: UPSTREAM_API_KEY,
     upstreamBaseUrl: options.upstream?.baseUrl ?? options.upstreamBaseUrl ?? "http://127.0.0.1:1/v1",
     gatewayLimits: { ...DEFAULT_GATEWAY_LIMITS, ...options.gatewayLimits },
+    metricsToken: options.metricsToken ?? null,
   });
   cleanups.push(() => server.close());
   const seated = await seatComputer(server, database);
@@ -690,5 +693,66 @@ describe("限速", () => {
 
     expect((await r.call("/chat/completions", authed("made-up-key", chatBody()))).status).toBe(401);
     expect((await r.call("/chat/completions", authed(r.key, chatBody()))).status).toBe(200);
+  });
+});
+
+describe("运维", () => {
+  it("网关回给电脑的 504 和 429 按状态码记进 /metrics", async () => {
+    const upstream = await startSilentUpstream();
+    cleanups.push(() => upstream.close());
+    const r = await rig({
+      upstreamBaseUrl: upstream.baseUrl,
+      gatewayLimits: { firstByteTimeoutMs: 200, burst: 1, requestsPerMinute: 1 },
+      metricsToken: "metrics-token-for-tests",
+    });
+
+    expect((await r.call("/chat/completions", authed(r.key, chatBody()))).status).toBe(504);
+    expect((await r.call("/chat/completions", authed(r.key, chatBody()))).status).toBe(429);
+    expect((await r.call("/chat/completions", authed("made-up-key", chatBody()))).status).toBe(401);
+
+    const samples = await scrapeMetrics(r.server.server.port, "metrics-token-for-tests");
+    expect([...samples].filter(([name]) => name.startsWith("baize_gateway_responses_total"))).toEqual([
+      ['baize_gateway_responses_total{code="401"}', 1],
+      ['baize_gateway_responses_total{code="429"}', 1],
+      ['baize_gateway_responses_total{code="504"}', 1],
+    ]);
+  });
+
+  it("上游失败时把收到的 Authorization 原样回显，控制面日志里既没有网关 key 也没有上游 key", async () => {
+    const echoing = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        const authorization = req.headers.authorization ?? "";
+        res.writeHead(401, { "content-type": "text/plain" });
+        res.end(`bad credentials: ${authorization} (key ${authorization.replace(/^Bearer /u, "")})`);
+      });
+    });
+    await new Promise<void>((resolve) => echoing.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise<void>((resolve) => echoing.close(() => resolve())));
+    const r = await rig({ upstreamBaseUrl: `http://127.0.0.1:${(echoing.address() as AddressInfo).port}/v1` });
+    const logged: string[] = [];
+    for (const method of ["log", "info", "warn", "error"] as const) {
+      vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      });
+    }
+    cleanups.push(async () => {
+      vi.restoreAllMocks();
+    });
+
+    const response = await r.call("/chat/completions", authed(r.key, chatBody()));
+
+    expect(response.status).toBe(401);
+    const line = logged
+      .map((entry) => JSON.parse(entry) as Record<string, unknown>)
+      .find((entry) => entry["msg"] === "模型上游返回错误");
+    expect(line, "上游报错照样记了一行").toMatchObject({
+      level: "error",
+      computerId: r.computerId,
+      status: 401,
+      body: "bad credentials: Bearer [已隐去] (key [已隐去])",
+    });
+    expect(logged.join("\n"), "网关 key").not.toContain(r.key);
+    expect(logged.join("\n"), "上游 key").not.toContain(UPSTREAM_API_KEY);
   });
 });

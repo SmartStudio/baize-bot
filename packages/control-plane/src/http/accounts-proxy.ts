@@ -1,5 +1,6 @@
 import { AccountId, OAuthPlatform } from "@baize/shared";
 import { Hono } from "hono";
+import { log } from "../log.js";
 import { expireLogin } from "../account-expiry.js";
 import type { AccessToken, AccountTokens } from "../credentials.js";
 import { apiBaseUrl, apiHeaders, type OAuthEndpoints } from "../oauth-providers.js";
@@ -64,7 +65,7 @@ export function createAccountsProxy(deps: AccountsProxyDeps): Hono {
       try {
         token = await deps.tokens.accessToken(account.id, rejected);
       } catch (error) {
-        console.error(`账号 ${account.id} 取令牌出错`, error);
+        log.error("账号取令牌出错", { accountId: account.id, err: error });
         return c.json({ error: "连不上平台换令牌，稍后再试" }, 502);
       }
       if (token.kind === "login_expired") {
@@ -145,7 +146,9 @@ export async function readCapped(response: Response, max: number): Promise<Cappe
       total += value.length;
       if (total > max) {
         // 上限前的正文已经读齐了，cancel 只是告诉平台不用再发。它出错就记一笔，截断的正文照样交出去。
-        await reader.cancel().catch((error: unknown) => console.error("账号代理读到上限后取消平台回包出错", error));
+        await reader
+          .cancel()
+          .catch((error: unknown) => log.error("账号代理读到上限后取消平台回包出错", { err: error }));
         const all = Buffer.concat(chunks);
         return { truncated: true, bytes: all.subarray(0, max), beyond: all.subarray(max) };
       }

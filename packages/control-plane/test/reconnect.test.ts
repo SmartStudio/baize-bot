@@ -14,6 +14,7 @@ import * as skillsRepo from "../src/repo/skills.js";
 import { ApiClient, TEST_CREDENTIALS_KEY } from "./helpers/client.js";
 import { createTestDb, type TestDb } from "./helpers/db.js";
 import { PASSWORD, makeComputer, makeUser, waitFor } from "./helpers/fixtures.js";
+import { logLine } from "./helpers/log.js";
 import { helloAgent, openAgent, type AgentClient } from "./helpers/agent.js";
 import { queueHello } from "./helpers/queued-hello.js";
 import { connectPush, type PushClient } from "./helpers/ws.js";
@@ -241,8 +242,14 @@ it("agent_error 带的 runId 不是这台电脑的活，不收尾别人的 run",
     expect(logged.join("\n"), "日志不带电脑令牌").not.toContain(other.computer.token);
     expect(logged.join("\n"), "日志不带别台电脑的令牌").not.toContain(victim.computer.token);
     expect(logged.join("\n"), "日志不带电脑名").not.toContain(privateName);
-    expect(logged).toEqual([
-      `电脑 ${other.computer.computerId} 上行 ${probeSeq} 的 publish_result 被拒收 invalid，出错的字段：body.draftId、body.attempt、body.result`,
+    expect(logged.map((line) => logLine(line))).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        msg: "上行 publish_result 被拒收 invalid",
+        computerId: other.computer.computerId,
+        seq: probeSeq,
+        fields: "body.draftId、body.attempt、body.result",
+      }),
     ]);
   } finally {
     warnings.mockRestore();
