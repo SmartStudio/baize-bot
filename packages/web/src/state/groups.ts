@@ -1,6 +1,15 @@
 import type { BotId, Group, GroupId, GroupListItem, Message, MessageId, TopicTask } from "@baize/shared";
-import { newer, shelfLoad, shelfRow, shelfWrite, type Seq } from "./stamped.js";
-import type { Action, Conversation, Delta, MessageGap, PendingCounts, ReadyState, TeamOfferOutcome } from "./types.js";
+import { newer, shelfLoad, shelfPrepend, shelfRow, shelfWrite, type Seq } from "./stamped.js";
+import type {
+  Action,
+  Conversation,
+  Delta,
+  MessageEdge,
+  MessageGap,
+  PendingCounts,
+  ReadyState,
+  TeamOfferOutcome,
+} from "./types.js";
 
 // 消息那一架按 revision 取号，不按客户端收到的先后：同一条消息经推送、历史几条路到，谁先到都只认服务端写得更晚的那份。
 // 加一是因为新建的消息 revision 为 0，而没见过的条目号按 0 算，要严格更大才写得进。
@@ -84,6 +93,18 @@ const written = (state: ReadyState, groupId: GroupId, message: Message): ReadySt
     conversations: touchGroup(state.conversations, groupId, [message]),
     messageGaps: closeGaps(state.messageGaps, [message]),
   };
+};
+
+// 重拉的最近一页接得上已经翻出来的更早几页，翻到哪还算数；接不上的话中间缺了一段，从这一页的头重新往上翻。
+const latestEdge = (
+  edge: MessageEdge | undefined,
+  known: readonly Message[] | undefined,
+  page: readonly Message[],
+  hasMore: boolean,
+): MessageEdge => {
+  const head = page[0];
+  if (edge !== undefined && head !== undefined && hasMore && known?.some((m) => m.id === head.id) === true) return edge;
+  return { oldest: head?.id ?? null, hasMore };
 };
 
 export const teamOf = (item: GroupListItem): Conversation => ({
@@ -280,8 +301,40 @@ export const reduceGroups = (state: ReadyState, action: Action): ReadyState => {
           ...state,
           messages,
           messagesLoadedAt: { ...state.messagesLoadedAt, [action.groupId]: action.seq },
+          messageEdges: {
+            ...state.messageEdges,
+            [action.groupId]: latestEdge(
+              state.messageEdges[action.groupId],
+              state.messages.rows[action.groupId],
+              action.messages,
+              action.hasMore,
+            ),
+          },
           conversations: touchGroup(state.conversations, action.groupId, rows),
           messageGaps: rearmGaps(closeGaps(state.messageGaps, rows), action.groupId),
+        },
+        action.messages,
+      );
+    }
+    case "older_messages_loaded": {
+      if (state.messages.rows[action.groupId] === undefined) return state;
+      const messages = shelfPrepend(state.messages, action.groupId, messageStamp, action.messages, action.before);
+      // 在途时最近一页重拉过、从别处重新起翻，这一页照样落进列表，翻到哪以重新起翻的为准。
+      const edge = state.messageEdges[action.groupId];
+      const messageEdges =
+        edge?.oldest === action.before
+          ? {
+              ...state.messageEdges,
+              [action.groupId]: { oldest: action.messages[0]?.id ?? action.before, hasMore: action.hasMore },
+            }
+          : state.messageEdges;
+      return withOutcomes(
+        {
+          ...state,
+          messages,
+          messageEdges,
+          conversations: touchGroup(state.conversations, action.groupId, action.messages),
+          messageGaps: closeGaps(state.messageGaps, action.messages),
         },
         action.messages,
       );

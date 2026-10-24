@@ -179,5 +179,39 @@ export const shelfLoad = <K extends string, T extends Row>(
   return { rows: { ...shelf.rows, [key]: next.rows }, early, stamps: next.stamps };
 };
 
+// 往上翻出来的更早一页，插在 before 那条前面。本地已有的同 id 行挪到页里的位置，号比它新的留本地那份。
+// 这一桶还没拉过最近一页就不写：翻页只从最近一页的头往上接。
+export const shelfPrepend = <K extends string, T extends Row>(
+  shelf: Shelf<K, T>,
+  key: K,
+  stamp: (row: T) => Seq,
+  page: readonly T[],
+  before: string,
+): Shelf<K, T> => {
+  const list = shelf.rows[key];
+  if (list === undefined) return shelf;
+  const local = new Map(list.map((item) => [item.id, item]));
+  const nextStamps: Record<string, Seq> = { ...shelf.stamps };
+  const paged = new Set<string>();
+  const incoming = page.flatMap((row) => {
+    if (paged.has(row.id)) return [];
+    paged.add(row.id);
+    const seq = stamp(row);
+    if (!newer(shelf.stamps, row.id, seq)) return local.get(row.id) ?? [];
+    nextStamps[row.id] = seq;
+    return [row];
+  });
+  const rest = list.filter((item) => !paged.has(item.id));
+  const at = Math.max(
+    0,
+    rest.findIndex((item) => item.id === before),
+  );
+  return {
+    ...shelf,
+    rows: { ...shelf.rows, [key]: [...rest.slice(0, at), ...incoming, ...rest.slice(at)] },
+    stamps: nextStamps,
+  };
+};
+
 export const shelfRow = <K extends string, T extends Row>(shelf: Shelf<K, T>, key: K, id: string): T | undefined =>
   (shelf.rows[key] ?? shelf.early[key])?.find((row) => row.id === id);

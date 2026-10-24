@@ -126,16 +126,18 @@ export const groupRoutes: Route = async ({ req, res, url, path, method, push }) 
         const all = messagesByGroupId.get(groupId) ?? [];
         const before = url.searchParams.get("before");
         const end = before === null ? all.length : all.findIndex((message) => message.id === before);
-        const limit = Number(url.searchParams.get("limit") ?? 50);
-        const start = Math.max(0, (end < 0 ? all.length : end) - limit);
-        const page = all.slice(start, end < 0 ? all.length : end);
-        send(res, 200, {
-          messages: page,
-          hasMore: start > 0,
-          approvals: approvalsIn(page),
-          handoffs: handoffsIn(page),
-          ...contentIn(page),
-        });
+        const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), 200);
+        const start = Math.max(0, end - limit);
+        const page = all.slice(start, end);
+        if (end < 0) send(res, 404, { error: "没有这条消息" });
+        else
+          send(res, 200, {
+            messages: page,
+            hasMore: start > 0,
+            approvals: approvalsIn(page),
+            handoffs: handoffsIn(page),
+            ...contentIn(page),
+          });
       } else if (method === "POST") {
         const parsed = SendMessageRequest.safeParse(await readBody(req));
         if (!parsed.success) send(res, 400, { error: "消息不能为空" });

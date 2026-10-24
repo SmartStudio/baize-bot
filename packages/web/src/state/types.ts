@@ -53,6 +53,7 @@ export type SessionId = number & { readonly __session: unique symbol };
 export type LoadStatus = "idle" | "loading" | "failed";
 export type LoadKey =
   | `messages:${GroupId}`
+  | `older:${GroupId}`
   | `message:${MessageId}`
   | "routines"
   | "groups"
@@ -65,6 +66,9 @@ export type LoadKey =
 // seq 是最近一次发现漏档时取的号，比它早发出的那趟拉取不算数。attempts 是单拉连着失败了几次，
 // 到 MESSAGE_GAP_ATTEMPTS 就不再自己拉，等重连或这个群重拉历史再给一轮机会。
 export type MessageGap = { groupId: GroupId; revision: number; seq: Seq; attempts: number };
+
+// 群历史往上翻到了哪：oldest 是已经拉回来、和最近一页连成一片的最早那条，下一页拿它当 before。
+export type MessageEdge = { oldest: MessageId | null; hasMore: boolean };
 export const MESSAGE_GAP_ATTEMPTS = 3;
 
 // 一个群里一个 Bot 选的电脑。货架按行 id 记号，同一个 Bot 在不同群里各是一行，所以 id 拼上群。
@@ -196,6 +200,7 @@ export type AppState =
       // 推送最近一次重连时取的号，messagesLoadedAt 是每个群的历史请求发出时取的号。比重连早的历史可能漏了断线时的推送。
       reconnectedAt: Seq;
       messagesLoadedAt: Record<GroupId, Seq>;
+      messageEdges: Record<GroupId, MessageEdge>;
       messageGaps: Record<MessageId, MessageGap>;
       // 本会话收到过删除推送的 Bot。Bot 表和群表是入口分两次取的，表里没有的成员可能只是建得比 Bot 表晚，不算删了。
       deletedBotIds: BotId[];
@@ -236,7 +241,8 @@ export type Action =
   | { type: "group_turn"; turn: GroupTurn }
   | { type: "turns_cleared" }
   | { type: "task_updated"; task: TopicTask }
-  | { type: "messages_set"; groupId: GroupId; messages: Message[]; seq: Seq }
+  | { type: "messages_set"; groupId: GroupId; messages: Message[]; hasMore: boolean; seq: Seq }
+  | { type: "older_messages_loaded"; groupId: GroupId; before: MessageId; messages: Message[]; hasMore: boolean }
   | { type: "message_upserted"; message: Message; seq: Seq }
   | ({ type: "message_delta"; seq: Seq } & Delta)
   // 单拉漏档的那条失败了（不含 404）。

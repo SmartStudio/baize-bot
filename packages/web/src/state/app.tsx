@@ -95,6 +95,8 @@ export type AppActions = {
   reloadTask: (task: TaskId) => Promise<void>;
   // after 是推送最近一次重连的号：在途那趟发得比它早，回来后要补拉一次。
   loadMessages: (groupId: GroupId, after: Seq) => Promise<void>;
+  // 从 before 那条往上再拉一页。同一个群同时只有一趟，失败记在 older 桶上由界面给重试。
+  loadOlderMessages: (groupId: GroupId, before: MessageId) => Promise<void>;
   // 单拉一条消息，补流式 delta 漏掉的那几版。after 是最近一次发现漏档的号。
   loadMessage: (messageId: MessageId, after: Seq) => Promise<void>;
   sendMessage: (groupId: GroupId, text: string) => Promise<void>;
@@ -522,10 +524,25 @@ export const AppProvider = ({ children }: { children: ReactNode }) => {
       loadMessages: signedIn((scope, groupId: GroupId, after: Seq) =>
         loadBucket(scope, `messages:${groupId}`, after, async (seq) => {
           const { put } = scope;
-          const { messages, approvals, handoffs, drafts, plans, publications } = await scope.api.messages(groupId);
+          const { messages, hasMore, approvals, handoffs, drafts, plans, publications } =
+            await scope.api.messages(groupId);
           put({ type: "content_loaded", drafts, plans, seq });
           put({ type: "publications_loaded", publications });
-          put({ type: "messages_set", groupId, messages, seq });
+          put({ type: "messages_set", groupId, messages, hasMore, seq });
+          put({ type: "approvals_loaded", approvals });
+          put({ type: "handoffs_loaded", handoffs });
+        }),
+      ),
+      loadOlderMessages: signedIn((scope, groupId: GroupId, before: MessageId) =>
+        loadBucket(scope, `older:${groupId}`, ANY_FLIGHT, async (seq) => {
+          const { put } = scope;
+          const { messages, hasMore, approvals, handoffs, drafts, plans, publications } = await scope.api.messages(
+            groupId,
+            before,
+          );
+          put({ type: "content_loaded", drafts, plans, seq });
+          put({ type: "publications_loaded", publications });
+          put({ type: "older_messages_loaded", groupId, before, messages, hasMore });
           put({ type: "approvals_loaded", approvals });
           put({ type: "handoffs_loaded", handoffs });
         }),

@@ -62,6 +62,7 @@ const enteredState = (action: Extract<Action, { type: "ready" }>): ReadyState =>
     pushLink: "down",
     reconnectedAt: 0 as Seq,
     messagesLoadedAt: {},
+    messageEdges: {},
     messageGaps: {},
     deletedBotIds: [],
     toolsUnsynced: [],
