@@ -1,5 +1,15 @@
 import { PokerTableResponse } from "@baize/shared";
-import { expect, login, openBot, openRoutines, test, type Page } from "./fixtures";
+import {
+  expect,
+  login,
+  openBot,
+  openRoutines,
+  openSeededBot,
+  sendForApproval,
+  sendText,
+  test,
+  type Page,
+} from "./fixtures";
 
 const pageErrors = (page: Page): string[] => {
   const errors: string[] = [];
@@ -8,6 +18,8 @@ const pageErrors = (page: Page): string[] => {
 };
 
 const isRoutine = (url: string) => /\/api\/routines\/[^/]+$/.test(new URL(url).pathname);
+
+const BAD_GATEWAY = { status: 500, contentType: "text/html", body: "<html><body>Bad Gateway</body></html>" };
 
 test("群历史首次还在路上时说正在加载，不先报「建好了」，到了就换成消息", async ({ page }) => {
   let release = () => {};
@@ -97,4 +109,107 @@ test("试跑请求断网，服务端没给原因，弹出兜底的中文提示",
 
   await expect(page.getByTestId("toast"), "没有服务端原因时说兜底的话").toHaveText("没开始试跑，再试一次");
   expect(errors, "断网不变成未处理的 Promise").toEqual([]);
+});
+
+test("删除例行时服务端回了非 JSON 的 500，弹出按动作写的话，不说请求失败几百", async ({ page }) => {
+  const errors = pageErrors(page);
+  await page.route("**/api/routines/*", (route) =>
+    route.request().method() === "DELETE" && isRoutine(route.request().url())
+      ? route.fulfill(BAD_GATEWAY)
+      : route.continue(),
+  );
+
+  await login(page);
+  await openRoutines(page, "小服");
+  await page.getByTestId("routine-open").click();
+  await page.getByTestId("routine-delete").click();
+  await page.getByTestId("routine-delete-confirm").click();
+
+  await expect(page.getByTestId("toast"), "服务端没给原因时说这个动作没成").toHaveText("没删掉，再试一次");
+  expect(errors, "失败不变成未处理的 Promise").toEqual([]);
+});
+
+test("主输入框发消息失败，弹出提示，字还回输入框", async ({ page }) => {
+  const errors = pageErrors(page);
+  await login(page);
+  await openSeededBot(page, "小销");
+  await page.route("**/api/groups/grp_sales/messages", (route) =>
+    route.request().method() === "POST" ? route.fulfill(BAD_GATEWAY) : route.continue(),
+  );
+
+  await sendText(page, "帮我约下周三的会");
+
+  await expect(page.getByTestId("toast"), "没发出去要告诉人").toHaveText("消息没发出去，再试一次");
+  await expect(page.getByTestId("composer-input"), "字还回来，不用重打").toHaveValue("帮我约下周三的会");
+  expect(errors, "失败不变成未处理的 Promise").toEqual([]);
+});
+
+test("审批卡点批准被服务端拒了，弹出服务端给的原因，按钮放开能再点", async ({ page }) => {
+  const errors = pageErrors(page);
+  await login(page);
+  const card = await sendForApproval(page, "小销");
+  await page.route("**/api/approvals/*", (route) =>
+    route.request().method() === "POST"
+      ? route.fulfill({ status: 500, json: { error: "审批暂时记不下来" } })
+      : route.continue(),
+  );
+
+  await card.getByTestId("approval-approve").click();
+
+  await expect(page.getByTestId("toast"), "决定没记下要告诉人").toHaveText("审批暂时记不下来");
+  await expect(card.getByTestId("approval-approve"), "没记下就还能再点").toBeEnabled();
+  await expect(card).toHaveAttribute("data-status", "pending");
+  expect(errors, "失败不变成未处理的 Promise").toEqual([]);
+});
+
+test("新项目小窗发那句话失败，弹出提示，小窗留着能再发", async ({ page }) => {
+  const errors = pageErrors(page);
+  await login(page);
+  await page.route("**/api/groups/*/messages", (route) =>
+    route.request().method() === "POST" ? route.fulfill(BAD_GATEWAY) : route.continue(),
+  );
+
+  await page.getByTestId("new-project").click();
+  await page.getByTestId("new-project-input").fill("把抖音号做起来，年底 1000 粉");
+  await page.getByTestId("new-project-submit").click();
+
+  await expect(page.getByTestId("toast"), "没发出去要告诉人").toHaveText("没发给主助理，再试一次");
+  await expect(page.getByTestId("new-project-dialog"), "小窗留着").toBeVisible();
+  await expect(page.getByTestId("new-project-submit"), "能再发").toBeEnabled();
+  expect(errors, "失败不变成未处理的 Promise").toEqual([]);
+});
+
+test("方案卡点开始失败，弹出提示，卡还能再点开始", async ({ page }) => {
+  const errors = pageErrors(page);
+  await login(page);
+  await page.getByTestId("new-project").click();
+  await page.getByTestId("new-project-input").fill("推广白泽的开源仓库，年底 1000 星");
+  await page.getByTestId("new-project-submit").click();
+  const card = page.getByTestId("message-list").getByTestId("project-offer");
+  await expect(card).toHaveAttribute("data-status", "offered");
+  await page.route("**/api/messages/*/project-offer", (route) => route.fulfill(BAD_GATEWAY));
+
+  await card.getByTestId("project-offer-start").click();
+
+  await expect(page.getByTestId("toast"), "没开始要告诉人").toHaveText("项目没开始，再试一次");
+  await expect(card.getByTestId("project-offer-start"), "卡还能再点").toBeEnabled();
+  expect(errors, "失败不变成未处理的 Promise").toEqual([]);
+});
+
+test("牌桌项目页拉牌桌 404，说这桌已经不在了，不一直停在正在整理", async ({ page }) => {
+  const errors = pageErrors(page);
+  await login(page);
+  const created = await page.request.post("/api/poker/tables", { data: { requestId: `gone-${Date.now()}` } });
+  expect(created.status(), "建桌成功").toBe(201);
+  const { groupId } = PokerTableResponse.parse(await created.json()).table;
+  await page.route(`**/api/poker/tables/${groupId}`, (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ status: 404, json: { error: "没有这张牌桌" } })
+      : route.continue(),
+  );
+
+  await page.goto(`/p/${groupId}`);
+  await expect(page.getByTestId("poker-project-gone"), "没有这桌要说出来").toHaveText("这桌已经不在了。");
+  await expect(page.getByTestId("poker-project-loading")).toHaveCount(0);
+  expect(errors, "404 不变成未处理的 Promise").toEqual([]);
 });

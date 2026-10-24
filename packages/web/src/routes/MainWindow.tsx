@@ -181,9 +181,15 @@ export const MainWindow = () => {
   const projectGroupId = projectOpen?.groupId ?? null;
   const pokerTable = ready === null || projectGroupId === null ? undefined : pokerTableOf(ready, projectGroupId);
   const awaitingTable = projectOpen?.poker === true && pokerTable === undefined;
-  const [tableFailed, setTableFailed] = useState<GroupId | null>(null);
+  const [tableMissed, setTableMissed] = useState<{ groupId: GroupId; why: "failed" | "gone" } | null>(null);
   const loadAwaitedTable = useCallback(
-    (target: GroupId) => actions.loadPokerTable(target).catch(() => setTableFailed(target)),
+    (target: GroupId) =>
+      actions.loadPokerTable(target).then(
+        (found) => {
+          if (found === false) setTableMissed({ groupId: target, why: "gone" });
+        },
+        () => setTableMissed({ groupId: target, why: "failed" }),
+      ),
     [actions],
   );
   useEffect(() => {
@@ -306,7 +312,7 @@ export const MainWindow = () => {
         user={ready.user}
         pendingCount={today.data === null ? 0 : today.data.pending.length}
         countsStale={ready.loads.counts === "failed"}
-        onRetryCounts={() => void actions.loadPendingCounts().catch(failed("待办数还是没刷新上"))}
+        onRetryCounts={() => void actions.loadPendingCounts()}
         routinesStopped={(routinesLoaded ?? []).some((routine) => routine.state === "auto_paused")}
         onNewProject={() => setOverlay("new-project")}
         onOpenAccount={() => setOverlay(overlay === "account" ? "none" : "account")}
@@ -370,7 +376,11 @@ export const MainWindow = () => {
             onSwapSeat={actions.swapPokerSeat}
             onArchive={actions.archiveGroup}
           />
-        ) : awaitingTable && tableFailed !== null && tableFailed === projectGroupId ? (
+        ) : awaitingTable && tableMissed?.groupId === projectGroupId && tableMissed.why === "gone" ? (
+          <main className="today-page today-loading" data-testid="poker-project-gone">
+            这桌已经不在了。
+          </main>
+        ) : awaitingTable && tableMissed?.groupId === projectGroupId ? (
           <main className="today-page today-loading" data-testid="poker-project-failed">
             <p>牌桌没取到。</p>
             <button
@@ -378,8 +388,8 @@ export const MainWindow = () => {
               className="ghost-button"
               data-testid="poker-project-retry"
               onClick={() => {
-                setTableFailed(null);
-                void loadAwaitedTable(tableFailed);
+                setTableMissed(null);
+                void loadAwaitedTable(tableMissed.groupId);
               }}
             >
               重试

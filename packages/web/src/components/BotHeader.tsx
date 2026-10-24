@@ -8,6 +8,7 @@ import { EditBotDialog } from "./EditBotDialog.js";
 import { ShareDialog } from "./ShareDialog.js";
 import { describeTriggers } from "./routines/cron.js";
 import { useApp } from "../state/app.js";
+import { useFailureToast } from "./Toasts.js";
 import { MY_ROUTINES } from "../state/routines.js";
 import { pathOf } from "../routes/screen.js";
 
@@ -114,6 +115,7 @@ export const BotHeader = ({
   computerChoices: ComputerChoicesView | null;
 }) => {
   const { state, actions } = useApp();
+  const failed = useFailureToast();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [sharing, setSharing] = useState(false);
@@ -142,8 +144,9 @@ export const BotHeader = ({
     setSyncingTools(bot.id);
     try {
       await actions.syncBotTools(bot.id);
-    } catch {
-      // 失败了 toolsUnsynced 还记着，入口留着再点。
+    } catch (cause) {
+      // toolsUnsynced 还记着，入口留着再点。
+      failed("插件没同步上，再试一次")(cause);
     } finally {
       setSyncingTools(null);
     }

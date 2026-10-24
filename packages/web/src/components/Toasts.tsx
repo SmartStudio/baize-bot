@@ -36,7 +36,7 @@ export const useFailureToast = () => {
   return useCallback(
     (fallback: string) => (cause: unknown) => {
       console.warn(fallback, cause);
-      show(cause instanceof RequestFailed ? cause.message : fallback);
+      show(cause instanceof RequestFailed && cause.reason !== null ? cause.reason : fallback);
     },
     [show],
   );
