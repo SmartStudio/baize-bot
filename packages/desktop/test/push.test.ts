@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { receiveServerPush } from "../src/push.js";
 
 describe("控制面推送", () => {
-  it("控制面的 notify 推送原样交给原生通知", () => {
+  it("控制面的 notify 推送连同所在的群交给原生通知", () => {
     const notices: unknown[] = [];
     let refreshes = 0;
     const accepted = receiveServerPush(
@@ -19,7 +19,7 @@ describe("控制面推送", () => {
     );
 
     expect(accepted).toBe(true);
-    expect(notices).toEqual([{ kind: "confirm", text: "批准小服发送邮件" }]);
+    expect(notices).toEqual([{ kind: "confirm", text: "批准小服发送邮件", groupId: "group-1" }]);
     expect(refreshes).toBe(0);
   });
 
