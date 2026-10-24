@@ -2,6 +2,7 @@ import {
   BotListResponse,
   CreateBotResponse,
   CreateGroupResponse,
+  MAX_ROUTINE_RUNS,
   MessageId,
   MessageListResponse,
   RoutineListResponse,
@@ -20,7 +21,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import * as schema from "../src/db/schema.js";
 import type { StoredTrigger } from "../src/db/schema.js";
-import { EXECUTOR_DELETED_NOTE, MAX_ROUTINE_RUNS, advanceCronTrigger } from "../src/repo/routines.js";
+import { EXECUTOR_DELETED_NOTE, advanceCronTrigger } from "../src/repo/routines.js";
 import { lockOwner, shareBotRunsLock } from "../src/repo/runs.js";
 import { connect, type Db, type Sql } from "../src/db/client.js";
 import { databaseUrl } from "../src/env.js";

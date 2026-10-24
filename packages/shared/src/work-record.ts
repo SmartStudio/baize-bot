@@ -2,12 +2,10 @@
 // 单开子路径 @baize/shared/work-record 导出：用了 node:crypto，不能进被 Web 引用的根导出。
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { KEPT_EDGE_BYTES, RETAIN_TEXT_LIMIT_BYTES } from "./retention.js";
 
 // 运行时裁旧截图和留存过滤共用这一句，重建之后模型看到的才和今天看旧截图时一样。
 export const PRUNED_IMAGE_TEXT = "（之前的截图已省略）";
-
-export const RETAIN_TEXT_LIMIT_BYTES = 16 * 1024;
-const KEPT_EDGE_BYTES = 2 * 1024;
 
 export interface RetainContext {
   readonly localOnlyToolNames: ReadonlySet<string>;

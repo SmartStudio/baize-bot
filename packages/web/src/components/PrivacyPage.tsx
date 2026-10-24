@@ -1,6 +1,13 @@
 import { useState, type FormEvent } from "react";
 import { Download } from "lucide-react";
-import type { User } from "@baize/shared";
+import {
+  KEPT_EDGE_BYTES,
+  MAX_ROUTINE_RUNS,
+  RETAIN_TEXT_LIMIT_BYTES,
+  SESSION_SWEEP_INTERVAL_MS,
+  SESSION_TTL_MS,
+  type User,
+} from "@baize/shared";
 import { exportDataUrl } from "../api/client.js";
 import { useApp } from "../state/app.js";
 
@@ -9,10 +16,15 @@ type Deletion =
   | { status: "confirming"; email: string; error: string | null }
   | { status: "deleting"; email: string };
 
+const KB = 1024;
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const sweepHours = SESSION_SWEEP_INTERVAL_MS / HOUR_MS;
+
 const STORAGE: ReadonlyArray<{ readonly what: string; readonly where: string; readonly keep: string }> = [
   {
     what: "对话和工作记录",
-    where: "控制面数据库。工作记录上传前，截图换成一行占位，超过 16 KB 的输出只留头尾各 2 KB。",
+    where: `控制面数据库。工作记录上传前，截图换成一行占位，超过 ${RETAIN_TEXT_LIMIT_BYTES / KB} KB 的输出只留头尾各 ${KEPT_EDGE_BYTES / KB} KB。`,
     keep: "不自动清理。删 Bot 时它自己那个群的对话和它的工作记录一起删；解散的群只是收起来，对话还在。",
   },
   {
@@ -43,12 +55,12 @@ const STORAGE: ReadonlyArray<{ readonly what: string; readonly where: string; re
   {
     what: "用量和例行记录",
     where: "控制面数据库，每次派活记一笔。",
-    keep: "删 Bot、删群后用量照样留着当账，删账号才删。每个例行只留最近 20 次运行记录。",
+    keep: `删 Bot、删群后用量照样留着当账，删账号才删。每个例行大约只留最近 ${MAX_ROUTINE_RUNS} 次运行记录，正在跑的那次和每个定时触发器最近到点的那次也留着，所以有时会多出几条。`,
   },
   {
     what: "网页登录",
     where: "控制面数据库。",
-    keep: "30 天过期，过期的每小时清一次。",
+    keep: `${SESSION_TTL_MS / DAY_MS} 天过期，过期的${sweepHours === 1 ? "每小时" : `每 ${sweepHours} 小时`}清一次。`,
   },
 ];
 
@@ -106,9 +118,10 @@ export const PrivacyPage = ({ user }: { user: User }) => {
         <div className="row-card">
           <span>
             <b>删除账号</b>
-            <small>
+            <small data-testid="privacy-delete-note">
               Bot、项目、对话、例行、授权一起删掉，连着的电脑会断开。删了找不回来。电脑上的数据目录和 App
-              存的连接凭据不会跟着删，要清干净就自己删掉上面那个目录。
+              存的连接凭据不会跟着删。要在 Mac 上清干净，先退出白泽 App，再删掉整个 ~/Library/Application Support/白泽
+              目录，连接凭据和 App 设置都在这里，不在 bots 下面。
             </small>
           </span>
           <button

@@ -1,9 +1,16 @@
-import type { OpenAtLogin } from "@baize/shared";
+import {
+  KEPT_EDGE_BYTES,
+  MAX_ROUTINE_RUNS,
+  RETAIN_TEXT_LIMIT_BYTES,
+  SESSION_TTL_MS,
+  type OpenAtLogin,
+} from "@baize/shared";
 import { expect, login, openSettings, test, type Page } from "./fixtures";
 
 type MockBridgeWindow = Window & {
   __bridgeSets: OpenAtLogin[];
   __loginItemChanged: (value: OpenAtLogin) => void;
+  __failSet: boolean;
 };
 
 const installDesktopBridge = (page: Page, initial: OpenAtLogin) =>
@@ -12,6 +19,7 @@ const installDesktopBridge = (page: Page, initial: OpenAtLogin) =>
     const listeners = new Set<(value: OpenAtLogin) => void>();
     const target = window as unknown as MockBridgeWindow;
     target.__bridgeSets = [];
+    target.__failSet = false;
     target.__loginItemChanged = (value) => {
       openAtLogin = value;
       for (const listener of listeners) listener(value);
@@ -22,6 +30,7 @@ const installDesktopBridge = (page: Page, initial: OpenAtLogin) =>
           get: async () => openAtLogin,
           set: async (value: OpenAtLogin) => {
             target.__bridgeSets.push(value);
+            if (target.__failSet) throw new Error("Error invoking remote method 'baize:open-at-login:set': boom");
             target.__loginItemChanged(value);
             return openAtLogin;
           },
@@ -57,6 +66,32 @@ test("App 里的开机启动开关能切换，菜单那边改了这里跟着变"
   await expect(toggle, "菜单里取消勾选，设置页跟着关").toHaveAttribute("aria-checked", "false");
 });
 
+test("主进程改开机启动失败，开关行内说没改成，开关留在实际的值", async ({ page }) => {
+  const unhandled: string[] = [];
+  page.on("pageerror", (error) => unhandled.push(error.message));
+  await installDesktopBridge(page, "off");
+  await login(page);
+  await openSettings(page);
+
+  const toggle = page.getByTestId("open-at-login-switch");
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await page.evaluate(() => {
+    (window as unknown as MockBridgeWindow).__failSet = true;
+  });
+  await toggle.click();
+  await expect(page.getByTestId("open-at-login-error")).toHaveText("没改成开机启动，请再试一次");
+  await expect(toggle, "失败了开关不假装打开").toHaveAttribute("aria-checked", "false");
+  expect(await page.evaluate(() => (window as unknown as MockBridgeWindow).__bridgeSets)).toEqual(["on"]);
+
+  await page.evaluate(() => {
+    (window as unknown as MockBridgeWindow).__failSet = false;
+  });
+  await toggle.click();
+  await expect(toggle, "再点一次成功").toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("open-at-login-error"), "成功之后错误收起").toHaveCount(0);
+  expect(unhandled, "失败不留未处理的 rejection").toEqual([]);
+});
+
 test("开发版 App 的桥报不支持，不出开机启动开关", async ({ page }) => {
   await installDesktopBridge(page, "unsupported");
   await login(page);
@@ -65,13 +100,19 @@ test("开发版 App 的桥报不支持，不出开机启动开关", async ({ pag
   await expect(page.getByTestId("open-at-login-switch")).toHaveCount(0);
 });
 
-test("数据与隐私页写明每类数据存在哪、留多久，删账号不清电脑上的目录", async ({ page }) => {
+test("数据与隐私页写明每类数据存在哪、留多久，删账号要清干净得删整个 App 数据目录", async ({ page }) => {
   await login(page);
   await openSettings(page);
   await page.getByTestId("settings-nav-privacy").click();
 
   const storage = page.getByTestId("privacy-storage");
   await expect(storage).toContainText("~/Library/Application Support/白泽/bots");
+  await expect(storage.getByTestId("privacy-storage-item").filter({ hasText: "对话和工作记录" })).toContainText(
+    `超过 ${RETAIN_TEXT_LIMIT_BYTES / 1024} KB 的输出只留头尾各 ${KEPT_EDGE_BYTES / 1024} KB`,
+  );
+  await expect(storage.getByTestId("privacy-storage-item").filter({ hasText: "网页登录" })).toContainText(
+    `${SESSION_TTL_MS / (24 * 60 * 60 * 1000)} 天过期`,
+  );
   await expect(storage.getByTestId("privacy-storage-item").locator("b")).toHaveText([
     "对话和工作记录",
     "会话文件",
@@ -90,7 +131,11 @@ test("数据与隐私页写明每类数据存在哪、留多久，删账号不�
     "截图原图和完整输出都在",
   );
   await expect(storage.getByTestId("privacy-storage-item").filter({ hasText: "用量和例行记录" })).toContainText(
-    "只留最近 20 次运行记录",
+    `每个例行大约只留最近 ${MAX_ROUTINE_RUNS} 次运行记录，正在跑的那次`,
   );
-  await expect(page.getByTestId("privacy-page")).toContainText("电脑上的数据目录和 App 存的连接凭据不会跟着删");
+  const deletion = page.getByTestId("privacy-delete-note");
+  await expect(deletion).toContainText("电脑上的数据目录和 App 存的连接凭据不会跟着删");
+  await expect(deletion, "凭据和设置不在 bots 下面，要删整个 userData").toContainText(
+    "删掉整个 ~/Library/Application Support/白泽 目录",
+  );
 });

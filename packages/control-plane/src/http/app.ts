@@ -58,6 +58,7 @@ import {
   RoutineId,
   RoutineListResponse,
   RoutineResponse,
+  SESSION_TTL_MS,
   SendMessageRequest,
   SendMessageResponse,
   SkillId,
@@ -113,7 +114,7 @@ import { createGroup, findGroup, listGroups } from "../repo/groups.js";
 import { archiveGroup } from "../repo/archive-group.js";
 import { findLiveGroupId } from "../repo/live-groups.js";
 import { appendMessageIfGroupAlive, findOwnedMessage, listGroupBots, listMessages } from "../repo/messages.js";
-import { SESSION_COOKIE, SESSION_TTL_MS, createSession, deleteSession, userForSession } from "../repo/sessions.js";
+import { SESSION_COOKIE, createSession, deleteSession, userForSession } from "../repo/sessions.js";
 import {
   createRoutine,
   deleteRoutine,

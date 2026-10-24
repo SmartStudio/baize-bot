@@ -1,6 +1,7 @@
 import {
   BotId,
   GroupId,
+  MAX_ROUTINE_RUNS,
   RoutineId,
   UserId,
   type OnFailure as OnFailureSchema,
@@ -34,9 +35,6 @@ import type { PushHub } from "../ws/hub.js";
 type OnFailure = z.infer<typeof OnFailureSchema>;
 type RoutineRunStatus = z.infer<typeof RoutineRunStatusSchema>;
 export type RoutineRow = typeof routines.$inferSelect;
-
-/** 每个例行任务留的运行记录条数。规格里的「运行记录（最近 20 条）」。 */
-export const MAX_ROUTINE_RUNS = 20;
 
 /** webhook 地址里的那一段。16 字节随机数，客户端选不了，只能带着这条例行任务已有的那个来保留它。 */
 export function newWebhookToken(): string {
