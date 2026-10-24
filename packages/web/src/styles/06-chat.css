@@ -63,7 +63,8 @@
   min-height: 0;
   padding: var(--space-7);
   overflow-y: auto;
-  /* ChatPanel 每次渲染自己把正看着的那条消息钉住，浏览器再锚一次就会多挪一截。 */
+  /* 滚动位置只许人和 ChatPanel 动：ChatPanel 把渲染前后滚动位置变了当成人刚滚过、不再钉，浏览器自己锚一次也会改它，
+     它挑的锚点和 ChatPanel 的不一样，接页、推送之后差出一截。chat-history 里接页、推送的几条用例钉着这件事。 */
   overflow-anchor: none;
 }
 

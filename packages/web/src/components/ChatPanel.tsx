@@ -11,6 +11,7 @@ import {
   type DecideSkillOffer,
   type HandoffTable,
   type InspectTool,
+  type ToggleTools,
 } from "./messages/MessageView.js";
 import { turnsOf, type Turn } from "./messages/turns.js";
 import { BotAvatar, resolveBotAvatarState } from "./BotAvatar.js";
@@ -59,6 +60,7 @@ type Props = {
 
 // 单 Bot 群没有清单。写成字面量的话每次渲染都是新身份，白让回合组件重画一遍。
 const NO_CHECKLIST: ChecklistItem[] = [];
+const NO_OPEN_TOOLS: ReadonlySet<MessageId> = new Set();
 
 // 正在打的那个 @。光标永远在末尾，所以只认结尾这一段：@ 之后还没打空格的字。
 const MENTION = /@([^\s@]*)$/;
@@ -82,12 +84,16 @@ const LOAD_OLDER_PX = 200;
 // 用户正看着的那一条：可见区最上面那条消息，和它离列表顶的距离。锚到单条消息而不是回合：更早的一页
 // 以同一个 Bot 的话结尾时会并进打头的回合，打头的审批、交接卡也会并进去，回合的边界和 id 都会变，
 // 单条消息的 id 和它自己的框不会。
-type Anchor = { id: string; offset: number };
+type Mark = { id: string; offset: number };
+// marks 是可见区从上往下的前几条，头一条被藏起来或卸掉了就按顺序退到下一条。scrollTop 是记下时的滚动位置，
+// 用来认出「用户刚滚过、滚动事件还没到」。
+type Anchor = { scrollTop: number; marks: Mark[] };
 
 const SHOWN = "[data-message-id]:not([hidden])";
+const MARKS = 5;
 
 // 消息在列表里从上往下排，底边随文档顺序递增，二分找第一条底边过了可见区顶的。每次渲染都要找一遍，长会话里不逐条量。
-const topVisible = (list: HTMLElement): Anchor | null => {
+const anchorOf = (list: HTMLElement): Anchor => {
   const top = list.getBoundingClientRect().top;
   const shown = list.querySelectorAll<HTMLElement>(SHOWN);
   let low = 0;
@@ -97,16 +103,31 @@ const topVisible = (list: HTMLElement): Anchor | null => {
     if ((shown[mid]?.getBoundingClientRect().bottom ?? top) > top) high = mid;
     else low = mid + 1;
   }
-  const message = shown[low];
-  return message === undefined
-    ? null
-    : { id: message.dataset.messageId ?? "", offset: message.getBoundingClientRect().top - top };
+  const marks: Mark[] = [];
+  for (let at = low; at < Math.min(low + MARKS, shown.length); at += 1) {
+    const message = shown[at];
+    if (message !== undefined)
+      marks.push({ id: message.dataset.messageId ?? "", offset: message.getBoundingClientRect().top - top });
+  }
+  return { scrollTop: list.scrollTop, marks };
+};
+
+// 滚动位置和记下的不一样就是人滚过，只有一种例外：上面的内容变矮，浏览器把滚动位置往回夹到了底。
+const scrolledSince = (list: HTMLElement, anchor: Anchor): boolean => {
+  if (list.scrollTop === anchor.scrollTop) return false;
+  const clamped = list.scrollTop < anchor.scrollTop && list.scrollTop >= list.scrollHeight - list.clientHeight - 1;
+  return !clamped;
 };
 
 const keepInPlace = (list: HTMLElement, anchor: Anchor) => {
-  const message = list.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(anchor.id)}"]:not([hidden])`);
-  if (message === null) return;
-  list.scrollTop += message.getBoundingClientRect().top - list.getBoundingClientRect().top - anchor.offset;
+  const top = list.getBoundingClientRect().top;
+  for (const mark of anchor.marks) {
+    const message = list.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(mark.id)}"]`);
+    if (message === null || message.getClientRects().length === 0) continue;
+    const shift = message.getBoundingClientRect().top - top - mark.offset;
+    if (Math.abs(shift) >= 0.5) list.scrollTop += shift;
+    return;
+  }
 };
 
 const firstAt = (turn: Turn): string =>
@@ -194,6 +215,21 @@ export const ChatPanel = ({
   const turns = turnsOf(messages);
 
   const anchor = useRef<Anchor | null>(null);
+  const [expanded, setExpanded] = useState<{ groupId: GroupId; ids: ReadonlySet<MessageId> }>({
+    groupId,
+    ids: NO_OPEN_TOOLS,
+  });
+  // 换群就清空，切回来时全部收起。
+  if (expanded.groupId !== groupId) setExpanded({ groupId, ids: NO_OPEN_TOOLS });
+  const toggleTools: ToggleTools = (ids, open) =>
+    setExpanded((current) => {
+      const next = new Set(current.ids);
+      for (const id of ids) {
+        if (open) next.add(id);
+        else next.delete(id);
+      }
+      return { groupId: current.groupId, ids: next };
+    });
   const oldest = edge?.oldest ?? null;
   const canLoadOlder = edge?.hasMore === true && older === "idle" && oldest !== null;
   const loadOlder = () => {
@@ -217,13 +253,16 @@ export const ChatPanel = ({
     navigate(location.pathname, { replace: true, state: null });
   }, [prefill, groupId, location.pathname, navigate]);
 
-  // 不列依赖、每次渲染都钉一遍：审批、交接推回来改的是卡片的高度，消息列表没变。
+  // 不列依赖、每次渲染都钉一遍：审批、交接推回来改的是卡片的高度，消息列表没变。用户刚滚过、滚动事件还没到时
+  // 钉回去就把人拽回滚之前，这时只重记。
   useLayoutEffect(() => {
     const list = thread.current;
     if (list === null) return;
-    if (atBottom.current) list.scrollTop = list.scrollHeight;
-    else if (anchor.current !== null) keepInPlace(list, anchor.current);
-    anchor.current = topVisible(list);
+    if (anchor.current === null || !scrolledSince(list, anchor.current)) {
+      if (atBottom.current) list.scrollTop = list.scrollHeight;
+      else if (anchor.current !== null) keepInPlace(list, anchor.current);
+    }
+    anchor.current = anchorOf(list);
   });
 
   useEffect(() => {
@@ -350,7 +389,7 @@ export const ChatPanel = ({
             const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
             atBottom.current = distance < 24;
             setShowScroll(distance > list.clientHeight);
-            anchor.current = topVisible(list);
+            anchor.current = anchorOf(list);
             if (canLoadOlder && list.scrollTop < LOAD_OLDER_PX) loadOlder();
           }}
         >
@@ -391,6 +430,8 @@ export const ChatPanel = ({
               ) : null}
               <TurnView
                 turn={turn}
+                openTools={expanded.ids}
+                onToggleTools={toggleTools}
                 lookup={lookup}
                 approvals={approvals}
                 handoffs={handoffs}
