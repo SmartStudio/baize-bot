@@ -1,6 +1,7 @@
 import {
   expect,
   test,
+  Message,
   MessageListResponse,
   login,
   openBot,
@@ -242,4 +243,146 @@ test("更早的一页没拉下来，顶上给重试，不自己反复拉；点�
   await expect(shown(page, 70), "重试接上了更早的一页").toBeAttached();
   await expect(page.getByTestId("older-failed")).toHaveCount(0);
   expect(befores).toHaveLength(2);
+});
+
+// 最近一页里第 from 到 to 条 Bot 的话换成工具调用，收进那段回答的「做了几步」。返回每条的消息 id。
+const toolsAt = async (page: Page, from: number, to: number) => {
+  const ids = new Map<number, string>();
+  await page.route(HISTORY, async (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() !== "GET" || url.searchParams.get("before") !== null) return route.continue();
+    const response = await route.fetch();
+    const latest = MessageListResponse.parse(await response.json());
+    const messages = latest.messages.map((message) => {
+      const n = message.body.kind === "bot" ? Number(/第 (\d+) 条/.exec(message.body.text)?.[1]) : NaN;
+      if (!(n >= from && n <= to)) return message;
+      ids.set(n, message.id);
+      const command = `echo ${label(n)}`;
+      return Message.parse({
+        ...message,
+        body: {
+          kind: "tool_call",
+          runId: "",
+          botId: "bot_sales",
+          tool: "bash",
+          view: { kind: "bash", command, raw: { command } },
+          status: "ok",
+          durationMs: 1000,
+        },
+      });
+    });
+    await route.fulfill({ response, json: { ...latest, messages } });
+  });
+  return (n: number) => {
+    const id = ids.get(n);
+    if (id === undefined) throw new Error(`${label(n)} 没换成工具调用`);
+    return id;
+  };
+};
+
+// 按消息 id 量离可见区顶边多远。给了 top 就先把这条的顶边摆到可见区顶边下 top 处，同步量，赶在滚动事件之前。
+const offsetOfId = (page: Page, id: string, top?: number) =>
+  page.getByTestId("message-list").evaluate(
+    (list, [messageId, at]) => {
+      const found = list.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+      if (found === null) throw new Error(`${messageId} 不在列表里`);
+      if (found.getClientRects().length === 0) return { offset: NaN, scrollTop: list.scrollTop };
+      const offset = () => found.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      if (at !== null) list.scrollTop += offset() - at;
+      return { offset: offset(), scrollTop: list.scrollTop };
+    },
+    [id, top ?? null] as const,
+  );
+
+const nextFrame = (page: Page) =>
+  page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
+test("点开最近一页打头回合的「做了几步」，锚在工具行上往上翻，接页之后还展开着、那一行不跳", async ({ page }) => {
+  await seedHistory(page.request, 120, { botSays: (n) => (n >= 60 && n <= 85) || (n % 2 === 0 && n !== 86) });
+  const toolId = await toolsAt(page, 72, 85);
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 120)).toBeVisible();
+  await expect(shown(page, 70)).toHaveCount(0);
+
+  const head = page.getByTestId("bot-turn").filter({ hasText: label(71) });
+  await expect(head.getByTestId("activity-toggle"), "第 72 到 85 条收进打头回合的「做了几步」").toHaveText(
+    "做了 14 步",
+  );
+  // 用 click() 的话 Playwright 先把开关滚进可见区，打头回合就在顶上，一滚就先翻了页。
+  await head.getByTestId("activity-toggle").dispatchEvent("click");
+  await expect(head.getByTestId("activity-toggle")).toHaveAttribute("aria-expanded", "true");
+  await expect(shown(page, 70), "点开时还没往上翻").toHaveCount(0);
+
+  const placed = await offsetOfId(page, toolId(72), -4);
+  expect(placed.scrollTop, "第 72 条那行工具贴顶时已经进了往上翻的范围").toBeLessThan(200);
+
+  await expect(shown(page, 60), "接出了更早的一页").toBeAttached();
+  await expect(page.getByTestId("older-loading")).toHaveCount(0);
+  const merged = page.getByTestId("bot-turn").filter({ hasText: label(60) });
+  await expect(merged, "更早一页的第 60 到 70 条并进了打头回合").toContainText(label(71));
+  await expect
+    .soft(merged.getByTestId("activity-toggle"), "并页之后「做了几步」还展开着")
+    .toHaveAttribute("aria-expanded", "true");
+  const after = await offsetOfId(page, toolId(72));
+  expect(Math.abs(after.offset - placed.offset), "第 72 条那行工具离可见区顶的距离没变").toBeLessThan(2);
+});
+
+test("正看着的工具行被收起来了，退到下面那条钉住，不跳", async ({ page }) => {
+  await seedHistory(page.request, 40, { botSays: (n) => (n >= 10 && n <= 25) || (n % 2 === 0 && n !== 26) });
+  const toolId = await toolsAt(page, 12, 25);
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 40)).toBeVisible();
+  await expect(page.getByTestId("history-start"), "40 条一页装得下").toBeVisible();
+
+  const toggle = page
+    .getByTestId("bot-turn")
+    .filter({ hasText: label(11) })
+    .getByTestId("activity-toggle");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  // 最后一行工具往上滚出去一点，它下面是第 26 条，开关在可见区上方。这时离底不到十四行工具那么高，
+  // 一收起来浏览器先把滚动位置夹到新的底，不能把这当成人滚过。
+  await offsetOfId(page, toolId(25), -6);
+  await nextFrame(page);
+  await expect(toggle).not.toBeInViewport();
+  const before = await offsetOf(page, 26);
+  const height = () => page.getByTestId("message-list").evaluate((list) => list.scrollHeight);
+  const [tall, distance] = [await height(), await distanceToBottom(page)];
+
+  await toggle.dispatchEvent("click");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(distance, "离底比收掉的工具行矮，滚动位置会被夹").toBeLessThan(tall - (await height()));
+  expect(Math.abs((await offsetOf(page, 26)) - before), "第 26 条离可见区顶的距离没变").toBeLessThan(2);
+});
+
+test("刚滚过、滚动事件还没到时界面重画，不把视图拽回滚之前", async ({ page }) => {
+  await seedHistory(page.request, 120);
+  await login(page);
+  await openBot(page, "小销");
+  await expect(shown(page, 120)).toBeVisible();
+  await page.getByTestId("message-list").evaluate((list) => {
+    list.scrollTop = list.scrollHeight / 2;
+  });
+  await expect(page.getByTestId("scroll-to-bottom"), "滚动事件到了，已经离开底部").toBeVisible();
+
+  // 同一个任务里先往上滚 300px，再在输入框打字让面板重画，这时滚动事件还没派发。
+  const scrolled = await page.getByTestId("message-list").evaluate(async (list) => {
+    const input = document.querySelector<HTMLTextAreaElement>("[data-testid=composer-input]");
+    if (input === null) throw new Error("输入框不在");
+    const before = list.scrollTop;
+    list.scrollTop = before - 300;
+    const intended = list.scrollTop;
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(input, "滚的同时打字");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const rendered = list.scrollTop;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return { before, intended, rendered, after: list.scrollTop };
+  });
+  await expect(page.getByTestId("composer-input")).toHaveValue("滚的同时打字");
+  expect(scrolled.intended, "确实往上滚了").toBeLessThan(scrolled.before - 200);
+  expect(Math.abs(scrolled.after - scrolled.intended), `重画没把视图拽回去 ${JSON.stringify(scrolled)}`).toBeLessThan(
+    1,
+  );
 });

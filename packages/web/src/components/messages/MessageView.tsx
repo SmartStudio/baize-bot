@@ -656,16 +656,24 @@ const MessageView = ({
   );
 };
 
+export type ToggleTools = (ids: MessageId[], open: boolean) => void;
+
 const Activity = ({
   tools,
+  openTools,
+  onToggle,
   selectedToolId,
   onInspect,
 }: {
   tools: Message[];
+  openTools: ReadonlySet<MessageId>;
+  onToggle: ToggleTools;
   selectedToolId: MessageId | null;
   onInspect: InspectTool;
 }) => {
-  const [open, setOpen] = useState(false);
+  // 展开状态按工具消息 id 记在面板上：往上接页并进打头的回合、往后追加一步，回合都可能重挂载或换一批工具，
+  // 任意一步记着就算展开。
+  const open = tools.some((message) => openTools.has(message.id));
   const running = tools.some((message) => message.body.kind === "tool_call" && message.body.status === "running");
 
   return (
@@ -676,7 +684,12 @@ const Activity = ({
           type="button"
           data-testid="activity-toggle"
           aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() =>
+            onToggle(
+              tools.map((message) => message.id),
+              !open,
+            )
+          }
         >
           {running ? `干活中，做了 ${tools.length} 步…` : `做了 ${tools.length} 步`}
           {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
@@ -707,12 +720,16 @@ const Activity = ({
   );
 };
 
-type TurnProps = Omit<MessageProps, "message"> & { turn: Turn };
+type TurnProps = Omit<MessageProps, "message"> & {
+  turn: Turn;
+  openTools: ReadonlySet<MessageId>;
+  onToggleTools: ToggleTools;
+};
 
 // 工具调用收进「做了几步」，跑的过程中也折着，人只看结果，要查再点开。接手卡是要人动手的，交还之后也得看得见结论，不进折叠区。
 const folded = (message: Message) => message.body.kind === "tool_call" && message.body.view.kind !== "takeover";
 
-export const TurnView = ({ turn, ...props }: TurnProps) => {
+export const TurnView = ({ turn, openTools, onToggleTools, ...props }: TurnProps) => {
   if (turn.kind === "system" && turn.message.body.kind === "system" && turn.message.body.tone === "error") {
     return (
       <div className="turn turn-system">
@@ -744,7 +761,13 @@ export const TurnView = ({ turn, ...props }: TurnProps) => {
             <MessageView key={message.id} message={message} {...props} />
           ))}
         {tools.length > 0 ? (
-          <Activity tools={tools} selectedToolId={props.selectedToolId} onInspect={props.onInspectTool} />
+          <Activity
+            tools={tools}
+            openTools={openTools}
+            onToggle={onToggleTools}
+            selectedToolId={props.selectedToolId}
+            onInspect={props.onInspectTool}
+          />
         ) : null}
       </div>
     </div>
