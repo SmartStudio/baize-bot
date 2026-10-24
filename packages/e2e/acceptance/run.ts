@@ -583,7 +583,7 @@ const run = async (): Promise<void> => {
     await s.startComputer();
     await openHome(p, home);
     await check(p.getByTestId("today-assistant-text")).toContainText("想让我帮你做成什么事");
-    await check(p.locator(".today-template")).toHaveText(["推广一个产品", "运营一个号"]);
+    await check(p.locator(".today-template")).toHaveText(["推广一个产品", "运营一个号", "和 AI 打一局"]);
     const firstHome = await p.locator("body").innerText();
     for (const word of ["企业", "团队结算", "同事"]) check(firstHome, `首页不出现「${word}」`).not.toContain(word);
     await assertPlainHome(p, s);
