@@ -116,7 +116,11 @@ const BotLookPicker = ({ bot, commit }: { bot: Bot; commit: (draft: BotDraft) =>
 // 名字、标签、描述改在 Bot 页头部的编辑弹窗里；这里只剩颜色、形状、通知和暂停，颜色和形状收在头像后面。
 // 技能不在这里配：头部「它知道的」里能看，加、改、删跟它在对话里说。
 export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: Props) => {
-  const commit = (draft: BotDraft) => void onChange(bot.id, draft);
+  const [save, setSave] = useState<"idle" | "failed">("idle");
+  const commit = (draft: BotDraft) => {
+    setSave("idle");
+    onChange(bot.id, draft).catch(() => setSave("failed"));
+  };
 
   return (
     <aside className="bot-panel" data-testid="bot-panel">
@@ -130,6 +134,11 @@ export const BotSettingsPanel = ({ bot, onChange, onPause, onResume, onClose }: 
         <X size={16} aria-hidden="true" />
       </button>
       <BotLookPicker bot={bot} commit={commit} />
+      {save === "failed" ? (
+        <p className="bot-settings-error" data-testid="bot-settings-error" role="alert">
+          没存上，再试一次
+        </p>
+      ) : null}
       <div className="row-card">
         <span>
           <b>通知</b>
