@@ -660,11 +660,24 @@ function openMainWindow(groupId: GroupId | null): void {
     );
     return;
   }
-  if (path !== null)
-    void window.loadURL(`${uiOrigin}${path}`).catch((error: unknown) => logLine(`主窗口跳转失败 ${errorText(error)}`));
+  const target = path === null ? null : `${uiOrigin}${path}`;
+  // 已经停在这个群就不整页重载，否则输入框里没发出去的草稿会丢。
+  if (target !== null && !samePage(window.webContents.getURL(), target))
+    void window.loadURL(target).catch((error: unknown) => logLine(`主窗口跳转失败 ${errorText(error)}`));
   if (window.isMinimized()) window.restore();
   window.show();
   window.focus();
+}
+
+function pageKey(raw: string): string | null {
+  if (!URL.canParse(raw)) return null;
+  const url = new URL(raw);
+  return `${url.origin}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+function samePage(current: string, target: string): boolean {
+  const currentKey = pageKey(current);
+  return currentKey !== null && currentKey === pageKey(target);
 }
 
 function trayImage() {
