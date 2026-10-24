@@ -209,12 +209,13 @@ baize.example.com {
 cd deploy/remote
 docker compose exec -T postgres psql -U baize -d baize -c 'SELECT name FROM _migrations ORDER BY name'   # 记下当前到哪条
 docker compose exec -T postgres psql -U baize -d baize -c "SELECT count(*) FROM work_entries WHERE stream = 'chat' AND pi_type = 'message'"   # 跑过 0032 才有这张表，见上一段
+git pull                           # 旧版本里没有 backup-db.sh，先拉代码才有。只换文件，不碰库和跑着的容器
+docker compose build               # 构建放在备份之前，缩短备份到停控制面之间旧控制面还在写库的那段，见 docs/部署.md「升级」
 ./backup-db.sh                     # 导到 ~/baize-backups，导完核一遍能读，见 docs/部署.md「备份和恢复」
-docker compose build
 docker compose stop control-plane  # 旧控制面先停，不让它跑在迁移后的表上，见 docs/部署.md「迁移」
 docker compose up -d
 docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或「迁移已是最新，没有要跑的」
-./put-launch.sh                    # 镜像升级后远程电脑要重新放启动文件
+./put-launch.sh [账号邮箱]          # 镜像升级后远程电脑要重新放启动文件
 ```
 
 要退回时先停控制面，用 `./restore-db.sh --replace <备份文件> baize` 整库换回去，再换回旧版本的镜像，步骤见 `docs/部署.md`「回滚」。新代码不能跑在回滚后的旧库上。不用 `pg_restore --clean`，它留下备份之后的迁移建的表。

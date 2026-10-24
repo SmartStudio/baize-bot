@@ -12,9 +12,10 @@ backup_dir=${BACKUP_DIR:-$HOME/baize-backups}
 keep=${BACKUP_KEEP:-14}
 db=${DB_NAME:-baize}
 
+# 拦前导零：00 过了数字检查却等于 0，会把刚导的这份也删掉；08 在算术展开里按八进制报错。
 case $keep in
-  '' | *[!0-9]* | 0)
-    echo "BACKUP_KEEP 要是正整数，现在是「${keep}」" >&2
+  '' | *[!0-9]* | 0*)
+    echo "BACKUP_KEEP 要是不带前导零的正整数，现在是「${keep}」" >&2
     exit 1
     ;;
 esac
