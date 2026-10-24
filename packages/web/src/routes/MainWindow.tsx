@@ -18,6 +18,11 @@ import { useFailureToast } from "../components/Toasts.js";
 import { useEscapeToClose } from "../components/useEscapeToClose.js";
 import { PushBanner } from "../components/PushBanner.js";
 import { LiveHost } from "../live/LiveHost.js";
+import { QuickSwitch } from "../components/QuickSwitch.js";
+import { ShortcutSheet } from "../components/ShortcutSheet.js";
+import { shortcutOf, type Shortcut } from "../components/shortcuts.js";
+import { switchItems } from "../components/switchItems.js";
+import { shownLive } from "../state/live.js";
 import { TodayPage } from "./TodayPage.js";
 import { PokerProjectPage } from "./PokerProjectPage.js";
 import { ProjectPage } from "./ProjectPage.js";
@@ -117,6 +122,7 @@ export const MainWindow = () => {
   const today = useToday();
   const failed = useFailureToast();
   const [overlay, setOverlay] = useState<Overlay>("none");
+  const [quick, setQuick] = useState<Shortcut | "none">("none");
   // 记的是「哪个群的任务详情开着」，不是「开没开」。换了群它自己就不算开了，不用再拿 effect 去关一遍。
   const [taskOpenFor, setTaskOpenFor] = useState<GroupId | null>(null);
   const [inspectedTool, setInspectedTool] = useState<{ groupId: GroupId; tool: InspectedTool } | null>(null);
@@ -156,6 +162,20 @@ export const MainWindow = () => {
   }, [groupId, reconnectedAt, twoComputers, actions]);
 
   useUnreadTitle(ready?.unreadNotices ?? 0, actions.markNoticesRead);
+
+  const appReady = ready !== null;
+  const keysGoToComputer = ready !== null && shownLive(ready.content) !== null;
+  useEffect(() => {
+    if (!appReady || keysGoToComputer) return;
+    const onKey = (event: KeyboardEvent) => {
+      const shortcut = shortcutOf(event);
+      if (shortcut === null) return;
+      event.preventDefault();
+      setQuick((current) => (current === shortcut ? "none" : shortcut));
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [appReady, keysGoToComputer]);
   // 点通知跳过来时浮层还盖着，人就看不到跳到了哪。每次跳转的 key 都不同，同一页连点两条也各收一次。
   // 在渲染时比对，不放进 effect 里多渲染一轮。
   const noticeKey = openedFromNotice(location.state) ? location.key : null;
@@ -561,6 +581,19 @@ export const MainWindow = () => {
           onLogout={() => void actions.logout().catch(failed("没退出登录，再试一次"))}
           onClose={() => setOverlay("none")}
         />
+      ) : null}
+      {quick === "switch" ? (
+        <QuickSwitch
+          items={switchItems(ready.conversations, bots)}
+          onPick={(item) => {
+            setQuick("none");
+            setOverlay("none");
+            navigate(item.path);
+          }}
+          onClose={() => setQuick("none")}
+        />
+      ) : quick === "shortcuts" ? (
+        <ShortcutSheet onClose={() => setQuick("none")} />
       ) : null}
       <LiveHost />
     </div>
