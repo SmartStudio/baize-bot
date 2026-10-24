@@ -72,8 +72,11 @@ fi
 if exists "$target"; then assert_idle "$target"; fi
 
 drop_staging() {
-  pg dropdb -U baize --if-exists "$staging" || true
-  echo "恢复没完成，临时库 $staging 已删，$target 没动" >&2
+  if pg dropdb -U baize --if-exists --force "$staging"; then
+    echo "恢复没完成，临时库 $staging 已删，$target 没动" >&2
+  else
+    echo "恢复没完成，$target 没动，临时库 $staging 没删掉，手动删：docker compose exec postgres dropdb -U baize --force $staging" >&2
+  fi
 }
 
 pg createdb -U baize "$staging"
