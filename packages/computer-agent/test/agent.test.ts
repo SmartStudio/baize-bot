@@ -579,7 +579,7 @@ describe("电脑代理连控制面", () => {
         computerId: "computer-1",
         token: "dev-token",
         version: "0.1.0",
-        protocol: 4,
+        protocol: 5,
         controlOrigin: `http://127.0.0.1:${port}`,
         installId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         piSessionVersion: CURRENT_SESSION_VERSION,

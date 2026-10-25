@@ -57,7 +57,7 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: "b".repeat(64),
       version: "test",
-      protocol: 4,
+      protocol: 5,
       controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: computer.computerId,
       piSessionVersion: 3,
@@ -76,7 +76,7 @@ describe("握手", () => {
       computerId: ComputerId.parse("没有这台电脑"),
       token: "b".repeat(64),
       version: "test",
-      protocol: 4,
+      protocol: 5,
       controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: "f112ce55-14af-49b1-a419-18b2e213f288",
       piSessionVersion: 3,
@@ -153,7 +153,7 @@ describe("握手", () => {
     }
   });
 
-  it("协议 4 的 hello 缺 controlOrigin 按坏 hello 关连接，不发 welcome", async () => {
+  it("协议 5 的 hello 缺 controlOrigin 按坏 hello 关连接，不发 welcome", async () => {
     const { computer } = await ownerWithComputer();
     const agent = await openAgent(server.server.port);
     agent.send({
@@ -161,7 +161,7 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
-      protocol: 4,
+      protocol: 5,
       installId: computer.computerId,
       piSessionVersion: 3,
       uplinkStream: computer.computerId,
@@ -187,7 +187,7 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
-      protocol: 4,
+      protocol: 5,
       controlOrigin,
       installId: computer.computerId,
       piSessionVersion: 3,
@@ -222,7 +222,7 @@ describe("握手", () => {
       computerId: computer.computerId,
       token: computer.token,
       version: "test",
-      protocol: 4,
+      protocol: 5,
       controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
       installId: computer.computerId,
       piSessionVersion: 3,

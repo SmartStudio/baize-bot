@@ -20,8 +20,8 @@ describe("换电脑的报文", () => {
     expect(SwitchComputerResponse.safeParse({ result: "switching", reason: "target_offline" }).success).toBe(false);
   });
 
-  it("prompt 的 reason 多一种 continuation，协议号仍是 4", () => {
-    expect(AGENT_PROTOCOL).toBe(4);
+  it("prompt 的 reason 多一种 continuation", () => {
+    expect(AGENT_PROTOCOL).toBe(5);
     const parsed = ControlToAgent.safeParse({
       type: "prompt",
       runId: "run-2",

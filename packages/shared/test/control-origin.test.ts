@@ -28,7 +28,7 @@ describe("hello 的 controlOrigin", () => {
     computerId: "c-1",
     token: "t",
     version: "test",
-    protocol: 4,
+    protocol: 5,
     installId: "f112ce55-14af-49b1-a419-18b2e213f288",
     piSessionVersion: 3,
     uplinkStream: "c-1",
