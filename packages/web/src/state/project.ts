@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ChecklistItem, GroupId, MetricSource, ProjectGoal, ProjectResponse, TaskMetric } from "@baize/shared";
+import type {
+  ChecklistItem,
+  GroupId,
+  MetricSource,
+  ProjectGoal,
+  ProjectResponse,
+  ReadMetric,
+  TaskMetric,
+} from "@baize/shared";
 import { useApp } from "./app.js";
 
 type ProjectLoad =
@@ -73,12 +81,15 @@ export const useProject = (groupId: GroupId, checklist: readonly ChecklistItem[]
 
 export type Project = ReturnType<typeof useProject>;
 
-export type GoalProgress = {
-  readonly current: number;
-  readonly target: number;
-  readonly unit: string;
-  readonly weekDelta: number | null;
-};
+export type GoalProgress =
+  | { readonly kind: "unread"; readonly target: number; readonly unit: string }
+  | {
+      readonly kind: "read";
+      readonly current: number;
+      readonly target: number;
+      readonly unit: string;
+      readonly weekDelta: number;
+    };
 
 // 周一 00:00 上海时区，和控制面 usage.ts#weekStart 同一个周界（D18）。
 const SHANGHAI_OFFSET_MS = 8 * 3_600_000;
@@ -89,13 +100,19 @@ const weekStartOf = (now: Date): number => {
 };
 
 // 会话里的卡可能是上周推来的，跨过周界又没有新样本，服务端此刻算的本周变化就是 0。
-export const weekDeltaOf = (metric: TaskMetric, now: Date): number =>
+export const weekDeltaOf = (metric: ReadMetric, now: Date): number =>
   Date.parse(metric.sampledAt) < weekStartOf(now) ? 0 : metric.weekDelta;
 
-export const goalProgressOf = (goal: ProjectGoal | null, metric: TaskMetric | null, now: Date): GoalProgress | null => {
+export const goalProgressOf = (goal: ProjectGoal | null, metric: TaskMetric, now: Date): GoalProgress | null => {
   if (goal === null) return null;
-  const weekDelta = metric === null ? null : weekDeltaOf(metric, now);
-  return { current: metric?.current ?? 0, target: goal.target, unit: goal.unit, weekDelta };
+  if (metric.kind === "unread") return { kind: "unread", target: goal.target, unit: goal.unit };
+  return {
+    kind: "read",
+    current: metric.current,
+    target: goal.target,
+    unit: goal.unit,
+    weekDelta: weekDeltaOf(metric, now),
+  };
 };
 
 export const metricNameOf = (source: MetricSource): string => {
@@ -113,13 +130,16 @@ export const metricNameOf = (source: MetricSource): string => {
 const NUMBER = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2, useGrouping: false });
 export const numberText = (value: number): string => NUMBER.format(value);
 
+export const UNREAD_TEXT = "还没读到数";
+
 export const goalText = (progress: GoalProgress): string =>
-  `${numberText(progress.current)} / ${numberText(progress.target)} ${progress.unit}`;
+  progress.kind === "unread"
+    ? `${numberText(progress.target)} ${progress.unit} · ${UNREAD_TEXT}`
+    : `${numberText(progress.current)} / ${numberText(progress.target)} ${progress.unit}`;
 
 // 进度条超过目标就画满，掉成负数画空。
-export const goalBarValue = (progress: GoalProgress): number =>
+export const goalBarValue = (progress: GoalProgress & { kind: "read" }): number =>
   Math.min(Math.max(progress.current, 0), progress.target);
 
-// 本周没动或还没有样本就不说。
-export const weekDeltaText = (delta: number | null): string | null =>
-  delta === null || delta === 0 ? null : `本周 ${delta > 0 ? "+" : ""}${numberText(delta)}`;
+export const weekDeltaText = (delta: number): string | null =>
+  delta === 0 ? null : `本周 ${delta > 0 ? "+" : ""}${numberText(delta)}`;

@@ -225,7 +225,7 @@ run 的正常收尾、异常、取消和停机都会清空结果。HTTP 请求�
 
 ## 指标上报
 
-`src/metric.ts` 的 `report_metric` 只挂在多 Bot 群的会话里，单聊没有这个工具。参数是 `value` 和 `label`，当前 run 的 runId、botId、groupId 随 `metric_report` 一起上行；label 去首尾空白，空白或超过 40 字时报中文错误，不发上行。只能走浏览器的平台读到真实数值后用它上报，不能编读数。label 和项目挂着的某个「Bot 报的数」同名就记到那个指标；挂了「Bot 报的数」但名字都对不上，整条不收，工具回中文错误让 Bot 改了重报；什么都没挂、目标又对手记的那条（或没有目标），才记到手记那条；其余情况也不收。落到哪由 shared 的 `landReported` 定，和控制面同一份规则。`renderTaskCard` 与 `read_task` 共用目标与进度文本：有目标时写目标值、期限、当前值、还差多少和本周变化；没有样本写「还没有数据」，达标写「已达成」，没有目标不增加这两行。项目挂了「Bot 报的数」时，进度之后再多一行「要报的数」列出这些名字，让 Bot 知道 label 写什么；没挂就没有这一行，卡片字节不变。
+`src/metric.ts` 的 `report_metric` 只挂在多 Bot 群的会话里，单聊没有这个工具。参数是 `value` 和 `label`，当前 run 的 runId、botId、groupId 随 `metric_report` 一起上行；label 去首尾空白，空白或超过 40 字时报中文错误，不发上行。只能走浏览器的平台读到真实数值后用它上报，不能编读数。label 和项目挂着的某个「Bot 报的数」去掉首尾空白后同名就记到那个指标；挂了「Bot 报的数」但名字都对不上，整条不收，工具回中文错误让 Bot 改了重报；什么都没挂、目标又对手记的那条（或没有目标），才记到手记那条；其余情况也不收。落到哪由 shared 的 `landReported` 定，和控制面同一份规则。`renderTaskCard` 与 `read_task` 共用目标与进度文本：有目标时写目标值、期限、当前值、还差多少和本周变化；没有样本（`metric.kind` 是 `unread`）写「还没有数据」，达标写「已达成」，没有目标不增加这两行。项目挂了「Bot 报的数」时，进度之后再多一行「要报的数」列出这些名字，让 Bot 知道 label 写什么；没挂就没有这一行，卡片字节不变。
 
 只给多 Bot 群，是因为单聊没有任务卡，报了也没有地方落。会话按群建，群的出身不变，所以建会话时一次定下，单聊会话的工具名单里压根没有它（`src/metric.ts:10-21`）。控制面那一半在 `packages/control-plane/src/agent/events/metric-report.ts`，校验 run 归属后落一条样本并推任务卡更新，run 收尾之后才到的报文作废。`test/runner.test.ts` 的「运行器的指标上报」一组只钉运行器这一半，控制面那一半由 `packages/control-plane/test/metric-poller.test.ts` 钉。
 

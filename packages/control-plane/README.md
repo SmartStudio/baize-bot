@@ -366,7 +366,7 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 任务卡上的目标是三列 `goal_target`、`goal_unit`、`goal_due_at`，契约是 `ProjectGoal`（`shared/src/domain.ts:146-187`）：目标数是正整数，上限 2147483647；单位 1 到 8 个字；期限可空。PATCH 任务卡给 `goal` 就三列整体替换，给 `null` 三列一起清空（`repo/tasks.ts:69-74`），不单改一列。没有单位的数、没有数的期限在卡上都读不懂。方案卡也一样，`goalTarget` 和 `goalUnit` 两个都给了才写进任务卡（`repo/projects.ts:194-199`），只给一个就当没有目标（`test/goals.test.ts:164`）。
 
-当前值不住在任务卡行上，住在 `metric_samples`，每记一次插一行。任务卡出边界前都过 `withMetric` / `withMetrics`（`repo/metrics.ts`），从样本算出 `current`、`weekDelta`、`sampledAt`；不过这一道，推出去的 `task_updated` 会把 Web 上的当前值冲成 null。存样本而不是覆盖一个数，是因为本周变化要拿得到周一之前的值。规则写在 `metricsOf`（第 21-64 行）：
+当前值不住在任务卡行上，住在 `metric_samples`，每记一次插一行。任务卡出边界前都过 `withMetric` / `withMetrics`（`repo/metrics.ts`），从样本算出 `{ kind: "read", current, weekDelta, sampledAt }`；一个样本都没有是 `{ kind: "unread" }`，不拿 0 或 null 顶，0 是读到了一个 0，Web 据此写「还没读到数」、不画进度条。不过这一道，推出去的 `task_updated` 会把 Web 上的读数冲成 unread。存样本而不是覆盖一个数，是因为本周变化要拿得到周一之前的值。规则写在 `metricsOf`（第 21-64 行）：
 
 - 本周从上海时区周一 00:00 起。
 - 当前值减周一之前的最后一个样本。
@@ -379,11 +379,13 @@ set_chief 是群在 Bot 前，和删 Bot 反向，是这套序之外唯一一条
 
 一个项目可以挂多个指标，挂在 `tasks.metric_sources`（jsonb 数组，最多 8 个），契约 `MetricSources`（`shared/src/domain.ts`）。每个来源有一个键（`metricKeyOf`）：`github_stars:<仓库>`、`x_followers:<账号 id>`、`reported:<名字>`，同一个键不许挂两次。样本按 (群, `metric_samples.metric`) 分序列，`metric` 为 null 是没挂指标时手记的那条。目标仍然只有一个，`tasks.goal_metric` 说它对哪个键，null 就对手记那条；PATCH 给 `metricSources` 整份替换，改完目标对的键不在挂着的里就回 400，什么都不改（`repo/tasks.ts` 的 `GoalMetricMissing` 在事务里抛）。任务卡出边界前过 `withMetrics`，`metric` 是目标那条的读数，`metrics` 和 `metricSources` 同序，每个指标一份读数加账号状态：读数器读的指标，账号是本人的、走接口的、登着的、平台对得上才算 `connected`，否则 `disconnected`，Web 提示去连；Bot 报的是 null。0051 把旧的单个 `metric_source` 迁成一个元素的数组，旧样本和目标都归到这个来源的键上，进度不变。
 
-能自己读的指标走 `metrics/readers.ts` 的读数器注册表，按 `kind` 登记：哪个平台的账号、请求哪个路径、从回包哪里取数、取不到怎么说。现在有两个，`github_stars` 读 `/repos/<仓库>` 的 `stargazers_count`，`x_followers` 用 X 接口授权读 `/2/users/me?user.fields=public_metrics` 的 `followers_count`。取令牌、30 秒超时、401 交回令牌强制刷新重试一次、还不认就 `expireLogin`、非 2xx 记一句日志都在 `metrics/poller.ts` 里，加一个平台只加一个读数器。`MetricPoller` 每 10 分钟扫一遍，按 UTC 对齐的六小时一格，库里这一格这个指标没有样本才去读，重启不会重取；同一群同一指标在一格里只落一条，`recordPolledSample` 先拿事务级 advisory 锁再做 NOT EXISTS 写入。读不到不写样本，上次的数和读到的时间原样留着。运行器上报的 `metric_report` 进 `agent/events/metric-report.ts`，落到哪由 shared 的 `landReported` 定：label 和挂着的某个 `reported` 来源同名就记到那个指标；挂了 `reported` 来源但都对不上就整条丢掉，运行器那边会报错让 Bot 重报；什么都没挂、目标又对手记的那条（或没有目标），才记到手记那条；其余情况都丢掉，丢的时候打一条 warn，带群、runId、Bot、label 和原因，不记数值。校验群和 run 的归属之后在 `whileRunOpen` 里落 `reported` 样本，run 收尾之后才到的报文作废，落了就推 `task_updated`。手动记数可以带 `metric` 指定记到哪个挂着的指标，没挂回 400，不带就记到目标那条。
+能自己读的指标走 `metrics/readers.ts` 的读数器注册表，按 `kind` 登记：哪个平台的账号、请求哪个路径、从回包哪里取数、取不到怎么说。现在有两个，`github_stars` 读 `/repos/<仓库>` 的 `stargazers_count`，`x_followers` 用 X 接口授权读 `/2/users/me?user.fields=public_metrics` 的 `followers_count`。取令牌、30 秒超时、401 交回令牌强制刷新重试一次、还不认就 `expireLogin`、非 2xx 记一句日志都在 `metrics/poller.ts` 里，加一个平台只加一个读数器。`MetricPoller` 每 10 分钟扫一遍，按 UTC 对齐的六小时一格，库里这一格这个指标没有样本才去读，重启不会重取；同一群同一指标在一格里只落一条，`recordPolledSample` 先拿事务级 advisory 锁再做 NOT EXISTS 写入。读不到不写样本，上次的数和读到的时间原样留着。运行器上报的 `metric_report` 进 `agent/events/metric-report.ts`，落到哪由 shared 的 `landReported` 定：label 和挂着的某个 `reported` 来源去掉首尾空白后同名就记到那个指标的键上；挂了 `reported` 来源但都对不上就整条丢掉，运行器那边会报错让 Bot 重报；什么都没挂、目标又对手记的那条（或没有目标），才记到手记那条；其余情况都丢掉，丢的时候打一条 warn，带群、runId、Bot、label 和原因，不记数值。校验群和 run 的归属之后在 `whileRunOpen` 里落 `reported` 样本，run 收尾之后才到的报文作废，落了就推 `task_updated`。手动记数可以带 `metric` 指定记到哪个挂着的指标，没挂回 400，不带就记到目标那条。
+
+`reported` 来源的 label 在契约层（`MetricSource`）去首尾空白，空的回 400，所以新挂的名字都是干净的；早先存下的名字可能带空格，库里不改它，`landReported` 比较时两边都去空白、落到那个来源自己的键上，旧的样本序列照样接得上。
 
 小红书没有接口，粉丝数这类只能 Bot 在浏览器里读了用 `report_metric` 报：项目挂一个 `{ kind: "reported", platform: "xiaohongshu", label: "粉丝" }`，Bot 报数时 label 写同一个名字。建小红书项目时自动挂读数例行还没做。
 
-首页 `GET /api/today` 的 running 项里 `goal` 和 `metric` 一律是 null（`repo/today.ts:225-226`），目标和进度只出现在任务卡、群列表和项目页上。
+首页 `GET /api/today` 的 running 项，项目那一行带任务卡的 `goal` 和目标那条的读数（`goalMetricOf`）；只有计划没有目标的那一行 `goal` 是 null、`metric` 是 unread。
 
 ### 周复盘
 

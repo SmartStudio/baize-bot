@@ -4,6 +4,7 @@ import {
   CreateBotResponse,
   CreateGroupResponse,
   GroupResponse,
+  UpdateTaskResponse,
   AccountId,
   type Bot,
   type GroupId,
@@ -291,7 +292,12 @@ async function pushesBefore(owner: Owner, groupId: GroupId, marker: number): Pro
   const before: ServerPush[] = [];
   for (;;) {
     const push = await owner.push.next();
-    if (push.type === "task_updated" && push.task.groupId === groupId && push.task.metric?.current === marker) {
+    if (
+      push.type === "task_updated" &&
+      push.task.groupId === groupId &&
+      push.task.metric.kind === "read" &&
+      push.task.metric.current === marker
+    ) {
       return before;
     }
     before.push(push);
@@ -311,7 +317,7 @@ describe("GitHub 星数轮询", () => {
       await server.metrics.tick();
       const pushed = await nextOfType(owner.push, "task_updated");
       expect(pushed.task.groupId).toBe(groupId);
-      expect(pushed.task.metric?.current, "推出去的任务卡带读回的星数").toBe(412);
+      expect(pushed.task.metric, "推出去的任务卡带读回的星数").toMatchObject({ kind: "read", current: 412 });
       expect(pushed.task.goal, "取样不动目标").toEqual({
         target: 1000,
         unit: "星",
@@ -322,7 +328,7 @@ describe("GitHub 星数轮询", () => {
       expect(github.requestsFor(repo), "带着账号的令牌读仓库").toEqual([
         { path: `/repos/${repo}`, authorization: "Bearer ghu_on_time" },
       ]);
-      expect((await taskOf(owner.client, groupId)).metric?.current).toBe(412);
+      expect((await taskOf(owner.client, groupId)).metric).toMatchObject({ kind: "read", current: 412 });
 
       github.stars.set(repo, 420);
       clock.now = new Date(clock.now.getTime() + HOUR_MS);
@@ -333,7 +339,7 @@ describe("GitHub 星数轮询", () => {
       clock.now = new Date(Math.ceil(clock.now.getTime() / METRIC_WINDOW_MS) * METRIC_WINDOW_MS);
       await server.metrics.tick();
       const next = await nextOfType(owner.push, "task_updated");
-      expect(next.task.metric?.current, "下一个窗口一开头就再读一次").toBe(420);
+      expect(next.task.metric, "下一个窗口一开头就再读一次").toMatchObject({ kind: "read", current: 420 });
       expect(github.requestsFor(repo)).toHaveLength(2);
       expect(await samplesOf(groupId)).toEqual([
         { value: "412", source: "github_stars" },
@@ -531,8 +537,10 @@ describe("X 粉丝数", () => {
         { url: FOLLOWERS_URL, authorization: "Bearer x_both" },
       ]);
       const read = await taskOf(owner.client, groupId);
-      expect(read.metric?.current, "目标进度还是按星数").toBe(88);
-      expect(read.metrics.map(({ key, metric, account }) => [key, metric?.current, account])).toEqual([
+      expect(read.metric, "目标进度还是按星数").toMatchObject({ kind: "read", current: 88 });
+      expect(
+        read.metrics.map(({ key, metric, account }) => [key, metric.kind === "read" ? metric.current : null, account]),
+      ).toEqual([
         [`github_stars:${repo}`, 88, "connected"],
         [`x_followers:${xId}`, 3400, "connected"],
       ]);
@@ -564,7 +572,11 @@ describe("X 粉丝数", () => {
       await server.metrics.tick();
       const first = (await taskOf(owner.client, groupId)).metrics;
       expect(first).toEqual([
-        { key, metric: { current: 500, weekDelta: 0, sampledAt: clock.now.toISOString() }, account: "connected" },
+        {
+          key,
+          metric: { kind: "read", current: 500, weekDelta: 0, sampledAt: clock.now.toISOString() },
+          account: "connected",
+        },
       ]);
 
       x.failWith = 503;
@@ -624,7 +636,7 @@ describe("X 粉丝数", () => {
 const RUN_BELONGS_TO = /^select "id" from "runs" where .*"computer_id"/;
 
 const withMetric = (pushes: readonly ServerPush[]) =>
-  pushes.filter((push) => push.type === "task_updated" && push.task.metric !== null);
+  pushes.filter((push) => push.type === "task_updated" && push.task.metric.kind === "read");
 
 describe("Bot 报数", () => {
   it("metric_report 带别的群的 runId 静默丢弃", async () => {
@@ -648,12 +660,12 @@ describe("Bot 报数", () => {
 
       // 派活换当前经手也推 task_updated，那几条不带数，跳过。
       let updated = await nextOfType(owner.push, "task_updated");
-      while (updated.task.metric === null) updated = await nextOfType(owner.push, "task_updated");
+      while (updated.task.metric.kind === "unread") updated = await nextOfType(owner.push, "task_updated");
       expect(updated.task.groupId, "第一条带数的 task_updated 是本群的，别的群那条没落").toBe(a.groupId);
-      expect(updated.task.metric?.current).toBe(412);
+      expect(updated.task.metric).toMatchObject({ kind: "read", current: 412 });
       expect(await samplesOf(a.groupId)).toEqual([{ value: "412", source: "reported" }]);
       expect(await samplesOf(b.groupId), "别的群一条样本都没有").toEqual([]);
-      expect((await taskOf(owner.client, b.groupId)).metric).toBeNull();
+      expect((await taskOf(owner.client, b.groupId)).metric).toEqual({ kind: "unread" });
     } finally {
       agent?.close();
       owner.close();
@@ -688,13 +700,51 @@ describe("Bot 报数", () => {
 
       const after = await taskOf(owner.client, groupId);
       expect(
-        after.metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
+        after.metrics.map(({ key, metric }) => [key, metric.kind === "read" ? metric.current : null]),
         "各落各的名字",
       ).toEqual([
         ["reported:粉丝", 1200],
         ["reported:互动率", 3.5],
       ]);
-      expect(after.metric?.current, "目标对的粉丝").toBe(1200);
+      expect(after.metric, "目标对的粉丝").toMatchObject({ kind: "read", current: 1200 });
+    } finally {
+      agent?.close();
+      owner.close();
+      await shutdown(server);
+    }
+  });
+
+  it("挂指标时名字去掉首尾空格，Bot 报「 粉丝 」落到「粉丝」；名字全是空格 400", async () => {
+    const server = await boot(windowClock());
+    const owner = await makeOwner(server);
+    let agent: AgentClient | null = null;
+    try {
+      const { groupId, task } = await makeProject(owner, "推广小红书");
+      const blank = await owner.client.patch(`/api/tasks/${task.id}`, {
+        metricSources: [{ kind: "reported", platform: "xiaohongshu", label: "   " }],
+      });
+      expect(blank.status, "名字全是空格不收").toBe(400);
+      const patched = await owner.client.patch(`/api/tasks/${task.id}`, {
+        metricSources: [{ kind: "reported", platform: "xiaohongshu", label: " 粉丝 " }],
+      });
+      expect(patched.status).toBe(200);
+      const fans = { kind: "reported", platform: "xiaohongshu", label: "粉丝" };
+      expect(UpdateTaskResponse.parse(await patched.json()).task.metricSources, "存进去的名字去过空格").toEqual([fans]);
+      await nextOfType(owner.push, "task_updated");
+      expect((await taskOf(owner.client, groupId)).metricSources, "读出来也是去过空格的").toEqual([fans]);
+
+      ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
+      expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
+      const prompt = await agent.expect("prompt");
+      const run = { runId: prompt.runId, botId: prompt.botId, groupId } as const;
+      agent.send({ type: "metric_report", ...run, label: " 粉丝 ", value: 1200 });
+      agent.send({ type: "run_done", ...run, steps: 1, inputTokens: 0, outputTokens: 0 });
+      await agent.ack(prompt.runId, 1);
+
+      expect((await taskOf(owner.client, groupId)).metrics, "报的数落在「粉丝」上").toMatchObject([
+        { key: "reported:粉丝", metric: { current: 1200 } },
+      ]);
+      expect(await samplesOf(groupId)).toEqual([{ value: "1200", source: "reported" }]);
     } finally {
       agent?.close();
       owner.close();
@@ -729,13 +779,13 @@ describe("Bot 报数", () => {
 
       const after = await taskOf(owner.client, groupId);
       expect(
-        after.metrics.map(({ key, metric }) => [key, metric?.current ?? null]),
+        after.metrics.map(({ key, metric }) => [key, metric.kind === "read" ? metric.current : null]),
         "「粉丝数」不是挂着的名字，哪个指标都不动",
       ).toEqual([
         ["reported:粉丝", null],
         ["reported:互动率", 3.5],
       ]);
-      expect(after.metric?.current, "目标进度还是互动率自己的数").toBe(3.5);
+      expect(after.metric, "目标进度还是互动率自己的数").toMatchObject({ kind: "read", current: 3.5 });
       expect(await samplesOf(groupId), "只落了对得上的那一条").toEqual([{ value: "3.5", source: "reported" }]);
     } finally {
       agent?.close();
@@ -754,7 +804,7 @@ describe("Bot 报数", () => {
       const { groupId } = await starsProject(owner, repo, "ghu_report_on_polled");
       github.stars.set(repo, 500);
       await server.metrics.tick();
-      expect((await nextOfType(owner.push, "task_updated")).task.metric?.current).toBe(500);
+      expect((await nextOfType(owner.push, "task_updated")).task.metric).toMatchObject({ kind: "read", current: 500 });
       ({ agent } = await helloAgent(server.port, owner.computer.computerId, owner.computer.token));
       expect((await owner.client.post(`/api/groups/${groupId}/messages`, { text: "@小销 读一下数" })).status).toBe(201);
       const prompt = await agent.expect("prompt");
@@ -765,10 +815,10 @@ describe("Bot 报数", () => {
       await agent.ack(prompt.runId, 1);
 
       const after = await taskOf(owner.client, groupId);
-      expect(after.metrics.map(({ key, metric }) => [key, metric?.current ?? null])).toEqual([
+      expect(after.metrics.map(({ key, metric }) => [key, metric.kind === "read" ? metric.current : null])).toEqual([
         [`github_stars:${repo}`, 500],
       ]);
-      expect(after.metric?.current, "目标进度还是读到的星数").toBe(500);
+      expect(after.metric, "目标进度还是读到的星数").toMatchObject({ kind: "read", current: 500 });
       expect(await samplesOf(groupId), "没多出 reported 样本").toEqual([{ value: "500", source: "github_stars" }]);
     } finally {
       agent?.close();
@@ -797,12 +847,12 @@ describe("Bot 报数", () => {
 
       agent.send({ type: "metric_report", runId: prompt.runId, botId: prompt.botId, groupId, label: "篇数", value: 7 });
       let updated = await nextOfType(owner.push, "task_updated");
-      while (updated.task.metric === null) updated = await nextOfType(owner.push, "task_updated");
+      while (updated.task.metric.kind === "unread") updated = await nextOfType(owner.push, "task_updated");
 
-      expect(updated.task.metric?.current, "目标对的手记那条").toBe(7);
-      expect(updated.task.metrics.map(({ key, metric }) => [key, metric?.current ?? null])).toEqual([
-        [`github_stars:${repo}`, null],
-      ]);
+      expect(updated.task.metric, "目标对的手记那条").toMatchObject({ kind: "read", current: 7 });
+      expect(
+        updated.task.metrics.map(({ key, metric }) => [key, metric.kind === "read" ? metric.current : null]),
+      ).toEqual([[`github_stars:${repo}`, null]]);
       expect(await samplesOf(groupId)).toEqual([{ value: "7", source: "reported" }]);
     } finally {
       agent?.close();

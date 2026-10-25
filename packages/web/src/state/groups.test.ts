@@ -643,7 +643,7 @@ describe("群入列按 kind，不按成员数和首席猜", () => {
     status: "active",
     goal: null,
     metricSources: [],
-    metric: null,
+    metric: { kind: "unread" },
     metrics: [],
   };
   const created = (group: Record<string, unknown>) => {

@@ -282,12 +282,13 @@ const topicTask = (overrides: Partial<TopicTask> = {}): TopicTask => ({
   cadence: "",
   goal: null,
   metricSources: [],
-  metric: null,
+  metric: { kind: "unread" },
   metrics: [],
   ...overrides,
 });
 
-const metricOf = (current: number, weekDelta: number): NonNullable<TopicTask["metric"]> => ({
+const metricOf = (current: number, weekDelta: number): TopicTask["metric"] => ({
+  kind: "read",
   current,
   weekDelta,
   sampledAt: "2026-10-09T08:00:00.000Z",
@@ -2009,7 +2010,7 @@ describe("运行器的主题任务工具", () => {
     });
 
     it("设了目标还没有样本：进度行说没有数据，不写成 0 / 1000", () => {
-      expect(goalLinesOf(topicTask({ goal: GOAL, metric: null }))).toEqual([
+      expect(goalLinesOf(topicTask({ goal: GOAL, metric: { kind: "unread" } }))).toEqual([
         "目标：1000 星，期限：2026-12-31T00:00:00.000Z",
         "进度：还没有数据",
       ]);
@@ -5974,7 +5975,7 @@ describe("运行器的指标上报", () => {
     });
     const task = topicTask({
       goal: { target: 1000, unit: "星", dueAt: "2026-12-31T00:00:00.000Z", metric: null },
-      metric: { current: 412, weekDelta: 37, sampledAt: "2026-10-09T08:00:00.000Z" },
+      metric: { kind: "read", current: 412, weekDelta: 37, sampledAt: "2026-10-09T08:00:00.000Z" },
     });
 
     await h.runner.prompt(promptMessage("bot-1", "run-1", "排本周计划", { task, members: TWO_MEMBERS }));

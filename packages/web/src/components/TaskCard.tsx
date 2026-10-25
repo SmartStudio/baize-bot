@@ -31,6 +31,12 @@ const draftOf = (task: TopicTask): GoalDraft => ({
   metric: task.goal === null ? (task.metrics[0]?.key ?? null) : task.goal.metric,
 });
 
+const switchedNameOf = (task: TopicTask, metric: string | null): string | null => {
+  if (task.goal === null || metric === task.goal.metric) return null;
+  const source = task.metricSources.find((candidate) => metricKeyOf(candidate) === metric);
+  return source === undefined ? "手记的数" : metricNameOf(source);
+};
+
 const dueInputOf = (due: DueDraft): string =>
   due.kind === "edited" ? due.input : due.dueAt === null ? "" : localInputOf(due.dueAt);
 
@@ -73,6 +79,7 @@ const GoalEditor = ({ task, saving, onEditing, onRefreshFailed }: GoalEditorProp
   const { actions } = useApp();
   const [draft, setDraft] = useState(() => draftOf(task));
   const [error, setError] = useState<string | null>(null);
+  const switched = switchedNameOf(task, draft.metric);
   const save = async (goal: ProjectGoal | null) => {
     onEditing("saving");
     setError(null);
@@ -168,6 +175,11 @@ const GoalEditor = ({ task, saving, onEditing, onRefreshFailed }: GoalEditorProp
           取消
         </button>
       </span>
+      {switched === null ? null : (
+        <p className="task-goal-switch" data-testid="task-goal-metric-switch">
+          进度改从「{switched}」的读数算，之前记的数留在原来那条
+        </p>
+      )}
       {error === null ? null : (
         <p className="task-goal-error" role="alert">
           {error}

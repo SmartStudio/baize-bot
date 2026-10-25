@@ -82,7 +82,7 @@ const prompt = (role: TablePrompt["role"] = "player", overrides: Partial<PromptM
     cadence: "",
     goal: null,
     metricSources: [],
-    metric: null,
+    metric: { kind: "unread" },
     metrics: [],
   },
   members: [{ id: BotId.parse("member-secret"), name: "秘密成员名单", tags: [], description: "秘密", seat: "member" }],

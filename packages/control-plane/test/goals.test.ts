@@ -149,7 +149,7 @@ describe("项目目标", () => {
       expect(card.body, "卡正文留着目标两项").toMatchObject({ goalTarget: 1000, goalUnit: "星", status: "started" });
       const goal = { target: 1000, unit: "星", dueAt: null, metric: null };
       expect(task.goal, "开始时回的任务卡就带目标，对的是手记的那条数").toEqual(goal);
-      expect(task.metric, "还没有样本").toBeNull();
+      expect(task.metric, "还没有样本").toEqual({ kind: "unread" });
       expect((await taskOf(s.client, group.id)).goal, "重新读群也是这个目标").toEqual(goal);
     } finally {
       s.close();
@@ -162,7 +162,7 @@ describe("项目目标", () => {
       const { card, group, task } = await startProject(s, OFFER);
       expect(card.body, "没给目标的卡正文里没有目标两项").not.toHaveProperty("goalTarget");
       expect(task.goal).toBeNull();
-      expect(task.metric).toBeNull();
+      expect(task.metric).toEqual({ kind: "unread" });
       expect(
         task.checklist.map((item) => ({ text: item.text, done: item.done })),
         "进度只能按清单算，清单里是方案卡的第一步",
@@ -250,9 +250,9 @@ describe("一个项目挂多个指标", () => {
       expect(updated.metricSources).toEqual(metricSources);
       expect(updated.goal).toEqual(goal);
       expect(updated.metrics, "同序，一个样本都没有，X 账号过期了要提示去连").toEqual([
-        { key: "github_stars:acme/baize", metric: null, account: "connected" },
-        { key: `x_followers:${x}`, metric: null, account: "disconnected" },
-        { key: "reported:小红书粉丝", metric: null, account: null },
+        { key: "github_stars:acme/baize", metric: { kind: "unread" }, account: "connected" },
+        { key: `x_followers:${x}`, metric: { kind: "unread" }, account: "disconnected" },
+        { key: "reported:小红书粉丝", metric: { kind: "unread" }, account: null },
       ]);
       expect((await nextOfType(s.push, "task_updated")).task.metrics).toEqual(updated.metrics);
 
@@ -262,8 +262,10 @@ describe("一个项目挂多个指标", () => {
       expect((await recordTo(3400, `x_followers:${x}`)).status).toBe(200);
       const last = await recordTo(56, "reported:小红书粉丝");
       const read = UpdateTaskResponse.parse(await last.json()).task;
-      expect(read.metric?.current, "目标进度按星数").toBe(120);
-      expect(read.metrics.map((reading) => reading.metric?.current)).toEqual([120, 3400, 56]);
+      expect(read.metric, "目标进度按星数").toMatchObject({ kind: "read", current: 120 });
+      expect(read.metrics.map((reading) => (reading.metric.kind === "read" ? reading.metric.current : null))).toEqual([
+        120, 3400, 56,
+      ]);
       expect((await taskOf(s.client, group.id)).metrics, "重新读群也是这三份").toEqual(read.metrics);
 
       const unknown = await recordTo(1, "reported:抖音粉丝");
@@ -326,7 +328,7 @@ describe("一个项目挂多个指标", () => {
         dueAt: "2030-12-31T16:00:00.000Z",
         metric: "github_stars:acme/keep",
       });
-      expect(kept.metric?.current, "进度还按星数").toBe(321);
+      expect(kept.metric, "进度还按星数").toMatchObject({ kind: "read", current: 321 });
 
       const toManual = await s.client.patch(`/api/tasks/${task.id}`, {
         goal: { target: 2000, unit: "星", dueAt: null, metric: null },
@@ -334,7 +336,7 @@ describe("一个项目挂多个指标", () => {
       expect(toManual.status).toBe(200);
       const manual = await taskOf(s.client, group.id);
       expect(manual.goal?.metric, "显式给 null 改对手记那条").toBeNull();
-      expect(manual.metric, "手记那条还没有数").toBeNull();
+      expect(manual.metric, "手记那条还没有数").toEqual({ kind: "unread" });
     } finally {
       s.close();
     }
@@ -347,15 +349,18 @@ describe("手动记数", () => {
     try {
       const { group } = await startProject(s, { ...OFFER, goalTarget: 1000, goalUnit: "星" });
       const task = await reportMetric(s.client, group.id, 412);
-      expect(task.metric?.current).toBe(412);
+      expect(task.metric).toMatchObject({ kind: "read", current: 412 });
       const pushed = await nextOfType(s.push, "task_updated");
       expect(pushed.task.groupId).toBe(group.id);
-      expect(pushed.task.metric?.current, "推出去的任务卡带最新的数").toBe(412);
+      expect(pushed.task.metric, "推出去的任务卡带最新的数").toMatchObject({ kind: "read", current: 412 });
       expect(pushed.task.goal, "记数不动目标").toEqual({ target: 1000, unit: "星", dueAt: null, metric: null });
-      expect((await taskOf(s.client, group.id)).metric?.current, "重新读群也是最新的数").toBe(412);
+      expect((await taskOf(s.client, group.id)).metric, "重新读群也是最新的数").toMatchObject({
+        kind: "read",
+        current: 412,
+      });
 
       const again = await reportMetric(s.client, group.id, 420);
-      expect(again.metric?.current, "再记一个数取最新那个").toBe(420);
+      expect(again.metric, "再记一个数取最新那个").toMatchObject({ kind: "read", current: 420 });
     } finally {
       s.close();
     }
@@ -369,7 +374,7 @@ describe("手动记数", () => {
       expect((await other.client.post(`/api/projects/${group.id}/metric`, { value: 1 })).status).toBe(404);
       expect((await s.client.post(`/api/projects/${s.assistant.groupId}/metric`, { value: 1 })).status).toBe(404);
       expect((await s.client.post(`/api/projects/${group.id}/metric`, { value: "多" })).status).toBe(400);
-      expect((await taskOf(s.client, group.id)).metric, "一个样本都没落").toBeNull();
+      expect((await taskOf(s.client, group.id)).metric, "一个样本都没落").toEqual({ kind: "unread" });
     } finally {
       s.close();
       other.close();
@@ -403,7 +408,7 @@ describe("本周变化", () => {
         current: 412,
         weekDelta: 37,
       });
-      expect((await taskOf(s.client, group.id)).metric?.weekDelta).toBe(37);
+      expect((await taskOf(s.client, group.id)).metric).toMatchObject({ kind: "read", weekDelta: 37 });
     } finally {
       s.close();
     }
@@ -549,7 +554,7 @@ describe("已有样本的项目", () => {
       for (;;) {
         const item = await nextOfType(s.push, "task_updated");
         if (accept(item.task)) {
-          expect(item.task.metric?.current, `${path}推出去的任务卡`).toBe(412);
+          expect(item.task.metric, `${path}推出去的任务卡`).toMatchObject({ kind: "read", current: 412 });
           return;
         }
       }
@@ -561,19 +566,25 @@ describe("已有样本的项目", () => {
       const list = (await (await s.client.get("/api/groups")).json()) as {
         items: { group: { id: string }; task: TopicTask }[];
       };
-      expect(list.items.find((item) => item.group.id === group.id)?.task.metric?.current, "群列表").toBe(412);
+      expect(list.items.find((item) => item.group.id === group.id)?.task.metric, "群列表").toMatchObject({
+        kind: "read",
+        current: 412,
+      });
 
       for (const [path, patch] of [
         ["空 PATCH", {}],
         ["普通 PATCH", { title: "推广白泽（改名）" }],
       ] as const) {
         const result = UpdateTaskResponse.parse(await (await s.client.patch(`/api/tasks/${task.id}`, patch)).json());
-        expect(result.task.metric?.current, `${path}回的任务卡`).toBe(412);
+        expect(result.task.metric, `${path}回的任务卡`).toMatchObject({ kind: "read", current: 412 });
         await pushed(path, () => true);
       }
 
       const replay = await s.client.post(`/api/messages/${card.id}/project-offer`, { decision: "start" });
-      expect(DecideProjectOfferResponse.parse(await replay.json()).task?.metric?.current, "方案卡重读").toBe(412);
+      expect(DecideProjectOfferResponse.parse(await replay.json()).task?.metric, "方案卡重读").toMatchObject({
+        kind: "read",
+        current: 412,
+      });
 
       const detail = GroupResponse.parse(await (await s.client.get(`/api/groups/${group.id}`)).json());
       const lead = detail.bots.find((bot) => bot.id === s.assistant.botId);
@@ -584,7 +595,7 @@ describe("已有样本的项目", () => {
         201,
       );
       const prompt = await nextPrompt();
-      expect(prompt.task?.metric?.current, "派活带的任务卡").toBe(412);
+      expect(prompt.task?.metric, "派活带的任务卡").toMatchObject({ kind: "read", current: 412 });
       await pushed("换经手", (t) => t.currentBotId === lead.id);
 
       const at = { runId: prompt.runId, botId: prompt.botId, groupId: prompt.groupId };
@@ -682,9 +693,9 @@ describe("首页在进行", () => {
         goal: { target: 1000, unit: "星", dueAt: null, metric: null },
         metric: expect.objectContaining({ current: 412 }),
       });
-      expect(byGroup.get(fresh.group.id), "有目标还没样本也出一行，metric 是 null").toMatchObject({
+      expect(byGroup.get(fresh.group.id), "有目标还没样本也出一行，metric 是 unread").toMatchObject({
         goal: { target: 1000, unit: "粉丝", dueAt: null, metric: null },
-        metric: null,
+        metric: { kind: "unread" },
       });
       expect(byGroup.has(plain.group.id), "没目标也没计划的项目不出行").toBe(false);
       expect(byGroup.has(finished.group.id), "任务卡做完了的项目不出行").toBe(false);

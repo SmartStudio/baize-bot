@@ -15,6 +15,7 @@ import {
   TopicTask,
   UsageRecord,
   User,
+  UNREAD_METRIC,
   metricKeyOf,
 } from "@baize/shared";
 import type * as schema from "../db/schema.js";
@@ -85,8 +86,8 @@ export function toTask(row: typeof schema.tasks.$inferSelect): TopicTask {
             metric: row.goalMetric,
           },
     metricSources: row.metricSources,
-    metric: null,
-    metrics: row.metricSources.map((source) => ({ key: metricKeyOf(source), metric: null, account: null })),
+    metric: UNREAD_METRIC,
+    metrics: row.metricSources.map((source) => ({ key: metricKeyOf(source), metric: UNREAD_METRIC, account: null })),
   });
 }
 

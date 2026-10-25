@@ -193,7 +193,7 @@ export const MetricSource = z.discriminatedUnion("kind", [
     })
     .strict(),
   z.object({ kind: z.literal("x_followers"), accountId: AccountId }).strict(),
-  z.object({ kind: z.literal("reported"), platform: Platform, label: z.string().min(1).max(40) }).strict(),
+  z.object({ kind: z.literal("reported"), platform: Platform, label: z.string().trim().min(1).max(40) }).strict(),
 ]);
 export type MetricSource = z.infer<typeof MetricSource>;
 
@@ -226,8 +226,11 @@ export function landReported(
   task: { readonly sources: readonly MetricSource[]; readonly goalMetric: MetricKey | null },
   label: string,
 ): MetricLanding<ReportRefusal> {
-  const labels = task.sources.flatMap((source) => (source.kind === "reported" ? [source.label] : []));
-  if (labels.includes(label)) return { kind: "land", metric: reportedMetricKey(label) };
+  const reported = task.sources.flatMap((source) => (source.kind === "reported" ? [source] : []));
+  const wanted = label.trim();
+  const matched = reported.find((source) => source.label.trim() === wanted);
+  if (matched !== undefined) return { kind: "land", metric: metricKeyOf(matched) };
+  const labels = reported.map((source) => source.label);
   if (labels.length > 0) return { kind: "refused", reason: { kind: "unknown_label", labels } };
   if (task.goalMetric === null) return { kind: "land", metric: null };
   return { kind: "refused", reason: { kind: "polled_goal" } };
@@ -240,15 +243,23 @@ export const MetricSources = z
   .refine((sources) => new Set(sources.map(metricKeyOf)).size === sources.length, "同一个指标挂了两次");
 
 // 最新一个样本和本周变化。weekDelta 是周一 00:00 上海时区之后的最新样本减之前的最后一个样本（D18）。
-export const TaskMetric = z
-  .object({ current: z.number().finite(), weekDelta: z.number().finite(), sampledAt: Timestamp })
+export const ReadMetric = z
+  .object({
+    kind: z.literal("read"),
+    current: z.number().finite(),
+    weekDelta: z.number().finite(),
+    sampledAt: Timestamp,
+  })
   .strict();
+export type ReadMetric = z.infer<typeof ReadMetric>;
+export const TaskMetric = z.discriminatedUnion("kind", [z.object({ kind: z.literal("unread") }).strict(), ReadMetric]);
 export type TaskMetric = z.infer<typeof TaskMetric>;
+export const UNREAD_METRIC: TaskMetric = { kind: "unread" };
 
 export const MetricReading = z
   .object({
     key: MetricKey,
-    metric: TaskMetric.nullable(),
+    metric: TaskMetric,
     account: z.enum(["connected", "disconnected"]).nullable(),
   })
   .strict();
@@ -268,8 +279,7 @@ export const TopicTask = z.object({
   status: TaskStatus,
   goal: ProjectGoal.nullable(),
   metricSources: MetricSources,
-  // 目标对的那条数的读数。没有样本就是 null，哪怕指标已经挂上了。
-  metric: TaskMetric.nullable(),
+  metric: TaskMetric,
   // 和 metricSources 一一对应、同序。
   metrics: z.array(MetricReading),
 });

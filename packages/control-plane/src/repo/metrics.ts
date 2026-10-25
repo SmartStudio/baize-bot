@@ -5,7 +5,9 @@ import {
   metricKeyOf,
   type MetricKey,
   type MetricLanding,
+  UNREAD_METRIC,
   type MetricReading,
+  type ReadMetric,
   type TaskMetric,
   type TopicTask,
 } from "@baize/shared";
@@ -20,7 +22,7 @@ import { weekStart } from "./usage.js";
 
 export type MetricSampleSource = "manual" | "reported" | PolledMetricKind;
 
-export type GroupMetrics = ReadonlyMap<string | null, TaskMetric>;
+export type GroupMetrics = ReadonlyMap<string | null, ReadMetric>;
 
 type MetricRow = {
   readonly groupId: string;
@@ -71,12 +73,13 @@ export async function metricsOf(
       on first_this_week.group_id = latest.group_id and first_this_week.metric is not distinct from latest.metric
   `);
 
-  const metrics = new Map<string, Map<string | null, TaskMetric>>();
+  const metrics = new Map<string, Map<string | null, ReadMetric>>();
   for (const row of rows) {
     const current = Number(row.current);
     const baseline = row.latestBeforeWeek ? row.current : (row.beforeWeek ?? row.firstThisWeek);
-    const series = metrics.get(row.groupId) ?? new Map<string | null, TaskMetric>();
+    const series = metrics.get(row.groupId) ?? new Map<string | null, ReadMetric>();
     series.set(row.metric, {
+      kind: "read",
       current,
       weekDelta: baseline === null ? 0 : current - Number(baseline),
       sampledAt: row.sampledAt,
@@ -86,8 +89,8 @@ export async function metricsOf(
   return metrics;
 }
 
-export const goalMetricOf = (task: TopicTask, series: GroupMetrics | undefined): TaskMetric | null =>
-  series?.get(task.goal?.metric ?? null) ?? null;
+export const goalMetricOf = (task: TopicTask, series: GroupMetrics | undefined): TaskMetric =>
+  series?.get(task.goal?.metric ?? null) ?? UNREAD_METRIC;
 
 async function connectedAccounts(db: Db | Tx, tasksIn: readonly TopicTask[]): Promise<Map<string, Set<string>>> {
   const accountIds = [
@@ -132,7 +135,7 @@ export async function withMetrics(db: Db | Tx, tasksIn: readonly TopicTask[], no
       const key = metricKeyOf(source);
       return {
         key,
-        metric: ofGroup?.get(key) ?? null,
+        metric: ofGroup?.get(key) ?? UNREAD_METRIC,
         account: isPolled(source)
           ? accountsOfGroup?.has(`${source.accountId}:${platformOfPolled(source)}`)
             ? "connected"

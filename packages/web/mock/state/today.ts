@@ -15,6 +15,7 @@ import {
   PublicationId,
   RunId,
   TodayResponse,
+  UNREAD_METRIC,
   type TodayAssistantLine,
   type TodayPendingItem,
 } from "@baize/shared";
@@ -709,7 +710,7 @@ export const todayOf = (): TodayResponse => {
         {
           at: plan.decidedAt ?? plan.createdAt,
           id: plan.id,
-          item: { groupId: group.id, title: plan.title, ...counts, goal: null, metric: null },
+          item: { groupId: group.id, title: plan.title, ...counts, goal: null, metric: UNREAD_METRIC },
         },
       ];
     })

@@ -63,11 +63,11 @@ const signed = (value: number): string => {
  * 目标的两行：目标和期限，当前值 / 目标、还差多少、本周变化。没有目标一行都不出，这样没设目标的项目
  * 卡片和加这两行之前逐字相同；设了目标还没有样本，进度写「还没有数据」而不是 0，0 是一个真实的读数。
  */
-function renderGoal(goal: ProjectGoal | null, metric: TaskMetric | null): string[] {
+function renderGoal(goal: ProjectGoal | null, metric: TaskMetric): string[] {
   if (goal === null) return [];
   const { target, unit } = goal;
   const head = `目标：${target} ${unit}，期限：${goal.dueAt ?? NO_DUE}`;
-  if (metric === null) return [head, "进度：还没有数据"];
+  if (metric.kind === "unread") return [head, "进度：还没有数据"];
   const gap = target - metric.current;
   // 达成按真实差额判，显示再舍入。正差额舍入后是 0 就说不足一分，不能写「还差 0」让模型以为到了。
   const shown = plain(gap);

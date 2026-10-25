@@ -71,17 +71,17 @@ it("0051 把单个来源迁成一个元素的数组，旧样本和目标归到�
 
     const stars = await read("g-stars");
     expect(stars.goal).toEqual({ target: 1000, unit: "个", dueAt: null, metric: "github_stars:baize/bot" });
-    expect(stars.metric?.current, "目标进度还是最新那条样本").toBe(320);
-    expect(stars.metrics.map(({ key, metric, account }) => [key, metric?.current, account])).toEqual([
-      ["github_stars:baize/bot", 320, "connected"],
-    ]);
+    expect(stars.metric, "目标进度还是最新那条样本").toMatchObject({ kind: "read", current: 320 });
+    expect(
+      stars.metrics.map(({ key, metric, account }) => [key, metric.kind === "read" ? metric.current : null, account]),
+    ).toEqual([["github_stars:baize/bot", 320, "connected"]]);
     const xhs = await read("g-xhs");
-    expect(xhs.metrics.map(({ key, metric, account }) => [key, metric?.current, account])).toEqual([
-      ["reported:粉丝", 800, null],
-    ]);
+    expect(
+      xhs.metrics.map(({ key, metric, account }) => [key, metric.kind === "read" ? metric.current : null, account]),
+    ).toEqual([["reported:粉丝", 800, null]]);
     const plain = await read("g-plain");
     expect(plain.metricSources).toEqual([]);
-    expect(plain.metric?.current, "没挂来源的项目，手记的数还是目标进度").toBe(12);
+    expect(plain.metric, "没挂来源的项目，手记的数还是目标进度").toMatchObject({ kind: "read", current: 12 });
   } finally {
     await server?.close();
     await database.close();

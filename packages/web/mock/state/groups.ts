@@ -88,7 +88,7 @@ export const createGroup = (input: {
     cadence: input.cadence ?? "",
     goal: null,
     metricSources: [],
-    metric: null,
+    metric: { kind: "unread" },
     metrics: [],
   });
   groups.set(group.id, group);

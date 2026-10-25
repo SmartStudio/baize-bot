@@ -4,6 +4,7 @@ import {
   GroupId,
   RoutineId,
   TodayResponse,
+  UNREAD_METRIC,
   type TodayAssistantLine,
   type TodayDoneItem,
   type TodayNextItem,
@@ -257,7 +258,7 @@ export async function getToday(db: Db, ownerId: UserId, viewer: Viewer, now = ne
       return {
         at: plan.decidedAt ?? plan.createdAt,
         id: plan.id,
-        item: { groupId, title: plan.title, ...counts, goal: null, metric: null },
+        item: { groupId, title: plan.title, ...counts, goal: null, metric: UNREAD_METRIC },
       };
     })
     .filter((row): row is { at: Date; id: string; item: TodayRunningItem } => row !== null)

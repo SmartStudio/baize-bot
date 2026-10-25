@@ -3,6 +3,7 @@ import {
   metricKeyOf,
   ProjectResponse,
   ProjectReviewId,
+  UNREAD_METRIC,
   type Group,
   type GroupId,
   type Message,
@@ -54,16 +55,17 @@ export const weekStartOf = (now: Date): Date => {
 const seriesOf = (groupId: string, metric: string | null) => `${groupId}\n${metric ?? ""}`;
 
 // 和控制面 metrics.ts#metricsOf 同一套口径：最新值减周一之前最后一个；周一之前没有就减本周第一个；最新的本身在周一之前就记 0。
-export const metricOf = (groupId: string, now: Date, metric: string | null): TaskMetric | null => {
+export const metricOf = (groupId: string, now: Date, metric: string | null): TaskMetric => {
   const samples = goalStateNow().samples.get(seriesOf(groupId, metric)) ?? [];
   const latest = samples.at(-1);
-  if (latest === undefined) return null;
+  if (latest === undefined) return UNREAD_METRIC;
   const start = weekStartOf(now).getTime();
   const baseline =
     latest.at < start
       ? latest
       : (samples.findLast((sample) => sample.at < start) ?? samples.find((sample) => sample.at >= start));
   return {
+    kind: "read",
     current: latest.value,
     weekDelta: baseline === undefined ? 0 : latest.value - baseline.value,
     sampledAt: new Date(latest.at).toISOString(),

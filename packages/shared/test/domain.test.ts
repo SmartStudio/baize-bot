@@ -18,6 +18,7 @@ import {
   Handoff,
   Message,
   MessageBody,
+  MetricSource,
   MetricSources,
   ProjectGoal,
   ProjectOfferPlatform,
@@ -81,7 +82,7 @@ describe("domain schemas reject illegal states", () => {
       status: "active",
       goal: null,
       metricSources: [],
-      metric: null,
+      metric: { kind: "unread" },
       metrics: [],
     };
     expect(TopicTask.safeParse({ ...task, number: "T-2481" }).success).toBe(true);
@@ -238,6 +239,21 @@ describe("domain schemas reject illegal states", () => {
       ],
       ["没挂要报的数、目标对星数", { kind: "refused", reason: { kind: "polled_goal" } }],
     ]);
+  });
+
+  it("Bot 报的数名字带首尾空格照样对得上；挂指标时名字去掉首尾空格，空名字不收", () => {
+    const fans = MetricSource.parse({ kind: "reported", platform: "xiaohongshu", label: " 粉丝 " });
+    expect(fans, "存进去的名字去过空格").toEqual({ kind: "reported", platform: "xiaohongshu", label: "粉丝" });
+    expect(MetricSource.safeParse({ kind: "reported", platform: "xiaohongshu", label: "   " }).success).toBe(false);
+    expect(landReported({ sources: [fans], goalMetric: null }, " 粉丝 ")).toEqual({
+      kind: "land",
+      metric: "reported:粉丝",
+    });
+    const legacy = { kind: "reported", platform: "xiaohongshu", label: "互动率 " } as const;
+    expect(landReported({ sources: [legacy], goalMetric: null }, "互动率"), "早先存下带空格的名字也认").toEqual({
+      kind: "land",
+      metric: "reported:互动率 ",
+    });
   });
 
   it("PATCH 的目标可以不带 metric，读出来的目标照旧补 null", () => {
@@ -622,7 +638,7 @@ describe("今日页的共享形状", () => {
         { kind: "plan_approved", at: now, groupId: "g1", title: "本周计划", draftCount: 1 },
         { kind: "routine", at: now, groupId: null, title: "每日早报", note: "新增 3 条线索" },
       ],
-      running: [{ groupId: "g1", title: "本周计划", published: 1, planned: 3, goal: null, metric: null }],
+      running: [{ groupId: "g1", title: "本周计划", published: 1, planned: 3, goal: null, metric: { kind: "unread" } }],
       next: [
         { kind: "draft", at: now, draft },
         { kind: "routine", at: now, routineId: "routine-1", groupId: null, botId: "b1", title: "每日早报" },
@@ -647,7 +663,7 @@ describe("今日页的共享形状", () => {
           {
             ...runningItem,
             goal: { target: 100, unit: "星", dueAt: null },
-            metric: { current: 42, weekDelta: 5, sampledAt: now },
+            metric: { kind: "read", current: 42, weekDelta: 5, sampledAt: now },
           },
         ],
       }).success,
@@ -655,7 +671,7 @@ describe("今日页的共享形状", () => {
     ).toBe(true);
     expect(
       TodayResponse.safeParse({ ...response, running: [{ ...runningItem, goal: undefined }] }).success,
-      "goal 和 metric 必填，没有就显式给 null",
+      "goal 和 metric 必填，没有目标显式给 null，没读到数显式给 unread",
     ).toBe(false);
     expect(TodayResponse.safeParse({ ...response, running: [{ ...runningItem, metric: undefined }] }).success).toBe(
       false,

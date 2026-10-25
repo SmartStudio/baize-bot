@@ -552,7 +552,6 @@ export const TodayDoneItem = z.discriminatedUnion("kind", [
 export type TodayDoneItem = z.infer<typeof TodayDoneItem>;
 
 // 进行中一个项目一行，进度是这个项目当前计划里已发出的稿子数对总数，没有计划时两个都是 0。
-// goal 和 metric 是第 2 期按目标画进度用的：有目标就按 metric.current 对 goal.target 画，没有退回稿子数；控制面现在一律填 null。
 export const TodayRunningItem = z
   .object({
     groupId: GroupId,
@@ -560,7 +559,7 @@ export const TodayRunningItem = z
     published: z.number().int().nonnegative(),
     planned: z.number().int().nonnegative(),
     goal: ProjectGoal.nullable(),
-    metric: TaskMetric.nullable(),
+    metric: TaskMetric,
   })
   .strict();
 export type TodayRunningItem = z.infer<typeof TodayRunningItem>;

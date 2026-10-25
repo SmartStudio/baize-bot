@@ -46,7 +46,7 @@ const taskOf = (group: Group) =>
     status: "active",
     goal: null,
     metricSources: [],
-    metric: null,
+    metric: { kind: "unread" },
     metrics: [],
   });
 const greeting = Message.parse({
