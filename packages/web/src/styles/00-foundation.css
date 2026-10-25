@@ -1,5 +1,18 @@
 /* 只用 src/ds/tokens 里的变量。任何裸色值、裸圆角、裸间距都算违规。 */
 
+/* 叠放层级只在这张表里定，从下往上。画面接管盖住设置窗口这些弹窗；⌘K 在接管时也归这边，所以快速切换和快捷键表盖在画面上；
+   右下角的接手提示要在快速切换的遮罩上面还点得到；toast 最上。 */
+:root {
+  --layer-menu: 2;
+  --layer-drawer: 2;
+  --layer-nav: 3;
+  --layer-dialog: 3;
+  --layer-live: 4;
+  --layer-quick-switch: 5;
+  --layer-takeover-hint: 6;
+  --layer-toast: 7;
+}
+
 *,
 *::before,
 *::after {

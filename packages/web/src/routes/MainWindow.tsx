@@ -19,6 +19,7 @@ import { useEscapeToClose } from "../components/useEscapeToClose.js";
 import { PushBanner } from "../components/PushBanner.js";
 import { LiveHost } from "../live/LiveHost.js";
 import { QuickSwitch } from "../components/QuickSwitch.js";
+import { RestoreFocus } from "../components/RestoreFocus.js";
 import { ShortcutSheet } from "../components/ShortcutSheet.js";
 import { shortcutOf, type Shortcut } from "../components/shortcuts.js";
 import { switchItems } from "../components/switchItems.js";
@@ -188,18 +189,20 @@ export const MainWindow = () => {
   useUnreadTitle(ready?.unreadNotices ?? 0, actions.markNoticesRead);
 
   const appReady = ready !== null;
-  const keysGoToComputer = ready !== null && shownLive(ready.content) !== null;
+  const live = ready === null ? null : shownLive(ready.content);
+  // 画面接管里只有 ⌘K 归这边，别的组合键照样发到电脑；终端里一个不留，Ctrl+K 在 shell 里是删到行尾。
+  const ours = live === null ? "all" : live.kind === "terminal" ? "none" : "switch";
   useEffect(() => {
-    if (!appReady || keysGoToComputer) return;
+    if (!appReady || ours === "none") return;
     const onKey = (event: KeyboardEvent) => {
       const shortcut = shortcutOf(event);
-      if (shortcut === null) return;
+      if (shortcut === null || (ours === "switch" && shortcut !== "switch")) return;
       event.preventDefault();
       setQuick((current) => (current === shortcut ? "none" : shortcut));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [appReady, keysGoToComputer]);
+  }, [appReady, ours]);
   // 点通知跳过来时浮层还盖着，人就看不到跳到了哪。每次跳转的 key 都不同，同一页连点两条也各收一次。
   // 在渲染时比对，不放进 effect 里多渲染一轮。
   const noticeKey = openedFromNotice(location.state) ? location.key : null;
@@ -643,19 +646,23 @@ export const MainWindow = () => {
           onClose={() => setOverlay("none")}
         />
       ) : null}
-      {quick === "switch" ? (
-        <QuickSwitch
-          items={switchItems(ready.conversations, bots)}
-          onPick={(item) => {
-            setQuick("none");
-            setOverlay("none");
-            navigate(item.path);
-          }}
-          onClose={() => setQuick("none")}
-        />
-      ) : quick === "shortcuts" ? (
-        <ShortcutSheet onClose={() => setQuick("none")} />
-      ) : null}
+      {quick === "none" ? null : (
+        <RestoreFocus>
+          {quick === "switch" ? (
+            <QuickSwitch
+              items={switchItems(ready.conversations, bots)}
+              onPick={(item) => {
+                setQuick("none");
+                setOverlay("none");
+                navigate(item.path);
+              }}
+              onClose={() => setQuick("none")}
+            />
+          ) : (
+            <ShortcutSheet onClose={() => setQuick("none")} />
+          )}
+        </RestoreFocus>
+      )}
       <LiveHost />
     </div>
   );

@@ -1,6 +1,6 @@
 /* 电脑上一页的实时画面。盖在设置窗口之上：账号页点登录时设置窗口还开着。 */
 .live-scrim {
-  z-index: 6;
+  z-index: var(--layer-live);
 }
 
 .live-panel {
@@ -163,12 +163,12 @@
   white-space: nowrap;
 }
 
-/* 没摆着的接手：右下角一条一条往上叠，盖在画面面板（6）之上，登录面板开着时也点得到。 */
+/* 没摆着的接手：右下角一条一条往上叠，盖在画面面板和快速切换之上，登录面板开着时也点得到。 */
 .takeover-hints {
   position: fixed;
   right: var(--space-6);
   bottom: var(--space-6);
-  z-index: 7;
+  z-index: var(--layer-takeover-hint);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);

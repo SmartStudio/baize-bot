@@ -52,7 +52,7 @@
 .mention-menu {
   position: absolute;
   bottom: 100%;
-  z-index: 2;
+  z-index: var(--layer-menu);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);

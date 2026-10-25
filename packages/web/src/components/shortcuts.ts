@@ -56,7 +56,8 @@ export const shortcutSections = (client: ClientPlatform = clientPlatform()): Sho
     {
       title: "画面接管和终端",
       rows: [
-        { keys: ["任意键"], what: `直接发到电脑上，这时 ${mod} K、${mod} / 不在这边打开` },
+        { keys: ["任意键"], what: `直接发到电脑上，这时 ${mod} / 不在这边打开` },
+        { keys: [mod, "K"], what: "画面接管里照样快速切换，终端里发到电脑上" },
         { keys: [mod, "V"], what: "贴的是你这边剪贴板里的字" },
         { keys: [mod, "…"], what: "画面接管里，到云电脑上是 Ctrl，到 Mac 上是 ⌘" },
       ],

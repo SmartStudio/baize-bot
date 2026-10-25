@@ -5,6 +5,7 @@ import { useApp } from "../state/app.js";
 import type { ScreenSession } from "../state/live.js";
 import { reconnectDelay } from "../state/reconnect.js";
 import { LIVE_TEXT, PLATFORM, beforeChinese, computerName, liveEndText } from "../components/messages/content.js";
+import { shortcutOf } from "../components/shortcuts.js";
 import {
   createClickCounter,
   createMoveCoalescer,
@@ -50,6 +51,7 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
   const movesRef = useRef<MoveCoalescer | null>(null);
   const [countClicks] = useState(() => createClickCounter());
   const pressClicks = useRef(1);
+  const heldRef = useRef(new Map<string, Extract<LiveInput, { kind: "key" }>>());
 
   const sendInput = (input: LiveInput) => viewerRef.current?.send({ t: "input", input });
 
@@ -150,11 +152,23 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
   };
 
   const key = (phase: "down" | "up", event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // ⌘K 归 App 拉起快速切换：不发也不拦，让它冒到窗口上。
+    if (shortcutOf(event.nativeEvent) === "switch") return;
     const input = keyInput(phase, event.nativeEvent, target);
-    if (input === null) return;
+    if (input?.kind !== "key") return;
     event.preventDefault();
+    // 按下没发过去的键，抬起也不发：比如关快速切换的那下 Esc，抬起时焦点已经回到画面上。
+    if (phase === "down") heldRef.current.set(input.code, input);
+    else if (!heldRef.current.delete(input.code)) return;
     movesRef.current?.flush();
     sendInput(input);
+  };
+
+  // 焦点离开画面（拉起快速切换、点了按钮）之后这边收不到抬起，替还按着的键补发，免得电脑那页以为 ⌘ 一直按着。
+  const releaseHeld = () => {
+    movesRef.current?.flush();
+    for (const input of heldRef.current.values()) sendInput({ ...input, phase: "up", text: null, modifiers: 0 });
+    heldRef.current.clear();
   };
 
   const typeText = (text: string) => {
@@ -248,6 +262,7 @@ export const LivePanel = ({ session, onDismiss }: Props) => {
             spellCheck={false}
             onKeyDown={(event) => key("down", event)}
             onKeyUp={(event) => key("up", event)}
+            onBlur={releaseHeld}
             onCompositionEnd={(event) => {
               typeText(event.data);
               event.currentTarget.value = "";
