@@ -240,7 +240,7 @@ export type EditDraftResult =
   | { readonly kind: "invalid"; readonly error: string };
 
 /**
- * Bot 改一条自己群里的草稿。发出去的和正在发的不改。内容指纹没变就原样保留状态，
+ * Bot 改一条自己在这个群里起的草稿，同群别的 Bot 起的当找不到。发出去的和正在发的不改。内容指纹没变就原样保留状态，
  * 变了一律回到待批：已批的要重新批，退回的和发失败的也要人再看一眼。
  */
 export async function editDraft(
@@ -255,7 +255,14 @@ export async function editDraft(
       .select({ draft: drafts, via: accounts.via })
       .from(drafts)
       .innerJoin(accounts, eq(accounts.id, drafts.accountId))
-      .where(and(eq(drafts.id, draftId), eq(drafts.ownerId, owner.ownerId), eq(drafts.groupId, owner.groupId)))
+      .where(
+        and(
+          eq(drafts.id, draftId),
+          eq(drafts.ownerId, owner.ownerId),
+          eq(drafts.groupId, owner.groupId),
+          eq(drafts.botId, owner.botId),
+        ),
+      )
       .limit(1)
       .for("update", { of: drafts });
     if (locked === undefined) return { kind: "not_found" };

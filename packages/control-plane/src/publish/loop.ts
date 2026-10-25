@@ -63,7 +63,8 @@ export class PublishLoop {
   constructor(options: PublishLoopOptions) {
     this.#options = options;
     this.#now = options.now ?? (() => new Date());
-    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    // unref：关进程时不为等一张动图处理多挂一分钟。
+    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms).unref()));
     this.#deps = {
       db: options.db,
       push: options.push,
@@ -188,7 +189,7 @@ export class PublishLoop {
             continue;
           }
           if (error instanceof PlatformForbidden) {
-            const forbidden = classifyForbidden({ needs, granted: token.scope, body: error.body });
+            const forbidden = classifyForbidden({ step: error.step, needs, granted: token.scope, body: error.body });
             log.warn("草稿没发出去", { draftId: draft.id, err: error });
             await publishFailed(
               this.#deps,

@@ -6,6 +6,7 @@ import type {
   PublishFailureReason,
   PublishVia,
 } from "@baize/shared";
+import type { PublishStep } from "./forbidden.js";
 
 /** externalId 为 null：电脑那边发出去了，但没读到平台上的 id。走接口的一定有。 */
 export type Published = { readonly url: string; readonly externalId: string | null };
@@ -29,8 +30,11 @@ export class TokenRejected extends PublishError {
 
 /** 平台回 403：令牌是认的，只是不让做这件事。 */
 export class PlatformForbidden extends PublishError {
-  constructor(readonly body: string) {
-    super("forbidden", `平台回 403：${body.slice(0, 500)}`);
+  constructor(
+    readonly body: string,
+    readonly step: PublishStep,
+  ) {
+    super("forbidden", `平台在${step === "upload" ? "传图" : "发帖"}那一步回 403：${body.slice(0, 500)}`);
   }
 }
 
@@ -93,7 +97,7 @@ async function send(url: string, init: RequestInit): Promise<Record<string, unkn
     throw new PublishError("error", `没等到平台的回应：${error instanceof Error ? error.message : String(error)}`);
   }
   if (response.status === 401) throw new TokenRejected("平台回 401，令牌不认了");
-  if (response.status === 403) throw new PlatformForbidden(await response.text().catch(() => ""));
+  if (response.status === 403) throw new PlatformForbidden(await response.text().catch(() => ""), "post");
   if (!response.ok) throw new PublishError("error", `平台回 ${response.status}`);
   const json: unknown = await response.json().catch(() => null);
   if (typeof json !== "object" || json === null) throw new PublishError("error", "平台的回应不是 JSON 对象");
@@ -252,7 +256,12 @@ async function publishX(input: ApiPublishInput): Promise<Published> {
     reply = { in_reply_to_tweet_id: target[1] };
   }
   const mediaIds: string[] = [];
-  for (const image of images) mediaIds.push(await uploadXMedia(input, image));
+  try {
+    for (const image of images) mediaIds.push(await uploadXMedia(input, image));
+  } catch (error) {
+    if (error instanceof PlatformForbidden) throw new PlatformForbidden(error.body, "upload");
+    throw error;
+  }
   const json = await call(`${baseUrl}/2/tweets`, token, {
     text: content.text,
     ...(reply === undefined ? {} : { reply }),
