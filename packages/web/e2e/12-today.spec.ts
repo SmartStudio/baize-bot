@@ -176,6 +176,7 @@ test("窄窗首页和两种输入框的焦点环不横向溢出", async ({ page,
     true,
   );
 
+  await page.getByTestId("nav-open").click();
   await openBot(page, "小服");
   const chatInput = page.getByTestId("composer-input");
   await chatInput.focus();

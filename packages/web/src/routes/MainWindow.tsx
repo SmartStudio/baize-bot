@@ -31,6 +31,7 @@ import { TablePage } from "./TablePage.js";
 import { RoutinesPage } from "./RoutinesPage.js";
 import { TeamPage } from "./TeamPage.js";
 import { pathOf, screenOf } from "./screen.js";
+import { useNarrow, watchNarrow } from "./narrow.js";
 import { useApp } from "../state/app.js";
 import { pokerTableOf } from "../state/poker.js";
 import { MY_ROUTINES } from "../state/routines.js";
@@ -110,7 +111,9 @@ const narrowerThanChatPlus = (tokens: readonly string[]) => {
   };
 };
 const panelDrawer = narrowerThanChatPlus(["--sidebar-w", "--panel-w"]);
-const navDrawer = narrowerThanChatPlus(["--sidebar-w"]);
+
+const focusLeftWithDrawer = (at: Element | null) =>
+  at === null || at === document.body || at.closest(".sidebar") !== null;
 
 const Scrim = ({
   testId,
@@ -152,12 +155,22 @@ export const MainWindow = () => {
   };
   const drawer = useSyncExternalStore(panelDrawer.watch, panelDrawer.now);
   const [botDrawerFor, setBotDrawerFor] = useState<GroupId | null>(null);
-  const narrow = useSyncExternalStore(navDrawer.watch, navDrawer.now);
+  const narrow = useNarrow();
   // 记的是在哪一次跳转上拉开的侧栏：选了群、换了页，location.key 一变它自己就收起。
   const [navOpenAt, setNavOpenAt] = useState<string | null>(null);
   // 跨过断点就收起，拉宽到侧栏常驻再缩回来不该又盖上来。
-  useEffect(() => navDrawer.watch(() => setNavOpenAt(null)), []);
+  useEffect(() => watchNarrow(() => setNavOpenAt(null)), []);
   const navOpen = narrow && navOpenAt === location.key;
+  // 抽屉一开，菜单按钮被 inert 盖住，焦点会被浏览器挪回 body。
+  const navButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const opener = navButton.current;
+    if (!navOpen || opener === null) return;
+    document.querySelector<HTMLElement>(".window > .sidebar :is(a[href], button)")?.focus();
+    return () => {
+      if (focusLeftWithDrawer(document.activeElement)) opener.focus();
+    };
+  }, [navOpen]);
 
   const ready = state.status === "ready" ? state : null;
   // 项目页和项目群看的是同一个群：项目页要拿最近一轮，也得把这个群的历史拉回来。
@@ -374,6 +387,7 @@ export const MainWindow = () => {
           <div className="narrow-bar">
             <button
               type="button"
+              ref={navButton}
               className="icon-button"
               data-testid="nav-open"
               aria-label="打开侧栏"

@@ -2,9 +2,11 @@ import { useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useApp } from "../state/app.js";
+import { useNarrow } from "./narrow.js";
 
 export const LoginPage = () => {
   const { state, actions } = useApp();
+  const narrow = useNarrow();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
@@ -13,7 +15,7 @@ export const LoginPage = () => {
   const busy = login.kind === "submitting";
 
   return (
-    <main className="login" data-testid="login">
+    <main className={`login${narrow ? " is-narrow" : ""}`} data-testid="login">
       <div className="login-form">
         <p className="wordmark">
           <span className="wordmark-badge" aria-hidden="true">
