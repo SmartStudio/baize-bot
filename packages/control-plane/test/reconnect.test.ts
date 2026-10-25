@@ -107,7 +107,7 @@ it("重连握手里 config 还没发出时来的活不派给这条连接，confi
       computerId: owner.computer.computerId,
       token: owner.computer.token,
       version: "test",
-      protocol: 4,
+      protocol: 5,
       controlOrigin: controlOriginFromAgentUrl(second.socket.url),
       installId: owner.computer.computerId,
       piSessionVersion: 3,

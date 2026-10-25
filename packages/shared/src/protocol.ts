@@ -587,8 +587,8 @@ export const ControlToAgent = ControlToAgentDiscriminatedUnion.refine(
 );
 export type ControlToAgent = z.infer<typeof ControlToAgent>;
 
-export const AGENT_PROTOCOL = 4;
-export const MIN_AGENT_PROTOCOL = 4;
+export const AGENT_PROTOCOL = 5;
+export const MIN_AGENT_PROTOCOL = 5;
 
 export const UPLINK_DELIVERY = {
   hello: "bare",

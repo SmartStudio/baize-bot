@@ -228,7 +228,7 @@ docker compose logs migrate        # 应有「应用了 N 个迁移: ...」或�
 
 控制面挡旧代理有两道关。`hello` 里的 `version`（写死的 `"0.1.0"`，`packages/computer-agent/src/main.ts:5`）没有代码读，起作用的是另外两样：
 
-- **协议号。** `hello` 带 `protocol`，不带按 1 算（`packages/shared/src/protocol.ts:96`）。低于 `MIN_AGENT_PROTOCOL`（现在是 4，`protocol.ts` 里的常量）的连接，控制面直接用 4003 关掉（`packages/control-plane/src/agent/hub.ts:242-243`）。协议 4 起 `hello` 还必须带 `controlOrigin`，缺了或格式不对用 4001 关掉，旧代理不带它也先撞上协议号，拿到的仍是 4003。代理在 stdout 写一行 `{"type":"upgrade_required"}` 后停机，桌面端弹窗请用户更新白泽（`packages/desktop/src/main.ts:287-290`、`:573-577`）。
+- **协议号。** `hello` 带 `protocol`，不带按 1 算（`packages/shared/src/protocol.ts:96`）。低于 `MIN_AGENT_PROTOCOL`（现在是 5，`protocol.ts` 里的常量）的连接，控制面直接用 4003 关掉（`packages/control-plane/src/agent/hub.ts:242-243`）。协议 4 起 `hello` 还必须带 `controlOrigin`，缺了或格式不对用 4001 关掉，旧代理不带它也先撞上协议号，拿到的仍是 4003。代理在 stdout 写一行 `{"type":"upgrade_required"}` 后停机，桌面端弹窗请用户更新白泽（`packages/desktop/src/main.ts:287-290`、`:573-577`）。
 - **config 校验。** 协议号够、但 config 的形状这个代理认不出来时，代理回一条 `config_rejected`（`packages/computer-agent/src/agent.ts:304-316`）。控制面把这台电脑记成拒收，不再往它派活。群里那句写「电脑上的白泽版本和控制面对不上」（`packages/control-plane/src/agent/computer-selection.ts:23`），同时给用户推一条卡住通知（`packages/control-plane/src/agent/events.ts:820-826`）。代理回了新一代的 `config_applied` 才恢复派活。
 
 所以升级顺序是：

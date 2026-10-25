@@ -424,7 +424,7 @@ async function reconnect(who: Owner, activeRuns: readonly RunId[]): Promise<Agen
     computerId: who.computer.computerId,
     token: who.computer.token,
     version: "test",
-    protocol: 4,
+    protocol: 5,
     controlOrigin: controlOriginFromAgentUrl(agent.socket.url),
     installId: who.computer.computerId,
     piSessionVersion: 3,
