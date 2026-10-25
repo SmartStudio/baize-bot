@@ -9,7 +9,7 @@
 .panel-scrim {
   position: fixed;
   inset: 0 0 0 var(--sidebar-w);
-  z-index: 2;
+  z-index: var(--layer-drawer);
   background: var(--overlay);
 }
 
@@ -18,7 +18,7 @@
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 2;
+  z-index: var(--layer-drawer);
   width: var(--panel-w);
   box-shadow: var(--shadow-lg);
 }
@@ -49,7 +49,7 @@
   top: 0;
   bottom: 0;
   left: 0;
-  z-index: 3;
+  z-index: var(--layer-nav);
   width: min(var(--sidebar-w), calc(100vw - var(--space-11)));
   box-shadow: var(--shadow-lg);
 }

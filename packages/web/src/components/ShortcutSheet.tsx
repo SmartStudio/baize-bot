@@ -1,18 +1,24 @@
 import { useEffect, useRef } from "react";
 import { Keyboard, X } from "lucide-react";
 import { shortcutSections } from "./shortcuts.js";
-import { useRestoreFocus } from "./QuickSwitch.js";
 import { trapTab } from "./trapTab.js";
 
 type Props = { onClose: () => void };
 
 export const ShortcutSheet = ({ onClose }: Props) => {
   const sheetRef = useRef<HTMLElement>(null);
-  useRestoreFocus();
   useEffect(() => sheetRef.current?.focus(), []);
 
   return (
-    <div className="scrim quick-switch-scrim" data-testid="shortcut-sheet-scrim" onMouseDown={onClose}>
+    <div
+      className="scrim quick-switch-scrim"
+      data-testid="shortcut-sheet-scrim"
+      // 按下的默认动作会在遮罩卸掉之后把焦点清到 body，盖过 RestoreFocus 还回去的那个。
+      onMouseDown={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+    >
       <section
         ref={sheetRef}
         className="dialog shortcut-sheet"

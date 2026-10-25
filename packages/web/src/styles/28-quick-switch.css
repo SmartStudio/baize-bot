@@ -1,7 +1,7 @@
 /* ---------- ⌘K 快速切换 · ⌘/ 快捷键 ---------- */
 
 .quick-switch-scrim {
-  z-index: 5;
+  z-index: var(--layer-quick-switch);
   align-items: start;
   padding-top: 14vh;
 }

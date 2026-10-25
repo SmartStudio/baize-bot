@@ -10,17 +10,6 @@ type Props = {
   onClose: () => void;
 };
 
-// 在首次渲染时记下：autoFocus 在提交阶段就把焦点挪进框里，effect 里再读拿到的是框自己。
-export const useRestoreFocus = () => {
-  const [before] = useState(() => document.activeElement);
-  useEffect(
-    () => () => {
-      if (before instanceof HTMLElement && before.isConnected) before.focus();
-    },
-    [before],
-  );
-};
-
 const iconOf = (item: SwitchItem) =>
   item.kind === "bot" && item.bot !== null ? (
     <BotAvatar shape={item.bot.shape} hue={item.bot.hue} size="xs" />
@@ -36,7 +25,6 @@ export const QuickSwitch = ({ items, onPick, onClose }: Props) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
-  useRestoreFocus();
 
   const found = matchItems(items, query);
   const at = Math.min(selected, Math.max(found.length - 1, 0));
@@ -65,7 +53,15 @@ export const QuickSwitch = ({ items, onPick, onClose }: Props) => {
   };
 
   return (
-    <div className="scrim quick-switch-scrim" data-testid="quick-switch-scrim" onMouseDown={onClose}>
+    <div
+      className="scrim quick-switch-scrim"
+      data-testid="quick-switch-scrim"
+      // 按下的默认动作会在遮罩卸掉之后把焦点清到 body，盖过 RestoreFocus 还回去的那个。
+      onMouseDown={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+    >
       <section
         className="quick-switch"
         role="dialog"
