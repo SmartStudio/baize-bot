@@ -297,6 +297,69 @@ test("停在首页时别处记了数，在进行那一行跟着变", async ({ pa
   await expect(row.locator("progress")).toHaveAttribute("value", "900");
 });
 
+test("目标对的指标还没读到数：首页、项目页、群页任务卡都写「还没读到数」，不画 0 的进度条", async ({
+  page,
+  request,
+}) => {
+  expect((await request.post("/api/test/project-metrics")).status()).toBe(204);
+  await otherSession(request);
+  const task = await orderTask(request);
+  const fans = { kind: "reported", platform: "xiaohongshu", label: "粉丝" } as const;
+  const patched = await request.patch(`/api/tasks/${task.id}`, {
+    data: {
+      metricSources: [...task.metricSources, fans],
+      goal: { target: 5000, unit: "粉丝", dueAt: null, metric: "reported:粉丝" },
+    },
+  });
+  expect(patched.status(), "挂上一个 Bot 还没报过的数，目标对它").toBe(200);
+  await login(page);
+
+  const row = page.getByTestId("today-running").getByTestId("today-row").filter({ hasText: TEAM_TITLE });
+  await expect(row, "首页在进行那一行").toContainText("还没读到数");
+  await expect(row).not.toContainText("0 /");
+  await expect(row.locator("progress"), "没读到数不画进度条").toHaveCount(0);
+
+  await openProject(page);
+  const head = page.getByTestId("project-progress");
+  await expect(head, "项目页头部").toContainText("还没读到数");
+  await expect(head).toContainText("5000 粉丝");
+  await expect(head).not.toContainText("0 /");
+  await expect(head.locator("progress")).toHaveCount(0);
+  await expect(page.getByTestId("project-metric").nth(3), "指标列表里那一行也这么写").toContainText(
+    "粉丝目标还没读到数",
+  );
+
+  await page.getByTestId("project-open-group").click();
+  await expect(page.getByTestId("task-goal"), "群页任务卡").toHaveText("目标 5000 粉丝 · 还没读到数");
+});
+
+test("换「对哪个数」时表单下面说清进度改从哪条读数算，存好就不再提示", async ({ page, request }) => {
+  expect((await request.post("/api/test/project-metrics")).status()).toBe(204);
+  await login(page);
+  await openGoalEditor(page);
+  const form = page.getByTestId("task-goal-form");
+  const metric = form.getByTestId("task-goal-metric");
+  const notice = form.getByTestId("task-goal-metric-switch");
+  await expect(notice, "没换就不提示").toHaveCount(0);
+
+  await metric.selectOption({ label: "X 粉丝数" });
+  await expect(notice).toHaveText("进度改从「X 粉丝数」的读数算，之前记的数留在原来那条");
+  await metric.selectOption({ label: "手记的数" });
+  await expect(notice).toHaveText("进度改从「手记的数」的读数算，之前记的数留在原来那条");
+  await metric.selectOption({ label: "GitHub 星数 · baize/order-board" });
+  await expect(notice, "换回现在对的那个就不提示").toHaveCount(0);
+
+  await metric.selectOption({ label: "X 粉丝数" });
+  await form.getByTestId("task-goal-target").fill("5000");
+  await form.getByTestId("task-goal-unit").fill("粉丝");
+  await form.getByTestId("task-goal-save").click();
+  await expect(form).toHaveCount(0);
+  await expect(page.getByTestId("task-goal")).toHaveText("目标 2100 / 5000 粉丝");
+  await page.getByTestId("task-goal").click();
+  await expect(page.getByTestId("task-goal-metric"), "表单带着刚存的 X 粉丝数").toHaveValue(/^x_followers:/);
+  await expect(page.getByTestId("task-goal-metric-switch"), "存好之后对的就是它，不再提示").toHaveCount(0);
+});
+
 test("复盘里一长串字不撑破成果栏，代码围栏自己横向滚", async ({ page, request }) => {
   await seedGoal(request);
   // 正文上限 8000 字，五段长串各 1400 字，合法且每段都比成果栏宽得多。
@@ -558,7 +621,7 @@ test("停在首页时项目成员被删空，在进行那一行撤掉", async ({
   expect((await request.patch(`/api/tasks/${created.task.id}`, { data: { goal } })).status()).toBe(200);
   await login(page);
   const row = page.getByTestId("today-running").getByTestId("today-row").filter({ hasText: "删空成员项目" });
-  await expect(row).toContainText("0 / 500 篇");
+  await expect(row).toContainText("500 篇 · 还没读到数");
 
   for (const botId of ["bot_sales", "bot_service"])
     expect((await request.delete(`/api/bots/${botId}`)).status(), `删掉 ${botId}`).toBe(204);

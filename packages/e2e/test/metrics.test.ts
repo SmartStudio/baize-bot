@@ -40,14 +40,14 @@ describe("端到端：GitHub 星数自动取样", () => {
         goal: { target: 1000, unit: "星", dueAt: null, metric: "github_stars:baize/demo" },
         metricSources: [{ kind: "github_stars", accountId: account.id, repo: "baize/demo" }],
       });
-      expect((await nextTask(stack, group.id)).metric).toBeNull();
+      expect((await nextTask(stack, group.id)).metric).toEqual({ kind: "unread" });
       const currentTask = async () => GroupResponse.parse(await stack!.get(`/api/groups/${group.id}`)).task;
       const reads = () => fake.requests().filter((request) => request.path === "/repos/baize/demo");
 
       fake.setGithubStars("baize/demo", 500);
       await stack.metricsTick();
       const first = await nextTask(stack, group.id);
-      expect(first.metric?.current, "真实控制面经 WebSocket 推自动读回的 500").toBe(500);
+      expect(first.metric, "真实控制面经 WebSocket 推自动读回的 500").toMatchObject({ kind: "read", current: 500 });
       expect((await currentTask()).metric).toEqual(first.metric);
       expect(reads()).toMatchObject([{ method: "GET", authorization: "Bearer gh-e2e-metrics" }]);
 
@@ -66,8 +66,7 @@ describe("端到端：GitHub 星数自动取样", () => {
       now = new Date((Math.floor(now.getTime() / windowMs) + 1) * windowMs);
       await stack.metricsTick();
       const next = await nextTask(stack, group.id);
-      expect(next.metric?.current).toBe(520);
-      expect(next.metric?.sampledAt).toBe(now.toISOString());
+      expect(next.metric).toMatchObject({ kind: "read", current: 520, sampledAt: now.toISOString() });
       expect((await currentTask()).metric).toEqual(next.metric);
       expect(reads()).toHaveLength(2);
     } finally {

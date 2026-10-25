@@ -290,7 +290,7 @@ describe("GET /api/today", () => {
       url: "https://example.com/customer-weekly",
     });
     expect(today.running).toEqual([
-      { groupId: owner.groupId, title: "客户周报", published: 1, planned: 2, goal: null, metric: null },
+      { groupId: owner.groupId, title: "客户周报", published: 1, planned: 2, goal: null, metric: { kind: "unread" } },
     ]);
     expect(today.next.map((item) => item.kind)).toEqual(["routine", "draft"]);
   });
@@ -381,7 +381,7 @@ describe("GET /api/today", () => {
 
     const today = TodayResponse.parse(await (await owner.client.get("/api/today")).json());
     expect(today.running).toEqual([
-      { groupId: owner.groupId, title: "新计划", published: 0, planned: 1, goal: null, metric: null },
+      { groupId: owner.groupId, title: "新计划", published: 0, planned: 1, goal: null, metric: { kind: "unread" } },
     ]);
   });
 

@@ -832,13 +832,12 @@ const run = async (): Promise<void> => {
     await shot(p, "U9-1-goal-form");
     await goalForm.getByTestId("task-goal-save").click();
     await check(goalForm).toHaveCount(0);
-    await check(p.getByTestId("task-goal")).toHaveText("目标 0 / 1000 星");
+    await check(p.getByTestId("task-goal"), "还没记过数，不拿 0 充当进度").toHaveText("目标 1000 星 · 还没读到数");
     await openProject(p, PROJECT);
     const progress = p.getByTestId("project-progress");
-    await check(progress).toContainText("0 / 1000 星");
+    await check(progress).toContainText("还没读到数 · 目标 1000 星");
     await check(progress).toContainText("截止 12-31 23:59");
-    await check(progress.locator("progress")).toHaveAttribute("max", "1000");
-    await check(progress.locator("progress")).toHaveAttribute("value", "0");
+    await check(progress.locator("progress"), "没读到数不画进度条").toHaveCount(0);
     await check(p.getByTestId("project-goal-week"), "还没有样本，不编本周变化").toHaveCount(0);
     await assertPlainHome(p, s);
     await shot(p, "U9-2-goal");
@@ -913,19 +912,43 @@ const run = async (): Promise<void> => {
     await assertPlainHome(p, s);
     await shot(p, "U9-8-achievements");
 
-    begin("U9 自动取样：GitHub 500 星，同格不重取，下一格更新为 520，两屏收到推送");
-    await progress.scrollIntoViewIfNeeded();
+    begin(
+      "U9 改成自动取样：挂上 GitHub 星数，任务卡里把目标改对它，读到之前写还没读到数；500 星，同格不重取，下一格 520",
+    );
     const metricTask = GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task;
     if (metricTask.goal === null) throw new Error("前面的界面步骤没定下目标");
     await s.patch(`/api/tasks/${metricTask.id}`, {
-      goal: { ...metricTask.goal, metric: "github_stars:baize/baize-bot" },
       metricSources: [{ kind: "github_stars", accountId: accountOf("github"), repo: "baize/baize-bot" }],
     });
+    await check(progress, "只挂来源不动目标，进度还是 Bot 报的 412").toContainText("412 / 1000 星");
+    await p.getByTestId("project-open-group").click();
+    await p.getByTestId("task-goal").click();
+    const switchForm = p.getByTestId("task-goal-form");
+    const switchNotice = switchForm.getByTestId("task-goal-metric-switch");
+    await check(switchForm.getByTestId("task-goal-metric"), "目标还对着手记的数").toHaveValue("");
+    await check(switchNotice).toHaveCount(0);
+    await switchForm.getByTestId("task-goal-metric").selectOption({ label: "GitHub 星数 · baize/baize-bot" });
+    await check(switchNotice, "换之前说清 375、412 不跟过来").toHaveText(
+      "进度改从「GitHub 星数 · baize/baize-bot」的读数算，之前记的数留在原来那条",
+    );
+    await assertPlainHome(p, s);
+    await shot(p, "U9-auto-0-switch-metric");
+    await switchForm.getByTestId("task-goal-save").click();
+    await check(switchForm).toHaveCount(0);
+    await check(p.getByTestId("task-goal"), "新指标还没读过").toHaveText("目标 1000 星 · 还没读到数");
+    await openProject(p, PROJECT);
+    await progress.scrollIntoViewIfNeeded();
+    await check(progress).toContainText("还没读到数 · 目标 1000 星");
+    await check(progress.locator("progress")).toHaveCount(0);
+    await check(p.getByTestId("project-metric"), "指标列表里目标那条也写还没读到数").toContainText(
+      "GitHub 星数 · baize/baize-bot目标还没读到数",
+    );
     const automaticHome = await ctx.newPage();
     try {
       await openHome(automaticHome, home);
       const running = automaticHome.getByTestId("today-running").getByTestId("today-row").filter({ hasText: PROJECT });
-      await check(running).toContainText("0 / 1000 星");
+      await check(running).toContainText("1000 星 · 还没读到数");
+      await check(running.locator("progress")).toHaveCount(0);
       const reads = () =>
         fake.requests().filter((request) => request.method === "GET" && request.path === "/repos/baize/baize-bot");
       const initialReads = reads().length;
@@ -934,7 +957,10 @@ const run = async (): Promise<void> => {
         await check(progress.locator("progress")).toHaveAttribute("value", String(value));
         await check(running, "首页不刷新收到自动取样").toContainText(`${value} / 1000 星`);
         await check(running.locator("progress")).toHaveAttribute("value", String(value));
-        check(GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task.metric?.current).toBe(value);
+        check(GroupResponse.parse(await s.get(`/api/groups/${ids.project}`)).task.metric).toMatchObject({
+          kind: "read",
+          current: value,
+        });
       };
       fake.setGithubStars("baize/baize-bot", 500);
       metricsNow = new Date(Date.now() + 1_000);

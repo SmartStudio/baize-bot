@@ -56,7 +56,7 @@ const TASK: TopicTask = {
   cadence: "",
   goal: null,
   metricSources: [],
-  metric: null,
+  metric: { kind: "unread" },
   metrics: [],
 };
 

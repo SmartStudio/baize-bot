@@ -39,7 +39,7 @@ const registerProject = (table: MockPokerTable): void => {
       cadence: "",
       goal: null,
       metricSources: [],
-      metric: null,
+      metric: { kind: "unread" },
       metrics: [],
     }),
   );

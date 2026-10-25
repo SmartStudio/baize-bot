@@ -305,6 +305,13 @@
   font: var(--type-caption);
 }
 
+.task-goal-switch {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--fg-3);
+  font: var(--type-caption);
+}
+
 .task-goal-error {
   flex-basis: 100%;
   margin: 0;

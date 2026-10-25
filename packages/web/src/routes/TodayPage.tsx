@@ -687,7 +687,7 @@ export const TodayPage = ({
                             </>
                           ) : (
                             <>
-                              <progress value={goalBarValue(goal)} max={goal.target} />
+                              {goal.kind === "read" ? <progress value={goalBarValue(goal)} max={goal.target} /> : null}
                               <small>{goalText(goal)}</small>
                             </>
                           )}

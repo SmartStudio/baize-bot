@@ -11,7 +11,15 @@ import {
   UserPlus,
   Users,
 } from "lucide-react";
-import type { Bot, BotId, GroupId, Message, ProjectResponse, ProjectTurn } from "@baize/shared";
+import {
+  UNREAD_METRIC,
+  type Bot,
+  type BotId,
+  type GroupId,
+  type Message,
+  type ProjectResponse,
+  type ProjectTurn,
+} from "@baize/shared";
 import { ArchiveGroup } from "../components/ArchiveGroup.js";
 import { BotAvatar } from "../components/BotAvatar.js";
 import { PLATFORM, draftText, timeText } from "../components/messages/content.js";
@@ -28,6 +36,7 @@ import {
   goalBarValue,
   goalProgressOf,
   goalText,
+  UNREAD_TEXT,
   metricNameOf,
   numberText,
   weekDeltaOf,
@@ -190,7 +199,7 @@ export const ProjectPage = ({
   const done = task.checklist.filter((item) => item.done).length;
   const now = new Date();
   const goal = goalProgressOf(task.goal, task.metric, now);
-  const goalWeek = goal === null ? null : weekDeltaText(goal.weekDelta);
+  const goalWeek = goal?.kind === "read" ? weekDeltaText(goal.weekDelta) : null;
   const { turn, older } = latestTurnOf(data.latestTurn, data.olderTurns, messages);
   const working = data.working[0];
   // 调整队伍就是跟主助理说一句：预填开头把话头递过去，已经打了字的不覆盖。
@@ -229,10 +238,18 @@ export const ProjectPage = ({
                 </span>
               ) : (
                 <>
-                  <span>
-                    <b>{numberText(goal.current)}</b> / {numberText(goal.target)} {goal.unit}
-                  </span>
-                  <progress value={goalBarValue(goal)} max={goal.target} aria-label={goalText(goal)} />
+                  {goal.kind === "unread" ? (
+                    <span>
+                      <b>{UNREAD_TEXT}</b> · 目标 {numberText(goal.target)} {goal.unit}
+                    </span>
+                  ) : (
+                    <>
+                      <span>
+                        <b>{numberText(goal.current)}</b> / {numberText(goal.target)} {goal.unit}
+                      </span>
+                      <progress value={goalBarValue(goal)} max={goal.target} aria-label={goalText(goal)} />
+                    </>
+                  )}
                   {goalWeek === null ? null : (
                     <span className="project-up" data-testid="project-goal-week">
                       {goalWeek}
@@ -253,8 +270,8 @@ export const ProjectPage = ({
               <ul className="project-metrics" data-testid="project-metrics">
                 {task.metricSources.map((source, index) => {
                   const reading = task.metrics[index];
-                  const metric = reading?.metric ?? null;
-                  const week = metric === null ? null : weekDeltaText(weekDeltaOf(metric, now));
+                  const metric = reading?.metric ?? UNREAD_METRIC;
+                  const week = metric.kind === "read" ? weekDeltaText(weekDeltaOf(metric, now)) : null;
                   return (
                     <li key={reading?.key ?? index} data-testid="project-metric">
                       <span className="project-metric-name">
@@ -263,8 +280,8 @@ export const ProjectPage = ({
                           <span className="project-metric-goal">目标</span>
                         ) : null}
                       </span>
-                      {metric === null ? (
-                        <span>还没读到</span>
+                      {metric.kind === "unread" ? (
+                        <span>{UNREAD_TEXT}</span>
                       ) : (
                         <>
                           <b>{numberText(metric.current)}</b>

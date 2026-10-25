@@ -257,7 +257,7 @@ export const restoreAssistant = () => {
     status: "active",
     goal: null,
     metricSources: [],
-    metric: null,
+    metric: { kind: "unread" },
     metrics: [],
   });
   const greeting = Message.parse({
@@ -376,7 +376,7 @@ export const reseed = (): void => {
       cadence: "",
       goal: null,
       metricSources: [],
-      metric: null,
+      metric: { kind: "unread" },
       metrics: [],
     }),
   );
