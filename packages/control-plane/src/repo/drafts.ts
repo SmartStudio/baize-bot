@@ -6,6 +6,7 @@ import {
   Publication,
   UserId,
   type Account,
+  type AccountScope,
   type BotId,
   type BrandBook,
   type ContentPlan,
@@ -47,7 +48,13 @@ import { accounts, agentOutbox, bots, contentPlans, drafts, publications } from 
 import { lockEnvelopeComputer } from "../agent/envelope.js";
 import { newId } from "../ids.js";
 import { draftAttachmentIds, findOwnedAttachmentFacts, matchDraftImages } from "./attachments.js";
-import { findAccountForDraft, markLoginExpired, type ClaimedSession, type RejectedCredentials } from "./accounts.js";
+import {
+  findAccountForDraft,
+  markLoginExpired,
+  markMissingScope,
+  type ClaimedSession,
+  type RejectedCredentials,
+} from "./accounts.js";
 import { recordApprovedEdit } from "./brand.js";
 import { appendMessage, type Tx } from "./messages.js";
 import { toDraft, toPlan } from "./rows.js";
@@ -227,18 +234,23 @@ export async function proposePlan(
 
 class Rollback extends Error {}
 
+export type EditDraftResult =
+  | { readonly kind: "ok"; readonly draft: Draft }
+  | { readonly kind: "run_closed" | "not_found" | "publishing_or_published" }
+  | { readonly kind: "invalid"; readonly error: string };
+
 /**
  * Bot 改一条自己群里的草稿。发出去的和正在发的不改。内容指纹没变就原样保留状态，
  * 变了一律回到待批：已批的要重新批，退回的和发失败的也要人再看一眼。
  */
 export async function editDraft(
-  db: Db,
+  db: Db | Tx,
   owner: DraftSource,
   draftId: DraftId,
   content: DraftContent,
-): Promise<Draft | null> {
-  return db.transaction(async (tx) => {
-    if (!(await lockOpenRun(tx, owner))) return null;
+): Promise<EditDraftResult> {
+  return db.transaction(async (tx): Promise<EditDraftResult> => {
+    if (!(await lockOpenRun(tx, owner))) return { kind: "run_closed" };
     const [locked] = await tx
       .select({ draft: drafts, via: accounts.via })
       .from(drafts)
@@ -246,12 +258,13 @@ export async function editDraft(
       .where(and(eq(drafts.id, draftId), eq(drafts.ownerId, owner.ownerId), eq(drafts.groupId, owner.groupId)))
       .limit(1)
       .for("update", { of: drafts });
-    if (locked === undefined) return null;
+    if (locked === undefined) return { kind: "not_found" };
     const current = locked.draft;
-    if (current.status === "publishing" || current.status === "published") return null;
-    if (kindRefusal(current.content, content) !== null) return null;
-    if ((await contentRefusal(tx, owner.ownerId, { platform: current.platform, via: locked.via }, content)) !== null)
-      return null;
+    if (current.status === "publishing" || current.status === "published") return { kind: "publishing_or_published" };
+    const refusal =
+      kindRefusal(current.content, content) ??
+      (await contentRefusal(tx, owner.ownerId, { platform: current.platform, via: locked.via }, content));
+    if (refusal !== null) return { kind: "invalid", error: refusal };
     const hash = contentHash({ platform: current.platform, accountId: AccountIdOf(current), content });
     const reopened =
       hash === current.contentHash
@@ -262,7 +275,7 @@ export async function editDraft(
       .set({ content, contentHash: hash, ...reopened })
       .where(and(eq(drafts.id, draftId), notInArray(drafts.status, ["publishing", "published"])))
       .returning();
-    return row === undefined ? null : toDraft(row);
+    return row === undefined ? { kind: "publishing_or_published" } : { kind: "ok", draft: toDraft(row) };
   });
 }
 
@@ -502,6 +515,8 @@ export type ClaimedDraft = {
   readonly via: PublishVia;
   readonly computerId: ComputerId;
   readonly claimedAt: Date;
+  /** 认领时账号上记着缺的授权范围，带图的稿子要它就不必再打平台。 */
+  readonly missingScope: AccountScope | null;
 };
 
 /**
@@ -583,7 +598,13 @@ export async function claimDueDrafts(
       .returning({ id: drafts.id });
     if (claimed.length === 0) return [];
     const rows = await tx
-      .select({ draft: drafts, handle: accounts.handle, via: accounts.via, computerId: accounts.computerId })
+      .select({
+        draft: drafts,
+        handle: accounts.handle,
+        via: accounts.via,
+        computerId: accounts.computerId,
+        missingScope: accounts.missingScope,
+      })
       .from(drafts)
       .innerJoin(accounts, eq(accounts.id, drafts.accountId))
       .where(
@@ -602,6 +623,7 @@ export async function claimDueDrafts(
         via: row.via,
         computerId: ComputerId.parse(row.computerId),
         claimedAt: row.draft.claimedAt,
+        missingScope: row.missingScope,
       };
     });
     await onClaim?.(tx, result);
@@ -688,11 +710,16 @@ export async function settlePublished(
 /**
  * 这次失败对账号登录的影响。expired_now 是这一下由已登录记成过期的。already_known 是账号这边已经有了
  * 不晚于这次认领的结论：先到的过期报文已经记过期、通知过用户，或者认领之后已经重新登录，旧那次的过期不算数。
+ * scope_missing_now 是这一下才记上账号缺某个授权范围，账号照旧已登录。
  */
 export type LoginEffect =
   | { readonly kind: "unchanged" }
   | { readonly kind: "expired_now"; readonly account: Account }
+  | { readonly kind: "scope_missing_now"; readonly account: Account }
   | { readonly kind: "already_known" };
+
+/** 控制面拿凭据发的带上用的那一代；平台说缺授权范围的（missing_scope）还带上缺的那样。 */
+export type CredentialEvidence = RejectedCredentials & { readonly missingScope?: AccountScope };
 
 /**
  * 因登录过期没发出去的，同一个事务里把账号也记成过期。控制面拿凭据被拒的（rejected）只按代际：
@@ -702,7 +729,7 @@ export async function settleFailed(
   db: Db,
   scope: SettleScope,
   reason: PublishFailureReason,
-  rejected?: RejectedCredentials,
+  rejected?: CredentialEvidence,
 ): Promise<{ draft: Draft; ownerId: UserId; login: LoginEffect } | null> {
   return db.transaction(async (tx) => {
     await lockDraftDeliveries(tx, settleWhere(scope));
@@ -715,12 +742,28 @@ export async function settleFailed(
     await deleteDraftDownlinks(tx, [row.id]);
     const ownerId = UserId.parse(row.ownerId);
     const draft = toDraft(row);
+    if (reason === "missing_scope") {
+      if (rejected?.missingScope === undefined) throw new Error("缺授权范围的失败没带缺的是哪样");
+      const marked = await markMissingScope(tx, {
+        ownerId,
+        accountId: draft.accountId,
+        scope: rejected.missingScope,
+        generation: rejected.generation,
+      });
+      return {
+        draft,
+        ownerId,
+        login: marked === null ? { kind: "unchanged" } : { kind: "scope_missing_now", account: marked },
+      };
+    }
     if (reason !== "login_expired") return { draft, ownerId, login: { kind: "unchanged" } };
     const expired = await markLoginExpired(tx, {
       ownerId,
       accountId: draft.accountId,
       evidence:
-        rejected === undefined ? { kind: "reported", session: claimedSession(row) } : { kind: "rejected", ...rejected },
+        rejected === undefined
+          ? { kind: "reported", session: claimedSession(row) }
+          : { kind: "rejected", generation: rejected.generation },
     });
     return {
       draft,

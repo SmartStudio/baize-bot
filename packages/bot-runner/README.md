@@ -541,9 +541,10 @@ Bot 想往外发东西只有起草这一条路。`src/drafts.ts` 的三件工具
 | 工具           | 参数                                                     | 返回                                                           | 上行报文       |
 | -------------- | -------------------------------------------------------- | -------------------------------------------------------------- | -------------- |
 | `create_draft` | `accountId`、`content`、`scheduledAt?`                   | `草稿已建（draftId：…），等用户在卡上批。` 加一句别说已经发了  | `draft_create` |
-| `edit_draft`   | `draftId`、`content`                                     | `草稿 … 已改，改过的稿子会重新等用户批`                        | `draft_edit`   |
+| `edit_draft`   | `draftId`、`content`                                     | `草稿 … 已改，改过的稿子会重新等用户批`                        | 中枢改稿       |
 | `propose_plan` | `title`、`drafts[]`（每条同 `create_draft`，1 到 20 条） | `计划「…」已发出，N 条草稿等用户在计划卡上批` 加每条的 draftId | `plan_propose` |
 
+- **改稿打中枢，不发上行。** `edit_draft` 打 `${config.hub.baseUrl}/drafts/<draftId>/edit`，带当前网关 key 和这条道的租约头，等控制面落库才回成功。控制面不让改（这一轮结束了、草稿不是这个 Bot 起的、已经发了、配图不合账号）就把它回的那句中文抛成工具错误，前面加「草稿没改：」；连不上、配置还没下发也各抛一句，模型不会以为改成了。
 - **id 由运行器生成。** 草稿和计划各用 `randomUUID()` 再 parse 成品牌类型，`propose_plan` 里每条草稿一个，计划里的草稿不再单独发 `draft_create`。
 - **边界上补齐可省字段。** 模型可以不写 `title`、`images`、`github`，发出去前补成 `null` 和空数组，只挑协议要的字段，多写的键丢掉。`scheduledAt` 收带时区偏移的写法，换算成 UTC 的 ISO 串，认不出就抛错并给一个示例。长度范围交给 `AgentToControl` 校验，不合格时翻成一句中文抛出，和主助理的两件工具共用 `parseOrThrow`。
 - **账号只认 `config.accounts`。** 工具每次调用都读最新的一份，换账号不用重建会话。模型从 prompt 里「能用的账号」一段抄 accountId，见「prompt 拼法」。`accountId` 不在清单里仍然抛错，错误里列出每个账号的平台、账号名和 accountId 作兜底；一个账号都没有时叫模型告诉用户先连账号。`propose_plan` 的错误前缀写明是第几条。

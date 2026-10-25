@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountLogin,
+  AccountScope,
   AccountTier,
   Computer,
   Draft,
@@ -49,6 +50,10 @@ export const LOGIN_TEXT: Record<AccountLogin, string> = {
   none: "未登录",
   valid: "已登录",
   expired: "登录已过期",
+};
+
+export const ACCOUNT_SCOPE_TEXT: Record<AccountScope, string> = {
+  "media.write": "发图权限",
 };
 
 export const LOGIN_FAILURE_TEXT: Record<LoginFailure, string> = {

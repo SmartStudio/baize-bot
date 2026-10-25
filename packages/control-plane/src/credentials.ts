@@ -1,11 +1,12 @@
 import { OAuthPlatform, type Account, type AccountId, type Platform } from "@baize/shared";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, ne, or, sql } from "drizzle-orm";
 import { open, seal } from "./crypto.js";
 import type { Db } from "./db/client.js";
 import { accountCredentials, accounts } from "./db/schema.js";
 import { requestToken, type OAuthEndpoints, type TokenGrant } from "./oauth-providers.js";
+import { missingScopeOf } from "./publish/forbidden.js";
 import { withAccountLock, type AccountLock } from "./repo/account-lock.js";
-import { LOGIN_CLOCK, addAccount, findOwnerAccount, lockOwnerPlatform, type NewAccount } from "./repo/accounts.js";
+import { addAccount, findOwnerAccount, lockOwnerPlatform, loginChangedAt, type NewAccount } from "./repo/accounts.js";
 import type { Tx } from "./repo/messages.js";
 import { toAccount } from "./repo/rows.js";
 
@@ -66,17 +67,18 @@ export async function addAccountWithToken(
   crypto: CredentialCrypto,
   input: NewAccount,
   token: string,
+  scope = "",
 ): Promise<Account> {
   return db.transaction(async (tx) => {
     await lockOwnerPlatform(tx, input.ownerId, input.platform);
     const added = (await findOwnerAccount(tx, input)) ?? (await addAccount(tx, input));
-    const saved = await withAccountLock(tx, added.id, (lock) => saveAccessToken(lock, crypto, token));
-    return saved.restored ?? added;
+    const saved = await withAccountLock(tx, added.id, (lock) => saveAccessToken(lock, crypto, token, scope));
+    return saved.changed ?? added;
   });
 }
 
-/** restored 是这一下从 expired（或 none）记回 valid 的账号，本来就是 valid 的为 null。 */
-export type SavedGrant = { readonly generation: number; readonly restored: Account | null };
+/** changed 是这一下登录状态或缺的授权范围变了的账号，两样都没变为 null。 */
+export type SavedGrant = { readonly generation: number; readonly changed: Account | null };
 
 /**
  * 一份新凭据落库：换成新的一代，账号同一个事务里回到 valid。这是账号回到 valid 的唯一入口
@@ -101,12 +103,27 @@ export async function saveGrant(lock: AccountLock, crypto: CredentialCrypto, gra
     })
     .returning({ generation: accountCredentials.generation });
   if (saved === undefined) throw new Error("写凭据没有返回行");
-  const [restored] = await lock.tx
+  const [account] = await lock.tx
+    .select({ platform: accounts.platform })
+    .from(accounts)
+    .where(eq(accounts.id, lock.accountId));
+  if (account === undefined) throw new Error("写凭据的账号不在了");
+  const missingScope = missingScopeOf(account.platform, grant.scope);
+  const [changed] = await lock.tx
     .update(accounts)
-    .set({ login: "valid", loginChangedAt: LOGIN_CLOCK })
-    .where(and(eq(accounts.id, lock.accountId), ne(accounts.login, "valid")))
+    .set({
+      login: "valid",
+      missingScope,
+      loginChangedAt: loginChangedAt("valid"),
+    })
+    .where(
+      and(
+        eq(accounts.id, lock.accountId),
+        or(ne(accounts.login, "valid"), sql`${accounts.missingScope} IS DISTINCT FROM ${missingScope}`),
+      ),
+    )
     .returning();
-  return { generation: saved.generation, restored: restored === undefined ? null : toAccount(restored) };
+  return { generation: saved.generation, changed: changed === undefined ? null : toAccount(changed) };
 }
 
 /**
@@ -114,7 +131,7 @@ export async function saveGrant(lock: AccountLock, crypto: CredentialCrypto, gra
  * 调用方把账号记过期时原样交给 markLoginExpired，那一代已经被新授权换掉的话就不记。
  */
 export type AccessToken =
-  | { readonly kind: "token"; readonly token: string; readonly generation: number }
+  | { readonly kind: "token"; readonly token: string; readonly generation: number; readonly scope: string }
   | { readonly kind: "login_expired"; readonly generation: number | null };
 
 /** 离过期不到这么久就先刷新：拿到令牌到请求打到平台之间还要走一段。 */
@@ -127,6 +144,7 @@ type CredentialRow = {
   readonly accessExpiresAt: Date | null;
   readonly refreshExpiresAt: Date | null;
   readonly generation: number;
+  readonly scope: string;
 };
 
 /** 能直接用：没到刷新窗口，也不是平台刚回 401 的那一个。 */
@@ -150,7 +168,7 @@ export class AccountTokens {
   readonly #db: Db;
   readonly #crypto: CredentialCrypto;
   readonly #endpoints: OAuthEndpoints;
-  readonly #restored: (account: Account) => Promise<void>;
+  readonly #changed: (account: Account) => Promise<void>;
   readonly #refreshing = new Map<AccountId, Promise<AccessToken>>();
   readonly #slots: Slots;
 
@@ -158,13 +176,13 @@ export class AccountTokens {
     db: Db,
     crypto: CredentialCrypto,
     endpoints: OAuthEndpoints,
-    /** 刷新成功把一个 expired 的账号带回 valid 时叫一下：推账号、重发 config 都在这里面做。 */
-    restored: (account: Account) => Promise<void> = async () => {},
+    /** 刷新成功把一个 expired 的账号带回 valid、或平台回的 scope 改了缺的授权范围时叫一下：推账号、重发 config 都在这里面做。 */
+    changed: (account: Account) => Promise<void> = async () => {},
   ) {
     this.#db = db;
     this.#crypto = crypto;
     this.#endpoints = endpoints;
-    this.#restored = restored;
+    this.#changed = changed;
     this.#slots = new Slots(Math.max(1, Math.floor(db.$client.options.max / 3)));
   }
 
@@ -176,7 +194,7 @@ export class AccountTokens {
     const [row] = await this.#select(this.#db, accountId);
     if (row === undefined) return { kind: "login_expired", generation: null };
     const token = usable(row, this.#crypto, new Date(), rejected);
-    if (token !== null) return { kind: "token", token, generation: row.generation };
+    if (token !== null) return { kind: "token", token, generation: row.generation, scope: row.scope };
 
     const inFlight = this.#refreshing.get(accountId);
     if (inFlight !== undefined) return inFlight;
@@ -192,23 +210,24 @@ export class AccountTokens {
    */
   async #refresh(accountId: AccountId, rejected: string | null): Promise<AccessToken> {
     const outcome = await this.#slots.run(() => this.#refreshLocked(accountId, rejected));
-    if (outcome.restored !== null) await this.#restored(outcome.restored);
+    if (outcome.changed !== null) await this.#changed(outcome.changed);
     return outcome.token;
   }
 
   #refreshLocked(accountId: AccountId, rejected: string | null) {
     return withAccountLock(this.#db, accountId, async (lock) => {
       const [locked] = await this.#select(lock.tx, accountId);
-      if (locked === undefined) return { token: { kind: "login_expired", generation: null } as const, restored: null };
+      if (locked === undefined) return { token: { kind: "login_expired", generation: null } as const, changed: null };
       const { generation } = locked;
       const now = new Date();
       const token = usable(locked, this.#crypto, now, rejected);
-      if (token !== null) return { token: { kind: "token", token, generation } as const, restored: null };
+      if (token !== null)
+        return { token: { kind: "token", token, generation, scope: locked.scope } as const, changed: null };
       if (locked.refreshEnc === null || (locked.refreshExpiresAt !== null && locked.refreshExpiresAt <= now)) {
-        return { token: { kind: "login_expired", generation } as const, restored: null };
+        return { token: { kind: "login_expired", generation } as const, changed: null };
       }
       if (!isOAuthPlatform(locked.platform))
-        return { token: { kind: "login_expired", generation } as const, restored: null };
+        return { token: { kind: "login_expired", generation } as const, changed: null };
       const refreshed = await requestToken(
         locked.platform,
         this.#endpoints,
@@ -221,12 +240,17 @@ export class AccountTokens {
           .update(accountCredentials)
           .set({ refreshEnc: null, updatedAt: now })
           .where(eq(accountCredentials.accountId, accountId));
-        return { token: { kind: "login_expired", generation } as const, restored: null };
+        return { token: { kind: "login_expired", generation } as const, changed: null };
       }
       const saved = await saveGrant(lock, this.#crypto, refreshed.grant);
       return {
-        token: { kind: "token", token: refreshed.grant.accessToken, generation: saved.generation } as const,
-        restored: saved.restored,
+        token: {
+          kind: "token",
+          token: refreshed.grant.accessToken,
+          generation: saved.generation,
+          scope: refreshed.grant.scope,
+        } as const,
+        changed: saved.changed,
       };
     });
   }
@@ -240,6 +264,7 @@ export class AccountTokens {
         accessExpiresAt: accountCredentials.accessExpiresAt,
         refreshExpiresAt: accountCredentials.refreshExpiresAt,
         generation: accountCredentials.generation,
+        scope: accountCredentials.scope,
       })
       .from(accountCredentials)
       .innerJoin(accounts, eq(accounts.id, accountCredentials.accountId))

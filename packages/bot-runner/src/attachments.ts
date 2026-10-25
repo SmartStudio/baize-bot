@@ -25,7 +25,7 @@ const IMAGE_EXTENSION: Record<AttachmentMime, string> = {
 
 export const attachmentCopyName = (sha256: string, mime: AttachmentMime): string => `${sha256}${IMAGE_EXTENSION[mime]}`;
 
-const endpoint = (baseUrl: string, path: string): URL => {
+export const endpoint = (baseUrl: string, path: string): URL => {
   const url = new URL(`${baseUrl.replace(/\/$/, "")}/${path}`);
   url.search = "";
   url.hash = "";

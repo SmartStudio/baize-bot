@@ -1322,17 +1322,20 @@ async function onPlanPropose(deps: AgentEventDeps, conn: AgentConnection, event:
   deps.push.push(conn.ownerId, { type: "message", message: proposed.message });
 }
 
-/** 内容没变也推一次：Bot 以为自己改了，卡上至少刷新一遍。 */
+/**
+ * 升级前的运行器还发这条上行，拒了它听不到；新运行器改走中枢的 /drafts/:id/edit。
+ * 内容没变也推一次：Bot 以为自己改了，卡上至少刷新一遍。
+ */
 async function onDraftEdit(deps: AgentEventDeps, conn: AgentConnection, event: DraftEditEvent): Promise<void> {
   const groupId = await resolveRun(deps, conn, event);
   if (groupId === null) return;
-  const draft = await editDraft(
+  const edited = await editDraft(
     deps.db,
     { ownerId: conn.ownerId, groupId, botId: event.botId, runId: event.runId },
     event.draftId,
     event.content,
   );
-  if (draft !== null) deps.push.push(conn.ownerId, { type: "draft_updated", draft });
+  if (edited.kind === "ok") deps.push.push(conn.ownerId, { type: "draft_updated", draft: edited.draft });
 }
 
 /**

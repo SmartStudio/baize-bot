@@ -5,7 +5,7 @@ import {
   type ControlToAgent,
   type DraftImage,
   draftImageRules,
-  type PublishFailureReason,
+  type ComputerPublishFailure,
 } from "@baize/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
@@ -174,7 +174,7 @@ const POLL_MS = 200;
 
 class PublishFailure extends Error {
   constructor(
-    readonly reason: PublishFailureReason,
+    readonly reason: ComputerPublishFailure,
     detail: string,
   ) {
     super(detail);
@@ -183,7 +183,7 @@ class PublishFailure extends Error {
 
 class TabClosed extends Error {}
 
-const failed = (reason: PublishFailureReason, detail: string): PublishResult => ({
+const failed = (reason: ComputerPublishFailure, detail: string): PublishResult => ({
   status: "failed",
   reason,
   detail: detail.length > DETAIL_MAX ? `${detail.slice(0, DETAIL_MAX - 1)}…` : detail,

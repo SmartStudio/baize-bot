@@ -249,6 +249,7 @@ export function toAccount(row: typeof schema.accounts.$inferSelect): Account {
       row.loginFailure === null || row.loginFailedAt === null
         ? null
         : { reason: row.loginFailure, at: row.loginFailedAt.toISOString() },
+    missingScope: row.missingScope,
     createdAt: row.createdAt.toISOString(),
   });
 }

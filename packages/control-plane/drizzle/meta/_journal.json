@@ -365,6 +365,13 @@
       "when": 1792867868770,
       "tag": "0051_lethal_felicia_hardy",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792929149265,
+      "tag": "0052_bright_hercules",
+      "breakpoints": true
     }
   ]
 }

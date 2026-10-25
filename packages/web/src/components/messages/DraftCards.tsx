@@ -15,6 +15,7 @@ import type {
 } from "@baize/shared";
 import type { ContentBook } from "../../state/types.js";
 import { BrandBookOpener } from "../BrandBookDialog.js";
+import { ScopeReconnect } from "../ScopeReconnect.js";
 import { PLATFORM, accountText, computerText, draftText, timeText } from "./content.js";
 
 export type ContentActions = {
@@ -40,6 +41,9 @@ const FAILURE: Record<PublishFailureReason, string> = {
   login_expired: "账号登录过期了，重新登录后让 Bot 再起一稿",
   page_changed: "平台页面变了，没发出去",
   paused: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
+  missing_scope: "账号缺发图权限，没发出去，重新连接后让 Bot 再起一稿",
+  forbidden: "平台拒绝了这一条，账号授权还有效，多半是内容重复或不合平台规则",
+  media_failed: "X 没处理好这张动图，换一张再让 Bot 起一稿",
   error: "没发出去",
 };
 
@@ -160,12 +164,18 @@ const DraftOutcome = ({ draft, content }: { draft: Draft; content: ContentBook }
           )}
         </div>
       );
-    case "failed":
-      return (
+    case "failed": {
+      const account = content.accounts[draft.accountId];
+      return draft.failure === "missing_scope" && account !== undefined && account.missingScope !== null ? (
+        <div className="draft-outcome is-failed" data-testid="draft-failure">
+          <ScopeReconnect account={account} />
+        </div>
+      ) : (
         <div className="draft-outcome is-failed" data-testid="draft-failure">
           {draft.failure === null ? FAILURE.error : FAILURE[draft.failure]}
         </div>
       );
+    }
     case "returned":
       return <div className="draft-outcome">已退回，不会发。</div>;
     default: {

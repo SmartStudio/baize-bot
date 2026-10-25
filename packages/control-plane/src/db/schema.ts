@@ -1,5 +1,6 @@
 import type {
   AccountLogin as AccountLoginSchema,
+  AccountScope as AccountScopeSchema,
   AccountTier as AccountTierSchema,
   ActionKind as ActionKindSchema,
   ApprovalStatus as ApprovalStatusSchema,
@@ -73,6 +74,7 @@ type TaskStatus = z.infer<typeof TaskStatusSchema>;
 type ToolConnectionStatus = z.infer<typeof ToolConnectionStatusSchema>;
 type AccountLogin = z.infer<typeof AccountLoginSchema>;
 type AccountTier = z.infer<typeof AccountTierSchema>;
+type AccountScope = z.infer<typeof AccountScopeSchema>;
 type LoginFailure = z.infer<typeof LoginFailureSchema>;
 type ActionKind = z.infer<typeof ActionKindSchema>;
 type ApprovalStatus = z.infer<typeof ApprovalStatusSchema>;
@@ -423,6 +425,7 @@ export const accounts = pgTable(
     // 最近一次登录没成：原因和库时钟时刻成对出现，登上时一起清空。
     loginFailure: text("login_failure").$type<LoginFailure>(),
     loginFailedAt: timestamp("login_failed_at", { withTimezone: true }),
+    missingScope: text("missing_scope").$type<AccountScope>(),
     createdAt: createdAt(),
   },
   (t) => [

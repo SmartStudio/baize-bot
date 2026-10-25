@@ -7894,7 +7894,7 @@ describe("运行器的草稿", () => {
     );
   });
 
-  it("edit_draft 发一条 draft_edit，结果告诉模型改过的稿子要重新等批", async () => {
+  it("edit_draft 把改动交给中枢，结果告诉模型改过的稿子要重新等批", async () => {
     const seen = recorder();
     const h = await startHarness({
       bots: ["bot-1"],
@@ -7908,17 +7908,43 @@ describe("运行器的草稿", () => {
     await h.runner.prompt(promptMessage("bot-1", "run-1", "改一下那条"));
 
     expect(shape(h.sent)).not.toContain("approval_request");
-    expect(h.sent.filter((message) => message.type === "draft_edit")).toEqual([
+    expect(shape(h.sent), "改稿等中枢当场答复，不再走上行").not.toContain("draft_edit");
+    expect(h.attachmentHub.draftEdits.map(({ draftId, body }) => ({ draftId, body }))).toEqual([
       {
-        type: "draft_edit",
-        runId: "run-1",
-        botId: "bot-1",
-        groupId: "group-1",
         draftId: "draft-1",
-        content: { kind: "post", title: null, text: "改过的正文", images: [], github: null },
+        body: { runId: "run-1", content: { kind: "post", title: null, text: "改过的正文", images: [], github: null } },
       },
     ]);
+    expect(h.attachmentHub.draftEdits[0]?.laneHeader, "改稿带着这条车道的围栏头").toBeTruthy();
     expect(seen.toolResults.join("")).toContain("重新等用户批");
+  });
+
+  it("控制面不收这次改稿，edit_draft 的工具结果是 isError，带着中文原因", async () => {
+    const seen = recorder();
+    const h = await startHarness({
+      bots: ["bot-1"],
+      accounts: ACCOUNTS,
+      extensionTools: [],
+      script: scriptRecording(seen, [
+        ["改一下那条", callTool("edit_draft", { draftId: "draft-1", content: { kind: "post", text: "改过的正文" } })],
+      ]),
+    });
+    h.attachmentHub.answerDraftEdits(409, JSON.stringify({ error: "这条草稿已经发出去了，不能再改" }));
+
+    await h.runner.prompt(promptMessage("bot-1", "run-1", "改一下那条"));
+
+    expect(seen.toolResults.join("")).toContain("草稿没改：这条草稿已经发出去了，不能再改");
+    expect(seen.toolResults.join("")).not.toContain("重新等用户批");
+    const entries = sessionFilesOf(h.dataDir, "bot-1").flatMap((file) =>
+      readFileSync(file, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { message?: { role?: string; isError?: boolean } }),
+    );
+    expect(
+      entries.some((entry) => entry.message?.role === "toolResult" && entry.message.isError === true),
+      "Pi 落盘的改稿结果必须是 isError",
+    ).toBe(true);
   });
 
   it("propose_plan 一次发一条 plan_propose，每条草稿各有 id", async () => {

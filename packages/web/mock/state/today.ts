@@ -94,6 +94,7 @@ const accountOf = (
     login: where.login,
     loginChangedAt: at(-120),
     lastLoginFailure: null,
+    missingScope: null,
     createdAt: at(-120),
   });
 
@@ -854,4 +855,34 @@ export const seedLoginCard = (slot: 1 | 2 = 1): { account: Account; draft: Draft
   putPending(draft, new Date().toISOString());
   appendMessage(draft.groupId, { kind: "draft", draftId: draft.id });
   return { account: placeholder, draft };
+};
+
+export const seedScopeCard = (): { account: Account; draft: Draft } => {
+  const account = Account.parse({
+    ...accountOf("acc_today_x_scope", "x", "mock_x", "confirm_publish", { computerId: "cmp_remote", login: "valid" }),
+    missingScope: "media.write",
+  });
+  accounts.set(account.id, account);
+  const text = "X3 新看板长这样，三张图看懂。";
+  const draft = draftOf({
+    id: "draft_today_scope",
+    groupId: "grp_buy",
+    botId: "bot_buy",
+    accountId: account.id,
+    platform: "x",
+    title: "X3 新看板三张图",
+    text,
+    status: "failed",
+    failure: "missing_scope",
+    content: {
+      kind: "post",
+      title: "X3 新看板三张图",
+      text,
+      images: [{ kind: "path", path: "x3-board.png", sha256: "a".repeat(64) }],
+      github: null,
+    },
+  });
+  drafts.set(draft.id, draft);
+  appendMessage(draft.groupId, { kind: "draft", draftId: draft.id });
+  return { account, draft };
 };

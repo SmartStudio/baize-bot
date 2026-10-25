@@ -29,6 +29,7 @@ import {
   messageFetchFaults,
   reportLoginState,
   seedLoginCard,
+  seedScopeCard,
   createApproval,
   expireLatestPending,
   timeOutLatestPending,
@@ -351,6 +352,14 @@ export const testRoutes: Route = async ({ req, res, path, method, push }) => {
   if (method === "POST" && path === "/api/test/accounts/login-card") {
     const parsed = LoginCardRequest.safeParse(await readBody(req));
     const { account, draft } = seedLoginCard(parsed.success ? parsed.data.slot : 1);
+    push({ type: "account_updated", account });
+    push({ type: "draft_updated", draft });
+    send(res, 200, { accountId: account.id, draftId: draft.id });
+    return true;
+  }
+
+  if (method === "POST" && path === "/api/test/accounts/missing-scope") {
+    const { account, draft } = seedScopeCard();
     push({ type: "account_updated", account });
     push({ type: "draft_updated", draft });
     send(res, 200, { accountId: account.id, draftId: draft.id });

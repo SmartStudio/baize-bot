@@ -10,7 +10,7 @@ import type {
 /** externalId 为 null：电脑那边发出去了，但没读到平台上的 id。走接口的一定有。 */
 export type Published = { readonly url: string; readonly externalId: string | null };
 
-/** 平台接口没走通。原因按状态码分：401、403 是令牌不认了，别的都记出错。detail 只给人看，不带令牌。 */
+/** 平台接口没走通。原因按状态码分：401 是令牌不认了，403 见 PlatformForbidden，别的都记出错。detail 只给人看，不带令牌。 */
 export class PublishError extends Error {
   constructor(
     readonly reason: PublishFailureReason,
@@ -27,6 +27,13 @@ export class TokenRejected extends PublishError {
   }
 }
 
+/** 平台回 403：令牌是认的，只是不让做这件事。 */
+export class PlatformForbidden extends PublishError {
+  constructor(readonly body: string) {
+    super("forbidden", `平台回 403：${body.slice(0, 500)}`);
+  }
+}
+
 export type PublishImage = { readonly bytes: Buffer; readonly mime: AttachmentMime };
 
 export type ApiPublishInput = {
@@ -35,6 +42,8 @@ export type ApiPublishInput = {
   readonly handle: string | null;
   readonly token: string;
   readonly baseUrl: string;
+  /** 等平台处理上传的图。测试注进来不真等。 */
+  readonly sleep: (ms: number) => Promise<void>;
 };
 
 export type ApiPublisher = {
@@ -62,26 +71,29 @@ export type ApiBases = { readonly githubApiBaseUrl: string; readonly xApiBaseUrl
 
 const TIMEOUT_MS = 60_000;
 
-async function call(
+function call(
   url: string,
   token: string,
   body: unknown,
   headers: Record<string, string> = {},
 ): Promise<Record<string, unknown>> {
+  return send(url, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
+async function send(url: string, init: RequestInit): Promise<Record<string, unknown>> {
   let response: Response;
   try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
+    response = await fetch(url, { ...init, signal: AbortSignal.timeout(TIMEOUT_MS) });
   } catch (error) {
     // 超时只说明没等到回应，平台可能已经收下、已经发出去了。
     throw new PublishError("error", `没等到平台的回应：${error instanceof Error ? error.message : String(error)}`);
   }
   if (response.status === 401) throw new TokenRejected("平台回 401，令牌不认了");
-  if (response.status === 403) throw new PublishError("login_expired", "平台回 403，令牌不认了");
+  if (response.status === 403) throw new PlatformForbidden(await response.text().catch(() => ""));
   if (!response.ok) throw new PublishError("error", `平台回 ${response.status}`);
   const json: unknown = await response.json().catch(() => null);
   if (typeof json !== "object" || json === null) throw new PublishError("error", "平台的回应不是 JSON 对象");
@@ -187,16 +199,52 @@ function categoriesOf(json: unknown): { id: string; name: string }[] {
 
 const TWEET = /^https:\/\/(?:x|twitter)\.com\/[^/]+\/status\/(\d+)/;
 
+const MEDIA_PROCESSING_LIMIT_MS = 5 * 60_000;
+
 // 一次性上传，正文 JSON 里 media 放 base64：https://docs.x.com/x-api/media/upload-media 。
-async function uploadXMedia(baseUrl: string, token: string, image: PublishImage): Promise<string> {
+// 回包带 processing_info 的（动图）要按 check_after_secs 去查处理状态，到 succeeded 才能挂到帖子上。
+async function uploadXMedia(input: ApiPublishInput, image: PublishImage): Promise<string> {
+  const { baseUrl, token } = input;
   const json = await call(`${baseUrl}/2/media/upload`, token, {
     media: image.bytes.toString("base64"),
     media_category: image.mime === "image/gif" ? "tweet_gif" : "tweet_image",
   });
-  return stringAt(json, "data", "id");
+  const id = stringAt(json, "data", "id");
+  let processing = processingOf(json);
+  let waited = 0;
+  while (processing !== null && processing.state !== "succeeded") {
+    if (processing.state === "failed") throw new PublishError("media_failed", `X 处理图失败：${processing.detail}`);
+    const wait = Math.max(1, processing.checkAfterSecs) * 1000;
+    if (waited + wait > MEDIA_PROCESSING_LIMIT_MS) {
+      throw new PublishError("media_failed", `X 处理图等了 ${waited / 1000} 秒还没好`);
+    }
+    await input.sleep(wait);
+    waited += wait;
+    const status = new URL(`${baseUrl}/2/media/upload`);
+    status.search = new URLSearchParams({ command: "STATUS", media_id: id }).toString();
+    processing = processingOf(await send(status.href, { headers: { authorization: `Bearer ${token}` } }));
+  }
+  return id;
 }
 
-async function publishX({ content, images, handle, token, baseUrl }: ApiPublishInput): Promise<Published> {
+type Processing = { readonly state: string; readonly checkAfterSecs: number; readonly detail: string };
+
+/** 不带 processing_info 就是不用等：静图传完即可用，查状态的回包不带它也是处理完了。 */
+function processingOf(json: Record<string, unknown>): Processing | null {
+  const data = json["data"];
+  const info = typeof data === "object" && data !== null ? (data as Record<string, unknown>)["processing_info"] : null;
+  if (typeof info !== "object" || info === null) return null;
+  const { state, check_after_secs: after, error } = info as Record<string, unknown>;
+  if (typeof state !== "string") throw new PublishError("error", "X 回的 processing_info 没有 state");
+  return {
+    state,
+    checkAfterSecs: typeof after === "number" && Number.isFinite(after) ? after : 1,
+    detail: JSON.stringify(error ?? null).slice(0, 300),
+  };
+}
+
+async function publishX(input: ApiPublishInput): Promise<Published> {
+  const { content, images, handle, token, baseUrl } = input;
   let reply: { in_reply_to_tweet_id: string } | undefined;
   if (content.kind === "reply") {
     const target = TWEET.exec(content.replyTo.url);
@@ -204,7 +252,7 @@ async function publishX({ content, images, handle, token, baseUrl }: ApiPublishI
     reply = { in_reply_to_tweet_id: target[1] };
   }
   const mediaIds: string[] = [];
-  for (const image of images) mediaIds.push(await uploadXMedia(baseUrl, token, image));
+  for (const image of images) mediaIds.push(await uploadXMedia(input, image));
   const json = await call(`${baseUrl}/2/tweets`, token, {
     text: content.text,
     ...(reply === undefined ? {} : { reply }),

@@ -1,6 +1,6 @@
 # @baize/control-plane
 
-控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件和工作记录快照。认身份、建电脑、发 config 那套写在仓库 docs/开发.md 的「控制面」一节。
+控制面。Hono 加 @hono/node-server，PostgreSQL 用 drizzle-orm 加 postgres.js。同一个 3001 端口按路径分流：`/api` 给 Web 客户端，`/api/ws` 往客户端推，`/agent` 给电脑代理，`/gateway/v1` 是模型网关，`/mcp-proxy` 代执行工具，`/hub/v1` 提供附件、工作记录快照和改稿。认身份、建电脑、发 config 那套写在仓库 docs/开发.md 的「控制面」一节。
 
 postgres.js 3.4.9 带一个补丁 `patches/postgres@3.4.9.patch`。上游的 `closed()` 断开时不清在途查询和收到的错误，带着在途查询被掐的连接，如果库在握手阶段拒连（`ALLOW_CONNECTIONS false`、连接数打满、重启恢复中），新查询会一直挂着并以 0 延迟空转重连；库恢复后还会收到旧错误。`test/db-reconnect.test.ts` 钉着这个场景（#100）。上游修了之后升级时去掉补丁。
 
@@ -692,7 +692,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 ## 账号
 
-`accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，取库时钟 `clock_timestamp()` 而不是控制面进程时钟，建占位时等于 `created_at`，今天页过期那行的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。`login_generation` 是浏览器登录的会话代次，电脑每报一次登录成功（`markLoginValid`）加一，`valid` 重登到 `valid` 也加，它只用来对发布结果，不进 `Account`。今天页哪些账号出行见「用量、今天与通知」一节。
+`accounts` 一行是一个用户挂在某台电脑上的一个平台账号。`login` 有三个值：`none` 是还没登录的占位，`valid` 已登录，`expired` 登录过期。`login_changed_at` 跟着 `login` 一起写，取库时钟 `clock_timestamp()` 而不是控制面进程时钟，建占位时等于 `created_at`，今天页过期那行的时间取它，写的是「什么时候过期的」而不是「什么时候加的」。`login_generation` 是浏览器登录的会话代次，电脑每报一次登录成功（`markLoginValid`）加一，`valid` 重登到 `valid` 也加，它只用来对发布结果，不进 `Account`。`missing_scope` 记接口授权的号缺了哪样发图要的授权范围，为 null 是不缺或不知道，见「草稿配图」。今天页哪些账号出行见「用量、今天与通知」一节。
 
 ### 两种连法：接口授权和电脑浏览器登录
 
@@ -715,9 +715,13 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 走接口的 X 照 X 的媒体限制：一条最多 4 张图或 1 张 GIF，图 5 MB（[媒体最佳实践](https://docs.x.com/x-api/media/quickstart/best-practices)）。文档没说 MB 是不是 1000 进位，按小的 5,000,000 字节算；GIF X 收到 15 MB，但一次性上传这里统一按 5 MB 卡，不做分块上传。走接口的图由控制面传，所以每张必须是这个归属人的附件（`kind: "attachment"`），id 取得到、`sha256` 和 `mime` 都和附件表上的一样，大小按附件表的 `size` 算；电脑上的路径图（`kind: "path"`）对接口号一律不收。走电脑的图由电脑上的发布器自己取，控制面只数张数。
 
-发的时候 `PublishLoop` 在拿令牌之前按草稿顺序从附件表取字节，有一张取不到或对不上就整条记 `error`。拿到令牌后逐张 `POST /2/media/upload`（[上传媒体](https://docs.x.com/x-api/media/upload-media)，JSON 体，`media` 放 base64，`media_category` 按 MIME 写 `tweet_image` 或 `tweet_gif`），回来的 `data.id` 依次放进 `POST /2/tweets` 的 `media.media_ids`。任何一张传不上去都抛 `PublishError`，帖子不发、不落 `publications`，草稿和通知走原来发布失败的那条路；401 换令牌重试时图从头再传一遍，没发出去的上传不算发了。
+发的时候 `PublishLoop` 在拿令牌之前按草稿顺序从附件表取字节，有一张取不到或对不上就整条记 `error`。拿到令牌后逐张 `POST /2/media/upload`（[上传媒体](https://docs.x.com/x-api/media/upload-media)，JSON 体，`media` 放 base64，`media_category` 按 MIME 写 `tweet_image` 或 `tweet_gif`），回来的 `data.id` 依次放进 `POST /2/tweets` 的 `media.media_ids`。任何一张传不上去都抛 `PublishError`，帖子不发、不落 `publications`，草稿和通知走原来发布失败的那条路；401 换令牌重试时图从头再传一遍，没发出去的上传不算发了。GIF 传完 X 要异步转码，上传的回包带 `data.processing_info` 时，按它的 `check_after_secs`（至少 1 秒）等一下再 `GET /2/media/upload?command=STATUS&media_id=…` 查，直到 `succeeded` 才拿去发帖；`failed` 或累计等过 5 分钟（`MEDIA_PROCESSING_LIMIT_MS`）都记 `media_failed`，帖子不发。等是 `PublishLoop` 注进来的 `sleep`，测试换成不真等的那个。
 
-传图要 `media.write` 权限，X 授权页的 scope 加了它。这之前授权的令牌没有这项，只发文字照常，带图的那条传图时会被 X 拒，401、403 都按原规则记登录过期、账号变过期，用户在账号页重新授权一次就带上了。
+传图要 `media.write` 权限，X 授权页的 scope 加了它。这之前授权的令牌没有这项，传图时 X 回 403。缺权限和登录过期是两回事：令牌还活着，只发文字照常，所以账号不记 `expired`，另记 `accounts.missing_scope`，不折进 `login`，因为 `login` 管着文字帖能不能发和可直接发布放不放行。账号页和这条草稿卡都写「X 账号缺发图权限，重新连接一次就好」，给一个走接入 X 同一个授权入口的「重新连接」。
+
+`missing_scope` 在三处写。写凭据的 `saveGrant`（授权回调、刷新成功）按令牌端点回的 `scope` 重算，缺就记上、补上了就清掉，变了才推 `account_updated`；所以老号下一次刷新令牌就会被标出来，不用等它发一条带图的。发带图的那条时，拿到令牌后先看账号上已经记着缺、或凭据存着的 `scope` 里没有 `media.write`，就不打 X，直接记 `missing_scope`。`scope` 是空串表示不知道（`account-add` 挂的令牌），不当作缺。真发出去回了 403，交给 `publish/forbidden.ts` 的纯函数 `classifyForbidden` 分：这一条要的范围存着的 scope 里没有，或 X 回包里点名了它，算缺权限，草稿记 `missing_scope`，账号由 `markMissingScope` 记上，带着认领时那一代凭据，重新授权之后晚到的结论不改账号；其余的 403（内容重复、不合平台规则、GitHub 没有这个仓库的权限）只是平台拒了这一条，草稿记 `forbidden`，账号不动，回包写进日志不落库。401 才是令牌不认，仍按「刷新」一节换令牌重试，换不到才记过期。
+
+迁移只加列，不回填：迁移里不碰凭据密文，老号靠上面三处之一标出来，最晚是第一次发带图的时候。
 
 GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文传图的公开接口，网页上拖图走的是没公开的上传通道（[社区讨论](https://github.com/orgs/community/discussions/46951)），不用未公开接口也不模拟网页上传，所以这一格是 0，带图起草不落。
 
@@ -743,7 +747,7 @@ GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文�
 
 发布循环 `claimDueDrafts` 只抢 `login='valid'` 账号的到点已批稿。账号一过期，它的稿子留在已批，不再下发，别的账号照发。重新登录成 `valid` 后（不管是更新原来那行还是新占位并进原来那行），这些稿子下一轮照常被抢，过了排期很久的也会补发。例外是控制面重启：`reopenMissedDrafts` 会把停机期间错过的定时稿打回待批，但跳过 `login` 不是 `valid` 的账号，过期账号的稿子不算停机错过，照样留在已批等重新登录。
 
-发布路径自己发现过期也记账号：草稿因 `login_expired` 失败（电脑回的 `publish_result`、平台回 401/403、令牌缺失三处），`settleFailed` 在同一个事务里把草稿记失败、把账号按上面同一个 `markLoginExpired` 记成 `expired`。用户只收到一条通知，就是草稿那条「某平台上的「标题」没发出去：账号登录过期了，重新登录后让 Bot 再起一稿」，账号这边只推 `account_updated`、重发 `config`，不再加第二条。电脑自己报 `expired` 时没有草稿可挂，才用账号那条「小红书账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」。两条哪条先到就是那一条：`markLoginExpired` 只认 `login='valid'`，后到的那条发现账号已经是 `expired`，账号不改、不推 `account_updated`、不重发 `config`，也不再发通知；后到的是草稿失败时草稿照样结算成失败，只推 `draft_updated`。发布结果记过期还绑着认领时那一代登录。电脑发的草稿（小红书）没有控制面凭据，认领那条 UPDATE 把账号当时的 `login_generation` 抄进 `drafts.claimed_login_generation`（和 `login = 'valid'` 是同一行同一刻看到的），结算时同一条 UPDATE 另要求 `accounts.login_generation = 草稿的 claimed_login_generation`。用代次不用时刻：`valid` 重登到 `valid` 时 `login_changed_at` 不动（它是给今天页看的），代次每次登录成功都加一。这列加上之前认领的旧稿子 `claimed_login_generation` 是 null，结算时退回基底的 `login_generation = 1 AND login_changed_at <= claimed_at`（见「唯一锁序」）。这条规则有代价：新控制面已经把账号推进到第 2 代之后，滚动升级期间的旧控制面认领草稿时写不出 `claimed_login_generation`，这些草稿回来的真 `login_expired` 都因代次不是 1 退成已知，账号留在 `valid`、不推过期通知。旧实例每认领一次都可能这样漏报一次真实过期，直到旧实例排空；之后新实例认领带上当前代次，再遇到过期就照常记。选它是因为反过来更坏：把重登之后的新会话误标过期，会让一个能用的账号停发、让用户白跑一趟重新登录。走控制面凭据的草稿（GitHub、X）只按下一节的代际条件。认领之后账号已经重登成 `valid` 的，不管中间有没有经过 `expired`，旧那次回来的 `login_expired` 只把草稿记失败、推 `draft_updated`，账号保持 `valid`，不推过期通知、不重发 `config`。
+发布路径自己发现过期也记账号：草稿因 `login_expired` 失败（电脑回的 `publish_result`、平台回 401 且换不到新令牌、令牌缺失三处；403 不算过期，见「草稿配图」），`settleFailed` 在同一个事务里把草稿记失败、把账号按上面同一个 `markLoginExpired` 记成 `expired`。用户只收到一条通知，就是草稿那条「某平台上的「标题」没发出去：账号登录过期了，重新登录后让 Bot 再起一稿」，账号这边只推 `account_updated`、重发 `config`，不再加第二条。电脑自己报 `expired` 时没有草稿可挂，才用账号那条「小红书账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」。两条哪条先到就是那一条：`markLoginExpired` 只认 `login='valid'`，后到的那条发现账号已经是 `expired`，账号不改、不推 `account_updated`、不重发 `config`，也不再发通知；后到的是草稿失败时草稿照样结算成失败，只推 `draft_updated`。发布结果记过期还绑着认领时那一代登录。电脑发的草稿（小红书）没有控制面凭据，认领那条 UPDATE 把账号当时的 `login_generation` 抄进 `drafts.claimed_login_generation`（和 `login = 'valid'` 是同一行同一刻看到的），结算时同一条 UPDATE 另要求 `accounts.login_generation = 草稿的 claimed_login_generation`。用代次不用时刻：`valid` 重登到 `valid` 时 `login_changed_at` 不动（它是给今天页看的），代次每次登录成功都加一。这列加上之前认领的旧稿子 `claimed_login_generation` 是 null，结算时退回基底的 `login_generation = 1 AND login_changed_at <= claimed_at`（见「唯一锁序」）。这条规则有代价：新控制面已经把账号推进到第 2 代之后，滚动升级期间的旧控制面认领草稿时写不出 `claimed_login_generation`，这些草稿回来的真 `login_expired` 都因代次不是 1 退成已知，账号留在 `valid`、不推过期通知。旧实例每认领一次都可能这样漏报一次真实过期，直到旧实例排空；之后新实例认领带上当前代次，再遇到过期就照常记。选它是因为反过来更坏：把重登之后的新会话误标过期，会让一个能用的账号停发、让用户白跑一趟重新登录。走控制面凭据的草稿（GitHub、X）只按下一节的代际条件。认领之后账号已经重登成 `valid` 的，不管中间有没有经过 `expired`，旧那次回来的 `login_expired` 只把草稿记失败、推 `draft_updated`，账号保持 `valid`，不推过期通知、不重发 `config`。
 
 过期推的是 `failed`，不是 `stuck`：`stuck` 每人一段离线期只推一次，是给电脑掉线的，混进来会和掉线那条互相吞。
 
@@ -766,7 +770,7 @@ GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文�
 - 同一进程里同一个账号的刷新只跑一趟（single-flight）。进程里按账号记着正在跑的那一趟，后来的请求直接等它的结果，不开事务、不占数据库连接。那一趟不论成功、被拒还是抛异常，结束时都从表里删掉，下一次要刷新的请求会重新起一趟，一次 5xx 不会把后面的请求永远钉在同一个失败上。
 - 不同账号的刷新各要一个事务，同时进事务的不超过连接池 `max` 的三分之一（至少 1 条，默认池 10 条时是 3 条），多出来的在进程内存里排队，排队时不开事务、不占连接。事务里要等令牌端点，最长 10 秒，不设上限的话发布循环一轮十几个账号一起刷新就能把连接池占满，登录、账号页这些普通请求全卡住。
 - 跑的那一趟走 `withAccountLock` 锁账号行（见下面「唯一锁序」），锁到之后再判一次：还能用（排在前面的已经刷过，或者库里的已经不是 `rejected`），就用它；没有刷新令牌或刷新令牌也过期了，回 `login_expired`；否则拿刷新令牌去换。
-- 换到了，新的访问令牌、刷新令牌、两个过期时间在同一个事务里写回，账号是 `expired` 的话同一条事务改回 `valid`，提交之后才把令牌交出去；改回了 `valid` 的，提交后推 `account_updated`、重发 `config`；这两步只是通知，重发 `config` 出错只记日志，这趟请求照常用新令牌走下去（`server.ts` 里交给 `AccountTokens` 的回调）。
+- 换到了，新的访问令牌、刷新令牌、两个过期时间在同一个事务里写回，账号是 `expired` 的话同一条事务改回 `valid`，`missing_scope` 按新回的 `scope` 重算，提交之后才把令牌交出去；账号改了的，提交后推 `account_updated`、重发 `config`；这两步只是通知，重发 `config` 出错只记日志，这趟请求照常用新令牌走下去（`server.ts` 里交给 `AccountTokens` 的回调）。
 
 刷新失败怎样分类。清掉刷新令牌是不可逆的，所以只有能证明刷新令牌本身失效的回应才算被拒，判断在 `oauth-providers.ts` 的 `DEAD_REFRESH_TOKEN`：
 
@@ -781,7 +785,7 @@ GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文�
 
 `login_expired` 到了发布循环就是草稿因 `login_expired` 失败，走上面同一条 `settleFailed`，只发草稿那条通知。到了代理就调 `expireLogin`：`markLoginExpired`、推 `account_updated`、发账号那条「…账号「handle」登录过期了，这个账号的稿子先不发，到账号页重新登录」、重发 `config`，和电脑报 `expired` 同一段代码。
 
-代际。`account_credentials.generation` 每写一份新凭据加一：授权回调写凭据、刷新成功写回，都走 `saveGrant` 的 `generation = generation + 1`；刷新被拒只清 `refresh_enc`，代际不动，死的还是那一代。`accessToken` 交出的令牌和 `login_expired` 都带着代际，没有凭据行时是 null。控制面自己因为凭据被拒把账号记过期（代理取到 `login_expired`、代理重试后还是 401、发布同样两种情况、发布碰到 403），都把那一代交给 `markLoginExpired`，改账号的那条 UPDATE 里带 `EXISTS (SELECT 1 FROM account_credentials WHERE account_id = accounts.id AND generation = <被拒的那一代>)`，没有凭据行的那种换成 `NOT EXISTS`。代理和发布走同一个函数，电脑报上来的过期不经过控制面的凭据，不带这个条件（`ExpiryEvidence` 的 `reported` 和 `rejected` 两种）。
+代际。`account_credentials.generation` 每写一份新凭据加一：授权回调写凭据、刷新成功写回，都走 `saveGrant` 的 `generation = generation + 1`；刷新被拒只清 `refresh_enc`，代际不动，死的还是那一代。`accessToken` 交出的令牌和 `login_expired` 都带着代际，没有凭据行时是 null。控制面自己因为凭据被拒把账号记过期（代理取到 `login_expired`、代理重试后还是 401、发布同样两种情况），都把那一代交给 `markLoginExpired`，改账号的那条 UPDATE 里带 `EXISTS (SELECT 1 FROM account_credentials WHERE account_id = accounts.id AND generation = <被拒的那一代>)`，没有凭据行的那种换成 `NOT EXISTS`。代理和发布走同一个函数，电脑报上来的过期不经过控制面的凭据，不带这个条件（`ExpiryEvidence` 的 `reported` 和 `rejected` 两种）。
 
 不变式。对有控制面凭据的账号，`login = 'expired'` 成立，当且仅当当前这一代凭据被判定为死了。过期是针对某一代凭据下的结论：记过期的 UPDATE 带着那一代，库里已经是下一代就什么都不改。凭据代际一推进（刷新成功、重新授权，都经 `saveGrant`），账号必须回到 `valid`，所以 `saveGrant` 写下新一代之后在同一个事务里把 `login <> 'valid'` 的账号改回 `valid`；代际不推进，账号就没有从 `expired` 回到 `valid` 的路（唯一例外是 `markLoginValid`，只给电脑报小红书登录用，这种账号没有控制面凭据）。刷新被拒只清 `refresh_enc`、不推进代际，因为死的还是这一代。选「刷新成功时在锁里写回 `valid`」而不是「发现已 `expired` 就不刷新」，是因为过期先提交、刷新随后成功这条交错里刷新已经拿到了平台发的新令牌，扔掉它就要用户再授权一次；写回 `valid` 让不变式直接成立，`account_updated` 和 `config` 在提交后补推。
 
@@ -830,6 +834,8 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 `attachments` 把草稿配图的原始字节存为 Postgres `bytea`，记录归属人、Bot、群、sha256、MIME 和大小。`(owner_id, bot_id, group_id, sha256)` 唯一；重复上传用一条 `INSERT ... ON CONFLICT ... DO UPDATE ... RETURNING id` 返回同一个附件 id，不先查后写。
 
 `PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。先验证网关 key，无效回 401；读体前再检查 Bot 和群的归属及成员关系，不成立回 404；落库事务内再次复核，避免上传期间删除对象的竞态。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。控制面和运行器共用 shared 的 `imageMime` 按魔数识别图片；空体回 400「附件图片不能为空」，无支持的魔数回 400「附件字节不是 PNG、JPEG、WebP 或 GIF 图片」，魔数与声明不符回 400「附件图片格式和 Content-Type 不一致」。服务器重算哈希，声明不符回 400。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
+
+`POST /hub/v1/drafts/:draftId/edit` 是运行器 `edit_draft` 改稿的地方，网关 key Bearer 加 `x-baize-lane` 租约头，body 是 `DraftEditRequest`（这一轮的 runId 和新正文）。Bot 和群取租约头里的道，电脑行、栅栏和 `editDraft` 在同一个事务里。改不了的照实回：这一轮已结束 409、草稿不是这个 Bot 在这个群里起的或不存在 404、已经发出 409、配图不合账号 400，文案在 `EDIT_REFUSED` 和 `editDraft` 的拒绝里，运行器原样抛成工具错误。走上行 `draft_edit` 的话改不了只能静默丢掉，模型以为改成了；这条上行还收着，给没升级的运行器用。
 
 `/hub/v1` 挂在 cookie 登录中间件之前，只接受当前电脑网关 key 的 Bearer。config 恒带 `hub.baseUrl`；hello 轮换 key 后旧 key 立即失效。`http/hub-auth.ts` 将归属人和电脑 id 写入请求上下文，P3-10 的租约头校验接在 `http/hub.ts` 的认证之后、附件路由之前；本单不校验租约头。
 
