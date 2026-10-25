@@ -192,6 +192,14 @@ export const MainWindow = () => {
   const live = ready === null ? null : shownLive(ready.content);
   // 画面接管里只有 ⌘K 归这边，别的组合键照样发到电脑；终端里一个不留，Ctrl+K 在 shell 里是删到行尾。
   const ours = live === null ? "all" : live.kind === "terminal" ? "none" : "switch";
+  // 新画面一摆出来就抢焦点去收键，快速切换还压在上面的话，人看到的是它，字却发到了电脑。
+  // 和收起放在同一次渲染里，RestoreFocus 卸载时还的焦点先落，画面的焦点后到。
+  const liveId = live?.session.liveId ?? null;
+  const [seenLiveId, setSeenLiveId] = useState(liveId);
+  if (liveId !== seenLiveId) {
+    setSeenLiveId(liveId);
+    if (liveId !== null) setQuick("none");
+  }
   useEffect(() => {
     if (!appReady || ours === "none") return;
     const onKey = (event: KeyboardEvent) => {

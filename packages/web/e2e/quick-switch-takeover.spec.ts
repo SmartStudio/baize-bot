@@ -125,6 +125,26 @@ test("画面开着、另一个 Bot 请人接手时按 ⌘K：右下角的接手�
   await expect(hint).toHaveCount(0);
 });
 
+test("快速切换开着时点接手提示的「打开画面」：快速切换收起，画面在最上面，打的字发到电脑", async ({
+  page,
+  request,
+}) => {
+  await login(page);
+  await openSeededBot(page, "小服");
+  await page.keyboard.press(SWITCH);
+  await expect(page.getByTestId("quick-switch-input")).toBeFocused();
+  const liveId = await takeover(request);
+  const hint = page.locator(`[data-testid=takeover-hint][data-live-id="${liveId}"]`);
+  await hint.getByTestId("takeover-hint-open").click();
+
+  await expect(panel(page)).toHaveAttribute("data-state", "live");
+  await expect(page.getByTestId("quick-switch"), "画面打开时快速切换收起，不压在画面上面").toHaveCount(0);
+  expect(await topmostAt(page, "live-panel"), "画面正中点到的是画面").toBe(true);
+  await expect(page.getByTestId("live-keys"), "焦点在画面上").toBeFocused();
+  await page.keyboard.type("c");
+  await expect.poll(() => typedSent(request, liveId), "字发到看得见的那块画面").toEqual(["c"]);
+});
+
 test("快捷键表关掉后焦点回到打开之前的地方，不落到 body：从快速切换里按 ⌘/ 换过去也一样", async ({ page }) => {
   await login(page);
   await openSeededBot(page, "小服");
