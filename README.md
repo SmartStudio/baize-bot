@@ -93,3 +93,12 @@ A TypeScript pnpm monorepo. The control plane uses Hono and PostgreSQL, the web 
 ## License
 
 [MIT](LICENSE)
+
+## 延伸阅读
+
+Notes on fxai.ai (in Chinese):
+
+- [Grok Bot 是什么？AI Agent 云端同事的实战指南](https://fxai.ai/notes/grok-bot-persistent-ai-teammates/): how a persistent cloud bot works with skills, routines, group chats and approvals.
+- [多 Agent 协作时，另一个 Agent 转来的指令能不能直接照做](https://fxai.ai/notes/agent-to-agent-trust-boundary/): how to check instructions passed between bots, which matters when bots work in groups.
+- [多个 Bot 共用云电脑，文件怎么隔离](https://fxai.ai/notes/grok-bot-shared-computer-isolation/): what is and isn't isolated when several bots share one computer.
+- [企业开通 Grok Bot，权限和审计要先定什么](https://fxai.ai/notes/grok-bot-enterprise-access-audit/): what to decide on access, approvals and audit logs before a company turns bots on.
