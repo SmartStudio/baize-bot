@@ -30,7 +30,7 @@ import {
   Preference,
   ProjectOfferMember,
   ProjectOfferPlatform,
-  PublishFailureReason,
+  ComputerPublishFailure,
   RoutineBoundary,
   RoutineId,
   RoutineOfferSpec,
@@ -227,7 +227,7 @@ export const AgentToControl = z.discriminatedUnion("type", [
       z
         .object({
           status: z.literal("failed"),
-          reason: PublishFailureReason,
+          reason: ComputerPublishFailure,
           detail: z.string().max(2000),
         })
         .strict(),

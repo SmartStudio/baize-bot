@@ -14,6 +14,7 @@ import { useApp, type RemotePairing } from "../state/app.js";
 import { openTerminal } from "../state/live.js";
 import type { LoginFlow } from "../state/types.js";
 import { ConnectEntries } from "./ConnectEntries.js";
+import { ScopeReconnect } from "./ScopeReconnect.js";
 import { loginFlowNote } from "./LoginCard.js";
 import { useFailureToast } from "./Toasts.js";
 import { ACTION_TEXT, SCOPE_TEXT, targetText } from "./grantText.js";
@@ -147,6 +148,7 @@ const AccountRow = ({
           login={login}
         />
       ) : null}
+      <ScopeReconnect account={account} />
       {open ? (
         <fieldset className="account-tiers" aria-label={`${handle} 的档位`} disabled={change.status === "busy"}>
           {TIERS.map((tier) => {

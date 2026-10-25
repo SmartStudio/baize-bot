@@ -164,6 +164,7 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
     login: "none",
     loginChangedAt: stamp,
     lastLoginFailure: null,
+    missingScope: null,
     createdAt: stamp,
   });
   accounts.set(next.id, next);
@@ -171,7 +172,7 @@ export const createAccount = (request: CreateAccountRequest): Outcome<{ account:
 };
 
 // 照控制面授权回调：不去平台，当平台认出的是固定的 mock_<平台> 这个号。同一平台同一 handle 已有的接口授权行挪到
-// 远程电脑、登录记回 valid；没有就在远程电脑新建（有远程挂远程）。
+// 远程电脑、登录记回 valid、缺的授权范围补上；没有就在远程电脑新建（有远程挂远程）。
 export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
   const handle = `mock_${platform}`;
   const remote = computersOf().computers.find((c) => c.kind === "remote") ?? computersOf().computers[0];
@@ -193,6 +194,7 @@ export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
           login: "valid",
           loginChangedAt: stamp,
           lastLoginFailure: null,
+          missingScope: null,
           createdAt: stamp,
         }
       : {
@@ -200,6 +202,7 @@ export const connectOAuthAccount = (platform: OAuthPlatform): Account => {
           computerId: remote.id,
           login: "valid",
           loginChangedAt: existing.login === "valid" ? existing.loginChangedAt : stamp,
+          missingScope: null,
         },
   );
   accounts.set(next.id, next);

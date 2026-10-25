@@ -30,6 +30,7 @@ const account = (
     login,
     loginChangedAt: at,
     lastLoginFailure: null,
+    missingScope: null,
     createdAt: at,
   });
 

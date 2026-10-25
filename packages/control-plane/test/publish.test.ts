@@ -58,7 +58,7 @@ type Clock = () => Date;
 type Stack = {
   readonly database: TestDb;
   readonly fake: FakePlatforms;
-  serve(now?: Clock): Promise<TestServer>;
+  serve(now?: Clock, sleep?: (ms: number) => Promise<void>): Promise<TestServer>;
 };
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -77,13 +77,13 @@ async function stack(): Promise<Stack> {
   return {
     database,
     fake,
-    serve: async (now) => {
+    serve: async (now, sleep) => {
       const server = await startTestServer(
         database.db,
         { githubApiBaseUrl: fake.githubBaseUrl, xApiBaseUrl: fake.xBaseUrl },
         undefined,
         undefined,
-        now === undefined ? undefined : { now },
+        { ...(now === undefined ? {} : { now }), ...(sleep === undefined ? {} : { sleep }) },
       );
       // 重启用例会先手动关掉旧进程，收尾时不再关第二次。
       let closed = false;
@@ -476,6 +476,69 @@ describe("发布循环", () => {
     expect(s.fake.requests(), "平台上只发过一次").toHaveLength(1);
   });
 
+  it("Bot 经中枢改稿：改成了回 200 并推新草稿；发出去的、改了类型的、找不到的都回中文原因，草稿不动", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [GITHUB]);
+    const github = accountOf(job, "github");
+    const editOnHub = async (draftId: string, content: DraftContent) => {
+      const response = await fetch(`${job.config.hub.baseUrl}/drafts/${draftId}/edit`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${job.config.modelGateway.apiKey}`,
+          "x-baize-lane": job.lane,
+        },
+        body: JSON.stringify({ runId: job.runId, content }),
+      });
+      return { status: response.status, body: (await response.json()) as unknown };
+    };
+
+    const pending = specOf(github, issuePost("先这么写"));
+    await createDraft(job, pending);
+    expect(await editOnHub(pending.draftId, issuePost("改一改"))).toEqual({ status: 200, body: {} });
+    expect((await nextOf(job.push, "draft_updated")).draft).toMatchObject({
+      id: pending.draftId,
+      status: "pending",
+      content: { text: "改一改" },
+    });
+
+    const sent = specOf(github, issuePost("发出去的"));
+    await createApproved(job, sent);
+    await server.server.publisher.tick();
+    await publishedPushes(job);
+    const reply: DraftContent = {
+      kind: "reply",
+      text: "回一句",
+      images: [],
+      replyTo: { url: "https://github.com/baize/demo/issues/7", author: "a", quote: "原话" },
+    };
+    expect(await editOnHub(sent.draftId, issuePost("发完又想改"))).toEqual({
+      status: 409,
+      body: { error: "这条草稿正在发或已经发出去了，不能再改，要发新的就另起一稿" },
+    });
+    expect(await editOnHub(pending.draftId, reply)).toEqual({
+      status: 400,
+      body: { error: "不能把帖子改成回复" },
+    });
+    expect(await editOnHub(pending.draftId, { ...issuePost("带图"), images: [IMAGE] })).toEqual({
+      status: 400,
+      body: { error: "草稿配图不合这个账号：不能带图" },
+    });
+    expect(await editOnHub("draft-nowhere", issuePost("没这条"))).toEqual({
+      status: 404,
+      body: { error: "找不到这条草稿，照建草稿时拿到的 draftId 抄" },
+    });
+    expect((await draftOnPage(job, sent.draftId)).draft).toMatchObject({
+      status: "published",
+      content: issuePost("发出去的"),
+    });
+    expect((await draftOnPage(job, pending.draftId)).draft).toMatchObject({
+      status: "pending",
+      content: issuePost("改一改"),
+    });
+  });
+
   it("发出后刚做完里有这一行，带原帖链接", async () => {
     const s = await stack();
     const server = await s.serve();
@@ -791,6 +854,145 @@ describe("X 接口带图", () => {
     }
     expect((await draftOnPage(job, accepted.draftId)).draft.status).toBe("pending");
     expect(s.fake.requests(), "批之前拒的不打 X").toEqual([]);
+  });
+
+  it("X 回 403 说缺 media.write：账号记缺发图权限、登录照旧有效，这条记权限不够；不带图的照发", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    await createApproved(job, specOf(x, { ...tweet("带一张图"), images: [await uploadImage(job, PNG, "image/png")] }));
+    s.fake.failNext(403, (request) => request.path === "/2/media/upload", {
+      title: "Forbidden",
+      type: "https://api.twitter.com/2/problems/client-forbidden",
+      status: 403,
+      detail: "Forbidden: Missing permission media.write",
+    });
+    await server.server.publisher.tick();
+    const { draft, account, notice } = await failedPushes(job);
+
+    expect(draft.failure).toBe("missing_scope");
+    expect(account, "账号推一次新状态，不是过期").toMatchObject({
+      id: x.id,
+      login: "valid",
+      missingScope: "media.write",
+    });
+    expect(notice.text).toContain("X 账号缺发图权限，重新连接一次就好");
+    const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(listed).toEqual([expect.objectContaining({ id: x.id, login: "valid", missingScope: "media.write" })]);
+
+    await createApproved(job, specOf(x, tweet("只有字")));
+    await server.server.publisher.tick();
+    await publishedPushes(job);
+    expect(s.fake.requests().map((request) => request.path)).toEqual(["/2/media/upload", "/2/tweets"]);
+  });
+
+  it("X 别的 403 和 GitHub 的 403 都不动账号，只这一条失败，原因写明是平台拒了这一条", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X, GITHUB]);
+    await createApproved(job, specOf(accountOf(job, "x"), tweet("和上一条一模一样")));
+    s.fake.failNext(403, (request) => request.path === "/2/tweets", {
+      title: "Forbidden",
+      type: "about:blank",
+      status: 403,
+      detail: "You are not allowed to create a Tweet with duplicate content.",
+    });
+    await server.server.publisher.tick();
+    const duplicate = await failedPushes(job);
+    expect(duplicate.draft.failure).toBe("forbidden");
+    expect(duplicate.account, "账号不动").toBeNull();
+    expect(duplicate.notice.text).toContain("平台拒绝了这一条，账号授权还有效");
+
+    await createApproved(job, specOf(accountOf(job, "github"), issuePost("没有这个仓库的权限")));
+    s.fake.failNext(403, undefined, { message: "Resource not accessible by integration" });
+    await server.server.publisher.tick();
+    const github = await failedPushes(job);
+    expect(github.draft.failure).toBe("forbidden");
+    expect(github.account, "账号不动").toBeNull();
+
+    const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(listed.map((one) => [one.platform, one.login, one.missingScope])).toEqual([
+      ["x", "valid", null],
+      ["github", "valid", null],
+    ]);
+  });
+
+  it("授权时没给 media.write 的 X 号，带图的稿子发之前就挡下，一条请求都不打；不带图的照发", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [{ ...X, scope: "tweet.read users.read tweet.write offline.access" }]);
+    const x = accountOf(job, "x");
+    expect(x.missingScope, "挂号那一刻就看得出缺发图权限").toBe("media.write");
+    await createApproved(job, specOf(x, { ...tweet("带一张图"), images: [await uploadImage(job, PNG, "image/png")] }));
+    await server.server.publisher.tick();
+    const blocked = await failedPushes(job);
+
+    expect(blocked.draft.failure).toBe("missing_scope");
+    expect(blocked.account, "账号早就记着缺权限，不再推").toBeNull();
+    expect(blocked.notice.text).toContain("X 账号缺发图权限，重新连接一次就好");
+    expect(s.fake.requests(), "发之前就挡下").toEqual([]);
+
+    await createApproved(job, specOf(x, tweet("只有字")));
+    await server.server.publisher.tick();
+    await publishedPushes(job);
+    expect(s.fake.requests().map((request) => request.path)).toEqual(["/2/tweets"]);
+  });
+
+  it("GIF 传上去 X 还在处理：按 check_after_secs 等着查，查到 succeeded 再发帖", async () => {
+    const s = await stack();
+    const waits: number[] = [];
+    const server = await s.serve(undefined, async (ms) => {
+      waits.push(ms);
+    });
+    const job = await jobOn(s, server, [X]);
+    await createApproved(
+      job,
+      specOf(accountOf(job, "x"), { ...tweet("动图"), images: [await uploadImage(job, GIF, "image/gif")] }),
+    );
+    s.fake.processNextMedia(["pending", "in_progress", "succeeded"], 3);
+    await server.server.publisher.tick();
+    await publishedPushes(job);
+
+    expect(s.fake.requests().map(({ method, path }) => `${method} ${path}`)).toEqual([
+      "POST /2/media/upload",
+      "GET /2/media/upload?command=STATUS&media_id=17101",
+      "GET /2/media/upload?command=STATUS&media_id=17101",
+      "POST /2/tweets",
+    ]);
+    expect(s.fake.requests()[3]?.body).toEqual({ text: "动图", media: { media_ids: ["17101"] } });
+    expect(waits, "每次等的都是 X 给的 check_after_secs").toEqual([3000, 3000]);
+  });
+
+  it("GIF 在 X 那边处理失败，或者一直处理不完等够上限，这一条记传图失败，不发帖", async () => {
+    const s = await stack();
+    const waits: number[] = [];
+    const server = await s.serve(undefined, async (ms) => {
+      waits.push(ms);
+    });
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    const gif = await uploadImage(job, GIF, "image/gif");
+    await createApproved(job, specOf(x, { ...tweet("处理会失败"), images: [gif] }));
+    s.fake.processNextMedia(["pending", "failed"], 2);
+    await server.server.publisher.tick();
+    const failed = await failedPushes(job);
+    expect(failed.draft.failure).toBe("media_failed");
+    expect(failed.account, "账号不动").toBeNull();
+    expect(failed.notice.text).toContain("X 没处理好这张动图");
+    expect(waits).toEqual([2000]);
+
+    waits.length = 0;
+    await createApproved(job, specOf(x, { ...tweet("一直处理不完"), images: [gif] }));
+    s.fake.processNextMedia(["in_progress"], 60);
+    await server.server.publisher.tick();
+    const stuck = await failedPushes(job);
+    expect(stuck.draft.failure).toBe("media_failed");
+    expect(waits, "一共只等 5 分钟").toEqual([60_000, 60_000, 60_000, 60_000, 60_000]);
+    expect(
+      s.fake.requests().filter((request) => request.path === "/2/tweets"),
+      "没处理好的动图不发帖",
+    ).toEqual([]);
   });
 });
 

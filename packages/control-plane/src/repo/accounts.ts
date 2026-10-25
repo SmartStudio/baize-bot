@@ -3,6 +3,7 @@ import {
   ComputerId,
   type Account,
   type AccountConfig,
+  type AccountScope,
   type AccountTier,
   type CreateAccountRequest,
   type LoginFailure,
@@ -162,7 +163,7 @@ export async function connectOAuthAccount(
 export const LOGIN_CLOCK = sql`clock_timestamp()`;
 
 /** login 真变了才换时刻：重复报一次 valid 不该让今天页以为刚登上。 */
-function loginChangedAt(login: Account["login"]): SQL {
+export function loginChangedAt(login: Account["login"]): SQL {
   return sql`case when ${accounts.login} = ${login} then ${accounts.loginChangedAt} else ${LOGIN_CLOCK} end`;
 }
 
@@ -373,6 +374,35 @@ export async function markLoginExpired(db: Db | Tx, target: ExpiryTarget): Promi
           eq(accounts.ownerId, target.ownerId),
           eq(accounts.login, "valid"),
           stillHolds(target.evidence),
+        ),
+      )
+      .returning();
+    return row === undefined ? null : toAccount(row);
+  });
+}
+
+/**
+ * 平台说这一代凭据缺了某个授权范围。
+ * 被拒之后已经重连换了一代的，新一代给没给全由 saveGrant 按新 scope 算，这里不改。
+ */
+export async function markMissingScope(
+  db: Db | Tx,
+  target: {
+    readonly ownerId: UserId;
+    readonly accountId: AccountId;
+    readonly scope: AccountScope;
+  } & RejectedCredentials,
+): Promise<Account | null> {
+  return withAccountLock(db, target.accountId, async ({ tx }) => {
+    const [row] = await tx
+      .update(accounts)
+      .set({ missingScope: target.scope })
+      .where(
+        and(
+          eq(accounts.id, target.accountId),
+          eq(accounts.ownerId, target.ownerId),
+          sql`${accounts.missingScope} IS DISTINCT FROM ${target.scope}`,
+          stillHolds({ kind: "rejected", generation: target.generation }),
         ),
       )
       .returning();

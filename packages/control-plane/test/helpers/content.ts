@@ -34,6 +34,7 @@ export type AccountSpec = {
   readonly via?: PublishVia;
   readonly handle: string;
   readonly token?: string;
+  readonly scope?: string;
 };
 
 export type ContentJob = {
@@ -46,6 +47,8 @@ export type ContentJob = {
   readonly groupId: GroupId;
   readonly botId: BotId;
   readonly runId: RunId;
+  /** 这次 run 所在车道的围栏头，打中枢时带上。 */
+  readonly lane: string;
   readonly accounts: readonly Account[];
   close(): void;
 };
@@ -68,7 +71,9 @@ export async function contentJob(server: TestServer, db: Db, specs: readonly Acc
       handle: spec.handle,
     } as const;
     const account =
-      spec.token === undefined ? await addAccount(db, input) : await addAccountWithToken(db, crypto, input, spec.token);
+      spec.token === undefined
+        ? await addAccount(db, input)
+        : await addAccountWithToken(db, crypto, input, spec.token, spec.scope);
     accounts.push(account);
   }
 
@@ -99,6 +104,7 @@ export async function contentJob(server: TestServer, db: Db, specs: readonly Acc
     groupId: created.group.id,
     botId: created.bot.id,
     runId: prompt.runId,
+    lane: `${prompt.botId}/${prompt.groupId}/${prompt.lane.epoch}`,
     accounts,
     close: () => {
       agent.close();

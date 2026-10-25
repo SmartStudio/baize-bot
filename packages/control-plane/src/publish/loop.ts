@@ -14,7 +14,15 @@ import {
 } from "../repo/drafts.js";
 import type { PushHub } from "../ws/hub.js";
 import { draftAttachmentIds, findOwnedAttachmentBytes, matchDraftImages } from "../repo/attachments.js";
-import { publisherFor, PublishError, TokenRejected, type ApiBases, type PublishImage } from "./platforms.js";
+import { classifyForbidden, IMAGE_SCOPE, lacksScope } from "./forbidden.js";
+import {
+  PlatformForbidden,
+  publisherFor,
+  PublishError,
+  TokenRejected,
+  type ApiBases,
+  type PublishImage,
+} from "./platforms.js";
 import { announceFailure, publishFailed, publishSucceeded, type SettleDeps } from "./settle.js";
 
 export const PUBLISH_INTERVAL_MS = 60_000;
@@ -36,6 +44,8 @@ export type PublishLoopOptions = {
   /** 测试注进来一个自己说了算的时钟。不给就是真实时间。 */
   readonly now?: () => Date;
   readonly intervalMs?: number;
+  /** 等平台处理上传的动图。测试注进来不真等。 */
+  readonly sleep?: (ms: number) => Promise<void>;
 };
 
 /**
@@ -45,6 +55,7 @@ export type PublishLoopOptions = {
 export class PublishLoop {
   readonly #options: PublishLoopOptions;
   readonly #now: () => Date;
+  readonly #sleep: (ms: number) => Promise<void>;
   readonly #deps: SettleDeps;
   #timer: NodeJS.Timeout | null = null;
   readonly #loginCheckedAt = new Map<AccountId, number>();
@@ -52,6 +63,7 @@ export class PublishLoop {
   constructor(options: PublishLoopOptions) {
     this.#options = options;
     this.#now = options.now ?? (() => new Date());
+    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.#deps = {
       db: options.db,
       push: options.push,
@@ -140,6 +152,8 @@ export class PublishLoop {
     const publisher = publisherFor(draft.platform, "api");
     try {
       const images = await this.#imagesStillStored(claimed);
+      // 普通发帖用不着它，缺了也照发；带图的缺了，平台必回 403，发之前就挡下。
+      const needs = images.length === 0 ? null : (IMAGE_SCOPE[draft.platform] ?? null);
       // 和账号代理同一条规则：401 把这次用的令牌交回去，库里还是它就强制刷新，已被别处换过就直接用新的，只重试一次。
       // 401 是平台没接受这次请求，重发这条 POST 不会发出两条；别处刷新之后旧令牌晚到的 401 也就不会把账号记过期。
       let rejected: string | null = null;
@@ -150,6 +164,13 @@ export class PublishLoop {
           await publishFailed(this.#deps, scope, "login_expired", { generation: token.generation });
           return;
         }
+        if (needs !== null && (claimed.missingScope === needs || lacksScope(token.scope, needs))) {
+          await publishFailed(this.#deps, scope, "missing_scope", {
+            generation: token.generation,
+            missingScope: needs,
+          });
+          return;
+        }
         try {
           const published = await publisher.publish({
             content: draft.content,
@@ -157,6 +178,7 @@ export class PublishLoop {
             handle: claimed.handle,
             token: token.token,
             baseUrl: publisher.baseUrl(this.#options.bases),
+            sleep: this.#sleep,
           });
           await publishSucceeded(this.#deps, scope, () => published);
           return;
@@ -164,6 +186,19 @@ export class PublishLoop {
           if (error instanceof TokenRejected && rejected === null) {
             rejected = token.token;
             continue;
+          }
+          if (error instanceof PlatformForbidden) {
+            const forbidden = classifyForbidden({ needs, granted: token.scope, body: error.body });
+            log.warn("草稿没发出去", { draftId: draft.id, err: error });
+            await publishFailed(
+              this.#deps,
+              scope,
+              forbidden.kind,
+              forbidden.kind === "missing_scope"
+                ? { generation: token.generation, missingScope: forbidden.scope }
+                : undefined,
+            );
+            return;
           }
           if (!(error instanceof PublishError) || error.reason !== "login_expired") throw error;
           log.warn("草稿没发出去", { draftId: draft.id, err: error });

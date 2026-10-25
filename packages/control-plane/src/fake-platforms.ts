@@ -38,10 +38,21 @@ export type FakePlatforms = {
   setTokenLifetime(seconds: number): void;
   /** 用户在平台上撤了授权：已发出的刷新令牌全部作废，再拿来刷新会被拒。 */
   revoke(): void;
+  /** 之后 X 令牌端点回的 scope，默认是授权页上要的全部。 */
+  setXScope(scope: string): void;
+  /**
+   * 下一张传上 X 的图要异步处理：上传回 states 的第一个，之后每查一次状态往后走一个，走到最后一个就停在那。
+   * 每次都带同一个 check_after_secs。
+   */
+  processNextMedia(states: readonly MediaState[], checkAfterSecs: number): void;
   close(): Promise<void>;
 };
 
 export type RequestMatch = (request: FakePlatformRequest) => boolean;
+
+export type MediaState = "pending" | "in_progress" | "succeeded" | "failed";
+
+const X_SCOPE = "tweet.read users.read tweet.write media.write offline.access";
 
 const everything: RequestMatch = () => true;
 
@@ -77,6 +88,16 @@ function reply(res: ServerResponse, status: number, body: unknown, headers: Reco
   res.end(JSON.stringify(body));
 }
 
+const processingInfo = (media: {
+  readonly states: readonly MediaState[];
+  readonly seen: number;
+  readonly checkAfterSecs: number;
+}) => {
+  const state = media.states[media.seen] ?? "succeeded";
+  if (state === "failed") return { state, error: { code: 1, name: "InvalidMedia", message: "Unsupported media" } };
+  return state === "succeeded" ? { state } : { state, check_after_secs: media.checkAfterSecs, progress_percent: 50 };
+};
+
 const s256 = (verifier: string): string => createHash("sha256").update(verifier).digest("base64url");
 
 type Grant = { readonly redirectUri: string; readonly challenge: string | null };
@@ -88,6 +109,9 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
   let counter = 100;
   let tokenCounter = 0;
   let lifetime: number | null = null;
+  let xScope = X_SCOPE;
+  let nextProcessing: { readonly states: readonly MediaState[]; readonly checkAfterSecs: number } | null = null;
+  const processing = new Map<string, { states: readonly MediaState[]; seen: number; checkAfterSecs: number }>();
   // 建 discussion 的那条 mutation 只带仓库的节点 id，仓库名记在前一条查仓库的请求上。
   let discussionRepo = "o/r";
   const codes = new Map<string, Grant & { readonly platform: "github" | "x" }>();
@@ -115,7 +139,7 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
           access_token: access,
           expires_in: expiresIn,
           refresh_token: refresh,
-          scope: "tweet.read users.read tweet.write media.write offline.access",
+          scope: xScope,
           token_type: "bearer",
         };
   };
@@ -206,6 +230,19 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
       else reply(res, 200, { data: { id: "42", name: "白泽", username: HANDLES.x } }, READ_HEADERS);
       return;
     }
+    const status = /^\/2\/media\/upload\?(.*)$/.exec(path);
+    if (status !== null) {
+      const query = new URLSearchParams(status[1]);
+      const id = query.get("media_id") ?? "";
+      const media = processing.get(id);
+      if (query.get("command") !== "STATUS" || media === undefined) {
+        reply(res, 400, { title: "Invalid Request", detail: "unknown media_id" });
+        return;
+      }
+      media.seen = Math.min(media.seen + 1, media.states.length - 1);
+      reply(res, 200, { data: { id, media_key: `3_${id}`, processing_info: processingInfo(media) } });
+      return;
+    }
     if (path.startsWith("/2/tweets/search/recent")) {
       reply(res, 200, { data: [{ id: "1801", text: "假推文" }], meta: { result_count: 1 } }, READ_HEADERS);
       return;
@@ -274,7 +311,16 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
         return;
       }
       counter += 1;
-      reply(res, 200, { data: { id: `17${counter}`, media_key: `3_17${counter}` } });
+      const id = `17${counter}`;
+      const pending = nextProcessing;
+      nextProcessing = null;
+      if (pending === null) {
+        reply(res, 200, { data: { id, media_key: `3_${id}` } });
+        return;
+      }
+      const media = { ...pending, seen: 0 };
+      processing.set(id, media);
+      reply(res, 200, { data: { id, media_key: `3_${id}`, processing_info: processingInfo(media) } });
       return;
     }
     if (path === "/2/tweets") {
@@ -368,6 +414,12 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
     },
     revoke: () => {
       refreshTokens.clear();
+    },
+    setXScope: (scope) => {
+      xScope = scope;
+    },
+    processNextMedia: (states, checkAfterSecs) => {
+      nextProcessing = { states, checkAfterSecs };
     },
     close: () =>
       new Promise<void>((resolve, reject) => {

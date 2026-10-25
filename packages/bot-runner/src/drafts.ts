@@ -8,6 +8,7 @@ import {
   type AgentToControl,
   ContentPlanId,
   type DraftContent,
+  type DraftEditRequest,
   DraftId,
   type DraftImage,
   type DraftImageFacts,
@@ -26,9 +27,9 @@ import { parseOrThrow, resultText } from "./assistant.js";
 import type { RunnerTool } from "./bot-session.js";
 import { isInsideRoot, logicalResolve, realpathExisting } from "./paths.js";
 import type { ActiveRun } from "./topic.js";
-import { attachmentCopyName, uploadAttachment, type AttachmentLive } from "./attachments.js";
+import { attachmentCopyName, endpoint, uploadAttachment, type AttachmentLive } from "./attachments.js";
 
-// Bot 往外发东西只有起草这一条路：三件工具都只发上行，群里出草稿卡或计划卡，用户在卡上批了才发。
+// Bot 往外发东西只有起草这一条路：群里出草稿卡或计划卡，用户在卡上批了才发。
 // 闸门把它们归 publish，只看账号档，见 gate.ts 的 decideDraft。
 
 /** 所有 Bot 都挂，所以这三个名字对队员和主助理都先占上，工具连接的同名操作不注册。 */
@@ -271,6 +272,34 @@ async function specOf(
   };
 }
 
+/**
+ * 改稿走中枢而不走上行报文：草稿当前的状态、平台和配图规则只有控制面知道，发出去的、改了类型的都在那边才拒得掉，
+ * 上行报文没有回音，拒了模型也以为改成了。
+ */
+async function editOnHub(live: (() => AttachmentLive) | undefined, draftId: DraftId, body: DraftEditRequest) {
+  if (live === undefined) throw new Error("草稿没改：白泽的连接配置还没下发，过一会儿再调。");
+  const { hub, gateway, laneHeaders } = live();
+  let response: Response;
+  try {
+    response = await fetch(endpoint(hub.baseUrl, `drafts/${encodeURIComponent(draftId)}/edit`), {
+      method: "POST",
+      headers: { authorization: `Bearer ${gateway.apiKey}`, "content-type": "application/json", ...laneHeaders },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30_000),
+      redirect: "error",
+    });
+  } catch {
+    throw new Error("草稿没改：连不上白泽，过一会儿再调。");
+  }
+  if (response.ok) {
+    await response.body?.cancel();
+    return;
+  }
+  const json: unknown = await response.json().catch(() => null);
+  const error = typeof json === "object" && json !== null ? (json as { error?: unknown }).error : undefined;
+  throw new Error(`草稿没改：${typeof error === "string" ? error : `白泽回了 ${response.status}`}`);
+}
+
 export function createDraftTools(options: {
   readonly activeRun: () => ActiveRun | null;
   /** 工具调用时读最新的 config.accounts：换账号不重建会话，建工具时抓一份会过期。 */
@@ -330,25 +359,14 @@ export function createDraftTools(options: {
         const { draftId, content } = params as Static<typeof EDIT_PARAMS>;
         const parsedId = DraftId.safeParse(draftId);
         if (!parsedId.success) throw new Error("草稿没改，改好再调：draftId 是空的，照建草稿时拿到的 draftId 抄。");
-        options.send(
-          parseOrThrow(
-            {
-              type: "draft_edit",
-              runId: active.run.runId,
-              botId: active.run.botId,
-              groupId: active.run.groupId,
-              draftId: parsedId.data,
-              content: await contentOf(
-                content,
-                options.images,
-                "草稿没改，改好再调：",
-                { run: active.run, live: options.liveHub },
-                null,
-              ),
-            },
-            "改动",
-          ),
+        const edited = await contentOf(
+          content,
+          options.images,
+          "草稿没改，改好再调：",
+          { run: active.run, live: options.liveHub },
+          null,
         );
+        await editOnHub(options.liveHub, parsedId.data, { runId: active.run.runId, content: edited });
         return resultText(`草稿 ${parsedId.data} 已改，改过的稿子会重新等用户批，批之前不会发出去。`);
       },
     },

@@ -150,6 +150,7 @@ const metricAccount = (id: string, platform: "github" | "x", login: "valid" | "e
     login,
     loginChangedAt: stamp,
     lastLoginFailure: null,
+    missingScope: null,
     createdAt: stamp,
   });
   accounts.set(account.id, account);

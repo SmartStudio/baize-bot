@@ -30,6 +30,7 @@ const account = (login: Account["login"]) =>
     login,
     loginChangedAt: at,
     lastLoginFailure: null,
+    missingScope: null,
     createdAt: at,
   });
 

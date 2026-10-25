@@ -698,6 +698,10 @@ export type LoginAttemptId = z.infer<typeof LoginAttemptId>;
 // 账号上最近一次登录没成。login_failed 推送过去了就没了，页面刷新、换设备或当时没开着都靠这个还看得到；登上就清掉。
 export const LastLoginFailure = z.object({ reason: LoginFailure, at: Timestamp });
 export type LastLoginFailure = z.infer<typeof LastLoginFailure>;
+// 授权页加上 media.write 之前连的号没有它，
+// 令牌活着、发字照常，只是传不了图。不并进 login：login 管的是令牌死没死，发字和可直接发布档都按它放行。
+export const AccountScope = z.enum(["media.write"]);
+export type AccountScope = z.infer<typeof AccountScope>;
 
 export const Account = z.object({
   id: AccountId,
@@ -711,12 +715,31 @@ export const Account = z.object({
   // login 最近一次变的时刻。建占位时等于 createdAt，今天页的过期卡按它写「什么时候过期的」。
   loginChangedAt: Timestamp,
   lastLoginFailure: LastLoginFailure.nullable(),
+  missingScope: AccountScope.nullable(),
   createdAt: Timestamp,
 });
 export type Account = z.infer<typeof Account>;
 
-export const PublishFailureReason = z.enum(["login_expired", "page_changed", "paused", "error"]);
+// missing_scope 是授权没给要的权限，重新连一次就好；forbidden 是平台拒了这一条（内容重复、不合规则），账号没事；
+// media_failed 是图传上去了平台没处理成。
+export const PublishFailureReason = z.enum([
+  "login_expired",
+  "missing_scope",
+  "forbidden",
+  "media_failed",
+  "page_changed",
+  "paused",
+  "error",
+]);
 export type PublishFailureReason = z.infer<typeof PublishFailureReason>;
+// 电脑上的发布器报得出的那几种。另外三种只出在控制面走接口发的时候，缺的范围和凭据代际都在控制面手上。
+export const ComputerPublishFailure = PublishFailureReason.extract([
+  "login_expired",
+  "page_changed",
+  "paused",
+  "error",
+]);
+export type ComputerPublishFailure = z.infer<typeof ComputerPublishFailure>;
 
 export const DraftStatus = z.enum(["pending", "approved", "publishing", "published", "returned", "failed"]);
 export type DraftStatus = z.infer<typeof DraftStatus>;
@@ -777,6 +800,10 @@ export type DraftContent = z.infer<typeof DraftContent>;
 
 export const DraftEdit = z.object({ before: z.string(), after: z.string(), at: Timestamp }).strict();
 export type DraftEdit = z.infer<typeof DraftEdit>;
+
+/** Bot 经中枢改稿的请求体。Bot 和群取自车道围栏头，不在这里带。 */
+export const DraftEditRequest = z.object({ runId: RunId, content: DraftContent }).strict();
+export type DraftEditRequest = z.infer<typeof DraftEditRequest>;
 
 export const Draft = z.object({
   id: DraftId,

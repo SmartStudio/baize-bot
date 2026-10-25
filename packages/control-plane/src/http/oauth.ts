@@ -76,7 +76,7 @@ export function createOAuthRoutes(deps: OAuthRouteDeps): Hono<Env> {
       account = await deps.db.transaction(async (tx) => {
         const connected = await connectOAuthAccount(tx, { ownerId, platform, handle });
         const saved = await withAccountLock(tx, connected.id, (lock) => saveGrant(lock, deps.crypto, outcome.grant));
-        return saved.restored ?? connected;
+        return saved.changed ?? connected;
       });
     } catch (error) {
       log.error("连账号出错", { platform, userId: ownerId, err: error });

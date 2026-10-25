@@ -615,6 +615,7 @@ describe("今日页的共享形状", () => {
       login: "valid",
       loginChangedAt: now,
       lastLoginFailure: null,
+      missingScope: null,
       createdAt: now,
     };
     const response = {

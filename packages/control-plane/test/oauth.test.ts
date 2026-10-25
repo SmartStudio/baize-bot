@@ -372,6 +372,26 @@ describe("连平台账号", () => {
     ]);
   });
 
+  it("X 授权没给 media.write：账号照旧已登录但记缺发图权限；重新连一次给全了就清掉", async () => {
+    const s = await stack();
+    const o = await owner(s, true);
+    s.fake.setXScope("tweet.read users.read tweet.write offline.access");
+    await connectPlatform(o.client, "x");
+    const first = await connected(o);
+    expect(first, "推给页面的那一行带着缺的权限").toMatchObject({ login: "valid", missingScope: "media.write" });
+    expect(await accountsOf(o)).toEqual([expect.objectContaining({ id: first.id, missingScope: "media.write" })]);
+
+    s.fake.setXScope("tweet.read users.read tweet.write media.write offline.access");
+    await connectPlatform(o.client, "x");
+    const again = await connected(o);
+    expect(again, "重新连上那一下推的就是清掉之后的那一行").toMatchObject({
+      id: first.id,
+      login: "valid",
+      missingScope: null,
+    });
+    expect(await accountsOf(o)).toEqual([expect.objectContaining({ id: first.id, missingScope: null })]);
+  });
+
   it("两次授权和建远程电脑交错进行，同一个号最后只有一行", async () => {
     const s = await stack();
     const o = await owner(s, false);

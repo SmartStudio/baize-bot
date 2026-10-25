@@ -94,7 +94,7 @@ export type StartOptions = {
   readonly toolSecretKey?: string;
   /** 不给就读 CREDENTIALS_KEY，缺了或不对启动失败。 */
   readonly credentialsKey?: string;
-  readonly publisher?: Pick<PublishLoopOptions, "now" | "intervalMs">;
+  readonly publisher?: Pick<PublishLoopOptions, "now" | "intervalMs" | "sleep">;
   readonly metrics?: Pick<MetricPollerOptions, "now" | "intervalMs">;
   readonly approvalTimeoutIntervalMs?: number;
   /** 画面面的输入限额和它的时钟，测试数限额用。 */
@@ -151,7 +151,7 @@ export async function startServer(options: StartOptions): Promise<RunningServer>
     notifications,
     live,
   });
-  // 刷新成功把过期账号带回 valid 和授权回调走同一套推送：账号页和 config.accounts 都要知道它又能用了。
+  // 刷新把过期账号带回 valid、或改了缺的授权范围，和授权回调走同一套推送：账号页和 config.accounts 都要知道。
   const tokens = new AccountTokens(options.db, credentialCrypto, endpoints, async (account) => {
     hub.push(account.ownerId, { type: "account_updated", account });
     // 新令牌已经落库，这一趟请求用它照常走；重发 config 出错只影响电脑那边晚点知道，不能把请求变成 502。

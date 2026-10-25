@@ -15,6 +15,8 @@ export async function startAttachmentHub() {
   const laneHeaders: Array<string | undefined> = [];
   const stored = new Map<string, Buffer>();
   const streams = new Map<string, string[]>();
+  const draftEdits: Array<{ draftId: string; laneHeader: string | undefined; body: unknown }> = [];
+  let draftEditAnswer: { status: number; body: string } = { status: 200, body: "{}" };
   let failUpload = false;
   let downloadBytes: Buffer | null = null;
   const server = createServer(async (request, response) => {
@@ -37,6 +39,17 @@ export async function startAttachmentHub() {
           piSessionVersion: lines.length > 0 ? 3 : null,
         }),
       );
+      return;
+    }
+    if (request.method === "POST" && /^\/hub\/v1\/drafts\/[^/]+\/edit$/.test(url.pathname)) {
+      const parts: Buffer[] = [];
+      for await (const part of request) parts.push(Buffer.from(part as Uint8Array));
+      draftEdits.push({
+        draftId: decodeURIComponent(url.pathname.split("/")[4] ?? ""),
+        laneHeader: Array.isArray(laneHeader) ? laneHeader.join(",") : laneHeader,
+        body: JSON.parse(Buffer.concat(parts).toString("utf8")),
+      });
+      response.writeHead(draftEditAnswer.status, { "content-type": "application/json" }).end(draftEditAnswer.body);
       return;
     }
     if (request.method === "PUT" && url.pathname === "/hub/v1/attachments") {
@@ -84,6 +97,10 @@ export async function startAttachmentHub() {
     downloads,
     laneHeaders,
     stored,
+    draftEdits,
+    answerDraftEdits: (status: number, body: string) => {
+      draftEditAnswer = { status, body };
+    },
     recordWork: (frame: WorkAppend) => {
       if (frame.lines.length === 0) return;
       const key = `${frame.lane.botId}/${frame.lane.groupId}/${frame.lane.stream}`;
