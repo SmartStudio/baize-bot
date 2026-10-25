@@ -4,13 +4,19 @@ import {
   AccountListResponse,
   AccountResponse,
   ComputerTokenResponse,
+  CreateBotResponse,
+  CreateGroupResponse,
   DecideDraftResponse,
   LoginAttemptId,
+  MessageListResponse,
   TodayResponse,
   type Account,
+  type BotId,
   type DraftContent,
   type DraftId,
   type DraftSpec,
+  type GroupId,
+  type RunId,
   type ServerPush,
 } from "@baize/shared";
 import { eq } from "drizzle-orm";
@@ -139,6 +145,25 @@ async function publishedPushes(job: ContentJob) {
 /** Bot 在自己的 run 里改稿。 */
 function editByBot(job: ContentJob, draftId: DraftId, content: DraftContent): void {
   job.agent.send({ type: "draft_edit", runId: job.runId, botId: job.botId, groupId: job.groupId, draftId, content });
+}
+
+/** Bot 在 run 里经中枢改稿，lane 是这次 run 所在车道的围栏头。 */
+async function editThroughHub(
+  job: ContentJob,
+  run: { readonly runId: RunId; readonly lane: string },
+  draftId: string,
+  content: DraftContent,
+) {
+  const response = await fetch(`${job.config.hub.baseUrl}/drafts/${draftId}/edit`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${job.config.modelGateway.apiKey}`,
+      "x-baize-lane": run.lane,
+    },
+    body: JSON.stringify({ runId: run.runId, content }),
+  });
+  return { status: response.status, body: (await response.json()) as unknown };
 }
 
 /** 代理连接上的报文按到达顺序处理：再发一条一定会落地的起草，等它出现在消息页，之前发的就都处理完了。 */
@@ -481,18 +506,7 @@ describe("发布循环", () => {
     const server = await s.serve();
     const job = await jobOn(s, server, [GITHUB]);
     const github = accountOf(job, "github");
-    const editOnHub = async (draftId: string, content: DraftContent) => {
-      const response = await fetch(`${job.config.hub.baseUrl}/drafts/${draftId}/edit`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${job.config.modelGateway.apiKey}`,
-          "x-baize-lane": job.lane,
-        },
-        body: JSON.stringify({ runId: job.runId, content }),
-      });
-      return { status: response.status, body: (await response.json()) as unknown };
-    };
+    const editOnHub = (draftId: string, content: DraftContent) => editThroughHub(job, job, draftId, content);
 
     const pending = specOf(github, issuePost("先这么写"));
     await createDraft(job, pending);
@@ -537,6 +551,50 @@ describe("发布循环", () => {
       status: "pending",
       content: issuePost("改一改"),
     });
+  });
+
+  it("多 Bot 群里另一个 Bot 经中枢改别人起的草稿：回 404，草稿不动", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [GITHUB]);
+    const github = accountOf(job, "github");
+    const done = async ({ runId, botId, groupId }: { runId: RunId; botId: BotId; groupId: GroupId }) => {
+      job.agent.send({ type: "run_done", runId, botId, groupId, steps: 1, inputTokens: 0, outputTokens: 0 });
+      await job.agent.ack(runId);
+    };
+    const nextPrompt = async () => {
+      for (;;) {
+        const message = await job.agent.next();
+        if (message.type === "prompt") return message;
+      }
+    };
+    await done(job);
+    const seller = CreateBotResponse.parse(await (await job.client.post("/api/bots", { name: "小销" })).json()).bot;
+    const team = CreateGroupResponse.parse(
+      await (await job.client.post("/api/groups", { title: "两人群", botIds: [job.botId, seller.id] })).json(),
+    ).group.id;
+
+    expect((await job.client.post(`/api/groups/${team}/messages`, { text: "@小内 写一条" })).status).toBe(201);
+    const inner = await nextPrompt();
+    expect(inner.botId).toBe(job.botId);
+    const spec = specOf(github, issuePost("小内写的"));
+    job.agent.send({ type: "draft_create", runId: inner.runId, botId: job.botId, groupId: team, draft: spec });
+    await done(inner);
+    const draftsOfTeam = async () =>
+      MessageListResponse.parse(await (await job.client.get(`/api/groups/${team}/messages`)).json()).drafts;
+    expect((await draftsOfTeam()).map((draft) => draft.id)).toEqual([spec.draftId]);
+
+    expect((await job.client.post(`/api/groups/${team}/messages`, { text: "@小销 改一下" })).status).toBe(201);
+    const other = await nextPrompt();
+    expect(other.botId).toBe(seller.id);
+    const lane = `${other.botId}/${other.groupId}/${other.lane.epoch}`;
+    expect(await editThroughHub(job, { runId: other.runId, lane }, spec.draftId, issuePost("小销改的"))).toEqual({
+      status: 404,
+      body: { error: "找不到这条草稿，照建草稿时拿到的 draftId 抄" },
+    });
+    expect(await draftsOfTeam()).toEqual([
+      expect.objectContaining({ id: spec.draftId, botId: job.botId, content: issuePost("小内写的") }),
+    ]);
   });
 
   it("发出后刚做完里有这一行，带原帖链接", async () => {
@@ -910,12 +968,64 @@ describe("X 接口带图", () => {
     const github = await failedPushes(job);
     expect(github.draft.failure).toBe("forbidden");
     expect(github.account, "账号不动").toBeNull();
+    expect(github.notice.text, "GitHub 的 403 不说内容重复").toContain(
+      "GitHub 拒绝了这一条，账号授权还有效，多半是仓库权限、组织的 SSO 或限流",
+    );
 
     const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
     expect(listed.map((one) => [one.platform, one.login, one.missingScope])).toEqual([
       ["x", "valid", null],
       ["github", "valid", null],
     ]);
+  });
+
+  it("不知道给过哪些权限的 X 号，传图那一步回不点名的 403：账号记缺发图权限、登录照旧有效，这条记权限不够、叫人重连", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    expect(x.missingScope, "account-add 挂的号不知道给了什么，挂号时不记缺").toBeNull();
+    await createApproved(job, specOf(x, { ...tweet("带一张图"), images: [await uploadImage(job, PNG, "image/png")] }));
+    s.fake.failNext(403, (request) => request.path === "/2/media/upload", {
+      title: "Forbidden",
+      type: "about:blank",
+      status: 403,
+      detail: "Forbidden",
+    });
+    await server.server.publisher.tick();
+    const { draft, account, notice } = await failedPushes(job);
+
+    expect(draft.failure).toBe("missing_scope");
+    expect(account, "账号推一次新状态，不是过期").toMatchObject({
+      id: x.id,
+      login: "valid",
+      missingScope: "media.write",
+    });
+    expect(notice.text).toContain("X 账号缺发图权限，重新连接一次就好");
+    expect(s.fake.requests().map((request) => request.path)).toEqual(["/2/media/upload"]);
+  });
+
+  it("不知道给过哪些权限的 X 号，图传上去了、发帖那一步回不点名的 403：只这一条记平台拒了，账号不动", async () => {
+    const s = await stack();
+    const server = await s.serve();
+    const job = await jobOn(s, server, [X]);
+    const x = accountOf(job, "x");
+    await createApproved(job, specOf(x, { ...tweet("带一张图"), images: [await uploadImage(job, PNG, "image/png")] }));
+    s.fake.failNext(403, (request) => request.path === "/2/tweets", {
+      title: "Forbidden",
+      type: "about:blank",
+      status: 403,
+      detail: "Forbidden",
+    });
+    await server.server.publisher.tick();
+    const { draft, account, notice } = await failedPushes(job);
+
+    expect(draft.failure).toBe("forbidden");
+    expect(account, "账号不动").toBeNull();
+    expect(notice.text).toContain("平台拒绝了这一条，账号授权还有效");
+    expect(s.fake.requests().map((request) => request.path)).toEqual(["/2/media/upload", "/2/tweets"]);
+    const listed = AccountListResponse.parse(await (await job.client.get("/api/accounts")).json()).accounts;
+    expect(listed).toEqual([expect.objectContaining({ id: x.id, login: "valid", missingScope: null })]);
   });
 
   it("授权时没给 media.write 的 X 号，带图的稿子发之前就挡下，一条请求都不打；不带图的照发", async () => {

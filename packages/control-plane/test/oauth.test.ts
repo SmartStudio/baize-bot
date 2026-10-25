@@ -392,6 +392,29 @@ describe("连平台账号", () => {
     expect(await accountsOf(o)).toEqual([expect.objectContaining({ id: first.id, missingScope: null })]);
   });
 
+  it("X 刷新令牌的回包不带 scope：已知缺的发图权限还记着，存下的 scope 不变", async () => {
+    const s = await stack();
+    const o = await owner(s, true);
+    const noMedia = "tweet.read users.read tweet.write offline.access";
+    s.fake.setXScope(noMedia);
+    s.fake.setTokenLifetime(SHORT_LIFETIME_S);
+    await connectPlatform(o.client, "x");
+    const account = await connected(o);
+    expect(account.missingScope).toBe("media.write");
+    const before = await credentialsOf(s, account.id);
+
+    s.fake.setXScope(null);
+    s.fake.setTokenLifetime(LONG_LIFETIME_S);
+    expect((await proxyFetch(o, `/${account.id}${WHOAMI.x}`)).status).toBe(200);
+    expect(refreshes(s), "确实刷新过一次").toHaveLength(1);
+    expect(await accountsOf(o)).toEqual([
+      expect.objectContaining({ id: account.id, login: "valid", missingScope: "media.write" }),
+    ]);
+    const after = await credentialsOf(s, account.id);
+    expect(after?.generation, "换成了新一代凭据").toBe((before?.generation ?? 0) + 1);
+    expect(after?.scope, "回包没说给了什么，就还按授权时给的算").toBe(noMedia);
+  });
+
   it("两次授权和建远程电脑交错进行，同一个号最后只有一行", async () => {
     const s = await stack();
     const o = await owner(s, false);

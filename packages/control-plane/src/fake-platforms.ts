@@ -38,8 +38,8 @@ export type FakePlatforms = {
   setTokenLifetime(seconds: number): void;
   /** 用户在平台上撤了授权：已发出的刷新令牌全部作废，再拿来刷新会被拒。 */
   revoke(): void;
-  /** 之后 X 令牌端点回的 scope，默认是授权页上要的全部。 */
-  setXScope(scope: string): void;
+  /** 之后 X 令牌端点回的 scope，默认是授权页上要的全部；null 是回包里不带 scope。 */
+  setXScope(scope: string | null): void;
   /**
    * 下一张传上 X 的图要异步处理：上传回 states 的第一个，之后每查一次状态往后走一个，走到最后一个就停在那。
    * 每次都带同一个 check_after_secs。
@@ -109,7 +109,7 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
   let counter = 100;
   let tokenCounter = 0;
   let lifetime: number | null = null;
-  let xScope = X_SCOPE;
+  let xScope: string | null = X_SCOPE;
   let nextProcessing: { readonly states: readonly MediaState[]; readonly checkAfterSecs: number } | null = null;
   const processing = new Map<string, { states: readonly MediaState[]; seen: number; checkAfterSecs: number }>();
   // 建 discussion 的那条 mutation 只带仓库的节点 id，仓库名记在前一条查仓库的请求上。
@@ -139,7 +139,7 @@ export async function startFakePlatforms(): Promise<FakePlatforms> {
           access_token: access,
           expires_in: expiresIn,
           refresh_token: refresh,
-          scope: xScope,
+          ...(xScope === null ? {} : { scope: xScope }),
           token_type: "bearer",
         };
   };
