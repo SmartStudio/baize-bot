@@ -61,6 +61,22 @@ test("今天四栏各有内容", async ({ page, request }, testInfo) => {
   await expect(pending, "菜单栏里可以直接批准待确认事项").toHaveCount(before - 1);
 });
 
+test("菜单栏窗口 390 宽：审批行的批准叠在拒绝上面", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 560 });
+  await login(page);
+  await page.goto("/menubar");
+  const row = page
+    .getByTestId("menubar-page")
+    .getByTestId("today-row")
+    .filter({ has: page.getByRole("button", { name: "批准" }) })
+    .first();
+  const approve = await row.getByRole("button", { name: "批准" }).boundingBox();
+  const reject = await row.getByRole("button", { name: "拒绝" }).boundingBox();
+  if (approve === null || reject === null) throw new Error("菜单栏审批行没有批准和拒绝两个按钮");
+  expect(approve.y + approve.height, "批准在上").toBeLessThanOrEqual(reject.y);
+  expect(Math.abs(approve.x - reject.x), "两个按钮上下对齐，不并排").toBeLessThan(2);
+});
+
 test("今天四栏各为空", async ({ page, request }) => {
   await setTodayMode(request, "empty");
   await login(page);
