@@ -371,18 +371,16 @@ a.today-row {
   text-align: center;
 }
 
-@media (max-width: 800px) {
-  .today-content {
-    padding: var(--space-7);
-  }
+.window.is-narrow .today-content {
+  padding: var(--space-7);
+}
 
-  .today-columns {
-    grid-template-columns: minmax(0, 1fr);
-  }
+.window.is-narrow .today-columns {
+  grid-template-columns: minmax(0, 1fr);
+}
 
-  .today-row-actions {
-    flex-direction: column-reverse;
-  }
+.window.is-narrow .today-row-actions {
+  flex-direction: column-reverse;
 }
 
 .today-assistant {
