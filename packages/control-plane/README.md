@@ -719,7 +719,7 @@ Bot 会做的一件活。**真相源是控制面的 `skills` 表，方向只有�
 
 传图要 `media.write` 权限，X 授权页的 scope 加了它。这之前授权的令牌没有这项，传图时 X 回 403。缺权限和登录过期是两回事：令牌还活着，只发文字照常，所以账号不记 `expired`，另记 `accounts.missing_scope`，不折进 `login`，因为 `login` 管着文字帖能不能发和可直接发布放不放行。账号页和这条草稿卡都写「X 账号缺发图权限，重新连接一次就好」，给一个走接入 X 同一个授权入口的「重新连接」。
 
-`missing_scope` 在三处写。写凭据的 `saveGrant`（授权回调、刷新成功）按令牌端点回的 `scope` 重算，缺就记上、补上了就清掉，变了才推 `account_updated`；所以老号下一次刷新令牌就会被标出来，不用等它发一条带图的。发带图的那条时，拿到令牌后先看账号上已经记着缺、或凭据存着的 `scope` 里没有 `media.write`，就不打 X，直接记 `missing_scope`。`scope` 是空串表示不知道（`account-add` 挂的令牌），不当作缺。真发出去回了 403，交给 `publish/forbidden.ts` 的纯函数 `classifyForbidden` 分：这一条要的范围存着的 scope 里没有，或 X 回包里点名了它，算缺权限，草稿记 `missing_scope`，账号由 `markMissingScope` 记上，带着认领时那一代凭据，重新授权之后晚到的结论不改账号；其余的 403（内容重复、不合平台规则、GitHub 没有这个仓库的权限）只是平台拒了这一条，草稿记 `forbidden`，账号不动，回包写进日志不落库。401 才是令牌不认，仍按「刷新」一节换令牌重试，换不到才记过期。
+`missing_scope` 在三处写。写凭据的 `saveGrant`（授权回调、刷新成功）按令牌端点回的 `scope` 重算，缺就记上、补上了就清掉，变了才推 `account_updated`；所以老号下一次刷新令牌就会被标出来，不用等它发一条带图的。令牌端点没回 `scope`（存成空串，`account-add` 挂的令牌也是空串）就是不知道给了什么，`saveGrant` 不覆盖凭据上已存的 `scope`，也不动账号上的 `missing_scope`：不然刷新一次就把授权时记下的缺权限抹掉。发带图的那条时，拿到令牌后先看账号上已经记着缺、或凭据存着的 `scope` 里没有 `media.write`，就不打 X，直接记 `missing_scope`。空串的 `scope` 发之前不当作缺。真发出去回了 403，交给 `publish/forbidden.ts` 的纯函数 `classifyForbidden` 分，`PlatformForbidden` 带着 403 出在哪一步（传图 `upload` 还是发帖 `post`）：这一条要的范围存着的 scope 里没有，或 X 回包里点名了它，或者 403 出在传图那一步而 scope 不知道，算缺权限，草稿记 `missing_scope`，账号由 `markMissingScope` 记上，带着认领时那一代凭据，重新授权之后晚到的结论不改账号。内容重复只会出在发帖那一步，传图那一步回的不点名 403 说不准就宁可多叫一次重连。其余的 403（发帖那一步的内容重复、不合平台规则，GitHub 的仓库权限、组织 SSO、限流）只是平台拒了这一条，草稿记 `forbidden`，账号不动，回包写进日志不落库，通知按平台写多半是什么缘故。401 才是令牌不认，仍按「刷新」一节换令牌重试，换不到才记过期。
 
 迁移只加列，不回填：迁移里不碰凭据密文，老号靠上面三处之一标出来，最晚是第一次发带图的时候。
 
@@ -770,7 +770,7 @@ GitHub 接口号不带图：GitHub 没有给 issue、discussion、评论正文�
 - 同一进程里同一个账号的刷新只跑一趟（single-flight）。进程里按账号记着正在跑的那一趟，后来的请求直接等它的结果，不开事务、不占数据库连接。那一趟不论成功、被拒还是抛异常，结束时都从表里删掉，下一次要刷新的请求会重新起一趟，一次 5xx 不会把后面的请求永远钉在同一个失败上。
 - 不同账号的刷新各要一个事务，同时进事务的不超过连接池 `max` 的三分之一（至少 1 条，默认池 10 条时是 3 条），多出来的在进程内存里排队，排队时不开事务、不占连接。事务里要等令牌端点，最长 10 秒，不设上限的话发布循环一轮十几个账号一起刷新就能把连接池占满，登录、账号页这些普通请求全卡住。
 - 跑的那一趟走 `withAccountLock` 锁账号行（见下面「唯一锁序」），锁到之后再判一次：还能用（排在前面的已经刷过，或者库里的已经不是 `rejected`），就用它；没有刷新令牌或刷新令牌也过期了，回 `login_expired`；否则拿刷新令牌去换。
-- 换到了，新的访问令牌、刷新令牌、两个过期时间在同一个事务里写回，账号是 `expired` 的话同一条事务改回 `valid`，`missing_scope` 按新回的 `scope` 重算，提交之后才把令牌交出去；账号改了的，提交后推 `account_updated`、重发 `config`；这两步只是通知，重发 `config` 出错只记日志，这趟请求照常用新令牌走下去（`server.ts` 里交给 `AccountTokens` 的回调）。
+- 换到了，新的访问令牌、刷新令牌、两个过期时间在同一个事务里写回，账号是 `expired` 的话同一条事务改回 `valid`，`missing_scope` 按新回的 `scope` 重算（回包不带 `scope` 就不动），提交之后才把令牌交出去；账号改了的，提交后推 `account_updated`、重发 `config`；这两步只是通知，重发 `config` 出错只记日志，这趟请求照常用新令牌走下去（`server.ts` 里交给 `AccountTokens` 的回调）。
 
 刷新失败怎样分类。清掉刷新令牌是不可逆的，所以只有能证明刷新令牌本身失效的回应才算被拒，判断在 `oauth-providers.ts` 的 `DEAD_REFRESH_TOKEN`：
 
@@ -835,7 +835,7 @@ Bot 读 GitHub、X（查 issue、搜推文）不直接打平台，打控制面�
 
 `PUT /hub/v1/attachments?botId=&groupId=` 接收原始图片字节和 `x-baize-sha256` 声明。先验证网关 key，无效回 401；读体前再检查 Bot 和群的归属及成员关系，不成立回 404；落库事务内再次复核，避免上传期间删除对象的竞态。只接受 `image/png`、`image/jpeg`、`image/webp`、`image/gif`，其他类型回 415；读取请求流时累计大小，超过 20 MiB 立即取消读取并回 413。控制面和运行器共用 shared 的 `imageMime` 按魔数识别图片；空体回 400「附件图片不能为空」，无支持的魔数回 400「附件字节不是 PNG、JPEG、WebP 或 GIF 图片」，魔数与声明不符回 400「附件图片格式和 Content-Type 不一致」。服务器重算哈希，声明不符回 400。`GET /hub/v1/attachments/:id` 返回原始字节和上传时的 `Content-Type`；同一归属人的任何电脑可读，别人的附件和不存在的 id 都回 404。
 
-`POST /hub/v1/drafts/:draftId/edit` 是运行器 `edit_draft` 改稿的地方，网关 key Bearer 加 `x-baize-lane` 租约头，body 是 `DraftEditRequest`（这一轮的 runId 和新正文）。Bot 和群取租约头里的道，电脑行、栅栏和 `editDraft` 在同一个事务里。改不了的照实回：这一轮已结束 409、草稿不是这个 Bot 在这个群里起的或不存在 404、已经发出 409、配图不合账号 400，文案在 `EDIT_REFUSED` 和 `editDraft` 的拒绝里，运行器原样抛成工具错误。走上行 `draft_edit` 的话改不了只能静默丢掉，模型以为改成了；这条上行还收着，给没升级的运行器用。
+`POST /hub/v1/drafts/:draftId/edit` 是运行器 `edit_draft` 改稿的地方，网关 key Bearer 加 `x-baize-lane` 租约头，body 是 `DraftEditRequest`（这一轮的 runId 和新正文）。Bot 和群取租约头里的道，电脑行、栅栏和 `editDraft` 在同一个事务里。改不了的照实回：这一轮已结束 409、草稿不是这个 Bot 在这个群里起的或不存在 404、已经发出 409、配图不合账号 400，文案在 `EDIT_REFUSED` 和 `editDraft` 的拒绝里，运行器原样抛成工具错误。走上行 `draft_edit` 的话改不了只能静默丢掉，模型以为改成了；这条上行还收着，给没升级的运行器用，同样只改这个 Bot 自己在这个群里起的草稿。
 
 `/hub/v1` 挂在 cookie 登录中间件之前，只接受当前电脑网关 key 的 Bearer。config 恒带 `hub.baseUrl`；hello 轮换 key 后旧 key 立即失效。`http/hub-auth.ts` 将归属人和电脑 id 写入请求上下文，P3-10 的租约头校验接在 `http/hub.ts` 的认证之后、附件路由之前；本单不校验租约头。
 

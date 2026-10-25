@@ -20,10 +20,15 @@ export type SettleDeps = {
 };
 
 export const PLATFORM_LABEL: Record<Platform, string> = { github: "GitHub", x: "X", xiaohongshu: "小红书" };
-const FAILURE_TEXT: Record<PublishFailureReason, string> = {
+/** 平台拒了这一条，各家多半是什么缘故不一样。小红书走电脑，电脑报不上 forbidden，这一格只是占位。 */
+const FORBIDDEN_TEXT: Record<Platform, string> = {
+  github: "GitHub 拒绝了这一条，账号授权还有效，多半是仓库权限、组织的 SSO 或限流",
+  x: "平台拒绝了这一条，账号授权还有效，多半是内容重复或不合平台规则",
+  xiaohongshu: "平台拒绝了这一条，账号授权还有效，多半是不合平台规则",
+};
+const FAILURE_TEXT: Record<Exclude<PublishFailureReason, "forbidden">, string> = {
   login_expired: "账号登录过期了，重新登录后让 Bot 再起一稿",
   missing_scope: "X 账号缺发图权限，重新连接一次就好，不带图的照常能发",
-  forbidden: "平台拒绝了这一条，账号授权还有效，多半是内容重复或不合平台规则",
   media_failed: "X 没处理好这张动图，换一张再让 Bot 起一稿",
   page_changed: "平台页面变了，没找到发布的地方",
   paused: "Bot 已暂停，这条没发出去，恢复 Bot 后让它再起一稿",
@@ -68,7 +73,8 @@ export async function announceFailure(
   if (login.kind === "already_known") return;
   if (login.kind === "expired_now" || login.kind === "scope_missing_now")
     deps.push.push(ownerId, { type: "account_updated", account: login.account });
-  const reason = FAILURE_TEXT[draft.failure ?? "error"];
+  const failure = draft.failure ?? "error";
+  const reason = failure === "forbidden" ? FORBIDDEN_TEXT[draft.platform] : FAILURE_TEXT[failure];
   await deps.notifications.publish(ownerId, {
     kind: "failed",
     text: `${PLATFORM_LABEL[draft.platform]}上的「${titleOf(draft)}」没发出去：${reason}`,

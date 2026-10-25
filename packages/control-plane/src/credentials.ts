@@ -77,8 +77,8 @@ export async function addAccountWithToken(
   });
 }
 
-/** changed 是这一下登录状态或缺的授权范围变了的账号，两样都没变为 null。 */
-export type SavedGrant = { readonly generation: number; readonly changed: Account | null };
+/** scope 是落库之后这份凭据算数的 scope。changed 是这一下登录状态或缺的授权范围变了的账号，两样都没变为 null。 */
+export type SavedGrant = { readonly generation: number; readonly scope: string; readonly changed: Account | null };
 
 /**
  * 一份新凭据落库：换成新的一代，账号同一个事务里回到 valid。这是账号回到 valid 的唯一入口
@@ -86,44 +86,53 @@ export type SavedGrant = { readonly generation: number; readonly changed: Accoun
  */
 export async function saveGrant(lock: AccountLock, crypto: CredentialCrypto, grant: TokenGrant): Promise<SavedGrant> {
   const now = new Date();
+  // scope 为空串是平台没说给了什么（刷新回包不带、account-add 挂的号）：存下的 scope 和已知缺的范围都不动，
+  // 不然刷新一次就把授权时记下的缺权限抹掉，之后真缺权限的 403 会被当成平台拒了这一条。
+  const known = grant.scope !== "";
   const row = {
     accessEnc: crypto.encrypt(grant.accessToken),
     refreshEnc: grant.refreshToken === null ? null : crypto.encrypt(grant.refreshToken),
     accessExpiresAt: grant.accessExpiresAt,
     refreshExpiresAt: grant.refreshExpiresAt,
-    scope: grant.scope,
+    ...(known ? { scope: grant.scope } : {}),
     updatedAt: now,
   };
   const [saved] = await lock.tx
     .insert(accountCredentials)
-    .values({ accountId: lock.accountId, ...row })
+    .values({ accountId: lock.accountId, scope: grant.scope, ...row })
     .onConflictDoUpdate({
       target: accountCredentials.accountId,
       set: { ...row, generation: sql`${accountCredentials.generation} + 1` },
     })
-    .returning({ generation: accountCredentials.generation });
+    .returning({ generation: accountCredentials.generation, scope: accountCredentials.scope });
   if (saved === undefined) throw new Error("写凭据没有返回行");
   const [account] = await lock.tx
     .select({ platform: accounts.platform })
     .from(accounts)
     .where(eq(accounts.id, lock.accountId));
   if (account === undefined) throw new Error("写凭据的账号不在了");
-  const missingScope = missingScopeOf(account.platform, grant.scope);
+  const missingScope = known ? missingScopeOf(account.platform, grant.scope) : undefined;
   const [changed] = await lock.tx
     .update(accounts)
     .set({
       login: "valid",
-      missingScope,
+      ...(missingScope === undefined ? {} : { missingScope }),
       loginChangedAt: loginChangedAt("valid"),
     })
     .where(
       and(
         eq(accounts.id, lock.accountId),
-        or(ne(accounts.login, "valid"), sql`${accounts.missingScope} IS DISTINCT FROM ${missingScope}`),
+        missingScope === undefined
+          ? ne(accounts.login, "valid")
+          : or(ne(accounts.login, "valid"), sql`${accounts.missingScope} IS DISTINCT FROM ${missingScope}`),
       ),
     )
     .returning();
-  return { generation: saved.generation, changed: changed === undefined ? null : toAccount(changed) };
+  return {
+    generation: saved.generation,
+    scope: saved.scope,
+    changed: changed === undefined ? null : toAccount(changed),
+  };
 }
 
 /**
@@ -248,7 +257,7 @@ export class AccountTokens {
           kind: "token",
           token: refreshed.grant.accessToken,
           generation: saved.generation,
-          scope: refreshed.grant.scope,
+          scope: saved.scope,
         } as const,
         changed: saved.changed,
       };
