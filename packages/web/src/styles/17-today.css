@@ -379,7 +379,8 @@ a.today-row {
   grid-template-columns: minmax(0, 1fr);
 }
 
-.window.is-narrow .today-row-actions {
+/* 菜单栏窗口不在 .window 里，它本来就窄，按钮也叠起来。 */
+:is(.window.is-narrow, .menubar-page) .today-row-actions {
   flex-direction: column-reverse;
 }
 

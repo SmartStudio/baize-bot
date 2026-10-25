@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-// @media 读不到 CSS 变量也读不到这里的常量，宽度断点只能定在这一处，样式表靠 is-narrow 跟它走，不写宽度 @media。
+// @media 读不到 CSS 变量也读不到这里的常量，窄屏断点只能定在这一处，样式表靠 is-narrow 跟它走，不写宽度 @media。
 // 平板竖屏最宽 834，横屏最窄 1024，断点落在两者之间。
 const NARROW_BELOW = 900;
 
