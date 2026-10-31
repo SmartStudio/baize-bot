@@ -14,11 +14,24 @@
 
 </div>
 
-**A personal assistant that leads a squad of bots to get work done for you.**
+**Baize Bot is an AI assistant that leads a team of bots. It is local-first: the bots run on your own computers.**
 
-You talk only to the main assistant. It hands the work to bots for content, community and growth. They run on your own computers and touch only the accounts you open to them. The assistant comes to you in three cases. It needs your decision, it has a result, or it is stuck.
+It is for one person or a small team doing content, community and growth work, such as promoting an open-source repo. You talk only to the main assistant. It hands the work to bots and comes back when it needs your decision, has a result, or is stuck. A post goes out only after you approve it, or approve the content plan it belongs to.
 
-> Baize is in early development. There is no release and no download yet. Everything below already runs on the main branch.
+> Baize is in early development. There is no release and no download yet. You can run it from source on the main branch today.
+
+<!-- TODO: demo GIF (one sentence on the home page → project opens → draft waiting for approval) -->
+![Content plan waiting for approval](docs/images/content-plan.png)
+
+### Try it from source in 3 steps
+
+You need Node 22+, pnpm and Docker.
+
+1. Clone and configure: `git clone https://github.com/SmartStudio/baize-bot && cd baize-bot && pnpm install && cp .env.example .env`. In `.env`, set `CREDENTIALS_KEY` (`openssl rand -base64 32`) and `TOOL_SECRET_KEY` (`openssl rand -hex 32`). The control plane will not start without them. Set `UPSTREAM_API_KEY` if you want bots to call a model.
+2. Start the database and seed it: `docker compose up -d`, then `pnpm --filter @baize/control-plane migrate` and `pnpm --filter @baize/control-plane seed`.
+3. Run `pnpm dev`, open http://localhost:5173 and sign in with `chen@baize.dev` / `baize-dev`. To connect a computer agent, see [docs/开发.md](docs/开发.md).
+
+If you want to follow Baize until the first release, star the repo. It is the easiest way for us to see that people want it.
 
 ## What it does
 
@@ -102,3 +115,5 @@ Notes on fxai.ai (in Chinese):
 - [多 Agent 协作时，另一个 Agent 转来的指令能不能直接照做](https://fxai.ai/notes/agent-to-agent-trust-boundary/): how to check instructions passed between bots, which matters when bots work in groups.
 - [多个 Bot 共用云电脑，文件怎么隔离](https://fxai.ai/notes/grok-bot-shared-computer-isolation/): what is and isn't isolated when several bots share one computer.
 - [企业开通 Grok Bot，权限和审计要先定什么](https://fxai.ai/notes/grok-bot-enterprise-access-audit/): what to decide on access, approvals and audit logs before a company turns bots on.
+- [Agent 试点能跑通，扩到生产还缺哪几项？](https://fxai.ai/notes/agent-pilot-to-production-checklist/): what a bot setup still needs after a pilot works and before it runs for real.
+- [Agent 权限管理怎么分级：工具权限先开哪类](https://fxai.ai/notes/agent-tool-permission-ladder/): which tool permissions to open first, which is the idea behind Baize's approval cards.
