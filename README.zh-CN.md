@@ -14,11 +14,24 @@
 
 </div>
 
-**一个人的助理，带一支 Bot 小队替你干活。**
+**白泽 Bot 是一个自托管的助理，在你自己的电脑上带一支 AI Bot 小队干活。**
 
-你只跟主助理说一句话。它把活分给内容、社区、增长各自的 Bot，在你自己的电脑上跑，只碰你开给它的账号。它只在三种时候找你：要你拍板、做完有成果、卡住了。
+适合一个人或小团队做内容、社区和增长，比如推广一个开源仓库。你只跟主助理说话。它把活分给各个 Bot，只在要你拍板、做完有成果、卡住了这三种时候找你。帖子要你批准它本身或它所在的内容计划后才会发出去。
 
-> 项目还在早期开发中，没有发布版本，也还没有下载地址。下面写的都是主干里已经能跑的东西。
+> 项目还在早期开发中，没有发布版本，也还没有下载地址。现在可以从源码在主干上跑起来。
+
+<!-- TODO: demo GIF（首页说一句话 → 项目开起来 → 草稿等你批准） -->
+![等你确认的内容计划](docs/images/content-plan.png)
+
+### 三步从源码跑起来
+
+需要 Node 22 以上、pnpm 和 Docker。
+
+1. 克隆并配置：`git clone https://github.com/SmartStudio/baize-bot && cd baize-bot && pnpm install && cp .env.example .env`。在 `.env` 里填 `CREDENTIALS_KEY`（`openssl rand -base64 32`）和 `TOOL_SECRET_KEY`（`openssl rand -hex 32`），缺了控制面起不来。要让 Bot 调模型，再填 `UPSTREAM_API_KEY`。
+2. 起数据库并初始化：`docker compose up -d`，再跑 `pnpm --filter @baize/control-plane migrate` 和 `pnpm --filter @baize/control-plane seed`。
+3. 跑 `pnpm dev`，打开 http://localhost:5173，用 `chen@baize.dev` / `baize-dev` 登录。要连电脑代理，见 [docs/开发.md](docs/开发.md)。
+
+想等到第一个发布版本，就点个 Star。这是我们判断有没有人需要它最直接的办法。
 
 ## 它能做什么
 

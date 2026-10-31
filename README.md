@@ -14,11 +14,24 @@
 
 </div>
 
-**A personal assistant that leads a squad of bots to get work done for you.**
+**Baize Bot is a self-hosted assistant that runs a small team of AI bots on your own computers.**
 
-You talk only to the main assistant. It hands the work to bots for content, community and growth. They run on your own computers and touch only the accounts you open to them. The assistant comes to you in three cases. It needs your decision, it has a result, or it is stuck.
+It is for one person or a small team doing content, community and growth work, such as promoting an open-source repo. You talk only to the main assistant. It hands the work to bots and comes back when it needs your decision, has a result, or is stuck. A post goes out only after you approve it, or approve the content plan it belongs to.
 
-> Baize is in early development. There is no release and no download yet. Everything below already runs on the main branch.
+> Baize is in early development. There is no release and no download yet. You can run it from source on the main branch today.
+
+<!-- TODO: demo GIF (one sentence on the home page → project opens → draft waiting for approval) -->
+![Content plan waiting for approval](docs/images/content-plan.png)
+
+### Try it from source in 3 steps
+
+You need Node 22+, pnpm and Docker.
+
+1. Clone and configure: `git clone https://github.com/SmartStudio/baize-bot && cd baize-bot && pnpm install && cp .env.example .env`. In `.env`, set `CREDENTIALS_KEY` (`openssl rand -base64 32`) and `TOOL_SECRET_KEY` (`openssl rand -hex 32`). The control plane will not start without them. Set `UPSTREAM_API_KEY` if you want bots to call a model.
+2. Start the database and seed it: `docker compose up -d`, then `pnpm --filter @baize/control-plane migrate` and `pnpm --filter @baize/control-plane seed`.
+3. Run `pnpm dev`, open http://localhost:5173 and sign in with `chen@baize.dev` / `baize-dev`. To connect a computer agent, see [docs/开发.md](docs/开发.md).
+
+If you want to follow Baize until the first release, star the repo. It is the easiest way for us to see that people want it.
 
 ## What it does
 
