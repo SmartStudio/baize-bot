@@ -14,7 +14,7 @@
 
 </div>
 
-**Baize Bot is a self-hosted assistant that runs a small team of AI bots on your own computers.**
+**Baize Bot is an AI assistant that leads a team of bots. It is local-first: the bots run on your own computers.**
 
 It is for one person or a small team doing content, community and growth work, such as promoting an open-source repo. You talk only to the main assistant. It hands the work to bots and comes back when it needs your decision, has a result, or is stuck. A post goes out only after you approve it, or approve the content plan it belongs to.
 
@@ -115,3 +115,5 @@ Notes on fxai.ai (in Chinese):
 - [多 Agent 协作时，另一个 Agent 转来的指令能不能直接照做](https://fxai.ai/notes/agent-to-agent-trust-boundary/): how to check instructions passed between bots, which matters when bots work in groups.
 - [多个 Bot 共用云电脑，文件怎么隔离](https://fxai.ai/notes/grok-bot-shared-computer-isolation/): what is and isn't isolated when several bots share one computer.
 - [企业开通 Grok Bot，权限和审计要先定什么](https://fxai.ai/notes/grok-bot-enterprise-access-audit/): what to decide on access, approvals and audit logs before a company turns bots on.
+- [Agent 试点能跑通，扩到生产还缺哪几项？](https://fxai.ai/notes/agent-pilot-to-production-checklist/): what a bot setup still needs after a pilot works and before it runs for real.
+- [Agent 权限管理怎么分级：工具权限先开哪类](https://fxai.ai/notes/agent-tool-permission-ladder/): which tool permissions to open first, which is the idea behind Baize's approval cards.
