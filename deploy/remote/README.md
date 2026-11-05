@@ -117,12 +117,12 @@ docker compose logs remote-computer | tail
 Ubuntu 23.10 以后的内核默认开着 `kernel.apparmor_restrict_unprivileged_userns=1`，它在宿主机层面限制非特权 user namespace，容器的 `apparmor=unconfined` 管不到它。部署前在服务器上跑一遍，参数和运行器启动时的探测（`packages/bot-runner/src/sandbox.ts` 的 `detectSandbox`）一字不差：
 
 ```
-docker compose exec remote-computer bwrap --ro-bind / / --unshare-net --unshare-pid true && echo 能用
+docker compose exec remote-computer bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-net true && echo 能用
 ```
 
 探测不通时运行器不会起不来，而是退成没有沙箱、每条 bash 都问，日志里留一行「bubblewrap 起不来」。
 
-不通的话，要么在宿主机上把那个 sysctl 设成 0，要么给 bwrap 单独配一份宿主机的 AppArmor profile。这件事只在 OrbStack（没有 AppArmor）上验过，没在 Ubuntu 服务器上验过。
+宿主机上有 `/etc/apparmor.d/bwrap-userns-restrict`（26.04 自带）就不用设置，也不能再给 bwrap 另加一份 profile，两份冲突反而不通；没有的（24.04）要给 bwrap 单独配一份宿主机的 AppArmor profile。做法和在 GitHub Actions runner 上实测的结果见 [`../README.md`](../README.md) 的「AppArmor 与 bwrap 探测」。
 
 ## 网络
 
