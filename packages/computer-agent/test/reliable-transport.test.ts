@@ -491,3 +491,148 @@ describe("发件箱入口的单帧上限", () => {
     expect((await ReliableOutbox.open(directory)).pending()).toEqual([...pending, { seq: 5, body: runDone("run-5") }]);
   });
 });
+
+const BACKLOG = "…（电脑离线太久，积压的输出太多，后面的已截掉）";
+const KiB = 1024;
+const limits = { maxBytes: 512 * KiB, trimToBytes: 384 * KiB };
+const textDone = (id: string, text: string): AgentToControl => ({
+  type: "bot_text_done",
+  ...lane,
+  messageId: MessageId.parse(id),
+  text,
+});
+const toolCall = (id: string, command: string): AgentToControl => ({
+  type: "bot_tool_call",
+  ...lane,
+  callId: id,
+  tool: "bash",
+  view: { kind: "bash", command, raw: { command } },
+  status: "ok",
+  durationMs: 5,
+});
+const workAppend = (line: string): AgentToControl => ({
+  type: "work_append",
+  lane: { botId: lane.botId, groupId: lane.groupId, stream: "chat", epoch: 1 },
+  runId: lane.runId,
+  fromSeq: 0,
+  lines: [line],
+  head: "0".repeat(64),
+  cause: "turn_end",
+});
+const journalBytes = async (outbox: ReliableOutbox, directory: string): Promise<number> =>
+  Buffer.byteLength(await readFile(join(directory, ".agent", "outbox", outbox.stream, "frames.jsonl"), "utf8"));
+
+describe("发件箱总量上限", () => {
+  it("积压超过上限时从最早的大帧原位收短到回落线以下，序号连续，结局帧原样，收短的写明原因，盘上也改掉", async () => {
+    const directory = await dataDir();
+    const logs: string[] = [];
+    const outbox = await ReliableOutbox.open(directory, { log: (line) => logs.push(line) }, limits);
+    const error: AgentToControl = {
+      type: "agent_error",
+      code: "runner_failed",
+      detail: "e".repeat(3 * KiB),
+      runId: lane.runId,
+    };
+    const bodies: AgentToControl[] = [
+      textDone("m-1", "早".repeat(100 * KiB)),
+      runDone("run-1"),
+      toolCall("call-1", "命".repeat(60 * KiB)),
+      error,
+      textDone("m-2", "晚".repeat(100 * KiB)),
+    ];
+    for (const body of bodies) await outbox.append(body);
+    await outbox.flush();
+
+    const reopened = await ReliableOutbox.open(directory, {}, limits);
+    const pending = reopened.pending();
+    expect(pending.map((frame) => frame.seq)).toEqual([1, 2, 3, 4, 5]);
+    const [first, done, tool, kept, last] = pending.map((frame) => frame.body);
+    if (first?.type !== "bot_text_done") throw new Error(`第 1 帧成了 ${first?.type}`);
+    expect(first.text.endsWith(BACKLOG)).toBe(true);
+    expect(Buffer.byteLength(first.text)).toBeLessThanOrEqual(64 * KiB);
+    expect("早".repeat(100 * KiB).startsWith(first.text.slice(0, -BACKLOG.length))).toBe(true);
+    expect(done).toEqual(runDone("run-1"));
+    if (tool?.type !== "bot_tool_call" || tool.view.kind !== "bash") throw new Error(`第 3 帧成了 ${tool?.type}`);
+    expect(Buffer.byteLength(tool.view.command)).toBeLessThanOrEqual(4 * KiB);
+    expect(tool.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    expect(kept, "agent_error 的 detail 不到 4 KiB 不收").toEqual(error);
+    expect(last, "回落到线以下就停，后面的大帧不动").toEqual(bodies[4]);
+    expect(await journalBytes(reopened, directory)).toBeLessThanOrEqual(limits.trimToBytes);
+    expect(logs).toEqual([
+      expect.stringMatching(/^发件箱积压超过上限 524288 字节，收短了最早的 2 帧，从 \d+ 字节到 \d+ 字节$/),
+    ]);
+  });
+
+  it("旧版代理留下的超量积压在重开时收短并重写日志：agent_error 的 detail 收到 4 KiB，审批请求不收，收过的不再收", async () => {
+    const directory = await dataDir();
+    const outbox = await ReliableOutbox.open(directory);
+    const approval: AgentToControl = {
+      type: "approval_request",
+      ...lane,
+      callId: "call-1",
+      tool: "bash",
+      action: "shell",
+      target: null,
+      view: { kind: "bash", command: "批".repeat(200 * KiB) },
+    };
+    await outbox.append(approval);
+    await outbox.append({ type: "agent_error", code: "runner_failed", detail: "错".repeat(200 * KiB), ...lane });
+    await outbox.append(toolCall("call-2", "命".repeat(60 * KiB)));
+    await outbox.append(textDone("m-1", "早".repeat(100 * KiB)));
+    await outbox.flush();
+    const once = (await ReliableOutbox.open(directory, {}, limits)).pending();
+    expect((await ReliableOutbox.open(directory)).pending(), "日志已重写").toEqual(once);
+
+    expect(once[0]?.body).toEqual(approval);
+    const error = once[1]?.body;
+    if (error?.type !== "agent_error") throw new Error(`第 2 帧成了 ${error?.type}`);
+    expect(error.detail.endsWith(BACKLOG)).toBe(true);
+    expect(Buffer.byteLength(error.detail)).toBeLessThanOrEqual(4 * KiB);
+
+    const logs: string[] = [];
+    const twice = await ReliableOutbox.open(directory, { log: (line) => logs.push(line) }, limits);
+    expect(twice.pending()).toEqual(once);
+    expect(logs).toEqual([
+      expect.stringMatching(/^发件箱收短后仍有 \d+ 字节，超过上限 524288 字节，剩下的报文收不动了，照收$/),
+    ]);
+  });
+
+  it("超过上限时新来的 work_append 拒收不占序号，结局帧照收并在日志里报当前字节数", async () => {
+    const directory = await dataDir();
+    const logs: string[] = [];
+    const outbox = await ReliableOutbox.open(directory, { log: (line) => logs.push(line) }, limits);
+    await Promise.all(Array.from({ length: 4000 }, (_, index) => outbox.append(runDone(`run-${index + 1}`))));
+
+    await expect(outbox.append(workAppend("一行工作记录"))).rejects.toThrow(/work_append 不进发件箱/);
+    const next = await outbox.append(runDone("run-last"));
+    await outbox.flush();
+
+    expect(next.seq).toBe(4001);
+    expect(outbox.pending().map((frame) => frame.seq)).toEqual(Array.from({ length: 4001 }, (_, index) => index + 1));
+    expect(outbox.pending().at(-1)?.body).toEqual(runDone("run-last"));
+    expect(logs.at(-1)).toMatch(/^发件箱收短后仍有 \d+ 字节，超过上限 524288 字节，剩下的报文收不动了，照收$/);
+  });
+
+  it("确认之后积压字节随之减少，work_append 又能进发件箱", async () => {
+    const outbox = await ReliableOutbox.open(await dataDir(), {}, limits);
+    await Promise.all(Array.from({ length: 4000 }, (_, index) => outbox.append(runDone(`run-${index + 1}`))));
+    await expect(outbox.append(workAppend("被拒"))).rejects.toThrow(/work_append 不进发件箱/);
+
+    await outbox.acknowledge(4000);
+
+    expect((await outbox.append(workAppend("放行"))).seq).toBe(4001);
+  });
+
+  it("压缩日志时还没落盘的帧不写进去，重开不出重复序号", async () => {
+    const directory = await dataDir();
+    const outbox = await ReliableOutbox.open(directory);
+    await outbox.append(runDone("run-1"));
+    const acknowledged = outbox.acknowledge(1);
+    await new Promise((resolve) => setImmediate(resolve));
+    const late = outbox.append(runDone("run-2"));
+    await acknowledged;
+    await late;
+
+    expect((await ReliableOutbox.open(directory)).pending()).toEqual([{ seq: 2, body: runDone("run-2") }]);
+  });
+});

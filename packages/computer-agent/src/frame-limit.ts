@@ -2,6 +2,9 @@ import { AGENT_FRAME_MAX_BYTES, type AgentToControl, type JsonValue, type ToolVi
 
 const CLIPPED = "…（内容过长，后面的已截掉）";
 const VIEW_TEXT_MAX_BYTES = 4096;
+const BACKLOG_CLIPPED = "…（电脑离线太久，积压的输出太多，后面的已截掉）";
+const BACKLOG_TEXT_MAX_BYTES = 64 * 1024;
+const BACKLOG_DETAIL_MAX_BYTES = 4 * 1024;
 
 export class OversizedUplink extends Error {}
 
@@ -20,10 +23,10 @@ function utf8Prefix(text: string, limit: number): string {
   return encoded.subarray(0, end).toString("utf8");
 }
 
-const short = (text: string): string =>
-  utf8Bytes(text) <= VIEW_TEXT_MAX_BYTES
-    ? text
-    : `${utf8Prefix(text, VIEW_TEXT_MAX_BYTES - utf8Bytes(CLIPPED))}${CLIPPED}`;
+const clipTo = (text: string, limit: number, tail: string): string =>
+  utf8Bytes(text) <= limit ? text : `${utf8Prefix(text, limit - utf8Bytes(tail))}${tail}`;
+
+const short = (text: string): string => clipTo(text, VIEW_TEXT_MAX_BYTES, CLIPPED);
 
 function shortJson(value: JsonValue): JsonValue {
   if (typeof value === "string") return short(value);
@@ -31,8 +34,11 @@ function shortJson(value: JsonValue): JsonValue {
   return utf8Bytes(text) <= VIEW_TEXT_MAX_BYTES ? value : short(text);
 }
 
-const rawNotice = (view: ToolView): { raw?: string } =>
-  view.raw === undefined ? {} : { raw: `原始参数有 ${utf8Bytes(JSON.stringify(view.raw))} 字节，太大没有上传` };
+function rawNotice(view: ToolView): { raw?: JsonValue } {
+  if (view.raw === undefined) return {};
+  const bytes = utf8Bytes(JSON.stringify(view.raw));
+  return { raw: bytes <= VIEW_TEXT_MAX_BYTES ? view.raw : `原始参数有 ${bytes} 字节，太大没有上传` };
+}
 
 /** 工具卡只是展示，哪个字段都可能装着模型给的大参数，所以整份收短。 */
 function compactView(view: ToolView): ToolView {
@@ -71,6 +77,19 @@ function compactView(view: ToolView): ToolView {
 function approvalView(view: ToolView): ToolView {
   const raw = rawNotice(view);
   return view.kind === "write" ? { ...view, preview: view.preview.map(short), ...raw } : { ...view, ...raw };
+}
+
+export function trimBacklog(body: AgentToControl): AgentToControl | null {
+  switch (body.type) {
+    case "bot_text_done":
+      return { ...body, text: clipTo(body.text, BACKLOG_TEXT_MAX_BYTES, BACKLOG_CLIPPED) };
+    case "agent_error":
+      return { ...body, detail: clipTo(body.detail, BACKLOG_DETAIL_MAX_BYTES, BACKLOG_CLIPPED) };
+    case "bot_tool_call":
+      return { ...body, view: compactView(body.view) };
+    default:
+      return null;
+  }
 }
 
 function shrink(body: AgentToControl, over: number): AgentToControl | null {
