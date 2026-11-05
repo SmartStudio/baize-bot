@@ -15,8 +15,8 @@ interface OutboxState {
 }
 
 interface PendingWrite {
-  readonly entry: StoredUplink;
-  readonly resolve: () => void;
+  readonly seq: number;
+  readonly resolve: (written: StoredUplink) => void;
   readonly reject: (error: unknown) => void;
 }
 
@@ -254,8 +254,8 @@ export class ReliableOutbox {
       return { seq: frame.seq, body: fitted.kind === "fit" ? fitted.body : fitted.notice };
     });
     const outbox = new ReliableOutbox(directory, state, fittedFrames, hooks, limits);
-    const trimmed = outbox.#bytes > limits.maxBytes && outbox.#trim();
-    if (refitted || trimmed) await outbox.#compact();
+    const rewrite = outbox.#bytes > limits.maxBytes && outbox.#trim();
+    if (refitted || rewrite) await outbox.#compact();
     return outbox;
   }
 
@@ -339,12 +339,14 @@ export class ReliableOutbox {
     this.#next += 1;
     this.#frames.push(entry);
     this.#track(entry);
-    const persisted = new Promise<void>((resolve, reject) => this.#writes.push({ entry, resolve, reject }));
+    const persisted = new Promise<StoredUplink>((resolve, reject) =>
+      this.#writes.push({ seq: entry.seq, resolve, reject }),
+    );
     if (this.#timer === null) {
       this.#timer = setTimeout(() => void this.#flush(), 100);
       this.#timer.unref();
     }
-    return persisted.then(() => entry);
+    return persisted;
   }
 
   async acknowledge(upTo: number): Promise<void> {
@@ -389,11 +391,13 @@ export class ReliableOutbox {
     this.#sizes.set(entry.seq, bytes);
   }
 
+  /** 返回有没有换掉已落盘的帧：换了就得重写日志，只换了还没落盘的帧照常追加就行。 */
   #trim(): boolean {
     const { maxBytes, trimToBytes } = this.#limits;
     const before = this.#bytes;
     let count = 0;
-    for (const [index, frame] of this.pending().entries()) {
+    let rewrite = false;
+    for (const [index, frame] of this.#frames.entries()) {
       if (this.#bytes <= trimToBytes) break;
       if (frame.seq <= this.#trimmedThrough) continue;
       this.#trimmedThrough = frame.seq;
@@ -404,6 +408,7 @@ export class ReliableOutbox {
       this.#frames[index] = entry;
       this.#track(entry);
       count += 1;
+      if (frame.seq <= this.#durable) rewrite = true;
     }
     if (count > 0)
       this.#hooks.log?.(
@@ -411,7 +416,7 @@ export class ReliableOutbox {
       );
     if (this.#bytes > maxBytes)
       this.#hooks.log?.(`发件箱收短后仍有 ${this.#bytes} 字节，超过上限 ${maxBytes} 字节，剩下的报文收不动了，照收`);
-    return count > 0;
+    return rewrite;
   }
 
   async #flushNow(): Promise<void> {
@@ -420,17 +425,23 @@ export class ReliableOutbox {
     this.#timer = null;
     const writes = this.#writes.splice(0);
     if (writes.length === 0) return;
+    // 写盘前收：还没落盘的帧直接追加收短后的，只有已落盘的帧被换掉才重写日志。收不动的积压下每批都重写，就是每批写一遍上限那么多字节。
+    const rewrite = this.#bytes > this.#limits.maxBytes && this.#trim();
+    const unwritten = new Map(
+      this.#frames.filter((frame) => frame.seq > this.#durable).map((frame) => [frame.seq, frame]),
+    );
     try {
+      if (rewrite) await this.#compact();
       const file = await open(this.#journal, "a", 0o600);
       try {
-        await file.writeFile(writes.map(({ entry }) => `${JSON.stringify(entry)}\n`).join(""), "utf8");
+        await file.writeFile([...unwritten.values()].map((frame) => `${JSON.stringify(frame)}\n`).join(""), "utf8");
         await file.sync();
       } finally {
         await file.close();
       }
       await syncDirectory(this.#directory);
-      this.#durable = writes.at(-1)?.entry.seq ?? this.#durable;
-      for (const write of writes) write.resolve();
+      this.#durable = writes.at(-1)?.seq ?? this.#durable;
+      for (const write of writes) write.resolve(unwritten.get(write.seq)!);
     } catch (error) {
       this.#failed = true;
       this.#failure = error;
@@ -438,7 +449,6 @@ export class ReliableOutbox {
       for (const write of this.#writes.splice(0)) write.reject(error);
       throw error;
     }
-    if (this.#bytes > this.#limits.maxBytes && this.#trim()) await this.#compact();
   }
 
   async #compact(): Promise<void> {

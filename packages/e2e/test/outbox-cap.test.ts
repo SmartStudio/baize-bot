@@ -32,6 +32,8 @@ it("断线期间发件箱积压超过上限：重连后群里是收短的正文�
     const { groupId } = bot;
     await stack.post(`/api/groups/${groupId}/messages`, { text: "说一大段" });
     await expect.poll(() => stack.agentLog(), poll).toMatch(/发件箱积压超过上限 131072 字节，收短了最早的 \d+ 帧/);
+    // 落盘前就收短，收短的日志比第一次发送早。等掐断真的发生了再接回去，不然先接回去后掐断，就再也连不上。
+    await expect.poll(() => cut, poll).toBe(true);
 
     stack.restoreAgentLink();
     const bodies = async () =>

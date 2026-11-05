@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -621,6 +621,40 @@ describe("发件箱总量上限", () => {
     await outbox.acknowledge(4000);
 
     expect((await outbox.append(workAppend("放行"))).seq).toBe(4001);
+  });
+
+  it("收不动的积压超过回落线后，新来的工具卡落盘前就收短，日志只追加不整份重写", async () => {
+    const directory = await dataDir();
+    const outbox = await ReliableOutbox.open(directory, {}, limits);
+    for (let index = 0; index < 6; index += 1)
+      await outbox.append({
+        type: "approval_request",
+        ...lane,
+        callId: `approval-${index}`,
+        tool: "bash",
+        action: "shell",
+        target: null,
+        view: { kind: "bash", command: "批".repeat(40 * KiB) },
+      });
+    const journalPath = join(directory, ".agent", "outbox", outbox.stream, "frames.jsonl");
+    const { ino } = await stat(journalPath);
+
+    for (let index = 0; index < 20; index += 1) {
+      await outbox.append(toolCall(`call-${index}`, "命".repeat(8 * KiB)));
+      await outbox.flush();
+      expect((await stat(journalPath)).ino, `第 ${index + 1} 条工具卡之后日志还是原来那个文件`).toBe(ino);
+    }
+    const onDisk = (await readFile(journalPath, "utf8"))
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { seq: number; body: AgentToControl });
+    expect(onDisk.map((frame) => frame.seq)).toEqual(Array.from({ length: 26 }, (_, index) => index + 1));
+    for (const { body } of onDisk.slice(6)) {
+      if (body.type !== "bot_tool_call" || body.view.kind !== "bash") throw new Error(`工具卡成了 ${body.type}`);
+      expect(Buffer.byteLength(body.view.command)).toBeLessThanOrEqual(4 * KiB);
+      expect(body.view.raw).toMatch(/^原始参数有 \d+ 字节，太大没有上传$/);
+    }
+    expect(outbox.pending().map((frame) => frame.body)).toEqual(onDisk.map((frame) => frame.body));
   });
 
   it("压缩日志时还没落盘的帧不写进去，重开不出重复序号", async () => {
