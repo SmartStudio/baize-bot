@@ -20,7 +20,17 @@ export interface TestChrome {
   stop(): Promise<void>;
 }
 
+const groupAlive = (pgid: number): boolean => {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 // 用例起的 Chrome 走无头模式，不在桌面上弹窗；实机不抢焦点的证据另外采。和产品一样走管道，不开调试端口。
+// 单独成进程组：只杀主进程时子进程要过一阵才走，存储进程这期间还在往 profile 里写。
 export async function launchTestChrome(profileDir: string): Promise<TestChrome> {
   if (chromeBinary === null) throw new Error("这台电脑上没有 Chrome");
   const child = spawn(
@@ -35,21 +45,26 @@ export async function launchTestChrome(profileDir: string): Promise<TestChrome> 
       "--use-mock-keychain",
       "about:blank",
     ],
-    { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] },
+    { detached: true, stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"] },
   );
   const pid = child.pid;
   if (pid === undefined) throw new Error("Chrome 没有 PID");
   const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   const toChrome = child.stdio[3] as Writable;
   const fromChrome = child.stdio[4] as Readable;
+  const stderr = child.stdio[2] as Readable;
   void exited.then(() => {
     toChrome.destroy();
     fromChrome.destroy();
+    stderr.destroy();
   });
-  const connection = connectPipe({ toChrome, fromChrome });
+  const connection = connectPipe({ toChrome, fromChrome, stderr });
   const stop = async (): Promise<void> => {
-    child.kill("SIGKILL");
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {}
     await exited;
+    while (groupAlive(pid)) await new Promise((resolve) => setTimeout(resolve, 20));
   };
   try {
     await connection.send("Browser.getVersion");

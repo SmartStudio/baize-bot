@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { isAlive, profileChromePids, reapProfileChromes } from "../src/chrome-process.js";
+import { isAlive, profileChromePids, reapProfileChromes, terminate } from "../src/chrome-process.js";
 
 const children: ChildProcess[] = [];
 const directories: string[] = [];
@@ -65,5 +66,55 @@ describe("按 profile 认助理 Chrome", () => {
       "渲染器、chrome-profile-old、子目录都不动",
     ).toEqual([true, true, true]);
     expect(await profileChromePids(profileDir)).toEqual([]);
+  });
+});
+
+const LINGERING_CHILD = `
+const { writeFileSync } = require("node:fs");
+const [parent, marker] = process.argv.slice(1);
+const gone = () => { try { process.kill(Number(parent), 0); return false; } catch { return true; } };
+const timer = setInterval(() => {
+  if (!gone()) return;
+  clearInterval(timer);
+  setTimeout(() => writeFileSync(marker, "flushed"), 300);
+}, 20);
+`;
+
+const FAKE_MAIN = `
+const { spawn } = require("node:child_process");
+const child = spawn(process.execPath, ["-e", process.argv[1], String(process.pid), process.argv[2]], { stdio: "ignore" });
+process.stdout.write(String(child.pid));
+setInterval(() => {}, 1e6);
+`;
+
+// 子进程过继给 init 后、收尸前是僵尸，kill(pid, 0) 照样成功，可它已经不会再写 profile 了。
+function stillRunning(pid: number): boolean {
+  const stat = execFileSync("ps", ["-ax", "-o", "pid=,stat="], { encoding: "utf8" })
+    .split("\n")
+    .map((line) => line.trim().split(/\s+/u))
+    .find(([found]) => Number(found) === pid)?.[1];
+  return stat !== undefined && !stat.startsWith("Z");
+}
+
+describe("收掉助理 Chrome", () => {
+  it("主进程退了不算完，等同组的子进程写完退掉才回来", async () => {
+    const root = await mkdtemp(join(tmpdir(), "baize-chrome-group-test-"));
+    directories.push(root);
+    const marker = join(root, "flushed");
+    const main = spawn(process.execPath, ["-e", FAKE_MAIN, LINGERING_CHILD, marker], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    children.push(main);
+    const childPid = await new Promise<number>((resolve) =>
+      main.stdout?.once("data", (chunk) => resolve(Number(chunk))),
+    );
+    if (main.pid === undefined) throw new Error("假 Chrome 没有 PID");
+
+    await terminate(main.pid);
+
+    expect(isAlive(main.pid), "主进程退了").toBe(false);
+    expect(stillRunning(childPid), "同组的子进程也退了").toBe(false);
+    expect(existsSync(marker), "子进程退之前写完了").toBe(true);
   });
 });
