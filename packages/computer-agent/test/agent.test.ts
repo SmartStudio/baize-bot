@@ -507,8 +507,12 @@ function spawnAgent(
       | "log"
       | "beforeReliableSend"
       | "computerId"
+      | "outboxLimits"
     >
-  > = {},
+  > & {
+    /** 不传 log，日志走代理自己的默认输出，等同 main.ts 和桌面端拉起代理的用法。 */
+    readonly productLog?: true;
+  } = {},
 ): AgentHandle {
   const calls: RunnerCalls = {
     approvals: [],
@@ -527,15 +531,16 @@ function spawnAgent(
   runnerCallsLog.push(calls);
   const dataDir = tuning.dataDir ?? mkdtempSync(join(tmpdir(), "baize-agent-test-"));
   if (tuning.dataDir === undefined) dataDirs.push(dataDir);
+  const { productLog, ...options } = tuning;
   const handle = startAgent({
     url,
     computerId: tuning.computerId ?? ComputerId.parse("computer-1"),
     token: "dev-token",
     version: "0.1.0",
-    log: () => {},
+    ...(productLog ? {} : { log: () => {} }),
     makeRunner: fakeRunner(calls),
     dataDir,
-    ...tuning,
+    ...options,
   });
   agents.push(handle);
   return handle;
@@ -1021,6 +1026,53 @@ describe("电脑代理连控制面", () => {
     const replay = await server.waitForMessage("run_done", 1);
     expect(replay.runId).toBe("run-1");
     expect(hookCalls).toBe(2);
+  });
+
+  it("不传 log 的代理（main.ts 的用法）冷启动收短发件箱、拒收工作记录，代理日志里都看得到", async () => {
+    const server = startControlPlane();
+    servers.push(server);
+    const directory = await tempDataDir();
+    const previous = await ReliableOutbox.openForComputer(directory, "computer-1");
+    await previous.outbox.append({
+      type: "bot_text_done",
+      runId: RunId.parse("run-old"),
+      botId: BotId.parse("bot-1"),
+      groupId: GroupId.parse("group-1"),
+      messageId: MessageId.parse("msg-old"),
+      text: "旧".repeat(100 * 1024),
+    });
+    const printed: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => printed.push(String(line)));
+    spawnAgent(await server.url(), {
+      dataDir: directory,
+      productLog: true,
+      outboxLimits: { maxBytes: 128, trimToBytes: 64 },
+    });
+    const socket = await server.waitForSocket(1);
+    socket.send(JSON.stringify(configMessage));
+    await server.waitForMessage("config_applied");
+    const result = await initialRunnerConfigs.at(-1)!.workAppend!({
+      type: "work_append",
+      lane: { botId: BotId.parse("bot-1"), groupId: GroupId.parse("group-1"), stream: "chat", epoch: 7 },
+      runId: RunId.parse("run-1"),
+      fromSeq: 0,
+      lines: ["一行工作记录"],
+      head: "0".repeat(64),
+      cause: "turn_end",
+    });
+
+    expect(result).toEqual({ kind: "invalid" });
+    expect(printed).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^\[computer-agent\] 发件箱积压超过上限 128 字节，收短了最早的 1 帧，从 \d+ 字节到 \d+ 字节$/,
+        ),
+        expect.stringMatching(
+          /^\[computer-agent\] 发件箱收短后仍有 \d+ 字节，超过上限 128 字节，剩下的报文收不动了，照收$/,
+        ),
+        expect.stringMatching(/^\[computer-agent\] 发件箱积压已有 \d+ 字节，work_append 不进发件箱$/),
+      ]),
+    );
   });
 
   it("超过单帧上限的可靠上行截短后送达，截不下的换成同一 run 的报错并停掉它，后面的帧照常到、连接不被 1009 关掉", async () => {

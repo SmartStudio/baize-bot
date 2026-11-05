@@ -27,6 +27,7 @@ describe("工作记录探针的确认通路", () => {
         sent.push(stored.seq);
         channel.acknowledge({ type: "uplink_ack", upTo: stored.seq, rejected: [] });
       },
+      log: () => {},
       cancel: () => {},
       failed: () => {},
     });
@@ -47,6 +48,7 @@ describe("工作记录探针的确认通路", () => {
       send: (stored) => {
         sent.push(stored.seq);
       },
+      log: () => {},
       cancel: (lane, epoch) => {
         cancelled.push({ lane, epoch });
       },
@@ -73,6 +75,7 @@ describe("工作记录探针的确认通路", () => {
       connected: () => true,
       append: async (body) => ({ seq: 1, body }),
       send: () => {},
+      log: () => {},
       cancel: () => {},
       failed: () => {},
     });
@@ -103,6 +106,7 @@ describe("工作记录探针的确认通路", () => {
       connected: () => true,
       append: async (body) => ({ seq: 1, body }),
       send: () => {},
+      log: () => {},
       cancel: () => {},
       failed: () => {},
     });
@@ -130,6 +134,7 @@ describe("工作记录探针的确认通路", () => {
         send: (stored) => {
           sent.push(stored.seq);
         },
+        log: () => {},
         cancel: () => {},
         failed: (error) => {
           failures.push(error);

@@ -241,6 +241,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
       return { seq: stored.seq, body: frame };
     },
     send: sendStored,
+    log,
     cancel: (lane, epoch) => runner?.cancel({ lane: { botId: lane.botId, groupId: lane.groupId }, epoch }),
     failed: (error) => {
       log(`工作记录探针落盘失败：${String(error)}`);
@@ -387,11 +388,11 @@ export function startAgent(options: AgentOptions): AgentHandle {
           await previousOutbox.flush();
           if (stopping) return;
           try {
-            await quarantineTransportState(dataDir, "服务器确认序号回退", options.log);
+            await quarantineTransportState(dataDir, "服务器确认序号回退", log);
             const fresh = await ReliableOutbox.openForComputer(
               dataDir,
               options.computerId,
-              options.log,
+              log,
               dropRun,
               options.outboxLimits,
             );
@@ -651,7 +652,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   }
 
   void Promise.all([
-    ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun, options.outboxLimits),
+    ReliableOutbox.openForComputer(dataDir, options.computerId, log, dropRun, options.outboxLimits),
     loadInstallId(dataDir),
   ])
     .then(([{ outbox: openedOutbox, downlinkCursor: openedCursor }, openedInstallId]) => {
