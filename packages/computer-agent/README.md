@@ -20,12 +20,12 @@ prompt 的 `lane` 原样交给运行器。`cancel{runId}` 停单条运行；`can
 
 电脑长期离线时未确认的上行会一直累积，所以发件箱有总量上限（`OUTBOX_LIMITS`，`src/reliable-transport.ts`）。量的是未确认帧在 journal 里那一行的字节，不按条数：占磁盘和内存的是字节，一条 `bot_text_done` 可能比一千条 `run_done` 还大。累计字节数在入队、确认、收短时增减，不每次重量整队。
 
-每次 flush 落盘之后，积压超过 128 MiB 就从最早的已落盘帧往后原位收短，收到 96 MiB 以下为止，然后重写 journal（`trimBacklog`，`src/frame-limit.ts`）：
+每次 flush 写盘之前，积压超过 128 MiB 就从最早的未确认帧往后原位收短，收到 96 MiB 以下为止（`trimBacklog`，`src/frame-limit.ts`）。还没落盘的帧直接写收短后的，只有已落盘的帧被换掉才重写 journal：剩下的都收不动时，要是每批新帧都整份重写，每批就要写一遍上限那么大的文件。收哪些：
 
 - `bot_text_done.text` 截到 64 KiB，`agent_error.detail` 截到 4 KiB，末尾写「…（电脑离线太久，积压的输出太多，后面的已截掉）」。
 - `bot_tool_call.view` 用单帧上限的 `compactView` 收短。不到 4 KiB 的原始参数留着，收过的帧再收不会变小，也就不再换。
 - 其余报文原样：`run_done`、`approval_request`、`approval_abandoned`、`handoff`、`handoff_accept`、各种 offer、`poker_*` 代表决定和结局，超了也照收。审批卡不收，用户是看着卡批的。
 
-收不小的帧不换，收过的帧不再收。帧不删：控制面只认连续的序号，删一条后面全成缺号；原位换、序号不变和单帧上限是同一个办法，控制面处理过的序号只回确认，没处理过的处理换上去的那条，所以控制面不需要知道发件箱满过。新来的 `work_append` 会让总量超过上限时直接拒收，走 `OversizedUplink`，镜像回 `invalid` 停流。收完还超就照收，日志打一行当前字节数。冷启动打开发件箱时同样执行一遍，处理旧版代理留下的超量 journal。
+收不小的帧不换，收过的帧不再收。帧不删：控制面只认连续的序号，删一条后面全成缺号；原位换、序号不变和单帧上限是同一个办法，控制面处理过的序号只回确认，没处理过的处理换上去的那条，所以控制面不需要知道发件箱满过。新来的 `work_append` 会让总量超过上限时直接拒收，走 `OversizedUplink`，代理日志打一行拒收原因，镜像回 `invalid` 停流。停流有代价：run 照常收尾，但被拒那一轮的工作记录没上传，下一轮按服务器快照重建会话，Bot 丢掉那一轮的会话记忆；同一个 run 里剩下的有副作用的工具调用会被 `bot-runner/src/lane-fence.ts` 的 `beforeEffect` 挡下（镜像停流后 `flush` 一直回 `invalid`，见 `work-mirror.ts` 的 `#flush`），读和写工作区不受影响；群里出现一条「工作记录停止上传」的系统消息（文案由 #132 跟进）。单帧超限的 `work_append` 也是同样的后果。收完还超就照收，日志打一行当前字节数。冷启动打开发件箱时同样执行一遍，处理旧版代理留下的超量 journal。
 
 重写 journal 只写已落盘的帧（`pending()`），还在 `#writes` 里的帧由下一次 flush 追加，否则同一序号会写两行，重开时被当成损坏隔离。确认之后的压缩原来也有这个问题，一并改了。
