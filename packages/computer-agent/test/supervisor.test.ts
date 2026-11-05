@@ -77,7 +77,7 @@ type Entry = {
 };
 
 function spawnEntry(launchFile: string, env: NodeJS.ProcessEnv): Entry {
-  const child = spawn("./node_modules/.bin/tsx", ["src/supervise.ts", launchFile], {
+  const child = spawn(process.execPath, ["--import", "tsx", "src/supervise.ts", launchFile], {
     env,
     stdio: ["ignore", "pipe", "pipe"],
   });

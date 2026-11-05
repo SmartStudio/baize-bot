@@ -33,7 +33,7 @@ type Child = {
   waitForExit(timeoutMs?: number): Promise<`退出 ${string}`>;
 };
 
-// 用例超时后 vitest 不执行用例里的 finally，只跑 afterEach，挂住的代理只能在这里收。
+// 用例超时时 vitest 不等用例里还在 await 的东西就跑 afterEach。那东西永不 settle，finally 就不执行；晚些 settle，finally 也落在超时之后。挂住的代理统一在这里收。
 const spawned: ChildProcessByStdio<Writable, Readable, Readable>[] = [];
 
 afterEach(() => {
@@ -45,7 +45,8 @@ afterEach(() => {
 function spawnAgent(env: NodeJS.ProcessEnv): Child {
   const childEnv = { ...process.env, ...env };
   if (!("AGENT_TOKEN" in env)) delete childEnv["AGENT_TOKEN"];
-  const child = spawn("./node_modules/.bin/tsx", ["src/main.ts"], {
+  // 直起 node，不走 node_modules/.bin/tsx。那是个包装进程，SIGKILL 只杀到它，真正的代理会被收养留下来。
+  const child = spawn(process.execPath, ["--import", "tsx", "src/main.ts"], {
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -186,10 +187,8 @@ describe("电脑代理进程", () => {
         }
       });
     });
-    const children: Child[] = [];
     const start = (): Child => {
       const child = spawnAgent({});
-      children.push(child);
       const address = server.address() as AddressInfo;
       child.stdin.write(
         `${JSON.stringify({ url: `ws://127.0.0.1:${address.port}/agent`, computerId: "computer-1", token: "token-1", dataDir })}\n`,
@@ -216,9 +215,6 @@ describe("电脑代理进程", () => {
       expect(reopened.pending()).toEqual([]);
       expect((await DownlinkCursor.open(dataDir)).applied).toBe(5);
     } finally {
-      for (const child of children) {
-        if (child.process.exitCode === null && child.process.signalCode === null) child.process.kill("SIGKILL");
-      }
       for (const socket of server.clients) socket.terminate();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(dataDir, { recursive: true, force: true });
