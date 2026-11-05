@@ -469,6 +469,9 @@ export function createBotBrowser(config: BrowserConfig, mutex = new BrowserMutex
       `生命周期：${open.mainFrameLifecycle.length === 0 ? "（没有）" : open.mainFrameLifecycle.join(" → ")}`,
       probe("Target.getTargets", targets),
     ]);
+    const stderr = open.connection.stderrTail?.();
+    if (stderr !== undefined)
+      states.push(`Chrome stderr 最后几行：${stderr.length === 0 ? "（没有）" : stderr.join(" ⏎ ")}`);
     return states.join("；");
   };
 

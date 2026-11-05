@@ -5,6 +5,8 @@ import type { Readable, Writable } from "node:stream";
 // 命令和事件按 flatten 模式的 sessionId 分路。
 
 const COMMAND_TIMEOUT_MS = 30_000;
+const STDERR_LINES_KEPT = 8;
+const STDERR_LINE_MAX = 300;
 
 export interface CdpEvent {
   readonly method: string;
@@ -17,6 +19,8 @@ export interface CdpConnection {
   /** 回退订函数。管道是共用的，挂上的监听要自己摘。 */
   onEvent(listener: (event: CdpEvent) => void): () => void;
   isOpen(): boolean;
+  /** Chrome 往 stderr 写的最后几行。管道没接 stderr 的连接没有它。 */
+  stderrTail?(): readonly string[];
 }
 
 export class CdpTimeoutError extends Error {}
@@ -26,6 +30,8 @@ export interface CdpPipe {
   readonly toChrome: Writable;
   /** Chrome 的 fd 4。 */
   readonly fromChrome: Readable;
+  /** Chrome 的 stderr。接了就要一直读空，不然管道写满 Chrome 会卡在写日志上。 */
+  readonly stderr?: Readable;
 }
 
 interface Pending {
@@ -91,6 +97,23 @@ export function connectPipe(pipe: CdpPipe): CdpConnection {
       dispatch(raw);
     }
   });
+  const stderrLines: string[] = [];
+  let stderrPartial = "";
+  const clipped = (line: string): string =>
+    line.length > STDERR_LINE_MAX ? `${line.slice(0, STDERR_LINE_MAX)}…` : line;
+  pipe.stderr?.setEncoding("utf8");
+  pipe.stderr?.on("data", (chunk: string) => {
+    const lines = (stderrPartial + chunk).split("\n");
+    stderrPartial = clipped(lines.pop() ?? "");
+    for (const raw of lines) {
+      const line = raw.trimEnd();
+      if (line === "") continue;
+      stderrLines.push(clipped(line));
+      if (stderrLines.length > STDERR_LINES_KEPT) stderrLines.shift();
+    }
+  });
+  pipe.stderr?.on("error", () => undefined);
+
   for (const stream of [pipe.fromChrome, pipe.toChrome]) {
     stream.on("close", shut);
     stream.on("end", shut);
@@ -119,5 +142,8 @@ export function connectPipe(pipe: CdpPipe): CdpConnection {
       return () => listeners.delete(listener);
     },
     isOpen: () => open,
+    ...(pipe.stderr === undefined
+      ? {}
+      : { stderrTail: () => [...stderrLines, stderrPartial].filter((line) => line !== "").slice(-STDERR_LINES_KEPT) }),
   };
 }

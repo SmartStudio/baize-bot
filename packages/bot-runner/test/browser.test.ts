@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -10,6 +11,7 @@ import {
   chromeBinary,
   evaluateIn,
   launchTestChrome,
+  openUserTab,
   pageTargets,
   settledPageCount,
   type TestChrome,
@@ -84,8 +86,42 @@ function wrap(
     },
     onEvent: (listener: (event: CdpEvent) => void) => inner.onEvent(listener),
     isOpen: () => wrapped.alive && inner.isOpen(),
+    stderrTail: () => inner.stderrTail?.() ?? [],
   };
   return wrapped;
+}
+
+function processTable(): Map<number, { readonly ppid: number; readonly zombie: boolean }> {
+  const table = new Map<number, { readonly ppid: number; readonly zombie: boolean }>();
+  for (const line of execFileSync("ps", ["-ax", "-o", "pid=,ppid=,stat="], { encoding: "utf8" }).split("\n")) {
+    const [pid, ppid, stat] = line.trim().split(/\s+/u);
+    if (pid !== undefined && ppid !== undefined && stat !== undefined)
+      table.set(Number(pid), { ppid: Number(ppid), zombie: stat.startsWith("Z") });
+  }
+  return table;
+}
+
+// Linux 上 Chrome 的渲染器挂在 zygote 下面，不是主进程的直接子进程。
+function descendantsOf(root: number): number[] {
+  const table = processTable();
+  const found = new Set([root]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [pid, { ppid }] of table) {
+      if (found.has(ppid) && !found.has(pid)) {
+        found.add(pid);
+        grew = true;
+      }
+    }
+  }
+  found.delete(root);
+  return [...found];
+}
+
+// 主进程一死子进程过继给 init，收尸前还是僵尸，kill(pid, 0) 照样成功，可僵尸已经不会再写 profile 了。
+function running(pids: readonly number[]): number[] {
+  const table = processTable();
+  return pids.filter((pid) => table.get(pid)?.zombie === false);
 }
 
 describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）", () => {
@@ -217,6 +253,19 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
     expect(await settled(before), "关 Bot 的浏览器后一页不剩").toBe(before);
   });
 
+  it("停掉 Chrome 回来时，它起的子进程都已经退了，profile 目录删得干净", async () => {
+    const ownProfile = mkdtempSync(join(tmpdir(), "baize-browser-stop-"));
+    const own = await launchTestChrome(ownProfile);
+    for (const path of ["/one", "/two", "/three"]) await openUserTab(own.connection, `${site.url}${path}`);
+    const children = descendantsOf(own.pid);
+
+    await own.stop();
+
+    expect(children.length, "开着三页的 Chrome 有渲染、GPU、网络这些子进程").toBeGreaterThan(2);
+    expect(running(children), "stop 回来时没有子进程还活着").toEqual([]);
+    rmSync(ownProfile, { recursive: true });
+  });
+
   it("截图 30 秒没回，报错里带上这一页当时的可见性、生命周期和标签页状态", async () => {
     const stuck = wrap(chrome.connection, (method) =>
       method === "Page.captureScreenshot"
@@ -237,6 +286,7 @@ describe.skipIf(chromeBinary === null)("助理浏览器走管道（真 Chrome）
     expect(error).toMatch(/生命周期：[^；]*\bload\b/);
     expect(error).toContain(`本页 page attached=true ${site.url}/shot`);
     expect(error, "别的 Bot 的标签页只报个数，网址不进这个 Bot 的模型上下文").not.toContain("/neighbour");
+    expect(error).toMatch(/Chrome stderr 最后几行：/);
     await Promise.all([browser.close(), neighbour.close()]);
   });
 });
@@ -293,6 +343,29 @@ describe("管道上的 CDP 客户端", () => {
     expect(await inFlight).toContain("助理 Chrome 退出了");
     expect(connection.isOpen()).toBe(false);
     expect(await errorOf(connection.send("Browser.getVersion"))).toContain("下次用时会重新起");
+  });
+
+  it("接了 stderr 的管道留着 Chrome 最后几行日志，太长的行截断", async () => {
+    const fake = fakePipe();
+    const stderr = new PassThrough();
+    const connection = connectPipe({ ...fake.pipe, stderr });
+    const quiet = connectPipe(fakePipe().pipe);
+    for (let line = 1; line <= 10; line += 1) stderr.write(`[ERROR] 第 ${line} 行\n`);
+    stderr.write(`${"x".repeat(400)}\n半`);
+    stderr.write("行");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(connection.stderrTail?.()).toEqual([
+      "[ERROR] 第 5 行",
+      "[ERROR] 第 6 行",
+      "[ERROR] 第 7 行",
+      "[ERROR] 第 8 行",
+      "[ERROR] 第 9 行",
+      "[ERROR] 第 10 行",
+      `${"x".repeat(300)}…`,
+      "半行",
+    ]);
+    expect(quiet.stderrTail, "没接 stderr 的连接不报日志").toBeUndefined();
   });
 
   it("命令 30 秒没回，报的是超时，连接照常能用", async () => {

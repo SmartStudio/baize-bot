@@ -101,7 +101,7 @@ async function spawnChrome(
   const child = spawn(binary, args, {
     detached: true,
     env: { ...process.env, ...env, TMPDIR: tmp, MAC_CHROMIUM_TMPDIR: tmp },
-    stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"],
+    stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],
   });
   await new Promise<void>((resolve, reject) => {
     child.once("spawn", resolve);
@@ -114,7 +114,11 @@ async function spawnChrome(
     if (child.exitCode !== null || child.signalCode !== null) resolve();
     else child.once("exit", () => resolve());
   });
-  const pipe: CdpPipe = { toChrome: child.stdio[3] as Writable, fromChrome: child.stdio[4] as Readable };
+  const pipe: CdpPipe = {
+    toChrome: child.stdio[3] as Writable,
+    fromChrome: child.stdio[4] as Readable,
+    stderr: child.stdio[2] as Readable,
+  };
   return { pid, exited, pipe, stop: () => terminate(pid) };
 }
 
@@ -234,6 +238,7 @@ export function startAssistantChrome(options: AssistantChromeOptions): Assistant
       void launched.exited.then(() => {
         launched.pipe.toChrome.destroy();
         launched.pipe.fromChrome.destroy();
+        launched.pipe.stderr?.destroy();
       });
       const timeout = AbortSignal.any([stopped.signal, AbortSignal.timeout(READY_TIMEOUT_MS)]);
       await untilAborted(connection.send("Browser.getVersion"), timeout).catch((error: unknown) => {

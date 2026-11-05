@@ -19,22 +19,36 @@ export function isAlive(pid: number): boolean {
   }
 }
 
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signal(target: number, name: NodeJS.Signals): void {
+  try {
+    process.kill(target, name);
+  } catch {}
+}
+
+// Chrome 主进程退了，渲染、网络、存储这些子进程还要一阵才走，存储进程这期间还在写 profile，
+// 整组都退了才算收掉。
+const running = (pid: number): boolean => isAlive(pid) || groupAlive(pid);
+
 export async function terminate(pid: number): Promise<void> {
-  if (!isAlive(pid)) return;
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    return;
-  }
+  if (!running(pid)) return;
+  signal(pid, "SIGTERM");
   const deadline = Date.now() + 5_000;
-  while (isAlive(pid) && Date.now() < deadline) await delay(50);
-  if (!isAlive(pid)) return;
-  try {
-    process.kill(pid, "SIGKILL");
-  } catch {
-    return;
-  }
-  while (isAlive(pid)) await delay(100);
+  while (running(pid) && Date.now() < deadline) await delay(50);
+  if (!running(pid)) return;
+  signal(pid, "SIGKILL");
+  signal(-pid, "SIGKILL");
+  // 挨了 SIGKILL 就不会再写 profile，剩下只是等收尸。没人收尸的僵尸会一直留在组里，不能无限等。
+  const reaped = Date.now() + 5_000;
+  while (running(pid) && Date.now() < reaped) await delay(100);
 }
 
 function listProcesses(): Promise<string> {
