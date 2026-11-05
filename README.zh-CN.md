@@ -102,3 +102,7 @@ TypeScript pnpm monorepo。控制面用 Hono 和 PostgreSQL，Web 用 React 和 
 ## 开源协议
 
 本项目以 [MIT 协议](LICENSE) 开源。
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=SmartStudio/baize-bot&type=Date)](https://star-history.com/#SmartStudio/baize-bot&Date)

@@ -117,3 +117,7 @@ Notes on fxai.ai (in Chinese):
 - [企业开通 Grok Bot，权限和审计要先定什么](https://fxai.ai/notes/grok-bot-enterprise-access-audit/): what to decide on access, approvals and audit logs before a company turns bots on.
 - [Agent 试点能跑通，扩到生产还缺哪几项？](https://fxai.ai/notes/agent-pilot-to-production-checklist/): what a bot setup still needs after a pilot works and before it runs for real.
 - [Agent 权限管理怎么分级：工具权限先开哪类](https://fxai.ai/notes/agent-tool-permission-ladder/): which tool permissions to open first, which is the idea behind Baize's approval cards.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=SmartStudio/baize-bot&type=Date)](https://star-history.com/#SmartStudio/baize-bot&Date)
