@@ -39,6 +39,7 @@ interface WorkAppendChannelOptions {
   readonly connected: () => boolean;
   readonly append: (frame: WorkAppend) => Promise<Stored>;
   readonly send: (stored: Stored) => void;
+  readonly log: (line: string) => void;
   readonly cancel: (lane: NonNullable<UplinkRejection["lane"]>, epoch: number) => void;
   readonly failed: (error: unknown) => void;
 }
@@ -71,6 +72,7 @@ export class WorkAppendChannel {
         .catch((error: unknown) => {
           // 运行器已按字节切批，到这里还超限就让镜像停流；回 disconnected 它会拿同一批反复重试。
           if (error instanceof OversizedUplink) {
+            this.#options.log(error.message);
             this.#settle(waiting, { kind: "invalid" });
             return;
           }
