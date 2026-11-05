@@ -35,7 +35,7 @@ import { type AssistantChrome, type AssistantChromeOptions, startAssistantChrome
 import { createLiveScreen } from "./live-screen.js";
 import { checkLogin, createLogins, defaultLoginPages } from "./login.js";
 import { createTerminals, ptySpawner } from "./terminal.js";
-import { DownlinkCursor, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
+import { DownlinkCursor, type OutboxLimits, quarantineTransportState, ReliableOutbox } from "./reliable-transport.js";
 import { OversizedUplink } from "./frame-limit.js";
 import { loadInstallId } from "./install-id.js";
 import { WorkAppendChannel } from "./work-append.js";
@@ -67,6 +67,7 @@ export interface AgentOptions {
   readonly loginTimeoutMs?: number;
   /** 测试用断线注入点：持久化完成后、可靠帧发送前调用。 */
   readonly beforeReliableSend?: (frame: UplinkFrame) => void;
+  readonly outboxLimits?: OutboxLimits;
   readonly discoverMcp?: typeof discoverMcpTools;
 }
 
@@ -387,7 +388,13 @@ export function startAgent(options: AgentOptions): AgentHandle {
           if (stopping) return;
           try {
             await quarantineTransportState(dataDir, "服务器确认序号回退", options.log);
-            const fresh = await ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun);
+            const fresh = await ReliableOutbox.openForComputer(
+              dataDir,
+              options.computerId,
+              options.log,
+              dropRun,
+              options.outboxLimits,
+            );
             outbox = fresh.outbox;
             downlinkCursor = fresh.downlinkCursor;
             resettingTransport = false;
@@ -644,7 +651,7 @@ export function startAgent(options: AgentOptions): AgentHandle {
   }
 
   void Promise.all([
-    ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun),
+    ReliableOutbox.openForComputer(dataDir, options.computerId, options.log, dropRun, options.outboxLimits),
     loadInstallId(dataDir),
   ])
     .then(([{ outbox: openedOutbox, downlinkCursor: openedCursor }, openedInstallId]) => {

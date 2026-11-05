@@ -63,6 +63,7 @@ export type StackOptions = {
   readonly cuttableAgentLink?: boolean;
   /** 可靠上行落盘后、实际发送前的确定注入点。 */
   readonly beforeReliableSend?: AgentOptions["beforeReliableSend"];
+  readonly outboxLimits?: AgentOptions["outboxLimits"];
   /** 发布走的平台接口根地址，指到假平台。不给就是一个连不上的地址，绝不打到真 GitHub 和 X。 */
   readonly githubApiBaseUrl?: string;
   readonly xApiBaseUrl?: string;
@@ -236,6 +237,7 @@ export async function startStack(options: StackOptions): Promise<Stack> {
       version: AGENT_VERSION,
       dataDir,
       ...(options.beforeReliableSend === undefined ? {} : { beforeReliableSend: options.beforeReliableSend }),
+      ...(options.outboxLimits === undefined ? {} : { outboxLimits: options.outboxLimits }),
       log: (line: string) => {
         log += `${line}\n`;
       },
