@@ -809,6 +809,7 @@ describe.runIf(realChrome)("助理 Chrome 进程", () => {
 
       first.child.kill("SIGKILL");
       await exited(first.child);
+      // 旧 Chrome 关闭时主线程轮询等网络服务子进程，最多约 10 秒才放弃；满载实测 0.04 到 10.8 秒，45 秒只为认出真卡死，还给后面再起一个 Chrome 留预算。
       await poll(() => (isAlive(first.ready.pid) ? undefined : true), 45_000, "管道断开后旧 Chrome 自己退出");
 
       const second = await startHost(directory);
