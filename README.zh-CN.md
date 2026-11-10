@@ -20,8 +20,22 @@
 
 > 项目还在早期开发中，没有发布版本，也还没有下载地址。现在可以从源码在主干上跑起来。
 
-<!-- TODO: demo GIF（首页说一句话 → 项目开起来 → 草稿等你批准） -->
-![等你确认的内容计划](docs/images/content-plan.png)
+![审批卡片：需要你点头 · 写外部文件](docs/images/approval.gif)
+
+*弹出「需要你点头 · 写外部文件」，点「批准 仅这一次」即可放行这次写入。*
+
+<table>
+<tr>
+<td width="50%">
+<img src="docs/images/task.gif" alt="给主助理派一个任务，它按步骤推进">
+<p><em>在首页给主助理派一个任务，它按步骤推进，其中一步会停在「等你点头」。</em></p>
+</td>
+<td width="50%">
+<img src="docs/images/team.gif" alt="几个 Bot 在德州牌桌上各自行动">
+<p><em>几个 Bot 在德州牌桌上各自跟注、加注或弃牌。</em></p>
+</td>
+</tr>
+</table>
 
 ### 三步从源码跑起来
 

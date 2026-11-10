@@ -20,8 +20,22 @@ It is for one person or a small team doing content, community and growth work, s
 
 > Baize is in early development. There is no release and no download yet. You can run it from source on the main branch today.
 
-<!-- TODO: demo GIF (one sentence on the home page → project opens → draft waiting for approval) -->
-![Content plan waiting for approval](docs/images/content-plan.png)
+![Approval card asking to write an external file](docs/images/approval.gif)
+
+*The card says 「需要你点头 · 写外部文件」. Click 批准 仅这一次 to allow this write.*
+
+<table>
+<tr>
+<td width="50%">
+<img src="docs/images/task.gif" alt="Give the main assistant a task; it runs the steps">
+<p><em>Give the main assistant a task. It runs the steps, including one that waits (等你点头).</em></p>
+</td>
+<td width="50%">
+<img src="docs/images/team.gif" alt="Several bots playing Texas Hold'em">
+<p><em>Several bots play Texas Hold'em, each calling, raising, or folding on its own.</em></p>
+</td>
+</tr>
+</table>
 
 ### Try it from source in 3 steps
 
