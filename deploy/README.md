@@ -39,21 +39,46 @@ docker run --rm --entrypoint node baize-remote-computer:remote --version
 
 ## AppArmor 与 bwrap 探测
 
-远程电脑上 Bot 的 bash 是否进沙箱，由运行器在进程里探一次决定（`packages/bot-runner/src/sandbox.ts:110-124`）：
+远程电脑上 Bot 的 bash 是否进沙箱，由运行器在进程里探一次决定（`packages/bot-runner/src/sandbox.ts` 的 `detectSandbox`）：
 
-- Linux 上跑 `bwrap --ro-bind / / --unshare-net --unshare-pid true`，退出码 0 就用 bwrap 沙箱。
-- 跑不通就退成 `none`，日志里留一行「bubblewrap 起不来（原因），这台电脑没有 bash 沙箱，Bot 的每条 bash 都要问」。退成 `none` 后每条 bash 都弹审批（`packages/bot-runner/README.md:74`），只读例行里 bash 一律拒绝（`packages/bot-runner/README.md:143`）。服务不会因此起不来，所以探测失败不显眼，要主动查。
+- Linux 上跑 `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-net true`（同文件的 `BWRAP_PROBE_ARGS`），退出码 0 就用 bwrap 沙箱。
+- 跑不通就退成 `none`，日志里留一行「bubblewrap 起不来（原因），这台电脑没有 bash 沙箱，Bot 的每条 bash 都要问」。退成 `none` 后每条 bash 都弹审批，批了也不进沙箱直接跑；只读例行里 bash 一律拒绝（`packages/bot-runner/src/gate.ts` 的 `NO_SANDBOX_REASON`）；云电脑的网页终端不开（`packages/computer-agent/src/agent.ts` 里终端的 `available`）。服务不会因此起不来，所以探测失败不显眼，要主动查。
 
-部署后按下面的顺序查（未在真机验证）。命令和运行器的探测参数一字不差，和 `remote/README.md:109-113` 那条相同：
+宿主机要做什么取决于它的 AppArmor 有没有自带 bwrap 的 profile。下面的结论是在 GitHub Actions 的 `ubuntu-24.04`（apparmor 4.0.1）和 `ubuntu-latest`（26.04，apparmor 5.0.2）runner 上实测的，容器用 `debian:bookworm-slim` 装 bubblewrap，带 compose 里同样的 `seccomp=./seccomp-bwrap.json` 和 `apparmor=unconfined`，以 uid 1000 跑探测（#135）：
+
+| 宿主机 | 什么都不做 | 宿主机加下面那份 profile |
+| --- | --- | --- |
+| Ubuntu 24.04 | 不通，`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted` | 通 |
+| Ubuntu 26.04 | 通，apparmor 包自带的 `/etc/apparmor.d/bwrap-userns-restrict` 已经放行 `/usr/bin/bwrap` | 不通，报错同左 |
+
+- 宿主机上的 AppArmor profile 按路径挂，容器里的 `/usr/bin/bwrap` 也挂得上。
+- 自带 `bwrap-userns-restrict` 的宿主机上不要再给 `/usr/bin/bwrap` 加 profile。两份 profile 挂同一个路径时内核记一条 `conflicting profile attachments`，一份都不用，bwrap 落回 `unprivileged_userns`，在新 user namespace 里拿不到配回环口要的 capability。自带的那份只把 capability 留给 bwrap 本身，沙箱里的命令一个 capability 都没有，比下面那份更紧。
+- 看宿主机有没有 `/etc/apparmor.d/bwrap-userns-restrict`（`ls` 一下），不看版本号。没有的（24.04），给 bwrap 单独放开 user namespace，不整机关 `kernel.apparmor_restrict_unprivileged_userns`：
+
+```
+sudo tee /etc/apparmor.d/baize-bwrap >/dev/null <<'PROFILE'
+abi <abi/4.0>,
+include <tunables/global>
+profile baize-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+PROFILE
+sudo apparmor_parser -r /etc/apparmor.d/baize-bwrap
+```
+
+宿主机升级到带 `bwrap-userns-restrict` 的版本（26.04 实测带，25.04 没实测）时，先删掉这份（`sudo apparmor_parser -R /etc/apparmor.d/baize-bwrap && sudo rm /etc/apparmor.d/baize-bwrap`），不然和自带的冲突。
+
+部署后按下面的顺序查（宿主机部分未在真机验证）。命令和运行器的探测参数一字不差：
 
 ```
 cd deploy/remote
 sysctl kernel.apparmor_restrict_unprivileged_userns        # 宿主机上看，Ubuntu 23.10 以后默认是 1
-docker compose exec remote-computer bwrap --ro-bind / / --unshare-net --unshare-pid true && echo 能用
+docker compose exec remote-computer bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-net true && echo 能用
 docker compose logs remote-computer | grep 'bubblewrap 起不来'   # 应当没有输出
+sudo dmesg | grep -i 'apparmor.*bwrap'                     # 不通时看是不是 conflicting profile attachments 或 unprivileged_userns 的 DENIED
 ```
 
-不通的两条出路（宿主机 sysctl 设 0，或给 bwrap 配宿主机 AppArmor profile）见 `remote/README.md:117`。
+探测是进程启动时做的，改完宿主机的 AppArmor 要 `docker compose restart remote-computer` 让运行器重探，重启后要重跑 `./put-launch.sh`（`remote/README.md` 的「容器重建或重启后要重新放一次」）。
 
 `apparmor=unconfined`（`remote/docker-compose.yml:87`）是按 `docker-default` profile 的内容推断加上的，开发时用的 OrbStack 没有 AppArmor，没实测过它是否必要（`remote/README.md:107`）。在带 AppArmor 的 Ubuntu 上可以这样判断它能不能去（未在真机验证）：
 
